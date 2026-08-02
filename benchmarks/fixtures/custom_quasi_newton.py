@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal, TypeAlias, cast
+from typing import Literal, Mapping, Protocol, TypeAlias, cast
 
 import jax
 import jax.numpy as jnp
@@ -23,6 +23,55 @@ MetadataValue: TypeAlias = (
     str | int | float | bool | tuple[int, ...] | tuple[float, ...]
 )
 FixtureMetadata: TypeAlias = tuple[tuple[str, MetadataValue], ...]
+
+
+@dataclass(frozen=True)
+class ScientificEndpointEvidence:
+    """Fixture-owned scientific evidence evaluated outside timed solver work."""
+
+    inner_success: bool
+    observables: FixtureMetadata
+
+
+ScientificEndpoint = Callable[[np.ndarray], ScientificEndpointEvidence]
+
+
+@dataclass(frozen=True)
+class ObjectiveTrialEvaluation:
+    """Objective-owned evidence for one opt-in diagnostic evaluation."""
+
+    raw_objective: float | None
+    raw_objective_certified: bool
+    filtered_objective: float | None
+    gradient: np.ndarray
+    gradient_source: Literal["candidate", "baseline", "unavailable"]
+    predictor_kind: str | None
+    predictor_success: bool | None
+    primal_success: bool
+    adjoint_success: bool | None
+    newton_success: bool
+    newton_stop_reason_code: int | None
+    newton_accepted_iterations: int | None
+    newton_attempted_iterations: int | None
+    newton_last_linear_solve_success: bool | None
+    inner_penalty_residual_l2: float | None
+    inner_final_gradient_inf_norm: float | None
+
+
+ObjectiveTrialEvaluator = Callable[[np.ndarray], ObjectiveTrialEvaluation]
+
+
+class AcceptedIncumbentHostValueAndGrad(Protocol):
+    """Host objective controller whose state advances only after acceptance."""
+
+    def value_and_grad(self, parameters: np.ndarray) -> tuple[float, np.ndarray]: ...
+
+    def accept(self, parameters: np.ndarray) -> None: ...
+
+
+AcceptedIncumbentHostValueAndGradFactory = Callable[
+    [], AcceptedIncumbentHostValueAndGrad
+]
 
 
 @dataclass(frozen=True)
@@ -44,6 +93,19 @@ class Fixture:
     native_value_and_grad: NativeValueAndGrad | None = None
     metadata: FixtureMetadata = ()
     native_reset: NativeReset | None = None
+    scientific_endpoint: ScientificEndpoint | None = None
+    native_scientific_endpoint: ScientificEndpoint | None = None
+    trial_evaluator: ObjectiveTrialEvaluator | None = None
+    native_trial_evaluator: ObjectiveTrialEvaluator | None = None
+    accepted_incumbent_host_value_and_grad: (
+        AcceptedIncumbentHostValueAndGradFactory | None
+    ) = None
+
+
+@dataclass(frozen=True)
+class FixtureDefinition:
+    builder: Callable[[], Fixture]
+    method: Literal["bfgs", "lbfgs"]
 
 
 def quadratic47() -> Fixture:
@@ -195,8 +257,10 @@ def boozer_physics() -> Fixture:
     from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
     from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
     from simsopt_jax_adapters.geo.surface_objectives_traceable import (
+        TraceableObjectiveTrialResult,
         make_traceable_objective_runtime_bundle,
         make_traceable_objective_session,
+        traceable_forward_result_outer_raw_terms,
     )
 
     base_curves, base_currents, magnetic_axis, nfp, native_field = get_data(
@@ -303,6 +367,86 @@ def boozer_physics() -> Fixture:
         Callable[[jax.Array], tuple[jax.Array, jax.Array]],
         runtime_bundle["value_and_grad"],
     )
+    forward_result = cast(
+        Callable[[jax.Array], Mapping[str, object]],
+        runtime_bundle["forward_result"],
+    )
+    reporting_metrics_from_solution = cast(
+        Callable[..., Mapping[str, jax.Array]],
+        runtime_bundle["reporting_metrics_from_solution"],
+    )
+
+    def trial_evaluator(x: np.ndarray) -> ObjectiveTrialEvaluation:
+        traceable_trial_evaluator = cast(
+            Callable[[jax.Array], TraceableObjectiveTrialResult],
+            session.trial_evaluator(),
+        )
+        result = traceable_trial_evaluator(jnp.asarray(x, dtype=jnp.float64))
+        gradient = np.asarray(result.gradient, dtype=np.float64)
+        raw_objective = float(result.raw_objective_value)
+        filtered_objective = float(result.filtered_objective_value)
+        raw_certified = bool(
+            result.primal_success
+            and result.actual_adjoint_success
+            and result.gradient_is_finite
+            and np.isfinite(raw_objective)
+        )
+        return ObjectiveTrialEvaluation(
+            raw_objective=raw_objective if np.isfinite(raw_objective) else None,
+            raw_objective_certified=raw_certified,
+            filtered_objective=(
+                filtered_objective if np.isfinite(filtered_objective) else None
+            ),
+            gradient=gradient,
+            gradient_source=cast(
+                Literal["candidate", "baseline", "unavailable"],
+                result.gradient_source,
+            ),
+            predictor_kind=boozer_surface.boozer_type,
+            predictor_success=result.predictor_success,
+            primal_success=result.primal_success,
+            adjoint_success=result.actual_adjoint_success,
+            newton_success=result.newton_success,
+            newton_stop_reason_code=result.newton_stop_reason_code,
+            newton_accepted_iterations=result.newton_iterations,
+            newton_attempted_iterations=result.newton_attempted_iterations,
+            newton_last_linear_solve_success=(result.newton_last_linear_solve_success),
+            inner_penalty_residual_l2=(
+                result.inner_penalty_residual_l2
+                if result.inner_penalty_residual_l2 is not None
+                else None
+            ),
+            inner_final_gradient_inf_norm=(
+                result.final_gradient_inf_norm
+                if result.final_gradient_inf_norm is not None
+                else None
+            ),
+        )
+
+    def scientific_endpoint(x: np.ndarray) -> ScientificEndpointEvidence:
+        coil_dofs = jnp.asarray(x, dtype=jnp.float64)
+        solved = forward_result(coil_dofs)
+        metrics = reporting_metrics_from_solution(
+            coil_dofs,
+            solved["x"],
+            solved["success"],
+            include_distance_metrics=False,
+            outer_raw_terms=traceable_forward_result_outer_raw_terms(solved),
+        )
+        jax.block_until_ready((solved, metrics))
+        return ScientificEndpointEvidence(
+            inner_success=bool(np.asarray(jax.device_get(metrics["solver_success"]))),
+            observables=tuple(
+                (key, float(np.asarray(jax.device_get(metrics[key]))))
+                for key in (
+                    "final_boozer_residual",
+                    "final_non_qs",
+                    "final_iota",
+                    "final_volume",
+                )
+            ),
+        )
+
     native_curves, native_currents, native_axis, native_nfp, native_field = get_data(
         "ncsx",
         coil_order=3,
@@ -394,19 +538,60 @@ def boozer_physics() -> Fixture:
         + native_length_penalty
     )
 
-    def native_value_and_grad(x: np.ndarray) -> tuple[float, np.ndarray]:
+    def native_trial_evaluator(x: np.ndarray) -> ObjectiveTrialEvaluation:
         previous_surface = np.asarray(native_solver.surface.x, dtype=np.float64)
         previous_iota = float(native_solver.res["iota"])
         previous_g = float(native_solver.res["G"])
         native_objective.x = np.asarray(x, dtype=np.float64)
         value = float(native_objective.J())
         gradient = np.asarray(native_objective.dJ(), dtype=np.float64)
-        if not bool(native_solver.res["success"]):
+        inner_success = bool(native_solver.res["success"])
+        if not inner_success:
             native_solver.surface.x = previous_surface
             native_solver.res["iota"] = previous_iota
             native_solver.res["G"] = previous_g
-            return 1.0e3, gradient
-        return value, gradient
+        gradient_finite = bool(np.all(np.isfinite(gradient)))
+        return ObjectiveTrialEvaluation(
+            raw_objective=value if np.isfinite(value) else None,
+            raw_objective_certified=bool(
+                inner_success and np.isfinite(value) and gradient_finite
+            ),
+            filtered_objective=value if inner_success else 1.0e3,
+            gradient=gradient,
+            gradient_source="candidate" if gradient_finite else "unavailable",
+            predictor_kind=None,
+            predictor_success=None,
+            primal_success=inner_success,
+            adjoint_success=None,
+            newton_success=inner_success,
+            newton_stop_reason_code=None,
+            newton_accepted_iterations=None,
+            newton_attempted_iterations=None,
+            newton_last_linear_solve_success=None,
+            inner_penalty_residual_l2=None,
+            inner_final_gradient_inf_norm=None,
+        )
+
+    def native_value_and_grad(x: np.ndarray) -> tuple[float, np.ndarray]:
+        evaluation = native_trial_evaluator(x)
+        if evaluation.filtered_objective is None:
+            return float("nan"), evaluation.gradient
+        return evaluation.filtered_objective, evaluation.gradient
+
+    def native_scientific_endpoint(x: np.ndarray) -> ScientificEndpointEvidence:
+        reset_native()
+        native_objective.x = np.asarray(x, dtype=np.float64)
+        native_objective.J()
+        inner_success = bool(native_solver.res["success"])
+        return ScientificEndpointEvidence(
+            inner_success=inner_success,
+            observables=(
+                ("final_boozer_residual", float(native_residual.J())),
+                ("final_non_qs", float(native_non_qs.J())),
+                ("final_iota", float(native_solver.res["iota"])),
+                ("final_volume", float(native_volume.J())),
+            ),
+        )
 
     initial = np.asarray(field.x, dtype=np.float64)
     traceable_iota = float(np.asarray(jax.device_get(traceable_result["iota"])))
@@ -447,6 +632,13 @@ def boozer_physics() -> Fixture:
         value_and_grad=value_and_grad,
         native_value_and_grad=native_value_and_grad,
         native_reset=reset_native,
+        scientific_endpoint=scientific_endpoint,
+        native_scientific_endpoint=native_scientific_endpoint,
+        trial_evaluator=trial_evaluator,
+        native_trial_evaluator=native_trial_evaluator,
+        accepted_incumbent_host_value_and_grad=(
+            session.accepted_incumbent_host_value_and_grad
+        ),
         metadata=metadata,
     )
 
@@ -483,15 +675,31 @@ def bfgs_quadratic() -> Fixture:
     )
 
 
-def fixture(name: str) -> Fixture:
-    """Resolve a named deterministic fixture without dynamic imports."""
-    builders: dict[str, Callable[[], Fixture]] = {
-        "coil47": coil47_physics,
-        "boozer": boozer_physics,
-        "bfgs_quadratic": bfgs_quadratic,
-        "rosenbrock": rosenbrock,
-    }
+_FIXTURE_DEFINITIONS: dict[str, FixtureDefinition] = {
+    "coil47": FixtureDefinition(coil47_physics, "lbfgs"),
+    "boozer": FixtureDefinition(boozer_physics, "bfgs"),
+    "bfgs_quadratic": FixtureDefinition(bfgs_quadratic, "bfgs"),
+    "rosenbrock": FixtureDefinition(rosenbrock, "lbfgs"),
+}
+
+
+def fixture_method(name: str) -> Literal["bfgs", "lbfgs"]:
+    """Return solver metadata without constructing expensive physics state."""
+
     try:
-        return builders[name]()
+        return _FIXTURE_DEFINITIONS[name].method
     except KeyError as exc:
         raise ValueError(f"unknown custom quasi-Newton fixture: {name}") from exc
+
+
+def fixture(name: str) -> Fixture:
+    """Resolve a named deterministic fixture without dynamic imports."""
+
+    try:
+        definition = _FIXTURE_DEFINITIONS[name]
+    except KeyError as exc:
+        raise ValueError(f"unknown custom quasi-Newton fixture: {name}") from exc
+    fixture_case = definition.builder()
+    if fixture_case.method != definition.method:
+        raise RuntimeError(f"fixture method metadata drifted for {name!r}")
+    return fixture_case
