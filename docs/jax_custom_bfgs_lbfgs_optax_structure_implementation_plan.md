@@ -13,7 +13,7 @@ but the change is not promotion-ready.
 
 | Area | Current evidence | Open gate |
 | --- | --- | --- |
-| Runtime | Eager BFGS uses the typed host driver; eager L-BFGS uses the specialized design-B facade. Traced whole-solve routes remain available. | Complete application-scale compatibility and rollback rehearsal. |
+| Runtime | Eager BFGS uses the typed host driver; eager L-BFGS uses the specialized design-B facade. Traced whole-solve routes remain available. | Complete application-scale compatibility and broad traceable closure. |
 | Numerical parity | Rosenbrock accepted states are byte-identical to the pre-refactor solver. Matched `coil47` native CPU/custom CPU/custom GPU/Optax endpoints converge at the recorded FP64 objective tolerance. | Close a matched converged Boozer endpoint and the full accepted-state matrix. |
 | GPU | The 41 non-slow runtime contracts and the broader Boozer/traceable compatibility selector pass on strict RTX 5090 CUDA. Custom `coil47` converges on GPU; the Boozer outer BFGS now has a current-HEAD 20-iteration CPU/GPU diagnostic pair. | Qualify a converged Boozer endpoint and run the declared A100 lane. |
 | Performance and memory | Bounded diagnostics favor specialized design B over generic design A. Custom now exposes a production `prepare_lbfgs_private`/`PreparedLBFGS` boundary; Optax uses the same prepare/run split. Both reuse fixed-shape programs for warm runs; a clean strict-RTX-5090 `coil47` five-sample receipt now includes process-attributed VRAM and phase-scoped RSS. | Complete the StableHLO/compile promotion comparison and the A100 gate. |
@@ -179,7 +179,7 @@ explicit comparator rather than a custom-solver parity oracle.
   callable contract, and BFGS scalar/value-and-gradient branches are narrowed
   explicitly. The combined runtime/trajectory selector passed `45/45` on
   strict CPU and `45/45` on strict CUDA. The current scoped Pyright profile
-  reports `798` diagnostics; remaining findings are dependency-stub and
+  reports `797` diagnostics; remaining findings are dependency-stub and
   benchmark/test call-site typing work, not runtime failures. The runner
   contract selector is also green at `38/38` (two slow probes deselected); it now fails closed when the
   requested device/intent pair does not select the canonical
@@ -486,7 +486,7 @@ explicit comparator rather than a custom-solver parity oracle.
   formatting checks pass. The standalone typed step-runtime module passes
   Pyright with zero errors; a historical strict scoped configuration reported
   1,828 errors before the current annotation pass. The historical profile
-  reported `793`; the current profile reports `798` because private optimizer
+  reported `793`; the current profile reports `797` because private optimizer
   dependencies and benchmark/test call sites are not yet typed. The project-wide
   Ruff command remains open under
   Ruff 0.16.1 (856 findings across
@@ -1289,15 +1289,19 @@ The behavior-changing implementation slice is committed in `fd200f564`:
 - `examples/jax/parity/cases/native_stage_two_optimization_planar_coils.py`.
 
 The lock-only follow-up is `41d95cf502240a686cc968e690f62d4a85a2d1a3`.
-No unrelated commit is part of the implementation slice. Rollback rehearsal
-and the frozen selector replay remain open.
+No unrelated commit is part of the implementation slice. The rollback
+rehearsal and bounded frozen-selector replay are recorded in
+`docs/receipts/custom-quasi-newton/rollback-rehearsal-20260802.md`; the
+broad traceable application selector remains open because its base run hit the
+declared RSS guard.
 
 - [ ] Remove duplicated eager host-loop mechanics only after BFGS and L-BFGS
       pass independently. Keep all mathematics algorithm-owned.
 - [ ] Keep runtime, algorithm transitions, public routing, and tests in
       reviewable commits. Record exactly which commits alter active public
-      behavior.
-- [ ] Expand `[tool.pyright].include` and add
+      behavior. The current implementation SHA is recorded, but the large
+      implementation commit still needs this separation review.
+- [x] Expand `[tool.pyright].include` and add
       `pyright.custom-quasi-newton.json`, scoped to the changed private
       optimizer, fixture, runner, and test paths with
       `typeCheckingMode: "strict"`. Do not add blanket ignores or permit
@@ -1307,29 +1311,36 @@ and the frozen selector replay remain open.
       production BFGS/L-BFGS lane; Optax is explicit and comparative.
 - [x] Record the exact pre-implementation rollback base above. Solver state is
       process-local, so no persisted-state migration is required.
-- [ ] After the implementation commits exist, record their SHAs oldest to
+- [x] After the implementation commits exist, record their SHAs oldest to
       newest. Rehearse `git revert --no-commit` for those SHAs in reverse order
       in a clean candidate worktree; the resulting source tree for every path
       above must be byte-identical to the rollback base. If a tested public
       old/new gate is added instead, prove that it selects untouched baseline
       primitives.
-- [ ] Run the frozen optimizer and eager/traceable Boozer compatibility
-      selectors on the rehearsed rollback tree, and archive the base, candidate,
-      ordered SHA list, commands, exit codes, tree hashes, and receipt hashes.
-      Return to the candidate commit and rerun the same selectors.
-- [ ] Do not remove the traceable whole-solve implementation in this plan.
+- [x] Run the frozen optimizer and bounded eager Boozer compatibility selectors
+      on the rehearsed rollback tree, and archive the base, candidate, ordered
+      SHA list, commands, exit codes, tree hashes, and receipt hashes. Return
+      to the candidate commit and rerun the same bounded selectors.
+- [ ] Complete the broad traceable Boozer compatibility selector; the rollback
+      receipt records its RSS-guard stop as incomplete.
+- [x] Do not remove the traceable whole-solve implementation in this plan.
 
 ## Receipt contract
 
 The runner writes local working data to
 `.artifacts/custom-quasi-newton/<run-id>/`. Promotion additionally requires:
 
-- [ ] a tracked manifest at
+- [x] a tracked manifest at
       `docs/receipts/custom-quasi-newton/<run-id>/manifest.json` with schema
       version, commit, clean status, environment lock hashes, device, commands,
       exit codes, artifact checksums, verdicts, and archive URI;
-- [ ] tracked compact `metrics.json` and `summary.md` beside the manifest; and
-- [ ] raw logs/JSON copied to the archive URI and verified from a fresh process.
+- [x] tracked compact `metrics.json` and `summary.md` beside the manifest; and
+- [x] raw logs/JSON copied to the archive URI and verified from a fresh process.
+
+Current-head validation: `validate-all` rechecked `39` manifests with exit
+code 0. The rollback receipt records the clean base/candidate tree hashes and
+the bounded selector results; the external archive is local and not yet
+replicated off-host.
 
 The ignored local `.artifacts/` copy alone is never authority. A result is
 incomplete if the archive is absent, a checksum differs, the environment is an
