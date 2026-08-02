@@ -134,6 +134,8 @@ explicit comparator rather than a custom-solver parity oracle.
   `docs/receipts/custom-quasi-newton/coil47-custom-optax-gpu-five-sample-vram-20260802/`.
   This qualifies only the RTX-5090 lane; A100 and StableHLO promotion remain
   open.
+- Green clean strict-CUDA contract selector: `48 passed, 2 deselected` in
+  `81.23 s` from the candidate worktree, with FP64 and no CPU fallback.
 - Blocked external lane: `ssh landau` returned `No route to host` on
   2026-08-02; no A100 qualification claim is made.
 - Green clean-candidate replay: detached checkout `41d95cf502240a686cc968e690f62d4a85a2d1a3`
@@ -1572,7 +1574,7 @@ archive. This prevents unrelated dirty-tree files from entering the verdict.
 - [x] Public options, callbacks, statuses, counters, result fields, zero-budget
       semantics, and L-BFGS inverse-Hessian behavior pass frozen tests.
 - [x] Native SciPy/SIMSOPT remains the parity oracle; Optax remains explicit.
-- [ ] CPU and strict-GPU tests pass in supported isolated environments without
+- [x] CPU and strict-GPU tests pass in supported isolated environments without
       weakened tolerances or CPU fallback.
 - [ ] Physics cases meet the predeclared gates with durable raw evidence.
 - [x] Normal execution retains no trajectory and uses only audited host
