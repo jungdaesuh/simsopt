@@ -1195,8 +1195,10 @@ custom method name.
 - [ ] Measure cold compile, warm optimizer, total wall time, peak RSS, peak
       device memory, StableHLO size, and executable count. Synchronize timed
       boundaries and exclude export/plotting.
-- [ ] Repair the measurement boundary before using any performance result for
-      promotion:
+- [x] Repair the measurement boundary before using any performance result for
+      promotion. The clean strict-RTX-5090 five-sample receipt now exercises
+      the repaired boundary; A100 and promotion-threshold qualification remain
+      separate gates:
   - [x] expose a prepared-provider interface for the flat runner fixtures:
         custom uses production `prepare_lbfgs_private`/
         `PreparedLBFGS`, while Optax constructs its equivalent prepared step
@@ -1213,8 +1215,9 @@ custom method name.
         labeled diagnostic; and
   - [x] invalidate the old custom-versus-Optax warm-time and solver-RSS
         promotion ratios. They compared unmatched provider preparation and a
-        process-lifetime high-water mark; the replacement phase-scoped receipts
-        remain diagnostic until clean five-sample qualification.
+        process-lifetime high-water mark; the replacement phase-scoped clean
+        receipt is
+        `docs/receipts/custom-quasi-newton/coil47-custom-optax-gpu-five-sample-vram-20260802/`.
 - [x] The strict-RTX-5090 `coil47` L-BFGS step-from-start runtime-compile
       diagnostic measured `20.303 s` to one executable, peak host RSS
       `1,816,276,992` bytes (`358,379,520`-byte delta), and recorded the
