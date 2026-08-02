@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import NamedTuple
 
 import jax
@@ -12,7 +13,6 @@ import numpy as np
 from simsopt_jax.runtime.host_boundary import host_array
 
 from ._types import LBFGS_STATUS_CALLBACK_STOP, LBFGS_STATUS_NONFINITE
-
 
 START = 0
 NO_MSG = 0
@@ -282,7 +282,7 @@ def _lbfgsb_history_size_from_workspace(n: int, workspace_size: int) -> int:
     n = int(n)
     linear = 2 * n + 8
     constant = 5 * n - int(workspace_size)
-    return int(round((-linear + np.sqrt(linear * linear - 44 * constant)) / 22))
+    return round((-linear + np.sqrt(linear * linear - 44 * constant)) / 22)
 
 
 def _lbfgsb_workspace_offsets(n: int, m: int) -> tuple[int, ...]:
@@ -331,7 +331,9 @@ def _lbfgsb_flatten_fortran_square(values) -> jax.Array:
     return values.T.reshape((-1,))
 
 
-def _lbfgsb_task(task, task_msg) -> jax.Array:
+def _lbfgsb_task(
+    task: jax.typing.ArrayLike, task_msg: jax.typing.ArrayLike
+) -> jax.Array:
     return jnp.asarray((task, task_msg), dtype=jnp.int32)
 
 
@@ -438,10 +440,10 @@ def lbfgsb_empty_workspace(
 
 
 def lbfgsb_initial_state(
-    x0,
+    x0: jax.typing.ArrayLike,
     *,
     m: int,
-    bounds=None,
+    bounds: object | None = None,
     ftol: float = 2.2204460492503131e-09,
     gtol: float = 1e-5,
     maxls: int = 20,
@@ -1873,8 +1875,8 @@ def lbfgsb_setulb(state: LbfgsbState) -> LbfgsbState:
 
 def lbfgsb_start_with_initial_value_and_grad(
     state: LbfgsbState,
-    value,
-    grad,
+    value: jax.typing.ArrayLike,
+    grad: jax.typing.ArrayLike,
 ) -> LbfgsbState:
     """Seed a fresh START state with its first value/gradient evaluation."""
     started = _lbfgsb_setulb_start(state)
@@ -1886,7 +1888,10 @@ def lbfgsb_start_with_initial_value_and_grad(
     )
 
 
-def _lbfgsb_evaluate_value_and_grad(value_and_grad, state: LbfgsbState) -> LbfgsbState:
+def _lbfgsb_evaluate_value_and_grad(
+    value_and_grad: Callable[[jax.Array], tuple[jax.Array, jax.Array]],
+    state: LbfgsbState,
+) -> LbfgsbState:
     value, gradient = value_and_grad(state.x)
     return state._replace(
         f=jnp.asarray(value, dtype=state.x.dtype),
@@ -1896,7 +1901,10 @@ def _lbfgsb_evaluate_value_and_grad(value_and_grad, state: LbfgsbState) -> Lbfgs
     )
 
 
-def _lbfgsb_evaluate_if_requested(value_and_grad, state: LbfgsbState) -> LbfgsbState:
+def _lbfgsb_evaluate_if_requested(
+    value_and_grad: Callable[[jax.Array], tuple[jax.Array, jax.Array]],
+    state: LbfgsbState,
+) -> LbfgsbState:
     """Evaluate only on FG requests; accepted NEW_X values stay cached in state."""
     return jax.lax.cond(
         state.workspace.task[0] == FG,
@@ -1976,8 +1984,8 @@ def lbfgsb_macro_step_result(
     state: LbfgsbState,
     accepted_new_x: jax.Array,
     *,
-    maxiter_array,
-    maxfun_array,
+    maxiter_array: jax.Array,
+    maxfun_array: jax.Array,
 ) -> LbfgsbMacroStepResult:
     task0 = state.workspace.task[0]
     return LbfgsbMacroStepResult(
@@ -1991,9 +1999,9 @@ def lbfgsb_macro_step_result(
 def _lbfgsb_finish_transition(
     state: LbfgsbState,
     *,
-    maxiter_array,
-    maxfun_array,
-    accepted_step_callback=None,
+    maxiter_array: jax.Array,
+    maxfun_array: jax.Array,
+    accepted_step_callback: Callable[..., object] | None = None,
 ) -> LbfgsbMacroStepResult:
     accepted_new_x = state.workspace.task[0] == NEW_X
     if accepted_step_callback is not None:
@@ -2020,12 +2028,12 @@ def _lbfgsb_finish_transition(
 
 
 def _lbfgsb_search_transition(
-    value_and_grad,
+    value_and_grad: Callable[[jax.Array], tuple[jax.Array, jax.Array]],
     state: LbfgsbState,
     *,
-    maxiter_array,
-    maxfun_array,
-    accepted_step_callback=None,
+    maxiter_array: jax.Array,
+    maxfun_array: jax.Array,
+    accepted_step_callback: Callable[..., object] | None = None,
     unconstrained_fast_path: bool = False,
 ) -> LbfgsbMacroStepResult:
     original_f = state.f
@@ -2083,11 +2091,11 @@ def _lbfgsb_search_transition(
 
 
 def _lbfgsb_advance_loop(
-    transition,
+    transition: Callable[[LbfgsbMacroStepResult], LbfgsbMacroStepResult],
     state: LbfgsbState,
     *,
-    maxiter_array,
-    maxfun_array,
+    maxiter_array: jax.Array,
+    maxfun_array: jax.Array,
 ) -> LbfgsbMacroStepResult:
     def continue_condition(result: LbfgsbMacroStepResult) -> jax.Array:
         return (~result.accepted_new_x) & (~result.terminal)
@@ -2105,12 +2113,12 @@ def _lbfgsb_advance_loop(
 
 
 def lbfgsb_advance_from_start_to_next_observable(
-    value_and_grad,
+    value_and_grad: Callable[[jax.Array], tuple[jax.Array, jax.Array]],
     state: LbfgsbState,
     *,
-    maxiter: int,
-    maxfun: int,
-    accepted_step_callback=None,
+    maxiter: jax.typing.ArrayLike,
+    maxfun: jax.typing.ArrayLike,
+    accepted_step_callback: Callable[..., object] | None = None,
     unconstrained_fast_path: bool = False,
 ) -> LbfgsbMacroStepResult:
     maxiter_array = jnp.asarray(maxiter, dtype=jnp.int32)
@@ -2134,12 +2142,12 @@ def lbfgsb_advance_from_start_to_next_observable(
 
 
 def lbfgsb_advance_from_search_to_next_observable(
-    value_and_grad,
+    value_and_grad: Callable[[jax.Array], tuple[jax.Array, jax.Array]],
     state: LbfgsbState,
     *,
-    maxiter: int,
-    maxfun: int,
-    accepted_step_callback=None,
+    maxiter: jax.typing.ArrayLike,
+    maxfun: jax.typing.ArrayLike,
+    accepted_step_callback: Callable[..., object] | None = None,
     unconstrained_fast_path: bool = False,
 ) -> LbfgsbMacroStepResult:
     maxiter_array = jnp.asarray(maxiter, dtype=jnp.int32)
@@ -2161,12 +2169,12 @@ def lbfgsb_advance_from_search_to_next_observable(
 
 
 def lbfgsb_reenter_new_x(
-    value_and_grad,
+    value_and_grad: Callable[[jax.Array], tuple[jax.Array, jax.Array]],
     state: LbfgsbState,
     *,
-    maxiter: int,
-    maxfun: int,
-    accepted_step_callback=None,
+    maxiter: jax.typing.ArrayLike,
+    maxfun: jax.typing.ArrayLike,
+    accepted_step_callback: Callable[..., object] | None = None,
     unconstrained_fast_path: bool = False,
 ) -> LbfgsbMacroStepResult:
     maxiter_array = jnp.asarray(maxiter, dtype=jnp.int32)
@@ -2185,12 +2193,12 @@ def lbfgsb_reenter_new_x(
 
 
 def lbfgsb_transition(
-    value_and_grad,
+    value_and_grad: Callable[[jax.Array], tuple[jax.Array, jax.Array]],
     state: LbfgsbState,
     *,
-    maxiter: int,
-    maxfun: int,
-    accepted_step_callback=None,
+    maxiter: jax.typing.ArrayLike,
+    maxfun: jax.typing.ArrayLike,
+    accepted_step_callback: Callable[..., object] | None = None,
 ) -> LbfgsbMacroStepResult:
     """Advance one SciPy reverse-communication transition.
 
@@ -2210,12 +2218,12 @@ def lbfgsb_transition(
 
 
 def lbfgsb_advance_to_next_observable(
-    value_and_grad,
+    value_and_grad: Callable[[jax.Array], tuple[jax.Array, jax.Array]],
     state: LbfgsbState,
     *,
-    maxiter: int,
-    maxfun: int,
-    accepted_step_callback=None,
+    maxiter: jax.typing.ArrayLike,
+    maxfun: jax.typing.ArrayLike,
+    accepted_step_callback: Callable[..., object] | None = None,
 ) -> LbfgsbMacroStepResult:
     """Advance to the next accepted NEW_X event or terminal task."""
     maxiter_array = jnp.asarray(maxiter, dtype=jnp.int32)
@@ -2246,12 +2254,12 @@ def lbfgsb_advance_to_next_observable(
 
 
 def lbfgsb_mainlb(
-    value_and_grad,
+    value_and_grad: Callable[[jax.Array], tuple[jax.Array, jax.Array]],
     state: LbfgsbState,
     *,
-    maxiter: int,
-    maxfun: int,
-    accepted_step_callback=None,
+    maxiter: jax.typing.ArrayLike,
+    maxfun: jax.typing.ArrayLike,
+    accepted_step_callback: Callable[..., object] | None = None,
 ) -> LbfgsbState:
     def continue_condition(state: LbfgsbState) -> jax.Array:
         return state.workspace.task[0] < CONVERGENCE
@@ -2872,28 +2880,56 @@ def lbfgsb_matupd(
 
     rollover = iupdat > m
 
-    for j in range(1, m):
-        for offset in range(j):
-            value = ss[offset + 1, j]
-            ss = ss.at[offset, j - 1].set(
-                jnp.where(rollover & (j < next_col), value, ss[offset, j - 1])
-            )
-        for offset in range(m - j):
-            active = rollover & (j < next_col) & (offset < (next_col - j))
-            value = sy[j + offset, j]
-            sy = sy.at[j - 1 + offset, j - 1].set(
-                jnp.where(active, value, sy[j - 1 + offset, j - 1])
+    def shift_ss_body(j, current_ss):
+        active_column = rollover & (j < next_col)
+
+        def shift_offset(offset, shifted_ss):
+            value = shifted_ss[offset + 1, j]
+            return shifted_ss.at[offset, j - 1].set(
+                jnp.where(
+                    active_column,
+                    value,
+                    shifted_ss[offset, j - 1],
+                )
             )
 
-    pointr = next_head
+        return jax.lax.fori_loop(0, j, shift_offset, current_ss)
+
+    ss = jax.lax.fori_loop(1, m, shift_ss_body, ss)
+
+    def shift_sy_body(j, current_sy):
+        def shift_offset(offset, shifted_sy):
+            active = rollover & (j < next_col) & (offset < (next_col - j))
+            value = shifted_sy[j + offset, j]
+            return shifted_sy.at[j - 1 + offset, j - 1].set(
+                jnp.where(
+                    active,
+                    value,
+                    shifted_sy[j - 1 + offset, j - 1],
+                )
+            )
+
+        return jax.lax.fori_loop(0, m - j, shift_offset, current_sy)
+
+    sy = jax.lax.fori_loop(1, m, shift_sy_body, sy)
+
     row = next_col - 1
-    for j in range(m - 1):
+
+    def update_row(j, values):
+        current_sy, current_ss = values
         active = j < (next_col - 1)
+        pointr = (next_head + j) % m
         sy_value = _lbfgsb_ddot(d, wy[pointr])
         ss_value = _lbfgsb_ddot(ws[pointr], d)
-        sy = sy.at[row, j].set(jnp.where(active, sy_value, sy[row, j]))
-        ss = ss.at[j, row].set(jnp.where(active, ss_value, ss[j, row]))
-        pointr = (pointr + 1) % m
+        current_sy = current_sy.at[row, j].set(
+            jnp.where(active, sy_value, current_sy[row, j])
+        )
+        current_ss = current_ss.at[j, row].set(
+            jnp.where(active, ss_value, current_ss[j, row])
+        )
+        return current_sy, current_ss
+
+    sy, ss = jax.lax.fori_loop(0, m - 1, update_row, (sy, ss))
 
     diagonal = jnp.where(stp == 1.0, dtd, stp * stp * dtd)
     ss = ss.at[row, row].set(diagonal)
@@ -2921,21 +2957,32 @@ def lbfgsb_bmv(sy, wt, col, v):
     p = jnp.zeros_like(v, dtype=dtype)
 
     first_rhs = jnp.zeros((m,), dtype=dtype)
-    for i in range(m):
-        first_rhs = first_rhs.at[i].set(jnp.where(i < col, v[col + i], 0.0))
-    for i in range(1, m):
+
+    def first_rhs_init(i, rhs):
+        return rhs.at[i].set(jnp.where(i < col, v[col + i], 0.0))
+
+    first_rhs = jax.lax.fori_loop(0, m, first_rhs_init, first_rhs)
+
+    def first_rhs_body(i, rhs):
         active_i = i < col
-        ssum = jnp.asarray(0.0, dtype=dtype)
-        for k in range(i):
+
+        def sum_body(k, total):
             active_k = k < col
-            ssum = ssum + jnp.where(
+            return total + jnp.where(
                 active_i & active_k,
                 sy[i, k] * v[k] / sy[k, k],
                 0.0,
             )
-        first_rhs = first_rhs.at[i].set(
-            jnp.where(active_i, first_rhs[i] + ssum, first_rhs[i])
+
+        ssum = jax.lax.fori_loop(
+            0,
+            i,
+            sum_body,
+            jnp.asarray(0.0, dtype=dtype),
         )
+        return rhs.at[i].set(jnp.where(active_i, rhs[i] + ssum, rhs[i]))
+
+    first_rhs = jax.lax.fori_loop(1, m, first_rhs_body, first_rhs)
 
     memory_index = jnp.arange(m, dtype=jnp.int32)
     active = memory_index < col
@@ -2960,19 +3007,30 @@ def lbfgsb_bmv(sy, wt, col, v):
         lower=False,
         unit_diagonal=False,
     )
-    for i in range(m):
-        p = p.at[col + i].set(jnp.where(i < col, first_rhs[i], p[col + i]))
+
+    def first_solution_body(i, vector):
+        return vector.at[col + i].set(jnp.where(i < col, first_rhs[i], vector[col + i]))
+
+    p = jax.lax.fori_loop(0, m, first_solution_body, p)
 
     diag_sy = jnp.diag(sy)
     scaled_v = jnp.where(active, v[:m] / jnp.sqrt(diag_sy), 0.0)
-    for i in range(m):
+
+    def first_solve_body(i, vector):
         update = factor_ok & (i < col)
-        p = p.at[i].set(jnp.where(update, scaled_v[i], p[i]))
-        p = p.at[col + i].set(jnp.where(update, first_solve[i], p[col + i]))
+        vector = vector.at[i].set(jnp.where(update, scaled_v[i], vector[i]))
+        return vector.at[col + i].set(
+            jnp.where(update, first_solve[i], vector[col + i])
+        )
+
+    p = jax.lax.fori_loop(0, m, first_solve_body, p)
 
     second_rhs = jnp.zeros((m,), dtype=dtype)
-    for i in range(m):
-        second_rhs = second_rhs.at[i].set(jnp.where(i < col, p[col + i], 0.0))
+
+    def second_rhs_body(i, rhs):
+        return rhs.at[i].set(jnp.where(i < col, p[col + i], 0.0))
+
+    second_rhs = jax.lax.fori_loop(0, m, second_rhs_body, second_rhs)
     second_solve = jsp_linalg.solve_triangular(
         solve_matrix,
         second_rhs,
@@ -2980,25 +3038,42 @@ def lbfgsb_bmv(sy, wt, col, v):
         lower=False,
         unit_diagonal=False,
     )
-    for i in range(m):
-        p = p.at[col + i].set(
-            jnp.where(factor_ok & (i < col), second_solve[i], p[col + i])
-        )
-    negative_scaled_p = jnp.where(active, -p[:m] / jnp.sqrt(diag_sy), 0.0)
-    for i in range(m):
-        p = p.at[i].set(jnp.where(factor_ok & (i < col), negative_scaled_p[i], p[i]))
 
-    for i in range(m):
+    def second_solve_body(i, vector):
+        return vector.at[col + i].set(
+            jnp.where(factor_ok & (i < col), second_solve[i], vector[col + i])
+        )
+
+    p = jax.lax.fori_loop(0, m, second_solve_body, p)
+    negative_scaled_p = jnp.where(active, -p[:m] / jnp.sqrt(diag_sy), 0.0)
+
+    def negative_scaled_body(i, vector):
+        return vector.at[i].set(
+            jnp.where(factor_ok & (i < col), negative_scaled_p[i], vector[i])
+        )
+
+    p = jax.lax.fori_loop(0, m, negative_scaled_body, p)
+
+    def last_update_body(i, vector):
         active_i = factor_ok & (i < col)
-        ssum = jnp.asarray(0.0, dtype=dtype)
-        for k in range(i + 1, m):
+
+        def sum_body(k, total):
             active_k = k < col
-            ssum = ssum + jnp.where(
+            return total + jnp.where(
                 active_i & active_k,
-                sy[k, i] * p[col + k] / sy[i, i],
+                sy[k, i] * vector[col + k] / sy[i, i],
                 0.0,
             )
-        p = p.at[i].set(jnp.where(active_i, p[i] + ssum, p[i]))
+
+        ssum = jax.lax.fori_loop(
+            i + 1,
+            m,
+            sum_body,
+            jnp.asarray(0.0, dtype=dtype),
+        )
+        return vector.at[i].set(jnp.where(active_i, vector[i] + ssum, vector[i]))
+
+    p = jax.lax.fori_loop(0, m, last_update_body, p)
 
     return LbfgsbBmvResult(p=p, info=factor_info)
 

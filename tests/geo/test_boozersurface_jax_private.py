@@ -15,6 +15,7 @@ import simsopt_jax.geo.optimizers.private._bfgs as _private_bfgs
 import simsopt_jax.geo.optimizers.private._common as _opt_common
 import simsopt_jax.geo.optimizers.private._lbfgs as _private_lbfgs
 import simsopt_jax.geo.optimizer_host_lbfgs as _host_lbfgs
+import simsopt_jax.geo.optimizers._shared as _opt_shared
 from simsopt_jax.geo.optimizers.private import (
     _BFGSResults,
     _LineSearchResults,
@@ -71,6 +72,43 @@ def test_solve_boozer_adjoint_raises_on_failed_operator_runtime():
         _soj._solve_boozer_adjoint(adjoint_state, jnp.ones((2,), dtype=jnp.float64))
 
 
+def test_bfgs_eager_does_not_step_from_nonfinite_initial_state():
+    def nonfinite_objective(x):
+        del x
+        return jnp.asarray(jnp.inf, dtype=jnp.float64)
+
+    state = _private_bfgs._minimize_bfgs_private(
+        nonfinite_objective,
+        jnp.asarray([1.0], dtype=jnp.float64),
+        maxiter=5,
+        gtol=1.0e-8,
+    )
+
+    assert int(state.k) == 0
+    assert bool(state.failed) is False
+    result = _result_converters._private_bfgs_result_to_optimize_result(state)
+    assert result.success is False
+
+
+def test_bfgs_callback_stop_is_unsuccessful():
+    def quad(x):
+        return 0.5 * jnp.dot(x, x)
+
+    def stop(_x):
+        raise StopIteration
+
+    state = _private_bfgs._minimize_bfgs_private(
+        quad,
+        jnp.asarray([1.0, -2.0], dtype=jnp.float64),
+        maxiter=5,
+        callback=stop,
+    )
+    result = _result_converters._private_bfgs_result_to_optimize_result(state)
+
+    assert int(result.status) == 99
+    assert result.success is False
+
+
 def test_traceable_forward_result_packs_newton_linear_solver_backend_code():
     code = _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
         _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU
@@ -124,7 +162,7 @@ def _record_progress(points):
 def test_private_lbfgs_history_size_preserves_maxcor_above_dimension():
     assert _private_lbfgs._resolve_lbfgs_history_size(200, maxiter_limit=1500) == 200
     assert _private_lbfgs._resolve_lbfgs_history_size(8, maxiter_limit=1500) == 8
-    assert _private_lbfgs._resolve_lbfgs_history_size(8, maxiter_limit=3) == 3
+    assert _private_lbfgs._resolve_lbfgs_history_size(8, maxiter_limit=3) == 8
 
 
 def test_private_lbfgs_workspace_bytes_reports_bounded_state_size():
@@ -153,12 +191,11 @@ def test_lbfgs_stepwise_driver_host_reads_use_host_boundary_helpers():
     )
 
     assert "jax.device_get" not in source
-    assert "np.asarray(" not in source
+    assert "np.asarray(" not in source.replace("jnp.asarray(", "")
     assert "workspace.task" not in status_source
     assert "workspace.task" not in driver_source
-    assert "host_bool(step_result.terminal" in status_source
-    assert "host_int(step_result.entry_kind" in status_source
-    assert "host_int" in source
+    assert "host_value(" in status_source
+    assert "host_value" in source
 
 
 def test_lbfgs_ondevice_fast_path_selection_is_bounds_derived():
@@ -313,16 +350,16 @@ def test_optimizer_dtype_uses_dtype_attr_without_eager_hostification(monkeypatch
     class HasDtypeOnly:
         dtype = np.dtype(np.float64)
 
-    original_asarray = _opt_common.np.asarray
+    original_asarray = _opt_shared.np.asarray
 
     def guarded_asarray(value, *args, **kwargs):
         if isinstance(value, HasDtypeOnly):
             raise AssertionError("np.asarray should not run when dtype attr exists")
         return original_asarray(value, *args, **kwargs)
 
-    monkeypatch.setattr(_opt_common.np, "asarray", guarded_asarray)
+    monkeypatch.setattr(_opt_shared.np, "asarray", guarded_asarray)
 
-    assert _opt_common._optimizer_dtype(HasDtypeOnly()) == np.dtype(np.float64)
+    assert _opt_shared._optimizer_dtype(HasDtypeOnly()) == np.dtype(np.float64)
 
 
 def test_prepare_optimizer_pytree_adapter_uses_leaf_metadata_without_hostification(
@@ -828,17 +865,17 @@ def test_bfgs_curvature_terms_reject_bad_curvature_updates():
     s_k_float32 = jnp.asarray([1.0, 0.0], dtype=jnp.float32)
     y_float32_boundary = jnp.asarray([1.0e-5, 1.0], dtype=jnp.float32)
 
-    _, _, negative_valid, _ = _private_bfgs._bfgs_curvature_terms(
+    _, _, negative_valid = _private_bfgs._bfgs_curvature_terms(
         s_k,
         y_negative,
         x_dtype=s_k.dtype,
     )
-    _, _, near_orthogonal_valid, _ = _private_bfgs._bfgs_curvature_terms(
+    _, _, near_orthogonal_valid = _private_bfgs._bfgs_curvature_terms(
         s_k,
         y_near_orthogonal,
         x_dtype=s_k.dtype,
     )
-    _, _, float32_boundary_valid, _ = _private_bfgs._bfgs_curvature_terms(
+    _, _, float32_boundary_valid = _private_bfgs._bfgs_curvature_terms(
         s_k_float32,
         y_float32_boundary,
         x_dtype=s_k_float32.dtype,
@@ -1259,7 +1296,18 @@ class TestOptimizerAdapterPrivate:
         )
 
         assert tuple(bool(state.failed) for state in states) == (False, False, True)
-        assert len(quad._simsopt_cached_private_solver) == 3
+        cache_keys = tuple(quad._simsopt_cached_private_solver)
+        assert len(cache_keys) <= _opt_common._PRIVATE_SOLVER_CACHE_CAPACITY
+        runtime_keys = {
+            (key[2], key[3])
+            for key in cache_keys
+            if isinstance(key, tuple) and key and key[0] == "bfgs-eager-runtime"
+        }
+        assert runtime_keys == {
+            ("<f4", (1,)),
+            ("<f4", (2,)),
+            ("<f8", (1,)),
+        }
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @pytest.mark.parametrize(
@@ -1611,13 +1659,13 @@ class TestOptimizerAdapterPrivate:
         ]
         assert diagnostic_events[0][1]["maxiter"] == 1
         assert diagnostic_events[0][1]["maxfun"] == 15000
-        assert diagnostic_events[0][1]["maxcor"] == 1
+        assert diagnostic_events[0][1]["maxcor"] == 5
         assert diagnostic_events[0][1]["maxls"] == 20
         assert diagnostic_events[0][1]["n"] == 2
         assert diagnostic_events[0][1]["workspace_bytes"] == (
             _private_lbfgs._lbfgsb_workspace_bytes(
                 2,
-                1,
+                5,
                 x0.dtype,
                 record_optimizer_state_trace=False,
                 maxiter_limit=1,
@@ -3307,14 +3355,22 @@ class TestBoozerSurfaceJAXClassPrivate:
         residual = rhs - solution
 
         assert bool(np.asarray(status.success))
-        assert status._fields == (
+        assert tuple(status._fields[:4]) == (
             "success",
             "residual",
             "residual_relative",
             "iterations",
         )
+        assert {
+            "residual_scale",
+            "requested_tolerance",
+            "effective_tolerance",
+        } <= set(status._fields)
         assert np.asarray(status.residual).shape == ()
         assert np.asarray(status.residual_relative).shape == ()
+        assert np.asarray(status.residual_scale).shape == ()
+        assert np.asarray(status.requested_tolerance).shape == ()
+        assert np.asarray(status.effective_tolerance).shape == ()
         assert isinstance(status.iterations, jax.Array)
         assert np.asarray(status.iterations).shape == ()
         np.testing.assert_allclose(
@@ -3633,7 +3689,12 @@ class TestBoozerSurfaceJAXClassPrivate:
             tol=1e-4,
         )
 
-        assert bool(status.success) is True
+        # FP64 parity policy caps the effective tolerance at 1e-10 even when
+        # callers request a looser diagnostic tolerance; two corrections still
+        # improve the live residual below the requested 1e-4 bound.
+        assert bool(status.success) is False
+        assert float(status.requested_tolerance) == pytest.approx(1e-4)
+        assert float(status.effective_tolerance) == pytest.approx(1e-10)
         assert int(status.iterations) == _dense_ir._DENSE_IR_NEWTON_REFINEMENT_STEPS
         np.testing.assert_allclose(
             np.asarray(matrix_live @ solution),

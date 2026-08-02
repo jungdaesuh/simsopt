@@ -90,6 +90,7 @@ def _regularization_config() -> StageTwoObjectiveConfig:
         curvature_threshold=10.0,
         curvature_weight=1.0e-6,
         mean_squared_curvature_threshold=10.0,
+        mean_squared_curvature_target_mode="identity",
         mean_squared_curvature_weight=1.0e-6,
         linking_number_weight=1.0,
     )

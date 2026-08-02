@@ -45,6 +45,31 @@ def test_coil_specs_preserve_fixed_total_current_expression() -> None:
     )
 
 
+def test_coil_set_spec_preserves_scaled_current_optimizer_coordinates() -> None:
+    curve = create_equally_spaced_curves(
+        1,
+        1,
+        stellsym=False,
+        R0=1.0,
+        R1=0.25,
+        order=2,
+        numquadpoints=12,
+    )[0]
+    curve.fix_all()
+    field = BiotSavartJAX([Coil(curve, Current(1.0) * 1.0e5)])
+
+    def current(owner_dofs: jax.Array) -> jax.Array:
+        return field.coil_set_spec_from_dofs(owner_dofs).groups[0].currents
+
+    owner_dofs = jnp.asarray(field.x, dtype=jnp.float64)
+    np.testing.assert_array_equal(owner_dofs, np.asarray([1.0]))
+    np.testing.assert_allclose(current(owner_dofs), np.asarray([1.0e5]))
+    np.testing.assert_allclose(
+        jax.jacrev(current)(owner_dofs),
+        np.asarray([[1.0e5]]),
+    )
+
+
 def test_coil_specs_reuse_geometry_for_symmetry_replicas() -> None:
     curve = create_equally_spaced_curves(
         1,

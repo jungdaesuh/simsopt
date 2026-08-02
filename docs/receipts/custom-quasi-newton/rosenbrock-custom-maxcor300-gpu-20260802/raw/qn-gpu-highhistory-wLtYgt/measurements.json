@@ -1,0 +1,149 @@
+{
+  "argv": [
+    "benchmarks/custom_quasi_newton_runtime.py",
+    "--device",
+    "gpu",
+    "--intent",
+    "parity",
+    "--providers",
+    "custom",
+    "--cases",
+    "rosenbrock",
+    "--maxiter",
+    "2",
+    "--maxcor",
+    "300",
+    "--output",
+    "/tmp/qn-gpu-highhistory-wLtYgt"
+  ],
+  "backend": "gpu",
+  "devices": [
+    "cuda:0"
+  ],
+  "git_clean": false,
+  "git_commit": "9c64c2ef6cee45eb7eb1989bd5a41e2adf8bfc26",
+  "jax_version": "0.10.0",
+  "jaxlib_version": "0.10.0",
+  "measurements": [
+    {
+      "algorithm_memory_contract": null,
+      "case": "rosenbrock",
+      "certificate": "accepted-step trajectory contract",
+      "cold_seconds": 6.6229904550127685,
+      "device": "gpu",
+      "dimension": 2,
+      "evaluations": 4,
+      "final_gradient_inf_norm": 2.717826078672214,
+      "final_objective": 4.127275523932904,
+      "final_parameters": [
+        -1.0270197526043319,
+        1.068358702632824
+      ],
+      "fixture_build_peak_rss_kib": 655312,
+      "fixture_build_seconds": 3.8538011722266674e-05,
+      "fixture_contract": {
+        "certificate": "accepted-step trajectory contract",
+        "expected_initial_observables": {
+          "gradient_inf_norm": 215.59999999999997,
+          "objective": 24.199999999999996
+        },
+        "final_certificate_fields": {
+          "evaluations": 4,
+          "final_gradient_inf_norm": 2.717826078672214,
+          "final_objective": 4.127275523932904,
+          "final_parameters": [
+            -1.0270197526043319,
+            1.068358702632824
+          ],
+          "iterations": 2,
+          "status": 1,
+          "stopping_reason": "iteration-limit",
+          "success": false
+        },
+        "fixture_metadata": {},
+        "generator_path": "benchmarks/fixtures/custom_quasi_newton.py",
+        "generator_sha256": "4ee3eee0ba9d271ac6e97a7fe797a16a11de4ae2e64fbbeaf2b16a8a550672d9",
+        "initial_parameters": [
+          -1.2,
+          1.0
+        ],
+        "solver_options": {
+          "device": "gpu",
+          "ftol": 0.0,
+          "gtol": 1e-10,
+          "intent": "parity",
+          "maxcor": 300,
+          "maxfun": null,
+          "maxiter": 2,
+          "maxls": 20,
+          "method": "lbfgs"
+        },
+        "source_path": "tests/jax/solve/test_lbfgsb_trajectory_parity.py",
+        "source_sha256": "00669ffcdb81f3532a53b5d1d986684533c21f708621cf9cf79e9b9f59a06b95",
+        "tolerances": {
+          "gradient_inf_norm_abs": 1e-08,
+          "objective_abs": 1e-12,
+          "objective_rel": 1e-10,
+          "parameters_abs": 1e-10
+        }
+      },
+      "fixture_metadata": [],
+      "initial_gradient_inf_norm": 215.59999999999997,
+      "initial_objective": 24.199999999999996,
+      "initial_parameters": [
+        -1.2,
+        1.0
+      ],
+      "intent": "parity",
+      "iterations": 2,
+      "maxcor": 300,
+      "maxiter": 2,
+      "method": "lbfgs",
+      "peak_rss_kib": 1088488,
+      "peak_rss_scope": "provider_child_process_lifetime",
+      "process_pid": 3570883,
+      "provider": "custom",
+      "solver_peak_rss_delta_kib": 218472,
+      "solver_peak_rss_kib": 1088488,
+      "solver_start_rss_kib": 870016,
+      "status": 1,
+      "stopping_reason": "iteration-limit",
+      "success": false,
+      "warm_seconds": 1.0970484449062496,
+      "warm_transfer_audit": [
+        {
+          "bytes": 18,
+          "calls": 3,
+          "leaves": 9,
+          "phase": "advance"
+        },
+        {
+          "bytes": 9700,
+          "calls": 15,
+          "leaves": 15,
+          "phase": "final_result"
+        }
+      ]
+    }
+  ],
+  "method": "lbfgs",
+  "numpy_version": "2.4.6",
+  "optax_version": "0.2.8",
+  "provider_child_rss_limit_kib": 8388608,
+  "provider_child_term_grace_seconds": 5,
+  "provider_child_timeout_seconds": 120,
+  "python_version": "3.11.15",
+  "requested_device": "gpu",
+  "runtime_environment": {
+    "JAX_ENABLE_X64": "true",
+    "JAX_PLATFORMS": "cuda",
+    "SIMSOPT_BACKEND_MODE": "jax_gpu_parity",
+    "SIMSOPT_BACKEND_STRICT": "1",
+    "SIMSOPT_PRECISION": "fp64",
+    "XLA_PYTHON_CLIENT_ALLOCATOR": "platform",
+    "XLA_PYTHON_CLIENT_MEM_FRACTION": null,
+    "XLA_PYTHON_CLIENT_PREALLOCATE": "false"
+  },
+  "schema_version": 5,
+  "scipy_version": "1.17.1"
+}

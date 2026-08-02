@@ -1,0 +1,65 @@
+{
+  "schema_version": 5,
+  "receipt_id": "coil47-fixed-budget-cpu",
+  "case": "coil47",
+  "device": "cpu",
+  "dtype": "float64",
+  "intent": "fast",
+  "maxiter": 2,
+  "maxcor": 10,
+  "candidate_head": "9c64c2ef6cee45eb7eb1989bd5a41e2adf8bfc26",
+  "candidate_worktree_dirty": true,
+  "environment_lock": "benchmarks/environments/custom_quasi_newton_cpu.txt",
+  "environment_lock_sha256": "c1916991fd549448c70fbd00dda11f4f8c2186519db4600aa02bd4d27e3ce963",
+  "initial_objective": 0.13792118300896353,
+  "initial_gradient_inf_norm": 0.0037469236744501672,
+  "providers": {
+    "native": {
+      "iterations": 2,
+      "evaluations": 5,
+      "status": 1,
+      "success": false,
+      "final_objective": 0.13786469682070213,
+      "final_gradient_inf_norm": 0.00021387295814231672,
+      "cold_seconds": 0.45889255800284445,
+      "warm_seconds": 0.5230264679994434,
+      "solver_peak_rss_kib": 468176,
+      "solver_peak_rss_delta_kib": 0
+    },
+    "custom": {
+      "iterations": 2,
+      "evaluations": 5,
+      "status": 1,
+      "success": false,
+      "final_objective": 0.13786469682070215,
+      "final_gradient_inf_norm": 0.00021387295814217567,
+      "cold_seconds": 19.56888157001231,
+      "warm_seconds": 0.07935761800035834,
+      "solver_peak_rss_kib": 1001316,
+      "solver_peak_rss_delta_kib": 336144
+    },
+    "optax": {
+      "iterations": 2,
+      "evaluations": null,
+      "status": null,
+      "success": false,
+      "final_objective": 0.13786469652455854,
+      "final_gradient_inf_norm": 0.00021507757517203992,
+      "cold_seconds": 14.313043298083358,
+      "warm_seconds": 7.993560453993268,
+      "solver_peak_rss_kib": 1064920,
+      "solver_peak_rss_delta_kib": 410400
+    }
+  },
+  "comparisons": {
+    "initial_objective_max_abs_difference": 0.0,
+    "initial_gradient_inf_norm_max_abs_difference": 1.5178830414797062e-17,
+    "native_custom_final_objective_abs_difference": 2.7755575615628914e-17,
+    "native_custom_final_gradient_inf_norm_abs_difference": 1.4105470264036413e-16,
+    "native_custom_final_parameter_max_abs_difference": 3.042011087472929e-14,
+    "native_optax_final_objective_abs_difference": 2.9614358187934897e-10,
+    "native_optax_final_objective_relative_difference": 2.1480740852796597e-09,
+    "native_optax_final_parameter_max_abs_difference": 8.937182094001517e-05
+  },
+  "verdict": "diagnostic-pass-not-promotion"
+}

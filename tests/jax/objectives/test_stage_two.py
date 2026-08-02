@@ -141,6 +141,38 @@ def test_stage_two_geometric_penalty_supports_per_base_curve_length_targets() ->
     np.testing.assert_allclose(value, expected)
 
 
+def test_stage_two_geometric_penalty_supports_identity_mean_squared_curvature() -> None:
+    gamma, gammadash, gammadashdash = _geometry()
+    common = {
+        "num_base_curves": 1,
+        "mean_squared_curvature_threshold": 1.0,
+        "mean_squared_curvature_weight": 2.0,
+    }
+
+    maximum = stage_two_geometric_penalty(
+        gamma,
+        gammadash,
+        gammadashdash,
+        jnp.zeros((1, 3), dtype=jnp.float64),
+        jnp.zeros((1, 3), dtype=jnp.float64),
+        StageTwoObjectiveConfig(**common),
+    )
+    identity = stage_two_geometric_penalty(
+        gamma,
+        gammadash,
+        gammadashdash,
+        jnp.zeros((1, 3), dtype=jnp.float64),
+        jnp.zeros((1, 3), dtype=jnp.float64),
+        StageTwoObjectiveConfig(
+            **common,
+            mean_squared_curvature_target_mode="identity",
+        ),
+    )
+
+    np.testing.assert_allclose(maximum, 0.0)
+    np.testing.assert_allclose(identity, (0.25**2 - 1.0) ** 2)
+
+
 def test_stage_two_geometric_penalty_is_jittable_and_differentiable() -> None:
     gamma, gammadash, gammadashdash = _geometry()
     surface_gamma = jnp.asarray(((3.0, 0.0, 0.0),), dtype=jnp.float64)

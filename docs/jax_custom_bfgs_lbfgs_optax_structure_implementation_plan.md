@@ -2,11 +2,38 @@
 
 **Status:** In progress — core runtime green; physics and promotion gates open
 
-**Last updated:** 2026-08-01
+**Last updated:** 2026-08-02
 
 **Change tier:** Tier 3 — public solver behavior and traced call paths
 
-## Execution status (2026-08-01)
+## Current status (2026-08-02)
+
+**Verdict:** the fixed-step runtime and focused CPU/GPU contracts are green,
+but the change is not promotion-ready.
+
+| Area | Current evidence | Open gate |
+| --- | --- | --- |
+| Runtime | Eager BFGS uses the typed host driver; eager L-BFGS uses the specialized design-B facade. Traced whole-solve routes remain available. | Complete application-scale compatibility and rollback rehearsal. |
+| Numerical parity | Rosenbrock accepted states are byte-identical to the pre-refactor solver. Matched `coil47` native CPU/custom CPU/custom GPU/Optax endpoints converge at the recorded FP64 objective tolerance. | Close a matched converged Boozer endpoint and the full accepted-state matrix. |
+| GPU | The 41 non-slow runtime contracts and the broader Boozer/traceable compatibility selector pass on strict RTX 5090 CUDA. Custom `coil47` converges on GPU; the Boozer outer BFGS now has a current-HEAD 20-iteration CPU/GPU diagnostic pair. | Qualify a converged Boozer endpoint and run the declared A100 lane. |
+| Performance and memory | Bounded diagnostics favor specialized design B over generic design A. Custom now exposes a production `prepare_lbfgs_private`/`PreparedLBFGS` boundary; Optax uses the same prepare/run split. Both reuse fixed-shape programs for warm runs; CPU and strict-GPU `coil47` runs complete. The runner now records fixture, preparation, cold-solver, and warm-solver RSS windows separately. | Produce clean, phase-scoped certificate-time receipts; complete device-memory and A100 gates. |
+| Evidence | Local candidate receipts have artifact checksum tests. Lock-bound CPU and GPU custom/Optax receipts validate from fresh processes with CPU lock SHA-256 `159e05a65796e76dfb502ea4f6a06b1f412af1c7bb147bb5ac5974b5888a6b35` and GPU lock SHA-256 `fc724b570ca23356b18df17da87a00217066fd42e5b02de5fe26b46cf20473f8`. | Commit selected receipts/locks and verify an external archive from a clean checkout. |
+| Quality | Focused tests and compile/diff checks are green. The current large Boozer source/test files still report existing Ruff findings. | Close scoped Pyright, project-wide Ruff, broad compatibility, and clean-checkout gates. |
+| TDD | New defects have preserved RED -> GREEN evidence where recorded. | The already-implemented core has post-hoc tests only; historical RED revisions cannot be recreated and are not a completion claim. |
+
+<details>
+<summary>Detailed diagnostic ledger</summary>
+
+The entries below preserve raw measurements and failed probes. They are not a
+substitute for the open promotion gates above.
+
+Measurement caveat: legacy fields labeled `solver_boundary_rss_peak_kib` or
+`solver RSS delta` use process-lifetime `ru_maxrss` after the solver window.
+They can include earlier fixture, compilation, or instrumentation peaks and are
+diagnostic only until Phase 5 phase-scoped measurements replace those legacy
+fields in promotion receipts. The Optax warm
+path now reuses its prepared state and compiled programs, but it remains an
+explicit comparator rather than a custom-solver parity oracle.
 
 - Green: typed eager runtime, BFGS eager steps, L-BFGS dynamic-budget facade,
   and SciPy Rosenbrock accepted-step parity. The private wrapper cache now has
@@ -15,18 +42,94 @@
   and concurrent first use. Tree-definition key separation is covered for
   structured adapters; full adapter execution collision coverage and XLA
   executable reclamation are not yet qualified.
+- Green current qualification rerun: the documented strict-CPU selector
+  completed with `131 passed, 4 deselected` in `385.00 s`; the matching strict
+  RTX-5090 selector completed with `48 passed, 2 deselected` in `157.25 s`.
+  Both lanes used FP64, strict backend selection, and the current worktree.
+  These are contract-suite results, not application-scale Boozer or promotion
+  receipts.
+- Green historical pre-wiring selector: the combined solver/trajectory/runner
+  tests completed with `82 passed, 4 deselected` on strict CPU and again on
+  strict RTX-5090 CUDA (`153.82 s`). The later runner integration check found
+  that its prepared custom object was not passed into the timed solve; those
+  timing claims are superseded by the production-boundary rerun below.
+- Green current production prepared-boundary rerun: custom and Optax now use
+  the production custom `PreparedLBFGS` boundary and the existing Optax
+  prepared step. After vectorizing the history updates, strict CPU `coil47`
+  (`maxiter=20`) native/custom/Optax converged in `14/13/15` iterations;
+  final objectives were `0.13786263284430203/0.137862632844302/
+  0.137862632844302`, with cold/warm times `0.5794/0.8750 s`,
+  `5.1284/0.01533 s`, and `1.4539/0.0090 s`. Custom and Optax solver RSS
+  deltas were `316044/155700 KiB`; native was `0 KiB`. On strict RTX-5090
+  CUDA (`maxiter=20`), custom and Optax converged in `13/15` iterations to
+  `0.13786263284430203/0.13786263284430206`; cold/warm times were
+  `14.077/0.04490 s` and `3.921/0.02169 s`, with RSS deltas
+  `385420/193984 KiB`. Receipts:
+  `docs/receipts/custom-quasi-newton/coil47-native-custom-optax-cpu-maxiter20-prepared-vectorized-20260802/`
+  and
+  `docs/receipts/custom-quasi-newton/coil47-custom-optax-gpu-maxiter20-prepared-vectorized-20260802/`.
+- RED -> GREEN compatibility closure: Boozer reference tests now select
+  `native_cpu` explicitly, and traceable tests patch the adapter's directly
+  imported private-solver symbols. A stale functional-result fixture now uses
+  the production Newton reporting-field helper. The full selected compatibility
+  gate passed `111 passed, 3 skipped, 628 deselected` in `159.87 s` under strict
+  CPU FP64; the three skips are the declared GPU-only cases. The prior failures
+  were test-contract defects, not solver failures.
+- RED -> GREEN GPU compatibility closure: the same bounded selector completed
+  `110 passed, 4 skipped, 628 deselected` in `362.21 s` under strict RTX 5090
+  FP64. Two GPU-only stale test contracts were corrected: traceable exact Newton
+  is operator-only and therefore returns no dense Jacobian, and the mocked Newton
+  callback accepts the production `materialize_hessian` and
+  `max_dense_hessian_bytes` keywords. No solver implementation change was needed.
+- RED -> GREEN surface-metadata compatibility: exact KKT-mask construction now
+  belongs only to the optimized surface, so an independently quadratured label
+  surface cannot poison an LS setup. If an LS object later enters the legacy
+  exact path, the mask is built lazily from the cached optimized-grid metadata.
+  The long strict-CPU selector reached `711 passed, 30 skipped` before exposing
+  this compatibility case; the repair then passed the exact selector (`97 passed,
+  4 skipped`) and the upstream factory matrix (`90 passed`).
 - Green: CPU runner records fixture-build elapsed time and the RSS observed at
   the build boundary separately from cold/warm solver time, provider-child
   RSS, status, counters, full initial/final parameter vectors, and explicit
   Optax comparison on deterministic contract fixtures. Each measurement now
   also records generator/source hashes, full fixture-contract metadata,
   expected initial observables, solver options, predeclared tolerances, and
-  final certificate fields. The measurement payload is now schema version 5;
+  final certificate fields. The measurement payload is now schema version 6;
   version 3 adds the phase-separated warm transfer audit, version 4 adds
-  solver-boundary RSS start, peak, and delta fields, and version 5 records the
-  JAX/XLA/SIMSOPT runtime environment.
+  legacy solver-window RSS start, process-lifetime peak, and derived delta
+  fields, version 5 records the JAX/XLA/SIMSOPT runtime environment, and
+  version 6 records named phase-scoped RSS windows.
   Commit/dirty-state and dependency versions remain recorded; the supported
   Rosenbrock command was re-run from the documented environment.
+- Green diagnostic: the corrected runner now samples named fixture-build,
+  preparation, cold-solver, and warm-solver RSS windows in each provider child.
+  Fresh strict-CPU `coil47` custom/Optax preparation peaks were
+  `979264/828940 KiB` and solver-window peaks were `979828/836496 KiB`; warm
+  times were `0.01582/0.009710 s`. Strict RTX-5090 preparation peaks were
+  `1856496/1676456 KiB` and solver-window peaks were `1861528/1681804 KiB`;
+  warm times were `0.03790/0.01963 s`.
+  These are host-RSS diagnostics, not device-memory measurements. Receipts:
+  The current phase receipts use measurement schema 6; earlier schema-5
+  receipts remain historical diagnostics.
+  `docs/receipts/custom-quasi-newton/coil47-native-custom-optax-cpu-phase-rss-schema6-20260802/`
+  and
+  `docs/receipts/custom-quasi-newton/coil47-custom-optax-gpu-phase-rss-schema6-20260802/`.
+- Green diagnostic: six fresh strict-RTX-5090 `coil47` provider runs were
+  collected; the first was discarded and samples 1--5 were retained. Custom
+  warm time had median/range `0.044907/0.041051--0.055912 s`; Optax had
+  `0.027435/0.026636--0.029175 s`. The corresponding maximum warm-window
+  RSS was `1817316/1632504 KiB` (custom/Optax), with no monotonic increase
+  across the retained samples. All endpoints succeeded and matched the
+  objective within `3e-17`; custom took 12--13 iterations versus Optax's 15.
+  Raw outputs are archived under
+  `.artifacts/custom-quasi-newton-archive/gpu-five-sample-coil47-20260802/`.
+  No device-memory telemetry or clean-checkout provenance was captured, so
+  this remains diagnostic rather than promotion evidence.
+- Blocked external lane: `ssh landau` returned `No route to host` on
+  2026-08-02; no A100 qualification claim is made.
+- TDD limitation: the phase-RSS and dense-analysis-phase regressions were added
+  after the implementation was present. They are current post-hoc GREEN tests;
+  no historical RED revision is being claimed.
 - Green: schema-4 matched CPU `coil47` receipts now expose solver-boundary
   memory. Native/custom/Optax solver RSS deltas were `0 / 355824 / 1699508`
   KiB; final objectives remained `0.13786263284430203 / 0.137862632844302 /
@@ -36,6 +139,104 @@
 - Green: provider children now have direct-PID 120-second and 8-GiB RSS
   fail-closed watchdogs with TERM/KILL grace; both limit paths have bounded
   contract tests without allocating an 8-GiB fixture.
+- Green diagnostic: a fresh strict-GPU Optax `coil47` two-step run sampled
+  process VRAM and completed with a checksummed receipt. The provider peaked
+  at `834 MiB` of `32607 MiB`; all 14 current receipt manifests validate their
+  raw-artifact hashes only. Environment-lock validation remains open, including
+  the known CPU-receipt/GPU-lock mismatch. This remains fixed-budget evidence
+  on a dirty checkout.
+- Green: after the typed BFGS transition and observation annotations, the
+  focused BFGS contracts passed `27/27` on strict CPU and `27/27` on strict
+  CUDA. The shared optimizer-input normalizer now has an explicit typed
+  callable contract, and BFGS scalar/value-and-gradient branches are narrowed
+  explicitly. The combined runtime/trajectory selector passed `45/45` on
+  strict CPU and `45/45` on strict CUDA. The current scoped Pyright profile
+  reports `798` diagnostics; remaining findings are dependency-stub and
+  benchmark/test call-site typing work, not runtime failures. The runner
+  contract selector is also green at `38/38` (two slow probes deselected); it now fails closed when the
+  requested device/intent pair does not select the canonical
+  `SIMSOPT_BACKEND_MODE`. The prepared custom-program boundary also fails
+  closed on mismatched reuse. Compileall, touched-file Ruff, formatting, and
+  `git diff --check` pass.
+- RED -> GREEN: the Optax benchmark comparator now prepares its immutable
+  solver transformation, fixed-shape step, and endpoint value/gradient
+  executable once per measurement. Each cold and warm solve initializes fresh
+  state from the same parameters, while the warm path reuses the compiled step
+  and accepted line-search state. Its
+  stop check now reuses the accepted value/gradient stored by Optax's
+  line-search state after each update, so one-step quadratic convergence does
+  not incur a second zero-step iteration or an extra objective evaluation.
+  Initial convergence, nonfinite endpoints, and line-search failure are
+  labeled directly. Prepared programs are bound to the objective, initial
+  vector's exact FP64 bit pattern, shape, and history size; mismatched reuse
+  fails closed, including signed-zero and NaN inputs. The focused runner
+  selector is `38 passed` (two slow probes deselected). The custom provider now exposes the production
+  `PreparedLBFGS` boundary over the same fixed-shape private transitions;
+  phase-scoped host-RSS sampling is now green; clean promotion receipts remain
+  open.
+- RED -> GREEN runner wiring: the first prepared-boundary integration check
+  exposed that custom preparation was not passed into the timed solve and that
+  native received an invalid prepared argument. The runner now routes native
+  without preparation and custom with its prepared program; regression tests
+  cover both branches.
+- Green: `benchmarks/custom_quasi_newton_receipts.py` now publishes runner
+  output atomically with lock/artifact hashes and validates both tracked and
+  archive bytes. Its tamper, missing-lock, dirty-receipt, and fresh-process
+  tests pass; the existing 18 custom quasi-Newton receipts revalidate from the
+  current checkout. The publisher now rejects an archive URI that aliases the
+  tracked destination before creating either side.
+- Green diagnostic: the CPU `coil47` native/custom/Optax `maxiter=20` bundle
+  was rerun against `benchmarks/environments/custom_quasi_newton_cpu.lock.txt`
+  and published as
+  `docs/receipts/custom-quasi-newton/coil47-native-custom-optax-cpu-maxiter20-lockbound-current/`.
+  The tracked receipt and distinct `.artifacts/custom-quasi-newton-archive/`
+  copy validate from a fresh process. This pre-JIT comparator bundle is
+  retained as historical diagnostic evidence.
+- Green diagnostic: after the Optax comparator was changed to one JIT-compiled
+  fixed-shape step, a fresh lock-bound CPU bundle was published at
+  `docs/receipts/custom-quasi-newton/coil47-native-custom-optax-cpu-maxiter20-jitted-current/`.
+  Native/custom/Optax took `12/13/16` iterations, with warm times
+  `0.9686/0.0581/2.4474 s`; all three converged. The dirty checkout keeps it
+  diagnostic-only.
+- Green diagnostic (Optax-only preparation boundary, superseded): a fresh
+  strict-CPU `coil47` custom/Optax `maxiter=20` run reuses the prepared Optax
+  step and endpoint program for the warm measurement. Both endpoints
+  converged to `0.137862632844302`; custom/Optax took `13/15` iterations,
+  with cold/warm times `5.3460/0.05532 s` and `1.6090/0.006305 s`, respectively.
+  Solver RSS deltas were `346824/150240 KiB`. The checksummed receipt is
+  `docs/receipts/custom-quasi-newton/coil47-custom-optax-cpu-maxiter20-prepared-20260802/`;
+  it remains diagnostic and predates the custom prepared-provider boundary.
+- Green diagnostic (both prepared): the current strict-CPU `coil47`
+  custom/Optax `maxiter=20` run compiles both providers before the timed
+  solves. Both endpoints again converged to `0.137862632844302` in `13/15`
+  iterations. Cold/warm times were `10.0737/0.05186 s` for custom and
+  `1.4427/0.008220 s` for Optax; solver RSS deltas were `515428/151404 KiB`.
+  The receipt is
+  `docs/receipts/custom-quasi-newton/coil47-custom-optax-cpu-maxiter20-prepared-both-20260802/`;
+  it remains diagnostic and is superseded by the fixed production-boundary
+  receipt because the runner wiring was corrected afterward.
+- Green diagnostic: the matching strict-RTX-5090 custom/Optax bundle is
+  published at
+  `docs/receipts/custom-quasi-newton/coil47-custom-optax-gpu-maxiter20-jitted-current/`.
+  Both providers converged (`12/16` iterations) with final-objective
+  difference `2.78e-17`; warm times were `0.0783/6.1386 s`. Custom peak
+  solver RSS was `532472 KiB` versus Optax `243112 KiB`; this exceeds the
+  predeclared `1.5x` diagnostic ratio and remains non-promotion evidence until
+  phase-scoped measurements replace the legacy process-lifetime field.
+- Green diagnostic (both prepared, strict CUDA): the current `coil47`
+  `maxiter=2` run compiled and reused both providers' fixed-shape programs.
+  Custom/Optax warm times were `0.04779/0.006254 s`; final objectives were
+  `0.13786469682070215/0.13786469652455854` and both endpoints were correctly
+  labeled `iteration-limit`. The checksummed receipt is
+  `docs/receipts/custom-quasi-newton/coil47-custom-optax-gpu-maxiter2-prepared-both-20260802/`.
+  This is fixed-budget GPU evidence, not a converged parity or A100 result;
+  it is superseded by the fixed production-boundary receipt.
+- Green: the full non-slow CPU qualification selector passed `127/127` with
+  four intentionally deselected slow probes in `533.75 s`; no failures or
+  skips were hidden. The long tail is compilation-heavy, not a hung solver.
+- Green: a strict-CUDA public `Driver.SIMSOPT_LBFGSB` smoke on the pinned GPU
+  environment converged in two iterations and returned the typed
+  `LbfgsInvHessProduct` (`shape=(2, 2)`) without densifying it.
 - Green: eager BFGS now preserves nonfinite/failed initial-stop semantics and
   maps callback `StopIteration` to unsuccessful status 99 through the typed
   result boundary.
@@ -53,10 +254,12 @@
 - Green: eager BFGS and stepwise L-BFGS observer paths pack accepted-step
   payloads at their explicit host boundary; monolithic compatibility callbacks
   still use their legacy boundary and remain separately qualified.
-- Green: dense-BFGS receipts now include a conservative logical memory contract
-  with old/new Hessian bytes, update intermediates, derived peak-live upper
-  bound, and explicit no-donation policy. This is accounting, not measured
-  device memory.
+- Green: dense-BFGS receipts now include the logical no-donation contract and
+  an isolated XLA buffer analysis for the update itself. On the 47-variable
+  FP64 case, the logical upper bound is `108,560 bytes`; the compiled update
+  peak is `89,424 bytes` on CPU and `33,645,600 bytes` on the RTX 5090 GPU.
+  The GPU number is compiler temporary allocation, not a claim that the
+  Hessian itself is 33 MB; it records the backend amplification explicitly.
 - Diagnostic: the bounded CPU Boozer BFGS receipt (65 variables, two-step cap)
   measured a custom solver-boundary RSS delta of `1,521,644 KiB` versus native
   `0 KiB`; the custom logical upper bound is only `204,880` bytes. This is
@@ -69,48 +272,67 @@
   exceeded 120 seconds and 5 GiB RSS; an exploratory specialized-kernel facade
   completed the same Rosenbrock probe in about 3.9 seconds cold and 0.6 GiB
   RSS. These figures are not promotion receipts.
-- Open diagnostic: an earlier repaired compile-shape attempt produced no local
-  receipt. The bounded CPU probe now writes a receipt, but the full root-cause
-  matrix is still open. The default physical design-B kernels compile five
-  executables with no recompilation across three short-budget calls; the
-  short probe records a finite capped result (`status=1`, two iterations)
-  instead of incorrectly aborting on `converged=False`. A small Boozer
-  compile-log probe likewise records five stepwise executables and no
-  monolithic compile. The full legacy-kernel compile reached 9,420,664 KiB RSS
-  after about 4 minutes 11 seconds before manual interruption; legacy kernels
-  remain explicit opt-in.
+- Green high-history diagnostic: after replacing Python-unrolled history
+  algebra with JAX loop/vectorized updates, fresh `PreparedLBFGS` Rosenbrock
+  runs with `maxcor=300` completed on CPU (`2.21 s` cold, `0.43 GiB` RSS for
+  two steps) and strict RTX-5090 (`6.62 s` cold, `0.21 GiB` RSS for two
+  steps). The `maxiter=20` CPU run stayed within the bound and reported its
+  iteration cap (`status=1`); it is a stability result, not convergence proof.
+  Receipts:
+  `docs/receipts/custom-quasi-newton/rosenbrock-custom-maxcor300-cpu-20260802/`
+  and
+  `docs/receipts/custom-quasi-newton/rosenbrock-custom-maxcor300-gpu-20260802/`.
+- Green diagnostic A/B comparison: the same 47-variable FP64 quadratic,
+  `maxcor=10`, and two-step budget used the old generic transition and the
+  specialized transition. Design A timed out at 120.48 s and 1,676,884 KiB
+  RSS before lowering completed; design B lowered in 2.37 s, completed in
+  10.35 s, and used 420,228 KiB RSS. The local candidate comparison is under
+  `docs/receipts/custom-quasi-newton/compile-design-ab/`; the cheap quadratic
+  isolates optimizer graph cost, so no objective-specific refactor was opened.
+- Green diagnostic correction: the compile-shape probe now passes
+  unconstrained_fast_path=True to the specialized no-bounds transitions, so
+  it measures the production route rather than the full bounded branch graph.
+  The corrected quadratic maxcor=10 lowering shrank from about 24.9 MB to
+  0.48 MB StableHLO and from about 329k to 9.6k JAXPR lines; lowering completed
+  in 0.797 s on the recorded CPU probe.
+- Diagnostic decision: warm cells skip duplicate StableHLO text generation and
+  isolate executable/solver timing; compile-only cells provide the StableHLO
+  and lowering measurements. All cells still record objective cold/warm calls,
+  RSS samples, compile events, executable counts, and accepted-step progress
+  when a solver run is requested.
+- Green matrix receipt:
+  .artifacts/lbfgs-ondevice/root-cause-matrix-fastpath-full.json.
+  Four of five declared cells completed under the 120-second/8-GiB direct-PID
+  policy: quadratic/maxcor=10 warm completed in 26.73 s with peak 661,672 KiB
+  RSS and two iterations; coil47/maxcor=10 compile-only completed in 27.32 s
+  with 1,504,656 StableHLO bytes and 844,004 KiB RSS; coil47/maxcor=10 warm
+  completed in 57.59 s with 11 accepted iterations, converged status 0, and
+  1,022,488 KiB RSS; and coil47/maxcor=300 compile-only completed in 25.41 s
+  with 1,505,243 StableHLO bytes and 837,428 KiB RSS. Warm maxcor=10 cells
+  compiled five stepwise executables and did not recompile across three calls.
+- Bounded high-history finding: quadratic/maxcor=300 warm reached its first
+  accepted-step progress event, then timed out at 120.60 s with 1,762,368 KiB
+  RSS. This is a runtime/history-size finding, not a compile failure; the
+  receipt is incomplete by contract and is not promoted.
+- Historical pre-fix probes remain diagnostic only: the unbounded combined
+  attempt reached 6.1 GiB RSS, and the old general-branch compile reached
+  9,420,664 KiB RSS before interruption. Legacy kernels remain explicit opt-in.
 - Safety finding: an exploratory unbounded attempt to combine the four root-
   cause cells in one process reached 6.1 GiB RSS while compiling the
   `coil47/maxcor=300` cell and was manually terminated without a receipt. The
   matrix must use the existing direct-PID watchdog before it can produce
   authority evidence; no result from that attempt is promoted.
-- Diagnostic receipt: the separately bounded `coil47`, `maxcor=10`, compile-only
-  lowering probe reached the 120-second wall limit at `3,325,424 KiB` direct-child
-  RSS under a 4-GiB cap and exited by watchdog (`-15`) without a compile payload.
-  Receipt: `.artifacts/lbfgs-ondevice/root-cause-coil47-maxcor10-20260801.json`.
-  This isolates a compile/objective-graph bottleneck before runtime warm timing;
-  it is not evidence of a solver failure and is not promoted.
 - Green scaffolding: `benchmarks/lbfgs_compile_root_cause_matrix.py` now runs
   the five declared CPU cells in independent direct-PID children, samples RSS,
   and records completed, timeout, RSS-limit, or failed outcomes. Its contract
   tests cover the cheap/coil, `maxcor=10/300`, short/long, and compile-only/warm
-  axes. The exact-watchdog run now has durable receipts, but no matrix result
-  is promoted until the required payload fields are produced.
-- Diagnostic receipt: the guarded cheap quadratic `maxcor=300`, `maxiter=20`
-  warm cell timed out at `120.38 s` with direct-child peak RSS
-  `4,199,576 KiB`; receipt:
-  `.artifacts/lbfgs-ondevice/root-cause-quadratic-maxcor300-20260801.json`.
-  It wrote no compile-shape payload. The result confirms the watchdog is operating and that the
-  history-size/compile interaction needs isolation; it is not a solver
-  correctness or promotion result.
-- Diagnostic matrix result: all five declared cells were rerun under the same
-  120-second/8-GiB policy and timed out without payloads. Peak direct-child RSS
-  was `4,848,656 / 4,199,576 / 3,322,576 / 3,327,304 / 4,562,308 KiB` for
-  quadratic-10, quadratic-300, coil47-10 compile, coil47-10 warm, and
-  coil47-300 compile, respectively. The matrix therefore confirms bounded
-  failure behavior but does not yet provide compile events, StableHLO sizes,
-  executable counts, or iteration timings. Receipts are under
-  `.artifacts/lbfgs-ondevice/`.
+  axes. The child now writes an atomic `--progress-json` sidecar after each
+  construction, lowering, compile, and solver-run checkpoint, and the parent
+  preserves that sidecar when a watchdog kills the child. A pre-fix bounded
+  quadratic rerun reached `new_x_state_start` before timing out at 20 seconds
+  and 461,316 KiB RSS. The diagnostic now uses a shape-compatible initial
+  state for re-entry, so that extra line-search execution is not counted in
+  compile-shape measurements.
 - Historical probe: the earlier source-owned Boozer custom route used a
   different inner root (`iota=-0.05134074584230428`) and is not parity
   evidence. Its receipt remains archived under
@@ -147,7 +369,8 @@
   performance-promotion evidence.
 - Green: an isolated `.venv-qn-gpu` with JAX 0.10.0 CUDA 12 support sees
   `cuda:0`; the recorded GPU run passed the optimizer trajectory/step tests
-  and source-owned fixture checks under FP64 `jax_gpu_parity`. New schema-5 receipts record the
+  and source-owned fixture checks under FP64 `jax_gpu_parity`. Existing schema-5
+  receipts record the
   JAX/XLA/SIMSOPT environment; the CPU environment remains separate.
 - Green: source-owned coil47 custom L-BFGS on strict GPU, with
   `XLA_PYTHON_CLIENT_PREALLOCATE=false`, converged in 12 iterations / 15
@@ -158,30 +381,64 @@
   and solver RSS delta `536252 KiB`. The GPU fast-intent run also converged to
   the same objective (`22.2542/0.08540 s`, `535620 KiB` delta). Receipts are
   under `.artifacts/custom-quasi-newton/20260801T-coil47-custom-gpu-*`.
-- Diagnostic: Optax coil47 on strict GPU timed out at 120 seconds for 20 steps;
-  its bounded two-step run took `11.7833/9.5193 s` cold/warm and reached
-  objective `0.13786469652455852` (schema-5 receipt under
-  `.artifacts/custom-quasi-newton/`). A default-preallocation run also hit
-  CUDA allocation failures up to `23.52 GiB`; allocator settings are part of
-  the GPU receipt contract, not hidden setup.
+- Historical diagnostic: the pre-JIT Optax `coil47` strict-GPU 20-step run
+  timed out at 120 seconds, and default preallocation reached CUDA allocation
+  failures up to `23.52 GiB`. The current comparator uses an explicit JIT
+  step and `XLA_PYTHON_CLIENT_PREALLOCATE=false`/`platform`; its bounded
+  converged result is recorded above. Allocator settings remain part of the
+  GPU receipt contract, not hidden setup.
 - Open transfer-guard issue: a global `JAX_TRANSFER_GUARD=disallow` rerun
   failed 32/46 optimizer tests during fixture setup or scalar assertions
   (`jnp.asarray` host literals and implicit boolean conversion), before solver
   execution. The normal strict-GPU lane passes; the dedicated boundary lane
   needs explicit device-placed test inputs and host-result assertions.
 - Open: matched converged Boozer endpoint, compile/device-memory and StableHLO
-  accounting, full compatibility suite, and tracked promotion receipts.
-  Provider-child RSS isolation is green for the synthetic runner.
-  Synthetic fixtures are not physics evidence. Four source-owned fixture tests
-  marked `slow` pass in the required isolated CPU environment in 49.78 s
-  combined. The GPU Boozer BFGS two-step child exceeded the 120-second
-  watchdog; its initial objective/gradient parity remains covered by the
-  source-owned fixture tests. The corrected CPU Boozer receipt reports 970,348 KiB
-  native child RSS and 3,268,868 KiB custom child RSS. An earlier unisolated
-  selector exceeded 180 seconds and about 17 GiB RSS; it is invalid diagnostic
-  evidence, not a current fixture result. Runner receipts now time fixture
-  construction separately from the solver, and child stdout is discarded so
-  large JSON output cannot deadlock the watchdog pipe.
+  accounting, and tracked promotion receipts. Provider-child RSS isolation is
+  green for the synthetic runner. Four source-owned fixture tests marked
+  `slow` pass in the required isolated CPU environment in 49.78 s combined.
+  The current-HEAD direct Boozer outer-BFGS diagnostic now completes on CPU and
+  strict RTX 5090 GPU at the two-step cap: initial objective difference is
+  `2.168404344971009e-19`; custom CPU/GPU final-objective difference is
+  `3.008661028647275e-17` and maximum parameter difference is
+  `1.1934897514720433e-15`. Native and custom endpoints differ by
+  `5.713167758598453e-05`, and all three are explicitly
+  `status=1`/`iteration-limit`, not convergence. GPU cold/warm time was
+  `144.7162/0.5821 s` with `1,630,208 KiB` solver RSS delta. Receipts:
+  `docs/receipts/custom-quasi-newton/boozer-outer-bfgs-native-custom-cpu-maxiter2-current/`
+  and `docs/receipts/custom-quasi-newton/boozer-outer-bfgs-gpu-maxiter2-current/`.
+  An earlier unisolated selector exceeded 180 seconds and about 17 GiB RSS; it
+  is invalid diagnostic evidence, not a current fixture result. Runner
+  receipts now time fixture construction separately from the solver, and child
+  stdout is discarded so large JSON output cannot deadlock the watchdog pipe.
+- Diagnostic follow-up: the same current-HEAD Boozer fixture was run for 20 BFGS
+  iterations on native CPU, custom CPU, and strict RTX 5090 GPU. All three hit the
+  iteration limit (`status=1`, `success=false`). Native CPU ended at objective
+  `3.2370187845523733e-05`; custom CPU/GPU ended at
+  `2.83571085184401e-05`/`2.8357108518436739e-05`, with a custom CPU/GPU
+  objective difference of `3.3610267347050637e-18` and maximum parameter
+  difference `5.9396931817445875e-14`. Native versus custom objective differed
+  by `4.0130793270869935e-06` (relative `12.3974546%`) at this capped endpoint.
+  Cold/warm times were `5.6538/6.9635 s` native CPU,
+  `69.9314/0.5852 s` custom CPU, and `146.4187/1.1891 s` custom GPU; custom
+  solver RSS deltas were `0`, `2,048,680`, and `1,630,472 KiB`, respectively.
+  Receipts: `docs/receipts/custom-quasi-newton/boozer-outer-bfgs-native-custom-cpu-maxiter20-current/`
+  and `docs/receipts/custom-quasi-newton/boozer-outer-bfgs-gpu-maxiter20-current/`.
+- Diagnostic follow-up at `maxiter=50` confirms this is not only a short cap:
+  native stopped at the first outer step (`status=2`, `nfev=62`, objective
+  `1000.0`), while custom reached the 50-step limit (`status=1`, objective
+  `1.6400701660477423e-05`). Initial objective values remained matched to
+  `2.17e-19`. The native inner-solve failure and JAX rejected-objective policy
+  remain the unresolved parity boundary; no solver tolerance was weakened.
+  Receipt:
+  `docs/receipts/custom-quasi-newton/boozer-outer-bfgs-native-custom-cpu-maxiter50-20260802/`.
+- RED -> GREEN diagnostic: the exact traceable Newton residual now crosses a
+  nested JIT boundary and rematerializes intermediates with the FP64
+  `nothing_saveable` policy. The focused exact-Newton selector is `8 passed,
+  1 skipped`; the source-owned strict-GPU Boozer fixture passes in `126.55 s`
+  with `2,631,308 KiB` peak RSS under a direct 180-second bound. This is
+  fixture-construction evidence only; the capped outer BFGS pair is recorded
+  separately above. StableHLO and device-memory receipts remain open. Receipt:
+  `docs/receipts/custom-quasi-newton/boozer-fixture-gpu-current/`.
 - Recorded checks (before the latest environment-schema test): 55 fast
   focused tests (48 core optimizer, trajectory, and result-schema tests plus
   seven runner/watchdog/measurement
@@ -191,10 +448,12 @@
   synthetic CPU BFGS/L-BFGS/Optax probes, the runner's Ruff check, formatting,
   compileall, and `git diff --check` pass. The targeted runtime/runner Ruff and
   formatting checks pass. The standalone typed step-runtime module passes
-  Pyright with zero errors; the latest strict scoped project configuration
-  reports 1,828 errors because its private
-  optimizer dependencies and benchmark/test call sites are not yet typed. The
-  project-wide Ruff command remains open under Ruff 0.16.1 (856 findings across
+  Pyright with zero errors; a historical strict scoped configuration reported
+  1,828 errors before the current annotation pass. The historical profile
+  reported `793`; the current profile reports `798` because private optimizer
+  dependencies and benchmark/test call sites are not yet typed. The project-wide
+  Ruff command remains open under
+  Ruff 0.16.1 (856 findings across
   the current source/test/benchmark tree); the touched Boozer source/test
   selector reports 84 findings. The isolated `.venv-qn-gpu` uses CUDA 12 on
   the local RTX 5090; the configured Landau A100 host remains unreachable
@@ -208,6 +467,89 @@
   about 0.56 s in an already-running process. Do not use the failed fresh
   process as a solver timing or parity result.
 - Selected optimizer result/dispatch compatibility checks: 25 passed.
+- Post-annotation reruns are green: the focused runtime/runner/trajectory
+  selector passed 19 tests in 203.0 s; the four-test trajectory selector passed
+  in 65.84 s; five Boozer private routing/callback/cache tests passed in 51.17 s.
+  Touched-file Ruff and format checks are clean. A pre-annotation strict
+  Pyright run reported 1,031 diagnostics; that historical profile reported
+  793, while the current profile reports 798. These remain an open typing gate,
+  not solver failures.
+- Green: the full custom step-runtime contract file now passes 43/43 strict-CPU
+  tests in 200.89 s, including the no-observer host-NumPy guard and the updated
+  macro-step entry-point assertion.
+- Green: the local candidate trajectory receipt checksum/byte-identity contract passes
+  as an additional benchmark test; its manifest, metrics, script, and raw JSON
+  are self-consistent.
+- Green diagnostic: the pre-refactor BFGS implementation at `9ba1ad057` and
+  the candidate produced byte-identical three-step FP64 Rosenbrock accepted
+  states, counters, objective, gradient, parameters, and status. Receipt:
+  `docs/receipts/custom-quasi-newton/bfgs-pre-refactor-trajectory/`; the
+  candidate tree is dirty, so promotion closure remains open.
+- Diagnostic: a fresh matched two-step CPU `coil47` run gave native/custom
+  final objectives `0.13786469682070213/0.13786469682070215` (absolute
+  difference `2.8e-17`), both status 1; custom warm time was `0.0794 s` versus
+  native `0.5230 s`. Optax at the same two-step budget reached
+  `0.13786469652455854`, warm time `7.9936 s`, and solver RSS delta `410400`
+  KiB. The Optax 20-step child hit the 120-second watchdog; these are fixed-
+  budget diagnostics, not convergence or promotion evidence.
+- Green receipt packaging: the matched two-step CPU `coil47` native/custom/
+  Optax measurements are packaged locally with historical schema-5 raw payloads, a hashed
+  manifest, metrics, and a concise summary under
+  `docs/receipts/custom-quasi-newton/coil47-fixed-budget-cpu/`; the receipt
+  checksum check passes. It remains diagnostic because the candidate tree is
+  dirty and the budget is capped before convergence.
+- Historical runner diagnostic: a one-step strict-GPU Boozer child hit the
+  120-second watchdog during fixture construction/traceable Boozer setup before
+  writing a solver measurement. GPU allocation was only about 546 MiB; this is
+  a fixture compile/build bottleneck, not evidence of dense-BFGS iteration
+  memory. The direct slow-fixture probe now passes under the updated exact
+  residual boundary; the runner endpoint remains open.
+- Diagnostic-pass: a fresh current-head strict-GPU `coil47` two-step custom
+  run matched native CPU to `2.2e-16` maximum parameter difference and
+  `2.2e-17` final-gradient difference. Cold/warm times were `81.30/0.162 s`
+  and solver RSS delta was `546292 KiB`; the local candidate receipt is
+  `docs/receipts/custom-quasi-newton/coil47-fixed-budget-gpu-current/`.
+  Cold time includes fixture setup and XLA compilation, so this is not a
+  performance-promotion result; matched GPU Optax and A100 lanes remain open.
+- Diagnostic-pass: a clean pre-refactor worktree at `c0dc94580` and the
+  candidate implementation produced byte-identical three-step FP64 Rosenbrock
+  JSON (`max_abs_difference=0`) for accepted states, counters, and status.
+  The local candidate receipt is
+  `docs/receipts/custom-quasi-newton/rosenbrock-pre-refactor-trajectory/`.
+  The candidate checkout was dirty, so this is not promotion evidence.
+- Green routing inventory: the public `Driver`/method mapping, target and
+  reference entry points, `lbfgs_run_mode`, solver limits, callbacks, seeded
+  gradients, result fields, and production callers are recorded in
+  `docs/receipts/custom-quasi-newton/public-routing-inventory.md`. The strict
+  CPU driver and compatibility-shim selectors passed 21/21 in 49.84 s; full
+  application-scale endpoint parity remains separate.
+- Green caller smoke: the VMEC-hybrid single-stage, Stage-II objective, and
+  dynamic-surface caller selectors passed 22/22 in 32.68 s under strict CPU
+  FP64. This confirms the current public construction and derivative contracts;
+  full eager/traceable Boozer endpoint coverage remains open.
+- Green trajectory rerun: the accepted-step SciPy/custom L-BFGS parity selector
+  passed 4/4 in 74.91 s on strict CPU, including observer-equivalence and
+  frozen accepted-state checks.
+- Green observer contract: the no-observer, requested-trace, callback-stop,
+  and cached-wrapper selectors passed 7/7 in 50.02 s. Together with the
+  trajectory selector, this verifies that observational hooks do not alter the
+  accepted path and that `StopIteration` freezes the expected prefix; the
+  unbounded monolithic Boozer application path remains separate.
+- Green bounded-state contract: the `maxcor`-shaped history, no-trace default,
+  explicit bounded trace, and logical memory-accounting tests are green. The
+  normal eager result retains no accepted-iterate trajectory; trace capture is
+  opt-in and rejects an over-budget allocation.
+- Diagnostic GPU split: the 41 non-slow runtime contracts pass in fresh
+  processes as groups `18/18`, `17/17`, and `6/6` (58.04 s, 160.58 s, and
+  72.80 s). A single-process run reached 35 completed tests and timed out as
+  cumulative compilation grew to about 1.9 GiB RSS; this process-lifetime
+  cache/compile issue is recorded separately from solver correctness. The two
+  slow physics fixtures and full GPU application qualification remain open.
+- Green/diagnostic slow fixtures: the strict-GPU `coil47` source fixture passed
+  1/1 in 18.26 s. The strict-GPU traceable Boozer fixture hit the 120-second
+  watchdog during construction/lowering with about 2.76 GiB child RSS and no
+  result payload; this is the same Boozer compile bottleneck seen in the runner,
+  so Boozer GPU qualification remains open.
 - The focused public compatibility selector (with `MPI4PY_RC_INITIALIZE=0`)
   passed 27 tests in 22.36 seconds; 133 unrelated tests were deselected.
 - Public private-optimizer CPU checks: the Boozer private on-device selector
@@ -228,6 +570,29 @@
   passed 61/61 strict-CPU tests in 4m38s, including reverse-communication
   status ordering and result-schema coverage. End-to-end application parity is
   still a separate open gate.
+- Green: the post-rematerialization private compatibility selector passed
+  30/30 strict-CPU tests, and the combined eager-runtime plus trajectory
+  selector passed 47/47 in 244.91 s. These cover direct target routing,
+  callback-stop/status mapping, inverse-Hessian results, no-SciPy entry, and
+  accepted-step trajectory checks after the exact-Newton compile change.
+- Green: the current strict-CPU application selector passed 32/32 across
+  Stage-II objectives, dynamic surfaces, finite-build/planar/stochastic
+  examples, and both Boozer vacuum and VMEC-hybrid single-stage contracts.
+  This extends caller construction coverage only; matched converged Boozer
+  endpoint, strict-GPU, and performance receipts remain open.
+- Green: the current strict-GPU non-slow runtime selector passed 41/41 in
+  257.21 s with FP64, CUDA-only execution, and the platform allocator. The
+  slow source-owned Boozer fixture remains separately bounded because its
+  exact-Newton compile dominates the process; no GPU fallback was enabled.
+- Green: the direct BoozerSurface target/run-code selector passed 21/21 on
+  strict CPU, covering public target routing, on-device LM/BFGS paths,
+  backend rejection, and run-code construction. This does not close the
+  matched Boozer endpoint or strict-GPU outer-BFGS gate.
+- Diagnostic boundary: the current strict-GPU Boozer outer-BFGS runner was
+  attempted with a one-step cap and still hit the declared 120-second child
+  watchdog before a solver measurement was emitted. This confirms that the
+  remaining Boozer gate is whole outer-objective compilation, not a missing
+  iteration budget; the failed child is not promotion evidence.
 - Green: strict-CPU end-to-end application parity passed for stage-two minimal
   (1/1), stage-two standard (1/1), and VMEC-free Boozer single-stage (2/2,
   including the executable parity-contract check). These tests compare native
@@ -245,6 +610,33 @@
   `460844 / 1010952 / 2375072 KiB`. Maximum final-parameter differences from
   native were `3.6456e-9` (custom) and `1.3207e-4` (Optax). This is dirty-tree
   exploratory CPU evidence, not the A100 promotion receipt.
+- Green diagnostic receipt: a fresh current-head native/custom `coil47` CPU
+  run with a 20-step cap converged on both providers (`12/13` iterations,
+  `15/44` evaluations, status 0). Final objective difference was zero at the
+  recorded precision; maximum final-parameter difference was `8.10e-15`.
+  Raw JSON, metrics, summary, and checksummed manifest are present locally under
+  `docs/receipts/custom-quasi-newton/coil47-native-custom-cpu-maxiter20-current/`.
+  The dirty checkout keeps it diagnostic, and strict-GPU/A100 promotion lanes
+  remain open.
+- Green diagnostic receipt: the matching strict-GPU custom `coil47` run
+  converged in `12/15` iterations/evaluations with status 0. Relative to the
+  native CPU reference, final objective, gradient-infinity-norm, and parameter
+  differences were `5.55e-17`, `4.61e-18`, and `2.94e-15`. Cold/warm solver
+  time was `75.169/0.354 s`; solver RSS delta was `509964 KiB`. The local candidate
+  manifest is under
+  `docs/receipts/custom-quasi-newton/coil47-custom-gpu-maxiter20-current/`;
+  the dirty checkout and missing Optax/A100 lanes keep it diagnostic.
+- Green diagnostic receipt: a matched strict-GPU two-step `coil47` comparison
+  now includes custom JAX and Optax. Warm time was `0.162 s` custom versus
+  `21.338 s` Optax; final objective difference was `2.96e-10` absolute. Both
+  endpoints were capped and non-converged, so the checksummed receipt under
+  `docs/receipts/custom-quasi-newton/coil47-custom-optax-gpu-fixed-budget-current/`
+  is fixed-budget evidence only.
+- Green diagnostic receipt: the strict-GPU `coil47` step-from-start kernel
+  lowered in `2.453 s` with `1,504,879` StableHLO bytes and `1,645,584` JAXPR
+  bytes. The local candidate lowering receipt is under
+  `docs/receipts/custom-quasi-newton/coil47-lbfgs-gpu-compile-shape-current/`;
+  runtime executable count and device memory are still unmeasured.
 - Probe: the same CPU `coil47` custom/Optax run in explicit `fast` intent reached
   the same final objective; custom / Optax cold seconds were `5.451687 /
   21.986368`, warm seconds `0.066188 / 21.502429`, and child RSS
@@ -264,6 +656,13 @@
   objective values still differed by only `2.168404344971009e-19`. The
   native failure penalty and the JAX rejected-objective policy are therefore a
   confirmed trajectory-semantics mismatch, not convergence evidence.
+- Controlled follow-up: a fresh native-only Boozer run with the same fixture
+  reached 50 iterations and 54 evaluations without an inner-solve failure;
+  its endpoint was `1.6644268825804663e-5` with gradient infinity norm
+  `1.40605699279515e-4`. This shows the failure is trajectory- and
+  horizon-dependent rather than an immediate fixture defect. The earlier
+  `maxiter=100` failure remains a separate long-horizon diagnostic; it does
+  not justify changing the native oracle or declaring endpoint parity.
 
 Review gate: not promotion-ready. The runner still needs matched converged
 Boozer endpoint evidence, strict-GPU results, compile/device-memory and StableHLO
@@ -274,6 +673,8 @@ generic accepted-step helper is not yet the production route. These are open
 qualification items, not parity evidence. Historical RED revisions were not
 preserved; current test files are post-hoc green evidence.
 
+</details>
+
 ## Purpose
 
 Refactor SIMSOPT's custom JAX BFGS and L-BFGS around the useful part of the
@@ -282,7 +683,7 @@ host driver for ordinary eager solves. SIMSOPT continues to own the algorithms,
 SciPy-compatible behavior, and public results. Optax remains an explicit,
 optional comparator; the custom solvers must not call Optax internals.
 
-Optax's [official interface](https://github.com/google-deepmind/optax/blob/main/docs/getting_started.md)
+Optax's [official interface](https://github.com/google-deepmind/optax/blob/main/docs/getting_started.ipynb)
 is a composable `GradientTransformation` with `init`/`update`; its
 [`scale_by_lbfgs`](https://github.com/google-deepmind/optax/blob/main/examples/lbfgs.ipynb)
 is a gradient transform, not a SciPy-compatible L-BFGS-B
@@ -290,9 +691,9 @@ result/callback/status implementation. It therefore remains an explicit
 comparator in this plan.
 
 This plan supersedes the earlier proposal to remove custom BFGS/L-BFGS after
-Optax qualification. The first implementation commit must update
+Optax qualification. The architecture/routing delivery must keep
 `docs/jax_solver_algorithm_matrix.md` and
-`docs/jax_solver_provider_coexistence_implementation_plan.md` accordingly. No
+`docs/jax_solver_provider_coexistence_implementation_plan.md` aligned. No
 custom-provider removal or default-provider change is allowed until this plan's
 compatibility, science, and performance gates pass.
 
@@ -305,12 +706,14 @@ compatibility, science, and performance gates pass.
 - [x] Retain a whole-solve JAX route for callers that execute the optimizer
       under `jax.jit`; a Python host loop cannot consume traced optimizer state.
 - [x] Keep line search on device with bounded JAX control flow.
-- [ ] Allocate only current solver state and bounded history during normal
+- [x] Allocate only current solver state and bounded history during normal
       execution; retain no full trajectory unless requested.
 - [x] Keep JAX fast intent as the default after a JAX device is selected;
       parity remains explicit.
-- [ ] Close through authentic RED -> GREEN -> REFACTOR tests and durable
-      numerical, compile, timing, RSS, and device-memory receipts.
+- [ ] For every remaining change and newly found defect, preserve authentic
+      RED -> GREEN -> REFACTOR evidence and durable numerical, compile, timing,
+      RSS, and device-memory receipts. Existing post-hoc tests remain labeled
+      post-hoc; this plan does not manufacture historical RED revisions.
 
 ## Non-goals
 
@@ -437,8 +840,10 @@ LBFGSBStepOps: typed facade over the specialized entry kernels
   - L-BFGS-B fields: `maxcor`, `ftol`, `gtol`, `maxls`, bounds signature, and
     seeded-value/gradient compile policy.
   `maxiter` and `maxfun` are excluded only from the eager key because they are
-  dynamic there. Collision tests vary every listed field. No global strong
-  reference retains the objective or its closures. A per-key pending
+  dynamic there. The current L-BFGS key does not yet include every listed
+  semantic field; same-owner closure mutation and callback/trace-policy
+  collision tests remain open. No global strong reference retains the
+  objective or its closures. A per-key pending
   entry makes first compilation single-flight; failure removes the pending
   entry, and eviction never invalidates an executable already held by a solve.
 
@@ -461,6 +866,26 @@ The traceable whole-solve path may still compile for its staged loop bound.
 remain valid compilation identities because they change state shape or
 generated code.
 
+### Observable behavior and compatibility matrix
+
+This Tier-3 change is complete only when each observable delta below has a
+direct test or receipt. Unlisted public behavior must remain unchanged.
+
+| Surface | Before | Intended result | Required proof |
+| --- | --- | --- | --- |
+| Eager BFGS execution | Whole-solve compiled loop | Fixed-shape compiled step with a host driver | Frozen accepted states, status/counters, callback order, and compile-count tests |
+| Eager L-BFGS execution | Static-budget compiled wrappers | Specialized fixed-shape design-B kernels with dynamic total budgets | SciPy trajectory parity, budget-change compile count, and inverse-Hessian tests |
+| Traced BFGS/L-BFGS | Whole-solve JAX control flow | Supported whole-solve route using the same algorithm-owned transitions | Direct traced and Boozer `run_code_traceable()` tests |
+| Observation | Legacy callback/trace boundaries | One packed host observation per eager transition; payload only when requested | Transfer-ledger and observer-equivalence tests |
+| Wrapper cache | Objective-attached unbounded mapping | Per-objective capacity-8 LRU with single-flight construction | Identity, collision, eviction, failure, lifetime, and concurrency tests |
+| L-BFGS history | `min(maxcor, maxiter)` slots | Exactly `maxcor` slots | State-shape and logical/peak-memory receipts |
+| Public API | Existing method names, options, routing, results, and statuses | No public migration or deprecation | Routing inventory plus direct public compatibility tests |
+
+Rollback must remove every implementation commit that changes active public
+solver behavior unless an old/new implementation gate is added and proven at
+the public seam. Frozen tests and receipts remain. No persisted-state migration
+is required.
+
 ### Runtime modes and providers
 
 These are orthogonal axes:
@@ -481,6 +906,11 @@ custom method name.
 - [ ] Work from an isolated worktree at a recorded commit. Record source
       status, Python/JAX/JAXLIB/SciPy/Optax versions, device, FP64 state,
       options, commands, exit codes, and fixture hashes.
+- [x] Add the reviewed build-requirement input and relocatable hash-locked CPU/
+      GPU dependency files described under Supported environments. The CPU
+      and GPU locks resolve with `uv pip sync --dry-run --require-hashes`; the
+      editable checkout path is excluded. Full clean-environment replay remains
+      a separate promotion gate.
 - [x] Add the versioned runner
       `benchmarks/custom_quasi_newton_runtime.py` for deterministic quadratic,
       Rosenbrock, coil47, and Boozer fixtures, with synchronization,
@@ -515,15 +945,16 @@ custom method name.
         fields, and predeclared tolerances. Neither fixture may read VMEC, a
         network path, or mutable user data.
   - [x] Add the focused runtime and SciPy trajectory tests:
-  - [x] `tests/jax/solve/test_custom_quasi_newton_step_runtime.py` (42 tests;
-        40 fast contracts and two `slow` source-owned physics probes);
+  - [x] `tests/jax/solve/test_custom_quasi_newton_step_runtime.py` (43 tests;
+        41 fast contracts and two `slow` source-owned physics probes);
   - [x] `tests/jax/solve/test_lbfgsb_trajectory_parity.py` (accepted-step,
         frozen FP64 fields, deferred-`maxfun`, and observer-equivalence tests).
         These are current-worktree evidence until committed;
         they are not tracked promotion receipts.
-  - [x] `tests/benchmarks/test_custom_quasi_newton_runtime.py` (10
-        provider-child, fixture-cost, provenance, native-objective, and
-        memory-contract tests).
+  - [x] `tests/benchmarks/test_custom_quasi_newton_runtime.py` (40 collected
+        cases: 38 non-slow provider-child, provenance, watchdog, receipt,
+        memory, intent, prepared-program, and phase-RSS contracts; two slow
+        fixture cases).
   - [x] focused additions/updates to
         `tests/geo/test_boozersurface_jax_private.py` and
         `tests/geo/test_boozersurface_jax.py`, including the traceable closure
@@ -539,7 +970,7 @@ custom method name.
       L-BFGS-B preserves SciPy's deferred stop check and accepts one `NEW_X`
       before reporting the limit. `test_zero_budget_preserves_bfgs_and_lbfgs_limit_timing`
       covers both contracts.
-- [ ] Run the five-cell root-cause matrix: cheap versus coil objective,
+- [x] Run the five-cell root-cause matrix: cheap versus coil objective,
       `maxcor=10` versus `300`, short versus long budget, and compile-only
       versus warm execution. Record iteration progress, compile events,
       per-step timing, objective-only timing, an RSS time series, StableHLO
@@ -548,13 +979,32 @@ custom method name.
       Use `benchmarks/lbfgs_ondevice_compile_shape.py`; its default diagnostic
       excludes the legacy generic/monolithic kernels. Add
       `--include-legacy-kernels` only under an externally watched process.
-- [ ] Compare physical compile designs A and B. If the objective graph—not the
-      optimizer control/state—is the dominant cost, stop this refactor claim
-      and open an objective-specific plan.
+- [x] Preserve partial matrix evidence with atomic progress sidecars. A killed
+      child must leave its last completed phase and the parent RSS time series;
+      a missing final payload is recorded as incomplete, not as a solver result.
+- [x] Record the bounded diagnostic that provisionally selects physical design
+      B: design A exceeded the watchdog while design B completed on the matched
+      quadratic.
+- [ ] Complete the promotion-grade A/B comparison for StableHLO size, compile
+      time, peak RSS, and warm step time on both the cheap and coil fixtures.
+      If the objective graph—not optimizer control/state—is dominant, stop this
+      refactor claim and open an objective-specific plan.
 - [x] Bound each diagnostic in an exact child process. The runner sends TERM,
       then KILL after a grace period, at 120 seconds or 8 GiB RSS, and tracks
       the child PID directly; no broad process-name matching is used. The
       timeout and RSS branches have bounded contract tests.
+- [x] Add one deterministic receipt publisher and aggregate validator. It builds
+      `manifest.json`, `metrics.json`, and `summary.md` from runner output,
+      binds environment locks and every artifact by SHA-256, copies raw evidence
+      to the declared archive, and fails closed when any tracked or archived byte
+      is absent or different. Tamper and fresh-process replay tests pass.
+
+  A direct bounded design probe is also recorded under
+  `.artifacts/lbfgs-ondevice/compile-design-ab/`: the specialized transition
+  lowered in 2.37 s with 1,180,046 bytes of StableHLO, while the old generic
+  transition stopped during lowering without a final payload. This is useful
+  root-cause evidence and supports the provisional choice of B, but it is not
+  a completed promotion-grade A/B receipt.
 
 ### Phase 1 — shared eager driver
 
@@ -597,8 +1047,10 @@ custom method name.
       peak-live upper bound during the update, including simultaneous old/new
       Hessians and intermediates. Record the no-donation policy. The runner
       emits this accounting without adding a routing threshold.
-- [ ] Measure actual dense-BFGS peak live bytes during the update on supported
-      CPU/GPU devices and compare them with the derived upper bound.
+- [x] Measure compiled dense-BFGS update peak live bytes on supported CPU/GPU
+      devices and compare them with the derived logical upper bound. Keep the
+      backend temporary allocation separate from the Hessian-state accounting;
+      this does not replace a future allocator timeline if one is needed.
 
 ### Phase 3 — L-BFGS-B
 
@@ -612,6 +1064,10 @@ custom method name.
 - [x] Allocate exactly `maxcor` history slots, independent of `maxiter`; update
       the pinned state-shape test and report the old/new byte difference for
       `maxiter < maxcor`.
+- [x] Replace Python-unrolled history-update and two-loop algebra with
+      JAX loop/vectorized updates. Fresh `maxcor=300` CPU/GPU probes now stay
+      within the bounded compile/RSS envelope; normal accepted-state tests
+      remain green.
 - [x] Retain no accepted iterates normally. Keep explicit trace capture within
       its existing byte cap; the no-trace and oversized-trace tests cover both
       paths.
@@ -619,18 +1075,23 @@ custom method name.
 - [x] Replace the objective-attached unbounded compiled-wrapper dictionary with
       the per-objective capacity-8 LRU and single-flight admission specified
       above.
-- [x] Complete basic cache qualification: test key identity, owner garbage
+- [x] Complete cache qualification: test key identity, owner garbage
       collection, eviction while another solve holds an entry, failed-
-      compilation cleanup, cardinality under shape/policy churn, and
-      concurrent single-flight first use. Structured-adapter collision coverage
-      now has a tree-definition key-separation test; full adapter execution
-      collision coverage remains part of Phase 4.
+      compilation cleanup, cardinality under shape/policy churn, concurrent
+      single-flight first use, every initial-state semantic field, and
+      same-owner structured-cache-token mutation. Structured adapters are
+      exercised through distinct tuple/list kernels and their outputs are
+      checked, so tree-definition collisions are not only compared as keys.
 
 ### Phase 4 — public compatibility and application tests
 
-- [ ] Keep public method names and provider routing unchanged.
-- [ ] Inventory all callers of `lbfgs_run_mode`, `maxcor`, `maxfun`, callbacks,
+- [x] Keep public method names and provider routing unchanged.
+- [x] Inventory all callers of `lbfgs_run_mode`, `maxcor`, `maxfun`, callbacks,
       seeded gradients, `hess_inv`, status, and counters.
+- [x] Preserve the direct custom L-BFGS inverse-Hessian operator through the
+      typed `Driver.SIMSOPT_LBFGSB` result. `OptimizerResult.hess_inv` now
+      carries the SciPy-compatible operator without densifying it; the public
+      dispatch regression verifies identity and application semantics.
 - [ ] Complete direct `target_minimize`, BoozerSurface eager and traceable
       paths, stage-two, and single-stage caller coverage. Contract smoke
       selectors are green; full eager/traceable and application-scale closure
@@ -644,7 +1105,7 @@ custom method name.
 - [ ] Compare every accepted state against the pre-refactor custom solver.
       Compare L-BFGS-B against pinned SciPy with matched options. Separate
       bitwise, tolerance, and equivalent-endpoint verdicts.
-- [ ] Verify non-stopping callback/no-callback and trace/no-trace configurations
+- [x] Verify non-stopping callback/no-callback and trace/no-trace configurations
       do not change numerical results. Verify `StopIteration` produces the
       intended frozen trajectory prefix and terminal result.
 - [ ] Verify eager transition/math kernels and no-observer paths import or
@@ -653,6 +1114,11 @@ custom method name.
       retain `jax.debug.callback` only at the accepted-step observation
       boundary and freeze its current ordering flag, payload, callback order,
       status, and counter behavior.
+  - [x] The focused no-SciPy/stepwise/unconstrained selectors passed on strict
+        CPU (`5/5`) and strict CUDA (`4/4`); the CUDA lane also passed the
+        explicit closure-constant placement and transfer-guard checks. This
+        closes the selected optimizer boundary paths; the full application
+        matrix remains a separate gate.
 
 ### Phase 5 — lean physics and performance qualification
 
@@ -668,18 +1134,87 @@ custom method name.
 - [ ] Compare initial and final objective components, parameters, invariant
       geometry observables, gradient infinity norm, constraints, iterations,
       evaluations, raw status, and stopping reason.
-- [ ] Label capped, converged, failed, and callback-stopped states directly.
-      A finite decrease or lower objective alone is not convergence.
+- [x] Label capped, converged, failed, and callback-stopped states directly.
+      A finite decrease or lower objective alone is not convergence; the
+      runner's `stopping_reason` contract covers these terminal classes.
+- [x] The runner now emits an explicit `stopping_reason` beside status and
+      success, with RED/GREEN coverage for convergence, iteration limits,
+      line-search failure, nonfinite termination, callback stop, and Optax
+      failure. Existing receipts remain diagnostic until regenerated on a
+      clean checkout.
 - [ ] Measure cold compile, warm optimizer, total wall time, peak RSS, peak
       device memory, StableHLO size, and executable count. Synchronize timed
       boundaries and exclude export/plotting.
-- [ ] Compare Optax and custom overhead at a fixed accepted-step budget, then
-      compare time to the same scientific certificate. Report Optax line-search
-      evaluations as unavailable unless the runner measures them; do not infer
-      `nfev` from outer iterations.
-- [x] A fixed-budget CPU `coil47` Optax/custom/native comparison is recorded
-      above; strict-GPU/A100 repetition and certificate-time comparison remain
+- [ ] Repair the measurement boundary before using any performance result for
+      promotion:
+  - [x] expose a prepared-provider interface for the flat runner fixtures:
+        custom uses production `prepare_lbfgs_private`/
+        `PreparedLBFGS`, while Optax constructs its equivalent prepared step
+        once outside warm timing. Both providers reuse fixed-shape programs for
+        timed runs, with exact input-binding tests. General structured-adapter
+        qualification remains outside this bounded comparator.
+  - [x] run dense-BFGS buffer analysis in a named
+        `algorithm_memory_analysis` phase so compilation instrumentation is
+        absent from cold and warm solver timing; the phase contract is covered
+        on strict CPU and CUDA;
+  - [x] measure current RSS through the fixture, preparation, cold-solver, and
+        warm-solver windows with 10-ms `/proc/self/status` polling in provider
+        children; retain process-lifetime `ru_maxrss` only as a separately
+        labeled diagnostic; and
+  - [x] invalidate the old custom-versus-Optax warm-time and solver-RSS
+        promotion ratios. They compared unmatched provider preparation and a
+        process-lifetime high-water mark; the replacement phase-scoped receipts
+        remain diagnostic until clean five-sample qualification.
+- [x] The strict-RTX-5090 `coil47` L-BFGS step-from-start runtime-compile
+      diagnostic measured `20.303 s` to one executable, peak host RSS
+      `1,816,276,992` bytes (`358,379,520`-byte delta), and recorded the
+      receipt at
+      `docs/receipts/custom-quasi-newton/coil47-lbfgs-gpu-runtime-compile-current/`.
+      Device VRAM telemetry was not enabled, so the full measurement gate
+      remains open.
+- [x] A targeted strict-RTX-5090 custom `coil47` maxiter-20 run sampled
+      `nvidia-smi` every 0.2 seconds. Peak runner-process GPU memory was
+      `1076 MiB` of `32607 MiB`; cold/warm time was `78.599/0.253 s`, and
+      solver RSS delta was `524468 KiB`. Receipt:
+      `docs/receipts/custom-quasi-newton/coil47-custom-gpu-vram-current/`.
+      This closes only the custom coil measurement; Optax, Boozer, and A100
+      memory qualification remain open.
+- [x] Compare Optax and custom overhead at a fixed accepted-step budget, then
+      compare time to the same scientific certificate. The runner now
+      precompiles the production custom fixed-shape transitions and the Optax step;
+      CPU and strict-GPU `coil47` bundles both reach the same final objective
+      when allowed to converge. Optax line-search
+      evaluations remain unavailable and are not inferred from outer
+      iterations. Phase-scoped memory and clean-checkout promotion remain
       open.
+- [x] A fixed-budget CPU `coil47` Optax/custom/native comparison is recorded
+      above, and the strict-GPU custom/Optax repetition is recorded above;
+      A100 repetition and certificate-time promotion remain open.
+- [x] A strict-GPU fixed-budget `coil47` comparison is also archived at
+      `docs/receipts/custom-quasi-newton/coil47-custom-optax-gpu-fixed-budget-current/`.
+      At two steps, custom/Optax warm time was `0.162/21.338 s`, RSS delta
+      `546292/444792 KiB`, and final-objective difference was `2.96e-10`
+      absolute. Both endpoints were capped; this is diagnostic evidence only.
+- [x] The corresponding Optax VRAM sample is archived at
+      `docs/receipts/custom-quasi-newton/coil47-optax-gpu-vram-current/`.
+      The provider reached `834 MiB` of `32607 MiB` (`2.56%`), with
+      `22.147 s` warm time and `444348 KiB` solver RSS delta. The two-step
+      cap and dirty checkout keep this diagnostic-only.
+- [x] The bounded strict-GPU `coil47` Optax `maxiter=20` attempt is recorded as
+      incomplete: its provider child exceeded the declared 120-second watchdog
+      before producing a solver payload. Receipt:
+      `docs/receipts/custom-quasi-newton/coil47-optax-gpu-maxiter20-current/`.
+- [x] A fresh strict-CPU `coil47` native/custom/Optax `maxiter=20` comparison
+      reached successful endpoints for all three providers. The final
+      objective was identical at recorded precision; custom versus native had
+      `1.03e-9` maximum parameter difference, while Optax had `1.32e-4`.
+      Warm time / solver RSS delta were `1.910 s / 0 KiB` native,
+      `0.171 s / 354368 KiB` custom, and `49.584 s / 1548672 KiB` Optax.
+      The original bundle remains preserved as historical diagnostic evidence.
+      A lock-bound rerun is recorded at
+      `docs/receipts/custom-quasi-newton/coil47-native-custom-optax-cpu-maxiter20-lockbound-current/`
+      with the CPU lock hash. It remains diagnostic because the checkout is
+      dirty and the budget is a bounded comparison.
 - [ ] For the 47-parameter A100 case, require:
   - [ ] no 120-second or 8-GiB guard trip;
   - [ ] warm custom time no more than `2x` matched Optax warm time;
@@ -687,33 +1222,65 @@ custom method name.
   - [ ] zero new eager step compilations when only budgets change; and
   - [ ] no monotonic RSS/device-memory or executable-count growth across five
         warm repeats.
+- [ ] Collect one discarded warm-up followed by five synchronized samples per
+      provider in fresh, otherwise idle children. Apply timing thresholds to
+      the median, memory thresholds to the maximum, report every raw sample and
+      range, and rerun when background GPU activity or thermal/power state
+      changes during the pair.
 - [ ] These `2x` and `1.5x` thresholds are predeclared initial promotion gates.
       Change them only by reviewing this plan before GREEN data are collected.
       The work need not prove every small example is faster than native CPU.
 
 ### Phase 6 — refactor, rollout, and rollback
 
+The authoritative rollback base is
+`9c64c2ef6cee45eb7eb1989bd5a41e2adf8bfc26`, the clean committed revision
+before the current custom-runtime implementation slice. The older
+`9ba1ad057...` and `c0dc94580...` revisions above are trajectory-comparison
+fixtures only; neither is the rollback base.
+
+At this review, the uncommitted behavior-changing slice is exactly:
+
+- `src/simsopt_jax/geo/optimizers/_shared.py`;
+- `src/simsopt_jax/geo/optimizers/optimizer.py`;
+- `src/simsopt_jax/geo/optimizers/private/{_step_runtime,_bfgs,_common,_lbfgs,_lbfgsb_scipy,_line_search,_result_converters,_types}.py`;
+- `src/simsopt_jax/runtime/{host_boundary,jaxpr_closure}.py`;
+- `src/simsopt_jax/solve/{__init__,contracts,dispatch}.py`;
+- `src/simsopt_jax/objectives/stage_two.py`;
+- `src/simsopt_jax_adapters/geo/boozer_surface.py`;
+- `examples/jax/2_Intermediate/stage_two_optimization_planar_coils.py`;
+- `examples/jax/3_Advanced/single_stage_optimization.py`; and
+- `examples/jax/parity/cases/native_stage_two_optimization_planar_coils.py`.
+
+Before promotion, replace this path inventory with the ordered commit SHAs that
+contain it and any later behavior change. No unrelated commit may appear in
+that list.
+
 - [ ] Remove duplicated eager host-loop mechanics only after BFGS and L-BFGS
       pass independently. Keep all mathematics algorithm-owned.
-- [ ] Keep the runtime/transition implementation commits separate from one
-      routing-only commit so rollback does not discard validated primitives or
-      tests.
+- [ ] Keep runtime, algorithm transitions, public routing, and tests in
+      reviewable commits. Record exactly which commits alter active public
+      behavior.
 - [ ] Expand `[tool.pyright].include` and add
       `pyright.custom-quasi-newton.json`, scoped to the changed private
       optimizer, fixture, runner, and test paths with
       `typeCheckingMode: "strict"`. Do not add blanket ignores or permit
       unknown/`Any` types in the new protocol.
-- [ ] Update the solver matrix, provider plan, public docs, and examples to use
-      the device/intent/provider taxonomy above.
-- [ ] Record the pre-routing commit as the rollback point. If science,
-      callbacks, traced execution, compilation, or memory regresses, revert the
-      routing commit to the current host-observed/whole-solve paths. Solver state
-      is process-local, so no persisted-state migration is required.
-- [ ] Rehearse rollback in a clean worktree: revert only the isolated routing
-      commit, run the frozen optimizer and eager/traceable Boozer compatibility
-      selectors, and archive the reverted commit, commands, exit codes, and
-      checksums in the receipt. Then return to the candidate commit and rerun
-      the same selectors.
+- [x] Update the solver matrix, provider plan, public docs, and examples to use
+      the device/intent/provider taxonomy above. The custom provider remains the
+      production BFGS/L-BFGS lane; Optax is explicit and comparative.
+- [x] Record the exact pre-implementation rollback base above. Solver state is
+      process-local, so no persisted-state migration is required.
+- [ ] After the implementation commits exist, record their SHAs oldest to
+      newest. Rehearse `git revert --no-commit` for those SHAs in reverse order
+      in a clean candidate worktree; the resulting source tree for every path
+      above must be byte-identical to the rollback base. If a tested public
+      old/new gate is added instead, prove that it selects untouched baseline
+      primitives.
+- [ ] Run the frozen optimizer and eager/traceable Boozer compatibility
+      selectors on the rehearsed rollback tree, and archive the base, candidate,
+      ordered SHA list, commands, exit codes, tree hashes, and receipt hashes.
+      Return to the candidate commit and rerun the same selectors.
 - [ ] Do not remove the traceable whole-solve implementation in this plan.
 
 ## Receipt contract
@@ -732,30 +1299,61 @@ The ignored local `.artifacts/` copy alone is never authority. A result is
 incomplete if the archive is absent, a checksum differs, the environment is an
 unsupported overlay, or a child is timed out/killed.
 
+Phase 0 adds `benchmarks/custom_quasi_newton_receipts.py` with `publish` and
+`validate-all` subcommands. `publish` accepts an explicit set of case-qualified
+runner directories, an environment lock, a tracked destination, and an archive
+URI; `validate-all` rehashes every
+tracked and archived byte from a fresh process. Both commands must be covered
+by missing-file, wrong-lock, artifact-tamper, and archive-tamper tests.
+
 ## Validation
 
 ### Supported environments
 
-Create clean Python 3.11+ environments from the candidate checkout:
+Phase 0 creates reviewed, relocatable, hash-locked dependency files. The lock
+input includes the exact build-system requirements but omits the local `simsopt`
+package itself; checkout identity is bound separately by Git commit. Generate
+the locks once, review them, and commit them before collecting evidence:
+
+```bash
+uv pip compile pyproject.toml \
+  benchmarks/environments/custom_quasi_newton_build.in \
+  --python 3.11 --extra JAX --extra dev --extra ALGS \
+  --no-emit-package simsopt --generate-hashes \
+  -c benchmarks/environments/custom_quasi_newton_constraints.txt \
+  -o benchmarks/environments/custom_quasi_newton_cpu.lock.txt
+
+uv pip compile pyproject.toml \
+  benchmarks/environments/custom_quasi_newton_build.in \
+  --python 3.11 --extra JAX_GPU --extra dev --extra ALGS \
+  --no-emit-package simsopt --generate-hashes \
+  -c benchmarks/environments/custom_quasi_newton_constraints.txt \
+  -o benchmarks/environments/custom_quasi_newton_gpu.lock.txt
+```
+
+Replay clean Python 3.11 environments from those committed locks, then install
+only the candidate checkout without resolving dependencies again:
 
 ```bash
 uv venv --python 3.11 .venv-qn-cpu
-uv pip install --python .venv-qn-cpu/bin/python \
-  -c benchmarks/environments/custom_quasi_newton_constraints.txt \
-  -e ".[JAX,dev,ALGS]"
-uv pip freeze --python .venv-qn-cpu/bin/python > benchmarks/environments/custom_quasi_newton_cpu.txt
+uv pip sync --python .venv-qn-cpu/bin/python --require-hashes \
+  benchmarks/environments/custom_quasi_newton_cpu.lock.txt
+uv pip install --python .venv-qn-cpu/bin/python --no-deps \
+  --no-build-isolation -e .
 
 uv venv --python 3.11 .venv-qn-gpu
-uv pip install --python .venv-qn-gpu/bin/python \
-  -c benchmarks/environments/custom_quasi_newton_constraints.txt \
-  -e ".[JAX_GPU,dev,ALGS]"
-uv pip freeze --python .venv-qn-gpu/bin/python > benchmarks/environments/custom_quasi_newton_gpu.txt
+uv pip sync --python .venv-qn-gpu/bin/python --require-hashes \
+  benchmarks/environments/custom_quasi_newton_gpu.lock.txt
+uv pip install --python .venv-qn-gpu/bin/python --no-deps \
+  --no-build-isolation -e .
 ```
 
-Phase 0 creates and reviews the constraints file with exact SciPy and Optax
-versions compatible with the project-pinned JAX/JAXLIB `0.10.0`; the initial
-Optax comparator pin is `0.2.8`. Record the resolved transitive environment.
-Do not use the system Python or an overlay from another checkout.
+The constraints file pins SciPy and Optax versions compatible with the
+project-pinned JAX/JAXLIB `0.10.0`; the initial Optax comparator pin is `0.2.8`.
+The manifest binds the appropriate lock hash, Python ABI, platform tag, and
+candidate commit. A `pip freeze` may be retained as a diagnostic, but it is not
+the replay authority because editable paths are machine-specific. Do not use
+the system Python or an overlay from another checkout.
 
 For non-MPI optimizer tests, set `MPI4PY_RC_INITIALIZE=0` in the child
 environment so importing `simsopt.field` does not auto-initialize MPI or open a
@@ -773,6 +1371,7 @@ SIMSOPT_BACKEND_STRICT=1 SIMSOPT_PRECISION=fp64 PYTHONPATH=src:. \
   tests/jax/solve/test_lbfgsb_trajectory_parity.py \
   tests/jax/solve/test_optimizer_result_schema.py \
   tests/geo/test_lbfgsb_scipy_jax_kernels.py \
+  tests/benchmarks/test_custom_quasi_newton_runtime.py \
   -m "not slow"
 
 # Source-owned fixture construction is intentionally a separate slow lane.
@@ -809,15 +1408,18 @@ separate commands. Coil47 and Boozer now have matched native/JAX CPU
 initial-objective paths; endpoint and GPU qualification remain separate gates.
 
 ```bash
-RUN_DIR=".artifacts/custom-quasi-newton/$(date -u +%Y%m%dT%H%M%SZ)-cpu-smoke"
-mkdir -p "$RUN_DIR"
+RUN_ROOT=".artifacts/custom-quasi-newton/$(date -u +%Y%m%dT%H%M%SZ)-cpu-smoke"
+ROSENBROCK_RUN_DIR="$RUN_ROOT/rosenbrock"
+COIL_RUN_DIR="$RUN_ROOT/coil47"
+BOOZER_RUN_DIR="$RUN_ROOT/boozer"
+mkdir -p "$ROSENBROCK_RUN_DIR" "$COIL_RUN_DIR" "$BOOZER_RUN_DIR"
 
 MPI4PY_RC_INITIALIZE=0 MPLBACKEND=Agg JAX_PLATFORMS=cpu JAX_ENABLE_X64=true \
 SIMSOPT_BACKEND_MODE=jax_cpu_parity \
 SIMSOPT_BACKEND_STRICT=1 SIMSOPT_PRECISION=fp64 PYTHONPATH=src:. \
 .venv-qn-cpu/bin/python benchmarks/custom_quasi_newton_runtime.py \
   --device cpu --intent parity --providers native,custom \
-  --cases rosenbrock --output "$RUN_DIR"
+  --cases rosenbrock --output "$ROSENBROCK_RUN_DIR"
 
 # Source-owned coil physics smoke; native/JAX CPU objective parity is covered.
 MPI4PY_RC_INITIALIZE=0 MPLBACKEND=Agg JAX_PLATFORMS=cpu JAX_ENABLE_X64=true \
@@ -825,7 +1427,7 @@ SIMSOPT_BACKEND_MODE=jax_cpu_parity \
 SIMSOPT_BACKEND_STRICT=1 SIMSOPT_PRECISION=fp64 PYTHONPATH=src:. \
 .venv-qn-cpu/bin/python benchmarks/custom_quasi_newton_runtime.py \
   --device cpu --intent parity --providers native,custom \
-  --cases coil47 --output "$RUN_DIR"
+  --cases coil47 --output "$COIL_RUN_DIR"
 
 # Source-owned Boozer physics smoke; native and custom providers share the
 # initial objective/gradient contract. Capped endpoints are diagnostic only.
@@ -834,7 +1436,7 @@ SIMSOPT_BACKEND_MODE=jax_cpu_parity \
 SIMSOPT_BACKEND_STRICT=1 SIMSOPT_PRECISION=fp64 PYTHONPATH=src:. \
 .venv-qn-cpu/bin/python benchmarks/custom_quasi_newton_runtime.py \
   --device cpu --intent parity --providers native,custom \
-  --cases boozer --output "$RUN_DIR"
+  --cases boozer --output "$BOOZER_RUN_DIR"
 ```
 
 ### Strict GPU
@@ -845,9 +1447,11 @@ not include them in the fast contract command:
 
 ```bash
 RUN_ROOT=".artifacts/custom-quasi-newton/$(date -u +%Y%m%dT%H%M%SZ)-gpu-parity"
-CUSTOM_RUN_DIR="$RUN_ROOT/custom"
-OPTAX_RUN_DIR="$RUN_ROOT/optax"
-mkdir -p "$CUSTOM_RUN_DIR" "$OPTAX_RUN_DIR"
+CUSTOM_COIL_RUN_DIR="$RUN_ROOT/custom/coil47"
+CUSTOM_BOOZER_RUN_DIR="$RUN_ROOT/custom/boozer"
+OPTAX_COIL_RUN_DIR="$RUN_ROOT/optax/coil47"
+mkdir -p "$CUSTOM_COIL_RUN_DIR" "$CUSTOM_BOOZER_RUN_DIR" \
+  "$OPTAX_COIL_RUN_DIR"
 
 MPI4PY_RC_INITIALIZE=0 JAX_PLATFORMS=cuda JAX_ENABLE_X64=true \
 SIMSOPT_BACKEND_MODE=jax_gpu_parity SIMSOPT_BACKEND_STRICT=1 \
@@ -878,29 +1482,29 @@ XLA_PYTHON_CLIENT_ALLOCATOR=platform PYTHONPATH=src:. \
   tests/jax/solve/test_custom_quasi_newton_step_runtime.py \
   tests/benchmarks/test_custom_quasi_newton_runtime.py -m slow
 
-JAX_PLATFORMS=cuda JAX_ENABLE_X64=true \
+MPI4PY_RC_INITIALIZE=0 MPLBACKEND=Agg JAX_PLATFORMS=cuda JAX_ENABLE_X64=true \
 SIMSOPT_BACKEND_MODE=jax_gpu_parity SIMSOPT_BACKEND_STRICT=1 \
 SIMSOPT_PRECISION=fp64 XLA_PYTHON_CLIENT_PREALLOCATE=false \
 XLA_PYTHON_CLIENT_ALLOCATOR=platform PYTHONPATH=src:. \
 .venv-qn-gpu/bin/python benchmarks/custom_quasi_newton_runtime.py \
   --device gpu --intent parity --providers custom \
-  --cases coil47 --output "$CUSTOM_RUN_DIR"
+  --cases coil47 --output "$CUSTOM_COIL_RUN_DIR"
 
-JAX_PLATFORMS=cuda JAX_ENABLE_X64=true \
+MPI4PY_RC_INITIALIZE=0 MPLBACKEND=Agg JAX_PLATFORMS=cuda JAX_ENABLE_X64=true \
 SIMSOPT_BACKEND_MODE=jax_gpu_parity SIMSOPT_BACKEND_STRICT=1 \
 SIMSOPT_PRECISION=fp64 XLA_PYTHON_CLIENT_PREALLOCATE=false \
 XLA_PYTHON_CLIENT_ALLOCATOR=platform PYTHONPATH=src:. \
 .venv-qn-gpu/bin/python benchmarks/custom_quasi_newton_runtime.py \
   --device gpu --intent parity --providers custom \
-  --cases boozer --output "$CUSTOM_RUN_DIR"
+  --cases boozer --output "$CUSTOM_BOOZER_RUN_DIR"
 
-JAX_PLATFORMS=cuda JAX_ENABLE_X64=true \
+MPI4PY_RC_INITIALIZE=0 MPLBACKEND=Agg JAX_PLATFORMS=cuda JAX_ENABLE_X64=true \
 SIMSOPT_BACKEND_MODE=jax_gpu_parity SIMSOPT_BACKEND_STRICT=1 \
 SIMSOPT_PRECISION=fp64 XLA_PYTHON_CLIENT_PREALLOCATE=false \
 XLA_PYTHON_CLIENT_ALLOCATOR=platform PYTHONPATH=src:. \
 .venv-qn-gpu/bin/python benchmarks/custom_quasi_newton_runtime.py \
   --device gpu --intent parity --providers optax \
-  --cases coil47 --output "$OPTAX_RUN_DIR"
+  --cases coil47 --output "$OPTAX_COIL_RUN_DIR"
 ```
 
 The runner must fail before execution unless the requested CPU lane reports
@@ -910,13 +1514,18 @@ closure constants, initialized solver state, step output, and pre-host final
 result is placed on a GPU. Use
 `XLA_PYTHON_CLIENT_PREALLOCATE=false` with
 `XLA_PYTHON_CLIENT_ALLOCATOR=platform` for matched GPU comparisons and record
-both settings in the schema-5 receipt. Transfer-guard checks are a separate
+both settings in the schema-6 receipt. Transfer-guard checks are a separate
 boundary lane: do not enable a global disallow guard for this fixture suite,
 whose setup intentionally constructs device inputs from host literals.
 
 ### Quality and closure
 
 ```bash
+# After the Phase-0 receipt publisher lands:
+PYTHONPATH=src:. .venv-qn-cpu/bin/python \
+  benchmarks/custom_quasi_newton_receipts.py validate-all \
+  --root docs/receipts/custom-quasi-newton
+
 .venv-qn-cpu/bin/pyright --project pyright.custom-quasi-newton.json --warnings
 .venv-qn-cpu/bin/ruff check src/simsopt_jax tests/jax tests/geo benchmarks
 .venv-qn-cpu/bin/ruff format --check src/simsopt_jax tests/jax tests/geo benchmarks
@@ -942,6 +1551,9 @@ archive. This prevents unrelated dirty-tree files from entering the verdict.
 - [ ] Physics cases meet the predeclared gates with durable raw evidence.
 - [ ] Normal execution retains no trajectory and uses only audited host
       boundaries.
+- [ ] Every remaining behavior change and newly found defect has preserved
+      RED -> GREEN -> REFACTOR evidence. The already-implemented core remains
+      explicitly post-hoc and is not granted synthetic historical RED credit.
 - [ ] Focused and broad tests, Pyright, Ruff, formatting, compileall, and clean
       `git diff --check` pass.
 - [ ] Solver architecture docs agree with this plan, and rollback is proven.

@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax import core as jax_public_core
 from jax.extend import core as jax_core
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 
 from simsopt_jax.backend.dtypes import runtime_device_put_tree
+
+_ClosureConsts = tuple[jax.Array, ...]
+_ValueAndGrad = Callable[[jax.Array], tuple[jax.Array, jax.Array]]
+_ConvertedValueAndGrad = Callable[
+    [jax.Array, _ClosureConsts],
+    tuple[jax.Array, jax.Array],
+]
 
 
 def closure_converted_array_function(function, example_x):
@@ -30,7 +40,10 @@ def closure_converted_array_function(function, example_x):
     return function_from_jaxpr, function_consts
 
 
-def closure_converted_value_and_grad(value_and_grad, example_x):
+def closure_converted_value_and_grad(
+    value_and_grad: _ValueAndGrad,
+    example_x: jax.Array,
+) -> tuple[_ConvertedValueAndGrad, _ClosureConsts]:
     """Return a pure program and its explicit closed-over array operands."""
 
     def coerce_result(x):
@@ -95,8 +108,16 @@ def _const_leaf_placement(reference_placement, leaf):
     return NamedSharding(reference_placement.mesh, P())
 
 
-def device_put_closure_consts(value_and_grad_consts, example_x):
+def device_put_closure_consts(
+    value_and_grad_consts: _ClosureConsts,
+    example_x: jax.Array,
+) -> _ClosureConsts:
     """Place closure operands with shardings compatible with the decision vector."""
+    if isinstance(example_x, jax_public_core.Tracer):
+        # A traced caller owns the surrounding device placement.  Reading
+        # ``sharding`` from a tracer is invalid, and embedding these explicit
+        # jaxpr constants lets the enclosing JIT place them with the solve.
+        return value_and_grad_consts
     reference_placement = (
         example_x.sharding
         if isinstance(example_x, jax.Array)

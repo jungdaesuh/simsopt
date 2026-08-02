@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "receipt_id": "compile-design-ab",
+  "case": {
+    "objective": "deterministic_quadratic",
+    "dimension": 47,
+    "dtype": "float64",
+    "maxcor": 10,
+    "maxiter": 2,
+    "maxfun": 20,
+    "device": "cpu"
+  },
+  "candidate_head": "9c64c2ef6cee45eb7eb1989bd5a41e2adf8bfc26",
+  "candidate_worktree_dirty": true,
+  "environment_lock": "benchmarks/environments/custom_quasi_newton_cpu.txt",
+  "environment_lock_sha256": "c1916991fd549448c70fbd00dda11f4f8c2186519db4600aa02bd4d27e3ce963",
+  "design_a_old_generic": {
+    "kernel": "old_generic_step_to_next_observable",
+    "include_legacy_kernels": true,
+    "exit_code": 124,
+    "watchdog": "120-second timeout",
+    "elapsed_seconds": 120.48,
+    "max_rss_kib": 1676884,
+    "final_payload_written": false,
+    "last_progress_event": "lower_start"
+  },
+  "design_b_specialized": {
+    "kernel": "step_from_start_to_next_observable",
+    "include_legacy_kernels": false,
+    "exit_code": 0,
+    "elapsed_seconds": 10.35,
+    "max_rss_kib": 420228,
+    "lower_seconds": 2.370749910012819,
+    "stablehlo_text_bytes": 1180046,
+    "stablehlo_text_lines": 14233,
+    "jaxpr_text_bytes": 1434487,
+    "jaxpr_text_lines": 22254,
+    "final_payload_written": true
+  },
+  "comparison": {
+    "same_objective": true,
+    "same_dimension": true,
+    "same_maxcor": true,
+    "same_budget": true,
+    "design_b_completed_within_watchdog": true,
+    "design_a_completed_within_watchdog": false,
+    "specialized_peak_rss_ratio_to_old_observed": 0.25059850268817204,
+    "decision": "design_b_controls compile graph size and memory enough to continue the solver refactor; no objective-specific plan is required from this quadratic isolation"
+  },
+  "verdict": "diagnostic-pass-not-promotion"
+}

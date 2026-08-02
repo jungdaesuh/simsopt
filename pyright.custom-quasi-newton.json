@@ -1,0 +1,22 @@
+{
+  "include": [
+    "src/simsopt_jax/geo/optimizers/private/_step_runtime.py",
+    "src/simsopt_jax/geo/optimizers/private/_bfgs.py",
+    "src/simsopt_jax/geo/optimizers/private/_lbfgs.py",
+    "benchmarks/custom_quasi_newton_runtime.py",
+    "benchmarks/fixtures/custom_quasi_newton.py",
+    "tests/jax/solve/test_custom_quasi_newton_step_runtime.py",
+    "benchmarks/lbfgs_compile_root_cause_matrix.py",
+    "tests/test_lbfgs_compile_root_cause_matrix.py"
+  ],
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": ["src"]
+    }
+  ],
+  "venvPath": ".",
+  "venv": ".venv-qn-cpu",
+  "typeCheckingMode": "strict",
+  "reportMissingTypeStubs": false
+}

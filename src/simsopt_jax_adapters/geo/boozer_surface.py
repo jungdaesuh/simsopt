@@ -1207,8 +1207,12 @@ def _surface_clamped_dims(
     return clamped_dims
 
 
-def build_boozer_surface_runtime_state(surface) -> _BoozerSurfaceRuntimeState:
-    """Snapshot the immutable surface metadata required by JAX Boozer solves."""
+def build_boozer_surface_runtime_state(
+    surface,
+    *,
+    include_exact_mask: bool = True,
+) -> _BoozerSurfaceRuntimeState:
+    """Snapshot immutable surface metadata for the selected Boozer solve lane."""
     quadpoints_phi = np.asarray(surface.quadpoints_phi, dtype=np.float64)
     quadpoints_theta = np.asarray(surface.quadpoints_theta, dtype=np.float64)
     surface_kind = _surface_geometry_kind(surface)
@@ -1223,7 +1227,7 @@ def build_boozer_surface_runtime_state(surface) -> _BoozerSurfaceRuntimeState:
             surface.ntor,
         )
         scatter_indices = _as_jax_int32(scatter_indices_host)
-    if surface_kind == "xyztensorfourier":
+    if include_exact_mask and surface_kind == "xyztensorfourier":
         exact_mask_indices_host = stellsym_mask_indices_for_grid_host(
             mpol=surface.mpol,
             ntor=surface.ntor,
@@ -4569,13 +4573,21 @@ class BoozerSurfaceJAX(Optimizable):
         runtime_state = (
             surface_runtime_state
             if surface_runtime_state is not None
-            else build_boozer_surface_runtime_state(surface)
+            else build_boozer_surface_runtime_state(
+                surface,
+                include_exact_mask=self.boozer_type == "exact",
+            )
         )
         label_surface = label.surface
         label_runtime_state = (
             runtime_state
             if label_surface is surface
-            else build_boozer_surface_runtime_state(label_surface)
+            else build_boozer_surface_runtime_state(
+                label_surface,
+                # Exact KKT masking applies to the optimized surface grid,
+                # not to an independently quadratured label surface.
+                include_exact_mask=False,
+            )
         )
 
         # --- Extract immutable surface metadata once; keep DOFs cached locally ---
@@ -4614,6 +4626,8 @@ class BoozerSurfaceJAX(Optimizable):
         self._reference_penalty_value_and_grad_cache = {}
         self._reference_penalty_residual_cache = {}
         self._reference_exact_residual_cache = {}
+        self._traceable_penalty_objective_cache = {}
+        self._traceable_penalty_residual_cache = {}
         self._kernel_bundle_cache = {}
         self._coil_set_static_signature = None
 
@@ -6235,6 +6249,10 @@ class BoozerSurfaceJAX(Optimizable):
             weight_inv_modB,
             resolved_constraint_weight,
         )
+        objective_fn = self._traceable_penalty_objective_cache.get(key)
+        if objective_fn is not None:
+            return objective_fn
+
         surface_args = self._traceable_surface_runtime_args()
 
         def objective_fn(x, coil_set_spec):
@@ -6250,10 +6268,12 @@ class BoozerSurfaceJAX(Optimizable):
             )
 
         objective_fn = _mark_cacheable_jit_value_and_grad(objective_fn)
-        return _mark_traceable_runner_cacheable(
+        objective_fn = _mark_traceable_runner_cacheable(
             objective_fn,
             cache_token=("boozer-traceable-penalty-objective", key),
         )
+        self._traceable_penalty_objective_cache[key] = objective_fn
+        return objective_fn
 
     def _get_traceable_penalty_residual(
         self,
@@ -6267,6 +6287,10 @@ class BoozerSurfaceJAX(Optimizable):
             weight_inv_modB,
             resolved_constraint_weight,
         )
+        residual_fn = self._traceable_penalty_residual_cache.get(key)
+        if residual_fn is not None:
+            return residual_fn
+
         surface_args = self._traceable_surface_runtime_args()
 
         def residual_fn(x, coil_set_spec):
@@ -6281,10 +6305,12 @@ class BoozerSurfaceJAX(Optimizable):
                 **surface_args,
             )
 
-        return _mark_traceable_runner_cacheable(
+        residual_fn = _mark_traceable_runner_cacheable(
             residual_fn,
             cache_token=("boozer-traceable-penalty-residual", key),
         )
+        self._traceable_penalty_residual_cache[key] = residual_fn
+        return residual_fn
 
     def _get_penalty_kernel_bundle(
         self,
@@ -8042,10 +8068,21 @@ class BoozerSurfaceJAX(Optimizable):
     def _compute_stellsym_mask_indices(self):
         """Return exact-residual indices captured at the host setup boundary."""
         if self._exact_mask_indices is None:
-            raise RuntimeError(
-                "Exact Boozer mask indices are unavailable for this surface runtime "
-                "state. Build it from a SurfaceXYZTensorFourier host surface."
+            if not _is_exact_surface_xyz_tensor_fourier(self._surface_geometry_kind):
+                raise RuntimeError(
+                    "Exact Boozer mask indices are unavailable for this surface "
+                    "runtime state. Build it from a SurfaceXYZTensorFourier host "
+                    "surface."
+                )
+            mask_indices_host = stellsym_mask_indices_for_grid_host(
+                mpol=self.mpol,
+                ntor=self.ntor,
+                nfp=self.nfp,
+                stellsym=self.stellsym,
+                quadpoints_phi=np.asarray(self.quadpoints_phi),
+                quadpoints_theta=np.asarray(self.quadpoints_theta),
             )
+            self._exact_mask_indices = _as_jax_int32(mask_indices_host)
         return self._exact_mask_indices
 
     def solve_residual_equation_exactly_newton(

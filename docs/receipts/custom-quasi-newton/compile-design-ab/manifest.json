@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "receipt_id": "compile-design-ab",
+  "kind": "physical-compile-design-comparison",
+  "case": "deterministic_quadratic",
+  "candidate_commit": "9c64c2ef6cee45eb7eb1989bd5a41e2adf8bfc26",
+  "candidate_worktree_clean": false,
+  "environment": {
+    "lock_path": "benchmarks/environments/custom_quasi_newton_cpu.txt",
+    "lock_sha256": "c1916991fd549448c70fbd00dda11f4f8c2186519db4600aa02bd4d27e3ce963",
+    "device": "cpu",
+    "dtype": "float64",
+    "jax_version": "0.10.0",
+    "jax_backend": "cpu"
+  },
+  "commands": {
+    "design_a": "timeout 120 .venv-qn-cpu/bin/python benchmarks/lbfgs_ondevice_compile_shape.py --objective quadratic --dimension 47 --maxcor 10 --maxiter 2 --kernel old_generic_step_to_next_observable --include-legacy-kernels --skip-runtime-compile --progress-json raw/old-generic.progress.json",
+    "design_b": "timeout 120 .venv-qn-cpu/bin/python benchmarks/lbfgs_ondevice_compile_shape.py --objective quadratic --dimension 47 --maxcor 10 --maxiter 2 --kernel step_from_start_to_next_observable --skip-runtime-compile --progress-json raw/specialized.progress.json"
+  },
+  "exit_codes": {
+    "design_a": 124,
+    "design_b": 0
+  },
+  "artifacts": [
+    {
+      "path": "raw/old-generic.progress.json",
+      "sha256": "0353fcc6684c40cdbada79b5cd95150d1ea95c2693a44eb912300311ccf2da27"
+    },
+    {
+      "path": "raw/old-generic.time",
+      "sha256": "6a062a978a4f8e304f9ad5f1733f8d20aded9756aa5001b27616bddf4b4186a7"
+    },
+    {
+      "path": "raw/specialized.json",
+      "sha256": "cdb8398f6ae7f7609aefc0ac7d621bc733ac8f781ecf55bcfb06580f2c2cbe98"
+    },
+    {
+      "path": "raw/specialized.progress.json",
+      "sha256": "6bf49b42f5f010190fdda00da8c685e4aa5c039066787c0fef234a49de610990"
+    },
+    {
+      "path": "raw/specialized.time",
+      "sha256": "651bc17031a353f57300d08af750a59bb221d91cadf33ead44f5d312f5ef819a"
+    },
+    {
+      "path": "metrics.json",
+      "sha256": "a94bb10fa94ff3d2454e02e75fab094ba72a5af8341bfb020664a0717059ef76"
+    }
+  ],
+  "archive_uri": "repo://docs/receipts/custom-quasi-newton/compile-design-ab/",
+  "verdict": "diagnostic-pass-not-promotion",
+  "limitations": [
+    "candidate checkout was dirty",
+    "comparison isolates optimizer compile structure with a deterministic quadratic, not a physical coil objective",
+    "CPU-only evidence; no GPU/A100 qualification",
+    "design A produced no final lowering payload because it timed out"
+  ]
+}

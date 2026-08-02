@@ -1,0 +1,38 @@
+{
+  "archive_uri": "repo://.artifacts/custom-quasi-newton-archive/coil47-custom-optax-cpu-maxiter20-prepared-both-20260802",
+  "artifacts": [
+    {
+      "path": "metrics.json",
+      "sha256": "edb61850e52bcb1ef0a8b269c2acee179ef8f6e4e2091d14d4c1fe61a2089410"
+    },
+    {
+      "path": "raw/qn-coil-prepared-8ITbjh/custom/measurements.json",
+      "sha256": "dd7cab91a92baadfe64629f58fda04d9aed56d9940fa2412d602395ebfb0545c"
+    },
+    {
+      "path": "raw/qn-coil-prepared-8ITbjh/measurements.json",
+      "sha256": "505bd64bdc3316369d45ece1ce918367c6eefe7da3f08085b3572e3d99fdd852"
+    },
+    {
+      "path": "raw/qn-coil-prepared-8ITbjh/optax/measurements.json",
+      "sha256": "ac42ac21ec97046a319120844d722198ef2889efc1fb09f558bb83df3b038748"
+    },
+    {
+      "path": "summary.md",
+      "sha256": "cf7ef609437b2461843eb1f73885c5b79a71da07685ebf7c7f767e544ebb329f"
+    }
+  ],
+  "candidate_commit": "9c64c2ef6cee45eb7eb1989bd5a41e2adf8bfc26",
+  "candidate_worktree_clean": false,
+  "environment_lock": {
+    "path": "benchmarks/environments/custom_quasi_newton_cpu.lock.txt",
+    "sha256": "159e05a65796e76dfb502ea4f6a06b1f412af1c7bb147bb5ac5974b5888a6b35"
+  },
+  "kind": "custom-quasi-newton-runner",
+  "receipt_id": "coil47-custom-optax-cpu-maxiter20-prepared-both-20260802",
+  "schema_version": 1,
+  "source_runs": [
+    "qn-coil-prepared-8ITbjh"
+  ],
+  "verdict": "diagnostic-pass-not-promotion"
+}

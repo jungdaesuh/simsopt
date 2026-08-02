@@ -2,6 +2,8 @@
 
 from .contracts import (
     Driver,
+    HessianInverse,
+    InverseHessianOperator,
     OptimizerCallbackEvent,
     OptimizerResult,
     OptimizerResultFingerprint,
@@ -38,6 +40,8 @@ from .simsopt import (
 
 __all__ = [
     "Driver",
+    "HessianInverse",
+    "InverseHessianOperator",
     "LinearSolver",
     "OptaxAdamOptions",
     "OptaxAdamCallbackEvent",

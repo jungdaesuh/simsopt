@@ -1,18 +1,20 @@
 import numpy as np
-from scipy.optimize import OptimizeResult
+from typing import cast
 
 import simsopt_jax.geo.optimizers.optimizer as legacy_optimizer
-import simsopt_jax.solve.dispatch as dispatch
-from simsopt_jax.solve.dispatch import least_squares, minimize
+from scipy.optimize import OptimizeResult
 from simsopt_jax.solve import (
     Driver,
+    InverseHessianOperator,
     OptaxLBFGSOptions,
     SimsoptBFGSCallbackEvent,
     SimsoptBFGSOptions,
     SimsoptLBFGSBOptions,
     SimsoptLMGMRESCallbackEvent,
     SimsoptLMGMRESOptions,
+    dispatch,
 )
+from simsopt_jax.solve.dispatch import least_squares, minimize
 
 
 def _fake_result():
@@ -213,6 +215,40 @@ def test_simsopt_lbfgsb_default_maxcor_matches_ondevice_history_default(monkeypa
     assert SimsoptLBFGSBOptions().maxcor == 10
     assert captured["method"] == "lbfgs-ondevice"
     assert captured["options"]["maxcor"] == 10
+
+
+def test_simsopt_lbfgsb_public_result_preserves_inverse_hessian_operator(monkeypatch):
+    from scipy.optimize._lbfgsb_py import LbfgsInvHessProduct
+
+    s_history = np.asarray([[1.0, 0.0]], dtype=np.float64)
+    y_history = np.asarray([[2.0, 0.0]], dtype=np.float64)
+    inverse_hessian = LbfgsInvHessProduct(s_history, y_history)
+
+    def target_minimize(*_args, **_kwargs):
+        return OptimizeResult(
+            x=np.zeros(2, dtype=np.float64),
+            fun=0.0,
+            jac=np.zeros(2, dtype=np.float64),
+            nit=1,
+            nfev=1,
+            njev=1,
+            status=0,
+            success=True,
+            message="ok",
+            hess_inv=inverse_hessian,
+        )
+
+    monkeypatch.setattr(legacy_optimizer, "target_minimize", target_minimize)
+
+    result = minimize(_value_and_grad, np.zeros(2), driver=Driver.SIMSOPT_LBFGSB)
+
+    public_inverse_hessian = cast(InverseHessianOperator, result.hess_inv)
+    assert public_inverse_hessian is inverse_hessian
+    assert result.hessian is None
+    np.testing.assert_allclose(
+        public_inverse_hessian(np.asarray([1.0, 0.0], dtype=np.float64)),
+        inverse_hessian(np.asarray([1.0, 0.0], dtype=np.float64)),
+    )
 
 
 def test_optax_lbfgs_default_memory_size_matches_upstream_optax(monkeypatch):

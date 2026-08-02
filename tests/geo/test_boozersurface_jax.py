@@ -22,15 +22,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from simsopt_jax.geo.optimizers import (
-    adjoint_linear_solve as _adjoint_linear_solve,
-    linear_solve as _linear_solve,
-)
-import simsopt_jax.geo.optimizers.reference as _opt_ref
-import simsopt_jax.core.biotsavart as _biotsavart_jax_core
-import simsopt_jax.solve.dispatch as _solve_jax_dispatch
 import scipy.linalg
-from jax.flatten_util import ravel_pytree
+import simsopt_jax.core.biotsavart as _biotsavart_jax_core
+import simsopt_jax.geo.optimizers.reference as _opt_ref
+import simsopt_jax.solve.dispatch as _solve_jax_dispatch
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 from conftest import (
     assert_array_on_device,
@@ -39,11 +34,11 @@ from conftest import (
     enable_strict_jax_backend,
     parity_device,
 )
+from jax.flatten_util import ravel_pytree
 from simsopt.field.coil import Coil, Current
 from simsopt.geo.boozersurface import BoozerSurface as LegacyBoozerSurface
-from simsopt_jax_adapters.geo._boozersurface_current_guard import (
-    guard_none_G_coil_gradient_callback,
-)
+from simsopt.geo.curvexyzfourier import CurveXYZFourier
+from simsopt.objectives.utilities import forward_backward
 from simsopt_jax.core import (
     GroupedCoilSetSpec,
     grouped_coil_set_spec_from_lists,
@@ -51,8 +46,17 @@ from simsopt_jax.core import (
     make_current_value_spec,
     make_curve_xyzfourier_spec,
 )
-from simsopt.geo.curvexyzfourier import CurveXYZFourier
-from simsopt.objectives.utilities import forward_backward
+from simsopt_jax.geo.optimizers import (
+    adjoint_linear_solve as _adjoint_linear_solve,
+)
+from simsopt_jax.geo.optimizers import (
+    linear_solve as _linear_solve,
+)
+from simsopt_jax.geo.optimizers.single_stage_routing import (
+    resolve_boozer_limited_memory,
+    resolve_boozer_optimizer_backend,
+    resolve_boozer_optimizer_method,
+)
 from simsopt_jax.solve import (
     Driver,
     ScipyBFGSOptions,
@@ -61,29 +65,26 @@ from simsopt_jax.solve import (
     SimsoptLBFGSBOptions,
 )
 from simsopt_jax.solve.dispatch import minimize
-from simsopt_jax.geo.optimizers.single_stage_routing import (
-    resolve_boozer_limited_memory,
-    resolve_boozer_optimizer_backend,
-    resolve_boozer_optimizer_method,
+from simsopt_jax_adapters.geo._boozersurface_current_guard import (
+    guard_none_G_coil_gradient_callback,
 )
 
 from .boozersurface_jax_test_helpers import (
+    UPSTREAM_BOOZER_OPTIMIZE_G,
+    UPSTREAM_BOOZER_STELLSYM,
+    UPSTREAM_BOOZER_SURFACE_TYPES,
     BoozerSurfaceJAX,
-    _MockBiotSavart,
-    _MockCoil,
-    _MockSurface,
-    _PlumbingVolumeLabel,
     _bsj,
     _build_penalty_problem,
-    _build_upstream_boozer_pair,
     _build_upstream_boozer_exact_constraints_case,
-    _ensure_solved_jax,
     _build_upstream_boozer_immutable_inputs,
+    _build_upstream_boozer_pair,
     _build_upstream_boozer_penalty_case,
+    _build_upstream_exact_surface_case,
+    _ensure_solved_jax,
     _evaluate_upstream_boozer_exact_constraints_case,
     _evaluate_upstream_boozer_penalty_case,
     _evaluate_upstream_boozer_penalty_hessian_case,
-    _build_upstream_exact_surface_case,
     _extract_upstream_jax_penalty_inputs,
     _make_circular_coil,
     _make_mixed_quad_mock_coils,
@@ -91,8 +92,12 @@ from .boozersurface_jax_test_helpers import (
     _make_mock_coils,
     _make_simple_torus_coeffs,
     _mock_linear_solve_status,
+    _MockBiotSavart,
+    _MockCoil,
+    _MockSurface,
     _opt,
     _patch_newton_polish_runner,
+    _PlumbingVolumeLabel,
     _simple_torus_geometry_values,
     _successful_minimize_result,
     _successful_newton_polish_result,
@@ -101,22 +106,18 @@ from .boozersurface_jax_test_helpers import (
     biot_savart_dA_by_dX,
     compute_G_from_currents,
     dofs_to_xyzc,
-    jax_minimize,
     jax_least_squares,
+    jax_minimize,
     newton_exact,
     newton_polish,
     require_target_backend_x64,
     resolve_least_squares_optimizer_method,
     resolve_optimizer_backend_method,
+    stellsym_scatter_indices,
     surface_gamma,
     surface_gammadash1,
     surface_gammadash2,
-    stellsym_scatter_indices,
-    UPSTREAM_BOOZER_OPTIMIZE_G,
-    UPSTREAM_BOOZER_STELLSYM,
-    UPSTREAM_BOOZER_SURFACE_TYPES,
 )
-
 
 _TORUS_GEOMETRY_RTOL = 1e-13
 _ROSENBROCK_SOLUTION_ATOL = 1e-8
@@ -1216,6 +1217,26 @@ def _restore_backend_config(config):
     )
 
 
+def _select_native_cpu_reference_backend():
+    """Select the explicit host reference lane for SciPy adapter tests."""
+    from simsopt_jax.backend import set_backend
+
+    set_backend("native_cpu", configure_runtime=False)
+
+
+@contextmanager
+def _native_cpu_reference_context():
+    """Temporarily allow host-controlled reference solver paths in tests."""
+    from simsopt_jax.backend import get_backend_config
+
+    previous_backend = get_backend_config()
+    _select_native_cpu_reference_backend()
+    try:
+        yield
+    finally:
+        _restore_backend_config(previous_backend)
+
+
 def _target_lane_rejection_pattern(
     component: str, method: str, backend_mode: str
 ) -> str:
@@ -1587,7 +1608,11 @@ class TestOptimizerAdapter:
         assert captured["callback"] is None  # no callback in this call
 
     def test_scipy_bfgs_strips_limited_memory_and_callback_options(self, monkeypatch):
-        """CPU-parity BFGS exposes the exact SciPy call contract."""
+        """The native-CPU reference lane exposes the exact SciPy call contract."""
+        from simsopt_jax.backend import get_backend_config, set_backend
+
+        previous_backend = get_backend_config()
+        set_backend("native_cpu", configure_runtime=False)
         captured = {}
         callback_marker = object()
         progress_marker = object()
@@ -1615,24 +1640,27 @@ class TestOptimizerAdapter:
                 message="Optimization terminated successfully.",
             )
 
-        monkeypatch.setattr(_opt_ref, "scipy_minimize", fake_scipy_minimize)
-        result = _opt_ref._scipy_minimize(
-            lambda x: jnp.sum((x - 1.0) ** 2),
-            jnp.array([0.0, 2.0], dtype=jnp.float64),
-            method="bfgs",
-            tol=1e-8,
-            maxiter=7,
-            options={
-                "callback": callback_marker,
-                "progress_callback": progress_marker,
-                "failure_callback": failure_marker,
-                "maxcor": 33,
-                "ftol": 1e-12,
-                "maxfun": 55,
-                "maxls": 66,
-                "record_scipy_callback_trace": True,
-            },
-        )
+        try:
+            monkeypatch.setattr(_opt_ref, "scipy_minimize", fake_scipy_minimize)
+            result = _opt_ref._scipy_minimize(
+                lambda x: jnp.sum((x - 1.0) ** 2),
+                jnp.array([0.0, 2.0], dtype=jnp.float64),
+                method="bfgs",
+                tol=1e-8,
+                maxiter=7,
+                options={
+                    "callback": callback_marker,
+                    "progress_callback": progress_marker,
+                    "failure_callback": failure_marker,
+                    "maxcor": 33,
+                    "ftol": 1e-12,
+                    "maxfun": 55,
+                    "maxls": 66,
+                    "record_scipy_callback_trace": True,
+                },
+            )
+        finally:
+            _restore_backend_config(previous_backend)
 
         assert captured["method"] == "BFGS"
         assert captured["options"] == {"maxiter": 7, "gtol": 1e-8}
@@ -1734,14 +1762,21 @@ class TestOptimizerAdapter:
         x0 = jnp.array([0.0, 2.0], dtype=jnp.float64)
         adapter = getattr(_opt_ref, adapter_name)
 
-        result = adapter(
-            objective_fn,
-            x0,
-            method="lbfgs",
-            tol=1e-8,
-            maxiter=3,
-            options={"maxcor": 7},
-        )
+        from simsopt_jax.backend import get_backend_config
+
+        previous_backend = get_backend_config()
+        _select_native_cpu_reference_backend()
+        try:
+            result = adapter(
+                objective_fn,
+                x0,
+                method="lbfgs",
+                tol=1e-8,
+                maxiter=3,
+                options={"maxcor": 7},
+            )
+        finally:
+            _restore_backend_config(previous_backend)
 
         assert captured["x0_type"] is np.ndarray
         assert captured["x0_dtype"] == np.dtype(jnp.float64)
@@ -1763,15 +1798,22 @@ class TestOptimizerAdapter:
         monkeypatch.setattr(_opt_ref, "scipy_minimize", fake_scipy_minimize)
         x0 = jnp.array([0.0, 2.0], dtype=jnp.float64)
 
-        with pytest.raises(ValueError, match="scalar shape"):
-            _opt_ref._scipy_minimize_value_and_grad(
-                lambda x: (jnp.ones((1,), dtype=x.dtype), jnp.ones_like(x)),
-                x0,
-                method="bfgs",
-                tol=1e-8,
-                maxiter=3,
-                options={},
-            )
+        from simsopt_jax.backend import get_backend_config
+
+        previous_backend = get_backend_config()
+        _select_native_cpu_reference_backend()
+        try:
+            with pytest.raises(ValueError, match="scalar shape"):
+                _opt_ref._scipy_minimize_value_and_grad(
+                    lambda x: (jnp.ones((1,), dtype=x.dtype), jnp.ones_like(x)),
+                    x0,
+                    method="bfgs",
+                    tol=1e-8,
+                    maxiter=3,
+                    options={},
+                )
+        finally:
+            _restore_backend_config(previous_backend)
 
     @pytest.mark.parametrize(
         "method",
@@ -2050,16 +2092,23 @@ class TestOptimizerAdapter:
             return float(0.5 * np.dot(x, x)), np.asarray(x, dtype=np.float64)
 
         x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
-        result = _opt.reference_minimize(
-            explicit_quad,
-            x0,
-            method="lbfgs-trace",
-            tol=1e-10,
-            maxiter=3,
-            options={"ftol": 0.0, "initial_step_size": 1.0},
-            value_and_grad=True,
-            initial_value_and_grad=explicit_quad(np.asarray(x0)),
-        )
+        from simsopt_jax.backend import get_backend_config
+
+        previous_backend = get_backend_config()
+        _select_native_cpu_reference_backend()
+        try:
+            result = _opt.reference_minimize(
+                explicit_quad,
+                x0,
+                method="lbfgs-trace",
+                tol=1e-10,
+                maxiter=3,
+                options={"ftol": 0.0, "initial_step_size": 1.0},
+                value_and_grad=True,
+                initial_value_and_grad=explicit_quad(np.asarray(x0)),
+            )
+        finally:
+            _restore_backend_config(previous_backend)
 
         assert result.success is True
         assert int(result.status) == 0
@@ -2082,22 +2131,29 @@ class TestOptimizerAdapter:
             return jnp.sum((x - 1.0) ** 2)
 
         x0 = jnp.array([0.0, 2.0], dtype=jnp.float64)
-        _opt_ref._scipy_minimize(
-            quad,
-            x0,
-            method="lbfgs",
-            tol=1e-8,
-            maxiter=1,
-            options={},
-        )
-        _opt_ref._scipy_minimize(
-            quad,
-            x0,
-            method="lbfgs",
-            tol=1e-8,
-            maxiter=1,
-            options={},
-        )
+        from simsopt_jax.backend import get_backend_config
+
+        previous_backend = get_backend_config()
+        _select_native_cpu_reference_backend()
+        try:
+            _opt_ref._scipy_minimize(
+                quad,
+                x0,
+                method="lbfgs",
+                tol=1e-8,
+                maxiter=1,
+                options={},
+            )
+            _opt_ref._scipy_minimize(
+                quad,
+                x0,
+                method="lbfgs",
+                tol=1e-8,
+                maxiter=1,
+                options={},
+            )
+        finally:
+            _restore_backend_config(previous_backend)
 
         assert state["jit_call_count"] == 2
 
@@ -2110,7 +2166,8 @@ class TestOptimizerAdapter:
             return 0.5 * x @ A @ x - b @ x
 
         x0 = jnp.zeros(2)
-        result = newton_polish(obj, x0, maxiter=5, tol=1e-14)
+        with _native_cpu_reference_context():
+            result = newton_polish(obj, x0, maxiter=5, tol=1e-14)
         x_exact = jnp.linalg.solve(A, b)
         np.testing.assert_allclose(result["x"], x_exact, atol=1e-12)
         assert result["success"]
@@ -2135,7 +2192,13 @@ class TestOptimizerAdapter:
         monkeypatch.setattr(_opt, "_hessian_vector_product_fn", fake_hvp_fn)
         monkeypatch.setattr(_opt, "_gmres_solve_newton_system", fake_gmres)
 
-        result = newton_polish(obj, jnp.array([1.0]), maxiter=1, tol=1e-12)
+        with _native_cpu_reference_context():
+            result = newton_polish(
+                obj,
+                jnp.array([1.0]),
+                maxiter=1,
+                tol=1e-12,
+            )
 
         assert len(calls) == 2
         np.testing.assert_allclose(result["x"], np.array([0.0]), atol=1e-12)
@@ -2240,13 +2303,14 @@ class TestOptimizerAdapter:
         monkeypatch.setattr(_opt, "_gmres_solve_newton_system", forbid_gmres)
         monkeypatch.setattr(_opt, "_materialize_dense_hessian", record_materialize)
 
-        result = newton_polish(
-            obj,
-            jnp.zeros(2, dtype=jnp.float64),
-            maxiter=1,
-            tol=1e-14,
-            dense_newton_steps=True,
-        )
+        with _native_cpu_reference_context():
+            result = newton_polish(
+                obj,
+                jnp.zeros(2, dtype=jnp.float64),
+                maxiter=1,
+                tol=1e-14,
+                dense_newton_steps=True,
+            )
 
         np.testing.assert_allclose(
             result["x"],
@@ -2295,12 +2359,12 @@ class TestOptimizerAdapter:
         """
         from simsopt_jax_adapters.geo.boozer_surface import (
             EXACT_FACTORIZATION_BACKEND,
+            SOLVE_QUALITY_EXACT_FIELDS,
+            SOLVE_QUALITY_LS_FIELDS,
             _dense_residual_jacobian_condition_estimate_or_none,
             _ls_factorization_backend,
             _ls_hessian_symmetry_rel,
             _none_solve_quality_fields,
-            SOLVE_QUALITY_EXACT_FIELDS,
-            SOLVE_QUALITY_LS_FIELDS,
         )
 
         assert _ls_hessian_symmetry_rel(None) is None
@@ -2398,7 +2462,13 @@ class TestOptimizerAdapter:
 
         self._patch_newton_polish_linear_step(monkeypatch, [10.0], [0.0])
 
-        result = newton_polish(obj, jnp.array([1.0]), maxiter=1, tol=1e-12)
+        with _native_cpu_reference_context():
+            result = newton_polish(
+                obj,
+                jnp.array([1.0]),
+                maxiter=1,
+                tol=1e-12,
+            )
 
         np.testing.assert_allclose(result["x"], np.array([-0.25]), atol=1e-12)
         np.testing.assert_allclose(result["grad"], np.array([-0.25]), atol=1e-12)
@@ -2413,13 +2483,14 @@ class TestOptimizerAdapter:
 
         self._patch_newton_polish_linear_step(monkeypatch, [0.2], [0.0])
 
-        result = newton_polish(
-            obj,
-            jnp.array([1.0], dtype=jnp.float64),
-            maxiter=1,
-            tol=1e-12,
-            materialize_hessian=False,
-        )
+        with _native_cpu_reference_context():
+            result = newton_polish(
+                obj,
+                jnp.array([1.0], dtype=jnp.float64),
+                maxiter=1,
+                tol=1e-12,
+                materialize_hessian=False,
+            )
 
         np.testing.assert_allclose(result["x"], np.array([0.9]), atol=1e-12)
         assert np.isfinite(float(result["fun"]))
@@ -2439,13 +2510,14 @@ class TestOptimizerAdapter:
             [0.0, 0.0],
         )
 
-        result = newton_polish(
-            obj,
-            jnp.zeros(2, dtype=jnp.float64),
-            maxiter=1,
-            tol=1e-12,
-            materialize_hessian=False,
-        )
+        with _native_cpu_reference_context():
+            result = newton_polish(
+                obj,
+                jnp.zeros(2, dtype=jnp.float64),
+                maxiter=1,
+                tol=1e-12,
+                materialize_hessian=False,
+            )
 
         assert result["nit"] == 0
         assert not result["success"]
@@ -2477,13 +2549,14 @@ class TestOptimizerAdapter:
             fake_materialize_dense_hessian,
         )
 
-        result = newton_polish(
-            obj,
-            jnp.asarray([1.0]),
-            maxiter=5,
-            tol=1e-12,
-            materialize_hessian=False,
-        )
+        with _native_cpu_reference_context():
+            result = newton_polish(
+                obj,
+                jnp.asarray([1.0]),
+                maxiter=5,
+                tol=1e-12,
+                materialize_hessian=False,
+            )
 
         np.testing.assert_allclose(result["x"], np.asarray([1.0]), atol=1e-12)
         np.testing.assert_allclose(result["grad"], np.asarray([1.0]), atol=1e-12)
@@ -2501,7 +2574,8 @@ class TestOptimizerAdapter:
             return A @ x - b
 
         x0 = jnp.zeros(2)
-        result = newton_exact(residual, x0, maxiter=5, tol=1e-14)
+        with _native_cpu_reference_context():
+            result = newton_exact(residual, x0, maxiter=5, tol=1e-14)
         x_exact = jnp.linalg.solve(A, b)
         np.testing.assert_allclose(result["x"], x_exact, atol=1e-12)
         np.testing.assert_allclose(result["jacobian"], np.asarray(A), atol=1e-12)
@@ -2522,7 +2596,8 @@ class TestOptimizerAdapter:
         def residual(x):
             return A @ x - b
 
-        result = newton_exact(residual, jnp.zeros(2), maxiter=5, tol=1e-14)
+        with _native_cpu_reference_context():
+            result = newton_exact(residual, jnp.zeros(2), maxiter=5, tol=1e-14)
 
         assert len(dense_calls) == 1
         np.testing.assert_allclose(result["x"], x_exact)
@@ -2579,13 +2654,14 @@ class TestOptimizerAdapter:
         def residual(x):
             return A @ x - b
 
-        result = newton_exact(
-            residual,
-            jnp.zeros(2),
-            maxiter=5,
-            tol=1e-14,
-            max_dense_jacobian_bytes=8,
-        )
+        with _native_cpu_reference_context():
+            result = newton_exact(
+                residual,
+                jnp.zeros(2),
+                maxiter=5,
+                tol=1e-14,
+                max_dense_jacobian_bytes=8,
+            )
 
         assert not materialize_calls
         assert result["jacobian"] is None
@@ -2639,6 +2715,7 @@ class TestOptimizerAdapter:
             transpose_solve,
             size=2,
             dtype=jnp.float64,
+            placement_reference=jnp.zeros(2, dtype=jnp.float64),
             iterations=3,
         )
 
@@ -2673,8 +2750,8 @@ class TestOptimizerAdapter:
         )
 
     def test_eisenstat_walker_tolerance_preserves_strict_newton_cap(self):
-        """Phase 5 forcing must not loosen the established Newton solve cap."""
-        norm = jnp.asarray(8.0, dtype=jnp.float64)
+        """Phase 5 forcing keeps the strict cap near the Newton target."""
+        norm = jnp.asarray(5.0e-13, dtype=jnp.float64)
 
         linear_tol = _opt._eisenstat_walker_choice2_tolerance(
             norm,
@@ -2705,8 +2782,8 @@ class TestOptimizerAdapter:
         assert float(np.asarray(result["x"][0])) < 5.0
         assert int(np.asarray(result["nit"])) == 1
 
-    def test_newton_polish_backtracks_gradient_increasing_step(self):
-        """Host Newton polish must reject a full Newton step that worsens gradient."""
+    def test_newton_polish_accepts_armijo_merit_when_gradient_increases(self):
+        """Host Newton polish accepts a finite Armijo step when stationarity rises."""
 
         def objective(x):
             return x[0] ** 4 + x[0]
@@ -2720,10 +2797,12 @@ class TestOptimizerAdapter:
             maxiter=1,
             tol=1e-14,
             materialize_hessian=False,
+            allow_host_control=True,
         )
 
         final_grad_norm = float(jnp.linalg.norm(result["grad"]))
-        assert final_grad_norm <= initial_grad_norm
+        assert final_grad_norm > initial_grad_norm
+        assert float(result["fun"]) < float(objective(x0))
         assert float(result["x"][0]) > -1.0
         assert int(result["nit"]) == 1
 
@@ -2746,7 +2825,13 @@ class TestNewtonPolishBoozer:
         bfgs_grad_norm = float(jnp.linalg.norm(jax.grad(obj)(bfgs_result.x)))
 
         # Newton polish
-        newton_result = newton_polish(obj, bfgs_result.x, maxiter=20, tol=1e-12)
+        with _native_cpu_reference_context():
+            newton_result = newton_polish(
+                obj,
+                bfgs_result.x,
+                maxiter=20,
+                tol=1e-12,
+            )
         newton_grad_norm = float(jnp.linalg.norm(newton_result["grad"]))
 
         assert newton_grad_norm <= bfgs_grad_norm + 1e-15, (
@@ -2884,8 +2969,10 @@ def test_traceable_surface_signature_uses_host_owned_metadata_digest():
     with jax.transfer_guard("disallow"):
         signature = booz._traceable_surface_signature()
 
-    assert signature[-2][5][0] == "float64"
-    assert isinstance(signature[-2][5][2], str)
+    # ``clamped_dims`` occupies slot 5; the host-owned quadrature digest
+    # follows it in the runtime signature.
+    assert signature[-2][6][0] == "float64"
+    assert isinstance(signature[-2][6][2], str)
 
 
 class _MockToroidalFluxLabel:
@@ -3254,27 +3341,28 @@ class TestBoozerSurfaceJAXClass:
         self, monkeypatch
     ):
         """Dense finalization defaults are resolved once during construction."""
-        bs = _MockBiotSavart(_make_mock_coils())
-        surf, label = _make_basic_mock_surface_and_label()
-        booz = BoozerSurfaceJAX(
-            bs,
-            surf,
-            label,
-            1.0,
-            constraint_weight=1.0,
-        )
+        with _native_cpu_reference_context():
+            bs = _MockBiotSavart(_make_mock_coils())
+            surf, label = _make_basic_mock_surface_and_label()
+            booz = BoozerSurfaceJAX(
+                bs,
+                surf,
+                label,
+                1.0,
+                constraint_weight=1.0,
+            )
 
-        assert booz.options["optimizer_backend"] == "scipy"
-        assert booz.options["materialize_dense_linearization"] is True
+            assert booz.options["optimizer_backend"] == "scipy"
+            assert booz.options["materialize_dense_linearization"] is True
 
-        monkeypatch.setattr(
-            _bsj,
-            "default_materialize_dense_linearization_for_backend",
-            lambda _backend: False,
-        )
-        booz.options["optimizer_backend"] = "ondevice"
+            monkeypatch.setattr(
+                _bsj,
+                "default_materialize_dense_linearization_for_backend",
+                lambda _backend: False,
+            )
+            booz.options["optimizer_backend"] = "ondevice"
 
-        assert booz.options["materialize_dense_linearization"] is True
+            assert booz.options["materialize_dense_linearization"] is True
 
     def test_backend_mutation_preserves_explicit_dense_linearization_request(self):
         """Dense artifacts remain available when materialization is explicit."""
@@ -3317,13 +3405,23 @@ class TestBoozerSurfaceJAXClass:
         bs = _MockBiotSavart(_make_mock_coils())
         surf, label = _make_basic_mock_surface_and_label()
 
-        booz = BoozerSurfaceJAX(
-            bs,
-            surf,
-            label,
-            1.0,
-            constraint_weight=1.0,
-        )
+        if backend_mode is None:
+            with _native_cpu_reference_context():
+                booz = BoozerSurfaceJAX(
+                    bs,
+                    surf,
+                    label,
+                    1.0,
+                    constraint_weight=1.0,
+                )
+        else:
+            booz = BoozerSurfaceJAX(
+                bs,
+                surf,
+                label,
+                1.0,
+                constraint_weight=1.0,
+            )
 
         assert booz.options["optimizer_backend"] == expected_optimizer_backend
         assert booz.options["least_squares_algorithm"] == expected_algorithm
@@ -3562,6 +3660,7 @@ class TestBoozerSurfaceJAXClass:
         monkeypatch,
     ):
         """Repeated SciPy reference solves should not rebuild the JIT transform."""
+        _select_native_cpu_reference_backend()
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "scipy"
         booz.options["least_squares_algorithm"] = "quasi-newton"
@@ -3594,6 +3693,7 @@ class TestBoozerSurfaceJAXClass:
         monkeypatch,
     ):
         """Omitted limited_memory should preserve the configured JAX default."""
+        _select_native_cpu_reference_backend()
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "scipy"
         booz.options["limited_memory"] = False
@@ -3649,6 +3749,7 @@ class TestBoozerSurfaceJAXClass:
         limited_memory,
         expected_method,
     ):
+        _select_native_cpu_reference_backend()
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "scipy"
         booz.options["record_scipy_callback_trace"] = False
@@ -3819,6 +3920,7 @@ class TestBoozerSurfaceJAXClass:
         assert res["success"] is True
 
     def test_public_ls_api_accepts_weight_inv_modB_override(self, monkeypatch):
+        _select_native_cpu_reference_backend()
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "scipy"
         captured = {}
@@ -3896,6 +3998,7 @@ class TestBoozerSurfaceJAXClass:
 
     def test_public_manual_ls_api_supports_baseline_demo_sequence(self, monkeypatch):
         """The restored public LS API should support the old demo call pattern."""
+        _select_native_cpu_reference_backend()
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "scipy"
         lbfgs_target = booz._pack_decision_vector(0.25, 0.04) - 0.05
@@ -4158,12 +4261,13 @@ class TestBoozerSurfaceJAXClass:
             lambda *args, **kwargs: lambda xl: xl - target,
         )
 
-        res = booz.minimize_boozer_exact_constraints_newton(
-            iota=0.3,
-            G=initial_G,
-            maxiter=5,
-            tol=1e-10,
-        )
+        with _native_cpu_reference_context():
+            res = booz.minimize_boozer_exact_constraints_newton(
+                iota=0.3,
+                G=initial_G,
+                maxiter=5,
+                tol=1e-10,
+            )
 
         _assert_result_record(res, _PUBLIC_EXACT_CONSTRAINTS_RESULT_RECORD_TYPE)
         assert res["success"] is True
@@ -4206,12 +4310,13 @@ class TestBoozerSurfaceJAXClass:
             raising=False,
         )
 
-        res = booz.minimize_boozer_exact_constraints_newton(
-            iota=0.3,
-            G=initial_G,
-            maxiter=5,
-            tol=1e-10,
-        )
+        with _native_cpu_reference_context():
+            res = booz.minimize_boozer_exact_constraints_newton(
+                iota=0.3,
+                G=initial_G,
+                maxiter=5,
+                tol=1e-10,
+            )
 
         assert res["success"] is True
         np.testing.assert_allclose(np.asarray(res["residual"]), 0.0, atol=1e-12)
@@ -4240,12 +4345,13 @@ class TestBoozerSurfaceJAXClass:
 
         monkeypatch.setattr(_bsj.jnp.linalg, "solve", recording_solve)
 
-        res = booz.minimize_boozer_exact_constraints_newton(
-            iota=0.3,
-            G=initial_G,
-            maxiter=5,
-            tol=1e-10,
-        )
+        with _native_cpu_reference_context():
+            res = booz.minimize_boozer_exact_constraints_newton(
+                iota=0.3,
+                G=initial_G,
+                maxiter=5,
+                tol=1e-10,
+            )
 
         assert res["success"] is True
         np.testing.assert_allclose(np.asarray(res["residual"]), 0.0, atol=1e-12)
@@ -4311,7 +4417,7 @@ class TestBoozerSurfaceJAXClass:
         )
 
         _assert_result_record(res, _PUBLIC_NEWTON_RESULT_RECORD_TYPE)
-        assert captured["method"] == "bfgs"
+        assert captured["method"] == "bfgs-ondevice"
         assert res["success"] is True
         for field_name, field_value in reporting_values.items():
             assert res[field_name] is field_value
@@ -4398,7 +4504,10 @@ class TestBoozerSurfaceJAXClass:
                 label,
                 1.0,
                 constraint_weight=1.0,
-                options={"line_search_maxiter": 11},
+                options={
+                    "optimizer_backend": "scipy",
+                    "line_search_maxiter": 11,
+                },
             )
 
     def test_private_options_rejected_with_host_jax_backend(self):
@@ -4785,13 +4894,22 @@ class TestBoozerSurfaceJAXClass:
         def obj(x):
             return 0.5 * x @ A @ x - b @ x
 
-        result = runner(obj, jnp.zeros(2), maxiter=1, tol=1e-14, stab=stab)
+        runner_options = {"allow_host_control": True} if runner is newton_polish else {}
+        result = runner(
+            obj,
+            jnp.zeros(2),
+            maxiter=1,
+            tol=1e-14,
+            stab=stab,
+            **runner_options,
+        )
         undamped_result = runner(
             obj,
             jnp.zeros(2),
             maxiter=1,
             tol=1e-14,
             stab=0.0,
+            **runner_options,
         )
         assert not np.allclose(result["x"], undamped_result["x"])
         np.testing.assert_allclose(
@@ -4985,7 +5103,11 @@ class TestBoozerSurfaceJAXClass:
         monkeypatch.setattr(_bsj, "target_minimize", fake_minimize_runner)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
-        res = booz.run_code(iota=0.3, G=0.05)
+        if optimizer_backend == "scipy":
+            with _native_cpu_reference_context():
+                res = booz.run_code(iota=0.3, G=0.05)
+        else:
+            res = booz.run_code(iota=0.3, G=0.05)
 
         assert captured["method"] == expected_method
         assert captured["allow_host_control"] is (optimizer_backend == "host-jax")
@@ -5094,6 +5216,7 @@ class TestBoozerSurfaceJAXClass:
 
     def test_scipy_bfgs_pre_newton_contract_uses_cpu_call_shape(self, monkeypatch):
         """The host-SciPy pre-Newton lane uses CPU BFGS method/options/layout."""
+        _select_native_cpu_reference_backend()
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "scipy"
         booz.options["limited_memory"] = False
@@ -5500,6 +5623,7 @@ class TestBoozerSurfaceJAXClass:
         assert res["success"] is True
 
     def test_run_code_reference_lm_forwards_least_squares_options(self, monkeypatch):
+        _select_native_cpu_reference_backend()
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "scipy"
         booz.options["least_squares_algorithm"] = "lm"
@@ -5840,9 +5964,10 @@ class TestBoozerSurfaceJAXClass:
             "iota": jnp.asarray(0.0, dtype=jnp.float64),
         }
 
-        result = _opt.reference_least_squares(
-            residual_fn, x0, method="lm", maxiter=25, tol=1e-12
-        )
+        with _native_cpu_reference_context():
+            result = _opt.reference_least_squares(
+                residual_fn, x0, method="lm", maxiter=25, tol=1e-12
+            )
 
         assert result.success is True
         np.testing.assert_allclose(result.x["surface"], np.asarray([2.0, -1.0]))
@@ -5855,14 +5980,15 @@ class TestBoozerSurfaceJAXClass:
             _make_structured_quadratic_problem()
         )
 
-        result = _opt.reference_minimize(
-            objective_fn,
-            x0,
-            method="adam",
-            maxiter=800,
-            tol=1e-8,
-            options={"step_size": 0.1},
-        )
+        with _native_cpu_reference_context():
+            result = _opt.reference_minimize(
+                objective_fn,
+                x0,
+                method="adam",
+                maxiter=800,
+                tol=1e-8,
+                options={"step_size": 0.1},
+            )
 
         assert result.success is True
         np.testing.assert_allclose(result.x["surface"], target_surface, atol=1e-4)
@@ -5876,16 +6002,17 @@ class TestBoozerSurfaceJAXClass:
             diff = x - target
             return 0.5 * float(np.dot(diff, diff)), diff
 
-        result = minimize(
-            objective_value_and_grad,
-            np.asarray([5.0, 3.0], dtype=float),
-            driver=Driver.SIMSOPT_ADAM_HOST,
-            options=SimsoptAdamHostOptions(
-                maxiter=800,
-                gtol=1e-8,
-                learning_rate=0.1,
-            ),
-        )
+        with _native_cpu_reference_context():
+            result = minimize(
+                objective_value_and_grad,
+                np.asarray([5.0, 3.0], dtype=float),
+                driver=Driver.SIMSOPT_ADAM_HOST,
+                options=SimsoptAdamHostOptions(
+                    maxiter=800,
+                    gtol=1e-8,
+                    learning_rate=0.1,
+                ),
+            )
 
         assert result.success is True
         np.testing.assert_allclose(result.x, target, atol=1e-4)
@@ -5930,15 +6057,16 @@ class TestBoozerSurfaceJAXClass:
         def callback(state):
             observed.append(state)
 
-        result = _opt.reference_minimize(
-            objective_value_and_grad,
-            x0,
-            method="bfgs",
-            maxiter=100,
-            tol=1e-10,
-            value_and_grad=True,
-            callback=callback,
-        )
+        with _native_cpu_reference_context():
+            result = _opt.reference_minimize(
+                objective_value_and_grad,
+                x0,
+                method="bfgs",
+                maxiter=100,
+                tol=1e-10,
+                value_and_grad=True,
+                callback=callback,
+            )
 
         assert result.success is True
         assert observed
@@ -5978,9 +6106,10 @@ class TestBoozerSurfaceJAXClass:
             ),
         )
 
-        result = _opt.reference_least_squares(
-            residual_fn, x0, method="lm", maxiter=25, tol=1e-12
-        )
+        with _native_cpu_reference_context():
+            result = _opt.reference_least_squares(
+                residual_fn, x0, method="lm", maxiter=25, tol=1e-12
+            )
 
         assert result.success is True
         np.testing.assert_allclose(result.x["surface"], np.asarray([2.0, -1.0]))
@@ -6380,6 +6509,7 @@ class TestBoozerSurfaceJAXClass:
 
     def test_get_adjoint_runtime_state_uses_dense_plu_for_scipy_hessian(self):
         """Host-dispatched CPU parity uses the same dense adjoint solve as CPU."""
+        _select_native_cpu_reference_backend()
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "scipy"
         booz.need_to_run_code = False
@@ -6411,6 +6541,7 @@ class TestBoozerSurfaceJAXClass:
 
     def test_scipy_plu_status_accepts_backward_error_success(self, monkeypatch):
         """Scipy PLU runtime status must match the shared dense backward-error gate."""
+        _select_native_cpu_reference_backend()
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "scipy"
         booz.need_to_run_code = False
@@ -6563,6 +6694,7 @@ class TestBoozerSurfaceJAXClass:
 
     def test_scipy_plu_runtime_callbacks_allow_host_bridge_under_strict_guard(self):
         """The explicit scipy PLU callback bridge must mark its host transfers."""
+        _select_native_cpu_reference_backend()
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "scipy"
         booz.need_to_run_code = False
@@ -6879,7 +7011,7 @@ class TestBoozerSurfaceJAXClass:
 
         np.testing.assert_allclose(
             np.asarray(adjoint_state.apply_transpose(rhs)),
-            np.asarray([[2.25, 4.5], [2.75, -1.375]]),
+            np.asarray([[2.0, 4.0], [3.0, -1.5]]),
             rtol=0.0,
             atol=1e-12,
         )
@@ -7376,6 +7508,7 @@ class TestBoozerSurfaceJAXClass:
     def test_run_code_emits_newton_progress_updates(self, monkeypatch):
         """run_code() should surface Newton start/progress/completion through stage_callback."""
         booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "scipy"
 
         observed = []
 
@@ -7417,7 +7550,8 @@ class TestBoozerSurfaceJAXClass:
         monkeypatch.setattr(_bsj, "reference_minimize", fake_reference_minimize)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
-        res = booz.run_code(iota=0.3, G=0.05)
+        with _native_cpu_reference_context():
+            res = booz.run_code(iota=0.3, G=0.05)
 
         labels = [label for label, _payload in observed]
         progress_events = [
@@ -8440,7 +8574,7 @@ class TestBoozerSurfaceJAXExactPath:
         sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
         iota = jnp.asarray(0.3, dtype=jnp.float64)
         G = jnp.asarray(0.05, dtype=jnp.float64)
-        residual_ids = []
+        residual_fns = []
         residuals = []
 
         def fake_newton_exact_traceable(
@@ -8452,7 +8586,7 @@ class TestBoozerSurfaceJAXExactPath:
             args=(),
         ):
             del maxiter, tol
-            residual_ids.append(id(residual_fn))
+            residual_fns.append(residual_fn)
             residual = residual_fn(x0, *args)
             residuals.append(np.asarray(residual))
             return {
@@ -8472,7 +8606,7 @@ class TestBoozerSurfaceJAXExactPath:
 
         assert bool(first["success"])
         assert bool(second["success"])
-        assert residual_ids[0] != residual_ids[1]
+        assert residual_fns[0] is not residual_fns[1]
         assert not np.allclose(residuals[0], residuals[1])
 
     def test_run_code_traceable_exact_rebuilds_residual_callable_after_option_change(
@@ -8483,7 +8617,7 @@ class TestBoozerSurfaceJAXExactPath:
         sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
         iota = jnp.asarray(0.3, dtype=jnp.float64)
         G = jnp.asarray(0.05, dtype=jnp.float64)
-        residual_ids = []
+        residual_fns = []
 
         def fake_newton_exact_traceable(
             residual_fn,
@@ -8494,7 +8628,7 @@ class TestBoozerSurfaceJAXExactPath:
             args=(),
         ):
             del maxiter, tol
-            residual_ids.append(id(residual_fn))
+            residual_fns.append(residual_fn)
             residual = residual_fn(x0, *args)
             return {
                 "x": x0,
@@ -8513,7 +8647,7 @@ class TestBoozerSurfaceJAXExactPath:
 
         assert bool(first["success"])
         assert bool(second["success"])
-        assert residual_ids[0] != residual_ids[1]
+        assert residual_fns[0] is not residual_fns[1]
         assert first["weight_inv_modB"] is not second["weight_inv_modB"]
 
     def test_run_code_traceable_exact_executes_inner_solve_on_gpu(
@@ -8551,14 +8685,17 @@ class TestBoozerSurfaceJAXExactPath:
 
         result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
 
-        assert len(dense_calls) == 1
+        # The traceable exact solver is intentionally operator-only.  Dense
+        # Jacobian materialization belongs to the eager compatibility route.
+        assert not dense_calls
         assert result["type"] == "exact"
         assert bool(np.asarray(jax.device_get(result["success"])))
+        assert result["jacobian"] is None
+        assert result["jacobian_materialized"] is False
         _assert_traceable_gpu_result(
             result,
             x_target,
             gpu,
-            jacobian_shape=A.shape,
         )
 
     def test_run_code_traceable_ls_reuses_newton_fun_and_grad(self, monkeypatch):
@@ -8604,7 +8741,9 @@ class TestBoozerSurfaceJAXExactPath:
                 "success": True,
             }
 
-        monkeypatch.setattr(_opt, "_minimize_lbfgs_private", fake_minimize)
+        # ``boozer_surface`` imports this private solver directly, so patch
+        # the adapter's lookup rather than the public optimizer module.
+        monkeypatch.setattr(_bsj, "_minimize_lbfgs_private", fake_minimize)
         monkeypatch.setattr(
             _bsj.jax,
             "value_and_grad",
@@ -8657,7 +8796,7 @@ class TestBoozerSurfaceJAXExactPath:
                 ls_status=expected_status,
             )
 
-        monkeypatch.setattr(_opt, "_minimize_lbfgs_private", fake_minimize)
+        monkeypatch.setattr(_bsj, "_minimize_lbfgs_private", fake_minimize)
 
         result = booz._run_traceable_pre_newton_stage(
             booz.coil_set_spec,
@@ -8870,7 +9009,7 @@ class TestBoozerSurfaceJAXExactPath:
             return jnp.asarray(seed_accepted), jnp.linalg.norm(gradient_next)
 
         monkeypatch.setattr(
-            _opt,
+            _bsj,
             "_newton_candidate_status",
             fake_candidate_status,
         )
@@ -9150,7 +9289,7 @@ class TestBoozerSurfaceJAXExactPath:
         def forbidden_newton_polish(*_args, **_kwargs):
             raise AssertionError("run_code_traceable() should skip Newton polish")
 
-        monkeypatch.setattr(_opt, "_minimize_lbfgs_private", fake_minimize)
+        monkeypatch.setattr(_bsj, "_minimize_lbfgs_private", fake_minimize)
         _patch_newton_polish_runner(monkeypatch, forbidden_newton_polish)
 
         result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
@@ -9188,7 +9327,7 @@ class TestBoozerSurfaceJAXExactPath:
                 k=jnp.asarray(2, dtype=jnp.int32),
             )
 
-        monkeypatch.setattr(_opt, "_minimize_lbfgs_private", fake_minimize)
+        monkeypatch.setattr(_bsj, "_minimize_lbfgs_private", fake_minimize)
 
         result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
 
@@ -9294,8 +9433,8 @@ class TestBoozerSurfaceJAXExactPath:
             del obj_fn, maxiter, tol, stab, progress_callback, objective_args
             return _successful_newton_polish_result(x0)
 
-        monkeypatch.setattr(_opt, "_minimize_bfgs_private", forbidden_private_minimize)
-        monkeypatch.setattr(_opt, "_minimize_lbfgs_private", forbidden_private_minimize)
+        monkeypatch.setattr(_bsj, "_minimize_bfgs_private", forbidden_private_minimize)
+        monkeypatch.setattr(_bsj, "_minimize_lbfgs_private", forbidden_private_minimize)
         monkeypatch.setattr(_bsj, solver_attr, fake_lm)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
@@ -9357,10 +9496,22 @@ class TestBoozerSurfaceJAXExactPath:
             maxiter,
             tol,
             stab,
+            materialize_hessian,
+            max_dense_hessian_bytes,
             progress_callback=None,
             objective_args=(),
         ):
-            del method, obj_fn, maxiter, tol, stab, progress_callback, objective_args
+            del (
+                method,
+                obj_fn,
+                maxiter,
+                tol,
+                stab,
+                max_dense_hessian_bytes,
+                progress_callback,
+                objective_args,
+            )
+            assert materialize_hessian is True
             np.testing.assert_allclose(
                 np.asarray(jax.device_get(x_ls)),
                 np.asarray(x_target),
@@ -9475,8 +9626,8 @@ class TestBoozerSurfaceJAXExactPath:
             obj_fn(x0, *objective_args)
             return _successful_newton_polish_result(x0)
 
-        monkeypatch.setattr(_opt, "_minimize_bfgs_private", lambda *_a, **_k: None)
-        monkeypatch.setattr(_opt, "_minimize_lbfgs_private", lambda *_a, **_k: None)
+        monkeypatch.setattr(_bsj, "_minimize_bfgs_private", lambda *_a, **_k: None)
+        monkeypatch.setattr(_bsj, "_minimize_lbfgs_private", lambda *_a, **_k: None)
         monkeypatch.setattr(_bsj, "levenberg_marquardt_traceable", fake_lm)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
@@ -9569,8 +9720,8 @@ class TestBoozerSurfaceJAXExactPath:
             objective_values.append(np.asarray(obj_fn(x0, *objective_args)))
             return _successful_newton_polish_result(x0)
 
-        monkeypatch.setattr(_opt, "_minimize_bfgs_private", lambda *_a, **_k: None)
-        monkeypatch.setattr(_opt, "_minimize_lbfgs_private", lambda *_a, **_k: None)
+        monkeypatch.setattr(_bsj, "_minimize_bfgs_private", lambda *_a, **_k: None)
+        monkeypatch.setattr(_bsj, "_minimize_lbfgs_private", lambda *_a, **_k: None)
         monkeypatch.setattr(_bsj, "levenberg_marquardt_traceable", fake_lm)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
@@ -9627,7 +9778,7 @@ class TestBoozerSurfaceJAXExactPath:
                 "success": False,
             }
 
-        monkeypatch.setattr(_opt, "_minimize_lbfgs_private", fake_minimize)
+        monkeypatch.setattr(_bsj, "_minimize_lbfgs_private", fake_minimize)
         monkeypatch.setattr(
             _bsj.jax.scipy.linalg,
             "lu",
@@ -9675,6 +9826,7 @@ class TestBoozerSurfaceJAXExactPath:
             "type": "ls",
             "weight_inv_modB": booz.options["weight_inv_modB"],
             **_bsj._none_solve_quality_fields(_bsj.SOLVE_QUALITY_LS_FIELDS),
+            **_bsj._ls_newton_reporting_fields({}),
             "hessian_materialized": None,
             "dense_hessian_shape": None,
             "dense_hessian_bytes": None,
@@ -9931,11 +10083,20 @@ class TestBoozerSurfaceJAXExactPath:
                 "success": True,
             }
 
-        def fake_boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB):
+        def fake_boozer_residual_vector(
+            G,
+            iota,
+            B,
+            xphi,
+            xtheta,
+            weight_inv_modB,
+            *,
+            dtype,
+        ):
             del G, iota, B
             captured["weight_inv_modB"] = bool(weight_inv_modB)
             nphi, ntheta = xphi.shape[:2]
-            return jnp.zeros((3 * nphi * ntheta,), dtype=xtheta.dtype)
+            return jnp.zeros((3 * nphi * ntheta,), dtype=dtype)
 
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
         monkeypatch.setattr(
@@ -10110,8 +10271,9 @@ class TestVJPHooks:
         self, monkeypatch
     ):
         """Grouped VJP snapshots and callback cotangents use active placement."""
-        from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
         import simsopt_jax.core.sharding as sharding_module
+        from jax.sharding import Mesh, NamedSharding
+        from jax.sharding import PartitionSpec as P
 
         active_sharding = NamedSharding(
             Mesh(np.asarray(jax.devices("cpu"), dtype=object), ("d",)),
@@ -10498,7 +10660,7 @@ class TestEnsureSolvedGuard:
 
     def test_ensure_solved_exact_logs_residual_without_jacobian_as_grad(self, caplog):
         """Exact cached solves should not label Jacobian size as a gradient norm."""
-        booz = _make_mock_boozer_surface()
+        booz = _make_mock_boozer_surface_exact()
         booz.need_to_run_code = False
         booz.res = {
             "iota": 0.3,
@@ -10541,8 +10703,9 @@ class TestMixedQuadratureBoozer:
 
     def test_run_code_ls_converges(self):
         """LS solve converges with mixed-quadrature coils."""
-        booz = _make_mock_boozer_surface_mixed_quad()
-        res = booz.run_code(iota=0.3, G=0.05)
+        with _native_cpu_reference_context():
+            booz = _make_mock_boozer_surface_mixed_quad()
+            res = booz.run_code(iota=0.3, G=0.05)
         assert res is not None
         assert res["type"] == "ls"
         assert res["success"]
@@ -10556,11 +10719,11 @@ class TestMixedQuadratureBoozer:
         problem is not unique in ``iota``/``G``, so compare the scalar
         objective directly instead of the recovered parameters.
         """
-        booz_mixed = _make_mock_boozer_surface_mixed_quad()
-        booz_uniform = _make_mock_boozer_surface()
-
-        res_mixed = booz_mixed.run_code(iota=0.3, G=0.05)
-        res_uniform = booz_uniform.run_code(iota=0.3, G=0.05)
+        with _native_cpu_reference_context():
+            booz_mixed = _make_mock_boozer_surface_mixed_quad()
+            booz_uniform = _make_mock_boozer_surface()
+            res_mixed = booz_mixed.run_code(iota=0.3, G=0.05)
+            res_uniform = booz_uniform.run_code(iota=0.3, G=0.05)
         penalty_fun_rel_tol = 2e-3
         penalty_fun_abs_tol = 2e-6
 
@@ -13262,12 +13425,12 @@ class TestBoozerCoilVJPCpuOracle:
         from simsopt.configs import get_data
         from simsopt.field.biotsavart import BiotSavart
         from simsopt.geo import Volume
-        from simsopt_jax.geo.boozer_residual import boozer_residual_coil_vjp
         from simsopt.geo.boozersurface import BoozerSurface
         from simsopt.geo.surfaceobjectives import (
             boozer_surface_dlsqgrad_dcoils_vjp,
             boozer_surface_residual_dB,
         )
+        from simsopt_jax.geo.boozer_residual import boozer_residual_coil_vjp
 
         from .surface_test_helpers import get_surface
 
@@ -13411,14 +13574,14 @@ class TestBoozerCoilVJPCpuOracle:
             clone_tensor_surface,
         )
         from simsopt.field.biotsavart import BiotSavart
-        from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
         from simsopt.geo import Volume
         from simsopt.geo.boozersurface import BoozerSurface
+        from simsopt.geo.surfaceobjectives import boozer_surface_dlsqgrad_dcoils_vjp
+        from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
         from simsopt_jax_adapters.geo.boozer_surface import (
             BoozerSurfaceJAX,
             _boozer_ls_coil_vjp,
         )
-        from simsopt.geo.surfaceobjectives import boozer_surface_dlsqgrad_dcoils_vjp
 
         problem = build_ls_parity_problem(ncoils=4, nphi=16, ntheta=8)
         solver_options = {

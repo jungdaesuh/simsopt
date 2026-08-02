@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import json
 import logging
 import platform
-from pathlib import Path
 import resource
 import subprocess
 import sys
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import TypeAlias, cast
 
 import jax
 import jax.numpy as jnp
@@ -26,13 +27,59 @@ sys.path.insert(0, str(SRC_ROOT))
 
 jax.config.update("jax_enable_x64", True)
 
+JsonValue: TypeAlias = (
+    None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
+)
+JsonObject: TypeAlias = dict[str, JsonValue]
+
+
+from simsopt_jax.geo.optimizers._shared import (
+    mark_cacheable_jit_value_and_grad as _mark_cacheable_jit_value_and_grad,
+)
+from simsopt_jax.geo.optimizers.private import _lbfgs as private_lbfgs
+from simsopt_jax.geo.optimizers.private import _lbfgsb_scipy as lbfgsb
+
 from benchmarks.traceable_compile_shape import (
     lower_to_text,
     summarize_lowered_text,
 )
-from simsopt_jax.geo.optimizers.private import _lbfgs as private_lbfgs
-from simsopt_jax.geo.optimizers.private import _lbfgsb_scipy as lbfgsb
-from simsopt_jax.geo.optimizers.optimizer import _mark_cacheable_jit_value_and_grad
+
+
+class _ProgressRecorder:
+    """Persist atomic child checkpoints for watchdog-interrupted diagnostics."""
+
+    def __init__(self, path: Path | None) -> None:
+        self._path = path
+        self._started_at = time.perf_counter()
+        self._events: list[JsonObject] = []
+        if path is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._write()
+
+    def record(self, event: str, fields: JsonObject) -> None:
+        if self._path is None:
+            return
+        event_payload: JsonObject = {
+            "event": event,
+            **fields,
+            "elapsed_s": time.perf_counter() - self._started_at,
+        }
+        self._events.append(event_payload)
+        self._write()
+
+    def _write(self) -> None:
+        if self._path is None:
+            return
+        payload: JsonObject = {
+            "schema_version": 1,
+            "events": cast(list[JsonValue], self._events),
+        }
+        temporary_path = self._path.with_name(f".{self._path.name}.tmp")
+        temporary_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        temporary_path.replace(self._path)
 
 
 _LBFGS_STEPWISE_COMPILE_FRAGMENTS = (
@@ -41,12 +88,19 @@ _LBFGS_STEPWISE_COMPILE_FRAGMENTS = (
     "lbfgs_private_macro_step_solver)",
     "lbfgs_private_result_payload_solver)",
 )
-_LBFGS_MONOLITHIC_COMPILE_FRAGMENTS = (
-    "lbfgs_private_monolithic_mainlb_solver)",
-)
+_LBFGS_MONOLITHIC_COMPILE_FRAGMENTS = ("lbfgs_private_monolithic_mainlb_solver)",)
 _LBFGS_PRIVATE_COMPILE_FRAGMENTS = (
     *_LBFGS_STEPWISE_COMPILE_FRAGMENTS,
     *_LBFGS_MONOLITHIC_COMPILE_FRAGMENTS,
+)
+_KERNEL_LABELS = (
+    "init_state",
+    "step_from_start_to_next_observable",
+    "step_from_search_to_next_observable",
+    "reenter_from_new_x",
+    "result_payload",
+    "old_generic_step_to_next_observable",
+    "old_monolithic_full_solve",
 )
 
 
@@ -95,11 +149,88 @@ def _quadratic_value_and_grad(x):
     return 0.5 * jnp.dot(vector, vector), vector
 
 
+def _objective_case(objective: str, dimension: int):
+    """Build the objective and initial vector used by one diagnostic cell."""
+
+    if objective == "quadratic":
+        return (
+            jnp.arange(1, dimension + 1, dtype=jnp.float64),
+            _quadratic_value_and_grad,
+        )
+    if objective == "coil47":
+        if dimension != 47:
+            raise ValueError("objective='coil47' requires dimension=47")
+        from benchmarks.fixtures.custom_quasi_newton import fixture
+
+        fixture_case = fixture("coil47")
+        return (
+            jnp.asarray(fixture_case.initial, dtype=jnp.float64),
+            jax.value_and_grad(fixture_case.objective),
+        )
+    raise ValueError(f"unknown compile-shape objective {objective!r}")
+
+
 def _maxrss_bytes() -> int:
     maxrss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     if platform.system() == "Darwin":
         return int(maxrss)
     return int(maxrss) * 1024
+
+
+def _sync(value) -> None:
+    for leaf in jax.tree_util.tree_leaves(value):
+        if hasattr(leaf, "block_until_ready"):
+            leaf.block_until_ready()
+
+
+def _summarize_bounded_result(result) -> JsonObject:
+    """Classify a finite result without requiring the budget to converge."""
+    objective = float(jax.device_get(result.f_k))
+    gradient = np.asarray(jax.device_get(result.g_k), dtype=np.float64)
+    finite = bool(np.isfinite(objective) and np.all(np.isfinite(gradient)))
+    if not finite:
+        raise AssertionError("bounded L-BFGS diagnostic produced a nonfinite result")
+    return {
+        "converged": bool(jax.device_get(result.converged)),
+        "status": int(jax.device_get(result.status)),
+        "iterations": int(jax.device_get(result.k)),
+        "evaluations": int(jax.device_get(result.nfev)),
+        "objective": objective,
+        "finite": finite,
+    }
+
+
+def _objective_timing(
+    value_and_grad,
+    x0,
+    *,
+    progress: _ProgressRecorder | None = None,
+    repeat_count: int = 3,
+) -> JsonObject:
+    """Measure one cold objective call and synchronized warm calls."""
+
+    compiled = jax.jit(value_and_grad)
+    if progress is not None:
+        progress.record("objective_probe_start", {"repeat_count": repeat_count})
+    timings: list[JsonValue] = []
+    for run_index in range(repeat_count):
+        started = time.perf_counter()
+        value, gradient = compiled(x0)
+        _sync((value, gradient))
+        elapsed_s = time.perf_counter() - started
+        timings.append(elapsed_s)
+        if progress is not None:
+            progress.record(
+                "objective_probe_complete",
+                {"run_index": run_index, "duration_s": elapsed_s},
+            )
+    return {
+        "run_count": repeat_count,
+        "cold_s": float(timings[0]),
+        "warm_s": [float(value) for value in timings[1:]],
+        "all_s": [float(value) for value in timings],
+        "peak_host_rss_bytes": _maxrss_bytes(),
+    }
 
 
 def _device_summary() -> list[dict[str, int | str]]:
@@ -153,8 +284,17 @@ def _build_kernel_cases(
     maxls: int,
     ftol: float,
     gtol: float,
-) -> list[dict[str, int | float | str | None]]:
-    x0 = jnp.arange(1, dimension + 1, dtype=jnp.float64)
+    objective: str = "quadratic",
+    include_legacy_kernels: bool = False,
+    progress: _ProgressRecorder | None = None,
+) -> list[_KernelCase]:
+    x0, value_and_grad = _objective_case(objective, dimension)
+
+    if progress is not None:
+        progress.record(
+            "objective_ready",
+            {"objective": objective, "dimension": dimension},
+        )
 
     def init_state(x):
         return lbfgsb.lbfgsb_initial_state(
@@ -167,10 +307,12 @@ def _build_kernel_cases(
         )
 
     state0 = init_state(x0)
+    if progress is not None:
+        progress.record("initial_state_ready", {"maxcor": maxcor})
 
     def step_kernel(state):
         return lbfgsb.lbfgsb_advance_to_next_observable(
-            _quadratic_value_and_grad,
+            value_and_grad,
             state,
             maxiter=maxiter,
             maxfun=maxfun,
@@ -179,36 +321,50 @@ def _build_kernel_cases(
 
     def step_from_start_kernel(state):
         return lbfgsb.lbfgsb_advance_from_start_to_next_observable(
-            _quadratic_value_and_grad,
+            value_and_grad,
             state,
             maxiter=maxiter,
             maxfun=maxfun,
             accepted_step_callback=None,
+            unconstrained_fast_path=True,
         )
 
     state_search = lbfgsb._lbfgsb_evaluate_value_and_grad(
-        _quadratic_value_and_grad,
+        value_and_grad,
         lbfgsb._lbfgsb_setulb_start(state0),
     )
+    if progress is not None:
+        progress.record("search_state_ready", {})
 
     def step_from_search_kernel(state):
         return lbfgsb.lbfgsb_advance_from_search_to_next_observable(
-            _quadratic_value_and_grad,
+            value_and_grad,
             state,
             maxiter=maxiter,
             maxfun=maxfun,
             accepted_step_callback=None,
+            unconstrained_fast_path=True,
         )
 
-    state_new_x = step_from_start_kernel(state0).state
+    # Re-entry lowering depends on the state pytree shapes, not on a prior
+    # accepted iterate. Avoid executing a full line search while constructing
+    # this diagnostic input; the real start-transition kernel is measured
+    # separately below.
+    state_new_x = state0
+    if progress is not None:
+        progress.record(
+            "new_x_state_ready",
+            {"source": "shape_compatible_initial_state"},
+        )
 
     def reenter_from_new_x_kernel(state):
         return lbfgsb.lbfgsb_reenter_new_x(
-            _quadratic_value_and_grad,
+            value_and_grad,
             state,
             maxiter=maxiter,
             maxfun=maxfun,
             accepted_step_callback=None,
+            unconstrained_fast_path=True,
         )
 
     def result_kernel(state):
@@ -216,7 +372,7 @@ def _build_kernel_cases(
 
     def monolithic_kernel(state):
         final_state = lbfgsb.lbfgsb_mainlb(
-            _quadratic_value_and_grad,
+            value_and_grad,
             state,
             maxiter=maxiter,
             maxfun=maxfun,
@@ -224,9 +380,8 @@ def _build_kernel_cases(
         )
         return _result_payload(final_state, maxiter=maxiter, maxfun=maxfun)
 
-    return [
+    cases = [
         _KernelCase("init_state", init_state, (x0,)),
-        _KernelCase("old_generic_step_to_next_observable", step_kernel, (state0,)),
         _KernelCase(
             "step_from_start_to_next_observable",
             step_from_start_kernel,
@@ -243,17 +398,35 @@ def _build_kernel_cases(
             (state_new_x,),
         ),
         _KernelCase("result_payload", result_kernel, (state0,)),
-        _KernelCase("old_monolithic_full_solve", monolithic_kernel, (state0,)),
     ]
+    if include_legacy_kernels:
+        cases[1:1] = [
+            _KernelCase(
+                "old_generic_step_to_next_observable",
+                step_kernel,
+                (state0,),
+            ),
+        ]
+        cases.append(
+            _KernelCase("old_monolithic_full_solve", monolithic_kernel, (state0,))
+        )
+    return cases
 
 
 def _build_summaries(
     kernel_cases: list[_KernelCase],
+    *,
+    progress: _ProgressRecorder | None = None,
 ) -> list[dict[str, int | float | str | None]]:
-    return [
-        _lower_summary(kernel_case.label, kernel_case.fn, *kernel_case.args)
-        for kernel_case in kernel_cases
-    ]
+    summaries: list[dict[str, int | float | str | None]] = []
+    for kernel_case in kernel_cases:
+        if progress is not None:
+            progress.record("lower_start", {"label": kernel_case.label})
+        summary = _lower_summary(kernel_case.label, kernel_case.fn, *kernel_case.args)
+        summaries.append(summary)
+        if progress is not None:
+            progress.record("lower_complete", cast(JsonObject, summary))
+    return summaries
 
 
 def _compile_measurement(
@@ -276,27 +449,56 @@ def _compile_measurement(
 
 def _compile_measurements(
     kernel_cases: list[_KernelCase],
+    *,
+    progress: _ProgressRecorder | None = None,
 ) -> list[dict[str, int | float | str]]:
-    return [_compile_measurement(kernel_case) for kernel_case in kernel_cases]
+    measurements: list[dict[str, int | float | str]] = []
+    for kernel_case in kernel_cases:
+        if progress is not None:
+            progress.record("compile_start", {"label": kernel_case.label})
+        measurement = _compile_measurement(kernel_case)
+        measurements.append(measurement)
+        if progress is not None:
+            progress.record("compile_complete", cast(JsonObject, measurement))
+    return measurements
 
 
 def _repeated_call_compile_summary(
     *,
+    objective: str,
+    dimension: int,
     maxiter: int,
     maxcor: int,
     maxls: int,
     ftol: float,
     gtol: float,
-) -> dict[str, bool | float | int | str | dict[str, int]]:
-    x0 = jnp.asarray(np.array([1.0, -2.0], dtype=np.float64))
-
-    def value_and_grad(x):
-        vector = jnp.asarray(x, dtype=jnp.float64)
-        return 0.5 * jnp.dot(vector, vector), vector
+    progress: _ProgressRecorder | None = None,
+):
+    x0, value_and_grad = _objective_case(objective, dimension)
 
     cacheable_value_and_grad = _mark_cacheable_jit_value_and_grad(value_and_grad)
 
-    def run_once() -> None:
+    def run_once() -> JsonObject:
+        iteration_progress: list[JsonObject] = []
+        run_started = time.perf_counter()
+        previous_callback_time = run_started
+
+        def record_iteration(iteration, objective_value, gradient_inf_norm) -> None:
+            nonlocal previous_callback_time
+            callback_time = time.perf_counter()
+            iteration_progress.append(
+                {
+                    "iteration": int(iteration),
+                    "objective": float(objective_value),
+                    "gradient_inf_norm": float(gradient_inf_norm),
+                    "solver_elapsed_s": callback_time - run_started,
+                    "step_s": callback_time - previous_callback_time,
+                }
+            )
+            previous_callback_time = callback_time
+            if progress is not None:
+                progress.record("solver_iteration", iteration_progress[-1])
+
         result = private_lbfgs._minimize_lbfgs_private_value_and_grad(
             cacheable_value_and_grad,
             x0,
@@ -305,9 +507,12 @@ def _repeated_call_compile_summary(
             maxls=maxls,
             ftol=ftol,
             gtol=gtol,
+            progress_callback=record_iteration,
         )
-        if bool(result.converged) is not True:
-            raise AssertionError("lbfgs-ondevice repeated compile probe did not converge")
+        summary = _summarize_bounded_result(result)
+        summary["run_seconds"] = time.perf_counter() - run_started
+        summary["iteration_progress"] = iteration_progress
+        return summary
 
     logger = logging.getLogger("jax")
     old_level = logger.level
@@ -316,11 +521,23 @@ def _repeated_call_compile_summary(
     started_at = time.perf_counter()
     logger.addHandler(handler)
     logger.setLevel(logging.WARNING)
+    run_summaries: list[JsonValue] = []
     try:
         jax.clear_caches()
         with jax.log_compiles(True):
-            for _ in range(3):
-                run_once()
+            for run_index in range(3):
+                if progress is not None:
+                    progress.record(
+                        "solver_run_start",
+                        {"run_index": run_index},
+                    )
+                result_summary = run_once()
+                run_summaries.append(cast(JsonObject, result_summary))
+                if progress is not None:
+                    progress.record(
+                        "solver_run_complete",
+                        {"run_index": run_index, **result_summary},
+                    )
     finally:
         logger.removeHandler(handler)
         logger.setLevel(old_level)
@@ -337,6 +554,8 @@ def _repeated_call_compile_summary(
     )
     return {
         "case": "private-lbfgs-repeated-call-compile-count",
+        "objective": objective,
+        "dimension": int(dimension),
         "run_count": 3,
         "compile_log_count": int(handler.count),
         "counts_by_fragment": dict(handler.counts_by_fragment),
@@ -349,6 +568,8 @@ def _repeated_call_compile_summary(
         "wall_s": elapsed_s,
         "peak_host_rss_bytes": rss_after_bytes,
         "peak_host_rss_delta_bytes": max(0, rss_after_bytes - rss_before_bytes),
+        "result_summary": result_summary,
+        "run_summaries": run_summaries,
     }
 
 
@@ -360,15 +581,20 @@ def _boozer_limited_memory_compile_summary(
     maxls: int,
     ftol: float,
     gtol: float,
+    progress: _ProgressRecorder | None = None,
 ) -> dict[str, bool | float | int | str | dict[str, int]]:
     from repo_bootstrap import bootstrap_local_simsopt
 
     bootstrap_local_simsopt(SRC_ROOT)
 
-    from benchmarks.benchmark_problem import build_ls_parity_problem, clone_tensor_surface
     from simsopt.geo.surfaceobjectives import Volume
     from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
     from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
+
+    from benchmarks.benchmark_problem import (
+        build_ls_parity_problem,
+        clone_tensor_surface,
+    )
 
     problem = build_ls_parity_problem(
         ncoils=2,
@@ -413,6 +639,15 @@ def _boozer_limited_memory_compile_summary(
     logger.setLevel(logging.WARNING)
     try:
         jax.clear_caches()
+        if progress is not None:
+            progress.record(
+                "boozer_compile_start",
+                {
+                    "maxiter": maxiter,
+                    "maxcor": maxcor,
+                    "maxfun": maxfun,
+                },
+            )
         with jax.log_compiles(True):
             result = booz.minimize_boozer_penalty_constraints_LBFGS(
                 constraint_weight=1.0,
@@ -437,7 +672,7 @@ def _boozer_limited_memory_compile_summary(
         handler.counts_by_fragment,
         _LBFGS_MONOLITHIC_COMPILE_FRAGMENTS,
     )
-    return {
+    summary = {
         "case": "boozer-limited-memory-lbfgs-compile-log",
         "run_count": 1,
         "method": "lbfgs-ondevice",
@@ -460,6 +695,9 @@ def _boozer_limited_memory_compile_summary(
         "peak_host_rss_bytes": rss_after_bytes,
         "peak_host_rss_delta_bytes": max(0, rss_after_bytes - rss_before_bytes),
     }
+    if progress is not None:
+        progress.record("boozer_compile_complete", cast(JsonObject, summary))
+    return summary
 
 
 def _comparison(summaries: list[dict[str, int | float | str | None]]) -> dict[str, int]:
@@ -471,9 +709,7 @@ def _comparison(summaries: list[dict[str, int | float | str | None]]) -> dict[st
         by_label["step_from_search_to_next_observable"],
         by_label["reenter_from_new_x"],
     ]
-    largest_specialized_step = max(
-        int(row["text_bytes"]) for row in specialized_steps
-    )
+    largest_specialized_step = max(int(row["text_bytes"]) for row in specialized_steps)
     largest_specialized_step_jaxpr = max(
         int(row["jaxpr_text_bytes"]) for row in specialized_steps
     )
@@ -482,14 +718,18 @@ def _comparison(summaries: list[dict[str, int | float | str | None]]) -> dict[st
         "old_monolithic_text_bytes": int(monolithic["text_bytes"]),
         "old_generic_step_text_bytes": int(old_generic_step["text_bytes"]),
         "largest_specialized_step_text_bytes": largest_specialized_step,
+        "specialized_step_text_bytes_reduced_vs_generic": int(
+            largest_specialized_step < int(old_generic_step["text_bytes"])
+        ),
         "result_payload_text_bytes": int(result["text_bytes"]),
         "largest_specialized_step_plus_result_text_bytes": largest_specialized_step
         + int(result["text_bytes"]),
         "old_monolithic_jaxpr_text_bytes": int(monolithic["jaxpr_text_bytes"]),
-        "old_generic_step_jaxpr_text_bytes": int(
-            old_generic_step["jaxpr_text_bytes"]
-        ),
+        "old_generic_step_jaxpr_text_bytes": int(old_generic_step["jaxpr_text_bytes"]),
         "largest_specialized_step_jaxpr_text_bytes": largest_specialized_step_jaxpr,
+        "specialized_step_jaxpr_text_bytes_reduced_vs_generic": int(
+            largest_specialized_step_jaxpr < int(old_generic_step["jaxpr_text_bytes"])
+        ),
         "result_payload_jaxpr_text_bytes": int(result["jaxpr_text_bytes"]),
     }
 
@@ -508,7 +748,18 @@ def main() -> None:
         default=".artifacts/lbfgs_ondevice_compile_shape_20260618.json",
         help="Path for the diagnostic JSON payload.",
     )
+    parser.add_argument(
+        "--progress-json",
+        default=None,
+        help="Optional atomic sidecar for checkpoints before watchdog termination.",
+    )
     parser.add_argument("--dimension", type=int, default=2)
+    parser.add_argument(
+        "--objective",
+        choices=("quadratic", "coil47"),
+        default="quadratic",
+        help="Objective graph used by the compile-shape probe.",
+    )
     parser.add_argument("--maxcor", type=int, default=3)
     parser.add_argument("--maxiter", type=int, default=5)
     parser.add_argument("--maxfun", type=int, default=20)
@@ -516,9 +767,45 @@ def main() -> None:
     parser.add_argument("--ftol", type=float, default=0.0)
     parser.add_argument("--gtol", type=float, default=1e-8)
     parser.add_argument(
+        "--include-legacy-kernels",
+        action="store_true",
+        help=(
+            "Include the old generic and monolithic kernels. They can require "
+            "multiple GiB of host memory; run only in an externally watched "
+            "process."
+        ),
+    )
+    parser.add_argument(
+        "--kernel",
+        choices=("all", *_KERNEL_LABELS),
+        default="all",
+        help="Lower/compile only one kernel; useful for bounded phase isolation.",
+    )
+    parser.add_argument(
         "--skip-runtime-compile",
         action="store_true",
         help="Only emit lowering/JAXPR shape summaries; skip executable compile/RSS probes.",
+    )
+    parser.add_argument(
+        "--skip-lowering-summary",
+        action="store_true",
+        help=(
+            "Skip StableHLO/JAXPR text generation when a runtime/solver timing "
+            "cell is being isolated."
+        ),
+    )
+    parser.add_argument(
+        "--measure-objective",
+        action="store_true",
+        help="Measure one cold and two warm synchronized objective calls.",
+    )
+    parser.add_argument(
+        "--run-solver",
+        action="store_true",
+        help=(
+            "Run three bounded solver calls and record accepted-step progress. "
+            "This is separate from per-kernel lowering."
+        ),
     )
     parser.add_argument(
         "--include-boozer-compile-log",
@@ -542,6 +829,21 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    progress = _ProgressRecorder(
+        None if args.progress_json is None else Path(args.progress_json)
+    )
+    progress.record(
+        "process_started",
+        {
+            "objective": args.objective,
+            "dimension": args.dimension,
+            "maxcor": args.maxcor,
+            "maxiter": args.maxiter,
+            "maxfun": args.maxfun,
+            "include_legacy_kernels": bool(args.include_legacy_kernels),
+            "kernel": args.kernel,
+        },
+    )
     kernel_cases = _build_kernel_cases(
         dimension=args.dimension,
         maxcor=args.maxcor,
@@ -550,13 +852,52 @@ def main() -> None:
         maxls=args.maxls,
         ftol=args.ftol,
         gtol=args.gtol,
+        objective=args.objective,
+        include_legacy_kernels=args.include_legacy_kernels,
+        progress=progress,
     )
-    summaries = _build_summaries(kernel_cases)
+    if args.kernel != "all":
+        if not args.include_legacy_kernels and args.kernel.startswith("old_"):
+            raise ValueError(
+                "legacy kernel selection requires --include-legacy-kernels"
+            )
+        kernel_cases = [
+            kernel_case
+            for kernel_case in kernel_cases
+            if kernel_case.label == args.kernel
+        ]
+        if not kernel_cases:
+            raise ValueError(f"kernel {args.kernel!r} is not available")
+    progress.record("kernel_cases_built", {"count": len(kernel_cases)})
+    summaries = (
+        []
+        if args.skip_lowering_summary
+        else _build_summaries(kernel_cases, progress=progress)
+    )
+    if args.skip_lowering_summary:
+        progress.record("lowering_skipped", {})
+    objective_timing = None
+    if args.measure_objective:
+        objective_x0, objective_value_and_grad = _objective_case(
+            args.objective,
+            args.dimension,
+        )
+        objective_timing = _objective_timing(
+            objective_value_and_grad,
+            objective_x0,
+            progress=progress,
+        )
     runtime_compile = None
     repeated_call_compile = None
     boozer_limited_memory_compile = None
+    run_solver = not args.skip_runtime_compile and (
+        args.run_solver or args.kernel == "all"
+    )
     if not args.skip_runtime_compile:
-        runtime_compile_summaries = _compile_measurements(kernel_cases)
+        runtime_compile_summaries = _compile_measurements(
+            kernel_cases,
+            progress=progress,
+        )
         runtime_compile = {
             "summaries": runtime_compile_summaries,
             "compiled_executable_count": sum(
@@ -567,14 +908,18 @@ def main() -> None:
                 int(row["peak_host_rss_bytes"]) for row in runtime_compile_summaries
             ),
         }
-        repeated_call_compile = _repeated_call_compile_summary(
-            maxiter=args.maxiter,
-            maxcor=args.maxcor,
-            maxls=args.maxls,
-            ftol=args.ftol,
-            gtol=args.gtol,
-        )
-        if args.include_boozer_compile_log:
+        if run_solver:
+            repeated_call_compile = _repeated_call_compile_summary(
+                objective=args.objective,
+                dimension=args.dimension,
+                maxiter=args.maxiter,
+                maxcor=args.maxcor,
+                maxls=args.maxls,
+                ftol=args.ftol,
+                gtol=args.gtol,
+                progress=progress,
+            )
+        if args.include_boozer_compile_log and args.kernel == "all":
             boozer_limited_memory_compile = _boozer_limited_memory_compile_summary(
                 maxiter=args.boozer_maxiter,
                 maxcor=args.boozer_maxcor,
@@ -582,6 +927,7 @@ def main() -> None:
                 maxls=args.maxls,
                 ftol=args.ftol,
                 gtol=args.gtol,
+                progress=progress,
             )
     payload = {
         "schema_version": 3,
@@ -594,7 +940,12 @@ def main() -> None:
         "platform": platform.platform(),
         "devices": _device_summary(),
         "case": {
-            "objective": "deterministic_quadratic",
+            "objective": (
+                "deterministic_quadratic"
+                if args.objective == "quadratic"
+                else "source_owned_coil47"
+            ),
+            "objective_kind": args.objective,
             "dimension": int(args.dimension),
             "maxcor": int(args.maxcor),
             "maxiter": int(args.maxiter),
@@ -605,13 +956,25 @@ def main() -> None:
             "dtype": np.dtype(np.float64).str,
         },
         "summaries": summaries,
-        "comparison": _comparison(summaries),
+        "comparison": (
+            _comparison(summaries)
+            if args.include_legacy_kernels
+            else {
+                "status": "legacy_kernels_not_requested",
+                "legacy_kernels_included": 0,
+            }
+        ),
+        "include_legacy_kernels": bool(args.include_legacy_kernels),
+        "kernel_selection": args.kernel,
+        "objective_timing": objective_timing,
+        "run_solver": run_solver,
         "runtime_compile": runtime_compile,
         "repeated_call_compile": repeated_call_compile,
         "boozer_limited_memory_compile": boozer_limited_memory_compile,
     }
     output_path = Path(args.output_json)
     _write_json(output_path, payload)
+    progress.record("payload_written", {"output_json": str(output_path)})
     print(json.dumps({"output_json": str(output_path)}, sort_keys=True))
 
 

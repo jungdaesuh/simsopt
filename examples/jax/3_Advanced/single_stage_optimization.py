@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from numbers import Real
 from pathlib import Path
-from typing import Iterator, cast
+from typing import Iterator, Literal, cast
 
 import jax
 import numpy as np
@@ -27,6 +27,7 @@ from simsopt.geo import create_equally_spaced_curves
 from simsopt.mhd import QuasisymmetryRatioResidual, Vmec
 from simsopt.objectives import LeastSquaresProblem
 from simsopt.util import MpiPartition
+from simsopt_jax.backend.runtime import get_backend_mode
 from simsopt_jax.examples import (
     ExampleResult,
     ExecutionScale,
@@ -38,6 +39,7 @@ from simsopt_jax.geo.optimizer_host_lbfgs import (
     minimize_bfgs_host_core,
     minimize_lbfgs_host_core,
 )
+from simsopt_jax.geo.optimizers.optimizer import target_minimize
 from simsopt_jax.objectives import (
     StageTwoObjectiveConfig,
     SurfaceRZFourierDofContract,
@@ -56,6 +58,10 @@ from simsopt_jax_adapters.mhd.vmec_host import (
 
 EXAMPLE_ID = "native-single-stage-optimization"
 NATIVE_ITERATIONS = 10
+CoilPreoptimizationSolver = Literal[
+    "simsopt-host-lbfgs-fast",
+    "simsopt-jax-lbfgsb-scipy-trajectory",
+]
 INPUT = (
     Path(__file__).resolve().parents[2]
     / "3_Advanced"
@@ -82,9 +88,18 @@ class HybridConfiguration:
     aspect_ratio_weight: float = 1.0
     coils_objective_weight: float = 1.0e3
 
-    def fingerprint(self, *, input_sha256: str, mpi_world_size: int) -> str:
+    def fingerprint(
+        self,
+        *,
+        input_sha256: str,
+        mpi_world_size: int,
+        stage_two_config: StageTwoObjectiveConfig,
+        coil_preoptimization_solver: CoilPreoptimizationSolver,
+    ) -> str:
         payload = {
             **asdict(self),
+            "stage_two": asdict(stage_two_config),
+            "coil_preoptimization_solver": coil_preoptimization_solver,
             "input_sha256": input_sha256,
             "mpi_world_size": int(mpi_world_size),
             "host_solver": "SIMSOPT_LBFGS",
@@ -95,6 +110,12 @@ class HybridConfiguration:
             separators=(",", ":"),
         ).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
+
+
+def _coil_preoptimization_solver() -> CoilPreoptimizationSolver:
+    if get_backend_mode().endswith("_parity"):
+        return "simsopt-jax-lbfgsb-scipy-trajectory"
+    return "simsopt-host-lbfgs-fast"
 
 
 def _configuration(native_scale: bool) -> HybridConfiguration:
@@ -138,6 +159,7 @@ def _stage_two_config() -> StageTwoObjectiveConfig:
         curvature_threshold=7.0,
         curvature_weight=1.0e-3,
         mean_squared_curvature_threshold=10.0,
+        mean_squared_curvature_target_mode="identity",
         mean_squared_curvature_weight=1.0e-3,
     )
 
@@ -212,7 +234,7 @@ def solve(
             numquadpoints=config.coil_quadpoints,
             use_jax_curve=False,
         )
-        base_currents = [Current(1.0e5) for _ in base_curves]
+        base_currents = [Current(1.0) * 1.0e5 for _ in base_curves]
         base_currents[0].fix_all()
         coils = coils_via_symmetries(
             base_curves,
@@ -222,10 +244,11 @@ def solve(
         )
         field = BiotSavartJAX(coils)
         surface_contract = SurfaceRZFourierDofContract.from_surface(surface)
+        stage_two_config = _stage_two_config()
         stage_two_objective = make_dynamic_surface_stage_two_objective(
             field,
             surface_contract,
-            _stage_two_config(),
+            stage_two_config,
             definition="local",
         )
         compiled_value_and_gradient = jax.jit(
@@ -255,6 +278,7 @@ def solve(
 
         coil_initial = np.asarray(field.x, dtype=np.float64)
         surface_initial = np.asarray(equilibrium_problem.x, dtype=np.float64)
+        surface_initial_device = jax.device_put(surface_initial)
         jax_elapsed_seconds = 0.0
 
         def coil_value_and_gradient(
@@ -272,18 +296,66 @@ def solve(
 
         coil_solution = np.array(coil_initial, copy=True)
         if mpi.proc0_world:
+            coil_preoptimization_solver = _coil_preoptimization_solver()
             coil_initial_value_and_gradient = coil_value_and_gradient(coil_initial)
-            coil_result = minimize_lbfgs_host_core(
-                coil_value_and_gradient,
-                coil_initial,
-                maxiter=NATIVE_ITERATIONS,
-                maxcor=min(NATIVE_ITERATIONS, 300),
-                ftol=0.0,
-                gtol=1.0e-8,
-                maxls=20,
-                initial_value_and_grad=coil_initial_value_and_gradient,
-            )
-            coil_solution = np.asarray(coil_result.x_k, dtype=np.float64)
+            if coil_preoptimization_solver == "simsopt-jax-lbfgsb-scipy-trajectory":
+
+                def coil_device_value_and_gradient(coil_dofs):
+                    value, gradients = compiled_value_and_gradient(
+                        coil_dofs,
+                        surface_initial_device,
+                    )
+                    return value, gradients[0]
+
+                jax_started = time.perf_counter()
+                coil_result = target_minimize(
+                    coil_device_value_and_gradient,
+                    jax.device_put(coil_initial),
+                    method="lbfgs-ondevice",
+                    tol=1.0e-12,
+                    maxiter=NATIVE_ITERATIONS,
+                    options={
+                        "maxcor": min(NATIVE_ITERATIONS, 300),
+                        "ftol": 1.0e-12,
+                        "maxls": 20,
+                        "lbfgs_run_mode": "stepwise",
+                    },
+                    value_and_grad=True,
+                )
+                jax.block_until_ready((coil_result.x, coil_result.fun, coil_result.jac))
+                jax_elapsed_seconds += time.perf_counter() - jax_started
+                coil_solution = np.asarray(
+                    jax.device_get(coil_result.x),
+                    dtype=np.float64,
+                )
+                coil_preoptimization_final_objective = float(coil_result.fun)
+                coil_preoptimization_final_gradient = np.asarray(
+                    coil_result.jac,
+                    dtype=np.float64,
+                )
+                coil_preoptimization_iterations = int(coil_result.nit)
+                coil_preoptimization_evaluations = int(coil_result.nfev)
+            else:
+                coil_result = minimize_lbfgs_host_core(
+                    coil_value_and_gradient,
+                    coil_initial,
+                    maxiter=NATIVE_ITERATIONS,
+                    maxcor=min(NATIVE_ITERATIONS, 300),
+                    ftol=0.0,
+                    gtol=1.0e-8,
+                    maxls=20,
+                    initial_value_and_grad=coil_initial_value_and_gradient,
+                )
+                coil_solution = np.asarray(coil_result.x_k, dtype=np.float64)
+                coil_preoptimization_final_objective = float(coil_result.f_k)
+                coil_preoptimization_final_gradient = np.asarray(
+                    coil_result.g_k,
+                    dtype=np.float64,
+                )
+                coil_preoptimization_iterations = int(coil_result.k)
+                coil_preoptimization_evaluations = int(coil_result.nfev)
+        else:
+            coil_preoptimization_solver = _coil_preoptimization_solver()
         mpi.comm_world.Bcast(coil_solution, root=0)
 
         initial = np.concatenate((coil_solution, surface_initial))
@@ -478,6 +550,26 @@ def solve(
                     "configuration_sha256": config.fingerprint(
                         input_sha256=_sha256(INPUT),
                         mpi_world_size=int(mpi.comm_world.size),
+                        stage_two_config=stage_two_config,
+                        coil_preoptimization_solver=coil_preoptimization_solver,
+                    ),
+                    "coil_preoptimization_initial_objective": (
+                        coil_initial_value_and_gradient[0]
+                    ),
+                    "coil_preoptimization_initial_gradient": tuple(
+                        float(value) for value in coil_initial_value_and_gradient[1]
+                    ),
+                    "coil_preoptimization_final_objective": (
+                        coil_preoptimization_final_objective
+                    ),
+                    "coil_preoptimization_final_gradient": tuple(
+                        float(value) for value in coil_preoptimization_final_gradient
+                    ),
+                    "coil_preoptimization_iterations": (
+                        coil_preoptimization_iterations
+                    ),
+                    "coil_preoptimization_evaluations": (
+                        coil_preoptimization_evaluations
                     ),
                     "vmec_objective": latest_vmec_evaluation.objective,
                     "stage_two_objective": final_stage_two_objective,

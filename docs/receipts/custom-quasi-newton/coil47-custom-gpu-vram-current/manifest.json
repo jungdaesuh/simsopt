@@ -1,0 +1,56 @@
+{
+  "schema_version": 5,
+  "receipt_id": "coil47-custom-gpu-vram-current",
+  "kind": "gpu-memory-provider-measurement",
+  "case": "coil47",
+  "device": "RTX 5090 GPU",
+  "dtype": "float64",
+  "intent": "fast",
+  "maxiter": 20,
+  "maxcor": 10,
+  "candidate_commit": "9c64c2ef6cee45eb7eb1989bd5a41e2adf8bfc26",
+  "candidate_worktree_clean": false,
+  "environment": {
+    "lock_path": "benchmarks/environments/custom_quasi_newton_gpu.txt",
+    "lock_sha256": "fc724b570ca23356b18df17da87a00217066fd42e5b02de5fe26b46cf20473f8",
+    "jax_platforms": "cuda",
+    "jax_enable_x64": "true",
+    "xla_preallocate": "false",
+    "xla_allocator": "platform",
+    "transfer_guard": "not-enabled"
+  },
+  "command": "nvidia-smi --query-compute-apps=pid,used_gpu_memory --format=csv,noheader,nounits sampled every 0.2 seconds while PYTHONPATH=. JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_ALLOCATOR=platform JAX_ENABLE_X64=true .venv-qn-gpu/bin/python benchmarks/custom_quasi_newton_runtime.py --device gpu --intent fast --providers custom --cases coil47 --maxiter 20 --maxcor 10 executed",
+  "artifacts": [
+    {
+      "path": "raw/runner.json",
+      "sha256": "e60abe2185766641ccd35509dfdced1c7bc6c400771ed710a62babba0e21bfd8"
+    },
+    {
+      "path": "raw/runner.stderr",
+      "sha256": "d49452cabe19e2fb51b572c8758398197119dc8e8db950faf45809f25d8a2134"
+    },
+    {
+      "path": "raw/gpu_memory.csv",
+      "sha256": "8bf14e427b7909baf0fc50a1e87286d365be7ed1bc80eeb5ca2827f4888f9978"
+    },
+    {
+      "path": "raw/exit_code",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "metrics.json",
+      "sha256": "6b7de558517199fe3dbf1602081850c6d515a5e6bba9a20325b6182a28322724"
+    },
+    {
+      "path": "summary.md",
+      "sha256": "de912d549828b0f3d72a92a8c46060ba2c4b936d1ce924bdefb6635e564a349d"
+    }
+  ],
+  "archive_uri": "repo://docs/receipts/custom-quasi-newton/coil47-custom-gpu-vram-current/",
+  "verdict": "diagnostic-pass-not-promotion",
+  "limitations": [
+    "candidate checkout was dirty",
+    "nvidia-smi process-tree sampling excludes unrelated desktop processes from the runner figure",
+    "A100 and Optax GPU qualification remain open"
+  ]
+}

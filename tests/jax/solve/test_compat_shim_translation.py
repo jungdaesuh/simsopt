@@ -2,6 +2,7 @@ import warnings
 
 import jax.numpy as jnp
 import numpy as np
+from conftest import enable_non_strict_jax_backend
 
 from simsopt_jax.geo.optimizers.optimizer import jax_least_squares, jax_minimize
 from simsopt_jax.solve.dispatch import least_squares, minimize
@@ -28,7 +29,9 @@ def _assert_same_core_result(old, new):
     np.testing.assert_allclose(float(old.fun), new.fun, rtol=0, atol=0)
 
 
-def test_old_lbfgs_call_matches_new_scipy_lbfgsb_driver():
+def test_old_lbfgs_call_matches_new_scipy_lbfgsb_driver(monkeypatch, request):
+    enable_non_strict_jax_backend(monkeypatch, request, mode="native_cpu")
+
     def value_and_grad(x):
         residual = x - jnp.array([1.0, -2.0])
         return jnp.vdot(residual, residual), 2.0 * residual
@@ -52,7 +55,9 @@ def test_old_lbfgs_call_matches_new_scipy_lbfgsb_driver():
     _assert_same_core_result(old, new)
 
 
-def test_old_bfgs_call_matches_new_scipy_bfgs_driver():
+def test_old_bfgs_call_matches_new_scipy_bfgs_driver(monkeypatch, request):
+    enable_non_strict_jax_backend(monkeypatch, request, mode="native_cpu")
+
     def value_and_grad(x):
         residual = x - jnp.array([1.0, -2.0])
         return jnp.vdot(residual, residual), 2.0 * residual
@@ -76,7 +81,9 @@ def test_old_bfgs_call_matches_new_scipy_bfgs_driver():
     _assert_same_core_result(old, new)
 
 
-def test_old_lbfgs_trace_call_matches_new_trace_bridge_driver():
+def test_old_lbfgs_trace_call_matches_new_trace_bridge_driver(monkeypatch, request):
+    enable_non_strict_jax_backend(monkeypatch, request, mode="native_cpu")
+
     def value_and_grad(x):
         residual = x - jnp.array([1.0, -2.0])
         return jnp.vdot(residual, residual), 2.0 * residual
@@ -100,7 +107,9 @@ def test_old_lbfgs_trace_call_matches_new_trace_bridge_driver():
     _assert_same_core_result(old, new)
 
 
-def test_old_scipy_jax_call_matches_new_scipy_lbfgsb_driver():
+def test_old_scipy_jax_call_matches_new_scipy_lbfgsb_driver(monkeypatch, request):
+    enable_non_strict_jax_backend(monkeypatch, request, mode="native_cpu")
+
     def value_and_grad(x):
         residual = x - jnp.array([1.0, -2.0])
         return jnp.vdot(residual, residual), 2.0 * residual
@@ -124,7 +133,11 @@ def test_old_scipy_jax_call_matches_new_scipy_lbfgsb_driver():
     _assert_same_core_result(old, new)
 
 
-def test_old_scipy_jax_fullgraph_call_matches_new_scipy_lbfgsb_driver():
+def test_old_scipy_jax_fullgraph_call_matches_new_scipy_lbfgsb_driver(
+    monkeypatch, request
+):
+    enable_non_strict_jax_backend(monkeypatch, request, mode="native_cpu")
+
     def value_and_grad(x):
         residual = x - jnp.array([1.0, -2.0])
         return jnp.vdot(residual, residual), 2.0 * residual
@@ -196,7 +209,9 @@ def test_old_bfgs_ondevice_call_matches_new_simsopt_bfgs_driver():
     _assert_same_core_result(old, new)
 
 
-def test_old_adam_call_matches_new_host_bridge_driver():
+def test_old_adam_call_matches_new_host_bridge_driver(monkeypatch, request):
+    enable_non_strict_jax_backend(monkeypatch, request, mode="native_cpu")
+
     def value_and_grad(x):
         residual = x - jnp.array([1.0, -2.0])
         return jnp.vdot(residual, residual), 2.0 * residual
@@ -248,7 +263,9 @@ def test_old_adam_ondevice_call_matches_new_target_bridge_driver():
     _assert_same_core_result(old, new)
 
 
-def test_old_lm_call_matches_new_gmres_host_bridge_driver():
+def test_old_lm_call_matches_new_gmres_host_bridge_driver(monkeypatch, request):
+    enable_non_strict_jax_backend(monkeypatch, request, mode="native_cpu")
+
     def residual(x):
         return x - jnp.array([1.0, -2.0])
 

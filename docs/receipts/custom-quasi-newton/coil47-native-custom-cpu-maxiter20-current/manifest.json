@@ -1,0 +1,49 @@
+{
+  "schema_version": 5,
+  "receipt_id": "coil47-native-custom-cpu-maxiter20-current",
+  "kind": "converged-provider-comparison",
+  "case": "coil47",
+  "device": "cpu",
+  "dtype": "float64",
+  "intent": "parity",
+  "maxiter": 20,
+  "maxcor": 10,
+  "candidate_commit": "9c64c2ef6cee45eb7eb1989bd5a41e2adf8bfc26",
+  "candidate_worktree_clean": false,
+  "environment": {
+    "lock_path": "benchmarks/environments/custom_quasi_newton_cpu.txt",
+    "lock_sha256": "c1916991fd549448c70fbd00dda11f4f8c2186519db4600aa02bd4d27e3ce963",
+    "jax_platforms": "cpu",
+    "transfer_guard": "not-enabled"
+  },
+  "command": "PYTHONPATH=. JAX_PLATFORMS=cpu XLA_PYTHON_CLIENT_PREALLOCATE=false JAX_ENABLE_X64=true .venv-qn-cpu/bin/python benchmarks/custom_quasi_newton_runtime.py --device cpu --intent parity --providers native,custom --cases coil47 --maxiter 20 --maxcor 10",
+  "artifacts": [
+    {
+      "path": "raw/native.json",
+      "sha256": "07ab70e329a3356b94de5635acd4b2098d48214f1121e534257935da6b4b081c"
+    },
+    {
+      "path": "raw/custom.json",
+      "sha256": "24538460f03156cfa1577c466e0a3559fb03a2fd1f31a38b90faac3ef01c9eb9"
+    },
+    {
+      "path": "raw/combined.json",
+      "sha256": "12753462ed079ae7f4a2a1cdd2a361cf3be16c1c38b2e6912ad0b10b34b96845"
+    },
+    {
+      "path": "metrics.json",
+      "sha256": "f5ad5fe998771ac6d0d5843904cb3f5cc262c96e339b402d2cb4a0280a0390b4"
+    },
+    {
+      "path": "summary.md",
+      "sha256": "42459d6c0db425d3f90fcfe5944e641314872cce47209bd8e222e6fbb3f2312b"
+    }
+  ],
+  "archive_uri": "repo://docs/receipts/custom-quasi-newton/coil47-native-custom-cpu-maxiter20-current/",
+  "verdict": "diagnostic-pass-not-promotion",
+  "limitations": [
+    "candidate checkout was dirty",
+    "CPU-only comparison; strict GPU and A100 lanes remain open",
+    "Optax was not included in this converged run"
+  ]
+}

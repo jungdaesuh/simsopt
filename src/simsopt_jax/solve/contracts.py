@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
-from typing import Callable, Literal, TypeAlias
+from dataclasses import dataclass
+from typing import Callable, Literal, Protocol, TypeAlias
 
 import jax
 import numpy as np
@@ -30,6 +30,20 @@ ValueAndGradFn: TypeAlias = Callable[[OptimizerInput], tuple[ScalarResult, Array
 ResidualFn: TypeAlias = Callable[[OptimizerInput], ArrayResult]
 
 
+class InverseHessianOperator(Protocol):
+    """SciPy-compatible limited-memory inverse-Hessian operator."""
+
+    shape: tuple[int, int]
+    n_corrs: int
+
+    def __call__(self, vector: np.ndarray) -> np.ndarray: ...
+
+    def todense(self) -> np.ndarray: ...
+
+
+HessianInverse: TypeAlias = np.ndarray | InverseHessianOperator
+
+
 @dataclass(frozen=True)
 class OptimizerResult:
     x: np.ndarray
@@ -47,6 +61,7 @@ class OptimizerResult:
     residual: np.ndarray | None = None
     residual_jacobian: np.ndarray | None = None
     hessian: np.ndarray | None = None
+    hess_inv: HessianInverse | None = None
     invalid_step_log: list[InvalidStepEvent] | None = None
     optimizer_state_trace: list[OptimizerStateTraceEntry] | None = None
     optimistix_result: str | None = None
@@ -203,7 +218,7 @@ STATUS_CODES: dict[Driver, tuple[int, ...]] = {
     Driver.OPTIMISTIX_LBFGS: (0, 1, 2),
     Driver.OPTIMISTIX_LM: (0, 1, 2),
     Driver.SIMSOPT_LBFGSB: (0, 1, 2, 3, 4, 5, 6),
-    Driver.SIMSOPT_BFGS: (-1, 0, 1, 2, 3, 5),
+    Driver.SIMSOPT_BFGS: (-1, 0, 1, 2, 3, 5, 99),
     Driver.SIMSOPT_TRACE_LBFGS: (0, 1, 2, 3, 4, 5, 6),
     Driver.SIMSOPT_ADAM_HOST: (0, 1, 2),
     Driver.SIMSOPT_ADAM: (0, 1, 2),
@@ -214,11 +229,14 @@ STATUS_CODES: dict[Driver, tuple[int, ...]] = {
 
 
 __all__ = [
+    "STATUS_CODES",
     "ArrayResult",
     "Callback",
     "Driver",
+    "HessianInverse",
     "InvalidStepEvent",
     "InvalidStepReason",
+    "InverseHessianOperator",
     "LineSearchStatus",
     "OptimizerCallbackEvent",
     "OptimizerInput",
@@ -227,7 +245,6 @@ __all__ = [
     "OptimizerStateTraceEntry",
     "OptionsBase",
     "ResidualFn",
-    "STATUS_CODES",
     "ScalarResult",
     "ValueAndGradFn",
     "fingerprint_optimizer_result",

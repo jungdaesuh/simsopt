@@ -1,0 +1,70 @@
+{
+  "events": [
+    {
+      "dimension": 47,
+      "elapsed_s": 0.0003603820223361254,
+      "event": "process_started",
+      "include_legacy_kernels": false,
+      "kernel": "step_from_start_to_next_observable",
+      "maxcor": 10,
+      "maxfun": 20,
+      "maxiter": 2,
+      "objective": "quadratic"
+    },
+    {
+      "dimension": 47,
+      "elapsed_s": 0.38746267301030457,
+      "event": "objective_ready",
+      "objective": "quadratic"
+    },
+    {
+      "elapsed_s": 1.0766647669952363,
+      "event": "initial_state_ready",
+      "maxcor": 10
+    },
+    {
+      "elapsed_s": 4.255618790979497,
+      "event": "search_state_ready"
+    },
+    {
+      "elapsed_s": 4.256391040980816,
+      "event": "new_x_state_ready",
+      "source": "shape_compatible_initial_state"
+    },
+    {
+      "count": 1,
+      "elapsed_s": 4.266402838984504,
+      "event": "kernel_cases_built"
+    },
+    {
+      "elapsed_s": 4.26668000605423,
+      "event": "lower_start",
+      "label": "step_from_start_to_next_observable"
+    },
+    {
+      "elapsed_s": 7.539452573051676,
+      "event": "lower_complete",
+      "jax_cond_source_count": 0,
+      "jax_while_source_count": 0,
+      "jaxpr_eqn_count": 63,
+      "jaxpr_text_bytes": 1434487,
+      "jaxpr_text_lines": 22254,
+      "label": "step_from_start_to_next_observable",
+      "lower_s": 2.370749910012819,
+      "mhlo_case_count": 0,
+      "mhlo_if_count": 0,
+      "mhlo_while_count": 0,
+      "stablehlo_case_count": 56,
+      "stablehlo_if_count": 0,
+      "stablehlo_while_count": 5,
+      "text_bytes": 1180046,
+      "text_lines": 14233
+    },
+    {
+      "elapsed_s": 7.700090965023264,
+      "event": "payload_written",
+      "output_json": ".artifacts/lbfgs_ondevice_compile_shape_20260618.json"
+    }
+  ],
+  "schema_version": 1
+}
