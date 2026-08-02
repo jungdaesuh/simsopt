@@ -331,14 +331,21 @@ def test_boozer_result_core_helpers_match_schema_sources():
         newton_core
     )
 
+    derived_hessian_fields = {"inner_penalty_residual_l2"}
     hessian_values = {
         field_name: object()
-        for field_name in _bsj._BOOZER_HESSIAN_REPORTING_RESULT_KEYS
+        for field_name in (
+            _bsj._BOOZER_HESSIAN_REPORTING_RESULT_KEYS - derived_hessian_fields
+        )
     }
+    hessian_values["fun"] = 4.5
     hessian_reporting = _bsj._ls_newton_reporting_fields(hessian_values)
     assert set(hessian_reporting) == _bsj._BOOZER_HESSIAN_REPORTING_RESULT_KEYS
     for field_name, field_value in hessian_values.items():
+        if field_name == "fun":
+            continue
         assert hessian_reporting[field_name] is field_value
+    assert hessian_reporting["inner_penalty_residual_l2"] == pytest.approx(3.0)
 
     skipped_reporting = _bsj._skipped_newton_polish_fields(
         marker, marker, marker, marker
@@ -351,6 +358,7 @@ def test_boozer_result_core_helpers_match_schema_sources():
     assert skipped_reporting["newton_iter"] is marker
     assert skipped_reporting["final_gradient_norm"] is marker
     assert skipped_reporting["final_gradient_inf_norm"] is marker
+    assert skipped_reporting["inner_penalty_residual_l2"] is None
     assert skipped_reporting["newton_polish_policy"] == "skip"
     assert skipped_reporting["newton_polish_skipped"] is True
 
@@ -412,6 +420,37 @@ def test_boozer_result_core_helpers_match_schema_sources():
     )
     assert set(traceable_core) == _bsj._BOOZER_TRACEABLE_RESULT_KEYS | {"lu_piv"}
     assert not _TRACEABLE_LS_RESULT_RECORD_TYPE.forbidden_keys & set(traceable_core)
+
+
+@pytest.mark.parametrize(
+    ("fun", "expected_residual"),
+    ((4.5, 3.0), (-1.0e-16, 0.0)),
+)
+def test_ls_newton_reporting_fields_propagate_inner_solve_telemetry(
+    fun, expected_residual
+):
+    values = {
+        "newton_stop_reason_code": jnp.asarray(2, dtype=jnp.int32),
+        "newton_iter": jnp.asarray(3, dtype=jnp.int32),
+        "newton_attempted_iterations": jnp.asarray(5, dtype=jnp.int32),
+        "newton_last_linear_solve_success": jnp.asarray(True),
+        "final_gradient_inf_norm": jnp.asarray(7.5e-9, dtype=jnp.float64),
+        "fun": jnp.asarray(fun, dtype=jnp.float64),
+    }
+
+    reporting = _bsj._ls_newton_reporting_fields(values)
+
+    for key in (
+        "newton_stop_reason_code",
+        "newton_iter",
+        "newton_attempted_iterations",
+        "newton_last_linear_solve_success",
+        "final_gradient_inf_norm",
+    ):
+        assert reporting[key] is values[key]
+    assert float(reporting["inner_penalty_residual_l2"]) == pytest.approx(
+        expected_residual
+    )
 
 
 def _assert_runtime_state_schema(runtime_state, required_fields):
@@ -4363,7 +4402,10 @@ class TestBoozerSurfaceJAXClass:
         captured = {}
         reporting_values = {
             field_name: object()
-            for field_name in _bsj._BOOZER_HESSIAN_REPORTING_RESULT_KEYS
+            for field_name in (
+                _bsj._BOOZER_HESSIAN_REPORTING_RESULT_KEYS
+                - {"inner_penalty_residual_l2"}
+            )
         }
 
         def fake_run_newton_polish_for_method(
@@ -4421,6 +4463,7 @@ class TestBoozerSurfaceJAXClass:
         assert res["success"] is True
         for field_name, field_value in reporting_values.items():
             assert res[field_name] is field_value
+        assert float(res["inner_penalty_residual_l2"]) == 0.0
 
     def test_stale_bfgs_method_rejected(self):
         """The removed bfgs_method option must fail fast."""
