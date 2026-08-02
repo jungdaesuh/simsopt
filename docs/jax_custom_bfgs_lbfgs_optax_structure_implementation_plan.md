@@ -148,11 +148,12 @@ explicit comparator rather than a custom-solver parity oracle.
   its inventory hash and path are recorded in the rollback receipt.
 - RED -> GREEN: native physics fixtures now expose a reset boundary for
   mutable provider state, and the runner resets it before each cold or warm
-  native run. The synthetic stateful-provider regression is green (`39`
-  non-slow runner tests), and the corrected current-HEAD Boozer receipt shows
-  native/custom status `1/1` with both stopping reasons `iteration-limit` at
-  50 iterations; the earlier native `status=2` receipt was a contaminated
-  warm-run measurement and is superseded. Receipt:
+  native run. The synthetic stateful-provider regression now verifies that
+  each reset is followed by an evaluation counter at zero. The corrected
+  post-commit candidate-source Boozer receipt shows native/custom status `1/1`
+  with both stopping reasons `iteration-limit` at 50 iterations; the earlier
+  native `status=2` receipt was a contaminated warm-run measurement and is
+  superseded. Receipt:
   `docs/receipts/custom-quasi-newton/boozer-outer-bfgs-native-custom-cpu-maxiter50-reset-20260802/`.
 - Green final receipt replay: clean candidate `8f29ca7a6` validates `39`
   manifests, including the five-sample GPU/VRAM receipt, against the same
