@@ -133,6 +133,12 @@ explicit comparator rather than a custom-solver parity oracle.
   manifests against the external archive. The archive is still under the
   ignored local `.artifacts/` tree, so this proves checksum and lock integrity
   but not portable archive availability.
+- Green bounded rollback rehearsal: the candidate was reverted in reverse
+  order to the declared base and the resulting index tree was byte-identical.
+  The native-CPU compatibility and bounded Boozer eager selectors passed on
+  both base and candidate. The broad traceable selector reproduced the known
+  resource blow-up and was stopped; the receipt is
+  `docs/receipts/custom-quasi-newton/rollback-rehearsal-20260802.md`.
 - TDD limitation: the phase-RSS and dense-analysis-phase regressions were added
   after the implementation was present. They are current post-hoc GREEN tests;
   no historical RED revision is being claimed.
