@@ -136,6 +136,16 @@ _DENSE_OPERATOR_CHUNK_BATCH_SIZE = _resolve_dense_operator_chunk_batch_size()
 
 _SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS = 1
 
+# Exact Boozer Newton solves use the unsquared residual Jacobian. The general
+# square-system path intentionally keeps a small restarted Krylov budget, but
+# that restart is too short for the 255-variable native-scale Boozer state:
+# the solve can stagnate even though the operator is finite and nonsingular.
+# Permit up to two full Krylov cycles for small exact systems while keeping a
+# fixed 256-vector cap for larger systems so the exact path remains matrix-free
+# and memory-bounded.
+_EXACT_NEWTON_GMRES_RESTART_CAP = 256
+_EXACT_NEWTON_GMRES_MAXITER = 10
+
 _EXACT_ADJOINT_DENSE_LU = os.environ.get(
     "SIMSOPT_EXACT_ADJOINT_DENSE_LU", "0"
 ).strip().lower() not in ("", "0", "false", "off", "no")
@@ -303,9 +313,22 @@ def _gmres_iteration_limits(n):
     return restart, maxiter
 
 
-def _run_operator_gmres(matvec, rhs, *, tol):
+def _exact_newton_gmres_iteration_limits(n):
+    dimension = int(n)
+    restart = max(5, min(dimension, _EXACT_NEWTON_GMRES_RESTART_CAP))
+    maxiter = (
+        2
+        if dimension <= _EXACT_NEWTON_GMRES_RESTART_CAP
+        else _EXACT_NEWTON_GMRES_MAXITER
+    )
+    return restart, maxiter
+
+
+def _run_operator_gmres(matvec, rhs, *, tol, restart=None, maxiter=None):
     n = rhs.shape[0]
-    restart, maxiter = _gmres_iteration_limits(n)
+    default_restart, default_maxiter = _gmres_iteration_limits(n)
+    restart = default_restart if restart is None else int(restart)
+    maxiter = default_maxiter if maxiter is None else int(maxiter)
     # JAX's gmres implementation currently lowers a few scalar literals through
     # host-to-device conversions even when the caller provides fully device-
     # resident operands. Keep the allowance scoped to the library call so the

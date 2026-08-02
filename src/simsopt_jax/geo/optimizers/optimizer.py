@@ -218,6 +218,7 @@ from simsopt_jax.geo.optimizers.linear_solve import (
     _device_scalar as _device_scalar,
     _effective_dense_backward_error_tolerance as _effective_dense_backward_error_tolerance,
     _effective_linear_solve_tolerance as _effective_linear_solve_tolerance,
+    _exact_newton_gmres_iteration_limits as _exact_newton_gmres_iteration_limits,
     _factor_dense_hessian as _factor_dense_hessian,
     _forward_error_bound as _forward_error_bound,
     _forward_error_success as _forward_error_success,
@@ -4412,7 +4413,14 @@ def _gmres_solve_exact_newton_system(jvp_fn, x, rhs, *, tol):
     def matvec(v):
         return jvp_fn(x, v)
 
-    dx, _ = _run_operator_gmres(matvec, rhs, tol=tol)
+    restart, maxiter = _exact_newton_gmres_iteration_limits(rhs.shape[0])
+    dx, _ = _run_operator_gmres(
+        matvec,
+        rhs,
+        tol=tol,
+        restart=restart,
+        maxiter=maxiter,
+    )
     residual = rhs - matvec(dx)
     return dx, residual, matvec
 
