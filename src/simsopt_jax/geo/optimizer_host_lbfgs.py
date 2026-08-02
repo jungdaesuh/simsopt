@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Callable, NamedTuple
 
 import numpy as np
-
 
 # Repo-local terminal status for non-finite f(x), x, or gradient state. SciPy's
 # low-level L-BFGS-B warnflag contract remains 0/1/2.
@@ -53,6 +53,22 @@ class HostLineSearchResults(NamedTuple):
     best_finite_alpha: float
     returned_alpha: float
     failure_reason: str
+    armijo_margin: float
+    curvature_margin: float
+
+
+@dataclass(frozen=True)
+class HostLineSearchTrial:
+    """Immutable diagnostics for one evaluated More-Thuente trial.
+
+    ``alpha`` is the dtype-cast scalar used to construct the evaluated point.
+    """
+
+    trial_ordinal: int
+    alpha: float
+    objective: float
+    directional_derivative: float
+    gradient_finite: bool
     armijo_margin: float
     curvature_margin: float
 
@@ -999,8 +1015,12 @@ def line_search_value_and_grad_more_thuente_host(
     c1=1e-4,
     c2=0.9,
     maxiter=100,
+    trial_observer: Callable[[HostLineSearchTrial], None] | None = None,
 ):
-    """Run the MINPACK More-Thuente search used by native SciPy BFGS."""
+    """Run the MINPACK More-Thuente search used by native SciPy BFGS.
+
+    The optional observer receives a frozen record after every trial evaluation.
+    """
     xk = np.asarray(xk)
     dtype = xk.dtype
     pk = np.asarray(pk, dtype=dtype)
@@ -1058,11 +1078,33 @@ def line_search_value_and_grad_more_thuente_host(
     accepted = False
 
     for _ in range(maxiter):
-        last_phi_raw, last_grad_raw = fun(xk + dtype.type(stp) * pk)
+        evaluated_alpha = dtype.type(stp)
+        last_phi_raw, last_grad_raw = fun(xk + evaluated_alpha * pk)
         last_phi = float(np.asarray(last_phi_raw, dtype=dtype))
         last_grad = np.asarray(last_grad_raw, dtype=dtype)
         last_dphi = float(np.dot(last_grad, pk))
         nfev += 1
+        if trial_observer is not None:
+            armijo_margin, curvature_margin = _line_search_margins(
+                phi_0=phi0,
+                dphi_0=dphi0,
+                c1=c1,
+                c2=c2,
+                alpha=evaluated_alpha,
+                phi=last_phi,
+                dphi=last_dphi,
+            )
+            trial_observer(
+                HostLineSearchTrial(
+                    trial_ordinal=nfev,
+                    alpha=float(evaluated_alpha),
+                    objective=last_phi,
+                    directional_derivative=last_dphi,
+                    gradient_finite=bool(np.all(np.isfinite(last_grad))),
+                    armijo_margin=armijo_margin,
+                    curvature_margin=curvature_margin,
+                )
+            )
         if not (
             np.isfinite(stp)
             and np.isfinite(last_phi)
