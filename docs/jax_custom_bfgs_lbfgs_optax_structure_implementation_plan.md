@@ -17,7 +17,7 @@ but the change is not promotion-ready.
 | Numerical parity | Rosenbrock accepted states are byte-identical to the pre-refactor solver. Matched `coil47` native CPU/custom CPU/custom GPU/Optax endpoints converge at the recorded FP64 objective tolerance. | Close a matched converged Boozer endpoint and the full accepted-state matrix. |
 | GPU | The 41 non-slow runtime contracts and the broader Boozer/traceable compatibility selector pass on strict RTX 5090 CUDA. Custom `coil47` converges on GPU; the Boozer outer BFGS now has a current-HEAD 20-iteration CPU/GPU diagnostic pair. | Qualify a converged Boozer endpoint and run the declared A100 lane. |
 | Performance and memory | Bounded diagnostics favor specialized design B over generic design A. Custom now exposes a production `prepare_lbfgs_private`/`PreparedLBFGS` boundary; Optax uses the same prepare/run split. Both reuse fixed-shape programs for warm runs; CPU and strict-GPU `coil47` runs complete. The runner now records fixture, preparation, cold-solver, and warm-solver RSS windows separately. | Produce clean, phase-scoped certificate-time receipts; complete device-memory and A100 gates. |
-| Evidence | Local candidate receipts have artifact checksum tests. Lock-bound CPU and GPU custom/Optax receipts validate from fresh processes with CPU lock SHA-256 `159e05a65796e76dfb502ea4f6a06b1f412af1c7bb147bb5ac5974b5888a6b35` and GPU lock SHA-256 `fc724b570ca23356b18df17da87a00217066fd42e5b02de5fe26b46cf20473f8`. | Commit selected receipts/locks and verify an external archive from a clean checkout. |
+| Evidence | Local candidate receipts have artifact checksum tests. The committed CPU/GPU locks validate from a clean candidate worktree against the external local archive; CPU lock SHA-256 is `159e05a65796e76dfb502ea4f6a06b1f412af1c7bb147bb5ac5974b5888a6b35` and GPU lock SHA-256 is `fc724b570ca23356b18df17da87a00217066fd42e5b02de5fe26b46cf20473f8`. | Move the archive to durable external storage and repeat validation without the dirty checkout. |
 | Quality | Focused tests and compile/diff checks are green. The current large Boozer source/test files still report existing Ruff findings. | Close scoped Pyright, project-wide Ruff, broad compatibility, and clean-checkout gates. |
 | TDD | New defects have preserved RED -> GREEN evidence where recorded. | The already-implemented core has post-hoc tests only; historical RED revisions cannot be recreated and are not a completion claim. |
 
@@ -127,6 +127,12 @@ explicit comparator rather than a custom-solver parity oracle.
   this remains diagnostic rather than promotion evidence.
 - Blocked external lane: `ssh landau` returned `No route to host` on
   2026-08-02; no A100 qualification claim is made.
+- Green clean-candidate replay: detached checkout `41d95cf502240a686cc968e690f62d4a85a2d1a3`
+  was clean; the receipt and runtime subset passed `51` tests with `2`
+  deselected, and a fresh-process `validate-all` verified all `38` tracked
+  manifests against the external archive. The archive is still under the
+  ignored local `.artifacts/` tree, so this proves checksum and lock integrity
+  but not portable archive availability.
 - TDD limitation: the phase-RSS and dense-analysis-phase regressions were added
   after the implementation was present. They are current post-hoc GREEN tests;
   no historical RED revision is being claimed.
@@ -1239,7 +1245,7 @@ before the current custom-runtime implementation slice. The older
 `9ba1ad057...` and `c0dc94580...` revisions above are trajectory-comparison
 fixtures only; neither is the rollback base.
 
-At this review, the uncommitted behavior-changing slice is exactly:
+The behavior-changing implementation slice is committed in `fd200f564`:
 
 - `src/simsopt_jax/geo/optimizers/_shared.py`;
 - `src/simsopt_jax/geo/optimizers/optimizer.py`;
@@ -1252,9 +1258,9 @@ At this review, the uncommitted behavior-changing slice is exactly:
 - `examples/jax/3_Advanced/single_stage_optimization.py`; and
 - `examples/jax/parity/cases/native_stage_two_optimization_planar_coils.py`.
 
-Before promotion, replace this path inventory with the ordered commit SHAs that
-contain it and any later behavior change. No unrelated commit may appear in
-that list.
+The lock-only follow-up is `41d95cf502240a686cc968e690f62d4a85a2d1a3`.
+No unrelated commit is part of the implementation slice. Rollback rehearsal
+and the frozen selector replay remain open.
 
 - [ ] Remove duplicated eager host-loop mechanics only after BFGS and L-BFGS
       pass independently. Keep all mathematics algorithm-owned.
