@@ -939,9 +939,12 @@ custom method name.
 
 ### Phase 0 — provenance, root cause, and RED
 
-- [ ] Work from an isolated worktree at a recorded commit. Record source
+- [x] Work from an isolated worktree at a recorded commit. Record source
       status, Python/JAX/JAXLIB/SciPy/Optax versions, device, FP64 state,
-      options, commands, exit codes, and fixture hashes.
+      options, commands, exit codes, and fixture hashes. The clean candidate
+      receipts bind these fields to commit `3b2b9f40a` and the CPU/GPU locks;
+      current-head `validate-all` revalidates the 39 tracked manifests and
+      archive checksums.
 - [x] Add the reviewed build-requirement input and relocatable hash-locked CPU/
       GPU dependency files described under Supported environments. The CPU
       and GPU locks resolve with `uv pip sync --dry-run --require-hashes`; the
