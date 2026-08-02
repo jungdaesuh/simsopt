@@ -1,0 +1,23 @@
+{
+  "archive_uri": "file:///home/jungdaesuh/simsopt-jax-quasi-newton-evidence/20260802/receipts/boozer-exact-inner-native-scale-cpu-gpu-20260802",
+  "candidate_commit": "19194b957db00d78ab6062a9685c4de5c7941ecc",
+  "candidate_worktree_clean": false,
+  "artifacts": [
+    {
+      "path": "raw/cpu.json",
+      "sha256": "09a49e206595e300055bdd6ae61db201fe8a1c3723005bfaf764c653ff6811eb"
+    },
+    {
+      "path": "raw/gpu.json",
+      "sha256": "65f23d6c56a5fa2988577531eb7d20a39308e3183408b200a9bca3943fb192b1"
+    },
+    {
+      "path": "summary.md",
+      "sha256": "4df682e62177c0cfe560ceef20b2030185669c0db869c0b060e0a3320b2b068f"
+    }
+  ],
+  "kind": "custom-quasi-newton-example-diagnostic",
+  "receipt_id": "boozer-exact-inner-native-scale-cpu-gpu-20260802",
+  "schema_version": 1,
+  "verdict": "diagnostic-pass-not-promotion"
+}
