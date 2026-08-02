@@ -1,0 +1,7 @@
+# Initial qualification pins used by the checked-in CPU/GPU probes.
+# Re-resolve these pins in a clean environment before promotion.
+jax==0.10.0
+jaxlib==0.10.0
+numpy==2.4.6
+scipy==1.17.1
+optax==0.2.8
