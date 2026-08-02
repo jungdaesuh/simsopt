@@ -16,7 +16,7 @@ but the change is not promotion-ready.
 | Runtime | Eager BFGS uses the typed host driver; eager L-BFGS uses the specialized design-B facade. Traced whole-solve routes remain available. | Complete application-scale compatibility and rollback rehearsal. |
 | Numerical parity | Rosenbrock accepted states are byte-identical to the pre-refactor solver. Matched `coil47` native CPU/custom CPU/custom GPU/Optax endpoints converge at the recorded FP64 objective tolerance. | Close a matched converged Boozer endpoint and the full accepted-state matrix. |
 | GPU | The 41 non-slow runtime contracts and the broader Boozer/traceable compatibility selector pass on strict RTX 5090 CUDA. Custom `coil47` converges on GPU; the Boozer outer BFGS now has a current-HEAD 20-iteration CPU/GPU diagnostic pair. | Qualify a converged Boozer endpoint and run the declared A100 lane. |
-| Performance and memory | Bounded diagnostics favor specialized design B over generic design A. Custom now exposes a production `prepare_lbfgs_private`/`PreparedLBFGS` boundary; Optax uses the same prepare/run split. Both reuse fixed-shape programs for warm runs; CPU and strict-GPU `coil47` runs complete. The runner now records fixture, preparation, cold-solver, and warm-solver RSS windows separately. | Produce clean, phase-scoped certificate-time receipts; complete device-memory and A100 gates. |
+| Performance and memory | Bounded diagnostics favor specialized design B over generic design A. Custom now exposes a production `prepare_lbfgs_private`/`PreparedLBFGS` boundary; Optax uses the same prepare/run split. Both reuse fixed-shape programs for warm runs; a clean strict-RTX-5090 `coil47` five-sample receipt now includes process-attributed VRAM and phase-scoped RSS. | Complete the StableHLO/compile promotion comparison and the A100 gate. |
 | Evidence | Local candidate receipts have artifact checksum tests. A clean candidate worktree validates all `38` manifests against the external bundle `/home/jungdaesuh/simsopt-jax-quasi-newton-evidence/20260802`; bundle inventory SHA-256 is `2415742390a5cb901fffb657c1115b34edcfa9d6d0e864ef216d3a744f8f86f2`. CPU lock SHA-256 is `159e05a65796e76dfb502ea4f6a06b1f412af1c7bb147bb5ac5974b5888a6b35` and GPU lock SHA-256 is `fc724b570ca23356b18df17da87a00217066fd42e5b02de5fe26b46cf20473f8`. | Replicate the bundle off-host and re-run the same validator there. |
 | Quality | Focused tests and compile/diff checks are green. The current large Boozer source/test files still report existing Ruff findings. | Close scoped Pyright, project-wide Ruff, broad compatibility, and clean-checkout gates. |
 | TDD | New defects have preserved RED -> GREEN evidence where recorded. | The already-implemented core has post-hoc tests only; historical RED revisions cannot be recreated and are not a completion claim. |
@@ -125,6 +125,15 @@ explicit comparator rather than a custom-solver parity oracle.
   `.artifacts/custom-quasi-newton-archive/gpu-five-sample-coil47-20260802/`.
   No device-memory telemetry or clean-checkout provenance was captured, so
   this remains diagnostic rather than promotion evidence.
+- Green clean-candidate GPU receipt: one discarded warm-up plus five retained
+  custom and Optax samples ran from clean commit `3b2b9f40a` with
+  process-attributed `nvidia-smi` VRAM. Custom/Optax medians were
+  `14.43294/4.07767 s` cold and `0.044042/0.027639 s` warm; maximum solver RSS
+  was `1786248/1605436 KiB`, and maximum process VRAM was `1514/2602 MiB`.
+  Objectives differed by at most `5.55e-17`. Receipt and raw evidence:
+  `docs/receipts/custom-quasi-newton/coil47-custom-optax-gpu-five-sample-vram-20260802/`.
+  This qualifies only the RTX-5090 lane; A100 and StableHLO promotion remain
+  open.
 - Blocked external lane: `ssh landau` returned `No route to host` on
   2026-08-02; no A100 qualification claim is made.
 - Green clean-candidate replay: detached checkout `41d95cf502240a686cc968e690f62d4a85a2d1a3`
