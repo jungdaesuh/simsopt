@@ -9,12 +9,13 @@ compatibility with existing callers.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field as dataclass_field
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from functools import partial
 from threading import Lock
 from typing import NamedTuple
-import hashlib
 
 import jax
 import jax.numpy as jnp
@@ -22,29 +23,18 @@ import jax.scipy.linalg as jsp_linalg
 import numpy as np
 from jax import lax
 from jax.sharding import PartitionSpec as P
-
-from simsopt_jax.runtime.host_boundary import (
-    host_array as _host_array,
-    host_bool as _host_bool,
-    host_inf_norm as _host_inf_norm,
-    host_int as _host_int,
-    host_scalar as _host_scalar,
-    runtime_certificate_probe_key as _runtime_certificate_probe_key,
-)
-from simsopt_jax.numerical_policy import (
-    MIXED_DENSE_IR_MAX_REFINEMENT_CORRECTIONS,
-    CertificateProbeAuthority,
-    CertificateProbeEvidence,
-    CertificateProbeKeyData,
-    resolve_certificate_probe_authority,
-)
+from simsopt.geo.curve import incremental_arclength_pure, kappa_pure
 from simsopt_jax.backend import get_backend_policy
+from simsopt_jax.core._device_scalars import staged_like as _staged_like
 from simsopt_jax.core._math_utils import (
     as_compute_array as _as_compute_array,
+)
+from simsopt_jax.core._math_utils import (
     as_jax_float64 as _as_jax_float64,
+)
+from simsopt_jax.core._math_utils import (
     as_runtime_float64 as _as_runtime_float64,
 )
-from simsopt_jax.core._device_scalars import staged_like as _staged_like
 from simsopt_jax.core.curve_geometry import curve_geometry_from_spec
 from simsopt_jax.core.field import (
     coil_set_spec_from_dof_extraction_spec,
@@ -56,6 +46,11 @@ from simsopt_jax.core.sharding import (
     maybe_shard_seed_batch_inputs,
     seed_batch_sharding_config,
 )
+from simsopt_jax.geo._pairwise_reductions import (
+    pairwise_min_distance_batched_pure,
+    pairwise_min_distance_pure,
+)
+from simsopt_jax.geo.boozer_residual import _surface_geometry_from_dofs
 from simsopt_jax.geo.optimizers import adjoint_linear_solve as _adjoint_linear_solve
 from simsopt_jax.geo.optimizers import dense_ir as _dense_ir
 from simsopt_jax.geo.optimizers import linear_solve as _linear_solve
@@ -63,24 +58,45 @@ from simsopt_jax.geo.optimizers._shared import (
     cast_floating_tree,
     mark_cacheable_jit_value_and_grad,
 )
-from simsopt_jax.geo._pairwise_reductions import (
-    pairwise_min_distance_batched_pure,
-    pairwise_min_distance_pure,
+from simsopt_jax.geo.surface_fourier import surface_volume
+from simsopt_jax.numerical_policy import (
+    MIXED_DENSE_IR_MAX_REFINEMENT_CORRECTIONS,
+    CertificateProbeAuthority,
+    CertificateProbeEvidence,
+    CertificateProbeKeyData,
+    resolve_certificate_probe_authority,
 )
-from simsopt_jax.geo.boozer_residual import _surface_geometry_from_dofs
+from simsopt_jax.runtime.host_boundary import (
+    host_array as _host_array,
+)
+from simsopt_jax.runtime.host_boundary import (
+    host_bool as _host_bool,
+)
+from simsopt_jax.runtime.host_boundary import (
+    host_inf_norm as _host_inf_norm,
+)
+from simsopt_jax.runtime.host_boundary import (
+    host_int as _host_int,
+)
+from simsopt_jax.runtime.host_boundary import (
+    host_scalar as _host_scalar,
+)
+from simsopt_jax.runtime.host_boundary import (
+    runtime_certificate_probe_key as _runtime_certificate_probe_key,
+)
+
+from simsopt_jax_adapters.geo.curve_objectives import curve_length_pure
+from simsopt_jax_adapters.geo.factor_handoff_identity import (
+    ExactFactorHandoff,
+    build_exact_factor_handoff,
+    require_exact_factor_handoff,
+)
+
 from .boozer_surface import (
     _ONDEVICE_OPTIMIZER_METHODS,
     _boozer_exact_residual,
     _make_boozer_penalty_objective_closure,
     _make_boozer_penalty_residual_closure,
-)
-from simsopt.geo.curve import incremental_arclength_pure, kappa_pure
-from simsopt_jax_adapters.geo.curve_objectives import curve_length_pure
-from simsopt_jax.geo.surface_fourier import surface_volume
-from simsopt_jax_adapters.geo.factor_handoff_identity import (
-    ExactFactorHandoff,
-    build_exact_factor_handoff,
-    require_exact_factor_handoff,
 )
 
 
@@ -115,21 +131,25 @@ def surface_to_surface_shortest_distance_pure(gamma1, gamma2):
 
 
 __all__ = [
+    "AcceptedIncumbentHostValueAndGrad",
     "TraceableObjectiveCertifiedSeededValueAndGrad",
+    "TraceableObjectiveInnerState",
+    "TraceableObjectiveIncumbentEvaluation",
     "TraceableObjectiveSeededValueAndGrad",
     "TraceableObjectiveSession",
     "TraceableObjectiveSolvedPair",
+    "TraceableObjectiveTrialResult",
     "diagnose_traceable_objective_runtime",
     "make_traceable_objective",
+    "make_traceable_objective_certified_seeded_value_and_grad",
     "make_traceable_objective_profile_suite",
     "make_traceable_objective_runtime_bundle",
-    "make_traceable_objective_certified_seeded_value_and_grad",
     "make_traceable_objective_seeded_value_and_grad",
     "make_traceable_objective_session",
     "make_traceable_objective_solved_pair",
     "make_traceable_objective_value_and_grad",
-    "make_traceable_solved_state_value_and_grad",
     "make_traceable_single_stage_alm_runtime_bundle",
+    "make_traceable_solved_state_value_and_grad",
     "traceable_forward_result_outer_raw_terms",
 ]
 
@@ -187,6 +207,140 @@ _TRACEABLE_NEWTON_TRACE_KEYS = (
     "newton_trace_certificate_value_dtype_bits",
     "newton_trace_certificate_gradient_dtype_bits",
 )
+
+
+class TraceableObjectiveInnerState(NamedTuple):
+    """Immutable accepted Boozer state supplied explicitly to candidate solves."""
+
+    coil_dofs: jax.Array
+    solved_x: jax.Array
+    objective_value: jax.Array
+    eligible: jax.Array
+
+
+class TraceableObjectiveIncumbentEvaluation(NamedTuple):
+    """Device-resident value, gradient, and candidate continuation state."""
+
+    value: jax.Array
+    gradient: jax.Array
+    candidate_inner_state: TraceableObjectiveInnerState
+
+
+class AcceptedIncumbentHostValueAndGrad:
+    """Host boundary that promotes Boozer continuation only after acceptance.
+
+    Every evaluation since the last accepted step stays addressable by
+    parameter identity: a line search may accept an earlier trial after
+    evaluating later ones. Acceptance clears the pending set, so it is
+    bounded by the evaluations of one outer iteration.
+    """
+
+    __slots__ = ("_compiled_evaluate", "_incumbent", "_lock", "_pending")
+
+    def __init__(self, compiled_evaluate: Callable, initial_state):
+        self._compiled_evaluate = compiled_evaluate
+        self._incumbent = initial_state
+        self._pending: dict[str, TraceableObjectiveIncumbentEvaluation] = {}
+        self._lock = Lock()
+
+    @staticmethod
+    def _parameter_sha256(parameters: np.ndarray) -> str:
+        canonical = np.ascontiguousarray(parameters, dtype=np.dtype("<f8")).reshape(-1)
+        return hashlib.sha256(canonical.tobytes(order="C")).hexdigest()
+
+    @property
+    def current_inner_state(self) -> TraceableObjectiveInnerState:
+        with self._lock:
+            return self._incumbent
+
+    def value_and_grad(self, parameters) -> tuple[float, np.ndarray]:
+        canonical = np.ascontiguousarray(parameters, dtype=np.dtype("<f8")).reshape(-1)
+        candidate = _as_jax_float64(canonical)
+        with self._lock:
+            incumbent = self._incumbent
+        evaluation = self._compiled_evaluate(candidate, incumbent)
+        jax.block_until_ready(evaluation)
+        with self._lock:
+            self._pending[self._parameter_sha256(canonical)] = evaluation
+        return (
+            float(_host_scalar(evaluation.value, dtype=np.float64)),
+            _host_array(evaluation.gradient, dtype=np.float64),
+        )
+
+    def __call__(self, parameters) -> tuple[float, np.ndarray]:
+        return self.value_and_grad(parameters)
+
+    def accept(self, parameters) -> None:
+        parameter_sha256 = self._parameter_sha256(np.asarray(parameters))
+        with self._lock:
+            evaluation = self._pending.get(parameter_sha256)
+            if evaluation is None:
+                raise RuntimeError(
+                    "accepted parameters do not match any pending candidate "
+                    "evaluation"
+                )
+            if not _host_bool(evaluation.candidate_inner_state.eligible):
+                raise RuntimeError("cannot promote an uncertified Boozer candidate")
+            self._incumbent = evaluation.candidate_inner_state
+            self._pending.clear()
+
+
+class TraceableObjectiveTrialResult(NamedTuple):
+    """Immutable host diagnostic for one forward solve and its actual adjoint."""
+
+    raw_objective_value: float
+    filtered_objective_value: float
+    gradient: np.ndarray
+    gradient_source: str
+    gradient_is_finite: bool
+    gradient_inf_norm: float
+    predictor_success: bool
+    primal_success: bool
+    actual_adjoint_success: bool
+    adjoint_linear_solve_available: bool
+    newton_success: bool
+    newton_iterations: int
+    newton_attempted_iterations: int | None
+    newton_stop_reason_code: int | None
+    newton_last_linear_solve_success: bool | None
+    inner_penalty_residual_l2: float | None
+    final_gradient_inf_norm: float | None
+    newton_trace_active: np.ndarray
+    newton_trace_step_accepted: np.ndarray
+    newton_trace_linear_solve_success: np.ndarray
+    newton_trace_linear_residual_relative: np.ndarray
+    newton_trace_linear_residual_norm: np.ndarray
+    newton_trace_linear_residual_scale: np.ndarray
+    newton_trace_linear_requested_tolerance: np.ndarray
+    newton_trace_linear_effective_tolerance: np.ndarray
+    newton_trace_linear_live_operator_certificate: np.ndarray
+    newton_trace_linear_factorization_dtype_bits: np.ndarray
+    newton_trace_linear_factor_application_dtype_bits: np.ndarray
+    newton_trace_linear_residual_dtype_bits: np.ndarray
+    newton_trace_certificate_value_dtype_bits: np.ndarray
+    newton_trace_certificate_gradient_dtype_bits: np.ndarray
+    newton_trace_active_present: bool
+    newton_trace_step_accepted_present: bool
+    newton_trace_linear_solve_success_present: bool
+    newton_trace_linear_residual_relative_present: bool
+    newton_trace_linear_residual_norm_present: bool
+    newton_trace_linear_residual_scale_present: bool
+    newton_trace_linear_requested_tolerance_present: bool
+    newton_trace_linear_effective_tolerance_present: bool
+    newton_trace_linear_live_operator_certificate_present: bool
+    newton_trace_linear_factorization_dtype_bits_present: bool
+    newton_trace_linear_factor_application_dtype_bits_present: bool
+    newton_trace_linear_residual_dtype_bits_present: bool
+    newton_trace_certificate_value_dtype_bits_present: bool
+    newton_trace_certificate_gradient_dtype_bits_present: bool
+    newton_linear_solve_backend_code: int
+    newton_linear_solve_backend_code_present: bool
+    dense_hessian_bytes: int
+    dense_hessian_bytes_present: bool
+    max_dense_hessian_bytes: int
+    max_dense_hessian_bytes_present: bool
+    candidate_inner_state: TraceableObjectiveInnerState
+
 
 _TRACEABLE_LABEL_OBJECTIVE_KEYS = (
     "targetlabel",
@@ -1020,14 +1174,23 @@ def _traceable_solve_linearization(
 def _pack_traceable_forward_result(
     *,
     value,
+    raw_value=None,
     x,
     sdofs,
     iota,
     G,
     linear_solve_factors,
     success,
+    predictor_success=None,
     primal_success,
     adjoint_linear_solve_available,
+    newton_success=None,
+    newton_iterations=None,
+    newton_attempted_iterations=None,
+    newton_stop_reason_code=None,
+    newton_last_linear_solve_success=None,
+    inner_penalty_residual_l2=None,
+    final_gradient_inf_norm=None,
     newton_trace_capacity: int,
     newton_trace_active: jax.Array | None = None,
     newton_trace_step_accepted: jax.Array | None = None,
@@ -1135,14 +1298,45 @@ def _pack_traceable_forward_result(
     }
     packed = {
         "value": value,
+        "raw_value": value if raw_value is None else raw_value,
         "x": x,
         "sdofs": sdofs,
         "iota": iota,
         "G": G,
         "linear_solve_factors": linear_solve_factors,
         "success": success,
+        "predictor_success": (
+            success if predictor_success is None else predictor_success
+        ),
         "primal_success": primal_success,
         "adjoint_linear_solve_available": adjoint_linear_solve_available,
+        "newton_success": success if newton_success is None else newton_success,
+        "newton_iterations": (
+            missing_int if newton_iterations is None else newton_iterations
+        ),
+        "newton_attempted_iterations": (
+            missing_int
+            if newton_attempted_iterations is None
+            else newton_attempted_iterations
+        ),
+        "newton_stop_reason_code": (
+            missing_int if newton_stop_reason_code is None else newton_stop_reason_code
+        ),
+        "newton_last_linear_solve_success": (
+            missing_bool
+            if newton_last_linear_solve_success is None
+            else newton_last_linear_solve_success
+        ),
+        "inner_penalty_residual_l2": (
+            missing_float
+            if inner_penalty_residual_l2 is None
+            else inner_penalty_residual_l2
+        ),
+        "final_gradient_inf_norm": (
+            missing_float
+            if final_gradient_inf_norm is None
+            else final_gradient_inf_norm
+        ),
         "newton_trace_active": newton_bool_trace_field(newton_trace_active),
         "newton_trace_step_accepted": newton_bool_trace_field(
             newton_trace_step_accepted
@@ -1253,7 +1447,6 @@ def _traceable_result_linear_solve_factors(solve_result, linearization_kind):
     operator-backed so compiled value/grad paths do not stage dense LU solves.
     """
     del solve_result, linearization_kind
-    return None
 
 
 def _build_linear_solve_factors_from_res(res):
@@ -1462,10 +1655,10 @@ def _traceable_general_forward_result(
         objective_kwargs=objective_kwargs,
     )
 
-    def _run_traceable_solve(_):
+    def _run_traceable_solve(initial_x, predictor_success):
         warmstart_sdofs, warmstart_iota, warmstart_G = (
             booz_jax._unpack_decision_vector_jax(
-                warmstart_x,
+                initial_x,
                 optimize_G,
                 coil_set_spec=coil_set_spec,
             )
@@ -1513,6 +1706,7 @@ def _traceable_general_forward_result(
         )
         return _pack_traceable_forward_result(
             value=filtered_objective_value,
+            raw_value=objective_value,
             x=solve_result["x"],
             sdofs=solved_sdofs,
             iota=solved_iota,
@@ -1522,8 +1716,21 @@ def _traceable_general_forward_result(
                 linearization_kind,
             ),
             success=success,
+            predictor_success=predictor_success,
             primal_success=primal_success,
             adjoint_linear_solve_available=adjoint_linear_solve_available,
+            newton_success=solve_result.get("success", primal_success),
+            newton_iterations=solve_result.get(
+                "newton_iter",
+                solve_result.get("nit", _runtime_int32_scalar(0)),
+            ),
+            newton_attempted_iterations=solve_result.get("newton_attempted_iterations"),
+            newton_stop_reason_code=solve_result.get("newton_stop_reason_code"),
+            newton_last_linear_solve_success=solve_result.get(
+                "newton_last_linear_solve_success"
+            ),
+            inner_penalty_residual_l2=solve_result.get("inner_penalty_residual_l2"),
+            final_gradient_inf_norm=solve_result.get("final_gradient_inf_norm"),
             newton_trace_capacity=newton_trace_capacity,
             newton_trace_active=solve_result.get("newton_trace_active"),
             newton_trace_step_accepted=solve_result.get("newton_trace_step_accepted"),
@@ -1576,44 +1783,21 @@ def _traceable_general_forward_result(
         )
 
     if linearization_kind != "exact_jacobian":
-        return _run_traceable_solve(None)
-
-    def _warmstart_failure(_):
-        warmstart_sdofs, warmstart_iota, warmstart_G = (
-            booz_jax._unpack_decision_vector_jax(
-                warmstart_x,
-                optimize_G,
-                coil_set_spec=coil_set_spec,
-            )
-        )
-        failure_value = _evaluate_traceable_total_objective(
+        return _run_traceable_solve(
             warmstart_x,
-            objective_coil_dofs,
-            certificate_coil_set_spec,
-            objective_kwargs,
-        )
-        filtered_failure_value = _traceable_rejected_objective_value(
-            failure_value,
-            baseline_value,
-        )
-        failure = _runtime_bool(False)
-        return _pack_traceable_forward_result(
-            value=filtered_failure_value,
-            x=warmstart_x,
-            sdofs=warmstart_sdofs,
-            iota=warmstart_iota,
-            G=warmstart_G,
-            linear_solve_factors=None,
-            success=failure,
-            primal_success=failure,
-            adjoint_linear_solve_available=failure,
-            newton_trace_capacity=newton_trace_capacity,
+            warmstart_linear_solve_success,
         )
 
     return lax.cond(
         warmstart_linear_solve_success,
-        _run_traceable_solve,
-        _warmstart_failure,
+        lambda _: _run_traceable_solve(
+            warmstart_x,
+            _runtime_bool(True),
+        ),
+        lambda _: _run_traceable_solve(
+            baseline_x,
+            _runtime_bool(False),
+        ),
         operand=None,
     )
 
@@ -1662,14 +1846,18 @@ def _traceable_forward_result(
             # seed is hardware-invalid. Candidate (non-baseline) states remain
             # subject to the hard success filter below.
             value=baseline_value,
+            raw_value=baseline_value,
             x=baseline_x,
             sdofs=baseline_sdofs,
             iota=baseline_iota,
             G=baseline_G,
             linear_solve_factors=baseline_linear_solve_factors,
             success=_runtime_bool(True),
+            predictor_success=_runtime_bool(True),
             primal_success=_runtime_bool(True),
             adjoint_linear_solve_available=_runtime_bool(False),
+            newton_success=_runtime_bool(True),
+            newton_iterations=_runtime_int32_scalar(0),
             newton_trace_capacity=newton_trace_capacity,
         )
 
@@ -2411,33 +2599,50 @@ def _build_traceable_objective_compiled_bundle_from_state(
     newton_trace_capacity = state["newton_trace_capacity"]
     coil_set_spec_from_dofs = state["coil_set_spec_from_dofs"]
 
+    def _general_forward_result_for(
+        coil_dofs,
+        anchor_coil_dofs,
+        anchor_x,
+        anchor_value,
+    ):
+        objective_coil_dofs = _as_jax_float64(coil_dofs)
+        proposal_coil_dofs = _as_compute_array(objective_coil_dofs)
+        proposal_anchor_coil_dofs = _as_compute_array(anchor_coil_dofs)
+        certificate_coil_set_spec = coil_set_spec_from_dofs(objective_coil_dofs)
+        return _traceable_general_forward_result(
+            booz_jax,
+            coil_set_spec_from_dofs,
+            coil_dofs=proposal_coil_dofs,
+            objective_coil_dofs=objective_coil_dofs,
+            certificate_coil_set_spec=certificate_coil_set_spec,
+            certificate_coil_set_spec_from_dofs=coil_set_spec_from_dofs,
+            baseline_x=anchor_x,
+            baseline_value=_as_jax_float64(anchor_value),
+            baseline_linear_solve_factors=baseline_linear_solve_factors,
+            linearization_kind=linearization_kind,
+            linear_solve_tol=linear_solve_tol,
+            linear_solve_stab=linear_solve_stab,
+            optimize_G=optimize_G,
+            baseline_coil_dofs=proposal_anchor_coil_dofs,
+            baseline_certificate_coil_dofs=anchor_coil_dofs,
+            predictor_kind=predictor_kind,
+            objective_kwargs=objective_kwargs,
+            success_filter=success_filter,
+            newton_trace_capacity=newton_trace_capacity,
+        )
+
     def _forward_result_for(coil_dofs):
+        if general_only_forward:
+            return _general_forward_result_for(
+                coil_dofs,
+                baseline_coil_dofs,
+                baseline_x,
+                baseline_value,
+            )
         objective_coil_dofs = _as_jax_float64(coil_dofs)
         proposal_coil_dofs = _as_compute_array(objective_coil_dofs)
         proposal_baseline_coil_dofs = _as_compute_array(baseline_coil_dofs)
         certificate_coil_set_spec = coil_set_spec_from_dofs(objective_coil_dofs)
-        if general_only_forward:
-            return _traceable_general_forward_result(
-                booz_jax,
-                coil_set_spec_from_dofs,
-                coil_dofs=proposal_coil_dofs,
-                objective_coil_dofs=objective_coil_dofs,
-                certificate_coil_set_spec=certificate_coil_set_spec,
-                certificate_coil_set_spec_from_dofs=coil_set_spec_from_dofs,
-                baseline_x=baseline_x,
-                baseline_value=_as_jax_float64(baseline_value),
-                baseline_linear_solve_factors=baseline_linear_solve_factors,
-                linearization_kind=linearization_kind,
-                linear_solve_tol=linear_solve_tol,
-                linear_solve_stab=linear_solve_stab,
-                optimize_G=optimize_G,
-                baseline_coil_dofs=proposal_baseline_coil_dofs,
-                baseline_certificate_coil_dofs=baseline_coil_dofs,
-                predictor_kind=predictor_kind,
-                objective_kwargs=objective_kwargs,
-                success_filter=success_filter,
-                newton_trace_capacity=newton_trace_capacity,
-            )
         return _traceable_forward_result(
             booz_jax,
             coil_set_spec_from_dofs,
@@ -2460,7 +2665,37 @@ def _build_traceable_objective_compiled_bundle_from_state(
             newton_trace_capacity=newton_trace_capacity,
         )
 
+    def _forward_result_from_anchor_for(
+        coil_dofs,
+        incumbent: TraceableObjectiveInnerState,
+    ):
+        anchor_eligible = jnp.asarray(incumbent.eligible, dtype=jnp.bool_)
+        anchor_coil_dofs = lax.select(
+            anchor_eligible,
+            _as_jax_float64(incumbent.coil_dofs),
+            _as_jax_float64(baseline_coil_dofs),
+        )
+        anchor_x = lax.select(
+            anchor_eligible,
+            _as_jax_float64(incumbent.solved_x),
+            _as_jax_float64(baseline_x),
+        )
+        anchor_value = lax.select(
+            anchor_eligible,
+            _as_jax_float64(incumbent.objective_value),
+            _as_jax_float64(baseline_value),
+        )
+        return _general_forward_result_for(
+            coil_dofs,
+            anchor_coil_dofs,
+            anchor_x,
+            anchor_value,
+        )
+
     jitted_forward_result_for = jax.jit(_forward_result_for)
+    jitted_forward_result_from_anchor_for = jax.jit(
+        _forward_result_from_anchor_for
+    )
 
     def _total_gradient_for(coil_dofs, solved_x, solved_linear_solve_factors):
         return _traceable_total_gradient_with_status(
@@ -2629,6 +2864,9 @@ def _build_traceable_objective_compiled_bundle_from_state(
     return {
         "state": state,
         "compiled_forward_result_for": compiled_forward_result_for,
+        "compiled_forward_result_from_anchor_for": (
+            jitted_forward_result_from_anchor_for
+        ),
         "compiled_total_gradient_for": compiled_total_gradient_for,
         "compiled_total_gradient_for_with_certificate_key": (
             compiled_total_gradient_for_with_certificate_key
@@ -3152,6 +3390,280 @@ def _ensure_traceable_runtime_optimizer_solved_pair(runtime_entry, booz_jax):
         )
         runtime_entry["optimizer_solved_pair"] = optimizer_solved_pair
     return optimizer_solved_pair
+
+
+def _build_traceable_trial_evaluator(compiled_bundle):
+    """Build the opt-in host diagnostic for one forward/adjoint evaluation.
+
+    The evaluator calls the owned compiled forward exactly once, then applies
+    the production candidate-versus-baseline gradient routing and preserves the
+    actual adjoint success returned by ``compiled_total_gradient_for``.
+    """
+    state = compiled_bundle["state"]
+    compiled_forward_result_for = compiled_bundle["compiled_forward_result_for"]
+    compiled_forward_result_from_anchor_for = compiled_bundle.get(
+        "compiled_forward_result_from_anchor_for"
+    )
+    compiled_total_gradient_for = compiled_bundle["compiled_total_gradient_for"]
+    baseline_coil_dofs = _as_jax_float64(state["baseline_coil_dofs"])
+    baseline_x = _as_jax_float64(state["baseline_x"])
+    baseline_linear_solve_factors = _traceable_runtime_deviceify_tree(
+        state["baseline_linear_solve_factors"]
+    )
+
+    def evaluate_trial(
+        coil_dofs,
+        incumbent: TraceableObjectiveInnerState | None = None,
+    ) -> TraceableObjectiveTrialResult:
+        candidate_coil_dofs = _as_jax_float64(coil_dofs)
+        if incumbent is None:
+            forward_result = compiled_forward_result_for(candidate_coil_dofs)
+            fallback_coil_dofs = baseline_coil_dofs
+            fallback_x = baseline_x
+            fallback_gradient_source = "baseline"
+        else:
+            if compiled_forward_result_from_anchor_for is None:
+                raise RuntimeError(
+                    "explicit incumbent evaluation requires the anchored forward "
+                    "program"
+                )
+            forward_result = compiled_forward_result_from_anchor_for(
+                candidate_coil_dofs,
+                incumbent,
+            )
+            incumbent_eligible = _host_bool(incumbent.eligible)
+            fallback_coil_dofs = (
+                incumbent.coil_dofs if incumbent_eligible else baseline_coil_dofs
+            )
+            fallback_x = incumbent.solved_x if incumbent_eligible else baseline_x
+            fallback_gradient_source = (
+                "incumbent" if incumbent_eligible else "baseline"
+            )
+        candidate_gradient_source = _host_bool(forward_result["success"]) or _host_bool(
+            forward_result["primal_success"]
+        )
+        if candidate_gradient_source:
+            gradient_coil_dofs = candidate_coil_dofs
+            gradient_x = forward_result["x"]
+            gradient_linear_solve_factors = forward_result["linear_solve_factors"]
+            gradient_source = "candidate"
+        else:
+            gradient_coil_dofs = fallback_coil_dofs
+            gradient_x = fallback_x
+            gradient_linear_solve_factors = baseline_linear_solve_factors
+            gradient_source = fallback_gradient_source
+
+        raw_gradient, actual_adjoint_success = compiled_total_gradient_for(
+            gradient_coil_dofs,
+            gradient_x,
+            gradient_linear_solve_factors,
+        )
+        gradient = _host_array(
+            _traceable_adjoint_gradient_or_nan(
+                raw_gradient,
+                actual_adjoint_success,
+            ),
+            dtype=np.float64,
+        )
+        gradient_is_finite = bool(np.all(np.isfinite(gradient)))
+        gradient_inf_norm = (
+            float(np.max(np.abs(gradient))) if gradient_is_finite else float("nan")
+        )
+        raw_objective_value = float(
+            _host_scalar(forward_result["raw_value"], dtype=np.float64)
+        )
+        candidate_inner_state = TraceableObjectiveInnerState(
+            coil_dofs=candidate_coil_dofs,
+            solved_x=forward_result["x"],
+            objective_value=forward_result["raw_value"],
+            eligible=jnp.asarray(
+                _host_bool(forward_result["success"])
+                and _host_bool(actual_adjoint_success)
+                and gradient_is_finite
+                and np.isfinite(raw_objective_value),
+                dtype=jnp.bool_,
+            ),
+        )
+
+        def trace_array(key: str) -> np.ndarray:
+            if key in {
+                "newton_trace_active",
+                "newton_trace_step_accepted",
+                "newton_trace_linear_solve_success",
+                "newton_trace_linear_live_operator_certificate",
+            }:
+                dtype = np.bool_
+            elif "dtype_bits" in key:
+                dtype = np.int32
+            else:
+                dtype = np.float64
+            return _host_array(forward_result[key], dtype=dtype)
+
+        def trace_present(key: str) -> bool:
+            return _host_bool(forward_result[f"{key}_present"])
+
+        missing_int = int(np.iinfo(np.int32).min)
+        newton_attempted_iterations = _host_int(
+            forward_result["newton_attempted_iterations"]
+        )
+        newton_stop_reason_code = _host_int(
+            forward_result["newton_stop_reason_code"]
+        )
+        detailed_newton_telemetry_present = not (
+            newton_attempted_iterations == missing_int
+            and newton_stop_reason_code == missing_int
+        )
+        inner_penalty_residual_l2 = float(
+            _host_scalar(
+                forward_result["inner_penalty_residual_l2"],
+                dtype=np.float64,
+            )
+        )
+        final_gradient_inf_norm = float(
+            _host_scalar(
+                forward_result["final_gradient_inf_norm"],
+                dtype=np.float64,
+            )
+        )
+
+        return TraceableObjectiveTrialResult(
+            raw_objective_value=raw_objective_value,
+            filtered_objective_value=float(
+                _host_scalar(forward_result["value"], dtype=np.float64)
+            ),
+            gradient=gradient,
+            gradient_source=gradient_source,
+            gradient_is_finite=gradient_is_finite,
+            gradient_inf_norm=gradient_inf_norm,
+            predictor_success=_host_bool(forward_result["predictor_success"]),
+            primal_success=_host_bool(forward_result["primal_success"]),
+            actual_adjoint_success=_host_bool(actual_adjoint_success),
+            adjoint_linear_solve_available=_host_bool(
+                forward_result["adjoint_linear_solve_available"]
+            ),
+            newton_success=_host_bool(forward_result["newton_success"]),
+            newton_iterations=_host_int(forward_result["newton_iterations"]),
+            newton_attempted_iterations=(
+                newton_attempted_iterations
+                if detailed_newton_telemetry_present
+                else None
+            ),
+            newton_stop_reason_code=(
+                newton_stop_reason_code if detailed_newton_telemetry_present else None
+            ),
+            newton_last_linear_solve_success=(
+                _host_bool(forward_result["newton_last_linear_solve_success"])
+                if detailed_newton_telemetry_present
+                else None
+            ),
+            inner_penalty_residual_l2=(
+                inner_penalty_residual_l2
+                if np.isfinite(inner_penalty_residual_l2)
+                else None
+            ),
+            final_gradient_inf_norm=(
+                final_gradient_inf_norm
+                if np.isfinite(final_gradient_inf_norm)
+                else None
+            ),
+            newton_trace_active=trace_array("newton_trace_active"),
+            newton_trace_step_accepted=trace_array("newton_trace_step_accepted"),
+            newton_trace_linear_solve_success=trace_array(
+                "newton_trace_linear_solve_success"
+            ),
+            newton_trace_linear_residual_relative=trace_array(
+                "newton_trace_linear_residual_relative"
+            ),
+            newton_trace_linear_residual_norm=trace_array(
+                "newton_trace_linear_residual_norm"
+            ),
+            newton_trace_linear_residual_scale=trace_array(
+                "newton_trace_linear_residual_scale"
+            ),
+            newton_trace_linear_requested_tolerance=trace_array(
+                "newton_trace_linear_requested_tolerance"
+            ),
+            newton_trace_linear_effective_tolerance=trace_array(
+                "newton_trace_linear_effective_tolerance"
+            ),
+            newton_trace_linear_live_operator_certificate=trace_array(
+                "newton_trace_linear_live_operator_certificate"
+            ),
+            newton_trace_linear_factorization_dtype_bits=trace_array(
+                "newton_trace_linear_factorization_dtype_bits"
+            ),
+            newton_trace_linear_factor_application_dtype_bits=trace_array(
+                "newton_trace_linear_factor_application_dtype_bits"
+            ),
+            newton_trace_linear_residual_dtype_bits=trace_array(
+                "newton_trace_linear_residual_dtype_bits"
+            ),
+            newton_trace_certificate_value_dtype_bits=trace_array(
+                "newton_trace_certificate_value_dtype_bits"
+            ),
+            newton_trace_certificate_gradient_dtype_bits=trace_array(
+                "newton_trace_certificate_gradient_dtype_bits"
+            ),
+            newton_trace_active_present=trace_present("newton_trace_active"),
+            newton_trace_step_accepted_present=trace_present(
+                "newton_trace_step_accepted"
+            ),
+            newton_trace_linear_solve_success_present=trace_present(
+                "newton_trace_linear_solve_success"
+            ),
+            newton_trace_linear_residual_relative_present=trace_present(
+                "newton_trace_linear_residual_relative"
+            ),
+            newton_trace_linear_residual_norm_present=trace_present(
+                "newton_trace_linear_residual_norm"
+            ),
+            newton_trace_linear_residual_scale_present=trace_present(
+                "newton_trace_linear_residual_scale"
+            ),
+            newton_trace_linear_requested_tolerance_present=trace_present(
+                "newton_trace_linear_requested_tolerance"
+            ),
+            newton_trace_linear_effective_tolerance_present=trace_present(
+                "newton_trace_linear_effective_tolerance"
+            ),
+            newton_trace_linear_live_operator_certificate_present=trace_present(
+                "newton_trace_linear_live_operator_certificate"
+            ),
+            newton_trace_linear_factorization_dtype_bits_present=trace_present(
+                "newton_trace_linear_factorization_dtype_bits"
+            ),
+            newton_trace_linear_factor_application_dtype_bits_present=trace_present(
+                "newton_trace_linear_factor_application_dtype_bits"
+            ),
+            newton_trace_linear_residual_dtype_bits_present=trace_present(
+                "newton_trace_linear_residual_dtype_bits"
+            ),
+            newton_trace_certificate_value_dtype_bits_present=trace_present(
+                "newton_trace_certificate_value_dtype_bits"
+            ),
+            newton_trace_certificate_gradient_dtype_bits_present=trace_present(
+                "newton_trace_certificate_gradient_dtype_bits"
+            ),
+            newton_linear_solve_backend_code=_host_int(
+                forward_result["newton_linear_solve_backend_code"]
+            ),
+            newton_linear_solve_backend_code_present=_host_bool(
+                forward_result["newton_linear_solve_backend_code_present"]
+            ),
+            dense_hessian_bytes=_host_int(forward_result["dense_hessian_bytes"]),
+            dense_hessian_bytes_present=_host_bool(
+                forward_result["dense_hessian_bytes_present"]
+            ),
+            max_dense_hessian_bytes=_host_int(
+                forward_result["max_dense_hessian_bytes"]
+            ),
+            max_dense_hessian_bytes_present=_host_bool(
+                forward_result["max_dense_hessian_bytes_present"]
+            ),
+            candidate_inner_state=candidate_inner_state,
+        )
+
+    return evaluate_trial
 
 
 def _ensure_traceable_runtime_seeded_value_and_grad(
@@ -4671,34 +5183,35 @@ class TraceableObjectiveSession:
     """
 
     __slots__ = (
-        "cache_key",
-        "success_filter",
-        "compiled_bundle",
-        "booz_jax",
-        "objective",
-        "batched_value_and_grad",
-        "reporting_metrics",
-        "reporting_metrics_from_solution",
-        "public_objective",
-        "public_value_and_grad",
-        "public_batched_value_and_grad",
-        "public_forward_result",
-        "public_reporting_metrics",
-        "public_reporting_metrics_from_solution",
-        "host_objective",
-        "host_value_and_grad",
-        "host_reporting_metrics",
-        "profile_suite",
-        "optimizer_value_and_grad",
-        "seeded_compiled_bundle",
-        "seeded_value_and_grad",
-        "alm_runtime_bundles",
-        "host_reporting_state",
-        "baseline_value_and_grad_state",
-        "solved_state_value_and_grad",
+        "_materialize_lock",
         "_optimizer_compiled_bundle",
         "_optimizer_solved_pair",
-        "_materialize_lock",
+        "_trial_evaluator",
+        "alm_runtime_bundles",
+        "baseline_value_and_grad_state",
+        "batched_value_and_grad",
+        "booz_jax",
+        "cache_key",
+        "compiled_bundle",
+        "host_objective",
+        "host_reporting_metrics",
+        "host_reporting_state",
+        "host_value_and_grad",
+        "objective",
+        "optimizer_value_and_grad",
+        "profile_suite",
+        "public_batched_value_and_grad",
+        "public_forward_result",
+        "public_objective",
+        "public_reporting_metrics",
+        "public_reporting_metrics_from_solution",
+        "public_value_and_grad",
+        "reporting_metrics",
+        "reporting_metrics_from_solution",
+        "seeded_compiled_bundle",
+        "seeded_value_and_grad",
+        "solved_state_value_and_grad",
+        "success_filter",
     )
 
     def __init__(
@@ -4739,6 +5252,7 @@ class TraceableObjectiveSession:
         self.solved_state_value_and_grad = None
         self._optimizer_compiled_bundle = optimizer_compiled_bundle
         self._optimizer_solved_pair = None
+        self._trial_evaluator = None
         self._materialize_lock = Lock()
 
     @property
@@ -4865,6 +5379,66 @@ class TraceableObjectiveSession:
                 optimizer_compiled_bundle
             )
             return self._optimizer_solved_pair
+
+    def trial_evaluator(self) -> Callable:
+        """Return the cached opt-in evaluator for immutable Boozer trial records."""
+        if self._trial_evaluator is not None:
+            return self._trial_evaluator
+        with self._materialize_lock:
+            if self._trial_evaluator is not None:
+                return self._trial_evaluator
+            optimizer_compiled_bundle = self._optimizer_compiled_bundle
+            if optimizer_compiled_bundle is None:
+                if self.booz_jax is None:
+                    raise RuntimeError(
+                        "TraceableObjectiveSession cannot build a trial evaluator "
+                        "without booz_jax; pass optimizer_compiled_bundle at "
+                        "construction or construct via "
+                        "make_traceable_objective_session()."
+                    )
+                optimizer_compiled_bundle = (
+                    _build_traceable_objective_compiled_bundle_from_state(
+                        self.booz_jax,
+                        self.compiled_bundle["state"],
+                        success_filter=self.success_filter,
+                        general_only_forward=True,
+                    )
+                )
+                self._optimizer_compiled_bundle = optimizer_compiled_bundle
+            self._trial_evaluator = _build_traceable_trial_evaluator(
+                optimizer_compiled_bundle
+            )
+            return self._trial_evaluator
+
+    def accepted_incumbent_host_value_and_grad(
+        self,
+    ) -> AcceptedIncumbentHostValueAndGrad:
+        """Mint an isolated accepted-incumbent controller seeded from baseline.
+
+        Each call returns a fresh controller; controllers never share incumbent
+        or pending state. Promotion happens only through ``accept``, which the
+        host driver must call from its post-acceptance callback.
+        """
+        evaluate_trial = self.trial_evaluator()
+        state = self._optimizer_compiled_bundle["state"]
+        initial_state = TraceableObjectiveInnerState(
+            coil_dofs=_as_jax_float64(state["baseline_coil_dofs"]),
+            solved_x=_as_jax_float64(state["baseline_x"]),
+            objective_value=jnp.asarray(state["baseline_value"], dtype=jnp.float64),
+            eligible=jnp.asarray(True, dtype=jnp.bool_),
+        )
+
+        def compiled_evaluate(candidate_coil_dofs, incumbent):
+            trial = evaluate_trial(candidate_coil_dofs, incumbent=incumbent)
+            return TraceableObjectiveIncumbentEvaluation(
+                value=jnp.asarray(
+                    trial.filtered_objective_value, dtype=jnp.float64
+                ),
+                gradient=jnp.asarray(trial.gradient, dtype=jnp.float64),
+                candidate_inner_state=trial.candidate_inner_state,
+            )
+
+        return AcceptedIncumbentHostValueAndGrad(compiled_evaluate, initial_state)
 
     def clear_solved_pair_cache(self):
         """Drop the session-local solved-pair cache (isolation / reset helper)."""

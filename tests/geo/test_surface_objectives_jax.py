@@ -2808,7 +2808,7 @@ def test_traceable_ls_warmstart_failure_preserves_baseline_state(monkeypatch):
     np.testing.assert_allclose(np.asarray(predicted), np.asarray(baseline_x))
 
 
-def test_traceable_exact_warmstart_failure_surfaces_unsuccessful_forward_result(
+def test_traceable_exact_warmstart_failure_retries_from_incumbent_state(
     monkeypatch,
 ):
     baseline_x = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
@@ -2818,8 +2818,17 @@ def test_traceable_exact_warmstart_failure_surfaces_unsuccessful_forward_result(
     monkeypatch.setattr(
         surfaceobjectives_traceable_jax_module,
         "_evaluate_traceable_total_objective",
-        lambda *_args, **_kwargs: jnp.asarray(np.nan, dtype=jnp.float64),
+        lambda *_args, **_kwargs: jnp.asarray(1.25, dtype=jnp.float64),
     )
+
+    def run_code_traceable(_coil_spec, sdofs, iota, G, **_kwargs):
+        warmstart = jnp.concatenate((jnp.asarray(sdofs), jnp.asarray([iota])))
+        return {
+            "x": warmstart,
+            "success": jnp.asarray(True, dtype=bool),
+            "primal_success": jnp.asarray(True, dtype=bool),
+            "adjoint_linear_solve_available": jnp.asarray(True, dtype=bool),
+        }
 
     booz = types.SimpleNamespace(
         _unpack_decision_vector_jax=lambda x, optimize_G, coil_set_spec: (
@@ -2827,13 +2836,7 @@ def test_traceable_exact_warmstart_failure_surfaces_unsuccessful_forward_result(
             x[-1],
             None,
         ),
-        run_code_traceable=lambda *_args, **_kwargs: {
-            "x": baseline_x,
-            "plu": None,
-            "success": jnp.asarray(True, dtype=bool),
-            "primal_success": jnp.asarray(True, dtype=bool),
-            "adjoint_linear_solve_available": jnp.asarray(True, dtype=bool),
-        },
+        run_code_traceable=run_code_traceable,
     )
 
     result = surfaceobjectives_traceable_jax_module._traceable_general_forward_result(
@@ -2854,14 +2857,12 @@ def test_traceable_exact_warmstart_failure_surfaces_unsuccessful_forward_result(
         newton_trace_capacity=_TEST_NEWTON_TRACE_CAPACITY,
     )
 
-    assert bool(result["success"]) is False
-    assert bool(result["primal_success"]) is False
-    assert bool(result["adjoint_linear_solve_available"]) is False
-    np.testing.assert_allclose(np.asarray(result["value"]), np.asarray(30.0))
-    np.testing.assert_allclose(
-        np.asarray(result["x"]),
-        np.asarray(baseline_x + failed_dx),
-    )
+    assert bool(result["success"]) is True
+    assert bool(result["predictor_success"]) is False
+    assert bool(result["primal_success"]) is True
+    assert bool(result["adjoint_linear_solve_available"]) is True
+    np.testing.assert_allclose(np.asarray(result["value"]), np.asarray(1.25))
+    np.testing.assert_allclose(np.asarray(result["x"]), np.asarray(baseline_x))
 
 
 def test_traceable_general_forward_passes_distinct_certificate_coil_source(
