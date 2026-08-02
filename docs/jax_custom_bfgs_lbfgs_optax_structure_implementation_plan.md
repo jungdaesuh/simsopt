@@ -1142,8 +1142,13 @@ custom method name.
       selectors pass in the isolated strict CPU lane; full application-scale
       endpoint parity remains open.
 - [ ] Compare every accepted state against the pre-refactor custom solver.
-      Compare L-BFGS-B against pinned SciPy with matched options. Separate
-      bitwise, tolerance, and equivalent-endpoint verdicts.
+      The current synthetic three-step BFGS and L-BFGS receipts are explicitly
+      diagnostic and do not cover the full application matrix.
+- [x] Compare the pinned SciPy L-BFGS-B accepted-step trajectory with matched
+      options. `tests/jax/solve/test_lbfgsb_trajectory_parity.py` covers the
+      accepted states, counters, deferred `maxfun`, and observer-equivalence
+      contracts; bitwise, tolerance, and equivalent-endpoint verdicts remain
+      separate where applicable.
 - [x] Verify non-stopping callback/no-callback and trace/no-trace configurations
       do not change numerical results. Verify `StopIteration` produces the
       intended frozen trajectory prefix and terminal result.
