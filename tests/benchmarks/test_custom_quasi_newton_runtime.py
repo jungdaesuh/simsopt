@@ -316,9 +316,17 @@ def test_measurement_native_provider_has_no_prepared_argument() -> None:
 
 
 def test_native_measurement_resets_mutable_provider_between_runs() -> None:
-    state = {"evaluations": 0, "resets": 0}
+    state = {
+        "evaluations": 0,
+        "resets": 0,
+        "first_evaluation_after_reset": [],
+        "awaiting_first_evaluation": False,
+    }
 
     def native_value_and_grad(x: np.ndarray) -> tuple[float, np.ndarray]:
+        if state["awaiting_first_evaluation"]:
+            state["first_evaluation_after_reset"].append(state["evaluations"])
+            state["awaiting_first_evaluation"] = False
         state["evaluations"] += 1
         value = float(np.sum(np.square(x)) + state["evaluations"])
         return value, 2.0 * np.asarray(x, dtype=np.float64)
@@ -326,6 +334,7 @@ def test_native_measurement_resets_mutable_provider_between_runs() -> None:
     def reset_native() -> None:
         state["evaluations"] = 0
         state["resets"] += 1
+        state["awaiting_first_evaluation"] = True
 
     fixture_case = Fixture(
         name="stateful_native",
@@ -353,6 +362,7 @@ def test_native_measurement_resets_mutable_provider_between_runs() -> None:
     )
 
     assert state["resets"] == 2
+    assert state["first_evaluation_after_reset"] == [0, 0]
     assert np.isfinite(measurement.final_objective)
 
 
