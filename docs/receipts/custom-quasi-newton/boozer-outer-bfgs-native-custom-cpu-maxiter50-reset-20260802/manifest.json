@@ -1,0 +1,38 @@
+{
+  "archive_uri": "file:///home/jungdaesuh/simsopt-jax-quasi-newton-evidence/20260802/receipts/boozer-outer-bfgs-native-custom-cpu-maxiter50-reset-20260802",
+  "artifacts": [
+    {
+      "path": "metrics.json",
+      "sha256": "97a13f4e3e45f48ed18d622f81929fe81f8400633e7f44a4acae1bb027415572"
+    },
+    {
+      "path": "raw/boozer-outer-bfgs-native-custom-cpu-maxiter50-reset-final-final-run/custom/measurements.json",
+      "sha256": "578a17b4dde9af0693e828bcd6f980e7c6c5e1602d2104fde0287bb81640946b"
+    },
+    {
+      "path": "raw/boozer-outer-bfgs-native-custom-cpu-maxiter50-reset-final-final-run/measurements.json",
+      "sha256": "b602f99d5065f8b8ff10d77769c19c784f1ebe36fb2b4e35e01bbac6620ef5eb"
+    },
+    {
+      "path": "raw/boozer-outer-bfgs-native-custom-cpu-maxiter50-reset-final-final-run/native/measurements.json",
+      "sha256": "691878f5f988de2e2a540c4061740d5b01f3710c994d852f3db37f4ab3f9ad1c"
+    },
+    {
+      "path": "summary.md",
+      "sha256": "9162ddfb7533840b484d8ca5f3eabf78f2044e0e1cfd3d65d8a4424b4d94fd14"
+    }
+  ],
+  "candidate_commit": "5c1ff54e46589f23b624c32b2fe7f56866052169",
+  "candidate_worktree_clean": false,
+  "environment_lock": {
+    "path": "benchmarks/environments/custom_quasi_newton_cpu.lock.txt",
+    "sha256": "159e05a65796e76dfb502ea4f6a06b1f412af1c7bb147bb5ac5974b5888a6b35"
+  },
+  "kind": "custom-quasi-newton-runner",
+  "receipt_id": "boozer-outer-bfgs-native-custom-cpu-maxiter50-reset-20260802",
+  "schema_version": 1,
+  "source_runs": [
+    "boozer-outer-bfgs-native-custom-cpu-maxiter50-reset-final-final-run"
+  ],
+  "verdict": "diagnostic-pass-not-promotion"
+}

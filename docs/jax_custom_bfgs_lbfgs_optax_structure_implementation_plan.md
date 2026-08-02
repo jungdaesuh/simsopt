@@ -952,7 +952,7 @@ custom method name.
       status, Python/JAX/JAXLIB/SciPy/Optax versions, device, FP64 state,
       options, commands, exit codes, and fixture hashes. The clean candidate
       receipts bind these fields to commit `3b2b9f40a` and the CPU/GPU locks;
-      current-head `validate-all` revalidates the 39 tracked manifests and
+      current-head `validate-all` revalidates the 40 tracked manifests and
       archive checksums.
 - [x] Add the reviewed build-requirement input and relocatable hash-locked CPU/
       GPU dependency files described under Supported environments. The CPU
@@ -1368,7 +1368,7 @@ The runner writes local working data to
 - [x] tracked compact `metrics.json` and `summary.md` beside the manifest; and
 - [x] raw logs/JSON copied to the archive URI and verified from a fresh process.
 
-Current-head validation: `validate-all` rechecked `39` manifests with exit
+Current-head validation: `validate-all` rechecked `40` manifests with exit
 code 0. The rollback receipt records the clean base/candidate tree hashes and
 the bounded selector results; the external archive is local and not yet
 replicated off-host.
