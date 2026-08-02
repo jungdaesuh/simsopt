@@ -18,7 +18,7 @@ but the change is not promotion-ready.
 | GPU | The 41 non-slow runtime contracts and the broader Boozer/traceable compatibility selector pass on strict RTX 5090 CUDA. Custom `coil47` converges on GPU; the Boozer outer BFGS now has a current-HEAD 20-iteration CPU/GPU diagnostic pair. | Qualify a converged Boozer endpoint and run the declared A100 lane. |
 | Performance and memory | Bounded diagnostics favor specialized design B over generic design A. Custom now exposes a production `prepare_lbfgs_private`/`PreparedLBFGS` boundary; Optax uses the same prepare/run split. Both reuse fixed-shape programs for warm runs; a clean strict-RTX-5090 `coil47` five-sample receipt now includes process-attributed VRAM and phase-scoped RSS. | Complete the StableHLO/compile promotion comparison and the A100 gate. |
 | Evidence | Local candidate receipts have artifact checksum tests. A clean candidate worktree validates all `39` manifests against the external bundle `/home/jungdaesuh/simsopt-jax-quasi-newton-evidence/20260802`; bundle inventory SHA-256 is `43ea7e7dd07c7914d16054c1dae206c3a6cdbc2293b493c255dfb87b43659ea9`. CPU lock SHA-256 is `159e05a65796e76dfb502ea4f6a06b1f412af1c7bb147bb5ac5974b5888a6b35` and GPU lock SHA-256 is `fc724b570ca23356b18df17da87a00217066fd42e5b02de5fe26b46cf20473f8`. | Replicate the bundle off-host and re-run the same validator there. |
-| Quality | Focused tests and compile/diff checks are green. The current large Boozer source/test files still report existing Ruff findings. | Close scoped Pyright, project-wide Ruff, broad compatibility, and clean-checkout gates. |
+| Quality | Focused tests and compile/diff checks are green. The current large Boozer source/test files still report existing Ruff findings. | Close scoped Pyright, project-wide Ruff, application-scale endpoint, and clean-checkout gates. |
 | TDD | New defects have preserved RED -> GREEN evidence where recorded. | The already-implemented core has post-hoc tests only; historical RED revisions cannot be recreated and are not a completion claim. |
 
 <details>
@@ -1295,8 +1295,10 @@ The lock-only follow-up is `41d95cf502240a686cc968e690f62d4a85a2d1a3`.
 No unrelated commit is part of the implementation slice. The rollback
 rehearsal and bounded frozen-selector replay are recorded in
 `docs/receipts/custom-quasi-newton/rollback-rehearsal-20260802.md`; the
-broad traceable application selector remains open because its base run hit the
-declared RSS guard.
+rollback-base broad traceable application selector remains incomplete because
+its run hit the declared RSS guard. Current-candidate compatibility closure is
+recorded separately in
+`docs/receipts/custom-quasi-newton/boozer-compatibility-partitions-20260802.md`.
 
 - [ ] Remove duplicated eager host-loop mechanics only after BFGS and L-BFGS
       pass independently. Keep all mathematics algorithm-owned.
@@ -1324,11 +1326,11 @@ declared RSS guard.
       on the rehearsed rollback tree, and archive the base, candidate, ordered
       SHA list, commands, exit codes, tree hashes, and receipt hashes. Return
       to the candidate commit and rerun the same bounded selectors.
-- [x] Complete the broad traceable Boozer compatibility selector in fresh
-      private/public/shim processes on strict CPU and RTX 5090 CUDA. The
-      partitioned receipt records `111 passed, 3 skipped` on CPU and
-      `110 passed, 4 skipped` on GPU; the earlier rollback-base RSS stop is
-      superseded and remains historical only.
+- [x] Complete the current-candidate broad traceable Boozer compatibility
+      selector in fresh private/public/shim processes on strict CPU and RTX
+      5090 CUDA. The partitioned receipt records `111 passed, 3 skipped` on
+      CPU and `110 passed, 4 skipped` on GPU. The rollback-base broad selector
+      remains an incomplete rollback-side comparison.
 - [x] Do not remove the traceable whole-solve implementation in this plan.
 
 ## Receipt contract
