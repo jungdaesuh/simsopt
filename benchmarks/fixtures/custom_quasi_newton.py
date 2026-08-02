@@ -18,6 +18,7 @@ import numpy as np
 ArrayObjective = Callable[[jax.Array], jax.Array]
 ValueAndGrad = Callable[[jax.Array], tuple[jax.Array, jax.Array]]
 NativeValueAndGrad = Callable[[np.ndarray], tuple[float, np.ndarray]]
+NativeReset = Callable[[], None]
 MetadataValue: TypeAlias = (
     str | int | float | bool | tuple[int, ...] | tuple[float, ...]
 )
@@ -26,7 +27,11 @@ FixtureMetadata: TypeAlias = tuple[tuple[str, MetadataValue], ...]
 
 @dataclass(frozen=True)
 class Fixture:
-    """A reproducible scalar objective and its initial point."""
+    """A reproducible scalar objective and its initial point.
+
+    ``native_reset`` restores mutable native-provider state before each
+    independent timed run; a provider without mutable state may leave it unset.
+    """
 
     name: str
     objective: ArrayObjective
@@ -38,6 +43,7 @@ class Fixture:
     value_and_grad: ValueAndGrad | None = None
     native_value_and_grad: NativeValueAndGrad | None = None
     metadata: FixtureMetadata = ()
+    native_reset: NativeReset | None = None
 
 
 def quadratic47() -> Fixture:
@@ -343,6 +349,20 @@ def boozer_physics() -> Fixture:
         G=native_g0,
     )
     native_iota_target = float(native_initial_solution["iota"])
+    native_initial_surface_dofs = np.asarray(
+        native_solver.surface.x,
+        dtype=np.float64,
+    ).copy()
+    native_initial_iota = float(native_initial_solution["iota"])
+    native_initial_G = float(native_initial_solution["G"])
+
+    def reset_native() -> None:
+        """Restore the native inner solve before each timed outer run."""
+        native_solver.surface.x = native_initial_surface_dofs.copy()
+        native_solver.res["iota"] = native_initial_iota
+        native_solver.res["G"] = native_initial_G
+        native_solver.set_recompute_flag()
+
     native_major_radius = MajorRadius(native_solver)
     native_lengths = [CurveLength(curve) for curve in native_curves]
     native_non_qs = NonQuasiSymmetricRatio(
@@ -426,6 +446,7 @@ def boozer_physics() -> Fixture:
         method="bfgs",
         value_and_grad=value_and_grad,
         native_value_and_grad=native_value_and_grad,
+        native_reset=reset_native,
         metadata=metadata,
     )
 

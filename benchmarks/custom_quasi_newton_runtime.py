@@ -981,6 +981,10 @@ def _measurement(
 
     def run_once():
         if provider == "native":
+            # Native inner solvers may retain their last accepted state; cold
+            # and warm measurements must start from the same native state.
+            if fixture_case.native_reset is not None:
+                fixture_case.native_reset()
             return _run_native(
                 fixture_case,
                 x0,

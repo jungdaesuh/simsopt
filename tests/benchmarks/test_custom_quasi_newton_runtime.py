@@ -315,6 +315,47 @@ def test_measurement_native_provider_has_no_prepared_argument() -> None:
     assert measurement.provider == "native"
 
 
+def test_native_measurement_resets_mutable_provider_between_runs() -> None:
+    state = {"evaluations": 0, "resets": 0}
+
+    def native_value_and_grad(x: np.ndarray) -> tuple[float, np.ndarray]:
+        state["evaluations"] += 1
+        value = float(np.sum(np.square(x)) + state["evaluations"])
+        return value, 2.0 * np.asarray(x, dtype=np.float64)
+
+    def reset_native() -> None:
+        state["evaluations"] = 0
+        state["resets"] += 1
+
+    fixture_case = Fixture(
+        name="stateful_native",
+        objective=lambda x: jnp.sum(x * x),
+        initial=np.asarray([1.0], dtype=np.float64),
+        expected_dimension=1,
+        source="synthetic_stateful_native",
+        certificate="synthetic native reset contract",
+        method="lbfgs",
+        native_value_and_grad=native_value_and_grad,
+        native_reset=reset_native,
+    )
+
+    measurement = runtime._measurement(
+        fixture_case,
+        "native",
+        "cpu",
+        "parity",
+        fixture_case.initial.copy(),
+        maxiter=1,
+        maxcor=3,
+        method="lbfgs",
+        fixture_build_seconds=0.0,
+        fixture_build_peak_rss_kib=0,
+    )
+
+    assert state["resets"] == 2
+    assert np.isfinite(measurement.final_objective)
+
+
 def test_optax_comparator_uses_a_jitted_step(monkeypatch) -> None:
     jit_calls = 0
     original_jit = runtime.jax.jit
