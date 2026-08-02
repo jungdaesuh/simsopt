@@ -372,10 +372,14 @@ _BOOZER_HESSIAN_REPORTING_RESULT_KEYS = (
             "dense_newton_steps_materialized",
             "dense_newton_steps_message",
             "newton_iter",
+            "newton_attempted_iterations",
+            "newton_stop_reason_code",
+            "newton_last_linear_solve_success",
             "newton_linear_solve_backend_code",
             "newton_trace_linear_solve_backend_code",
             "final_gradient_norm",
             "final_gradient_inf_norm",
+            "inner_penalty_residual_l2",
             "iterative_refinement_ran",
             "final_step_iterative_refinement_ran",
             "dense_refinement_ran",
@@ -3621,6 +3625,10 @@ def _exact_newton_reporting_fields(result):
 
 def _ls_newton_reporting_fields(result):
     """Pack Newton-polish Hessian diagnostics without changing solve paths."""
+    fun = result.get("fun")
+    inner_penalty_residual_l2 = (
+        None if fun is None else jnp.sqrt(jnp.maximum(0.0, 2.0 * fun))
+    )
     return {
         **{key: result.get(key) for key in _BOOZER_NEWTON_TRACE_RESULT_KEYS},
         **{key: result.get(key) for key in _BOOZER_NEWTON_TRACE_PRESENCE_RESULT_KEYS},
@@ -3633,6 +3641,11 @@ def _ls_newton_reporting_fields(result):
         ),
         "dense_newton_steps_message": result.get("dense_newton_steps_message"),
         "newton_iter": result.get("newton_iter"),
+        "newton_attempted_iterations": result.get("newton_attempted_iterations"),
+        "newton_stop_reason_code": result.get("newton_stop_reason_code"),
+        "newton_last_linear_solve_success": result.get(
+            "newton_last_linear_solve_success"
+        ),
         "newton_linear_solve_backend_code": result.get(
             "newton_linear_solve_backend_code"
         ),
@@ -3641,6 +3654,7 @@ def _ls_newton_reporting_fields(result):
         ),
         "final_gradient_norm": result.get("final_gradient_norm"),
         "final_gradient_inf_norm": result.get("final_gradient_inf_norm"),
+        "inner_penalty_residual_l2": inner_penalty_residual_l2,
         "iterative_refinement_ran": result.get("iterative_refinement_ran"),
         "final_step_iterative_refinement_ran": result.get(
             "final_step_iterative_refinement_ran"
