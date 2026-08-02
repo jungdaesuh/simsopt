@@ -38,12 +38,15 @@ validate-all --root docs/receipts/custom-quasi-newton \
   --repo-root /home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed
 ```
 
-Result: `38` manifests validated against the external local archive. The
+Result: `38` manifests validated against the external archive bundle at
+`/home/jungdaesuh/simsopt-jax-quasi-newton-evidence/20260802`. The bundle's
+sorted file inventory has SHA-256
+`2415742390a5cb901fffb657c1115b34edcfa9d6d0e864ef216d3a744f8f86f2`. The
 sorted tracked-manifest inventory has SHA-256
 `d165979c72ec43c131d42fb646cb0b9c5cb5207a44445bb66f5cabbf39ca9539`.
 The CPU and GPU environment-lock hashes are
 `159e05a65796e76dfb502ea4f6a06b1f412af1c7bb147bb5ac5974b5888a6b35` and
 `fc724b570ca23356b18df17da87a00217066fd42e5b02de5fe26b46cf20473f8`.
 
-The archive remains in the ignored local `.artifacts/` tree; this receipt
-proves the clean-checkout checksum path but is not durable external storage.
+The bundle is local external storage outside the repository and survives a
+working-tree cleanup. It is not yet replicated off-host.
