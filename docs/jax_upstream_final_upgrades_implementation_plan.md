@@ -96,7 +96,7 @@ commit.
 | Host/dense operator correctness | selected portions of `9ca8929f5`, `7d488caacc`, `ecdba5011`, `aa7612a05`, `5df801e1b`, and `e7b74254a` | Keep host dense-Hessian materialization independent, short-circuit exact-zero RHS solves, use bounded static CUDA chunk sizing, and keep Newton step damping out of returned accepted-state Hessians except for explicitly augmented residual-J LSMR operators. |
 | Mixed dtype and solver foundation | `35eda35e3`, selected non-`lsmr_ir` portions of `e726e161f`, `37fc6be86`, `303ca6ed1`, selected `1f71046a7`, and `8120b0ede` | Reconcile hunks with target FP64 hardening; retain target defaults, preserve explicit FP32 placement, port replicated-scalar sharding, and package integration tests so mixed-directory collection loads both conftest owners. |
 | Mixed correctness fixes | `93a3e0271`, `9c3b6523e`, `d5ea716e3`, `c9299557b`, `111d22758`, `18b39f0c3`, `5604c4263`, `c2450d7bb`, `dd6d7fcc7`, and selected `7d488caacc` | Port final semantics, including the transfer-safe fixed reduction tree, not intermediate states. |
-| Pairwise and curve-objective SSOT | production portions of `8e3d2a784` | Port the core owner, geo compatibility re-export, core curve kernels, adapter routing, and focused parity tests as one slice; exclude banana owners and tests. |
+| Pairwise and curve-objective SSOT | production portions of `8e3d2a784` | Port the core owner, geo compatibility re-export, core curve kernels, adapter routing, and focused parity tests as one slice; exclude project-specific owners and tests. |
 | Typed policy and certificate/fallback closure | selected portions of `1f71046a7`, `5df801e1b`, `84bfcfc6b`, `0412de980`, `add41e95c`, `b35d9a9cc`, `c338f48ca`, `9e13791ca`, `e7b74254a`, `0391dd82d`, `aa47aa741` | Exclude campaign, attestation, and evidence-publication files; retain the strict-transfer host-boundary fix. |
 | Online Biot-Savart | production portions of `2afc66397`, then `12f7eb254` | Port implementation and focused field tests only. |
 | Dense HVP and surface placement | `b9732104b`, `7f6bf6192`, `5742d81b8` | Port as independent performance/correctness slices. |
@@ -412,7 +412,7 @@ the compatibility default and mixed precision is selected explicitly.
      re-export, move the reusable length/curvature/curve-distance kernels into
      `core/curve_kernels.py`, and route
      `src/simsopt_jax_adapters/geo/curve_objectives.py` through those kernels.
-     Exclude `banana.py`, banana specs/exports, and banana tests.
+     Exclude project-specific application owners, specs/exports, and tests.
    - [ ] Port the `7d488caacc` fixed reduction tree in
      `src/simsopt_jax/core/reductions.py`; remove the short-axis
      `lax.slice_in_dim` path so VJP on three-component axes remains valid under
@@ -604,7 +604,7 @@ the compatibility default and mixed precision is selected explicitly.
    - [ ] Reconcile only the dependency-complete fixture portions of
      `ad73aa0f1` in `tests/geo/test_surface_objectives_jax.py`: typed
      certificate-key helpers and the final `newton_trace_capacity` mock/state
-     contract. Do not copy validation-ladder, banana, campaign, or evidence
+     contract. Do not copy validation-ladder, campaign-specific, or evidence
      imports from the source test wholesale.
    - [ ] Port the production `newton_trace_capacity` owner and propagation
      finalized by `add41e95c`: `BoozerSurfaceJAX` must return the full configured
@@ -766,7 +766,7 @@ the compatibility default and mixed precision is selected explicitly.
      source runtime-attestation imports/exports; keep
      `surface_objectives.py` on the existing numerical grouped-Biot-Savart path
      without dispatch-evidence plumbing; and adapt only selected assertions from
-     source tests that otherwise import validation-ladder or banana owners.
+     source tests that otherwise import validation-ladder or project-specific owners.
 
 10. Prepare the upstream review series.
     - [ ] Keep policy/runtime, FP64 dense-IR, mixed kernels, certification,

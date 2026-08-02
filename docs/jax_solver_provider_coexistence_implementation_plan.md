@@ -5,10 +5,9 @@
 
 ## Purpose
 
-Reconstruct the solver portion of the JAX port as an additive, green commit
-stack. Keep custom/reference and third-party implementations available for
-qualification while separating implementation availability from the public
-solver-selection policy.
+Keep the custom SIMSOPT BFGS/L-BFGS algorithms as production providers while
+adding an additive, green qualification stack for explicit third-party
+comparisons. Separate implementation availability from public solver policy.
 
 ## Goals
 
@@ -19,6 +18,8 @@ solver-selection policy.
   provider and version as result provenance.
 - Keep SIMSOPT custom and SciPy reference lanes available while independently
   adding Lineax, Optax, and Optimistix providers.
+- Do not remove or silently replace custom BFGS/L-BFGS; Optax is an explicit
+  comparator until a separate provider decision is approved.
 - Make provider availability, default selection, call-site migration, and
   predecessor deletion separate commits.
 - Permit clean provider-specific cherry-picks and policy-only reverts.
@@ -95,6 +96,7 @@ solver-selection policy.
 | Layer | Owner |
 | --- | --- |
 | Adam, AdamW, and unconstrained L-BFGS update kernels | Optax |
+| Custom BFGS/L-BFGS line search, SciPy-compatible state, callbacks, counters, and statuses | SIMSOPT |
 | LM and Newton/root internal algorithm state and step kernels | Optimistix |
 | QR, SVD, LSMR, CG, GMRES, and related linear kernels | Lineax |
 | CPU L-BFGS-B, general constraints, and reference solves | SciPy |
@@ -445,8 +447,9 @@ C2 ── M1..Mn behavior-preserving semantic call-site migrations
     - [ ] `S_adam`: after `QO` and `M_adam`, select Optax Adam for qualified
       unconstrained deterministic full-batch/fixed-schedule problems. Include
       stochastic problems only after the matched multi-seed gate passes.
-    - [ ] `S_lbfgs`: after `QO` and `M_lbfgs`, select Optax L-BFGS for qualified
-      unconstrained smooth scalar problems.
+    - [ ] `S_lbfgs`: defer any Optax default decision until the custom
+      BFGS/L-BFGS structure plan has passed its compatibility, science, and
+      performance gates; Optax remains an explicit comparator meanwhile.
     - [ ] `S_lmroot`: after `QL`, `QX`, and the corresponding `M` commits,
       select Optimistix plus Lineax for qualified LM/root regimes.
     - [ ] `S_linear`: after `QL` and `M_linear`, select qualified Lineax

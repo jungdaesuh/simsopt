@@ -1,6 +1,6 @@
 # SIMSOPT solver and algorithm matrix
 
-Code snapshot audited: `544605fc8788ef6fbefaa0669d068f1dccdd1dbd`
+Code snapshot audited: working tree, 2026-08-01 solver-runtime refactor
 
 Status: **target architecture, not current behavior**. “Current” means implemented
 at the audited snapshot. “Target” is a migration decision and remains gated by
@@ -10,7 +10,7 @@ the contracts below.
 
 | Problem | Native / CPU current | JAX current | Target generic-kernel provider | Target action |
 |---|---|---|---|---|
-| Smooth deterministic scalar, unconstrained | SciPy `BFGS` or `L-BFGS-B`; physics often in C++ | SIMSOPT BFGS/L-BFGS; Optax and Optimistix L-BFGS adapters | Optax L-BFGS | Qualify Optax; retain SciPy reference |
+| Smooth deterministic scalar, unconstrained | SciPy `BFGS` or `L-BFGS-B`; physics often in C++ | SIMSOPT custom BFGS/L-BFGS with eager fixed-step and traced whole-solve routes; Optax explicit comparator | SIMSOPT custom; Optax comparator | Qualify trajectory/performance; retain SciPy reference |
 | Smooth scalar, box constrained | SciPy `L-BFGS-B` | Bound-aware private machinery, but the live route fixes `bounds=None`; no public bound-bearing path | SciPy CPU | Keep supported CPU lane; reject unsupported JAX/GPU bounds explicitly |
 | Stochastic/noisy scalar or fixed-step schedule | No native C++ Adam | SIMSOPT host/traceable Adam; Optax adapter | Optax Adam/AdamW | Migrate call sites; delete only duplicated update equations after certification |
 | Dense/modest nonlinear least squares | SciPy `least_squares`; manual Boozer Newton paths | SIMSOPT LM with JAX pivoted QR; Optimistix LM with selectable Lineax LSMR/QR (LSMR default) | Optimistix LM + Lineax QR | Change default only after differential and failure-mode certification |
@@ -30,7 +30,7 @@ the contracts below.
 
 | Current implementation | Actual ownership | Candidate | Target disposition |
 |---|---|---|---|
-| SIMSOPT BFGS and host L-BFGS | Algorithm, line search, stopping, SciPy-shaped result | Optax L-BFGS | Remove after application and failure-mode certification |
+| SIMSOPT BFGS and L-BFGS-B | Algorithm, line search, stopping, callbacks, SciPy-shaped result; eager fixed-step runtime plus traced whole-solve compatibility | Optax L-BFGS | Keep as production custom provider; compare Optax explicitly |
 | Private L-BFGS-B machinery; live route specializes to `bounds=None` | Bound-aware internals, projected-gradient logic, and More-Thuente search; no supported bound-bearing route | None selected for supported JAX | Keep private during qualification; delete if JAX bounds remain unsupported |
 | SIMSOPT host/traceable Adam | Update equations, stopping, callbacks, result policy | Optax Adam/AdamW | Replace equations; retain normalized policy |
 | SIMSOPT LM + JAX GMRES/pivoted QR | Nonlinear state machine, damping, acceptance, linear-solve policy | Optimistix + Lineax | Replace generic state/step machinery after certification |
@@ -46,7 +46,7 @@ the contracts below.
 
 | Library | Adam | Unconstrained quasi-Newton | Box-constrained scalar | Nonlinear least squares | Roots | Linear solves | General constraints | Selected role |
 |---|---|---|---|---|---|---|---|---|
-| Optax | Adam/AdamW | L-BFGS | Projection utilities, not L-BFGS-B | No | No | No | No general constrained optimizer | Adam and L-BFGS kernels |
+| Optax | Adam/AdamW | L-BFGS | Projection utilities, not L-BFGS-B | No | No | No | No general constrained optimizer | Explicit comparator; no silent custom-provider replacement |
 | Optimistix | Via Optax adapter; not native | BFGS/L-BFGS | No L-BFGS-B | LM | Newton/root solvers | Via Lineax | No general constrained optimizer | Nonlinear least squares and roots |
 | Lineax | No | No | No | Linear subproblems only | No | LU, Cholesky, QR, SVD, CG, GMRES, LSMR | No | Linear kernels |
 | SciPy | No | BFGS/L-BFGS-B | L-BFGS-B | Yes; bounds via TRF/dogbox, not LM | Yes | Yes | SLSQP, `trust-constr`, COBYLA | CPU bounds, constraints, and reference |
@@ -60,12 +60,12 @@ All external providers remain behind a SIMSOPT adapter.
 
 | Owner | Target responsibility |
 |---|---|
-| Optax | Adam/AdamW and unconstrained L-BFGS generic kernels |
+| Optax | Adam/AdamW and explicit unconstrained L-BFGS comparator; no default replacement decision |
 | Optimistix | LM and Newton/root generic state and step kernels |
 | Lineax | Linear factorization and iterative-solve kernels |
 | SciPy | CPU L-BFGS-B; bounded least squares via TRF/dogbox; general constraints; reference lane |
 | Diffrax | Candidate ODE/event kernels only after a separate audit |
-| SIMSOPT | Problem classification; solver selection; domain algorithms; acceptance/certification; damping/continuation policy; budgets/counters; status normalization; placement; precision escalation; fallback |
+| SIMSOPT | Custom BFGS/L-BFGS algorithms; problem classification; solver selection; domain algorithms; acceptance/certification; damping/continuation policy; budgets/counters; status normalization; placement; precision escalation; fallback |
 
 ## Evidence status
 
