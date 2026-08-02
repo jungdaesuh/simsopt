@@ -725,7 +725,7 @@ compatibility, science, and performance gates pass.
 
 ## Goals
 
-- [ ] Preserve `bfgs-ondevice` and `lbfgs-ondevice` method names, options,
+- [x] Preserve `bfgs-ondevice` and `lbfgs-ondevice` method names, options,
       callbacks, statuses, counters, result fields, and SciPy parity behavior.
 - [x] Use a fixed-shape accepted-step interface for normal eager solves, with
       total budgets outside step compilation.
@@ -1565,17 +1565,17 @@ archive. This prevents unrelated dirty-tree files from entering the verdict.
 
 ## Completion criteria
 
-- [ ] Eager custom BFGS/L-BFGS use the fixed-shape step runtime; traced callers
+- [x] Eager custom BFGS/L-BFGS use the fixed-shape step runtime; traced callers
       retain a supported whole-solve JAX path.
-- [ ] Changing only `maxiter`/`maxfun` causes no new eager init/step executable,
+- [x] Changing only `maxiter`/`maxfun` causes no new eager init/step executable,
       and the `maxcor` allocation change is measured and documented.
-- [ ] Public options, callbacks, statuses, counters, result fields, zero-budget
+- [x] Public options, callbacks, statuses, counters, result fields, zero-budget
       semantics, and L-BFGS inverse-Hessian behavior pass frozen tests.
-- [ ] Native SciPy/SIMSOPT remains the parity oracle; Optax remains explicit.
+- [x] Native SciPy/SIMSOPT remains the parity oracle; Optax remains explicit.
 - [ ] CPU and strict-GPU tests pass in supported isolated environments without
       weakened tolerances or CPU fallback.
 - [ ] Physics cases meet the predeclared gates with durable raw evidence.
-- [ ] Normal execution retains no trajectory and uses only audited host
+- [x] Normal execution retains no trajectory and uses only audited host
       boundaries.
 - [ ] Every remaining behavior change and newly found defect has preserved
       RED -> GREEN -> REFACTOR evidence. The already-implemented core remains
