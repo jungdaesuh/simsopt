@@ -1,6 +1,6 @@
 # Custom JAX Quasi-Newton Performance and Boozer Closure Plan
 
-**Status:** Draft — reviewed; implementation not started
+**Status:** In progress — diagnosis and architecture decision complete
 **Last updated:** 2026-08-02
 **Change tier:** Tier 3 — solver behavior, routing, schemas, and scientific evidence
 
@@ -109,6 +109,26 @@ owns only the follow-on closure work.
   not yet available. Fusion must not begin until matched profiling supports
   this causal claim.
 
+### Confirmed outer-failure diagnosis
+
+- Matched native/custom diagnostics agree through the early and middle BFGS
+  trajectory. At 20 iterations, both use 23 evaluations and final objectives
+  differ by `5.86e-17`.
+- The baseline-anchored custom run reaches iteration 789, then its exact
+  predictor crosses to a different Boozer branch for ordinary line-search
+  displacements. The line search eventually operates at numerical-noise step
+  lengths and fails.
+- The local implicit gradient is correct: central differences from `1e-10` to
+  `1e-7` agree with the analytic directional derivative.
+- Newton initialized directly from the last accepted inner state succeeds for
+  tested displacements from `1e-6` through `1e-3`, with residual norms near
+  `1e-14`.
+- A full accepted-incumbent prototype completes 1,000 accepted BFGS steps with
+  no inner failures and reproduces the native capped trajectory: 1,187 custom
+  evaluations versus 1,188 native, and final objectives `3.72242e-7` versus
+  `3.71939e-7`. This fixes the premature line-search failure but does not by
+  itself prove convergence.
+
 ## Rationale
 
 The Boozer BFGS correctness failure and the L-BFGS performance gap have
@@ -175,6 +195,23 @@ scientific comparison owner.
 Select option 1 only for predictor or inner-solve basin failure. Select option
 2 only if certified candidate domain holes remain after bounded recovery. Do
 not implement both speculatively.
+
+**Selected design:** objective-owned accepted-incumbent continuation. The
+objective exposes an immutable inner state containing accepted coil DOFs,
+solved inner DOFs, raw physical objective, and eligibility. Every speculative
+trial receives the same explicit state. A candidate returns a new immutable
+state, which the host driver promotes only from its post-acceptance callback.
+If the exact linear predictor fails, the objective makes one bounded retry by
+running Newton directly from the incumbent inner DOFs. Only a certified primal
+and adjoint result is eligible for promotion.
+
+**Rejected design:** session-owned or `BoozerSurfaceJAX`-owned mutable
+continuation. It would let rejected trials contaminate subsequent evaluations,
+couple correctness to evaluation order, and make concurrent sessions unsafe.
+Promotion from the line-search observer is also rejected because that observer
+runs before acceptance is decided. The generic optimizer-owned rejection
+protocol remains unnecessary unless the bounded incumbent retry still leaves
+certified-domain holes.
 
 ### L-BFGS fast routing
 
