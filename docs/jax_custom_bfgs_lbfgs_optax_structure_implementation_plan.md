@@ -15,7 +15,7 @@ but the change is not promotion-ready.
 | --- | --- | --- |
 | Runtime | Eager BFGS uses the typed host driver; eager L-BFGS uses the specialized design-B facade. Traced whole-solve routes remain available. The broad Boozer compatibility set is green when partitioned into fresh processes. | Complete application-scale endpoint closure. |
 | Numerical parity | Rosenbrock accepted states are byte-identical to the pre-refactor solver. Matched `coil47` native CPU/custom CPU/custom GPU/Optax endpoints converge at the recorded FP64 objective tolerance. | Close a matched converged Boozer endpoint and the full accepted-state matrix. |
-| GPU | The 41 non-slow runtime contracts and the broader Boozer/traceable compatibility selector pass on strict RTX 5090 CUDA. Custom `coil47` converges on GPU. A two- and 20-iteration Boozer CPU/GPU diagnostic pair exists for candidate `9c64c2ef6`, while the current-source reset-safe Boozer receipt is CPU-only. | Re-run the Boozer GPU lane from the current source, qualify a converged endpoint, and run the declared A100 lane. |
+| GPU | The 41 non-slow runtime contracts and the broader Boozer/traceable compatibility selector pass on strict RTX 5090 CUDA. Custom `coil47` converges on GPU. The current-source fast Boozer two-step receipt is finite but diagnostic: one run ended `status=1/iteration-limit`, and a repeat ended `status=2/line-search-failed`. | Qualify a converged Boozer endpoint and run the declared A100 lane. |
 | Performance and memory | Bounded diagnostics favor specialized design B over generic design A. Custom now exposes a production `prepare_lbfgs_private`/`PreparedLBFGS` boundary; Optax uses the same prepare/run split. Both reuse fixed-shape programs for warm runs; a clean strict-RTX-5090 `coil47` five-sample receipt now includes process-attributed VRAM and phase-scoped RSS. | Complete the StableHLO/compile promotion comparison and the A100 gate. |
 | Evidence | Local candidate receipts have artifact checksum tests. A clean candidate worktree validates all `39` manifests against the external bundle `/home/jungdaesuh/simsopt-jax-quasi-newton-evidence/20260802`; bundle inventory SHA-256 is `43ea7e7dd07c7914d16054c1dae206c3a6cdbc2293b493c255dfb87b43659ea9`. CPU lock SHA-256 is `159e05a65796e76dfb502ea4f6a06b1f412af1c7bb147bb5ac5974b5888a6b35` and GPU lock SHA-256 is `fc724b570ca23356b18df17da87a00217066fd42e5b02de5fe26b46cf20473f8`. | Replicate the bundle off-host and re-run the same validator there. |
 | Quality | Focused tests and compile/diff checks are green. The current large Boozer source/test files still report existing Ruff findings. | Close scoped Pyright, project-wide Ruff, application-scale endpoint, and clean-checkout gates. |
@@ -155,6 +155,13 @@ explicit comparator rather than a custom-solver parity oracle.
   native `status=2` receipt was a contaminated warm-run measurement and is
   superseded. Receipt:
   `docs/receipts/custom-quasi-newton/boozer-outer-bfgs-native-custom-cpu-maxiter50-reset-20260802/`.
+- RED -> GREEN endpoint classification: the runner now checks final objective,
+  gradient, and parameters for finiteness before assigning a stopping reason.
+  A finite endpoint at the iteration cap remains `iteration-limit`; a
+  nonfinite endpoint is `nonfinite` even when the raw solver status is `1`.
+  CPU and strict-CUDA runner contracts pass `40/40`. The current-source fast
+  Boozer GPU diagnostic receipt is finite but not converged:
+  `docs/receipts/custom-quasi-newton/boozer-outer-bfgs-gpu-fast-maxiter2-current-b33ed2523/`.
 - Green final receipt replay: clean candidate `8f29ca7a6` validates `39`
   manifests, including the five-sample GPU/VRAM receipt, against the same
   external bundle. The fresh receipt tests pass `7/7`.
