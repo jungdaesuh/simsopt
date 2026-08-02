@@ -1167,6 +1167,12 @@ custom method name.
       stage-two standard, and VMEC-free Boozer single-stage; the custom GPU
       runner lane for the 47-parameter coil is also green, while the combined
       Boozer/performance qualification remains open.
+- [x] The clean-candidate VMEC-free Boozer fixture now has matched initial
+      native/JAX objective and gradient evidence on strict CPU and RTX 5090
+      CUDA. Objective absolute differences are `2.1684e-19` and `3.7947e-19`,
+      and maximum gradient differences are `7.429e-16` and `2.085e-15`;
+      receipt: `docs/receipts/custom-quasi-newton/boozer-initial-parity-20260802.md`.
+      This does not close the outer endpoint/convergence gate.
 - [x] Strict-CPU application parity is also green for finite-build, planar,
       and stochastic Stage-II mirrors; these are outcome-contract evidence,
       not performance receipts.
