@@ -1,6 +1,23 @@
 # Off-host archive replay — landau (2026-08-03)
 
-## Fourth replay (evidenced; supersedes the prose-only third entry)
+## Fifth replay (evidenced; current — 51-receipt corpus after the A100 speed campaign)
+
+Repeated after the A100 speed campaign published its two pass receipts
+(`coil47-fused-optax-a100-63638856f`, `coil47-fused-optax-a100-contended-63638856f`).
+Complete `set -x` transcript committed at
+`offhost-replay-landau-20260803/raw-evidenced-51/replay-51.log` (sha256 in
+the adjacent `SHA256SUMS`). The transcript contains, verbatim: UTC
+start/end timestamps, `hostname` (landau), the full 64-hex sha256 of the
+fresh 51-bundle archive tarball
+(`36741ba32b820fb6c9ce4878d2440d29c2233da671fd7467897745f39bf32be9`),
+the archive refresh (`chmod -R a-w`; the prior copy kept at
+`qn-receipt-archives-49prev`), `git fetch` of the delta bundle,
+`checkout --detach 2ac59ac00` with `git rev-parse HEAD` and
+`git status --porcelain | wc -l` = 0 (pristine), and the full
+`validate-all` command with its `{"validated": 51}` output and
+`validate_all_exit=0`.
+
+## Fourth replay (evidenced; superseded by the fifth above — 49-receipt corpus)
 
 External review noted the third entry carried only prose and a truncated
 hash. The replay was repeated at validator checkout `44f127e61` with the
