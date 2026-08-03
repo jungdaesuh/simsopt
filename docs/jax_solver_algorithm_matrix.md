@@ -83,15 +83,39 @@ Authority artifact: `examples/jax/authority_evidence.json` (SHA-256
 snapshot `9fbb569`) assigned smooth deterministic unconstrained scalar
 minimization to Optax L-BFGS as production owner. The 2026-08-02 quasi-Newton
 closure campaign supersedes that row for this problem family: the SIMSOPT
-custom L-BFGS `fused_stepwise` route measured statistical performance par with
-the Optax comparator on the pinned RTX 5090 (quiet warm medians 27.65 ms vs
-26.03 ms with overlapping spreads; contended 45.9 ms vs 48.9 ms), while
+custom L-BFGS `fused_stepwise` route beat the Optax comparator on the pinned
+RTX 5090 in the receipt-attested final lanes (receipts
+`coil47-fused-optax-quiet-359fd41fc-r2`: warm medians 13.14 ms vs 23.79 ms,
+qualification ratio 0.5523, verdict pass; and
+`coil47-fused-optax-contended-359fd41fc-r2`: 14.59 ms vs 26.76 ms, ratio
+0.5453, verdict pass; earlier unbound sweeps had shown statistical par at
+27.65 ms vs 26.03 ms before the fused route landed), while
 uniquely providing the SciPy-shaped result contract and the post-acceptance
 callback hook that the accepted-incumbent Boozer continuation architecture
 requires and Optax's scan loop cannot express. The custom provider therefore
 remains production owner for this family with Optax retained as an explicit,
 receipt-gated comparator, as recorded in the tables above. The blindspot
 report's remaining rows are unaffected.
+
+### `fused_stepwise` migration, cache, and rollback record (2026-08-03)
+
+- Migration: `lbfgs_run_mode="fused_stepwise"` is opt-in. No public caller
+  changed defaults — `optimizer.py` and the Boozer adapter stay on
+  `stepwise`; only the benchmark runner's `--intent fast` lane and the
+  compile-shape/warm-soak diagnostics select the fused route (caller
+  inventory: receipt `public-routing-inventory.md`, 2026-08-03 addendum).
+  Callers needing per-step callbacks are rejected fail-closed and must stay
+  on `stepwise`.
+- Cache behavior: fused preparation compiles exactly three executables
+  (`initial_state`, `value_and_grad`, `fused_solve`) into the same
+  per-owner cache used by the stepwise transitions; the stepwise
+  result-payload executable is not compiled on this route. The 20-run warm
+  soak shows executable count 1 during solving with flat RSS/VRAM (receipt
+  `warm-soak-gpu-af4a7619f/`).
+- Rollback: revert to `stepwise` by dropping the intent routing
+  (`_solver_route`) commit — rehearsed in a clean worktree in receipt
+  `rollback-rehearsal-20260802.md` (base/candidate comparison plus
+  three-commit revert; parity lanes green on the base).
 
 ## Migration contracts and live gaps
 
