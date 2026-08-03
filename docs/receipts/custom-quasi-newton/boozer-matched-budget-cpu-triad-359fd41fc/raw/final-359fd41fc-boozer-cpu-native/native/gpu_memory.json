@@ -1,0 +1,10 @@
+{
+  "availability": "unavailable",
+  "gpu_uuid": null,
+  "peak_used_memory_mib": null,
+  "provider_pid": 2682596,
+  "samples": [],
+  "schema_version": 1,
+  "target_pid_observed": false,
+  "unavailable_reason": "cpu-device"
+}
