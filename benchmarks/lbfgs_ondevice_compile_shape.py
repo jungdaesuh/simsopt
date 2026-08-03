@@ -839,6 +839,7 @@ def _capture_provider_preparation(
     x0: np.ndarray,
     *,
     maxcor: int,
+    intent: str,
 ) -> tuple[object, tuple[_CapturedProviderCompile, ...], float]:
     if provider not in {"custom", "optax"}:
         raise ValueError(f"unknown compile provider {provider!r}")
@@ -872,7 +873,12 @@ def _capture_provider_preparation(
     preparation_started = time.perf_counter()
     with patch.object(lowered_type, "compile", record_compile):
         if provider == "custom":
-            prepared = runtime._prepare_custom(fixture_case, x0, maxcor=maxcor)
+            prepared = runtime._prepare_custom(
+                fixture_case,
+                x0,
+                maxcor=maxcor,
+                run_mode=runtime._solver_route("custom", "lbfgs", intent=intent),
+            )
         elif provider == "optax":
             prepared = runtime._prepare_optax(fixture_case, x0, maxcor=maxcor)
     preparation_s = time.perf_counter() - preparation_started
@@ -920,6 +926,7 @@ def _provider_compile_payload(
         fixture_case,
         x0,
         maxcor=maxcor,
+        intent=intent,
     )
     programs, aggregate = _summarize_provider_compiles(
         typed_provider,
@@ -959,7 +966,7 @@ def _provider_compile_payload(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "command": [sys.executable, *sys.argv],
         "provider": typed_provider,
-        "solver_route": runtime._solver_route(typed_provider, "lbfgs"),
+        "solver_route": runtime._solver_route(typed_provider, "lbfgs", intent=intent),
         "candidate_sha": candidate_sha,
         "candidate_sha_availability": (
             "available" if candidate_sha is not None else "unavailable"

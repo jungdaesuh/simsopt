@@ -5038,7 +5038,7 @@ class TestBoozerSurfaceJAXClass:
         """_pack and _unpack are inverses."""
         booz = _make_mock_boozer_surface()
         x = booz._pack_decision_vector(0.3, 1.5)
-        sdofs, iota, G = booz._unpack_decision_vector(x, optimize_G=True)
+        _sdofs, iota, G = booz._unpack_decision_vector(x, optimize_G=True)
         np.testing.assert_allclose(iota, 0.3)
         np.testing.assert_allclose(G, 1.5)
 
@@ -10201,7 +10201,7 @@ class TestVJPHooks:
         lm = np.zeros_like(res["jacobian"])
         lm[0] = 1.0
 
-        d_coil_arrays, coil_indices = vjp_fn(jnp.asarray(lm), booz, iota_sol, G_sol)
+        d_coil_arrays, _coil_indices = vjp_fn(jnp.asarray(lm), booz, iota_sol, G_sol)
         # d_coil_arrays is a list of (d_g, d_gd, d_c) tuples, one per group
         assert len(d_coil_arrays) == len(booz.coil_groups)
         for (d_g, d_gd, d_c), (g, gd, c, _) in zip(d_coil_arrays, booz.coil_groups):

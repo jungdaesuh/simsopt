@@ -1058,7 +1058,7 @@ class PreparedLBFGS:
     initial_state: _LBFGSInitialState
     value_and_grad: _LBFGSValueAndGrad
     value_and_grad_consts: _LBFGSConsts
-    result_payload: _LBFGSResultPayload
+    result_payload: _LBFGSResultPayload | None
     initial_value: jax.Array
     initial_gradient: jax.Array
     history_size: int
@@ -1091,6 +1091,7 @@ class PreparedLBFGS:
             self.advance_from_start is None
             or self.advance_from_search is None
             or self.reenter_new_x is None
+            or self.result_payload is None
         ):
             raise RuntimeError(
                 "prepared stepwise L-BFGS program is missing its macro-step "
@@ -1215,23 +1216,13 @@ def prepare_lbfgs_private(
                 _int_scalar(maxfun_limit),
             ),
         )
-        fused_result_payload = cast(
-            _LBFGSResultPayload,
-            _compile_prepared_program(
-                _lbfgsb_result_payload_kernel(
-                    cache_owner=solver_cache_owner,
-                    cache_key_prefix=solver_cache_key_prefix,
-                ),
-                sample_state,
-                _int_scalar(maxiter_limit),
-                _int_scalar(maxfun_limit),
-            ),
-        )
+        # The fused kernel returns the complete result payload itself; the
+        # stepwise result-payload executable is never reachable on this route.
         return PreparedLBFGS(
             initial_state=initial_state,
             value_and_grad=value_and_grad,
             value_and_grad_consts=value_and_grad_consts,
-            result_payload=fused_result_payload,
+            result_payload=None,
             initial_value=initial_value,
             initial_gradient=initial_gradient,
             history_size=history_size,
