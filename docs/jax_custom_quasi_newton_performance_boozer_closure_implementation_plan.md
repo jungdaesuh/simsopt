@@ -444,8 +444,15 @@ metrics, tampered derivations, and historical round trips.
    - [ ] Bind GPU model, UUID, compute capability, total VRAM, driver/CUDA
          versions, visible-device selector, and host/job identity. Paired runs
          must use the same UUID and the expected RTX 5090 or A100 model.
-   - [ ] Repeat the matched `coil47` fast comparison on RTX 5090 and A100 with
-         FP64 and no CPU fallback.
+   - [x] Repeat the matched `coil47` fast comparison on RTX 5090 and A100 with
+         FP64 and no CPU fallback — CLOSED 2026-08-03 after landau returned:
+         receipt `coil47-fused-optax-a100-55745feaf` (verdict pass, ratio
+         1.1659, five AB/BA rounds, A100-PCIE-40GB identity-bound, all
+         endpoints converged in FP64). The regimes invert across GPUs:
+         custom fused is 0.55x Optax on the RTX 5090 but 1.17x on the
+         A100 (both inside the 2.0x gate) — the fused route's win rides
+         on host-tax elimination, and landau's older host/dispatch path
+         flips the balance.
    - [ ] Bind every StableHLO and compile artifact to its provider, solver
          route, candidate SHA, and exact device UUID; require a complete
          custom/Optax artifact pair for each GPU.
