@@ -367,8 +367,13 @@ def _validate_device_identity(
         return
     if identity.get("backend") not in {"gpu", "cuda"}:
         raise ValueError("GPU measurement backend is not GPU execution")
-    if identity.get("platform") != "cuda":
+    # JAX CUDA devices report device.platform == "gpu"; CUDA-ness is proven
+    # by the jax_device name below plus the NVIDIA UUID and CUDA version.
+    if identity.get("platform") not in {"gpu", "cuda"}:
         raise ValueError("GPU measurement platform is not CUDA")
+    jax_device = identity.get("jax_device")
+    if not isinstance(jax_device, str) or not jax_device.startswith("cuda:"):
+        raise ValueError("GPU measurement jax_device is not a CUDA device")
     gpu_uuid = identity.get("gpu_uuid")
     if not isinstance(gpu_uuid, str) or not gpu_uuid.startswith("GPU-"):
         raise ValueError("device_identity.gpu_uuid must be an NVIDIA GPU UUID")
