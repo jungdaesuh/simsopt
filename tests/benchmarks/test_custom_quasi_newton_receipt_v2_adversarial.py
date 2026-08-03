@@ -32,7 +32,7 @@ def _runner_v7_directory(root: Path) -> Path:
     device_identity: dict[str, object] = {
         "requested_device": "gpu",
         "backend": "gpu",
-        "platform": "cuda",
+        "platform": "gpu",
         "jax_device": "cuda:0",
         "device_kind": "NVIDIA GeForce RTX 5090",
         "device_id": 0,
