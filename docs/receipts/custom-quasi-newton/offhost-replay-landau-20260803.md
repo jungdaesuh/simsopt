@@ -12,6 +12,12 @@ recomputation, derivation and qualification recomputation from raw rows,
 archive-root inventory cross-check), on a host that shares nothing with the
 publishing machine.
 
+Scope, precisely: `487d9ff89` below is the VALIDATOR checkout (the
+then-HEAD whose object store authenticates every receipt-recorded
+candidate commit such as `359fd41fc`). The replay re-verifies bytes,
+hashes, derivations, and qualification arithmetic; it does not re-execute
+solvers at the receipts' candidate trees.
+
 ## Replay identity
 
 - Host: `landau` (Columbia AP fusion server, NVIDIA A100-PCIE-40GB,

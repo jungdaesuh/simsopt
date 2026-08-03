@@ -466,7 +466,12 @@ metrics, tampered derivations, and historical round trips.
          it read-only, and replay from a detached checkout at the recorded
          candidate SHA with the recorded environment lock — CLOSED
          2026-08-03 on `landau` (A100 host): 47/47 receipts green; receipt
-         `offhost-replay-landau-20260803.md`.
+         `offhost-replay-landau-20260803.md`. Precisely: the VALIDATOR
+         checkout was `487d9ff89` (then-HEAD, containing every
+         receipt-recorded candidate commit object for authentication);
+         the replay re-verified hashes, derivations, qualifications, and
+         commit-object presence — no solver execution was replayed at the
+         receipts' candidate trees.
 
 8. Complete rollout and API review.
    - [x] Inventory observable behavior changes and every caller of
@@ -486,11 +491,14 @@ metrics, tampered derivations, and historical round trips.
          reconciliation commit `a8134ebc8`; medians rebound to the
          receipt-attested `-r2` values on 2026-08-03.
    - [x] Record ordered implementation commits and rehearse rollback in a clean
-         worktree — ordered `bb05ec58f..466432b88` series; the rollback
-         receipt proves one base/candidate comparison plus a three-commit
-         revert in a clean worktree; clean detached-worktree lane replays
-         are attested by the receipts' runner payloads (`git_clean=true`)
-         at the successive evidence SHAs `7b1372ad0` and `359fd41fc`.
+         worktree — ordered `bb05ec58f..466432b88` series;
+         `rollback-rehearsal-20260802.md` proves the pre-fused
+         prepared-runtime revert and
+         `rollback-rehearsal-fused-20260803.md` proves the fused-route
+         lever itself (stepwise fallback, parity green, exactly the two
+         route pins failing); clean detached-worktree lane replays are
+         attested by the receipts' runner payloads (`git_clean=true`) at
+         the successive evidence SHAs `7b1372ad0` and `359fd41fc`.
    - [ ] Obtain independent architecture, numerical, runtime, and evidence
          review with no unresolved finding — IN PROGRESS: two external
          adversarial verdicts (FAIL_ITERATE) received and worked
@@ -765,9 +773,12 @@ three P1s, fixed in the next commit batch:
   continuation vs private on-device solver), the example names its host
   emitters directly, merged budget statuses (`private/scipy-lbfgsb` 1) are
   discriminated into iteration- vs evaluation-limit by the iteration
-  evidence, and real-emitter failure tests drive the actual solvers into
-  each path. All 47 receipts revalidate unchanged under the emitter-true
-  tables.
+  evidence, and real-emitter failure tests drive the actual solvers
+  (SciPy BFGS, private BFGS, private L-BFGS-B, host BFGS) into each
+  reachable failure path — the private BFGS nonfinite backstop is
+  unreachable through the hardened line search and is locked as the
+  documented sentinel behavior instead. All 47 receipts revalidate
+  unchanged under the emitter-true tables.
 - Receipt source-run aliasing closed: `validate-all` now requires each
   source-run name to be one canonical filesystem component, so
   path-normalized aliases (`./round-1`, `round-1/`) can no longer
@@ -776,6 +787,33 @@ three P1s, fixed in the next commit batch:
   gained the `fused_stepwise` addendum, the solver matrix gained the
   migration/cache/rollback record and receipt-bound medians, and the
   rollback/replay tick now states exactly what its receipts prove.
+
+Fourth external pass (delta review, same day) returned FAIL_ITERATE with
+two P1s and two P2s, fixed in the next commit batch:
+
+- Emitter identity made durable in the persisted bytes: the runtime now
+  splits the custom BFGS route by emitter
+  (`custom_bfgs_host_incumbent` / `custom_bfgs_private`), and receipt
+  recomputation derives the status convention purely from each row's
+  recorded `solver_route` (with a frozen transcription pinning the
+  pre-split `custom_bfgs_stepwise`+`boozer` rows to the host core) —
+  the live fixture registry is no longer consulted at validation, so
+  later registry policy changes cannot invalidate authentic history
+  (regression: validation passes with the registry poisoned). Unmapped
+  route/case combinations fail closed.
+- The fused-route rollback lever was actually rehearsed
+  (`rollback-rehearsal-fused-20260803.md`): one-line `_solver_route`
+  rollback in a clean worktree at `76f8fdf23` — fast intent falls back
+  to stepwise, SciPy trajectory parity stays green, exactly the two
+  fused route pins fail, and the receipt gate caveat is recorded. The
+  matrix and Phase-8 prose now cite it (the 2026-08-02 rehearsal covers
+  only the pre-fused prepared-runtime commits).
+- Off-host replay wording now distinguishes the validator checkout
+  (`487d9ff89`) from the receipts' candidate SHAs and states that no
+  solver execution was replayed.
+- A real SciPy-BFGS failure test (NaN -> status 3 -> nonfinite;
+  maxiter -> 1 -> iteration-limit) closes the emitter-coverage gap, and
+  the coverage claim is scoped to reachable paths.
 
 Reviewer sub-claims refuted with evidence (not re-fixed): the batch
 telemetry CSVs existed at
