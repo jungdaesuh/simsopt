@@ -384,12 +384,13 @@ def lbfgsb_two_loop_direction(state: LbfgsbState) -> jax.Array:
     active_history = positions < col
     reverse_indices = history_indices[::-1]
     reverse_active = active_history[::-1]
+    history_curvatures = jax.vmap(_lbfgsb_ddot)(ws, wy)
 
     def right_product(direction, index_active):
         index, active = index_active
         s_i = ws[index]
         y_i = wy[index]
-        s_dot_y = _lbfgsb_ddot(s_i, y_i)
+        s_dot_y = history_curvatures[index]
         safe_s_dot_y = jnp.where(active & (s_dot_y != 0.0), s_dot_y, 1.0)
         rho = active.astype(dtype) / safe_s_dot_y
         alpha = rho * _lbfgsb_ddot(s_i, direction)
@@ -407,7 +408,7 @@ def lbfgsb_two_loop_direction(state: LbfgsbState) -> jax.Array:
         index, active, alpha = index_active_alpha
         s_i = ws[index]
         y_i = wy[index]
-        s_dot_y = _lbfgsb_ddot(s_i, y_i)
+        s_dot_y = history_curvatures[index]
         safe_s_dot_y = jnp.where(active & (s_dot_y != 0.0), s_dot_y, 1.0)
         rho = active.astype(dtype) / safe_s_dot_y
         beta = rho * _lbfgsb_ddot(y_i, direction)
@@ -2879,39 +2880,28 @@ def lbfgsb_matupd(
     theta = rr / dr
 
     rollover = iupdat > m
-
-    def shift_ss_body(j, current_ss):
-        active_column = rollover & (j < next_col)
-
-        def shift_offset(offset, shifted_ss):
-            value = shifted_ss[offset + 1, j]
-            return shifted_ss.at[offset, j - 1].set(
-                jnp.where(
-                    active_column,
-                    value,
-                    shifted_ss[offset, j - 1],
-                )
-            )
-
-        return jax.lax.fori_loop(0, j, shift_offset, current_ss)
-
-    ss = jax.lax.fori_loop(1, m, shift_ss_body, ss)
-
-    def shift_sy_body(j, current_sy):
-        def shift_offset(offset, shifted_sy):
-            active = rollover & (j < next_col) & (offset < (next_col - j))
-            value = shifted_sy[j + offset, j]
-            return shifted_sy.at[j - 1 + offset, j - 1].set(
-                jnp.where(
-                    active,
-                    value,
-                    shifted_sy[j - 1 + offset, j - 1],
-                )
-            )
-
-        return jax.lax.fori_loop(0, m - j, shift_offset, current_sy)
-
-    sy = jax.lax.fori_loop(1, m, shift_sy_body, sy)
+    history_index = jnp.arange(m - 1, dtype=jnp.int32)
+    history_rows = history_index[:, None]
+    history_columns = history_index[None, :]
+    active_extent = next_col - 1
+    ss = ss.at[:-1, :-1].set(
+        jnp.where(
+            rollover
+            & (history_rows <= history_columns)
+            & (history_columns < active_extent),
+            ss[1:, 1:],
+            ss[:-1, :-1],
+        )
+    )
+    sy = sy.at[:-1, :-1].set(
+        jnp.where(
+            rollover
+            & (history_columns <= history_rows)
+            & (history_rows < active_extent),
+            sy[1:, 1:],
+            sy[:-1, :-1],
+        )
+    )
 
     row = next_col - 1
 
