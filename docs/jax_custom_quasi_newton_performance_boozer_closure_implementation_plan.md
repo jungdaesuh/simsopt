@@ -494,8 +494,10 @@ metrics, tampered derivations, and historical round trips.
    - [x] Copy the authority bundle to a different host or durable store, mount
          it read-only, and replay from a detached checkout at the recorded
          candidate SHA with the recorded environment lock — CLOSED
-         2026-08-03 on `landau` (A100 host): 47/47 at the first replay and
-         49/49 at the same-day second replay; receipt
+         2026-08-03 on `landau` (A100 host): 47/47 at the first replay,
+         49/49 at the second, and 49/49 plus rollback-tree integrity at
+         the third (current corpus, validator checkout `bf1239cc6`);
+         receipt
          `offhost-replay-landau-20260803.md`. Precisely: the VALIDATOR
          checkout was `487d9ff89` (then-HEAD, containing every
          receipt-recorded candidate commit object for authentication);
@@ -662,8 +664,9 @@ metrics, tampered derivations, and historical round trips.
 - [x] Authority artifacts validate from a durable off-host copy
       (`offhost-replay-landau-20260803.md`: landau/A100, detached pristine
       checkout at `487d9ff89`, lock-pinned stack, write-protected archive,
-      47/47 at the first replay; 49/49 at the second covering the
-      current corpus).
+      47/47 at the first replay; 49/49 at the third replay covering
+      the current corpus at validator checkout `bf1239cc6`, with the
+      rollback evidence tree integrity-checked separately).
 
 ## Campaign closure status (2026-08-03)
 
@@ -674,8 +677,9 @@ series and are recorded there, not in this count); candidate evidence SHA
 `359fd41fc`, lanes run from clean detached worktrees, receipts first
 committed at `f2ed3d534` and republished under the hardened validator at
 `cdf62708a`. Closed with receipts (all `validate-all` green — 47 receipts
-at first closure, 48 since the A100 comparison receipt landed at
-`76f8fdf23` — including `--archive-root` against the complete mirror at
+at first closure, 49 in the current corpus after the A100 comparison and
+contention-control receipts landed — including `--archive-root` against
+the complete mirror at
 `/home/jungdaesuh/qn-receipt-archives`):
 
 - Phase 4 matched-budget milestone:
@@ -906,7 +910,8 @@ Reviewer sub-claims refuted with evidence (not re-fixed): the batch
 telemetry CSVs existed at
 `.artifacts/custom-quasi-newton/final-{359fd41fc,7b1372ad0}-gpu-telemetry.csv`
 (the `359fd41fc` CSV — the one belonging to the receipts' lane batch — is
-now bundled and hashed inside each `-r2` receipt; the `7b1372ad0` CSV
+bundled and hashed inside each 5090 performance receipt from the `-r2`
+revisions onward, including the current `-r4`; the `7b1372ad0` CSV
 belongs to the superseded earlier batch and remains host-local plus
 archive-mirrored); 17 of the 18 failing tests in
 `tests/geo/test_surface_objectives_jax.py` fail identically at the commit

@@ -622,8 +622,17 @@ def _validate_device_identity(
     if not isinstance(jax_device, str) or not jax_device.startswith("cuda:"):
         raise ValueError("GPU measurement jax_device is not a CUDA device")
     gpu_uuid = identity.get("gpu_uuid")
-    if not isinstance(gpu_uuid, str) or not gpu_uuid.startswith("GPU-"):
-        raise ValueError("device_identity.gpu_uuid must be an NVIDIA GPU UUID")
+    if not isinstance(gpu_uuid, str) or (
+        re.fullmatch(
+            r"GPU-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            gpu_uuid,
+        )
+        is None
+    ):
+        raise ValueError(
+            "device_identity.gpu_uuid must be a canonical NVIDIA GPU UUID "
+            "(GPU- followed by lowercase 8-4-4-4-12 hex)"
+        )
     for field in (
         "gpu_model",
         "compute_capability",

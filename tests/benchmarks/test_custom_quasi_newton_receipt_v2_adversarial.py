@@ -83,13 +83,13 @@ def _runner_v7_directory(root: Path) -> Path:
         "device_kind": "NVIDIA GeForce RTX 5090",
         "device_id": 0,
         "process_index": 0,
-        "gpu_uuid": "GPU-test",
+        "gpu_uuid": "GPU-0000f78e-c05d-e01c-303f-d644f4341f00",
         "gpu_model": "NVIDIA GeForce RTX 5090",
         "compute_capability": "12.0",
         "total_memory_bytes": 32 * 1024**3,
         "driver_version": "590.48",
         "cuda_version": "CUDA 13.0",
-        "visible_devices": "GPU-test",
+        "visible_devices": "GPU-0000f78e-c05d-e01c-303f-d644f4341f00",
         "hostname": "test-host",
         "scheduler_job_id": None,
     }
@@ -198,7 +198,7 @@ def _runner_v7_directory(root: Path) -> Path:
         json.dumps(
             {
                 "availability": "available",
-                "gpu_uuid": "GPU-test",
+                "gpu_uuid": "GPU-0000f78e-c05d-e01c-303f-d644f4341f00",
                 "peak_used_memory_mib": 200,
                 "provider_pid": 1234,
                 "samples": [{"sampled_at_unix_ns": 1, "used_memory_mib": 200}],
@@ -1011,3 +1011,45 @@ def test_publish_rejects_two_rows_bound_to_the_same_child_trial_trace(
     assert str(error.value) == (
         "provider child trial binding requires exactly one emitted trial trace"
     )
+
+
+@pytest.mark.parametrize(
+    "forged_uuid",
+    (
+        "GPU-",
+        "GPU-placeholder",
+        "GPU-0000F78E-C05D-E01C-303F-D644F4341F00",
+        "GPU-0000f78e-c05d-e01c-303f",
+        "",
+    ),
+)
+def test_validate_all_rejects_noncanonical_gpu_uuid(
+    tmp_path: Path,
+    forged_uuid: str,
+) -> None:
+    """Placeholder or malformed UUIDs must not satisfy the identity gates."""
+
+    run = _runner_v7_directory(tmp_path)
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+    receipt = tmp_path / "tracked" / "noncanonical-uuid"
+    publish(
+        (run,),
+        environment_lock=lock,
+        destination=receipt,
+        archive_uri=(tmp_path / "archive" / "noncanonical-uuid").as_uri(),
+        repo_root=tmp_path,
+        qualification_kind="diagnostic",
+    )
+    for payload_path in sorted(receipt.rglob("measurements.json")):
+        payload = _json_object(payload_path)
+        identity = cast(dict[str, object], payload.get("device_identity"))
+        if identity is not None:
+            identity["gpu_uuid"] = forged_uuid
+        for row in cast(list[dict[str, object]], payload.get("measurements", [])):
+            row_identity = cast(dict[str, object], row["device_identity"])
+            row_identity["gpu_uuid"] = forged_uuid
+        _write_json(payload_path, payload)
+
+    with pytest.raises(ValueError, match="canonical NVIDIA GPU UUID"):
+        validate_all(receipt, repo_root=tmp_path)
