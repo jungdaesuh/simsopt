@@ -1152,6 +1152,42 @@ def test_validate_all_rejects_duplicate_performance_source_runs(tmp_path: Path) 
     assert str(error.value) == f"receipt source runs are duplicated: {runs[0].name}"
 
 
+@pytest.mark.parametrize(
+    "alias_template",
+    ("./{name}", "{name}/", "{name}/.", "{name}//"),
+)
+def test_validate_all_rejects_aliased_source_run_names(
+    tmp_path: Path,
+    alias_template: str,
+) -> None:
+    """Path-normalized aliases of one physical run must not multiply samples."""
+
+    runs = _performance_v7_runs(tmp_path, warm_pairs=((0.055, 0.1),))
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+    destination = tmp_path / "tracked" / "aliased-source-runs"
+    publish(
+        runs,
+        environment_lock=lock,
+        destination=destination,
+        archive_uri=(tmp_path / "archive" / "aliased-source-runs").as_uri(),
+        repo_root=tmp_path,
+        qualification_kind="performance",
+    )
+    alias = alias_template.format(name=runs[0].name)
+    for document in ("metrics.json", "manifest.json"):
+        payload = _json_object(destination / document)
+        payload["source_runs"] = [runs[0].name, alias]
+        _write_json(destination / document, payload)
+
+    with pytest.raises(ValueError) as error:
+        validate_all(destination, repo_root=tmp_path)
+
+    assert str(error.value) == (
+        f"receipt source run is not a canonical directory name: {alias!r}"
+    )
+
+
 def test_publish_rejects_invalid_nested_legacy_runner_commit(tmp_path: Path) -> None:
     run = _runner_directory(tmp_path)
     nested = run / "nested"

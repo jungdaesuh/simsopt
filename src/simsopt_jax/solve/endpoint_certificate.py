@@ -19,29 +19,86 @@ StoppingReason = Literal[
     "nonfinite",
     "failed",
 ]
-StatusConvention = Literal["bfgs", "host-lbfgsb", "scipy-lbfgsb", "optax-lbfgs"]
+StatusConvention = Literal[
+    "scipy-bfgs",
+    "private-bfgs",
+    "host-bfgs",
+    "scipy-lbfgsb",
+    "private-lbfgsb",
+    "host-lbfgsb",
+    "optax-lbfgs",
+]
 
 _SUCCESS_STATUSES: Final[Mapping[StatusConvention, frozenset[int]]] = MappingProxyType(
     {
-        "bfgs": frozenset({0}),
-        "host-lbfgsb": frozenset({0, 4}),
+        "scipy-bfgs": frozenset({0}),
+        "private-bfgs": frozenset({0}),
+        "host-bfgs": frozenset({0}),
         "scipy-lbfgsb": frozenset({0}),
+        "private-lbfgsb": frozenset({0}),
+        "host-lbfgsb": frozenset({0, 4}),
         "optax-lbfgs": frozenset({0}),
     }
 )
+# Each table transcribes one emitter's actual vocabulary; none is shared
+# across implementations because the same integer means different things
+# in different solvers (private BFGS: 2=nonfinite/3=line-search, SciPy
+# BFGS: 2=line-search/3=nonfinite).
 _FAILURE_REASON_BY_STATUS: Final[
     Mapping[StatusConvention, Mapping[int, StoppingReason]]
 ] = MappingProxyType(
     {
-        "bfgs": MappingProxyType(
+        # scipy.optimize.minimize(method="BFGS"): 2 is precision-loss in
+        # the line search, 3 is a NaN result.
+        "scipy-bfgs": MappingProxyType(
             {
                 1: "iteration-limit",
                 2: "line-search-failed",
                 3: "nonfinite",
+            }
+        ),
+        # private _bfgs.py: outer failure status is 2 for a nonfinite
+        # trial (inner line-search status -1) and 2 + ls_status
+        # otherwise (ls 1 = failed, ls 3 = line-search budget).
+        "private-bfgs": MappingProxyType(
+            {
+                1: "iteration-limit",
+                2: "nonfinite",
+                3: "line-search-failed",
+                5: "line-search-failed",
+                99: "callback-stopped",
+            }
+        ),
+        # minimize_bfgs_host_core: 2 covers both a failed line search and
+        # a nonfinite trial; the certificate's finite evidence separates
+        # the nonfinite case before this table is consulted.
+        "host-bfgs": MappingProxyType(
+            {
+                1: "iteration-limit",
+                2: "line-search-failed",
+            }
+        ),
+        # scipy.optimize.minimize(method="L-BFGS-B"): 1 merges the
+        # iteration and evaluation budgets (discriminated below).
+        "scipy-lbfgsb": MappingProxyType(
+            {
+                1: "iteration-limit",
+                2: "line-search-failed",
+            }
+        ),
+        # private _lbfgsb_scipy.py lbfgsb_public_status_from_state:
+        # 1 merges the budgets, 2 is a finite ABNORMAL line search,
+        # 6 is ABNORMAL with nonfinite state, 99 is a callback stop.
+        "private-lbfgsb": MappingProxyType(
+            {
+                1: "iteration-limit",
+                2: "line-search-failed",
                 6: "nonfinite",
                 99: "callback-stopped",
             }
         ),
+        # minimize_lbfgs_host_core: distinct budget statuses
+        # (1 iterations, 2 nfev, 3 ngev), 5 line-search, 6 nonfinite.
         "host-lbfgsb": MappingProxyType(
             {
                 1: "iteration-limit",
@@ -49,13 +106,6 @@ _FAILURE_REASON_BY_STATUS: Final[
                 3: "evaluation-limit",
                 5: "line-search-failed",
                 6: "nonfinite",
-                99: "callback-stopped",
-            }
-        ),
-        "scipy-lbfgsb": MappingProxyType(
-            {
-                1: "iteration-limit",
-                2: "line-search-failed",
             }
         ),
         # The Optax lane emits its own vocabulary (benchmarks runtime
@@ -68,6 +118,14 @@ _FAILURE_REASON_BY_STATUS: Final[
                 6: "nonfinite",
             }
         ),
+    }
+)
+# Conventions whose single budget status merges the iteration and
+# evaluation limits; the iteration evidence disambiguates after lookup.
+_MERGED_BUDGET_STATUSES: Final[frozenset[tuple[StatusConvention, int]]] = frozenset(
+    {
+        ("scipy-lbfgsb", 1),
+        ("private-lbfgsb", 1),
     }
 )
 
@@ -92,16 +150,35 @@ class OptimizationEndpointCertificate:
     constraints_satisfied: bool
 
 
-def status_convention_for(provider: str, method: str) -> StatusConvention:
-    """Return the canonical status namespace for a supported solver lane."""
+def status_convention_for(
+    provider: str,
+    method: str,
+    *,
+    accepted_incumbent: bool,
+) -> StatusConvention:
+    """Return the emitter convention for a benchmark-runner solver lane.
 
-    if method == "bfgs":
-        return "bfgs"
-    if method == "lbfgs" and provider == "native":
+    The benchmark lanes route provider+method to one concrete emitter,
+    except custom BFGS, which runs the host core under accepted-incumbent
+    continuation and the private on-device solver otherwise. Callers
+    outside the benchmark runner (the example's host drivers) must name
+    their emitter convention directly instead of using this mapping.
+    """
+
+    if provider == "custom" and method == "bfgs":
+        return "host-bfgs" if accepted_incumbent else "private-bfgs"
+    if accepted_incumbent:
+        raise ValueError(
+            "accepted-incumbent continuation exists only on the custom BFGS "
+            f"lane, not provider={provider!r}, method={method!r}"
+        )
+    if provider == "custom" and method == "lbfgs":
+        return "private-lbfgsb"
+    if provider == "native" and method == "bfgs":
+        return "scipy-bfgs"
+    if provider == "native" and method == "lbfgs":
         return "scipy-lbfgsb"
-    if method == "lbfgs" and provider == "custom":
-        return "host-lbfgsb"
-    if method == "lbfgs" and provider == "optax":
+    if provider == "optax" and method == "lbfgs":
         return "optax-lbfgs"
     raise ValueError(
         "unsupported optimizer status convention for "
@@ -131,6 +208,11 @@ def _stopping_reason(
             provider_status
         )
         if failure_reason is not None:
+            if (
+                (status_convention, provider_status) in _MERGED_BUDGET_STATUSES
+                and iterations < max_iterations
+            ):
+                return "evaluation-limit"
             return failure_reason
     if iterations >= max_iterations:
         return "iteration-limit"
