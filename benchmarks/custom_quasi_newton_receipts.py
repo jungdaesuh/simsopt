@@ -13,6 +13,7 @@ import json
 import math
 import shutil
 import statistics
+import sys
 import tempfile
 from dataclasses import asdict
 from pathlib import Path
@@ -20,6 +21,11 @@ from typing import Iterable, Literal, cast
 from urllib.parse import unquote, urlparse
 
 import numpy as np
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 from simsopt_jax.parity_tolerances import PARITY_LADDER_TOLERANCES
 from simsopt_jax.solve.endpoint_certificate import certify_optimization_endpoint
 
@@ -450,9 +456,10 @@ def _validate_v7_measurement(
         ("native", "bfgs"): "scipy_bfgs",
         ("native", "lbfgs"): "scipy_lbfgsb",
         ("custom", "bfgs"): "custom_bfgs_stepwise",
-        ("custom", "lbfgs"): "stepwise",
         ("optax", "lbfgs"): "optax_lbfgs",
     }.get((provider, method))
+    if provider == "custom" and method == "lbfgs":
+        expected_route = "fused_stepwise" if intent == "fast" else "stepwise"
     if route != expected_route:
         raise ValueError(
             f"solver route {route!r} does not match provider/method "
@@ -753,11 +760,19 @@ def _qualification(
     scientific = _scientific_qualification(rows)
     if kind == "scientific":
         return scientific
+    performance_route_failures = [
+        "performance-custom-lbfgs-requires-fast-fused-stepwise"
+        for row in rows
+        if row.get("provider") == "custom"
+        and row.get("method") == "lbfgs"
+        and (row.get("intent") != "fast" or row.get("solver_route") != "fused_stepwise")
+    ]
     return {
         "passed": False,
         "failure_reasons": sorted(
             set(
                 cast(list[str], scientific["failure_reasons"])
+                + performance_route_failures
                 + ["performance-qualification-not-implemented"]
             )
         ),

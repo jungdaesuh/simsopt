@@ -302,14 +302,14 @@ class Measurement:
     algorithm_memory_contract: dict[str, int | bool] | None
 
 
-def _solver_route(provider: Provider, method: Method) -> str:
+def _solver_route(provider: Provider, method: Method, *, intent: str = "parity") -> str:
     if provider == "native":
         return "scipy_bfgs" if method == "bfgs" else "scipy_lbfgsb"
     if provider == "optax":
         return "optax_lbfgs"
     if method == "bfgs":
         return "custom_bfgs_stepwise"
-    return "stepwise"
+    return "fused_stepwise" if intent == "fast" else "stepwise"
 
 
 def _parse_nvidia_smi_identity_rows(output: str) -> tuple[_NvidiaSmiIdentity, ...]:
@@ -766,6 +766,7 @@ def _run_custom(
     maxiter: int,
     maxcor: int,
     method: Literal["bfgs", "lbfgs"],
+    run_mode: str = "stepwise",
     prepared: _PreparedCustom | None = None,
 ) -> tuple[
     object,
@@ -778,6 +779,8 @@ def _run_custom(
     if prepared is not None:
         if method != "lbfgs":
             raise ValueError("prepared custom programs support only L-BFGS")
+        if prepared.program.run_mode != run_mode:
+            raise ValueError("prepared custom program run mode does not match request")
         return _run_prepared_custom(
             fixture_case,
             x0,
@@ -839,6 +842,7 @@ def _run_custom(
                 gtol=_SOLVER_GTOL,
                 maxls=_SOLVER_MAXLS,
                 x_dtype=jnp.float64,
+                run_mode=run_mode,
             )
         if method == "bfgs":
             if fixture_case.accepted_incumbent_host_value_and_grad is None:
@@ -871,6 +875,7 @@ def _prepare_custom(
     x0: np.ndarray,
     *,
     maxcor: int,
+    run_mode: str = "stepwise",
 ) -> _PreparedCustom:
     """Prepare the custom L-BFGS state machine for fair warm timing."""
 
@@ -888,6 +893,7 @@ def _prepare_custom(
         gtol=_SOLVER_GTOL,
         maxls=_SOLVER_MAXLS,
         x_dtype=jnp.float64,
+        run_mode=run_mode,
     )
     return _PreparedCustom(
         program=program,
@@ -1233,9 +1239,15 @@ def _measurement(
     prepared_optax: _PreparedOptax | None = None
     preparation_seconds = 0.0
     if provider == "custom" and method == "lbfgs":
+        run_mode = "fused_stepwise" if intent == "fast" else "stepwise"
         preparation_started = time.perf_counter()
         with _RSSPhase("preparation") as preparation_phase:
-            prepared_custom = _prepare_custom(fixture_case, x0, maxcor=maxcor)
+            prepared_custom = _prepare_custom(
+                fixture_case,
+                x0,
+                maxcor=maxcor,
+                run_mode=run_mode,
+            )
         phase_rss.append(preparation_phase.measurement())
         preparation_seconds = time.perf_counter() - preparation_started
     elif provider == "optax":
@@ -1265,6 +1277,11 @@ def _measurement(
                 maxiter=maxiter,
                 maxcor=maxcor,
                 method=method,
+                run_mode=(
+                    "fused_stepwise"
+                    if intent == "fast" and method == "lbfgs"
+                    else "stepwise"
+                ),
                 prepared=prepared_custom,
             )
         if method != "lbfgs":
@@ -1403,10 +1420,18 @@ def _measurement(
     transfer_calls = sum(entry.calls for entry in warm_transfer_audit)
     transfer_leaves = sum(entry.leaves for entry in warm_transfer_audit)
     transfer_bytes = sum(entry.bytes for entry in warm_transfer_audit)
-    advance_observations = next(
-        (entry.calls for entry in warm_transfer_audit if entry.phase == "advance"),
-        None,
+    advance_observations = sum(
+        entry.calls for entry in warm_transfer_audit if entry.phase == "advance"
     )
+    if (
+        provider == "custom"
+        and method == "lbfgs"
+        and intent == "fast"
+        and advance_observations > iteration_count + 1
+    ):
+        raise RuntimeError(
+            "fused_stepwise advance observations exceed the runner transfer gate"
+        )
 
     return Measurement(
         case=fixture_case.name,
@@ -1414,7 +1439,7 @@ def _measurement(
         method=method,
         device=device,
         intent=intent,
-        solver_route=_solver_route(provider, method),
+        solver_route=_solver_route(provider, method, intent=intent),
         device_identity=_device_identity(device),
         dimension=fixture_case.expected_dimension,
         maxiter=maxiter,
@@ -1588,7 +1613,7 @@ def _run_provider_child(
             production_route = typed_measurement.get("solver_route")
             if not isinstance(production_route, str) or not production_route:
                 raise TypeError("Boozer trial trace row omitted its solver route")
-            expected_production_route = _solver_route(provider, method)
+            expected_production_route = _solver_route(provider, method, intent=intent)
             if production_route != expected_production_route:
                 raise ValueError(
                     "Boozer trial trace row solver route differs from the request"

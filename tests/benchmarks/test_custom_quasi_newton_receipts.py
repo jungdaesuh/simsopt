@@ -102,7 +102,7 @@ def _runner_v7_directory(root: Path) -> Path:
                         "method": "lbfgs",
                         "device": "gpu",
                         "intent": "fast",
-                        "solver_route": "stepwise",
+                        "solver_route": "fused_stepwise",
                         "device_identity": device_identity,
                         "maxiter": 20,
                         "iterations": 2,
@@ -147,7 +147,7 @@ def _runner_v7_directory(root: Path) -> Path:
                             "transfer_calls": 3,
                             "transfer_leaves": 6,
                             "transfer_bytes": 48,
-                            "advance_observations": 3,
+                            "advance_observations": 0,
                         },
                         "diagnostic_artifacts": {
                             "memory_trace": "memory.json",
