@@ -997,6 +997,52 @@ def test_measurement_records_fixture_build_costs() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("intent", "expected_route", "expected_run_mode"),
+    (("parity", "stepwise", "stepwise"), ("fast", "fused_stepwise", "fused_stepwise")),
+)
+def test_custom_lbfgs_route_and_prepared_program_follow_intent(
+    intent: str,
+    expected_route: str,
+    expected_run_mode: str,
+) -> None:
+    fixture_case = fixture("rosenbrock")
+    initial = np.asarray(fixture_case.initial, dtype=np.float64)
+    prepared = runtime._prepare_custom(
+        fixture_case,
+        initial,
+        maxcor=3,
+        run_mode=expected_run_mode,
+    )
+
+    assert runtime._solver_route("custom", "lbfgs", intent=intent) == expected_route
+    assert prepared.program.run_mode == expected_run_mode
+
+
+def test_fast_custom_lbfgs_has_zero_advance_observations() -> None:
+    fixture_case = runtime._measurement(
+        fixture("rosenbrock"),
+        "custom",
+        "cpu",
+        "fast",
+        np.asarray([-1.2, 1.0], dtype=np.float64),
+        maxiter=1,
+        maxcor=3,
+        method="lbfgs",
+        fixture_build_seconds=0.0,
+        fixture_build_peak_rss_kib=0,
+    )
+
+    assert fixture_case.solver_route == "fused_stepwise"
+    assert fixture_case.work_counters.advance_observations == 0
+    assert fixture_case.work_counters.advance_observations <= fixture_case.iterations + 1
+    assert sum(
+        entry.calls
+        for entry in fixture_case.warm_transfer_audit
+        if entry.phase == "advance"
+    ) == 0
+
+
 def test_rss_phase_records_named_scope() -> None:
     with runtime._RSSPhase("test") as phase:
         np.zeros(1024, dtype=np.float64)

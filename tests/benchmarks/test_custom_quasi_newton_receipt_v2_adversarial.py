@@ -65,7 +65,7 @@ def _runner_v7_directory(root: Path) -> Path:
                 "method": "lbfgs",
                 "device": "gpu",
                 "intent": "fast",
-                "solver_route": "stepwise",
+                "solver_route": "fused_stepwise",
                 "device_identity": device_identity,
                 "maxiter": 20,
                 "iterations": 2,
@@ -110,7 +110,7 @@ def _runner_v7_directory(root: Path) -> Path:
                     "transfer_calls": 3,
                     "transfer_leaves": 6,
                     "transfer_bytes": 48,
-                    "advance_observations": 3,
+                    "advance_observations": 0,
                 },
                 "diagnostic_artifacts": {
                     "memory_trace": "memory.json",
@@ -238,6 +238,34 @@ def _invalidate_field(
 
 def test_unmodified_v2_fixture_is_valid(receipt_v2: Path, tmp_path: Path) -> None:
     assert validate_all(receipt_v2, repo_root=tmp_path) == 0
+
+
+@pytest.mark.parametrize(
+    ("intent", "route"),
+    (
+        ("fast", "stepwise"),
+        ("fast", None),
+        ("fast", "custom_bfgs_stepwise"),
+        ("parity", "fused_stepwise"),
+    ),
+)
+def test_v2_rejects_custom_lbfgs_route_drift_for_each_intent(
+    receipt_v2: Path,
+    tmp_path: Path,
+    intent: str,
+    route: str | None,
+) -> None:
+    def tamper_route(row: dict[str, object]) -> None:
+        row["intent"] = intent
+        if route is None:
+            row.pop("solver_route")
+        else:
+            row["solver_route"] = route
+
+    _mutate_retained_measurement(receipt_v2, tamper_route)
+
+    with pytest.raises(ValueError, match="solver route"):
+        validate_all(receipt_v2, repo_root=tmp_path)
 
 
 @pytest.mark.parametrize(
