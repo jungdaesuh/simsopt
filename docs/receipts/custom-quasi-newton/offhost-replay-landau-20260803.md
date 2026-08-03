@@ -1,6 +1,21 @@
 # Off-host archive replay — landau (2026-08-03)
 
-## Third replay (same day, final corpus with identity-bound qualification)
+## Fourth replay (evidenced; supersedes the prose-only third entry)
+
+External review noted the third entry carried only prose and a truncated
+hash. The replay was repeated at validator checkout `44f127e61` with the
+COMPLETE transcript captured under `set -x` and committed at
+`offhost-replay-landau-20260803/raw-evidenced/replay-evidenced.log`
+(sha256 in the adjacent `SHA256SUMS`). The transcript contains, verbatim:
+UTC start/end timestamps, `hostname` (landau), the FULL 64-hex sha256 of
+the archive tarball, `git fetch`/`checkout --detach 44f127e61`,
+`git rev-parse HEAD`, `git status --porcelain | wc -l` (0 = pristine),
+the full `validate-all` command with its `{"validated": 49}` output and
+`validate_all_exit=0`, and `sha256sum -c SHA256SUMS` over the
+rollback-rehearsal evidence tree (five artifacts `OK`,
+`shacheck_exit=0`).
+
+## Third replay (same day, prose record; superseded by the fourth above)
 
 Repeated after the performance qualification became lane-identity-bound
 and the receipts were republished at their final revisions
