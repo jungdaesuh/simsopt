@@ -33,7 +33,18 @@ class ScientificEndpointEvidence:
     observables: FixtureMetadata
 
 
-ScientificEndpoint = Callable[[np.ndarray], ScientificEndpointEvidence]
+
+class AcceptedIncumbentInnerState(Protocol):
+    """Accepted outer point and its certified inner continuation state."""
+
+    coil_dofs: jax.Array
+    solved_x: jax.Array
+    eligible: jax.Array
+
+
+ScientificEndpoint = Callable[
+    [np.ndarray, AcceptedIncumbentInnerState | None], ScientificEndpointEvidence
+]
 
 
 class _TraceableEndpointSolver(Protocol):
@@ -60,15 +71,32 @@ def _certified_traceable_endpoint(
     iota_seed: float,
     G_seed: float,
     reporting_metrics_from_solution: Callable[..., Mapping[str, jax.Array]],
+    incumbent_state: AcceptedIncumbentInnerState | None = None,
 ) -> ScientificEndpointEvidence:
-    """Certify endpoint observables from a fresh solve at the endpoint coils."""
+    """Certify endpoint observables, warm-starting from an accepted inner state."""
 
     coil_dofs = jnp.asarray(x, dtype=jnp.float64)
+    if incumbent_state is None or not bool(
+        np.asarray(jax.device_get(incumbent_state.eligible))
+    ):
+        endpoint_surface_dofs = surface_dofs
+        endpoint_iota = iota_seed
+        endpoint_G = G_seed
+    else:
+        solved_x = jnp.asarray(incumbent_state.solved_x, dtype=jnp.float64)
+        surface_dof_count = surface_dofs.size
+        endpoint_surface_dofs = np.asarray(
+            jax.device_get(solved_x[:surface_dof_count]), dtype=np.float64
+        )
+        endpoint_iota = float(np.asarray(jax.device_get(solved_x[surface_dof_count])))
+        endpoint_G = float(
+            np.asarray(jax.device_get(solved_x[surface_dof_count + 1]))
+        )
     solved = run_code_traceable(
         coil_set_spec_from_dofs(coil_dofs),
-        jax.device_put(np.asarray(surface_dofs, dtype=np.float64)),
-        jax.device_put(np.asarray(iota_seed, dtype=np.float64)),
-        jax.device_put(np.asarray(G_seed, dtype=np.float64)),
+        jax.device_put(np.asarray(endpoint_surface_dofs, dtype=np.float64)),
+        jax.device_put(np.asarray(endpoint_iota, dtype=np.float64)),
+        jax.device_put(np.asarray(endpoint_G, dtype=np.float64)),
         materialize_dense_linearization=False,
     )
     jax.block_until_ready(solved)
@@ -131,6 +159,9 @@ class AcceptedIncumbentHostValueAndGrad(Protocol):
     def value_and_grad(self, parameters: np.ndarray) -> tuple[float, np.ndarray]: ...
 
     def accept(self, parameters: np.ndarray) -> None: ...
+
+    @property
+    def current_inner_state(self) -> AcceptedIncumbentInnerState: ...
 
 
 AcceptedIncumbentHostValueAndGradFactory = Callable[
@@ -487,7 +518,10 @@ def boozer_physics() -> Fixture:
             ),
         )
 
-    def scientific_endpoint(x: np.ndarray) -> ScientificEndpointEvidence:
+    def scientific_endpoint(
+        x: np.ndarray,
+        incumbent_state: AcceptedIncumbentInnerState | None = None,
+    ) -> ScientificEndpointEvidence:
         return _certified_traceable_endpoint(
             x,
             coil_set_spec_from_dofs=endpoint_coil_set_spec_from_dofs,
@@ -499,6 +533,7 @@ def boozer_physics() -> Fixture:
             iota_seed=-0.406,
             G_seed=g0,
             reporting_metrics_from_solution=reporting_metrics_from_solution,
+            incumbent_state=incumbent_state,
         )
 
     native_curves, native_currents, native_axis, native_nfp, native_field = get_data(
@@ -632,8 +667,10 @@ def boozer_physics() -> Fixture:
             return float("nan"), evaluation.gradient
         return evaluation.filtered_objective, evaluation.gradient
 
-    def native_scientific_endpoint(x: np.ndarray) -> ScientificEndpointEvidence:
-        reset_native()
+    def native_scientific_endpoint(
+        x: np.ndarray,
+        _incumbent_state: AcceptedIncumbentInnerState | None = None,
+    ) -> ScientificEndpointEvidence:
         native_objective.x = np.asarray(x, dtype=np.float64)
         native_objective.J()
         inner_success = bool(native_solver.res["success"])

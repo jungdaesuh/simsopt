@@ -59,6 +59,7 @@ from benchmarks.boozer_trial_diagnostic import (
 )
 from benchmarks.fixtures.custom_quasi_newton import (
     Fixture,
+    AcceptedIncumbentInnerState,
     NativeValueAndGrad,
     ScientificEndpointEvidence,
     fixture,
@@ -775,6 +776,7 @@ def _run_custom(
     bool,
     tuple[TransferMeasurement, ...],
     dict[str, int] | None,
+    AcceptedIncumbentInnerState | None,
 ]:
     if prepared is not None:
         if method != "lbfgs":
@@ -794,6 +796,7 @@ def _run_custom(
     object.__setattr__(objective, "_simsopt_cache_jit_value_and_grad", True)
     x_device = jnp.asarray(x0, dtype=jnp.float64)
     memory_analysis: dict[str, int] | None = None
+    final_incumbent_state: AcceptedIncumbentInnerState | None = None
 
     def record_memory_analysis(report: dict[str, int]) -> None:
         nonlocal memory_analysis
@@ -832,6 +835,7 @@ def _run_custom(
                     ),
                     callback=incumbent_controller.accept,
                 )
+                final_incumbent_state = incumbent_controller.current_inner_state
         else:
             result = _minimize_lbfgs_private(
                 objective,
@@ -867,6 +871,7 @@ def _run_custom(
         bool(np.asarray(result.converged)),
         transfer_summary,
         memory_analysis,
+        final_incumbent_state,
     )
 
 
@@ -918,6 +923,7 @@ def _run_prepared_custom(
     bool,
     tuple[TransferMeasurement, ...],
     dict[str, int] | None,
+    AcceptedIncumbentInnerState | None,
 ]:
     params = jnp.asarray(x0, dtype=jnp.float64)
     if (
@@ -948,6 +954,7 @@ def _run_prepared_custom(
         bool(np.asarray(result.converged)),
         transfer_summary,
         None,
+        None,
     )
 
 
@@ -965,6 +972,7 @@ def _run_native(
     bool,
     tuple[TransferMeasurement, ...],
     dict[str, int] | None,
+    AcceptedIncumbentInnerState | None,
 ]:
     native_callback = _native_value_and_grad_or_none(fixture_case)
     value_and_grad = (
@@ -1002,7 +1010,7 @@ def _run_native(
         method="BFGS" if method == "bfgs" else "L-BFGS-B",
         options=options,
     )
-    return result, calls, int(result.status), bool(result.success), (), None
+    return result, calls, int(result.status), bool(result.success), (), None, None
 
 
 def _parameter_bits(x0: np.ndarray) -> tuple[int, ...]:
@@ -1024,6 +1032,7 @@ def _run_optax(
     bool,
     tuple[TransferMeasurement, ...],
     dict[str, int] | None,
+    AcceptedIncumbentInnerState | None,
 ]:
     if prepared is None:
         prepared = _prepare_optax(fixture_case, x0, maxcor=maxcor)
@@ -1090,6 +1099,7 @@ def _run_optax(
         status,
         status == 0,
         (),
+        None,
         None,
     )
 
@@ -1303,6 +1313,7 @@ def _measurement(
             _cold_success,
             _cold_transfer_audit,
             _cold_memory_analysis,
+            _cold_incumbent_state,
         ) = run_once()
         _sync(cold_result)
     phase_rss.append(cold_phase.measurement())
@@ -1318,6 +1329,7 @@ def _measurement(
             success,
             warm_transfer_audit,
             warm_memory_analysis,
+            final_incumbent_state,
         ) = run_once()
         _sync(result)
     phase_rss.append(warm_phase.measurement())
@@ -1372,7 +1384,7 @@ def _measurement(
     endpoint_evidence = (
         ScientificEndpointEvidence(inner_success=True, observables=())
         if scientific_endpoint is None
-        else scientific_endpoint(final_parameters)
+        else scientific_endpoint(final_parameters, final_incumbent_state)
     )
     scientific_certification_seconds = (
         time.perf_counter() - scientific_certification_started
