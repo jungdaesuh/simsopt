@@ -403,9 +403,15 @@ def _device_identity(requested_device: str) -> DeviceIdentity:
         ),
         driver_version=(None if gpu_identity is None else gpu_identity.driver_version),
         cuda_version=(
-            str(cuda_version_value) if cuda_version_value is not None else None
+            str(cuda_version_value)
+            if requested_device == "gpu" and cuda_version_value is not None
+            else None
         ),
-        visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
+        visible_devices=(
+            os.environ.get("CUDA_VISIBLE_DEVICES")
+            if requested_device == "gpu"
+            else None
+        ),
         hostname=platform.node(),
         scheduler_job_id=(
             os.environ.get("SLURM_JOB_ID") or os.environ.get("PBS_JOBID")
