@@ -77,6 +77,22 @@ All external providers remain behind a SIMSOPT adapter.
 Authority artifact: `examples/jax/authority_evidence.json` (SHA-256
 `13d5843438a93c748234e7cb8a52eb75f7627d832fe8dd3658eea5759e59a521`).
 
+### Reconciliation with the production-architecture blindspot report (2026-08-03)
+
+`docs/jax_solver_production_architecture_blindspot_report.md` (2026-07-28,
+snapshot `9fbb569`) assigned smooth deterministic unconstrained scalar
+minimization to Optax L-BFGS as production owner. The 2026-08-02 quasi-Newton
+closure campaign supersedes that row for this problem family: the SIMSOPT
+custom L-BFGS `fused_stepwise` route measured statistical performance par with
+the Optax comparator on the pinned RTX 5090 (quiet warm medians 27.65 ms vs
+26.03 ms with overlapping spreads; contended 45.9 ms vs 48.9 ms), while
+uniquely providing the SciPy-shaped result contract and the post-acceptance
+callback hook that the accepted-incumbent Boozer continuation architecture
+requires and Optax's scan loop cannot express. The custom provider therefore
+remains production owner for this family with Optax retained as an explicit,
+receipt-gated comparator, as recorded in the tables above. The blindspot
+report's remaining rows are unaffected.
+
 ## Migration contracts and live gaps
 
 | Contract | Target requirement | Live status at audited snapshot |
