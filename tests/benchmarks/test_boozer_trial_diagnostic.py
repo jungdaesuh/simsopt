@@ -19,6 +19,12 @@ from benchmarks.boozer_trial_diagnostic import (
 )
 from benchmarks.fixtures.custom_quasi_newton import Fixture, ObjectiveTrialEvaluation
 
+_PRODUCTION_PARAMETERS = np.asarray([3.0, 4.0], dtype=np.float64)
+_PRODUCTION_EVALUATIONS = 1207
+_PRODUCTION_FINAL_OBJECTIVE = 0.25
+_PRODUCTION_FINAL_GRADIENT_INF_NORM = 0.125
+_PRODUCTION_FINAL_STATUS = 2
+
 
 def _objective(parameter_hash: str) -> ObjectiveTrialEvidence:
     return ObjectiveTrialEvidence(
@@ -77,7 +83,7 @@ def _records(
 def test_trial_trace_round_trip_binds_records_parameters_and_bounds(
     tmp_path: Path,
 ) -> None:
-    records, parameters = _records(np.asarray([1.0, 2.0], dtype=np.float64))
+    records, parameters = _records(np.asarray([1.0, 2.0], dtype=np.float64), count=953)
     manifest = write_boozer_trial_trace(
         tmp_path / "trial.json",
         provider="custom",
@@ -86,6 +92,11 @@ def test_trial_trace_round_trip_binds_records_parameters_and_bounds(
         maxls=20,
         records=records,
         parameters_by_sha256=parameters,
+        production_evaluations=_PRODUCTION_EVALUATIONS,
+        production_final_objective=_PRODUCTION_FINAL_OBJECTIVE,
+        production_final_gradient_inf_norm=(_PRODUCTION_FINAL_GRADIENT_INF_NORM),
+        production_final_status=_PRODUCTION_FINAL_STATUS,
+        production_final_parameters_sha256=parameter_sha256(_PRODUCTION_PARAMETERS),
     )
 
     summary = validate_boozer_trial_trace(
@@ -93,10 +104,18 @@ def test_trial_trace_round_trip_binds_records_parameters_and_bounds(
         expected_provider="custom",
         expected_production_route="custom_bfgs_stepwise",
         expected_maxiter=1000,
-        expected_evaluations=2,
+        expected_evaluations=_PRODUCTION_EVALUATIONS,
+        expected_final_parameters=_PRODUCTION_PARAMETERS,
+        expected_final_objective=_PRODUCTION_FINAL_OBJECTIVE,
+        expected_final_gradient_inf_norm=_PRODUCTION_FINAL_GRADIENT_INF_NORM,
+        expected_final_status=_PRODUCTION_FINAL_STATUS,
     )
 
-    assert summary.record_count == 3
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 3
+    assert payload["diagnostic_evaluations"] == 952
+    assert payload["production_evaluations"] == 1207
+    assert summary.record_count == 953
     assert summary.max_records == 20_002
     assert summary.parameter_bytes == 16
 
@@ -113,15 +132,20 @@ def test_trial_trace_rejects_final_parameters_not_bound_to_production(
         maxls=20,
         records=records,
         parameters_by_sha256=parameters,
+        production_evaluations=_PRODUCTION_EVALUATIONS,
+        production_final_objective=_PRODUCTION_FINAL_OBJECTIVE,
+        production_final_gradient_inf_norm=(_PRODUCTION_FINAL_GRADIENT_INF_NORM),
+        production_final_status=_PRODUCTION_FINAL_STATUS,
+        production_final_parameters_sha256=parameter_sha256(_PRODUCTION_PARAMETERS),
     )
 
-    with pytest.raises(ValueError, match="final accepted trial parameters"):
+    with pytest.raises(ValueError, match="production final parameters"):
         validate_boozer_trial_trace(
             manifest,
             expected_provider="custom",
             expected_production_route="custom_bfgs_stepwise",
             expected_maxiter=1000,
-            expected_evaluations=2,
+            expected_evaluations=_PRODUCTION_EVALUATIONS,
             expected_final_parameters=np.asarray([9.0, 2.0], dtype=np.float64),
         )
 
@@ -139,25 +163,67 @@ def test_trial_trace_rejects_final_objective_and_status_mismatch(
         records=records,
         parameters_by_sha256=parameters,
         final_status=0,
+        production_evaluations=_PRODUCTION_EVALUATIONS,
+        production_final_objective=_PRODUCTION_FINAL_OBJECTIVE,
+        production_final_gradient_inf_norm=(_PRODUCTION_FINAL_GRADIENT_INF_NORM),
+        production_final_status=_PRODUCTION_FINAL_STATUS,
+        production_final_parameters_sha256=parameter_sha256(_PRODUCTION_PARAMETERS),
     )
 
-    with pytest.raises(ValueError, match="final accepted trial objective"):
+    with pytest.raises(ValueError, match="production final objective"):
         validate_boozer_trial_trace(
             manifest,
             expected_provider="custom",
             expected_production_route="custom_bfgs_stepwise",
             expected_maxiter=1000,
-            expected_evaluations=2,
+            expected_evaluations=_PRODUCTION_EVALUATIONS,
             expected_final_objective=2.0,
         )
-    with pytest.raises(ValueError, match="final status"):
+    with pytest.raises(ValueError, match="production final status"):
         validate_boozer_trial_trace(
             manifest,
             expected_provider="custom",
             expected_production_route="custom_bfgs_stepwise",
             expected_maxiter=1000,
-            expected_evaluations=2,
+            expected_evaluations=_PRODUCTION_EVALUATIONS,
             expected_final_status=1,
+        )
+
+
+def test_trial_trace_rejects_production_evaluation_and_gradient_mismatch(
+    tmp_path: Path,
+) -> None:
+    records, parameters = _records(np.asarray([1.0, 2.0], dtype=np.float64))
+    manifest = write_boozer_trial_trace(
+        tmp_path / "trial.json",
+        provider="custom",
+        production_route="custom_bfgs_stepwise",
+        maxiter=1000,
+        maxls=20,
+        records=records,
+        parameters_by_sha256=parameters,
+        production_evaluations=_PRODUCTION_EVALUATIONS,
+        production_final_objective=_PRODUCTION_FINAL_OBJECTIVE,
+        production_final_gradient_inf_norm=(_PRODUCTION_FINAL_GRADIENT_INF_NORM),
+        production_final_status=_PRODUCTION_FINAL_STATUS,
+        production_final_parameters_sha256=parameter_sha256(_PRODUCTION_PARAMETERS),
+    )
+
+    with pytest.raises(ValueError, match="production evaluations"):
+        validate_boozer_trial_trace(
+            manifest,
+            expected_provider="custom",
+            expected_production_route="custom_bfgs_stepwise",
+            expected_maxiter=1000,
+            expected_evaluations=1208,
+        )
+    with pytest.raises(ValueError, match="production final gradient"):
+        validate_boozer_trial_trace(
+            manifest,
+            expected_provider="custom",
+            expected_production_route="custom_bfgs_stepwise",
+            expected_maxiter=1000,
+            expected_final_gradient_inf_norm=0.5,
         )
 
 
@@ -175,6 +241,60 @@ def test_trial_trace_rejects_empty_placeholder(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "missing_field",
+    (
+        "production_evaluations",
+        "production_final_objective",
+        "production_final_gradient_inf_norm",
+        "production_final_status",
+        "production_final_parameters_sha256",
+    ),
+)
+def test_trial_trace_rejects_missing_production_binding_field(
+    tmp_path: Path, missing_field: str
+) -> None:
+    records, parameters = _records(np.asarray([1.0, 2.0], dtype=np.float64))
+    manifest = write_boozer_trial_trace(
+        tmp_path / "trial.json",
+        provider="custom",
+        production_route="custom_bfgs_stepwise",
+        maxiter=1000,
+        maxls=20,
+        records=records,
+        parameters_by_sha256=parameters,
+        production_evaluations=_PRODUCTION_EVALUATIONS,
+        production_final_objective=_PRODUCTION_FINAL_OBJECTIVE,
+        production_final_gradient_inf_norm=(_PRODUCTION_FINAL_GRADIENT_INF_NORM),
+        production_final_status=_PRODUCTION_FINAL_STATUS,
+        production_final_parameters_sha256=parameter_sha256(_PRODUCTION_PARAMETERS),
+    )
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    del payload[missing_field]
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(TypeError, match=missing_field):
+        validate_boozer_trial_trace(
+            manifest,
+            expected_provider="custom",
+            expected_production_route="custom_bfgs_stepwise",
+            expected_maxiter=1000,
+        )
+
+
+def test_trial_trace_rejects_schema_two_without_legacy_reader(tmp_path: Path) -> None:
+    placeholder = tmp_path / "trial.json"
+    placeholder.write_text('{"schema_version": 2}\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unsupported Boozer trial trace schema"):
+        validate_boozer_trial_trace(
+            placeholder,
+            expected_provider="custom",
+            expected_production_route="custom_bfgs_stepwise",
+            expected_maxiter=1000,
+        )
+
+
 def test_trial_trace_rejects_parameter_hash_tampering(tmp_path: Path) -> None:
     records, parameters = _records(np.asarray([1.0, 2.0], dtype=np.float64))
     manifest = write_boozer_trial_trace(
@@ -185,6 +305,11 @@ def test_trial_trace_rejects_parameter_hash_tampering(tmp_path: Path) -> None:
         maxls=20,
         records=records,
         parameters_by_sha256=parameters,
+        production_evaluations=_PRODUCTION_EVALUATIONS,
+        production_final_objective=_PRODUCTION_FINAL_OBJECTIVE,
+        production_final_gradient_inf_norm=(_PRODUCTION_FINAL_GRADIENT_INF_NORM),
+        production_final_status=_PRODUCTION_FINAL_STATUS,
+        production_final_parameters_sha256=parameter_sha256(_PRODUCTION_PARAMETERS),
     )
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     payload["parameters_sha256"] = "0" * 64
@@ -212,6 +337,11 @@ def test_writer_rejects_unbounded_record_count(tmp_path: Path) -> None:
             maxls=1,
             records=records,
             parameters_by_sha256=parameters,
+            production_evaluations=_PRODUCTION_EVALUATIONS,
+            production_final_objective=_PRODUCTION_FINAL_OBJECTIVE,
+            production_final_gradient_inf_norm=(_PRODUCTION_FINAL_GRADIENT_INF_NORM),
+            production_final_status=_PRODUCTION_FINAL_STATUS,
+            production_final_parameters_sha256=parameter_sha256(_PRODUCTION_PARAMETERS),
         )
 
 
@@ -256,6 +386,11 @@ def test_host_diagnostic_correlates_objective_and_line_search_trials(
         fixture_case,
         provider="custom",
         manifest_path=tmp_path / "trial.json",
+        production_evaluations=_PRODUCTION_EVALUATIONS,
+        production_final_objective=_PRODUCTION_FINAL_OBJECTIVE,
+        production_final_gradient_inf_norm=(_PRODUCTION_FINAL_GRADIENT_INF_NORM),
+        production_final_status=_PRODUCTION_FINAL_STATUS,
+        production_final_parameters=_PRODUCTION_PARAMETERS,
         maxiter=5,
         maxls=20,
     )
@@ -268,6 +403,10 @@ def test_host_diagnostic_correlates_objective_and_line_search_trials(
         expected_provider="custom",
         expected_production_route="custom_bfgs_stepwise",
         expected_maxiter=5,
-        expected_evaluations=result.evaluations,
+        expected_evaluations=_PRODUCTION_EVALUATIONS,
+        expected_final_parameters=_PRODUCTION_PARAMETERS,
+        expected_final_objective=_PRODUCTION_FINAL_OBJECTIVE,
+        expected_final_gradient_inf_norm=_PRODUCTION_FINAL_GRADIENT_INF_NORM,
+        expected_final_status=_PRODUCTION_FINAL_STATUS,
     )
     assert summary.record_count == result.evaluations + 1

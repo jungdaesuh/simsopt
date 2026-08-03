@@ -21,7 +21,7 @@ from simsopt_jax.geo.optimizer_host_lbfgs import (
 if TYPE_CHECKING:
     from benchmarks.fixtures.custom_quasi_newton import Fixture
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _DIAGNOSTIC_ROUTE = "host_more_thuente_objective_probe"
 _DEFAULT_PARAMETER_BYTE_CAP = 64 * 1024 * 1024
 _SHA256_HEX_LENGTH = 64
@@ -132,6 +132,11 @@ def run_boozer_host_diagnostic(
     *,
     provider: TrialProvider,
     manifest_path: Path,
+    production_evaluations: int,
+    production_final_objective: float,
+    production_final_gradient_inf_norm: float,
+    production_final_status: int,
+    production_final_parameters: np.ndarray,
     maxiter: int = 1000,
     maxls: int = 20,
     gtol: float = 1.0e-10,
@@ -330,6 +335,13 @@ def run_boozer_host_diagnostic(
         parameters_by_sha256=parameters,
         parameter_byte_cap=parameter_byte_cap,
         final_status=result.status,
+        production_evaluations=production_evaluations,
+        production_final_objective=production_final_objective,
+        production_final_gradient_inf_norm=production_final_gradient_inf_norm,
+        production_final_status=production_final_status,
+        production_final_parameters_sha256=parameter_sha256(
+            production_final_parameters
+        ),
     )
     validate_boozer_trial_trace(
         manifest_path,
@@ -338,9 +350,11 @@ def run_boozer_host_diagnostic(
             "scipy_bfgs" if provider == "native" else "custom_bfgs_stepwise"
         ),
         expected_maxiter=maxiter,
-        expected_evaluations=result.nfev,
-        expected_final_parameters=final_parameters,
-        expected_final_status=result.status,
+        expected_evaluations=production_evaluations,
+        expected_final_parameters=production_final_parameters,
+        expected_final_objective=production_final_objective,
+        expected_final_gradient_inf_norm=production_final_gradient_inf_norm,
+        expected_final_status=production_final_status,
     )
     return BoozerHostDiagnosticResult(
         provider=provider,
@@ -381,6 +395,11 @@ def write_boozer_trial_trace(
     maxls: int,
     records: tuple[JoinedBoozerTrialRecord, ...],
     parameters_by_sha256: dict[str, np.ndarray],
+    production_evaluations: int,
+    production_final_objective: float,
+    production_final_gradient_inf_norm: float,
+    production_final_status: int,
+    production_final_parameters_sha256: str,
     parameter_byte_cap: int = _DEFAULT_PARAMETER_BYTE_CAP,
     final_status: int | None = None,
 ) -> Path:
@@ -390,6 +409,15 @@ def write_boozer_trial_trace(
         raise FileExistsError(f"trial trace already exists: {manifest_path}")
     if maxiter <= 0 or maxls <= 0 or parameter_byte_cap <= 0:
         raise ValueError("trial bounds must be positive")
+    production_binding = _production_binding(
+        {
+            "production_evaluations": production_evaluations,
+            "production_final_objective": production_final_objective,
+            "production_final_gradient_inf_norm": (production_final_gradient_inf_norm),
+            "production_final_status": production_final_status,
+            "production_final_parameters_sha256": (production_final_parameters_sha256),
+        }
+    )
     max_records = 1 + maxiter * maxls + 1
     if not records or len(records) > max_records:
         raise ValueError("trial record count exceeds the declared bound")
@@ -451,6 +479,15 @@ def write_boozer_trial_trace(
             "record_count": len(records),
             "diagnostic_evaluations": len(records) - 1,
             "final_status": final_status,
+            "production_evaluations": production_binding.evaluations,
+            "production_final_objective": production_binding.final_objective,
+            "production_final_gradient_inf_norm": (
+                production_binding.final_gradient_inf_norm
+            ),
+            "production_final_status": production_binding.final_status,
+            "production_final_parameters_sha256": (
+                production_binding.final_parameters_sha256
+            ),
             "parameter_dtype": "<f8",
             "parameter_bytes": parameter_bytes,
             "parameter_byte_cap": parameter_byte_cap,
@@ -482,6 +519,54 @@ def _required_string(payload: dict[str, object], field: str) -> str:
     if not isinstance(value, str) or not value:
         raise TypeError(f"trial trace {field} must be a nonempty string")
     return value
+
+
+def _required_finite_number(payload: dict[str, object], field: str) -> float:
+    value = payload.get(field)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise TypeError(f"trial trace {field} must be a number")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"trial trace {field} must be finite")
+    return number
+
+
+@dataclass(frozen=True)
+class _ProductionBinding:
+    evaluations: int
+    final_objective: float
+    final_gradient_inf_norm: float
+    final_status: int
+    final_parameters_sha256: str
+
+
+def _production_binding(payload: dict[str, object]) -> _ProductionBinding:
+    evaluations = _required_int(payload, "production_evaluations")
+    if evaluations < 1:
+        raise ValueError("trial trace production_evaluations must be positive")
+    final_gradient_inf_norm = _required_finite_number(
+        payload, "production_final_gradient_inf_norm"
+    )
+    if final_gradient_inf_norm < 0.0:
+        raise ValueError(
+            "trial trace production_final_gradient_inf_norm must be nonnegative"
+        )
+    final_parameters_sha256 = _required_string(
+        payload, "production_final_parameters_sha256"
+    )
+    if len(final_parameters_sha256) != _SHA256_HEX_LENGTH or any(
+        character not in "0123456789abcdef" for character in final_parameters_sha256
+    ):
+        raise ValueError(
+            "trial trace production_final_parameters_sha256 is not lowercase SHA-256"
+        )
+    return _ProductionBinding(
+        evaluations=evaluations,
+        final_objective=_required_finite_number(payload, "production_final_objective"),
+        final_gradient_inf_norm=final_gradient_inf_norm,
+        final_status=_required_int(payload, "production_final_status"),
+        final_parameters_sha256=final_parameters_sha256,
+    )
 
 
 def _relative_file(root: Path, relative: object, *, field: str) -> Path:
@@ -736,6 +821,7 @@ def validate_boozer_trial_trace(
     diagnostic_evaluations = _required_int(payload, "diagnostic_evaluations")
     parameter_bytes = _required_int(payload, "parameter_bytes")
     parameter_byte_cap = _required_int(payload, "parameter_byte_cap")
+    production_binding = _production_binding(payload)
     final_status = payload.get("final_status")
     if final_status is not None and (
         not isinstance(final_status, int) or isinstance(final_status, bool)
@@ -747,11 +833,6 @@ def validate_boozer_trial_trace(
         raise ValueError("trial trace record bound is not derived from solver bounds")
     if diagnostic_evaluations < 1 or record_count != diagnostic_evaluations + 1:
         raise ValueError("trial trace diagnostic evaluation count is inconsistent")
-    if (
-        expected_evaluations is not None
-        and diagnostic_evaluations != expected_evaluations
-    ):
-        raise ValueError("trial trace diagnostic evaluations differ from expectation")
     if not 0 < record_count <= max_records:
         raise ValueError("trial trace record count differs from objective evaluations")
     if parameter_bytes < 0 or parameter_byte_cap <= 0:
@@ -809,23 +890,37 @@ def validate_boozer_trial_trace(
         ).reshape(-1)
         if not np.all(np.isfinite(final_parameters)):
             raise ValueError("final accepted trial parameters are not finite")
-        if parameter_sha256(final_parameters) != records[-1].key.parameter_sha256:
+        if parameter_sha256(final_parameters) != (
+            production_binding.final_parameters_sha256
+        ):
             raise ValueError(
-                "final accepted trial parameters do not match measurement"
+                "trial trace production final parameters differ from measurement"
             )
-    final_record = records[-1]
+    if (
+        expected_evaluations is not None
+        and production_binding.evaluations != expected_evaluations
+    ):
+        raise ValueError("trial trace production evaluations differ from measurement")
     if (
         expected_final_objective is not None
-        and final_record.objective.filtered_objective != expected_final_objective
+        and production_binding.final_objective != expected_final_objective
     ):
-        raise ValueError("final accepted trial objective does not match measurement")
+        raise ValueError(
+            "trial trace production final objective differs from measurement"
+        )
     if (
         expected_final_gradient_inf_norm is not None
-        and final_record.objective.gradient_inf_norm != expected_final_gradient_inf_norm
+        and production_binding.final_gradient_inf_norm
+        != expected_final_gradient_inf_norm
     ):
-        raise ValueError("final accepted trial gradient does not match measurement")
-    if expected_final_status is not None and final_status != expected_final_status:
-        raise ValueError("trial trace final status does not match measurement")
+        raise ValueError(
+            "trial trace production final gradient differs from measurement"
+        )
+    if (
+        expected_final_status is not None
+        and production_binding.final_status != expected_final_status
+    ):
+        raise ValueError("trial trace production final status differs from measurement")
     return BoozerTrialTraceSummary(
         case="boozer",
         provider=cast(TrialProvider, expected_provider),
@@ -859,6 +954,15 @@ def main() -> int:
     parser.add_argument("--maxiter", type=int, default=1000)
     parser.add_argument("--maxls", type=int, default=20)
     parser.add_argument("--gtol", type=float, default=1.0e-10)
+    parser.add_argument("--production-evaluations", type=int, required=True)
+    parser.add_argument("--production-final-objective", type=float, required=True)
+    parser.add_argument(
+        "--production-final-gradient-inf-norm", type=float, required=True
+    )
+    parser.add_argument("--production-final-status", type=int, required=True)
+    parser.add_argument(
+        "--production-final-parameters", type=float, nargs="+", required=True
+    )
     args = parser.parse_args()
 
     from benchmarks.fixtures.custom_quasi_newton import fixture
@@ -867,6 +971,13 @@ def main() -> int:
         fixture("boozer"),
         provider=cast(TrialProvider, args.provider),
         manifest_path=args.output,
+        production_evaluations=args.production_evaluations,
+        production_final_objective=args.production_final_objective,
+        production_final_gradient_inf_norm=(args.production_final_gradient_inf_norm),
+        production_final_status=args.production_final_status,
+        production_final_parameters=np.asarray(
+            args.production_final_parameters, dtype=np.float64
+        ),
         maxiter=args.maxiter,
         maxls=args.maxls,
         gtol=args.gtol,
