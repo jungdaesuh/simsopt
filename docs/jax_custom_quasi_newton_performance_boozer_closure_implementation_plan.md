@@ -289,60 +289,79 @@ warm gates. Otherwise revert it and retain the measured limitation.
 
 `benchmarks/custom_quasi_newton_runtime.py` owns runner version 7.
 `benchmarks/custom_quasi_newton_receipts.py` owns receipt version 2 and its
-semantic validator. Tests must cover the current version, the allowed legacy
+semantic validator. (2026-08-03: the runner advanced to version 8 — version 7
+plus trial-trace/GPU-memory production binding, commit 03de61652; the trial
+trace advanced to schema 2 adding `final_status`. Version 7 remains readable
+as legacy; receipts stay at version 2 with the binding cross-checks.) Tests must cover the current version, the allowed legacy
 versions, unknown-version rejection, missing/null/wrong-type fields, nonfinite
 metrics, tampered derivations, and historical round trips.
 
 ## Implementation Plan
 
 1. Freeze failure, finalization, and schema behavior.
-   - [ ] Add a RED example regression proving a finite, decreasing Boozer result
+   - [x] Add a RED example regression proving a finite, decreasing Boozer result
          with `outer_solver_success=false` must produce top-level
-         `status="failed"`.
-   - [ ] Add zero-step cases proving stationary raw-success is valid and the
+         `status="failed"`. (65b5d8c9c; smoke contract Option 1.)
+   - [x] Add zero-step cases proving stationary raw-success is valid and the
          current nonstationary Boozer zero-step result is invalid.
-   - [ ] Add a RED runner/receipt test requiring the trial fields needed to
-         diagnose line-search failure.
-   - [ ] Preserve the exact-inner CPU/GPU test as a GREEN non-regression gate.
-   - [ ] Implement the version 7/version 2 schema matrix above before producing
-         new promotion receipts.
-   - [ ] Make receipt validation recompute outer and scientific success from
-         raw fields; never trust top-level `status` or a stored aggregate alone.
+         (91e1133b9, tests/jax/solve/test_endpoint_certificate.py.)
+   - [x] Add a RED runner/receipt test requiring the trial fields needed to
+         diagnose line-search failure. (590cffd47, c5c964aeb.)
+   - [x] Preserve the exact-inner CPU/GPU test as a GREEN non-regression gate.
+   - [x] Implement the version 7/version 2 schema matrix above before producing
+         new promotion receipts. (0d8c86ba0, 745fbb850; runner now v8 per note
+         above, 03de61652.)
+   - [x] Make receipt validation recompute outer and scientific success from
+         raw fields; never trust top-level `status` or a stored aggregate
+         alone. (745fbb850.)
 
 2. Diagnose the Boozer outer failure with one bounded owner.
-   - [ ] Add a benchmark-only host diagnostic harness with immutable trial
+   - [x] Add a benchmark-only host diagnostic harness with immutable trial
          records. Correlate optimizer and objective data by
          `(evaluation_index, SHA-256(float64 parameter bytes))`; use no global
-         mutable state.
-   - [ ] The host line search owns trial step length and Wolfe errors. The
+         mutable state. (590cffd47, benchmarks/boozer_trial_diagnostic.py.)
+   - [x] The host line search owns trial step length and Wolfe errors. The
          solved-pair/objective boundary owns predictor, primal, adjoint, Newton,
          residual, physical objective, and gradient data. The diagnostic
-         harness is the only join owner.
-   - [ ] Record predictor kind/success, primal and adjoint success, Newton
+         harness is the only join owner. (590cffd47.)
+   - [x] Record predictor kind/success, primal and adjoint success, Newton
          status/iterations, inner residual, raw and filtered objective,
-         gradient finiteness/norm, step length, and Wolfe errors.
-   - [ ] Keep capture optional and bounded. Normal execution retains no trial
-         trajectory and adds no host callback.
-   - [ ] Run matched native/custom CPU diagnostics, then the custom strict RTX
-         5090 diagnostic, and identify the first causal divergence.
-   - [ ] Record the selected recovery design and rejected alternative in this
-         plan before changing objective or optimizer behavior.
+         gradient finiteness/norm, step length, and Wolfe errors. (590cffd47.)
+   - [x] Keep capture optional and bounded. Normal execution retains no trial
+         trajectory and adds no host callback. (`--capture-boozer-trial-trace`
+         opt-in with declared byte caps, c5c964aeb.)
+   - [x] Run matched native/custom CPU diagnostics, then the custom strict RTX
+         5090 diagnostic, and identify the first causal divergence. (Confirmed
+         outer-failure diagnosis section above; GPU deaths are stochastic
+         noise-floor line-search mortality, CPU deterministic.)
+   - [x] Record the selected recovery design and rejected alternative in this
+         plan before changing objective or optimizer behavior. (Selected
+         design under Design Alternatives.)
 
 3. Fix Boozer finalization and the diagnosed root cause with RED -> GREEN ->
    REFACTOR.
-   - [ ] Make the example finalizer require certified outer and inner success,
+   - [x] Make the example finalizer require certified outer and inner success,
          finite certificate fields, and the Scientific Certificate above.
-   - [ ] Write an observable RED regression for the selected candidate failure;
+         (65b5d8c9c via the endpoint-certificate SSOT, 91e1133b9.)
+   - [x] Write an observable RED regression for the selected candidate failure;
          preserve the failing pre-fix command, output, commit, and hash.
-   - [ ] If objective-owned recovery is selected, implement one immutable,
-         fixed-length policy in `surface_objectives_traceable.py` and report its
-         attempts/evaluations.
-   - [ ] If the optimizer protocol is selected, define one typed private
+         (tests/geo/test_traceable_trial_evaluator.py controller suite,
+         1a7ce5b90.)
+   - [x] If objective-owned recovery is selected, implement one immutable,
+         fixed-length policy in `surface_objectives_traceable.py` and report
+         its attempts/evaluations. (Accepted-incumbent continuation with one
+         bounded Newton-from-incumbent retry, 1a7ce5b90; lean evaluator core
+         5357fc91e; promotion generation guard e3e8d5fe9.)
+   - [x] If the optimizer protocol is selected, define one typed private
          outcome and inventory every BFGS/L-BFGS caller before changing it.
-   - [ ] Require every accepted trial to use a certified inner solve and finite
+         (Not selected — objective-owned recovery chosen; no optimizer
+         protocol added.)
+   - [x] Require every accepted trial to use a certified inner solve and finite
          physical objective/gradient; never certify a penalty value.
-   - [ ] Refactor only after GREEN, keeping candidate classification and retry
-         policy under one owner.
+         (`accept` fails closed on uncertified candidates, 1a7ce5b90.)
+   - [x] Refactor only after GREEN, keeping candidate classification and retry
+         policy under one owner. (5357fc91e single-owner
+         `_build_candidate_evaluation_core`.)
 
 4. Close outer Boozer scientific parity.
    - [ ] Use the `boozer` fixture with `method=bfgs`, `maxiter=1000`, matched
@@ -359,43 +378,55 @@ metrics, tampered derivations, and historical round trips.
          bitwise endpoint identity.
 
 5. Establish matched L-BFGS performance attribution before fusion.
-   - [ ] Emit fixture-build, provider-preparation, first-execution, and warm
+   - [x] Emit fixture-build, provider-preparation, first-execution, and warm
          times as separate synchronized fields. Keep cold total derived.
-   - [ ] Give custom and Optax the same work-counter, transfer, RSS, and
+         (0d8c86ba0.)
+   - [x] Give custom and Optax the same work-counter, transfer, RSS, and
          process-attributed VRAM boundaries. Mark genuinely unavailable values
-         unavailable rather than inferring them.
-   - [ ] Extend `benchmarks/lbfgs_ondevice_compile_shape.py` to select custom or
+         unavailable rather than inferring them. (0d8c86ba0, e7051ab65.)
+   - [x] Extend `benchmarks/lbfgs_ondevice_compile_shape.py` to select custom or
          Optax and compile the exact provider factories used by the runner.
          Record route, per-program and aggregate StableHLO bytes, compile time,
          executable count, dtype, fixture, and options. Share benchmark
-         preparation code; do not copy optimizer equations.
-   - [ ] Profile objective/line-search work, per-kernel device time, and
+         preparation code; do not copy optimizer equations. (6edad18f0.)
+   - [x] Profile objective/line-search work, per-kernel device time, and
          host-transfer latency. Confirm or reject the reentry/synchronization
-         hypothesis before Phase 6.
-   - [ ] Add version-7 boundary tests proving fixture construction and compile
-         diagnostics are excluded from warm measurements.
+         hypothesis before Phase 6. (REJECTED — warm-gap attribution section
+         above: 65% device / 35% host; while-predicate D2H 1,513 vs 78 per
+         solve.)
+   - [x] Add version-7 boundary tests proving fixture construction and compile
+         diagnostics are excluded from warm measurements. (0d8c86ba0.)
 
 6. Evaluate the explicitly routed L-BFGS fast design.
-   - [ ] Add a RED routing test: `fused_stepwise` must reach the new prepared
+   - [x] Add a RED routing test: `fused_stepwise` must reach the new prepared
          program, while `stepwise` and `monolithic_debug` retain their current
-         paths and cache identities.
-   - [ ] Add a RED transfer test against the measured baseline of two `advance`
+         paths and cache identities. (9cf8c949d, 8fbf50918.)
+   - [x] Add a RED transfer test against the measured baseline of two `advance`
          observations per accepted iteration. The fast target is no more than
          `iterations + 1` advance observations, with exact leaves and bytes
-         retained in the receipt.
-   - [ ] Implement the fused reentry-plus-search program only after Phase 5
-         confirms that target is causal.
-   - [ ] Preserve status, counters, callbacks, zero budgets, `maxfun`, bounds,
+         retained in the receipt. (8fbf50918 — fused advance observations
+         measure 0 with the transfer gate.)
+   - [x] Implement the fused reentry-plus-search program only after Phase 5
+         confirms that target is causal. (9cf8c949d, after the Phase-5
+         attribution pivot recorded above.)
+   - [x] Preserve status, counters, callbacks, zero budgets, `maxfun`, bounds,
          inverse-Hessian behavior, and accepted-state scientific parity.
-   - [ ] Abort if compilation exceeds 120 seconds or 8 GiB RSS, duplicates
+         (27 fused-vs-stepwise tests, 9cf8c949d; 7 direct fused-vs-SciPy
+         contracts, b243a176e; callbacks rejected fail-closed toward
+         `stepwise`.)
+   - [x] Abort if compilation exceeds 120 seconds or 8 GiB RSS, duplicates
          transition mathematics, changes the endpoint contract, or recreates
-         the rejected all-entry generic branch graph.
-   - [ ] A performance receipt is eligible only when `intent=fast` and
+         the rejected all-entry generic branch graph. (No abort trips; fused
+         reuses the existing `_lbfgsb_scipy` transitions under
+         `lax.while_loop`/`lax.cond`.)
+   - [x] A performance receipt is eligible only when `intent=fast` and
          `solver_route=fused_stepwise`; the validator rejects any other route.
-         Current `stepwise` timing cannot satisfy this gate.
-   - [ ] Keep the route only if warm custom time is no more than `2.0x` matched
-         Optax on both GPUs and improves over the current custom median. Revert
-         a pure performance regression.
+         (8fbf50918.)
+   - [x] Keep the route only if warm custom time is no more than `2.0x` matched
+         Optax on both GPUs and improves over the current custom median.
+         (RTX 5090: 1.06x quiet / 0.94x contended, from 1.59x pre-fusion;
+         A100 superseded — landau down, user directive 2026-08-02 narrows the
+         target to the RTX 5090.)
 
 7. Qualify performance, memory, devices, and evidence.
    - [ ] In one prepared child per provider, discard one warm run and retain
