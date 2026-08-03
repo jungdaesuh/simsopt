@@ -612,8 +612,10 @@ metrics, tampered derivations, and historical round trips.
 
 ## Campaign closure status (2026-08-03)
 
-Forty-three ordered commits (`bb05ec58f..HEAD`, including the two external
-review iterations recorded in the addendum below); candidate evidence SHA
+Forty-four ordered commits in the fixed range `bb05ec58f..466432b88`
+(`git rev-list --count`; includes the two external review iterations
+recorded in the addendum below — later review-closure commits extend the
+series and are recorded there, not in this count); candidate evidence SHA
 `359fd41fc`, lanes run from clean detached worktrees, receipts first
 committed at `f2ed3d534` and republished under the hardened validator at
 `cdf62708a`. Closed with receipts (all `validate-all` green, 47 receipts,
