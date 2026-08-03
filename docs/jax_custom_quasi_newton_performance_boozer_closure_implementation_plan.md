@@ -494,10 +494,11 @@ metrics, tampered derivations, and historical round trips.
    - [x] Copy the authority bundle to a different host or durable store, mount
          it read-only, and replay from a detached checkout at the recorded
          candidate SHA with the recorded environment lock — CLOSED
-         2026-08-03 on `landau` (A100 host): 47/47 at the first replay,
-         49/49 at the second, and 49/49 plus rollback-tree integrity at
-         the third (current corpus, validator checkout `bf1239cc6`);
-         receipt
+         2026-08-03 on `landau` (A100 host): current evidence is the
+         EVIDENCED fourth replay at validator checkout `44f127e61`
+         (committed transcript: 49/49 plus rollback-tree integrity);
+         the first (47/47), second, and prose-only third replays are
+         historical; receipt
          `offhost-replay-landau-20260803.md`. Precisely: the VALIDATOR
          checkout was `487d9ff89` (then-HEAD, containing every
          receipt-recorded candidate commit object for authentication);
@@ -664,9 +665,10 @@ metrics, tampered derivations, and historical round trips.
 - [x] Authority artifacts validate from a durable off-host copy
       (`offhost-replay-landau-20260803.md`: landau/A100, detached pristine
       checkout at `487d9ff89`, lock-pinned stack, write-protected archive,
-      47/47 at the first replay; 49/49 at the third replay covering
-      the current corpus at validator checkout `bf1239cc6`, with the
-      rollback evidence tree integrity-checked separately).
+      current evidence = the evidenced fourth replay at validator
+      checkout `44f127e61` with its committed transcript: 49/49 and the
+      rollback evidence tree integrity-checked separately; earlier
+      replays historical).
 
 ## Campaign closure status (2026-08-03)
 
