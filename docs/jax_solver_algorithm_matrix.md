@@ -112,10 +112,15 @@ report's remaining rows are unaffected.
   result-payload executable is not compiled on this route. The 20-run warm
   soak shows executable count 1 during solving with flat RSS/VRAM (receipt
   `warm-soak-gpu-af4a7619f/`).
-- Rollback: revert to `stepwise` by dropping the intent routing
-  (`_solver_route`) commit — rehearsed in a clean worktree in receipt
-  `rollback-rehearsal-20260802.md` (base/candidate comparison plus
-  three-commit revert; parity lanes green on the base).
+- Rollback: revert to `stepwise` by dropping the intent routing in
+  `_solver_route` — rehearsed in a clean worktree in receipt
+  `rollback-rehearsal-fused-20260803.md`: fast intent falls back to the
+  callback-capable stepwise route, SciPy trajectory parity stays green,
+  and exactly the two fused-contract route pins fail (they revert with
+  the routing line); new fast performance receipts are then rejected by
+  the fused-route gate, so a full rollback also retires that gate. The
+  earlier `rollback-rehearsal-20260802.md` covers the pre-fused
+  prepared-runtime commits only.
 
 ## Migration contracts and live gaps
 
