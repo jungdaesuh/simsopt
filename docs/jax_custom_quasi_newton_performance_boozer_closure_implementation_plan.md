@@ -440,12 +440,22 @@ metrics, tampered derivations, and historical round trips.
          competing GPU processes, and rerun if they materially change.
    - [ ] Record all raw samples and the timing median/range. Gate the maximum
          across retained samples for memory.
-   - [ ] Require both maximum absolute process RSS and maximum provider-
-         attributable RSS delta (`phase peak - phase start`) to be no more than
-         `1.5x` matched Optax.
-   - [ ] Require maximum process VRAM no more than `1.5x` matched Optax and a
-         same-process prepared warm soak whose RSS, VRAM, and executable count
-         plateau rather than grow across retained runs.
+   - [x] AMENDED BY RULING (user-ratified 2026-08-03): the authored `1.5x`
+         RSS requirement predated measurement; every matched lane measures
+         custom attributable RSS at 2.93x (5090 contended), 2.98x (5090
+         quiet), and 4.69x (A100) Optax — the deliberate cost of retaining
+         the fused executables. Memory maxima and custom/Optax ratios are
+         now computed and RECORDED in every performance qualification
+         payload (`custom_to_optax_rss_delta_ratio` etc.) as disclosed
+         diagnostics; timing remains the promotion gate. Reverting this
+         ruling means republishing the performance receipts with the
+         `1.5x` thresholds enforced, which fails all current lanes.
+   - [x] AMENDED BY THE SAME RULING for the VRAM threshold (measured up to
+         2.14x on the quiet 5090; equal-VRAM on contended/A100 lanes);
+         `custom_to_optax_vram_ratio` is recorded per receipt. The
+         plateau requirement stands separately and is CLOSED by the
+         warm-soak receipt `warm-soak-gpu-af4a7619f/` (executable count 1
+         throughout, RSS drift 20 KiB, VRAM flat).
    - [ ] Bind GPU model, UUID, compute capability, total VRAM, driver/CUDA
          versions, visible-device selector, and host/job identity. Paired runs
          must use the same UUID and the expected RTX 5090 or A100 model.
@@ -455,18 +465,22 @@ metrics, tampered derivations, and historical round trips.
          1.1659, five AB/BA rounds, A100-PCIE-40GB identity-bound, all
          endpoints converged in FP64). Measured facts: custom fused is
          0.55x Optax on the RTX 5090 but 1.17x on the A100 (both inside
-         the 2.0x gate), and a host-contention control on landau (48 of
-         64 cores busy, same protocol; runner dirs at
-         `.artifacts/custom-quasi-newton/final-a100-55745feaf-contended`)
-         left the inversion in place at ratio 1.13 — so host load does
-         not explain it. The working HYPOTHESIS (correlation across two
-         pinned systems, not a profiled cause) is device-side
+         the 2.0x gate). One host-contention CONTROL was run on landau
+         (six executed rounds, round-0 discarded by protocol, five
+         retained — same as every sweep here; a CPU-burner spawning 48
+         busy workers on the 64-core host, launcher bundled in the
+         contended receipt): the inversion persisted at ratio 1.13,
+         so THAT contention condition did not change the outcome. This
+         is one condition, not a general exclusion of host effects.
+         The working HYPOTHESIS (correlation across two pinned systems;
+         no profiling, clock, or power evidence) is device-side
          per-operation dispatch cost: the fused route degrades 6.1x
-         5090→A100 versus Optax's 2.9x, the signature of its longer
+         5090→A100 versus Optax's 2.9x, consistent with its longer
          chain of tiny sequential kernels on the older, lower-clocked
-         part; A100 FP64 throughput is not the limiter (it is stronger
-         than the 5090's, yet both providers slow down). Clock/power
-         controls and kernel-level profiling remain unrun.
+         part; A100 FP64 THROUGHPUT being the limiter is inconsistent
+         with the A100's stronger FP64 ratio, though no direct
+         FLOP-utilization measurement was taken. Clock/power controls
+         and kernel-level profiling remain unrun.
    - [ ] Bind every StableHLO and compile artifact to its provider, solver
          route, candidate SHA, and exact device UUID; require a complete
          custom/Optax artifact pair for each GPU.
@@ -631,8 +645,11 @@ metrics, tampered derivations, and historical round trips.
 - [ ] The explicitly identified `fused_stepwise` route meets the `2.0x` Optax
       warm gate on both GPUs and improves over current custom, or it is reverted
       and no performance-promotion claim is made.
-- [ ] Absolute and attributable RSS and maximum VRAM meet their `1.5x` gates;
-      same-process memory and executable counts plateau.
+- [x] AMENDED BY RULING (user-ratified 2026-08-03): RSS/VRAM maxima and
+      ratios are recorded per receipt as disclosed diagnostics instead of
+      `1.5x` gates (measured 2.9-4.7x RSS, up to 2.14x VRAM — see the
+      Phase-7 amendment); same-process memory and executable counts
+      plateau per the warm-soak receipt.
 - [ ] Custom and Optax use matched measurement boundaries, hardware identity,
       and raw five-sample reporting.
 - [ ] Cold preparation and first execution are separately reported with exact-
@@ -849,10 +866,11 @@ one P1 and three P2s, fixed in the next commit batch:
   (nonsmooth objective -> status 2 -> line-search-failed).
 - The A100 inversion claim was downgraded from cause to hypothesis and a
   host-contention CONTROL was run (48 of 64 cores busy): the inversion
-  persists at ratio 1.13 vs 1.17 quiet, refuting host load as the
-  explanation and pointing at device-side per-op dispatch cost
-  (degradation 6.1x for the fused chain vs 2.9x for Optax, 5090->A100,
-  with FP64 throughput exonerated).
+  persists at ratio 1.13 vs 1.17 quiet — that contention condition did
+  not change the outcome (one condition, not a general exclusion of
+  host effects); the device-side per-op dispatch-cost HYPOTHESIS is
+  consistent with the 6.1x-vs-2.9x cross-GPU degradation and with the
+  A100's stronger FP64 ratio, pending profiling.
 
 Reviewer sub-claims refuted with evidence (not re-fixed): the batch
 telemetry CSVs existed at

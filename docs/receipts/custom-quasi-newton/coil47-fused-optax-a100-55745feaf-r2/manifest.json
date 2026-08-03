@@ -1,14 +1,14 @@
 {
   "archive_bundle": {
-    "inventory_sha256": "52a2720309cf6e71bcc5420286f8837d2c98d7f9fa64503f37265789fe3845fe",
-    "receipt_id": "coil47-fused-optax-a100-55745feaf",
-    "storage_identity": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-a100-55745feaf"
+    "inventory_sha256": "2bd3cc7db393dafdc52f8ed5bc2ce770d7cc16999111e3073cdc4d59320c5491",
+    "receipt_id": "coil47-fused-optax-a100-55745feaf-r2",
+    "storage_identity": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-a100-55745feaf-r2"
   },
-  "archive_uri": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-a100-55745feaf",
+  "archive_uri": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-a100-55745feaf-r2",
   "artifacts": [
     {
       "path": "metrics.json",
-      "sha256": "c5c2482131b82906d5d8a1b59e203b19f88867b86e7848f013ec2477c3a08419"
+      "sha256": "ae992744d1b6966d017c81fbafd345614558dbc326f0fead707186c4bdc5ea85"
     },
     {
       "path": "raw/round-1/custom/gpu_memory.json",
@@ -132,14 +132,14 @@
     },
     {
       "path": "summary.md",
-      "sha256": "a7be055b1f4a60bfdfcf8d4412f6a23bdcf27c3410d790043caa34295b128e64"
+      "sha256": "a6889b36f9234c00ef6da240cb223737a817f5c4c8b31cb498043b07c37e9385"
     }
   ],
   "candidate_commit": "55745feaf939bb5b0c40fa85493e72ec506ac41a",
   "candidate_worktree_clean": true,
   "environment_lock": {
     "path": "benchmarks/environments/custom_quasi_newton_a100_landau.lock.txt",
-    "sha256": "dd896aa4779a6d825ef067f14830c0eeac65176e5348fd035b05524077e2ae1b"
+    "sha256": "5dc24a0d942ca28269e607129ec67d19080f11096983455c6eeb7a37e1bb9822"
   },
   "expected_sample_counts": {
     "custom": 5,
@@ -148,15 +148,23 @@
   "kind": "custom-quasi-newton-runner",
   "qualification": {
     "comparison_count": 5,
+    "custom_max_solver_rss_delta_kib": 914972.0,
+    "custom_max_vram_mib": 742.0,
+    "custom_to_optax_rss_delta_ratio": 4.685916214278398,
+    "custom_to_optax_vram_ratio": 1.0,
     "custom_to_optax_warm_ratio": 1.1659094237725227,
     "custom_warm_seconds_median": 0.08040603400058899,
     "failure_reasons": [],
+    "memory_ruling": "recorded-diagnostic-user-ratified-2026-08-03",
+    "minimum_samples_per_provider": 5,
+    "optax_max_solver_rss_delta_kib": 195260.0,
+    "optax_max_vram_mib": 742.0,
     "optax_warm_seconds_median": 0.06896421999954327,
     "passed": true,
     "verdict": "pass"
   },
   "qualification_kind": "performance",
-  "receipt_id": "coil47-fused-optax-a100-55745feaf",
+  "receipt_id": "coil47-fused-optax-a100-55745feaf-r2",
   "runner_schema_version": 9,
   "schema_version": 2,
   "source_runs": [

@@ -1,0 +1,7 @@
+round=0 providers=custom,optax exit=0
+round=1 providers=optax,custom exit=0
+round=2 providers=custom,optax exit=0
+round=3 providers=optax,custom exit=0
+round=4 providers=custom,optax exit=0
+round=5 providers=optax,custom exit=0
+A100 CONTENDED SWEEP DONE
