@@ -1,0 +1,283 @@
+{
+  "config": {
+    "device": "gpu",
+    "discarded_runs": 1,
+    "fixture": "coil47",
+    "maxcor": 10,
+    "maxiter": 20,
+    "method": "lbfgs",
+    "provider": "custom",
+    "retained_runs": 19,
+    "run_mode": "fused_stepwise",
+    "runs": 20
+  },
+  "device_identity": {
+    "backend": "gpu",
+    "jax_device": "cuda:0"
+  },
+  "git_clean": true,
+  "git_commit": "af4a7619f8d19188de1a83beb4fd7d8f2f7774ef",
+  "plateau_verdict": {
+    "compared_runs_per_half": 9,
+    "executable_count_identical": true,
+    "executable_count_positive": true,
+    "first_half_max_rss_kib": 1905444,
+    "first_half_max_vram_mib": 968,
+    "first_half_median_warm_seconds": 0.026163172093220055,
+    "last_half_max_rss_kib": 1905464,
+    "last_half_max_vram_mib": 968,
+    "last_half_median_warm_seconds": 0.028339277021586895,
+    "plateau": true,
+    "retained_run_count": 19,
+    "rss_plateau": true,
+    "rss_slack_kib": 2048,
+    "vram_applicable": true,
+    "vram_plateau": true,
+    "vram_slack_mib": 2,
+    "warm_seconds_plateau": true,
+    "warm_seconds_ratio_limit": 1.2
+  },
+  "runs": [
+    {
+      "executable_count": 1,
+      "retained": false,
+      "rss_kib": 1905412,
+      "run_index": 0,
+      "vram": {
+        "availability": "available",
+        "reason": null,
+        "vram_mib": 968
+      },
+      "warm_seconds": 0.045923531986773014
+    },
+    {
+      "executable_count": 1,
+      "retained": true,
+      "rss_kib": 1905436,
+      "run_index": 1,
+      "vram": {
+        "availability": "available",
+        "reason": null,
+        "vram_mib": 968
+      },
+      "warm_seconds": 0.026189880911260843
+    },
+    {
+      "executable_count": 1,
+      "retained": true,
+      "rss_kib": 1905440,
+      "run_index": 2,
+      "vram": {
+        "availability": "available",
+        "reason": null,
+        "vram_mib": 968
+      },
+      "warm_seconds": 0.026163172093220055
+    },
+    {
+      "executable_count": 1,
+      "retained": true,
+      "rss_kib": 1905440,
+      "run_index": 3,
+      "vram": {
+        "availability": "available",
+        "reason": null,
+        "vram_mib": 968
+      },
+      "warm_seconds": 0.028375981957651675
+    },
+    {
+      "executable_count": 1,
+      "retained": true,
+      "rss_kib": 1905440,
+      "run_index": 4,
+      "vram": {
+        "availability": "available",
+        "reason": null,
+        "vram_mib": 968
+      },
+      "warm_seconds": 0.025857162079773843
+    },
+    {
+      "executable_count": 1,
+      "retained": true,
+      "rss_kib": 1905440,
+      "run_index": 5,
+      "vram": {
+        "availability": "available",
+        "reason": null,
+        "vram_mib": 968
+      },
+      "warm_seconds": 0.025235519045963883
+    },
+    {
+      "executable_count": 1,
+      "retained": true,
+      "rss_kib": 1905444,
+      "run_index": 6,
+      "vram": {
+        "availability": "available",
+        "reason": null,
+        "vram_mib": 968
+      },
+      "warm_seconds": 0.025546315009705722
+    },
+    {
+      "executable_count": 1,
+      "retained": true,
+      "rss_kib": 1905444,
+      "run_index": 7,
+      "vram": {
+        "availability": "available",
+        "reason": null,
+        "vram_mib": 968
+      },
+      "warm_seconds": 0.03681723296176642
+    },
+    {
+      "executable_count": 1,
+      "retained": true,
+      "rss_kib": 1905444,
+      "run_index": 8,
+      "vram": {
+        "availability": "available",
+        "reason": null,
+        "vram_mib": 968
+      },
+      "warm_seconds": 0.03415644902270287
+    },
+    {
+      "executable_count": 1,
+      "retained": true,
+      "rss_kib": 1905444,
+      "run_index": 9,
+      "vram": {
+        "availability": "available",
+        "reason": null,
+        "vram_mib": 968
+      },
+      "warm_seconds": 0.02580050705000758
+    },
+    {
+      "executable_count": 1,
+      "retained": true,
+      "rss_kib": 1905448,
+      "run_index": 10,
+      "vram": {
+        "availability": "available",
+        "reason": null,
+        "vram_mib": 968
+      },
+      "warm_seconds": 0.02663899608887732
+    },
+    {
+      "executable_count": 1,
+      "retained": true,
+      "rss_kib": 1905448,
+      "run_index": 11,
+      "vram": {
+        "availability": "available",
+        "reason": null,
+        "vram_mib": 968
+      },
+      "warm_seconds": 0.040261021931655705
+    },
+    {
+      "executable_count": 1,
+      "retained": true,
+      "rss_kib": 1905448,
+      "run_index": 12,
+      "vram": {
+        "availability": "available",
+        "reason": null,
+        "vram_mib": 968
+      },
+      "warm_seconds": 0.030741674010641873
+    },
+    {
+      "executable_count": 1,
+      "retained": true,
+      "rss_kib": 1905448,
+      "run_index": 13,
+      "vram": {
+        "availability": "available",
+        "reason": null,
+        "vram_mib": 968
+      },
+      "warm_seconds": 0.026586437015794218
+    },
+    {
+      "executable_count": 1,
+      "retained": true,
+      "rss_kib": 1905452,
+      "run_index": 14,
+      "vram": {
+        "availability": "available",
+        "reason": null,
+        "vram_mib": 968
+      },
+      "warm_seconds": 0.033868225989863276
+    },
+    {
+      "executable_count": 1,
+      "retained": true,
+      "rss_kib": 1905452,
+      "run_index": 15,
+      "vram": {
+        "availability": "available",
+        "reason": null,
+        "vram_mib": 968
+      },
+      "warm_seconds": 0.02635489997919649
+    },
+    {
+      "executable_count": 1,
+      "retained": true,
+      "rss_kib": 1905452,
+      "run_index": 16,
+      "vram": {
+        "availability": "available",
+        "reason": null,
+        "vram_mib": 968
+      },
+      "warm_seconds": 0.028339277021586895
+    },
+    {
+      "executable_count": 1,
+      "retained": true,
+      "rss_kib": 1905456,
+      "run_index": 17,
+      "vram": {
+        "availability": "available",
+        "reason": null,
+        "vram_mib": 968
+      },
+      "warm_seconds": 0.026356961927376688
+    },
+    {
+      "executable_count": 1,
+      "retained": true,
+      "rss_kib": 1905456,
+      "run_index": 18,
+      "vram": {
+        "availability": "available",
+        "reason": null,
+        "vram_mib": 968
+      },
+      "warm_seconds": 0.026923483004793525
+    },
+    {
+      "executable_count": 1,
+      "retained": true,
+      "rss_kib": 1905464,
+      "run_index": 19,
+      "vram": {
+        "availability": "available",
+        "reason": null,
+        "vram_mib": 968
+      },
+      "warm_seconds": 0.03192682203371078
+    }
+  ],
+  "schema_version": 1
+}
