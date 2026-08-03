@@ -872,6 +872,30 @@ one P1 and three P2s, fixed in the next commit batch:
   consistent with the 6.1x-vs-2.9x cross-GPU degradation and with the
   A100's stronger FP64 ratio, pending profiling.
 
+Sixth external pass (full verdict at 76f8fdf23) and seventh (delta at
+3106dd2ce) were worked together, fixes in the commits after
+3106dd2ce:
+
+- Performance qualification extended (user-ratified ruling): sample
+  floor (>=5 per provider) and same-GPU pair identity are ENFORCED;
+  memory maxima and custom/Optax ratios are RECORDED in every payload;
+  the plan's pre-measurement 1.5x memory thresholds are amended by the
+  dated ruling above. All four performance receipts republished with
+  the diagnostics visible (RSS 2.93-4.69x, VRAM up to 2.14x).
+- The A100 host-contention control became its own claim-bound receipt
+  (`coil47-fused-optax-a100-contended-55745feaf`) with the CPU-burner
+  launcher and sweep log bundled and hashed.
+- The rollback rehearsal was re-run at `280624e80` with every
+  execution byte tracked and hashed under
+  `rollback-rehearsal-fused-20260803/raw/`; the receipt now states the
+  transfer gate's true `iterations+1` predicate and no longer depends
+  on an unreachable amended SHA.
+- The copied landau simsoptpp binary is sha256-bound in the A100 lock;
+  the design-record gate is marked permanently unmet as written
+  (post-hoc); campaign files were ruff-formatted; the off-host replay
+  was repeated over the full 49-receipt corpus (pristine detached
+  `89a0a823c` on landau, refreshed write-protected archive).
+
 Reviewer sub-claims refuted with evidence (not re-fixed): the batch
 telemetry CSVs existed at
 `.artifacts/custom-quasi-newton/final-{359fd41fc,7b1372ad0}-gpu-telemetry.csv`
