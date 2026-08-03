@@ -837,27 +837,29 @@ def _lbfgsb_stepwise_driver(
         entry_kind=initial_entry_kind,
         accepted_new_x=False,
     )
+    maxiter_scalar = _int_scalar(maxiter)
+    maxfun_scalar = _int_scalar(maxfun)
     while not host_status.terminal:
         if host_status.entry_kind == _LBFGS_STEP_ENTRY_START:
             step_result = advance_from_start(
                 state,
                 value_and_grad_consts,
-                _int_scalar(maxiter),
-                _int_scalar(maxfun),
+                maxiter_scalar,
+                maxfun_scalar,
             )
         elif host_status.entry_kind == _LBFGS_STEP_ENTRY_NEW_X_REENTRY:
             step_result = reenter_new_x(
                 state,
                 value_and_grad_consts,
-                _int_scalar(maxiter),
-                _int_scalar(maxfun),
+                maxiter_scalar,
+                maxfun_scalar,
             )
         else:
             step_result = advance_from_search(
                 state,
                 value_and_grad_consts,
-                _int_scalar(maxiter),
-                _int_scalar(maxfun),
+                maxiter_scalar,
+                maxfun_scalar,
             )
         state = step_result.state
         transfer_phase = "callback" if accepted_step_callback is not None else "advance"
