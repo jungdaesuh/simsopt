@@ -113,12 +113,16 @@ report's remaining rows are unaffected.
   soak shows executable count 1 during solving with flat RSS/VRAM (receipt
   `warm-soak-gpu-af4a7619f/`).
 - Rollback: revert to `stepwise` by dropping the intent routing in
-  `_solver_route` — rehearsed in a clean worktree in receipt
-  `rollback-rehearsal-fused-20260803.md`: fast intent falls back to the
-  callback-capable stepwise route, SciPy trajectory parity stays green,
-  and exactly the two fused-contract route pins fail (they revert with
-  the routing line); new fast performance receipts are then rejected by
-  the fused-route gate, so a full rollback also retires that gate. The
+  `_solver_route` — since `2f23db25a` that single decision drives
+  preparation, execution, the transfer gate, and the persisted row, so
+  the lever changes what actually RUNS. Rehearsed with execution-level
+  evidence in receipt `rollback-rehearsal-fused-20260803.md`: the real
+  benchmark entrypoint under rollback emits
+  `solver_route="stepwise"` with five audited advance host packets
+  (impossible under fused), SciPy trajectory parity stays green, and
+  exactly the two fused-contract route pins fail (they revert with the
+  routing line); new fast performance receipts are then rejected by the
+  fused-route gate, so a full rollback also retires that gate. The
   earlier `rollback-rehearsal-20260802.md` covers the pre-fused
   prepared-runtime commits only.
 

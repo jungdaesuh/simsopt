@@ -448,11 +448,20 @@ metrics, tampered derivations, and historical round trips.
          FP64 and no CPU fallback — CLOSED 2026-08-03 after landau returned:
          receipt `coil47-fused-optax-a100-55745feaf` (verdict pass, ratio
          1.1659, five AB/BA rounds, A100-PCIE-40GB identity-bound, all
-         endpoints converged in FP64). The regimes invert across GPUs:
-         custom fused is 0.55x Optax on the RTX 5090 but 1.17x on the
-         A100 (both inside the 2.0x gate) — the fused route's win rides
-         on host-tax elimination, and landau's older host/dispatch path
-         flips the balance.
+         endpoints converged in FP64). Measured facts: custom fused is
+         0.55x Optax on the RTX 5090 but 1.17x on the A100 (both inside
+         the 2.0x gate), and a host-contention control on landau (48 of
+         64 cores busy, same protocol; runner dirs at
+         `.artifacts/custom-quasi-newton/final-a100-55745feaf-contended`)
+         left the inversion in place at ratio 1.13 — so host load does
+         not explain it. The working HYPOTHESIS (correlation across two
+         pinned systems, not a profiled cause) is device-side
+         per-operation dispatch cost: the fused route degrades 6.1x
+         5090→A100 versus Optax's 2.9x, the signature of its longer
+         chain of tiny sequential kernels on the older, lower-clocked
+         part; A100 FP64 throughput is not the limiter (it is stronger
+         than the 5090's, yet both providers slow down). Clock/power
+         controls and kernel-level profiling remain unrun.
    - [ ] Bind every StableHLO and compile artifact to its provider, solver
          route, candidate SHA, and exact device UUID; require a complete
          custom/Optax artifact pair for each GPU.
@@ -814,6 +823,30 @@ two P1s and two P2s, fixed in the next commit batch:
 - A real SciPy-BFGS failure test (NaN -> status 3 -> nonfinite;
   maxiter -> 1 -> iteration-limit) closes the emitter-coverage gap, and
   the coverage claim is scoped to reachable paths.
+
+Fifth external pass (delta review, same day) returned FAIL_ITERATE with
+one P1 and three P2s, fixed in the next commit batch:
+
+- The P1 exposed that the first fused rollback rehearsal was INVALID:
+  preparation, execution, and the persisted row each re-derived the
+  route independently, so the one-line lever only relabeled the
+  measurement while the solver still ran fused. `2f23db25a` makes one
+  route decision drive all four sites (including the fast-lane transfer
+  gate, previously keyed on intent), and the rehearsal was repeated with
+  an execution-level discriminator: under rollback the real benchmark
+  entrypoint emits `solver_route="stepwise"` with five audited advance
+  host packets (a fused run audits zero and fails the gate). The revised
+  receipt also preserves the intermediate fail-closed state.
+- Discriminating identity regression added (exact pre-r510-safe
+  nvidia-smi argv, UUID selection, capability from the same bound JAX
+  device) and the reachable SciPy-BFGS status-2 precision-loss probe
+  (nonsmooth objective -> status 2 -> line-search-failed).
+- The A100 inversion claim was downgraded from cause to hypothesis and a
+  host-contention CONTROL was run (48 of 64 cores busy): the inversion
+  persists at ratio 1.13 vs 1.17 quiet, refuting host load as the
+  explanation and pointing at device-side per-op dispatch cost
+  (degradation 6.1x for the fused chain vs 2.9x for Optax, 5090->A100,
+  with FP64 throughput exonerated).
 
 Reviewer sub-claims refuted with evidence (not re-fixed): the batch
 telemetry CSVs existed at
