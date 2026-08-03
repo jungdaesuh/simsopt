@@ -1,4 +1,4 @@
-# Fused-route rollback rehearsal (2026-08-03, evidence-bound revision)
+# Fused-route rollback rehearsal (2026-08-03, behavioral evidence)
 
 Rehearses the documented `fused_stepwise` rollback lever with tracked
 execution bytes — distinct from `rollback-rehearsal-20260802.md`, which
@@ -25,10 +25,13 @@ predates the fused route and covers the prepared-runtime commits
 
 ## Setup
 
-Clean detached worktree at `280624e80` (`git worktree add --detach`).
-The rehearsal exercises the lever exactly as the solver matrix documents
-it: drop the intent routing in `_solver_route` — the exact applied diff
-is tracked at `rollback-rehearsal-fused-20260803/raw/lever.patch`.
+The worktree began clean and detached at `280624e80` (`git worktree add
+--detach`). Applying the rollback lever necessarily made the execution tree
+dirty. The raw runner payload records that dirty state but did not capture the
+complete `git status` or full-diff hash, so it cannot prove that the separately
+tracked `rollback-rehearsal-fused-20260803/raw/lever.patch` was the only dirty
+change. The raw bundle is retained as behavioral evidence, not exclusive
+source-tree attestation.
 
 ## Tracked evidence (`rollback-rehearsal-fused-20260803/raw/`, hashes in `SHA256SUMS`)
 
@@ -69,5 +72,11 @@ is tracked at `rollback-rehearsal-fused-20260803/raw/lever.patch`.
   pauses fast-lane publication).
 - Committed receipts are unaffected: validation replays hashes and
   qualification arithmetic, not solvers.
+- The clean-tree regression
+  `test_solver_route_decision_drives_stepwise_execution_and_persistence`
+  forces `_solver_route` to `stepwise` through the real `_measurement` path and
+  asserts the persisted route plus discriminating per-advance observations.
+  That regression, rather than the dirty rehearsal's source identity, is the
+  durable guard for the single-decision routing bug.
 
 Worktree restored (`git checkout -- .`) and removed after the rehearsal.

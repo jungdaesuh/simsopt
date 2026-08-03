@@ -97,19 +97,17 @@ remains production owner for this family with Optax retained as an explicit,
 receipt-gated comparator, as recorded in the tables above. The blindspot
 report's remaining rows are unaffected.
 
-2026-08-03 A100 update: the batched-and-unrolled history kernels
-(`cb613eff9` + `63638856f`, bitwise-identical to the sequential loops per
-the 41 uint64 oracles in
-`tests/jax/solve/test_lbfgs_history_kernel_equivalence.py`) eliminate the
-while-predicate dispatch tax that previously inverted the A100 comparison.
-Receipt-attested at `63638856f`: `coil47-fused-optax-a100-63638856f`
-(quiet, warm medians 27.34 ms vs 68.52 ms, ratio 0.3990, verdict pass) and
-`coil47-fused-optax-a100-contended-63638856f` (29.09 ms vs 71.22 ms, ratio
-0.4085, verdict pass). The custom provider now beats Optax on BOTH pinned
-GPUs; the pre-fix A100 receipts at `55745feaf` (ratios 1.1659/1.1316)
-remain the historical record. The 5090 receipts above attest `359fd41fc`;
-their republication at `63638856f` is deferred until the workstation is
-quiet (probes show no regression).
+2026-08-03 A100 correction: target-device testing falsified the exact-parity
+premise of the `63638856f` curvature hoist and unrolled two-loop scans, so both
+are reverted while the bitwise-safe masked `lbfgsb_matupd` shift remains. The
+corrected clean candidate `e481b35a4` passes all 40 FP64 history-kernel oracles
+on the physical landau A100 and has a fresh five-round AB/BA receipt,
+`coil47-fused-optax-a100-e481b35a4`: custom 32.865 ms versus Optax 70.018 ms,
+ratio 0.4694, all ten retained lanes successful, verdict pass. The complete
+53-receipt corpus also revalidates from a pristine detached checkout and
+write-protected archive on landau. This restores the A100 claim for the
+corrected candidate only; a fresh receipt-grade RTX 5090 rerun remains pending,
+so no new cross-GPU promotion claim is made here.
 
 ### `fused_stepwise` migration, cache, and rollback record (2026-08-03)
 

@@ -1,4 +1,4 @@
-"""CPU bitwise gates for batched L-BFGS history operations."""
+"""Target-device bitwise gates for optimized L-BFGS history operations."""
 
 from __future__ import annotations
 
@@ -16,10 +16,6 @@ pytestmark = [
     pytest.mark.skipif(
         not private_optimizer_runtime_is_supported(jax.__version__),
         reason="L-BFGS-B history kernels are validated on the pinned JAX runtime.",
-    ),
-    pytest.mark.skipif(
-        jax.default_backend() != "cpu",
-        reason="History-kernel bitwise batching is currently qualified on CPU only.",
     ),
 ]
 
@@ -236,51 +232,9 @@ def test_matupd_masked_history_shift_matches_element_loops_bitwise(
         _assert_same_bits(actual_item, expected_item)
 
 
-def _sequential_row_dots(rows, vector):
-    values = jnp.zeros((rows.shape[0],), dtype=rows.dtype)
-
-    def body(index, current_values):
-        return current_values.at[index].set(lbfgsb._lbfgsb_ddot(vector, rows[index]))
-
-    return jax.lax.fori_loop(0, rows.shape[0], body, values)
-
-
-def test_matupd_matrix_vector_row_batch_is_not_bitwise_on_cpu() -> None:
-    m = 10
-    mismatch_count = 0
-    for n in (2, 47, 257, 1000):
-        rng = np.random.default_rng(900_000 + n)
-        rows = rng.standard_normal((m, n), dtype=np.float64)
-        vector = rng.standard_normal(n, dtype=np.float64)
-        if n == 2:
-            vector = np.asarray(
-                [-1.6105335681572335, 0.7880123651088977],
-                dtype=np.float64,
-            )
-            rows[0] = np.asarray(
-                [1.6255292696770385, -0.7393987894384814],
-                dtype=np.float64,
-            )
-        for head in (0, 3, 9):
-            pointers = (head + np.arange(m - 1)) % m
-            active_rows = rows[pointers]
-            sequential = jax.jit(_sequential_row_dots)(active_rows, vector)
-            matrix_vector = jax.jit(lambda matrix, x: matrix @ x)(
-                active_rows,
-                vector,
-            )
-            sequential_bits = np.asarray(sequential).view(np.uint64)
-            matrix_vector_bits = np.asarray(matrix_vector).view(np.uint64)
-            mismatch_count += int(
-                np.count_nonzero(sequential_bits != matrix_vector_bits)
-            )
-
-    assert mismatch_count > 0
-
-
 @pytest.mark.parametrize("n", (1, 47, 257, 1000))
 @pytest.mark.parametrize("col,head", ((0, 0), (4, 0), (10, 0), (10, 3), (10, 9)))
-def test_two_loop_batched_curvatures_match_repeated_reductions_bitwise(
+def test_two_loop_direction_matches_preoptimization_oracle_bitwise(
     n: int,
     col: int,
     head: int,

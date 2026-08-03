@@ -384,13 +384,12 @@ def lbfgsb_two_loop_direction(state: LbfgsbState) -> jax.Array:
     active_history = positions < col
     reverse_indices = history_indices[::-1]
     reverse_active = active_history[::-1]
-    history_curvatures = jax.vmap(_lbfgsb_ddot)(ws, wy)
 
     def right_product(direction, index_active):
         index, active = index_active
         s_i = ws[index]
         y_i = wy[index]
-        s_dot_y = history_curvatures[index]
+        s_dot_y = _lbfgsb_ddot(s_i, y_i)
         safe_s_dot_y = jnp.where(active & (s_dot_y != 0.0), s_dot_y, 1.0)
         rho = active.astype(dtype) / safe_s_dot_y
         alpha = rho * _lbfgsb_ddot(s_i, direction)
@@ -400,7 +399,6 @@ def lbfgsb_two_loop_direction(state: LbfgsbState) -> jax.Array:
         right_product,
         -state.g,
         (reverse_indices, reverse_active),
-        unroll=True,
     )
     direction = direction / theta
     alphas = reverse_alphas[::-1]
@@ -409,7 +407,7 @@ def lbfgsb_two_loop_direction(state: LbfgsbState) -> jax.Array:
         index, active, alpha = index_active_alpha
         s_i = ws[index]
         y_i = wy[index]
-        s_dot_y = history_curvatures[index]
+        s_dot_y = _lbfgsb_ddot(s_i, y_i)
         safe_s_dot_y = jnp.where(active & (s_dot_y != 0.0), s_dot_y, 1.0)
         rho = active.astype(dtype) / safe_s_dot_y
         beta = rho * _lbfgsb_ddot(y_i, direction)
@@ -419,7 +417,6 @@ def lbfgsb_two_loop_direction(state: LbfgsbState) -> jax.Array:
         left_product,
         direction,
         (history_indices, active_history, alphas),
-        unroll=True,
     )
     return direction
 

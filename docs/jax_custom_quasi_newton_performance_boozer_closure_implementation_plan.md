@@ -482,36 +482,32 @@ metrics, tampered derivations, and historical round trips.
          with the A100's stronger FP64 ratio, though no direct
          FLOP-utilization measurement was taken. Clock/power controls
          and kernel-level profiling remain unrun.
-         RESOLVED 2026-08-03 (user goal "make custom jax faster than
-         optax on a100"): the dispatch-cost hypothesis was CONFIRMED
-         and the inversion eliminated by two bitwise-identical kernel
-         commits — `cb613eff9` (masked triangular history-shift block
-         copies replacing four nested fori_loops in lbfgsb_matupd, plus
-         a vmapped curvature hoist in the two-loop direction; recovered
-         from the reverted U1 patch) and `63638856f` (unroll=True on
-         the three remaining static-bound hot-path loops; both kernels
-         now lower with zero stablehlo.while ops, leaving only the two
-         data-dependent driver whiles). Bitwise identity is enforced by
-         41 uint64 oracles in
-         tests/jax/solve/test_lbfgs_history_kernel_equivalence.py, and
-         endpoints reproduce the prior receipts' final_objective to the
-         recorded digits on both GPUs. Receipt-attested A100 medians at
-         `63638856f`: quiet `coil47-fused-optax-a100-63638856f` verdict
-         pass, ratio 0.3990 (custom 27.34 ms vs Optax 68.52 ms; was
-         1.1659 = 80.4/69.0 at 55745feaf); contended control
-         `coil47-fused-optax-a100-contended-63638856f` verdict pass,
-         ratio 0.4085 (29.09 vs 71.22 ms, 48-of-64 busy workers,
-         leak-proofed launcher bundled). The 55745feaf receipts remain
-         the pre-fix historical record. Isolated-lever attribution: a
-         cb613eff9-only probe measured ratio 0.4622 (custom 32.67 ms),
-         so the shift-loop elimination carries most of the win and the
-         unrolls the rest (~3 ms, matching the census's ~30 removed
-         while-predicate D2H syncs per iteration at ~7 us each).
-         Two stochastic custom line-search deaths (status 2, known GPU
-         noise-floor mortality, ~2/15 rows) forced full lane re-runs
-         before all-success sweeps landed; the failed attempts are
-         preserved under
-         .artifacts/custom-quasi-newton/failed-receipts-20260803/.
+         CORRECTED 2026-08-03: the A100 lane is reclosed on corrected clean
+         candidate `e481b35a4`. The selected
+         all-success receipts at `63638856f` measured ratio 0.3990 quiet
+         (27.34 ms vs 68.52 ms) and 0.4085 contended (29.09 ms vs
+         71.22 ms), but the claimed bitwise premise was false on the
+         target GPU. The 41-oracle suite was CPU-only; an RTX 5090 run
+         showed that the vmapped curvature hoist and unrolled two-loop
+         scans change FP64 bits. Both transformations are reverted in
+         the correction under review while the independently bitwise masked
+         `lbfgsb_matupd` shift remains, and the oracle now executes on
+         the selected device. The `63638856f` receipts remain immutable
+         historical measurements of that candidate and cannot certify
+         the corrected code. Moreover, the selected ratios are
+         conditional on successful solves: tracked receipt
+         `coil47-fused-optax-a100-63638856f-failed-attempt-1` records a
+         custom status-2 row and verdict fail. A second reported death
+         has no durable bytes in this checkout, so no aggregate success
+         rate is claimed. A committed corrected candidate plus fresh
+         5090/A100 receipts, including every attempted lane, are required
+         before this goal can close. The corrected target-device oracle passes
+         40/40 on landau's physical A100, and receipt
+         `coil47-fused-optax-a100-e481b35a4` records five clean AB/BA pairs:
+         custom 32.865 ms versus Optax 70.018 ms, ratio 0.4694, with all ten
+         retained solves successful and verdict pass. A fresh receipt-grade
+         RTX 5090 run and independent final review remain open; neither is
+         implied by this A100 result.
    - [ ] Bind every StableHLO and compile artifact to its provider, solver
          route, candidate SHA, and exact device UUID; require a complete
          custom/Optax artifact pair for each GPU.
@@ -524,17 +520,16 @@ metrics, tampered derivations, and historical round trips.
    - [x] Copy the authority bundle to a different host or durable store, mount
          it read-only, and replay from a detached checkout at the recorded
          candidate SHA with the recorded environment lock — CLOSED
-         2026-08-03 on `landau` (A100 host): current evidence is the
-         EVIDENCED fourth replay at validator checkout `44f127e61`
-         (committed transcript: 49/49 plus rollback-tree integrity);
-         the first (47/47), second, and prose-only third replays are
-         historical; receipt
-         `offhost-replay-landau-20260803.md`. Precisely: the VALIDATOR
-         checkout was `487d9ff89` (then-HEAD, containing every
-         receipt-recorded candidate commit object for authentication);
-         the replay re-verified hashes, derivations, qualifications, and
-         commit-object presence — no solver execution was replayed at the
-         receipts' candidate trees.
+         2026-08-03 on `landau` (A100 host). The current sixth replay validates
+         all 53 receipts from detached pristine validator checkout `c1451b11c`
+         and a newly extracted write-protected archive. The first (47/47),
+         second, prose-only third, fourth (49/49), and fifth (51/51) replays are
+         historical; receipt `offhost-replay-landau-20260803.md`. Precisely:
+         the current VALIDATOR checkout is `c1451b11c` and contains every
+         receipt-recorded candidate commit object for authentication. The
+         replay re-verifies hashes, derivations, qualifications, and
+         commit-object presence; it does not re-execute solvers at historical
+         receipt candidate trees.
 
 8. Complete rollout and API review.
    - [x] Inventory observable behavior changes and every caller of
@@ -742,14 +737,14 @@ the complete mirror at
   fixed: `e3e8d5fe9`, `b243a176e`, `03de61652`); ordered commits with
   detached-worktree replays at three successive SHAs.
 
-Negative result (do not retry blindly): bitwise-safe batching of the
-matupd shift loops plus vmap of the two-loop fixed curvatures lowered the
-fused StableHLO while-count 18→14 but raised dynamic_slice 53→59 and showed
-no warm-time improvement in interleaved A/B on the RTX 5090 (clean pairs
-1.03x/1.40x vs baseline); reverted per the Phase-6 revert rule. Matvec
-batching of the update-row dots diverges from the sequential loop at 1 ULP
-(deterministic n=2 case) and is unusable in shared transition code. The
-equivalence-test artifact is preserved in the session scratchpad.
+Negative result (do not retry blindly): batching the `matupd` shift loops plus
+vmap of the two-loop fixed curvatures lowered the fused StableHLO while-count
+18→14 but showed no warm-time improvement in the original interleaved RTX
+5090 probe (clean pairs 1.03x/1.40x vs baseline). The later CPU-only oracle
+incorrectly labeled the curvature vmap bitwise-safe: target-GPU testing proved
+otherwise. Matvec batching of the update-row dots also diverges from the
+sequential loop at 1 ULP (deterministic n=2 case). Only the masked shift block,
+which passes the target-device oracle, remains in the corrected implementation.
 
 Deferred-items sweep (2026-08-03, second pass — commits `4127102e7`,
 `af4a7619f`):
@@ -951,28 +946,31 @@ that introduced them (other-workstream drift, proven in a detached
 worktree) — the eighteenth, the general-only structural test, was a real
 campaign regression and is fixed in `45f853a12`.
 
-## 2026-08-03 A100 speed campaign (post-closure, user-directed)
+## 2026-08-03 A100 speed campaign and parity correction
 
 After the strict-PASS closure at `d6b0c147c`, the user set the goal
 "make custom jax faster than optax on a100 while maintaining parity
 with cpp/native" and authorized the previously user-gated batched
-kernel option. Outcome (receipt-attested, both verdicts pass):
+kernel option. The performance measurements below remain valid for candidate
+`63638856f`, but the parity conclusion was invalid and this campaign is not
+current promotion evidence:
 
-- `cb613eff9` — U1 bitwise history-kernel batching re-applied (the
+- `cb613eff9` — U1 history-kernel batching re-applied (the
   reverted working-tree patch was recovered byte-exact from the
   implementing Codex session transcript): lbfgsb_matupd's four nested
   history-shift fori_loops became masked triangular block copies, and
   the two-loop direction's per-step curvature reductions became one
-  vmapped pass. 41 uint64 bitwise oracles committed in
-  tests/jax/solve/test_lbfgs_history_kernel_equivalence.py.
+  vmapped pass. The 41 uint64 oracles committed with the change were
+  restricted to CPU and did not prove the GPU contract.
 - `63638856f` — unroll=True on the three remaining static-bound
   hot-path loops (two-loop scans, matupd update-row fori). Both hot
   kernels lower with zero stablehlo.while ops; the fused solve keeps
   only its two data-dependent driver whiles. A census of all 21 lax
   loop sites confirmed rows outside these three are either statically
   elided for unconstrained coil47 or irreducible.
-- Mechanism, quantified: the A100 slowdown was while-predicate D2H
-  sync tax on landau's host (~10 us per predicate evaluation). The
+- Historical mechanism attribution: the campaign attributed the A100 slowdown
+  to while-predicate D2H sync tax on landau's host (~10 us per predicate
+  evaluation). The
   shift loops alone cost ~48 ms of the pre-fix 80.4 ms warm solve;
   the unrolls removed a further ~3 ms (~30 syncs/iteration), matching
   the census prediction. The 5090 never showed the inversion because
@@ -980,15 +978,22 @@ kernel option. Outcome (receipt-attested, both verdicts pass):
 - Receipts at `63638856f`: `coil47-fused-optax-a100-63638856f`
   (quiet, ratio 0.3990, custom 27.34 ms vs Optax 68.52 ms) and
   `coil47-fused-optax-a100-contended-63638856f` (48-of-64 contention,
-  ratio 0.4085, 29.09 vs 71.22 ms). validate-all: 51 receipts green
-  including --archive-root. The pre-fix 55745feaf receipts (1.1659
+  ratio 0.4085, 29.09 vs 71.22 ms). At that snapshot, validate-all reported
+  51 receipts green including --archive-root. The pre-fix 55745feaf receipts (1.1659
   quiet / 1.1316 contended) remain the historical record.
-- Parity: unchanged by construction — the kernels are proven
-  bit-identical (oracles), the trajectory/fused-SciPy/endpoint suites
-  are green at `63638856f`, and both providers reproduce
-  final_objective 0.137862632844302xx to the recorded digits on both
-  GPUs. The cpp/native Boozer parity receipts are untouched by this
-  campaign.
+- Parity correction: the RTX 5090 oracle falsified exact identity for the
+  vmapped curvature hoist and the unrolled two-loop scans. Matching endpoint
+  digits did not prove trajectory identity. Those transformations are
+  reverted; the target-device oracle covers the corrected kernel. The
+  cpp/native Boozer receipts remain historical and do not certify the new
+  future corrected candidate until the full lane is rerun.
+- Corrected A100 evidence: clean candidate `e481b35a4` passes all 40
+  target-device uint64 history-kernel oracles on landau's physical A100.
+  Receipt `coil47-fused-optax-a100-e481b35a4` retains five alternating-order
+  pairs with ten successful status-0 solves and matching final objectives;
+  custom median 32.865 ms versus Optax 70.018 ms, ratio 0.4694, verdict pass.
+  The current 53-receipt corpus passes both local archive validation and the
+  evidenced pristine off-host replay at validator checkout `c1451b11c`.
 - 5090 status: probes at `63638856f` show no regression (ratio
   0.35-0.43 under uncontrolled host contention; calm-round custom
   12.4-16.4 ms against the 13.14 ms quiet baseline). Receipt-grade
@@ -996,10 +1001,12 @@ kernel option. Outcome (receipt-attested, both verdicts pass):
   the workstation is free of the concurrent campaign load; the
   359fd41fc -r4 receipts remain the current 5090 attestation for
   their SHA.
-- Lane hygiene incidents, disclosed: two stochastic custom
-  line-search deaths (status 2) forced full sweep re-runs (failed
-  publication attempt preserved under
-  .artifacts/custom-quasi-newton/failed-receipts-20260803/); one
+- Lane hygiene incidents, disclosed: two reported custom line-search deaths
+  (status 2) forced full sweep re-runs. One complete failed attempt is now
+  durable as receipt
+  `coil47-fused-optax-a100-63638856f-failed-attempt-1` (verdict fail); the
+  second reported death lacks durable bytes, so neither a campaign success
+  rate nor an unconditional speed claim is made. One
   contended sweep leaked its 48 CPU burners past its cleanup trap and
   contaminated a subsequent "quiet" sweep (both contaminated sweeps
   retained on landau under contaminated-* names, never published);

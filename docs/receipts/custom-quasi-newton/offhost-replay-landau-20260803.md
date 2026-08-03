@@ -1,6 +1,17 @@
 # Off-host archive replay — landau (2026-08-03)
 
-## Fifth replay (evidenced; current — 51-receipt corpus after the A100 speed campaign)
+## Sixth replay (evidenced; current 53-receipt corpus)
+
+Repeated after publishing the tracked failed attempt and the corrected A100
+receipt `coil47-fused-optax-a100-e481b35a4`. The complete `set -x` transcript
+is committed at `raw-evidenced-53/replay-53.log`, with its sha256 in the
+adjacent `SHA256SUMS`. It records both complete transfer hashes, extraction to
+a new archive directory followed by `chmod -R a-w`, detached checkout
+`c1451b11c3ab678abab03f6bcbb642da94afc093`, zero porcelain entries, and the
+full validator result `{"validated": 53}`. The replay ran from
+2026-08-03T22:15:47Z through 2026-08-03T22:16:05Z on `landau`.
+
+## Fifth replay (evidenced; historical 51-receipt corpus)
 
 Repeated after the A100 speed campaign published its two pass receipts
 (`coil47-fused-optax-a100-63638856f`, `coil47-fused-optax-a100-contended-63638856f`).
@@ -16,6 +27,9 @@ the archive refresh (`chmod -R a-w`; the prior copy kept at
 `git status --porcelain | wc -l` = 0 (pristine), and the full
 `validate-all` command with its `{"validated": 51}` output and
 `validate_all_exit=0`.
+
+This replay does not cover the subsequently committed failed-attempt or
+corrected-candidate receipts; it is superseded by the sixth replay above.
 
 ## Fourth replay (evidenced; superseded by the fifth above — 49-receipt corpus)
 
