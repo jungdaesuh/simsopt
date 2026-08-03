@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pytest
@@ -26,15 +27,24 @@ _PRODUCTION_FINAL_GRADIENT_INF_NORM = 0.125
 _PRODUCTION_FINAL_STATUS = 2
 
 
-def _objective(parameter_hash: str) -> ObjectiveTrialEvidence:
+def _objective(
+    parameter_hash: str,
+    *,
+    gradient_source: Literal["candidate", "baseline"] = "candidate",
+    gradient_source_parameter_hash: str | None = None,
+) -> ObjectiveTrialEvidence:
     return ObjectiveTrialEvidence(
         raw_objective=1.0,
         raw_objective_certified=True,
         filtered_objective=1.0,
         gradient_inf_norm=0.5,
         gradient_finite=True,
-        gradient_source="candidate",
-        gradient_source_parameter_sha256=parameter_hash,
+        gradient_source=gradient_source,
+        gradient_source_parameter_sha256=(
+            parameter_hash
+            if gradient_source_parameter_hash is None
+            else gradient_source_parameter_hash
+        ),
         predictor_kind="baseline",
         predictor_success=True,
         primal_success=True,
@@ -80,6 +90,46 @@ def _records(
     return tuple(records), {parameter_hash: parameters}
 
 
+def _records_with_baseline_source(
+    baseline_parameters: np.ndarray,
+    trial_parameters: np.ndarray,
+    *,
+    trial_gradient_source_parameter_hash: str,
+) -> tuple[tuple[JoinedBoozerTrialRecord, ...], dict[str, np.ndarray]]:
+    baseline_hash = parameter_sha256(baseline_parameters)
+    trial_hash = parameter_sha256(trial_parameters)
+    return (
+        (
+            JoinedBoozerTrialRecord(
+                key=TrialKey(0, baseline_hash),
+                phase="initial",
+                objective=_objective(
+                    baseline_hash,
+                    gradient_source="baseline",
+                ),
+                line_search=LineSearchTrialEvidence(None, None, None, None, None),
+                parameter_archive_key=baseline_hash,
+                parameter_shape=(baseline_parameters.size,),
+            ),
+            JoinedBoozerTrialRecord(
+                key=TrialKey(1, trial_hash),
+                phase="final_refresh",
+                objective=_objective(
+                    trial_hash,
+                    gradient_source="baseline",
+                    gradient_source_parameter_hash=(
+                        trial_gradient_source_parameter_hash
+                    ),
+                ),
+                line_search=LineSearchTrialEvidence(None, None, None, None, None),
+                parameter_archive_key=trial_hash,
+                parameter_shape=(trial_parameters.size,),
+            ),
+        ),
+        {baseline_hash: baseline_parameters, trial_hash: trial_parameters},
+    )
+
+
 def test_trial_trace_round_trip_binds_records_parameters_and_bounds(
     tmp_path: Path,
 ) -> None:
@@ -118,6 +168,82 @@ def test_trial_trace_round_trip_binds_records_parameters_and_bounds(
     assert summary.record_count == 953
     assert summary.max_records == 20_002
     assert summary.parameter_bytes == 16
+
+
+def test_trial_trace_accepts_baseline_gradient_bound_to_record_zero(
+    tmp_path: Path,
+) -> None:
+    baseline_parameters = np.asarray([1.0, 2.0], dtype=np.float64)
+    trial_parameters = np.asarray([2.0, 3.0], dtype=np.float64)
+    baseline_hash = parameter_sha256(baseline_parameters)
+    records, parameters = _records_with_baseline_source(
+        baseline_parameters,
+        trial_parameters,
+        trial_gradient_source_parameter_hash=baseline_hash,
+    )
+    manifest = write_boozer_trial_trace(
+        tmp_path / "trial.json",
+        provider="custom",
+        production_route="custom_bfgs_stepwise",
+        maxiter=1,
+        maxls=1,
+        records=records,
+        parameters_by_sha256=parameters,
+        production_evaluations=_PRODUCTION_EVALUATIONS,
+        production_final_objective=_PRODUCTION_FINAL_OBJECTIVE,
+        production_final_gradient_inf_norm=(_PRODUCTION_FINAL_GRADIENT_INF_NORM),
+        production_final_status=_PRODUCTION_FINAL_STATUS,
+        production_final_parameters_sha256=parameter_sha256(_PRODUCTION_PARAMETERS),
+    )
+
+    summary = validate_boozer_trial_trace(
+        manifest,
+        expected_provider="custom",
+        expected_production_route="custom_bfgs_stepwise",
+        expected_maxiter=1,
+        expected_evaluations=_PRODUCTION_EVALUATIONS,
+    )
+
+    assert summary.record_count == 2
+
+
+def test_trial_trace_rejects_baseline_gradient_bound_to_other_archived_parameter(
+    tmp_path: Path,
+) -> None:
+    baseline_parameters = np.asarray([1.0, 2.0], dtype=np.float64)
+    trial_parameters = np.asarray([2.0, 3.0], dtype=np.float64)
+    trial_hash = parameter_sha256(trial_parameters)
+    records, parameters = _records_with_baseline_source(
+        baseline_parameters,
+        trial_parameters,
+        trial_gradient_source_parameter_hash=trial_hash,
+    )
+    manifest = write_boozer_trial_trace(
+        tmp_path / "trial.json",
+        provider="custom",
+        production_route="custom_bfgs_stepwise",
+        maxiter=1,
+        maxls=1,
+        records=records,
+        parameters_by_sha256=parameters,
+        production_evaluations=_PRODUCTION_EVALUATIONS,
+        production_final_objective=_PRODUCTION_FINAL_OBJECTIVE,
+        production_final_gradient_inf_norm=(_PRODUCTION_FINAL_GRADIENT_INF_NORM),
+        production_final_status=_PRODUCTION_FINAL_STATUS,
+        production_final_parameters_sha256=parameter_sha256(_PRODUCTION_PARAMETERS),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="baseline gradient source is not bound to record 0 parameters",
+    ):
+        validate_boozer_trial_trace(
+            manifest,
+            expected_provider="custom",
+            expected_production_route="custom_bfgs_stepwise",
+            expected_maxiter=1,
+            expected_evaluations=_PRODUCTION_EVALUATIONS,
+        )
 
 
 def test_trial_trace_rejects_final_parameters_not_bound_to_production(

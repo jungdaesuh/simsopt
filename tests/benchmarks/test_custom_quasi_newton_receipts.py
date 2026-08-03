@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import Literal, cast
 
+import benchmarks.custom_quasi_newton_receipts as receipt_module
 import numpy as np
 import pytest
 from benchmarks.boozer_trial_diagnostic import (
@@ -19,7 +22,52 @@ from benchmarks.boozer_trial_diagnostic import (
 from benchmarks.custom_quasi_newton_receipts import publish, validate_all
 
 
+def _git_commit(root: Path) -> str:
+    subprocess.run(
+        ["git", "init", str(root)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "config", "user.email", "receipt-tests@example.com"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "config", "user.name", "Receipt Tests"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    marker = root / "receipt-source.txt"
+    marker.write_text("synthetic receipt source\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(root), "add", marker.name],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "-m", "synthetic receipt source"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    completed = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    commit = completed.stdout.strip()
+    assert len(commit) == 40
+    return commit
+
+
 def _runner_directory(root: Path, *, clean: bool = True) -> Path:
+    commit = _git_commit(root)
     run = root / "runner-case"
     run.mkdir()
     (run / "raw").mkdir()
@@ -27,7 +75,7 @@ def _runner_directory(root: Path, *, clean: bool = True) -> Path:
     (run / "measurements.json").write_text(
         json.dumps(
             {
-                "git_commit": "abc123",
+                "git_commit": commit,
                 "git_clean": clean,
                 "measurements": [
                     {
@@ -47,6 +95,7 @@ def _runner_directory(root: Path, *, clean: bool = True) -> Path:
 
 
 def _runner_v7_directory(root: Path) -> Path:
+    commit = _git_commit(root)
     run = root / "runner-v7"
     run.mkdir()
     device_identity = {
@@ -71,7 +120,7 @@ def _runner_v7_directory(root: Path) -> Path:
         json.dumps(
             {
                 "schema_version": 9,
-                "git_commit": "abc123",
+                "git_commit": commit,
                 "git_clean": True,
                 "orchestrator_git_clean": True,
                 "provider_child": True,
@@ -449,6 +498,224 @@ def _publish_receipt(tmp_path: Path, *, clean: bool = True) -> tuple[Path, Path]
     return destination, archive
 
 
+def _performance_v7_runs(
+    tmp_path: Path,
+    *,
+    warm_pairs: tuple[tuple[float, float], ...],
+    providers_by_run: tuple[tuple[str, ...], ...] | None = None,
+    custom_route: str = "fused_stepwise",
+    custom_intent: str = "fast",
+) -> tuple[Path, ...]:
+    seed = _runner_v7_directory(tmp_path)
+    if providers_by_run is None:
+        providers_by_run = (
+            ("custom", "optax"),
+            *(("custom", "optax") for _ in warm_pairs[1:]),
+        )
+    assert len(providers_by_run) == len(warm_pairs)
+    runs: list[Path] = []
+    for index, (custom_warm, optax_warm) in enumerate(warm_pairs):
+        providers = providers_by_run[index]
+        assert providers
+        source_run = tmp_path / f"performance-{index}"
+        source_run.mkdir()
+        rows: list[dict[str, object]] = []
+        child_provenance: list[dict[str, object]] = []
+        child_payloads: list[dict[str, object]] = []
+        for provider in providers:
+            child_root = source_run / provider
+            shutil.copytree(seed, child_root)
+            child_measurements = child_root / "measurements.json"
+            child_payload = _json_object(child_measurements)
+            row = dict(_first_measurement(child_payload))
+            row["provider"] = provider
+            row["warm_seconds"] = custom_warm if provider == "custom" else optax_warm
+            if provider == "custom":
+                row["intent"] = custom_intent
+                row["solver_route"] = custom_route
+            else:
+                row["intent"] = "fast"
+                row["solver_route"] = "optax_lbfgs"
+            child_payload["measurements"] = [row]
+            _write_json(child_measurements, child_payload)
+            rows.append(row)
+            child_payloads.append(child_payload)
+            child_provenance.append(
+                {
+                    "provider": provider,
+                    "measurements_path": f"{provider}/measurements.json",
+                    "measurements_sha256": hashlib.sha256(
+                        child_measurements.read_bytes()
+                    ).hexdigest(),
+                    "gpu_memory_path": f"{provider}/memory.json",
+                    "gpu_memory_sha256": hashlib.sha256(
+                        (child_root / "memory.json").read_bytes()
+                    ).hexdigest(),
+                    "measurement_count": 1,
+                    "git_commit": child_payload["git_commit"],
+                    "git_clean": child_payload["git_clean"],
+                    "runtime_environment": child_payload["runtime_environment"],
+                    "requested_device": child_payload["requested_device"],
+                    "method": child_payload["method"],
+                    "device_identity": child_payload["device_identity"],
+                }
+            )
+        parent_payload = dict(child_payloads[0])
+        parent_payload.update(
+            {
+                "provider_child": False,
+                "provider_children": child_provenance,
+                "measurements": rows,
+            }
+        )
+        _write_json(source_run / "measurements.json", parent_payload)
+        runs.append(source_run)
+    return tuple(runs)
+
+
+def test_publish_performance_rejects_wrong_route_at_receipt_boundary(
+    tmp_path: Path,
+) -> None:
+    runs = _performance_v7_runs(
+        tmp_path,
+        warm_pairs=((0.055, 0.1),),
+        custom_route="stepwise",
+    )
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+
+    with pytest.raises(ValueError) as error:
+        publish(
+            runs,
+            environment_lock=lock,
+            destination=tmp_path / "tracked" / "wrong-route",
+            archive_uri=(tmp_path / "archive" / "wrong-route").as_uri(),
+            repo_root=tmp_path,
+            qualification_kind="performance",
+        )
+
+    assert str(error.value) == (
+        "solver route 'stepwise' does not match provider/method 'custom'/'lbfgs'"
+    )
+
+
+def test_publish_performance_rejects_optax_pairing_across_source_runs(
+    tmp_path: Path,
+) -> None:
+    runs = _performance_v7_runs(
+        tmp_path,
+        warm_pairs=((0.055, 0.1), (0.055, 0.1)),
+        providers_by_run=(("custom",), ("optax",)),
+    )
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+    destination = tmp_path / "tracked" / "missing-pair"
+
+    publish(
+        runs,
+        environment_lock=lock,
+        destination=destination,
+        archive_uri=(tmp_path / "archive" / "missing-pair").as_uri(),
+        repo_root=tmp_path,
+        qualification_kind="performance",
+    )
+
+    qualification = cast(
+        dict[str, object], _json_object(destination / "manifest.json")["qualification"]
+    )
+    ratio = qualification.pop("custom_to_optax_warm_ratio")
+    expected_qualification = {
+        "passed": False,
+        "failure_reasons": [
+            "performance-0:coil47:optax-count",
+            "performance-1:coil47:custom-count",
+        ],
+        "comparison_count": 0,
+        "custom_warm_seconds_median": 0.055,
+        "optax_warm_seconds_median": 0.1,
+        "verdict": "fail",
+    }
+    assert ratio == pytest.approx(0.55)
+    assert qualification == expected_qualification
+    assert _json_object(destination / "manifest.json")["verdict"] == "fail"
+    assert validate_all(destination, repo_root=tmp_path) == 0
+
+
+def test_publish_performance_rejects_warm_ratio_above_two(
+    tmp_path: Path,
+) -> None:
+    runs = _performance_v7_runs(
+        tmp_path,
+        warm_pairs=((0.25, 0.1),),
+    )
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+    destination = tmp_path / "tracked" / "ratio-fail"
+
+    publish(
+        runs,
+        environment_lock=lock,
+        destination=destination,
+        archive_uri=(tmp_path / "archive" / "ratio-fail").as_uri(),
+        repo_root=tmp_path,
+        qualification_kind="performance",
+    )
+
+    qualification = _json_object(destination / "manifest.json")["qualification"]
+    assert qualification["passed"] is False
+    assert qualification["failure_reasons"] == [
+        "custom-to-optax-warm-ratio-exceeds-2.0"
+    ]
+    assert qualification["comparison_count"] == 1
+    assert qualification["custom_warm_seconds_median"] == 0.25
+    assert qualification["optax_warm_seconds_median"] == 0.1
+    assert qualification["custom_to_optax_warm_ratio"] == 2.5
+    assert qualification["verdict"] == "fail"
+    assert _json_object(destination / "manifest.json")["verdict"] == "fail"
+    assert validate_all(destination, repo_root=tmp_path) == 0
+
+
+def test_publish_performance_passes_five_real_shape_runs_at_ratio_point_five_five(
+    tmp_path: Path,
+) -> None:
+    runs = _performance_v7_runs(
+        tmp_path,
+        warm_pairs=(
+            (0.013, 0.024),
+            (0.0135, 0.025),
+            (0.014, 0.0255),
+            (0.0145, 0.026),
+            (0.015, 0.027),
+        ),
+    )
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+    destination = tmp_path / "tracked" / "ratio-pass"
+
+    publish(
+        runs,
+        environment_lock=lock,
+        destination=destination,
+        archive_uri=(tmp_path / "archive" / "ratio-pass").as_uri(),
+        repo_root=tmp_path,
+        qualification_kind="performance",
+    )
+
+    manifest = _json_object(destination / "manifest.json")
+    qualification = cast(dict[str, object], manifest["qualification"])
+    assert manifest["verdict"] == "pass"
+    assert qualification["passed"] is True
+    assert qualification["failure_reasons"] == []
+    assert qualification["comparison_count"] == 5
+    assert qualification["custom_warm_seconds_median"] == 0.014
+    assert qualification["optax_warm_seconds_median"] == 0.0255
+    assert qualification["custom_to_optax_warm_ratio"] == pytest.approx(
+        0.55, abs=0.002
+    )
+    assert qualification["verdict"] == "pass"
+    assert validate_all(destination, repo_root=tmp_path) == 0
+
+
 def test_publish_and_validate_receipt_from_a_fresh_process(tmp_path: Path) -> None:
     destination, _archive = _publish_receipt(tmp_path)
 
@@ -822,3 +1089,86 @@ def test_publish_rejects_unknown_runner_schema(tmp_path: Path) -> None:
             qualification_kind="diagnostic",
             archive_storage_identity="test-archive",
         )
+
+
+def test_publish_validates_the_copied_runner_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _runner_v7_directory(tmp_path)
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+    destination = tmp_path / "tracked" / "snapshot"
+    archive = tmp_path / "archive" / "snapshot"
+    original_copy = receipt_module._copy_runner_tree
+
+    def mutate_then_copy(source: Path, target: Path) -> None:
+        if source == run:
+            mutated_payload = _json_object(source / "measurements.json")
+            mutated_payload["git_commit"] = "f" * 40
+            _write_json(source / "measurements.json", mutated_payload)
+        original_copy(source, target)
+
+    monkeypatch.setattr(receipt_module, "_copy_runner_tree", mutate_then_copy)
+
+    with pytest.raises(ValueError) as error:
+        publish(
+            (run,),
+            environment_lock=lock,
+            destination=destination,
+            archive_uri=archive.as_uri(),
+            repo_root=tmp_path,
+            qualification_kind="diagnostic",
+        )
+
+    assert str(error.value) == (
+        "runner git_commit does not resolve to a commit in repo_root: " + "f" * 40
+    )
+    assert not destination.exists()
+    assert not archive.exists()
+
+
+def test_validate_all_rejects_duplicate_performance_source_runs(tmp_path: Path) -> None:
+    runs = _performance_v7_runs(tmp_path, warm_pairs=((0.055, 0.1),))
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+    destination = tmp_path / "tracked" / "duplicate-source-runs"
+    publish(
+        runs,
+        environment_lock=lock,
+        destination=destination,
+        archive_uri=(tmp_path / "archive" / "duplicate-source-runs").as_uri(),
+        repo_root=tmp_path,
+        qualification_kind="performance",
+    )
+    for document in ("metrics.json", "manifest.json"):
+        payload = _json_object(destination / document)
+        payload["source_runs"] = [runs[0].name, runs[0].name]
+        _write_json(destination / document, payload)
+
+    with pytest.raises(ValueError) as error:
+        validate_all(destination, repo_root=tmp_path)
+
+    assert str(error.value) == f"receipt source runs are duplicated: {runs[0].name}"
+
+
+def test_publish_rejects_invalid_nested_legacy_runner_commit(tmp_path: Path) -> None:
+    run = _runner_directory(tmp_path)
+    nested = run / "nested"
+    nested.mkdir()
+    _write_json(nested / "measurements.json", {"git_commit": "invalid"})
+    lock = tmp_path / "environment.lock"
+    lock.write_text("python==3.11\n", encoding="utf-8")
+
+    with pytest.raises(ValueError) as error:
+        publish(
+            (run,),
+            environment_lock=lock,
+            destination=tmp_path / "tracked" / "legacy-nested-commit",
+            archive_uri=(tmp_path / "archive" / "legacy-nested-commit").as_uri(),
+            repo_root=tmp_path,
+        )
+
+    assert str(error.value) == (
+        "runner git_commit must be exactly 40 lowercase hexadecimal characters"
+    )

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal, cast
@@ -11,6 +12,50 @@ import pytest
 from benchmarks.custom_quasi_newton_receipts import publish, validate_all
 
 EndpointMutation = Literal["missing", "null", "wrong-type"]
+
+
+def _git_commit(root: Path) -> str:
+    subprocess.run(
+        ["git", "init", str(root)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "config", "user.email", "receipt-tests@example.com"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "config", "user.name", "Receipt Tests"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    marker = root / "receipt-source.txt"
+    marker.write_text("synthetic receipt source\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(root), "add", marker.name],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "-m", "synthetic receipt source"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    completed = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    commit = completed.stdout.strip()
+    assert len(commit) == 40
+    return commit
 
 
 def _json_object(path: Path) -> dict[str, object]:
@@ -27,6 +72,7 @@ def _first_measurement(payload: dict[str, object]) -> dict[str, object]:
 
 
 def _runner_v7_directory(root: Path) -> Path:
+    commit = _git_commit(root)
     run = root / "runner-v7"
     run.mkdir()
     device_identity: dict[str, object] = {
@@ -49,7 +95,7 @@ def _runner_v7_directory(root: Path) -> Path:
     }
     payload: dict[str, object] = {
         "schema_version": 9,
-        "git_commit": "abc123",
+        "git_commit": commit,
         "git_clean": True,
         "orchestrator_git_clean": True,
         "provider_child": True,
@@ -188,6 +234,10 @@ def _parent_runner_v7_directory(root: Path) -> Path:
                     "measurements_sha256": hashlib.sha256(
                         child_path.read_bytes()
                     ).hexdigest(),
+                    "gpu_memory_path": "custom/memory.json",
+                    "gpu_memory_sha256": hashlib.sha256(
+                        (nested_child / "memory.json").read_bytes()
+                    ).hexdigest(),
                     "measurement_count": 1,
                     "git_commit": child_payload["git_commit"],
                     "git_clean": child_payload["git_clean"],
@@ -257,6 +307,143 @@ def _invalidate_field(
 
 def test_unmodified_v2_fixture_is_valid(receipt_v2: Path, tmp_path: Path) -> None:
     assert validate_all(receipt_v2, repo_root=tmp_path) == 0
+
+
+@pytest.mark.parametrize(
+    ("commit", "message"),
+    (
+        (
+            "abc123",
+            "runner git_commit must be exactly 40 lowercase hexadecimal characters",
+        ),
+        (
+            "g" * 40,
+            "runner git_commit must be exactly 40 lowercase hexadecimal characters",
+        ),
+        (
+            "0" * 40,
+            "runner git_commit does not resolve to a commit in repo_root: "
+            + "0" * 40,
+        ),
+    ),
+)
+def test_publish_rejects_unusable_runner_commit(
+    tmp_path: Path,
+    commit: str,
+    message: str,
+) -> None:
+    run = _runner_v7_directory(tmp_path)
+    payload = _json_object(run / "measurements.json")
+    payload["git_commit"] = commit
+    _write_json(run / "measurements.json", payload)
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+
+    with pytest.raises(ValueError) as error:
+        publish(
+            (run,),
+            environment_lock=lock,
+            destination=tmp_path / "tracked" / "invalid-commit",
+            archive_uri=(tmp_path / "archive" / "invalid-commit").as_uri(),
+            repo_root=tmp_path,
+            qualification_kind="diagnostic",
+        )
+
+    assert str(error.value) == message
+
+
+def test_validate_all_rejects_unresolved_retained_runner_commit(
+    tmp_path: Path,
+) -> None:
+    run = _runner_v7_directory(tmp_path)
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+    destination = tmp_path / "tracked" / "unresolved-retained-commit"
+    publish(
+        (run,),
+        environment_lock=lock,
+        destination=destination,
+        archive_uri=(tmp_path / "archive" / "unresolved-retained-commit").as_uri(),
+        repo_root=tmp_path,
+        qualification_kind="diagnostic",
+    )
+
+    unresolved_commit = "0123456789abcdef" * 2 + "01234567"
+    retained = destination / "raw" / run.name / "measurements.json"
+    payload = _json_object(retained)
+    payload["git_commit"] = unresolved_commit
+    _write_json(retained, payload)
+
+    with pytest.raises(ValueError) as error:
+        validate_all(destination, repo_root=tmp_path)
+
+    assert str(error.value) == (
+        "runner git_commit does not resolve to a commit in repo_root: "
+        + unresolved_commit
+    )
+
+
+def test_publish_rejects_non_git_repo_root(tmp_path: Path) -> None:
+    run = _runner_v7_directory(tmp_path)
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+    non_git_root = tmp_path.parent / f"{tmp_path.name}-not-a-repository"
+    non_git_root.mkdir()
+
+    with pytest.raises(ValueError) as error:
+        publish(
+            (run,),
+            environment_lock=lock,
+            destination=tmp_path / "tracked" / "non-git-root",
+            archive_uri=(tmp_path / "archive" / "non-git-root").as_uri(),
+            repo_root=non_git_root,
+            qualification_kind="diagnostic",
+        )
+
+    assert str(error.value) == f"repo_root is not a Git work tree: {non_git_root}"
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    (
+        (
+            "gpu_memory_sha256",
+            "provider child gpu_memory_path checksum mismatch",
+        ),
+        (
+            "trial_trace_sha256",
+            "provider child trial_trace_path checksum mismatch",
+        ),
+    ),
+)
+def test_publish_rejects_zeroed_child_artifact_checksum(
+    tmp_path: Path,
+    field: str,
+    message: str,
+) -> None:
+    parent = _parent_runner_v7_directory(tmp_path)
+    payload = _json_object(parent / "measurements.json")
+    children = cast(list[dict[str, object]], payload["provider_children"])
+    if field == "trial_trace_sha256":
+        trial_path = parent / "custom" / "trial.json"
+        trial_path.write_text("synthetic trial trace\n", encoding="utf-8")
+        children[0]["trial_trace_path"] = "custom/trial.json"
+    children[0][field] = "0" * 64
+    _write_json(parent / "measurements.json", payload)
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+
+    with pytest.raises(ValueError) as error:
+        publish(
+            (parent,),
+            environment_lock=lock,
+            destination=tmp_path / "tracked" / "zeroed-checksum",
+            archive_uri=(tmp_path / "archive" / "zeroed-checksum").as_uri(),
+            repo_root=tmp_path,
+            qualification_kind="diagnostic",
+        )
+
+    assert str(error.value) == message
 
 
 @pytest.mark.parametrize(
@@ -551,11 +738,50 @@ def test_publish_rejects_provider_child_from_another_commit(tmp_path: Path) -> N
     parent = _parent_runner_v7_directory(tmp_path)
     child_path = parent / "custom" / "measurements.json"
     child_payload = _json_object(child_path)
-    child_payload["git_commit"] = "different-commit"
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "config",
+            "user.email",
+            "receipt-tests@example.com",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.name", "Receipt Tests"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    second_marker = tmp_path / "receipt-source-second.txt"
+    second_marker.write_text("second synthetic source\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "add", second_marker.name],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "commit", "-m", "second synthetic source"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    second_commit = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    child_payload["git_commit"] = second_commit
     _write_json(child_path, child_payload)
     parent_payload = _json_object(parent / "measurements.json")
     children = cast(list[dict[str, object]], parent_payload["provider_children"])
-    children[0]["git_commit"] = "different-commit"
+    children[0]["git_commit"] = second_commit
     children[0]["measurements_sha256"] = hashlib.sha256(
         child_path.read_bytes()
     ).hexdigest()
@@ -572,3 +798,221 @@ def test_publish_rejects_provider_child_from_another_commit(tmp_path: Path) -> N
             repo_root=tmp_path,
             qualification_kind="diagnostic",
         )
+
+
+def test_publish_requires_trial_binding_for_an_emitted_child_trial_trace(
+    tmp_path: Path,
+) -> None:
+    parent = _parent_runner_v7_directory(tmp_path)
+    child_path = parent / "custom" / "measurements.json"
+    child_payload = _json_object(child_path)
+    child_row = _first_measurement(child_payload)
+    diagnostic_artifacts = cast(dict[str, object], child_row["diagnostic_artifacts"])
+    diagnostic_artifacts["trial_trace"] = "trial.json"
+    _write_json(child_path, child_payload)
+    parent_payload = _json_object(parent / "measurements.json")
+    parent_payload["measurements"] = child_payload["measurements"]
+    children = cast(list[dict[str, object]], parent_payload["provider_children"])
+    children[0]["measurements_sha256"] = hashlib.sha256(
+        child_path.read_bytes()
+    ).hexdigest()
+    _write_json(parent / "measurements.json", parent_payload)
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+
+    with pytest.raises(ValueError) as error:
+        publish(
+            (parent,),
+            environment_lock=lock,
+            destination=tmp_path / "tracked" / "missing-emitted-trial-binding",
+            archive_uri=(
+                tmp_path / "archive" / "missing-emitted-trial-binding"
+            ).as_uri(),
+            repo_root=tmp_path,
+            qualification_kind="diagnostic",
+        )
+
+    assert str(error.value) == (
+        "provider child omitted trial_trace_path/trial_trace_sha256"
+    )
+
+
+def test_publish_rejects_trial_binding_to_a_non_emitted_child_artifact(
+    tmp_path: Path,
+) -> None:
+    parent = _parent_runner_v7_directory(tmp_path)
+    child_path = parent / "custom" / "measurements.json"
+    child_payload = _json_object(child_path)
+    child_row = _first_measurement(child_payload)
+    diagnostic_artifacts = cast(dict[str, object], child_row["diagnostic_artifacts"])
+    diagnostic_artifacts["trial_trace"] = "trial.json"
+    _write_json(child_path, child_payload)
+    parent_payload = _json_object(parent / "measurements.json")
+    parent_payload["measurements"] = child_payload["measurements"]
+    children = cast(list[dict[str, object]], parent_payload["provider_children"])
+    children[0]["measurements_sha256"] = hashlib.sha256(
+        child_path.read_bytes()
+    ).hexdigest()
+    children[0]["trial_trace_path"] = "custom/memory.json"
+    children[0]["trial_trace_sha256"] = hashlib.sha256(
+        (parent / "custom" / "memory.json").read_bytes()
+    ).hexdigest()
+    _write_json(parent / "measurements.json", parent_payload)
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+
+    with pytest.raises(ValueError) as error:
+        publish(
+            (parent,),
+            environment_lock=lock,
+            destination=tmp_path / "tracked" / "wrong-emitted-trial-binding",
+            archive_uri=(
+                tmp_path / "archive" / "wrong-emitted-trial-binding"
+            ).as_uri(),
+            repo_root=tmp_path,
+            qualification_kind="diagnostic",
+        )
+
+    assert str(error.value) == (
+        "provider child trial trace path does not bind the emitted measurement artifact"
+    )
+
+
+def test_publish_rejects_gpu_binding_to_a_non_emitted_child_artifact(
+    tmp_path: Path,
+) -> None:
+    parent = _parent_runner_v7_directory(tmp_path)
+    unrelated_memory = parent / "custom" / "unrelated-memory.json"
+    unrelated_memory.write_text("unrelated GPU memory artifact\n", encoding="utf-8")
+    parent_payload = _json_object(parent / "measurements.json")
+    children = cast(list[dict[str, object]], parent_payload["provider_children"])
+    children[0]["gpu_memory_path"] = "custom/unrelated-memory.json"
+    children[0]["gpu_memory_sha256"] = hashlib.sha256(
+        unrelated_memory.read_bytes()
+    ).hexdigest()
+    _write_json(parent / "measurements.json", parent_payload)
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+
+    with pytest.raises(ValueError) as error:
+        publish(
+            (parent,),
+            environment_lock=lock,
+            destination=tmp_path / "tracked" / "wrong-emitted-memory-binding",
+            archive_uri=(
+                tmp_path / "archive" / "wrong-emitted-memory-binding"
+            ).as_uri(),
+            repo_root=tmp_path,
+            qualification_kind="diagnostic",
+        )
+
+    assert str(error.value) == (
+        "provider child GPU memory path does not bind the emitted measurement artifact"
+    )
+
+
+def test_publish_rejects_capture_without_an_emitted_child_trial_trace(
+    tmp_path: Path,
+) -> None:
+    parent = _parent_runner_v7_directory(tmp_path)
+    child_path = parent / "custom" / "measurements.json"
+    child_payload = _json_object(child_path)
+    child_payload["capture_boozer_trial_trace"] = True
+    _write_json(child_path, child_payload)
+    parent_payload = _json_object(parent / "measurements.json")
+    parent_payload["capture_boozer_trial_trace"] = True
+    children = cast(list[dict[str, object]], parent_payload["provider_children"])
+    children[0]["measurements_sha256"] = hashlib.sha256(
+        child_path.read_bytes()
+    ).hexdigest()
+    _write_json(parent / "measurements.json", parent_payload)
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+
+    with pytest.raises(ValueError) as error:
+        publish(
+            (parent,),
+            environment_lock=lock,
+            destination=tmp_path / "tracked" / "missing-captured-trial",
+            archive_uri=(tmp_path / "archive" / "missing-captured-trial").as_uri(),
+            repo_root=tmp_path,
+            qualification_kind="diagnostic",
+        )
+
+    assert str(error.value) == (
+        "provider child trial capture requires exactly one emitted trial trace"
+    )
+
+
+def test_publish_rejects_trial_binding_without_an_emitted_child_trial_trace(
+    tmp_path: Path,
+) -> None:
+    parent = _parent_runner_v7_directory(tmp_path)
+    trial_path = parent / "custom" / "trial.json"
+    trial_path.write_text("synthetic trial trace\n", encoding="utf-8")
+    parent_payload = _json_object(parent / "measurements.json")
+    children = cast(list[dict[str, object]], parent_payload["provider_children"])
+    children[0]["trial_trace_path"] = "custom/trial.json"
+    children[0]["trial_trace_sha256"] = hashlib.sha256(
+        trial_path.read_bytes()
+    ).hexdigest()
+    _write_json(parent / "measurements.json", parent_payload)
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+
+    with pytest.raises(ValueError) as error:
+        publish(
+            (parent,),
+            environment_lock=lock,
+            destination=tmp_path / "tracked" / "binding-without-trial",
+            archive_uri=(tmp_path / "archive" / "binding-without-trial").as_uri(),
+            repo_root=tmp_path,
+            qualification_kind="diagnostic",
+        )
+
+    assert str(error.value) == (
+        "provider child trial binding requires exactly one emitted trial trace"
+    )
+
+
+def test_publish_rejects_two_rows_bound_to_the_same_child_trial_trace(
+    tmp_path: Path,
+) -> None:
+    parent = _parent_runner_v7_directory(tmp_path)
+    child_path = parent / "custom" / "measurements.json"
+    child_payload = _json_object(child_path)
+    first_row = _first_measurement(child_payload)
+    first_artifacts = cast(dict[str, object], first_row["diagnostic_artifacts"])
+    first_artifacts["trial_trace"] = "trial.json"
+    child_payload["measurements"] = [first_row, dict(first_row)]
+    _write_json(child_path, child_payload)
+    trial_path = parent / "custom" / "trial.json"
+    trial_path.write_text("synthetic trial trace\n", encoding="utf-8")
+    parent_payload = _json_object(parent / "measurements.json")
+    parent_payload["measurements"] = child_payload["measurements"]
+    children = cast(list[dict[str, object]], parent_payload["provider_children"])
+    children[0]["measurements_sha256"] = hashlib.sha256(
+        child_path.read_bytes()
+    ).hexdigest()
+    children[0]["measurement_count"] = 2
+    children[0]["trial_trace_path"] = "custom/trial.json"
+    children[0]["trial_trace_sha256"] = hashlib.sha256(
+        trial_path.read_bytes()
+    ).hexdigest()
+    _write_json(parent / "measurements.json", parent_payload)
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+
+    with pytest.raises(ValueError) as error:
+        publish(
+            (parent,),
+            environment_lock=lock,
+            destination=tmp_path / "tracked" / "two-rows-one-trial",
+            archive_uri=(tmp_path / "archive" / "two-rows-one-trial").as_uri(),
+            repo_root=tmp_path,
+            qualification_kind="diagnostic",
+        )
+
+    assert str(error.value) == (
+        "provider child trial binding requires exactly one emitted trial trace"
+    )
