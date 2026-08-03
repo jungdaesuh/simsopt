@@ -400,6 +400,7 @@ def lbfgsb_two_loop_direction(state: LbfgsbState) -> jax.Array:
         right_product,
         -state.g,
         (reverse_indices, reverse_active),
+        unroll=True,
     )
     direction = direction / theta
     alphas = reverse_alphas[::-1]
@@ -418,6 +419,7 @@ def lbfgsb_two_loop_direction(state: LbfgsbState) -> jax.Array:
         left_product,
         direction,
         (history_indices, active_history, alphas),
+        unroll=True,
     )
     return direction
 
@@ -2919,7 +2921,7 @@ def lbfgsb_matupd(
         )
         return current_sy, current_ss
 
-    sy, ss = jax.lax.fori_loop(0, m - 1, update_row, (sy, ss))
+    sy, ss = jax.lax.fori_loop(0, m - 1, update_row, (sy, ss), unroll=True)
 
     diagonal = jnp.where(stp == 1.0, dtd, stp * stp * dtd)
     ss = ss.at[row, row].set(diagonal)
