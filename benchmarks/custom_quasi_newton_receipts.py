@@ -341,12 +341,9 @@ def _validate_runner_child_provenance(
             raise ValueError(
                 "provider child GPU memory provenance requires exactly one emitted memory trace"
             )
-        if (
-            emitted_memory_paths
-            and (
-                bound_memory_path is None
-                or bound_memory_path.resolve() not in emitted_memory_paths
-            )
+        if emitted_memory_paths and (
+            bound_memory_path is None
+            or bound_memory_path.resolve() not in emitted_memory_paths
         ):
             raise ValueError(
                 "provider child GPU memory path does not bind the emitted measurement artifact"
@@ -377,9 +374,9 @@ def _validate_runner_child_provenance(
                 or "trial_trace_sha256" in child
             ),
         )
-        if (
-            "trial_trace_path" in child or "trial_trace_sha256" in child
-        ) and len(emitted_trial_rows) != 1:
+        if ("trial_trace_path" in child or "trial_trace_sha256" in child) and len(
+            emitted_trial_rows
+        ) != 1:
             raise ValueError(
                 "provider child trial binding requires exactly one emitted trial trace"
             )
@@ -387,9 +384,9 @@ def _validate_runner_child_provenance(
             raise ValueError(
                 "provider child trial provenance requires exactly one emitting measurement row"
             )
-        if (
-            emitted_trial_paths
-            and (bound_trial_path is None or bound_trial_path.resolve() not in emitted_trial_paths)
+        if emitted_trial_paths and (
+            bound_trial_path is None
+            or bound_trial_path.resolve() not in emitted_trial_paths
         ):
             raise ValueError(
                 "provider child trial trace path does not bind the emitted measurement artifact"
@@ -531,12 +528,12 @@ _CONVENTION_BY_ROUTE: Final[Mapping[str, StatusConvention]] = MappingProxyType(
 # Frozen transcription for rows persisted before the custom BFGS route
 # was split by emitter: every published "custom_bfgs_stepwise" row ran
 # the Boozer fixture's host core under accepted-incumbent continuation.
-_HISTORICAL_ROUTE_CONVENTIONS: Final[
-    Mapping[tuple[str, str], StatusConvention]
-] = MappingProxyType(
-    {
-        ("custom_bfgs_stepwise", "boozer"): "host-bfgs",
-    }
+_HISTORICAL_ROUTE_CONVENTIONS: Final[Mapping[tuple[str, str], StatusConvention]] = (
+    MappingProxyType(
+        {
+            ("custom_bfgs_stepwise", "boozer"): "host-bfgs",
+        }
+    )
 )
 
 
@@ -687,9 +684,7 @@ def _validate_phase_rss(row: dict[str, object]) -> None:
         _required_int(phase, "peak_rss_kib") for phase in phases
     )
     if lifetime_peak != expected_lifetime_peak:
-        raise ValueError(
-            "process lifetime RSS peak does not match phase measurements"
-        )
+        raise ValueError("process lifetime RSS peak does not match phase measurements")
     if row.get("peak_rss_scope") != "self_proc_status_phase_max":
         raise ValueError("process lifetime RSS scope is unsupported")
     if _required_int(row, "ru_maxrss_kib") <= 0:
@@ -850,9 +845,7 @@ def _validate_v7_measurement(
                     "GPU memory artifact peak does not match peak_vram_mib"
                 )
             if device == "gpu" and memory_artifact.availability != "available":
-                raise ValueError(
-                    "GPU measurement memory artifact is unavailable"
-                )
+                raise ValueError("GPU measurement memory artifact is unavailable")
             if device == "cpu" and memory_artifact.availability != "unavailable":
                 raise ValueError(
                     "CPU measurement memory artifact is unexpectedly available"
@@ -999,11 +992,15 @@ def _scientific_qualification(rows: list[dict[str, object]]) -> dict[str, object
             comparison_count += 1
             native_constraint = native.get("constraint_norm")
             lane_constraint = row.get("constraint_norm")
-            if (native_constraint is None) != (lane_constraint is None) or native_constraint is not None and not _close(
-                lane_constraint,
-                native_constraint,
-                tolerance_name="mirror_single_stage_terminal_constraint",
-                field="constraint_norm",
+            if (
+                (native_constraint is None) != (lane_constraint is None)
+                or native_constraint is not None
+                and not _close(
+                    lane_constraint,
+                    native_constraint,
+                    tolerance_name="mirror_single_stage_terminal_constraint",
+                    field="constraint_norm",
+                )
             ):
                 failures.append(f"{case}:constraint_norm")
             native_status = _optional_int(native, "status")
@@ -1153,9 +1150,7 @@ def _performance_qualification(
         failures.append("optax-warm-median-must-be-positive")
     ratio = (
         custom_median / optax_median
-        if custom_median is not None
-        and optax_median is not None
-        and optax_median > 0.0
+        if custom_median is not None and optax_median is not None and optax_median > 0.0
         else None
     )
     if ratio is not None and ratio > _MAX_CUSTOM_TO_OPTAX_WARM_RATIO:
@@ -1360,8 +1355,7 @@ def publish(
         for run in runs:
             _copy_runner_tree(run, raw_root / run.name)
         run_payloads = [
-            (raw_root / run.name, _runner_payload(raw_root / run.name))
-            for run in runs
+            (raw_root / run.name, _runner_payload(raw_root / run.name)) for run in runs
         ]
         for run, _payload in run_payloads:
             _validate_runner_tree_commits(run, repo_root=repo_root)
@@ -1397,9 +1391,7 @@ def publish(
                     runtime_environment = cast(
                         dict[str, object], payload["runtime_environment"]
                     )
-                    expected_backend_mode = (
-                        f"jax_{payload['requested_device']}_parity"
-                    )
+                    expected_backend_mode = f"jax_{payload['requested_device']}_parity"
                     if (
                         runtime_environment.get("SIMSOPT_BACKEND_MODE")
                         != expected_backend_mode
@@ -1412,14 +1404,10 @@ def publish(
                 }
                 if len(jax_versions) != 1:
                     raise ValueError("jax_version differs across lanes")
-        candidate_commits = {
-            _runner_commit(payload) for _run, payload in run_payloads
-        }
+        candidate_commits = {_runner_commit(payload) for _run, payload in run_payloads}
         clean_values = [_runner_clean(payload) for _run, payload in run_payloads]
         rows = [
-            row
-            for _run, payload in run_payloads
-            for row in _measurement_rows(payload)
+            row for _run, payload in run_payloads for row in _measurement_rows(payload)
         ]
         source_run_rows = [
             (run.name, _measurement_rows(payload)) for run, payload in run_payloads
@@ -1554,8 +1542,7 @@ def _validate_v2_semantics(
         # one canonical filesystem component.
         if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", source_run) is None:
             raise ValueError(
-                f"receipt source run is not a canonical directory name: "
-                f"{source_run!r}"
+                f"receipt source run is not a canonical directory name: {source_run!r}"
             )
         if source_run in seen_source_runs:
             raise ValueError(f"receipt source runs are duplicated: {source_run}")

@@ -201,9 +201,7 @@ def _runner_v7_directory(root: Path) -> Path:
                 "gpu_uuid": "GPU-test",
                 "peak_used_memory_mib": 200,
                 "provider_pid": 1234,
-                "samples": [
-                    {"sampled_at_unix_ns": 1, "used_memory_mib": 200}
-                ],
+                "samples": [{"sampled_at_unix_ns": 1, "used_memory_mib": 200}],
                 "schema_version": 1,
                 "target_pid_observed": True,
                 "unavailable_reason": None,
@@ -322,8 +320,7 @@ def test_unmodified_v2_fixture_is_valid(receipt_v2: Path, tmp_path: Path) -> Non
         ),
         (
             "0" * 40,
-            "runner git_commit does not resolve to a commit in repo_root: "
-            + "0" * 40,
+            "runner git_commit does not resolve to a commit in repo_root: " + "0" * 40,
         ),
     ),
 )
@@ -866,9 +863,7 @@ def test_publish_rejects_trial_binding_to_a_non_emitted_child_artifact(
             (parent,),
             environment_lock=lock,
             destination=tmp_path / "tracked" / "wrong-emitted-trial-binding",
-            archive_uri=(
-                tmp_path / "archive" / "wrong-emitted-trial-binding"
-            ).as_uri(),
+            archive_uri=(tmp_path / "archive" / "wrong-emitted-trial-binding").as_uri(),
             repo_root=tmp_path,
             qualification_kind="diagnostic",
         )

@@ -334,9 +334,14 @@ metrics, tampered derivations, and historical round trips.
          5090 diagnostic, and identify the first causal divergence. (Confirmed
          outer-failure diagnosis section above; GPU deaths are stochastic
          noise-floor line-search mortality, CPU deterministic.)
-   - [x] Record the selected recovery design and rejected alternative in this
-         plan before changing objective or optimizer behavior. (Selected
-         design under Design Alternatives.)
+   - [ ] Record the selected recovery design and rejected alternative in this
+         plan before changing objective or optimizer behavior — NOT MET as
+         written and not retroactively repairable: the Design Alternatives
+         record was written POST-HOC, after the implementation landed
+         (established by external review). The design content itself is
+         accurate and remains under Design Alternatives; the
+         before-implementation ordering this box required did not happen,
+         so the box stays open as a permanent record.
 
 3. Fix Boozer finalization and the diagnosed root cause with RED -> GREEN ->
    REFACTOR.
@@ -648,8 +653,9 @@ recorded in the addendum below — later review-closure commits extend the
 series and are recorded there, not in this count); candidate evidence SHA
 `359fd41fc`, lanes run from clean detached worktrees, receipts first
 committed at `f2ed3d534` and republished under the hardened validator at
-`cdf62708a`. Closed with receipts (all `validate-all` green, 47 receipts,
-including `--archive-root` against the complete mirror at
+`cdf62708a`. Closed with receipts (all `validate-all` green — 47 receipts
+at first closure, 48 since the A100 comparison receipt landed at
+`76f8fdf23` — including `--archive-root` against the complete mirror at
 `/home/jungdaesuh/qn-receipt-archives`):
 
 - Phase 4 matched-budget milestone:

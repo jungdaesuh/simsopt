@@ -209,9 +209,9 @@ def _stopping_reason(
         )
         if failure_reason is not None:
             if (
-                (status_convention, provider_status) in _MERGED_BUDGET_STATUSES
-                and iterations < max_iterations
-            ):
+                status_convention,
+                provider_status,
+            ) in _MERGED_BUDGET_STATUSES and iterations < max_iterations:
                 return "evaluation-limit"
             return failure_reason
     if iterations >= max_iterations:

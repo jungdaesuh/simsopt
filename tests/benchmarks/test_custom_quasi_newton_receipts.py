@@ -243,9 +243,7 @@ def _runner_v7_directory(root: Path) -> Path:
                 "gpu_uuid": "GPU-test",
                 "peak_used_memory_mib": 200,
                 "provider_pid": 1234,
-                "samples": [
-                    {"sampled_at_unix_ns": 1, "used_memory_mib": 200}
-                ],
+                "samples": [{"sampled_at_unix_ns": 1, "used_memory_mib": 200}],
                 "schema_version": 1,
                 "target_pid_observed": True,
                 "unavailable_reason": None,
@@ -709,9 +707,7 @@ def test_publish_performance_passes_five_real_shape_runs_at_ratio_point_five_fiv
     assert qualification["comparison_count"] == 5
     assert qualification["custom_warm_seconds_median"] == 0.014
     assert qualification["optax_warm_seconds_median"] == 0.0255
-    assert qualification["custom_to_optax_warm_ratio"] == pytest.approx(
-        0.55, abs=0.002
-    )
+    assert qualification["custom_to_optax_warm_ratio"] == pytest.approx(0.55, abs=0.002)
     assert qualification["verdict"] == "pass"
     assert validate_all(destination, repo_root=tmp_path) == 0
 
@@ -1232,9 +1228,7 @@ def test_receipt_recompute_never_consults_the_live_fixture_registry(
     )
 
     def poisoned(_name: str) -> bool:
-        raise AssertionError(
-            "receipt validation consulted the live fixture registry"
-        )
+        raise AssertionError("receipt validation consulted the live fixture registry")
 
     monkeypatch.setattr(fixtures_module, "fixture_accepted_incumbent", poisoned)
     assert not hasattr(receipt_module, "fixture_accepted_incumbent")
@@ -1275,6 +1269,4 @@ def test_unmapped_solver_route_conventions_fail_closed(
     case: str,
 ) -> None:
     with pytest.raises(ValueError, match="no status convention is recorded"):
-        receipt_module._row_status_convention(
-            {"solver_route": route, "case": case}
-        )
+        receipt_module._row_status_convention({"solver_route": route, "case": case})

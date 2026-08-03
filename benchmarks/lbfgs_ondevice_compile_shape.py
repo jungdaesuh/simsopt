@@ -782,9 +782,7 @@ def _provider_programs(
                 ("reenter_new_x", program.reenter_new_x),
                 ("result_payload", program.result_payload),
             )
-        raise RuntimeError(
-            f"unsupported custom provider run mode {program.run_mode!r}"
-        )
+        raise RuntimeError(f"unsupported custom provider run mode {program.run_mode!r}")
     if provider == "optax":
         optax_prepared = cast(runtime._PreparedOptax, prepared)
         return (
