@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import types
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -517,6 +518,43 @@ def test_accepted_incumbent_controller_discards_candidate_across_acceptance() ->
     with pytest.raises(RuntimeError, match="do not match"):
         controller.accept(second_parameters)
     assert controller.current_inner_state is first_state
+
+
+def test_accepted_incumbent_controller_is_transfer_guard_safe() -> None:
+    initial_state = _inner_state((-1.0, -2.0), (-3.0, -4.0), 5.0, eligible=True)
+    accepted_state = _inner_state((8.0, 9.0), (3.0, 4.0), 7.5, eligible=True)
+    evaluation = _incumbent_evaluation(accepted_state)
+
+    controller = surface_objectives_traceable.AcceptedIncumbentHostValueAndGrad(
+        lambda _parameters, _incumbent: evaluation,
+        initial_state,
+    )
+    parameters = np.asarray([8.0, 9.0], dtype=np.float64)
+
+    with jax.transfer_guard("disallow"):
+        value, gradient = controller.value_and_grad(parameters)
+        controller.accept(parameters)
+
+    assert controller.current_inner_state is accepted_state
+    assert value == 17.5
+    np.testing.assert_array_equal(gradient, np.asarray([1.25, -2.5]))
+
+
+def test_accepted_incumbent_session_factory_is_transfer_guard_safe() -> None:
+    forward_result = _forward_result(success=True, primal_success=True)
+    bundle, _gradient_calls, _forward_calls = _compiled_bundle(forward_result)
+    bundle["state"]["baseline_value"] = jnp.asarray(5.0, dtype=jnp.float64)
+    bundle["compiled_forward_result_from_anchor_for"] = (
+        lambda _parameters, _incumbent: forward_result
+    )
+    session = surface_objectives_traceable.TraceableObjectiveSession.from_optimizer_compiled_bundle(
+        bundle
+    )
+
+    with jax.transfer_guard("disallow"):
+        controller = session.accepted_incumbent_host_value_and_grad()
+
+    assert bool(np.asarray(jax.device_get(controller.current_inner_state.eligible)))
 
 
 def test_accepted_incumbent_controllers_from_same_session_are_isolated() -> None:

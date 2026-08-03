@@ -25,6 +25,7 @@ from jax import lax
 from jax.sharding import PartitionSpec as P
 from simsopt.geo.curve import incremental_arclength_pure, kappa_pure
 from simsopt_jax.backend import get_backend_policy
+from simsopt_jax.backend.dtypes import runtime_device_put as _runtime_device_put
 from simsopt_jax.core._device_scalars import staged_like as _staged_like
 from simsopt_jax.core._math_utils import (
     as_compute_array as _as_compute_array,
@@ -261,7 +262,10 @@ class AcceptedIncumbentHostValueAndGrad:
 
     def value_and_grad(self, parameters) -> tuple[float, np.ndarray]:
         canonical = np.ascontiguousarray(parameters, dtype=np.dtype("<f8")).reshape(-1)
-        candidate = _as_jax_float64(canonical)
+        # Explicit H2D: host optimizer parameters cross the device boundary
+        # here, and guarded runs (JAX_TRANSFER_GUARD=disallow) forbid the
+        # implicit conversion.
+        candidate = _runtime_device_put(canonical, dtype=jnp.float64)
         with self._lock:
             incumbent = self._incumbent
             generation = self._generation
@@ -5493,7 +5497,7 @@ class TraceableObjectiveSession:
             coil_dofs=_as_jax_float64(state["baseline_coil_dofs"]),
             solved_x=_as_jax_float64(state["baseline_x"]),
             objective_value=jnp.asarray(state["baseline_value"], dtype=jnp.float64),
-            eligible=jnp.asarray(True, dtype=jnp.bool_),
+            eligible=_runtime_device_put(np.bool_(True)),
         )
         return AcceptedIncumbentHostValueAndGrad(
             _build_accepted_incumbent_evaluator(bundle),
