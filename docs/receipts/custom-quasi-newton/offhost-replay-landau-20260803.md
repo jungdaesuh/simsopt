@@ -1,6 +1,18 @@
 # Off-host archive replay — landau (2026-08-03)
 
-## Second replay (same day, current corpus)
+## Third replay (same day, final corpus with identity-bound qualification)
+
+Repeated after the performance qualification became lane-identity-bound
+and the receipts were republished at their final revisions
+(quiet/contended `-r4`, A100 `-r3`, A100-contended `-r2`): fresh
+archive tarball sha256 prefix `4e1f3434a284aab723fb` verified end to
+end, extracted and re-write-protected (prior copy kept at
+`qn-receipt-archives-48prev`), checkout detached PRISTINE at
+`bf1239cc6` — result `{"validated": 49}`, and the rollback-rehearsal
+evidence tree separately verified with `sha256sum -c SHA256SUMS`
+(all five artifacts `OK`).
+
+## Second replay (same day, earlier 49-receipt corpus)
 
 After the review iterations extended the corpus, the replay was
 repeated: fresh archive tarball
