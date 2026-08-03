@@ -837,9 +837,7 @@ def _run_custom(
 
     with host_transfer_audit() as transfer_audit:
         if method == "bfgs":
-            incumbent_factory = (
-                fixture_case.accepted_incumbent_host_value_and_grad
-            )
+            incumbent_factory = fixture_case.accepted_incumbent_host_value_and_grad
             if incumbent_factory is None:
                 result = _minimize_bfgs_private(
                     objective,
@@ -1462,10 +1460,7 @@ def _measurement(
     advance_observations = sum(
         entry.calls for entry in warm_transfer_audit if entry.phase == "advance"
     )
-    if (
-        solver_route == "fused_stepwise"
-        and advance_observations > iteration_count + 1
-    ):
+    if solver_route == "fused_stepwise" and advance_observations > iteration_count + 1:
         raise RuntimeError(
             "fused_stepwise advance observations exceed the runner transfer gate"
         )
@@ -1681,9 +1676,7 @@ def _run_provider_child(
                 raise TypeError("Boozer trial trace row omitted evaluations")
             raw_final_parameters = typed_measurement.get("final_parameters")
             if not isinstance(raw_final_parameters, list):
-                raise TypeError(
-                    "Boozer trial trace row omitted final parameters"
-                )
+                raise TypeError("Boozer trial trace row omitted final parameters")
             final_parameters = np.asarray(raw_final_parameters, dtype=np.float64)
             measurement_final_objective = typed_measurement.get("final_objective")
             if not isinstance(measurement_final_objective, (int, float)) or isinstance(
@@ -1696,9 +1689,7 @@ def _run_provider_child(
             if not isinstance(measurement_final_gradient, (int, float)) or isinstance(
                 measurement_final_gradient, bool
             ):
-                raise TypeError(
-                    "Boozer trial trace row omitted final gradient norm"
-                )
+                raise TypeError("Boozer trial trace row omitted final gradient norm")
             measurement_status = typed_measurement.get("status")
             if not isinstance(measurement_status, int) or isinstance(
                 measurement_status, bool
@@ -1762,9 +1753,7 @@ def _run_provider_child(
     if capture_boozer_trial_trace:
         trial_trace_path = output / _BOOZER_TRIAL_TRACE_ARTIFACT_NAME
         child_provenance.update(
-            trial_trace_path=(
-                f"{provider}/{_BOOZER_TRIAL_TRACE_ARTIFACT_NAME}"
-            ),
+            trial_trace_path=(f"{provider}/{_BOOZER_TRIAL_TRACE_ARTIFACT_NAME}"),
             trial_trace_sha256=_sha256_file(trial_trace_path),
         )
     return typed_measurements, child_provenance

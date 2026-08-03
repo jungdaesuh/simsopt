@@ -245,7 +245,9 @@ def test_gpu_child_rows_retain_observed_peak_and_memory_artifact_provenance(
 
     artifact_path = output / "gpu_memory.json"
     artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
-    child_payload = json.loads((output / "measurements.json").read_text(encoding="utf-8"))
+    child_payload = json.loads(
+        (output / "measurements.json").read_text(encoding="utf-8")
+    )
     assert artifact == {
         "availability": "available",
         "gpu_uuid": selected.uuid,
@@ -263,12 +265,14 @@ def test_gpu_child_rows_retain_observed_peak_and_memory_artifact_provenance(
     assert rows[0]["peak_vram_mib"] == 768
     assert rows[0]["diagnostic_artifacts"]["memory_trace"] == "gpu_memory.json"
     assert provenance["gpu_memory_path"] == "custom/gpu_memory.json"
-    assert provenance["gpu_memory_sha256"] == hashlib.sha256(
-        artifact_path.read_bytes()
-    ).hexdigest()
-    assert provenance["measurements_sha256"] == hashlib.sha256(
-        (output / "measurements.json").read_bytes()
-    ).hexdigest()
+    assert (
+        provenance["gpu_memory_sha256"]
+        == hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    )
+    assert (
+        provenance["measurements_sha256"]
+        == hashlib.sha256((output / "measurements.json").read_bytes()).hexdigest()
+    )
 
 
 def test_parent_forwards_and_binds_opt_in_boozer_trial_trace(
@@ -329,9 +333,10 @@ def test_parent_forwards_and_binds_opt_in_boozer_trial_trace(
     trial_trace_path = output / "boozer_trial_trace.json"
     assert rows[0]["diagnostic_artifacts"]["trial_trace"] == trial_trace_path.name
     assert provenance["trial_trace_path"] == "custom/boozer_trial_trace.json"
-    assert provenance["trial_trace_sha256"] == hashlib.sha256(
-        trial_trace_path.read_bytes()
-    ).hexdigest()
+    assert (
+        provenance["trial_trace_sha256"]
+        == hashlib.sha256(trial_trace_path.read_bytes()).hexdigest()
+    )
     assert {
         key: value
         for key, value in observed_validation.items()
@@ -1086,12 +1091,17 @@ def test_fast_custom_lbfgs_has_zero_advance_observations() -> None:
 
     assert fixture_case.solver_route == "fused_stepwise"
     assert fixture_case.work_counters.advance_observations == 0
-    assert fixture_case.work_counters.advance_observations <= fixture_case.iterations + 1
-    assert sum(
-        entry.calls
-        for entry in fixture_case.warm_transfer_audit
-        if entry.phase == "advance"
-    ) == 0
+    assert (
+        fixture_case.work_counters.advance_observations <= fixture_case.iterations + 1
+    )
+    assert (
+        sum(
+            entry.calls
+            for entry in fixture_case.warm_transfer_audit
+            if entry.phase == "advance"
+        )
+        == 0
+    )
 
 
 def test_rss_phase_records_named_scope() -> None:

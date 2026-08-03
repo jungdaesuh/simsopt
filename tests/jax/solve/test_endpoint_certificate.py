@@ -573,9 +573,7 @@ def test_private_lbfgsb_evaluation_budget_certifies_evaluation_limit() -> None:
     from simsopt_jax.geo.optimizers.private._lbfgs import _minimize_lbfgs_private
 
     def rosenbrock(x):
-        return jnp.sum(
-            100.0 * (x[1:] - x[:-1] ** 2) ** 2 + (1.0 - x[:-1]) ** 2
-        )
+        return jnp.sum(100.0 * (x[1:] - x[:-1] ** 2) ** 2 + (1.0 - x[:-1]) ** 2)
 
     result = _minimize_lbfgs_private(
         rosenbrock,
@@ -766,9 +764,7 @@ def test_scipy_bfgs_failure_statuses_certify_from_the_real_emitter() -> None:
     )
 
     def rosenbrock(x):
-        return float(
-            np.sum(100.0 * (x[1:] - x[:-1] ** 2) ** 2 + (1.0 - x[:-1]) ** 2)
-        )
+        return float(np.sum(100.0 * (x[1:] - x[:-1] ** 2) ** 2 + (1.0 - x[:-1]) ** 2))
 
     limited = optimize.minimize(
         rosenbrock,
