@@ -11,10 +11,11 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TypeAlias, cast
+from typing import Literal, Protocol, TypeAlias, cast
+from unittest.mock import patch
 
 import jax
 import jax.numpy as jnp
@@ -39,10 +40,27 @@ from simsopt_jax.geo.optimizers._shared import (
 from simsopt_jax.geo.optimizers.private import _lbfgs as private_lbfgs
 from simsopt_jax.geo.optimizers.private import _lbfgsb_scipy as lbfgsb
 
+from benchmarks import custom_quasi_newton_runtime as runtime
 from benchmarks.traceable_compile_shape import (
     lower_to_text,
     summarize_lowered_text,
 )
+
+_CompileProvider = Literal["custom", "optax"]
+
+
+class _LoweredProgram(Protocol):
+    def as_text(self) -> str: ...
+
+    def compile(self, *args: object, **kwargs: object) -> object: ...
+
+
+@dataclass(frozen=True)
+class _CapturedProviderCompile:
+    executable: object
+    stablehlo_module: str
+    stablehlo_bytes: int
+    compile_s: float
 
 
 class _ProgressRecorder:
@@ -734,6 +752,249 @@ def _comparison(summaries: list[dict[str, int | float | str | None]]) -> dict[st
     }
 
 
+def _stablehlo_module_name(stablehlo_text: str) -> str:
+    first_line = stablehlo_text.splitlines()[0]
+    prefix = "module @"
+    if not first_line.startswith(prefix):
+        raise RuntimeError("provider lowering did not emit a StableHLO module")
+    return first_line[len(prefix) :].split(maxsplit=1)[0]
+
+
+def _provider_programs(
+    provider: _CompileProvider,
+    prepared: object,
+) -> tuple[tuple[str, object], ...]:
+    if provider == "custom":
+        custom = cast(runtime._PreparedCustom, prepared)
+        program = custom.program
+        return (
+            ("initial_state", program.initial_state),
+            ("value_and_grad", program.value_and_grad),
+            ("advance_from_start", program.advance_from_start),
+            ("advance_from_search", program.advance_from_search),
+            ("reenter_new_x", program.reenter_new_x),
+            ("result_payload", program.result_payload),
+        )
+    if provider == "optax":
+        optax_prepared = cast(runtime._PreparedOptax, prepared)
+        return (
+            ("step", optax_prepared.step),
+            ("final_value_and_grad", optax_prepared.final_value_and_grad),
+        )
+    raise ValueError(f"unknown compile provider {provider!r}")
+
+
+def _summarize_provider_compiles(
+    provider: _CompileProvider,
+    prepared: object,
+    captured: tuple[_CapturedProviderCompile, ...],
+) -> tuple[list[JsonObject], JsonObject]:
+    programs = _provider_programs(provider, prepared)
+    labels_by_executable = {id(executable): label for label, executable in programs}
+    if len(labels_by_executable) != len(programs):
+        raise RuntimeError(
+            "provider preparation reused one executable for two programs"
+        )
+    if len(captured) != len(programs):
+        raise RuntimeError(
+            f"provider {provider!r} prepared {len(programs)} programs but "
+            f"performed {len(captured)} executable compiles"
+        )
+
+    summaries: list[JsonObject] = []
+    observed_labels: set[str] = set()
+    for record in captured:
+        label = labels_by_executable.get(id(record.executable))
+        if label is None:
+            raise RuntimeError("provider preparation compiled an unreturned executable")
+        observed_labels.add(label)
+        summaries.append(
+            {
+                "label": label,
+                "stablehlo_module": record.stablehlo_module,
+                "stablehlo_bytes": record.stablehlo_bytes,
+                "compile_s": record.compile_s,
+                "compiled_executable_count": 1,
+                "compiled_executable_count_source": "observed_lowered_compile_call",
+            }
+        )
+    expected_labels = {label for label, _executable in programs}
+    if observed_labels != expected_labels:
+        raise RuntimeError("provider compile observations did not cover every program")
+
+    aggregate: JsonObject = {
+        "stablehlo_bytes": sum(
+            cast(int, summary["stablehlo_bytes"]) for summary in summaries
+        ),
+        "compile_s": sum(cast(float, summary["compile_s"]) for summary in summaries),
+        "compiled_executable_count": len(summaries),
+        "compiled_executable_count_source": "observed_lowered_compile_calls",
+    }
+    return summaries, aggregate
+
+
+def _capture_provider_preparation(
+    provider: _CompileProvider,
+    fixture_case: runtime.Fixture,
+    x0: np.ndarray,
+    *,
+    maxcor: int,
+) -> tuple[object, tuple[_CapturedProviderCompile, ...], float]:
+    if provider not in {"custom", "optax"}:
+        raise ValueError(f"unknown compile provider {provider!r}")
+
+    sample_lowered = jax.jit(lambda value: value).lower(
+        jnp.asarray(0.0, dtype=jnp.float64)
+    )
+    lowered_type = type(sample_lowered)
+    original_compile = lowered_type.compile
+    captured: list[_CapturedProviderCompile] = []
+
+    def record_compile(
+        lowered: _LoweredProgram,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        stablehlo_text = lowered.as_text()
+        compile_started = time.perf_counter()
+        executable = original_compile(lowered, *args, **kwargs)
+        compile_s = time.perf_counter() - compile_started
+        captured.append(
+            _CapturedProviderCompile(
+                executable=executable,
+                stablehlo_module=_stablehlo_module_name(stablehlo_text),
+                stablehlo_bytes=len(stablehlo_text.encode("utf-8")),
+                compile_s=compile_s,
+            )
+        )
+        return executable
+
+    preparation_started = time.perf_counter()
+    with patch.object(lowered_type, "compile", record_compile):
+        if provider == "custom":
+            prepared = runtime._prepare_custom(fixture_case, x0, maxcor=maxcor)
+        elif provider == "optax":
+            prepared = runtime._prepare_optax(fixture_case, x0, maxcor=maxcor)
+    preparation_s = time.perf_counter() - preparation_started
+    return prepared, tuple(captured), preparation_s
+
+
+def _provider_compile_payload(
+    *,
+    provider: str,
+    fixture_name: str,
+    device: str,
+    intent: str,
+    maxiter: int,
+    maxcor: int,
+) -> dict[str, object]:
+    if provider not in {"custom", "optax"}:
+        raise ValueError(f"unknown compile provider {provider!r}")
+    typed_provider = cast(_CompileProvider, provider)
+    runtime._validate_intent_environment(device, intent)
+    if runtime.fixture_method(fixture_name) != "lbfgs":
+        raise ValueError("provider compile diagnostics support only L-BFGS fixtures")
+
+    fixture_started = time.perf_counter()
+    fixture_case = runtime.fixture(fixture_name)
+    x0 = np.asarray(fixture_case.initial, dtype=np.float64)
+    fixture_build_s = time.perf_counter() - fixture_started
+    initial_objective, initial_gradient = runtime._initial_value_and_grad(
+        fixture_case,
+        x0,
+        provider=typed_provider,
+    )
+    fixture_contract = runtime._fixture_contract_payload(
+        fixture_case,
+        x0,
+        initial_objective=initial_objective,
+        initial_gradient_inf_norm=float(np.max(np.abs(initial_gradient))),
+        method="lbfgs",
+        maxiter=maxiter,
+        maxcor=maxcor,
+        device=device,
+        intent=intent,
+    )
+    prepared, captured, provider_preparation_s = _capture_provider_preparation(
+        typed_provider,
+        fixture_case,
+        x0,
+        maxcor=maxcor,
+    )
+    programs, aggregate = _summarize_provider_compiles(
+        typed_provider,
+        prepared,
+        captured,
+    )
+
+    git_commit, git_clean = runtime._checkout_provenance()
+    candidate_sha = git_commit if git_clean else None
+    device_identity = asdict(runtime._device_identity(device))
+    if device == "cpu":
+        for field in (
+            "gpu_uuid",
+            "gpu_model",
+            "compute_capability",
+            "total_memory_bytes",
+            "driver_version",
+            "cuda_version",
+            "visible_devices",
+        ):
+            device_identity[field] = None
+    gpu_identity_available = device_identity["gpu_uuid"] is not None
+    provider_factory_options: JsonObject = (
+        {
+            "maxcor": maxcor,
+            "ftol": runtime._SOLVER_FTOL,
+            "gtol": runtime._SOLVER_GTOL,
+            "maxls": runtime._SOLVER_MAXLS,
+            "x_dtype": "float64",
+        }
+        if typed_provider == "custom"
+        else {"memory_size": maxcor}
+    )
+    return {
+        "schema_version": 4,
+        "artifact_kind": "provider_factory_compile_shape",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "command": [sys.executable, *sys.argv],
+        "provider": typed_provider,
+        "solver_route": runtime._solver_route(typed_provider, "lbfgs"),
+        "candidate_sha": candidate_sha,
+        "candidate_sha_availability": (
+            "available" if candidate_sha is not None else "unavailable"
+        ),
+        "candidate_sha_unavailable_reason": (
+            None if candidate_sha is not None else "dirty_worktree"
+        ),
+        "git_commit": git_commit,
+        "git_clean": git_clean,
+        "git_status_short": _git_text("status", "--short"),
+        "jax_version": jax.__version__,
+        "optax_version": runtime.optax.__version__,
+        "jax_backend": jax.default_backend(),
+        "platform": platform.platform(),
+        "device_identity": device_identity,
+        "gpu_identity_availability": (
+            "available" if gpu_identity_available else "unavailable"
+        ),
+        "gpu_identity_unavailable_reason": (
+            None if gpu_identity_available else "cpu_device"
+        ),
+        "runtime_environment": runtime._runtime_environment_payload(),
+        "fixture": fixture_case.name,
+        "fixture_build_s": fixture_build_s,
+        "fixture_contract": fixture_contract,
+        "dtype": str(x0.dtype),
+        "parameter_shape": [int(size) for size in x0.shape],
+        "options": fixture_contract["solver_options"],
+        "provider_factory_options": provider_factory_options,
+        "provider_preparation_s": provider_preparation_s,
+        "programs": programs,
+        "aggregate": aggregate,
+    }
+
+
 def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -753,6 +1014,23 @@ def main() -> None:
         default=None,
         help="Optional atomic sidecar for checkpoints before watchdog termination.",
     )
+    parser.add_argument(
+        "--provider",
+        choices=("custom-diagnostics", "custom", "optax"),
+        default="custom-diagnostics",
+        help=(
+            "Compile the exact runtime provider factory, or retain the existing "
+            "custom kernel diagnostics."
+        ),
+    )
+    parser.add_argument(
+        "--fixture",
+        choices=("coil47", "rosenbrock"),
+        default="coil47",
+        help="Runtime-runner fixture for custom or Optax provider compilation.",
+    )
+    parser.add_argument("--device", choices=("cpu", "gpu"), default="cpu")
+    parser.add_argument("--intent", choices=("fast", "parity"), default="parity")
     parser.add_argument("--dimension", type=int, default=2)
     parser.add_argument(
         "--objective",
@@ -760,8 +1038,8 @@ def main() -> None:
         default="quadratic",
         help="Objective graph used by the compile-shape probe.",
     )
-    parser.add_argument("--maxcor", type=int, default=3)
-    parser.add_argument("--maxiter", type=int, default=5)
+    parser.add_argument("--maxcor", type=int)
+    parser.add_argument("--maxiter", type=int)
     parser.add_argument("--maxfun", type=int, default=20)
     parser.add_argument("--maxls", type=int, default=20)
     parser.add_argument("--ftol", type=float, default=0.0)
@@ -829,16 +1107,52 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    provider_factory_mode = args.provider != "custom-diagnostics"
+    maxcor = (
+        args.maxcor if args.maxcor is not None else (10 if provider_factory_mode else 3)
+    )
+    maxiter = (
+        args.maxiter
+        if args.maxiter is not None
+        else (20 if provider_factory_mode else 5)
+    )
+
     progress = _ProgressRecorder(
         None if args.progress_json is None else Path(args.progress_json)
     )
+    if provider_factory_mode:
+        progress.record(
+            "provider_compile_started",
+            {
+                "provider": args.provider,
+                "fixture": args.fixture,
+                "device": args.device,
+                "intent": args.intent,
+                "maxcor": maxcor,
+                "maxiter": maxiter,
+            },
+        )
+        provider_payload = _provider_compile_payload(
+            provider=args.provider,
+            fixture_name=args.fixture,
+            device=args.device,
+            intent=args.intent,
+            maxiter=maxiter,
+            maxcor=maxcor,
+        )
+        output_path = Path(args.output_json)
+        _write_json(output_path, provider_payload)
+        progress.record("payload_written", {"output_json": str(output_path)})
+        print(json.dumps({"output_json": str(output_path)}, sort_keys=True))
+        return
+
     progress.record(
         "process_started",
         {
             "objective": args.objective,
             "dimension": args.dimension,
-            "maxcor": args.maxcor,
-            "maxiter": args.maxiter,
+            "maxcor": maxcor,
+            "maxiter": maxiter,
             "maxfun": args.maxfun,
             "include_legacy_kernels": bool(args.include_legacy_kernels),
             "kernel": args.kernel,
@@ -846,8 +1160,8 @@ def main() -> None:
     )
     kernel_cases = _build_kernel_cases(
         dimension=args.dimension,
-        maxcor=args.maxcor,
-        maxiter=args.maxiter,
+        maxcor=maxcor,
+        maxiter=maxiter,
         maxfun=args.maxfun,
         maxls=args.maxls,
         ftol=args.ftol,
@@ -912,8 +1226,8 @@ def main() -> None:
             repeated_call_compile = _repeated_call_compile_summary(
                 objective=args.objective,
                 dimension=args.dimension,
-                maxiter=args.maxiter,
-                maxcor=args.maxcor,
+                maxiter=maxiter,
+                maxcor=maxcor,
                 maxls=args.maxls,
                 ftol=args.ftol,
                 gtol=args.gtol,
@@ -947,8 +1261,8 @@ def main() -> None:
             ),
             "objective_kind": args.objective,
             "dimension": int(args.dimension),
-            "maxcor": int(args.maxcor),
-            "maxiter": int(args.maxiter),
+            "maxcor": int(maxcor),
+            "maxiter": int(maxiter),
             "maxfun": int(args.maxfun),
             "maxls": int(args.maxls),
             "ftol": float(args.ftol),
