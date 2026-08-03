@@ -11,8 +11,10 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import shutil
 import statistics
+import subprocess
 import sys
 import tempfile
 from dataclasses import asdict
@@ -112,6 +114,110 @@ def _runner_commit(payload: dict[str, object]) -> str:
     return value
 
 
+def _validate_runner_commit(payload: dict[str, object], *, repo_root: Path) -> str:
+    """Require each runner's immutable commit to exist in the selected repository."""
+
+    commit = _runner_commit(payload)
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise ValueError(
+            "runner git_commit must be exactly 40 lowercase hexadecimal characters"
+        )
+    git_root = subprocess.run(
+        ["git", "-C", str(repo_root), "rev-parse", "--is-inside-work-tree"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if git_root.returncode != 0 or git_root.stdout.strip() != "true":
+        raise ValueError(f"repo_root is not a Git work tree: {repo_root}")
+    commit_check = subprocess.run(
+        ["git", "-C", str(repo_root), "cat-file", "-e", f"{commit}^{{commit}}"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if commit_check.returncode != 0:
+        raise ValueError(
+            f"runner git_commit does not resolve to a commit in repo_root: {commit}"
+        )
+    return commit
+
+
+def _runner_relative_file(run: Path, relative: str, *, field: str) -> Path:
+    relative_path = Path(relative)
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        raise ValueError(f"{field} escapes runner root: {relative}")
+    candidate = run / relative_path
+    if not candidate.resolve().is_relative_to(run.resolve()):
+        raise ValueError(f"{field} escapes runner root: {relative}")
+    return candidate
+
+
+def _validate_child_artifact_binding(
+    child: dict[str, object],
+    *,
+    run: Path,
+    child_root: Path,
+    path_field: str,
+    sha256_field: str,
+    required: bool,
+) -> Path | None:
+    """Bind a child-provenance artifact to a regular file below that child root."""
+
+    relative = child.get(path_field)
+    expected_sha256 = child.get(sha256_field)
+    if relative is None and expected_sha256 is None:
+        if required:
+            raise ValueError(f"provider child omitted {path_field}/{sha256_field}")
+        return None
+    if relative is None or expected_sha256 is None:
+        raise ValueError(
+            f"provider child has an incomplete {path_field}/{sha256_field} pair"
+        )
+    if not isinstance(relative, str) or not relative:
+        raise ValueError(
+            f"provider child {path_field} must be a nonempty relative path"
+        )
+    if not isinstance(expected_sha256, str) or not expected_sha256:
+        raise ValueError(f"provider child {sha256_field} must be a nonempty checksum")
+    artifact_path = _runner_relative_file(run, relative, field=path_field)
+    if not artifact_path.resolve().is_relative_to(child_root.resolve()):
+        raise ValueError(f"{path_field} escapes child runner directory: {relative}")
+    if not artifact_path.is_file():
+        raise ValueError(f"provider child artifact is missing: {artifact_path}")
+    if _sha256(artifact_path) != expected_sha256:
+        raise ValueError(f"provider child {path_field} checksum mismatch")
+    return artifact_path
+
+
+def _emitted_child_artifact_paths(
+    rows: list[dict[str, object]],
+    *,
+    child_root: Path,
+    artifact_name: Literal["memory_trace", "trial_trace"],
+) -> list[Path]:
+    emitted_paths: list[Path] = []
+    for row in rows:
+        diagnostic_artifacts = row.get("diagnostic_artifacts")
+        if not isinstance(diagnostic_artifacts, dict):
+            raise TypeError("diagnostic_artifacts must be a JSON object")
+        relative = diagnostic_artifacts.get(artifact_name)
+        if relative is None:
+            continue
+        if not isinstance(relative, str) or not relative:
+            raise TypeError(
+                f"diagnostic artifact {artifact_name!r} must be a path or null"
+            )
+        emitted_paths.append(
+            _runner_relative_file(
+                child_root,
+                relative,
+                field=f"diagnostic artifact {artifact_name} path",
+            ).resolve()
+        )
+    return emitted_paths
+
+
 def _runner_clean(payload: dict[str, object]) -> bool:
     value = payload.get("git_clean")
     if not isinstance(value, bool):
@@ -122,7 +228,10 @@ def _runner_clean(payload: dict[str, object]) -> bool:
 def _validate_runner_child_provenance(
     run: Path,
     payload: dict[str, object],
+    *,
+    repo_root: Path,
 ) -> None:
+    _validate_runner_commit(payload, repo_root=repo_root)
     provider_child = payload.get("provider_child")
     if not isinstance(provider_child, bool):
         raise TypeError("runner provider_child must be a boolean")
@@ -152,6 +261,12 @@ def _validate_runner_child_provenance(
         return
     if not children:
         raise ValueError("runner parent omitted provider child provenance")
+    capture_trial_trace = payload.get("capture_boozer_trial_trace", False)
+    if not isinstance(capture_trial_trace, bool):
+        raise TypeError("runner capture_boozer_trial_trace must be a boolean")
+    require_gpu_memory_binding = (
+        _runner_schema_version(payload) == _RUNNER_SCHEMA_VERSION
+    )
     parent_rows = _measurement_rows(payload)
     child_rows: list[dict[str, object]] = []
     seen_paths: set[str] = set()
@@ -175,7 +290,11 @@ def _validate_runner_child_provenance(
             raise ValueError("provider child provenance is duplicated")
         seen_paths.add(relative)
         seen_providers.add(provider)
-        child_path = run / relative_path
+        child_path = _runner_relative_file(
+            run,
+            relative,
+            field="provider child measurements path",
+        )
         if not child_path.is_file():
             raise FileNotFoundError(
                 f"provider child measurements are missing: {child_path}"
@@ -185,8 +304,94 @@ def _validate_runner_child_provenance(
         child_payload = _json_object(child_path)
         if child_payload.get("provider_child") is not True:
             raise ValueError("nested provider payload is not a provider child")
-        _validate_runner_child_provenance(child_path.parent, child_payload)
+        _validate_runner_child_provenance(
+            child_path.parent,
+            child_payload,
+            repo_root=repo_root,
+        )
+        child_capture_trial_trace = child_payload.get(
+            "capture_boozer_trial_trace", False
+        )
+        if not isinstance(child_capture_trial_trace, bool):
+            raise TypeError(
+                "provider child capture_boozer_trial_trace must be a boolean"
+            )
+        if child_capture_trial_trace is not capture_trial_trace:
+            raise ValueError("provider child trial capture differs from parent runner")
         child_measurements = _measurement_rows(child_payload)
+        emitted_memory_rows = _emitted_child_artifact_paths(
+            child_measurements,
+            child_root=child_path.parent,
+            artifact_name="memory_trace",
+        )
+        emitted_memory_paths = set(emitted_memory_rows)
+        if len(emitted_memory_paths) > 1:
+            raise ValueError("provider child emitted multiple memory trace paths")
+        bound_memory_path = _validate_child_artifact_binding(
+            child,
+            run=run,
+            child_root=child_path.parent,
+            path_field="gpu_memory_path",
+            sha256_field="gpu_memory_sha256",
+            required=require_gpu_memory_binding,
+        )
+        if require_gpu_memory_binding and len(emitted_memory_paths) != 1:
+            raise ValueError(
+                "provider child GPU memory provenance requires exactly one emitted memory trace"
+            )
+        if (
+            emitted_memory_paths
+            and (
+                bound_memory_path is None
+                or bound_memory_path.resolve() not in emitted_memory_paths
+            )
+        ):
+            raise ValueError(
+                "provider child GPU memory path does not bind the emitted measurement artifact"
+            )
+        emitted_trial_rows = _emitted_child_artifact_paths(
+            child_measurements,
+            child_root=child_path.parent,
+            artifact_name="trial_trace",
+        )
+        emitted_trial_paths = set(emitted_trial_rows)
+        if len(emitted_trial_paths) > 1:
+            raise ValueError("provider child emitted multiple trial trace paths")
+        if capture_trial_trace and len(emitted_trial_rows) != 1:
+            raise ValueError(
+                "provider child trial capture requires exactly one emitted trial trace"
+            )
+        bound_trial_path = _validate_child_artifact_binding(
+            child,
+            run=run,
+            child_root=child_path.parent,
+            path_field="trial_trace_path",
+            sha256_field="trial_trace_sha256",
+            required=(
+                capture_trial_trace
+                or child_capture_trial_trace
+                or bool(emitted_trial_paths)
+                or "trial_trace_path" in child
+                or "trial_trace_sha256" in child
+            ),
+        )
+        if (
+            "trial_trace_path" in child or "trial_trace_sha256" in child
+        ) and len(emitted_trial_rows) != 1:
+            raise ValueError(
+                "provider child trial binding requires exactly one emitted trial trace"
+            )
+        if emitted_trial_rows and len(emitted_trial_rows) != 1:
+            raise ValueError(
+                "provider child trial provenance requires exactly one emitting measurement row"
+            )
+        if (
+            emitted_trial_paths
+            and (bound_trial_path is None or bound_trial_path.resolve() not in emitted_trial_paths)
+        ):
+            raise ValueError(
+                "provider child trial trace path does not bind the emitted measurement artifact"
+            )
         if child.get("measurement_count") != len(child_measurements):
             raise ValueError("provider child measurement count mismatch")
         if any(row.get("provider") != provider for row in child_measurements):
@@ -826,9 +1031,106 @@ def _scientific_qualification(rows: list[dict[str, object]]) -> dict[str, object
     }
 
 
+_MAX_CUSTOM_TO_OPTAX_WARM_RATIO = 2.0
+
+
+def _performance_qualification(
+    source_run_rows: list[tuple[str, list[dict[str, object]]]],
+) -> dict[str, object]:
+    """Qualify matched fast L-BFGS custom/Optax warm samples by source run."""
+
+    failures: list[str] = []
+    comparison_count = 0
+    custom_rows: list[dict[str, object]] = []
+    optax_rows: list[dict[str, object]] = []
+    for source_run, run_rows in source_run_rows:
+        cases = sorted({str(row.get("case")) for row in run_rows})
+        for case in cases:
+            case_rows = [row for row in run_rows if row.get("case") == case]
+            custom_case_rows = [
+                row for row in case_rows if row.get("provider") == "custom"
+            ]
+            optax_case_rows = [
+                row for row in case_rows if row.get("provider") == "optax"
+            ]
+            if len(custom_case_rows) != 1:
+                failures.append(f"{source_run}:{case}:custom-count")
+            if len(optax_case_rows) != 1:
+                failures.append(f"{source_run}:{case}:optax-count")
+            if len(custom_case_rows) == 1 and len(optax_case_rows) == 1:
+                comparison_count += 1
+            for row in case_rows:
+                provider = row.get("provider")
+                if provider not in {"custom", "optax"}:
+                    failures.append(
+                        f"{source_run}:{case}:provider-must-be-custom-or-optax"
+                    )
+                if row.get("method") != "lbfgs":
+                    failures.append(f"{source_run}:{case}:method-must-be-lbfgs")
+                if row.get("intent") != "fast":
+                    failures.append(f"{source_run}:{case}:intent-must-be-fast")
+                if provider == "custom" and row.get("solver_route") != "fused_stepwise":
+                    failures.append(
+                        f"{source_run}:{case}:custom-route-must-be-fused-stepwise"
+                    )
+                if provider == "optax" and row.get("solver_route") != "optax_lbfgs":
+                    failures.append(
+                        f"{source_run}:{case}:optax-route-must-be-optax-lbfgs"
+                    )
+            custom_rows.extend(custom_case_rows)
+            optax_rows.extend(optax_case_rows)
+    custom_median = (
+        float(
+            statistics.median(
+                [
+                    _finite_number(row["warm_seconds"], field="warm_seconds")
+                    for row in custom_rows
+                ]
+            )
+        )
+        if custom_rows
+        else None
+    )
+    optax_median = (
+        float(
+            statistics.median(
+                [
+                    _finite_number(row["warm_seconds"], field="warm_seconds")
+                    for row in optax_rows
+                ]
+            )
+        )
+        if optax_rows
+        else None
+    )
+    if optax_median == 0.0:
+        failures.append("optax-warm-median-must-be-positive")
+    ratio = (
+        custom_median / optax_median
+        if custom_median is not None
+        and optax_median is not None
+        and optax_median > 0.0
+        else None
+    )
+    if ratio is not None and ratio > _MAX_CUSTOM_TO_OPTAX_WARM_RATIO:
+        failures.append("custom-to-optax-warm-ratio-exceeds-2.0")
+    passed = not failures
+    return {
+        "passed": passed,
+        "failure_reasons": sorted(set(failures)),
+        "comparison_count": comparison_count,
+        "custom_warm_seconds_median": custom_median,
+        "optax_warm_seconds_median": optax_median,
+        "custom_to_optax_warm_ratio": ratio,
+        "verdict": "pass" if passed else "fail",
+    }
+
+
 def _qualification(
     rows: list[dict[str, object]],
     kind: QualificationKind,
+    *,
+    source_run_rows: list[tuple[str, list[dict[str, object]]]],
 ) -> dict[str, object]:
     if kind == "diagnostic":
         return {
@@ -836,27 +1138,9 @@ def _qualification(
             "failure_reasons": ["diagnostic-not-promotion"],
             "comparison_count": 0,
         }
-    scientific = _scientific_qualification(rows)
     if kind == "scientific":
-        return scientific
-    performance_route_failures = [
-        "performance-custom-lbfgs-requires-fast-fused-stepwise"
-        for row in rows
-        if row.get("provider") == "custom"
-        and row.get("method") == "lbfgs"
-        and (row.get("intent") != "fast" or row.get("solver_route") != "fused_stepwise")
-    ]
-    return {
-        "passed": False,
-        "failure_reasons": sorted(
-            set(
-                cast(list[str], scientific["failure_reasons"])
-                + performance_route_failures
-                + ["performance-qualification-not-implemented"]
-            )
-        ),
-        "comparison_count": scientific["comparison_count"],
-    }
+        return _scientific_qualification(rows)
+    return _performance_qualification(source_run_rows)
 
 
 def _finite_number(value: object, *, field: str) -> float:
@@ -958,6 +1242,11 @@ def _copy_runner_tree(run: Path, destination: Path) -> None:
         shutil.copy2(source, target)
 
 
+def _validate_runner_tree_commits(run: Path, *, repo_root: Path) -> None:
+    for measurements in sorted(run.rglob("measurements.json")):
+        _validate_runner_commit(_json_object(measurements), repo_root=repo_root)
+
+
 def _summary(
     receipt_id: str,
     run_payloads: list[tuple[Path, dict[str, object]]],
@@ -1000,8 +1289,7 @@ def publish(
     if destination.exists():
         raise FileExistsError(f"receipt destination already exists: {destination}")
 
-    run_payloads = [(run, _runner_payload(run)) for run in runs]
-    run_names = [run.name for run, _payload in run_payloads]
+    run_names = [run.name for run in runs]
     if len(set(run_names)) != len(run_names):
         raise ValueError("runner directory names must be unique")
     archive = _archive_path(archive_uri, repo_root=repo_root)
@@ -1011,81 +1299,6 @@ def publish(
         )
     if archive.exists():
         raise FileExistsError(f"receipt archive destination already exists: {archive}")
-
-    runner_schema_versions = {
-        _runner_schema_version(payload) for _run, payload in run_payloads
-    }
-    if len(runner_schema_versions) != 1:
-        raise ValueError("receipt source runs must use one runner schema version")
-    runner_schema_version = next(iter(runner_schema_versions))
-    if runner_schema_version == _REJECTED_RUNNER_SCHEMA_VERSION:
-        raise ValueError(
-            "runner schema 8 is rejected: its cross-instrument RSS peak "
-            "semantics never produced a valid receipt"
-        )
-    receipt_schema_version = (
-        _SCHEMA_VERSION
-        if runner_schema_version == _RUNNER_SCHEMA_VERSION
-        else _LEGACY_SCHEMA_VERSION
-    )
-    if receipt_schema_version == _SCHEMA_VERSION:
-        for run, payload in run_payloads:
-            _validate_runner_child_provenance(run, payload)
-            for row, artifact_root in _v7_rows_with_artifact_roots(run, payload):
-                _validate_v7_measurement(
-                    row,
-                    source_run=artifact_root,
-                    bind_artifacts=(
-                        _runner_schema_version(payload) == _RUNNER_SCHEMA_VERSION
-                    ),
-                )
-        if qualification_kind == "scientific" and len(run_payloads) > 1:
-            for _run, payload in run_payloads:
-                runtime_environment = cast(
-                    dict[str, object], payload["runtime_environment"]
-                )
-                expected_backend_mode = (
-                    f"jax_{payload['requested_device']}_parity"
-                )
-                if (
-                    runtime_environment.get("SIMSOPT_BACKEND_MODE")
-                    != expected_backend_mode
-                ):
-                    raise ValueError(
-                        "SIMSOPT_BACKEND_MODE differs from scientific lane device"
-                    )
-            jax_versions = {
-                payload.get("jax_version") for _run, payload in run_payloads
-            }
-            if len(jax_versions) != 1:
-                raise ValueError("jax_version differs across lanes")
-    candidate_commits = {_runner_commit(payload) for _run, payload in run_payloads}
-    clean_values = [_runner_clean(payload) for _run, payload in run_payloads]
-    rows = [row for _run, payload in run_payloads for row in _measurement_rows(payload)]
-    eligible_source = (
-        len(candidate_commits) == 1 and all(clean_values) and _all_success(rows)
-    )
-    qualification = (
-        _qualification(rows, qualification_kind)
-        if receipt_schema_version == _SCHEMA_VERSION
-        else {
-            "passed": False,
-            "failure_reasons": ["legacy-receipt-not-promotion"],
-            "comparison_count": 0,
-        }
-    )
-    verdict = (
-        "pass"
-        if eligible_source
-        and receipt_schema_version == _SCHEMA_VERSION
-        and qualification.get("passed") is True
-        else (
-            "diagnostic-pass-not-promotion"
-            if qualification_kind == "diagnostic"
-            else "fail"
-        )
-    )
-    lock_sha256 = _sha256(environment_lock)
 
     destination_parent = destination.parent
     destination_parent.mkdir(parents=True, exist_ok=True)
@@ -1098,8 +1311,101 @@ def publish(
         destination_tmp = Path(destination_tmp_name)
         archive_tmp = Path(archive_tmp_name)
         raw_root = destination_tmp / "raw"
-        for run, _payload in run_payloads:
+        for run in runs:
             _copy_runner_tree(run, raw_root / run.name)
+        run_payloads = [
+            (raw_root / run.name, _runner_payload(raw_root / run.name))
+            for run in runs
+        ]
+        for run, _payload in run_payloads:
+            _validate_runner_tree_commits(run, repo_root=repo_root)
+        runner_schema_versions = {
+            _runner_schema_version(payload) for _run, payload in run_payloads
+        }
+        if len(runner_schema_versions) != 1:
+            raise ValueError("receipt source runs must use one runner schema version")
+        runner_schema_version = next(iter(runner_schema_versions))
+        if runner_schema_version == _REJECTED_RUNNER_SCHEMA_VERSION:
+            raise ValueError(
+                "runner schema 8 is rejected: its cross-instrument RSS peak "
+                "semantics never produced a valid receipt"
+            )
+        receipt_schema_version = (
+            _SCHEMA_VERSION
+            if runner_schema_version == _RUNNER_SCHEMA_VERSION
+            else _LEGACY_SCHEMA_VERSION
+        )
+        if receipt_schema_version == _SCHEMA_VERSION:
+            for run, payload in run_payloads:
+                _validate_runner_child_provenance(run, payload, repo_root=repo_root)
+                for row, artifact_root in _v7_rows_with_artifact_roots(run, payload):
+                    _validate_v7_measurement(
+                        row,
+                        source_run=artifact_root,
+                        bind_artifacts=(
+                            _runner_schema_version(payload) == _RUNNER_SCHEMA_VERSION
+                        ),
+                    )
+            if qualification_kind == "scientific" and len(run_payloads) > 1:
+                for _run, payload in run_payloads:
+                    runtime_environment = cast(
+                        dict[str, object], payload["runtime_environment"]
+                    )
+                    expected_backend_mode = (
+                        f"jax_{payload['requested_device']}_parity"
+                    )
+                    if (
+                        runtime_environment.get("SIMSOPT_BACKEND_MODE")
+                        != expected_backend_mode
+                    ):
+                        raise ValueError(
+                            "SIMSOPT_BACKEND_MODE differs from scientific lane device"
+                        )
+                jax_versions = {
+                    payload.get("jax_version") for _run, payload in run_payloads
+                }
+                if len(jax_versions) != 1:
+                    raise ValueError("jax_version differs across lanes")
+        candidate_commits = {
+            _runner_commit(payload) for _run, payload in run_payloads
+        }
+        clean_values = [_runner_clean(payload) for _run, payload in run_payloads]
+        rows = [
+            row
+            for _run, payload in run_payloads
+            for row in _measurement_rows(payload)
+        ]
+        source_run_rows = [
+            (run.name, _measurement_rows(payload)) for run, payload in run_payloads
+        ]
+        eligible_source = (
+            len(candidate_commits) == 1 and all(clean_values) and _all_success(rows)
+        )
+        qualification = (
+            _qualification(
+                rows,
+                qualification_kind,
+                source_run_rows=source_run_rows,
+            )
+            if receipt_schema_version == _SCHEMA_VERSION
+            else {
+                "passed": False,
+                "failure_reasons": ["legacy-receipt-not-promotion"],
+                "comparison_count": 0,
+            }
+        )
+        verdict = (
+            "pass"
+            if eligible_source
+            and receipt_schema_version == _SCHEMA_VERSION
+            and qualification.get("passed") is True
+            else (
+                "diagnostic-pass-not-promotion"
+                if qualification_kind == "diagnostic"
+                else "fail"
+            )
+        )
+        lock_sha256 = _sha256(environment_lock)
 
         metrics = {
             "schema_version": receipt_schema_version,
@@ -1167,6 +1473,8 @@ def publish(
 def _validate_v2_semantics(
     receipt: Path,
     manifest: dict[str, object],
+    *,
+    repo_root: Path,
 ) -> None:
     metrics = _json_object(receipt / "metrics.json")
     if metrics.get("schema_version") != _SCHEMA_VERSION:
@@ -1188,13 +1496,22 @@ def _validate_v2_semantics(
     if metrics.get("source_runs") != source_runs:
         raise ValueError(f"metrics source runs do not match manifest: {receipt}")
     raw_rows: list[dict[str, object]] = []
+    source_run_rows: list[tuple[str, list[dict[str, object]]]] = []
     source_payloads: list[dict[str, object]] = []
+    seen_source_runs: set[str] = set()
     for source_run in cast(list[object], source_runs):
         if not isinstance(source_run, str):
             raise TypeError(f"receipt source run is invalid: {receipt}")
         source_path = Path(source_run)
-        if source_path.is_absolute() or ".." in source_path.parts:
+        if (
+            source_path.is_absolute()
+            or ".." in source_path.parts
+            or len(source_path.parts) != 1
+        ):
             raise ValueError(f"receipt source run escapes raw root: {source_run}")
+        if source_run in seen_source_runs:
+            raise ValueError(f"receipt source runs are duplicated: {source_run}")
+        seen_source_runs.add(source_run)
         payload = _runner_payload(receipt / "raw" / source_run)
         payload_runner_schema = _runner_schema_version(payload)
         if payload_runner_schema not in {
@@ -1202,9 +1519,14 @@ def _validate_v2_semantics(
             _RUNNER_SCHEMA_VERSION,
         }:
             raise ValueError(f"receipt contains a legacy promotion run: {receipt}")
-        _validate_runner_child_provenance(receipt / "raw" / source_run, payload)
+        _validate_runner_child_provenance(
+            receipt / "raw" / source_run,
+            payload,
+            repo_root=repo_root,
+        )
         source_payloads.append(payload)
         source_rows = _measurement_rows(payload)
+        source_run_rows.append((source_run, source_rows))
         for row, artifact_root in _v7_rows_with_artifact_roots(
             receipt / "raw" / source_run,
             payload,
@@ -1230,6 +1552,7 @@ def _validate_v2_semantics(
     recomputed_qualification = _qualification(
         raw_rows,
         cast(QualificationKind, qualification_kind),
+        source_run_rows=source_run_rows,
     )
     if metrics.get("qualification") != recomputed_qualification:
         raise ValueError(f"receipt qualification does not match raw runs: {receipt}")
@@ -1358,8 +1681,11 @@ def _validate_receipt(
     schema_version = manifest.get("schema_version")
     if schema_version not in _LEGACY_SCHEMA_VERSIONS | {_SCHEMA_VERSION}:
         raise ValueError(f"unsupported receipt schema version: {schema_version!r}")
+    raw_root = receipt / "raw"
+    if raw_root.is_dir():
+        _validate_runner_tree_commits(raw_root, repo_root=repo_root)
     if schema_version == _SCHEMA_VERSION:
-        _validate_v2_semantics(receipt, manifest)
+        _validate_v2_semantics(receipt, manifest, repo_root=repo_root)
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, list):
         raise TypeError(f"manifest artifacts are invalid: {receipt}")

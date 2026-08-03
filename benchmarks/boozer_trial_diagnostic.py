@@ -880,6 +880,16 @@ def validate_boozer_trial_trace(
                 archive=archive,
             )
         )
+    baseline_parameter_hash = records[0].key.parameter_sha256
+    for record in records:
+        if (
+            record.objective.gradient_source == "baseline"
+            and record.objective.gradient_source_parameter_sha256
+            != baseline_parameter_hash
+        ):
+            raise ValueError(
+                "baseline gradient source is not bound to record 0 parameters"
+            )
     if records[0].phase != "initial" or records[-1].phase != "final_refresh":
         raise ValueError("trial phases do not bracket the optimization")
     if any(record.phase != "line_search" for record in records[1:-1]):
