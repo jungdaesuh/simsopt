@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import sys
@@ -12,7 +13,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from benchmarks import custom_quasi_newton_runtime as runtime
-from benchmarks.fixtures.custom_quasi_newton import Fixture, fixture
+from benchmarks.fixtures.custom_quasi_newton import (
+    Fixture,
+    _certified_traceable_endpoint,
+    fixture,
+)
 from benchmarks.process_gpu_monitor import (
     ProcessGpuMemoryMonitorError,
     ProcessGpuMemoryResult,
@@ -1606,3 +1611,90 @@ def test_native_provider_rejects_unmatched_source_fixture() -> None:
             fixture_case.initial,
             provider="native",
         )
+
+
+def test_boozer_scientific_endpoint_uses_certified_traceable_route() -> None:
+    fixture_path = (
+        Path(__file__).resolve().parents[2]
+        / "benchmarks/fixtures/custom_quasi_newton.py"
+    )
+    tree = ast.parse(fixture_path.read_text(encoding="utf-8"))
+    endpoint = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "scientific_endpoint"
+    )
+    endpoint_calls = {
+        call.func.id
+        for call in ast.walk(endpoint)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+    }
+    assert "_certified_traceable_endpoint" in endpoint_calls
+    assert "forward_result" not in endpoint_calls
+
+    helper = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_certified_traceable_endpoint"
+    )
+    helper_calls = {
+        call.func.id
+        for call in ast.walk(helper)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+    }
+    assert "run_code_traceable" in helper_calls
+    assert "reporting_metrics_from_solution" in helper_calls
+
+
+def test_certified_traceable_endpoint_fails_closed_on_inner_failure() -> None:
+    observed: dict[str, object] = {}
+
+    def coil_set_spec_from_dofs(coil_dofs):
+        observed["coil_dofs"] = np.asarray(coil_dofs)
+        return "endpoint-coil-spec"
+
+    def run_code_traceable(
+        coil_source,
+        sdofs,
+        iota,
+        G,
+        *,
+        materialize_dense_linearization,
+    ):
+        observed["solve_args"] = (
+            coil_source,
+            np.asarray(sdofs),
+            float(iota),
+            float(G),
+            materialize_dense_linearization,
+        )
+        return {
+            "x": jnp.asarray([9.0], dtype=jnp.float64),
+            "success": jnp.asarray(False),
+        }
+
+    def reporting_metrics_from_solution(*_args, **_kwargs):
+        pytest.fail("failed inner solves must not produce reporting metrics")
+
+    evidence = _certified_traceable_endpoint(
+        np.asarray([1.5, -2.0], dtype=np.float64),
+        coil_set_spec_from_dofs=coil_set_spec_from_dofs,
+        run_code_traceable=run_code_traceable,
+        install_traceable_solved_runtime_state=lambda _solved: pytest.fail(
+            "failed inner solves must not install state"
+        ),
+        surface_dofs=np.asarray([0.25], dtype=np.float64),
+        iota_seed=-0.406,
+        G_seed=3.25,
+        reporting_metrics_from_solution=reporting_metrics_from_solution,
+    )
+
+    assert evidence.inner_success is False
+    assert evidence.observables == ()
+    np.testing.assert_array_equal(observed["coil_dofs"], [1.5, -2.0])
+    solve_args = observed["solve_args"]
+    assert isinstance(solve_args, tuple)
+    assert solve_args[0] == "endpoint-coil-spec"
+    np.testing.assert_array_equal(solve_args[1], [0.25])
+    assert solve_args[2:] == (-0.406, 3.25, False)
