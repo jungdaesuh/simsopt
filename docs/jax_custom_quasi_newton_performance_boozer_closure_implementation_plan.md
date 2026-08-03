@@ -632,14 +632,39 @@ batching of the update-row dots diverges from the sequential loop at 1 ULP
 (deterministic n=2 case) and is unusable in shared transition code. The
 equivalence-test artifact is preserved in the session scratchpad.
 
-Deferred (recorded, not silently dropped): same-process warm-soak plateau
-evidence; StableHLO artifact pair regeneration at the final SHA (earlier
-receipt `coil47-lbfgs-gpu-compile-shape-current` covers an earlier SHA);
-different-host archive replay (local second-copy mirror validated;
-landau/A100 down — A100 lanes superseded by user directive 2026-08-02);
-exact-inner replay re-run at the final SHA; scoped Pyright/compileall at
-the final SHA (Ruff and `git diff --check` ran green during the campaign);
-optional line-search floor-acceptance fix for the stochastic GPU deaths
+Deferred-items sweep (2026-08-03, second pass — commits `4127102e7`,
+`af4a7619f`):
+
+- Warm soak CLOSED: `benchmarks/lbfgs_warm_soak.py` (same-process, prepared
+  once, fail-closed plateau verdict). Definitive clean-worktree 20-run RTX
+  5090 soak: plateau on all axes — executable count 1 throughout, RSS drift
+  20 KiB (slack 2048), VRAM flat at 968 MiB, warm median ratio 1.083
+  (limit 1.2). Artifact
+  `.artifacts/custom-quasi-newton/final-warm-soak-gpu-af4a7619f.json`.
+- Exact-inner replay CLOSED — and it caught a real regression: the
+  accepted-incumbent controller postdates the exact-inner receipt and its
+  host boundary used implicit H2D transfers, crashing guarded runs
+  (`JAX_TRANSFER_GUARD=disallow`). Fixed via explicit `runtime_device_put`
+  (`4127102e7`, with two transfer-guard regression tests). Guarded CPU and
+  RTX 5090 replays now complete with inner residuals at receipt scale
+  (2.18e-29 / 6.60e-15 CPU; 2.28e-29 / 6.76e-15 GPU vs the receipt's
+  1.98e-29 / 6.30e-15 and 2.52e-29 / 7.09e-15).
+- StableHLO pair CLOSED:
+  `.artifacts/custom-quasi-newton/final-compile-shape/{custom,optax}-gpu-fast.json`.
+- Pyright/compileall CLOSED with adjudication: compileall green; the repo's
+  scoped Pyright gate has 50 pre-existing errors, all in files this
+  campaign never touched (the one touched gated file,
+  `parity_tolerances.py`, is clean); differential on the non-gated campaign
+  files is 61 → 68 (+7 latent annotations in heavily-edited files),
+  recorded as residual debt. Caution: Pyright silently excludes
+  dot-directories — a baseline run against a worktree under `.artifacts/`
+  analyzes nothing and reports a vacuous 0.
+- Detached-checkout archive replay CLOSED (validate-all --archive-root over
+  the complete 47-receipt mirror).
+
+Still deferred: different-host archive replay (needs a second host;
+landau/A100 down — superseded by user directive 2026-08-02); optional
+line-search floor-acceptance fix for the stochastic GPU deaths
 (unauthorized).
 
 ## Open Questions
