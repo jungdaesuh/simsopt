@@ -1,0 +1,187 @@
+{
+  "archive_bundle": {
+    "inventory_sha256": "60227b057b2b94968d3ca41807ff834153d854c7fb5497ad283510f53600b9be",
+    "receipt_id": "boozer-matched-budget-gpu-distribution-359fd41fc",
+    "storage_identity": "file:///home/jungdaesuh/qn-receipt-archives/boozer-matched-budget-gpu-distribution-359fd41fc"
+  },
+  "archive_uri": "file:///home/jungdaesuh/qn-receipt-archives/boozer-matched-budget-gpu-distribution-359fd41fc",
+  "artifacts": [
+    {
+      "path": "metrics.json",
+      "sha256": "5692b88692c4416383b83f3b64479d6dbb46bd3009e4cb51a02e907070b49e7a"
+    },
+    {
+      "path": "raw/rep-1/custom/boozer_trial_trace.json",
+      "sha256": "f787bea77d238717ccb2d057e91b2f187185a2da310f7a96f2a9dc461c5f69d0"
+    },
+    {
+      "path": "raw/rep-1/custom/boozer_trial_trace.parameters.npz",
+      "sha256": "a48f874600b0956aca233e8b8e48ab5e9ccaa300f257802aad179590c45e6faa"
+    },
+    {
+      "path": "raw/rep-1/custom/boozer_trial_trace.records.jsonl",
+      "sha256": "209f610de389d4d49df286545c25c622c7126810ee34b341130a2046bca62073"
+    },
+    {
+      "path": "raw/rep-1/custom/gpu_memory.json",
+      "sha256": "81c718b0685f9e6153eddfdc2c0ab30dfca5d0f54dd2f845ad87dfeb1e7c0cdc"
+    },
+    {
+      "path": "raw/rep-1/custom/measurements.json",
+      "sha256": "8ac6540865795a69e845a72f71bf2b0c7dca19bbd022c4eabba78c2adc4b325f"
+    },
+    {
+      "path": "raw/rep-1/measurements.json",
+      "sha256": "c5f1375404131b97d7d1807a5a97b473731a2ea9eef5b67b4a4f6a893c5795d9"
+    },
+    {
+      "path": "raw/rep-1/run.log",
+      "sha256": "c5f1375404131b97d7d1807a5a97b473731a2ea9eef5b67b4a4f6a893c5795d9"
+    },
+    {
+      "path": "raw/rep-2/custom/boozer_trial_trace.json",
+      "sha256": "6384e93fd7f7db103ab4a9c93e984f84dee738fd776dffc9f1131f6e3e2895b7"
+    },
+    {
+      "path": "raw/rep-2/custom/boozer_trial_trace.parameters.npz",
+      "sha256": "f436768c6ca9b6238a1026adef741217c730673ce8818abb738042c1383b848d"
+    },
+    {
+      "path": "raw/rep-2/custom/boozer_trial_trace.records.jsonl",
+      "sha256": "0c18d03f9768dc9a26ca5e17c3e586d6b3f97ad465b9cb82e0cc3f8f0479904f"
+    },
+    {
+      "path": "raw/rep-2/custom/gpu_memory.json",
+      "sha256": "f93da7768c7e5b295d3631e6da8d522047ca4a2502fb6c594bb6e1a757f39e1b"
+    },
+    {
+      "path": "raw/rep-2/custom/measurements.json",
+      "sha256": "88e058eda8567704a329501ed51efe76ab47f043794442f049bea9bc12983c83"
+    },
+    {
+      "path": "raw/rep-2/measurements.json",
+      "sha256": "e06cc8f136f590f62dd59fbe40600e2d0782c86298bfb86eb2ca0bde5e6fa40e"
+    },
+    {
+      "path": "raw/rep-2/run.log",
+      "sha256": "e06cc8f136f590f62dd59fbe40600e2d0782c86298bfb86eb2ca0bde5e6fa40e"
+    },
+    {
+      "path": "raw/rep-3/custom/boozer_trial_trace.json",
+      "sha256": "b594b9c767e797640aa9e2fa95eb9a5e6a837a0ea0332fccb951e37d9d294ad4"
+    },
+    {
+      "path": "raw/rep-3/custom/boozer_trial_trace.parameters.npz",
+      "sha256": "79e05728267a815adb052b3ea25c16576d2a39b6fcefd762e85d0c27916245f7"
+    },
+    {
+      "path": "raw/rep-3/custom/boozer_trial_trace.records.jsonl",
+      "sha256": "1224e2daaed86f3a8b3fbe09deb80047497a108bf24fcd502ea98210cabf0306"
+    },
+    {
+      "path": "raw/rep-3/custom/gpu_memory.json",
+      "sha256": "947c8c7814aabe572cffbd40c626de609b90ede411320f59ef28745edf064b7b"
+    },
+    {
+      "path": "raw/rep-3/custom/measurements.json",
+      "sha256": "ce37c4115a6af7f633df7eae4c946cc994eee4d3967ab6dc00efc8ea034978e2"
+    },
+    {
+      "path": "raw/rep-3/measurements.json",
+      "sha256": "82cf1b63fb748f68bba12bd867c0c1f64ffd0c84204611918cd87a172e96b20c"
+    },
+    {
+      "path": "raw/rep-3/run.log",
+      "sha256": "82cf1b63fb748f68bba12bd867c0c1f64ffd0c84204611918cd87a172e96b20c"
+    },
+    {
+      "path": "raw/rep-4/custom/boozer_trial_trace.json",
+      "sha256": "ec2d76e0f5f59d37e98531f1337d740ebfbe7967acaa92cb82a405baf8c73192"
+    },
+    {
+      "path": "raw/rep-4/custom/boozer_trial_trace.parameters.npz",
+      "sha256": "540926189e7082bb04e271404b41992b8a8aaa16ce3ba965bd7038a00924613a"
+    },
+    {
+      "path": "raw/rep-4/custom/boozer_trial_trace.records.jsonl",
+      "sha256": "bc6544605892750921a1384c8e71426ee3d16518e748d0b2438794185f748426"
+    },
+    {
+      "path": "raw/rep-4/custom/gpu_memory.json",
+      "sha256": "15170c88a8762f9c63aef8f3f22c8b681f7743ced78209e1d7dc3127ae6fe782"
+    },
+    {
+      "path": "raw/rep-4/custom/measurements.json",
+      "sha256": "fcfe29c8dc77ac085d39140b52abfa3f5e8b83e59bf0007622914989ae221262"
+    },
+    {
+      "path": "raw/rep-4/measurements.json",
+      "sha256": "b178d502e719374d53a281a9eb18bf02ce749486e104d42ef67c3201388230c8"
+    },
+    {
+      "path": "raw/rep-4/run.log",
+      "sha256": "b178d502e719374d53a281a9eb18bf02ce749486e104d42ef67c3201388230c8"
+    },
+    {
+      "path": "raw/rep-5/custom/boozer_trial_trace.json",
+      "sha256": "227772fdc6c35d9af7f5718357e181acd0b3d877f033b59eaee73eaa12ea3d0d"
+    },
+    {
+      "path": "raw/rep-5/custom/boozer_trial_trace.parameters.npz",
+      "sha256": "2071bbb8755b35f405473111afd1dca9904265c29dad52099b7281fa9d344353"
+    },
+    {
+      "path": "raw/rep-5/custom/boozer_trial_trace.records.jsonl",
+      "sha256": "d945fc13f60450d1614544c8739123641fda3fb5fc9c08e302edc2a91a78b7e4"
+    },
+    {
+      "path": "raw/rep-5/custom/gpu_memory.json",
+      "sha256": "9d04f4dc5d1133dac4dd0f41922bd66e4beb3e1db4021a455b248130455bcedc"
+    },
+    {
+      "path": "raw/rep-5/custom/measurements.json",
+      "sha256": "d79948b18855fd4d01b7981bac771dc1900b795325595e53dfb5febf1c21cee2"
+    },
+    {
+      "path": "raw/rep-5/measurements.json",
+      "sha256": "df04e453da73353b911bd59b98ffd50a821b01766cc6f2c3c4e8ea998a2271df"
+    },
+    {
+      "path": "raw/rep-5/run.log",
+      "sha256": "df04e453da73353b911bd59b98ffd50a821b01766cc6f2c3c4e8ea998a2271df"
+    },
+    {
+      "path": "summary.md",
+      "sha256": "f4679ca43a7f333923bf755a5ffc6c1f2e84aa96d67bd529bf47ec2ff2dd2a95"
+    }
+  ],
+  "candidate_commit": "359fd41fc4535c6ae68f9a94f3e69c2315f1c2f4",
+  "candidate_worktree_clean": true,
+  "environment_lock": {
+    "path": "benchmarks/environments/custom_quasi_newton_gpu.lock.txt",
+    "sha256": "04e77f2a39bd2d5bd602e0a0596462f5dbd4f21cc2ebfc3b537fe95ec591758f"
+  },
+  "expected_sample_counts": {
+    "custom": 5
+  },
+  "kind": "custom-quasi-newton-runner",
+  "qualification": {
+    "comparison_count": 0,
+    "failure_reasons": [
+      "diagnostic-not-promotion"
+    ],
+    "passed": false
+  },
+  "qualification_kind": "diagnostic",
+  "receipt_id": "boozer-matched-budget-gpu-distribution-359fd41fc",
+  "runner_schema_version": 9,
+  "schema_version": 2,
+  "source_runs": [
+    "rep-1",
+    "rep-2",
+    "rep-3",
+    "rep-4",
+    "rep-5"
+  ],
+  "verdict": "diagnostic-pass-not-promotion"
+}

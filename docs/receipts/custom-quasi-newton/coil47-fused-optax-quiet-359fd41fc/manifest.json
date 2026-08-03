@@ -1,0 +1,173 @@
+{
+  "archive_bundle": {
+    "inventory_sha256": "80ac4af6de14dc1d3f68d23319f266423a120763a42fd1a6d6c79f048f7e8b72",
+    "receipt_id": "coil47-fused-optax-quiet-359fd41fc",
+    "storage_identity": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-quiet-359fd41fc"
+  },
+  "archive_uri": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-quiet-359fd41fc",
+  "artifacts": [
+    {
+      "path": "metrics.json",
+      "sha256": "2821dd95813a64cb24dda8b395b105d134ddd1ba367e2a2a1b3676a061ba6d10"
+    },
+    {
+      "path": "raw/round-1/custom/gpu_memory.json",
+      "sha256": "4a0fd30dc4499535847b2ba495aec7b1b3e59e4dc0e7c5cba65844c2a9352f1f"
+    },
+    {
+      "path": "raw/round-1/custom/measurements.json",
+      "sha256": "3d07ab51d5957fe2a10da30840446ea1609d5a11fb5d5523da767f80e15cae89"
+    },
+    {
+      "path": "raw/round-1/measurements.json",
+      "sha256": "007ffd09392febf6686260d007378116fdf7586e89debec78a8453cfd43375d7"
+    },
+    {
+      "path": "raw/round-1/optax/gpu_memory.json",
+      "sha256": "6912524a5c1f212f51b119336b0c681f86b1db21d0d232750a79efc8c8bae96c"
+    },
+    {
+      "path": "raw/round-1/optax/measurements.json",
+      "sha256": "60f8d376de64fee456a686970bb7a07f9bfd1290c9c7fdc08f711a6890759267"
+    },
+    {
+      "path": "raw/round-1/run.log",
+      "sha256": "007ffd09392febf6686260d007378116fdf7586e89debec78a8453cfd43375d7"
+    },
+    {
+      "path": "raw/round-2/custom/gpu_memory.json",
+      "sha256": "9c9d8a68d1878000cfa99706de2c31e001b2a8b117bc4edd037a3ce58af5e128"
+    },
+    {
+      "path": "raw/round-2/custom/measurements.json",
+      "sha256": "dad919b64cb3fb6df622b7821e12ddb555e8d5c7bbc8fde4ac14f8ed63d239cb"
+    },
+    {
+      "path": "raw/round-2/measurements.json",
+      "sha256": "883ab13db70ad703ec6cc932369adad00dcbf0b543393b3acf8f64e1708a15fb"
+    },
+    {
+      "path": "raw/round-2/optax/gpu_memory.json",
+      "sha256": "562a5a22add229987cd7d55f1b7c6cae97374e819a545cbaeee665d8b8cbfaba"
+    },
+    {
+      "path": "raw/round-2/optax/measurements.json",
+      "sha256": "88e9b1dfae4f1c8de4e56d5c3af9a2b1ff3880950decb5ddc7d942f1085c9c27"
+    },
+    {
+      "path": "raw/round-2/run.log",
+      "sha256": "883ab13db70ad703ec6cc932369adad00dcbf0b543393b3acf8f64e1708a15fb"
+    },
+    {
+      "path": "raw/round-3/custom/gpu_memory.json",
+      "sha256": "00b141d5f21b6d717c8cdcc0d56499f742b44b80553634e6a11d7ef755a6257f"
+    },
+    {
+      "path": "raw/round-3/custom/measurements.json",
+      "sha256": "e2c51016c22f977b5b542ad6a81b54c9392840482a4a09f37797119afb1fb93c"
+    },
+    {
+      "path": "raw/round-3/measurements.json",
+      "sha256": "3c00a0426bfbfc0d319e21af183a3a787fcd031c7c489fcfa2d01953b79f8247"
+    },
+    {
+      "path": "raw/round-3/optax/gpu_memory.json",
+      "sha256": "055b64d27621040deaa4db6e3ed4b97772a2cad74665457f7185203825de1e68"
+    },
+    {
+      "path": "raw/round-3/optax/measurements.json",
+      "sha256": "6943f104ba1f9f3b4ceabe9079fac47e5a715dafaaa40ce7fbef6158d27bb39b"
+    },
+    {
+      "path": "raw/round-3/run.log",
+      "sha256": "3c00a0426bfbfc0d319e21af183a3a787fcd031c7c489fcfa2d01953b79f8247"
+    },
+    {
+      "path": "raw/round-4/custom/gpu_memory.json",
+      "sha256": "76e5d5f1e08587bbbf74372f4783fab1844ff6bce42de682557d6174d686831f"
+    },
+    {
+      "path": "raw/round-4/custom/measurements.json",
+      "sha256": "82005540424871945b427bc79a347ed75de6a7fab0496974a866f5fb75c0d957"
+    },
+    {
+      "path": "raw/round-4/measurements.json",
+      "sha256": "35b661af64268f6ef5ff9dd44b9317ed156a330b8ef74ec6fb26ce5102f891fa"
+    },
+    {
+      "path": "raw/round-4/optax/gpu_memory.json",
+      "sha256": "738e98f9d84da7827bf845246c532a99761d862f618eb64364e1171189c97add"
+    },
+    {
+      "path": "raw/round-4/optax/measurements.json",
+      "sha256": "c2ec965bd2461544bd8d7abca2e215fbda7354e800d4ba3c729adca8153c8efb"
+    },
+    {
+      "path": "raw/round-4/run.log",
+      "sha256": "35b661af64268f6ef5ff9dd44b9317ed156a330b8ef74ec6fb26ce5102f891fa"
+    },
+    {
+      "path": "raw/round-5/custom/gpu_memory.json",
+      "sha256": "552b69cd26461b755bc7ae5cd8bc8c31d90b55b3f319ef9ca34ccafbce738c23"
+    },
+    {
+      "path": "raw/round-5/custom/measurements.json",
+      "sha256": "1e7f41e0029ad62503454cd5b51b2ac03b794dbf8ece546740d194b9c1812d8f"
+    },
+    {
+      "path": "raw/round-5/measurements.json",
+      "sha256": "6f421873017dc832ab9cefb73e5c1f26d496995def9967f631b96ae2c854ff30"
+    },
+    {
+      "path": "raw/round-5/optax/gpu_memory.json",
+      "sha256": "78c837ddad70641477ec5633a20358e7b20175d8901b6fa6ee969b99a9567818"
+    },
+    {
+      "path": "raw/round-5/optax/measurements.json",
+      "sha256": "6e317b748b265ac2528d30c140efaac58a3305b0e2cf139f38c9a9d433e72dcd"
+    },
+    {
+      "path": "raw/round-5/run.log",
+      "sha256": "6f421873017dc832ab9cefb73e5c1f26d496995def9967f631b96ae2c854ff30"
+    },
+    {
+      "path": "summary.md",
+      "sha256": "fae18e437b21e7198d54af4025c010491e53cf302cad8078e56e553c35330dca"
+    }
+  ],
+  "candidate_commit": "359fd41fc4535c6ae68f9a94f3e69c2315f1c2f4",
+  "candidate_worktree_clean": true,
+  "environment_lock": {
+    "path": "benchmarks/environments/custom_quasi_newton_gpu.lock.txt",
+    "sha256": "04e77f2a39bd2d5bd602e0a0596462f5dbd4f21cc2ebfc3b537fe95ec591758f"
+  },
+  "expected_sample_counts": {
+    "custom": 5,
+    "optax": 5
+  },
+  "kind": "custom-quasi-newton-runner",
+  "qualification": {
+    "comparison_count": 0,
+    "failure_reasons": [
+      "coil47:intent-must-be-parity",
+      "coil47:maxiter-must-be-1000",
+      "coil47:method-must-be-bfgs",
+      "coil47:native-authority-count",
+      "performance-qualification-not-implemented",
+      "scientific-case-must-be-boozer"
+    ],
+    "passed": false
+  },
+  "qualification_kind": "performance",
+  "receipt_id": "coil47-fused-optax-quiet-359fd41fc",
+  "runner_schema_version": 9,
+  "schema_version": 2,
+  "source_runs": [
+    "round-1",
+    "round-2",
+    "round-3",
+    "round-4",
+    "round-5"
+  ],
+  "verdict": "fail"
+}
