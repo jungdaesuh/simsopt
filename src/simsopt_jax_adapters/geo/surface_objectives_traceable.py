@@ -133,9 +133,10 @@ def surface_to_surface_shortest_distance_pure(gamma1, gamma2):
 
 __all__ = [
     "AcceptedIncumbentHostValueAndGrad",
+    "TraceableObjectiveCandidateEvaluation",
     "TraceableObjectiveCertifiedSeededValueAndGrad",
-    "TraceableObjectiveInnerState",
     "TraceableObjectiveIncumbentEvaluation",
+    "TraceableObjectiveInnerState",
     "TraceableObjectiveSeededValueAndGrad",
     "TraceableObjectiveSession",
     "TraceableObjectiveSolvedPair",
@@ -3405,23 +3406,26 @@ def _ensure_traceable_runtime_optimizer_solved_pair(runtime_entry, booz_jax):
     return optimizer_solved_pair
 
 
-class _CandidateEvaluation(NamedTuple):
-    """Device-resident core result shared by the trial and incumbent paths."""
+class TraceableObjectiveCandidateEvaluation(NamedTuple):
+    """Device-resident forward, gradient, and state for one candidate."""
 
-    forward_result: dict
+    forward_result: dict[str, object]
     gradient: jax.Array
     actual_adjoint_success: jax.Array
     gradient_source: str
     candidate_inner_state: TraceableObjectiveInnerState
 
 
-def _build_candidate_evaluation_core(compiled_bundle):
+def _build_candidate_evaluation_core(
+    compiled_bundle,
+    *,
+    fallback_gradient_on_primal_failure: bool = True,
+):
     """Build the single owner of forward, gradient routing, and eligibility.
 
-    The core calls the owned compiled forward exactly once, applies the
-    production candidate-versus-fallback gradient routing, and certifies the
-    candidate inner state device-side. Only the host branching the routing
-    genuinely needs is synchronized.
+    The core calls the owned compiled forward exactly once, applies the caller's
+    fail-closed gradient-fallback policy, and certifies the candidate inner state
+    device-side. Only the host branching the routing needs is synchronized.
     """
     state = compiled_bundle["state"]
     compiled_forward_result_for = compiled_bundle["compiled_forward_result_for"]
@@ -3438,7 +3442,7 @@ def _build_candidate_evaluation_core(compiled_bundle):
     def evaluate_candidate(
         candidate_coil_dofs,
         incumbent: TraceableObjectiveInnerState | None,
-    ) -> _CandidateEvaluation:
+    ) -> TraceableObjectiveCandidateEvaluation:
         if incumbent is None:
             forward_result = compiled_forward_result_for(candidate_coil_dofs)
             fallback_coil_dofs = baseline_coil_dofs
@@ -3470,21 +3474,26 @@ def _build_candidate_evaluation_core(compiled_bundle):
             gradient_x = forward_result["x"]
             gradient_linear_solve_factors = forward_result["linear_solve_factors"]
             gradient_source = "candidate"
+        elif not fallback_gradient_on_primal_failure:
+            gradient = _traceable_adjoint_fail_gradient_like(candidate_coil_dofs)
+            actual_adjoint_success = _runtime_device_put(np.bool_(False))
+            gradient_source = "unavailable"
         else:
             gradient_coil_dofs = fallback_coil_dofs
             gradient_x = fallback_x
             gradient_linear_solve_factors = baseline_linear_solve_factors
             gradient_source = fallback_gradient_source
 
-        raw_gradient, actual_adjoint_success = compiled_total_gradient_for(
-            gradient_coil_dofs,
-            gradient_x,
-            gradient_linear_solve_factors,
-        )
-        gradient = _traceable_adjoint_gradient_or_nan(
-            raw_gradient,
-            actual_adjoint_success,
-        )
+        if candidate_gradient_source or fallback_gradient_on_primal_failure:
+            raw_gradient, actual_adjoint_success = compiled_total_gradient_for(
+                gradient_coil_dofs,
+                gradient_x,
+                gradient_linear_solve_factors,
+            )
+            gradient = _traceable_adjoint_gradient_or_nan(
+                raw_gradient,
+                actual_adjoint_success,
+            )
         candidate_inner_state = TraceableObjectiveInnerState(
             coil_dofs=candidate_coil_dofs,
             solved_x=forward_result["x"],
@@ -3496,7 +3505,7 @@ def _build_candidate_evaluation_core(compiled_bundle):
                 & jnp.isfinite(jnp.asarray(forward_result["raw_value"]))
             ),
         )
-        return _CandidateEvaluation(
+        return TraceableObjectiveCandidateEvaluation(
             forward_result=dict(forward_result),
             gradient=gradient,
             actual_adjoint_success=actual_adjoint_success,
@@ -5481,6 +5490,31 @@ class TraceableObjectiveSession:
                 optimizer_compiled_bundle
             )
             return self._trial_evaluator
+
+    def evaluate_candidate_from_anchor(
+        self,
+        parameters: np.ndarray,
+        incumbent_state: TraceableObjectiveInnerState,
+    ) -> TraceableObjectiveCandidateEvaluation:
+        """Evaluate one candidate from an explicit continuation anchor.
+
+        Runs the shared forward/gradient core once and returns its device-resident
+        forward state and candidate gradient. A fallback gradient is unavailable.
+        """
+        if not _host_bool(incumbent_state.eligible):
+            raise RuntimeError("candidate evaluation requires an eligible anchor")
+        canonical = np.ascontiguousarray(
+            parameters,
+            dtype=np.dtype("<f8"),
+        ).reshape(-1)
+        candidate = _runtime_device_put(canonical, dtype=jnp.float64)
+        evaluate_candidate = _build_candidate_evaluation_core(
+            self.ensure_optimizer_compiled_bundle(),
+            fallback_gradient_on_primal_failure=False,
+        )
+        evaluation = evaluate_candidate(candidate, incumbent_state)
+        jax.block_until_ready(evaluation)
+        return evaluation
 
     def accepted_incumbent_host_value_and_grad(
         self,

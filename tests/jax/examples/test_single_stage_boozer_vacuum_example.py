@@ -95,6 +95,52 @@ def test_jax_vacuum_single_stage_uses_fail_closed_endpoint_certificate() -> None
     } <= observable_keys
 
 
+def test_jax_finalization_uses_one_controller_anchored_evaluation() -> None:
+    module = _module(JAX)
+    solve = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "solve"
+    )
+    anchored_calls = [
+        call
+        for call in ast.walk(solve)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "session"
+        and call.func.attr == "evaluate_candidate_from_anchor"
+    ]
+
+    assert len(anchored_calls) == 1
+    anchored_call = anchored_calls[0]
+    assert len(anchored_call.args) == 2
+    assert isinstance(anchored_call.args[0], ast.Name)
+    assert anchored_call.args[0].id == "solution"
+    assert isinstance(anchored_call.args[1], ast.Attribute)
+    assert isinstance(anchored_call.args[1].value, ast.Name)
+    assert anchored_call.args[1].value.id == "incumbent_controller"
+    assert anchored_call.args[1].attr == "current_inner_state"
+
+    baseline_finalization_calls = [
+        call
+        for call in ast.walk(solve)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id in {"forward_result", "host_value_and_gradient"}
+    ]
+    assert baseline_finalization_calls == []
+
+    anchored_attributes = {
+        node.attr
+        for node in ast.walk(solve)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "final_evaluation"
+    }
+    assert {"forward_result", "gradient", "candidate_inner_state"} <= anchored_attributes
+
+
 def test_both_single_stage_examples_report_implicit_physics_state() -> None:
     required = {
         "inner_solver_success",

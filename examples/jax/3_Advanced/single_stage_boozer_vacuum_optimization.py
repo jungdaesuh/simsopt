@@ -194,14 +194,6 @@ def solve(
         outer_objective_config=objective_config,
         session=session,
     )
-    value_and_gradient = cast(
-        Callable[[jax.Array], tuple[jax.Array, jax.Array]],
-        runtime_bundle["value_and_grad"],
-    )
-    forward_result = cast(
-        Callable[[jax.Array], Mapping[str, object]],
-        runtime_bundle["forward_result"],
-    )
     reporting_metrics_from_solution = cast(
         Callable[..., Mapping[str, object]],
         runtime_bundle["reporting_metrics_from_solution"],
@@ -212,14 +204,6 @@ def solve(
     initial_value_and_gradient = incumbent_controller.value_and_grad(
         initial_parameters
     )
-
-    def host_value_and_gradient(
-        parameters: np.ndarray,
-    ) -> tuple[float, np.ndarray]:
-        parameters_device = jax.device_put(np.asarray(parameters, dtype=np.float64))
-        value_device, gradient_device = value_and_gradient(parameters_device)
-        jax.block_until_ready((value_device, gradient_device))
-        return _host_float(value_device), _host_array(gradient_device)
 
     driver = scalar_example_driver()
     if driver == Driver.SIMSOPT_LBFGSB:
@@ -246,17 +230,21 @@ def solve(
             callback=incumbent_controller.accept,
         )
     solution = np.asarray(optimizer_result.x_k, dtype=np.float64)
-    solution_device = jax.device_put(solution)
-    final_value, gradient = host_value_and_gradient(solution)
-    final_forward = forward_result(solution_device)
+    final_evaluation = session.evaluate_candidate_from_anchor(
+        solution,
+        incumbent_controller.current_inner_state,
+    )
+    final_forward = final_evaluation.forward_result
+    final_value = _host_float(final_forward["value"])
+    gradient = _host_array(final_evaluation.gradient)
     final_metrics = reporting_metrics_from_solution(
-        solution_device,
+        final_evaluation.candidate_inner_state.coil_dofs,
         final_forward["x"],
         final_forward["success"],
         include_distance_metrics=False,
         outer_raw_terms=traceable_forward_result_outer_raw_terms(final_forward),
     )
-    jax.block_until_ready((final_forward, final_metrics))
+    jax.block_until_ready(final_metrics)
     inner_solver_success = _host_bool(final_metrics["solver_success"])
     boozer_residual = _host_float(final_metrics["final_boozer_residual"])
     final_iota = _host_float(final_metrics["final_iota"])
