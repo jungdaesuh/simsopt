@@ -1208,3 +1208,73 @@ def test_publish_rejects_invalid_nested_legacy_runner_commit(tmp_path: Path) -> 
     assert str(error.value) == (
         "runner git_commit must be exactly 40 lowercase hexadecimal characters"
     )
+
+
+def test_receipt_recompute_never_consults_the_live_fixture_registry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Historical evidence must stay valid if fixture registry policy drifts."""
+
+    import benchmarks.fixtures.custom_quasi_newton as fixtures_module
+
+    lanes = _scientific_v7_lanes(tmp_path)
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+    destination = tmp_path / "tracked" / "registry-drift"
+    publish(
+        tuple(lanes),
+        environment_lock=lock,
+        destination=destination,
+        archive_uri=(tmp_path / "archive" / "registry-drift").as_uri(),
+        repo_root=tmp_path,
+        qualification_kind="scientific",
+    )
+
+    def poisoned(_name: str) -> bool:
+        raise AssertionError(
+            "receipt validation consulted the live fixture registry"
+        )
+
+    monkeypatch.setattr(fixtures_module, "fixture_accepted_incumbent", poisoned)
+    assert not hasattr(receipt_module, "fixture_accepted_incumbent")
+    assert validate_all(destination, repo_root=tmp_path) == 0
+
+
+@pytest.mark.parametrize(
+    ("route", "case", "expected"),
+    (
+        ("scipy_bfgs", "boozer", "scipy-bfgs"),
+        ("scipy_lbfgsb", "coil47", "scipy-lbfgsb"),
+        ("optax_lbfgs", "coil47", "optax-lbfgs"),
+        ("stepwise", "coil47", "private-lbfgsb"),
+        ("fused_stepwise", "coil47", "private-lbfgsb"),
+        ("custom_bfgs_private", "bfgs_quadratic", "private-bfgs"),
+        ("custom_bfgs_host_incumbent", "boozer", "host-bfgs"),
+        ("custom_bfgs_stepwise", "boozer", "host-bfgs"),
+    ),
+)
+def test_row_status_convention_is_a_pure_function_of_persisted_bytes(
+    route: str,
+    case: str,
+    expected: str,
+) -> None:
+    row: dict[str, object] = {"solver_route": route, "case": case}
+    assert receipt_module._row_status_convention(row) == expected
+
+
+@pytest.mark.parametrize(
+    ("route", "case"),
+    (
+        ("custom_bfgs_stepwise", "mystery-case"),
+        ("unknown_route", "boozer"),
+    ),
+)
+def test_unmapped_solver_route_conventions_fail_closed(
+    route: str,
+    case: str,
+) -> None:
+    with pytest.raises(ValueError, match="no status convention is recorded"):
+        receipt_module._row_status_convention(
+            {"solver_route": route, "case": case}
+        )

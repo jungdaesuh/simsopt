@@ -65,6 +65,7 @@ from benchmarks.fixtures.custom_quasi_newton import (
     NativeValueAndGrad,
     ScientificEndpointEvidence,
     fixture,
+    fixture_accepted_incumbent,
     fixture_method,
 )
 from benchmarks.process_gpu_monitor import (
@@ -305,13 +306,27 @@ class Measurement:
     algorithm_memory_contract: dict[str, int | bool] | None
 
 
-def _solver_route(provider: Provider, method: Method, *, intent: str = "parity") -> str:
+def _solver_route(
+    provider: Provider,
+    method: Method,
+    *,
+    intent: str = "parity",
+    accepted_incumbent: bool = False,
+) -> str:
     if provider == "native":
         return "scipy_bfgs" if method == "bfgs" else "scipy_lbfgsb"
     if provider == "optax":
         return "optax_lbfgs"
     if method == "bfgs":
-        return "custom_bfgs_stepwise"
+        # The route names the emitting driver so persisted rows stay
+        # self-describing: the host core under accepted-incumbent
+        # continuation and the private on-device solver use different
+        # status vocabularies.
+        return (
+            "custom_bfgs_host_incumbent"
+            if accepted_incumbent
+            else "custom_bfgs_private"
+        )
     return "fused_stepwise" if intent == "fast" else "stepwise"
 
 
@@ -1455,7 +1470,16 @@ def _measurement(
         method=method,
         device=device,
         intent=intent,
-        solver_route=_solver_route(provider, method, intent=intent),
+        solver_route=_solver_route(
+            provider,
+            method,
+            intent=intent,
+            accepted_incumbent=bool(
+                provider == "custom"
+                and method == "bfgs"
+                and fixture_case.accepted_incumbent_host_value_and_grad is not None
+            ),
+        ),
         device_identity=_device_identity(device),
         dimension=fixture_case.expected_dimension,
         maxiter=maxiter,
@@ -1630,7 +1654,16 @@ def _run_provider_child(
             production_route = typed_measurement.get("solver_route")
             if not isinstance(production_route, str) or not production_route:
                 raise TypeError("Boozer trial trace row omitted its solver route")
-            expected_production_route = _solver_route(provider, method, intent=intent)
+            expected_production_route = _solver_route(
+                provider,
+                method,
+                intent=intent,
+                accepted_incumbent=bool(
+                    provider == "custom"
+                    and method == "bfgs"
+                    and fixture_accepted_incumbent("boozer")
+                ),
+            )
             if production_route != expected_production_route:
                 raise ValueError(
                     "Boozer trial trace row solver route differs from the request"

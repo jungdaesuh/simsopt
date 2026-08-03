@@ -17,9 +17,11 @@ import statistics
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
-from typing import Iterable, Literal, cast
+from types import MappingProxyType
+from typing import Final, Iterable, Literal, cast
 from urllib.parse import unquote, urlparse
 
 import numpy as np
@@ -30,12 +32,11 @@ if str(_REPO_ROOT) not in sys.path:
 
 from simsopt_jax.parity_tolerances import PARITY_LADDER_TOLERANCES
 from simsopt_jax.solve.endpoint_certificate import (
+    StatusConvention,
     certify_optimization_endpoint,
-    status_convention_for,
 )
 
 from benchmarks.boozer_trial_diagnostic import validate_boozer_trial_trace
-from benchmarks.fixtures.custom_quasi_newton import fixture_accepted_incumbent
 from benchmarks.process_gpu_monitor import parse_process_gpu_memory_artifact
 
 _LEGACY_SCHEMA_VERSION = 1
@@ -513,14 +514,46 @@ def _close(
     )
 
 
+# Persisted rows are self-describing through their solver_route; the
+# convention must be recomputable from receipt bytes alone so that later
+# fixture-registry policy changes can never invalidate authentic history.
+_CONVENTION_BY_ROUTE: Final[Mapping[str, StatusConvention]] = MappingProxyType(
+    {
+        "scipy_bfgs": "scipy-bfgs",
+        "scipy_lbfgsb": "scipy-lbfgsb",
+        "optax_lbfgs": "optax-lbfgs",
+        "stepwise": "private-lbfgsb",
+        "fused_stepwise": "private-lbfgsb",
+        "custom_bfgs_private": "private-bfgs",
+        "custom_bfgs_host_incumbent": "host-bfgs",
+    }
+)
+# Frozen transcription for rows persisted before the custom BFGS route
+# was split by emitter: every published "custom_bfgs_stepwise" row ran
+# the Boozer fixture's host core under accepted-incumbent continuation.
+_HISTORICAL_ROUTE_CONVENTIONS: Final[
+    Mapping[tuple[str, str], StatusConvention]
+] = MappingProxyType(
+    {
+        ("custom_bfgs_stepwise", "boozer"): "host-bfgs",
+    }
+)
+
+
+def _row_status_convention(row: dict[str, object]) -> StatusConvention:
+    route = str(row["solver_route"])
+    convention = _CONVENTION_BY_ROUTE.get(route)
+    if convention is None:
+        convention = _HISTORICAL_ROUTE_CONVENTIONS.get((route, str(row["case"])))
+    if convention is None:
+        raise ValueError(
+            f"no status convention is recorded for solver route {route!r} "
+            f"on case {row['case']!r}"
+        )
+    return convention
+
+
 def _recompute_endpoint_certificate(row: dict[str, object]) -> dict[str, object]:
-    provider = cast(Literal["native", "custom", "optax"], row["provider"])
-    method = cast(Literal["bfgs", "lbfgs"], row["method"])
-    accepted_incumbent = bool(
-        provider == "custom"
-        and method == "bfgs"
-        and fixture_accepted_incumbent(str(row["case"]))
-    )
     raw_constraint_norm = row.get("constraint_norm")
     constraint_norm = (
         None
@@ -528,11 +561,7 @@ def _recompute_endpoint_certificate(row: dict[str, object]) -> dict[str, object]
         else _nonnegative_number(raw_constraint_norm, field="constraint_norm")
     )
     certificate = certify_optimization_endpoint(
-        status_convention=status_convention_for(
-            provider,
-            method,
-            accepted_incumbent=accepted_incumbent,
-        ),
+        status_convention=_row_status_convention(row),
         provider_success=_required_bool(row, "success"),
         provider_status=_optional_int(row, "status"),
         iterations=_required_int(row, "iterations"),
@@ -689,15 +718,22 @@ def _validate_v7_measurement(
         raise ValueError(f"unsupported measurement device: {device!r}")
     if intent not in {"fast", "parity"}:
         raise ValueError(f"unsupported measurement intent: {intent!r}")
-    expected_route = {
-        ("native", "bfgs"): "scipy_bfgs",
-        ("native", "lbfgs"): "scipy_lbfgsb",
-        ("custom", "bfgs"): "custom_bfgs_stepwise",
-        ("optax", "lbfgs"): "optax_lbfgs",
-    }.get((provider, method))
+    route_table: dict[tuple[str, str], set[str]] = {
+        ("native", "bfgs"): {"scipy_bfgs"},
+        ("native", "lbfgs"): {"scipy_lbfgsb"},
+        # The emitter-split routes plus the pre-split historical name,
+        # whose emitter is pinned by _HISTORICAL_ROUTE_CONVENTIONS.
+        ("custom", "bfgs"): {
+            "custom_bfgs_host_incumbent",
+            "custom_bfgs_private",
+            "custom_bfgs_stepwise",
+        },
+        ("optax", "lbfgs"): {"optax_lbfgs"},
+    }
+    expected_routes = route_table.get((cast(str, provider), cast(str, method)), set())
     if provider == "custom" and method == "lbfgs":
-        expected_route = "fused_stepwise" if intent == "fast" else "stepwise"
-    if route != expected_route:
+        expected_routes = {"fused_stepwise" if intent == "fast" else "stepwise"}
+    if route not in expected_routes:
         raise ValueError(
             f"solver route {route!r} does not match provider/method "
             f"{provider!r}/{method!r}"
