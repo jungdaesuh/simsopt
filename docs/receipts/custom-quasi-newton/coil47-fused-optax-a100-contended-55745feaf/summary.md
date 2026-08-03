@@ -1,18 +1,18 @@
-# coil47-fused-optax-quiet-359fd41fc-r2
+# coil47-fused-optax-a100-contended-55745feaf
 
 Verdict: `pass`
 
 ## round-1
 - `optax`: success=True, status=0, iterations=15, final objective=0.137862632844302
-- `custom`: success=True, status=0, iterations=12, final objective=0.13786263284430206
+- `custom`: success=True, status=0, iterations=14, final objective=0.137862632844302
 
 ## round-2
-- `custom`: success=True, status=0, iterations=12, final objective=0.13786263284430206
-- `optax`: success=True, status=0, iterations=15, final objective=0.13786263284430206
+- `custom`: success=True, status=0, iterations=13, final objective=0.13786263284430203
+- `optax`: success=True, status=0, iterations=15, final objective=0.137862632844302
 
 ## round-3
-- `optax`: success=True, status=0, iterations=15, final objective=0.13786263284430203
-- `custom`: success=True, status=0, iterations=13, final objective=0.13786263284430203
+- `optax`: success=True, status=0, iterations=15, final objective=0.13786263284430206
+- `custom`: success=True, status=0, iterations=14, final objective=0.137862632844302
 
 ## round-4
 - `custom`: success=True, status=0, iterations=12, final objective=0.13786263284430206

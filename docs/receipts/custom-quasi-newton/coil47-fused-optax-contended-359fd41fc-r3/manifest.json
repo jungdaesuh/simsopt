@@ -1,14 +1,14 @@
 {
   "archive_bundle": {
-    "inventory_sha256": "0b6cdb8d97cff3e9b22c09b842c6bc4cf1fbcadb51299ffc80f1a689f4594983",
-    "receipt_id": "coil47-fused-optax-contended-359fd41fc-r2",
-    "storage_identity": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-contended-359fd41fc-r2"
+    "inventory_sha256": "71109e16a62c5e58e1fd06b254772b7fadaf32d6ba435977954884119e56ff8d",
+    "receipt_id": "coil47-fused-optax-contended-359fd41fc-r3",
+    "storage_identity": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-contended-359fd41fc-r3"
   },
-  "archive_uri": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-contended-359fd41fc-r2",
+  "archive_uri": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-contended-359fd41fc-r3",
   "artifacts": [
     {
       "path": "metrics.json",
-      "sha256": "4c00403f09b4109cd15ca90e7a6f46f7d9d86d480366793fd9b311af45af8264"
+      "sha256": "5afd4c5dbd3cc3bf166a3f3aa2e2b3474fa380c7502184093f6bfaaacfd730f8"
     },
     {
       "path": "raw/round-1/custom/gpu_memory.json",
@@ -136,7 +136,7 @@
     },
     {
       "path": "summary.md",
-      "sha256": "b3cdd5df689206ae6651f2a7ad9467c58f59fc5d49a19bc1f157819a526458a8"
+      "sha256": "fd2a688b9627b005559da0fc9f6ea67326b3ea76a00672b4dacee4bae75550f1"
     }
   ],
   "candidate_commit": "359fd41fc4535c6ae68f9a94f3e69c2315f1c2f4",
@@ -152,15 +152,23 @@
   "kind": "custom-quasi-newton-runner",
   "qualification": {
     "comparison_count": 5,
+    "custom_max_solver_rss_delta_kib": 604776.0,
+    "custom_max_vram_mib": 2058.0,
+    "custom_to_optax_rss_delta_ratio": 2.9271097516117166,
+    "custom_to_optax_vram_ratio": 1.0,
     "custom_to_optax_warm_ratio": 0.5453022015693105,
     "custom_warm_seconds_median": 0.014592758030630648,
     "failure_reasons": [],
+    "memory_ruling": "recorded-diagnostic-user-ratified-2026-08-03",
+    "minimum_samples_per_provider": 5,
+    "optax_max_solver_rss_delta_kib": 206612.0,
+    "optax_max_vram_mib": 2058.0,
     "optax_warm_seconds_median": 0.026760863955132663,
     "passed": true,
     "verdict": "pass"
   },
   "qualification_kind": "performance",
-  "receipt_id": "coil47-fused-optax-contended-359fd41fc-r2",
+  "receipt_id": "coil47-fused-optax-contended-359fd41fc-r3",
   "runner_schema_version": 9,
   "schema_version": 2,
   "source_runs": [

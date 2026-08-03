@@ -1,4 +1,4 @@
-# coil47-fused-optax-contended-359fd41fc-r2
+# coil47-fused-optax-contended-359fd41fc-r3
 
 Verdict: `pass`
 
