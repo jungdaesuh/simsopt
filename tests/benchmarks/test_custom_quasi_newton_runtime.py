@@ -25,6 +25,7 @@ from benchmarks.process_gpu_monitor import (
     ProcessGpuMemorySample,
     ProcessGpuMemoryUnavailable,
 )
+from simsopt_jax.solve.endpoint_certificate import StatusConvention, StoppingReason
 
 
 class _Child:
@@ -624,31 +625,44 @@ def test_monitor_failure_prevents_child_payload_promotion(
 
 
 @pytest.mark.parametrize(
-    ("iterations", "maxiter", "status", "success", "finite", "expected"),
+    (
+        "status_convention",
+        "iterations",
+        "max_iterations",
+        "provider_status",
+        "provider_success",
+        "finite",
+        "expected",
+    ),
     [
-        (4, 20, 0, True, True, "converged"),
-        (20, 20, 1, False, True, "iteration-limit"),
-        (3, 20, 2, False, True, "line-search-failed"),
-        (3, 20, 6, False, True, "nonfinite"),
-        (3, 20, 99, False, True, "callback-stopped"),
-        (3, 20, None, False, True, "failed"),
-        (3, 20, 1, False, False, "nonfinite"),
+        ("bfgs", 4, 20, 0, True, True, "converged"),
+        ("bfgs", 20, 20, 1, False, True, "iteration-limit"),
+        ("bfgs", 3, 20, 2, False, True, "line-search-failed"),
+        ("bfgs", 3, 20, 6, False, True, "nonfinite"),
+        ("bfgs", 3, 20, 99, False, True, "callback-stopped"),
+        ("bfgs", 3, 20, None, False, True, "failed"),
+        ("bfgs", 3, 20, 1, False, False, "nonfinite"),
+        ("host-lbfgsb", 3, 20, 2, False, True, "evaluation-limit"),
+        ("host-lbfgsb", 3, 20, 5, False, True, "line-search-failed"),
+        ("scipy-lbfgsb", 3, 20, 2, False, True, "line-search-failed"),
     ],
 )
 def test_stopping_reason_labels_terminal_state(
+    status_convention: StatusConvention,
     iterations: int,
-    maxiter: int,
-    status: int | None,
-    success: bool,
+    max_iterations: int,
+    provider_status: int | None,
+    provider_success: bool,
     finite: bool,
-    expected: str,
+    expected: StoppingReason,
 ) -> None:
     assert (
         runtime._stopping_reason(
+            provider_success=provider_success,
+            provider_status=provider_status,
+            status_convention=status_convention,
             iterations=iterations,
-            maxiter=maxiter,
-            status=status,
-            success=success,
+            max_iterations=max_iterations,
             finite=finite,
         )
         == expected

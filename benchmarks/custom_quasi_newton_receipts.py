@@ -27,7 +27,10 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from simsopt_jax.parity_tolerances import PARITY_LADDER_TOLERANCES
-from simsopt_jax.solve.endpoint_certificate import certify_optimization_endpoint
+from simsopt_jax.solve.endpoint_certificate import (
+    certify_optimization_endpoint,
+    status_convention_for,
+)
 
 from benchmarks.boozer_trial_diagnostic import validate_boozer_trial_trace
 from benchmarks.process_gpu_monitor import parse_process_gpu_memory_artifact
@@ -305,6 +308,8 @@ def _close(
 
 
 def _recompute_endpoint_certificate(row: dict[str, object]) -> dict[str, object]:
+    provider = cast(Literal["native", "custom", "optax"], row["provider"])
+    method = cast(Literal["bfgs", "lbfgs"], row["method"])
     raw_constraint_norm = row.get("constraint_norm")
     constraint_norm = (
         None
@@ -312,6 +317,7 @@ def _recompute_endpoint_certificate(row: dict[str, object]) -> dict[str, object]
         else _nonnegative_number(raw_constraint_norm, field="constraint_norm")
     )
     certificate = certify_optimization_endpoint(
+        status_convention=status_convention_for(provider, method),
         provider_success=_required_bool(row, "success"),
         provider_status=_optional_int(row, "status"),
         iterations=_required_int(row, "iterations"),
