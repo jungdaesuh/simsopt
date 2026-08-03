@@ -21,7 +21,7 @@ from simsopt_jax.geo.optimizer_host_lbfgs import (
 if TYPE_CHECKING:
     from benchmarks.fixtures.custom_quasi_newton import Fixture
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _DIAGNOSTIC_ROUTE = "host_more_thuente_objective_probe"
 _DEFAULT_PARAMETER_BYTE_CAP = 64 * 1024 * 1024
 _SHA256_HEX_LENGTH = 64
@@ -329,6 +329,7 @@ def run_boozer_host_diagnostic(
         records=tuple(records),
         parameters_by_sha256=parameters,
         parameter_byte_cap=parameter_byte_cap,
+        final_status=result.status,
     )
     validate_boozer_trial_trace(
         manifest_path,
@@ -338,6 +339,8 @@ def run_boozer_host_diagnostic(
         ),
         expected_maxiter=maxiter,
         expected_evaluations=result.nfev,
+        expected_final_parameters=final_parameters,
+        expected_final_status=result.status,
     )
     return BoozerHostDiagnosticResult(
         provider=provider,
@@ -379,6 +382,7 @@ def write_boozer_trial_trace(
     records: tuple[JoinedBoozerTrialRecord, ...],
     parameters_by_sha256: dict[str, np.ndarray],
     parameter_byte_cap: int = _DEFAULT_PARAMETER_BYTE_CAP,
+    final_status: int | None = None,
 ) -> Path:
     """Write one atomic manifest plus bounded JSONL/NPZ evidence pair."""
 
@@ -446,6 +450,7 @@ def write_boozer_trial_trace(
             "max_records": max_records,
             "record_count": len(records),
             "diagnostic_evaluations": len(records) - 1,
+            "final_status": final_status,
             "parameter_dtype": "<f8",
             "parameter_bytes": parameter_bytes,
             "parameter_byte_cap": parameter_byte_cap,
@@ -703,6 +708,10 @@ def validate_boozer_trial_trace(
     expected_production_route: str,
     expected_maxiter: int,
     expected_evaluations: int | None = None,
+    expected_final_parameters: np.ndarray | None = None,
+    expected_final_objective: float | None = None,
+    expected_final_gradient_inf_norm: float | None = None,
+    expected_final_status: int | None = None,
 ) -> BoozerTrialTraceSummary:
     """Validate all linked bytes and semantic bounds for one trial trace."""
 
@@ -727,6 +736,11 @@ def validate_boozer_trial_trace(
     diagnostic_evaluations = _required_int(payload, "diagnostic_evaluations")
     parameter_bytes = _required_int(payload, "parameter_bytes")
     parameter_byte_cap = _required_int(payload, "parameter_byte_cap")
+    final_status = payload.get("final_status")
+    if final_status is not None and (
+        not isinstance(final_status, int) or isinstance(final_status, bool)
+    ):
+        raise TypeError("trial trace final status must be an integer or null")
     if maxiter != expected_maxiter or maxls <= 0:
         raise ValueError("trial trace solver bounds differ from measurement")
     if max_records != 1 + maxiter * maxls + 1:
@@ -789,6 +803,29 @@ def validate_boozer_trial_trace(
         raise ValueError("trial phases do not bracket the optimization")
     if any(record.phase != "line_search" for record in records[1:-1]):
         raise ValueError("trial intermediate phases are not line-search evaluations")
+    if expected_final_parameters is not None:
+        final_parameters = np.ascontiguousarray(
+            expected_final_parameters, dtype=np.dtype("<f8")
+        ).reshape(-1)
+        if not np.all(np.isfinite(final_parameters)):
+            raise ValueError("final accepted trial parameters are not finite")
+        if parameter_sha256(final_parameters) != records[-1].key.parameter_sha256:
+            raise ValueError(
+                "final accepted trial parameters do not match measurement"
+            )
+    final_record = records[-1]
+    if (
+        expected_final_objective is not None
+        and final_record.objective.filtered_objective != expected_final_objective
+    ):
+        raise ValueError("final accepted trial objective does not match measurement")
+    if (
+        expected_final_gradient_inf_norm is not None
+        and final_record.objective.gradient_inf_norm != expected_final_gradient_inf_norm
+    ):
+        raise ValueError("final accepted trial gradient does not match measurement")
+    if expected_final_status is not None and final_status != expected_final_status:
+        raise ValueError("trial trace final status does not match measurement")
     return BoozerTrialTraceSummary(
         case="boozer",
         provider=cast(TrialProvider, expected_provider),

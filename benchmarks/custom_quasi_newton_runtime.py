@@ -58,8 +58,8 @@ from benchmarks.boozer_trial_diagnostic import (
     validate_boozer_trial_trace,
 )
 from benchmarks.fixtures.custom_quasi_newton import (
-    Fixture,
     AcceptedIncumbentInnerState,
+    Fixture,
     NativeValueAndGrad,
     ScientificEndpointEvidence,
     fixture,
@@ -75,7 +75,7 @@ from benchmarks.process_gpu_monitor import (
 Provider = Literal["native", "custom", "optax"]
 Method = Literal["bfgs", "lbfgs"]
 
-_RUNNER_SCHEMA_VERSION = 7
+_RUNNER_SCHEMA_VERSION = 8
 
 
 class _OptaxValueAndGrad(Protocol):
@@ -1639,11 +1639,46 @@ def _run_provider_child(
                 raise ValueError(
                     "Boozer trial trace row maxiter differs from the request"
                 )
+            measurement_evaluations = typed_measurement.get("evaluations")
+            if not isinstance(measurement_evaluations, int) or isinstance(
+                measurement_evaluations, bool
+            ):
+                raise TypeError("Boozer trial trace row omitted evaluations")
+            raw_final_parameters = typed_measurement.get("final_parameters")
+            if not isinstance(raw_final_parameters, list):
+                raise TypeError(
+                    "Boozer trial trace row omitted final parameters"
+                )
+            final_parameters = np.asarray(raw_final_parameters, dtype=np.float64)
+            measurement_final_objective = typed_measurement.get("final_objective")
+            if not isinstance(measurement_final_objective, (int, float)) or isinstance(
+                measurement_final_objective, bool
+            ):
+                raise TypeError("Boozer trial trace row omitted final objective")
+            measurement_final_gradient = typed_measurement.get(
+                "final_gradient_inf_norm"
+            )
+            if not isinstance(measurement_final_gradient, (int, float)) or isinstance(
+                measurement_final_gradient, bool
+            ):
+                raise TypeError(
+                    "Boozer trial trace row omitted final gradient norm"
+                )
+            measurement_status = typed_measurement.get("status")
+            if not isinstance(measurement_status, int) or isinstance(
+                measurement_status, bool
+            ):
+                raise TypeError("Boozer trial trace row omitted status")
             validate_boozer_trial_trace(
                 output / _BOOZER_TRIAL_TRACE_ARTIFACT_NAME,
                 expected_provider=provider,
                 expected_production_route=expected_production_route,
                 expected_maxiter=maxiter,
+                expected_evaluations=measurement_evaluations,
+                expected_final_parameters=final_parameters,
+                expected_final_objective=float(measurement_final_objective),
+                expected_final_gradient_inf_norm=float(measurement_final_gradient),
+                expected_final_status=measurement_status,
             )
         elif trial_trace is not None:
             raise ValueError("provider child emitted an unrequested trial trace")

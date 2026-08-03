@@ -101,6 +101,66 @@ def test_trial_trace_round_trip_binds_records_parameters_and_bounds(
     assert summary.parameter_bytes == 16
 
 
+def test_trial_trace_rejects_final_parameters_not_bound_to_production(
+    tmp_path: Path,
+) -> None:
+    records, parameters = _records(np.asarray([1.0, 2.0], dtype=np.float64))
+    manifest = write_boozer_trial_trace(
+        tmp_path / "trial.json",
+        provider="custom",
+        production_route="custom_bfgs_stepwise",
+        maxiter=1000,
+        maxls=20,
+        records=records,
+        parameters_by_sha256=parameters,
+    )
+
+    with pytest.raises(ValueError, match="final accepted trial parameters"):
+        validate_boozer_trial_trace(
+            manifest,
+            expected_provider="custom",
+            expected_production_route="custom_bfgs_stepwise",
+            expected_maxiter=1000,
+            expected_evaluations=2,
+            expected_final_parameters=np.asarray([9.0, 2.0], dtype=np.float64),
+        )
+
+
+def test_trial_trace_rejects_final_objective_and_status_mismatch(
+    tmp_path: Path,
+) -> None:
+    records, parameters = _records(np.asarray([1.0, 2.0], dtype=np.float64))
+    manifest = write_boozer_trial_trace(
+        tmp_path / "trial.json",
+        provider="custom",
+        production_route="custom_bfgs_stepwise",
+        maxiter=1000,
+        maxls=20,
+        records=records,
+        parameters_by_sha256=parameters,
+        final_status=0,
+    )
+
+    with pytest.raises(ValueError, match="final accepted trial objective"):
+        validate_boozer_trial_trace(
+            manifest,
+            expected_provider="custom",
+            expected_production_route="custom_bfgs_stepwise",
+            expected_maxiter=1000,
+            expected_evaluations=2,
+            expected_final_objective=2.0,
+        )
+    with pytest.raises(ValueError, match="final status"):
+        validate_boozer_trial_trace(
+            manifest,
+            expected_provider="custom",
+            expected_production_route="custom_bfgs_stepwise",
+            expected_maxiter=1000,
+            expected_evaluations=2,
+            expected_final_status=1,
+        )
+
+
 def test_trial_trace_rejects_empty_placeholder(tmp_path: Path) -> None:
     placeholder = tmp_path / "trial.json"
     placeholder.write_text("{}\n", encoding="utf-8")

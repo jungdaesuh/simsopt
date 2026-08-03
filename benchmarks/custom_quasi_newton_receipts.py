@@ -30,11 +30,13 @@ from simsopt_jax.parity_tolerances import PARITY_LADDER_TOLERANCES
 from simsopt_jax.solve.endpoint_certificate import certify_optimization_endpoint
 
 from benchmarks.boozer_trial_diagnostic import validate_boozer_trial_trace
+from benchmarks.process_gpu_monitor import parse_process_gpu_memory_artifact
 
 _LEGACY_SCHEMA_VERSION = 1
 _LEGACY_SCHEMA_VERSIONS = frozenset((1, 3, 5))
 _SCHEMA_VERSION = 2
-_RUNNER_SCHEMA_VERSION = 7
+_LEGACY_RUNNER_SCHEMA_VERSION = 7
+_RUNNER_SCHEMA_VERSION = 8
 _JSON_INDENT = 2
 
 QualificationKind = Literal["diagnostic", "scientific", "performance"]
@@ -435,6 +437,7 @@ def _validate_v7_measurement(
     row: dict[str, object],
     *,
     source_run: Path | None,
+    bind_artifacts: bool = True,
 ) -> None:
     case = row.get("case")
     provider = row.get("provider")
@@ -542,9 +545,11 @@ def _validate_v7_measurement(
     if not isinstance(diagnostic_artifacts, dict):
         raise TypeError("diagnostic_artifacts must be a JSON object")
     if set(diagnostic_artifacts) != {"memory_trace", "trial_trace"}:
-        raise ValueError("diagnostic artifact keys do not match schema v7")
+        raise ValueError("diagnostic artifact keys do not match schema v8")
     for name, relative in diagnostic_artifacts.items():
         if relative is None:
+            if name == "memory_trace" and bind_artifacts:
+                raise ValueError("GPU memory artifact reference is missing")
             continue
         if not isinstance(relative, str) or not relative:
             raise TypeError(f"diagnostic artifact {name!r} must be a path or null")
@@ -555,14 +560,64 @@ def _validate_v7_measurement(
             raise FileNotFoundError(
                 f"diagnostic artifact is missing: {source_run / relative_path}"
             )
-        if name == "trial_trace" and source_run is not None:
+        if name == "memory_trace" and source_run is not None and bind_artifacts:
+            memory_artifact = parse_process_gpu_memory_artifact(
+                source_run / relative_path
+            )
+            process_pid = _required_int(row, "process_pid")
+            if memory_artifact.provider_pid != process_pid:
+                raise ValueError(
+                    "GPU memory artifact provider PID differs from measurement"
+                )
+            identity = cast(dict[str, object], row["device_identity"])
+            if memory_artifact.gpu_uuid != identity.get("gpu_uuid"):
+                raise ValueError(
+                    "GPU memory artifact GPU UUID differs from measurement"
+                )
+            peak_vram = row.get("peak_vram_mib")
+            if peak_vram != memory_artifact.peak_used_memory_mib:
+                raise ValueError(
+                    "GPU memory artifact peak does not match peak_vram_mib"
+                )
+            if device == "gpu" and memory_artifact.availability != "available":
+                raise ValueError(
+                    "GPU measurement memory artifact is unavailable"
+                )
+            if device == "cpu" and memory_artifact.availability != "unavailable":
+                raise ValueError(
+                    "CPU measurement memory artifact is unexpectedly available"
+                )
+        if name == "trial_trace" and source_run is not None and bind_artifacts:
             if case != "boozer" or provider not in {"native", "custom"}:
                 raise ValueError("Boozer trial trace is attached to an invalid row")
+            if evaluations is None:
+                raise TypeError(
+                    "Boozer trial trace measurement evaluations must be an integer"
+                )
+            status = _optional_int(row, "status")
+            if status is None:
+                raise TypeError(
+                    "Boozer trial trace measurement status must be an integer"
+                )
             validate_boozer_trial_trace(
                 source_run / relative_path,
                 expected_provider=cast(str, provider),
                 expected_production_route=cast(str, route),
                 expected_maxiter=maxiter,
+                expected_evaluations=evaluations,
+                expected_final_parameters=_numeric_array(
+                    row.get("final_parameters"), field="final_parameters"
+                ),
+                expected_final_objective=float(
+                    _finite_number(row.get("final_objective"), field="final_objective")
+                ),
+                expected_final_gradient_inf_norm=float(
+                    _nonnegative_number(
+                        row.get("final_gradient_inf_norm"),
+                        field="final_gradient_inf_norm",
+                    )
+                ),
+                expected_final_status=status,
             )
 
 
@@ -941,14 +996,21 @@ def publish(
     runner_schema_version = next(iter(runner_schema_versions))
     receipt_schema_version = (
         _SCHEMA_VERSION
-        if runner_schema_version == _RUNNER_SCHEMA_VERSION
+        if runner_schema_version
+        in {_LEGACY_RUNNER_SCHEMA_VERSION, _RUNNER_SCHEMA_VERSION}
         else _LEGACY_SCHEMA_VERSION
     )
     if receipt_schema_version == _SCHEMA_VERSION:
         for run, payload in run_payloads:
             _validate_runner_child_provenance(run, payload)
             for row, artifact_root in _v7_rows_with_artifact_roots(run, payload):
-                _validate_v7_measurement(row, source_run=artifact_root)
+                _validate_v7_measurement(
+                    row,
+                    source_run=artifact_root,
+                    bind_artifacts=(
+                        _runner_schema_version(payload) == _RUNNER_SCHEMA_VERSION
+                    ),
+                )
         if qualification_kind == "scientific" and len(run_payloads) > 1:
             for _run, payload in run_payloads:
                 runtime_environment = cast(
@@ -1081,9 +1143,12 @@ def _validate_v2_semantics(
     metrics = _json_object(receipt / "metrics.json")
     if metrics.get("schema_version") != _SCHEMA_VERSION:
         raise ValueError(f"receipt metrics schema mismatch: {receipt}")
-    if manifest.get("runner_schema_version") != _RUNNER_SCHEMA_VERSION:
+    if manifest.get("runner_schema_version") not in {
+        _LEGACY_RUNNER_SCHEMA_VERSION,
+        _RUNNER_SCHEMA_VERSION,
+    }:
         raise ValueError(f"receipt runner schema mismatch: {receipt}")
-    if metrics.get("runner_schema_version") != _RUNNER_SCHEMA_VERSION:
+    if metrics.get("runner_schema_version") != manifest.get("runner_schema_version"):
         raise ValueError(f"metrics runner schema mismatch: {receipt}")
     if manifest.get("receipt_id") != receipt.name:
         raise ValueError(f"manifest receipt identity mismatch: {receipt}")
@@ -1103,7 +1168,11 @@ def _validate_v2_semantics(
         if source_path.is_absolute() or ".." in source_path.parts:
             raise ValueError(f"receipt source run escapes raw root: {source_run}")
         payload = _runner_payload(receipt / "raw" / source_run)
-        if _runner_schema_version(payload) != _RUNNER_SCHEMA_VERSION:
+        payload_runner_schema = _runner_schema_version(payload)
+        if payload_runner_schema not in {
+            _LEGACY_RUNNER_SCHEMA_VERSION,
+            _RUNNER_SCHEMA_VERSION,
+        }:
             raise ValueError(f"receipt contains a legacy promotion run: {receipt}")
         _validate_runner_child_provenance(receipt / "raw" / source_run, payload)
         source_payloads.append(payload)
@@ -1115,6 +1184,7 @@ def _validate_v2_semantics(
             _validate_v7_measurement(
                 row,
                 source_run=artifact_root,
+                bind_artifacts=payload_runner_schema == _RUNNER_SCHEMA_VERSION,
             )
         raw_rows.extend(source_rows)
     if metrics.get("measurements") != raw_rows:

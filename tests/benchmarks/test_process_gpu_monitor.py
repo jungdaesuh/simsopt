@@ -181,6 +181,33 @@ def test_cpu_measurement_is_explicitly_unavailable_and_never_queries_nvidia(
     )
 
 
+def test_gpu_memory_artifact_parser_recomputes_peak_and_rejects_tampering(
+    tmp_path,
+) -> None:
+    artifact_path = tmp_path / "gpu_memory.json"
+    artifact_path.write_text(
+        '{"availability":"available","gpu_uuid":"GPU-authenticated",'
+        '"peak_used_memory_mib":512,"provider_pid":123,"samples":['
+        '{"sampled_at_unix_ns":1,"used_memory_mib":256},'
+        '{"sampled_at_unix_ns":2,"used_memory_mib":512}],'
+        '"schema_version":1,"target_pid_observed":true,'
+        '"unavailable_reason":null}\n',
+        encoding="utf-8",
+    )
+
+    parsed = gpu_monitor.parse_process_gpu_memory_artifact(artifact_path)
+    assert parsed.peak_used_memory_mib == 512
+
+    artifact_path.write_text(
+        artifact_path.read_text(encoding="utf-8").replace(
+            '"peak_used_memory_mib":512', '"peak_used_memory_mib":513'
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="peak"):
+        gpu_monitor.parse_process_gpu_memory_artifact(artifact_path)
+
+
 @pytest.mark.parametrize(
     "output",
     (
