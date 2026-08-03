@@ -1,0 +1,35 @@
++ date -u -Is
+2026-08-03T18:46:45+00:00
++ hostname
+landau
++ sha256sum /mnt/homes_global/jdsuh/qn-receipt-archives-v3.tgz
+4e1f3434a284aab723fb8d61d8bfd77ee869e1d157f902c4f95c0107c0a3ea2d  /mnt/homes_global/jdsuh/qn-receipt-archives-v3.tgz
++ cd /mnt/homes_global/jdsuh/qn-offhost-replay/checkout
++ git fetch /mnt/homes_global/jdsuh/qn-delta5.bundle pr/jax-port-squashed:refs/heads/delta5
+From /mnt/homes_global/jdsuh/qn-delta5.bundle
+ * [new branch]      pr/jax-port-squashed -> delta5
++ git checkout --detach 44f127e61
+Previous HEAD position was bf1239c feat(bench): bind performance qualification to the full lane identity
+HEAD is now at 44f127e fix(bench): require canonical NVIDIA GPU UUIDs in receipt identity
++ git rev-parse HEAD
+44f127e61ce3362df37538af5aa825680a2ab910
++ git status --porcelain
++ wc -l
+0
++ JAX_PLATFORMS=cpu
++ PYTHONPATH=src:.
++ /mnt/homes_global/jdsuh/qn-offhost-replay/venv/bin/python -m benchmarks.custom_quasi_newton_receipts validate-all --root docs/receipts/custom-quasi-newton --repo-root . --archive-root /mnt/homes_global/jdsuh/qn-offhost-replay/qn-receipt-archives
+{"validated": 49, "root": "docs/receipts/custom-quasi-newton"}
++ echo validate_all_exit=0
+validate_all_exit=0
++ cd docs/receipts/custom-quasi-newton/rollback-rehearsal-fused-20260803/raw
++ sha256sum -c SHA256SUMS
+lever.patch: OK
+probe-stdout.log: OK
+parity-under-rollback.log: OK
+suites-under-rollback.log: OK
+measurements.json: OK
++ echo shacheck_exit=0
+shacheck_exit=0
++ date -u -Is
+2026-08-03T18:46:49+00:00
