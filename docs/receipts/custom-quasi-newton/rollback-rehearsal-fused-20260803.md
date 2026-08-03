@@ -1,65 +1,63 @@
-# Fused-route rollback rehearsal (2026-08-03, revised)
+# Fused-route rollback rehearsal (2026-08-03, evidence-bound revision)
 
-Rehearses the documented `fused_stepwise` rollback lever with
-EXECUTION-level evidence — distinct from `rollback-rehearsal-20260802.md`,
-which predates the fused route and covers the prepared-runtime commits
+Rehearses the documented `fused_stepwise` rollback lever with tracked
+execution bytes — distinct from `rollback-rehearsal-20260802.md`, which
+predates the fused route and covers the prepared-runtime commits
 (`3b2b9f40a`, `41d95cf50`, `fd200f564`) only.
 
-## Why this receipt was revised
+## Revision history (kept as the honest record)
 
-The first version of this rehearsal was INVALID and was caught by external
-review: before commit `2f23db25a`, preparation, execution, and the
-persisted row each re-derived the route from intent independently, so the
-one-line `_solver_route` lever only relabeled the measurement while the
-solver still ran fused — `103/2` test results proved a mislabeling, not a
-rollback. `2f23db25a` makes one route decision drive preparation
-(`_prepare_custom`), execution (`_run_custom`), the fast-lane transfer
-gate, and the persisted `solver_route`; this receipt records the rehearsal
-repeated against that commit with a behavioral discriminator.
+- The FIRST version of this rehearsal was INVALID and was caught by
+  external review: before the single-decision routing fix, preparation,
+  execution, the fast-lane transfer gate, and the persisted row each
+  re-derived the route from intent independently, so the one-line
+  `_solver_route` lever only relabeled the measurement while the solver
+  still ran fused. During development of the fix (`2f23db25a`) an
+  intermediate state existed in which the transfer gate still keyed on
+  intent: there, the same probe failed closed ("fused_stepwise advance
+  observations exceed the runner transfer gate") — the solver executed
+  stepwise but the runner refused to emit a measurement. That state was
+  folded into `2f23db25a` by amend and is not a reachable commit; it is
+  recorded here as prose history only.
+- The SECOND version proved behavioral rollback but carried its numbers
+  as prose only. This revision re-runs the rehearsal at `280624e80` and
+  commits the raw bytes.
 
 ## Setup
 
-Clean detached worktree at `2f23db25a` (`git worktree add --detach`,
-porcelain empty). A whole-commit `git revert 8fbf50918` (the fast-intent
-routing commit) no longer applies cleanly — the receipts module has since
-been rewritten around it — so the rehearsal exercises the lever exactly as
-the solver matrix documents it: drop the intent routing in
-`_solver_route`, i.e. replace
+Clean detached worktree at `280624e80` (`git worktree add --detach`).
+The rehearsal exercises the lever exactly as the solver matrix documents
+it: drop the intent routing in `_solver_route` — the exact applied diff
+is tracked at `rollback-rehearsal-fused-20260803/raw/lever.patch`.
 
-```python
-    return "fused_stepwise" if intent == "fast" else "stepwise"
-```
+## Tracked evidence (`rollback-rehearsal-fused-20260803/raw/`, hashes in `SHA256SUMS`)
 
-with `return "stepwise"` (one line, `benchmarks/custom_quasi_newton_runtime.py`).
-
-## Observed under rollback (CPU env, `.venv-qn-cpu`)
-
-- EXECUTION probe at the real benchmark entrypoint
-  (`benchmarks/custom_quasi_newton_runtime.py --device cpu --intent fast
-  --providers custom --cases coil47 --method lbfgs --maxiter 3`, backend
-  mode `jax_cpu_fast`): the emitted row records
-  `solver_route="stepwise"` AND
+- `measurements.json` — the emitted row from the REAL benchmark
+  entrypoint under rollback (`benchmarks/custom_quasi_newton_runtime.py
+  --device cpu --intent fast --providers custom --cases coil47
+  --method lbfgs --maxiter 3`, backend mode `jax_cpu_fast`; stdout in
+  `probe-stdout.log`): `solver_route="stepwise"` with
   `work_counters.advance_observations = 5` — per-advance host-boundary
-  packets audited by the transfer instrumentation, which a fused run
-  cannot produce (the fused invariant is zero advance observations, and
-  the runner's transfer gate — now keyed on the route, not the intent —
-  fails closed if a fused-labeled run observes them). The solver
-  demonstrably executed the stepwise driver.
-- Intermediate finding, preserved: at the pre-SSOT commit `6c6eb1962`
-  (gate still keyed on intent), the same probe FAILED CLOSED with
-  "fused_stepwise advance observations exceed the runner transfer gate" —
-  the run executed stepwise but the runner refused to emit a measurement.
-  Mislabeled evidence was impossible in either state; honest emission
-  requires the gate to follow the same route decision.
-- Parity oracle: `tests/jax/solve/test_lbfgsb_trajectory_parity.py`
-  **4 passed** under rollback.
-- Full runtime + fused-mode suites: **104 passed, 2 failed**, the
-  failures being exactly the two fused-contract pins that must revert
-  together with the lever —
-  `test_custom_lbfgs_route_and_prepared_program_follow_intent[fast-…]`
-  and `test_fast_custom_lbfgs_has_zero_advance_observations`. The fused
-  kernel tests stay green (the kernel remains buildable; only routing
-  reverts).
+  packets audited by the transfer instrumentation. A fused run cannot
+  produce this row: the fused driver performs no per-advance host
+  transfers, and the route-keyed transfer gate fails closed when a
+  fused-labeled run observes more than `iterations + 1` advance packets
+  (the small allowance covers the terminal payload fetch; the gate is
+  NOT zero-tolerance — see `custom_quasi_newton_runtime.py`, transfer
+  gate in `_measurement`). Five observations at three iterations
+  exceeds that allowance, so this row could only be emitted under the
+  stepwise route label the lever produced.
+- `parity-under-rollback.log` —
+  `tests/jax/solve/test_lbfgsb_trajectory_parity.py`: **4 passed**.
+- `suites-under-rollback.log` — runtime + fused-mode suites:
+  **104 passed, 2 failed**, the failures being exactly the two
+  fused-contract pins that must revert together with the lever
+  (`test_custom_lbfgs_route_and_prepared_program_follow_intent[fast-…]`,
+  `test_fast_custom_lbfgs_has_zero_advance_observations` — the latter
+  pins the fused lane's zero-advance INVARIANT at the work-counter
+  level, stricter than the gate's `iterations + 1` allowance). Fused
+  kernel tests stay green: the kernel remains buildable; only routing
+  reverts.
 
 ## Rollback caveats (part of the lever's contract)
 
