@@ -460,16 +460,27 @@ metrics, tampered derivations, and historical round trips.
          candidate SHA with the recorded environment lock.
 
 8. Complete rollout and API review.
-   - [ ] Inventory observable behavior changes and every caller of
+   - [x] Inventory observable behavior changes and every caller of
          `lbfgs_run_mode`, Boozer example finalization, runner schema, and
-         receipt schema.
-   - [ ] Document the new `fused_stepwise` option, its explicit fast callers,
-         parity preservation, migration path, cache behavior, and rollback.
-   - [ ] Update the solver matrix and provider plan only after gates pass.
-   - [ ] Record ordered implementation commits and rehearse rollback in a clean
-         worktree.
+         receipt schema — receipts
+         `public-routing-inventory.md` and
+         `boozer-compatibility-partitions-20260802.md`; runner/receipt
+         schema history in the closure block (schema 9 / trace v3 /
+         receipt v2).
+   - [x] Document the new `fused_stepwise` option, its explicit fast callers,
+         parity preservation, migration path, cache behavior, and rollback —
+         `docs/jax_solver_algorithm_matrix.md` plus the rollback receipt
+         `rollback-rehearsal-20260802.md`.
+   - [x] Update the solver matrix and provider plan only after gates pass —
+         reconciliation commit `a8134ebc8`.
+   - [x] Record ordered implementation commits and rehearse rollback in a clean
+         worktree — ordered `bb05ec58f..HEAD` series; detached-worktree
+         replays at three successive SHAs; rollback rehearsal receipt above.
    - [ ] Obtain independent architecture, numerical, runtime, and evidence
-         review with no unresolved finding.
+         review with no unresolved finding — IN PROGRESS: two external
+         adversarial verdicts (FAIL_ITERATE) received and worked
+         finding-by-finding (see the review-iteration addendum); closure
+         requires the pending delta review to return PASS.
 
 ## Validation Plan
 
@@ -596,9 +607,11 @@ metrics, tampered derivations, and historical round trips.
 
 ## Campaign closure status (2026-08-03)
 
-Thirty-one ordered commits (`bb05ec58f..HEAD`); candidate evidence SHA
-`359fd41fc`, lanes run from clean detached worktrees, receipts committed at
-`f2ed3d534`. Closed with receipts (all `validate-all` green, 47 receipts,
+Forty-three ordered commits (`bb05ec58f..HEAD`, including the two external
+review iterations recorded in the addendum below); candidate evidence SHA
+`359fd41fc`, lanes run from clean detached worktrees, receipts first
+committed at `f2ed3d534` and republished under the hardened validator at
+`cdf62708a`. Closed with receipts (all `validate-all` green, 47 receipts,
 including `--archive-root` against the complete mirror at
 `/home/jungdaesuh/qn-receipt-archives`):
 
@@ -612,12 +625,19 @@ including `--archive-root` against the complete mirror at
   3.56–3.77e-7 band containing native). Capped endpoints remain `failed`;
   the Scientific Certificate stays unachieved by both implementations per
   the author ruling above.
-- Phase 6/7 performance: `coil47-fused-optax-quiet-359fd41fc` (custom warm
-  median 13.14 ms vs Optax 23.79 ms, 0.55x) and
-  `coil47-fused-optax-contended-359fd41fc` (14.59 vs 26.76 ms, 0.55x) —
-  five retained AB/BA rounds each, GPU clocks/power telemetry CSVs beside
-  the artifacts, UUID-bound identity. The 2.0x gate is passed with margin;
-  custom is faster than Optax in both regimes.
+- Phase 6/7 performance: `coil47-fused-optax-quiet-359fd41fc-r2`
+  (receipt-attested `verdict: pass`, qualification ratio 0.5523 — custom
+  warm median 13.14 ms vs Optax 23.79 ms) and
+  `coil47-fused-optax-contended-359fd41fc-r2` (`verdict: pass`, ratio
+  0.5453 — 14.59 vs 26.76 ms) — five retained AB/BA rounds each with five
+  matched custom/Optax comparisons, the batch GPU clocks/power telemetry
+  CSV bundled and hashed inside each receipt, UUID-bound identity. The
+  2.0x gate passes by receipt-recomputed qualification (the initial
+  publications recorded `verdict: fail` with
+  `performance-qualification-not-implemented` because the validator had no
+  performance kind; those receipt dirs were retired at `cdf62708a` when
+  the implemented qualifier attested the pass). Custom is faster than
+  Optax in both regimes.
 - Phase 8: solver-matrix reconciliation after gates (`a8134ebc8`);
   independent adversarial review by the plan author (no P0s; all three P1s
   fixed: `e3e8d5fe9`, `b243a176e`, `03de61652`); ordered commits with
@@ -639,8 +659,10 @@ Deferred-items sweep (2026-08-03, second pass — commits `4127102e7`,
   once, fail-closed plateau verdict). Definitive clean-worktree 20-run RTX
   5090 soak: plateau on all axes — executable count 1 throughout, RSS drift
   20 KiB (slack 2048), VRAM flat at 968 MiB, warm median ratio 1.083
-  (limit 1.2). Artifact
-  `.artifacts/custom-quasi-newton/final-warm-soak-gpu-af4a7619f.json`.
+  (limit 1.2). Artifact tracked at
+  `docs/receipts/custom-quasi-newton/warm-soak-gpu-af4a7619f/` and
+  mirrored in the same-host archive (generated at
+  `.artifacts/custom-quasi-newton/final-warm-soak-gpu-af4a7619f.json`).
 - Exact-inner replay CLOSED — and it caught a real regression: the
   accepted-incumbent controller postdates the exact-inner receipt and its
   host boundary used implicit H2D transfers, crashing guarded runs
@@ -649,8 +671,16 @@ Deferred-items sweep (2026-08-03, second pass — commits `4127102e7`,
   RTX 5090 replays now complete with inner residuals at receipt scale
   (2.18e-29 / 6.60e-15 CPU; 2.28e-29 / 6.76e-15 GPU vs the receipt's
   1.98e-29 / 6.30e-15 and 2.52e-29 / 7.09e-15).
-- StableHLO pair CLOSED:
-  `.artifacts/custom-quasi-newton/final-compile-shape/{custom,optax}-gpu-fast.json`.
+- StableHLO pair CLOSED at
+  `docs/receipts/custom-quasi-newton/compile-shape-fused-v2-cd6b66368/`
+  (tracked, archive-mirrored): custom records
+  `solver_route=fused_stepwise`, `git_clean=true`, an available candidate
+  SHA, and exactly three compiled executables; Optax records
+  `optax_lbfgs` with two. The first pair
+  (`final-compile-shape/`, retired) was INVALID — the script did not
+  thread `--intent` into preparation and measured the stepwise route while
+  labeled fast; fixed in the review iteration (route-aware program
+  enumeration) and regenerated from a pristine worktree at `cd6b66368`.
 - Pyright/compileall CLOSED with adjudication: compileall green; the repo's
   scoped Pyright gate has 50 pre-existing errors, all in files this
   campaign never touched (the one touched gated file,
@@ -666,6 +696,48 @@ Still deferred: different-host archive replay (needs a second host;
 landau/A100 down — superseded by user directive 2026-08-02); optional
 line-search floor-acceptance fix for the stochastic GPU deaths
 (unauthorized).
+
+## External review iterations (2026-08-03 addendum)
+
+Two external adversarial Crucible verdicts (both FAIL_ITERATE) were worked
+finding-by-finding, each finding proven against the live repo before any
+edit. Fix commits, in order:
+
+- `0e686d682` — CRITICAL: the endpoint certificate trusted
+  `provider_success` before interpreting statuses; termination evidence is
+  now normalized per provider convention and contradictions fail closed.
+  The runtime's duplicate classifier was deleted (single owner).
+- `80bf41ea1` — compile-shape `--intent` threading; removal of the unused
+  fused result-payload compilation; warm-soak monitor `finish()` in
+  `finally`; RUF059 cleanups.
+- `72b63cdae` — example finalization consumes one evaluation anchored at
+  the accepted incumbent's inner state (baseline-owned finalization calls
+  removed), with structural tests proving anchor identity.
+- `cd6b66368` — route-aware compile-shape program enumeration (the fused
+  route was unmeasurable: preparation tripped the executable-reuse guard);
+  live regression locks fused preparation at exactly three executables.
+- `45f853a12` — dedicated `optax-lbfgs` status convention (Optax status 2
+  is a line-search failure, not an evaluation limit); cross-convention
+  contamination locked; anchored-forward structural expectations repaired.
+- `e861f9355` — receipt provenance authentication: baseline gradients must
+  bind to record 0's parameter hash; runner `git_commit` must be a
+  canonical 40-hex SHA resolving to a commit object at publish and
+  validate time; child `gpu_memory`/`trial_trace` artifacts bound by
+  containment and recomputed SHA-256; performance-kind qualification
+  implemented (matched pairs, route enforcement, warm-median ratio <= 2.0
+  gate); publication snapshots before validation.
+- `cdf62708a` — performance receipts republished with attested pass
+  verdicts (`-r2` IDs); telemetry bundled; compile-shape v2 and warm-soak
+  artifacts tracked and archive-mirrored.
+
+Reviewer sub-claims refuted with evidence (not re-fixed): the batch
+telemetry CSVs existed at
+`.artifacts/custom-quasi-newton/final-{359fd41fc,7b1372ad0}-gpu-telemetry.csv`
+(now also bundled inside the `-r2` receipts); 17 of the 18 failing tests in
+`tests/geo/test_surface_objectives_jax.py` fail identically at the commit
+that introduced them (other-workstream drift, proven in a detached
+worktree) — the eighteenth, the general-only structural test, was a real
+campaign regression and is fixed in `45f853a12`.
 
 ## Open Questions
 
