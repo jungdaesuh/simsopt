@@ -482,6 +482,36 @@ metrics, tampered derivations, and historical round trips.
          with the A100's stronger FP64 ratio, though no direct
          FLOP-utilization measurement was taken. Clock/power controls
          and kernel-level profiling remain unrun.
+         RESOLVED 2026-08-03 (user goal "make custom jax faster than
+         optax on a100"): the dispatch-cost hypothesis was CONFIRMED
+         and the inversion eliminated by two bitwise-identical kernel
+         commits — `cb613eff9` (masked triangular history-shift block
+         copies replacing four nested fori_loops in lbfgsb_matupd, plus
+         a vmapped curvature hoist in the two-loop direction; recovered
+         from the reverted U1 patch) and `63638856f` (unroll=True on
+         the three remaining static-bound hot-path loops; both kernels
+         now lower with zero stablehlo.while ops, leaving only the two
+         data-dependent driver whiles). Bitwise identity is enforced by
+         41 uint64 oracles in
+         tests/jax/solve/test_lbfgs_history_kernel_equivalence.py, and
+         endpoints reproduce the prior receipts' final_objective to the
+         recorded digits on both GPUs. Receipt-attested A100 medians at
+         `63638856f`: quiet `coil47-fused-optax-a100-63638856f` verdict
+         pass, ratio 0.3990 (custom 27.34 ms vs Optax 68.52 ms; was
+         1.1659 = 80.4/69.0 at 55745feaf); contended control
+         `coil47-fused-optax-a100-contended-63638856f` verdict pass,
+         ratio 0.4085 (29.09 vs 71.22 ms, 48-of-64 busy workers,
+         leak-proofed launcher bundled). The 55745feaf receipts remain
+         the pre-fix historical record. Isolated-lever attribution: a
+         cb613eff9-only probe measured ratio 0.4622 (custom 32.67 ms),
+         so the shift-loop elimination carries most of the win and the
+         unrolls the rest (~3 ms, matching the census's ~30 removed
+         while-predicate D2H syncs per iteration at ~7 us each).
+         Two stochastic custom line-search deaths (status 2, known GPU
+         noise-floor mortality, ~2/15 rows) forced full lane re-runs
+         before all-success sweeps landed; the failed attempts are
+         preserved under
+         .artifacts/custom-quasi-newton/failed-receipts-20260803/.
    - [ ] Bind every StableHLO and compile artifact to its provider, solver
          route, candidate SHA, and exact device UUID; require a complete
          custom/Optax artifact pair for each GPU.
@@ -920,6 +950,61 @@ archive-mirrored); 17 of the 18 failing tests in
 that introduced them (other-workstream drift, proven in a detached
 worktree) — the eighteenth, the general-only structural test, was a real
 campaign regression and is fixed in `45f853a12`.
+
+## 2026-08-03 A100 speed campaign (post-closure, user-directed)
+
+After the strict-PASS closure at `d6b0c147c`, the user set the goal
+"make custom jax faster than optax on a100 while maintaining parity
+with cpp/native" and authorized the previously user-gated batched
+kernel option. Outcome (receipt-attested, both verdicts pass):
+
+- `cb613eff9` — U1 bitwise history-kernel batching re-applied (the
+  reverted working-tree patch was recovered byte-exact from the
+  implementing Codex session transcript): lbfgsb_matupd's four nested
+  history-shift fori_loops became masked triangular block copies, and
+  the two-loop direction's per-step curvature reductions became one
+  vmapped pass. 41 uint64 bitwise oracles committed in
+  tests/jax/solve/test_lbfgs_history_kernel_equivalence.py.
+- `63638856f` — unroll=True on the three remaining static-bound
+  hot-path loops (two-loop scans, matupd update-row fori). Both hot
+  kernels lower with zero stablehlo.while ops; the fused solve keeps
+  only its two data-dependent driver whiles. A census of all 21 lax
+  loop sites confirmed rows outside these three are either statically
+  elided for unconstrained coil47 or irreducible.
+- Mechanism, quantified: the A100 slowdown was while-predicate D2H
+  sync tax on landau's host (~10 us per predicate evaluation). The
+  shift loops alone cost ~48 ms of the pre-fix 80.4 ms warm solve;
+  the unrolls removed a further ~3 ms (~30 syncs/iteration), matching
+  the census prediction. The 5090 never showed the inversion because
+  its host dispatches syncs an order of magnitude faster.
+- Receipts at `63638856f`: `coil47-fused-optax-a100-63638856f`
+  (quiet, ratio 0.3990, custom 27.34 ms vs Optax 68.52 ms) and
+  `coil47-fused-optax-a100-contended-63638856f` (48-of-64 contention,
+  ratio 0.4085, 29.09 vs 71.22 ms). validate-all: 51 receipts green
+  including --archive-root. The pre-fix 55745feaf receipts (1.1659
+  quiet / 1.1316 contended) remain the historical record.
+- Parity: unchanged by construction — the kernels are proven
+  bit-identical (oracles), the trajectory/fused-SciPy/endpoint suites
+  are green at `63638856f`, and both providers reproduce
+  final_objective 0.137862632844302xx to the recorded digits on both
+  GPUs. The cpp/native Boozer parity receipts are untouched by this
+  campaign.
+- 5090 status: probes at `63638856f` show no regression (ratio
+  0.35-0.43 under uncontrolled host contention; calm-round custom
+  12.4-16.4 ms against the 13.14 ms quiet baseline). Receipt-grade
+  quiet/contended 5090 republication at `63638856f` is DEFERRED until
+  the workstation is free of the concurrent campaign load; the
+  359fd41fc -r4 receipts remain the current 5090 attestation for
+  their SHA.
+- Lane hygiene incidents, disclosed: two stochastic custom
+  line-search deaths (status 2) forced full sweep re-runs (failed
+  publication attempt preserved under
+  .artifacts/custom-quasi-newton/failed-receipts-20260803/); one
+  contended sweep leaked its 48 CPU burners past its cleanup trap and
+  contaminated a subsequent "quiet" sweep (both contaminated sweeps
+  retained on landau under contaminated-* names, never published);
+  the final lanes bundle the leak-proofed launcher and record load
+  averages before/after each sweep.
 
 ## Open Questions
 
