@@ -455,9 +455,11 @@ metrics, tampered derivations, and historical round trips.
          verified without rewriting receipt manifests. Map by receipt ID,
          verify bundle inventory hash/storage identity, and reject incomplete
          remaps.
-   - [ ] Copy the authority bundle to a different host or durable store, mount
+   - [x] Copy the authority bundle to a different host or durable store, mount
          it read-only, and replay from a detached checkout at the recorded
-         candidate SHA with the recorded environment lock.
+         candidate SHA with the recorded environment lock — CLOSED
+         2026-08-03 on `landau` (A100 host): 47/47 receipts green; receipt
+         `offhost-replay-landau-20260803.md`.
 
 8. Complete rollout and API review.
    - [x] Inventory observable behavior changes and every caller of
@@ -603,7 +605,10 @@ metrics, tampered derivations, and historical round trips.
 - [ ] No tolerance is weakened and no CPU fallback occurs in strict GPU lanes.
 - [ ] RED -> GREEN -> REFACTOR receipts, focused/broad tests, type/style checks,
       clean replay, rollback, semantic validation, and independent review pass.
-- [ ] Authority artifacts validate from a durable off-host copy.
+- [x] Authority artifacts validate from a durable off-host copy
+      (`offhost-replay-landau-20260803.md`: landau/A100, detached pristine
+      checkout at `487d9ff89`, lock-pinned stack, write-protected archive,
+      47/47 green).
 
 ## Campaign closure status (2026-08-03)
 
@@ -692,10 +697,11 @@ Deferred-items sweep (2026-08-03, second pass — commits `4127102e7`,
 - Detached-checkout archive replay CLOSED (validate-all --archive-root over
   the complete 47-receipt mirror).
 
-Still deferred: different-host archive replay (needs a second host;
-landau/A100 down — superseded by user directive 2026-08-02); optional
-line-search floor-acceptance fix for the stochastic GPU deaths
-(unauthorized).
+Different-host archive replay CLOSED 2026-08-03: landau returned to
+service (user-confirmed) and the full authority bundle replayed green
+there — see `offhost-replay-landau-20260803.md` and the ticked Phase-7
+box above. Still deferred: optional line-search floor-acceptance fix for
+the stochastic GPU deaths (unauthorized).
 
 ## External review iterations (2026-08-03 addendum)
 
