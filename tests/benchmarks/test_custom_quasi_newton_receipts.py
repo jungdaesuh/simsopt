@@ -635,13 +635,13 @@ def test_publish_performance_rejects_optax_pairing_across_source_runs(
     expected_qualification = {
         "passed": False,
         "failure_reasons": [
-            "custom-sample-count-below-5",
-            "optax-sample-count-below-5",
+            "custom-sample-count-must-be-5",
+            "optax-sample-count-must-be-5",
             "performance-0:coil47:optax-count",
             "performance-1:coil47:custom-count",
         ],
         "comparison_count": 0,
-        "minimum_samples_per_provider": 5,
+        "required_samples_per_provider": 5,
         "custom_warm_seconds_median": 0.055,
         "optax_warm_seconds_median": 0.1,
         "memory_ruling": "recorded-diagnostic-user-ratified-2026-08-03",
@@ -682,9 +682,9 @@ def test_publish_performance_rejects_warm_ratio_above_two(
     qualification = _json_object(destination / "manifest.json")["qualification"]
     assert qualification["passed"] is False
     assert qualification["failure_reasons"] == [
-        "custom-sample-count-below-5",
+        "custom-sample-count-must-be-5",
         "custom-to-optax-warm-ratio-exceeds-2.0",
-        "optax-sample-count-below-5",
+        "optax-sample-count-must-be-5",
     ]
     assert qualification["comparison_count"] == 1
     assert qualification["custom_warm_seconds_median"] == 0.25
@@ -1321,7 +1321,7 @@ def test_performance_qualification_records_memory_diagnostics_on_pass(
     )
     assert qualification["passed"] is True
     assert qualification["verdict"] == "pass"
-    assert qualification["minimum_samples_per_provider"] == 5
+    assert qualification["required_samples_per_provider"] == 5
     assert (
         qualification["memory_ruling"] == "recorded-diagnostic-user-ratified-2026-08-03"
     )
@@ -1361,3 +1361,101 @@ def test_performance_qualification_rejects_cross_device_pairs(
         list[str], qualification["failure_reasons"]
     )
     assert _json_object(destination / "manifest.json")["verdict"] == "fail"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_reason"),
+    (
+        (
+            {"gpu_model": "NVIDIA GeForce RTX 4090"},
+            "performance-0:coil47:gpu-model-must-be-rtx5090-or-a100",
+        ),
+        ({"device": "cpu"}, "performance-0:coil47:device-must-be-gpu"),
+    ),
+)
+def test_performance_qualification_rejects_wrong_lane_identity(
+    tmp_path: Path,
+    mutation: dict[str, object],
+    expected_reason: str,
+) -> None:
+    runs = _performance_v7_runs(
+        tmp_path,
+        warm_pairs=tuple((0.055, 0.1) for _ in range(5)),
+    )
+    source_run_rows: list[tuple[str, list[dict[str, object]]]] = []
+    for index, run in enumerate(runs):
+        payload = _json_object(run / "measurements.json")
+        rows = cast(list[dict[str, object]], payload["measurements"])
+        for row in rows:
+            if "gpu_model" in mutation:
+                identity = dict(cast(dict[str, object], row["device_identity"]))
+                identity["gpu_model"] = mutation["gpu_model"]
+                identity["device_kind"] = mutation["gpu_model"]
+                row["device_identity"] = identity
+            if "device" in mutation:
+                row["device"] = mutation["device"]
+        source_run_rows.append((f"performance-{index}", rows))
+
+    qualification = receipt_module._performance_qualification(source_run_rows)
+    assert qualification["passed"] is False
+    assert expected_reason in cast(list[str], qualification["failure_reasons"])
+
+
+def test_performance_qualification_rejects_six_retained_pairs(
+    tmp_path: Path,
+) -> None:
+    runs = _performance_v7_runs(
+        tmp_path,
+        warm_pairs=tuple((0.055, 0.1) for _ in range(6)),
+    )
+    qualification = receipt_module._performance_qualification(
+        [
+            (
+                f"performance-{index}",
+                cast(
+                    list[dict[str, object]],
+                    _json_object(run / "measurements.json")["measurements"],
+                ),
+            )
+            for index, run in enumerate(runs)
+        ]
+    )
+    assert qualification["passed"] is False
+    assert "custom-sample-count-must-be-5" in cast(
+        list[str], qualification["failure_reasons"]
+    )
+
+
+def test_performance_qualification_rejects_cross_round_uuid_drift(
+    tmp_path: Path,
+) -> None:
+    """All retained rounds must bind one reserved GPU allocation."""
+
+    runs = _performance_v7_runs(
+        tmp_path,
+        warm_pairs=tuple((0.055, 0.1) for _ in range(5)),
+    )
+    payload = _json_object(runs[4] / "measurements.json")
+    rows = cast(list[dict[str, object]], payload["measurements"])
+    for row in rows:
+        identity = dict(cast(dict[str, object], row["device_identity"]))
+        identity["gpu_uuid"] = "GPU-second-allocation"
+        row["device_identity"] = identity
+    _write_json(runs[4] / "measurements.json", payload)
+
+    qualification = receipt_module._performance_qualification(
+        [
+            (
+                f"performance-{index}",
+                cast(
+                    list[dict[str, object]],
+                    _json_object(run / "measurements.json")["measurements"],
+                ),
+            )
+            for index, run in enumerate(runs)
+        ]
+    )
+    assert qualification["passed"] is False
+    assert "receipt-gpu-uuid-must-be-unique" in cast(
+        list[str], qualification["failure_reasons"]
+    )

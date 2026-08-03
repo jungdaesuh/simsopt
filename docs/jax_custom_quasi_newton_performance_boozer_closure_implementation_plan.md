@@ -461,7 +461,8 @@ metrics, tampered derivations, and historical round trips.
          must use the same UUID and the expected RTX 5090 or A100 model.
    - [x] Repeat the matched `coil47` fast comparison on RTX 5090 and A100 with
          FP64 and no CPU fallback — CLOSED 2026-08-03 after landau returned:
-         receipt `coil47-fused-optax-a100-55745feaf` (verdict pass, ratio
+         receipt `coil47-fused-optax-a100-55745feaf-r3` (current revision;
+         verdict pass, ratio
          1.1659, five AB/BA rounds, A100-PCIE-40GB identity-bound, all
          endpoints converged in FP64). Measured facts: custom fused is
          0.55x Optax on the RTX 5090 but 1.17x on the A100 (both inside
@@ -493,7 +494,8 @@ metrics, tampered derivations, and historical round trips.
    - [x] Copy the authority bundle to a different host or durable store, mount
          it read-only, and replay from a detached checkout at the recorded
          candidate SHA with the recorded environment lock — CLOSED
-         2026-08-03 on `landau` (A100 host): 47/47 receipts green; receipt
+         2026-08-03 on `landau` (A100 host): 47/47 at the first replay and
+         49/49 at the same-day second replay; receipt
          `offhost-replay-landau-20260803.md`. Precisely: the VALIDATOR
          checkout was `487d9ff89` (then-HEAD, containing every
          receipt-recorded candidate commit object for authentication);
@@ -660,7 +662,8 @@ metrics, tampered derivations, and historical round trips.
 - [x] Authority artifacts validate from a durable off-host copy
       (`offhost-replay-landau-20260803.md`: landau/A100, detached pristine
       checkout at `487d9ff89`, lock-pinned stack, write-protected archive,
-      47/47 green).
+      47/47 at the first replay; 49/49 at the second covering the
+      current corpus).
 
 ## Campaign closure status (2026-08-03)
 
@@ -685,10 +688,10 @@ at first closure, 48 since the A100 comparison receipt landed at
   3.56–3.77e-7 band containing native). Capped endpoints remain `failed`;
   the Scientific Certificate stays unachieved by both implementations per
   the author ruling above.
-- Phase 6/7 performance: `coil47-fused-optax-quiet-359fd41fc-r2`
+- Phase 6/7 performance: `coil47-fused-optax-quiet-359fd41fc-r4` (current revision)
   (receipt-attested `verdict: pass`, qualification ratio 0.5523 — custom
   warm median 13.14 ms vs Optax 23.79 ms) and
-  `coil47-fused-optax-contended-359fd41fc-r2` (`verdict: pass`, ratio
+  `coil47-fused-optax-contended-359fd41fc-r4` (`verdict: pass`, ratio
   0.5453 — 14.59 vs 26.76 ms) — five retained AB/BA rounds each with five
   matched custom/Optax comparisons, the batch GPU clocks/power telemetry
   CSV bundled and hashed inside each receipt, UUID-bound identity. The
@@ -750,7 +753,8 @@ Deferred-items sweep (2026-08-03, second pass — commits `4127102e7`,
   dot-directories — a baseline run against a worktree under `.artifacts/`
   analyzes nothing and reports a vacuous 0.
 - Detached-checkout archive replay CLOSED (validate-all --archive-root over
-  the complete 47-receipt mirror).
+  the mirror — 47 receipts at that time; the corpus is 49 receipts
+  and revalidated since).
 
 Different-host archive replay CLOSED 2026-08-03: landau returned to
 service (user-confirmed) and the full authority bundle replayed green
@@ -809,7 +813,8 @@ three P1s, fixed in the next commit batch:
   (SciPy BFGS, private BFGS, private L-BFGS-B, host BFGS) into each
   reachable failure path — the private BFGS nonfinite backstop is
   unreachable through the hardened line search and is locked as the
-  documented sentinel behavior instead. All 47 receipts revalidate
+  documented sentinel behavior instead. All 47 then-committed receipts
+  (49 in the current corpus) revalidate
   unchanged under the emitter-true tables.
 - Receipt source-run aliasing closed: `validate-all` now requires each
   source-run name to be one canonical filesystem component, so
@@ -883,7 +888,8 @@ Sixth external pass (full verdict at 76f8fdf23) and seventh (delta at
   dated ruling above. All four performance receipts republished with
   the diagnostics visible (RSS 2.93-4.69x, VRAM up to 2.14x).
 - The A100 host-contention control became its own claim-bound receipt
-  (`coil47-fused-optax-a100-contended-55745feaf`) with the CPU-burner
+  (`coil47-fused-optax-a100-contended-55745feaf-r2`, current revision)
+  with the CPU-burner
   launcher and sweep log bundled and hashed.
 - The rollback rehearsal was re-run at `280624e80` with every
   execution byte tracked and hashed under

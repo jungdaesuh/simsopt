@@ -1,14 +1,14 @@
 {
   "archive_bundle": {
-    "inventory_sha256": "2bd3cc7db393dafdc52f8ed5bc2ce770d7cc16999111e3073cdc4d59320c5491",
-    "receipt_id": "coil47-fused-optax-a100-55745feaf-r2",
-    "storage_identity": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-a100-55745feaf-r2"
+    "inventory_sha256": "eff55cb8435b0a5233d5a93b7495592d9df1317c5f95c2d6a92cfe2268b1b5b7",
+    "receipt_id": "coil47-fused-optax-a100-55745feaf-r3",
+    "storage_identity": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-a100-55745feaf-r3"
   },
-  "archive_uri": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-a100-55745feaf-r2",
+  "archive_uri": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-a100-55745feaf-r3",
   "artifacts": [
     {
       "path": "metrics.json",
-      "sha256": "ae992744d1b6966d017c81fbafd345614558dbc326f0fead707186c4bdc5ea85"
+      "sha256": "e1543ac26176890eae57d1a7cbe12d6d260d071b93eb443b2816fc7b4098a4e1"
     },
     {
       "path": "raw/round-1/custom/gpu_memory.json",
@@ -132,7 +132,7 @@
     },
     {
       "path": "summary.md",
-      "sha256": "a6889b36f9234c00ef6da240cb223737a817f5c4c8b31cb498043b07c37e9385"
+      "sha256": "eed68ad7a8ef82aab8b575a5c8628f94f06794cb6110e9fb506706e49fa3274e"
     }
   ],
   "candidate_commit": "55745feaf939bb5b0c40fa85493e72ec506ac41a",
@@ -156,15 +156,15 @@
     "custom_warm_seconds_median": 0.08040603400058899,
     "failure_reasons": [],
     "memory_ruling": "recorded-diagnostic-user-ratified-2026-08-03",
-    "minimum_samples_per_provider": 5,
     "optax_max_solver_rss_delta_kib": 195260.0,
     "optax_max_vram_mib": 742.0,
     "optax_warm_seconds_median": 0.06896421999954327,
     "passed": true,
+    "required_samples_per_provider": 5,
     "verdict": "pass"
   },
   "qualification_kind": "performance",
-  "receipt_id": "coil47-fused-optax-a100-55745feaf-r2",
+  "receipt_id": "coil47-fused-optax-a100-55745feaf-r3",
   "runner_schema_version": 9,
   "schema_version": 2,
   "source_runs": [

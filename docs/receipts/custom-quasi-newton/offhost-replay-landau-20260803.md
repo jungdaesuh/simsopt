@@ -8,11 +8,16 @@ repeated: fresh archive tarball
 and re-write-protected (`chmod -R a-w`; the prior 47-receipt copy kept
 at `qn-receipt-archives-47`), checkout fast-forwarded via delta bundle
 and detached PRISTINE at `89a0a823c` — result:
-`{"validated": 49, ...}` covering every current receipt, including the
-republished performance receipts with recorded memory diagnostics, the
-A100 quiet and contended receipts, and the rollback-rehearsal evidence
-tree. The first replay below is retained as the historical record of
-the 47-receipt corpus.
+`{"validated": 49, ...}`. Scope, precisely: `validate-all` discovers
+and validates the 49 manifest-bearing receipt bundles (including the
+republished performance receipts with recorded memory diagnostics and
+the A100 quiet and contended receipts). The rollback-rehearsal
+evidence tree carries no `manifest.json` and is therefore NOT part of
+the validate-all count; its integrity is checked separately with
+`sha256sum -c SHA256SUMS` inside
+`rollback-rehearsal-fused-20260803/raw/` (see the third replay below).
+The first replay below is retained as the historical record of the
+47-receipt corpus.
 
 Different-host replay of the complete custom-quasi-newton receipt authority
 bundle, per the closure plan's Phase-7 off-host gate.
