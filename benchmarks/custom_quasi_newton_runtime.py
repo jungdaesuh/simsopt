@@ -49,7 +49,9 @@ from simsopt_jax.geo.optimizers.private._lbfgs import _minimize_lbfgs_private
 from simsopt_jax.runtime.host_boundary import host_transfer_audit
 from simsopt_jax.solve.endpoint_certificate import (
     OptimizationEndpointCertificate,
+    _stopping_reason,
     certify_optimization_endpoint,
+    status_convention_for,
 )
 
 from benchmarks.boozer_trial_diagnostic import (
@@ -1174,31 +1176,6 @@ def _prepare_optax(
     )
 
 
-def _stopping_reason(
-    *,
-    iterations: int,
-    maxiter: int,
-    status: int | None,
-    success: bool,
-    finite: bool,
-) -> str:
-    """Classify the terminal state without masking a nonfinite endpoint."""
-
-    if not finite:
-        return "nonfinite"
-    if success:
-        return "converged"
-    if status == 99:
-        return "callback-stopped"
-    if status == 6:
-        return "nonfinite"
-    if status == 2:
-        return "line-search-failed"
-    if iterations >= maxiter:
-        return "iteration-limit"
-    return "failed"
-
-
 def _measurement(
     fixture_case: Fixture,
     provider: Provider,
@@ -1375,11 +1352,13 @@ def _measurement(
         and np.isfinite(final_gradient_inf_norm)
         and np.all(np.isfinite(final_parameters))
     )
+    status_convention = status_convention_for(provider, method)
     stopping_reason = _stopping_reason(
+        provider_success=success,
+        provider_status=status,
+        status_convention=status_convention,
         iterations=iteration_count,
-        maxiter=maxiter,
-        status=status,
-        success=success,
+        max_iterations=maxiter,
         finite=finite_endpoint,
     )
     scientific_certification_started = time.perf_counter()
@@ -1410,6 +1389,7 @@ def _measurement(
     endpoint_certificate = certify_optimization_endpoint(
         provider_success=success,
         provider_status=status,
+        status_convention=status_convention,
         iterations=iteration_count,
         max_iterations=maxiter,
         initial_gradient_inf_norm=float(np.max(np.abs(initial_gradient))),
