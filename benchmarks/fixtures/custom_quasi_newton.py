@@ -201,6 +201,7 @@ class Fixture:
 class FixtureDefinition:
     builder: Callable[[], Fixture]
     method: Literal["bfgs", "lbfgs"]
+    accepted_incumbent: bool = False
 
 
 def quadratic47() -> Fixture:
@@ -770,7 +771,7 @@ def bfgs_quadratic() -> Fixture:
 
 _FIXTURE_DEFINITIONS: dict[str, FixtureDefinition] = {
     "coil47": FixtureDefinition(coil47_physics, "lbfgs"),
-    "boozer": FixtureDefinition(boozer_physics, "bfgs"),
+    "boozer": FixtureDefinition(boozer_physics, "bfgs", accepted_incumbent=True),
     "bfgs_quadratic": FixtureDefinition(bfgs_quadratic, "bfgs"),
     "rosenbrock": FixtureDefinition(rosenbrock, "lbfgs"),
 }
@@ -785,6 +786,15 @@ def fixture_method(name: str) -> Literal["bfgs", "lbfgs"]:
         raise ValueError(f"unknown custom quasi-Newton fixture: {name}") from exc
 
 
+def fixture_accepted_incumbent(name: str) -> bool:
+    """Report whether the custom BFGS lane runs accepted-incumbent continuation."""
+
+    try:
+        return _FIXTURE_DEFINITIONS[name].accepted_incumbent
+    except KeyError as exc:
+        raise ValueError(f"unknown custom quasi-Newton fixture: {name}") from exc
+
+
 def fixture(name: str) -> Fixture:
     """Resolve a named deterministic fixture without dynamic imports."""
 
@@ -795,4 +805,11 @@ def fixture(name: str) -> Fixture:
     fixture_case = definition.builder()
     if fixture_case.method != definition.method:
         raise RuntimeError(f"fixture method metadata drifted for {name!r}")
+    incumbent_available = (
+        fixture_case.accepted_incumbent_host_value_and_grad is not None
+    )
+    if incumbent_available != definition.accepted_incumbent:
+        raise RuntimeError(
+            f"fixture accepted-incumbent metadata drifted for {name!r}"
+        )
     return fixture_case

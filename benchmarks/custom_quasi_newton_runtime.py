@@ -1352,7 +1352,15 @@ def _measurement(
         and np.isfinite(final_gradient_inf_norm)
         and np.all(np.isfinite(final_parameters))
     )
-    status_convention = status_convention_for(provider, method)
+    status_convention = status_convention_for(
+        provider,
+        method,
+        accepted_incumbent=bool(
+            provider == "custom"
+            and method == "bfgs"
+            and fixture_case.accepted_incumbent_host_value_and_grad is not None
+        ),
+    )
     stopping_reason = _stopping_reason(
         provider_success=success,
         provider_status=status,

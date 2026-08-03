@@ -33,7 +33,6 @@ from simsopt_jax.geo.optimizer_host_lbfgs import (
 from simsopt_jax.solve.driver import Driver
 from simsopt_jax.solve.endpoint_certificate import (
     certify_optimization_endpoint,
-    status_convention_for,
 )
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
@@ -261,9 +260,12 @@ def solve(
         and np.isfinite(boozer_residual)
     )
     endpoint_certificate = certify_optimization_endpoint(
-        status_convention=status_convention_for(
-            "custom",
-            "lbfgs" if driver == Driver.SIMSOPT_LBFGSB else "bfgs",
+        # The example's outer drivers are the HOST cores
+        # (minimize_lbfgs_host_core / minimize_bfgs_host_core), whose
+        # status vocabularies differ from the benchmark runner's private
+        # on-device lanes, so the emitter convention is named directly.
+        status_convention=(
+            "host-lbfgsb" if driver == Driver.SIMSOPT_LBFGSB else "host-bfgs"
         ),
         provider_success=bool(optimizer_result.converged),
         provider_status=int(optimizer_result.status),

@@ -35,6 +35,7 @@ from simsopt_jax.solve.endpoint_certificate import (
 )
 
 from benchmarks.boozer_trial_diagnostic import validate_boozer_trial_trace
+from benchmarks.fixtures.custom_quasi_newton import fixture_accepted_incumbent
 from benchmarks.process_gpu_monitor import parse_process_gpu_memory_artifact
 
 _LEGACY_SCHEMA_VERSION = 1
@@ -515,6 +516,11 @@ def _close(
 def _recompute_endpoint_certificate(row: dict[str, object]) -> dict[str, object]:
     provider = cast(Literal["native", "custom", "optax"], row["provider"])
     method = cast(Literal["bfgs", "lbfgs"], row["method"])
+    accepted_incumbent = bool(
+        provider == "custom"
+        and method == "bfgs"
+        and fixture_accepted_incumbent(str(row["case"]))
+    )
     raw_constraint_norm = row.get("constraint_norm")
     constraint_norm = (
         None
@@ -522,7 +528,11 @@ def _recompute_endpoint_certificate(row: dict[str, object]) -> dict[str, object]
         else _nonnegative_number(raw_constraint_norm, field="constraint_norm")
     )
     certificate = certify_optimization_endpoint(
-        status_convention=status_convention_for(provider, method),
+        status_convention=status_convention_for(
+            provider,
+            method,
+            accepted_incumbent=accepted_incumbent,
+        ),
         provider_success=_required_bool(row, "success"),
         provider_status=_optional_int(row, "status"),
         iterations=_required_int(row, "iterations"),
@@ -1502,13 +1512,15 @@ def _validate_v2_semantics(
     for source_run in cast(list[object], source_runs):
         if not isinstance(source_run, str):
             raise TypeError(f"receipt source run is invalid: {receipt}")
-        source_path = Path(source_run)
-        if (
-            source_path.is_absolute()
-            or ".." in source_path.parts
-            or len(source_path.parts) != 1
-        ):
-            raise ValueError(f"receipt source run escapes raw root: {source_run}")
+        # Path() normalizes "./x", "x/", and "x/." to the same location,
+        # so aliased names would pass a parts-based check while remaining
+        # distinct dedup entries; the raw string itself must therefore be
+        # one canonical filesystem component.
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", source_run) is None:
+            raise ValueError(
+                f"receipt source run is not a canonical directory name: "
+                f"{source_run!r}"
+            )
         if source_run in seen_source_runs:
             raise ValueError(f"receipt source runs are duplicated: {source_run}")
         seen_source_runs.add(source_run)
