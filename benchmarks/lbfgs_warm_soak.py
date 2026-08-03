@@ -176,10 +176,12 @@ def _vram_record(
             provider_pid=provider_pid,
         )
         monitor.start()
-        started = time.perf_counter()
-        run_solve()
-        warm_seconds = time.perf_counter() - started
-        measurement = monitor.finish()
+        try:
+            started = time.perf_counter()
+            run_solve()
+            warm_seconds = time.perf_counter() - started
+        finally:
+            measurement = monitor.finish()
     artifact = process_gpu_memory_artifact(measurement)
     return warm_seconds, VramRecord(
         availability=artifact.availability,

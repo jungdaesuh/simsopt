@@ -311,8 +311,8 @@ def test_fused_matches_stepwise_under_small_iteration_budgets(maxiter) -> None:
         run_mode=_LBFGS_RUN_MODE_FUSED_STEPWISE,
         maxiter=maxiter,
     )
-    sx, sf, sstatus, sk, snfev = _endpoint(stepwise)
-    fx, ff, fstatus, fk, fnfev = _endpoint(fused)
+    sx, _sf, sstatus, sk, snfev = _endpoint(stepwise)
+    fx, _ff, fstatus, fk, fnfev = _endpoint(fused)
     assert (fstatus, fk, fnfev) == (sstatus, sk, snfev)
     np.testing.assert_allclose(fx, sx, rtol=0.0, atol=_ENDPOINT_ATOL)
 
@@ -333,8 +333,8 @@ def test_fused_matches_stepwise_under_evaluation_budgets(maxfun) -> None:
         maxiter=60,
         maxfun=maxfun,
     )
-    sx, sf, sstatus, sk, snfev = _endpoint(stepwise)
-    fx, ff, fstatus, fk, fnfev = _endpoint(fused)
+    sx, _sf, sstatus, sk, snfev = _endpoint(stepwise)
+    fx, _ff, fstatus, fk, fnfev = _endpoint(fused)
     assert (fstatus, fk, fnfev) == (sstatus, sk, snfev)
     np.testing.assert_allclose(fx, sx, rtol=0.0, atol=_ENDPOINT_ATOL)
 
