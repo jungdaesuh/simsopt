@@ -1,5 +1,19 @@
 # Off-host archive replay — landau (2026-08-03)
 
+## Second replay (same day, current corpus)
+
+After the review iterations extended the corpus, the replay was
+repeated: fresh archive tarball
+(sha256 prefix `59fc61fe901bd1256a8c`, verified end to end), extracted
+and re-write-protected (`chmod -R a-w`; the prior 47-receipt copy kept
+at `qn-receipt-archives-47`), checkout fast-forwarded via delta bundle
+and detached PRISTINE at `89a0a823c` — result:
+`{"validated": 49, ...}` covering every current receipt, including the
+republished performance receipts with recorded memory diagnostics, the
+A100 quiet and contended receipts, and the rollback-rehearsal evidence
+tree. The first replay below is retained as the historical record of
+the 47-receipt corpus.
+
 Different-host replay of the complete custom-quasi-newton receipt authority
 bundle, per the closure plan's Phase-7 off-host gate.
 
