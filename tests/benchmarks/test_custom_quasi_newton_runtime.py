@@ -71,6 +71,12 @@ def _write_minimal_child_payload(
             {
                 "provider": "custom",
                 "device_identity": device_identity,
+                "process_pid": 1234,
+                "evaluations": 0,
+                "final_parameters": [],
+                "status": 0,
+                "final_objective": 0.0,
+                "final_gradient_inf_norm": 0.0,
                 "peak_vram_mib": None,
                 "diagnostic_artifacts": {
                     "memory_trace": None,
@@ -326,12 +332,24 @@ def test_parent_forwards_and_binds_opt_in_boozer_trial_trace(
     assert provenance["trial_trace_sha256"] == hashlib.sha256(
         trial_trace_path.read_bytes()
     ).hexdigest()
-    assert observed_validation == {
+    assert {
+        key: value
+        for key, value in observed_validation.items()
+        if key != "expected_final_parameters"
+    } == {
         "manifest_path": trial_trace_path,
         "expected_provider": "custom",
         "expected_production_route": "custom_bfgs_stepwise",
         "expected_maxiter": 2,
+        "expected_evaluations": 0,
+        "expected_final_objective": 0.0,
+        "expected_final_gradient_inf_norm": 0.0,
+        "expected_final_status": 0,
     }
+    assert np.array_equal(
+        observed_validation["expected_final_parameters"],
+        np.asarray([], dtype=np.float64),
+    )
 
 
 @pytest.mark.parametrize(
@@ -652,7 +670,7 @@ def test_runtime_environment_payload_records_device_allocator_contract(
 
 
 def test_runner_schema_v7_declares_the_promotion_contract() -> None:
-    assert runtime._RUNNER_SCHEMA_VERSION == 7
+    assert runtime._RUNNER_SCHEMA_VERSION == 8
 
 
 def test_nvidia_smi_identity_parser_binds_uuid_model_memory_and_driver() -> None:

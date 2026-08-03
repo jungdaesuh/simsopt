@@ -70,7 +70,7 @@ def _runner_v7_directory(root: Path) -> Path:
     (run / "measurements.json").write_text(
         json.dumps(
             {
-                "schema_version": 7,
+                "schema_version": 8,
                 "git_commit": "abc123",
                 "git_clean": True,
                 "orchestrator_git_clean": True,
@@ -127,6 +127,7 @@ def _runner_v7_directory(root: Path) -> Path:
                         "solver_peak_rss_delta_kib": 20,
                         "peak_rss_kib": 130,
                         "peak_rss_scope": "provider_child_process_lifetime",
+                        "process_pid": 1234,
                         "peak_vram_mib": 200,
                         "inner_success": True,
                         "parameters_finite": True,
@@ -185,7 +186,24 @@ def _runner_v7_directory(root: Path) -> Path:
         ),
         encoding="utf-8",
     )
-    (run / "memory.json").write_text("{}\n", encoding="utf-8")
+    (run / "memory.json").write_text(
+        json.dumps(
+            {
+                "availability": "available",
+                "gpu_uuid": "GPU-test",
+                "peak_used_memory_mib": 200,
+                "provider_pid": 1234,
+                "samples": [
+                    {"sampled_at_unix_ns": 1, "used_memory_mib": 200}
+                ],
+                "schema_version": 1,
+                "target_pid_observed": True,
+                "unavailable_reason": None,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     return run
 
 
@@ -260,6 +278,7 @@ def _write_valid_trial_trace(lane: Path, row: dict[str, object]) -> None:
             initial_hash: initial_parameters,
             final_hash: final_parameters,
         },
+        final_status=cast(int, row["status"]),
     )
 
 
@@ -373,7 +392,23 @@ def _scientific_v7_lanes(tmp_path: Path) -> list[Path]:
             }
         )
         _write_json(lane / "measurements.json", lane_payload)
-        (lane / "memory.json").write_text("{}\n", encoding="utf-8")
+        lane_memory = {
+            "availability": "available" if is_gpu else "unavailable",
+            "gpu_uuid": row["device_identity"].get("gpu_uuid"),
+            "peak_used_memory_mib": row["peak_vram_mib"] if is_gpu else None,
+            "provider_pid": 1234,
+            "samples": (
+                [{"sampled_at_unix_ns": 1, "used_memory_mib": row["peak_vram_mib"]}]
+                if is_gpu
+                else []
+            ),
+            "schema_version": 1,
+            "target_pid_observed": is_gpu,
+            "unavailable_reason": None if is_gpu else "cpu-device",
+        }
+        (lane / "memory.json").write_text(
+            json.dumps(lane_memory) + "\n", encoding="utf-8"
+        )
         _write_valid_trial_trace(lane, row)
         lanes.append(lane)
     return lanes
@@ -497,7 +532,7 @@ def test_publish_v2_binds_runner_contract_and_archive_inventory(tmp_path: Path) 
     metrics = json.loads((destination / "metrics.json").read_text(encoding="utf-8"))
     assert manifest["schema_version"] == 2
     assert metrics["schema_version"] == 2
-    assert manifest["runner_schema_version"] == 7
+    assert manifest["runner_schema_version"] == 8
     assert manifest["archive_bundle"]["storage_identity"] == "test-archive"
     assert metrics["derivations"]["sample_counts"] == {"custom": 1}
     assert manifest["verdict"] == "diagnostic-pass-not-promotion"
@@ -510,6 +545,75 @@ def test_publish_v2_binds_runner_contract_and_archive_inventory(tmp_path: Path) 
         )
         == 0
     )
+
+
+def test_publish_rejects_unparseable_gpu_memory_trace(tmp_path: Path) -> None:
+    run = _runner_v7_directory(tmp_path)
+    (run / "memory.json").write_text("{}\n", encoding="utf-8")
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="GPU memory artifact"):
+        publish(
+            (run,),
+            environment_lock=lock,
+            destination=tmp_path / "tracked" / "receipt-v2",
+            archive_uri=(tmp_path / "archive" / "receipt-v2").as_uri(),
+            repo_root=tmp_path,
+            qualification_kind="diagnostic",
+        )
+
+
+def test_publish_rejects_gpu_memory_peak_mismatch(tmp_path: Path) -> None:
+    run = _runner_v7_directory(tmp_path)
+    memory = _json_object(run / "memory.json")
+    memory["peak_used_memory_mib"] = 201
+    memory["samples"] = [{"sampled_at_unix_ns": 1, "used_memory_mib": 201}]
+    _write_json(run / "memory.json", memory)
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+
+    with pytest.raises(
+        ValueError, match="GPU memory artifact peak does not match peak_vram_mib"
+    ):
+        publish(
+            (run,),
+            environment_lock=lock,
+            destination=tmp_path / "tracked" / "receipt-v2",
+            archive_uri=(tmp_path / "archive" / "receipt-v2").as_uri(),
+            repo_root=tmp_path,
+            qualification_kind="diagnostic",
+        )
+
+
+def test_publish_rejects_trial_trace_final_parameter_mismatch(tmp_path: Path) -> None:
+    lanes = _scientific_v7_lanes(tmp_path)
+    target = lanes[0]
+    payload = _json_object(target / "measurements.json")
+    row = dict(_first_measurement(payload))
+    bad_row = dict(row)
+    bad_row["final_parameters"] = [9.0]
+    for artifact_name in (
+        "trial.json",
+        "trial.records.jsonl",
+        "trial.parameters.npz",
+    ):
+        (target / artifact_name).unlink()
+    _write_valid_trial_trace(target, bad_row)
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+
+    with pytest.raises(
+        ValueError, match="final accepted trial parameters do not match measurement"
+    ):
+        publish(
+            tuple(lanes),
+            environment_lock=lock,
+            destination=tmp_path / "tracked" / "scientific-v2",
+            archive_uri=(tmp_path / "archive" / "scientific-v2").as_uri(),
+            repo_root=tmp_path,
+            qualification_kind="scientific",
+        )
 
 
 def test_publish_scientific_recomputes_endpoint_and_native_parity(
@@ -607,7 +711,7 @@ def test_publish_scientific_rejects_missing_native_authority(tmp_path: Path) -> 
 def test_publish_rejects_unknown_runner_schema(tmp_path: Path) -> None:
     run = _runner_v7_directory(tmp_path)
     payload = json.loads((run / "measurements.json").read_text(encoding="utf-8"))
-    payload["schema_version"] = 8
+    payload["schema_version"] = 9
     (run / "measurements.json").write_text(json.dumps(payload), encoding="utf-8")
     lock = tmp_path / "environment.lock"
     lock.write_text("jax==0.10.0\n", encoding="utf-8")

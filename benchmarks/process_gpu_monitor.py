@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Literal, TypeAlias
+from pathlib import Path
+from typing import Literal, TypeAlias, cast
 
 _NVIDIA_SMI_PROCESS_QUERY = (
     "nvidia-smi",
@@ -116,6 +118,119 @@ def process_gpu_memory_artifact(
         target_pid_observed=measurement.target_pid_observed,
         samples=(),
         peak_used_memory_mib=None,
+    )
+
+
+def parse_process_gpu_memory_artifact(
+    artifact_path: Path,
+) -> ProcessGpuMemoryArtifact:
+    """Decode and semantically validate one persisted monitor artifact."""
+
+    try:
+        raw_payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            f"GPU memory artifact is not valid JSON: {artifact_path}"
+        ) from error
+    if not isinstance(raw_payload, dict):
+        raise TypeError(f"GPU memory artifact must be a JSON object: {artifact_path}")
+    payload = cast(dict[str, object], raw_payload)
+    if payload.get("schema_version") != 1:
+        raise ValueError(f"unsupported GPU memory artifact schema: {artifact_path}")
+    availability = payload.get("availability")
+    if availability not in {"available", "unavailable"}:
+        raise ValueError(f"GPU memory artifact availability is invalid: {artifact_path}")
+    provider_pid = payload.get("provider_pid")
+    if not isinstance(provider_pid, int) or isinstance(provider_pid, bool):
+        raise TypeError(f"GPU memory artifact provider_pid must be an integer: {artifact_path}")
+    if provider_pid <= 0:
+        raise ValueError(f"GPU memory artifact provider_pid must be positive: {artifact_path}")
+    gpu_uuid = payload.get("gpu_uuid")
+    if gpu_uuid is not None and (not isinstance(gpu_uuid, str) or not gpu_uuid):
+        raise TypeError(f"GPU memory artifact gpu_uuid must be a string or null: {artifact_path}")
+    target_pid_observed = payload.get("target_pid_observed")
+    if not isinstance(target_pid_observed, bool):
+        raise TypeError(
+            f"GPU memory artifact target_pid_observed must be a boolean: {artifact_path}"
+        )
+    unavailable_reason = payload.get("unavailable_reason")
+    if unavailable_reason not in {None, "cpu-device", "provider-pid-not-observed"}:
+        raise ValueError(f"GPU memory artifact unavailable reason is invalid: {artifact_path}")
+    raw_samples = payload.get("samples")
+    if not isinstance(raw_samples, list):
+        raise TypeError(f"GPU memory artifact samples must be a list: {artifact_path}")
+    samples: list[ProcessGpuMemorySample] = []
+    for raw_sample in raw_samples:
+        if not isinstance(raw_sample, dict):
+            raise TypeError(
+                f"GPU memory artifact samples must contain objects: {artifact_path}"
+            )
+        sample = cast(dict[str, object], raw_sample)
+        sampled_at_unix_ns = sample.get("sampled_at_unix_ns")
+        used_memory_mib = sample.get("used_memory_mib")
+        if not isinstance(sampled_at_unix_ns, int) or isinstance(
+            sampled_at_unix_ns, bool
+        ):
+            raise TypeError(
+                f"GPU memory artifact sample timestamp must be an integer: {artifact_path}"
+            )
+        if not isinstance(used_memory_mib, int) or isinstance(used_memory_mib, bool):
+            raise TypeError(
+                f"GPU memory artifact sample memory must be an integer: {artifact_path}"
+            )
+        if sampled_at_unix_ns <= 0 or used_memory_mib < 0:
+            raise ValueError(f"GPU memory artifact sample values are invalid: {artifact_path}")
+        samples.append(
+            ProcessGpuMemorySample(
+                sampled_at_unix_ns=sampled_at_unix_ns,
+                used_memory_mib=used_memory_mib,
+            )
+        )
+    peak = payload.get("peak_used_memory_mib")
+    if availability == "available":
+        if unavailable_reason is not None or not target_pid_observed:
+            raise ValueError(
+                f"available GPU memory artifact has unavailable provenance: {artifact_path}"
+            )
+        if gpu_uuid is None or not samples:
+            raise ValueError(
+                f"available GPU memory artifact has incomplete samples: {artifact_path}"
+            )
+        if not isinstance(peak, int) or isinstance(peak, bool) or peak < 0:
+            raise TypeError(
+                f"available GPU memory artifact peak must be a nonnegative integer: {artifact_path}"
+            )
+        expected_peak = max(sample.used_memory_mib for sample in samples)
+        if peak != expected_peak:
+            raise ValueError(
+                f"GPU memory artifact peak does not match samples: {artifact_path}"
+            )
+    else:
+        if unavailable_reason is None:
+            raise ValueError(
+                f"unavailable GPU memory artifact has no reason: {artifact_path}"
+            )
+        if unavailable_reason == "cpu-device" and gpu_uuid is not None:
+            raise ValueError(
+                f"CPU GPU memory artifact carries a GPU UUID: {artifact_path}"
+            )
+        if unavailable_reason == "provider-pid-not-observed" and gpu_uuid is None:
+            raise ValueError(
+                f"unobserved GPU memory artifact has no GPU UUID: {artifact_path}"
+            )
+        if target_pid_observed or samples or peak is not None:
+            raise ValueError(
+                f"unavailable GPU memory artifact carries observed samples: {artifact_path}"
+            )
+    return ProcessGpuMemoryArtifact(
+        schema_version=1,
+        availability=cast(Literal["available", "unavailable"], availability),
+        unavailable_reason=cast(GpuMemoryUnavailableReason | None, unavailable_reason),
+        gpu_uuid=cast(str | None, gpu_uuid),
+        provider_pid=provider_pid,
+        target_pid_observed=target_pid_observed,
+        samples=tuple(samples),
+        peak_used_memory_mib=cast(int | None, peak),
     )
 
 
@@ -314,13 +429,14 @@ class ProcessGpuMemoryMonitor:
 
 __all__ = [
     "GpuMemoryUnavailableReason",
+    "ProcessGpuMemoryArtifact",
     "ProcessGpuMemoryMeasurement",
     "ProcessGpuMemoryMonitor",
     "ProcessGpuMemoryMonitorError",
-    "ProcessGpuMemoryArtifact",
     "ProcessGpuMemoryResult",
     "ProcessGpuMemorySample",
     "ProcessGpuMemoryUnavailable",
     "cpu_gpu_memory_unavailable",
+    "parse_process_gpu_memory_artifact",
     "process_gpu_memory_artifact",
 ]
