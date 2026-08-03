@@ -219,8 +219,19 @@ def _cpu_device_identity() -> runtime.DeviceIdentity:
 
 def _prepared_provider_compiles(
     provider: compile_shape._CompileProvider,
+    run_mode: str = "stepwise",
 ) -> tuple[object, tuple[compile_shape._CapturedProviderCompile, ...]]:
-    if provider == "custom":
+    if provider == "custom" and run_mode == "fused_stepwise":
+        executables = tuple(object() for _ in range(3))
+        prepared = SimpleNamespace(
+            program=SimpleNamespace(
+                initial_state=executables[0],
+                value_and_grad=executables[1],
+                fused_solve=executables[2],
+                run_mode=run_mode,
+            )
+        )
+    elif provider == "custom":
         executables = tuple(object() for _ in range(6))
         prepared = SimpleNamespace(
             program=SimpleNamespace(
@@ -230,6 +241,7 @@ def _prepared_provider_compiles(
                 advance_from_search=executables[3],
                 reenter_new_x=executables[4],
                 result_payload=executables[5],
+                run_mode=run_mode,
             )
         )
     else:
@@ -251,10 +263,11 @@ def _prepared_provider_compiles(
 
 
 @pytest.mark.parametrize(
-    ("provider", "expected_labels"),
+    ("provider", "run_mode", "expected_labels"),
     [
         (
             "custom",
+            "stepwise",
             [
                 "initial_state",
                 "value_and_grad",
@@ -264,14 +277,20 @@ def _prepared_provider_compiles(
                 "result_payload",
             ],
         ),
-        ("optax", ["step", "final_value_and_grad"]),
+        (
+            "custom",
+            "fused_stepwise",
+            ["initial_state", "value_and_grad", "fused_solve"],
+        ),
+        ("optax", "stepwise", ["step", "final_value_and_grad"]),
     ],
 )
 def test_provider_compile_summary_labels_returned_executables_and_aggregates(
     provider: compile_shape._CompileProvider,
+    run_mode: str,
     expected_labels: list[str],
 ) -> None:
-    prepared, captured = _prepared_provider_compiles(provider)
+    prepared, captured = _prepared_provider_compiles(provider, run_mode)
 
     programs, aggregate = compile_shape._summarize_provider_compiles(
         provider,
@@ -291,6 +310,13 @@ def test_provider_compile_summary_labels_returned_executables_and_aggregates(
         aggregate["compiled_executable_count_source"]
         == "observed_lowered_compile_calls"
     )
+
+
+def test_provider_programs_rejects_an_unknown_custom_run_mode() -> None:
+    prepared, _captured = _prepared_provider_compiles("custom", "monolithic_debug")
+
+    with pytest.raises(RuntimeError, match="unsupported custom provider run mode"):
+        compile_shape._provider_programs("custom", prepared)
 
 
 def test_provider_compile_summary_rejects_an_unreturned_executable() -> None:
@@ -420,11 +446,12 @@ def test_dirty_checkout_marks_candidate_sha_unavailable(
 
 
 @pytest.mark.parametrize(
-    ("provider", "expected_count"),
-    [("custom", 6), ("optax", 2)],
+    ("provider", "intent", "expected_count"),
+    [("custom", "parity", 6), ("custom", "fast", 3), ("optax", "parity", 2)],
 )
 def test_exact_runtime_factory_compiles_are_observed(
     provider: compile_shape._CompileProvider,
+    intent: str,
     expected_count: int,
 ) -> None:
     fixture_case = runtime.fixture("rosenbrock")
@@ -435,6 +462,7 @@ def test_exact_runtime_factory_compiles_are_observed(
         fixture_case,
         x0,
         maxcor=2,
+        intent=intent,
     )
     programs, aggregate = compile_shape._summarize_provider_compiles(
         provider,

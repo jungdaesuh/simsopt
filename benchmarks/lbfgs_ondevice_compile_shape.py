@@ -767,13 +767,23 @@ def _provider_programs(
     if provider == "custom":
         custom = cast(runtime._PreparedCustom, prepared)
         program = custom.program
-        return (
-            ("initial_state", program.initial_state),
-            ("value_and_grad", program.value_and_grad),
-            ("advance_from_start", program.advance_from_start),
-            ("advance_from_search", program.advance_from_search),
-            ("reenter_new_x", program.reenter_new_x),
-            ("result_payload", program.result_payload),
+        if program.run_mode == "fused_stepwise":
+            return (
+                ("initial_state", program.initial_state),
+                ("value_and_grad", program.value_and_grad),
+                ("fused_solve", program.fused_solve),
+            )
+        if program.run_mode == "stepwise":
+            return (
+                ("initial_state", program.initial_state),
+                ("value_and_grad", program.value_and_grad),
+                ("advance_from_start", program.advance_from_start),
+                ("advance_from_search", program.advance_from_search),
+                ("reenter_new_x", program.reenter_new_x),
+                ("result_payload", program.result_payload),
+            )
+        raise RuntimeError(
+            f"unsupported custom provider run mode {program.run_mode!r}"
         )
     if provider == "optax":
         optax_prepared = cast(runtime._PreparedOptax, prepared)
