@@ -1075,7 +1075,7 @@ def _scientific_qualification(rows: list[dict[str, object]]) -> dict[str, object
 
 
 _MAX_CUSTOM_TO_OPTAX_WARM_RATIO = 2.0
-_MINIMUM_PERFORMANCE_SAMPLES = 5
+_REQUIRED_PERFORMANCE_SAMPLES = 5
 
 
 def _performance_qualification(
@@ -1113,6 +1113,18 @@ def _performance_qualification(
                     failures.append(f"{source_run}:{case}:method-must-be-lbfgs")
                 if row.get("intent") != "fast":
                     failures.append(f"{source_run}:{case}:intent-must-be-fast")
+                if row.get("case") != "coil47":
+                    failures.append(f"{source_run}:{case}:case-must-be-coil47")
+                if row.get("device") != "gpu":
+                    failures.append(f"{source_run}:{case}:device-must-be-gpu")
+                row_identity = cast(dict[str, object], row["device_identity"])
+                row_model = str(row_identity.get("gpu_model") or "")
+                if row_model != "NVIDIA GeForce RTX 5090" and not row_model.startswith(
+                    "NVIDIA A100"
+                ):
+                    failures.append(
+                        f"{source_run}:{case}:gpu-model-must-be-rtx5090-or-a100"
+                    )
                 if provider == "custom" and row.get("solver_route") != "fused_stepwise":
                     failures.append(
                         f"{source_run}:{case}:custom-route-must-be-fused-stepwise"
@@ -1137,14 +1149,24 @@ def _performance_qualification(
                         )
             custom_rows.extend(custom_case_rows)
             optax_rows.extend(optax_case_rows)
+    # The declared protocol retains exactly five AB/BA rounds (round 0 is
+    # the discard), so any other retained count is a protocol violation.
     for provider_name, provider_rows in (
         ("custom", custom_rows),
         ("optax", optax_rows),
     ):
-        if len(provider_rows) < _MINIMUM_PERFORMANCE_SAMPLES:
+        if len(provider_rows) != _REQUIRED_PERFORMANCE_SAMPLES:
             failures.append(
-                f"{provider_name}-sample-count-below-{_MINIMUM_PERFORMANCE_SAMPLES}"
+                f"{provider_name}-sample-count-must-be-{_REQUIRED_PERFORMANCE_SAMPLES}"
             )
+    # One reserved GPU allocation per receipt: every retained row must
+    # bind the same physical device.
+    receipt_uuids = {
+        str(cast(dict[str, object], row["device_identity"]).get("gpu_uuid"))
+        for row in (*custom_rows, *optax_rows)
+    }
+    if len(receipt_uuids) > 1:
+        failures.append("receipt-gpu-uuid-must-be-unique")
     custom_median = (
         float(
             statistics.median(
@@ -1196,7 +1218,7 @@ def _performance_qualification(
         "passed": passed,
         "failure_reasons": sorted(set(failures)),
         "comparison_count": comparison_count,
-        "minimum_samples_per_provider": _MINIMUM_PERFORMANCE_SAMPLES,
+        "required_samples_per_provider": _REQUIRED_PERFORMANCE_SAMPLES,
         "custom_warm_seconds_median": custom_median,
         "optax_warm_seconds_median": optax_median,
         "custom_to_optax_warm_ratio": ratio,

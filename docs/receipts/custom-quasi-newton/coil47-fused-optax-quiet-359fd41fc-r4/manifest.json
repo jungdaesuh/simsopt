@@ -1,14 +1,14 @@
 {
   "archive_bundle": {
-    "inventory_sha256": "8237fbb350a152255558beecf2adeabbb329b2cd9c2e92c931c70f50d490f234",
-    "receipt_id": "coil47-fused-optax-quiet-359fd41fc-r3",
-    "storage_identity": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-quiet-359fd41fc-r3"
+    "inventory_sha256": "65627ebdff5ce9ba0d992379f01412ce2b9967ebc7a244096145ea02c4eb15cd",
+    "receipt_id": "coil47-fused-optax-quiet-359fd41fc-r4",
+    "storage_identity": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-quiet-359fd41fc-r4"
   },
-  "archive_uri": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-quiet-359fd41fc-r3",
+  "archive_uri": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-quiet-359fd41fc-r4",
   "artifacts": [
     {
       "path": "metrics.json",
-      "sha256": "074996ac3a624f16ef61e7964afccaf199c3d86e40017dc5d5c97bf8d2bd96be"
+      "sha256": "76ab97adfa74cc738d523067a68b6582c576398f60080a275fffa16f6f648fb4"
     },
     {
       "path": "raw/round-1/custom/gpu_memory.json",
@@ -136,7 +136,7 @@
     },
     {
       "path": "summary.md",
-      "sha256": "5c1a792c70159bd361843a638d86bfad58abc1e7244d4b260a0fd47271eb9bde"
+      "sha256": "c3bf7f029666f16ee4dea3c0fd52d0a897d2f3889a26619be89b5d28d9af7552"
     }
   ],
   "candidate_commit": "359fd41fc4535c6ae68f9a94f3e69c2315f1c2f4",
@@ -160,15 +160,15 @@
     "custom_warm_seconds_median": 0.013139054062776268,
     "failure_reasons": [],
     "memory_ruling": "recorded-diagnostic-user-ratified-2026-08-03",
-    "minimum_samples_per_provider": 5,
     "optax_max_solver_rss_delta_kib": 205308.0,
     "optax_max_vram_mib": 962.0,
     "optax_warm_seconds_median": 0.023789800936356187,
     "passed": true,
+    "required_samples_per_provider": 5,
     "verdict": "pass"
   },
   "qualification_kind": "performance",
-  "receipt_id": "coil47-fused-optax-quiet-359fd41fc-r3",
+  "receipt_id": "coil47-fused-optax-quiet-359fd41fc-r4",
   "runner_schema_version": 9,
   "schema_version": 2,
   "source_runs": [

@@ -1,14 +1,14 @@
 {
   "archive_bundle": {
-    "inventory_sha256": "5818ee39051185d80cbf2ede21b86c73169d298e0d795b84e35f285abc1a4a80",
-    "receipt_id": "coil47-fused-optax-a100-contended-55745feaf",
-    "storage_identity": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-a100-contended-55745feaf"
+    "inventory_sha256": "adc671e3668e1db90cd366c9e9fd5de08459804469443d2fc4b559ac78390dac",
+    "receipt_id": "coil47-fused-optax-a100-contended-55745feaf-r2",
+    "storage_identity": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-a100-contended-55745feaf-r2"
   },
-  "archive_uri": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-a100-contended-55745feaf",
+  "archive_uri": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-a100-contended-55745feaf-r2",
   "artifacts": [
     {
       "path": "metrics.json",
-      "sha256": "9f45605cbe0e2629b4245b9dfc00c8b5fee798232cd990d9bd62ec7eadca8b49"
+      "sha256": "313baab427c041212f59edaf71ca27ba740580c6001432340e9a2a31eb159497"
     },
     {
       "path": "raw/round-1/contended-launcher.sh",
@@ -140,7 +140,7 @@
     },
     {
       "path": "summary.md",
-      "sha256": "857054d69965bc93622bf976c6f85f2f378799c62674cfa0a9b60a4e17f165d4"
+      "sha256": "38aadacb408bb69ef5853a1b4915ed39e229286c3181e1de4820ad9469943be0"
     }
   ],
   "candidate_commit": "55745feaf939bb5b0c40fa85493e72ec506ac41a",
@@ -164,15 +164,15 @@
     "custom_warm_seconds_median": 0.08150588799981051,
     "failure_reasons": [],
     "memory_ruling": "recorded-diagnostic-user-ratified-2026-08-03",
-    "minimum_samples_per_provider": 5,
     "optax_max_solver_rss_delta_kib": 199736.0,
     "optax_max_vram_mib": 742.0,
     "optax_warm_seconds_median": 0.07202976199914701,
     "passed": true,
+    "required_samples_per_provider": 5,
     "verdict": "pass"
   },
   "qualification_kind": "performance",
-  "receipt_id": "coil47-fused-optax-a100-contended-55745feaf",
+  "receipt_id": "coil47-fused-optax-a100-contended-55745feaf-r2",
   "runner_schema_version": 9,
   "schema_version": 2,
   "source_runs": [

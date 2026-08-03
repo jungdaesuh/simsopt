@@ -85,9 +85,9 @@ minimization to Optax L-BFGS as production owner. The 2026-08-02 quasi-Newton
 closure campaign supersedes that row for this problem family: the SIMSOPT
 custom L-BFGS `fused_stepwise` route beat the Optax comparator on the pinned
 RTX 5090 in the receipt-attested final lanes (receipts
-`coil47-fused-optax-quiet-359fd41fc-r2`: warm medians 13.14 ms vs 23.79 ms,
+`coil47-fused-optax-quiet-359fd41fc-r4` (current revision): warm medians 13.14 ms vs 23.79 ms,
 qualification ratio 0.5523, verdict pass; and
-`coil47-fused-optax-contended-359fd41fc-r2`: 14.59 ms vs 26.76 ms, ratio
+`coil47-fused-optax-contended-359fd41fc-r4`: 14.59 ms vs 26.76 ms, ratio
 0.5453, verdict pass; earlier unbound sweeps had shown statistical par at
 27.65 ms vs 26.03 ms before the fused route landed), while
 uniquely providing the SciPy-shaped result contract and the post-acceptance

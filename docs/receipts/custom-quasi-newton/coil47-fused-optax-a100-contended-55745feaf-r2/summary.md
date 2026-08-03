@@ -1,4 +1,4 @@
-# coil47-fused-optax-a100-contended-55745feaf
+# coil47-fused-optax-a100-contended-55745feaf-r2
 
 Verdict: `pass`
 
