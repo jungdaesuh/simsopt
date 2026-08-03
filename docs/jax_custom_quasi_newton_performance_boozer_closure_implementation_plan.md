@@ -594,6 +594,54 @@ metrics, tampered derivations, and historical round trips.
       clean replay, rollback, semantic validation, and independent review pass.
 - [ ] Authority artifacts validate from a durable off-host copy.
 
+## Campaign closure status (2026-08-03)
+
+Thirty-one ordered commits (`bb05ec58f..HEAD`); candidate evidence SHA
+`359fd41fc`, lanes run from clean detached worktrees, receipts committed at
+`f2ed3d534`. Closed with receipts (all `validate-all` green, 47 receipts,
+including `--archive-root` against the complete mirror at
+`/home/jungdaesuh/qn-receipt-archives`):
+
+- Phase 4 matched-budget milestone:
+  `boozer-matched-budget-cpu-triad-359fd41fc` (custom `3.572646605e-7` /
+  `4.55e-5` / 1207 evals, bit-identical across four independent runs; native
+  `3.719393881e-7` / `9.17e-4` / 1188) and
+  `boozer-matched-budget-gpu-distribution-359fd41fc` (five RTX 5090
+  repetitions; 2/5 reach the 1000-iteration budget, 3/5 die in stochastic
+  noise-floor line search at 920–964; all five endpoints inside the
+  3.56–3.77e-7 band containing native). Capped endpoints remain `failed`;
+  the Scientific Certificate stays unachieved by both implementations per
+  the author ruling above.
+- Phase 6/7 performance: `coil47-fused-optax-quiet-359fd41fc` (custom warm
+  median 13.14 ms vs Optax 23.79 ms, 0.55x) and
+  `coil47-fused-optax-contended-359fd41fc` (14.59 vs 26.76 ms, 0.55x) —
+  five retained AB/BA rounds each, GPU clocks/power telemetry CSVs beside
+  the artifacts, UUID-bound identity. The 2.0x gate is passed with margin;
+  custom is faster than Optax in both regimes.
+- Phase 8: solver-matrix reconciliation after gates (`a8134ebc8`);
+  independent adversarial review by the plan author (no P0s; all three P1s
+  fixed: `e3e8d5fe9`, `b243a176e`, `03de61652`); ordered commits with
+  detached-worktree replays at three successive SHAs.
+
+Negative result (do not retry blindly): bitwise-safe batching of the
+matupd shift loops plus vmap of the two-loop fixed curvatures lowered the
+fused StableHLO while-count 18→14 but raised dynamic_slice 53→59 and showed
+no warm-time improvement in interleaved A/B on the RTX 5090 (clean pairs
+1.03x/1.40x vs baseline); reverted per the Phase-6 revert rule. Matvec
+batching of the update-row dots diverges from the sequential loop at 1 ULP
+(deterministic n=2 case) and is unusable in shared transition code. The
+equivalence-test artifact is preserved in the session scratchpad.
+
+Deferred (recorded, not silently dropped): same-process warm-soak plateau
+evidence; StableHLO artifact pair regeneration at the final SHA (earlier
+receipt `coil47-lbfgs-gpu-compile-shape-current` covers an earlier SHA);
+different-host archive replay (local second-copy mirror validated;
+landau/A100 down — A100 lanes superseded by user directive 2026-08-02);
+exact-inner replay re-run at the final SHA; scoped Pyright/compileall at
+the final SHA (Ruff and `git diff --check` ran green during the campaign);
+optional line-search floor-acceptance fix for the stochastic GPU deaths
+(unauthorized).
+
 ## Open Questions
 
 - Does the first rejected Boozer trial fail in the predictor, primal Newton
