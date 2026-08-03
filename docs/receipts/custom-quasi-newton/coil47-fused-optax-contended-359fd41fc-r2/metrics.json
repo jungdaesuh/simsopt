@@ -4433,19 +4433,16 @@
     }
   ],
   "qualification": {
-    "comparison_count": 0,
-    "failure_reasons": [
-      "coil47:intent-must-be-parity",
-      "coil47:maxiter-must-be-1000",
-      "coil47:method-must-be-bfgs",
-      "coil47:native-authority-count",
-      "performance-qualification-not-implemented",
-      "scientific-case-must-be-boozer"
-    ],
-    "passed": false
+    "comparison_count": 5,
+    "custom_to_optax_warm_ratio": 0.5453022015693105,
+    "custom_warm_seconds_median": 0.014592758030630648,
+    "failure_reasons": [],
+    "optax_warm_seconds_median": 0.026760863955132663,
+    "passed": true,
+    "verdict": "pass"
   },
   "qualification_kind": "performance",
-  "receipt_id": "coil47-fused-optax-contended-359fd41fc",
+  "receipt_id": "coil47-fused-optax-contended-359fd41fc-r2",
   "runner_schema_version": 9,
   "schema_version": 2,
   "source_runs": [
@@ -4455,5 +4452,5 @@
     "round-4",
     "round-5"
   ],
-  "verdict": "fail"
+  "verdict": "pass"
 }

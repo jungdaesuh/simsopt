@@ -1,14 +1,14 @@
 {
   "archive_bundle": {
-    "inventory_sha256": "80ac4af6de14dc1d3f68d23319f266423a120763a42fd1a6d6c79f048f7e8b72",
-    "receipt_id": "coil47-fused-optax-quiet-359fd41fc",
-    "storage_identity": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-quiet-359fd41fc"
+    "inventory_sha256": "4680cc330225bb285124cfb543d981fc8d94da90ec3c2a029ae7dfaba9a9463a",
+    "receipt_id": "coil47-fused-optax-quiet-359fd41fc-r2",
+    "storage_identity": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-quiet-359fd41fc-r2"
   },
-  "archive_uri": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-quiet-359fd41fc",
+  "archive_uri": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-quiet-359fd41fc-r2",
   "artifacts": [
     {
       "path": "metrics.json",
-      "sha256": "2821dd95813a64cb24dda8b395b105d134ddd1ba367e2a2a1b3676a061ba6d10"
+      "sha256": "85b41882a6b337ab3159d66e0fa6dedb18442f817dbc58e90a922e1cc7da9b19"
     },
     {
       "path": "raw/round-1/custom/gpu_memory.json",
@@ -17,6 +17,10 @@
     {
       "path": "raw/round-1/custom/measurements.json",
       "sha256": "3d07ab51d5957fe2a10da30840446ea1609d5a11fb5d5523da767f80e15cae89"
+    },
+    {
+      "path": "raw/round-1/final-359fd41fc-gpu-telemetry.csv",
+      "sha256": "2446b111d587f21d0d291bb54129ffa4667464be9b9074e17d3e91cd4d27660a"
     },
     {
       "path": "raw/round-1/measurements.json",
@@ -132,7 +136,7 @@
     },
     {
       "path": "summary.md",
-      "sha256": "fae18e437b21e7198d54af4025c010491e53cf302cad8078e56e553c35330dca"
+      "sha256": "5536cc012c5af203949c13b8428fb778c548cdcd7c605e1aa5ef23e3c51d3d10"
     }
   ],
   "candidate_commit": "359fd41fc4535c6ae68f9a94f3e69c2315f1c2f4",
@@ -147,19 +151,16 @@
   },
   "kind": "custom-quasi-newton-runner",
   "qualification": {
-    "comparison_count": 0,
-    "failure_reasons": [
-      "coil47:intent-must-be-parity",
-      "coil47:maxiter-must-be-1000",
-      "coil47:method-must-be-bfgs",
-      "coil47:native-authority-count",
-      "performance-qualification-not-implemented",
-      "scientific-case-must-be-boozer"
-    ],
-    "passed": false
+    "comparison_count": 5,
+    "custom_to_optax_warm_ratio": 0.5522977723910597,
+    "custom_warm_seconds_median": 0.013139054062776268,
+    "failure_reasons": [],
+    "optax_warm_seconds_median": 0.023789800936356187,
+    "passed": true,
+    "verdict": "pass"
   },
   "qualification_kind": "performance",
-  "receipt_id": "coil47-fused-optax-quiet-359fd41fc",
+  "receipt_id": "coil47-fused-optax-quiet-359fd41fc-r2",
   "runner_schema_version": 9,
   "schema_version": 2,
   "source_runs": [
@@ -169,5 +170,5 @@
     "round-4",
     "round-5"
   ],
-  "verdict": "fail"
+  "verdict": "pass"
 }
