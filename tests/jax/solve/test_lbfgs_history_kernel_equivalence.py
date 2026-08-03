@@ -240,9 +240,7 @@ def _sequential_row_dots(rows, vector):
     values = jnp.zeros((rows.shape[0],), dtype=rows.dtype)
 
     def body(index, current_values):
-        return current_values.at[index].set(
-            lbfgsb._lbfgsb_ddot(vector, rows[index])
-        )
+        return current_values.at[index].set(lbfgsb._lbfgsb_ddot(vector, rows[index]))
 
     return jax.lax.fori_loop(0, rows.shape[0], body, values)
 
@@ -273,7 +271,9 @@ def test_matupd_matrix_vector_row_batch_is_not_bitwise_on_cpu() -> None:
             )
             sequential_bits = np.asarray(sequential).view(np.uint64)
             matrix_vector_bits = np.asarray(matrix_vector).view(np.uint64)
-            mismatch_count += int(np.count_nonzero(sequential_bits != matrix_vector_bits))
+            mismatch_count += int(
+                np.count_nonzero(sequential_bits != matrix_vector_bits)
+            )
 
     assert mismatch_count > 0
 
