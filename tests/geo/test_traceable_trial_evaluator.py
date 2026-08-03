@@ -557,6 +557,139 @@ def test_accepted_incumbent_session_factory_is_transfer_guard_safe() -> None:
     assert bool(np.asarray(jax.device_get(controller.current_inner_state.eligible)))
 
 
+def test_session_candidate_evaluation_uses_explicit_anchor_under_transfer_guard() -> None:
+    forward_result = _forward_result(success=True, primal_success=True)
+    anchored_calls: list[tuple[object, object]] = []
+    gradient_calls: list[tuple[object, object, object]] = []
+    gradient = jnp.asarray([1.25, -2.5], dtype=jnp.float64)
+    adjoint_success = jnp.asarray(True, dtype=jnp.bool_)
+
+    def baseline_forward(_parameters):
+        pytest.fail("anchored candidate evaluation must not call baseline forward")
+
+    def anchored_forward(parameters, incumbent_state):
+        anchored_calls.append((parameters, incumbent_state))
+        return forward_result
+
+    def total_gradient(coil_dofs, solved_x, factors):
+        gradient_calls.append((coil_dofs, solved_x, factors))
+        return gradient, adjoint_success
+
+    bundle = {
+        "state": {
+            "baseline_coil_dofs": jnp.asarray([-1.0, -2.0], dtype=jnp.float64),
+            "baseline_x": jnp.asarray([-3.0, -4.0], dtype=jnp.float64),
+            "baseline_linear_solve_factors": None,
+        },
+        "compiled_forward_result_for": baseline_forward,
+        "compiled_forward_result_from_anchor_for": anchored_forward,
+        "compiled_total_gradient_for": total_gradient,
+    }
+    session = surface_objectives_traceable.TraceableObjectiveSession.from_optimizer_compiled_bundle(
+        bundle
+    )
+    incumbent_state = _inner_state(
+        (0.25, -0.75),
+        (1.5, -2.5),
+        4.5,
+        eligible=True,
+    )
+    parameters = np.asarray([8.0, 9.0], dtype=np.float64)
+
+    with jax.transfer_guard("disallow"):
+        evaluation = session.evaluate_candidate_from_anchor(
+            parameters,
+            incumbent_state,
+        )
+
+    assert isinstance(
+        evaluation,
+        surface_objectives_traceable.TraceableObjectiveCandidateEvaluation,
+    )
+    assert len(anchored_calls) == 1
+    np.testing.assert_array_equal(anchored_calls[0][0], parameters)
+    assert anchored_calls[0][1] is incumbent_state
+    assert len(gradient_calls) == 1
+    np.testing.assert_array_equal(evaluation.gradient, gradient)
+    assert evaluation.forward_result["x"] is forward_result["x"]
+
+
+def test_session_candidate_evaluation_skips_fallback_gradient() -> None:
+    forward_result = _forward_result(success=False, primal_success=False)
+    anchored_calls: list[tuple[object, object]] = []
+    gradient_calls: list[tuple[object, object, object]] = []
+
+    def baseline_forward(_parameters):
+        pytest.fail("anchored candidate evaluation must not call baseline forward")
+
+    def anchored_forward(parameters, incumbent_state):
+        anchored_calls.append((parameters, incumbent_state))
+        return forward_result
+
+    def total_gradient(coil_dofs, solved_x, factors):
+        gradient_calls.append((coil_dofs, solved_x, factors))
+        pytest.fail("failed terminal forward must not evaluate a fallback gradient")
+
+    bundle = {
+        "state": {
+            "baseline_coil_dofs": jnp.asarray([-1.0, -2.0], dtype=jnp.float64),
+            "baseline_x": jnp.asarray([-3.0, -4.0], dtype=jnp.float64),
+            "baseline_linear_solve_factors": None,
+        },
+        "compiled_forward_result_for": baseline_forward,
+        "compiled_forward_result_from_anchor_for": anchored_forward,
+        "compiled_total_gradient_for": total_gradient,
+    }
+    session = surface_objectives_traceable.TraceableObjectiveSession.from_optimizer_compiled_bundle(
+        bundle
+    )
+    incumbent_state = _inner_state(
+        (0.25, -0.75),
+        (1.5, -2.5),
+        4.5,
+        eligible=True,
+    )
+
+    with jax.transfer_guard("disallow"):
+        evaluation = session.evaluate_candidate_from_anchor(
+            np.asarray([8.0, 9.0], dtype=np.float64),
+            incumbent_state,
+        )
+
+    assert len(anchored_calls) == 1
+    assert anchored_calls[0][1] is incumbent_state
+    assert gradient_calls == []
+    assert evaluation.gradient_source == "unavailable"
+    assert np.isnan(np.asarray(jax.device_get(evaluation.gradient))).all()
+    assert not bool(np.asarray(jax.device_get(evaluation.candidate_inner_state.eligible)))
+
+
+def test_session_candidate_evaluation_rejects_ineligible_anchor() -> None:
+    forward_result = _forward_result(success=True, primal_success=True)
+    bundle, _gradient_calls, _forward_calls = _compiled_bundle(forward_result)
+    bundle["compiled_forward_result_from_anchor_for"] = (
+        lambda _parameters, _incumbent: forward_result
+    )
+    session = surface_objectives_traceable.TraceableObjectiveSession.from_optimizer_compiled_bundle(
+        bundle
+    )
+    ineligible_state = _inner_state(
+        (0.25, -0.75),
+        (1.5, -2.5),
+        4.5,
+        eligible=False,
+    )
+
+    with jax.transfer_guard("disallow"), pytest.raises(
+        RuntimeError,
+        match="eligible anchor",
+    ):
+        session.evaluate_candidate_from_anchor(
+            np.asarray([8.0, 9.0], dtype=np.float64),
+            ineligible_state,
+        )
+
+
 def test_accepted_incumbent_controllers_from_same_session_are_isolated() -> None:
     forward_result = _forward_result(success=True, primal_success=True)
     bundle, _gradient_calls, _forward_calls = _compiled_bundle(forward_result)
