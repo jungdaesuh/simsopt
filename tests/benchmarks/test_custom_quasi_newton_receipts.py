@@ -106,13 +106,13 @@ def _runner_v7_directory(root: Path) -> Path:
         "device_kind": "NVIDIA GeForce RTX 5090",
         "device_id": 0,
         "process_index": 0,
-        "gpu_uuid": "GPU-test",
+        "gpu_uuid": "GPU-0000f78e-c05d-e01c-303f-d644f4341f00",
         "gpu_model": "NVIDIA GeForce RTX 5090",
         "compute_capability": "12.0",
         "total_memory_bytes": 32 * 1024**3,
         "driver_version": "590.48",
         "cuda_version": "CUDA 13.0",
-        "visible_devices": "GPU-test",
+        "visible_devices": "GPU-0000f78e-c05d-e01c-303f-d644f4341f00",
         "hostname": "test-host",
         "scheduler_job_id": None,
     }
@@ -240,7 +240,7 @@ def _runner_v7_directory(root: Path) -> Path:
         json.dumps(
             {
                 "availability": "available",
-                "gpu_uuid": "GPU-test",
+                "gpu_uuid": "GPU-0000f78e-c05d-e01c-303f-d644f4341f00",
                 "peak_used_memory_mib": 200,
                 "provider_pid": 1234,
                 "samples": [{"sampled_at_unix_ns": 1, "used_memory_mib": 200}],
@@ -416,12 +416,12 @@ def _scientific_v7_lanes(tmp_path: Path) -> list[Path]:
     a100_identity = dict(cast(dict[str, object], rtx["device_identity"]))
     a100_identity.update(
         {
-            "gpu_uuid": "GPU-a100",
+            "gpu_uuid": "GPU-3333f78e-c05d-e01c-303f-d644f4341f33",
             "gpu_model": "NVIDIA A100-PCIE-40GB",
             "device_kind": "NVIDIA A100-PCIE-40GB",
             "compute_capability": "8.0",
             "total_memory_bytes": 40 * 1024**3,
-            "visible_devices": "GPU-a100",
+            "visible_devices": "GPU-3333f78e-c05d-e01c-303f-d644f4341f33",
         }
     )
     a100 = dict(rtx)
@@ -1338,7 +1338,7 @@ def test_performance_qualification_rejects_cross_device_pairs(
     runs = _performance_v7_runs(
         tmp_path,
         warm_pairs=tuple((0.055, 0.1) for _ in range(5)),
-        optax_gpu_uuid="GPU-different",
+        optax_gpu_uuid="GPU-1111f78e-c05d-e01c-303f-d644f4341f11",
     )
     lock = tmp_path / "environment.lock"
     lock.write_text("jax==0.10.0\n", encoding="utf-8")
@@ -1439,7 +1439,7 @@ def test_performance_qualification_rejects_cross_round_uuid_drift(
     rows = cast(list[dict[str, object]], payload["measurements"])
     for row in rows:
         identity = dict(cast(dict[str, object], row["device_identity"]))
-        identity["gpu_uuid"] = "GPU-second-allocation"
+        identity["gpu_uuid"] = "GPU-2222f78e-c05d-e01c-303f-d644f4341f22"
         row["device_identity"] = identity
     _write_json(runs[4] / "measurements.json", payload)
 
