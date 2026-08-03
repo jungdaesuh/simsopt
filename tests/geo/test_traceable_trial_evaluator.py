@@ -489,6 +489,36 @@ def test_accepted_incumbent_controller_accepts_earlier_trial_by_identity() -> No
         controller.accept(second_parameters)
 
 
+def test_accepted_incumbent_controller_discards_candidate_across_acceptance() -> None:
+    initial_state = _inner_state((-1.0, -2.0), (-3.0, -4.0), 5.0, eligible=True)
+    first_state = _inner_state((8.0, 9.0), (3.0, 4.0), 7.5, eligible=True)
+    stale_state = _inner_state((10.0, 11.0), (5.0, 6.0), 9.5, eligible=True)
+    first_parameters = np.asarray([8.0, 9.0], dtype=np.float64)
+    second_parameters = np.asarray([10.0, 11.0], dtype=np.float64)
+
+    def compiled_evaluate(parameters, incumbent):
+        if bool(np.all(np.asarray(parameters) == first_parameters)):
+            return _incumbent_evaluation(first_state)
+        # The second evaluation overlaps an acceptance: the incumbent it was
+        # evaluated from is promoted away before its result is inserted.
+        controller.accept(first_parameters)
+        assert incumbent is initial_state
+        return _incumbent_evaluation(stale_state)
+
+    controller = surface_objectives_traceable.AcceptedIncumbentHostValueAndGrad(
+        compiled_evaluate,
+        initial_state,
+    )
+
+    controller.value_and_grad(first_parameters)
+    controller.value_and_grad(second_parameters)
+
+    assert controller.current_inner_state is first_state
+    with pytest.raises(RuntimeError, match="do not match"):
+        controller.accept(second_parameters)
+    assert controller.current_inner_state is first_state
+
+
 def test_accepted_incumbent_controllers_from_same_session_are_isolated() -> None:
     forward_result = _forward_result(success=True, primal_success=True)
     bundle, _gradient_calls, _forward_calls = _compiled_bundle(forward_result)
