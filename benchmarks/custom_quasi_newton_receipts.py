@@ -1075,6 +1075,7 @@ def _scientific_qualification(rows: list[dict[str, object]]) -> dict[str, object
 
 
 _MAX_CUSTOM_TO_OPTAX_WARM_RATIO = 2.0
+_MINIMUM_PERFORMANCE_SAMPLES = 5
 
 
 def _performance_qualification(
@@ -1120,8 +1121,30 @@ def _performance_qualification(
                     failures.append(
                         f"{source_run}:{case}:optax-route-must-be-optax-lbfgs"
                     )
+            if len(custom_case_rows) == 1 and len(optax_case_rows) == 1:
+                custom_identity = cast(
+                    dict[str, object], custom_case_rows[0]["device_identity"]
+                )
+                optax_identity = cast(
+                    dict[str, object], optax_case_rows[0]["device_identity"]
+                )
+                for identity_field in ("gpu_uuid", "gpu_model"):
+                    if custom_identity.get(identity_field) != optax_identity.get(
+                        identity_field
+                    ):
+                        failures.append(
+                            f"{source_run}:{case}:pair-{identity_field}-mismatch"
+                        )
             custom_rows.extend(custom_case_rows)
             optax_rows.extend(optax_case_rows)
+    for provider_name, provider_rows in (
+        ("custom", custom_rows),
+        ("optax", optax_rows),
+    ):
+        if len(provider_rows) < _MINIMUM_PERFORMANCE_SAMPLES:
+            failures.append(
+                f"{provider_name}-sample-count-below-{_MINIMUM_PERFORMANCE_SAMPLES}"
+            )
     custom_median = (
         float(
             statistics.median(
@@ -1155,14 +1178,49 @@ def _performance_qualification(
     )
     if ratio is not None and ratio > _MAX_CUSTOM_TO_OPTAX_WARM_RATIO:
         failures.append("custom-to-optax-warm-ratio-exceeds-2.0")
+
+    def _provider_maximum(rows: list[dict[str, object]], field: str) -> float | None:
+        values = [
+            _nonnegative_number(row[field], field=field)
+            for row in rows
+            if row.get(field) is not None
+        ]
+        return max(values) if values else None
+
+    custom_rss_delta = _provider_maximum(custom_rows, "solver_peak_rss_delta_kib")
+    optax_rss_delta = _provider_maximum(optax_rows, "solver_peak_rss_delta_kib")
+    custom_vram = _provider_maximum(custom_rows, "peak_vram_mib")
+    optax_vram = _provider_maximum(optax_rows, "peak_vram_mib")
     passed = not failures
     return {
         "passed": passed,
         "failure_reasons": sorted(set(failures)),
         "comparison_count": comparison_count,
+        "minimum_samples_per_provider": _MINIMUM_PERFORMANCE_SAMPLES,
         "custom_warm_seconds_median": custom_median,
         "optax_warm_seconds_median": optax_median,
         "custom_to_optax_warm_ratio": ratio,
+        # Memory maxima are recorded diagnostics per the 2026-08-03
+        # user-ratified ruling: the fused route trades resident memory
+        # for warm speed, so the plan's pre-measurement 1.5x memory
+        # thresholds are disclosed here rather than gated on.
+        "memory_ruling": "recorded-diagnostic-user-ratified-2026-08-03",
+        "custom_max_solver_rss_delta_kib": custom_rss_delta,
+        "optax_max_solver_rss_delta_kib": optax_rss_delta,
+        "custom_to_optax_rss_delta_ratio": (
+            custom_rss_delta / optax_rss_delta
+            if custom_rss_delta is not None
+            and optax_rss_delta is not None
+            and optax_rss_delta > 0.0
+            else None
+        ),
+        "custom_max_vram_mib": custom_vram,
+        "optax_max_vram_mib": optax_vram,
+        "custom_to_optax_vram_ratio": (
+            custom_vram / optax_vram
+            if custom_vram is not None and optax_vram is not None and optax_vram > 0.0
+            else None
+        ),
         "verdict": "pass" if passed else "fail",
     }
 

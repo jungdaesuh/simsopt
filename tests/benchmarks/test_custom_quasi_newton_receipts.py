@@ -503,6 +503,7 @@ def _performance_v7_runs(
     providers_by_run: tuple[tuple[str, ...], ...] | None = None,
     custom_route: str = "fused_stepwise",
     custom_intent: str = "fast",
+    optax_gpu_uuid: str | None = None,
 ) -> tuple[Path, ...]:
     seed = _runner_v7_directory(tmp_path)
     if providers_by_run is None:
@@ -534,6 +535,15 @@ def _performance_v7_runs(
             else:
                 row["intent"] = "fast"
                 row["solver_route"] = "optax_lbfgs"
+                if optax_gpu_uuid is not None:
+                    identity = dict(cast(dict[str, object], row["device_identity"]))
+                    identity["gpu_uuid"] = optax_gpu_uuid
+                    identity["visible_devices"] = optax_gpu_uuid
+                    row["device_identity"] = identity
+                    child_payload["device_identity"] = identity
+                    child_memory = _json_object(child_root / "memory.json")
+                    child_memory["gpu_uuid"] = optax_gpu_uuid
+                    _write_json(child_root / "memory.json", child_memory)
             child_payload["measurements"] = [row]
             _write_json(child_measurements, child_payload)
             rows.append(row)
@@ -625,12 +635,22 @@ def test_publish_performance_rejects_optax_pairing_across_source_runs(
     expected_qualification = {
         "passed": False,
         "failure_reasons": [
+            "custom-sample-count-below-5",
+            "optax-sample-count-below-5",
             "performance-0:coil47:optax-count",
             "performance-1:coil47:custom-count",
         ],
         "comparison_count": 0,
+        "minimum_samples_per_provider": 5,
         "custom_warm_seconds_median": 0.055,
         "optax_warm_seconds_median": 0.1,
+        "memory_ruling": "recorded-diagnostic-user-ratified-2026-08-03",
+        "custom_max_solver_rss_delta_kib": 20,
+        "optax_max_solver_rss_delta_kib": 20,
+        "custom_to_optax_rss_delta_ratio": 1.0,
+        "custom_max_vram_mib": 200,
+        "optax_max_vram_mib": 200,
+        "custom_to_optax_vram_ratio": 1.0,
         "verdict": "fail",
     }
     assert ratio == pytest.approx(0.55)
@@ -662,7 +682,9 @@ def test_publish_performance_rejects_warm_ratio_above_two(
     qualification = _json_object(destination / "manifest.json")["qualification"]
     assert qualification["passed"] is False
     assert qualification["failure_reasons"] == [
-        "custom-to-optax-warm-ratio-exceeds-2.0"
+        "custom-sample-count-below-5",
+        "custom-to-optax-warm-ratio-exceeds-2.0",
+        "optax-sample-count-below-5",
     ]
     assert qualification["comparison_count"] == 1
     assert qualification["custom_warm_seconds_median"] == 0.25
@@ -1270,3 +1292,72 @@ def test_unmapped_solver_route_conventions_fail_closed(
 ) -> None:
     with pytest.raises(ValueError, match="no status convention is recorded"):
         receipt_module._row_status_convention({"solver_route": route, "case": case})
+
+
+def test_performance_qualification_records_memory_diagnostics_on_pass(
+    tmp_path: Path,
+) -> None:
+    """Five matched pairs pass the enforced gates and record memory ratios."""
+
+    runs = _performance_v7_runs(
+        tmp_path,
+        warm_pairs=tuple((0.055, 0.1) for _ in range(5)),
+    )
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+    destination = tmp_path / "tracked" / "memory-diagnostics"
+
+    publish(
+        runs,
+        environment_lock=lock,
+        destination=destination,
+        archive_uri=(tmp_path / "archive" / "memory-diagnostics").as_uri(),
+        repo_root=tmp_path,
+        qualification_kind="performance",
+    )
+
+    qualification = cast(
+        dict[str, object], _json_object(destination / "manifest.json")["qualification"]
+    )
+    assert qualification["passed"] is True
+    assert qualification["verdict"] == "pass"
+    assert qualification["minimum_samples_per_provider"] == 5
+    assert (
+        qualification["memory_ruling"] == "recorded-diagnostic-user-ratified-2026-08-03"
+    )
+    assert qualification["custom_to_optax_rss_delta_ratio"] == 1.0
+    assert qualification["custom_to_optax_vram_ratio"] == 1.0
+    assert validate_all(destination, repo_root=tmp_path) == 0
+
+
+def test_performance_qualification_rejects_cross_device_pairs(
+    tmp_path: Path,
+) -> None:
+    """A custom/optax pair measured on different GPUs must fail pairing."""
+
+    runs = _performance_v7_runs(
+        tmp_path,
+        warm_pairs=tuple((0.055, 0.1) for _ in range(5)),
+        optax_gpu_uuid="GPU-different",
+    )
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+    destination = tmp_path / "tracked" / "cross-device-pair"
+
+    publish(
+        runs,
+        environment_lock=lock,
+        destination=destination,
+        archive_uri=(tmp_path / "archive" / "cross-device-pair").as_uri(),
+        repo_root=tmp_path,
+        qualification_kind="performance",
+    )
+
+    qualification = cast(
+        dict[str, object], _json_object(destination / "manifest.json")["qualification"]
+    )
+    assert qualification["passed"] is False
+    assert "performance-0:coil47:pair-gpu_uuid-mismatch" in cast(
+        list[str], qualification["failure_reasons"]
+    )
+    assert _json_object(destination / "manifest.json")["verdict"] == "fail"

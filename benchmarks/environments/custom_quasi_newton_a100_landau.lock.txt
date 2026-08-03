@@ -12,7 +12,11 @@
 # landau-built cpython-311 extension from the prior landau session
 # (source tree src/simsoptpp is byte-identical from that build's commit
 # 898e16dd7 through 55745feaf), copied into the venv rather than
-# pip-installed.
+# pip-installed. Binary binding:
+# sha256(simsoptpp.cpython-311-x86_64-linux-gnu.so) =
+# c6791771e9808d74dade76fc02358e31703743450552c674082fe3f4b4452ab8
+# (identical in the source venv ~/simsopt-jax-landau/venv and the copy
+# in ~/qn-a100/venv, verified 2026-08-03).
 absl-py==2.5.0
 bentley-ottmann==8.0.0
 cfractions==2.6.1
