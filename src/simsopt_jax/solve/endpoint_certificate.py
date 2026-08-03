@@ -19,13 +19,14 @@ StoppingReason = Literal[
     "nonfinite",
     "failed",
 ]
-StatusConvention = Literal["bfgs", "host-lbfgsb", "scipy-lbfgsb"]
+StatusConvention = Literal["bfgs", "host-lbfgsb", "scipy-lbfgsb", "optax-lbfgs"]
 
 _SUCCESS_STATUSES: Final[Mapping[StatusConvention, frozenset[int]]] = MappingProxyType(
     {
         "bfgs": frozenset({0}),
         "host-lbfgsb": frozenset({0, 4}),
         "scipy-lbfgsb": frozenset({0}),
+        "optax-lbfgs": frozenset({0}),
     }
 )
 _FAILURE_REASON_BY_STATUS: Final[
@@ -55,6 +56,16 @@ _FAILURE_REASON_BY_STATUS: Final[
             {
                 1: "iteration-limit",
                 2: "line-search-failed",
+            }
+        ),
+        # The Optax lane emits its own vocabulary (benchmarks runtime
+        # _run_optax): 2 is a Wolfe line-search failure, never an
+        # evaluation budget.
+        "optax-lbfgs": MappingProxyType(
+            {
+                1: "iteration-limit",
+                2: "line-search-failed",
+                6: "nonfinite",
             }
         ),
     }
@@ -88,8 +99,10 @@ def status_convention_for(provider: str, method: str) -> StatusConvention:
         return "bfgs"
     if method == "lbfgs" and provider == "native":
         return "scipy-lbfgsb"
-    if method == "lbfgs" and provider in ("custom", "optax"):
+    if method == "lbfgs" and provider == "custom":
         return "host-lbfgsb"
+    if method == "lbfgs" and provider == "optax":
+        return "optax-lbfgs"
     raise ValueError(
         "unsupported optimizer status convention for "
         f"provider={provider!r}, method={method!r}"

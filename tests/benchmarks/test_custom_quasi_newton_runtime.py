@@ -645,6 +645,8 @@ def test_monitor_failure_prevents_child_payload_promotion(
         ("host-lbfgsb", 3, 20, 2, False, True, "evaluation-limit"),
         ("host-lbfgsb", 3, 20, 5, False, True, "line-search-failed"),
         ("scipy-lbfgsb", 3, 20, 2, False, True, "line-search-failed"),
+        ("optax-lbfgs", 3, 20, 2, False, True, "line-search-failed"),
+        ("optax-lbfgs", 3, 20, 6, False, True, "nonfinite"),
     ],
 )
 def test_stopping_reason_labels_terminal_state(

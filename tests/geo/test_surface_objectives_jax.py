@@ -6289,7 +6289,10 @@ def test_traceable_general_only_bundle_defers_gradient_jits(monkeypatch):
         general_only_forward=True,
     )
 
-    assert observed_jit_names == ["_forward_result_for"]
+    assert observed_jit_names == [
+        "_forward_result_for",
+        "_forward_result_from_anchor_for",
+    ]
     assert len(mark_calls) == 1
     assert (
         getattr(
@@ -6305,7 +6308,11 @@ def test_traceable_general_only_bundle_defers_gradient_jits(monkeypatch):
         jnp.asarray([3.0], dtype=jnp.float64),
         None,
     )
-    assert observed_jit_names == ["_forward_result_for", "_total_gradient_for"]
+    assert observed_jit_names == [
+        "_forward_result_for",
+        "_forward_result_from_anchor_for",
+        "_total_gradient_for",
+    ]
     np.testing.assert_allclose(np.asarray(grad), np.asarray([2.0, -4.0]))
     assert bool(np.asarray(success))
 
@@ -6314,6 +6321,7 @@ def test_traceable_general_only_bundle_defers_gradient_jits(monkeypatch):
     )
     assert observed_jit_names == [
         "_forward_result_for",
+        "_forward_result_from_anchor_for",
         "_total_gradient_for",
         "_value_and_grad_for",
     ]

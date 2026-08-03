@@ -207,7 +207,7 @@ def test_invalid_iteration_budgets_are_rejected_fail_closed(
 
 @pytest.mark.parametrize(
     "status_convention",
-    ("bfgs", "host-lbfgsb", "scipy-lbfgsb"),
+    ("bfgs", "host-lbfgsb", "scipy-lbfgsb", "optax-lbfgs"),
 )
 @pytest.mark.parametrize("provider_status", (2, 5, 6, 99, None, 42))
 def test_provider_success_with_non_success_status_fails_closed(
@@ -251,7 +251,13 @@ def test_contradictory_success_status_precedes_nonfinite_reason() -> None:
 
 @pytest.mark.parametrize(
     ("status_convention", "provider_status"),
-    (("bfgs", 0), ("host-lbfgsb", 0), ("host-lbfgsb", 4), ("scipy-lbfgsb", 0)),
+    (
+        ("bfgs", 0),
+        ("host-lbfgsb", 0),
+        ("host-lbfgsb", 4),
+        ("scipy-lbfgsb", 0),
+        ("optax-lbfgs", 0),
+    ),
 )
 def test_provider_success_with_convention_success_status_can_certify(
     status_convention: StatusConvention,
@@ -290,6 +296,9 @@ def test_provider_success_with_convention_success_status_can_certify(
         ("host-lbfgsb", 99, "callback-stopped"),
         ("scipy-lbfgsb", 1, "iteration-limit"),
         ("scipy-lbfgsb", 2, "line-search-failed"),
+        ("optax-lbfgs", 1, "iteration-limit"),
+        ("optax-lbfgs", 2, "line-search-failed"),
+        ("optax-lbfgs", 6, "nonfinite"),
     ),
 )
 def test_provider_failure_uses_convention_specific_reason(
@@ -345,7 +354,7 @@ def test_unknown_failure_status_uses_iteration_budget_fallback(
         ("custom", "bfgs", "bfgs"),
         ("native", "bfgs", "bfgs"),
         ("custom", "lbfgs", "host-lbfgsb"),
-        ("optax", "lbfgs", "host-lbfgsb"),
+        ("optax", "lbfgs", "optax-lbfgs"),
         ("native", "lbfgs", "scipy-lbfgsb"),
     ),
 )
@@ -355,6 +364,24 @@ def test_status_convention_follows_provider_and_method(
     expected_convention: StatusConvention,
 ) -> None:
     assert status_convention_for(provider, method) == expected_convention
+
+
+def test_optax_success_claim_with_host_lbfgsb_success_status_fails_closed() -> None:
+    certificate = certify_optimization_endpoint(
+        provider_success=True,
+        provider_status=4,
+        status_convention="optax-lbfgs",
+        iterations=1,
+        max_iterations=1000,
+        initial_gradient_inf_norm=1.0e-3,
+        final_gradient_inf_norm=1.0e-8,
+        parameters_finite=True,
+        observables_finite=True,
+        inner_success=True,
+    )
+
+    assert certificate.stopping_reason == "failed"
+    assert certificate.success is False
 
 
 def test_unsupported_provider_method_pair_has_no_status_fallback() -> None:
