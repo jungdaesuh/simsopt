@@ -737,3 +737,53 @@ def test_merged_budget_status_discriminates_on_iteration_evidence(
         )
         == "iteration-limit"
     )
+
+
+def test_scipy_bfgs_failure_statuses_certify_from_the_real_emitter() -> None:
+    import numpy as np
+    from scipy import optimize
+
+    def nan_after_moving(x):
+        moved = float(np.sum((x - 1.0) ** 2)) > 0.0
+        return float("nan") if moved else float(np.sum(x**2))
+
+    nan_result = optimize.minimize(
+        nan_after_moving,
+        np.ones(2, dtype=np.float64),
+        method="BFGS",
+        options={"maxiter": 50},
+    )
+    assert int(nan_result.status) == 3
+    assert (
+        _certify_emitter_result(
+            convention="scipy-bfgs",
+            success=bool(nan_result.success),
+            status=int(nan_result.status),
+            iterations=int(nan_result.nit),
+            max_iterations=50,
+        )
+        == "nonfinite"
+    )
+
+    def rosenbrock(x):
+        return float(
+            np.sum(100.0 * (x[1:] - x[:-1] ** 2) ** 2 + (1.0 - x[:-1]) ** 2)
+        )
+
+    limited = optimize.minimize(
+        rosenbrock,
+        np.asarray([-1.2, 1.0], dtype=np.float64),
+        method="BFGS",
+        options={"maxiter": 2},
+    )
+    assert int(limited.status) == 1
+    assert (
+        _certify_emitter_result(
+            convention="scipy-bfgs",
+            success=bool(limited.success),
+            status=int(limited.status),
+            iterations=int(limited.nit),
+            max_iterations=2,
+        )
+        == "iteration-limit"
+    )

@@ -296,7 +296,7 @@ def test_parent_forwards_and_binds_opt_in_boozer_trial_trace(
             device_identity=identity,
             method="bfgs",
             case="boozer",
-            solver_route="custom_bfgs_stepwise",
+            solver_route="custom_bfgs_host_incumbent",
             maxiter=2,
             trial_trace=trial_trace.name,
             capture_boozer_trial_trace=True,
@@ -339,7 +339,7 @@ def test_parent_forwards_and_binds_opt_in_boozer_trial_trace(
     } == {
         "manifest_path": trial_trace_path,
         "expected_provider": "custom",
-        "expected_production_route": "custom_bfgs_stepwise",
+        "expected_production_route": "custom_bfgs_host_incumbent",
         "expected_maxiter": 2,
         "expected_evaluations": 0,
         "expected_final_objective": 0.0,
@@ -356,7 +356,7 @@ def test_parent_forwards_and_binds_opt_in_boozer_trial_trace(
     ("child_route", "child_maxiter", "message"),
     (
         ("wrong-route", 2, "solver route"),
-        ("custom_bfgs_stepwise", 3, "maxiter"),
+        ("custom_bfgs_host_incumbent", 3, "maxiter"),
     ),
 )
 def test_parent_rejects_child_boozer_trial_trace_contract_drift(
@@ -866,7 +866,7 @@ def test_provider_child_opt_in_writes_and_attaches_boozer_trial_trace(
     row = {
         "case": "boozer",
         "provider": "custom",
-        "solver_route": "custom_bfgs_stepwise",
+        "solver_route": "custom_bfgs_host_incumbent",
         "maxiter": 2,
         "evaluations": 3,
         "final_parameters": (0.25,),
