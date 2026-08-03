@@ -787,3 +787,24 @@ def test_scipy_bfgs_failure_statuses_certify_from_the_real_emitter() -> None:
         )
         == "iteration-limit"
     )
+
+    def nonsmooth(x):
+        return float(np.sum(np.abs(x)))
+
+    precision_loss = optimize.minimize(
+        nonsmooth,
+        np.ones(2, dtype=np.float64) * 0.3,
+        method="BFGS",
+        options={"maxiter": 50},
+    )
+    assert int(precision_loss.status) == 2
+    assert (
+        _certify_emitter_result(
+            convention="scipy-bfgs",
+            success=bool(precision_loss.success),
+            status=int(precision_loss.status),
+            iterations=int(precision_loss.nit),
+            max_iterations=50,
+        )
+        == "line-search-failed"
+    )

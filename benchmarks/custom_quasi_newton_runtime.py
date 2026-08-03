@@ -1253,18 +1253,30 @@ def _measurement(
             )
         phase_rss.append(memory_phase.measurement())
     solver_start_rss_kib = _current_rss_kib()
+    # One route decision drives preparation, execution, and the persisted
+    # row; divergent per-site route expressions previously allowed a
+    # mislabeled measurement.
+    solver_route = _solver_route(
+        provider,
+        method,
+        intent=intent,
+        accepted_incumbent=bool(
+            provider == "custom"
+            and method == "bfgs"
+            and fixture_case.accepted_incumbent_host_value_and_grad is not None
+        ),
+    )
     prepared_custom: _PreparedCustom | None = None
     prepared_optax: _PreparedOptax | None = None
     preparation_seconds = 0.0
     if provider == "custom" and method == "lbfgs":
-        run_mode = "fused_stepwise" if intent == "fast" else "stepwise"
         preparation_started = time.perf_counter()
         with _RSSPhase("preparation") as preparation_phase:
             prepared_custom = _prepare_custom(
                 fixture_case,
                 x0,
                 maxcor=maxcor,
-                run_mode=run_mode,
+                run_mode=solver_route,
             )
         phase_rss.append(preparation_phase.measurement())
         preparation_seconds = time.perf_counter() - preparation_started
@@ -1295,11 +1307,7 @@ def _measurement(
                 maxiter=maxiter,
                 maxcor=maxcor,
                 method=method,
-                run_mode=(
-                    "fused_stepwise"
-                    if intent == "fast" and method == "lbfgs"
-                    else "stepwise"
-                ),
+                run_mode=(solver_route if method == "lbfgs" else "stepwise"),
                 prepared=prepared_custom,
             )
         if method != "lbfgs":
@@ -1455,9 +1463,7 @@ def _measurement(
         entry.calls for entry in warm_transfer_audit if entry.phase == "advance"
     )
     if (
-        provider == "custom"
-        and method == "lbfgs"
-        and intent == "fast"
+        solver_route == "fused_stepwise"
         and advance_observations > iteration_count + 1
     ):
         raise RuntimeError(
@@ -1470,16 +1476,7 @@ def _measurement(
         method=method,
         device=device,
         intent=intent,
-        solver_route=_solver_route(
-            provider,
-            method,
-            intent=intent,
-            accepted_incumbent=bool(
-                provider == "custom"
-                and method == "bfgs"
-                and fixture_case.accepted_incumbent_host_value_and_grad is not None
-            ),
-        ),
+        solver_route=solver_route,
         device_identity=_device_identity(device),
         dimension=fixture_case.expected_dimension,
         maxiter=maxiter,

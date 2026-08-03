@@ -1925,3 +1925,49 @@ def test_measurement_threads_custom_final_incumbent_to_scientific_endpoint(
     assert received_states[0] is incumbent_state
     assert measurement.inner_success is True
     assert measurement.scientific_observables["final_iota"] == pytest.approx(-0.19)
+
+
+def test_device_identity_binds_smi_argv_selection_and_device_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The smi query must stay pre-r510-safe and capability must come from
+    the same bound JAX device that names the CUDA backend."""
+
+    observed_argv: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        observed_argv.append(list(argv))
+        return SimpleNamespace(
+            stdout=(
+                "0, GPU-other, NVIDIA A100-PCIE-40GB, 40960, 470.256.02\n"
+                "1, GPU-bound, NVIDIA A100-PCIE-40GB, 40960, 470.256.02\n"
+            ),
+            returncode=0,
+        )
+
+    bound_device = SimpleNamespace(
+        id=1,
+        process_index=0,
+        platform="gpu",
+        device_kind="NVIDIA A100-PCIE-40GB",
+        compute_capability="8.0",
+        client=SimpleNamespace(platform_version="cuda 12060"),
+    )
+    monkeypatch.setattr(runtime.subprocess, "run", fake_run)
+    monkeypatch.setattr(runtime.jax, "devices", lambda: (bound_device,))
+    monkeypatch.setattr(runtime.jax, "default_backend", lambda: "gpu")
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+    identity = runtime._device_identity("gpu")
+
+    assert observed_argv == [
+        [
+            "nvidia-smi",
+            "--query-gpu=index,uuid,name,memory.total,driver_version",
+            "--format=csv,noheader,nounits",
+        ]
+    ]
+    assert identity.gpu_uuid == "GPU-bound"
+    assert identity.compute_capability == "8.0"
+    assert identity.driver_version == "470.256.02"
+    assert identity.device_id == 1
