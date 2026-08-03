@@ -24,10 +24,20 @@ import yaml
 from datetime import datetime, timedelta
 from scipy.optimize import minimize
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'utils'))
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_THIS_DIR, 'utils'))
+sys.path.insert(0, os.path.join(_THIS_DIR, 'new_objectives'))
 from output_dir import resolve_output_dir
 from current_penalty import CurrentPenaltyWrapper
+from hardware_metrics import (
+    boozer_json_vacuum_lineage,
+    curve_poloidal_half_extent,
+)
 from run_registry import RunRegistry, artifact_path, install_atexit_handler, run_dir
+from poloidal_extent import PoloidalExtent
+from ellipse_width import ProjectedEllipseWidth
+from self_intersect import CurveSelfIntersect
+from global_curvature_radius import GlobalRadiusCurvature
 
 from simsopt._core import load
 from simsopt.geo import (
@@ -56,12 +66,18 @@ TF_NUM = cfg['tf_coils']['num']
 # Banana coils
 BANANA_CURV_P              = cfg['banana_coils']['curv_p']
 BANANA_CURRENT_MAX         = cfg['banana_coils']['current_max']
-BANANA_CURRENT_SOFT_MAX_S2 = cfg['banana_coils']['current_soft_max_stage2']
 BANANA_CURRENT_FIXED_S2    = float(os.environ.get(
     'BANANA_I_FIXED_S2',
     cfg['banana_coils']['current_fixed_stage2']
 ))
 BANANA_CURRENT_CAP         = cfg['banana_coils'].get('current_cap_stage2', True)
+WINDING_R0                 = float(cfg['winding_surface']['R0'])
+WINDING_A                  = float(cfg['winding_surface']['a'])
+# TF current penalty bound: |I_tf| penalized above its operating magnitude
+# (80 kA), matching the reference hardware limit. TF coils are the fixed
+# background field, so this term is normally inactive; it guards against an
+# unfixed TF current drifting past hardware.
+TF_CURRENT_MAX             = abs(float(cfg['tf_coils']['current']))
 
 # Stage 2 current handling: 'free' | 'penalized' | 'fixed'
 STAGE2_CURRENT_MODE = os.environ.get(
@@ -79,6 +95,13 @@ LENGTH_MAX_HW = float(cfg['thresholds']['length_max'])
 LENGTH_TARGET_HW = float(cfg['thresholds']['length_target'])
 CC_MIN_HW     = float(cfg['thresholds']['coil_coil_min'])
 CURV_MAX_HW   = float(cfg['thresholds']['curvature_max'])
+# Width and self-intersection targets are enforced unmodified (no stage 2
+# relaxation), matching the banana_drivers reference objective set.
+WIDTH_MAX_HW   = float(cfg['thresholds']['width_max'])
+WIDTH_MIN_HW   = float(cfg['thresholds']['width_min'])
+SELFINT_MIN_HW = float(cfg['thresholds']['self_intersect_min'])
+GCR_MIN_HW     = float(cfg['thresholds']['global_curvature_radius_min'])
+GCR_EXP_WEIGHT = float(cfg['thresholds']['global_curvature_exp_weight'])
 
 # Stage 2 per-threshold relaxation factors (env var > config > 1.0).
 # Stage 2 only needs coils good enough for singlestage to polish; relaxing
@@ -89,11 +112,15 @@ CC_RELAX     = float(os.environ.get(
     'BANANA_STAGE2_CC_RELAX',     cfg['stage2_relaxation']['coil_coil']))
 CURV_RELAX   = float(os.environ.get(
     'BANANA_STAGE2_CURV_RELAX',   cfg['stage2_relaxation']['curvature']))
+POLOIDAL_RELAX = float(cfg['stage2_relaxation']['poloidal_extent'])
 
 # Effective thresholds seen by the stage 2 objective.
 LENGTH_THRESHOLD = LENGTH_TARGET_HW * LENGTH_RELAX
 CC_THRESHOLD     = CC_MIN_HW     / CC_RELAX
 CURV_THRESHOLD   = CURV_MAX_HW   * CURV_RELAX
+POLOIDAL_THRESHOLD_RAD = np.deg2rad(
+    float(cfg['thresholds']['poloidal_half_width_max_deg']) * POLOIDAL_RELAX
+)
 
 # Weighted-mode params
 STAGE2_MODE = 'weighted'
@@ -101,7 +128,11 @@ SQF_WEIGHT  = float(cfg['stage2_weights']['squared_flux'])
 LEN_WEIGHT  = float(cfg['stage2_weights']['length'])
 CC_WEIGHT   = float(cfg['stage2_weights']['coil_coil'])
 CURV_WEIGHT = float(cfg['stage2_weights']['curvature'])
+POL_WEIGHT  = float(cfg['stage2_weights']['poloidal_extent'])
 CURR_WEIGHT = float(cfg['stage2_weights']['current'])
+WIDTH_WEIGHT   = float(cfg['stage2_weights']['width'])
+SELFINT_WEIGHT = float(cfg['stage2_weights']['selfint'])
+GCR_WEIGHT     = float(cfg['stage2_weights']['global_curvature'])
 
 MAXITER = int(cfg['stage2_optimizer']['maxiter'])
 MAXCOR  = int(cfg['stage2_optimizer']['maxcor'])
@@ -144,10 +175,12 @@ cfg['banana_coils']['current_fixed_stage2']       = BANANA_CURRENT_FIXED_S2
 cfg['stage2_relaxation']['length']                = LENGTH_RELAX
 cfg['stage2_relaxation']['coil_coil']             = CC_RELAX
 cfg['stage2_relaxation']['curvature']             = CURV_RELAX
+cfg['stage2_relaxation']['poloidal_extent']       = POLOIDAL_RELAX
 
 registry = RunRegistry()
 RUN_ID, _is_new = registry.register_stage2(cfg, stage1_id=STAGE1_ID,
                                            slurm_meta=_slurm_meta)
+install_atexit_handler(registry, "stage2", RUN_ID)
 
 RUN_DIR = run_dir("stage2", RUN_ID, OUT_DIR)
 os.makedirs(RUN_DIR, exist_ok=True)
@@ -168,7 +201,6 @@ def _emit_out_dir_on_exit():
 
 
 atexit.register(_emit_out_dir_on_exit)
-install_atexit_handler(registry, "stage2", RUN_ID)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -191,20 +223,30 @@ INPUT PARAMETERS ─────────────────────
         current_max (HW) = {BANANA_CURRENT_MAX/1e3:.1f} kA  (enforced in singlestage)
         current_mode_s2  = {STAGE2_CURRENT_MODE}
         current_fixed_s2 = {BANANA_CURRENT_FIXED_S2/1e3:.1f} kA  (used when mode='fixed')
-        current_soft_max = {BANANA_CURRENT_SOFT_MAX_S2/1e3:.1f} kA  (used when mode='penalized')
+        current_pen_max  = {BANANA_CURRENT_MAX/1e3:.1f} kA banana / {TF_CURRENT_MAX/1e3:.1f} kA TF  (penalty thresholds when mode='penalized')
         current_cap_hard = {BANANA_CURRENT_CAP} (L-BFGS-B bound)
+        winding_surface  = R0 {WINDING_R0:.3f} m, a {WINDING_A:.3f} m
 
     Thresholds (HW tolerance × stage 2 relaxation = effective):
         length_abs  = {LENGTH_MAX_HW} m
         length_tgt  = {LENGTH_TARGET_HW} m × {LENGTH_RELAX} = {LENGTH_THRESHOLD} m
+        length_min  = {LENGTH_THRESHOLD/2} m  (half the max-length threshold)
         cc_min      = {CC_MIN_HW} m        / {CC_RELAX}     = {CC_THRESHOLD} m
         curv_max    = {CURV_MAX_HW} m^-1   × {CURV_RELAX}   = {CURV_THRESHOLD} m^-1
+        poloidal    = {cfg['thresholds']['poloidal_half_width_max_deg']} deg × {POLOIDAL_RELAX} = {POLOIDAL_THRESHOLD_RAD:.6f} rad
+        width       = [{WIDTH_MIN_HW}, {WIDTH_MAX_HW}] m
+        selfint     = {SELFINT_MIN_HW} m
+        gcr_min     = {GCR_MIN_HW} m  (barrier softness {GCR_EXP_WEIGHT} m)
 
     Objective weights:
         squared_flux = {SQF_WEIGHT:.3e}
         length       = {LEN_WEIGHT:.3e}
         coil_coil    = {CC_WEIGHT:.3e}
         curvature    = {CURV_WEIGHT:.3e}
+        poloidal     = {POL_WEIGHT:.3e}
+        width        = {WIDTH_WEIGHT:.3e}
+        selfint      = {SELFINT_WEIGHT:.3e}{'' if SELFINT_WEIGHT else '  (diagnostic only)'}
+        global_curv  = {GCR_WEIGHT:.3e}{'' if GCR_WEIGHT else '  (diagnostic only)'}
         current      = {CURR_WEIGHT:.3e}  (used when current_mode_s2='penalized')
 
     Optimizer (L-BFGS-B):
@@ -226,12 +268,13 @@ boozersurface = load(INIT_BSURF_FILE)
 surface = boozersurface.surface
 biotsavart = boozersurface.biotsavart
 coils = biotsavart.coils
-curves = [coil.curve for coil in coils]
 
 tf_coils = coils[:TF_NUM]
 banana_coils = coils[TF_NUM:]
-banana_curve = banana_coils[0].curve
+banana_curves = [coil.curve for coil in banana_coils]
+banana_curve = banana_curves[0]
 banana_current = banana_coils[0].current
+tf_current_0 = tf_coils[0].current
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Apply current mode: pin + fix the DOF when mode='fixed'.
@@ -268,17 +311,58 @@ Bdotn_surf = np.sum(Bbs * surface.unitnormal(), axis=-1)
 Jsqf  = SquaredFlux(surface, biotsavart, definition="normalized")
 _Jl   = CurveLength(banana_curve)
 Jl    = QuadraticPenalty(_Jl, LENGTH_THRESHOLD, "max")
-Jcc   = CurveCurveDistance(curves, CC_THRESHOLD)
+# Lower length bound at half the max-length threshold (reference: max_length/2)
+# keeps the coil from collapsing while the other penalties pull it inward.
+Jl_min = QuadraticPenalty(_Jl, LENGTH_THRESHOLD / 2, "min")
+# Coil-coil distance over banana coils only — TF coils are fixed background,
+# so TF-TF and TF-banana pairs add no gradient (matches the reference).
+Jcc   = CurveCurveDistance(banana_curves, CC_THRESHOLD)
 Jcurv = LpCurveCurvature(banana_curve, BANANA_CURV_P, CURV_THRESHOLD)
-# Current soft-cap (only used when mode='penalized'): QuadraticPenalty(|I|,
-# soft_max, "max") clips to 0 below the soft max.
+Jpol  = PoloidalExtent(
+    banana_curve, WINDING_R0, POLOIDAL_THRESHOLD_RAD, p=BANANA_CURV_P
+)
+# Projected-ellipse width, bounded above (port-fit) and below (anti-collapse).
+_width = ProjectedEllipseWidth(banana_curve, WINDING_R0, WINDING_A)
+Jwmax  = QuadraticPenalty(_width, WIDTH_MAX_HW, "max")
+Jwmin  = QuadraticPenalty(_width, WIDTH_MIN_HW, "min")
+# Self-intersection hinge (figure-8 prevention); neighbor_skip = int(1.5*order)
+# mirrors the reference.
+Jself  = CurveSelfIntersect(
+    banana_curve, SELFINT_MIN_HW, int(1.5 * banana_curve.order)
+)
+# Gonzalez-Maddocks global radius of curvature: the same self-contact
+# constraint as Jself, but smooth on its noncoincident/nonparallel branch and
+# summed over every near-contact pair rather than hinged on the single worst
+# one. Its exponential penalty is finite; exact sampled coincidences receive
+# radius zero. Only one of the two belongs in JF; both are reported.
+Jgcr   = GlobalRadiusCurvature(banana_curve, GCR_MIN_HW, GCR_EXP_WEIGHT)
+# Current penalty (only when mode='penalized'): penalize |I_banana| above the
+# 16 kA hardware limit and |I_tf| above 80 kA, matching the reference. In
+# 'fixed' mode the banana current is pinned and dropped from the DOF set; in
+# 'free' mode it is left unconstrained — both omit this term.
 if STAGE2_CURRENT_MODE == 'penalized':
-    _Jcurr = CurrentPenaltyWrapper(banana_current)
-    Jcurr  = QuadraticPenalty(_Jcurr, BANANA_CURRENT_SOFT_MAX_S2, "max")
+    _Jbananacurr = CurrentPenaltyWrapper(banana_current)
+    Jbananacurr  = QuadraticPenalty(_Jbananacurr, BANANA_CURRENT_MAX, "max")
+    _Jtfcurr     = CurrentPenaltyWrapper(tf_current_0)
+    Jtfcurr      = QuadraticPenalty(_Jtfcurr, TF_CURRENT_MAX, "max")
+    Jcurr        = Jtfcurr + Jbananacurr
 else:
     Jcurr = None
 
-JF = (SQF_WEIGHT * Jsqf) + (LEN_WEIGHT * Jl) + (CC_WEIGHT * Jcc) + (CURV_WEIGHT * Jcurv)
+JF = (SQF_WEIGHT * Jsqf) + (LEN_WEIGHT * Jl) + (LEN_WEIGHT * Jl_min) \
+   + (CC_WEIGHT * Jcc) + (CURV_WEIGHT * Jcurv) + (POL_WEIGHT * Jpol) \
+   + (WIDTH_WEIGHT * (Jwmax + Jwmin))
+
+# Self-contact: Jgcr and Jself enforce the same constraint by different
+# means, so whichever carries a nonzero weight owns it and the other stays a
+# reported diagnostic. Zero-weight terms are left out of JF entirely rather
+# than added as 0*J — CurveSelfIntersect is O(N^2) per evaluation and there
+# is no reason to pay for it on the critical path.
+if GCR_WEIGHT:
+    JF = JF + (GCR_WEIGHT * Jgcr)
+if SELFINT_WEIGHT:
+    JF = JF + (SELFINT_WEIGHT * Jself)
+
 if Jcurr is not None:
     JF = JF + (CURR_WEIGHT * Jcurr)
 
@@ -310,6 +394,9 @@ INITIAL STATE ──────────────────────
         Banana coil length:              {_Jl.J():.6e} m
         CC separation (shortest_dist):   {Jcc.shortest_distance():.6e} m
         Max curvature (kappa.max):       {banana_curve.kappa().max():.6e} m^-1
+        Poloidal half extent:            {curve_poloidal_half_extent(banana_curve, WINDING_R0):.6e} rad
+        Min global curv radius:          {Jgcr.shortest_radius():.6e} m (limit: {GCR_MIN_HW:.3e} m)
+        Shortest self-distance:          {Jself.shortest_self_distance():.6e} m (limit: {SELFINT_MIN_HW:.3e} m)
 
     Objective ({STAGE2_MODE}):
 {_format_objective_block()}
@@ -319,6 +406,7 @@ INITIAL STATE ──────────────────────
         Length penalty (QuadPen.J):      {Jl.J():.6e}
         CC distance penalty:             {Jcc.J():.6e}
         Curvature penalty (LpCurvCurv):  {Jcurv.J():.6e}
+        Poloidal extent penalty:         {Jpol.J():.6e}
 
     n_dofs = {len(JF.x)}
 """
@@ -348,7 +436,10 @@ def _write_diagnostics_row(J, dJ, t0):
         f"{Jsqf.J():.6e},"
         f"{_Jl.J():.6e},"
         f"{Jcc.shortest_distance():.6e},"
-        f"{banana_curve.kappa().max():.6e}"
+        f"{banana_curve.kappa().max():.6e},"
+        f"{curve_poloidal_half_extent(banana_curve, WINDING_R0):.6e},"
+        f"{Jgcr.shortest_radius():.6e},"
+        f"{Jself.shortest_self_distance():.6e}"
     )
     proc0_print(row)
     with open(DIAGNOSTICS_FILE, 'a') as f:
@@ -380,6 +471,9 @@ def _print_state(iter_label):
         Banana coil length:              {_Jl.J():.6e} m
         CC separation (shortest_dist):   {Jcc.shortest_distance():.6e} m
         Max curvature (kappa.max):       {banana_curve.kappa().max():.6e} m^-1
+        Poloidal half extent:            {curve_poloidal_half_extent(banana_curve, WINDING_R0):.6e} rad
+        Min global curv radius:          {Jgcr.shortest_radius():.6e} m (limit: {GCR_MIN_HW:.3e} m)
+        Shortest self-distance:          {Jself.shortest_self_distance():.6e} m (limit: {SELFINT_MIN_HW:.3e} m)
 
     Objective ({STAGE2_MODE}):
 {_format_objective_block()}
@@ -389,6 +483,7 @@ def _print_state(iter_label):
         Length penalty (QuadPen.J):      {Jl.J():.6e}
         CC distance penalty:             {Jcc.J():.6e}
         Curvature penalty (LpCurvCurv):  {Jcurv.J():.6e}
+        Poloidal extent penalty:         {Jpol.J():.6e}
 """
     )
 
@@ -409,11 +504,11 @@ def callback_weighted(x):
 t0 = time.time()
 
 with open(DIAGNOSTICS_FILE, 'w') as f:
-    f.write(f'# Stage 2 Diagnostics\n')
+    f.write('# Stage 2 Diagnostics\n')
     f.write(f'# Date: {datetime.now()}\n')
     f.write(f'# Mode: {STAGE2_MODE}\n')
     f.write(f'# TF: {len(tf_coils)} coils, Banana: {banana_current.get_value()/1e3:.0f} kA (init)\n')
-    f.write(f'# LENGTH_THRESHOLD={LENGTH_THRESHOLD}, CC_THRESHOLD={CC_THRESHOLD}, CURV_THRESHOLD={CURV_THRESHOLD}\n')
+    f.write(f'# LENGTH_THRESHOLD={LENGTH_THRESHOLD}, CC_THRESHOLD={CC_THRESHOLD}, CURV_THRESHOLD={CURV_THRESHOLD}, POLOIDAL_THRESHOLD_RAD={POLOIDAL_THRESHOLD_RAD}\n')
     f.write(f'# MAXITER={MAXITER}, FTOL={FTOL:.3e}, GTOL={GTOL:.3e}\n')
     f.write(
         'iter,eval,runtime,'
@@ -421,7 +516,10 @@ with open(DIAGNOSTICS_FILE, 'w') as f:
         'sqflx,'
         'coil_length,'
         'ccdist,'
-        'max_kappa\n'
+        'max_kappa,'
+        'poloidal_extent_rad,'
+        'min_global_curv_radius,'
+        'shortest_self_distance\n'
     )
 
 
@@ -542,6 +640,9 @@ FINAL STATE ──────────────────────�
         Banana coil length:              {_Jl.J():.6e} m
         CC separation (shortest_dist):   {Jcc.shortest_distance():.6e} m
         Max curvature (kappa.max):       {banana_curve.kappa().max():.6e} m^-1
+        Poloidal half extent:            {curve_poloidal_half_extent(banana_curve, WINDING_R0):.6e} rad
+        Min global curv radius:          {Jgcr.shortest_radius():.6e} m (limit: {GCR_MIN_HW:.3e} m)
+        Shortest self-distance:          {Jself.shortest_self_distance():.6e} m (limit: {SELFINT_MIN_HW:.3e} m)
 
     Objective ({STAGE2_MODE}):
 {_format_objective_block()}
@@ -551,6 +652,7 @@ FINAL STATE ──────────────────────�
         Length penalty (QuadPen.J):      {Jl.J():.6e}
         CC distance penalty:             {Jcc.J():.6e}
         Curvature penalty (LpCurvCurv):  {Jcurv.J():.6e}
+        Poloidal extent penalty:         {Jpol.J():.6e}
 """
 )
 
@@ -562,6 +664,7 @@ FINAL STATE ──────────────────────�
 _bsurf_kind = "bsurf_opt" if stage2_ok else "bsurf_failed"
 _bsurf_out_path = artifact_path("stage2", RUN_ID, OUT_DIR, _bsurf_kind)
 boozersurface.save(_bsurf_out_path)
+_lineage_metrics = boozer_json_vacuum_lineage(_bsurf_out_path)
 
 proc0_print(f'Diagnostics saved to {DIAGNOSTICS_FILE}')
 proc0_print(f'Outputs saved to {RUN_DIR}')
@@ -578,7 +681,30 @@ _metrics = {
     "final_min_cs_dist":    None,
     "final_banana_current": float(banana_current.get_value()),
     "runtime_s":            float(opt_runtime),
+    "tf_current_A":          float(cfg['tf_coils']['current']),
+    "banana_current_max_abs_A": float(abs(banana_current.get_value())),
+    "banana_current_limit_A": float(BANANA_CURRENT_MAX),
+    "length_target_m":       float(LENGTH_TARGET_HW),
+    "length_abs_max_m":      float(LENGTH_MAX_HW),
+    "coil_coil_min_threshold_m": float(CC_MIN_HW),
+    "curvature_threshold_inv_m": float(CURV_MAX_HW),
+    "poloidal_extent_rad":   float(curve_poloidal_half_extent(banana_curve, WINDING_R0)),
+    "poloidal_extent_threshold_rad": float(POLOIDAL_THRESHOLD_RAD),
+    "min_global_curv_radius_m": float(Jgcr.shortest_radius()),
+    "global_curv_radius_threshold_m": float(GCR_MIN_HW),
+    "shortest_self_distance_m": float(Jself.shortest_self_distance()),
+    "self_intersect_threshold_m": float(SELFINT_MIN_HW),
+    "winding_R0_m":          float(WINDING_R0),
+    "winding_a_m":           float(WINDING_A),
+    **_lineage_metrics,
 }
+if stage2_ok and not _lineage_metrics["vacuum_lineage_ok"]:
+    _err_code = "file_save_failed"
+    _err_msg = "saved BoozerSurface failed vacuum lineage validation"
+    registry.mark_failed("stage2", RUN_ID, error_code=_err_code,
+                         error_message=_err_msg, slurm_wall_s=float(opt_runtime),
+                         metrics=_metrics)
+    raise RuntimeError(_err_msg)
 if stage2_ok:
     registry.mark_success("stage2", RUN_ID, metrics=_metrics,
                           slurm_wall_s=float(opt_runtime))

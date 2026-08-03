@@ -24,10 +24,24 @@ import yaml
 from datetime import datetime, timedelta
 from scipy.optimize import minimize
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'utils'))
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_THIS_DIR, 'utils'))
+sys.path.insert(0, os.path.join(_THIS_DIR, 'new_objectives'))
 from output_dir import resolve_output_dir
 from current_penalty import CurrentPenaltyWrapper
+from hardware_metrics import (
+    boozer_json_vacuum_lineage,
+    curve_poloidal_half_extent,
+    surface_shape_metrics,
+    surface_vessel_clearance,
+)
 from run_registry import RunRegistry, artifact_path, install_atexit_handler, run_dir
+from solver_log import make_solver_iter_tap, stdout_to_log
+from poloidal_extent import PoloidalExtent
+from ellipse_width import ProjectedEllipseWidth
+from self_intersect import CurveSelfIntersect
+from global_curvature_radius import GlobalRadiusCurvature
+from vessel_clearance import CircularVesselClearance
 
 from simsopt._core import load
 from simsopt.geo import (
@@ -90,6 +104,7 @@ _slurm_job_id = os.environ.get("SLURM_JOB_ID")
 registry = RunRegistry()
 RUN_ID, _is_new = registry.register_singlestage(cfg, stage2_id=STAGE2_ID,
                                                 slurm_meta=_slurm_meta)
+install_atexit_handler(registry, "singlestage", RUN_ID)
 
 RUN_DIR = run_dir("singlestage", RUN_ID, OUT_DIR)
 os.makedirs(RUN_DIR, exist_ok=True)
@@ -97,6 +112,10 @@ os.makedirs(RUN_DIR, exist_ok=True)
 # Device geometry
 NFP      = cfg['device']['nfp']
 STELLSYM = cfg['device']['stellsym']
+VESSEL_MAJOR_R = float(cfg['device']['major_radius'])
+VESSEL_MINOR_R = float(cfg['device']['vessel_minor_radius'])
+TARGET_LCFS_MAJOR_R = float(cfg['device']['plasma_radius'])
+TARGET_LCFS_MINOR_R = float(cfg['device']['plasma_minor_radius'])
 
 # TF coil layout
 TF_NUM = cfg['tf_coils']['num']
@@ -104,6 +123,12 @@ TF_NUM = cfg['tf_coils']['num']
 # Banana coil constraints
 BANANA_CURV_P      = cfg['banana_coils']['curv_p']
 BANANA_CURRENT_MAX = cfg['banana_coils']['current_max']
+WINDING_R0         = float(cfg['winding_surface']['R0'])
+WINDING_A          = float(cfg['winding_surface']['a'])
+# TF current penalty bound: |I_tf| penalized above its operating magnitude
+# (80 kA), matching the reference hardware limit. TF current is fixed
+# background, so this term is normally inactive; it guards against drift.
+TF_CURRENT_MAX     = abs(float(cfg['tf_coils']['current']))
 
 # Physics targets
 TARGET_VOLUME = cfg['targets']['volume']
@@ -128,7 +153,16 @@ LENGTH_MAX_HW    = cfg['thresholds']['length_max']
 LENGTH_THRESHOLD = cfg['thresholds']['length_target']
 CC_THRESHOLD     = cfg['thresholds']['coil_coil_min']
 CS_THRESHOLD     = cfg['thresholds']['coil_surface_min']
+PV_THRESHOLD     = cfg['thresholds']['plasma_vessel_min']
 CURV_THRESHOLD   = cfg['thresholds']['curvature_max']
+POLOIDAL_THRESHOLD_RAD = np.deg2rad(
+    float(cfg['thresholds']['poloidal_half_width_max_deg'])
+)
+WIDTH_MAX_HW    = float(cfg['thresholds']['width_max'])
+WIDTH_MIN_HW    = float(cfg['thresholds']['width_min'])
+SELFINT_MIN_HW  = float(cfg['thresholds']['self_intersect_min'])
+GCR_MIN_HW      = float(cfg['thresholds']['global_curvature_radius_min'])
+GCR_EXP_WEIGHT  = float(cfg['thresholds']['global_curvature_exp_weight'])
 
 # Objective weights
 NONQS_WEIGHT = cfg['singlestage_weights']['nonqs']
@@ -138,15 +172,35 @@ LEN_WEIGHT   = cfg['singlestage_weights']['length']
 CC_WEIGHT    = cfg['singlestage_weights']['coil_coil']
 CS_WEIGHT    = cfg['singlestage_weights']['coil_surface']
 CURV_WEIGHT  = cfg['singlestage_weights']['curvature']
+POL_WEIGHT   = cfg['singlestage_weights']['poloidal_extent']
+PV_WEIGHT    = cfg['singlestage_weights']['plasma_vessel']
 CURR_WEIGHT  = cfg['singlestage_weights']['current']
+WIDTH_WEIGHT   = cfg['singlestage_weights']['width']
+SELFINT_WEIGHT = cfg['singlestage_weights']['selfint']
+GCR_WEIGHT     = cfg['singlestage_weights']['global_curvature']
 
 # Optimizer (L-BFGS-B)
 MAXITER = cfg['singlestage_optimizer']['maxiter']
 MAXCOR  = cfg['singlestage_optimizer']['maxcor']
 MAXFUN  = cfg['singlestage_optimizer']['maxfun']
 TOL     = cfg['singlestage_optimizer']['tol']
-FTOL    = cfg['singlestage_optimizer']['ftol']
-GTOL    = cfg['singlestage_optimizer']['gtol']
+
+
+def _tolerance_for_mpol(table, mpol):
+    """Look up a resolution-keyed L-BFGS-B tolerance, clamped at both ends.
+
+    `table` maps poloidal resolution to tolerance and is contiguous over its
+    key range. Resolutions below the lowest key take the lowest key's value
+    and resolutions above the highest take the highest key's, so an mpol
+    outside the tabulated range degrades to the nearest calibrated row
+    instead of failing.
+    """
+    resolutions = sorted(table)
+    return float(table[min(max(mpol, resolutions[0]), resolutions[-1])])
+
+
+FTOL = _tolerance_for_mpol(cfg['singlestage_optimizer']['ftol_per_mpol'], MPOL)
+GTOL = _tolerance_for_mpol(cfg['singlestage_optimizer']['gtol_per_mpol'], MPOL)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Output atexit handler
@@ -160,7 +214,6 @@ def _emit_out_dir_on_exit():
 
 
 atexit.register(_emit_out_dir_on_exit)
-install_atexit_handler(registry, "singlestage", RUN_ID)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -186,6 +239,9 @@ INPUT PARAMETERS ─────────────────────
         ntor             = {NTOR}
 
     Banana coil curvature p-norm = {BANANA_CURV_P}
+    Winding surface:
+        R0         = {WINDING_R0:.3f} m
+        a          = {WINDING_A:.3f} m
 
     Warm-start:
         bsurf       = {STAGE2_BSURF_FILE}
@@ -194,10 +250,16 @@ INPUT PARAMETERS ─────────────────────
     Thresholds:
         length_abs  = {LENGTH_MAX_HW} m
         length_tgt  = {LENGTH_THRESHOLD} m
+        length_min  = {LENGTH_THRESHOLD/2} m  (half the max-length threshold)
         cc_min      = {CC_THRESHOLD} m
         cs_min      = {CS_THRESHOLD} m
+        pv_min      = {PV_THRESHOLD} m
         curv_max    = {CURV_THRESHOLD} m^-1
-        current_max = {BANANA_CURRENT_MAX/1e3:.0f} kA
+        poloidal    = {POLOIDAL_THRESHOLD_RAD:.6f} rad
+        width       = [{WIDTH_MIN_HW}, {WIDTH_MAX_HW}] m
+        selfint     = {SELFINT_MIN_HW} m
+        gcr_min     = {GCR_MIN_HW} m  (barrier softness {GCR_EXP_WEIGHT} m)
+        current_max = {BANANA_CURRENT_MAX/1e3:.0f} kA banana / {TF_CURRENT_MAX/1e3:.0f} kA TF
 
     Objective weights:
         nonqs       = {NONQS_WEIGHT:.3e}
@@ -207,6 +269,11 @@ INPUT PARAMETERS ─────────────────────
         coil_coil   = {CC_WEIGHT:.3e}
         coil_surf   = {CS_WEIGHT:.3e}
         curvature   = {CURV_WEIGHT:.3e}
+        poloidal    = {POL_WEIGHT:.3e}
+        plasma_vess = {PV_WEIGHT:.3e}
+        width       = {WIDTH_WEIGHT:.3e}
+        selfint     = {SELFINT_WEIGHT:.3e}{'' if SELFINT_WEIGHT else '  (diagnostic only)'}
+        global_curv = {GCR_WEIGHT:.3e}{'' if GCR_WEIGHT else '  (diagnostic only)'}
         current     = {CURR_WEIGHT:.3e}
 
     Optimizer (L-BFGS-B):
@@ -214,8 +281,8 @@ INPUT PARAMETERS ─────────────────────
         maxcor  = {MAXCOR}
         maxfun  = {MAXFUN}
         tol     = {TOL:.3e}
-        ftol    = {FTOL:.3e}
-        gtol    = {GTOL:.3e}
+        ftol    = {FTOL:.3e}  (from ftol_per_mpol[mpol={MPOL}])
+        gtol    = {GTOL:.3e}  (from gtol_per_mpol[mpol={MPOL}])
 """
 )
 
@@ -270,7 +337,20 @@ boozersurface = BoozerSurface(
     biotsavart, surface, Jvol, TARGET_VOLUME, CONSTRAINT_WEIGHT,
     options=dict(verbose=True),
 )
-res = boozersurface.run_code(TARGET_IOTA, G0)
+
+# The Boozer solvers print their own convergence trace to stdout. Folding it
+# through the driver's log keeps it interleaved with the driver's own output
+# in file order, and the tap scrapes the inner solver iteration counts back
+# out of those lines so each outer evaluation can report how much work the
+# inner solve cost. BoozerLS runs BFGS then Newton; BoozerExact runs Newton
+# only, and `make_solver_iter_tap` leaves absent keys untouched.
+solver_iters = (dict(bfgs_nit=0, newton_nit=0)
+                if boozersurface.constraint_weight is not None
+                else dict(newton_nit=0))
+_solver_iter_tap = make_solver_iter_tap(solver_iters)
+
+with stdout_to_log(proc0_print, tap=_solver_iter_tap):
+    res = boozersurface.run_code(TARGET_IOTA, G0)
 
 solve_success = res["success"]
 not_intersecting = not boozersurface.surface.is_self_intersecting()
@@ -293,27 +373,74 @@ _Jiota  = Iotas(boozersurface)
 Jiota   = QuadraticPenalty(_Jiota, TARGET_IOTA)
 _Jl     = CurveLength(banana_curve)
 Jl      = QuadraticPenalty(_Jl, LENGTH_THRESHOLD, "max")
+# Lower length bound at half the max-length threshold (reference: max_length/2).
+Jl_min  = QuadraticPenalty(_Jl, LENGTH_THRESHOLD / 2, "min")
+# Coil-surface distance spans all coils; coil-coil distance is banana-only
+# (TF coils are fixed background), matching the reference.
 Jcs     = CurveSurfaceDistance(curves, surface, CS_THRESHOLD)
-Jcc     = CurveCurveDistance(curves, CC_THRESHOLD)
+Jcc     = CurveCurveDistance(banana_curves, CC_THRESHOLD)
 Jcurv   = LpCurveCurvature(banana_curve, BANANA_CURV_P, CURV_THRESHOLD)
+Jpol    = PoloidalExtent(
+    banana_curve, WINDING_R0, POLOIDAL_THRESHOLD_RAD, p=BANANA_CURV_P
+)
+Jpv     = CircularVesselClearance(
+    surface, VESSEL_MAJOR_R, VESSEL_MINOR_R, PV_THRESHOLD, p=BANANA_CURV_P
+)
+# Projected-ellipse width (port-fit max + anti-collapse min) and
+# self-intersection hinge, matching the reference objective set.
+_width  = ProjectedEllipseWidth(banana_curve, WINDING_R0, WINDING_A)
+Jwmax   = QuadraticPenalty(_width, WIDTH_MAX_HW, "max")
+Jwmin   = QuadraticPenalty(_width, WIDTH_MIN_HW, "min")
+Jself   = CurveSelfIntersect(
+    banana_curve, SELFINT_MIN_HW, int(1.5 * banana_curve.order)
+)
+# Gonzalez-Maddocks global radius of curvature: the same self-contact
+# constraint as Jself, but smooth on its noncoincident/nonparallel branch and
+# summed over every near-contact pair rather than hinged on the single worst
+# one, so L-BFGS-B gets a gradient before the constraint is violated rather
+# than after. Its exponential penalty is finite; exact sampled coincidences
+# receive radius zero. Only one of the two belongs in JF; both are reported.
+Jgcr    = GlobalRadiusCurvature(banana_curve, GCR_MIN_HW, GCR_EXP_WEIGHT)
+# Current penalties: |I_banana| above 16 kA (added below only when the warm
+# start already violates the limit) and |I_tf| above 80 kA (always present;
+# inactive while TF stays at its fixed operating point).
 _Jcurr  = CurrentPenaltyWrapper(banana_coils[0].current)
 Jcurr   = QuadraticPenalty(_Jcurr, BANANA_CURRENT_MAX, "max")
+_Jtfcurr = CurrentPenaltyWrapper(tf_currents[0])
+Jtfcurr  = QuadraticPenalty(_Jtfcurr, TF_CURRENT_MAX, "max")
 
-# Auto-detect current enforcement mode:
-# If initial current already within limit → hard L-BFGS-B bound (no penalty needed)
-# If initial current exceeds limit → soft penalty to drive it down
+# Always-on objective: physics (nonqs, boozer residual, iota) + the full
+# banana_drivers reference geometric set (length max/min, coil-coil,
+# curvature, poloidal extent, width max/min) + the local surface-coupling
+# clearances (coil-surface, plasma-vessel) + the TF current guard. The
+# self-contact and banana-current penalties are added conditionally below.
+JF = (NONQS_WEIGHT * Jnonqs) + (BRES_WEIGHT * Jbres) + (IOTA_WEIGHT * Jiota) \
+   + (LEN_WEIGHT * Jl) + (LEN_WEIGHT * Jl_min) + (CS_WEIGHT * Jcs) \
+   + (CC_WEIGHT * Jcc) + (CURV_WEIGHT * Jcurv) + (POL_WEIGHT * Jpol) \
+   + (PV_WEIGHT * Jpv) + (WIDTH_WEIGHT * (Jwmax + Jwmin)) \
+   + (CURR_WEIGHT * Jtfcurr)
+
+# Self-contact: Jgcr and Jself enforce the same constraint by different
+# means, so whichever carries a nonzero weight owns it and the other stays a
+# reported diagnostic. Zero-weight terms are left out of JF entirely rather
+# than added as 0*J — CurveSelfIntersect is O(N^2) per evaluation and there
+# is no reason to pay for it on the critical path.
+if GCR_WEIGHT:
+    JF = JF + (GCR_WEIGHT * Jgcr)
+if SELFINT_WEIGHT:
+    JF = JF + (SELFINT_WEIGHT * Jself)
+
+# Auto-detect banana-current enforcement:
+#   within limit  → hard L-BFGS-B bound (no penalty term)
+#   exceeds limit → soft QuadraticPenalty to drive it down
 CURRENT_VIOLATES = abs(banana_coils[0].current.get_value()) > BANANA_CURRENT_MAX
 if CURRENT_VIOLATES:
     proc0_print(f'  Banana current {abs(banana_coils[0].current.get_value())/1e3:.3f} kA '
                 f'exceeds limit {BANANA_CURRENT_MAX/1e3:.0f} kA → using soft penalty (weight={CURR_WEIGHT:.3e})')
-    JF = (NONQS_WEIGHT * Jnonqs) + (BRES_WEIGHT * Jbres) + (IOTA_WEIGHT * Jiota) \
-       + (LEN_WEIGHT * Jl) + (CS_WEIGHT * Jcs) + (CC_WEIGHT * Jcc) + (CURV_WEIGHT * Jcurv) \
-       + (CURR_WEIGHT * Jcurr)
+    JF = JF + (CURR_WEIGHT * Jcurr)
 else:
     proc0_print(f'  Banana current {abs(banana_coils[0].current.get_value())/1e3:.3f} kA '
                 f'within limit {BANANA_CURRENT_MAX/1e3:.0f} kA → using hard L-BFGS-B bound')
-    JF = (NONQS_WEIGHT * Jnonqs) + (BRES_WEIGHT * Jbres) + (IOTA_WEIGHT * Jiota) \
-       + (LEN_WEIGHT * Jl) + (CS_WEIGHT * Jcs) + (CC_WEIGHT * Jcc) + (CURV_WEIGHT * Jcurv)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -345,6 +472,10 @@ INITIAL STATE (MPOL={MPOL}) ─────────────────�
         CC separation (shortest_dist):   {Jcc.shortest_distance():.6e} m
         CS separation (shortest_dist):   {Jcs.shortest_distance():.6e} m
         Max curvature (kappa.max):       {banana_curve.kappa().max():.6e} m^-1
+        Poloidal half extent:            {curve_poloidal_half_extent(banana_curve, WINDING_R0):.6e} rad
+        Plasma-vessel clearance:         {surface_vessel_clearance(surface, VESSEL_MAJOR_R, VESSEL_MINOR_R):.6e} m
+        Min global curv radius:          {Jgcr.shortest_radius():.6e} m (limit: {GCR_MIN_HW:.3e} m)
+        Shortest self-distance:          {Jself.shortest_self_distance():.6e} m (limit: {SELFINT_MIN_HW:.3e} m)
 
     Penalty values:
         Objective J:                     {JF.J():.6e}
@@ -356,6 +487,8 @@ INITIAL STATE (MPOL={MPOL}) ─────────────────�
         CC distance penalty:             ({CC_WEIGHT:.3e}){Jcc.J():.6e} = {CC_WEIGHT * Jcc.J():.6e}
         CS distance penalty:             ({CS_WEIGHT:.3e}){Jcs.J():.6e} = {CS_WEIGHT * Jcs.J():.6e}
         Curvature penalty (LpCurvCurv):  ({CURV_WEIGHT:.3e}){Jcurv.J():.6e} = {CURV_WEIGHT * Jcurv.J():.6e}
+        Poloidal extent penalty:         ({POL_WEIGHT:.3e}){Jpol.J():.6e} = {POL_WEIGHT * Jpol.J():.6e}
+        Plasma-vessel penalty:           ({PV_WEIGHT:.3e}){Jpv.J():.6e} = {PV_WEIGHT * Jpv.J():.6e}
         Current penalty (QuadPen.J):     ({CURR_WEIGHT:.3e}){Jcurr.J():.6e} = {CURR_WEIGHT * Jcurr.J():.6e}
 
     n_dofs = {len(JF.x)}
@@ -366,6 +499,12 @@ INITIAL STATE (MPOL={MPOL}) ─────────────────�
 # ──────────────────────────────────────────────────────────────────────────────
 # Optimization tracking and diagnostics
 # ──────────────────────────────────────────────────────────────────────────────
+# `*_prev` entries are the last state L-BFGS-B accepted, i.e. the last one
+# whose Boozer solve converged on a non-self-intersecting surface. They are
+# both the warm-start for the next solve and the fallback a rejected step
+# returns to; `callback` advances them only on an accepted iterate. Keeping
+# the accepted coil DOFs with the other rollback state is important because
+# the failed Boozer trial has already mutated the shared objective graph.
 track = dict(
     eval=0,
     iter=0,
@@ -374,11 +513,19 @@ track = dict(
     sdofs_prev=surface.x.copy(),
     iota_prev=boozersurface.res["iota"],
     G_prev=boozersurface.res["G"],
+    x_prev=JF.x.copy(),
+    J_prev=JF.J(),
 )
 
 
-def _write_diagnostics_row(J, dJ, t0):
-    """Append a single diagnostics row to the CSV file (inner-loop tracking)."""
+def _write_diagnostics_row(J, dJ, t0, solve_ok):
+    """Append a single diagnostics row to the CSV file (inner-loop tracking).
+
+    `solve_ok` records whether this evaluation's Boozer solve converged on a
+    non-self-intersecting surface. Rejected evaluations are written too, with
+    the fallback J/dJ they returned, so the CSV shows where the line search
+    probed and was pushed back rather than silently skipping those rows.
+    """
     t_elapsed = time.time() - t0
     dJ_norm = np.linalg.norm(dJ)
 
@@ -393,7 +540,12 @@ def _write_diagnostics_row(J, dJ, t0):
         f"{Jcs.shortest_distance():.6e},"
         f"{banana_curve.kappa().max():.6e},"
         f"{_Jcurr.J():.6e},"
-        "1"
+        f"{curve_poloidal_half_extent(banana_curve, WINDING_R0):.6e},"
+        f"{surface_vessel_clearance(surface, VESSEL_MAJOR_R, VESSEL_MINOR_R):.6e},"
+        f"{Jgcr.shortest_radius():.6e},"
+        f"{Jself.shortest_self_distance():.6e},"
+        f"{','.join(str(n) for n in solver_iters.values())},"
+        f"{int(solve_ok)}"
     )
     proc0_print(row)
     with open(DIAGNOSTICS_FILE, 'a') as f:
@@ -401,14 +553,29 @@ def _write_diagnostics_row(J, dJ, t0):
 
 
 def fun(dofs):
-    """Objective function for L-BFGS-B with a required Boozer solve."""
+    """Objective function for L-BFGS-B with a required Boozer solve.
+
+    A Boozer solve that fails to converge, or converges onto a
+    self-intersecting surface, is a property of the trial coil DOFs rather
+    than a fatal condition: L-BFGS-B is mid-line-search and only needs to be
+    told the step is bad. This returns a smooth quadratic reject penalty
+    centered on the last accepted DOFs, so the returned ``(J, dJ)`` is a
+    valid trial-point pair whose descent direction contracts the line search.
+    The complete accepted objective state, including the coil DOFs, is
+    restored because `run_code` mutates shared state even when it fails.
+    Raising here instead would abandon an otherwise healthy optimization at
+    the first bad trial.
+    """
     # Restore surface state for warm-start
     surface.x                 = track["sdofs_prev"]
     boozersurface.res["iota"] = track["iota_prev"]
     boozersurface.res["G"]    = track["G_prev"]
 
     JF.x = dofs
-    res = boozersurface.run_code(track["iota_prev"], track["G_prev"])
+    for nit_key in solver_iters:
+        solver_iters[nit_key] = 0
+    with stdout_to_log(proc0_print, tap=_solver_iter_tap):
+        res = boozersurface.run_code(track["iota_prev"], track["G_prev"])
 
     solve_success = res["success"]
     not_intersecting = not surface.is_self_intersecting()
@@ -418,25 +585,38 @@ def fun(dofs):
         J  = JF.J()
         dJ = JF.dJ()
     else:
+        delta = np.asarray(dofs) - track["x_prev"]
+        reject_scale = max(1.0, abs(track["J_prev"]))
+        J  = track["J_prev"] + reject_scale * (1.0 + np.dot(delta, delta))
+        dJ = 2.0 * reject_scale * delta
+        surface.x                 = track["sdofs_prev"]
+        boozersurface.res["iota"] = track["iota_prev"]
+        boozersurface.res["G"]    = track["G_prev"]
+        JF.x                       = track["x_prev"]
         reasons = []
         if not solve_success:
             reasons.append("Boozer solve failed")
         if not not_intersecting:
             reasons.append("surface is self-intersecting")
-        raise RuntimeError("; ".join(reasons))
+        proc0_print(f"    step rejected ({'; '.join(reasons)}); "
+                    f"returning a quadratic reject penalty")
 
-    _write_diagnostics_row(J, dJ, t0)
+    _write_diagnostics_row(J, dJ, t0, solve_ok=success)
     return J, dJ
 
 
 def callback(x):
     """Callback called after each L-BFGS-B iteration (outer-loop tracking)."""
+    accepted_x = np.asarray(x).copy()
+    JF.x = accepted_x
     J  = JF.J()
     dJ = JF.dJ()
     res = boozersurface.res
+    track["x_prev"] = accepted_x
     track["sdofs_prev"] = surface.x.copy()
     track["iota_prev"]  = res["iota"]
     track["G_prev"]     = res["G"]
+    track["J_prev"]     = J
     track['f_prev'] = track['f_curr']
     track['f_curr'] = J
     track['iter'] += 1
@@ -455,6 +635,10 @@ def callback(x):
         CC separation (shortest_dist):   {Jcc.shortest_distance():.6e} m
         CS separation (shortest_dist):   {Jcs.shortest_distance():.6e} m
         Max curvature (kappa.max):       {banana_curve.kappa().max():.6e} m^-1
+        Poloidal half extent:            {curve_poloidal_half_extent(banana_curve, WINDING_R0):.6e} rad
+        Plasma-vessel clearance:         {surface_vessel_clearance(surface, VESSEL_MAJOR_R, VESSEL_MINOR_R):.6e} m
+        Min global curv radius:          {Jgcr.shortest_radius():.6e} m (limit: {GCR_MIN_HW:.3e} m)
+        Shortest self-distance:          {Jself.shortest_self_distance():.6e} m (limit: {SELFINT_MIN_HW:.3e} m)
 
     Penalty values:
         Objective J:                     {JF.J():.6e}
@@ -466,6 +650,8 @@ def callback(x):
         CC distance penalty:             ({CC_WEIGHT:.3e}){Jcc.J():.6e} = {CC_WEIGHT * Jcc.J():.6e}
         CS distance penalty:             ({CS_WEIGHT:.3e}){Jcs.J():.6e} = {CS_WEIGHT * Jcs.J():.6e}
         Curvature penalty (LpCurvCurv):  ({CURV_WEIGHT:.3e}){Jcurv.J():.6e} = {CURV_WEIGHT * Jcurv.J():.6e}
+        Poloidal extent penalty:         ({POL_WEIGHT:.3e}){Jpol.J():.6e} = {POL_WEIGHT * Jpol.J():.6e}
+        Plasma-vessel penalty:           ({PV_WEIGHT:.3e}){Jpv.J():.6e} = {PV_WEIGHT * Jpv.J():.6e}
         Current penalty (QuadPen.J):     ({CURR_WEIGHT:.3e}){Jcurr.J():.6e} = {CURR_WEIGHT * Jcurr.J():.6e}
 """
     )
@@ -477,12 +663,12 @@ def callback(x):
 t0 = time.time()
 
 with open(DIAGNOSTICS_FILE, 'w') as f:
-    f.write(f'# Singlestage Diagnostics\n')
+    f.write('# Singlestage Diagnostics\n')
     f.write(f'# Date: {datetime.now()}\n')
     f.write(f'# BoozerSurface: {STAGE2_BSURF_FILE}\n')
     f.write(f'# MPOL={MPOL}, NTOR={NTOR}, CONSTRAINT_WEIGHT={CONSTRAINT_WEIGHT:.3e}\n')
     f.write(f'# TARGET_VOLUME={TARGET_VOLUME}, TARGET_IOTA={TARGET_IOTA}\n')
-    f.write(f'# LENGTH_THRESHOLD={LENGTH_THRESHOLD}, CC_THRESHOLD={CC_THRESHOLD}, CS_THRESHOLD={CS_THRESHOLD}, CURV_THRESHOLD={CURV_THRESHOLD}\n')
+    f.write(f'# LENGTH_THRESHOLD={LENGTH_THRESHOLD}, CC_THRESHOLD={CC_THRESHOLD}, CS_THRESHOLD={CS_THRESHOLD}, PV_THRESHOLD={PV_THRESHOLD}, CURV_THRESHOLD={CURV_THRESHOLD}, POLOIDAL_THRESHOLD_RAD={POLOIDAL_THRESHOLD_RAD}\n')
     f.write(f'# MAXITER={MAXITER}, FTOL={FTOL:.3e}, GTOL={GTOL:.3e}\n')
     f.write(
         'iter,eval,runtime,'
@@ -493,6 +679,11 @@ with open(DIAGNOSTICS_FILE, 'w') as f:
         'ccdist,csdist,'
         'max_kappa,'
         'banana_current,'
+        'poloidal_extent_rad,'
+        'plasma_vessel_clearance,'
+        'min_global_curv_radius,'
+        'shortest_self_distance,'
+        f"{','.join(solver_iters)},"
         'solve_ok\n'
     )
 
@@ -597,6 +788,10 @@ FINAL STATE (MPOL={MPOL}) ──────────────────
         CC separation (shortest_dist):   {Jcc.shortest_distance():.6e} m
         CS separation (shortest_dist):   {Jcs.shortest_distance():.6e} m
         Max curvature (kappa.max):       {banana_curve.kappa().max():.6e} m^-1
+        Poloidal half extent:            {curve_poloidal_half_extent(banana_curve, WINDING_R0):.6e} rad
+        Plasma-vessel clearance:         {surface_vessel_clearance(surface, VESSEL_MAJOR_R, VESSEL_MINOR_R):.6e} m
+        Min global curv radius:          {Jgcr.shortest_radius():.6e} m (limit: {GCR_MIN_HW:.3e} m)
+        Shortest self-distance:          {Jself.shortest_self_distance():.6e} m (limit: {SELFINT_MIN_HW:.3e} m)
 
     Penalty values:
         Objective J:                     {JF.J():.6e}
@@ -608,6 +803,8 @@ FINAL STATE (MPOL={MPOL}) ──────────────────
         CC distance penalty:             ({CC_WEIGHT:.3e}){Jcc.J():.6e} = {CC_WEIGHT * Jcc.J():.6e}
         CS distance penalty:             ({CS_WEIGHT:.3e}){Jcs.J():.6e} = {CS_WEIGHT * Jcs.J():.6e}
         Curvature penalty (LpCurvCurv):  ({CURV_WEIGHT:.3e}){Jcurv.J():.6e} = {CURV_WEIGHT * Jcurv.J():.6e}
+        Poloidal extent penalty:         ({POL_WEIGHT:.3e}){Jpol.J():.6e} = {POL_WEIGHT * Jpol.J():.6e}
+        Plasma-vessel penalty:           ({PV_WEIGHT:.3e}){Jpv.J():.6e} = {PV_WEIGHT * Jpv.J():.6e}
         Current penalty (QuadPen.J):     ({CURR_WEIGHT:.3e}){Jcurr.J():.6e} = {CURR_WEIGHT * Jcurr.J():.6e}
 """
 )
@@ -620,6 +817,7 @@ FINAL STATE (MPOL={MPOL}) ──────────────────
 _bsurf_kind = "bsurf_opt" if success else "bsurf_failed"
 _bsurf_out_path = artifact_path("singlestage", RUN_ID, OUT_DIR, _bsurf_kind)
 boozersurface.save(_bsurf_out_path)
+_lineage_metrics = boozer_json_vacuum_lineage(_bsurf_out_path)
 if success:
     _state_out_path = artifact_path("singlestage", RUN_ID, OUT_DIR, "state_opt")
     np.savez(_state_out_path,
@@ -643,7 +841,38 @@ _metrics = {
     "final_max_length":      float(_Jl.J()),
     "final_banana_current":  float(banana_coils[0].current.get_value()),
     "runtime_s":             float(opt_runtime),
+    "tf_current_A":           float(cfg['tf_coils']['current']),
+    "banana_current_max_abs_A": float(abs(banana_coils[0].current.get_value())),
+    "banana_current_limit_A": float(BANANA_CURRENT_MAX),
+    "length_target_m":        float(LENGTH_THRESHOLD),
+    "length_abs_max_m":       float(LENGTH_MAX_HW),
+    "coil_coil_min_threshold_m": float(CC_THRESHOLD),
+    "coil_plasma_min_threshold_m": float(CS_THRESHOLD),
+    "plasma_vessel_min_m":    float(surface_vessel_clearance(surface, VESSEL_MAJOR_R, VESSEL_MINOR_R)),
+    "plasma_vessel_min_threshold_m": float(PV_THRESHOLD),
+    "curvature_threshold_inv_m": float(CURV_THRESHOLD),
+    "poloidal_extent_rad":    float(curve_poloidal_half_extent(banana_curve, WINDING_R0)),
+    "poloidal_extent_threshold_rad": float(POLOIDAL_THRESHOLD_RAD),
+    "min_global_curv_radius_m": float(Jgcr.shortest_radius()),
+    "global_curv_radius_threshold_m": float(GCR_MIN_HW),
+    "shortest_self_distance_m": float(Jself.shortest_self_distance()),
+    "self_intersect_threshold_m": float(SELFINT_MIN_HW),
+    "boozer_bfgs_nit":        int(solver_iters.get("bfgs_nit", 0)),
+    "boozer_newton_nit":      int(solver_iters.get("newton_nit", 0)),
+    "winding_R0_m":           float(WINDING_R0),
+    "winding_a_m":            float(WINDING_A),
+    "target_lcfs_major_radius_max_m": float(TARGET_LCFS_MAJOR_R),
+    "target_lcfs_minor_radius_max_m": float(TARGET_LCFS_MINOR_R),
+    **surface_shape_metrics(surface),
+    **_lineage_metrics,
 }
+if success and not _lineage_metrics["vacuum_lineage_ok"]:
+    _err_code = "file_save_failed"
+    _err_msg = "saved BoozerSurface failed vacuum lineage validation"
+    registry.mark_failed("singlestage", RUN_ID, error_code=_err_code,
+                         error_message=_err_msg, slurm_wall_s=float(opt_runtime),
+                         metrics=_metrics)
+    raise RuntimeError(_err_msg)
 if success:
     registry.mark_success("singlestage", RUN_ID, metrics=_metrics,
                           slurm_wall_s=float(opt_runtime))

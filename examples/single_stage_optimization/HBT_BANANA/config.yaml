@@ -73,12 +73,14 @@ banana_coils:
   #                 normalized SquaredFlux with only TF field (see run 51246996).
   current_mode_stage2: fixed
   current_fixed_stage2: -16.0e+3    # A — pinned physical current when mode='fixed'
-  current_soft_max_stage2: 20.0e+3  # A — soft cap when mode='penalized'.
-                                #     Stage 2 is a warm-start generator, not a
-                                #     final design — we let current drift up to
-                                #     ~20 kA if it helps SquaredFlux converge,
-                                #     then singlestage drives it back down to
-                                #     the hardware limit (16 kA).
+  current_soft_max_stage2: 20.0e+3  # A — DEPRECATED. Retained for Pareto-sweep
+                                #     config compatibility only. The driver no
+                                #     longer reads this: to match the
+                                #     banana_drivers reference objective,
+                                #     mode='penalized' now penalizes |I_banana|
+                                #     above the hardware limit (current_max,
+                                #     16 kA), and |I_tf| above |tf_coils.current|
+                                #     (80 kA).
   current_cap_stage2: false     # Optional L-BFGS-B hard bound in weighted mode.
   nfp: 5
   order: 4                 # Fourier order. order=4 was previously unusable
@@ -213,6 +215,31 @@ thresholds:
   poloidal_half_width_max_deg: 70.0  # deg — 140 deg full poloidal width
   curvature_max: 100        # m^-1 — max curvature (HW-verified: selected
                             # conductor has min bending radius ~1 cm)
+  # Projected-ellipse-width and self-intersection targets, matching the
+  # banana_drivers reference objective set (stage2_config.yaml targets).
+  # Both stage 2 and singlestage enforce these unmodified (no relaxation).
+  width_max: 0.17           # m — max projected coil width (port-fit)
+  width_min: 0.10           # m — min projected coil width (anti-collapse)
+  self_intersect_min: 0.01  # m — min self-distance (figure-8 prevention),
+                            # now a reported diagnostic only — see
+                            # global_curvature_radius_min below.
+  # Gonzalez-Maddocks global radius of curvature (banana_drivers reference).
+  # This is the *optimized* self-contact constraint: it is smooth on the
+  # noncoincident, nonparallel branch, accumulates every near-contact pair
+  # rather than only the single worst one, and its finite exponential soft
+  # barrier gives L-BFGS-B a usable gradient before the constraint is
+  # violated. Exact sampled coincidences are assigned radius zero. Same
+  # physical intent and same 1 cm floor as self_intersect_min, so only one of
+  # the two belongs in the objective.
+  # NOTE on units before retuning R_min: this S_C divides by sin^2(alpha),
+  # not the textbook Gonzalez-Maddocks 2*sin(alpha), so the reported radius
+  # is ~2x the textbook rho_G on circular arcs — a circle of radius R scores
+  # exactly 2R (verified numerically). R_min is therefore NOT a clearance in
+  # the same units as self_intersect_min. 0.010 is the reference
+  # DEFAULT_MIN_GLOBAL_CURVATURE_RADIUS used against this same formula, so it
+  # reproduces the reference barrier; treat it as calibrated, not physical.
+  global_curvature_radius_min: 0.010  # m — barrier activation threshold R_min
+  global_curvature_exp_weight: 0.010  # m — barrier softness (epsilon)
 
 # ── Stage 2 per-threshold relaxation factors ─────────────────────────────────
 # Stage 2 only needs to produce coils good enough for singlestage to polish.
@@ -225,6 +252,7 @@ stage2_relaxation:
   length:    1.05  # effective length_target   = length_target   * length
   coil_coil: 1.05  # effective coil_coil_min   = coil_coil_min   / coil_coil
   curvature: 1.05  # effective curvature_max   = curvature_max   * curvature
+  poloidal_extent: 1.0  # effective half-width max = threshold * poloidal_extent
 
 # ── Stage 2 solver ───────────────────────────────────────────────────────────
 # This HBT_BANANA lane is intentionally weighted-only for the first
@@ -237,7 +265,16 @@ stage2_weights:
   length: 5.0e-4
   coil_coil: 1.0e+2
   curvature: 1.0e-4
+  poloidal_extent: 1.0e+2
   current: 1.0e+0
+  # width/selfint added to match the banana_drivers reference objective set.
+  # Seeded from the reference stage2_config.yaml (1e1 each); retune against
+  # the local weight scale (coil_coil/poloidal at 1e2) if needed.
+  width: 1.0e+1
+  selfint: 0.0e+0     # diagnostic only — global_curvature owns self-contact.
+                      # Set back to 1e1 (and global_curvature to 0) to revert
+                      # to the hinge-based constraint.
+  global_curvature: 1.0e+3   # reference DEFAULT_WEIGHT_GLOBAL_CURVATURE_RADIUS
 
 # ── Stage 2 optimizer (L-BFGS-B) ─────────────────────────────────────────────
 # Keep defaults tiny for smoke execution; raise maxiter/maxfun for real runs.
@@ -258,13 +295,51 @@ singlestage_weights:
   coil_coil: 1.0e+2
   coil_surface: 1.0e+0
   curvature: 1.0e-1
+  poloidal_extent: 1.0e+2
+  plasma_vessel: 1.0e+2
   current: 1.0e+2     # Penalty weight for banana current > current_max (16 kA)
+                      # and TF current > |tf_coils.current| (80 kA)
+  # width/selfint added to match the banana_drivers reference objective set.
+  width: 1.0e+1
+  selfint: 0.0e+0     # diagnostic only — global_curvature owns self-contact.
+  global_curvature: 1.0e+3   # reference DEFAULT_WEIGHT_GLOBAL_CURVATURE_RADIUS
 
 # ── Singlestage optimizer (L-BFGS-B) ────────────────────────────────────────
+# ftol/gtol are resolution-dependent, not free parameters: the Boozer solve
+# resolves the surface to ~1 part in 10^mpol, so an outer tolerance tighter
+# than that just chases solver noise, and one looser than it stops early.
+# The tables below are the banana_drivers reference schedule, keyed by
+# boozer.mpol. Lookup clamps at both ends (mpol < 8 uses the mpol=8 row,
+# mpol > 18 uses the mpol=18 row).
+#
+# At the current boozer.mpol=8 these resolve to ftol=1e-5, gtol=1e-2 — the
+# exact scalars this lane used before, so the default run is unchanged.
 singlestage_optimizer:
   maxiter: 2
   maxcor: 300
   maxfun: 10000
   tol: 1.0e-15
-  ftol: 1.0e-5
-  gtol: 1.0e-2
+  ftol_per_mpol:
+    8:  1.0e-5
+    9:  5.0e-6
+    10: 1.0e-6
+    11: 5.0e-7
+    12: 1.0e-7
+    13: 5.0e-8
+    14: 1.0e-8
+    15: 5.0e-9
+    16: 1.0e-9
+    17: 5.0e-10
+    18: 1.0e-10
+  gtol_per_mpol:
+    8:  1.0e-2
+    9:  5.0e-3
+    10: 1.0e-3
+    11: 5.0e-4
+    12: 1.0e-4
+    13: 5.0e-5
+    14: 1.0e-5
+    15: 5.0e-6
+    16: 1.0e-6
+    17: 5.0e-7
+    18: 1.0e-7

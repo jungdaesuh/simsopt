@@ -133,6 +133,7 @@ STAGE2_INPUT_KEYS = (
     "banana_coils.current_max",
     "banana_coils.current_mode_stage2",
     "banana_coils.current_fixed_stage2",
+    "banana_coils.current_cap_stage2",
     "banana_coils.current_soft_max_stage2",
     "banana_coils.order",
     "banana_coils.nqpts",
@@ -143,25 +144,42 @@ STAGE2_INPUT_KEYS = (
     "banana_coils.theta1",
     "winding_surface.R0",
     "winding_surface.a",
+    # These are consumed directly while constructing the stage-2 coil set and
+    # TF-current objective. The stage-1 parent id does not subsume them:
+    # changing either value changes this stage's physical problem.
+    "tf_coils.current",
+    "tf_coils.num",
     # Hardware thresholds + stage 2 relaxation
     "thresholds.length_max",
     "thresholds.length_target",
     "thresholds.coil_coil_min",
+    "thresholds.poloidal_half_width_max_deg",
     "thresholds.curvature_max",
+    "thresholds.width_max",
+    "thresholds.width_min",
+    "thresholds.self_intersect_min",
+    "thresholds.global_curvature_radius_min",
+    "thresholds.global_curvature_exp_weight",
     "stage2_relaxation.length",
     "stage2_relaxation.coil_coil",
     "stage2_relaxation.curvature",
+    "stage2_relaxation.poloidal_extent",
     # Weighted objective
     "stage2_mode",
     "stage2_weights.squared_flux",
     "stage2_weights.length",
     "stage2_weights.coil_coil",
     "stage2_weights.curvature",
+    "stage2_weights.poloidal_extent",
     "stage2_weights.current",
+    "stage2_weights.width",
+    "stage2_weights.selfint",
+    "stage2_weights.global_curvature",
     # Weighted optimizer
     "stage2_optimizer.maxiter",
     "stage2_optimizer.maxcor",
     "stage2_optimizer.maxfun",
+    "stage2_optimizer.tol",
     "stage2_optimizer.ftol",
     "stage2_optimizer.gtol",
 )
@@ -169,6 +187,16 @@ STAGE2_INPUT_KEYS = (
 SINGLESTAGE_INPUT_KEYS = (
     "stage2_id",  # parent — injected at register time
     "warm_start.stage1_id",
+    # Stage-3 constructs its own surface and coil objective from these values;
+    # hashing only the parent artifact ids would miss these direct inputs.
+    "device.nfp",
+    "device.stellsym",
+    "device.major_radius",
+    "device.vessel_minor_radius",
+    "device.plasma_radius",
+    "device.plasma_minor_radius",
+    "winding_surface.R0",
+    "winding_surface.a",
     "targets.iota",
     "targets.volume",
     "boozer.mpol",
@@ -178,7 +206,14 @@ SINGLESTAGE_INPUT_KEYS = (
     "thresholds.length_target",
     "thresholds.coil_coil_min",
     "thresholds.coil_surface_min",
+    "thresholds.plasma_vessel_min",
+    "thresholds.poloidal_half_width_max_deg",
     "thresholds.curvature_max",
+    "thresholds.width_max",
+    "thresholds.width_min",
+    "thresholds.self_intersect_min",
+    "thresholds.global_curvature_radius_min",
+    "thresholds.global_curvature_exp_weight",
     "singlestage_weights.nonqs",
     "singlestage_weights.boozer_residual",
     "singlestage_weights.iota",
@@ -186,14 +221,27 @@ SINGLESTAGE_INPUT_KEYS = (
     "singlestage_weights.coil_coil",
     "singlestage_weights.coil_surface",
     "singlestage_weights.curvature",
+    "singlestage_weights.poloidal_extent",
+    "singlestage_weights.plasma_vessel",
     "singlestage_weights.current",
+    "singlestage_weights.width",
+    "singlestage_weights.selfint",
+    "singlestage_weights.global_curvature",
     "banana_coils.current_init",
     "banana_coils.current_max",
+    "banana_coils.curv_p",
+    "tf_coils.current",
+    "tf_coils.num",
     "singlestage_optimizer.maxiter",
     "singlestage_optimizer.maxcor",
     "singlestage_optimizer.maxfun",
-    "singlestage_optimizer.ftol",
-    "singlestage_optimizer.gtol",
+    "singlestage_optimizer.tol",
+    # The whole tolerance table is hashed, not just the row boozer.mpol
+    # selects. Over-strict on purpose: editing any row changes every run id,
+    # which costs re-runs but can never let two different tolerance schedules
+    # share an id. Reproducibility over ergonomics, per config.yaml.
+    "singlestage_optimizer.ftol_per_mpol",
+    "singlestage_optimizer.gtol_per_mpol",
     "plasma_surface.nphi",
     "plasma_surface.ntheta",
     "plasma_surface.vmec_s",
@@ -239,9 +287,12 @@ SLURM_META_COLUMNS = (
     "slurm_ntasks", "slurm_cpus_per_task",
 )
 
-# Float rounding precision for canonicalization. 1e-12 is well below any
-# physical tolerance in this project while killing IEEE parser noise.
+# Float rounding precision for canonicalization. Twelve decimal places kill
+# IEEE parser noise at the physical scales in this project. Solver controls
+# can legitimately be smaller than 1e-12, though, so those values are rounded
+# at twice the precision instead of collapsing every nonzero tolerance to 0.
 FLOAT_DECIMALS = 12
+SMALL_FLOAT_DECIMALS = 2 * FLOAT_DECIMALS
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -328,9 +379,20 @@ def _canonicalize(value: Any) -> Any:
     if isinstance(value, bool):
         return value  # bool is subclass of int — handle before np.integer
     if isinstance(value, float):
-        return round(value, FLOAT_DECIMALS)
+        decimals = (
+            SMALL_FLOAT_DECIMALS
+            if 0.0 < abs(value) < 10.0 ** (-FLOAT_DECIMALS)
+            else FLOAT_DECIMALS
+        )
+        return round(value, decimals)
     if isinstance(value, np.floating):
-        return round(float(value), FLOAT_DECIMALS)
+        scalar = float(value)
+        decimals = (
+            SMALL_FLOAT_DECIMALS
+            if 0.0 < abs(scalar) < 10.0 ** (-FLOAT_DECIMALS)
+            else FLOAT_DECIMALS
+        )
+        return round(scalar, decimals)
     if isinstance(value, np.integer):
         return int(value)
     if isinstance(value, np.bool_):
@@ -687,17 +749,21 @@ def _slurm_job_terminal_state(job_id: str) -> str | None:
 # ─────────────────────────────────────────────────────────────────────────────
 def install_atexit_handler(registry: RunRegistry, stage: str, run_id: str) -> None:
     """Register an atexit handler that marks the row as failed with
-    error_code='unclean_exit' if it is still in 'running' at interpreter
-    shutdown. Covers uncaught exceptions and normal exits that forgot to
-    mark the row. Does NOT cover SIGKILL/OOM — that's what sweep() is for.
+    error_code='unclean_exit' if it is still in 'pending' or 'running' at
+    interpreter shutdown. Covers startup failures before ``mark_running`` as
+    well as uncaught exceptions and normal exits that forgot to mark the row.
+    Does NOT cover SIGKILL/OOM — that's what sweep() is for.
     """
     def _handler():
         row = registry.get(stage, run_id)
-        if row is not None and row["status"] == "running":
+        if row is not None and row["status"] in {"pending", "running"}:
             registry.mark_failed(
                 stage, run_id,
                 error_code="unclean_exit",
-                error_message="Python exited while status was 'running'",
+                error_message=(
+                    "Python exited while status was "
+                    f"'{row['status']}'"
+                ),
             )
     atexit.register(_handler)
 
