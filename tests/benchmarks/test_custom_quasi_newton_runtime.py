@@ -1104,6 +1104,37 @@ def test_fast_custom_lbfgs_has_zero_advance_observations() -> None:
     )
 
 
+def test_solver_route_decision_drives_stepwise_execution_and_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        runtime,
+        "_solver_route",
+        lambda *_args, **_kwargs: "stepwise",
+    )
+
+    measurement = runtime._measurement(
+        fixture("rosenbrock"),
+        "custom",
+        "cpu",
+        "fast",
+        np.asarray([-1.2, 1.0], dtype=np.float64),
+        maxiter=3,
+        maxcor=3,
+        method="lbfgs",
+        fixture_build_seconds=0.0,
+        fixture_build_peak_rss_kib=0,
+    )
+
+    assert measurement.solver_route == "stepwise"
+    assert measurement.work_counters.advance_observations > measurement.iterations + 1
+    assert measurement.work_counters.advance_observations == sum(
+        entry.calls
+        for entry in measurement.warm_transfer_audit
+        if entry.phase == "advance"
+    )
+
+
 def test_rss_phase_records_named_scope() -> None:
     with runtime._RSSPhase("test") as phase:
         np.zeros(1024, dtype=np.float64)
