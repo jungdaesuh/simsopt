@@ -15,6 +15,7 @@ import pytest
 from benchmarks import custom_quasi_newton_runtime as runtime
 from benchmarks.fixtures.custom_quasi_newton import (
     Fixture,
+    ScientificEndpointEvidence,
     _certified_traceable_endpoint,
     fixture,
 )
@@ -1199,7 +1200,7 @@ def test_measurement_classifies_nonfinite_endpoint_before_iteration_limit(
     monkeypatch.setattr(
         runtime,
         "_run_custom",
-        lambda *_args, **_kwargs: (result, 1, 1, False, (), None),
+        lambda *_args, **_kwargs: (result, 1, 1, False, (), None, None),
     )
 
     measurement = runtime._measurement(
@@ -1314,6 +1315,11 @@ def test_custom_boozer_bfgs_mints_fresh_accepted_incumbent_controllers() -> None
         def __init__(self) -> None:
             self.pending: np.ndarray | None = None
             self.accepted: list[np.ndarray] = []
+            self.current_inner_state = SimpleNamespace(
+                coil_dofs=jnp.asarray([2.0], dtype=jnp.float64),
+                solved_x=jnp.asarray([3.0, -0.406, 1.5], dtype=jnp.float64),
+                eligible=jnp.asarray(True, dtype=jnp.bool_),
+            )
 
         def value_and_grad(self, parameters: np.ndarray) -> tuple[float, np.ndarray]:
             candidate = np.asarray(parameters, dtype=np.float64)
@@ -1744,3 +1750,128 @@ def test_certified_traceable_endpoint_fails_closed_on_inner_failure() -> None:
     assert solve_args[0] == "endpoint-coil-spec"
     np.testing.assert_array_equal(solve_args[1], [0.25])
     assert solve_args[2:] == (-0.406, 3.25, False)
+
+
+def test_certified_traceable_endpoint_uses_final_incumbent_inner_state() -> None:
+    observed: dict[str, object] = {}
+
+    def coil_set_spec_from_dofs(coil_dofs):
+        observed["coil_dofs"] = np.asarray(coil_dofs)
+        return "endpoint-coil-spec"
+
+    def run_code_traceable(
+        coil_source,
+        sdofs,
+        iota,
+        G,
+        *,
+        materialize_dense_linearization,
+    ):
+        observed["solve_args"] = (
+            coil_source,
+            np.asarray(sdofs),
+            float(iota),
+            float(G),
+            materialize_dense_linearization,
+        )
+        return {
+            "x": jnp.asarray([7.0, 8.0, -0.19, 2.5], dtype=jnp.float64),
+            "success": jnp.asarray(True),
+        }
+
+    incumbent_state = SimpleNamespace(
+        coil_dofs=jnp.asarray([4.0, 5.0], dtype=jnp.float64),
+        solved_x=jnp.asarray([7.0, 8.0, -0.19, 2.5], dtype=jnp.float64),
+        eligible=jnp.asarray(True, dtype=jnp.bool_),
+    )
+    evidence = _certified_traceable_endpoint(
+        np.asarray([4.0, 5.0], dtype=np.float64),
+        coil_set_spec_from_dofs=coil_set_spec_from_dofs,
+        run_code_traceable=run_code_traceable,
+        install_traceable_solved_runtime_state=lambda _solved: None,
+        surface_dofs=np.asarray([0.25, 0.5], dtype=np.float64),
+        iota_seed=-0.406,
+        G_seed=3.25,
+        reporting_metrics_from_solution=lambda *_args, **_kwargs: {
+            "final_boozer_residual": jnp.asarray(1.0e-12),
+            "final_non_qs": jnp.asarray(2.0e-8),
+            "final_iota": jnp.asarray(-0.19),
+            "final_volume": jnp.asarray(0.1),
+        },
+        incumbent_state=incumbent_state,
+    )
+
+    assert evidence.inner_success is True
+    assert dict(evidence.observables)["final_iota"] == pytest.approx(-0.19)
+    solve_args = observed["solve_args"]
+    assert isinstance(solve_args, tuple)
+    assert solve_args[0] == "endpoint-coil-spec"
+    np.testing.assert_array_equal(solve_args[1], [7.0, 8.0])
+    assert solve_args[2:] == (-0.19, 2.5, False)
+
+
+def test_measurement_threads_custom_final_incumbent_to_scientific_endpoint(
+    monkeypatch,
+) -> None:
+    received_states: list[object | None] = []
+    incumbent_state = SimpleNamespace(
+        coil_dofs=jnp.asarray([0.5], dtype=jnp.float64),
+        solved_x=jnp.asarray([3.0, -0.19, 2.5], dtype=jnp.float64),
+        eligible=jnp.asarray(True, dtype=jnp.bool_),
+    )
+
+    def endpoint(_parameters, state):
+        received_states.append(state)
+        return ScientificEndpointEvidence(
+            inner_success=True,
+            observables=(("final_iota", -0.19),),
+        )
+
+    fixture_case = Fixture(
+        name="boozer",
+        objective=lambda x: jnp.sum(x * x),
+        initial=np.asarray([1.0], dtype=np.float64),
+        expected_dimension=1,
+        source="synthetic_boozer_endpoint_threading",
+        certificate="synthetic",
+        method="bfgs",
+        scientific_endpoint=endpoint,
+        accepted_incumbent_host_value_and_grad=lambda: SimpleNamespace(),
+    )
+    result = SimpleNamespace(
+        f_k=jnp.asarray(1.0),
+        g_k=jnp.asarray([0.1]),
+        k=jnp.asarray(1),
+        x_k=jnp.asarray([0.5]),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_run_custom",
+        lambda *args, **kwargs: (
+            result,
+            1,
+            1,
+            False,
+            (),
+            None,
+            incumbent_state,
+        ),
+    )
+
+    measurement = runtime._measurement(
+        fixture_case,
+        "custom",
+        "cpu",
+        "parity",
+        fixture_case.initial,
+        maxiter=1,
+        maxcor=3,
+        method="bfgs",
+        fixture_build_seconds=0.0,
+        fixture_build_peak_rss_kib=0,
+    )
+
+    assert len(received_states) == 1
+    assert received_states[0] is incumbent_state
+    assert measurement.inner_success is True
+    assert measurement.scientific_observables["final_iota"] == pytest.approx(-0.19)
