@@ -1852,11 +1852,44 @@ def main() -> int:
         row = measurement_payload[0]
         if not isinstance(row, dict):
             raise TypeError("Boozer trial capture requires an object measurement")
+        production_evaluations = row.get("evaluations")
+        if not isinstance(production_evaluations, int) or isinstance(
+            production_evaluations, bool
+        ):
+            raise TypeError("Boozer measurement omitted evaluations")
+        production_final_objective = row.get("final_objective")
+        if not isinstance(production_final_objective, (int, float)) or isinstance(
+            production_final_objective, bool
+        ):
+            raise TypeError("Boozer measurement omitted final objective")
+        production_final_gradient_inf_norm = row.get("final_gradient_inf_norm")
+        if not isinstance(
+            production_final_gradient_inf_norm, (int, float)
+        ) or isinstance(production_final_gradient_inf_norm, bool):
+            raise TypeError("Boozer measurement omitted final gradient norm")
+        production_final_status = row.get("status")
+        if not isinstance(production_final_status, int) or isinstance(
+            production_final_status, bool
+        ):
+            raise TypeError("Boozer measurement omitted final status")
+        raw_production_final_parameters = row.get("final_parameters")
+        if not isinstance(raw_production_final_parameters, (list, tuple)):
+            raise TypeError("Boozer measurement omitted final parameters")
+        production_final_parameters = np.asarray(
+            raw_production_final_parameters, dtype=np.float64
+        )
         trial_trace_path = args.output / _BOOZER_TRIAL_TRACE_ARTIFACT_NAME
         diagnostic_result = run_boozer_host_diagnostic(
             selected_cases[0],
             provider=cast(TrialProvider, providers[0]),
             manifest_path=trial_trace_path,
+            production_evaluations=production_evaluations,
+            production_final_objective=float(production_final_objective),
+            production_final_gradient_inf_norm=float(
+                production_final_gradient_inf_norm
+            ),
+            production_final_status=production_final_status,
+            production_final_parameters=production_final_parameters,
             maxiter=args.maxiter,
             maxls=_SOLVER_MAXLS,
             gtol=_SOLVER_GTOL,

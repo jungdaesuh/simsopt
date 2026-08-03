@@ -851,6 +851,11 @@ def test_provider_child_opt_in_writes_and_attaches_boozer_trial_trace(
         "provider": "custom",
         "solver_route": "custom_bfgs_stepwise",
         "maxiter": 2,
+        "evaluations": 3,
+        "final_parameters": (0.25,),
+        "final_objective": 0.0625,
+        "final_gradient_inf_norm": 0.5,
+        "status": 0,
         "device_identity": {
             "requested_device": "cpu",
             "backend": "cpu",
@@ -916,6 +921,14 @@ def test_provider_child_opt_in_writes_and_attaches_boozer_trial_trace(
     assert diagnostic_calls[0]["fixture"] is fixture_case
     assert diagnostic_calls[0]["provider"] == "custom"
     assert diagnostic_calls[0]["maxiter"] == 2
+    assert diagnostic_calls[0]["production_evaluations"] == 3
+    assert diagnostic_calls[0]["production_final_objective"] == 0.0625
+    assert diagnostic_calls[0]["production_final_gradient_inf_norm"] == 0.5
+    assert diagnostic_calls[0]["production_final_status"] == 0
+    assert np.array_equal(
+        diagnostic_calls[0]["production_final_parameters"],
+        np.asarray([0.25], dtype=np.float64),
+    )
 
 
 @pytest.mark.parametrize(

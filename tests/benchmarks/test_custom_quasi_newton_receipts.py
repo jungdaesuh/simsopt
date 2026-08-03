@@ -207,9 +207,18 @@ def _runner_v7_directory(root: Path) -> Path:
     return run
 
 
-def _write_valid_trial_trace(lane: Path, row: dict[str, object]) -> None:
+def _write_valid_trial_trace(
+    lane: Path,
+    row: dict[str, object],
+    *,
+    production_row: dict[str, object] | None = None,
+) -> None:
     initial_parameters = np.asarray(row["initial_parameters"], dtype=np.float64)
     final_parameters = np.asarray(row["final_parameters"], dtype=np.float64)
+    production = row if production_row is None else production_row
+    production_final_parameters = np.asarray(
+        production["final_parameters"], dtype=np.float64
+    )
     initial_hash = parameter_sha256(initial_parameters)
     final_hash = parameter_sha256(final_parameters)
     evaluations = cast(int, row["evaluations"])
@@ -278,6 +287,15 @@ def _write_valid_trial_trace(lane: Path, row: dict[str, object]) -> None:
             initial_hash: initial_parameters,
             final_hash: final_parameters,
         },
+        production_evaluations=cast(int, production["evaluations"]),
+        production_final_objective=cast(float, production["final_objective"]),
+        production_final_gradient_inf_norm=cast(
+            float, production["final_gradient_inf_norm"]
+        ),
+        production_final_status=cast(int, production["status"]),
+        production_final_parameters_sha256=parameter_sha256(
+            production_final_parameters
+        ),
         final_status=cast(int, row["status"]),
     )
 
@@ -586,26 +604,39 @@ def test_publish_rejects_gpu_memory_peak_mismatch(tmp_path: Path) -> None:
         )
 
 
-def test_publish_rejects_trial_trace_final_parameter_mismatch(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("field", "bad_value", "message"),
+    (
+        ("evaluations", 5, "production evaluations"),
+        ("final_objective", 2.5, "production final objective"),
+        ("final_gradient_inf_norm", 2.0e-9, "production final gradient"),
+        ("status", 1, "production final status"),
+        ("final_parameters", [9.0], "production final parameters"),
+    ),
+)
+def test_publish_rejects_trial_trace_production_binding_mismatch(
+    tmp_path: Path,
+    field: str,
+    bad_value: object,
+    message: str,
+) -> None:
     lanes = _scientific_v7_lanes(tmp_path)
     target = lanes[0]
     payload = _json_object(target / "measurements.json")
     row = dict(_first_measurement(payload))
-    bad_row = dict(row)
-    bad_row["final_parameters"] = [9.0]
+    bad_production_row = dict(row)
+    bad_production_row[field] = bad_value
     for artifact_name in (
         "trial.json",
         "trial.records.jsonl",
         "trial.parameters.npz",
     ):
         (target / artifact_name).unlink()
-    _write_valid_trial_trace(target, bad_row)
+    _write_valid_trial_trace(target, row, production_row=bad_production_row)
     lock = tmp_path / "environment.lock"
     lock.write_text("jax==0.10.0\n", encoding="utf-8")
 
-    with pytest.raises(
-        ValueError, match="final accepted trial parameters do not match measurement"
-    ):
+    with pytest.raises(ValueError, match=message):
         publish(
             tuple(lanes),
             environment_lock=lock,
@@ -614,6 +645,48 @@ def test_publish_rejects_trial_trace_final_parameter_mismatch(tmp_path: Path) ->
             repo_root=tmp_path,
             qualification_kind="scientific",
         )
+
+
+def test_publish_ignores_probe_trajectory_fields_for_production_binding(
+    tmp_path: Path,
+) -> None:
+    lanes = _scientific_v7_lanes(tmp_path)
+    target = lanes[0]
+    payload = _json_object(target / "measurements.json")
+    production_row = dict(_first_measurement(payload))
+    probe_row = dict(production_row)
+    probe_row.update(
+        {
+            "evaluations": 3,
+            "final_objective": 3.0,
+            "final_gradient_inf_norm": 4.0,
+            "final_parameters": [9.0],
+            "status": 7,
+        }
+    )
+    for artifact_name in (
+        "trial.json",
+        "trial.records.jsonl",
+        "trial.parameters.npz",
+    ):
+        (target / artifact_name).unlink()
+    _write_valid_trial_trace(target, probe_row, production_row=production_row)
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+
+    destination = tmp_path / "tracked" / "scientific-v2"
+    publish(
+        tuple(lanes),
+        environment_lock=lock,
+        destination=destination,
+        archive_uri=(tmp_path / "archive" / "scientific-v2").as_uri(),
+        repo_root=tmp_path,
+        qualification_kind="scientific",
+    )
+
+    manifest = _json_object(destination / "manifest.json")
+    assert manifest["verdict"] == "pass"
+    assert validate_all(destination, repo_root=tmp_path) == 0
 
 
 def test_publish_scientific_recomputes_endpoint_and_native_parity(

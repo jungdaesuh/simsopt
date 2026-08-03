@@ -599,25 +599,30 @@ def _validate_v7_measurement(
                 raise TypeError(
                     "Boozer trial trace measurement status must be an integer"
                 )
+            production_evaluations = evaluations
+            production_final_status = status
+            production_final_parameters = _numeric_array(
+                row.get("final_parameters"), field="final_parameters"
+            )
+            production_final_objective = float(
+                _finite_number(row.get("final_objective"), field="final_objective")
+            )
+            production_final_gradient_inf_norm = float(
+                _nonnegative_number(
+                    row.get("final_gradient_inf_norm"),
+                    field="final_gradient_inf_norm",
+                )
+            )
             validate_boozer_trial_trace(
                 source_run / relative_path,
                 expected_provider=cast(str, provider),
                 expected_production_route=cast(str, route),
                 expected_maxiter=maxiter,
-                expected_evaluations=evaluations,
-                expected_final_parameters=_numeric_array(
-                    row.get("final_parameters"), field="final_parameters"
-                ),
-                expected_final_objective=float(
-                    _finite_number(row.get("final_objective"), field="final_objective")
-                ),
-                expected_final_gradient_inf_norm=float(
-                    _nonnegative_number(
-                        row.get("final_gradient_inf_norm"),
-                        field="final_gradient_inf_norm",
-                    )
-                ),
-                expected_final_status=status,
+                expected_evaluations=production_evaluations,
+                expected_final_parameters=production_final_parameters,
+                expected_final_objective=production_final_objective,
+                expected_final_gradient_inf_norm=production_final_gradient_inf_norm,
+                expected_final_status=production_final_status,
             )
 
 
