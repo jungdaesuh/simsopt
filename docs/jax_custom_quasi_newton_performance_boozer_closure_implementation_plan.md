@@ -104,10 +104,27 @@ owns only the follow-on closure work.
 - The Boozer line search may encounter candidate inner-solve failures. The
   objective converts a failed candidate into a discontinuous rejected value,
   which can prevent Wolfe acceptance. Trial-level evidence is still missing.
-- The L-BFGS warm gap may be dominated by the extra `NEW_X` reentry dispatch
-  and host observation, but Optax work counts and matched transfer timing are
-  not yet available. Fusion must not begin until matched profiling supports
-  this causal claim.
+
+### Confirmed warm-gap attribution (2026-08-02 RTX 5090 profiling)
+
+- The `NEW_X` reentry hypothesis is refuted as the dominant cause: only
+  about `35%` of the custom-minus-Optax warm delta is host-boundary time;
+  about `65%` is device compute. Custom executes `14,394` GPU ops and
+  `15.5 ms` device time per warm solve versus Optax `3,062` ops and
+  `4.8 ms`, with `1,477` versus `78` in-program while-predicate D2H reads.
+- The stepwise driver rebuilt `_int_scalar(maxiter/maxfun)` every macro step
+  (52 H2D per solve); hoisted trajectory-identically in commit `7d88bd1a3`.
+- Projections under the receipt environment: scalar hoist alone reaches
+  `1.36-1.53x`; adding `NEW_X` reentry fusion reaches `1.10-1.28x` — not
+  par; only a fully on-device driver or an equivalent device-side op
+  reduction reaches `0.85-1.02x`. The par target therefore requires more
+  than the originally planned `fused_stepwise` kernel; the revised Phase 6
+  evaluates a bounded on-device fast route (measuring the existing
+  `monolithic_debug` program first) against device-side loop restructuring,
+  and records that decision here before implementation.
+- Caveat: par is defined against Optax's current host-taxed warm median
+  (`27.6 ms`, platform allocator). Custom's device floor (`15.5 ms`) exceeds
+  Optax's (`4.8 ms`); device-side excess must shrink for durable parity.
 
 ### Confirmed outer-failure diagnosis
 
