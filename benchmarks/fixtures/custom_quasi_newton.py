@@ -36,6 +36,70 @@ class ScientificEndpointEvidence:
 ScientificEndpoint = Callable[[np.ndarray], ScientificEndpointEvidence]
 
 
+class _TraceableEndpointSolver(Protocol):
+    """Full inner solve used to certify one endpoint outside timed work."""
+
+    def __call__(
+        self,
+        coil_source: object,
+        sdofs: jax.Array,
+        iota: jax.Array,
+        G: jax.Array,
+        *,
+        materialize_dense_linearization: bool,
+    ) -> Mapping[str, object]: ...
+
+
+def _certified_traceable_endpoint(
+    x: np.ndarray,
+    *,
+    coil_set_spec_from_dofs: Callable[[jax.Array], object],
+    run_code_traceable: _TraceableEndpointSolver,
+    install_traceable_solved_runtime_state: Callable[[Mapping[str, object]], object],
+    surface_dofs: np.ndarray,
+    iota_seed: float,
+    G_seed: float,
+    reporting_metrics_from_solution: Callable[..., Mapping[str, jax.Array]],
+) -> ScientificEndpointEvidence:
+    """Certify endpoint observables from a fresh solve at the endpoint coils."""
+
+    coil_dofs = jnp.asarray(x, dtype=jnp.float64)
+    solved = run_code_traceable(
+        coil_set_spec_from_dofs(coil_dofs),
+        jax.device_put(np.asarray(surface_dofs, dtype=np.float64)),
+        jax.device_put(np.asarray(iota_seed, dtype=np.float64)),
+        jax.device_put(np.asarray(G_seed, dtype=np.float64)),
+        materialize_dense_linearization=False,
+    )
+    jax.block_until_ready(solved)
+    inner_success = bool(np.asarray(jax.device_get(solved["success"])))
+    if not inner_success:
+        return ScientificEndpointEvidence(inner_success=False, observables=())
+
+    install_traceable_solved_runtime_state(solved)
+    solved_x = cast(jax.Array, solved["x"])
+    solver_success = cast(jax.Array, solved["success"])
+    metrics = reporting_metrics_from_solution(
+        coil_dofs,
+        solved_x,
+        solver_success,
+        include_distance_metrics=False,
+    )
+    jax.block_until_ready(metrics)
+    return ScientificEndpointEvidence(
+        inner_success=True,
+        observables=tuple(
+            (key, float(np.asarray(jax.device_get(metrics[key]))))
+            for key in (
+                "final_boozer_residual",
+                "final_non_qs",
+                "final_iota",
+                "final_volume",
+            )
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class ObjectiveTrialEvaluation:
     """Objective-owned evidence for one opt-in diagnostic evaluation."""
@@ -260,7 +324,6 @@ def boozer_physics() -> Fixture:
         TraceableObjectiveTrialResult,
         make_traceable_objective_runtime_bundle,
         make_traceable_objective_session,
-        traceable_forward_result_outer_raw_terms,
     )
 
     base_curves, base_currents, magnetic_axis, nfp, native_field = get_data(
@@ -367,14 +430,15 @@ def boozer_physics() -> Fixture:
         Callable[[jax.Array], tuple[jax.Array, jax.Array]],
         runtime_bundle["value_and_grad"],
     )
-    forward_result = cast(
-        Callable[[jax.Array], Mapping[str, object]],
-        runtime_bundle["forward_result"],
-    )
     reporting_metrics_from_solution = cast(
         Callable[..., Mapping[str, jax.Array]],
         runtime_bundle["reporting_metrics_from_solution"],
     )
+    runtime_state = cast(Mapping[str, object], session["state"])
+    endpoint_coil_set_spec_from_dofs = cast(
+        Callable[[jax.Array], object], runtime_state["coil_set_spec_from_dofs"]
+    )
+    endpoint_solver = cast(_TraceableEndpointSolver, boozer_surface.run_code_traceable)
 
     def trial_evaluator(x: np.ndarray) -> ObjectiveTrialEvaluation:
         traceable_trial_evaluator = cast(
@@ -424,27 +488,17 @@ def boozer_physics() -> Fixture:
         )
 
     def scientific_endpoint(x: np.ndarray) -> ScientificEndpointEvidence:
-        coil_dofs = jnp.asarray(x, dtype=jnp.float64)
-        solved = forward_result(coil_dofs)
-        metrics = reporting_metrics_from_solution(
-            coil_dofs,
-            solved["x"],
-            solved["success"],
-            include_distance_metrics=False,
-            outer_raw_terms=traceable_forward_result_outer_raw_terms(solved),
-        )
-        jax.block_until_ready((solved, metrics))
-        return ScientificEndpointEvidence(
-            inner_success=bool(np.asarray(jax.device_get(metrics["solver_success"]))),
-            observables=tuple(
-                (key, float(np.asarray(jax.device_get(metrics[key]))))
-                for key in (
-                    "final_boozer_residual",
-                    "final_non_qs",
-                    "final_iota",
-                    "final_volume",
-                )
+        return _certified_traceable_endpoint(
+            x,
+            coil_set_spec_from_dofs=endpoint_coil_set_spec_from_dofs,
+            run_code_traceable=endpoint_solver,
+            install_traceable_solved_runtime_state=(
+                boozer_surface.install_traceable_solved_runtime_state
             ),
+            surface_dofs=surface_dofs,
+            iota_seed=-0.406,
+            G_seed=g0,
+            reporting_metrics_from_solution=reporting_metrics_from_solution,
         )
 
     native_curves, native_currents, native_axis, native_nfp, native_field = get_data(
@@ -583,8 +637,10 @@ def boozer_physics() -> Fixture:
         native_objective.x = np.asarray(x, dtype=np.float64)
         native_objective.J()
         inner_success = bool(native_solver.res["success"])
+        if not inner_success:
+            return ScientificEndpointEvidence(inner_success=False, observables=())
         return ScientificEndpointEvidence(
-            inner_success=inner_success,
+            inner_success=True,
             observables=(
                 ("final_boozer_residual", float(native_residual.J())),
                 ("final_non_qs", float(native_non_qs.J())),
