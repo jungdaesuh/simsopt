@@ -233,12 +233,18 @@ class AcceptedIncumbentHostValueAndGrad:
     parameter identity: a line search may accept an earlier trial after
     evaluating later ones. Acceptance clears the pending set, so it is
     bounded by the evaluations of one outer iteration.
+
+    Candidates are promotable only against the incumbent generation they
+    were evaluated from: an evaluation that overlaps an acceptance is
+    discarded at insert, so a later ``accept`` of it fails closed instead
+    of promoting a continuation state derived from a stale incumbent.
     """
 
-    __slots__ = ("_compiled_evaluate", "_incumbent", "_lock", "_pending")
+    __slots__ = ("_compiled_evaluate", "_generation", "_incumbent", "_lock", "_pending")
 
     def __init__(self, compiled_evaluate: Callable, initial_state):
         self._compiled_evaluate = compiled_evaluate
+        self._generation = 0
         self._incumbent = initial_state
         self._pending: dict[str, TraceableObjectiveIncumbentEvaluation] = {}
         self._lock = Lock()
@@ -258,10 +264,12 @@ class AcceptedIncumbentHostValueAndGrad:
         candidate = _as_jax_float64(canonical)
         with self._lock:
             incumbent = self._incumbent
+            generation = self._generation
         evaluation = self._compiled_evaluate(candidate, incumbent)
         jax.block_until_ready(evaluation)
         with self._lock:
-            self._pending[self._parameter_sha256(canonical)] = evaluation
+            if generation == self._generation:
+                self._pending[self._parameter_sha256(canonical)] = evaluation
         return (
             float(_host_scalar(evaluation.value, dtype=np.float64)),
             _host_array(evaluation.gradient, dtype=np.float64),
@@ -282,6 +290,7 @@ class AcceptedIncumbentHostValueAndGrad:
             if not _host_bool(evaluation.candidate_inner_state.eligible):
                 raise RuntimeError("cannot promote an uncertified Boozer candidate")
             self._incumbent = evaluation.candidate_inner_state
+            self._generation += 1
             self._pending.clear()
 
 
