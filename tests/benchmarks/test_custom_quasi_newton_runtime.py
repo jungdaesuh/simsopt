@@ -969,6 +969,8 @@ def test_provider_child_timeout_override_wins_and_validates() -> None:
 
 
 def test_measurement_records_fixture_build_costs() -> None:
+    if runtime.jax.default_backend() != "cpu":
+        pytest.skip("CPU identity assertions require a CPU-backend process")
     measurement = runtime._measurement(
         fixture("rosenbrock"),
         "custom",
