@@ -464,20 +464,26 @@ metrics, tampered derivations, and historical round trips.
 8. Complete rollout and API review.
    - [x] Inventory observable behavior changes and every caller of
          `lbfgs_run_mode`, Boozer example finalization, runner schema, and
-         receipt schema — receipts
-         `public-routing-inventory.md` and
+         receipt schema — receipt `public-routing-inventory.md` (2026-08-01
+         snapshot PLUS the 2026-08-03 `fused_stepwise` addendum covering the
+         route added after that snapshot) and
          `boozer-compatibility-partitions-20260802.md`; runner/receipt
          schema history in the closure block (schema 9 / trace v3 /
          receipt v2).
    - [x] Document the new `fused_stepwise` option, its explicit fast callers,
          parity preservation, migration path, cache behavior, and rollback —
-         `docs/jax_solver_algorithm_matrix.md` plus the rollback receipt
-         `rollback-rehearsal-20260802.md`.
+         `docs/jax_solver_algorithm_matrix.md` "fused_stepwise migration,
+         cache, and rollback record (2026-08-03)" (receipt-bound medians)
+         plus the rollback receipt `rollback-rehearsal-20260802.md`.
    - [x] Update the solver matrix and provider plan only after gates pass —
-         reconciliation commit `a8134ebc8`.
+         reconciliation commit `a8134ebc8`; medians rebound to the
+         receipt-attested `-r2` values on 2026-08-03.
    - [x] Record ordered implementation commits and rehearse rollback in a clean
-         worktree — ordered `bb05ec58f..HEAD` series; detached-worktree
-         replays at three successive SHAs; rollback rehearsal receipt above.
+         worktree — ordered `bb05ec58f..466432b88` series; the rollback
+         receipt proves one base/candidate comparison plus a three-commit
+         revert in a clean worktree; clean detached-worktree lane replays
+         are attested by the receipts' runner payloads (`git_clean=true`)
+         at the successive evidence SHAs `7b1372ad0` and `359fd41fc`.
    - [ ] Obtain independent architecture, numerical, runtime, and evidence
          review with no unresolved finding — IN PROGRESS: two external
          adversarial verdicts (FAIL_ITERATE) received and worked
@@ -738,10 +744,39 @@ edit. Fix commits, in order:
   verdicts (`-r2` IDs); telemetry bundled; compile-shape v2 and warm-soak
   artifacts tracked and archive-mirrored.
 
+Third external pass (delta review, same day) returned FAIL_ITERATE with
+three P1s, fixed in the next commit batch:
+
+- Status conventions were re-derived from the ACTUAL emitters, one table
+  per solver implementation (`scipy-bfgs`, `private-bfgs`, `host-bfgs`,
+  `scipy-lbfgsb`, `private-lbfgsb`, `host-lbfgsb`, `optax-lbfgs`): the
+  custom benchmark L-BFGS lane runs the private SciPy port whose status 2
+  is a line-search failure (not `host-lbfgsb`'s evaluation-limit), and the
+  private BFGS reverses SciPy's 2/3 (2 = nonfinite backstop, 3 =
+  line-search). `status_convention_for` now requires the
+  accepted-incumbent discriminator (custom BFGS: host core under
+  continuation vs private on-device solver), the example names its host
+  emitters directly, merged budget statuses (`private/scipy-lbfgsb` 1) are
+  discriminated into iteration- vs evaluation-limit by the iteration
+  evidence, and real-emitter failure tests drive the actual solvers into
+  each path. All 47 receipts revalidate unchanged under the emitter-true
+  tables.
+- Receipt source-run aliasing closed: `validate-all` now requires each
+  source-run name to be one canonical filesystem component, so
+  path-normalized aliases (`./round-1`, `round-1/`) can no longer
+  multiply one physical run's samples into the performance medians.
+- Phase-8 evidence made true rather than claimed: routing inventory
+  gained the `fused_stepwise` addendum, the solver matrix gained the
+  migration/cache/rollback record and receipt-bound medians, and the
+  rollback/replay tick now states exactly what its receipts prove.
+
 Reviewer sub-claims refuted with evidence (not re-fixed): the batch
 telemetry CSVs existed at
 `.artifacts/custom-quasi-newton/final-{359fd41fc,7b1372ad0}-gpu-telemetry.csv`
-(now also bundled inside the `-r2` receipts); 17 of the 18 failing tests in
+(the `359fd41fc` CSV — the one belonging to the receipts' lane batch — is
+now bundled and hashed inside each `-r2` receipt; the `7b1372ad0` CSV
+belongs to the superseded earlier batch and remains host-local plus
+archive-mirrored); 17 of the 18 failing tests in
 `tests/geo/test_surface_objectives_jax.py` fail identically at the commit
 that introduced them (other-workstream drift, proven in a detached
 worktree) — the eighteenth, the general-only structural test, was a real
