@@ -122,6 +122,24 @@ owns only the follow-on closure work.
   evaluates a bounded on-device fast route (measuring the existing
   `monolithic_debug` program first) against device-side loop restructuring,
   and records that decision here before implementation.
+- Measured 2026-08-02: `monolithic_debug` is not a viable fast route — its
+  `lbfgsb_mainlb` path omits `unconstrained_fast_path=True`, compiling the
+  full bound-constrained machinery (`462.5 MB` StableHLO, `491 s` to lower,
+  compile unfinished at 21 minutes and 20 GiB; fails both watchdog bounds).
+  The selected Phase 6 design is instead the bounded fused on-device
+  driver: one `lax.while_loop` whose body is a `lax.cond` over the existing
+  search/`NEW_X`-reentry transitions with `unconstrained_fast_path=True` —
+  the current host driver moved on-device. The measured prototype compiles
+  in `12-17 s` / `1.8 GiB`, removes all per-step host observations, is
+  endpoint-identical to stepwise at matched iterations (`|df| = 0.0`,
+  `max|dx| = 1.6e-14`), and projects `0.85-0.95x` Optax warm under the
+  receipt environment. The earlier blanket rejection of an all-entry
+  on-device graph was premised on `monolithic_debug`'s compile cost and is
+  refuted for the fast-path-flagged variant. Callback-bearing callers stay
+  on `stepwise`; the fused route rejects observers fail-closed. Durable-par
+  caveat: custom device time remains `2.8x` Optax's; the dominant device
+  costs are `~1,513` while-predicate D2H per solve and the `formk`/`bmv`
+  subspace `fori_loop` fusion family.
 - Caveat: par is defined against Optax's current host-taxed warm median
   (`27.6 ms`, platform allocator). Custom's device floor (`15.5 ms`) exceeds
   Optax's (`4.8 ms`); device-side excess must shrink for durable parity.
