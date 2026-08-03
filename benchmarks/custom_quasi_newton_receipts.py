@@ -36,7 +36,8 @@ _LEGACY_SCHEMA_VERSION = 1
 _LEGACY_SCHEMA_VERSIONS = frozenset((1, 3, 5))
 _SCHEMA_VERSION = 2
 _LEGACY_RUNNER_SCHEMA_VERSION = 7
-_RUNNER_SCHEMA_VERSION = 8
+_REJECTED_RUNNER_SCHEMA_VERSION = 8
+_RUNNER_SCHEMA_VERSION = 9
 _JSON_INDENT = 2
 
 QualificationKind = Literal["diagnostic", "scientific", "performance"]
@@ -427,10 +428,17 @@ def _validate_phase_rss(row: dict[str, object]) -> None:
     if _required_int(row, "solver_peak_rss_delta_kib") != expected_delta:
         raise ValueError("solver RSS delta does not match phase measurements")
     lifetime_peak = _required_int(row, "peak_rss_kib")
-    if lifetime_peak < expected_peak:
-        raise ValueError("process lifetime RSS peak is below solver phase peak")
-    if row.get("peak_rss_scope") != "provider_child_process_lifetime":
+    expected_lifetime_peak = max(
+        _required_int(phase, "peak_rss_kib") for phase in phases
+    )
+    if lifetime_peak != expected_lifetime_peak:
+        raise ValueError(
+            "process lifetime RSS peak does not match phase measurements"
+        )
+    if row.get("peak_rss_scope") != "self_proc_status_phase_max":
         raise ValueError("process lifetime RSS scope is unsupported")
+    if _required_int(row, "ru_maxrss_kib") <= 0:
+        raise ValueError("ru_maxrss diagnostic must be positive")
 
 
 def _validate_v7_measurement(
@@ -999,10 +1007,14 @@ def publish(
     if len(runner_schema_versions) != 1:
         raise ValueError("receipt source runs must use one runner schema version")
     runner_schema_version = next(iter(runner_schema_versions))
+    if runner_schema_version == _REJECTED_RUNNER_SCHEMA_VERSION:
+        raise ValueError(
+            "runner schema 8 is rejected: its cross-instrument RSS peak "
+            "semantics never produced a valid receipt"
+        )
     receipt_schema_version = (
         _SCHEMA_VERSION
-        if runner_schema_version
-        in {_LEGACY_RUNNER_SCHEMA_VERSION, _RUNNER_SCHEMA_VERSION}
+        if runner_schema_version == _RUNNER_SCHEMA_VERSION
         else _LEGACY_SCHEMA_VERSION
     )
     if receipt_schema_version == _SCHEMA_VERSION:

@@ -75,7 +75,7 @@ from benchmarks.process_gpu_monitor import (
 Provider = Literal["native", "custom", "optax"]
 Method = Literal["bfgs", "lbfgs"]
 
-_RUNNER_SCHEMA_VERSION = 8
+_RUNNER_SCHEMA_VERSION = 9
 
 
 class _OptaxValueAndGrad(Protocol):
@@ -284,6 +284,7 @@ class Measurement:
     warm_seconds: float
     peak_rss_kib: int
     peak_rss_scope: str
+    ru_maxrss_kib: int
     peak_vram_mib: float | None
     process_pid: int
     certificate: str
@@ -1476,8 +1477,9 @@ def _measurement(
         first_execution_seconds=first_execution_seconds,
         cold_seconds=cold_seconds,
         warm_seconds=warm_seconds,
-        peak_rss_kib=_peak_rss_kib(),
-        peak_rss_scope="provider_child_process_lifetime",
+        peak_rss_kib=max(phase.peak_rss_kib for phase in phase_rss),
+        peak_rss_scope="self_proc_status_phase_max",
+        ru_maxrss_kib=_peak_rss_kib(),
         peak_vram_mib=None,
         process_pid=os.getpid(),
         certificate=fixture_case.certificate,

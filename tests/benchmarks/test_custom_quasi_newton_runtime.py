@@ -670,7 +670,7 @@ def test_runtime_environment_payload_records_device_allocator_contract(
 
 
 def test_runner_schema_v7_declares_the_promotion_contract() -> None:
-    assert runtime._RUNNER_SCHEMA_VERSION == 8
+    assert runtime._RUNNER_SCHEMA_VERSION == 9
 
 
 def test_nvidia_smi_identity_parser_binds_uuid_model_memory_and_driver() -> None:

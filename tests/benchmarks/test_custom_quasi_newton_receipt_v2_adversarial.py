@@ -48,7 +48,7 @@ def _runner_v7_directory(root: Path) -> Path:
         "scheduler_job_id": None,
     }
     payload: dict[str, object] = {
-        "schema_version": 7,
+        "schema_version": 9,
         "git_commit": "abc123",
         "git_clean": True,
         "orchestrator_git_clean": True,
@@ -88,9 +88,11 @@ def _runner_v7_directory(root: Path) -> Path:
                 "solver_start_rss_kib": 100,
                 "solver_peak_rss_kib": 120,
                 "solver_peak_rss_delta_kib": 20,
-                "peak_rss_kib": 130,
-                "peak_rss_scope": "provider_child_process_lifetime",
+                "peak_rss_kib": 120,
+                "peak_rss_scope": "self_proc_status_phase_max",
+                "ru_maxrss_kib": 118,
                 "peak_vram_mib": 200.0,
+                "process_pid": 1234,
                 "inner_success": True,
                 "parameters_finite": True,
                 "observables_finite": True,
@@ -146,7 +148,24 @@ def _runner_v7_directory(root: Path) -> Path:
         ],
     }
     _write_json(run / "measurements.json", payload)
-    (run / "memory.json").write_text("{}\n", encoding="utf-8")
+    (run / "memory.json").write_text(
+        json.dumps(
+            {
+                "availability": "available",
+                "gpu_uuid": "GPU-test",
+                "peak_used_memory_mib": 200,
+                "provider_pid": 1234,
+                "samples": [
+                    {"sampled_at_unix_ns": 1, "used_memory_mib": 200}
+                ],
+                "schema_version": 1,
+                "target_pid_observed": True,
+                "unavailable_reason": None,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     return run
 
 

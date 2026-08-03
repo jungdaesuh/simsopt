@@ -70,7 +70,7 @@ def _runner_v7_directory(root: Path) -> Path:
     (run / "measurements.json").write_text(
         json.dumps(
             {
-                "schema_version": 8,
+                "schema_version": 9,
                 "git_commit": "abc123",
                 "git_clean": True,
                 "orchestrator_git_clean": True,
@@ -125,8 +125,9 @@ def _runner_v7_directory(root: Path) -> Path:
                         "solver_start_rss_kib": 100,
                         "solver_peak_rss_kib": 120,
                         "solver_peak_rss_delta_kib": 20,
-                        "peak_rss_kib": 130,
-                        "peak_rss_scope": "provider_child_process_lifetime",
+                        "peak_rss_kib": 120,
+                        "peak_rss_scope": "self_proc_status_phase_max",
+                        "ru_maxrss_kib": 118,
                         "process_pid": 1234,
                         "peak_vram_mib": 200,
                         "inner_success": True,
@@ -550,7 +551,7 @@ def test_publish_v2_binds_runner_contract_and_archive_inventory(tmp_path: Path) 
     metrics = json.loads((destination / "metrics.json").read_text(encoding="utf-8"))
     assert manifest["schema_version"] == 2
     assert metrics["schema_version"] == 2
-    assert manifest["runner_schema_version"] == 8
+    assert manifest["runner_schema_version"] == 9
     assert manifest["archive_bundle"]["storage_identity"] == "test-archive"
     assert metrics["derivations"]["sample_counts"] == {"custom": 1}
     assert manifest["verdict"] == "diagnostic-pass-not-promotion"
@@ -593,6 +594,28 @@ def test_publish_rejects_gpu_memory_peak_mismatch(tmp_path: Path) -> None:
 
     with pytest.raises(
         ValueError, match="GPU memory artifact peak does not match peak_vram_mib"
+    ):
+        publish(
+            (run,),
+            environment_lock=lock,
+            destination=tmp_path / "tracked" / "receipt-v2",
+            archive_uri=(tmp_path / "archive" / "receipt-v2").as_uri(),
+            repo_root=tmp_path,
+            qualification_kind="diagnostic",
+        )
+
+
+def test_publish_rejects_lifetime_peak_diverging_from_phases(tmp_path: Path) -> None:
+    run = _runner_v7_directory(tmp_path)
+    payload = _json_object(run / "measurements.json")
+    row = cast(dict[str, object], cast(list[object], payload["measurements"])[0])
+    row["peak_rss_kib"] = 130
+    _write_json(run / "measurements.json", payload)
+    lock = tmp_path / "environment.lock"
+    lock.write_text("jax==0.10.0\n", encoding="utf-8")
+
+    with pytest.raises(
+        ValueError, match="process lifetime RSS peak does not match phase"
     ):
         publish(
             (run,),
@@ -784,7 +807,7 @@ def test_publish_scientific_rejects_missing_native_authority(tmp_path: Path) -> 
 def test_publish_rejects_unknown_runner_schema(tmp_path: Path) -> None:
     run = _runner_v7_directory(tmp_path)
     payload = json.loads((run / "measurements.json").read_text(encoding="utf-8"))
-    payload["schema_version"] = 9
+    payload["schema_version"] = 10
     (run / "measurements.json").write_text(json.dumps(payload), encoding="utf-8")
     lock = tmp_path / "environment.lock"
     lock.write_text("jax==0.10.0\n", encoding="utf-8")
