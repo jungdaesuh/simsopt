@@ -923,6 +923,14 @@ def test_tracked_pre_refactor_trajectory_receipt_is_self_consistent(
     assert pre_refactor == candidate
 
 
+def test_provider_child_timeout_override_wins_and_validates() -> None:
+    assert runtime._provider_child_timeout_seconds("rosenbrock", None) == 120
+    assert runtime._provider_child_timeout_seconds("boozer", None) == 1800
+    assert runtime._provider_child_timeout_seconds("boozer", 21600) == 21600
+    with pytest.raises(ValueError, match="positive second count"):
+        runtime._provider_child_timeout_seconds("boozer", 0)
+
+
 def test_measurement_records_fixture_build_costs() -> None:
     measurement = runtime._measurement(
         fixture("rosenbrock"),

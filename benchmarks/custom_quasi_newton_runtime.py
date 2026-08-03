@@ -615,9 +615,19 @@ def _stop_provider_child(
     )
 
 
-def _provider_child_timeout_seconds(cases: str) -> int:
-    """Return the bounded child watchdog for the selected fixture set."""
+def _provider_child_timeout_seconds(cases: str, override: int | None = None) -> int:
+    """Return the bounded child watchdog for the selected fixture set.
 
+    ``override`` is the explicit CLI bound for long-budget campaigns; it must
+    be positive and is recorded verbatim in run provenance.
+    """
+
+    if override is not None:
+        if override <= 0:
+            raise ValueError(
+                "provider child timeout override must be a positive second count"
+            )
+        return override
     selected_cases = {name.strip() for name in cases.split(",")}
     if "boozer" in selected_cases:
         return _BOOZER_PROVIDER_CHILD_TIMEOUT_SECONDS
@@ -1487,6 +1497,7 @@ def _run_provider_child(
     maxcor: int,
     output: Path,
     capture_boozer_trial_trace: bool = False,
+    provider_child_timeout_seconds: int | None = None,
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
     monitored_gpu_uuid = (
         _selected_nvidia_smi_identity(None).uuid if device == "gpu" else None
@@ -1517,7 +1528,9 @@ def _run_provider_child(
     memory_measurement = _run_provider_child_process(
         command,
         gpu_uuid=monitored_gpu_uuid,
-        timeout_seconds=_provider_child_timeout_seconds(cases),
+        timeout_seconds=_provider_child_timeout_seconds(
+            cases, provider_child_timeout_seconds
+        ),
     )
     measurements_path = output / "measurements.json"
     payload = json.loads(measurements_path.read_text(encoding="utf-8"))
@@ -1661,6 +1674,7 @@ def main() -> int:
     parser.add_argument("--maxcor", type=int, default=10)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--capture-boozer-trial-trace", action="store_true")
+    parser.add_argument("--provider-child-timeout-seconds", type=int, default=None)
     parser.add_argument("--provider-child", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
@@ -1751,6 +1765,7 @@ def main() -> int:
                 maxcor=args.maxcor,
                 output=child_output,
                 capture_boozer_trial_trace=args.capture_boozer_trial_trace,
+                provider_child_timeout_seconds=args.provider_child_timeout_seconds,
             )
             measurements.extend(child_measurements)
             provider_children.append(child_provenance)
@@ -1836,7 +1851,9 @@ def main() -> int:
         "orchestrator_git_clean": orchestrator_git_clean,
         "provider_child": args.provider_child,
         "provider_children": provider_children,
-        "provider_child_timeout_seconds": _provider_child_timeout_seconds(args.cases),
+        "provider_child_timeout_seconds": _provider_child_timeout_seconds(
+            args.cases, args.provider_child_timeout_seconds
+        ),
         "provider_child_rss_limit_kib": _PROVIDER_CHILD_RSS_LIMIT_KIB,
         "provider_child_term_grace_seconds": _PROVIDER_CHILD_TERM_GRACE_SECONDS,
         "measurements": measurement_payload,
