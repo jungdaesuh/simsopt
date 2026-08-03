@@ -202,7 +202,6 @@ def test_gpu_child_rows_retain_observed_peak_and_memory_artifact_provenance(
         model="NVIDIA A100",
         total_memory_bytes=40960 * 1024 * 1024,
         driver_version="590.48",
-        compute_capability="8.0",
     )
     measurement = ProcessGpuMemoryResult(
         gpu_uuid=selected.uuid,
@@ -496,7 +495,6 @@ def test_unavailable_gpu_memory_is_retained_without_an_inferred_peak(
         model="NVIDIA A100",
         total_memory_bytes=40960 * 1024 * 1024,
         driver_version="590.48",
-        compute_capability="8.0",
     )
     if device == "cpu":
         monkeypatch.setattr(
@@ -552,7 +550,6 @@ def test_parent_rejects_child_identity_that_differs_from_monitored_gpu(
         model="NVIDIA A100",
         total_memory_bytes=40960 * 1024 * 1024,
         driver_version="590.48",
-        compute_capability="8.0",
     )
     monkeypatch.setattr(runtime, "_selected_nvidia_smi_identity", lambda _id: selected)
 
@@ -599,7 +596,6 @@ def test_monitor_failure_prevents_child_payload_promotion(
         model="NVIDIA A100",
         total_memory_bytes=40960 * 1024 * 1024,
         driver_version="590.48",
-        compute_capability="8.0",
     )
     monkeypatch.setattr(runtime, "_selected_nvidia_smi_identity", lambda _id: selected)
     monkeypatch.setattr(
@@ -697,8 +693,8 @@ def test_runner_schema_v7_declares_the_promotion_contract() -> None:
 
 def test_nvidia_smi_identity_parser_binds_uuid_model_memory_and_driver() -> None:
     records = runtime._parse_nvidia_smi_identity_rows(
-        "0, GPU-abc, NVIDIA GeForce RTX 5090, 32607, 590.48, 12.0\n"
-        "1, GPU-def, NVIDIA A100-PCIE-40GB, 40960, 590.48, 8.0\n"
+        "0, GPU-abc, NVIDIA GeForce RTX 5090, 32607, 590.48\n"
+        "1, GPU-def, NVIDIA A100-PCIE-40GB, 40960, 590.48\n"
     )
 
     assert records[0].index == 0
@@ -706,7 +702,6 @@ def test_nvidia_smi_identity_parser_binds_uuid_model_memory_and_driver() -> None
     assert records[0].model == "NVIDIA GeForce RTX 5090"
     assert records[0].total_memory_bytes == 32607 * 1024 * 1024
     assert records[0].driver_version == "590.48"
-    assert records[0].compute_capability == "12.0"
 
 
 @pytest.mark.parametrize(

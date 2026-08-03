@@ -249,7 +249,6 @@ class _NvidiaSmiIdentity:
     model: str
     total_memory_bytes: int
     driver_version: str
-    compute_capability: str
 
 
 @dataclass(frozen=True)
@@ -322,9 +321,9 @@ def _parse_nvidia_smi_identity_rows(output: str) -> tuple[_NvidiaSmiIdentity, ..
     records: list[_NvidiaSmiIdentity] = []
     for line in output.splitlines():
         fields = tuple(field.strip() for field in line.split(","))
-        if len(fields) != 6:
+        if len(fields) != 5:
             raise ValueError(f"invalid nvidia-smi identity row: {line!r}")
-        index, uuid, model, memory_mib, driver, compute_capability = fields
+        index, uuid, model, memory_mib, driver = fields
         records.append(
             _NvidiaSmiIdentity(
                 index=int(index),
@@ -332,7 +331,6 @@ def _parse_nvidia_smi_identity_rows(output: str) -> tuple[_NvidiaSmiIdentity, ..
                 model=model,
                 total_memory_bytes=int(memory_mib) * 1024 * 1024,
                 driver_version=driver,
-                compute_capability=compute_capability,
             )
         )
     return tuple(records)
@@ -342,7 +340,7 @@ def _selected_nvidia_smi_identity(device_id: int | None) -> _NvidiaSmiIdentity:
     completed = subprocess.run(
         [
             "nvidia-smi",
-            "--query-gpu=index,uuid,name,memory.total,driver_version,compute_cap",
+            "--query-gpu=index,uuid,name,memory.total,driver_version",
             "--format=csv,noheader,nounits",
         ],
         check=True,
@@ -385,6 +383,11 @@ def _device_identity(requested_device: str) -> DeviceIdentity:
     gpu_identity = (
         _selected_nvidia_smi_identity(device_id) if requested_device == "gpu" else None
     )
+    device_compute_capability = (
+        getattr(device, "compute_capability", None)
+        if requested_device == "gpu"
+        else None
+    )
     return DeviceIdentity(
         requested_device=requested_device,
         backend=str(jax.default_backend()),
@@ -397,8 +400,14 @@ def _device_identity(requested_device: str) -> DeviceIdentity:
         ),
         gpu_uuid=None if gpu_identity is None else gpu_identity.uuid,
         gpu_model=None if gpu_identity is None else gpu_identity.model,
+        # The CUDA runtime (via the bound JAX device) owns the compute
+        # capability; nvidia-smi's compute_cap projection did not exist
+        # before the r510 drivers, and the runtime is the same authority
+        # that already proves CUDA-ness through jax_device.
         compute_capability=(
-            None if gpu_identity is None else gpu_identity.compute_capability
+            str(device_compute_capability)
+            if device_compute_capability is not None
+            else None
         ),
         total_memory_bytes=(
             None if gpu_identity is None else gpu_identity.total_memory_bytes
