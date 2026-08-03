@@ -214,6 +214,20 @@ Iterations and evaluations are recorded but may differ by provider. Raw
 parameters remain available even when an invariant representation is the
 scientific comparison owner.
 
+### Matched-budget equivalence milestone (2026-08-03 author ruling)
+
+At a matched 1000-iteration budget neither implementation reaches the
+`1e-7` terminal stationarity above: the native SciPy oracle itself caps at a
+gradient infinity norm of `9.2e-4` (custom reaches `4.6e-5`). The plan
+author's adversarial final review therefore ruled: record **matched-budget
+equivalence versus the native oracle** as a separately named
+interoperability/performance milestone — with explicit endpoint, objective,
+gradient, parameter, counter, and status criteria and distributional GPU
+evidence — while the scientific certificate above remains the unmodified
+promotion gate and is explicitly **not yet achieved** by either
+implementation. Matched-budget receipts must be labeled as such and cannot be
+presented as scientific-certificate promotion.
+
 ## Design Alternatives
 
 ### Boozer candidate recovery
