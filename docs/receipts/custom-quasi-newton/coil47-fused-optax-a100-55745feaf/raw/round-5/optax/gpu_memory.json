@@ -1,0 +1,631 @@
+{
+  "availability": "available",
+  "gpu_uuid": "GPU-250014ca-8cb3-bdcd-ad1d-2f6f64529b8d",
+  "peak_used_memory_mib": 598,
+  "provider_pid": 25492,
+  "samples": [
+    {
+      "sampled_at_unix_ns": 1785776039099648362,
+      "used_memory_mib": 422
+    },
+    {
+      "sampled_at_unix_ns": 1785776039209037779,
+      "used_memory_mib": 422
+    },
+    {
+      "sampled_at_unix_ns": 1785776039318575245,
+      "used_memory_mib": 422
+    },
+    {
+      "sampled_at_unix_ns": 1785776039428728681,
+      "used_memory_mib": 422
+    },
+    {
+      "sampled_at_unix_ns": 1785776039538608107,
+      "used_memory_mib": 422
+    },
+    {
+      "sampled_at_unix_ns": 1785776039648209473,
+      "used_memory_mib": 422
+    },
+    {
+      "sampled_at_unix_ns": 1785776039757242180,
+      "used_memory_mib": 422
+    },
+    {
+      "sampled_at_unix_ns": 1785776039868150136,
+      "used_memory_mib": 422
+    },
+    {
+      "sampled_at_unix_ns": 1785776039979439681,
+      "used_memory_mib": 422
+    },
+    {
+      "sampled_at_unix_ns": 1785776040089901948,
+      "used_memory_mib": 426
+    },
+    {
+      "sampled_at_unix_ns": 1785776040199184944,
+      "used_memory_mib": 428
+    },
+    {
+      "sampled_at_unix_ns": 1785776040307880801,
+      "used_memory_mib": 428
+    },
+    {
+      "sampled_at_unix_ns": 1785776040418320797,
+      "used_memory_mib": 428
+    },
+    {
+      "sampled_at_unix_ns": 1785776040527308314,
+      "used_memory_mib": 428
+    },
+    {
+      "sampled_at_unix_ns": 1785776040637515450,
+      "used_memory_mib": 428
+    },
+    {
+      "sampled_at_unix_ns": 1785776040747073136,
+      "used_memory_mib": 428
+    },
+    {
+      "sampled_at_unix_ns": 1785776040855879093,
+      "used_memory_mib": 428
+    },
+    {
+      "sampled_at_unix_ns": 1785776040966311509,
+      "used_memory_mib": 428
+    },
+    {
+      "sampled_at_unix_ns": 1785776041076517036,
+      "used_memory_mib": 428
+    },
+    {
+      "sampled_at_unix_ns": 1785776041186879221,
+      "used_memory_mib": 428
+    },
+    {
+      "sampled_at_unix_ns": 1785776041297027398,
+      "used_memory_mib": 428
+    },
+    {
+      "sampled_at_unix_ns": 1785776041407271664,
+      "used_memory_mib": 428
+    },
+    {
+      "sampled_at_unix_ns": 1785776041517532810,
+      "used_memory_mib": 428
+    },
+    {
+      "sampled_at_unix_ns": 1785776041627832096,
+      "used_memory_mib": 428
+    },
+    {
+      "sampled_at_unix_ns": 1785776041738229542,
+      "used_memory_mib": 428
+    },
+    {
+      "sampled_at_unix_ns": 1785776041848534758,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776041958639514,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776042069053170,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776042179281226,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776042289598312,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776042399812338,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776042510041294,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776042620113281,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776042730571457,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776042840859263,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776042951233149,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776043061621285,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776043171935211,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776043282182537,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776043392264543,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776043502329419,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776043612669006,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776043722995642,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776043833466418,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776043943689534,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776044054110939,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776044164219586,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776044274709091,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776044384945678,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776044495241984,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776044605398220,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776044715560996,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776044825887182,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776044936040528,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776045046319564,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776045157436710,
+      "used_memory_mib": 438
+    },
+    {
+      "sampled_at_unix_ns": 1785776045267603046,
+      "used_memory_mib": 438
+    },
+    {
+      "sampled_at_unix_ns": 1785776045377937772,
+      "used_memory_mib": 438
+    },
+    {
+      "sampled_at_unix_ns": 1785776045488030208,
+      "used_memory_mib": 438
+    },
+    {
+      "sampled_at_unix_ns": 1785776045598801134,
+      "used_memory_mib": 438
+    },
+    {
+      "sampled_at_unix_ns": 1785776045709045900,
+      "used_memory_mib": 438
+    },
+    {
+      "sampled_at_unix_ns": 1785776045819209376,
+      "used_memory_mib": 438
+    },
+    {
+      "sampled_at_unix_ns": 1785776045929365403,
+      "used_memory_mib": 438
+    },
+    {
+      "sampled_at_unix_ns": 1785776046039423349,
+      "used_memory_mib": 438
+    },
+    {
+      "sampled_at_unix_ns": 1785776046150739484,
+      "used_memory_mib": 456
+    },
+    {
+      "sampled_at_unix_ns": 1785776046261755650,
+      "used_memory_mib": 438
+    },
+    {
+      "sampled_at_unix_ns": 1785776046371902486,
+      "used_memory_mib": 438
+    },
+    {
+      "sampled_at_unix_ns": 1785776046482191742,
+      "used_memory_mib": 438
+    },
+    {
+      "sampled_at_unix_ns": 1785776046592661318,
+      "used_memory_mib": 438
+    },
+    {
+      "sampled_at_unix_ns": 1785776046702904564,
+      "used_memory_mib": 438
+    },
+    {
+      "sampled_at_unix_ns": 1785776046813213190,
+      "used_memory_mib": 438
+    },
+    {
+      "sampled_at_unix_ns": 1785776046923355976,
+      "used_memory_mib": 438
+    },
+    {
+      "sampled_at_unix_ns": 1785776047033760792,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776047144077908,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776047254278564,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776047364398301,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776047474748867,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776047584753223,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776047694825569,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776047804890316,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776047914775272,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776048024521178,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776048134835764,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776048245206890,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776048355414786,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776048465701982,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776048575943609,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776048686206715,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776048796726811,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776048907038617,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776049017358193,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776049127400819,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776049237655365,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776049347857941,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776049458285177,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776049569336893,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776049679313249,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776049789990025,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776049900461291,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776050011915226,
+      "used_memory_mib": 472
+    },
+    {
+      "sampled_at_unix_ns": 1785776050124034351,
+      "used_memory_mib": 598
+    },
+    {
+      "sampled_at_unix_ns": 1785776050235115677,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776050346047133,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776050456950568,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776050567838244,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776050678859160,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776050790012555,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776050900501321,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776051010866077,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776051121211933,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776051231313719,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776051341501115,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776051451461612,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776051561648138,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776051672041264,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776051782280890,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776051892466796,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776052002698203,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776052116995116,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776052227091862,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776052337386978,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776052447321635,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776052557605021,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776052667881657,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776052778091583,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776052888464839,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776052998648655,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776053108832771,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776053219018228,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776053329369094,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776053439621710,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776053549990216,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776053660193082,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776053770434388,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776053880568694,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776053990880940,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776054100953396,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776054211787832,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776054322008508,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776054431943465,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776054542238071,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776054652534277,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776054763022092,
+      "used_memory_mib": 454
+    },
+    {
+      "sampled_at_unix_ns": 1785776054873375029,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776054983527895,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776055094484550,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776055205075106,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776055315159983,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776055425418349,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776055535698365,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776055646205551,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776055756483207,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776055867414303,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776055977794888,
+      "used_memory_mib": 436
+    },
+    {
+      "sampled_at_unix_ns": 1785776056088191935,
+      "used_memory_mib": 436
+    }
+  ],
+  "schema_version": 1,
+  "target_pid_observed": true,
+  "unavailable_reason": null
+}

@@ -1,0 +1,170 @@
+{
+  "archive_bundle": {
+    "inventory_sha256": "52a2720309cf6e71bcc5420286f8837d2c98d7f9fa64503f37265789fe3845fe",
+    "receipt_id": "coil47-fused-optax-a100-55745feaf",
+    "storage_identity": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-a100-55745feaf"
+  },
+  "archive_uri": "file:///home/jungdaesuh/qn-receipt-archives/coil47-fused-optax-a100-55745feaf",
+  "artifacts": [
+    {
+      "path": "metrics.json",
+      "sha256": "c5c2482131b82906d5d8a1b59e203b19f88867b86e7848f013ec2477c3a08419"
+    },
+    {
+      "path": "raw/round-1/custom/gpu_memory.json",
+      "sha256": "a9ba0537b784cce642cdc23a8d28f2ce90fc4c65acce18028658317e0b0064e7"
+    },
+    {
+      "path": "raw/round-1/custom/measurements.json",
+      "sha256": "d73e047f90ee2c7756986540f53e1e87bbbd963802cc25816edf431692d52443"
+    },
+    {
+      "path": "raw/round-1/measurements.json",
+      "sha256": "8c81419ac02c2c0978d8a310ded0dd5d55cfce98525aa5e5afb2b64a3f851cd1"
+    },
+    {
+      "path": "raw/round-1/optax/gpu_memory.json",
+      "sha256": "5380bf7d192dba2a9cb9162cb23244f32eb422dbad47a50d30510b053720a5c0"
+    },
+    {
+      "path": "raw/round-1/optax/measurements.json",
+      "sha256": "4d5cdeec90768699907bc5455025d2fb331c75cc5a69402ef7f224c68fa7570a"
+    },
+    {
+      "path": "raw/round-1/run.log",
+      "sha256": "8c81419ac02c2c0978d8a310ded0dd5d55cfce98525aa5e5afb2b64a3f851cd1"
+    },
+    {
+      "path": "raw/round-2/custom/gpu_memory.json",
+      "sha256": "de7a5190f67c90f20b53045a76072264e13ce5bc356ec6e0f62abcdb7d3c891b"
+    },
+    {
+      "path": "raw/round-2/custom/measurements.json",
+      "sha256": "ddaf1bb28b032c4835264cbbc0c1baa08bdf54bb300271fa17901456d4b0f60b"
+    },
+    {
+      "path": "raw/round-2/measurements.json",
+      "sha256": "dee81e11f0f67ce34260b5ad83d5c253fb08fde7b21c12cdb9607ad66c111694"
+    },
+    {
+      "path": "raw/round-2/optax/gpu_memory.json",
+      "sha256": "f77815b9e44f015584d9a7f8c7a5c1cde22443f17efa33c489da7729e342429a"
+    },
+    {
+      "path": "raw/round-2/optax/measurements.json",
+      "sha256": "5fe0420ed0d1ff20a619c826a6686a091330145944a1495cec840b6ed1c66898"
+    },
+    {
+      "path": "raw/round-2/run.log",
+      "sha256": "dee81e11f0f67ce34260b5ad83d5c253fb08fde7b21c12cdb9607ad66c111694"
+    },
+    {
+      "path": "raw/round-3/custom/gpu_memory.json",
+      "sha256": "a4ed5a40b400d0e34eb89c1b1a34d842feb518c6fc3dda450cbdcbac5e43e1eb"
+    },
+    {
+      "path": "raw/round-3/custom/measurements.json",
+      "sha256": "b4b357fc1e1f9914ff53508d2bd2cdb6791ebe96b45c7dfcf3ec4dee0368f132"
+    },
+    {
+      "path": "raw/round-3/measurements.json",
+      "sha256": "805923d2529f00e0b638b1ee61afdbb70ae87cb918ddf09ee513fe8a24932220"
+    },
+    {
+      "path": "raw/round-3/optax/gpu_memory.json",
+      "sha256": "8742180c1b206d4474e41172c44054fe3e244fa9bf0febe5fc716e6bdea0ffcf"
+    },
+    {
+      "path": "raw/round-3/optax/measurements.json",
+      "sha256": "527e6a49d91a068de4f92ec1a928417106bb3d0cec0e38ae5a96900d0f8b7509"
+    },
+    {
+      "path": "raw/round-3/run.log",
+      "sha256": "805923d2529f00e0b638b1ee61afdbb70ae87cb918ddf09ee513fe8a24932220"
+    },
+    {
+      "path": "raw/round-4/custom/gpu_memory.json",
+      "sha256": "8dcc834137552fbd16e003d8de82d006bf6adf55a1f88d6ed63187eb986061fa"
+    },
+    {
+      "path": "raw/round-4/custom/measurements.json",
+      "sha256": "083ca0c7fa3acdff098672687ec628a88d731e10a74769aaa07d67f81383e4d4"
+    },
+    {
+      "path": "raw/round-4/measurements.json",
+      "sha256": "6b7641415b99b41ce3a4136fda3b1151f107cbfb3f53137443e2bfb8e0a2d86b"
+    },
+    {
+      "path": "raw/round-4/optax/gpu_memory.json",
+      "sha256": "939f1102b0df85b54fdb5115b368de7e22b0ec10d18ba8be839bb0bbef8e7266"
+    },
+    {
+      "path": "raw/round-4/optax/measurements.json",
+      "sha256": "c259f962e2359ad5ef9bf2d429b60cb49d722212138a39a404250cad8acaccfd"
+    },
+    {
+      "path": "raw/round-4/run.log",
+      "sha256": "6b7641415b99b41ce3a4136fda3b1151f107cbfb3f53137443e2bfb8e0a2d86b"
+    },
+    {
+      "path": "raw/round-5/custom/gpu_memory.json",
+      "sha256": "bd469747a0c1f56e162960ae31e96f1a7d5c5471571ec0ed8cb2229783439b45"
+    },
+    {
+      "path": "raw/round-5/custom/measurements.json",
+      "sha256": "3b762f979cdc0829e0d5c325be5e266c8220976baac97ad5b31d6c6b53a4e7f2"
+    },
+    {
+      "path": "raw/round-5/measurements.json",
+      "sha256": "1d99159b31e853fc7d1d6d75a07bd0d181f51b45df5f0e899a56ac7627a3e187"
+    },
+    {
+      "path": "raw/round-5/optax/gpu_memory.json",
+      "sha256": "2b08513914a101ce8da67e337e9e0376e73bcb5f23bf1819206ce454be533c70"
+    },
+    {
+      "path": "raw/round-5/optax/measurements.json",
+      "sha256": "2ff60152d5f3a79d16000b9606adf157644c0f160771bd495e3de92c69c48773"
+    },
+    {
+      "path": "raw/round-5/run.log",
+      "sha256": "1d99159b31e853fc7d1d6d75a07bd0d181f51b45df5f0e899a56ac7627a3e187"
+    },
+    {
+      "path": "summary.md",
+      "sha256": "a7be055b1f4a60bfdfcf8d4412f6a23bdcf27c3410d790043caa34295b128e64"
+    }
+  ],
+  "candidate_commit": "55745feaf939bb5b0c40fa85493e72ec506ac41a",
+  "candidate_worktree_clean": true,
+  "environment_lock": {
+    "path": "benchmarks/environments/custom_quasi_newton_a100_landau.lock.txt",
+    "sha256": "dd896aa4779a6d825ef067f14830c0eeac65176e5348fd035b05524077e2ae1b"
+  },
+  "expected_sample_counts": {
+    "custom": 5,
+    "optax": 5
+  },
+  "kind": "custom-quasi-newton-runner",
+  "qualification": {
+    "comparison_count": 5,
+    "custom_to_optax_warm_ratio": 1.1659094237725227,
+    "custom_warm_seconds_median": 0.08040603400058899,
+    "failure_reasons": [],
+    "optax_warm_seconds_median": 0.06896421999954327,
+    "passed": true,
+    "verdict": "pass"
+  },
+  "qualification_kind": "performance",
+  "receipt_id": "coil47-fused-optax-a100-55745feaf",
+  "runner_schema_version": 9,
+  "schema_version": 2,
+  "source_runs": [
+    "round-1",
+    "round-2",
+    "round-3",
+    "round-4",
+    "round-5"
+  ],
+  "verdict": "pass"
+}
