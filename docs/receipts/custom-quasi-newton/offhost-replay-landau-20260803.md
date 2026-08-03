@@ -42,7 +42,8 @@ the A100 quiet and contended receipts). The rollback-rehearsal
 evidence tree carries no `manifest.json` and is therefore NOT part of
 the validate-all count; its integrity is checked separately with
 `sha256sum -c SHA256SUMS` inside
-`rollback-rehearsal-fused-20260803/raw/` (see the third replay below).
+`rollback-rehearsal-fused-20260803/raw/` (executed in the evidenced
+fourth replay above).
 The first replay below is retained as the historical record of the
 47-receipt corpus.
 
