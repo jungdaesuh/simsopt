@@ -3392,12 +3392,23 @@ def _ensure_traceable_runtime_optimizer_solved_pair(runtime_entry, booz_jax):
     return optimizer_solved_pair
 
 
-def _build_traceable_trial_evaluator(compiled_bundle):
-    """Build the opt-in host diagnostic for one forward/adjoint evaluation.
+class _CandidateEvaluation(NamedTuple):
+    """Device-resident core result shared by the trial and incumbent paths."""
 
-    The evaluator calls the owned compiled forward exactly once, then applies
-    the production candidate-versus-baseline gradient routing and preserves the
-    actual adjoint success returned by ``compiled_total_gradient_for``.
+    forward_result: dict
+    gradient: jax.Array
+    actual_adjoint_success: jax.Array
+    gradient_source: str
+    candidate_inner_state: TraceableObjectiveInnerState
+
+
+def _build_candidate_evaluation_core(compiled_bundle):
+    """Build the single owner of forward, gradient routing, and eligibility.
+
+    The core calls the owned compiled forward exactly once, applies the
+    production candidate-versus-fallback gradient routing, and certifies the
+    candidate inner state device-side. Only the host branching the routing
+    genuinely needs is synchronized.
     """
     state = compiled_bundle["state"]
     compiled_forward_result_for = compiled_bundle["compiled_forward_result_for"]
@@ -3411,11 +3422,10 @@ def _build_traceable_trial_evaluator(compiled_bundle):
         state["baseline_linear_solve_factors"]
     )
 
-    def evaluate_trial(
-        coil_dofs,
-        incumbent: TraceableObjectiveInnerState | None = None,
-    ) -> TraceableObjectiveTrialResult:
-        candidate_coil_dofs = _as_jax_float64(coil_dofs)
+    def evaluate_candidate(
+        candidate_coil_dofs,
+        incumbent: TraceableObjectiveInnerState | None,
+    ) -> _CandidateEvaluation:
         if incumbent is None:
             forward_result = compiled_forward_result_for(candidate_coil_dofs)
             fallback_coil_dofs = baseline_coil_dofs
@@ -3458,31 +3468,80 @@ def _build_traceable_trial_evaluator(compiled_bundle):
             gradient_x,
             gradient_linear_solve_factors,
         )
-        gradient = _host_array(
-            _traceable_adjoint_gradient_or_nan(
-                raw_gradient,
-                actual_adjoint_success,
-            ),
-            dtype=np.float64,
+        gradient = _traceable_adjoint_gradient_or_nan(
+            raw_gradient,
+            actual_adjoint_success,
         )
+        candidate_inner_state = TraceableObjectiveInnerState(
+            coil_dofs=candidate_coil_dofs,
+            solved_x=forward_result["x"],
+            objective_value=forward_result["raw_value"],
+            eligible=(
+                jnp.asarray(forward_result["success"], dtype=jnp.bool_)
+                & jnp.asarray(actual_adjoint_success, dtype=jnp.bool_)
+                & jnp.all(jnp.isfinite(jnp.asarray(gradient)))
+                & jnp.isfinite(jnp.asarray(forward_result["raw_value"]))
+            ),
+        )
+        return _CandidateEvaluation(
+            forward_result=dict(forward_result),
+            gradient=gradient,
+            actual_adjoint_success=actual_adjoint_success,
+            gradient_source=gradient_source,
+            candidate_inner_state=candidate_inner_state,
+        )
+
+    return evaluate_candidate
+
+
+def _build_accepted_incumbent_evaluator(compiled_bundle):
+    """Build the lean compiled evaluate for the accepted-incumbent controller.
+
+    Returns device-resident value, gradient, and candidate state without the
+    diagnostic trace materialization the trial evaluator performs.
+    """
+    evaluate_candidate = _build_candidate_evaluation_core(compiled_bundle)
+
+    def compiled_evaluate(
+        candidate_coil_dofs,
+        incumbent: TraceableObjectiveInnerState,
+    ) -> TraceableObjectiveIncumbentEvaluation:
+        core = evaluate_candidate(candidate_coil_dofs, incumbent)
+        return TraceableObjectiveIncumbentEvaluation(
+            value=jnp.asarray(core.forward_result["value"], dtype=jnp.float64),
+            gradient=jnp.asarray(core.gradient, dtype=jnp.float64),
+            candidate_inner_state=core.candidate_inner_state,
+        )
+
+    return compiled_evaluate
+
+
+def _build_traceable_trial_evaluator(compiled_bundle):
+    """Build the opt-in host diagnostic for one forward/adjoint evaluation.
+
+    Hostifies the shared candidate-evaluation core plus the full Newton trace
+    telemetry; production optimization uses the lean incumbent evaluator
+    instead.
+    """
+    evaluate_candidate = _build_candidate_evaluation_core(compiled_bundle)
+
+    def evaluate_trial(
+        coil_dofs,
+        incumbent: TraceableObjectiveInnerState | None = None,
+    ) -> TraceableObjectiveTrialResult:
+        candidate_coil_dofs = _as_jax_float64(coil_dofs)
+        core = evaluate_candidate(candidate_coil_dofs, incumbent)
+        forward_result = core.forward_result
+        actual_adjoint_success = core.actual_adjoint_success
+        gradient_source = core.gradient_source
+        candidate_inner_state = core.candidate_inner_state
+        gradient = _host_array(core.gradient, dtype=np.float64)
         gradient_is_finite = bool(np.all(np.isfinite(gradient)))
         gradient_inf_norm = (
             float(np.max(np.abs(gradient))) if gradient_is_finite else float("nan")
         )
         raw_objective_value = float(
             _host_scalar(forward_result["raw_value"], dtype=np.float64)
-        )
-        candidate_inner_state = TraceableObjectiveInnerState(
-            coil_dofs=candidate_coil_dofs,
-            solved_x=forward_result["x"],
-            objective_value=forward_result["raw_value"],
-            eligible=jnp.asarray(
-                _host_bool(forward_result["success"])
-                and _host_bool(actual_adjoint_success)
-                and gradient_is_finite
-                and np.isfinite(raw_objective_value),
-                dtype=jnp.bool_,
-            ),
         )
 
         def trace_array(key: str) -> np.ndarray:
@@ -5419,26 +5478,18 @@ class TraceableObjectiveSession:
         or pending state. Promotion happens only through ``accept``, which the
         host driver must call from its post-acceptance callback.
         """
-        evaluate_trial = self.trial_evaluator()
-        state = self._optimizer_compiled_bundle["state"]
+        bundle = self.ensure_optimizer_compiled_bundle()
+        state = bundle["state"]
         initial_state = TraceableObjectiveInnerState(
             coil_dofs=_as_jax_float64(state["baseline_coil_dofs"]),
             solved_x=_as_jax_float64(state["baseline_x"]),
             objective_value=jnp.asarray(state["baseline_value"], dtype=jnp.float64),
             eligible=jnp.asarray(True, dtype=jnp.bool_),
         )
-
-        def compiled_evaluate(candidate_coil_dofs, incumbent):
-            trial = evaluate_trial(candidate_coil_dofs, incumbent=incumbent)
-            return TraceableObjectiveIncumbentEvaluation(
-                value=jnp.asarray(
-                    trial.filtered_objective_value, dtype=jnp.float64
-                ),
-                gradient=jnp.asarray(trial.gradient, dtype=jnp.float64),
-                candidate_inner_state=trial.candidate_inner_state,
-            )
-
-        return AcceptedIncumbentHostValueAndGrad(compiled_evaluate, initial_state)
+        return AcceptedIncumbentHostValueAndGrad(
+            _build_accepted_incumbent_evaluator(bundle),
+            initial_state,
+        )
 
     def clear_solved_pair_cache(self):
         """Drop the session-local solved-pair cache (isolation / reset helper)."""
