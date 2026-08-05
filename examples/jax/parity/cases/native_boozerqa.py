@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import os
-from collections.abc import Callable, Mapping
-from contextlib import nullcontext
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import TypeVar, cast
 
 import numpy as np
 from examples.jax.parity.arbiter import LaneObservation
@@ -23,7 +23,10 @@ from simsopt.optimization_endpoint import (
     OptimizationEndpointCertificate,
     certify_optimization_endpoint,
 )
-from simsopt.optimization_trajectory import OptimizationTrajectoryRecorder
+from simsopt.optimization_trajectory import (
+    OptimizationMeasurementWindow,
+    OptimizationTrajectoryRecorder,
+)
 from simsopt.single_stage_boozer_vacuum import (
     JAX_FAST_DRIVER_ID,
     JAX_OPTAX_DRIVER_ID,
@@ -74,6 +77,26 @@ BOOZER_QA_SPEC = BoozerSingleStageSpec(
     residual_weight=0.0,
     report_residual=False,
 )
+
+
+_InitialEvaluation = TypeVar("_InitialEvaluation")
+
+
+@contextmanager
+def _measurement_optimization_window(
+    measurement: MeasurementExecution | None,
+    evaluate_initial: Callable[[], _InitialEvaluation],
+) -> Iterator[tuple[_InitialEvaluation, OptimizationTrajectoryRecorder | None]]:
+    """Start trajectory time before the lane's required initial evaluation."""
+    with OptimizationMeasurementWindow(
+        trajectory_path=(
+            measurement.trajectory_path if measurement is not None else None
+        ),
+        timing_path=(
+            measurement.optimization_timing_path if measurement is not None else None
+        ),
+    ) as trajectory:
+        yield evaluate_initial(), trajectory
 
 
 def _scale_configuration(
@@ -337,14 +360,11 @@ def _native(
             solver.res["G"] = previous_G
         return value, gradient
 
-    initial_objective, initial_gradient = value_and_grad(initial_parameters)
     native_iteration = 0
-    recorder_context = (
-        OptimizationTrajectoryRecorder(measurement.trajectory_path)
-        if measurement is not None and measurement.trajectory_path is not None
-        else nullcontext()
-    )
-    with recorder_context as trajectory:
+    with _measurement_optimization_window(
+        measurement,
+        lambda: value_and_grad(initial_parameters),
+    ) as ((initial_objective, initial_gradient), trajectory):
         if trajectory is None:
             record_iteration = None
         else:
@@ -618,24 +638,24 @@ def _jax(
     )
     initial_parameters = np.asarray(field.x, dtype=np.float64)
     incumbent_controller = session.accepted_incumbent_host_value_and_grad()
-    if optimizer_backend == "optax-lbfgs":
-        value_and_grad = cast(Callable, runtime["value_and_grad"])
-        initial_objective_device, initial_gradient_device = value_and_grad(
-            jax.device_put(initial_parameters)
-        )
-        jax.block_until_ready((initial_objective_device, initial_gradient_device))
-        initial_objective = _host_float(initial_objective_device)
-        initial_gradient = _host_array(initial_gradient_device)
-    else:
-        initial_objective, initial_gradient = incumbent_controller.value_and_grad(
-            initial_parameters
-        )
-    recorder_context = (
-        OptimizationTrajectoryRecorder(measurement.trajectory_path)
-        if measurement is not None and measurement.trajectory_path is not None
-        else nullcontext()
-    )
-    with recorder_context as trajectory:
+    value_and_grad = cast(Callable, runtime["value_and_grad"])
+
+    def evaluate_initial() -> tuple[float, np.ndarray]:
+        if optimizer_backend == "optax-lbfgs":
+            initial_objective_device, initial_gradient_device = value_and_grad(
+                jax.device_put(initial_parameters)
+            )
+            jax.block_until_ready((initial_objective_device, initial_gradient_device))
+            return (
+                _host_float(initial_objective_device),
+                _host_array(initial_gradient_device),
+            )
+        return incumbent_controller.value_and_grad(initial_parameters)
+
+    with _measurement_optimization_window(
+        measurement,
+        evaluate_initial,
+    ) as ((initial_objective, initial_gradient), trajectory):
         if trajectory is None:
             progress_callback = None
         else:
@@ -668,6 +688,7 @@ def _jax(
                 value_and_grad=True,
                 progress_callback=progress_callback,
             )
+            jax.block_until_ready(optimizer_result.x)
             driver = Driver.OPTAX_LBFGS
             final_parameters = np.asarray(optimizer_result.x, dtype=np.float64)
             optimizer_iterations = int(optimizer_result.nit)

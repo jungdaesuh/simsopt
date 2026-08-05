@@ -13,17 +13,23 @@ SingleStageOuterOptimizerBackend = Literal["optax-lbfgs"]
 class MeasurementExecution:
     """Per-process trajectory instrumentation and optimizer selection.
 
-    The request requires a trajectory path or optimizer backend. A case that
-    supports measurements owns the meaning of ``optimizer_backend``.
+    The request requires instrumentation output or an optimizer backend. A
+    case that supports measurements owns the meaning of ``optimizer_backend``.
     """
 
     trajectory_path: Path | None = None
+    optimization_timing_path: Path | None = None
     optimizer_backend: SingleStageOuterOptimizerBackend | None = None
 
     def __post_init__(self) -> None:
-        if self.trajectory_path is None and self.optimizer_backend is None:
+        if (
+            self.trajectory_path is None
+            and self.optimization_timing_path is None
+            and self.optimizer_backend is None
+        ):
             raise ValueError(
-                "measurement execution requires a trajectory path or optimizer backend"
+                "measurement execution requires an instrumentation path or "
+                "optimizer backend"
             )
 
 

@@ -22,6 +22,7 @@ from simsopt.single_stage_boozer_vacuum import (
     JAX_FAST_DRIVER_ID,
     JAX_OPTAX_DRIVER_ID,
 )
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 
 ReceiptLaneId = Literal[
     "native_cpu", "jax_gpu_custom", "jax_gpu_optax", "jax_cpu_custom"
@@ -235,6 +236,17 @@ def _validate_metadata(metadata: CampaignMetadata) -> None:
         raise ValueError("created_utc must be a UTC ISO timestamp")
 
 
+def single_stage_speed_parity_tolerance(native_value: float) -> float:
+    """Return the frozen campaign tolerance owned by the native reference."""
+
+    tolerance_contract = parity_ladder_tolerances("mirror_single_stage_final_value")
+    rtol = tolerance_contract.get("rtol")
+    atol = tolerance_contract.get("atol")
+    if not isinstance(rtol, float) or not isinstance(atol, float):
+        raise TypeError("mirror_single_stage_final_value lacks scalar rtol/atol")
+    return atol + rtol * abs(native_value)
+
+
 def _validate_trajectory(
     trajectory: tuple[TrajectoryPoint, ...], *, field: str, iteration_budget: int
 ) -> None:
@@ -255,6 +267,8 @@ def _validate_trajectory(
             raise ValueError(f"{field} wall times must be nondecreasing")
         previous_iteration = point.iteration
         previous_wall_seconds = point.wall_seconds_from_start
+    if trajectory[-1].iteration != iteration_budget:
+        raise ValueError(f"{field} must end exactly at iteration budget")
 
 
 def _validate_lane(lane: LaneReceipt, *, iteration_budget: int) -> None:
@@ -309,6 +323,12 @@ def _validate_lane(lane: LaneReceipt, *, iteration_budget: int) -> None:
         _finite(row.native_value, "parity native_value")
         _finite(row.lane_value, "parity lane_value")
         _finite_nonnegative(row.tolerance, "parity tolerance")
+        expected_tolerance = single_stage_speed_parity_tolerance(row.native_value)
+        if row.tolerance != expected_tolerance:
+            raise ValueError(
+                f"{lane.lane_id} parity row {row.observable} tolerance does not "
+                "match the frozen native-owned bound"
+            )
         if abs(row.lane_value - row.native_value) > row.tolerance:
             raise ValueError(
                 f"{lane.lane_id} parity row {row.observable} exceeds tolerance"

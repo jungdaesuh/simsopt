@@ -35,13 +35,13 @@ from examples.jax.manifest_runtime import load_runtime_contract_pair
 from examples.jax.parity.arbiter import LaneObservation, arbitrate
 from examples.jax.parity.cases import get_case
 from examples.jax.parity.receipts import load_lane_observation
+from simsopt.optimization_trajectory import read_optimization_window_timing
 from simsopt.single_stage_boozer_vacuum import (
     JAX_FAST_DRIVER_ID,
     JAX_OPTAX_DRIVER_ID,
     JAX_PARITY_DRIVER_ID,
 )
 from simsopt_jax.config import ExecutionIntent
-from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 
 from benchmarks.jax_native_example_measurement_contract import (
     MEASUREMENT_EVIDENCE_KIND,
@@ -66,6 +66,7 @@ from benchmarks.single_stage_speed_campaign_receipt import (
     SampleMeasurement,
     SamplePhase,
     TrajectoryPoint,
+    single_stage_speed_parity_tolerance,
     write_campaign_receipt,
 )
 
@@ -578,6 +579,7 @@ def build_profile_command(
     result_directory: Path,
     scale: MeasurementScale,
     trajectory_path: Path | None = None,
+    optimization_timing_path: Path | None = None,
     isolated_site: bool = False,
 ) -> tuple[str, ...]:
     """Build a profile command that consumes the one canonical input bundle."""
@@ -607,6 +609,8 @@ def build_profile_command(
     )
     if trajectory_path is not None:
         command += ("--trajectory-path", str(trajectory_path))
+    if optimization_timing_path is not None:
+        command += ("--optimization-timing-path", str(optimization_timing_path))
     if profile_id == "jax_gpu_optax":
         if trajectory_path is None:
             raise ValueError("jax_gpu_optax requires a trajectory path")
@@ -1442,11 +1446,20 @@ def _validate_single_stage_trajectory_count(
     phase: SamplePhase,
     trajectory: tuple[TrajectoryPoint, ...],
     observation: LaneObservation,
+    iteration_budget: int,
 ) -> None:
     if observation.nit is None or len(trajectory) != observation.nit:
         raise MeasurementRunnerError(
             f"{profile_id} {phase} trajectory has {len(trajectory)} "
             f"records for reported nit={observation.nit}"
+        )
+    if (
+        observation.nit != iteration_budget
+        or trajectory[-1].iteration != iteration_budget
+    ):
+        raise MeasurementRunnerError(
+            f"{profile_id} {phase} trajectory must end exactly at "
+            f"iteration budget {iteration_budget}"
         )
 
 
@@ -1799,11 +1812,12 @@ def _execute_single_stage_speed_run(
     gpu_index: int,
     poll_interval_seconds: float,
     timeout_seconds: float,
-) -> tuple[MonitoredCommandResult, LaneObservation, Path]:
+) -> tuple[MonitoredCommandResult, LaneObservation, Path, float]:
     stem = _sample_stem(run, sequence_index)
     result_directory = workspace / "receipts" / stem
     result_directory.mkdir(parents=True)
     trajectory_path = result_directory / "trajectory.jsonl"
+    optimization_timing_path = result_directory / "optimization_timing.json"
     command = build_profile_command(
         python_executable=python_executable,
         case_id=_SINGLE_STAGE_CASE_ID,
@@ -1812,6 +1826,7 @@ def _execute_single_stage_speed_run(
         result_directory=result_directory,
         scale="native_default",
         trajectory_path=trajectory_path,
+        optimization_timing_path=optimization_timing_path,
         isolated_site=isolated_site,
     )
     monitored = execute_monitored_command(
@@ -1830,7 +1845,29 @@ def _execute_single_stage_speed_run(
             f"{run.profile_id} {run.phase} failed with {monitored.termination}; "
             f"see logs/{stem}.stderr"
         )
-    return monitored, load_lane_observation(result_directory), trajectory_path
+    try:
+        optimization_timing = read_optimization_window_timing(optimization_timing_path)
+    except (OSError, TypeError, UnicodeError, ValueError) as error:
+        raise MeasurementRunnerError(
+            f"{run.profile_id} {run.phase} has an invalid optimizer timing sidecar"
+        ) from error
+    if optimization_timing.wall_seconds > monitored.wall_seconds:
+        raise MeasurementRunnerError(
+            f"{run.profile_id} {run.phase} optimizer timing exceeds subprocess wall"
+        )
+    _write_json_exclusive(
+        workspace / "logs" / f"{stem}.timing.json",
+        {
+            "optimization_wall_seconds": optimization_timing.wall_seconds,
+            "subprocess_wall_seconds": monitored.wall_seconds,
+        },
+    )
+    return (
+        monitored,
+        load_lane_observation(result_directory),
+        trajectory_path,
+        optimization_timing.wall_seconds,
+    )
 
 
 def _single_stage_campaign_parity_rows(
@@ -1841,19 +1878,12 @@ def _single_stage_campaign_parity_rows(
     """Compare the five campaign observables under the frozen tolerance SSOT."""
     if profile_id == "native_cpu":
         return ()
-    tolerance_contract = parity_ladder_tolerances("mirror_single_stage_final_value")
-    rtol = tolerance_contract.get("rtol")
-    atol = tolerance_contract.get("atol")
-    if not isinstance(rtol, float) or not isinstance(atol, float):
-        raise MeasurementRunnerError(
-            "mirror_single_stage_final_value lacks scalar rtol/atol"
-        )
     rows: list[ParityRow] = []
     for receipt_observable, observable in _SINGLE_STAGE_PARITY_OBSERVABLES:
         native_value = _single_stage_scalar(observations["native_cpu"], observable)
         lane_value = _single_stage_scalar(observations[profile_id], observable)
-        tolerance = atol + rtol * abs(lane_value)
-        if not bool(np.isclose(native_value, lane_value, rtol=rtol, atol=atol)):
+        tolerance = single_stage_speed_parity_tolerance(native_value)
+        if abs(lane_value - native_value) > tolerance:
             raise MeasurementRunnerError(
                 f"{profile_id} direct parity failed for final:{observable}"
             )
@@ -1889,6 +1919,15 @@ def collect_single_stage_speed_campaign(
     workspace = _single_stage_campaign_workspace(artifact_root)
     case = get_case(_SINGLE_STAGE_CASE_ID)
     bundle = case.create_input(workspace / "inputs", "native_default")
+    iteration_budget = bundle.configuration["outer_maxiter"]
+    if (
+        isinstance(iteration_budget, bool)
+        or not isinstance(iteration_budget, int)
+        or iteration_budget <= 0
+    ):
+        raise MeasurementRunnerError(
+            "single-stage iteration budget must be a positive integer"
+        )
     plan = build_single_stage_speed_collection_plan(mirror_index=0)
     samples: dict[RunnerProfileId, list[SampleMeasurement]] = {
         profile_id: [] for profile_id in SINGLE_STAGE_SPEED_PROFILE_IDS
@@ -1913,7 +1952,12 @@ def collect_single_stage_speed_campaign(
             environment["JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS"] = "0"
         environments[profile_id] = environment
     for sequence_index, run in enumerate(plan):
-        monitored, observation, trajectory_path = _execute_single_stage_speed_run(
+        (
+            _monitored,
+            observation,
+            trajectory_path,
+            optimization_wall_seconds,
+        ) = _execute_single_stage_speed_run(
             bundle_path=workspace / "inputs" / "input_bundle.json",
             workspace=workspace,
             run=run,
@@ -1951,12 +1995,17 @@ def collect_single_stage_speed_campaign(
             phase=phase,
             trajectory=trajectory,
             observation=observation,
+            iteration_budget=iteration_budget,
         )
+        if trajectory[-1].wall_seconds_from_start > optimization_wall_seconds:
+            raise MeasurementRunnerError(
+                f"{run.profile_id} {phase} trajectory exceeds its optimizer window"
+            )
         samples[run.profile_id].append(
             SampleMeasurement(
                 phase=phase,
                 sample_index=sample_index,
-                wall_seconds=monitored.wall_seconds,
+                wall_seconds=optimization_wall_seconds,
                 trajectory=trajectory,
             )
         )
@@ -2005,9 +2054,6 @@ def collect_single_stage_speed_campaign(
     hostname = platform.node()
     if not hostname:
         raise MeasurementRunnerError("hostname is unavailable")
-    iteration_budget = bundle.configuration["outer_maxiter"]
-    if isinstance(iteration_budget, bool) or not isinstance(iteration_budget, int):
-        raise MeasurementRunnerError("single-stage iteration budget must be an integer")
     runtime_provenance = endpoints["native_cpu"].provenance
     assert runtime_provenance is not None
     runtime_jax_version = runtime_provenance.jax_version

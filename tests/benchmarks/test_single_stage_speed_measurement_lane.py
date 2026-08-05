@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -34,12 +35,14 @@ from examples.jax.parity.provenance import (
     LaneProvenance,
 )
 from simsopt.single_stage_boozer_vacuum import JAX_FAST_DRIVER_ID, JAX_OPTAX_DRIVER_ID
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 
 
 def test_optax_profile_uses_fast_gpu_runtime_with_explicit_optimizer_route(
     tmp_path: Path,
 ) -> None:
     trajectory_path = tmp_path / "trajectory-warm-0.jsonl"
+    timing_path = tmp_path / "optimization-timing-warm-0.json"
     command = build_profile_command(
         python_executable="/python",
         case_id="native-single-stage-boozer-vacuum-optimization",
@@ -48,6 +51,7 @@ def test_optax_profile_uses_fast_gpu_runtime_with_explicit_optimizer_route(
         result_directory=tmp_path / "result",
         scale="native_default",
         trajectory_path=trajectory_path,
+        optimization_timing_path=timing_path,
     )
     environment = build_measurement_environment(
         "jax_gpu_optax",
@@ -58,6 +62,7 @@ def test_optax_profile_uses_fast_gpu_runtime_with_explicit_optimizer_route(
 
     assert command[command.index("--lane") + 1] == "jax-gpu"
     assert command[command.index("--trajectory-path") + 1] == str(trajectory_path)
+    assert command[command.index("--optimization-timing-path") + 1] == str(timing_path)
     assert command[command.index("--optimizer-backend") + 1] == "optax-lbfgs"
     assert environment["SIMSOPT_BACKEND_MODE"] == "jax_gpu_fast"
     assert environment["JAX_PLATFORMS"] == "cuda"
@@ -80,6 +85,108 @@ def test_campaign_plan_is_balanced_and_isolates_every_sample() -> None:
         )
         assert {run.profile_id for run in warm} == set(SINGLE_STAGE_SPEED_PROFILE_IDS)
         assert {run.order_position for run in warm} == set(range(4))
+
+
+@pytest.mark.parametrize(
+    ("process_wall_seconds", "optimization_wall_seconds", "rejects"),
+    (
+        (8.4, 0.4, False),
+        (0.4, 0.5, True),
+    ),
+)
+def test_speed_run_validates_optimizer_timing_and_retains_process_diagnostic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_wall_seconds: float,
+    optimization_wall_seconds: float,
+    rejects: bool,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "logs").mkdir()
+
+    def fake_monitored_command(**kwargs) -> MonitoredCommandResult:
+        command = kwargs["command"]
+        timing_path = Path(command[command.index("--optimization-timing-path") + 1])
+        timing_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "wall_seconds": optimization_wall_seconds,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return MonitoredCommandResult(
+            returncode=0,
+            termination="normal",
+            wall_seconds=process_wall_seconds,
+            peak_process_tree_rss_bytes=1,
+            peak_gpu_process_bytes=None,
+            gpu_counter_status="not_applicable",
+            stdout_sha256="stdout",
+            stderr_sha256="stderr",
+        )
+
+    observation = _campaign_observation(
+        "native_cpu",
+        driver="simsopt_scipy_bfgs_with_boozer_newton",
+    )
+    monkeypatch.setattr(
+        measurements,
+        "execute_monitored_command",
+        fake_monitored_command,
+    )
+    monkeypatch.setattr(
+        measurements,
+        "load_lane_observation",
+        lambda result_directory: observation,
+    )
+    run = measurements.CollectionRun(
+        profile_id="native_cpu",
+        phase="cold",
+        sample_index=0,
+        order_position=0,
+        measured=True,
+        allocation_sensitive=False,
+    )
+
+    def execute_speed_run():
+        return measurements._execute_single_stage_speed_run(
+            bundle_path=tmp_path / "input_bundle.json",
+            workspace=workspace,
+            run=run,
+            sequence_index=0,
+            environment={},
+            python_executable="/python",
+            isolated_site=False,
+            repo_root=tmp_path,
+            gpu_index=0,
+            poll_interval_seconds=0.01,
+            timeout_seconds=1.0,
+        )
+
+    if rejects:
+        with pytest.raises(
+            MeasurementRunnerError,
+            match="optimizer timing exceeds subprocess wall",
+        ):
+            execute_speed_run()
+        assert not tuple((workspace / "logs").glob("*.timing.json"))
+        return
+
+    _, loaded_observation, _, measured_wall_seconds = execute_speed_run()
+
+    assert loaded_observation is observation
+    assert measured_wall_seconds == optimization_wall_seconds
+    diagnostic_path = next((workspace / "logs").glob("*.timing.json"))
+    assert json.loads(diagnostic_path.read_text(encoding="utf-8")) == {
+        "optimization_wall_seconds": optimization_wall_seconds,
+        "subprocess_wall_seconds": process_wall_seconds,
+    }
 
 
 def test_optax_profile_rejects_forged_driver() -> None:
@@ -303,6 +410,32 @@ def test_campaign_rejects_incomplete_iteration_trajectory() -> None:
                 ),
             ),
             observation=observation,
+            iteration_budget=2,
+        )
+
+
+def test_campaign_rejects_a_contiguous_trajectory_short_of_the_budget() -> None:
+    observation = replace(
+        _campaign_observation(
+            "native_cpu",
+            driver="simsopt_scipy_bfgs_with_boozer_newton",
+        ),
+        nit=1,
+    )
+
+    with pytest.raises(MeasurementRunnerError, match="end exactly at iteration budget"):
+        _validate_single_stage_trajectory_count(
+            profile_id="native_cpu",
+            phase="warm",
+            trajectory=(
+                measurements.TrajectoryPoint(
+                    iteration=1,
+                    objective=1.0,
+                    wall_seconds_from_start=0.01,
+                ),
+            ),
+            observation=observation,
+            iteration_budget=2,
         )
 
 
@@ -437,6 +570,7 @@ def test_public_campaign_uses_four_lane_plan_and_rejects_forged_provider(
             ),
             _campaign_observation(run.profile_id, driver=driver),
             trajectory_path,
+            0.02,
         )
 
     monkeypatch.setattr(measurements, "get_case", lambda case_id: _CampaignCase())
@@ -465,7 +599,7 @@ def test_public_campaign_uses_four_lane_plan_and_rejects_forged_provider(
     assert not artifact_root.exists()
 
 
-def test_public_campaign_publishes_a_writer_valid_four_lane_tree(
+def test_public_campaign_publishes_optimizer_window_not_process_duration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     input_fingerprint = "1" * 64
@@ -509,7 +643,7 @@ def test_public_campaign_publishes_a_writer_valid_four_lane_tree(
             MonitoredCommandResult(
                 returncode=0,
                 termination="normal",
-                wall_seconds=0.02,
+                wall_seconds=8.02,
                 peak_process_tree_rss_bytes=1,
                 peak_gpu_process_bytes=None,
                 gpu_counter_status="not_applicable",
@@ -518,6 +652,7 @@ def test_public_campaign_publishes_a_writer_valid_four_lane_tree(
             ),
             observation,
             trajectory_path,
+            0.02,
         )
 
     monkeypatch.setattr(
@@ -553,6 +688,12 @@ def test_public_campaign_publishes_a_writer_valid_four_lane_tree(
         native_endpoint = json.loads(
             (artifact_root / "lanes" / "native_cpu" / "endpoint.json").read_text()
         )
+        native_measurement = json.loads(
+            (artifact_root / "lanes" / "native_cpu" / "measurement.json").read_text()
+        )
+        assert {sample["wall_seconds"] for sample in native_measurement["samples"]} == {
+            0.02
+        }
         assert native_endpoint["audit"]["adjoint_route"] is None
         for lane_id in (
             "jax_gpu_custom",
@@ -601,12 +742,6 @@ def test_campaign_direct_parity_emits_exactly_five_ssot_rows(
         "arbitrate",
         lambda *args, **kwargs: pytest.fail("campaign parity must not invoke arbiter"),
     )
-    contract = measurements.parity_ladder_tolerances("mirror_single_stage_final_value")
-    rtol = contract["rtol"]
-    atol = contract["atol"]
-    assert isinstance(rtol, float)
-    assert isinstance(atol, float)
-
     rows = measurements._single_stage_campaign_parity_rows(
         profile_id="jax_gpu_optax",
         observations={
@@ -627,7 +762,8 @@ def test_campaign_direct_parity_emits_exactly_five_ssot_rows(
         "final_boozer_residual",
     )
     assert all(
-        row.tolerance == pytest.approx(atol + rtol * abs(row.lane_value))
+        row.tolerance
+        == measurements.single_stage_speed_parity_tolerance(row.native_value)
         for row in rows
     )
 
@@ -642,6 +778,38 @@ def test_campaign_direct_parity_rejects_a_row_outside_the_ssot_tolerance() -> No
         values={
             **optax.values,
             "final:objective": np.asarray(1.1, dtype=np.float64),
+        },
+    )
+
+    with pytest.raises(MeasurementRunnerError, match="direct parity failed"):
+        measurements._single_stage_campaign_parity_rows(
+            profile_id="jax_gpu_optax",
+            observations={"native_cpu": native, "jax_gpu_optax": optax},
+        )
+
+
+def test_campaign_direct_parity_rejects_lane_owned_asymmetric_bound() -> None:
+    native = _campaign_observation(
+        "native_cpu",
+        driver="simsopt_scipy_bfgs_with_boozer_newton",
+    )
+    native_value = float(native.values["final:objective"])
+    native_tolerance = measurements.single_stage_speed_parity_tolerance(native_value)
+    lane_value = native_value + native_tolerance
+    while abs(lane_value - native_value) <= native_tolerance:
+        lane_value = math.nextafter(lane_value, math.inf)
+    contract = parity_ladder_tolerances("mirror_single_stage_final_value")
+    rtol = contract["rtol"]
+    atol = contract["atol"]
+    assert isinstance(rtol, float)
+    assert isinstance(atol, float)
+    assert abs(lane_value - native_value) <= atol + rtol * abs(lane_value)
+    optax = _campaign_observation("jax_gpu_optax", driver=JAX_OPTAX_DRIVER_ID)
+    optax = replace(
+        optax,
+        values={
+            **optax.values,
+            "final:objective": np.asarray(lane_value, dtype=np.float64),
         },
     )
 

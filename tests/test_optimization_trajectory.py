@@ -4,27 +4,213 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
+import examples.jax.parity.cases.native_boozerqa as single_stage_case
 import numpy as np
 import pytest
 import simsopt.optimization_trajectory as trajectory_module
-from simsopt.optimization_trajectory import OptimizationTrajectoryRecorder
+from examples.jax.parity.measurement import MeasurementExecution
+from simsopt.optimization_trajectory import (
+    OptimizationMeasurementWindow,
+    OptimizationTrajectoryRecorder,
+    read_optimization_window_timing,
+)
 
 
 class _OptimizeIntermediateResult(Protocol):
     fun: float
 
 
-def test_measurement_execution_allows_backend_selection_without_recording() -> None:
-    from examples.jax.parity.measurement import MeasurementExecution
+_LaneTimingStrategy = Literal["native_cpu", "jax_gpu_custom", "jax_gpu_optax"]
 
+
+@pytest.mark.parametrize(
+    "lane_strategy",
+    ("native_cpu", "jax_gpu_custom", "jax_gpu_optax"),
+)
+def test_single_stage_lane_strategies_share_the_recorded_timing_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lane_strategy: _LaneTimingStrategy,
+) -> None:
+    clock = [100.0]
+    initial_evaluation_seconds = 0.375
+    endpoint_reporting_seconds = 8.0
+    monkeypatch.setattr(trajectory_module, "perf_counter", lambda: clock[0])
+    phase_events: list[str] = []
+    x0 = np.asarray([4.0, -5.0], dtype=np.float64)
+    target = np.asarray([1.0, -2.0], dtype=np.float64)
+
+    def numpy_value_and_grad(x: np.ndarray) -> tuple[float, np.ndarray]:
+        residual = x - target
+        return float(np.dot(residual, residual)), 2.0 * residual
+
+    def evaluate_initial() -> tuple[float, np.ndarray]:
+        phase_events.append("initial_value_and_grad")
+        value, gradient = numpy_value_and_grad(x0)
+        clock[0] += initial_evaluation_seconds
+        return value, gradient
+
+    trajectory_path = tmp_path / f"{lane_strategy}.jsonl"
+    timing_path = tmp_path / f"{lane_strategy}-timing.json"
+    measurement = MeasurementExecution(
+        trajectory_path=trajectory_path,
+        optimization_timing_path=timing_path,
+    )
+    with single_stage_case._measurement_optimization_window(
+        measurement,
+        evaluate_initial,
+    ) as (initial_value_and_grad, recorder):
+        phase_events.append("optimizer_started")
+        assert recorder is not None
+        if lane_strategy == "native_cpu":
+            scipy = pytest.importorskip("scipy", minversion="1.11")
+            accepted_iterations = 0
+
+            def record_native(intermediate_result: _OptimizeIntermediateResult) -> None:
+                nonlocal accepted_iterations
+                accepted_iterations += 1
+                recorder.record(accepted_iterations, float(intermediate_result.fun))
+
+            optimizer_result = scipy.optimize.minimize(
+                numpy_value_and_grad,
+                x0,
+                jac=True,
+                method="BFGS",
+                callback=record_native,
+                options={"gtol": 1.0e-12, "maxiter": 4},
+            )
+            endpoint_parameters = np.asarray(optimizer_result.x, dtype=np.float64)
+        elif lane_strategy == "jax_gpu_custom":
+            from simsopt_jax.geo.optimizer_host_lbfgs import (
+                minimize_lbfgs_host_core,
+            )
+
+            optimizer_result = minimize_lbfgs_host_core(
+                numpy_value_and_grad,
+                x0,
+                maxiter=4,
+                maxcor=4,
+                gtol=1.0e-12,
+                maxls=10,
+                initial_value_and_grad=initial_value_and_grad,
+                progress_callback=lambda iteration, objective, gradient_norm: (
+                    recorder.record(iteration, objective)
+                ),
+            )
+            endpoint_parameters = np.asarray(
+                optimizer_result.x_k,
+                dtype=np.float64,
+            )
+        else:
+            jnp = pytest.importorskip("jax.numpy")
+            pytest.importorskip("optax")
+            from simsopt_jax.geo.optimizers.optimizer import target_minimize
+
+            target_device = jnp.asarray(target)
+
+            def jax_value_and_grad(x):
+                residual = x - target_device
+                return jnp.vdot(residual, residual), 2.0 * residual
+
+            optimizer_result = target_minimize(
+                jax_value_and_grad,
+                jnp.asarray(x0),
+                method="optax-lbfgs-ondevice",
+                tol=1.0e-12,
+                maxiter=4,
+                options={"maxcor": 4, "maxls": 10},
+                value_and_grad=True,
+                progress_callback=lambda iteration, objective, gradient_norm: (
+                    recorder.record(iteration, objective)
+                ),
+            )
+            endpoint_parameters = np.asarray(optimizer_result.x, dtype=np.float64)
+        phase_events.append("optimizer_finished")
+
+    clock[0] += endpoint_reporting_seconds
+    endpoint_objective, _endpoint_gradient = numpy_value_and_grad(endpoint_parameters)
+    phase_events.append("endpoint_reporting")
+
+    records = [
+        json.loads(line)
+        for line in trajectory_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert records
+    assert read_optimization_window_timing(timing_path).wall_seconds == (
+        initial_evaluation_seconds
+    )
+    assert records[0]["wall_seconds_from_start"] == initial_evaluation_seconds
+    assert {record["wall_seconds_from_start"] for record in records} == {
+        initial_evaluation_seconds
+    }
+    assert phase_events == [
+        "initial_value_and_grad",
+        "optimizer_started",
+        "optimizer_finished",
+        "endpoint_reporting",
+    ]
+    assert np.isfinite(endpoint_objective)
+
+
+def test_measurement_execution_allows_backend_selection_without_recording() -> None:
     request = MeasurementExecution(optimizer_backend="optax-lbfgs")
 
     assert request.trajectory_path is None
     assert request.optimizer_backend == "optax-lbfgs"
-    with pytest.raises(ValueError, match="trajectory path or optimizer backend"):
+    with pytest.raises(ValueError, match="instrumentation path or optimizer backend"):
         MeasurementExecution()
+
+
+def test_optimizer_window_writes_exact_exclusive_timing_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock_values = iter((20.0, 20.75, 30.0, 30.5))
+    monkeypatch.setattr(trajectory_module, "perf_counter", lambda: next(clock_values))
+    timing_path = tmp_path / "optimization-timing.json"
+
+    with OptimizationMeasurementWindow(
+        trajectory_path=None,
+        timing_path=timing_path,
+    ):
+        pass
+
+    assert timing_path.read_text(encoding="utf-8") == (
+        '{"schema_version":1,"wall_seconds":0.75}\n'
+    )
+    assert read_optimization_window_timing(timing_path).wall_seconds == 0.75
+
+    with pytest.raises(FileExistsError), OptimizationMeasurementWindow(
+        trajectory_path=None,
+        timing_path=timing_path,
+    ):
+        pass
+
+    assert timing_path.read_text(encoding="utf-8") == (
+        '{"schema_version":1,"wall_seconds":0.75}\n'
+    )
+
+
+@pytest.mark.parametrize(
+    "document",
+    (
+        '{"schema_version":1,"wall_seconds":false}\n',
+        '{"schema_version":1,"wall_seconds":-1.0}\n',
+        '{"schema_version":2,"wall_seconds":1.0}\n',
+        '{"extra":0,"schema_version":1,"wall_seconds":1.0}\n',
+    ),
+)
+def test_timing_sidecar_reader_rejects_noncanonical_documents(
+    tmp_path: Path,
+    document: str,
+) -> None:
+    timing_path = tmp_path / "optimization-timing.json"
+    timing_path.write_text(document, encoding="utf-8")
+
+    with pytest.raises((TypeError, ValueError), match="optimization"):
+        read_optimization_window_timing(timing_path)
 
 
 def test_recorder_writes_exact_canonical_records(tmp_path: Path) -> None:
