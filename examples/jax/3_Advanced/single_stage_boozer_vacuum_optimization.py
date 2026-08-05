@@ -19,6 +19,11 @@ import numpy as np
 from simsopt.configs import get_data
 from simsopt.geo import CurveLength, SurfaceXYZTensorFourier, Volume
 from simsopt.geo.curve import Curve
+from simsopt.optimization_endpoint import certify_optimization_endpoint
+from simsopt.single_stage_boozer_vacuum import (
+    NATIVE_ITERATIONS,
+    OUTER_GRADIENT_TOLERANCE,
+)
 from simsopt_jax.examples import (
     ExampleResult,
     ExecutionScale,
@@ -26,14 +31,12 @@ from simsopt_jax.examples import (
     scalar_example_driver,
 )
 from simsopt_jax.geo.optimizer_host_lbfgs import (
+    lbfgs_status_is_success,
     line_search_value_and_grad_more_thuente_host,
     minimize_bfgs_host_core,
     minimize_lbfgs_host_core,
 )
 from simsopt_jax.solve.driver import Driver
-from simsopt_jax.solve.endpoint_certificate import (
-    certify_optimization_endpoint,
-)
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
 from simsopt_jax_adapters.geo.surface_objectives import (
@@ -43,7 +46,6 @@ from simsopt_jax_adapters.geo.surface_objectives import (
 )
 
 EXAMPLE_ID = "native-single-stage-boozer-vacuum-optimization"
-NATIVE_ITERATIONS = 1000
 
 
 def _host_array(value: object) -> np.ndarray:
@@ -200,9 +202,7 @@ def solve(
 
     initial_parameters = np.asarray(field.x, dtype=np.float64)
     incumbent_controller = session.accepted_incumbent_host_value_and_grad()
-    initial_value_and_gradient = incumbent_controller.value_and_grad(
-        initial_parameters
-    )
+    initial_value_and_gradient = incumbent_controller.value_and_grad(initial_parameters)
 
     driver = scalar_example_driver()
     if driver == Driver.SIMSOPT_LBFGSB:
@@ -212,7 +212,7 @@ def solve(
             maxiter=max_steps,
             maxcor=min(max_steps, 200),
             ftol=0.0,
-            gtol=1.0e-8,
+            gtol=OUTER_GRADIENT_TOLERANCE,
             maxls=20,
             initial_value_and_grad=initial_value_and_gradient,
             callback=incumbent_controller.accept,
@@ -222,7 +222,7 @@ def solve(
             incumbent_controller.value_and_grad,
             initial_parameters,
             maxiter=max_steps,
-            gtol=1.0e-8,
+            gtol=OUTER_GRADIENT_TOLERANCE,
             maxls=20,
             initial_value_and_grad=initial_value_and_gradient,
             line_search_value_and_grad=line_search_value_and_grad_more_thuente_host,
@@ -259,6 +259,14 @@ def solve(
         and np.isfinite(final_non_qs)
         and np.isfinite(boozer_residual)
     )
+    provider_state_invalid = bool(
+        not np.isfinite(final_value) or not np.all(np.isfinite(gradient))
+    )
+    outer_solver_success = bool(
+        lbfgs_status_is_success(optimizer_result.status, provider_state_invalid)
+        if driver == Driver.SIMSOPT_LBFGSB
+        else optimizer_result.converged
+    )
     endpoint_certificate = certify_optimization_endpoint(
         # The example's outer drivers are the HOST cores
         # (minimize_lbfgs_host_core / minimize_bfgs_host_core), whose
@@ -267,7 +275,7 @@ def solve(
         status_convention=(
             "host-lbfgsb" if driver == Driver.SIMSOPT_LBFGSB else "host-bfgs"
         ),
-        provider_success=bool(optimizer_result.converged),
+        provider_success=outer_solver_success,
         provider_status=int(optimizer_result.status),
         iterations=int(optimizer_result.k),
         max_iterations=max_steps,
@@ -291,7 +299,7 @@ def solve(
             "solution": tuple(float(value) for value in solution),
             "gradient": tuple(float(value) for value in gradient),
             "inner_solver_success": inner_solver_success,
-            "outer_solver_success": bool(optimizer_result.converged),
+            "outer_solver_success": outer_solver_success,
             "outer_stopping_reason": endpoint_certificate.stopping_reason,
             "initial_stationary": endpoint_certificate.initial_stationary,
             "terminal_stationary": endpoint_certificate.terminal_stationary,

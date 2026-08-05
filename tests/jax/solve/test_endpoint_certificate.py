@@ -3,12 +3,39 @@
 from __future__ import annotations
 
 import pytest
-from simsopt_jax.solve.endpoint_certificate import (
+from simsopt.optimization_endpoint import (
+    TERMINAL_CONSTRAINT_NORM_ATOL,
+    TERMINAL_STATIONARITY_ATOL,
     StatusConvention,
     StoppingReason,
     certify_optimization_endpoint,
     status_convention_for,
 )
+from simsopt_jax.parity_tolerances import PARITY_LADDER_TOLERANCES
+from simsopt_jax.solve.endpoint_certificate import (
+    certify_optimization_endpoint as compatibility_certificate,
+)
+
+
+def test_jax_endpoint_certificate_import_remains_compatible() -> None:
+    assert compatibility_certificate is certify_optimization_endpoint
+
+
+def test_parity_tolerances_source_terminal_certificate_thresholds() -> None:
+    native_workflow = PARITY_LADDER_TOLERANCES["native_workflow"]
+    terminal_gradient = PARITY_LADDER_TOLERANCES[
+        "mirror_single_stage_terminal_gradient"
+    ]
+    terminal_constraint = PARITY_LADDER_TOLERANCES[
+        "mirror_single_stage_terminal_constraint"
+    ]
+
+    assert native_workflow["terminal_stationarity_atol"] == TERMINAL_STATIONARITY_ATOL
+    assert native_workflow["terminal_constraint_norm_atol"] == (
+        TERMINAL_CONSTRAINT_NORM_ATOL
+    )
+    assert terminal_gradient["atol"] == TERMINAL_STATIONARITY_ATOL
+    assert terminal_constraint["atol"] == TERMINAL_CONSTRAINT_NORM_ATOL
 
 
 def test_failed_outer_solve_cannot_pass_on_finite_decreasing_values() -> None:

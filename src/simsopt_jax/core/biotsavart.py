@@ -372,31 +372,30 @@ def _point_chunk_reduce(points, chunk_kernel, chunk_size):
     if point_count == 0 or chunk_size <= 0 or point_count <= chunk_size:
         return chunk_kernel(points)
 
-    chunk_count = (point_count + chunk_size - 1) // chunk_size
-    padded_point_count = chunk_count * chunk_size
-    # Point padding is trimmed before returning; the padded result tree is the
-    # price of a fixed-shape loop body. Tune chunk_size against peak memory and
-    # compile time instead of adding a second dynamic-shape path.
-    padded_points = _pad_axis(points, axis=0, padded_size=padded_point_count)
+    full_chunk_count, tail_size = divmod(point_count, chunk_size)
     # Keep the default remat policy until CUDA profiling shows that saving dot
     # residuals is a better memory/runtime tradeoff for this kernel.
     remat_chunk_kernel = jax.checkpoint(chunk_kernel)
-    first_chunk_points = _slice_point_chunk(padded_points, 0, chunk_size)
+    first_chunk_points = _slice_point_chunk(points, 0, chunk_size)
     first_result = remat_chunk_kernel(first_chunk_points)
-    padded_result = _tree_dynamic_update(
-        _tree_zeros_like_prefix(first_result, padded_point_count),
+    result = _tree_dynamic_update(
+        _tree_zeros_like_prefix(first_result, point_count),
         first_result,
         0,
     )
 
     def body(chunk_index: int, acc):
         start = chunk_index * chunk_size
-        chunk_points = _slice_point_chunk(padded_points, start, chunk_size)
+        chunk_points = _slice_point_chunk(points, start, chunk_size)
         chunk_result = remat_chunk_kernel(chunk_points)
         return _tree_dynamic_update(acc, chunk_result, start)
 
-    padded_result = lax.fori_loop(1, chunk_count, body, padded_result)
-    return _tree_trim(padded_result, point_count)
+    result = lax.fori_loop(1, full_chunk_count, body, result)
+    if tail_size:
+        tail_start = full_chunk_count * chunk_size
+        tail_result = remat_chunk_kernel(points[tail_start:])
+        result = _tree_dynamic_update(result, tail_result, tail_start)
+    return result
 
 
 def _point_direction_chunk_reduce(

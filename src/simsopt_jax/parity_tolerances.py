@@ -11,6 +11,11 @@ from __future__ import annotations
 
 from typing import Union
 
+from simsopt.optimization_endpoint import (
+    TERMINAL_CONSTRAINT_NORM_ATOL,
+    TERMINAL_STATIONARITY_ATOL,
+)
+
 ParityToleranceValue = Union[float, bool, None]
 
 PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
@@ -22,9 +27,9 @@ PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
         "whole_solve_value_rtol": 1e-6,
         "whole_solve_value_atol": 1e-7,
         "terminal_relative_reduction": 1e-12,
-        "terminal_constraint_norm_atol": 1e-10,
+        "terminal_constraint_norm_atol": TERMINAL_CONSTRAINT_NORM_ATOL,
         "terminal_orthonormality_atol": 1e-12,
-        "terminal_stationarity_atol": 1e-7,
+        "terminal_stationarity_atol": TERMINAL_STATIONARITY_ATOL,
         "requires_same_input": True,
         "requires_native_workflow_oracle": True,
         "requires_direct_cpp_oracle": False,
@@ -170,8 +175,14 @@ PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
         "rtol": 2e-8,
         "atol": 2e-10,
     },
-    "mirror_single_stage_terminal_gradient": {"rtol": 0.0, "atol": 1e-7},
-    "mirror_single_stage_terminal_constraint": {"rtol": 0.0, "atol": 1e-10},
+    "mirror_single_stage_terminal_gradient": {
+        "rtol": 0.0,
+        "atol": TERMINAL_STATIONARITY_ATOL,
+    },
+    "mirror_single_stage_terminal_constraint": {
+        "rtol": 0.0,
+        "atol": TERMINAL_CONSTRAINT_NORM_ATOL,
+    },
     "mirror_optimization_5e2": {"rtol": 5e-2, "atol": 1e-9},
     "mirror_optimization_3e2": {"rtol": 3e-2, "atol": 1e-9},
     "mirror_optimization_2e2": {"rtol": 2e-2, "atol": 1e-9},
