@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 import sys
 from dataclasses import replace
@@ -29,15 +30,41 @@ from simsopt.single_stage_boozer_vacuum import (
     JAX_FAST_DRIVER_ID,
     JAX_OPTAX_DRIVER_ID,
 )
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 
 
 def _parity_rows() -> tuple[ParityRow, ...]:
     return (
-        ParityRow("final_objective", 1.0, 1.0, 0.0),
-        ParityRow("final_iota", 0.2, 0.2, 0.0),
-        ParityRow("final_volume", 0.1, 0.1, 0.0),
-        ParityRow("final_non_qs_ratio", 0.01, 0.01, 0.0),
-        ParityRow("final_boozer_residual", 0.001, 0.001, 0.0),
+        ParityRow(
+            "final_objective",
+            1.0,
+            1.0,
+            receipt_writer.single_stage_speed_parity_tolerance(1.0),
+        ),
+        ParityRow(
+            "final_iota",
+            0.2,
+            0.2,
+            receipt_writer.single_stage_speed_parity_tolerance(0.2),
+        ),
+        ParityRow(
+            "final_volume",
+            0.1,
+            0.1,
+            receipt_writer.single_stage_speed_parity_tolerance(0.1),
+        ),
+        ParityRow(
+            "final_non_qs_ratio",
+            0.01,
+            0.01,
+            receipt_writer.single_stage_speed_parity_tolerance(0.01),
+        ),
+        ParityRow(
+            "final_boozer_residual",
+            0.001,
+            0.001,
+            receipt_writer.single_stage_speed_parity_tolerance(0.001),
+        ),
     )
 
 
@@ -318,6 +345,27 @@ def test_writer_rejects_a_trajectory_that_skips_an_optimizer_iteration(
     assert not artifact_root.exists()
 
 
+def test_writer_rejects_a_contiguous_trajectory_short_of_iteration_budget(
+    tmp_path: Path,
+) -> None:
+    receipt = _receipt()
+    first_sample = replace(
+        receipt.lanes[0].samples[0],
+        trajectory=(TrajectoryPoint(1, 2.0, 0.005),),
+    )
+    native_lane = replace(
+        receipt.lanes[0],
+        samples=(first_sample, *receipt.lanes[0].samples[1:]),
+    )
+    short_receipt = replace(receipt, lanes=(native_lane, *receipt.lanes[1:]))
+    artifact_root = tmp_path / "short-trajectory"
+
+    with pytest.raises(ValueError, match="end exactly at iteration budget"):
+        write_campaign_receipt(artifact_root, short_receipt)
+
+    assert not artifact_root.exists()
+
+
 def test_writer_rejects_a_non_native_parity_row_outside_its_tolerance(
     tmp_path: Path,
 ) -> None:
@@ -325,7 +373,12 @@ def test_writer_rejects_a_non_native_parity_row_outside_its_tolerance(
     out_of_tolerance_endpoint = replace(
         receipt.lanes[1].endpoint,
         parity_rows=(
-            ParityRow("final_objective", 1.0, 1.01, 0.001),
+            ParityRow(
+                "final_objective",
+                1.0,
+                1.01,
+                receipt_writer.single_stage_speed_parity_tolerance(1.0),
+            ),
             *_parity_rows()[1:],
         ),
     )
@@ -341,6 +394,51 @@ def test_writer_rejects_a_non_native_parity_row_outside_its_tolerance(
         write_campaign_receipt(artifact_root, parity_failure_receipt)
 
     assert not artifact_root.exists()
+
+
+def test_writer_rejects_lane_owned_tolerance_that_widens_with_drift(
+    tmp_path: Path,
+) -> None:
+    receipt = _receipt()
+    native_value = receipt.lanes[0].endpoint.observables.final_objective
+    native_tolerance = receipt_writer.single_stage_speed_parity_tolerance(native_value)
+    lane_value = native_value + native_tolerance
+    while abs(lane_value - native_value) <= native_tolerance:
+        lane_value = math.nextafter(lane_value, math.inf)
+    tolerance_contract = parity_ladder_tolerances("mirror_single_stage_final_value")
+    rtol = tolerance_contract["rtol"]
+    atol = tolerance_contract["atol"]
+    assert isinstance(rtol, float)
+    assert isinstance(atol, float)
+    lane_owned_tolerance = atol + rtol * abs(lane_value)
+    drift = abs(lane_value - native_value)
+    assert drift > native_tolerance
+    assert drift <= lane_owned_tolerance
+
+    forged_endpoint = replace(
+        receipt.lanes[1].endpoint,
+        observables=replace(
+            receipt.lanes[1].endpoint.observables,
+            final_objective=lane_value,
+        ),
+        parity_rows=(
+            ParityRow(
+                "final_objective",
+                native_value,
+                lane_value,
+                lane_owned_tolerance,
+            ),
+            *_parity_rows()[1:],
+        ),
+    )
+    forged_lane = replace(receipt.lanes[1], endpoint=forged_endpoint)
+    forged_receipt = replace(
+        receipt,
+        lanes=(receipt.lanes[0], forged_lane, *receipt.lanes[2:]),
+    )
+
+    with pytest.raises(ValueError, match="frozen native-owned bound"):
+        write_campaign_receipt(tmp_path / "lane-owned-tolerance", forged_receipt)
 
 
 def test_writer_rejects_a_reordered_measurement_schedule(tmp_path: Path) -> None:
@@ -537,7 +635,12 @@ def test_writer_rejects_unbound_parity_values_and_contradictory_certificate(
         receipt.lanes[1].endpoint,
         parity_rows=(
             receipt.lanes[1].endpoint.parity_rows[0],
-            ParityRow("final_iota", 0.25, 0.25, 0.0),
+            ParityRow(
+                "final_iota",
+                0.25,
+                0.25,
+                receipt_writer.single_stage_speed_parity_tolerance(0.25),
+            ),
             *receipt.lanes[1].endpoint.parity_rows[2:],
         ),
     )

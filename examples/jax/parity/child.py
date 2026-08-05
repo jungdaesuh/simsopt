@@ -29,6 +29,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--input-bundle", type=Path, required=True)
     parser.add_argument("--result-directory", type=Path, required=True)
     parser.add_argument("--trajectory-path", type=Path)
+    parser.add_argument("--optimization-timing-path", type=Path)
     parser.add_argument("--optimizer-backend", choices=("optax-lbfgs",))
     parser.add_argument("--scale", choices=EXECUTION_SCALES, required=True)
     return parser
@@ -48,7 +49,11 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError(
             f"input bundle scale {bundle.scale} does not match requested {scale}"
         )
-    if args.trajectory_path is None and args.optimizer_backend is None:
+    if (
+        args.trajectory_path is None
+        and args.optimization_timing_path is None
+        and args.optimizer_backend is None
+    ):
         observation = case.execute(args.lane, bundle, arrays)
     else:
         if case.measurement_execute is None:
@@ -59,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
             arrays,
             MeasurementExecution(
                 trajectory_path=args.trajectory_path,
+                optimization_timing_path=args.optimization_timing_path,
                 optimizer_backend=args.optimizer_backend,
             ),
         )
