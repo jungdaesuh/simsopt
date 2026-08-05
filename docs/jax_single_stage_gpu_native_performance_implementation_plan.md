@@ -2,8 +2,9 @@
 
 **Status:** SUPERSEDED (2026-08-05) — retained as the pre-campaign historical
 record. The operative documents are
-`docs/single_stage_speed_campaign_protocol.md` (amendments r2–r4) and its
-frozen validator `benchmarks/validate_single_stage_speed_claim.py`. The
+`docs/single_stage_speed_campaign_protocol.md` (amendments r2–r5), its
+frozen validator `benchmarks/validate_single_stage_speed_claim.py`, and the
+bounded closeout in `docs/single_stage_speed_campaign_results.md`. The
 convergence-ladder strategy, the single 10%-warm-median gate, and the
 endpoint-certificate eligibility rule below are dead. Measured 2026-08-05
 outcome: the host-driven GPU lane lost by ~26x (see the supersession record
