@@ -260,27 +260,17 @@ def _coil_chunk_reduce(
             reduce_chunk,
         )
 
-    padded_coil_count = chunk_count * chunk_size
-    # Chunk padding is bounded by chunk_size - 1 coil rows. It keeps the loop
-    # statically shaped for JIT; raise chunk_size when production shapes show
-    # repeated near-2x padding overhead.
-    padded_gammas = _pad_axis(gammas, axis=0, padded_size=padded_coil_count)
-    padded_gammadashs = _pad_axis(
-        gammadashs,
-        axis=0,
-        padded_size=padded_coil_count,
-    )
-    padded_currents = _pad_axis(currents, axis=0, padded_size=padded_coil_count)
+    full_chunk_count, tail_size = divmod(coil_count, chunk_size)
 
     # Keep the outer coil accumulation serial until parity data implicates it;
     # the quadrature-axis sum dominates the known reduction-order drift, while
     # tree-reducing chunk outputs would add another staged hot-path combine.
     def body(chunk_index: int, acc):
         start = chunk_index * chunk_size
-        chunk_gammas = _slice_coil_chunk(padded_gammas, start, chunk_size)
-        chunk_gammadashs = _slice_coil_chunk(padded_gammadashs, start, chunk_size)
+        chunk_gammas = _slice_coil_chunk(gammas, start, chunk_size)
+        chunk_gammadashs = _slice_coil_chunk(gammadashs, start, chunk_size)
         chunk_currents = lax.dynamic_slice(
-            padded_currents,
+            currents,
             (start,),
             (chunk_size,),
         )
@@ -289,7 +279,18 @@ def _coil_chunk_reduce(
             reduce_chunk(chunk_gammas, chunk_gammadashs, chunk_currents),
         )
 
-    return lax.fori_loop(0, chunk_count, body, zero)
+    reduced = lax.fori_loop(0, full_chunk_count, body, zero)
+    if tail_size:
+        tail_start = full_chunk_count * chunk_size
+        reduced = _tree_add(
+            reduced,
+            reduce_chunk(
+                gammas[tail_start:],
+                gammadashs[tail_start:],
+                currents[tail_start:],
+            ),
+        )
+    return reduced
 
 
 def _quadrature_block_integral(
@@ -301,7 +302,7 @@ def _quadrature_block_integral(
     integrand,
 ):
     quadrature_count = gammas.shape[1]
-    # The single-block, exact two-block, and padded >=3-block paths use
+    # The single-block, exact two-block, and full-block-plus-tail >=3 paths use
     # different quadrature reduction-tree shapes. Keep parity tests pinned
     # across block boundaries when changing this routine.
     if block_size <= 0 or quadrature_count <= block_size:
@@ -334,30 +335,29 @@ def _quadrature_block_integral(
             / quadrature_count
         )
 
-    padded_quadrature_count = block_count * block_size
-    # Quadrature padding trades at most block_size - 1 zero samples for static
-    # block loops. Prefer larger blocks only when profiling shows padding, not
-    # register pressure, dominates the kernel cost.
-    padded_gammas = _pad_axis(gammas, axis=1, padded_size=padded_quadrature_count)
-    padded_gammadashs = _pad_axis(
-        gammadashs,
-        axis=1,
-        padded_size=padded_quadrature_count,
-    )
+    full_block_count, tail_size = divmod(quadrature_count, block_size)
     zero = _zeros((gammas.shape[0], 3), dtype=jnp.float64)
 
     def body(block_index: int, acc):
         start = block_index * block_size
-        block_gammas = _slice_quadrature_block(padded_gammas, start, block_size)
+        block_gammas = _slice_quadrature_block(gammas, start, block_size)
         block_gammadashs = _slice_quadrature_block(
-            padded_gammadashs,
+            gammadashs,
             start,
             block_size,
         )
         block_integrand = integrand(x, block_gammas, block_gammadashs)
         return acc + _pairwise_sum_axis(block_integrand, axis=1)
 
-    integral_sum = lax.fori_loop(0, block_count, body, zero)
+    integral_sum = lax.fori_loop(0, full_block_count, body, zero)
+    if tail_size:
+        tail_start = full_block_count * block_size
+        tail_integrand = integrand(
+            x,
+            gammas[:, tail_start:],
+            gammadashs[:, tail_start:],
+        )
+        integral_sum = integral_sum + _pairwise_sum_axis(tail_integrand, axis=1)
     return integral_sum / quadrature_count
 
 
@@ -562,13 +562,7 @@ def _quadrature_block_B_and_dB_integral(x, gammas, gammadashs, *, block_size: in
         )
         return average_sum(_tree_add(first, second))
 
-    padded_quadrature_count = block_count * block_size
-    padded_gammas = _pad_axis(gammas, axis=1, padded_size=padded_quadrature_count)
-    padded_gammadashs = _pad_axis(
-        gammadashs,
-        axis=1,
-        padded_size=padded_quadrature_count,
-    )
+    full_block_count, tail_size = divmod(quadrature_count, block_size)
     zero = (
         _zeros((gammas.shape[0], 3), dtype=jnp.float64),
         _zeros((gammas.shape[0], 3, 3), dtype=jnp.float64),
@@ -576,15 +570,25 @@ def _quadrature_block_B_and_dB_integral(x, gammas, gammadashs, *, block_size: in
 
     def body(block_index: int, acc):
         start = block_index * block_size
-        block_gammas = _slice_quadrature_block(padded_gammas, start, block_size)
+        block_gammas = _slice_quadrature_block(gammas, start, block_size)
         block_gammadashs = _slice_quadrature_block(
-            padded_gammadashs,
+            gammadashs,
             start,
             block_size,
         )
         return _tree_add(acc, reduce_values(block_gammas, block_gammadashs))
 
-    return average_sum(lax.fori_loop(0, block_count, body, zero))
+    integral_sum = lax.fori_loop(0, full_block_count, body, zero)
+    if tail_size:
+        tail_start = full_block_count * block_size
+        integral_sum = _tree_add(
+            integral_sum,
+            reduce_values(
+                gammas[:, tail_start:],
+                gammadashs[:, tail_start:],
+            ),
+        )
+    return average_sum(integral_sum)
 
 
 def _one_point_dense_B_and_dB(

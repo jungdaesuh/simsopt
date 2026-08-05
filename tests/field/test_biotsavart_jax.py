@@ -1596,6 +1596,134 @@ class TestBiotSavartJaxChunkedSelfConsistency:
                     atol=1e-14,
                 )
 
+    def test_nondivisible_quadrature_does_not_add_origin_samples_to_B_or_vjp(
+        self, monkeypatch
+    ):
+        with _kernel_tuning_env("jax_cpu_parity"):
+            from simsopt_jax.core import biotsavart as core_bs
+
+            gammas, gammadashs = _make_circular_coil(nquad=10)
+            currents = jnp.asarray((5.0e4,), dtype=jnp.float64)
+            points = jnp.zeros((1, 3), dtype=jnp.float64)
+            v = jnp.asarray(((0.3, -0.2, 0.1),), dtype=jnp.float64)
+
+            monkeypatch.setattr(core_bs, "_read_tuning_config", lambda: (0, 0, 0))
+            core_bs.invalidate_kernel_cache()
+            dense_B = core_bs.biot_savart_B(points, gammas, gammadashs, currents)
+            dense_fused_B, dense_dB = core_bs.biot_savart_B_and_dB(
+                points,
+                gammas,
+                gammadashs,
+                currents,
+            )
+            dense_vjp = core_bs.biot_savart_B_vjp(
+                points,
+                v,
+                gammas,
+                gammadashs,
+                currents,
+            )
+
+            monkeypatch.setattr(core_bs, "_read_tuning_config", lambda: (0, 3, 0))
+            core_bs.invalidate_kernel_cache()
+            chunked_B = core_bs.biot_savart_B(points, gammas, gammadashs, currents)
+            chunked_fused_B, chunked_dB = core_bs.biot_savart_B_and_dB(
+                points,
+                gammas,
+                gammadashs,
+                currents,
+            )
+            chunked_vjp = core_bs.biot_savart_B_vjp(
+                points,
+                v,
+                gammas,
+                gammadashs,
+                currents,
+            )
+
+            assert np.all(np.isfinite(np.asarray(dense_B)))
+            assert np.all(np.isfinite(np.asarray(chunked_B)))
+            np.testing.assert_allclose(
+                np.asarray(chunked_B),
+                np.asarray(dense_B),
+                rtol=1e-12,
+                atol=1e-14,
+            )
+            assert np.all(np.isfinite(np.asarray(chunked_fused_B)))
+            assert np.all(np.isfinite(np.asarray(chunked_dB)))
+            np.testing.assert_allclose(
+                np.asarray(chunked_fused_B),
+                np.asarray(dense_fused_B),
+                rtol=1e-12,
+                atol=1e-14,
+            )
+            np.testing.assert_allclose(
+                np.asarray(chunked_dB),
+                np.asarray(dense_dB),
+                rtol=1e-12,
+                atol=1e-14,
+            )
+            for chunked_leaf, dense_leaf in zip(chunked_vjp, dense_vjp, strict=True):
+                assert np.all(np.isfinite(np.asarray(chunked_leaf)))
+                np.testing.assert_allclose(
+                    np.asarray(chunked_leaf),
+                    np.asarray(dense_leaf),
+                    rtol=1e-12,
+                    atol=1e-14,
+                )
+
+    def test_nondivisible_coil_chunks_do_not_add_origin_samples_to_B_or_vjp(
+        self, monkeypatch
+    ):
+        with _kernel_tuning_env("jax_cpu_parity"):
+            from simsopt_jax.core import biotsavart as core_bs
+
+            gammas, gammadashs, currents = _make_shifted_circular_coils(
+                7,
+                nquad=12,
+            )
+            points = jnp.zeros((1, 3), dtype=jnp.float64)
+            v = jnp.asarray(((0.3, -0.2, 0.1),), dtype=jnp.float64)
+
+            monkeypatch.setattr(core_bs, "_read_tuning_config", lambda: (0, 0, 0))
+            core_bs.invalidate_kernel_cache()
+            dense_B = core_bs.biot_savart_B(points, gammas, gammadashs, currents)
+            dense_vjp = core_bs.biot_savart_B_vjp(
+                points,
+                v,
+                gammas,
+                gammadashs,
+                currents,
+            )
+
+            monkeypatch.setattr(core_bs, "_read_tuning_config", lambda: (3, 0, 0))
+            core_bs.invalidate_kernel_cache()
+            chunked_B = core_bs.biot_savart_B(points, gammas, gammadashs, currents)
+            chunked_vjp = core_bs.biot_savart_B_vjp(
+                points,
+                v,
+                gammas,
+                gammadashs,
+                currents,
+            )
+
+            assert np.all(np.isfinite(np.asarray(dense_B)))
+            assert np.all(np.isfinite(np.asarray(chunked_B)))
+            np.testing.assert_allclose(
+                np.asarray(chunked_B),
+                np.asarray(dense_B),
+                rtol=1e-12,
+                atol=1e-14,
+            )
+            for chunked_leaf, dense_leaf in zip(chunked_vjp, dense_vjp, strict=True):
+                assert np.all(np.isfinite(np.asarray(chunked_leaf)))
+                np.testing.assert_allclose(
+                    np.asarray(chunked_leaf),
+                    np.asarray(dense_leaf),
+                    rtol=1e-12,
+                    atol=1e-14,
+                )
+
     def test_two_chunk_coil_and_quadrature_paths_match_dense_reference(
         self, monkeypatch
     ):
@@ -1979,6 +2107,7 @@ class TestBiotSavartJaxChunkedSelfConsistency:
         point_dtype,
         expected_dtype,
     ):
+        monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_parity")
         if mixed_precision:
             monkeypatch.setenv("SIMSOPT_PRECISION", "mixed")
         else:
@@ -2058,6 +2187,7 @@ class TestBiotSavartJaxChunkedSelfConsistency:
     def test_grouped_biot_savart_vjp_boundary_uses_point_dtype(self, monkeypatch):
         from simsopt_jax.core import field as core_field
 
+        monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_parity")
         monkeypatch.setenv("SIMSOPT_PRECISION", "mixed")
         invalidate_backend_cache()
         seen = []
