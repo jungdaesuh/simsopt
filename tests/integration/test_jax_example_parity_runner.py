@@ -6,9 +6,15 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import numpy as np
 import pytest
+from benchmarks.run_jax_native_example_measurements import (
+    MeasurementRunnerError,
+    _scientific_comparison_document,
+)
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 from examples.jax.parity._manifest import ComparisonRoute
 from examples.jax.parity.arbiter import (
@@ -34,6 +40,11 @@ from examples.jax.parity.runner import (
     execute_case_lanes,
     execute_child_process,
 )
+from simsopt.single_stage_boozer_vacuum import (
+    JAX_FAST_DRIVER_ID,
+    JAX_PARITY_DRIVER_ID,
+)
+from simsopt_jax.config import ExecutionIntent
 
 
 def _routes() -> tuple[ComparisonRoute, ...]:
@@ -58,13 +69,14 @@ def _routes() -> tuple[ComparisonRoute, ...]:
 
 def _provenance(backend_mode: str) -> LaneProvenance:
     is_jax = backend_mode != "native_cpu"
-    platform = "gpu" if backend_mode == "jax_gpu_parity" else "cpu"
+    platform = "gpu" if backend_mode.startswith("jax_gpu_") else "cpu"
+    transfer_guard = "log" if backend_mode == "jax_gpu_fast" else "disallow"
     policy = {"SIMSOPT_BACKEND_MODE": backend_mode}
-    if backend_mode == "jax_gpu_parity":
+    if platform == "gpu":
         policy.update(
             {
-                "SIMSOPT_JAX_TRANSFER_GUARD": "disallow",
-                "JAX_TRANSFER_GUARD": "disallow",
+                "SIMSOPT_JAX_TRANSFER_GUARD": transfer_guard,
+                "JAX_TRANSFER_GUARD": transfer_guard,
             }
         )
     return LaneProvenance(
@@ -83,11 +95,11 @@ def _provenance(backend_mode: str) -> LaneProvenance:
         lane_environment_policy=policy,
         jax_effective_transfer_guards=(
             {
-                "device_to_device": "disallow",
-                "device_to_host": "disallow",
-                "host_to_device": "disallow",
+                "device_to_device": transfer_guard,
+                "device_to_host": transfer_guard,
+                "host_to_device": transfer_guard,
             }
-            if backend_mode == "jax_gpu_parity"
+            if platform == "gpu"
             else {}
         ),
         devices=(DeviceMetadata(0, platform, "test", 0),) if is_jax else (),
@@ -178,6 +190,21 @@ def _observations() -> dict[str, LaneObservation]:
     }
 
 
+def _fast_observations() -> dict[str, LaneObservation]:
+    observations = _observations()
+    for lane, backend_mode in (
+        ("jax-cpu", "jax_cpu_fast"),
+        ("jax-gpu", "jax_gpu_fast"),
+    ):
+        observations[lane] = dataclasses.replace(
+            observations[lane],
+            backend_mode=backend_mode,
+            driver=JAX_FAST_DRIVER_ID,
+            provenance=_provenance(backend_mode),
+        )
+    return observations
+
+
 def test_native_workflow_tolerance_is_centrally_owned_and_adversarial() -> None:
     tolerance = parity_ladder_tolerances("native_workflow")
 
@@ -261,6 +288,149 @@ def test_arbiter_requires_direct_all_pairs_and_passes_matching_receipts() -> Non
     assert result.verdict == "pass"
     assert len(result.comparisons) == 3
     assert all(comparison.passed for comparison in result.comparisons)
+
+
+def test_arbiter_accepts_truthful_fast_receipts_only_with_fast_intent() -> None:
+    result = arbitrate(_routes(), _fast_observations(), execution_intent="fast")
+
+    assert result.verdict == "pass"
+
+
+def test_arbiter_default_parity_intent_rejects_fast_receipts() -> None:
+    with pytest.raises(ArbitrationError, match="backend_mode must be jax_cpu_parity"):
+        arbitrate(_routes(), _fast_observations())
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_message"),
+    (
+        ("backend", "backend_mode must be jax_gpu_fast"),
+        ("provenance", "provenance backend policy mismatch"),
+        ("guard_policy", "effective transfer guards must log"),
+        ("effective_guard", "effective transfer guards must log"),
+    ),
+)
+def test_fast_intent_rejects_runtime_provenance_mismatches(
+    mutation: str, expected_message: str
+) -> None:
+    observations = _fast_observations()
+    gpu = observations["jax-gpu"]
+    provenance = gpu.provenance
+    assert provenance is not None
+    if mutation == "backend":
+        observations["jax-gpu"] = dataclasses.replace(
+            gpu, backend_mode="jax_gpu_parity"
+        )
+    elif mutation == "provenance":
+        observations["jax-gpu"] = dataclasses.replace(
+            gpu,
+            provenance=dataclasses.replace(
+                provenance,
+                lane_environment_policy={
+                    **provenance.lane_environment_policy,
+                    "SIMSOPT_BACKEND_MODE": "jax_gpu_parity",
+                },
+            ),
+        )
+    elif mutation == "guard_policy":
+        observations["jax-gpu"] = dataclasses.replace(
+            gpu,
+            provenance=dataclasses.replace(
+                provenance,
+                lane_environment_policy={
+                    **provenance.lane_environment_policy,
+                    "JAX_TRANSFER_GUARD": "disallow",
+                },
+            ),
+        )
+    elif mutation == "effective_guard":
+        observations["jax-gpu"] = dataclasses.replace(
+            gpu,
+            provenance=dataclasses.replace(
+                provenance,
+                jax_effective_transfer_guards={
+                    direction: "disallow"
+                    for direction in provenance.jax_effective_transfer_guards
+                },
+            ),
+        )
+    else:
+        raise AssertionError(f"unhandled mutation: {mutation}")
+
+    with pytest.raises(ArbitrationError, match=expected_message):
+        arbitrate(_routes(), observations, execution_intent="fast")
+
+
+def test_arbiter_rejects_invalid_execution_intent() -> None:
+    with pytest.raises(ArbitrationError, match="invalid execution intent"):
+        arbitrate(
+            _routes(),
+            _observations(),
+            execution_intent=cast(ExecutionIntent, "benchmark"),
+        )
+
+
+def test_measurement_scientific_comparison_arbitrates_fast_and_parity_receipts() -> (
+    None
+):
+    parity_observations = _observations()
+    for lane in ("jax-cpu", "jax-gpu"):
+        parity_observations[lane] = dataclasses.replace(
+            parity_observations[lane],
+            driver=JAX_PARITY_DRIVER_ID,
+        )
+    fast_observations = _fast_observations()
+    document = _scientific_comparison_document(
+        relationship=SimpleNamespace(
+            case_id="native-single-stage-boozer-vacuum-optimization",
+            comparison_routes=_routes(),
+            workflow_stages=("construct", "evaluate"),
+        ),
+        observations={
+            "native_cpu": parity_observations["native-cpu"],
+            "jax_cpu_fast": fast_observations["jax-cpu"],
+            "jax_gpu_fast": fast_observations["jax-gpu"],
+            "jax_cpu_parity": parity_observations["jax-cpu"],
+            "jax_gpu_parity": parity_observations["jax-gpu"],
+        },
+    )
+    fast_document = document["fast"]
+    parity_document = document["parity"]
+    assert isinstance(fast_document, dict)
+    assert isinstance(parity_document, dict)
+
+    assert fast_document["verdict"] == "pass"
+    assert parity_document["verdict"] == "pass"
+
+
+def test_measurement_scientific_comparison_rejects_forged_fast_driver() -> None:
+    parity_observations = _observations()
+    for lane in ("jax-cpu", "jax-gpu"):
+        parity_observations[lane] = dataclasses.replace(
+            parity_observations[lane],
+            driver=JAX_PARITY_DRIVER_ID,
+        )
+    fast_observations = _fast_observations()
+    fast_observations["jax-cpu"] = dataclasses.replace(
+        fast_observations["jax-cpu"],
+        driver=JAX_PARITY_DRIVER_ID,
+    )
+
+    with pytest.raises(MeasurementRunnerError, match="jax_cpu_fast driver must be"):
+        _scientific_comparison_document(
+            relationship=SimpleNamespace(
+                case_id="native-single-stage-boozer-vacuum-optimization",
+                comparison_routes=_routes(),
+                workflow_stages=("construct", "evaluate"),
+            ),
+            observations={
+                "native_cpu": parity_observations["native-cpu"],
+                "jax_cpu_fast": fast_observations["jax-cpu"],
+                "jax_gpu_fast": fast_observations["jax-gpu"],
+                "jax_cpu_parity": parity_observations["jax-cpu"],
+                "jax_gpu_parity": parity_observations["jax-gpu"],
+            },
+        )
 
 
 def test_arbiter_rejects_applicable_observable_without_routes() -> None:

@@ -206,7 +206,10 @@ def write_array(root: Path, relative_path: str, values: np.ndarray) -> ArrayRefe
     root.mkdir(parents=True, exist_ok=True)
     path = _relative_npy_path(relative_path)
     _contained_path(root, relative_path)
-    array = _canonical_array(values)
+    try:
+        array = _canonical_array(values)
+    except ArtifactValidationError as error:
+        raise ArtifactValidationError(f"{relative_path}: {error}") from error
     with _exclusive_binary_writer(root, path) as stream:
         np.lib.format.write_array(stream, array, version=(2, 0), allow_pickle=False)
         stream.flush()

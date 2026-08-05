@@ -7,14 +7,17 @@ import json
 import sys
 from pathlib import Path
 
+import jax  # noqa: F401
 import numpy as np
 import pytest
 from examples.jax.manifest_runtime import RuntimeExample
+from examples.jax.parity.cases import get_case
 from examples.jax.parity.child import main as run_parity_child
 from examples.jax.parity.input_bundle import (
     create_input_bundle,
     read_input_bundle,
 )
+from examples.jax.parity.receipts import load_lane_observation
 from examples.jax.parity.runner import build_child_command as build_parity_command
 from examples.jax.run_examples import (
     _parse_arguments as parse_example_arguments,
@@ -243,3 +246,35 @@ def test_parity_child_rejects_requested_scale_different_from_input(
                 "native_default",
             ]
         )
+
+
+def test_native_child_records_native_synchronization_when_jax_is_loaded(
+    tmp_path: Path,
+) -> None:
+    input_bundle = get_case("traceable-least-squares").create_input(
+        tmp_path / "inputs", "bounded"
+    )
+
+    assert (
+        run_parity_child(
+            [
+                "--case",
+                "traceable-least-squares",
+                "--lane",
+                "native-cpu",
+                "--input-bundle",
+                str(tmp_path / "inputs" / "input_bundle.json"),
+                "--result-directory",
+                str(tmp_path / "result"),
+                "--scale",
+                input_bundle.scale,
+            ]
+        )
+        == 0
+    )
+
+    receipt = load_lane_observation(tmp_path / "result")
+    assert receipt.provenance is not None
+    assert (
+        receipt.provenance.measurement_synchronization == "native synchronous execution"
+    )

@@ -1540,6 +1540,62 @@ class TestBiotSavartJaxChunkedSelfConsistency:
                         atol=1e-14,
                     )
 
+    def test_B_vjp_nondivisible_point_and_quadrature_tails_match_dense(
+        self, monkeypatch
+    ):
+        with _kernel_tuning_env("jax_cpu_parity"):
+            chunked_bs = _load_chunked_biotsavart()
+            from simsopt_jax.core import biotsavart as core_bs
+
+            monkeypatch.setattr(core_bs, "_read_tuning_config", lambda: (0, 3, 4))
+            core_bs.invalidate_kernel_cache()
+
+            gammas, gammadashs = _make_circular_coil(nquad=10)
+            currents = jnp.asarray((5.0e4,), dtype=jnp.float64)
+            points = jnp.asarray(
+                (
+                    (0.20, 0.10, -0.30),
+                    (0.10, -0.40, 0.05),
+                    (-0.30, 0.20, 0.35),
+                    (0.25, -0.15, -0.10),
+                    (-0.12, -0.22, 0.18),
+                    (0.33, 0.07, 0.12),
+                    (-0.28, 0.14, -0.08),
+                ),
+                dtype=jnp.float64,
+            )
+            v = jnp.linspace(
+                0.2,
+                1.3,
+                points.shape[0] * 3,
+                dtype=jnp.float64,
+            ).reshape(points.shape[0], 3)
+
+            chunked_vjp = core_bs.biot_savart_B_vjp(
+                points,
+                v,
+                gammas,
+                gammadashs,
+                currents,
+            )
+            dense_vjp = _dense_B_vjp(
+                chunked_bs,
+                points,
+                v,
+                gammas,
+                gammadashs,
+                currents,
+            )
+
+            for chunked_leaf, dense_leaf in zip(chunked_vjp, dense_vjp, strict=True):
+                assert np.all(np.isfinite(np.asarray(chunked_leaf)))
+                np.testing.assert_allclose(
+                    np.asarray(chunked_leaf),
+                    np.asarray(dense_leaf),
+                    rtol=1e-12,
+                    atol=1e-14,
+                )
+
     def test_two_chunk_coil_and_quadrature_paths_match_dense_reference(
         self, monkeypatch
     ):

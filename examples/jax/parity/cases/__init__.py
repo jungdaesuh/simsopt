@@ -76,6 +76,9 @@ from examples.jax.parity.cases.native_single_stage_boozer_vacuum import (
 from examples.jax.parity.cases.native_single_stage_boozer_vacuum import (
     execute as execute_native_single_stage_boozer_vacuum,
 )
+from examples.jax.parity.cases.native_single_stage_boozer_vacuum import (
+    execute_measurement as measure_native_single_stage_boozer_vacuum,
+)
 from examples.jax.parity.cases.native_stage_two_optimization import (
     create_input as create_native_stage_two_optimization_input,
 )
@@ -187,6 +190,7 @@ from examples.jax.parity.cases.traceable_least_squares import (
 from examples.jax.parity.cases.wireframe import create_input as create_wireframe_input
 from examples.jax.parity.cases.wireframe import execute as execute_wireframe
 from examples.jax.parity.input_bundle import InputBundle
+from examples.jax.parity.measurement import MeasurementExecution
 from examples.jax.parity.runtime import ParityLane
 from simsopt_jax.examples import ExecutionScale
 
@@ -196,6 +200,18 @@ class CaseDefinition:
     case_id: str
     create_input: Callable[[Path, ExecutionScale], InputBundle]
     execute: Callable[[ParityLane, InputBundle, dict[str, np.ndarray]], LaneObservation]
+    measurement_execute: (
+        Callable[
+            [
+                ParityLane,
+                InputBundle,
+                dict[str, np.ndarray],
+                MeasurementExecution,
+            ],
+            LaneObservation,
+        ]
+        | None
+    ) = None
 
 
 _CASES = {
@@ -303,6 +319,7 @@ _CASES = {
         case_id="native-single-stage-boozer-vacuum-optimization",
         create_input=create_native_single_stage_boozer_vacuum_input,
         execute=execute_native_single_stage_boozer_vacuum,
+        measurement_execute=measure_native_single_stage_boozer_vacuum,
     ),
     "native-wireframe-rcls-basic": CaseDefinition(
         case_id="native-wireframe-rcls-basic",

@@ -12,7 +12,9 @@ from examples.jax.parity.cases.native_boozerqa import (
     execute_variant,
 )
 from examples.jax.parity.input_bundle import InputBundle
+from examples.jax.parity.measurement import MeasurementExecution
 from examples.jax.parity.runtime import ParityLane
+from simsopt.single_stage_boozer_vacuum import NATIVE_ITERATIONS
 from simsopt_jax.examples import ExecutionScale
 
 WORKFLOW_STAGES = (
@@ -31,11 +33,12 @@ SPEC = BoozerSingleStageSpec(
     native_resolution=6,
     inner_tolerance=1.0e-13,
     bounded_outer_maxiter=2,
-    native_outer_maxiter=1_000,
+    native_outer_maxiter=NATIVE_ITERATIONS,
     bounded_non_qs_sdim=4,
     native_non_qs_sdim=20,
     residual_weight=1.0,
     report_residual=True,
+    enforce_endpoint_certificate=True,
 )
 
 
@@ -51,3 +54,13 @@ def execute(
 ) -> LaneObservation:
     """Execute the VMEC-free single-stage workflow in one isolated lane."""
     return execute_variant(lane, bundle, arrays, SPEC)
+
+
+def execute_measurement(
+    lane: ParityLane,
+    bundle: InputBundle,
+    arrays: dict[str, np.ndarray],
+    measurement: MeasurementExecution,
+) -> LaneObservation:
+    """Execute one instrumented single-stage measurement lane."""
+    return execute_variant(lane, bundle, arrays, SPEC, measurement=measurement)

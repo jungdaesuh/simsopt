@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import statistics
 import sys
@@ -10,7 +11,7 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
-
+import simsopt_jax.examples.execution as example_execution
 from benchmarks.jax_native_example_measurement_contract import (
     MEASUREMENT_EVIDENCE_KIND,
     MEASUREMENT_PROFILE_IDS,
@@ -31,6 +32,9 @@ from benchmarks.run_jax_native_example_measurements import (
     parse_nvidia_smi_compute_apps,
     publish_artifact_exclusive,
 )
+from examples.jax.parity.cases import get_case, native_boozerqa
+from simsopt_jax.backend import get_backend_mode, invalidate_backend_cache
+from simsopt_jax.solve.driver import Driver
 
 _SHA_A = "a" * 64
 _SHA_B = "b" * 64
@@ -379,6 +383,7 @@ def test_environments_separate_production_timing_from_gpu_allocation_memory() ->
     inherited = {
         "PRESERVED": "yes",
         "SIMSOPT_BACKEND_MODE": "stale",
+        "SIMSOPT_EXACT_ADJOINT_DENSE_LU": "stale",
         "XLA_PYTHON_CLIENT_PREALLOCATE": "stale",
     }
 
@@ -407,6 +412,9 @@ def test_environments_separate_production_timing_from_gpu_allocation_memory() ->
     assert timing["CUDA_VISIBLE_DEVICES"] == "1"
     assert timing["XLA_PYTHON_CLIENT_PREALLOCATE"] == "true"
     assert allocation["XLA_PYTHON_CLIENT_PREALLOCATE"] == "false"
+    assert "SIMSOPT_EXACT_ADJOINT_DENSE_LU" not in timing
+    assert "SIMSOPT_EXACT_ADJOINT_DENSE_LU" not in allocation
+    assert "SIMSOPT_EXACT_ADJOINT_DENSE_LU" not in native
     assert "SIMSOPT_BACKEND_MODE" not in native
     assert "JAX_PLATFORMS" not in native
     assert "CUDA_VISIBLE_DEVICES" not in native
@@ -500,6 +508,62 @@ def test_profile_command_consumes_the_canonical_bundle_in_parity_child(
 
 
 @pytest.mark.parametrize(
+    ("profile_id", "expected_lane", "expected_driver"),
+    (
+        ("jax_cpu_fast", "jax-cpu", Driver.SIMSOPT_LBFGSB),
+        ("jax_cpu_parity", "jax-cpu", Driver.SIMSOPT_BFGS),
+        ("jax_gpu_fast", "jax-gpu", Driver.SIMSOPT_LBFGSB),
+        ("jax_gpu_parity", "jax-gpu", Driver.SIMSOPT_BFGS),
+    ),
+)
+def test_jax_profile_environment_selects_solver_inside_parity_child(
+    profile_id: _ProfileId,
+    expected_lane: str,
+    expected_driver: Driver,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    command = build_profile_command(
+        python_executable="/python",
+        case_id="native-single-stage-boozer-vacuum-optimization",
+        profile_id=profile_id,
+        input_bundle_path=tmp_path / "input_bundle.json",
+        result_directory=tmp_path / "result",
+        scale="bounded",
+    )
+    environment = build_measurement_environment(
+        profile_id,
+        allocation_sensitive=False,
+        base_environment={"SIMSOPT_BACKEND_MODE": "stale"},
+    )
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    invalidate_backend_cache()
+
+    assert command[2:4] == ("examples.jax.parity.child", "--case")
+    assert command[4] == "native-single-stage-boozer-vacuum-optimization"
+    assert command[command.index("--lane") + 1] == expected_lane
+    assert get_backend_mode() == profile_id
+    assert example_execution.scalar_example_driver() == expected_driver
+
+
+def test_registered_single_stage_case_consumes_profile_solver_selector() -> None:
+    case = get_case("native-single-stage-boozer-vacuum-optimization")
+    registered_execute_source = inspect.getsource(case.execute)
+    jax_execute_source = inspect.getsource(native_boozerqa._jax)
+
+    assert "return execute_variant(lane, bundle, arrays, SPEC)" in (
+        registered_execute_source
+    )
+    assert "driver = scalar_example_driver()" in jax_execute_source
+    assert "if driver == Driver.SIMSOPT_LBFGSB:" in jax_execute_source
+    assert "minimize_lbfgs_host_core(" in jax_execute_source
+    assert "minimize_bfgs_host_core(" in jax_execute_source
+    assert "JAX_FAST_DRIVER_ID" in jax_execute_source
+    assert "JAX_PARITY_DRIVER_ID" in jax_execute_source
+
+
+@pytest.mark.parametrize(
     ("returncode", "expected"),
     (
         (0, "normal"),
@@ -579,7 +643,7 @@ def test_collection_plan_rotates_every_warm_round() -> None:
         round_runs = tuple(run for run in warm if run.sample_index == sample_index)
         assert len(round_runs) == 5
         assert tuple(run.order_position for run in round_runs) == tuple(range(5))
-        assert set(run.profile_id for run in round_runs) == set(MEASUREMENT_PROFILE_IDS)
+        assert {run.profile_id for run in round_runs} == set(MEASUREMENT_PROFILE_IDS)
 
 
 def test_cpu_child_measurement_uses_parent_process_tree_rss_polling(

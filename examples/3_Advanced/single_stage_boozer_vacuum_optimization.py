@@ -31,10 +31,13 @@ from simsopt.geo import (
     boozer_surface_residual,
 )
 from simsopt.objectives import QuadraticPenalty
-
+from simsopt.optimization_endpoint import certify_optimization_endpoint
+from simsopt.single_stage_boozer_vacuum import (
+    NATIVE_ITERATIONS,
+    OUTER_GRADIENT_TOLERANCE,
+)
 
 EXAMPLE_ID = "native-single-stage-boozer-vacuum-optimization"
-NATIVE_ITERATIONS = 1000
 
 
 def _configuration_options(native_scale: bool) -> dict[str, int]:
@@ -47,8 +50,7 @@ def _configuration_options(native_scale: bool) -> dict[str, int]:
     }
 
 
-def solve(max_steps: int) -> dict[str, object]:
-    native_scale = max_steps >= NATIVE_ITERATIONS
+def solve(max_steps: int, *, native_scale: bool) -> dict[str, object]:
     base_curves, base_currents, magnetic_axis, nfp, field = get_data(
         "ncsx",
         **_configuration_options(native_scale),
@@ -136,8 +138,7 @@ def solve(max_steps: int) -> dict[str, object]:
         initial_parameters,
         jac=True,
         method="BFGS",
-        options={"maxiter": max_steps},
-        tol=1.0e-15,
+        options={"maxiter": max_steps, "gtol": OUTER_GRADIENT_TOLERANCE},
     )
     objective.x = np.asarray(optimizer_result.x, dtype=np.float64)
     final_objective = float(objective.J())
@@ -155,14 +156,31 @@ def solve(max_steps: int) -> dict[str, object]:
     )[0]
     residual_rms = float(np.sqrt(np.mean(np.square(residual_vector))))
     inner_solver_success = bool(boozer_surface.res["success"])
-    scientific_success = bool(
-        initial_inner_success
-        and inner_solver_success
-        and np.all(np.isfinite(optimizer_result.x))
-        and np.all(np.isfinite(gradient))
-        and np.isfinite(final_objective)
+    parameters_finite = bool(
+        np.all(np.isfinite(optimizer_result.x)) and np.all(np.isfinite(gradient))
+    )
+    observables_finite = bool(
+        np.isfinite(final_objective)
+        and np.isfinite(final_iota)
+        and np.isfinite(final_volume)
+        and np.isfinite(final_non_qs)
+        and np.isfinite(final_residual)
         and np.isfinite(residual_rms)
-        and final_objective <= initial_objective
+    )
+    endpoint_certificate = certify_optimization_endpoint(
+        status_convention="scipy-bfgs",
+        provider_success=bool(optimizer_result.success),
+        provider_status=int(optimizer_result.status),
+        iterations=int(optimizer_result.nit),
+        max_iterations=max_steps,
+        initial_gradient_inf_norm=float(np.max(np.abs(initial_gradient))),
+        final_gradient_inf_norm=float(np.max(np.abs(gradient))),
+        parameters_finite=parameters_finite,
+        observables_finite=observables_finite,
+        inner_success=bool(initial_inner_success and inner_solver_success),
+    )
+    scientific_success = bool(
+        endpoint_certificate.success and final_objective <= initial_objective
     )
     return {
         "example_id": EXAMPLE_ID,
@@ -178,8 +196,12 @@ def solve(max_steps: int) -> dict[str, object]:
             "gradient": tuple(float(value) for value in gradient),
             "inner_solver_success": inner_solver_success,
             "outer_solver_success": bool(optimizer_result.success),
+            "outer_stopping_reason": endpoint_certificate.stopping_reason,
+            "initial_stationary": endpoint_certificate.initial_stationary,
+            "terminal_stationary": endpoint_certificate.terminal_stationary,
             "solver_status": int(optimizer_result.status),
             "solver_iterations": int(optimizer_result.nit),
+            "solver_evaluations": int(optimizer_result.nfev),
             "iota": final_iota,
             "volume": final_volume,
             "non_qs_ratio": final_non_qs,
@@ -211,7 +233,7 @@ def main(arguments: list[str] | None = None) -> int:
             tempfile.mkdtemp(prefix="simsopt-native-single-stage-boozer-")
         )
     output_directory.mkdir(parents=True, exist_ok=True)
-    result = solve(max_steps)
+    result = solve(max_steps, native_scale=not options.smoke)
     if options.json:
         print(json.dumps(result, sort_keys=True))
     else:

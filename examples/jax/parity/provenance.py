@@ -83,6 +83,7 @@ class LaneProvenance:
 _LANE_ENVIRONMENT_KEYS = (
     "SIMSOPT_BACKEND_MODE",
     "SIMSOPT_BACKEND_STRICT",
+    "SIMSOPT_EXACT_ADJOINT_DENSE_LU",
     "SIMSOPT_PRECISION",
     "SIMSOPT_JAX_TRANSFER_GUARD",
     "JAX_TRANSFER_GUARD",
@@ -283,8 +284,10 @@ def _device_metadata() -> tuple[
     return devices, peak, status, str(jax_module.__version__), guards
 
 
-def collect_lane_provenance(repo_root: Path) -> LaneProvenance:
-    """Collect one post-execution, non-secret lane provenance receipt."""
+def collect_lane_provenance(
+    repo_root: Path, *, measurement_synchronization: str
+) -> LaneProvenance:
+    """Collect a receipt using the synchronization recorded by its producer."""
     repository = collect_repository_state(repo_root)
     devices, device_peak, device_status, jax_version, effective_guards = (
         _device_metadata()
@@ -354,11 +357,7 @@ def collect_lane_provenance(repo_root: Path) -> LaneProvenance:
             "combined import, compile/warmup, and one bounded execution"
         ),
         steady_state_memory_measured=False,
-        measurement_synchronization=(
-            "jax.block_until_ready over published observation values"
-            if jax_version is not None
-            else "native synchronous execution"
-        ),
+        measurement_synchronization=measurement_synchronization,
         simsoptpp_path=simsoptpp_path,
         simsoptpp_sha256=simsoptpp_sha256,
         simsoptpp_version=simsoptpp_version,

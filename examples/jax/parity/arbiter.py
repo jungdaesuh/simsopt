@@ -10,6 +10,7 @@ import numpy as np
 from examples.jax.parity._manifest import ComparisonRoute
 from examples.jax.parity.contracts import ComparisonResult
 from examples.jax.parity.provenance import LaneProvenance
+from simsopt_jax.config import ExecutionIntent
 from simsopt_jax.examples import ExecutionScale
 from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 
@@ -76,7 +77,10 @@ def _validate_lanes(
     observations: Mapping[str, LaneObservation],
     required_lanes: frozenset[str],
     expected_workflow_stages: tuple[str, ...] | None,
+    execution_intent: ExecutionIntent = "parity",
 ) -> None:
+    if execution_intent not in ("fast", "parity"):
+        raise ArbitrationError(f"invalid execution intent: {execution_intent}")
     if not required_lanes or not required_lanes <= _REQUIRED_LANES:
         raise ArbitrationError(f"invalid required lanes: {sorted(required_lanes)}")
     missing = required_lanes - set(observations)
@@ -84,9 +88,10 @@ def _validate_lanes(
         raise ArbitrationError(f"missing required lane: {sorted(missing)}")
     expected_runtime = {
         "native-cpu": ("native_cpu", "cpu", "fp64"),
-        "jax-cpu": ("jax_cpu_parity", "cpu", "fp64"),
-        "jax-gpu": ("jax_gpu_parity", "gpu", "fp64"),
+        "jax-cpu": (f"jax_cpu_{execution_intent}", "cpu", "fp64"),
+        "jax-gpu": (f"jax_gpu_{execution_intent}", "gpu", "fp64"),
     }
+    expected_gpu_transfer_guard = "log" if execution_intent == "fast" else "disallow"
     for lane in sorted(required_lanes):
         backend, platform, precision = expected_runtime[lane]
         observation = observations[lane]
@@ -112,14 +117,17 @@ def _validate_lanes(
             raise ArbitrationError(f"{lane} provenance backend policy mismatch")
         if lane == "jax-gpu" and (
             provenance.lane_environment_policy.get("SIMSOPT_JAX_TRANSFER_GUARD")
-            != "disallow"
+            != expected_gpu_transfer_guard
             or provenance.lane_environment_policy.get("JAX_TRANSFER_GUARD")
-            != "disallow"
-            or set(provenance.jax_effective_transfer_guards.values()) != {"disallow"}
+            != expected_gpu_transfer_guard
+            or set(provenance.jax_effective_transfer_guards.values())
+            != {expected_gpu_transfer_guard}
             or set(provenance.jax_effective_transfer_guards)
             != {"device_to_device", "device_to_host", "host_to_device"}
         ):
-            raise ArbitrationError("jax-gpu effective transfer guards must disallow")
+            raise ArbitrationError(
+                f"jax-gpu effective transfer guards must {expected_gpu_transfer_guard}"
+            )
         if lane.startswith("jax-"):
             device_platforms = {device.platform for device in provenance.devices}
             expected_device_platforms = (
@@ -288,9 +296,18 @@ def arbitrate(
     *,
     required_lanes: frozenset[str] = _REQUIRED_LANES,
     expected_workflow_stages: tuple[str, ...] | None = None,
+    execution_intent: ExecutionIntent = "parity",
 ) -> ArbitrationResult:
-    """Compare every declared direct pair and aggregate one fail-closed verdict."""
-    _validate_lanes(observations, required_lanes, expected_workflow_stages)
+    """Compare every direct pair under the declared JAX execution policy.
+
+    The default retains the certification-oriented parity backend and guards.
+    """
+    _validate_lanes(
+        observations,
+        required_lanes,
+        expected_workflow_stages,
+        execution_intent,
+    )
     selected_routes = tuple(
         route
         for route in routes
