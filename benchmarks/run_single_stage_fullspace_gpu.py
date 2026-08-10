@@ -525,6 +525,21 @@ def _optional_finite_float(value: object) -> float | None:
     return scalar if np.isfinite(scalar) else None
 
 
+def json_safe_array_payload(value: object) -> JsonValue:
+    """Serialize array telemetry, representing nonfinite slots as JSON null."""
+
+    def normalize(item: object) -> JsonValue:
+        if isinstance(item, list):
+            return [normalize(element) for element in item]
+        if item is None or isinstance(item, (bool, str, int)):
+            return item
+        if isinstance(item, float):
+            return item if np.isfinite(item) else None
+        raise TypeError("array telemetry contains a non-JSON scalar")
+
+    return normalize(np.asarray(value).tolist())
+
+
 def _vector_payload(value: object) -> tuple[list[JsonValue], str]:
     payload = np.asarray(value).tolist()
     if not isinstance(payload, list):
@@ -1214,7 +1229,7 @@ def run_cfs_ftr1_probe(
     accepted_iterations = int(np.asarray(optimizer.accepted_iterations))
     status = FilterTrustRegionSQPStatus(int(np.asarray(optimizer.status))).name
     history = {
-        field: np.asarray(getattr(optimizer.history, field)[:iterations]).tolist()
+        field: json_safe_array_payload(getattr(optimizer.history, field)[:iterations])
         for field in optimizer.history._fields
     }
     history["attempted_length"] = iterations
