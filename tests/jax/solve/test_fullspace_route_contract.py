@@ -6,12 +6,14 @@ from dataclasses import FrozenInstanceError, asdict
 
 import pytest
 from simsopt_jax.solve.fullspace import (
+    CFS_FTR1_POLICY,
     CFS_SQP1_POLICY,
     LEGACY_V1_ROUTE_CONTRACT_SHA256,
     LEGACY_V1_ROUTE_CONTRACT_SIZE_BYTES,
     LEGACY_V1_ROUTES,
     ROUTE_POLICIES,
     ROUTE_SCHEMA_VERSION_V2,
+    ROUTE_SCHEMA_VERSION_V3,
     ROUTE_V2_CONTRACT_SHA256,
     ROUTE_V2_CONTRACT_SIZE_BYTES,
     FullSpaceRoute,
@@ -20,6 +22,8 @@ from simsopt_jax.solve.fullspace import (
     frozen_route_contract_payload,
     frozen_route_contract_payload_v1,
     frozen_route_contract_payload_v2,
+    frozen_route_contract_payload_v3,
+    ftr_route_policy,
     route_policy,
     sqp_route_policy,
 )
@@ -50,8 +54,12 @@ def test_route_lookup_returns_the_unique_frozen_policy(route: FullSpaceRoute) ->
     assert policy is next(item for item in ROUTE_POLICIES if item.route is route)
 
 
-def test_route_enum_adds_sqp1_without_changing_legacy_v1_order() -> None:
-    assert tuple(FullSpaceRoute) == (*LEGACY_V1_ROUTES, FullSpaceRoute.CFS_SQP1)
+def test_route_enum_appends_new_routes_without_changing_legacy_v1_order() -> None:
+    assert tuple(FullSpaceRoute) == (
+        *LEGACY_V1_ROUTES,
+        FullSpaceRoute.CFS_SQP1,
+        FullSpaceRoute.CFS_FTR1,
+    )
 
 
 def test_route_lookups_reject_the_wrong_policy_family_clearly() -> None:
@@ -60,6 +68,11 @@ def test_route_lookups_reject_the_wrong_policy_family_clearly() -> None:
         route_policy(FullSpaceRoute.CFS_SQP1)
     with pytest.raises(ValueError, match="not an SQP route"):
         sqp_route_policy(FullSpaceRoute.CFS_AL1)
+    assert ftr_route_policy(FullSpaceRoute.CFS_FTR1) is CFS_FTR1_POLICY
+    with pytest.raises(ValueError, match="uses ftr_route_policy"):
+        route_policy(FullSpaceRoute.CFS_FTR1)
+    with pytest.raises(ValueError, match="not an FTR route"):
+        ftr_route_policy(FullSpaceRoute.CFS_SQP1)
 
 
 def test_all_routes_pin_shared_scaling_convergence_and_resource_budgets() -> None:
@@ -251,4 +264,16 @@ def test_route_v2_payload_embeds_frozen_v1_and_detached_sqp_contract() -> None:
         hashlib.sha256(encoded).hexdigest()
         == ROUTE_V2_CONTRACT_SHA256
         == "b3b36797924331721d36221c29f94a9d464c6f72812f47fad360085be0b37287"
+    )
+
+
+def test_route_v3_payload_adds_ftr_without_changing_v2_bytes() -> None:
+    payload = frozen_route_contract_payload_v3()
+
+    assert payload["schema_version"] == ROUTE_SCHEMA_VERSION_V3
+    assert payload["legacy_v2"] == frozen_route_contract_payload_v2()
+    assert payload["ftr_routes"] == [asdict(CFS_FTR1_POLICY)]
+    assert (
+        hashlib.sha256(_canonical_json_bytes(payload["legacy_v2"])).hexdigest()
+        == ROUTE_V2_CONTRACT_SHA256
     )
