@@ -19,6 +19,7 @@ from simsopt_jax.solve.fullspace import (
     FullSpaceRoute,
     frozen_route_contract_payload_v1,
     frozen_route_contract_payload_v2,
+    frozen_route_contract_payload_v3,
 )
 
 from benchmarks import single_stage_fullspace_snapshot as _snapshot_contract
@@ -30,6 +31,7 @@ from benchmarks.single_stage_fullspace_snapshot import (
 
 SCHEMA_VERSION = "single-stage-fullspace-campaign-v1"
 SCHEMA_VERSION_V2 = "single-stage-fullspace-campaign-v2"
+SCHEMA_VERSION_V3 = "single-stage-fullspace-campaign-v3"
 SQP_SAMPLE_SCHEMA_VERSION = "single-stage-fullspace-cfs-sqp1-sample-receipt-v1"
 SQP_RESULT_SCHEMA_VERSION = "single-stage-fullspace-cfs-sqp1-result-v1"
 SQP_MEMORY_SCHEMA_VERSION = "single-stage-fullspace-cfs-sqp1-gpu-memory-v1"
@@ -197,6 +199,22 @@ class RunRequest:
         if self.route not in LEGACY_V1_ROUTES:
             raise ValueError("campaign-v2 request route is unsupported")
         self._validate_legacy_shape()
+
+    def validate_v3(self) -> None:
+        """Validate an additive campaign-v3 legacy, SQP, or FTR request."""
+
+        if self.route is FullSpaceRoute.CFS_FTR1:
+            if (
+                self.phase is not RunPhase.CANARY
+                or self.device is not DeviceLane.RTX5090
+                or self.steps != 10
+                or self.sample is not None
+            ):
+                raise ValueError(
+                    "CFS-FTR1 Gate 2 requires exactly one RTX 5090 ten-step canary"
+                )
+            return
+        self.validate_v2()
 
     def _validate_legacy_shape(self) -> None:
         if self.phase is RunPhase.FIRST_EVAL:
@@ -1710,6 +1728,16 @@ def contract_payload_v2() -> dict[str, JsonValue]:
     }
 
 
+def contract_payload_v3() -> dict[str, JsonValue]:
+    """Return the additive FTR campaign contract envelope."""
+
+    return {
+        "schema_version": SCHEMA_VERSION_V3,
+        "physics": cast(JsonValue, frozen_problem_contract_payload()),
+        "routes": cast(JsonValue, frozen_route_contract_payload_v3()),
+    }
+
+
 def contract_payload() -> dict[str, JsonValue]:
     """Compatibility alias for the byte-frozen campaign-v1 contract."""
 
@@ -1722,6 +1750,10 @@ def contract_sha256_v1() -> str:
 
 def contract_sha256_v2() -> str:
     return hashlib.sha256(canonical_json_bytes(contract_payload_v2())).hexdigest()
+
+
+def contract_sha256_v3() -> str:
+    return hashlib.sha256(canonical_json_bytes(contract_payload_v3())).hexdigest()
 
 
 def contract_sha256() -> str:
@@ -1789,6 +1821,13 @@ def run_request_payload_v2(request: RunRequest) -> dict[str, JsonValue]:
     return {"schema_version": SCHEMA_VERSION_V2, "request": payload}
 
 
+def run_request_payload_v3(request: RunRequest) -> dict[str, JsonValue]:
+    """Encode one exact campaign-v3 request."""
+
+    request.validate_v3()
+    return {"schema_version": SCHEMA_VERSION_V3, "request": asdict(request)}
+
+
 def run_request_from_payload(value: JsonValue) -> RunRequest:
     """Parse and cross-validate the exact request embedded in a run receipt."""
 
@@ -1802,6 +1841,14 @@ def run_request_v2_from_payload(value: JsonValue) -> RunRequest:
 
     request = _run_request_from_payload_unvalidated(value)
     request.validate_v2()
+    return request
+
+
+def run_request_v3_from_payload(value: JsonValue) -> RunRequest:
+    """Parse and cross-validate one campaign-v3 request."""
+
+    request = _run_request_from_payload_unvalidated(value)
+    request.validate_v3()
     return request
 
 
