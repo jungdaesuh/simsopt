@@ -44,8 +44,10 @@ SQP_DERIVATIVE_GATE_RECEIPT_SCHEMA_VERSION = (
 )
 SQP_CANARY_1_GATE_SCHEMA_VERSION = "single-stage-fullspace-cfs-sqp1-canary-1-gate-v1"
 SQP_CANARY_10_GATE_SCHEMA_VERSION = "single-stage-fullspace-cfs-sqp1-canary-10-gate-v1"
-SQP_PLAN_SHA256 = "3024b82b272dd72349c8c814b7b547dc6335357c1155b95cf60c1c5d252d0b78"
+SQP_PLAN_SHA256 = "e8ba9fe0513163038fd587427cc5199a00be954d9d9c3f9f51a79641136c9f4e"
 SQP_BUDGET_SHA256 = "d51c87c55793ebed63acf01e87ef3837f5abdccb95e8c61827758a8961482082"
+SQP_R2_PLAN_SHA256 = "3024b82b272dd72349c8c814b7b547dc6335357c1155b95cf60c1c5d252d0b78"
+SQP_R2_BUDGET_SHA256 = SQP_BUDGET_SHA256
 SQP_R1_PLAN_SHA256 = "1baf0a1c487e7f985ff5017e3762a19a5d4c69fdc27f140bdcd652cd384dce44"
 SQP_R1_BUDGET_SHA256 = (
     "c8fab1b74588cd9256020d84133739c930c28b8a6741181f4f2f9c667dbb86c1"
@@ -72,6 +74,16 @@ SQP_TERMINAL_STATUSES = frozenset(
         "EVALUATION_LIMIT",
     )
 )
+_SQP_CONVERGENCE_TELEMETRY_KEYS = frozenset(
+    (
+        "merit",
+        "penalty",
+        "multiplier_update_infinity_norm",
+        "bfgs_reset",
+        "restoration_applied",
+        "restoration_numerical_failures",
+    )
+)
 V2_ROUTES = (*LEGACY_V1_ROUTES, FullSpaceRoute.CFS_SQP1)
 RuntimeIdentity = _snapshot_contract.RuntimeIdentity
 SourceIdentity = _snapshot_contract.SourceIdentity
@@ -89,6 +101,20 @@ def _is_sqp_revision1_identity(
         plan_sha256 == SQP_R1_PLAN_SHA256
         and budget_sha256 == SQP_R1_BUDGET_SHA256
         and (contract_sha256 is None or contract_sha256 == SQP_R1_CONTRACT_SHA256)
+    )
+
+
+def _is_sqp_revision2_identity(
+    plan_sha256: JsonValue,
+    budget_sha256: JsonValue,
+    contract_sha256: JsonValue | None = None,
+) -> bool:
+    """Identify immutable Revision 2 evidence without changing its meaning."""
+
+    return (
+        plan_sha256 == SQP_R2_PLAN_SHA256
+        and budget_sha256 == SQP_R2_BUDGET_SHA256
+        and (contract_sha256 is None or contract_sha256 == contract_sha256_v2())
     )
 
 
@@ -768,6 +794,58 @@ def _expect_finite_number(value: JsonValue, *, context: str) -> float:
     return result
 
 
+def validate_sqp_convergence_telemetry(
+    optimizer: dict[str, JsonValue], *, accepted_length: int
+) -> None:
+    """Validate the Revision 3 fixed-shape diagnostic prefix."""
+
+    restoration_failures = optimizer.get("restoration_numerical_failures")
+    if (
+        isinstance(restoration_failures, bool)
+        or not isinstance(restoration_failures, int)
+        or restoration_failures < 0
+    ):
+        raise ValueError("optimizer.restoration_numerical_failures must be nonnegative")
+    telemetry = expect_mapping(
+        optimizer.get("convergence_telemetry"),
+        context="optimizer.convergence_telemetry",
+    )
+    expect_exact_keys(
+        telemetry,
+        _SQP_CONVERGENCE_TELEMETRY_KEYS,
+        context="optimizer.convergence_telemetry",
+    )
+    if telemetry["restoration_numerical_failures"] != restoration_failures:
+        raise ValueError("SQP restoration failure telemetry is inconsistent")
+    for key in (
+        "merit",
+        "penalty",
+        "multiplier_update_infinity_norm",
+        "bfgs_reset",
+        "restoration_applied",
+    ):
+        values = telemetry[key]
+        if not isinstance(values, list) or len(values) != accepted_length:
+            raise ValueError(
+                f"optimizer.convergence_telemetry.{key} must match accepted history length"
+            )
+        for index, item in enumerate(values):
+            context = f"optimizer.convergence_telemetry.{key}[{index}]"
+            if key in {"bfgs_reset", "restoration_applied"}:
+                if (
+                    isinstance(item, bool)
+                    or not isinstance(item, int)
+                    or item not in (0, 1)
+                ):
+                    raise ValueError(f"{context} must be a zero-or-one indicator")
+            else:
+                value = _expect_finite_number(item, context=context)
+                if value < 0.0 or (key == "penalty" and value == 0.0):
+                    raise ValueError(f"{context} must be positive telemetry")
+    if optimizer.get("all_finite") is True and restoration_failures != 0:
+        raise ValueError("finite SQP result reports restoration numerical failures")
+
+
 def _expect_failure_reasons(value: JsonValue) -> tuple[str, ...]:
     if not isinstance(value, list):
         raise TypeError("SQP gate failure_reasons must be an array")
@@ -903,6 +981,9 @@ def _validate_derivative_gate(value: JsonValue) -> SqpGateResult:
     revision1 = _is_sqp_revision1_identity(
         raw["plan_sha256"], raw["budget_sha256"], raw["contract_sha256"]
     )
+    revision2 = _is_sqp_revision2_identity(
+        raw["plan_sha256"], raw["budget_sha256"], raw["contract_sha256"]
+    )
     if not (
         (
             raw["contract_sha256"] == contract_sha256_v2()
@@ -910,6 +991,7 @@ def _validate_derivative_gate(value: JsonValue) -> SqpGateResult:
             and raw["budget_sha256"] == SQP_BUDGET_SHA256
         )
         or revision1
+        or revision2
     ):
         raise ValueError("SQP derivative gate plan or budget digest differs")
     request = run_request_v2_from_payload(raw["request"])
@@ -1150,6 +1232,11 @@ def _canary_failure_reasons(
     history = optimizer.get("history")
     if not isinstance(history, dict) or history.get("accepted_length") != request.steps:
         reasons.append("ACCEPTED_HISTORY_LENGTH")
+    if request.steps == 10 and raw.get("plan_sha256") == SQP_PLAN_SHA256:
+        validate_sqp_convergence_telemetry(
+            optimizer,
+            accepted_length=request.steps,
+        )
     if transfers.get("hot_h2d_calls") != 0 or transfers.get("hot_d2h_calls") != 0:
         reasons.append("HOT_TRANSFER")
     if transfers.get("initial_h2d_calls") != 1 or transfers.get("final_d2h_calls") != 1:
@@ -1293,6 +1380,11 @@ def load_sqp_gate_result(
             receipt["budget_sha256"],
             receipt["contract_sha256"],
         )
+        or _is_sqp_revision2_identity(
+            receipt["plan_sha256"],
+            receipt["budget_sha256"],
+            receipt["contract_sha256"],
+        )
     ):
         raise ValueError("SQP gate receipt plan or budget digest differs")
     request = run_request_v2_from_payload(receipt["request"])
@@ -1311,8 +1403,6 @@ def load_sqp_gate_result(
         raise ValueError("SQP gate receipt request differs from the frozen request")
     raw_ref = artifact_ref_from_payload(receipt["raw_result"])
     memory_ref = artifact_ref_from_payload(receipt["gpu_memory"])
-    runtime_ref = artifact_ref_from_payload(receipt["runtime_evidence"])
-    bootstrap_ref = artifact_ref_from_payload(receipt["bootstrap_artifact"])
     raw = expect_mapping(
         load_canonical_json_bytes(raw_ref.resolve_and_validate(root).read_bytes()),
         context="SQP gate raw result",
@@ -1321,6 +1411,11 @@ def load_sqp_gate_result(
         load_canonical_json_bytes(memory_ref.resolve_and_validate(root).read_bytes()),
         context="SQP gate GPU memory",
     )
+    for identity_key in ("contract_sha256", "plan_sha256", "budget_sha256"):
+        if raw.get(identity_key) != receipt[identity_key]:
+            raise ValueError(f"SQP gate receipt and raw {identity_key} identity differ")
+    runtime_ref = artifact_ref_from_payload(receipt["runtime_evidence"])
+    bootstrap_ref = artifact_ref_from_payload(receipt["bootstrap_artifact"])
     if raw.get("request") != receipt["request"]:
         raise ValueError("SQP gate receipt and raw request differ")
     if raw.get("source_identity") != receipt["source_identity"]:

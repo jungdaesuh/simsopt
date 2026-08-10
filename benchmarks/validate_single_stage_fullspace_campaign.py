@@ -29,7 +29,11 @@ from benchmarks.single_stage_fullspace_receipt import (
     SQP_MAXIMUM_MEMORY_FRACTION,
     SQP_MEMORY_SCHEMA_VERSION,
     SQP_PLAN_SHA256,
+    SQP_R1_BUDGET_SHA256,
     SQP_R1_CONTRACT_SHA256,
+    SQP_R1_PLAN_SHA256,
+    SQP_R2_BUDGET_SHA256,
+    SQP_R2_PLAN_SHA256,
     SQP_RESULT_SCHEMA_VERSION,
     SQP_SCHUR_RELATIVE_RESIDUAL_MAXIMUM,
     SQP_WARM_SOLVE_MAX_SECONDS,
@@ -39,6 +43,7 @@ from benchmarks.single_stage_fullspace_receipt import (
     CompleteSample,
     JsonValue,
     RouteDisposition,
+    RunPhase,
     SqpGate,
     SqpSampleReceipt,
     artifact_ref_from_payload,
@@ -55,6 +60,7 @@ from benchmarks.single_stage_fullspace_receipt import (
     run_request_from_payload,
     run_request_v2_from_payload,
     sqp_sample_receipt_from_payload,
+    validate_sqp_convergence_telemetry,
 )
 from benchmarks.single_stage_fullspace_snapshot import (
     ArtifactRef,
@@ -140,6 +146,10 @@ _SQP_OPTIMIZER_KEYS = frozenset(
         "history_sha256",
     )
 )
+_SQP_R3_OPTIMIZER_KEYS = _SQP_OPTIMIZER_KEYS | {
+    "convergence_telemetry",
+    "restoration_numerical_failures",
+}
 _SQP_HISTORY_KEYS = frozenset(
     (
         "accepted_length",
@@ -349,9 +359,17 @@ def _sha256_string(value: object, context: str) -> str:
     return value
 
 
-def _validate_sqp_optimizer_result(value: JsonValue, sample: SqpSampleReceipt) -> None:
+def _validate_sqp_optimizer_result(
+    value: JsonValue,
+    sample: SqpSampleReceipt,
+    *,
+    require_convergence_telemetry: bool,
+) -> None:
     optimizer = expect_mapping(value, context="SQP optimizer result")
-    expect_exact_keys(optimizer, _SQP_OPTIMIZER_KEYS, context="SQP optimizer result")
+    expected_keys = (
+        _SQP_R3_OPTIMIZER_KEYS if require_convergence_telemetry else _SQP_OPTIMIZER_KEYS
+    )
+    expect_exact_keys(optimizer, expected_keys, context="SQP optimizer result")
     status = expect_string(optimizer["status"], context="optimizer.status")
     fatal = _boolean(optimizer["fatal"], "optimizer.fatal")
     failed = _boolean(optimizer["failed"], "optimizer.failed")
@@ -472,6 +490,11 @@ def _validate_sqp_optimizer_result(value: JsonValue, sample: SqpSampleReceipt) -
         raise ValueError("optimizer history digest differs from inline history")
     if counters["joint_evaluations"] < counters["iterations"]:
         raise ValueError("SQP joint-evaluation counter is inconsistent")
+    if require_convergence_telemetry:
+        validate_sqp_convergence_telemetry(
+            optimizer,
+            accepted_length=accepted_length,
+        )
     if status != sample.terminal_status:
         raise ValueError("SQP optimizer status differs from sample receipt")
     if converged and (fatal or failed):
@@ -488,13 +511,31 @@ def _validate_sqp_raw_result(
     expect_exact_keys(raw, _SQP_RAW_KEYS, context="SQP raw result")
     if raw["schema_version"] != SQP_RESULT_SCHEMA_VERSION:
         raise ValueError("SQP raw result schema mismatch")
-    if raw["contract_sha256"] != contract_sha256_v2():
+    if raw["contract_sha256"] not in (
+        contract_sha256_v2(),
+        SQP_R1_CONTRACT_SHA256,
+    ):
         raise ValueError("SQP raw result contract digest mismatch")
-    if raw["plan_sha256"] != SQP_PLAN_SHA256:
-        raise ValueError("SQP raw result plan digest mismatch")
-    if raw["budget_sha256"] != SQP_BUDGET_SHA256:
+    current_identity = (
+        raw["plan_sha256"] == SQP_PLAN_SHA256
+        and raw["budget_sha256"] == SQP_BUDGET_SHA256
+    )
+    revision2_identity = (
+        raw["plan_sha256"] == SQP_R2_PLAN_SHA256
+        and raw["budget_sha256"] == SQP_R2_BUDGET_SHA256
+    )
+    revision1_identity = (
+        raw["plan_sha256"] == SQP_R1_PLAN_SHA256
+        and raw["budget_sha256"] == SQP_R1_BUDGET_SHA256
+        and raw["contract_sha256"] == SQP_R1_CONTRACT_SHA256
+    )
+    if not (current_identity or revision2_identity or revision1_identity):
+        valid_plans = (SQP_PLAN_SHA256, SQP_R2_PLAN_SHA256, SQP_R1_PLAN_SHA256)
+        if raw["plan_sha256"] not in valid_plans:
+            raise ValueError("SQP raw result plan digest mismatch")
         raise ValueError("SQP raw result budget digest mismatch")
-    if run_request_v2_from_payload(raw["request"]) != sample.request:
+    request = run_request_v2_from_payload(raw["request"])
+    if request != sample.request:
         raise ValueError("SQP raw result request differs from sample receipt")
     if source_identity_from_payload(raw["source_identity"]) != source:
         raise ValueError("SQP raw result source identity differs")
@@ -513,7 +554,15 @@ def _validate_sqp_raw_result(
         raise ValueError("SQP raw result may not require trajectory equivalence")
     if raw["terminal_status"] != sample.terminal_status:
         raise ValueError("SQP sample terminal status differs from raw result")
-    _validate_sqp_optimizer_result(raw["optimizer_result"], sample)
+    _validate_sqp_optimizer_result(
+        raw["optimizer_result"],
+        sample,
+        require_convergence_telemetry=(
+            current_identity
+            and request.phase is RunPhase.CANARY
+            and request.steps == 10
+        ),
+    )
     optimizer = expect_mapping(raw["optimizer_result"], context="SQP optimizer result")
     endpoint = expect_mapping(raw["endpoint"], context="SQP raw endpoint")
     expect_exact_keys(endpoint, _SQP_ENDPOINT_KEYS, context="SQP raw endpoint")

@@ -166,6 +166,7 @@ _CONFIGURATION_FILES: Final = (
     "docs/single_stage_jax_gpu_coupled_fullspace_implementation_plan.md",
     "docs/single_stage_jax_gpu_coupled_fullspace_phase0_budget.json",
     "docs/single_stage_jax_gpu_sqp_primal_dual_implementation_plan.md",
+    "docs/single_stage_jax_gpu_sqp_primal_dual_implementation_plan_r3.md",
     "docs/single_stage_jax_gpu_sqp_primal_dual_phase0_budget.json",
 )
 _BENCHMARK_FILES: Final = (
@@ -913,6 +914,7 @@ def run_cfs_sqp1_probe(
     *,
     maximum_iterations: int,
     warm: bool,
+    include_convergence_telemetry: bool = False,
 ) -> tuple[
     dict[str, JsonValue],
     dict[str, JsonValue],
@@ -986,6 +988,23 @@ def run_cfs_sqp1_probe(
         ).tolist(),
         "status": np.asarray(optimizer.history.status[:iterations]).tolist(),
     }
+    convergence_telemetry: dict[str, JsonValue] | None = None
+    if include_convergence_telemetry:
+        telemetry = optimizer.convergence_telemetry
+        convergence_telemetry = {
+            "merit": np.asarray(telemetry.merit[:iterations]).tolist(),
+            "penalty": np.asarray(telemetry.penalty[:iterations]).tolist(),
+            "multiplier_update_infinity_norm": np.asarray(
+                telemetry.multiplier_update_infinity_norm[:iterations]
+            ).tolist(),
+            "bfgs_reset": np.asarray(telemetry.bfgs_reset[:iterations]).tolist(),
+            "restoration_applied": np.asarray(
+                telemetry.restoration_applied[:iterations]
+            ).tolist(),
+            "restoration_numerical_failures": int(
+                np.asarray(optimizer.restoration_numerical_failures)
+            ),
+        }
     physical_state, physical_state_sha = _vector_payload(endpoint_result.physical_state)
     optimizer_coordinates, optimizer_coordinates_sha = _vector_payload(
         optimizer.optimizer_coordinates
@@ -1080,6 +1099,11 @@ def run_cfs_sqp1_probe(
             np.asarray(initial_endpoint_result.raw_kkt_stationarity_infinity_norm)
         ),
     }
+    if convergence_telemetry is not None:
+        optimizer_payload["convergence_telemetry"] = convergence_telemetry
+        optimizer_payload["restoration_numerical_failures"] = int(
+            np.asarray(optimizer.restoration_numerical_failures)
+        )
     timing: dict[str, JsonValue] = {
         "synchronized_solve_seconds": solve_elapsed_ns / 1.0e9,
         "synchronization": "block_until_ready",
@@ -2556,30 +2580,16 @@ def _enforce_sqp_prerequisite_chain(
     """Require each persisted predecessor before authorizing the next process."""
 
     required_gates: tuple[tuple[Path, str], ...]
-    if request.phase is RunPhase.FIRST_EVAL:
+    if request.phase is RunPhase.FIRST_EVAL or (
+        request.phase is RunPhase.CANARY and request.steps == 1
+    ):
+        raise PhaseGateError(
+            "Revision 3 prohibits derivative and one-step SQP gate replays"
+        )
+    if request.phase is RunPhase.CANARY and request.steps == 10:
         required_gates = ()
-    elif request.phase is RunPhase.CANARY and request.steps == 1:
-        required_gates = (
-            (
-                Path("gates/derivative"),
-                CFS_SQP1_DERIVATIVE_GATE_RECEIPT_SCHEMA_VERSION,
-            ),
-        )
-    elif request.phase is RunPhase.CANARY and request.steps == 10:
-        required_gates = (
-            (
-                Path("gates/derivative"),
-                CFS_SQP1_DERIVATIVE_GATE_RECEIPT_SCHEMA_VERSION,
-            ),
-            (Path("gates/canary-1"), CFS_SQP1_CANARY_1_GATE_SCHEMA_VERSION),
-        )
     else:
         required_gates = (
-            (
-                Path("gates/derivative"),
-                CFS_SQP1_DERIVATIVE_GATE_RECEIPT_SCHEMA_VERSION,
-            ),
-            (Path("gates/canary-1"), CFS_SQP1_CANARY_1_GATE_SCHEMA_VERSION),
             (Path("gates/canary-10"), CFS_SQP1_CANARY_10_GATE_SCHEMA_VERSION),
         )
     for relative_directory, expected_schema in required_gates:
@@ -2651,6 +2661,9 @@ def _cfs_sqp1_child_probe_payload(
         maximum_iterations=_sqp_maximum_iterations(request),
         warm=request.phase is RunPhase.COMPLETE
         and request.sample is not CompleteSample.COLD,
+        include_convergence_telemetry=(
+            request.phase is RunPhase.CANARY and _sqp_maximum_iterations(request) == 10
+        ),
     )
     timing = execution["timing"]
     if not isinstance(timing, dict):

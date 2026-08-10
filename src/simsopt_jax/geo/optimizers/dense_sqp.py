@@ -127,6 +127,16 @@ class DenseSQPHistory(NamedTuple):
     status: jax.Array
 
 
+class DenseSQPConvergenceTelemetry(NamedTuple):
+    """Revision-specific diagnostics kept separate from legacy history."""
+
+    merit: jax.Array
+    penalty: jax.Array
+    multiplier_update_infinity_norm: jax.Array
+    bfgs_reset: jax.Array
+    restoration_applied: jax.Array
+
+
 class DenseSQPResult(NamedTuple):
     """Device-array result of one prepared dense equality-SQP solve."""
 
@@ -159,9 +169,11 @@ class DenseSQPResult(NamedTuple):
     selected_regularization: jax.Array
     regularization_candidates_tested: jax.Array
     merit_penalty: jax.Array
+    restoration_numerical_failures: jax.Array
     all_accepted_states_finite: jax.Array
     all_finite: jax.Array
     history: DenseSQPHistory
+    convergence_telemetry: DenseSQPConvergenceTelemetry
 
 
 _PreparedRun = Callable[[jax.Array, jax.Array], DenseSQPResult]
@@ -238,9 +250,11 @@ class _SolverState(NamedTuple):
     final_schur_cholesky_relative_pivot: jax.Array
     selected_regularization: jax.Array
     regularization_candidates_tested: jax.Array
+    restoration_numerical_failures: jax.Array
     all_accepted_states_finite: jax.Array
     all_finite: jax.Array
     history: DenseSQPHistory
+    convergence_telemetry: DenseSQPConvergenceTelemetry
 
 
 class _LineSearchResult(NamedTuple):
@@ -252,6 +266,8 @@ class _LineSearchResult(NamedTuple):
     evaluations: jax.Array
     rejected_nonfinite: jax.Array
     evaluation_limit: jax.Array
+    restoration_applied: jax.Array
+    restoration_numerical_failure: jax.Array
 
 
 def _validate_options(options: DenseSQPOptions) -> None:
@@ -601,12 +617,27 @@ def powell_damped_bfgs_update(
     )
 
 
+def _normal_restoration_factor(
+    constraint_jacobian: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """Factor the minimum-norm linearized normal-restoration system."""
+
+    gram = constraint_jacobian @ constraint_jacobian.T
+    gram = 0.5 * (gram + gram.T)
+    factor = jnp.linalg.cholesky(gram)
+    diagonal = jnp.diag(factor)
+    valid = jnp.all(jnp.isfinite(factor)) & jnp.all(diagonal > 0.0)
+    return factor, valid
+
+
 def _line_search(
     joint_value_constraints: JointValueConstraints,
     state: _SolverState,
     kkt_step: DenseSQPKKTStep,
     penalty: jax.Array,
     options: DenseSQPOptions,
+    normal_factor: jax.Array,
+    normal_factor_valid: jax.Array,
 ) -> _LineSearchResult:
     dtype = state.coordinates.dtype
     current_merit = state.objective + penalty * jnp.linalg.norm(
@@ -629,6 +660,8 @@ def _line_search(
         evaluations=jnp.asarray(0, dtype=jnp.int32),
         rejected_nonfinite=jnp.asarray(0, dtype=jnp.int32),
         evaluation_limit=jnp.asarray(False),
+        restoration_applied=jnp.asarray(False),
+        restoration_numerical_failure=jnp.asarray(False),
     )
 
     def try_candidate(result: _LineSearchResult, alpha: jax.Array) -> _LineSearchResult:
@@ -637,23 +670,117 @@ def _line_search(
         finite = jnp.isfinite(trial_objective) & jnp.all(
             jnp.isfinite(trial_constraints)
         )
+        trial_feasibility = jnp.linalg.norm(trial_constraints, ord=jnp.inf)
+        feasibility_cap = jnp.maximum(
+            jnp.asarray(options.feasibility_tolerance, dtype=dtype),
+            jnp.linalg.norm(state.constraints, ord=jnp.inf),
+        )
         trial_merit = trial_objective + penalty * jnp.linalg.norm(
             trial_constraints, ord=1
         )
-        accepted = finite & (
-            trial_merit
-            <= current_merit + options.armijo_coefficient * alpha * merit_derivative
+        armijo_limit = (
+            current_merit + options.armijo_coefficient * alpha * merit_derivative
         )
+        direct_accepted = (
+            finite
+            & (trial_feasibility <= feasibility_cap)
+            & (trial_merit <= armijo_limit)
+        )
+        restoration_needed = finite & (trial_feasibility > feasibility_cap)
+        used = state.joint_evaluations + result.evaluations
+        restoration_budget = used + 1 < options.maximum_joint_evaluations - 1
+        restore = restoration_needed & restoration_budget & normal_factor_valid
+        invalid_restoration_factor = restoration_needed & ~normal_factor_valid
+
+        def evaluate_restored() -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+            normal_rhs = jsp.linalg.cho_solve((normal_factor, True), trial_constraints)
+            normal_correction = -state.constraint_jacobian.T @ normal_rhs
+            restored_coordinates = trial_coordinates + normal_correction
+            restoration_internal_finite = (
+                jnp.all(jnp.isfinite(normal_rhs))
+                & jnp.all(jnp.isfinite(normal_correction))
+                & jnp.all(jnp.isfinite(restored_coordinates))
+            )
+            restored_objective, restored_constraints = jax.lax.cond(
+                restoration_internal_finite,
+                lambda: joint_value_constraints(restored_coordinates),
+                lambda: (
+                    jnp.asarray(jnp.nan, dtype=dtype),
+                    jnp.full_like(trial_constraints, jnp.nan),
+                ),
+            )
+            restored_finite = (
+                restoration_internal_finite
+                & jnp.isfinite(restored_objective)
+                & jnp.all(jnp.isfinite(restored_constraints))
+            )
+            return (
+                restored_coordinates,
+                restored_objective,
+                restored_constraints,
+                restored_finite,
+            )
+
+        nan_objective = jnp.asarray(jnp.nan, dtype=dtype)
+        nan_constraints = jnp.full_like(trial_constraints, jnp.nan)
+        (
+            restored_coordinates,
+            restored_objective,
+            restored_constraints,
+            restored_finite,
+        ) = jax.lax.cond(
+            restore,
+            evaluate_restored,
+            lambda: (
+                trial_coordinates,
+                nan_objective,
+                nan_constraints,
+                jnp.asarray(False),
+            ),
+        )
+        restored_merit = restored_objective + penalty * jnp.linalg.norm(
+            restored_constraints, ord=1
+        )
+        restored_accepted = (
+            restore
+            & restored_finite
+            & (jnp.linalg.norm(restored_constraints, ord=jnp.inf) <= feasibility_cap)
+            & (restored_merit <= armijo_limit)
+        )
+        accepted = direct_accepted | restored_accepted
+        selected_coordinates = jnp.where(
+            restored_accepted,
+            restored_coordinates,
+            trial_coordinates,
+        )
+        selected_objective = jnp.where(
+            restored_accepted,
+            restored_objective,
+            trial_objective,
+        )
+        selected_constraints = jnp.where(
+            restored_accepted,
+            restored_constraints,
+            trial_constraints,
+        )
+        corrected_evaluation = jnp.asarray(restore, dtype=jnp.int32)
+        corrected_nonfinite = restore & ~restored_finite
+        restoration_budget_failure = restoration_needed & ~restoration_budget
+        restoration_numerical_failure = invalid_restoration_factor | corrected_nonfinite
         return _LineSearchResult(
             accepted=accepted,
-            coordinates=jnp.where(accepted, trial_coordinates, result.coordinates),
-            objective=jnp.where(accepted, trial_objective, result.objective),
-            constraints=jnp.where(accepted, trial_constraints, result.constraints),
+            coordinates=jnp.where(accepted, selected_coordinates, result.coordinates),
+            objective=jnp.where(accepted, selected_objective, result.objective),
+            constraints=jnp.where(accepted, selected_constraints, result.constraints),
             step_length=jnp.where(accepted, alpha, result.step_length),
-            evaluations=result.evaluations + 1,
+            evaluations=result.evaluations + 1 + corrected_evaluation,
             rejected_nonfinite=result.rejected_nonfinite
-            + jnp.asarray(~finite, dtype=jnp.int32),
-            evaluation_limit=result.evaluation_limit,
+            + jnp.asarray(~finite, dtype=jnp.int32)
+            + jnp.asarray(restoration_numerical_failure, dtype=jnp.int32),
+            evaluation_limit=result.evaluation_limit | restoration_budget_failure,
+            restoration_applied=result.restoration_applied | restored_accepted,
+            restoration_numerical_failure=result.restoration_numerical_failure
+            | restoration_numerical_failure,
         )
 
     def scan_step(
@@ -688,6 +815,20 @@ def _initial_history(maximum_iterations: int, dtype: jnp.dtype) -> DenseSQPHisto
         status=jnp.full(
             (maximum_iterations,), int(DenseSQPStatus.RUNNING), dtype=jnp.int32
         ),
+    )
+
+
+def _initial_convergence_telemetry(
+    maximum_iterations: int, dtype: jnp.dtype
+) -> DenseSQPConvergenceTelemetry:
+    return DenseSQPConvergenceTelemetry(
+        merit=jnp.full((maximum_iterations,), jnp.nan, dtype=dtype),
+        penalty=jnp.full((maximum_iterations,), jnp.nan, dtype=dtype),
+        multiplier_update_infinity_norm=jnp.full(
+            (maximum_iterations,), jnp.nan, dtype=dtype
+        ),
+        bfgs_reset=jnp.zeros((maximum_iterations,), dtype=jnp.int32),
+        restoration_applied=jnp.zeros((maximum_iterations,), dtype=jnp.int32),
     )
 
 
@@ -782,9 +923,13 @@ def _build_program(
             final_schur_cholesky_relative_pivot=jnp.asarray(jnp.nan, dtype=x0.dtype),
             selected_regularization=jnp.asarray(jnp.nan, dtype=x0.dtype),
             regularization_candidates_tested=jnp.asarray(0, dtype=jnp.int32),
+            restoration_numerical_failures=jnp.asarray(0, dtype=jnp.int32),
             all_accepted_states_finite=initial_all_finite,
             all_finite=initial_all_finite,
             history=_initial_history(options.maximum_iterations, x0.dtype),
+            convergence_telemetry=_initial_convergence_telemetry(
+                options.maximum_iterations, x0.dtype
+            ),
         )
 
         def continue_loop(current: _SolverState) -> jax.Array:
@@ -796,6 +941,9 @@ def _build_program(
 
         def iteration(current: _SolverState) -> _SolverState:
             dual_residual = current.stationarity
+            normal_factor, normal_factor_valid = _normal_restoration_factor(
+                current.constraint_jacobian
+            )
             primary_step = solve_dense_sqp_kkt(
                 current.bfgs_matrix,
                 current.constraint_jacobian,
@@ -822,6 +970,8 @@ def _build_program(
                     primary_step,
                     primary_penalty,
                     options,
+                    normal_factor,
+                    normal_factor_valid,
                 ),
                 lambda: _LineSearchResult(
                     accepted=jnp.asarray(False),
@@ -832,6 +982,8 @@ def _build_program(
                     evaluations=jnp.asarray(0, dtype=jnp.int32),
                     rejected_nonfinite=jnp.asarray(0, dtype=jnp.int32),
                     evaluation_limit=jnp.asarray(False),
+                    restoration_applied=jnp.asarray(False),
+                    restoration_numerical_failure=jnp.asarray(False),
                 ),
             )
             retry_needed = (
@@ -875,6 +1027,8 @@ def _build_program(
                     retry_step,
                     retry_penalty,
                     options,
+                    normal_factor,
+                    normal_factor_valid,
                 ),
                 lambda: _LineSearchResult(
                     accepted=jnp.asarray(False),
@@ -885,6 +1039,8 @@ def _build_program(
                     evaluations=jnp.asarray(0, dtype=jnp.int32),
                     rejected_nonfinite=jnp.asarray(0, dtype=jnp.int32),
                     evaluation_limit=jnp.asarray(False),
+                    restoration_applied=jnp.asarray(False),
+                    restoration_numerical_failure=jnp.asarray(False),
                 ),
             )
             use_retry = retry_needed
@@ -904,6 +1060,12 @@ def _build_program(
             )
             total_nonfinite = primary_search.rejected_nonfinite + jnp.where(
                 retry_search_executed, retry_search.rejected_nonfinite, 0
+            )
+            total_restoration_numerical_failures = jnp.asarray(
+                primary_search.restoration_numerical_failure, dtype=jnp.int32
+            ) + jnp.asarray(
+                retry_search_executed & retry_search.restoration_numerical_failure,
+                dtype=jnp.int32,
             )
             total_kkt_solves = jnp.asarray(1, dtype=jnp.int32) + jnp.asarray(
                 use_retry, dtype=jnp.int32
@@ -983,6 +1145,12 @@ def _build_program(
                     int(DenseSQPStatus.BFGS_UPDATE_FAILED),
                     endpoint_status,
                 ).astype(jnp.int32)
+                multiplier_update = (
+                    chosen_search.step_length * chosen_step.multiplier_step
+                )
+                next_merit = next_rows.objective + chosen_penalty * jnp.linalg.norm(
+                    next_rows.constraints, ord=1
+                )
                 history_index = current.iterations
                 history = DenseSQPHistory(
                     objective=current.history.objective.at[history_index].set(
@@ -1002,6 +1170,25 @@ def _build_program(
                     ].set(chosen_step.kkt_relative_residual),
                     status=current.history.status.at[history_index].set(
                         endpoint_status
+                    ),
+                )
+                convergence_telemetry = DenseSQPConvergenceTelemetry(
+                    merit=current.convergence_telemetry.merit.at[history_index].set(
+                        next_merit
+                    ),
+                    penalty=current.convergence_telemetry.penalty.at[history_index].set(
+                        chosen_penalty
+                    ),
+                    multiplier_update_infinity_norm=current.convergence_telemetry.multiplier_update_infinity_norm.at[
+                        history_index
+                    ].set(jnp.linalg.norm(multiplier_update, ord=jnp.inf)),
+                    bfgs_reset=current.convergence_telemetry.bfgs_reset.at[
+                        history_index
+                    ].set(jnp.asarray(bfgs.reset, dtype=jnp.int32)),
+                    restoration_applied=current.convergence_telemetry.restoration_applied.at[
+                        history_index
+                    ].set(
+                        jnp.asarray(chosen_search.restoration_applied, dtype=jnp.int32)
                     ),
                 )
                 return current._replace(
@@ -1039,13 +1226,17 @@ def _build_program(
                     selected_regularization=chosen_step.selected_regularization,
                     regularization_candidates_tested=current.regularization_candidates_tested
                     + total_regularization_candidates,
+                    restoration_numerical_failures=current.restoration_numerical_failures
+                    + total_restoration_numerical_failures,
                     all_accepted_states_finite=current.all_accepted_states_finite
                     & accepted_state_finite,
                     all_finite=current.all_finite
                     & accepted_state_finite
                     & chosen_step.all_finite
-                    & bfgs.all_finite,
+                    & bfgs.all_finite
+                    & (total_restoration_numerical_failures == 0),
                     history=history,
+                    convergence_telemetry=convergence_telemetry,
                 )
 
             def reject_step() -> _SolverState:
@@ -1078,7 +1269,11 @@ def _build_program(
                     selected_regularization=chosen_step.selected_regularization,
                     regularization_candidates_tested=current.regularization_candidates_tested
                     + total_regularization_candidates,
-                    all_finite=current.all_finite & chosen_step.all_finite,
+                    restoration_numerical_failures=current.restoration_numerical_failures
+                    + total_restoration_numerical_failures,
+                    all_finite=current.all_finite
+                    & chosen_step.all_finite
+                    & (total_restoration_numerical_failures == 0),
                 )
 
             return jax.lax.cond(accepted, accept_step, reject_step)
@@ -1157,9 +1352,11 @@ def _build_program(
             selected_regularization=state.selected_regularization,
             regularization_candidates_tested=state.regularization_candidates_tested,
             merit_penalty=state.merit_penalty,
+            restoration_numerical_failures=state.restoration_numerical_failures,
             all_accepted_states_finite=state.all_accepted_states_finite,
             all_finite=state.all_finite & final_telemetry_finite,
             history=state.history,
+            convergence_telemetry=state.convergence_telemetry,
         )
 
     return program
@@ -1204,6 +1401,7 @@ def prepare_dense_sqp(
 
 
 __all__ = (
+    "DenseSQPConvergenceTelemetry",
     "DenseSQPHistory",
     "DenseSQPKKTStep",
     "DenseSQPOptions",
