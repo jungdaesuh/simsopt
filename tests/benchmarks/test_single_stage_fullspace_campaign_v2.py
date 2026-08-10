@@ -16,6 +16,9 @@ from benchmarks.single_stage_fullspace_receipt import (
     SQP_KKT_SOLUTION_SCALED_RESIDUAL_MAXIMUM,
     SQP_MEMORY_SCHEMA_VERSION,
     SQP_PLAN_SHA256,
+    SQP_R1_BUDGET_SHA256,
+    SQP_R1_CONTRACT_SHA256,
+    SQP_R1_PLAN_SHA256,
     SQP_RESULT_SCHEMA_VERSION,
     SQP_SAMPLE_SCHEMA_VERSION,
     SQP_SCHUR_RELATIVE_RESIDUAL_MAXIMUM,
@@ -595,6 +598,96 @@ def test_sqp_raw_result_exact_schema_and_bindings_accept_canonical_payload() -> 
     validator._validate_sqp_raw_result(
         _raw_payload(sample), sample, sample.source_identity
     )
+
+
+def test_sqp_revision1_raw_result_remains_accepted() -> None:
+    sample = _sample(CompleteSample.COLD, promotion_eligible=True)
+    raw = _raw_payload(sample)
+    raw["plan_sha256"] = SQP_R1_PLAN_SHA256
+    raw["budget_sha256"] = SQP_R1_BUDGET_SHA256
+    raw["contract_sha256"] = SQP_R1_CONTRACT_SHA256
+
+    validator._validate_sqp_raw_result(raw, sample, sample.source_identity)
+
+
+def test_sqp_revision3_ten_step_requires_valid_convergence_telemetry() -> None:
+    complete = _sample(CompleteSample.COLD, promotion_eligible=False)
+    sample = replace(
+        complete,
+        request=RunRequest(
+            phase=RunPhase.CANARY,
+            route=FullSpaceRoute.CFS_SQP1,
+            device=DeviceLane.RTX5090,
+            steps=10,
+            sample=None,
+        ),
+    )
+    raw = _raw_payload(sample)
+    optimizer = raw["optimizer_result"]
+    assert isinstance(optimizer, dict)
+    telemetry: dict[str, JsonValue] = {
+        "merit": [1.0],
+        "penalty": [2.0],
+        "multiplier_update_infinity_norm": [0.5],
+        "bfgs_reset": [0],
+        "restoration_applied": [1],
+        "restoration_numerical_failures": 0,
+    }
+    optimizer["convergence_telemetry"] = telemetry
+    optimizer["restoration_numerical_failures"] = 0
+    validator._validate_sqp_raw_result(raw, sample, sample.source_identity)
+
+    telemetry["penalty"] = []
+    with pytest.raises(ValueError, match="penalty must match accepted history length"):
+        validator._validate_sqp_raw_result(raw, sample, sample.source_identity)
+
+
+def test_sqp_revision3_gate_path_rejects_missing_convergence_telemetry() -> None:
+    complete = _sample(CompleteSample.COLD, promotion_eligible=False)
+    request = RunRequest(
+        phase=RunPhase.CANARY,
+        route=FullSpaceRoute.CFS_SQP1,
+        device=DeviceLane.RTX5090,
+        steps=10,
+        sample=None,
+    )
+    sample = replace(complete, request=request)
+    raw = _raw_payload(sample)
+    optimizer = raw["optimizer_result"]
+    assert isinstance(optimizer, dict)
+    history = optimizer["history"]
+    assert isinstance(history, dict)
+    for key in (
+        "objective",
+        "feasibility_infinity_norm",
+        "stationarity_infinity_norm",
+        "step_length",
+        "kkt_relative_residual",
+        "status",
+    ):
+        values = history[key]
+        assert isinstance(values, list)
+        history[key] = values * 10
+    history["accepted_length"] = 10
+    optimizer["history_sha256"] = hashlib.sha256(
+        canonical_json_bytes(history)
+    ).hexdigest()
+    optimizer["iterations"] = 10
+    optimizer["convergence_telemetry"] = {
+        "merit": [1.0] * 10,
+        "penalty": [2.0] * 10,
+        "multiplier_update_infinity_norm": [0.5] * 10,
+        "bfgs_reset": [0] * 10,
+        "restoration_applied": [1] * 10,
+        "restoration_numerical_failures": 0,
+    }
+    optimizer["restoration_numerical_failures"] = 0
+    memory: dict[str, JsonValue] = {"peak_memory_fraction": 0.5}
+
+    receipt._canary_failure_reasons(request, raw, memory)
+    del optimizer["convergence_telemetry"]
+    with pytest.raises(TypeError, match="convergence_telemetry"):
+        receipt._canary_failure_reasons(request, raw, memory)
 
 
 @pytest.mark.parametrize(

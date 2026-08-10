@@ -281,6 +281,118 @@ def test_prepared_dense_sqp_converges_on_nonlinear_equality() -> None:
     assert abs(float(result.stationarity[0])) <= 1.0e-7
 
 
+def test_dense_sqp_restores_nonlinear_feasibility_and_records_telemetry() -> None:
+    def circle_joint(values: jax.Array) -> tuple[jax.Array, jax.Array]:
+        objective = 0.5 * (values[1] - 1.0) ** 2
+        constraints = jnp.asarray(
+            [values[0] ** 2 + values[1] ** 2 - 1.0], dtype=values.dtype
+        )
+        return objective, constraints
+
+    initial = jnp.asarray([1.0, 0.0], dtype=jnp.float64)
+    result = prepare_dense_sqp(
+        circle_joint,
+        initial,
+        options=DenseSQPOptions(maximum_iterations=3),
+    ).run(initial)
+
+    iterations = int(result.iterations)
+    assert iterations == 3
+    telemetry = result.convergence_telemetry
+    assert bool(jnp.all(telemetry.restoration_applied[:iterations] == 1))
+    assert bool(
+        jnp.all(result.history.feasibility_infinity_norm[:iterations] <= 1.0e-10)
+    )
+    assert bool(jnp.all(jnp.isfinite(telemetry.merit[:iterations])))
+    assert bool(jnp.all(jnp.isfinite(telemetry.penalty[:iterations])))
+    assert bool(jnp.all(telemetry.penalty[:iterations] > 0.0))
+    assert bool(
+        jnp.all(jnp.isfinite(telemetry.multiplier_update_infinity_norm[:iterations]))
+    )
+    assert bool(jnp.all(telemetry.bfgs_reset[:iterations] >= 0))
+    assert int(result.line_search_evaluations) == 54
+    assert int(result.joint_evaluations) == (
+        int(result.derivative_builds) + int(result.line_search_evaluations)
+    )
+
+
+def test_dense_sqp_fails_closed_when_normal_restoration_factor_is_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def invalid_normal_factor(
+        constraint_jacobian: jax.Array,
+    ) -> tuple[jax.Array, jax.Array]:
+        size = constraint_jacobian.shape[0]
+        return (
+            jnp.full((size, size), jnp.nan, dtype=constraint_jacobian.dtype),
+            jnp.asarray(False),
+        )
+
+    monkeypatch.setattr(
+        dense_sqp_module,
+        "_normal_restoration_factor",
+        invalid_normal_factor,
+    )
+
+    def circle_joint(values: jax.Array) -> tuple[jax.Array, jax.Array]:
+        objective = 0.5 * (values[1] - 1.0) ** 2
+        constraints = jnp.asarray(
+            [values[0] ** 2 + values[1] ** 2 - 1.0], dtype=values.dtype
+        )
+        return objective, constraints
+
+    initial = jnp.asarray([1.0, 0.0], dtype=jnp.float64)
+    result = prepare_dense_sqp(circle_joint, initial).run(initial)
+
+    assert int(result.status) == int(DenseSQPStatus.GLOBALIZATION_FAILED)
+    assert int(result.iterations) == 0
+    assert bool(result.fatal)
+    assert int(result.restoration_numerical_failures) > 0
+    assert int(result.rejected_nonfinite_trials) > 0
+    assert not bool(result.all_finite)
+    np.testing.assert_array_equal(result.optimizer_coordinates, initial)
+
+
+def test_dense_sqp_rejects_nonfinite_restoration_before_masked_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def overflowing_normal_factor(
+        constraint_jacobian: jax.Array,
+    ) -> tuple[jax.Array, jax.Array]:
+        size = constraint_jacobian.shape[0]
+        return (
+            jnp.eye(size, dtype=constraint_jacobian.dtype)
+            * jnp.asarray(1.0e-300, dtype=constraint_jacobian.dtype),
+            jnp.asarray(True),
+        )
+
+    monkeypatch.setattr(
+        dense_sqp_module,
+        "_normal_restoration_factor",
+        overflowing_normal_factor,
+    )
+
+    def masked_circle_joint(values: jax.Array) -> tuple[jax.Array, jax.Array]:
+        finite = jnp.all(jnp.isfinite(values))
+        safe_values = jnp.where(finite, values, jnp.zeros_like(values))
+        objective = 0.5 * (safe_values[1] - 1.0) ** 2
+        constraints = jnp.asarray(
+            [safe_values[0] ** 2 + safe_values[1] ** 2 - 1.0],
+            dtype=values.dtype,
+        )
+        return objective, constraints
+
+    initial = jnp.asarray([1.0, 0.0], dtype=jnp.float64)
+    result = prepare_dense_sqp(masked_circle_joint, initial).run(initial)
+
+    assert int(result.status) == int(DenseSQPStatus.GLOBALIZATION_FAILED)
+    assert int(result.iterations) == 0
+    assert int(result.restoration_numerical_failures) > 0
+    assert int(result.rejected_nonfinite_trials) > 0
+    assert not bool(result.all_finite)
+    np.testing.assert_array_equal(result.optimizer_coordinates, initial)
+
+
 def test_prepared_dense_sqp_distinguishes_objective_and_budget_terminations() -> None:
     def quality_joint(values: jax.Array) -> tuple[jax.Array, jax.Array]:
         return jnp.asarray(2.0, dtype=values.dtype), values[:1]

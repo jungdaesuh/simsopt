@@ -8,6 +8,7 @@ import jax.numpy as jnp
 import pytest
 import simsopt_jax.solve.fullspace_certificate as certificate_module
 from simsopt_jax.geo.optimizers.dense_sqp import (
+    DenseSQPConvergenceTelemetry,
     DenseSQPHistory,
     DenseSQPResult,
     DenseSQPStatus,
@@ -256,6 +257,13 @@ def _sqp_result(
             jnp.asarray(int(DenseSQPStatus.RUNNING), dtype=jnp.int32),
         ),
     )
+    convergence_telemetry = DenseSQPConvergenceTelemetry(
+        merit=jnp.where(accepted, zero, jnp.nan),
+        penalty=jnp.where(accepted, jnp.asarray(1.0), jnp.nan),
+        multiplier_update_infinity_norm=jnp.where(accepted, zero, jnp.nan),
+        bfgs_reset=jnp.zeros(history_size, dtype=jnp.int32),
+        restoration_applied=jnp.zeros(history_size, dtype=jnp.int32),
+    )
     converged = status is DenseSQPStatus.CONVERGED
     solve_count = iterations if kkt_solves is None else kkt_solves
     unavailable = jnp.asarray(jnp.nan, dtype=jnp.float64)
@@ -297,9 +305,11 @@ def _sqp_result(
         selected_regularization=final_regularization,
         regularization_candidates_tested=jnp.asarray(solve_count, dtype=jnp.int32),
         merit_penalty=jnp.asarray(1.0, dtype=jnp.float64),
+        restoration_numerical_failures=jnp.asarray(0, dtype=jnp.int32),
         all_accepted_states_finite=jnp.asarray(True),
         all_finite=jnp.asarray(True),
         history=history,
+        convergence_telemetry=convergence_telemetry,
     )
     diagnostics = CfsSqp1EndpointDiagnostics(
         physical_state=endpoint,

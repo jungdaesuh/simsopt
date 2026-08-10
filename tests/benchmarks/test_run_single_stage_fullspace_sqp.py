@@ -22,6 +22,7 @@ from benchmarks.single_stage_fullspace_process_gpu_monitor import (
 from benchmarks.single_stage_fullspace_receipt import (
     SCHEMA_VERSION_V2,
     SQP_MEMORY_SCHEMA_VERSION,
+    SQP_R2_PLAN_SHA256,
     CompleteSample,
     DeviceLane,
     RunPhase,
@@ -442,6 +443,9 @@ def _persist_passed_gate(
 ) -> None:
     run_root = campaign / runner._sqp_run_relative_directory(request)
     raw: dict[str, object] = {
+        "contract_sha256": runner.contract_sha256_v2(),
+        "plan_sha256": runner.SQP_PLAN_SHA256,
+        "budget_sha256": runner.SQP_BUDGET_SHA256,
         "request": {
             "phase": request.phase.value,
             "route": request.route.value,
@@ -494,6 +498,18 @@ def _persist_passed_gate(
                 },
             }
         )
+        if request.steps == 10:
+            raw_optimizer = raw["optimizer_result"]
+            assert isinstance(raw_optimizer, dict)
+            raw_optimizer["convergence_telemetry"] = {
+                "merit": [1.0] * 10,
+                "penalty": [2.0] * 10,
+                "multiplier_update_infinity_norm": [0.5] * 10,
+                "bfgs_reset": [0] * 10,
+                "restoration_applied": [1] * 10,
+                "restoration_numerical_failures": 0,
+            }
+            raw_optimizer["restoration_numerical_failures"] = 0
     raw["schema_version"] = raw_schema
     memory: dict[str, object] = {
         "schema_version": SQP_MEMORY_SCHEMA_VERSION,
@@ -526,7 +542,7 @@ def _persist_passed_gate(
     )
 
 
-def test_sqp_prerequisite_chain_requires_persisted_semantic_passes(
+def test_sqp_revision3_authorizes_only_standalone_ten_step_gate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -572,23 +588,60 @@ def test_sqp_prerequisite_chain_requires_persisted_semantic_passes(
 
     monkeypatch.setattr(runner, "load_sqp_gate_result", validate_gate)
 
-    with pytest.raises(runner.PhaseGateError, match="missing SQP prerequisite"):
+    with pytest.raises(runner.PhaseGateError, match="prohibits"):
+        runner._enforce_sqp_prerequisite_chain(derivative, campaign)
+    with pytest.raises(runner.PhaseGateError, match="prohibits"):
         runner._enforce_sqp_prerequisite_chain(canary_1, campaign)
-    _persist_passed_gate(campaign, derivative)
-    runner._enforce_sqp_prerequisite_chain(canary_1, campaign)
-    with pytest.raises(runner.PhaseGateError, match="missing SQP prerequisite"):
-        runner._enforce_sqp_prerequisite_chain(canary_10, campaign)
-    _persist_passed_gate(campaign, canary_1)
     runner._enforce_sqp_prerequisite_chain(canary_10, campaign)
     with pytest.raises(runner.PhaseGateError, match="missing SQP prerequisite"):
         runner._enforce_sqp_prerequisite_chain(cold, campaign)
     _persist_passed_gate(campaign, canary_10)
     runner._enforce_sqp_prerequisite_chain(cold, campaign)
-    assert validated_gates[-3:] == [
-        runner.SqpGate.DERIVATIVE,
-        runner.SqpGate.CANARY_1,
-        runner.SqpGate.CANARY_10,
-    ]
+    assert validated_gates == [runner.SqpGate.CANARY_10]
+
+
+def test_sqp_gate_reader_binds_raw_revision_identity(tmp_path: Path) -> None:
+    campaign = tmp_path / "campaign"
+    campaign.mkdir()
+    request = RunRequest(
+        RunPhase.CANARY,
+        FullSpaceRoute.CFS_SQP1,
+        DeviceLane.RTX5090,
+        10,
+        None,
+    )
+    _persist_passed_gate(campaign, request)
+    run_root = campaign / runner._sqp_run_relative_directory(request)
+    raw_path = run_root / "raw-result.json"
+    gate_path = run_root / "gate-receipt.json"
+
+    raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    raw["plan_sha256"] = SQP_R2_PLAN_SHA256
+    raw_bytes = canonical_json_bytes(raw)
+    raw_path.chmod(0o644)
+    raw_path.write_bytes(raw_bytes)
+    raw_path.chmod(0o444)
+
+    gate_receipt = json.loads(gate_path.read_text(encoding="utf-8"))
+    gate_receipt["raw_result"]["sha256"] = hashlib.sha256(raw_bytes).hexdigest()
+    gate_receipt["raw_result"]["size_bytes"] = len(raw_bytes)
+    gate_bytes = canonical_json_bytes(gate_receipt)
+    gate_path.chmod(0o644)
+    gate_path.write_bytes(gate_bytes)
+    gate_path.chmod(0o444)
+    artifact = runner.ArtifactRef(
+        relative_path=gate_path.relative_to(campaign).as_posix(),
+        sha256=hashlib.sha256(gate_bytes).hexdigest(),
+        size_bytes=len(gate_bytes),
+        schema_version=runner.CFS_SQP1_CANARY_10_GATE_SCHEMA_VERSION,
+    )
+
+    with pytest.raises(ValueError, match="raw plan_sha256 identity differ"):
+        runner.load_sqp_gate_result(
+            campaign,
+            runner.SqpGate.CANARY_10,
+            artifact,
+        )
 
 
 def test_complete_sqp_refuses_before_child_without_endpoint_authority(
