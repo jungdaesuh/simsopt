@@ -1,8 +1,8 @@
 # GPU-Native SQP/Primal-Dual Single-Stage Results
 
 **Status:** `CLOSED_BOUNDED_NEGATIVE / NON_PROMOTING`
-**Route:** `CFS-SQP1`, SSOT Revision 2
-**SSOT:** `docs/single_stage_jax_gpu_sqp_primal_dual_implementation_plan.md`
+**Route:** `CFS-SQP1`, SSOT Revision 3 convergence closure
+**SSOT:** `docs/single_stage_jax_gpu_sqp_primal_dual_implementation_plan_r3.md`
 **Formal comparative verdict:** `NOT_PRODUCED`
 
 ## Current disposition
@@ -18,6 +18,62 @@ endpoint measures. Per the SSOT chain, no cold endpoint or warm samples ran.
 This is a bounded-negative optimization result, not evidence that the GPU
 formulation or all SQP routes are impossible. The projected 100-iteration time
 is diagnostic only and is not a speed verdict without endpoint certification.
+
+## Revision 3 convergence closure
+
+Revision 3 added device-resident minimum-norm normal restoration to the
+nonlinear line search and fixed-shape per-iteration telemetry. The focused
+regression suites passed (`62` dense-SQP/certificate tests, `22` runner tests,
+and `71` receipt/validator tests). One bootstrap ten-step RTX gate was
+then run with no untimed warm solve, cold endpoint, A100 run, or speed campaign.
+
+The revised trajectory maintained scaled feasibility below `1e-10` and reduced
+the objective, but raw KKT stationarity increased from the bootstrap value
+`0.005108879270420846` to `0.030689422261180984`. The ten-step gate therefore
+fails `RAW_KKT_NOT_DECREASED`. This is the second convergence failure of this
+SQP route. Per the Revision 3 SSOT, no further CFS-SQP1 tuning or timing is
+authorized. The prior coupled AL routes are also closed, so continuation
+requires a new SSOT for the filter/trust-region fullspace route.
+
+| Iteration | Step | Merit | Feasibility inf | KKT residual | Multiplier update inf | BFGS reset | Restoration |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 1 | 8.3998071402e-05 | 1.2439553395e-11 | 1.4760362824e-17 | 5.7914759758e-04 | 0 | 1 |
+| 2 | 3.90625e-03 | 8.3236389821e-05 | 5.6224383316e-11 | 3.2853795109e-18 | 2.4070268600e-05 | 0 | 1 |
+| 3 | 1.25e-01 | 8.2684773507e-05 | 2.4994689297e-11 | 2.1869172662e-17 | 1.2505341561e-04 | 0 | 1 |
+| 4 | 3.125e-02 | 8.1935079840e-05 | 7.4139323610e-11 | 5.1013207720e-18 | 7.1936487656e-05 | 0 | 1 |
+| 5 | 1.5625e-02 | 8.1405028176e-05 | 2.8012875132e-11 | 3.4012399641e-18 | 3.1323627032e-05 | 0 | 1 |
+| 6 | 1.5625e-02 | 8.0729722604e-05 | 6.1888915359e-11 | 3.1823499314e-18 | 2.7112259979e-05 | 0 | 1 |
+| 7 | 7.8125e-03 | 8.0325980229e-05 | 1.3515016858e-11 | 1.9057808937e-18 | 1.1491570256e-05 | 0 | 1 |
+| 8 | 7.8125e-03 | 7.9869401990e-05 | 2.0248004408e-11 | 2.1800693090e-18 | 9.6467310030e-06 | 0 | 1 |
+| 9 | 7.8125e-03 | 7.9370882624e-05 | 2.6982998212e-11 | 1.6164650465e-18 | 7.9515823989e-06 | 0 | 1 |
+| 10 | 7.8125e-03 | 7.8841807477e-05 | 3.3021264675e-11 | 1.4630216500e-18 | 6.4345818281e-06 | 0 | 1 |
+
+The synchronized ten-step solve took `14.598303656 s`; this number is retained
+as diagnostic evidence only and is not a GPU-speed claim.
+
+### Revision 3 identity
+
+| Field | Value |
+| --- | --- |
+| Plan SHA-256 | `e8ba9fe0513163038fd587427cc5199a00be954d9d9c3f9f51a79641136c9f4e` |
+| Parent Revision 2 plan SHA-256 | `3024b82b272dd72349c8c814b7b547dc6335357c1155b95cf60c1c5d252d0b78` |
+| Budget SHA-256 | `d51c87c55793ebed63acf01e87ef3837f5abdccb95e8c61827758a8961482082` |
+| Source HEAD | `aeda1a02eb9706dd9aad5b9f97b7f3a72193c6ca` |
+| Source manifest SHA-256 | `88ef17d13d14bdd48e403692b52fceccaaf1c37857b204f3ca15b2c87b4cc169` |
+| Tracked diff SHA-256 | `997c766e43854b6aa5d2c600e95af2f9958d0827e90d1663d1c69d05a282f51c` |
+| Untracked bytes manifest SHA-256 | `a90b88949a97c19448c7caa3cf7a7779cb402142c769f99e71d33c5ec6c5e3fc` |
+| Device | RTX 5090, `GPU-7951f78e-c05d-e01c-303f-d644f4341fe1` |
+| Gate disposition | `FAIL / RAW_KKT_NOT_DECREASED` |
+
+Authoritative Revision 3 root:
+`/home/jungdaesuh/campaigns/cfs-sqp1-r3-dirty-snapshot-20260809`
+
+| Artifact | SHA-256 |
+| --- | --- |
+| gate receipt | `90d7e416ced18978b56061ee1f7e56cc1fb7a9bf4cdbe1e0ea620342fa49557d` |
+| raw result | `e6cdd063044b6df6fbd393e1aa106721a41c0a0da5167d803f00e427413d476d` |
+| GPU memory | `3ba0a3abfac19ab9d68f7fcbfac69e0c038b6c49d4d37cc3ed0d5289441ed20e` |
+| runtime evidence | `0c062dc6f4ceeb2650fc7ac35d43e495292579f6708e76c962e0e2c31656ec20` |
 
 ## Revision 2 identity
 
@@ -42,6 +98,7 @@ is diagnostic only and is not a speed verdict without endpoint certification.
 | RTX derivative gate | `PASS` | `rho_K=6.397585277035713e-06`, `zeta_2=8.729023804486768e-16`, bound `1.3644247677339793e-10`; rank 255; zero hot H2D/D2H |
 | RTX one-step canary | `PASS` | 2.487900536 s synchronized solve; zero hot transfers |
 | RTX ten-step canary | `FAIL` | `FEASIBILITY_NOT_MAINTAINED_OR_DECREASED`, `RAW_KKT_NOT_DECREASED` |
+| RTX Revision 3 ten-step canary | `FAIL` | `RAW_KKT_NOT_DECREASED`; feasibility maintained below `1e-10`; zero hot transfers |
 | Complete cold endpoint | `NOT_RUN` | Prohibited after ten-step failure |
 | Conditional warm samples | `NOT_RUN` | No certified cold endpoint |
 
