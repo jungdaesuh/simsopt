@@ -1,6 +1,6 @@
 # Coupled Fullspace Filter/Trust-Region GPU Implementation Plan
 
-**Status:** `AUTHORIZED / NOT_IMPLEMENTED`
+**Status:** `ACTIVE_IMPLEMENTATION / GATE_1_PENDING`
 **Route:** `CFS-FTR1`
 **Role:** sole SSOT for the next single-stage convergence route
 
@@ -76,6 +76,9 @@ At accepted state `(u_k, lambda_k, B_k)` form the exact objective gradient
    `pred_f = -(g_k^T s_k + 0.5 s_k^T B_k s_k)` and
    `pred_theta = ||c_k||_2 - ||c_k + A_k s_k||_2`. Nonfinite or nonpositive
    applicable prediction rejects the candidate.
+   Evaluate exactly one trial at the current radius per optimizer iteration;
+   a rejection updates the radius for the next iteration without a same-
+   iteration radius ladder or replay.
 5. Use a fixed-capacity filter of `(theta, objective, active)` arrays with at
    most one insertion per accepted iteration. A trial is filter-acceptable
    against every active entry when either
@@ -117,8 +120,10 @@ native/JAX routes.
 For every accepted iteration retain fixed-shape arrays for objective,
 feasibility, raw/scaled stationarity, normal/tangential/combined step norms,
 radius, selected radius index, predicted reduction, actual reduction, ratio,
-filter decision, multiplier-projection residual, KKT/Schur residuals, BFGS
-reset, and evaluation counts. Retain causal failure counters for factor,
+filter decision, normal and multiplier-projection residuals and forward-error
+bounds, tangency residual, BFGS reset, and evaluation counts. The independent
+endpoint certificate—not the optimizer hot loop—owns retained KKT/Schur
+residuals. Retain causal failure counters for factor,
 nonfinite, projection, model, filter, radius, and budget rejection.
 
 ## Gates

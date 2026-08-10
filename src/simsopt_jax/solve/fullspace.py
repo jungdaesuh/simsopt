@@ -32,6 +32,7 @@ from simsopt_jax.objectives.single_stage_fullspace import (
 
 SCHEMA_VERSION = "single-stage-fullspace-routes-v1"
 ROUTE_SCHEMA_VERSION_V2: Final = "single-stage-fullspace-routes-v2"
+ROUTE_SCHEMA_VERSION_V3: Final = "single-stage-fullspace-routes-v3"
 LEGACY_V1_ROUTE_CONTRACT_SIZE_BYTES: Final = 5599
 LEGACY_V1_ROUTE_CONTRACT_SHA256: Final = (
     "1cac4bd571dac722ae188693b26ab6cc86d2c5ca64f274f2a5b962a625a7b01b"
@@ -48,6 +49,7 @@ class FullSpaceRoute(StrEnum):
     CFS_AL2 = "CFS-AL2"
     CFS_AL1_B = "CFS-AL1-B"
     CFS_SQP1 = "CFS-SQP1"
+    CFS_FTR1 = "CFS-FTR1"
 
 
 LEGACY_V1_ROUTES: Final = (
@@ -151,6 +153,47 @@ class CfsSqp1Policy:
     scaled_feasibility_tolerance: float
     raw_kkt_stationarity_tolerance: float
     derivative_one_step_process_timeout_s: float
+    ten_step_process_timeout_s: float
+    complete_process_timeout_s: float
+    maximum_device_memory_fraction: float
+    maximum_hot_h2d_transfers: int
+    maximum_hot_d2h_transfers: int
+    warm_synchronized_solve_max_s: float
+    selection_rule: str
+
+
+@dataclass(frozen=True, slots=True)
+class CfsFtr1Policy:
+    """Frozen controls for the filter/trust-region fullspace route."""
+
+    route: FullSpaceRoute
+    promotion_status: PromotionStatus
+    maximum_iterations: int
+    maximum_joint_evaluations: int
+    reverse_row_batch_width: int
+    initial_bfgs_identity_scale: float
+    powell_curvature_fraction: float
+    maximum_consecutive_bfgs_resets: int
+    initial_trust_radius: float
+    minimum_trust_radius: float
+    maximum_trust_radius: float
+    normal_radius_fraction: float
+    maximum_tangential_cg_iterations: int
+    filter_gamma_feasibility: float
+    filter_gamma_objective: float
+    objective_step_threshold: float
+    acceptance_ratio: float
+    radius_shrink_ratio: float
+    expansion_ratio: float
+    radius_contraction: float
+    radius_expansion: float
+    boundary_fraction: float
+    linear_solve_relative_residual_tolerance: float
+    linear_solve_forward_error_tolerance: float
+    tangency_relative_residual_tolerance: float
+    objective_maximum: float
+    scaled_feasibility_tolerance: float
+    raw_kkt_stationarity_tolerance: float
     ten_step_process_timeout_s: float
     complete_process_timeout_s: float
     maximum_device_memory_fraction: float
@@ -482,6 +525,46 @@ CFS_SQP1_POLICY = CfsSqp1Policy(
     ),
 )
 
+CFS_FTR1_POLICY = CfsFtr1Policy(
+    route=FullSpaceRoute.CFS_FTR1,
+    promotion_status=PromotionStatus.PROMOTING,
+    maximum_iterations=100,
+    maximum_joint_evaluations=1200,
+    reverse_row_batch_width=8,
+    initial_bfgs_identity_scale=1.0,
+    powell_curvature_fraction=0.2,
+    maximum_consecutive_bfgs_resets=2,
+    initial_trust_radius=1.0,
+    minimum_trust_radius=2.0**-20,
+    maximum_trust_radius=8.0,
+    normal_radius_fraction=0.8,
+    maximum_tangential_cg_iterations=64,
+    filter_gamma_feasibility=1.0e-4,
+    filter_gamma_objective=1.0e-4,
+    objective_step_threshold=1.0e-4,
+    acceptance_ratio=0.1,
+    radius_shrink_ratio=0.25,
+    expansion_ratio=0.75,
+    radius_contraction=0.25,
+    radius_expansion=2.0,
+    boundary_fraction=0.8,
+    linear_solve_relative_residual_tolerance=1.0e-10,
+    linear_solve_forward_error_tolerance=1.0e-7,
+    tangency_relative_residual_tolerance=1.0e-10,
+    objective_maximum=4.4822247e-8,
+    scaled_feasibility_tolerance=1.0e-10,
+    raw_kkt_stationarity_tolerance=1.0e-7,
+    ten_step_process_timeout_s=600.0,
+    complete_process_timeout_s=900.0,
+    maximum_device_memory_fraction=0.8,
+    maximum_hot_h2d_transfers=0,
+    maximum_hot_d2h_transfers=0,
+    warm_synchronized_solve_max_s=287.30421751597896,
+    selection_rule=(
+        "filter/trust-region successor after bounded-negative AL and SQP routes"
+    ),
+)
+
 
 def route_policy(route: FullSpaceRoute) -> RoutePolicy:
     """Return the one frozen policy for ``route``."""
@@ -491,6 +574,8 @@ def route_policy(route: FullSpaceRoute) -> RoutePolicy:
             return policy
     if route is FullSpaceRoute.CFS_SQP1:
         raise ValueError("CFS-SQP1 uses sqp_route_policy(), not the legacy AL policy")
+    if route is FullSpaceRoute.CFS_FTR1:
+        raise ValueError("CFS-FTR1 uses ftr_route_policy(), not the legacy AL policy")
     raise ValueError(f"unsupported full-space route: {route!r}")
 
 
@@ -500,6 +585,14 @@ def sqp_route_policy(route: FullSpaceRoute) -> CfsSqp1Policy:
     if route is not FullSpaceRoute.CFS_SQP1:
         raise ValueError(f"route is not an SQP route: {route.value}")
     return CFS_SQP1_POLICY
+
+
+def ftr_route_policy(route: FullSpaceRoute) -> CfsFtr1Policy:
+    """Return the frozen FTR policy, rejecting other route identities."""
+
+    if route is not FullSpaceRoute.CFS_FTR1:
+        raise ValueError(f"route is not an FTR route: {route.value}")
+    return CFS_FTR1_POLICY
 
 
 def fullspace_scaling_from_bootstrap(
@@ -1321,4 +1414,14 @@ def frozen_route_contract_payload_v2() -> dict[str, object]:
         "legacy_v1": frozen_route_contract_payload_v1(),
         "schema_version": ROUTE_SCHEMA_VERSION_V2,
         "sqp_routes": [asdict(CFS_SQP1_POLICY)],
+    }
+
+
+def frozen_route_contract_payload_v3() -> dict[str, object]:
+    """Return the additive route-v3 contract without mutating v1/v2 bytes."""
+
+    return {
+        "legacy_v2": frozen_route_contract_payload_v2(),
+        "schema_version": ROUTE_SCHEMA_VERSION_V3,
+        "ftr_routes": [asdict(CFS_FTR1_POLICY)],
     }
