@@ -16,6 +16,8 @@ from simsopt_jax.solve.fullspace import (
     ROUTE_SCHEMA_VERSION_V3,
     ROUTE_V2_CONTRACT_SHA256,
     ROUTE_V2_CONTRACT_SIZE_BYTES,
+    ROUTE_V3_CONTRACT_SHA256,
+    ROUTE_V3_CONTRACT_SIZE_BYTES,
     FullSpaceRoute,
     GlobalizationPolicy,
     PromotionStatus,
@@ -276,4 +278,11 @@ def test_route_v3_payload_adds_ftr_without_changing_v2_bytes() -> None:
     assert (
         hashlib.sha256(_canonical_json_bytes(payload["legacy_v2"])).hexdigest()
         == ROUTE_V2_CONTRACT_SHA256
+    )
+    encoded = _canonical_json_bytes(payload)
+    assert len(encoded) == ROUTE_V3_CONTRACT_SIZE_BYTES == 8179
+    assert (
+        hashlib.sha256(encoded).hexdigest()
+        == ROUTE_V3_CONTRACT_SHA256
+        == "c33782b484822441ddbfe60939fd7bfc7794e5c0a77a8e39b82f37c470fedbe6"
     )
