@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -89,3 +90,10 @@ def test_ftr_probe_rejects_non_gpu_runtime_before_building_physics(
 
     with pytest.raises(ValueError, match="exactly one JAX GPU"):
         runner.run_cfs_ftr1_probe(object())
+
+
+def test_ftr_history_serialization_maps_nonfinite_slots_to_json_null() -> None:
+    payload = runner.json_safe_array_payload([1.0, math.nan, math.inf, -math.inf])
+
+    assert payload == [1.0, None, None, None]
+    assert json.dumps(payload, allow_nan=False)
