@@ -19,6 +19,10 @@ from simsopt_jax.solve.fullspace_certificate import (
 )
 
 from benchmarks.single_stage_fullspace_bootstrap import validate_bootstrap_artifact
+from benchmarks.single_stage_fullspace_ftr_receipt import (
+    gate_artifact_from_path,
+    load_ftr_gate_result,
+)
 from benchmarks.single_stage_fullspace_receipt import (
     SCHEMA_VERSION,
     SQP_BUDGET_SHA256,
@@ -1167,13 +1171,22 @@ def validate_campaign(campaign_root: Path) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(allow_abbrev=False)
-    parser.add_argument("--campaign", required=True, type=Path)
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--campaign", type=Path)
+    input_group.add_argument("--ftr-gate", type=Path)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    validate_campaign(args.campaign)
+    if args.ftr_gate is not None:
+        gate_path = args.ftr_gate.resolve(strict=True)
+        campaign_root = gate_path.parents[2]
+        artifact = gate_artifact_from_path(campaign_root, gate_path)
+        load_ftr_gate_result(campaign_root, artifact)
+    else:
+        assert args.campaign is not None
+        validate_campaign(args.campaign)
     return 0
 
 

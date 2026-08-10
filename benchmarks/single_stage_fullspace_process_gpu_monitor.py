@@ -94,8 +94,9 @@ def bound_gpu_memory_payload(
     parent_pid: int,
     physical_device_memory_bytes: int,
     runtime_argv: Sequence[str],
+    schema_version: str = SQP_MEMORY_SCHEMA_VERSION,
 ) -> dict[str, JsonValue]:
-    """Serialize the validator's exact PID/device-bound SQP memory schema."""
+    """Serialize one exact PID/device-bound GPU-memory observation."""
 
     if not isinstance(measurement, ProcessGpuMemoryResult):
         raise TypeError("CFS-SQP1 requires an observed process GPU-memory sample")
@@ -110,7 +111,7 @@ def bound_gpu_memory_payload(
         raise ValueError("physical GPU memory must be a positive integer")
     peak_memory_bytes = measurement.peak_used_memory_mib * 1024 * 1024
     return {
-        "schema_version": SQP_MEMORY_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "monitor_scope": "whole-child-exact-pid-exact-device",
         "parent_pid": parent_pid,
         "child_pid": monitor.identity.pid,

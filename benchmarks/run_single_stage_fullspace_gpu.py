@@ -53,6 +53,9 @@ from simsopt_jax.geo.optimizers.dense_sqp import (
     DenseSQPStatus,
     solve_dense_sqp_kkt,
 )
+from simsopt_jax.geo.optimizers.filter_trust_region_sqp import (
+    FilterTrustRegionSQPStatus,
+)
 from simsopt_jax.objectives.single_stage_fullspace import (
     FullSpaceProblem,
     fullspace_constraint_jvp,
@@ -72,6 +75,7 @@ from simsopt_jax.solve.fullspace import (
     route_policy,
     sqp_route_policy,
 )
+from simsopt_jax.solve.fullspace_filter_trust_region import prepare_cfs_ftr1
 from simsopt_jax.solve.fullspace_sqp import (
     CfsSqp1JointLinearization,
     cfs_sqp1_endpoint_diagnostics,
@@ -89,6 +93,16 @@ from benchmarks.single_stage_fullspace_bootstrap import (
 from benchmarks.single_stage_fullspace_bootstrap import (
     publish_bootstrap_artifact,
     validate_bootstrap_artifact,
+)
+from benchmarks.single_stage_fullspace_ftr_receipt import (
+    FTR_BUDGET_SHA256,
+    FTR_GATE_RECEIPT_SCHEMA_VERSION,
+    FTR_MEMORY_SCHEMA_VERSION,
+    FTR_PLAN_SHA256,
+    FTR_PRIMARY_DEVICE_UUID,
+    FTR_RESULT_SCHEMA_VERSION,
+    ftr_gate_receipt_payload,
+    load_ftr_gate_result,
 )
 from benchmarks.single_stage_fullspace_process_gpu_monitor import (
     BoundProcessGpuMemoryMonitor,
@@ -112,9 +126,11 @@ from benchmarks.single_stage_fullspace_receipt import (
     canonical_json_bytes,
     contract_sha256,
     contract_sha256_v2,
+    contract_sha256_v3,
     load_sqp_gate_result,
     run_request_payload,
     run_request_payload_v2,
+    run_request_payload_v3,
 )
 from benchmarks.single_stage_fullspace_snapshot import (
     RUNTIME_EVIDENCE_FILENAME,
@@ -158,6 +174,7 @@ CFS_SQP1_CANARY_1_GATE_SCHEMA_VERSION: Final = (
 CFS_SQP1_CANARY_10_GATE_SCHEMA_VERSION: Final = (
     "single-stage-fullspace-cfs-sqp1-canary-10-gate-v1"
 )
+CFS_FTR1_CANARY_10_GATE_SCHEMA_VERSION: Final = FTR_GATE_RECEIPT_SCHEMA_VERSION
 BOOTSTRAP_RELATIVE_PATH: Final = "artifacts/fullspace-bootstrap.json"
 _SNAPSHOT_MANIFEST_ENV: Final = "SIMSOPT_FULLSPACE_SNAPSHOT_MANIFEST_SHA256"
 _CAMPAIGN_ROOT_ENV: Final = "SIMSOPT_FULLSPACE_CAMPAIGN_ROOT"
@@ -168,6 +185,8 @@ _CONFIGURATION_FILES: Final = (
     "docs/single_stage_jax_gpu_sqp_primal_dual_implementation_plan.md",
     "docs/single_stage_jax_gpu_sqp_primal_dual_implementation_plan_r3.md",
     "docs/single_stage_jax_gpu_sqp_primal_dual_phase0_budget.json",
+    "docs/single_stage_jax_gpu_coupled_fullspace_filter_trust_region_implementation_plan.md",
+    "docs/single_stage_jax_gpu_coupled_fullspace_filter_trust_region_phase0_budget.json",
 )
 _BENCHMARK_FILES: Final = (
     "benchmarks/process_gpu_monitor.py",
@@ -175,6 +194,7 @@ _BENCHMARK_FILES: Final = (
     "benchmarks/run_single_stage_fullspace_gpu.py",
     "benchmarks/single_stage_fullspace_bootstrap.py",
     "benchmarks/single_stage_fullspace_endpoint_audit.py",
+    "benchmarks/single_stage_fullspace_ftr_receipt.py",
     "benchmarks/single_stage_fullspace_process_gpu_monitor.py",
     "benchmarks/single_stage_fullspace_receipt.py",
     "benchmarks/single_stage_fullspace_snapshot.py",
@@ -189,6 +209,8 @@ _TEST_FILES: Final = (
     "tests/benchmarks/test_single_stage_fullspace_bootstrap_artifact.py",
     "tests/benchmarks/test_single_stage_fullspace_snapshot.py",
     "tests/benchmarks/test_run_single_stage_fullspace_sqp.py",
+    "tests/benchmarks/test_run_single_stage_fullspace_ftr.py",
+    "tests/benchmarks/test_single_stage_fullspace_ftr_receipt.py",
     "tests/jax/adapters/test_single_stage_fullspace_bootstrap.py",
     "tests/jax/adapters/test_single_stage_fullspace_same_state_parity.py",
     "tests/jax/objectives/test_single_stage_fullspace_contract.py",
@@ -198,6 +220,8 @@ _TEST_FILES: Final = (
     "tests/geo/test_dense_sqp.py",
     "tests/jax/solve/test_fullspace_certificate.py",
     "tests/jax/solve/test_fullspace_sqp.py",
+    "tests/jax/solve/test_fullspace_filter_trust_region.py",
+    "tests/geo/test_filter_trust_region_sqp.py",
 )
 
 
@@ -1123,6 +1147,202 @@ def run_cfs_sqp1_probe(
         "timed_execution_transfer_guard": "disallow",
     }
     return optimizer_payload, endpoint, {"timing": timing, "transfers": transfers}
+
+
+def run_cfs_ftr1_probe(
+    bootstrap: SingleStageFullSpaceBootstrap,
+) -> tuple[dict[str, JsonValue], dict[str, JsonValue], dict[str, JsonValue]]:
+    """Run the one authorized device-resident CFS-FTR1 ten-step gate."""
+
+    if jax.default_backend() != "gpu" or len(jax.devices()) != 1:
+        raise ValueError("CFS-FTR1 Gate 2 requires exactly one JAX GPU")
+    host_z, host_problem = jax.device_get((bootstrap.z0, bootstrap.problem))
+    staging_leaves, staging_bytes = _array_tree_size((host_z, host_problem))
+    device_z, device_problem = jax.device_put(
+        (host_z, host_problem), device=jax.devices()[0]
+    )
+    jax.block_until_ready((device_z, device_problem))
+    prepared = prepare_cfs_ftr1(
+        device_problem,
+        device_z,
+        device_z,
+        maximum_iterations=10,
+    )
+    initial_endpoint = cfs_sqp1_endpoint_diagnostics(
+        prepared.initial_optimizer_coordinates,
+        prepared.initial_scaled_multipliers,
+        device_problem,
+        prepared.scaling,
+    )
+    jax.block_until_ready(initial_endpoint)
+
+    solve_start_ns = time.perf_counter_ns()
+    with jax.transfer_guard("disallow"):
+        optimizer_result = prepared.run_solver()
+        jax.block_until_ready(optimizer_result)
+    solve_elapsed_ns = time.perf_counter_ns() - solve_start_ns
+    finalized = prepared.finalize_result(optimizer_result)
+    independent_kkt = solve_dense_sqp_kkt(
+        optimizer_result.bfgs_matrix,
+        optimizer_result.constraint_jacobian,
+        optimizer_result.stationarity,
+        optimizer_result.constraints,
+        regularization_ladder=(0.0,),
+        relative_residual_tolerance=1.0e-10,
+        schur_relative_residual_tolerance=1.0e-10,
+        kkt_forward_error_tolerance=1.0e-7,
+        kkt_solution_scaled_residual_tolerance=1.0e-10,
+    )
+    device_evidence = {
+        "optimizer": optimizer_result,
+        "initial_endpoint": initial_endpoint,
+        "endpoint": finalized.endpoint,
+        "independent_kkt": independent_kkt,
+        "route_all_finite": finalized.all_finite,
+        "route_converged": finalized.converged,
+        "solver_result_consistent": finalized.solver_result_consistent,
+        "solve_certificates_valid": finalized.solve_certificates_valid,
+    }
+    jax.block_until_ready(device_evidence)
+    result_leaves, result_bytes = _array_tree_size(device_evidence)
+    host = jax.device_get(device_evidence)
+    optimizer = host["optimizer"]
+    initial = host["initial_endpoint"]
+    endpoint_result = host["endpoint"]
+    final_kkt = host["independent_kkt"]
+    iterations = int(np.asarray(optimizer.iterations))
+    accepted_iterations = int(np.asarray(optimizer.accepted_iterations))
+    status = FilterTrustRegionSQPStatus(int(np.asarray(optimizer.status))).name
+    history = {
+        field: np.asarray(getattr(optimizer.history, field)[:iterations]).tolist()
+        for field in optimizer.history._fields
+    }
+    history["attempted_length"] = iterations
+    history["accepted_length"] = accepted_iterations
+    failure_counters = {
+        field: int(np.asarray(getattr(optimizer.failure_counters, field)))
+        for field in optimizer.failure_counters._fields
+    }
+
+    physical_state, physical_state_sha = _vector_payload(endpoint_result.physical_state)
+    optimizer_coordinates, optimizer_coordinates_sha = _vector_payload(
+        optimizer.optimizer_coordinates
+    )
+    scaled_multipliers, scaled_multipliers_sha = _vector_payload(
+        endpoint_result.scaled_multipliers
+    )
+    raw_multipliers, raw_multipliers_sha = _vector_payload(
+        endpoint_result.raw_multipliers
+    )
+    endpoint: dict[str, JsonValue] = {
+        "physical_state": physical_state,
+        "physical_state_sha256": physical_state_sha,
+        "optimizer_coordinates": optimizer_coordinates,
+        "optimizer_coordinates_sha256": optimizer_coordinates_sha,
+        "scaled_multipliers": scaled_multipliers,
+        "scaled_multipliers_sha256": scaled_multipliers_sha,
+        "raw_multipliers": raw_multipliers,
+        "raw_multipliers_sha256": raw_multipliers_sha,
+        "physical_objective": float(np.asarray(endpoint_result.physical_objective)),
+        "raw_constraint_infinity_norm": float(
+            np.asarray(endpoint_result.raw_constraint_infinity_norm)
+        ),
+        "scaled_constraint_infinity_norm": float(
+            np.asarray(endpoint_result.scaled_constraint_infinity_norm)
+        ),
+        "raw_kkt_stationarity_infinity_norm": float(
+            np.asarray(endpoint_result.raw_kkt_stationarity_infinity_norm)
+        ),
+        "all_finite": bool(np.asarray(endpoint_result.all_finite)),
+    }
+    optimizer_payload: dict[str, JsonValue] = {
+        "status": status,
+        "fatal": bool(np.asarray(optimizer.fatal)),
+        "failed": bool(np.asarray(optimizer.failed)),
+        "converged": bool(np.asarray(host["route_converged"])),
+        "all_finite": bool(np.asarray(host["route_all_finite"])),
+        "all_accepted_states_finite": bool(
+            np.asarray(optimizer.all_accepted_states_finite)
+        ),
+        "solver_result_consistent": bool(np.asarray(host["solver_result_consistent"])),
+        "solve_certificates_valid": bool(np.asarray(host["solve_certificates_valid"])),
+        "iterations": iterations,
+        "accepted_iterations": accepted_iterations,
+        "joint_evaluations": int(np.asarray(optimizer.joint_evaluations)),
+        "derivative_builds": int(np.asarray(optimizer.derivative_builds)),
+        "radius": float(np.asarray(optimizer.radius)),
+        "final_normal_relative_residual": _optional_finite_float(
+            optimizer.final_normal_relative_residual
+        ),
+        "final_normal_forward_error_bound": _optional_finite_float(
+            optimizer.final_normal_forward_error_bound
+        ),
+        "final_tangency_relative_residual": _optional_finite_float(
+            optimizer.final_tangency_relative_residual
+        ),
+        "final_multiplier_projection_relative_residual": _optional_finite_float(
+            optimizer.final_multiplier_projection_relative_residual
+        ),
+        "final_multiplier_projection_forward_error_bound": _optional_finite_float(
+            optimizer.final_multiplier_projection_forward_error_bound
+        ),
+        "initial_physical_objective": float(np.asarray(initial.physical_objective)),
+        "initial_scaled_constraint_infinity_norm": float(
+            np.asarray(initial.scaled_constraint_infinity_norm)
+        ),
+        "initial_raw_kkt_stationarity_infinity_norm": float(
+            np.asarray(initial.raw_kkt_stationarity_infinity_norm)
+        ),
+        "coordinate_count": int(np.asarray(optimizer.optimizer_coordinates).size),
+        "equality_count": int(np.asarray(optimizer.constraints).size),
+        "dtype": str(np.asarray(optimizer.optimizer_coordinates).dtype),
+        "history": history,
+        "history_sha256": hashlib.sha256(canonical_json_bytes(history)).hexdigest(),
+        "failure_counters": failure_counters,
+    }
+    kkt_payload: dict[str, JsonValue] = {
+        "valid": bool(np.asarray(final_kkt.valid)),
+        "all_finite": bool(np.asarray(final_kkt.all_finite)),
+        "kkt_relative_residual": _optional_finite_float(
+            final_kkt.kkt_relative_residual
+        ),
+        "schur_relative_residual": _optional_finite_float(
+            final_kkt.schur_relative_residual
+        ),
+        "kkt_solution_scaled_residual": _optional_finite_float(
+            final_kkt.kkt_solution_scaled_residual
+        ),
+        "kkt_forward_error_bound": _optional_finite_float(
+            final_kkt.kkt_forward_error_bound
+        ),
+    }
+    timing: dict[str, JsonValue] = {
+        "synchronized_solve_seconds": solve_elapsed_ns / 1.0e9,
+        "synchronization": "block_until_ready",
+        "warmup_solve_count": 0,
+        "pristine_inputs_restored_before_timed_solve": False,
+    }
+    transfers: dict[str, JsonValue] = {
+        "audit_scope": "cfs_ftr1_after_bootstrap_publication",
+        "hot_h2d_calls": 0,
+        "hot_d2h_calls": 0,
+        "initial_h2d_calls": 1,
+        "initial_h2d_bytes": staging_bytes,
+        "initial_h2d_leaves": staging_leaves,
+        "final_d2h_calls": 1,
+        "final_d2h_bytes": result_bytes,
+        "final_d2h_leaves": result_leaves,
+        "timed_execution_transfer_guard": "disallow",
+    }
+    return (
+        optimizer_payload,
+        endpoint,
+        {
+            "independent_kkt": kkt_payload,
+            "timing": timing,
+            "transfers": transfers,
+        },
+    )
 
 
 def _run_cfs_al_complete_probe(
@@ -2744,6 +2964,83 @@ def execute_cfs_sqp1_snapshot_child(
     return canonical_json_bytes(payload)
 
 
+def execute_cfs_ftr1_snapshot_child(
+    request: RunRequest,
+    *,
+    campaign_root: Path,
+    process_argv: Sequence[str],
+    environment: Mapping[str, str],
+) -> bytes:
+    """Produce the sole authorized FTR Gate 2 raw-result draft."""
+
+    request.validate_v3()
+    if request.route is not FullSpaceRoute.CFS_FTR1:
+        raise PhaseGateError("FTR child requires the CFS-FTR1 route")
+    campaign = campaign_root.resolve(strict=True)
+    publication = load_snapshot(campaign / SNAPSHOT_DIRECTORY)
+    if (
+        environment.get(_CAMPAIGN_ROOT_ENV) != str(campaign)
+        or environment.get(_SNAPSHOT_MANIFEST_ENV) != publication.manifest_sha256
+    ):
+        raise ValueError("snapshot child is not bound to this campaign and manifest")
+    if Path.cwd().resolve(strict=True) != publication.root:
+        raise ValueError("snapshot child must execute from the immutable snapshot root")
+    run_root = campaign / "gates" / "ftr-canary-10"
+    run_root.mkdir(parents=True)
+    runtime, runtime_ref = publish_child_runtime_provenance(
+        publication,
+        campaign_root=campaign,
+        process_argv=process_argv,
+        environment=environment,
+        evidence_relative_directory=Path("gates/ftr-canary-10/evidence"),
+    )
+    if (
+        runtime.observation.runtime_identity.device_uuid != FTR_PRIMARY_DEVICE_UUID
+        or "5090" not in runtime.observation.device_name
+    ):
+        raise ValueError("CFS-FTR1 Gate 2 requires the frozen RTX 5090")
+    runtime_ref.resolve_and_validate(campaign).chmod(0o444)
+    bootstrap = build_single_stage_fullspace_bootstrap()
+    bootstrap_ref = publish_bootstrap_artifact(
+        run_root / "bootstrap.json",
+        campaign_root=campaign,
+        snapshot_root=publication.root,
+        runtime_evidence=runtime_ref,
+        bootstrap_factory=lambda: bootstrap,
+    )
+    optimizer, endpoint, execution = run_cfs_ftr1_probe(bootstrap)
+    timing = execution["timing"]
+    transfers = execution["transfers"]
+    independent_kkt = execution["independent_kkt"]
+    if not all(
+        isinstance(section, dict) for section in (timing, transfers, independent_kkt)
+    ):
+        raise TypeError("FTR probe evidence is malformed")
+    assert isinstance(timing, dict)
+    timing["total_child_wall_seconds"] = None
+    return canonical_json_bytes(
+        {
+            "schema_version": FTR_RESULT_SCHEMA_VERSION,
+            "contract_sha256": contract_sha256_v3(),
+            "plan_sha256": FTR_PLAN_SHA256,
+            "budget_sha256": FTR_BUDGET_SHA256,
+            "request": asdict(request),
+            "source_identity": asdict(runtime.source_identity),
+            "runtime_evidence": asdict(runtime_ref),
+            "bootstrap_artifact": asdict(bootstrap_ref),
+            "optimizer_result": optimizer,
+            "endpoint": endpoint,
+            "independent_kkt": independent_kkt,
+            "timing": timing,
+            "transfer_audit": transfers,
+            "endpoint_certificate": None,
+            "promotion_eligible": False,
+            "trajectory_equivalence_required": False,
+            "terminal_status": str(optimizer["status"]),
+        }
+    )
+
+
 def _physical_gpu_memory_identity(
     environment: Mapping[str, str],
 ) -> tuple[str, int]:
@@ -2915,6 +3212,128 @@ def run_cfs_sqp1_campaign(
     )
 
 
+def run_cfs_ftr1_campaign(
+    request: RunRequest,
+    campaign_root: Path,
+    *,
+    native_extension_path: Path,
+    interpreter: Path,
+    environment: Mapping[str, str],
+    timeout_seconds: float = 600.0,
+) -> bytes:
+    """Run and seal the sole timeout-bounded CFS-FTR1 Gate 2 child."""
+
+    request.validate_v3()
+    if request != RunRequest(
+        RunPhase.CANARY,
+        FullSpaceRoute.CFS_FTR1,
+        DeviceLane.RTX5090,
+        10,
+        None,
+    ):
+        raise PhaseGateError("CFS-FTR1 authorizes only the frozen Gate 2 request")
+    publication = prepare_or_load_execution_snapshot(
+        campaign_root, native_extension_path=native_extension_path
+    )
+    run_root = campaign_root / "gates" / "ftr-canary-10"
+    if run_root.exists() or run_root.is_symlink():
+        raise FileExistsError(f"refusing existing FTR gate path: {run_root}")
+    raw_path = run_root / "raw-result.json"
+    request_argv = (
+        "--phase",
+        request.phase.value,
+        "--route",
+        request.route.value,
+        "--device",
+        request.device.value,
+        "--steps",
+        "10",
+        "--output",
+        str(raw_path),
+        "--snapshot-child",
+    )
+    invocation = build_snapshot_child_invocation(
+        publication,
+        campaign_root=campaign_root,
+        interpreter=interpreter,
+        request_argv=request_argv,
+        environment=environment,
+    )
+    gpu_uuid, physical_memory_bytes = _physical_gpu_memory_identity(environment)
+    if gpu_uuid != FTR_PRIMARY_DEVICE_UUID:
+        raise ValueError("CFS-FTR1 Gate 2 requires the frozen RTX 5090 UUID")
+    started_ns = time.perf_counter_ns()
+    child = subprocess.Popen(
+        invocation.argv,
+        cwd=invocation.cwd,
+        env=invocation.environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    monitor = BoundProcessGpuMemoryMonitor(
+        gpu_uuid=gpu_uuid,
+        provider_pid=child.pid,
+        expected_argv=invocation.argv,
+    )
+    monitor.start()
+    try:
+        stdout, stderr = child.communicate(timeout=timeout_seconds)
+        finished_ns = time.perf_counter_ns()
+    except subprocess.TimeoutExpired as error:
+        child.kill()
+        child.communicate()
+        raise TimeoutError("CFS-FTR1 Gate 2 child exceeded 600 seconds") from error
+    finally:
+        memory_measurement = monitor.finish()
+    if child.returncode != 0:
+        raise RuntimeError(
+            "snapshot CFS-FTR1 child failed with exit code "
+            f"{child.returncode}: {stderr.decode('utf-8', 'replace')}"
+        )
+    raw_value = load_canonical_json_bytes(stdout)
+    if not isinstance(raw_value, dict):
+        raise TypeError("FTR child result must be a canonical JSON object")
+    raw = dict(raw_value)
+    timing = raw.get("timing")
+    if (
+        not isinstance(timing, dict)
+        or timing.get("total_child_wall_seconds") is not None
+    ):
+        raise ValueError("FTR child timing draft is malformed")
+    timing["total_child_wall_seconds"] = (finished_ns - started_ns) / 1.0e9
+    if raw.get("schema_version") != FTR_RESULT_SCHEMA_VERSION:
+        raise ValueError("FTR child returned an unsupported result schema")
+    raw_ref = _publish_immutable_json(
+        raw_path,
+        raw,
+        campaign_root=campaign_root,
+        schema_version=FTR_RESULT_SCHEMA_VERSION,
+    )
+    memory = bound_gpu_memory_payload(
+        monitor,
+        memory_measurement,
+        parent_pid=os.getpid(),
+        physical_device_memory_bytes=physical_memory_bytes,
+        runtime_argv=invocation.argv[2:],
+        schema_version=FTR_MEMORY_SCHEMA_VERSION,
+    )
+    memory_ref = _publish_immutable_json(
+        run_root / "gpu-memory.json",
+        memory,
+        campaign_root=campaign_root,
+        schema_version=FTR_MEMORY_SCHEMA_VERSION,
+    )
+    gate_receipt = ftr_gate_receipt_payload(raw, raw_ref, memory, memory_ref)
+    gate_ref = _publish_immutable_json(
+        run_root / "gate-receipt.json",
+        gate_receipt,
+        campaign_root=campaign_root,
+        schema_version=FTR_GATE_RECEIPT_SCHEMA_VERSION,
+    )
+    load_ftr_gate_result(campaign_root, gate_ref)
+    return gate_ref.resolve_and_validate(campaign_root).read_bytes()
+
+
 def executed_run_receipt_payload(
     request: RunRequest,
     *,
@@ -2988,14 +3407,16 @@ def parse_request(argv: Sequence[str]) -> tuple[RunRequest, Path, bool]:
         steps=args.steps,
         sample=CompleteSample(args.sample) if args.sample is not None else None,
     )
-    if request.route is FullSpaceRoute.CFS_SQP1:
+    if request.route is FullSpaceRoute.CFS_FTR1:
+        request.validate_v3()
+    elif request.route is FullSpaceRoute.CFS_SQP1:
         request.validate_v2()
     else:
         request.validate()
     output = args.output
     if (
         not args.preflight_only
-        and request.route is not FullSpaceRoute.CFS_SQP1
+        and request.route not in (FullSpaceRoute.CFS_SQP1, FullSpaceRoute.CFS_FTR1)
         and (output.exists() or output.is_symlink())
     ):
         raise FileExistsError(f"refusing existing output path: {output}")
@@ -3007,7 +3428,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     request, output, preflight_only = parse_request(raw_argv)
     if preflight_only:
         payload = canonical_json_bytes(
-            run_request_payload_v2(request)
+            run_request_payload_v3(request)
+            if request.route is FullSpaceRoute.CFS_FTR1
+            else run_request_payload_v2(request)
             if request.route is FullSpaceRoute.CFS_SQP1
             else run_request_payload(request)
         )
@@ -3015,7 +3438,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         campaign_value = os.environ.get(_CAMPAIGN_ROOT_ENV)
         if campaign_value is None:
             raise ValueError("snapshot child campaign binding is absent")
-        if request.route is FullSpaceRoute.CFS_SQP1:
+        if request.route is FullSpaceRoute.CFS_FTR1:
+            payload = execute_cfs_ftr1_snapshot_child(
+                request,
+                campaign_root=Path(campaign_value),
+                process_argv=(str(Path(__file__).resolve()), *raw_argv),
+                environment=os.environ,
+            )
+        elif request.route is FullSpaceRoute.CFS_SQP1:
             payload = execute_cfs_sqp1_snapshot_child(
                 request,
                 campaign_root=Path(campaign_value),
@@ -3071,7 +3501,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         native_path_value = simsoptpp.__file__
         if native_path_value is None:
             raise ValueError("native extension path is unavailable")
-        if request.route is FullSpaceRoute.CFS_SQP1:
+        if request.route is FullSpaceRoute.CFS_FTR1:
+            payload = run_cfs_ftr1_campaign(
+                request,
+                output,
+                native_extension_path=Path(native_path_value),
+                interpreter=Path(sys.executable),
+                environment=os.environ,
+            )
+        elif request.route is FullSpaceRoute.CFS_SQP1:
             payload = run_cfs_sqp1_campaign(
                 request,
                 output,
