@@ -306,3 +306,49 @@ def test_objective_target_stops_the_run() -> None:
 
     assert run.status is ProjectedLbfgsStatus.OBJECTIVE_TARGET_REACHED
     assert run.objective <= 0.55
+
+
+def test_dense_curvature_solves_the_sphere_and_stays_definite() -> None:
+    run = run_projected_lbfgs(
+        _sphere_problem,
+        _feasible_start(),
+        options=ProjectedLbfgsOptions(
+            maximum_iterations=30,
+            feasibility_tolerance=1.0e-12,
+            dense_curvature=True,
+        ),
+    )
+
+    objectives = [record.objective for record in run.iterations]
+    assert objectives == sorted(objectives, reverse=True)
+    assert abs(run.objective - _SPHERE_MINIMUM) <= 1.0e-10
+    for record in run.iterations:
+        assert record.feasibility_inf <= 1.0e-12
+        assert record.dense_positive_definite, (
+            f"iteration {record.index} lost positive definiteness, so the "
+            "Powell damping failed to keep B a metric"
+        )
+
+
+def test_powell_damping_keeps_a_negative_curvature_pair_definite() -> None:
+    from simsopt_jax.geo.optimizers.dense_tangent_curvature import (
+        dense_tangent_direction,
+        empty_dense_tangent_curvature,
+        update_dense_tangent_curvature,
+    )
+
+    curvature = empty_dense_tangent_curvature(5, jnp.float64)
+    step = jnp.asarray([1.0, 0.5, 0.0, 0.0, 0.0], dtype=jnp.float64)
+    # s.y < 0: an undamped BFGS update on this pair would destroy definiteness.
+    bad_change = -0.5 * step
+    assert float(step @ bad_change) < 0.0
+
+    updated = update_dense_tangent_curvature(curvature, step, bad_change)
+    factor = np.linalg.cholesky(np.asarray(updated.hessian))
+
+    assert np.all(np.isfinite(factor)), "Powell damping failed to keep B definite"
+    assert int(updated.damped_updates) == 1
+    probe = jnp.asarray([0.2, -0.3, 0.7, 0.1, 0.0], dtype=jnp.float64)
+    result = dense_tangent_direction(updated, probe, lambda vector: vector)
+    assert bool(result.positive_definite)
+    assert float(probe @ result.direction) < 0.0, "direction must descend"
