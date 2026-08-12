@@ -90,11 +90,14 @@ from .label_constraints import compute_G_from_currents
 _BOOZER_CPU_ORDERED_REDUCTION_MODE = "cpu_ordered"
 
 __all__ = [
+    "boozer_masked_residual",
     "boozer_residual_scalar",
+    "boozer_residual_scalar_from_vector",
     "boozer_residual_scalar_and_grad_cpu_ordered",
     "boozer_residual_grad",
     "boozer_residual_hessian",
     "boozer_residual_vector",
+    "select_boozer_residual_mask",
     "boozer_penalty_composed",
     "boozer_penalty_grad_composed",
     "boozer_penalty_hvp_composed",
@@ -472,6 +475,62 @@ def boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB=False, dtyp
         xtheta,
         weight_inv_modB,
     ).ravel()
+
+
+def boozer_residual_scalar_from_vector(
+    residual,
+    *,
+    nphi,
+    ntheta,
+    reduction_mode="default",
+):
+    """Reduce an already-computed raw Boozer vector to its scalar objective."""
+
+    residual = jnp.asarray(residual)
+    if reduction_mode == _BOOZER_CPU_ORDERED_REDUCTION_MODE:
+        square_sum = _cpu_ordered_boozer_square_sum(
+            residual.reshape((nphi, ntheta, 3))
+        )
+    else:
+        validate_reduction_mode(reduction_mode)
+        square_sum = scalar_square_sum(
+            residual,
+            reduction_mode=reduction_mode,
+            default="pairwise",
+        )
+    half = _boozer_scalar(0.5, reference=residual)
+    count = _boozer_scalar(3 * nphi * ntheta, reference=residual)
+    return half * square_sum / count
+
+
+def select_boozer_residual_mask(residual, mask_indices):
+    """Select the canonical exact-system components from a raw residual."""
+
+    return jnp.asarray(residual)[jnp.asarray(mask_indices, dtype=jnp.int32)]
+
+
+def boozer_masked_residual(
+    G,
+    iota,
+    B,
+    xphi,
+    xtheta,
+    mask_indices,
+    weight_inv_modB=False,
+    dtype=None,
+):
+    """Return the raw Boozer residual at the exact-system mask indices."""
+
+    residual = boozer_residual_vector(
+        G,
+        iota,
+        B,
+        xphi,
+        xtheta,
+        weight_inv_modB=weight_inv_modB,
+        dtype=dtype,
+    )
+    return select_boozer_residual_mask(residual, mask_indices)
 
 
 def boozer_residual_scalar_and_grad_cpu_ordered(

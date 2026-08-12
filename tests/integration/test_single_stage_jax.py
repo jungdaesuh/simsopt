@@ -330,19 +330,15 @@ def test_selected_coil_length_penalty_uses_total_selected_length(
         ),
     )
 
-    curve_geometries: dict[str, tuple[jax.Array, jax.Array, jax.Array]] = {}
-    for curve_name, speed in curve_speeds.items():
-        gamma = jnp.zeros((8, 3), dtype=jnp.float64)
-        gammadash = jnp.broadcast_to(
-            jnp.asarray([speed, 0.0, 0.0], dtype=jnp.float64),
-            gamma.shape,
-        )
-        curve_geometries[curve_name] = (gamma, gammadash, jnp.zeros_like(gamma))
-
-    def curve_geometry(curve_name: str) -> tuple[jax.Array, jax.Array, jax.Array]:
-        return curve_geometries[curve_name]
-
-    monkeypatch.setattr(soj, "curve_geometry_from_spec", curve_geometry)
+    curve_lengths = {
+        name: jnp.asarray(speed, dtype=jnp.float64)
+        for name, speed in curve_speeds.items()
+    }
+    monkeypatch.setattr(
+        soj,
+        "curve_length_from_spec",
+        lambda curve_name: curve_lengths[curve_name],
+    )
     coil_dofs = jnp.zeros(1, dtype=jnp.float64)
 
     with jax.transfer_guard("disallow"):
