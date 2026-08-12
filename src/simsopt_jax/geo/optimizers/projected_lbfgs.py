@@ -7,11 +7,18 @@ limited-memory inverse Hessian turns that tangent gradient into a search
 direction, and every trial point is pulled back onto the manifold by certified
 minimum-norm Newton corrections before its objective is compared.
 
-The module owns one piece of knowledge: how a projected quasi-Newton step is
+The module owns one piece of knowledge: how a projected curvature step is
 proposed, retracted, and accepted.  The certified tangent projector and the
 certified Newton correction live in ``projected_hvp_trust_region``, the
-correction store lives in ``quasi_newton_metric``, and the exact derivative
+correction store lives in ``quasi_newton_metric``, the reduced-Lagrangian
+Newton direction lives in ``lagrangian_newton_cg``, and the exact derivative
 rows come from ``dense_sqp``.
+
+Which curvature model proposes the direction is an option, and the models can
+be scheduled against each other: the limited-memory step is cheap but settles
+into a linear rate, while a Lagrangian Newton step costs several curvature
+products and earns that back only where the linear rate has stalled.
+``hybrid_plateau_window`` measures the realized rate and switches on it.
 
 Curvature pairs are formed from the realized on-manifold displacement ``s``
 and the projected-gradient change ``y``.  Those two vectors are only
@@ -41,6 +48,12 @@ from .dense_tangent_curvature import (
     dense_tangent_direction,
     empty_dense_tangent_curvature,
     update_dense_tangent_curvature,
+)
+from .lagrangian_newton_cg import (
+    TangentNewtonCgStep,
+    lagrangian_hessian_vector_product,
+    least_squares_multipliers,
+    solve_tangent_newton_cg,
 )
 from .projected_hvp_trust_region import (
     CertifiedGramProjector,
@@ -102,12 +115,49 @@ class ProjectedLbfgsOptions:
     Requires ``objective_residuals``.  For a small-residual objective the GN
     model is locally near-exact, so the step is taken at full length and the
     Armijo line search -- not a trust region -- decides how far along it to go.
-    When the GN step cannot be accepted above ``gauss_newton_rescue_scale`` the
+    When the GN step cannot be accepted above ``model_step_rescue_scale`` the
     iteration falls back to the limited-memory direction.
     """
 
     gauss_newton_levenberg_relative: float = 1.0e-12
-    gauss_newton_rescue_scale: float = 1.0e-2
+
+    model_step_rescue_scale: float = 1.0e-2
+    """Scale below which a full-length model step is abandoned for the store.
+
+    A Gauss--Newton or Newton direction is a MODEL-scale step: either the model
+    describes this neighbourhood, in which case a step near unit scale is
+    accepted, or it does not, in which case backtracking it into the ground
+    only spends retractions to arrive somewhere the secant direction would have
+    reached sooner.
+    """
+
+    lagrangian_newton: bool = False
+    """Take ball-free reduced-Lagrangian Newton--CG steps, pair store as rescue.
+
+    The curvature carried is ``P (grad2 Phi + sum_i lambda_i grad2 c_i) P`` at
+    the least-squares multipliers, applied matrix-free by forward-over-reverse.
+    That constraint-curvature term is exactly what an objective-only model
+    omits, and when most of the gradient lies in the constraint row space the
+    multipliers are large enough for it to dominate at Newton scale.  Like the
+    Gauss--Newton arm the step is tried at full length and rescued by the pair
+    store below ``model_step_rescue_scale``.
+    """
+
+    newton_cg_maximum_iterations: int = 40
+    newton_cg_forcing_maximum: float = 0.5
+
+    hybrid_plateau_window: int = 0
+    """Trailing iterations whose decrease rate arms the Newton phase.
+
+    Zero runs one direction model for the whole run.  Positive runs the
+    limited-memory step -- several times the cheaper one -- until its geometric
+    per-iteration decrease factor over this window stops clearing
+    ``hybrid_plateau_factor``, then switches to Newton steps, and switches back
+    for another window whenever a Newton step cannot be accepted.  Requires
+    ``lagrangian_newton``.
+    """
+
+    hybrid_plateau_factor: float = 0.995
 
     dense_curvature: bool = False
     """Carry a dense tangent-space Hessian approximation instead of pairs.
@@ -227,6 +277,23 @@ class ProjectedLbfgsIteration(NamedTuple):
     gauss_newton_reciprocal_condition: float
     gauss_newton_tangency_residual: float
     gauss_newton_direction_norm: float
+    lagrangian_newton_used: bool
+    lagrangian_newton_rescued: bool
+    newton_cg_iterations: int
+    newton_cg_termination: int
+    newton_cg_negative_curvature: bool
+    newton_cg_negative_curvature_before_any_step: bool
+    newton_cg_forcing_eta: float
+    newton_cg_initial_residual_norm: float
+    newton_cg_final_residual_norm: float
+    newton_curvature: float
+    newton_normalized_curvature: float
+    newton_curvature_rayleigh_history: tuple[float, ...]
+    newton_direction_norm: float
+    newton_predicted_reduction: float
+    multiplier_norm: float
+    multiplier_forward_error_bound: float
+    trailing_objective_factor: float
     model_exactness_ratio: float
     direction_seconds: float
     line_search_seconds: float
@@ -566,6 +633,31 @@ def run_projected_lbfgs(
         )
     )
     update_curvature = jax.jit(update_dense_tangent_curvature)
+    if options.lagrangian_newton:
+
+        def _lagrangian_newton_direction(
+            coordinates, projector, gradient, projected_gradient, metric
+        ):
+            """Multipliers, then a truncated Newton solve on their Lagrangian.
+
+            Both live in one jitted region so the multiplier solve reuses the
+            already factored Gram without a host round trip, and the frozen
+            multipliers reach the curvature operator as a device value.
+            """
+
+            multipliers = least_squares_multipliers(projector, gradient)
+            return multipliers, solve_tangent_newton_cg(
+                lagrangian_hessian_vector_product(
+                    joint_value_constraints, coordinates, multipliers.multipliers
+                ),
+                projector,
+                projected_gradient,
+                maximum_iterations=options.newton_cg_maximum_iterations,
+                forcing_maximum=options.newton_cg_forcing_maximum,
+                preconditioner=lambda vector: apply_quasi_newton_metric(metric, vector),
+            )
+
+        lagrangian_newton_direction = jax.jit(_lagrangian_newton_direction)
     if options.gauss_newton:
         if objective_residuals is None:
             raise ValueError("gauss_newton requires objective_residuals")
@@ -590,6 +682,10 @@ def run_projected_lbfgs(
     records: list[ProjectedLbfgsIteration] = []
     status = ProjectedLbfgsStatus.RUNNING
     stored_pairs = 0
+    # Without a hybrid window the selected model runs from the first iteration;
+    # with one the run opens on the cheap secant step and earns its way in.
+    newton_active = options.lagrangian_newton and options.hybrid_plateau_window == 0
+    newton_rearm_index = 0
 
     solve_started = time.perf_counter()
     if not bool(point.all_finite):
@@ -606,6 +702,18 @@ def run_projected_lbfgs(
             status = ProjectedLbfgsStatus.ITERATION_LIMIT
             break
 
+        trailing_factor = _trailing_objective_factor(
+            records, float(point.objective), options.hybrid_plateau_window
+        )
+        if (
+            options.lagrangian_newton
+            and options.hybrid_plateau_window > 0
+            and not newton_active
+            and index - newton_rearm_index >= options.hybrid_plateau_window
+            and math.isfinite(trailing_factor)
+        ):
+            newton_active = trailing_factor >= options.hybrid_plateau_factor
+
         direction_started = time.perf_counter()
         applied_metric = metric
         masked_pairs = 0
@@ -616,7 +724,35 @@ def run_projected_lbfgs(
         gn_condition = float("nan")
         gn_tangency = float("nan")
         gn_direction_norm = float("nan")
-        if options.gauss_newton:
+        lagrangian_newton_used = False
+        lagrangian_newton_rescued = False
+        newton_step: object | None = None
+        model_predicted = float("nan")
+        multiplier_norm = float("nan")
+        multiplier_forward_error_bound = float("nan")
+        if options.lagrangian_newton and newton_active:
+            multipliers, newton_step = jax.block_until_ready(
+                lagrangian_newton_direction(
+                    coordinates,
+                    point.projector,
+                    point.gradient,
+                    point.projected_gradient,
+                    metric,
+                )
+            )
+            multiplier_norm = float(multipliers.norm)
+            multiplier_forward_error_bound = float(multipliers.forward_error_bound)
+            if bool(newton_step.usable):
+                direction = newton_step.direction
+                lagrangian_newton_used = True
+                model_predicted = float(newton_step.predicted_reduction)
+            else:
+                # A refused Newton solve is evidence, not a failure: the
+                # telemetry is kept and the secant store takes this iteration.
+                direction = jax.block_until_ready(
+                    apply_metric(metric, -point.projected_gradient)
+                )
+        elif options.gauss_newton:
             gn_step = jax.block_until_ready(
                 gauss_newton_direction(
                     coordinates, point.projector, point.projected_gradient
@@ -626,6 +762,7 @@ def run_projected_lbfgs(
                 direction = gn_step.direction
                 gauss_newton_used = True
                 gn_predicted = float(gn_step.predicted_reduction)
+                model_predicted = gn_predicted
                 gn_condition = float(gn_step.reduced_hessian_reciprocal_condition)
                 gn_tangency = float(gn_step.tangency_relative_residual)
                 gn_direction_norm = float(jnp.linalg.norm(gn_step.direction))
@@ -662,13 +799,14 @@ def run_projected_lbfgs(
             status = ProjectedLbfgsStatus.NON_DESCENT_DIRECTION
             break
 
-        # A Gauss--Newton step is a MODEL-scale step, not a locally safe one.
+        # A curvature-model step is a MODEL-scale step, not a locally safe one.
         # Capping it to maximum_step_norm reimposes exactly the trust ball this
         # route exists to remove -- the projected GN trust-region arm measured
         # its directions at 152-1950x that ball -- and with the cap in place the
         # initial scale lands below the rescue floor, so the step is never even
         # tried.  The cap therefore applies only to secant directions.
-        if gauss_newton_used:
+        model_step_used = gauss_newton_used or lagrangian_newton_used
+        if model_step_used:
             capped = False
             step_scale = 1.0
         else:
@@ -716,18 +854,18 @@ def run_projected_lbfgs(
                 scale *= options.backtracking_factor
             return None, scale
 
-        # A Gauss--Newton step is tried at full length and abandoned early: if
-        # it is not accepted well above the rescue scale the model is not
-        # describing this neighbourhood, and the pair store is the better bet.
+        # A model step is tried at full length and abandoned early: if it is
+        # not accepted well above the rescue scale the model is not describing
+        # this neighbourhood, and the pair store is the better bet.
         rescue_floor = (
-            options.gauss_newton_rescue_scale
-            if gauss_newton_used
+            options.model_step_rescue_scale
+            if model_step_used
             else options.minimum_step_scale
         )
         accepted, step_scale = search(
             direction, directional_derivative, step_scale, rescue_floor
         )
-        if accepted is None and gauss_newton_used:
+        if accepted is None and model_step_used:
             rescue_direction = jax.block_until_ready(
                 apply_metric(metric, -point.projected_gradient)
             )
@@ -739,7 +877,8 @@ def run_projected_lbfgs(
                 and math.isfinite(rescue_norm)
                 and rescue_norm > 0.0
             ):
-                gauss_newton_rescued = True
+                gauss_newton_rescued = gauss_newton_used
+                lagrangian_newton_rescued = lagrangian_newton_used
                 capped = rescue_norm > options.maximum_step_norm
                 initial = options.maximum_step_norm / rescue_norm if capped else 1.0
                 direction = rescue_direction
@@ -752,6 +891,18 @@ def run_projected_lbfgs(
                     options.minimum_step_scale,
                 )
         line_search_seconds = time.perf_counter() - line_search_started
+
+        # A Newton phase that could not place a step -- because the solve
+        # refused one or because the line search would not take it -- hands the
+        # run back to the secant store for another window rather than paying
+        # for a curvature solve every iteration to be told the same thing.
+        if (
+            options.hybrid_plateau_window > 0
+            and newton_active
+            and (lagrangian_newton_rescued or not lagrangian_newton_used)
+        ):
+            newton_active = False
+            newton_rearm_index = index + 1
 
         if accepted is None:
             status = ProjectedLbfgsStatus.LINE_SEARCH_COLLAPSE
@@ -768,6 +919,12 @@ def run_projected_lbfgs(
                     rejected_for_feasibility=rejected_for_feasibility,
                     stored_pairs=stored_pairs,
                     masked_pairs=masked_pairs,
+                    lagrangian_newton_used=lagrangian_newton_used,
+                    lagrangian_newton_rescued=lagrangian_newton_rescued,
+                    newton_step=newton_step,
+                    multiplier_norm=multiplier_norm,
+                    multiplier_forward_error_bound=multiplier_forward_error_bound,
+                    trailing_objective_factor=trailing_factor,
                     direction_seconds=direction_seconds,
                     line_search_seconds=line_search_seconds,
                     retraction_seconds=retraction_seconds,
@@ -842,12 +999,18 @@ def run_projected_lbfgs(
             gauss_newton_reciprocal_condition=gn_condition,
             gauss_newton_tangency_residual=gn_tangency,
             gauss_newton_direction_norm=gn_direction_norm,
+            lagrangian_newton_used=lagrangian_newton_used,
+            lagrangian_newton_rescued=lagrangian_newton_rescued,
+            **_newton_telemetry(newton_step),
+            multiplier_norm=multiplier_norm,
+            multiplier_forward_error_bound=multiplier_forward_error_bound,
+            trailing_objective_factor=trailing_factor,
             model_exactness_ratio=(
-                (float(point.objective) - float(accepted.objective)) / gn_predicted
-                if gauss_newton_used
-                and not gauss_newton_rescued
-                and math.isfinite(gn_predicted)
-                and gn_predicted != 0.0
+                (float(point.objective) - float(accepted.objective)) / model_predicted
+                if model_step_used
+                and not (gauss_newton_rescued or lagrangian_newton_rescued)
+                and math.isfinite(model_predicted)
+                and model_predicted != 0.0
                 else float("nan")
             ),
             direction_seconds=direction_seconds,
@@ -880,6 +1043,64 @@ def run_projected_lbfgs(
     )
 
 
+def _trailing_objective_factor(
+    records: list[ProjectedLbfgsIteration],
+    current_objective: float,
+    window: int,
+) -> float:
+    """Geometric per-iteration objective decrease over the trailing window.
+
+    A value approaching one is a plateau: the model in use is buying less per
+    iteration than a more expensive one would have to buy to be worth its cost.
+    """
+
+    if window < 1 or len(records) < window:
+        return float("nan")
+    earlier = records[-window].objective
+    if not (earlier > 0.0 and current_objective > 0.0):
+        return float("nan")
+    return (current_objective / earlier) ** (1.0 / window)
+
+
+def _newton_telemetry(step: TangentNewtonCgStep | None) -> dict[str, object]:
+    """Host-side scalars for one Newton--CG solve, blank when none was run."""
+
+    if step is None:
+        return {
+            "newton_cg_iterations": 0,
+            "newton_cg_termination": -1,
+            "newton_cg_negative_curvature": False,
+            "newton_cg_negative_curvature_before_any_step": False,
+            "newton_cg_forcing_eta": float("nan"),
+            "newton_cg_initial_residual_norm": float("nan"),
+            "newton_cg_final_residual_norm": float("nan"),
+            "newton_curvature": float("nan"),
+            "newton_normalized_curvature": float("nan"),
+            "newton_curvature_rayleigh_history": (),
+            "newton_direction_norm": float("nan"),
+            "newton_predicted_reduction": float("nan"),
+        }
+    return {
+        "newton_cg_iterations": int(step.iterations),
+        "newton_cg_termination": int(step.termination),
+        "newton_cg_negative_curvature": bool(step.negative_curvature),
+        "newton_cg_negative_curvature_before_any_step": bool(
+            step.negative_curvature_before_any_step
+        ),
+        "newton_cg_forcing_eta": float(step.forcing_eta),
+        "newton_cg_initial_residual_norm": float(step.initial_residual_norm),
+        "newton_cg_final_residual_norm": float(step.final_residual_norm),
+        "newton_curvature": float(step.terminal_curvature),
+        "newton_normalized_curvature": float(step.terminal_normalized_curvature),
+        "newton_curvature_rayleigh_history": tuple(
+            float(value)
+            for value in step.curvature_rayleigh_history[: int(step.iterations)]
+        ),
+        "newton_direction_norm": float(step.direction_norm),
+        "newton_predicted_reduction": float(step.predicted_reduction),
+    }
+
+
 def _collapsed_record(
     *,
     index: int,
@@ -893,11 +1114,21 @@ def _collapsed_record(
     rejected_for_feasibility: int,
     stored_pairs: int,
     masked_pairs: int,
+    lagrangian_newton_used: bool,
+    lagrangian_newton_rescued: bool,
+    newton_step: TangentNewtonCgStep | None,
+    multiplier_norm: float,
+    multiplier_forward_error_bound: float,
+    trailing_objective_factor: float,
     direction_seconds: float,
     line_search_seconds: float,
     retraction_seconds: float,
 ) -> ProjectedLbfgsIteration:
-    """Record the iteration whose line search found no acceptable step."""
+    """Record the iteration whose line search found no acceptable step.
+
+    The curvature telemetry is carried through unchanged: an iteration that
+    could place no step is the one whose direction evidence matters most.
+    """
 
     return ProjectedLbfgsIteration(
         index=index,
@@ -929,6 +1160,12 @@ def _collapsed_record(
         gauss_newton_reciprocal_condition=float("nan"),
         gauss_newton_tangency_residual=float("nan"),
         gauss_newton_direction_norm=float("nan"),
+        lagrangian_newton_used=lagrangian_newton_used,
+        lagrangian_newton_rescued=lagrangian_newton_rescued,
+        **_newton_telemetry(newton_step),
+        multiplier_norm=multiplier_norm,
+        multiplier_forward_error_bound=multiplier_forward_error_bound,
+        trailing_objective_factor=trailing_objective_factor,
         model_exactness_ratio=float("nan"),
         stored_pairs=stored_pairs,
         transport_masked_pairs=masked_pairs,
@@ -955,11 +1192,29 @@ def _validate_options(options: ProjectedLbfgsOptions) -> None:
         options.feasibility_tolerance,
         options.maximum_step_norm,
         options.minimum_step_scale,
+        options.model_step_rescue_scale,
     )
     if any(not math.isfinite(value) or value <= 0.0 for value in positive):
         raise ValueError("tolerances and bounds must be finite and positive")
     if not math.isfinite(options.objective_target):
         raise ValueError("objective_target must be finite")
+    if options.newton_cg_maximum_iterations < 1:
+        raise ValueError("newton_cg_maximum_iterations must be positive")
+    if not 0.0 < options.newton_cg_forcing_maximum < 1.0:
+        raise ValueError("newton_cg_forcing_maximum must lie strictly inside (0, 1)")
+    if options.hybrid_plateau_window < 0:
+        raise ValueError("hybrid_plateau_window must not be negative")
+    if not 0.0 < options.hybrid_plateau_factor <= 1.0:
+        raise ValueError("hybrid_plateau_factor must lie inside (0, 1]")
+    if options.hybrid_plateau_window > 0 and not options.lagrangian_newton:
+        raise ValueError("hybrid_plateau_window requires lagrangian_newton")
+    selected = sum(
+        (options.gauss_newton, options.dense_curvature, options.lagrangian_newton)
+    )
+    if selected > 1:
+        raise ValueError(
+            "gauss_newton, dense_curvature and lagrangian_newton are exclusive"
+        )
 
 
 __all__ = (

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -32,6 +34,20 @@ def _sphere_problem(coordinates: jax.Array) -> tuple[jax.Array, jax.Array]:
 
 def _feasible_start() -> jax.Array:
     start = jnp.asarray([0.3, 0.4, 0.5, 0.5, 0.5], dtype=jnp.float64)
+    return start / jnp.linalg.norm(start)
+
+
+def _near_minimizer_start() -> jax.Array:
+    """A start whose REDUCED Lagrangian Hessian is positive definite.
+
+    The reduced Hessian is ``P (D - (x' D x) I) P``, which is indefinite over
+    most of the sphere -- at ``_feasible_start`` its tangent eigenvalues run
+    -2.23 to 1.20 -- and positive definite only near the minimizing axis.  A
+    Newton claim is a claim about the definite regime; the indefinite one is
+    what the negative-curvature fallback exists for.
+    """
+
+    start = jnp.asarray([1.0, 0.12, 0.08, 0.06, 0.05], dtype=jnp.float64)
     return start / jnp.linalg.norm(start)
 
 
@@ -426,3 +442,125 @@ def test_gauss_newton_requires_residuals() -> None:
             _feasible_start(),
             options=ProjectedLbfgsOptions(maximum_iterations=3, gauss_newton=True),
         )
+
+
+def test_lagrangian_newton_run_reaches_the_closed_form_minimum() -> None:
+    run = run_projected_lbfgs(
+        _sphere_problem,
+        _near_minimizer_start(),
+        options=ProjectedLbfgsOptions(
+            maximum_iterations=40,
+            lagrangian_newton=True,
+            objective_target=_SPHERE_MINIMUM + 1.0e-12,
+        ),
+    )
+
+    assert run.status is ProjectedLbfgsStatus.OBJECTIVE_TARGET_REACHED
+    # The point of a ball-free Newton step: unit scale is accepted as proposed.
+    assert all(
+        iteration.step_scale == 1.0
+        for iteration in run.iterations
+        if iteration.lagrangian_newton_used
+    )
+    assert float(run.objective) <= _SPHERE_MINIMUM + 1.0e-12
+    assert float(run.feasibility_inf) <= 1.0e-10
+    assert any(iteration.lagrangian_newton_used for iteration in run.iterations)
+    # Every Newton iteration must bank the curvature it explored.
+    for iteration in run.iterations:
+        if iteration.lagrangian_newton_used:
+            assert len(iteration.newton_curvature_rayleigh_history) == (
+                iteration.newton_cg_iterations
+            )
+            assert iteration.newton_cg_iterations >= 1
+            assert math.isfinite(iteration.multiplier_norm)
+
+
+def test_lagrangian_newton_beats_the_secant_store_on_the_same_budget() -> None:
+    budget = 4
+    secant = run_projected_lbfgs(
+        _sphere_problem,
+        _near_minimizer_start(),
+        options=ProjectedLbfgsOptions(maximum_iterations=budget),
+    )
+    newton = run_projected_lbfgs(
+        _sphere_problem,
+        _near_minimizer_start(),
+        options=ProjectedLbfgsOptions(
+            maximum_iterations=budget, lagrangian_newton=True
+        ),
+    )
+
+    # Four Newton steps land on the closed-form minimum to rounding; four
+    # secant steps are still three digits away from it.
+    assert float(newton.objective) - _SPHERE_MINIMUM <= 1.0e-14
+    assert float(secant.objective) - _SPHERE_MINIMUM > 1.0e-6
+
+
+def test_negative_curvature_iteration_falls_back_to_the_store() -> None:
+    # From this start the reduced Lagrangian Hessian is indefinite, so the
+    # first Newton solve must refuse and the run must still descend.
+    run = run_projected_lbfgs(
+        _sphere_problem,
+        _feasible_start(),
+        options=ProjectedLbfgsOptions(
+            maximum_iterations=3, lagrangian_newton=True
+        ),
+    )
+
+    first = run.iterations[0]
+    assert first.newton_cg_negative_curvature_before_any_step
+    assert not first.lagrangian_newton_used
+    assert float(run.objective) < float(run.iterations[0].objective)
+
+
+def test_hybrid_schedule_opens_on_the_secant_step() -> None:
+    window = 3
+    run = run_projected_lbfgs(
+        _sphere_problem,
+        _feasible_start(),
+        options=ProjectedLbfgsOptions(
+            maximum_iterations=12,
+            lagrangian_newton=True,
+            hybrid_plateau_window=window,
+            # A factor of one arms the Newton phase only on a true plateau.
+            hybrid_plateau_factor=1.0,
+        ),
+    )
+
+    for iteration in run.iterations[:window]:
+        assert iteration.newton_cg_iterations == 0
+        assert not iteration.lagrangian_newton_used
+    assert all(
+        math.isnan(iteration.trailing_objective_factor)
+        for iteration in run.iterations[:window]
+    )
+    assert any(
+        math.isfinite(iteration.trailing_objective_factor)
+        for iteration in run.iterations[window:]
+    )
+
+
+def test_hybrid_window_requires_the_newton_arm() -> None:
+    try:
+        run_projected_lbfgs(
+            _sphere_problem,
+            _feasible_start(),
+            options=ProjectedLbfgsOptions(hybrid_plateau_window=5),
+        )
+    except ValueError:
+        return
+    raise AssertionError("hybrid_plateau_window was accepted without the Newton arm")
+
+
+def test_direction_models_are_mutually_exclusive() -> None:
+    try:
+        run_projected_lbfgs(
+            _sphere_problem,
+            _feasible_start(),
+            options=ProjectedLbfgsOptions(
+                lagrangian_newton=True, dense_curvature=True
+            ),
+        )
+    except ValueError:
+        return
+    raise AssertionError("two direction models were accepted at once")
