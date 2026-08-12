@@ -141,6 +141,8 @@ class LbfgsbState(NamedTuple):
     n_iterations: jax.Array
     nfev: jax.Array
     njev: jax.Array
+    evaluated_nonfinite_count: jax.Array
+    all_accepted_states_finite: jax.Array
 
 
 class LbfgsbMacroStepResult(NamedTuple):
@@ -469,6 +471,8 @@ def lbfgsb_initial_state(
         n_iterations=jnp.asarray(0, dtype=jnp.int32),
         nfev=jnp.asarray(0, dtype=jnp.int32),
         njev=jnp.asarray(0, dtype=jnp.int32),
+        evaluated_nonfinite_count=jnp.asarray(0, dtype=jnp.int32),
+        all_accepted_states_finite=jnp.asarray(True, dtype=jnp.bool_),
     )
 
 
@@ -1880,11 +1884,18 @@ def lbfgsb_start_with_initial_value_and_grad(
 ) -> LbfgsbState:
     """Seed a fresh START state with its first value/gradient evaluation."""
     started = _lbfgsb_setulb_start(state)
+    value = jnp.asarray(value, dtype=started.x.dtype)
+    grad = jnp.asarray(grad, dtype=started.x.dtype)
+    evaluated_nonfinite = (~jnp.isfinite(value)) | jnp.any(~jnp.isfinite(grad))
     return started._replace(
-        f=jnp.asarray(value, dtype=started.x.dtype),
-        g=jnp.asarray(grad, dtype=started.x.dtype),
+        f=value,
+        g=grad,
         nfev=started.nfev + jnp.asarray(1, dtype=jnp.int32),
         njev=started.njev + jnp.asarray(1, dtype=jnp.int32),
+        evaluated_nonfinite_count=(
+            started.evaluated_nonfinite_count
+            + evaluated_nonfinite.astype(started.evaluated_nonfinite_count.dtype)
+        ),
     )
 
 
@@ -1893,11 +1904,29 @@ def _lbfgsb_evaluate_value_and_grad(
     state: LbfgsbState,
 ) -> LbfgsbState:
     value, gradient = value_and_grad(state.x)
+    value = jnp.asarray(value, dtype=state.x.dtype)
+    gradient = jnp.asarray(gradient, dtype=state.x.dtype)
+    evaluated_nonfinite = (~jnp.isfinite(value)) | jnp.any(~jnp.isfinite(gradient))
+    line_search_trial = (state.workspace.task[0] == FG) & (
+        state.workspace.task[1] == FG_LNSRCH
+    )
+    reject_nonfinite_trial = evaluated_nonfinite & line_search_trial
+    previous_value = state.workspace.dsave[1]
+    rejected_trial_value = previous_value + jnp.maximum(
+        jnp.abs(previous_value),
+        jnp.asarray(1.0, dtype=state.x.dtype),
+    )
+    value = jnp.where(reject_nonfinite_trial, rejected_trial_value, value)
+    gradient = jnp.where(reject_nonfinite_trial, jnp.zeros_like(gradient), gradient)
     return state._replace(
-        f=jnp.asarray(value, dtype=state.x.dtype),
-        g=jnp.asarray(gradient, dtype=state.x.dtype),
+        f=value,
+        g=gradient,
         nfev=state.nfev + jnp.asarray(1, dtype=jnp.int32),
         njev=state.njev + jnp.asarray(1, dtype=jnp.int32),
+        evaluated_nonfinite_count=(
+            state.evaluated_nonfinite_count
+            + evaluated_nonfinite.astype(state.evaluated_nonfinite_count.dtype)
+        ),
     )
 
 
@@ -2004,6 +2033,16 @@ def _lbfgsb_finish_transition(
     accepted_step_callback: Callable[..., object] | None = None,
 ) -> LbfgsbMacroStepResult:
     accepted_new_x = state.workspace.task[0] == NEW_X
+    accepted_state_finite = (
+        jnp.all(jnp.isfinite(state.x))
+        & jnp.isfinite(state.f)
+        & jnp.all(jnp.isfinite(state.g))
+    )
+    state = state._replace(
+        all_accepted_states_finite=(
+            state.all_accepted_states_finite & (~accepted_new_x | accepted_state_finite)
+        )
+    )
     if accepted_step_callback is not None:
         state = jax.lax.cond(
             accepted_new_x,

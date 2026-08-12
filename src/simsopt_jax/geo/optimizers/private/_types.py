@@ -111,6 +111,8 @@ class _LBFGSResults(NamedTuple):
     gamma: float | jax.Array
     status: int | jax.Array
     ls_status: int | jax.Array
+    evaluated_nonfinite_count: jax.Array
+    all_accepted_states_finite: jax.Array
     invalid_step_log: _LBFGSInvalidStepLog
     optimizer_state_trace: tuple[dict[str, object], ...] = ()
     hess_inv_s: jax.Array | None = None

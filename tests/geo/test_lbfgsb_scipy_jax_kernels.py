@@ -2149,6 +2149,26 @@ def _lbfgsb_state_after_accepted_steps(*, m: int, accepted_steps: int):
     return state
 
 
+def test_finish_transition_latches_nonfinite_accepted_state() -> None:
+    state = _lbfgsb_state_after_accepted_steps(m=4, accepted_steps=1)
+    workspace = state.workspace._replace(
+        task=jnp.asarray((lbfgsb.NEW_X, lbfgsb.NO_MSG), dtype=jnp.int32)
+    )
+    nonfinite_accepted = state._replace(
+        f=jnp.asarray(jnp.nan, dtype=state.f.dtype),
+        workspace=workspace,
+    )
+
+    result = lbfgsb._lbfgsb_finish_transition(
+        nonfinite_accepted,
+        maxiter_array=jnp.asarray(20, dtype=jnp.int32),
+        maxfun_array=jnp.asarray(100, dtype=jnp.int32),
+    )
+
+    assert bool(np.asarray(result.accepted_new_x))
+    assert not bool(np.asarray(result.state.all_accepted_states_finite))
+
+
 @pytest.mark.parametrize("m,accepted_steps", [(4, 0), (4, 1), (4, 2), (3, 4)])
 def test_lbfgsb_two_loop_fast_reentry_matches_bounded_geometry_reentry(
     m,

@@ -22,6 +22,7 @@ from simsopt_jax.runtime.host_boundary import (
     host_value,
 )
 from simsopt_jax.runtime.jaxpr_closure import (
+    closure_converted_parametric_value_and_grad,
     closure_converted_value_and_grad,
     device_put_closure_consts,
 )
@@ -78,6 +79,15 @@ class _LbfgsbStepwiseHostStatus(NamedTuple):
 _LBFGSConsts = tuple[jax.Array, ...]
 _LBFGSValueAndGrad = Callable[
     [jax.Array, _LBFGSConsts],
+    tuple[jax.Array, jax.Array],
+]
+_LBFGSParametricValueAndGrad = Callable[
+    [jax.Array, jax.Array, _LBFGSConsts],
+    tuple[jax.Array, jax.Array],
+]
+_LBFGSObjectiveOperands = _LBFGSConsts | tuple[jax.Array, _LBFGSConsts]
+_LBFGSValueAndGradWithOperands = Callable[
+    [jax.Array, _LBFGSObjectiveOperands],
     tuple[jax.Array, jax.Array],
 ]
 _LBFGSInitialState = Callable[[jax.Array], lbfgsb.LbfgsbState]
@@ -183,6 +193,38 @@ def _cached_lbfgs_value_and_grad_kernel(
     )
     value_and_grad_consts = _device_put_lbfgs_consts(value_and_grad_consts, example_x)
     return value_and_grad_kernel, value_and_grad_consts
+
+
+def _parametric_lbfgs_value_and_grad_kernel(
+    value_and_grad_fun: Callable[
+        [jax.Array, jax.Array],
+        tuple[jax.Array, jax.Array],
+    ],
+    *,
+    example_x: jax.Array,
+    example_parameter: jax.Array,
+) -> tuple[_LBFGSParametricValueAndGrad, _LBFGSConsts]:
+    """Stage a value/gradient program with one explicit dynamic parameter."""
+
+    converted, consts = closure_converted_parametric_value_and_grad(
+        value_and_grad_fun,
+        example_x,
+        example_parameter,
+    )
+
+    @jax.jit
+    def value_and_grad(
+        x: jax.Array,
+        parameter: jax.Array,
+        closure_consts: _LBFGSConsts,
+    ) -> tuple[jax.Array, jax.Array]:
+        value, gradient = converted(x, parameter, closure_consts)
+        return (
+            jnp.asarray(value, dtype=x.dtype),
+            jnp.asarray(gradient, dtype=x.dtype),
+        )
+
+    return value_and_grad, _device_put_lbfgs_consts(consts, example_x)
 
 
 def _lbfgsb_cache_context(
@@ -397,11 +439,12 @@ def _lbfgsb_advance_to_next_observable_kernel(
     )
 
 
-def _lbfgsb_fused_stepwise_kernel(
-    value_and_grad: _LBFGSValueAndGrad,
+def _lbfgsb_fused_stepwise_kernel_with_operands(
+    value_and_grad: _LBFGSValueAndGradWithOperands,
     *,
     cache_owner: object | None = None,
     cache_key_prefix: tuple[object, ...] = (),
+    cache_key_name: str,
     entry_kind: str = _LBFGS_STEP_ENTRY_START,
     unconstrained_fast_path: bool = False,
 ) -> Callable[..., _LBFGSResults]:
@@ -416,22 +459,17 @@ def _lbfgsb_fused_stepwise_kernel(
 
     if entry_kind not in (_LBFGS_STEP_ENTRY_START, _LBFGS_STEP_ENTRY_SEARCH):
         raise ValueError(
-            "fused L-BFGS entry kind must be 'start' or 'search', "
-            f"got {entry_kind!r}."
+            f"fused L-BFGS entry kind must be 'start' or 'search', got {entry_kind!r}."
         )
 
     def run(
         state: lbfgsb.LbfgsbState,
-        value_and_grad_consts: _LBFGSConsts,
+        objective_operands: _LBFGSObjectiveOperands,
         maxiter_limit: jax.Array,
         maxfun_limit: jax.Array,
     ) -> _LBFGSResults:
         def value_and_grad_with_consts(x):
-            return _call_lbfgs_value_and_grad(
-                value_and_grad,
-                x,
-                value_and_grad_consts,
-            )
+            return value_and_grad(x, objective_operands)
 
         def advance_from_search(
             result: lbfgsb.LbfgsbMacroStepResult,
@@ -499,16 +537,61 @@ def _lbfgsb_fused_stepwise_kernel(
             maxfun_limit=maxfun_limit,
         )
 
-    run.__name__ = "lbfgs_private_fused_stepwise_solver"
+    run.__name__ = cache_key_name.replace("-", "_")
     return _cached_private_solver(
         cache_owner,
         cache_key=(
-            "lbfgsb-fused-stepwise",
+            cache_key_name,
             *cache_key_prefix,
             entry_kind,
             bool(unconstrained_fast_path),
         ),
         builder=lambda: jax.jit(run),
+    )
+
+
+def _lbfgsb_fused_stepwise_kernel(
+    value_and_grad: _LBFGSValueAndGrad,
+    *,
+    cache_owner: object | None = None,
+    cache_key_prefix: tuple[object, ...] = (),
+    entry_kind: str = _LBFGS_STEP_ENTRY_START,
+    unconstrained_fast_path: bool = False,
+) -> Callable[..., _LBFGSResults]:
+    def evaluate(
+        x: jax.Array,
+        operands: _LBFGSObjectiveOperands,
+    ) -> tuple[jax.Array, jax.Array]:
+        return value_and_grad(x, cast(_LBFGSConsts, operands))
+
+    return _lbfgsb_fused_stepwise_kernel_with_operands(
+        evaluate,
+        cache_owner=cache_owner,
+        cache_key_prefix=cache_key_prefix,
+        cache_key_name="lbfgsb-fused-stepwise",
+        entry_kind=entry_kind,
+        unconstrained_fast_path=unconstrained_fast_path,
+    )
+
+
+def _lbfgsb_parametric_fused_stepwise_kernel(
+    value_and_grad: _LBFGSParametricValueAndGrad,
+    *,
+    entry_kind: str = _LBFGS_STEP_ENTRY_START,
+    unconstrained_fast_path: bool = False,
+) -> Callable[..., _LBFGSResults]:
+    def evaluate(
+        x: jax.Array,
+        operands: _LBFGSObjectiveOperands,
+    ) -> tuple[jax.Array, jax.Array]:
+        parameter, consts = cast(tuple[jax.Array, _LBFGSConsts], operands)
+        return value_and_grad(x, parameter, consts)
+
+    return _lbfgsb_fused_stepwise_kernel_with_operands(
+        evaluate,
+        cache_key_name="lbfgsb-parametric-fused-stepwise",
+        entry_kind=entry_kind,
+        unconstrained_fast_path=unconstrained_fast_path,
     )
 
 
@@ -903,6 +986,8 @@ def _lbfgsb_state_to_lbfgs_results(
         gamma=state.workspace.dsave[0],
         status=status,
         ls_status=state.workspace.isave[34],
+        evaluated_nonfinite_count=state.evaluated_nonfinite_count,
+        all_accepted_states_finite=state.all_accepted_states_finite,
         invalid_step_log=_lbfgsb_invalid_step_log(state),
         optimizer_state_trace=tuple(optimizer_state_trace),
         hess_inv_s=history.s,
@@ -1110,6 +1195,27 @@ class PreparedLBFGS:
         )
 
 
+@dataclass(frozen=True)
+class PreparedParametricLBFGS:
+    """Composable fused L-BFGS program with one fixed-shape device parameter."""
+
+    initial_value: jax.Array
+    initial_gradient: jax.Array
+    history_size: int
+    parameter_shape: tuple[int, ...]
+    parameter_dtype: str
+    _run_staged: Callable[[jax.Array, jax.Array], _LBFGSResults]
+
+    def run_staged(
+        self,
+        x0: jax.Array,
+        objective_parameter: jax.Array,
+    ) -> _LBFGSResults:
+        """Stage or execute the callback-free solve with frozen run budgets."""
+
+        return self._run_staged(x0, objective_parameter)
+
+
 def prepare_lbfgs_private(
     fun: Callable[[jax.Array], jax.Array],
     x0: jax.typing.ArrayLike,
@@ -1281,6 +1387,92 @@ def prepare_lbfgs_private(
         initial_gradient=initial_gradient,
         history_size=history_size,
         run_mode=run_mode,
+    )
+
+
+def prepare_parametric_lbfgs_private(
+    objective: Callable[[jax.Array, jax.Array], jax.Array],
+    x0: jax.typing.ArrayLike,
+    objective_parameter: jax.typing.ArrayLike,
+    *,
+    maxiter: int,
+    maxfun: int,
+    maxcor: int = 10,
+    ftol: float = 0.0,
+    gtol: float = 1e-5,
+    maxls: int = 20,
+    x_dtype: jax.typing.DTypeLike | None = None,
+) -> PreparedParametricLBFGS:
+    """Prepare a JAX-transformable fused solve with one dynamic parameter."""
+
+    parameters = _require_private_optimizer_runtime(x0, dtype=x_dtype)
+    parameter_array = jnp.asarray(objective_parameter)
+    if parameter_array.dtype != parameters.dtype:
+        raise TypeError(
+            "parametric L-BFGS objective parameter dtype must match x dtype: "
+            f"expected {parameters.dtype}, got {parameter_array.dtype}"
+        )
+    parameter_array = device_put_closure_consts((parameter_array,), parameters)[0]
+
+    def value_and_grad(
+        current_parameters: jax.Array,
+        current_objective_parameter: jax.Array,
+    ) -> tuple[jax.Array, jax.Array]:
+        return jax.value_and_grad(objective, argnums=0)(
+            current_parameters,
+            current_objective_parameter,
+        )
+
+    value_and_grad_program, value_and_grad_consts = (
+        _parametric_lbfgs_value_and_grad_kernel(
+            value_and_grad,
+            example_x=parameters,
+            example_parameter=parameter_array,
+        )
+    )
+    maxiter_limit, maxfun_limit = _resolve_scipy_lbfgsb_limits(maxiter, maxfun)
+    history_size = _resolve_lbfgs_history_size(
+        maxcor,
+        maxiter_limit=maxiter_limit,
+    )
+    initial_state_program = _lbfgsb_initial_state_kernel(
+        m=history_size,
+        ftol=ftol,
+        gtol=gtol,
+        maxls=maxls,
+    )
+    fused_program = _lbfgsb_parametric_fused_stepwise_kernel(
+        value_and_grad_program,
+        unconstrained_fast_path=_lbfgsb_unconstrained_fast_path_enabled(
+            _LBFGSB_PRIVATE_BOUNDS
+        ),
+    )
+
+    @jax.jit
+    def run_staged(
+        initial_parameters: jax.Array,
+        current_objective_parameter: jax.Array,
+    ) -> _LBFGSResults:
+        initial_state = initial_state_program(initial_parameters)
+        return fused_program(
+            initial_state,
+            (current_objective_parameter, value_and_grad_consts),
+            _int_scalar(maxiter_limit),
+            _int_scalar(maxfun_limit),
+        )
+
+    initial_value, initial_gradient = value_and_grad_program(
+        parameters,
+        parameter_array,
+        value_and_grad_consts,
+    )
+    return PreparedParametricLBFGS(
+        initial_value=initial_value,
+        initial_gradient=initial_gradient,
+        history_size=history_size,
+        parameter_shape=parameter_array.shape,
+        parameter_dtype=str(parameter_array.dtype),
+        _run_staged=run_staged,
     )
 
 
