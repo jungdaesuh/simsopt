@@ -82,6 +82,9 @@ class ProjectedLbfgsOptions:
     objective_target: float = 0.0
 
 
+_DEFAULT_OPTIONS = ProjectedLbfgsOptions()
+
+
 class ProjectedPoint(NamedTuple):
     """One on-manifold point with its tangent gradient and projector evidence."""
 
@@ -123,9 +126,15 @@ class _RetractionState(NamedTuple):
 
 
 class ProjectedLbfgsIteration(NamedTuple):
-    """Host-side scalar record of one iteration, complete enough to bank."""
+    """One iteration's accepted coordinates and host-side scalar evidence.
+
+    ``coordinates`` are the iterate this record opens at, so that callers can
+    take whatever projection of the trajectory they track — a distance to a
+    reference state, a per-block norm — without the optimizer knowing about it.
+    """
 
     index: int
+    coordinates: jax.Array
     objective: float
     projected_gradient_inf: float
     projected_gradient_norm: float
@@ -308,7 +317,7 @@ def run_projected_lbfgs(
     joint_value_constraints: JointValueConstraints,
     initial_coordinates: jax.Array,
     *,
-    options: ProjectedLbfgsOptions = ProjectedLbfgsOptions(),
+    options: ProjectedLbfgsOptions = _DEFAULT_OPTIONS,
     observer: Callable[[ProjectedLbfgsIteration], None] | None = None,
 ) -> ProjectedLbfgsRun:
     """Run the bounded projected L-BFGS loop from one feasible starting point.
@@ -381,9 +390,7 @@ def run_projected_lbfgs(
             break
 
         capped = direction_norm > options.maximum_step_norm
-        step_scale = (
-            options.maximum_step_norm / direction_norm if capped else 1.0
-        )
+        step_scale = options.maximum_step_norm / direction_norm if capped else 1.0
 
         line_search_started = time.perf_counter()
         retraction_seconds = 0.0
@@ -417,6 +424,7 @@ def run_projected_lbfgs(
             records.append(
                 _collapsed_record(
                     index=index,
+                    coordinates=coordinates,
                     point=point,
                     direction_norm=direction_norm,
                     directional_derivative=directional_derivative,
@@ -452,6 +460,7 @@ def run_projected_lbfgs(
 
         record = ProjectedLbfgsIteration(
             index=index,
+            coordinates=coordinates,
             objective=float(point.objective),
             projected_gradient_inf=float(point.projected_gradient_inf),
             projected_gradient_norm=float(point.projected_gradient_norm),
@@ -505,6 +514,7 @@ def run_projected_lbfgs(
 def _collapsed_record(
     *,
     index: int,
+    coordinates: jax.Array,
     point: ProjectedPoint,
     direction_norm: float,
     directional_derivative: float,
@@ -521,6 +531,7 @@ def _collapsed_record(
 
     return ProjectedLbfgsIteration(
         index=index,
+        coordinates=coordinates,
         objective=float(point.objective),
         projected_gradient_inf=float(point.projected_gradient_inf),
         projected_gradient_norm=float(point.projected_gradient_norm),
