@@ -9,6 +9,7 @@ preconditioned solve as an operator on an arbitrary vector.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import NamedTuple
 
 import jax
@@ -137,6 +138,53 @@ def apply_quasi_newton_metric(
     )
 
 
+class TransportedMetric(NamedTuple):
+    """A store carried into another tangent space, with what that cost."""
+
+    metric: QuasiNewtonMetric
+    masked_pairs: jax.Array
+    live_pairs: jax.Array
+
+
+def transport_quasi_newton_metric(
+    metric: QuasiNewtonMetric,
+    transport: Callable[[jax.Array], jax.Array],
+) -> TransportedMetric:
+    """Carry every stored pair through ``transport`` and re-admit the survivors.
+
+    On a manifold each pair was formed in the tangent space of its own iterate,
+    so applying the store at a later point compares vectors that live in
+    different spaces.  ``transport`` maps a ``(memory, dimension)`` batch into
+    the current tangent space; a pair whose curvature no longer clears the
+    admission floor there was carrying curvature that the manifold's rotation
+    invented, and is zeroed.
+
+    A zeroed pair is an exact no-op in the two-loop recursion -- its ``s.y`` is
+    zero, which the recursion already guards, making ``rho`` multiply a zero
+    inner product -- so masking needs no change to the shared correction store.
+    """
+
+    transported_steps = transport(metric.history.s)
+    transported_changes = transport(metric.history.y)
+    curvatures = jnp.sum(transported_steps * transported_changes, axis=1)
+    magnitudes = jnp.linalg.norm(transported_steps, axis=1) * jnp.linalg.norm(
+        transported_changes, axis=1
+    )
+    admissible = curvatures > _CURVATURE_ADMISSION_FLOOR * magnitudes
+    live = jnp.arange(metric.history.s.shape[0]) < metric.history.n_corrs
+    keep = (admissible & live)[:, None]
+    return TransportedMetric(
+        metric=metric._replace(
+            history=metric.history._replace(
+                s=jnp.where(keep, transported_steps, 0.0),
+                y=jnp.where(keep, transported_changes, 0.0),
+            )
+        ),
+        masked_pairs=jnp.sum(live & ~admissible, dtype=jnp.int32),
+        live_pairs=jnp.sum(live, dtype=jnp.int32),
+    )
+
+
 def valid_pair_count(metric: QuasiNewtonMetric) -> jax.Array:
     """Count live correction pairs currently held by the store."""
 
@@ -145,9 +193,11 @@ def valid_pair_count(metric: QuasiNewtonMetric) -> jax.Array:
 
 __all__ = (
     "QuasiNewtonMetric",
+    "TransportedMetric",
     "apply_quasi_newton_metric",
     "curvature_pair_admissible",
     "empty_quasi_newton_metric",
     "insert_curvature_pair",
+    "transport_quasi_newton_metric",
     "valid_pair_count",
 )

@@ -13,12 +13,15 @@ certified Newton correction live in ``projected_hvp_trust_region``, the
 correction store lives in ``quasi_newton_metric``, and the exact derivative
 rows come from ``dense_sqp``.
 
-The pair rule is the standard Riemannian-L-BFGS-with-projection
-approximation: ``s`` is the realized on-manifold displacement (tangent step
-plus normal correction) and ``y`` is the change in the *projected* gradient,
-compared without vector transport.  Both vectors live in different tangent
-spaces, which is exact only in the limit of small steps; the curvature
-admission guard is what keeps the resulting operator positive definite.
+Curvature pairs are formed from the realized on-manifold displacement ``s``
+and the projected-gradient change ``y``.  Those two vectors are only
+comparable inside one tangent space, so ``vector_transport`` decides how the
+manifold's rotation is handled: without it they are differenced across two
+tangent spaces, which is exact only in the small-step limit; with it both are
+formed in the new point's tangent space and the stored pairs are carried into
+the current one before each apply, with pairs whose curvature does not survive
+the carry masked out.  The curvature admission guard keeps the resulting
+operator positive definite either way.
 """
 
 from __future__ import annotations
@@ -47,6 +50,7 @@ from .quasi_newton_metric import (
     curvature_pair_admissible,
     empty_quasi_newton_metric,
     insert_curvature_pair,
+    transport_quasi_newton_metric,
     valid_pair_count,
 )
 
@@ -82,6 +86,17 @@ class ProjectedLbfgsOptions:
     maximum_line_search_trials: int = 24
     minimum_step_scale: float = 1.0e-6
     objective_target: float = 0.0
+    vector_transport: bool = False
+    """Carry curvature pairs between tangent spaces by projection.
+
+    Without this, ``s`` and ``y`` are differences of quantities living in the
+    tangent spaces of two different iterates, so a rotating manifold injects
+    curvature that is an artifact of the rotation.  With it, both are formed in
+    the NEW point's tangent space, and the stored pairs are re-projected into
+    the current one before each two-loop apply, with pairs whose curvature does
+    not survive the carry masked out.
+    """
+
     frozen_projector_line_search: bool = False
     """Retract line-search trials against the accepted point's factored Gram.
 
@@ -105,6 +120,7 @@ class ProjectedPoint(NamedTuple):
 
     projector: CertifiedGramProjector
     objective: jax.Array
+    gradient: jax.Array
     constraints: jax.Array
     feasibility_inf: jax.Array
     projected_gradient: jax.Array
@@ -171,6 +187,7 @@ class ProjectedLbfgsIteration(NamedTuple):
     curvature: float
     pair_admitted: bool
     stored_pairs: int
+    transport_masked_pairs: int
     direction_seconds: float
     line_search_seconds: float
     retraction_seconds: float
@@ -210,6 +227,7 @@ def evaluate_projected_point(
     return ProjectedPoint(
         projector=projector,
         objective=rows.objective,
+        gradient=rows.objective_gradient,
         constraints=rows.constraints,
         feasibility_inf=jnp.linalg.norm(rows.constraints, ord=jnp.inf),
         projected_gradient=projected_gradient,
@@ -395,6 +413,40 @@ def retract_with_frozen_projector(
     return _finish_retraction(joint_value_constraints, retracted, feasibility_tolerance)
 
 
+def project_into_tangent_space(
+    projector: CertifiedGramProjector,
+    vectors: jax.Array,
+) -> jax.Array:
+    """Project a ``(batch, dimension)`` stack into ``null(A)`` row by row.
+
+    This is the vector transport for an embedded manifold: the ambient vector
+    is simply re-projected into the tangent space at the new point.
+    """
+
+    return jax.vmap(
+        lambda vector: project_with_certified_gram(projector, vector).projected
+    )(vectors)
+
+
+def _transported_pair(
+    projector: CertifiedGramProjector,
+    step: jax.Array,
+    previous_gradient: jax.Array,
+    projected_gradient: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """Form one curvature pair entirely inside the NEW point's tangent space.
+
+    ``y`` subtracts the previous RAW gradient projected here from the gradient
+    already projected here, so both terms are measured in one space; ``s`` is
+    the realized displacement projected into that same space.
+    """
+
+    carried = project_into_tangent_space(
+        projector, jnp.stack((step, previous_gradient))
+    )
+    return carried[0], projected_gradient - carried[1]
+
+
 def _admit_curvature_pair(
     metric: QuasiNewtonMetric,
     step: jax.Array,
@@ -459,6 +511,12 @@ def run_projected_lbfgs(
 
     apply_metric = jax.jit(apply_quasi_newton_metric)
     admit_pair = jax.jit(_admit_curvature_pair)
+    transport_metric = jax.jit(
+        lambda metric, projector: transport_quasi_newton_metric(
+            metric, lambda vectors: project_into_tangent_space(projector, vectors)
+        )
+    )
+    transported_pair = jax.jit(_transported_pair)
 
     compile_started = time.perf_counter()
     point = jax.block_until_ready(evaluate(initial_coordinates))
@@ -486,8 +544,14 @@ def run_projected_lbfgs(
             break
 
         direction_started = time.perf_counter()
+        applied_metric = metric
+        masked_pairs = 0
+        if options.vector_transport:
+            carried = jax.block_until_ready(transport_metric(metric, point.projector))
+            applied_metric = carried.metric
+            masked_pairs = int(carried.masked_pairs)
         direction = jax.block_until_ready(
-            apply_metric(metric, -point.projected_gradient)
+            apply_metric(applied_metric, -point.projected_gradient)
         )
         directional_derivative = float(point.projected_gradient @ direction)
         direction_norm = float(jnp.linalg.norm(direction))
@@ -546,6 +610,7 @@ def run_projected_lbfgs(
                     trials=trials,
                     rejected_for_feasibility=rejected_for_feasibility,
                     stored_pairs=stored_pairs,
+                    masked_pairs=masked_pairs,
                     direction_seconds=direction_seconds,
                     line_search_seconds=line_search_seconds,
                     retraction_seconds=retraction_seconds,
@@ -561,12 +626,22 @@ def run_projected_lbfgs(
         point_evaluation_seconds = time.perf_counter() - point_started
 
         pair_started = time.perf_counter()
-        metric, curvature, admitted, live_pairs = jax.block_until_ready(
-            admit_pair(
-                metric,
-                step,
-                next_point.projected_gradient - point.projected_gradient,
+        if options.vector_transport:
+            pair_step, pair_gradient_change = jax.block_until_ready(
+                transported_pair(
+                    next_point.projector,
+                    step,
+                    point.gradient,
+                    next_point.projected_gradient,
+                )
             )
+        else:
+            pair_step = step
+            pair_gradient_change = (
+                next_point.projected_gradient - point.projected_gradient
+            )
+        metric, curvature, admitted, live_pairs = jax.block_until_ready(
+            admit_pair(metric, pair_step, pair_gradient_change)
         )
         pair_update_seconds = time.perf_counter() - pair_started
         stored_pairs = int(live_pairs)
@@ -594,6 +669,7 @@ def run_projected_lbfgs(
             curvature=float(curvature),
             pair_admitted=bool(admitted),
             stored_pairs=stored_pairs,
+            transport_masked_pairs=masked_pairs,
             direction_seconds=direction_seconds,
             line_search_seconds=line_search_seconds,
             retraction_seconds=retraction_seconds,
@@ -636,6 +712,7 @@ def _collapsed_record(
     trials: int,
     rejected_for_feasibility: int,
     stored_pairs: int,
+    masked_pairs: int,
     direction_seconds: float,
     line_search_seconds: float,
     retraction_seconds: float,
@@ -665,6 +742,7 @@ def _collapsed_record(
         curvature=float("nan"),
         pair_admitted=False,
         stored_pairs=stored_pairs,
+        transport_masked_pairs=masked_pairs,
         direction_seconds=direction_seconds,
         line_search_seconds=line_search_seconds,
         retraction_seconds=retraction_seconds,
