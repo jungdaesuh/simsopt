@@ -1,9 +1,10 @@
-"""Fixed-shape limited-memory secant metric for device-resident optimizers.
+"""Trust-region adapter for the shared L-BFGS-B inverse-curvature store.
 
-The module owns one piece of knowledge: how a bounded ring of accepted
-curvature pairs turns into an inverse-curvature operator.  Every array has a
-compile-time shape and every admission decision is masked, so the metric can be
-carried through ``jax.lax`` loop state and applied inside a traced solve.
+The correction-pair layout, the rollover bookkeeping and the two-loop recursion
+all live in ``private/_lbfgsb_scipy.py``, the scipy L-BFGS-B parity port.  This
+module owns only what a trust-region caller adds on top: which accepted steps
+become correction pairs, and how the stored inverse Hessian is handed to a
+preconditioned solve as an operator on an arbitrary vector.
 """
 
 from __future__ import annotations
@@ -13,20 +14,34 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from .private._lbfgsb_scipy import (
+    LbfgsbInverseHessianHistory,
+    lbfgsb_apply_inverse_hessian,
+    lbfgsb_matupd,
+)
+
 # A pair is admitted only when its curvature is positive relative to the pair's
 # own magnitude; the floor also rejects nonfinite pairs, since every comparison
-# against NaN is False.
+# against NaN is False.  L-BFGS-B decides admission in its caller too
+# (``mainlb``'s ``skip_update``), but with the line-search directional
+# derivatives a trust-region step does not have.
 _CURVATURE_ADMISSION_FLOOR = 1.0e-10
 
 
 class QuasiNewtonMetric(NamedTuple):
-    """Ring of admitted secant pairs with the newest pair at ``insertion_index - 1``."""
+    """Shared correction store with the bookkeeping ``lbfgsb_matupd`` maintains.
 
-    steps: jax.Array
-    gradient_changes: jax.Array
-    reciprocal_curvatures: jax.Array
-    pair_valid: jax.Array
-    insertion_index: jax.Array
+    ``inverse_hessian_theta`` is L-BFGS-B's ``theta``: the initial inverse
+    Hessian is ``I / theta``, so an empty store applies as the identity.
+    """
+
+    history: LbfgsbInverseHessianHistory
+    correction_gram: jax.Array
+    step_gram: jax.Array
+    tail_index: jax.Array
+    head_index: jax.Array
+    admitted_updates: jax.Array
+    inverse_hessian_theta: jax.Array
 
 
 def empty_quasi_newton_metric(
@@ -34,14 +49,20 @@ def empty_quasi_newton_metric(
     dimension: int,
     dtype: jnp.dtype,
 ) -> QuasiNewtonMetric:
-    """Return a metric holding no pair, which applies as the exact identity."""
+    """Return a store holding no pair, which applies as the exact identity."""
 
     return QuasiNewtonMetric(
-        steps=jnp.zeros((memory, dimension), dtype=dtype),
-        gradient_changes=jnp.zeros((memory, dimension), dtype=dtype),
-        reciprocal_curvatures=jnp.zeros((memory,), dtype=dtype),
-        pair_valid=jnp.zeros((memory,), dtype=jnp.bool_),
-        insertion_index=jnp.asarray(0, dtype=jnp.int32),
+        history=LbfgsbInverseHessianHistory(
+            s=jnp.zeros((memory, dimension), dtype=dtype),
+            y=jnp.zeros((memory, dimension), dtype=dtype),
+            n_corrs=jnp.asarray(0, dtype=jnp.int32),
+        ),
+        correction_gram=jnp.zeros((memory, memory), dtype=dtype),
+        step_gram=jnp.zeros((memory, memory), dtype=dtype),
+        tail_index=jnp.asarray(0, dtype=jnp.int32),
+        head_index=jnp.asarray(0, dtype=jnp.int32),
+        admitted_updates=jnp.asarray(0, dtype=jnp.int32),
+        inverse_hessian_theta=jnp.asarray(1.0, dtype=dtype),
     )
 
 
@@ -59,46 +80,44 @@ def insert_curvature_pair(
     step: jax.Array,
     gradient_change: jax.Array,
 ) -> QuasiNewtonMetric:
-    """Overwrite the oldest ring slot, but only with an admissible pair."""
+    """Store one admissible pair through the shared L-BFGS-B update.
+
+    The accepted step is already the whole step, so the update runs at unit
+    line-search scale.
+    """
 
     admissible = curvature_pair_admissible(step, gradient_change)
-    curvature = step @ gradient_change
-    memory = metric.steps.shape[0]
-    index = jnp.mod(metric.insertion_index, memory)
-    safe_curvature = jnp.where(admissible, curvature, jnp.ones_like(curvature))
-    return QuasiNewtonMetric(
-        steps=metric.steps.at[index].set(
-            jnp.where(admissible, step, metric.steps[index])
-        ),
-        gradient_changes=metric.gradient_changes.at[index].set(
-            jnp.where(admissible, gradient_change, metric.gradient_changes[index])
-        ),
-        reciprocal_curvatures=metric.reciprocal_curvatures.at[index].set(
-            jnp.where(
-                admissible,
-                1.0 / safe_curvature,
-                metric.reciprocal_curvatures[index],
-            )
-        ),
-        pair_valid=metric.pair_valid.at[index].set(
-            admissible | metric.pair_valid[index]
-        ),
-        insertion_index=metric.insertion_index + admissible.astype(jnp.int32),
+    update = lbfgsb_matupd(
+        metric.history.s,
+        metric.history.y,
+        metric.correction_gram,
+        metric.step_gram,
+        step,
+        gradient_change,
+        metric.tail_index,
+        metric.admitted_updates + 1,
+        metric.history.n_corrs,
+        metric.head_index,
+        gradient_change @ gradient_change,
+        step @ gradient_change,
+        jnp.ones((), dtype=step.dtype),
+        step @ step,
     )
-
-
-def quasi_newton_metric_scaling(metric: QuasiNewtonMetric) -> jax.Array:
-    """Return ``(s.y)/(y.y)`` of the newest admitted pair, or one when empty."""
-
-    memory = metric.steps.shape[0]
-    newest = jnp.mod(metric.insertion_index - 1, memory)
-    gradient_change = metric.gradient_changes[newest]
-    curvature = metric.steps[newest] @ gradient_change
-    gradient_change_squared = gradient_change @ gradient_change
-    return jnp.where(
-        metric.pair_valid[newest],
-        curvature / gradient_change_squared,
-        jnp.ones_like(curvature),
+    updated = QuasiNewtonMetric(
+        history=LbfgsbInverseHessianHistory(
+            s=update.ws, y=update.wy, n_corrs=update.col
+        ),
+        correction_gram=update.sy,
+        step_gram=update.ss,
+        tail_index=update.itail,
+        head_index=update.head,
+        admitted_updates=metric.admitted_updates + 1,
+        inverse_hessian_theta=update.theta,
+    )
+    return jax.tree.map(
+        lambda admitted, retained: jnp.where(admissible, admitted, retained),
+        updated,
+        metric,
     )
 
 
@@ -106,50 +125,22 @@ def apply_quasi_newton_metric(
     metric: QuasiNewtonMetric,
     vector: jax.Array,
 ) -> jax.Array:
-    """Apply the two-loop recursion, which is the identity for an empty metric."""
+    """Apply the stored inverse Hessian, which is the identity when empty."""
 
-    memory = metric.steps.shape[0]
-    scaling = quasi_newton_metric_scaling(metric)
-
-    def newest_to_oldest(
-        offset: int, carry: tuple[jax.Array, jax.Array]
-    ) -> tuple[jax.Array, jax.Array]:
-        residual, coefficients = carry
-        index = jnp.mod(metric.insertion_index - 1 - offset, memory)
-        coefficient = jnp.where(
-            metric.pair_valid[index],
-            metric.reciprocal_curvatures[index] * (metric.steps[index] @ residual),
-            jnp.zeros((), dtype=vector.dtype),
-        )
-        return (
-            residual - coefficient * metric.gradient_changes[index],
-            coefficients.at[index].set(coefficient),
-        )
-
-    residual, coefficients = jax.lax.fori_loop(
-        0,
-        memory,
-        newest_to_oldest,
-        (vector, jnp.zeros((memory,), dtype=vector.dtype)),
+    return lbfgsb_apply_inverse_hessian(
+        metric.history.s,
+        metric.history.y,
+        metric.head_index,
+        metric.history.n_corrs,
+        metric.inverse_hessian_theta,
+        vector,
     )
-
-    def oldest_to_newest(offset: int, applied: jax.Array) -> jax.Array:
-        index = jnp.mod(metric.insertion_index + offset, memory)
-        correction = coefficients[index] - jnp.where(
-            metric.pair_valid[index],
-            metric.reciprocal_curvatures[index]
-            * (metric.gradient_changes[index] @ applied),
-            jnp.zeros((), dtype=vector.dtype),
-        )
-        return applied + correction * metric.steps[index]
-
-    return jax.lax.fori_loop(0, memory, oldest_to_newest, scaling * residual)
 
 
 def valid_pair_count(metric: QuasiNewtonMetric) -> jax.Array:
-    """Count admitted pairs currently held by the ring."""
+    """Count live correction pairs currently held by the store."""
 
-    return jnp.sum(metric.pair_valid.astype(jnp.int32))
+    return metric.history.n_corrs
 
 
 __all__ = (
@@ -158,6 +149,5 @@ __all__ = (
     "curvature_pair_admissible",
     "empty_quasi_newton_metric",
     "insert_curvature_pair",
-    "quasi_newton_metric_scaling",
     "valid_pair_count",
 )
