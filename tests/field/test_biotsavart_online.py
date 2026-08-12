@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
+import simsopt_jax.core.biotsavart_online as _online
+import simsopt_jax.runtime.trace_annotations as _trace_annotations
 from simsopt_jax.backend import invalidate_backend_cache
 from simsopt_jax.core import field as core_field
-import simsopt_jax.core.biotsavart_online as _online
 from simsopt_jax.core.specs import (
     CoilGroupSpec,
     GroupedCoilSetSpec,
@@ -24,7 +25,7 @@ from simsopt_jax.core.surface_rzfourier import (
     surface_rz_fourier_geometry_from_spec,
     surface_rz_fourier_spec_from_dofs,
 )
-
+from simsopt_jax.runtime.trace_annotations import PhaseId, device_scope, trace_session
 
 jax.config.update("jax_enable_x64", True)
 
@@ -84,6 +85,21 @@ def _candidate(*args):
     )
 
 
+def _grouped_candidate(points, source_positions, source_vectors):
+    source_count = source_positions.shape[0]
+    gammas = jnp.reshape(source_positions, (1, source_count, 3))
+    gammadashs = jnp.reshape(
+        source_vectors * jnp.asarray(source_count, dtype=jnp.float32),
+        (1, source_count, 3),
+    )
+    currents = jnp.ones((1,), dtype=jnp.float32)
+    return _online.mixed_grouped_biot_savart_B_online(
+        points,
+        ((gammas, gammadashs, currents),),
+        source_tile_size=4,
+    )
+
+
 def _assert_close(actual, expected, *, rtol: float, atol: float) -> None:
     np.testing.assert_allclose(
         np.asarray(actual),
@@ -105,6 +121,107 @@ def test_online_custom_jvp_primal_matches_primal_entrypoint_bitwise():
     assert jvp_array.dtype == direct_array.dtype
     assert jvp_array.shape == direct_array.shape
     assert jvp_array.tobytes() == direct_array.tobytes()
+
+
+def test_online_forward_annotation_disabled_is_numerical_noop(monkeypatch):
+    """The default route retains the exact mixed-online numerical result."""
+    primals = _fixture(source_count=8, seed=1736)
+    baseline = _grouped_candidate(*primals)
+
+    def unexpected_named_scope(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("disabled annotations must not enter jax.named_scope")
+
+    monkeypatch.setattr(_trace_annotations.jax, "named_scope", unexpected_named_scope)
+    disabled = _grouped_candidate(*primals)
+
+    baseline_array = np.asarray(baseline)
+    disabled_array = np.asarray(disabled)
+    assert disabled_array.dtype == baseline_array.dtype
+    assert disabled_array.shape == baseline_array.shape
+    assert disabled_array.tobytes() == baseline_array.tobytes()
+
+
+def test_online_forward_enabled_compilation_exposes_owned_phase(monkeypatch):
+    """The compiled mixed-online owner carries the forward phase boundary."""
+    observed_phases = []
+    original_device_scope = _online.device_scope
+
+    @contextmanager
+    def recording_scope(phase):
+        observed_phases.append(phase)
+        with original_device_scope(phase):
+            yield
+
+    monkeypatch.setattr(_online, "device_scope", recording_scope)
+    primals = _fixture(source_count=8, seed=1737)
+    with trace_session():
+        lowered = jax.jit(_grouped_candidate).lower(*primals)
+
+    stablehlo_with_debug_info = lowered.compiler_ir(
+        dialect="stablehlo"
+    ).operation.get_asm(enable_debug_info=True, pretty_debug_info=True)
+    assert observed_phases == [PhaseId.BIOTSAVART_FORWARD]
+    assert PhaseId.BIOTSAVART_FORWARD.value in stablehlo_with_debug_info
+    assert "biotsavart_forward" in stablehlo_with_debug_info
+
+
+@pytest.mark.parametrize(
+    "enclosing_phase",
+    (
+        PhaseId.ADJOINT_OUTER_VJP_RHS,
+        PhaseId.ADJOINT_IMPLICIT_COIL_VJP,
+    ),
+)
+def test_online_reverse_transform_compiles_as_vjp_under_adjoint_owner(
+    enclosing_phase,
+):
+    """Production adjoint owners classify mixed-online derivative work as VJP."""
+    points, source_positions, source_vectors = _fixture(source_count=8, seed=1740)
+
+    def scalar_field_sum(current_source_vectors):
+        return jnp.sum(_candidate(points, source_positions, current_source_vectors))
+
+    with trace_session(), device_scope(enclosing_phase):
+        lowered = jax.jit(jax.grad(scalar_field_sum)).lower(source_vectors)
+
+    stablehlo_with_debug_info = lowered.compiler_ir(
+        dialect="stablehlo"
+    ).operation.get_asm(enable_debug_info=True, pretty_debug_info=True)
+    assert (
+        f"{PhaseId.BIOTSAVART_FORWARD.value}/{PhaseId.BIOTSAVART_VJP.value}"
+        in stablehlo_with_debug_info
+    )
+
+
+@pytest.mark.parametrize(
+    "enclosing_phase",
+    (None, PhaseId.NEWTON_RESIDUAL_JVP, PhaseId.ADJOINT_LU_SOLVE),
+)
+def test_online_derivative_compiles_as_forward_without_adjoint_owner(
+    enclosing_phase,
+):
+    """Only the two production adjoint owners classify online work as VJP."""
+    points, source_positions, source_vectors = _fixture(source_count=8, seed=1741)
+
+    def scalar_field_sum(current_source_vectors):
+        return jnp.sum(_candidate(points, source_positions, current_source_vectors))
+
+    with trace_session():
+        if enclosing_phase is None:
+            lowered = jax.jit(jax.grad(scalar_field_sum)).lower(source_vectors)
+        else:
+            with device_scope(enclosing_phase):
+                lowered = jax.jit(jax.grad(scalar_field_sum)).lower(source_vectors)
+
+    stablehlo_with_debug_info = lowered.compiler_ir(
+        dialect="stablehlo"
+    ).operation.get_asm(enable_debug_info=True, pretty_debug_info=True)
+    assert PhaseId.BIOTSAVART_VJP.value not in stablehlo_with_debug_info
+    assert (
+        f"{PhaseId.BIOTSAVART_FORWARD.value}/{PhaseId.BIOTSAVART_FORWARD.value}"
+        in stablehlo_with_debug_info
+    )
 
 
 def test_online_custom_jvp_shares_tile_geometry_in_lowering():
@@ -777,6 +894,180 @@ def test_production_grouped_dispatch_vjp_matches_fp64(monkeypatch):
         strict=True,
     ):
         _assert_close(actual, expected, rtol=3.0e-5, atol=3.0e-9)
+
+
+@pytest.mark.parametrize("quadrature_count", (127, 128, 129, 250, 256, 257))
+def test_production_online_exact_source_boundaries_match_fp64_forward_jvp_vjp(
+    monkeypatch,
+    quadrature_count,
+):
+    """Mixed production dispatch preserves exact Q=128 boundary geometry."""
+    points = jnp.asarray(
+        [[0.20, 0.02, 0.01], [-0.14, 0.11, -0.04]],
+        dtype=jnp.float32,
+    )
+    group = _make_quadrature_group(
+        coil_count=1,
+        quadrature_count=quadrature_count,
+        phase=0.17,
+    )
+    coil_spec = _grouped_spec((group,))
+    directions = (
+        jnp.asarray(
+            np.random.default_rng(10100 + quadrature_count).normal(
+                scale=0.03,
+                size=points.shape,
+            ),
+            dtype=jnp.float32,
+        ),
+        _grouped_spec_directions(coil_spec, seed=10200 + quadrature_count),
+    )
+    cotangent = jnp.asarray(
+        np.random.default_rng(10300 + quadrature_count).normal(size=(2, 3)),
+        dtype=jnp.float64,
+    )
+    monkeypatch.setattr(core_field, "is_mixed_precision_enabled", lambda: True)
+    monkeypatch.setattr(
+        core_field,
+        "coil_group_collective_config",
+        lambda currents: None,
+    )
+    monkeypatch.setattr(
+        core_field,
+        "get_field_kernel_tuning",
+        lambda: SimpleNamespace(mixed_biot_savart_source_tile_size=128),
+    )
+
+    actual_value, actual_tangent = jax.jvp(
+        _production_grouped_candidate,
+        (points, coil_spec),
+        directions,
+    )
+    expected_value, expected_tangent = jax.jvp(
+        _production_grouped_reference,
+        (points, coil_spec),
+        directions,
+    )
+    _, actual_pullback = jax.vjp(_production_grouped_candidate, points, coil_spec)
+    _, expected_pullback = jax.vjp(_production_grouped_reference, points, coil_spec)
+    actual_cotangents = actual_pullback(cotangent)
+    expected_cotangents = expected_pullback(cotangent)
+    source_positions, source_vectors = _flatten_grouped_biot_savart_sources((group,))
+
+    assert source_positions.shape == source_vectors.shape == (quadrature_count, 3)
+    assert actual_value.shape == expected_value.shape == (2, 3)
+    assert actual_tangent.shape == expected_tangent.shape == (2, 3)
+    assert actual_value.dtype == expected_value.dtype == jnp.float64
+    assert actual_tangent.dtype == expected_tangent.dtype == jnp.float64
+    assert np.all(np.isfinite(np.asarray(actual_value)))
+    assert np.all(np.isfinite(np.asarray(actual_tangent)))
+    _assert_close(actual_value, expected_value, rtol=4.0e-6, atol=3.0e-10)
+    _assert_close(actual_tangent, expected_tangent, rtol=1.2e-5, atol=3.0e-9)
+    for actual, expected in zip(
+        jax.tree.leaves(actual_cotangents),
+        jax.tree.leaves(expected_cotangents),
+        strict=True,
+    ):
+        assert actual.shape == expected.shape
+        assert actual.dtype == expected.dtype == jnp.float32
+        assert np.all(np.isfinite(np.asarray(actual)))
+        _assert_close(actual, expected, rtol=3.0e-5, atol=3.0e-9)
+
+
+@pytest.mark.parametrize(
+    ("source_count", "expected_tail_width"),
+    (
+        (127, 127),
+        (128, None),
+        (129, 1),
+        (250, 122),
+        (256, None),
+        (257, 1),
+    ),
+)
+def test_online_source_boundary_dispatch_uses_exact_unpadded_tail(
+    monkeypatch,
+    source_count,
+    expected_tail_width,
+):
+    """The production online accumulator passes physical tail widths to tiles."""
+    primals = _fixture(
+        point_count=2, source_count=source_count, seed=11000 + source_count
+    )
+    tangents = _directions(primals, seed=12000 + source_count)
+    observed_full_tile_shapes = []
+    observed_primal_widths = []
+    observed_jvp_widths = []
+    original_source_tiles = _online._source_tiles
+    original_tile_value_sum = _online._tile_value_sum
+    original_tile_value_and_tangent_sum = _online._tile_value_and_tangent_sum
+
+    def recording_source_tiles(array, *, tile_size, full_tile_count):
+        tiled = original_source_tiles(
+            array,
+            tile_size=tile_size,
+            full_tile_count=full_tile_count,
+        )
+        observed_full_tile_shapes.append(tiled.shape)
+        return tiled
+
+    def recording_tile_value_sum(points, source_positions, source_vectors):
+        observed_primal_widths.append(source_positions.shape[0])
+        return original_tile_value_sum(points, source_positions, source_vectors)
+
+    def recording_tile_value_and_tangent_sum(
+        points,
+        source_positions,
+        source_vectors,
+        points_dot,
+        source_positions_dot,
+        source_vectors_dot,
+    ):
+        observed_jvp_widths.append(source_positions.shape[0])
+        return original_tile_value_and_tangent_sum(
+            points,
+            source_positions,
+            source_vectors,
+            points_dot,
+            source_positions_dot,
+            source_vectors_dot,
+        )
+
+    monkeypatch.setattr(_online, "_source_tiles", recording_source_tiles)
+    monkeypatch.setattr(_online, "_tile_value_sum", recording_tile_value_sum)
+    monkeypatch.setattr(
+        _online,
+        "_tile_value_and_tangent_sum",
+        recording_tile_value_and_tangent_sum,
+    )
+
+    direct = _mixed_biot_savart_B_online_from_flat_sources(
+        *primals,
+        source_tile_size=128,
+    )
+    jvp_value, tangent = jax.jvp(
+        lambda *args: _mixed_biot_savart_B_online_from_flat_sources(
+            *args,
+            source_tile_size=128,
+        ),
+        primals,
+        tangents,
+    )
+
+    full_tile_count = source_count // 128
+    assert all(
+        shape == (full_tile_count, 128, 3) for shape in observed_full_tile_shapes
+    )
+    expected_widths = ((128,) if full_tile_count else ()) + (
+        (expected_tail_width,) if expected_tail_width is not None else ()
+    )
+    assert tuple(observed_primal_widths) == expected_widths
+    assert tuple(observed_jvp_widths) == expected_widths
+    assert direct.shape == jvp_value.shape == tangent.shape == (2, 3)
+    assert direct.dtype == jvp_value.dtype == tangent.dtype == jnp.float64
+    assert np.all(np.isfinite(np.asarray(direct)))
+    assert np.all(np.isfinite(np.asarray(tangent)))
+    np.testing.assert_array_equal(np.asarray(jvp_value), np.asarray(direct))
 
 
 def test_production_grouped_dispatch_reverse_over_jvp_matches_fp64(monkeypatch):

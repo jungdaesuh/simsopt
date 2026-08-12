@@ -13,8 +13,14 @@ from collections.abc import Sequence
 from functools import partial
 
 import jax
-from jax import lax
 import jax.numpy as jnp
+from jax import lax
+
+from simsopt_jax.runtime.trace_annotations import (
+    PhaseId,
+    current_device_phase_stack,
+    device_scope,
+)
 
 from .biotsavart import (
     _MU0_OVER_4PI,
@@ -378,16 +384,45 @@ def _mixed_biot_savart_B_online_jvp(
 ):
     points, source_positions, source_vectors = primals
     points_dot, source_positions_dot, source_vectors_dot = tangents
-    primal_sum, tangent_sum = _accumulate_primal_and_tangent_tiles(
-        points,
-        source_positions,
-        source_vectors,
-        points_dot,
-        source_positions_dot,
-        source_vectors_dot,
-        source_tile_size=source_tile_size,
+    enclosing_phases = current_device_phase_stack()
+    derivative_phase = (
+        PhaseId.BIOTSAVART_VJP
+        if PhaseId.ADJOINT_OUTER_VJP_RHS in enclosing_phases
+        or PhaseId.ADJOINT_IMPLICIT_COIL_VJP in enclosing_phases
+        else PhaseId.BIOTSAVART_FORWARD
     )
-    return _scale_float64(primal_sum), _scale_float64(tangent_sum)
+    with device_scope(derivative_phase):
+        primal_sum, tangent_sum = _accumulate_primal_and_tangent_tiles(
+            points,
+            source_positions,
+            source_vectors,
+            points_dot,
+            source_positions_dot,
+            source_vectors_dot,
+            source_tile_size=source_tile_size,
+        )
+        return _scale_float64(primal_sum), _scale_float64(tangent_sum)
+
+
+def _mixed_biot_savart_B_online_kernel(
+    points,
+    source_positions,
+    source_vectors,
+    source_tile_size: int,
+):
+    with device_scope(PhaseId.BIOTSAVART_FORWARD):
+        return _mixed_biot_savart_B_online(
+            points,
+            source_positions,
+            source_vectors,
+            source_tile_size,
+        )
+
+
+_named_mixed_biot_savart_B_online = jax.named_call(
+    _mixed_biot_savart_B_online_kernel,
+    name="biotsavart_forward",
+)
 
 
 def _mixed_biot_savart_B_online_from_flat_sources(
@@ -412,7 +447,7 @@ def _mixed_biot_savart_B_online_from_flat_sources(
     source_positions = jnp.asarray(source_positions)
     source_vectors = jnp.asarray(source_vectors)
     _validate_flat_sources(points, source_positions, source_vectors)
-    return _mixed_biot_savart_B_online(
+    return _named_mixed_biot_savart_B_online(
         points,
         source_positions,
         source_vectors,

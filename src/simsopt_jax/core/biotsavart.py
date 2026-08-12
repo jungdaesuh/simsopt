@@ -22,6 +22,8 @@ from simsopt_jax.backend import (
     get_field_kernel_tuning,
     register_backend_cache_clear,
 )
+from simsopt_jax.runtime.trace_annotations import PhaseId, device_scope
+
 from ._device_scalars import device_one as _device_one
 from ._math_utils import (
     as_compute_array as _as_compute_array,
@@ -714,17 +716,19 @@ def _make_kernel(
                 basis = lax.pcast(basis, point_vma_axis_name, to="varying")
             return primals, jax.vmap(tangents_fn, in_axes=(0,))(basis)
 
-    @jax.jit
     def kernel(points, gammas, gammadashs, currents):
-        def chunk_fn(chunk_points):
-            return jax.vmap(
-                lambda x: per_point(x, gammas, gammadashs, currents),
-                in_axes=(0,),
-            )(chunk_points)
+        with device_scope(PhaseId.BIOTSAVART_FORWARD):
 
-        return _point_chunk_reduce(points, chunk_fn, point_cs)
+            def chunk_fn(chunk_points):
+                return jax.vmap(
+                    lambda x: per_point(x, gammas, gammadashs, currents),
+                    in_axes=(0,),
+                )(chunk_points)
 
-    return kernel
+            return _point_chunk_reduce(points, chunk_fn, point_cs)
+
+    kernel.__name__ = "biotsavart_forward"
+    return jax.jit(kernel)
 
 
 def _get_kernel(integrand_key, diff_mode, *, point_vma_axis_name=None):
@@ -758,20 +762,22 @@ def _make_B_vjp_kernel(coil_cs, quad_bs, point_cs):
         None,
     )
 
-    @jax.jit
     def kernel(points, v, gammas, gammadashs, currents):
-        def fwd(group_gammas, group_gammadashs, group_currents):
-            return forward_kernel(
-                points,
-                group_gammas,
-                group_gammadashs,
-                group_currents,
-            )
+        with device_scope(PhaseId.BIOTSAVART_VJP):
 
-        _, pullback = jax.vjp(fwd, gammas, gammadashs, currents)
-        return pullback(v)
+            def fwd(group_gammas, group_gammadashs, group_currents):
+                return forward_kernel(
+                    points,
+                    group_gammas,
+                    group_gammadashs,
+                    group_currents,
+                )
 
-    return kernel
+            _, pullback = jax.vjp(fwd, gammas, gammadashs, currents)
+            return pullback(v)
+
+    kernel.__name__ = "biotsavart_vjp"
+    return jax.jit(kernel)
 
 
 def _get_B_vjp_kernel():
@@ -893,9 +899,33 @@ register_backend_cache_clear(invalidate_kernel_cache)
 # ── Public API ────────────────────────────────────────────────────────
 
 
+def _apply_forward_kernel(
+    integrand_key,
+    diff_mode,
+    points,
+    gammas,
+    gammadashs,
+    currents,
+    *,
+    point_vma_axis_name=None,
+):
+    """Apply one cached field kernel under the canonical forward trace scope."""
+
+    return _get_kernel(
+        integrand_key,
+        diff_mode,
+        point_vma_axis_name=point_vma_axis_name,
+    )(points, gammas, gammadashs, currents)
+
+
 def biot_savart_B(points, gammas, gammadashs, currents):
-    return _get_kernel(_Integrand.B, _DiffMode.VALUE)(
-        points, gammas, gammadashs, currents
+    return _apply_forward_kernel(
+        _Integrand.B,
+        _DiffMode.VALUE,
+        points,
+        gammas,
+        gammadashs,
+        currents,
     )
 
 
@@ -909,8 +939,13 @@ def biot_savart_dB_by_dX(points, gammas, gammadashs, currents):
         ``dB[p, j, l] = ∂_j B_l(x_p)``. Axis 1 is the spatial derivative
         direction; axis 2 is the B-field component.
     """
-    return _get_kernel(_Integrand.B, _DiffMode.JACOBIAN)(
-        points, gammas, gammadashs, currents
+    return _apply_forward_kernel(
+        _Integrand.B,
+        _DiffMode.JACOBIAN,
+        points,
+        gammas,
+        gammadashs,
+        currents,
     )
 
 
@@ -924,8 +959,13 @@ def biot_savart_d2B_by_dXdX(points, gammas, gammadashs, currents):
     ``C=16``, ``Q=128`` materializes roughly 226 MB (216 MiB) of Hessian
     intermediates before quadrature reduction.
     """
-    return _get_kernel(_Integrand.B, _DiffMode.HESSIAN)(
-        points, gammas, gammadashs, currents
+    return _apply_forward_kernel(
+        _Integrand.B,
+        _DiffMode.HESSIAN,
+        points,
+        gammas,
+        gammadashs,
+        currents,
     )
 
 
@@ -941,8 +981,13 @@ def biot_savart_B_and_dB(points, gammas, gammadashs, currents):
         ``dB[p, j, l] = ∂_j B_l(x_p)``. Axis 1 is the spatial derivative
         direction; axis 2 is the B-field component.
     """
-    return _get_kernel(_Integrand.B, _DiffMode.VALUE_AND_JACOBIAN)(
-        points, gammas, gammadashs, currents
+    return _apply_forward_kernel(
+        _Integrand.B,
+        _DiffMode.VALUE_AND_JACOBIAN,
+        points,
+        gammas,
+        gammadashs,
+        currents,
     )
 
 
@@ -964,16 +1009,25 @@ def biot_savart_B_and_dB_with_point_axis(
         ``dB[p, j, l] = ∂_j B_l(x_p)``. Axis 1 is the spatial derivative
         direction; axis 2 is the B-field component.
     """
-    return _get_kernel(
+    return _apply_forward_kernel(
         _Integrand.B,
         _DiffMode.VALUE_AND_JACOBIAN,
+        points,
+        gammas,
+        gammadashs,
+        currents,
         point_vma_axis_name=point_axis_name,
-    )(points, gammas, gammadashs, currents)
+    )
 
 
 def biot_savart_A(points, gammas, gammadashs, currents):
-    return _get_kernel(_Integrand.A, _DiffMode.VALUE)(
-        points, gammas, gammadashs, currents
+    return _apply_forward_kernel(
+        _Integrand.A,
+        _DiffMode.VALUE,
+        points,
+        gammas,
+        gammadashs,
+        currents,
     )
 
 
@@ -987,14 +1041,24 @@ def biot_savart_dA_by_dX(points, gammas, gammadashs, currents):
         ``dA[p, j, l] = ∂_j A_l(x_p)``. Axis 1 is the spatial derivative
         direction; axis 2 is the A-field component.
     """
-    return _get_kernel(_Integrand.A, _DiffMode.JACOBIAN)(
-        points, gammas, gammadashs, currents
+    return _apply_forward_kernel(
+        _Integrand.A,
+        _DiffMode.JACOBIAN,
+        points,
+        gammas,
+        gammadashs,
+        currents,
     )
 
 
 def biot_savart_d2A_by_dXdX(points, gammas, gammadashs, currents):
-    return _get_kernel(_Integrand.A, _DiffMode.HESSIAN)(
-        points, gammas, gammadashs, currents
+    return _apply_forward_kernel(
+        _Integrand.A,
+        _DiffMode.HESSIAN,
+        points,
+        gammas,
+        gammadashs,
+        currents,
     )
 
 

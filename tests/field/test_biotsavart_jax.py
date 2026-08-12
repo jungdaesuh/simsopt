@@ -214,6 +214,117 @@ def _host_array(value):
     return np.asarray(jax.device_get(jax.block_until_ready(value)))
 
 
+def test_timeline_scopes_preserve_biot_savart_values_vjp_and_cache_behavior():
+    from simsopt_jax.runtime.trace_annotations import trace_session
+
+    points = jnp.asarray([[0.0, 0.0, 0.3], [0.2, -0.1, 0.4]])
+    gammas, gammadashs = _make_circular_coil(nquad=24)
+    currents = jnp.asarray([8.0e4])
+    cotangent = jnp.asarray([[0.5, -0.25, 1.0], [-0.75, 0.125, 0.25]])
+
+    core_biotsavart.invalidate_kernel_cache()
+    baseline_field = _host_array(
+        core_biotsavart.biot_savart_B(
+            points,
+            gammas,
+            gammadashs,
+            currents,
+        )
+    )
+    baseline_vjp = tuple(
+        _host_array(leaf)
+        for leaf in core_biotsavart.biot_savart_B_vjp(
+            points,
+            cotangent,
+            gammas,
+            gammadashs,
+            currents,
+        )
+    )
+    baseline_cache_sizes = (
+        core_biotsavart._make_kernel.cache_info().currsize,
+        core_biotsavart._make_B_vjp_kernel.cache_info().currsize,
+    )
+
+    core_biotsavart.invalidate_kernel_cache()
+    with trace_session():
+        annotated_field = _host_array(
+            core_biotsavart.biot_savart_B(
+                points,
+                gammas,
+                gammadashs,
+                currents,
+            )
+        )
+        annotated_vjp = tuple(
+            _host_array(leaf)
+            for leaf in core_biotsavart.biot_savart_B_vjp(
+                points,
+                cotangent,
+                gammas,
+                gammadashs,
+                currents,
+            )
+        )
+    annotated_cache_sizes = (
+        core_biotsavart._make_kernel.cache_info().currsize,
+        core_biotsavart._make_B_vjp_kernel.cache_info().currsize,
+    )
+
+    np.testing.assert_array_equal(annotated_field, baseline_field)
+    for annotated_leaf, baseline_leaf in zip(
+        annotated_vjp,
+        baseline_vjp,
+        strict=True,
+    ):
+        np.testing.assert_array_equal(annotated_leaf, baseline_leaf)
+    assert annotated_cache_sizes == baseline_cache_sizes == (1, 1)
+    core_biotsavart.invalidate_kernel_cache()
+
+
+def test_timeline_scopes_tag_forward_and_reverse_kernel_owners(monkeypatch):
+    from simsopt_jax.runtime.trace_annotations import PhaseId
+
+    observed_phases = []
+
+    @contextmanager
+    def recording_scope(phase):
+        observed_phases.append(phase)
+        yield
+
+    monkeypatch.setattr(core_biotsavart, "device_scope", recording_scope)
+    core_biotsavart.invalidate_kernel_cache()
+    points = jnp.asarray([[0.0, 0.0, 0.3]])
+    gammas, gammadashs = _make_circular_coil(nquad=16)
+    currents = jnp.asarray([8.0e4])
+    cotangent = jnp.asarray([[0.5, -0.25, 1.0]])
+
+    _host_array(
+        core_biotsavart.biot_savart_B(
+            points,
+            gammas,
+            gammadashs,
+            currents,
+        )
+    )
+    jax.tree.map(
+        _host_array,
+        core_biotsavart.biot_savart_B_vjp(
+            points,
+            cotangent,
+            gammas,
+            gammadashs,
+            currents,
+        ),
+    )
+
+    assert observed_phases == [
+        PhaseId.BIOTSAVART_FORWARD,
+        PhaseId.BIOTSAVART_VJP,
+    ]
+    core_biotsavart.invalidate_kernel_cache()
+
+
 def _make_accumulation_order_fixture(
     *,
     seed: int,
@@ -1435,6 +1546,152 @@ class TestBiotSavartJaxChunkedSelfConsistency:
                 rtol=1e-12,
                 atol=1e-14,
             )
+
+    @pytest.mark.parametrize(
+        "quadrature_count",
+        (127, 128, 129, 250, 256, 257),
+    )
+    def test_exact_quadrature_boundaries_match_dense_forward_jvp_and_vjp(
+        self,
+        monkeypatch,
+        quadrature_count,
+    ):
+        """Production FP64 kernels preserve dense parity at Q=128 boundaries."""
+        from simsopt_jax.core import biotsavart as core_bs
+
+        primals = _make_random_fixture(
+            seed=8100 + quadrature_count,
+            ncoils=1,
+            nquad=quadrature_count,
+            npoints=2,
+        )
+        rng = np.random.default_rng(9100 + quadrature_count)
+        tangents = tuple(
+            jnp.asarray(
+                rng.normal(scale=0.02, size=primal.shape),
+                dtype=jnp.float64,
+            )
+            for primal in primals
+        )
+        cotangent = jnp.asarray(
+            rng.normal(size=(primals[0].shape[0], 3)),
+            dtype=jnp.float64,
+        )
+
+        def chunked(points, gammas, gammadashs, currents):
+            return core_bs.biot_savart_B(
+                points,
+                gammas,
+                gammadashs,
+                currents,
+            )
+
+        def dense(points, gammas, gammadashs, currents):
+            return _dense_B_reference(
+                core_bs,
+                points,
+                gammas,
+                gammadashs,
+                currents,
+            )
+
+        monkeypatch.setattr(core_bs, "_read_tuning_config", lambda: (0, 128, 0))
+        core_bs.invalidate_kernel_cache()
+        actual_value, actual_tangent = jax.jvp(chunked, primals, tangents)
+        expected_value, expected_tangent = jax.jvp(dense, primals, tangents)
+        _, actual_pullback = jax.vjp(chunked, *primals)
+        _, expected_pullback = jax.vjp(dense, *primals)
+        actual_cotangents = actual_pullback(cotangent)
+        expected_cotangents = expected_pullback(cotangent)
+
+        assert actual_value.shape == expected_value.shape == (2, 3)
+        assert actual_tangent.shape == expected_tangent.shape == (2, 3)
+        assert actual_value.dtype == expected_value.dtype == jnp.float64
+        assert actual_tangent.dtype == expected_tangent.dtype == jnp.float64
+        assert np.all(np.isfinite(np.asarray(actual_value)))
+        assert np.all(np.isfinite(np.asarray(actual_tangent)))
+        np.testing.assert_allclose(
+            np.asarray(actual_value),
+            np.asarray(expected_value),
+            rtol=_DIRECT_KERNEL_TOLS["rtol"],
+            atol=_DIRECT_KERNEL_TOLS["atol"],
+        )
+        np.testing.assert_allclose(
+            np.asarray(actual_tangent),
+            np.asarray(expected_tangent),
+            rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+            atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
+        )
+        for actual, expected, primal in zip(
+            actual_cotangents,
+            expected_cotangents,
+            primals,
+            strict=True,
+        ):
+            assert actual.shape == expected.shape == primal.shape
+            assert actual.dtype == expected.dtype == jnp.float64
+            assert np.all(np.isfinite(np.asarray(actual)))
+            np.testing.assert_allclose(
+                np.asarray(actual),
+                np.asarray(expected),
+                rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+                atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
+            )
+
+    @pytest.mark.parametrize(
+        ("quadrature_count", "expected_reduction_widths"),
+        (
+            (127, (127,)),
+            (128, (128,)),
+            (129, (128, 1)),
+            (250, (128, 122)),
+            (256, (128, 128)),
+            (257, (128, 1)),
+        ),
+    )
+    def test_quadrature_boundary_dispatch_reduces_exact_physical_tails(
+        self,
+        monkeypatch,
+        quadrature_count,
+        expected_reduction_widths,
+    ):
+        """The Q=128 dispatcher reduces exact blocks without physical padding."""
+        from simsopt_jax.core import biotsavart as core_bs
+
+        observed_integrand_widths = []
+        observed_reduction_widths = []
+        original_pairwise_sum_axis = core_bs._pairwise_sum_axis
+
+        def integrand(_point, block_gammas, _block_gammadashs):
+            observed_integrand_widths.append(block_gammas.shape[1])
+            return jnp.broadcast_to(block_gammas[..., :1], block_gammas.shape)
+
+        def recording_pairwise_sum_axis(values, *, axis):
+            observed_reduction_widths.append(values.shape[axis])
+            return original_pairwise_sum_axis(values, axis=axis)
+
+        monkeypatch.setattr(core_bs, "_pairwise_sum_axis", recording_pairwise_sum_axis)
+        physical_samples = jnp.arange(
+            1,
+            quadrature_count + 1,
+            dtype=jnp.float64,
+        ).reshape(1, quadrature_count, 1)
+        gammas = jnp.broadcast_to(physical_samples, (1, quadrature_count, 3))
+        gammadashs = jnp.zeros_like(gammas)
+
+        actual = core_bs._quadrature_block_integral(
+            jnp.zeros((3,), dtype=jnp.float64),
+            gammas,
+            gammadashs,
+            block_size=128,
+            integrand=integrand,
+        )
+
+        expected = np.full((1, 3), 0.5 * (quadrature_count + 1), dtype=np.float64)
+        np.testing.assert_array_equal(np.asarray(actual), expected)
+        assert tuple(observed_integrand_widths) == expected_reduction_widths
+        assert tuple(observed_reduction_widths) == expected_reduction_widths
+        assert all(width <= 128 for width in observed_integrand_widths)
 
     def test_kernel_factories_do_not_key_equivalent_kernels_by_platform(self):
         from simsopt_jax.core import biotsavart as core_bs
