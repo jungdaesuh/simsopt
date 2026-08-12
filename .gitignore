@@ -81,3 +81,13 @@ examples/single_stage_optimization/STAGE_2/outputs-*/
 .artifacts/jax-vmec-hybrid/
 .artifacts/jax-example-execution-modes/
 .handoffs/
+
+# Agent scratch/learnings directories (not shipped source)
+.Codex/learnings/
+.claude/learnings/
+
+# Campaign/benchmark run-output roots (timestamped receipts, snapshots, authority captures)
+/artifacts/
+
+# Run-timestamped backup duplicates of generated docs
+docs/*.pre_*.md
