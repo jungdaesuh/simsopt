@@ -369,17 +369,23 @@ def _lbfgsb_eps(dtype) -> jax.Array:
     return jnp.asarray(np.finfo(np.dtype(dtype)).eps, dtype=dtype)
 
 
-def lbfgsb_two_loop_direction(state: LbfgsbState) -> jax.Array:
-    """Return the unconstrained L-BFGS direction from stored correction pairs."""
-    n, m = _lbfgsb_state_dimensions(state)
-    lws, lwy, lsy, *_ = _lbfgsb_workspace_offsets(n, m)
-    wa = state.workspace.wa
-    ws = wa[lws:lwy].reshape((m, n))
-    wy = wa[lwy:lsy].reshape((m, n))
-    head = state.workspace.isave[26]
-    col = state.workspace.isave[27]
-    theta = state.workspace.dsave[0]
-    dtype = state.x.dtype
+def lbfgsb_apply_inverse_hessian(
+    ws: jax.Array,
+    wy: jax.Array,
+    head: jax.Array,
+    col: jax.Array,
+    theta: jax.Array,
+    vector: jax.Array,
+) -> jax.Array:
+    """Apply the stored inverse Hessian to one vector by the two-loop recursion.
+
+    ``ws``/``wy`` hold the correction pairs in the workspace layout, oldest at
+    ``head``; only the first ``col`` are live.  With no live pair the result is
+    ``vector / theta``.
+    """
+
+    m = int(ws.shape[0])
+    dtype = vector.dtype
 
     positions = jnp.arange(m, dtype=jnp.int32)
     history_indices = (head + positions) % m
@@ -399,7 +405,7 @@ def lbfgsb_two_loop_direction(state: LbfgsbState) -> jax.Array:
 
     direction, reverse_alphas = jax.lax.scan(
         right_product,
-        -state.g,
+        vector,
         (reverse_indices, reverse_active),
     )
     direction = direction / theta
@@ -421,6 +427,21 @@ def lbfgsb_two_loop_direction(state: LbfgsbState) -> jax.Array:
         (history_indices, active_history, alphas),
     )
     return direction
+
+
+def lbfgsb_two_loop_direction(state: LbfgsbState) -> jax.Array:
+    """Return the unconstrained L-BFGS direction from stored correction pairs."""
+    n, m = _lbfgsb_state_dimensions(state)
+    lws, lwy, lsy, *_ = _lbfgsb_workspace_offsets(n, m)
+    wa = state.workspace.wa
+    return lbfgsb_apply_inverse_hessian(
+        wa[lws:lwy].reshape((m, n)),
+        wa[lwy:lsy].reshape((m, n)),
+        state.workspace.isave[26],
+        state.workspace.isave[27],
+        state.workspace.dsave[0],
+        -state.g,
+    )
 
 
 def lbfgsb_empty_workspace(
