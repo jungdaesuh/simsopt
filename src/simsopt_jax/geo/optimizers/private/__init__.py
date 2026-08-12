@@ -15,9 +15,11 @@ from ._bfgs import (
 )
 from ._lbfgs import (
     PreparedLBFGS,
+    PreparedParametricLBFGS,
     _minimize_lbfgs_private,
     _minimize_lbfgs_private_value_and_grad,
     prepare_lbfgs_private,
+    prepare_parametric_lbfgs_private,
 )
 from ._line_search import (
     _binary_replace,

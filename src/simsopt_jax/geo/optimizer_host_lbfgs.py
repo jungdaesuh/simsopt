@@ -7,6 +7,8 @@ from typing import Callable, NamedTuple
 
 import numpy as np
 
+from simsopt_jax.runtime.trace_annotations import accepted_iteration_span
+
 # Repo-local terminal status for non-finite f(x), x, or gradient state. SciPy's
 # low-level L-BFGS-B warnflag contract remains 0/1/2.
 LBFGS_STATUS_NONFINITE = 6
@@ -1648,6 +1650,7 @@ def minimize_lbfgs_host_core(
     progress_callback=None,
     failure_callback=None,
     initial_value_and_grad=None,
+    final_eval_value_and_grad_host=None,
     line_search_value_and_grad=line_search_value_and_grad_host,
     record_optimizer_state_trace=False,
     max_optimizer_state_trace_bytes=None,
@@ -1781,19 +1784,20 @@ def minimize_lbfgs_host_core(
             state.rho_history,
             state.history_count,
         )
-        ls_results = coerce_line_search_results(
-            line_search_value_and_grad(
-                fun=eval_value_and_grad_host,
-                xk=state.x_k,
-                pk=p_k,
-                old_fval=state.f_k,
-                gfk=state.g_k,
-                old_old_fval=state.old_old_fval,
-                initial_step_size=line_search_initial_step_size,
-                maxiter=maxls,
-            ),
-            dtype=dtype,
-        )
+        with accepted_iteration_span(state.k + 1):
+            ls_results = coerce_line_search_results(
+                line_search_value_and_grad(
+                    fun=eval_value_and_grad_host,
+                    xk=state.x_k,
+                    pk=p_k,
+                    old_fval=state.f_k,
+                    gfk=state.g_k,
+                    old_old_fval=state.old_old_fval,
+                    initial_step_size=line_search_initial_step_size,
+                    maxiter=maxls,
+                ),
+                dtype=dtype,
+            )
 
         next_nfev = state.nfev + int(ls_results.nfev)
         next_ngev = state.ngev + int(ls_results.ngev)
@@ -1989,7 +1993,12 @@ def minimize_lbfgs_host_core(
         )
 
     if initial_value_and_grad is None or state.k > 0:
-        f_final, g_final = eval_value_and_grad_host(state.x_k)
+        final_evaluator = (
+            eval_value_and_grad_host
+            if final_eval_value_and_grad_host is None
+            else final_eval_value_and_grad_host
+        )
+        f_final, g_final = final_evaluator(state.x_k)
         final_eval_increment = 1
     else:
         f_final, g_final = f_0, g_0
