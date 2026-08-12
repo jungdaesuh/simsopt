@@ -11,6 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from .curve_kernels import (
+    curve_length_from_incremental_arclength_pure as _curve_length_from_incremental_arclength_pure,
     curve_cws_rz_gamma_from_dofs,
     incremental_arclength_pure as _incremental_arclength_pure,
     kappa_pure as _kappa_pure,
@@ -78,6 +79,7 @@ __all__ = [
     "curve_gammadashdashdash_vjp_from_dofs",
     "curve_incremental_arclength_from_dofs",
     "curve_incremental_arclength_from_spec",
+    "curve_length_from_spec",
     "curve_kappa_from_dofs",
     "curve_kappa_from_spec",
     "curve_pullback_from_dofs",
@@ -1038,6 +1040,14 @@ def curve_incremental_arclength_from_dofs(spec: CurveSpec, dofs):
     """Return pure JAX incremental arclength from an immutable curve spec."""
     _gamma, gammadash = curve_gamma_and_dash_from_dofs(spec, dofs)
     return _incremental_arclength_pure(gammadash)
+
+
+def curve_length_from_spec(spec: CurveSpec):
+    """Return the canonical mean-arclength curve length for one spec."""
+
+    return _curve_length_from_incremental_arclength_pure(
+        curve_incremental_arclength_from_spec(spec)
+    )
 
 
 def curve_kappa_from_spec(spec: CurveSpec):

@@ -9,10 +9,13 @@ from . import framedcurve as _framedcurve
 from . import interpolated_boozer_field as _interpolated_boozer_field
 from . import mhd_reductions as _mhd_reductions
 from . import objectives_flux as _objectives_flux
+from . import quasisymmetry as _quasisymmetry
 from . import reductions as _reductions
 from . import specs as _specs
+from . import surface_dofs as _surface_dofs
 from . import surface_fourier as _surface_fourier
 from . import surface_henneberg as _surface_henneberg
+from . import surface_integrals as _surface_integrals
 from . import surface_rzfourier as _surface_rzfourier
 
 _JAX_CORE_MODULES = (
@@ -20,6 +23,7 @@ _JAX_CORE_MODULES = (
     ("finitebuild", _finitebuild),
     ("framedcurve", _framedcurve),
     ("objectives_flux", _objectives_flux),
+    ("quasisymmetry", _quasisymmetry),
     ("curve_geometry", _curve_geometry),
     ("field", _field),
     ("circular_coil", _circular_coil),
@@ -30,6 +34,8 @@ _JAX_CORE_MODULES = (
     ("surface_rzfourier", _surface_rzfourier),
     ("surface_fourier", _surface_fourier),
     ("surface_henneberg", _surface_henneberg),
+    ("surface_dofs", _surface_dofs),
+    ("surface_integrals", _surface_integrals),
 )
 
 _PACKAGE_EXPORTS_BY_MODULE = {
@@ -74,7 +80,7 @@ closed_curve_self_intersection_min_distance closed_curve_self_intersection_penal
 curve_dincremental_arclength_by_dcoeff_from_dofs curve_dincremental_arclength_by_dcoeff_vjp_from_dofs curve_dkappa_by_dcoeff_from_dofs curve_dkappa_by_dcoeff_vjp_from_dofs
 curve_dtorsion_by_dcoeff_from_dofs curve_dtorsion_by_dcoeff_vjp_from_dofs curve_gamma_and_dash_from_dofs curve_gamma_and_dash_from_spec
 curve_gamma_vjp_from_dofs curve_geometry_from_dofs curve_geometry_from_spec curve_gammadash_vjp_from_dofs
-curve_gammadashdash_vjp_from_dofs curve_gammadashdashdash_vjp_from_dofs curve_incremental_arclength_from_dofs curve_incremental_arclength_from_spec
+curve_gammadashdash_vjp_from_dofs curve_gammadashdashdash_vjp_from_dofs curve_incremental_arclength_from_dofs curve_incremental_arclength_from_spec curve_length_from_spec
 curve_kappa_from_dofs curve_kappa_from_spec curve_pullback_from_dofs curve_pullback_from_spec
 curve_spec_kind surface_spec_kind curve_spec_from_curve curve_spec_with_dofs
 curve_spec_with_quadpoints curve_torsion_from_dofs curve_torsion_from_spec coil_set_spec_from_dof_extraction_spec
@@ -136,6 +142,8 @@ surface_xyz_tensor_fourier_gammadash2dash2_from_spec surface_xyz_tensor_fourier_
 surface_xyz_tensor_fourier_gammadash2dash2dash2_lin_from_dofs surface_xyz_tensor_fourier_normal_from_spec surface_xyz_tensor_fourier_second_fund_form_from_spec surface_xyz_tensor_fourier_second_fund_form_from_dofs
 surface_xyz_tensor_fourier_surface_curvatures_from_spec surface_xyz_tensor_fourier_surface_curvatures_from_dofs surface_xyz_tensor_fourier_unitnormal_from_spec surface_xyz_tensor_fourier_volume_from_spec
 make_surface_xyz_fourier_spec make_surface_xyz_tensor_fourier_spec
+non_quasi_symmetric_ratio non_quasi_symmetric_residual_primitives surface_gamma_tangents_from_dofs surface_spec_with_dofs surface_volume_from_dofs
+surface_area surface_major_radius surface_mean_cross_sectional_area surface_volume
 """.split()
 )
 
