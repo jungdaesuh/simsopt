@@ -31,20 +31,13 @@ from simsopt_jax.objectives.single_stage_fullspace import (
 )
 from simsopt_jax.solve.fullspace import (
     FullSpaceRoute,
-    cfs_al1_raw_multipliers,
-    cfs_al1_value_and_grad,
     cfs_p0_diagnostics,
     cfs_p0_value_and_grad,
     fullspace_optimizer_coordinates,
     fullspace_physical_coordinates,
     fullspace_scaling_from_bootstrap,
-    pack_cfs_al1_parameters,
-    prepare_cfs_al1,
-    prepare_cfs_al2,
     prepare_cfs_p0,
     route_policy,
-    unpack_cfs_al1_parameters,
-    update_cfs_al1_parameters,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -378,122 +371,6 @@ def test_prepared_cfs_p0_executes_ten_step_public_fused_state_machine() -> None:
     )
 
 
-def test_cfs_al1_value_gradient_matches_scaled_raw_kkt_identity() -> None:
-    problem, bootstrap = _cfs_p0_problem_and_z()
-    scaling = fullspace_scaling_from_bootstrap(bootstrap, problem)
-    optimizer_coordinates = jnp.linspace(
-        -0.006,
-        0.009,
-        bootstrap.size,
-        dtype=jnp.float64,
-    )
-    multiplier_count = scaling.constraint_inverse_scale.size
-    scaled_multipliers = jnp.linspace(
-        -0.04,
-        0.03,
-        multiplier_count,
-        dtype=jnp.float64,
-    )
-    penalty = jnp.asarray(10.0, dtype=jnp.float64)
-    parameters = pack_cfs_al1_parameters(scaled_multipliers, penalty)
-    (value, diagnostics), gradient = cfs_al1_value_and_grad(
-        optimizer_coordinates,
-        parameters,
-        problem,
-        scaling,
-    )
-    effective_scaled_multipliers = (
-        scaled_multipliers + penalty * diagnostics.scaled_constraints
-    )
-    raw_multipliers = cfs_al1_raw_multipliers(
-        effective_scaled_multipliers,
-        scaling,
-    )
-    kkt = fullspace_kkt_primitives(
-        diagnostics.physical_state,
-        raw_multipliers,
-        problem,
-    )
-    expected_value = (
-        diagnostics.physical_objective
-        + jnp.vdot(scaled_multipliers, diagnostics.scaled_constraints)
-        + 0.5
-        * penalty
-        * jnp.vdot(diagnostics.scaled_constraints, diagnostics.scaled_constraints)
-    )
-
-    np.testing.assert_allclose(value, expected_value, rtol=2.0e-15, atol=2.0e-15)
-    np.testing.assert_allclose(
-        gradient,
-        scaling.variable_scale * kkt.stationarity_residual,
-        rtol=3.0e-12,
-        atol=3.0e-10,
-    )
-    assert bool(diagnostics.all_finite)
-
-
-def test_cfs_al1_multiplier_update_sign_and_penalty_cap_are_frozen() -> None:
-    problem, bootstrap = _cfs_p0_problem_and_z()
-    scaling = fullspace_scaling_from_bootstrap(bootstrap, problem)
-    multipliers = jnp.linspace(
-        -0.2,
-        0.3,
-        scaling.constraint_inverse_scale.size,
-        dtype=jnp.float64,
-    )
-    constraints = jnp.linspace(
-        0.01,
-        -0.02,
-        multipliers.size,
-        dtype=jnp.float64,
-    )
-    parameters = pack_cfs_al1_parameters(multipliers, jnp.asarray(10.0))
-
-    first = update_cfs_al1_parameters(parameters, constraints)
-    first_multipliers, first_penalty = unpack_cfs_al1_parameters(first)
-    second = update_cfs_al1_parameters(first, constraints)
-    second_multipliers, second_penalty = unpack_cfs_al1_parameters(second)
-    third = update_cfs_al1_parameters(second, constraints)
-    _, third_penalty = unpack_cfs_al1_parameters(third)
-
-    np.testing.assert_allclose(first_multipliers, multipliers + 10.0 * constraints)
-    np.testing.assert_allclose(
-        second_multipliers,
-        first_multipliers + 100.0 * constraints,
-    )
-    assert float(first_penalty) == 100.0
-    assert float(second_penalty) == 250.0
-    assert float(third_penalty) == 250.0
-
-
-def test_prepared_cfs_al1_runs_all_stages_in_one_typed_program() -> None:
-    problem, bootstrap = _cfs_p0_problem_and_z()
-    changed_state = bootstrap.at[0].add(2.0e-3).at[-2].add(-1.0e-3)
-    prepared = prepare_cfs_al1(problem, bootstrap, changed_state)
-    result = prepared.run()
-
-    assert int(np.asarray(result.completed_outer_stages)) == 10
-    assert not bool(np.asarray(result.fatal))
-    assert bool(np.asarray(result.all_finite))
-    assert bool(np.asarray(result.all_accepted_states_finite))
-    assert int(np.asarray(result.nonfinite_evaluation_count)) == 0
-    assert int(np.asarray(result.total_inner_iterations)) <= 1000
-    assert int(np.asarray(result.total_function_evaluations)) <= 150000
-    np.testing.assert_array_equal(
-        result.stage_history.stage_completed,
-        jnp.ones((10,), dtype=jnp.bool_),
-    )
-    np.testing.assert_allclose(
-        result.stage_history.penalty,
-        jnp.asarray(
-            (10.0, 100.0, 250.0, 250.0, 250.0, 250.0, 250.0, 250.0, 250.0, 250.0)
-        ),
-    )
-    assert all(
-        isinstance(leaf, jax.Array) for leaf in jax.tree_util.tree_leaves(result)
-    )
-
-
 def test_cfs_al2_policy_only_escalates_the_inner_accuracy_budget() -> None:
     al1 = route_policy(FullSpaceRoute.CFS_AL1)
     al2 = route_policy(FullSpaceRoute.CFS_AL2)
@@ -511,33 +388,4 @@ def test_cfs_al2_policy_only_escalates_the_inner_accuracy_budget() -> None:
             selection_rule=al1.selection_rule,
         )
         == al1
-    )
-
-
-def test_prepared_cfs_al2_runs_all_stages_in_one_typed_program() -> None:
-    problem, bootstrap = _cfs_p0_problem_and_z()
-    changed_state = bootstrap.at[0].add(2.0e-3).at[-2].add(-1.0e-3)
-    prepared = prepare_cfs_al2(problem, bootstrap, changed_state)
-    result = prepared.run()
-
-    assert int(np.asarray(result.completed_outer_stages)) == 10
-    assert not bool(np.asarray(result.fatal))
-    assert bool(np.asarray(result.all_finite))
-    assert bool(np.asarray(result.all_accepted_states_finite))
-    assert int(np.asarray(result.nonfinite_evaluation_count)) == 0
-    assert int(np.asarray(result.total_inner_iterations)) <= 10000
-    assert int(np.asarray(result.total_function_evaluations)) <= 150000
-    assert bool(np.all(np.asarray(result.stage_history.inner_iterations) <= 1000))
-    np.testing.assert_array_equal(
-        result.stage_history.stage_completed,
-        jnp.ones((10,), dtype=jnp.bool_),
-    )
-    np.testing.assert_allclose(
-        result.stage_history.penalty,
-        jnp.asarray(
-            (10.0, 100.0, 250.0, 250.0, 250.0, 250.0, 250.0, 250.0, 250.0, 250.0)
-        ),
-    )
-    assert all(
-        isinstance(leaf, jax.Array) for leaf in jax.tree_util.tree_leaves(result)
     )

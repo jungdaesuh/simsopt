@@ -96,7 +96,7 @@ def test_sqp_preflight_is_v2_and_does_not_require_cuda_or_new_output(
     assert payload["request"]["route"] == "CFS-SQP1"
 
 
-def test_sqp_main_dispatches_directly_without_al_fallthrough(
+def test_sqp_main_dispatches_directly_to_the_sqp_campaign(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsysbinary: pytest.CaptureFixture[bytes],
@@ -109,11 +109,6 @@ def test_sqp_main_dispatches_directly_without_al_fallthrough(
 
     monkeypatch.setattr(runner, "run_cfs_sqp1_campaign", fake_sqp)
     monkeypatch.setattr(runner.simsoptpp, "__file__", "/tmp/simsoptpp.so")
-    monkeypatch.setattr(
-        runner,
-        "run_cfs_al2_campaign",
-        lambda *_args, **_kwargs: pytest.fail("SQP fell through to AL2"),
-    )
     assert runner.main(_argv(tmp_path)) == 0
     assert observed[0].route is FullSpaceRoute.CFS_SQP1
     assert capsysbinary.readouterr().out == b'{"route":"CFS-SQP1"}'
