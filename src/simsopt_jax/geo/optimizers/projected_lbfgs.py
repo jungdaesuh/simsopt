@@ -47,6 +47,7 @@ from .projected_hvp_trust_region import (
     certified_correction_with_projector,
     certified_minimum_norm_correction,
     factor_certified_gram_projector,
+    materialize_certified_projection,
     project_with_certified_gram,
 )
 from .quasi_newton_metric import (
@@ -58,6 +59,7 @@ from .quasi_newton_metric import (
     transport_quasi_newton_metric,
     valid_pair_count,
 )
+from .tangent_gauss_newton import solve_tangent_gauss_newton
 
 
 class ProjectedLbfgsStatus(IntEnum):
@@ -91,6 +93,19 @@ class ProjectedLbfgsOptions:
     maximum_line_search_trials: int = 24
     minimum_step_scale: float = 1.0e-6
     objective_target: float = 0.0
+    gauss_newton: bool = False
+    """Take reduced Gauss--Newton steps, with the pair store as rescue.
+
+    Requires ``objective_residuals``.  For a small-residual objective the GN
+    model is locally near-exact, so the step is taken at full length and the
+    Armijo line search -- not a trust region -- decides how far along it to go.
+    When the GN step cannot be accepted above ``gauss_newton_rescue_scale`` the
+    iteration falls back to the limited-memory direction.
+    """
+
+    gauss_newton_levenberg_relative: float = 1.0e-12
+    gauss_newton_rescue_scale: float = 1.0e-2
+
     dense_curvature: bool = False
     """Carry a dense tangent-space Hessian approximation instead of pairs.
 
@@ -203,6 +218,12 @@ class ProjectedLbfgsIteration(NamedTuple):
     transport_masked_pairs: int
     dense_damped_updates: int
     dense_positive_definite: bool
+    gauss_newton_used: bool
+    gauss_newton_rescued: bool
+    gauss_newton_predicted_reduction: float
+    gauss_newton_reciprocal_condition: float
+    gauss_newton_tangency_residual: float
+    model_exactness_ratio: float
     direction_seconds: float
     line_search_seconds: float
     retraction_seconds: float
@@ -483,6 +504,7 @@ def run_projected_lbfgs(
     initial_coordinates: jax.Array,
     *,
     options: ProjectedLbfgsOptions = _DEFAULT_OPTIONS,
+    objective_residuals: Callable[[jax.Array], jax.Array] | None = None,
     observer: Callable[[ProjectedLbfgsIteration], None] | None = None,
 ) -> ProjectedLbfgsRun:
     """Run the bounded projected L-BFGS loop from one feasible starting point.
@@ -540,6 +562,20 @@ def run_projected_lbfgs(
         )
     )
     update_curvature = jax.jit(update_dense_tangent_curvature)
+    if options.gauss_newton:
+        if objective_residuals is None:
+            raise ValueError("gauss_newton requires objective_residuals")
+        residual_jacobian = jax.jacfwd(objective_residuals)
+
+        def _gauss_newton_direction(coordinates, projector, projected_gradient):
+            return solve_tangent_gauss_newton(
+                residual_jacobian(coordinates),
+                materialize_certified_projection(projector),
+                projected_gradient,
+                levenberg_relative=options.gauss_newton_levenberg_relative,
+            )
+
+        gauss_newton_direction = jax.jit(_gauss_newton_direction)
 
     compile_started = time.perf_counter()
     point = jax.block_until_ready(evaluate(initial_coordinates))
@@ -571,7 +607,28 @@ def run_projected_lbfgs(
         applied_metric = metric
         masked_pairs = 0
         dense_pd = True
-        if options.dense_curvature:
+        gauss_newton_used = False
+        gauss_newton_rescued = False
+        gn_predicted = float("nan")
+        gn_condition = float("nan")
+        gn_tangency = float("nan")
+        if options.gauss_newton:
+            gn_step = jax.block_until_ready(
+                gauss_newton_direction(
+                    coordinates, point.projector, point.projected_gradient
+                )
+            )
+            if bool(gn_step.all_finite):
+                direction = gn_step.direction
+                gauss_newton_used = True
+                gn_predicted = float(gn_step.predicted_reduction)
+                gn_condition = float(gn_step.reduced_hessian_reciprocal_condition)
+                gn_tangency = float(gn_step.tangency_relative_residual)
+            else:
+                direction = jax.block_until_ready(
+                    apply_metric(metric, -point.projected_gradient)
+                )
+        elif options.dense_curvature:
             dense_step = jax.block_until_ready(
                 dense_direction(curvature, point.projector, point.projected_gradient)
             )
@@ -608,26 +665,77 @@ def run_projected_lbfgs(
         trials = 0
         rejected_for_feasibility = 0
         accepted: ManifoldRetraction | None = None
-        while (
-            trials < options.maximum_line_search_trials
-            and step_scale >= options.minimum_step_scale
+
+        def search(
+            search_direction: jax.Array,
+            slope: float,
+            initial_scale: float,
+            floor_scale: float,
+            *,
+            point: ProjectedPoint = point,
+            coordinates: jax.Array = coordinates,
         ):
-            trials += 1
-            retraction_started = time.perf_counter()
-            candidate = jax.block_until_ready(
-                retract(point.projector, coordinates + step_scale * direction)
-            )
-            retraction_seconds += time.perf_counter() - retraction_started
-            if bool(candidate.feasible):
-                sufficient = float(point.objective) + (
-                    options.armijo_coefficient * step_scale * directional_derivative
+            """Backtrack from ``initial_scale`` until Armijo holds or ``floor_scale``.
+
+            ``point`` and ``coordinates`` are bound as defaults so the closure
+            cannot outlive the iteration that created it.
+            """
+
+            nonlocal trials, rejected_for_feasibility, retraction_seconds
+            scale = initial_scale
+            while trials < options.maximum_line_search_trials and scale >= floor_scale:
+                trials += 1
+                started = time.perf_counter()
+                candidate = jax.block_until_ready(
+                    retract(point.projector, coordinates + scale * search_direction)
                 )
-                if float(candidate.objective) <= sufficient:
-                    accepted = candidate
-                    break
-            else:
-                rejected_for_feasibility += 1
-            step_scale *= options.backtracking_factor
+                retraction_seconds += time.perf_counter() - started
+                if bool(candidate.feasible):
+                    sufficient = float(point.objective) + (
+                        options.armijo_coefficient * scale * slope
+                    )
+                    if float(candidate.objective) <= sufficient:
+                        return candidate, scale
+                else:
+                    rejected_for_feasibility += 1
+                scale *= options.backtracking_factor
+            return None, scale
+
+        # A Gauss--Newton step is tried at full length and abandoned early: if
+        # it is not accepted well above the rescue scale the model is not
+        # describing this neighbourhood, and the pair store is the better bet.
+        rescue_floor = (
+            options.gauss_newton_rescue_scale
+            if gauss_newton_used
+            else options.minimum_step_scale
+        )
+        accepted, step_scale = search(
+            direction, directional_derivative, step_scale, rescue_floor
+        )
+        if accepted is None and gauss_newton_used:
+            rescue_direction = jax.block_until_ready(
+                apply_metric(metric, -point.projected_gradient)
+            )
+            rescue_slope = float(point.projected_gradient @ rescue_direction)
+            rescue_norm = float(jnp.linalg.norm(rescue_direction))
+            if (
+                math.isfinite(rescue_slope)
+                and rescue_slope < 0.0
+                and math.isfinite(rescue_norm)
+                and rescue_norm > 0.0
+            ):
+                gauss_newton_rescued = True
+                capped = rescue_norm > options.maximum_step_norm
+                initial = options.maximum_step_norm / rescue_norm if capped else 1.0
+                direction = rescue_direction
+                directional_derivative = rescue_slope
+                direction_norm = rescue_norm
+                accepted, step_scale = search(
+                    rescue_direction,
+                    rescue_slope,
+                    initial,
+                    options.minimum_step_scale,
+                )
         line_search_seconds = time.perf_counter() - line_search_started
 
         if accepted is None:
@@ -713,6 +821,19 @@ def run_projected_lbfgs(
             transport_masked_pairs=masked_pairs,
             dense_damped_updates=dense_damped,
             dense_positive_definite=dense_pd,
+            gauss_newton_used=gauss_newton_used,
+            gauss_newton_rescued=gauss_newton_rescued,
+            gauss_newton_predicted_reduction=gn_predicted,
+            gauss_newton_reciprocal_condition=gn_condition,
+            gauss_newton_tangency_residual=gn_tangency,
+            model_exactness_ratio=(
+                (float(point.objective) - float(accepted.objective)) / gn_predicted
+                if gauss_newton_used
+                and not gauss_newton_rescued
+                and math.isfinite(gn_predicted)
+                and gn_predicted != 0.0
+                else float("nan")
+            ),
             direction_seconds=direction_seconds,
             line_search_seconds=line_search_seconds,
             retraction_seconds=retraction_seconds,
@@ -786,6 +907,12 @@ def _collapsed_record(
         pair_admitted=False,
         dense_damped_updates=0,
         dense_positive_definite=True,
+        gauss_newton_used=False,
+        gauss_newton_rescued=False,
+        gauss_newton_predicted_reduction=float("nan"),
+        gauss_newton_reciprocal_condition=float("nan"),
+        gauss_newton_tangency_residual=float("nan"),
+        model_exactness_ratio=float("nan"),
         stored_pairs=stored_pairs,
         transport_masked_pairs=masked_pairs,
         direction_seconds=direction_seconds,

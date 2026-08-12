@@ -352,3 +352,77 @@ def test_powell_damping_keeps_a_negative_curvature_pair_definite() -> None:
     result = dense_tangent_direction(updated, probe, lambda vector: vector)
     assert bool(result.positive_definite)
     assert float(probe @ result.direction) < 0.0, "direction must descend"
+
+
+def _sphere_residuals(coordinates: jax.Array) -> jax.Array:
+    """Residual form of the sphere objective: Phi = 0.5 ||R||^2."""
+    return jnp.sqrt(_CURVATURES) * coordinates
+
+
+def test_gauss_newton_step_is_tangent_and_predicts_its_own_reduction() -> None:
+    from simsopt_jax.geo.optimizers.projected_hvp_trust_region import (
+        materialize_certified_projection,
+    )
+    from simsopt_jax.geo.optimizers.tangent_gauss_newton import (
+        solve_tangent_gauss_newton,
+    )
+
+    start = _feasible_start()
+    point = evaluate_projected_point(_sphere_problem, start)
+    projection = materialize_certified_projection(point.projector)
+    jacobian = jax.jacfwd(_sphere_residuals)(start)
+
+    step = solve_tangent_gauss_newton(
+        jacobian, projection, point.projected_gradient, levenberg_relative=1.0e-12
+    )
+
+    assert bool(step.all_finite)
+    assert float(step.tangency_relative_residual) <= 1.0e-10
+    # The step must leave the constraint linearization untouched to first order.
+    jacobian_constraint = 2.0 * np.asarray(start)
+    assert abs(float(jacobian_constraint @ step.direction)) <= 1.0e-10
+    assert float(step.predicted_reduction) > 0.0
+    assert float(point.projected_gradient @ step.direction) < 0.0
+
+
+def test_gauss_newton_run_descends_and_its_model_predicts_the_decrease() -> None:
+    """The route's premise is model EXACTNESS, not superiority over a secant.
+
+    On a curved constraint manifold ``P J^T J P`` is the Gauss--Newton Hessian
+    of the OBJECTIVE and omits the constraint-curvature term of the reduced
+    Lagrangian Hessian, so GN need not beat L-BFGS on a budget.  What must hold
+    is that the model predicts the decrease it actually delivers, since that is
+    what lets the line search take full steps.
+    """
+
+    run = run_projected_lbfgs(
+        _sphere_problem,
+        _feasible_start(),
+        options=ProjectedLbfgsOptions(
+            maximum_iterations=12,
+            feasibility_tolerance=1.0e-12,
+            gauss_newton=True,
+        ),
+        objective_residuals=_sphere_residuals,
+    )
+
+    assert any(record.gauss_newton_used for record in run.iterations)
+    objectives = [record.objective for record in run.iterations]
+    assert objectives == sorted(objectives, reverse=True)
+    assert abs(run.objective - _SPHERE_MINIMUM) <= 1.0e-5
+    for record in run.iterations:
+        assert record.feasibility_inf <= 1.0e-12
+        if record.gauss_newton_used and not record.gauss_newton_rescued:
+            assert record.gauss_newton_predicted_reduction > 0.0
+            assert record.gauss_newton_tangency_residual <= 1.0e-10
+
+
+def test_gauss_newton_requires_residuals() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="objective_residuals"):
+        run_projected_lbfgs(
+            _sphere_problem,
+            _feasible_start(),
+            options=ProjectedLbfgsOptions(maximum_iterations=3, gauss_newton=True),
+        )

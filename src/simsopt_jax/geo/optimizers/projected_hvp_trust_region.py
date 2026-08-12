@@ -345,6 +345,29 @@ def certified_minimum_norm_correction(
     )
 
 
+def materialize_certified_projection(
+    projector: CertifiedGramProjector,
+) -> jax.Array:
+    """Return the tangent projector ``I - A.T (A A.T)^-1 A`` as a dense matrix.
+
+    Applying the projector to one vector never needs this, but building an
+    operator that must be projected on BOTH sides -- a reduced Gauss--Newton
+    Hessian, say -- does, and one dense solve is cheaper than projecting every
+    column separately.
+    """
+
+    constraint_jacobian = projector.constraint_jacobian
+    solved = jsp.linalg.cho_solve(
+        (projector.cholesky_factor, True), constraint_jacobian
+    )
+    dimension = constraint_jacobian.shape[1]
+    projection = (
+        jnp.eye(dimension, dtype=constraint_jacobian.dtype)
+        - constraint_jacobian.T @ solved
+    )
+    return 0.5 * (projection + projection.T)
+
+
 def _boundary_root(
     offset: jax.Array,
     direction: jax.Array,
