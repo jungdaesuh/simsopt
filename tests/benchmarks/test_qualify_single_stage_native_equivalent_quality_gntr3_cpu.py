@@ -1962,15 +1962,10 @@ def test_direct_bootstrap_phase_is_self_contained_end_to_end(
         if report["hazard"]:
             assert report["native_loader"] == "_ScikitBuildLoaderWrapper"
 
-        saved_meta_path = list(sys.meta_path)
-        try:
-            removed = namespace["_neutralize_editable_source_redirection"]()
-            assert not any(
-                "ScikitBuild" in type(finder).__name__ for finder in sys.meta_path
-            )
-            assert sorted(removed) == report["hazard"]
-        finally:
-            sys.meta_path[:] = saved_meta_path
+        assert namespace["_neutralize_editable_source_redirection"]() == ()
+        assert not any(
+            "ScikitBuild" in type(finder).__name__ for finder in sys.meta_path
+        )
     finally:
         if copied is not None:
             copied.close()
