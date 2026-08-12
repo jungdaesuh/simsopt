@@ -3,11 +3,16 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+from simsopt_jax.geo.optimizers.dense_sqp import materialize_joint_vjp_rows
+from simsopt_jax.geo.optimizers.projected_hvp_trust_region import (
+    factor_certified_gram_projector,
+)
 from simsopt_jax.geo.optimizers.projected_lbfgs import (
     ProjectedLbfgsOptions,
     ProjectedLbfgsStatus,
     evaluate_projected_point,
     retract_to_manifold,
+    retract_with_frozen_projector,
     run_projected_lbfgs,
 )
 
@@ -156,6 +161,53 @@ def test_curvature_beats_steepest_descent_on_the_same_budget() -> None:
     assert quasi_newton_gap < steepest_gap, (
         "stored curvature must close the gap faster than a one-pair store: "
         f"{quasi_newton_gap} vs {steepest_gap}"
+    )
+
+
+def test_frozen_projector_retraction_lands_on_the_true_manifold() -> None:
+    # Factor the Gram somewhere OTHER than the point being retracted, so the
+    # chord rows really are stale, then demand the true constraints anyway.
+    anchor = _feasible_start()
+    projector = factor_certified_gram_projector(
+        materialize_joint_vjp_rows(_sphere_problem, anchor).constraint_jacobian
+    )
+    off_manifold = anchor + jnp.asarray(
+        [0.05, -0.04, 0.03, 0.02, -0.01], dtype=jnp.float64
+    )
+
+    frozen = retract_with_frozen_projector(
+        _sphere_problem,
+        projector,
+        off_manifold,
+        feasibility_tolerance=1.0e-12,
+        maximum_corrections=8,
+    )
+
+    assert bool(frozen.feasible), "chord retraction failed to reach the manifold"
+    assert float(frozen.feasibility_inf) <= 1.0e-12
+
+
+def test_frozen_projector_run_matches_the_exact_retraction_run() -> None:
+    shared = {"maximum_iterations": 25, "memory": 6, "feasibility_tolerance": 1.0e-12}
+    exact = run_projected_lbfgs(
+        _sphere_problem,
+        _feasible_start(),
+        options=ProjectedLbfgsOptions(**shared),
+    )
+    frozen = run_projected_lbfgs(
+        _sphere_problem,
+        _feasible_start(),
+        options=ProjectedLbfgsOptions(**shared, frozen_projector_line_search=True),
+    )
+
+    # Amortizing the factorization must not cost feasibility or descent quality.
+    assert frozen.feasibility_inf <= 1.0e-12
+    for record in frozen.iterations:
+        assert record.candidate_feasibility_inf <= 1.0e-12
+    assert abs(frozen.objective - _SPHERE_MINIMUM) <= 1.0e-10
+    assert frozen.objective <= exact.objective * 1.001, (
+        f"frozen-projector run ended at {frozen.objective}, materially worse "
+        f"than the exact-retraction run at {exact.objective}"
     )
 
 
