@@ -173,7 +173,7 @@ The successor identities are:
 
 The fixed CPU qualification root is:
 
-`/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-cpu-qualification-20260812T071500Z`
+`/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-cpu-qualification-20260812T090000Z`
 
 The fixed GPU output root is:
 
@@ -390,7 +390,7 @@ where specified, and locks are revalidated at every frozen boundary.
 The sole CPU command is:
 
 ```text
-env JAX_PLATFORMS=cpu JAX_ENABLE_X64=true XLA_PYTHON_CLIENT_PREALLOCATE=false PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=src .venv-qn-cpu/bin/python benchmarks/qualify_single_stage_native_equivalent_quality_gntr3_cpu.py --output-root /home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-cpu-qualification-20260812T071500Z
+env JAX_PLATFORMS=cpu JAX_ENABLE_X64=true XLA_PYTHON_CLIENT_PREALLOCATE=false PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=src .venv-qn-cpu/bin/python benchmarks/qualify_single_stage_native_equivalent_quality_gntr3_cpu.py --output-root /home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-cpu-qualification-20260812T090000Z
 ```
 
 It produces only CPU schema
@@ -422,6 +422,31 @@ regression test, and reopens the tranche on the fresh `20260812T071500Z`
 namespaces frozen above. All schemas, numerics, thresholds, and gates are
 otherwise unchanged; the four pre-run `GO` reviews must be re-obtained against
 the recovered bytes.
+
+The second CPU qualification root,
+`/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-cpu-qualification-20260812T071500Z`,
+was spent on 2026-08-12T08:12:59Z: the repaired bootstrap succeeded and the
+worker re-exec reached production import binding, where
+`_validate_imported_source_bindings` failed closed because the CPU virtual
+environment's scikit-build-core editable install registers a meta-path
+redirecting finder that resolves repository packages to the live worktree
+ahead of every `sys.path` entry, so
+`simsopt_jax.geo.optimizers.projected_gauss_newton_trust_region` escaped the
+sealed execution-source tree. The retained `.partial-claim` staging tree, the
+sealed stderr transcript
+`/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-terminal-worker-import-escape-20260812T0813Z.txt`
+(SHA-256
+`c1fc5f40fc0ba7e1d932f7133bfd43328169030457cc551af5ec896dcb64f105`), and the
+retracted second pre-run review root
+`/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-reviews-20260812T071500Z`
+are immutable evidence and may never be reused, replaced, or deleted. This
+revision imports the native extension through its installed loader first —
+preserving the frozen `_ScikitBuildLoaderWrapper` binding — then removes the
+redirecting finders (`_neutralize_editable_source_redirection`) before any
+production-source import, extends the bootstrap dry-run regression test with a
+sealed-tree subprocess resolution probe, and reopens the tranche on the fresh
+`20260812T090000Z` namespaces frozen above. The four pre-run `GO` reviews must
+be re-obtained once more against the recovered bytes.
 
 Before the one CPU qualification:
 
@@ -484,7 +509,7 @@ The postmortem must equal this array and hash, not merely accept four self-hashe
 rows. No physical DIAG4 qualification record or authority existed.
 
 New review records live beneath exact root
-`/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-reviews-20260812T071500Z`,
+`/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-reviews-20260812T090000Z`,
 which and all siblings sharing that basename must be absent before the first
 pre-run review publication. The eight exact files are `pre-run/<role>.json` and
 `post-run/<role>.json` for the

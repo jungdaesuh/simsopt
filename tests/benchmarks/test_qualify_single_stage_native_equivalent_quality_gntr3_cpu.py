@@ -3,10 +3,12 @@ from __future__ import annotations
 import ast
 import copy
 import hashlib
+import json
 import multiprocessing
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import time
 from collections.abc import Mapping
@@ -1923,6 +1925,52 @@ def test_direct_bootstrap_phase_is_self_contained_end_to_end(
         namespace["_validate_publication_binding"](publication, published=False)
         copied.validate(copied_required=True)
         assert namespace["_execution_source_descriptor_payload"](copied)
+
+        execution_root = copied.execution_root
+        assert execution_root is not None
+        resolution_probe = (
+            "import json, sys\n"
+            "import simsoptpp\n"
+            "hazard = sorted(type(f).__name__ for f in sys.meta_path"
+            " if 'ScikitBuild' in type(f).__name__)\n"
+            "sys.meta_path[:] = [f for f in sys.meta_path"
+            " if 'ScikitBuild' not in type(f).__name__]\n"
+            "import simsopt_jax.geo.optimizers."
+            "projected_gauss_newton_trust_region as production\n"
+            "print(json.dumps({'hazard': hazard,"
+            " 'production': production.__file__,"
+            " 'native_loader': type(simsoptpp.__loader__).__name__}))\n"
+        )
+        probe_environment = dict(os.environ)
+        probe_environment["PYTHONPATH"] = os.pathsep.join(
+            (str(execution_root / "src"), str(execution_root))
+        )
+        probe_environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        completed = subprocess.run(
+            (sys.executable, "-B", "-c", resolution_probe),
+            capture_output=True,
+            check=True,
+            cwd=execution_root,
+            env=probe_environment,
+            text=True,
+        )
+        report = json.loads(completed.stdout.strip().splitlines()[-1])
+        resolved = Path(report["production"]).resolve()
+        assert resolved.is_relative_to(Path(execution_root).resolve()), (
+            f"production import escaped the sealed tree: {report['production']}"
+        )
+        if report["hazard"]:
+            assert report["native_loader"] == "_ScikitBuildLoaderWrapper"
+
+        saved_meta_path = list(sys.meta_path)
+        try:
+            removed = namespace["_neutralize_editable_source_redirection"]()
+            assert not any(
+                "ScikitBuild" in type(finder).__name__ for finder in sys.meta_path
+            )
+            assert sorted(removed) == report["hazard"]
+        finally:
+            sys.meta_path[:] = saved_meta_path
     finally:
         if copied is not None:
             copied.close()

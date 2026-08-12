@@ -44,7 +44,7 @@ _EXECUTION_SOURCE_DESCRIPTOR_ENVIRONMENT: Final = (
 )
 _EXPECTED_OUTPUT_ROOT_TEXT: Final = (
     "/home/jungdaesuh/simsopt-campaigns/"
-    "neq-gntr3-diag5-cpu-qualification-20260812T071500Z"
+    "neq-gntr3-diag5-cpu-qualification-20260812T090000Z"
 )
 _REQUIRED_ENVIRONMENT: Final = {
     "JAX_PLATFORMS": "cpu",
@@ -1535,6 +1535,29 @@ def _execution_source_descriptor_payload(
     )
 
 
+def _neutralize_editable_source_redirection() -> tuple[str, ...]:
+    """Drop editable-install redirecting finders after native-extension import.
+
+    scikit-build-core editable installs register a meta-path finder that
+    resolves the repository packages to the live worktree ahead of every
+    ``sys.path`` entry, escaping the sealed execution-source tree. The native
+    extension must already be imported through its installed loader before
+    this runs; every later production import then binds to ``PYTHONPATH``.
+    """
+
+    removed = tuple(
+        type(finder).__name__
+        for finder in sys.meta_path
+        if "ScikitBuild" in type(finder).__name__
+    )
+    sys.meta_path[:] = [
+        finder
+        for finder in sys.meta_path
+        if "ScikitBuild" not in type(finder).__name__
+    ]
+    return removed
+
+
 def _direct_bootstrap() -> None:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--output-root", type=Path, required=True)
@@ -1602,11 +1625,14 @@ def _direct_bootstrap() -> None:
 if __name__ == "__main__" and os.environ.get(_WORKER_ENVIRONMENT) != "1":
     _direct_bootstrap()
 
+import simsoptpp
+
+_REMOVED_EDITABLE_FINDERS: Final = _neutralize_editable_source_redirection()
+
 import jax
 import jax.numpy as jnp
 import jaxlib
 import numpy as np
-import simsoptpp
 from examples.jax.parity.input_bundle import read_input_bundle
 from simsopt_jax.runtime.exact_numeric_identity import exact_numeric_tree_sha256
 from simsopt_jax.solve.fullspace_native_equivalent_quality import (
@@ -1707,7 +1733,7 @@ MANIFEST_SCHEMA_VERSION: Final = (
 )
 EXPECTED_OUTPUT_ROOT: Final = Path(
     "/home/jungdaesuh/simsopt-campaigns/"
-    "neq-gntr3-diag5-cpu-qualification-20260812T071500Z"
+    "neq-gntr3-diag5-cpu-qualification-20260812T090000Z"
 )
 RETAINED_DIAG3_ROOT: Final = Path(
     "/home/jungdaesuh/simsopt-campaigns/"
