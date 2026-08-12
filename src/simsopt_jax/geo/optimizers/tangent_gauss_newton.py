@@ -23,11 +23,51 @@ argued.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 import jax.scipy as jsp
+
+
+def materialize_residual_jacobian(
+    residuals: Callable[[jax.Array], jax.Array],
+    coordinates: jax.Array,
+    *,
+    batch_width: int = 4,
+) -> jax.Array:
+    """Materialize ``dR/dz`` by chunked forward-mode passes.
+
+    Forward mode costs one pass per INPUT, which is the cheaper direction here
+    because the residual vector is longer than the coordinate vector.  The
+    passes are chunked rather than vmapped all at once because a single vmap
+    over every input holds that many sets of forward intermediates live, which
+    exhausts device memory on a problem of this size.
+    """
+
+    if batch_width < 1:
+        raise ValueError("batch_width must be positive")
+
+    dimension = coordinates.shape[0]
+    basis = jnp.eye(dimension, dtype=coordinates.dtype)
+
+    def push(tangents: jax.Array) -> jax.Array:
+        return jax.vmap(
+            lambda tangent: jax.jvp(residuals, (coordinates,), (tangent,))[1]
+        )(tangents)
+
+    complete_count = dimension // batch_width
+    complete_width = complete_count * batch_width
+    columns: list[jax.Array] = []
+    if complete_count:
+        chunks = basis[:complete_width].reshape(
+            (complete_count, batch_width, dimension)
+        )
+        columns.append(jax.lax.map(push, chunks).reshape((complete_width, -1)))
+    if complete_width < dimension:
+        columns.append(push(basis[complete_width:]))
+    return jnp.concatenate(columns, axis=0).T if len(columns) > 1 else columns[0].T
 
 
 class TangentGaussNewtonStep(NamedTuple):
@@ -106,5 +146,6 @@ def solve_tangent_gauss_newton(
 
 __all__ = (
     "TangentGaussNewtonStep",
+    "materialize_residual_jacobian",
     "solve_tangent_gauss_newton",
 )

@@ -59,7 +59,10 @@ from .quasi_newton_metric import (
     transport_quasi_newton_metric,
     valid_pair_count,
 )
-from .tangent_gauss_newton import solve_tangent_gauss_newton
+from .tangent_gauss_newton import (
+    materialize_residual_jacobian,
+    solve_tangent_gauss_newton,
+)
 
 
 class ProjectedLbfgsStatus(IntEnum):
@@ -223,6 +226,7 @@ class ProjectedLbfgsIteration(NamedTuple):
     gauss_newton_predicted_reduction: float
     gauss_newton_reciprocal_condition: float
     gauss_newton_tangency_residual: float
+    gauss_newton_direction_norm: float
     model_exactness_ratio: float
     direction_seconds: float
     line_search_seconds: float
@@ -565,11 +569,10 @@ def run_projected_lbfgs(
     if options.gauss_newton:
         if objective_residuals is None:
             raise ValueError("gauss_newton requires objective_residuals")
-        residual_jacobian = jax.jacfwd(objective_residuals)
 
         def _gauss_newton_direction(coordinates, projector, projected_gradient):
             return solve_tangent_gauss_newton(
-                residual_jacobian(coordinates),
+                materialize_residual_jacobian(objective_residuals, coordinates),
                 materialize_certified_projection(projector),
                 projected_gradient,
                 levenberg_relative=options.gauss_newton_levenberg_relative,
@@ -612,6 +615,7 @@ def run_projected_lbfgs(
         gn_predicted = float("nan")
         gn_condition = float("nan")
         gn_tangency = float("nan")
+        gn_direction_norm = float("nan")
         if options.gauss_newton:
             gn_step = jax.block_until_ready(
                 gauss_newton_direction(
@@ -624,6 +628,7 @@ def run_projected_lbfgs(
                 gn_predicted = float(gn_step.predicted_reduction)
                 gn_condition = float(gn_step.reduced_hessian_reciprocal_condition)
                 gn_tangency = float(gn_step.tangency_relative_residual)
+                gn_direction_norm = float(jnp.linalg.norm(gn_step.direction))
             else:
                 direction = jax.block_until_ready(
                     apply_metric(metric, -point.projected_gradient)
@@ -657,8 +662,18 @@ def run_projected_lbfgs(
             status = ProjectedLbfgsStatus.NON_DESCENT_DIRECTION
             break
 
-        capped = direction_norm > options.maximum_step_norm
-        step_scale = options.maximum_step_norm / direction_norm if capped else 1.0
+        # A Gauss--Newton step is a MODEL-scale step, not a locally safe one.
+        # Capping it to maximum_step_norm reimposes exactly the trust ball this
+        # route exists to remove -- the projected GN trust-region arm measured
+        # its directions at 152-1950x that ball -- and with the cap in place the
+        # initial scale lands below the rescue floor, so the step is never even
+        # tried.  The cap therefore applies only to secant directions.
+        if gauss_newton_used:
+            capped = False
+            step_scale = 1.0
+        else:
+            capped = direction_norm > options.maximum_step_norm
+            step_scale = options.maximum_step_norm / direction_norm if capped else 1.0
 
         line_search_started = time.perf_counter()
         retraction_seconds = 0.0
@@ -826,6 +841,7 @@ def run_projected_lbfgs(
             gauss_newton_predicted_reduction=gn_predicted,
             gauss_newton_reciprocal_condition=gn_condition,
             gauss_newton_tangency_residual=gn_tangency,
+            gauss_newton_direction_norm=gn_direction_norm,
             model_exactness_ratio=(
                 (float(point.objective) - float(accepted.objective)) / gn_predicted
                 if gauss_newton_used
@@ -912,6 +928,7 @@ def _collapsed_record(
         gauss_newton_predicted_reduction=float("nan"),
         gauss_newton_reciprocal_condition=float("nan"),
         gauss_newton_tangency_residual=float("nan"),
+        gauss_newton_direction_norm=float("nan"),
         model_exactness_ratio=float("nan"),
         stored_pairs=stored_pairs,
         transport_masked_pairs=masked_pairs,
