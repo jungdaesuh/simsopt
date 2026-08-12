@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from enum import StrEnum
-from typing import Literal, TypeAlias
+from typing import Literal, NamedTuple, TypeAlias
 
 import jax
 import jax.numpy as jnp
@@ -19,7 +19,9 @@ from simsopt_jax.core.field import (
     coil_specs_from_dof_extraction_spec,
     grouped_biot_savart_B_from_spec,
 )
-from simsopt_jax.core.quasisymmetry import non_quasi_symmetric_ratio
+from simsopt_jax.core.quasisymmetry import (
+    non_quasi_symmetric_residual_primitives,
+)
 from simsopt_jax.core.specs import (
     CoilSetDofExtractionSpec,
     GroupedCoilSetSpec,
@@ -298,6 +300,25 @@ jax.tree_util.register_dataclass(
 )
 
 
+class FullSpaceObjectiveResiduals(NamedTuple):
+    """Five canonical least-squares blocks in frozen objective order."""
+
+    non_qs: jax.Array
+    boozer: jax.Array
+    iota: jax.Array
+    major_radius: jax.Array
+    length: jax.Array
+
+
+class FullSpaceResidualEvaluation(NamedTuple):
+    """Authoritative evaluation paired with route-local GN residuals."""
+
+    evaluation: FullSpaceEvaluation
+    objective_residuals: FullSpaceObjectiveResiduals
+    objective_residual_vector: jax.Array
+    residual_valid: jax.Array
+
+
 @dataclass(frozen=True, slots=True)
 class FullSpaceFeasibilityPrimitives:
     """Raw equality residuals and device-side feasibility diagnostics."""
@@ -558,19 +579,19 @@ def _surface_field(
     return gamma, xphi, xtheta, magnetic_field
 
 
-def _non_qs_ratio(
+def _non_qs_quantities(
     surface_dofs: jax.Array,
     surface_template: SurfaceXYZTensorFourierSpec,
     coil_set: GroupedCoilSetSpec,
     *,
     axis: int,
-) -> jax.Array:
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     _gamma, xphi, xtheta, magnetic_field = _surface_field(
         surface_dofs,
         surface_template,
         coil_set,
     )
-    return non_quasi_symmetric_ratio(
+    return non_quasi_symmetric_residual_primitives(
         xphi,
         xtheta,
         magnetic_field,
@@ -593,9 +614,12 @@ def _selected_total_length(
     return sum(lengths[1:], start=lengths[0])
 
 
-def evaluate_fullspace(z: jax.Array, problem: FullSpaceProblem) -> FullSpaceEvaluation:
-    """Evaluate the unchanged objective, exact equalities, and observables."""
-
+def _evaluate_fullspace_impl(
+    z: jax.Array,
+    problem: FullSpaceProblem,
+    *,
+    include_objective_residuals: bool,
+) -> tuple[FullSpaceEvaluation, FullSpaceObjectiveResiduals, jax.Array]:
     state = problem.layout.unpack(z)
     coil_set = coil_set_spec_from_dof_extraction_spec(
         problem.coil_dof_extraction,
@@ -619,7 +643,12 @@ def evaluate_fullspace(z: jax.Array, problem: FullSpaceProblem) -> FullSpaceEval
         nphi=exact_B.shape[0],
         ntheta=exact_B.shape[1],
     )
-    non_qs = _non_qs_ratio(
+    (
+        non_qs,
+        non_qs_differential_area,
+        non_quasi_symmetric_B,
+        non_qs_denominator,
+    ) = _non_qs_quantities(
         state.surface_dofs,
         problem.non_qs_surface_template,
         coil_set,
@@ -678,12 +707,128 @@ def evaluate_fullspace(z: jax.Array, problem: FullSpaceProblem) -> FullSpaceEval
         boozer_residual_scalar=residual_objective,
         boozer_residual_rms=jnp.sqrt(jnp.mean(full_boozer_residual**2)),
     )
-    return FullSpaceEvaluation(
+    evaluation = FullSpaceEvaluation(
         raw_terms=raw_terms,
         weighted_total=weighted_total,
         constraints=constraints,
         observables=observables,
     )
+    if include_objective_residuals:
+        config = problem.config
+        boozer_count = jnp.asarray(full_boozer_residual.size, dtype=z.dtype)
+        objective_residuals = FullSpaceObjectiveResiduals(
+            non_qs=(
+                jnp.sqrt(
+                    2.0
+                    * config.non_qs_weight
+                    * non_qs_differential_area
+                    / non_qs_denominator
+                )
+                * non_quasi_symmetric_B
+            ).ravel(),
+            boozer=(
+                jnp.sqrt(config.residual_weight / boozer_count) * full_boozer_residual
+            ),
+            iota=jnp.reshape(
+                jnp.sqrt(config.iota_weight) * (state.iota - config.iota_target),
+                (1,),
+            ),
+            major_radius=jnp.reshape(
+                jnp.sqrt(config.major_radius_weight)
+                * (major_radius - config.major_radius_target),
+                (1,),
+            ),
+            length=jnp.reshape(
+                jnp.sqrt(config.length_weight) * length_excess,
+                (1,),
+            ),
+        )
+        residual_vector = flatten_fullspace_objective_residuals(objective_residuals)
+        weights = jnp.stack(
+            (
+                config.non_qs_weight,
+                config.residual_weight,
+                config.iota_weight,
+                config.major_radius_weight,
+                config.length_weight,
+            )
+        )
+        residual_valid = (
+            jnp.all(jnp.isfinite(weights))
+            & jnp.all(weights >= zero)
+            & jnp.isfinite(non_qs_denominator)
+            & (non_qs_denominator > zero)
+            & jnp.all(jnp.isfinite(residual_vector))
+        )
+    else:
+        empty = jnp.empty((0,), dtype=z.dtype)
+        objective_residuals = FullSpaceObjectiveResiduals(
+            non_qs=empty,
+            boozer=empty,
+            iota=empty,
+            major_radius=empty,
+            length=empty,
+        )
+        residual_valid = jnp.asarray(True)
+    return evaluation, objective_residuals, residual_valid
+
+
+def evaluate_fullspace(z: jax.Array, problem: FullSpaceProblem) -> FullSpaceEvaluation:
+    """Evaluate the unchanged objective, exact equalities, and observables."""
+
+    evaluation, _residuals, _residual_valid = _evaluate_fullspace_impl(
+        z,
+        problem,
+        include_objective_residuals=False,
+    )
+    return evaluation
+
+
+def flatten_fullspace_objective_residuals(
+    residuals: FullSpaceObjectiveResiduals,
+) -> jax.Array:
+    """Flatten objective residuals in their frozen block order."""
+
+    return jnp.concatenate(
+        (
+            residuals.non_qs,
+            residuals.boozer,
+            residuals.iota,
+            residuals.major_radius,
+            residuals.length,
+        )
+    )
+
+
+def evaluate_fullspace_with_objective_residuals(
+    z: jax.Array,
+    problem: FullSpaceProblem,
+) -> FullSpaceResidualEvaluation:
+    """Evaluate authoritative values and GN residuals in one physics traversal."""
+
+    evaluation, residuals, residual_valid = _evaluate_fullspace_impl(
+        z,
+        problem,
+        include_objective_residuals=True,
+    )
+    return FullSpaceResidualEvaluation(
+        evaluation=evaluation,
+        objective_residuals=residuals,
+        objective_residual_vector=flatten_fullspace_objective_residuals(residuals),
+        residual_valid=residual_valid,
+    )
+
+
+def fullspace_objective_residual_vector(
+    z: jax.Array,
+    problem: FullSpaceProblem,
+) -> jax.Array:
+    """Return the canonical flat residual used only for GN curvature."""
+
+    return evaluate_fullspace_with_objective_residuals(
+        z,
+        problem,
+    ).objective_residual_vector
 
 
 def fullspace_raw_terms(z: jax.Array, problem: FullSpaceProblem) -> FullSpaceRawTerms:

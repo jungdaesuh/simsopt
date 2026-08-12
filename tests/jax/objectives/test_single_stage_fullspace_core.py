@@ -7,9 +7,6 @@ from dataclasses import replace
 import jax
 import jax.numpy as jnp
 import numpy as np
-from simsopt_jax.core.surface_dofs import (
-    surface_gamma_tangents_from_dofs,
-)
 from simsopt_jax.core.curve_geometry import curve_length_from_spec
 from simsopt_jax.core.field import (
     coil_set_spec_from_dof_extraction_spec,
@@ -23,6 +20,9 @@ from simsopt_jax.core.specs import (
     make_optimizable_dof_map_spec,
     make_surface_xyz_tensor_fourier_spec,
 )
+from simsopt_jax.core.surface_dofs import (
+    surface_gamma_tangents_from_dofs,
+)
 from simsopt_jax.core.surface_fourier_indices import stellsym_scatter_indices
 from simsopt_jax.core.surface_integrals import surface_major_radius, surface_volume
 from simsopt_jax.geo.boozer_residual import boozer_residual_vector
@@ -32,10 +32,15 @@ from simsopt_jax.objectives.single_stage_fullspace import (
     FullSpaceProblem,
     FullSpaceState,
     evaluate_fullspace,
+    evaluate_fullspace_with_objective_residuals,
     flatten_fullspace_constraints,
     fullspace_constraints,
+    fullspace_objective_residual_vector,
     fullspace_value,
     fullspace_value_and_grad,
+)
+from simsopt_jax.objectives.single_stage_fullspace_residuals import (
+    certify_fullspace_objective_residuals,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -245,6 +250,159 @@ def test_raw_terms_follow_frozen_scalar_formulas() -> None:
         atol=1.0e-15,
     )
     np.testing.assert_allclose(evaluation.weighted_total, expected_weighted)
+
+
+def test_objective_residual_contract_reconstructs_terms_and_gradient() -> None:
+    problem, state = _problem_and_state()
+    z = problem.layout.pack(state)
+    residual_evaluation = evaluate_fullspace_with_objective_residuals(z, problem)
+    residuals = residual_evaluation.objective_residuals
+    evaluation = residual_evaluation.evaluation
+
+    assert residuals.non_qs.shape == (5 * 6,)
+    assert residuals.boozer.shape == (4 * 5 * 3,)
+    assert residual_evaluation.objective_residual_vector.shape == (30 + 60 + 3,)
+    expected_weighted_terms = (
+        problem.config.non_qs_weight * evaluation.raw_terms.non_qs,
+        problem.config.residual_weight * evaluation.raw_terms.residual,
+        problem.config.iota_weight * evaluation.raw_terms.iota,
+        problem.config.major_radius_weight * evaluation.raw_terms.major_radius,
+        problem.config.length_weight * evaluation.raw_terms.length,
+    )
+    for residual, expected in zip(residuals, expected_weighted_terms, strict=True):
+        np.testing.assert_allclose(
+            0.5 * jnp.vdot(residual, residual),
+            expected,
+            rtol=1.0e-12,
+            atol=1.0e-15,
+        )
+
+    changed = z.at[problem.layout.coil_dof_count].add(2.0e-4)
+    for candidate in (z, changed):
+        certificate = certify_fullspace_objective_residuals(candidate, problem)
+        assert bool(certificate.residual_valid)
+        assert bool(certificate.all_finite)
+        assert float(certificate.value_scaled_defect) <= 1.0e-12
+        assert float(certificate.gradient_scaled_defect) <= 1.0e-10
+
+    only_non_qs = replace(
+        problem,
+        config=replace(
+            problem.config,
+            residual_weight=jnp.asarray(0.0, dtype=z.dtype),
+            iota_weight=jnp.asarray(0.0, dtype=z.dtype),
+            major_radius_weight=jnp.asarray(0.0, dtype=z.dtype),
+            length_weight=jnp.asarray(0.0, dtype=z.dtype),
+        ),
+    )
+    non_qs_certificate = certify_fullspace_objective_residuals(changed, only_non_qs)
+    assert float(non_qs_certificate.gradient_scaled_defect) <= 1.0e-10
+
+    variable_scale = jnp.linspace(0.5, 1.5, z.size, dtype=z.dtype)
+    optimizer_origin = jnp.zeros_like(z)
+
+    def optimizer_residual(u: jax.Array) -> jax.Array:
+        return fullspace_objective_residual_vector(z + variable_scale * u, problem)
+
+    optimizer_residual_value, pushforward = jax.linearize(
+        optimizer_residual,
+        optimizer_origin,
+    )
+    pullback = jax.linear_transpose(pushforward, optimizer_origin)
+    reconstructed_optimizer_gradient = pullback(optimizer_residual_value)[0]
+    _value, physical_gradient = fullspace_value_and_grad(z, problem)
+    np.testing.assert_allclose(
+        reconstructed_optimizer_gradient,
+        variable_scale * physical_gradient,
+        rtol=3.0e-12,
+        atol=3.0e-10,
+    )
+
+
+def test_gauss_newton_hvp_matches_explicit_residual_jacobian() -> None:
+    problem, state = _problem_and_state()
+    z = problem.layout.pack(state)
+    residual_fn = lambda candidate: fullspace_objective_residual_vector(
+        candidate, problem
+    )
+    _residual, pushforward = jax.linearize(residual_fn, z)
+    pullback = jax.linear_transpose(pushforward, z)
+    direction = jnp.linspace(-0.4, 0.7, z.size, dtype=z.dtype)
+    gn_hvp = pullback(pushforward(direction))[0]
+    jacobian = jax.jacfwd(residual_fn)(z)
+    expected = jacobian.T @ (jacobian @ direction)
+
+    np.testing.assert_allclose(gn_hvp, expected, rtol=3.0e-11, atol=3.0e-11)
+    probe = jnp.linspace(0.8, -0.2, z.size, dtype=z.dtype)
+    probe_hvp = pullback(pushforward(probe))[0]
+    np.testing.assert_allclose(
+        jnp.vdot(probe, gn_hvp),
+        jnp.vdot(direction, probe_hvp),
+        rtol=1.0e-11,
+        atol=1.0e-11,
+    )
+    assert float(jnp.vdot(direction, gn_hvp)) >= -1.0e-12
+
+
+def test_length_residual_preserves_jax_max_tie_convention() -> None:
+    problem, state = _problem_and_state()
+    z = problem.layout.pack(state)
+    total_length = evaluate_fullspace(z, problem).observables.total_length
+    kink_problem = replace(
+        problem,
+        config=replace(problem.config, length_target=total_length),
+    )
+    length_gradient = jax.grad(
+        lambda candidate: (
+            evaluate_fullspace(candidate, kink_problem).observables.total_length
+        )
+    )(z)
+    direction = length_gradient / jnp.linalg.norm(length_gradient)
+    length_directional = jnp.vdot(length_gradient, direction)
+    _value, residual_directional = jax.jvp(
+        lambda candidate: evaluate_fullspace_with_objective_residuals(
+            candidate,
+            kink_problem,
+        ).objective_residuals.length[0],
+        (z,),
+        (direction,),
+    )
+    expected = 0.5 * jnp.sqrt(kink_problem.config.length_weight) * length_directional
+    np.testing.assert_allclose(residual_directional, expected, rtol=1.0e-12)
+
+    for offset, active in ((1.0e-3, False), (-1.0e-3, True)):
+        side_problem = replace(
+            problem,
+            config=replace(problem.config, length_target=total_length + offset),
+        )
+        side_residual = evaluate_fullspace_with_objective_residuals(
+            z,
+            side_problem,
+        ).objective_residuals.length[0]
+        assert bool(side_residual > 0.0) is active
+        side_certificate = certify_fullspace_objective_residuals(z, side_problem)
+        assert float(side_certificate.value_scaled_defect) <= 1.0e-12
+        assert float(side_certificate.gradient_scaled_defect) <= 1.0e-10
+    value, gradient = fullspace_value_and_grad(z, kink_problem)
+    no_length_problem = replace(
+        kink_problem,
+        config=replace(
+            kink_problem.config,
+            length_weight=jnp.asarray(0.0, dtype=z.dtype),
+        ),
+    )
+    assert np.isfinite(float(value))
+    np.testing.assert_allclose(
+        jnp.vdot(gradient, direction),
+        jnp.vdot(
+            jax.grad(lambda candidate: fullspace_value(candidate, no_length_problem))(
+                z
+            ),
+            direction,
+        ),
+        rtol=1.0e-12,
+        atol=1.0e-12,
+    )
 
 
 def test_equalities_preserve_signed_volume_and_exact_mask_order() -> None:
