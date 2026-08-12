@@ -12,6 +12,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from simsopt_jax.backend.dtypes import explicit_device_array
 from simsopt_jax.core._finite_difference import (
     forward_jacobian_shard_map,
     forward_jacobian_vmap,
@@ -199,9 +200,11 @@ class TraceableParametricScalarProblem:
     def __post_init__(self) -> None:
         objective_fn = self.objective_fn
         x = jnp.asarray(self.x)
-        objective_parameter = jax.device_put(
-            jnp.asarray(self.objective_parameter),
-            x.sharding,
+        objective_parameter_array = jnp.asarray(self.objective_parameter)
+        objective_parameter = explicit_device_array(
+            objective_parameter_array,
+            dtype=objective_parameter_array.dtype,
+            reference=x,
         )
 
         def normalized_objective(current_x, current_parameter):
@@ -253,9 +256,10 @@ class TraceableParametricScalarProblem:
                 "objective_parameter dtype cannot change between solves: "
                 f"expected {self.objective_parameter.dtype}, got {parameter.dtype}."
             )
-        self.objective_parameter = jax.device_put(
+        self.objective_parameter = explicit_device_array(
             parameter,
-            self.x.sharding,
+            dtype=parameter.dtype,
+            reference=self.x,
         )
 
     def objective(self, x: jax.Array | None = None) -> jax.Array:
@@ -514,7 +518,11 @@ def least_squares_serial_solve_jax(
         residual_args=prob._solver_residual_args,
     )
     _require_success(result, operation="JAX least-squares solve")
-    final_x = jax.device_put(result.x, initial_x.sharding)
+    final_x = explicit_device_array(
+        result.x,
+        dtype=result.x.dtype,
+        reference=initial_x,
+    )
     final_objective = prob.objective(final_x)
     _write_bounded_objective_log(
         problem_type="least_squares",
@@ -596,7 +604,11 @@ def serial_solve_jax(
     )
     if require_success:
         _require_success(result, operation="JAX scalar solve")
-    final_x = jax.device_put(result.x, initial_x.sharding)
+    final_x = explicit_device_array(
+        result.x,
+        dtype=result.x.dtype,
+        reference=initial_x,
+    )
     final_objective = prob.objective(final_x)
     _write_bounded_objective_log(
         problem_type="general",

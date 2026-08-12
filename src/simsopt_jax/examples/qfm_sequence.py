@@ -18,6 +18,7 @@ from simsopt_jax.core.qfm_solver import (
 )
 from simsopt_jax.core.specs import GroupedCoilSetSpec, SurfaceRZFourierSpec
 from simsopt_jax.core.surface_rzfourier import surface_rz_fourier_spec_from_dofs
+from simsopt_jax.runtime.host_boundary import block_until_ready
 
 
 class QfmDeviceState(NamedTuple):
@@ -284,7 +285,7 @@ def solve_qfm_sequence(
         tolerance=tolerance,
         constraint_weight=constraint_weight,
     )
-    return jax.block_until_ready(
+    return block_until_ready(
         QfmSequenceDeviceResult(
             initial_volume=initial_volume,
             volume=volume,

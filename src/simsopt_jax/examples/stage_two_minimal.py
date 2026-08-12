@@ -14,6 +14,7 @@ from simsopt_jax.objectives import (
     fused_stage_two_values,
     make_fused_stage_two_objective,
 )
+from simsopt_jax.runtime.host_boundary import block_until_ready
 from simsopt_jax.solve.contracts import OptimizerResult
 from simsopt_jax.solve.serial import TraceableScalarProblem, serial_solve_jax
 
@@ -244,7 +245,7 @@ def solve_minimal_stage_two(
         atol=atol,
     )
     final = state(problem.x)
-    completed = jax.block_until_ready(
+    completed = block_until_ready(
         (
             (
                 initial.parameters,

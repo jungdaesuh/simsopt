@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 
+from simsopt_jax.runtime.host_boundary import block_until_ready
 from simsopt_jax.solve.contracts import OptimizerResult
 from simsopt_jax.solve.serial import (
     TraceableLeastSquaresProblem,
@@ -93,7 +94,7 @@ def solve_weighted_quadratic(
     final_residuals = problem.residuals()
     final_objective = problem.objective()
     final_gradient = weighted_quadratic_gradient(jacobian, final_residuals)
-    completed = jax.block_until_ready(
+    completed = block_until_ready(
         (
             initial_residuals,
             jacobian,
