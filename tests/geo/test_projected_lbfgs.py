@@ -733,3 +733,28 @@ def test_refresh_period_must_be_positive() -> None:
     except ValueError:
         return
     raise AssertionError("a nonpositive refresh period was accepted")
+
+
+def test_committing_the_start_point_is_numerically_inert() -> None:
+    """The loop binds its start to one device; that must change no number.
+
+    A jitted output is committed to the device it ran on and a caller's array
+    need not be, and ``jax.jit`` compiles a second executable for the second
+    of those it sees.  The loop therefore commits its start point once.  What
+    that must never do is move the run, so the same start supplied both ways
+    has to produce the identical trajectory.
+    """
+
+    uncommitted = _feasible_start()
+    committed = jax.device_put(uncommitted, next(iter(uncommitted.devices())))
+    options = ProjectedLbfgsOptions(maximum_iterations=6, feasibility_tolerance=1e-12)
+
+    loose = run_projected_lbfgs(_sphere_problem, uncommitted, options=options)
+    bound = run_projected_lbfgs(_sphere_problem, committed, options=options)
+
+    assert [record.objective for record in loose.iterations] == [
+        record.objective for record in bound.iterations
+    ]
+    np.testing.assert_array_equal(
+        np.asarray(loose.coordinates), np.asarray(bound.coordinates)
+    )
