@@ -75,9 +75,7 @@ def test_projected_gradient_is_tangent_and_vanishes_at_the_minimizer() -> None:
     stationary = evaluate_projected_point(_sphere_problem, minimizer)
     assert float(stationary.projected_gradient_inf) <= 1.0e-12
     # Tangency: the projected gradient carries no component along the normal.
-    assert (
-        abs(float(interior.projected_gradient @ _feasible_start())) <= 1.0e-12
-    )
+    assert abs(float(interior.projected_gradient @ _feasible_start())) <= 1.0e-12
 
 
 def test_run_descends_monotonically_to_the_closed_form_minimum() -> None:
@@ -102,8 +100,7 @@ def test_run_descends_monotonically_to_the_closed_form_minimum() -> None:
     )
     assert run.objective == min(objectives + [run.objective])
     assert abs(run.objective - _SPHERE_MINIMUM) <= 1.0e-10, (
-        f"converged to {run.objective}, not the closed-form minimum "
-        f"{_SPHERE_MINIMUM}"
+        f"converged to {run.objective}, not the closed-form minimum {_SPHERE_MINIMUM}"
     )
     assert run.projected_gradient_inf <= 1.0e-8
 
@@ -177,9 +174,7 @@ def test_objective_target_stops_the_run() -> None:
     run = run_projected_lbfgs(
         _sphere_problem,
         _feasible_start(),
-        options=ProjectedLbfgsOptions(
-            maximum_iterations=200, objective_target=0.55
-        ),
+        options=ProjectedLbfgsOptions(maximum_iterations=200, objective_target=0.55),
     )
 
     assert run.status is ProjectedLbfgsStatus.OBJECTIVE_TARGET_REACHED
