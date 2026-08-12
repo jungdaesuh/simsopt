@@ -20,7 +20,7 @@ from examples.jax.parity.artifacts import (
     write_bytes_exclusive,
 )
 from examples.jax.parity.contracts import ArrayReference
-from simsopt_jax.examples import ExecutionScale
+from simsopt_jax.runtime.execution_scale import ExecutionScale
 
 _ARRAY_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 
