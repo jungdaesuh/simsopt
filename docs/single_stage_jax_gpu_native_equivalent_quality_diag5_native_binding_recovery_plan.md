@@ -173,7 +173,7 @@ The successor identities are:
 
 The fixed CPU qualification root is:
 
-`/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-cpu-qualification-20260812T090000Z`
+`/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-cpu-qualification-20260812T110000Z`
 
 The fixed GPU output root is:
 
@@ -287,7 +287,7 @@ policy must never be reused for sealed artifact leaves.
 
 ## Source, plan, and snapshot closure
 
-`DIAG5_QUALIFIED_FILE_PATHS` is the exact following 24-path frozenset, with no
+`DIAG5_QUALIFIED_FILE_PATHS` is the exact following 25-path frozenset, with no
 additional or missing member:
 
 1. `benchmarks/process_gpu_monitor.py`;
@@ -302,18 +302,19 @@ additional or missing member:
 10. `benchmarks/single_stage_native_equivalent_quality_successor_authority.py`;
 11. `benchmarks/single_stage_native_equivalent_reference.py`;
 12. `docs/single_stage_jax_gpu_native_equivalent_quality_diag4_independent_postmortem.json`;
-13. `tests/benchmarks/_diag2_fixture.py`;
-14. `tests/benchmarks/test_process_gpu_monitor.py`;
-15. `tests/benchmarks/test_qualify_single_stage_native_equivalent_quality_gntr3_cpu.py`;
-16. `tests/benchmarks/test_run_single_stage_native_equivalent_quality_campaign.py`;
-17. `tests/benchmarks/test_single_stage_fullspace_snapshot.py`;
-18. `tests/benchmarks/test_single_stage_native_equivalent_endpoint_audit.py`;
-19. `tests/benchmarks/test_single_stage_native_equivalent_quality_diag2_contract.py`;
-20. `tests/benchmarks/test_single_stage_native_equivalent_quality_diagnostic_receipt.py`;
-21. `tests/benchmarks/test_single_stage_native_equivalent_quality_receipt.py`;
-22. `tests/benchmarks/test_single_stage_native_equivalent_reference.py`;
-23. `tests/geo/test_fullspace_native_equivalent_quality.py`;
-24. `tests/geo/test_projected_gauss_newton_trust_region.py`.
+13. `src/simsopt/configs/NCSX.dat`;
+14. `tests/benchmarks/_diag2_fixture.py`;
+15. `tests/benchmarks/test_process_gpu_monitor.py`;
+16. `tests/benchmarks/test_qualify_single_stage_native_equivalent_quality_gntr3_cpu.py`;
+17. `tests/benchmarks/test_run_single_stage_native_equivalent_quality_campaign.py`;
+18. `tests/benchmarks/test_single_stage_fullspace_snapshot.py`;
+19. `tests/benchmarks/test_single_stage_native_equivalent_endpoint_audit.py`;
+20. `tests/benchmarks/test_single_stage_native_equivalent_quality_diag2_contract.py`;
+21. `tests/benchmarks/test_single_stage_native_equivalent_quality_diagnostic_receipt.py`;
+22. `tests/benchmarks/test_single_stage_native_equivalent_quality_receipt.py`;
+23. `tests/benchmarks/test_single_stage_native_equivalent_reference.py`;
+24. `tests/geo/test_fullspace_native_equivalent_quality.py`;
+25. `tests/geo/test_projected_gauss_newton_trust_region.py`.
 
 `DIAG5_FROZEN_NUMERICAL_PATHS` is the exact following 11-path frozenset:
 
@@ -343,14 +344,15 @@ variant is accepted.
 
 DIAG5 regenerates the canonical execution-source manifest after all successor
 changes settle. Its entry set is exact no-ignore `Path.rglob("*.py")` regular,
-nonsymlink membership beneath `benchmarks`, `examples`, and `src`, union the 24
+nonsymlink membership beneath `benchmarks`, `examples`, and `src`, union the 25
 qualified and 11 frozen paths, minus the manifest itself and this plan. The
 future authority JSON and all generated review/qualification JSON are excluded;
 the repository postmortem JSON is included. Membership discovery validates the
 frozen manifest but never selects runtime copy inputs. The no-ignore Python set
 is exactly 591 paths (113 `benchmarks`, 156 `examples`, 322 `src`); union with
-the 12 qualified test paths and one repository postmortem yields exactly 604
-deduplicated execution entries. The separately copied manifest is not an entry.
+the 12 qualified test paths, one repository postmortem, and one qualified
+configuration data file yields exactly 605 deduplicated execution entries. The
+separately copied manifest is not an entry.
 
 This plan is a separate blank prequalification control with exact schema
 `single-stage-neq-gntr3-prequalification-plan-control-v2` and keys
@@ -362,12 +364,12 @@ is exactly the SHA-256 of all bytes physically preceding the sole
 `## Qualification Record` marker, including the newline immediately before that
 marker; it is frozen only after the blank-plan independent audit.
 
-The decisive CPU snapshot contains exactly 607 leaves: 604 execution entries,
+The decisive CPU snapshot contains exactly 608 leaves: 605 execution entries,
 the separately copied manifest, blank plan control, and one copied native
 extension. The copied-native relative path is the constant
 `native/simsoptpp.cpython-311-x86_64-linux-gnu.so`, derived once from the CPU
-binding and frozen here. The GPU snapshot contains exactly 606 leaves: the
-sealed CPU-qualified 604 execution entries, manifest, and copied native
+binding and frozen here. The GPU snapshot contains exactly 607 leaves: the
+sealed CPU-qualified 605 execution entries, manifest, and copied native
 extension at that same constant relative path even if the installed GPU basename
 differs. It does not re-enumerate or copy live repository Python files. CPU and
 GPU runtime documents separately record their installed absolute loaded paths.
@@ -390,7 +392,7 @@ where specified, and locks are revalidated at every frozen boundary.
 The sole CPU command is:
 
 ```text
-env JAX_PLATFORMS=cpu JAX_ENABLE_X64=true XLA_PYTHON_CLIENT_PREALLOCATE=false PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=src .venv-qn-cpu/bin/python benchmarks/qualify_single_stage_native_equivalent_quality_gntr3_cpu.py --output-root /home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-cpu-qualification-20260812T090000Z
+env JAX_PLATFORMS=cpu JAX_ENABLE_X64=true XLA_PYTHON_CLIENT_PREALLOCATE=false PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=src .venv-qn-cpu/bin/python benchmarks/qualify_single_stage_native_equivalent_quality_gntr3_cpu.py --output-root /home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-cpu-qualification-20260812T110000Z
 ```
 
 It produces only CPU schema
@@ -447,6 +449,32 @@ production-source import, extends the bootstrap dry-run regression test with a
 sealed-tree subprocess resolution probe, and reopens the tranche on the fresh
 `20260812T090000Z` namespaces frozen above. The four pre-run `GO` reviews must
 be re-obtained once more against the recovered bytes.
+
+The third CPU qualification root,
+`/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-cpu-qualification-20260812T090000Z`,
+was spent on 2026-08-12T09:51Z: production imports bound to the sealed tree
+correctly, and the worker failed closed at
+`build_single_stage_fullspace_bootstrap` because the sealed execution source
+contained no physics data file — the membership rule sealed only Python
+sources plus the repository postmortem, so `src/simsopt/configs/NCSX.dat`,
+read by `get_data("ncsx")`, was absent; the prior import escape had masked
+this gap. A live audit-hook enumeration of the complete bootstrap and
+native-endpoint-runtime chain establishes `NCSX.dat` as the sole repository
+data file the qualification reads; every other input comes from the admitted
+external native-reference and input-bundle roots. The retained
+`.partial-claim`, the sealed stderr transcript
+`/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-terminal-sealed-data-absent-20260812T0951Z.txt`
+(SHA-256
+`afde64050d6a1c316188bede6477500b429580f573a83e216b27ad67c9758ee0`), and the
+retracted third pre-run review root
+`/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-reviews-20260812T090000Z`
+are immutable evidence and may never be reused, replaced, or deleted. This
+revision qualifies `src/simsopt/configs/NCSX.dat` as the twenty-fifth
+qualified file (605 execution entries, 608 CPU snapshot leaves), extends the
+bootstrap dry-run subprocess probe to construct the NCSX coil set from the
+sealed tree, and reopens the tranche on the fresh `20260812T110000Z`
+namespaces frozen above. The four pre-run `GO` reviews must be re-obtained
+against the recovered bytes.
 
 Before the one CPU qualification:
 
@@ -509,7 +537,7 @@ The postmortem must equal this array and hash, not merely accept four self-hashe
 rows. No physical DIAG4 qualification record or authority existed.
 
 New review records live beneath exact root
-`/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-reviews-20260812T090000Z`,
+`/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-reviews-20260812T110000Z`,
 which and all siblings sharing that basename must be absent before the first
 pre-run review publication. The eight exact files are `pre-run/<role>.json` and
 `post-run/<role>.json` for the

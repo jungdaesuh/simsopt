@@ -44,7 +44,7 @@ _EXECUTION_SOURCE_DESCRIPTOR_ENVIRONMENT: Final = (
 )
 _EXPECTED_OUTPUT_ROOT_TEXT: Final = (
     "/home/jungdaesuh/simsopt-campaigns/"
-    "neq-gntr3-diag5-cpu-qualification-20260812T090000Z"
+    "neq-gntr3-diag5-cpu-qualification-20260812T110000Z"
 )
 _REQUIRED_ENVIRONMENT: Final = {
     "JAX_PLATFORMS": "cpu",
@@ -1733,7 +1733,7 @@ MANIFEST_SCHEMA_VERSION: Final = (
 )
 EXPECTED_OUTPUT_ROOT: Final = Path(
     "/home/jungdaesuh/simsopt-campaigns/"
-    "neq-gntr3-diag5-cpu-qualification-20260812T090000Z"
+    "neq-gntr3-diag5-cpu-qualification-20260812T110000Z"
 )
 RETAINED_DIAG3_ROOT: Final = Path(
     "/home/jungdaesuh/simsopt-campaigns/"
