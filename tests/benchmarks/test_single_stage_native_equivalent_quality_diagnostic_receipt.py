@@ -1167,6 +1167,223 @@ def test_diag4_terminal_endpoint_evidence_round_trip_and_mutations(
             )
 
 
+_DIAG4_AGREEMENT_TERMS = {
+    "non_qs": 3.1e-08,
+    "residual": 7.5e-09,
+    "iota": 1.25e-08,
+    "major_radius": 2.5e-09,
+    "length": 9.75e-09,
+}
+_DIAG4_AGREEMENT_OBSERVABLES = {
+    "iota": 0.42,
+    "G": 1.75,
+    "volume": 0.031,
+    "major_radius": 1.0,
+    "total_length": 24.5,
+    "non_qs_ratio": 1.5e-06,
+    "boozer_residual_value": 4.5e-09,
+    "boozer_residual_rms": 6.25e-10,
+}
+
+
+def _diag4_agreement_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, dict[str, object]]:
+    root = tmp_path / "agreement"
+    receipt = _complete_receipt(root, monkeypatch, quality_hit=True)
+    terminal_ref = dict(receipt.evidence_refs)["terminal_numerical"]
+    legacy = json.loads((root / terminal_ref.relative_path).read_bytes())
+    legacy["objective_terms"] = dict(_DIAG4_AGREEMENT_TERMS)
+    legacy["objective"] = sum(
+        _DIAG4_AGREEMENT_TERMS[name] * legacy["objective_weights"][name]
+        for name in receipt_module.DIAG4_ENDPOINT_OBJECTIVE_TERM_FIELDS
+    )
+    return root, legacy
+
+
+@pytest.mark.parametrize(
+    ("divergence", "message"),
+    (
+        ("exact", None),
+        ("ulp_term", None),
+        ("ulp_observable", None),
+        ("ulp_objective", None),
+        ("wrong_state_term", "endpoint objective term.non_qs differs"),
+        ("wrong_state_observable", "endpoint observable.G differs"),
+        ("wrong_state_objective", "endpoint weighted objective differs"),
+        ("state_sha", "DIAG4 terminal endpoint state binding differs"),
+        ("nonfinite_term", "DIAG4 endpoint objective terms.non_qs must be finite"),
+    ),
+)
+def test_diag4_endpoint_agreement_is_tolerance_certified_not_bitwise(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    divergence: str,
+    message: str | None,
+) -> None:
+    root, legacy = _diag4_agreement_terminal(tmp_path, monkeypatch)
+    endpoint_terms = dict(_DIAG4_AGREEMENT_TERMS)
+    endpoint_observables = dict(_DIAG4_AGREEMENT_OBSERVABLES)
+    state_sha256 = legacy["arrays"]["physical_state"]["content_sha256"]
+    ulp = 1.0 + 2.0**-50
+    wrong_state = 1.0 + 1.0e-06
+    if divergence == "ulp_term":
+        endpoint_terms["non_qs"] *= ulp
+    elif divergence == "ulp_observable":
+        endpoint_observables["G"] *= ulp
+    elif divergence == "ulp_objective":
+        legacy["objective"] *= ulp
+    elif divergence == "wrong_state_term":
+        endpoint_terms["non_qs"] *= wrong_state
+    elif divergence == "wrong_state_observable":
+        endpoint_observables["G"] *= wrong_state
+    elif divergence == "wrong_state_objective":
+        legacy["objective"] *= wrong_state
+    elif divergence == "state_sha":
+        state_sha256 = "f" * 64
+    elif divergence == "nonfinite_term":
+        endpoint_terms["non_qs"] = float("inf")
+    if message is not None:
+        with pytest.raises(ValueError, match=message):
+            receipt_module.diag4_terminal_numerical_payload(
+                terminal_numerical=legacy,
+                numerical_identity=_diag4_test_numerical_identity(),
+                endpoint_state_sha256=state_sha256,
+                terminal_observables=_DIAG4_AGREEMENT_OBSERVABLES,
+                endpoint_objective_terms=endpoint_terms,
+                endpoint_observables=endpoint_observables,
+            )
+        return
+    payload = receipt_module.diag4_terminal_numerical_payload(
+        terminal_numerical=legacy,
+        numerical_identity=_diag4_test_numerical_identity(),
+        endpoint_state_sha256=state_sha256,
+        terminal_observables=_DIAG4_AGREEMENT_OBSERVABLES,
+        endpoint_objective_terms=endpoint_terms,
+        endpoint_observables=endpoint_observables,
+    )
+    evidence = receipt_module.validate_diag4_terminal_numerical_payload(
+        root, json.loads(canonical_json_bytes(payload))
+    )
+    assert (
+        dict(evidence.endpoint_objective_terms)["non_qs"] == (endpoint_terms["non_qs"])
+    )
+    assert dict(evidence.endpoint_observables)["G"] == endpoint_observables["G"]
+
+
+@pytest.mark.parametrize(
+    ("divergence", "message"),
+    (
+        ("exact", None),
+        ("ulp_objective", None),
+        ("floor_equalities", None),
+        ("wrong_state_objective", "GNTR3 endpoint audit objective differs"),
+        ("wrong_state_equalities", "GNTR3 endpoint audit raw equality 0 differs"),
+        ("term_copy", "GNTR3 endpoint audit differs from terminal evidence"),
+        ("state_sha", "GNTR3 endpoint audit differs from terminal evidence"),
+    ),
+)
+def test_terminal_endpoint_audit_join_is_tolerance_certified_and_state_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    divergence: str,
+    message: str | None,
+) -> None:
+    root, legacy = _diag4_agreement_terminal(tmp_path, monkeypatch)
+    payload = receipt_module.diag4_terminal_numerical_payload(
+        terminal_numerical=legacy,
+        numerical_identity=_diag4_test_numerical_identity(),
+        endpoint_state_sha256=legacy["arrays"]["physical_state"]["content_sha256"],
+        terminal_observables=_DIAG4_AGREEMENT_OBSERVABLES,
+        endpoint_objective_terms=_DIAG4_AGREEMENT_TERMS,
+        endpoint_observables=_DIAG4_AGREEMENT_OBSERVABLES,
+    )
+    terminal = receipt_module.validate_diag4_terminal_numerical_payload(
+        root, json.loads(canonical_json_bytes(payload))
+    )
+    values = terminal.terminal
+    objective = values.objective
+    equalities = tuple(float(item) for item in values.array("raw_equalities").values)
+    terms = tuple(value for _, value in terminal.endpoint_objective_terms)
+    state_sha256 = terminal.endpoint_state_sha256
+    if divergence == "ulp_objective":
+        objective *= 1.0 + 2.0**-50
+    elif divergence == "floor_equalities":
+        equalities = (equalities[0] + 1.0e-13,) + equalities[1:]
+    elif divergence == "wrong_state_objective":
+        objective *= 1.0 + 1.0e-06
+    elif divergence == "wrong_state_equalities":
+        equalities = (equalities[0] + 1.0e-09,) + equalities[1:]
+    elif divergence == "term_copy":
+        terms = (terms[0] * (1.0 + 2.0**-50),) + terms[1:]
+    elif divergence == "state_sha":
+        state_sha256 = "f" * 64
+    endpoint_audit = SimpleNamespace(
+        audited_state_sha256=state_sha256,
+        gpu_quality=SimpleNamespace(
+            physical_objective=objective,
+            gpu_raw_objective_terms=terms,
+            gpu_raw_equalities=equalities,
+            constraint_inverse_scale=tuple(
+                float(item) for item in values.array("constraint_inverse_scale").values
+            ),
+        ),
+    )
+    if message is None:
+        receipt_module.validate_terminal_endpoint_audit(
+            terminal=terminal, endpoint_audit=endpoint_audit
+        )
+        return
+    with pytest.raises(ValueError, match=message):
+        receipt_module.validate_terminal_endpoint_audit(
+            terminal=terminal, endpoint_audit=endpoint_audit
+        )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected", "accepted"),
+    (
+        (0.0, 0.0, True),
+        (3.1e-08, 3.1e-08 * (1.0 + 2.0**-50), True),
+        (0.0, receipt_module.DIAG4_ENDPOINT_AGREEMENT_ABSOLUTE_FLOOR, True),
+        (0.0, 1.0e-18, False),
+        (3.1e-08, 3.1e-08 * (1.0 + 1.0e-10), False),
+        (float("inf"), float("inf"), False),
+        (float("nan"), 0.0, False),
+        (1.0, float("-inf"), False),
+    ),
+)
+def test_certify_agreement_is_relative_with_absolute_floor_and_fails_closed(
+    value: float, expected: float, accepted: bool
+) -> None:
+    if accepted:
+        receipt_module._certify_agreement(
+            value,
+            expected,
+            "probe",
+            relative_tolerance=(
+                receipt_module.DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE
+            ),
+            absolute_floor=receipt_module.DIAG4_ENDPOINT_AGREEMENT_ABSOLUTE_FLOOR,
+        )
+        return
+    with pytest.raises(ValueError, match="probe"):
+        receipt_module._certify_agreement(
+            value,
+            expected,
+            "probe",
+            relative_tolerance=(
+                receipt_module.DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE
+            ),
+            absolute_floor=receipt_module.DIAG4_ENDPOINT_AGREEMENT_ABSOLUTE_FLOOR,
+        )
+
+
+def test_diag4_endpoint_agreement_tolerances_are_frozen() -> None:
+    assert receipt_module.DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE == 1.0e-11
+    assert receipt_module.DIAG4_ENDPOINT_AGREEMENT_ABSOLUTE_FLOOR == 1.0e-19
+
+
 def test_diag4_endpoint_audit_structural_validation_does_not_require_hit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

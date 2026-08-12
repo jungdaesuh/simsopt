@@ -304,6 +304,24 @@ DIAG4_ENDPOINT_OBSERVABLE_FIELDS: Final = (
     "boozer_residual_value",
     "boozer_residual_rms",
 )
+# The endpoint objective terms, endpoint observables and the weighted objective
+# are produced by independently compiled XLA executables (the endpoint audit
+# re-evaluates the state standalone while the solve evaluates it fused inside the
+# finalizer), and the weighted objective additionally compares a host
+# left-to-right sum against a device fused reduction.  Bitwise equality across
+# those boundaries is unattainable: fp64 eps is 2.2e-16 and reduction reordering
+# across the ~1e3-1e4 element sums of this objective accumulates to ~1e-13
+# relative, so 1e-11 keeps two decades of headroom.  Same-state binding is proven
+# exactly and separately by ``endpoint_state_sha256``; anything that changes the
+# evaluated state class moves these values by many orders of magnitude, far above
+# this band.
+DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE: Final = 1.0e-11
+# Absolute floor for values that legitimately pass through zero, set to the
+# relative tolerance evaluated at the smallest campaign term scale (1e-11 * 1e-8
+# for terms that live in 1e-8..1e-6).  It is seven decades below the tightest
+# frozen gate threshold in this campaign (1.0e-12), so no floor-admitted
+# divergence can move a gate decision.
+DIAG4_ENDPOINT_AGREEMENT_ABSOLUTE_FLOOR: Final = 1.0e-19
 POLICY_RAW_VECTOR_FIELDS: Final = (
     "native_raw_equalities",
     "constraint_inverse_scale",
@@ -553,6 +571,27 @@ def _number(value: JsonValue, context: str) -> float:
 
 def _optional_number(value: JsonValue, context: str) -> float | None:
     return None if value is None else _number(value, context)
+
+
+def _certify_agreement(
+    value: float,
+    expected: float,
+    context: str,
+    *,
+    relative_tolerance: float,
+    absolute_floor: float,
+) -> None:
+    """Certify one cross-executable value pair against a frozen tolerance."""
+
+    if not math.isfinite(value) or not math.isfinite(expected):
+        raise ValueError(f"{context} must be finite: {value!r} against {expected!r}")
+    if not math.isclose(
+        value, expected, rel_tol=relative_tolerance, abs_tol=absolute_floor
+    ):
+        raise ValueError(
+            f"{context} differs: {value!r} against {expected!r} exceeds relative "
+            f"{relative_tolerance!r} with absolute floor {absolute_floor!r}"
+        )
 
 
 def _sha256(value: JsonValue, context: str) -> str:
@@ -3789,6 +3828,23 @@ def _diag4_ordered_finite_mapping(
     return tuple((name, _number(payload[name], f"{context}.{name}")) for name in fields)
 
 
+def _certify_diag4_endpoint_agreement(
+    values: tuple[tuple[str, float], ...],
+    expected: tuple[tuple[str, float], ...],
+    context: str,
+) -> None:
+    """Certify one named cross-executable endpoint evaluation pair field by field."""
+
+    for (name, value), (_, expected_value) in zip(values, expected, strict=True):
+        _certify_agreement(
+            value,
+            expected_value,
+            f"{context}.{name}",
+            relative_tolerance=DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE,
+            absolute_floor=DIAG4_ENDPOINT_AGREEMENT_ABSOLUTE_FLOOR,
+        )
+
+
 def diag4_terminal_numerical_payload(
     *,
     terminal_numerical: Mapping[str, JsonValue],
@@ -3917,21 +3973,29 @@ def _validate_gntr3_terminal_numerical_structure(
     endpoint_state_sha256 = _sha256(
         payload["endpoint_state_sha256"], "DIAG4 endpoint state SHA"
     )
-    if (
-        endpoint_terms != terminal_terms
-        or endpoint_observables != terminal_observables
-        or endpoint_state_sha256
-        != _sha256(
-            physical_state.get("content_sha256"),
-            "DIAG4 terminal physical-state content SHA",
-        )
-        or sum(
+    if endpoint_state_sha256 != _sha256(
+        physical_state.get("content_sha256"),
+        "DIAG4 terminal physical-state content SHA",
+    ):
+        raise ValueError("DIAG4 terminal endpoint state binding differs")
+    _certify_diag4_endpoint_agreement(
+        endpoint_terms, terminal_terms, "DIAG4 terminal endpoint objective term"
+    )
+    _certify_diag4_endpoint_agreement(
+        endpoint_observables,
+        terminal_observables,
+        "DIAG4 terminal endpoint observable",
+    )
+    _certify_agreement(
+        sum(
             term * weight
             for (_, term), (_, weight) in zip(endpoint_terms, weights, strict=True)
-        )
-        != _number(payload["objective"], "DIAG4 terminal objective")
-    ):
-        raise ValueError("DIAG4 terminal endpoint evidence differs")
+        ),
+        _number(payload["objective"], "DIAG4 terminal objective"),
+        "DIAG4 terminal endpoint weighted objective",
+        relative_tolerance=DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE,
+        absolute_floor=DIAG4_ENDPOINT_AGREEMENT_ABSOLUTE_FLOOR,
+    )
     return (
         legacy,
         NativeEquivalentNumericalIdentity(
@@ -3986,18 +4050,27 @@ def _validate_gntr3_terminal_numerical_payload(
     terminal = _parse_terminal(artifact_root, legacy)
     if state_sha256 != terminal.array("physical_state").content_sha256:
         raise ValueError("DIAG4 endpoint state differs from terminal physical state")
-    if endpoint_terms != tuple(
-        (name, dict(terminal.objective_terms)[name])
-        for name in DIAG4_ENDPOINT_OBJECTIVE_TERM_FIELDS
-    ):
-        raise ValueError("DIAG4 endpoint objective terms differ from terminal")
-    if endpoint_observables != terminal_observables:
-        raise ValueError("DIAG4 endpoint observables differ from terminal")
-    endpoint_weighted = sum(
-        value * dict(terminal.objective_weights)[name] for name, value in endpoint_terms
+    _certify_diag4_endpoint_agreement(
+        endpoint_terms,
+        tuple(
+            (name, dict(terminal.objective_terms)[name])
+            for name in DIAG4_ENDPOINT_OBJECTIVE_TERM_FIELDS
+        ),
+        "DIAG4 endpoint objective term",
     )
-    if endpoint_weighted != terminal.objective:
-        raise ValueError("DIAG4 endpoint objective differs from terminal")
+    _certify_diag4_endpoint_agreement(
+        endpoint_observables, terminal_observables, "DIAG4 endpoint observable"
+    )
+    _certify_agreement(
+        sum(
+            value * dict(terminal.objective_weights)[name]
+            for name, value in endpoint_terms
+        ),
+        terminal.objective,
+        "DIAG4 endpoint weighted objective",
+        relative_tolerance=DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE,
+        absolute_floor=DIAG4_ENDPOINT_AGREEMENT_ABSOLUTE_FLOOR,
+    )
     return TerminalEvidenceV4(
         terminal,
         numerical_identity,
@@ -11533,11 +11606,8 @@ def validate_terminal_endpoint_audit(
     terminal_values = terminal.terminal
     if (
         endpoint_audit.audited_state_sha256 != terminal.endpoint_state_sha256
-        or endpoint_audit.gpu_quality.physical_objective != terminal_values.objective
         or endpoint_audit.gpu_quality.gpu_raw_objective_terms
         != tuple(value for _, value in terminal.endpoint_objective_terms)
-        or endpoint_audit.gpu_quality.gpu_raw_equalities
-        != tuple(float(item) for item in terminal_values.array("raw_equalities").values)
         or endpoint_audit.gpu_quality.constraint_inverse_scale
         != tuple(
             float(item)
@@ -11545,6 +11615,36 @@ def validate_terminal_endpoint_audit(
         )
     ):
         raise ValueError("GNTR3 endpoint audit differs from terminal evidence")
+    _certify_agreement(
+        endpoint_audit.gpu_quality.physical_objective,
+        terminal_values.objective,
+        "GNTR3 endpoint audit objective",
+        relative_tolerance=DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE,
+        absolute_floor=DIAG4_ENDPOINT_AGREEMENT_ABSOLUTE_FLOOR,
+    )
+    published_equalities = tuple(
+        float(item) for item in terminal_values.array("raw_equalities").values
+    )
+    for index, (audited, published) in enumerate(
+        zip(
+            endpoint_audit.gpu_quality.gpu_raw_equalities,
+            published_equalities,
+            strict=True,
+        )
+    ):
+        # Raw equalities are near-zero residuals of O(1) physical quantities, so
+        # their cross-executable rounding footprint is set by the operand scale
+        # rather than by the residual, and a purely relative band is unusable
+        # here.  The floor reuses the campaign's frozen raw-component resolution;
+        # the component gate itself is unaffected because it is evaluated on the
+        # terminal arrays alone, never on this join.
+        _certify_agreement(
+            audited,
+            published,
+            f"GNTR3 endpoint audit raw equality {index}",
+            relative_tolerance=RAW_EQUALITY_RELATIVE_TOLERANCE,
+            absolute_floor=RAW_EQUALITY_ABSOLUTE_TOLERANCE,
+        )
 
 
 def validate_endpoint_audit_evidence_payload(
@@ -17743,6 +17843,8 @@ __all__ = (
     "DIAG3_UNCOMMITTED_NUMERICAL_DIRECTORY",
     "DIAG4_COLD_RESULT_SCHEMA_VERSION",
     "DIAG4_CONDITIONAL_TIMING_ROUTE",
+    "DIAG4_ENDPOINT_AGREEMENT_ABSOLUTE_FLOOR",
+    "DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE",
     "DIAG4_ENDPOINT_OBJECTIVE_TERM_FIELDS",
     "DIAG4_ENDPOINT_OBSERVABLE_FIELDS",
     "DIAG4_ENGINEERING_THRESHOLD_SECONDS",
