@@ -5748,7 +5748,7 @@ def test_policy_raw_mutation_matrix_is_schema_complete(
 
 def test_diag5_contract_is_independent_and_exact() -> None:
     assert receipt_module.DIAG5_PLAN_SHA256 == (
-        "618cb703d507ee280e4ff861ec848e2ac76f586517e33f4f4720c04fe8e663e9"
+        "24300e9742bcbb14b3fc3e2cceab37dedc310410290a13370a11d21ef749ec7a"
     )
     assert len(receipt_module.DIAG5_EVIDENCE_SLOT_PATHS) == 26
     assert tuple(receipt_module.DIAG5_EVIDENCE_SLOT_PATHS) == tuple(
