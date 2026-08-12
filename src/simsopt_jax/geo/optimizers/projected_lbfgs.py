@@ -740,6 +740,17 @@ def run_projected_lbfgs(
     """
 
     _validate_options(options)
+    # Every coordinate array the loop feeds back into these kernels comes out
+    # of one of them, and a jitted output is COMMITTED to the device it ran on
+    # while a caller's array need not be.  ``jax.jit`` caches on that
+    # difference, so an uncommitted start point compiles the point evaluation,
+    # the retraction and the direction solve a SECOND time on their first
+    # in-loop call -- 31 s of the measured 92 s fixed cost on the coupled
+    # full-space problem.  Committing the start once is numerically inert and
+    # leaves one executable per kernel.
+    initial_coordinates = jax.device_put(
+        initial_coordinates, next(iter(initial_coordinates.devices()))
+    )
     dimension = int(initial_coordinates.shape[0])
     dtype = initial_coordinates.dtype
 
