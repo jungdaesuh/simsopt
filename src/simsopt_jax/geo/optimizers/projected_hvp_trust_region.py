@@ -293,13 +293,19 @@ def project_with_certified_gram(
     )
 
 
-def certified_minimum_norm_correction(
-    constraint_jacobian: jax.Array,
+def certified_correction_with_projector(
+    projector: CertifiedGramProjector,
     constraints: jax.Array,
 ) -> CertifiedMinimumNormCorrection:
-    """Return the certified minimum-norm solution of ``A delta = -c``."""
+    """Return the minimum-norm solution of ``A delta = -c`` for a factored ``A``.
 
-    projector = factor_certified_gram_projector(constraint_jacobian)
+    ``constraints`` need not have been evaluated at the point where ``A`` was
+    materialized.  When it was not, this is a chord step -- normal to the rows
+    of the frozen ``A`` rather than to the manifold at the current point -- and
+    ``linearized_constraints`` reports the residual the frozen rows predict.
+    """
+
+    constraint_jacobian = projector.constraint_jacobian
     solve = solve_certified_gram(projector, -constraints)
     correction = constraint_jacobian.T @ solve.solution
     linearized_constraints = constraints + constraint_jacobian @ correction
@@ -325,6 +331,17 @@ def certified_minimum_norm_correction(
         reciprocal_condition=solve.reciprocal_condition,
         forward_error_bound=solve.forward_error_bound,
         all_finite=all_finite,
+    )
+
+
+def certified_minimum_norm_correction(
+    constraint_jacobian: jax.Array,
+    constraints: jax.Array,
+) -> CertifiedMinimumNormCorrection:
+    """Return the certified minimum-norm solution of ``A delta = -c``."""
+
+    return certified_correction_with_projector(
+        factor_certified_gram_projector(constraint_jacobian), constraints
     )
 
 
@@ -983,6 +1000,7 @@ __all__ = (
     "ProjectedSteihaugResult",
     "ProjectedSteihaugTermination",
     "TangentPreconditioner",
+    "certified_correction_with_projector",
     "certified_minimum_norm_correction",
     "exact_hvp_bilinear_symmetry_relative_defect",
     "factor_certified_gram_projector",

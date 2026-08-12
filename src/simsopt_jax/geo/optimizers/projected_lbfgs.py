@@ -35,6 +35,8 @@ import jax.numpy as jnp
 
 from .dense_sqp import JointValueConstraints, materialize_joint_vjp_rows
 from .projected_hvp_trust_region import (
+    CertifiedGramProjector,
+    certified_correction_with_projector,
     certified_minimum_norm_correction,
     factor_certified_gram_projector,
     project_with_certified_gram,
@@ -80,14 +82,28 @@ class ProjectedLbfgsOptions:
     maximum_line_search_trials: int = 24
     minimum_step_scale: float = 1.0e-6
     objective_target: float = 0.0
+    frozen_projector_line_search: bool = False
+    """Retract line-search trials against the accepted point's factored Gram.
+
+    Amortizes the Jacobian materialization -- by far the dominant per-iteration
+    cost -- over the whole line search, leaving one materialization per accepted
+    iteration.  Feasibility is still certified against the true constraints, so
+    a trial the chord iteration cannot land is rejected and the step halves.
+    """
 
 
 _DEFAULT_OPTIONS = ProjectedLbfgsOptions()
 
 
 class ProjectedPoint(NamedTuple):
-    """One on-manifold point with its tangent gradient and projector evidence."""
+    """One on-manifold point with its tangent gradient and projector evidence.
 
+    ``projector`` holds the factored Gram of the constraint Jacobian at this
+    point, so a caller can spend the factorization again -- on a line search's
+    trial retractions, for instance -- without materializing the Jacobian.
+    """
+
+    projector: CertifiedGramProjector
     objective: jax.Array
     constraints: jax.Array
     feasibility_inf: jax.Array
@@ -192,6 +208,7 @@ def evaluate_projected_point(
     projection = project_with_certified_gram(projector, rows.objective_gradient)
     projected_gradient = projection.projected
     return ProjectedPoint(
+        projector=projector,
         objective=rows.objective,
         constraints=rows.constraints,
         feasibility_inf=jnp.linalg.norm(rows.constraints, ord=jnp.inf),
@@ -275,6 +292,20 @@ def retract_to_manifold(
             all_finite=jnp.asarray(True),
         ),
     )
+    return _finish_retraction(joint_value_constraints, retracted, feasibility_tolerance)
+
+
+def _finish_retraction(
+    joint_value_constraints: JointValueConstraints,
+    retracted: _RetractionState,
+    feasibility_tolerance: float,
+) -> ManifoldRetraction:
+    """Evaluate the landed point and certify that it reached the manifold.
+
+    The verdict is always taken against the TRUE constraints, so a chord
+    retraction is held to the same standard as an exact one.
+    """
+
     objective, constraints = joint_value_constraints(retracted.coordinates)
     feasibility_inf = jnp.linalg.norm(constraints, ord=jnp.inf)
     all_finite = (
@@ -295,6 +326,73 @@ def retract_to_manifold(
         solve_forward_error_bound=retracted.solve_forward_error_bound,
         all_finite=all_finite,
     )
+
+
+def retract_with_frozen_projector(
+    joint_value_constraints: JointValueConstraints,
+    projector: CertifiedGramProjector,
+    coordinates: jax.Array,
+    *,
+    feasibility_tolerance: float,
+    maximum_corrections: int,
+) -> ManifoldRetraction:
+    """Pull a point back onto the manifold reusing an already factored Jacobian.
+
+    This is the chord form of :func:`retract_to_manifold`: the corrections are
+    normal to the frozen rows in ``projector`` instead of to the manifold at the
+    current point, which costs one primal evaluation per correction rather than
+    a full Jacobian materialization.  The frozen rows change only the RATE and
+    the direction of approach -- a converged point still satisfies the true
+    constraints to ``feasibility_tolerance``, and ``feasible`` reports whether
+    convergence happened inside the budget, so a caller can fall back.
+    """
+
+    if maximum_corrections < 1:
+        raise ValueError("maximum_corrections must be positive")
+
+    dtype = coordinates.dtype
+
+    def extend(_iteration: jax.Array, state: _RetractionState) -> _RetractionState:
+        _, constraints = joint_value_constraints(state.coordinates)
+        feasibility = jnp.linalg.norm(constraints, ord=jnp.inf)
+        required = (
+            state.all_finite
+            & jnp.isfinite(feasibility)
+            & (feasibility > feasibility_tolerance)
+        )
+
+        def correct(active: _RetractionState) -> _RetractionState:
+            correction = certified_correction_with_projector(projector, constraints)
+            return _RetractionState(
+                coordinates=active.coordinates + correction.correction,
+                correction_path_norm=active.correction_path_norm
+                + jnp.linalg.norm(correction.correction),
+                corrections=active.corrections + jnp.asarray(1, dtype=jnp.int32),
+                solve_relative_residual=jnp.maximum(
+                    active.solve_relative_residual, correction.relative_residual
+                ),
+                solve_forward_error_bound=jnp.maximum(
+                    active.solve_forward_error_bound, correction.forward_error_bound
+                ),
+                all_finite=active.all_finite & correction.all_finite,
+            )
+
+        return jax.lax.cond(required, correct, lambda active: active, state)
+
+    retracted = jax.lax.fori_loop(
+        0,
+        maximum_corrections,
+        extend,
+        _RetractionState(
+            coordinates=coordinates,
+            correction_path_norm=jnp.zeros((), dtype=dtype),
+            corrections=jnp.asarray(0, dtype=jnp.int32),
+            solve_relative_residual=jnp.zeros((), dtype=dtype),
+            solve_forward_error_bound=jnp.zeros((), dtype=dtype),
+            all_finite=jnp.asarray(True),
+        ),
+    )
+    return _finish_retraction(joint_value_constraints, retracted, feasibility_tolerance)
 
 
 def _admit_curvature_pair(
@@ -336,7 +434,7 @@ def run_projected_lbfgs(
             joint_value_constraints, coordinates
         )
     )
-    retract = jax.jit(
+    exact_retract = jax.jit(
         lambda coordinates: retract_to_manifold(
             joint_value_constraints,
             coordinates,
@@ -344,6 +442,21 @@ def run_projected_lbfgs(
             maximum_corrections=options.maximum_retraction_corrections,
         )
     )
+    frozen_retract = jax.jit(
+        lambda projector, coordinates: retract_with_frozen_projector(
+            joint_value_constraints,
+            projector,
+            coordinates,
+            feasibility_tolerance=options.feasibility_tolerance,
+            maximum_corrections=options.maximum_retraction_corrections,
+        )
+    )
+
+    def retract(projector: CertifiedGramProjector, coordinates: jax.Array):
+        if options.frozen_projector_line_search:
+            return frozen_retract(projector, coordinates)
+        return exact_retract(coordinates)
+
     apply_metric = jax.jit(apply_quasi_newton_metric)
     admit_pair = jax.jit(_admit_curvature_pair)
 
@@ -404,7 +517,7 @@ def run_projected_lbfgs(
             trials += 1
             retraction_started = time.perf_counter()
             candidate = jax.block_until_ready(
-                retract(coordinates + step_scale * direction)
+                retract(point.projector, coordinates + step_scale * direction)
             )
             retraction_seconds += time.perf_counter() - retraction_started
             if bool(candidate.feasible):
@@ -591,5 +704,6 @@ __all__ = (
     "ProjectedPoint",
     "evaluate_projected_point",
     "retract_to_manifold",
+    "retract_with_frozen_projector",
     "run_projected_lbfgs",
 )
