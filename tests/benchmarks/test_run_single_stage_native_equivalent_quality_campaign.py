@@ -12857,10 +12857,10 @@ def test_diag5_publication_uses_only_fixed_claim_root(
 
 def test_diag5_bootstrap_uses_final_ssot_plan_hashes() -> None:
     assert runner._DIAG5_BOOTSTRAP_PLAN_SHA256 == (
-        "618cb703d507ee280e4ff861ec848e2ac76f586517e33f4f4720c04fe8e663e9"
+        "24300e9742bcbb14b3fc3e2cceab37dedc310410290a13370a11d21ef749ec7a"
     )
     assert runner._DIAG5_BOOTSTRAP_COMPLETED_PLAN_SHA256 == (
-        "afd6ef26f0c404aacc894010bc0a1da7f6f7c10e117b6fd170a17099486ea46f"
+        "ce244ac37bb437ea022a4b73e62bf49f8d4d5cf88b610ad2146e895f3471ce1c"
     )
 
 

@@ -4989,7 +4989,7 @@ DIAG4_CONDITIONAL_TIMING_ROUTE: Final = "CONDITIONAL_ENGINEERING_TIMING"
 # their original schemas; only the identity-bearing documents listed here move
 # to v2. Legacy loaders remain intentionally unaware of every constant below.
 DIAG5_PLAN_SHA256: Final = (
-    "618cb703d507ee280e4ff861ec848e2ac76f586517e33f4f4720c04fe8e663e9"
+    "24300e9742bcbb14b3fc3e2cceab37dedc310410290a13370a11d21ef749ec7a"
 )
 DIAG5_ROUTE: Final = "NEQ-GNTR3-DIAG5"
 DIAG5_NUMERICAL_ROUTE: Final = DIAG4_NUMERICAL_ROUTE
