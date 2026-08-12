@@ -350,6 +350,7 @@ DIAG5_QUALIFIED_FILE_PATHS: Final = frozenset(
         "benchmarks/single_stage_native_equivalent_quality_successor_authority.py",
         "benchmarks/single_stage_native_equivalent_reference.py",
         "docs/single_stage_jax_gpu_native_equivalent_quality_diag4_independent_postmortem.json",
+        "src/simsopt/configs/NCSX.dat",
         "tests/benchmarks/_diag2_fixture.py",
         "tests/benchmarks/test_process_gpu_monitor.py",
         "tests/benchmarks/test_qualify_single_stage_native_equivalent_quality_gntr3_cpu.py",
@@ -379,7 +380,7 @@ DIAG5_FROZEN_NUMERICAL_PATHS: Final = frozenset(
         "src/simsopt_jax_adapters/geo/single_stage_native_endpoint.py",
     }
 )
-DIAG5_EXECUTION_SOURCE_ENTRY_COUNT: Final = 604
+DIAG5_EXECUTION_SOURCE_ENTRY_COUNT: Final = 605
 DIAG5_CPU_QUALIFICATION_SCHEMA_VERSION: Final = (
     "single-stage-neq-gntr3-cpu-trajectory-qualification-v2"
 )
@@ -395,7 +396,7 @@ DIAG5_CONSUMPTION_SCHEMA_VERSION: Final = (
 )
 DIAG5_CPU_QUALIFICATION_ROOT: Final = Path(
     "/home/jungdaesuh/simsopt-campaigns/"
-    "neq-gntr3-diag5-cpu-qualification-20260812T090000Z"
+    "neq-gntr3-diag5-cpu-qualification-20260812T110000Z"
 )
 DIAG5_GPU_OUTPUT_ROOT: Final = Path(
     "/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-rtx5090-20260812T030000Z"
@@ -409,7 +410,7 @@ DIAG5_PHYSICAL_FAILURE_PATH: Final = DIAG5_GPU_OUTPUT_ROOT.parent / (
     f".{DIAG5_GPU_OUTPUT_ROOT.name}.diag5-physical-publication-failure.json"
 )
 DIAG5_REVIEW_ROOT: Final = Path(
-    "/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-reviews-20260812T090000Z"
+    "/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-reviews-20260812T110000Z"
 )
 DIAG5_NATIVE_REFERENCE_ROOT: Final = Path(
     "/home/jungdaesuh/simsopt-campaigns/neq-gntr1-diag3-cb0-20260811T150010Z.partial-56a1ec6d730cc005db84f99e9965b868/native-reference"

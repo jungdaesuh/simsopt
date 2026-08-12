@@ -1937,9 +1937,12 @@ def test_direct_bootstrap_phase_is_self_contained_end_to_end(
             " if 'ScikitBuild' not in type(f).__name__]\n"
             "import simsopt_jax.geo.optimizers."
             "projected_gauss_newton_trust_region as production\n"
+            "from simsopt.configs import get_data\n"
+            "ncsx = get_data('ncsx')\n"
             "print(json.dumps({'hazard': hazard,"
             " 'production': production.__file__,"
-            " 'native_loader': type(simsoptpp.__loader__).__name__}))\n"
+            " 'native_loader': type(simsoptpp.__loader__).__name__,"
+            " 'ncsx_base_curves': len(ncsx[0])}))\n"
         )
         probe_environment = dict(os.environ)
         probe_environment["PYTHONPATH"] = os.pathsep.join(
@@ -1961,6 +1964,7 @@ def test_direct_bootstrap_phase_is_self_contained_end_to_end(
         )
         if report["hazard"]:
             assert report["native_loader"] == "_ScikitBuildLoaderWrapper"
+        assert report["ncsx_base_curves"] == 3
 
         assert namespace["_neutralize_editable_source_redirection"]() == ()
         assert not any(
