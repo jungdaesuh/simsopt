@@ -37,6 +37,11 @@ import jax
 import jax.numpy as jnp
 
 from .dense_sqp import JointValueConstraints, materialize_joint_vjp_rows
+from .dense_tangent_curvature import (
+    dense_tangent_direction,
+    empty_dense_tangent_curvature,
+    update_dense_tangent_curvature,
+)
 from .projected_hvp_trust_region import (
     CertifiedGramProjector,
     certified_correction_with_projector,
@@ -86,6 +91,14 @@ class ProjectedLbfgsOptions:
     maximum_line_search_trials: int = 24
     minimum_step_scale: float = 1.0e-6
     objective_target: float = 0.0
+    dense_curvature: bool = False
+    """Carry a dense tangent-space Hessian approximation instead of pairs.
+
+    At this dimension a dense Powell-damped BFGS model costs microseconds per
+    iteration against a Jacobian materialization, and it is the curvature model
+    a native dense-BFGS solve uses.  ``memory`` is ignored when this is set.
+    """
+
     vector_transport: bool = False
     """Carry curvature pairs between tangent spaces by projection.
 
@@ -188,6 +201,8 @@ class ProjectedLbfgsIteration(NamedTuple):
     pair_admitted: bool
     stored_pairs: int
     transport_masked_pairs: int
+    dense_damped_updates: int
+    dense_positive_definite: bool
     direction_seconds: float
     line_search_seconds: float
     retraction_seconds: float
@@ -517,6 +532,14 @@ def run_projected_lbfgs(
         )
     )
     transported_pair = jax.jit(_transported_pair)
+    dense_direction = jax.jit(
+        lambda dense, projector, projected_gradient: dense_tangent_direction(
+            dense,
+            projected_gradient,
+            lambda vector: project_with_certified_gram(projector, vector).projected,
+        )
+    )
+    update_curvature = jax.jit(update_dense_tangent_curvature)
 
     compile_started = time.perf_counter()
     point = jax.block_until_ready(evaluate(initial_coordinates))
@@ -524,6 +547,7 @@ def run_projected_lbfgs(
 
     coordinates = initial_coordinates
     metric = empty_quasi_newton_metric(options.memory, dimension, dtype)
+    curvature = empty_dense_tangent_curvature(dimension, dtype)
     records: list[ProjectedLbfgsIteration] = []
     status = ProjectedLbfgsStatus.RUNNING
     stored_pairs = 0
@@ -546,13 +570,23 @@ def run_projected_lbfgs(
         direction_started = time.perf_counter()
         applied_metric = metric
         masked_pairs = 0
-        if options.vector_transport:
-            carried = jax.block_until_ready(transport_metric(metric, point.projector))
-            applied_metric = carried.metric
-            masked_pairs = int(carried.masked_pairs)
-        direction = jax.block_until_ready(
-            apply_metric(applied_metric, -point.projected_gradient)
-        )
+        dense_pd = True
+        if options.dense_curvature:
+            dense_step = jax.block_until_ready(
+                dense_direction(curvature, point.projector, point.projected_gradient)
+            )
+            direction = dense_step.direction
+            dense_pd = bool(dense_step.positive_definite)
+        else:
+            if options.vector_transport:
+                carried = jax.block_until_ready(
+                    transport_metric(metric, point.projector)
+                )
+                applied_metric = carried.metric
+                masked_pairs = int(carried.masked_pairs)
+            direction = jax.block_until_ready(
+                apply_metric(applied_metric, -point.projected_gradient)
+            )
         directional_derivative = float(point.projected_gradient @ direction)
         direction_norm = float(jnp.linalg.norm(direction))
         direction_seconds = time.perf_counter() - direction_started
@@ -640,9 +674,16 @@ def run_projected_lbfgs(
             pair_gradient_change = (
                 next_point.projected_gradient - point.projected_gradient
             )
-        metric, curvature, admitted, live_pairs = jax.block_until_ready(
+        metric, pair_curvature, admitted, live_pairs = jax.block_until_ready(
             admit_pair(metric, pair_step, pair_gradient_change)
         )
+        if options.dense_curvature:
+            curvature = jax.block_until_ready(
+                update_curvature(curvature, pair_step, pair_gradient_change)
+            )
+            dense_damped = int(curvature.damped_updates)
+        else:
+            dense_damped = 0
         pair_update_seconds = time.perf_counter() - pair_started
         stored_pairs = int(live_pairs)
 
@@ -666,10 +707,12 @@ def run_projected_lbfgs(
             retraction_corrections=int(accepted.corrections),
             candidate_objective=float(accepted.objective),
             candidate_feasibility_inf=float(accepted.feasibility_inf),
-            curvature=float(curvature),
+            curvature=float(pair_curvature),
             pair_admitted=bool(admitted),
             stored_pairs=stored_pairs,
             transport_masked_pairs=masked_pairs,
+            dense_damped_updates=dense_damped,
+            dense_positive_definite=dense_pd,
             direction_seconds=direction_seconds,
             line_search_seconds=line_search_seconds,
             retraction_seconds=retraction_seconds,
@@ -741,6 +784,8 @@ def _collapsed_record(
         candidate_feasibility_inf=float("nan"),
         curvature=float("nan"),
         pair_admitted=False,
+        dense_damped_updates=0,
+        dense_positive_definite=True,
         stored_pairs=stored_pairs,
         transport_masked_pairs=masked_pairs,
         direction_seconds=direction_seconds,
