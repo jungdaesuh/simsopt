@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 import subprocess
 import threading
 import time
@@ -15,10 +17,88 @@ _NVIDIA_SMI_PROCESS_QUERY = (
     "--query-compute-apps=gpu_uuid,pid,used_gpu_memory",
     "--format=csv,noheader,nounits",
 )
+SUPERVISOR_GPU_INVENTORY_QUERY = (
+    "nvidia-smi",
+    "--query-gpu=uuid,memory.total",
+    "--format=csv,noheader,nounits",
+)
+SUPERVISOR_COMPUTE_APPS_QUERY = (
+    "nvidia-smi",
+    "--query-compute-apps=pid,gpu_uuid,used_gpu_memory",
+    "--format=csv,noheader,nounits",
+)
 
 
 class ProcessGpuMemoryMonitorError(RuntimeError):
     """The NVIDIA process-memory evidence could not be sampled faithfully."""
+
+
+@dataclass(frozen=True, slots=True)
+class SupervisorGpuQuery:
+    """One raw, non-raising NVIDIA management-query outcome."""
+
+    argv: tuple[str, ...]
+    query_executable_sha256: str
+    launched: bool
+    timed_out: bool
+    returncode: int | None
+    stdout: bytes
+    stderr: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class SupervisorGpuInventoryRow:
+    gpu_uuid: str
+    total_memory_mib: int
+
+
+@dataclass(frozen=True, slots=True)
+class SupervisorComputeAppRow:
+    pid: int
+    gpu_uuid: str
+    used_memory_mib: int
+
+
+@dataclass(frozen=True, slots=True)
+class SupervisorGpuZeroObservation:
+    """Dual raw queries and strict parsed rows for one supervisor-zero gate."""
+
+    captured_at_monotonic_ns: int
+    captured_at_unix_ns: int
+    supervisor_pid: int
+    supervisor_start_ticks: int
+    gpu_uuid: str
+    visible_device: str
+    gpu_inventory_query: SupervisorGpuQuery
+    compute_apps_query: SupervisorGpuQuery
+    inventory_rows: tuple[SupervisorGpuInventoryRow, ...]
+    compute_rows: tuple[SupervisorComputeAppRow, ...]
+    matching_rows: tuple[SupervisorComputeAppRow, ...]
+    parse_valid: bool
+
+    @property
+    def gate_passes(self) -> bool:
+        inventory = tuple(
+            row for row in self.inventory_rows if row.gpu_uuid == self.gpu_uuid
+        )
+        return (
+            self.parse_valid
+            and len(inventory) == 1
+            and self.gpu_inventory_query.launched
+            and not self.gpu_inventory_query.timed_out
+            and self.gpu_inventory_query.returncode == 0
+            and self.compute_apps_query.launched
+            and not self.compute_apps_query.timed_out
+            and self.compute_apps_query.returncode == 0
+            and not self.matching_rows
+        )
+
+    @property
+    def physical_memory_bytes(self) -> int | None:
+        rows = tuple(
+            row for row in self.inventory_rows if row.gpu_uuid == self.gpu_uuid
+        )
+        return rows[0].total_memory_mib * 1024 * 1024 if len(rows) == 1 else None
 
 
 @dataclass(frozen=True)
@@ -139,15 +219,23 @@ def parse_process_gpu_memory_artifact(
         raise ValueError(f"unsupported GPU memory artifact schema: {artifact_path}")
     availability = payload.get("availability")
     if availability not in {"available", "unavailable"}:
-        raise ValueError(f"GPU memory artifact availability is invalid: {artifact_path}")
+        raise ValueError(
+            f"GPU memory artifact availability is invalid: {artifact_path}"
+        )
     provider_pid = payload.get("provider_pid")
     if not isinstance(provider_pid, int) or isinstance(provider_pid, bool):
-        raise TypeError(f"GPU memory artifact provider_pid must be an integer: {artifact_path}")
+        raise TypeError(
+            f"GPU memory artifact provider_pid must be an integer: {artifact_path}"
+        )
     if provider_pid <= 0:
-        raise ValueError(f"GPU memory artifact provider_pid must be positive: {artifact_path}")
+        raise ValueError(
+            f"GPU memory artifact provider_pid must be positive: {artifact_path}"
+        )
     gpu_uuid = payload.get("gpu_uuid")
     if gpu_uuid is not None and (not isinstance(gpu_uuid, str) or not gpu_uuid):
-        raise TypeError(f"GPU memory artifact gpu_uuid must be a string or null: {artifact_path}")
+        raise TypeError(
+            f"GPU memory artifact gpu_uuid must be a string or null: {artifact_path}"
+        )
     target_pid_observed = payload.get("target_pid_observed")
     if not isinstance(target_pid_observed, bool):
         raise TypeError(
@@ -155,7 +243,9 @@ def parse_process_gpu_memory_artifact(
         )
     unavailable_reason = payload.get("unavailable_reason")
     if unavailable_reason not in {None, "cpu-device", "provider-pid-not-observed"}:
-        raise ValueError(f"GPU memory artifact unavailable reason is invalid: {artifact_path}")
+        raise ValueError(
+            f"GPU memory artifact unavailable reason is invalid: {artifact_path}"
+        )
     raw_samples = payload.get("samples")
     if not isinstance(raw_samples, list):
         raise TypeError(f"GPU memory artifact samples must be a list: {artifact_path}")
@@ -179,7 +269,9 @@ def parse_process_gpu_memory_artifact(
                 f"GPU memory artifact sample memory must be an integer: {artifact_path}"
             )
         if sampled_at_unix_ns <= 0 or used_memory_mib < 0:
-            raise ValueError(f"GPU memory artifact sample values are invalid: {artifact_path}")
+            raise ValueError(
+                f"GPU memory artifact sample values are invalid: {artifact_path}"
+            )
         samples.append(
             ProcessGpuMemorySample(
                 sampled_at_unix_ns=sampled_at_unix_ns,
@@ -262,6 +354,188 @@ def _parse_nvidia_process_rows(output: str) -> tuple[_NvidiaProcessRow, ...]:
             )
         )
     return tuple(rows)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _run_supervisor_query(
+    argv: tuple[str, ...],
+    *,
+    executable_sha256: str,
+    timeout_seconds: float,
+) -> SupervisorGpuQuery:
+    try:
+        completed = subprocess.run(
+            argv,
+            check=False,
+            capture_output=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as error:
+        return SupervisorGpuQuery(
+            argv=argv,
+            query_executable_sha256=executable_sha256,
+            launched=True,
+            timed_out=True,
+            returncode=None,
+            stdout=bytes(error.stdout or b""),
+            stderr=bytes(error.stderr or b""),
+        )
+    except OSError:
+        return SupervisorGpuQuery(
+            argv=argv,
+            query_executable_sha256=executable_sha256,
+            launched=False,
+            timed_out=False,
+            returncode=None,
+            stdout=b"",
+            stderr=b"",
+        )
+    return SupervisorGpuQuery(
+        argv=argv,
+        query_executable_sha256=executable_sha256,
+        launched=True,
+        timed_out=False,
+        returncode=completed.returncode,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+    )
+
+
+def _parse_supervisor_inventory(
+    payload: bytes,
+) -> tuple[SupervisorGpuInventoryRow, ...]:
+    rows: list[SupervisorGpuInventoryRow] = []
+    for line in payload.decode("utf-8", "strict").splitlines():
+        fields = tuple(field.strip() for field in line.split(","))
+        if len(fields) != 2 or not fields[0] or not fields[1].isdecimal():
+            raise ValueError("malformed NVIDIA GPU inventory row")
+        memory = int(fields[1])
+        if memory <= 0:
+            raise ValueError("NVIDIA GPU inventory memory must be positive")
+        rows.append(SupervisorGpuInventoryRow(fields[0], memory))
+    if not rows:
+        raise ValueError("NVIDIA GPU inventory is empty")
+    return tuple(rows)
+
+
+def _parse_supervisor_compute_apps(
+    payload: bytes,
+) -> tuple[SupervisorComputeAppRow, ...]:
+    rows: list[SupervisorComputeAppRow] = []
+    seen_pids: set[int] = set()
+    for line in payload.decode("utf-8", "strict").splitlines():
+        fields = tuple(field.strip() for field in line.split(","))
+        if (
+            len(fields) != 3
+            or not fields[0].isdecimal()
+            or not fields[1]
+            or not fields[2].isdecimal()
+        ):
+            raise ValueError("malformed NVIDIA compute-application row")
+        pid = int(fields[0])
+        memory = int(fields[2])
+        if pid <= 0 or memory < 0:
+            raise ValueError("NVIDIA compute-application values are invalid")
+        if pid in seen_pids:
+            raise ValueError("NVIDIA compute-application PID is duplicated")
+        seen_pids.add(pid)
+        rows.append(SupervisorComputeAppRow(pid, fields[1], memory))
+    return tuple(rows)
+
+
+def capture_supervisor_gpu_zero(
+    *,
+    gpu_uuid: str,
+    visible_device: str,
+    supervisor_pid: int,
+    supervisor_start_ticks: int,
+    timeout_seconds: float = 5.0,
+    query_executable_sha256: str | None = None,
+) -> SupervisorGpuZeroObservation:
+    """Capture two raw management queries without importing or invoking JAX."""
+
+    if not gpu_uuid or not visible_device:
+        raise ValueError("GPU UUID and visible device must be nonempty")
+    if supervisor_pid <= 0 or supervisor_start_ticks <= 0:
+        raise ValueError("supervisor process identity must be positive")
+    if timeout_seconds <= 0.0:
+        raise ValueError("query timeout must be positive")
+    executable_sha256 = (
+        supervisor_query_executable_sha256()
+        if query_executable_sha256 is None
+        else query_executable_sha256
+    )
+    if len(executable_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in executable_sha256
+    ):
+        raise ValueError("query executable SHA must be lower-case SHA-256")
+    monotonic_ns = time.monotonic_ns()
+    unix_ns = time.time_ns()
+    inventory = _run_supervisor_query(
+        SUPERVISOR_GPU_INVENTORY_QUERY,
+        executable_sha256=executable_sha256,
+        timeout_seconds=timeout_seconds,
+    )
+    compute = _run_supervisor_query(
+        SUPERVISOR_COMPUTE_APPS_QUERY,
+        executable_sha256=executable_sha256,
+        timeout_seconds=timeout_seconds,
+    )
+    inventory_rows: tuple[SupervisorGpuInventoryRow, ...] = ()
+    compute_rows: tuple[SupervisorComputeAppRow, ...] = ()
+    parse_valid = False
+    if (
+        inventory.launched
+        and not inventory.timed_out
+        and inventory.returncode == 0
+        and compute.launched
+        and not compute.timed_out
+        and compute.returncode == 0
+    ):
+        try:
+            inventory_rows = _parse_supervisor_inventory(inventory.stdout)
+            compute_rows = _parse_supervisor_compute_apps(compute.stdout)
+        except (UnicodeDecodeError, ValueError):
+            pass
+        else:
+            parse_valid = True
+    matching = tuple(
+        row
+        for row in compute_rows
+        if row.pid == supervisor_pid and row.gpu_uuid == gpu_uuid
+    )
+    return SupervisorGpuZeroObservation(
+        captured_at_monotonic_ns=monotonic_ns,
+        captured_at_unix_ns=unix_ns,
+        supervisor_pid=supervisor_pid,
+        supervisor_start_ticks=supervisor_start_ticks,
+        gpu_uuid=gpu_uuid,
+        visible_device=visible_device,
+        gpu_inventory_query=inventory,
+        compute_apps_query=compute,
+        inventory_rows=inventory_rows,
+        compute_rows=compute_rows,
+        matching_rows=matching if parse_valid else (),
+        parse_valid=parse_valid,
+    )
+
+
+def supervisor_query_executable_sha256() -> str:
+    """Resolve and hash the management executable before artifact creation."""
+
+    executable_text = shutil.which("nvidia-smi")
+    return (
+        _sha256_file(Path(executable_text))
+        if executable_text is not None
+        else hashlib.sha256(b"").hexdigest()
+    )
 
 
 class ProcessGpuMemoryMonitor:
@@ -428,6 +702,8 @@ class ProcessGpuMemoryMonitor:
 
 
 __all__ = [
+    "SUPERVISOR_COMPUTE_APPS_QUERY",
+    "SUPERVISOR_GPU_INVENTORY_QUERY",
     "GpuMemoryUnavailableReason",
     "ProcessGpuMemoryArtifact",
     "ProcessGpuMemoryMeasurement",
@@ -436,7 +712,13 @@ __all__ = [
     "ProcessGpuMemoryResult",
     "ProcessGpuMemorySample",
     "ProcessGpuMemoryUnavailable",
+    "SupervisorComputeAppRow",
+    "SupervisorGpuInventoryRow",
+    "SupervisorGpuQuery",
+    "SupervisorGpuZeroObservation",
+    "capture_supervisor_gpu_zero",
     "cpu_gpu_memory_unavailable",
     "parse_process_gpu_memory_artifact",
     "process_gpu_memory_artifact",
+    "supervisor_query_executable_sha256",
 ]

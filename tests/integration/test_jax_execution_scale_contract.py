@@ -4,19 +4,25 @@ from __future__ import annotations
 
 import ast
 import json
+import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import jax  # noqa: F401
 import numpy as np
 import pytest
 from examples.jax.manifest_runtime import RuntimeExample
+from examples.jax.parity import child as parity_child
+from examples.jax.parity import provenance as parity_provenance
 from examples.jax.parity.cases import get_case
 from examples.jax.parity.child import main as run_parity_child
 from examples.jax.parity.input_bundle import (
     create_input_bundle,
     read_input_bundle,
 )
+from examples.jax.parity.provenance import SnapshotLaneIdentity, SnapshotProfileId
 from examples.jax.parity.receipts import load_lane_observation
 from examples.jax.parity.runner import build_child_command as build_parity_command
 from examples.jax.run_examples import (
@@ -27,6 +33,53 @@ from examples.jax.run_examples import (
 )
 from examples.jax.run_parity import _parse_arguments as parse_parity_arguments
 from simsopt_jax.examples import ExampleResult, ExecutionScale, run_example
+
+
+def test_input_bundle_import_does_not_load_eager_example_package() -> None:
+    completed = subprocess.run(
+        (
+            sys.executable,
+            "-c",
+            (
+                "import sys; import examples.jax.parity.input_bundle; assert "
+                "'simsopt_jax.examples' not in sys.modules; assert "
+                "'jax' not in sys.modules; assert 'jaxlib' not in sys.modules"
+            ),
+        ),
+        cwd=Path(__file__).resolve().parents[2],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def _snapshot_identity(profile_id: SnapshotProfileId) -> SnapshotLaneIdentity:
+    return SnapshotLaneIdentity(
+        profile_id=profile_id,
+        lane="native-cpu" if profile_id == "native_cpu" else "jax-gpu",
+        backend_mode="native_cpu",
+        driver="driver",
+        execution_platform="cpu" if profile_id == "native_cpu" else "gpu",
+        runtime_identity_sha256="1" * 64,
+        source_sha256="2" * 64,
+        gpu_uuid="GPU-test",
+        snapshot_root=parity_child._REPO_ROOT,
+        repository_commit="a" * 40,
+        repository_dirty=False,
+        tracked_diff_sha256="3" * 64,
+        untracked_files=(),
+        manifest_entries={},
+        native_extension_path=parity_child._REPO_ROOT / "simsoptpp.so",
+        native_extension_sha256="4" * 64,
+        interpreter_path=Path(sys.executable),
+        python_version=sys.version.split()[0],
+        jax_version="test",
+        jaxlib_version="test",
+        bound_environment={},
+        static_environment={},
+    )
 
 
 def _example() -> RuntimeExample:
@@ -246,6 +299,99 @@ def test_parity_child_rejects_requested_scale_different_from_input(
                 "native_default",
             ]
         )
+
+
+def test_snapshot_child_rejects_cross_profile_before_case_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        parity_child,
+        "load_snapshot_lane_identity",
+        lambda _path: _snapshot_identity("jax_gpu_fast"),
+    )
+    monkeypatch.setattr(
+        parity_child,
+        "get_case",
+        lambda _case_id: pytest.fail("case executed before profile validation"),
+    )
+
+    with pytest.raises(ValueError, match="profile does not match"):
+        run_parity_child(
+            [
+                "--case",
+                "traceable-least-squares",
+                "--lane",
+                "native-cpu",
+                "--input-bundle",
+                "/unused/input_bundle.json",
+                "--result-directory",
+                "/unused/result",
+                "--immutable-snapshot-provenance",
+                "/unused/identity.json",
+                "--scale",
+                "bounded",
+            ]
+        )
+
+
+def test_snapshot_child_does_not_publish_when_dynamic_provenance_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_bundle = get_case("traceable-least-squares").create_input(
+        tmp_path / "inputs", "bounded"
+    )
+    identity = _snapshot_identity("native_cpu")
+    identity = replace(
+        identity,
+        backend_mode="native_cpu",
+        driver="scipy_least_squares",
+    )
+    monkeypatch.setattr(
+        parity_child, "load_snapshot_lane_identity", lambda _path: identity
+    )
+    monkeypatch.setattr(
+        parity_child,
+        "collect_snapshot_lane_provenance",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError("dynamic provenance unavailable")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="dynamic provenance unavailable"):
+        run_parity_child(
+            [
+                "--case",
+                "traceable-least-squares",
+                "--lane",
+                "native-cpu",
+                "--input-bundle",
+                str(tmp_path / "inputs" / "input_bundle.json"),
+                "--result-directory",
+                str(tmp_path / "result"),
+                "--immutable-snapshot-provenance",
+                str(tmp_path / "identity.json"),
+                "--scale",
+                input_bundle.scale,
+            ]
+        )
+    assert not (tmp_path / "result" / "lane_result.json").exists()
+
+
+def test_snapshot_dynamic_source_collection_rejects_ambient_project_module(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    escaped = tmp_path / "escaped.py"
+    escaped.write_text("value = 1\n", encoding="utf-8")
+    monkeypatch.setitem(
+        sys.modules,
+        "simsopt.escaped_snapshot_test",
+        SimpleNamespace(__file__=str(escaped)),
+    )
+
+    with pytest.raises(ValueError, match="escaped immutable root"):
+        parity_provenance._snapshot_executed_sources(_snapshot_identity("native_cpu"))
 
 
 def test_native_child_records_native_synchronization_when_jax_is_loaded(

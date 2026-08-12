@@ -9,7 +9,11 @@ from pathlib import Path
 from examples.jax.parity.cases import get_case
 from examples.jax.parity.input_bundle import read_input_bundle
 from examples.jax.parity.measurement import MeasurementExecution
-from examples.jax.parity.provenance import collect_lane_provenance
+from examples.jax.parity.provenance import (
+    collect_lane_provenance,
+    collect_snapshot_lane_provenance,
+    load_snapshot_lane_identity,
+)
 from examples.jax.parity.receipts import write_lane_observation
 from simsopt_jax.examples import EXECUTION_SCALES, ExecutionScale
 
@@ -31,6 +35,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--trajectory-path", type=Path)
     parser.add_argument("--optimization-timing-path", type=Path)
     parser.add_argument("--optimizer-backend", choices=("optax-lbfgs",))
+    parser.add_argument("--immutable-snapshot-provenance", type=Path)
     parser.add_argument("--scale", choices=EXECUTION_SCALES, required=True)
     return parser
 
@@ -38,6 +43,27 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """Load one immutable bundle, execute one lane, and publish its receipt."""
     args = _parser().parse_args(argv)
+    snapshot_identity = (
+        None
+        if args.immutable_snapshot_provenance is None
+        else load_snapshot_lane_identity(args.immutable_snapshot_provenance)
+    )
+    if snapshot_identity is not None:
+        if snapshot_identity.snapshot_root.resolve() != _REPO_ROOT.resolve():
+            raise ValueError("snapshot lane identity root does not match executed root")
+        expected_profile = (
+            "native_cpu"
+            if args.lane == "native-cpu"
+            else "jax_gpu_optax"
+            if args.lane == "jax-gpu" and args.optimizer_backend == "optax-lbfgs"
+            else "jax_gpu_fast"
+            if args.lane == "jax-gpu"
+            else None
+        )
+        if snapshot_identity.profile_id != expected_profile:
+            raise ValueError(
+                "snapshot lane identity profile does not match child route"
+            )
     case = get_case(args.case)
     bundle, arrays = read_input_bundle(args.input_bundle.parent)
     scale: ExecutionScale = args.scale
@@ -76,13 +102,25 @@ def main(argv: list[str] | None = None) -> int:
             tuple(observation.values.values())
         )
         measurement_synchronization = _JAX_MEASUREMENT_SYNCHRONIZATION
-    observation = dataclasses.replace(
-        observation,
-        provenance=collect_lane_provenance(
+    if args.immutable_snapshot_provenance is None:
+        provenance = collect_lane_provenance(
             _REPO_ROOT,
             measurement_synchronization=measurement_synchronization,
-        ),
-    )
+        )
+    else:
+        assert snapshot_identity is not None
+        if (
+            observation.lane != snapshot_identity.lane
+            or observation.backend_mode != snapshot_identity.backend_mode
+            or observation.driver != snapshot_identity.driver
+            or observation.platform != snapshot_identity.execution_platform
+        ):
+            raise ValueError("snapshot lane identity does not match observation route")
+        provenance = collect_snapshot_lane_provenance(
+            snapshot_identity,
+            measurement_synchronization=measurement_synchronization,
+        )
+    observation = dataclasses.replace(observation, provenance=provenance)
     write_lane_observation(args.result_directory, observation)
     return 0
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import shutil
+import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -24,6 +25,13 @@ from benchmarks.run_jax_native_example_measurements import (
     build_profile_command,
     build_single_stage_speed_collection_plan,
     collect_single_stage_speed_campaign,
+)
+from benchmarks.single_stage_compute_graph_isolated_launch import (
+    ISOLATED_MODULE_BOOTSTRAP,
+)
+from benchmarks.single_stage_compute_graph_snapshot import (
+    RoleRoot,
+    publish_immutable_snapshot,
 )
 from benchmarks.single_stage_speed_campaign_receipt import (
     DIRECT_FP64_LU_EXACT_ADJOINT_ROUTE,
@@ -331,6 +339,97 @@ def _campaign_observation(profile_id: str, *, driver: str) -> LaneObservation:
             "final:outer_solver_status": np.asarray(1, dtype=np.int64),
         },
     )
+
+
+def test_complete_path_speed_run_uses_snapshot_isolation_bootstrap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    definitions = (
+        ("execution_source", "src/simsopt/__init__.py", "\n"),
+        ("configuration", "config/input.json", "{}\n"),
+        ("benchmark", "examples/jax/parity/child.py", "\n"),
+        ("test", "tests/test_child.py", "\n"),
+        ("native_extension", "src/simsoptpp.py", "\n"),
+    )
+    roots: list[RoleRoot] = []
+    for role, relative_path, payload in definitions:
+        path = source / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(payload, encoding="utf-8")
+        roots.append(RoleRoot(role, path, relative_path))
+    snapshot = tmp_path / "snapshot"
+    publish_immutable_snapshot(snapshot, tuple(roots))
+    provenance_path = tmp_path / "lane-provenance.json"
+    provenance_path.write_text("{}\n", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    (workspace / "logs").mkdir(parents=True)
+    (workspace / "receipts").mkdir()
+    captured: dict[str, object] = {}
+
+    def fake_monitored_command(**kwargs) -> MonitoredCommandResult:
+        captured.update(kwargs)
+        command = kwargs["command"]
+        timing_path = Path(command[command.index("--optimization-timing-path") + 1])
+        timing_path.write_text(
+            '{"schema_version":1,"wall_seconds":0.5}\n', encoding="utf-8"
+        )
+        return MonitoredCommandResult(
+            returncode=0,
+            termination="normal",
+            wall_seconds=1.0,
+            peak_process_tree_rss_bytes=1,
+            peak_gpu_process_bytes=None,
+            gpu_counter_status="not_applicable",
+            stdout_sha256="stdout",
+            stderr_sha256="stderr",
+        )
+
+    observation = _campaign_observation(
+        "native_cpu", driver="simsopt_scipy_bfgs_with_boozer_newton"
+    )
+    monkeypatch.setattr(
+        measurements, "execute_monitored_command", fake_monitored_command
+    )
+    monkeypatch.setattr(
+        measurements, "load_lane_observation", lambda _result_directory: observation
+    )
+    run = measurements.CollectionRun(
+        profile_id="native_cpu",
+        phase="cold",
+        sample_index=None,
+        order_position=0,
+        measured=True,
+        allocation_sensitive=False,
+    )
+
+    measurements._execute_single_stage_speed_run(
+        bundle_path=tmp_path / "input_bundle.json",
+        workspace=workspace,
+        run=run,
+        sequence_index=0,
+        environment={"PYTHONPATH": "/ambient/editable"},
+        python_executable=sys.executable,
+        isolated_site=False,
+        repo_root=snapshot,
+        gpu_index=0,
+        poll_interval_seconds=0.01,
+        timeout_seconds=1.0,
+        immutable_snapshot_provenance_path=provenance_path,
+    )
+
+    command = captured["command"]
+    assert command[1:6] == (
+        "-P",
+        "-s",
+        "-c",
+        ISOLATED_MODULE_BOOTSTRAP,
+        "examples.jax.parity.child",
+    )
+    assert captured["cwd"] == snapshot
+    child_environment = captured["environment"]
+    assert child_environment["PYTHONPATH"] == f"{snapshot / 'src'}:{snapshot}"
 
 
 def test_campaign_rejects_nonfinite_terminal_gradient() -> None:

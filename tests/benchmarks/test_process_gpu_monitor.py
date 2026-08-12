@@ -16,6 +16,289 @@ def _completed(stdout: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _binary_completed(
+    argv: tuple[str, ...], stdout: bytes, *, returncode: int = 0
+) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.CompletedProcess(
+        args=argv,
+        returncode=returncode,
+        stdout=stdout,
+        stderr=b"",
+    )
+
+
+def test_supervisor_gpu_zero_dual_query_proves_exact_pid_absence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    outputs = {
+        gpu_monitor.SUPERVISOR_GPU_INVENTORY_QUERY: b"GPU-target, 32768\n",
+        gpu_monitor.SUPERVISOR_COMPUTE_APPS_QUERY: (
+            b"99, GPU-target, 512\n123, GPU-other, 1024\n"
+        ),
+    }
+    monkeypatch.setattr(gpu_monitor.shutil, "which", lambda _name: "/nvidia-smi")
+    monkeypatch.setattr(gpu_monitor, "_sha256_file", lambda _path: "a" * 64)
+
+    def run(
+        argv: tuple[str, ...], **_kwargs: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        calls.append(argv)
+        return _binary_completed(argv, outputs[argv])
+
+    monkeypatch.setattr(gpu_monitor.subprocess, "run", run)
+    observation = gpu_monitor.capture_supervisor_gpu_zero(
+        gpu_uuid="GPU-target",
+        visible_device="GPU-target",
+        supervisor_pid=123,
+        supervisor_start_ticks=456,
+    )
+
+    assert calls == [
+        gpu_monitor.SUPERVISOR_GPU_INVENTORY_QUERY,
+        gpu_monitor.SUPERVISOR_COMPUTE_APPS_QUERY,
+    ]
+    assert observation.gate_passes is True
+    assert observation.matching_rows == ()
+    assert observation.physical_memory_bytes == 32768 * 1024 * 1024
+
+
+def test_supervisor_gpu_zero_rejects_exact_parent_pid_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outputs = iter((b"GPU-target, 32768\n", b"123, GPU-target, 0\n"))
+    monkeypatch.setattr(gpu_monitor.shutil, "which", lambda _name: "/nvidia-smi")
+    monkeypatch.setattr(gpu_monitor, "_sha256_file", lambda _path: "a" * 64)
+    monkeypatch.setattr(
+        gpu_monitor.subprocess,
+        "run",
+        lambda argv, **_kwargs: _binary_completed(argv, next(outputs)),
+    )
+
+    observation = gpu_monitor.capture_supervisor_gpu_zero(
+        gpu_uuid="GPU-target",
+        visible_device="GPU-target",
+        supervisor_pid=123,
+        supervisor_start_ticks=456,
+    )
+
+    assert observation.gate_passes is False
+    assert observation.matching_rows == (
+        gpu_monitor.SupervisorComputeAppRow(123, "GPU-target", 0),
+    )
+
+
+def test_supervisor_gpu_zero_rejects_duplicate_compute_pid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outputs = iter(
+        (
+            b"GPU-target, 32768\n",
+            b"99, GPU-target, 1\n99, GPU-target, 2\n",
+        )
+    )
+    monkeypatch.setattr(gpu_monitor.shutil, "which", lambda _name: "/nvidia-smi")
+    monkeypatch.setattr(gpu_monitor, "_sha256_file", lambda _path: "a" * 64)
+    monkeypatch.setattr(
+        gpu_monitor.subprocess,
+        "run",
+        lambda argv, **_kwargs: _binary_completed(argv, next(outputs)),
+    )
+
+    observation = gpu_monitor.capture_supervisor_gpu_zero(
+        gpu_uuid="GPU-target",
+        visible_device="GPU-target",
+        supervisor_pid=123,
+        supervisor_start_ticks=456,
+    )
+
+    assert observation.parse_valid is False
+    assert observation.compute_rows == ()
+    assert observation.gate_passes is False
+
+
+@pytest.mark.parametrize("failed_query", ("inventory", "compute"))
+def test_supervisor_gpu_zero_retains_nonzero_query_and_never_trusts_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    failed_query: str,
+) -> None:
+    outputs = {
+        gpu_monitor.SUPERVISOR_GPU_INVENTORY_QUERY: b"GPU-target, 32768\n",
+        gpu_monitor.SUPERVISOR_COMPUTE_APPS_QUERY: b"123, GPU-target, 1\n",
+    }
+    monkeypatch.setattr(gpu_monitor.shutil, "which", lambda _name: "/nvidia-smi")
+    monkeypatch.setattr(gpu_monitor, "_sha256_file", lambda _path: "a" * 64)
+
+    def run(
+        argv: tuple[str, ...], **_kwargs: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        is_failed = (
+            failed_query == "inventory"
+            and argv == gpu_monitor.SUPERVISOR_GPU_INVENTORY_QUERY
+        ) or (
+            failed_query == "compute"
+            and argv == gpu_monitor.SUPERVISOR_COMPUTE_APPS_QUERY
+        )
+        return _binary_completed(
+            argv,
+            outputs[argv],
+            returncode=7 if is_failed else 0,
+        )
+
+    monkeypatch.setattr(gpu_monitor.subprocess, "run", run)
+    observation = gpu_monitor.capture_supervisor_gpu_zero(
+        gpu_uuid="GPU-target",
+        visible_device="GPU-target",
+        supervisor_pid=123,
+        supervisor_start_ticks=456,
+    )
+
+    failed = (
+        observation.gpu_inventory_query
+        if failed_query == "inventory"
+        else observation.compute_apps_query
+    )
+    assert failed.returncode == 7
+    assert failed.stdout == outputs[failed.argv]
+    assert observation.parse_valid is False
+    assert observation.matching_rows == ()
+    assert observation.gate_passes is False
+
+
+@pytest.mark.parametrize(
+    ("inventory", "compute"),
+    (
+        (b"", b""),
+        (b"GPU-target, 32768\nGPU-target, 32768\n", b""),
+        (b"GPU-other, 32768\n", b""),
+        (b"GPU-target, malformed\n", b""),
+        (b"GPU-target, 32768\n", b"not-a-pid, GPU-target, 1\n"),
+    ),
+)
+def test_supervisor_gpu_zero_rejects_empty_duplicate_wrong_and_malformed_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    inventory: bytes,
+    compute: bytes,
+) -> None:
+    outputs = iter((inventory, compute))
+    monkeypatch.setattr(gpu_monitor.shutil, "which", lambda _name: "/nvidia-smi")
+    monkeypatch.setattr(gpu_monitor, "_sha256_file", lambda _path: "a" * 64)
+    monkeypatch.setattr(
+        gpu_monitor.subprocess,
+        "run",
+        lambda argv, **_kwargs: _binary_completed(argv, next(outputs)),
+    )
+
+    observation = gpu_monitor.capture_supervisor_gpu_zero(
+        gpu_uuid="GPU-target",
+        visible_device="GPU-target",
+        supervisor_pid=123,
+        supervisor_start_ticks=456,
+    )
+
+    assert observation.gate_passes is False
+
+
+def test_supervisor_gpu_zero_retains_timeout_and_runs_both_queries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    monkeypatch.setattr(gpu_monitor.shutil, "which", lambda _name: "/nvidia-smi")
+    monkeypatch.setattr(gpu_monitor, "_sha256_file", lambda _path: "a" * 64)
+
+    def run(
+        argv: tuple[str, ...], **_kwargs: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise subprocess.TimeoutExpired(
+                argv, 5.0, output=b"partial", stderr=b"late"
+            )
+        return _binary_completed(argv, b"")
+
+    monkeypatch.setattr(gpu_monitor.subprocess, "run", run)
+    observation = gpu_monitor.capture_supervisor_gpu_zero(
+        gpu_uuid="GPU-target",
+        visible_device="GPU-target",
+        supervisor_pid=123,
+        supervisor_start_ticks=456,
+    )
+
+    assert calls == 2
+    assert observation.gpu_inventory_query.timed_out is True
+    assert observation.gpu_inventory_query.stdout == b"partial"
+    assert observation.gate_passes is False
+
+
+def test_supervisor_gpu_zero_retains_query_launch_failure_and_runs_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    monkeypatch.setattr(gpu_monitor.shutil, "which", lambda _name: "/nvidia-smi")
+    monkeypatch.setattr(gpu_monitor, "_sha256_file", lambda _path: "a" * 64)
+
+    def run(
+        argv: tuple[str, ...], **_kwargs: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("launch failed")
+        return _binary_completed(argv, b"")
+
+    monkeypatch.setattr(gpu_monitor.subprocess, "run", run)
+    observation = gpu_monitor.capture_supervisor_gpu_zero(
+        gpu_uuid="GPU-target",
+        visible_device="GPU-target",
+        supervisor_pid=123,
+        supervisor_start_ticks=456,
+    )
+
+    assert calls == 2
+    assert observation.gpu_inventory_query.launched is False
+    assert observation.gpu_inventory_query.returncode is None
+    assert observation.compute_apps_query.launched is True
+    assert observation.parse_valid is False
+    assert observation.gate_passes is False
+
+
+def test_supervisor_gpu_zero_uses_prevalidated_executable_sha(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gpu_monitor,
+        "supervisor_query_executable_sha256",
+        lambda: pytest.fail("capture must not re-resolve the executable"),
+    )
+    monkeypatch.setattr(
+        gpu_monitor,
+        "_run_supervisor_query",
+        lambda argv, *, executable_sha256, timeout_seconds: (
+            gpu_monitor.SupervisorGpuQuery(
+                argv,
+                executable_sha256,
+                False,
+                False,
+                None,
+                b"",
+                b"",
+            )
+        ),
+    )
+
+    observation = gpu_monitor.capture_supervisor_gpu_zero(
+        gpu_uuid="GPU-test",
+        visible_device="GPU-test",
+        supervisor_pid=1,
+        supervisor_start_ticks=2,
+        query_executable_sha256="a" * 64,
+    )
+
+    assert observation.gpu_inventory_query.query_executable_sha256 == "a" * 64
+    assert observation.compute_apps_query.query_executable_sha256 == "a" * 64
+
+
 def test_monitor_binds_samples_to_the_exact_gpu_uuid_and_direct_pid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
