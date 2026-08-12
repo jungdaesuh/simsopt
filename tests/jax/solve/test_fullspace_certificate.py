@@ -21,15 +21,12 @@ from simsopt_jax.objectives.single_stage_fullspace import (
     FullSpaceRawTerms,
 )
 from simsopt_jax.solve.fullspace import (
-    CfsAl1Result,
-    CfsAl1StageHistory,
     FullSpaceRoute,
     FullSpaceScaling,
 )
 from simsopt_jax.solve.fullspace_certificate import (
     CFS_SQP1_CERTIFICATE_SCHEMA_VERSION,
     BranchEvidence,
-    CfsAl1EndpointCertificate,
     CfsSqp1EndpointCertificate,
     CrossEvaluatorEvidence,
     FieldLineEvidence,
@@ -38,10 +35,7 @@ from simsopt_jax.solve.fullspace_certificate import (
     ObjectiveReferenceEvidence,
     OptimizerTermination,
     ProjectionEvidence,
-    certify_cfs_al1_endpoint,
-    certify_cfs_al2_endpoint,
     certify_cfs_sqp1_endpoint,
-    certify_fullspace_endpoint,
 )
 from simsopt_jax.solve.fullspace_sqp import (
     SCHEMA_VERSION as CFS_SQP1_RESULT_SCHEMA_VERSION,
@@ -119,59 +113,10 @@ def _install_pure_test_evaluator(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(certificate_module, "fullspace_kkt_primitives", _kkt)
 
 
-def _result(
-    *,
-    state: jax.Array | None = None,
-    inner_iterations_per_stage: int = 1,
-    function_evaluations_per_stage: int = 2,
-) -> CfsAl1Result:
-    endpoint = jnp.asarray([1.0, 2.0], dtype=jnp.float64) if state is None else state
-    stages = 10
-    history = CfsAl1StageHistory(
-        penalty=jnp.ones(stages, dtype=jnp.float64),
-        physical_objective=jnp.zeros(stages, dtype=jnp.float64),
-        scaled_feasibility_infinity_norm=jnp.zeros(stages, dtype=jnp.float64),
-        augmented_stationarity_infinity_norm=jnp.zeros(stages, dtype=jnp.float64),
-        optimizer_status=jnp.ones(stages, dtype=jnp.int32),
-        inner_iterations=jnp.full(stages, inner_iterations_per_stage, dtype=jnp.int32),
-        function_evaluations=jnp.full(
-            stages, function_evaluations_per_stage, dtype=jnp.int32
-        ),
-        stage_completed=jnp.ones(stages, dtype=jnp.bool_),
-    )
-    return CfsAl1Result(
-        optimizer_coordinates=endpoint,
-        physical_state=endpoint,
-        scaled_multipliers=jnp.zeros(2, dtype=jnp.float64),
-        raw_multipliers=jnp.zeros(2, dtype=jnp.float64),
-        next_penalty=jnp.asarray(250.0, dtype=jnp.float64),
-        physical_objective=jnp.asarray(0.0, dtype=jnp.float64),
-        raw_constraint_infinity_norm=jnp.asarray(0.0, dtype=jnp.float64),
-        scaled_constraint_infinity_norm=jnp.asarray(0.0, dtype=jnp.float64),
-        raw_kkt_stationarity_infinity_norm=jnp.asarray(0.0, dtype=jnp.float64),
-        completed_outer_stages=jnp.asarray(stages, dtype=jnp.int32),
-        total_inner_iterations=jnp.asarray(
-            inner_iterations_per_stage * stages, dtype=jnp.int32
-        ),
-        total_function_evaluations=jnp.asarray(
-            function_evaluations_per_stage * stages, dtype=jnp.int32
-        ),
-        total_gradient_evaluations=jnp.asarray(
-            function_evaluations_per_stage * stages, dtype=jnp.int32
-        ),
-        nonfinite_evaluation_count=jnp.asarray(0, dtype=jnp.int32),
-        all_accepted_states_finite=jnp.asarray(True),
-        converged=jnp.asarray(True),
-        fatal=jnp.asarray(False),
-        all_finite=jnp.asarray(True),
-        stage_history=history,
-    )
-
-
 def _inputs() -> dict[str, object]:
     endpoint = jnp.asarray([1.0, 2.0], dtype=jnp.float64)
     return {
-        "result": _result(),
+        "result": _sqp_result(),
         "problem": SimpleNamespace(
             layout=SimpleNamespace(total_dof_count=2),
             config=SimpleNamespace(
@@ -235,12 +180,13 @@ def _inputs() -> dict[str, object]:
 
 def _sqp_result(
     *,
+    state: jax.Array | None = None,
     status: DenseSQPStatus = DenseSQPStatus.CONVERGED,
     iterations: int = 2,
     joint_evaluations: int = 5,
     kkt_solves: int | None = None,
 ) -> CfsSqp1Result:
-    endpoint = jnp.asarray([1.0, 2.0], dtype=jnp.float64)
+    endpoint = jnp.asarray([1.0, 2.0], dtype=jnp.float64) if state is None else state
     scaled_multipliers = jnp.zeros(2, dtype=jnp.float64)
     zero = jnp.asarray(0.0, dtype=jnp.float64)
     history_size = 100
@@ -338,22 +284,7 @@ def _sqp_result(
 
 
 def _certify(inputs: dict[str, object]):
-    return certify_cfs_al1_endpoint(**inputs)  # type: ignore[arg-type]
-
-
-def test_complete_cfs_al1_evidence_certifies_without_nested_inner_success() -> None:
-    certificate = _certify(_inputs())
-
-    assert type(certificate) is CfsAl1EndpointCertificate
-    assert certificate.schema_version == certificate_module.SCHEMA_VERSION
-    assert certificate.certified
-    assert certificate.termination is OptimizerTermination.CONVERGED
-    assert certificate.pre_projection.boozer_residual_infinity_norm == 0.0
-    assert certificate.pre_projection.volume_residual_absolute == 0.0
-    assert certificate.post_projection.iota == 1.0
-    assert certificate.post_projection.major_radius == 1.5
-    assert certificate.post_projection.one_sided_length_penalty == 0.0
-    assert not hasattr(certificate, "inner_success")
+    return certify_cfs_sqp1_endpoint(**inputs)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -409,7 +340,7 @@ def test_required_external_evidence_tampering_fails_closed(
 def test_material_projection_cannot_repair_failed_unprojected_solve() -> None:
     inputs = _inputs()
     pre_state = jnp.asarray([1.0 + 1.0e-4, 2.0], dtype=jnp.float64)
-    inputs["result"] = _result(state=pre_state)
+    inputs["result"] = _sqp_result(state=pre_state)
     inputs["projection"] = ProjectionEvidence(
         evaluated=True,
         used=True,
@@ -423,61 +354,6 @@ def test_material_projection_cannot_repair_failed_unprojected_solve() -> None:
     assert not certificate.checks.pre_projection_certifiable
     assert not certificate.checks.projection_immaterial
     assert certificate.checks.post_projection_certifiable
-
-
-def test_optimizer_nonfinite_and_incomplete_histories_are_normalized() -> None:
-    inputs = _inputs()
-    result = inputs["result"]
-    assert isinstance(result, CfsAl1Result)
-    inputs["result"] = replace(
-        result,
-        nonfinite_evaluation_count=jnp.asarray(1, dtype=jnp.int32),
-    )
-    nonfinite = _certify(inputs)
-    assert not nonfinite.certified
-    assert nonfinite.termination is OptimizerTermination.NONFINITE
-
-    inputs = _inputs()
-    result = inputs["result"]
-    assert isinstance(result, CfsAl1Result)
-    inputs["result"] = replace(
-        result,
-        completed_outer_stages=jnp.asarray(9, dtype=jnp.int32),
-    )
-    incomplete = _certify(inputs)
-    assert not incomplete.certified
-    assert incomplete.termination is OptimizerTermination.INCOMPLETE
-
-    inputs = _inputs()
-    result = inputs["result"]
-    assert isinstance(result, CfsAl1Result)
-    tampered_history = replace(
-        result.stage_history,
-        inner_iterations=result.stage_history.inner_iterations.at[0].set(101),
-    )
-    inputs["result"] = replace(
-        result,
-        stage_history=tampered_history,
-        total_inner_iterations=jnp.asarray(110, dtype=jnp.int32),
-    )
-    over_budget = _certify(inputs)
-    assert not over_budget.certified
-    assert over_budget.termination is OptimizerTermination.INCOMPLETE
-
-
-def test_solver_reported_endpoint_metrics_are_recomputed_not_trusted() -> None:
-    inputs = _inputs()
-    result = inputs["result"]
-    assert isinstance(result, CfsAl1Result)
-    inputs["result"] = replace(
-        result,
-        physical_objective=jnp.asarray(-1.0, dtype=jnp.float64),
-    )
-
-    certificate = _certify(inputs)
-
-    assert not certificate.certified
-    assert not certificate.checks.solver_result_consistent
 
 
 def test_fp32_or_nonfinite_authoritative_evidence_fails_closed() -> None:
@@ -515,73 +391,6 @@ def test_projection_pre_state_must_be_exact_solver_endpoint() -> None:
 
     assert not certificate.certified
     assert not certificate.checks.projection_bound_to_solver_endpoint
-
-
-@pytest.mark.parametrize(
-    "route",
-    (FullSpaceRoute.CFS_P0, FullSpaceRoute.CFS_AL1_B),
-)
-def test_other_routes_are_rejected_before_scientific_evaluation(
-    route: FullSpaceRoute,
-) -> None:
-    inputs = _inputs()
-
-    with pytest.raises(ValueError, match="restricted to CFS-AL1 and CFS-AL2"):
-        certify_fullspace_endpoint(
-            route=route,
-            **inputs,  # type: ignore[arg-type]
-        )
-
-
-def test_cfs_al2_uses_its_1000_per_stage_and_10000_total_budget() -> None:
-    inputs = _inputs()
-    inputs["result"] = _result(
-        inner_iterations_per_stage=1000,
-        function_evaluations_per_stage=1001,
-    )
-
-    certificate = certify_cfs_al2_endpoint(**inputs)  # type: ignore[arg-type]
-
-    assert certificate.certified
-    assert certificate.route is FullSpaceRoute.CFS_AL2
-    assert certificate.termination is OptimizerTermination.CONVERGED
-
-
-def test_identical_stage_history_is_route_validated_not_globally_accepted() -> None:
-    inputs = _inputs()
-    inputs["result"] = _result(
-        inner_iterations_per_stage=1000,
-        function_evaluations_per_stage=1001,
-    )
-
-    al1 = _certify(inputs)
-
-    assert not al1.certified
-    assert al1.termination is OptimizerTermination.INCOMPLETE
-
-
-@pytest.mark.parametrize(
-    ("inner_iterations", "function_evaluations"),
-    (
-        (1001, 1002),
-        (1000, 999),
-        (1000, 15001),
-    ),
-)
-def test_cfs_al2_rejects_per_stage_iteration_and_maxfun_tampering(
-    inner_iterations: int,
-    function_evaluations: int,
-) -> None:
-    inputs = _inputs()
-    inputs["result"] = _result(
-        inner_iterations_per_stage=inner_iterations,
-        function_evaluations_per_stage=function_evaluations,
-    )
-
-    certificate = certify_cfs_al2_endpoint(**inputs)  # type: ignore[arg-type]
-
-    assert not certificate.certified
-    assert certificate.termination is OptimizerTermination.INCOMPLETE
 
 
 def test_complete_cfs_sqp1_evidence_uses_shared_scientific_recomputation() -> None:

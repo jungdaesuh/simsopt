@@ -1,4 +1,4 @@
-"""Fail-closed endpoint certification for the promoting CFS-AL1 route.
+"""Fail-closed endpoint certification for the promoting CFS-SQP1 route.
 
 This module deliberately owns a formulation-specific contract.  It does not
 translate the joint equality-constrained solve into the nested solver's
@@ -24,12 +24,9 @@ from simsopt_jax.objectives.single_stage_fullspace import (
     fullspace_kkt_primitives,
 )
 from simsopt_jax.solve.fullspace import (
-    CfsAl1Result,
     CfsSqp1Policy,
     FullSpaceRoute,
     FullSpaceScaling,
-    RoutePolicy,
-    route_policy,
     sqp_route_policy,
 )
 from simsopt_jax.solve.fullspace_sqp import (
@@ -58,7 +55,7 @@ INACTIVE_HARDWARE_TERMS: Final = (
 
 
 class OptimizerTermination(StrEnum):
-    """Normalized CFS-AL1 terminal classifications."""
+    """Normalized full-space solver terminal classifications."""
 
     CONVERGED = "CONVERGED"
     INCOMPLETE = "INCOMPLETE"
@@ -201,9 +198,8 @@ class CfsSqp1EndpointCertificate(CfsAl1EndpointCertificate):
     """Distinct CFS-SQP1 envelope over the shared scientific evidence."""
 
 
-# The evidence schema is formulation-specific but shared by the two authorized
-# augmented-Lagrangian schedules.  Retain the original public name for callers
-# that already consume CFS-AL1 receipts.
+# The evidence schema is formulation-specific but route-independent.  Retain the
+# original public name for callers that already consume published receipts.
 FullSpaceEndpointCertificate = CfsAl1EndpointCertificate
 
 
@@ -307,15 +303,6 @@ def _endpoint_numerics(
     )
 
 
-def _certificate_policy(route: FullSpaceRoute) -> RoutePolicy:
-    if route.value not in {"CFS-AL1", "CFS-AL2"}:
-        raise ValueError(
-            "full-space endpoint certification is restricted to CFS-AL1 and "
-            f"CFS-AL2; got {route.value}"
-        )
-    return route_policy(route)
-
-
 def _sqp_certificate_policy(route: FullSpaceRoute) -> CfsSqp1Policy:
     if route is not FullSpaceRoute.CFS_SQP1:
         raise ValueError(
@@ -324,62 +311,14 @@ def _sqp_certificate_policy(route: FullSpaceRoute) -> CfsSqp1Policy:
     return sqp_route_policy(route)
 
 
-def _normalized_termination(
-    result: CfsAl1Result,
-    route: FullSpaceRoute,
-) -> OptimizerTermination:
-    if (
-        not _scalar_bool(result.all_finite)
-        or not _scalar_bool(result.all_accepted_states_finite)
-        or _scalar_int(result.nonfinite_evaluation_count) != 0
-    ):
-        return OptimizerTermination.NONFINITE
-    policy = _certificate_policy(route)
-    completed = _scalar_int(result.completed_outer_stages)
-    completed_mask = np.asarray(result.stage_history.stage_completed, dtype=np.bool_)
-    statuses = np.asarray(result.stage_history.optimizer_status)
-    inner_iterations = np.asarray(result.stage_history.inner_iterations)
-    function_evaluations = np.asarray(result.stage_history.function_evaluations)
-    history_valid = bool(
-        completed_mask.shape == (policy.maximum_outer_stages,)
-        and statuses.shape == (policy.maximum_outer_stages,)
-        and np.all(completed_mask)
-        and np.all((statuses == 0) | (statuses == 1))
-        and np.all(inner_iterations >= 0)
-        and np.all(inner_iterations <= policy.inner_iterations_per_stage)
-        and np.all(function_evaluations >= inner_iterations + 1)
-        and np.all(
-            function_evaluations <= policy.maximum_function_evaluations_per_inner_solve
-        )
-        and int(np.sum(inner_iterations)) == _scalar_int(result.total_inner_iterations)
-        and int(np.sum(function_evaluations))
-        == _scalar_int(result.total_function_evaluations)
-        and _scalar_int(result.total_gradient_evaluations)
-        == _scalar_int(result.total_function_evaluations)
-        and _scalar_int(result.total_inner_iterations)
-        <= policy.maximum_total_inner_iterations
-    )
-    if completed != policy.maximum_outer_stages or not history_valid:
-        return OptimizerTermination.INCOMPLETE
-    if _scalar_bool(result.fatal) or not _scalar_bool(result.converged):
-        return OptimizerTermination.OPTIMIZER_REJECTED
-    return OptimizerTermination.CONVERGED
-
-
 def _endpoint_core_passes(
     endpoint: EndpointNumerics,
     route: FullSpaceRoute,
 ) -> tuple[bool, bool, bool]:
-    if route is FullSpaceRoute.CFS_SQP1:
-        policy = _sqp_certificate_policy(route)
-        constraint_tolerance = policy.scaled_feasibility_tolerance
-        stationarity_tolerance = policy.raw_kkt_stationarity_tolerance
-        objective_maximum = policy.objective_maximum
-    else:
-        convergence = _certificate_policy(route).convergence
-        constraint_tolerance = convergence.constraint_tolerance
-        stationarity_tolerance = convergence.stationarity_tolerance
-        objective_maximum = OBJECTIVE_MAXIMUM
+    policy = _sqp_certificate_policy(route)
+    constraint_tolerance = policy.scaled_feasibility_tolerance
+    stationarity_tolerance = policy.raw_kkt_stationarity_tolerance
+    objective_maximum = policy.objective_maximum
     feasibility = bool(
         np.asarray(endpoint.scaled_feasibility_infinity_norm) <= constraint_tolerance
     )
@@ -415,54 +354,6 @@ def _fixed_state_passes(evidence: FixedStateEvidence) -> bool:
         and np.array_equal(
             np.asarray(evidence.expected_fixed_dofs),
             np.asarray(evidence.observed_fixed_dofs),
-        )
-    )
-
-
-def _solver_result_is_consistent(
-    result: CfsAl1Result,
-    endpoint: EndpointNumerics,
-    scaling: FullSpaceScaling,
-) -> bool:
-    expected_physical_state = (
-        scaling.bootstrap_anchor + result.optimizer_coordinates * scaling.variable_scale
-    )
-    expected_raw_multipliers = (
-        scaling.constraint_inverse_scale * result.scaled_multipliers
-    )
-    floating_evidence = (
-        result.optimizer_coordinates,
-        result.physical_state,
-        result.scaled_multipliers,
-        result.raw_multipliers,
-        result.next_penalty,
-        result.physical_objective,
-        result.raw_constraint_infinity_norm,
-        result.scaled_constraint_infinity_norm,
-        result.raw_kkt_stationarity_infinity_norm,
-    )
-    return bool(
-        all(_finite_fp64(value) for value in floating_evidence)
-        and np.array_equal(
-            np.asarray(expected_physical_state), np.asarray(result.physical_state)
-        )
-        and np.array_equal(
-            np.asarray(expected_raw_multipliers), np.asarray(result.raw_multipliers)
-        )
-        and np.array_equal(
-            np.asarray(result.physical_objective), np.asarray(endpoint.objective)
-        )
-        and np.array_equal(
-            np.asarray(result.raw_constraint_infinity_norm),
-            np.asarray(jnp.max(jnp.abs(endpoint.constraints))),
-        )
-        and np.array_equal(
-            np.asarray(result.scaled_constraint_infinity_norm),
-            np.asarray(endpoint.scaled_feasibility_infinity_norm),
-        )
-        and np.array_equal(
-            np.asarray(result.raw_kkt_stationarity_infinity_norm),
-            np.asarray(endpoint.raw_kkt_stationarity_infinity_norm),
         )
     )
 
@@ -976,123 +867,6 @@ def _certify_recomputed_endpoint(
     )
 
 
-def certify_fullspace_endpoint(
-    *,
-    route: FullSpaceRoute,
-    result: CfsAl1Result,
-    problem: FullSpaceProblem,
-    scaling: FullSpaceScaling,
-    fixed_state: FixedStateEvidence,
-    inactive_hardware: InactiveHardwareEvidence,
-    objective_reference: ObjectiveReferenceEvidence,
-    cross_evaluator: CrossEvaluatorEvidence,
-    field_line: FieldLineEvidence,
-    branch: BranchEvidence,
-    projection: ProjectionEvidence,
-) -> CfsAl1EndpointCertificate:
-    """Build a complete promoting augmented-Lagrangian endpoint certificate."""
-
-    _certificate_policy(route)
-    _validate_certificate_inputs(
-        state_name="result.physical_state",
-        solver_physical_state=result.physical_state,
-        multiplier_name="result.raw_multipliers",
-        raw_multipliers=result.raw_multipliers,
-        problem=problem,
-        scaling=scaling,
-        objective_reference=objective_reference,
-        cross_evaluator=cross_evaluator,
-        field_line=field_line,
-        branch=branch,
-        projection=projection,
-    )
-    pre = _endpoint_numerics(
-        projection.pre_state,
-        result.raw_multipliers,
-        problem,
-        scaling,
-    )
-    return _certify_recomputed_endpoint(
-        certificate_type=CfsAl1EndpointCertificate,
-        schema_version=SCHEMA_VERSION,
-        route=route,
-        solver_physical_state=result.physical_state,
-        raw_multipliers=result.raw_multipliers,
-        termination=_normalized_termination(result, route),
-        solver_result_consistent=_solver_result_is_consistent(result, pre, scaling),
-        pre=pre,
-        problem=problem,
-        scaling=scaling,
-        fixed_state=fixed_state,
-        inactive_hardware=inactive_hardware,
-        objective_reference=objective_reference,
-        cross_evaluator=cross_evaluator,
-        field_line=field_line,
-        branch=branch,
-        projection=projection,
-    )
-
-
-def certify_cfs_al1_endpoint(
-    *,
-    result: CfsAl1Result,
-    problem: FullSpaceProblem,
-    scaling: FullSpaceScaling,
-    fixed_state: FixedStateEvidence,
-    inactive_hardware: InactiveHardwareEvidence,
-    objective_reference: ObjectiveReferenceEvidence,
-    cross_evaluator: CrossEvaluatorEvidence,
-    field_line: FieldLineEvidence,
-    branch: BranchEvidence,
-    projection: ProjectionEvidence,
-) -> CfsAl1EndpointCertificate:
-    """Backward-compatible CFS-AL1 certificate entry point."""
-
-    return certify_fullspace_endpoint(
-        route=FullSpaceRoute.CFS_AL1,
-        result=result,
-        problem=problem,
-        scaling=scaling,
-        fixed_state=fixed_state,
-        inactive_hardware=inactive_hardware,
-        objective_reference=objective_reference,
-        cross_evaluator=cross_evaluator,
-        field_line=field_line,
-        branch=branch,
-        projection=projection,
-    )
-
-
-def certify_cfs_al2_endpoint(
-    *,
-    result: CfsAl1Result,
-    problem: FullSpaceProblem,
-    scaling: FullSpaceScaling,
-    fixed_state: FixedStateEvidence,
-    inactive_hardware: InactiveHardwareEvidence,
-    objective_reference: ObjectiveReferenceEvidence,
-    cross_evaluator: CrossEvaluatorEvidence,
-    field_line: FieldLineEvidence,
-    branch: BranchEvidence,
-    projection: ProjectionEvidence,
-) -> CfsAl1EndpointCertificate:
-    """Certify CFS-AL2 with its route-specific iteration policy."""
-
-    return certify_fullspace_endpoint(
-        route=FullSpaceRoute.CFS_AL2,
-        result=result,
-        problem=problem,
-        scaling=scaling,
-        fixed_state=fixed_state,
-        inactive_hardware=inactive_hardware,
-        objective_reference=objective_reference,
-        cross_evaluator=cross_evaluator,
-        field_line=field_line,
-        branch=branch,
-        projection=projection,
-    )
-
-
 def certify_cfs_sqp1_endpoint(
     *,
     result: CfsSqp1Result,
@@ -1178,8 +952,5 @@ __all__ = (
     "ObjectiveReferenceEvidence",
     "OptimizerTermination",
     "ProjectionEvidence",
-    "certify_cfs_al1_endpoint",
-    "certify_cfs_al2_endpoint",
     "certify_cfs_sqp1_endpoint",
-    "certify_fullspace_endpoint",
 )
