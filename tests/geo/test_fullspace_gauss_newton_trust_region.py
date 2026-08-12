@@ -16,6 +16,7 @@ from simsopt_jax.geo.optimizers.projected_gauss_newton_trust_region import (
     ProjectedGaussNewtonOptions,
     ProjectedGaussNewtonResult,
     ProjectedGaussNewtonStatus,
+    _empty_history,
 )
 from simsopt_jax.objectives.single_stage_fullspace import FullSpaceProblem
 from simsopt_jax.objectives.single_stage_fullspace_residuals import (
@@ -145,7 +146,7 @@ def _history(options: ProjectedGaussNewtonOptions) -> ProjectedGaussNewtonHistor
     index = jnp.arange(options.maximum_attempts, dtype=jnp.int32)
     active = index < options.maximum_accepted_steps
     floating = jnp.where(active, 0.0, jnp.nan).astype(jnp.float64)
-    return ProjectedGaussNewtonHistory(
+    return _empty_history(options.maximum_attempts, jnp.float64)._replace(
         outcome=jnp.where(
             active,
             int(ProjectedGaussNewtonAttemptOutcome.ACCEPTED),
