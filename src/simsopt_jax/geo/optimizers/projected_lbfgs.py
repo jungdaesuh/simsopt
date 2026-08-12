@@ -726,7 +726,7 @@ def run_projected_lbfgs(
         gn_direction_norm = float("nan")
         lagrangian_newton_used = False
         lagrangian_newton_rescued = False
-        newton_step: object | None = None
+        newton_step: TangentNewtonCgStep | None = None
         model_predicted = float("nan")
         multiplier_norm = float("nan")
         multiplier_forward_error_bound = float("nan")
