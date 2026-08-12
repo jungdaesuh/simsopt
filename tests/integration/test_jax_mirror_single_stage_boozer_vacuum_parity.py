@@ -63,7 +63,13 @@ def test_single_stage_parity_preserves_public_solver_boundaries() -> None:
     assert "make_traceable_objective_session" in source
     assert "accepted_incumbent_host_value_and_grad" in source
     assert "evaluate_candidate_from_anchor" in source
-    assert source.count("callback=incumbent_controller.accept") == 2
+    assert source.count("callback=accept_optimizer_trial") == 2
+    assert "final_eval_value_and_grad_host=evaluate_optimizer_final" in source
+    assert 'gradient_source="candidate"' not in source
+    assert "forward_success=evidence.forward_success" in source
+    assert "primal_success=evidence.primal_success" in source
+    assert "actual_adjoint_success=evidence.actual_adjoint_success" in source
+    assert "eligible=evidence.eligible" in source
     assert "scalar_example_driver()" in source
     assert "minimize_lbfgs_host_core" in source
     assert "minimize_bfgs_host_core" in source
