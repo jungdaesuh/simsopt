@@ -20,6 +20,24 @@ into a linear rate, while a Lagrangian Newton step costs several curvature
 products and earns that back only where the linear rate has stalled.
 ``hybrid_plateau_window`` measures the realized rate and switches on it.
 
+The constraint Jacobian's materialization dominates everything else here by
+two orders of magnitude -- one primal traversal per row against one for the
+whole objective gradient -- so the factored Gram it yields is treated as an
+asset with a lifetime rather than as a per-point quantity.
+``frozen_projector_line_search`` spends it across one line search;
+``projector_refresh_period`` spends it across several ITERATIONS, with the
+intervening points evaluated for value, constraints and gradient only.  What
+that buys is speed and what it costs is exactness of the tangent projection --
+never feasibility, because the retraction's verdict is taken against the true
+constraints in both cases.  Each carried point measures its own true tangency
+and hands the carry back when it has drifted, and a line search that can place
+nothing against carried rows refreshes and retries instead of collapsing.
+
+``newton_tangent_fraction_threshold`` decides on the same evidence whether the
+Newton solve is worth running at all: the tangent fraction ``||P g|| / ||g||``
+is free once the point is evaluated, and it separates the neighbourhoods where
+a reduced model earns its cost from the ones where it does not.
+
 Curvature pairs are formed from the realized on-manifold displacement ``s``
 and the projected-gradient change ``y``.  Those two vectors are only
 comparable inside one tangent space, so ``vector_transport`` decides how the
@@ -187,6 +205,45 @@ class ProjectedLbfgsOptions:
     a trial the chord iteration cannot land is rejected and the step halves.
     """
 
+    projector_refresh_period: int = 1
+    """Accepted iterations one materialized constraint Jacobian serves.
+
+    One leaves the Jacobian materialized at every accepted point.  A larger
+    period carries the factored Gram ACROSS iterations: the intervening points
+    are evaluated for their objective, constraints and objective gradient only
+    -- two orders of magnitude cheaper than the row materialization -- and the
+    tangent projection, the multipliers and the chord retraction all spend the
+    carried factor.  The projection is then inexact, so every stale point
+    measures its own TRUE tangency with one constraint JVP and refreshes when
+    ``projector_tangency_tolerance`` is exceeded; a line search that can place
+    no step against carried rows refreshes and retries rather than collapsing.
+    Feasibility is unaffected either way: the retraction's verdict is taken
+    against the true constraints, so no stale factor can admit an off-manifold
+    point -- it can only cost trials.
+    """
+
+    projector_tangency_tolerance: float = 0.0
+    """Measured true tangency above which a carried projector is refreshed.
+
+    Zero carries the projector for the full period regardless.  The measured
+    quantity is ``||A d||_inf / ||d||_inf`` at the CURRENT point for the
+    projected gradient ``d``, which is zero to rounding when the rows were
+    materialized here and grows with the distance travelled since.
+    """
+
+    newton_tangent_fraction_threshold: float = 0.0
+    """Tangent gradient fraction below which the Newton solve is skipped.
+
+    Zero runs the scheduled Newton solve unconditionally.  Positive compares
+    ``||P g|| / ||g||`` -- already in hand from the point evaluation, at the
+    cost of no additional work -- against the threshold before the solve, and
+    below it takes the limited-memory direction directly.  A gradient that lies
+    almost entirely in the constraint row space leaves a tangent component too
+    small for the reduced model to describe, and the banked telemetry separates
+    the two populations cleanly: the Newton directions that were accepted sat
+    at fraction 0.85, the ones the line search refused at 0.15.
+    """
+
 
 _DEFAULT_OPTIONS = ProjectedLbfgsOptions()
 
@@ -197,6 +254,12 @@ class ProjectedPoint(NamedTuple):
     ``projector`` holds the factored Gram of the constraint Jacobian at this
     point, so a caller can spend the factorization again -- on a line search's
     trial retractions, for instance -- without materializing the Jacobian.
+
+    ``tangency_relative_residual`` certifies the projection against the rows
+    the projector CARRIES; ``true_tangency_relative_residual`` certifies it
+    against the constraint Jacobian at these coordinates.  The two coincide
+    when the rows were materialized here and separate when a carried projector
+    is spent at a later point.
     """
 
     projector: CertifiedGramProjector
@@ -209,6 +272,7 @@ class ProjectedPoint(NamedTuple):
     projected_gradient_norm: jax.Array
     gradient_norm: jax.Array
     tangency_relative_residual: jax.Array
+    true_tangency_relative_residual: jax.Array
     gram_reciprocal_condition: jax.Array
     solve_forward_error_bound: jax.Array
     all_finite: jax.Array
@@ -254,6 +318,11 @@ class ProjectedLbfgsIteration(NamedTuple):
     gradient_norm: float
     feasibility_inf: float
     tangency_relative_residual: float
+    true_tangency_relative_residual: float
+    projector_age: int
+    projector_refreshed: bool
+    tangent_gradient_fraction: float
+    newton_gate_skipped: bool
     gram_reciprocal_condition: float
     direction_norm: float
     directional_derivative: float
@@ -302,6 +371,27 @@ class ProjectedLbfgsIteration(NamedTuple):
     pair_update_seconds: float
 
 
+class _AbandonedAttempt(NamedTuple):
+    """What an iteration attempt spent before carried rows sent it back.
+
+    A line search that placed nothing against a carried projector is retried
+    against rows materialized here, and the retry opens the counters again.
+    Carrying what the abandoned attempt spent -- rather than dropping it -- is
+    what keeps the per-phase seconds summing to the solve time and the trial
+    counts summing to the retractions actually performed.
+    """
+
+    direction_seconds: float = 0.0
+    line_search_seconds: float = 0.0
+    retraction_seconds: float = 0.0
+    point_evaluation_seconds: float = 0.0
+    trials: int = 0
+    rejected_for_feasibility: int = 0
+
+
+_NO_ABANDONED_ATTEMPT = _AbandonedAttempt()
+
+
 class ProjectedLbfgsRun(NamedTuple):
     """Terminal state of one run plus every banked iteration record."""
 
@@ -314,6 +404,9 @@ class ProjectedLbfgsRun(NamedTuple):
     iterations: tuple[ProjectedLbfgsIteration, ...]
     compile_seconds: float
     solve_seconds: float
+    projector_materializations: int
+    tangency_forced_refreshes: int
+    line_search_forced_refreshes: int
 
 
 def evaluate_projected_point(
@@ -342,6 +435,9 @@ def evaluate_projected_point(
         projected_gradient_norm=jnp.linalg.norm(projected_gradient),
         gradient_norm=jnp.linalg.norm(rows.objective_gradient),
         tangency_relative_residual=projection.tangency_relative_residual,
+        # The rows were materialized HERE, so the projector's own certificate
+        # is already the true one; measuring it again would buy nothing.
+        true_tangency_relative_residual=projection.tangency_relative_residual,
         gram_reciprocal_condition=projector.reciprocal_condition,
         solve_forward_error_bound=projection.solve_forward_error_bound,
         all_finite=(
@@ -349,6 +445,64 @@ def evaluate_projected_point(
             & jnp.isfinite(rows.objective)
             & jnp.all(jnp.isfinite(rows.constraints))
             & jnp.all(jnp.isfinite(rows.objective_gradient))
+            & projection.all_finite
+        ),
+    )
+
+
+def evaluate_projected_point_with_projector(
+    joint_value_constraints: JointValueConstraints,
+    projector: CertifiedGramProjector,
+    coordinates: jax.Array,
+) -> ProjectedPoint:
+    """Evaluate one point against an already factored constraint Jacobian.
+
+    This is the carried-projector form of :func:`evaluate_projected_point`.
+    The objective, the constraints and the objective gradient are exact here --
+    one primal traversal and one reverse pass, against the 256 the row
+    materialization spends -- and only the tangent projection is inexact,
+    because the rows it removes are the manifold's at an earlier point.
+
+    That inexactness is measured rather than assumed: one constraint JVP
+    through the projected gradient gives the tangency residual the step will
+    actually be judged by, in the same relative form the fresh evaluation
+    certifies, so a caller can decide when the carry has to end.
+    """
+
+    (objective, constraints), gradient = jax.value_and_grad(
+        joint_value_constraints, has_aux=True
+    )(coordinates)
+    projection = project_with_certified_gram(projector, gradient)
+    projected_gradient = projection.projected
+    true_rows_action = jax.jvp(
+        lambda values: joint_value_constraints(values)[1],
+        (coordinates,),
+        (projected_gradient,),
+    )[1]
+    tiny = jnp.asarray(jnp.finfo(coordinates.dtype).tiny, dtype=coordinates.dtype)
+    true_tangency_relative_residual = jnp.linalg.norm(
+        true_rows_action, ord=jnp.inf
+    ) / jnp.maximum(tiny, jnp.linalg.norm(projected_gradient, ord=jnp.inf))
+    return ProjectedPoint(
+        projector=projector,
+        objective=objective,
+        gradient=gradient,
+        constraints=constraints,
+        feasibility_inf=jnp.linalg.norm(constraints, ord=jnp.inf),
+        projected_gradient=projected_gradient,
+        projected_gradient_inf=jnp.linalg.norm(projected_gradient, ord=jnp.inf),
+        projected_gradient_norm=jnp.linalg.norm(projected_gradient),
+        gradient_norm=jnp.linalg.norm(gradient),
+        tangency_relative_residual=projection.tangency_relative_residual,
+        true_tangency_relative_residual=true_tangency_relative_residual,
+        gram_reciprocal_condition=projector.reciprocal_condition,
+        solve_forward_error_bound=projection.solve_forward_error_bound,
+        all_finite=(
+            jnp.all(jnp.isfinite(coordinates))
+            & jnp.isfinite(objective)
+            & jnp.all(jnp.isfinite(constraints))
+            & jnp.all(jnp.isfinite(gradient))
+            & jnp.isfinite(true_tangency_relative_residual)
             & projection.all_finite
         ),
     )
@@ -594,6 +748,11 @@ def run_projected_lbfgs(
             joint_value_constraints, coordinates
         )
     )
+    evaluate_carried = jax.jit(
+        lambda projector, coordinates: evaluate_projected_point_with_projector(
+            joint_value_constraints, projector, coordinates
+        )
+    )
     exact_retract = jax.jit(
         lambda coordinates: retract_to_manifold(
             joint_value_constraints,
@@ -682,6 +841,13 @@ def run_projected_lbfgs(
     records: list[ProjectedLbfgsIteration] = []
     status = ProjectedLbfgsStatus.RUNNING
     stored_pairs = 0
+    # Accepted iterations the projector in hand has already served, plus the
+    # seconds a forced refresh spent outside any record's own accounting.
+    projector_age = 0
+    projector_materializations = 1
+    tangency_forced_refreshes = 0
+    line_search_forced_refreshes = 0
+    abandoned = _NO_ABANDONED_ATTEMPT
     # Without a hybrid window the selected model runs from the first iteration;
     # with one the run opens on the cheap secant step and earns its way in.
     newton_active = options.lagrangian_newton and options.hybrid_plateau_window == 0
@@ -730,7 +896,26 @@ def run_projected_lbfgs(
         model_predicted = float("nan")
         multiplier_norm = float("nan")
         multiplier_forward_error_bound = float("nan")
-        if options.lagrangian_newton and newton_active:
+        # The age of the rows THIS iteration's direction and line search are
+        # spending, fixed before the acceptance can advance it.
+        direction_projector_age = projector_age
+        # The fraction of the gradient that survives the projection is already
+        # in hand; where it is small the reduced model has almost nothing to
+        # describe and the solve would be spent to be refused downstream.
+        gradient_norm_value = float(point.gradient_norm)
+        tangent_fraction = (
+            float(point.projected_gradient_norm) / gradient_norm_value
+            if gradient_norm_value > 0.0
+            else float("nan")
+        )
+        newton_gate_skipped = (
+            options.lagrangian_newton
+            and newton_active
+            and options.newton_tangent_fraction_threshold > 0.0
+            and math.isfinite(tangent_fraction)
+            and tangent_fraction < options.newton_tangent_fraction_threshold
+        )
+        if options.lagrangian_newton and newton_active and not newton_gate_skipped:
             multipliers, newton_step = jax.block_until_ready(
                 lagrangian_newton_direction(
                     coordinates,
@@ -899,10 +1084,38 @@ def run_projected_lbfgs(
         if (
             options.hybrid_plateau_window > 0
             and newton_active
+            and not newton_gate_skipped
             and (lagrangian_newton_rescued or not lagrangian_newton_used)
         ):
             newton_active = False
             newton_rearm_index = index + 1
+
+        # A line search that placed nothing against CARRIED rows has not proved
+        # anything about this point: the trials it rejected were retracted by a
+        # chord whose rows belong somewhere else.  Materialize here and take the
+        # iteration again.  The retry cannot repeat, because the refreshed
+        # projector is not stale, so a second failure is the real verdict.
+        if accepted is None and projector_age > 0:
+            refresh_started = time.perf_counter()
+            point = jax.block_until_ready(evaluate(coordinates))
+            abandoned = _AbandonedAttempt(
+                direction_seconds=abandoned.direction_seconds + direction_seconds,
+                line_search_seconds=abandoned.line_search_seconds
+                + line_search_seconds,
+                retraction_seconds=abandoned.retraction_seconds + retraction_seconds,
+                point_evaluation_seconds=abandoned.point_evaluation_seconds
+                + (time.perf_counter() - refresh_started),
+                trials=abandoned.trials + trials,
+                rejected_for_feasibility=abandoned.rejected_for_feasibility
+                + rejected_for_feasibility,
+            )
+            projector_age = 0
+            projector_materializations += 1
+            line_search_forced_refreshes += 1
+            if not bool(point.all_finite):
+                status = ProjectedLbfgsStatus.NONFINITE_STATE
+                break
+            continue
 
         if accepted is None:
             status = ProjectedLbfgsStatus.LINE_SEARCH_COLLAPSE
@@ -915,8 +1128,9 @@ def run_projected_lbfgs(
                     directional_derivative=directional_derivative,
                     step_scale=step_scale,
                     capped=capped,
-                    trials=trials,
-                    rejected_for_feasibility=rejected_for_feasibility,
+                    trials=trials + abandoned.trials,
+                    rejected_for_feasibility=rejected_for_feasibility
+                    + abandoned.rejected_for_feasibility,
                     stored_pairs=stored_pairs,
                     masked_pairs=masked_pairs,
                     lagrangian_newton_used=lagrangian_newton_used,
@@ -925,9 +1139,15 @@ def run_projected_lbfgs(
                     multiplier_norm=multiplier_norm,
                     multiplier_forward_error_bound=multiplier_forward_error_bound,
                     trailing_objective_factor=trailing_factor,
-                    direction_seconds=direction_seconds,
-                    line_search_seconds=line_search_seconds,
-                    retraction_seconds=retraction_seconds,
+                    projector_age=direction_projector_age,
+                    tangent_fraction=tangent_fraction,
+                    newton_gate_skipped=newton_gate_skipped,
+                    direction_seconds=direction_seconds + abandoned.direction_seconds,
+                    line_search_seconds=line_search_seconds
+                    + abandoned.line_search_seconds,
+                    retraction_seconds=retraction_seconds
+                    + abandoned.retraction_seconds,
+                    point_evaluation_seconds=abandoned.point_evaluation_seconds,
                 )
             )
             if observer is not None:
@@ -936,8 +1156,29 @@ def run_projected_lbfgs(
 
         step = accepted.coordinates - coordinates
         point_started = time.perf_counter()
-        next_point = jax.block_until_ready(evaluate(accepted.coordinates))
-        point_evaluation_seconds = time.perf_counter() - point_started
+        if projector_age + 1 < options.projector_refresh_period:
+            next_point = jax.block_until_ready(
+                evaluate_carried(point.projector, accepted.coordinates)
+            )
+            carry_tangency = float(next_point.true_tangency_relative_residual)
+            # The carry is kept only while its own measurement says the tangent
+            # space it names is still this point's.
+            if options.projector_tangency_tolerance > 0.0 and not (
+                carry_tangency <= options.projector_tangency_tolerance
+            ):
+                next_point = jax.block_until_ready(evaluate(accepted.coordinates))
+                projector_age = 0
+                projector_materializations += 1
+                tangency_forced_refreshes += 1
+            else:
+                projector_age += 1
+        else:
+            next_point = jax.block_until_ready(evaluate(accepted.coordinates))
+            projector_age = 0
+            projector_materializations += 1
+        point_evaluation_seconds = (
+            time.perf_counter() - point_started + abandoned.point_evaluation_seconds
+        )
 
         pair_started = time.perf_counter()
         if options.vector_transport:
@@ -976,14 +1217,22 @@ def run_projected_lbfgs(
             gradient_norm=float(point.gradient_norm),
             feasibility_inf=float(point.feasibility_inf),
             tangency_relative_residual=float(point.tangency_relative_residual),
+            true_tangency_relative_residual=float(
+                point.true_tangency_relative_residual
+            ),
+            projector_age=direction_projector_age,
+            projector_refreshed=direction_projector_age == 0,
+            tangent_gradient_fraction=tangent_fraction,
+            newton_gate_skipped=newton_gate_skipped,
             gram_reciprocal_condition=float(point.gram_reciprocal_condition),
             direction_norm=direction_norm,
             directional_derivative=directional_derivative,
             step_scale=step_scale,
             step_norm=float(jnp.linalg.norm(step)),
             step_norm_capped=bool(capped),
-            line_search_trials=trials,
-            rejected_for_feasibility=rejected_for_feasibility,
+            line_search_trials=trials + abandoned.trials,
+            rejected_for_feasibility=rejected_for_feasibility
+            + abandoned.rejected_for_feasibility,
             retraction_corrections=int(accepted.corrections),
             candidate_objective=float(accepted.objective),
             candidate_feasibility_inf=float(accepted.feasibility_inf),
@@ -1013,12 +1262,13 @@ def run_projected_lbfgs(
                 and model_predicted != 0.0
                 else float("nan")
             ),
-            direction_seconds=direction_seconds,
-            line_search_seconds=line_search_seconds,
-            retraction_seconds=retraction_seconds,
+            direction_seconds=direction_seconds + abandoned.direction_seconds,
+            line_search_seconds=line_search_seconds + abandoned.line_search_seconds,
+            retraction_seconds=retraction_seconds + abandoned.retraction_seconds,
             point_evaluation_seconds=point_evaluation_seconds,
             pair_update_seconds=pair_update_seconds,
         )
+        abandoned = _NO_ABANDONED_ATTEMPT
         records.append(record)
         if observer is not None:
             observer(record)
@@ -1040,6 +1290,9 @@ def run_projected_lbfgs(
         iterations=tuple(records),
         compile_seconds=compile_seconds,
         solve_seconds=solve_seconds,
+        projector_materializations=projector_materializations,
+        tangency_forced_refreshes=tangency_forced_refreshes,
+        line_search_forced_refreshes=line_search_forced_refreshes,
     )
 
 
@@ -1120,9 +1373,13 @@ def _collapsed_record(
     multiplier_norm: float,
     multiplier_forward_error_bound: float,
     trailing_objective_factor: float,
+    projector_age: int,
+    tangent_fraction: float,
+    newton_gate_skipped: bool,
     direction_seconds: float,
     line_search_seconds: float,
     retraction_seconds: float,
+    point_evaluation_seconds: float,
 ) -> ProjectedLbfgsIteration:
     """Record the iteration whose line search found no acceptable step.
 
@@ -1139,6 +1396,11 @@ def _collapsed_record(
         gradient_norm=float(point.gradient_norm),
         feasibility_inf=float(point.feasibility_inf),
         tangency_relative_residual=float(point.tangency_relative_residual),
+        true_tangency_relative_residual=float(point.true_tangency_relative_residual),
+        projector_age=projector_age,
+        projector_refreshed=projector_age == 0,
+        tangent_gradient_fraction=tangent_fraction,
+        newton_gate_skipped=newton_gate_skipped,
         gram_reciprocal_condition=float(point.gram_reciprocal_condition),
         direction_norm=direction_norm,
         directional_derivative=directional_derivative,
@@ -1172,7 +1434,7 @@ def _collapsed_record(
         direction_seconds=direction_seconds,
         line_search_seconds=line_search_seconds,
         retraction_seconds=retraction_seconds,
-        point_evaluation_seconds=0.0,
+        point_evaluation_seconds=point_evaluation_seconds,
         pair_update_seconds=0.0,
     )
 
@@ -1208,6 +1470,19 @@ def _validate_options(options: ProjectedLbfgsOptions) -> None:
         raise ValueError("hybrid_plateau_factor must lie inside (0, 1]")
     if options.hybrid_plateau_window > 0 and not options.lagrangian_newton:
         raise ValueError("hybrid_plateau_window requires lagrangian_newton")
+    if options.projector_refresh_period < 1:
+        raise ValueError("projector_refresh_period must be positive")
+    if (
+        not math.isfinite(options.projector_tangency_tolerance)
+        or options.projector_tangency_tolerance < 0.0
+    ):
+        raise ValueError("projector_tangency_tolerance must be finite and nonnegative")
+    if not 0.0 <= options.newton_tangent_fraction_threshold < 1.0:
+        raise ValueError("newton_tangent_fraction_threshold must lie inside [0, 1)")
+    if options.newton_tangent_fraction_threshold > 0.0 and not (
+        options.lagrangian_newton
+    ):
+        raise ValueError("newton_tangent_fraction_threshold requires lagrangian_newton")
     selected = sum(
         (options.gauss_newton, options.dense_curvature, options.lagrangian_newton)
     )
@@ -1225,6 +1500,7 @@ __all__ = (
     "ProjectedLbfgsStatus",
     "ProjectedPoint",
     "evaluate_projected_point",
+    "evaluate_projected_point_with_projector",
     "retract_to_manifold",
     "retract_with_frozen_projector",
     "run_projected_lbfgs",

@@ -13,6 +13,7 @@ from simsopt_jax.geo.optimizers.projected_lbfgs import (
     ProjectedLbfgsOptions,
     ProjectedLbfgsStatus,
     evaluate_projected_point,
+    evaluate_projected_point_with_projector,
     retract_to_manifold,
     retract_with_frozen_projector,
     run_projected_lbfgs,
@@ -564,3 +565,171 @@ def test_direction_models_are_mutually_exclusive() -> None:
     except ValueError:
         return
     raise AssertionError("two direction models were accepted at once")
+
+
+def test_carried_projector_evaluation_matches_the_fresh_one_at_its_own_point() -> None:
+    """At the point its rows came from, the carried form must be the fresh one.
+
+    The two paths reach the objective, the constraints and the gradient through
+    different derivative programs -- a batched VJP over 1 + m outputs versus one
+    scalar reverse pass -- so their agreement is what says the cheap path is the
+    same evaluation and not an approximation of it.
+    """
+
+    coordinates = _feasible_start()
+    fresh = evaluate_projected_point(_sphere_problem, coordinates)
+    carried = evaluate_projected_point_with_projector(
+        _sphere_problem, fresh.projector, coordinates
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(carried.gradient), np.asarray(fresh.gradient), rtol=0.0, atol=1e-14
+    )
+    np.testing.assert_allclose(
+        np.asarray(carried.projected_gradient),
+        np.asarray(fresh.projected_gradient),
+        rtol=0.0,
+        atol=1e-14,
+    )
+    assert float(carried.objective) == float(fresh.objective)
+    assert float(carried.feasibility_inf) == float(fresh.feasibility_inf)
+    # The rows ARE this point's, so the measured true tangency has to agree
+    # with the projector's own certificate rather than merely be small.
+    assert float(carried.true_tangency_relative_residual) <= 1.0e-10
+    assert bool(carried.all_finite)
+
+
+def test_carried_projector_reports_the_drift_it_accumulates() -> None:
+    """The measurement must react to distance, or it cannot gate the carry."""
+
+    near = _feasible_start()
+    projector = evaluate_projected_point(_sphere_problem, near).projector
+    far = retract_to_manifold(
+        _sphere_problem,
+        near + jnp.asarray([0.2, -0.15, 0.1, 0.0, 0.0], dtype=jnp.float64),
+        feasibility_tolerance=1.0e-12,
+        maximum_corrections=8,
+    ).coordinates
+
+    here = evaluate_projected_point_with_projector(_sphere_problem, projector, near)
+    there = evaluate_projected_point_with_projector(_sphere_problem, projector, far)
+
+    assert float(there.true_tangency_relative_residual) > 1.0e-3
+    assert float(there.true_tangency_relative_residual) > 1.0e6 * float(
+        here.true_tangency_relative_residual
+    )
+    # The carried projector never touches the constraint values, so the point
+    # it reports is still exactly on the manifold.
+    assert float(there.feasibility_inf) <= 1.0e-12
+
+
+def test_refresh_period_reaches_the_same_minimum_with_fewer_materializations() -> None:
+    period = 4
+    budget = 30
+    carried = run_projected_lbfgs(
+        _sphere_problem,
+        _feasible_start(),
+        options=ProjectedLbfgsOptions(
+            maximum_iterations=budget,
+            feasibility_tolerance=1.0e-12,
+            frozen_projector_line_search=True,
+            projector_refresh_period=period,
+        ),
+    )
+
+    assert carried.projector_materializations <= len(carried.iterations)
+    assert abs(float(carried.objective) - _SPHERE_MINIMUM) <= 1.0e-6
+    # Feasibility is judged against the TRUE constraints whatever the rows are.
+    for iteration in carried.iterations:
+        assert iteration.feasibility_inf <= 1.0e-12
+        assert 0 <= iteration.projector_age < period
+    assert any(iteration.projector_age > 0 for iteration in carried.iterations)
+
+
+def test_tangency_tolerance_forces_the_carry_to_end() -> None:
+    """A tolerance no drift can clear must materialize at every point."""
+
+    run = run_projected_lbfgs(
+        _sphere_problem,
+        _feasible_start(),
+        options=ProjectedLbfgsOptions(
+            maximum_iterations=8,
+            feasibility_tolerance=1.0e-12,
+            frozen_projector_line_search=True,
+            projector_refresh_period=8,
+            projector_tangency_tolerance=1.0e-300,
+        ),
+    )
+
+    assert run.tangency_forced_refreshes == len(run.iterations)
+    assert all(iteration.projector_age == 0 for iteration in run.iterations)
+    assert all(iteration.projector_refreshed for iteration in run.iterations)
+
+
+def test_tangent_fraction_gate_skips_the_newton_solve() -> None:
+    """Below the threshold no curvature solve may be spent at all."""
+
+    run = run_projected_lbfgs(
+        _sphere_problem,
+        _near_minimizer_start(),
+        options=ProjectedLbfgsOptions(
+            maximum_iterations=6,
+            lagrangian_newton=True,
+            newton_tangent_fraction_threshold=0.999,
+        ),
+    )
+
+    assert all(iteration.newton_gate_skipped for iteration in run.iterations)
+    assert all(iteration.newton_cg_iterations == 0 for iteration in run.iterations)
+    assert not any(iteration.lagrangian_newton_used for iteration in run.iterations)
+    objectives = [iteration.objective for iteration in run.iterations]
+    assert objectives == sorted(objectives, reverse=True)
+    for iteration in run.iterations:
+        assert 0.0 <= iteration.tangent_gradient_fraction <= 1.0 + 1.0e-12
+
+
+def test_a_gate_that_admits_everything_leaves_the_newton_arm_alone() -> None:
+    budget = 6
+    ungated = run_projected_lbfgs(
+        _sphere_problem,
+        _near_minimizer_start(),
+        options=ProjectedLbfgsOptions(
+            maximum_iterations=budget, lagrangian_newton=True
+        ),
+    )
+    gated = run_projected_lbfgs(
+        _sphere_problem,
+        _near_minimizer_start(),
+        options=ProjectedLbfgsOptions(
+            maximum_iterations=budget,
+            lagrangian_newton=True,
+            newton_tangent_fraction_threshold=1.0e-12,
+        ),
+    )
+
+    assert not any(iteration.newton_gate_skipped for iteration in gated.iterations)
+    assert float(gated.objective) == float(ungated.objective)
+
+
+def test_newton_gate_requires_the_newton_arm() -> None:
+    try:
+        run_projected_lbfgs(
+            _sphere_problem,
+            _feasible_start(),
+            options=ProjectedLbfgsOptions(newton_tangent_fraction_threshold=0.3),
+        )
+    except ValueError:
+        return
+    raise AssertionError("the tangent-fraction gate was accepted without Newton")
+
+
+def test_refresh_period_must_be_positive() -> None:
+    try:
+        run_projected_lbfgs(
+            _sphere_problem,
+            _feasible_start(),
+            options=ProjectedLbfgsOptions(projector_refresh_period=0),
+        )
+    except ValueError:
+        return
+    raise AssertionError("a nonpositive refresh period was accepted")
