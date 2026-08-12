@@ -38,6 +38,7 @@ class HostTransferSummary:
     """Aggregated device-to-host materializations for one execution phase."""
 
     phase: str
+    evaluation_id: str | None
     calls: int
     leaves: int
     bytes: int
@@ -52,32 +53,43 @@ class HostTransferAudit:
     ``ContextVar`` ownership keeps concurrent solver calls independent.
     """
 
-    _events: list[tuple[str, int, int]] = field(default_factory=list)
-    _phases: list[str] = field(default_factory=list)
+    _events: list[tuple[str, str | None, int, int]] = field(default_factory=list)
+    _phases: list[tuple[str, str | None]] = field(default_factory=list)
 
-    def register_phase(self, phase: str) -> None:
-        if phase not in self._phases:
-            self._phases.append(phase)
+    def register_phase(self, phase: str, evaluation_id: str | None) -> None:
+        key = (phase, evaluation_id)
+        if key not in self._phases:
+            self._phases.append(key)
 
-    def record(self, phase: str, *, leaves: int, bytes: int) -> None:
+    def record(
+        self,
+        phase: str,
+        *,
+        evaluation_id: str | None,
+        leaves: int,
+        bytes: int,
+    ) -> None:
         if leaves > 0:
-            self._events.append((phase, leaves, bytes))
+            self._events.append((phase, evaluation_id, leaves, bytes))
 
     def summary(self) -> tuple[HostTransferSummary, ...]:
-        aggregates: dict[str, list[int]] = {phase: [0, 0, 0] for phase in self._phases}
-        for phase, leaves, bytes in self._events:
-            aggregate = aggregates.setdefault(phase, [0, 0, 0])
+        aggregates: dict[tuple[str, str | None], list[int]] = {
+            key: [0, 0, 0] for key in self._phases
+        }
+        for phase, evaluation_id, leaves, bytes in self._events:
+            aggregate = aggregates.setdefault((phase, evaluation_id), [0, 0, 0])
             aggregate[0] += 1
             aggregate[1] += leaves
             aggregate[2] += bytes
         return tuple(
             HostTransferSummary(
                 phase=phase,
+                evaluation_id=evaluation_id,
                 calls=values[0],
                 leaves=values[1],
                 bytes=values[2],
             )
-            for phase, values in aggregates.items()
+            for (phase, evaluation_id), values in aggregates.items()
         )
 
 
@@ -88,6 +100,10 @@ _ACTIVE_TRANSFER_AUDIT: ContextVar[HostTransferAudit | None] = ContextVar(
 _ACTIVE_TRANSFER_PHASE: ContextVar[str] = ContextVar(
     "simsopt_jax_active_host_transfer_phase",
     default="unclassified",
+)
+_ACTIVE_TRANSFER_EVALUATION_ID: ContextVar[str | None] = ContextVar(
+    "simsopt_jax_active_host_transfer_evaluation_id",
+    default=None,
 )
 
 
@@ -112,12 +128,23 @@ def host_transfer_phase(phase: str) -> Iterator[None]:
     if audit is None:
         yield
         return
-    audit.register_phase(normalized_phase)
+    audit.register_phase(normalized_phase, _ACTIVE_TRANSFER_EVALUATION_ID.get())
     token = _ACTIVE_TRANSFER_PHASE.set(normalized_phase)
     try:
         yield
     finally:
         _ACTIVE_TRANSFER_PHASE.reset(token)
+
+
+@contextmanager
+def host_transfer_evaluation(evaluation_id: str) -> Iterator[None]:
+    """Correlate transfer accounting with one objective evaluation."""
+
+    token = _ACTIVE_TRANSFER_EVALUATION_ID.set(str(evaluation_id))
+    try:
+        yield
+    finally:
+        _ACTIVE_TRANSFER_EVALUATION_ID.reset(token)
 
 
 def _record_host_transfer(value: object) -> None:
@@ -135,6 +162,7 @@ def _record_host_transfer(value: object) -> None:
         )
     audit.record(
         _ACTIVE_TRANSFER_PHASE.get(),
+        evaluation_id=_ACTIVE_TRANSFER_EVALUATION_ID.get(),
         leaves=leaves,
         bytes=total_bytes,
     )

@@ -14,9 +14,9 @@ from simsopt_jax.backend.runtime import (
     get_resolved_precision,
     get_runtime_jax_device,
 )
+from simsopt_jax.runtime.execution_scale import ExecutionScale
 from simsopt_jax.solve.driver import Driver
 
-ExecutionScale = Literal["bounded", "native_default"]
 EXECUTION_SCALES: Final = ("bounded", "native_default")
 
 
