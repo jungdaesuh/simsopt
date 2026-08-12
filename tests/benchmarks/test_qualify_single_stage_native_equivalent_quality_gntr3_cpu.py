@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import copy
 import hashlib
 import multiprocessing
@@ -180,7 +181,6 @@ def _small_execution_authority(
             sha256=hashlib.sha256(plan_payload).hexdigest(),
         )
     )
-    monkeypatch.setattr(qualifier, "_EXECUTION_SOURCE_ENTRY_COUNT", len(payloads))
     monkeypatch.setattr(
         qualifier,
         "_validate_execution_source_membership",
@@ -652,7 +652,6 @@ def test_execution_source_authority_parser_is_strict_and_canonical(
 ) -> None:
     entries = {"src/pkg/module.py": b"VALUE = 1\n"}
     payload = _execution_manifest(entries)
-    monkeypatch.setattr(qualifier, "_EXECUTION_SOURCE_ENTRY_COUNT", 1)
 
     parsed, entries_sha256 = qualifier._parse_execution_source_authority(payload)
 
@@ -711,6 +710,7 @@ def test_live_python_membership_revalidates_addition_and_removal(
     authority_payload = (
         b"DIAG5_QUALIFIED_FILE_PATHS: Final = frozenset(())\n"
         b"DIAG5_FROZEN_NUMERICAL_PATHS: Final = frozenset(())\n"
+        b"DIAG5_EXECUTION_SOURCE_ENTRY_COUNT: Final = 3\n"
     )
     monkeypatch.setattr(
         qualifier,
@@ -1880,3 +1880,48 @@ def test_real_telemetry_seam_emits_all_twenty_four_envelopes_and_outer_solves() 
     mutated["steihaug_solve_calls"]["values"][0] = 0
     with pytest.raises(ValueError, match="envelope hash differs"):
         receipt_module.validate_safeguard_telemetry_payload(mutated)
+
+
+def test_direct_bootstrap_phase_is_self_contained_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """Run the exact pre-exec bootstrap chain in bootstrap name-binding order.
+
+    Regression for the spent 20260812T022000Z root: names bound only after the
+    __main__ bootstrap guard (the worker re-exec imports) must never be
+    reachable from the bootstrap phase. The module source is executed only up
+    to the guard statement, then the complete pre-exec chain — publication
+    claim, authority load, source copy, binding validation, and descriptor
+    payload — runs against the live repository with a throwaway staging
+    namespace. Fails with NameError against the pre-fix module.
+    """
+    source_path = Path(qualifier.__file__).resolve()
+    source = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(source_path))
+    guard_line = next(
+        node.lineno
+        for node in tree.body
+        if isinstance(node, ast.If) and "__main__" in ast.dump(node.test)
+    )
+    truncated = "".join(source.splitlines(keepends=True)[: guard_line - 1])
+    namespace: dict[str, object] = {
+        "__name__": "qualifier_bootstrap_probe",
+        "__file__": str(source_path),
+    }
+    exec(compile(truncated, str(source_path), "exec"), namespace)
+    repository = source_path.parents[1]
+    publication = namespace["_prepare_publication"](tmp_path / "probe-root")
+    copied = None
+    try:
+        authority = namespace["_load_execution_source_authority"](repository)
+        copied = namespace["_bootstrap_copy_execution_source"](
+            authority,
+            publication.staging_root,
+        )
+        namespace["_validate_publication_binding"](publication, published=False)
+        copied.validate(copied_required=True)
+        assert namespace["_execution_source_descriptor_payload"](copied)
+    finally:
+        if copied is not None:
+            copied.close()
+        namespace["_close_publication"](publication)

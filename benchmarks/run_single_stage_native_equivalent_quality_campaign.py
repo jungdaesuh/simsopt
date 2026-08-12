@@ -84,7 +84,7 @@ _DIAG5_BOOTSTRAP_AUTHORITY_RELATIVE_PATH: Final = (
 )
 _DIAG5_BOOTSTRAP_CPU_ROOT: Final = Path(
     "/home/jungdaesuh/simsopt-campaigns/"
-    "neq-gntr3-diag5-cpu-qualification-20260812T022000Z"
+    "neq-gntr3-diag5-cpu-qualification-20260812T071500Z"
 )
 _DIAG5_BOOTSTRAP_GPU_ROOT: Final = Path(
     "/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-rtx5090-20260812T030000Z"

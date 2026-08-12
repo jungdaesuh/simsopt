@@ -35,12 +35,16 @@ EXECUTION_SOURCE_AUTHORITY_SCHEMA_VERSION: Final = (
     "single-stage-neq-gntr3-execution-source-authority-v1"
 )
 PREQUALIFICATION_PLAN_SNAPSHOT_RELATIVE_PATH: Final = "control/prequalification-plan.md"
+_PREQUALIFICATION_PLAN_SOURCE_RELATIVE_PATH: Final = (
+    "docs/single_stage_jax_gpu_native_equivalent_quality_"
+    "diag5_native_binding_recovery_plan.md"
+)
 _EXECUTION_SOURCE_DESCRIPTOR_ENVIRONMENT: Final = (
     "SIMSOPT_GNTR3_CPU_EXECUTION_SOURCE_DESCRIPTORS_V1"
 )
 _EXPECTED_OUTPUT_ROOT_TEXT: Final = (
     "/home/jungdaesuh/simsopt-campaigns/"
-    "neq-gntr3-diag5-cpu-qualification-20260812T022000Z"
+    "neq-gntr3-diag5-cpu-qualification-20260812T071500Z"
 )
 _REQUIRED_ENVIRONMENT: Final = {
     "JAX_PLATFORMS": "cpu",
@@ -802,7 +806,7 @@ def _parse_execution_source_authority(
             )
         entries.append(ExecutionSourceEntry(relative, sha256, size_bytes))
     entries.sort(key=lambda entry: entry.relative_path)
-    if len(entries) != _EXECUTION_SOURCE_ENTRY_COUNT or any(
+    if any(
         entry.relative_path == _PREQUALIFICATION_PLAN_SOURCE_RELATIVE_PATH
         for entry in entries
     ):
@@ -863,9 +867,19 @@ def _validate_execution_source_membership(
         selected.update(value)
     selected.discard(EXECUTION_SOURCE_AUTHORITY_RELATIVE_PATH)
     selected.discard(_PREQUALIFICATION_PLAN_SOURCE_RELATIVE_PATH)
+    expected_entry_count = _bootstrap_constant(
+        authority_tree,
+        "DIAG5_EXECUTION_SOURCE_ENTRY_COUNT",
+    )
+    if type(expected_entry_count) is not int or expected_entry_count <= 0:
+        raise QualificationError(
+            "execution-source membership constant differs: "
+            "DIAG5_EXECUTION_SOURCE_ENTRY_COUNT"
+        )
     if (
         counts != dict(_BROAD_EXECUTION_SOURCE_COUNTS)
         or "src/simsopt/_version.py" not in selected
+        or len(entries) != expected_entry_count
         or selected != {entry.relative_path for entry in entries}
     ):
         raise QualificationError("execution-source exact membership differs")
@@ -1661,9 +1675,6 @@ from benchmarks.single_stage_native_equivalent_quality_successor_authority impor
     validate_diag5_predecessor_postmortem_artifact,
 )
 from benchmarks.single_stage_native_equivalent_quality_successor_authority import (
-    DIAG5_EXECUTION_SOURCE_ENTRY_COUNT as _EXECUTION_SOURCE_ENTRY_COUNT,
-)
-from benchmarks.single_stage_native_equivalent_quality_successor_authority import (
     DIAG5_PREDECESSOR_POSTMORTEM_ARTIFACT_RELATIVE_PATH as PREDECESSOR_POSTMORTEM_ARTIFACT_RELATIVE_PATH,
 )
 from benchmarks.single_stage_native_equivalent_quality_successor_authority import (
@@ -1680,7 +1691,10 @@ from benchmarks.single_stage_native_equivalent_reference import (
     validate_native_equivalent_reference,
 )
 
-_PREQUALIFICATION_PLAN_SOURCE_RELATIVE_PATH: Final = DIAG5_PLAN_RELATIVE_PATH
+if _PREQUALIFICATION_PLAN_SOURCE_RELATIVE_PATH != DIAG5_PLAN_RELATIVE_PATH:
+    raise QualificationError(
+        "prequalification plan source path differs from authority"
+    )
 from benchmarks.single_stage_native_equivalent_reference import (
     load_canonical_json_bytes as load_reference_json_bytes,
 )
@@ -1693,7 +1707,7 @@ MANIFEST_SCHEMA_VERSION: Final = (
 )
 EXPECTED_OUTPUT_ROOT: Final = Path(
     "/home/jungdaesuh/simsopt-campaigns/"
-    "neq-gntr3-diag5-cpu-qualification-20260812T022000Z"
+    "neq-gntr3-diag5-cpu-qualification-20260812T071500Z"
 )
 RETAINED_DIAG3_ROOT: Final = Path(
     "/home/jungdaesuh/simsopt-campaigns/"

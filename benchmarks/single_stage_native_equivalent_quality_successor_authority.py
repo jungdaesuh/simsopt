@@ -395,7 +395,7 @@ DIAG5_CONSUMPTION_SCHEMA_VERSION: Final = (
 )
 DIAG5_CPU_QUALIFICATION_ROOT: Final = Path(
     "/home/jungdaesuh/simsopt-campaigns/"
-    "neq-gntr3-diag5-cpu-qualification-20260812T022000Z"
+    "neq-gntr3-diag5-cpu-qualification-20260812T071500Z"
 )
 DIAG5_GPU_OUTPUT_ROOT: Final = Path(
     "/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-rtx5090-20260812T030000Z"
@@ -409,7 +409,7 @@ DIAG5_PHYSICAL_FAILURE_PATH: Final = DIAG5_GPU_OUTPUT_ROOT.parent / (
     f".{DIAG5_GPU_OUTPUT_ROOT.name}.diag5-physical-publication-failure.json"
 )
 DIAG5_REVIEW_ROOT: Final = Path(
-    "/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-reviews-20260812T022000Z"
+    "/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-reviews-20260812T071500Z"
 )
 DIAG5_NATIVE_REFERENCE_ROOT: Final = Path(
     "/home/jungdaesuh/simsopt-campaigns/neq-gntr1-diag3-cb0-20260811T150010Z.partial-56a1ec6d730cc005db84f99e9965b868/native-reference"

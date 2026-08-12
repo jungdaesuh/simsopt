@@ -173,7 +173,7 @@ The successor identities are:
 
 The fixed CPU qualification root is:
 
-`/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-cpu-qualification-20260812T022000Z`
+`/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-cpu-qualification-20260812T071500Z`
 
 The fixed GPU output root is:
 
@@ -390,7 +390,7 @@ where specified, and locks are revalidated at every frozen boundary.
 The sole CPU command is:
 
 ```text
-env JAX_PLATFORMS=cpu JAX_ENABLE_X64=true XLA_PYTHON_CLIENT_PREALLOCATE=false PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=src .venv-qn-cpu/bin/python benchmarks/qualify_single_stage_native_equivalent_quality_gntr3_cpu.py --output-root /home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-cpu-qualification-20260812T022000Z
+env JAX_PLATFORMS=cpu JAX_ENABLE_X64=true XLA_PYTHON_CLIENT_PREALLOCATE=false PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=src .venv-qn-cpu/bin/python benchmarks/qualify_single_stage_native_equivalent_quality_gntr3_cpu.py --output-root /home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-cpu-qualification-20260812T071500Z
 ```
 
 It produces only CPU schema
@@ -399,6 +399,29 @@ It produces only CPU schema
 `.partial-claim`, and every same-prefix sibling must be absent first. Exactly one
 invocation is permitted; any process start spends the root, and no failure,
 partial, timeout, or `NO_HIT` may be retried or replaced.
+
+The first CPU qualification root,
+`/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-cpu-qualification-20260812T022000Z`,
+was spent on 2026-08-12T06:43:42Z by an out-of-band bootstrap defect: the
+direct-bootstrap phase referenced module names bound only after the worker
+re-exec imports (`_EXECUTION_SOURCE_ENTRY_COUNT`,
+`_PREQUALIFICATION_PLAN_SOURCE_RELATIVE_PATH`), raising `NameError` after the
+staging claim and before any byte gate. The empty `.partial-claim`, the sealed
+stderr transcript
+`/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-terminal-bootstrap-nameerror-20260812T0643Z.txt`
+(SHA-256
+`e7a8a347f3bf388a2efdb345d4b345d889447907d2b3abb1611029546c361068`), and the
+retracted first pre-run review root
+`/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-reviews-20260812T022000Z`
+are immutable evidence and may never be reused, replaced, or deleted. This
+revision makes the bootstrap phase self-contained — the execution-entry count
+is parsed from the admitted authority bytes inside membership validation, and
+the plan source path is a pre-bootstrap literal cross-checked against the
+authority constant after re-exec — adds a full pre-exec bootstrap dry-run
+regression test, and reopens the tranche on the fresh `20260812T071500Z`
+namespaces frozen above. All schemas, numerics, thresholds, and gates are
+otherwise unchanged; the four pre-run `GO` reviews must be re-obtained against
+the recovered bytes.
 
 Before the one CPU qualification:
 
@@ -461,7 +484,7 @@ The postmortem must equal this array and hash, not merely accept four self-hashe
 rows. No physical DIAG4 qualification record or authority existed.
 
 New review records live beneath exact root
-`/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-reviews-20260812T022000Z`,
+`/home/jungdaesuh/simsopt-campaigns/neq-gntr3-diag5-reviews-20260812T071500Z`,
 which and all siblings sharing that basename must be absent before the first
 pre-run review publication. The eight exact files are `pre-run/<role>.json` and
 `post-run/<role>.json` for the
