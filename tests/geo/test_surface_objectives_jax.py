@@ -7086,18 +7086,24 @@ def test_traceable_objective_gradient_parts_use_strict_vjp_helpers(monkeypatch):
     solved_x = jax.device_put(np.asarray([1.0, 2.0], dtype=np.float64))
 
     with jax.transfer_guard("disallow"):
-        direct_grad, implicit_grad, total_grad, linear_solve_success, _trust = (
-            surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
-                object(),
-                lambda coil_dofs: coil_dofs,
-                coil_dofs=coil_dofs,
-                solved_x=solved_x,
-                solved_linear_solve_factors=(object(), object(), object()),
-                linearization_kind="hessian",
-                linear_solve_tol=1.0e-10,
-                linear_solve_stab=0.0,
-                objective_kwargs={},
-            )
+        (
+            direct_grad,
+            implicit_grad,
+            total_grad,
+            linear_solve_success,
+            _trust,
+            _execution_counts,
+            _adjoint_evidence,
+        ) = surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
+            object(),
+            lambda coil_dofs: coil_dofs,
+            coil_dofs=coil_dofs,
+            solved_x=solved_x,
+            solved_linear_solve_factors=(object(), object(), object()),
+            linearization_kind="hessian",
+            linear_solve_tol=1.0e-10,
+            linear_solve_stab=0.0,
+            objective_kwargs={},
         )
 
     np.testing.assert_allclose(direct_grad, np.asarray([4.0, 6.0], dtype=np.float64))
@@ -7108,6 +7114,81 @@ def test_traceable_objective_gradient_parts_use_strict_vjp_helpers(monkeypatch):
     np.testing.assert_allclose(total_grad, np.asarray([1.0, 2.0], dtype=np.float64))
     assert bool(np.asarray(linear_solve_success))
     assert vjp_calls["count"] == 2
+
+
+def test_traceable_fused_total_gradient_isolates_rhs_from_coil_pullbacks(
+    monkeypatch,
+):
+    true_status = _mock_linear_solve_status(jnp.asarray(True, dtype=bool))
+
+    def scalar_objective_fn(
+        x_inner,
+        current_coil_dofs,
+        _coil_set_spec,
+        *,
+        objective_kwargs,
+    ):
+        del _coil_set_spec, objective_kwargs
+        return jnp.dot(x_inner[:2], current_coil_dofs) + 0.5 * jnp.dot(
+            current_coil_dofs,
+            current_coil_dofs,
+        )
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_solve_linearization",
+        lambda _booz_jax, solved_x, rhs, coil_set_spec, objective_kwargs, **_kwargs: (
+            rhs,
+            true_status,
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_inner_objective_kwargs",
+        lambda _objective_kwargs: {},
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_directional_inner_stationarity",
+        lambda _solved_x, tangent, coil_set_spec, **_kwargs: jnp.dot(
+            tangent[:2],
+            coil_set_spec,
+        ),
+    )
+
+    original_vjp = surfaceobjectives_jax_module.jax.vjp
+    primal_shapes = []
+
+    def recording_vjp(fun, *primals, **kwargs):
+        primal_shapes.append(tuple(np.shape(primal) for primal in primals))
+        return original_vjp(fun, *primals, **kwargs)
+
+    monkeypatch.setattr(surfaceobjectives_jax_module.jax, "vjp", recording_vjp)
+
+    solved_x = jnp.asarray([1.0, 2.0, -3.0], dtype=jnp.float64)
+    coil_dofs = jnp.asarray([3.0, 4.0], dtype=jnp.float64)
+    total_grad, success, _trust, execution_counts, _adjoint_evidence = (
+        surfaceobjectives_traceable_jax_module._traceable_fused_total_gradient_canary(
+            object(),
+            lambda current_coil_dofs: current_coil_dofs,
+            coil_dofs=coil_dofs,
+            solved_x=solved_x,
+            solved_linear_solve_factors=None,
+            linearization_kind="hessian",
+            linear_solve_tol=1.0e-10,
+            linear_solve_stab=0.0,
+            objective_kwargs={},
+            scalar_objective_fn=scalar_objective_fn,
+        )
+    )
+
+    np.testing.assert_allclose(np.asarray(total_grad), np.asarray([1.0, 2.0]))
+    assert bool(np.asarray(success))
+    assert int(np.asarray(execution_counts.adjoint_execution_count)) == 1
+    # lax.cond traces the mutually exclusive zero-RHS direct branch and the
+    # nonzero fused branch. Neither branch recreates the split path's joint
+    # objective VJP over (x_inner, coil_dofs).
+    assert primal_shapes == [((3,),), ((2,),), ((2,),)]
 
 
 def test_traceable_exact_objective_gradient_uses_exact_residual_equation(
@@ -7149,8 +7230,33 @@ def test_traceable_exact_objective_gradient_uses_exact_residual_equation(
 
     coil_dofs = jnp.asarray([3.0, 4.0], dtype=jnp.float64)
     solved_x = jnp.asarray([1.0, 2.0], dtype=jnp.float64)
-    direct_grad, implicit_grad, total_grad, success, _trust = (
-        surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
+    (
+        direct_grad,
+        implicit_grad,
+        total_grad,
+        success,
+        _trust,
+        _execution_counts,
+        _adjoint_evidence,
+    ) = surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
+        object(),
+        lambda current_coil_dofs: current_coil_dofs,
+        coil_dofs=coil_dofs,
+        solved_x=solved_x,
+        solved_linear_solve_factors=None,
+        linearization_kind="exact_jacobian",
+        linear_solve_tol=1.0e-10,
+        linear_solve_stab=0.0,
+        objective_kwargs=objective_kwargs,
+    )
+
+    np.testing.assert_allclose(direct_grad, solved_x)
+    np.testing.assert_allclose(implicit_grad, coil_dofs)
+    np.testing.assert_allclose(total_grad, solved_x - coil_dofs)
+    assert bool(np.asarray(success))
+
+    fused_total_grad, fused_success, _trust, execution_counts, _evidence = (
+        surfaceobjectives_traceable_jax_module._traceable_fused_total_gradient_canary(
             object(),
             lambda current_coil_dofs: current_coil_dofs,
             coil_dofs=coil_dofs,
@@ -7163,10 +7269,9 @@ def test_traceable_exact_objective_gradient_uses_exact_residual_equation(
         )
     )
 
-    np.testing.assert_allclose(direct_grad, solved_x)
-    np.testing.assert_allclose(implicit_grad, coil_dofs)
-    np.testing.assert_allclose(total_grad, solved_x - coil_dofs)
-    assert bool(np.asarray(success))
+    np.testing.assert_allclose(fused_total_grad, solved_x - coil_dofs)
+    assert bool(np.asarray(fused_success))
+    assert int(np.asarray(execution_counts.adjoint_execution_count)) == 1
 
 
 def test_traceable_objective_gradient_parts_skips_direct_vjp_for_iota_term(
@@ -7219,19 +7324,25 @@ def test_traceable_objective_gradient_parts_skips_direct_vjp_for_iota_term(
     solved_x = jax.device_put(np.asarray([1.0, 2.0], dtype=np.float64))
 
     with jax.transfer_guard("disallow"):
-        direct_grad, implicit_grad, total_grad, linear_solve_success, _trust = (
-            surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
-                object(),
-                lambda coil_dofs: coil_dofs,
-                coil_dofs=coil_dofs,
-                solved_x=solved_x,
-                solved_linear_solve_factors=(object(), object(), object()),
-                linearization_kind="hessian",
-                linear_solve_tol=1.0e-10,
-                linear_solve_stab=0.0,
-                objective_kwargs={},
-                term_name="iota",
-            )
+        (
+            direct_grad,
+            implicit_grad,
+            total_grad,
+            linear_solve_success,
+            _trust,
+            _execution_counts,
+            _adjoint_evidence,
+        ) = surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
+            object(),
+            lambda coil_dofs: coil_dofs,
+            coil_dofs=coil_dofs,
+            solved_x=solved_x,
+            solved_linear_solve_factors=(object(), object(), object()),
+            linearization_kind="hessian",
+            linear_solve_tol=1.0e-10,
+            linear_solve_stab=0.0,
+            objective_kwargs={},
+            term_name="iota",
         )
 
     np.testing.assert_allclose(direct_grad, np.zeros(2, dtype=np.float64))
@@ -7434,19 +7545,25 @@ def test_traceable_objective_gradient_parts_term_diagnostics_use_strict_vjp_dire
     solved_x = jax.device_put(np.asarray([1.0, 2.0], dtype=np.float64))
 
     with jax.transfer_guard("disallow"):
-        direct_grad, implicit_grad, total_grad, linear_solve_success, _trust = (
-            surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
-                object(),
-                lambda coil_dofs: coil_dofs,
-                coil_dofs=coil_dofs,
-                solved_x=solved_x,
-                solved_linear_solve_factors=(object(), object(), object()),
-                linearization_kind="hessian",
-                linear_solve_tol=1.0e-10,
-                linear_solve_stab=0.0,
-                objective_kwargs={},
-                term_name="length",
-            )
+        (
+            direct_grad,
+            implicit_grad,
+            total_grad,
+            linear_solve_success,
+            _trust,
+            _execution_counts,
+            _adjoint_evidence,
+        ) = surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
+            object(),
+            lambda coil_dofs: coil_dofs,
+            coil_dofs=coil_dofs,
+            solved_x=solved_x,
+            solved_linear_solve_factors=(object(), object(), object()),
+            linearization_kind="hessian",
+            linear_solve_tol=1.0e-10,
+            linear_solve_stab=0.0,
+            objective_kwargs={},
+            term_name="length",
         )
 
     np.testing.assert_allclose(direct_grad, np.asarray([3.0, 4.0], dtype=np.float64))
@@ -7493,19 +7610,25 @@ def test_traceable_objective_gradient_parts_skip_all_autodiff_for_zero_weight_te
     objective_kwargs = {"outer_objective_config": {"non_qs_weight": 0.0}}
 
     with jax.transfer_guard("disallow"):
-        direct_grad, implicit_grad, total_grad, linear_solve_success, _trust = (
-            surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
-                object(),
-                lambda current_coil_dofs: current_coil_dofs,
-                coil_dofs=coil_dofs,
-                solved_x=solved_x,
-                solved_linear_solve_factors=(object(), object(), object()),
-                linearization_kind="hessian",
-                linear_solve_tol=1.0e-10,
-                linear_solve_stab=0.0,
-                objective_kwargs=objective_kwargs,
-                term_name="non_qs",
-            )
+        (
+            direct_grad,
+            implicit_grad,
+            total_grad,
+            linear_solve_success,
+            _trust,
+            _execution_counts,
+            _adjoint_evidence,
+        ) = surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
+            object(),
+            lambda current_coil_dofs: current_coil_dofs,
+            coil_dofs=coil_dofs,
+            solved_x=solved_x,
+            solved_linear_solve_factors=(object(), object(), object()),
+            linearization_kind="hessian",
+            linear_solve_tol=1.0e-10,
+            linear_solve_stab=0.0,
+            objective_kwargs=objective_kwargs,
+            term_name="non_qs",
         )
 
     np.testing.assert_allclose(direct_grad, np.zeros(2, dtype=np.float64))
@@ -7581,18 +7704,24 @@ def test_traceable_total_gradient_skips_direct_vjp_when_active_weights_are_inner
     }
 
     with jax.transfer_guard("disallow"):
-        direct_grad, implicit_grad, total_grad, linear_solve_success, _trust = (
-            surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
-                object(),
-                lambda current_coil_dofs: current_coil_dofs,
-                coil_dofs=coil_dofs,
-                solved_x=solved_x,
-                solved_linear_solve_factors=(object(), object(), object()),
-                linearization_kind="hessian",
-                linear_solve_tol=1.0e-10,
-                linear_solve_stab=0.0,
-                objective_kwargs=objective_kwargs,
-            )
+        (
+            direct_grad,
+            implicit_grad,
+            total_grad,
+            linear_solve_success,
+            _trust,
+            _execution_counts,
+            _adjoint_evidence,
+        ) = surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
+            object(),
+            lambda current_coil_dofs: current_coil_dofs,
+            coil_dofs=coil_dofs,
+            solved_x=solved_x,
+            solved_linear_solve_factors=(object(), object(), object()),
+            linearization_kind="hessian",
+            linear_solve_tol=1.0e-10,
+            linear_solve_stab=0.0,
+            objective_kwargs=objective_kwargs,
         )
 
     np.testing.assert_allclose(direct_grad, np.zeros(2, dtype=np.float64))
@@ -7684,19 +7813,25 @@ def test_traceable_objective_gradient_parts_skips_direct_jvp_for_surface_vessel_
     solved_x = jax.device_put(np.asarray([1.0, 2.0], dtype=np.float64))
 
     with jax.transfer_guard("disallow"):
-        direct_grad, implicit_grad, total_grad, linear_solve_success, _trust = (
-            surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
-                object(),
-                lambda coil_dofs: coil_dofs,
-                coil_dofs=coil_dofs,
-                solved_x=solved_x,
-                solved_linear_solve_factors=(object(), object(), object()),
-                linearization_kind="hessian",
-                linear_solve_tol=1.0e-10,
-                linear_solve_stab=0.0,
-                objective_kwargs={},
-                term_name="surface_vessel",
-            )
+        (
+            direct_grad,
+            implicit_grad,
+            total_grad,
+            linear_solve_success,
+            _trust,
+            _execution_counts,
+            _adjoint_evidence,
+        ) = surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
+            object(),
+            lambda coil_dofs: coil_dofs,
+            coil_dofs=coil_dofs,
+            solved_x=solved_x,
+            solved_linear_solve_factors=(object(), object(), object()),
+            linearization_kind="hessian",
+            linear_solve_tol=1.0e-10,
+            linear_solve_stab=0.0,
+            objective_kwargs={},
+            term_name="surface_vessel",
         )
 
     np.testing.assert_allclose(direct_grad, np.zeros(2, dtype=np.float64))

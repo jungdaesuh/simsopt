@@ -130,6 +130,7 @@ from simsopt_jax.core.sharding import place_active_replicated
 from simsopt_jax.geo.boozer_residual import (
     _split_decision_vector_for_mode as _split_boozer_decision_vector_for_mode,
     _split_decision_vector_lax as _split_boozer_decision_vector_lax,
+    boozer_masked_residual,
     boozer_residual_scalar_and_grad_cpu_ordered,
     boozer_residual_scalar,
     boozer_residual_vector,
@@ -318,6 +319,15 @@ class _BoozerResultRecord(dict):
         return default
 
 
+@dataclass(frozen=True)
+class _TraceableExactNewtonBenchmarkRoute:
+    """Compiled array kernel plus its host-side reporting projection."""
+
+    variant: str
+    compiled_kernel: Callable[..., Mapping[str, jax.Array]]
+    project_result: Callable[[Mapping[str, jax.Array]], Mapping[str, object]]
+
+
 _BOOZER_SOLVER_RESULT_CORE_KEYS = frozenset(
     {"success", "G", "s", "iota", "weight_inv_modB", "type"}
 )
@@ -402,6 +412,32 @@ _BOOZER_EXACT_REPORTING_RESULT_KEYS = frozenset(
         "failure_stage",
         "message",
     }
+)
+_EXACT_NEWTON_OBSERVER_REPORTING_KEYS = (
+    "exact_newton_execution_observer_bearing",
+    "exact_newton_residual_evaluation_count",
+    "exact_newton_linear_operator_application_count",
+)
+_EXACT_NEWTON_VARIANT_TELEMETRY_KEYS = (
+    "exact_newton_variant_dense_linearization_used",
+    "exact_newton_variant_linear_solve_attempt_count",
+    "exact_newton_variant_dense_materialization_count",
+    "exact_newton_variant_lu_factorization_count",
+    "exact_newton_variant_lu_solve_count",
+    "exact_newton_variant_refinement_correction_count",
+    "exact_newton_variant_backtracking_iteration_count",
+    "exact_newton_variant_stalled",
+    "exact_newton_variant_retry_linear_solve_at_strict_cap",
+    "exact_newton_variant_applied_update_count",
+    "exact_newton_variant_stop_reason_code",
+    "exact_newton_variant_numerical_failure",
+    "exact_newton_variant_rollback_branch_taken",
+    "exact_newton_variant_rollback_recompute_count",
+    "exact_newton_variant_native_persist_predicate",
+    "exact_newton_variant_persist_solved_state",
+    "exact_newton_variant_initial_norm",
+    "exact_newton_variant_assessed_norm",
+    "exact_newton_variant_returned_norm",
 )
 _BOOZER_TRACEABLE_RESULT_KEYS = frozenset(
     {
@@ -2883,15 +2919,15 @@ def _boozer_exact_residual_impl(
     )
     B = B.reshape(nphi, ntheta, 3)
 
-    r_flat = boozer_residual_vector(
+    r_masked = boozer_masked_residual(
         G,
         iota,
         B,
         xphi,
         xtheta,
+        mask_indices,
         weight_inv_modB=weight_inv_modB,
     )
-    r_masked = r_flat[mask_indices]
 
     label_val, gamma_axis_z = _compute_label_and_axis_z(
         geometry=geometry,
@@ -3612,7 +3648,7 @@ def _traceable_lu_piv_or_dummy(matrix, *, finite):
 
 
 def _exact_newton_reporting_fields(result):
-    return {
+    fields = {
         "message": result.get("message"),
         "failure_category": result.get("failure_category"),
         "failure_stage": result.get("failure_stage"),
@@ -3621,6 +3657,16 @@ def _exact_newton_reporting_fields(result):
         "dense_jacobian_bytes": result.get("dense_jacobian_bytes"),
         "max_dense_jacobian_bytes": result.get("max_dense_jacobian_bytes"),
     }
+    observer_bearing = result.get("exact_newton_execution_observer_bearing")
+    if observer_bearing is not None:
+        fields.update(
+            {
+                key: result[key]
+                for key in _EXACT_NEWTON_OBSERVER_REPORTING_KEYS
+                if key in result
+            }
+        )
+    return fields
 
 
 def _ls_newton_reporting_fields(result):
@@ -6873,6 +6919,217 @@ class BoozerSurfaceJAX(Optimizable):
             when_rejected=run_canonical_pipeline,
         )
 
+    def _run_code_traceable_exact_array_kernel(
+        self,
+        certificate_coil_set_spec,
+        sdofs,
+        iota,
+        G,
+        *,
+        weight_inv_modB,
+        solver_contract: _optimizer_jax._TraceableExactNewtonVariantContract,
+    ):
+        """Return only array leaves for one preselected exact solver."""
+
+        G_exact = (
+            G
+            if G is not None
+            else compute_G_from_currents(
+                grouped_coil_currents_from_spec(certificate_coil_set_spec)
+            )
+        )
+        x0 = _concat_boozer_state(sdofs, iota, G_exact)
+        res_fn = self._get_traceable_exact_residual(weight_inv_modB)
+        result = solver_contract.solver(
+            res_fn,
+            x0,
+            maxiter=self.options["newton_maxiter"],
+            tol=self.options["newton_tol"],
+            args=(certificate_coil_set_spec,),
+        )
+        jacobian = result["jacobian"] if solver_contract.returns_jacobian else None
+        finite = jnp.all(jnp.isfinite(result["x"])) & jnp.all(
+            jnp.isfinite(result["residual"])
+        )
+        if solver_contract.returns_jacobian:
+            finite = finite & jnp.all(jnp.isfinite(jacobian))
+        sdofs_exact, iota_exact, G_exact = self._unpack_decision_vector_jax(
+            result["x"],
+            True,
+        )
+        half = _as_runtime_float64(0.5, reference=result["residual"])
+        primal_success = result["success"] & finite
+        array_result = {
+            "x": result["x"],
+            "sdofs": sdofs_exact,
+            "iota": iota_exact,
+            "G": G_exact,
+            "fun": half * jnp.mean(jnp.square(result["residual"])),
+            "nit": result["nit"],
+            "success": primal_success,
+            "residual": result["residual"],
+        }
+        if solver_contract.returns_jacobian:
+            array_result["jacobian"] = jacobian
+            array_result["exact_condition_estimate"] = (
+                _dense_condition_estimate_or_none(jacobian)
+            )
+        for key in (
+            "exact_newton_linear_residual_rel",
+            "exact_refinement_correction_rel",
+            *_EXACT_NEWTON_OBSERVER_REPORTING_KEYS,
+            *_EXACT_NEWTON_VARIANT_TELEMETRY_KEYS,
+        ):
+            if key in result and result[key] is not None:
+                array_result[key] = result[key]
+        return array_result
+
+    def _project_traceable_exact_array_result(
+        self,
+        array_result,
+        *,
+        weight_inv_modB,
+        solver_contract: _optimizer_jax._TraceableExactNewtonVariantContract,
+    ):
+        """Attach the Python reporting envelope outside the compiled kernel."""
+
+        jacobian = array_result.get("jacobian")
+        reporting_source = {
+            "message": None,
+            "failure_category": None,
+            "failure_stage": None,
+            "jacobian_materialized": solver_contract.returns_jacobian,
+            "dense_jacobian_shape": (
+                tuple(int(size) for size in jacobian.shape)
+                if solver_contract.returns_jacobian
+                else None
+            ),
+            "dense_jacobian_bytes": (
+                int(jacobian.size * jacobian.dtype.itemsize)
+                if solver_contract.returns_jacobian
+                else None
+            ),
+            "max_dense_jacobian_bytes": None,
+            **{
+                key: array_result[key]
+                for key in _EXACT_NEWTON_OBSERVER_REPORTING_KEYS
+                if key in array_result
+            },
+        }
+        return {
+            **_boozer_traceable_result_core(
+                array_result["x"],
+                array_result["sdofs"],
+                array_result["iota"],
+                array_result["G"],
+                array_result["fun"],
+                None,
+                None,
+                array_result["nit"],
+                array_result["success"],
+                "exact_jacobian",
+                False,
+                "exact",
+                weight_inv_modB,
+            ),
+            "residual": array_result["residual"],
+            "jacobian": jacobian,
+            **_exact_newton_reporting_fields(reporting_source),
+            **_none_solve_quality_fields(SOLVE_QUALITY_EXACT_FIELDS),
+            "exact_factorization_backend": solver_contract.factorization_backend,
+            "exact_condition_estimate": array_result.get("exact_condition_estimate"),
+            "exact_newton_linear_residual_rel": array_result.get(
+                "exact_newton_linear_residual_rel"
+            ),
+            "exact_refinement_correction_rel": array_result.get(
+                "exact_refinement_correction_rel"
+            ),
+            **{
+                key: array_result[key]
+                for key in _EXACT_NEWTON_VARIANT_TELEMETRY_KEYS
+                if key in array_result
+            },
+        }
+
+    def _run_code_traceable_exact_with_solver(
+        self,
+        certificate_coil_set_spec,
+        sdofs,
+        iota,
+        G,
+        *,
+        weight_inv_modB,
+        solver_contract: _optimizer_jax._TraceableExactNewtonVariantContract,
+    ):
+        """Run the array kernel and attach its non-JIT reporting envelope."""
+
+        array_result = self._run_code_traceable_exact_array_kernel(
+            certificate_coil_set_spec,
+            sdofs,
+            iota,
+            G,
+            weight_inv_modB=weight_inv_modB,
+            solver_contract=solver_contract,
+        )
+        return self._project_traceable_exact_array_result(
+            array_result,
+            weight_inv_modB=weight_inv_modB,
+            solver_contract=solver_contract,
+        )
+
+    def _make_run_code_traceable_exact_benchmark_variant(self, variant: object):
+        """Build a C1/C2 compiled array kernel and host reporting projection."""
+
+        if self.boozer_type != "exact":
+            raise ValueError(
+                "exact Newton benchmark variants require boozer_type='exact'."
+            )
+        solver_contract = _optimizer_jax._make_traceable_exact_newton_variant_contract(
+            variant
+        )
+        if solver_contract.variant == "C0":
+            raise ValueError("benchmark exact Newton variant must be C1 or C2.")
+
+        weight_inv_modB = self.options["weight_inv_modB"]
+
+        def array_kernel(
+            coil_source,
+            certificate_coil_source,
+            sdofs,
+            iota,
+            G,
+        ):
+            coil_set_spec = grouped_coil_set_spec_from_source(coil_source)
+            certificate_coil_set_spec = (
+                coil_set_spec
+                if certificate_coil_source is None
+                else grouped_coil_set_spec_from_source(certificate_coil_source)
+            )
+            return self._run_code_traceable_exact_array_kernel(
+                certificate_coil_set_spec,
+                sdofs,
+                iota,
+                G,
+                weight_inv_modB=weight_inv_modB,
+                solver_contract=solver_contract,
+            )
+
+        def project_result(array_result):
+            return self._project_traceable_exact_array_result(
+                array_result,
+                weight_inv_modB=weight_inv_modB,
+                solver_contract=solver_contract,
+            )
+
+        array_kernel.__name__ = (
+            f"run_code_traceable_exact_{solver_contract.variant}_array_kernel"
+        )
+        return _TraceableExactNewtonBenchmarkRoute(
+            variant=solver_contract.variant,
+            compiled_kernel=jax.jit(array_kernel),
+            project_result=project_result,
+        )
+
     def run_code_traceable(
         self,
         coil_source,
@@ -6883,12 +7140,15 @@ class BoozerSurfaceJAX(Optimizable):
         certificate_coil_source=None,
         materialize_dense_linearization=True,
     ):
-        """Trace-safe pure-array inner solve for the ondevice target lane.
+        """Trace-safe inner solve composition for the ondevice target lane.
 
         Accepts a preferred immutable ``GroupedCoilSetSpec`` or the legacy
-        grouped-array payload plus warm-start state, returns only JAX arrays /
-        scalars, and never reads or writes ``self.res``, ``self.surface``, or
-        ``self.need_to_run_code``.
+        grouped-array payload plus warm-start state. The numerical leaves are
+        JAX arrays, while the returned reporting envelope also contains static
+        Python metadata and is not itself a top-level ``jax.jit`` output. The
+        private benchmark route exposes its compiled array-only kernel
+        separately. This method never reads or writes ``self.res``,
+        ``self.surface``, or ``self.need_to_run_code``.
 
         Supported modes:
         - LS Boozer solve on the on-device optimizer lane.
@@ -6903,65 +7163,20 @@ class BoozerSurfaceJAX(Optimizable):
         )
 
         if self.boozer_type == "exact":
-            G_exact = (
-                G
-                if G is not None
-                else compute_G_from_currents(
-                    grouped_coil_currents_from_spec(certificate_coil_set_spec)
-                )
+            c0_contract = _optimizer_jax._TraceableExactNewtonVariantContract(
+                variant="C0",
+                solver=newton_exact_traceable,
+                factorization_backend=EXACT_FACTORIZATION_BACKEND,
+                returns_jacobian=False,
             )
-            x0 = _concat_boozer_state(sdofs, iota, G_exact)
-            res_fn = self._get_traceable_exact_residual(weight_inv_modB)
-            result = newton_exact_traceable(
-                res_fn,
-                x0,
-                maxiter=self.options["newton_maxiter"],
-                tol=self.options["newton_tol"],
-                args=(certificate_coil_set_spec,),
+            return self._run_code_traceable_exact_with_solver(
+                certificate_coil_set_spec,
+                sdofs,
+                iota,
+                G,
+                weight_inv_modB=weight_inv_modB,
+                solver_contract=c0_contract,
             )
-            jacobian = result["jacobian"]
-            jacobian_available = jacobian is not None
-            finite = jnp.all(jnp.isfinite(result["x"])) & jnp.all(
-                jnp.isfinite(result["residual"])
-            )
-            if jacobian_available:
-                finite = finite & jnp.all(jnp.isfinite(jacobian))
-            sdofs_exact, iota_exact, G_exact = self._unpack_decision_vector_jax(
-                result["x"],
-                True,
-            )
-            half = _as_runtime_float64(0.5, reference=result["residual"])
-            primal_success = result["success"] & finite
-            exact_condition_estimate = _dense_condition_estimate_or_none(jacobian)
-            return {
-                **_boozer_traceable_result_core(
-                    result["x"],
-                    sdofs_exact,
-                    iota_exact,
-                    G_exact,
-                    half * jnp.mean(jnp.square(result["residual"])),
-                    None,
-                    None,
-                    result["nit"],
-                    primal_success,
-                    "exact_jacobian",
-                    False,
-                    "exact",
-                    weight_inv_modB,
-                ),
-                "residual": result["residual"],
-                "jacobian": jacobian,
-                **_exact_newton_reporting_fields(result),
-                **_none_solve_quality_fields(SOLVE_QUALITY_EXACT_FIELDS),
-                "exact_factorization_backend": EXACT_FACTORIZATION_BACKEND,
-                "exact_condition_estimate": exact_condition_estimate,
-                "exact_newton_linear_residual_rel": result.get(
-                    "exact_newton_linear_residual_rel"
-                ),
-                "exact_refinement_correction_rel": result.get(
-                    "exact_refinement_correction_rel"
-                ),
-            }
 
         optimize_G = G is not None
         method = self._resolve_optimizer_method(optimize_G=optimize_G)
