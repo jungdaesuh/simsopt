@@ -6,6 +6,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from simsopt_jax.runtime.host_boundary import host_transfer_audit
+from simsopt_jax.runtime.trace_annotations import (
+    EvaluationKind,
+    HostEvent,
+    PhaseId,
+    evaluation_context,
+    trace_session,
+)
 from simsopt_jax_adapters.geo import surface_objectives_traceable
 
 
@@ -223,6 +231,98 @@ def test_trial_evaluator_returns_immutable_candidate_inner_state() -> None:
         candidate_inner_state.eligible = False
 
 
+def test_accepted_evaluator_threads_device_execution_evidence_without_replay() -> None:
+    forward_result = _forward_result(success=True, primal_success=True)
+    bundle, _gradient_calls, forward_calls = _compiled_bundle(forward_result)
+    bundle["compiled_forward_result_from_anchor_for"] = lambda _parameters, _incumbent: (
+        forward_result
+    )
+    gradient_execution_calls = 0
+
+    def compiled_gradient_with_execution(_coil_dofs, solved_x, _factors):
+        nonlocal gradient_execution_calls
+        gradient_execution_calls += 1
+        zero = jnp.asarray(0, dtype=jnp.int32)
+        counts = surface_objectives_traceable.TraceableObjectiveExecutionCounts(
+            newton_iteration_count=zero,
+            dense_materialization_count=jnp.asarray(1, dtype=jnp.int32),
+            lu_factorization_count=jnp.asarray(1, dtype=jnp.int32),
+            lu_solve_count=jnp.asarray(12, dtype=jnp.int32),
+            refinement_correction_count=jnp.asarray(1, dtype=jnp.int32),
+            adjoint_execution_count=jnp.asarray(1, dtype=jnp.int32),
+        )
+        adjoint_evidence = (
+            surface_objectives_traceable._TraceableAdjointExecutionEvidence(
+                adjoint_output=jnp.asarray(solved_x, dtype=jnp.float64) * 0.25,
+                residual=jnp.asarray(2.0e-13, dtype=jnp.float64),
+                residual_relative=jnp.asarray(3.0e-14, dtype=jnp.float64),
+            )
+        )
+        return (
+            jnp.asarray([1.25, -2.5], dtype=jnp.float64),
+            jnp.asarray(True, dtype=jnp.bool_),
+            counts,
+            adjoint_evidence,
+        )
+
+    bundle["compiled_total_gradient_with_execution_for"] = (
+        compiled_gradient_with_execution
+    )
+    incumbent = _inner_state((-1.0, -2.0), (-3.0, -4.0), 5.0, eligible=True)
+    evaluate = surface_objectives_traceable._build_accepted_incumbent_evaluator(bundle)
+
+    with surface_objectives_traceable._traceable_execution_evidence():
+        evaluation = evaluate(
+            jnp.asarray([8.0, 9.0], dtype=jnp.float64),
+            incumbent,
+        )
+
+    assert forward_calls == []
+    assert gradient_execution_calls == 1
+    assert evaluation.forward_result.keys() == forward_result.keys()
+    assert evaluation.forward_result["x"] is forward_result["x"]
+    assert int(np.asarray(evaluation.execution_counts.newton_iteration_count)) == 6
+    assert int(np.asarray(evaluation.execution_counts.dense_materialization_count)) == 1
+    assert int(np.asarray(evaluation.execution_counts.lu_solve_count)) == 12
+    np.testing.assert_array_equal(
+        evaluation.adjoint_output,
+        np.asarray([0.75, 1.0], dtype=np.float64),
+    )
+    assert float(np.asarray(evaluation.adjoint_residual_relative)) == 3.0e-14
+
+
+def test_accepted_evaluator_default_keeps_original_gradient_program() -> None:
+    forward_result = _forward_result(success=True, primal_success=True)
+    bundle, gradient_calls, _forward_calls = _compiled_bundle(forward_result)
+    bundle["compiled_forward_result_from_anchor_for"] = lambda _parameters, _incumbent: (
+        forward_result
+    )
+    execution_calls = 0
+
+    def compiled_gradient_with_execution(_coil_dofs, _solved_x, _factors):
+        nonlocal execution_calls
+        execution_calls += 1
+        raise AssertionError("default evaluation selected timeline evidence program")
+
+    bundle["compiled_total_gradient_with_execution_for"] = (
+        compiled_gradient_with_execution
+    )
+    evaluate = surface_objectives_traceable._build_accepted_incumbent_evaluator(bundle)
+
+    evaluation = evaluate(
+        jnp.asarray([8.0, 9.0], dtype=jnp.float64),
+        _inner_state((-1.0, -2.0), (-3.0, -4.0), 5.0, eligible=True),
+    )
+
+    assert len(gradient_calls) == 1
+    assert execution_calls == 0
+    assert evaluation.forward_result is None
+    assert evaluation.adjoint_output is None
+    assert evaluation.adjoint_residual is None
+    assert evaluation.adjoint_residual_relative is None
+    assert evaluation.execution_counts is None
+
+
 def test_trial_evaluator_threads_explicit_incumbent_into_forward_path() -> None:
     forward_result = _forward_result(success=False, primal_success=False)
     forward_calls: list[tuple[object, ...]] = []
@@ -337,11 +437,35 @@ def _inner_state(
 
 def _incumbent_evaluation(
     candidate_inner_state: surface_objectives_traceable.TraceableObjectiveInnerState,
+    *,
+    forward_success: bool = True,
+    primal_success: bool = True,
+    actual_adjoint_success: bool = True,
+    gradient_source: str = "candidate",
 ) -> surface_objectives_traceable.TraceableObjectiveIncumbentEvaluation:
+    execution_counts = surface_objectives_traceable.TraceableObjectiveExecutionCounts(
+        newton_iteration_count=jnp.asarray(6, dtype=jnp.int32),
+        dense_materialization_count=jnp.asarray(1, dtype=jnp.int32),
+        lu_factorization_count=jnp.asarray(1, dtype=jnp.int32),
+        lu_solve_count=jnp.asarray(12, dtype=jnp.int32),
+        refinement_correction_count=jnp.asarray(1, dtype=jnp.int32),
+        adjoint_execution_count=jnp.asarray(1, dtype=jnp.int32),
+    )
     return surface_objectives_traceable.TraceableObjectiveIncumbentEvaluation(
         value=jnp.asarray(candidate_inner_state.objective_value + 10.0),
         gradient=jnp.asarray([1.25, -2.5], dtype=jnp.float64),
+        forward_success=jnp.asarray(forward_success, dtype=jnp.bool_),
+        primal_success=jnp.asarray(primal_success, dtype=jnp.bool_),
+        actual_adjoint_success=jnp.asarray(actual_adjoint_success, dtype=jnp.bool_),
+        gradient_source=gradient_source,
         candidate_inner_state=candidate_inner_state,
+        forward_result={
+            "newton_iterations": execution_counts.newton_iteration_count,
+        },
+        adjoint_output=jnp.asarray([0.5, -0.25], dtype=jnp.float64),
+        adjoint_residual=jnp.asarray(2.0e-13, dtype=jnp.float64),
+        adjoint_residual_relative=jnp.asarray(3.0e-14, dtype=jnp.float64),
+        execution_counts=execution_counts,
     )
 
 
@@ -540,12 +664,143 @@ def test_accepted_incumbent_controller_is_transfer_guard_safe() -> None:
     np.testing.assert_array_equal(gradient, np.asarray([1.25, -2.5]))
 
 
+def test_accepted_incumbent_controller_emits_one_correlated_host_event_set() -> None:
+    initial_state = _inner_state((-1.0, -2.0), (-3.0, -4.0), 5.0, eligible=True)
+    candidate_state = _inner_state((8.0, 9.0), (3.0, 4.0), 7.5, eligible=True)
+    controller = surface_objectives_traceable.AcceptedIncumbentHostValueAndGrad(
+        lambda _parameters, _incumbent: _incumbent_evaluation(candidate_state),
+        initial_state,
+    )
+    parameters = np.asarray([8.0, 9.0], dtype=np.float64)
+    parameter_sha256 = controller._parameter_sha256(parameters)
+
+    with trace_session() as timeline_audit, host_transfer_audit() as transfer_audit, evaluation_context(
+        "evaluation-7",
+        parameter_sha256,
+        EvaluationKind.TRIAL,
+    ):
+        value, gradient = controller.value_and_grad(parameters)
+
+    assert value == 17.5
+    np.testing.assert_array_equal(gradient, np.asarray([1.25, -2.5]))
+    assert [event.event for event in timeline_audit.events()] == [
+        HostEvent.EVALUATOR_ENTRY,
+        HostEvent.DEVICE_READY,
+        HostEvent.EVALUATOR_RETURN,
+    ]
+    assert all(
+        event.evaluation.evaluation_id == "evaluation-7"
+        for event in timeline_audit.events()
+    )
+    assert [record.phase for record in timeline_audit.records()] == [
+        PhaseId.HOST_H2D_SUBMIT,
+        PhaseId.HOST_D2H_MATERIALIZE,
+    ]
+    [transfer_summary] = transfer_audit.summary()
+    assert transfer_summary.phase == PhaseId.HOST_D2H_MATERIALIZE.value
+    assert transfer_summary.evaluation_id == "evaluation-7"
+    assert transfer_summary.calls == 2
+    assert transfer_summary.leaves == 2
+    assert transfer_summary.bytes == 24
+
+
+def test_accepted_incumbent_controller_observer_gets_truthful_existing_evidence() -> (
+    None
+):
+    initial_state = _inner_state((-1.0, -2.0), (-3.0, -4.0), 5.0, eligible=True)
+    candidate_state = _inner_state((8.0, 9.0), (3.0, 4.0), 7.5, eligible=False)
+    evaluation_calls = 0
+
+    def compiled_evaluate(_parameters, _incumbent):
+        nonlocal evaluation_calls
+        evaluation_calls += 1
+        return _incumbent_evaluation(
+            candidate_state,
+            forward_success=False,
+            primal_success=True,
+            actual_adjoint_success=False,
+            gradient_source="candidate",
+        )
+
+    controller = surface_objectives_traceable.AcceptedIncumbentHostValueAndGrad(
+        compiled_evaluate,
+        initial_state,
+    )
+    observations = []
+
+    with surface_objectives_traceable._accepted_incumbent_host_observation_sink(
+        observations.append
+    ):
+        returned_value, returned_gradient = controller.value_and_grad(
+            np.asarray([8.0, 9.0], dtype=np.float64)
+        )
+
+    assert evaluation_calls == 1
+    [observation] = observations
+    assert observation.value == returned_value == 17.5
+    assert observation.gradient is returned_gradient
+    assert observation.gradient.dtype == np.float64
+    np.testing.assert_array_equal(observation.gradient, np.asarray([1.25, -2.5]))
+    assert not bool(np.asarray(observation.forward_success))
+    assert bool(np.asarray(observation.primal_success))
+    assert not bool(np.asarray(observation.actual_adjoint_success))
+    assert observation.gradient_source == "candidate"
+    assert observation.candidate_gradient_source
+    assert not bool(np.asarray(observation.eligible))
+    assert int(np.asarray(observation.execution_counts.newton_iteration_count)) == 6
+    assert int(np.asarray(observation.execution_counts.lu_solve_count)) == 12
+
+
+def test_accepted_incumbent_controller_without_observer_does_not_hostify_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    initial_state = _inner_state((-1.0, -2.0), (-3.0, -4.0), 5.0, eligible=True)
+    candidate_state = _inner_state((8.0, 9.0), (3.0, 4.0), 7.5, eligible=True)
+    controller = surface_objectives_traceable.AcceptedIncumbentHostValueAndGrad(
+        lambda _parameters, _incumbent: _incumbent_evaluation(candidate_state),
+        initial_state,
+    )
+    original_host_bool = surface_objectives_traceable._host_bool
+    host_bool_calls = 0
+
+    def counted_host_bool(value):
+        nonlocal host_bool_calls
+        host_bool_calls += 1
+        return original_host_bool(value)
+
+    monkeypatch.setattr(
+        surface_objectives_traceable,
+        "_host_bool",
+        counted_host_bool,
+    )
+
+    controller.value_and_grad(np.asarray([8.0, 9.0], dtype=np.float64))
+
+    assert host_bool_calls == 0
+
+
+def test_accepted_incumbent_controller_rejects_mismatched_trace_identity() -> None:
+    initial_state = _inner_state((-1.0, -2.0), (-3.0, -4.0), 5.0, eligible=True)
+    candidate_state = _inner_state((8.0, 9.0), (3.0, 4.0), 7.5, eligible=True)
+    controller = surface_objectives_traceable.AcceptedIncumbentHostValueAndGrad(
+        lambda _parameters, _incumbent: _incumbent_evaluation(candidate_state),
+        initial_state,
+    )
+
+    with trace_session(), evaluation_context(
+        "evaluation-8",
+        "0" * 64,
+        EvaluationKind.TRIAL,
+    ), pytest.raises(ValueError, match="parameter SHA-256"):
+        controller.value_and_grad(np.asarray([8.0, 9.0], dtype=np.float64))
+
+
 def test_accepted_incumbent_session_factory_is_transfer_guard_safe() -> None:
     forward_result = _forward_result(success=True, primal_success=True)
     bundle, _gradient_calls, _forward_calls = _compiled_bundle(forward_result)
     bundle["state"]["baseline_value"] = jnp.asarray(5.0, dtype=jnp.float64)
-    bundle["compiled_forward_result_from_anchor_for"] = (
-        lambda _parameters, _incumbent: forward_result
+    bundle["compiled_forward_result_from_anchor_for"] = lambda _parameters, _incumbent: (
+        forward_result
     )
     session = surface_objectives_traceable.TraceableObjectiveSession.from_optimizer_compiled_bundle(
         bundle
@@ -557,7 +812,9 @@ def test_accepted_incumbent_session_factory_is_transfer_guard_safe() -> None:
     assert bool(np.asarray(jax.device_get(controller.current_inner_state.eligible)))
 
 
-def test_session_candidate_evaluation_uses_explicit_anchor_under_transfer_guard() -> None:
+def test_session_candidate_evaluation_uses_explicit_anchor_under_transfer_guard() -> (
+    None
+):
     forward_result = _forward_result(success=True, primal_success=True)
     anchored_calls: list[tuple[object, object]] = []
     gradient_calls: list[tuple[object, object, object]] = []
@@ -661,14 +918,16 @@ def test_session_candidate_evaluation_skips_fallback_gradient() -> None:
     assert gradient_calls == []
     assert evaluation.gradient_source == "unavailable"
     assert np.isnan(np.asarray(jax.device_get(evaluation.gradient))).all()
-    assert not bool(np.asarray(jax.device_get(evaluation.candidate_inner_state.eligible)))
+    assert not bool(
+        np.asarray(jax.device_get(evaluation.candidate_inner_state.eligible))
+    )
 
 
 def test_session_candidate_evaluation_rejects_ineligible_anchor() -> None:
     forward_result = _forward_result(success=True, primal_success=True)
     bundle, _gradient_calls, _forward_calls = _compiled_bundle(forward_result)
-    bundle["compiled_forward_result_from_anchor_for"] = (
-        lambda _parameters, _incumbent: forward_result
+    bundle["compiled_forward_result_from_anchor_for"] = lambda _parameters, _incumbent: (
+        forward_result
     )
     session = surface_objectives_traceable.TraceableObjectiveSession.from_optimizer_compiled_bundle(
         bundle
@@ -694,8 +953,8 @@ def test_accepted_incumbent_controllers_from_same_session_are_isolated() -> None
     forward_result = _forward_result(success=True, primal_success=True)
     bundle, _gradient_calls, _forward_calls = _compiled_bundle(forward_result)
     bundle["state"]["baseline_value"] = jnp.asarray(5.0, dtype=jnp.float64)
-    bundle["compiled_forward_result_from_anchor_for"] = (
-        lambda _parameters, _incumbent: forward_result
+    bundle["compiled_forward_result_from_anchor_for"] = lambda _parameters, _incumbent: (
+        forward_result
     )
     session = surface_objectives_traceable.TraceableObjectiveSession.from_optimizer_compiled_bundle(
         bundle
@@ -746,6 +1005,10 @@ def test_accepted_incumbent_controller_drives_host_bfgs_via_callback() -> None:
         return surface_objectives_traceable.TraceableObjectiveIncumbentEvaluation(
             value=jnp.asarray(value, dtype=jnp.float64),
             gradient=jnp.asarray(gradient, dtype=jnp.float64),
+            forward_success=jnp.asarray(True, dtype=jnp.bool_),
+            primal_success=jnp.asarray(True, dtype=jnp.bool_),
+            actual_adjoint_success=jnp.asarray(True, dtype=jnp.bool_),
+            gradient_source="candidate",
             candidate_inner_state=candidate_state,
         )
 

@@ -10,7 +10,9 @@ compatibility with existing callers.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from functools import partial
@@ -59,6 +61,9 @@ from simsopt_jax.geo.optimizers._shared import (
     cast_floating_tree,
     mark_cacheable_jit_value_and_grad,
 )
+from simsopt_jax.geo.optimizers.exact_final_linearization import (
+    _ExactFinalLinearization,
+)
 from simsopt_jax.geo.surface_fourier import surface_volume
 from simsopt_jax.numerical_policy import (
     MIXED_DENSE_IR_MAX_REFINEMENT_CORRECTIONS,
@@ -66,6 +71,9 @@ from simsopt_jax.numerical_policy import (
     CertificateProbeEvidence,
     CertificateProbeKeyData,
     resolve_certificate_probe_authority,
+)
+from simsopt_jax.runtime.host_boundary import (
+    block_until_ready as _block_until_ready,
 )
 from simsopt_jax.runtime.host_boundary import (
     host_array as _host_array,
@@ -83,7 +91,21 @@ from simsopt_jax.runtime.host_boundary import (
     host_scalar as _host_scalar,
 )
 from simsopt_jax.runtime.host_boundary import (
+    host_transfer_evaluation as _host_transfer_evaluation,
+)
+from simsopt_jax.runtime.host_boundary import (
+    host_transfer_phase as _host_transfer_phase,
+)
+from simsopt_jax.runtime.host_boundary import (
     runtime_certificate_probe_key as _runtime_certificate_probe_key,
+)
+from simsopt_jax.runtime.trace_annotations import (
+    HostEvent,
+    PhaseId,
+    current_evaluation_context,
+    device_scope,
+    host_span,
+    record_host_event,
 )
 
 from simsopt_jax_adapters.geo.curve_objectives import curve_length_pure
@@ -104,9 +126,11 @@ from .boozer_surface import (
 @dataclass
 class _LazyCompiledGradientState:
     total_gradient: Callable | None = None
+    total_gradient_with_execution: Callable | None = None
     total_gradient_with_key: Callable | None = None
     value_and_grad: Callable | None = None
     gradient_lock: Lock = dataclass_field(default_factory=Lock)
+    execution_gradient_lock: Lock = dataclass_field(default_factory=Lock)
     keyed_gradient_lock: Lock = dataclass_field(default_factory=Lock)
     value_and_grad_lock: Lock = dataclass_field(default_factory=Lock)
 
@@ -135,6 +159,7 @@ __all__ = [
     "AcceptedIncumbentHostValueAndGrad",
     "TraceableObjectiveCandidateEvaluation",
     "TraceableObjectiveCertifiedSeededValueAndGrad",
+    "TraceableObjectiveExecutionCounts",
     "TraceableObjectiveIncumbentEvaluation",
     "TraceableObjectiveInnerState",
     "TraceableObjectiveSeededValueAndGrad",
@@ -220,12 +245,178 @@ class TraceableObjectiveInnerState(NamedTuple):
     eligible: jax.Array
 
 
-class TraceableObjectiveIncumbentEvaluation(NamedTuple):
-    """Device-resident value, gradient, and candidate continuation state."""
+class TraceableObjectiveExecutionCounts(NamedTuple):
+    """Device-resident counts emitted by branches that actually executed."""
+
+    newton_iteration_count: jax.Array
+    dense_materialization_count: jax.Array
+    lu_factorization_count: jax.Array
+    lu_solve_count: jax.Array
+    refinement_correction_count: jax.Array
+    adjoint_execution_count: jax.Array
+
+
+class _TraceableAdjointExecutionEvidence(NamedTuple):
+    """Device-resident adjoint output and linear-solve residual evidence."""
+
+    adjoint_output: jax.Array
+    residual: jax.Array
+    residual_relative: jax.Array
+
+
+class _TraceableExactReturnedState(NamedTuple):
+    """Returned exact-solve state and its producer-owned success status."""
+
+    solved_state: jax.Array
+    solve_success: jax.Array
+
+
+class _TraceableExactPayloadFusedStatus(NamedTuple):
+    """Closed-graph success gates without exposing its retained factors."""
+
+    success: jax.Array
+    returned_state_solve_success: jax.Array
+    producer_solve_success: jax.Array
+    returned_state_residual_success: jax.Array
+    dynamic_inputs_match: jax.Array
+    live_residual_matches_payload: jax.Array
+    payload_validation_success: jax.Array
+    factorization_valid: jax.Array
+    adjoint_solve_success: jax.Array
+    finite_outputs: jax.Array
+
+
+class _TraceableExactPayloadFusedEvidence(NamedTuple):
+    """Physical producer and consumer evidence for one closed execution."""
+
+    producer_residual: jax.Array
+    live_residual: jax.Array
+    producer_residual_inf_norm: jax.Array
+    adjoint: _TraceableAdjointExecutionEvidence
+    consumer_reuse_counts: TraceableObjectiveExecutionCounts
+    full_graph_counts: TraceableObjectiveExecutionCounts
+    factorization_reconstruction_count: jax.Array
+    linearization_primal_traversal_count: jax.Array
+
+
+class _TraceableExactPayloadFusedResult(NamedTuple):
+    """Closed exact-payload value, gradient, status, and physical evidence."""
 
     value: jax.Array
     gradient: jax.Array
+    status: _TraceableExactPayloadFusedStatus
+    evidence: _TraceableExactPayloadFusedEvidence
+
+
+class _TraceableExactPayloadFusedConsumerResult(NamedTuple):
+    """Fail-closed internal consumer result and its adjudication evidence."""
+
+    success: jax.Array
+    value: jax.Array
+    gradient: jax.Array
+    retained_solve: _linear_solve._RetainedJacobianTransposeSolve
+    dynamic_inputs_match: jax.Array
+    live_residual_matches_payload: jax.Array
+    returned_state_residual_success: jax.Array
+    finite_outputs: jax.Array
+    live_residual: jax.Array
+    producer_residual_inf_norm: jax.Array
+
+
+class TraceableObjectiveIncumbentEvaluation(NamedTuple):
+    """Device-resident numerical result and its scientific eligibility evidence."""
+
+    value: jax.Array
+    gradient: jax.Array
+    forward_success: jax.Array
+    primal_success: jax.Array
+    actual_adjoint_success: jax.Array
+    gradient_source: str
     candidate_inner_state: TraceableObjectiveInnerState
+    forward_result: dict[str, object] | None = None
+    adjoint_output: jax.Array | None = None
+    adjoint_residual: jax.Array | None = None
+    adjoint_residual_relative: jax.Array | None = None
+    execution_counts: TraceableObjectiveExecutionCounts | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _AcceptedIncumbentHostEvaluationObservation:
+    """Production host result plus deferred device-only timeline evidence."""
+
+    value: float
+    gradient: np.ndarray
+    forward_success: jax.Array
+    primal_success: jax.Array
+    actual_adjoint_success: jax.Array
+    gradient_source: str
+    candidate_gradient_source: bool
+    eligible: jax.Array
+    forward_result: Mapping[str, object]
+    adjoint_output: jax.Array
+    adjoint_residual: jax.Array
+    adjoint_residual_relative: jax.Array
+    execution_counts: TraceableObjectiveExecutionCounts
+
+
+_ACCEPTED_INCUMBENT_HOST_OBSERVATION_SINK: ContextVar[
+    Callable[[_AcceptedIncumbentHostEvaluationObservation], None] | None
+] = ContextVar("accepted_incumbent_host_observation_sink", default=None)
+_TRACEABLE_EXECUTION_EVIDENCE_REQUESTED: ContextVar[bool] = ContextVar(
+    "traceable_execution_evidence_requested",
+    default=False,
+)
+
+
+def _host_evaluation_identity(parameters):
+    """Canonicalize one host candidate and bind its active trace identity."""
+
+    canonical = np.ascontiguousarray(parameters, dtype=np.dtype("<f8")).reshape(-1)
+    parameter_sha256 = hashlib.sha256(canonical.tobytes(order="C")).hexdigest()
+    trace_evaluation = current_evaluation_context()
+    if (
+        trace_evaluation is not None
+        and trace_evaluation.parameter_sha256 != parameter_sha256
+    ):
+        raise ValueError(
+            "evaluation trace parameter SHA-256 does not match the candidate"
+        )
+    evaluation_id = (
+        parameter_sha256 if trace_evaluation is None else trace_evaluation.evaluation_id
+    )
+    trace_attributes = {
+        "evaluation_id": evaluation_id,
+        "evaluation_kind": (
+            "uncorrelated" if trace_evaluation is None else trace_evaluation.kind.value
+        ),
+        "parameter_sha256": parameter_sha256,
+    }
+    return canonical, evaluation_id, trace_attributes
+
+
+@contextmanager
+def _traceable_execution_evidence() -> Iterator[None]:
+    """Opt into the richer compiled result only for timeline observation."""
+
+    token = _TRACEABLE_EXECUTION_EVIDENCE_REQUESTED.set(True)
+    try:
+        yield
+    finally:
+        _TRACEABLE_EXECUTION_EVIDENCE_REQUESTED.reset(token)
+
+
+@contextmanager
+def _accepted_incumbent_host_observation_sink(
+    sink: Callable[[_AcceptedIncumbentHostEvaluationObservation], None],
+) -> Iterator[None]:
+    """Observe an existing host result without changing its numerical API."""
+
+    token = _ACCEPTED_INCUMBENT_HOST_OBSERVATION_SINK.set(sink)
+    try:
+        with _traceable_execution_evidence():
+            yield
+    finally:
+        _ACCEPTED_INCUMBENT_HOST_OBSERVATION_SINK.reset(token)
 
 
 class AcceptedIncumbentHostValueAndGrad:
@@ -262,23 +453,66 @@ class AcceptedIncumbentHostValueAndGrad:
             return self._incumbent
 
     def value_and_grad(self, parameters) -> tuple[float, np.ndarray]:
-        canonical = np.ascontiguousarray(parameters, dtype=np.dtype("<f8")).reshape(-1)
-        # Explicit H2D: host optimizer parameters cross the device boundary
-        # here, and guarded runs (JAX_TRANSFER_GUARD=disallow) forbid the
-        # implicit conversion.
-        candidate = _runtime_device_put(canonical, dtype=jnp.float64)
-        with self._lock:
-            incumbent = self._incumbent
-            generation = self._generation
-        evaluation = self._compiled_evaluate(candidate, incumbent)
-        jax.block_until_ready(evaluation)
-        with self._lock:
-            if generation == self._generation:
-                self._pending[self._parameter_sha256(canonical)] = evaluation
-        return (
-            float(_host_scalar(evaluation.value, dtype=np.float64)),
-            _host_array(evaluation.gradient, dtype=np.float64),
+        record_host_event(HostEvent.EVALUATOR_ENTRY)
+        canonical, evaluation_id, trace_attributes = _host_evaluation_identity(
+            parameters
         )
+        parameter_sha256 = str(trace_attributes["parameter_sha256"])
+        with _host_transfer_evaluation(evaluation_id):
+            # Explicit H2D: host optimizer parameters cross the device boundary
+            # here, and guarded runs (JAX_TRANSFER_GUARD=disallow) forbid the
+            # implicit conversion.
+            with host_span(PhaseId.HOST_H2D_SUBMIT, attributes=trace_attributes):
+                candidate = _runtime_device_put(canonical, dtype=jnp.float64)
+            with self._lock:
+                incumbent = self._incumbent
+                generation = self._generation
+            evaluation = self._compiled_evaluate(candidate, incumbent)
+            _block_until_ready(evaluation)
+            record_host_event(HostEvent.DEVICE_READY)
+            with self._lock:
+                if generation == self._generation:
+                    self._pending[parameter_sha256] = evaluation
+            with host_span(
+                PhaseId.HOST_D2H_MATERIALIZE,
+                attributes=trace_attributes,
+            ), _host_transfer_phase(PhaseId.HOST_D2H_MATERIALIZE.value):
+                value = float(_host_scalar(evaluation.value, dtype=np.float64))
+                gradient = _host_array(evaluation.gradient, dtype=np.float64)
+                observation_sink = _ACCEPTED_INCUMBENT_HOST_OBSERVATION_SINK.get()
+                if observation_sink is not None:
+                    gradient_source = evaluation.gradient_source
+                    if (
+                        evaluation.forward_result is None
+                        or evaluation.adjoint_output is None
+                        or evaluation.adjoint_residual is None
+                        or evaluation.adjoint_residual_relative is None
+                        or evaluation.execution_counts is None
+                    ):
+                        raise RuntimeError(
+                            "timeline observation requires device execution evidence"
+                        )
+                    observation_sink(
+                        _AcceptedIncumbentHostEvaluationObservation(
+                            value=value,
+                            gradient=gradient,
+                            forward_success=evaluation.forward_success,
+                            primal_success=evaluation.primal_success,
+                            actual_adjoint_success=evaluation.actual_adjoint_success,
+                            gradient_source=gradient_source,
+                            candidate_gradient_source=(gradient_source == "candidate"),
+                            eligible=evaluation.candidate_inner_state.eligible,
+                            forward_result=evaluation.forward_result,
+                            adjoint_output=evaluation.adjoint_output,
+                            adjoint_residual=evaluation.adjoint_residual,
+                            adjoint_residual_relative=(
+                                evaluation.adjoint_residual_relative
+                            ),
+                            execution_counts=evaluation.execution_counts,
+                        )
+                    )
+        record_host_event(HostEvent.EVALUATOR_RETURN)
+        return value, gradient
 
     def __call__(self, parameters) -> tuple[float, np.ndarray]:
         return self.value_and_grad(parameters)
@@ -289,8 +523,7 @@ class AcceptedIncumbentHostValueAndGrad:
             evaluation = self._pending.get(parameter_sha256)
             if evaluation is None:
                 raise RuntimeError(
-                    "accepted parameters do not match any pending candidate "
-                    "evaluation"
+                    "accepted parameters do not match any pending candidate evaluation"
                 )
             if not _host_bool(evaluation.candidate_inner_state.eligible):
                 raise RuntimeError("cannot promote an uncertified Boozer candidate")
@@ -1222,9 +1455,13 @@ def _pack_traceable_forward_result(
     newton_trace_certificate_gradient_dtype_bits: jax.Array | None = None,
     newton_trace_presence: Mapping[str, jax.Array | None] | None = None,
     newton_linear_solve_backend_code=None,
+    exact_newton_execution_observer_bearing=None,
+    exact_newton_residual_evaluation_count=None,
+    exact_newton_linear_operator_application_count=None,
     dense_hessian_bytes=None,
     max_dense_hessian_bytes=None,
     outer_raw_terms=None,
+    exact_newton_variant_telemetry: Mapping[str, jax.Array] | None = None,
 ):
     """Return the normalized traceable forward-result contract."""
     missing_bool = _staged_like(value, False, dtype=jnp.bool_)
@@ -1341,6 +1578,21 @@ def _pack_traceable_forward_result(
             if newton_last_linear_solve_success is None
             else newton_last_linear_solve_success
         ),
+        "exact_newton_execution_observer_bearing": (
+            missing_bool
+            if exact_newton_execution_observer_bearing is None
+            else exact_newton_execution_observer_bearing
+        ),
+        "exact_newton_residual_evaluation_count": (
+            _runtime_int32_scalar(0)
+            if exact_newton_residual_evaluation_count is None
+            else exact_newton_residual_evaluation_count
+        ),
+        "exact_newton_linear_operator_application_count": (
+            _runtime_int32_scalar(0)
+            if exact_newton_linear_operator_application_count is None
+            else exact_newton_linear_operator_application_count
+        ),
         "inner_penalty_residual_l2": (
             missing_float
             if inner_penalty_residual_l2 is None
@@ -1410,6 +1662,8 @@ def _pack_traceable_forward_result(
             dtype=jnp.bool_,
         )
     packed["outer_raw_terms_present"] = _runtime_bool(outer_raw_terms is not None)
+    if exact_newton_variant_telemetry:
+        packed.update(exact_newton_variant_telemetry)
     missing_int64 = _staged_like(
         value,
         np.iinfo(np.int64).min,
@@ -1677,14 +1931,15 @@ def _traceable_general_forward_result(
                 coil_set_spec=coil_set_spec,
             )
         )
-        solve_result = booz_jax.run_code_traceable(
-            coil_set_spec,
-            warmstart_sdofs,
-            warmstart_iota,
-            warmstart_G,
-            certificate_coil_source=certificate_coil_set_spec,
-            materialize_dense_linearization=False,
-        )
+        with device_scope(PhaseId.NEWTON_SOLVER_CONTROL):
+            solve_result = booz_jax.run_code_traceable(
+                coil_set_spec,
+                warmstart_sdofs,
+                warmstart_iota,
+                warmstart_G,
+                certificate_coil_source=certificate_coil_set_spec,
+                materialize_dense_linearization=False,
+            )
         solved_sdofs, solved_iota, solved_G = _resolve_traceable_solved_state(
             booz_jax,
             solve_result,
@@ -1745,6 +2000,31 @@ def _traceable_general_forward_result(
             ),
             inner_penalty_residual_l2=solve_result.get("inner_penalty_residual_l2"),
             final_gradient_inf_norm=solve_result.get("final_gradient_inf_norm"),
+            exact_newton_variant_telemetry={
+                key: solve_result[key]
+                for key in (
+                    "exact_newton_variant_dense_linearization_used",
+                    "exact_newton_variant_linear_solve_attempt_count",
+                    "exact_newton_variant_dense_materialization_count",
+                    "exact_newton_variant_lu_factorization_count",
+                    "exact_newton_variant_lu_solve_count",
+                    "exact_newton_variant_refinement_correction_count",
+                    "exact_newton_variant_backtracking_iteration_count",
+                    "exact_newton_variant_stalled",
+                    "exact_newton_variant_retry_linear_solve_at_strict_cap",
+                    "exact_newton_variant_applied_update_count",
+                    "exact_newton_variant_stop_reason_code",
+                    "exact_newton_variant_numerical_failure",
+                    "exact_newton_variant_rollback_branch_taken",
+                    "exact_newton_variant_rollback_recompute_count",
+                    "exact_newton_variant_native_persist_predicate",
+                    "exact_newton_variant_persist_solved_state",
+                    "exact_newton_variant_initial_norm",
+                    "exact_newton_variant_assessed_norm",
+                    "exact_newton_variant_returned_norm",
+                )
+                if key in solve_result
+            },
             newton_trace_capacity=newton_trace_capacity,
             newton_trace_active=solve_result.get("newton_trace_active"),
             newton_trace_step_accepted=solve_result.get("newton_trace_step_accepted"),
@@ -1790,6 +2070,15 @@ def _traceable_general_forward_result(
             },
             newton_linear_solve_backend_code=solve_result.get(
                 "newton_linear_solve_backend_code"
+            ),
+            exact_newton_execution_observer_bearing=solve_result.get(
+                "exact_newton_execution_observer_bearing"
+            ),
+            exact_newton_residual_evaluation_count=solve_result.get(
+                "exact_newton_residual_evaluation_count"
+            ),
+            exact_newton_linear_operator_application_count=solve_result.get(
+                "exact_newton_linear_operator_application_count"
             ),
             dense_hessian_bytes=solve_result.get("dense_hessian_bytes"),
             max_dense_hessian_bytes=solve_result.get("max_dense_hessian_bytes"),
@@ -1956,7 +2245,15 @@ def _traceable_total_gradient_with_status(
     scalar_objective_fn=None,
     certificate_probe_key=None,
 ):
-    _, _, total_grad, linear_solve_success, _ = _traceable_objective_gradient_parts(
+    (
+        _,
+        _,
+        total_grad,
+        linear_solve_success,
+        _,
+        _,
+        _,
+    ) = _traceable_objective_gradient_parts(
         booz_jax,
         coil_set_spec_from_dofs,
         coil_dofs=coil_dofs,
@@ -1970,6 +2267,46 @@ def _traceable_total_gradient_with_status(
         certificate_probe_key=certificate_probe_key,
     )
     return total_grad, linear_solve_success
+
+
+def _traceable_total_gradient_with_execution_evidence(
+    booz_jax,
+    coil_set_spec_from_dofs,
+    *,
+    coil_dofs,
+    solved_x,
+    solved_linear_solve_factors,
+    linearization_kind,
+    linear_solve_tol,
+    linear_solve_stab,
+    objective_kwargs,
+):
+    """Return one gradient and device-resident evidence from that execution."""
+    (
+        _,
+        _,
+        total_grad,
+        linear_solve_success,
+        _,
+        execution_counts,
+        adjoint_evidence,
+    ) = _traceable_objective_gradient_parts(
+        booz_jax,
+        coil_set_spec_from_dofs,
+        coil_dofs=coil_dofs,
+        solved_x=solved_x,
+        solved_linear_solve_factors=solved_linear_solve_factors,
+        linearization_kind=linearization_kind,
+        linear_solve_tol=linear_solve_tol,
+        linear_solve_stab=linear_solve_stab,
+        objective_kwargs=objective_kwargs,
+    )
+    return (
+        total_grad,
+        linear_solve_success,
+        execution_counts,
+        adjoint_evidence,
+    )
 
 
 def _traceable_total_gradient_with_trust(
@@ -1986,7 +2323,15 @@ def _traceable_total_gradient_with_trust(
     certificate_probe_key,
 ):
     """Return the total gradient and its mixed dense-IR certificate evidence."""
-    _, _, total_grad, linear_solve_success, trust = _traceable_objective_gradient_parts(
+    (
+        _,
+        _,
+        total_grad,
+        linear_solve_success,
+        trust,
+        _,
+        _,
+    ) = _traceable_objective_gradient_parts(
         booz_jax,
         coil_set_spec_from_dofs,
         coil_dofs=coil_dofs,
@@ -2005,6 +2350,34 @@ def _traceable_adjoint_rhs_exactly_zero(rhs):
     """Test exact zero entirely on device without staging a scalar constant."""
     rhs = jnp.asarray(rhs)
     return jnp.logical_not(jnp.any(rhs))
+
+
+def _traceable_adjoint_execution_counts(reference, linear_solve_status=None):
+    """Build counts from the status returned by the branch that executed."""
+    zero = _staged_like(reference, 0, dtype=jnp.int32)
+    if linear_solve_status is None:
+        return TraceableObjectiveExecutionCounts(zero, zero, zero, zero, zero, zero)
+    unknown = _staged_like(reference, -1, dtype=jnp.int32)
+    return TraceableObjectiveExecutionCounts(
+        newton_iteration_count=zero,
+        dense_materialization_count=getattr(
+            linear_solve_status,
+            "dense_materialization_count",
+            unknown,
+        ),
+        lu_factorization_count=getattr(
+            linear_solve_status,
+            "lu_factorization_count",
+            unknown,
+        ),
+        lu_solve_count=getattr(linear_solve_status, "lu_solve_count", unknown),
+        refinement_correction_count=getattr(
+            linear_solve_status,
+            "refinement_correction_count",
+            unknown,
+        ),
+        adjoint_execution_count=_staged_like(reference, 1, dtype=jnp.int32),
+    )
 
 
 def _traceable_objective_gradient_parts(
@@ -2081,6 +2454,12 @@ def _traceable_objective_gradient_parts(
         dJ_dx = _runtime_zeros_like(solved_x)
         adjoint = _runtime_zeros_like(solved_x)
         linear_solve_success = _runtime_bool(True)
+        execution_counts = _traceable_adjoint_execution_counts(solved_x)
+        adjoint_evidence = _TraceableAdjointExecutionEvidence(
+            adjoint_output=adjoint,
+            residual=_staged_like(solved_x, 0.0, dtype=jnp.float64),
+            residual_relative=_staged_like(solved_x, 0.0, dtype=jnp.float64),
+        )
     else:
         if depends_on_coil_dofs:
 
@@ -2094,25 +2473,38 @@ def _traceable_objective_gradient_parts(
                     coil_set_spec_from_dofs(current_coil_dofs),
                 )
 
-            objective_value, pullback = jax.vjp(
-                _evaluate_objective_of_x_and_coils,
-                solved_x,
-                coil_dofs,
-            )
-            dJ_dx, direct_grad = pullback(
-                _explicit_scalar_pullback_seed(objective_value)
-            )
+            with device_scope(PhaseId.ADJOINT_OUTER_VJP_RHS):
+                objective_value, pullback = jax.vjp(
+                    _evaluate_objective_of_x_and_coils,
+                    solved_x,
+                    coil_dofs,
+                )
+                dJ_dx, direct_grad = pullback(
+                    _explicit_scalar_pullback_seed(objective_value)
+                )
         else:
-            dJ_dx = _strict_scalar_grad(
-                lambda x: _evaluate_objective(x, coil_dofs, coil_set_spec),
-                solved_x,
-            )
+            with device_scope(PhaseId.ADJOINT_OUTER_VJP_RHS):
+                dJ_dx = _strict_scalar_grad(
+                    lambda x: _evaluate_objective(x, coil_dofs, coil_set_spec),
+                    solved_x,
+                )
 
         def zero_adjoint(_):
+            zero_adjoint_output = _runtime_zeros_like(solved_x)
             return (
-                _runtime_zeros_like(solved_x),
+                zero_adjoint_output,
                 _runtime_bool(True),
                 inactive_mixed_dense_ir_trust,
+                _traceable_adjoint_execution_counts(solved_x),
+                _TraceableAdjointExecutionEvidence(
+                    adjoint_output=zero_adjoint_output,
+                    residual=_staged_like(solved_x, 0.0, dtype=jnp.float64),
+                    residual_relative=_staged_like(
+                        solved_x,
+                        0.0,
+                        dtype=jnp.float64,
+                    ),
+                ),
             )
 
         def solve_adjoint(_):
@@ -2142,9 +2534,30 @@ def _traceable_objective_gradient_parts(
                 adjoint_value,
                 _linear_solve._linear_solve_status_success(linear_solve_status),
                 trust,
+                _traceable_adjoint_execution_counts(
+                    solved_x,
+                    linear_solve_status,
+                ),
+                _TraceableAdjointExecutionEvidence(
+                    adjoint_output=adjoint_value,
+                    residual=jnp.asarray(
+                        linear_solve_status.residual,
+                        dtype=jnp.float64,
+                    ),
+                    residual_relative=jnp.asarray(
+                        linear_solve_status.residual_relative,
+                        dtype=jnp.float64,
+                    ),
+                ),
             )
 
-        adjoint, linear_solve_success, mixed_dense_ir_trust = lax.cond(
+        (
+            adjoint,
+            linear_solve_success,
+            mixed_dense_ir_trust,
+            execution_counts,
+            adjoint_evidence,
+        ) = lax.cond(
             _traceable_adjoint_rhs_exactly_zero(dJ_dx),
             zero_adjoint,
             solve_adjoint,
@@ -2171,6 +2584,8 @@ def _traceable_objective_gradient_parts(
             direct_grad,
             linear_solve_success,
             mixed_dense_ir_trust,
+            execution_counts,
+            adjoint_evidence,
         )
 
     if linearization_kind == "exact_jacobian":
@@ -2194,10 +2609,11 @@ def _traceable_objective_gradient_parts(
                 **inner_objective_kwargs,
             )
 
-    implicit_grad = _strict_scalar_grad(
-        directional_stationarity_of_coils,
-        coil_dofs,
-    )
+    with device_scope(PhaseId.ADJOINT_IMPLICIT_COIL_VJP):
+        implicit_grad = _strict_scalar_grad(
+            directional_stationarity_of_coils,
+            coil_dofs,
+        )
     total_grad = _traceable_adjoint_gradient_or_nan(
         direct_grad - implicit_grad,
         linear_solve_success,
@@ -2208,7 +2624,530 @@ def _traceable_objective_gradient_parts(
         total_grad,
         linear_solve_success,
         mixed_dense_ir_trust,
+        execution_counts,
+        adjoint_evidence,
     )
+
+
+def _traceable_fused_total_gradient_canary(
+    booz_jax,
+    coil_set_spec_from_dofs,
+    *,
+    coil_dofs,
+    solved_x,
+    solved_linear_solve_factors,
+    linearization_kind,
+    linear_solve_tol,
+    linear_solve_stab,
+    objective_kwargs,
+    scalar_objective_fn=None,
+    certificate_probe_key=None,
+):
+    """Evaluate an opt-in total gradient through one fused coil pullback.
+
+    The solved state, adjoint, and factors are constants of the pullback. This
+    canary does not replace the diagnostic split-gradient or production paths.
+    """
+    coil_dofs = _as_jax_float64(coil_dofs)
+    solved_x = lax.stop_gradient(_as_jax_float64(solved_x))
+    stopped_coil_dofs = lax.stop_gradient(coil_dofs)
+    stopped_coil_set_spec = coil_set_spec_from_dofs(stopped_coil_dofs)
+    stopped_linear_solve_factors = (
+        None
+        if solved_linear_solve_factors is None
+        else jax.tree.map(lax.stop_gradient, solved_linear_solve_factors)
+    )
+    inactive_trust = _dense_ir._inactive_mixed_dense_ir_trust_telemetry(solved_x)
+
+    def evaluate_objective(x_inner, current_coil_dofs, coil_set_spec):
+        if scalar_objective_fn is not None:
+            return scalar_objective_fn(
+                x_inner,
+                current_coil_dofs,
+                coil_set_spec,
+                objective_kwargs=objective_kwargs,
+            )
+        return _evaluate_traceable_total_objective(
+            x_inner,
+            current_coil_dofs,
+            coil_set_spec,
+            objective_kwargs,
+        )
+
+    depends_on_x_inner = True
+    depends_on_coil_dofs = True
+    if scalar_objective_fn is None:
+        depends_on_x_inner, depends_on_coil_dofs = (
+            _traceable_single_stage_effective_dependency_flags(
+                None,
+                objective_kwargs=objective_kwargs,
+            )
+        )
+
+    def direct_gradient():
+        if not depends_on_coil_dofs:
+            return _runtime_zeros_like(coil_dofs)
+        return _strict_scalar_grad(
+            lambda current_coil_dofs: evaluate_objective(
+                solved_x,
+                current_coil_dofs,
+                coil_set_spec_from_dofs(current_coil_dofs),
+            ),
+            coil_dofs,
+        )
+
+    zero_adjoint = _runtime_zeros_like(solved_x)
+    zero_counts = _traceable_adjoint_execution_counts(solved_x)
+    zero_evidence = _TraceableAdjointExecutionEvidence(
+        adjoint_output=zero_adjoint,
+        residual=_staged_like(solved_x, 0.0, dtype=jnp.float64),
+        residual_relative=_staged_like(solved_x, 0.0, dtype=jnp.float64),
+    )
+    if not depends_on_x_inner:
+        return (
+            direct_gradient(),
+            _runtime_bool(True),
+            inactive_trust,
+            zero_counts,
+            zero_evidence,
+        )
+
+    with device_scope(PhaseId.ADJOINT_OUTER_VJP_RHS):
+        dJ_dx = _strict_scalar_grad(
+            lambda x_inner: evaluate_objective(
+                x_inner,
+                stopped_coil_dofs,
+                stopped_coil_set_spec,
+            ),
+            solved_x,
+        )
+
+    def zero_rhs_total(_):
+        return (
+            direct_gradient(),
+            _runtime_bool(True),
+            inactive_trust,
+            zero_counts,
+            zero_evidence,
+        )
+
+    def fused_total(_):
+        adjoint, linear_solve_status = _traceable_solve_linearization(
+            booz_jax,
+            solved_x,
+            dJ_dx,
+            stopped_coil_set_spec,
+            objective_kwargs,
+            linear_solve_factors=stopped_linear_solve_factors,
+            linearization_kind=linearization_kind,
+            linear_solve_tol=linear_solve_tol,
+            linear_solve_stab=linear_solve_stab,
+            transpose=True,
+            certificate_probe_key=certificate_probe_key,
+        )
+        adjoint = lax.stop_gradient(jnp.asarray(adjoint, dtype=solved_x.dtype))
+        linear_solve_success = _linear_solve._linear_solve_status_success(
+            linear_solve_status
+        )
+        trust = (
+            linear_solve_status.trust
+            if isinstance(linear_solve_status, _dense_ir._MixedDenseIrSolveStatus)
+            else inactive_trust
+        )
+
+        def lagrangian(current_coil_dofs):
+            current_coil_set_spec = coil_set_spec_from_dofs(current_coil_dofs)
+            if linearization_kind == "exact_jacobian":
+                directional_stationarity = _traceable_directional_exact_residual(
+                    solved_x,
+                    adjoint,
+                    current_coil_set_spec,
+                    objective_kwargs,
+                )
+            else:
+                directional_stationarity = _traceable_directional_inner_stationarity(
+                    solved_x,
+                    adjoint,
+                    current_coil_set_spec,
+                    **_traceable_inner_objective_kwargs(objective_kwargs),
+                )
+            if not depends_on_coil_dofs:
+                return -directional_stationarity
+            return (
+                evaluate_objective(
+                    solved_x,
+                    current_coil_dofs,
+                    current_coil_set_spec,
+                )
+                - directional_stationarity
+            )
+
+        with device_scope(PhaseId.ADJOINT_IMPLICIT_COIL_VJP):
+            total_gradient = _strict_scalar_grad(lagrangian, coil_dofs)
+        total_gradient = _traceable_adjoint_gradient_or_nan(
+            total_gradient,
+            linear_solve_success,
+        )
+        return (
+            total_gradient,
+            linear_solve_success,
+            trust,
+            _traceable_adjoint_execution_counts(solved_x, linear_solve_status),
+            _TraceableAdjointExecutionEvidence(
+                adjoint_output=adjoint,
+                residual=jnp.asarray(linear_solve_status.residual, dtype=jnp.float64),
+                residual_relative=jnp.asarray(
+                    linear_solve_status.residual_relative,
+                    dtype=jnp.float64,
+                ),
+            ),
+        )
+
+    return lax.cond(
+        _traceable_adjoint_rhs_exactly_zero(dJ_dx),
+        zero_rhs_total,
+        fused_total,
+        operand=None,
+    )
+
+
+def _traceable_exact_payload_fused_value_and_gradient(
+    payload: _ExactFinalLinearization,
+    *,
+    coil_dynamic_inputs_from_dofs: Callable[
+        [jax.Array],
+        tuple[jax.Array, ...],
+    ],
+    scalar_objective_fn: Callable[
+        [jax.Array, jax.Array, tuple[jax.Array, ...], tuple[jax.Array, ...]],
+        jax.Array,
+    ],
+    exact_residual_fn: Callable[
+        [jax.Array, jax.Array, tuple[jax.Array, ...], tuple[jax.Array, ...]],
+        jax.Array,
+    ],
+    producer_residual_tol: float,
+    linear_solve_tol: float,
+) -> _TraceableExactPayloadFusedConsumerResult:
+    """Consume one payload while rebuilding all coil-derived dynamic inputs."""
+
+    solved_state = lax.stop_gradient(payload.inputs.solved_state)
+    coil_dofs = payload.inputs.coil_dofs
+    stopped_coil_dofs = lax.stop_gradient(coil_dofs)
+    stored_coil_dynamic_inputs = jax.tree.map(
+        lax.stop_gradient,
+        payload.inputs.coil_dynamic_inputs,
+    )
+    residual_configuration = jax.tree.map(
+        lax.stop_gradient,
+        payload.inputs.residual_configuration,
+    )
+    rebuilt_coil_dynamic_inputs = jax.tree.map(
+        lax.stop_gradient,
+        tuple(coil_dynamic_inputs_from_dofs(stopped_coil_dofs)),
+    )
+
+    stored_leaves, stored_structure = jax.tree.flatten(stored_coil_dynamic_inputs)
+    rebuilt_leaves, rebuilt_structure = jax.tree.flatten(rebuilt_coil_dynamic_inputs)
+    dynamic_inputs_match = _staged_like(solved_state, True, dtype=jnp.bool_)
+    if stored_structure != rebuilt_structure or len(stored_leaves) != len(
+        rebuilt_leaves
+    ):
+        dynamic_inputs_match = _staged_like(solved_state, False, dtype=jnp.bool_)
+    else:
+        for stored_leaf, rebuilt_leaf in zip(
+            stored_leaves,
+            rebuilt_leaves,
+            strict=True,
+        ):
+            if (
+                stored_leaf.shape != rebuilt_leaf.shape
+                or stored_leaf.dtype != rebuilt_leaf.dtype
+            ):
+                dynamic_inputs_match = _staged_like(
+                    solved_state,
+                    False,
+                    dtype=jnp.bool_,
+                )
+            else:
+                dynamic_inputs_match = dynamic_inputs_match & jnp.array_equal(
+                    stored_leaf,
+                    rebuilt_leaf,
+                )
+
+    live_residual = exact_residual_fn(
+        solved_state,
+        stopped_coil_dofs,
+        rebuilt_coil_dynamic_inputs,
+        residual_configuration,
+    )
+    live_residual_matches_payload = jnp.array_equal(
+        live_residual,
+        payload.residual,
+    )
+    producer_residual_inf_norm = jnp.linalg.norm(payload.residual, ord=jnp.inf)
+    returned_state_residual_success = jnp.isfinite(producer_residual_inf_norm) & (
+        producer_residual_inf_norm
+        <= _staged_like(
+            producer_residual_inf_norm,
+            producer_residual_tol,
+            dtype=producer_residual_inf_norm.dtype,
+        )
+    )
+    value = scalar_objective_fn(
+        solved_state,
+        stopped_coil_dofs,
+        rebuilt_coil_dynamic_inputs,
+        residual_configuration,
+    )
+    with device_scope(PhaseId.ADJOINT_OUTER_VJP_RHS):
+        objective_state_gradient = _strict_scalar_grad(
+            lambda current_state: scalar_objective_fn(
+                current_state,
+                stopped_coil_dofs,
+                rebuilt_coil_dynamic_inputs,
+                residual_configuration,
+            ),
+            solved_state,
+        )
+
+    retained_solve = _linear_solve._solve_retained_jacobian_transpose_adjoint(
+        payload,
+        objective_state_gradient,
+        tol=linear_solve_tol,
+    )
+    adjoint = lax.stop_gradient(retained_solve.solution)
+
+    def stopped_state_lagrangian(current_coil_dofs):
+        current_coil_dynamic_inputs = tuple(
+            coil_dynamic_inputs_from_dofs(current_coil_dofs)
+        )
+        return scalar_objective_fn(
+            solved_state,
+            current_coil_dofs,
+            current_coil_dynamic_inputs,
+            residual_configuration,
+        ) - jnp.vdot(
+            adjoint,
+            exact_residual_fn(
+                solved_state,
+                current_coil_dofs,
+                current_coil_dynamic_inputs,
+                residual_configuration,
+            ),
+        )
+
+    with device_scope(PhaseId.ADJOINT_IMPLICIT_COIL_VJP):
+        gradient = _strict_scalar_grad(stopped_state_lagrangian, coil_dofs)
+    finite_outputs = (
+        jnp.all(jnp.isfinite(value))
+        & jnp.all(jnp.isfinite(gradient))
+        & jnp.all(jnp.isfinite(retained_solve.solution))
+        & jnp.all(jnp.isfinite(retained_solve.residual))
+        & jnp.all(jnp.isfinite(live_residual))
+    )
+    success = (
+        payload.producer_solve_success
+        & returned_state_residual_success
+        & dynamic_inputs_match
+        & live_residual_matches_payload
+        & retained_solve.payload_validation.success
+        & retained_solve.status.success
+        & finite_outputs
+    )
+    value = jnp.where(success, value, jnp.full_like(value, jnp.nan))
+    gradient = _traceable_adjoint_gradient_or_nan(gradient, success)
+    return _TraceableExactPayloadFusedConsumerResult(
+        success=success,
+        value=value,
+        gradient=gradient,
+        retained_solve=retained_solve,
+        dynamic_inputs_match=dynamic_inputs_match,
+        live_residual_matches_payload=live_residual_matches_payload,
+        returned_state_residual_success=returned_state_residual_success,
+        finite_outputs=finite_outputs,
+        live_residual=live_residual,
+        producer_residual_inf_norm=producer_residual_inf_norm,
+    )
+
+
+def _build_traceable_exact_payload_fused_value_and_gradient(
+    *,
+    returned_state_from_dofs: Callable[
+        [jax.Array, tuple[jax.Array, ...], tuple[jax.Array, ...]],
+        _TraceableExactReturnedState,
+    ],
+    coil_dynamic_inputs_from_dofs: Callable[
+        [jax.Array],
+        tuple[jax.Array, ...],
+    ],
+    scalar_objective_fn: Callable[
+        [jax.Array, jax.Array, tuple[jax.Array, ...], tuple[jax.Array, ...]],
+        jax.Array,
+    ],
+    exact_residual_fn: Callable[
+        [jax.Array, jax.Array, tuple[jax.Array, ...], tuple[jax.Array, ...]],
+        jax.Array,
+    ],
+    residual_configuration: tuple[jax.Array, ...],
+    producer_residual_tol: float,
+    linear_solve_tol: float,
+) -> Callable[[jax.Array], _TraceableExactPayloadFusedResult]:
+    """Build one closed state/linearization/factor/adjoint graph for coil DOFs."""
+
+    fixed_residual_configuration = tuple(residual_configuration)
+
+    def closed_value_and_gradient(coil_dofs: jax.Array):
+        coil_dynamic_inputs = tuple(coil_dynamic_inputs_from_dofs(coil_dofs))
+        returned_state = returned_state_from_dofs(
+            coil_dofs,
+            coil_dynamic_inputs,
+            fixed_residual_configuration,
+        )
+
+        def residual_at_returned_coils(current_state):
+            return exact_residual_fn(
+                current_state,
+                coil_dofs,
+                coil_dynamic_inputs,
+                fixed_residual_configuration,
+            )
+
+        with device_scope(PhaseId.ADJOINT_DENSE_MATRIX):
+            materialization = (
+                _linear_solve._linearize_and_materialize_dense_square_jacobian(
+                    residual_at_returned_coils,
+                    returned_state.solved_state,
+                )
+            )
+        residual_inf_norm = jnp.linalg.norm(
+            materialization.residual,
+            ord=jnp.inf,
+        )
+        residual_success = jnp.isfinite(residual_inf_norm) & (
+            residual_inf_norm
+            <= _staged_like(
+                residual_inf_norm,
+                producer_residual_tol,
+                dtype=residual_inf_norm.dtype,
+            )
+        )
+        producer_finite = (
+            jnp.all(jnp.isfinite(returned_state.solved_state))
+            & jnp.all(jnp.isfinite(materialization.residual))
+            & jnp.all(jnp.isfinite(materialization.jacobian))
+        )
+        producer_success = (
+            jnp.asarray(returned_state.solve_success, dtype=jnp.bool_)
+            & residual_success
+            & producer_finite
+        )
+        inputs = _linear_solve._build_exact_final_linearization_inputs(
+            solved_state=returned_state.solved_state,
+            coil_dofs=coil_dofs,
+            coil_dynamic_inputs=coil_dynamic_inputs,
+            residual_configuration=fixed_residual_configuration,
+        )
+        with device_scope(PhaseId.ADJOINT_LU_FACTOR):
+            lu_piv = jsp_linalg.lu_factor(materialization.jacobian)
+        payload = _linear_solve._build_exact_final_linearization(
+            inputs,
+            residual=materialization.residual,
+            jacobian=materialization.jacobian,
+            lu_piv=lu_piv,
+            producer_solve_success=producer_success,
+        )
+        consumed = _traceable_exact_payload_fused_value_and_gradient(
+            payload,
+            coil_dynamic_inputs_from_dofs=coil_dynamic_inputs_from_dofs,
+            scalar_objective_fn=scalar_objective_fn,
+            exact_residual_fn=exact_residual_fn,
+            producer_residual_tol=producer_residual_tol,
+            linear_solve_tol=linear_solve_tol,
+        )
+        retained_solve = consumed.retained_solve
+        payload_validation = retained_solve.payload_validation
+        consumer_counts = _traceable_adjoint_execution_counts(
+            returned_state.solved_state,
+            retained_solve.status,
+        )._replace(
+            adjoint_execution_count=jnp.where(
+                retained_solve.status.lu_solve_count > 0,
+                _staged_like(
+                    returned_state.solved_state,
+                    1,
+                    dtype=jnp.int32,
+                ),
+                _staged_like(
+                    returned_state.solved_state,
+                    0,
+                    dtype=jnp.int32,
+                ),
+            )
+        )
+        full_graph_counts = consumer_counts._replace(
+            dense_materialization_count=_staged_like(
+                returned_state.solved_state,
+                1,
+                dtype=jnp.int32,
+            ),
+            lu_factorization_count=_staged_like(
+                returned_state.solved_state,
+                1,
+                dtype=jnp.int32,
+            ),
+        )
+        overall_success = producer_success & consumed.success
+        value = jnp.where(
+            overall_success,
+            consumed.value,
+            jnp.full_like(consumed.value, jnp.nan),
+        )
+        gradient = _traceable_adjoint_gradient_or_nan(
+            consumed.gradient,
+            overall_success,
+        )
+        return _TraceableExactPayloadFusedResult(
+            value=value,
+            gradient=gradient,
+            status=_TraceableExactPayloadFusedStatus(
+                success=overall_success,
+                returned_state_solve_success=jnp.asarray(
+                    returned_state.solve_success,
+                    dtype=jnp.bool_,
+                ),
+                producer_solve_success=producer_success,
+                returned_state_residual_success=(
+                    consumed.returned_state_residual_success
+                ),
+                dynamic_inputs_match=consumed.dynamic_inputs_match,
+                live_residual_matches_payload=(consumed.live_residual_matches_payload),
+                payload_validation_success=payload_validation.success,
+                factorization_valid=payload_validation.factorization_valid,
+                adjoint_solve_success=retained_solve.status.success,
+                finite_outputs=consumed.finite_outputs,
+            ),
+            evidence=_TraceableExactPayloadFusedEvidence(
+                producer_residual=payload.residual,
+                live_residual=consumed.live_residual,
+                producer_residual_inf_norm=consumed.producer_residual_inf_norm,
+                adjoint=_TraceableAdjointExecutionEvidence(
+                    adjoint_output=retained_solve.solution,
+                    residual=retained_solve.residual,
+                    residual_relative=retained_solve.status.residual_relative,
+                ),
+                consumer_reuse_counts=consumer_counts,
+                full_graph_counts=full_graph_counts,
+                factorization_reconstruction_count=(
+                    payload_validation.factorization_reconstruction_count
+                ),
+                linearization_primal_traversal_count=(
+                    materialization.telemetry.primal_traversal_count
+                ),
+            ),
+        )
+
+    return jax.jit(closed_value_and_gradient)
 
 
 def _traceable_predict_warmstart_result_from_anchor(
@@ -2247,50 +3186,53 @@ def _traceable_predict_warmstart_result_from_anchor(
     )
     delta = predictor_coil_dofs - predictor_anchor_coil_dofs
 
-    if predictor_kind == "exact":
-        exact_residual_kwargs = _traceable_exact_residual_kwargs(objective_kwargs)
+    with device_scope(PhaseId.NEWTON_WARM_START):
+        if predictor_kind == "exact":
+            exact_residual_kwargs = _traceable_exact_residual_kwargs(objective_kwargs)
 
-        def anchor_residual_of_coils(cd):
-            return _boozer_exact_residual(
-                anchor_x,
-                coil_set_spec=coil_set_spec_from_dofs(cd),
-                **exact_residual_kwargs,
+            def anchor_residual_of_coils(cd):
+                return _boozer_exact_residual(
+                    anchor_x,
+                    coil_set_spec=coil_set_spec_from_dofs(cd),
+                    **exact_residual_kwargs,
+                )
+
+            with device_scope(PhaseId.NEWTON_RESIDUAL_JVP):
+                forcing = jax.jvp(
+                    anchor_residual_of_coils,
+                    (predictor_anchor_coil_dofs,),
+                    (delta,),
+                )[1]
+        else:
+            inner_objective_kwargs = _traceable_inner_objective_kwargs(objective_kwargs)
+            forcing = _traceable_inner_stationarity_coil_jvp(
+                _as_compute_array(anchor_x)
+                if predictor_state_use_compute_dtype
+                else anchor_x,
+                predictor_anchor_coil_dofs,
+                delta,
+                coil_set_spec_from_dofs,
+                **inner_objective_kwargs,
             )
 
-        forcing = jax.jvp(
-            anchor_residual_of_coils,
-            (predictor_anchor_coil_dofs,),
-            (delta,),
-        )[1]
-    else:
-        inner_objective_kwargs = _traceable_inner_objective_kwargs(objective_kwargs)
-        forcing = _traceable_inner_stationarity_coil_jvp(
-            _as_compute_array(anchor_x)
-            if predictor_state_use_compute_dtype
-            else anchor_x,
-            predictor_anchor_coil_dofs,
-            delta,
-            coil_set_spec_from_dofs,
-            **inner_objective_kwargs,
+        live_coil_set_spec_from_dofs = (
+            coil_set_spec_from_dofs
+            if certificate_coil_set_spec_from_dofs is None
+            else certificate_coil_set_spec_from_dofs
         )
-
-    live_coil_set_spec_from_dofs = (
-        coil_set_spec_from_dofs
-        if certificate_coil_set_spec_from_dofs is None
-        else certificate_coil_set_spec_from_dofs
-    )
-    dx, linear_solve_status = _traceable_solve_linearization(
-        booz_jax,
-        _as_jax_float64(anchor_x),
-        _as_jax_float64(-forcing),
-        live_coil_set_spec_from_dofs(anchor_certificate_coil_dofs),
-        objective_kwargs,
-        linear_solve_factors=anchor_linear_solve_factors,
-        linearization_kind=linearization_kind,
-        linear_solve_tol=linear_solve_tol,
-        linear_solve_stab=linear_solve_stab,
-        transpose=False,
-    )
+        with device_scope(PhaseId.NEWTON_LINEAR_SOLVE):
+            dx, linear_solve_status = _traceable_solve_linearization(
+                booz_jax,
+                _as_jax_float64(anchor_x),
+                _as_jax_float64(-forcing),
+                live_coil_set_spec_from_dofs(anchor_certificate_coil_dofs),
+                objective_kwargs,
+                linear_solve_factors=anchor_linear_solve_factors,
+                linearization_kind=linearization_kind,
+                linear_solve_tol=linear_solve_tol,
+                linear_solve_stab=linear_solve_stab,
+                transpose=False,
+            )
     linear_solve_success = _linear_solve._linear_solve_status_success(
         linear_solve_status
     )
@@ -2575,7 +3517,7 @@ def _build_traceable_objective_state(
 
 def _traceable_runtime_reject_host_input(coil_dofs, entrypoint_name):
     if isinstance(coil_dofs, (np.ndarray, np.generic, list, tuple, float, int)):
-        raise RuntimeError(
+        raise RuntimeError(  # noqa: TRY004 - established transfer-guard contract
             f"{entrypoint_name} requires a JAX array. Host inputs must enter "
             "through an explicit staging boundary; transfer_guard=disallow "
             "rejects implicit host-to-device transfer."
@@ -2707,9 +3649,7 @@ def _build_traceable_objective_compiled_bundle_from_state(
         )
 
     jitted_forward_result_for = jax.jit(_forward_result_for)
-    jitted_forward_result_from_anchor_for = jax.jit(
-        _forward_result_from_anchor_for
-    )
+    jitted_forward_result_from_anchor_for = jax.jit(_forward_result_from_anchor_for)
 
     def _total_gradient_for(coil_dofs, solved_x, solved_linear_solve_factors):
         return _traceable_total_gradient_with_status(
@@ -2728,6 +3668,28 @@ def _build_traceable_objective_compiled_bundle_from_state(
 
     def _build_compiled_total_gradient_for():
         return jax.jit(_total_gradient_for)
+
+    def _total_gradient_with_execution_for(
+        coil_dofs,
+        solved_x,
+        solved_linear_solve_factors,
+    ):
+        return _traceable_total_gradient_with_execution_evidence(
+            booz_jax,
+            coil_set_spec_from_dofs,
+            coil_dofs=coil_dofs,
+            solved_x=solved_x,
+            solved_linear_solve_factors=_traceable_runtime_deviceify_tree(
+                solved_linear_solve_factors
+            ),
+            linearization_kind=linearization_kind,
+            linear_solve_tol=linear_solve_tol,
+            linear_solve_stab=linear_solve_stab,
+            objective_kwargs=objective_kwargs,
+        )
+
+    def _build_compiled_total_gradient_with_execution_for():
+        return jax.jit(_total_gradient_with_execution_for)
 
     def _total_gradient_for_with_certificate_key(
         coil_dofs,
@@ -2843,6 +3805,15 @@ def _build_traceable_objective_compiled_bundle_from_state(
                         )
             return lazy_state.total_gradient_with_key(*args)
 
+        def _lazy_compiled_total_gradient_with_execution_for(*args):
+            if lazy_state.total_gradient_with_execution is None:
+                with lazy_state.execution_gradient_lock:
+                    if lazy_state.total_gradient_with_execution is None:
+                        lazy_state.total_gradient_with_execution = (
+                            _build_compiled_total_gradient_with_execution_for()
+                        )
+            return lazy_state.total_gradient_with_execution(*args)
+
         def _lazy_compiled_value_and_grad_for(coil_dofs):
             if lazy_state.value_and_grad is None:
                 with lazy_state.value_and_grad_lock:
@@ -2859,6 +3830,9 @@ def _build_traceable_objective_compiled_bundle_from_state(
             return lazy_state.value_and_grad(coil_dofs)
 
         compiled_total_gradient_for = _lazy_compiled_total_gradient_for
+        compiled_total_gradient_with_execution_for = (
+            _lazy_compiled_total_gradient_with_execution_for
+        )
         compiled_total_gradient_for_with_certificate_key = (
             _lazy_compiled_total_gradient_for_with_certificate_key
         )
@@ -2868,6 +3842,9 @@ def _build_traceable_objective_compiled_bundle_from_state(
     else:
         lazy_state = None
         compiled_total_gradient_for = _build_compiled_total_gradient_for()
+        compiled_total_gradient_with_execution_for = (
+            _build_compiled_total_gradient_with_execution_for()
+        )
         compiled_total_gradient_for_with_certificate_key = (
             _build_compiled_total_gradient_for_with_certificate_key()
         )
@@ -2882,6 +3859,9 @@ def _build_traceable_objective_compiled_bundle_from_state(
             jitted_forward_result_from_anchor_for
         ),
         "compiled_total_gradient_for": compiled_total_gradient_for,
+        "compiled_total_gradient_with_execution_for": (
+            compiled_total_gradient_with_execution_for
+        ),
         "compiled_total_gradient_for_with_certificate_key": (
             compiled_total_gradient_for_with_certificate_key
         ),
@@ -3414,6 +4394,8 @@ class TraceableObjectiveCandidateEvaluation(NamedTuple):
     actual_adjoint_success: jax.Array
     gradient_source: str
     candidate_inner_state: TraceableObjectiveInnerState
+    execution_counts: TraceableObjectiveExecutionCounts | None = None
+    adjoint_evidence: _TraceableAdjointExecutionEvidence | None = None
 
 
 def _build_candidate_evaluation_core(
@@ -3433,6 +4415,9 @@ def _build_candidate_evaluation_core(
         "compiled_forward_result_from_anchor_for"
     )
     compiled_total_gradient_for = compiled_bundle["compiled_total_gradient_for"]
+    compiled_total_gradient_with_execution_for = compiled_bundle.get(
+        "compiled_total_gradient_with_execution_for"
+    )
     baseline_coil_dofs = _as_jax_float64(state["baseline_coil_dofs"])
     baseline_x = _as_jax_float64(state["baseline_x"])
     baseline_linear_solve_factors = _traceable_runtime_deviceify_tree(
@@ -3443,6 +4428,7 @@ def _build_candidate_evaluation_core(
         candidate_coil_dofs,
         incumbent: TraceableObjectiveInnerState | None,
     ) -> TraceableObjectiveCandidateEvaluation:
+        execution_evidence_requested = _TRACEABLE_EXECUTION_EVIDENCE_REQUESTED.get()
         if incumbent is None:
             forward_result = compiled_forward_result_for(candidate_coil_dofs)
             fallback_coil_dofs = baseline_coil_dofs
@@ -3463,9 +4449,7 @@ def _build_candidate_evaluation_core(
                 incumbent.coil_dofs if incumbent_eligible else baseline_coil_dofs
             )
             fallback_x = incumbent.solved_x if incumbent_eligible else baseline_x
-            fallback_gradient_source = (
-                "incumbent" if incumbent_eligible else "baseline"
-            )
+            fallback_gradient_source = "incumbent" if incumbent_eligible else "baseline"
         candidate_gradient_source = _host_bool(forward_result["success"]) or _host_bool(
             forward_result["primal_success"]
         )
@@ -3478,6 +4462,26 @@ def _build_candidate_evaluation_core(
             gradient = _traceable_adjoint_fail_gradient_like(candidate_coil_dofs)
             actual_adjoint_success = _runtime_device_put(np.bool_(False))
             gradient_source = "unavailable"
+            if execution_evidence_requested:
+                execution_counts = _traceable_adjoint_execution_counts(
+                    candidate_coil_dofs
+                )
+                adjoint_evidence = _TraceableAdjointExecutionEvidence(
+                    adjoint_output=_runtime_zeros_like(forward_result["x"]),
+                    residual=_staged_like(
+                        candidate_coil_dofs,
+                        0.0,
+                        dtype=jnp.float64,
+                    ),
+                    residual_relative=_staged_like(
+                        candidate_coil_dofs,
+                        0.0,
+                        dtype=jnp.float64,
+                    ),
+                )
+            else:
+                execution_counts = None
+                adjoint_evidence = None
         else:
             gradient_coil_dofs = fallback_coil_dofs
             gradient_x = fallback_x
@@ -3485,11 +4489,28 @@ def _build_candidate_evaluation_core(
             gradient_source = fallback_gradient_source
 
         if candidate_gradient_source or fallback_gradient_on_primal_failure:
-            raw_gradient, actual_adjoint_success = compiled_total_gradient_for(
-                gradient_coil_dofs,
-                gradient_x,
-                gradient_linear_solve_factors,
-            )
+            if (
+                not execution_evidence_requested
+                or compiled_total_gradient_with_execution_for is None
+            ):
+                raw_gradient, actual_adjoint_success = compiled_total_gradient_for(
+                    gradient_coil_dofs,
+                    gradient_x,
+                    gradient_linear_solve_factors,
+                )
+                execution_counts = None
+                adjoint_evidence = None
+            else:
+                (
+                    raw_gradient,
+                    actual_adjoint_success,
+                    execution_counts,
+                    adjoint_evidence,
+                ) = compiled_total_gradient_with_execution_for(
+                    gradient_coil_dofs,
+                    gradient_x,
+                    gradient_linear_solve_factors,
+                )
             gradient = _traceable_adjoint_gradient_or_nan(
                 raw_gradient,
                 actual_adjoint_success,
@@ -3511,6 +4532,8 @@ def _build_candidate_evaluation_core(
             actual_adjoint_success=actual_adjoint_success,
             gradient_source=gradient_source,
             candidate_inner_state=candidate_inner_state,
+            execution_counts=execution_counts,
+            adjoint_evidence=adjoint_evidence,
         )
 
     return evaluate_candidate
@@ -3528,11 +4551,44 @@ def _build_accepted_incumbent_evaluator(compiled_bundle):
         candidate_coil_dofs,
         incumbent: TraceableObjectiveInnerState,
     ) -> TraceableObjectiveIncumbentEvaluation:
+        execution_evidence_requested = _TRACEABLE_EXECUTION_EVIDENCE_REQUESTED.get()
         core = evaluate_candidate(candidate_coil_dofs, incumbent)
+        execution_counts = core.execution_counts
+        if execution_counts is not None:
+            execution_counts = execution_counts._replace(
+                newton_iteration_count=jnp.asarray(
+                    core.forward_result["newton_iterations"],
+                    dtype=jnp.int32,
+                )
+            )
+        adjoint_evidence = core.adjoint_evidence
         return TraceableObjectiveIncumbentEvaluation(
             value=jnp.asarray(core.forward_result["value"], dtype=jnp.float64),
             gradient=jnp.asarray(core.gradient, dtype=jnp.float64),
+            forward_success=jnp.asarray(
+                core.forward_result["success"], dtype=jnp.bool_
+            ),
+            primal_success=jnp.asarray(
+                core.forward_result["primal_success"], dtype=jnp.bool_
+            ),
+            actual_adjoint_success=jnp.asarray(
+                core.actual_adjoint_success, dtype=jnp.bool_
+            ),
+            gradient_source=core.gradient_source,
             candidate_inner_state=core.candidate_inner_state,
+            forward_result=(
+                core.forward_result if execution_evidence_requested else None
+            ),
+            adjoint_output=(
+                None if adjoint_evidence is None else adjoint_evidence.adjoint_output
+            ),
+            adjoint_residual=(
+                None if adjoint_evidence is None else adjoint_evidence.residual
+            ),
+            adjoint_residual_relative=(
+                None if adjoint_evidence is None else adjoint_evidence.residual_relative
+            ),
+            execution_counts=execution_counts,
         )
 
     return compiled_evaluate
@@ -3587,9 +4643,7 @@ def _build_traceable_trial_evaluator(compiled_bundle):
         newton_attempted_iterations = _host_int(
             forward_result["newton_attempted_iterations"]
         )
-        newton_stop_reason_code = _host_int(
-            forward_result["newton_stop_reason_code"]
-        )
+        newton_stop_reason_code = _host_int(forward_result["newton_stop_reason_code"])
         detailed_newton_telemetry_present = not (
             newton_attempted_iterations == missing_int
             and newton_stop_reason_code == missing_int
@@ -4953,6 +6007,8 @@ def diagnose_traceable_objective_runtime(
             term_total_grad,
             linear_solve_success,
             _mixed_dense_ir_trust,
+            _execution_counts,
+            _adjoint_evidence,
         ) = _traceable_objective_gradient_parts(
             booz_jax,
             coil_set_spec_from_dofs,
@@ -5491,6 +6547,21 @@ class TraceableObjectiveSession:
             )
             return self._trial_evaluator
 
+    def _evaluate_candidate_device(
+        self, candidate, incumbent_state: TraceableObjectiveInnerState
+    ) -> TraceableObjectiveCandidateEvaluation:
+        """Run the shared candidate core once from an already placed array."""
+
+        if not _host_bool(incumbent_state.eligible):
+            raise RuntimeError("candidate evaluation requires an eligible anchor")
+        evaluate_candidate = _build_candidate_evaluation_core(
+            self.ensure_optimizer_compiled_bundle(),
+            fallback_gradient_on_primal_failure=False,
+        )
+        evaluation = evaluate_candidate(candidate, incumbent_state)
+        _block_until_ready(evaluation)
+        return evaluation
+
     def evaluate_candidate_from_anchor(
         self,
         parameters: np.ndarray,
@@ -5501,20 +6572,43 @@ class TraceableObjectiveSession:
         Runs the shared forward/gradient core once and returns its device-resident
         forward state and candidate gradient. A fallback gradient is unavailable.
         """
-        if not _host_bool(incumbent_state.eligible):
-            raise RuntimeError("candidate evaluation requires an eligible anchor")
+
         canonical = np.ascontiguousarray(
             parameters,
             dtype=np.dtype("<f8"),
         ).reshape(-1)
         candidate = _runtime_device_put(canonical, dtype=jnp.float64)
-        evaluate_candidate = _build_candidate_evaluation_core(
-            self.ensure_optimizer_compiled_bundle(),
-            fallback_gradient_on_primal_failure=False,
+        return self._evaluate_candidate_device(candidate, incumbent_state)
+
+    def _evaluate_candidate_from_anchor_host(
+        self,
+        parameters: np.ndarray,
+        incumbent_state: TraceableObjectiveInnerState,
+    ) -> tuple[TraceableObjectiveCandidateEvaluation, float, np.ndarray]:
+        """Evaluate once with exact lifecycle and host-transfer evidence."""
+
+        record_host_event(HostEvent.EVALUATOR_ENTRY)
+        canonical, evaluation_id, trace_attributes = _host_evaluation_identity(
+            parameters
         )
-        evaluation = evaluate_candidate(candidate, incumbent_state)
-        jax.block_until_ready(evaluation)
-        return evaluation
+        with _host_transfer_evaluation(evaluation_id):
+            with host_span(PhaseId.HOST_H2D_SUBMIT, attributes=trace_attributes):
+                candidate = _runtime_device_put(canonical, dtype=jnp.float64)
+            evaluation = self._evaluate_candidate_device(candidate, incumbent_state)
+            record_host_event(HostEvent.DEVICE_READY)
+            with host_span(
+                PhaseId.HOST_D2H_MATERIALIZE,
+                attributes=trace_attributes,
+            ), _host_transfer_phase(PhaseId.HOST_D2H_MATERIALIZE.value):
+                value = float(
+                    _host_scalar(
+                        evaluation.forward_result["value"],
+                        dtype=np.float64,
+                    )
+                )
+                gradient = _host_array(evaluation.gradient, dtype=np.float64)
+        record_host_event(HostEvent.EVALUATOR_RETURN)
+        return evaluation, value, gradient
 
     def accepted_incumbent_host_value_and_grad(
         self,
@@ -5773,13 +6867,14 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
                     coil_set_spec=coil_set_spec,
                 )
             )
-            solve_result = booz_jax.run_code_traceable(
-                coil_set_spec,
-                warmstart_sdofs,
-                warmstart_iota,
-                warmstart_G,
-                materialize_dense_linearization=False,
-            )
+            with device_scope(PhaseId.NEWTON_SOLVER_CONTROL):
+                solve_result = booz_jax.run_code_traceable(
+                    coil_set_spec,
+                    warmstart_sdofs,
+                    warmstart_iota,
+                    warmstart_G,
+                    materialize_dense_linearization=False,
+                )
             solved_sdofs, solved_iota, solved_G = _resolve_traceable_solved_state(
                 booz_jax,
                 solve_result,

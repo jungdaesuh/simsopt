@@ -16,6 +16,7 @@ import logging
 import sys
 import types
 from contextlib import contextmanager
+from dataclasses import replace
 from functools import partial
 
 import jax
@@ -8082,6 +8083,105 @@ class TestBoozerSurfaceJAXExactPath:
     - Residual is raw unmasked (full grid size).
     """
 
+    @pytest.mark.parametrize("variant", ["C1", "C2"])
+    def test_benchmark_entry_point_binds_variant_before_jit(self, variant):
+        booz = _make_mock_boozer_surface_exact()
+
+        route = booz._make_run_code_traceable_exact_benchmark_variant(variant)
+
+        assert route.variant == variant
+        assert route.compiled_kernel.__name__ == (
+            f"run_code_traceable_exact_{variant}_array_kernel"
+        )
+
+    @pytest.mark.parametrize("variant", ["C1", "C2"])
+    def test_benchmark_route_jits_array_kernel_with_certificate_source(
+        self,
+        monkeypatch,
+        variant,
+    ):
+        booz = _make_mock_boozer_surface_exact()
+        booz.options["newton_maxiter"] = 2
+        coil_set_spec = booz.coil_set_spec
+        certificate_coil_set_spec = replace(
+            coil_set_spec,
+            groups=tuple(
+                replace(group, currents=group.currents * 1.01)
+                for group in coil_set_spec.groups
+            ),
+        )
+        sdofs = jax.device_put(np.asarray(booz.surface.get_dofs(), dtype=np.float64))
+        iota = jax.device_put(np.asarray(0.3, dtype=np.float64))
+        G = jax.device_put(np.asarray(0.05, dtype=np.float64))
+
+        def exact_residual(_weight_inv_modB):
+            def residual(x, certificate_spec):
+                current_sum = sum(
+                    jnp.sum(group.currents) for group in certificate_spec.groups
+                )
+                target = jnp.broadcast_to(current_sum * 1.0e-12, x.shape)
+                return x - target
+
+            return residual
+
+        monkeypatch.setattr(booz, "_get_traceable_exact_residual", exact_residual)
+        route = booz._make_run_code_traceable_exact_benchmark_variant(variant)
+
+        with jax.transfer_guard("disallow"):
+            array_result = route.compiled_kernel(
+                coil_set_spec,
+                certificate_coil_set_spec,
+                sdofs,
+                iota,
+                G,
+            )
+            jax.block_until_ready(array_result)
+
+        array_leaves = jax.tree.leaves(
+            array_result,
+            is_leaf=lambda value: value is None,
+        )
+        assert array_leaves
+        assert all(isinstance(leaf, jax.Array) for leaf in array_leaves)
+        expected_target = (
+            sum(
+                float(np.sum(np.asarray(group.currents)))
+                for group in certificate_coil_set_spec.groups
+            )
+            * 1.0e-12
+        )
+        np.testing.assert_allclose(
+            np.asarray(array_result["x"]),
+            expected_target,
+            rtol=0.0,
+            atol=8.0 * np.finfo(np.float64).eps,
+        )
+
+        projected = route.project_result(array_result)
+        assert projected["type"] == "exact"
+        assert projected["plu"] is None
+        assert projected["exact_factorization_backend"] == "dense-lu"
+        assert projected["jacobian_materialized"] is (variant == "C2")
+        assert bool(projected["exact_newton_variant_dense_linearization_used"])
+        assert int(projected["exact_newton_variant_dense_materialization_count"]) > 0
+        assert int(projected["exact_newton_variant_lu_factorization_count"]) > 0
+        assert int(projected["exact_newton_variant_lu_solve_count"]) > 0
+        if variant == "C1":
+            assert projected["jacobian"] is None
+            assert int(projected["exact_newton_variant_stop_reason_code"]) == 0
+            assert not bool(projected["exact_newton_variant_numerical_failure"])
+            assert not bool(projected["exact_newton_variant_stalled"])
+        else:
+            assert projected["jacobian"] is not None
+            assert int(projected["exact_newton_variant_stop_reason_code"]) >= 0
+            assert not bool(projected["exact_newton_variant_numerical_failure"])
+
+    def test_benchmark_entry_point_rejects_c0_at_construction(self):
+        booz = _make_mock_boozer_surface_exact()
+
+        with pytest.raises(ValueError, match="must be C1 or C2"):
+            booz._make_run_code_traceable_exact_benchmark_variant("C0")
+
     def test_exact_instantiation(self):
         """constraint_weight=None yields boozer_type='exact'."""
         booz = _make_mock_boozer_surface_exact()
@@ -8555,6 +8655,41 @@ class TestBoozerSurfaceJAXExactPath:
         assert result["jacobian_materialized"] is False
         assert result["max_dense_jacobian_bytes"] is None
         assert result["message"] is None
+        assert frozenset(result) == frozenset(
+            {
+                "x",
+                "sdofs",
+                "iota",
+                "G",
+                "fun",
+                "plu",
+                "lu_piv",
+                "nit",
+                "success",
+                "primal_success",
+                "adjoint_linear_solve_available",
+                "linearization_kind",
+                "linear_solve_backend",
+                "dense_linear_solve_factors_available",
+                "type",
+                "weight_inv_modB",
+                "residual",
+                "jacobian",
+                "message",
+                "failure_category",
+                "failure_stage",
+                "jacobian_materialized",
+                "dense_jacobian_shape",
+                "dense_jacobian_bytes",
+                "max_dense_jacobian_bytes",
+                "exact_jacobian_action_max_rel",
+                "exact_newton_linear_residual_rel",
+                "exact_refinement_correction_rel",
+                "exact_adjoint_solve_residual_rel",
+                "exact_factorization_backend",
+                "exact_condition_estimate",
+            }
+        )
         for field in _bsj.SOLVE_QUALITY_EXACT_FIELDS:
             assert field in result
         assert result["exact_factorization_backend"] == _bsj.EXACT_FACTORIZATION_BACKEND
