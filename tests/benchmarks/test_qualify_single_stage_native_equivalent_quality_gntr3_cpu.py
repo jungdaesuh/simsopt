@@ -7,11 +7,12 @@ import multiprocessing
 import os
 import shutil
 import stat
+import sys
 import time
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Protocol
 
 import benchmarks.qualify_single_stage_native_equivalent_quality_gntr3_cpu as qualifier
@@ -1904,15 +1905,16 @@ def test_direct_bootstrap_phase_is_self_contained_end_to_end(
         if isinstance(node, ast.If) and "__main__" in ast.dump(node.test)
     )
     truncated = "".join(source.splitlines(keepends=True)[: guard_line - 1])
-    namespace: dict[str, object] = {
-        "__name__": "qualifier_bootstrap_probe",
-        "__file__": str(source_path),
-    }
-    exec(compile(truncated, str(source_path), "exec"), namespace)
-    repository = source_path.parents[1]
-    publication = namespace["_prepare_publication"](tmp_path / "probe-root")
+    probe = ModuleType("qualifier_bootstrap_probe")
+    probe.__file__ = str(source_path)
+    sys.modules[probe.__name__] = probe
+    publication = None
     copied = None
     try:
+        exec(compile(truncated, str(source_path), "exec"), probe.__dict__)
+        namespace = probe.__dict__
+        repository = source_path.parents[1]
+        publication = namespace["_prepare_publication"](tmp_path / "probe-root")
         authority = namespace["_load_execution_source_authority"](repository)
         copied = namespace["_bootstrap_copy_execution_source"](
             authority,
@@ -1924,4 +1926,6 @@ def test_direct_bootstrap_phase_is_self_contained_end_to_end(
     finally:
         if copied is not None:
             copied.close()
-        namespace["_close_publication"](publication)
+        if publication is not None:
+            probe.__dict__["_close_publication"](publication)
+        del sys.modules[probe.__name__]
