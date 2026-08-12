@@ -211,6 +211,81 @@ def test_frozen_projector_run_matches_the_exact_retraction_run() -> None:
     )
 
 
+def test_transport_masks_pairs_whose_curvature_does_not_survive() -> None:
+    from simsopt_jax.geo.optimizers.quasi_newton_metric import (
+        empty_quasi_newton_metric,
+        insert_curvature_pair,
+        transport_quasi_newton_metric,
+    )
+
+    metric = empty_quasi_newton_metric(4, 5, jnp.float64)
+    step = jnp.asarray([1.0, 0.0, 0.0, 0.0, 0.0], dtype=jnp.float64)
+    change = jnp.asarray([1.0, 0.0, 0.0, 0.0, 0.0], dtype=jnp.float64)
+    metric = insert_curvature_pair(metric, step, change)
+    assert int(metric.history.n_corrs) == 1
+
+    # A transport that annihilates exactly the direction the pair's curvature
+    # lived in must retire the pair rather than keep pretending it is curvature.
+    def kill_first_axis(vectors: jax.Array) -> jax.Array:
+        return vectors.at[:, 0].set(0.0)
+
+    carried = transport_quasi_newton_metric(metric, kill_first_axis)
+
+    assert int(carried.masked_pairs) == 1
+    assert int(carried.live_pairs) == 1
+    np.testing.assert_allclose(np.asarray(carried.metric.history.s[0]), 0.0)
+    np.testing.assert_allclose(np.asarray(carried.metric.history.y[0]), 0.0)
+
+
+def test_masked_pair_is_a_no_op_in_the_two_loop() -> None:
+    from simsopt_jax.geo.optimizers.quasi_newton_metric import (
+        apply_quasi_newton_metric,
+        empty_quasi_newton_metric,
+        insert_curvature_pair,
+        transport_quasi_newton_metric,
+    )
+
+    empty = empty_quasi_newton_metric(4, 5, jnp.float64)
+    stored = insert_curvature_pair(
+        empty,
+        jnp.asarray([1.0, 0.0, 0.0, 0.0, 0.0], dtype=jnp.float64),
+        jnp.asarray([1.0, 0.0, 0.0, 0.0, 0.0], dtype=jnp.float64),
+    )
+    masked = transport_quasi_newton_metric(
+        stored, lambda vectors: vectors.at[:, 0].set(0.0)
+    ).metric
+    probe = jnp.asarray([0.3, -0.7, 1.1, 0.0, 2.0], dtype=jnp.float64)
+
+    # theta is carried from the stored pair, so compare against the same store
+    # with its pair zeroed -- the claim is that a zeroed pair contributes
+    # nothing, not that the store reverts to the identity.
+    np.testing.assert_allclose(
+        np.asarray(apply_quasi_newton_metric(masked, probe)),
+        np.asarray(probe) / float(masked.inverse_hessian_theta),
+        atol=1.0e-14,
+    )
+
+
+def test_transport_run_holds_feasibility_and_descends() -> None:
+    run = run_projected_lbfgs(
+        _sphere_problem,
+        _feasible_start(),
+        options=ProjectedLbfgsOptions(
+            maximum_iterations=40,
+            memory=6,
+            feasibility_tolerance=1.0e-12,
+            vector_transport=True,
+        ),
+    )
+
+    objectives = [record.objective for record in run.iterations]
+    assert objectives == sorted(objectives, reverse=True)
+    assert abs(run.objective - _SPHERE_MINIMUM) <= 1.0e-10
+    for record in run.iterations:
+        assert record.feasibility_inf <= 1.0e-12
+        assert record.transport_masked_pairs >= 0
+
+
 def test_infeasible_start_fails_closed() -> None:
     run = run_projected_lbfgs(
         _sphere_problem,
