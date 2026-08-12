@@ -13,6 +13,7 @@ import hashlib
 import importlib
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -26,11 +27,18 @@ from typing import Final, Literal, TypeAlias
 
 SOURCE_MANIFEST_SCHEMA_VERSION: Final = "single-stage-fullspace-source-manifest-v1"
 RUNTIME_EVIDENCE_SCHEMA_VERSION: Final = "single-stage-fullspace-runtime-evidence-v1"
+RUNTIME_EVIDENCE_V2_SCHEMA_VERSION: Final = "single-stage-fullspace-runtime-evidence-v2"
 SOURCE_MANIFEST_FILENAME: Final = "source-manifest.json"
 RUNTIME_EVIDENCE_FILENAME: Final = "runtime-evidence.json"
 
 SnapshotRole = Literal[
-    "execution_source", "configuration", "benchmark", "test", "native_extension"
+    "execution_source",
+    "configuration",
+    "benchmark",
+    "test",
+    "native_extension",
+    "execution_source_manifest",
+    "prequalification_plan",
 ]
 CommandRunner: TypeAlias = Callable[
     [Sequence[str], Mapping[str, str]], subprocess.CompletedProcess[str]
@@ -39,8 +47,31 @@ JsonValue: TypeAlias = (
     None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 )
 
-_ROLES: Final = frozenset(
+LEGACY_SNAPSHOT_ROLES: Final[frozenset[SnapshotRole]] = frozenset(
     {"execution_source", "configuration", "benchmark", "test", "native_extension"}
+)
+DIAG4_GPU_SNAPSHOT_ROLES: Final[frozenset[SnapshotRole]] = frozenset(
+    {
+        "execution_source",
+        "benchmark",
+        "test",
+        "execution_source_manifest",
+        "native_extension",
+    }
+)
+DIAG4_CPU_SNAPSHOT_ROLES: Final[frozenset[SnapshotRole]] = (
+    DIAG4_GPU_SNAPSHOT_ROLES | frozenset({"prequalification_plan"})
+)
+# DIAG5 changes live-runtime/native-binding schemas, not snapshot membership.
+# These aliases make the successor contract explicit without reinterpreting
+# either DIAG4 manifest bytes or the generation-neutral source-manifest schema.
+DIAG5_GPU_SNAPSHOT_ROLES: Final[frozenset[SnapshotRole]] = DIAG4_GPU_SNAPSHOT_ROLES
+DIAG5_CPU_SNAPSHOT_ROLES: Final[frozenset[SnapshotRole]] = DIAG4_CPU_SNAPSHOT_ROLES
+DIAG5_PREQUALIFICATION_PLAN_RELATIVE_PATH: Final = "control/prequalification-plan.md"
+_SUPPORTED_SNAPSHOT_ROLE_SETS: Final = (
+    LEGACY_SNAPSHOT_ROLES,
+    DIAG4_GPU_SNAPSHOT_ROLES,
+    DIAG4_CPU_SNAPSHOT_ROLES,
 )
 _IMPORT_MODULES: Final = (
     "simsopt",
@@ -54,6 +85,7 @@ _ENVIRONMENT_KEYS: Final = tuple(
             "CUDA_VISIBLE_DEVICES",
             "CUDA_DEVICE_ORDER",
             "JAX_COMPILATION_CACHE_DIR",
+            "JAX_ENABLE_COMPILATION_CACHE",
             "JAX_CUDA_VISIBLE_DEVICES",
             "JAX_DEFAULT_MATMUL_PRECISION",
             "JAX_ENABLE_X64",
@@ -70,6 +102,7 @@ _ENVIRONMENT_KEYS: Final = tuple(
             "PYTHONPATH",
             "TF_NUM_INTEROP_THREADS",
             "TF_NUM_INTRAOP_THREADS",
+            "TF_PROFILER_TRACE_VIEWER_MAX_EVENTS",
             "XLA_FLAGS",
             "XLA_PYTHON_CLIENT_ALLOCATOR",
             "XLA_PYTHON_CLIENT_MEM_FRACTION",
@@ -77,9 +110,25 @@ _ENVIRONMENT_KEYS: Final = tuple(
         )
     )
 )
+XLA_GPU_COMMAND_BUFFER_DISABLE_FLAG: Final = "--xla_gpu_enable_command_buffer="
+_XLA_GPU_COMMAND_BUFFER_FLAG_PREFIX: Final = (
+    XLA_GPU_COMMAND_BUFFER_DISABLE_FLAG.removesuffix("=")
+)
 _SHA256_LENGTH: Final = 64
 _LOWER_HEX: Final = frozenset("0123456789abcdef")
 _COPY_CHUNK_BYTES: Final = 1024 * 1024
+
+
+def command_buffer_disabled_xla_flags(value: str) -> str:
+    """Canonicalize XLA flags with GPU command-buffer execution disabled."""
+
+    retained = tuple(
+        token
+        for token in shlex.split(value)
+        if token != _XLA_GPU_COMMAND_BUFFER_FLAG_PREFIX
+        and not token.startswith(f"{_XLA_GPU_COMMAND_BUFFER_FLAG_PREFIX}=")
+    )
+    return shlex.join((*retained, XLA_GPU_COMMAND_BUFFER_DISABLE_FLAG))
 
 
 def activate_snapshot_source_imports(source_root: Path) -> None:
@@ -183,6 +232,15 @@ class RuntimeIdentity:
     effective_environment_sha256: str
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeIdentityV2(RuntimeIdentity):
+    """DIAG5 runtime identity with the independently loaded native binding."""
+
+    native_extension_sha256: str
+    native_extension_size_bytes: int
+    native_extension_link_count: int
+
+
 def canonical_json_bytes(value: JsonValue) -> bytes:
     """Serialize the evidence protocol's sole UTF-8 JSON representation."""
 
@@ -261,6 +319,15 @@ class WorktreeIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class SnapshotIdentity:
+    """Pathless canonical identity of one immutable source snapshot."""
+
+    manifest_sha256: str
+    entries: tuple[SnapshotEntry, ...]
+    worktree: WorktreeIdentity
+
+
+@dataclass(frozen=True, slots=True)
 class SnapshotPublication:
     """A sealed snapshot plus its content-addressed source identity."""
 
@@ -269,6 +336,11 @@ class SnapshotPublication:
     manifest_sha256: str
     entries: tuple[SnapshotEntry, ...]
     worktree: WorktreeIdentity
+
+    def identity(self) -> SnapshotIdentity:
+        """Return the path-independent identity of these sealed bytes."""
+
+        return build_snapshot_identity(self.entries, self.worktree)
 
     def source_identity(self, campaign_root: Path) -> SourceIdentity:
         root = _strict_directory(campaign_root, "campaign root")
@@ -296,6 +368,15 @@ class SnapshotPublication:
         )
 
 
+class SnapshotPostPublicationError(OSError):
+    """A published snapshot exists, but its post-rename durability step failed."""
+
+    def __init__(self, publication: SnapshotPublication, cause: BaseException) -> None:
+        super().__init__(str(cause))
+        self.publication = publication
+        self.cause = cause
+
+
 @dataclass(frozen=True, slots=True)
 class ImportBinding:
     """A live module origin proven equal to one source-manifest entry."""
@@ -319,6 +400,13 @@ class RuntimeObservation:
     effective_environment: tuple[tuple[str, str | None], ...]
     device_name: str
     platform_version: str
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeObservationV2(RuntimeObservation):
+    """DIAG5 observation whose native import is separate from snapshot sources."""
+
+    runtime_identity: RuntimeIdentityV2
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,6 +441,38 @@ class RuntimeEvidence:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeEvidenceV2:
+    """Canonical DIAG5 runtime evidence; v1 evidence remains byte-stable."""
+
+    source_identity: SourceIdentity
+    observation: RuntimeObservationV2
+    snapshot_manifest_sha256: str
+
+    def to_payload(self) -> dict[str, JsonValue]:
+        environment = {
+            key: value for key, value in self.observation.effective_environment
+        }
+        return {
+            "device": {
+                "name": self.observation.device_name,
+                "platform_version": self.observation.platform_version,
+            },
+            "effective_environment": environment,
+            "entrypoint_binding": self.observation.entrypoint_binding.to_payload(),
+            "import_bindings": [
+                binding.to_payload() for binding in self.observation.import_bindings
+            ],
+            "runtime_identity": asdict(self.observation.runtime_identity),
+            "schema_version": RUNTIME_EVIDENCE_V2_SCHEMA_VERSION,
+            "snapshot_manifest_sha256": self.snapshot_manifest_sha256,
+            "source_identity": {
+                **asdict(self.source_identity),
+                "snapshot_manifest": asdict(self.source_identity.snapshot_manifest),
+            },
+        }
+
+
 def _sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
@@ -362,6 +482,14 @@ def _sha256_file(path: Path) -> str:
     with path.open("rb") as stream:
         while chunk := stream.read(_COPY_CHUNK_BYTES):
             digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sha256_descriptor(descriptor: int) -> str:
+    digest = hashlib.sha256()
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    while chunk := os.read(descriptor, _COPY_CHUNK_BYTES):
+        digest.update(chunk)
     return digest.hexdigest()
 
 
@@ -476,8 +604,19 @@ def capture_worktree_identity(repo_root: Path) -> WorktreeIdentity:
     )
 
 
+def _validate_required_roles(
+    required_roles: frozenset[SnapshotRole],
+) -> frozenset[SnapshotRole]:
+    for supported_roles in _SUPPORTED_SNAPSHOT_ROLE_SETS:
+        if required_roles == supported_roles:
+            return supported_roles
+    raise SnapshotValidationError("required_roles is not a supported exact role set")
+
+
 def _expand_source_roots(
     roots: Sequence[SourceRoot],
+    *,
+    required_roles: frozenset[SnapshotRole],
 ) -> tuple[tuple[SnapshotEntry, Path], ...]:
     if not roots:
         raise SnapshotValidationError("at least one explicit source root is required")
@@ -485,7 +624,7 @@ def _expand_source_roots(
     observed_roles: set[str] = set()
     for index, root in enumerate(roots):
         context = f"source_roots[{index}]"
-        if root.role not in _ROLES:
+        if root.role not in required_roles:
             raise SnapshotValidationError(f"{context}.role is unsupported")
         source = root.source_path.absolute()
         destination_root = _safe_relative_path(
@@ -524,9 +663,9 @@ def _expand_source_roots(
             entry = SnapshotEntry(root.role, relative_text, size_bytes, "")
             selected[relative_text] = (entry, descendant)
             observed_roles.add(root.role)
-    if observed_roles != _ROLES:
+    if observed_roles != required_roles:
         raise SnapshotValidationError(
-            "source roots must cover execution_source, configuration, benchmark, test, and native_extension"
+            "source roots do not cover the exact required snapshot roles"
         )
     return tuple(selected[path] for path in sorted(selected))
 
@@ -539,6 +678,79 @@ def _manifest_payload(
         "schema_version": SOURCE_MANIFEST_SCHEMA_VERSION,
         "worktree": worktree.to_payload(),
     }
+
+
+def build_snapshot_identity(
+    entries: Sequence[SnapshotEntry], worktree: WorktreeIdentity
+) -> SnapshotIdentity:
+    """Build an identity from the exact canonical source-manifest payload."""
+
+    frozen_entries = tuple(entries)
+    roles = frozenset(entry.role for entry in frozen_entries)
+    _validate_required_roles(roles)
+    paths = tuple(entry.relative_path for entry in frozen_entries)
+    if paths != tuple(sorted(paths)) or len(paths) != len(set(paths)):
+        raise SnapshotValidationError(
+            "snapshot identity paths are not sorted and unique"
+        )
+    for entry in frozen_entries:
+        if (
+            str(_safe_relative_path(entry.relative_path, "snapshot identity entry"))
+            != entry.relative_path
+        ):
+            raise SnapshotValidationError("snapshot identity path is noncanonical")
+        if (
+            type(entry.size_bytes) is not int
+            or entry.size_bytes < 0
+            or not _is_sha256(entry.sha256)
+        ):
+            raise SnapshotValidationError("snapshot identity entry metadata is invalid")
+    if (
+        len(worktree.git_head) != 40
+        or any(character not in "0123456789abcdef" for character in worktree.git_head)
+        or not _is_sha256(worktree.tracked_diff_sha256)
+        or not _is_sha256(worktree.untracked_bytes_manifest_sha256)
+        or not Path(worktree.repo_root).is_absolute()
+    ):
+        raise SnapshotValidationError("snapshot identity worktree is invalid")
+    manifest_bytes = canonical_json_bytes(_manifest_payload(frozen_entries, worktree))
+    return SnapshotIdentity(
+        manifest_sha256=_sha256_bytes(manifest_bytes),
+        entries=frozen_entries,
+        worktree=worktree,
+    )
+
+
+def project_diag5_gpu_snapshot_identity(
+    cpu_identity: SnapshotIdentity,
+) -> SnapshotIdentity:
+    """Derive the GPU closure by removing only the sealed CPU plan control."""
+
+    canonical_cpu = build_snapshot_identity(cpu_identity.entries, cpu_identity.worktree)
+    if canonical_cpu != cpu_identity:
+        raise SnapshotValidationError("DIAG5 CPU snapshot identity is noncanonical")
+    if frozenset(entry.role for entry in cpu_identity.entries) != (
+        DIAG5_CPU_SNAPSHOT_ROLES
+    ):
+        raise SnapshotValidationError("DIAG5 CPU snapshot roles differ")
+    removed = tuple(
+        entry for entry in cpu_identity.entries if entry.role == "prequalification_plan"
+    )
+    if len(removed) != 1 or removed[0].relative_path != (
+        DIAG5_PREQUALIFICATION_PLAN_RELATIVE_PATH
+    ):
+        raise SnapshotValidationError("DIAG5 CPU prequalification-plan control differs")
+    retained = tuple(
+        entry
+        for entry in cpu_identity.entries
+        if entry.relative_path != DIAG5_PREQUALIFICATION_PLAN_RELATIVE_PATH
+    )
+    if (
+        len(retained) + 1 != len(cpu_identity.entries)
+        or frozenset(entry.role for entry in retained) != DIAG5_GPU_SNAPSHOT_ROLES
+    ):
+        raise SnapshotValidationError("DIAG5 GPU snapshot projection differs")
+    return build_snapshot_identity(retained, cpu_identity.worktree)
 
 
 def _seal_tree(root: Path) -> None:
@@ -557,15 +769,17 @@ def publish_immutable_snapshot(
     roots: Sequence[SourceRoot],
     *,
     worktree: WorktreeIdentity,
+    required_roles: frozenset[SnapshotRole] = LEGACY_SNAPSHOT_ROLES,
 ) -> SnapshotPublication:
     """Atomically copy explicit roots into a fresh canonical read-only tree."""
 
+    roles = _validate_required_roles(required_roles)
     target = destination.absolute()
     _reject_symlink_components(target.parent, "snapshot parent")
     if target.exists() or target.is_symlink():
         raise FileExistsError(target)
     target.parent.mkdir(parents=True, exist_ok=True)
-    selected = _expand_source_roots(roots)
+    selected = _expand_source_roots(roots, required_roles=roles)
     staging = Path(
         tempfile.mkdtemp(prefix=f".{target.name}.staging-", dir=target.parent)
     )
@@ -614,19 +828,41 @@ def publish_immutable_snapshot(
         finally:
             os.close(directory_fd)
         _seal_tree(staging)
-        staging.rename(target)
-        parent_fd = os.open(target.parent, os.O_RDONLY)
-        try:
-            os.fsync(parent_fd)
-        finally:
-            os.close(parent_fd)
-        return SnapshotPublication(
+        publication = SnapshotPublication(
             root=target,
             manifest_path=target / SOURCE_MANIFEST_FILENAME,
             manifest_sha256=_sha256_bytes(manifest_bytes),
             entries=tuple(entries),
             worktree=worktree,
         )
+        staging.rename(target)
+        try:
+            parent_fd = os.open(
+                target.parent,
+                os.O_RDONLY
+                | os.O_CLOEXEC
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except OSError as error:
+            raise SnapshotPostPublicationError(publication, error) from error
+        parent_error: OSError | None = None
+        try:
+            try:
+                os.fsync(parent_fd)
+            except OSError as error:
+                parent_error = error
+        finally:
+            try:
+                os.close(parent_fd)
+            except OSError as error:
+                if parent_error is None:
+                    parent_error = error
+        if parent_error is not None:
+            raise SnapshotPostPublicationError(
+                publication, parent_error
+            ) from parent_error
+        return publication
     except Exception:
         if staging.exists():
             staging.chmod(0o700)
@@ -636,6 +872,149 @@ def publish_immutable_snapshot(
                 path.chmod(0o700)
             shutil.rmtree(staging)
         raise
+
+
+def copy_immutable_snapshot(
+    destination: Path,
+    source_root: Path,
+    *,
+    source_required_roles: frozenset[SnapshotRole],
+    destination_required_roles: frozenset[SnapshotRole],
+) -> SnapshotPublication:
+    """Copy a sealed CPU snapshot into the exact narrower GPU role contract."""
+
+    source_roles = _validate_required_roles(source_required_roles)
+    destination_roles = _validate_required_roles(destination_required_roles)
+    if (
+        source_roles != DIAG4_CPU_SNAPSHOT_ROLES
+        or destination_roles != DIAG4_GPU_SNAPSHOT_ROLES
+    ):
+        raise SnapshotValidationError("snapshot copy role transition is unsupported")
+    source = load_snapshot(source_root, required_roles=source_roles)
+    roots = tuple(
+        SourceRoot(
+            entry.role,
+            source.root.joinpath(*PurePosixPath(entry.relative_path).parts),
+            entry.relative_path,
+        )
+        for entry in source.entries
+        if entry.role in destination_roles
+    )
+    publication = publish_immutable_snapshot(
+        destination,
+        roots,
+        worktree=source.worktree,
+        required_roles=destination_roles,
+    )
+    expected = tuple(
+        entry for entry in source.entries if entry.role in destination_roles
+    )
+    if publication.entries != expected:
+        raise SnapshotValidationError("copied snapshot entries differ from source")
+    return publication
+
+
+def validate_sealed_native_extension(
+    snapshot: SnapshotPublication,
+    *,
+    expected_sha256: str,
+    expected_size_bytes: int,
+    expected_relative_path: str,
+) -> SnapshotEntry:
+    """Reprove one copied native leaf independently of live-install topology."""
+
+    if not _is_sha256(expected_sha256):
+        raise SnapshotValidationError("expected native extension SHA-256 is invalid")
+    if type(expected_size_bytes) is not int or expected_size_bytes < 0:
+        raise SnapshotValidationError("expected native extension size is invalid")
+    relative_path = _safe_relative_path(
+        expected_relative_path, "expected native extension relative path"
+    )
+    if len(relative_path.parts) != 2 or relative_path.parts[0] != "native":
+        raise SnapshotValidationError(
+            "expected native extension relative path is invalid"
+        )
+
+    required_roles = _validate_required_roles(
+        frozenset(entry.role for entry in snapshot.entries)
+    )
+    loaded = load_snapshot(snapshot.root, required_roles=required_roles)
+    if loaded != snapshot:
+        raise SnapshotValidationError("native extension snapshot identity differs")
+    native_entries = tuple(
+        entry for entry in loaded.entries if entry.role == "native_extension"
+    )
+    if len(native_entries) != 1:
+        raise SnapshotValidationError(
+            "snapshot must contain exactly one native extension"
+        )
+    entry = native_entries[0]
+    if (
+        entry.relative_path != relative_path.as_posix()
+        or entry.sha256 != expected_sha256
+        or entry.size_bytes != expected_size_bytes
+    ):
+        raise SnapshotValidationError("sealed native extension identity differs")
+
+    path = loaded.root.joinpath(*PurePosixPath(entry.relative_path).parts)
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        locked = os.fstat(descriptor)
+        bound = path.stat(follow_symlinks=False)
+        locked_identity = (locked.st_dev, locked.st_ino, locked.st_size)
+        bound_identity = (bound.st_dev, bound.st_ino, bound.st_size)
+        if (
+            not stat.S_ISREG(locked.st_mode)
+            or not stat.S_ISREG(bound.st_mode)
+            or locked_identity != bound_identity
+            or locked.st_nlink != 1
+            or bound.st_nlink != 1
+            or stat.S_IMODE(locked.st_mode) != 0o444
+            or stat.S_IMODE(bound.st_mode) != 0o444
+            or locked.st_size != expected_size_bytes
+            or _sha256_descriptor(descriptor) != expected_sha256
+        ):
+            raise SnapshotValidationError(
+                "sealed native extension topology or bytes differ"
+            )
+    finally:
+        os.close(descriptor)
+    return entry
+
+
+def copy_diag5_immutable_snapshot(
+    destination: Path,
+    source_root: Path,
+    *,
+    expected_sha256: str,
+    expected_size_bytes: int,
+    expected_native_relative_path: str,
+) -> SnapshotPublication:
+    """Atomically publish the DIAG5 GPU closure after validating its CPU source."""
+
+    source = load_snapshot(source_root, required_roles=DIAG5_CPU_SNAPSHOT_ROLES)
+    validate_sealed_native_extension(
+        source,
+        expected_sha256=expected_sha256,
+        expected_size_bytes=expected_size_bytes,
+        expected_relative_path=expected_native_relative_path,
+    )
+    publication = copy_immutable_snapshot(
+        destination,
+        source.root,
+        source_required_roles=DIAG5_CPU_SNAPSHOT_ROLES,
+        destination_required_roles=DIAG5_GPU_SNAPSHOT_ROLES,
+    )
+    validate_sealed_native_extension(
+        publication,
+        expected_sha256=expected_sha256,
+        expected_size_bytes=expected_size_bytes,
+        expected_relative_path=expected_native_relative_path,
+    )
+    return publication
 
 
 def _load_json(payload: bytes, context: str) -> dict[str, object]:
@@ -714,9 +1093,14 @@ def _parse_worktree(value: object) -> WorktreeIdentity:
     )
 
 
-def load_snapshot(snapshot_root: Path) -> SnapshotPublication:
+def load_snapshot(
+    snapshot_root: Path,
+    *,
+    required_roles: frozenset[SnapshotRole] = LEGACY_SNAPSHOT_ROLES,
+) -> SnapshotPublication:
     """Revalidate the manifest, exact file set, digests, roles, and read-only seal."""
 
+    expected_roles = _validate_required_roles(required_roles)
     root = _strict_directory(snapshot_root, "snapshot root")
     for path in root.rglob("*"):
         if path.is_symlink():
@@ -749,7 +1133,7 @@ def load_snapshot(snapshot_root: Path) -> SnapshotPublication:
             context,
         )
         role = _string(raw_entry["role"], f"{context}.role")
-        if role not in _ROLES:
+        if role not in expected_roles:
             raise SnapshotValidationError(f"{context}.role is unsupported")
         relative = str(
             _safe_relative_path(
@@ -777,7 +1161,7 @@ def load_snapshot(snapshot_root: Path) -> SnapshotPublication:
         roles.add(role)
     if paths != sorted(paths) or len(paths) != len(set(paths)):
         raise SnapshotValidationError("source manifest paths are not sorted and unique")
-    if roles != _ROLES:
+    if roles != expected_roles:
         raise SnapshotValidationError("source manifest omits a required role")
     actual_files = tuple(
         sorted(
@@ -847,6 +1231,121 @@ def _bind_imports(snapshot: SnapshotPublication) -> tuple[ImportBinding, ...]:
         bindings.append(
             ImportBinding(module_name, relative, entry.size_bytes, entry.sha256)
         )
+    return tuple(bindings)
+
+
+def _validate_installed_native_extension(
+    path: Path,
+    *,
+    expected_sha256: str,
+    expected_size_bytes: int,
+    expected_link_count: int,
+) -> Path:
+    """Descriptor-bind one installed native extension to an expected identity."""
+
+    if not path.is_absolute() or path != path.resolve(strict=True):
+        raise SnapshotValidationError(
+            "installed native extension path is not absolute and resolved"
+        )
+    if not _is_sha256(expected_sha256):
+        raise SnapshotValidationError("installed native extension digest is invalid")
+    if expected_size_bytes <= 0 or expected_link_count <= 0:
+        raise SnapshotValidationError(
+            "installed native extension size and link count must be positive"
+        )
+    _reject_symlink_components(path, "installed native extension path")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        observed = os.fstat(descriptor)
+        named = path.stat(follow_symlinks=False)
+        if (
+            not stat.S_ISREG(observed.st_mode)
+            or not stat.S_ISREG(named.st_mode)
+            or (observed.st_dev, observed.st_ino) != (named.st_dev, named.st_ino)
+            or observed.st_size != expected_size_bytes
+            or observed.st_nlink != expected_link_count
+            or _sha256_descriptor(descriptor) != expected_sha256
+        ):
+            raise SnapshotValidationError(
+                "installed native extension topology or bytes differ"
+            )
+    finally:
+        os.close(descriptor)
+    return path
+
+
+def _bind_imports_v2(
+    snapshot: SnapshotPublication,
+    *,
+    expected_native_extension_path: Path,
+    expected_native_extension_sha256: str,
+    expected_native_extension_size_bytes: int,
+    expected_native_extension_link_count: int,
+) -> tuple[ImportBinding, ...]:
+    """Bind snapshot Python imports and the separate installed native import."""
+
+    entry_by_path = {entry.relative_path: entry for entry in snapshot.entries}
+    bindings: list[ImportBinding] = []
+    for module_name in _IMPORT_MODULES[:-1]:
+        origin = _module_origin(importlib.import_module(module_name))
+        try:
+            relative = origin.relative_to(snapshot.root).as_posix()
+        except ValueError as error:
+            raise SnapshotValidationError(
+                f"module {module_name!r} resolved outside the immutable snapshot"
+            ) from error
+        entry = entry_by_path.get(relative)
+        if (
+            entry is None
+            or entry.role != "execution_source"
+            or _sha256_file(origin) != entry.sha256
+        ):
+            raise SnapshotValidationError(
+                f"module {module_name!r} is not bound to manifested bytes"
+            )
+        bindings.append(
+            ImportBinding(module_name, relative, entry.size_bytes, entry.sha256)
+        )
+
+    native_origin = _module_origin(importlib.import_module("simsoptpp"))
+    expected_native = _validate_installed_native_extension(
+        expected_native_extension_path,
+        expected_sha256=expected_native_extension_sha256,
+        expected_size_bytes=expected_native_extension_size_bytes,
+        expected_link_count=expected_native_extension_link_count,
+    )
+    if native_origin != expected_native:
+        raise SnapshotValidationError(
+            "loaded native extension path differs from expected installed path"
+        )
+    native_entries = tuple(
+        entry for entry in snapshot.entries if entry.role == "native_extension"
+    )
+    if (
+        len(native_entries) != 1
+        or native_entries[0].sha256 != expected_native_extension_sha256
+        or native_entries[0].size_bytes != expected_native_extension_size_bytes
+    ):
+        raise SnapshotValidationError(
+            "installed native extension differs from snapshot evidence copy"
+        )
+    native_entry = native_entries[0]
+    snapshot_native = snapshot.root.joinpath(
+        *PurePosixPath(native_entry.relative_path).parts
+    )
+    if native_origin == snapshot_native:
+        raise SnapshotValidationError(
+            "installed native extension path aliases the snapshot evidence copy"
+        )
+    bindings.append(
+        ImportBinding(
+            "simsoptpp",
+            native_entry.relative_path,
+            native_entry.size_bytes,
+            native_entry.sha256,
+        )
+    )
     return tuple(bindings)
 
 
@@ -946,10 +1445,11 @@ def observe_live_runtime(
     cwd: Path,
     environment: Mapping[str, str],
     command_runner: CommandRunner = _run_command,
+    required_roles: frozenset[SnapshotRole] = LEGACY_SNAPSHOT_ROLES,
 ) -> RuntimeObservation:
     """Observe the claim-bearing process after JAX selected exactly one GPU."""
 
-    snapshot = load_snapshot(snapshot_root)
+    snapshot = load_snapshot(snapshot_root, required_roles=required_roles)
     if not argv or not all(isinstance(value, str) and value for value in argv):
         raise SnapshotValidationError("runtime argv must contain non-empty strings")
     runtime_cwd = _strict_directory(cwd, "runtime cwd")
@@ -1002,15 +1502,102 @@ def observe_live_runtime(
     )
 
 
+def observe_live_runtime_v2(
+    snapshot_root: Path,
+    *,
+    argv: Sequence[str],
+    cwd: Path,
+    environment: Mapping[str, str],
+    expected_native_extension_path: Path,
+    expected_native_extension_sha256: str,
+    expected_native_extension_size_bytes: int,
+    expected_native_extension_link_count: int,
+    command_runner: CommandRunner = _run_command,
+    required_roles: frozenset[SnapshotRole] = DIAG5_GPU_SNAPSHOT_ROLES,
+) -> RuntimeObservationV2:
+    """Observe DIAG5 with snapshot Python and an authority-bound native import."""
+
+    snapshot = load_snapshot(snapshot_root, required_roles=required_roles)
+    if not argv or not all(isinstance(value, str) and value for value in argv):
+        raise SnapshotValidationError("runtime argv must contain non-empty strings")
+    runtime_cwd = _strict_directory(cwd, "runtime cwd")
+    entrypoint_binding = _bind_entrypoint(snapshot, argv, runtime_cwd)
+    bindings = _bind_imports_v2(
+        snapshot,
+        expected_native_extension_path=expected_native_extension_path,
+        expected_native_extension_sha256=expected_native_extension_sha256,
+        expected_native_extension_size_bytes=expected_native_extension_size_bytes,
+        expected_native_extension_link_count=expected_native_extension_link_count,
+    )
+    jax_module = importlib.import_module("jax")
+    jaxlib_module = importlib.import_module("jaxlib")
+    backend = jax_module.default_backend()
+    devices = tuple(jax_module.devices())
+    if backend != "gpu" or len(devices) != 1 or devices[0].platform != "gpu":
+        raise SnapshotValidationError("runtime is not bound to exactly one JAX GPU")
+    device_uuid, device_name, driver_version = _physical_gpu(
+        environment, command_runner
+    )
+    env = effective_environment(environment)
+    env_payload = {key: value for key, value in env}
+    binding_by_module = {binding.module: binding for binding in bindings}
+
+    def snapshot_path_for(module: str) -> str:
+        return str(snapshot.root / binding_by_module[module].relative_path)
+
+    runtime_identity = RuntimeIdentityV2(
+        argv=tuple(argv),
+        cwd=str(runtime_cwd),
+        python_executable=os.path.abspath(sys.executable),
+        python_version=sys.version,
+        jax_version=_string(getattr(jax_module, "__version__", None), "JAX version"),
+        jaxlib_version=_string(
+            getattr(jaxlib_module, "__version__", None), "JAXLIB version"
+        ),
+        simsopt_module_path=snapshot_path_for("simsopt"),
+        simsopt_jax_module_path=snapshot_path_for("simsopt_jax"),
+        native_extension_path=str(expected_native_extension_path),
+        backend=backend,
+        device_uuid=device_uuid,
+        driver_version=driver_version,
+        effective_environment_sha256=_sha256_bytes(canonical_json_bytes(env_payload)),
+        native_extension_sha256=expected_native_extension_sha256,
+        native_extension_size_bytes=expected_native_extension_size_bytes,
+        native_extension_link_count=expected_native_extension_link_count,
+    )
+    platform_version = _string(
+        getattr(devices[0].client, "platform_version", None),
+        "JAX device platform version",
+    )
+    observation = RuntimeObservationV2(
+        runtime_identity=runtime_identity,
+        entrypoint_binding=entrypoint_binding,
+        import_bindings=bindings,
+        effective_environment=env,
+        device_name=device_name,
+        platform_version=platform_version,
+    )
+    _validate_observation_v2(
+        snapshot,
+        observation,
+        expected_native_extension_path=expected_native_extension_path,
+        expected_native_extension_sha256=expected_native_extension_sha256,
+        expected_native_extension_size_bytes=expected_native_extension_size_bytes,
+        expected_native_extension_link_count=expected_native_extension_link_count,
+    )
+    return observation
+
+
 def build_runtime_evidence(
     snapshot_root: Path,
     *,
     source_identity: SourceIdentity,
     observation: RuntimeObservation,
+    required_roles: frozenset[SnapshotRole] = LEGACY_SNAPSHOT_ROLES,
 ) -> RuntimeEvidence:
     """Validate and bind one live observation to its source snapshot."""
 
-    snapshot = load_snapshot(snapshot_root)
+    snapshot = load_snapshot(snapshot_root, required_roles=required_roles)
     if (
         source_identity.git_head != snapshot.worktree.git_head
         or (
@@ -1033,6 +1620,47 @@ def build_runtime_evidence(
         raise SnapshotValidationError("source identity manifest reference differs")
     _validate_observation(snapshot, observation)
     return RuntimeEvidence(source_identity, observation, snapshot.manifest_sha256)
+
+
+def build_runtime_evidence_v2(
+    snapshot_root: Path,
+    *,
+    source_identity: SourceIdentity,
+    observation: RuntimeObservationV2,
+    expected_native_extension_path: Path,
+    expected_native_extension_sha256: str,
+    expected_native_extension_size_bytes: int,
+    expected_native_extension_link_count: int,
+    required_roles: frozenset[SnapshotRole] = DIAG5_GPU_SNAPSHOT_ROLES,
+) -> RuntimeEvidenceV2:
+    """Validate DIAG5 source, live native identity, and runtime observation."""
+
+    snapshot = load_snapshot(snapshot_root, required_roles=required_roles)
+    if (
+        source_identity.git_head != snapshot.worktree.git_head
+        or source_identity.tracked_diff_sha256 != snapshot.worktree.tracked_diff_sha256
+        or source_identity.untracked_bytes_manifest_sha256
+        != snapshot.worktree.untracked_bytes_manifest_sha256
+        or source_identity.repo_root != snapshot.worktree.repo_root
+    ):
+        raise SnapshotValidationError("source identity differs from snapshot worktree")
+    manifest_ref = source_identity.snapshot_manifest
+    manifest_payload = snapshot.manifest_path.read_bytes()
+    if (
+        manifest_ref.sha256 != snapshot.manifest_sha256
+        or manifest_ref.size_bytes != len(manifest_payload)
+        or manifest_ref.schema_version != SOURCE_MANIFEST_SCHEMA_VERSION
+    ):
+        raise SnapshotValidationError("source identity manifest reference differs")
+    _validate_observation_v2(
+        snapshot,
+        observation,
+        expected_native_extension_path=expected_native_extension_path,
+        expected_native_extension_sha256=expected_native_extension_sha256,
+        expected_native_extension_size_bytes=expected_native_extension_size_bytes,
+        expected_native_extension_link_count=expected_native_extension_link_count,
+    )
+    return RuntimeEvidenceV2(source_identity, observation, snapshot.manifest_sha256)
 
 
 def _validate_observation(
@@ -1142,12 +1770,114 @@ def _validate_observation(
         )
 
 
+def _validate_observation_v2(
+    snapshot: SnapshotPublication,
+    observation: RuntimeObservationV2,
+    *,
+    expected_native_extension_path: Path,
+    expected_native_extension_sha256: str,
+    expected_native_extension_size_bytes: int,
+    expected_native_extension_link_count: int,
+) -> None:
+    """Reprove v1 runtime facts plus DIAG5's separate installed native binding."""
+
+    expected_native = _validate_installed_native_extension(
+        expected_native_extension_path,
+        expected_sha256=expected_native_extension_sha256,
+        expected_size_bytes=expected_native_extension_size_bytes,
+        expected_link_count=expected_native_extension_link_count,
+    )
+    _validate_observation_v2_against_expected_binding(
+        snapshot,
+        observation,
+        expected_native_extension_path=expected_native,
+        expected_native_extension_sha256=expected_native_extension_sha256,
+        expected_native_extension_size_bytes=expected_native_extension_size_bytes,
+        expected_native_extension_link_count=expected_native_extension_link_count,
+    )
+
+
+def _validate_observation_v2_against_expected_binding(
+    snapshot: SnapshotPublication,
+    observation: RuntimeObservationV2,
+    *,
+    expected_native_extension_path: Path,
+    expected_native_extension_sha256: str,
+    expected_native_extension_size_bytes: int,
+    expected_native_extension_link_count: int,
+) -> None:
+    """Join runtime facts to an independently descriptor-validated native binding."""
+
+    runtime = observation.runtime_identity
+    native_binding = next(
+        (
+            binding
+            for binding in observation.import_bindings
+            if binding.module == "simsoptpp"
+        ),
+        None,
+    )
+    if native_binding is None:
+        raise SnapshotValidationError("runtime import bindings omit simsoptpp")
+    snapshot_native = snapshot.root.joinpath(
+        *PurePosixPath(native_binding.relative_path).parts
+    )
+    legacy_runtime = RuntimeIdentity(
+        argv=runtime.argv,
+        cwd=runtime.cwd,
+        python_executable=runtime.python_executable,
+        python_version=runtime.python_version,
+        jax_version=runtime.jax_version,
+        jaxlib_version=runtime.jaxlib_version,
+        simsopt_module_path=runtime.simsopt_module_path,
+        simsopt_jax_module_path=runtime.simsopt_jax_module_path,
+        native_extension_path=str(snapshot_native),
+        backend=runtime.backend,
+        device_uuid=runtime.device_uuid,
+        driver_version=runtime.driver_version,
+        effective_environment_sha256=runtime.effective_environment_sha256,
+    )
+    _validate_observation(
+        snapshot,
+        RuntimeObservation(
+            runtime_identity=legacy_runtime,
+            entrypoint_binding=observation.entrypoint_binding,
+            import_bindings=observation.import_bindings,
+            effective_environment=observation.effective_environment,
+            device_name=observation.device_name,
+            platform_version=observation.platform_version,
+        ),
+    )
+
+    if (
+        runtime.native_extension_path != str(expected_native_extension_path)
+        or runtime.native_extension_sha256 != expected_native_extension_sha256
+        or runtime.native_extension_size_bytes != expected_native_extension_size_bytes
+        or runtime.native_extension_link_count != expected_native_extension_link_count
+    ):
+        raise SnapshotValidationError(
+            "runtime native extension identity differs from expected authority"
+        )
+    if expected_native_extension_path == snapshot_native:
+        raise SnapshotValidationError(
+            "installed native extension path aliases the snapshot evidence copy"
+        )
+    if (
+        native_binding.sha256 != expected_native_extension_sha256
+        or native_binding.size_bytes != expected_native_extension_size_bytes
+    ):
+        raise SnapshotValidationError(
+            "runtime native extension differs from snapshot evidence copy"
+        )
+
+
 def publish_runtime_evidence(
     path: Path,
     evidence: RuntimeEvidence,
     *,
     snapshot_root: Path,
     campaign_root: Path,
+    required_roles: frozenset[SnapshotRole] = LEGACY_SNAPSHOT_ROLES,
 ) -> ArtifactRef:
     """Exclusively publish canonical runtime evidence after full revalidation."""
 
@@ -1166,6 +1896,7 @@ def publish_runtime_evidence(
         snapshot_root,
         source_identity=evidence.source_identity,
         observation=evidence.observation,
+        required_roles=required_roles,
     )
     payload = canonical_json_bytes(evidence.to_payload())
     with absolute_path.open("xb") as stream:
@@ -1177,6 +1908,54 @@ def publish_runtime_evidence(
         sha256=_sha256_bytes(payload),
         size_bytes=len(payload),
         schema_version=RUNTIME_EVIDENCE_SCHEMA_VERSION,
+    )
+
+
+def publish_runtime_evidence_v2(
+    path: Path,
+    evidence: RuntimeEvidenceV2,
+    *,
+    snapshot_root: Path,
+    campaign_root: Path,
+    expected_native_extension_path: Path,
+    expected_native_extension_sha256: str,
+    expected_native_extension_size_bytes: int,
+    expected_native_extension_link_count: int,
+    required_roles: frozenset[SnapshotRole] = DIAG5_GPU_SNAPSHOT_ROLES,
+) -> ArtifactRef:
+    """Exclusively publish DIAG5 evidence after live native revalidation."""
+
+    campaign = _strict_directory(campaign_root, "campaign root")
+    parent = _strict_directory(path.parent, "runtime evidence parent")
+    if path.exists() or path.is_symlink():
+        raise FileExistsError(path)
+    absolute_path = parent / path.name
+    try:
+        relative_path = absolute_path.relative_to(campaign).as_posix()
+    except ValueError as error:
+        raise SnapshotValidationError(
+            "runtime evidence must be inside the campaign root"
+        ) from error
+    build_runtime_evidence_v2(
+        snapshot_root,
+        source_identity=evidence.source_identity,
+        observation=evidence.observation,
+        expected_native_extension_path=expected_native_extension_path,
+        expected_native_extension_sha256=expected_native_extension_sha256,
+        expected_native_extension_size_bytes=expected_native_extension_size_bytes,
+        expected_native_extension_link_count=expected_native_extension_link_count,
+        required_roles=required_roles,
+    )
+    payload = canonical_json_bytes(evidence.to_payload())
+    with absolute_path.open("xb") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+    return ArtifactRef(
+        relative_path=relative_path,
+        sha256=_sha256_bytes(payload),
+        size_bytes=len(payload),
+        schema_version=RUNTIME_EVIDENCE_V2_SCHEMA_VERSION,
     )
 
 
@@ -1304,6 +2083,89 @@ def runtime_identity_from_payload(value: object) -> RuntimeIdentity:
     )
 
 
+def runtime_identity_v2_from_payload(value: object) -> RuntimeIdentityV2:
+    """Parse the exact DIAG5 dynamic identity without accepting v1 aliases."""
+
+    mapping = _mapping(value, "runtime evidence runtime_identity")
+    expected = frozenset(
+        {
+            "argv",
+            "backend",
+            "cwd",
+            "device_uuid",
+            "driver_version",
+            "effective_environment_sha256",
+            "jax_version",
+            "jaxlib_version",
+            "native_extension_link_count",
+            "native_extension_path",
+            "native_extension_sha256",
+            "native_extension_size_bytes",
+            "python_executable",
+            "python_version",
+            "simsopt_jax_module_path",
+            "simsopt_module_path",
+        }
+    )
+    _exact_keys(mapping, expected, "runtime evidence runtime_identity")
+    argv = _array(mapping["argv"], "runtime_identity.argv")
+    digest = mapping["native_extension_sha256"]
+    if not _is_sha256(digest):
+        raise SnapshotValidationError("runtime native extension digest is invalid")
+    size_bytes = _integer(
+        mapping["native_extension_size_bytes"],
+        "runtime_identity.native_extension_size_bytes",
+    )
+    link_count = _integer(
+        mapping["native_extension_link_count"],
+        "runtime_identity.native_extension_link_count",
+    )
+    if size_bytes == 0 or link_count == 0:
+        raise SnapshotValidationError(
+            "runtime native extension size and link count must be positive"
+        )
+    return RuntimeIdentityV2(
+        argv=tuple(
+            _string(item, f"runtime_identity.argv[{index}]")
+            for index, item in enumerate(argv)
+        ),
+        cwd=_string(mapping["cwd"], "runtime_identity.cwd"),
+        python_executable=_string(
+            mapping["python_executable"], "runtime_identity.python_executable"
+        ),
+        python_version=_string(
+            mapping["python_version"], "runtime_identity.python_version"
+        ),
+        jax_version=_string(mapping["jax_version"], "runtime_identity.jax_version"),
+        jaxlib_version=_string(
+            mapping["jaxlib_version"], "runtime_identity.jaxlib_version"
+        ),
+        simsopt_module_path=_string(
+            mapping["simsopt_module_path"], "runtime_identity.simsopt_module_path"
+        ),
+        simsopt_jax_module_path=_string(
+            mapping["simsopt_jax_module_path"],
+            "runtime_identity.simsopt_jax_module_path",
+        ),
+        native_extension_path=_string(
+            mapping["native_extension_path"],
+            "runtime_identity.native_extension_path",
+        ),
+        backend=_string(mapping["backend"], "runtime_identity.backend"),
+        device_uuid=_string(mapping["device_uuid"], "runtime_identity.device_uuid"),
+        driver_version=_string(
+            mapping["driver_version"], "runtime_identity.driver_version"
+        ),
+        effective_environment_sha256=_string(
+            mapping["effective_environment_sha256"],
+            "runtime_identity.effective_environment_sha256",
+        ),
+        native_extension_sha256=str(digest),
+        native_extension_size_bytes=size_bytes,
+        native_extension_link_count=link_count,
+    )
+
+
 def _import_binding(value: object, index: int) -> ImportBinding:
     context = f"runtime evidence import_bindings[{index}]"
     mapping = _mapping(value, context)
@@ -1329,7 +2191,11 @@ def _import_binding(value: object, index: int) -> ImportBinding:
 
 
 def validate_runtime_evidence(
-    path: Path, *, snapshot_root: Path, campaign_root: Path
+    path: Path,
+    *,
+    snapshot_root: Path,
+    campaign_root: Path,
+    required_roles: frozenset[SnapshotRole] = LEGACY_SNAPSHOT_ROLES,
 ) -> RuntimeEvidence:
     """Parse canonical runtime evidence and reprove every source/runtime relation."""
 
@@ -1364,7 +2230,7 @@ def validate_runtime_evidence(
         raise SnapshotValidationError("runtime evidence manifest digest is invalid")
     source = source_identity_from_payload(document["source_identity"])
     source_manifest_path = source.snapshot_manifest.resolve_and_validate(campaign)
-    snapshot = load_snapshot(snapshot_root)
+    snapshot = load_snapshot(snapshot_root, required_roles=required_roles)
     if source_manifest_path != snapshot.manifest_path:
         raise SnapshotValidationError(
             "runtime evidence names a different source manifest"
@@ -1417,39 +2283,269 @@ def validate_runtime_evidence(
         snapshot.root,
         source_identity=evidence.source_identity,
         observation=evidence.observation,
+        required_roles=required_roles,
     )
     if rebuilt.snapshot_manifest_sha256 != evidence.snapshot_manifest_sha256:
         raise SnapshotValidationError("runtime evidence snapshot digest differs")
     return evidence
 
 
+def validate_runtime_evidence_v2(
+    path: Path,
+    *,
+    snapshot_root: Path,
+    campaign_root: Path,
+    expected_native_extension_path: Path,
+    expected_native_extension_sha256: str,
+    expected_native_extension_size_bytes: int,
+    expected_native_extension_link_count: int,
+    required_roles: frozenset[SnapshotRole] = DIAG5_GPU_SNAPSHOT_ROLES,
+) -> RuntimeEvidenceV2:
+    """Deep-load DIAG5 evidence and reprove its live installed native binding."""
+
+    campaign = _strict_directory(campaign_root, "campaign root")
+    _reject_symlink_components(path, "runtime evidence path")
+    runtime_path = path.resolve(strict=True)
+    if not runtime_path.is_file() or not runtime_path.is_relative_to(campaign):
+        raise SnapshotValidationError(
+            "runtime evidence is not a regular campaign-local file"
+        )
+    evidence = _runtime_evidence_v2_from_bytes(runtime_path.read_bytes())
+    source_manifest_path = (
+        evidence.source_identity.snapshot_manifest.resolve_and_validate(campaign)
+    )
+    snapshot = load_snapshot(snapshot_root, required_roles=required_roles)
+    if source_manifest_path != snapshot.manifest_path:
+        raise SnapshotValidationError(
+            "runtime evidence names a different source manifest"
+        )
+    rebuilt = build_runtime_evidence_v2(
+        snapshot.root,
+        source_identity=evidence.source_identity,
+        observation=evidence.observation,
+        expected_native_extension_path=expected_native_extension_path,
+        expected_native_extension_sha256=expected_native_extension_sha256,
+        expected_native_extension_size_bytes=expected_native_extension_size_bytes,
+        expected_native_extension_link_count=expected_native_extension_link_count,
+        required_roles=required_roles,
+    )
+    if rebuilt.snapshot_manifest_sha256 != evidence.snapshot_manifest_sha256:
+        raise SnapshotValidationError("runtime evidence snapshot digest differs")
+    return evidence
+
+
+def _runtime_evidence_v2_from_bytes(payload: bytes) -> RuntimeEvidenceV2:
+    """Parse canonical DIAG5 runtime bytes without resolving artifact paths."""
+
+    document = _load_json(payload, "runtime evidence")
+    _exact_keys(
+        document,
+        frozenset(
+            {
+                "device",
+                "effective_environment",
+                "entrypoint_binding",
+                "import_bindings",
+                "runtime_identity",
+                "schema_version",
+                "snapshot_manifest_sha256",
+                "source_identity",
+            }
+        ),
+        "runtime evidence",
+    )
+    if document["schema_version"] != RUNTIME_EVIDENCE_V2_SCHEMA_VERSION:
+        raise SnapshotValidationError("runtime evidence schema version is unsupported")
+    manifest_sha = document["snapshot_manifest_sha256"]
+    if not _is_sha256(manifest_sha):
+        raise SnapshotValidationError("runtime evidence manifest digest is invalid")
+    source = source_identity_from_payload(document["source_identity"])
+    environment_mapping = _mapping(
+        document["effective_environment"], "runtime evidence effective_environment"
+    )
+    if tuple(environment_mapping) != _ENVIRONMENT_KEYS:
+        raise SnapshotValidationError(
+            "runtime evidence environment keys are not canonical"
+        )
+    environment: list[tuple[str, str | None]] = []
+    for key, value in environment_mapping.items():
+        if value is not None and not isinstance(value, str):
+            raise SnapshotValidationError(
+                f"runtime evidence effective_environment.{key} is invalid"
+            )
+        environment.append((key, value))
+    bindings = tuple(
+        _import_binding(value, index)
+        for index, value in enumerate(
+            _array(document["import_bindings"], "runtime evidence import_bindings")
+        )
+    )
+    entrypoint_binding = _import_binding(document["entrypoint_binding"], -1)
+    device = _mapping(document["device"], "runtime evidence device")
+    _exact_keys(
+        device,
+        frozenset({"name", "platform_version"}),
+        "runtime evidence device",
+    )
+    return RuntimeEvidenceV2(
+        source_identity=source,
+        observation=RuntimeObservationV2(
+            runtime_identity=runtime_identity_v2_from_payload(
+                document["runtime_identity"]
+            ),
+            entrypoint_binding=entrypoint_binding,
+            import_bindings=bindings,
+            effective_environment=tuple(environment),
+            device_name=_string(device["name"], "runtime evidence device.name"),
+            platform_version=_string(
+                device["platform_version"],
+                "runtime evidence device.platform_version",
+            ),
+        ),
+        snapshot_manifest_sha256=str(manifest_sha),
+    )
+
+
+def validate_diag5_runtime_evidence_v2_bytes(
+    payload: bytes,
+    *,
+    expected_snapshot_identity: SnapshotIdentity,
+    expected_logical_campaign_root: Path,
+    expected_logical_snapshot_root: Path,
+    expected_native_extension_path: Path,
+    expected_native_extension_sha256: str,
+    expected_native_extension_size_bytes: int,
+    expected_native_extension_link_count: int,
+) -> RuntimeEvidenceV2:
+    """Validate held runtime bytes against pathless source and logical-root identity."""
+
+    campaign_root = Path(os.path.normpath(expected_logical_campaign_root))
+    snapshot_root = Path(os.path.normpath(expected_logical_snapshot_root))
+    native_extension_path = Path(os.path.normpath(expected_native_extension_path))
+    if (
+        not expected_logical_campaign_root.is_absolute()
+        or not expected_logical_snapshot_root.is_absolute()
+        or campaign_root != expected_logical_campaign_root
+        or snapshot_root != expected_logical_snapshot_root
+        or not snapshot_root.is_relative_to(campaign_root)
+    ):
+        raise SnapshotValidationError("logical runtime roots are invalid")
+    if (
+        not expected_native_extension_path.is_absolute()
+        or native_extension_path != expected_native_extension_path
+    ):
+        raise SnapshotValidationError("expected native extension path is invalid")
+    required_roles = _validate_required_roles(
+        frozenset(entry.role for entry in expected_snapshot_identity.entries)
+    )
+    if required_roles != DIAG5_GPU_SNAPSHOT_ROLES:
+        raise SnapshotValidationError("runtime snapshot identity roles differ")
+    canonical_identity = build_snapshot_identity(
+        expected_snapshot_identity.entries,
+        expected_snapshot_identity.worktree,
+    )
+    if canonical_identity != expected_snapshot_identity:
+        raise SnapshotValidationError("runtime snapshot identity is noncanonical")
+
+    evidence = _runtime_evidence_v2_from_bytes(payload)
+    manifest_bytes = canonical_json_bytes(
+        _manifest_payload(
+            expected_snapshot_identity.entries,
+            expected_snapshot_identity.worktree,
+        )
+    )
+    logical_manifest = snapshot_root / SOURCE_MANIFEST_FILENAME
+    expected_manifest_ref = ArtifactRef(
+        relative_path=logical_manifest.relative_to(campaign_root).as_posix(),
+        sha256=expected_snapshot_identity.manifest_sha256,
+        size_bytes=len(manifest_bytes),
+        schema_version=SOURCE_MANIFEST_SCHEMA_VERSION,
+    )
+    if (
+        evidence.source_identity.snapshot_manifest != expected_manifest_ref
+        or evidence.source_identity.git_head
+        != expected_snapshot_identity.worktree.git_head
+        or evidence.source_identity.tracked_diff_sha256
+        != expected_snapshot_identity.worktree.tracked_diff_sha256
+        or evidence.source_identity.untracked_bytes_manifest_sha256
+        != expected_snapshot_identity.worktree.untracked_bytes_manifest_sha256
+        or evidence.source_identity.repo_root
+        != expected_snapshot_identity.worktree.repo_root
+        or evidence.snapshot_manifest_sha256
+        != expected_snapshot_identity.manifest_sha256
+    ):
+        raise SnapshotValidationError(
+            "runtime evidence source identity differs from expected snapshot"
+        )
+    logical_snapshot = SnapshotPublication(
+        root=snapshot_root,
+        manifest_path=logical_manifest,
+        manifest_sha256=expected_snapshot_identity.manifest_sha256,
+        entries=expected_snapshot_identity.entries,
+        worktree=expected_snapshot_identity.worktree,
+    )
+    _validate_observation_v2_against_expected_binding(
+        logical_snapshot,
+        evidence.observation,
+        expected_native_extension_path=native_extension_path,
+        expected_native_extension_sha256=expected_native_extension_sha256,
+        expected_native_extension_size_bytes=expected_native_extension_size_bytes,
+        expected_native_extension_link_count=expected_native_extension_link_count,
+    )
+    return evidence
+
+
 __all__ = (
+    "DIAG4_CPU_SNAPSHOT_ROLES",
+    "DIAG4_GPU_SNAPSHOT_ROLES",
+    "DIAG5_CPU_SNAPSHOT_ROLES",
+    "DIAG5_GPU_SNAPSHOT_ROLES",
+    "DIAG5_PREQUALIFICATION_PLAN_RELATIVE_PATH",
+    "LEGACY_SNAPSHOT_ROLES",
     "RUNTIME_EVIDENCE_FILENAME",
     "RUNTIME_EVIDENCE_SCHEMA_VERSION",
+    "RUNTIME_EVIDENCE_V2_SCHEMA_VERSION",
     "SOURCE_MANIFEST_FILENAME",
     "SOURCE_MANIFEST_SCHEMA_VERSION",
     "ArtifactRef",
     "ImportBinding",
     "JsonValue",
     "RuntimeEvidence",
+    "RuntimeEvidenceV2",
     "RuntimeIdentity",
+    "RuntimeIdentityV2",
     "RuntimeObservation",
+    "RuntimeObservationV2",
     "SnapshotEntry",
+    "SnapshotIdentity",
+    "SnapshotPostPublicationError",
     "SnapshotPublication",
+    "SnapshotRole",
     "SnapshotValidationError",
     "SourceIdentity",
     "SourceRoot",
     "WorktreeIdentity",
     "build_runtime_evidence",
+    "build_runtime_evidence_v2",
+    "build_snapshot_identity",
     "capture_worktree_identity",
+    "copy_diag5_immutable_snapshot",
+    "copy_immutable_snapshot",
     "effective_environment",
     "load_canonical_json_bytes",
     "load_snapshot",
     "observe_live_runtime",
+    "observe_live_runtime_v2",
+    "project_diag5_gpu_snapshot_identity",
     "publish_immutable_snapshot",
     "publish_runtime_evidence",
+    "publish_runtime_evidence_v2",
     "runtime_identity_from_payload",
+    "runtime_identity_v2_from_payload",
     "select_physical_gpu_identity",
     "source_identity_from_payload",
+    "validate_diag5_runtime_evidence_v2_bytes",
     "validate_runtime_evidence",
+    "validate_runtime_evidence_v2",
+    "validate_sealed_native_extension",
 )

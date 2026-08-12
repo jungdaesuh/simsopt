@@ -52,6 +52,9 @@ from benchmarks.jax_native_example_measurement_contract import (
     MeasurementScale,
     validate_measurement_artifact,
 )
+from benchmarks.single_stage_compute_graph_isolated_launch import (
+    build_snapshot_module_launch,
+)
 from benchmarks.single_stage_speed_campaign_receipt import (
     DIRECT_FP64_LU_EXACT_ADJOINT_ROUTE,
     CampaignMetadata,
@@ -495,16 +498,20 @@ def execute_monitored_command(
     gpu_index: int,
     poll_interval_seconds: float,
     timeout_seconds: float,
+    max_process_tree_rss_bytes: int | None = None,
 ) -> MonitoredCommandResult:
-    """Run one child and poll process-tree RSS plus process-attributed VRAM."""
+    """Run one child with bounded wall time and optional process-tree RSS."""
     if poll_interval_seconds <= 0.0 or timeout_seconds <= 0.0:
         raise ValueError("poll interval and timeout must be positive")
+    if max_process_tree_rss_bytes is not None and max_process_tree_rss_bytes <= 0:
+        raise ValueError("process-tree RSS bound must be positive")
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     stderr_path.parent.mkdir(parents=True, exist_ok=True)
     peak_rss_bytes = 0
     peak_gpu_bytes = 0 if device == "gpu" else None
     gpu_counter_available = True
     timed_out = False
+    memory_limited = False
     started_ns = time.monotonic_ns()
     with stdout_path.open("xb") as stdout_stream, stderr_path.open(
         "xb"
@@ -515,6 +522,7 @@ def execute_monitored_command(
             env=dict(environment),
             stdout=stdout_stream,
             stderr=stderr_stream,
+            start_new_session=max_process_tree_rss_bytes is not None,
         )
         while process.poll() is None:
             rss_bytes, gpu_bytes, sample_available = _sample_process_tree(
@@ -528,23 +536,36 @@ def execute_monitored_command(
                 if gpu_bytes is not None and peak_gpu_bytes is not None:
                     peak_gpu_bytes = max(peak_gpu_bytes, gpu_bytes)
             elapsed_seconds = (time.monotonic_ns() - started_ns) / 1_000_000_000
+            if (
+                max_process_tree_rss_bytes is not None
+                and rss_bytes > max_process_tree_rss_bytes
+            ):
+                memory_limited = True
+                os.killpg(process.pid, signal.SIGTERM)
+                break
             if elapsed_seconds > timeout_seconds:
                 timed_out = True
-                process.terminate()
+                if max_process_tree_rss_bytes is None:
+                    process.terminate()
+                else:
+                    os.killpg(process.pid, signal.SIGTERM)
                 break
             time.sleep(poll_interval_seconds)
-        if timed_out:
+        if timed_out or memory_limited:
             try:
                 process.wait(timeout=5.0)
             except subprocess.TimeoutExpired:
-                process.kill()
+                if max_process_tree_rss_bytes is None:
+                    process.kill()
+                else:
+                    os.killpg(process.pid, signal.SIGKILL)
         returncode = process.wait()
         stdout_stream.flush()
         stderr_stream.flush()
         os.fsync(stdout_stream.fileno())
         os.fsync(stderr_stream.fileno())
     _fsync_directory(stdout_path.parent)
-    if timed_out and returncode == 0:
+    if (timed_out or memory_limited) and returncode == 0:
         returncode = -signal.SIGTERM
     wall_seconds = (time.monotonic_ns() - started_ns) / 1_000_000_000
     if peak_rss_bytes <= 0:
@@ -560,7 +581,13 @@ def execute_monitored_command(
         gpu_status = "available"
     return MonitoredCommandResult(
         returncode=returncode,
-        termination=classify_termination(returncode),
+        termination=(
+            "process_tree_memory_limit"
+            if memory_limited
+            else "wall_time_limit"
+            if timed_out
+            else classify_termination(returncode)
+        ),
         wall_seconds=wall_seconds,
         peak_process_tree_rss_bytes=peak_rss_bytes,
         peak_gpu_process_bytes=peak_gpu_bytes,
@@ -580,6 +607,7 @@ def build_profile_command(
     scale: MeasurementScale,
     trajectory_path: Path | None = None,
     optimization_timing_path: Path | None = None,
+    immutable_snapshot_provenance_path: Path | None = None,
     isolated_site: bool = False,
 ) -> tuple[str, ...]:
     """Build a profile command that consumes the one canonical input bundle."""
@@ -611,6 +639,11 @@ def build_profile_command(
         command += ("--trajectory-path", str(trajectory_path))
     if optimization_timing_path is not None:
         command += ("--optimization-timing-path", str(optimization_timing_path))
+    if immutable_snapshot_provenance_path is not None:
+        command += (
+            "--immutable-snapshot-provenance",
+            str(immutable_snapshot_provenance_path),
+        )
     if profile_id == "jax_gpu_optax":
         if trajectory_path is None:
             raise ValueError("jax_gpu_optax requires a trajectory path")
@@ -1812,6 +1845,7 @@ def _execute_single_stage_speed_run(
     gpu_index: int,
     poll_interval_seconds: float,
     timeout_seconds: float,
+    immutable_snapshot_provenance_path: Path | None = None,
 ) -> tuple[MonitoredCommandResult, LaneObservation, Path, float]:
     stem = _sample_stem(run, sequence_index)
     result_directory = workspace / "receipts" / stem
@@ -1827,12 +1861,37 @@ def _execute_single_stage_speed_run(
         scale="native_default",
         trajectory_path=trajectory_path,
         optimization_timing_path=optimization_timing_path,
+        immutable_snapshot_provenance_path=immutable_snapshot_provenance_path,
         isolated_site=isolated_site,
     )
+    child_environment = environment
+    child_cwd = repo_root
+    if immutable_snapshot_provenance_path is not None:
+        if isolated_site:
+            raise MeasurementRunnerError(
+                "immutable snapshot execution is incompatible with isolated_site"
+            )
+        module = "examples.jax.parity.child"
+        try:
+            module_index = command.index(module)
+        except ValueError as error:
+            raise MeasurementRunnerError(
+                "profile command omitted the canonical parity child"
+            ) from error
+        launch = build_snapshot_module_launch(
+            Path(python_executable),
+            repo_root,
+            module,
+            command[module_index + 1 :],
+            environment,
+        )
+        command = launch.argv
+        child_environment = launch.environment
+        child_cwd = launch.cwd
     monitored = execute_monitored_command(
         command=command,
-        environment=environment,
-        cwd=repo_root,
+        environment=child_environment,
+        cwd=child_cwd,
         stdout_path=workspace / "logs" / f"{stem}.stdout",
         stderr_path=workspace / "logs" / f"{stem}.stderr",
         device=_profile_device(run.profile_id),
