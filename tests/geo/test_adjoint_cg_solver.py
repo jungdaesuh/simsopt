@@ -37,13 +37,61 @@ jax = pytest.importorskip("jax")
 lineax = pytest.importorskip("lineax")
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
+from jax.extend import core as jax_core
 from simsopt_jax.geo.optimizers import adjoint_linear_solve as _adjoint_linear_solve
 from simsopt_jax.geo.optimizers import dense_ir as _dense_ir
 from simsopt_jax.geo.optimizers import linear_solve as _linear_solve
 from simsopt_jax.geo.optimizers import optimizer as _optimizer
+from simsopt_jax.runtime.trace_annotations import PhaseId, trace_session
 
 _LINEAX_LSMR_AVAILABLE = hasattr(lineax, "LSMR")
 _LINEAX_LSMR_SKIP_REASON = "lineax>=0.1.1 is required for LSMR comparator tests"
+
+
+def test_traceable_status_normalization_preserves_execution_counts() -> None:
+    status = _linear_solve._LinearSolveStatus(
+        success=jnp.asarray(True),
+        residual=jnp.asarray(2.0e-13, dtype=jnp.float64),
+        residual_relative=jnp.asarray(3.0e-14, dtype=jnp.float64),
+        iterations=jnp.asarray(5, dtype=jnp.int32),
+        dense_materialization_count=jnp.asarray(1, dtype=jnp.int32),
+        lu_factorization_count=jnp.asarray(1, dtype=jnp.int32),
+        lu_solve_count=jnp.asarray(12, dtype=jnp.int32),
+        refinement_correction_count=jnp.asarray(1, dtype=jnp.int32),
+    )
+
+    normalized = _optimizer._normalize_traceable_linear_solve_status(
+        status,
+        rhs=jnp.asarray([1.0, -2.0], dtype=jnp.float64),
+        tolerance=1.0e-12,
+    )
+
+    assert int(np.asarray(normalized.dense_materialization_count)) == 1
+    assert int(np.asarray(normalized.lu_factorization_count)) == 1
+    assert int(np.asarray(normalized.lu_solve_count)) == 12
+    assert int(np.asarray(normalized.refinement_correction_count)) == 1
+
+
+def _jaxpr_name_stacks(value):
+    names = []
+    if isinstance(value, jax_core.ClosedJaxpr):
+        return _jaxpr_name_stacks(value.jaxpr)
+    if isinstance(value, jax_core.Jaxpr):
+        for equation in value.eqns:
+            name = str(equation.source_info.name_stack)
+            if name:
+                names.append(name)
+            for parameter in equation.params.values():
+                names.extend(_jaxpr_name_stacks(parameter))
+        return names
+    if isinstance(value, dict):
+        for item in value.values():
+            names.extend(_jaxpr_name_stacks(item))
+        return names
+    if isinstance(value, (tuple, list)):
+        for item in value:
+            names.extend(_jaxpr_name_stacks(item))
+    return names
 
 
 def _run_jax_runtime_case(case):
@@ -85,6 +133,10 @@ def test_cg_matches_direct_solve():
     expected = jnp.linalg.solve(matrix, rhs)
     assert bool(status.success)
     assert int(np.asarray(status.iterations)) > 0
+    assert int(np.asarray(status.dense_materialization_count)) == 0
+    assert int(np.asarray(status.lu_factorization_count)) == 0
+    assert int(np.asarray(status.lu_solve_count)) == 0
+    assert int(np.asarray(status.refinement_correction_count)) == 0
     np.testing.assert_allclose(
         np.asarray(solution), np.asarray(expected), rtol=1e-8, atol=1e-10
     )
@@ -542,6 +594,10 @@ def test_dense_lu_solver_matches_numpy_solve_nonsymmetric():
     )
     expected = np.linalg.solve(np.asarray(matrix), np.asarray(rhs))
     assert bool(status.success)
+    assert int(np.asarray(status.dense_materialization_count)) == 1
+    assert int(np.asarray(status.lu_factorization_count)) == 1
+    assert int(np.asarray(status.lu_solve_count)) == 12
+    assert int(np.asarray(status.refinement_correction_count)) == 1
     rel = float(
         np.linalg.norm(np.asarray(solution) - np.asarray(expected))
         / np.linalg.norm(np.asarray(expected))
@@ -571,6 +627,132 @@ def test_dense_lu_solver_batched_rhs_column_parity():
         np.testing.assert_allclose(
             np.asarray(batched[:, j]), np.asarray(column), rtol=1e-10, atol=1e-12
         )
+
+
+def test_dense_lu_trace_scopes_preserve_outputs_and_mark_each_owned_phase():
+    """Exact-adjoint annotations add name stacks but no numerical outputs."""
+    _matrix, matvec, rhs = _nonsymmetric_problem(seed=31)
+
+    def solve(current_rhs):
+        return _linear_solve._solve_dense_square_operator_lu_system_with_status(
+            matvec,
+            current_rhs,
+            tol=1.0e-12,
+        )
+
+    unannotated_solution, unannotated_status = solve(rhs)
+    unannotated_jaxpr = jax.make_jaxpr(solve)(rhs)
+    with trace_session():
+        annotated_solution, annotated_status = solve(rhs)
+        annotated_jaxpr = jax.make_jaxpr(lambda current_rhs: solve(current_rhs))(rhs)
+
+    np.testing.assert_array_equal(
+        np.asarray(annotated_solution),
+        np.asarray(unannotated_solution),
+    )
+    for annotated_field, unannotated_field in zip(
+        annotated_status,
+        unannotated_status,
+        strict=True,
+    ):
+        if annotated_field is None:
+            assert unannotated_field is None
+        else:
+            np.testing.assert_array_equal(
+                np.asarray(annotated_field),
+                np.asarray(unannotated_field),
+            )
+
+    target_phase_values = {
+        PhaseId.ADJOINT_DENSE_MATRIX.value,
+        PhaseId.ADJOINT_LU_FACTOR.value,
+        PhaseId.ADJOINT_LU_SOLVE.value,
+        PhaseId.ADJOINT_REFINEMENT.value,
+    }
+    unannotated_names = {
+        str(equation.source_info.name_stack)
+        for equation in unannotated_jaxpr.jaxpr.eqns
+    }
+    annotated_names = {
+        str(equation.source_info.name_stack) for equation in annotated_jaxpr.jaxpr.eqns
+    }
+    assert all(
+        phase not in name for phase in target_phase_values for name in unannotated_names
+    )
+    assert all(
+        any(phase in name for name in annotated_names) for phase in target_phase_values
+    )
+    assert (
+        f"{PhaseId.ADJOINT_REFINEMENT.value}/{PhaseId.ADJOINT_LU_SOLVE.value}"
+        not in annotated_names
+    )
+
+
+def test_exact_newton_trace_scopes_preserve_result_and_separate_jvp_from_solve():
+    """Exact Newton marks nested JVP work without changing solver evidence."""
+
+    def residual_factory():
+        def residual(candidate):
+            return jnp.asarray(
+                (
+                    candidate[0] * candidate[0] - 2.0,
+                    candidate[1] - 1.0,
+                )
+            )
+
+        return residual
+
+    initial = jnp.asarray((1.5, 0.0), dtype=jnp.float64)
+    unannotated_residual = residual_factory()
+    annotated_residual = residual_factory()
+
+    def unannotated_run(candidate):
+        return _optimizer.newton_exact_traceable(
+            unannotated_residual,
+            candidate,
+            maxiter=3,
+            tol=1.0e-12,
+        )
+
+    def annotated_run(candidate):
+        return _optimizer.newton_exact_traceable(
+            annotated_residual,
+            candidate,
+            maxiter=3,
+            tol=1.0e-12,
+        )
+
+    unannotated_result = unannotated_run(initial)
+    unannotated_jaxpr = jax.make_jaxpr(unannotated_run)(initial)
+    with trace_session():
+        annotated_result = annotated_run(initial)
+        annotated_jaxpr = jax.make_jaxpr(annotated_run)(initial)
+
+    assert annotated_result.keys() == unannotated_result.keys()
+    for annotated_leaf, unannotated_leaf in zip(
+        jax.tree.leaves(annotated_result),
+        jax.tree.leaves(unannotated_result),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(
+            np.asarray(annotated_leaf),
+            np.asarray(unannotated_leaf),
+        )
+
+    unannotated_names = set(_jaxpr_name_stacks(unannotated_jaxpr))
+    annotated_names = set(_jaxpr_name_stacks(annotated_jaxpr))
+    assert all(
+        PhaseId.NEWTON_RESIDUAL_JVP.value not in name
+        and PhaseId.NEWTON_LINEAR_SOLVE.value not in name
+        for name in unannotated_names
+    )
+    assert any(PhaseId.NEWTON_RESIDUAL_JVP.value in name for name in annotated_names)
+    assert any(PhaseId.NEWTON_LINEAR_SOLVE.value in name for name in annotated_names)
+    assert any(
+        PhaseId.NEWTON_LINEAR_SOLVE.value in name
+        and PhaseId.NEWTON_RESIDUAL_JVP.value in name
+        for name in annotated_names
+    )
 
 
 def test_dense_lu_materialization_gate_shape_and_byte_contract():
@@ -724,6 +906,30 @@ def test_dense_condition_estimate_preserves_float32_under_transfer_guard():
     assert float(np.asarray(estimate)) == pytest.approx(1.0e5, rel=1.0e-5)
 
 
+def test_condition_estimate_telemetry_counts_executed_factor_applications():
+    matrix = jnp.diag(jnp.asarray([0.25, 1.0, 4.0], dtype=jnp.float64))
+
+    estimate, factorizations, solves = (
+        _linear_solve._dense_matrix_condition_estimate_with_telemetry(matrix)
+    )
+    cached = jax.scipy.linalg.lu_factor(matrix)
+    cached_estimate, cached_factorizations, cached_solves = (
+        _linear_solve._dense_matrix_condition_estimate_with_telemetry(
+            matrix,
+            lu_piv=cached,
+        )
+    )
+
+    assert float(np.asarray(estimate)) == pytest.approx(16.0)
+    assert float(np.asarray(cached_estimate)) == pytest.approx(16.0)
+    assert int(np.asarray(factorizations)) == 1
+    assert int(np.asarray(cached_factorizations)) == 0
+    assert (
+        int(np.asarray(solves)) == 2 * _linear_solve._HAGER_HIGHAM_CONDITION_ITERATIONS
+    )
+    assert int(np.asarray(cached_solves)) == int(np.asarray(solves))
+
+
 def test_dense_condition_estimate_tolerates_cross_device_factors():
     """The matrix and externally placed LU factors may reside on different devices."""
     result = _run_jax_runtime_case("dense-condition-estimate-cross-device-factors")
@@ -774,7 +980,7 @@ def test_float32_dense_lu_rejects_nonnormal_forward_error_through_dispatch(
     monkeypatch,
 ):
     """The exact-adjoint dispatch must reject fp32 solves with wrong forward error."""
-    matrix, matvec, rhs, true_solution = _float32_forward_error_problem()
+    _matrix, matvec, rhs, true_solution = _float32_forward_error_problem()
     operator = {"matvec": matvec, "transpose_matvec": matvec}
     monkeypatch.setattr(_linear_solve, "_EXACT_ADJOINT_DENSE_LU", True)
 
@@ -796,7 +1002,7 @@ def test_solve_jacobian_operator_returns_nan_when_dense_lu_status_fails(
     monkeypatch,
 ):
     """The solution-only exact-adjoint helper must not leak a failed LU vector."""
-    matrix, matvec, rhs, true_solution = _float32_forward_error_problem()
+    _matrix, matvec, rhs, true_solution = _float32_forward_error_problem()
     operator = {"matvec": matvec, "transpose_matvec": matvec}
     monkeypatch.setattr(_linear_solve, "_EXACT_ADJOINT_DENSE_LU", True)
 
