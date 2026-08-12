@@ -13,6 +13,7 @@ from simsopt_jax.core.curve_geometry import (
 )
 from simsopt_jax.core.specs import make_curve_rzfourier_spec
 from simsopt_jax.core.specs import CurveRZFourierSpec
+from simsopt_jax.runtime.host_boundary import block_until_ready
 from simsopt_jax.solve.contracts import OptimizerResult
 from simsopt_jax.solve.serial import TraceableScalarProblem, serial_solve_jax
 from simsopt_jax_adapters.geo.curve_objectives import curve_length_pure
@@ -122,7 +123,7 @@ def solve_rz_curve_length(
         free_positions_device,
         spec,
     )
-    completed = jax.block_until_ready(
+    completed = block_until_ready(
         (
             initial_parameters,
             initial_length,

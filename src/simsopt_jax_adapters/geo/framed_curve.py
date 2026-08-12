@@ -35,6 +35,7 @@ import jax.numpy as jnp
 import numpy as np
 from simsopt._core.derivative import Derivative
 from simsopt._core.optimizable import Optimizable
+from simsopt_jax.backend.dtypes import explicit_device_array
 from simsopt_jax.core._math_utils import as_jax_float64 as _as_jax_float64
 from simsopt_jax.core.framedcurve import (
     rotated_centroid_frame,
@@ -352,7 +353,10 @@ class ZeroRotationJAX(Optimizable):
         super().__init__()
         quad_array = np.asarray(quadpoints, dtype=np.float64)
         self.quadpoints = quad_array
-        self._zero = jax.device_put(np.zeros(int(quad_array.size), dtype=np.float64))
+        self._zero = explicit_device_array(
+            np.zeros(int(quad_array.size), dtype=np.float64),
+            dtype=np.float64,
+        )
 
     def alpha(self, quadpoints: object) -> jax.Array:
         del quadpoints

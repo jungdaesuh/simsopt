@@ -7,7 +7,6 @@ from pathlib import Path
 
 import jax.numpy as jnp
 import numpy as np
-
 from simsopt_jax.backend.dtypes import runtime_device_put_tree
 from simsopt_jax.runtime.host_boundary import block_until_ready, host_tree_after_ready
 
@@ -25,7 +24,6 @@ _ALLOWED_OWNER_CALLS = frozenset(
         "src/simsopt_jax/backend/dtypes.py::runtime_device_put_tree::device_put",
         "src/simsopt_jax/runtime/host_boundary.py::block_until_ready::block_until_ready",
         "src/simsopt_jax/runtime/host_boundary.py::host_value::device_get",
-        "src/simsopt_jax/runtime/host_boundary.py::host_value::transfer_guard_device_to_host",
         # Sharding owns explicit H2D/D2D placement scopes for mesh collectives.
         "src/simsopt_jax/core/sharding.py::_place_leading_axis_arrays::transfer_guard_device_to_device",
         "src/simsopt_jax/core/sharding.py::_place_leading_axis_arrays::transfer_guard_host_to_device",
@@ -37,6 +35,8 @@ _ALLOWED_OWNER_CALLS = frozenset(
         "src/simsopt_jax/geo/optimizers/optimizer.py::_gmres_solve_least_squares_system::transfer_guard_host_to_device",
         "src/simsopt_jax/solve/dispatch.py::_run_optimistix_lm::transfer_guard_host_to_device",
         "src/simsopt_jax/solve/minimize_runtime.py::run_optimistix_minimize::transfer_guard_host_to_device",
+        # This file-reporting bridge explicitly permits its owned D2H log writes.
+        "src/simsopt_jax/solve/serial.py::_write_bounded_objective_log::transfer_guard",
         # Explicit host-extension and reporting bridge scopes.
         "src/simsopt_jax/geo/optimizers/reference.py::_scipy_host_array::transfer_guard_device_to_host",
         "src/simsopt_jax/geo/optimizers/reference.py::_target_array_from_scipy_host::transfer_guard_host_to_device",
@@ -98,9 +98,11 @@ class _BoundaryCallCensus(ast.NodeVisitor):
             return None
         if node.func.attr == "block_until_ready":
             return node.func.attr
-        if isinstance(node.func.value, ast.Name):
-            if node.func.value.id in self.jax_module_aliases:
-                return node.func.attr
+        if (
+            isinstance(node.func.value, ast.Name)
+            and node.func.value.id in self.jax_module_aliases
+        ):
+            return node.func.attr
         return None
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:

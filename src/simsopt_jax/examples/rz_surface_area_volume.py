@@ -13,6 +13,7 @@ from simsopt_jax.core.surface_rzfourier import (
     surface_rz_fourier_spec_from_dofs,
     surface_rz_fourier_volume_from_dofs,
 )
+from simsopt_jax.runtime.host_boundary import block_until_ready
 from simsopt_jax.solve.contracts import OptimizerResult
 from simsopt_jax.solve.serial import (
     TraceableLeastSquaresProblem,
@@ -160,7 +161,7 @@ def _solve_stage(
             spec,
         )
     )
-    completed = jax.block_until_ready(
+    completed = block_until_ready(
         (
             initial_parameters,
             solver_initial_parameters,

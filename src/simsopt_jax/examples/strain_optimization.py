@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 from simsopt_jax.geo.optimizers.optimizer import target_minimize
 
+from simsopt_jax.backend.dtypes import explicit_device_array, runtime_device_put
 from simsopt_jax.core._math_utils import as_runtime_array as _as_runtime_array
 from simsopt_jax.core.framedcurve import (
     rotated_centroid_frame,
@@ -295,19 +296,32 @@ def solve_strain_rotation(
             initial_state.gradient,
         ),
     )
-    final_parameters = jax.device_put(optimizer_result.x, initial_array.sharding)
+    final_parameters = explicit_device_array(
+        optimizer_result.x,
+        dtype=optimizer_result.x.dtype,
+        reference=initial_array,
+    )
     return StrainOptimizationDeviceResult(
         initial=initial_state,
         final=state(final_parameters),
-        success=jax.device_put(optimizer_result.success, initial_array.sharding),
-        status=jax.device_put(optimizer_result.status, initial_array.sharding),
-        iterations=jax.device_put(optimizer_result.nit, initial_array.sharding),
-        function_evaluations=jax.device_put(
-            optimizer_result.nfev,
-            initial_array.sharding,
+        success=runtime_device_put(
+            optimizer_result.success,
+            target=initial_array.sharding,
         ),
-        gradient_evaluations=jax.device_put(
+        status=runtime_device_put(
+            optimizer_result.status,
+            target=initial_array.sharding,
+        ),
+        iterations=runtime_device_put(
+            optimizer_result.nit,
+            target=initial_array.sharding,
+        ),
+        function_evaluations=runtime_device_put(
+            optimizer_result.nfev,
+            target=initial_array.sharding,
+        ),
+        gradient_evaluations=runtime_device_put(
             optimizer_result.njev,
-            initial_array.sharding,
+            target=initial_array.sharding,
         ),
     )

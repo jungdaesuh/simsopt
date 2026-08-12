@@ -13,6 +13,7 @@ from simsopt_jax.objectives import (
     StageTwoObjectiveConfig,
     fused_stage_two_values,
 )
+from simsopt_jax.runtime.host_boundary import block_until_ready
 from simsopt_jax.solve.contracts import OptimizerResult
 from simsopt_jax.solve.driver import Driver
 from simsopt_jax.solve.serial import (
@@ -344,7 +345,7 @@ def solve_standard_stage_two(
         regularization_config,
         second_length_weight_device,
     )
-    initial, first, final, taylor_errors = jax.block_until_ready(
+    initial, first, final, taylor_errors = block_until_ready(
         (initial, first, final, taylor_errors)
     )
     return StandardStageTwoDeviceResult(

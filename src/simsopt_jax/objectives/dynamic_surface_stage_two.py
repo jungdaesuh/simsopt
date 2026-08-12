@@ -20,6 +20,7 @@ from simsopt_jax.core.surface_rzfourier import (
     surface_rz_fourier_normal_from_spec,
     surface_rz_fourier_spec_from_dofs,
 )
+from simsopt_jax.runtime.host_boundary import host_value
 
 from .stage_two import (
     CoilDofExtractionProvider,
@@ -54,7 +55,7 @@ def freeze_coil_dof_extraction_spec(
     field: CoilDofExtractionProvider,
 ) -> CoilSetDofExtractionSpec:
     """Freeze closed-over coil templates as immutable host constants."""
-    extraction = jax.device_get(field.coil_dof_extraction_spec())
+    extraction = host_value(field.coil_dof_extraction_spec())
     return cast(
         CoilSetDofExtractionSpec,
         jax.tree.map(_immutable_host_leaf, extraction),
