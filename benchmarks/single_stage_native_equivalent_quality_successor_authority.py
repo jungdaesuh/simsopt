@@ -326,12 +326,12 @@ DIAG4_REVIEW_ROLES: Final = frozenset(
 
 DIAG5_ROUTE: Final = "NEQ-GNTR3-DIAG5"
 DIAG5_PLAN_SHA256: Final = (
-    "786a7d3da6252aa04704d0532158e8fde96833bcf07d81b639f6313d72e857a4"
+    "618cb703d507ee280e4ff861ec848e2ac76f586517e33f4f4720c04fe8e663e9"
 )
 DIAG5_BLANK_PLAN_SHA256: Final = (
-    "ec43f7872ba25a79dc9672fea293363279ad668f697680305923e811d206592b"
+    "afd6ef26f0c404aacc894010bc0a1da7f6f7c10e117b6fd170a17099486ea46f"
 )
-DIAG5_BLANK_PLAN_SIZE_BYTES: Final = 72838
+DIAG5_BLANK_PLAN_SIZE_BYTES: Final = 74430
 DIAG5_PLAN_RELATIVE_PATH: Final = "docs/single_stage_jax_gpu_native_equivalent_quality_diag5_native_binding_recovery_plan.md"
 DIAG5_PREQUALIFICATION_PLAN_CONTROL_SCHEMA_VERSION: Final = (
     "single-stage-neq-gntr3-prequalification-plan-control-v2"
