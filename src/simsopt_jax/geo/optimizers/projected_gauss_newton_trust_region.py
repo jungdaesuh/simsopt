@@ -1542,102 +1542,40 @@ def run_projected_gauss_newton_trust_region_loop(
         )
 
     def safeguarded_attempt(state: _LoopState) -> _LoopState:
-        first_result = attempt(state)
-        (
-            first_outcome,
-            first_actual_reduction,
-            first_predicted_reduction,
-            first_maximum_individual_correction_step_ratio,
-            first_correction_path_step_ratio,
-            first_corrected_radius_ratio,
-            first_steihaug_iterations,
-            first_steihaug_hvp_evaluations,
-            first_steihaug_solve_calls,
-            first_total_hvp_evaluations,
-            first_nonlinear_corrections,
-            first_joint_evaluations,
-            first_joint_linearizations,
-            first_joint_value_evaluations,
-            first_objective_residual_linearizations,
-            first_gram_factorizations,
-            first_gram_solves,
-            first_retry_step_bounds,
-        ) = subtrial_work(state, first_result)
         integer_zeros = jnp.zeros((_STEP_BOUND_SAFEGUARD_SUBTRIALS,), dtype=jnp.int32)
+        real_nans = jnp.full((_STEP_BOUND_SAFEGUARD_SUBTRIALS,), nan, dtype=dtype)
+        # Subtrial 0 is seeded as pending at the incoming trust radius, so the
+        # rolled loop below runs it exactly like every backtracked subtrial.
         ledger = _StepBoundSafeguardState(
-            result=first_result,
-            subtrial_count=jnp.asarray(1, dtype=jnp.int32),
+            result=state,
+            subtrial_count=jnp.asarray(0, dtype=jnp.int32),
             selected_subtrial_index=jnp.asarray(0, dtype=jnp.int32),
-            subtrial_trust_radius=jnp.full(
-                (_STEP_BOUND_SAFEGUARD_SUBTRIALS,), nan, dtype=dtype
-            )
-            .at[0]
-            .set(state.trust_radius),
+            subtrial_trust_radius=real_nans,
             subtrial_outcome=jnp.full(
                 (_STEP_BOUND_SAFEGUARD_SUBTRIALS,),
                 int(ProjectedGaussNewtonAttemptOutcome.INACTIVE),
                 dtype=jnp.int32,
-            )
-            .at[0]
-            .set(first_outcome),
-            subtrial_actual_reduction=jnp.full(
-                (_STEP_BOUND_SAFEGUARD_SUBTRIALS,), nan, dtype=dtype
-            )
-            .at[0]
-            .set(first_actual_reduction),
-            subtrial_predicted_reduction=jnp.full(
-                (_STEP_BOUND_SAFEGUARD_SUBTRIALS,), nan, dtype=dtype
-            )
-            .at[0]
-            .set(first_predicted_reduction),
-            subtrial_maximum_individual_correction_step_ratio=jnp.full(
-                (_STEP_BOUND_SAFEGUARD_SUBTRIALS,), nan, dtype=dtype
-            )
-            .at[0]
-            .set(first_maximum_individual_correction_step_ratio),
-            subtrial_correction_path_step_ratio=jnp.full(
-                (_STEP_BOUND_SAFEGUARD_SUBTRIALS,), nan, dtype=dtype
-            )
-            .at[0]
-            .set(first_correction_path_step_ratio),
-            subtrial_corrected_radius_ratio=jnp.full(
-                (_STEP_BOUND_SAFEGUARD_SUBTRIALS,), nan, dtype=dtype
-            )
-            .at[0]
-            .set(first_corrected_radius_ratio),
-            subtrial_steihaug_iterations=integer_zeros.at[0].set(
-                first_steihaug_iterations
             ),
-            subtrial_steihaug_hvp_evaluations=integer_zeros.at[0].set(
-                first_steihaug_hvp_evaluations
-            ),
-            subtrial_steihaug_solve_calls=integer_zeros.at[0].set(
-                first_steihaug_solve_calls
-            ),
-            subtrial_total_hvp_evaluations=integer_zeros.at[0].set(
-                first_total_hvp_evaluations
-            ),
-            subtrial_nonlinear_corrections=integer_zeros.at[0].set(
-                first_nonlinear_corrections
-            ),
-            subtrial_joint_evaluations=integer_zeros.at[0].set(first_joint_evaluations),
-            subtrial_joint_linearizations=integer_zeros.at[0].set(
-                first_joint_linearizations
-            ),
-            subtrial_joint_value_evaluations=integer_zeros.at[0].set(
-                first_joint_value_evaluations
-            ),
-            subtrial_objective_residual_linearizations=integer_zeros.at[0].set(
-                first_objective_residual_linearizations
-            ),
-            subtrial_gram_factorizations=integer_zeros.at[0].set(
-                first_gram_factorizations
-            ),
-            subtrial_gram_solves=integer_zeros.at[0].set(first_gram_solves),
-            retry_step_bounds=first_retry_step_bounds,
+            subtrial_actual_reduction=real_nans,
+            subtrial_predicted_reduction=real_nans,
+            subtrial_maximum_individual_correction_step_ratio=real_nans,
+            subtrial_correction_path_step_ratio=real_nans,
+            subtrial_corrected_radius_ratio=real_nans,
+            subtrial_steihaug_iterations=integer_zeros,
+            subtrial_steihaug_hvp_evaluations=integer_zeros,
+            subtrial_steihaug_solve_calls=integer_zeros,
+            subtrial_total_hvp_evaluations=integer_zeros,
+            subtrial_nonlinear_corrections=integer_zeros,
+            subtrial_joint_evaluations=integer_zeros,
+            subtrial_joint_linearizations=integer_zeros,
+            subtrial_joint_value_evaluations=integer_zeros,
+            subtrial_objective_residual_linearizations=integer_zeros,
+            subtrial_gram_factorizations=integer_zeros,
+            subtrial_gram_solves=integer_zeros,
+            retry_step_bounds=jnp.asarray(True),
         )
 
-        def backtrack(active: _StepBoundSafeguardState) -> _StepBoundSafeguardState:
+        def subtrial(active: _StepBoundSafeguardState) -> _StepBoundSafeguardState:
             trial_state = state._replace(trust_radius=active.result.trust_radius)
             result = attempt(trial_state)
             (
@@ -1746,14 +1684,22 @@ def run_projected_gauss_newton_trust_region_loop(
                 retry_step_bounds=retry_step_bounds,
             )
 
-        if options.enable_step_bound_safeguard:
-            for _ in range(_STEP_BOUND_SAFEGUARD_BACKTRACKS):
-                ledger = jax.lax.cond(
-                    ledger.retry_step_bounds,
-                    backtrack,
-                    lambda current: current,
-                    ledger,
-                )
+        def subtrial_when_pending(
+            _index: int, current: _StepBoundSafeguardState
+        ) -> _StepBoundSafeguardState:
+            return jax.lax.cond(
+                current.retry_step_bounds,
+                subtrial,
+                lambda live: live,
+                current,
+            )
+
+        ledger = jax.lax.fori_loop(
+            0,
+            _STEP_BOUND_SAFEGUARD_SUBTRIALS,
+            subtrial_when_pending,
+            ledger,
+        )
 
         index = state.attempts
         history = ledger.result.history._replace(
