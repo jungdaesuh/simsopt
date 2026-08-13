@@ -1,7 +1,11 @@
 # Projected-route certification protocol — single-stage VMEC-free, GPU beats native
 
-Status: PHASES 1–3 LANDED (CPU machinery, GPU attempt-protocol launcher,
-shipped example), phase 4 NOT STARTED. No root has been opened.
+Status: PHASES 1–4 LANDED. The root ran on 2026-08-13, latched on its first
+attempt, and published `verdict = CLAIM_DISCHARGED` at
+`~/simsopt-campaigns/projected-route-root-20260813T184930Z/final/`
+(`root-evidence.json` sha256 `6937fc68…`, engine bytes at commit `b7857e6e8`).
+**§12.14 is the authoritative claim statement** — quote it, not §1, and read
+its NOT-claimed list before restating the result anywhere.
 Route under certification: `projected-lagrangian-newton-cg`
 (`src/simsopt_jax/geo/optimizers/projected_lbfgs.py`, entry
 `run_projected_lbfgs`), configuration frozen at
@@ -155,6 +159,16 @@ the `FullSpaceProblem` and running the identity gate are setup that native's
 287.30 s does not contain either (bootstrap costs ≈14.5 s on the 5090, ≈7.2 s
 on this CPU box). Every artifact states the boundary explicitly in a
 `timing_boundary` field so the comparison is checkable rather than assumed.
+
+The **sum** is the certified quantity; the two halves name where a compile
+happened rather than separating compile from execution. `compile_seconds` is
+the first point evaluation, which is where that kernel compiles;
+`solve_seconds` is everything after it, which is where the retraction, the
+metric apply, the pair admission and the Newton solve each compile on their own
+first call. No second escapes the boundary either way — `engine_wall` is
+complete — but `engine_compile` alone understates the run's compile cost and
+`engine_solve` alone overstates its execution cost, so neither half is quotable
+on its own.
 
 **Compile is INSIDE the claim.** The predecessor route's gate excluded compile
 while native's bar excluded nothing, which is not a comparison. Two lanes are
@@ -591,6 +605,34 @@ configuration — are pinned by
 `tests/benchmarks/test_rehearse_single_stage_projected_route_cpu.py::test_certified_options_are_the_configuration_the_latches_used`,
 so an optimizer default changed elsewhere cannot silently redefine what is
 being certified.
+
+**Re-adjudicated 2026-08-13, after the root, on measured evidence: the
+tolerance stays at zero, and the sensor stays too.** A review read the pairing
+as a defect — the loop spends a constraint JVP per carried point to compute
+`true_tangency_relative_residual`, and the `> 0.0` guard at
+`projected_lbfgs.py` then makes the refresh unreachable. The measurement is
+real and the conclusion is the opposite one, on two counts from
+`~/simsopt-campaigns/projected-lbfgs-headroom-roadmap-20260813.md` §7 (lever
+B6):
+
+* **Enabling it is net negative.** A tolerance of 2.0 would have fired on 16 of
+  Q1's iterations at 511.5 ms per materialization — **+8.2 s spent to recover
+  ≈0.55 s** of avoided line-search trials, **net −7.6 s**. Higher tangency also
+  goes with *fewer* trials over most of the range (`tangency > 0.25`, 45.7 % of
+  iterations, averages 2.41 trials against 3.19 overall), and freshly refreshed
+  iterations are not cheaper (`projector_age = 0` averages 3.36 trials against
+  2.70 at age 2).
+* **It cannot prevent the collapse it would be aimed at.** The A100 no-latch arm
+  ended with `line_search_forced_refreshes = 0`, which — the retry being guarded
+  by `projector_age > 0` — proves the failure happened at `projector_age == 0`,
+  against rows materialized at that very point. Tangency does not discriminate
+  either: 12.49 on the collapsed arm against 11.24 and 4.33 on two latched ones,
+  i.e. the second-highest maximum belongs to a *latched* run.
+
+The JVP is therefore not waste: `true_tangency_relative_residual` is published
+on every banked row of every receipt, and the staleness readings and the
+collapse-proximity margin are drawn from those rows. The route measures the
+sensor and declines to act on it, deliberately.
 
 ### 12.4 Rehearsal scope — the GPU root artifact carries a sealed snapshot
 
@@ -2384,3 +2426,42 @@ live repository manifest moves on.
 > remains, unchanged: RTX 5090, one box, one interpreter, seven NO-GO review
 > ledgers with an adjudicated residual, a non-authoritative historical native
 > bar, and an endpoint-quality contract rather than parity.
+
+### 12.15 Post-certification engine changes, 2026-08-13
+
+The certificate binds **engine bytes at commit `b7857e6e8`** — the execution
+sources are enumerated by digest in the authority the supplement carries
+(`5a40391f…`), and the package validator checks the 297 executed modules
+against that copy. Nothing committed after the seal can reach it: a later
+commit changes the live repository, never the sealed bytes, their digests, or
+the numbers derived from them. The rule that follows is the one already stated
+for the manifest in §12.14.2 — **the sealed root stays valid and stops being
+re-derivable from the live tree; a future claim needs a fresh root under a plan
+revision (§12.1), not a re-reading of this one.**
+
+Changes landed after the seal, in that spirit:
+
+* **A usable Newton direction measured as ascent falls back to the secant
+  store** (`projected_lbfgs.py`) instead of ending the run at
+  `NON_DESCENT_DIRECTION`. A refused solve (`usable = False`) already took that
+  fallback; a solve the loop accepted, whose direction then measured
+  `Pg · d ≥ 0`, did not, and killed the run on a recoverable iteration.
+  `NON_DESCENT_DIRECTION` now names the case where the *rescue* direction also
+  fails the slope test. **Inert for the certified trajectories, and checked
+  rather than argued:** no row of the sealed root (387 warm, 387 cold), of Q1
+  (357) or of Q2 (401) carries a nonnegative `directional_derivative`, so the
+  path this fix changes was never taken; a bounded CPU rehearsal A/B against
+  the pre-fix commit reproduces bit-identical terminal coordinates and
+  telemetry.
+* **Documentation-only, no behaviour changed:** the tangency adjudication of
+  §12.3 written into the option's own docstring; the engine timing split stated
+  precisely where the fields are defined (`compile_seconds` is the first point
+  evaluation, and every other kernel — retraction, metric apply, pair
+  admission, Newton solve — compiles inside `solve_seconds`, so only the **sum**
+  is the certified wall, which is what §3 fixes and every receipt publishes);
+  the Gram forward-error contract recorded at
+  `factor_certified_gram_projector` with its deferral reason; the supervisor's
+  parent CUDA context documented as accepted at the binding site.
+
+None of these is quotable as an improvement to the published result. The
+result is the sealed one, at `b7857e6e8`, on the numbers of §12.14.

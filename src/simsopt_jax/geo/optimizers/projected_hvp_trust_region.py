@@ -196,7 +196,33 @@ def _forward_error_bound(
 def factor_certified_gram_projector(
     constraint_jacobian: jax.Array,
 ) -> CertifiedGramProjector:
-    """Factor ``A A.T`` and record rank and reconstruction evidence."""
+    """Factor ``A A.T`` and record rank and reconstruction evidence.
+
+    ``all_finite`` here is a FACTORIZATION verdict and nothing more: the factor
+    is finite, its diagonal positive, the Gram numerically full rank.  The
+    accuracy of what the factor is later spent on is a property of each solve
+    and is certified there, as ``CertifiedGramSolve.forward_error_bound`` --
+    ``relative_residual / (reciprocal_condition - relative_residual)``, a bound
+    on the relative error of that one solution.  No consumer in this package
+    refuses on that bound.  On the certified projected route the Gram runs at
+    condition 3.6e6, where fp64 leaves the bound near 4e-10 against a 1e-10
+    raw-equality budget, so the two are the same order and a caller must not
+    read "finite" as "accurate to the feasibility tolerance".
+
+    Feasibility itself does not depend on that reading: every retraction takes
+    its verdict from the TRUE constraints at the landed point
+    (``projected_lbfgs._finish_retraction``), so a solve whose forward error
+    consumed the budget costs rejected line-search trials rather than admitting
+    an off-manifold iterate -- measured at ~1e-14 through the campaign
+    bootstrap.  Turning the bound into a refusal is therefore a margin
+    improvement, not a correctness fix, and it is deferred rather than taken
+    here: it would gate accepted iterates, so it changes trajectories and
+    re-opens the certified configuration, and the bound is not carried on the
+    banked rows a receipt could be validated against
+    (``ProjectedLbfgsIteration`` publishes ``multiplier_forward_error_bound``
+    and not the projection's).  Publishing it and gating on it belong together,
+    in a receipt-schema revision under a successor plan.
+    """
 
     gram_matrix = constraint_jacobian @ constraint_jacobian.T
     gram_matrix = 0.5 * (gram_matrix + gram_matrix.T)
