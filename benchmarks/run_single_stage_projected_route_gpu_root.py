@@ -2046,6 +2046,13 @@ def attempt_engine_wall_seconds(attempt: Mapping[str, JsonValue]) -> float:
     doubles, so agreement is exact; a receipt whose ``engine_wall`` is not its
     own compile plus its own solve has restated the quantity the claim is
     judged on.
+
+    The SUM is the certified quantity and the only one a claim may quote.  The
+    halves name where a compile happened rather than separating compile from
+    execution: ``engine_compile`` is the first point evaluation, and every other
+    kernel -- retraction, metric apply, pair admission, Newton solve -- compiles
+    on its own first call inside ``engine_solve`` (see ``ProjectedLbfgsRun``).
+    No second is dropped by that boundary, so the wall this returns is complete.
     """
 
     timing = attempt["evidence"]["timing_seconds"]
@@ -4221,6 +4228,23 @@ def run_attempt_protocol(
     # ``bind_gpu_backend`` initialises a CUDA context under whatever storage the
     # operator had, before that storage has been probed.  Neither costs the
     # root; neither is nothing.
+    #
+    # That context then lives for the whole protocol, alongside up to four
+    # full-budget GPU children, and it is ACCEPTED rather than overlooked.  The
+    # supervisor's own artifact says so in its bytes (``supervisor_payload``
+    # publishes ``gpu_zero_asserted = False``).  It stays in the parent because
+    # a silent CPU resolution has to be refused BEFORE any child spends compute
+    # or any tree is staged, and a refusal delegated to a child would arrive
+    # after the launch it was meant to prevent -- ``nvidia-smi`` cannot stand in
+    # for it, since the fact being established is which backend THIS
+    # interpreter resolved, not which device the box has.  What bounds the cost
+    # is that the children inherit this process's environment and refuse unless
+    # it carries ``XLA_PYTHON_CLIENT_PREALLOCATE=false``, so every launch that
+    # reaches a receipt had the parent's own context non-preallocating too, and
+    # every launch that did not is refused at the first child.  Moving the
+    # binding into a disposable probe child would trade that bounded cost for a
+    # process launch inside the refusal window, and is deferred to a successor
+    # plan rather than taken on a frozen protocol.
     runtime_identity = bind_gpu_backend()
     preflight = preflight_external_resources(
         gpu_uuid=gpu_uuid,

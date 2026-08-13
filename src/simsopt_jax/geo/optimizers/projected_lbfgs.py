@@ -247,6 +247,21 @@ class ProjectedLbfgsOptions:
     quantity is ``||A d||_inf / ||d||_inf`` at the CURRENT point for the
     projected gradient ``d``, which is zero to rounding when the rows were
     materialized here and grows with the distance travelled since.
+
+    The certified route runs at zero, so it MEASURES the tangency it never acts
+    on, and that is the adjudicated design rather than an oversight.  The
+    measurement is load-bearing evidence: ``true_tangency_relative_residual`` is
+    published on every banked row and is what the collapse-margin reading and
+    the staleness analyses are drawn from, so the constraint JVP buys telemetry
+    even at tolerance zero.  Acting on it was measured and refused
+    (``~/simsopt-campaigns/projected-lbfgs-headroom-roadmap-20260813.md`` §7,
+    lever B6): a tolerance of 2.0 would have fired on 16 of Q1's iterations at
+    511.5 ms per materialization, spending +8.2 s to recover the ~0.55 s of
+    line-search trials it avoids -- net -7.6 s.  It also cannot prevent the
+    collapse it would be aimed at: the A100 arm that failed did so with
+    ``line_search_forced_refreshes = 0``, i.e. against a projector materialized
+    at that very point, and tangency does not separate the populations anyway
+    (12.49 on the collapsed arm against 11.24 and 4.33 on two latched ones).
     """
 
     newton_tangent_fraction_threshold: float = 0.0
@@ -468,6 +483,16 @@ class ProjectedLbfgsRun(NamedTuple):
     factor.  The exact retraction materializes its own rows per correction and
     those are not counted here; ``retraction_corrections`` on each record is
     what reports them.
+
+    ``compile_seconds`` is the wall of the FIRST point evaluation, which is
+    where the point-evaluation kernel compiles; ``solve_seconds`` is everything
+    after it, which is where every OTHER kernel -- the retraction, the metric
+    apply, the pair admission, the selected direction solve -- compiles on its
+    own first call.  The split therefore names where each compile happened, not
+    compile against execution, and only their SUM is the engine wall a speed
+    claim may be stated at.  Reading ``compile_seconds`` alone as the run's
+    compile cost understates it; reading ``solve_seconds`` alone as its
+    execution cost overstates it by the same seconds.
     """
 
     status: ProjectedLbfgsStatus
@@ -1266,6 +1291,31 @@ def run_projected_lbfgs(
             )
         directional_derivative = float(point.projected_gradient @ direction)
         direction_norm = float(jnp.linalg.norm(direction))
+        # A Newton direction the SOLVE called usable can still measure as ascent
+        # here: the solve certifies finiteness and a nonzero norm, not the sign
+        # of ``Pg . d``, and a carried projector's rows, an L-BFGS-preconditioned
+        # truncated CG and a Gram of condition 3.6e6 leave that sign to
+        # rounding.  Measured ascent is the same evidence a refused solve
+        # carries -- the model is not describing this neighbourhood -- so it
+        # hands the iteration to the secant store exactly as ``usable=False``
+        # does: same direction, same cap, same rescue floor, same hybrid disarm.
+        # Ending the RUN on it instead would make a recoverable iteration
+        # terminal.  The banked row still separates the two cases, because the
+        # Newton telemetry of a refused solve is nonfinite or zero-norm while
+        # this one's is finite and nonzero with ``lagrangian_newton_used``
+        # false.  Only a rescue that is ITSELF not a descent direction is
+        # terminal, which is what the check below decides.  The Newton arm
+        # alone is treated this way: it is the arm the certified route drives,
+        # and the Gauss--Newton family is closed with a recorded negative
+        # verdict rather than carrying evidence of this mode.
+        if lagrangian_newton_used and directional_derivative >= 0.0:
+            direction = jax.block_until_ready(
+                apply_metric(metric, -point.projected_gradient)
+            )
+            directional_derivative = float(point.projected_gradient @ direction)
+            direction_norm = float(jnp.linalg.norm(direction))
+            lagrangian_newton_used = False
+            model_predicted = float("nan")
         direction_seconds = time.perf_counter() - direction_started
 
         if not math.isfinite(direction_norm) or not math.isfinite(

@@ -80,6 +80,17 @@ class TangentNewtonCgStep(NamedTuple):
     iteration met negative curvature, since no iterate had yet been taken;
     ``negative_curvature_before_any_step`` reports that case so a caller can
     fall back to another model rather than test a zero step.
+
+    ``usable`` is deliberately narrow: finite, and a step that exists.  It
+    states nothing about ``tangency_relative_residual`` and nothing about the
+    sign of ``Pg . d``, both of which are published beside it for a caller to
+    judge.  A poorly tangent step is not unusable -- the retraction takes its
+    verdict from the true constraints, so the cost of one is trials, not an
+    off-manifold point -- and a step that measures as ascent is handled by the
+    caller falling back to its own store, which is where the evidence about
+    what to do next lives.  Folding either into ``usable`` would put a policy
+    threshold with no measured band behind it inside a solve whose job is to
+    report what it found.
     """
 
     direction: jax.Array

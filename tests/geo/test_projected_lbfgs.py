@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from simsopt_jax.geo.optimizers import projected_lbfgs
 from simsopt_jax.geo.optimizers.dense_sqp import materialize_joint_vjp_rows
 from simsopt_jax.geo.optimizers.projected_hvp_trust_region import (
     factor_certified_gram_projector,
@@ -554,6 +555,113 @@ def test_negative_curvature_iteration_falls_back_to_the_store() -> None:
     assert first.newton_cg_negative_curvature_before_any_step
     assert not first.lagrangian_newton_used
     assert float(run.objective) < float(run.iterations[0].objective)
+
+
+def _ascending_newton_kernels(
+    monkeypatch: pytest.MonkeyPatch, *, ascending_store: bool = False
+) -> None:
+    """Make every usable Newton solve hand the loop an ASCENT direction.
+
+    The solve certifies finiteness and a nonzero norm, never the sign of
+    ``Pg . d``; on the certified full-space problem that sign is left to
+    rounding by a carried projector, an L-BFGS-preconditioned truncated CG and
+    a Gram of condition 3.6e6, which a five-variable sphere cannot reproduce.
+    Negating the solved direction at the kernel bundle -- the loop's one
+    construction site for it -- states exactly the condition under test and
+    leaves every other field of the solve as the real one produced it.
+    ``ascending_store`` negates the loop's metric apply as well, so the secant
+    rescue the loop falls back to is an ascent direction too.  The metric is
+    replaced on the bundle rather than in the module, because the Newton solve
+    preconditions with the same function and negating it there would change
+    which direction the solve returns instead of which one the loop takes.
+    """
+
+    original_build = projected_lbfgs.build_projected_lbfgs_kernels
+
+    def build_ascending(*arguments: object, **keywords: object) -> object:
+        kernels = original_build(*arguments, **keywords)
+        solve = kernels.lagrangian_newton_direction
+        assert solve is not None
+
+        def ascending(*solve_arguments: object) -> object:
+            multipliers, step = solve(*solve_arguments)
+            return multipliers, step._replace(direction=-step.direction)
+
+        if not ascending_store:
+            return kernels._replace(lagrangian_newton_direction=ascending)
+        apply_metric = kernels.apply_metric
+        return kernels._replace(
+            lagrangian_newton_direction=ascending,
+            apply_metric=lambda metric, vector: -apply_metric(metric, vector),
+        )
+
+    monkeypatch.setattr(
+        projected_lbfgs, "build_projected_lbfgs_kernels", build_ascending
+    )
+
+
+def test_ascending_newton_direction_falls_back_to_the_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A usable Newton step measured as ascent is recoverable, not terminal.
+
+    A refused solve already hands the iteration to the secant store.  A solve
+    the loop accepted as usable, whose direction then measures ``Pg . d >= 0``,
+    carries the same evidence -- the model is not describing this
+    neighbourhood -- and must take the same fallback.  Before this was fixed
+    the run ended at ``NON_DESCENT_DIRECTION`` with no iteration banked at all.
+    """
+
+    _ascending_newton_kernels(monkeypatch)
+    budget = 6
+
+    run = run_projected_lbfgs(
+        _sphere_problem,
+        _near_minimizer_start(),
+        options=ProjectedLbfgsOptions(
+            maximum_iterations=budget, lagrangian_newton=True
+        ),
+    )
+
+    assert run.status is ProjectedLbfgsStatus.ITERATION_LIMIT
+    assert len(run.iterations) == budget
+    assert float(run.objective) < float(run.iterations[0].objective)
+    assert float(run.feasibility_inf) <= 1.0e-10
+    # The solve was usable -- its direction is finite and nonzero -- and the
+    # loop still refused it, which is what separates this from the refused-solve
+    # fallback in the banked row.
+    first = run.iterations[0]
+    assert first.newton_direction_norm > 0.0
+    assert not first.lagrangian_newton_used
+    assert all(
+        iteration.directional_derivative < 0.0 for iteration in run.iterations
+    )
+    assert not any(iteration.lagrangian_newton_used for iteration in run.iterations)
+
+
+def test_ascending_rescue_direction_still_ends_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``NON_DESCENT_DIRECTION`` survives for the case that has no fallback left.
+
+    The store's own direction is the last one the iteration can try, so a run
+    whose secant rescue is ALSO an ascent direction has nothing further to fall
+    back to and must still fail closed rather than search along it.  This
+    behaviour is the same before and after the ascent fallback landed, which is
+    the point: the fallback narrowed which cases reach this status without
+    removing the status itself.
+    """
+
+    _ascending_newton_kernels(monkeypatch, ascending_store=True)
+
+    run = run_projected_lbfgs(
+        _sphere_problem,
+        _near_minimizer_start(),
+        options=ProjectedLbfgsOptions(maximum_iterations=6, lagrangian_newton=True),
+    )
+
+    assert run.status is ProjectedLbfgsStatus.NON_DESCENT_DIRECTION
+    assert run.iterations == ()
 
 
 def test_hybrid_schedule_opens_on_the_secant_step() -> None:
