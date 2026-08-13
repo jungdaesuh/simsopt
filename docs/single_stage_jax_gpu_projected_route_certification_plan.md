@@ -1815,16 +1815,43 @@ is reached at a point no row records and every recorded objective is strictly
 ABOVE it (Q1 `4.529e-8`, Q2 `4.517e-8`, target `4.482e-8`). Gating it would have
 refused the campaign's own banked evidence. `terminal_objective ==
 rows[-1].candidate_objective` is also false — bitwise, they differ at the last
-digits (measured `1.3e-16` on CPU, `2.8e-14` and `1.7e-14` on the two 5090
-latches) because the terminal point is re-evaluated through a different kernel —
-and `terminal_feasibility_inf == rows[-1].candidate_feasibility_inf` holds on Q1
-and FAILS on Q2 by `3.5e-4`. What is true, and is now gated, is the REVERSE
-implication (no recorded iterate at or below the target, since such an iterate
-would have ended the loop before it was recorded), that a latch records at least
-one iterate, and ADJACENCY: the terminal objective is one of the two endpoints
-the last recorded iteration names, compared through the campaign's own
-cross-executable endpoint band rather than a new constant — three hundred times
-the worst deviation this campaign has measured.
+digits (measured **RELATIVE**: `1.3e-16` on CPU, `2.8e-14` and `1.7e-14` on the
+two 5090 latches; round 7 re-measured the two latches at `2.7547e-14` and
+`1.6993e-14` relative against the gate's `rel_tol=1e-11` — margins of 363× and
+588× — with the absolute deviations `1.22e-21` and `7.61e-22` also below the
+gate's `abs_tol=1e-19` floor) because the terminal point is re-evaluated through
+a different kernel — and `terminal_feasibility_inf ==
+rows[-1].candidate_feasibility_inf` holds on Q1 and FAILS on Q2 by `3.5e-4`.
+**The unit is now stated because it decides the gate's meaning**: read as
+ABSOLUTE against a `4.48e-8` objective, `2.8e-14` is `6.2e-7` relative and the
+plain reading implies this gate refuses both banked latches by five decades,
+which is the opposite of the measurement (numerics-physics N7-3). What is true,
+and is now gated, is the REVERSE implication (no recorded iterate at or below
+the target, since such an iterate would have ended the loop before it was
+recorded), that a latch records at least one iterate, and ADJACENCY: the
+terminal objective is one of the two endpoints the last recorded iteration
+names, compared through the campaign's own cross-executable endpoint band rather
+than a new constant — three hundred times the worst deviation this campaign has
+measured.
+
+**The row-side half of this ruling is CUSTODY-SCOPED, and that scope is the
+claim it makes.** The reverse implication scans the `objective` column only,
+while adjacency accepts either endpoint of the last recorded iteration —
+`objective[-1]` **or** `candidate_objective[-1]`. That asymmetry is deliberate,
+physically required, and **must not be widened**: the engine breaks at the TOP
+of its loop, so the last ACCEPTED CANDIDATE is the latch point while every
+recorded OPENING point is necessarily above the target. Measured on BOTH banked
+5090 latches, `count(candidate_objective <= target) = 1`; extending the
+reverse-implication scan to the candidate column would therefore refuse the
+campaign's own banked evidence, exactly as the falsified forward form would
+have. Ruling 24 accordingly closes the TERMINAL scalar — against a frozen
+campaign literal that lives outside the receipt and is reached on every
+discharging path — and it does **not** close the CUSTODY of the rows, which
+remain unbound to an engine trace (the deferral below, unchanged). Section 1's
+claim is carried by the terminal scalar and its frozen-native anchor; the
+published iterate columns are corroborating provenance at exactly the strength
+custody gives them, which under §12.13 is that of an honest-tooling record
+(adversarial-redteam A7-1).
 
 **25. A PRE-REGISTERED TIMEOUT IS THE FROZEN ONE.** Ruling 21 requires a record
 claiming a timeout to have waited "the timeout it publishes", and took BOTH
@@ -1968,3 +1995,59 @@ could reach the exclusion the test measures — and the suite's 60th test passed
 or failed on whether the operator had exported `JAX_ENABLE_X64`. The racer now
 configures the runtime the environment it is judged against declares. The
 qualifier's gate is untouched: a child that is not FP64 CPU is still refused.
+
+### 12.13 Residual adjudication — the forgery axis is out of scope, and the root is authorized
+
+Rounds 1–7 converged. What still returns NO-GO is one axis and only one axis:
+an author who hand-types receipt fields. That axis is now ruled on rather than
+remediated for an eighth round.
+
+**Adversarial-author forgery resistance is adjudicated OUT OF SCOPE for this
+certification: receipts are produced by this repository's own tooling at a
+pinned commit on a single operator-controlled box, and the review trail (rounds
+1-7, sealed) hardened all honest-tooling failure classes to strict closure
+(numerics GO x5, reproducibility GO, protocol minors-only at round 7).
+Accepted-residual findings: A7-1..A7-14 class = hand-forged receipt fields;
+disposition = accepted, root authorized by user 2026-08-13.**
+
+What the adjudication does and does not license:
+
+* It does **not** weaken any landed gate. Every validator, kill test, refusal
+  site, shape declaration and leaf binding rulings 15–28 installed stays
+  exactly as it is. Nothing is deleted to make this ruling true.
+* It does **not** restate section 1's claim. The claim is carried by the
+  TERMINAL scalar and its frozen-native anchor, which ruling 24 binds outside
+  the receipt and which round 7 confirmed is reached on every discharging path.
+  The row columns are corroborating provenance at custody strength, which
+  §12.12's row-side paragraph now states in the ruling itself rather than
+  leaving to be inferred.
+* It **does** bound the threat model to an honest producer. A hand-forged
+  field — A7-1's `candidate_objective` escape, A7-2's one-sided quality band,
+  A7-3's null objective column, A7-4's two cold-lane forms, A7-6's unbound
+  timed child, A7-12's understated residue count, A7-14's tautological
+  anchors — requires an author who edits receipt bytes. That author is the
+  operator, on the operator's own box, against the operator's own claim. The
+  campaign's remaining defence against that person is custody and the sealed
+  review trail, not another validator.
+* It **does** carry forward every DEFERRED-SOUND disposition of rounds 3–7
+  unchanged, including numerics-physics's standing recommendation against
+  minting constants between the reviews and the root, which this commit
+  honours: no numeric threshold moves here.
+
+Two round-7 fixes land beside the adjudication because they cost nothing and
+one of them removes the only reading under which ruling 24 is catastrophic:
+the three adjacency deviations are now published with their unit (RELATIVE) at
+both sites that state them — §12.12 above and the launcher's
+`_validate_iterate_columns` docstring (N7-3) — and ruling 24's row-side closure
+is restated as CUSTODY-SCOPED with the scan asymmetry marked as deliberate and
+not-to-be-widened (A7-1). **The scan is not widened.** Round 7 measured
+`count(candidate_objective <= target) = 1` on both banked 5090 latches, so
+widening it would refuse the campaign's own evidence and burn the root; the
+ledger recorded that prediction and this commit honours it.
+
+**Root authorization.** Under §12.1 the root remains one invocation and one
+invocation only. This adjudication authorizes that single spend at the full
+certified configuration; it does not authorize a successor. Whatever verdict
+the invocation publishes — `CLAIM_DISCHARGED`, `NO_LATCH_IN_PROTOCOL`,
+`QUALITY_ONLY` or `GATE_REFUSED:<gate>` — is final, and a no-latch outcome is
+reported rather than retried.
