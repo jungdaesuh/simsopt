@@ -750,6 +750,22 @@ def test_the_gated_ledger_branch_executes_on_real_physics() -> None:
     # The rows the bands were derived from, reproduced by the live objective.
     for term, expected in BANKED_ENDPOINT_LEDGER["native"].items():
         assert ledger["native"][term] == pytest.approx(expected, rel=1.0e-9, abs=1.0e-30)
+    # And the FROZEN native side re-validation judges a receipt against, bound
+    # to the producer BITWISE rather than to a transcription.  These literals
+    # are what stops an artifact supplying its own reference, so a term that
+    # drifts from the objective must fail here rather than at a root.
+    assert ledger["native"] | dict(rehearsal.NATIVE_ENDPOINT_PINNED_TERMS) == (
+        ledger["native"]
+    )
+    # The reference's own evaluation is admissible against itself, through the
+    # gate re-validation actually runs.
+    frozen = rehearsal.gate_endpoint_ledger_against_frozen_native(ledger)
+    assert frozen["passed"] is True
+    rehearsal.certify_native_reference(ledger["native"])
+    with pytest.raises(rehearsal.RehearsalError, match="frozen native reference"):
+        rehearsal.certify_native_reference(
+            {name: 1.0 for name in rehearsal.PINNED_ENDPOINT_QUALITY_TERMS}
+        )
 
 
 # ------------------------------------------------- native reference custody
@@ -886,6 +902,15 @@ def _minimal_evidence(coordinates: jax.Array) -> dict:
                 rehearsal.INFORMATIONAL_ENDPOINT_OBSERVABLES
             ),
             "gated_at_this_budget": False,
+            # The reference the ledger's terms are judged against is the
+            # campaign's, and re-validation now says so: both digests of ruling
+            # 6 and the frozen native side, in both lanes.
+            "native_state_relative_path": rehearsal.NATIVE_ENDPOINT_STATE_PATH.name,
+            "native_state_sha256": rehearsal.NATIVE_ENDPOINT_STATE_FILE_SHA256,
+            "native_state_content_sha256": (
+                rehearsal.NATIVE_ENDPOINT_STATE_CONTENT_SHA256
+            ),
+            "native": dict(rehearsal.NATIVE_ENDPOINT_PINNED_TERMS),
         },
         "endpoint_agreement": {
             "loop_terminal_objective": 1.0,

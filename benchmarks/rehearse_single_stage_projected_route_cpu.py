@@ -225,6 +225,27 @@ def equal_minima_raw_term_ceiling(native_value: float) -> float:
     ``EQUAL_MINIMA_PENALTY_SPREAD``.  Deriving it for one term and asserting it
     for another is how the predecessor bands came to refuse the campaign's own
     banked evidence.
+
+    PRECONDITION, wider than the name says: ``native_value`` must be a RAW
+    OBJECTIVE SUMMAND, and therefore at or under ``NATIVE_TARGET_OBJECTIVE``.
+    Handed a penalized observable -- ``observable.total_length``'s native 20.99,
+    say -- the numerator goes negative and the result (-1.0) is arithmetically
+    well formed and physically meaningless; that term's ceiling comes from
+    ``EQUAL_MINIMA_PENALTY_SPREAD`` instead.  No refusal is raised here because
+    the suite calls it out of domain deliberately, to show the two ceilings are
+    different constructions rather than one with two names.
+
+    SECOND CAVEAT, on what the ceiling bounds.  ``Phi <= NATIVE_TARGET_OBJECTIVE``
+    is the ENGINE's latch condition, while the gate measures the STANDALONE
+    re-evaluation of the same endpoint, and section 5 certifies those equal only
+    to ``DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE`` (1e-11 relative).  So the
+    honest ceiling for a term whose own ceiling is tighter than that -- only
+    ``weighted_total``, at 2.061e-13 -- is the cross-executable tolerance
+    itself, of order 1e-11, two decades ABOVE the stated figure.  Nothing
+    shipped moves: ``weighted_total``'s band is 1e-6, still inert by 4.8e4x
+    against the corrected ceiling.  It is recorded so a later revision does not
+    place a band just under 2.061e-13 and manufacture a false reject out of
+    cross-executable noise.
     """
 
     return (NATIVE_TARGET_OBJECTIVE - native_value) / abs(native_value)
@@ -276,8 +297,10 @@ def equal_minima_raw_term_ceiling(native_value: float) -> float:
 #       weighted_total           4.4822e-08    2.061e-13  1e-6     INERT
 #
 #   ``raw.non_qs`` and ``observable.non_qs_ratio`` are the same variable and
-#   carry 99.93% of the objective, so they are where a false reject costs the
-#   most.  The predecessor band of 1e-6 sat 296x under their ceiling -- two
+#   carry 99.97% of the NATIVE objective (99.93% at Q1's terminal, 99.97% at
+#   Q2's -- the share is a property of the endpoint, not of the term), so they
+#   are where a false reject costs the most.
+#   The predecessor band of 1e-6 sat 296x under their ceiling -- two
 #   decades tighter than the placement the geometry terms received, on the
 #   dominant term -- and left the nearer banked latch (Q2) clearing refusal by
 #   only 3.95x while the two banked arms differ FROM EACH OTHER in this very
@@ -288,10 +311,14 @@ def equal_minima_raw_term_ceiling(native_value: float) -> float:
 #   margin to 5.94x.
 #
 #   ``weighted_total`` is the opposite case and is kept at 1e-6 deliberately:
-#   its ceiling is 2.061e-13, so ANY band a latch could fail would have to be
-#   tighter than the cross-executable ULP between this repository's re-evaluated
-#   native total and the frozen literal.  1e-6 sits 4.85e6x ABOVE the ceiling,
-#   which makes the term INERT -- it cannot refuse a latch and it cannot false
+#   its ceiling is 2.061e-13 on the ENGINE's Phi, and the gate measures the
+#   STANDALONE re-evaluation, which section 5 certifies equal to the engine's
+#   only within ``DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE`` -- so the honest
+#   ceiling is of order 1e-11, two decades above the derived figure, and ANY
+#   band a latch could fail would have to be tighter than the cross-executable
+#   ULP between two compilations of the same objective.  1e-6 sits 4.85e6x above
+#   the derived ceiling and 1e5x above the corrected one, which makes the term
+#   INERT either way -- it cannot refuse a latch and it cannot false
 #   reject one either.  Its substantive gate is the latch number itself,
 #   ``terminal_objective <= NATIVE_TARGET_OBJECTIVE``, re-checked from the
 #   published bytes.  ``observable.total_length`` is inert for the same reason
@@ -308,6 +335,58 @@ PINNED_ENDPOINT_QUALITY_GATES: Final = {
     "raw.residual": ("absolute", 1.0e-10),
     "weighted_total": ("not_worse", 1.0e-6),
 }
+
+# The NATIVE side of every pinned comparison, frozen.  ``gate_endpoint_ledger``
+# reads both sides out of the document it is handed, so an artifact that
+# published ``terminal == native`` on all ten terms passed the gate against a
+# reference it invented: the quality half of the claim was a self-consistency
+# check between two numbers the receipt supplied about itself.  These are the
+# values this repository's objective produces at the digest-pinned native
+# endpoint (``NATIVE_ENDPOINT_STATE_CONTENT_SHA256``), measured on CPU through
+# ``BoundCase.standalone_evaluation``, and they are what re-validation judges a
+# receipt's native side against and recomputes the gate from.
+NATIVE_ENDPOINT_PINNED_TERMS: Final = {
+    "constraint.boozer|inf": 3.209172479736042e-14,
+    "constraint.volume": -2.3321594505398645e-18,
+    "observable.iota": -0.4062027259574152,
+    "observable.major_radius": 1.4674438048094534,
+    "observable.non_qs_ratio": 4.480897876285335e-08,
+    "observable.total_length": 20.989162892060936,
+    "observable.volume": -0.2904457582995848,
+    "raw.non_qs": 4.480897876285335e-08,
+    "raw.residual": 3.739666640426295e-29,
+    "weighted_total": 4.482224653311689e-08,
+}
+
+# How far a receipt's published native side may sit from those literals.  The
+# reference file is one array, but the two lanes evaluate it through two
+# independently compiled executables, so bitwise equality is the demand that
+# refused the predecessor route's fourth root after a complete solve.  Measured
+# on this box, the same endpoint through the same objective, CPU against the
+# 5090, term by term:
+#
+#     term                     CPU              GPU              deviation
+#     constraint.boozer|inf    3.209172e-14     2.975398e-14     2.34e-15 abs
+#     constraint.volume       -2.332159e-18    -5.551115e-17     5.32e-17 abs
+#     raw.residual             3.739667e-29     3.491806e-29     2.48e-30 abs
+#     observable.iota         -0.4062027259574152 (identical)    0
+#     observable.total_length  20.989162892060936 (identical)    0
+#     observable.major_radius  1.4674438048094534  ...36         1.4e-16 rel
+#     observable.volume       -0.2904457582995848 ...86          1.9e-16 rel
+#     raw.non_qs               4.480897876285335e-08 ...4225e-08 1.95e-14 rel
+#     observable.non_qs_ratio  (the same variable)               1.95e-14 rel
+#     weighted_total           4.482224653311689e-08 ...7006e-08 2.6e-15 rel
+#
+# The three ``absolute`` terms sit at machine zero, where the CROSS-EXECUTABLE
+# RELATIVE deviation reaches 23x -- a relative comparison of them measures
+# rounding, which is exactly why the gate judges them absolutely -- so the
+# native side is judged by each term's own comparison class: absolute terms
+# against their own gate band, everything else against the constant below.
+# 1e-11 sits 512x above the worst measured relative deviation and five decades
+# under the tightest relative band any pinned term carries (1e-6, on
+# ``observable.volume``), so it can neither false-reject an honest lane nor let
+# a forged reference widen a gate by a fraction of its band.
+NATIVE_ENDPOINT_REFERENCE_RELATIVE_TOLERANCE: Final = 1.0e-11
 
 REQUIRED_ENVIRONMENT: Final = {
     "JAX_PLATFORMS": "cpu",
@@ -863,6 +942,10 @@ def gate_endpoint_ledger(ledger: Mapping[str, JsonValue]) -> dict[str, JsonValue
         )
         for name in sorted(PINNED_ENDPOINT_QUALITY_TERMS)
     }
+    if frozenset(PINNED_ENDPOINT_QUALITY_GATES) != frozenset(
+        NATIVE_ENDPOINT_PINNED_TERMS
+    ):
+        raise RehearsalError("pinned quality terms and their frozen natives disagree")
     return {
         "terms": verdicts,
         "failed_terms": sorted(
@@ -870,6 +953,71 @@ def gate_endpoint_ledger(ledger: Mapping[str, JsonValue]) -> dict[str, JsonValue
         ),
         "passed": all(verdict["passed"] for verdict in verdicts.values()),
     }
+
+
+def certify_native_reference(native: Mapping[str, JsonValue]) -> None:
+    """Refuse a ledger whose NATIVE side is not the campaign's reference.
+
+    An artifact may not supply the reference it is judged against.  The gate is
+    a comparison of a terminal endpoint with the sealed native one, and both
+    sides used to come out of the same document, so a receipt publishing
+    ``terminal == native`` on all ten pinned terms recomputed every verdict to
+    ``measured = 0.0, passed = true`` and sealed as ``CLAIM_DISCHARGED``.
+
+    Each term is judged by ITS OWN comparison class, because the three
+    ``absolute`` terms sit at machine zero where a relative comparison of two
+    honest executables measures rounding and nothing else -- see
+    ``NATIVE_ENDPOINT_REFERENCE_RELATIVE_TOLERANCE`` for the measured table.
+    """
+
+    if not isinstance(native, Mapping):
+        raise RehearsalError("endpoint ledger native side is not a term map")
+    missing = sorted(frozenset(NATIVE_ENDPOINT_PINNED_TERMS) - frozenset(native))
+    if missing:
+        raise RehearsalError(f"endpoint ledger native side omits {missing}")
+    differing: list[str] = []
+    for name, frozen in sorted(NATIVE_ENDPOINT_PINNED_TERMS.items()):
+        published = native[name]
+        if not isinstance(published, float):
+            differing.append(name)
+            continue
+        comparison, band = PINNED_ENDPOINT_QUALITY_GATES[name]
+        deviation = abs(published - frozen)
+        tolerance = (
+            band
+            if comparison == "absolute"
+            else abs(frozen) * NATIVE_ENDPOINT_REFERENCE_RELATIVE_TOLERANCE
+        )
+        if not deviation <= tolerance:
+            differing.append(name)
+    if differing:
+        raise RehearsalError(
+            "endpoint ledger native side is not the campaign's frozen native "
+            f"reference on {differing}"
+        )
+
+
+def gate_endpoint_ledger_against_frozen_native(
+    ledger: Mapping[str, JsonValue],
+) -> dict[str, JsonValue]:
+    """Judge one ledger's TERMINAL side against the frozen native reference.
+
+    The companion of ``gate_endpoint_ledger`` for a reader of sealed bytes.
+    That function recomputes what the run computed, which proves the run
+    recorded its own arithmetic faithfully; this one replaces the reference with
+    the campaign's frozen literals, so what it proves is that the endpoint
+    reached NATIVE's physics rather than the receipt's own.
+
+    Bitwise agreement between the two is not required and must not be: the
+    literals are this repository's CPU evaluation and the receipt's are the
+    GPU's, which differ by up to 1.95e-14 relative -- eight decades under the
+    tightest band any pinned term carries, so no verdict can turn on the
+    difference.  What is required is that this gate PASSES.
+    """
+
+    return gate_endpoint_ledger(
+        {"terminal": ledger["terminal"], "native": dict(NATIVE_ENDPOINT_PINNED_TERMS)}
+    )
 
 
 def build_endpoint_ledger(
@@ -1237,6 +1385,14 @@ def validate_rehearsal_artifact(artifact_root: Path) -> dict[str, JsonValue]:
         != list(INFORMATIONAL_ENDPOINT_OBSERVABLES)
     ):
         raise RehearsalError("rehearsal endpoint ledger scope differs from the campaign's")
+    # Nor may it supply the REFERENCE it is judged against.  Both lanes ask one
+    # owner, so a rehearsal artifact carrying an invented native side is refused
+    # here for the same reason the GPU root's is.
+    if ledger["native_state_sha256"] != NATIVE_ENDPOINT_STATE_FILE_SHA256 or (
+        ledger["native_state_content_sha256"] != NATIVE_ENDPOINT_STATE_CONTENT_SHA256
+    ) or ledger["native_state_relative_path"] != NATIVE_ENDPOINT_STATE_PATH.name:
+        raise RehearsalError("rehearsal endpoint ledger names another native reference")
+    certify_native_reference(ledger["native"])
 
     endpoint = evidence["endpoint_agreement"]
     if (
@@ -1389,6 +1545,8 @@ __all__ = (
     "EVIDENCE_FILENAME",
     "INFORMATIONAL_ENDPOINT_OBSERVABLES",
     "MANIFEST_FILENAME",
+    "NATIVE_ENDPOINT_PINNED_TERMS",
+    "NATIVE_ENDPOINT_REFERENCE_RELATIVE_TOLERANCE",
     "NATIVE_ENDPOINT_STATE_CONTENT_SHA256",
     "NATIVE_ENDPOINT_STATE_FILE_SHA256",
     "NATIVE_ENDPOINT_STATE_PATH",
@@ -1411,10 +1569,12 @@ __all__ = (
     "build_endpoint_ledger",
     "build_rehearsal_evidence",
     "certify_endpoint_agreement",
+    "certify_native_reference",
     "collapse_proximity_margin",
     "endpoint_ledger_is_gated",
     "equal_minima_raw_term_ceiling",
     "gate_endpoint_ledger",
+    "gate_endpoint_ledger_against_frozen_native",
     "iteration_payload",
     "json_scalar",
     "load_execution_source_manifest",
