@@ -441,6 +441,15 @@ A1/A1b incident cost a crucible cycle).
 4. Any literal assertion of the same value in
    `tests/benchmarks/test_run_single_stage_native_equivalent_quality_campaign.py`
    and `tests/benchmarks/test_single_stage_native_equivalent_quality_diagnostic_receipt.py`.
+4b. `benchmarks/single_stage_native_equivalent_quality_diagnostic_receipt.py`
+   → add the new path to `DIAG2_SOURCE_DELTA_ALLOWLIST`. This is the fifth twin
+   site and it is **not** a count: the DIAG1 baseline
+   (`DIAG2_BASELINE_FILTERED_ENTRY_COUNT = 576`, and its entries digest) is
+   historical and must never move, so a new snapshot member is admitted by
+   being filtered OUT of the comparison rather than by bumping the baseline.
+   Skipping this step fails
+   `test_diag2_current_production_snapshot_includes_matrix_test_authority` with
+   "filtered entry count differs from DIAG1", which is the gate working.
 5. **Manifest last**: regenerate
    `benchmarks/single_stage_native_equivalent_quality_gntr3_execution_sources.json`
    with `benchmarks/regenerate_execution_source_manifest.py`. It does not
@@ -462,13 +471,19 @@ A1/A1b incident cost a crucible cycle).
 
 6. Validate all suites green, then commit.
 
-At this freeze: **614 entries** (benchmarks 116, examples 157, src 327, plus 14
-non-broad qualified paths). The two new members are phase 2's GPU launcher
+At this freeze: **615 entries** by manifest prefix — benchmarks 117, examples
+157, src 328 (327 broad `*.py` plus the qualified `src/simsopt/configs/NCSX.dat`),
+and 13 non-broad qualified paths, 12 under `tests/` and 1 under `docs/`. The
+broad-root `*.py` twin in the qualifier reads (benchmarks 117, src 327,
+examples 157) for the same freeze. The newest
+member is §12.14.2's standalone package validator
+(`benchmarks/validate_projected_route_package.py`); the freeze before it was 614
+(benchmarks 116), whose two new members were phase 2's GPU launcher
 (`benchmarks/run_single_stage_projected_route_gpu_root.py`) and phase 3's
 shipped example
 (`examples/jax/3_Advanced/single_stage_boozer_vacuum_projected_route.py`); both
-entered the DIAG2 allowlist by the step-4b rule, and the previous freeze was 612
-(benchmarks 115, examples 156).
+entered the DIAG2 allowlist by the step-4b rule, and the freeze before that was
+612 (benchmarks 115, examples 156).
 
 Do **not** touch the DIAG5 plan doc. Its prose "591 paths (113 `benchmarks`,
 156 `examples`, 322 `src`)" is a historical statement about the DIAG5 freeze
@@ -2096,10 +2111,19 @@ axes and this is the source of truth for the corrected form.
 * **Not coordinate, trajectory, or complete-termwise parity.** The contract is
   the ten pinned endpoint-quality terms of §1.1 plus the feasibility bound. The
   GPU route deliberately takes a different optimizer, trajectory and iteration
-  count, and the ledger's own `relative_difference` block shows the
-  informational terms (`observable.G`, `raw.residual`, `raw.major_radius`)
-  diverging by orders of magnitude while every *pinned* term passes. Quoting
-  agreement on the pinned ten is honest; quoting it as parity is not.
+  count, and the ledger's own `relative_difference` block shows the *unpinned*
+  terms diverging by orders of magnitude while every *pinned* term passes.
+  Naming those terms exactly, because an earlier revision of this paragraph got
+  it wrong: the ledger's `informational_observables` list is exactly
+  `observable.G` and `state.G` (both 3.90e-3 relative); the other large
+  divergences are on unpinned corroborating terms — `raw.major_radius` (27.7),
+  `raw.length` (1.0), `raw.iota` (0.845). **`raw.residual` is NOT informational
+  and NOT unpinned**: it is pinned quality gate 9, comparison `absolute`, band
+  `1e-10`, measured `1.5866e-25`, **passed** — its `relative_difference` of
+  4.55e3 is the ratio between `1.587e-25` and `3.486e-29`, two numbers fifteen
+  decades under the band it is judged by, which is why the gate is stated in
+  absolute terms there in the first place. Quoting agreement on the pinned ten
+  is honest; quoting it as parity is not.
 * **Not a hardware-general or version-general result.** RTX 5090, one box, one
   interpreter (CPython 3.11.15). §7's A100 lane replicates quality, not speed.
 
@@ -2116,22 +2140,34 @@ ratio family is published rather than only the flattering one:
 | Boundary | GPU (s) | ratio vs 287.304218 s bar |
 |---|---|---|
 | warm engine compile+solve (**certified**) | 124.707842 | **2.304x** |
-| warm attempt wall (full child process) | 156.856340 | 1.832x |
-| warm supervised wall | 158.741789 | 1.810x |
+| warm attempt wall (child's own timer) | 156.856340 | 1.832x |
+| warm supervised wall (Popen→exit) | 158.741789 | 1.810x |
 | cold-lane engine compile+solve | 170.693673 | 1.683x |
-| cold-lane attempt wall | 226.003532 | 1.271x |
+| cold-lane attempt wall (child's own timer) | 226.003532 | 1.271x |
+| **cold-lane supervised wall (Popen→exit)** | **228.083841** | **1.260x** |
 
 Even the cold lane measured end-to-end at process wall — compile from an empty
-cache, nothing cached, nothing excluded — beats the bar. Anyone quoting 2.304x
-must name the engine boundary in the same sentence; the defensible
-boundary-free statement is "beats the native bar on every published boundary,
-by 2.304x at the certified one and 1.271x at the most conservative one".
+cache, nothing cached, nothing excluded — beats the bar. Two cold-lane numbers
+exist and they are not interchangeable: `226.003532 s` is
+`cold_lane.evidence.timing_seconds.attempt_wall`, the child's own internal
+timer, which starts after the process is already running; `228.083841 s` is
+`cold_lane.supervised_seconds`, the supervisor's `Popen`-to-exit measurement,
+which includes interpreter start-up and every second the child cost the
+operating system. The supervised figure is the strictest boundary this campaign
+publishes, and **1.260x is therefore the headline conservative number**; the
+1.271x that earlier text quoted is the same lane measured one boundary
+narrower. Anyone quoting 2.304x must name the engine boundary in the same
+sentence; the defensible boundary-free statement is "beats the native bar on
+every published boundary, by 2.304x at the certified one and 1.260x at the
+strictest one".
 
 **Artifact size, stated correctly.** `final/` contains **608 files** (607
 manifest members plus `artifact-manifest.json`). The figure 1137 is the whole
-campaign directory including the JAX compilation cache and launcher logs, and
-1142 after the supplement below. Quoting 1137 as the certificate's size
-overstates it by ~1.9x.
+campaign directory including the JAX compilation cache and launcher logs; it is
+1142 after the supplement below and **1169** after §12.14.2's composite manifest
+(3) and revalidation receipts (24). Quoting 1137 as the certificate's size
+overstates it by ~1.9x; the checkable **package** is 613 members — `final/`'s
+608 plus the supplement's 5 — which is what the composite digest names.
 
 #### 12.14.1 Two follow-ups, executed 2026-08-13
 
@@ -2190,12 +2226,161 @@ it requires Python ≥ 3.12 while this artifact's execution identity pins CPytho
 result digest, timestamps, and that refusal — is written durably into the
 supplement as `revalidation-record.json` before sealing.
 
-**What this converts.** "Self-contained standalone certificate" and
-"cross-version revalidation" move from NOT-claimed to claimed, in the bounded
-form above: the certificate is self-contained *as `final/` plus its sealed
-supplement*, and the revalidation is cross-**version** across three adjacent
-releases on one box and one interpreter — not a claim across all jaxlib builds
-or all hardware. Everything else in the NOT-claimed list stands unchanged: the
-reviews are still seven NO-GO ledgers with an adjudicated residual, the native
-bar is still a non-authoritative dirty-tree budget-exhausted historical run,
-and the contract is still endpoint quality, not parity.
+**What 12.14.1 converted, and what it did not.** "Self-contained standalone
+certificate" and "cross-version revalidation" moved toward claimed — but as
+written, `final/` did not *authenticate* the supplement (nothing bound the two
+directories together), the commit pinned neither the supplement-manifest digest
+nor any composite digest, and the only validator that could judge the package
+still opened the live repository and an absolute path into another campaign
+directory. §12.14.2 closes exactly those, and the safe claim is restated at the
+end of it. Everything else in the NOT-claimed list stands unchanged: the reviews
+are still seven NO-GO ledgers with an adjudicated residual, the native bar is
+still a non-authoritative dirty-tree budget-exhausted historical run, and the
+contract is still endpoint quality, not parity.
+
+#### 12.14.2 Binding the package, 2026-08-13
+
+Four things land here. None of them touches a sealed byte: `final/` still holds
+608 files, `root-evidence.json` still digests to `6937fc68…`, the supplement is
+untouched, and every new directory is a NEW sibling sealed 0444/0555 after it
+was written.
+
+**(a) Composite manifest — one digest now names the whole certificate.**
+`projected-route-root-20260813T184930Z/composite-manifest/composite-manifest.json`
+is a canonical-serializer document (the campaign's `canonical_json_bytes`:
+sorted keys, compact separators, trailing newline) that carries the sha256 and
+byte size of **every** member of `final/` (607 manifest members plus
+`artifact-manifest.json`) and **every** member of `provenance-supplement/` (the
+4 supplement entries plus `supplement-manifest.json`) — 613 members — together
+with the supplement-manifest digest
+`d859b34c331e701c016bda8a5215744b075abfd63064174ed6aa4aedfc31f0e5`, the
+root-evidence digest `6937fc68a417d6968655cbdc460fa5655bd8cb5980a6e4c735506b3008231412`,
+the re-derived quality gate, the re-derived timing ratios, the executed-source
+closure, and:
+
+> **composite package sha256
+> `58a116ae9f1ce8e97e62796cda503d6613ad4907f8090920441c1e51426a8283`**
+
+taken over the canonical JSON encoding of the member table as a list of
+`[package_relative_path, sha256]` pairs sorted by path. That single value is
+what this commit pins and what a reader checks. The document also records, per
+supplement JSON, whether the sealed bytes are canonical:
+`single_stage_native_equivalent_quality_gntr3_execution_sources.json` is;
+`supplement-manifest.json` and `revalidation-record.json` were written
+pretty-printed and are **not**, so the canonical re-serializations live beside
+the binding at `composite-manifest/canonical/`, with both digests recorded. The
+sealed originals are never rewritten — the correction is published, not applied.
+
+**(b) The executed-source closure, defined.** The package carries the bytes of
+**297** modules — every module the certified chain actually bound at run time,
+296 from `final/source-snapshot/` and 1 (`src/simsopt/_version.py`) from the
+supplement — and each one is verified against the digest the execution-source
+authority states for it. The authority itself has **614** entries, of which
+**54** are absent from the package. This is a deliberate, verified boundary, not
+a gap:
+
+* The 54 are 52 example scripts under `examples/1_Simple`, `2_Intermediate`,
+  `3_Advanced` and `stellarator_benchmarks`, one diagnostic postmortem JSON
+  under `docs/`, and one test module. **None of them is among the 297 bound
+  modules** — checked, not assumed, and re-checked by the validator on every
+  run.
+* The 614-entry authority is the **repository-wide freeze**: it enumerates every
+  file admitted to the certified surface, executed or not. It is **cited by
+  digest and carried in full in the supplement**, so a reader can see exactly
+  what the freeze contained; it is not embedded file by file.
+* The closure this certificate makes is therefore the **narrower executed-source
+  closure**: bytes that could have affected the published numbers are all here.
+  Embedding 54 files that never ran would enlarge the package without narrowing
+  what it proves, and the validator enforces the narrow closure exactly —
+  every bound module must resolve to package bytes at the authority's digest,
+  and an authority member that is absent from the package may never appear
+  among the bound modules.
+
+**(c) Standalone package validator.** `benchmarks/validate_projected_route_package.py`
+validates `final/` + `provenance-supplement/` + `composite-manifest/` **from the
+package's bytes alone**. It imports nothing from this repository and no
+third-party package (standard library only, asserted by test), it opens nothing
+outside the package directory it is given — no repository source, no git object,
+no other campaign path — and the native endpoint reference it judges the gate's
+reference side against is the **supplement copy**, digest-pinned on both its
+file digest and its array-content digest. Validation is a rebuild: the whole
+binding is re-derived from the bytes and compared to the stored document byte
+for byte, so a tampered member, a missing member, an unclaimed extra file, a
+hand-edited composite digest and a non-canonical encoding are one failure mode
+with one cause. It also re-derives, with the standard library only, the pinned
+ten-term gate from the ledger's own two sides, the published terminal-state
+digest from the published `.npy`, the latch (`terminal_objective <= target`), the
+whole-run feasibility bound, and every published timing ratio.
+
+Proven, not asserted: `strace -f -e trace=openat,open` over a real run against
+the sealed package shows **766 successfully opened paths, 673 of them inside the
+package, 0 anywhere else under `~/simsopt-campaigns/`, and exactly one
+repository file — the validator module itself** (the remainder are `/usr`
+standard library, `/etc/ld.so.cache`, `/proc`). The suite carries that audit,
+plus a PEP-578 audit-hook equivalent, plus refusal tests for a tampered member,
+a tampered supplement member, a missing member, a missing supplement directory,
+an unclaimed extra file, a wrong composite digest, a non-canonical composite
+manifest, a non-canonical correction copy, a supplement pointed at another root,
+an executed module absent from the package, a symlinked member, a failed quality
+term, a receipt whose gate never ran, endpoint coordinates that moved, and
+unsealed modes — 24 tests, all green.
+
+Scope limit, stated: the validator judges the receipt's native side against the
+digest-pinned native endpoint state the supplement carries. It does not
+*recompute* those native term values from that state — that needs the physics
+stack, which is exactly what a standalone validator must not import. The native
+side's provenance is custody and digest, as it always was.
+
+**(d) Per-lane cross-version execution receipts.** `revalidation-receipts/`
+(new sibling, sealed 0444/0555, 24 files — 23 members plus the index that names
+them — receipts digest
+`034fc6fc5db5a6e3d339d1bfa1310e03ed26fe1e6fb941c10d44789e51ae71e8`) carries, for
+each of the three version lanes, the raw evidence the earlier
+`revalidation-record.json` summarised but did not hold: exact `argv` and its
+digest, the interpreter's path, realpath, prefix and sha256, the validator
+file's sha256, the driver's sha256, the exit code, the complete stdout (the raw
+result document, 2 426 643 bytes) and the complete stderr, start and finish
+timestamps, and every resolved dependency version.
+
+| Lane | jax / jaxlib | exit | stderr | result sha256 | verdict |
+|---|---|---|---|---|---|
+| cross-version, older | 0.9.2 | 0 | empty | `93f5e072…` | `CLAIM_DISCHARGED` |
+| producer version | 0.10.0 | 0 | empty | `93f5e072…` | `CLAIM_DISCHARGED` |
+| cross-version, newer | 0.10.2 | 0 | empty | `93f5e072…` | `CLAIM_DISCHARGED` |
+
+All three ran under `uv run --no-project --isolated --python 3.11`, on uv's own
+managed CPython 3.11.15 — **no virtual environment on this box was read for its
+packages, installed into, or modified** — and all three return the
+byte-identical result document
+`93f5e072574911f98ea8b3396e108848ae1114c25efc46ceca7199c2f4372f7a`. `lineax`
+resolves to 0.1.0 on the 0.9.2 lane and 0.1.1 on the other two because lineax
+0.1.1 requires `jax>=0.10.0`; every resolved version is recorded per lane rather
+than smoothed to one list.
+
+**One consequence, published rather than discovered later.** `validate_root_artifact`
+re-derives the execution-source manifest from the **live** repository and
+refuses when it differs from the one the receipt names, so its verdict is
+pinned to a commit. Adding `benchmarks/validate_projected_route_package.py` to a
+broad root moves that manifest from 614 to 615 entries, which means the
+production validator no longer re-validates the sealed root at this commit or
+after it. That is why the three lanes above were run at commit `057782442` with
+a clean tree **before** the new file existed, and why their receipts are sealed:
+they are the durable record of the production validator's verdict at the last
+commit where it could be taken. From here the sealed root is checked by
+`validate_projected_route_package.py`, which needs no repository at all — which
+is the property the certificate actually needed. The **614-entry authority the
+certificate cites is unaffected**: the supplement carries those exact bytes
+(`5a40391f…`) as the frozen freeze at execution commit `b7857e6e8`, and the
+package validator checks the 297 executed modules against *that* copy. Only the
+live repository manifest moves on.
+
+**The claim, stated safely, after (a)–(d).**
+
+> The result is **empirically validated and independently reproduced across
+> three JAX/JAXlib versions** (0.9.2 / 0.10.0 / 0.10.2, byte-identical result
+> document, per-lane execution receipts sealed), and the certificate is
+> **standalone-package-validated against the composite manifest**
+> (`58a116ae…`, 613 members, no filesystem access outside the package). It
+> remains, unchanged: RTX 5090, one box, one interpreter, seven NO-GO review
+> ledgers with an adjudicated residual, a non-authoritative historical native
+> bar, and an endpoint-quality contract rather than parity.

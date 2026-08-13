@@ -2397,6 +2397,11 @@ def test_diag3_snapshot_closure_is_frozen_against_later_diag2_growth() -> None:
         "benchmarks/regenerate_execution_source_manifest.py",
         "benchmarks/rehearse_single_stage_projected_route_cpu.py",
         "benchmarks/run_single_stage_projected_route_gpu_root.py",
+        # The standalone package validator landed after the root sealed. It reads
+        # a published certificate and never participates in a certified run, so
+        # it is a new file by the same rule: filtered out by path, leaving the
+        # DIAG1 count and digest describing the DIAG1 tree.
+        "benchmarks/validate_projected_route_package.py",
         # The shipped projected-route example landed in the same freeze as the
         # GPU launcher, before the root opened, so the certified bytes and the
         # shipped bytes are one tree.  It is a new file too.

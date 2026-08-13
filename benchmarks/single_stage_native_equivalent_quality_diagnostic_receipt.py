@@ -5484,6 +5484,7 @@ DIAG2_SOURCE_DELTA_ALLOWLIST: Final = frozenset(
         "benchmarks/single_stage_fullspace_snapshot.py",
         "benchmarks/single_stage_native_equivalent_quality_diagnostic_receipt.py",
         "benchmarks/single_stage_native_equivalent_quality_successor_authority.py",
+        "benchmarks/validate_projected_route_package.py",
         "docs/single_stage_jax_gpu_native_equivalent_quality_diag2_implementation_plan.md",
         "docs/single_stage_jax_gpu_native_equivalent_quality_diag3_command_buffer_recovery_plan.md",
         "docs/single_stage_jax_gpu_native_equivalent_quality_diag3_command_buffer_recovery_authorization.json",
