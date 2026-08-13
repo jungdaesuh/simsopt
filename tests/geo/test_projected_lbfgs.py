@@ -5,6 +5,7 @@ import math
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from simsopt_jax.geo.optimizers.dense_sqp import materialize_joint_vjp_rows
 from simsopt_jax.geo.optimizers.projected_hvp_trust_region import (
     factor_certified_gram_projector,
@@ -31,6 +32,13 @@ _SPHERE_MINIMUM = 0.5
 def _sphere_problem(coordinates: jax.Array) -> tuple[jax.Array, jax.Array]:
     objective = 0.5 * jnp.sum(_CURVATURES * coordinates**2)
     return objective, jnp.reshape(coordinates @ coordinates - 1.0, (1,))
+
+
+def _shifted_sphere_problem(coordinates: jax.Array) -> tuple[jax.Array, jax.Array]:
+    """The same problem with its objective shifted to run strictly negative."""
+
+    objective, constraints = _sphere_problem(coordinates)
+    return objective - 10.0, constraints
 
 
 def _feasible_start() -> jax.Array:
@@ -300,7 +308,24 @@ def test_transport_run_holds_feasibility_and_descends() -> None:
     assert abs(run.objective - _SPHERE_MINIMUM) <= 1.0e-10
     for record in run.iterations:
         assert record.feasibility_inf <= 1.0e-12
-        assert record.transport_masked_pairs >= 0
+    # Every carried pair kept admissible curvature on this manifold, so the
+    # store the transported run applies is the whole store -- the run is
+    # evidence about transport, not about a store that emptied itself.
+    assert all(record.transport_masked_pairs == 0 for record in run.iterations)
+
+    untransported = run_projected_lbfgs(
+        _sphere_problem,
+        _feasible_start(),
+        options=ProjectedLbfgsOptions(
+            maximum_iterations=40,
+            memory=6,
+            feasibility_tolerance=1.0e-12,
+        ),
+    )
+
+    # And the transport is not a relabelling: re-forming the pairs in the new
+    # tangent space has to move the trajectory off the untransported one.
+    assert objectives != [record.objective for record in untransported.iterations]
 
 
 def test_infeasible_start_fails_closed() -> None:
@@ -400,6 +425,21 @@ def test_gauss_newton_step_is_tangent_and_predicts_its_own_reduction() -> None:
     assert abs(float(jacobian_constraint @ step.direction)) <= 1.0e-10
     assert float(step.predicted_reduction) > 0.0
     assert float(point.projected_gradient @ step.direction) < 0.0
+    # The reported conditioning must describe the tangent block of the solve,
+    # not the Levenberg floor the normal space sits at exactly.
+    hessian = np.asarray(jacobian).T @ np.asarray(jacobian)
+    reduced = np.asarray(projection) @ hessian @ np.asarray(projection)
+    reduced = 0.5 * (reduced + reduced.T)
+    regularized = reduced + float(step.levenberg) * np.eye(reduced.shape[0])
+    eigenvalues = np.linalg.eigvalsh(regularized)
+    tangent_rank = round(float(np.trace(np.asarray(projection))))
+    expected = eigenvalues[eigenvalues.size - tangent_rank] / eigenvalues[-1]
+    assert float(step.reduced_hessian_reciprocal_condition) == pytest.approx(
+        expected, rel=1.0e-9
+    )
+    assert float(step.reduced_hessian_reciprocal_condition) > (
+        1.0e3 * float(step.levenberg) / eigenvalues[-1]
+    )
 
 
 def test_gauss_newton_run_descends_and_its_model_predicts_the_decrease() -> None:
@@ -435,8 +475,6 @@ def test_gauss_newton_run_descends_and_its_model_predicts_the_decrease() -> None
 
 
 def test_gauss_newton_requires_residuals() -> None:
-    import pytest
-
     with pytest.raises(ValueError, match="objective_residuals"):
         run_projected_lbfgs(
             _sphere_problem,
@@ -458,10 +496,12 @@ def test_lagrangian_newton_run_reaches_the_closed_form_minimum() -> None:
 
     assert run.status is ProjectedLbfgsStatus.OBJECTIVE_TARGET_REACHED
     # The point of a ball-free Newton step: unit scale is accepted as proposed.
+    # A rescued iteration's scale belongs to the secant direction that placed
+    # the step, so it is not evidence either way.
     assert all(
         iteration.step_scale == 1.0
         for iteration in run.iterations
-        if iteration.lagrangian_newton_used
+        if iteration.lagrangian_newton_used and not iteration.lagrangian_newton_rescued
     )
     assert float(run.objective) <= _SPHERE_MINIMUM + 1.0e-12
     assert float(run.feasibility_inf) <= 1.0e-10
@@ -542,29 +582,45 @@ def test_hybrid_schedule_opens_on_the_secant_step() -> None:
 
 
 def test_hybrid_window_requires_the_newton_arm() -> None:
-    try:
+    with pytest.raises(ValueError, match="hybrid_plateau_window requires"):
         run_projected_lbfgs(
             _sphere_problem,
             _feasible_start(),
             options=ProjectedLbfgsOptions(hybrid_plateau_window=5),
         )
-    except ValueError:
-        return
-    raise AssertionError("hybrid_plateau_window was accepted without the Newton arm")
 
 
 def test_direction_models_are_mutually_exclusive() -> None:
-    try:
+    with pytest.raises(ValueError, match="are exclusive"):
+        run_projected_lbfgs(
+            _sphere_problem,
+            _feasible_start(),
+            options=ProjectedLbfgsOptions(lagrangian_newton=True, dense_curvature=True),
+        )
+
+
+def test_transport_is_rejected_with_a_model_direction() -> None:
+    with pytest.raises(ValueError, match="secant direction only"):
         run_projected_lbfgs(
             _sphere_problem,
             _feasible_start(),
             options=ProjectedLbfgsOptions(
-                lagrangian_newton=True, dense_curvature=True
+                lagrangian_newton=True, vector_transport=True
             ),
         )
-    except ValueError:
-        return
-    raise AssertionError("two direction models were accepted at once")
+
+
+def test_objective_target_is_off_by_default() -> None:
+    """A nonpositive objective must not read the default as a met target."""
+
+    run = run_projected_lbfgs(
+        _shifted_sphere_problem,
+        _feasible_start(),
+        options=ProjectedLbfgsOptions(maximum_iterations=3),
+    )
+
+    assert run.status is not ProjectedLbfgsStatus.OBJECTIVE_TARGET_REACHED
+    assert len(run.iterations) == 3
 
 
 def test_carried_projector_evaluation_matches_the_fresh_one_at_its_own_point() -> None:
@@ -712,27 +768,21 @@ def test_a_gate_that_admits_everything_leaves_the_newton_arm_alone() -> None:
 
 
 def test_newton_gate_requires_the_newton_arm() -> None:
-    try:
+    with pytest.raises(ValueError, match="newton_tangent_fraction_threshold requires"):
         run_projected_lbfgs(
             _sphere_problem,
             _feasible_start(),
             options=ProjectedLbfgsOptions(newton_tangent_fraction_threshold=0.3),
         )
-    except ValueError:
-        return
-    raise AssertionError("the tangent-fraction gate was accepted without Newton")
 
 
 def test_refresh_period_must_be_positive() -> None:
-    try:
+    with pytest.raises(ValueError, match="projector_refresh_period must be positive"):
         run_projected_lbfgs(
             _sphere_problem,
             _feasible_start(),
             options=ProjectedLbfgsOptions(projector_refresh_period=0),
         )
-    except ValueError:
-        return
-    raise AssertionError("a nonpositive refresh period was accepted")
 
 
 def test_committing_the_start_point_is_numerically_inert() -> None:

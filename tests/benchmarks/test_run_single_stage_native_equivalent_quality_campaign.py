@@ -2389,6 +2389,16 @@ def test_diag3_snapshot_closure_is_frozen_against_later_diag2_growth() -> None:
     ) == {
         "benchmarks/qualify_single_stage_native_equivalent_quality_gntr3_cpu.py",
         "docs/single_stage_jax_gpu_native_equivalent_quality_diag4_iterative_retraction_plan.md",
+        # The projected-route modules landed after DIAG1 sealed its baseline.
+        # They are new files, not edits to a reviewed numerical source, so the
+        # DIAG2 filter excludes them by path and the frozen filtered count and
+        # digest still describe the DIAG1 tree.  DIAG3's own closure is
+        # unaffected: it never saw them.
+        "src/simsopt_jax/geo/optimizers/dense_tangent_curvature.py",
+        "src/simsopt_jax/geo/optimizers/lagrangian_newton_cg.py",
+        "src/simsopt_jax/geo/optimizers/projected_lbfgs.py",
+        "src/simsopt_jax/geo/optimizers/quasi_newton_metric.py",
+        "src/simsopt_jax/geo/optimizers/tangent_gauss_newton.py",
     }
     snapshot = SnapshotPublication(
         root=Path("/snapshot"),

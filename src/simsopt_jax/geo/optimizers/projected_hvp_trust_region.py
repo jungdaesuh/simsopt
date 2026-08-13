@@ -19,10 +19,6 @@ import jax.scipy as jsp
 from .dense_sqp import JointValueConstraints, JointVJPRows, materialize_joint_vjp_rows
 
 HessianVectorProduct = Callable[[jax.Array], jax.Array]
-# Maps one tangent residual to the search-direction seed of a preconditioned
-# conjugate-gradient step.  The operator must be symmetric positive definite on
-# the tangent space, and must return tangent vectors.
-TangentPreconditioner = Callable[[jax.Array], jax.Array]
 
 
 class ProjectedSteihaugTermination(IntEnum):
@@ -390,18 +386,9 @@ def solve_projected_steihaug(
     trust_radius: float,
     maximum_iterations: int,
     projected_residual_tolerance: float,
-    preconditioner: TangentPreconditioner | None = None,
 ) -> ProjectedSteihaugResult:
-    """Solve one equality-projected trust subproblem using callable HVPs.
+    """Solve one equality-projected trust subproblem using callable HVPs."""
 
-    The trust region is always the Euclidean ball, so a supplied preconditioner
-    changes only the conjugate-gradient search directions and leaves every step
-    norm, boundary root, and termination certificate measured as before.
-    """
-
-    seed_direction = (
-        (lambda residual: residual) if preconditioner is None else preconditioner
-    )
     radius = jnp.asarray(trust_radius, dtype=lagrangian_gradient.dtype)
     zero_vector = jnp.zeros_like(normal_step)
     normal_is_nonzero = jnp.linalg.norm(normal_step) > 0.0
@@ -429,7 +416,7 @@ def solve_projected_steihaug(
         tangential_step=zero_vector,
         hessian_tangential_step=zero_vector,
         residual=initial_residual,
-        direction=-seed_direction(initial_residual),
+        direction=-initial_residual,
         active=initially_active,
         iterations=jnp.asarray(0, dtype=jnp.int32),
         hvp_evaluations=normal_hvp_evaluations,
@@ -453,9 +440,9 @@ def solve_projected_steihaug(
         )
         normalized_curvature = curvature / curvature_scale
         nonpositive_curvature = curvature <= 0.0
-        residual_inner_product = state.residual @ seed_direction(state.residual)
+        residual_squared = state.residual @ state.residual
         safe_curvature = jnp.where(nonpositive_curvature, 1.0, curvature)
-        alpha = residual_inner_product / safe_curvature
+        alpha = residual_squared / safe_curvature
         unconstrained_step = state.tangential_step + alpha * state.direction
         crosses_boundary = jnp.linalg.norm(normal_step + unconstrained_step) >= radius
         hits_boundary = nonpositive_curvature | crosses_boundary
@@ -468,21 +455,12 @@ def solve_projected_steihaug(
             state.hessian_tangential_step + step_length * hessian_direction
         )
         next_residual = state.residual + step_length * projected_hessian_direction
-        next_seed = seed_direction(next_residual)
-        next_residual_inner_product = next_residual @ next_seed
-        # Without a preconditioner the conjugate-gradient inner product is the
-        # squared residual norm, so the convergence test reuses that same
-        # contraction rather than emitting a second one.
-        next_residual_squared = (
-            next_residual_inner_product
-            if preconditioner is None
-            else next_residual @ next_residual
-        )
-        beta = next_residual_inner_product / jnp.maximum(
-            residual_inner_product,
+        next_residual_squared = next_residual @ next_residual
+        beta = next_residual_squared / jnp.maximum(
+            residual_squared,
             jnp.asarray(jnp.finfo(lagrangian_gradient.dtype).tiny),
         )
-        next_direction = -next_seed + beta * state.direction
+        next_direction = -next_residual + beta * state.direction
         converged = jnp.sqrt(next_residual_squared) <= residual_target
         next_active = ~hits_boundary & ~converged
         termination = jnp.where(
@@ -1022,11 +1000,11 @@ __all__ = (
     "ProjectedHvpCanaryResult",
     "ProjectedSteihaugResult",
     "ProjectedSteihaugTermination",
-    "TangentPreconditioner",
     "certified_correction_with_projector",
     "certified_minimum_norm_correction",
     "exact_hvp_bilinear_symmetry_relative_defect",
     "factor_certified_gram_projector",
+    "materialize_certified_projection",
     "project_with_certified_gram",
     "run_projected_curvature_canary",
     "run_projected_hvp_canary",

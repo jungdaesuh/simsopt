@@ -160,7 +160,7 @@ def test_diag2_current_production_snapshot_includes_matrix_test_authority(
     publication = publish_immutable_snapshot(
         current_root / "source-snapshot", roots, worktree=worktree
     )
-    with pytest.raises(ValueError, match="non-allowlisted DIAG1 delta|filtered entry count differs from DIAG1"):
+    with pytest.raises(ValueError, match="non-allowlisted DIAG1 delta"):
         receipt_module.validate_diag2_source_snapshot_authority(current_root)
     entries = {entry.relative_path: entry for entry in publication.entries}
     matrix_path = (
@@ -192,7 +192,7 @@ def test_diag2_current_production_snapshot_includes_matrix_test_authority(
     publish_immutable_snapshot(
         changed_root / "source-snapshot", changed_roots, worktree=worktree
     )
-    with pytest.raises(ValueError, match="non-allowlisted DIAG1 delta|filtered entry count differs from DIAG1"):
+    with pytest.raises(ValueError, match="non-allowlisted DIAG1 delta"):
         receipt_module.validate_diag2_source_snapshot_authority(changed_root)
 
 

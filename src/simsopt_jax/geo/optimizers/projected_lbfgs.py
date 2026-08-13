@@ -126,7 +126,14 @@ class ProjectedLbfgsOptions:
     backtracking_factor: float = 0.5
     maximum_line_search_trials: int = 24
     minimum_step_scale: float = 1.0e-6
-    objective_target: float = 0.0
+    objective_target: float | None = None
+    """Objective at or below which the run stops and reports success.
+
+    ``None`` runs no target check at all.  A numeric default would be a target
+    every nonpositive objective meets at the start point, which is a success
+    status handed to a run that has taken no step.
+    """
+
     gauss_newton: bool = False
     """Take reduced Gauss--Newton steps, with the pair store as rescue.
 
@@ -182,7 +189,10 @@ class ProjectedLbfgsOptions:
 
     At this dimension a dense Powell-damped BFGS model costs microseconds per
     iteration against a Jacobian materialization, and it is the curvature model
-    a native dense-BFGS solve uses.  ``memory`` is ignored when this is set.
+    a native dense-BFGS solve uses.  The direction comes from the dense model
+    alone; the ``memory`` pair store is still fed, at a cost of one rank-two
+    update per iteration, so a run can be compared against the secant arm on
+    its own banked pairs.
     """
 
     vector_transport: bool = False
@@ -194,6 +204,11 @@ class ProjectedLbfgsOptions:
     the NEW point's tangent space, and the stored pairs are re-projected into
     the current one before each two-loop apply, with pairs whose curvature does
     not survive the carry masked out.
+
+    The transport reaches the SECANT direction only.  A model arm applies the
+    store untransported -- as a Newton preconditioner, or as the rescue after a
+    refused model step -- so pairing transport with one would write the store in
+    one convention and read it in another; the combination is rejected.
     """
 
     frozen_projector_line_search: bool = False
@@ -212,8 +227,11 @@ class ProjectedLbfgsOptions:
     period carries the factored Gram ACROSS iterations: the intervening points
     are evaluated for their objective, constraints and objective gradient only
     -- two orders of magnitude cheaper than the row materialization -- and the
-    tangent projection, the multipliers and the chord retraction all spend the
-    carried factor.  The projection is then inexact, so every stale point
+    tangent projection and the multipliers spend the carried factor.  The
+    retraction spends it as well only under ``frozen_projector_line_search``;
+    the exact retraction this option leaves in place materializes its own rows
+    at every correction whatever the period is.  The projection is then
+    inexact, so every stale point
     measures its own TRUE tangency with one constraint JVP and refreshes when
     ``projector_tangency_tolerance`` is exceeded; a line search that can place
     no step against carried rows refreshes and retries rather than collapsing.
@@ -251,9 +269,12 @@ _DEFAULT_OPTIONS = ProjectedLbfgsOptions()
 class ProjectedPoint(NamedTuple):
     """One on-manifold point with its tangent gradient and projector evidence.
 
-    ``projector`` holds the factored Gram of the constraint Jacobian at this
-    point, so a caller can spend the factorization again -- on a line search's
-    trial retractions, for instance -- without materializing the Jacobian.
+    ``projector`` holds the factored Gram of the constraint Jacobian the point
+    was evaluated WITH, so a caller can spend the factorization again -- on a
+    line search's trial retractions, for instance -- without materializing the
+    Jacobian.  Those rows are this point's own only when the evaluation
+    materialized them here; under ``projector_refresh_period`` they belong to
+    an earlier iterate.
 
     ``tangency_relative_residual`` certifies the projection against the rows
     the projector CARRIES; ``true_tangency_relative_residual`` certifies it
@@ -308,6 +329,10 @@ class ProjectedLbfgsIteration(NamedTuple):
     ``coordinates`` are the iterate this record opens at, so that callers can
     take whatever projection of the trajectory they track — a distance to a
     reference state, a per-block norm — without the optimizer knowing about it.
+
+    ``retraction_corrections`` belongs to the ACCEPTED trial alone; the
+    corrections the rejected trials spent are inside ``retraction_seconds`` and
+    are counted nowhere else.  ``line_search_trials`` is the whole search.
     """
 
     index: int
@@ -393,7 +418,14 @@ _NO_ABANDONED_ATTEMPT = _AbandonedAttempt()
 
 
 class ProjectedLbfgsRun(NamedTuple):
-    """Terminal state of one run plus every banked iteration record."""
+    """Terminal state of one run plus every banked iteration record.
+
+    ``projector_materializations`` counts the constraint-Jacobian rows the LOOP
+    materialized -- one per point evaluation that did not spend a carried
+    factor.  The exact retraction materializes its own rows per correction and
+    those are not counted here; ``retraction_corrections`` on each record is
+    what reports them.
+    """
 
     status: ProjectedLbfgsStatus
     coordinates: jax.Array
@@ -734,9 +766,10 @@ def run_projected_lbfgs(
 ) -> ProjectedLbfgsRun:
     """Run the bounded projected L-BFGS loop from one feasible starting point.
 
-    The host drives three jitted kernels — point evaluation, retraction, and
-    the correction store — so that every phase is separately timed; ``observer``
-    receives each iteration record as it is produced, before the run returns.
+    The host drives one jitted kernel per phase — point evaluation, retraction,
+    the correction store, and whichever direction model the options select — so
+    that every phase is separately timed; ``observer`` receives each iteration
+    record as it is produced, before the run returns.
     """
 
     _validate_options(options)
@@ -828,6 +861,8 @@ def run_projected_lbfgs(
             )
 
         lagrangian_newton_direction = jax.jit(_lagrangian_newton_direction)
+    if objective_residuals is not None and not options.gauss_newton:
+        raise ValueError("objective_residuals requires gauss_newton")
     if options.gauss_newton:
         if objective_residuals is None:
             raise ValueError("gauss_newton requires objective_residuals")
@@ -872,7 +907,10 @@ def run_projected_lbfgs(
 
     while status is ProjectedLbfgsStatus.RUNNING:
         index = len(records)
-        if float(point.objective) <= options.objective_target:
+        if (
+            options.objective_target is not None
+            and float(point.objective) <= options.objective_target
+        ):
             status = ProjectedLbfgsStatus.OBJECTIVE_TARGET_REACHED
             break
         if index >= options.maximum_iterations:
@@ -1073,39 +1111,42 @@ def run_projected_lbfgs(
                 and math.isfinite(rescue_norm)
                 and rescue_norm > 0.0
             ):
-                gauss_newton_rescued = gauss_newton_used
-                lagrangian_newton_rescued = lagrangian_newton_used
-                capped = rescue_norm > options.maximum_step_norm
-                initial = options.maximum_step_norm / rescue_norm if capped else 1.0
-                direction = rescue_direction
-                directional_derivative = rescue_slope
-                direction_norm = rescue_norm
-                accepted, step_scale = search(
+                rescue_capped = rescue_norm > options.maximum_step_norm
+                initial = (
+                    options.maximum_step_norm / rescue_norm if rescue_capped else 1.0
+                )
+                rescued, rescue_scale = search(
                     rescue_direction,
                     rescue_slope,
                     initial,
                     options.minimum_step_scale,
                 )
+                # The rescue owns the iteration only if it placed a step.  A
+                # rescue the shared trial budget starved to zero attempts
+                # placed nothing, and stamping the direction fields with a
+                # candidate that was never retracted would report the model
+                # arm as rescued on evidence that does not exist.
+                if rescued is not None:
+                    accepted = rescued
+                    step_scale = rescue_scale
+                    gauss_newton_rescued = gauss_newton_used
+                    lagrangian_newton_rescued = lagrangian_newton_used
+                    capped = rescue_capped
+                    direction = rescue_direction
+                    directional_derivative = rescue_slope
+                    direction_norm = rescue_norm
         line_search_seconds = time.perf_counter() - line_search_started
-
-        # A Newton phase that could not place a step -- because the solve
-        # refused one or because the line search would not take it -- hands the
-        # run back to the secant store for another window rather than paying
-        # for a curvature solve every iteration to be told the same thing.
-        if (
-            options.hybrid_plateau_window > 0
-            and newton_active
-            and not newton_gate_skipped
-            and (lagrangian_newton_rescued or not lagrangian_newton_used)
-        ):
-            newton_active = False
-            newton_rearm_index = index + 1
 
         # A line search that placed nothing against CARRIED rows has not proved
         # anything about this point: the trials it rejected were retracted by a
         # chord whose rows belong somewhere else.  Materialize here and take the
         # iteration again.  The retry cannot repeat, because the refreshed
-        # projector is not stale, so a second failure is the real verdict.
+        # projector is not stale, so a second failure is the real verdict.  It
+        # runs BEFORE the hybrid disarm below for the same reason: an attempt
+        # that proved nothing is not evidence against the model it used.  Only
+        # the seconds and trials it spent are carried; its own direction and
+        # curvature telemetry belong to a tangent space this point does not
+        # have, and the retry produces the record's telemetry afresh.
         if accepted is None and projector_age > 0:
             refresh_started = time.perf_counter()
             point = jax.block_until_ready(evaluate(coordinates))
@@ -1128,6 +1169,23 @@ def run_projected_lbfgs(
                 break
             continue
 
+        # A Newton phase that could not place a step -- because the solve
+        # refused one or because the line search would not take it -- hands the
+        # run back to the secant store for another window rather than paying
+        # for a curvature solve every iteration to be told the same thing.  It
+        # runs after the retry so that ``index`` is the index of an iteration
+        # that will be RECORDED, which is what makes the window that counts
+        # from ``index + 1`` exactly as many secant iterations as the option
+        # names.
+        if (
+            options.hybrid_plateau_window > 0
+            and newton_active
+            and not newton_gate_skipped
+            and (lagrangian_newton_rescued or not lagrangian_newton_used)
+        ):
+            newton_active = False
+            newton_rearm_index = index + 1
+
         if accepted is None:
             status = ProjectedLbfgsStatus.LINE_SEARCH_COLLAPSE
             records.append(
@@ -1144,6 +1202,16 @@ def run_projected_lbfgs(
                     + abandoned.rejected_for_feasibility,
                     stored_pairs=stored_pairs,
                     masked_pairs=masked_pairs,
+                    dense_damped_updates=(
+                        int(curvature.damped_updates) if options.dense_curvature else 0
+                    ),
+                    dense_positive_definite=dense_pd,
+                    gauss_newton_used=gauss_newton_used,
+                    gauss_newton_rescued=gauss_newton_rescued,
+                    gauss_newton_predicted_reduction=gn_predicted,
+                    gauss_newton_reciprocal_condition=gn_condition,
+                    gauss_newton_tangency_residual=gn_tangency,
+                    gauss_newton_direction_norm=gn_direction_norm,
                     lagrangian_newton_used=lagrangian_newton_used,
                     lagrangian_newton_rescued=lagrangian_newton_rescued,
                     newton_step=newton_step,
@@ -1217,6 +1285,18 @@ def run_projected_lbfgs(
         else:
             dense_damped = 0
         pair_update_seconds = time.perf_counter() - pair_started
+        # The model's own decrease along the step that was ACCEPTED.
+        # ``model_predicted`` is ``-(g.d + 0.5 d.H d)`` at full length, so the
+        # same quadratic predicts ``-(t g.d + t^2 0.5 d.H d)`` at scale ``t``,
+        # which rearranges into these two numbers the iteration already holds.
+        # Dividing the realized decrease by the FULL-step prediction instead
+        # reports every backtracked iteration as an inexact model: a step at
+        # scale 1/8 buys roughly an eighth of the full-step decrease and would
+        # score near 0.125 however exact the model is.
+        scaled_model_predicted = (
+            step_scale * step_scale * model_predicted
+            + (step_scale * step_scale - step_scale) * directional_derivative
+        )
         stored_pairs = int(live_pairs)
 
         record = ProjectedLbfgsIteration(
@@ -1266,11 +1346,12 @@ def run_projected_lbfgs(
             multiplier_forward_error_bound=multiplier_forward_error_bound,
             trailing_objective_factor=trailing_factor,
             model_exactness_ratio=(
-                (float(point.objective) - float(accepted.objective)) / model_predicted
+                (float(point.objective) - float(accepted.objective))
+                / scaled_model_predicted
                 if model_step_used
                 and not (gauss_newton_rescued or lagrangian_newton_rescued)
-                and math.isfinite(model_predicted)
-                and model_predicted != 0.0
+                and math.isfinite(scaled_model_predicted)
+                and scaled_model_predicted != 0.0
                 else float("nan")
             ),
             direction_seconds=direction_seconds + abandoned.direction_seconds,
@@ -1316,6 +1397,12 @@ def _trailing_objective_factor(
 
     A value approaching one is a plateau: the model in use is buying less per
     iteration than a more expensive one would have to buy to be worth its cost.
+
+    The ratio is only a rate for a positive objective, so a window that reaches
+    a nonpositive one reports NaN.  ``hybrid_plateau_window`` requires a finite
+    factor to rearm, which means an objective that can go nonpositive leaves the
+    hybrid arm on the secant store for good; such a run wants the Newton arm
+    selected outright rather than scheduled.
     """
 
     if window < 1 or len(records) < window:
@@ -1378,6 +1465,14 @@ def _collapsed_record(
     rejected_for_feasibility: int,
     stored_pairs: int,
     masked_pairs: int,
+    dense_damped_updates: int,
+    dense_positive_definite: bool,
+    gauss_newton_used: bool,
+    gauss_newton_rescued: bool,
+    gauss_newton_predicted_reduction: float,
+    gauss_newton_reciprocal_condition: float,
+    gauss_newton_tangency_residual: float,
+    gauss_newton_direction_norm: float,
     lagrangian_newton_used: bool,
     lagrangian_newton_rescued: bool,
     newton_step: TangentNewtonCgStep | None,
@@ -1394,8 +1489,11 @@ def _collapsed_record(
 ) -> ProjectedLbfgsIteration:
     """Record the iteration whose line search found no acceptable step.
 
-    The curvature telemetry is carried through unchanged: an iteration that
-    could place no step is the one whose direction evidence matters most.
+    The direction and curvature telemetry is carried through unchanged: an
+    iteration that could place no step is the one whose direction evidence
+    matters most.  Only the fields an ACCEPTED step would have produced -- the
+    candidate, the admitted pair, the realized decrease -- are absent, and they
+    are absent rather than defaulted.
     """
 
     return ProjectedLbfgsIteration(
@@ -1425,14 +1523,14 @@ def _collapsed_record(
         candidate_feasibility_inf=float("nan"),
         curvature=float("nan"),
         pair_admitted=False,
-        dense_damped_updates=0,
-        dense_positive_definite=True,
-        gauss_newton_used=False,
-        gauss_newton_rescued=False,
-        gauss_newton_predicted_reduction=float("nan"),
-        gauss_newton_reciprocal_condition=float("nan"),
-        gauss_newton_tangency_residual=float("nan"),
-        gauss_newton_direction_norm=float("nan"),
+        dense_damped_updates=dense_damped_updates,
+        dense_positive_definite=dense_positive_definite,
+        gauss_newton_used=gauss_newton_used,
+        gauss_newton_rescued=gauss_newton_rescued,
+        gauss_newton_predicted_reduction=gauss_newton_predicted_reduction,
+        gauss_newton_reciprocal_condition=gauss_newton_reciprocal_condition,
+        gauss_newton_tangency_residual=gauss_newton_tangency_residual,
+        gauss_newton_direction_norm=gauss_newton_direction_norm,
         lagrangian_newton_used=lagrangian_newton_used,
         lagrangian_newton_rescued=lagrangian_newton_rescued,
         **_newton_telemetry(newton_step),
@@ -1469,7 +1567,9 @@ def _validate_options(options: ProjectedLbfgsOptions) -> None:
     )
     if any(not math.isfinite(value) or value <= 0.0 for value in positive):
         raise ValueError("tolerances and bounds must be finite and positive")
-    if not math.isfinite(options.objective_target):
+    if options.objective_target is not None and not math.isfinite(
+        options.objective_target
+    ):
         raise ValueError("objective_target must be finite")
     if options.newton_cg_maximum_iterations < 1:
         raise ValueError("newton_cg_maximum_iterations must be positive")
@@ -1494,6 +1594,15 @@ def _validate_options(options: ProjectedLbfgsOptions) -> None:
         options.lagrangian_newton
     ):
         raise ValueError("newton_tangent_fraction_threshold requires lagrangian_newton")
+    if options.maximum_retraction_corrections < 1:
+        raise ValueError("maximum_retraction_corrections must be positive")
+    if (
+        not math.isfinite(options.gauss_newton_levenberg_relative)
+        or options.gauss_newton_levenberg_relative < 0.0
+    ):
+        raise ValueError(
+            "gauss_newton_levenberg_relative must be finite and nonnegative"
+        )
     selected = sum(
         (options.gauss_newton, options.dense_curvature, options.lagrangian_newton)
     )
@@ -1501,6 +1610,8 @@ def _validate_options(options: ProjectedLbfgsOptions) -> None:
         raise ValueError(
             "gauss_newton, dense_curvature and lagrangian_newton are exclusive"
         )
+    if options.vector_transport and selected:
+        raise ValueError("vector_transport applies to the secant direction only")
 
 
 __all__ = (
