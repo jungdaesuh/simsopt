@@ -1357,7 +1357,7 @@ def test_certify_agreement_is_relative_with_absolute_floor_and_fails_closed(
     value: float, expected: float, accepted: bool
 ) -> None:
     if accepted:
-        receipt_module._certify_agreement(
+        receipt_module.certify_agreement(
             value,
             expected,
             "probe",
@@ -1368,7 +1368,7 @@ def test_certify_agreement_is_relative_with_absolute_floor_and_fails_closed(
         )
         return
     with pytest.raises(ValueError, match="probe"):
-        receipt_module._certify_agreement(
+        receipt_module.certify_agreement(
             value,
             expected,
             "probe",

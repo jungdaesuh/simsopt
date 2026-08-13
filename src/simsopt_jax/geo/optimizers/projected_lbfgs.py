@@ -756,86 +756,60 @@ def _admit_curvature_pair(
     )
 
 
-def run_projected_lbfgs(
+class ProjectedLbfgsKernels(NamedTuple):
+    """The jitted kernels one configuration of the projected loop drives.
+
+    One executable per phase.  ``lagrangian_newton_direction`` and
+    ``gauss_newton_direction`` are ``None`` where the options do not select
+    them, so the bundle names exactly the executables a run will compile.
+    """
+
+    evaluate: Callable[..., ProjectedPoint]
+    evaluate_carried: Callable[..., ProjectedPoint]
+    exact_retract: Callable[..., ManifoldRetraction]
+    frozen_retract: Callable[..., ManifoldRetraction]
+    apply_metric: Callable[..., jax.Array]
+    admit_pair: Callable[..., tuple[QuasiNewtonMetric, jax.Array, jax.Array, jax.Array]]
+    transport_metric: Callable[..., object]
+    transported_pair: Callable[..., tuple[jax.Array, jax.Array]]
+    dense_direction: Callable[..., object]
+    update_curvature: Callable[..., object]
+    lagrangian_newton_direction: Callable[..., object] | None
+    gauss_newton_direction: Callable[..., object] | None
+    frozen_projector_line_search: bool
+
+    def retract(
+        self,
+        projector: CertifiedGramProjector,
+        coordinates: jax.Array,
+    ) -> ManifoldRetraction:
+        """Retract one trial point, against carried rows where amortized."""
+
+        if self.frozen_projector_line_search:
+            return self.frozen_retract(projector, coordinates)
+        return self.exact_retract(coordinates)
+
+
+def build_projected_lbfgs_kernels(
     joint_value_constraints: JointValueConstraints,
-    initial_coordinates: jax.Array,
     *,
     options: ProjectedLbfgsOptions = _DEFAULT_OPTIONS,
     objective_residuals: Callable[[jax.Array], jax.Array] | None = None,
-    observer: Callable[[ProjectedLbfgsIteration], None] | None = None,
-) -> ProjectedLbfgsRun:
-    """Run the bounded projected L-BFGS loop from one feasible starting point.
+) -> ProjectedLbfgsKernels:
+    """Build the jitted kernels one options set drives, compiling none of them.
 
-    The host drives one jitted kernel per phase — point evaluation, retraction,
-    the correction store, and whichever direction model the options select — so
-    that every phase is separately timed; ``observer`` receives each iteration
-    record as it is produced, before the run returns.
+    The loop and any pre-flight measurement share this construction, so what a
+    pre-flight lowers is exactly what a run compiles rather than a re-spelled
+    copy that can drift away from it.
     """
 
     _validate_options(options)
-    # Every coordinate array the loop feeds back into these kernels comes out
-    # of one of them, and a jitted output is COMMITTED to the device it ran on
-    # while a caller's array need not be.  ``jax.jit`` caches on that
-    # difference, so an uncommitted start point compiles the point evaluation,
-    # the retraction and the direction solve a SECOND time on their first
-    # in-loop call -- 31 s of the measured 92 s fixed cost on the coupled
-    # full-space problem.  Committing the start once is numerically inert and
-    # leaves one executable per kernel.
-    initial_coordinates = jax.device_put(
-        initial_coordinates, next(iter(initial_coordinates.devices()))
-    )
-    dimension = int(initial_coordinates.shape[0])
-    dtype = initial_coordinates.dtype
+    if objective_residuals is not None and not options.gauss_newton:
+        raise ValueError("objective_residuals requires gauss_newton")
+    if options.gauss_newton and objective_residuals is None:
+        raise ValueError("gauss_newton requires objective_residuals")
 
-    evaluate = jax.jit(
-        lambda coordinates: evaluate_projected_point(
-            joint_value_constraints, coordinates
-        )
-    )
-    evaluate_carried = jax.jit(
-        lambda projector, coordinates: evaluate_projected_point_with_projector(
-            joint_value_constraints, projector, coordinates
-        )
-    )
-    exact_retract = jax.jit(
-        lambda coordinates: retract_to_manifold(
-            joint_value_constraints,
-            coordinates,
-            feasibility_tolerance=options.feasibility_tolerance,
-            maximum_corrections=options.maximum_retraction_corrections,
-        )
-    )
-    frozen_retract = jax.jit(
-        lambda projector, coordinates: retract_with_frozen_projector(
-            joint_value_constraints,
-            projector,
-            coordinates,
-            feasibility_tolerance=options.feasibility_tolerance,
-            maximum_corrections=options.maximum_retraction_corrections,
-        )
-    )
-
-    def retract(projector: CertifiedGramProjector, coordinates: jax.Array):
-        if options.frozen_projector_line_search:
-            return frozen_retract(projector, coordinates)
-        return exact_retract(coordinates)
-
-    apply_metric = jax.jit(apply_quasi_newton_metric)
-    admit_pair = jax.jit(_admit_curvature_pair)
-    transport_metric = jax.jit(
-        lambda metric, projector: transport_quasi_newton_metric(
-            metric, lambda vectors: project_into_tangent_space(projector, vectors)
-        )
-    )
-    transported_pair = jax.jit(_transported_pair)
-    dense_direction = jax.jit(
-        lambda dense, projector, projected_gradient: dense_tangent_direction(
-            dense,
-            projected_gradient,
-            lambda vector: project_with_certified_gram(projector, vector).projected,
-        )
-    )
-    update_curvature = jax.jit(update_dense_tangent_curvature)
+    lagrangian_newton_direction = None
     if options.lagrangian_newton:
 
         def _lagrangian_newton_direction(
@@ -861,11 +835,9 @@ def run_projected_lbfgs(
             )
 
         lagrangian_newton_direction = jax.jit(_lagrangian_newton_direction)
-    if objective_residuals is not None and not options.gauss_newton:
-        raise ValueError("objective_residuals requires gauss_newton")
+
+    gauss_newton_direction = None
     if options.gauss_newton:
-        if objective_residuals is None:
-            raise ValueError("gauss_newton requires objective_residuals")
 
         def _gauss_newton_direction(coordinates, projector, projected_gradient):
             return solve_tangent_gauss_newton(
@@ -876,6 +848,234 @@ def run_projected_lbfgs(
             )
 
         gauss_newton_direction = jax.jit(_gauss_newton_direction)
+
+    return ProjectedLbfgsKernels(
+        evaluate=jax.jit(
+            lambda coordinates: evaluate_projected_point(
+                joint_value_constraints, coordinates
+            )
+        ),
+        evaluate_carried=jax.jit(
+            lambda projector, coordinates: evaluate_projected_point_with_projector(
+                joint_value_constraints, projector, coordinates
+            )
+        ),
+        exact_retract=jax.jit(
+            lambda coordinates: retract_to_manifold(
+                joint_value_constraints,
+                coordinates,
+                feasibility_tolerance=options.feasibility_tolerance,
+                maximum_corrections=options.maximum_retraction_corrections,
+            )
+        ),
+        frozen_retract=jax.jit(
+            lambda projector, coordinates: retract_with_frozen_projector(
+                joint_value_constraints,
+                projector,
+                coordinates,
+                feasibility_tolerance=options.feasibility_tolerance,
+                maximum_corrections=options.maximum_retraction_corrections,
+            )
+        ),
+        apply_metric=jax.jit(apply_quasi_newton_metric),
+        admit_pair=jax.jit(_admit_curvature_pair),
+        transport_metric=jax.jit(
+            lambda metric, projector: transport_quasi_newton_metric(
+                metric, lambda vectors: project_into_tangent_space(projector, vectors)
+            )
+        ),
+        transported_pair=jax.jit(_transported_pair),
+        dense_direction=jax.jit(
+            lambda dense, projector, projected_gradient: dense_tangent_direction(
+                dense,
+                projected_gradient,
+                lambda vector: project_with_certified_gram(projector, vector).projected,
+            )
+        ),
+        update_curvature=jax.jit(update_dense_tangent_curvature),
+        lagrangian_newton_direction=lagrangian_newton_direction,
+        gauss_newton_direction=gauss_newton_direction,
+        frozen_projector_line_search=options.frozen_projector_line_search,
+    )
+
+
+class KernelLowering(NamedTuple):
+    """Lowered-IR measurement of one kernel, taken without compiling it."""
+
+    name: str
+    ir_bytes: int
+    while_operations: int
+
+
+def lower_projected_lbfgs_kernels(
+    joint_value_constraints: JointValueConstraints,
+    initial_coordinates: jax.Array,
+    *,
+    options: ProjectedLbfgsOptions = _DEFAULT_OPTIONS,
+    objective_residuals: Callable[[jax.Array], jax.Array] | None = None,
+) -> tuple[KernelLowering, ...]:
+    """Lower the kernels this configuration drives without compiling any.
+
+    Every argument beyond the start point is an abstract shape taken from
+    ``jax.eval_shape``, so the whole measurement is one trace per kernel and
+    nothing reaches a backend compiler.  The loop runs on the host, so no
+    kernel carries the attempt budget: the sizes reported for a three-attempt
+    rehearsal are the sizes a full-length run compiles, which is what lets the
+    rehearsal stand in for a certified run's compile.
+    """
+
+    kernels = build_projected_lbfgs_kernels(
+        joint_value_constraints,
+        options=options,
+        objective_residuals=objective_residuals,
+    )
+    dimension = int(initial_coordinates.shape[0])
+    dtype = initial_coordinates.dtype
+    coordinates = jax.ShapeDtypeStruct((dimension,), dtype)
+    point = jax.eval_shape(kernels.evaluate, coordinates)
+    metric = jax.eval_shape(
+        lambda: empty_quasi_newton_metric(options.memory, dimension, dtype)
+    )
+    curvature = jax.eval_shape(
+        lambda: empty_dense_tangent_curvature(dimension, dtype)
+    )
+
+    selected: list[tuple[str, object, tuple[object, ...]]] = [
+        ("evaluate", kernels.evaluate, (coordinates,)),
+        ("apply_metric", kernels.apply_metric, (metric, point.projected_gradient)),
+        (
+            "admit_pair",
+            kernels.admit_pair,
+            (metric, coordinates, point.projected_gradient),
+        ),
+    ]
+    if options.projector_refresh_period > 1:
+        selected.append(
+            (
+                "evaluate_carried",
+                kernels.evaluate_carried,
+                (point.projector, coordinates),
+            )
+        )
+    if options.frozen_projector_line_search:
+        selected.append(
+            ("frozen_retract", kernels.frozen_retract, (point.projector, coordinates))
+        )
+    else:
+        selected.append(("exact_retract", kernels.exact_retract, (coordinates,)))
+    if options.vector_transport:
+        selected.append(
+            ("transport_metric", kernels.transport_metric, (metric, point.projector))
+        )
+        selected.append(
+            (
+                "transported_pair",
+                kernels.transported_pair,
+                (
+                    point.projector,
+                    coordinates,
+                    point.gradient,
+                    point.projected_gradient,
+                ),
+            )
+        )
+    if options.dense_curvature:
+        selected.append(
+            (
+                "dense_direction",
+                kernels.dense_direction,
+                (curvature, point.projector, point.projected_gradient),
+            )
+        )
+        selected.append(
+            (
+                "update_curvature",
+                kernels.update_curvature,
+                (curvature, coordinates, point.projected_gradient),
+            )
+        )
+    if kernels.lagrangian_newton_direction is not None:
+        selected.append(
+            (
+                "lagrangian_newton_direction",
+                kernels.lagrangian_newton_direction,
+                (
+                    coordinates,
+                    point.projector,
+                    point.gradient,
+                    point.projected_gradient,
+                    metric,
+                ),
+            )
+        )
+    if kernels.gauss_newton_direction is not None:
+        selected.append(
+            (
+                "gauss_newton_direction",
+                kernels.gauss_newton_direction,
+                (coordinates, point.projector, point.projected_gradient),
+            )
+        )
+
+    measurements = []
+    for name, kernel, arguments in sorted(selected, key=lambda entry: entry[0]):
+        text = kernel.lower(*arguments).as_text()
+        measurements.append(
+            KernelLowering(
+                name=name,
+                ir_bytes=len(text.encode("utf-8")),
+                while_operations=text.count("stablehlo.while"),
+            )
+        )
+    return tuple(measurements)
+
+
+def run_projected_lbfgs(
+    joint_value_constraints: JointValueConstraints,
+    initial_coordinates: jax.Array,
+    *,
+    options: ProjectedLbfgsOptions = _DEFAULT_OPTIONS,
+    objective_residuals: Callable[[jax.Array], jax.Array] | None = None,
+    observer: Callable[[ProjectedLbfgsIteration], None] | None = None,
+) -> ProjectedLbfgsRun:
+    """Run the bounded projected L-BFGS loop from one feasible starting point.
+
+    The host drives one jitted kernel per phase — point evaluation, retraction,
+    the correction store, and whichever direction model the options select — so
+    that every phase is separately timed; ``observer`` receives each iteration
+    record as it is produced, before the run returns.
+    """
+
+    kernels = build_projected_lbfgs_kernels(
+        joint_value_constraints,
+        options=options,
+        objective_residuals=objective_residuals,
+    )
+    # Every coordinate array the loop feeds back into these kernels comes out
+    # of one of them, and a jitted output is COMMITTED to the device it ran on
+    # while a caller's array need not be.  ``jax.jit`` caches on that
+    # difference, so an uncommitted start point compiles the point evaluation,
+    # the retraction and the direction solve a SECOND time on their first
+    # in-loop call -- 31 s of the measured 92 s fixed cost on the coupled
+    # full-space problem.  Committing the start once is numerically inert and
+    # leaves one executable per kernel.
+    initial_coordinates = jax.device_put(
+        initial_coordinates, next(iter(initial_coordinates.devices()))
+    )
+    dimension = int(initial_coordinates.shape[0])
+    dtype = initial_coordinates.dtype
+
+    evaluate = kernels.evaluate
+    evaluate_carried = kernels.evaluate_carried
+    retract = kernels.retract
+    apply_metric = kernels.apply_metric
+    admit_pair = kernels.admit_pair
+    transport_metric = kernels.transport_metric
+    transported_pair = kernels.transported_pair
+    dense_direction = kernels.dense_direction
+    update_curvature = kernels.update_curvature
+    lagrangian_newton_direction = kernels.lagrangian_newton_direction
+    gauss_newton_direction = kernels.gauss_newton_direction
 
     compile_started = time.perf_counter()
     point = jax.block_until_ready(evaluate(initial_coordinates))
@@ -1615,14 +1815,18 @@ def _validate_options(options: ProjectedLbfgsOptions) -> None:
 
 
 __all__ = (
+    "KernelLowering",
     "ManifoldRetraction",
     "ProjectedLbfgsIteration",
+    "ProjectedLbfgsKernels",
     "ProjectedLbfgsOptions",
     "ProjectedLbfgsRun",
     "ProjectedLbfgsStatus",
     "ProjectedPoint",
+    "build_projected_lbfgs_kernels",
     "evaluate_projected_point",
     "evaluate_projected_point_with_projector",
+    "lower_projected_lbfgs_kernels",
     "retract_to_manifold",
     "retract_with_frozen_projector",
     "run_projected_lbfgs",

@@ -2394,6 +2394,8 @@ def test_diag3_snapshot_closure_is_frozen_against_later_diag2_growth() -> None:
         # DIAG2 filter excludes them by path and the frozen filtered count and
         # digest still describe the DIAG1 tree.  DIAG3's own closure is
         # unaffected: it never saw them.
+        "benchmarks/regenerate_execution_source_manifest.py",
+        "benchmarks/rehearse_single_stage_projected_route_cpu.py",
         "src/simsopt_jax/geo/optimizers/dense_tangent_curvature.py",
         "src/simsopt_jax/geo/optimizers/lagrangian_newton_cg.py",
         "src/simsopt_jax/geo/optimizers/projected_lbfgs.py",
