@@ -3017,10 +3017,28 @@ def _validate_solve_telemetry(solve: Mapping[str, JsonValue]) -> None:
     opening point and then breaks without advancing) or the candidate it
     accepted.  Those two endpoints are measured through a different kernel from
     the terminal re-evaluation, so they agree with it to a few ULP and never
-    bitwise (measured: 1.3e-16 on CPU, 2.8e-14 and 1.7e-14 on the two 5090
-    latches), and the comparison uses the campaign's own cross-executable
-    endpoint band rather than a new constant -- three hundred times the worst
-    deviation this campaign has measured.
+    bitwise (measured RELATIVE: 1.3e-16 on CPU, 2.8e-14 and 1.7e-14 on the two
+    5090 latches -- re-measured at 2.7547e-14 and 1.6993e-14 relative against
+    this gate's rel_tol=1e-11, margins of 363x and 588x, with the absolute
+    deviations 1.22e-21 and 7.61e-22 also below its abs_tol=1e-19 floor), and
+    the comparison uses the campaign's own cross-executable endpoint band rather
+    than a new constant -- three hundred times the worst deviation this campaign
+    has measured.  THE UNIT IS STATED because it decides the gate's meaning: an
+    ABSOLUTE reading of those three numbers against a 4.48e-8 objective makes
+    2.8e-14 a 6.2e-7 relative deviation and implies this gate refuses both
+    banked latches, which is the opposite of what was measured.
+
+    THE SCAN ASYMMETRY IS DELIBERATE AND MUST NOT BE WIDENED.  The reverse
+    implication above reads the ``objective`` column only, while adjacency
+    accepts EITHER endpoint.  Extending the reverse implication to
+    ``candidate_objective`` would refuse both banked 5090 latches, on which
+    ``count(candidate_objective <= target) == 1`` by construction -- the last
+    ACCEPTED CANDIDATE is the latch point the loop breaks on at the top of the
+    next iteration, so it is the one recorded value legitimately at or below the
+    target.  What these row-side checks bind is the TERMINAL scalar, against a
+    frozen campaign literal outside the receipt; the rows themselves remain
+    unbound to an engine trace, which the plan defers with its reasons
+    (section 12.12) and adjudicates as accepted residual in section 12.13.
     """
 
     rows = solve["rows"]
