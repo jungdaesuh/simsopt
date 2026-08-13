@@ -10,7 +10,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, TypeAlias, cast
+from typing import Final, Literal, TypeAlias, cast, get_args
 
 _NVIDIA_SMI_PROCESS_QUERY = (
     "nvidia-smi",
@@ -121,8 +121,13 @@ class ProcessGpuMemoryResult:
 
 
 GpuMemoryUnavailableReason: TypeAlias = Literal[
-    "cpu-device", "provider-pid-not-observed"
+    "cpu-device", "provider-pid-not-observed", "sampler-failed"
 ]
+# The reason vocabulary, derived from the type rather than re-spelled beside it:
+# a second listing is a twin, and twins drift (mistake book P153).
+GPU_MEMORY_UNAVAILABLE_REASONS: Final = frozenset(
+    get_args(GpuMemoryUnavailableReason)
+)
 
 
 @dataclass(frozen=True)
@@ -169,6 +174,30 @@ def cpu_gpu_memory_unavailable(*, provider_pid: int) -> ProcessGpuMemoryUnavaila
     return ProcessGpuMemoryUnavailable(
         reason="cpu-device",
         gpu_uuid=None,
+        provider_pid=provider_pid,
+    )
+
+
+def sampler_failure_unavailable(
+    *, gpu_uuid: str, provider_pid: int
+) -> ProcessGpuMemoryUnavailable:
+    """Represent a sampler that could not observe the provider faithfully.
+
+    ``ProcessGpuMemoryMonitor`` raises rather than guesses when its own
+    machinery fails -- an ``nvidia-smi`` query that timed out, a row some
+    unrelated process rendered unparseable, an exhausted sample cap.  A caller
+    for whom this observation is telemetry rather than a gate needs that
+    failure as evidence instead of as an exception, and this is the union member
+    that carries it: no samples, no peak, an explicit reason.
+    """
+
+    if not gpu_uuid or gpu_uuid.strip() != gpu_uuid:
+        raise ValueError("gpu_uuid must be a nonempty exact NVIDIA UUID")
+    if provider_pid <= 0:
+        raise ValueError("provider_pid must be positive")
+    return ProcessGpuMemoryUnavailable(
+        reason="sampler-failed",
+        gpu_uuid=gpu_uuid,
         provider_pid=provider_pid,
     )
 
@@ -242,7 +271,9 @@ def parse_process_gpu_memory_artifact(
             f"GPU memory artifact target_pid_observed must be a boolean: {artifact_path}"
         )
     unavailable_reason = payload.get("unavailable_reason")
-    if unavailable_reason not in {None, "cpu-device", "provider-pid-not-observed"}:
+    if unavailable_reason is not None and (
+        unavailable_reason not in GPU_MEMORY_UNAVAILABLE_REASONS
+    ):
         raise ValueError(
             f"GPU memory artifact unavailable reason is invalid: {artifact_path}"
         )
@@ -306,7 +337,7 @@ def parse_process_gpu_memory_artifact(
             raise ValueError(
                 f"CPU GPU memory artifact carries a GPU UUID: {artifact_path}"
             )
-        if unavailable_reason == "provider-pid-not-observed" and gpu_uuid is None:
+        if unavailable_reason != "cpu-device" and gpu_uuid is None:
             raise ValueError(
                 f"unobserved GPU memory artifact has no GPU UUID: {artifact_path}"
             )
@@ -702,6 +733,7 @@ class ProcessGpuMemoryMonitor:
 
 
 __all__ = [
+    "GPU_MEMORY_UNAVAILABLE_REASONS",
     "SUPERVISOR_COMPUTE_APPS_QUERY",
     "SUPERVISOR_GPU_INVENTORY_QUERY",
     "GpuMemoryUnavailableReason",
@@ -720,5 +752,6 @@ __all__ = [
     "cpu_gpu_memory_unavailable",
     "parse_process_gpu_memory_artifact",
     "process_gpu_memory_artifact",
+    "sampler_failure_unavailable",
     "supervisor_query_executable_sha256",
 ]

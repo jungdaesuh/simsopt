@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -65,11 +66,18 @@ from simsopt_jax.geo.optimizers.projected_lbfgs import (
 )
 from simsopt_jax.runtime.exact_numeric_identity import exact_numeric_tree_sha256
 
-from benchmarks.process_gpu_monitor import process_gpu_memory_artifact
+from benchmarks.process_gpu_monitor import (
+    SUPERVISOR_GPU_INVENTORY_QUERY,
+    ProcessGpuMemoryMeasurement,
+    ProcessGpuMemoryMonitorError,
+    process_gpu_memory_artifact,
+    sampler_failure_unavailable,
+)
 from benchmarks.rehearse_single_stage_projected_route_cpu import (
     CERTIFIED_MAXIMUM_ITERATIONS,
     CERTIFIED_ROUTE_OPTIONS,
     INFORMATIONAL_ENDPOINT_OBSERVABLES,
+    NATIVE_ENDPOINT_STATE_PATH,
     NATIVE_TARGET_OBJECTIVE,
     NATIVE_WALL_SECONDS_BAR,
     PINNED_ENDPOINT_QUALITY_TERMS,
@@ -81,12 +89,15 @@ from benchmarks.rehearse_single_stage_projected_route_cpu import (
     build_endpoint_ledger,
     certify_endpoint_agreement,
     collapse_proximity_margin,
+    endpoint_ledger_is_gated,
     gate_endpoint_ledger,
     iteration_payload,
     json_scalar,
+    load_native_endpoint_state,
     measure_lowering_pre_gate,
     rehearsal_options,
     rename_noreplace,
+    run_latched,
     seal_and_sync,
     sha256_hex,
     validate_environment,
@@ -134,8 +145,16 @@ GPU_ATTEMPT_SCHEMA_VERSION: Final = "single-stage-projected-route-gpu-attempt-v1
 
 EVIDENCE_FILENAME: Final = "root-evidence.json"
 MANIFEST_FILENAME: Final = "artifact-manifest.json"
+REFUSAL_FILENAME: Final = "root-validation-refusal.json"
+REFUSAL_SCHEMA_VERSION: Final = "single-stage-projected-route-gpu-root-refusal-v1"
 ATTEMPTS_DIRECTORY: Final = "attempts"
 COLD_LANE_DIRECTORY: Final = "cold-lane"
+
+# Plan section 12.2 pre-registers N and the certified budget together, and
+# section 3 pre-registers the cold lane beside them.  A run that differs in any
+# of the three is a bounded smoke, and the verdict is conditioned on that label.
+CONFORMANCE_PREREGISTERED: Final = "PREREGISTERED"
+CONFORMANCE_BOUNDED_SMOKE: Final = "BOUNDED_SMOKE"
 
 # Frozen by plan section 12.2 and never widened by an artifact: the observed
 # latch rate of 4/5 across two boxes puts three consecutive misses near 1%, and
@@ -245,6 +264,10 @@ def gpu_runtime_identity() -> dict[str, JsonValue]:
 
     The speed result is RTX 5090 specific (plan section 1.2), so the artifact
     records the device it was taken on rather than leaving a reader to assume.
+    The interpreter is recorded for the same reason: plan section 3 pins the
+    warm-cache behaviour to ``.venv-qn-gpu``, so which environment ran is
+    contract-relevant provenance and must not have to be inferred from a
+    hashed argv.
     """
 
     devices = jax.devices()
@@ -258,6 +281,8 @@ def gpu_runtime_identity() -> dict[str, JsonValue]:
         "jaxlib_version": jaxlib.__version__,
         "native_extension_path": str(Path(simsoptpp.__file__).resolve(strict=True)),
         "process_id": os.getpid(),
+        "python_executable": str(Path(sys.executable).resolve(strict=True)),
+        "python_prefix": str(Path(sys.prefix).resolve(strict=True)),
     }
 
 
@@ -300,20 +325,26 @@ class _gate:
 def _solve_payload(
     run: ProjectedLbfgsRun, options: ProjectedLbfgsOptions
 ) -> dict[str, JsonValue]:
-    """Every host-side scalar the solve produced, in the rehearsal's shape."""
+    """Every host-side scalar the solve produced, in the rehearsal's shape.
+
+    Every float goes through ``json_scalar``.  ``canonical_json_bytes`` refuses
+    the nonfinite values, and the child's encoding call sits outside its
+    ``GateRefusal`` handler, so a raw scalar left unsanitized turns a completed
+    -- possibly latching -- solve into an empty stdout and a
+    ``PROTOCOL_FAILURE`` over an encoding detail.  A nonfinite scalar is
+    published as null, which every downstream gate refuses as a number.
+    """
 
     objectives = [record.objective for record in run.iterations]
     feasibilities = [record.feasibility_inf for record in run.iterations]
     return {
         "status": int(run.status),
         "status_name": ProjectedLbfgsStatus(int(run.status)).name,
-        "latched": bool(
-            int(run.status) == int(ProjectedLbfgsStatus.OBJECTIVE_TARGET_REACHED)
-        ),
+        "latched": run_latched(run),
         "iterations_run": len(run.iterations),
-        "terminal_objective": run.objective,
-        "terminal_feasibility_inf": run.feasibility_inf,
-        "terminal_projected_gradient_inf": run.projected_gradient_inf,
+        "terminal_objective": json_scalar(run.objective),
+        "terminal_feasibility_inf": json_scalar(run.feasibility_inf),
+        "terminal_projected_gradient_inf": json_scalar(run.projected_gradient_inf),
         "stored_pairs": run.stored_pairs,
         "projector_materializations": run.projector_materializations,
         "tangency_forced_refreshes": run.tangency_forced_refreshes,
@@ -343,9 +374,8 @@ def run_attempt(
     """Execute one attempt's whole chain and return its canonical evidence.
 
     The phases run in the order plan section 6 fixes, each failing closed under
-    the gate name the verdict will carry.  The endpoint ledger is GATED only at
-    the certified budget: a bounded attempt sits orders of magnitude from the
-    endpoint, so a gate there would fail on every term and prove nothing.
+    the gate name the verdict will carry.  The endpoint ledger is GATED only on
+    the attempt that discharges the claim -- see ``endpoint_ledger_is_gated``.
     """
 
     started = time.perf_counter()
@@ -413,7 +443,9 @@ def run_attempt(
         endpoint = certify_endpoint_agreement(case, run)
 
     with _gate("endpoint_ledger"):
-        gated = iterations == CERTIFIED_MAXIMUM_ITERATIONS
+        gated = endpoint_ledger_is_gated(
+            iterations=iterations, latched=run_latched(run)
+        )
         ledger = build_endpoint_ledger(case, run, gated=gated)
         if gated and not ledger["pinned_term_gate"]["passed"]:
             raise ProjectedRootError(
@@ -589,12 +621,9 @@ def supervise_attempt(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    monitor = BoundProcessGpuMemoryMonitor(
-        gpu_uuid=gpu_uuid,
-        provider_pid=child.pid,
-        expected_argv=argv,
+    monitor = _start_gpu_memory_monitor(
+        gpu_uuid=gpu_uuid, provider_pid=child.pid, expected_argv=argv
     )
-    monitor.start()
     timed_out = False
     try:
         stdout, stderr = child.communicate(timeout=timeout_seconds)
@@ -615,7 +644,9 @@ def supervise_attempt(
         "timed_out": timed_out,
         "supervised_seconds": supervised_seconds,
         "argv_sha256": sha256_hex(canonical_json_bytes(list(argv))),
-        "gpu_memory": _gpu_memory_payload(monitor),
+        "gpu_memory": _gpu_memory_payload(
+            monitor, gpu_uuid=gpu_uuid, provider_pid=child.pid, argv=argv
+        ),
         "stderr_tail": stderr[-_FAILURE_TAIL_BYTES:].decode("utf-8", "replace"),
         # Kept only when the stream did not carry the child's document, so a
         # PROTOCOL_FAILURE names what arrived instead of leaving a reader to
@@ -629,26 +660,75 @@ def supervise_attempt(
     }
 
 
-def _gpu_memory_payload(monitor: BoundProcessGpuMemoryMonitor) -> dict[str, JsonValue]:
+def _start_gpu_memory_monitor(
+    *, gpu_uuid: str, provider_pid: int, expected_argv: Sequence[str]
+) -> BoundProcessGpuMemoryMonitor | None:
+    """Attach the PID-and-device-bound sampler, or report that it did not.
+
+    ``None`` means this child runs unobserved: procfs did not yield an identity
+    (a child that raced to zombie reads an empty ``cmdline``), the argv did not
+    match, or the sampling thread refused to start.  Process GPU-memory
+    sampling is telemetry -- plan section 6 does not list it among the gates --
+    so it may not hold veto power over the publication of a one-shot root.
+    """
+
+    try:
+        monitor = BoundProcessGpuMemoryMonitor(
+            gpu_uuid=gpu_uuid,
+            provider_pid=provider_pid,
+            expected_argv=expected_argv,
+        )
+        monitor.start()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return monitor
+
+
+def _gpu_memory_payload(
+    monitor: BoundProcessGpuMemoryMonitor | None,
+    *,
+    gpu_uuid: str,
+    provider_pid: int,
+    argv: Sequence[str],
+) -> dict[str, JsonValue]:
     """Serialize one PID-and-device-bound GPU-memory observation.
 
     Normalized through the monitor module's own union so that a child the
     sampler never caught is published as explicit unavailability rather than as
-    an inferred zero -- the distinction the monitor was written to preserve.
+    an inferred zero -- the distinction the monitor was written to preserve --
+    and so that a sampler which FAILED is published the same way instead of
+    raised.  ``ProcessGpuMemoryMonitor.finish`` re-raises whatever its polling
+    thread stored: an ``nvidia-smi`` query that timed out among the ~10^4 this
+    protocol performs, a row some unrelated process rendered ``[N/A]``, an
+    exhausted sample cap.  Raised from here, any of those would propagate
+    through the supervisor and spend the root -- attempts, verdict and all --
+    with nothing sealed and nothing published, which is precisely the undefined
+    outcome plan section 4 exists to eliminate.
     """
 
-    artifact = process_gpu_memory_artifact(monitor.finish())
+    identity = None if monitor is None else monitor.identity
+    if monitor is None:
+        measurement: ProcessGpuMemoryMeasurement = sampler_failure_unavailable(
+            gpu_uuid=gpu_uuid, provider_pid=provider_pid
+        )
+    else:
+        try:
+            measurement = monitor.finish()
+        except ProcessGpuMemoryMonitorError:
+            measurement = sampler_failure_unavailable(
+                gpu_uuid=gpu_uuid, provider_pid=provider_pid
+            )
+    artifact = process_gpu_memory_artifact(measurement)
+    observed_argv = list(argv if identity is None else identity.argv)
     return {
         "monitor_scope": "whole-child-exact-pid-exact-device",
         "availability": artifact.availability,
         "unavailable_reason": artifact.unavailable_reason,
         "device_uuid": artifact.gpu_uuid,
         "parent_pid": os.getpid(),
-        "child_pid": monitor.identity.pid,
-        "child_start_time_ticks": monitor.identity.start_ticks,
-        "child_argv_sha256": sha256_hex(
-            canonical_json_bytes(list(monitor.identity.argv))
-        ),
+        "child_pid": provider_pid,
+        "child_start_time_ticks": None if identity is None else identity.start_ticks,
+        "child_argv_sha256": sha256_hex(canonical_json_bytes(observed_argv)),
         "sample_count": len(artifact.samples),
         "peak_used_memory_mib": artifact.peak_used_memory_mib,
     }
@@ -699,22 +779,65 @@ def _attempt_outcome(
 
 
 def attempt_engine_wall_seconds(attempt: Mapping[str, JsonValue]) -> float:
-    """The certified wall of one attempt: engine compile plus engine solve."""
+    """The certified wall of one attempt: engine compile plus engine solve.
 
-    evidence = attempt["evidence"]
-    return float(evidence["timing_seconds"]["engine_wall"])
+    DERIVED from its two halves rather than read back, and refused if the
+    published sum disagrees.  Both are IEEE additions of the same two published
+    doubles, so agreement is exact; a receipt whose ``engine_wall`` is not its
+    own compile plus its own solve has restated the quantity the claim is
+    judged on.
+    """
+
+    timing = attempt["evidence"]["timing_seconds"]
+    derived = float(timing["engine_compile"]) + float(timing["engine_solve"])
+    if derived != float(timing["engine_wall"]):
+        raise ProjectedRootError(
+            f"attempt engine wall {timing['engine_wall']!r} is not its own "
+            f"compile plus solve ({derived!r})"
+        )
+    return derived
+
+
+def attempt_protocol_conformance(
+    *, authorized_attempts: int, iterations: int, cold_lane: bool
+) -> str:
+    """Whether a run IS the pre-registered protocol or a bounded smoke.
+
+    The three facts plan sections 3 and 12.2 freeze together -- N = 3, the
+    certified budget, and the cold lane the warm numbers are accounted against
+    -- decide one label, in one place, read by the verdict and re-derived at
+    re-validation.  A bounded smoke that read as a spent pre-registered protocol
+    would drag in the successor-root rule of section 12.1, which applies to a
+    root and to nothing else.
+    """
+
+    preregistered = (
+        authorized_attempts == PREREGISTERED_ATTEMPTS
+        and iterations == CERTIFIED_MAXIMUM_ITERATIONS
+        and cold_lane
+    )
+    return CONFORMANCE_PREREGISTERED if preregistered else CONFORMANCE_BOUNDED_SMOKE
 
 
 def derive_verdict(
     attempts: Sequence[Mapping[str, JsonValue]],
     *,
     wall_seconds_bar: float,
+    conformance: str,
 ) -> str:
-    """Derive the protocol's verdict from the attempts alone.
+    """Derive the protocol's verdict from the attempts and the budget label.
 
     Kept a pure function of the published attempts so that re-validation can
     recompute the verdict from the sealed bytes instead of believing the field
     the run wrote.  The outcome space is closed: there is no fifth answer.
+
+    ``CLAIM_DISCHARGED`` additionally requires ``CONFORMANCE_PREREGISTERED``.
+    The claim is a claim about the pre-registered protocol at the certified
+    budget, and it is at that budget alone that the per-term ledger gate --
+    section 1.1's definition of quality parity -- can run.  A bounded run that
+    latches under the bar is a true measurement and reads ``QUALITY_ONLY``; it
+    is not the campaign's headline verdict, and the launcher will not mint one
+    beside ``quality_claim: NOT_CLAIMED_AT_BOUNDED_BUDGET``.
     """
 
     if not attempts:
@@ -723,11 +846,10 @@ def derive_verdict(
         outcome = attempt["outcome"]
         if outcome == "LATCHED":
             wall = attempt_engine_wall_seconds(attempt)
-            return (
-                VERDICT_CLAIM_DISCHARGED
-                if wall < wall_seconds_bar
-                else VERDICT_QUALITY_ONLY
+            discharged = (
+                wall < wall_seconds_bar and conformance == CONFORMANCE_PREREGISTERED
             )
+            return VERDICT_CLAIM_DISCHARGED if discharged else VERDICT_QUALITY_ONLY
         if outcome == "GATE_REFUSED":
             return verdict_of_gate(str(attempt["evidence"]["gate_refused"]))
         if outcome != "COMPLETED_WITHOUT_LATCH":
@@ -735,11 +857,55 @@ def derive_verdict(
     return VERDICT_NO_LATCH
 
 
+def preflight_external_resources(*, gpu_uuid: str) -> dict[str, JsonValue]:
+    """Check every resource outside this process BEFORE the first child runs.
+
+    Plan section 11: enumerate the failure class, not the instance.  Three
+    resources this protocol depends on live outside the repository and outside
+    the gates -- the NVIDIA tooling the telemetry uses, the device the claim
+    names, and the sealed native endpoint that is the reference side of the
+    quality gate.  Each is checkable in milliseconds; each otherwise spends the
+    root at the first child.  A missing data file already spent one root of the
+    predecessor route.
+    """
+
+    executable = shutil.which(SUPERVISOR_GPU_INVENTORY_QUERY[0])
+    if executable is None:
+        raise ProjectedRootError(
+            f"{SUPERVISOR_GPU_INVENTORY_QUERY[0]} is not on PATH"
+        )
+    completed = subprocess.run(
+        SUPERVISOR_GPU_INVENTORY_QUERY,
+        capture_output=True,
+        check=True,
+        text=True,
+        timeout=30.0,
+    )
+    visible = tuple(
+        line.split(",")[0].strip()
+        for line in completed.stdout.splitlines()
+        if line.strip()
+    )
+    if gpu_uuid not in visible:
+        raise ProjectedRootError(
+            f"pinned GPU {gpu_uuid} is not among the visible devices {visible}"
+        )
+    native_state = load_native_endpoint_state()
+    return {
+        "gpu_inventory_executable": executable,
+        "visible_gpu_uuids": list(visible),
+        "native_endpoint_state_path": str(NATIVE_ENDPOINT_STATE_PATH),
+        "native_endpoint_state_sha256": native_state.file_sha256,
+        "native_endpoint_state_content_sha256": native_state.content_sha256,
+    }
+
+
 def supervisor_payload(
     runtime_identity: Mapping[str, JsonValue],
     *,
     gpu_uuid: str,
     timeout_seconds: float,
+    preflight: Mapping[str, JsonValue],
 ) -> dict[str, JsonValue]:
     """Describe the supervising process, including what it does NOT claim.
 
@@ -755,6 +921,7 @@ def supervisor_payload(
         "gpu_uuid": gpu_uuid,
         "attempt_timeout_seconds": timeout_seconds,
         "gpu_zero_asserted": False,
+        "preflight": dict(preflight),
     }
 
 
@@ -793,6 +960,7 @@ def build_root_evidence(
     supervisor: Mapping[str, JsonValue],
     authorized_attempts: int,
     iterations: int,
+    cold_lane_authorized: bool,
     cache: Mapping[str, JsonValue],
     verdict: str,
     chain_seconds: float,
@@ -800,10 +968,6 @@ def build_root_evidence(
     """Assemble the root receipt, telemetry of every attempt included."""
 
     latched = [attempt for attempt in attempts if attempt["outcome"] == "LATCHED"]
-    preregistered = (
-        authorized_attempts == PREREGISTERED_ATTEMPTS
-        and iterations == CERTIFIED_MAXIMUM_ITERATIONS
-    )
     return {
         "schema_version": GPU_ROOT_SCHEMA_VERSION,
         "route": PROJECTED_ROUTE,
@@ -819,11 +983,17 @@ def build_root_evidence(
             "attempts_run": len(attempts),
             "stop_rule": "stop at the first OBJECTIVE_TARGET_REACHED",
             "latch_count": len(latched),
-            "latch_rate": f"{len(latched)}/{len(attempts)}",
-            # A bounded run is not a root and must not read as one.  The
-            # successor-root rule of plan section 12.1 applies to a spent
-            # PREREGISTERED protocol and to nothing else.
-            "conformance": "PREREGISTERED" if preregistered else "BOUNDED_SMOKE",
+            # k over N, the denominator plan section 4 names -- the attempts
+            # AUTHORIZED, not the attempts the stop rule got to.  The cold lane
+            # is a fourth full-budget draw and is deliberately outside it: it is
+            # not part of the protocol and can only make the rate conservative.
+            "latch_rate": f"{len(latched)}/{authorized_attempts}",
+            "cold_lane_authorized": cold_lane_authorized,
+            "conformance": attempt_protocol_conformance(
+                authorized_attempts=authorized_attempts,
+                iterations=iterations,
+                cold_lane=cold_lane_authorized,
+            ),
             "maximum_iterations": iterations,
             "certified_maximum_iterations": CERTIFIED_MAXIMUM_ITERATIONS,
         },
@@ -842,10 +1012,10 @@ def build_root_evidence(
     }
 
 
-def publish_root(
-    staging_root: Path, output_root: Path, evidence: Mapping[str, JsonValue]
-) -> Path:
-    """Write the receipt, seal the tree, and publish it without replacing."""
+def write_root_receipt(
+    staging_root: Path, evidence: Mapping[str, JsonValue]
+) -> None:
+    """Write the receipt and, last, the manifest that describes the tree."""
 
     (staging_root / EVIDENCE_FILENAME).write_bytes(canonical_json_bytes(evidence))
     (staging_root / MANIFEST_FILENAME).write_bytes(
@@ -855,6 +1025,38 @@ def publish_root(
             )
         )
     )
+
+
+def publish_root(
+    staging_root: Path, output_root: Path, evidence: Mapping[str, JsonValue]
+) -> Path:
+    """Write the receipt, re-validate it, then seal and publish it.
+
+    Plan section 6 step 10 GATES publication rather than annotating it.  The
+    receipt is re-derived from the bytes on disk while the staging tree is still
+    writable, so a refusal leaves an UNSEALED tree carrying the refusal it
+    raised -- not a sealed, ``renameat2``-published, 0444 artifact whose
+    ``verdict`` field the launcher's own validator rejected and which a later
+    reader cannot tell apart from one it accepted.  Only the sealed modes are
+    checked after the fact, because they are the one property that does not
+    exist yet at the moment the receipt is judged.
+    """
+
+    write_root_receipt(staging_root, evidence)
+    try:
+        validate_root_artifact(staging_root, sealed=False)
+    except BaseException as refusal:
+        (staging_root / REFUSAL_FILENAME).write_bytes(
+            canonical_json_bytes(
+                {
+                    "schema_version": REFUSAL_SCHEMA_VERSION,
+                    "refused_at": "pre_seal_revalidation",
+                    "published": False,
+                    "error": f"{type(refusal).__name__}: {refusal}",
+                }
+            )
+        )
+        raise
     seal_and_sync(staging_root)
     rename_noreplace(staging_root, output_root)
     descriptor = os.open(output_root.parent, os.O_RDONLY | os.O_DIRECTORY)
@@ -862,20 +1064,28 @@ def publish_root(
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+    validate_sealed_modes(output_root)
     return output_root
 
 
-def validate_root_artifact(artifact_root: Path) -> dict[str, JsonValue]:
-    """Re-derive every claim the sealed root artifact makes about itself.
+def validate_root_artifact(
+    artifact_root: Path, *, sealed: bool = True
+) -> dict[str, JsonValue]:
+    """Re-derive every claim the root artifact makes about itself.
 
-    Run against the bytes this process just published and runnable later by
-    anyone.  The verdict is RECOMPUTED from the attempts rather than read, the
-    endpoint agreements are re-certified against the campaign's frozen band
-    after the recorded band is checked against it, and each published terminal
-    state is re-hashed.  State hashes compare exactly -- they are same-source
-    copies -- while cross-executable numbers are toleranced, because demanding
-    bitwise equality between two independently compiled executables is what
-    refused the predecessor route's fourth root after a complete solve.
+    Run against the bytes this process just wrote -- before they are sealed, so
+    that a refusal can still gate the publication -- and runnable later by
+    anyone against the sealed tree, which is what ``sealed`` selects: the modes
+    are the one property that does not exist yet at the moment the receipt is
+    judged.  The verdict is RECOMPUTED from the attempts and the re-derived
+    conformance label rather than read, each attempt's outcome is re-derived
+    from its own evidence and exit status, the endpoint agreements are
+    re-certified against the campaign's frozen band after the recorded band is
+    checked against it, and each published terminal state is re-hashed.  State
+    hashes compare exactly -- they are same-source copies -- while
+    cross-executable numbers are toleranced, because demanding bitwise equality
+    between two independently compiled executables is what refused the
+    predecessor route's fourth root after a complete solve.
     """
 
     manifest = load_canonical_json_bytes((artifact_root / MANIFEST_FILENAME).read_bytes())
@@ -883,7 +1093,8 @@ def validate_root_artifact(artifact_root: Path) -> dict[str, JsonValue]:
         artifact_root, schema_version=GPU_ROOT_MANIFEST_SCHEMA_VERSION
     ):
         raise ProjectedRootError("root manifest differs from the artifact tree")
-    validate_sealed_modes(artifact_root)
+    if sealed:
+        validate_sealed_modes(artifact_root)
 
     evidence = load_canonical_json_bytes((artifact_root / EVIDENCE_FILENAME).read_bytes())
     if (
@@ -892,15 +1103,36 @@ def validate_root_artifact(artifact_root: Path) -> dict[str, JsonValue]:
         or evidence.get("route") != PROJECTED_ROUTE
     ):
         raise ProjectedRootError("root evidence schema differs")
-    if evidence["claim"]["wall_seconds_bar"] != NATIVE_WALL_SECONDS_BAR or (
-        evidence["claim"]["target_objective"] != NATIVE_TARGET_OBJECTIVE
+    claim = evidence["claim"]
+    if (
+        claim["wall_seconds_bar"] != NATIVE_WALL_SECONDS_BAR
+        or claim["target_objective"] != NATIVE_TARGET_OBJECTIVE
+        or claim["feasibility_tolerance"] != CERTIFIED_ROUTE_OPTIONS.feasibility_tolerance
     ):
         raise ProjectedRootError("root evidence restates the native reference")
     if evidence["timing_boundary"] != "engine_compile_plus_solve":
         raise ProjectedRootError("root evidence states a different timing boundary")
 
+    protocol = evidence["attempt_protocol"]
+    conformance = attempt_protocol_conformance(
+        authorized_attempts=int(protocol["authorized_attempts"]),
+        iterations=int(protocol["maximum_iterations"]),
+        cold_lane=bool(protocol["cold_lane_authorized"]),
+    )
+    if conformance != protocol["conformance"]:
+        raise ProjectedRootError(
+            f"published conformance {protocol['conformance']!r} is not the one "
+            f"the protocol derives ({conformance!r})"
+        )
+
     attempts = evidence["attempts"]
-    recomputed = derive_verdict(attempts, wall_seconds_bar=NATIVE_WALL_SECONDS_BAR)
+    for attempt in attempts:
+        _validate_attempt_outcome(attempt)
+    recomputed = derive_verdict(
+        attempts,
+        wall_seconds_bar=NATIVE_WALL_SECONDS_BAR,
+        conformance=conformance,
+    )
     if recomputed != evidence["verdict"]:
         raise ProjectedRootError(
             f"published verdict {evidence['verdict']!r} is not the one the "
@@ -920,8 +1152,29 @@ def validate_root_artifact(artifact_root: Path) -> dict[str, JsonValue]:
             and cold["evidence"]["compilation_cache"]["warm"]
         ):
             raise ProjectedRootError("the cold lane ran against a populated cache")
+        _validate_attempt_outcome(cold)
         _validate_attempt(artifact_root, cold)
     return evidence
+
+
+def _validate_attempt_outcome(attempt: Mapping[str, JsonValue]) -> None:
+    """Re-derive one attempt's outcome from its evidence and its exit status.
+
+    The verdict is a function of these strings, so recomputing the verdict from
+    them and calling that "recomputed" would stop one level above where it
+    matters.  The three facts the classifier consumes are all published.
+    """
+
+    recomputed = _attempt_outcome(
+        attempt["evidence"],
+        return_code=int(attempt["return_code"]),
+        timed_out=bool(attempt["timed_out"]),
+    )
+    if recomputed != attempt["outcome"]:
+        raise ProjectedRootError(
+            f"attempt outcome {attempt['outcome']!r} is not the one its "
+            f"evidence derives ({recomputed!r})"
+        )
 
 
 def _validate_attempt(artifact_root: Path, attempt: Mapping[str, JsonValue]) -> None:
@@ -949,6 +1202,19 @@ def _validate_attempt(artifact_root: Path, attempt: Mapping[str, JsonValue]) -> 
     if evidence["options"]["objective_target"] != NATIVE_TARGET_OBJECTIVE:
         raise ProjectedRootError(
             "attempt targets an objective other than the native endpoint"
+        )
+    # Substitution soundness rests on "same route": every budget is the frozen
+    # configuration with one field replaced.  The published delta is therefore
+    # RE-DERIVED from the published options against the frozen object, not read.
+    delta = {
+        field: value
+        for field, value in evidence["options"].items()
+        if value != json_scalar(getattr(CERTIFIED_ROUTE_OPTIONS, field))
+    }
+    if delta != evidence["certified_options_delta"]:
+        raise ProjectedRootError(
+            f"attempt options delta {evidence['certified_options_delta']!r} is "
+            f"not the one its options derive ({delta!r})"
         )
     if (
         attempt["outcome"] == "LATCHED"
@@ -1020,10 +1286,16 @@ def run_attempt_protocol(
 ) -> Path:
     """Run the pre-registered protocol once and publish its sealed artifact.
 
-    The output root is claimed before a second of compute is spent, the cold
-    lane runs first against an empty cache so that its compile is the honest
-    cold number and the cache it leaves behind is what the timed attempts load,
-    and the artifact is published and re-validated whatever the verdict.
+    The output namespace is checked and every external resource is preflighted
+    before a second of compute is spent, the cold lane runs first against an
+    empty cache so that its compile is the honest cold number and the cache it
+    leaves behind is what the timed attempts load, and the artifact is published
+    whatever the verdict -- after the re-validation that gates it.
+
+    The final name is claimed only at the ``renameat2``: what this reserves up
+    front is the fact that nothing occupies it yet, plus a private
+    ``.partial-<hex>`` staging tree.  Plan section 11 constrains the root to one
+    supervised session, which is what makes that sufficient.
     """
 
     chain_started = time.perf_counter()
@@ -1046,7 +1318,10 @@ def run_attempt_protocol(
     os.mkdir(staging_root, 0o700)
 
     supervisor = supervisor_payload(
-        bind_gpu_backend(), gpu_uuid=gpu_uuid, timeout_seconds=timeout_seconds
+        bind_gpu_backend(),
+        gpu_uuid=gpu_uuid,
+        timeout_seconds=timeout_seconds,
+        preflight=preflight_external_resources(gpu_uuid=gpu_uuid),
     )
     snapshot = publish_source_snapshot(staging_root)
 
@@ -1082,7 +1357,15 @@ def run_attempt_protocol(
         if attempt["outcome"] != "COMPLETED_WITHOUT_LATCH":
             break
 
-    verdict = derive_verdict(attempts, wall_seconds_bar=NATIVE_WALL_SECONDS_BAR)
+    verdict = derive_verdict(
+        attempts,
+        wall_seconds_bar=NATIVE_WALL_SECONDS_BAR,
+        conformance=attempt_protocol_conformance(
+            authorized_attempts=attempts_authorized,
+            iterations=iterations,
+            cold_lane=cold_lane,
+        ),
+    )
     evidence = build_root_evidence(
         attempts=attempts,
         cold_lane=cold,
@@ -1090,13 +1373,12 @@ def run_attempt_protocol(
         supervisor=supervisor,
         authorized_attempts=attempts_authorized,
         iterations=iterations,
+        cold_lane_authorized=cold_lane,
         cache=compilation_cache_state(cache_directory),
         verdict=verdict,
         chain_seconds=time.perf_counter() - chain_started,
     )
-    published = publish_root(staging_root, output_root, evidence)
-    validate_root_artifact(published)
-    return published
+    return publish_root(staging_root, output_root, evidence)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1162,6 +1444,8 @@ __all__ = (
     "ATTEMPT_TIMEOUT_SECONDS",
     "COLD_LANE_DIRECTORY",
     "COMPILATION_CACHE_ENVIRONMENT_VARIABLE",
+    "CONFORMANCE_BOUNDED_SMOKE",
+    "CONFORMANCE_PREREGISTERED",
     "EVIDENCE_FILENAME",
     "GPU_ATTEMPT_SCHEMA_VERSION",
     "GPU_REQUIRED_ENVIRONMENT",
@@ -1172,6 +1456,8 @@ __all__ = (
     "PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES",
     "PREREGISTERED_ATTEMPTS",
     "PROJECTED_ROUTE",
+    "REFUSAL_FILENAME",
+    "REFUSAL_SCHEMA_VERSION",
     "VERDICT_CLAIM_DISCHARGED",
     "VERDICT_GATE_REFUSED_PREFIX",
     "VERDICT_NO_LATCH",
@@ -1180,6 +1466,7 @@ __all__ = (
     "ProjectedRootError",
     "attempt_engine_wall_seconds",
     "attempt_invocation",
+    "attempt_protocol_conformance",
     "bind_gpu_backend",
     "build_root_evidence",
     "compilation_cache_state",
@@ -1187,6 +1474,7 @@ __all__ = (
     "derive_verdict",
     "gpu_runtime_identity",
     "main",
+    "preflight_external_resources",
     "publish_root",
     "publish_source_snapshot",
     "run_attempt",
@@ -1196,6 +1484,7 @@ __all__ = (
     "supervisor_payload",
     "validate_root_artifact",
     "verdict_of_gate",
+    "write_root_receipt",
 )
 
 
