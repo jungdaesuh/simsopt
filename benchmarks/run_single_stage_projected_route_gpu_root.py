@@ -58,6 +58,7 @@ import jaxlib
 import numpy as np
 import simsoptpp
 from simsopt_jax.geo.optimizers.projected_lbfgs import (
+    ProjectedLbfgsOptions,
     ProjectedLbfgsRun,
     ProjectedLbfgsStatus,
     run_projected_lbfgs,
@@ -79,6 +80,7 @@ from benchmarks.rehearse_single_stage_projected_route_cpu import (
     bind_problem_identity,
     build_endpoint_ledger,
     certify_endpoint_agreement,
+    collapse_proximity_margin,
     gate_endpoint_ledger,
     iteration_payload,
     json_scalar,
@@ -295,7 +297,9 @@ class _gate:
         raise GateRefusal(self.name, value) from value
 
 
-def _solve_payload(run: ProjectedLbfgsRun) -> dict[str, JsonValue]:
+def _solve_payload(
+    run: ProjectedLbfgsRun, options: ProjectedLbfgsOptions
+) -> dict[str, JsonValue]:
     """Every host-side scalar the solve produced, in the rehearsal's shape."""
 
     objectives = [record.objective for record in run.iterations]
@@ -320,6 +324,9 @@ def _solve_payload(run: ProjectedLbfgsRun) -> dict[str, JsonValue]:
         ),
         "maximum_feasibility_inf": json_scalar(
             max(feasibilities, default=float("nan"))
+        ),
+        "collapse_proximity_margin": json_scalar(
+            collapse_proximity_margin(run, options)
         ),
         "rows": [iteration_payload(record) for record in run.iterations],
     }
@@ -444,7 +451,7 @@ def run_attempt(
             "after": cache_after,
             "warm": bool(cache_at_entry["entry_count"] > 0),
         },
-        "solve": _solve_payload(run),
+        "solve": _solve_payload(run, options),
         "endpoint_agreement": endpoint,
         "endpoint_ledger": ledger,
         "timing_seconds": {

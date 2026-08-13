@@ -552,6 +552,38 @@ def iteration_payload(record: ProjectedLbfgsIteration) -> dict[str, JsonValue]:
     }
 
 
+def collapse_proximity_margin(
+    run: ProjectedLbfgsRun, options: ProjectedLbfgsOptions
+) -> float:
+    """The run's smallest recorded step scale, in units of the line search floor.
+
+    Backtracking on a secant direction stops below ``minimum_step_scale``, so
+    the smallest scale a run ever recorded says how close it came to that end.
+    One caveat bounds the reading: a MODEL direction backtracks only to
+    ``model_step_rescue_scale`` before the secant rescue takes the iteration
+    over, and when that rescue also places nothing the row keeps the model
+    arm's scale, four orders above the floor.  Measured on the banked arms:
+    10.8x and 2.70x on the two 5090 latches, 67x and 4.75x on the two A100
+    latches, and 0.95x on the A100 arm that collapsed -- the only one below
+    one, and the collapse itself.  Those four latches span 2.70x to 67x, so any
+    threshold drawn above unity already excludes one of them; unity is the only
+    separation the evidence carries.  On a collapsed run the terminal row
+    carries the scale the search gave up at rather than one it placed, which is
+    exactly why that run's margin falls below one.
+
+    This is REPORTED and never acted on.  Every input is already in the
+    iteration rows at zero marginal cost, so emitting it changes no iterate; a
+    refresh or floor policy driven by it would re-open certification, and the
+    measured evidence says such a policy spends wall without buying latch
+    probability.  A run that recorded no iteration has no margin and says so.
+    """
+
+    scales = [record.step_scale for record in run.iterations]
+    if not scales:
+        return float("nan")
+    return min(scales) / options.minimum_step_scale
+
+
 def _physics_leaves(record: object, prefix: str) -> dict[str, float]:
     """Flatten one registered evaluation dataclass into named host scalars."""
 
@@ -800,6 +832,9 @@ def build_rehearsal_evidence(
                     (record.feasibility_inf for record in run.iterations),
                     default=float("nan"),
                 )
+            ),
+            "collapse_proximity_margin": json_scalar(
+                collapse_proximity_margin(run, options)
             ),
             "rows": [iteration_payload(record) for record in run.iterations],
         },
@@ -1153,6 +1188,7 @@ __all__ = (
     "build_endpoint_ledger",
     "build_rehearsal_evidence",
     "certify_endpoint_agreement",
+    "collapse_proximity_margin",
     "gate_endpoint_ledger",
     "iteration_payload",
     "json_scalar",
