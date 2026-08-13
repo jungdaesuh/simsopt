@@ -136,10 +136,13 @@ def test_the_lowering_pre_gate_record_is_the_one_its_producer_writes(
     already pays for once, so the binding lives here: the record a real
     rehearsal published, against the frozen shapes and the frozen kernel list.
 
-    The SIZES are deliberately not frozen anywhere: the same six kernels lower
-    to totals that differ by thousands of bytes between two CPU processes and
-    again on the 5090, so a byte count would be a false reject waiting to
-    happen.
+    The SIZES are deliberately not frozen anywhere, and the reason is not the
+    one this docstring used to give: three independent CPU processes at one
+    commit lower these six kernels to 65 204 569 bytes, to the byte.  What moves
+    is the COMMIT -- 65 207 733 one commit earlier with the engine file
+    byte-identical, 65 200 869 on the 5090 -- so the total is a function of the
+    tree rather than of the process, and a frozen byte count would be a false
+    reject waiting on the next edit to any manifested module.
     """
 
     lowering = _evidence(published_rehearsal)["lowering_pre_gate"]
