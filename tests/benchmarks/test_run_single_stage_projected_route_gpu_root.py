@@ -28,6 +28,7 @@ from types import SimpleNamespace
 
 import benchmarks.rehearse_single_stage_projected_route_cpu as rehearsal
 import benchmarks.run_single_stage_projected_route_gpu_root as launcher
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -54,7 +55,16 @@ REPOSITORY = Path(__file__).resolve().parents[2]
 
 
 def _off_tmpfs_base() -> Path:
-    """The first candidate directory on this box that is not a RAM filesystem."""
+    """The first candidate directory on this box that takes the suite's writes.
+
+    Selected by the launcher's OWN probe rather than by a type check of its
+    own: a relative ``TMPDIR`` resolves against pytest's rootdir, which is this
+    frozen repository, and a ``/var/tmp`` that is off tmpfs but read-only or
+    quota-exhausted passes a filesystem-type check and then fails at ``mkdir``
+    as an unhandled ``OSError`` mid-suite.  ``probe_writable_storage`` refuses a
+    non-absolute path, refuses a RAM filesystem and then WRITES A BYTE, which is
+    the half of ruling 9 the EDQUOT lesson calls binding.
+    """
 
     declared = os.environ.get("TMPDIR", "")
     candidates = [
@@ -63,13 +73,12 @@ def _off_tmpfs_base() -> Path:
         Path.home() / ".cache",
     ]
     for candidate in candidates:
-        if not candidate.is_dir():
+        try:
+            launcher.probe_writable_storage(candidate, role="suite temporary")
+        except launcher.ProjectedRootError:
             continue
-        if launcher.filesystem_type(candidate) not in (
-            launcher.REFUSED_STORAGE_FILESYSTEM_TYPES
-        ):
-            return candidate
-    raise RuntimeError(f"no candidate directory off tmpfs among {candidates}")
+        return candidate
+    raise RuntimeError(f"no candidate directory the suite may write to among {candidates}")
 
 
 @pytest.fixture(scope="session")
@@ -336,6 +345,64 @@ def _gpu_memory() -> dict:
     }
 
 
+def _execution_sources() -> dict:
+    """The custody block ``bind_execution_sources`` publishes, from the manifest.
+
+    The fixture used to publish ``{"bound_modules": []}`` -- a receipt asserting
+    that ZERO source modules executed -- against a producer that publishes four
+    keys and 297 bound modules, and the suite's only coverage of the field was
+    its deletion, which the outer key set already caught.  That is how a nulled
+    ``execution_sources`` shipped inside the remediation that named it.  Built
+    here from the campaign's own manifest and the launcher's own list of the
+    modules the chain runs through, so it is derived rather than transcribed.
+    """
+
+    manifest, entries = rehearsal.load_execution_source_manifest(REPOSITORY)
+    return {
+        "manifest": manifest,
+        "bound_modules": [
+            {
+                "module": path.replace("/", ".").removesuffix(".py"),
+                "relative_path": path,
+                "sha256": entries[path]["sha256"],
+                "size_bytes": entries[path]["size_bytes"],
+            }
+            for path in sorted(launcher.CHAIN_EXECUTION_SOURCE_PATHS)
+        ],
+        "unmanifested_repository_modules": [],
+        "interpreter_installation_modules": {"count": 0, "roots": []},
+    }
+
+
+def _problem_identity() -> dict:
+    """The identity binding ``bind_problem_identity`` publishes, whole.
+
+    Derived through the producer's own owner at the campaign's reference
+    observables, so the fixture is a document the child can actually write.
+    """
+
+    return rehearsal.problem_identity_evidence(
+        dict(rehearsal.CPU_BOOTSTRAP_OBSERVABLES),
+        problem_sha256="0" * 64,
+        bootstrap_sha256="1" * 64,
+    )
+
+
+def _lowering_pre_gate(iterations: int) -> dict:
+    """The whole pre-gate record ``measure_lowering_pre_gate`` publishes."""
+
+    return {
+        "rehearsal_iterations": iterations,
+        "certified_iterations": rehearsal.CERTIFIED_MAXIMUM_ITERATIONS,
+        "budget_independent": True,
+        "kernels": [
+            {"name": "projected_lbfgs_step", "ir_bytes": 4096, "while_operations": 1},
+            {"name": "projected_lbfgs_loop", "ir_bytes": 8192, "while_operations": 2},
+        ],
+        "total_ir_bytes": 12288,
+    }
+
+
 def _attempt_evidence(
     *,
     index: int,
@@ -354,9 +421,9 @@ def _attempt_evidence(
             launcher.COMPILATION_CACHE_ENVIRONMENT_VARIABLE: "/cache",
         },
         "runtime_identity": _runtime_identity(),
-        "execution_sources": {"bound_modules": []},
-        "problem_identity": {"bound": True, "sha_is_binding": False},
-        "lowering_pre_gate": {"budget_independent": True},
+        "execution_sources": _execution_sources(),
+        "problem_identity": _problem_identity(),
+        "lowering_pre_gate": _lowering_pre_gate(iterations),
         "options": _options_payload(iterations),
         "certified_options_delta": _options_delta(iterations),
         "compilation_cache": _attempt_cache(warm=True),
@@ -924,15 +991,12 @@ def _synthetic_ledger(*, gated: bool, **overrides: float) -> dict:
     rows = _ledger(**overrides)
     ledger = {
         **rows,
-        "relative_difference": {
-            name: (
-                abs(rows["terminal"][name] - rows["native"][name])
-                / abs(rows["native"][name])
-                if rows["native"][name] != 0.0
-                else None
-            )
-            for name in sorted(rows["terminal"])
-        },
+        # From the producer's own owner: the column is now RE-DERIVED at
+        # re-validation, so a second spelling here would be a twin that drifts
+        # into refusing every honest receipt.
+        "relative_difference": rehearsal.endpoint_relative_differences(
+            rows["terminal"], rows["native"]
+        ),
         "native_state_relative_path": rehearsal.NATIVE_ENDPOINT_STATE_PATH.name,
         "native_state_sha256": rehearsal.NATIVE_ENDPOINT_STATE_FILE_SHA256,
         "native_state_content_sha256": (
@@ -1272,10 +1336,7 @@ def test_a_discharged_root_whose_physics_gate_failed_is_refused(
     physics.
     """
 
-    failed = _synthetic_ledger(gated=False)
-    failed["terminal"] = {**failed["terminal"], "raw.non_qs": 3.6e-4 * 1.01}
-    failed["gated_at_this_budget"] = True
-    failed["pinned_term_gate"] = rehearsal.gate_endpoint_ledger(failed)
+    failed = _synthetic_ledger(gated=True, **{"raw.non_qs": 3.6e-4 * 1.01})
     assert failed["pinned_term_gate"]["passed"] is False
     with pytest.raises(launcher.ProjectedRootError, match="failed pinned-term gate"):
         _publish_synthetic_root(
@@ -1433,6 +1494,418 @@ def test_a_hollow_custody_block_cannot_pass_for_a_published_one(
         _refuse_published(root, evidence, match="incomplete|not a document")
 
 
+# ------------------------------------------------- the round-4 forged receipts
+#
+# Six receipts were published through the REAL ``publish_root`` by the round-4
+# adversarial review and re-validated clean from their sealed bytes, four of
+# them as ``CLAIM_DISCHARGED``.  Each is re-published here, by the scenario
+# letter it carried in that review, and each must now be refused before the
+# seal.  They are kept as named tests rather than folded into the tables above
+# because a forgery that once worked is the only evidence that a fix works.
+
+
+def test_round4_forgery_i_hollowed_custody_blocks_are_refused(tmp_path: Path) -> None:
+    """Scenario I: the three blocks below the frozen floor, reduced to nothing.
+
+    ``execution_sources`` to ``{}``, ``problem_identity`` to the two keys the
+    validator read, ``lowering_pre_gate`` to the one -- on the discharging
+    attempt AND on the cold lane.  Published and re-validated clean as
+    ``CLAIM_DISCHARGED``: the shape tree stopped at the blocks it enumerated,
+    and these three were not among them.
+    """
+
+    def hollow(evidence: dict) -> None:
+        for record in (evidence["attempts"][0], evidence["cold_lane"]):
+            record["evidence"]["execution_sources"] = {}
+            record["evidence"]["problem_identity"] = {
+                "bound": True,
+                "sha_is_binding": False,
+            }
+            record["evidence"]["lowering_pre_gate"] = {"budget_independent": True}
+
+    root, evidence = _mutated_root(tmp_path, "hollow_custody", hollow)
+    _refuse_published(root, evidence, match="execution_sources is incomplete")
+
+
+def test_round4_forgery_i2_a_null_execution_sources_block_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Scenario I2: ``execution_sources: null`` on the discharging attempt.
+
+    The one key of ``ATTEMPT_EVIDENCE_REQUIRED_KEYS`` that no code in the module
+    read.  ``null``, ``{}``, ``"a string"`` and ``{"bound_modules": []}`` all
+    sealed as ``CLAIM_DISCHARGED`` and re-validated clean, on both lanes, so the
+    receipt asserted nothing at all about which bytes executed.
+    """
+
+    for name, value in (
+        ("null", None),
+        ("empty", {}),
+        ("string", "a string"),
+        ("no_modules", {"bound_modules": []}),
+    ):
+
+        def forge(evidence: dict, value: object = value) -> None:
+            evidence["attempts"][0]["evidence"]["execution_sources"] = value
+
+        root, evidence = _mutated_root(tmp_path, f"execution_sources_{name}", forge)
+        _refuse_published(
+            root, evidence, match="execution_sources is (not a document|incomplete)"
+        )
+
+    def other_repository(evidence: dict) -> None:
+        sources = evidence["attempts"][0]["evidence"]["execution_sources"]
+        sources["bound_modules"] = [
+            {
+                "module": "somewhere.else",
+                "relative_path": "src/simsopt_jax/geo/optimizers/projected_lbfgs.py",
+                "sha256": "0" * 64,
+                "size_bytes": 1,
+            }
+        ]
+
+    root, evidence = _mutated_root(tmp_path, "other_repository", other_repository)
+    _refuse_published(root, evidence, match="bytes the manifest does not describe")
+
+    def missing_engine(evidence: dict) -> None:
+        sources = evidence["attempts"][0]["evidence"]["execution_sources"]
+        sources["bound_modules"] = [
+            module
+            for module in sources["bound_modules"]
+            if not module["relative_path"].startswith("src/")
+        ]
+
+    root, evidence = _mutated_root(tmp_path, "missing_engine", missing_engine)
+    _refuse_published(root, evidence, match="modules the certified chain runs through")
+
+
+def test_round4_forgery_h_a_nulled_leaf_is_refused(tmp_path: Path) -> None:
+    """Scenario H: every leaf the validator did not read, set to null.
+
+    The shape tree refused a non-mapping where a block was declared, which is
+    what closed the round-3 finding, and then skipped every leaf.  A
+    ``CLAIM_DISCHARGED`` receipt whose cache accounting was three nulls, whose
+    device inventory was null and whose telemetry was entirely null published
+    and re-validated clean -- "missing its cache accounting and telemetry" in
+    any sense a reader cares about.
+    """
+
+    def null_runtime_identity(evidence: dict) -> None:
+        identity = evidence["supervisor"]["runtime_identity"]
+        evidence["supervisor"]["runtime_identity"] = dict.fromkeys(identity)
+
+    def null_cache_accounting(evidence: dict) -> None:
+        cache = evidence["compilation_cache"]
+        evidence["compilation_cache"] = dict.fromkeys(cache)
+
+    def null_chain_wall(evidence: dict) -> None:
+        evidence["timing_seconds"]["chain_wall"] = None
+
+    def null_snapshot_digest(evidence: dict) -> None:
+        evidence["source_snapshot"]["manifest_sha256"] = None
+
+    def null_worktree(evidence: dict) -> None:
+        worktree = evidence["source_snapshot"]["worktree"]
+        evidence["source_snapshot"]["worktree"] = dict.fromkeys(worktree)
+
+    def null_probe_identity(evidence: dict) -> None:
+        for probe in evidence["supervisor"]["preflight"]["storage"]:
+            probe["directory"] = None
+            probe["resolved_directory"] = None
+
+    def null_device_inventory(evidence: dict) -> None:
+        evidence["supervisor"]["preflight"]["visible_gpu_uuids"] = None
+
+    def null_telemetry(evidence: dict) -> None:
+        memory = evidence["attempts"][0]["gpu_memory"]
+        evidence["attempts"][0]["gpu_memory"] = {
+            **dict.fromkeys(memory),
+            "device_uuid": launcher.GPU_UUID,
+        }
+
+    def null_attempt_cache(evidence: dict) -> None:
+        cache = evidence["attempts"][0]["evidence"]["compilation_cache"]
+        for state in ("at_entry", "before_engine", "after"):
+            cache[state] = dict.fromkeys(cache[state])
+
+    def null_solve_status(evidence: dict) -> None:
+        evidence["attempts"][0]["evidence"]["solve"]["status_name"] = None
+
+    def null_argv(evidence: dict) -> None:
+        evidence["attempts"][0]["argv_sha256"] = None
+
+    for name, mutate in (
+        ("runtime_identity", null_runtime_identity),
+        ("cache_accounting", null_cache_accounting),
+        ("chain_wall", null_chain_wall),
+        ("snapshot_digest", null_snapshot_digest),
+        ("worktree", null_worktree),
+        ("probe_identity", null_probe_identity),
+        ("device_inventory", null_device_inventory),
+        ("telemetry", null_telemetry),
+        ("attempt_cache", null_attempt_cache),
+        ("solve_status", null_solve_status),
+        ("argv", null_argv),
+    ):
+        root, evidence = _mutated_root(tmp_path, f"null_{name}", mutate)
+        _refuse_published(root, evidence, match="is null where the receipt publishes")
+
+
+def test_round4_forgery_j_a_wrongly_typed_leaf_is_refused(tmp_path: Path) -> None:
+    """Scenario J: published scalars of the wrong type, accepted as they were.
+
+    ``chain_wall: "not a number"``, ``entry_count: true``, ``total_bytes:
+    "1e9"``, ``sample_count: false``, ``iterations_run: "seven"`` and
+    ``attempt_wall: "-inf"`` all published and re-validated clean.  A leaf now
+    states what its producer writes there, and ``bool`` is excluded from the
+    number leaves explicitly because it is a subclass of ``int``.
+    """
+
+    def string_chain_wall(evidence: dict) -> None:
+        evidence["timing_seconds"]["chain_wall"] = "not a number"
+
+    def boolean_entry_count(evidence: dict) -> None:
+        evidence["compilation_cache"]["entry_count"] = True
+
+    def string_total_bytes(evidence: dict) -> None:
+        evidence["compilation_cache"]["total_bytes"] = "1e9"
+
+    def boolean_sample_count(evidence: dict) -> None:
+        evidence["attempts"][0]["gpu_memory"]["sample_count"] = False
+
+    def string_iterations_run(evidence: dict) -> None:
+        evidence["attempts"][0]["evidence"]["solve"]["iterations_run"] = "seven"
+
+    def string_attempt_wall(evidence: dict) -> None:
+        timing = evidence["attempts"][0]["evidence"]["timing_seconds"]
+        timing["attempt_wall"] = "-inf"
+
+    def mapping_for_a_list(evidence: dict) -> None:
+        evidence["supervisor"]["preflight"]["storage"] = {"role": "temporary"}
+
+    for name, mutate in (
+        ("chain_wall", string_chain_wall),
+        ("entry_count", boolean_entry_count),
+        ("total_bytes", string_total_bytes),
+        ("sample_count", boolean_sample_count),
+        ("iterations_run", string_iterations_run),
+        ("attempt_wall", string_attempt_wall),
+        ("storage", mapping_for_a_list),
+    ):
+        root, evidence = _mutated_root(tmp_path, f"typed_{name}", mutate)
+        _refuse_published(root, evidence, match="is not a")
+
+
+def test_round4_forgery_k_a_cold_lane_aliased_onto_an_attempt_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Scenario K: ``PREREGISTERED`` minted with no cold lane in the tree.
+
+    After the lane was taken out of the verdict, ``cold_lane_authorized``
+    became its ONLY channel to the conformance label and therefore to the
+    headline verdict -- and the only check on it was that a record existed.  A
+    lane whose ``artifact_relative_path`` pointed at ``attempts/attempt-1`` was
+    validated against attempt 1's own sealed array and passed, so a root with no
+    ``cold-lane`` directory at all published ``CLAIM_DISCHARGED``.
+    """
+
+    root = tmp_path / "aliased"
+    staging = root / "staging"
+    attempt = _synthetic_attempt(
+        staging / "attempts" / "attempt-1",
+        engine_wall=1.0,
+        terminal_objective=4.48e-8,
+        maximum_feasibility_inf=1.0e-14,
+    )
+    aliased = _synthetic_attempt(
+        staging / "unpublished-lane",
+        engine_wall=1.0,
+        terminal_objective=4.48e-8,
+        maximum_feasibility_inf=1.0e-14,
+        outcome="COMPLETED_WITHOUT_LATCH",
+        index=0,
+        relative_path=f"{launcher.ATTEMPTS_DIRECTORY}/attempt-1",
+        warm=False,
+    )
+    aliased["timed_against_bar"] = False
+    evidence = _root_evidence(
+        verdict=launcher.VERDICT_CLAIM_DISCHARGED,
+        attempts=[attempt],
+        cold_lane=aliased,
+    )
+    _refuse_published(root, evidence, match="directory the protocol runs it in")
+
+    # The same fact from the other side: an honestly named lane the tree does
+    # not carry, and a tree that carries a lane the receipt does not claim.
+    absent = tmp_path / "absent"
+    staging = absent / "staging"
+    attempt = _synthetic_attempt(
+        staging / "attempts" / "attempt-1",
+        engine_wall=1.0,
+        terminal_objective=4.48e-8,
+        maximum_feasibility_inf=1.0e-14,
+    )
+    unpublished = _synthetic_attempt(
+        staging / "unpublished-lane-2",
+        engine_wall=1.0,
+        terminal_objective=4.48e-8,
+        maximum_feasibility_inf=1.0e-14,
+        outcome="COMPLETED_WITHOUT_LATCH",
+        index=0,
+        relative_path=launcher.COLD_LANE_DIRECTORY,
+        warm=False,
+    )
+    unpublished["timed_against_bar"] = False
+    evidence = _root_evidence(
+        verdict=launcher.VERDICT_CLAIM_DISCHARGED,
+        attempts=[attempt],
+        cold_lane=unpublished,
+    )
+    _refuse_published(absent, evidence, match="carries no 'cold-lane' directory")
+
+    unclaimed = tmp_path / "unclaimed"
+    staging = unclaimed / "staging"
+    attempt = _synthetic_attempt(
+        staging / "attempts" / "attempt-1",
+        engine_wall=1.0,
+        terminal_objective=4.48e-8,
+        maximum_feasibility_inf=1.0e-14,
+    )
+    (staging / launcher.COLD_LANE_DIRECTORY).mkdir(parents=True)
+    (staging / launcher.COLD_LANE_DIRECTORY / "stray.json").write_bytes(b"{}\n")
+    evidence = _root_evidence(
+        verdict=launcher.VERDICT_QUALITY_ONLY, attempts=[attempt], cold_lane=None
+    )
+    _refuse_published(unclaimed, evidence, match="carries 'cold-lane' directory")
+
+
+def test_round4_forgery_m_a_restated_relative_difference_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Scenario M: the distance column replaced with zeros beside honest sides.
+
+    Both sides of the ledger are re-gated and the column that reports the
+    distance between them was checked for its key set and never for its
+    arithmetic, so a published receipt could report perfect agreement on every
+    term while carrying the numbers that disagree.
+    """
+
+    def restate_column(evidence: dict) -> None:
+        ledger = evidence["attempts"][0]["evidence"]["endpoint_ledger"]
+        ledger["terminal"] = {
+            **ledger["terminal"],
+            "observable.iota": _scaled("observable.iota", 1.0 + 1.0e-9),
+        }
+        ledger["pinned_term_gate"] = rehearsal.gate_endpoint_ledger(ledger)
+        ledger["relative_difference"] = dict.fromkeys(
+            ledger["relative_difference"], 0.0
+        )
+
+    root, evidence = _mutated_root(tmp_path, "restated_column", restate_column)
+    _refuse_published(root, evidence, match="relative differences are not the ones")
+
+
+def _root_with_cold_lane(
+    root: Path,
+    *,
+    outcome: str,
+    ledger: dict | None,
+    maximum_feasibility_inf: float | None,
+) -> Path:
+    """One healthy timed latch beside a cold lane the caller shapes."""
+
+    staging = root / "staging"
+    attempt = _synthetic_attempt(
+        staging / "attempts" / "attempt-1",
+        engine_wall=1.0,
+        terminal_objective=4.48e-8,
+        maximum_feasibility_inf=1.0e-14,
+    )
+    cold = _synthetic_attempt(
+        staging / launcher.COLD_LANE_DIRECTORY,
+        engine_wall=1.0,
+        terminal_objective=4.48e-8,
+        maximum_feasibility_inf=maximum_feasibility_inf,
+        ledger=ledger,
+        outcome=outcome,
+        index=0,
+        relative_path=launcher.COLD_LANE_DIRECTORY,
+        warm=False,
+    )
+    cold["timed_against_bar"] = False
+    return launcher.publish_root(
+        staging,
+        root / "final",
+        _root_evidence(
+            verdict=launcher.VERDICT_CLAIM_DISCHARGED,
+            attempts=[attempt],
+            cold_lane=cold,
+        ),
+    )
+
+
+def test_an_unlucky_cold_lane_draw_cannot_refuse_the_whole_publication(
+    tmp_path: Path,
+) -> None:
+    """The lane decides nothing, INCLUDING whether the artifact exists.
+
+    Ruling 13 took the lane out of the conformance label and out of
+    ``derive_verdict`` and left it running the full discharging-attempt
+    validation inside ``publish_root``.  Executed, a cold lane that latched and
+    missed one pinned band -- and a cold lane that merely MISSED with one
+    infeasible recorded iterate, the ordinary one-in-five outcome the
+    pre-registered N exists to absorb -- refused the entire root after the lane
+    and all three timed attempts had been spent: a refusal record, no artifact
+    and no verdict at all.  That is worse than the ``QUALITY_ONLY`` cap ruling
+    13 reversed ruling 8 to avoid.
+    """
+
+    missed_band = _synthetic_ledger(
+        gated=True, **{"observable.iota": _scaled("observable.iota", 1.0 + 1.0e-3)}
+    )
+    assert not missed_band["pinned_term_gate"]["passed"]
+    published = _root_with_cold_lane(
+        tmp_path / "missed_band",
+        outcome="LATCHED",
+        ledger=missed_band,
+        maximum_feasibility_inf=1.0e-14,
+    )
+    evidence = launcher.validate_root_artifact(published)
+    assert evidence["verdict"] == launcher.VERDICT_CLAIM_DISCHARGED
+    assert evidence["attempt_protocol"]["conformance"] == (
+        launcher.CONFORMANCE_PREREGISTERED
+    )
+    assert not evidence["cold_lane"]["evidence"]["endpoint_ledger"][
+        "pinned_term_gate"
+    ]["passed"]
+
+    published = _root_with_cold_lane(
+        tmp_path / "infeasible_iterate",
+        outcome="COMPLETED_WITHOUT_LATCH",
+        ledger=None,
+        maximum_feasibility_inf=1.0e-9,
+    )
+    evidence = launcher.validate_root_artifact(published)
+    assert evidence["verdict"] == launcher.VERDICT_CLAIM_DISCHARGED
+    assert evidence["cold_lane"]["evidence"]["solve"]["maximum_feasibility_inf"] == (
+        1.0e-9
+    )
+
+    # What the lane still cannot do is lie about what it was.  Shape and
+    # honesty are validated on both lanes; only the claim-bearing gates are not.
+    def cold_ran_on_the_cpu(evidence: dict) -> None:
+        evidence["cold_lane"]["evidence"]["runtime_identity"]["backend"] = "cpu"
+
+    root, evidence = _mutated_root(tmp_path, "cold_cpu", cold_ran_on_the_cpu)
+    _refuse_published(root, evidence, match="not the 'gpu' the wall is claimed on")
+
+    def cold_hollowed_custody(evidence: dict) -> None:
+        evidence["cold_lane"]["evidence"]["execution_sources"] = None
+
+    root, evidence = _mutated_root(tmp_path, "cold_custody", cold_hollowed_custody)
+    _refuse_published(root, evidence, match="execution_sources is not a document")
+
+
 def test_a_receipt_may_not_supply_the_reference_its_physics_gate_is_judged_against(
     tmp_path: Path,
 ) -> None:
@@ -1471,6 +1944,11 @@ def test_a_receipt_may_not_supply_the_reference_its_physics_gate_is_judged_again
             **ledger["native"],
             "observable.iota": ledger["native"]["observable.iota"] * (1.0 + 1.0e-5),
         }
+        # Internally coherent, so that what refuses it is the reference and not
+        # the arithmetic of its own published columns.
+        ledger["relative_difference"] = rehearsal.endpoint_relative_differences(
+            ledger["terminal"], ledger["native"]
+        )
         ledger["pinned_term_gate"] = rehearsal.gate_endpoint_ledger(ledger)
 
     root, evidence = _mutated_root(tmp_path, "drifted_native", drifted_native)
@@ -1630,20 +2108,45 @@ def test_revalidation_asserts_the_precision_it_re_derives_in(
         launcher.validate_root_artifact(published)
 
 
-def test_the_frozen_nested_shapes_are_the_ones_the_producers_write() -> None:
+def test_the_frozen_nested_shapes_are_the_ones_the_producers_write(
+    off_tmpfs_path: Path,
+) -> None:
     """Every nested shape is bound to the function that writes it, not a fixture.
 
     A frozen key set asserted against the suite's own helper is a twin, and
     twins drift -- which is exactly how the fixture publishing ``preflight: {}``
-    came to certify that a discharged root needs no preflight at all.
+    came to certify that a discharged root needs no preflight at all, and how a
+    fixture publishing ``{"bound_modules": []}`` came to certify that a
+    discharged root need not say which bytes executed.
+
+    Everything a CPU process can produce is bound BY EXECUTION here, including
+    the four that a previous revision described as "the three that are only
+    reachable with a device": ``gpu_runtime_identity`` runs on any backend,
+    ``probe_writable_storage`` and ``configure_persistent_compilation_cache``
+    need no device at all, and ``_gpu_memory_payload`` normalizes an
+    unobserved child without one.  The single genuinely device-gated producer
+    is the preflight, which queries the pinned GPU's inventory.
     """
 
     assert frozenset(launcher.CACHE_STATE_SHAPE) == frozenset(
         launcher.compilation_cache_state(REPOSITORY / "does-not-exist")
     )
-    assert frozenset(launcher.CACHE_CONFIGURATION_SHAPE) == frozenset(
-        _attempt_cache(warm=False)["configuration"]
-    )
+    cache_directory = jax.config.jax_compilation_cache_dir
+    minimum_entry = jax.config.jax_persistent_cache_min_entry_size_bytes
+    minimum_compile = jax.config.jax_persistent_cache_min_compile_time_secs
+    try:
+        configuration = launcher.configure_persistent_compilation_cache(
+            off_tmpfs_path / "cache"
+        )
+    finally:
+        jax.config.update("jax_compilation_cache_dir", cache_directory)
+        jax.config.update(
+            "jax_persistent_cache_min_entry_size_bytes", minimum_entry
+        )
+        jax.config.update(
+            "jax_persistent_cache_min_compile_time_secs", minimum_compile
+        )
+    assert frozenset(launcher.CACHE_CONFIGURATION_SHAPE) == frozenset(configuration)
     assert frozenset(launcher.ROOT_CLAIM_SHAPE) == frozenset(
         launcher.build_root_evidence(
             attempts=[],
@@ -1669,14 +2172,128 @@ def test_the_frozen_nested_shapes_are_the_ones_the_producers_write() -> None:
     assert frozenset(launcher.COLD_LANE_ANOMALY_SHAPE) == frozenset(
         launcher.cold_lane_anomaly(_attempt("TIMEOUT", index=0))
     )
-    # The three that are only reachable with a device stay bound by the shapes
-    # the bounded GPU smoke publishes through, which is what makes the smoke a
-    # producer test rather than a liveness check.
-    assert frozenset(launcher.RUNTIME_IDENTITY_SHAPE) == frozenset(_runtime_identity())
-    assert frozenset(launcher.GPU_MEMORY_SHAPE) == frozenset(_gpu_memory())
-    assert frozenset(launcher.PREFLIGHT_SHAPE) == frozenset(_preflight())
+    assert frozenset(launcher.RUNTIME_IDENTITY_SHAPE) == frozenset(
+        launcher.gpu_runtime_identity()
+    )
+    assert frozenset(launcher.GPU_MEMORY_SHAPE) == frozenset(
+        launcher._gpu_memory_payload(
+            None, gpu_uuid=launcher.GPU_UUID, provider_pid=1, argv=("python",)
+        )
+    )
     assert frozenset(launcher.STORAGE_PROBE_SHAPE) == frozenset(
-        _storage_probe("temporary")
+        launcher.probe_writable_storage(off_tmpfs_path, role="temporary")
+    )
+    execution_sources = rehearsal.bind_execution_sources(REPOSITORY)
+    assert frozenset(launcher.EXECUTION_SOURCES_SHAPE) == frozenset(execution_sources)
+    assert frozenset(launcher.EXECUTION_SOURCE_MANIFEST_SHAPE) == frozenset(
+        execution_sources["manifest"]
+    )
+    assert frozenset(launcher.BOUND_MODULE_SHAPE) == frozenset(
+        execution_sources["bound_modules"][0]
+    )
+    assert frozenset(launcher.INTERPRETER_INSTALLATION_SHAPE) == frozenset(
+        execution_sources["interpreter_installation_modules"]
+    )
+    assert frozenset(launcher.PROBLEM_IDENTITY_SHAPE) == frozenset(
+        rehearsal.problem_identity_evidence(
+            dict(rehearsal.CPU_BOOTSTRAP_OBSERVABLES),
+            problem_sha256="0" * 64,
+            bootstrap_sha256="1" * 64,
+        )
+    )
+    # The one producer that genuinely needs the pinned device: it queries the
+    # GPU inventory.  It stays bound by the shape the bounded GPU smoke
+    # publishes through, which is what makes the smoke a producer test rather
+    # than a liveness check.
+    assert frozenset(launcher.PREFLIGHT_SHAPE) == frozenset(_preflight())
+
+
+def _unshaped_leaves_the_walker_finds() -> dict[str, str]:
+    """Every place a shape admits a mapping or a list without an inner shape."""
+
+    found: dict[str, str] = {}
+
+    def walk(shape: dict, prefix: str) -> None:
+        for name, nested in sorted(shape.items()):
+            path = f"{prefix}.{name}"
+            if isinstance(nested, launcher._Dispatched):
+                found[path] = f"dispatched: {nested.owner}"
+            elif isinstance(nested, launcher._Leaf):
+                if nested in (launcher._LIST, launcher._MAPPING):
+                    found[path] = "unshaped leaf"
+            elif isinstance(nested, tuple):
+                walk(nested[0], f"{path}[]")
+            else:
+                walk(nested, path)
+
+    for root, shape in launcher.RECEIPT_SHAPES.items():
+        walk(shape, root)
+    return found
+
+
+def test_the_shape_tree_covers_its_own_required_key_sets() -> None:
+    """No required key without a shape, and no unshaped block without a reason.
+
+    THIS is the test that had to exist.  Four consecutive review rounds found
+    the same defect one level lower each time -- the top-level names frozen and
+    the blocks unchecked, then the blocks frozen and one required key left with
+    no entry in the parallel map of shapes, so ``execution_sources: null``
+    sealed as ``CLAIM_DISCHARGED`` while the plan said it could not.  The suite
+    could not see it, because a test that enumerates the shapes which EXIST is
+    structurally blind to a shape that is ABSENT.
+
+    So the property asserted here is COVERAGE, not enumeration: every required
+    key set is exactly the key set of its shape (they are derived from it, and
+    this refuses a future revision that reintroduces a second listing), no leaf
+    of any shape is an untyped free pass, and the complete list of places where
+    a mapping or list is admitted without an inner shape is declared in the
+    module WITH ITS REASON and is exactly what a walk of the trees finds.
+    """
+
+    assert launcher.ROOT_EVIDENCE_REQUIRED_KEYS == frozenset(
+        launcher.ROOT_EVIDENCE_SHAPE
+    )
+    assert launcher.ATTEMPT_PROTOCOL_REQUIRED_KEYS == frozenset(
+        launcher.ATTEMPT_PROTOCOL_SHAPE
+    )
+    assert launcher.SUPERVISED_ATTEMPT_REQUIRED_KEYS == frozenset(
+        launcher.SUPERVISED_ATTEMPT_SHAPE
+    )
+    assert launcher.ATTEMPT_EVIDENCE_REQUIRED_KEYS == frozenset(
+        launcher.ATTEMPT_EVIDENCE_SHAPE
+    )
+    assert launcher.REFUSED_ATTEMPT_EVIDENCE_REQUIRED_KEYS == frozenset(
+        launcher.REFUSED_ATTEMPT_EVIDENCE_SHAPE
+    )
+    # Every node of every tree is one of exactly four things, and none of them
+    # is "unchecked".
+    def every_node(shape: dict, prefix: str) -> None:
+        for name, nested in shape.items():
+            path = f"{prefix}.{name}"
+            assert isinstance(
+                nested, (launcher._Leaf, launcher._Dispatched, dict, tuple)
+            ), path
+            if isinstance(nested, tuple):
+                every_node(nested[0], f"{path}[]")
+            elif isinstance(nested, dict):
+                every_node(nested, path)
+
+    for root, shape in launcher.RECEIPT_SHAPES.items():
+        every_node(shape, root)
+    assert _unshaped_leaves_the_walker_finds().keys() == (
+        launcher.UNSHAPED_LEAVES.keys()
+    )
+    assert all(reason.strip() for reason in launcher.UNSHAPED_LEAVES.values())
+    # Both custody blocks the previous revision reached with nothing at all are
+    # now in the tree with a shape of their own.
+    assert launcher.ATTEMPT_EVIDENCE_SHAPE["execution_sources"] == (
+        launcher.EXECUTION_SOURCES_SHAPE
+    )
+    assert launcher.ATTEMPT_EVIDENCE_SHAPE["problem_identity"] == (
+        launcher.PROBLEM_IDENTITY_SHAPE
+    )
+    assert launcher.ATTEMPT_EVIDENCE_SHAPE["lowering_pre_gate"] == (
+        launcher.LOWERING_PRE_GATE_SHAPE
     )
 
 
@@ -1722,7 +2339,9 @@ def test_a_truncated_receipt_cannot_pass_for_a_complete_one(tmp_path: Path) -> N
     )
     evidence = _root_evidence(verdict=launcher.VERDICT_QUALITY_ONLY, attempts=[attempt])
     del evidence["attempt_protocol"]["latch_rate"]
-    with pytest.raises(launcher.ProjectedRootError, match="protocol block is incomplete"):
+    with pytest.raises(
+        launcher.ProjectedRootError, match="attempt_protocol is incomplete"
+    ):
         launcher.publish_root(staging, root / "final", evidence)
 
     root = tmp_path / "attempt"
@@ -2161,6 +2780,10 @@ def test_publication_recomputes_a_gated_ledgers_verdicts_from_its_terms(
     gated = _synthetic_ledger(gated=True)
     assert gated["pinned_term_gate"]["passed"] is True
     gated["terminal"] = {**gated["terminal"], "observable.iota": -0.42 * (1.0 + 1.0e-2)}
+    # The distance column moves with the terms, so what is stale is the GATE.
+    gated["relative_difference"] = rehearsal.endpoint_relative_differences(
+        gated["terminal"], gated["native"]
+    )
     with pytest.raises(launcher.ProjectedRootError, match="not the one its ledger"):
         _publish_synthetic_root(
             tmp_path,

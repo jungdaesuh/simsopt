@@ -51,6 +51,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Self
 
@@ -77,6 +78,7 @@ from benchmarks.process_gpu_monitor import (
 from benchmarks.rehearse_single_stage_projected_route_cpu import (
     CERTIFIED_MAXIMUM_ITERATIONS,
     CERTIFIED_ROUTE_OPTIONS,
+    CPU_BOOTSTRAP_OBSERVABLES,
     INFORMATIONAL_ENDPOINT_OBSERVABLES,
     NATIVE_ENDPOINT_STATE_CONTENT_SHA256,
     NATIVE_ENDPOINT_STATE_FILE_SHA256,
@@ -86,6 +88,7 @@ from benchmarks.rehearse_single_stage_projected_route_cpu import (
     PINNED_ENDPOINT_QUALITY_TERMS,
     TERMINAL_COORDINATES_FILENAME,
     BoundCase,
+    RehearsalError,
     artifact_manifest_payload,
     bind_execution_sources,
     bind_problem_identity,
@@ -94,12 +97,15 @@ from benchmarks.rehearse_single_stage_projected_route_cpu import (
     certify_native_reference,
     collapse_proximity_margin,
     endpoint_ledger_is_gated,
+    endpoint_relative_differences,
     gate_endpoint_ledger,
     gate_endpoint_ledger_against_frozen_native,
     iteration_payload,
     json_scalar,
+    load_execution_source_manifest,
     load_native_endpoint_state,
     measure_lowering_pre_gate,
+    problem_identity_evidence,
     rehearsal_options,
     rename_noreplace,
     run_latched,
@@ -232,100 +238,63 @@ COLD_LANE_MEASURED_OUTCOMES: Final = frozenset(
     {"LATCHED", "COMPLETED_WITHOUT_LATCH"}
 )
 
-# The receipt's own shape, frozen.  ``validate_root_artifact`` used to index
-# into whatever fields it needed, so a receipt missing its source snapshot, its
-# supervisor block, its preflight, its cache accounting and its telemetry
-# re-validated clean and could not be told from a complete one.  These are the
-# key sets ``build_root_evidence``, ``supervise_attempt`` and ``run_attempt``
-# write; the bounded GPU smoke publishes through all three and re-validates, so
-# a producer that drifts from them fails there rather than at the root.
-ROOT_EVIDENCE_REQUIRED_KEYS: Final = frozenset({
-    "attempt_protocol",
-    "attempts",
-    "claim",
-    "cold_lane",
-    "cold_lane_anomaly",
-    "compilation_cache",
-    "quality_claim",
-    "route",
-    "schema_version",
-    "source_snapshot",
-    "supervisor",
-    "timing_boundary",
-    "timing_seconds",
-    "verdict",
-})
-ATTEMPT_PROTOCOL_REQUIRED_KEYS: Final = frozenset({
-    "attempts_run",
-    "authorized_attempts",
-    "certified_maximum_iterations",
-    "cold_lane_authorized",
-    "conformance",
-    "latch_count",
-    "latch_rate",
-    "maximum_iterations",
-    "preregistered_attempts",
-    "stop_rule",
-})
-SUPERVISED_ATTEMPT_REQUIRED_KEYS: Final = frozenset({
-    "argv_sha256",
-    "artifact_relative_path",
-    "attempt_index",
-    "evidence",
-    "gpu_memory",
-    "outcome",
-    "return_code",
-    "stderr_tail",
-    "stdout_tail",
-    "supervised_seconds",
-    "timed_out",
-})
-ATTEMPT_EVIDENCE_REQUIRED_KEYS: Final = frozenset({
-    "attempt_index",
-    "certified_options_delta",
-    "compilation_cache",
-    "endpoint_agreement",
-    "endpoint_ledger",
-    "environment",
-    "execution_sources",
-    "gate_refused",
-    "lowering_pre_gate",
-    "options",
-    "problem_identity",
-    "quality_claim",
-    "route",
-    "runtime_identity",
-    "schema_version",
-    "solve",
-    "timing_boundary",
-    "timing_seconds",
-})
-REFUSED_ATTEMPT_EVIDENCE_REQUIRED_KEYS: Final = frozenset({
-    "attempt_index",
-    "error",
-    "gate_refused",
-    "route",
-    "schema_version",
-})
+# The receipt's own shape, frozen -- ONE listing, walked recursively.
+#
+# ``validate_root_artifact`` used to index into whatever fields it needed, so a
+# receipt missing its source snapshot, its supervisor block, its preflight, its
+# cache accounting and its telemetry re-validated clean and could not be told
+# from a complete one.  Freezing the top-level names closed that one level deep;
+# freezing every block below them closed it two levels deep; and the round after
+# that found the identical hole one level lower again -- ``execution_sources``,
+# the module-byte custody binding, sat in a required KEY SET with no entry in
+# the parallel map of nested SHAPES, so ``execution_sources: null`` published
+# and re-validated clean as ``CLAIM_DISCHARGED`` beside a plan sentence saying
+# it could not.  Two hand-written enumerations -- "the keys that must be there"
+# and "the blocks that have shapes" -- reproduce that hole once per round, and
+# a suite that enumerates the shapes which EXIST is structurally blind to a
+# shape that is ABSENT.
+#
+# So there is one structure and the key sets are DERIVED from it.  Every value
+# in a shape is a nested shape, an ``_each(...)`` list of them, a TYPED LEAF, or
+# an explicitly ``_dispatched(...)`` node naming the function that validates it.
+# There is no ``_ANY``: a leaf states what the producer writes there, so a
+# receipt whose cache accounting is ``{entry_count: null, total_bytes: null,
+# entries_digest: null}``, or whose ``chain_wall`` is the string ``"not a
+# number"``, is refused by name instead of passing for one that states them.
+# ``UNSHAPED_LEAVES`` is the complete list of places where a mapping or a list
+# is admitted without an inner shape, each with its reason; the suite walks the
+# trees and requires that list to be exactly what it finds, so a block cannot be
+# added without a shape and without saying why.
 
-# ------------------------------------------------------ nested receipt shapes
-#
-# The key sets above are exactly ONE level deep, and a receipt is not whole
-# because its top-level names are all present.  Measured against the previous
-# revision: a ``CLAIM_DISCHARGED`` root whose supervisor block held nothing but
-# ``gpu_uuid`` -- no preflight, no runtime identity, therefore no storage record
-# and no native-reference digests -- published through the real publication path
-# and re-validated clean, as did one with an empty ``source_snapshot``, a null
-# ``compilation_cache``, an empty ``timing_seconds`` and every attempt's
-# ``gpu_memory`` nulled.  Present-but-null was indistinguishable from absent,
-# because the ``frozenset`` check passed and no reader followed.
-#
-# So the shape is frozen RECURSIVELY, from one tree.  A node's keys ARE its
-# required key set; ``_ANY`` is a leaf whose own shape is not frozen here, a
-# nested mapping freezes that block in turn, and ``_each(shape)`` freezes every
-# element of a published list.  One walker (``_validate_document_shape``) reads
-# the whole tree, so there is no second listing to drift.
-_ANY: Final = None
+
+@dataclass(frozen=True, slots=True)
+class _Leaf:
+    """What the producer writes at one leaf of the receipt."""
+
+    description: str
+    types: tuple[type, ...]
+    nullable: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _Dispatched:
+    """A node whose shape is chosen by the named function, not fixed here."""
+
+    owner: str
+
+
+def _leaf(description: str, *types: type, nullable: bool = False) -> _Leaf:
+    return _Leaf(description, types, nullable)
+
+
+_STRING: Final = _leaf("a string", str)
+_STRING_OR_NULL: Final = _leaf("a string or null", str, nullable=True)
+_NUMBER: Final = _leaf("a number", int, float)
+_NUMBER_OR_NULL: Final = _leaf("a number or null", int, float, nullable=True)
+_BOOL: Final = _leaf("a boolean", bool)
+_LIST: Final = _leaf("a list", list)
+_MAPPING: Final = _leaf("a mapping", dict)
+_NULL: Final = _leaf("null", nullable=True)
 
 
 def _each(shape: Mapping[str, object]) -> tuple[Mapping[str, object]]:
@@ -335,170 +304,359 @@ def _each(shape: Mapping[str, object]) -> tuple[Mapping[str, object]]:
 
 
 CACHE_STATE_SHAPE: Final = {
-    "entry_count": _ANY,
-    "entries_digest": _ANY,
-    "total_bytes": _ANY,
+    "entry_count": _NUMBER,
+    "entries_digest": _STRING,
+    "total_bytes": _NUMBER,
 }
 CACHE_CONFIGURATION_SHAPE: Final = {
-    "directory": _ANY,
-    "enabled": _ANY,
-    "min_compile_time_seconds": _ANY,
-    "min_entry_size_bytes": _ANY,
+    "directory": _STRING,
+    "enabled": _BOOL,
+    "min_compile_time_seconds": _NUMBER,
+    "min_entry_size_bytes": _NUMBER,
 }
 RUNTIME_IDENTITY_SHAPE: Final = {
-    "backend": _ANY,
-    "device_count": _ANY,
-    "device_kind": _ANY,
-    "device_platform": _ANY,
-    "jax_version": _ANY,
-    "jaxlib_version": _ANY,
-    "native_extension_path": _ANY,
-    "process_id": _ANY,
-    "python_executable": _ANY,
-    "python_prefix": _ANY,
+    "backend": _STRING,
+    "device_count": _NUMBER,
+    "device_kind": _STRING,
+    "device_platform": _STRING,
+    "jax_version": _STRING,
+    "jaxlib_version": _STRING,
+    "native_extension_path": _STRING,
+    "process_id": _NUMBER,
+    "python_executable": _STRING,
+    "python_prefix": _STRING,
 }
 STORAGE_PROBE_SHAPE: Final = {
-    "advisory_available_bytes": _ANY,
-    "device_id": _ANY,
-    "directory": _ANY,
-    "filesystem_type": _ANY,
-    "one_byte_write": _ANY,
-    "resolved_directory": _ANY,
-    "role": _ANY,
+    "advisory_available_bytes": _NUMBER,
+    "device_id": _NUMBER,
+    "directory": _STRING,
+    "filesystem_type": _STRING,
+    "one_byte_write": _STRING,
+    "resolved_directory": _STRING,
+    "role": _STRING,
 }
 PREFLIGHT_SHAPE: Final = {
-    "gpu_inventory_executable": _ANY,
-    "native_endpoint_state_content_sha256": _ANY,
-    "native_endpoint_state_path": _ANY,
-    "native_endpoint_state_sha256": _ANY,
-    "resolved_temporary_directory": _ANY,
+    "gpu_inventory_executable": _STRING,
+    "native_endpoint_state_content_sha256": _STRING,
+    "native_endpoint_state_path": _STRING,
+    "native_endpoint_state_sha256": _STRING,
+    "resolved_temporary_directory": _STRING,
     "storage": _each(STORAGE_PROBE_SHAPE),
-    "temporary_directory": _ANY,
-    "visible_gpu_uuids": _ANY,
+    "temporary_directory": _STRING,
+    "visible_gpu_uuids": _LIST,
 }
 SUPERVISOR_SHAPE: Final = {
-    "attempt_timeout_seconds": _ANY,
-    "gpu_uuid": _ANY,
-    "gpu_zero_asserted": _ANY,
+    "attempt_timeout_seconds": _NUMBER,
+    "gpu_uuid": _STRING,
+    "gpu_zero_asserted": _BOOL,
     "preflight": PREFLIGHT_SHAPE,
     "runtime_identity": RUNTIME_IDENTITY_SHAPE,
 }
 WORKTREE_IDENTITY_SHAPE: Final = {
-    "git_head": _ANY,
-    "repo_root": _ANY,
-    "tracked_diff_sha256": _ANY,
-    "untracked_bytes_manifest_sha256": _ANY,
+    "git_head": _STRING,
+    "repo_root": _STRING,
+    "tracked_diff_sha256": _STRING,
+    "untracked_bytes_manifest_sha256": _STRING,
 }
 SOURCE_SNAPSHOT_SHAPE: Final = {
-    "entry_count": _ANY,
-    "manifest_sha256": _ANY,
-    "relative_path": _ANY,
+    "entry_count": _NUMBER,
+    "manifest_sha256": _STRING,
+    "relative_path": _STRING,
     "worktree": WORKTREE_IDENTITY_SHAPE,
 }
 ROOT_CLAIM_SHAPE: Final = {
-    "feasibility_tolerance": _ANY,
-    "target_objective": _ANY,
-    "wall_seconds_bar": _ANY,
+    "feasibility_tolerance": _NUMBER,
+    "target_objective": _NUMBER,
+    "wall_seconds_bar": _NUMBER,
 }
-ROOT_TIMING_SHAPE: Final = {"chain_wall": _ANY}
+ROOT_TIMING_SHAPE: Final = {"chain_wall": _NUMBER}
 COLD_LANE_ANOMALY_SHAPE: Final = {
-    "artifact_relative_path": _ANY,
-    "gate_refused": _ANY,
-    "outcome": _ANY,
-    "return_code": _ANY,
-    "supervised_seconds": _ANY,
-    "timed_out": _ANY,
+    "artifact_relative_path": _STRING,
+    "gate_refused": _STRING_OR_NULL,
+    "outcome": _STRING,
+    "return_code": _NUMBER,
+    "supervised_seconds": _NUMBER,
+    "timed_out": _BOOL,
 }
 GPU_MEMORY_SHAPE: Final = {
-    "availability": _ANY,
-    "child_argv_sha256": _ANY,
-    "child_pid": _ANY,
-    "child_start_time_ticks": _ANY,
-    "device_uuid": _ANY,
-    "monitor_scope": _ANY,
-    "parent_pid": _ANY,
-    "peak_used_memory_mib": _ANY,
-    "sample_count": _ANY,
-    "unavailable_reason": _ANY,
+    "availability": _STRING,
+    "child_argv_sha256": _STRING,
+    "child_pid": _NUMBER,
+    "child_start_time_ticks": _NUMBER_OR_NULL,
+    "device_uuid": _STRING,
+    "monitor_scope": _STRING,
+    "parent_pid": _NUMBER,
+    "peak_used_memory_mib": _NUMBER_OR_NULL,
+    "sample_count": _NUMBER,
+    "unavailable_reason": _STRING_OR_NULL,
 }
 ATTEMPT_TIMING_SHAPE: Final = {
-    "attempt_wall": _ANY,
-    "bootstrap": _ANY,
-    "engine_compile": _ANY,
-    "engine_solve": _ANY,
-    "engine_wall": _ANY,
-    "lowering_pre_gate": _ANY,
-    "problem_identity": _ANY,
+    "attempt_wall": _NUMBER,
+    "bootstrap": _NUMBER,
+    "engine_compile": _NUMBER,
+    "engine_solve": _NUMBER,
+    "engine_wall": _NUMBER,
+    "lowering_pre_gate": _NUMBER,
+    "problem_identity": _NUMBER,
 }
 ATTEMPT_CACHE_SHAPE: Final = {
     "after": CACHE_STATE_SHAPE,
     "at_entry": CACHE_STATE_SHAPE,
     "before_engine": CACHE_STATE_SHAPE,
     "configuration": CACHE_CONFIGURATION_SHAPE,
-    "warm": _ANY,
+    "warm": _BOOL,
 }
 ATTEMPT_SOLVE_SHAPE: Final = {
-    "collapse_proximity_margin": _ANY,
-    "iterations_run": _ANY,
-    "latched": _ANY,
-    "line_search_forced_refreshes": _ANY,
-    "maximum_feasibility_inf": _ANY,
-    "monotone_descent": _ANY,
-    "projector_materializations": _ANY,
-    "rows": _ANY,
-    "status": _ANY,
-    "status_name": _ANY,
-    "stored_pairs": _ANY,
-    "tangency_forced_refreshes": _ANY,
-    "terminal_feasibility_inf": _ANY,
-    "terminal_objective": _ANY,
-    "terminal_projected_gradient_inf": _ANY,
+    # The five host scalars that go through ``json_scalar`` publish null for a
+    # nonfinite value, which is the shape a NaN reaches the receipt in; the
+    # gates that read them refuse null as a number rather than here.
+    "collapse_proximity_margin": _NUMBER_OR_NULL,
+    "iterations_run": _NUMBER,
+    "latched": _BOOL,
+    "line_search_forced_refreshes": _NUMBER,
+    "maximum_feasibility_inf": _NUMBER_OR_NULL,
+    "monotone_descent": _BOOL,
+    "projector_materializations": _NUMBER,
+    "rows": _LIST,
+    "status": _NUMBER,
+    "status_name": _STRING,
+    "stored_pairs": _NUMBER,
+    "tangency_forced_refreshes": _NUMBER,
+    "terminal_feasibility_inf": _NUMBER_OR_NULL,
+    "terminal_objective": _NUMBER_OR_NULL,
+    "terminal_projected_gradient_inf": _NUMBER_OR_NULL,
 }
 ATTEMPT_ENVIRONMENT_SHAPE: Final = {
-    COMPILATION_CACHE_ENVIRONMENT_VARIABLE: _ANY,
-    **{name: _ANY for name in GPU_REQUIRED_ENVIRONMENT},
+    COMPILATION_CACHE_ENVIRONMENT_VARIABLE: _STRING,
+    **{name: _STRING for name in GPU_REQUIRED_ENVIRONMENT},
 }
 ENDPOINT_AGREEMENT_SHAPE: Final = {
-    "absolute_floor": _ANY,
-    "feasibility_absolute_tolerance": _ANY,
-    "loop_terminal_objective": _ANY,
-    "relative_tolerance": _ANY,
-    "standalone_terminal_objective": _ANY,
-    "terminal_feasibility_inf": _ANY,
-    "terminal_state_sha256": _ANY,
+    "absolute_floor": _NUMBER,
+    "feasibility_absolute_tolerance": _NUMBER,
+    "loop_terminal_objective": _NUMBER,
+    "relative_tolerance": _NUMBER,
+    "standalone_terminal_objective": _NUMBER,
+    "terminal_feasibility_inf": _NUMBER,
+    "terminal_state_sha256": _STRING,
 }
+
+# The custody blocks the previous revision reached with nothing at all: the
+# module-byte binding, the observable identity binding and the lowering
+# pre-gate.  All three are the child's answer to "which bytes ran, on which
+# problem, through which kernels", all three are published on every attempt,
+# and all three were unreachable by the walker and unread by every validator.
+EXECUTION_SOURCE_MANIFEST_SHAPE: Final = {
+    "entries_sha256": _STRING,
+    "entry_count": _NUMBER,
+    "manifest_sha256": _STRING,
+    "relative_path": _STRING,
+    "schema_version": _STRING,
+}
+BOUND_MODULE_SHAPE: Final = {
+    "module": _STRING,
+    "relative_path": _STRING,
+    "sha256": _STRING,
+    "size_bytes": _NUMBER,
+}
+UNMANIFESTED_MODULE_SHAPE: Final = {"module": _STRING, "relative_path": _STRING}
+INTERPRETER_INSTALLATION_SHAPE: Final = {"count": _NUMBER, "roots": _LIST}
+EXECUTION_SOURCES_SHAPE: Final = {
+    "bound_modules": _each(BOUND_MODULE_SHAPE),
+    "interpreter_installation_modules": INTERPRETER_INSTALLATION_SHAPE,
+    "manifest": EXECUTION_SOURCE_MANIFEST_SHAPE,
+    "unmanifested_repository_modules": _each(UNMANIFESTED_MODULE_SHAPE),
+}
+PROBLEM_IDENTITY_SHAPE: Final = {
+    "bound": _BOOL,
+    "checks": _MAPPING,
+    "feasibility_absolute_tolerance": _NUMBER,
+    "measured_observables": _MAPPING,
+    "recorded_bootstrap_sha256": _STRING,
+    "recorded_problem_sha256": _STRING,
+    "reference_observables": _MAPPING,
+    "relative_difference": _MAPPING,
+    "relative_tolerances": _MAPPING,
+    "sha_is_binding": _BOOL,
+}
+LOWERED_KERNEL_SHAPE: Final = {
+    "ir_bytes": _NUMBER,
+    "name": _STRING,
+    "while_operations": _NUMBER,
+}
+LOWERING_PRE_GATE_SHAPE: Final = {
+    "budget_independent": _BOOL,
+    "certified_iterations": _NUMBER,
+    "kernels": _each(LOWERED_KERNEL_SHAPE),
+    "rehearsal_iterations": _NUMBER,
+    "total_ir_bytes": _NUMBER,
+}
+
 _ENDPOINT_LEDGER_KEYS: Final = {
-    "gated_at_this_budget": _ANY,
-    "informational_observables": _ANY,
-    "native": _ANY,
-    "native_state_content_sha256": _ANY,
-    "native_state_relative_path": _ANY,
-    "native_state_sha256": _ANY,
-    "pinned_quality_terms": _ANY,
-    "relative_difference": _ANY,
-    "terminal": _ANY,
+    "gated_at_this_budget": _BOOL,
+    "informational_observables": _LIST,
+    "native": _MAPPING,
+    "native_state_content_sha256": _STRING,
+    "native_state_relative_path": _STRING,
+    "native_state_sha256": _STRING,
+    "pinned_quality_terms": _LIST,
+    "relative_difference": _MAPPING,
+    "terminal": _MAPPING,
 }
 ENDPOINT_LEDGER_SHAPE: Final = dict(_ENDPOINT_LEDGER_KEYS)
 GATED_ENDPOINT_LEDGER_SHAPE: Final = {
     **_ENDPOINT_LEDGER_KEYS,
-    "pinned_term_gate": {"failed_terms": _ANY, "passed": _ANY, "terms": _ANY},
+    "pinned_term_gate": {
+        "failed_terms": _LIST,
+        "passed": _BOOL,
+        "terms": _MAPPING,
+    },
 }
-ROOT_EVIDENCE_NESTED_SHAPES: Final = {
-    "claim": ROOT_CLAIM_SHAPE,
-    "compilation_cache": CACHE_STATE_SHAPE,
-    "source_snapshot": SOURCE_SNAPSHOT_SHAPE,
-    "supervisor": SUPERVISOR_SHAPE,
-    "timing_seconds": ROOT_TIMING_SHAPE,
-}
-SUPERVISED_ATTEMPT_NESTED_SHAPES: Final = {"gpu_memory": GPU_MEMORY_SHAPE}
-ATTEMPT_EVIDENCE_NESTED_SHAPES: Final = {
+
+ATTEMPT_EVIDENCE_SHAPE: Final = {
+    "attempt_index": _NUMBER,
+    "certified_options_delta": _MAPPING,
     "compilation_cache": ATTEMPT_CACHE_SHAPE,
     "endpoint_agreement": ENDPOINT_AGREEMENT_SHAPE,
+    "endpoint_ledger": _Dispatched("_validate_attempt_shape, gated or ungated"),
     "environment": ATTEMPT_ENVIRONMENT_SHAPE,
+    "execution_sources": EXECUTION_SOURCES_SHAPE,
+    # A completed chain publishes ``gate_refused: null`` and nothing else; the
+    # refused shape below is the other document the child has.
+    "gate_refused": _NULL,
+    "lowering_pre_gate": LOWERING_PRE_GATE_SHAPE,
+    "options": _MAPPING,
+    "problem_identity": PROBLEM_IDENTITY_SHAPE,
+    "quality_claim": _STRING,
+    "route": _STRING,
     "runtime_identity": RUNTIME_IDENTITY_SHAPE,
+    "schema_version": _STRING,
     "solve": ATTEMPT_SOLVE_SHAPE,
+    "timing_boundary": _STRING,
     "timing_seconds": ATTEMPT_TIMING_SHAPE,
 }
+REFUSED_ATTEMPT_EVIDENCE_SHAPE: Final = {
+    "attempt_index": _NUMBER,
+    "error": _STRING,
+    "gate_refused": _STRING,
+    "route": _STRING,
+    "schema_version": _STRING,
+}
+SUPERVISED_ATTEMPT_SHAPE: Final = {
+    "argv_sha256": _STRING,
+    "artifact_relative_path": _STRING,
+    "attempt_index": _NUMBER,
+    "evidence": _Dispatched("_validate_attempt_shape, one of the child's two"),
+    "gpu_memory": GPU_MEMORY_SHAPE,
+    "outcome": _STRING,
+    "return_code": _NUMBER,
+    "stderr_tail": _STRING,
+    "stdout_tail": _STRING_OR_NULL,
+    "supervised_seconds": _NUMBER,
+    "timed_out": _BOOL,
+}
+COLD_LANE_SHAPE: Final = {
+    **SUPERVISED_ATTEMPT_SHAPE,
+    "timed_against_bar": _BOOL,
+}
+ATTEMPT_PROTOCOL_SHAPE: Final = {
+    "attempts_run": _NUMBER,
+    "authorized_attempts": _NUMBER,
+    "certified_maximum_iterations": _NUMBER,
+    "cold_lane_authorized": _BOOL,
+    "conformance": _STRING,
+    "latch_count": _NUMBER,
+    "latch_rate": _STRING,
+    "maximum_iterations": _NUMBER,
+    "preregistered_attempts": _NUMBER,
+    "stop_rule": _STRING,
+}
+ROOT_EVIDENCE_SHAPE: Final = {
+    "attempt_protocol": ATTEMPT_PROTOCOL_SHAPE,
+    "attempts": _Dispatched("_validate_attempt_shape, element by element"),
+    "claim": ROOT_CLAIM_SHAPE,
+    "cold_lane": _Dispatched("_validate_attempt_shape, or null"),
+    "cold_lane_anomaly": _Dispatched("cold_lane_anomaly, re-derived and compared"),
+    "compilation_cache": CACHE_STATE_SHAPE,
+    "quality_claim": _STRING,
+    "route": _STRING,
+    "schema_version": _STRING,
+    "source_snapshot": SOURCE_SNAPSHOT_SHAPE,
+    "supervisor": SUPERVISOR_SHAPE,
+    "timing_boundary": _STRING,
+    "timing_seconds": ROOT_TIMING_SHAPE,
+    "verdict": _STRING,
+}
+
+# DERIVED, never written twice: a required key with no shape is the defect this
+# structure exists to make impossible, and it is impossible only while these
+# are functions of the shapes rather than second listings beside them.
+ROOT_EVIDENCE_REQUIRED_KEYS: Final = frozenset(ROOT_EVIDENCE_SHAPE)
+ATTEMPT_PROTOCOL_REQUIRED_KEYS: Final = frozenset(ATTEMPT_PROTOCOL_SHAPE)
+SUPERVISED_ATTEMPT_REQUIRED_KEYS: Final = frozenset(SUPERVISED_ATTEMPT_SHAPE)
+ATTEMPT_EVIDENCE_REQUIRED_KEYS: Final = frozenset(ATTEMPT_EVIDENCE_SHAPE)
+REFUSED_ATTEMPT_EVIDENCE_REQUIRED_KEYS: Final = frozenset(REFUSED_ATTEMPT_EVIDENCE_SHAPE)
+
+# Every document the receipt is built from, by the name its refusals carry.
+RECEIPT_SHAPES: Final = {
+    "root": ROOT_EVIDENCE_SHAPE,
+    "supervised attempt": SUPERVISED_ATTEMPT_SHAPE,
+    "cold lane": COLD_LANE_SHAPE,
+    "attempt evidence": ATTEMPT_EVIDENCE_SHAPE,
+    "refused attempt evidence": REFUSED_ATTEMPT_EVIDENCE_SHAPE,
+    "endpoint ledger": ENDPOINT_LEDGER_SHAPE,
+    "gated endpoint ledger": GATED_ENDPOINT_LEDGER_SHAPE,
+    "cold lane anomaly": COLD_LANE_ANOMALY_SHAPE,
+}
+
+# Where a mapping or a list is admitted without an inner shape, and why.  The
+# suite walks ``RECEIPT_SHAPES`` and requires this to be exactly what it finds,
+# which is what stops the next block from arriving unshaped: adding one costs a
+# line here and a reason.
+UNSHAPED_LEAVES: Final = {
+    "root.attempts": "each element is a supervised attempt, walked by _validate_attempt_shape",
+    "root.cold_lane": "null, or a cold-lane record walked by _validate_attempt_shape",
+    "root.cold_lane_anomaly": "null, or COLD_LANE_ANOMALY_SHAPE; re-derived from the lane and compared",
+    "root.supervisor.preflight.visible_gpu_uuids": "an inventory of device UUIDs; the pinned one is required to be among them",
+    "supervised attempt.evidence": "null, refused or complete; _validate_attempt_shape picks the shape",
+    "cold lane.evidence": "null, refused or complete; _validate_attempt_shape picks the shape",
+    "attempt evidence.certified_options_delta": "the fields this budget changed; re-derived from options against the frozen configuration",
+    "attempt evidence.endpoint_ledger": "gated or ungated; _validate_attempt_shape picks the shape from gated_at_this_budget",
+    "attempt evidence.options": "the certified dataclass's fields; the key set is checked against it and every value re-derived",
+    "attempt evidence.problem_identity.checks": "one boolean per bound observable; re-derived by problem_identity_evidence",
+    "attempt evidence.problem_identity.measured_observables": "the four bootstrap observables; re-derived by problem_identity_evidence",
+    "attempt evidence.problem_identity.reference_observables": "the campaign's frozen observables; compared to them",
+    "attempt evidence.problem_identity.relative_difference": "re-derived by problem_identity_evidence from the measured side",
+    "attempt evidence.problem_identity.relative_tolerances": "the campaign's frozen tolerances; compared to them",
+    "attempt evidence.execution_sources.interpreter_installation_modules.roots": "the hidden top-level directories the interpreter installation lives under",
+    "attempt evidence.solve.rows": "per-iteration telemetry; section 6 gates none of it",
+    "endpoint ledger.informational_observables": "the campaign's frozen informational set; compared to it",
+    "endpoint ledger.native": "one number per physics term; compared term by term to the campaign's frozen native reference",
+    "endpoint ledger.pinned_quality_terms": "the campaign's frozen pinned set; compared to it",
+    "endpoint ledger.relative_difference": "re-derived from the two sides",
+    "endpoint ledger.terminal": "one number per physics term; the gate is recomputed from it",
+    "gated endpoint ledger.informational_observables": "the campaign's frozen informational set; compared to it",
+    "gated endpoint ledger.native": "one number per physics term; compared term by term to the campaign's frozen native reference",
+    "gated endpoint ledger.pinned_quality_terms": "the campaign's frozen pinned set; compared to it",
+    "gated endpoint ledger.pinned_term_gate.failed_terms": "the terms the recomputed gate names; the whole block is recomputed and compared",
+    "gated endpoint ledger.pinned_term_gate.terms": "one verdict per pinned term; the whole block is recomputed and compared",
+    "gated endpoint ledger.relative_difference": "re-derived from the two sides",
+    "gated endpoint ledger.terminal": "one number per physics term; the gate is recomputed from it",
+}
+
+# The three modules the certified chain cannot run without, named by the files
+# this process imported rather than by a second spelling of their paths: the
+# launcher itself, the rehearsal module every shared primitive comes from, and
+# the engine under certification.  A receipt whose custody block does not bind
+# all three is not a receipt of this chain.
+CHAIN_EXECUTION_SOURCE_MODULES: Final = (
+    Path(__file__),
+    Path(str(sys.modules[bind_execution_sources.__module__].__file__)),
+    Path(str(sys.modules[run_projected_lbfgs.__module__].__file__)),
+)
+CHAIN_EXECUTION_SOURCE_PATHS: Final = frozenset(
+    path.resolve(strict=True).relative_to(REPOSITORY).as_posix()
+    for path in CHAIN_EXECUTION_SOURCE_MODULES
+)
 
 
 class ProjectedRootError(RuntimeError):
@@ -1634,15 +1792,17 @@ def write_root_receipt(
 def _validate_document_shape(
     document: JsonValue, shape: Mapping[str, object], *, where: str
 ) -> None:
-    """Refuse a receipt block that is not, recursively, the whole one.
+    """Refuse a receipt block that is not, recursively and by type, the whole one.
 
     The frozen key sets were exactly one level deep, so a ``supervisor`` holding
     nothing but ``gpu_uuid``, an empty ``source_snapshot``, a null
     ``compilation_cache`` and an emptied ``timing_seconds`` all passed for the
     complete document they replaced: the ``frozenset`` matched at the top and no
     reader followed.  PRESENT-BUT-NULL was equivalent to absent for every block
-    nothing indexed into.  This walks the whole shape tree from one listing, so
-    the completeness claim reaches every block section 6 builds.
+    nothing indexed into.  Freezing the blocks moved the same hole to the LEAVES:
+    a receipt whose cache accounting was three nulls, or whose ``chain_wall`` was
+    the string ``"not a number"``, still published.  This walks the whole tree
+    from one listing and checks every leaf against what its producer writes.
     """
 
     if not isinstance(document, dict):
@@ -1654,9 +1814,12 @@ def _validate_document_shape(
             f"{sorted(frozenset(document) - frozenset(shape))}"
         )
     for name, nested in shape.items():
-        if nested is _ANY:
+        if isinstance(nested, _Dispatched):
             continue
         value = document[name]
+        if isinstance(nested, _Leaf):
+            _validate_leaf(value, nested, where=f"{where}.{name}")
+            continue
         if isinstance(nested, tuple):
             if not isinstance(value, list):
                 raise ProjectedRootError(f"{where}.{name} is not a published list")
@@ -1668,16 +1831,27 @@ def _validate_document_shape(
         _validate_document_shape(value, nested, where=f"{where}.{name}")
 
 
-def _validate_nested_shapes(
-    document: Mapping[str, JsonValue],
-    shapes: Mapping[str, Mapping[str, object]],
-    *,
-    where: str,
-) -> None:
-    """Walk every frozen sub-block of one already key-checked document."""
+def _validate_leaf(value: JsonValue, leaf: _Leaf, *, where: str) -> None:
+    """Refuse a published leaf that is not what its producer writes there.
 
-    for name, shape in shapes.items():
-        _validate_document_shape(document[name], shape, where=f"{where}.{name}")
+    Named refusals, not incidental ``TypeError``s: a third party re-validating
+    sealed bytes needs a sentence naming the defect, and the previous revision
+    answered a nulled device inventory with ``argument of type 'NoneType' is not
+    iterable`` from the first reader that happened to touch it.
+    """
+
+    if value is None:
+        if leaf.nullable:
+            return
+        raise ProjectedRootError(
+            f"{where} is null where the receipt publishes {leaf.description}"
+        )
+    # ``bool`` is a subclass of ``int``, so a number leaf must exclude it
+    # explicitly or ``true`` passes for a count.
+    if isinstance(value, bool) and bool not in leaf.types:
+        raise ProjectedRootError(f"{where} is not {leaf.description}: {value!r}")
+    if not isinstance(value, leaf.types):
+        raise ProjectedRootError(f"{where} is not {leaf.description}: {value!r}")
 
 
 def _validate_preflight_record(preflight: Mapping[str, JsonValue]) -> None:
@@ -1724,6 +1898,20 @@ def _validate_preflight_record(preflight: Mapping[str, JsonValue]) -> None:
         raise ProjectedRootError(
             "root preflight did not probe the three directories the protocol writes"
         )
+    # The temporary directory is published TWICE -- once as the resolved XLA
+    # spill path and once as the probe that cleared it -- and a receipt naming
+    # one directory beside a probe of another states nothing about the storage
+    # the run used.  The two are one fact, so they are compared.
+    temporary = preflight["storage"][0]
+    if (
+        preflight["temporary_directory"] != temporary["directory"]
+        or preflight["resolved_temporary_directory"] != temporary["resolved_directory"]
+    ):
+        raise ProjectedRootError(
+            f"root preflight probed {temporary['directory']!r} and published "
+            f"{preflight['temporary_directory']!r} as the temporary directory "
+            f"the children spill through"
+        )
     # And where the reference itself is still on the box, it is RE-LOADED, which
     # re-verifies both digests against the constants above.  A reader whose box
     # no longer carries it keeps the comparison against the frozen literals; a
@@ -1731,6 +1919,171 @@ def _validate_preflight_record(preflight: Mapping[str, JsonValue]) -> None:
     # whole point of ruling 6.
     if NATIVE_ENDPOINT_STATE_PATH.exists():
         load_native_endpoint_state()
+
+
+def _validate_execution_sources(execution_sources: Mapping[str, JsonValue]) -> None:
+    """Re-derive the module-byte custody binding against the live manifest.
+
+    This block answers the one question a sealed source snapshot cannot: did the
+    bytes the snapshot contains actually EXECUTE?  The predecessor route lost a
+    one-shot root to an editable install whose meta-path finder outranked
+    ``PYTHONPATH``, so production modules resolved outside the tree the run
+    believed it was executing, and this is the residue of the gate that catches
+    that class.  It was published on every attempt, given no shape, and read by
+    nothing -- so ``execution_sources: null``, ``{}``, ``"a string"`` and
+    ``{"bound_modules": []}`` all sealed as ``CLAIM_DISCHARGED`` and re-validated
+    clean, and the receipt asserted nothing at all about which bytes ran.
+
+    Re-derived, not read: the manifest evidence must be this repository's own
+    manifest recomputed from its bytes, every bound module must hash to the
+    entry the manifest holds for it, and the three modules the chain cannot run
+    without must be among them.  A reader on another box needs this repository
+    at this commit for the frozen constants already; the manifest is one of
+    them.
+    """
+
+    try:
+        manifest_evidence, entries = load_execution_source_manifest(REPOSITORY)
+    except RehearsalError as failure:
+        raise ProjectedRootError(
+            f"the execution-source manifest this receipt is judged against is "
+            f"not loadable: {failure}"
+        ) from failure
+    if execution_sources["manifest"] != manifest_evidence:
+        raise ProjectedRootError(
+            f"attempt names an execution-source manifest other than the "
+            f"campaign's: {execution_sources['manifest']!r}"
+        )
+    bound = execution_sources["bound_modules"]
+    if not bound:
+        raise ProjectedRootError(
+            "attempt binds no manifest module, so its receipt says nothing "
+            "about which bytes executed"
+        )
+    for module in bound:
+        entry = entries.get(str(module["relative_path"]))
+        if (
+            entry is None
+            or module["sha256"] != entry["sha256"]
+            or int(module["size_bytes"]) != int(entry["size_bytes"])
+        ):
+            raise ProjectedRootError(
+                f"attempt binds {module['module']!r} to "
+                f"{module['relative_path']!r} with bytes the manifest does not "
+                f"describe"
+            )
+    executed = {str(module["relative_path"]) for module in bound}
+    missing = sorted(CHAIN_EXECUTION_SOURCE_PATHS - executed)
+    if missing:
+        raise ProjectedRootError(
+            f"attempt does not bind the modules the certified chain runs "
+            f"through: {missing}"
+        )
+
+
+def _validate_problem_identity(identity: Mapping[str, JsonValue]) -> None:
+    """Re-derive the observable identity binding from its measured side.
+
+    Plan section 2: identity is bound by observables, never by the problem sha.
+    The block that records it had no shape and two read fields, so a receipt
+    could publish ``{"bound": true, "sha_is_binding": false}`` and nothing else
+    and re-validate clean.  ``problem_identity_evidence`` is the one owner of
+    the derivation the child ran, so it is asked again here, on the published
+    measurements, and the whole block must be what it returns.
+    """
+
+    if identity["sha_is_binding"]:
+        raise ProjectedRootError("attempt binds identity to an unstable sha")
+    measured = identity["measured_observables"]
+    if not isinstance(measured, dict) or frozenset(measured) != frozenset(
+        CPU_BOOTSTRAP_OBSERVABLES
+    ):
+        raise ProjectedRootError(
+            "attempt publishes bootstrap observables other than the campaign's"
+        )
+    if any(not isinstance(value, float) for value in measured.values()):
+        raise ProjectedRootError(
+            "attempt publishes a bootstrap observable that is not a number"
+        )
+    derived = problem_identity_evidence(
+        measured,
+        problem_sha256=str(identity["recorded_problem_sha256"]),
+        bootstrap_sha256=str(identity["recorded_bootstrap_sha256"]),
+    )
+    if identity != derived:
+        raise ProjectedRootError(
+            "attempt problem identity is not the one its measured observables "
+            "derive"
+        )
+    if not identity["bound"]:
+        raise ProjectedRootError("attempt claims an unbound problem")
+
+
+def _validate_lowering_pre_gate(
+    lowering: Mapping[str, JsonValue], *, iterations: int
+) -> None:
+    """Re-derive the lowering pre-gate's own accounting.
+
+    Section 6.1's gate is that the rehearsal budget and the certified budget
+    lower to IDENTICAL IR, which is what makes a bounded rehearsal stand in for
+    a certified compile.  The receipt's record of it was one boolean the
+    validator read; the budgets it ran at, the kernels it lowered and the size
+    it reports are re-derived here.
+    """
+
+    if not lowering["budget_independent"]:
+        raise ProjectedRootError("attempt claims budget-dependent lowering")
+    if int(lowering["certified_iterations"]) != CERTIFIED_MAXIMUM_ITERATIONS:
+        raise ProjectedRootError(
+            f"attempt lowered against {lowering['certified_iterations']!r} "
+            f"certified iterations, not {CERTIFIED_MAXIMUM_ITERATIONS!r}"
+        )
+    if int(lowering["rehearsal_iterations"]) != iterations:
+        raise ProjectedRootError(
+            f"attempt lowered at {lowering['rehearsal_iterations']!r} "
+            f"iterations, not the {iterations!r} it ran"
+        )
+    kernels = lowering["kernels"]
+    if not kernels:
+        raise ProjectedRootError("attempt lowered no kernel at all")
+    total = sum(int(kernel["ir_bytes"]) for kernel in kernels)
+    if int(lowering["total_ir_bytes"]) != total:
+        raise ProjectedRootError(
+            f"attempt lowering total {lowering['total_ir_bytes']!r} is not the "
+            f"sum of its kernels ({total!r})"
+        )
+
+
+def _validate_endpoint_ledger_arithmetic(ledger: Mapping[str, JsonValue]) -> None:
+    """Recompute the ledger's relative-difference column from its two sides.
+
+    Both sides are re-gated -- the terminal against the frozen native reference,
+    the native against the campaign's literals -- while the column that reports
+    the distance between them was checked for its key set and never for its
+    arithmetic, so every entry could read ``0.0`` beside honest sides.  It is a
+    published number in a receipt a reader reads, so it is derived from the same
+    owner the producer derived it from.
+    """
+
+    terminal = ledger["terminal"]
+    native = ledger["native"]
+    for side, rows in (("terminal", terminal), ("native", native)):
+        for name, value in rows.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ProjectedRootError(
+                    f"attempt endpoint ledger {side} side publishes {name} as "
+                    f"{value!r}, which is not a physics measurement"
+                )
+    if frozenset(terminal) != frozenset(native):
+        raise ProjectedRootError(
+            "attempt endpoint ledger sides do not carry the same terms"
+        )
+    derived = endpoint_relative_differences(terminal, native)
+    if ledger["relative_difference"] != derived:
+        raise ProjectedRootError(
+            "attempt endpoint ledger relative differences are not the ones its "
+            "two sides derive"
+        )
 
 
 def _fsync(path: Path) -> None:
@@ -1820,9 +2173,13 @@ def validate_root_artifact(
     consistency check over the fields it happened to find, and a sealed
     ``CLAIM_DISCHARGED`` root whose physics gate never ran -- or ran and failed
     -- published and re-validated clean.  It also asserts the receipt is
-    COMPLETE, RECURSIVELY, because a truncated document could not be told from a
-    whole one: every block section 6 builds has a frozen key set, and so does
-    every block inside it (``_validate_document_shape``).
+    COMPLETE, RECURSIVELY AND BY TYPE, because a truncated document could not be
+    told from a whole one: every block section 6 builds is a node of ONE frozen
+    shape tree whose keys ARE the required key sets, and every leaf of that tree
+    states what its producer writes there (``_validate_document_shape``).  The
+    previous revision said this while ``execution_sources`` -- the module-byte
+    custody binding -- had no shape and no reader at all, which is the sentence
+    this revision had to make true rather than restate.
 
     The reference the physics gate is judged against is the CAMPAIGN's, never
     the artifact's.  The published native side is compared to
@@ -1864,7 +2221,7 @@ def validate_root_artifact(
             f"{sorted(ROOT_EVIDENCE_REQUIRED_KEYS - frozenset(evidence))}, "
             f"unexpected {sorted(frozenset(evidence) - ROOT_EVIDENCE_REQUIRED_KEYS)}"
         )
-    _validate_nested_shapes(evidence, ROOT_EVIDENCE_NESTED_SHAPES, where="root")
+    _validate_document_shape(evidence, ROOT_EVIDENCE_SHAPE, where="root")
     claim = evidence["claim"]
     if (
         claim["wall_seconds_bar"] != NATIVE_WALL_SECONDS_BAR
@@ -1883,15 +2240,52 @@ def validate_root_artifact(
         )
     _validate_preflight_record(evidence["supervisor"]["preflight"])
 
+    # The block's own key set and leaf types were walked above, with the rest of
+    # the tree, from the one listing -- a second check here would be the second
+    # enumeration this structure exists to remove.
     protocol = evidence["attempt_protocol"]
-    if frozenset(protocol) != ATTEMPT_PROTOCOL_REQUIRED_KEYS:
-        raise ProjectedRootError("root attempt protocol block is incomplete")
     cold = evidence["cold_lane"]
     if bool(protocol["cold_lane_authorized"]) != (cold is not None):
         raise ProjectedRootError(
             "root cold-lane authorization does not match the lane it published"
         )
+    # ``cold_lane_authorized`` is the lane's ONLY channel to the conformance
+    # label, and therefore to the headline verdict, and the only check on it was
+    # that a record existed somewhere in the receipt.  A record whose path
+    # pointed at ``attempts/attempt-1`` was validated against attempt 1's own
+    # sealed array and passed, so a root with no cold lane in the tree at all
+    # minted ``PREREGISTERED`` and ``CLAIM_DISCHARGED``.  The pre-registration
+    # fact is bound to the directory the lane runs in: the supervisor creates it
+    # before it launches the lane, so it exists for every outcome the lane has.
+    cold_lane_directory = artifact_root / COLD_LANE_DIRECTORY
+    if cold is not None and not isinstance(cold, dict):
+        raise ProjectedRootError("root cold-lane record is not a document")
+    if cold is not None and cold["artifact_relative_path"] != COLD_LANE_DIRECTORY:
+        raise ProjectedRootError(
+            f"root publishes its cold lane at "
+            f"{cold['artifact_relative_path']!r}, not in the "
+            f"{COLD_LANE_DIRECTORY!r} directory the protocol runs it in"
+        )
+    if cold is not None and int(cold["attempt_index"]) != 0:
+        raise ProjectedRootError(
+            f"root publishes a cold lane indexed {cold['attempt_index']!r} "
+            f"among the protocol's own draws"
+        )
+    if cold_lane_directory.is_dir() != (cold is not None):
+        raise ProjectedRootError(
+            f"root claims cold_lane_authorized="
+            f"{bool(protocol['cold_lane_authorized'])!r} against a tree that "
+            f"{'carries' if cold_lane_directory.is_dir() else 'carries no'} "
+            f"{COLD_LANE_DIRECTORY!r} directory"
+        )
+    anomaly = evidence["cold_lane_anomaly"]
+    if anomaly is not None:
+        _validate_document_shape(
+            anomaly, COLD_LANE_ANOMALY_SHAPE, where="root.cold_lane_anomaly"
+        )
     attempts = evidence["attempts"]
+    if not isinstance(attempts, list):
+        raise ProjectedRootError("root publishes no list of attempts")
     for attempt in attempts:
         _validate_attempt_shape(attempt, cold_lane=False)
     if cold is not None:
@@ -2008,7 +2402,7 @@ def validate_root_artifact(
             and cold["evidence"]["compilation_cache"]["warm"]
         ):
             raise ProjectedRootError("the cold lane ran against a populated cache")
-        _validate_attempt(artifact_root, cold, protocol)
+        _validate_cold_lane(artifact_root, cold, protocol)
     return evidence
 
 
@@ -2023,39 +2417,37 @@ def _validate_attempt_shape(
     two -- a completed chain, or a named gate refusal -- so both are frozen.
     """
 
-    required = SUPERVISED_ATTEMPT_REQUIRED_KEYS | (
-        frozenset({"timed_against_bar"}) if cold_lane else frozenset()
-    )
+    if not isinstance(attempt, dict):
+        raise ProjectedRootError("supervised attempt record is not a document")
+    record_shape = COLD_LANE_SHAPE if cold_lane else SUPERVISED_ATTEMPT_SHAPE
+    required = frozenset(record_shape)
     if frozenset(attempt) != required:
         raise ProjectedRootError(
             "supervised attempt record is incomplete: missing "
             f"{sorted(required - frozenset(attempt))}, unexpected "
             f"{sorted(frozenset(attempt) - required)}"
         )
-    _validate_nested_shapes(
-        attempt, SUPERVISED_ATTEMPT_NESTED_SHAPES, where="supervised attempt"
-    )
+    _validate_document_shape(attempt, record_shape, where="supervised attempt")
     evidence = attempt["evidence"]
     if evidence is None:
         return
     if not isinstance(evidence, dict):
         raise ProjectedRootError("attempt evidence is not a document")
-    expected = (
-        REFUSED_ATTEMPT_EVIDENCE_REQUIRED_KEYS
+    expected_shape = (
+        REFUSED_ATTEMPT_EVIDENCE_SHAPE
         if evidence.get("gate_refused") is not None
-        else ATTEMPT_EVIDENCE_REQUIRED_KEYS
+        else ATTEMPT_EVIDENCE_SHAPE
     )
+    expected = frozenset(expected_shape)
     if frozenset(evidence) != expected:
         raise ProjectedRootError(
             "attempt evidence document is incomplete: missing "
             f"{sorted(expected - frozenset(evidence))}, unexpected "
             f"{sorted(frozenset(evidence) - expected)}"
         )
+    _validate_document_shape(evidence, expected_shape, where="attempt evidence")
     if evidence.get("gate_refused") is not None:
         return
-    _validate_nested_shapes(
-        evidence, ATTEMPT_EVIDENCE_NESTED_SHAPES, where="attempt evidence"
-    )
     _validate_document_shape(
         evidence["endpoint_ledger"],
         (
@@ -2089,20 +2481,32 @@ def _validate_attempt_outcome(attempt: Mapping[str, JsonValue]) -> None:
         )
 
 
-def _validate_attempt(
+def _validate_attempt_record(
     artifact_root: Path,
     attempt: Mapping[str, JsonValue],
     protocol: Mapping[str, JsonValue],
-) -> None:
-    """Re-derive one attempt's endpoint agreement and published state hash."""
+) -> Mapping[str, JsonValue] | None:
+    """Re-derive WHICH RUN produced this record, and what its own bytes say.
+
+    Everything here is a fact about the record: the context the child ran in,
+    the custody of the bytes that ran, the budget it ran at, the arithmetic of
+    its own published columns, and the array behind its terminal-state hash.
+    None of it is a comparison against another executable, so an honest draw
+    cannot fail any of it -- which is what makes it the part BOTH lanes run.
+    The claim-bearing gates live in ``_validate_attempt``, and the cold lane
+    (plan section 12.9: diagnostics, never disposition) does not run them.
+
+    Returns the child's completed document, or ``None`` when the record carries
+    no chain to check -- a timeout, a protocol failure, or a named gate refusal.
+    """
 
     if attempt["outcome"] in {"TIMEOUT", "PROTOCOL_FAILURE"}:
-        return
+        return None
     evidence = attempt["evidence"]
     if not isinstance(evidence, dict):
         raise ProjectedRootError("attempt carries no evidence document")
     if evidence["gate_refused"] is not None:
-        return
+        return None
     # The EXECUTION CONTEXT the attempt declares, re-derived rather than merely
     # published.  The root's own schema, route and timing boundary were checked;
     # the attempt's were not, so a ``CLAIM_DISCHARGED`` receipt could name the
@@ -2149,12 +2553,16 @@ def _validate_attempt(
             f"attempt quality claim {evidence['quality_claim']!r} is not the one "
             f"its budget derives ({quality_claim!r})"
         )
-    if evidence["problem_identity"]["sha_is_binding"]:
-        raise ProjectedRootError("attempt binds identity to an unstable sha")
-    if not evidence["problem_identity"]["bound"]:
-        raise ProjectedRootError("attempt claims an unbound problem")
-    if not evidence["lowering_pre_gate"]["budget_independent"]:
-        raise ProjectedRootError("attempt claims budget-dependent lowering")
+    # The three custody blocks: which bytes ran, which problem they ran on, and
+    # which kernels they lowered.  All three were published on every attempt and
+    # reached by nothing -- ``execution_sources`` by no reader at all -- so each
+    # is re-derived against the campaign's own authorities.
+    _validate_execution_sources(evidence["execution_sources"])
+    _validate_problem_identity(evidence["problem_identity"])
+    _validate_lowering_pre_gate(
+        evidence["lowering_pre_gate"],
+        iterations=int(evidence["options"]["maximum_iterations"]),
+    )
 
     # The claim's quality quantity is a NUMBER, not a status code.  ``LATCHED``
     # is the optimizer reporting that some iterate fell to its own configured
@@ -2229,7 +2637,7 @@ def _validate_attempt(
                 f"attempt endpoint ledger {side} side does not carry the "
                 f"campaign's terms"
             )
-    certify_native_reference(ledger["native"])
+    _validate_endpoint_ledger_arithmetic(ledger)
     # ``gated_at_this_budget`` was the one decision field re-validation READ,
     # and it is the field that switches section 1.1's physics gate on.  Read, a
     # ``CLAIM_DISCHARGED`` root could carry an ungated ledger on its latching
@@ -2245,11 +2653,55 @@ def _validate_attempt(
             f"attempt ledger claims gated={ledger['gated_at_this_budget']!r}, "
             f"which is not what its budget and outcome derive ({gated!r})"
         )
-    if gated:
-        if gate_endpoint_ledger(ledger) != ledger["pinned_term_gate"]:
-            raise ProjectedRootError(
-                "attempt pinned-term gate is not the one its ledger derives"
-            )
+    if gated and gate_endpoint_ledger(ledger) != ledger["pinned_term_gate"]:
+        raise ProjectedRootError(
+            "attempt pinned-term gate is not the one its ledger derives"
+        )
+    endpoint = evidence["endpoint_agreement"]
+    if (
+        endpoint["relative_tolerance"] != DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE
+        or endpoint["absolute_floor"] != DIAG4_ENDPOINT_AGREEMENT_ABSOLUTE_FLOOR
+    ):
+        raise ProjectedRootError("attempt endpoint tolerances differ from the campaign's")
+
+    coordinates_path = (
+        artifact_root
+        / str(attempt["artifact_relative_path"])
+        / TERMINAL_COORDINATES_FILENAME
+    )
+    with coordinates_path.open("rb") as stream:
+        coordinates = np.load(stream, allow_pickle=False)
+    republished = exact_numeric_tree_sha256(
+        jnp.asarray(coordinates, dtype=jnp.float64)
+    )
+    if republished != endpoint["terminal_state_sha256"]:
+        raise ProjectedRootError("published terminal state differs from its hash")
+    return evidence
+
+
+def _validate_attempt(
+    artifact_root: Path,
+    attempt: Mapping[str, JsonValue],
+    protocol: Mapping[str, JsonValue],
+) -> None:
+    """Re-derive one PRE-REGISTERED attempt, including the claim it bears.
+
+    The record's own facts first, then the four comparisons that decide whether
+    this draw discharges section 1's claim: its native side against the
+    campaign's frozen reference, its per-term gate's verdict, that gate
+    recomputed FROM the frozen literals, its two independently compiled
+    endpoints against each other, and its worst iterate against the feasibility
+    bound.  Each of these compares two independently compiled executables or
+    judges the physics, so each is a gate on the CLAIM -- which is why the cold
+    lane does not run them.
+    """
+
+    evidence = _validate_attempt_record(artifact_root, attempt, protocol)
+    if evidence is None:
+        return
+    ledger = evidence["endpoint_ledger"]
+    certify_native_reference(ledger["native"])
+    if bool(ledger["gated_at_this_budget"]):
         # Equality of a faithfully recorded FAILURE with its own recomputation
         # is a consistency check, not a quality gate.  Section 1.1 defines
         # quality parity as this verdict passing, so a discharging endpoint that
@@ -2270,13 +2722,7 @@ def _validate_attempt(
                 "attempt endpoint differs from the campaign's frozen native "
                 f"reference on {frozen['failed_terms']}"
             )
-
     endpoint = evidence["endpoint_agreement"]
-    if (
-        endpoint["relative_tolerance"] != DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE
-        or endpoint["absolute_floor"] != DIAG4_ENDPOINT_AGREEMENT_ABSOLUTE_FLOOR
-    ):
-        raise ProjectedRootError("attempt endpoint tolerances differ from the campaign's")
     certify_agreement(
         endpoint["standalone_terminal_objective"],
         endpoint["loop_terminal_objective"],
@@ -2293,18 +2739,37 @@ def _validate_attempt(
     ):
         raise ProjectedRootError("attempt published an infeasible iterate")
 
-    coordinates_path = (
-        artifact_root
-        / str(attempt["artifact_relative_path"])
-        / TERMINAL_COORDINATES_FILENAME
-    )
-    with coordinates_path.open("rb") as stream:
-        coordinates = np.load(stream, allow_pickle=False)
-    republished = exact_numeric_tree_sha256(
-        jnp.asarray(coordinates, dtype=jnp.float64)
-    )
-    if republished != endpoint["terminal_state_sha256"]:
-        raise ProjectedRootError("published terminal state differs from its hash")
+
+def _validate_cold_lane(
+    artifact_root: Path,
+    cold: Mapping[str, JsonValue],
+    protocol: Mapping[str, JsonValue],
+) -> None:
+    """Validate the cold lane for SHAPE and HONESTY, and for nothing else.
+
+    Plan section 12.9 ruling 13 took the lane out of the conformance label and
+    out of ``derive_verdict`` -- "what changes is that it decides nothing" --
+    and left it running the FULL discharging-attempt validation inside
+    ``publish_root``.  Executed, it still decided the largest thing there is: a
+    lane that latched and missed one pinned band, or that merely missed the
+    latch with one infeasible recorded iterate, raised inside the publication
+    gate, so the run wrote a refusal record and NO ARTIFACT AT ALL -- after the
+    cold lane and all three timed attempts had been spent.  That is strictly
+    worse than the ``QUALITY_ONLY`` cap ruling 13 reversed ruling 8 to avoid,
+    and it is reachable on the sanctioned path by an ordinary unlucky draw: the
+    lane is a fourth full-budget draw at the same budget, run first, against an
+    empty cache, and the campaign's own measured miss rate is one in five.
+
+    So the lane is validated for what it IS -- a complete, honest record of a
+    draw this protocol ran, whose bytes, budget, problem, arithmetic and sealed
+    array are its own -- and never for what it SAYS about the claim.  A lane
+    that fails a claim-bearing gate is not silently accepted: it either refuses
+    in the child, which publishes it as ``cold_lane_anomaly`` with the gate
+    named, or it publishes its whole ledger for a reader to recompute, beside
+    three timed attempts each of which runs every gate on its own endpoint.
+    """
+
+    _validate_attempt_record(artifact_root, cold, protocol)
 
 
 def run_attempt_protocol(
@@ -2513,18 +2978,22 @@ __all__ = (
     "ATTEMPTS_DIRECTORY",
     "ATTEMPT_CACHE_SHAPE",
     "ATTEMPT_ENVIRONMENT_SHAPE",
-    "ATTEMPT_EVIDENCE_NESTED_SHAPES",
     "ATTEMPT_EVIDENCE_REQUIRED_KEYS",
+    "ATTEMPT_EVIDENCE_SHAPE",
     "ATTEMPT_PROTOCOL_REQUIRED_KEYS",
+    "ATTEMPT_PROTOCOL_SHAPE",
     "ATTEMPT_SOLVE_SHAPE",
     "ATTEMPT_STOP_RULE",
     "ATTEMPT_TIMEOUT_SECONDS",
     "ATTEMPT_TIMING_SHAPE",
+    "BOUND_MODULE_SHAPE",
     "CACHE_CONFIGURATION_SHAPE",
     "CACHE_STATE_SHAPE",
+    "CHAIN_EXECUTION_SOURCE_PATHS",
     "COLD_LANE_ANOMALY_SHAPE",
     "COLD_LANE_DIRECTORY",
     "COLD_LANE_MEASURED_OUTCOMES",
+    "COLD_LANE_SHAPE",
     "COMPILATION_CACHE_ENVIRONMENT_VARIABLE",
     "CONFORMANCE_BOUNDED_SMOKE",
     "CONFORMANCE_PREREGISTERED",
@@ -2532,34 +3001,44 @@ __all__ = (
     "ENDPOINT_AGREEMENT_SHAPE",
     "ENDPOINT_LEDGER_SHAPE",
     "EVIDENCE_FILENAME",
+    "EXECUTION_SOURCES_SHAPE",
+    "EXECUTION_SOURCE_MANIFEST_SHAPE",
     "GATED_ENDPOINT_LEDGER_SHAPE",
     "GPU_ATTEMPT_SCHEMA_VERSION",
     "GPU_MEMORY_SHAPE",
     "GPU_REQUIRED_ENVIRONMENT",
     "GPU_ROOT_MANIFEST_SCHEMA_VERSION",
     "GPU_ROOT_SCHEMA_VERSION",
+    "INTERPRETER_INSTALLATION_SHAPE",
+    "LOWERED_KERNEL_SHAPE",
+    "LOWERING_PRE_GATE_SHAPE",
     "MANIFEST_FILENAME",
     "PERSISTENT_CACHE_MIN_COMPILE_TIME_SECONDS",
     "PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES",
     "PREFLIGHT_SHAPE",
     "PREREGISTERED_ATTEMPTS",
+    "PROBLEM_IDENTITY_SHAPE",
     "PROJECTED_ROUTE",
+    "RECEIPT_SHAPES",
     "REFUSAL_FILENAME",
     "REFUSAL_SCHEMA_VERSION",
     "REFUSED_ATTEMPT_EVIDENCE_REQUIRED_KEYS",
+    "REFUSED_ATTEMPT_EVIDENCE_SHAPE",
     "REFUSED_STORAGE_FILESYSTEM_TYPES",
     "ROOT_CLAIM_SHAPE",
-    "ROOT_EVIDENCE_NESTED_SHAPES",
     "ROOT_EVIDENCE_REQUIRED_KEYS",
+    "ROOT_EVIDENCE_SHAPE",
     "ROOT_TIMING_SHAPE",
     "RUNTIME_IDENTITY_SHAPE",
     "SOURCE_SNAPSHOT_SHAPE",
     "STORAGE_PROBE_SHAPE",
-    "SUPERVISED_ATTEMPT_NESTED_SHAPES",
     "SUPERVISED_ATTEMPT_REQUIRED_KEYS",
+    "SUPERVISED_ATTEMPT_SHAPE",
     "SUPERVISOR_SHAPE",
     "TEMPORARY_DIRECTORY_ENVIRONMENT_VARIABLE",
     "TEMPORARY_DIRECTORY_ENVIRONMENT_VARIABLES",
+    "UNMANIFESTED_MODULE_SHAPE",
+    "UNSHAPED_LEAVES",
     "VERDICT_CLAIM_DISCHARGED",
     "VERDICT_GATE_REFUSED_PREFIX",
     "VERDICT_NO_LATCH",
