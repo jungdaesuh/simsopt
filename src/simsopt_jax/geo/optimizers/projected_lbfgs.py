@@ -299,6 +299,49 @@ class ProjectedPoint(NamedTuple):
     all_finite: jax.Array
 
 
+class _PointScalars(NamedTuple):
+    """The host-side view of one iterate: every scalar the loop reads of it."""
+
+    objective: float
+    feasibility_inf: float
+    projected_gradient_inf: float
+    projected_gradient_norm: float
+    gradient_norm: float
+    tangency_relative_residual: float
+    true_tangency_relative_residual: float
+    gram_reciprocal_condition: float
+
+
+def _point_scalars(point: ProjectedPoint) -> _PointScalars:
+    """Fetch one iterate's host scalars in a single device-to-host transfer.
+
+    ``jax.device_get`` over the whole tuple batches the copies: measured on the
+    certified GPU at 157 microseconds against 265 for the same eight values
+    pulled one ``float()`` at a time.  Reading them in one place is also what
+    keeps a second read of the same quantity from reappearing downstream --
+    though a repeat is cheap, since an array caches its host value once fetched
+    (1.1 microseconds against 35 for the first read).
+    """
+
+    return _PointScalars(
+        *(
+            float(value)
+            for value in jax.device_get(
+                (
+                    point.objective,
+                    point.feasibility_inf,
+                    point.projected_gradient_inf,
+                    point.projected_gradient_norm,
+                    point.gradient_norm,
+                    point.tangency_relative_residual,
+                    point.true_tangency_relative_residual,
+                    point.gram_reciprocal_condition,
+                )
+            )
+        )
+    )
+
+
 class ManifoldRetraction(NamedTuple):
     """One pullback onto the manifold and the evidence that it landed there."""
 
@@ -1107,9 +1150,10 @@ def run_projected_lbfgs(
 
     while status is ProjectedLbfgsStatus.RUNNING:
         index = len(records)
+        scalars = _point_scalars(point)
         if (
             options.objective_target is not None
-            and float(point.objective) <= options.objective_target
+            and scalars.objective <= options.objective_target
         ):
             status = ProjectedLbfgsStatus.OBJECTIVE_TARGET_REACHED
             break
@@ -1118,7 +1162,7 @@ def run_projected_lbfgs(
             break
 
         trailing_factor = _trailing_objective_factor(
-            records, float(point.objective), options.hybrid_plateau_window
+            records, scalars.objective, options.hybrid_plateau_window
         )
         if (
             options.lagrangian_newton
@@ -1151,9 +1195,9 @@ def run_projected_lbfgs(
         # The fraction of the gradient that survives the projection is already
         # in hand; where it is small the reduced model has almost nothing to
         # describe and the solve would be spent to be refused downstream.
-        gradient_norm_value = float(point.gradient_norm)
+        gradient_norm_value = scalars.gradient_norm
         tangent_fraction = (
-            float(point.projected_gradient_norm) / gradient_norm_value
+            scalars.projected_gradient_norm / gradient_norm_value
             if gradient_norm_value > 0.0
             else float("nan")
         )
@@ -1261,11 +1305,14 @@ def run_projected_lbfgs(
             *,
             point: ProjectedPoint = point,
             coordinates: jax.Array = coordinates,
+            objective: float = scalars.objective,
         ):
             """Backtrack from ``initial_scale`` until Armijo holds or ``floor_scale``.
 
-            ``point`` and ``coordinates`` are bound as defaults so the closure
-            cannot outlive the iteration that created it.
+            ``point``, ``coordinates`` and ``objective`` are bound as defaults so
+            the closure cannot outlive the iteration that created it.  The
+            objective is the iterate's, not the trial's: re-reading it from the
+            device once per trial spends a synchronous copy on a constant.
             """
 
             nonlocal trials, rejected_for_feasibility, retraction_seconds
@@ -1278,7 +1325,7 @@ def run_projected_lbfgs(
                 )
                 retraction_seconds += time.perf_counter() - started
                 if bool(candidate.feasible):
-                    sufficient = float(point.objective) + (
+                    sufficient = objective + (
                         options.armijo_coefficient * scale * slope
                     )
                     if float(candidate.objective) <= sufficient:
@@ -1392,7 +1439,7 @@ def run_projected_lbfgs(
                 _collapsed_record(
                     index=index,
                     coordinates=coordinates,
-                    point=point,
+                    scalars=scalars,
                     direction_norm=direction_norm,
                     directional_derivative=directional_derivative,
                     step_scale=step_scale,
@@ -1498,24 +1545,23 @@ def run_projected_lbfgs(
             + (step_scale * step_scale - step_scale) * directional_derivative
         )
         stored_pairs = int(live_pairs)
+        candidate_objective = float(accepted.objective)
 
         record = ProjectedLbfgsIteration(
             index=index,
             coordinates=coordinates,
-            objective=float(point.objective),
-            projected_gradient_inf=float(point.projected_gradient_inf),
-            projected_gradient_norm=float(point.projected_gradient_norm),
-            gradient_norm=float(point.gradient_norm),
-            feasibility_inf=float(point.feasibility_inf),
-            tangency_relative_residual=float(point.tangency_relative_residual),
-            true_tangency_relative_residual=float(
-                point.true_tangency_relative_residual
-            ),
+            objective=scalars.objective,
+            projected_gradient_inf=scalars.projected_gradient_inf,
+            projected_gradient_norm=scalars.projected_gradient_norm,
+            gradient_norm=scalars.gradient_norm,
+            feasibility_inf=scalars.feasibility_inf,
+            tangency_relative_residual=scalars.tangency_relative_residual,
+            true_tangency_relative_residual=scalars.true_tangency_relative_residual,
             projector_age=direction_projector_age,
             projector_refreshed=direction_projector_age == 0,
             tangent_gradient_fraction=tangent_fraction,
             newton_gate_skipped=newton_gate_skipped,
-            gram_reciprocal_condition=float(point.gram_reciprocal_condition),
+            gram_reciprocal_condition=scalars.gram_reciprocal_condition,
             direction_norm=direction_norm,
             directional_derivative=directional_derivative,
             step_scale=step_scale,
@@ -1525,7 +1571,7 @@ def run_projected_lbfgs(
             rejected_for_feasibility=rejected_for_feasibility
             + abandoned.rejected_for_feasibility,
             retraction_corrections=int(accepted.corrections),
-            candidate_objective=float(accepted.objective),
+            candidate_objective=candidate_objective,
             candidate_feasibility_inf=float(accepted.feasibility_inf),
             curvature=float(pair_curvature),
             pair_admitted=bool(admitted),
@@ -1546,8 +1592,7 @@ def run_projected_lbfgs(
             multiplier_forward_error_bound=multiplier_forward_error_bound,
             trailing_objective_factor=trailing_factor,
             model_exactness_ratio=(
-                (float(point.objective) - float(accepted.objective))
-                / scaled_model_predicted
+                (scalars.objective - candidate_objective) / scaled_model_predicted
                 if model_step_used
                 and not (gauss_newton_rescued or lagrangian_newton_rescued)
                 and math.isfinite(scaled_model_predicted)
@@ -1631,8 +1676,15 @@ def _newton_telemetry(step: TangentNewtonCgStep | None) -> dict[str, object]:
             "newton_direction_norm": float("nan"),
             "newton_predicted_reduction": float("nan"),
         }
+    # The window is fetched WHOLE and sliced on the host.  Slicing it on the
+    # device with a Python bound instead mints a fresh one-shot executable for
+    # every distinct CG count a run produces -- measured at 64 ms each on the
+    # certified GPU, 1.9 s over a run reaching 29 of them -- to move at most 40
+    # numbers that are already sitting in one fixed-shape array.
+    iterations = int(step.iterations)
+    curvature_rayleigh_window = jax.device_get(step.curvature_rayleigh_history)
     return {
-        "newton_cg_iterations": int(step.iterations),
+        "newton_cg_iterations": iterations,
         "newton_cg_termination": int(step.termination),
         "newton_cg_negative_curvature": bool(step.negative_curvature),
         "newton_cg_negative_curvature_before_any_step": bool(
@@ -1644,8 +1696,7 @@ def _newton_telemetry(step: TangentNewtonCgStep | None) -> dict[str, object]:
         "newton_curvature": float(step.terminal_curvature),
         "newton_normalized_curvature": float(step.terminal_normalized_curvature),
         "newton_curvature_rayleigh_history": tuple(
-            float(value)
-            for value in step.curvature_rayleigh_history[: int(step.iterations)]
+            float(value) for value in curvature_rayleigh_window[:iterations]
         ),
         "newton_direction_norm": float(step.direction_norm),
         "newton_predicted_reduction": float(step.predicted_reduction),
@@ -1656,7 +1707,7 @@ def _collapsed_record(
     *,
     index: int,
     coordinates: jax.Array,
-    point: ProjectedPoint,
+    scalars: _PointScalars,
     direction_norm: float,
     directional_derivative: float,
     step_scale: float,
@@ -1699,18 +1750,18 @@ def _collapsed_record(
     return ProjectedLbfgsIteration(
         index=index,
         coordinates=coordinates,
-        objective=float(point.objective),
-        projected_gradient_inf=float(point.projected_gradient_inf),
-        projected_gradient_norm=float(point.projected_gradient_norm),
-        gradient_norm=float(point.gradient_norm),
-        feasibility_inf=float(point.feasibility_inf),
-        tangency_relative_residual=float(point.tangency_relative_residual),
-        true_tangency_relative_residual=float(point.true_tangency_relative_residual),
+        objective=scalars.objective,
+        projected_gradient_inf=scalars.projected_gradient_inf,
+        projected_gradient_norm=scalars.projected_gradient_norm,
+        gradient_norm=scalars.gradient_norm,
+        feasibility_inf=scalars.feasibility_inf,
+        tangency_relative_residual=scalars.tangency_relative_residual,
+        true_tangency_relative_residual=scalars.true_tangency_relative_residual,
         projector_age=projector_age,
         projector_refreshed=projector_age == 0,
         tangent_gradient_fraction=tangent_fraction,
         newton_gate_skipped=newton_gate_skipped,
-        gram_reciprocal_condition=float(point.gram_reciprocal_condition),
+        gram_reciprocal_condition=scalars.gram_reciprocal_condition,
         direction_norm=direction_norm,
         directional_derivative=directional_derivative,
         step_scale=step_scale,

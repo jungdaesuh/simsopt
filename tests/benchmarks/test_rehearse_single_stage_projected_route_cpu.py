@@ -203,6 +203,55 @@ def test_rehearsal_claims_no_science(published_rehearsal: Path) -> None:
     assert evidence["timing_boundary"] == "engine_compile_plus_solve"
 
 
+def test_published_margin_is_the_smallest_recorded_scale_over_the_floor(
+    published_rehearsal: Path,
+) -> None:
+    """The collapse-proximity margin is derived from the rows it is published with.
+
+    It is telemetry, not a control input: a reader must be able to recompute it
+    from the same artifact rather than trust a number the run asserted.
+    """
+
+    evidence = _evidence(published_rehearsal)
+    solve = evidence["solve"]
+    smallest = min(row["step_scale"] for row in solve["rows"])
+    assert solve["collapse_proximity_margin"] == (
+        smallest / rehearsal.CERTIFIED_ROUTE_OPTIONS.minimum_step_scale
+    )
+    # The rehearsal budget places every step it tries, so it is nowhere near
+    # the floor; the metric earns its keep on runs that are.
+    assert solve["collapse_proximity_margin"] > 1.0
+
+
+def test_collapse_proximity_margin_names_the_collapse_it_measures() -> None:
+    """Below one is the collapse itself, and an empty run has no margin.
+
+    The sub-one case is the A100 arm that terminated in ``LINE_SEARCH_COLLAPSE``
+    at a step scale of 9.456e-7 against the route's 1e-6 floor: the margin has to
+    report that arm below one while every arm that latched stays above it.
+    """
+
+    options = rehearsal.CERTIFIED_ROUTE_OPTIONS
+    latched = SimpleNamespace(
+        iterations=tuple(
+            SimpleNamespace(step_scale=scale) for scale in (1.0, 0.125, 0.5)
+        )
+    )
+    assert rehearsal.collapse_proximity_margin(latched, options) == 125000.0
+
+    collapsed = SimpleNamespace(
+        iterations=(
+            SimpleNamespace(step_scale=1.0),
+            SimpleNamespace(step_scale=9.456e-7),
+        )
+    )
+    assert rehearsal.collapse_proximity_margin(collapsed, options) < 1.0
+
+    assert np.isnan(
+        rehearsal.collapse_proximity_margin(SimpleNamespace(iterations=()), options)
+    )
+
+
 def test_rehearsal_never_binds_identity_to_the_problem_sha(
     published_rehearsal: Path,
 ) -> None:
