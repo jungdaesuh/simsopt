@@ -13,10 +13,14 @@ vector product here; and a Cholesky factorization both delivers the direction
 and proves the operator is still positive definite, which a stored inverse
 would only imply.
 
-Curvature pairs are formed from tangent vectors, so every update acts inside
-the tangent space and ``B`` keeps its initial scaling on the normal
-directions.  That is what keeps it invertible even though the objective has no
-curvature to report there.
+Curvature pairs are formed from projected gradients at two different iterates,
+so they are tangent to neither tangent space exactly and a rotating manifold
+leaks a little normal component into every update.  Powell damping is what
+makes that safe: it rescales ``y`` until ``s.y`` clears a fixed fraction of
+``s.B s``, so no update can drive ``B`` indefinite whatever the pair carries,
+and ``B`` keeps its initial scaling wherever no curvature was reported.  That
+is what keeps it invertible even in the directions the objective says nothing
+about.
 """
 
 from __future__ import annotations

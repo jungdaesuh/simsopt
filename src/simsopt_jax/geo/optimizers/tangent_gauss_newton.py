@@ -114,10 +114,19 @@ def solve_tangent_gauss_newton(
     solved = jsp.linalg.cho_solve((safe_factor, True), projected_gradient)
     direction = -(projection @ solved)
 
+    # ``reduced`` is zero on the normal space, so ``levenberg`` is an eigenvalue
+    # of ``regularized`` there whatever the objective does.  Taking the smallest
+    # eigenvalue outright would therefore report ``levenberg / largest`` on every
+    # iteration and describe the regularizer rather than the solve; the tangent
+    # block is the part the direction is actually drawn from, and the projector's
+    # trace is its rank.
     eigenvalues = jnp.linalg.eigvalsh(regularized)
     largest = jnp.max(eigenvalues)
+    tangent_rank = jnp.round(jnp.trace(projection)).astype(jnp.int32)
+    in_tangent_block = jnp.arange(dimension) >= dimension - tangent_rank
+    smallest = jnp.min(jnp.where(in_tangent_block, eigenvalues, largest))
     reciprocal_condition = jnp.where(
-        largest > 0.0, jnp.min(eigenvalues) / largest, jnp.zeros((), dtype=dtype)
+        largest > 0.0, smallest / largest, jnp.zeros((), dtype=dtype)
     )
     # Tangency is measured against the projector itself: a tangent step is a
     # fixed point of P, so the residual of that identity is the defect.

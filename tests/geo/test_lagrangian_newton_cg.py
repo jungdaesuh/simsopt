@@ -14,6 +14,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from simsopt_jax.geo.optimizers.lagrangian_newton_cg import (
     TangentNewtonCgTermination,
     lagrangian_hessian_vector_product,
@@ -184,7 +185,14 @@ def test_first_iteration_negative_curvature_returns_no_step() -> None:
     assert int(step.iterations) == 1
 
 
-def test_preconditioner_changes_the_iterations_not_the_solution() -> None:
+def test_a_preconditioner_does_not_move_the_solution() -> None:
+    """The seed changes the conjugate directions, never the point they reach.
+
+    On this problem the tangent space is four-dimensional and CG exhausts it
+    either way, so the claim under test is the solution's invariance, not an
+    iteration count.
+    """
+
     coordinates = _positive_curvature_point()
     point = evaluate_projected_point(_sphere_problem, coordinates)
     multipliers = least_squares_multipliers(point.projector, point.gradient)
@@ -255,13 +263,10 @@ def test_solver_rejects_an_empty_budget_and_a_degenerate_forcing() -> None:
         {"maximum_iterations": 5, "forcing_maximum": 0.0},
         {"maximum_iterations": 5, "forcing_maximum": 1.0},
     ):
-        try:
+        with pytest.raises(ValueError):
             solve_tangent_newton_cg(
                 product, point.projector, point.projected_gradient, **keywords
             )
-        except ValueError:
-            continue
-        raise AssertionError(f"no ValueError for {keywords}")
 
 
 def test_solve_is_jittable_with_frozen_multipliers() -> None:

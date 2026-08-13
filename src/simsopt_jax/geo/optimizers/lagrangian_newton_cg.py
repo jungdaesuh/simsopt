@@ -28,6 +28,7 @@ Gauss--Newton arm needed at 25 s per iteration.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from enum import IntEnum
 from typing import NamedTuple
 
@@ -38,10 +39,15 @@ from .dense_sqp import JointValueConstraints
 from .projected_hvp_trust_region import (
     CertifiedGramProjector,
     HessianVectorProduct,
-    TangentPreconditioner,
     project_with_certified_gram,
     solve_certified_gram,
 )
+
+# Maps one tangent residual to the search-direction seed of a preconditioned
+# conjugate-gradient step.  The operator must be symmetric positive definite on
+# the tangent space; whatever normal component it returns is projected away by
+# the solve before the seed is used, so it need not be tangent itself.
+TangentPreconditioner = Callable[[jax.Array], jax.Array]
 
 
 class TangentNewtonCgTermination(IntEnum):
@@ -50,6 +56,7 @@ class TangentNewtonCgTermination(IntEnum):
     FORCING_SATISFIED = 0
     NEGATIVE_CURVATURE = 1
     ITERATION_LIMIT = 2
+    NONFINITE = 3
 
 
 class LeastSquaresMultipliers(NamedTuple):
@@ -272,7 +279,11 @@ def solve_tangent_newton_cg(
             termination=jnp.where(
                 nonpositive,
                 int(TangentNewtonCgTermination.NEGATIVE_CURVATURE),
-                int(TangentNewtonCgTermination.FORCING_SATISFIED),
+                jnp.where(
+                    finite,
+                    int(TangentNewtonCgTermination.FORCING_SATISFIED),
+                    int(TangentNewtonCgTermination.NONFINITE),
+                ),
             ).astype(jnp.int32),
             negative_curvature_before_any_step=(
                 state.negative_curvature_before_any_step
@@ -342,6 +353,7 @@ __all__ = (
     "LeastSquaresMultipliers",
     "TangentNewtonCgStep",
     "TangentNewtonCgTermination",
+    "TangentPreconditioner",
     "lagrangian_hessian_vector_product",
     "least_squares_multipliers",
     "solve_tangent_newton_cg",

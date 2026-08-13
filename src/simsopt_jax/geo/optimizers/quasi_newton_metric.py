@@ -1,10 +1,11 @@
-"""Trust-region adapter for the shared L-BFGS-B inverse-curvature store.
+"""Projected-optimizer adapter for the shared L-BFGS-B inverse-curvature store.
 
 The correction-pair layout, the rollover bookkeeping and the two-loop recursion
 all live in ``private/_lbfgsb_scipy.py``, the scipy L-BFGS-B parity port.  This
-module owns only what a trust-region caller adds on top: which accepted steps
-become correction pairs, and how the stored inverse Hessian is handed to a
-preconditioned solve as an operator on an arbitrary vector.
+module owns only what a projected caller adds on top: which accepted steps
+become correction pairs, how the stored inverse Hessian is handed to a solve --
+a search direction, or a preconditioner -- as an operator on an arbitrary
+vector, and how a store built in one tangent space is carried into another.
 """
 
 from __future__ import annotations

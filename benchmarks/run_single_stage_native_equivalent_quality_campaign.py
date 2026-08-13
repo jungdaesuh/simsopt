@@ -115,7 +115,7 @@ _DIAG5_BOOTSTRAP_COMPLETED_PLAN_SHA256: Final = (
 _DIAG5_BOOTSTRAP_SCIENCE_SCHEMA: Final = (
     "single-stage-neq-gntr3-trace-free-diagnostic-v2"
 )
-_DIAG5_BOOTSTRAP_EXECUTION_ENTRY_COUNT: Final = 605
+_DIAG5_BOOTSTRAP_EXECUTION_ENTRY_COUNT: Final = 610
 _DIAG5_BOOTSTRAP_NATIVE_COPY_PATH: Final = (
     "native/simsoptpp.cpython-311-x86_64-linux-gnu.so"
 )
@@ -1135,7 +1135,7 @@ def _diag5_bootstrap_validate_cpu_artifact(
         _diag4_bootstrap_json_bytes(
             execution_manifest_bytes, "DIAG5 execution-source manifest"
         ),
-        frozenset({"entries", "schema_version"}),
+        frozenset({"entries", "entries_sha256", "schema_version"}),
         "DIAG5 execution-source manifest",
     )
     execution_entries = execution_manifest["entries"]
