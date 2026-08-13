@@ -292,6 +292,23 @@ _STRING: Final = _leaf("a string", str)
 _STRING_OR_NULL: Final = _leaf("a string or null", str, nullable=True)
 _NUMBER: Final = _leaf("a number", int, float)
 _NUMBER_OR_NULL: Final = _leaf("a number or null", int, float, nullable=True)
+# A COUNT, an INDEX, a BUDGET or a SIZE IN BYTES is a whole number, and the
+# ``_NUMBER`` leaf admitted a fractional one.  Every gate that reads such a leaf
+# read it through ``int(...)``, which TRUNCATES, so the receipt's own words were
+# defeated by their own reader: ``stored_pairs: -0.5`` passed the check that says
+# "which is not a count" (``int(-0.5) == 0``), ``status: 2.9`` passed "which is
+# not one the engine reports" and minted ``latched: true``, and
+# ``maximum_iterations: 700.9`` truncated into ``CERTIFIED_BUDGET`` /
+# ``PREREGISTERED``.  The deferral that left this open reasoned that a receipt
+# claiming 700.9 certified iterations describes nothing physical -- true, and
+# beside the point, because the truncation is what let it seal.  Measured on the
+# real producers at these bytes: every one of these leaves is a Python ``int``
+# by construction (``len(...)``, ``os.getpid()``, ``st_dev``, ``st_size``,
+# ``int(run.status)``, ``text.count(...)``), so refusing the float form refuses
+# nothing an honest chain writes.  ``bool`` is excluded here as it is for
+# ``_NUMBER``: ``true`` is not a count either.
+_INTEGER: Final = _leaf("a whole number", int)
+_INTEGER_OR_NULL: Final = _leaf("a whole number or null", int, nullable=True)
 _BOOL: Final = _leaf("a boolean", bool)
 _LIST: Final = _leaf("a list", list)
 _MAPPING: Final = _leaf("a mapping", dict)
@@ -305,31 +322,31 @@ def _each(shape: Mapping[str, object]) -> tuple[Mapping[str, object]]:
 
 
 CACHE_STATE_SHAPE: Final = {
-    "entry_count": _NUMBER,
+    "entry_count": _INTEGER,
     "entries_digest": _STRING,
-    "total_bytes": _NUMBER,
+    "total_bytes": _INTEGER,
 }
 CACHE_CONFIGURATION_SHAPE: Final = {
     "directory": _STRING,
     "enabled": _BOOL,
     "min_compile_time_seconds": _NUMBER,
-    "min_entry_size_bytes": _NUMBER,
+    "min_entry_size_bytes": _INTEGER,
 }
 RUNTIME_IDENTITY_SHAPE: Final = {
     "backend": _STRING,
-    "device_count": _NUMBER,
+    "device_count": _INTEGER,
     "device_kind": _STRING,
     "device_platform": _STRING,
     "jax_version": _STRING,
     "jaxlib_version": _STRING,
     "native_extension_path": _STRING,
-    "process_id": _NUMBER,
+    "process_id": _INTEGER,
     "python_executable": _STRING,
     "python_prefix": _STRING,
 }
 STORAGE_PROBE_SHAPE: Final = {
-    "advisory_available_bytes": _NUMBER,
-    "device_id": _NUMBER,
+    "advisory_available_bytes": _INTEGER,
+    "device_id": _INTEGER,
     "directory": _STRING,
     "filesystem_type": _STRING,
     "one_byte_write": _STRING,
@@ -360,7 +377,7 @@ WORKTREE_IDENTITY_SHAPE: Final = {
     "untracked_bytes_manifest_sha256": _STRING,
 }
 SOURCE_SNAPSHOT_SHAPE: Final = {
-    "entry_count": _NUMBER,
+    "entry_count": _INTEGER,
     "manifest_sha256": _STRING,
     "relative_path": _STRING,
     "worktree": WORKTREE_IDENTITY_SHAPE,
@@ -375,20 +392,20 @@ COLD_LANE_ANOMALY_SHAPE: Final = {
     "artifact_relative_path": _STRING,
     "gate_refused": _STRING_OR_NULL,
     "outcome": _STRING,
-    "return_code": _NUMBER,
+    "return_code": _INTEGER,
     "supervised_seconds": _NUMBER,
     "timed_out": _BOOL,
 }
 GPU_MEMORY_SHAPE: Final = {
     "availability": _STRING,
     "child_argv_sha256": _STRING,
-    "child_pid": _NUMBER,
-    "child_start_time_ticks": _NUMBER_OR_NULL,
+    "child_pid": _INTEGER,
+    "child_start_time_ticks": _INTEGER_OR_NULL,
     "device_uuid": _STRING,
     "monitor_scope": _STRING,
-    "parent_pid": _NUMBER,
+    "parent_pid": _INTEGER,
     "peak_used_memory_mib": _NUMBER_OR_NULL,
-    "sample_count": _NUMBER,
+    "sample_count": _INTEGER,
     "unavailable_reason": _STRING_OR_NULL,
 }
 ATTEMPT_TIMING_SHAPE: Final = {
@@ -412,17 +429,17 @@ ATTEMPT_SOLVE_SHAPE: Final = {
     # nonfinite value, which is the shape a NaN reaches the receipt in; the
     # gates that read them refuse null as a number rather than here.
     "collapse_proximity_margin": _NUMBER_OR_NULL,
-    "iterations_run": _NUMBER,
+    "iterations_run": _INTEGER,
     "latched": _BOOL,
-    "line_search_forced_refreshes": _NUMBER,
+    "line_search_forced_refreshes": _INTEGER,
     "maximum_feasibility_inf": _NUMBER_OR_NULL,
     "monotone_descent": _BOOL,
-    "projector_materializations": _NUMBER,
+    "projector_materializations": _INTEGER,
     "rows": _LIST,
-    "status": _NUMBER,
+    "status": _INTEGER,
     "status_name": _STRING,
-    "stored_pairs": _NUMBER,
-    "tangency_forced_refreshes": _NUMBER,
+    "stored_pairs": _INTEGER,
+    "tangency_forced_refreshes": _INTEGER,
     "terminal_feasibility_inf": _NUMBER_OR_NULL,
     "terminal_objective": _NUMBER_OR_NULL,
     "terminal_projected_gradient_inf": _NUMBER_OR_NULL,
@@ -448,7 +465,7 @@ ENDPOINT_AGREEMENT_SHAPE: Final = {
 # and all three were unreachable by the walker and unread by every validator.
 EXECUTION_SOURCE_MANIFEST_SHAPE: Final = {
     "entries_sha256": _STRING,
-    "entry_count": _NUMBER,
+    "entry_count": _INTEGER,
     "manifest_sha256": _STRING,
     "relative_path": _STRING,
     "schema_version": _STRING,
@@ -457,10 +474,10 @@ BOUND_MODULE_SHAPE: Final = {
     "module": _STRING,
     "relative_path": _STRING,
     "sha256": _STRING,
-    "size_bytes": _NUMBER,
+    "size_bytes": _INTEGER,
 }
 UNMANIFESTED_MODULE_SHAPE: Final = {"module": _STRING, "relative_path": _STRING}
-INTERPRETER_INSTALLATION_SHAPE: Final = {"count": _NUMBER, "roots": _LIST}
+INTERPRETER_INSTALLATION_SHAPE: Final = {"count": _INTEGER, "roots": _LIST}
 EXECUTION_SOURCES_SHAPE: Final = {
     "bound_modules": _each(BOUND_MODULE_SHAPE),
     "interpreter_installation_modules": INTERPRETER_INSTALLATION_SHAPE,
@@ -480,16 +497,16 @@ PROBLEM_IDENTITY_SHAPE: Final = {
     "sha_is_binding": _BOOL,
 }
 LOWERED_KERNEL_SHAPE: Final = {
-    "ir_bytes": _NUMBER,
+    "ir_bytes": _INTEGER,
     "name": _STRING,
-    "while_operations": _NUMBER,
+    "while_operations": _INTEGER,
 }
 LOWERING_PRE_GATE_SHAPE: Final = {
     "budget_independent": _BOOL,
-    "certified_iterations": _NUMBER,
+    "certified_iterations": _INTEGER,
     "kernels": _each(LOWERED_KERNEL_SHAPE),
-    "rehearsal_iterations": _NUMBER,
-    "total_ir_bytes": _NUMBER,
+    "rehearsal_iterations": _INTEGER,
+    "total_ir_bytes": _INTEGER,
 }
 
 _ENDPOINT_LEDGER_KEYS: Final = {
@@ -514,7 +531,7 @@ GATED_ENDPOINT_LEDGER_SHAPE: Final = {
 }
 
 ATTEMPT_EVIDENCE_SHAPE: Final = {
-    "attempt_index": _NUMBER,
+    "attempt_index": _INTEGER,
     "certified_options_delta": _MAPPING,
     "compilation_cache": ATTEMPT_CACHE_SHAPE,
     "endpoint_agreement": ENDPOINT_AGREEMENT_SHAPE,
@@ -536,7 +553,7 @@ ATTEMPT_EVIDENCE_SHAPE: Final = {
     "timing_seconds": ATTEMPT_TIMING_SHAPE,
 }
 REFUSED_ATTEMPT_EVIDENCE_SHAPE: Final = {
-    "attempt_index": _NUMBER,
+    "attempt_index": _INTEGER,
     "error": _STRING,
     "gate_refused": _STRING,
     "route": _STRING,
@@ -545,11 +562,11 @@ REFUSED_ATTEMPT_EVIDENCE_SHAPE: Final = {
 SUPERVISED_ATTEMPT_SHAPE: Final = {
     "argv_sha256": _STRING,
     "artifact_relative_path": _STRING,
-    "attempt_index": _NUMBER,
+    "attempt_index": _INTEGER,
     "evidence": _Dispatched("_validate_attempt_shape, one of the child's two"),
     "gpu_memory": GPU_MEMORY_SHAPE,
     "outcome": _STRING,
-    "return_code": _NUMBER,
+    "return_code": _INTEGER,
     "stderr_tail": _STRING,
     "stdout_tail": _STRING_OR_NULL,
     "supervised_seconds": _NUMBER,
@@ -560,15 +577,15 @@ COLD_LANE_SHAPE: Final = {
     "timed_against_bar": _BOOL,
 }
 ATTEMPT_PROTOCOL_SHAPE: Final = {
-    "attempts_run": _NUMBER,
-    "authorized_attempts": _NUMBER,
-    "certified_maximum_iterations": _NUMBER,
+    "attempts_run": _INTEGER,
+    "authorized_attempts": _INTEGER,
+    "certified_maximum_iterations": _INTEGER,
     "cold_lane_authorized": _BOOL,
     "conformance": _STRING,
-    "latch_count": _NUMBER,
+    "latch_count": _INTEGER,
     "latch_rate": _STRING,
-    "maximum_iterations": _NUMBER,
-    "preregistered_attempts": _NUMBER,
+    "maximum_iterations": _INTEGER,
+    "preregistered_attempts": _INTEGER,
     "stop_rule": _STRING,
 }
 ROOT_EVIDENCE_SHAPE: Final = {
@@ -617,7 +634,7 @@ UNSHAPED_LEAVES: Final = {
     "root.attempts": "each element is a supervised attempt, walked by _validate_attempt_shape",
     "root.cold_lane": "null, or a cold-lane record walked by _validate_attempt_shape",
     "root.cold_lane_anomaly": "null, or COLD_LANE_ANOMALY_SHAPE; re-derived from the lane and compared",
-    "root.supervisor.preflight.visible_gpu_uuids": "an inventory of device UUIDs; the pinned one is required to be among them",
+    "root.supervisor.preflight.visible_gpu_uuids": "an inventory of device UUIDs; every element is required to be a string and the pinned one to be among them",
     "supervised attempt.evidence": "null, refused or complete; _validate_attempt_shape picks the shape",
     "cold lane.evidence": "null, refused or complete; _validate_attempt_shape picks the shape",
     "attempt evidence.certified_options_delta": "the fields this budget changed; re-derived from options against the frozen configuration and required to name maximum_iterations or nothing",
@@ -629,20 +646,754 @@ UNSHAPED_LEAVES: Final = {
     "attempt evidence.problem_identity.relative_difference": "re-derived by problem_identity_evidence from the measured side",
     "attempt evidence.problem_identity.relative_tolerances": "the campaign's frozen tolerances; compared to them",
     "attempt evidence.execution_sources.interpreter_installation_modules.roots": "the hidden top-level directories the interpreter installation lives under",
-    "attempt evidence.solve.rows": "the recorded iterates the solve summary is a projection of; each row's objective and feasibility_inf are re-derived into that summary by _validate_solve_telemetry",
+    "attempt evidence.solve.rows": "the recorded iterates; _validate_solve_telemetry re-derives iterations_run, maximum_feasibility_inf, monotone_descent and (through status) status_name and latched from them, and requires the terminal objective to be an endpoint of the last one. The terminal scalars are measured at a point the rows do not contain, so they are bound to the endpoint agreement rather than projected from a row",
     "endpoint ledger.informational_observables": "the campaign's frozen informational set; compared to it",
     "endpoint ledger.native": "one number per physics term; compared term by term to the campaign's frozen native reference on a PRE-REGISTERED attempt (ruling 17 leaves the cold lane's native side uncompared, by design)",
     "endpoint ledger.pinned_quality_terms": "the campaign's frozen pinned set; compared to it",
     "endpoint ledger.relative_difference": "re-derived from the two sides",
-    "endpoint ledger.terminal": "one number per physics term; the gate is recomputed from it",
+    "endpoint ledger.terminal": "one number per physics term; the relative-difference column is recomputed from it and weighted_total is required to be the standalone terminal objective (this node carries no gate: an UNGATED ledger is the shape a lane or a non-latching draw publishes, and by ruling 13 it decides nothing)",
     "gated endpoint ledger.informational_observables": "the campaign's frozen informational set; compared to it",
     "gated endpoint ledger.native": "one number per physics term; compared term by term to the campaign's frozen native reference on a PRE-REGISTERED attempt (ruling 17 leaves the cold lane's native side uncompared, by design)",
     "gated endpoint ledger.pinned_quality_terms": "the campaign's frozen pinned set; compared to it",
     "gated endpoint ledger.pinned_term_gate.failed_terms": "the terms the recomputed gate names; the whole block is recomputed and compared",
     "gated endpoint ledger.pinned_term_gate.terms": "one verdict per pinned term; the whole block is recomputed and compared",
     "gated endpoint ledger.relative_difference": "re-derived from the two sides",
-    "gated endpoint ledger.terminal": "one number per physics term; the gate is recomputed from it",
+    "gated endpoint ledger.terminal": "one number per physics term; the gate is recomputed from it, against the campaign's frozen native literals on the attempt that discharges the claim, and weighted_total is required to be the standalone terminal objective",
 }
+
+# WHAT EVERY TYPED LEAF IS BOUND TO, and for the ones bound to nothing, why.
+#
+# The campaign's whole history is one defect told six times: each remediation
+# binds the leaf the last round found and leaves its neighbour free, and the
+# next round finds the neighbour.  A shape tree made an ABSENT SHAPE
+# unrepresentable; this makes an UNBOUND CLAIM-BEARING LEAF unrepresentable the
+# same way.  Every ``_Leaf`` of ``RECEIPT_SHAPES`` is declared here as exactly
+# one of:
+#
+#   ``BINDING_FROZEN``    compared to something outside the receipt -- a
+#                         campaign constant, or a frozen owner that holds one.
+#   ``BINDING_DERIVED``   re-derived from other published fields, or from the
+#                         producer's own owner asked again.
+#   ``BINDING_DIGEST``    recomputed by hashing an artifact the tree carries.
+#   ``BINDING_NONE``      read by nothing, with the reason stated.
+#
+# and the second element is the ANCHOR: the module-level name the comparison is
+# against, or the function that re-derives it, or -- for ``BINDING_NONE`` -- the
+# reason.  The suite requires this map to be exactly the leaves the walker
+# finds, requires every anchor to resolve in this module, and requires
+# ``CLAIM_BEARING_LEAVES`` to carry no ``BINDING_NONE``.
+#
+# What it does NOT prove is that the named anchor is reached on every path; that
+# is what the refusal-site census and its kill tests in the suite are for, and
+# the two are meant to be read together.  What it does make impossible is the
+# thing that has actually happened six times: a claim-bearing leaf shipped with
+# nothing on the other side of it.
+BINDING_FROZEN: Final = "frozen literal"
+BINDING_DERIVED: Final = "re-derivation"
+BINDING_DIGEST: Final = "digest"
+BINDING_NONE: Final = "unbound"
+BINDING_KINDS: Final = frozenset(
+    {BINDING_FROZEN, BINDING_DERIVED, BINDING_DIGEST, BINDING_NONE}
+)
+
+
+def _prefixed(
+    prefix: str, bindings: Mapping[str, tuple[str, str]]
+) -> dict[str, tuple[str, str]]:
+    """One block's bindings, under the path the walker reports it at."""
+
+    return {f"{prefix}.{name}": binding for name, binding in bindings.items()}
+
+
+_RUNTIME_IDENTITY_UNREAD: Final = (
+    BINDING_NONE,
+    (
+        "the timed child's device and toolchain beyond its backend; deferred, and "
+        "the same deferral covers the supervisor's own copy"
+    ),
+)
+_CACHE_STATE_UNREAD: Final = (
+    BINDING_NONE,
+    (
+        "cache accounting published for a reader; only at_entry.entry_count decides "
+        "anything (warm), and the directory itself is a standing deferral"
+    ),
+)
+_SUPERVISED_DRAW_BINDINGS: Final = {
+    "argv_sha256": (BINDING_DERIVED, "_validate_supervised_launch"),
+    "artifact_relative_path": (BINDING_DERIVED, "validate_root_artifact"),
+    "attempt_index": (BINDING_DERIVED, "validate_root_artifact"),
+    "gpu_memory.availability": (
+        BINDING_NONE,
+        (
+            "the sampler's own verdict on itself; the producer's fallback publishes "
+            "unavailability rather than an inferred zero and nothing gates on it"
+        ),
+    ),
+    "gpu_memory.child_argv_sha256": (BINDING_DERIVED, "_validate_supervised_launch"),
+    "gpu_memory.child_pid": (BINDING_DERIVED, "_validate_supervised_launch"),
+    "gpu_memory.child_start_time_ticks": (
+        BINDING_NONE,
+        (
+            "procfs start ticks, published so a reader can tell two children apart; "
+            "unread, and null whenever the sampler bound nothing"
+        ),
+    ),
+    "gpu_memory.device_uuid": (BINDING_FROZEN, "GPU_UUID"),
+    "gpu_memory.monitor_scope": (
+        BINDING_NONE,
+        "a label for what the sampler watched; unread",
+    ),
+    "gpu_memory.parent_pid": (BINDING_DERIVED, "_validate_supervised_launch"),
+    "gpu_memory.peak_used_memory_mib": (
+        BINDING_NONE,
+        (
+            "the observation itself, reported and never gated; the claim is about "
+            "wall time, not occupancy"
+        ),
+    ),
+    "gpu_memory.sample_count": (
+        BINDING_NONE,
+        "how many samples the poller took; unread",
+    ),
+    "gpu_memory.unavailable_reason": (
+        BINDING_NONE,
+        "why the sampler bound nothing; unread",
+    ),
+    "outcome": (BINDING_DERIVED, "_validate_attempt_outcome"),
+    "return_code": (BINDING_DERIVED, "_attempt_outcome"),
+    "stderr_tail": (
+        BINDING_NONE,
+        (
+            "the child's narrative tail, published so a defect report names what the "
+            "child wrote; a free-form string by construction"
+        ),
+    ),
+    "stdout_tail": (
+        BINDING_NONE,
+        "the bytes a protocol failure refused, published for the same reason",
+    ),
+    "supervised_seconds": (BINDING_DERIVED, "_validate_supervised_launch"),
+    "timed_out": (BINDING_DERIVED, "_validate_supervised_launch"),
+}
+_ENDPOINT_LEDGER_BINDINGS: Final = {
+    "gated_at_this_budget": (BINDING_DERIVED, "endpoint_ledger_is_gated"),
+    "informational_observables": (BINDING_FROZEN, "INFORMATIONAL_ENDPOINT_OBSERVABLES"),
+    "native": (BINDING_FROZEN, "certify_native_reference"),
+    "native_state_content_sha256": (
+        BINDING_FROZEN,
+        "NATIVE_ENDPOINT_STATE_CONTENT_SHA256",
+    ),
+    "native_state_relative_path": (BINDING_FROZEN, "NATIVE_ENDPOINT_STATE_PATH"),
+    "native_state_sha256": (BINDING_FROZEN, "NATIVE_ENDPOINT_STATE_FILE_SHA256"),
+    "pinned_quality_terms": (BINDING_FROZEN, "PINNED_ENDPOINT_QUALITY_TERMS"),
+    "relative_difference": (BINDING_DERIVED, "endpoint_relative_differences"),
+    "terminal": (BINDING_DERIVED, "_validate_terminal_endpoint_column"),
+}
+LEAF_BINDINGS: Final = {
+    **_prefixed(
+        "root",
+        {
+            "attempt_protocol.attempts_run": (BINDING_DERIVED, "validate_root_artifact"),
+            "attempt_protocol.authorized_attempts": (
+                BINDING_FROZEN,
+                "PREREGISTERED_ATTEMPTS",
+            ),
+            "attempt_protocol.certified_maximum_iterations": (
+                BINDING_FROZEN,
+                "CERTIFIED_MAXIMUM_ITERATIONS",
+            ),
+            "attempt_protocol.cold_lane_authorized": (
+                BINDING_DERIVED,
+                "validate_root_artifact",
+            ),
+            "attempt_protocol.conformance": (
+                BINDING_DERIVED,
+                "attempt_protocol_conformance",
+            ),
+            "attempt_protocol.latch_count": (BINDING_DERIVED, "validate_root_artifact"),
+            "attempt_protocol.latch_rate": (BINDING_DERIVED, "validate_root_artifact"),
+            "attempt_protocol.maximum_iterations": (
+                BINDING_DERIVED,
+                "_validate_attempt_record",
+            ),
+            "attempt_protocol.preregistered_attempts": (
+                BINDING_FROZEN,
+                "PREREGISTERED_ATTEMPTS",
+            ),
+            "attempt_protocol.stop_rule": (BINDING_FROZEN, "ATTEMPT_STOP_RULE"),
+            "claim.feasibility_tolerance": (BINDING_FROZEN, "CERTIFIED_ROUTE_OPTIONS"),
+            "claim.target_objective": (BINDING_FROZEN, "NATIVE_TARGET_OBJECTIVE"),
+            "claim.wall_seconds_bar": (BINDING_FROZEN, "NATIVE_WALL_SECONDS_BAR"),
+            "compilation_cache.entry_count": _CACHE_STATE_UNREAD,
+            "compilation_cache.entries_digest": _CACHE_STATE_UNREAD,
+            "compilation_cache.total_bytes": _CACHE_STATE_UNREAD,
+            "quality_claim": (BINDING_DERIVED, "_quality_claim"),
+            "route": (BINDING_FROZEN, "PROJECTED_ROUTE"),
+            "schema_version": (BINDING_FROZEN, "GPU_ROOT_SCHEMA_VERSION"),
+            "source_snapshot.entry_count": (
+                BINDING_NONE,
+                (
+                    "the sealed source snapshot is re-derived by nothing; tying it "
+                    "means recomputing the snapshot manifest inside the validator, "
+                    "which is new code on the publication path, and the artifact "
+                    "manifest already covers every byte after publication"
+                ),
+            ),
+            "source_snapshot.manifest_sha256": (
+                BINDING_NONE,
+                "same deferral as source_snapshot.entry_count",
+            ),
+            "source_snapshot.relative_path": (
+                BINDING_NONE,
+                "same deferral as source_snapshot.entry_count",
+            ),
+            "source_snapshot.worktree.git_head": (
+                BINDING_NONE,
+                "same deferral as source_snapshot.entry_count",
+            ),
+            "source_snapshot.worktree.repo_root": (
+                BINDING_NONE,
+                "same deferral as source_snapshot.entry_count",
+            ),
+            "source_snapshot.worktree.tracked_diff_sha256": (
+                BINDING_NONE,
+                "same deferral as source_snapshot.entry_count",
+            ),
+            "source_snapshot.worktree.untracked_bytes_manifest_sha256": (
+                BINDING_NONE,
+                "same deferral as source_snapshot.entry_count",
+            ),
+            "supervisor.attempt_timeout_seconds": (
+                BINDING_FROZEN,
+                "ATTEMPT_TIMEOUT_SECONDS",
+            ),
+            "supervisor.gpu_uuid": (BINDING_FROZEN, "GPU_UUID"),
+            "supervisor.gpu_zero_asserted": (
+                BINDING_NONE,
+                (
+                    "the supervisor states that it is NOT GPU-zero; a receipt saying "
+                    "otherwise describes a different supervisor and nothing reads it"
+                ),
+            ),
+            "supervisor.preflight.gpu_inventory_executable": (
+                BINDING_NONE,
+                "which binary answered the device query; provenance, unread",
+            ),
+            "supervisor.preflight.native_endpoint_state_content_sha256": (
+                BINDING_FROZEN,
+                "NATIVE_ENDPOINT_STATE_CONTENT_SHA256",
+            ),
+            "supervisor.preflight.native_endpoint_state_path": (
+                BINDING_FROZEN,
+                "NATIVE_ENDPOINT_STATE_PATH",
+            ),
+            "supervisor.preflight.native_endpoint_state_sha256": (
+                BINDING_FROZEN,
+                "NATIVE_ENDPOINT_STATE_FILE_SHA256",
+            ),
+            "supervisor.preflight.resolved_temporary_directory": (
+                BINDING_DERIVED,
+                "_validate_preflight_record",
+            ),
+            "supervisor.preflight.storage[].advisory_available_bytes": (
+                BINDING_NONE,
+                (
+                    "advisory by construction: this is the number that said 12.29 GiB "
+                    "free on a filesystem whose one-byte write returned EDQUOT"
+                ),
+            ),
+            "supervisor.preflight.storage[].device_id": (
+                BINDING_NONE,
+                "which device the probed directory sits on; provenance, unread",
+            ),
+            "supervisor.preflight.storage[].directory": (
+                BINDING_DERIVED,
+                "_validate_preflight_record",
+            ),
+            "supervisor.preflight.storage[].filesystem_type": (
+                BINDING_FROZEN,
+                "REFUSED_STORAGE_FILESYSTEM_TYPES",
+            ),
+            "supervisor.preflight.storage[].one_byte_write": (
+                BINDING_DERIVED,
+                "_validate_preflight_record",
+            ),
+            "supervisor.preflight.storage[].resolved_directory": (
+                BINDING_DERIVED,
+                "_validate_preflight_record",
+            ),
+            "supervisor.preflight.storage[].role": (
+                BINDING_DERIVED,
+                "_validate_preflight_record",
+            ),
+            "supervisor.preflight.temporary_directory": (
+                BINDING_DERIVED,
+                "_validate_preflight_record",
+            ),
+            "supervisor.preflight.visible_gpu_uuids": (BINDING_FROZEN, "GPU_UUID"),
+            "supervisor.runtime_identity.backend": _RUNTIME_IDENTITY_UNREAD,
+            "supervisor.runtime_identity.device_count": _RUNTIME_IDENTITY_UNREAD,
+            "supervisor.runtime_identity.device_kind": _RUNTIME_IDENTITY_UNREAD,
+            "supervisor.runtime_identity.device_platform": _RUNTIME_IDENTITY_UNREAD,
+            "supervisor.runtime_identity.jax_version": _RUNTIME_IDENTITY_UNREAD,
+            "supervisor.runtime_identity.jaxlib_version": _RUNTIME_IDENTITY_UNREAD,
+            "supervisor.runtime_identity.native_extension_path": (
+                _RUNTIME_IDENTITY_UNREAD
+            ),
+            "supervisor.runtime_identity.process_id": _RUNTIME_IDENTITY_UNREAD,
+            "supervisor.runtime_identity.python_executable": _RUNTIME_IDENTITY_UNREAD,
+            "supervisor.runtime_identity.python_prefix": _RUNTIME_IDENTITY_UNREAD,
+            "timing_boundary": (BINDING_FROZEN, "validate_root_artifact"),
+            "timing_seconds.chain_wall": (BINDING_DERIVED, "validate_root_artifact"),
+            "verdict": (BINDING_DERIVED, "derive_verdict"),
+        },
+    ),
+    **_prefixed("supervised attempt", _SUPERVISED_DRAW_BINDINGS),
+    **_prefixed(
+        "cold lane",
+        {
+            **_SUPERVISED_DRAW_BINDINGS,
+            "timed_against_bar": (BINDING_DERIVED, "validate_root_artifact"),
+        },
+    ),
+    **_prefixed(
+        "attempt evidence",
+        {
+            "attempt_index": (BINDING_DERIVED, "_validate_attempt_record"),
+            "certified_options_delta": (
+                BINDING_DERIVED,
+                "_validate_certified_route_options",
+            ),
+            "compilation_cache.after.entry_count": _CACHE_STATE_UNREAD,
+            "compilation_cache.after.entries_digest": _CACHE_STATE_UNREAD,
+            "compilation_cache.after.total_bytes": _CACHE_STATE_UNREAD,
+            "compilation_cache.at_entry.entry_count": (
+                BINDING_DERIVED,
+                "_validate_attempt_record",
+            ),
+            "compilation_cache.at_entry.entries_digest": _CACHE_STATE_UNREAD,
+            "compilation_cache.at_entry.total_bytes": _CACHE_STATE_UNREAD,
+            "compilation_cache.before_engine.entry_count": _CACHE_STATE_UNREAD,
+            "compilation_cache.before_engine.entries_digest": _CACHE_STATE_UNREAD,
+            "compilation_cache.before_engine.total_bytes": _CACHE_STATE_UNREAD,
+            "compilation_cache.configuration.directory": (
+                BINDING_NONE,
+                (
+                    "the attempt's compilation-cache directory is a standing "
+                    "deferral; the cold lane is what makes the cache an accounting "
+                    "device, and it is bound through warm rather than through a path"
+                ),
+            ),
+            "compilation_cache.configuration.enabled": (
+                BINDING_NONE,
+                "same deferral as the cache directory",
+            ),
+            "compilation_cache.configuration.min_compile_time_seconds": (
+                BINDING_NONE,
+                "same deferral as the cache directory",
+            ),
+            "compilation_cache.configuration.min_entry_size_bytes": (
+                BINDING_NONE,
+                "same deferral as the cache directory",
+            ),
+            "compilation_cache.warm": (BINDING_DERIVED, "_validate_attempt_record"),
+            "endpoint_agreement.absolute_floor": (
+                BINDING_FROZEN,
+                "DIAG4_ENDPOINT_AGREEMENT_ABSOLUTE_FLOOR",
+            ),
+            "endpoint_agreement.feasibility_absolute_tolerance": (
+                BINDING_FROZEN,
+                "CERTIFIED_ROUTE_OPTIONS",
+            ),
+            "endpoint_agreement.loop_terminal_objective": (
+                BINDING_DERIVED,
+                "_validate_terminal_endpoint_column",
+            ),
+            "endpoint_agreement.relative_tolerance": (
+                BINDING_FROZEN,
+                "DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE",
+            ),
+            "endpoint_agreement.standalone_terminal_objective": (
+                BINDING_DERIVED,
+                "_validate_terminal_endpoint_column",
+            ),
+            "endpoint_agreement.terminal_feasibility_inf": (
+                BINDING_DERIVED,
+                "_validate_terminal_endpoint_column",
+            ),
+            "endpoint_agreement.terminal_state_sha256": (
+                BINDING_DIGEST,
+                "exact_numeric_tree_sha256",
+            ),
+            "environment.JAX_COMPILATION_CACHE_DIR": (
+                BINDING_NONE,
+                "same deferral as the cache directory",
+            ),
+            "environment.JAX_ENABLE_X64": (BINDING_FROZEN, "GPU_REQUIRED_ENVIRONMENT"),
+            "environment.JAX_PLATFORMS": (BINDING_FROZEN, "GPU_REQUIRED_ENVIRONMENT"),
+            "environment.XLA_PYTHON_CLIENT_PREALLOCATE": (
+                BINDING_FROZEN,
+                "GPU_REQUIRED_ENVIRONMENT",
+            ),
+            "execution_sources.bound_modules[].module": (
+                BINDING_NONE,
+                (
+                    "the importable NAME of a bound module, published so a refusal "
+                    "can say which one; custody is decided by the three leaves below"
+                ),
+            ),
+            "execution_sources.bound_modules[].relative_path": (
+                BINDING_DERIVED,
+                "_validate_execution_sources",
+            ),
+            "execution_sources.bound_modules[].sha256": (
+                BINDING_DERIVED,
+                "_validate_execution_sources",
+            ),
+            "execution_sources.bound_modules[].size_bytes": (
+                BINDING_DERIVED,
+                "_validate_execution_sources",
+            ),
+            "execution_sources.interpreter_installation_modules.count": (
+                BINDING_NONE,
+                (
+                    "hidden top-level directories INSIDE the checkout that the "
+                    "interpreter installation lives under; a venv outside the tree "
+                    "publishes {count: 0, roots: []} and is equally honest, so the "
+                    "field cannot discharge an interpreter pin"
+                ),
+            ),
+            "execution_sources.interpreter_installation_modules.roots": (
+                BINDING_NONE,
+                "same deferral as its count",
+            ),
+            "execution_sources.manifest.entries_sha256": (
+                BINDING_DERIVED,
+                "load_execution_source_manifest",
+            ),
+            "execution_sources.manifest.entry_count": (
+                BINDING_DERIVED,
+                "load_execution_source_manifest",
+            ),
+            "execution_sources.manifest.manifest_sha256": (
+                BINDING_DERIVED,
+                "load_execution_source_manifest",
+            ),
+            "execution_sources.manifest.relative_path": (
+                BINDING_DERIVED,
+                "load_execution_source_manifest",
+            ),
+            "execution_sources.manifest.schema_version": (
+                BINDING_DERIVED,
+                "load_execution_source_manifest",
+            ),
+            "execution_sources.unmanifested_repository_modules[].module": (
+                BINDING_DERIVED,
+                "_validate_execution_sources",
+            ),
+            "execution_sources.unmanifested_repository_modules[].relative_path": (
+                BINDING_DERIVED,
+                "_validate_execution_sources",
+            ),
+            "gate_refused": (BINDING_DERIVED, "_validate_attempt_shape"),
+            "lowering_pre_gate.budget_independent": (
+                BINDING_DERIVED,
+                "_validate_lowering_pre_gate",
+            ),
+            "lowering_pre_gate.certified_iterations": (
+                BINDING_FROZEN,
+                "CERTIFIED_MAXIMUM_ITERATIONS",
+            ),
+            "lowering_pre_gate.kernels[].ir_bytes": (
+                BINDING_DERIVED,
+                "_validate_lowering_pre_gate",
+            ),
+            "lowering_pre_gate.kernels[].name": (
+                BINDING_FROZEN,
+                "CERTIFIED_LOWERED_KERNEL_NAMES",
+            ),
+            "lowering_pre_gate.kernels[].while_operations": (
+                BINDING_DERIVED,
+                "_validate_lowering_pre_gate",
+            ),
+            "lowering_pre_gate.rehearsal_iterations": (
+                BINDING_DERIVED,
+                "_validate_lowering_pre_gate",
+            ),
+            "lowering_pre_gate.total_ir_bytes": (
+                BINDING_DERIVED,
+                "_validate_lowering_pre_gate",
+            ),
+            "options": (BINDING_FROZEN, "CERTIFIED_ROUTE_OPTIONS"),
+            "problem_identity.bound": (BINDING_DERIVED, "_validate_problem_identity"),
+            "problem_identity.checks": (BINDING_DERIVED, "problem_identity_evidence"),
+            "problem_identity.feasibility_absolute_tolerance": (
+                BINDING_DERIVED,
+                "problem_identity_evidence",
+            ),
+            "problem_identity.measured_observables": (
+                BINDING_DERIVED,
+                "problem_identity_evidence",
+            ),
+            "problem_identity.recorded_bootstrap_sha256": (
+                BINDING_DERIVED,
+                "problem_identity_evidence",
+            ),
+            "problem_identity.recorded_problem_sha256": (
+                BINDING_DERIVED,
+                "problem_identity_evidence",
+            ),
+            "problem_identity.reference_observables": (
+                BINDING_FROZEN,
+                "CPU_BOOTSTRAP_OBSERVABLES",
+            ),
+            "problem_identity.relative_difference": (
+                BINDING_DERIVED,
+                "problem_identity_evidence",
+            ),
+            "problem_identity.relative_tolerances": (
+                BINDING_DERIVED,
+                "problem_identity_evidence",
+            ),
+            "problem_identity.sha_is_binding": (
+                BINDING_DERIVED,
+                "_validate_problem_identity",
+            ),
+            "quality_claim": (BINDING_DERIVED, "_quality_claim"),
+            "route": (BINDING_FROZEN, "PROJECTED_ROUTE"),
+            "runtime_identity.backend": (BINDING_FROZEN, "REQUIRED_BACKEND"),
+            "runtime_identity.device_count": _RUNTIME_IDENTITY_UNREAD,
+            "runtime_identity.device_kind": _RUNTIME_IDENTITY_UNREAD,
+            "runtime_identity.device_platform": _RUNTIME_IDENTITY_UNREAD,
+            "runtime_identity.jax_version": _RUNTIME_IDENTITY_UNREAD,
+            "runtime_identity.jaxlib_version": _RUNTIME_IDENTITY_UNREAD,
+            "runtime_identity.native_extension_path": _RUNTIME_IDENTITY_UNREAD,
+            "runtime_identity.process_id": _RUNTIME_IDENTITY_UNREAD,
+            "runtime_identity.python_executable": _RUNTIME_IDENTITY_UNREAD,
+            "runtime_identity.python_prefix": _RUNTIME_IDENTITY_UNREAD,
+            "schema_version": (BINDING_FROZEN, "GPU_ATTEMPT_SCHEMA_VERSION"),
+            "solve.collapse_proximity_margin": (
+                BINDING_NONE,
+                (
+                    "reported and never acted on: the run's smallest recorded step "
+                    "scale in units of the line-search floor, whose only separation "
+                    "the banked evidence carries is unity"
+                ),
+            ),
+            "solve.iterations_run": (BINDING_DERIVED, "_validate_solve_telemetry"),
+            "solve.latched": (BINDING_DERIVED, "_validate_solve_telemetry"),
+            "solve.line_search_forced_refreshes": (
+                BINDING_DERIVED,
+                "_validate_solve_telemetry",
+            ),
+            "solve.maximum_feasibility_inf": (
+                BINDING_DERIVED,
+                "_validate_solve_telemetry",
+            ),
+            "solve.monotone_descent": (BINDING_DERIVED, "_validate_solve_telemetry"),
+            "solve.projector_materializations": (
+                BINDING_DERIVED,
+                "_validate_solve_telemetry",
+            ),
+            "solve.rows": (BINDING_DERIVED, "_iterate_column"),
+            "solve.status": (BINDING_DERIVED, "_validate_solve_telemetry"),
+            "solve.status_name": (BINDING_DERIVED, "_validate_solve_telemetry"),
+            "solve.stored_pairs": (BINDING_DERIVED, "_validate_solve_telemetry"),
+            "solve.tangency_forced_refreshes": (
+                BINDING_DERIVED,
+                "_validate_solve_telemetry",
+            ),
+            "solve.terminal_feasibility_inf": (
+                BINDING_DERIVED,
+                "_validate_terminal_endpoint_column",
+            ),
+            "solve.terminal_objective": (
+                BINDING_DERIVED,
+                "_validate_terminal_endpoint_column",
+            ),
+            "solve.terminal_projected_gradient_inf": (
+                BINDING_NONE,
+                (
+                    "the terminal projected gradient, reported: section 1 states the "
+                    "claim on the objective and on feasibility, and a stationarity "
+                    "band is not part of it"
+                ),
+            ),
+            "timing_boundary": (BINDING_FROZEN, "_validate_attempt_record"),
+            "timing_seconds.attempt_wall": (BINDING_DERIVED, "_validate_attempt_record"),
+            "timing_seconds.bootstrap": (BINDING_DERIVED, "_validate_attempt_record"),
+            "timing_seconds.engine_compile": (
+                BINDING_DERIVED,
+                "attempt_engine_wall_seconds",
+            ),
+            "timing_seconds.engine_solve": (
+                BINDING_DERIVED,
+                "attempt_engine_wall_seconds",
+            ),
+            "timing_seconds.engine_wall": (
+                BINDING_DERIVED,
+                "attempt_engine_wall_seconds",
+            ),
+            "timing_seconds.lowering_pre_gate": (
+                BINDING_DERIVED,
+                "_validate_attempt_record",
+            ),
+            "timing_seconds.problem_identity": (
+                BINDING_DERIVED,
+                "_validate_attempt_record",
+            ),
+        },
+    ),
+    **_prefixed(
+        "refused attempt evidence",
+        {
+            "attempt_index": (
+                BINDING_NONE,
+                (
+                    "a refused draw decides nothing but its own outcome (ruling 17), "
+                    "so its document is shape-checked and its gate name read"
+                ),
+            ),
+            "error": (
+                BINDING_NONE,
+                "the refusing gate's own words; free-form by construction",
+            ),
+            "gate_refused": (BINDING_DERIVED, "_attempt_outcome"),
+            "route": (
+                BINDING_NONE,
+                "same reason as the refused document's attempt_index",
+            ),
+            "schema_version": (
+                BINDING_NONE,
+                "same reason as the refused document's attempt_index",
+            ),
+        },
+    ),
+    **_prefixed("endpoint ledger", _ENDPOINT_LEDGER_BINDINGS),
+    **_prefixed(
+        "gated endpoint ledger",
+        {
+            **_ENDPOINT_LEDGER_BINDINGS,
+            "pinned_term_gate.failed_terms": (BINDING_DERIVED, "gate_endpoint_ledger"),
+            "pinned_term_gate.passed": (
+                BINDING_DERIVED,
+                "gate_endpoint_ledger_against_frozen_native",
+            ),
+            "pinned_term_gate.terms": (BINDING_DERIVED, "gate_endpoint_ledger"),
+        },
+    ),
+    **_prefixed(
+        "cold lane anomaly",
+        {
+            "artifact_relative_path": (BINDING_DERIVED, "cold_lane_anomaly"),
+            "gate_refused": (BINDING_DERIVED, "cold_lane_anomaly"),
+            "outcome": (BINDING_DERIVED, "cold_lane_anomaly"),
+            "return_code": (BINDING_DERIVED, "cold_lane_anomaly"),
+            "supervised_seconds": (BINDING_DERIVED, "cold_lane_anomaly"),
+            "timed_out": (BINDING_DERIVED, "cold_lane_anomaly"),
+        },
+    ),
+}
+
+# The leaves section 1's claim is made of: the verdict and its pre-registered
+# precondition, the five comparisons that decide whether a draw discharges the
+# claim, the route the claim is about, the device it is stated for, the custody
+# of the bytes that produced it, and the wall it is measured in.  None of these
+# may be ``BINDING_NONE``, and the suite makes that unrepresentable.
+CLAIM_BEARING_LEAVES: Final = frozenset(
+    {
+        "root.verdict",
+        "root.quality_claim",
+        "root.route",
+        "root.schema_version",
+        "root.claim.feasibility_tolerance",
+        "root.claim.target_objective",
+        "root.claim.wall_seconds_bar",
+        "root.attempt_protocol.attempts_run",
+        "root.attempt_protocol.authorized_attempts",
+        "root.attempt_protocol.certified_maximum_iterations",
+        "root.attempt_protocol.cold_lane_authorized",
+        "root.attempt_protocol.conformance",
+        "root.attempt_protocol.latch_count",
+        "root.attempt_protocol.latch_rate",
+        "root.attempt_protocol.maximum_iterations",
+        "root.attempt_protocol.preregistered_attempts",
+        "root.attempt_protocol.stop_rule",
+        "root.supervisor.attempt_timeout_seconds",
+        "root.supervisor.gpu_uuid",
+        "root.supervisor.preflight.native_endpoint_state_content_sha256",
+        "root.supervisor.preflight.native_endpoint_state_path",
+        "root.supervisor.preflight.native_endpoint_state_sha256",
+        "root.supervisor.preflight.visible_gpu_uuids",
+        "root.supervisor.preflight.storage[].filesystem_type",
+        "root.timing_seconds.chain_wall",
+        "root.timing_boundary",
+        "supervised attempt.outcome",
+        "supervised attempt.return_code",
+        "supervised attempt.supervised_seconds",
+        "supervised attempt.timed_out",
+        "supervised attempt.argv_sha256",
+        "supervised attempt.attempt_index",
+        "supervised attempt.artifact_relative_path",
+        "supervised attempt.gpu_memory.device_uuid",
+        "attempt evidence.options",
+        "attempt evidence.certified_options_delta",
+        "attempt evidence.route",
+        "attempt evidence.schema_version",
+        "attempt evidence.quality_claim",
+        "attempt evidence.timing_boundary",
+        "attempt evidence.timing_seconds.engine_compile",
+        "attempt evidence.timing_seconds.engine_solve",
+        "attempt evidence.timing_seconds.engine_wall",
+        "attempt evidence.timing_seconds.attempt_wall",
+        "attempt evidence.runtime_identity.backend",
+        "attempt evidence.environment.JAX_ENABLE_X64",
+        "attempt evidence.environment.JAX_PLATFORMS",
+        "attempt evidence.environment.XLA_PYTHON_CLIENT_PREALLOCATE",
+        "attempt evidence.execution_sources.bound_modules[].relative_path",
+        "attempt evidence.execution_sources.bound_modules[].sha256",
+        "attempt evidence.execution_sources.bound_modules[].size_bytes",
+        "attempt evidence.execution_sources.manifest.entries_sha256",
+        "attempt evidence.execution_sources.manifest.entry_count",
+        "attempt evidence.execution_sources.manifest.manifest_sha256",
+        "attempt evidence.execution_sources.unmanifested_repository_modules[].relative_path",
+        "attempt evidence.problem_identity.bound",
+        "attempt evidence.problem_identity.measured_observables",
+        "attempt evidence.problem_identity.reference_observables",
+        "attempt evidence.problem_identity.sha_is_binding",
+        "attempt evidence.lowering_pre_gate.budget_independent",
+        "attempt evidence.lowering_pre_gate.certified_iterations",
+        "attempt evidence.lowering_pre_gate.rehearsal_iterations",
+        "attempt evidence.lowering_pre_gate.kernels[].name",
+        "attempt evidence.solve.rows",
+        "attempt evidence.solve.latched",
+        "attempt evidence.solve.status",
+        "attempt evidence.solve.status_name",
+        "attempt evidence.solve.iterations_run",
+        "attempt evidence.solve.maximum_feasibility_inf",
+        "attempt evidence.solve.terminal_objective",
+        "attempt evidence.solve.terminal_feasibility_inf",
+        "attempt evidence.compilation_cache.warm",
+        "attempt evidence.compilation_cache.at_entry.entry_count",
+        "attempt evidence.endpoint_agreement.loop_terminal_objective",
+        "attempt evidence.endpoint_agreement.standalone_terminal_objective",
+        "attempt evidence.endpoint_agreement.terminal_feasibility_inf",
+        "attempt evidence.endpoint_agreement.feasibility_absolute_tolerance",
+        "attempt evidence.endpoint_agreement.relative_tolerance",
+        "attempt evidence.endpoint_agreement.absolute_floor",
+        "attempt evidence.endpoint_agreement.terminal_state_sha256",
+        "gated endpoint ledger.gated_at_this_budget",
+        "gated endpoint ledger.native",
+        "gated endpoint ledger.terminal",
+        "gated endpoint ledger.pinned_quality_terms",
+        "gated endpoint ledger.native_state_sha256",
+        "gated endpoint ledger.native_state_content_sha256",
+        "gated endpoint ledger.pinned_term_gate.passed",
+        "gated endpoint ledger.pinned_term_gate.terms",
+        "gated endpoint ledger.pinned_term_gate.failed_terms",
+    }
+)
 
 # The three modules the certified chain cannot run without, named by the files
 # this process imported rather than by a second spelling of their paths: the
@@ -1390,16 +2141,20 @@ def cold_lane_anomaly(
 
 
 def attempt_protocol_conformance(
-    *, authorized_attempts: int, iterations: int, cold_lane_authorized: bool
+    *,
+    authorized_attempts: int,
+    iterations: int,
+    cold_lane_authorized: bool,
+    attempt_timeout_seconds: float,
 ) -> str:
     """Whether a run IS the pre-registered protocol or a bounded smoke.
 
-    The three facts plan sections 3 and 12.2 freeze together -- N = 3, the
-    certified budget, and the cold lane the warm numbers are accounted against
-    -- decide one label, in one place, read by the verdict and re-derived at
-    re-validation.  A bounded smoke that read as a spent pre-registered protocol
-    would drag in the successor-root rule of section 12.1, which applies to a
-    root and to nothing else.
+    The facts plan sections 3 and 12.2 freeze together -- N = 3, the certified
+    budget, the cold lane the warm numbers are accounted against, and the
+    timeout every draw is supervised under -- decide one label, in one place,
+    read by the verdict and re-derived at re-validation.  A bounded smoke that
+    read as a spent pre-registered protocol would drag in the successor-root
+    rule of section 12.1, which applies to a root and to nothing else.
 
     ``cold_lane_authorized`` is whether the lane RAN, never what it produced
     (plan section 12.9).  ``--no-cold-lane`` is a real departure from the
@@ -1408,12 +2163,27 @@ def attempt_protocol_conformance(
     here labelled a fully conforming run a smoke and spent the root on an
     outcome that says nothing about the claim; ``cold_lane_anomaly`` publishes
     it instead.
+
+    ``attempt_timeout_seconds`` is here because it was bound to NOTHING.  The
+    supervised-launch gate requires a record claiming a timeout to have waited
+    the timeout it publishes -- and took BOTH sides of that comparison out of
+    the document being judged, which is the exact defect the certified-route
+    value gate was written to retire, reintroduced in the same commit.  Roots
+    carrying ``1e-9``, ``0.0`` and ``-1.0`` in this field sealed
+    ``CLAIM_DISCHARGED`` / ``PREREGISTERED`` beside a lane that "timed out"
+    after half a second, which erases the pre-registered cold measurement while
+    keeping the pre-registered label.  ``--attempt-timeout-seconds`` is a real
+    knob and an operator who moves it is running a real experiment, so this
+    demotes rather than refuses -- the same shape the certified-route gate uses
+    for ``maximum_iterations``, and the anchor is the frozen literal OUTSIDE the
+    receipt.
     """
 
     preregistered = (
         authorized_attempts == PREREGISTERED_ATTEMPTS
         and iterations == CERTIFIED_MAXIMUM_ITERATIONS
         and cold_lane_authorized
+        and attempt_timeout_seconds == ATTEMPT_TIMEOUT_SECONDS
     )
     return CONFORMANCE_PREREGISTERED if preregistered else CONFORMANCE_BOUNDED_SMOKE
 
@@ -1727,6 +2497,7 @@ def build_root_evidence(
     cache: Mapping[str, JsonValue],
     verdict: str,
     chain_seconds: float,
+    attempt_timeout_seconds: float,
 ) -> dict[str, JsonValue]:
     """Assemble the root receipt, telemetry of every attempt included."""
 
@@ -1756,6 +2527,7 @@ def build_root_evidence(
                 authorized_attempts=authorized_attempts,
                 iterations=iterations,
                 cold_lane_authorized=cold_lane_authorized,
+                attempt_timeout_seconds=attempt_timeout_seconds,
             ),
             "maximum_iterations": iterations,
             "certified_maximum_iterations": CERTIFIED_MAXIMUM_ITERATIONS,
@@ -1848,9 +2620,14 @@ def _validate_leaf(value: JsonValue, leaf: _Leaf, *, where: str) -> None:
             f"{where} is null where the receipt publishes {leaf.description}"
         )
     # ``bool`` is a subclass of ``int``, so a number leaf must exclude it
-    # explicitly or ``true`` passes for a count.
+    # explicitly or ``true`` passes for a count.  Named apart from the ordinary
+    # type refusal because it is a different defect and because two refusal
+    # sites that read identically cannot be told apart by the coverage census.
     if isinstance(value, bool) and bool not in leaf.types:
-        raise ProjectedRootError(f"{where} is not {leaf.description}: {value!r}")
+        raise ProjectedRootError(
+            f"{where} is a boolean where the receipt publishes "
+            f"{leaf.description}: {value!r}"
+        )
     if not isinstance(value, leaf.types):
         raise ProjectedRootError(f"{where} is not {leaf.description}: {value!r}")
 
@@ -1876,7 +2653,18 @@ def _validate_preflight_record(preflight: Mapping[str, JsonValue]) -> None:
             "root preflight names a native endpoint reference other than the "
             "campaign's pinned one"
         )
-    if GPU_UUID not in preflight["visible_gpu_uuids"]:
+    visible = preflight["visible_gpu_uuids"]
+    # An INVENTORY of device UUIDs, which is what its own reason calls it: the
+    # producer builds it from one column of the supervisor's device query, so
+    # every element is a string.  Only membership was enforced, so a receipt
+    # could publish the pinned UUID beside integers, nulls and nested documents
+    # and still read as an inventory.
+    if any(not isinstance(entry, str) for entry in visible):
+        raise ProjectedRootError(
+            f"root preflight publishes a device inventory that is not one: "
+            f"{visible!r}"
+        )
+    if GPU_UUID not in visible:
         raise ProjectedRootError(
             f"root preflight did not see the device the claim names ({GPU_UUID!r})"
         )
@@ -1904,6 +2692,18 @@ def _validate_preflight_record(preflight: Mapping[str, JsonValue]) -> None:
     # one directory beside a probe of another states nothing about the storage
     # the run used.  The two are one fact, so they are compared.
     temporary = preflight["storage"][0]
+    # And it is an ABSOLUTE directory.  ``probe_writable_storage`` refuses a
+    # relative one by name, in the PRODUCER -- so the refusal never reached a
+    # reader of sealed bytes, and a receipt declaring ``temporary/tmp`` on all
+    # four fields sealed: a directory the children spill through that no third
+    # party can resolve, which is the decoupling the absoluteness rule exists to
+    # stop, surviving one level below where its closure landed.
+    for name in ("temporary_directory", "resolved_temporary_directory"):
+        if not Path(str(preflight[name])).is_absolute():
+            raise ProjectedRootError(
+                f"root preflight publishes {preflight[name]!r} as the {name} the "
+                f"children spill through, which no reader can resolve"
+            )
     for declared, probed in (
         ("temporary_directory", "directory"),
         ("resolved_temporary_directory", "resolved_directory"),
@@ -2057,10 +2857,15 @@ def _validate_lowering_pre_gate(
     ``lagrangian_newton_direction`` only under the reduced-Lagrangian arm), so
     the list is re-derived against the campaign's own
     ``CERTIFIED_LOWERED_KERNEL_NAMES``.  Their SIZES are not re-derivable by a
-    reader: the same six kernels lower to IR totals that differ by thousands of
-    bytes between two CPU processes and again on the GPU, which is why the
-    substantive section 6.1 gate (identical IR at both budgets) runs in the
-    child, where both sides are lowered by one process.
+    reader, for a reason this module used to state wrongly: the totals do NOT
+    differ between processes -- three independent CPU processes at one commit
+    measured 65 204 569 bytes to the byte -- they differ between COMMITS with
+    the engine file byte-identical (65 207 733 one commit earlier, 65 200 869 on
+    the 5090).  The total is a function of the tree, not of the process, so
+    freezing it would be a false reject waiting on the next edit to any
+    manifested module; which is why the substantive section 6.1 gate (identical
+    IR at both budgets) runs in the child, where both sides are lowered by one
+    process.
     """
 
     if not lowering["budget_independent"]:
@@ -2135,6 +2940,17 @@ def _validate_certified_route_options(
         raise ProjectedRootError(
             "attempt options are not the certified configuration's fields"
         )
+    # The one field a budget may replace is the one field the shape tree cannot
+    # type, because ``options`` is the dataclass's own mapping and carries no
+    # inner shape.  Every reader of it truncates, so ``maximum_iterations:
+    # 700.9`` minted ``CERTIFIED_BUDGET`` and ``PREREGISTERED`` for a budget
+    # describing nothing physical.  A budget is a whole number of iterations.
+    budget = options["maximum_iterations"]
+    if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1:
+        raise ProjectedRootError(
+            f"attempt options publish maximum_iterations as {budget!r}, which is "
+            f"not a budget"
+        )
     certified = {
         field: json_scalar(getattr(CERTIFIED_ROUTE_OPTIONS, field))
         for field in fields
@@ -2181,6 +2997,30 @@ def _validate_solve_telemetry(solve: Mapping[str, JsonValue]) -> None:
     identity un-re-derivable from the published bytes (``json_scalar`` writes
     null and the raw value is gone), the check admits every reading the producer
     could have written rather than guessing one.
+
+    THE OBJECTIVE COLUMN was left free by the revision that bound the
+    feasibility one, and it is the column section 1's claim is made of: a
+    receipt whose 700 recorded iterates never fell below 1.0 sealed
+    ``CLAIM_DISCHARGED`` beside ``terminal_objective: 4.48e-8``,
+    ``latched: true`` and ``OBJECTIVE_TARGET_REACHED`` -- the latch denied by
+    the receipt's own rows by seven decades.  What is NOT true, and was proposed
+    as the closure, is that a latch implies ``min(objectives) <= target``:
+    MEASURED on both banked 5090 latches and on a live CPU solve, the engine
+    breaks at the TOP of the loop when the current point reaches the target, so
+    no recorded iterate is ever at or below it (Q1 ``4.529e-8``, Q2
+    ``4.517e-8``, target ``4.482e-8``).  Gating that implication would have
+    refused the campaign's own banked evidence.  The true relations are the
+    reverse implication -- no recorded iterate may be at or below the target,
+    because such an iterate would have ended the loop before it was recorded --
+    and ADJACENCY: the terminal point is an endpoint of the LAST recorded
+    iteration, either the point it opened at (a line-search collapse records its
+    opening point and then breaks without advancing) or the candidate it
+    accepted.  Those two endpoints are measured through a different kernel from
+    the terminal re-evaluation, so they agree with it to a few ULP and never
+    bitwise (measured: 1.3e-16 on CPU, 2.8e-14 and 1.7e-14 on the two 5090
+    latches), and the comparison uses the campaign's own cross-executable
+    endpoint band rather than a new constant -- three hundred times the worst
+    deviation this campaign has measured.
     """
 
     rows = solve["rows"]
@@ -2254,6 +3094,43 @@ def _validate_solve_telemetry(solve: Mapping[str, JsonValue]) -> None:
             f"attempt publishes latched={solve['latched']!r} under status "
             f"{solve['status_name']!r}"
         )
+    target = json_scalar(CERTIFIED_ROUTE_OPTIONS.objective_target)
+    reached = [
+        index
+        for index, value in enumerate(objectives)
+        if value is not None and value <= target
+    ]
+    if reached:
+        raise ProjectedRootError(
+            f"attempt records iterate {reached[0]} at objective "
+            f"{objectives[reached[0]]!r}, at or below the target "
+            f"{target!r} the engine stops before recording"
+        )
+    if latched and not rows:
+        raise ProjectedRootError(
+            "attempt publishes a latch with no recorded iterate, so nothing it "
+            "recorded reached the target it claims"
+        )
+    terminal_objective = solve["terminal_objective"]
+    if rows and isinstance(terminal_objective, float):
+        candidates = _iterate_column(rows, "candidate_objective")
+        endpoints = [
+            value for value in (objectives[-1], candidates[-1]) if value is not None
+        ]
+        if endpoints and not any(
+            math.isclose(
+                terminal_objective,
+                value,
+                rel_tol=DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE,
+                abs_tol=DIAG4_ENDPOINT_AGREEMENT_ABSOLUTE_FLOOR,
+            )
+            for value in endpoints
+        ):
+            raise ProjectedRootError(
+                f"attempt publishes a terminal objective {terminal_objective!r} "
+                f"that is neither endpoint of its last recorded iteration "
+                f"({endpoints!r})"
+            )
 
 
 def _iterate_column(rows: Sequence[JsonValue], name: str) -> list[float | None]:
@@ -2261,8 +3138,10 @@ def _iterate_column(rows: Sequence[JsonValue], name: str) -> list[float | None]:
 
     The rows are the child's own per-iteration records and carry every field of
     the engine's iteration tuple, which is a function of the configuration -- so
-    they are not shaped here.  The two columns the solve summary is a projection
-    of are required to be there and to be measurements.
+    they are not shaped here.  The three columns the solve summary is derived
+    against -- the two it is a projection of, and the accepted candidate the
+    terminal endpoint is adjacent to -- are required to be there and to be
+    measurements.
     """
 
     column: list[float | None] = []
@@ -2314,6 +3193,97 @@ def _validate_endpoint_ledger_arithmetic(ledger: Mapping[str, JsonValue]) -> Non
         raise ProjectedRootError(
             "attempt endpoint ledger relative differences are not the ones its "
             "two sides derive"
+        )
+
+
+def _validate_terminal_endpoint_column(evidence: Mapping[str, JsonValue]) -> None:
+    """Make the receipt's four tellings of the terminal endpoint ONE fact.
+
+    The scalar the latch gate reads -- ``solve.terminal_objective`` -- was
+    re-derived from nothing, while the receipt states the same measurement three
+    more times and two of those tellings are EXACT copies in the producer.  So a
+    receipt could seal ``CLAIM_DISCHARGED`` with ``terminal_objective:
+    4.48e-30`` beside an endpoint ledger holding the native weighted total, or
+    with an agreement block whose two halves agreed with each other to 5e-16 and
+    with nothing else in the run.
+
+    The producer's identities, measured at these bytes through the canonical
+    round trip the receipt takes:
+
+    * ``solve.terminal_objective`` is ``json_scalar(run.objective)`` and
+      ``endpoint_agreement.loop_terminal_objective`` is ``run.objective`` -- the
+      same float, and finite on any completed chain, because
+      ``certify_endpoint_agreement`` refuses a nonfinite pair by name before the
+      chain can complete.
+    * ``solve.terminal_feasibility_inf`` and
+      ``endpoint_agreement.terminal_feasibility_inf`` are both
+      ``run.feasibility_inf``, and the same refusal makes them finite.
+    * ``endpoint_agreement.standalone_terminal_objective`` and the ledger's
+      ``terminal.weighted_total`` are both
+      ``float(case.standalone_evaluation(run.coordinates).weighted_total)``,
+      evaluated twice in one process on one input -- bitwise equal, measured.
+
+    That last one is the whole point: it is what puts an ANCHOR OUTSIDE THE
+    RECEIPT under the claim's headline number.  ``weighted_total`` is a pinned
+    quality term, so on the attempt that discharges the claim
+    ``gate_endpoint_ledger_against_frozen_native`` judges it against the
+    campaign's frozen native literal, and the chain
+    ``terminal_objective -> loop -> (campaign band) -> standalone -> ledger
+    terminal -> frozen literal`` leaves the forger nothing free to move.
+
+    The feasibility half is closed the same way and then against the route's own
+    frozen tolerance, which is the child's own gate re-derived
+    (``certify_endpoint_agreement`` refuses a terminal feasibility outside it):
+    a receipt publishing ``terminal_feasibility_inf: 0.99`` beside
+    ``feasibility_absolute_tolerance: 1.0`` is refused rather than sealed.
+    """
+
+    solve = evidence["solve"]
+    endpoint = evidence["endpoint_agreement"]
+    tolerance = CERTIFIED_ROUTE_OPTIONS.feasibility_tolerance
+    if endpoint["feasibility_absolute_tolerance"] != tolerance:
+        raise ProjectedRootError(
+            f"attempt states its terminal feasibility against "
+            f"{endpoint['feasibility_absolute_tolerance']!r}, not the certified "
+            f"route's {tolerance!r}"
+        )
+    for name, published, agreed in (
+        (
+            "terminal objective",
+            solve["terminal_objective"],
+            endpoint["loop_terminal_objective"],
+        ),
+        (
+            "terminal feasibility",
+            solve["terminal_feasibility_inf"],
+            endpoint["terminal_feasibility_inf"],
+        ),
+    ):
+        if not isinstance(published, float):
+            raise ProjectedRootError(
+                f"attempt publishes a completed chain whose {name} is "
+                f"{published!r}, which no chain that cleared the endpoint "
+                f"agreement can carry"
+            )
+        if published != agreed:
+            raise ProjectedRootError(
+                f"attempt publishes a {name} of {published!r} in its solve "
+                f"summary and {agreed!r} in its endpoint agreement, which are "
+                f"one measurement told twice"
+            )
+    if not endpoint["terminal_feasibility_inf"] <= tolerance:
+        raise ProjectedRootError(
+            f"attempt publishes a terminal feasibility "
+            f"{endpoint['terminal_feasibility_inf']!r} outside the certified "
+            f"route's {tolerance!r}"
+        )
+    ledger_terminal = evidence["endpoint_ledger"]["terminal"]["weighted_total"]
+    if endpoint["standalone_terminal_objective"] != ledger_terminal:
+        raise ProjectedRootError(
+            f"attempt publishes a standalone terminal objective "
+            f"{endpoint['standalone_terminal_objective']!r} beside an endpoint "
+            f"ledger whose terminal weighted total is {ledger_terminal!r}, "
+            f"which is the same evaluation of the same state"
         )
 
 
@@ -2561,7 +3531,25 @@ def validate_root_artifact(
         authorized_attempts=int(protocol["authorized_attempts"]),
         iterations=int(protocol["maximum_iterations"]),
         cold_lane_authorized=bool(protocol["cold_lane_authorized"]),
+        attempt_timeout_seconds=timeout_seconds,
     )
+    # The whole chain contains every draw it published: the lane and the timed
+    # attempts run sequentially inside one supervised session, so the root's own
+    # wall is at least their sum.  It was read by nothing, so a receipt could
+    # publish ``chain_wall: -1e9`` or ``1e-300`` beside walls that add to
+    # minutes -- the residue of the attempt-level timing chain on the one
+    # measurement that gate did not reach.
+    chain_wall = float(evidence["timing_seconds"]["chain_wall"])
+    supervised_total = sum(
+        float(draw["supervised_seconds"])
+        for draw in (*attempts, *(() if cold is None else (cold,)))
+    )
+    if not math.isfinite(chain_wall) or chain_wall < supervised_total:
+        raise ProjectedRootError(
+            f"root publishes a chain wall of "
+            f"{evidence['timing_seconds']['chain_wall']!r} s around draws it "
+            f"supervised for {supervised_total!r} s"
+        )
     # Section 12.9: the lane's own outcome is published, in full, and reaches
     # nothing else.  Re-derived here so a receipt cannot hide an anomalous lane
     # behind a null.
@@ -2897,6 +3885,16 @@ def _validate_attempt_record(
         iterations=int(evidence["options"]["maximum_iterations"]),
     )
 
+    # Substitution soundness rests on "same route": every budget is the frozen
+    # configuration with one field replaced.  Both the delta and every VALUE it
+    # is derived from are bound to the campaign's frozen object.  This runs
+    # FIRST of the two: its opening act is the field-set check, and reading a
+    # named option out of the block before that check answered a truncated
+    # options block with a bare ``KeyError`` instead of the refusal that names
+    # the defect.
+    _validate_certified_route_options(
+        evidence["options"], evidence["certified_options_delta"]
+    )
     # The claim's quality quantity is a NUMBER, not a status code.  ``LATCHED``
     # is the optimizer reporting that some iterate fell to its own configured
     # ``objective_target``, so an attempt configured against a different target
@@ -2906,12 +3904,6 @@ def _validate_attempt_record(
         raise ProjectedRootError(
             "attempt targets an objective other than the native endpoint"
         )
-    # Substitution soundness rests on "same route": every budget is the frozen
-    # configuration with one field replaced.  Both the delta and every VALUE it
-    # is derived from are bound to the campaign's frozen object.
-    _validate_certified_route_options(
-        evidence["options"], evidence["certified_options_delta"]
-    )
     # The solve summary, re-derived from the iterates published beside it.
     _validate_solve_telemetry(evidence["solve"])
     if attempt["outcome"] == "LATCHED":
@@ -2985,6 +3977,10 @@ def _validate_attempt_record(
         or endpoint["absolute_floor"] != DIAG4_ENDPOINT_AGREEMENT_ABSOLUTE_FLOOR
     ):
         raise ProjectedRootError("attempt endpoint tolerances differ from the campaign's")
+    # The four tellings of the terminal endpoint, made one fact.  Runs after the
+    # ledger's own sides are known to be physics measurements carrying the
+    # campaign's terms, because it reads one of them.
+    _validate_terminal_endpoint_column(evidence)
 
     coordinates_path = (
         artifact_root
@@ -3275,6 +4271,7 @@ def run_attempt_protocol(
             authorized_attempts=attempts_authorized,
             iterations=iterations,
             cold_lane_authorized=cold_lane,
+            attempt_timeout_seconds=timeout_seconds,
         ),
     )
     evidence = build_root_evidence(
@@ -3288,6 +4285,7 @@ def run_attempt_protocol(
         cache=compilation_cache_state(cache_directory),
         verdict=verdict,
         chain_seconds=time.perf_counter() - chain_started,
+        attempt_timeout_seconds=timeout_seconds,
     )
     return publish_root(staging_root, output_root, evidence)
 

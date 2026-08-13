@@ -16,13 +16,16 @@ imported the module and monkeypatched the constant that was missing.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -255,15 +258,36 @@ def _runtime_identity() -> dict:
     }
 
 
-def _endpoint_agreement(terminal_state_sha256: str = "0" * 64) -> dict:
-    """The whole agreement block ``certify_endpoint_agreement`` publishes."""
+def _endpoint_agreement(
+    terminal_state_sha256: str = "0" * 64,
+    *,
+    terminal_objective: float = 4.48e-8,
+    terminal_feasibility_inf: float = 1.0e-14,
+    standalone_terminal_objective: float | None = None,
+) -> dict:
+    """The whole agreement block ``certify_endpoint_agreement`` publishes.
+
+    Its two objective halves are not free of the rest of the receipt.
+    ``loop_terminal_objective`` IS ``solve.terminal_objective`` -- one float
+    through two writers -- and ``standalone_terminal_objective`` IS the endpoint
+    ledger's terminal ``weighted_total``, because both are
+    ``case.standalone_evaluation(run.coordinates)`` evaluated in one process on
+    one input.  A fixture that lets them drift is a fixture asserting a receipt
+    the child cannot write, which is how an agreement block whose two halves
+    agreed with each other to 5e-16 and with nothing else in the run came to
+    seal.  The feasibility is the same fact told twice the same way.
+    """
 
     return {
-        "loop_terminal_objective": 4.48e-8,
-        "standalone_terminal_objective": 4.48e-8 * (1.0 + 5.0e-16),
+        "loop_terminal_objective": terminal_objective,
+        "standalone_terminal_objective": (
+            terminal_objective
+            if standalone_terminal_objective is None
+            else standalone_terminal_objective
+        ),
         "relative_tolerance": launcher.DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE,
         "absolute_floor": launcher.DIAG4_ENDPOINT_AGREEMENT_ABSOLUTE_FLOOR,
-        "terminal_feasibility_inf": 1.0e-14,
+        "terminal_feasibility_inf": terminal_feasibility_inf,
         "feasibility_absolute_tolerance": (
             rehearsal.CERTIFIED_ROUTE_OPTIONS.feasibility_tolerance
         ),
@@ -306,9 +330,12 @@ def _attempt_cache(*, warm: bool) -> dict:
 
 
 def _iterates(
-    *, terminal_objective: float, maximum_feasibility_inf: float | None
+    *,
+    terminal_objective: float,
+    maximum_feasibility_inf: float | None,
+    terminal_feasibility_inf: float = 1.0e-14,
 ) -> list[dict]:
-    """The recorded iterates the solve summary is a projection of.
+    """The recorded iterates the solve summary is derived against.
 
     The summary the claim's feasibility gate reads is ``max`` over these rows,
     and a fixture publishing ``rows: []`` beside ``iterations_run: 7`` is a
@@ -316,24 +343,47 @@ def _iterates(
     receipt carrying two iterates nine decades outside the tolerance came to
     seal beside a passing summary.  The last iterate carries the worst
     feasibility and the objectives descend, as a monotone run's do.
+
+    TWO further properties of a real trajectory this fixture used to deny.  A
+    row OPENS at its objective, and the engine breaks at the top of the loop
+    when the point it opens at has reached the target -- so no recorded iterate
+    is ever at or below ``objective_target``, and the fixture's opening
+    objectives stay above it.  And the terminal point is the CANDIDATE the last
+    recorded iteration accepted, not the point it opened at, which is why the
+    engine's own row carries both and why ``terminal_objective`` here is the
+    last row's ``candidate_objective`` rather than its ``objective``.  A fixture
+    that made the terminal one of the opening objectives asserted an identity
+    two banked 5090 latches refute.
     """
 
     smaller = (
         None if maximum_feasibility_inf is None else maximum_feasibility_inf / 10.0
     )
+    target = rehearsal.CERTIFIED_ROUTE_OPTIONS.objective_target
+    opening = max(terminal_objective, target) * 10.0
+    objectives = [opening * 100.0, opening * 10.0, opening]
+    candidates = [objectives[1], objectives[2], terminal_objective]
+    feasibilities = [smaller, smaller, maximum_feasibility_inf]
     return [
-        {"index": 0, "objective": terminal_objective * 100.0, "feasibility_inf": smaller},
-        {"index": 1, "objective": terminal_objective * 10.0, "feasibility_inf": smaller},
         {
-            "index": 2,
-            "objective": terminal_objective,
-            "feasibility_inf": maximum_feasibility_inf,
-        },
+            "index": index,
+            "objective": objectives[index],
+            "candidate_objective": candidates[index],
+            "feasibility_inf": feasibilities[index],
+            "candidate_feasibility_inf": (
+                terminal_feasibility_inf if index == 2 else feasibilities[index]
+            ),
+        }
+        for index in range(3)
     ]
 
 
 def _solve_payload(
-    *, latched: bool, terminal_objective: float, maximum_feasibility_inf: float | None
+    *,
+    latched: bool,
+    terminal_objective: float,
+    maximum_feasibility_inf: float | None,
+    terminal_feasibility_inf: float = 1.0e-14,
 ) -> dict:
     """Every host-side scalar ``_solve_payload`` publishes, in its shape.
 
@@ -351,6 +401,7 @@ def _solve_payload(
     rows = _iterates(
         terminal_objective=terminal_objective,
         maximum_feasibility_inf=maximum_feasibility_inf,
+        terminal_feasibility_inf=terminal_feasibility_inf,
     )
     return {
         "status": int(status),
@@ -358,7 +409,7 @@ def _solve_payload(
         "latched": latched,
         "iterations_run": len(rows),
         "terminal_objective": terminal_objective,
-        "terminal_feasibility_inf": 1.0e-14,
+        "terminal_feasibility_inf": terminal_feasibility_inf,
         "terminal_projected_gradient_inf": 1.0e-7,
         "stored_pairs": 5,
         "projector_materializations": 2,
@@ -501,8 +552,8 @@ def _attempt_evidence(
             terminal_objective=4.48e-8,
             maximum_feasibility_inf=1.0e-14,
         ),
-        "endpoint_agreement": _endpoint_agreement(),
-        "endpoint_ledger": _synthetic_ledger(gated=False),
+        "endpoint_agreement": _endpoint_agreement(terminal_objective=4.48e-8),
+        "endpoint_ledger": _synthetic_ledger(gated=False, weighted_total=4.48e-8),
         "timing_seconds": {
             "bootstrap": 1.0,
             "problem_identity": 1.0,
@@ -683,13 +734,20 @@ def test_a_latch_under_the_bar_at_a_bounded_budget_is_capped_at_quality_only() -
     )
 
 
-def test_conformance_is_one_label_derived_from_the_three_frozen_facts() -> None:
-    """N, the certified budget and whether the cold lane RAN decide it.
+def test_conformance_is_one_label_derived_from_the_four_frozen_facts() -> None:
+    """N, the certified budget, whether the cold lane RAN, and the timeout.
 
     The third fact is the lane's AUTHORIZATION, never its outcome (plan section
     12.9).  Feeding the outcome in charged a fully conforming run for an
     infrastructure fault on a draw the protocol does not contain -- see
     ``test_an_anomalous_cold_lane_is_published_and_does_not_dispose_the_root``.
+
+    The fourth is the supervision timeout, and it is here because it was bound
+    to nothing at all: the gate that requires a claimed timeout to have been
+    waited took BOTH sides out of the receipt, so a root publishing
+    ``attempt_timeout_seconds: 1e-9`` sealed ``CLAIM_DISCHARGED`` beside a lane
+    that "timed out" in half a second.  A moved timeout is a real experiment and
+    demotes rather than refusing, exactly as a moved budget does.
     """
 
     assert (
@@ -697,19 +755,31 @@ def test_conformance_is_one_label_derived_from_the_three_frozen_facts() -> None:
             authorized_attempts=launcher.PREREGISTERED_ATTEMPTS,
             iterations=rehearsal.CERTIFIED_MAXIMUM_ITERATIONS,
             cold_lane_authorized=True,
+            attempt_timeout_seconds=launcher.ATTEMPT_TIMEOUT_SECONDS,
         )
         == launcher.CONFORMANCE_PREREGISTERED
     )
-    for authorized, iterations, cold_lane in (
-        (10, rehearsal.CERTIFIED_MAXIMUM_ITERATIONS, True),
-        (launcher.PREREGISTERED_ATTEMPTS, 400, True),
-        (launcher.PREREGISTERED_ATTEMPTS, rehearsal.CERTIFIED_MAXIMUM_ITERATIONS, False),
+    for authorized, iterations, cold_lane, timeout in (
+        (10, rehearsal.CERTIFIED_MAXIMUM_ITERATIONS, True, launcher.ATTEMPT_TIMEOUT_SECONDS),
+        (launcher.PREREGISTERED_ATTEMPTS, 400, True, launcher.ATTEMPT_TIMEOUT_SECONDS),
+        (
+            launcher.PREREGISTERED_ATTEMPTS,
+            rehearsal.CERTIFIED_MAXIMUM_ITERATIONS,
+            False,
+            launcher.ATTEMPT_TIMEOUT_SECONDS,
+        ),
+        # Every value the field admitted while nothing read it.
+        (launcher.PREREGISTERED_ATTEMPTS, rehearsal.CERTIFIED_MAXIMUM_ITERATIONS, True, 1e-9),
+        (launcher.PREREGISTERED_ATTEMPTS, rehearsal.CERTIFIED_MAXIMUM_ITERATIONS, True, 0.0),
+        (launcher.PREREGISTERED_ATTEMPTS, rehearsal.CERTIFIED_MAXIMUM_ITERATIONS, True, -1.0),
+        (launcher.PREREGISTERED_ATTEMPTS, rehearsal.CERTIFIED_MAXIMUM_ITERATIONS, True, 1e12),
     ):
         assert (
             launcher.attempt_protocol_conformance(
                 authorized_attempts=authorized,
                 iterations=iterations,
                 cold_lane_authorized=cold_lane,
+                attempt_timeout_seconds=timeout,
             )
             == launcher.CONFORMANCE_BOUNDED_SMOKE
         )
@@ -977,6 +1047,7 @@ def test_a_bounded_run_does_not_read_as_a_root() -> None:
         cache={},
         verdict=launcher.VERDICT_NO_LATCH,
         chain_seconds=1.0,
+        attempt_timeout_seconds=launcher.ATTEMPT_TIMEOUT_SECONDS,
     )
     assert bounded["quality_claim"] == "NOT_CLAIMED_AT_BOUNDED_BUDGET"
     assert bounded["attempt_protocol"]["conformance"] == (
@@ -994,6 +1065,7 @@ def test_a_bounded_run_does_not_read_as_a_root() -> None:
         cache={},
         verdict=launcher.VERDICT_CLAIM_DISCHARGED,
         chain_seconds=1.0,
+        attempt_timeout_seconds=launcher.ATTEMPT_TIMEOUT_SECONDS,
     )
     assert root["quality_claim"] == "CERTIFIED_BUDGET"
     assert root["attempt_protocol"]["conformance"] == (
@@ -1225,6 +1297,7 @@ def _root_evidence(
                 authorized_attempts=authorized_attempts,
                 iterations=iterations,
                 cold_lane_authorized=authorized,
+                attempt_timeout_seconds=launcher.ATTEMPT_TIMEOUT_SECONDS,
             ),
             "maximum_iterations": iterations,
             "certified_maximum_iterations": rehearsal.CERTIFIED_MAXIMUM_ITERATIONS,
@@ -1251,7 +1324,17 @@ def _root_evidence(
             else "NOT_CLAIMED_AT_BOUNDED_BUDGET"
         ),
         "timing_boundary": "engine_compile_plus_solve",
-        "timing_seconds": {"chain_wall": 1.0},
+        # The chain contains every draw it published: the lane and the timed
+        # attempts run sequentially inside one supervised session, so a fixture
+        # publishing a chain wall shorter than their sum is one no supervisor
+        # can observe.
+        "timing_seconds": {
+            "chain_wall": 1.0
+            + sum(
+                float(draw["supervised_seconds"])
+                for draw in (*attempts, *(() if cold_lane is None else (cold_lane,)))
+            )
+        },
     }
 
 
@@ -1291,20 +1374,29 @@ def _synthetic_attempt(
     gated = rehearsal.endpoint_ledger_is_gated(
         iterations=iterations, latched=outcome == "LATCHED"
     )
+    published_ledger = (
+        _synthetic_ledger(gated=gated, weighted_total=terminal_objective)
+        if ledger is None
+        else ledger
+    )
     attempt["evidence"] = {
         **attempt["evidence"],
         "certified_options_delta": (
             _options_delta(iterations) if options_delta is None else options_delta
         ),
         "compilation_cache": _attempt_cache(warm=warm),
-        "endpoint_ledger": _synthetic_ledger(gated=gated) if ledger is None else ledger,
+        "endpoint_ledger": published_ledger,
         "solve": _solve_payload(
             latched=outcome == "LATCHED",
             terminal_objective=terminal_objective,
             maximum_feasibility_inf=maximum_feasibility_inf,
         ),
+        # The standalone half is the ledger's own terminal weighted total,
+        # because in the producer both are one evaluation of one state.
         "endpoint_agreement": _endpoint_agreement(
-            exact_numeric_tree_sha256(coordinates)
+            exact_numeric_tree_sha256(coordinates),
+            terminal_objective=terminal_objective,
+            standalone_terminal_objective=published_ledger["terminal"]["weighted_total"],
         ),
     }
     return attempt
@@ -1491,6 +1583,26 @@ def test_a_discharged_root_must_have_run_the_budget_its_label_claims(
     assert not (tmp_path / "final").exists()
 
 
+def _rebind_chain_wall(evidence: dict) -> dict:
+    """Restate the root's chain wall around the draws the receipt now carries.
+
+    The lane and the timed attempts run sequentially inside one supervised
+    session, so the root's own wall is at least their sum -- and a test that
+    ADDS or REPLACES a draw after ``_root_evidence`` built the receipt would
+    otherwise be publishing a chain wall no supervisor could have observed, and
+    would be refused for the timing rather than for the thing it is about.
+    """
+
+    draws = [
+        *evidence["attempts"],
+        *(() if evidence["cold_lane"] is None else (evidence["cold_lane"],)),
+    ]
+    evidence["timing_seconds"]["chain_wall"] = 1.0 + sum(
+        float(draw["supervised_seconds"]) for draw in draws
+    )
+    return evidence
+
+
 def _refuse_published(root: Path, evidence: dict, *, match: str) -> None:
     """Publish one receipt through the real path and require it to be refused.
 
@@ -1530,7 +1642,15 @@ def _mutated_root(tmp_path: Path, name: str, mutate) -> tuple[Path, dict]:
     evidence = _root_evidence(
         verdict=launcher.VERDICT_CLAIM_DISCHARGED, attempts=[attempt], cold_lane=cold
     )
+    published_wall = evidence["timing_seconds"]["chain_wall"]
     mutate(evidence)
+    # A mutation that ADDS or REPLACES a draw leaves the chain wall describing
+    # the draws the receipt used to carry, and the forgery would then be refused
+    # for its timing rather than for the thing it is about -- the "refused for a
+    # narrower reason than the test claims" class.  A mutation that forges the
+    # chain wall ITSELF is left exactly as it wrote it.
+    if evidence.get("timing_seconds", {}).get("chain_wall") == published_wall:
+        _rebind_chain_wall(evidence)
     return root, evidence
 
 
@@ -2190,7 +2310,12 @@ def test_round4_forgery_j_a_wrongly_typed_leaf_is_refused(tmp_path: Path) -> Non
         ("storage", mapping_for_a_list),
     ):
         root, evidence = _mutated_root(tmp_path, f"typed_{name}", mutate)
-        _refuse_published(root, evidence, match="is not a")
+        # The boolean forms name their own defect: ``true`` is not a count, and
+        # two refusal sites that read identically cannot be told apart by the
+        # coverage census.
+        _refuse_published(
+            root, evidence, match="(is not a|is a boolean where the receipt publishes)"
+        )
 
 
 def test_round4_forgery_k_a_cold_lane_aliased_onto_an_attempt_is_refused(
@@ -2327,8 +2452,18 @@ def _forge_extra_claim_key(evidence: dict) -> None:
     evidence["claim"]["A_KEY_NO_PRODUCER_EMITS"] = 1.0
 
 
-def _forge_untyped_chain_wall(evidence: dict) -> None:
-    evidence["timing_seconds"]["chain_wall"] = "not a number"
+def _forge_untyped_cache_digest(evidence: dict) -> None:
+    """A leaf whose ONLY reader is the type check, so the kill's other half holds.
+
+    ``chain_wall`` used to carry this kill and can no longer: it is now read as a
+    duration around the draws, so the deleted-validator half of the case --
+    "with ``_validate_leaf`` a no-op the same receipt must PUBLISH" -- would fail
+    inside the chain-wall arithmetic instead, proving nothing about the leaf
+    walker.  The root cache's aggregate digest is shape-checked and read by
+    nothing, which is exactly the property this kill needs.
+    """
+
+    evidence["compilation_cache"]["entries_digest"] = 12345
 
 
 def _forge_tmpfs_storage(evidence: dict) -> None:
@@ -2423,12 +2558,32 @@ def _forge_lane_on_the_cpu(evidence: dict) -> None:
     evidence["cold_lane"]["evidence"]["runtime_identity"]["backend"] = "cpu"
 
 
+def _forge_agreement_untied_to_the_run(evidence: dict) -> None:
+    """Both halves of the agreement moved together, away from the solve summary.
+
+    Moved together so the pair still certifies against each other: with
+    ``_validate_terminal_endpoint_column`` deleted, nothing else in the receipt
+    compares the agreement block to the run it is supposed to be an agreement
+    ABOUT, which is the whole finding -- a self-contained pair of numbers
+    agreeing to 5e-16 beside a terminal objective they have never met.
+    """
+
+    endpoint = evidence["attempts"][0]["evidence"]["endpoint_agreement"]
+    endpoint["loop_terminal_objective"] = 1.0
+    endpoint["standalone_terminal_objective"] = 1.0
+
+
 _VALIDATOR_KILLS: tuple[tuple[str, object, str], ...] = (
     ("_validate_document_shape", _forge_extra_claim_key, "root.claim is incomplete"),
     (
         "_validate_leaf",
-        _forge_untyped_chain_wall,
-        "root.timing_seconds.chain_wall is not a number",
+        _forge_untyped_cache_digest,
+        "root.compilation_cache.entries_digest is not a string",
+    ),
+    (
+        "_validate_terminal_endpoint_column",
+        _forge_agreement_untied_to_the_run,
+        "one measurement told twice",
     ),
     (
         "_validate_preflight_record",
@@ -2537,6 +2692,881 @@ def test_every_named_validator_is_covered_by_the_mutation_kill_set() -> None:
         if name.startswith("_validate_") and callable(value)
     )
     assert named == frozenset(case[0] for case in _VALIDATOR_KILLS)
+
+
+# --------------------------------------------------------- refusal-site census
+#
+# The validator kill table is true at FUNCTION granularity and was false one
+# level down.  Measured against the previous revision: 52 of 127 refusal sites
+# were reached by no test, 30 of them INSIDE functions the kill table claims to
+# protect, and seven individual checks were deleted one at a time -- including
+# the re-hash of the receipt's only re-evaluatable artifact -- with the whole
+# suite green each time.  A gate no test can kill is a gate the next revision
+# can delete, and that is as true of a check as of the function around it.
+#
+# So the site census below is to refusal SITES what ``UNSHAPED_LEAVES`` is to
+# unshaped blocks: the suite walks the launcher's own ``raise`` statements and
+# requires this map to be exactly what it finds, so a check cannot be added
+# without a disposition.  A site is either killed by a case in
+# ``_CHECK_KILLS`` -- published through the real path, refused, and the refusal
+# traced back to that exact line -- or carries the reason it is not.
+
+
+def _refusal_sites() -> dict[str, int]:
+    """Every ``raise`` of a refusal in the launcher, keyed by owner and words.
+
+    The key is the owning function plus the message TEMPLATE with its
+    interpolations blanked, which is what a reader of a refusal actually sees
+    and is stable under a re-worded value.  Two sites that read identically
+    would collide, so the launcher names them apart.
+    """
+
+    source = (
+        REPOSITORY / "benchmarks" / "run_single_stage_projected_route_gpu_root.py"
+    ).read_text(encoding="utf-8")
+
+    def template(node: ast.AST) -> str:
+        if isinstance(node, ast.Constant):
+            return node.value if isinstance(node.value, str) else "{}"
+        if isinstance(node, ast.JoinedStr):
+            return "".join(template(part) for part in node.values)
+        if isinstance(node, ast.FormattedValue):
+            return "{}"
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            return template(node.left) + template(node.right)
+        if isinstance(node, ast.Call):
+            return "".join(template(argument) for argument in node.args)
+        return "{}"
+
+    sites: dict[str, int] = {}
+
+    class Walk(ast.NodeVisitor):
+        owner = "<module>"
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            outer, self.owner = self.owner, node.name
+            self.generic_visit(node)
+            self.owner = outer
+
+        def visit_Raise(self, node: ast.Raise) -> None:
+            call = node.exc
+            if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+                return
+            if call.func.id not in {"ProjectedRootError", "RehearsalError"}:
+                return
+            words = " ".join(template(call.args[0]).split()) if call.args else ""
+            key = f"{self.owner}: {words}"
+            assert key not in sites, f"two refusal sites read identically: {key}"
+            sites[key] = node.lineno
+
+    Walk().visit(ast.parse(source))
+    return sites
+
+
+# The dispositions.  Each says exactly what is guaranteed and nothing more --
+# the census is worthless if its reasons are the "because I said so" prose the
+# UNSHAPED_LEAVES reasons were caught being twice.  Three of the six are checked
+# by the meta-test rather than asserted.
+_CHECK_KILLED = (
+    "a case in _CHECK_KILLS publishes a forgery refused at this exact line "
+    "(checked: the site is in that table)"
+)
+_UNREACHABLE_BY_CONSTRUCTION = (
+    "no receipt can reach it: _validate_attempt_outcome runs first and derives "
+    "PROTOCOL_FAILURE for any draw whose evidence is not a document, while this "
+    "line needs an outcome that is neither TIMEOUT nor PROTOCOL_FAILURE beside "
+    "evidence that is not a document. Defensive, and dead -- named here rather "
+    "than given a kill test that would have to forge the impossible"
+)
+_PRODUCER_ONLY = (
+    "producer-side: raised while the chain RUNS and unreachable from "
+    "validate_root_artifact, so no sealed receipt can drive it (checked: the "
+    "owner is not in the re-validation call graph)"
+)
+_WALKER_COVERED = (
+    "the shape walker itself, driven over the whole tree by the truncation, "
+    "nulled-leaf and wrongly-typed-leaf forgeries"
+)
+_OWNER_KILLED = (
+    "the owning validator is in _VALIDATOR_KILLS, so the FUNCTION cannot be "
+    "deleted silently; this branch is not pinned to its own line (checked: the "
+    "owner is in that table)"
+)
+_NO_CHECK_KILL = (
+    "no check-granularity kill, and the owner is not a named validator either, "
+    "so neither table sees it. This round's declared residue"
+)
+
+
+def _solve_of(evidence: dict, *, lane: bool = False) -> dict:
+    draw = evidence["cold_lane"] if lane else evidence["attempts"][0]
+    return draw["evidence"]["solve"]
+
+
+def _kill_status_name_disagrees(root: Path, evidence: dict) -> None:
+    _solve_of(evidence)["status_name"] = "ITERATION_LIMIT"
+
+
+def _kill_worst_iterate_without_iterates(root: Path, evidence: dict) -> None:
+    solve = _solve_of(evidence)
+    solve["rows"] = []
+    solve["iterations_run"] = 0
+
+
+def _kill_latch_without_iterates(root: Path, evidence: dict) -> None:
+    solve = _solve_of(evidence)
+    solve["rows"] = []
+    solve["iterations_run"] = 0
+    solve["maximum_feasibility_inf"] = None
+
+
+def _kill_no_kernel_at_all(root: Path, evidence: dict) -> None:
+    lowering = evidence["attempts"][0]["evidence"]["lowering_pre_gate"]
+    lowering["kernels"] = []
+    lowering["total_ir_bytes"] = 0
+
+
+def _kill_terminal_state_is_another_array(root: Path, evidence: dict) -> None:
+    """The re-hash of the receipt's ONE re-evaluatable artifact.
+
+    Deleted one line at a time, this check was free: the suite never opened the
+    published array, so a sealed root could carry a terminal state that is not
+    the state its own digest names.
+    """
+
+    path = (
+        root
+        / "staging"
+        / "attempts"
+        / "attempt-1"
+        / rehearsal.TERMINAL_COORDINATES_FILENAME
+    )
+    with path.open("wb") as stream:
+        np.save(
+            stream, np.asarray([1.0, 2.0, 3.0], dtype=np.float64), allow_pickle=False
+        )
+
+
+def _kill_identity_that_derives_unbound(root: Path, evidence: dict) -> None:
+    """A problem identity that IS what its measurements derive, and is unbound.
+
+    The whole-block equality is checked first, so the forgery has to be the
+    producer's own derivation over observables that miss the campaign's -- which
+    is exactly the shape a run on a different problem publishes.
+    """
+
+    drifted = {
+        name: value * 2.0 for name, value in rehearsal.CPU_BOOTSTRAP_OBSERVABLES.items()
+    }
+    evidence["attempts"][0]["evidence"]["problem_identity"] = (
+        rehearsal.problem_identity_evidence(
+            drifted, problem_sha256="0" * 64, bootstrap_sha256="1" * 64
+        )
+    )
+
+
+def _kill_preflight_without_the_pinned_device(root: Path, evidence: dict) -> None:
+    evidence["supervisor"]["preflight"]["visible_gpu_uuids"] = ["GPU-not-the-one"]
+
+
+def _kill_inventory_that_is_not_one(root: Path, evidence: dict) -> None:
+    evidence["supervisor"]["preflight"]["visible_gpu_uuids"] = [
+        launcher.GPU_UUID,
+        12345,
+        None,
+        {"not": "a uuid"},
+    ]
+
+
+def _kill_relative_temporary_directory(root: Path, evidence: dict) -> None:
+    """The absoluteness rule, which lived only in the producer.
+
+    ``probe_writable_storage`` refuses a relative directory by name while the
+    chain RUNS, so the receipt could declare one on all four fields and seal: a
+    directory the children spill through that no third party can resolve.
+    """
+
+    preflight = evidence["supervisor"]["preflight"]
+    preflight["temporary_directory"] = "relative/tmp"
+    preflight["resolved_temporary_directory"] = "relative/tmp"
+    preflight["storage"][0]["directory"] = "relative/tmp"
+    preflight["storage"][0]["resolved_directory"] = "relative/tmp"
+
+
+def _kill_negative_chain_wall(root: Path, evidence: dict) -> None:
+    evidence["timing_seconds"]["chain_wall"] = -1.0e9
+
+
+def _kill_fractional_budget(root: Path, evidence: dict) -> None:
+    """700.9 certified iterations, which every reader used to truncate to 700."""
+
+    options = evidence["attempts"][0]["evidence"]["options"]
+    options["maximum_iterations"] = 700.9
+    evidence["attempts"][0]["evidence"]["certified_options_delta"] = {
+        "maximum_iterations": 700.9
+    }
+
+
+def _kill_agreement_untied_to_the_run(root: Path, evidence: dict) -> None:
+    _forge_agreement_untied_to_the_run(evidence)
+
+
+def _kill_standalone_untied_to_the_ledger(root: Path, evidence: dict) -> None:
+    endpoint = evidence["attempts"][0]["evidence"]["endpoint_agreement"]
+    endpoint["standalone_terminal_objective"] = (
+        endpoint["standalone_terminal_objective"] * (1.0 + 1.0e-13)
+    )
+
+
+def _kill_feasibility_stated_against_another_tolerance(
+    root: Path, evidence: dict
+) -> None:
+    endpoint = evidence["attempts"][0]["evidence"]["endpoint_agreement"]
+    endpoint["feasibility_absolute_tolerance"] = 1.0
+
+
+def _kill_terminal_feasibility_outside_the_tolerance(root: Path, evidence: dict) -> None:
+    """Both copies moved together, so what refuses is the TOLERANCE, not a twin."""
+
+    attempt = evidence["attempts"][0]["evidence"]
+    attempt["solve"]["terminal_feasibility_inf"] = 0.99
+    attempt["endpoint_agreement"]["terminal_feasibility_inf"] = 0.99
+
+
+def _kill_nonfinite_terminal_on_a_completed_chain(root: Path, evidence: dict) -> None:
+    """On the LANE, whose completed chain the latch gate never reaches."""
+
+    _solve_of(evidence, lane=True)["terminal_objective"] = None
+
+
+def _kill_iterate_at_or_below_the_target(root: Path, evidence: dict) -> None:
+    """A recorded iterate the engine would have stopped before recording."""
+
+    target = rehearsal.CERTIFIED_ROUTE_OPTIONS.objective_target
+    solve = _solve_of(evidence)
+    for index, row in enumerate(solve["rows"]):
+        row["objective"] = target / (2.0**index)
+
+
+def _kill_terminal_objective_off_the_trajectory(root: Path, evidence: dict) -> None:
+    """A terminal objective neither endpoint of the last recorded iteration."""
+
+    _solve_of(evidence)["terminal_objective"] = 4.0e-8
+    evidence["attempts"][0]["evidence"]["endpoint_agreement"][
+        "loop_terminal_objective"
+    ] = 4.0e-8
+
+
+# One forgery per CHECK, refused at that exact ``raise``.  Deleting the check
+# makes the case red twice over: the refusal disappears, or it comes from
+# another line.  That is the property ruling 22 states and held only of the
+# function around the check.
+_CHECK_KILLS: tuple[tuple[str, object, str], ...] = (
+    (
+        "_validate_solve_telemetry: attempt publishes status {} under the name {}, which the engine calls {}",
+        _kill_status_name_disagrees,
+        "under the name",
+    ),
+    (
+        "_validate_solve_telemetry: attempt publishes a worst iterate {} with no iterates",
+        _kill_worst_iterate_without_iterates,
+        "with no iterates",
+    ),
+    (
+        "_validate_solve_telemetry: attempt publishes a latch with no recorded iterate, so nothing it recorded reached the target it claims",
+        _kill_latch_without_iterates,
+        "a latch with no recorded iterate",
+    ),
+    (
+        "_validate_solve_telemetry: attempt records iterate {} at objective {}, at or below the target {} the engine stops before recording",
+        _kill_iterate_at_or_below_the_target,
+        "at or below the target",
+    ),
+    (
+        "_validate_solve_telemetry: attempt publishes a terminal objective {} that is neither endpoint of its last recorded iteration ({})",
+        _kill_terminal_objective_off_the_trajectory,
+        "neither endpoint of its last recorded iteration",
+    ),
+    (
+        "_validate_lowering_pre_gate: attempt lowered no kernel at all",
+        _kill_no_kernel_at_all,
+        "lowered no kernel at all",
+    ),
+    (
+        "_validate_attempt_record: published terminal state differs from its hash",
+        _kill_terminal_state_is_another_array,
+        "published terminal state differs from its hash",
+    ),
+    (
+        "_validate_problem_identity: attempt claims an unbound problem",
+        _kill_identity_that_derives_unbound,
+        "claims an unbound problem",
+    ),
+    (
+        "_validate_preflight_record: root preflight did not see the device the claim names ({})",
+        _kill_preflight_without_the_pinned_device,
+        "did not see the device the claim names",
+    ),
+    (
+        "_validate_preflight_record: root preflight publishes a device inventory that is not one: {}",
+        _kill_inventory_that_is_not_one,
+        "device inventory that is not one",
+    ),
+    (
+        "_validate_preflight_record: root preflight publishes {} as the {} the children spill through, which no reader can resolve",
+        _kill_relative_temporary_directory,
+        "which no reader can resolve",
+    ),
+    (
+        "validate_root_artifact: root publishes a chain wall of {} s around draws it supervised for {} s",
+        _kill_negative_chain_wall,
+        "publishes a chain wall of",
+    ),
+    (
+        "_validate_certified_route_options: attempt options publish maximum_iterations as {}, which is not a budget",
+        _kill_fractional_budget,
+        "which is not a budget",
+    ),
+    (
+        "_validate_terminal_endpoint_column: attempt publishes a {} of {} in its solve summary and {} in its endpoint agreement, which are one measurement told twice",
+        _kill_agreement_untied_to_the_run,
+        "one measurement told twice",
+    ),
+    (
+        "_validate_terminal_endpoint_column: attempt publishes a standalone terminal objective {} beside an endpoint ledger whose terminal weighted total is {}, which is the same evaluation of the same state",
+        _kill_standalone_untied_to_the_ledger,
+        "the same evaluation of the same state",
+    ),
+    (
+        "_validate_terminal_endpoint_column: attempt states its terminal feasibility against {}, not the certified route's {}",
+        _kill_feasibility_stated_against_another_tolerance,
+        "states its terminal feasibility against",
+    ),
+    (
+        "_validate_terminal_endpoint_column: attempt publishes a terminal feasibility {} outside the certified route's {}",
+        _kill_terminal_feasibility_outside_the_tolerance,
+        "outside the certified route's",
+    ),
+    (
+        "_validate_terminal_endpoint_column: attempt publishes a completed chain whose {} is {}, which no chain that cleared the endpoint agreement can carry",
+        _kill_nonfinite_terminal_on_a_completed_chain,
+        "which no chain that cleared the endpoint agreement can carry",
+    ),
+)
+
+# Every refusal the launcher raises, and what the suite guarantees about it.
+# Generated once by walking the launcher's own ``raise`` statements and then
+# dispositioned by hand; the meta-test below requires it to stay exactly what
+# the walker finds, so a check cannot be added without a disposition.
+_REFUSAL_SITES: dict[str, str] = {
+    'bind_gpu_backend: resolved backend is {}, not {}': _PRODUCER_ONLY,
+    'run_attempt: {} must equal {}, observed {}': _PRODUCER_ONLY,
+    'run_attempt: iterate feasibility {} is not within {}': _PRODUCER_ONLY,
+    'run_attempt: pinned endpoint terms differ from native: {}': _PRODUCER_ONLY,
+    'attempt_engine_wall_seconds: attempt publishes no timing block to derive from': _NO_CHECK_KILL,
+    'attempt_engine_wall_seconds: attempt publishes an engine compile/solve pair that is not a pair of durations: {} + {}': _NO_CHECK_KILL,
+    'attempt_engine_wall_seconds: attempt engine wall {} is not its own compile plus solve ({})': _NO_CHECK_KILL,
+    'attempt_engine_wall_seconds: attempt engine wall {} is not within the supervised wall {} it is a part of': _NO_CHECK_KILL,
+    'filesystem_type: no mount in this namespace carries {}': _PRODUCER_ONLY,
+    'probe_writable_storage: {} directory {} is relative; the supervisor would probe it against its own working directory while the children resolve it against {}': _PRODUCER_ONLY,
+    'probe_writable_storage: {}': _PRODUCER_ONLY,
+    'probe_writable_storage: {} directory {} is on {}; plan section 11 requires every directory this root writes to off tmpfs (set {} and the paths accordingly)': _PRODUCER_ONLY,
+    'probe_writable_storage: {} directory {} refused a one-byte write: errno {} ({})': _PRODUCER_ONLY,
+    'preflight_external_resources: {} is not on PATH': _PRODUCER_ONLY,
+    'preflight_external_resources: pinned GPU {} is not among the visible devices {}': _PRODUCER_ONLY,
+    'publish_source_snapshot: source changed during snapshot publication': _PRODUCER_ONLY,
+    '_validate_document_shape: {} is not a document': _WALKER_COVERED,
+    '_validate_document_shape: {} is incomplete: missing {}, unexpected {}': _WALKER_COVERED,
+    '_validate_document_shape: {}.{} is not a published list': _WALKER_COVERED,
+    '_validate_leaf: {} is null where the receipt publishes {}': _WALKER_COVERED,
+    '_validate_leaf: {} is a boolean where the receipt publishes {}: {}': _WALKER_COVERED,
+    '_validate_leaf: {} is not {}: {}': _WALKER_COVERED,
+    "_validate_preflight_record: root preflight names a native endpoint reference other than the campaign's pinned one": _OWNER_KILLED,
+    '_validate_preflight_record: root preflight publishes a device inventory that is not one: {}': _CHECK_KILLED,
+    '_validate_preflight_record: root preflight did not see the device the claim names ({})': _CHECK_KILLED,
+    '_validate_preflight_record: root published a {} directory on {}, which plan section 11 refuses': _OWNER_KILLED,
+    '_validate_preflight_record: root published a {} directory whose write probe did not succeed': _OWNER_KILLED,
+    '_validate_preflight_record: root preflight did not probe the three directories the protocol writes': _OWNER_KILLED,
+    '_validate_preflight_record: root preflight publishes {} as the {} the children spill through, which no reader can resolve': _CHECK_KILLED,
+    '_validate_preflight_record: root preflight probed {} and published {} as the {} the children spill through': _OWNER_KILLED,
+    '_validate_execution_sources: the execution-source manifest this receipt is judged against is not loadable: {}': _OWNER_KILLED,
+    "_validate_execution_sources: attempt names an execution-source manifest other than the campaign's: {}": _OWNER_KILLED,
+    '_validate_execution_sources: attempt binds no manifest module, so its receipt says nothing about which bytes executed': _OWNER_KILLED,
+    '_validate_execution_sources: attempt binds {} to {} with bytes the manifest does not describe': _OWNER_KILLED,
+    '_validate_execution_sources: attempt does not bind the modules the certified chain runs through: {}': _OWNER_KILLED,
+    '_validate_execution_sources: attempt executed repository modules the manifest does not describe: {}': _OWNER_KILLED,
+    '_validate_problem_identity: attempt binds identity to an unstable sha': _OWNER_KILLED,
+    "_validate_problem_identity: attempt publishes bootstrap observables other than the campaign's": _OWNER_KILLED,
+    '_validate_problem_identity: attempt publishes a bootstrap observable that is not a number': _OWNER_KILLED,
+    '_validate_problem_identity: attempt problem identity is not the one its measured observables derive': _OWNER_KILLED,
+    '_validate_problem_identity: attempt claims an unbound problem': _CHECK_KILLED,
+    '_validate_lowering_pre_gate: attempt claims budget-dependent lowering': _OWNER_KILLED,
+    '_validate_lowering_pre_gate: attempt lowered against {} certified iterations, not {}': _OWNER_KILLED,
+    '_validate_lowering_pre_gate: attempt lowered at {} iterations, not the {} it ran': _OWNER_KILLED,
+    '_validate_lowering_pre_gate: attempt lowered no kernel at all': _CHECK_KILLED,
+    '_validate_lowering_pre_gate: attempt lowered {}, which is not the kernel set the certified configuration selects ({})': _OWNER_KILLED,
+    '_validate_lowering_pre_gate: attempt publishes kernel {} with {} IR bytes and {} while operations, which is not a lowering': _OWNER_KILLED,
+    '_validate_lowering_pre_gate: attempt lowering total {} is not the sum of its kernels ({})': _OWNER_KILLED,
+    "_validate_certified_route_options: attempt options are not the certified configuration's fields": _OWNER_KILLED,
+    '_validate_certified_route_options: attempt options publish maximum_iterations as {}, which is not a budget': _CHECK_KILLED,
+    '_validate_certified_route_options: attempt options delta {} is not the one its options derive ({})': _OWNER_KILLED,
+    '_validate_certified_route_options: attempt ran a route other than the certified one: {}': _OWNER_KILLED,
+    '_validate_solve_telemetry: attempt publishes {} recorded iterates against {} iterations run': _OWNER_KILLED,
+    '_validate_solve_telemetry: attempt publishes {} as {}, which is not a count': _OWNER_KILLED,
+    '_validate_solve_telemetry: attempt publishes a worst iterate {} with no iterates': _CHECK_KILLED,
+    '_validate_solve_telemetry: attempt publishes a worst iterate feasibility {} that its own recorded iterates do not carry (their maximum is {})': _OWNER_KILLED,
+    '_validate_solve_telemetry: attempt publishes a worst iterate feasibility {} that its own recorded iterates do not carry': _OWNER_KILLED,
+    '_validate_solve_telemetry: attempt publishes monotone_descent={}, which is not what its recorded objectives derive ({})': _OWNER_KILLED,
+    '_validate_solve_telemetry: attempt publishes status {}, which is not one the engine reports': _OWNER_KILLED,
+    '_validate_solve_telemetry: attempt publishes status {} under the name {}, which the engine calls {}': _CHECK_KILLED,
+    '_validate_solve_telemetry: attempt publishes latched={} under status {}': _OWNER_KILLED,
+    '_validate_solve_telemetry: attempt records iterate {} at objective {}, at or below the target {} the engine stops before recording': _CHECK_KILLED,
+    '_validate_solve_telemetry: attempt publishes a latch with no recorded iterate, so nothing it recorded reached the target it claims': _CHECK_KILLED,
+    '_validate_solve_telemetry: attempt publishes a terminal objective {} that is neither endpoint of its last recorded iteration ({})': _CHECK_KILLED,
+    '_iterate_column: attempt iterate {} is not a document': _NO_CHECK_KILL,
+    '_iterate_column: attempt iterate {} publishes no {}': _NO_CHECK_KILL,
+    '_iterate_column: attempt iterate {} publishes {} as {}, which is not a measurement': _NO_CHECK_KILL,
+    '_validate_endpoint_ledger_arithmetic: attempt endpoint ledger {} side publishes {} as {}, which is not a physics measurement': _OWNER_KILLED,
+    '_validate_endpoint_ledger_arithmetic: attempt endpoint ledger sides do not carry the same terms': _OWNER_KILLED,
+    '_validate_endpoint_ledger_arithmetic: attempt endpoint ledger relative differences are not the ones its two sides derive': _OWNER_KILLED,
+    "_validate_terminal_endpoint_column: attempt states its terminal feasibility against {}, not the certified route's {}": _CHECK_KILLED,
+    '_validate_terminal_endpoint_column: attempt publishes a completed chain whose {} is {}, which no chain that cleared the endpoint agreement can carry': _CHECK_KILLED,
+    '_validate_terminal_endpoint_column: attempt publishes a {} of {} in its solve summary and {} in its endpoint agreement, which are one measurement told twice': _CHECK_KILLED,
+    "_validate_terminal_endpoint_column: attempt publishes a terminal feasibility {} outside the certified route's {}": _CHECK_KILLED,
+    '_validate_terminal_endpoint_column: attempt publishes a standalone terminal objective {} beside an endpoint ledger whose terminal weighted total is {}, which is the same evaluation of the same state': _CHECK_KILLED,
+    'validate_root_artifact: re-validation requires JAX_ENABLE_X64=true: the published terminal state is a float64 array, and with x64 disabled its digest is re-derived at float32 and disagrees with every honest receipt': _NO_CHECK_KILL,
+    'validate_root_artifact: root manifest differs from the artifact tree': _NO_CHECK_KILL,
+    'validate_root_artifact: root evidence schema differs': _NO_CHECK_KILL,
+    'validate_root_artifact: root evidence is not the complete receipt: missing {}, unexpected {}': _NO_CHECK_KILL,
+    'validate_root_artifact: root evidence restates the native reference': _NO_CHECK_KILL,
+    'validate_root_artifact: root evidence states a different timing boundary': _NO_CHECK_KILL,
+    'validate_root_artifact: root names GPU {}, not the device the claim is stated for ({})': _NO_CHECK_KILL,
+    'validate_root_artifact: root cold-lane authorization does not match the lane it published': _NO_CHECK_KILL,
+    'validate_root_artifact: root cold-lane record is not a document': _NO_CHECK_KILL,
+    'validate_root_artifact: root publishes its cold lane at {}, not in the {} directory the protocol runs it in': _NO_CHECK_KILL,
+    "validate_root_artifact: root publishes a cold lane indexed {} among the protocol's own draws": _NO_CHECK_KILL,
+    'validate_root_artifact: root claims cold_lane_authorized={} against a tree that {} {} directory': _NO_CHECK_KILL,
+    'validate_root_artifact: root publishes no list of attempts': _NO_CHECK_KILL,
+    "validate_root_artifact: root publishes two attempts launched by the same invocation, which the protocol's own per-attempt directory and index make impossible": _NO_CHECK_KILL,
+    'validate_root_artifact: root publishes a chain wall of {} s around draws it supervised for {} s': _CHECK_KILLED,
+    'validate_root_artifact: published cold-lane anomaly {} is not the one its lane derives ({})': _NO_CHECK_KILL,
+    'validate_root_artifact: root published {} attempts under {} authorized': _NO_CHECK_KILL,
+    'validate_root_artifact: attempt {} outcome {} does not obey the published stop rule: {}': _NO_CHECK_KILL,
+    "validate_root_artifact: root attempts are not the protocol's consecutive draws, each in its own directory": _NO_CHECK_KILL,
+    'validate_root_artifact: the artifact tree carries attempt directories the receipt does not publish: {}': _NO_CHECK_KILL,
+    'validate_root_artifact: published attempt protocol {} {} is not the one the attempts derive ({})': _NO_CHECK_KILL,
+    'validate_root_artifact: published quality claim {} is not the one its budget derives ({})': _NO_CHECK_KILL,
+    'validate_root_artifact: published verdict {} is not the one the attempts derive ({})': _NO_CHECK_KILL,
+    'validate_root_artifact: the cold lane may not be timed against the bar': _NO_CHECK_KILL,
+    '_validate_attempt_shape: supervised attempt record is not a document': _OWNER_KILLED,
+    '_validate_attempt_shape: supervised attempt record is incomplete: missing {}, unexpected {}': _OWNER_KILLED,
+    '_validate_attempt_shape: attempt evidence is not a document': _OWNER_KILLED,
+    '_validate_attempt_shape: attempt evidence document is incomplete: missing {}, unexpected {}': _OWNER_KILLED,
+    '_validate_attempt_outcome: attempt outcome {} is not the one its evidence derives ({})': _OWNER_KILLED,
+    '_validate_supervised_launch: {} publishes device telemetry for a child other than the one it launched': _OWNER_KILLED,
+    '_validate_supervised_launch: {} was observed on GPU {}, not the device the claim is stated for ({})': _OWNER_KILLED,
+    '_validate_supervised_launch: {} names the supervisor as its own child process': _OWNER_KILLED,
+    '_validate_supervised_launch: {} publishes a supervised wall of {}, which is not a duration': _OWNER_KILLED,
+    '_validate_supervised_launch: {} claims a timeout after {} s under the {} s timeout it publishes': _OWNER_KILLED,
+    '_validate_attempt_record: attempt carries no evidence document': _UNREACHABLE_BY_CONSTRUCTION,
+    '_validate_attempt_record: attempt evidence describes a different run than the record carrying it': _OWNER_KILLED,
+    '_validate_attempt_record: attempt names backend {}, not the {} the wall is claimed on': _OWNER_KILLED,
+    '_validate_attempt_record: attempt ran under an environment the route forbids': _OWNER_KILLED,
+    '_validate_attempt_record: attempt publishes {} as {}, which is not a duration': _OWNER_KILLED,
+    '_validate_attempt_record: attempt timings do not nest: engine wall {}, attempt wall {}, supervised wall {}': _OWNER_KILLED,
+    '_validate_attempt_record: attempt ran {} iterations, not the {} its protocol claims': _OWNER_KILLED,
+    '_validate_attempt_record: attempt quality claim {} is not the one its budget derives ({})': _OWNER_KILLED,
+    '_validate_attempt_record: attempt publishes warm={} against a cache holding {} entries at entry': _OWNER_KILLED,
+    '_validate_attempt_record: attempt targets an objective other than the native endpoint': _OWNER_KILLED,
+    '_validate_attempt_record: attempt published a latch above the native endpoint objective': _OWNER_KILLED,
+    "_validate_attempt_record: attempt endpoint ledger scope differs from the campaign's": _OWNER_KILLED,
+    '_validate_attempt_record: attempt endpoint ledger names another native endpoint reference': _OWNER_KILLED,
+    "_validate_attempt_record: attempt endpoint ledger {} side does not carry the campaign's terms": _OWNER_KILLED,
+    '_validate_attempt_record: attempt ledger claims gated={}, which is not what its budget and outcome derive ({})': _OWNER_KILLED,
+    '_validate_attempt_record: attempt pinned-term gate is not the one its ledger derives': _OWNER_KILLED,
+    "_validate_attempt_record: attempt endpoint tolerances differ from the campaign's": _OWNER_KILLED,
+    '_validate_attempt_record: attempt published a completed chain whose directory {} carries no {}': _OWNER_KILLED,
+    '_validate_attempt_record: published terminal state differs from its hash': _CHECK_KILLED,
+    '_validate_attempt: attempt discharges the claim with a failed pinned-term gate: {}': _OWNER_KILLED,
+    "_validate_attempt: attempt endpoint differs from the campaign's frozen native reference on {}": _OWNER_KILLED,
+    '_validate_attempt: attempt published an infeasible iterate': _OWNER_KILLED,
+    "_validate_cold_lane_draw: root publishes a cold lane whose invocation is a timed attempt's, so its record is a copy of a draw rather than a draw": _OWNER_KILLED,
+    '_validate_cold_lane_draw: the cold lane ran against a populated cache ({} entries at entry)': _OWNER_KILLED,
+    'run_attempt_protocol: attempt protocol must authorize at least one attempt': _PRODUCER_ONLY,
+    'run_attempt_protocol: attempt budget must be positive': _PRODUCER_ONLY,
+    'run_attempt_protocol: this plan certifies {}, not {}': _PRODUCER_ONLY,
+    'run_attempt_protocol: root output already exists: {}': _PRODUCER_ONLY,
+    'run_attempt_protocol: compilation cache directory must start empty: {}': _PRODUCER_ONLY,
+    'main: --output-root is required outside an attempt child': _PRODUCER_ONLY,
+}
+
+
+_LAUNCHER_SOURCE_FILE = str(
+    (REPOSITORY / "benchmarks" / "run_single_stage_projected_route_gpu_root.py").resolve()
+)
+
+
+@pytest.mark.parametrize(
+    "site, forge, match",
+    _CHECK_KILLS,
+    ids=[case[0].split(": ")[1][:48] for case in _CHECK_KILLS],
+)
+def test_each_claim_bearing_check_owns_a_forgery_refused_at_that_exact_line(
+    tmp_path: Path,
+    site: str,
+    forge: object,
+    match: str,
+) -> None:
+    """One forgery per CHECK, and the refusal has to come from that check.
+
+    The validator kill table proves a FUNCTION is load-bearing.  It cannot see a
+    refusal site INSIDE one, and seven of those were deleted one at a time with
+    the whole suite green -- including the re-hash of the published terminal
+    state, the receipt's only re-evaluatable artifact.  Asserting the refusing
+    LINE is what makes each check individually non-deletable: remove it and the
+    refusal either stops happening or arrives from somewhere else.
+    """
+
+    sites = _refusal_sites()
+    assert site in sites, f"the launcher no longer raises: {site}"
+    name = f"check_{abs(hash(site))}"
+    root = tmp_path / name
+    _, evidence = _mutated_root(tmp_path, name, lambda document: forge(root, document))
+
+    with pytest.raises(
+        (launcher.ProjectedRootError, rehearsal.RehearsalError)
+    ) as caught:
+        launcher.publish_root(root / "staging", root / "final", evidence)
+    assert re.search(match, str(caught.value)), str(caught.value)
+    assert not (root / "final").exists()
+
+    frames = [
+        frame
+        for frame in traceback.extract_tb(caught.value.__traceback__)
+        if frame.filename == _LAUNCHER_SOURCE_FILE
+    ]
+    assert frames, "the refusal did not come out of the launcher"
+    assert frames[-1].lineno == sites[site], (
+        f"refused at line {frames[-1].lineno}, which is not the check this case "
+        f"names (line {sites[site]})"
+    )
+
+
+def test_every_refusal_site_carries_a_disposition() -> None:
+    """A check cannot be added without saying what the suite does about it.
+
+    The structural half of the check-granularity fix, and the same shape as the
+    ``UNSHAPED_LEAVES`` guard one level down: the census is required to be
+    EXACTLY the launcher's own ``raise`` sites, so the next revision cannot ship
+    a gate that no table sees.  It is also the honest record of what is NOT
+    covered -- 30 sites this round -- because a census that only listed the
+    covered ones would be the same overclaim it exists to retire.
+    """
+
+    walked = frozenset(_refusal_sites())
+    declared = frozenset(_REFUSAL_SITES)
+    assert walked == declared, (
+        f"undeclared refusal sites: {sorted(walked - declared)}; "
+        f"declared sites the launcher no longer raises: {sorted(declared - walked)}"
+    )
+    assert all(reason.strip() for reason in _REFUSAL_SITES.values())
+
+    # The three dispositions that make a checkable claim are checked.
+    killed = frozenset(case[0] for case in _CHECK_KILLS)
+    assert killed == frozenset(
+        site for site, reason in _REFUSAL_SITES.items() if reason is _CHECK_KILLED
+    )
+    named_validators = frozenset(
+        name
+        for name, value in vars(launcher).items()
+        if name.startswith("_validate_") and callable(value)
+    )
+    covered_by_table = frozenset(case[0] for case in _VALIDATOR_KILLS)
+    for site, reason in _REFUSAL_SITES.items():
+        owner = site.split(":")[0]
+        if reason is _OWNER_KILLED:
+            assert owner in named_validators and owner in covered_by_table, site
+        if reason is _PRODUCER_ONLY:
+            assert owner not in named_validators, site
+            assert owner not in _REVALIDATION_CALL_GRAPH, site
+
+
+def _revalidation_call_graph() -> frozenset[str]:
+    """Every launcher function reachable from ``validate_root_artifact``.
+
+    What makes the ``_PRODUCER_ONLY`` disposition a measurement rather than a
+    claim: a refusal in a function no sealed receipt can drive is genuinely
+    outside the re-validation surface, and this is how the census says so.
+    """
+
+    source = (
+        REPOSITORY / "benchmarks" / "run_single_stage_projected_route_gpu_root.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    bodies = {
+        node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+    }
+    reached: set[str] = set()
+    pending = ["validate_root_artifact"]
+    while pending:
+        name = pending.pop()
+        if name in reached or name not in bodies:
+            continue
+        reached.add(name)
+        for node in ast.walk(bodies[name]):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                pending.append(node.func.id)
+    return frozenset(reached)
+
+
+_REVALIDATION_CALL_GRAPH = _revalidation_call_graph()
+
+
+def test_every_claim_bearing_leaf_is_declared_bound_to_something() -> None:
+    """The terminal generalisation: an unbound claim-bearing leaf is unrepresentable.
+
+    Six rounds of this campaign have the same shape -- the remediation binds the
+    leaf the last round found and leaves its neighbour free, and the next round
+    finds the neighbour.  The shape tree made an ABSENT SHAPE unrepresentable by
+    deriving the required key sets from it; ``LEAF_BINDINGS`` does the same for
+    an UNBOUND VALUE.  Every typed leaf of ``RECEIPT_SHAPES`` is declared as a
+    frozen-literal comparison, a re-derivation, a digest recomputation, or
+    unbound WITH ITS REASON -- and a claim-bearing leaf may not be the last.
+
+    What this does not prove is that the named anchor is reached on every path;
+    that is what the refusal-site census and its kill tests are for, and the two
+    are meant to be read together.
+    """
+
+    def walk(shape: dict, prefix: str, found: list[str]) -> None:
+        for name, nested in shape.items():
+            path = f"{prefix}.{name}"
+            if isinstance(nested, launcher._Leaf):
+                found.append(path)
+            elif isinstance(nested, launcher._Dispatched):
+                continue
+            elif isinstance(nested, tuple):
+                walk(nested[0], f"{path}[]", found)
+            else:
+                walk(nested, path, found)
+
+    found: list[str] = []
+    for document, shape in launcher.RECEIPT_SHAPES.items():
+        walk(shape, document, found)
+
+    declared = frozenset(launcher.LEAF_BINDINGS)
+    assert frozenset(found) == declared, (
+        f"leaves with no binding declared: {sorted(frozenset(found) - declared)}; "
+        f"declared leaves the tree no longer carries: "
+        f"{sorted(declared - frozenset(found))}"
+    )
+    for path, (kind, anchor) in launcher.LEAF_BINDINGS.items():
+        assert kind in launcher.BINDING_KINDS, path
+        assert anchor.strip(), path
+        if kind != launcher.BINDING_NONE:
+            # An anchor that does not resolve is a census entry naming a
+            # comparison nothing in this module can perform.
+            assert hasattr(launcher, anchor), f"{path} names a missing anchor: {anchor}"
+
+    assert launcher.CLAIM_BEARING_LEAVES <= declared
+    unbound = sorted(
+        path
+        for path in launcher.CLAIM_BEARING_LEAVES
+        if launcher.LEAF_BINDINGS[path][0] == launcher.BINDING_NONE
+    )
+    assert not unbound, f"claim-bearing leaves bound to nothing: {unbound}"
+
+
+def test_a_self_published_timeout_cannot_mint_the_headline_verdict(
+    tmp_path: Path,
+) -> None:
+    """E6-1/P6-1/A6-2: the timeout gate took both sides out of the receipt.
+
+    The supervised-launch gate requires a record claiming a timeout to have
+    waited "the timeout it publishes", and the timeout it publishes was compared
+    to NOTHING -- the frozen ``ATTEMPT_TIMEOUT_SECONDS`` reached the validator
+    through no path at all.  So a root carrying ``attempt_timeout_seconds:
+    1e-9`` sealed ``CLAIM_DISCHARGED`` / ``PREREGISTERED`` beside a lane that
+    "timed out" in half a second, erasing the pre-registered cold measurement
+    while keeping the pre-registered label -- and the suite's own test of that
+    branch pinned the honest timeout in its fixture, so it could only ever prove
+    the weaker property.
+
+    The fix is the shape that made the certified-route gate hold: the frozen
+    literal is the anchor, and the one permitted departure is folded into the
+    conformance label rather than refused, because ``--attempt-timeout-seconds``
+    is a real knob and an operator who moves it is running a real experiment.
+    """
+
+    def a_timeout_of_its_own_choosing(evidence: dict) -> None:
+        evidence["supervisor"]["attempt_timeout_seconds"] = 1.0e-9
+        cold = evidence["cold_lane"]
+        cold["outcome"] = "TIMEOUT"
+        cold["timed_out"] = True
+        cold["evidence"] = None
+        cold["return_code"] = -9
+        cold["supervised_seconds"] = 0.5
+        evidence["cold_lane_anomaly"] = launcher.cold_lane_anomaly(cold)
+
+    root, evidence = _mutated_root(tmp_path, "own_timeout", a_timeout_of_its_own_choosing)
+    # The lane's own wall no longer clears the timeout it publishes, and the
+    # verdict the attempts derive is no longer the headline one.
+    _refuse_published(root, evidence, match="is not the one the attempts derive")
+
+    # The same receipt, restated honestly: a moved timeout is a BOUNDED_SMOKE,
+    # and it publishes.
+    honest = tmp_path / "moved_timeout"
+    staging = honest / "staging"
+    attempt = _synthetic_attempt(
+        staging / "attempts" / "attempt-1",
+        engine_wall=1.0,
+        terminal_objective=4.48e-8,
+        maximum_feasibility_inf=1.0e-14,
+    )
+    cold = _synthetic_attempt(
+        staging / launcher.COLD_LANE_DIRECTORY,
+        engine_wall=1.0,
+        terminal_objective=4.48e-8,
+        maximum_feasibility_inf=1.0e-14,
+        outcome="COMPLETED_WITHOUT_LATCH",
+        index=0,
+        relative_path=launcher.COLD_LANE_DIRECTORY,
+        warm=False,
+    )
+    cold["timed_against_bar"] = False
+    moved = _root_evidence(
+        verdict=launcher.VERDICT_QUALITY_ONLY, attempts=[attempt], cold_lane=cold
+    )
+    moved["supervisor"]["attempt_timeout_seconds"] = 900.0
+    moved["attempt_protocol"]["conformance"] = launcher.CONFORMANCE_BOUNDED_SMOKE
+    published = launcher.publish_root(staging, honest / "final", moved)
+    sealed = launcher.validate_root_artifact(published)
+    assert sealed["verdict"] == launcher.VERDICT_QUALITY_ONLY
+    assert sealed["attempt_protocol"]["conformance"] == (
+        launcher.CONFORMANCE_BOUNDED_SMOKE
+    )
+
+
+def test_a_count_a_budget_and_a_size_are_whole_numbers(tmp_path: Path) -> None:
+    """A6-3: every reader of these leaves truncated, so the checks lost to their own reader.
+
+    ``int(-0.5) == 0`` passed the check whose words are "which is not a count";
+    ``int(2.9) == 2`` passed "which is not one the engine reports" and minted
+    ``latched: true``; ``ir_bytes: 1.5`` satisfied the internal-sum identity
+    under truncation; and ``maximum_iterations: 700.9`` sealed as
+    ``CERTIFIED_BUDGET`` / ``PREREGISTERED``.  The deferral that left this open
+    reasoned that a receipt claiming 700.9 certified iterations describes
+    nothing physical -- true, and beside the point, because the truncation was
+    what let it seal.
+
+    Measured on the real producers, every one of these is a Python ``int`` by
+    construction, so refusing the fractional form refuses nothing honest.
+    """
+
+    def fractional_stored_pairs(evidence: dict) -> None:
+        _solve_of(evidence)["stored_pairs"] = -0.5
+
+    def fractional_status(evidence: dict) -> None:
+        _solve_of(evidence)["status"] = 2.9
+
+    def fractional_kernel_size(evidence: dict) -> None:
+        kernels = evidence["attempts"][0]["evidence"]["lowering_pre_gate"]["kernels"]
+        kernels[0]["ir_bytes"] = 1.5
+
+    def fractional_entry_count(evidence: dict) -> None:
+        cache = evidence["attempts"][0]["evidence"]["compilation_cache"]
+        cache["at_entry"]["entry_count"] = 0.5
+
+    def fractional_child_pid(evidence: dict) -> None:
+        evidence["attempts"][0]["gpu_memory"]["child_pid"] = 7.5
+
+    for name, mutate in (
+        ("stored_pairs", fractional_stored_pairs),
+        ("status", fractional_status),
+        ("ir_bytes", fractional_kernel_size),
+        ("entry_count", fractional_entry_count),
+        ("child_pid", fractional_child_pid),
+    ):
+        root, evidence = _mutated_root(tmp_path, f"fractional_{name}", mutate)
+        _refuse_published(root, evidence, match="is not a whole number")
+
+
+def test_the_latch_a_receipt_discharges_cannot_be_denied_by_its_own_rows(
+    tmp_path: Path,
+) -> None:
+    """A6-1: the feasibility column was bound and the objective endpoint was not.
+
+    A receipt whose recorded iterates never fall to the target sealed
+    ``CLAIM_DISCHARGED`` beside ``terminal_objective`` at the target,
+    ``latched: true`` and ``OBJECTIVE_TARGET_REACHED`` -- the latch, which is
+    the whole content of section 1's claim, denied by the receipt's own
+    arithmetic by seven decades.  Three tellings of the same number sat beside
+    it, two of them EXACT copies in the producer, and none was compared.
+
+    The closure is a chain, not a scalar: the summary's terminal objective is
+    the agreement block's loop half, whose standalone half is the endpoint
+    ledger's terminal ``weighted_total``, which the frozen-native pinned-term
+    gate judges against the campaign's own literal on the attempt that
+    discharges the claim.  Nothing in that chain is free.
+    """
+
+    def rows_that_never_reach_the_target(evidence: dict) -> None:
+        solve = _solve_of(evidence)
+        # A descending trajectory that stops seven decades above the target,
+        # beside a terminal objective at it -- self-consistent in every field
+        # the previous revision read.
+        solve["rows"] = [
+            {
+                "index": index,
+                "objective": objective,
+                "candidate_objective": objective / 10.0,
+                "feasibility_inf": 1.0e-14,
+                "candidate_feasibility_inf": 1.0e-14,
+            }
+            for index, objective in enumerate((1000.0, 100.0, 10.0, 1.0))
+        ]
+        solve["iterations_run"] = 4
+
+    root, evidence = _mutated_root(
+        tmp_path, "rows_deny_the_latch", rows_that_never_reach_the_target
+    )
+    _refuse_published(
+        root, evidence, match="neither endpoint of its last recorded iteration"
+    )
+
+    def a_terminal_objective_its_ledger_denies(evidence: dict) -> None:
+        attempt = evidence["attempts"][0]["evidence"]
+        attempt["solve"]["terminal_objective"] = 4.48e-30
+        attempt["endpoint_agreement"]["loop_terminal_objective"] = 4.48e-30
+
+    root, evidence = _mutated_root(
+        tmp_path, "terminal_denies_its_ledger", a_terminal_objective_its_ledger_denies
+    )
+    _refuse_published(
+        root, evidence, match="neither endpoint of its last recorded iteration"
+    )
+
+
+def test_a_truncated_options_block_refuses_by_name_rather_than_by_key_error(
+    tmp_path: Path,
+) -> None:
+    """E6-2: the objective-target read ran EIGHT LINES before the field-set gate.
+
+    A reader of sealed bytes needs a sentence naming the defect, and a truncated
+    options block answered with a bare ``KeyError: 'objective_target'`` -- the
+    class the nullable-leaf guard closed one block over, recurring inside the
+    remediation that closed it.  The two checks are simply in the wrong order.
+    """
+
+    def a_budget_and_nothing_else(evidence: dict) -> None:
+        attempt = evidence["attempts"][0]["evidence"]
+        attempt["options"] = {"maximum_iterations": 700}
+        attempt["certified_options_delta"] = {}
+
+    root, evidence = _mutated_root(tmp_path, "truncated_options", a_budget_and_nothing_else)
+    _refuse_published(
+        root, evidence, match="options are not the certified configuration's fields"
+    )
 
 
 def _root_with_cold_lane(
@@ -2658,6 +3688,12 @@ def test_a_receipt_may_not_supply_the_reference_its_physics_gate_is_judged_again
         forged.update(
             {name: 1.0 for name in rehearsal.INFORMATIONAL_ENDPOINT_OBSERVABLES}
         )
+        # ``weighted_total`` is left as the run's own terminal objective: it is
+        # the ledger term the endpoint agreement is bound to, so forging it too
+        # would make this receipt refuse on the agreement rather than on the
+        # reference, and the test would prove a narrower property than its name.
+        endpoint = evidence["attempts"][0]["evidence"]["endpoint_agreement"]
+        forged["weighted_total"] = endpoint["standalone_terminal_objective"]
         ledger = evidence["attempts"][0]["evidence"]["endpoint_ledger"]
         ledger["terminal"] = dict(forged)
         ledger["native"] = dict(forged)
@@ -2892,6 +3928,7 @@ def test_the_frozen_nested_shapes_are_the_ones_the_producers_write(
             cache={},
             verdict=launcher.VERDICT_NO_LATCH,
             chain_seconds=1.0,
+            attempt_timeout_seconds=launcher.ATTEMPT_TIMEOUT_SECONDS,
         )["claim"]
     )
     assert frozenset(launcher.SUPERVISOR_SHAPE) == frozenset(
@@ -3133,6 +4170,7 @@ def test_the_frozen_key_sets_are_the_ones_the_receipt_builder_writes() -> None:
         cache={},
         verdict=launcher.VERDICT_CLAIM_DISCHARGED,
         chain_seconds=1.0,
+        attempt_timeout_seconds=launcher.ATTEMPT_TIMEOUT_SECONDS,
     )
     assert frozenset(built) == launcher.ROOT_EVIDENCE_REQUIRED_KEYS
     assert frozenset(built["attempt_protocol"]) == (
@@ -3507,7 +4545,10 @@ def test_a_gated_ledger_survives_its_own_canonical_round_trip(tmp_path: Path) ->
         tmp_path,
         verdict=launcher.VERDICT_CLAIM_DISCHARGED,
         engine_wall=1.0,
-        ledger=_synthetic_ledger(gated=True),
+        # ``weighted_total`` is the run's own terminal objective, because the
+        # producer evaluates the ledger's terminal side and the agreement's
+        # standalone half at one state in one process.
+        ledger=_synthetic_ledger(gated=True, weighted_total=4.48e-8),
     )
     evidence = launcher.validate_root_artifact(published)
     ledger = evidence["attempts"][0]["evidence"]["endpoint_ledger"]
@@ -3663,6 +4704,7 @@ def test_an_anomalous_cold_lane_is_published_and_does_not_dispose_the_root(
         authorized_attempts=launcher.PREREGISTERED_ATTEMPTS,
         iterations=rehearsal.CERTIFIED_MAXIMUM_ITERATIONS,
         cold_lane_authorized=False,
+        attempt_timeout_seconds=launcher.ATTEMPT_TIMEOUT_SECONDS,
     ) == launcher.CONFORMANCE_BOUNDED_SMOKE
 
 

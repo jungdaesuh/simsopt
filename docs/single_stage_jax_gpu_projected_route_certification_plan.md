@@ -1758,3 +1758,213 @@ between the reviews and the root. — The round-3 and round-4 deferrals
 terminal-side tie, AL5b/H06, the fixture's storage record, numerics N7, N13,
 N14, M2 and A1, the `--preflight-only` reason) are unchanged and their reasons
 are unchanged.
+
+### 12.12 Rulings on the sixth review round (three roles NO-GO)
+
+Round 6 reviewed `a0400d6eb` (reviews at
+`~/simsopt-campaigns/projected-route-root-reviews-round6-20260813T154303Z/`).
+numerics-physics returned GO; protocol-receipt, reproducibility-engineering and
+adversarial-redteam returned NO-GO on **one CRITICAL and three MAJORs**. It is
+also the round the round-5 remediation is vindicated in: ruling 19 is closed by
+all three roles that raised it — twelve route substitutions refused by name on
+both lanes, the options proven to be the same object from the same import in
+both lanes, `json_scalar` proven lossless in value and type on all 24 fields
+with +1 ULP refused twelve for twelve — ruling 20's feasibility half holds
+13/13 exactly against a real solve, ruling 22 kills 16 validators of 16, and
+ruling 23's kernel list is this repository's real lowering.
+
+The pattern the round-4 ledger named reproduced for the **sixth** time, and this
+round it landed INSIDE the commit that retired it. The generalisation the
+orchestrator states, and which this remediation is written in: **a re-derivation
+is only as strong as the ANCHOR it derives against, and an anchor inside the
+document under judgement is not an anchor.** Ruling 19 anchors on
+`CERTIFIED_ROUTE_OPTIONS` — a frozen literal outside the receipt — and held
+against every attack three roles could mount. Ruling 21 anchored on a receipt
+field and fell to a one-float edit.
+
+**24. THE OBJECTIVE COLUMN IS BOUND, AND IT IS BOUND OUTSIDE THE RECEIPT.**
+Ruling 20 re-derived the feasibility column from the rows and left the objective
+ENDPOINT free — the scalar the latch gate reads and the one section 1's claim is
+made of. A receipt whose 700 recorded iterates never fell below 1.0 sealed
+`CLAIM_DISCHARGED` beside `terminal_objective: 4.48e-8`, `latched: true` and
+`OBJECTIVE_TARGET_REACHED`: the latch denied by the receipt's own arithmetic by
+seven decades. Three further tellings of the same number sat beside it and none
+was compared to another.
+
+The closure is a CHAIN, and it ends outside the document.
+`_validate_terminal_endpoint_column` requires `solve.terminal_objective` to be
+`endpoint_agreement.loop_terminal_objective` (one float through two writers),
+`solve.terminal_feasibility_inf` to be the agreement's copy, and the agreement's
+`standalone_terminal_objective` to be the endpoint ledger's terminal
+`weighted_total` — both of which are
+`float(case.standalone_evaluation(run.coordinates).weighted_total)` evaluated
+twice in one process on one input, measured bitwise equal at these bytes. On the
+attempt that discharges the claim `weighted_total` is a pinned quality term, so
+`gate_endpoint_ledger_against_frozen_native` judges it against the campaign's
+frozen native literal, and nothing in the chain is free. The agreement's
+feasibility tolerance is bound to the route's own frozen tolerance and the
+terminal feasibility required to be within it, which is the child's own gate
+re-derived.
+
+**The proposed row-side closure was FALSIFIED before it was gated, and would
+have burned the root.** The adversarial closure — "require `latched` to imply
+`min(objectives) <= NATIVE_TARGET_OBJECTIVE`" — is false of the producer:
+measured on BOTH banked 5090 latches and on a live CPU solve, the engine breaks
+at the TOP of its loop when the current point reaches the target, so the target
+is reached at a point no row records and every recorded objective is strictly
+ABOVE it (Q1 `4.529e-8`, Q2 `4.517e-8`, target `4.482e-8`). Gating it would have
+refused the campaign's own banked evidence. `terminal_objective ==
+rows[-1].candidate_objective` is also false — bitwise, they differ at the last
+digits (measured `1.3e-16` on CPU, `2.8e-14` and `1.7e-14` on the two 5090
+latches) because the terminal point is re-evaluated through a different kernel —
+and `terminal_feasibility_inf == rows[-1].candidate_feasibility_inf` holds on Q1
+and FAILS on Q2 by `3.5e-4`. What is true, and is now gated, is the REVERSE
+implication (no recorded iterate at or below the target, since such an iterate
+would have ended the loop before it was recorded), that a latch records at least
+one iterate, and ADJACENCY: the terminal objective is one of the two endpoints
+the last recorded iteration names, compared through the campaign's own
+cross-executable endpoint band rather than a new constant — three hundred times
+the worst deviation this campaign has measured.
+
+**25. A PRE-REGISTERED TIMEOUT IS THE FROZEN ONE.** Ruling 21 requires a record
+claiming a timeout to have waited "the timeout it publishes", and took BOTH
+sides of that comparison out of the document being judged:
+`supervisor.attempt_timeout_seconds` was compared to nothing at all, and the
+frozen `ATTEMPT_TIMEOUT_SECONDS = 3600.0` reached the validator through no path.
+Roots carrying `1e-9`, `0.0`, `-1.0`, `3600` and `1e12` all sealed; three roles
+found it independently and rated it MAJOR unanimously, the first unanimous
+severity in six rounds. A fabricated lane timeout erases the pre-registered cold
+measurement — the one thing that makes the cache an accounting device rather
+than a hiding place — while keeping `PREREGISTERED` and `CLAIM_DISCHARGED`,
+because ruling 13 deliberately derives conformance from whether the lane was
+AUTHORIZED. The suite's own test of that branch pinned the honest timeout in its
+fixture and could only ever prove the weaker property.
+
+The ruling takes ruling 19's shape exactly: `attempt_protocol_conformance` gains
+the timeout, so a run supervised under anything but the frozen literal is a
+`BOUNDED_SMOKE` and cannot reach the headline verdict.
+`--attempt-timeout-seconds` survives, because an operator who moves it is
+running a real experiment and refusing it would be the false-reject the budget
+exemption already avoids.
+
+**26. A COUNT, AN INDEX, A BUDGET AND A SIZE ARE WHOLE NUMBERS.** The `int(...)`
+deferral's reason — "a receipt claiming 700.9 certified iterations describes
+nothing physical" — is true and was beside the point: the TRUNCATION is what let
+it seal, and it defeated ruling 20's own new count gate in the same commit.
+`int(-0.5) == 0` passed the check whose words are *"which is not a count"*;
+`status: 2.9` passed *"which is not one the engine reports"* and minted
+`latched: true`; `maximum_iterations: 700.9` sealed as `CERTIFIED_BUDGET` /
+`PREREGISTERED`. The shape tree gains `_INTEGER` and `_INTEGER_OR_NULL` and every
+count, index, budget, process id and size in bytes is declared with it, `bool`
+excluded as it already was for `_NUMBER`; the budget inside the unshaped
+`options` mapping is checked where that mapping is judged. Verified against the
+real producers at these bytes: every one of these leaves is a Python `int` by
+construction, so the float form refuses nothing an honest chain writes.
+
+**27. AN UNBOUND CLAIM-BEARING LEAF IS UNREPRESENTABLE.** Ruling 15 made an
+ABSENT SHAPE unrepresentable by deriving the required key sets from the shape
+tree. Six rounds later the same defect keeps arriving one leaf over, so the same
+move is made for an unbound VALUE. `LEAF_BINDINGS` declares every one of the 222
+typed leaves as a frozen-literal comparison, a re-derivation, a digest
+recomputation, or unbound WITH ITS REASON, and names the ANCHOR — the
+module-level constant compared against, or the function that re-derives it. The
+suite requires the map to be exactly the leaves the walker finds, requires every
+anchor to resolve in the module, and requires `CLAIM_BEARING_LEAVES` to carry no
+unbound entry. What it does not prove is that the named anchor is reached on
+every path; that is ruling 28's job, and the two are meant to be read together.
+
+**28. RULING 22 AT CHECK GRANULARITY.** Ruling 22 is true of a validator's
+EXISTENCE and was false of its CONTENT: 52 of 127 refusal sites were reached by
+no test, 30 of them inside kill-table validators, and seven individual checks
+were deleted one at a time with the suite green each time — including the
+re-hash of the published terminal state, the receipt's only re-evaluatable
+artifact. `_CHECK_KILLS` pairs eighteen checks with a forgery published through
+the real path and requires the refusal to arrive from THAT EXACT `raise` line,
+so deleting the check makes the case red twice over. The structural half is
+`_REFUSAL_SITES`, which is to refusal sites what `UNSHAPED_LEAVES` is to
+unshaped blocks: the suite walks the launcher's own `raise` statements and
+requires the census to be exactly what it finds, with a disposition per site.
+The census records what is NOT covered — 30 sites — because a census listing
+only the covered ones would be the overclaim it exists to retire. Three of its
+six dispositions are CHECKED rather than asserted: `_CHECK_KILLED` against the
+kill table, `_OWNER_KILLED` against `_VALIDATOR_KILLS`, and `_PRODUCER_ONLY`
+against an AST call graph rooted at `validate_root_artifact`.
+
+One site is declared UNREACHABLE with its derivation rather than given a kill
+test that would have to forge the impossible: `_validate_attempt_record`'s
+*"attempt carries no evidence document"* needs an outcome that is neither
+`TIMEOUT` nor `PROTOCOL_FAILURE` beside evidence that is not a document, and
+`_validate_attempt_outcome` runs first and derives `PROTOCOL_FAILURE` for
+exactly that. It is defensive, and dead.
+
+#### Minors closed in the same remediation
+
+The preflight's temporary directory was checked for absoluteness only in the
+PRODUCER, so a receipt declaring `relative/tmp` on all four fields sealed — a
+directory the children spill through that no reader can resolve; the receipt is
+now checked too, closing round-3 N18 at the level its closure missed
+(adversarial A6-7d). — `visible_gpu_uuids` was declared an inventory of device
+UUIDs and only membership was enforced, so integers, nulls and nested documents
+published beside the pinned one; every element is required to be a string
+(A6-7a). — The root's own `chain_wall` was read by nothing while every attempt
+phase had just been bound to be a duration, so `-1e9` and `1e-300` sealed; the
+lane and the timed attempts run sequentially inside one supervised session, so
+the chain wall is required to span their sum (A6-6, P5-8's residue). — The
+`objective_target` comparison ran eight lines BEFORE the field-set gate, so a
+truncated options block refused with a bare `KeyError` instead of the sentence
+that names the defect; the two are reordered (reproducibility E6-2). — The
+stated reason for leaving the lowered-kernel SIZES unfrozen is refuted by
+execution: three independent CPU processes at one commit lower the six kernels
+to 65 204 569 bytes to the byte, and what moves is the COMMIT (65 207 733 one
+commit earlier with the engine byte-identical, 65 200 869 on the 5090). The
+decision is right for the measured reason and both docstrings now state it
+(E6-3). — Two `UNSHAPED_LEAVES` reasons were false or loose at these bytes and
+are corrected: `endpoint ledger.terminal` claimed "the gate is recomputed from
+it" on the node that carries no gate (protocol-receipt P6-6), and `solve.rows`
+called the whole solve summary a projection of the rows when two of its scalars
+are measured at a point the rows do not contain (numerics N6-2). — Two refusal
+sites in `_validate_leaf` read identically, which no coverage census can tell
+apart; the boolean form names its own defect.
+
+**Deferred, with reasons.** *The cold lane's empty-directory and byte-copy forms*
+(adversarial A6-2, protocol-receipt P6-1's second half): ruling 25 raises the
+price — a fabricated `TIMEOUT` under the frozen 3600 s must publish a supervised
+wall above it — but the honest-timeout form survives, and closing it by
+comparing the lane directory's CONTENTS against its own outcome collides with
+ruling 17, which requires an honest timed-out lane to publish whatever it left
+behind. Recorded rather than closed, because a gate that burns an honest lane is
+worse than the forgery. — *No floor under the lowered IR sizes* (A6-4): a floor
+is a new frozen constant about GPU compile size, the class numerics-physics
+recommends against introducing between the reviews and the root, and the total
+is commit-dependent by measurement. — *The supervisor's own runtime identity,
+the draw's process facts, the sampler's observation, and `bound_modules` as a
+superset* (A6-8, P6-4, E6-6): each is declared `BINDING_NONE` with its reason in
+`LEAF_BINDINGS`, which is where the exposure is now visible to a reader instead
+of implicit. — *`source_snapshot`, the sealed terminal state's dimension, the
+cache configuration and directory, `interpreter_installation_modules`, the
+launcher's module-scope import failure, `XLA_FLAGS` and the inherited
+environment* (A5-6, A5-10a, P5-7, P6-5, E6-4, E6-5, E6-7): unchanged from
+§12.11 and §12.10, and every one of them is now a declared `BINDING_NONE` entry
+rather than a silence. — *Binding a published row to the terminal STATE* (the
+custody half of A6-1): the only exact link runs through re-evaluating the sealed
+array through the objective, which means a bootstrapped case and new heavy
+compute on the re-validation path — the change class §9 makes expensive between
+the reviews and the root. Ruling 24 binds the objective column to a frozen
+literal instead; the rows remain unbound to an engine trace, and that is stated
+rather than implied. — *The round-3, round-4 and round-5 deferrals* (numerics
+N7, N13, N14, N6-1, N6-4, N6-5, the preflight's fstype self-reference, AL5b/H06,
+the fixture's storage record, `--preflight-only`) are unchanged and their
+reasons are unchanged. numerics-physics's recommendation AGAINST retuning
+`NATIVE_ENDPOINT_REFERENCE_RELATIVE_TOLERANCE` between the reviews and the root
+is carried forward for the fourth time and accepted.
+
+**The commit's own suite claim, corrected.** The round-5 commit message stated
+"qualifier 60" under the default environment and protocol-receipt measured 1
+failed / 59 passed (P6-8). Root-caused rather than widened: a `multiprocessing`
+**spawn** child re-imports the test module but not `tests/conftest.py`, where the
+parent's FP64 is an in-process `jax.config.update`, so both racing children died
+in `observe_cpu_runtime` with *"qualification requires JAX FP64"* before either
+could reach the exclusion the test measures — and the suite's 60th test passed
+or failed on whether the operator had exported `JAX_ENABLE_X64`. The racer now
+configures the runtime the environment it is judged against declares. The
+qualifier's gate is untouched: a child that is not FP64 CPU is still refused.

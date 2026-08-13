@@ -373,11 +373,31 @@ def _spawn_qualification_racer(
     ledger: str,
     release: _Waitable,
 ) -> None:
+    """One racing child, running the runtime the environment it is judged against declares.
+
+    A ``spawn`` child re-imports THIS module but not ``tests/conftest.py``, and
+    the parent's FP64 is an in-process ``jax.config.update`` that conftest
+    performs -- so the child inherited it only when the operator happened to
+    export ``JAX_ENABLE_X64``, and under the box's default environment both
+    children died in ``observe_cpu_runtime`` with "qualification requires JAX
+    FP64" before either could reach the exclusion this test measures.  The
+    result was a suite whose 60th test passed or failed on an environment
+    variable rather than on the code.
+
+    The qualifier judges the RUNTIME against the environment it is handed, so
+    the child configures the runtime that environment declares.  Nothing is
+    widened: ``observe_cpu_runtime`` still refuses a child that is not FP64 CPU.
+    """
+
+    environment = _environment()
+    qualifier.jax.config.update(
+        "jax_enable_x64", environment["JAX_ENABLE_X64"] == "true"
+    )
     try:
         run_qualification(
             Path(output_root),
             producer=_SpawnBlockingProducer(Path(ledger), release),
-            environment=_environment(),
+            environment=environment,
         )
     except FileExistsError:
         raise SystemExit(20) from None
