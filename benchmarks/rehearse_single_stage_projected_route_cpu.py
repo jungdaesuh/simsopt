@@ -226,8 +226,12 @@ def equal_minima_raw_term_ceiling(native_value: float) -> float:
     for another is how the predecessor bands came to refuse the campaign's own
     banked evidence.
 
-    PRECONDITION, wider than the name says: ``native_value`` must be a RAW
-    OBJECTIVE SUMMAND, and therefore at or under ``NATIVE_TARGET_OBJECTIVE``.
+    PRECONDITION, wider than the name says: ``native_value`` must be a quantity
+    a latch BOUNDS ABOVE by ``NATIVE_TARGET_OBJECTIVE`` -- every raw objective
+    summand, and the weighted total itself, which is the quantity the latch
+    bounds directly.  (The narrower reading, "a raw objective summand", excludes
+    ``weighted_total``, for which this module derives a ceiling twenty lines
+    below and which the suite calls this function on.)
     Handed a penalized observable -- ``observable.total_length``'s native 20.99,
     say -- the numerator goes negative and the result (-1.0) is arithmetically
     well formed and physically meaningless; that term's ceiling comes from
@@ -241,11 +245,13 @@ def equal_minima_raw_term_ceiling(native_value: float) -> float:
     to ``DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE`` (1e-11 relative).  So the
     honest ceiling for a term whose own ceiling is tighter than that -- only
     ``weighted_total``, at 2.061e-13 -- is the cross-executable tolerance
-    itself, of order 1e-11, two decades ABOVE the stated figure.  Nothing
-    shipped moves: ``weighted_total``'s band is 1e-6, still inert by 4.8e4x
-    against the corrected ceiling.  It is recorded so a later revision does not
-    place a band just under 2.061e-13 and manufacture a false reject out of
-    cross-executable noise.
+    itself: ``rel * NATIVE_TARGET_OBJECTIVE = 1.0206e-11``, which is 49.52x
+    (1.695 decades) ABOVE the stated figure.  ``certify_agreement``'s absolute
+    floor is a ``max`` and not an addend, and 4.482e-19 > 1e-19, so the floor is
+    inert in that arithmetic.  Nothing shipped moves: ``weighted_total``'s band
+    is 1e-6, still inert by 9.80e4x against the corrected ceiling.  It is
+    recorded so a later revision does not place a band just under 2.061e-13 and
+    manufacture a false reject out of cross-executable noise.
     """
 
     return (NATIVE_TARGET_OBJECTIVE - native_value) / abs(native_value)
@@ -265,7 +271,7 @@ def equal_minima_raw_term_ceiling(native_value: float) -> float:
 #   latches show against native, and stays under the equal-minima ceiling:
 #
 #       term                    native      worst banked   ceiling    band
-#       observable.iota         0.40620273  3.9247e-6      1.474e-3   1e-4
+#       observable.iota        -0.40620273  3.9247e-6      1.474e-3   1e-4
 #       observable.major_radius 1.46744380  5.6022e-6      4.081e-4   1e-4
 #       observable.volume       -0.29044576 5.0e-15        (equality) 1e-6
 #
@@ -314,12 +320,12 @@ def equal_minima_raw_term_ceiling(native_value: float) -> float:
 #   its ceiling is 2.061e-13 on the ENGINE's Phi, and the gate measures the
 #   STANDALONE re-evaluation, which section 5 certifies equal to the engine's
 #   only within ``DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE`` -- so the honest
-#   ceiling is of order 1e-11, two decades above the derived figure, and ANY
-#   band a latch could fail would have to be tighter than the cross-executable
-#   ULP between two compilations of the same objective.  1e-6 sits 4.85e6x above
-#   the derived ceiling and 1e5x above the corrected one, which makes the term
-#   INERT either way -- it cannot refuse a latch and it cannot false
-#   reject one either.  Its substantive gate is the latch number itself,
+#   ceiling is 1.0206e-11, 49.52x (1.695 decades) above the derived figure, and
+#   ANY band a latch could fail would have to be tighter than the
+#   cross-executable ULP between two compilations of the same objective.  1e-6
+#   sits 4.85e6x above the derived ceiling and 9.80e4x above the corrected one,
+#   which makes the term INERT either way -- it cannot refuse a latch and it
+#   cannot false reject one either.  Its substantive gate is the latch itself,
 #   ``terminal_objective <= NATIVE_TARGET_OBJECTIVE``, re-checked from the
 #   published bytes.  ``observable.total_length`` is inert for the same reason
 #   (band 3.51x above its 2.853e-05 ceiling) and is documented as such above.
@@ -743,6 +749,49 @@ class BoundCase:
         self.bootstrap_sha256 = exact_numeric_tree_sha256(bootstrap.z0)
 
 
+def problem_identity_evidence(
+    measured: Mapping[str, float],
+    *,
+    problem_sha256: str,
+    bootstrap_sha256: str,
+) -> dict[str, JsonValue]:
+    """Derive the identity binding from four measured bootstrap observables.
+
+    ONE owner for the derivation, because it is asked twice: by the child, from
+    the bootstrap it just evaluated, and by the root's re-validation, from the
+    measurements the receipt published.  A second spelling in the validator
+    would be the twin-constant class plan section 5 forbids, and the receipt's
+    identity block was previously re-read rather than re-derived at all -- two
+    booleans of it were checked and the eight numbers behind them were not.
+    """
+
+    relative = {
+        name: abs(measured[name] - reference) / abs(reference)
+        for name, reference in CPU_BOOTSTRAP_OBSERVABLES.items()
+    }
+    checks = {
+        name: relative[name] <= tolerance
+        for name, tolerance in BOOTSTRAP_BINDING_RELATIVE_TOLERANCES.items()
+    }
+    checks["feasibility_inf_absolute"] = (
+        measured["feasibility_inf"] <= BOOTSTRAP_FEASIBILITY_ABSOLUTE_TOLERANCE
+        and CPU_BOOTSTRAP_OBSERVABLES["feasibility_inf"]
+        <= BOOTSTRAP_FEASIBILITY_ABSOLUTE_TOLERANCE
+    )
+    return {
+        "reference_observables": dict(CPU_BOOTSTRAP_OBSERVABLES),
+        "measured_observables": dict(measured),
+        "relative_difference": relative,
+        "relative_tolerances": dict(BOOTSTRAP_BINDING_RELATIVE_TOLERANCES),
+        "feasibility_absolute_tolerance": BOOTSTRAP_FEASIBILITY_ABSOLUTE_TOLERANCE,
+        "checks": dict(sorted(checks.items())),
+        "bound": all(checks.values()),
+        "recorded_problem_sha256": problem_sha256,
+        "recorded_bootstrap_sha256": bootstrap_sha256,
+        "sha_is_binding": False,
+    }
+
+
 def bind_problem_identity(case: BoundCase) -> dict[str, JsonValue]:
     """Bind this process to the campaign's problem by reproducing observables.
 
@@ -760,31 +809,11 @@ def bind_problem_identity(case: BoundCase) -> dict[str, JsonValue]:
         "gradient_norm": float(point.gradient_norm),
         "projected_gradient_norm": float(point.projected_gradient_norm),
     }
-    relative = {
-        name: abs(measured[name] - reference) / abs(reference)
-        for name, reference in CPU_BOOTSTRAP_OBSERVABLES.items()
-    }
-    checks = {
-        name: relative[name] <= tolerance
-        for name, tolerance in BOOTSTRAP_BINDING_RELATIVE_TOLERANCES.items()
-    }
-    checks["feasibility_inf_absolute"] = (
-        measured["feasibility_inf"] <= BOOTSTRAP_FEASIBILITY_ABSOLUTE_TOLERANCE
-        and CPU_BOOTSTRAP_OBSERVABLES["feasibility_inf"]
-        <= BOOTSTRAP_FEASIBILITY_ABSOLUTE_TOLERANCE
+    evidence = problem_identity_evidence(
+        measured,
+        problem_sha256=case.problem_sha256,
+        bootstrap_sha256=case.bootstrap_sha256,
     )
-    evidence: dict[str, JsonValue] = {
-        "reference_observables": dict(CPU_BOOTSTRAP_OBSERVABLES),
-        "measured_observables": measured,
-        "relative_difference": relative,
-        "relative_tolerances": dict(BOOTSTRAP_BINDING_RELATIVE_TOLERANCES),
-        "feasibility_absolute_tolerance": BOOTSTRAP_FEASIBILITY_ABSOLUTE_TOLERANCE,
-        "checks": dict(sorted(checks.items())),
-        "bound": all(checks.values()),
-        "recorded_problem_sha256": case.problem_sha256,
-        "recorded_bootstrap_sha256": case.bootstrap_sha256,
-        "sha_is_binding": False,
-    }
     if not evidence["bound"]:
         raise RehearsalError(
             "bootstrap observables do not reproduce the campaign problem: "
@@ -1020,6 +1049,27 @@ def gate_endpoint_ledger_against_frozen_native(
     )
 
 
+def endpoint_relative_differences(
+    terminal: Mapping[str, float], native: Mapping[str, float]
+) -> dict[str, JsonValue]:
+    """The per-term distance column, from one owner.
+
+    Published beside the two sides it summarises and re-derived from them at
+    re-validation, so the column a reader reads cannot be a set of zeros beside
+    honest sides.  A native term that is exactly zero has no relative distance
+    and publishes null rather than an infinity the canonical encoder refuses.
+    """
+
+    return {
+        name: json_scalar(
+            abs(terminal[name] - native[name]) / abs(native[name])
+            if native[name] != 0.0
+            else None
+        )
+        for name in sorted(terminal)
+    }
+
+
 def build_endpoint_ledger(
     case: BoundCase, run: ProjectedLbfgsRun, *, gated: bool = False
 ) -> dict[str, JsonValue]:
@@ -1071,15 +1121,9 @@ def build_endpoint_ledger(
     ledger: dict[str, JsonValue] = {
         "terminal": dict(sorted(rows["terminal"].items())),
         "native": dict(sorted(rows["native"].items())),
-        "relative_difference": {
-            name: json_scalar(
-                abs(rows["terminal"][name] - rows["native"][name])
-                / abs(rows["native"][name])
-                if rows["native"][name] != 0.0
-                else None
-            )
-            for name in sorted(rows["terminal"])
-        },
+        "relative_difference": endpoint_relative_differences(
+            rows["terminal"], rows["native"]
+        ),
         "native_state_relative_path": NATIVE_ENDPOINT_STATE_PATH.name,
         "native_state_sha256": case.native_state.file_sha256,
         "native_state_content_sha256": case.native_state.content_sha256,
@@ -1572,6 +1616,7 @@ __all__ = (
     "certify_native_reference",
     "collapse_proximity_margin",
     "endpoint_ledger_is_gated",
+    "endpoint_relative_differences",
     "equal_minima_raw_term_ceiling",
     "gate_endpoint_ledger",
     "gate_endpoint_ledger_against_frozen_native",
@@ -1582,6 +1627,7 @@ __all__ = (
     "lowering_payload",
     "main",
     "measure_lowering_pre_gate",
+    "problem_identity_evidence",
     "publish_rehearsal",
     "refuse_redirected_distribution_modules",
     "rehearsal_options",

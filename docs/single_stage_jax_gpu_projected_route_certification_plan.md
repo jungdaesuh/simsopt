@@ -719,7 +719,9 @@ all five weights are 1.0 and every raw term is nonnegative, so a latch's
 
 The predecessor QS band of 1e-6 sat **296× under its own ceiling** — two decades
 tighter than the placement every geometry term received — on the term carrying
-**99.93 % of the objective**. Its refusal budget is
+**99.97 % of the NATIVE objective** (99.93 % at Q1's terminal, 99.97 % at Q2's —
+the share is a property of the endpoint, not of the term; §12.9 states the
+correction and this line carried the uncorrected form). Its refusal budget is
 `(Φ* − native) − native·band`: a latch is refused iff its geometry penalties
 plus its overshoot below the target fall under that number. At 1e-6 the nearer
 banked latch (Q2) cleared refusal by **3.95×**, while the two banked arms differ
@@ -953,9 +955,15 @@ tautological read-backs (`timed_against_bar`, `sha_is_binding`, `bound`,
 `budget_independent`; protocol-receipt finding 5) stay: each is a tamper check
 whose substantive gate exists upstream. *(Round 2 correctly observed that the
 "the artifact-tree digest covers the hand-edit case" half of that reason did not
-hold while a wholly fabricated artifact could re-validate clean. Ruling 7 closes
-that; the read-backs stay on the first half of the reason, which never depended
-on it.)* Sanitizing the endpoint ledger's own term rows would
+hold while a wholly fabricated artifact could re-validate clean. **That half is
+withdrawn rather than repaired**: rulings 7, 11, 12, 15 and 16 raised the cost of
+a fabricated artifact — every block and every leaf shaped, the physics reference
+frozen, the module-byte custody re-derived against the manifest — but a
+hand-assembled `CLAIM_DISCHARGED` tree whose `source_snapshot` names a directory
+it does not carry still re-validates, because nothing compares that block's
+digest to the tree. The read-backs stay on the first half of the reason, which
+never depended on it; the snapshot-digest tie is deferred with its reason in
+§12.10.)* Sanitizing the endpoint ledger's own term rows would
 require the pinned-term gate to model null terms, changing the verdict
 contract; the rows are finite at any finite iterate, and a nonfinite one stays
 contained as a published `PROTOCOL_FAILURE`. Constraining `--output-root` to
@@ -1095,12 +1103,27 @@ deviation reaches 23x (`constraint.volume`, −2.332e-18 against −5.551e-17) w
 the absolute deviation is 5.3e-17; the seven others agree to 1.95e-14 relative
 or better (`raw.non_qs`, the dominant term). So absolute terms are judged
 against their own gate band and the rest against
-`NATIVE_ENDPOINT_REFERENCE_RELATIVE_TOLERANCE = 1e-11` — 512x above the worst
+`NATIVE_ENDPOINT_REFERENCE_RELATIVE_TOLERANCE = 1e-11` — 512.98x above the worst
 measured deviation and five decades under the tightest relative band any pinned
-term carries, so it can neither false-reject an honest lane nor let a forged
-reference widen a gate by a fraction of its band. Recomputing the gate against
-the literals shifts each `measured` by at most ~2e-14 against a smallest band of
-1e-6, which is why *passing* rather than *matching bitwise* is what is demanded.
+term carries, so it cannot false-reject an honest lane.
+
+Two figures in the previous statement of this ruling were wrong and are
+corrected here rather than restated. *"Nor let a forged reference widen a gate by
+a fraction of its band"* is **false for the three `absolute` terms**, whose
+native-side tolerance IS the gate band (1e-10): a forged `constraint.volume`
+native of +1.0e-10 moves the admissible terminal window from [−1e-10, 1e-10] to
+[0, 2e-10], a widening of a FULL band, and the same holds for
+`constraint.boozer|inf` and `raw.residual` (measured: 1.000 band units for those
+three, 1e-7 or 1e-5 for the other seven). The protection is sound for a stronger
+reason than that sentence gave: the gate that DECIDES,
+`gate_endpoint_ledger_against_frozen_native`, substitutes the frozen literals for
+the published native side and never reads the reference the artifact publishes —
+all three maximal forgeries are refused by it. And recomputing the gate against
+the literals shifts each `measured` by at most 1.9477e-14 against a smallest band
+of **1e-10**, not 1e-6: the worst shift as a fraction of a band is 2.3377e-05, on
+`constraint.boozer|inf`. That is still four decades under the tightest banked
+margin on that term (26.6x), so the conclusion — *passing* rather than *matching
+bitwise* is what is demanded — holds by an enormous margin.
 
 **13. THE COLD LANE IS DIAGNOSTICS, NEVER DISPOSITION.** Ruling 8 fed the lane's
 own outcome into the conformance label through a predicate that cannot tell
@@ -1206,9 +1229,12 @@ Corrected in place rather than papered over. — Three documentation corrections
 from numerics-physics: `weighted_total`'s stated ceiling (2.061e-13) bounds the
 ENGINE's Φ while the gate measures the STANDALONE re-evaluation, which §5
 certifies equal only within `DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE`, so
-the honest ceiling is of order 1e-11 — two decades above the stated figure, with
-the shipped 1e-6 band still inert against either; `equal_minima_raw_term_ceiling`
-carries its real precondition (a RAW OBJECTIVE SUMMAND, at or under the target)
+the honest ceiling is 1.0206e-11 — 49.52x (1.695 decades) above the stated
+figure, with the shipped 1e-6 band still inert against either (9.80e4x);
+`equal_minima_raw_term_ceiling`
+carries its real precondition (corrected in §12.10 to "a quantity a latch BOUNDS
+ABOVE by `NATIVE_TARGET_OBJECTIVE`", the narrower "raw objective summand" having
+excluded the `weighted_total` this module derives a ceiling for)
 and the note that out of domain it returns a well-formed meaningless negative;
 and "99.93 % of the objective" is Q1's TERMINAL share, while the term carries
 99.97 % of the native objective.
@@ -1247,3 +1273,249 @@ on the engine's own finiteness invariants rather than on inspection. *The
 the whole preflight runs before the staging tree exists and before any compute,
 so a refusal already costs an error message — and the exit-code argument beside
 it should not be relied on, since `main` already has a non-root lane.
+
+---
+
+### 12.10 Rulings on the fourth review round (three roles NO-GO)
+
+The round-4 reviews at `167d71d87`
+(`~/simsopt-campaigns/projected-route-root-reviews-round4-20260813T130000Z/`)
+returned NO-GO from protocol-receipt, reproducibility-engineering and
+adversarial-redteam, with numerics-physics at GO. Four majors, no critical, none
+in the engine or the physics. Round 4 was also the first round in which the
+adversarial forgery attempt SUCCEEDED after a remediation: six defective
+receipts were published through the real `publish_root` and re-validated clean
+from their sealed bytes, four of them as `CLAIM_DISCHARGED`.
+
+Three roles reached ONE defect from three different entry points, and the
+orchestrator's own note names the pattern behind it: *each round's completeness
+fix stops exactly one level above the fact it protects.* Round 2 froze the
+top-level keys; round 3 froze the blocks one level down; round 4 froze a tree
+and left `execution_sources` — a REQUIRED key — with no shape at all, plus 164
+`_ANY` leaves under the blocks it did freeze. A fix that enumerates shapes by
+hand reproduces this once per round. Ruling 15 is therefore structural and is
+the ruling the other three rest on.
+
+**15. THE SHAPE IS THE KEY SET.** There were two hand-written enumerations —
+five `*_REQUIRED_KEYS` frozensets ("the keys that must be present") and three
+`*_NESTED_SHAPES` maps ("the blocks that have shapes"), keyed by a subset of
+them — and the drift between them was live: an AST census showed
+`execution_sources` was the only key of `ATTEMPT_EVIDENCE_REQUIRED_KEYS` that no
+code in the module ever read, and the suite could not see it because a test that
+enumerates the shapes which EXIST is structurally incapable of detecting a shape
+that is ABSENT. That is how the previous revision shipped 75 green tests over
+the hole, and how the plan came to assert that "the ten escape shapes above are
+refused by name" while the ninth was refused in no form at all.
+
+The ruling: **there is one structure, and the key sets are derived from it.**
+Every document the receipt is built from is a node of one shape tree
+(`RECEIPT_SHAPES`); each `*_REQUIRED_KEYS` frozenset is now literally
+`frozenset(*_SHAPE)`, so a required key with no shape is unrepresentable rather
+than merely absent. `_ANY` is gone: every leaf declares what its producer writes
+there (`_STRING`, `_NUMBER`, `_BOOL`, `_LIST`, `_MAPPING`, their nullable forms,
+and `_NULL`), `bool` is excluded from the number leaves explicitly because it is
+a subclass of `int`, and a leaf refusal names the defect instead of surfacing as
+whatever `TypeError` the first reader to touch it raised. Where a mapping or a
+list is still admitted without an inner shape, the place and the REASON are
+declared in `UNSHAPED_LEAVES`, and a `_dispatched(...)` node names the function
+that validates it instead.
+
+The suite's half is a COVERAGE meta-test, not another enumeration
+(`test_the_shape_tree_covers_its_own_required_key_sets`): it asserts that every
+required key set is exactly its shape's key set, that every node of every tree is
+one of the four admitted kinds, and that a walk of the trees finds exactly the
+unshaped leaves the module declares — so a block added without a shape, or an
+unshaped leaf added without a reason, fails the suite rather than the next
+review. Every producer a CPU process can run is bound to its shape BY EXECUTION,
+including the four the previous revision called "the three that are only
+reachable with a device" (a miscount, and wrong for at least three of them). The
+one genuinely device-gated producer is the preflight, which queries the pinned
+GPU's inventory; it stays bound through the bounded GPU smoke.
+
+**16. A `CLAIM_DISCHARGED` RECEIPT SAYS WHICH BYTES EXECUTED.**
+`execution_sources` is the published residue of the module-hash gate — the
+manifest binding, the bound modules, the unmanifested-repository set and the
+interpreter-installation set — and it is the only place in a sealed receipt
+where a reader can see the child's source binding. It answers the question a
+sealed source snapshot cannot: did the bytes the snapshot contains actually RUN?
+The predecessor route lost a root to a scikit-build-core editable finder that
+outranked `PYTHONPATH`, which is the class this block exists to catch. At the
+previous revision it had no shape and zero readers, so `null`, `{}`, `"a
+string"` and `{"bound_modules": []}` all published through the real
+`publish_root` and re-validated clean, on the timed attempt and on the cold
+lane — and the suite fixture published `{"bound_modules": []}`, a receipt
+asserting that ZERO source modules executed, against a producer that publishes
+four keys and 297 bound modules.
+
+It now carries a full frozen shape AND is RE-DERIVED: the published manifest
+evidence must equal this repository's own manifest recomputed from its bytes
+(path, schema, both digests, entry count), every bound module must hash and
+size to the entry the manifest holds for it, the bound set may not be empty, and
+it must contain the three modules the certified chain cannot run without — the
+launcher, the rehearsal module every shared primitive comes from, and the engine
+under certification — named by the files this process imported rather than by a
+second spelling of their paths. The same treatment reaches the two other blocks
+that had no shape and two read booleans between them: `problem_identity` is
+re-derived in full from its published measurements through
+`problem_identity_evidence`, the producer's own owner (§2's identity binding, now
+checked rather than asserted), and `lowering_pre_gate` has its budgets, its
+kernel list and its IR total re-derived. A fixture that publishes less than its
+producer does is a fixture asserting a shape the protocol cannot produce; the
+suite's now derive from the manifest and from the producers.
+
+**17. THE COLD LANE DOES NOT GATE PUBLICATION EITHER — ruling 13, completed.**
+Ruling 13 took the lane out of `attempt_protocol_conformance` and out of
+`derive_verdict` and said "what changes is that it decides nothing". Executed, it
+still decided the largest thing there is: `validate_root_artifact` ran the FULL
+discharging-attempt validation on the lane, inside the publication gate, so a
+cold lane that latched and missed one pinned band — or that merely MISSED the
+latch with one infeasible recorded iterate — raised, `publish_root` wrote its
+refusal record and re-raised, and `seal_and_sync` was never reached. No
+artifact, no verdict, and the cold lane plus all three timed attempts already
+spent. §4's table disposes `QUALITY_ONLY` as *root spent*; this outcome is
+strictly worse, because there is nothing for an operator to read. Two roles
+found it independently (adversarial-redteam F1 as a live root-burn path,
+numerics-physics N12 as the same mechanism), and it is reachable on the
+sanctioned launcher path with no flags: the lane is a fourth full-budget draw at
+the same budget, run first, against an empty cache, and the campaign's measured
+miss rate is one in five.
+
+The ruling: **inside `publish_root` the cold lane gets anomaly-recording
+validation only.** It is validated for SHAPE and for HONESTY — the record is
+complete and typed, its outcome is re-derived from its own evidence and exit
+status, its execution context, custody blocks, budget, options, engine-wall
+algebra, ledger scope, ledger arithmetic and terminal-state hash are all
+re-derived, it may not be timed against the bar and it may not have run warm —
+and it is never validated for the CLAIM. The five comparisons that decide
+whether a draw discharges §1's claim (`certify_native_reference`, the per-term
+gate's verdict, that gate recomputed from the frozen literals,
+`certify_agreement`, and the feasibility bound) run on the pre-registered
+attempts alone. An honest cold miss or band-fail publishes: a lane that refused
+a gate publishes as `cold_lane_anomaly` with the refusing gate named, and a lane
+that latched past a band publishes its whole ledger for a reader to recompute,
+beside three timed attempts each of which runs every gate on its own endpoint.
+The split has one owner each — `_validate_attempt_record` for the record's own
+facts, `_validate_attempt` for the claim, `_validate_cold_lane` for the lane.
+
+**18. A PRE-REGISTRATION FACT IS BOUND TO THE TREE.** After ruling 13,
+`cold_lane_authorized` is the lane's ONLY channel to `PREREGISTERED` and
+therefore to `CLAIM_DISCHARGED`, and ruling 13 did not bind it: the sole check
+was that a record existed somewhere in the receipt, `COLD_LANE_DIRECTORY`
+appeared zero times in the validator, and the "every draw on disk is a draw in
+the receipt" sweep iterated only `attempts/`. A lane record whose
+`artifact_relative_path` said `attempts/attempt-1` was validated against attempt
+1's own sealed array and passed, so a root with **no cold-lane directory in the
+tree at all** minted the headline verdict. The lane's path must now be
+`cold-lane` and its index 0, and the `cold-lane` directory must exist in the
+artifact tree if and only if the receipt claims the lane ran — the supervisor
+creates it before it launches the lane, so it exists for every outcome the lane
+has, including a refusal.
+
+**The six forged receipts are re-published by name.** Round 4's forgeries are
+kept as named tests rather than folded into the tables, because a forgery that
+once worked is the only evidence that a fix works:
+`test_round4_forgery_i_hollowed_custody_blocks_are_refused`,
+`test_round4_forgery_i2_a_null_execution_sources_block_is_refused`,
+`test_round4_forgery_h_a_nulled_leaf_is_refused`,
+`test_round4_forgery_j_a_wrongly_typed_leaf_is_refused`,
+`test_round4_forgery_k_a_cold_lane_aliased_onto_an_attempt_is_refused` and
+`test_round4_forgery_m_a_restated_relative_difference_is_refused`. Ruling 17's
+own direction is pinned the other way by
+`test_an_unlucky_cold_lane_draw_cannot_refuse_the_whole_publication`, which
+publishes a root whose cold lane failed the per-term gate and another whose cold
+lane recorded an infeasible iterate, and requires both to seal
+`CLAIM_DISCHARGED` — while a cold lane that lies about its backend or hollows its
+custody block is still refused.
+
+#### Minors closed in the same remediation
+
+The ledger's `relative_difference` column was checked for its key set and never
+for its arithmetic, so every entry could read `0.0` beside sides that disagree;
+it is re-derived from the two sides through `endpoint_relative_differences`, one
+owner shared by the producer, the validator and the suite (adversarial F5). —
+Every `_ANY` leaf admitted present-but-null and any scalar type: 164 of them, and
+the reachable ones included the whole cache accounting ruling 9's readability
+promise leans on, every storage probe's identity, the source snapshot's digest,
+`chain_wall`, and every attempt's telemetry and solve payload. Closed by ruling
+15's typed leaves (protocol-receipt N4-3, reproducibility R4-2, adversarial F3).
+— `preflight.visible_gpu_uuids: null` refused with `TypeError: argument of type
+'NoneType' is not iterable` rather than a named refusal; every leaf refusal now
+names the defect (protocol-receipt N4-6). — The preflight published the
+temporary directory TWICE, once as the resolved XLA spill path and once as the
+probe that cleared it, and never compared them, so a receipt could name one
+directory beside a probe of another; they are one fact and are compared
+(protocol-receipt N4-4, first half). — The ruling-14 suite fixture applied
+neither of ruling 9's own rules to itself: it accepted a RELATIVE `TMPDIR`, which
+resolves against pytest's rootdir — this frozen repository — and it type-checked
+its candidates without write-probing them, so a `/var/tmp` that is off tmpfs but
+read-only or quota-exhausted is selected and fails later at `mkdir` as an
+unhandled `OSError` mid-suite. The fixture now selects through the launcher's own
+`probe_writable_storage`, which refuses a non-absolute path, refuses a RAM
+filesystem, and then writes a byte (reproducibility R4-3, R4-4). — Four frozen
+shapes were bound in the suite to fixtures under a comment that miscounted them
+("the three that are only reachable with a device" naming four) and misstated
+why: `gpu_runtime_identity`, `probe_writable_storage`,
+`configure_persistent_compilation_cache` and `_gpu_memory_payload` all run on
+CPU, and all four are now bound to their producers by execution (adversarial F6,
+reproducibility R4-6). — Three numerics documentation defects, each corrected in
+place with the measured figure: ruling 12's "a fraction of its band" is false for
+the three absolute terms (N8), its "~2e-14 against a smallest band of 1e-6"
+pairs the right magnitude with the wrong band — the smallest band is 1e-10 and
+the worst shift is 2.3377e-05 of a band (N9), and `weighted_total`'s corrected
+ceiling is 1.0206e-11, which is 49.52x rather than "two decades" above the
+derived figure and leaves the shipped band inert by 9.80e4x rather than 4.8e4x
+(N11; the module carried two different multipliers for one ratio). —
+`equal_minima_raw_term_ceiling`'s stated precondition excluded the
+`weighted_total` the module derives a ceiling for two dozen lines below and the
+suite calls it on; restated as "a quantity a latch BOUNDS ABOVE by
+`NATIVE_TARGET_OBJECTIVE`" (N10). — §12.8's deferral sentence "Ruling 7 closes
+that" was still refuted by execution; the half it rested on is WITHDRAWN in
+place, with what actually remains open stated beside it (protocol-receipt N4-2).
+— The plan's ruling-2 body still carried the unqualified "99.93 % of the
+objective" that §12.9 corrects 490 lines later, and the module's band table
+printed `observable.iota` without its sign (numerics N15).
+
+**Deferred from round 4, with reasons.** *The preflight's storage record is
+re-derived only against itself* (protocol-receipt N4-4, second half): the
+temporary directory is now tied to its probe, but `filesystem_type` and
+`one_byte_write` remain the artifact's own strings, because re-deriving them
+means reading `/proc/self/mountinfo` on the READER's box — which makes a sealed
+root un-re-validatable anywhere except the machine that produced it, and
+reproducibility-engineering's third-party re-validation is a property this
+protocol has and intends to keep. The half that decides is already frozen: the
+launcher computes the real type through the corrected mount walk before any
+compute, and a run on tmpfs never reaches the staging tree. — *`source_snapshot`
+may name a directory the tree does not carry* (protocol-receipt N4-2's X11): the
+snapshot's own manifest digest is not compared to the sealed subtree, so a
+hand-assembled root with no `source-snapshot` directory re-validates. Tying it
+means re-deriving `publish_immutable_snapshot`'s manifest over the sealed tree
+inside the validator, which is new code on the publication path between the
+reviews and the root; the artifact manifest already covers every byte in the
+tree against tampering AFTER publication, and this is a forgery-only exposure of
+a receipt nobody produced. Filed for the successor revision. — *Two attempt
+records with byte-identical evidence in two directories publish clean*
+(protocol-receipt N4-5's AL5b): with `artifact_relative_path` now pinned to
+`attempts/attempt-{i}` and the lane to `cold-lane`, this reads as "two draws that
+produced the same terminal state", which is not per se false. — *The supervisor's
+own `runtime_identity.backend` may say `cpu`* (N4-5's H06): the supervisor is not
+where the certified wall comes from and the attempt's backend is bound. — *The
+suite fixture does not record which storage it resolved, and leaves a shared base
+behind* (reproducibility R4-5): pytest output is not an artifact of this
+protocol, and the per-session directory is removed. — *`certify_native_reference`
+is a cross-backend equality gate one decade tighter than the campaign's own
+cross-backend precedent, and it runs after the spend* (numerics N7), and *it runs
+before the `gated` branch, so a native-side deviation would destroy even the
+`NO_LATCH_IN_PROTOCOL` receipt §12.1 needs* (N13): both are accepted with the
+margin measured — 513x against the cited measurement, ~340x against an
+independent numpy-vs-XLA reimplementation, ~85x against the worst case implied by
+the session-to-session spread in sixteen banked `bootstrap_equivalence` records —
+and numerics-physics explicitly recommends against retuning the constant between
+the reviews and the one-shot root. Its own role rated the placement defensible;
+retuning is the larger risk. — *Twin native-side constants: the rehearsal suite's
+`BANKED_ENDPOINT_LEDGER` disagrees with `NATIVE_ENDPOINT_PINNED_TERMS` at 1-2 ULP
+on three terms* (numerics N14): the authoritative object is the bitwise-bound
+one, the fixture is judged at `rel=1e-9`, and deriving the fixture from the
+constant edits the admissibility proof's own input between the reviews and the
+root. — The round-3 deferrals (`XLA_FLAGS`, the timed child's device UUID, the
+physics gate's terminal-side tie, numerics M2 and A1, the `--preflight-only`
+reason) are unchanged and their reasons are unchanged.
