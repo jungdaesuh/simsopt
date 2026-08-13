@@ -44,6 +44,7 @@ primitives.  A second spelling of any of them is a twin, and twins drift.
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import shutil
 import subprocess
@@ -77,6 +78,8 @@ from benchmarks.rehearse_single_stage_projected_route_cpu import (
     CERTIFIED_MAXIMUM_ITERATIONS,
     CERTIFIED_ROUTE_OPTIONS,
     INFORMATIONAL_ENDPOINT_OBSERVABLES,
+    NATIVE_ENDPOINT_STATE_CONTENT_SHA256,
+    NATIVE_ENDPOINT_STATE_FILE_SHA256,
     NATIVE_ENDPOINT_STATE_PATH,
     NATIVE_TARGET_OBJECTIVE,
     NATIVE_WALL_SECONDS_BAR,
@@ -88,9 +91,11 @@ from benchmarks.rehearse_single_stage_projected_route_cpu import (
     bind_problem_identity,
     build_endpoint_ledger,
     certify_endpoint_agreement,
+    certify_native_reference,
     collapse_proximity_margin,
     endpoint_ledger_is_gated,
     gate_endpoint_ledger,
+    gate_endpoint_ledger_against_frozen_native,
     iteration_payload,
     json_scalar,
     load_native_endpoint_state,
@@ -197,6 +202,12 @@ _FAILURE_TAIL_BYTES: Final = 8192
 # environment condition.  The directory resolved here is therefore XLA's, and it
 # is what the children are launched with rather than whatever they inherit.
 TEMPORARY_DIRECTORY_ENVIRONMENT_VARIABLE: Final = "TMPDIR"
+# TSL's candidate list, in its order.  Both shipped binaries carry all three
+# names beside the resolver's terminal "We are not able to find a directory for
+# temporary files." -- and ``TEST_TMPDIR`` is tried BEFORE ``TMPDIR``, so an
+# operator shell holding it would send the spill somewhere the preflight never
+# probed while the receipt recorded the probed one.
+TEMPORARY_DIRECTORY_ENVIRONMENT_VARIABLES: Final = ("TEST_TMPDIR", "TMPDIR", "TMP")
 DEFAULT_TEMPORARY_DIRECTORY: Final = Path("/tmp")
 
 # Filesystem types whose capacity is RAM and whose per-user limit is a quota no
@@ -233,6 +244,7 @@ ROOT_EVIDENCE_REQUIRED_KEYS: Final = frozenset({
     "attempts",
     "claim",
     "cold_lane",
+    "cold_lane_anomaly",
     "compilation_cache",
     "quality_claim",
     "route",
@@ -295,6 +307,198 @@ REFUSED_ATTEMPT_EVIDENCE_REQUIRED_KEYS: Final = frozenset({
     "route",
     "schema_version",
 })
+
+# ------------------------------------------------------ nested receipt shapes
+#
+# The key sets above are exactly ONE level deep, and a receipt is not whole
+# because its top-level names are all present.  Measured against the previous
+# revision: a ``CLAIM_DISCHARGED`` root whose supervisor block held nothing but
+# ``gpu_uuid`` -- no preflight, no runtime identity, therefore no storage record
+# and no native-reference digests -- published through the real publication path
+# and re-validated clean, as did one with an empty ``source_snapshot``, a null
+# ``compilation_cache``, an empty ``timing_seconds`` and every attempt's
+# ``gpu_memory`` nulled.  Present-but-null was indistinguishable from absent,
+# because the ``frozenset`` check passed and no reader followed.
+#
+# So the shape is frozen RECURSIVELY, from one tree.  A node's keys ARE its
+# required key set; ``_ANY`` is a leaf whose own shape is not frozen here, a
+# nested mapping freezes that block in turn, and ``_each(shape)`` freezes every
+# element of a published list.  One walker (``_validate_document_shape``) reads
+# the whole tree, so there is no second listing to drift.
+_ANY: Final = None
+
+
+def _each(shape: Mapping[str, object]) -> tuple[Mapping[str, object]]:
+    """A published list whose every element carries ``shape``."""
+
+    return (shape,)
+
+
+CACHE_STATE_SHAPE: Final = {
+    "entry_count": _ANY,
+    "entries_digest": _ANY,
+    "total_bytes": _ANY,
+}
+CACHE_CONFIGURATION_SHAPE: Final = {
+    "directory": _ANY,
+    "enabled": _ANY,
+    "min_compile_time_seconds": _ANY,
+    "min_entry_size_bytes": _ANY,
+}
+RUNTIME_IDENTITY_SHAPE: Final = {
+    "backend": _ANY,
+    "device_count": _ANY,
+    "device_kind": _ANY,
+    "device_platform": _ANY,
+    "jax_version": _ANY,
+    "jaxlib_version": _ANY,
+    "native_extension_path": _ANY,
+    "process_id": _ANY,
+    "python_executable": _ANY,
+    "python_prefix": _ANY,
+}
+STORAGE_PROBE_SHAPE: Final = {
+    "advisory_available_bytes": _ANY,
+    "device_id": _ANY,
+    "directory": _ANY,
+    "filesystem_type": _ANY,
+    "one_byte_write": _ANY,
+    "resolved_directory": _ANY,
+    "role": _ANY,
+}
+PREFLIGHT_SHAPE: Final = {
+    "gpu_inventory_executable": _ANY,
+    "native_endpoint_state_content_sha256": _ANY,
+    "native_endpoint_state_path": _ANY,
+    "native_endpoint_state_sha256": _ANY,
+    "resolved_temporary_directory": _ANY,
+    "storage": _each(STORAGE_PROBE_SHAPE),
+    "temporary_directory": _ANY,
+    "visible_gpu_uuids": _ANY,
+}
+SUPERVISOR_SHAPE: Final = {
+    "attempt_timeout_seconds": _ANY,
+    "gpu_uuid": _ANY,
+    "gpu_zero_asserted": _ANY,
+    "preflight": PREFLIGHT_SHAPE,
+    "runtime_identity": RUNTIME_IDENTITY_SHAPE,
+}
+WORKTREE_IDENTITY_SHAPE: Final = {
+    "git_head": _ANY,
+    "repo_root": _ANY,
+    "tracked_diff_sha256": _ANY,
+    "untracked_bytes_manifest_sha256": _ANY,
+}
+SOURCE_SNAPSHOT_SHAPE: Final = {
+    "entry_count": _ANY,
+    "manifest_sha256": _ANY,
+    "relative_path": _ANY,
+    "worktree": WORKTREE_IDENTITY_SHAPE,
+}
+ROOT_CLAIM_SHAPE: Final = {
+    "feasibility_tolerance": _ANY,
+    "target_objective": _ANY,
+    "wall_seconds_bar": _ANY,
+}
+ROOT_TIMING_SHAPE: Final = {"chain_wall": _ANY}
+COLD_LANE_ANOMALY_SHAPE: Final = {
+    "artifact_relative_path": _ANY,
+    "gate_refused": _ANY,
+    "outcome": _ANY,
+    "return_code": _ANY,
+    "supervised_seconds": _ANY,
+    "timed_out": _ANY,
+}
+GPU_MEMORY_SHAPE: Final = {
+    "availability": _ANY,
+    "child_argv_sha256": _ANY,
+    "child_pid": _ANY,
+    "child_start_time_ticks": _ANY,
+    "device_uuid": _ANY,
+    "monitor_scope": _ANY,
+    "parent_pid": _ANY,
+    "peak_used_memory_mib": _ANY,
+    "sample_count": _ANY,
+    "unavailable_reason": _ANY,
+}
+ATTEMPT_TIMING_SHAPE: Final = {
+    "attempt_wall": _ANY,
+    "bootstrap": _ANY,
+    "engine_compile": _ANY,
+    "engine_solve": _ANY,
+    "engine_wall": _ANY,
+    "lowering_pre_gate": _ANY,
+    "problem_identity": _ANY,
+}
+ATTEMPT_CACHE_SHAPE: Final = {
+    "after": CACHE_STATE_SHAPE,
+    "at_entry": CACHE_STATE_SHAPE,
+    "before_engine": CACHE_STATE_SHAPE,
+    "configuration": CACHE_CONFIGURATION_SHAPE,
+    "warm": _ANY,
+}
+ATTEMPT_SOLVE_SHAPE: Final = {
+    "collapse_proximity_margin": _ANY,
+    "iterations_run": _ANY,
+    "latched": _ANY,
+    "line_search_forced_refreshes": _ANY,
+    "maximum_feasibility_inf": _ANY,
+    "monotone_descent": _ANY,
+    "projector_materializations": _ANY,
+    "rows": _ANY,
+    "status": _ANY,
+    "status_name": _ANY,
+    "stored_pairs": _ANY,
+    "tangency_forced_refreshes": _ANY,
+    "terminal_feasibility_inf": _ANY,
+    "terminal_objective": _ANY,
+    "terminal_projected_gradient_inf": _ANY,
+}
+ATTEMPT_ENVIRONMENT_SHAPE: Final = {
+    COMPILATION_CACHE_ENVIRONMENT_VARIABLE: _ANY,
+    **{name: _ANY for name in GPU_REQUIRED_ENVIRONMENT},
+}
+ENDPOINT_AGREEMENT_SHAPE: Final = {
+    "absolute_floor": _ANY,
+    "feasibility_absolute_tolerance": _ANY,
+    "loop_terminal_objective": _ANY,
+    "relative_tolerance": _ANY,
+    "standalone_terminal_objective": _ANY,
+    "terminal_feasibility_inf": _ANY,
+    "terminal_state_sha256": _ANY,
+}
+_ENDPOINT_LEDGER_KEYS: Final = {
+    "gated_at_this_budget": _ANY,
+    "informational_observables": _ANY,
+    "native": _ANY,
+    "native_state_content_sha256": _ANY,
+    "native_state_relative_path": _ANY,
+    "native_state_sha256": _ANY,
+    "pinned_quality_terms": _ANY,
+    "relative_difference": _ANY,
+    "terminal": _ANY,
+}
+ENDPOINT_LEDGER_SHAPE: Final = dict(_ENDPOINT_LEDGER_KEYS)
+GATED_ENDPOINT_LEDGER_SHAPE: Final = {
+    **_ENDPOINT_LEDGER_KEYS,
+    "pinned_term_gate": {"failed_terms": _ANY, "passed": _ANY, "terms": _ANY},
+}
+ROOT_EVIDENCE_NESTED_SHAPES: Final = {
+    "claim": ROOT_CLAIM_SHAPE,
+    "compilation_cache": CACHE_STATE_SHAPE,
+    "source_snapshot": SOURCE_SNAPSHOT_SHAPE,
+    "supervisor": SUPERVISOR_SHAPE,
+    "timing_seconds": ROOT_TIMING_SHAPE,
+}
+SUPERVISED_ATTEMPT_NESTED_SHAPES: Final = {"gpu_memory": GPU_MEMORY_SHAPE}
+ATTEMPT_EVIDENCE_NESTED_SHAPES: Final = {
+    "compilation_cache": ATTEMPT_CACHE_SHAPE,
+    "endpoint_agreement": ENDPOINT_AGREEMENT_SHAPE,
+    "environment": ATTEMPT_ENVIRONMENT_SHAPE,
+    "runtime_identity": RUNTIME_IDENTITY_SHAPE,
+    "solve": ATTEMPT_SOLVE_SHAPE,
+    "timing_seconds": ATTEMPT_TIMING_SHAPE,
+}
 
 
 class ProjectedRootError(RuntimeError):
@@ -706,7 +910,13 @@ def attempt_invocation(
     child_environment = {
         **environment,
         COMPILATION_CACHE_ENVIRONMENT_VARIABLE: str(cache_directory),
-        TEMPORARY_DIRECTORY_ENVIRONMENT_VARIABLE: str(temporary_directory),
+        # ALL THREE of TSL's candidates, not just ``TMPDIR``: the resolver tries
+        # ``TEST_TMPDIR`` first, so overriding one name while forwarding the
+        # other two leaves the rule enforced against a directory nobody used.
+        **{
+            name: str(temporary_directory)
+            for name in TEMPORARY_DIRECTORY_ENVIRONMENT_VARIABLES
+        },
         "PYTHONPATH": os.pathsep.join((str(REPOSITORY / "src"), str(REPOSITORY))),
         "PYTHONDONTWRITEBYTECODE": "1",
     }
@@ -931,11 +1141,34 @@ def attempt_engine_wall_seconds(attempt: Mapping[str, JsonValue]) -> float:
     timing = attempt["evidence"]["timing_seconds"]
     if not isinstance(timing, dict):
         raise ProjectedRootError("attempt publishes no timing block to derive from")
-    derived = float(timing["engine_compile"]) + float(timing["engine_solve"])
+    compile_seconds = float(timing["engine_compile"])
+    solve_seconds = float(timing["engine_solve"])
+    # Deriving the sum constrains neither half.  A receipt publishing
+    # ``engine_compile = -1e6`` beside ``engine_solve = 1e6 + 100`` derives a
+    # 100 s wall exactly, and 100 s is not what either phase cost.  Both halves
+    # are durations: finite and nonnegative.
+    if not all(
+        math.isfinite(half) and half >= 0.0 for half in (compile_seconds, solve_seconds)
+    ):
+        raise ProjectedRootError(
+            f"attempt publishes an engine compile/solve pair that is not a pair "
+            f"of durations: {compile_seconds!r} + {solve_seconds!r}"
+        )
+    derived = compile_seconds + solve_seconds
     if derived != float(timing["engine_wall"]):
         raise ProjectedRootError(
             f"attempt engine wall {timing['engine_wall']!r} is not its own "
             f"compile plus solve ({derived!r})"
+        )
+    # The supervisor timed the whole child from ``Popen`` to ``communicate``.
+    # The certified wall is a strict part of that, so a receipt whose engine
+    # wall exceeds the wall the supervisor observed has restated the quantity
+    # the claim is judged on.
+    supervised = float(attempt["supervised_seconds"])
+    if not math.isfinite(supervised) or derived > supervised:
+        raise ProjectedRootError(
+            f"attempt engine wall {derived!r} is not within the supervised "
+            f"wall {supervised!r} it is a part of"
         )
     return derived
 
@@ -943,22 +1176,11 @@ def attempt_engine_wall_seconds(attempt: Mapping[str, JsonValue]) -> float:
 def cold_lane_measured(cold_lane: Mapping[str, JsonValue] | None) -> bool:
     """Whether the cold lane produced the measurement section 3 pre-registers.
 
-    Ruling 1 carried to the lane it was not written for.  The cold lane is a
-    fourth full-budget draw at the certified budget, run FIRST and outside the
-    attempt loop, and its outcome was never inspected: a lane that latched and
-    failed the per-term quality gate published ``GATE_REFUSED:endpoint_ledger``,
-    primed the cache the timed attempts were then measured against, and left
-    ``conformance: PREREGISTERED`` untouched -- the strongest available
-    counter-evidence to the quality claim, sealed into the same tree with no
-    effect on anything.
-
-    A lane that MISSED still measured a cold compile and still primed the cache,
-    so a miss conforms; ruling 1's whole point is that a stochastic miss indicts
-    nothing.  Every other outcome leaves the protocol in the state
-    ``--no-cold-lane`` leaves it in -- no cold number, nothing to account the
-    warm walls against -- and is labelled the same way, which caps the verdict
-    at ``QUALITY_ONLY`` instead of breaking the loop.  The lane's telemetry
-    publishes either way.
+    One owner for the PARTITION, and for nothing beyond it -- see
+    ``cold_lane_anomaly`` for what each side costs.  A lane that latched or
+    missed measured the cold compile and primed the cache; every other outcome
+    produced neither, and a lane that was never authorized produced neither
+    either.
     """
 
     if cold_lane is None:
@@ -966,8 +1188,50 @@ def cold_lane_measured(cold_lane: Mapping[str, JsonValue] | None) -> bool:
     return cold_lane["outcome"] in COLD_LANE_MEASURED_OUTCOMES
 
 
+def cold_lane_anomaly(
+    cold_lane: Mapping[str, JsonValue] | None,
+) -> dict[str, JsonValue] | None:
+    """Publish, in full, a cold lane that produced neither a latch nor a miss.
+
+    Plan section 12.9: THE COLD LANE IS DIAGNOSTICS, NEVER DISPOSITION.  It is
+    "a fourth full-budget draw that is not part of the protocol" (section 12.8's
+    own words) and it is the FIRST GPU process of the session, against a cache
+    that must start empty -- precisely where a first-compile timeout, an OOM or
+    a bootstrap fault lands.  None of those is evidence about the claim, and the
+    predicate that used to feed the conformance label could not tell them from
+    evidence: it returned the same ``False`` for a lane that failed the per-term
+    quality gate and for one that died on ``GATE_REFUSED:bootstrap``.  Either
+    way it forced ``BOUNDED_SMOKE`` on a run that ran the pre-registered N, the
+    certified budget and the lane; section 4's table disposes the resulting
+    ``QUALITY_ONLY`` as ROOT SPENT; and the pair it minted beside
+    ``quality_claim: CERTIFIED_BUDGET`` is one ``derive_verdict``'s own contract
+    says cannot occur.
+
+    So an anomalous lane is PUBLISHED rather than charged.  A reader of the
+    sealed bytes gets the lane's outcome, the gate that refused it, its exit
+    status, whether it timed out and its supervised wall -- the whole diagnosis
+    -- while the disposition rests on the three timed attempts, each of which
+    runs the same physics gate on its own endpoint.  ``None`` means the lane
+    latched, missed, or was never authorized.
+    """
+
+    if cold_lane is None or cold_lane_measured(cold_lane):
+        return None
+    evidence = cold_lane["evidence"]
+    return {
+        "outcome": cold_lane["outcome"],
+        "gate_refused": (
+            evidence["gate_refused"] if isinstance(evidence, dict) else None
+        ),
+        "return_code": cold_lane["return_code"],
+        "timed_out": cold_lane["timed_out"],
+        "supervised_seconds": cold_lane["supervised_seconds"],
+        "artifact_relative_path": cold_lane["artifact_relative_path"],
+    }
+
+
 def attempt_protocol_conformance(
-    *, authorized_attempts: int, iterations: int, cold_lane: bool
+    *, authorized_attempts: int, iterations: int, cold_lane_authorized: bool
 ) -> str:
     """Whether a run IS the pre-registered protocol or a bounded smoke.
 
@@ -978,16 +1242,19 @@ def attempt_protocol_conformance(
     would drag in the successor-root rule of section 12.1, which applies to a
     root and to nothing else.
 
-    ``cold_lane`` is the lane's own OUTCOME through ``cold_lane_measured``, not
-    the ``--no-cold-lane`` flag.  The flag says what was asked for; conformance
-    is a statement about what the protocol produced, and a lane that was
-    authorized and then refused produced exactly what an unauthorized one does.
+    ``cold_lane_authorized`` is whether the lane RAN, never what it produced
+    (plan section 12.9).  ``--no-cold-lane`` is a real departure from the
+    pre-registered protocol and demotes.  A lane that ran and then refused a
+    gate is a fact about a draw the protocol does not contain, and charging it
+    here labelled a fully conforming run a smoke and spent the root on an
+    outcome that says nothing about the claim; ``cold_lane_anomaly`` publishes
+    it instead.
     """
 
     preregistered = (
         authorized_attempts == PREREGISTERED_ATTEMPTS
         and iterations == CERTIFIED_MAXIMUM_ITERATIONS
-        and cold_lane
+        and cold_lane_authorized
     )
     return CONFORMANCE_PREREGISTERED if preregistered else CONFORMANCE_BOUNDED_SMOKE
 
@@ -1011,6 +1278,14 @@ def derive_verdict(
     latches under the bar is a true measurement and reads ``QUALITY_ONLY``; it
     is not the campaign's headline verdict, and the launcher will not mint one
     beside ``quality_claim: NOT_CLAIMED_AT_BOUNDED_BUDGET``.
+
+    THE COLD LANE DOES NOT REACH HERE, and neither does its outcome (plan
+    section 12.9).  The attempts this function reads are the pre-registered
+    ones; the lane is a fourth draw outside the protocol, run first and against
+    an empty cache, and an infrastructure fault there is a diagnosis published
+    as ``cold_lane_anomaly`` rather than a disposition charged to the root.  The
+    conformance label the caller passes carries whether the lane was AUTHORIZED,
+    which is a pre-registration fact and not an outcome.
     """
 
     if not attempts:
@@ -1061,7 +1336,13 @@ def filesystem_type(path: Path) -> str:
         for line in stream:
             fields = line.split()
             depth = depth_of.get(_unescape_mount_field(fields[4]))
-            if depth is None or depth <= deepest:
+            # ``<`` and not ``<=``: mountinfo is in MOUNT order, and among
+            # several mounts sharing one mount point the kernel resolves the
+            # LAST.  Skipping ties reported the SHADOWED filesystem, so
+            # ``mount -t tmpfs tmpfs /var/tmp/scratch`` -- the ordinary way an
+            # operator hands a compile a RAM scratch directory -- was published
+            # as the ext4 underneath it and passed the tmpfs refusal.
+            if depth is None or depth < deepest:
                 continue
             deepest = depth
             kind = fields[fields.index("-") + 1]
@@ -1086,8 +1367,19 @@ def probe_writable_storage(directory: Path, *, role: str) -> dict[str, JsonValue
     the failure CLASS, not the instance.
     """
 
+    if not directory.is_absolute():
+        raise ProjectedRootError(
+            f"{role} directory {directory} is relative; the supervisor would "
+            f"probe it against its own working directory while the children "
+            f"resolve it against {REPOSITORY}"
+        )
     if not directory.is_dir():
-        raise ProjectedRootError(f"{role} directory does not exist: {directory}")
+        raise ProjectedRootError(
+            f"{role} directory is not a directory: {directory}"
+            if directory.exists()
+            else f"{role} directory does not exist: {directory}"
+        )
+    resolved = directory.resolve()
     kind = filesystem_type(directory)
     if kind in REFUSED_STORAGE_FILESYSTEM_TYPES:
         raise ProjectedRootError(
@@ -1115,6 +1407,11 @@ def probe_writable_storage(directory: Path, *, role: str) -> dict[str, JsonValue
     return {
         "role": role,
         "directory": str(directory),
+        # The DECLARED path is what an operator set; the RESOLVED one is what
+        # the write landed in.  A symlinked temporary directory publishes two
+        # different strings here, and a reader of sealed bytes needs the second
+        # to know which filesystem the root actually ran under.
+        "resolved_directory": str(resolved),
         "filesystem_type": kind,
         "device_id": os.stat(directory).st_dev,
         "one_byte_write": "ok",
@@ -1125,10 +1422,23 @@ def probe_writable_storage(directory: Path, *, role: str) -> dict[str, JsonValue
 
 
 def resolve_temporary_directory(environment: Mapping[str, str]) -> Path:
-    """The directory XLA will spill through, by XLA's resolution rule."""
+    """The directory XLA will spill through, by XLA's resolution rule.
 
-    declared = environment.get(TEMPORARY_DIRECTORY_ENVIRONMENT_VARIABLE, "")
-    return Path(declared) if declared.strip() else DEFAULT_TEMPORARY_DIRECTORY
+    The rule is TSL's, and it is a CANDIDATE LIST, not one name: the resolver
+    tries ``TEST_TMPDIR`` first, then ``TMPDIR``, then ``TMP``, then ``/tmp``,
+    and dies with ``We are not able to find a directory for temporary files.``
+    if none of them takes a write.  All three names are carried by both shipped
+    binaries.  Reading only ``TMPDIR`` preflighted one directory while the
+    children spilled through another, under an operator shell that happened to
+    hold a Bazel-ism -- section 11 requires the failure CLASS, so all three are
+    resolved here and all three are overridden in the child environment.
+    """
+
+    for name in TEMPORARY_DIRECTORY_ENVIRONMENT_VARIABLES:
+        declared = environment.get(name, "")
+        if declared.strip():
+            return Path(declared)
+    return DEFAULT_TEMPORARY_DIRECTORY
 
 
 def preflight_external_resources(
@@ -1189,6 +1499,7 @@ def preflight_external_resources(
         # previously tell a root that ran under a safe temporary directory from
         # one that did not.
         "temporary_directory": str(temporary_directory),
+        "resolved_temporary_directory": str(temporary_directory.resolve()),
         "storage": storage,
     }
 
@@ -1285,13 +1596,17 @@ def build_root_evidence(
             "conformance": attempt_protocol_conformance(
                 authorized_attempts=authorized_attempts,
                 iterations=iterations,
-                cold_lane=cold_lane_measured(cold_lane),
+                cold_lane_authorized=cold_lane_authorized,
             ),
             "maximum_iterations": iterations,
             "certified_maximum_iterations": CERTIFIED_MAXIMUM_ITERATIONS,
         },
         "attempts": [dict(attempt) for attempt in attempts],
         "cold_lane": None if cold_lane is None else dict(cold_lane),
+        # Diagnostics, never disposition (section 12.9): a lane that produced
+        # neither a latch nor a miss is stated in full, beside a verdict derived
+        # without it.
+        "cold_lane_anomaly": cold_lane_anomaly(cold_lane),
         "compilation_cache": dict(cache),
         "source_snapshot": dict(snapshot),
         "supervisor": dict(supervisor),
@@ -1314,6 +1629,108 @@ def write_root_receipt(
             )
         )
     )
+
+
+def _validate_document_shape(
+    document: JsonValue, shape: Mapping[str, object], *, where: str
+) -> None:
+    """Refuse a receipt block that is not, recursively, the whole one.
+
+    The frozen key sets were exactly one level deep, so a ``supervisor`` holding
+    nothing but ``gpu_uuid``, an empty ``source_snapshot``, a null
+    ``compilation_cache`` and an emptied ``timing_seconds`` all passed for the
+    complete document they replaced: the ``frozenset`` matched at the top and no
+    reader followed.  PRESENT-BUT-NULL was equivalent to absent for every block
+    nothing indexed into.  This walks the whole shape tree from one listing, so
+    the completeness claim reaches every block section 6 builds.
+    """
+
+    if not isinstance(document, dict):
+        raise ProjectedRootError(f"{where} is not a document")
+    if frozenset(document) != frozenset(shape):
+        raise ProjectedRootError(
+            f"{where} is incomplete: missing "
+            f"{sorted(frozenset(shape) - frozenset(document))}, unexpected "
+            f"{sorted(frozenset(document) - frozenset(shape))}"
+        )
+    for name, nested in shape.items():
+        if nested is _ANY:
+            continue
+        value = document[name]
+        if isinstance(nested, tuple):
+            if not isinstance(value, list):
+                raise ProjectedRootError(f"{where}.{name} is not a published list")
+            for index, element in enumerate(value):
+                _validate_document_shape(
+                    element, nested[0], where=f"{where}.{name}[{index}]"
+                )
+            continue
+        _validate_document_shape(value, nested, where=f"{where}.{name}")
+
+
+def _validate_nested_shapes(
+    document: Mapping[str, JsonValue],
+    shapes: Mapping[str, Mapping[str, object]],
+    *,
+    where: str,
+) -> None:
+    """Walk every frozen sub-block of one already key-checked document."""
+
+    for name, shape in shapes.items():
+        _validate_document_shape(document[name], shape, where=f"{where}.{name}")
+
+
+def _validate_preflight_record(preflight: Mapping[str, JsonValue]) -> None:
+    """Re-derive the supervisor's preflight against the constants it checked.
+
+    Ruling 6 pinned the native reference AT LOAD, in the supervisor's process,
+    and left no residue a reader of sealed bytes could check: a receipt could
+    restate both digests, name a path that does not exist, and publish a device
+    inventory and a storage record that never happened.  Ruling 9 acquired the
+    same status the moment its evidence was published rather than re-derived.
+    Both are constants here, so both are compared.
+    """
+
+    if (
+        preflight["native_endpoint_state_sha256"] != NATIVE_ENDPOINT_STATE_FILE_SHA256
+        or preflight["native_endpoint_state_content_sha256"]
+        != NATIVE_ENDPOINT_STATE_CONTENT_SHA256
+        or preflight["native_endpoint_state_path"] != str(NATIVE_ENDPOINT_STATE_PATH)
+    ):
+        raise ProjectedRootError(
+            "root preflight names a native endpoint reference other than the "
+            "campaign's pinned one"
+        )
+    if GPU_UUID not in preflight["visible_gpu_uuids"]:
+        raise ProjectedRootError(
+            f"root preflight did not see the device the claim names ({GPU_UUID!r})"
+        )
+    for probe in preflight["storage"]:
+        if probe["filesystem_type"] in REFUSED_STORAGE_FILESYSTEM_TYPES:
+            raise ProjectedRootError(
+                f"root published a {probe['role']} directory on "
+                f"{probe['filesystem_type']}, which plan section 11 refuses"
+            )
+        if probe["one_byte_write"] != "ok":
+            raise ProjectedRootError(
+                f"root published a {probe['role']} directory whose write probe "
+                f"did not succeed"
+            )
+    if [probe["role"] for probe in preflight["storage"]] != [
+        "temporary",
+        "compilation_cache",
+        "output",
+    ]:
+        raise ProjectedRootError(
+            "root preflight did not probe the three directories the protocol writes"
+        )
+    # And where the reference itself is still on the box, it is RE-LOADED, which
+    # re-verifies both digests against the constants above.  A reader whose box
+    # no longer carries it keeps the comparison against the frozen literals; a
+    # reader whose box carries a DIFFERENT file learns so here, which is the
+    # whole point of ruling 6.
+    if NATIVE_ENDPOINT_STATE_PATH.exists():
+        load_native_endpoint_state()
 
 
 def _fsync(path: Path) -> None:
@@ -1403,10 +1820,29 @@ def validate_root_artifact(
     consistency check over the fields it happened to find, and a sealed
     ``CLAIM_DISCHARGED`` root whose physics gate never ran -- or ran and failed
     -- published and re-validated clean.  It also asserts the receipt is
-    COMPLETE, because a truncated document could not be told from a whole one:
-    every block section 6 builds has a frozen key set.
+    COMPLETE, RECURSIVELY, because a truncated document could not be told from a
+    whole one: every block section 6 builds has a frozen key set, and so does
+    every block inside it (``_validate_document_shape``).
+
+    The reference the physics gate is judged against is the CAMPAIGN's, never
+    the artifact's.  The published native side is compared to
+    ``NATIVE_ENDPOINT_PINNED_TERMS`` term by term, the gate is recomputed from
+    those literals, the two digests of ruling 6 are compared to the frozen
+    constants wherever the receipt states them, and the reference file itself is
+    re-loaded -- digests verified -- when this box still has it.
+
+    Re-validation is FLOATING-POINT WORK, so it asserts its own precision: the
+    terminal-state digest is re-derived through ``jnp.asarray(..., float64)``,
+    which silently yields float32 with x64 disabled and refuses a valid root
+    with a message indicting the artifact rather than the reader's environment.
     """
 
+    if not jax.config.jax_enable_x64:
+        raise ProjectedRootError(
+            "re-validation requires JAX_ENABLE_X64=true: the published terminal "
+            "state is a float64 array, and with x64 disabled its digest is "
+            "re-derived at float32 and disagrees with every honest receipt"
+        )
     manifest = load_canonical_json_bytes((artifact_root / MANIFEST_FILENAME).read_bytes())
     if manifest != artifact_manifest_payload(
         artifact_root, schema_version=GPU_ROOT_MANIFEST_SCHEMA_VERSION
@@ -1428,6 +1864,7 @@ def validate_root_artifact(
             f"{sorted(ROOT_EVIDENCE_REQUIRED_KEYS - frozenset(evidence))}, "
             f"unexpected {sorted(frozenset(evidence) - ROOT_EVIDENCE_REQUIRED_KEYS)}"
         )
+    _validate_nested_shapes(evidence, ROOT_EVIDENCE_NESTED_SHAPES, where="root")
     claim = evidence["claim"]
     if (
         claim["wall_seconds_bar"] != NATIVE_WALL_SECONDS_BAR
@@ -1444,6 +1881,7 @@ def validate_root_artifact(
             f"root names GPU {evidence['supervisor']['gpu_uuid']!r}, not the "
             f"device the claim is stated for ({GPU_UUID!r})"
         )
+    _validate_preflight_record(evidence["supervisor"]["preflight"])
 
     protocol = evidence["attempt_protocol"]
     if frozenset(protocol) != ATTEMPT_PROTOCOL_REQUIRED_KEYS:
@@ -1470,8 +1908,60 @@ def validate_root_artifact(
     conformance = attempt_protocol_conformance(
         authorized_attempts=int(protocol["authorized_attempts"]),
         iterations=int(protocol["maximum_iterations"]),
-        cold_lane=cold_lane_measured(cold),
+        cold_lane_authorized=bool(protocol["cold_lane_authorized"]),
     )
+    # Section 12.9: the lane's own outcome is published, in full, and reaches
+    # nothing else.  Re-derived here so a receipt cannot hide an anomalous lane
+    # behind a null.
+    derived_anomaly = cold_lane_anomaly(cold)
+    if evidence["cold_lane_anomaly"] != derived_anomaly:
+        raise ProjectedRootError(
+            f"published cold-lane anomaly {evidence['cold_lane_anomaly']!r} is "
+            f"not the one its lane derives ({derived_anomaly!r})"
+        )
+    # The published stop rule was a STRING, re-derived from a constant, while
+    # the attempt SEQUENCE it describes was unconstrained: a receipt could carry
+    # three ``LATCHED`` attempts and ``latch_rate: 3/3`` on a loop that breaks
+    # after the first.  The rule is enforced against the list it names.
+    if len(attempts) > int(protocol["authorized_attempts"]):
+        raise ProjectedRootError(
+            f"root published {len(attempts)} attempts under "
+            f"{protocol['authorized_attempts']!r} authorized"
+        )
+    for index, attempt in enumerate(attempts[:-1]):
+        if attempt["outcome"] != "COMPLETED_WITHOUT_LATCH":
+            raise ProjectedRootError(
+                f"attempt {index + 1} outcome {attempt['outcome']!r} does not "
+                f"obey the published stop rule: {ATTEMPT_STOP_RULE}"
+            )
+    expected_paths = [
+        f"{ATTEMPTS_DIRECTORY}/attempt-{index}"
+        for index in range(1, len(attempts) + 1)
+    ]
+    if [attempt["artifact_relative_path"] for attempt in attempts] != expected_paths or (
+        [int(attempt["attempt_index"]) for attempt in attempts]
+        != list(range(1, len(attempts) + 1))
+    ):
+        raise ProjectedRootError(
+            "root attempts are not the protocol's consecutive draws, each in its "
+            "own directory"
+        )
+    # Every draw ON DISK has to be a draw in the receipt.  The loop writes an
+    # attempt directory before it launches the child, so a tree carrying one the
+    # attempt list does not claim is a suppressed draw.
+    attempts_directory = artifact_root / ATTEMPTS_DIRECTORY
+    unclaimed = sorted(
+        entry.name
+        for entry in (
+            attempts_directory.iterdir() if attempts_directory.is_dir() else ()
+        )
+        if entry.is_dir() and f"{ATTEMPTS_DIRECTORY}/{entry.name}" not in expected_paths
+    )
+    if unclaimed:
+        raise ProjectedRootError(
+            f"the artifact tree carries attempt directories the receipt does "
+            f"not publish: {unclaimed}"
+        )
     latch_count = len([a for a in attempts if a["outcome"] == "LATCHED"])
     derived_protocol: dict[str, JsonValue] = {
         "attempts_run": len(attempts),
@@ -1542,6 +2032,9 @@ def _validate_attempt_shape(
             f"{sorted(required - frozenset(attempt))}, unexpected "
             f"{sorted(frozenset(attempt) - required)}"
         )
+    _validate_nested_shapes(
+        attempt, SUPERVISED_ATTEMPT_NESTED_SHAPES, where="supervised attempt"
+    )
     evidence = attempt["evidence"]
     if evidence is None:
         return
@@ -1558,6 +2051,22 @@ def _validate_attempt_shape(
             f"{sorted(expected - frozenset(evidence))}, unexpected "
             f"{sorted(frozenset(evidence) - expected)}"
         )
+    if evidence.get("gate_refused") is not None:
+        return
+    _validate_nested_shapes(
+        evidence, ATTEMPT_EVIDENCE_NESTED_SHAPES, where="attempt evidence"
+    )
+    _validate_document_shape(
+        evidence["endpoint_ledger"],
+        (
+            GATED_ENDPOINT_LEDGER_SHAPE
+            if evidence["endpoint_ledger"].get("gated_at_this_budget")
+            else ENDPOINT_LEDGER_SHAPE
+        )
+        if isinstance(evidence["endpoint_ledger"], dict)
+        else ENDPOINT_LEDGER_SHAPE,
+        where="attempt evidence.endpoint_ledger",
+    )
 
 
 def _validate_attempt_outcome(attempt: Mapping[str, JsonValue]) -> None:
@@ -1594,6 +2103,30 @@ def _validate_attempt(
         raise ProjectedRootError("attempt carries no evidence document")
     if evidence["gate_refused"] is not None:
         return
+    # The EXECUTION CONTEXT the attempt declares, re-derived rather than merely
+    # published.  The root's own schema, route and timing boundary were checked;
+    # the attempt's were not, so a ``CLAIM_DISCHARGED`` receipt could name the
+    # CPU as the backend that produced the certified wall, state another timing
+    # boundary, or carry another route's schema.
+    if (
+        evidence["schema_version"] != GPU_ATTEMPT_SCHEMA_VERSION
+        or evidence["route"] != PROJECTED_ROUTE
+        or evidence["timing_boundary"] != "engine_compile_plus_solve"
+        or int(evidence["attempt_index"]) != int(attempt["attempt_index"])
+    ):
+        raise ProjectedRootError(
+            "attempt evidence describes a different run than the record carrying it"
+        )
+    if evidence["runtime_identity"]["backend"] != REQUIRED_BACKEND:
+        raise ProjectedRootError(
+            f"attempt names backend {evidence['runtime_identity']['backend']!r}, "
+            f"not the {REQUIRED_BACKEND!r} the wall is claimed on"
+        )
+    if any(
+        evidence["environment"][name] != value
+        for name, value in GPU_REQUIRED_ENVIRONMENT.items()
+    ):
+        raise ProjectedRootError("attempt ran under an environment the route forbids")
     # The wall of EVERY attempt, not only the first latching one: section 4
     # makes each attempt's wall part of the artifact, and ``derive_verdict``
     # reaches ``attempt_engine_wall_seconds`` on exactly one of them.
@@ -1671,6 +2204,32 @@ def _validate_attempt(
         ledger["informational_observables"] != list(INFORMATIONAL_ENDPOINT_OBSERVABLES)
     ):
         raise ProjectedRootError("attempt endpoint ledger scope differs from the campaign's")
+    # Nor may it supply the REFERENCE those terms are judged against.  Both
+    # sides of the gate used to come out of the document being judged, so a
+    # ledger publishing ``terminal == native == 1.0`` on all ten pinned terms
+    # recomputed every verdict to ``measured = 0.0, passed = true`` and sealed
+    # as ``CLAIM_DISCHARGED`` -- ruling 7 bound whether the gate RAN and whether
+    # it PASSED, and not what it ran against.  The native side is the campaign's
+    # frozen evaluation of the digest-pinned reference, and the digests the
+    # ledger names are ruling 6's constants.
+    if (
+        ledger["native_state_sha256"] != NATIVE_ENDPOINT_STATE_FILE_SHA256
+        or ledger["native_state_content_sha256"] != NATIVE_ENDPOINT_STATE_CONTENT_SHA256
+        or ledger["native_state_relative_path"] != NATIVE_ENDPOINT_STATE_PATH.name
+    ):
+        raise ProjectedRootError(
+            "attempt endpoint ledger names another native endpoint reference"
+        )
+    for side in ("terminal", "native", "relative_difference"):
+        if not isinstance(ledger[side], dict) or not frozenset(ledger[side]) >= (
+            frozenset(PINNED_ENDPOINT_QUALITY_TERMS)
+            | frozenset(INFORMATIONAL_ENDPOINT_OBSERVABLES)
+        ):
+            raise ProjectedRootError(
+                f"attempt endpoint ledger {side} side does not carry the "
+                f"campaign's terms"
+            )
+    certify_native_reference(ledger["native"])
     # ``gated_at_this_budget`` was the one decision field re-validation READ,
     # and it is the field that switches section 1.1's physics gate on.  Read, a
     # ``CLAIM_DISCHARGED`` root could carry an ungated ledger on its latching
@@ -1699,6 +2258,17 @@ def _validate_attempt(
             raise ProjectedRootError(
                 "attempt discharges the claim with a failed pinned-term gate: "
                 f"{ledger['pinned_term_gate']['failed_terms']}"
+            )
+        # And the gate that DECIDES is recomputed against the frozen reference,
+        # not against the ledger's own native side.  Bitwise agreement between
+        # the two recomputations is neither required nor possible -- the
+        # literals are this repository's CPU evaluation, the receipt's are the
+        # GPU's -- so what is demanded is that the frozen-reference gate passes.
+        frozen = gate_endpoint_ledger_against_frozen_native(ledger)
+        if not frozen["passed"]:
+            raise ProjectedRootError(
+                "attempt endpoint differs from the campaign's frozen native "
+                f"reference on {frozen['failed_terms']}"
             )
 
     endpoint = evidence["endpoint_agreement"]
@@ -1784,12 +2354,18 @@ def run_attempt_protocol(
         )
     cache_directory.mkdir(parents=True, exist_ok=True)
 
-    # Both BEFORE the staging tree exists, so a refusal leaves the filesystem
-    # exactly as it found it and costs zero compute -- which is what makes
-    # refusing a temporary directory on tmpfs the cheap half of the trade
-    # against a ``GATE_REFUSED:bootstrap`` on a spent root.  The backend stays
-    # first: a process that resolved to the CPU is not a launch of this protocol
-    # at all, and it is the cheapest fact to establish.
+    # Both BEFORE the staging tree exists, so a refusal costs zero compute --
+    # which is what makes refusing a temporary directory on tmpfs the cheap half
+    # of the trade against a ``GATE_REFUSED:bootstrap`` on a spent root.  The
+    # backend stays first: a process that resolved to the CPU is not a launch of
+    # this protocol at all, and it is the cheapest fact to establish.
+    #
+    # "Leaves the filesystem exactly as it found it" is APPROXIMATE, and stated
+    # here rather than claimed: the ``mkdir`` above creates ``--cache-dir`` if
+    # it is absent (a re-run finds it empty and passes the check above it), and
+    # ``bind_gpu_backend`` initialises a CUDA context under whatever storage the
+    # operator had, before that storage has been probed.  Neither costs the
+    # root; neither is nothing.
     runtime_identity = bind_gpu_backend()
     preflight = preflight_external_resources(
         gpu_uuid=gpu_uuid,
@@ -1803,6 +2379,11 @@ def run_attempt_protocol(
         output_root.parent / f"{output_root.name}.partial-{os.urandom(8).hex()}"
     )
     os.mkdir(staging_root, 0o700)
+    # Ruling 10 reaches the NAME as well as the contents.  ``root-validation-refusal.json``
+    # is fsynced where it is written, but an unfsynced ``mkdir`` leaves the
+    # directory entry that names its tree in the page cache, so a power loss in
+    # the refusal window could take the freshly durable record with it.
+    _fsync(output_root.parent)
 
     supervisor = supervisor_payload(
         runtime_identity,
@@ -1852,7 +2433,7 @@ def run_attempt_protocol(
         conformance=attempt_protocol_conformance(
             authorized_attempts=attempts_authorized,
             iterations=iterations,
-            cold_lane=cold_lane_measured(cold),
+            cold_lane_authorized=cold_lane,
         ),
     )
     evidence = build_root_evidence(
@@ -1930,37 +2511,60 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 __all__ = (
     "ATTEMPTS_DIRECTORY",
+    "ATTEMPT_CACHE_SHAPE",
+    "ATTEMPT_ENVIRONMENT_SHAPE",
+    "ATTEMPT_EVIDENCE_NESTED_SHAPES",
     "ATTEMPT_EVIDENCE_REQUIRED_KEYS",
     "ATTEMPT_PROTOCOL_REQUIRED_KEYS",
+    "ATTEMPT_SOLVE_SHAPE",
     "ATTEMPT_STOP_RULE",
     "ATTEMPT_TIMEOUT_SECONDS",
+    "ATTEMPT_TIMING_SHAPE",
+    "CACHE_CONFIGURATION_SHAPE",
+    "CACHE_STATE_SHAPE",
+    "COLD_LANE_ANOMALY_SHAPE",
     "COLD_LANE_DIRECTORY",
     "COLD_LANE_MEASURED_OUTCOMES",
     "COMPILATION_CACHE_ENVIRONMENT_VARIABLE",
     "CONFORMANCE_BOUNDED_SMOKE",
     "CONFORMANCE_PREREGISTERED",
     "DEFAULT_TEMPORARY_DIRECTORY",
+    "ENDPOINT_AGREEMENT_SHAPE",
+    "ENDPOINT_LEDGER_SHAPE",
     "EVIDENCE_FILENAME",
+    "GATED_ENDPOINT_LEDGER_SHAPE",
     "GPU_ATTEMPT_SCHEMA_VERSION",
+    "GPU_MEMORY_SHAPE",
     "GPU_REQUIRED_ENVIRONMENT",
     "GPU_ROOT_MANIFEST_SCHEMA_VERSION",
     "GPU_ROOT_SCHEMA_VERSION",
     "MANIFEST_FILENAME",
     "PERSISTENT_CACHE_MIN_COMPILE_TIME_SECONDS",
     "PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES",
+    "PREFLIGHT_SHAPE",
     "PREREGISTERED_ATTEMPTS",
     "PROJECTED_ROUTE",
     "REFUSAL_FILENAME",
     "REFUSAL_SCHEMA_VERSION",
     "REFUSED_ATTEMPT_EVIDENCE_REQUIRED_KEYS",
     "REFUSED_STORAGE_FILESYSTEM_TYPES",
+    "ROOT_CLAIM_SHAPE",
+    "ROOT_EVIDENCE_NESTED_SHAPES",
     "ROOT_EVIDENCE_REQUIRED_KEYS",
+    "ROOT_TIMING_SHAPE",
+    "RUNTIME_IDENTITY_SHAPE",
+    "SOURCE_SNAPSHOT_SHAPE",
+    "STORAGE_PROBE_SHAPE",
+    "SUPERVISED_ATTEMPT_NESTED_SHAPES",
     "SUPERVISED_ATTEMPT_REQUIRED_KEYS",
+    "SUPERVISOR_SHAPE",
     "TEMPORARY_DIRECTORY_ENVIRONMENT_VARIABLE",
+    "TEMPORARY_DIRECTORY_ENVIRONMENT_VARIABLES",
     "VERDICT_CLAIM_DISCHARGED",
     "VERDICT_GATE_REFUSED_PREFIX",
     "VERDICT_NO_LATCH",
     "VERDICT_QUALITY_ONLY",
+    "WORKTREE_IDENTITY_SHAPE",
     "GateRefusal",
     "ProjectedRootError",
     "attempt_engine_wall_seconds",
@@ -1968,6 +2572,8 @@ __all__ = (
     "attempt_protocol_conformance",
     "bind_gpu_backend",
     "build_root_evidence",
+    "capture_worktree_identity",
+    "cold_lane_anomaly",
     "cold_lane_measured",
     "compilation_cache_state",
     "configure_persistent_compilation_cache",

@@ -22,6 +22,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -38,6 +39,57 @@ from benchmarks.single_stage_fullspace_snapshot import canonical_json_bytes
 from simsopt_jax.runtime.exact_numeric_identity import exact_numeric_tree_sha256
 
 REPOSITORY = Path(__file__).resolve().parents[2]
+
+
+# ------------------------------------------------------- off-tmpfs test storage
+#
+# Ruling 9's three tests are the only machine evidence for the rule, and under
+# this box's DEFAULT environment they were the three that failed: pytest derives
+# ``tmp_path`` from ``$TMPDIR``, ``/tmp`` here is tmpfs, and the filesystem-type
+# refusal fired before the assertion each test makes -- so an operator running
+# the pre-root suite the obvious way saw the newest ruling's tests in red, and
+# the EDQUOT-class write probe the ruling is built around was never exercised at
+# all.  The suite provisions its own storage instead of depending on the
+# runner's shell.
+
+
+def _off_tmpfs_base() -> Path:
+    """The first candidate directory on this box that is not a RAM filesystem."""
+
+    declared = os.environ.get("TMPDIR", "")
+    candidates = [
+        *([Path(declared)] if declared.strip() else []),
+        Path("/var/tmp"),
+        Path.home() / ".cache",
+    ]
+    for candidate in candidates:
+        if not candidate.is_dir():
+            continue
+        if launcher.filesystem_type(candidate) not in (
+            launcher.REFUSED_STORAGE_FILESYSTEM_TYPES
+        ):
+            return candidate
+    raise RuntimeError(f"no candidate directory off tmpfs among {candidates}")
+
+
+@pytest.fixture(scope="session")
+def off_tmpfs_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A session directory off tmpfs, whatever the runner's ``TMPDIR`` says."""
+
+    base = _off_tmpfs_base() / "projected-route-suite"
+    base.mkdir(parents=True, exist_ok=True)
+    root = Path(tempfile.mkdtemp(dir=base))
+    yield root
+    shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.fixture
+def off_tmpfs_path(off_tmpfs_root: Path, request: pytest.FixtureRequest) -> Path:
+    """One test's own directory, guaranteed off tmpfs."""
+
+    path = off_tmpfs_root / request.node.name.replace("/", "_")[:80]
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 # ------------------------------------------------------------ frozen protocol
@@ -68,14 +120,31 @@ def test_the_certified_wall_is_derived_from_engine_compile_plus_engine_solve() -
     bar is strict: a wall equal to it does not discharge the claim.
     """
 
-    attempt = _attempt("LATCHED")
+    attempt = _attempt("LATCHED", engine_wall=112.75)
     attempt["evidence"]["timing_seconds"] = {
+        **attempt["evidence"]["timing_seconds"],
         "engine_compile": 12.5,
         "engine_solve": 100.25,
         "engine_wall": 112.75,
-        "attempt_wall": 140.0,
     }
     assert launcher.attempt_engine_wall_seconds(attempt) == 112.75 == (12.5 + 100.25)
+
+    # Neither half is free: a receipt deriving the right sum out of a negative
+    # compile and an inflated solve has published a wall neither phase cost, and
+    # the engine's wall is a strict part of the wall the supervisor observed.
+    signed = _attempt("LATCHED", engine_wall=100.0)
+    signed["evidence"]["timing_seconds"] = {
+        **signed["evidence"]["timing_seconds"],
+        "engine_compile": -1.0e6,
+        "engine_solve": 1.0e6 + 100.0,
+        "engine_wall": 100.0,
+    }
+    with pytest.raises(launcher.ProjectedRootError, match="not a pair of durations"):
+        launcher.attempt_engine_wall_seconds(signed)
+    unsupervised = _attempt("LATCHED", engine_wall=100.0)
+    unsupervised["supervised_seconds"] = 1.0
+    with pytest.raises(launcher.ProjectedRootError, match="supervised wall"):
+        launcher.attempt_engine_wall_seconds(unsupervised)
 
     bar = rehearsal.NATIVE_WALL_SECONDS_BAR
     at_the_bar = _attempt("LATCHED", engine_wall=bar)
@@ -159,6 +228,114 @@ def _options_delta(iterations: int) -> dict:
     }
 
 
+def _runtime_identity() -> dict:
+    """The identity ``gpu_runtime_identity`` publishes, key for key."""
+
+    return {
+        "backend": "gpu",
+        "device_count": 1,
+        "device_kind": "NVIDIA GeForce RTX 5090",
+        "device_platform": "cuda",
+        "jax_version": "0.0.0",
+        "jaxlib_version": "0.0.0",
+        "native_extension_path": "/simsoptpp.so",
+        "process_id": 1,
+        "python_executable": "/python",
+        "python_prefix": "/venv",
+    }
+
+
+def _endpoint_agreement(terminal_state_sha256: str = "0" * 64) -> dict:
+    """The whole agreement block ``certify_endpoint_agreement`` publishes."""
+
+    return {
+        "loop_terminal_objective": 4.48e-8,
+        "standalone_terminal_objective": 4.48e-8 * (1.0 + 5.0e-16),
+        "relative_tolerance": launcher.DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE,
+        "absolute_floor": launcher.DIAG4_ENDPOINT_AGREEMENT_ABSOLUTE_FLOOR,
+        "terminal_feasibility_inf": 1.0e-14,
+        "feasibility_absolute_tolerance": (
+            rehearsal.CERTIFIED_ROUTE_OPTIONS.feasibility_tolerance
+        ),
+        "terminal_state_sha256": terminal_state_sha256,
+    }
+
+
+def _cache_state(entry_count: int = 1) -> dict:
+    """One cache-state block, in the shape ``compilation_cache_state`` writes."""
+
+    return {
+        "entry_count": entry_count,
+        "total_bytes": 16 * entry_count,
+        "entries_digest": "0" * 64,
+    }
+
+
+def _attempt_cache(*, warm: bool) -> dict:
+    """The child's whole cache accounting, not just the ``warm`` flag.
+
+    Re-validation walks the receipt's nested blocks, so a fixture publishing one
+    key of five is a fixture asserting a shape the protocol cannot produce --
+    which is how a hollow ``compilation_cache`` came to re-validate clean.
+    """
+
+    return {
+        "configuration": {
+            "directory": "/cache",
+            "enabled": True,
+            "min_entry_size_bytes": launcher.PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES,
+            "min_compile_time_seconds": (
+                launcher.PERSISTENT_CACHE_MIN_COMPILE_TIME_SECONDS
+            ),
+        },
+        "at_entry": _cache_state(1 if warm else 0),
+        "before_engine": _cache_state(1 if warm else 0),
+        "after": _cache_state(2),
+        "warm": warm,
+    }
+
+
+def _solve_payload(
+    *, latched: bool, terminal_objective: float, maximum_feasibility_inf: float | None
+) -> dict:
+    """Every host-side scalar ``_solve_payload`` publishes, in its shape."""
+
+    return {
+        "status": 0,
+        "status_name": "OBJECTIVE_TARGET_REACHED" if latched else "MAXIMUM_ITERATIONS",
+        "latched": latched,
+        "iterations_run": 7,
+        "terminal_objective": terminal_objective,
+        "terminal_feasibility_inf": 1.0e-14,
+        "terminal_projected_gradient_inf": 1.0e-7,
+        "stored_pairs": 5,
+        "projector_materializations": 2,
+        "tangency_forced_refreshes": 0,
+        "line_search_forced_refreshes": 0,
+        "monotone_descent": True,
+        "maximum_feasibility_inf": maximum_feasibility_inf,
+        "collapse_proximity_margin": 1.0,
+        "rows": [],
+    }
+
+
+def _gpu_memory() -> dict:
+    """The observation ``_gpu_memory_payload`` normalizes, whole."""
+
+    return {
+        "monitor_scope": "whole-child-exact-pid-exact-device",
+        "availability": "unavailable",
+        "unavailable_reason": "sampler-failed",
+        "device_uuid": launcher.GPU_UUID,
+        "parent_pid": 1,
+        "child_pid": 2,
+        "child_start_time_ticks": None,
+        "child_argv_sha256": "0" * 64,
+        "sample_count": 0,
+        "peak_used_memory_mib": None,
+    }
+
+
 def _attempt_evidence(
     *,
     index: int,
@@ -172,25 +349,32 @@ def _attempt_evidence(
         "schema_version": launcher.GPU_ATTEMPT_SCHEMA_VERSION,
         "route": launcher.PROJECTED_ROUTE,
         "attempt_index": index,
-        "environment": dict(launcher.GPU_REQUIRED_ENVIRONMENT),
-        "runtime_identity": {"backend": "gpu"},
+        "environment": {
+            **launcher.GPU_REQUIRED_ENVIRONMENT,
+            launcher.COMPILATION_CACHE_ENVIRONMENT_VARIABLE: "/cache",
+        },
+        "runtime_identity": _runtime_identity(),
         "execution_sources": {"bound_modules": []},
         "problem_identity": {"bound": True, "sha_is_binding": False},
         "lowering_pre_gate": {"budget_independent": True},
         "options": _options_payload(iterations),
         "certified_options_delta": _options_delta(iterations),
-        "compilation_cache": {"warm": True},
-        "solve": {
-            "latched": latched,
-            "maximum_feasibility_inf": 1.0e-14,
-            "terminal_objective": 4.48e-8,
-        },
-        "endpoint_agreement": {},
-        "endpoint_ledger": {},
+        "compilation_cache": _attempt_cache(warm=True),
+        "solve": _solve_payload(
+            latched=latched,
+            terminal_objective=4.48e-8,
+            maximum_feasibility_inf=1.0e-14,
+        ),
+        "endpoint_agreement": _endpoint_agreement(),
+        "endpoint_ledger": _synthetic_ledger(gated=False),
         "timing_seconds": {
+            "bootstrap": 1.0,
+            "problem_identity": 1.0,
+            "lowering_pre_gate": 1.0,
             "engine_compile": 0.0,
             "engine_solve": engine_wall,
             "engine_wall": engine_wall,
+            "attempt_wall": engine_wall + 3.0,
         },
         "timing_boundary": "engine_compile_plus_solve",
         "quality_claim": (
@@ -251,10 +435,7 @@ def _attempt(
         "timed_out": outcome == "TIMEOUT",
         "supervised_seconds": engine_wall + 1.0,
         "argv_sha256": "0" * 64,
-        "gpu_memory": {
-            "availability": "unavailable",
-            "unavailable_reason": "sampler-failed",
-        },
+        "gpu_memory": _gpu_memory(),
         "stderr_tail": "",
         "stdout_tail": None,
         "evidence": evidence,
@@ -333,13 +514,19 @@ def test_a_latch_under_the_bar_at_a_bounded_budget_is_capped_at_quality_only() -
 
 
 def test_conformance_is_one_label_derived_from_the_three_frozen_facts() -> None:
-    """N, the certified budget and the cold lane decide it, in one place."""
+    """N, the certified budget and whether the cold lane RAN decide it.
+
+    The third fact is the lane's AUTHORIZATION, never its outcome (plan section
+    12.9).  Feeding the outcome in charged a fully conforming run for an
+    infrastructure fault on a draw the protocol does not contain -- see
+    ``test_an_anomalous_cold_lane_is_published_and_does_not_dispose_the_root``.
+    """
 
     assert (
         launcher.attempt_protocol_conformance(
             authorized_attempts=launcher.PREREGISTERED_ATTEMPTS,
             iterations=rehearsal.CERTIFIED_MAXIMUM_ITERATIONS,
-            cold_lane=True,
+            cold_lane_authorized=True,
         )
         == launcher.CONFORMANCE_PREREGISTERED
     )
@@ -352,7 +539,7 @@ def test_conformance_is_one_label_derived_from_the_three_frozen_facts() -> None:
             launcher.attempt_protocol_conformance(
                 authorized_attempts=authorized,
                 iterations=iterations,
-                cold_lane=cold_lane,
+                cold_lane_authorized=cold_lane,
             )
             == launcher.CONFORMANCE_BOUNDED_SMOKE
         )
@@ -472,24 +659,28 @@ def test_a_canonical_document_of_another_shape_is_a_named_protocol_failure() -> 
 
 
 def _ledger(**overrides: float) -> dict:
-    """A ledger whose terminal side equals native, then perturbed by name."""
+    """A ledger whose terminal side equals native, then perturbed by name.
+
+    The native side is the CAMPAIGN's, not an invented one: re-validation now
+    judges a receipt's native side against ``NATIVE_ENDPOINT_PINNED_TERMS``, so
+    a fixture with a made-up reference would assert a shape no honest artifact
+    can carry.  The perturbations below are relative to the real values and the
+    band arithmetic is unchanged by the substitution.
+    """
 
     native = {
-        "constraint.boozer|inf": 3.0e-15,
-        "constraint.volume": 0.0,
-        "observable.G": 13.0,
-        "observable.iota": -0.42,
-        "observable.major_radius": 1.44,
-        "observable.non_qs_ratio": 1.9e-2,
-        "observable.total_length": 14.9,
-        "observable.volume": -0.178,
-        "raw.non_qs": 3.6e-4,
-        "raw.residual": 1.0e-20,
-        "state.G": 13.0,
-        "weighted_total": 4.48e-8,
+        **rehearsal.NATIVE_ENDPOINT_PINNED_TERMS,
+        "observable.G": 13.887472087505376,
+        "state.G": 13.887472087505376,
     }
     terminal = {**native, **overrides}
     return {"terminal": terminal, "native": native}
+
+
+def _scaled(name: str, factor: float) -> float:
+    """One pinned term's native value, moved by a relative factor."""
+
+    return rehearsal.NATIVE_ENDPOINT_PINNED_TERMS[name] * factor
 
 
 def test_an_endpoint_that_beat_native_on_non_qs_is_not_refused() -> None:
@@ -501,7 +692,12 @@ def test_an_endpoint_that_beat_native_on_non_qs_is_not_refused() -> None:
     """
 
     verdict = rehearsal.gate_endpoint_ledger(
-        _ledger(**{"raw.non_qs": 3.6e-4 * 0.991, "observable.non_qs_ratio": 1.9e-2 * 0.991})
+        _ledger(
+            **{
+                "raw.non_qs": _scaled("raw.non_qs", 0.991),
+                "observable.non_qs_ratio": _scaled("observable.non_qs_ratio", 0.991),
+            }
+        )
     )
     assert verdict["passed"] is True
     assert verdict["terms"]["raw.non_qs"]["comparison"] == "not_worse"
@@ -511,7 +707,9 @@ def test_an_endpoint_that_beat_native_on_non_qs_is_not_refused() -> None:
 def test_an_endpoint_materially_worse_than_native_is_refused() -> None:
     """``not_worse`` is one-sided, not absent."""
 
-    verdict = rehearsal.gate_endpoint_ledger(_ledger(**{"raw.non_qs": 3.6e-4 * 1.01}))
+    verdict = rehearsal.gate_endpoint_ledger(
+        _ledger(**{"raw.non_qs": _scaled("raw.non_qs", 1.01)})
+    )
     assert verdict["passed"] is False
     assert verdict["failed_terms"] == ["raw.non_qs"]
 
@@ -520,10 +718,10 @@ def test_geometry_terms_are_gated_relatively_and_residuals_absolutely() -> None:
     """Both sides of a machine-zero residual sit below any meaningful ratio."""
 
     assert rehearsal.gate_endpoint_ledger(
-        _ledger(**{"observable.iota": -0.42 * (1.0 + 1.0e-5)})
+        _ledger(**{"observable.iota": _scaled("observable.iota", 1.0 + 1.0e-5)})
     )["passed"]
     assert not rehearsal.gate_endpoint_ledger(
-        _ledger(**{"observable.iota": -0.42 * (1.0 + 1.0e-2)})
+        _ledger(**{"observable.iota": _scaled("observable.iota", 1.0 + 1.0e-2)})
     )["passed"]
     # A residual moving from 1e-20 to 1e-18 is a 99x relative change and a
     # 1e-18 absolute one; only the absolute reading means anything here.
@@ -547,11 +745,15 @@ def test_the_hinged_length_term_is_free_below_native_and_gated_above_it() -> Non
         ("not_worse", 1.0e-4)
     )
     shorter = rehearsal.gate_endpoint_ledger(
-        _ledger(**{"observable.total_length": 14.9 * (1.0 - 1.0e-2)})
+        _ledger(
+            **{"observable.total_length": _scaled("observable.total_length", 0.99)}
+        )
     )
     assert shorter["passed"] is True
     longer = rehearsal.gate_endpoint_ledger(
-        _ledger(**{"observable.total_length": 14.9 * (1.0 + 1.0e-2)})
+        _ledger(
+            **{"observable.total_length": _scaled("observable.total_length", 1.01)}
+        )
     )
     assert longer["failed_terms"] == ["observable.total_length"]
 
@@ -560,7 +762,12 @@ def test_the_free_direction_G_is_never_gated() -> None:
     """Nothing in the shared objective pins the net poloidal current."""
 
     verdict = rehearsal.gate_endpoint_ledger(
-        _ledger(**{"observable.G": 13.0 * 0.99, "state.G": 13.0 * 0.99})
+        _ledger(
+            **{
+                "observable.G": 13.887472087505376 * 0.99,
+                "state.G": 13.887472087505376 * 0.99,
+            }
+        )
     )
     assert verdict["passed"] is True
     assert not set(verdict["terms"]) & set(rehearsal.INFORMATIONAL_ENDPOINT_OBSERVABLES)
@@ -706,11 +913,31 @@ def test_cache_evidence_tells_a_warm_run_from_a_cold_one(tmp_path: Path) -> None
 # --------------------------------------------------------- publish and revalidate
 
 
-def _synthetic_ledger(*, gated: bool) -> dict:
-    """The ledger scope an attempt must publish, optionally with its verdicts."""
+def _synthetic_ledger(*, gated: bool, **overrides: float) -> dict:
+    """The COMPLETE ledger an attempt publishes, optionally with its verdicts.
 
+    Whole, because re-validation walks it: the two digests of ruling 6 and the
+    reference's filename are compared to the frozen constants, and the three
+    term maps must carry the campaign's terms.
+    """
+
+    rows = _ledger(**overrides)
     ledger = {
-        **_ledger(),
+        **rows,
+        "relative_difference": {
+            name: (
+                abs(rows["terminal"][name] - rows["native"][name])
+                / abs(rows["native"][name])
+                if rows["native"][name] != 0.0
+                else None
+            )
+            for name in sorted(rows["terminal"])
+        },
+        "native_state_relative_path": rehearsal.NATIVE_ENDPOINT_STATE_PATH.name,
+        "native_state_sha256": rehearsal.NATIVE_ENDPOINT_STATE_FILE_SHA256,
+        "native_state_content_sha256": (
+            rehearsal.NATIVE_ENDPOINT_STATE_CONTENT_SHA256
+        ),
         "pinned_quality_terms": list(rehearsal.PINNED_ENDPOINT_QUALITY_TERMS),
         "informational_observables": list(
             rehearsal.INFORMATIONAL_ENDPOINT_OBSERVABLES
@@ -720,6 +947,62 @@ def _synthetic_ledger(*, gated: bool) -> dict:
     if gated:
         ledger["pinned_term_gate"] = rehearsal.gate_endpoint_ledger(ledger)
     return ledger
+
+
+def _storage_probe(role: str) -> dict:
+    """One probe record, in the shape ``probe_writable_storage`` returns it."""
+
+    return {
+        "role": role,
+        "directory": f"/var/tmp/{role}",
+        "resolved_directory": f"/var/tmp/{role}",
+        "filesystem_type": "ext4",
+        "device_id": 66306,
+        "one_byte_write": "ok",
+        "advisory_available_bytes": 1 << 40,
+    }
+
+
+def _preflight() -> dict:
+    """The WHOLE preflight, including ruling 6's digests and ruling 9's record.
+
+    The fixture used to publish ``preflight: {}`` and every published-root test
+    flowed through it, so the suite asserted that a ``CLAIM_DISCHARGED`` root
+    needs no native-reference digests, no device inventory and no storage
+    evidence at all -- one level below the frozen key set that was supposed to
+    prevent exactly that.
+    """
+
+    return {
+        "gpu_inventory_executable": "/usr/bin/nvidia-smi",
+        "visible_gpu_uuids": [launcher.GPU_UUID],
+        "native_endpoint_state_path": str(rehearsal.NATIVE_ENDPOINT_STATE_PATH),
+        "native_endpoint_state_sha256": (
+            rehearsal.NATIVE_ENDPOINT_STATE_FILE_SHA256
+        ),
+        "native_endpoint_state_content_sha256": (
+            rehearsal.NATIVE_ENDPOINT_STATE_CONTENT_SHA256
+        ),
+        "temporary_directory": "/var/tmp/temporary",
+        "resolved_temporary_directory": "/var/tmp/temporary",
+        "storage": [
+            _storage_probe("temporary"),
+            _storage_probe("compilation_cache"),
+            _storage_probe("output"),
+        ],
+    }
+
+
+def _supervisor() -> dict:
+    """The supervisor block ``supervisor_payload`` writes, key for key."""
+
+    return {
+        "runtime_identity": _runtime_identity(),
+        "gpu_uuid": launcher.GPU_UUID,
+        "attempt_timeout_seconds": launcher.ATTEMPT_TIMEOUT_SECONDS,
+        "gpu_zero_asserted": False,
+        "preflight": _preflight(),
+    }
 
 
 def _root_evidence(
@@ -774,28 +1057,27 @@ def _root_evidence(
             "conformance": launcher.attempt_protocol_conformance(
                 authorized_attempts=authorized_attempts,
                 iterations=iterations,
-                cold_lane=launcher.cold_lane_measured(cold_lane),
+                cold_lane_authorized=authorized,
             ),
             "maximum_iterations": iterations,
             "certified_maximum_iterations": rehearsal.CERTIFIED_MAXIMUM_ITERATIONS,
         },
         "attempts": attempts,
         "cold_lane": cold_lane,
-        "compilation_cache": {
-            "entry_count": 1,
-            "total_bytes": 16,
-            "entries_digest": "0" * 64,
-        },
+        "cold_lane_anomaly": launcher.cold_lane_anomaly(cold_lane),
+        "compilation_cache": _cache_state(),
         "source_snapshot": {
             "relative_path": "source-snapshot",
             "manifest_sha256": "0" * 64,
             "entry_count": 1,
+            "worktree": {
+                "git_head": "0" * 40,
+                "tracked_diff_sha256": "0" * 64,
+                "untracked_bytes_manifest_sha256": "0" * 64,
+                "repo_root": str(REPOSITORY),
+            },
         },
-        "supervisor": {
-            "gpu_uuid": launcher.GPU_UUID,
-            "gpu_zero_asserted": False,
-            "preflight": {},
-        },
+        "supervisor": _supervisor(),
         "quality_claim": (
             "CERTIFIED_BUDGET"
             if iterations == rehearsal.CERTIFIED_MAXIMUM_ITERATIONS
@@ -847,22 +1129,16 @@ def _synthetic_attempt(
         "certified_options_delta": (
             _options_delta(iterations) if options_delta is None else options_delta
         ),
-        "compilation_cache": {"warm": warm},
+        "compilation_cache": _attempt_cache(warm=warm),
         "endpoint_ledger": _synthetic_ledger(gated=gated) if ledger is None else ledger,
-        "solve": {
-            "latched": outcome == "LATCHED",
-            "maximum_feasibility_inf": maximum_feasibility_inf,
-            "terminal_objective": terminal_objective,
-        },
-        "endpoint_agreement": {
-            "loop_terminal_objective": 4.48e-8,
-            "standalone_terminal_objective": 4.48e-8 * (1.0 + 5.0e-16),
-            "relative_tolerance": (
-                launcher.DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE
-            ),
-            "absolute_floor": launcher.DIAG4_ENDPOINT_AGREEMENT_ABSOLUTE_FLOOR,
-            "terminal_state_sha256": exact_numeric_tree_sha256(coordinates),
-        },
+        "solve": _solve_payload(
+            latched=outcome == "LATCHED",
+            terminal_objective=terminal_objective,
+            maximum_feasibility_inf=maximum_feasibility_inf,
+        ),
+        "endpoint_agreement": _endpoint_agreement(
+            exact_numeric_tree_sha256(coordinates)
+        ),
     }
     return attempt
 
@@ -1049,6 +1325,359 @@ def test_a_discharged_root_must_have_run_the_budget_its_label_claims(
     with pytest.raises(launcher.ProjectedRootError, match="iterations, not the"):
         launcher.publish_root(staging, tmp_path / "final", evidence)
     assert not (tmp_path / "final").exists()
+
+
+def _refuse_published(root: Path, evidence: dict, *, match: str) -> None:
+    """Publish one receipt through the real path and require it to be refused.
+
+    Either refusal type counts: the campaign's shared owners live in the
+    rehearsal module and raise its error, which the validator has always been
+    able to surface (``gate_endpoint_ledger`` does), and the refusal record
+    names the type it caught either way.
+    """
+
+    with pytest.raises((launcher.ProjectedRootError, rehearsal.RehearsalError), match=match):
+        launcher.publish_root(root / "staging", root / "final", evidence)
+    assert not (root / "final").exists()
+
+
+def _mutated_root(tmp_path: Path, name: str, mutate) -> tuple[Path, dict]:
+    """A complete, otherwise-honest ``CLAIM_DISCHARGED`` receipt, then mutated."""
+
+    root = tmp_path / name
+    staging = root / "staging"
+    attempt = _synthetic_attempt(
+        staging / "attempts" / "attempt-1",
+        engine_wall=1.0,
+        terminal_objective=4.48e-8,
+        maximum_feasibility_inf=1.0e-14,
+    )
+    cold = _synthetic_attempt(
+        staging / launcher.COLD_LANE_DIRECTORY,
+        engine_wall=1.0,
+        terminal_objective=4.48e-8,
+        maximum_feasibility_inf=1.0e-14,
+        outcome="COMPLETED_WITHOUT_LATCH",
+        index=0,
+        relative_path=launcher.COLD_LANE_DIRECTORY,
+        warm=False,
+    )
+    cold["timed_against_bar"] = False
+    evidence = _root_evidence(
+        verdict=launcher.VERDICT_CLAIM_DISCHARGED, attempts=[attempt], cold_lane=cold
+    )
+    mutate(evidence)
+    return root, evidence
+
+
+def test_a_hollow_custody_block_cannot_pass_for_a_published_one(
+    tmp_path: Path,
+) -> None:
+    """Completeness reaches BELOW the top level, or it reaches nothing.
+
+    Six mutations published through the real ``publish_root`` and re-validated
+    clean at the previous revision, including a ``CLAIM_DISCHARGED`` root with
+    no preflight block at all -- so ruling 7's promise that "a receipt missing
+    its source snapshot, supervisor block, preflight, cache accounting or
+    telemetry cannot pass for a whole one" was true of the names and false of
+    everything under them.  PRESENT-BUT-NULL was equivalent to absent.
+    """
+
+    def drop_preflight(evidence: dict) -> None:
+        del evidence["supervisor"]["preflight"]
+
+    def hollow_supervisor(evidence: dict) -> None:
+        evidence["supervisor"] = {"gpu_uuid": launcher.GPU_UUID}
+
+    def empty_preflight(evidence: dict) -> None:
+        evidence["supervisor"]["preflight"] = {}
+
+    def null_snapshot(evidence: dict) -> None:
+        evidence["source_snapshot"] = {"relative_path": "source-snapshot"}
+
+    def null_cache(evidence: dict) -> None:
+        evidence["compilation_cache"] = None
+
+    def empty_timing(evidence: dict) -> None:
+        evidence["timing_seconds"] = {}
+
+    def extra_claim_key(evidence: dict) -> None:
+        evidence["claim"]["A_KEY_NO_PRODUCER_EMITS"] = 1.0
+
+    def null_telemetry(evidence: dict) -> None:
+        evidence["attempts"][0]["gpu_memory"] = None
+
+    def hollow_child_cache(evidence: dict) -> None:
+        evidence["attempts"][0]["evidence"]["compilation_cache"] = {"warm": True}
+
+    def hollow_child_solve(evidence: dict) -> None:
+        evidence["attempts"][0]["evidence"]["solve"] = {
+            "latched": True,
+            "terminal_objective": 4.48e-8,
+            "maximum_feasibility_inf": 1.0e-14,
+        }
+
+    for name, mutate in (
+        ("drop_preflight", drop_preflight),
+        ("hollow_supervisor", hollow_supervisor),
+        ("empty_preflight", empty_preflight),
+        ("null_snapshot", null_snapshot),
+        ("null_cache", null_cache),
+        ("empty_timing", empty_timing),
+        ("extra_claim_key", extra_claim_key),
+        ("null_telemetry", null_telemetry),
+        ("hollow_child_cache", hollow_child_cache),
+        ("hollow_child_solve", hollow_child_solve),
+    ):
+        root, evidence = _mutated_root(tmp_path, name, mutate)
+        _refuse_published(root, evidence, match="incomplete|not a document")
+
+
+def test_a_receipt_may_not_supply_the_reference_its_physics_gate_is_judged_against(
+    tmp_path: Path,
+) -> None:
+    """The forged-native escape: ``terminal == native`` on all ten pinned terms.
+
+    Ruling 7 bound whether the per-term gate RAN and whether it PASSED, and not
+    what it ran against.  ``gate_endpoint_ledger`` takes both sides from the
+    document it is handed, so a ledger publishing ``1.0`` for every pinned term
+    on both sides recomputed each verdict to ``measured = 0.0, passed = true``
+    beside ``solve.terminal_objective = 4.48e-8`` -- an internal contradiction
+    nothing noticed -- and sealed as ``CLAIM_DISCHARGED``.
+    """
+
+    def forged_native(evidence: dict) -> None:
+        forged = {name: 1.0 for name in rehearsal.PINNED_ENDPOINT_QUALITY_TERMS}
+        forged.update(
+            {name: 1.0 for name in rehearsal.INFORMATIONAL_ENDPOINT_OBSERVABLES}
+        )
+        ledger = evidence["attempts"][0]["evidence"]["endpoint_ledger"]
+        ledger["terminal"] = dict(forged)
+        ledger["native"] = dict(forged)
+        ledger["relative_difference"] = {name: 0.0 for name in forged}
+        ledger["pinned_term_gate"] = rehearsal.gate_endpoint_ledger(ledger)
+
+    root, evidence = _mutated_root(tmp_path, "forged_native", forged_native)
+    # The gate the receipt published is self-consistent and passes; what refuses
+    # it is the reference.
+    assert evidence["attempts"][0]["evidence"]["endpoint_ledger"]["pinned_term_gate"][
+        "passed"
+    ]
+    _refuse_published(root, evidence, match="not the campaign's frozen native")
+
+    def drifted_native(evidence: dict) -> None:
+        ledger = evidence["attempts"][0]["evidence"]["endpoint_ledger"]
+        ledger["native"] = {
+            **ledger["native"],
+            "observable.iota": ledger["native"]["observable.iota"] * (1.0 + 1.0e-5),
+        }
+        ledger["pinned_term_gate"] = rehearsal.gate_endpoint_ledger(ledger)
+
+    root, evidence = _mutated_root(tmp_path, "drifted_native", drifted_native)
+    _refuse_published(root, evidence, match="not the campaign's frozen native")
+
+    def restated_ledger_digest(evidence: dict) -> None:
+        evidence["attempts"][0]["evidence"]["endpoint_ledger"][
+            "native_state_sha256"
+        ] = "f" * 64
+
+    root, evidence = _mutated_root(
+        tmp_path, "restated_ledger_digest", restated_ledger_digest
+    )
+    _refuse_published(root, evidence, match="another native endpoint reference")
+
+    def restated_preflight_digest(evidence: dict) -> None:
+        evidence["supervisor"]["preflight"]["native_endpoint_state_content_sha256"] = (
+            "e" * 64
+        )
+
+    root, evidence = _mutated_root(
+        tmp_path, "restated_preflight_digest", restated_preflight_digest
+    )
+    _refuse_published(root, evidence, match="other than the campaign's pinned one")
+
+    def restated_storage(evidence: dict) -> None:
+        evidence["supervisor"]["preflight"]["storage"][0]["filesystem_type"] = "tmpfs"
+
+    root, evidence = _mutated_root(tmp_path, "restated_storage", restated_storage)
+    _refuse_published(root, evidence, match="which plan section 11 refuses")
+
+    def unseen_device(evidence: dict) -> None:
+        evidence["supervisor"]["preflight"]["visible_gpu_uuids"] = ["GPU-0000dead"]
+
+    root, evidence = _mutated_root(tmp_path, "unseen_device", unseen_device)
+    _refuse_published(root, evidence, match="did not see the device")
+
+
+def test_the_published_stop_rule_is_enforced_against_the_attempt_sequence(
+    tmp_path: Path,
+) -> None:
+    """``latch_rate: 3/3`` on a loop that breaks after the first latch.
+
+    ``ATTEMPT_STOP_RULE`` was re-derived as a STRING LITERAL and the statistics
+    were re-derived from an attempt list nothing constrained, so a receipt could
+    publish three latching attempts on a protocol that can produce at most one,
+    or four draws under three authorized with the rate reported over the
+    denominator section 4 names.
+    """
+
+    def three_latches(evidence: dict) -> None:
+        first = evidence["attempts"][0]
+        evidence["attempts"] = [
+            first,
+            {**first, "attempt_index": 2, "artifact_relative_path": "attempts/attempt-2"},
+            {**first, "attempt_index": 3, "artifact_relative_path": "attempts/attempt-3"},
+        ]
+        evidence["attempt_protocol"]["attempts_run"] = 3
+        evidence["attempt_protocol"]["latch_count"] = 3
+        evidence["attempt_protocol"]["latch_rate"] = "3/3"
+
+    root, evidence = _mutated_root(tmp_path, "three_latches", three_latches)
+    _refuse_published(root, evidence, match="does not obey the published stop rule")
+
+    def four_draws(evidence: dict) -> None:
+        first = evidence["attempts"][0]
+        miss = {
+            **first,
+            "outcome": "COMPLETED_WITHOUT_LATCH",
+            "evidence": {
+                **first["evidence"],
+                "solve": {**first["evidence"]["solve"], "latched": False},
+                "endpoint_ledger": _synthetic_ledger(gated=False),
+            },
+        }
+        evidence["attempts"] = [
+            {**miss, "attempt_index": index, "artifact_relative_path": f"attempts/attempt-{index}"}
+            for index in (1, 2, 3)
+        ] + [{**first, "attempt_index": 4, "artifact_relative_path": "attempts/attempt-4"}]
+        evidence["attempt_protocol"]["attempts_run"] = 4
+
+    root, evidence = _mutated_root(tmp_path, "four_draws", four_draws)
+    _refuse_published(root, evidence, match="attempts under")
+
+    # A draw on disk the receipt does not publish is a suppressed draw.
+    root = tmp_path / "suppressed"
+    staging = root / "staging"
+    attempt = _synthetic_attempt(
+        staging / "attempts" / "attempt-1",
+        engine_wall=1.0,
+        terminal_objective=4.48e-8,
+        maximum_feasibility_inf=1.0e-14,
+    )
+    (staging / "attempts" / "attempt-2").mkdir(parents=True)
+    evidence = _root_evidence(
+        verdict=launcher.VERDICT_QUALITY_ONLY, attempts=[attempt]
+    )
+    _refuse_published(root, evidence, match="the receipt does not publish")
+
+
+def test_an_attempt_may_not_declare_an_execution_context_it_did_not_run_in(
+    tmp_path: Path,
+) -> None:
+    """The certified wall belongs to a GPU child, and the receipt has to say so.
+
+    The ROOT's schema, route and timing boundary were re-derived; the attempt's
+    were not, so a ``CLAIM_DISCHARGED`` receipt could name the CPU as the backend
+    that produced the wall, declare another timing boundary, or carry another
+    route's schema on the document the verdict is derived from.
+    """
+
+    def cpu_backend(evidence: dict) -> None:
+        evidence["attempts"][0]["evidence"]["runtime_identity"]["backend"] = "cpu"
+
+    root, evidence = _mutated_root(tmp_path, "cpu_backend", cpu_backend)
+    _refuse_published(root, evidence, match="not the 'gpu' the wall is claimed on")
+
+    def other_boundary(evidence: dict) -> None:
+        evidence["attempts"][0]["evidence"]["timing_boundary"] = "attempt_wall"
+
+    root, evidence = _mutated_root(tmp_path, "other_boundary", other_boundary)
+    _refuse_published(root, evidence, match="a different run than the record")
+
+    def other_index(evidence: dict) -> None:
+        evidence["attempts"][0]["evidence"]["attempt_index"] = 7
+
+    root, evidence = _mutated_root(tmp_path, "other_index", other_index)
+    _refuse_published(root, evidence, match="a different run than the record")
+
+    def forbidden_environment(evidence: dict) -> None:
+        evidence["attempts"][0]["evidence"]["environment"]["JAX_PLATFORMS"] = "cpu"
+
+    root, evidence = _mutated_root(
+        tmp_path, "forbidden_environment", forbidden_environment
+    )
+    _refuse_published(root, evidence, match="environment the route forbids")
+
+
+def test_revalidation_asserts_the_precision_it_re_derives_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A third party without x64 gets a named refusal, not a false one.
+
+    The terminal-state digest is re-derived through ``jnp.asarray(..., float64)``,
+    which with x64 disabled downcasts to float32 WITHOUT RAISING -- so a valid
+    sealed root was refused with "published terminal state differs from its
+    hash", a message indicting the artifact rather than the reader's shell.
+    """
+
+    published = _publish_synthetic_root(
+        tmp_path, verdict=launcher.VERDICT_CLAIM_DISCHARGED, engine_wall=1.0
+    )
+    monkeypatch.setattr(
+        launcher, "jax", SimpleNamespace(config=SimpleNamespace(jax_enable_x64=False))
+    )
+    with pytest.raises(launcher.ProjectedRootError, match="JAX_ENABLE_X64"):
+        launcher.validate_root_artifact(published)
+
+
+def test_the_frozen_nested_shapes_are_the_ones_the_producers_write() -> None:
+    """Every nested shape is bound to the function that writes it, not a fixture.
+
+    A frozen key set asserted against the suite's own helper is a twin, and
+    twins drift -- which is exactly how the fixture publishing ``preflight: {}``
+    came to certify that a discharged root needs no preflight at all.
+    """
+
+    assert frozenset(launcher.CACHE_STATE_SHAPE) == frozenset(
+        launcher.compilation_cache_state(REPOSITORY / "does-not-exist")
+    )
+    assert frozenset(launcher.CACHE_CONFIGURATION_SHAPE) == frozenset(
+        _attempt_cache(warm=False)["configuration"]
+    )
+    assert frozenset(launcher.ROOT_CLAIM_SHAPE) == frozenset(
+        launcher.build_root_evidence(
+            attempts=[],
+            cold_lane=None,
+            snapshot={},
+            supervisor={},
+            authorized_attempts=launcher.PREREGISTERED_ATTEMPTS,
+            iterations=rehearsal.CERTIFIED_MAXIMUM_ITERATIONS,
+            cold_lane_authorized=True,
+            cache={},
+            verdict=launcher.VERDICT_NO_LATCH,
+            chain_seconds=1.0,
+        )["claim"]
+    )
+    assert frozenset(launcher.SUPERVISOR_SHAPE) == frozenset(
+        launcher.supervisor_payload(
+            {}, gpu_uuid=launcher.GPU_UUID, timeout_seconds=1.0, preflight={}
+        )
+    )
+    assert frozenset(launcher.WORKTREE_IDENTITY_SHAPE) == frozenset(
+        launcher.capture_worktree_identity(REPOSITORY).to_payload()
+    )
+    assert frozenset(launcher.COLD_LANE_ANOMALY_SHAPE) == frozenset(
+        launcher.cold_lane_anomaly(_attempt("TIMEOUT", index=0))
+    )
+    # The three that are only reachable with a device stay bound by the shapes
+    # the bounded GPU smoke publishes through, which is what makes the smoke a
+    # producer test rather than a liveness check.
+    assert frozenset(launcher.RUNTIME_IDENTITY_SHAPE) == frozenset(_runtime_identity())
+    assert frozenset(launcher.GPU_MEMORY_SHAPE) == frozenset(_gpu_memory())
+    assert frozenset(launcher.PREFLIGHT_SHAPE) == frozenset(_preflight())
+    assert frozenset(launcher.STORAGE_PROBE_SHAPE) == frozenset(
+        _storage_probe("temporary")
+    )
 
 
 def test_a_truncated_receipt_cannot_pass_for_a_complete_one(tmp_path: Path) -> None:
@@ -1404,6 +2033,7 @@ def test_every_attempts_wall_is_derived_not_only_the_first_latching_one(
         outcome="COMPLETED_WITHOUT_LATCH",
     )
     attempt["evidence"]["timing_seconds"] = {
+        **attempt["evidence"]["timing_seconds"],
         "engine_compile": 10.0,
         "engine_solve": 20.0,
         "engine_wall": 1.0,
@@ -1568,7 +2198,7 @@ def test_publication_rejects_a_cold_lane_that_ran_warm(tmp_path: Path) -> None:
     cold["timed_against_bar"] = False
     cold["evidence"] = {
         **cold["evidence"],
-        "compilation_cache": {"warm": True},
+        "compilation_cache": _attempt_cache(warm=True),
     }
     evidence = _root_evidence(
         verdict=launcher.verdict_of_gate("solve"),
@@ -1579,25 +2209,26 @@ def test_publication_rejects_a_cold_lane_that_ran_warm(tmp_path: Path) -> None:
         launcher.publish_root(staging, tmp_path / "final", evidence)
 
 
-def test_a_cold_lane_that_refused_its_gate_cannot_leave_a_discharge_behind(
+def test_an_anomalous_cold_lane_is_published_and_does_not_dispose_the_root(
     tmp_path: Path,
 ) -> None:
-    """Ruling 1 carried to the lane it was not written for.
+    """Plan section 12.9: the cold lane is DIAGNOSTICS, never disposition.
 
-    The cold lane is a fourth full-budget draw at the certified budget, run
-    FIRST and outside the attempt loop, and its outcome was never inspected.  A
-    lane that LATCHED and failed the per-term quality gate published
-    ``GATE_REFUSED:endpoint_ledger``, primed the cache the timed attempts were
-    then measured against, left ``conformance: PREREGISTERED`` untouched, and
-    let the protocol mint ``CLAIM_DISCHARGED`` beside it -- the strongest
-    available counter-evidence to the quality claim, sealed into the same tree
-    with no effect on anything, and a certified wall that is a WARM number whose
-    cold counterpart does not exist.
+    Ruling 8 fed the lane's outcome into the conformance label, on a predicate
+    that could not tell counter-evidence from infrastructure: a lane that failed
+    the per-term quality gate and one that died on ``GATE_REFUSED:bootstrap``
+    both returned the same ``False``.  Either way a run that ran the
+    pre-registered N, the certified budget and the lane was labelled
+    ``BOUNDED_SMOKE``, its verdict capped at ``QUALITY_ONLY`` -- which section
+    4's table disposes as ROOT SPENT -- and the pair it minted beside
+    ``quality_claim: CERTIFIED_BUDGET`` is one ``derive_verdict``'s own contract
+    says cannot occur.  The lane is the FIRST GPU process of the session against
+    an empty cache, which is exactly where a first-compile timeout or an OOM
+    lands.
 
-    Conformance now comes from what the lane MEASURED.  A refused lane leaves
-    the protocol in the state ``--no-cold-lane`` leaves it in, which caps the
-    verdict at ``QUALITY_ONLY`` rather than breaking the loop: every attempt
-    still runs and every attempt's telemetry still publishes.
+    So the anomaly publishes in full and the disposition comes from the three
+    timed attempts.  ``--no-cold-lane`` still demotes: that is a pre-registration
+    fact, not an outcome.
     """
 
     assert launcher.cold_lane_measured(None) is False
@@ -1605,6 +2236,7 @@ def test_a_cold_lane_that_refused_its_gate_cannot_leave_a_discharge_behind(
         assert launcher.cold_lane_measured({"outcome": outcome}) is True
     for outcome in ("GATE_REFUSED", "TIMEOUT", "PROTOCOL_FAILURE"):
         assert launcher.cold_lane_measured({"outcome": outcome}) is False
+    assert launcher.cold_lane_anomaly(None) is None
 
     staging = tmp_path / "staging"
     attempt = _synthetic_attempt(
@@ -1622,34 +2254,49 @@ def test_a_cold_lane_that_refused_its_gate_cannot_leave_a_discharge_behind(
         attempts=[attempt],
         cold_lane=cold,
     )
+    # The run conformed; the lane's fault is stated, not charged.
     assert evidence["attempt_protocol"]["conformance"] == (
-        launcher.CONFORMANCE_BOUNDED_SMOKE
+        launcher.CONFORMANCE_PREREGISTERED
     )
-    with pytest.raises(launcher.ProjectedRootError, match="published verdict"):
-        launcher.publish_root(staging, tmp_path / "final", evidence)
-    assert not (tmp_path / "final").exists()
+    assert evidence["cold_lane_anomaly"] == {
+        "outcome": "GATE_REFUSED",
+        "gate_refused": "endpoint_ledger",
+        "return_code": 2,
+        "timed_out": False,
+        "supervised_seconds": cold["supervised_seconds"],
+        "artifact_relative_path": launcher.COLD_LANE_DIRECTORY,
+    }
+    published = launcher.publish_root(staging, tmp_path / "final", evidence)
+    sealed = launcher.validate_root_artifact(published)
+    assert sealed["verdict"] == launcher.VERDICT_CLAIM_DISCHARGED
+    assert sealed["cold_lane_anomaly"]["gate_refused"] == "endpoint_ledger"
 
-    # The measurement is real and still publishes -- under the name section 4
-    # gives it.
-    published = launcher.publish_root(
-        tmp_path / "second" / "staging",
-        tmp_path / "second" / "final",
-        _root_evidence(
-            verdict=launcher.VERDICT_QUALITY_ONLY,
-            attempts=[
-                _synthetic_attempt(
-                    tmp_path / "second" / "staging" / "attempts" / "attempt-1",
-                    engine_wall=1.0,
-                    terminal_objective=4.48e-8,
-                    maximum_feasibility_inf=1.0e-14,
-                )
-            ],
-            cold_lane=cold,
-        ),
+    # A receipt may not hide the anomaly behind a null, and a latching or
+    # missing lane has none to publish.
+    hidden = tmp_path / "hidden"
+    hidden_staging = hidden / "staging"
+    hidden_attempt = _synthetic_attempt(
+        hidden_staging / "attempts" / "attempt-1",
+        engine_wall=1.0,
+        terminal_objective=4.48e-8,
+        maximum_feasibility_inf=1.0e-14,
     )
-    assert launcher.validate_root_artifact(published)["verdict"] == (
-        launcher.VERDICT_QUALITY_ONLY
+    (hidden_staging / launcher.COLD_LANE_DIRECTORY).mkdir(parents=True)
+    hidden_evidence = _root_evidence(
+        verdict=launcher.VERDICT_CLAIM_DISCHARGED,
+        attempts=[hidden_attempt],
+        cold_lane=cold,
     )
+    hidden_evidence["cold_lane_anomaly"] = None
+    with pytest.raises(launcher.ProjectedRootError, match="cold-lane anomaly"):
+        launcher.publish_root(hidden_staging, hidden / "final", hidden_evidence)
+
+    # And ``--no-cold-lane`` still caps, because the lane was never run.
+    assert launcher.attempt_protocol_conformance(
+        authorized_attempts=launcher.PREREGISTERED_ATTEMPTS,
+        iterations=rehearsal.CERTIFIED_MAXIMUM_ITERATIONS,
+        cold_lane_authorized=False,
+    ) == launcher.CONFORMANCE_BOUNDED_SMOKE
 
 
 def test_validation_rejects_a_tampered_artifact_tree(tmp_path: Path) -> None:
@@ -1886,7 +2533,7 @@ def test_the_unavailable_reason_vocabulary_is_derived_from_its_own_type() -> Non
 
 
 def test_the_preflight_refuses_a_device_that_is_not_the_one_the_claim_names(
-    tmp_path: Path,
+    off_tmpfs_path: Path,
 ) -> None:
     """Three external resources are checked before the first child is spawned.
 
@@ -1896,13 +2543,13 @@ def test_the_preflight_refuses_a_device_that_is_not_the_one_the_claim_names(
     was checked at all before this.
     """
 
-    cache = tmp_path / "cache"
+    cache = off_tmpfs_path / "cache"
     cache.mkdir()
-    environment = {launcher.TEMPORARY_DIRECTORY_ENVIRONMENT_VARIABLE: str(tmp_path)}
+    environment = {launcher.TEMPORARY_DIRECTORY_ENVIRONMENT_VARIABLE: str(off_tmpfs_path)}
     preflight = launcher.preflight_external_resources(
         gpu_uuid=launcher.GPU_UUID,
         cache_directory=cache,
-        output_root=tmp_path / "root",
+        output_root=off_tmpfs_path / "root",
         environment=environment,
     )
     assert launcher.GPU_UUID in preflight["visible_gpu_uuids"]
@@ -1914,7 +2561,7 @@ def test_the_preflight_refuses_a_device_that_is_not_the_one_the_claim_names(
     )
     # The temporary, cache and output storage every child writes through, each
     # proven by a write rather than asserted from a capacity number.
-    assert preflight["temporary_directory"] == str(tmp_path)
+    assert preflight["temporary_directory"] == str(off_tmpfs_path)
     assert [probe["role"] for probe in preflight["storage"]] == [
         "temporary",
         "compilation_cache",
@@ -1930,7 +2577,7 @@ def test_the_preflight_refuses_a_device_that_is_not_the_one_the_claim_names(
         launcher.preflight_external_resources(
             gpu_uuid="GPU-not-this-box",
             cache_directory=cache,
-            output_root=tmp_path / "root",
+            output_root=off_tmpfs_path / "root",
             environment=environment,
         )
 
@@ -1956,10 +2603,39 @@ def test_the_temporary_directory_is_resolved_by_xlas_rule_not_pythons() -> None:
     assert launcher.resolve_temporary_directory(
         {launcher.TEMPORARY_DIRECTORY_ENVIRONMENT_VARIABLE: "/var/tmp"}
     ) == Path("/var/tmp")
+    # The rule is a CANDIDATE LIST in TSL's order, not one name.  Both shipped
+    # binaries carry all three, and ``TEST_TMPDIR`` is tried FIRST -- so reading
+    # only ``TMPDIR`` preflighted one directory while the children spilled
+    # through another under a shell holding a Bazel-ism.
+    assert launcher.TEMPORARY_DIRECTORY_ENVIRONMENT_VARIABLES == (
+        "TEST_TMPDIR",
+        "TMPDIR",
+        "TMP",
+    )
+    assert launcher.resolve_temporary_directory(
+        {"TEST_TMPDIR": "/var/tmp/first", "TMPDIR": "/var/tmp/second", "TMP": "/x"}
+    ) == Path("/var/tmp/first")
+    assert launcher.resolve_temporary_directory({"TMP": "/var/tmp/third"}) == (
+        Path("/var/tmp/third")
+    )
+    # And all three are OVERRIDDEN in the child, or the rule is enforced against
+    # a directory nobody used.
+    _, child_environment = launcher.attempt_invocation(
+        Path("/var/tmp/attempt"),
+        attempt_index=1,
+        iterations=3,
+        cache_directory=Path("/var/tmp/cache"),
+        environment={"TEST_TMPDIR": "/tmp", "TMP": "/tmp", "TMPDIR": "/tmp"},
+        temporary_directory=Path("/var/tmp/safe"),
+    )
+    assert [
+        child_environment[name]
+        for name in launcher.TEMPORARY_DIRECTORY_ENVIRONMENT_VARIABLES
+    ] == ["/var/tmp/safe"] * 3
 
 
 def test_a_temporary_directory_on_tmpfs_is_refused_before_any_compute(
-    tmp_path: Path,
+    off_tmpfs_path: Path,
 ) -> None:
     """Plan section 11's rule, enforced by code rather than stated in prose.
 
@@ -1972,7 +2648,7 @@ def test_a_temporary_directory_on_tmpfs_is_refused_before_any_compute(
     """
 
     assert launcher.filesystem_type(Path("/dev/shm")) == "tmpfs"
-    assert launcher.filesystem_type(tmp_path) not in (
+    assert launcher.filesystem_type(off_tmpfs_path) not in (
         launcher.REFUSED_STORAGE_FILESYSTEM_TYPES
     )
     with pytest.raises(launcher.ProjectedRootError, match="is on tmpfs"):
@@ -1980,7 +2656,7 @@ def test_a_temporary_directory_on_tmpfs_is_refused_before_any_compute(
 
 
 def test_a_directory_that_refuses_a_write_is_refused_however_much_it_reports(
-    tmp_path: Path,
+    off_tmpfs_path: Path,
 ) -> None:
     """A write is the only check that sees a quota.
 
@@ -1990,7 +2666,7 @@ def test_a_directory_that_refuses_a_write_is_refused_however_much_it_reports(
     portable way to reach the same errno class.
     """
 
-    unwritable = tmp_path / "unwritable"
+    unwritable = off_tmpfs_path / "unwritable"
     unwritable.mkdir()
     unwritable.chmod(0o500)
     try:
@@ -2002,11 +2678,56 @@ def test_a_directory_that_refuses_a_write_is_refused_however_much_it_reports(
     finally:
         unwritable.chmod(0o700)
     with pytest.raises(launcher.ProjectedRootError, match="does not exist"):
-        launcher.probe_writable_storage(tmp_path / "absent", role="temporary")
-    probe = launcher.probe_writable_storage(tmp_path, role="temporary")
+        launcher.probe_writable_storage(off_tmpfs_path / "absent", role="temporary")
+    # A path that exists and is not a directory said "does not exist", which is
+    # a five-minute diagnosis at the moment an operator is launching a root.
+    a_file = off_tmpfs_path / "a-file"
+    a_file.write_bytes(b"")
+    with pytest.raises(launcher.ProjectedRootError, match="is not a directory"):
+        launcher.probe_writable_storage(a_file, role="temporary")
+    # A RELATIVE declaration is refused rather than probed: the supervisor
+    # resolves it against its own working directory while every child resolves
+    # it against the repository, so the rule would be enforced against a
+    # directory nobody uses and the spill would fall through to ``/tmp``.
+    with pytest.raises(launcher.ProjectedRootError, match="is relative"):
+        launcher.probe_writable_storage(Path("relative-tmp"), role="temporary")
+    probe = launcher.probe_writable_storage(off_tmpfs_path, role="temporary")
     assert probe["one_byte_write"] == "ok"
-    assert probe["device_id"] == os.stat(tmp_path).st_dev
-    assert not list(tmp_path.glob(f"{launcher.STORAGE_PROBE_PREFIX}*"))
+    assert probe["device_id"] == os.stat(off_tmpfs_path).st_dev
+    # The declared path and the one the write landed in are both published, so a
+    # symlinked temporary directory can be re-identified from the sealed bytes.
+    assert probe["directory"] == str(off_tmpfs_path)
+    assert probe["resolved_directory"] == str(off_tmpfs_path.resolve())
+    assert not list(off_tmpfs_path.glob(f"{launcher.STORAGE_PROBE_PREFIX}*"))
+
+
+def test_a_stacked_mount_reports_the_filesystem_the_kernel_resolves(
+    off_tmpfs_path: Path,
+) -> None:
+    """Mountinfo is in MOUNT order; the effective mount is the LAST at a path.
+
+    Skipping ties reported the SHADOWED filesystem, so ``mount -t tmpfs tmpfs
+    /var/tmp/scratch`` -- the ordinary way an operator hands a compile a RAM
+    scratch directory, and what several container and systemd-hardening configs
+    do -- published the ext4 underneath it, passed the tmpfs refusal, passed the
+    write probe because an empty tmpfs takes a byte, and then filled during the
+    run.  This box carries one real stacked mount, and it is a stable one.
+    """
+
+    stacked = Path("/proc/sys/fs/binfmt_misc")
+    orders = [
+        line.split()
+        for line in Path("/proc/self/mountinfo").read_text().splitlines()
+        if len(line.split()) > 4 and line.split()[4] == str(stacked)
+    ]
+    if len(orders) < 2:
+        pytest.skip("this namespace carries no stacked mount to read")
+    effective = orders[-1][orders[-1].index("-") + 1]
+    assert launcher.filesystem_type(stacked) == effective
+    assert launcher.filesystem_type(Path("/dev/shm")) == "tmpfs"
+    assert launcher.filesystem_type(off_tmpfs_path) not in (
+        launcher.REFUSED_STORAGE_FILESYSTEM_TYPES
+    )
 
 
 def test_the_launcher_import_closure_binds_in_a_fresh_interpreter(

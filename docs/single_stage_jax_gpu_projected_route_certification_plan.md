@@ -877,9 +877,13 @@ gate now re-derives, from the sealed bytes:
 * the GPU the receipt names against the frozen `GPU_UUID` of §1.2, refused at
   launch as well so a mismatch costs nothing rather than costing the root;
 * and **completeness**: the root document, `attempt_protocol`, every supervised
-  attempt record and every child document have frozen key sets, so a receipt
-  missing its source snapshot, supervisor block, preflight, cache accounting or
-  telemetry cannot pass for a whole one.
+  attempt record and every child document have frozen key sets. *(Amended by
+  ruling 11. The mechanism half of this bullet was accurate and the consequence
+  half was false: the sets were exactly one level deep, so a receipt missing its
+  preflight — or carrying an empty source snapshot, a null cache accounting and
+  an emptied telemetry block — did pass for a whole one, executed through the
+  real publication path by three of the four round-3 roles. Completeness is now
+  recursive; see §12.9.)*
 
 The suite is the other half of this ruling. `test_a_published_root_revalidates_from_its_sealed_bytes`
 *ratified* the ungated shape — it published `CLAIM_DISCHARGED` at the certified
@@ -888,7 +892,11 @@ the pathology ruling 3 named as the reason the round-1 defect went unseen,
 reproduced inside the fix for it. It now refuses that shape, and every fixture
 publishes the complete document the supervisor publishes.
 
-**8. Ruling 1 is carried to the cold lane.** The cold lane is a fourth
+**8. Ruling 1 is carried to the cold lane.** *(SUPERSEDED IN ITS SECOND HALF by
+ruling 13 of §12.9: the lane's OUTCOME no longer feeds conformance or the
+verdict. Conformance's cold leg is the lane's AUTHORIZATION. What follows is the
+defect ruling 8 correctly identified and the mechanism it chose; §12.9 keeps the
+first and replaces the second.)* The cold lane is a fourth
 full-budget draw at the certified budget, run first and outside the attempt
 loop, and its outcome was never inspected. A lane that **latched and failed the
 per-term quality gate** published `GATE_REFUSED:endpoint_ledger`, primed the
@@ -998,3 +1006,244 @@ machine-checked rather than conventional. *The sampler perturbs the wall it
 certifies* (adversarial N12) and *the absorption discards samples already
 collected* (N4): both are telemetry-direction findings, the first inflationary
 and therefore incapable of minting a false pass.
+ The second, N4, discards a
+partial sample series when the observer fails and publishes the whole attempt as
+`availability: unavailable, reason: "sampler-failed"` — so what is lost is a peak
+number the receipt then declines to state, in the direction that under-claims,
+and no gate reads it. Both are deferred on that ground and neither is reachable
+from a claim.
+
+---
+
+### 12.9 Rulings on the third review round (two roles NO-GO)
+
+The round-3 reviews at `cc1c710c0`
+(`~/simsopt-campaigns/projected-route-root-reviews-round3-20260813T114359Z/`)
+returned NO-GO from reproducibility-engineering and adversarial-redteam on three
+majors, with numerics-physics and protocol-receipt at GO. All three majors are
+in the layer that decides what a sealed receipt is allowed to say; none is in
+the engine or the physics. Four rulings follow, binding in the same way.
+
+**11. Completeness is recursive, or it is nothing.** Ruling 7 froze the key sets
+of the root document, `attempt_protocol`, every supervised record and every
+child document — and stopped there. Three roles independently reached the same
+consequence from different entry points: below those four names nothing was
+checked, and PRESENT-BUT-NULL was indistinguishable from absent for every block
+no reader indexed into. Executed through the real `publish_root`, which
+re-validates before it seals: a `CLAIM_DISCHARGED` root with **no preflight
+block at all** published and re-validated clean, as did one whose supervisor
+held nothing but `gpu_uuid`, one with an empty `source_snapshot`, one with a
+null `compilation_cache`, one with an emptied `timing_seconds`, one whose
+`claim` carried a key no producer emits, and ones with every attempt's
+`gpu_memory`, `runtime_identity`, `execution_sources` and `environment` nulled.
+The plan sentence those falsify is this document's own (ruling 7's completeness
+bullet), and ruling 9's promise that "a reader of the sealed bytes can tell a
+root that ran under safe storage from one that did not" rested on it.
+
+The shape is now frozen as a TREE and walked recursively from one listing
+(`_validate_document_shape`), so there is no second enumeration to drift: the
+claim, the supervisor, its runtime identity, its preflight, each of the three
+storage probes, the source snapshot and its worktree identity, the root's cache
+accounting and telemetry, each supervised record's `gpu_memory`, and each child
+document's environment, runtime identity, cache accounting, solve payload,
+endpoint agreement, endpoint ledger and timing block. The preflight's contents
+are additionally RE-DERIVED rather than read: ruling 6's two digests and the
+reference path against the frozen constants, the pinned device against the
+published inventory, and every probed directory against
+`REFUSED_STORAGE_FILESYSTEM_TYPES` and its own write result — because a record
+that is merely published is a record an artifact can invent. Where the reference
+file is still on the box it is re-loaded, which re-verifies both digests at
+validation instead of only at launch.
+
+The suite is the other half again. The fixture every published-root test flowed
+through published `supervisor: {"gpu_uuid": …, "gpu_zero_asserted": false,
+"preflight": {}}`, so the suite asserted that the campaign's headline verdict
+needs no native-reference digests, no device inventory and no storage evidence —
+the exact pathology ruling 7 named, one level down, inside the fix for it. Every
+fixture now publishes what its producer publishes, the nested shapes are bound
+to the producers by execution rather than to a second listing, and the ten
+escape shapes above are refused by name.
+
+**12. An artifact may not supply the reference its physics gate is judged
+against.** `gate_endpoint_ledger` takes BOTH sides from the document it is
+handed. Ruling 7 made it *the* gate on publication and bound whether it ran and
+whether it passed; it did not bind what it ran against. Executed: a ledger
+publishing `terminal == native == 1.0` on all ten pinned terms recomputes every
+verdict to `measured = 0.0, passed = true`, passes the gate, and seals as
+`CLAIM_DISCHARGED` beside `solve.terminal_objective = 4.48e-8` — an internal
+contradiction nothing noticed. This is round-2 N1's defect class displaced one
+level: the quality half of the claim was a self-consistency check between two
+numbers the receipt supplied about itself.
+
+The native side is therefore a FROZEN CONSTANT of this campaign
+(`NATIVE_ENDPOINT_PINNED_TERMS`), measured through this repository's objective
+at the digest-pinned endpoint, and re-validation does three things with it: it
+compares the receipt's published native side to the literals term by term; it
+recomputes the gate FROM the literals and requires that recomputation to pass;
+and it compares the ledger's own `native_state_sha256`,
+`native_state_content_sha256` and reference filename to ruling 6's constants.
+The existing self-consistency recomputation stays beside them — it is what
+proves the run recorded its own arithmetic faithfully — but it is no longer the
+gate.
+
+The comparison class is per term, and this is load-bearing. The two lanes
+evaluate one array through two independently compiled executables, so bitwise
+equality is the demand that refused the predecessor route's fourth root after a
+complete solve. Measured on this box, CPU against the 5090, at the same
+endpoint: the three `absolute` terms sit at machine zero where the RELATIVE
+deviation reaches 23x (`constraint.volume`, −2.332e-18 against −5.551e-17) while
+the absolute deviation is 5.3e-17; the seven others agree to 1.95e-14 relative
+or better (`raw.non_qs`, the dominant term). So absolute terms are judged
+against their own gate band and the rest against
+`NATIVE_ENDPOINT_REFERENCE_RELATIVE_TOLERANCE = 1e-11` — 512x above the worst
+measured deviation and five decades under the tightest relative band any pinned
+term carries, so it can neither false-reject an honest lane nor let a forged
+reference widen a gate by a fraction of its band. Recomputing the gate against
+the literals shifts each `measured` by at most ~2e-14 against a smallest band of
+1e-6, which is why *passing* rather than *matching bitwise* is what is demanded.
+
+**13. THE COLD LANE IS DIAGNOSTICS, NEVER DISPOSITION.** Ruling 8 fed the lane's
+own outcome into the conformance label through a predicate that cannot tell
+counter-evidence from infrastructure: `cold_lane_measured` returns the same
+`False` for a lane that failed the per-term quality gate and for one that died
+on `GATE_REFUSED:bootstrap`, `:environment`, `:execution_sources`, `:solve`
+(OOM) or `:attempt_publication`, that hit the 3600 s timeout, or whose stdout
+did not parse. The lane is the FIRST GPU process of the session, against a cache
+that must start empty, which is precisely where a first-compile timeout, an OOM
+or a bootstrap fault lands — and §12.8 itself calls it "a fourth full-budget
+draw that is not part of the protocol". Either way the previous revision
+labelled a run that ran the pre-registered N, the certified budget and the lane
+`BOUNDED_SMOKE`, capped its verdict at `QUALITY_ONLY` — which §4's table
+disposes as **root spent** — and minted a `conformance: BOUNDED_SMOKE` beside
+`quality_claim: CERTIFIED_BUDGET`, a pair `derive_verdict`'s own contract says
+cannot occur and the sole stated reason for deferring protocol-receipt NEW-7.
+§12.1 governs `NO_LATCH_IN_PROTOCOL` and nothing else, so the operator could not
+tell from the artifact whether the arc stopped. The suite published exactly that
+receipt and asserted acceptance.
+
+The ruling: **attempt conformance and verdict derivation are governed solely by
+the attempts.** `attempt_protocol_conformance` takes `cold_lane_authorized` —
+whether the lane RAN, which is a pre-registration fact — and never the lane's
+outcome, so `--no-cold-lane` still demotes and a lane that ran and then refused
+does not. `derive_verdict` never sees the lane; its docstring says so. Any
+cold-lane outcome other than a latch or a miss is published as a new top-level
+`cold_lane_anomaly` block carrying the lane's outcome, the gate that refused it,
+its exit status, whether it timed out, its supervised wall and its path in the
+tree — re-derived at re-validation, so a receipt cannot hide an anomalous lane
+behind a null. `PREREGISTERED` stands if the attempts ran pre-registered.
+
+This is a deliberate reversal of ruling 8's second half, and the cost is stated:
+a cold lane that latches and FAILS the per-term quality gate no longer caps
+anything. That was ruling 8's real content and both GO roles endorsed its
+direction. It is given up because the predicate cannot separate that case from
+an OOM, because the price of the conflation is a spent one-shot root on an
+infrastructure fault, and because the counter-evidence is not lost — it is
+published in full, under a name, beside three timed attempts that each run the
+same gate on their own endpoint. The lane's own ledger is still gated, still
+published and still validated; what changes is that it decides nothing.
+
+**14. The suite provisions its own storage.** Ruling 9's three tests are the
+only machine evidence for the rule, and under this box's default environment
+they were the three that failed: pytest derives `tmp_path` from `$TMPDIR`,
+`/tmp` here is tmpfs, and the filesystem-type refusal fired before the assertion
+each test makes — so an operator running the pre-root suite the obvious way saw
+the newest ruling's tests in red pointing at the code under test rather than at
+the environment, and the EDQUOT-class write probe the ruling is BUILT AROUND was
+never exercised at all. §11's `--basetemp` rule is an operating instruction, not
+a property of the repository. The suite now resolves its own directory off tmpfs
+(`/var/tmp`, then `~/.cache`) through a fixture and the three tests use it, so
+the whole file is green under the default environment and the write leg runs.
+
+#### Minors closed in the same remediation
+
+`filesystem_type` skipped mount-point TIES, so among several mounts sharing one
+point the FIRST line of `/proc/self/mountinfo` won while the kernel resolves the
+LAST: `mount -t tmpfs tmpfs /var/tmp/scratch` published as the ext4 underneath
+it, passed the tmpfs refusal, passed the write probe an empty tmpfs always
+passes, and then filled during the run. One character (`<` for `<=`), pinned by
+a test against this namespace's one real stacked mount. — XLA's temporary
+directory is a CANDIDATE LIST in TSL's order, `TEST_TMPDIR` → `TMPDIR` → `TMP` →
+`/tmp`, and all three names are carried by both shipped binaries beside the
+resolver's terminal `LOG(FATAL)`; the launcher read and overrode one of them, so
+a shell holding `TEST_TMPDIR` sent every child's spill through a directory the
+preflight never probed. All three are resolved, and all three are set in the
+child environment. — A RELATIVE `TMPDIR` was accepted, probed against the
+supervisor's working directory and forwarded to children launched with
+`cwd=REPOSITORY`, so the certified directory and the used one were different and
+the used one did not exist, which falls XLA's resolver through to `/tmp`: a
+complete bypass reached by a value no check rejected. Non-absolute directories
+are refused, and both the declared and the RESOLVED path are published, so a
+symlinked temporary directory can be re-identified from the sealed bytes. — The
+certified wall was derived from two halves neither of which was constrained in
+sign or magnitude (`engine_compile = −1e6` beside `engine_solve = 1e6 + 100`
+derives 100 s exactly) and was never compared to `supervised_seconds`, which the
+receipt requires, publishes and no reader read. Both halves must be finite and
+nonnegative and the derived wall must fit inside the wall the supervisor
+observed. — `ATTEMPT_STOP_RULE` was re-derived as a STRING while the sequence it
+describes was unconstrained, so a receipt could publish three `LATCHED` attempts
+and `latch_rate: 3/3` on a loop that breaks after one, or four draws under three
+authorized. The list is now bound to the rule: at most `authorized_attempts`
+draws, every attempt before the last `COMPLETED_WITHOUT_LATCH`, consecutive
+indices in their own directories, and no attempt directory in the tree the
+receipt does not publish. — An attempt's declared EXECUTION CONTEXT was
+published and never re-derived, so a `CLAIM_DISCHARGED` receipt could name the
+CPU as the backend that produced the certified wall, state another timing
+boundary, carry another route's schema or index, or declare an environment the
+route forbids; all five are compared. — Re-validation is floating-point work and
+silently depended on `JAX_ENABLE_X64`: with x64 disabled `jnp.asarray(...,
+float64)` downcasts without raising, and a third party re-validating a GENUINE
+sealed root was told "published terminal state differs from its hash", a message
+indicting the artifact rather than the reader's shell. It asserts its own
+precision first. — Ruling 10 reached the refusal record's contents but not its
+tree's NAME: an unfsynced `mkdir` leaves the directory entry in the page cache,
+so a power loss in the refusal window could take the freshly fsynced
+`root-validation-refusal.json` with it. The staging tree's parent is fsynced at
+creation. — `probe_writable_storage` reported "does not exist" for a path that
+exists and is not a directory. — Two ordering statements around the preflight
+("a refusal leaves the filesystem exactly as it found it") are approximate: the
+cache directory `mkdir` and `bind_gpu_backend`'s CUDA context both precede it.
+Corrected in place rather than papered over. — Three documentation corrections
+from numerics-physics: `weighted_total`'s stated ceiling (2.061e-13) bounds the
+ENGINE's Φ while the gate measures the STANDALONE re-evaluation, which §5
+certifies equal only within `DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE`, so
+the honest ceiling is of order 1e-11 — two decades above the stated figure, with
+the shipped 1e-6 band still inert against either; `equal_minima_raw_term_ceiling`
+carries its real precondition (a RAW OBJECTIVE SUMMAND, at or under the target)
+and the note that out of domain it returns a well-formed meaningless negative;
+and "99.93 % of the objective" is Q1's TERMINAL share, while the term carries
+99.97 % of the native objective.
+
+**Deferred from round 3, with reasons.** *`XLA_FLAGS` routes around ruling 9 and
+moves the certified wall, unrecorded* (adversarial N19, protocol-receipt's one
+MARGINAL deferral): the adjacent and larger half of this — the temporary-directory
+name class — is closed above, which removes the mechanism by which an ordinary
+shell reaches unprobed storage. What remains is an operator who deliberately
+points `--xla_dump_to` at tmpfs or changes autotuning, and round 2's reason
+stands: recording the whole child environment seals an operator's shell into a
+published artifact and enumerating a "performance-relevant" subset is the
+twin-constant class §5 forbids. It rests on §11 operator discipline and is
+recorded as a known, accepted exposure of the wall-time claim. *The timed
+child's DEVICE is never bound, only its backend string* (protocol-receipt NEW-5
+residue): `gpu_runtime_identity` records `device_kind` and no UUID, and JAX
+exposes no device UUID this chain can compare to §1.2's constant without a new
+dependency; the supervisor pins the device at launch, refuses a mismatch before
+compute and refuses it again at re-validation, and this is a single-GPU box.
+Latent, and a new binding is a change to the launcher between the reviews and
+the root. *The re-validated physics gate has no tie to the published TERMINAL
+STATE* (protocol-receipt N3-8): closing it means re-running the objective inside
+the validator, which is ~9 s of CPU and affordable — but the validator runs
+inside the supervisor, and §6's whole timing argument rests on the supervisor
+building no problem and compiling no kernel. Ruling 12 ties the gate's
+REFERENCE side to the digest-pinned file without evaluating anything; tying its
+TERMINAL side to the sealed array requires a lane that is not the supervisor,
+and that is post-root work. *The admissibility fixture drifts by 1–4 ULP from
+the live objective* (numerics M2, re-measured this round at worst 3.868e-16
+relative, nine decades under the tightest band): unchanged, and re-verified
+correct at this tree. *`max()` over a NaN-containing sequence is
+order-dependent* (numerics A1): unchanged, and this round grounded the deferral
+on the engine's own finiteness invariants rather than on inspection. *The
+`--preflight-only` deferral's stated reason is contradicted by `--attempt-child`*
+(protocol-receipt N3-5): the deferral stands on its other half — under ruling 9
+the whole preflight runs before the staging tree exists and before any compute,
+so a refusal already costs an error message — and the exit-code argument beside
+it should not be relied on, since `main` already has a non-root lane.
