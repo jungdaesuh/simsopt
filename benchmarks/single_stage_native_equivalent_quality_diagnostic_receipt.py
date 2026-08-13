@@ -573,7 +573,7 @@ def _optional_number(value: JsonValue, context: str) -> float | None:
     return None if value is None else _number(value, context)
 
 
-def _certify_agreement(
+def certify_agreement(
     value: float,
     expected: float,
     context: str,
@@ -3836,7 +3836,7 @@ def _certify_diag4_endpoint_agreement(
     """Certify one named cross-executable endpoint evaluation pair field by field."""
 
     for (name, value), (_, expected_value) in zip(values, expected, strict=True):
-        _certify_agreement(
+        certify_agreement(
             value,
             expected_value,
             f"{context}.{name}",
@@ -3986,7 +3986,7 @@ def _validate_gntr3_terminal_numerical_structure(
         terminal_observables,
         "DIAG4 terminal endpoint observable",
     )
-    _certify_agreement(
+    certify_agreement(
         sum(
             term * weight
             for (_, term), (_, weight) in zip(endpoint_terms, weights, strict=True)
@@ -4061,7 +4061,7 @@ def _validate_gntr3_terminal_numerical_payload(
     _certify_diag4_endpoint_agreement(
         endpoint_observables, terminal_observables, "DIAG4 endpoint observable"
     )
-    _certify_agreement(
+    certify_agreement(
         sum(
             value * dict(terminal.objective_weights)[name]
             for name, value in endpoint_terms
@@ -5476,6 +5476,8 @@ DIAG2_SOURCE_DELTA_ALLOWLIST: Final = frozenset(
     {
         "benchmarks/process_gpu_monitor.py",
         "benchmarks/qualify_single_stage_native_equivalent_quality_gntr3_cpu.py",
+        "benchmarks/regenerate_execution_source_manifest.py",
+        "benchmarks/rehearse_single_stage_projected_route_cpu.py",
         "benchmarks/run_single_stage_native_equivalent_quality_campaign.py",
         "benchmarks/single_stage_fullspace_process_gpu_monitor.py",
         "benchmarks/single_stage_fullspace_snapshot.py",
@@ -11620,7 +11622,7 @@ def validate_terminal_endpoint_audit(
         )
     ):
         raise ValueError("GNTR3 endpoint audit differs from terminal evidence")
-    _certify_agreement(
+    certify_agreement(
         endpoint_audit.gpu_quality.physical_objective,
         terminal_values.objective,
         "GNTR3 endpoint audit objective",
@@ -11643,7 +11645,7 @@ def validate_terminal_endpoint_audit(
         # here.  The floor reuses the campaign's frozen raw-component resolution;
         # the component gate itself is unaffected because it is evaluated on the
         # terminal arrays alone, never on this join.
-        _certify_agreement(
+        certify_agreement(
             audited,
             published,
             f"GNTR3 endpoint audit raw equality {index}",
@@ -18010,6 +18012,7 @@ __all__ = (
     "build_diagnostic_receipt",
     "build_incomplete_diagnostic_receipt",
     "build_native_equivalent_scientific_evidence",
+    "certify_agreement",
     "classify_diag2_cold_evidence",
     "classify_diag2_subordinate_child_outcome",
     "classify_diag3_cold_evidence",

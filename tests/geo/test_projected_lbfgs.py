@@ -13,8 +13,10 @@ from simsopt_jax.geo.optimizers.projected_hvp_trust_region import (
 from simsopt_jax.geo.optimizers.projected_lbfgs import (
     ProjectedLbfgsOptions,
     ProjectedLbfgsStatus,
+    build_projected_lbfgs_kernels,
     evaluate_projected_point,
     evaluate_projected_point_with_projector,
+    lower_projected_lbfgs_kernels,
     retract_to_manifold,
     retract_with_frozen_projector,
     run_projected_lbfgs,
@@ -808,3 +810,137 @@ def test_committing_the_start_point_is_numerically_inert() -> None:
     np.testing.assert_array_equal(
         np.asarray(loose.coordinates), np.asarray(bound.coordinates)
     )
+
+
+def _certified_route_options(iterations: int) -> ProjectedLbfgsOptions:
+    """The configuration the projected route is certified at, at any budget."""
+
+    return ProjectedLbfgsOptions(
+        maximum_iterations=iterations,
+        feasibility_tolerance=1.0e-10,
+        lagrangian_newton=True,
+        frozen_projector_line_search=True,
+        newton_tangent_fraction_threshold=0.25,
+        projector_refresh_period=4,
+    )
+
+
+def test_lowering_the_route_reports_only_the_kernels_it_drives() -> None:
+    """The pre-gate measures the selected executables and no others.
+
+    The certified configuration carries the projector across iterations and
+    retracts against it, so it drives the carried evaluation and the frozen
+    retraction; the exact retraction, the transport kernels and the dense
+    curvature kernels belong to configurations it does not select and must not
+    appear in a measurement that claims to describe this run's compile.
+    """
+
+    measured = lower_projected_lbfgs_kernels(
+        _sphere_problem, _feasible_start(), options=_certified_route_options(3)
+    )
+
+    assert {record.name for record in measured} == {
+        "admit_pair",
+        "apply_metric",
+        "evaluate",
+        "evaluate_carried",
+        "frozen_retract",
+        "lagrangian_newton_direction",
+    }
+    assert all(record.ir_bytes > 0 for record in measured)
+
+
+def test_route_lowering_does_not_depend_on_the_attempt_budget() -> None:
+    """A three-attempt rehearsal compiles exactly what a full run compiles.
+
+    The projected loop runs on the host, so the attempt budget never reaches a
+    kernel.  This is the invariant the bounded-rehearsal gate rests on: if any
+    kernel embedded the budget, a short rehearsal would lower -- and compile --
+    a strictly smaller program than the certified run it stands in for, which
+    is the failure the fused GNTR loop showed when its safeguard unrolled the
+    attempt body three times.
+    """
+
+    rehearsal = lower_projected_lbfgs_kernels(
+        _sphere_problem, _feasible_start(), options=_certified_route_options(3)
+    )
+    full_length = lower_projected_lbfgs_kernels(
+        _sphere_problem, _feasible_start(), options=_certified_route_options(700)
+    )
+
+    assert rehearsal == full_length
+
+
+def test_lowering_the_route_compiles_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pre-gate must cost a trace, not a backend compile.
+
+    Lowering runs before the expensive phase precisely so an IR blowup is
+    caught for the price of tracing; on the full-space problem the compile it
+    stands in front of is tens of seconds on CPU and tens of seconds on GPU.
+    Every route to a backend executable passes through
+    ``compile_or_get_cached``, so counting its calls proves the gate never
+    reaches one -- and the same counter fires on an ordinary jitted call, which
+    is what makes the zero meaningful.
+    """
+
+    from jax._src import compiler
+
+    # Built before the counter is armed: forming the start point runs ordinary
+    # array operations, and those compile like anything else.
+    start = _feasible_start()
+    options = _certified_route_options(3)
+    compilations: list[str] = []
+    original = compiler.compile_or_get_cached
+
+    def counted(*arguments: object, **keywords: object) -> object:
+        compilations.append("compile")
+        return original(*arguments, **keywords)
+
+    monkeypatch.setattr(compiler, "compile_or_get_cached", counted)
+
+    lower_projected_lbfgs_kernels(_sphere_problem, start, options=options)
+    assert compilations == []
+
+    jax.jit(lambda values: values * 2.0)(start)
+    assert compilations != []
+
+
+def test_the_loop_runs_the_kernels_the_pre_gate_lowers() -> None:
+    """One builder serves the loop and the gate, so neither can drift.
+
+    A gate that rebuilt the kernels from its own spelling would keep passing
+    while the loop compiled something else.  The builder is therefore the only
+    construction site, and the bundle it returns names exactly the direction
+    kernel the options select.
+    """
+
+    options = _certified_route_options(3)
+    kernels = build_projected_lbfgs_kernels(_sphere_problem, options=options)
+
+    assert kernels.lagrangian_newton_direction is not None
+    assert kernels.gauss_newton_direction is None
+    assert kernels.frozen_projector_line_search is True
+
+    secant = build_projected_lbfgs_kernels(
+        _sphere_problem, options=ProjectedLbfgsOptions(maximum_iterations=3)
+    )
+    assert secant.lagrangian_newton_direction is None
+    assert secant.frozen_projector_line_search is False
+
+
+def test_building_kernels_rejects_a_residual_without_its_model() -> None:
+    """The builder owns the model/residual pairing contract for both callers."""
+
+    with pytest.raises(ValueError, match="objective_residuals requires gauss_newton"):
+        build_projected_lbfgs_kernels(
+            _sphere_problem,
+            options=ProjectedLbfgsOptions(maximum_iterations=3),
+            objective_residuals=lambda coordinates: coordinates,
+        )
+    with pytest.raises(ValueError, match="gauss_newton requires objective_residuals"):
+        build_projected_lbfgs_kernels(
+            _sphere_problem,
+            options=ProjectedLbfgsOptions(maximum_iterations=3, gauss_newton=True),
+        )
