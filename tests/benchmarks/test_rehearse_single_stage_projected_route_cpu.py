@@ -614,18 +614,84 @@ def test_the_predecessor_1e_6_bands_refused_the_banked_latches(
     assert band < rehearsal.EQUAL_MINIMA_PENALTY_SPREAD / abs(ledger["native"][term])
 
 
+def test_the_one_sided_quality_bands_are_derived_from_the_same_geometry() -> None:
+    """The QS leg was asserted where the geometry leg was derived.
+
+    Ruling 2 re-derived the admissibility ceiling for the penalized observables
+    and left ``raw.non_qs`` / ``observable.non_qs_ratio`` -- the same variable,
+    carrying 99.93% of the objective -- at ``not_worse 1e-6``, which is 296x
+    under the ceiling its own construction yields.  Two decades tighter than the
+    placement every geometry term received, on the dominant term, and the nearer
+    banked latch (Q2) cleared refusal by only 3.95x while the two banked arms
+    differ FROM EACH OTHER in that quantity by 9.2x that margin.
+
+    The construction is the same one, through the raw-term ceiling rather than
+    the penalty spread: all five weights are 1.0 and every raw term is
+    nonnegative, so a latch bounds each summand by ``NATIVE_TARGET_OBJECTIVE``.
+    """
+
+    native = BANKED_ENDPOINT_LEDGER["native"]
+    for term in ("raw.non_qs", "observable.non_qs_ratio"):
+        ceiling = rehearsal.equal_minima_raw_term_ceiling(native[term])
+        comparison, band = rehearsal.PINNED_ENDPOINT_QUALITY_GATES[term]
+        assert comparison == "not_worse"
+        assert ceiling == pytest.approx(2.960962e-04, rel=1.0e-6)
+        # The decade below the ceiling, which is where ``major_radius`` sits
+        # against its own (4.08x) -- not two decades below it.
+        assert band < ceiling
+        assert ceiling / band < 10.0
+        # Both banked arms are on the passing side by orders of magnitude: this
+        # band is not a widening that admits them, it is a placement.
+        for arm in ("Q1", "Q2"):
+            measured = (BANKED_ENDPOINT_LEDGER[arm][term] - native[term]) / abs(
+                native[term]
+            )
+            assert measured < 0.0
+    # The two are one measurement, so a false reject fires on both at once.
+    assert native["raw.non_qs"] == native["observable.non_qs_ratio"]
+
+
+def test_the_widened_qs_band_widens_the_margin_it_was_drawn_for() -> None:
+    """The refusal budget, in the quantity that decides a false reject.
+
+    A latch is refused on non-QS iff its geometry penalties plus its overshoot
+    below the target fall under ``(target - native) - native*band``.  Q2 landed
+    3.97e-11 under the target with 1.25e-11 of geometry penalties, and the
+    engine latches on the FIRST iterate at or under the target, so a tight
+    landing is an ordinary outcome rather than a tail event.
+    """
+
+    native = BANKED_ENDPOINT_LEDGER["native"]["raw.non_qs"]
+    _, band = rehearsal.PINNED_ENDPOINT_QUALITY_GATES["raw.non_qs"]
+    budget = (rehearsal.NATIVE_TARGET_OBJECTIVE - native) - native * band
+    predecessor = (rehearsal.NATIVE_TARGET_OBJECTIVE - native) - native * 1.0e-6
+    assert budget < predecessor
+    for arm, expected in (("Q1", 46.0), ("Q2", 5.9)):
+        row = BANKED_ENDPOINT_LEDGER[arm]
+        slack = (row["weighted_total"] - row["raw.non_qs"]) + (
+            rehearsal.NATIVE_TARGET_OBJECTIVE - row["weighted_total"]
+        )
+        assert slack / budget == pytest.approx(expected, rel=0.05)
+
+
 def test_the_weighted_total_band_cannot_refuse_an_attempt_that_latched() -> None:
     """A latch passes ``weighted_total`` by construction, not by luck.
 
     A latching attempt's objective is at or below ``NATIVE_TARGET_OBJECTIVE``,
     and the native endpoint re-evaluated through this repository's objective
-    lands 2.1e-08 relative BELOW that literal -- cross-executable ULP, the band
-    class plan section 5 exists for.  The one-sided 1e-6 band exceeds that gap
-    by nearly two decades, so no latch can be refused on the total.
+    lands 2.061e-13 relative BELOW that literal -- cross-executable ULP, the
+    band class plan section 5 exists for.  That gap IS this term's admissibility
+    ceiling, so the 1e-6 band sits 4.85e6x ABOVE it: the term is INERT.  It
+    cannot refuse a latch and it cannot false reject one, and its substantive
+    gate is the latch number itself, re-checked from the published bytes.
     """
 
     native_total = BANKED_ENDPOINT_LEDGER["native"]["weighted_total"]
     gap = (rehearsal.NATIVE_TARGET_OBJECTIVE - native_total) / abs(native_total)
+    assert gap == pytest.approx(2.061020e-13, rel=1.0e-3)
+    assert gap == pytest.approx(
+        rehearsal.equal_minima_raw_term_ceiling(native_total), rel=1.0e-12
+    )
     assert 0.0 < gap < 1.0e-7
     comparison, band = rehearsal.PINNED_ENDPOINT_QUALITY_GATES["weighted_total"]
     assert comparison == "not_worse"

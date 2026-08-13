@@ -207,6 +207,28 @@ INFORMATIONAL_ENDPOINT_OBSERVABLES: Final = ("observable.G", "state.G")
 # false reject; a band above this ceiling refuses nothing the objective permits.
 EQUAL_MINIMA_PENALTY_SPREAD: Final = 2.0 * math.sqrt(2.0 * NATIVE_TARGET_OBJECTIVE)
 
+
+def equal_minima_raw_term_ceiling(native_value: float) -> float:
+    """The largest ``not_worse`` excess a LATCH can measure on a raw term.
+
+    The companion of ``EQUAL_MINIMA_PENALTY_SPREAD`` for the other kind of
+    pinned term.  A penalized *observable* is bounded through its penalty, which
+    is where the square root comes from; a term that IS one of the objective's
+    raw summands is bounded directly, because all five weights are 1.0 and every
+    raw term is nonnegative, so a latch's ``Phi <= NATIVE_TARGET_OBJECTIVE``
+    bounds each summand by that same number.  Dividing by the native value gives
+    the ceiling: a band at or above it can never refuse a latch, and a band far
+    below it refuses latches the objective permits.
+
+    Both bands the QS leg carries are drawn from this, at the decade below the
+    ceiling -- the same placement the geometry observables take against
+    ``EQUAL_MINIMA_PENALTY_SPREAD``.  Deriving it for one term and asserting it
+    for another is how the predecessor bands came to refuse the campaign's own
+    banked evidence.
+    """
+
+    return (NATIVE_TARGET_OBJECTIVE - native_value) / abs(native_value)
+
 # How each pinned term is judged, on the attempt that discharges the claim.  The
 # comparison class is per term because the terms are not the same KIND of
 # quantity, and a single band across all of them manufactures a false reject --
@@ -243,15 +265,46 @@ EQUAL_MINIMA_PENALTY_SPREAD: Final = 2.0 * math.sqrt(2.0 * NATIVE_TARGET_OBJECTI
 #   the longer side alone is a real gate: 1e-4 relative on L is a 2.1e-3 excess
 #   whose penalty alone is 49x the certified Phi, so no endpoint at the
 #   certified quality can fail it for a legitimate reason.
+#
+#   The one-sided bands are derived the SAME way the two-sided ones are, through
+#   ``equal_minima_raw_term_ceiling`` rather than ``EQUAL_MINIMA_PENALTY_SPREAD``
+#   because these terms are raw objective summands, not penalized coordinates:
+#
+#       term                     native        ceiling    band     under ceiling
+#       raw.non_qs               4.4809e-08    2.961e-4   1e-4     2.96x
+#       observable.non_qs_ratio  4.4809e-08    2.961e-4   1e-4     2.96x
+#       weighted_total           4.4822e-08    2.061e-13  1e-6     INERT
+#
+#   ``raw.non_qs`` and ``observable.non_qs_ratio`` are the same variable and
+#   carry 99.93% of the objective, so they are where a false reject costs the
+#   most.  The predecessor band of 1e-6 sat 296x under their ceiling -- two
+#   decades tighter than the placement the geometry terms received, on the
+#   dominant term -- and left the nearer banked latch (Q2) clearing refusal by
+#   only 3.95x while the two banked arms differ FROM EACH OTHER in this very
+#   quantity by 7.98e-03, i.e. 9.2x that surviving margin.  A gate whose margin
+#   is smaller than the observed run-to-run spread of the quantity it gates is
+#   not calibrated.  1e-4 is the decade below the ceiling, the same placement
+#   ``observable.major_radius`` takes (4.08x under its own), and it moves Q2's
+#   margin to 5.94x.
+#
+#   ``weighted_total`` is the opposite case and is kept at 1e-6 deliberately:
+#   its ceiling is 2.061e-13, so ANY band a latch could fail would have to be
+#   tighter than the cross-executable ULP between this repository's re-evaluated
+#   native total and the frozen literal.  1e-6 sits 4.85e6x ABOVE the ceiling,
+#   which makes the term INERT -- it cannot refuse a latch and it cannot false
+#   reject one either.  Its substantive gate is the latch number itself,
+#   ``terminal_objective <= NATIVE_TARGET_OBJECTIVE``, re-checked from the
+#   published bytes.  ``observable.total_length`` is inert for the same reason
+#   (band 3.51x above its 2.853e-05 ceiling) and is documented as such above.
 PINNED_ENDPOINT_QUALITY_GATES: Final = {
     "constraint.boozer|inf": ("absolute", 1.0e-10),
     "constraint.volume": ("absolute", 1.0e-10),
     "observable.iota": ("relative", 1.0e-4),
     "observable.major_radius": ("relative", 1.0e-4),
-    "observable.non_qs_ratio": ("not_worse", 1.0e-6),
+    "observable.non_qs_ratio": ("not_worse", 1.0e-4),
     "observable.total_length": ("not_worse", 1.0e-4),
     "observable.volume": ("relative", 1.0e-6),
-    "raw.non_qs": ("not_worse", 1.0e-6),
+    "raw.non_qs": ("not_worse", 1.0e-4),
     "raw.residual": ("absolute", 1.0e-10),
     "weighted_total": ("not_worse", 1.0e-6),
 }
@@ -1360,6 +1413,7 @@ __all__ = (
     "certify_endpoint_agreement",
     "collapse_proximity_margin",
     "endpoint_ledger_is_gated",
+    "equal_minima_raw_term_ceiling",
     "gate_endpoint_ledger",
     "iteration_payload",
     "json_scalar",
