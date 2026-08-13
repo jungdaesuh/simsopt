@@ -22,7 +22,7 @@ already paid for twice (mistake-book P153).
 Run from the repository root with the repository and ``src`` on ``PYTHONPATH``:
 
     python benchmarks/regenerate_execution_source_manifest.py \\
-        --admit benchmarks/new_execution_source.py --expect-count 612
+        --admit benchmarks/new_execution_source.py --expect-count 614
 """
 
 from __future__ import annotations

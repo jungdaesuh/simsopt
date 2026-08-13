@@ -391,7 +391,7 @@ _JAX_EXAMPLE = SourceRef(
 )
 _SURFACE_TERMS = SourceRef(
     path="src/simsopt_jax_adapters/geo/surface_objectives.py",
-    sha256="6fcfad4a0602b7089ad201f53528ae590096098d299710e79eba380ab759e64a",
+    sha256="09118d18126c0ff915ae35a29efbaf46a1b1168f89b9c6ac9bc657bec747aef9",
     symbol="_traceable_single_stage_outer_term_values",
 )
 _BOOZER_CORE = SourceRef(
