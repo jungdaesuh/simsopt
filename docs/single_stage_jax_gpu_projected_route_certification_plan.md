@@ -55,13 +55,21 @@ the two non-geometry state components — for the run's endpoint **and** for the
 sealed native endpoint, both evaluated through one executable of this
 repository's objective.
 
-Measured against native at the banked 5090 endpoints:
+Measured against native at the banked 5090 endpoints — every number below is
+the CPU re-evaluation of §12.8, not a recollection:
 
-* `iota`, `volume`, `major_radius`, `total_length` agree to 1e-6 relative or
-  better; `volume` is machine-identical, being an equality constraint.
-* non-QS is slightly *better* than native (0.9% on Q1, 0.09% on Q2).
-* Boozer residuals are machine-zero on both sides.
-* **`G` is the one differing observable**, ~0.8–0.9% below native.
+* `volume` is machine-identical (7.6e-16 / 5.0e-15 relative), being an equality
+  constraint.
+* `iota` agrees to 2.2e-07 (Q1) and 3.9e-06 (Q2); `major_radius` to 5.6e-06
+  (Q1) and 1.0e-06 (Q2); `total_length` to 2.3e-06 (Q1) and 3.0e-08 (Q2).
+  **An earlier revision of this section claimed 1e-6 or better on all four and
+  the bands were drawn from that claim; the measurement refutes it** — see
+  §12.8, adjudication 2.
+* non-QS is slightly *better* than native (0.885% on Q1, 0.087% on Q2).
+* Boozer residuals are machine-zero on both sides (5.8e-13 / 3.8e-12 absolute
+  against a 1e-10 band).
+* **`G` is the one materially differing observable**, 0.785% (Q1) and 0.934%
+  (Q2) below native.
 
 `G` is **reported, never gated**. The non-QS term is a field-scale-invariant
 ratio and nothing in the shared objective pins the net poloidal current, so `G`
@@ -71,13 +79,18 @@ would manufacture a false reject on a direction the objective deliberately
 leaves free, which is the V260/ρ-floor failure class this campaign has now hit
 three times.
 
+`total_length` is **gated on the longer side only** for the same reason in a
+weaker form: its penalty is `0.5·max(L − target, 0)²`, exactly flat below the
+target, and the banked Q1 latch sits in that flat region with `raw.length`
+exactly `0.0`. Below native's length the objective pins nothing; above it, it
+does.
+
 Owner of the two sets: `PINNED_ENDPOINT_QUALITY_TERMS` and
 `INFORMATIONAL_ENDPOINT_OBSERVABLES` in the rehearsal module. An artifact may
 not restate them — validation compares the recorded sets against the module's
-before reading the ledger. The ledger is *reported* at the rehearsal budget
-(three attempts sit four orders of magnitude from the endpoint, so a gate there
-would fail on every term and prove nothing) and *gated* at the certified
-budget.
+before reading the ledger. The ledger is *reported* on every attempt and
+*gated* on the attempt that discharges the claim: a latch at the certified
+budget, and nothing else (`endpoint_ledger_is_gated`; §12.8, adjudication 1).
 
 ### 1.2 What is NOT claimed
 
@@ -196,13 +209,18 @@ Semantics that must be recorded in the artifact, not inferred:
 
 | Outcome | Artifact verdict | Root disposition |
 |---|---|---|
-| An attempt latches under the bar | `CLAIM_DISCHARGED` | root spent, successfully |
+| An attempt latches under the bar, at the pre-registered conformance | `CLAIM_DISCHARGED` | root spent, successfully |
 | All N attempts complete, none latches | `NO_LATCH_IN_PROTOCOL` | root spent; the claim is *not* refuted, the draw failed. A successor root requires **new user authorization** and is never automatic (§12.1) |
-| An attempt latches over the bar | `QUALITY_ONLY` | root spent; quality replicated, speed not |
+| An attempt latches over the bar, **or** under it at any conformance other than `PREREGISTERED` | `QUALITY_ONLY` | root spent; quality replicated, speed not claimed |
 | Any attempt fails a gate (identity, feasibility, receipt) | `GATE_REFUSED:<gate>` | root spent; this is a defect report, not a science result |
 
 There is no undefined outcome. Roots 1–4 of the predecessor route all died in
 stages whose semantics had never been written down.
+
+`CLAIM_DISCHARGED` is conditioned on `attempt_protocol.conformance` as well as
+on the wall — see §12.8, adjudication 3. Telemetry that is not in the §6 gate
+order can never produce an outcome outside this table: a GPU-memory sampler
+failure is absorbed as degraded telemetry, not raised (§12.8, adjudication 4).
 
 ---
 
@@ -244,11 +262,20 @@ a twin, and twins drift — see mistake-book P153.
 6. **Engine compile** (timed, warm-cache lane).
 7. **Solve** (timed) — attempt protocol of §4.
 8. **Endpoint certification** — §5 — and the per-term endpoint ledger of
-   §1.1, gated on the pinned set at the certified budget.
-9. **Sealed publication** — 0444/0555, artifact manifest written last,
-   `renameat2(RENAME_NOREPLACE)`, parent fsync.
-10. **Independent re-validation** of the published bytes, in-process, before
-    the launcher exits.
+   §1.1, gated on the pinned set on the attempt that discharges the claim: a
+   latch at the certified budget (§12.8, adjudication 1).
+9. **Independent re-validation** of the receipt bytes, in-process, against the
+   still-writable staging tree — it GATES step 10 rather than annotating it. A
+   refusal leaves an unsealed tree carrying the refusal and publishes nothing
+   (§12.8, adjudication 5).
+10. **Sealed publication** — 0444/0555, artifact manifest written last,
+    `renameat2(RENAME_NOREPLACE)`, parent fsync, sealed modes re-checked from
+    the published tree.
+
+Every external resource the protocol depends on — the NVIDIA tooling, the GPU
+UUID the receipt names, and the sealed native endpoint of §12.8 adjudication 6
+— is preflighted before the first child is spawned, so none of them can spend
+the root at step 3.
 
 ### 6.1 Lowering pre-gate (`.lower()` without `.compile()`)
 
@@ -484,6 +511,15 @@ the entry, keep the mapping sorted by path, then continue to step 5.
   PYTHONPATH=src`), always with an explicit `--basetemp` outside tmpfs — the
   per-user tmpfs quota has twice mass-failed suites and once killed the harness
   itself.
+* **GPU launches set `TMPDIR` outside tmpfs.** XLA spills PTX through the
+  system temporary directory, and on a full `/tmp` the spill fails with
+  `RESOURCE_EXHAUSTED: … Disk quota exceeded` *inside the bootstrap gate* — a
+  third instance of the quota class, and the one that would spend the root.
+  Measured 2026-08-13: the bounded GPU smoke published
+  `GATE_REFUSED:bootstrap` for exactly this reason, and passed the whole chain
+  when relaunched with `TMPDIR` pointed off tmpfs. `TMPDIR` is not one of the
+  pinned environment variables (§6 step 1) because it names no property of the
+  run; it is an operator precondition, checked the same way free space is.
 * **Sealed trees are 0555/0444.** Removal restores modes first and uses a
   Python walk; recursive-force shell globs are blocked by policy.
 
@@ -492,7 +528,8 @@ the entry, keep the mapping sorted by path, then continue to step 5.
 ## 12. Adjudicated decisions
 
 These were open questions when phase 1 landed. All six are now ruled on, and
-the rulings are binding on the phases that follow.
+the rulings are binding on the phases that follow. §12.8 adds six more, ruled
+on after the first four-role GO review round returned unanimous NO-GO.
 
 ### 12.1 No-latch disposition — successor roots are never automatic
 
@@ -576,3 +613,182 @@ Both halves of §9's phase-3 paragraph are ruled on, not merely described:
   root, which §9 forbids. The registration is therefore phase 4 follow-on work,
   and the shipped script's execution evidence at this freeze is its own contract
   test, not a manifest lane.
+
+---
+
+### 12.8 Rulings on the first review round (all four roles NO-GO)
+
+The pre-root reviews at `a3ea4983d`
+(`~/simsopt-campaigns/projected-route-root-reviews-20260813T084549Z/`) returned
+NO-GO from all four roles, on two criticals, four majors and a long minor tail.
+Six rulings follow; they are binding, and the remediation implements exactly
+them. The reviews' verdict on everything else stands: the manifest arithmetic,
+the identity binding, the timing boundary, the lowering pre-gate, the snapshot
+custody and the tolerance classes were found sound and are unchanged.
+
+**1. The pinned-term endpoint gate fires only on the latching attempt.**
+Quality parity is a claim *about the latch*: it decides whether the endpoint
+that reached native's objective reached native's physics. Gated instead on
+every certified-budget attempt, a non-latching attempt fails `weighted_total`'s
+`not_worse` band with certainty — its objective is above the target by the
+definition of not latching, and the A100 no-latch arm measures an excess of
+≈1.0 against a 1e-6 band — so the first stochastic miss (≈1 in 5 by the
+campaign's own measured rate) publishes `GATE_REFUSED:endpoint_ledger`, breaks
+the attempt loop after one of three attempts, and makes
+`COMPLETED_WITHOUT_LATCH` and therefore `NO_LATCH_IN_PROTOCOL` unreachable at a
+root — dissolving exactly the insurance §4 was written to buy. Non-latching
+attempts publish the ledger **ungated** and the protocol continues to the next
+draw. Owner: `endpoint_ledger_is_gated` in the rehearsal module, asked by both
+lanes.
+
+**2. The bands are re-derived from equal-minima geometry.**
+All five objective weights are 1.0 and the geometry penalties are
+`0.5·(x − target)²` summed into a total of nonnegative terms, so at the
+certified quality every penalized observable satisfies
+`|x − target| ≤ √(2Φ) = 2.99407e-04`, and two *legitimate* endpoints of equal
+certified quality may differ by up to `2√(2Φ) = 5.98814e-04` in that
+coordinate. Dividing by the native value gives the **admissibility ceiling**:
+above it the gate refuses nothing the objective permits, below the measured
+spread it manufactures a false reject.
+
+The geometry terms are gated against the native reference with bands taken as
+*the next decade at or above ten times the worst deviation the two banked 5090
+latches show*, capped by that ceiling. Measured on CPU through this
+repository's objective (`BoundCase`; bootstrap 7.3 s, ledger 1.8 s), relative
+to native:
+
+| term | native | Q1 | Q2 | worst | ceiling | band | margin |
+|---|---|---|---|---|---|---|---|
+| `observable.iota` | −0.4062027259574152 | 2.210e-07 | 3.925e-06 | 3.925e-06 | 1.474e-03 | **relative 1e-4** | 25× over evidence, 14.7× under ceiling |
+| `observable.major_radius` | 1.467443804809453 | 5.602e-06 | 1.031e-06 | 5.602e-06 | 4.081e-04 | **relative 1e-4** | 17.9× over evidence, 4.1× under ceiling |
+| `observable.total_length` | 20.98916289206094 | −2.282e-06 | −2.986e-08 | both shorter | one-sided | **not_worse 1e-4** | see below |
+| `observable.volume` | −0.2904457582995848 | 7.6e-16 | 5.0e-15 | 5.0e-15 | equality constraint | **relative 1e-6** | unchanged |
+
+The predecessor bands were `relative 1e-6` on all four, drawn from a prose
+claim in §1.1 that the banked endpoints "agree to 1e-6 relative or better". The
+measurement refutes that claim: the gate the root was about to run for the
+first time **refuses Q2 on iota and both arms on major radius** — the
+campaign's own banked evidence, refused by the gate meant to certify it, with
+§12.1 barring an automatic successor root. That is the V260 shell gate and the
+SQP ρ-floor a third time, and it is why §1.1's numbers are now stated from the
+re-evaluation rather than from memory.
+
+Flat and hinged directions stay reported-never-gated on their free side. `G` is
+free in both directions and remains informational. `total_length` is free
+*below* its hinge — `0.5·max(L − target, 0)²` is exactly flat there, and Q1's
+terminal sits in that region with `raw.length` exactly `0.0` — so it is judged
+`not_worse`: unconstrained shorter, gated longer. Its band sits above the
+ceiling on purpose, because a 1e-4 relative excess on L is a 2.1e-3 absolute
+excess whose penalty alone is 49× the certified Φ, so no endpoint at the
+certified quality can fail it for a legitimate reason.
+
+`not_worse` stays for the QS terms (`raw.non_qs`, `observable.non_qs_ratio`)
+and for `weighted_total`, on the latch only. `weighted_total` cannot refuse a
+latch by construction: a latching attempt's objective is at or below
+`NATIVE_TARGET_OBJECTIVE`, and the native endpoint re-evaluated through this
+repository's objective lands 2.1e-08 relative below that literal
+(cross-executable ULP, the class §5 exists for), nearly two decades inside the
+1e-6 band. The absolute legs (`constraint.*`, `raw.residual`) are unchanged at
+1e-10 and pass with ≥26× margin (worst measured 3.8e-12).
+
+**3. `derive_verdict` consults budget conformance.**
+`CLAIM_DISCHARGED` requires `attempt_protocol.conformance == PREREGISTERED` as
+well as a latch under the bar. Conformance is one label derived from the three
+facts §3 and §12.2 freeze together — N = 3, the certified budget, the cold lane
+— by a single owner (`attempt_protocol_conformance`); re-validation recomputes
+it from the published fields before recomputing the verdict with it. Bounded
+runs cap at `QUALITY_ONLY` (a latch under a lower cap is still a true
+measurement) or `NO_LATCH_IN_PROTOCOL`. Without this, a `--iterations 400` run
+minted the campaign's headline verdict and a zero exit code beside
+`quality_claim: NOT_CLAIMED_AT_BOUNDED_BUDGET` and a per-term physics gate that
+never ran — and the suite ratified that shape rather than refusing it.
+
+**4. Sampler failures are absorbed as modeled degraded telemetry.**
+`ProcessGpuMemoryMonitor.finish` re-raises whatever its polling thread stored,
+and the supervisor called it with no handler anywhere between the raise and the
+interpreter. One `nvidia-smi` query timing out among the ~10⁴ this protocol
+performs, or one unparseable `[N/A]` row contributed by an unrelated process on
+the box, discarded up to four completed GPU runs — possibly including the latch
+— with nothing sealed and nothing published: the undefined outcome §4 exists to
+eliminate, produced by a subsystem that appears nowhere in the §6 gate order.
+Process GPU-memory sampling has no veto. Every failure of that observer — a
+procfs binding refusal, an argv mismatch, a thread that would not start, a
+query failure, an exhausted sample cap — is absorbed into the monitor module's
+own unavailability union as `reason: "sampler-failed"` and published as
+evidence; attempts and verdict publish regardless. The absorption is bounded to
+that union and that observer, and no other exception path is widened.
+
+**5. Re-validation runs before sealing and gates publication.**
+§6 step 10 ran *after* `seal_and_sync` and `renameat2`, so any refusal it
+raised left a sealed, immutable 0444 artifact carrying an intact `verdict`
+field that the launcher's own validator had rejected, with the only record on a
+stderr §11 calls volatile. The receipt is now re-derived from the bytes on disk
+while the staging tree is still writable. A refusal writes
+`root-validation-refusal.json` into that tree, leaves it unsealed and
+unrenamed, publishes nothing at the final name, and propagates. Only the sealed
+modes are checked after the rename, because they are the one property that does
+not exist yet at the moment the receipt is judged. §6's gate order is
+renumbered accordingly: re-validation is step 9, sealed publication step 10.
+
+**6. The native endpoint reference is pinned and verified at load.**
+It is the one input the chain reads from outside the repository: no
+execution-source entry covers it, no source snapshot seals it, its enclosing
+`.partial-` directory is owner-writable, and nothing compared its digest to
+anything — so replacing it silently redefined what quality parity means, and
+deleting it (ordinary housekeeping on the staging directory of a publication
+that never completed) spent the root at the bootstrap gate. Both digests the
+producing artifact records are now frozen constants, verified on every load,
+along with the naming convention itself. They are **different quantities**:
+`benchmarks/single_stage_native_equivalent_reference.py:418` writes
+`arrays/{content_sha256}.npy`, where the content digest is taken over the
+C-order float64 buffer, while the file digest covers the `.npy` container
+around it. Reading the basename as the file digest is the trap this ruling
+closes.
+
+| quantity | value |
+|---|---|
+| `NATIVE_ENDPOINT_STATE_CONTENT_SHA256` (the basename) | `2639a955ede349edfdd7f5083776ae3ed0151627f3468d3430ca46029d63a912` |
+| `NATIVE_ENDPOINT_STATE_FILE_SHA256` | `2ec9a9e38e9e4262c4b5dac49f418d1396572ddb22472f9ada979582fe6bf070` |
+
+Both are published in the endpoint ledger and in the supervisor's preflight, so
+a reader of the sealed bytes can re-identify the reference the gate used.
+
+#### Minors closed in the same remediation
+
+Re-validation additionally re-derives each attempt's **outcome** from its own
+evidence, return code and timeout flag; the **certified options delta** from
+the published options against the frozen configuration; the **engine wall**
+from `engine_compile + engine_solve` (an IEEE addition of the same two
+published doubles, so agreement is exact); and the **claim's feasibility
+tolerance** alongside the other two claim numbers. `latch_rate` is published as
+*k*/N over the attempts authorized, the denominator §4 names, with the cold
+lane deliberately outside it — a fourth full-budget draw that is not part of
+the protocol and can only make the rate conservative. `gpu_runtime_identity`
+records the interpreter and its prefix, since §3 pins the warm-cache behaviour
+to a named venv. `_solve_payload` sanitizes every terminal scalar through
+`json_scalar`, so a nonfinite value publishes null rather than killing a
+completed solve at the canonical encoder. The execution-source gate refuses any
+module of this distribution that resolved outside the checkout instead of being
+structurally blind to it, and the launcher's own import closure is now bound in
+a fresh interpreter by the suite. The certified-budget ledger branch is
+executed against the real objective by the rehearsal suite (the native endpoint
+against itself), so the root is no longer its first execution. The
+external-resource preflight is described in §6.
+
+**Deferred, with reasons.** The order-dependence of `max()` over a sequence
+containing NaN (numerics advisory A1) stays: recorded rows are provably finite
+at this tree and the terminal point is separately gated by a nonfinite-refusing
+`certify_agreement`, so a guard there would be an unreachable branch. The four
+tautological read-backs (`timed_against_bar`, `sha_is_binding`, `bound`,
+`budget_independent`; protocol-receipt finding 5) stay: each is a tamper check
+whose substantive gate exists upstream, and the artifact-tree digest already
+covers the hand-edit case. Sanitizing the endpoint ledger's own term rows would
+require the pinned-term gate to model null terms, changing the verdict
+contract; the rows are finite at any finite iterate, and a nonfinite one stays
+contained as a published `PROTOCOL_FAILURE`. Constraining `--output-root` to
+`~/simsopt-campaigns/` (reproducibility finding 7) stays operator-enforced per
+§11. `src/simsopt/configs/NCSX.dat` (finding 11) stays covered by the identity
+gate and the sealed source snapshot rather than by the module-hash gate. The
+output namespace is still claimed only at the `renameat2`; §11 constrains the
+root to one supervised session, so the misleading docstring is corrected rather
+than the mechanism changed (protocol-receipt advisory 7).

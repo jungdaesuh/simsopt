@@ -442,6 +442,31 @@ def test_execution_source_binding_rejects_an_unmanifested_broad_root_module(
         rehearsal.bind_execution_sources(root)
 
 
+def test_execution_source_binding_refuses_a_distribution_module_outside_the_tree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The gate hashes what it can see; what it cannot see must not pass silently.
+
+    ``_imported_repository_modules`` returned only modules under the checkout,
+    so a ``simsopt*`` module resolved elsewhere was neither hashed nor recorded
+    -- invisible -- and the sole liveness check is satisfied by ``benchmarks/*``
+    alone.  Today that is closed by where the editable install happens to point;
+    launching from a moved or copied checkout would put the baked-in redirect
+    outside the tree and silence the gate on exactly the class it exists for.
+    """
+
+    rehearsal.refuse_redirected_distribution_modules()
+
+    elsewhere = tmp_path / "elsewhere/simsopt_jax/redirected.py"
+    elsewhere.parent.mkdir(parents=True)
+    elsewhere.write_bytes(b"redirected = 1\n")
+    _register_probe_module(monkeypatch, elsewhere, name="simsopt_jax.redirected")
+    with pytest.raises(rehearsal.RehearsalError, match="which is outside"):
+        rehearsal.refuse_redirected_distribution_modules()
+    with pytest.raises(rehearsal.RehearsalError, match="which is outside"):
+        rehearsal.bind_execution_sources(REPOSITORY)
+
+
 def test_execution_source_manifest_gate_rejects_a_stale_digest(
     tmp_path: Path,
 ) -> None:
@@ -477,6 +502,252 @@ def test_execution_source_manifest_gate_rejects_a_count_the_authority_denies(
     manifest.write_bytes(canonical_json_bytes(document))
     with pytest.raises(rehearsal.RehearsalError, match="authority freezes"):
         rehearsal.load_execution_source_manifest(root)
+
+
+# ------------------------------------------------- pinned bands vs the evidence
+
+# The per-term endpoint ledger of the two banked RTX 5090 latches and of the
+# sealed native endpoint, all three evaluated through THIS repository's
+# objective on CPU at commit a3ea4983d (bootstrap 7.3 s, ledger 1.8 s).  Pinned
+# as literals so the bands are checked against the campaign's own measured
+# evidence without the suite reaching into a sealed campaign root: the numbers
+# below ARE the derivation recorded in plan section 12.8.
+BANKED_ENDPOINT_LEDGER: dict[str, dict[str, float]] = {
+    "native": {
+        "constraint.boozer|inf": 3.209172479736042e-14,
+        "constraint.volume": -2.332159450539864e-18,
+        "observable.G": 13.88747208750538,
+        "observable.iota": -0.4062027259574152,
+        "observable.major_radius": 1.467443804809453,
+        "observable.non_qs_ratio": 4.480897876285335e-08,
+        "observable.total_length": 20.98916289206094,
+        "observable.volume": -0.2904457582995848,
+        "raw.non_qs": 4.480897876285335e-08,
+        "raw.residual": 3.739666640426295e-29,
+        "state.G": 13.88747208750538,
+        "weighted_total": 4.482224653311689e-08,
+    },
+    "Q1": {
+        "constraint.boozer|inf": 5.815039065069709e-13,
+        "constraint.volume": -2.265665533787766e-16,
+        "observable.G": 13.77850219496056,
+        "observable.iota": -0.4062026361994761,
+        "observable.major_radius": 1.46743558397157,
+        "observable.non_qs_ratio": 4.441225770763212e-08,
+        "observable.total_length": 20.98911498799002,
+        "observable.volume": -0.290445758299585,
+        "raw.non_qs": 4.441225770763212e-08,
+        "raw.residual": 1.775213079010563e-26,
+        "state.G": 13.77850219496056,
+        "weighted_total": 4.444127944835292e-08,
+    },
+    "Q2": {
+        "constraint.boozer|inf": 3.785997957504678e-12,
+        "constraint.volume": -1.459855719984079e-15,
+        "observable.G": 13.7578227650719,
+        "observable.iota": -0.4062043201689589,
+        "observable.major_radius": 1.467445317012639,
+        "observable.non_qs_ratio": 4.477005226987877e-08,
+        "observable.total_length": 20.98916226534961,
+        "observable.volume": -0.2904457582995862,
+        "raw.non_qs": 4.477005226987877e-08,
+        "raw.residual": 3.910766621870086e-25,
+        "state.G": 13.7578227650719,
+        "weighted_total": 4.47825530664393e-08,
+    },
+}
+
+
+def _banked_ledger(arm: str) -> dict[str, dict[str, float]]:
+    return {
+        "terminal": BANKED_ENDPOINT_LEDGER[arm],
+        "native": BANKED_ENDPOINT_LEDGER["native"],
+    }
+
+
+@pytest.mark.parametrize("arm", ["Q1", "Q2"])
+def test_the_pinned_bands_admit_both_banked_5090_latches(arm: str) -> None:
+    """The gate must not refuse the very evidence the campaign banked.
+
+    This is the V260 shell gate and the SQP rho floor a third time: a band
+    drawn tighter than the spread the shared objective leaves free refuses
+    legitimate minima.  The root is the pinned-term gate's FIRST execution
+    against real endpoint numbers, and section 12.1 bars an automatic successor,
+    so it is checked here against the sealed arms instead of there.
+    """
+
+    verdict = rehearsal.gate_endpoint_ledger(_banked_ledger(arm))
+    assert verdict["failed_terms"] == []
+    assert verdict["passed"] is True
+
+
+@pytest.mark.parametrize(
+    ("arm", "term", "measured"),
+    [
+        ("Q1", "observable.major_radius", 5.602e-06),
+        ("Q2", "observable.iota", 3.925e-06),
+        ("Q2", "observable.major_radius", 1.031e-06),
+    ],
+)
+def test_the_predecessor_1e_6_bands_refused_the_banked_latches(
+    arm: str, term: str, measured: float
+) -> None:
+    """The regression this remediation exists for, stated as a number.
+
+    Every geometry observable was gated at 1e-6 relative on the strength of a
+    prose claim that the banked endpoints agreed "to 1e-6 relative or better".
+    Measured, they do not: the gate the root would have run refuses Q2 on iota
+    and BOTH arms on major radius.
+    """
+
+    ledger = _banked_ledger(arm)
+    relative = abs(
+        ledger["terminal"][term] - ledger["native"][term]
+    ) / abs(ledger["native"][term])
+    assert relative == pytest.approx(measured, rel=1.0e-3)
+    assert relative > 1.0e-6
+    comparison, band = rehearsal.PINNED_ENDPOINT_QUALITY_GATES[term]
+    assert comparison == "relative"
+    # At least a decade of margin over the worst measurement, and still inside
+    # the freedom two equal-quality minima of the shared objective may take.
+    assert band >= 10.0 * relative
+    assert band < rehearsal.EQUAL_MINIMA_PENALTY_SPREAD / abs(ledger["native"][term])
+
+
+def test_the_weighted_total_band_cannot_refuse_an_attempt_that_latched() -> None:
+    """A latch passes ``weighted_total`` by construction, not by luck.
+
+    A latching attempt's objective is at or below ``NATIVE_TARGET_OBJECTIVE``,
+    and the native endpoint re-evaluated through this repository's objective
+    lands 2.1e-08 relative BELOW that literal -- cross-executable ULP, the band
+    class plan section 5 exists for.  The one-sided 1e-6 band exceeds that gap
+    by nearly two decades, so no latch can be refused on the total.
+    """
+
+    native_total = BANKED_ENDPOINT_LEDGER["native"]["weighted_total"]
+    gap = (rehearsal.NATIVE_TARGET_OBJECTIVE - native_total) / abs(native_total)
+    assert 0.0 < gap < 1.0e-7
+    comparison, band = rehearsal.PINNED_ENDPOINT_QUALITY_GATES["weighted_total"]
+    assert comparison == "not_worse"
+    assert band > 10.0 * gap
+    at_the_target = {
+        "terminal": {
+            **BANKED_ENDPOINT_LEDGER["native"],
+            "weighted_total": rehearsal.NATIVE_TARGET_OBJECTIVE,
+        },
+        "native": BANKED_ENDPOINT_LEDGER["native"],
+    }
+    assert rehearsal.gate_endpoint_ledger(at_the_target)["passed"] is True
+
+
+def test_a_non_latching_attempt_would_fail_the_gate_that_no_longer_binds_it() -> None:
+    """Why the ledger gate binds the latch and nothing else.
+
+    The A100 no-latch arm terminated at Phi 8.96e-8, twice the target, so its
+    ``weighted_total`` excess is ~1.0 against a 1e-6 band: gated on every
+    certified-budget attempt, the first stochastic miss publishes
+    ``GATE_REFUSED:endpoint_ledger`` and ends the protocol after one of three
+    attempts.
+    """
+
+    missed = {
+        "terminal": {**BANKED_ENDPOINT_LEDGER["native"], "weighted_total": 8.96e-08},
+        "native": BANKED_ENDPOINT_LEDGER["native"],
+    }
+    verdict = rehearsal.gate_endpoint_ledger(missed)
+    assert verdict["failed_terms"] == ["weighted_total"]
+    assert verdict["terms"]["weighted_total"]["measured"] == pytest.approx(1.0, rel=0.1)
+    assert not rehearsal.endpoint_ledger_is_gated(
+        iterations=rehearsal.CERTIFIED_MAXIMUM_ITERATIONS, latched=False
+    )
+
+
+def test_the_gated_ledger_branch_executes_on_real_physics() -> None:
+    """The certified-budget branch, run once against the real objective.
+
+    No lane could reach it: the rehearsal budget switches it off, the GPU smoke
+    runs bounded, and every other test drives ``gate_endpoint_ledger`` as a pure
+    function on a synthetic fixture -- so the root was to be its first
+    execution.  Comparing the native endpoint against itself exercises the whole
+    path (bootstrap, two standalone evaluations, the verdict build) with a
+    verdict whose expected value cannot be argued about.
+    """
+
+    case = rehearsal.BoundCase()
+    ledger = rehearsal.build_endpoint_ledger(
+        case, SimpleNamespace(coordinates=case.native_endpoint), gated=True
+    )
+    assert ledger["gated_at_this_budget"] is True
+    assert ledger["pinned_term_gate"]["failed_terms"] == []
+    assert ledger["pinned_term_gate"]["passed"] is True
+    assert json.loads(canonical_json_bytes(ledger)) == ledger
+    # The rows the bands were derived from, reproduced by the live objective.
+    for term, expected in BANKED_ENDPOINT_LEDGER["native"].items():
+        assert ledger["native"][term] == pytest.approx(expected, rel=1.0e-9, abs=1.0e-30)
+
+
+# ------------------------------------------------- native reference custody
+
+
+def test_the_native_endpoint_reference_is_pinned_by_both_of_its_digests() -> None:
+    """The reference side of the quality gate is the one unsealed input.
+
+    It lives outside the repository, outside the execution-source manifest and
+    outside the GPU root's source snapshot, in a ``.partial-`` staging directory
+    of a publication that never completed -- so replacing it silently redefines
+    what quality parity means.  Nothing compared its digest to anything.  The
+    campaign's convention names the file by the CONTENT digest
+    (``arrays/{content_sha256}.npy``), which is not the file digest, so both are
+    pinned and both are checked.
+    """
+
+    state = rehearsal.load_native_endpoint_state()
+    assert state.values.shape == (716,)
+    assert state.values.dtype == np.float64
+    assert state.file_sha256 == rehearsal.NATIVE_ENDPOINT_STATE_FILE_SHA256
+    assert state.content_sha256 == rehearsal.NATIVE_ENDPOINT_STATE_CONTENT_SHA256
+    assert rehearsal.NATIVE_ENDPOINT_STATE_PATH.stem == state.content_sha256
+    assert state.file_sha256 != state.content_sha256
+    assert (
+        hashlib.sha256(
+            np.ascontiguousarray(state.values, dtype=np.float64).tobytes(order="C")
+        ).hexdigest()
+        == state.content_sha256
+    )
+    assert (
+        hashlib.sha256(rehearsal.NATIVE_ENDPOINT_STATE_PATH.read_bytes()).hexdigest()
+        == state.file_sha256
+    )
+
+
+def test_a_substituted_native_endpoint_reference_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Altered bytes at the pinned path stop the chain instead of redefining it."""
+
+    substitute = tmp_path / f"{rehearsal.NATIVE_ENDPOINT_STATE_CONTENT_SHA256}.npy"
+    with substitute.open("wb") as stream:
+        np.save(stream, np.zeros((716,), dtype=np.float64), allow_pickle=False)
+    monkeypatch.setattr(rehearsal, "NATIVE_ENDPOINT_STATE_PATH", substitute)
+    with pytest.raises(rehearsal.RehearsalError, match="not the pinned"):
+        rehearsal.load_native_endpoint_state()
+
+
+def test_the_published_rehearsal_records_both_native_reference_digests(
+    published_rehearsal: Path,
+) -> None:
+    """A reader of the sealed bytes can re-identify the reference it used."""
+
+    ledger = _evidence(published_rehearsal)["endpoint_ledger"]
+    assert ledger["native_state_sha256"] == (
+        rehearsal.NATIVE_ENDPOINT_STATE_FILE_SHA256
+    )
+    assert ledger["native_state_content_sha256"] == (
+        rehearsal.NATIVE_ENDPOINT_STATE_CONTENT_SHA256
+    )
+    assert ledger["native_state_relative_path"] == (
+        f"{rehearsal.NATIVE_ENDPOINT_STATE_CONTENT_SHA256}.npy"
+    )
 
 
 # ------------------------------------------------------------ identity gate
