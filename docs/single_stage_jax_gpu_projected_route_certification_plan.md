@@ -100,6 +100,11 @@ budget, and nothing else (`endpoint_ledger_is_gated`; §12.8, adjudication 1).
 * Not a claim about any other route in this repository. The GNTR/FTR/SQP
   families are closed with recorded negative verdicts.
 
+**After the root ran, §12.14 is the authoritative claim statement.** It records
+the measured ratio family, the exact NOT-claimed list (reviews, native-bar
+provenance, parity scope), and the two gaps closed on 2026-08-13. Quote §12.14,
+not this section, when stating the result outside this document.
+
 ---
 
 ## 2. Problem identity is bound by observables, never by the problem sha
@@ -2051,3 +2056,146 @@ certified configuration; it does not authorize a successor. Whatever verdict
 the invocation publishes — `CLAIM_DISCHARGED`, `NO_LATCH_IN_PROTOCOL`,
 `QUALITY_ONLY` or `GATE_REFUSED:<gate>` — is final, and a no-latch outcome is
 reported rather than retried.
+
+---
+
+### 12.14 Accurate claim statement
+
+The root ran, latched on its first attempt, and published
+`verdict = CLAIM_DISCHARGED` at
+`~/simsopt-campaigns/projected-route-root-20260813T184930Z/final/`
+(`root-evidence.json` sha256
+`6937fc68a417d6968655cbdc460fa5655bd8cb5980a6e4c735506b3008231412`). The
+empirical result is sound. This section states what it does and does not
+establish, because the announcement wording ran ahead of the artifact on three
+axes and this is the source of truth for the corrected form.
+
+**The claim, stated accurately.**
+
+> **2.304x RTX 5090 engineering time-to-quality win over the frozen native bar**
+> (engine compile+solve boundary, 124.707842 s vs 287.304218 s; attempt wall
+> 156.856 s) **on the full VMEC-free single-stage workload, with ten endpoint
+> quality gates and the whole-run feasibility bound satisfied, under the
+> narrowed honest-producer pinned-checkout threat model of §12.13.**
+
+**NOT claimed** — each item below was checked against the artifact, not assumed:
+
+* **Not unanimous GO reviews.** All seven sealed review ledgers carry
+  `overall_verdict = NO-GO`. Round 7 was two GO (numerics-physics,
+  reproducibility-engineering) and two NO-GO (protocol-receipt,
+  adversarial-redteam). The root is authorized because §12.13 *adjudicated*
+  the surviving residual out of scope, not because the reviews converted to GO.
+  The honest phrase is "seven rounds closed NO-GO with the residual
+  adjudicated", never "unanimous GO" and never "reviews passed".
+* **Not a provenance-equivalent native certification.** The bar is a
+  hash-bound historical run whose own preserved receipt
+  (`8118529751f1…`) self-describes as `authoritative: false`,
+  `repository_dirty: true`, `normalized_status: budget_exhausted`. The claim is
+  therefore "reaches the endpoint native reached", never "converged better than
+  native" and never "native-equivalent certification".
+* **Not coordinate, trajectory, or complete-termwise parity.** The contract is
+  the ten pinned endpoint-quality terms of §1.1 plus the feasibility bound. The
+  GPU route deliberately takes a different optimizer, trajectory and iteration
+  count, and the ledger's own `relative_difference` block shows the
+  informational terms (`observable.G`, `raw.residual`, `raw.major_radius`)
+  diverging by orders of magnitude while every *pinned* term passes. Quoting
+  agreement on the pinned ten is honest; quoting it as parity is not.
+* **Not a hardware-general or version-general result.** RTX 5090, one box, one
+  interpreter (CPython 3.11.15). §7's A100 lane replicates quality, not speed.
+
+**The timing boundary, stated symmetrically.** `124.707842 s` is
+`engine_compile + engine_solve`, not process wall; the attempt's full child
+wall was `156.856340 s` and the supervised wall `158.741789 s`. This is not a
+thumb on the scale: the 287.304218 s bar is *itself* an interior
+time-to-quality figure — the timestamp of the native run's final accepted
+trajectory row — so both sides exclude their own process bootstrap, which is
+why §3 fixes the boundary there and every receipt carries `timing_boundary`
+explicitly. The win survives the strictest possible reading, and the whole
+ratio family is published rather than only the flattering one:
+
+| Boundary | GPU (s) | ratio vs 287.304218 s bar |
+|---|---|---|
+| warm engine compile+solve (**certified**) | 124.707842 | **2.304x** |
+| warm attempt wall (full child process) | 156.856340 | 1.832x |
+| warm supervised wall | 158.741789 | 1.810x |
+| cold-lane engine compile+solve | 170.693673 | 1.683x |
+| cold-lane attempt wall | 226.003532 | 1.271x |
+
+Even the cold lane measured end-to-end at process wall — compile from an empty
+cache, nothing cached, nothing excluded — beats the bar. Anyone quoting 2.304x
+must name the engine boundary in the same sentence; the defensible
+boundary-free statement is "beats the native bar on every published boundary,
+by 2.304x at the certified one and 1.271x at the most conservative one".
+
+**Artifact size, stated correctly.** `final/` contains **608 files** (607
+manifest members plus `artifact-manifest.json`). The figure 1137 is the whole
+campaign directory including the JAX compilation cache and launcher logs, and
+1142 after the supplement below. Quoting 1137 as the certificate's size
+overstates it by ~1.9x.
+
+#### 12.14.1 Two follow-ups, executed 2026-08-13
+
+Both were opened as gaps by the review of the announcement, and both are now
+closed rather than merely recorded. Neither touched a sealed byte: `final/`
+still holds 608 files, `root-evidence.json` still digests to `6937fc68…`, and
+no file under `final/` has an mtime after the seal.
+
+**(a) Provenance supplement — the certificate is now self-contained.** Three
+files the receipt names by digest but does not carry lived outside `final/`,
+so a reader holding only the certificate could not check them:
+
+| File | Pinned digest | Why it was outside |
+|---|---|---|
+| `src/simsopt/_version.py` | `e7da6f35…` | executed as `simsopt._version`, but git-ignored and build-generated, so the tracked-source snapshot walker never saw it — the only 1 of 297 bound modules with no snapshot member |
+| `benchmarks/single_stage_native_equivalent_quality_gntr3_execution_sources.json` | `5a40391f…` | the execution-source authority (614 entries) the receipt cites by digest only |
+| native endpoint state `2639a955….npy` | file `2ec9a9e3…`, content `2639a955…` | the reference side of the quality gate, pinned by absolute path into a *different* campaign directory |
+
+They are now copied, byte-verified against those pinned digests at both read
+and write, into a new sibling directory
+`projected-route-root-20260813T184930Z/provenance-supplement/`, sealed 0444
+files / 0555 dir, with a `supplement-manifest.json` that lists each member's
+sha256, names the `root-evidence.json` digest it supplements, and states in its
+own bytes that it was added post-seal at user direction. Recorded honestly
+there: the executed `_version.py` carries
+`1.10.7.dev1074+g320e5cba8.d20260806`, i.e. it was generated at commit
+`320e5cba8` and is **stale** relative to the pinned execution commit
+`b7857e6e8`; it contributes a version string and no numerics, so it does not
+touch the claim, and it is published rather than smoothed over. The supplement
+is additive: `final/` does not reference it and is not re-sealed.
+
+**(b) Cross-version revalidation — now real, and now durable.** The earlier
+"different jaxlib build" wording was misleading. The producer
+(`.venv-qn-gpu`) and the revalidator (`.venv-qn-cpu`) both run jax/jaxlib
+**0.10.0**; they differ by wheel and backend (`jax_cuda12_plugin` /
+`jax_cuda12_pjrt` vs CPU-only jaxlib) but not by version — and no record of any
+revalidation existed inside the artifact at all. Both defects are fixed.
+`validate_root_artifact(sealed=True)` was re-run against `final/` from
+throwaway `uv run --no-project` environments carrying genuinely different
+versions on either side of the producer's:
+
+| Lane | jax / jaxlib | Environment | Outcome |
+|---|---|---|---|
+| control | 0.10.0 | `.venv-qn-cpu` (CPU wheel) | PASS |
+| cross-version, older | 0.9.2 | ephemeral uv env | PASS |
+| cross-version, newer | 0.10.2 | ephemeral uv env | PASS |
+
+All three re-derive `CLAIM_DISCHARGED` and return the **byte-identical** result
+document, sha256
+`93f5e072574911f98ea8b3396e108848ae1114c25efc46ceca7199c2f4372f7a`. No existing
+virtual environment was installed into or modified; the prebuilt cp311
+`simsoptpp` extension was reached through a symlink on `PYTHONPATH`. jax
+`0.11.0` was attempted and is recorded as **not run**, with its real blocker:
+it requires Python ≥ 3.12 while this artifact's execution identity pins CPython
+3.11.15 and a cp311 extension. The outcome — versions, interpreter, verdict,
+result digest, timestamps, and that refusal — is written durably into the
+supplement as `revalidation-record.json` before sealing.
+
+**What this converts.** "Self-contained standalone certificate" and
+"cross-version revalidation" move from NOT-claimed to claimed, in the bounded
+form above: the certificate is self-contained *as `final/` plus its sealed
+supplement*, and the revalidation is cross-**version** across three adjacent
+releases on one box and one interpreter — not a claim across all jaxlib builds
+or all hardware. Everything else in the NOT-claimed list stands unchanged: the
+reviews are still seven NO-GO ledgers with an adjudicated residual, the native
+bar is still a non-authoritative dirty-tree budget-exhausted historical run,
+and the contract is still endpoint quality, not parity.
