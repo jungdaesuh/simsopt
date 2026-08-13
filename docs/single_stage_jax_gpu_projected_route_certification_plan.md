@@ -267,15 +267,18 @@ a twin, and twins drift — see mistake-book P153.
 9. **Independent re-validation** of the receipt bytes, in-process, against the
    still-writable staging tree — it GATES step 10 rather than annotating it. A
    refusal leaves an unsealed tree carrying the refusal and publishes nothing
-   (§12.8, adjudication 5).
+   (§12.8, adjudication 5). It re-derives the claim rather than checking the
+   receipt against itself, and refuses a receipt that is not complete (§12.8,
+   adjudication 7).
 10. **Sealed publication** — 0444/0555, artifact manifest written last,
     `renameat2(RENAME_NOREPLACE)`, parent fsync, sealed modes re-checked from
     the published tree.
 
 Every external resource the protocol depends on — the NVIDIA tooling, the GPU
-UUID the receipt names, and the sealed native endpoint of §12.8 adjudication 6
-— is preflighted before the first child is spawned, so none of them can spend
-the root at step 3.
+UUID the receipt names, the sealed native endpoint of §12.8 adjudication 6, and
+the temporary, cache and output storage every child writes through (§12.8,
+adjudication 9) — is preflighted before the first child is spawned and before
+the staging tree exists, so none of them can spend the root at step 3.
 
 ### 6.1 Lowering pre-gate (`.lower()` without `.compile()`)
 
@@ -511,15 +514,24 @@ the entry, keep the mapping sorted by path, then continue to step 5.
   PYTHONPATH=src`), always with an explicit `--basetemp` outside tmpfs — the
   per-user tmpfs quota has twice mass-failed suites and once killed the harness
   itself.
-* **GPU launches set `TMPDIR` outside tmpfs.** XLA spills PTX through the
-  system temporary directory, and on a full `/tmp` the spill fails with
-  `RESOURCE_EXHAUSTED: … Disk quota exceeded` *inside the bootstrap gate* — a
-  third instance of the quota class, and the one that would spend the root.
-  Measured 2026-08-13: the bounded GPU smoke published
+* **GPU launches set `TMPDIR` outside tmpfs — and the launcher enforces it.**
+  XLA spills PTX through the system temporary directory, and on a full `/tmp`
+  the spill fails with `RESOURCE_EXHAUSTED: … Disk quota exceeded` *inside the
+  bootstrap gate* — a third instance of the quota class, and the one that would
+  spend the root. Measured 2026-08-13: the bounded GPU smoke published
   `GATE_REFUSED:bootstrap` for exactly this reason, and passed the whole chain
   when relaunched with `TMPDIR` pointed off tmpfs. `TMPDIR` is not one of the
   pinned environment variables (§6 step 1) because it names no property of the
-  run; it is an operator precondition, checked the same way free space is.
+  run; it is an operator precondition — but it is **not** "checked the same way
+  free space is", because free space cannot see it: the same box reported 12.29
+  GiB available and 571 769 free inodes while a one-byte write returned
+  `EDQUOT` and left a zero-length file. `preflight_external_resources` therefore
+  *writes* a probe byte in the resolved temporary directory, in `--cache-dir`
+  and in `output_root.parent`, refuses any of the three on a tmpfs filesystem
+  type, publishes what it resolved, and launches the children with `TMPDIR` set
+  to it (§12.8, adjudication 9). A redirected write under a spent quota returns
+  exit 0 with an empty result, so no capacity check and no exit code substitutes
+  for the probe.
 * **Sealed trees are 0555/0444.** Removal restores modes first and uses a
   Python walk; recursive-force shell globs are blocked by policy.
 
@@ -683,13 +695,58 @@ excess whose penalty alone is 49× the certified Φ, so no endpoint at the
 certified quality can fail it for a legitimate reason.
 
 `not_worse` stays for the QS terms (`raw.non_qs`, `observable.non_qs_ratio`)
-and for `weighted_total`, on the latch only. `weighted_total` cannot refuse a
-latch by construction: a latching attempt's objective is at or below
-`NATIVE_TARGET_OBJECTIVE`, and the native endpoint re-evaluated through this
-repository's objective lands 2.1e-08 relative below that literal
-(cross-executable ULP, the class §5 exists for), nearly two decades inside the
-1e-6 band. The absolute legs (`constraint.*`, `raw.residual`) are unchanged at
-1e-10 and pass with ≥26× margin (worst measured 3.8e-12).
+and for `weighted_total`, on the latch only. The absolute legs (`constraint.*`,
+`raw.residual`) are unchanged at 1e-10 and pass with ≥26× margin (worst measured
+3.8e-12).
+
+**Amended in the round-2 remediation: the one-sided bands are derived from this
+same geometry, not asserted beside it.** The first version of this ruling
+derived the ceiling for the *penalized observables* and left the QS leg where it
+found it. That is the defect this ruling exists to close, one term over. The
+construction transfers, through a different bound: a penalized observable is
+constrained via its penalty, which is where the square root comes from, while a
+term that IS one of the objective's raw summands is constrained *directly* —
+all five weights are 1.0 and every raw term is nonnegative, so a latch's
+`Φ ≤ NATIVE_TARGET_OBJECTIVE` bounds each summand by that same number. Owner:
+`equal_minima_raw_term_ceiling` in the rehearsal module, beside
+`EQUAL_MINIMA_PENALTY_SPREAD`.
+
+| term | native | ceiling | band | placement |
+|---|---|---|---|---|
+| `raw.non_qs` | 4.480897876285335e-08 | 2.961e-04 | **not_worse 1e-4** | 2.96× under ceiling |
+| `observable.non_qs_ratio` | (the same variable) | 2.961e-04 | **not_worse 1e-4** | 2.96× under ceiling |
+| `weighted_total` | 4.482224653311689e-08 | 2.061e-13 | **not_worse 1e-6** | 4.85e6× *above* ceiling — inert |
+
+The predecessor QS band of 1e-6 sat **296× under its own ceiling** — two decades
+tighter than the placement every geometry term received — on the term carrying
+**99.93 % of the objective**. Its refusal budget is
+`(Φ* − native) − native·band`: a latch is refused iff its geometry penalties
+plus its overshoot below the target fall under that number. At 1e-6 the nearer
+banked latch (Q2) cleared refusal by **3.95×**, while the two banked arms differ
+*from each other* in that very quantity by 7.98e-03, i.e. **9.2× that surviving
+margin** — a gate whose margin is smaller than the observed run-to-run spread of
+the quantity it gates is not calibrated. And the engine latches on the *first*
+iterate at or under the target, so a tight landing (Q2 landed 3.97e-11 under) is
+an ordinary outcome, not a tail event. At 1e-4 — the decade below the ceiling,
+the placement `observable.major_radius` takes against its own 4.08× — Q2's
+margin is 5.94× and Q1's is 46.7×. Nothing banked moves from pass to fail in
+either direction; this is a placement, not a widening that admits the evidence.
+
+`weighted_total` is the opposite case and keeps 1e-6 deliberately. Its ceiling
+**is** the cross-executable gap between this repository's re-evaluated native
+total and the frozen literal, so any band a latch could fail would have to be
+tighter than a ULP class §5 exists to tolerate. At 1e-6 the term is **inert** —
+it can neither refuse a latch nor false-reject one — and its substantive gate is
+the latch number itself, `terminal_objective ≤ NATIVE_TARGET_OBJECTIVE`,
+re-derived from the published bytes. `observable.total_length` is inert for the
+same reason (3.51× above its own 2.853e-05 ceiling), as stated above. Two of the
+ten pinned terms being one measurement (`raw.non_qs` and
+`observable.non_qs_ratio` bind the same variable) is recorded here rather than
+changed: dropping one would narrow the published set an artifact is judged on.
+
+*(An earlier revision of this ruling stated the `weighted_total` cross-executable
+offset as 2.1e-08. The measured value is 2.061e-13 — the conclusion is unchanged
+and 6.7 decades stronger, not "nearly two".)*
 
 **3. `derive_verdict` consults budget conformance.**
 `CLAIM_DISCHARGED` requires `attempt_protocol.conformance == PREREGISTERED` as
@@ -751,7 +808,13 @@ closes.
 | `NATIVE_ENDPOINT_STATE_FILE_SHA256` | `2ec9a9e38e9e4262c4b5dac49f418d1396572ddb22472f9ada979582fe6bf070` |
 
 Both are published in the endpoint ledger and in the supervisor's preflight, so
-a reader of the sealed bytes can re-identify the reference the gate used.
+a reader of the sealed bytes can re-identify the reference the gate used. Two of
+the three facts `load_native_endpoint_state` checks are substantive; the third,
+the basename convention, is an *identity* — `NATIVE_ENDPOINT_STATE_PATH` is
+built with an f-string from the content digest, so its stem is that constant by
+construction and cannot fail. It is kept because building the path from the
+constant is what stops the two from drifting, which is worth more than a third
+independent check would be; it is recorded here so it is not read as one.
 
 #### Minors closed in the same remediation
 
@@ -775,14 +838,116 @@ executed against the real objective by the rehearsal suite (the native endpoint
 against itself), so the root is no longer its first execution. The
 external-resource preflight is described in §6.
 
+#### Round-2 rulings (reviews at `5d4f6e855`, all four roles NO-GO)
+
+The second review round returned NO-GO on five majors and no critical: every
+round-1 blocker was confirmed closed by execution, and what remained was one
+coherent theme plus one precondition. Four rulings follow, binding in the same
+way; ruling 2 above is amended in place rather than restated.
+
+**7. Re-validation re-derives the claim, and refuses a receipt that is not
+whole.** Ruling 5 promoted `validate_root_artifact` from a diagnostic to *the*
+gate on publication, and the function was not taught what that made it
+responsible for: it remained a consistency check over the fields it happened to
+find. Four sealed `CLAIM_DISCHARGED` artifacts were published through the real
+`publish_root` and re-validated clean by two reviewers independently — one whose
+latching attempt's ledger was **ungated**, carrying no per-term verdicts at all;
+one carrying a self-consistent gate whose `passed` was **false**; and two whose
+`attempt_protocol.maximum_iterations` said 700 while the attempts' own options
+said 400, which is field for field the defect ruling 3 closed in the launcher
+and left open in the validator. A fifth carried none of its custody blocks. The
+gate now re-derives, from the sealed bytes:
+
+* `endpoint_ledger_is_gated(iterations, latched)` for every attempt, against the
+  published `gated_at_this_budget` — the one decision field that was read rather
+  than derived, and the one that switches §1.1's physics gate on;
+* `pinned_term_gate.passed`, *required* on a gated ledger. Equality of a
+  faithfully recorded failure with its own recomputation is a consistency check,
+  not a quality gate;
+* every attempt's own `options.maximum_iterations` against the budget the
+  conformance label is derived from, and `quality_claim` on both the attempt and
+  the root from that same budget;
+* §4's draw statistics — `attempts_run`, `latch_count`, `latch_rate`,
+  `preregistered_attempts`, `stop_rule`, `certified_maximum_iterations` — which
+  were pure read-backs beside a conformance label that was not;
+* the wall of **every** attempt, not only the first latching one;
+* the options **key set** against `CERTIFIED_ROUTE_OPTIONS.__dataclass_fields__`,
+  because a delta derived over the keys an attempt published makes a truncated
+  options block derive an empty delta and pass;
+* the GPU the receipt names against the frozen `GPU_UUID` of §1.2, refused at
+  launch as well so a mismatch costs nothing rather than costing the root;
+* and **completeness**: the root document, `attempt_protocol`, every supervised
+  attempt record and every child document have frozen key sets, so a receipt
+  missing its source snapshot, supervisor block, preflight, cache accounting or
+  telemetry cannot pass for a whole one.
+
+The suite is the other half of this ruling. `test_a_published_root_revalidates_from_its_sealed_bytes`
+*ratified* the ungated shape — it published `CLAIM_DISCHARGED` at the certified
+budget with `_synthetic_ledger(gated=False)` and asserted acceptance, which is
+the pathology ruling 3 named as the reason the round-1 defect went unseen,
+reproduced inside the fix for it. It now refuses that shape, and every fixture
+publishes the complete document the supervisor publishes.
+
+**8. Ruling 1 is carried to the cold lane.** The cold lane is a fourth
+full-budget draw at the certified budget, run first and outside the attempt
+loop, and its outcome was never inspected. A lane that **latched and failed the
+per-term quality gate** published `GATE_REFUSED:endpoint_ledger`, primed the
+cache the timed attempts were then measured against, left
+`conformance: PREREGISTERED` untouched — because that leg read the
+`--no-cold-lane` *flag*, not the lane — and let the protocol mint the headline
+verdict beside it: the strongest available counter-evidence to the quality
+claim, sealed into the same tree with no effect on anything, and a certified
+wall that is a warm number whose cold counterpart does not exist. Conformance's
+cold-lane leg is now the lane's own outcome (`cold_lane_measured`). A lane that
+**missed** still measured a cold compile and still primed the cache, so a miss
+conforms — ruling 1's whole point is that a stochastic miss indicts nothing.
+Every other outcome leaves the protocol in the state `--no-cold-lane` leaves it
+in, and is labelled the same way: the verdict caps at `QUALITY_ONLY` instead of
+the loop breaking, so every attempt still runs and every attempt's telemetry
+still publishes.
+
+**9. §11's temporary-storage rule is enforced in code, not in prose.** The rule
+landed in §11 and was implemented by zero lines: `TMPDIR` appeared nowhere
+in this repository except two sentences of this document, and the check those
+sentences named — free space, "checked the same way" — is *provably blind* to
+the binding limit. Measured on the certifying box while the condition was live:
+`/tmp` reported **12.29 GiB available and 571 769 free inodes** while a one-byte
+write returned `EDQUOT` and left a zero-length file behind. A per-uid tmpfs quota
+is invisible to every capacity API and visible to exactly one thing, which is a
+write. Meanwhile the unsafe configuration was the *default* — XLA spills from
+C++, where the rule is `TMPDIR` or `/tmp` with no fallthrough, unlike Python's
+`tempfile`, and that asymmetry is precisely why every Python path on the box kept
+working while the spill died inside the bootstrap gate. `preflight_external_resources`
+now **writes, fsyncs and removes a probe byte** in the resolved temporary
+directory, in `--cache-dir` and in `output_root.parent`, refusing on any errno,
+and refuses any of the three on a tmpfs filesystem type — because an empty tmpfs
+passes a write probe and then fills during the run, and §11 enumerates the
+failure *class*. The resolved directory, its filesystem type, its `st_dev` and
+the (advisory) capacity number are published in the receipt, so a reader of the
+sealed bytes can tell a root that ran under safe storage from one that did not.
+The children are launched with `TMPDIR` **set** to the preflighted directory
+rather than inheriting the operator's, so the rule is enforced against the
+directory that is actually used. All of it runs before the staging tree exists
+and before a second of compute, so a refusal costs an error message.
+
+**10. Durability reaches the refusal record.** `seal_and_sync` is what fsyncs a
+published tree, and it is exactly the step a refusal never reaches, so the
+receipt, the manifest and `root-validation-refusal.json` lived only in the page
+cache — the same "the only record is on a stderr §11 calls volatile" failure
+ruling 5 exists to eliminate, displaced one step later. All three are fsynced
+where they are written.
+
 **Deferred, with reasons.** The order-dependence of `max()` over a sequence
 containing NaN (numerics advisory A1) stays: recorded rows are provably finite
 at this tree and the terminal point is separately gated by a nonfinite-refusing
 `certify_agreement`, so a guard there would be an unreachable branch. The four
 tautological read-backs (`timed_against_bar`, `sha_is_binding`, `bound`,
 `budget_independent`; protocol-receipt finding 5) stay: each is a tamper check
-whose substantive gate exists upstream, and the artifact-tree digest already
-covers the hand-edit case. Sanitizing the endpoint ledger's own term rows would
+whose substantive gate exists upstream. *(Round 2 correctly observed that the
+"the artifact-tree digest covers the hand-edit case" half of that reason did not
+hold while a wholly fabricated artifact could re-validate clean. Ruling 7 closes
+that; the read-backs stay on the first half of the reason, which never depended
+on it.)* Sanitizing the endpoint ledger's own term rows would
 require the pinned-term gate to model null terms, changing the verdict
 contract; the rows are finite at any finite iterate, and a nonfinite one stays
 contained as a published `PROTOCOL_FAILURE`. Constraining `--output-root` to
@@ -792,3 +957,44 @@ gate and the sealed source snapshot rather than by the module-hash gate. The
 output namespace is still claimed only at the `renameat2`; §11 constrains the
 root to one supervised session, so the misleading docstring is corrected rather
 than the mechanism changed (protocol-receipt advisory 7).
+
+**Deferred from round 2, with reasons.** *The unguarded supervisor window* stays
+scoped exactly as ruling 4 scoped it — the one new indexing hazard inside it is
+closed (`_attempt_outcome` requires `latched` to *be* a boolean rather than
+indexing for it, so a canonical document of another shape is the
+`PROTOCOL_FAILURE` the closed outcome space already has), and no other exception
+path is widened. *No gate requires a timed attempt to have run warm*
+(reproducibility NEW-2): the mechanism that would silently skip §3's warm lane
+is a `--cache-dir` whose writes fail, and ruling 9 now probes that directory by
+writing to it; the gate itself is refused because its direction is
+conservative — a cold compile only inflates the wall against the bar, so no
+false speed claim is reachable — and a gate that refuses an honest slow run is
+the false-reject class this campaign has paid for three times. *No
+`--preflight-only` CLI* (reproducibility NEW-3): under ruling 9 the whole
+preflight runs before the staging tree exists and before any compute, so a
+refusal costs an error message, and adding a zero-exit non-root lane to `main`
+would break the invariant that its exit code is 0 **iff** `CLAIM_DISCHARGED`.
+*The admissibility test is bound to a transcribed fixture* (numerics M2): the
+fixture is verified correct at this tree and re-deriving it in the suite would
+make the tests read a sealed campaign root, which is what pinning it as literals
+deliberately avoids; it is a drift risk, not a present error. *`XLA_FLAGS` and
+the rest of the inherited environment are neither pinned nor recorded*
+(adversarial N6): recording the whole child environment would seal an operator's
+shell into a published artifact, and enumerating a "performance-relevant" subset
+is the twin-constant class §5 forbids. *`thread.join()` has no timeout*
+(adversarial N11): the absorption catches exceptions, not hangs, and a join
+timeout that abandons a live sampling thread trades a rare hang for a thread
+still writing after the attempt closed. *A distribution module presented as a
+namespace package escapes the redirected-module refusal* (reproducibility NEW-5,
+adversarial N5b): a namespace package carries no code and the import dies at the
+first symbol; the `.so`'s bytes are sealed into the source snapshot through the
+`native_extension` role. The claim in the minors list above should be read as
+"refuses any module of this distribution that resolved outside the checkout
+**and has a file**". *`QUALITY_ONLY` at a bounded budget is minted with the
+per-term ledger never gated* (protocol-receipt NEW-7): plan-sanctioned by ruling
+3 — a latch under a lower cap is still a true measurement — and `quality_claim`
+beside it is now re-derived and refused if restated, so the disambiguation is
+machine-checked rather than conventional. *The sampler perturbs the wall it
+certifies* (adversarial N12) and *the absorption discards samples already
+collected* (N4): both are telemetry-direction findings, the first inflationary
+and therefore incapable of minting a false pass.
