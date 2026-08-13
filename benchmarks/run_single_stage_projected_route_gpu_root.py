@@ -76,6 +76,7 @@ from benchmarks.process_gpu_monitor import (
     sampler_failure_unavailable,
 )
 from benchmarks.rehearse_single_stage_projected_route_cpu import (
+    CERTIFIED_LOWERED_KERNEL_NAMES,
     CERTIFIED_MAXIMUM_ITERATIONS,
     CERTIFIED_ROUTE_OPTIONS,
     CPU_BOOTSTRAP_OBSERVABLES,
@@ -619,23 +620,23 @@ UNSHAPED_LEAVES: Final = {
     "root.supervisor.preflight.visible_gpu_uuids": "an inventory of device UUIDs; the pinned one is required to be among them",
     "supervised attempt.evidence": "null, refused or complete; _validate_attempt_shape picks the shape",
     "cold lane.evidence": "null, refused or complete; _validate_attempt_shape picks the shape",
-    "attempt evidence.certified_options_delta": "the fields this budget changed; re-derived from options against the frozen configuration",
+    "attempt evidence.certified_options_delta": "the fields this budget changed; re-derived from options against the frozen configuration and required to name maximum_iterations or nothing",
     "attempt evidence.endpoint_ledger": "gated or ungated; _validate_attempt_shape picks the shape from gated_at_this_budget",
-    "attempt evidence.options": "the certified dataclass's fields; the key set is checked against it and every value re-derived",
+    "attempt evidence.options": "the certified dataclass's fields; the key set is checked against it and every VALUE compared to CERTIFIED_ROUTE_OPTIONS, with only maximum_iterations permitted to differ",
     "attempt evidence.problem_identity.checks": "one boolean per bound observable; re-derived by problem_identity_evidence",
     "attempt evidence.problem_identity.measured_observables": "the four bootstrap observables; re-derived by problem_identity_evidence",
     "attempt evidence.problem_identity.reference_observables": "the campaign's frozen observables; compared to them",
     "attempt evidence.problem_identity.relative_difference": "re-derived by problem_identity_evidence from the measured side",
     "attempt evidence.problem_identity.relative_tolerances": "the campaign's frozen tolerances; compared to them",
     "attempt evidence.execution_sources.interpreter_installation_modules.roots": "the hidden top-level directories the interpreter installation lives under",
-    "attempt evidence.solve.rows": "per-iteration telemetry; section 6 gates none of it",
+    "attempt evidence.solve.rows": "the recorded iterates the solve summary is a projection of; each row's objective and feasibility_inf are re-derived into that summary by _validate_solve_telemetry",
     "endpoint ledger.informational_observables": "the campaign's frozen informational set; compared to it",
-    "endpoint ledger.native": "one number per physics term; compared term by term to the campaign's frozen native reference",
+    "endpoint ledger.native": "one number per physics term; compared term by term to the campaign's frozen native reference on a PRE-REGISTERED attempt (ruling 17 leaves the cold lane's native side uncompared, by design)",
     "endpoint ledger.pinned_quality_terms": "the campaign's frozen pinned set; compared to it",
     "endpoint ledger.relative_difference": "re-derived from the two sides",
     "endpoint ledger.terminal": "one number per physics term; the gate is recomputed from it",
     "gated endpoint ledger.informational_observables": "the campaign's frozen informational set; compared to it",
-    "gated endpoint ledger.native": "one number per physics term; compared term by term to the campaign's frozen native reference",
+    "gated endpoint ledger.native": "one number per physics term; compared term by term to the campaign's frozen native reference on a PRE-REGISTERED attempt (ruling 17 leaves the cold lane's native side uncompared, by design)",
     "gated endpoint ledger.pinned_quality_terms": "the campaign's frozen pinned set; compared to it",
     "gated endpoint ledger.pinned_term_gate.failed_terms": "the terms the recomputed gate names; the whole block is recomputed and compared",
     "gated endpoint ledger.pinned_term_gate.terms": "one verdict per pinned term; the whole block is recomputed and compared",
@@ -1903,15 +1904,19 @@ def _validate_preflight_record(preflight: Mapping[str, JsonValue]) -> None:
     # one directory beside a probe of another states nothing about the storage
     # the run used.  The two are one fact, so they are compared.
     temporary = preflight["storage"][0]
-    if (
-        preflight["temporary_directory"] != temporary["directory"]
-        or preflight["resolved_temporary_directory"] != temporary["resolved_directory"]
+    for declared, probed in (
+        ("temporary_directory", "directory"),
+        ("resolved_temporary_directory", "resolved_directory"),
     ):
-        raise ProjectedRootError(
-            f"root preflight probed {temporary['directory']!r} and published "
-            f"{preflight['temporary_directory']!r} as the temporary directory "
-            f"the children spill through"
-        )
+        # Named per PAIR: reporting the declared/probed pair of the OTHER field
+        # produced a refusal that reads as self-contradictory to a third party
+        # ("probed '/var/tmp/temporary' and published '/var/tmp/temporary'").
+        if preflight[declared] != temporary[probed]:
+            raise ProjectedRootError(
+                f"root preflight probed {temporary[probed]!r} and published "
+                f"{preflight[declared]!r} as the {declared} the children spill "
+                f"through"
+            )
     # And where the reference itself is still on the box, it is RE-LOADED, which
     # re-verifies both digests against the constants above.  A reader whose box
     # no longer carries it keeps the comparison against the frozen literals; a
@@ -1979,6 +1984,18 @@ def _validate_execution_sources(execution_sources: Mapping[str, JsonValue]) -> N
             f"attempt does not bind the modules the certified chain runs "
             f"through: {missing}"
         )
+    # The escape half.  A repository module that resolved outside the manifest's
+    # roots lands HERE rather than in ``bound_modules``, which is exactly the
+    # class the block exists to catch, and it was shape-checked and read by
+    # nothing.  A certified launch imports nothing from the tree but the three
+    # manifested roots -- measured on both lanes of the bounded 5090 smoke, and
+    # on CPU: ``[]``.
+    unmanifested = execution_sources["unmanifested_repository_modules"]
+    if unmanifested:
+        raise ProjectedRootError(
+            f"attempt executed repository modules the manifest does not "
+            f"describe: {sorted(str(module['relative_path']) for module in unmanifested)}"
+        )
 
 
 def _validate_problem_identity(identity: Mapping[str, JsonValue]) -> None:
@@ -2029,6 +2046,21 @@ def _validate_lowering_pre_gate(
     a certified compile.  The receipt's record of it was one boolean the
     validator read; the budgets it ran at, the kernels it lowered and the size
     it reports are re-derived here.
+
+    The KERNEL LIST was the half four reviewers refuted in one round: it was
+    checked for non-emptiness and for an internal sum, so a receipt publishing a
+    single invented kernel of one IR byte -- and the suite's own fixture, which
+    published two kernels this repository never lowers -- were both accepted.
+    WHICH kernels a configuration lowers is a function of that configuration
+    (``evaluate_carried`` exists only above a projector refresh period of one,
+    ``frozen_retract`` only under the frozen-projector line search,
+    ``lagrangian_newton_direction`` only under the reduced-Lagrangian arm), so
+    the list is re-derived against the campaign's own
+    ``CERTIFIED_LOWERED_KERNEL_NAMES``.  Their SIZES are not re-derivable by a
+    reader: the same six kernels lower to IR totals that differ by thousands of
+    bytes between two CPU processes and again on the GPU, which is why the
+    substantive section 6.1 gate (identical IR at both budgets) runs in the
+    child, where both sides are lowered by one process.
     """
 
     if not lowering["budget_independent"]:
@@ -2046,12 +2078,211 @@ def _validate_lowering_pre_gate(
     kernels = lowering["kernels"]
     if not kernels:
         raise ProjectedRootError("attempt lowered no kernel at all")
+    lowered = sorted(str(kernel["name"]) for kernel in kernels)
+    if lowered != sorted(CERTIFIED_LOWERED_KERNEL_NAMES):
+        raise ProjectedRootError(
+            f"attempt lowered {lowered!r}, which is not the kernel set the "
+            f"certified configuration selects "
+            f"({sorted(CERTIFIED_LOWERED_KERNEL_NAMES)!r})"
+        )
+    for kernel in kernels:
+        if int(kernel["ir_bytes"]) <= 0 or int(kernel["while_operations"]) < 0:
+            raise ProjectedRootError(
+                f"attempt publishes kernel {kernel['name']!r} with "
+                f"{kernel['ir_bytes']!r} IR bytes and "
+                f"{kernel['while_operations']!r} while operations, which is not "
+                f"a lowering"
+            )
     total = sum(int(kernel["ir_bytes"]) for kernel in kernels)
     if int(lowering["total_ir_bytes"]) != total:
         raise ProjectedRootError(
             f"attempt lowering total {lowering['total_ir_bytes']!r} is not the "
             f"sum of its kernels ({total!r})"
         )
+
+
+def _validate_certified_route_options(
+    options: JsonValue, delta: JsonValue
+) -> None:
+    """Bind the configuration the attempt RAN to the certified route's VALUES.
+
+    Section 1's claim is a claim about ONE route, and the campaign's whole
+    substitution argument is that a bounded CPU rehearsal and the certified GPU
+    run are the same configuration with one field replaced
+    (``rehearsal_options`` = ``replace(CERTIFIED_ROUTE_OPTIONS,
+    maximum_iterations=...)``).  The previous revision checked the KEY SET
+    against the frozen dataclass and re-derived the published DELTA from the
+    published options -- and then constrained the delta to nothing at all.  Both
+    sides of that comparison came out of the same document, so a
+    ``CLAIM_DISCHARGED`` receipt could declare ``lagrangian_newton: false``,
+    ``gauss_newton: true``, ``frozen_projector_line_search: false``,
+    ``backtracking_factor: 1.0`` and ``feasibility_tolerance: 1e-3`` beside a
+    self-consistent delta and re-validate clean: twenty-one of the twenty-four
+    fields were free, including the reduced-Lagrangian Newton--CG arm that IS
+    the route under certification.  Three roles reached it from three entry
+    points, and the CPU rehearsal's own suite had enforced the stronger property
+    since round 1.
+
+    So every value is compared to the frozen configuration's, and the only field
+    a budget may replace is the budget.  At the certified budget the permitted
+    delta is therefore EMPTY; at a bounded one it is exactly
+    ``{"maximum_iterations": n}``, which is what the published label
+    ``NOT_CLAIMED_AT_BOUNDED_BUDGET`` already says out loud.
+    """
+
+    fields = frozenset(CERTIFIED_ROUTE_OPTIONS.__dataclass_fields__)
+    if not isinstance(options, dict) or frozenset(options) != fields:
+        raise ProjectedRootError(
+            "attempt options are not the certified configuration's fields"
+        )
+    certified = {
+        field: json_scalar(getattr(CERTIFIED_ROUTE_OPTIONS, field))
+        for field in fields
+    }
+    derived = {
+        field: value
+        for field, value in options.items()
+        if value != certified[field]
+    }
+    if delta != derived:
+        raise ProjectedRootError(
+            f"attempt options delta {delta!r} is not the one its options derive "
+            f"({derived!r})"
+        )
+    substituted = sorted(frozenset(derived) - {"maximum_iterations"})
+    if substituted:
+        raise ProjectedRootError(
+            "attempt ran a route other than the certified one: "
+            + ", ".join(
+                f"{field}={options[field]!r} where the certified configuration "
+                f"is {certified[field]!r}"
+                for field in substituted
+            )
+        )
+
+
+def _validate_solve_telemetry(solve: Mapping[str, JsonValue]) -> None:
+    """Re-derive the solve summary from the iterates the same receipt publishes.
+
+    Section 6's feasibility gate -- one of the five comparisons that decide
+    whether a draw discharges the claim -- reads the summary scalar
+    ``maximum_feasibility_inf``.  In the producer that scalar is ``max`` over the
+    very iterates published beside it as ``rows``, so the gated number and the
+    recorded evidence are one measurement told twice, and nothing compared them:
+    a receipt could publish iterates carrying 0.005 and 0.027 beside
+    ``maximum_feasibility_inf: 1e-14`` and seal ``CLAIM_DISCHARGED`` -- a
+    nine-decade contradiction in plain sight, with a reader who does the
+    arithmetic the receipt invites getting a different answer from the validator
+    that accepted it.
+
+    The identities re-derived here hold EXACTLY for the real producer -- checked
+    against both lanes of a real 5090 receipt and against a live CPU solve -- so
+    binding them cannot burn an honest root.  Where a nonfinite scalar makes an
+    identity un-re-derivable from the published bytes (``json_scalar`` writes
+    null and the raw value is gone), the check admits every reading the producer
+    could have written rather than guessing one.
+    """
+
+    rows = solve["rows"]
+    if int(solve["iterations_run"]) != len(rows):
+        raise ProjectedRootError(
+            f"attempt publishes {len(rows)} recorded iterates against "
+            f"{solve['iterations_run']!r} iterations run"
+        )
+    for name in (
+        "iterations_run",
+        "stored_pairs",
+        "projector_materializations",
+        "tangency_forced_refreshes",
+        "line_search_forced_refreshes",
+    ):
+        if int(solve[name]) < 0:
+            raise ProjectedRootError(
+                f"attempt publishes {name} as {solve[name]!r}, which is not a count"
+            )
+    feasibilities = _iterate_column(rows, "feasibility_inf")
+    objectives = _iterate_column(rows, "objective")
+    worst = solve["maximum_feasibility_inf"]
+    recorded = [value for value in feasibilities if value is not None]
+    if not rows:
+        # ``max(..., default=nan)`` through ``json_scalar``.
+        if worst is not None:
+            raise ProjectedRootError(
+                f"attempt publishes a worst iterate {worst!r} with no iterates"
+            )
+    elif len(recorded) == len(feasibilities):
+        if worst != max(feasibilities):
+            raise ProjectedRootError(
+                f"attempt publishes a worst iterate feasibility {worst!r} that "
+                f"its own recorded iterates do not carry (their maximum is "
+                f"{max(feasibilities)!r})"
+            )
+    elif worst is not None and worst != max(recorded, default=None):
+        # A nonfinite iterate publishes null: ``max`` then yields either that
+        # nonfinite value (null here) or the maximum of the finite ones,
+        # depending on where in the sequence it fell.  Both are honest.
+        raise ProjectedRootError(
+            f"attempt publishes a worst iterate feasibility {worst!r} that its "
+            f"own recorded iterates do not carry"
+        )
+    if all(value is not None for value in objectives):
+        descent = all(
+            later <= earlier
+            for earlier, later in zip(objectives, objectives[1:], strict=False)
+        )
+        if bool(solve["monotone_descent"]) != descent:
+            raise ProjectedRootError(
+                f"attempt publishes monotone_descent="
+                f"{solve['monotone_descent']!r}, which is not what its recorded "
+                f"objectives derive ({descent!r})"
+            )
+    try:
+        status_name = ProjectedLbfgsStatus(int(solve["status"])).name
+    except ValueError as failure:
+        raise ProjectedRootError(
+            f"attempt publishes status {solve['status']!r}, which is not one "
+            f"the engine reports"
+        ) from failure
+    if solve["status_name"] != status_name:
+        raise ProjectedRootError(
+            f"attempt publishes status {solve['status']!r} under the name "
+            f"{solve['status_name']!r}, which the engine calls {status_name!r}"
+        )
+    latched = status_name == ProjectedLbfgsStatus.OBJECTIVE_TARGET_REACHED.name
+    if bool(solve["latched"]) != latched:
+        raise ProjectedRootError(
+            f"attempt publishes latched={solve['latched']!r} under status "
+            f"{solve['status_name']!r}"
+        )
+
+
+def _iterate_column(rows: Sequence[JsonValue], name: str) -> list[float | None]:
+    """One published quantity, taken from every recorded iterate.
+
+    The rows are the child's own per-iteration records and carry every field of
+    the engine's iteration tuple, which is a function of the configuration -- so
+    they are not shaped here.  The two columns the solve summary is a projection
+    of are required to be there and to be measurements.
+    """
+
+    column: list[float | None] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ProjectedRootError(f"attempt iterate {index} is not a document")
+        if name not in row:
+            raise ProjectedRootError(
+                f"attempt iterate {index} publishes no {name}"
+            )
+        value = row[name]
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+        ):
+            raise ProjectedRootError(
+                f"attempt iterate {index} publishes {name} as {value!r}, which "
+                f"is not a measurement"
+            )
+        column.append(value)
+    return column
 
 
 def _validate_endpoint_ledger_arithmetic(ledger: Mapping[str, JsonValue]) -> None:
@@ -2181,6 +2412,16 @@ def validate_root_artifact(
     custody binding -- had no shape and no reader at all, which is the sentence
     this revision had to make true rather than restate.
 
+    A shape is not a value, and the revision that froze the whole tree left the
+    values inside it free: the options block was key-checked and its delta
+    re-derived from itself, so a receipt could discharge the claim for a
+    DIFFERENT optimizer configuration; the feasibility gate read a summary
+    scalar its own published iterates contradicted by nine decades; and the
+    cold lane's pre-registration fact was bound to a directory entry.  Each of
+    those is now a comparison against something outside the document being
+    judged -- the campaign's frozen configuration, the receipt's own recorded
+    iterates, and the invocation and cache of a draw nobody else took.
+
     The reference the physics gate is judged against is the CAMPAIGN's, never
     the artifact's.  The published native side is compared to
     ``NATIVE_ENDPOINT_PINNED_TERMS`` term by term, the gate is recomputed from
@@ -2294,6 +2535,23 @@ def validate_root_artifact(
         _validate_attempt_outcome(attempt)
     if cold is not None:
         _validate_attempt_outcome(cold)
+    # Every draw the receipt publishes is one child this supervisor launched,
+    # timed and sampled, and no two draws are the same launch.
+    timeout_seconds = float(evidence["supervisor"]["attempt_timeout_seconds"])
+    for index, attempt in enumerate(attempts):
+        _validate_supervised_launch(
+            attempt, timeout_seconds=timeout_seconds, where=f"attempt {index + 1}"
+        )
+    if cold is not None:
+        _validate_supervised_launch(
+            cold, timeout_seconds=timeout_seconds, where="the cold lane"
+        )
+    invocations = [str(attempt["argv_sha256"]) for attempt in attempts]
+    if len(frozenset(invocations)) != len(invocations):
+        raise ProjectedRootError(
+            "root publishes two attempts launched by the same invocation, which "
+            "the protocol's own per-attempt directory and index make impossible"
+        )
 
     # Section 4's draw statistics were pure read-backs beside a conformance
     # label that was re-derived, so a one-attempt root could publish
@@ -2394,14 +2652,7 @@ def validate_root_artifact(
     if cold is not None:
         if cold["timed_against_bar"]:
             raise ProjectedRootError("the cold lane may not be timed against the bar")
-        # The cold lane is what makes the cache an accounting device rather
-        # than a hiding place, and it can only say what compile costs without a
-        # cache if it ran without one.
-        if isinstance(cold["evidence"], dict) and (
-            cold["evidence"]["gate_refused"] is None
-            and cold["evidence"]["compilation_cache"]["warm"]
-        ):
-            raise ProjectedRootError("the cold lane ran against a populated cache")
+        _validate_cold_lane_draw(cold, attempts)
         _validate_cold_lane(artifact_root, cold, protocol)
     return evidence
 
@@ -2481,6 +2732,52 @@ def _validate_attempt_outcome(attempt: Mapping[str, JsonValue]) -> None:
         )
 
 
+def _validate_supervised_launch(
+    record: Mapping[str, JsonValue], *, timeout_seconds: float, where: str
+) -> None:
+    """Re-derive that this record is one CHILD LAUNCH the supervisor observed.
+
+    Every draw in the receipt -- the three timed attempts and the cold lane --
+    is a process the supervisor started, timed and sampled, and the record
+    carries three independent traces of that: the digest of the argv it was
+    launched with, the sampler's digest of the argv it OBSERVED on the device,
+    and the supervised wall.  None of the three was read, so a record could be
+    a copy of another draw, could name a device the claim is not stated for, or
+    could claim a timeout it did not wait for.  The identities are exact for the
+    real producer (verified on both lanes of a real 5090 receipt): the sampler
+    is handed the same argv the child was launched with and refuses to bind a
+    child whose procfs argv differs, and ``communicate(timeout=...)`` cannot
+    raise before its timeout elapses.
+    """
+
+    memory = record["gpu_memory"]
+    if memory["child_argv_sha256"] != record["argv_sha256"]:
+        raise ProjectedRootError(
+            f"{where} publishes device telemetry for a child other than the one "
+            f"it launched"
+        )
+    if memory["device_uuid"] != GPU_UUID:
+        raise ProjectedRootError(
+            f"{where} was observed on GPU {memory['device_uuid']!r}, not the "
+            f"device the claim is stated for ({GPU_UUID!r})"
+        )
+    if int(memory["child_pid"]) == int(memory["parent_pid"]):
+        raise ProjectedRootError(
+            f"{where} names the supervisor as its own child process"
+        )
+    supervised = float(record["supervised_seconds"])
+    if not math.isfinite(supervised) or supervised <= 0.0:
+        raise ProjectedRootError(
+            f"{where} publishes a supervised wall of {supervised!r}, which is "
+            f"not a duration"
+        )
+    if bool(record["timed_out"]) and supervised < float(timeout_seconds):
+        raise ProjectedRootError(
+            f"{where} claims a timeout after {supervised!r} s under the "
+            f"{float(timeout_seconds)!r} s timeout it publishes"
+        )
+
+
 def _validate_attempt_record(
     artifact_root: Path,
     attempt: Mapping[str, JsonValue],
@@ -2489,8 +2786,12 @@ def _validate_attempt_record(
     """Re-derive WHICH RUN produced this record, and what its own bytes say.
 
     Everything here is a fact about the record: the context the child ran in,
-    the custody of the bytes that ran, the budget it ran at, the arithmetic of
-    its own published columns, and the array behind its terminal-state hash.
+    the custody of the bytes that ran, the ROUTE it ran (every option value
+    against the campaign's frozen configuration), the budget it ran at, the
+    warmth of the cache it entered, the nesting of its three walls, the
+    arithmetic of its own published columns -- including the solve summary
+    re-derived from the iterates published beside it -- and the array behind its
+    terminal-state hash.
     None of it is a comparison against another executable, so an honest draw
     cannot fail any of it -- which is what makes it the part BOTH lanes run.
     The claim-bearing gates live in ``_validate_attempt``, and the cold lane
@@ -2534,7 +2835,29 @@ def _validate_attempt_record(
     # The wall of EVERY attempt, not only the first latching one: section 4
     # makes each attempt's wall part of the artifact, and ``derive_verdict``
     # reaches ``attempt_engine_wall_seconds`` on exactly one of them.
-    attempt_engine_wall_seconds(attempt)
+    engine_wall = attempt_engine_wall_seconds(attempt)
+    # And the wall is a CHAIN: the engine's compile plus solve sits inside the
+    # attempt's own wall, which sits inside the wall the supervisor observed.
+    # Only the outer relation was checked, so a receipt could publish
+    # ``attempt_wall: 1e-9`` beside a 187 s engine and three negative phase
+    # durations.  Each phase is a duration of this run and the three
+    # measurements nest, by construction and by measurement on both lanes.
+    timing = evidence["timing_seconds"]
+    for phase in ATTEMPT_TIMING_SHAPE:
+        seconds = float(timing[phase])
+        if not math.isfinite(seconds) or seconds < 0.0:
+            raise ProjectedRootError(
+                f"attempt publishes {phase} as {timing[phase]!r}, which is not "
+                f"a duration"
+            )
+    if not engine_wall <= float(timing["attempt_wall"]) <= float(
+        attempt["supervised_seconds"]
+    ):
+        raise ProjectedRootError(
+            f"attempt timings do not nest: engine wall {engine_wall!r}, attempt "
+            f"wall {timing['attempt_wall']!r}, supervised wall "
+            f"{attempt['supervised_seconds']!r}"
+        )
     # The budget the conformance label is derived from has to be the budget the
     # attempt RAN.  A receipt declaring ``maximum_iterations: 700`` beside an
     # attempt whose own options say 400 minted the campaign's headline verdict
@@ -2552,6 +2875,16 @@ def _validate_attempt_record(
         raise ProjectedRootError(
             f"attempt quality claim {evidence['quality_claim']!r} is not the one "
             f"its budget derives ({quality_claim!r})"
+        )
+    # "Warm" is what the cold lane's whole accounting turns on, and it was a
+    # published boolean beside the cache state it is a function of.  The
+    # producer derives it from the entry count it sampled before this process
+    # had traced anything, so it is derived from the same number here.
+    cache = evidence["compilation_cache"]
+    if bool(cache["warm"]) != (int(cache["at_entry"]["entry_count"]) > 0):
+        raise ProjectedRootError(
+            f"attempt publishes warm={cache['warm']!r} against a cache holding "
+            f"{cache['at_entry']['entry_count']!r} entries at entry"
         )
     # The three custody blocks: which bytes ran, which problem they ran on, and
     # which kernels they lowered.  All three were published on every attempt and
@@ -2574,35 +2907,24 @@ def _validate_attempt_record(
             "attempt targets an objective other than the native endpoint"
         )
     # Substitution soundness rests on "same route": every budget is the frozen
-    # configuration with one field replaced.  The published delta is therefore
-    # RE-DERIVED from the published options against the frozen object, not read.
-    # The KEY SET is checked first, against the frozen dataclass: derived over
-    # whatever fields an attempt happened to publish, a truncated options block
-    # yields an empty delta and passes, and an unknown field reaches ``getattr``
-    # as an ``AttributeError`` rather than a named refusal.
-    if frozenset(evidence["options"]) != frozenset(
-        CERTIFIED_ROUTE_OPTIONS.__dataclass_fields__
-    ):
-        raise ProjectedRootError(
-            "attempt options are not the certified configuration's fields"
-        )
-    delta = {
-        field: value
-        for field, value in evidence["options"].items()
-        if value != json_scalar(getattr(CERTIFIED_ROUTE_OPTIONS, field))
-    }
-    if delta != evidence["certified_options_delta"]:
-        raise ProjectedRootError(
-            f"attempt options delta {evidence['certified_options_delta']!r} is "
-            f"not the one its options derive ({delta!r})"
-        )
-    if (
-        attempt["outcome"] == "LATCHED"
-        and evidence["solve"]["terminal_objective"] > NATIVE_TARGET_OBJECTIVE
-    ):
-        raise ProjectedRootError(
-            "attempt published a latch above the native endpoint objective"
-        )
+    # configuration with one field replaced.  Both the delta and every VALUE it
+    # is derived from are bound to the campaign's frozen object.
+    _validate_certified_route_options(
+        evidence["options"], evidence["certified_options_delta"]
+    )
+    # The solve summary, re-derived from the iterates published beside it.
+    _validate_solve_telemetry(evidence["solve"])
+    if attempt["outcome"] == "LATCHED":
+        terminal_objective = evidence["solve"]["terminal_objective"]
+        # ``json_scalar`` writes null for a nonfinite terminal objective, and a
+        # null reached ``>`` as an unnamed ``TypeError`` from the one nullable
+        # numeric leaf this function reads.
+        if not isinstance(terminal_objective, float) or (
+            terminal_objective > NATIVE_TARGET_OBJECTIVE
+        ):
+            raise ProjectedRootError(
+                "attempt published a latch above the native endpoint objective"
+            )
 
     # An artifact may not narrow what quality parity is measured on: the pinned
     # set and the informational set are the campaign's, not the run's, and a
@@ -2669,6 +2991,12 @@ def _validate_attempt_record(
         / str(attempt["artifact_relative_path"])
         / TERMINAL_COORDINATES_FILENAME
     )
+    if not coordinates_path.is_file():
+        raise ProjectedRootError(
+            f"attempt published a completed chain whose directory "
+            f"{str(attempt['artifact_relative_path'])!r} carries no "
+            f"{TERMINAL_COORDINATES_FILENAME}"
+        )
     with coordinates_path.open("rb") as stream:
         coordinates = np.load(stream, allow_pickle=False)
     republished = exact_numeric_tree_sha256(
@@ -2686,7 +3014,7 @@ def _validate_attempt(
 ) -> None:
     """Re-derive one PRE-REGISTERED attempt, including the claim it bears.
 
-    The record's own facts first, then the four comparisons that decide whether
+    The record's own facts first, then the five comparisons that decide whether
     this draw discharges section 1's claim: its native side against the
     campaign's frozen reference, its per-term gate's verdict, that gate
     recomputed FROM the frozen literals, its two independently compiled
@@ -2770,6 +3098,54 @@ def _validate_cold_lane(
     """
 
     _validate_attempt_record(artifact_root, cold, protocol)
+
+
+def _validate_cold_lane_draw(
+    cold: Mapping[str, JsonValue], attempts: Sequence[Mapping[str, JsonValue]]
+) -> None:
+    """Re-derive that the published lane is a DRAW OF ITS OWN, not a retelling.
+
+    Ruling 18 bound the lane's path, its index and the EXISTENCE of the
+    directory it runs in.  A forger paid one ``mkdir``: an empty ``cold-lane/``
+    beside a record that produced nothing, and a ``cold-lane/`` holding a
+    byte-copy of ``attempts/attempt-1`` beside a deep copy of attempt 1's own
+    record, both minted ``PREREGISTERED`` and therefore the headline verdict.
+
+    What separates a draw from a copy is not its terminal state -- two honest
+    draws of the same problem at the same budget produced BITWISE IDENTICAL
+    endpoints on the 5090 (measured: both lanes of the bounded smoke report the
+    same worst iterate to the last digit), so demanding difference there would
+    burn an honest root.  It is the INVOCATION and the CACHE: the lane is
+    launched at index 0 into its own directory, so its argv digest is not any
+    timed attempt's, and it is the session's first process against a cache the
+    protocol required to be empty, so its own accounting must say so.
+
+    Ruling 17 is preserved: a lane that timed out, failed the protocol or
+    refused a gate publishes with its anomaly recorded, and nothing here reads
+    the lane's outcome.  What is refused is a lane that claims a draw it did not
+    take.
+    """
+
+    invocations = {str(attempt["argv_sha256"]) for attempt in attempts}
+    if str(cold["argv_sha256"]) in invocations:
+        raise ProjectedRootError(
+            "root publishes a cold lane whose invocation is a timed attempt's, "
+            "so its record is a copy of a draw rather than a draw"
+        )
+    evidence = cold["evidence"]
+    if not isinstance(evidence, dict) or evidence["gate_refused"] is not None:
+        return
+    # The cold lane is what makes the cache an accounting device rather than a
+    # hiding place, and it can only say what a compile costs without a cache if
+    # it ran without one.  ``warm`` is re-derived from the entry count the lane
+    # sampled before it traced anything (``_validate_attempt_record``), so this
+    # is a statement about the cache and not about a published boolean.
+    cache = evidence["compilation_cache"]
+    if cache["warm"]:
+        raise ProjectedRootError(
+            f"the cold lane ran against a populated cache "
+            f"({cache['at_entry']['entry_count']!r} entries at entry)"
+        )
 
 
 def run_attempt_protocol(

@@ -37,6 +37,7 @@ from benchmarks.process_gpu_monitor import (
     ProcessGpuMemoryMonitorError,
 )
 from benchmarks.single_stage_fullspace_snapshot import canonical_json_bytes
+from simsopt_jax.geo.optimizers.projected_lbfgs import KernelLowering
 from simsopt_jax.runtime.exact_numeric_identity import exact_numeric_tree_sha256
 
 REPOSITORY = Path(__file__).resolve().parents[2]
@@ -304,16 +305,58 @@ def _attempt_cache(*, warm: bool) -> dict:
     }
 
 
+def _iterates(
+    *, terminal_objective: float, maximum_feasibility_inf: float | None
+) -> list[dict]:
+    """The recorded iterates the solve summary is a projection of.
+
+    The summary the claim's feasibility gate reads is ``max`` over these rows,
+    and a fixture publishing ``rows: []`` beside ``iterations_run: 7`` is a
+    fixture asserting a shape the producer cannot write -- which is how a
+    receipt carrying two iterates nine decades outside the tolerance came to
+    seal beside a passing summary.  The last iterate carries the worst
+    feasibility and the objectives descend, as a monotone run's do.
+    """
+
+    smaller = (
+        None if maximum_feasibility_inf is None else maximum_feasibility_inf / 10.0
+    )
+    return [
+        {"index": 0, "objective": terminal_objective * 100.0, "feasibility_inf": smaller},
+        {"index": 1, "objective": terminal_objective * 10.0, "feasibility_inf": smaller},
+        {
+            "index": 2,
+            "objective": terminal_objective,
+            "feasibility_inf": maximum_feasibility_inf,
+        },
+    ]
+
+
 def _solve_payload(
     *, latched: bool, terminal_objective: float, maximum_feasibility_inf: float | None
 ) -> dict:
-    """Every host-side scalar ``_solve_payload`` publishes, in its shape."""
+    """Every host-side scalar ``_solve_payload`` publishes, in its shape.
 
+    The status and its name come from the engine's own enumeration: the fixture
+    used to publish ``status: 0`` (``RUNNING``) under the name
+    ``MAXIMUM_ITERATIONS``, which the engine calls ``ITERATION_LIMIT`` and never
+    reports at the end of a run.
+    """
+
+    status = (
+        launcher.ProjectedLbfgsStatus.OBJECTIVE_TARGET_REACHED
+        if latched
+        else launcher.ProjectedLbfgsStatus.ITERATION_LIMIT
+    )
+    rows = _iterates(
+        terminal_objective=terminal_objective,
+        maximum_feasibility_inf=maximum_feasibility_inf,
+    )
     return {
-        "status": 0,
-        "status_name": "OBJECTIVE_TARGET_REACHED" if latched else "MAXIMUM_ITERATIONS",
+        "status": int(status),
+        "status_name": status.name,
         "latched": latched,
-        "iterations_run": 7,
+        "iterations_run": len(rows),
         "terminal_objective": terminal_objective,
         "terminal_feasibility_inf": 1.0e-14,
         "terminal_projected_gradient_inf": 1.0e-7,
@@ -324,12 +367,27 @@ def _solve_payload(
         "monotone_descent": True,
         "maximum_feasibility_inf": maximum_feasibility_inf,
         "collapse_proximity_margin": 1.0,
-        "rows": [],
+        "rows": rows,
     }
 
 
-def _gpu_memory() -> dict:
-    """The observation ``_gpu_memory_payload`` normalizes, whole."""
+def _invocation_sha256(index: int) -> str:
+    """One draw's argv digest, distinct per draw as the supervisor's are.
+
+    The supervisor launches every child with its own attempt root and index, so
+    no two draws of one root share an invocation -- which is what tells a cold
+    lane from a copy of a timed attempt.
+    """
+
+    return rehearsal.sha256_hex(f"attempt-{index}".encode())
+
+
+def _gpu_memory(index: int = 1) -> dict:
+    """The observation ``_gpu_memory_payload`` normalizes, whole.
+
+    ``child_argv_sha256`` is the sampler's digest of the argv it observed on the
+    device, which for an honest record is the argv the supervisor launched.
+    """
 
     return {
         "monitor_scope": "whole-child-exact-pid-exact-device",
@@ -337,9 +395,9 @@ def _gpu_memory() -> dict:
         "unavailable_reason": "sampler-failed",
         "device_uuid": launcher.GPU_UUID,
         "parent_pid": 1,
-        "child_pid": 2,
+        "child_pid": 2 + index,
         "child_start_time_ticks": None,
-        "child_argv_sha256": "0" * 64,
+        "child_argv_sha256": _invocation_sha256(index),
         "sample_count": 0,
         "peak_used_memory_mib": None,
     }
@@ -389,17 +447,28 @@ def _problem_identity() -> dict:
 
 
 def _lowering_pre_gate(iterations: int) -> dict:
-    """The whole pre-gate record ``measure_lowering_pre_gate`` publishes."""
+    """The whole pre-gate record ``measure_lowering_pre_gate`` publishes.
 
+    The kernels are the campaign's own list -- the six the CERTIFIED
+    configuration selects, bound to the real producer by execution in the
+    rehearsal suite.  This fixture used to invent two kernel names this
+    repository never lowers (``projected_lbfgs_step``, ``projected_lbfgs_loop``)
+    totalling 12 288 bytes against a producer that lowers six totalling
+    65 million, and the validator accepted it -- four reviewers found the same
+    hole in one round.  The SIZES stay fixture values, because the producer's
+    differ between two processes on one box.
+    """
+
+    kernels = [
+        {"name": name, "ir_bytes": 4096 * (index + 1), "while_operations": index}
+        for index, name in enumerate(rehearsal.CERTIFIED_LOWERED_KERNEL_NAMES)
+    ]
     return {
         "rehearsal_iterations": iterations,
         "certified_iterations": rehearsal.CERTIFIED_MAXIMUM_ITERATIONS,
         "budget_independent": True,
-        "kernels": [
-            {"name": "projected_lbfgs_step", "ir_bytes": 4096, "while_operations": 1},
-            {"name": "projected_lbfgs_loop", "ir_bytes": 8192, "while_operations": 2},
-        ],
-        "total_ir_bytes": 12288,
+        "kernels": kernels,
+        "total_ir_bytes": sum(kernel["ir_bytes"] for kernel in kernels),
     }
 
 
@@ -500,12 +569,46 @@ def _attempt(
         "outcome": outcome,
         "return_code": 2 if gate is not None else 0,
         "timed_out": outcome == "TIMEOUT",
-        "supervised_seconds": engine_wall + 1.0,
-        "argv_sha256": "0" * 64,
-        "gpu_memory": _gpu_memory(),
+        # The three measurements NEST: the engine's compile plus solve sits
+        # inside the attempt's own wall, which sits inside the wall the
+        # supervisor observed.  The fixture used to publish an attempt wall
+        # outside the supervised one, which no supervisor can observe.
+        "supervised_seconds": engine_wall + 4.0,
+        "argv_sha256": _invocation_sha256(index),
+        "gpu_memory": _gpu_memory(index),
         "stderr_tail": "",
         "stdout_tail": None,
         "evidence": evidence,
+    }
+
+
+def _relaunched(record: dict, index: int, *, directory: str | None = None) -> dict:
+    """One record re-stamped as the draw the protocol launched at ``index``.
+
+    A forgery about the attempt SEQUENCE must differ from an honest receipt in
+    the sequence and in nothing else, or it is refused for the wrong reason and
+    the test proves a narrower property than its name -- the finding class the
+    round-5 review filed against two of the round-4 forgery tests.  Every draw
+    is launched into its own directory at its own index, so its invocation
+    digest and the sampler's observation of it are its own.
+    """
+
+    evidence = record["evidence"]
+    return {
+        **record,
+        "attempt_index": index,
+        "artifact_relative_path": (
+            f"{launcher.ATTEMPTS_DIRECTORY}/attempt-{index}"
+            if directory is None
+            else directory
+        ),
+        "argv_sha256": _invocation_sha256(index),
+        "gpu_memory": _gpu_memory(index),
+        "evidence": (
+            {**evidence, "attempt_index": index}
+            if isinstance(evidence, dict)
+            else evidence
+        ),
     }
 
 
@@ -1494,6 +1597,364 @@ def test_a_hollow_custody_block_cannot_pass_for_a_published_one(
         _refuse_published(root, evidence, match="incomplete|not a document")
 
 
+# -------------------------------------------------- the round-5 forged receipts
+#
+# The round-5 review published twenty-two receipts through the REAL
+# ``publish_root`` that sealed as ``CLAIM_DISCHARGED`` and re-validated clean
+# from their sealed bytes.  Two of them forged a fact that DECIDES the claim --
+# the route the attempt ran, and the worst iterate the feasibility gate reads --
+# and one forged the pre-registration fact the headline verdict rests on.  Each
+# is re-published here and must be refused before the seal, by a reason that
+# names the gate that refuses it.
+
+
+def test_publication_refuses_an_attempt_that_ran_a_different_route(
+    tmp_path: Path,
+) -> None:
+    """A5-1/E5-1/P5-1: the receipt is bound to the certified route's VALUES.
+
+    The options block was checked for its KEY SET and its published delta was
+    re-derived from the published options -- and then the delta was constrained
+    by nothing at all.  Twenty-one of the twenty-four fields were free, so a
+    ``CLAIM_DISCHARGED`` receipt could declare ``lagrangian_newton: false``
+    (the arm that IS the route under certification), ``gauss_newton: true``, a
+    disabled line search, a backtracker that never contracts, or
+    ``feasibility_tolerance: 1e-3`` beside ``claim.feasibility_tolerance:
+    1e-10`` -- each with a truthful delta -- and re-validate clean.  Six roots
+    of that shape sealed in one review.
+
+    At the certified budget the honest delta is EMPTY, which is what makes the
+    subset rule and the plan's sentence the same rule.
+    """
+
+    assert _options_delta(rehearsal.CERTIFIED_MAXIMUM_ITERATIONS) == {}
+    assert _options_delta(3) == {"maximum_iterations": 3}
+
+    for field, value in (
+        ("lagrangian_newton", False),
+        ("gauss_newton", True),
+        ("frozen_projector_line_search", False),
+        ("backtracking_factor", 1.0),
+        ("feasibility_tolerance", 1.0e-3),
+        ("newton_tangent_fraction_threshold", 0.99),
+    ):
+
+        def substitute(evidence: dict, field: str = field, value: object = value) -> None:
+            for record in (evidence["attempts"][0], evidence["cold_lane"]):
+                options = {**record["evidence"]["options"], field: value}
+                record["evidence"]["options"] = options
+                # The delta a forger publishes is TRUTHFUL: what the previous
+                # revision could not tell is a substituted route from a bounded
+                # budget, not a consistent receipt from an inconsistent one.
+                record["evidence"]["certified_options_delta"] = {
+                    name: published
+                    for name, published in options.items()
+                    if published
+                    != rehearsal.json_scalar(
+                        getattr(rehearsal.CERTIFIED_ROUTE_OPTIONS, name)
+                    )
+                }
+
+        root, evidence = _mutated_root(tmp_path, f"route_{field}", substitute)
+        _refuse_published(
+            root, evidence, match="ran a route other than the certified one"
+        )
+
+
+def test_the_solve_summary_is_the_one_its_published_iterates_derive(
+    tmp_path: Path,
+) -> None:
+    """A5-2: the feasibility gate may not read a scalar its own rows contradict.
+
+    ``maximum_feasibility_inf`` is ``max`` over the iterates the same receipt
+    publishes as ``solve.rows``, and nothing compared them: a receipt carrying
+    recorded iterates at 0.005 and 0.027 -- nine decades outside the tolerance
+    the claim is stated at -- sealed ``CLAIM_DISCHARGED`` beside a summary of
+    1e-14, so a reader who did the arithmetic the receipt invites got a
+    different answer from the validator that accepted it.  The same receipt
+    published ``iterations_run: 700`` with zero rows, ``latched: true`` beside
+    ``status_name: LINE_SEARCH_COLLAPSE`` and ``stored_pairs: -5``.
+    """
+
+    def infeasible_iterates(evidence: dict) -> None:
+        solve = evidence["attempts"][0]["evidence"]["solve"]
+        solve["rows"] = [
+            {"index": 0, "objective": 4.48e-6, "feasibility_inf": 0.005},
+            {"index": 1, "objective": 4.48e-8, "feasibility_inf": 0.027},
+        ]
+        solve["iterations_run"] = 2
+
+    root, evidence = _mutated_root(tmp_path, "iterates", infeasible_iterates)
+    _refuse_published(
+        root, evidence, match="its own recorded iterates do not carry"
+    )
+
+    def budget_without_iterates(evidence: dict) -> None:
+        evidence["attempts"][0]["evidence"]["solve"]["iterations_run"] = 700
+
+    root, evidence = _mutated_root(tmp_path, "no_iterates", budget_without_iterates)
+    _refuse_published(root, evidence, match="against 700 iterations run")
+
+    def ascending_objectives(evidence: dict) -> None:
+        solve = evidence["attempts"][0]["evidence"]["solve"]
+        solve["rows"] = list(reversed(solve["rows"]))
+
+    root, evidence = _mutated_root(tmp_path, "ascending", ascending_objectives)
+    _refuse_published(
+        root, evidence, match="not what its recorded objectives derive"
+    )
+
+    def latch_without_the_status(evidence: dict) -> None:
+        solve = evidence["attempts"][0]["evidence"]["solve"]
+        solve["status"] = int(launcher.ProjectedLbfgsStatus.LINE_SEARCH_COLLAPSE)
+        solve["status_name"] = launcher.ProjectedLbfgsStatus.LINE_SEARCH_COLLAPSE.name
+
+    root, evidence = _mutated_root(tmp_path, "latch_status", latch_without_the_status)
+    _refuse_published(root, evidence, match="publishes latched=True under status")
+
+    def invented_status(evidence: dict) -> None:
+        evidence["attempts"][0]["evidence"]["solve"]["status"] = 99
+
+    root, evidence = _mutated_root(tmp_path, "status", invented_status)
+    _refuse_published(root, evidence, match="not one the engine reports")
+
+    def negative_counter(evidence: dict) -> None:
+        evidence["attempts"][0]["evidence"]["solve"]["stored_pairs"] = -5
+
+    root, evidence = _mutated_root(tmp_path, "counter", negative_counter)
+    _refuse_published(root, evidence, match="which is not a count")
+
+    def an_iterate_without_its_feasibility(evidence: dict) -> None:
+        rows = evidence["attempts"][0]["evidence"]["solve"]["rows"]
+        rows[0] = {"index": 0, "objective": rows[0]["objective"]}
+
+    root, evidence = _mutated_root(
+        tmp_path, "row_without_feasibility", an_iterate_without_its_feasibility
+    )
+    _refuse_published(root, evidence, match="iterate 0 publishes no feasibility_inf")
+
+
+def test_a_published_cold_lane_must_be_a_draw_of_its_own(tmp_path: Path) -> None:
+    """A5-3/P5-11: ruling 18 bound the lane's DIRECTORY, not a cold DRAW.
+
+    ``cold_lane_authorized`` is the lane's only channel to ``PREREGISTERED`` and
+    therefore to the headline verdict, and the three forms round 4 published are
+    refused -- but a forger paid one ``mkdir``: an EMPTY ``cold-lane/`` beside a
+    record that produced nothing, and a ``cold-lane/`` holding a byte-copy of
+    ``attempts/attempt-1`` beside a copy of attempt 1's own record, both still
+    minted ``CLAIM_DISCHARGED``.
+
+    What separates a draw from a retelling is not its endpoint -- two honest
+    draws of the same problem at the same budget produced BITWISE IDENTICAL
+    worst iterates on the 5090 -- but its INVOCATION, its cache and the wall the
+    supervisor actually waited.  Ruling 17 is preserved in the other direction
+    below: an honest lane that really timed out publishes.
+    """
+
+    def the_lanes_invocation_is_attempt_ones(evidence: dict) -> None:
+        cold = evidence["cold_lane"]
+        cold["argv_sha256"] = evidence["attempts"][0]["argv_sha256"]
+        cold["gpu_memory"]["child_argv_sha256"] = cold["argv_sha256"]
+
+    root, evidence = _mutated_root(
+        tmp_path, "lane_copies_a_draw", the_lanes_invocation_is_attempt_ones
+    )
+    _refuse_published(root, evidence, match="copy of a draw rather than a draw")
+
+    # The whole published form: the lane's record IS attempt 1's, re-stamped.
+    copied = tmp_path / "lane_is_attempt_one"
+    staging = copied / "staging"
+    attempt = _synthetic_attempt(
+        staging / "attempts" / "attempt-1",
+        engine_wall=1.0,
+        terminal_objective=4.48e-8,
+        maximum_feasibility_inf=1.0e-14,
+    )
+    (staging / launcher.COLD_LANE_DIRECTORY).mkdir(parents=True)
+    shutil.copyfile(
+        staging / "attempts" / "attempt-1" / rehearsal.TERMINAL_COORDINATES_FILENAME,
+        staging
+        / launcher.COLD_LANE_DIRECTORY
+        / rehearsal.TERMINAL_COORDINATES_FILENAME,
+    )
+    lane = json.loads(json.dumps(attempt))
+    lane["attempt_index"] = 0
+    lane["artifact_relative_path"] = launcher.COLD_LANE_DIRECTORY
+    lane["outcome"] = "COMPLETED_WITHOUT_LATCH"
+    lane["timed_against_bar"] = False
+    lane["evidence"]["attempt_index"] = 0
+    lane["evidence"]["solve"] = _solve_payload(
+        latched=False, terminal_objective=4.48e-8, maximum_feasibility_inf=1.0e-14
+    )
+    lane["evidence"]["endpoint_ledger"] = _synthetic_ledger(gated=False)
+    lane["evidence"]["compilation_cache"] = _attempt_cache(warm=False)
+    _refuse_published(
+        copied,
+        _root_evidence(
+            verdict=launcher.VERDICT_CLAIM_DISCHARGED,
+            attempts=[attempt],
+            cold_lane=lane,
+        ),
+        match="copy of a draw rather than a draw",
+    )
+
+    # An EMPTY directory beside a lane that claims a timeout it did not wait
+    # for.  ``communicate(timeout=...)`` cannot raise before its timeout
+    # elapses, so a lane supervised for 105 s under a 3600 s timeout was never
+    # launched.
+    def a_timeout_nobody_waited_for(evidence: dict) -> None:
+        cold = _attempt("TIMEOUT", index=0)
+        cold["artifact_relative_path"] = launcher.COLD_LANE_DIRECTORY
+        cold["timed_against_bar"] = False
+        cold["evidence"] = None
+        evidence["cold_lane"] = cold
+        evidence["cold_lane_anomaly"] = launcher.cold_lane_anomaly(cold)
+
+    root, evidence = _mutated_root(
+        tmp_path, "unwaited_timeout", a_timeout_nobody_waited_for
+    )
+    _refuse_published(root, evidence, match="claims a timeout after")
+
+    # And the honest form of exactly that lane publishes: an infrastructure
+    # failure is not evidence about the claim (ruling 17), so it is recorded as
+    # an anomaly beside a discharged root rather than destroying it.
+    def an_honest_timeout(evidence: dict) -> None:
+        cold = _attempt("TIMEOUT", index=0)
+        cold["artifact_relative_path"] = launcher.COLD_LANE_DIRECTORY
+        cold["timed_against_bar"] = False
+        cold["evidence"] = None
+        cold["supervised_seconds"] = launcher.ATTEMPT_TIMEOUT_SECONDS + 1.0
+        evidence["cold_lane"] = cold
+        evidence["cold_lane_anomaly"] = launcher.cold_lane_anomaly(cold)
+
+    root, evidence = _mutated_root(tmp_path, "honest_timeout", an_honest_timeout)
+    published = launcher.publish_root(root / "staging", root / "final", evidence)
+    sealed = launcher.validate_root_artifact(published)
+    assert sealed["verdict"] == launcher.VERDICT_CLAIM_DISCHARGED
+    assert sealed["attempt_protocol"]["conformance"] == (
+        launcher.CONFORMANCE_PREREGISTERED
+    )
+    assert sealed["cold_lane_anomaly"]["outcome"] == "TIMEOUT"
+
+
+def test_publication_refuses_a_lowering_the_certified_route_does_not_select(
+    tmp_path: Path,
+) -> None:
+    """Ruling 16's kernel list, re-derived rather than asserted.
+
+    The list was checked for non-emptiness and for its own internal sum, so a
+    receipt publishing one invented kernel of one IR byte re-validated clean --
+    and so did the suite's own fixture, which published two kernel names this
+    repository never lowers.  Four reviewers refuted the word "re-derived" for
+    it in one round.  WHICH kernels are lowered is a function of the
+    configuration, so the list is now the campaign's own.
+    """
+
+    def invented_kernels(evidence: dict) -> None:
+        evidence["attempts"][0]["evidence"]["lowering_pre_gate"] = {
+            "rehearsal_iterations": rehearsal.CERTIFIED_MAXIMUM_ITERATIONS,
+            "certified_iterations": rehearsal.CERTIFIED_MAXIMUM_ITERATIONS,
+            "budget_independent": True,
+            "kernels": [
+                {"name": "not_a_real_kernel", "ir_bytes": 1, "while_operations": 0}
+            ],
+            "total_ir_bytes": 1,
+        }
+
+    root, evidence = _mutated_root(tmp_path, "invented_kernels", invented_kernels)
+    _refuse_published(
+        root, evidence, match="not the kernel set the certified configuration selects"
+    )
+
+    def a_kernel_dropped(evidence: dict) -> None:
+        lowering = evidence["attempts"][0]["evidence"]["lowering_pre_gate"]
+        kernels = lowering["kernels"][:-1]
+        lowering["kernels"] = kernels
+        lowering["total_ir_bytes"] = sum(kernel["ir_bytes"] for kernel in kernels)
+
+    root, evidence = _mutated_root(tmp_path, "kernel_dropped", a_kernel_dropped)
+    _refuse_published(
+        root, evidence, match="not the kernel set the certified configuration selects"
+    )
+
+    def a_kernel_of_no_ir(evidence: dict) -> None:
+        lowering = evidence["attempts"][0]["evidence"]["lowering_pre_gate"]
+        lowering["kernels"][0]["ir_bytes"] = 0
+        lowering["total_ir_bytes"] = sum(
+            kernel["ir_bytes"] for kernel in lowering["kernels"]
+        )
+
+    root, evidence = _mutated_root(tmp_path, "kernel_no_ir", a_kernel_of_no_ir)
+    _refuse_published(root, evidence, match="which is not a lowering")
+
+
+def test_publication_refuses_a_module_the_manifest_does_not_cover(
+    tmp_path: Path,
+) -> None:
+    """E5-4: the escape half of the custody block had no reader.
+
+    ``unmanifested_repository_modules`` is where a repository module that
+    resolved outside the manifest's roots LANDS -- the scikit-build-core
+    editable-finder class the whole block exists to catch -- and it was
+    shape-checked and read by nothing.  A certified launch imports nothing from
+    the tree but the three manifested roots: measured ``[]`` on both lanes of
+    the bounded 5090 smoke.
+    """
+
+    def an_unmanifested_module(evidence: dict) -> None:
+        sources = evidence["attempts"][0]["evidence"]["execution_sources"]
+        sources["unmanifested_repository_modules"] = [
+            {"module": "somewhere.else", "relative_path": "elsewhere/module.py"}
+        ]
+
+    root, evidence = _mutated_root(tmp_path, "unmanifested", an_unmanifested_module)
+    _refuse_published(
+        root, evidence, match="repository modules the manifest does not describe"
+    )
+
+
+def test_every_draw_is_a_child_this_supervisor_launched(tmp_path: Path) -> None:
+    """A5-8/A5-9: the telemetry, the device and the wall chain, all unread.
+
+    Each draw carries three independent traces of its own launch -- the digest
+    of the argv the supervisor used, the sampler's digest of the argv it
+    OBSERVED on the device, and the nested walls -- and none was read, so an
+    attempt could name another GPU, publish telemetry for another child, or
+    report a 1e-9 s attempt wall around a 187 s engine.
+    """
+
+    def another_device(evidence: dict) -> None:
+        evidence["attempts"][0]["gpu_memory"]["device_uuid"] = "GPU-0000dead"
+
+    root, evidence = _mutated_root(tmp_path, "another_device", another_device)
+    _refuse_published(root, evidence, match="was observed on GPU")
+
+    def telemetry_of_another_child(evidence: dict) -> None:
+        evidence["attempts"][0]["gpu_memory"]["child_argv_sha256"] = "0" * 64
+
+    root, evidence = _mutated_root(tmp_path, "another_child", telemetry_of_another_child)
+    _refuse_published(root, evidence, match="telemetry for a child other than")
+
+    def a_wall_inside_its_engine(evidence: dict) -> None:
+        evidence["attempts"][0]["evidence"]["timing_seconds"]["attempt_wall"] = 1.0e-9
+
+    root, evidence = _mutated_root(tmp_path, "wall_nesting", a_wall_inside_its_engine)
+    _refuse_published(root, evidence, match="timings do not nest")
+
+    def a_negative_phase(evidence: dict) -> None:
+        evidence["attempts"][0]["evidence"]["timing_seconds"]["bootstrap"] = -50.0
+
+    root, evidence = _mutated_root(tmp_path, "negative_phase", a_negative_phase)
+    _refuse_published(root, evidence, match="which is not a duration")
+
+    def a_cache_it_did_not_enter(evidence: dict) -> None:
+        cache = evidence["attempts"][0]["evidence"]["compilation_cache"]
+        cache["at_entry"] = _cache_state(0)
+
+    root, evidence = _mutated_root(tmp_path, "warm_lie", a_cache_it_did_not_enter)
+    _refuse_published(root, evidence, match="against a cache holding")
+
+
 # ------------------------------------------------- the round-4 forged receipts
 #
 # Six receipts were published through the REAL ``publish_root`` by the round-4
@@ -1512,18 +1973,33 @@ def test_round4_forgery_i_hollowed_custody_blocks_are_refused(tmp_path: Path) ->
     attempt AND on the cold lane.  Published and re-validated clean as
     ``CLAIM_DISCHARGED``: the shape tree stopped at the blocks it enumerated,
     and these three were not among them.
+
+    Each block is hollowed INDIVIDUALLY and refused by ITS OWN name.  The
+    previous form of this test hollowed all three and asserted one message, so
+    the walk raised at the first block and the other two hollowings were never
+    evaluated: the test proved one third of its docstring, which is the
+    finding class it exists to close.
     """
 
-    def hollow(evidence: dict) -> None:
-        for record in (evidence["attempts"][0], evidence["cold_lane"]):
-            record["evidence"]["execution_sources"] = {}
-            record["evidence"]["problem_identity"] = {
-                "bound": True,
-                "sha_is_binding": False,
-            }
-            record["evidence"]["lowering_pre_gate"] = {"budget_independent": True}
+    hollowed = {
+        "execution_sources": {},
+        "problem_identity": {"bound": True, "sha_is_binding": False},
+        "lowering_pre_gate": {"budget_independent": True},
+    }
+    for block, hollow_value in hollowed.items():
 
-    root, evidence = _mutated_root(tmp_path, "hollow_custody", hollow)
+        def hollow(evidence: dict, block: str = block, value: object = hollow_value) -> None:
+            for record in (evidence["attempts"][0], evidence["cold_lane"]):
+                record["evidence"][block] = value
+
+        root, evidence = _mutated_root(tmp_path, f"hollow_{block}", hollow)
+        _refuse_published(root, evidence, match=f"{block} is incomplete")
+
+    def hollow_all_three(evidence: dict) -> None:
+        for record in (evidence["attempts"][0], evidence["cold_lane"]):
+            record["evidence"].update(hollowed)
+
+    root, evidence = _mutated_root(tmp_path, "hollow_custody", hollow_all_three)
     _refuse_published(root, evidence, match="execution_sources is incomplete")
 
 
@@ -1577,6 +2053,27 @@ def test_round4_forgery_i2_a_null_execution_sources_block_is_refused(
 
     root, evidence = _mutated_root(tmp_path, "missing_engine", missing_engine)
     _refuse_published(root, evidence, match="modules the certified chain runs through")
+
+    # The two gates of ``_validate_execution_sources`` the four shape forms
+    # above never reach: the four legs are refused by the outer key-set check
+    # before the re-derivation runs at all, so without these the block's own
+    # manifest comparison and its empty-bound-set refusal are exercised by
+    # nothing in the suite.
+    def a_complete_block_binding_nothing(evidence: dict) -> None:
+        sources = evidence["attempts"][0]["evidence"]["execution_sources"]
+        sources["bound_modules"] = []
+
+    root, evidence = _mutated_root(tmp_path, "no_bound_modules", a_complete_block_binding_nothing)
+    _refuse_published(root, evidence, match="binds no manifest module")
+
+    def another_manifest(evidence: dict) -> None:
+        sources = evidence["attempts"][0]["evidence"]["execution_sources"]
+        sources["manifest"] = {**sources["manifest"], "entries_sha256": "0" * 64}
+
+    root, evidence = _mutated_root(tmp_path, "another_manifest", another_manifest)
+    _refuse_published(
+        root, evidence, match="execution-source manifest other than the campaign's"
+    )
 
 
 def test_round4_forgery_h_a_nulled_leaf_is_refused(tmp_path: Path) -> None:
@@ -1704,7 +2201,11 @@ def test_round4_forgery_k_a_cold_lane_aliased_onto_an_attempt_is_refused(
     After the lane was taken out of the verdict, ``cold_lane_authorized``
     became its ONLY channel to the conformance label and therefore to the
     headline verdict -- and the only check on it was that a record existed.  A
-    lane whose ``artifact_relative_path`` pointed at ``attempts/attempt-1`` was
+    The case this fix left open -- a ``cold-lane`` directory that EXISTS with
+    fabricated or copied content -- is
+    ``test_a_published_cold_lane_must_be_a_draw_of_its_own``.
+
+    A lane whose ``artifact_relative_path`` pointed at ``attempts/attempt-1`` was
     validated against attempt 1's own sealed array and passed, so a root with no
     ``cold-lane`` directory at all published ``CLAIM_DISCHARGED``.
     """
@@ -1803,6 +2304,239 @@ def test_round4_forgery_m_a_restated_relative_difference_is_refused(
 
     root, evidence = _mutated_root(tmp_path, "restated_column", restate_column)
     _refuse_published(root, evidence, match="relative differences are not the ones")
+
+
+# ------------------------------------------------------- the mutation kill set
+#
+# The round-5 review deleted ``_validate_lowering_pre_gate`` and
+# ``_validate_problem_identity`` outright, re-ran this file, and got 83 green:
+# ruling 16's two most complete re-derivations were protected by nothing, and 37
+# of the 82 refusal sites in the re-validation path were never reached by any
+# test.  A gate no test can kill is a gate the next revision can delete.
+#
+# So every named validator owns one forgery that ONLY it refuses.  Each case is
+# published twice through the real ``publish_root``: once whole, where the
+# refusal must name that validator's own words, and once with the validator
+# replaced by a no-op, where the same receipt must PUBLISH -- which is what
+# proves the refusal came from there and from nowhere else.  The meta-test below
+# requires the table to name every ``_validate_*`` function in the module, so a
+# validator cannot be added without one.
+
+
+def _forge_extra_claim_key(evidence: dict) -> None:
+    evidence["claim"]["A_KEY_NO_PRODUCER_EMITS"] = 1.0
+
+
+def _forge_untyped_chain_wall(evidence: dict) -> None:
+    evidence["timing_seconds"]["chain_wall"] = "not a number"
+
+
+def _forge_tmpfs_storage(evidence: dict) -> None:
+    evidence["supervisor"]["preflight"]["storage"][0]["filesystem_type"] = "tmpfs"
+
+
+def _forge_other_bytes(evidence: dict) -> None:
+    sources = evidence["attempts"][0]["evidence"]["execution_sources"]
+    sources["bound_modules"][0] = {**sources["bound_modules"][0], "sha256": "0" * 64}
+
+
+def _forge_widened_identity(evidence: dict) -> None:
+    identity = evidence["attempts"][0]["evidence"]["problem_identity"]
+    identity["relative_tolerances"] = dict.fromkeys(identity["relative_tolerances"], 1.0)
+
+
+def _forge_invented_kernel(evidence: dict) -> None:
+    lowering = evidence["attempts"][0]["evidence"]["lowering_pre_gate"]
+    lowering["kernels"] = [
+        {**lowering["kernels"][0], "name": "not_a_real_kernel"},
+        *lowering["kernels"][1:],
+    ]
+
+
+def _forge_another_route(evidence: dict) -> None:
+    for record in (evidence["attempts"][0], evidence["cold_lane"]):
+        options = {**record["evidence"]["options"], "lagrangian_newton": False}
+        record["evidence"]["options"] = options
+        record["evidence"]["certified_options_delta"] = {
+            name: value
+            for name, value in options.items()
+            if value
+            != rehearsal.json_scalar(getattr(rehearsal.CERTIFIED_ROUTE_OPTIONS, name))
+        }
+
+
+def _forge_contradicted_summary(evidence: dict) -> None:
+    solve = evidence["attempts"][0]["evidence"]["solve"]
+    solve["rows"] = [
+        {"index": 0, "objective": 4.48e-6, "feasibility_inf": 0.005},
+        {"index": 1, "objective": 4.48e-8, "feasibility_inf": 0.027},
+    ]
+    solve["iterations_run"] = 2
+
+
+def _forge_zeroed_distance_column(evidence: dict) -> None:
+    # The term has to MOVE for the column to be a lie: the fixture's two sides
+    # agree, so a column of zeros is the honest one there.
+    ledger = evidence["attempts"][0]["evidence"]["endpoint_ledger"]
+    ledger["terminal"] = {
+        **ledger["terminal"],
+        "observable.iota": _scaled("observable.iota", 1.0 + 1.0e-9),
+    }
+    ledger["pinned_term_gate"] = rehearsal.gate_endpoint_ledger(ledger)
+    ledger["relative_difference"] = dict.fromkeys(ledger["relative_difference"], 0.0)
+
+
+def _forge_another_device(evidence: dict) -> None:
+    evidence["attempts"][0]["gpu_memory"]["device_uuid"] = "GPU-0000dead"
+
+
+def _forge_lane_copying_a_draw(evidence: dict) -> None:
+    cold = evidence["cold_lane"]
+    cold["argv_sha256"] = evidence["attempts"][0]["argv_sha256"]
+    cold["gpu_memory"]["child_argv_sha256"] = cold["argv_sha256"]
+
+
+def _forge_truncated_record(evidence: dict) -> None:
+    del evidence["attempts"][0]["stdout_tail"]
+
+
+def _forge_outcome_its_evidence_denies(evidence: dict) -> None:
+    solve = evidence["attempts"][0]["evidence"]["solve"]
+    solve["latched"] = False
+    solve["status"] = int(launcher.ProjectedLbfgsStatus.ITERATION_LIMIT)
+    solve["status_name"] = launcher.ProjectedLbfgsStatus.ITERATION_LIMIT.name
+
+
+def _forge_another_timing_boundary(evidence: dict) -> None:
+    evidence["attempts"][0]["evidence"]["timing_boundary"] = "wall_clock"
+
+
+def _forge_infeasible_iterate(evidence: dict) -> None:
+    solve = evidence["attempts"][0]["evidence"]["solve"]
+    solve["maximum_feasibility_inf"] = 1.0e-9
+    solve["rows"] = _iterates(
+        terminal_objective=4.48e-8, maximum_feasibility_inf=1.0e-9
+    )
+
+
+def _forge_lane_on_the_cpu(evidence: dict) -> None:
+    evidence["cold_lane"]["evidence"]["runtime_identity"]["backend"] = "cpu"
+
+
+_VALIDATOR_KILLS: tuple[tuple[str, object, str], ...] = (
+    ("_validate_document_shape", _forge_extra_claim_key, "root.claim is incomplete"),
+    (
+        "_validate_leaf",
+        _forge_untyped_chain_wall,
+        "root.timing_seconds.chain_wall is not a number",
+    ),
+    (
+        "_validate_preflight_record",
+        _forge_tmpfs_storage,
+        "which plan section 11 refuses",
+    ),
+    (
+        "_validate_execution_sources",
+        _forge_other_bytes,
+        "bytes the manifest does not describe",
+    ),
+    (
+        "_validate_problem_identity",
+        _forge_widened_identity,
+        "problem identity is not the one its measured observables derive",
+    ),
+    (
+        "_validate_lowering_pre_gate",
+        _forge_invented_kernel,
+        "not the kernel set the certified configuration selects",
+    ),
+    (
+        "_validate_certified_route_options",
+        _forge_another_route,
+        "ran a route other than the certified one",
+    ),
+    (
+        "_validate_solve_telemetry",
+        _forge_contradicted_summary,
+        "its own recorded iterates do not carry",
+    ),
+    (
+        "_validate_endpoint_ledger_arithmetic",
+        _forge_zeroed_distance_column,
+        "relative differences are not the ones",
+    ),
+    ("_validate_supervised_launch", _forge_another_device, "was observed on GPU"),
+    (
+        "_validate_cold_lane_draw",
+        _forge_lane_copying_a_draw,
+        "copy of a draw rather than a draw",
+    ),
+    (
+        "_validate_attempt_shape",
+        _forge_truncated_record,
+        "supervised attempt record is incomplete",
+    ),
+    (
+        "_validate_attempt_outcome",
+        _forge_outcome_its_evidence_denies,
+        "is not the one its evidence derives",
+    ),
+    (
+        "_validate_attempt_record",
+        _forge_another_timing_boundary,
+        "describes a different run than the record carrying it",
+    ),
+    ("_validate_attempt", _forge_infeasible_iterate, "published an infeasible iterate"),
+    (
+        "_validate_cold_lane",
+        _forge_lane_on_the_cpu,
+        "not the 'gpu' the wall is claimed on",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    "validator, forge, match",
+    _VALIDATOR_KILLS,
+    ids=[case[0] for case in _VALIDATOR_KILLS],
+)
+def test_deleting_a_named_validator_turns_a_refusal_into_a_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    validator: str,
+    forge: object,
+    match: str,
+) -> None:
+    """Each named validator is the SOLE owner of one refusal this suite makes."""
+
+    root, evidence = _mutated_root(tmp_path, f"{validator}_whole", forge)
+    _refuse_published(root, evidence, match=match)
+
+    monkeypatch.setattr(
+        launcher, validator, lambda *arguments, **keywords: None, raising=True
+    )
+    deleted, evidence = _mutated_root(tmp_path, f"{validator}_deleted", forge)
+    published = launcher.publish_root(
+        deleted / "staging", deleted / "final", evidence
+    )
+    assert published.is_dir()
+
+
+def test_every_named_validator_is_covered_by_the_mutation_kill_set() -> None:
+    """A validator cannot be added without a forgery that proves it necessary.
+
+    The structural half of the fix: the table is asserted to be exactly the
+    module's own ``_validate_*`` surface, so the next revision cannot add a gate
+    the suite never reaches -- which is how two whole validators came to be
+    deletable with 83 tests green.
+    """
+
+    named = frozenset(
+        name
+        for name, value in vars(launcher).items()
+        if name.startswith("_validate_") and callable(value)
+    )
+    assert named == frozenset(case[0] for case in _VALIDATOR_KILLS)
 
 
 def _root_with_cold_lane(
@@ -2003,8 +2737,8 @@ def test_the_published_stop_rule_is_enforced_against_the_attempt_sequence(
         first = evidence["attempts"][0]
         evidence["attempts"] = [
             first,
-            {**first, "attempt_index": 2, "artifact_relative_path": "attempts/attempt-2"},
-            {**first, "attempt_index": 3, "artifact_relative_path": "attempts/attempt-3"},
+            _relaunched(first, 2),
+            _relaunched(first, 3),
         ]
         evidence["attempt_protocol"]["attempts_run"] = 3
         evidence["attempt_protocol"]["latch_count"] = 3
@@ -2025,9 +2759,8 @@ def test_the_published_stop_rule_is_enforced_against_the_attempt_sequence(
             },
         }
         evidence["attempts"] = [
-            {**miss, "attempt_index": index, "artifact_relative_path": f"attempts/attempt-{index}"}
-            for index in (1, 2, 3)
-        ] + [{**first, "attempt_index": 4, "artifact_relative_path": "attempts/attempt-4"}]
+            _relaunched(miss, index) for index in (1, 2, 3)
+        ] + [_relaunched(first, 4)]
         evidence["attempt_protocol"]["attempts_run"] = 4
 
     root, evidence = _mutated_root(tmp_path, "four_draws", four_draws)
@@ -2199,6 +2932,17 @@ def test_the_frozen_nested_shapes_are_the_ones_the_producers_write(
             dict(rehearsal.CPU_BOOTSTRAP_OBSERVABLES),
             problem_sha256="0" * 64,
             bootstrap_sha256="1" * 64,
+        )
+    )
+    # The lowered-kernel record, from the producer's own payload function.  The
+    # OUTER pre-gate record needs a bootstrapped case and two lowerings of the
+    # real objective, which is a 26 s job this file has no other reason to pay,
+    # so it is bound by execution in the rehearsal suite -- against the record a
+    # REAL rehearsal published -- by
+    # ``test_the_lowering_pre_gate_record_is_the_one_its_producer_writes``.
+    assert frozenset(launcher.LOWERED_KERNEL_SHAPE) == frozenset(
+        rehearsal.lowering_payload(
+            KernelLowering(name="evaluate", ir_bytes=1, while_operations=0)
         )
     )
     # The one producer that genuinely needs the pinned device: it queries the

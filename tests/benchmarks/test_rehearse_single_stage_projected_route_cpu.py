@@ -24,6 +24,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import benchmarks.rehearse_single_stage_projected_route_cpu as rehearsal
+import benchmarks.run_single_stage_projected_route_gpu_root as launcher
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -119,6 +120,40 @@ def test_rehearsal_exercises_the_whole_chain(published_rehearsal: Path) -> None:
         "lowering_pre_gate",
         "problem_identity",
     }
+
+
+def test_the_lowering_pre_gate_record_is_the_one_its_producer_writes(
+    published_rehearsal: Path,
+) -> None:
+    """The pre-gate's shapes and kernel list, bound to a REAL lowering.
+
+    Both shapes the GPU root's validator gates publication on were bound to
+    nothing but a hand-written fixture -- which invented two kernel names this
+    repository never lowers, totalling 12 288 IR bytes against a producer that
+    lowers six totalling 65 million -- and the validator accepted it.  Three
+    roles refuted the same sentence in one round.  The producer needs a
+    bootstrapped case and two lowerings of the real objective, which this file
+    already pays for once, so the binding lives here: the record a real
+    rehearsal published, against the frozen shapes and the frozen kernel list.
+
+    The SIZES are deliberately not frozen anywhere: the same six kernels lower
+    to totals that differ by thousands of bytes between two CPU processes and
+    again on the 5090, so a byte count would be a false reject waiting to
+    happen.
+    """
+
+    lowering = _evidence(published_rehearsal)["lowering_pre_gate"]
+    assert frozenset(lowering) == frozenset(launcher.LOWERING_PRE_GATE_SHAPE)
+    assert frozenset(lowering["kernels"][0]) == frozenset(
+        launcher.LOWERED_KERNEL_SHAPE
+    )
+    assert sorted(kernel["name"] for kernel in lowering["kernels"]) == sorted(
+        rehearsal.CERTIFIED_LOWERED_KERNEL_NAMES
+    )
+    assert lowering["total_ir_bytes"] == sum(
+        kernel["ir_bytes"] for kernel in lowering["kernels"]
+    )
+    assert all(kernel["ir_bytes"] > 0 for kernel in lowering["kernels"])
 
 
 def test_rehearsal_binds_the_route_module_it_certifies(

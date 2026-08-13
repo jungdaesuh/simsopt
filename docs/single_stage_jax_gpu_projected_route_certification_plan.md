@@ -1519,3 +1519,242 @@ constant edits the admissibility proof's own input between the reviews and the
 root. — The round-3 deferrals (`XLA_FLAGS`, the timed child's device UUID, the
 physics gate's terminal-side tie, numerics M2 and A1, the `--preflight-only`
 reason) are unchanged and their reasons are unchanged.
+
+### 12.11 Rulings on the fifth review round (two roles NO-GO)
+
+Round 5 reviewed `2f4244dca` (reviews at
+`~/simsopt-campaigns/projected-route-root-reviews-round5-20260813T140000Z/`).
+numerics-physics and protocol-receipt returned GO; reproducibility-engineering
+and adversarial-redteam returned NO-GO on **two CRITICALs and one MAJOR**. It is
+also the round in which the previous remediation genuinely worked: all four
+round-4 blocking findings are closed BY EXECUTION — the coverage meta-test was
+proven by mutation to detect an ABSENT shape, `execution_sources` refuses eleven
+escape shapes by name on both lanes, and six honest cold-lane outcomes that
+round 4 refused now publish. The findings below are what the review found
+underneath that.
+
+The pattern the round-4 ledger named reproduced for the fifth time: *each
+round's completeness fix stops exactly one level above the fact it protects.*
+Round 2 froze the top-level keys; round 3 froze one level down; round 4 froze a
+tree and left `execution_sources` with no shape; round 5 froze the SHAPE of
+`options` and re-derived its DELTA, and left the VALUE unconstrained. **Freezing
+a shape is not binding a value**, and this remediation is stated in those terms.
+
+**19. THE RECEIPT IS BOUND TO THE CERTIFIED ROUTE'S VALUES.** §1's claim is a
+claim about ONE route, and the campaign's whole substitution argument is that a
+bounded CPU rehearsal and the certified GPU run are the same configuration with
+`maximum_iterations` replaced (plan:339-346, `rehearse…:410-417`,
+`run_…:2576-2578`). The validator checked the options KEY SET against
+`CERTIFIED_ROUTE_OPTIONS.__dataclass_fields__` and re-derived the published
+DELTA from the published options — and then constrained that delta to nothing at
+all. Twenty-one of the twenty-four fields were free. Three roles reached the
+same defect from three entry points (forgery, substitution-soundness audit,
+plan-claim audit) and published, through the real `publish_root`, roots that
+seal `CLAIM_DISCHARGED` and re-validate clean while declaring
+`lagrangian_newton: false` — the reduced-Lagrangian Newton–CG arm that IS the
+route under certification — `gauss_newton: true`, `frozen_projector_line_search:
+false`, `backtracking_factor: 1.0` (a line search that never contracts) and
+`feasibility_tolerance: 1e-3` beside `claim.feasibility_tolerance: 1e-10`, each
+with a self-consistent delta. `UNSHAPED_LEAVES:624` declared "every value
+re-derived"; no value was re-derived.
+
+The ruling: `_validate_certified_route_options` compares **every published
+option value, field by field, to `CERTIFIED_ROUTE_OPTIONS`'s own literals**, and
+the only field a budget may replace is the budget. At the certified budget the
+permitted delta is therefore EMPTY; at a bounded one it is exactly
+`{"maximum_iterations": n}`. This is the enforcement the CPU rehearsal's suite
+has had since round 1 (`test_rehearse…:272`), ported to the publication gate.
+
+**20. A SUMMARY MAY NOT CONTRADICT THE ROWS IT SUMMARISES.** One of the five
+claim-bearing comparisons — the worst iterate against the feasibility bound —
+read the scalar `solve.maximum_feasibility_inf`, which in the producer is `max`
+over the very iterates the same receipt publishes as `solve.rows`. A receipt
+carrying recorded iterates at 0.005 and 0.027 — nine decades outside the
+tolerance §1 states the claim at — sealed `CLAIM_DISCHARGED` beside a summary of
+1e-14, so a reader doing the arithmetic the receipt invites gets a different
+answer from the validator that accepted it. The same receipt published
+`iterations_run: 700` with zero rows, `latched: true` beside `status_name:
+LINE_SEARCH_COLLAPSE`, and `stored_pairs: -5`; `status`, `status_name`,
+`iterations_run`, `monotone_descent`, `stored_pairs` and
+`terminal_feasibility_inf` had zero readers.
+
+The ruling: `_validate_solve_telemetry` **re-derives the summary from the rows**
+— `iterations_run == len(rows)`, the worst feasibility from the rows'
+`feasibility_inf`, `monotone_descent` from the rows' objectives, `status_name`
+from the engine's own enumeration and `latched` from that name, plus counts that
+are counts. Every identity was verified EXACTLY against both lanes of a real
+5090 receipt and a live CPU solve before it was made a gate, so it cannot burn
+an honest root. Where a nonfinite value makes an identity un-re-derivable from
+the published bytes (`json_scalar` writes null and the raw value is gone), the
+check admits every reading the producer could have written rather than guessing
+one.
+
+**21. A CLAIMED COLD DRAW IS A DRAW.** Ruling 18 bound the cold-lane
+DIRECTORY's existence, not a cold draw, and `cold_lane_authorized` remains the
+lane's only channel to `PREREGISTERED` and therefore to the headline verdict. A
+forger paid one `mkdir`: an EMPTY `cold-lane/` beside a `TIMEOUT` record, and a
+`cold-lane/` holding a byte-copy of `attempts/attempt-1` beside a copy of
+attempt 1's own record, both minted `CLAIM_DISCHARGED`.
+
+What separates a draw from a retelling is **not its endpoint**: two honest draws
+of the same problem at the same budget produced BITWISE IDENTICAL worst iterates
+on the 5090 (measured, both lanes of the round-4 smoke), so demanding a
+different terminal state would burn an honest root. It is the INVOCATION, the
+CACHE and the WALL. `_validate_cold_lane_draw` requires the lane's invocation
+digest to be no timed attempt's — the supervisor launches every child at its own
+index into its own directory — and requires the lane not to have run warm, now
+that `warm` is itself re-derived from the entry count the child sampled before
+it traced anything. `_validate_supervised_launch` requires every draw's device
+telemetry to be an observation OF THAT CHILD (`child_argv_sha256 ==
+argv_sha256`), on the device §1.2 names, and requires a record claiming a
+timeout to have waited the timeout it publishes — `communicate(timeout=…)`
+cannot raise before its timeout elapses. **Ruling 17 is preserved in both
+directions**, and the suite pins it: a lane that really timed out publishes with
+its anomaly recorded beside a discharged root.
+
+**22. EVERY NAMED VALIDATOR OWNS A FORGERY THAT KILLS IT.** protocol-receipt
+deleted `_validate_lowering_pre_gate` and `_validate_problem_identity` outright
+and the launcher suite stayed 83/83 green; line-trace coverage showed **37 of
+the 82 refusal sites in the re-validation path are never reached by any test**,
+and the six named round-4 forgery tests all refuse at the outer shape frozenset
+before reaching one of ruling 16's own gates. Ruling 16's re-derivations were
+therefore protected by nothing: a gate no test can kill is a gate the next
+revision can delete.
+
+The ruling: `_VALIDATOR_KILLS` pairs **every** `_validate_*` function in the
+launcher with one forgery that ONLY it refuses, and each case is published twice
+through the real `publish_root` — once whole, where the refusal must name that
+validator's own words, and once with the validator replaced by a no-op, where
+the same receipt must PUBLISH. The structural half is
+`test_every_named_validator_is_covered_by_the_mutation_kill_set`, which asserts
+the table is exactly the module's `_validate_*` surface, so a validator cannot
+be added without a forgery that proves it necessary. The forgery tests are
+narrowed to the gate they claim: scenario I hollows each custody block
+INDIVIDUALLY and asserts each block's own refusal, and scenario I2 gains the two
+gates of `_validate_execution_sources` no test reached — the manifest comparison
+and the empty-bound-set refusal.
+
+**23. RULING 16'S KERNEL LIST, RE-DERIVED.** All four roles refuted the same
+clause: `lowering_pre_gate` "has its budgets, its kernel list and its IR total
+re-derived" was false for the kernel list, which was checked for non-emptiness
+and for its own internal sum. numerics-physics executed the real CPU lowering (6
+kernels, 65 204 569 IR bytes) and showed the shipped fixture's two invented
+kernels and 12 288 bytes are ACCEPTED. WHICH kernels a configuration lowers is a
+function of that configuration — `evaluate_carried` exists only above a
+projector refresh period of one, `frozen_retract` only under the frozen-projector
+line search, `lagrangian_newton_direction` only under the reduced-Lagrangian arm
+— so the list IS a statement about the route and is now re-derived against
+`CERTIFIED_LOWERED_KERNEL_NAMES`, the campaign's own, bound to the real producer
+BY EXECUTION in the rehearsal suite against a record a real rehearsal published.
+Their SIZES are deliberately not frozen: the same six kernels lowered 65 204 569
+bytes on CPU here, 65 207 733 in another CPU process and 65 200 869 on the 5090,
+so a byte count would be a false reject waiting to happen — which is why §6.1's
+substantive gate (identical IR at both budgets) runs in the child, where one
+process lowers both sides.
+
+#### Minors closed in the same remediation
+
+`execution_sources.unmanifested_repository_modules` — the half of the custody
+block that catches the scikit-build-core editable-finder class it exists for —
+was shape-checked and read by nothing; a certified launch imports nothing from
+the tree but the three manifested roots (measured `[]` on both lanes of the
+bounded 5090 smoke and on CPU), so a non-empty list is refused by name
+(reproducibility E5-4, adversarial A5-4). — The timing chain was not a chain:
+`engine_wall <= supervised_seconds` was enforced while `attempt_wall` sat
+outside both and the three phase durations were unconstrained, so a receipt
+could publish `attempt_wall: 1e-9` around a 187 s engine beside three `-50.0`
+phases; the three measurements nest and each phase is a duration (adversarial
+A5-8, first half). — Every attempt's `gpu_memory.device_uuid` was unread, so an
+attempt could name another device beside a supervisor pinned to §1.2's; it is
+compared to `GPU_UUID`, which is also the cheap half of the timed child's device
+deferral (adversarial A5-9, protocol-receipt P5-6). — `warm` was a published
+boolean beside the cache state it is a function of; it is re-derived from
+`at_entry.entry_count` on both lanes, which is what gives the cold lane's own
+"may not have run warm" refusal something to stand on (adversarial A5-7, first
+half). — The one nullable numeric leaf `_validate_attempt_record` reads
+unguarded, `terminal_objective`, reached `>` as an unnamed `TypeError` on a
+`LATCHED` record; it is refused by name (reproducibility E5-3). — The preflight's
+temporary-directory refusal reported the declared/probed pair of the OTHER field
+and read as self-contradictory to a third party; it names the pair it checked
+(protocol-receipt P5-10). — `LOWERED_KERNEL_SHAPE` is bound to
+`lowering_payload` by execution in the launcher suite and the whole
+`LOWERING_PRE_GATE_SHAPE` record to `measure_lowering_pre_gate` in the rehearsal
+suite, where a real rehearsal already pays for the bootstrap and the two
+lowerings (reproducibility E5-2, protocol-receipt P5-3, numerics N5-5). — Three
+`UNSHAPED_LEAVES` reasons were false or stale and are corrected in place:
+`options` ("every value re-derived", refuted by ruling 19 and now true of ruling
+19's own comparison), `endpoint ledger.native` and its gated twin (true for a
+pre-registered attempt, false for the cold lane, which shares the node and by
+ruling 17's design never reaches `certify_native_reference`), and `solve.rows`
+("§6 gates none of it", while §6's feasibility gate is a projection of exactly
+those rows) (protocol-receipt P5-4, reproducibility E5-7, numerics N5-7). —
+Three numerics documentation defects: ruling 12's refuted "a fraction of its
+band" sentence still stood verbatim in the module comment attached to the
+constant it describes and is corrected there (N5-1); the N11 closure attached
+the right number (1.0206e-11) to a formula that is false by seven decades
+(`rel * NATIVE_TARGET_OBJECTIVE = 4.482e-19`) and contradicted itself two lines
+later — the honest ceiling is the derived ceiling PLUS the cross-executable
+RELATIVE tolerance, `2.0610196e-13 + 1e-11` (N5-3); and `_validate_attempt`'s
+docstring said "four comparisons" over a list of five.
+
+**Deferred, with reasons.** *§12.10's "four decades under the tightest banked
+margin on that term (26.6x)" is 3.206 decades, measured* (numerics N5-2): the
+figure is wrong and the conclusion it supports — that recomputing the gate
+against the frozen literals cannot flip a verdict — holds by 3.2 decades on the
+binding arm. Correcting a decimal in a closed ruling's prose is the one edit
+class §9 makes expensive between the reviews and the root, and the measurement
+is recorded here instead: **3.206 decades on Q2, 2.371 on Q1**. — *`source_snapshot`
+is re-derived by nothing and not bound to the artifact tree* (adversarial A5-6,
+protocol-receipt N4-2's X11, unchanged from §12.10): tying it means re-deriving
+`publish_immutable_snapshot`'s manifest over the sealed tree inside the
+validator, which is new code on the publication path between the reviews and the
+root; the artifact manifest already covers every byte after publication and this
+is a forgery-only exposure. — *No floor under the certified wall* (adversarial
+A5-8, second half): a latch whose whole certified wall is `1e-300 s` seals under
+a 287.30 s bar. A floor is a new frozen constant about GPU compile time, which
+is exactly the class numerics-physics recommends against introducing between the
+reviews and the root; the wall's halves, their nesting and the supervised wall
+are all bound, so the residue is a receipt whose own three measurements agree on
+an impossible number. — *The sealed terminal state is not bound to the problem's
+dimension* (adversarial A5-10): the array's length is the joint DOF count, which
+the receipt does not otherwise carry, so binding it means a new frozen constant
+about the case; the digest, the array and the ledger's terminal side are each
+bound to their own owners. — *`endpoint_agreement.terminal_feasibility_inf` and
+`feasibility_absolute_tolerance` are unread* (A5-10, second half): the claim's
+feasibility gate reads the solve summary, which ruling 20 now binds to the
+iterates; the agreement block's copy is a second telling with no reader, and
+giving it one means deciding which of the two is authoritative — a contract
+question, not a gate. — *`interpreter_installation_modules.roots` is unread and
+would close the `.venv-qn-gpu` carry-over* (reproducibility E5-4, second half):
+`roots` names hidden top-level directories INSIDE the checkout, so a venv
+outside the tree publishes `{count: 0, roots: []}` and is equally honest; the
+field cannot discharge an interpreter pin, and pinning `.venv-qn-gpu` would
+refuse an equally honest launch. — *The launcher cannot be imported at all when
+the engine resolves outside the tree, and the failure is a bare `ValueError` at
+module scope* (reproducibility E5-5): fail-closed, before argv is parsed, at no
+root cost; converting it means module-scope error handling on the import path
+the root itself runs. — *`bound_modules` is a function of the import graph, so
+two honest attempts may publish different custody lists* (E5-6): both are
+honest, the three chain modules are pinned by name, and a superset rule is what
+keeps the block from being a false-reject surface. — *`UNMANIFESTED_MODULE_SHAPE`
+is bound to no producer by execution* (protocol-receipt P5-3, third shape): the
+producer emits an element only when a repository module resolves outside the
+manifest's roots, which no honest launch does — and ruling 19's minor now
+refuses any receipt that carries one, so the shape is exercised in the refusal
+path rather than in an accepted receipt. — *Ruling 17's "never validated for the
+CLAIM" is inexact: a sixth comparison against `NATIVE_TARGET_OBJECTIVE` runs on
+the lane* (protocol-receipt P5-5): proven unreachable by an honest draw — the
+engine breaks at the first iterate at or below the target and returns that
+point's objective — and it is now guarded against the null reading (E5-3), so
+the sentence's residue is one comparison an honest lane cannot fail. — *The
+attempt's compilation-cache directory is unbound* (P5-7), *`chain_wall` and the
+ledger's superset rule* (P5-8). — *Five integer quantities are read through
+`int(...)`, which truncates a non-integral value the `_NUMBER` leaf admits*
+(numerics N5-6): no producer writes a non-integral iteration count or IR size
+(verified by execution), a receipt claiming 700.9 certified iterations describes
+nothing physical, and an integrality leaf kind is new shape-tree vocabulary
+between the reviews and the root. — The round-3 and round-4 deferrals
+(`XLA_FLAGS`, the preflight's fstype self-reference, the physics gate's
+terminal-side tie, AL5b/H06, the fixture's storage record, numerics N7, N13,
+N14, M2 and A1, the `--preflight-only` reason) are unchanged and their reasons
+are unchanged.

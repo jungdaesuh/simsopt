@@ -242,15 +242,20 @@ def equal_minima_raw_term_ceiling(native_value: float) -> float:
     SECOND CAVEAT, on what the ceiling bounds.  ``Phi <= NATIVE_TARGET_OBJECTIVE``
     is the ENGINE's latch condition, while the gate measures the STANDALONE
     re-evaluation of the same endpoint, and section 5 certifies those equal only
-    to ``DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE`` (1e-11 relative).  So the
-    honest ceiling for a term whose own ceiling is tighter than that -- only
-    ``weighted_total``, at 2.061e-13 -- is the cross-executable tolerance
-    itself: ``rel * NATIVE_TARGET_OBJECTIVE = 1.0206e-11``, which is 49.52x
-    (1.695 decades) ABOVE the stated figure.  ``certify_agreement``'s absolute
-    floor is a ``max`` and not an addend, and 4.482e-19 > 1e-19, so the floor is
-    inert in that arithmetic.  Nothing shipped moves: ``weighted_total``'s band
-    is 1e-6, still inert by 9.80e4x against the corrected ceiling.  It is
-    recorded so a later revision does not place a band just under 2.061e-13 and
+    to ``DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE`` (1e-11 relative).  This
+    function returns a RELATIVE ceiling, so the honest ceiling for a term whose
+    own ceiling is tighter than that tolerance -- only ``weighted_total``, at
+    2.061e-13 -- is its own ceiling PLUS the cross-executable relative
+    tolerance: ``2.0610196e-13 + 1e-11 = 1.0206102e-11``, which is 49.52x
+    (1.695 decades) ABOVE the derived figure.  (The previous statement of this
+    paragraph wrote that sum as ``rel * NATIVE_TARGET_OBJECTIVE``, which is
+    4.482e-19 -- seven decades away from the value it was attached to, and
+    contradicted by this paragraph's own next sentence.)
+    ``certify_agreement``'s absolute floor is a ``max`` and not an addend, and
+    ``rel * NATIVE_TARGET_OBJECTIVE = 4.482e-19 > 1e-19``, so the floor is inert
+    in that arithmetic.  Nothing shipped moves: ``weighted_total``'s band is
+    1e-6, still inert by 9.80e4x against the corrected ceiling.  It is recorded
+    so a later revision does not place a band just under 2.061e-13 and
     manufacture a false reject out of cross-executable noise.
     """
 
@@ -390,8 +395,14 @@ NATIVE_ENDPOINT_PINNED_TERMS: Final = {
 # against their own gate band, everything else against the constant below.
 # 1e-11 sits 512x above the worst measured relative deviation and five decades
 # under the tightest relative band any pinned term carries (1e-6, on
-# ``observable.volume``), so it can neither false-reject an honest lane nor let
-# a forged reference widen a gate by a fraction of its band.
+# ``observable.volume``), so it cannot false-reject an honest lane.  It does NOT
+# bound how far a forged reference could widen a gate: for the three
+# ``absolute`` terms the native-side tolerance IS the gate band, so a forged
+# native moves the admissible window by a FULL band (measured: 1.000 band units
+# for those three, 1e-7 or 1e-5 for the other seven).  What refuses those
+# forgeries is ``gate_endpoint_ledger_against_frozen_native``, which substitutes
+# the frozen literals for the published native side and never reads the
+# reference the artifact publishes.
 NATIVE_ENDPOINT_REFERENCE_RELATIVE_TOLERANCE: Final = 1.0e-11
 
 REQUIRED_ENVIRONMENT: Final = {
@@ -820,6 +831,27 @@ def bind_problem_identity(case: BoundCase) -> dict[str, JsonValue]:
             f"{json.dumps(evidence['checks'], sort_keys=True)}"
         )
     return evidence
+
+
+# The kernels the CERTIFIED configuration selects, by name.  Which kernels are
+# lowered at all is a function of the options -- ``evaluate_carried`` exists
+# only while ``projector_refresh_period > 1``, ``frozen_retract`` replaces
+# ``exact_retract`` only while ``frozen_projector_line_search`` is set, and
+# ``lagrangian_newton_direction`` only while the reduced-Lagrangian arm is the
+# direction model -- so this list IS a statement about the route, and it is the
+# one part of the lowering record a reader of sealed bytes can re-derive.  The
+# SIZES are not: the same six kernels lowered 65 204 569 IR bytes on CPU here,
+# 65 207 733 in another CPU process and 65 200 869 on the 5090, so a frozen byte
+# count would be a false reject waiting to happen.  Bound to the producer BY
+# EXECUTION in the rehearsal suite, which runs the real chain.
+CERTIFIED_LOWERED_KERNEL_NAMES: Final = (
+    "admit_pair",
+    "apply_metric",
+    "evaluate",
+    "evaluate_carried",
+    "frozen_retract",
+    "lagrangian_newton_direction",
+)
 
 
 def measure_lowering_pre_gate(case: BoundCase, iterations: int) -> dict[str, JsonValue]:
@@ -1581,6 +1613,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 __all__ = (
     "BOOTSTRAP_BINDING_RELATIVE_TOLERANCES",
     "BOOTSTRAP_FEASIBILITY_ABSOLUTE_TOLERANCE",
+    "CERTIFIED_LOWERED_KERNEL_NAMES",
     "CERTIFIED_MAXIMUM_ITERATIONS",
     "CERTIFIED_ROUTE_OPTIONS",
     "CPU_BOOTSTRAP_OBSERVABLES",
