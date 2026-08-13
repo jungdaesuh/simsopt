@@ -2396,6 +2396,11 @@ def test_diag3_snapshot_closure_is_frozen_against_later_diag2_growth() -> None:
         # unaffected: it never saw them.
         "benchmarks/regenerate_execution_source_manifest.py",
         "benchmarks/rehearse_single_stage_projected_route_cpu.py",
+        "benchmarks/run_single_stage_projected_route_gpu_root.py",
+        # The shipped projected-route example landed in the same freeze as the
+        # GPU launcher, before the root opened, so the certified bytes and the
+        # shipped bytes are one tree.  It is a new file too.
+        "examples/jax/3_Advanced/single_stage_boozer_vacuum_projected_route.py",
         "src/simsopt_jax/geo/optimizers/dense_tangent_curvature.py",
         "src/simsopt_jax/geo/optimizers/lagrangian_newton_cg.py",
         "src/simsopt_jax/geo/optimizers/projected_lbfgs.py",

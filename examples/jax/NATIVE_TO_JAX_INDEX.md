@@ -48,7 +48,7 @@ Latest authority evidence:
 | `examples/2_Intermediate/wireframe_rcls_with_ports.py` | `examples/jax/2_Intermediate/wireframe_rcls_with_ports.py` | eligible / adapter | none | cpu: jax_region, gpu: jax_region | bounded | pass (`20260729T005942Z-5ade9aee`) |
 | `examples/3_Advanced/coil_forces.py` | `examples/jax/3_Advanced/coil_forces.py` | eligible / adapter | none | cpu: jax_region, gpu: jax_region | bounded | pass (`20260729T005942Z-5ade9aee`) |
 | `examples/3_Advanced/optimize_qs_and_islands_simultaneously.py` | — | blocked | SPEC, VMEC | — | — | not run |
-| `examples/3_Advanced/single_stage_boozer_vacuum_optimization.py` | `examples/jax/3_Advanced/single_stage_boozer_vacuum_optimization.py` | eligible / adapter | none | cpu: jax_region, gpu: jax_region | bounded | pass (`20260729T005942Z-5ade9aee`) |
+| `examples/3_Advanced/single_stage_boozer_vacuum_optimization.py` | `examples/jax/3_Advanced/single_stage_boozer_vacuum_optimization.py` | eligible / adapter | none | cpu: jax_region, gpu: jax_region | native_default | not run |
 | `examples/3_Advanced/single_stage_optimization.py` | `examples/jax/3_Advanced/single_stage_optimization.py` | hybrid / hybrid | VMEC | cpu: host_and_jax_slice, gpu: jax_slice_only | not_applicable | unsupported |
 | `examples/3_Advanced/single_stage_optimization_finite_beta.py` | — | blocked | VMEC | — | — | not run |
 | `examples/3_Advanced/stage_two_optimization_finitebuild.py` | `examples/jax/3_Advanced/stage_two_optimization_finitebuild.py` | eligible / adapter | none | cpu: jax_region, gpu: jax_region | bounded | pass (`20260729T005942Z-5ade9aee`) |

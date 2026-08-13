@@ -1,6 +1,7 @@
 # Projected-route certification protocol — single-stage VMEC-free, GPU beats native
 
-Status: PHASE 1 LANDED (CPU machinery), phases 2–4 NOT STARTED.
+Status: PHASES 1–3 LANDED (CPU machinery, GPU attempt-protocol launcher,
+shipped example), phase 4 NOT STARTED. No root has been opened.
 Route under certification: `projected-lagrangian-newton-cg`
 (`src/simsopt_jax/geo/optimizers/projected_lbfgs.py`, entry
 `run_projected_lbfgs`), configuration frozen at
@@ -327,23 +328,60 @@ reads the artifact that subprocess published.
 
 ---
 
-## 9. Phases 2–4 (NOT STARTED)
+## 9. Phases 2–4
 
 The order below is the execution order, and it is binding: the examples script
 lands **before** the root opens (§12.6).
 
-**Phase 2 — GPU lane.** Persistent-cache preflight and the warm/cold pair of
-§3; the attempt protocol of §4 wired into a supervised launcher (reuse
-`run_single_stage_native_equivalent_quality_campaign.py`'s supervisor, GPU
-monitor and atomic publication rather than a new launcher); artifact schema
-extended from the rehearsal's with `attempts[]`, the cache evidence, the GPU
-runtime identity, and the sealed source snapshot of §12.4.
+**Phase 2 — GPU lane. LANDED** as
+`benchmarks/run_single_stage_projected_route_gpu_root.py`. Persistent-cache
+preflight and the warm/cold pair of §3; the attempt protocol of §4; artifact
+schema extended from the rehearsal's with `attempts[]`, the cache evidence, the
+GPU runtime identity, and the sealed source snapshot of §12.4.
 
-**Phase 3 — examples landing.** The route lands as an `examples/jax/3_Advanced`
-script reusing `build_projected_lbfgs_kernels`; the shipped mirror still uses
-the old nested formulation, and the claim's wording ("the examples workload")
-is not literally true until it does. Landing it here — not after the root —
-puts the certified bytes and the shipped bytes in one freeze.
+Two shapes the build had to settle. **Each attempt is its own process**: a
+second attempt run in the launcher's process inherits the first's `jax.jit`
+caches and reports a compile of milliseconds, and the claim is discharged by
+the first LATCHING attempt's wall, which is not necessarily the first
+attempt's. And **the cold lane runs first against the empty cache**, so one run
+is both the honest cold measurement and the process that primes what the timed
+attempts load — the supervisor reuses the campaign's `publish_immutable_snapshot`,
+its `_enumerated_source_roots` role bindings and its PID-and-device-bound GPU
+memory monitor, while the frozen configuration, the identity gate, the lowering
+pre-gate, the endpoint ledger and the sealing primitives are imported from the
+rehearsal module rather than re-spelled. Re-validation RECOMPUTES rather than
+reads back: the verdict from the attempts, the sealed 0555/0444 modes from the
+tree, the pinned-term verdicts from the ledger's own published terms, and the
+claim's quality quantity as a NUMBER — the recorded `objective_target` and the
+recorded terminal objective are both compared against `NATIVE_TARGET_OBJECTIVE`,
+because `OBJECTIVE_TARGET_REACHED` is the optimizer reporting against whatever
+target it was configured with, not against this claim's. A child whose stdout
+did not carry its canonical document is classified `PROTOCOL_FAILURE` and
+published; it does not escape the outcome space and abort the root unpublished.
+
+Measured on the RTX 5090 at a bounded three-iteration budget (not a root):
+cold compile 13.8 s and solve 43.1 s against warm compile 3.9 s and solve
+9.9 s, the two processes agreeing on Φ and on every recorded feasibility.
+
+**Phase 3 — examples landing. LANDED** as
+`examples/jax/3_Advanced/single_stage_boozer_vacuum_projected_route.py`, a new
+script beside the nested mirror rather than a rewrite of it. The mirror's value
+is that it reproduces the native example term for term — its correctness file
+asserts that numerically against `examples/3_Advanced/` at 1e-12 relative — and
+switching its formulation in place would have deleted that evidence to satisfy
+a wording point. The new script runs the certified configuration on the same
+audited workload, and
+`tests/jax/examples/test_single_stage_boozer_vacuum_projected_route_example.py`
+pins its options to `CERTIFIED_ROUTE_OPTIONS` field for field so the two
+spellings cannot drift.
+
+It is deliberately **not** registered in `examples/jax/manifest.json`. A `ready`
+manifest entry is executed by the tree's strict-transfer-guard lane, and the
+route's host-driven loop reads device scalars with `float()` and `bool()`,
+which that guard refuses; registering it would require re-plumbing the engine's
+host boundary through `simsopt_jax.runtime.host_boundary`, and the engine under
+certification must not change between the reviews and the one-shot root. The
+registration is the first item of phase 4's follow-on work, not of this freeze.
 
 **Phase 4 — refreeze, reviews and root.** Refreeze (§10, which the examples
 file makes mandatory) → four independent GO reviews under a fresh reviews root
@@ -389,8 +427,13 @@ A1/A1b incident cost a crucible cycle).
 
 6. Validate all suites green, then commit.
 
-At this freeze: **612 entries** (benchmarks 115, examples 156, src 327, plus 14
-non-broad qualified paths).
+At this freeze: **614 entries** (benchmarks 116, examples 157, src 327, plus 14
+non-broad qualified paths). The two new members are phase 2's GPU launcher
+(`benchmarks/run_single_stage_projected_route_gpu_root.py`) and phase 3's
+shipped example
+(`examples/jax/3_Advanced/single_stage_boozer_vacuum_projected_route.py`); both
+entered the DIAG2 allowlist by the step-4b rule, and the previous freeze was 612
+(benchmarks 115, examples 156).
 
 Do **not** touch the DIAG5 plan doc. Its prose "591 paths (113 `benchmarks`,
 156 `examples`, 322 `src`)" is a historical statement about the DIAG5 freeze
@@ -414,6 +457,16 @@ path-membership based, so a refreeze would invalidate every historical
 artifact. Widening the test's error matcher was also vetoed (mistake-book
 P154): the alternation blinds the ordered count/digest legs, and the count leg
 is the one that fires first for a new file.
+
+**Step 4c — editing a file listed in `DIAG2_FROZEN_NUMERICAL_ENTRIES`.** Those
+eleven paths are pinned by exact digest, and the pins name the DIAG1 tree, not
+the live one — several already differ from the checked-out bytes. Moving one
+therefore does **not** mean refreezing the pin (see the veto above); the
+designed remedy is `_DIAG2_ARCHIVED_FROZEN_SOURCE` in
+`tests/benchmarks/_diag2_fixture.py`, which retains the historical bytes
+(zlib + base85, keyed by path, its digest asserted against the pin) so the
+contract suite keeps replaying DIAG1's tree while the live file moves on. Add
+the entry, keep the mapping sorted by path, then continue to step 5.
 
 ---
 
@@ -487,8 +540,10 @@ has moved on; an import-hash list points at bytes that no longer exist.
 
 Resolved: the fail-closed regenerator is
 `benchmarks/regenerate_execution_source_manifest.py` (§10 step 5). Promoting it
-made it a member of the manifest it writes, which is why this freeze is 612 and
-not 611.
+made it a member of the manifest it writes, which is why the phase-1 freeze
+came out at 612 and not 611. The current freeze is §10's 614; this paragraph
+records why the count moved when the regenerator landed, and is not a second
+statement of what the count is.
 
 ### 12.6 Examples landing order — before the root
 
@@ -497,3 +552,27 @@ claim's wording ("the audited full single-stage VMEC-free examples workload")
 is only literally true once the script ships, and landing it first puts the
 certified bytes and the shipped bytes in one freeze instead of forcing a
 post-certification refreeze that no review covered.
+
+### 12.7 Phase-3 examples shape and manifest registration — ACCEPTED
+
+Both halves of §9's phase-3 paragraph are ruled on, not merely described:
+
+* **A new file beside the nested mirror, not a rewrite of it — ACCEPTED.** The
+  mirror's value is evidence: its correctness file asserts, numerically at 1e-12
+  relative, that it reproduces `examples/3_Advanced/` term for term. Switching
+  its formulation in place would have deleted that evidence to satisfy a wording
+  point, and the wording is satisfied by shipping the coupled formulation
+  alongside it. The two spellings are held together by
+  `tests/jax/examples/test_single_stage_boozer_vacuum_projected_route_example.py`,
+  which pins the new script's options to `CERTIFIED_ROUTE_OPTIONS` field for
+  field.
+* **Deferral of `examples/jax/manifest.json` registration to phase 4 —
+  ACCEPTED.** A `ready` manifest entry is executed by the tree's
+  strict-transfer-guard lane, which refuses the `float()`/`bool()` device reads
+  the route's host-driven loop performs. Registering it now would require
+  re-plumbing the engine's host boundary through
+  `simsopt_jax.runtime.host_boundary` — a change to the engine under
+  certification, landing between the four independent reviews and the one-shot
+  root, which §9 forbids. The registration is therefore phase 4 follow-on work,
+  and the shipped script's execution evidence at this freeze is its own contract
+  test, not a manifest lane.

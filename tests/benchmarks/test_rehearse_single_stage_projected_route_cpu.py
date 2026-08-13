@@ -301,11 +301,11 @@ def test_environment_gate_names_the_variable_that_differs() -> None:
 def test_nonfinite_evidence_scalars_become_null() -> None:
     """Canonical JSON refuses NaN, and the protocol writes null instead."""
 
-    assert rehearsal._json_scalar(float("nan")) is None
-    assert rehearsal._json_scalar(float("inf")) is None
-    assert rehearsal._json_scalar(True) is True
-    assert rehearsal._json_scalar(3) == 3
-    assert rehearsal._json_scalar((1.0, float("nan"))) == [1.0, None]
+    assert rehearsal.json_scalar(float("nan")) is None
+    assert rehearsal.json_scalar(float("inf")) is None
+    assert rehearsal.json_scalar(True) is True
+    assert rehearsal.json_scalar(3) == 3
+    assert rehearsal.json_scalar((1.0, float("nan"))) == [1.0, None]
 
 
 # ------------------------------------------------------- execution-source gate

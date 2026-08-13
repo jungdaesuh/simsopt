@@ -181,6 +181,35 @@ PINNED_ENDPOINT_QUALITY_TERMS: Final = (
 # Reported, never gated.  See ``build_endpoint_ledger`` for why.
 INFORMATIONAL_ENDPOINT_OBSERVABLES: Final = ("observable.G", "state.G")
 
+# How each pinned term is judged at the certified budget.  The comparison class
+# is per term because the terms are not the same KIND of quantity, and a single
+# band across all of them manufactures a false reject -- the failure class this
+# campaign has already hit three times (the V260 shell gate, the SQP rho floor,
+# and the fourth predecessor root's bitwise receipt).
+#
+# * ``absolute`` -- raw equality residuals and the Boozer residual term.  Both
+#   sides sit at machine zero, so a relative comparison of them measures
+#   rounding.  The band is the route's own raw-equality feasibility tolerance.
+# * ``relative`` -- the geometry observables.  Measured agreement between the
+#   banked 5090 endpoints and native is 1e-6 or better on each.
+# * ``not_worse`` -- the quality quantities.  The claim is "REACH native's
+#   endpoint objective", never "equal it": non-QS came out 0.9% BETTER than
+#   native on Q1 and 0.09% better on Q2, so a two-sided 1e-6 band would refuse
+#   the very evidence the campaign banked.  The band is the slack allowed on
+#   the worse side only.
+PINNED_ENDPOINT_QUALITY_GATES: Final = {
+    "constraint.boozer|inf": ("absolute", 1.0e-10),
+    "constraint.volume": ("absolute", 1.0e-10),
+    "observable.iota": ("relative", 1.0e-6),
+    "observable.major_radius": ("relative", 1.0e-6),
+    "observable.non_qs_ratio": ("not_worse", 1.0e-6),
+    "observable.total_length": ("relative", 1.0e-6),
+    "observable.volume": ("relative", 1.0e-6),
+    "raw.non_qs": ("not_worse", 1.0e-6),
+    "raw.residual": ("absolute", 1.0e-10),
+    "weighted_total": ("not_worse", 1.0e-6),
+}
+
 REQUIRED_ENVIRONMENT: Final = {
     "JAX_PLATFORMS": "cpu",
     "JAX_ENABLE_X64": "true",
@@ -204,11 +233,11 @@ def rehearsal_options(iterations: int) -> ProjectedLbfgsOptions:
     return replace(CERTIFIED_ROUTE_OPTIONS, maximum_iterations=iterations)
 
 
-def _sha256(payload: bytes) -> str:
+def sha256_hex(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _json_scalar(value: object) -> JsonValue:
+def json_scalar(value: object) -> JsonValue:
     """Encode one host scalar, mapping nonfinite floats to null.
 
     ``canonical_json_bytes`` refuses ``NaN`` and the infinities, and the
@@ -221,23 +250,29 @@ def _json_scalar(value: object) -> JsonValue:
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, tuple):
-        return [_json_scalar(item) for item in value]
+        return [json_scalar(item) for item in value]
     raise RehearsalError(f"unencodable evidence scalar: {value!r}")
 
 
-def validate_environment(environment: Mapping[str, str]) -> dict[str, JsonValue]:
+def validate_environment(
+    environment: Mapping[str, str],
+    *,
+    required: Mapping[str, str] = REQUIRED_ENVIRONMENT,
+) -> dict[str, JsonValue]:
     """Refuse any launch whose backend or precision differs from the contract.
 
     JAX resolves its platform and its x64 flag lazily, so an absent variable
     does not fail loudly: it silently produces a different run.  The gate is
     therefore an equality check against every variable the contract names.
+    ``required`` is a parameter because the GPU lane pins a different platform
+    and must not re-spell the check to say so.
     """
 
-    for name, expected in sorted(REQUIRED_ENVIRONMENT.items()):
+    for name, expected in sorted(required.items()):
         observed = environment.get(name)
         if observed != expected:
             raise RehearsalError(f"{name} must equal {expected!r}, observed {observed!r}")
-    return {name: environment[name] for name in sorted(REQUIRED_ENVIRONMENT)}
+    return {name: environment[name] for name in sorted(required)}
 
 
 def load_execution_source_manifest(
@@ -269,13 +304,13 @@ def load_execution_source_manifest(
             f"execution-source manifest holds {len(entries)} entries, "
             f"authority freezes {DIAG5_EXECUTION_SOURCE_ENTRY_COUNT}"
         )
-    recomputed = _sha256(canonical_json_bytes(entries))
+    recomputed = sha256_hex(canonical_json_bytes(entries))
     if recomputed != document["entries_sha256"]:
         raise RehearsalError("execution-source manifest entries digest differs")
     evidence: dict[str, JsonValue] = {
         "relative_path": DIAG4_EXECUTION_SOURCE_MANIFEST_PATH,
         "schema_version": DIAG4_EXECUTION_SOURCE_SCHEMA_VERSION,
-        "manifest_sha256": _sha256(payload),
+        "manifest_sha256": sha256_hex(payload),
         "entries_sha256": recomputed,
         "entry_count": len(entries),
     }
@@ -340,7 +375,7 @@ def bind_execution_sources(repository: Path) -> dict[str, JsonValue]:
                 f"module {name} executes {relative}, which the manifest omits"
             )
         payload = path.read_bytes()
-        digest = _sha256(payload)
+        digest = sha256_hex(payload)
         if digest != entry["sha256"] or len(payload) != entry["size_bytes"]:
             raise RehearsalError(
                 f"module {name} executes {relative} with bytes the manifest "
@@ -496,12 +531,12 @@ def measure_lowering_pre_gate(case: BoundCase, iterations: int) -> dict[str, Jso
         "rehearsal_iterations": iterations,
         "certified_iterations": CERTIFIED_MAXIMUM_ITERATIONS,
         "budget_independent": True,
-        "kernels": [_lowering_payload(record) for record in rehearsal],
+        "kernels": [lowering_payload(record) for record in rehearsal],
         "total_ir_bytes": sum(record.ir_bytes for record in rehearsal),
     }
 
 
-def _lowering_payload(record: KernelLowering) -> dict[str, JsonValue]:
+def lowering_payload(record: KernelLowering) -> dict[str, JsonValue]:
     return {
         "name": record.name,
         "ir_bytes": record.ir_bytes,
@@ -509,9 +544,9 @@ def _lowering_payload(record: KernelLowering) -> dict[str, JsonValue]:
     }
 
 
-def _iteration_payload(record: ProjectedLbfgsIteration) -> dict[str, JsonValue]:
+def iteration_payload(record: ProjectedLbfgsIteration) -> dict[str, JsonValue]:
     return {
-        field: _json_scalar(value)
+        field: json_scalar(value)
         for field, value in record._asdict().items()
         if field != "coordinates"
     }
@@ -530,7 +565,71 @@ def _physics_leaves(record: object, prefix: str) -> dict[str, float]:
     return flattened
 
 
-def build_endpoint_ledger(case: BoundCase, run: ProjectedLbfgsRun) -> dict[str, JsonValue]:
+def _pinned_term_verdict(
+    name: str, terminal: float, native: float
+) -> dict[str, JsonValue]:
+    """Judge one pinned term by the comparison class its kind requires."""
+
+    comparison, band = PINNED_ENDPOINT_QUALITY_GATES[name]
+    difference = terminal - native
+    if comparison == "absolute":
+        measured = abs(difference)
+        passed = measured <= band
+    elif comparison == "relative":
+        measured = abs(difference) / abs(native)
+        passed = measured <= band
+    else:
+        # Lower is better on every ``not_worse`` term, so an endpoint that beat
+        # native measures a negative excess and passes with room to spare.
+        measured = difference / abs(native)
+        passed = measured <= band
+    return {
+        "comparison": comparison,
+        "band": band,
+        "measured": json_scalar(measured),
+        "passed": bool(passed),
+    }
+
+
+def gate_endpoint_ledger(ledger: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    """Judge the pinned terms of one ledger; G is absent by construction.
+
+    The pinned set is read from this module, never from the ledger, so an
+    artifact cannot narrow the terms it is then judged on.  The informational
+    observables are not consulted at all: gating a direction the shared
+    objective deliberately leaves free is how a false reject gets manufactured.
+    """
+
+    terminal = ledger["terminal"]
+    native = ledger["native"]
+    if not isinstance(terminal, dict) or not isinstance(native, dict):
+        raise RehearsalError("endpoint ledger sides are not term maps")
+    if frozenset(PINNED_ENDPOINT_QUALITY_GATES) != frozenset(
+        PINNED_ENDPOINT_QUALITY_TERMS
+    ):
+        raise RehearsalError("pinned quality terms and their gates disagree")
+    if frozenset(PINNED_ENDPOINT_QUALITY_GATES) & frozenset(
+        INFORMATIONAL_ENDPOINT_OBSERVABLES
+    ):
+        raise RehearsalError("an informational observable is being gated")
+    verdicts = {
+        name: _pinned_term_verdict(
+            name, float(terminal[name]), float(native[name])
+        )
+        for name in sorted(PINNED_ENDPOINT_QUALITY_TERMS)
+    }
+    return {
+        "terms": verdicts,
+        "failed_terms": sorted(
+            name for name, verdict in verdicts.items() if not verdict["passed"]
+        ),
+        "passed": all(verdict["passed"] for verdict in verdicts.values()),
+    }
+
+
+def build_endpoint_ledger(
+    case: BoundCase, run: ProjectedLbfgsRun, *, gated: bool = False
+) -> dict[str, JsonValue]:
     """Report every physics term at the endpoint beside the native reference.
 
     A total objective and a feasibility number cannot distinguish "reached the
@@ -547,9 +646,11 @@ def build_endpoint_ledger(case: BoundCase, run: ProjectedLbfgsRun) -> dict[str, 
     1e-6 or better.  Gating G would manufacture a false reject on a direction
     the objective deliberately leaves free.
 
-    The ledger is REPORTED here and gated only at the certified budget: three
-    rehearsal attempts sit four orders of magnitude from the endpoint, so a
-    gate at this budget would fail on every term and prove nothing.
+    The ledger is REPORTED at the rehearsal budget and gated only at the
+    certified one: three rehearsal attempts sit four orders of magnitude from
+    the endpoint, so a gate at that budget would fail on every term and prove
+    nothing.  ``gated`` therefore adds the per-term verdicts and says so; the
+    caller decides what a failed verdict costs.
     """
 
     terminal_evaluation, terminal_physical = jax.block_until_ready(
@@ -574,7 +675,7 @@ def build_endpoint_ledger(case: BoundCase, run: ProjectedLbfgsRun) -> dict[str, 
             "state.iota": float(state[-2]),
             "state.G": float(state[-1]),
         }
-    return {
+    ledger: dict[str, JsonValue] = {
         "terminal": dict(sorted(rows["terminal"].items())),
         "native": dict(sorted(rows["native"].items())),
         "relative_difference": {
@@ -587,13 +688,16 @@ def build_endpoint_ledger(case: BoundCase, run: ProjectedLbfgsRun) -> dict[str, 
             for name in sorted(rows["terminal"])
         },
         "native_state_relative_path": NATIVE_ENDPOINT_STATE_PATH.name,
-        "native_state_sha256": _sha256(
+        "native_state_sha256": sha256_hex(
             NATIVE_ENDPOINT_STATE_PATH.read_bytes()
         ),
         "pinned_quality_terms": list(PINNED_ENDPOINT_QUALITY_TERMS),
         "informational_observables": list(INFORMATIONAL_ENDPOINT_OBSERVABLES),
-        "gated_at_this_budget": False,
+        "gated_at_this_budget": bool(gated),
     }
+    if gated:
+        ledger["pinned_term_gate"] = gate_endpoint_ledger(ledger)
+    return ledger
 
 
 def certify_endpoint_agreement(
@@ -622,9 +726,12 @@ def certify_endpoint_agreement(
         relative_tolerance=DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE,
         absolute_floor=DIAG4_ENDPOINT_AGREEMENT_ABSOLUTE_FLOOR,
     )
-    if run.feasibility_inf > CERTIFIED_ROUTE_OPTIONS.feasibility_tolerance:
+    # Spelled as the negation of the contract rather than as ``> tolerance``:
+    # every comparison against a NaN is false, so the ``>`` form passes a
+    # nonfinite feasibility through the gate that exists to refuse it.
+    if not run.feasibility_inf <= CERTIFIED_ROUTE_OPTIONS.feasibility_tolerance:
         raise RehearsalError(
-            f"terminal feasibility {run.feasibility_inf!r} exceeds "
+            f"terminal feasibility {run.feasibility_inf!r} is not within "
             f"{CERTIFIED_ROUTE_OPTIONS.feasibility_tolerance!r}"
         )
     return {
@@ -662,11 +769,11 @@ def build_rehearsal_evidence(
         "problem_identity": dict(problem_identity),
         "lowering_pre_gate": dict(lowering),
         "options": {
-            field: _json_scalar(getattr(options, field))
+            field: json_scalar(getattr(options, field))
             for field in sorted(options.__dataclass_fields__)
         },
         "certified_options_delta": {
-            field: _json_scalar(getattr(options, field))
+            field: json_scalar(getattr(options, field))
             for field in sorted(options.__dataclass_fields__)
             if getattr(options, field) != getattr(CERTIFIED_ROUTE_OPTIONS, field)
         },
@@ -688,13 +795,13 @@ def build_rehearsal_evidence(
                 later <= earlier
                 for earlier, later in zip(objectives, objectives[1:], strict=False)
             ),
-            "maximum_feasibility_inf": _json_scalar(
+            "maximum_feasibility_inf": json_scalar(
                 max(
                     (record.feasibility_inf for record in run.iterations),
                     default=float("nan"),
                 )
             ),
-            "rows": [_iteration_payload(record) for record in run.iterations],
+            "rows": [iteration_payload(record) for record in run.iterations],
         },
         "endpoint_agreement": dict(endpoint),
         "endpoint_ledger": dict(endpoint_ledger),
@@ -711,7 +818,7 @@ def build_rehearsal_evidence(
     }
 
 
-def _seal_and_sync(root: Path) -> None:
+def seal_and_sync(root: Path) -> None:
     """Make the artifact read-only and durable, refusing anything irregular."""
 
     directories = [root]
@@ -739,8 +846,30 @@ def _seal_and_sync(root: Path) -> None:
             os.close(descriptor)
 
 
-def _artifact_manifest_payload(root: Path) -> dict[str, JsonValue]:
-    """Describe every artifact file except the manifest that will carry this."""
+def validate_sealed_modes(root: Path) -> None:
+    """Refuse a published tree that is not 0555/0444 all the way down.
+
+    Sealing and checking the seal are two different facts: ``seal_and_sync``
+    says what this process did, and this says what the bytes a later reader
+    finds actually are.  Both lanes publish under the same rule, so the check
+    lives once here rather than twice.
+    """
+
+    for path in (root, *root.rglob("*")):
+        observed = path.stat(follow_symlinks=False)
+        expected_mode = 0o555 if stat.S_ISDIR(observed.st_mode) else 0o444
+        if stat.S_IMODE(observed.st_mode) != expected_mode:
+            raise RehearsalError(f"sealed artifact mode differs: {path}")
+
+
+def artifact_manifest_payload(
+    root: Path, *, schema_version: str = REHEARSAL_MANIFEST_SCHEMA_VERSION
+) -> dict[str, JsonValue]:
+    """Describe every artifact file except the manifest that will carry this.
+
+    ``schema_version`` is a parameter so the GPU root lane publishes its own
+    schema through THIS enumeration rather than a second spelling of it.
+    """
 
     manifest_path = root / MANIFEST_FILENAME
     files: list[JsonValue] = []
@@ -762,7 +891,7 @@ def _artifact_manifest_payload(root: Path) -> dict[str, JsonValue]:
                 {
                     "mode": "0444",
                     "relative_path": relative,
-                    "sha256": _sha256(payload),
+                    "sha256": sha256_hex(payload),
                     "size_bytes": len(payload),
                 }
             )
@@ -771,11 +900,11 @@ def _artifact_manifest_payload(root: Path) -> dict[str, JsonValue]:
     return {
         "directories": directories,
         "files": files,
-        "schema_version": REHEARSAL_MANIFEST_SCHEMA_VERSION,
+        "schema_version": schema_version,
     }
 
 
-def _rename_noreplace(source: Path, destination: Path) -> None:
+def rename_noreplace(source: Path, destination: Path) -> None:
     """Publish by rename, refusing to replace an existing final root."""
 
     renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
@@ -807,10 +936,10 @@ def publish_rehearsal(
     with (staging_root / TERMINAL_COORDINATES_FILENAME).open("wb") as stream:
         np.save(stream, terminal_coordinates, allow_pickle=False)
     (staging_root / MANIFEST_FILENAME).write_bytes(
-        canonical_json_bytes(_artifact_manifest_payload(staging_root))
+        canonical_json_bytes(artifact_manifest_payload(staging_root))
     )
-    _seal_and_sync(staging_root)
-    _rename_noreplace(staging_root, output_root)
+    seal_and_sync(staging_root)
+    rename_noreplace(staging_root, output_root)
     descriptor = os.open(output_root.parent, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(descriptor)
@@ -834,13 +963,9 @@ def validate_rehearsal_artifact(artifact_root: Path) -> dict[str, JsonValue]:
     manifest = load_canonical_json_bytes(
         (artifact_root / MANIFEST_FILENAME).read_bytes()
     )
-    if manifest != _artifact_manifest_payload(artifact_root):
+    if manifest != artifact_manifest_payload(artifact_root):
         raise RehearsalError("rehearsal manifest differs from the artifact tree")
-    for path in (artifact_root, *artifact_root.rglob("*")):
-        observed = path.stat(follow_symlinks=False)
-        expected_mode = 0o555 if stat.S_ISDIR(observed.st_mode) else 0o444
-        if stat.S_IMODE(observed.st_mode) != expected_mode:
-            raise RehearsalError("rehearsal artifact mode differs")
+    validate_sealed_modes(artifact_root)
 
     evidence = load_canonical_json_bytes(
         (artifact_root / EVIDENCE_FILENAME).read_bytes()
@@ -1012,6 +1137,7 @@ __all__ = (
     "NATIVE_ENDPOINT_STATE_PATH",
     "NATIVE_TARGET_OBJECTIVE",
     "NATIVE_WALL_SECONDS_BAR",
+    "PINNED_ENDPOINT_QUALITY_GATES",
     "PINNED_ENDPOINT_QUALITY_TERMS",
     "REHEARSAL_MANIFEST_SCHEMA_VERSION",
     "REHEARSAL_MAXIMUM_ITERATIONS",
@@ -1021,19 +1147,28 @@ __all__ = (
     "TERMINAL_COORDINATES_FILENAME",
     "BoundCase",
     "RehearsalError",
+    "artifact_manifest_payload",
     "bind_execution_sources",
     "bind_problem_identity",
     "build_endpoint_ledger",
     "build_rehearsal_evidence",
     "certify_endpoint_agreement",
+    "gate_endpoint_ledger",
+    "iteration_payload",
+    "json_scalar",
     "load_execution_source_manifest",
+    "lowering_payload",
     "main",
     "measure_lowering_pre_gate",
     "publish_rehearsal",
     "rehearsal_options",
+    "rename_noreplace",
     "run_bounded_rehearsal",
+    "seal_and_sync",
+    "sha256_hex",
     "validate_environment",
     "validate_rehearsal_artifact",
+    "validate_sealed_modes",
 )
 
 
