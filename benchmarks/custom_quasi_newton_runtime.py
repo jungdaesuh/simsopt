@@ -1283,12 +1283,12 @@ def _measurement(
         if method == "bfgs" and not accepted_incumbent_bfgs
         else None
     )
-    # Only the custom provider's non-incumbent BFGS lane executes the private
-    # solver whose compiled step the probe measures; a native or accepted-
-    # incumbent row could never carry the fields, so the probe solve would be
-    # pure overhead inside that row's RSS phase.
-    reports_compiled_step = provider == "custom" and not accepted_incumbent_bfgs
     if algorithm_memory_contract is not None:
+        # Only the custom provider's non-incumbent BFGS lane executes the
+        # private solver whose compiled step the probe measures; a native or
+        # accepted-incumbent row could never carry the fields, so the probe
+        # solve would be pure overhead inside that row's RSS phase.
+        reports_compiled_step = provider == "custom"
         with _RSSPhase("algorithm_memory_analysis") as memory_phase:
             algorithm_memory_contract.update(
                 _dense_bfgs_update_memory_analysis(

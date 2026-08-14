@@ -61,17 +61,15 @@ listed" for `fused_stepwise` as of that date: the typed dispatch lane and
 the concrete BFGS entry point are now themselves `fused_stepwise`-routing
 production surfaces rather than opt-in callers. CPU bitwise evidence:
 `tests/jax/solve/test_lbfgsb_dispatch_run_mode.py` and
-`tests/jax/solve/test_bfgs_host_fused_gate.py`. The benchmark BFGS lane
-(`benchmarks/custom_quasi_newton_runtime.py`, `method == "bfgs"` branch)
-still attaches `memory_analysis_callback` to `_minimize_bfgs_private`, so it
-remains pinned to the eager driver and measures the observer route, not the
-new default.
+`tests/jax/solve/test_bfgs_host_fused_gate.py`.
 
-Correction (same date, later in the day): the preceding sentence no longer
-describes the tree. `benchmarks/custom_quasi_newton_runtime.py` now takes the
-compiled-step memory report from an untimed one-iteration probe solve
+The benchmark BFGS lane (`benchmarks/custom_quasi_newton_runtime.py`,
+`method == "bfgs"` branch) takes the compiled-step memory report from an
+untimed one-iteration probe solve
 (`_bfgs_compiled_step_memory_analysis`, executed inside the existing
-`algorithm_memory_analysis` RSS phase) and leaves both timed solves
+`algorithm_memory_analysis` RSS phase — whose own `phase_rss` entry therefore
+now includes one XLA compile plus a one-iteration solve where it previously
+held pure arithmetic) and leaves both timed solves
 unobserved, so the benchmark's custom BFGS lane measures the production fused
 program. Measured on the `bfgs_quadratic` fixture at `maxiter=5`: the warm
 transfer audit went from 5 `advance` observations to 0, and the objective's

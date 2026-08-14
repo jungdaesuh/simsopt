@@ -7,7 +7,6 @@ from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
-
 from simsopt_jax.objectives.stage_two import (
     CoilDofExtractionProvider,
     StageTwoObjectiveConfig,
@@ -15,6 +14,7 @@ from simsopt_jax.objectives.stage_two import (
     stage_two_geometric_penalty,
     stage_two_length_penalty,
 )
+
 from simsopt_jax_adapters.field.force import (
     b2energy_pure,
     curve_force_norms_pure,

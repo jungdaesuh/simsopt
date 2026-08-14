@@ -703,7 +703,8 @@ def minimize(
             maxiter=options_used.maxiter,
             options=_legacy_lbfgsb_options(
                 options_used,
-                observes_accepted_steps=callback is not None,
+                observes_accepted_steps=legacy_callback is not None
+                or legacy_progress_callback is not None,
             ),
             value_and_grad=True,
             callback=legacy_callback,

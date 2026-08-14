@@ -1602,13 +1602,14 @@ def wrap_strict_target_lane_value_and_grad(fun):
     if not cacheable:
         return wrapped
     # Double-checked install under the wrapper lock. ``fun`` carries the
-    # cacheable marker (the check above gated this branch), so ``setattr``
-    # cannot raise.
+    # cacheable marker, and some in-repo callers write that marker with
+    # ``object.__setattr__`` because plain ``setattr`` is overridden on their
+    # callables — use the same spelling so every marked callable is writable.
     with _STRICT_TARGET_LANE_WRAPPER_LOCK:
         memoized = _memoized_strict_target_lane_wrapper(fun)
         if memoized is not None:
             return memoized
-        setattr(fun, _STRICT_TARGET_LANE_WRAPPER_ATTR, wrapped)
+        object.__setattr__(fun, _STRICT_TARGET_LANE_WRAPPER_ATTR, wrapped)
         return wrapped
 
 

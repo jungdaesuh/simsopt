@@ -1,15 +1,15 @@
 """Native graph adapters for public traceable JAX objectives."""
 
+from .finite_build_stage_two import (
+    FiniteBuildStageTwoConfig,
+    finite_build_stage_two_diagnostics,
+    make_finite_build_stage_two_objective,
+)
 from .force_stage_two import (
     ForceStageTwoConfig,
     force_stage_two_diagnostics,
     make_force_stage_two_length_penalty,
     make_force_stage_two_objective,
-)
-from .finite_build_stage_two import (
-    FiniteBuildStageTwoConfig,
-    finite_build_stage_two_diagnostics,
-    make_finite_build_stage_two_objective,
 )
 
 __all__ = (
