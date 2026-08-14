@@ -15,6 +15,9 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+
+from simsopt_jax.backend.dtypes import explicit_device_array
 
 from .private._lbfgsb_scipy import (
     LbfgsbInverseHessianHistory,
@@ -51,20 +54,28 @@ def empty_quasi_newton_metric(
     dimension: int,
     dtype: jnp.dtype,
 ) -> QuasiNewtonMetric:
-    """Return a store holding no pair, which applies as the exact identity."""
+    """Return a store holding no pair, which applies as the exact identity.
+
+    The store is minted at an EXPLICIT host-to-device boundary rather than by
+    ``jnp.zeros``: an empty store is built on the host, once, outside any
+    traced kernel, and a strict transfer guard refuses the implicit placement
+    ``jnp.zeros`` performs there.  Same values, same dtypes, same shapes.
+    """
 
     return QuasiNewtonMetric(
         history=LbfgsbInverseHessianHistory(
-            s=jnp.zeros((memory, dimension), dtype=dtype),
-            y=jnp.zeros((memory, dimension), dtype=dtype),
-            n_corrs=jnp.asarray(0, dtype=jnp.int32),
+            s=explicit_device_array(np.zeros((memory, dimension), dtype), dtype=dtype),
+            y=explicit_device_array(np.zeros((memory, dimension), dtype), dtype=dtype),
+            n_corrs=explicit_device_array(0, dtype=jnp.int32),
         ),
-        correction_gram=jnp.zeros((memory, memory), dtype=dtype),
-        step_gram=jnp.zeros((memory, memory), dtype=dtype),
-        tail_index=jnp.asarray(0, dtype=jnp.int32),
-        head_index=jnp.asarray(0, dtype=jnp.int32),
-        admitted_updates=jnp.asarray(0, dtype=jnp.int32),
-        inverse_hessian_theta=jnp.asarray(1.0, dtype=dtype),
+        correction_gram=explicit_device_array(
+            np.zeros((memory, memory), dtype), dtype=dtype
+        ),
+        step_gram=explicit_device_array(np.zeros((memory, memory), dtype), dtype=dtype),
+        tail_index=explicit_device_array(0, dtype=jnp.int32),
+        head_index=explicit_device_array(0, dtype=jnp.int32),
+        admitted_updates=explicit_device_array(0, dtype=jnp.int32),
+        inverse_hessian_theta=explicit_device_array(1.0, dtype=dtype),
     )
 
 

@@ -386,7 +386,7 @@ _NATIVE_EXAMPLE = SourceRef(
 )
 _JAX_EXAMPLE = SourceRef(
     path="examples/jax/3_Advanced/single_stage_boozer_vacuum_optimization.py",
-    sha256="857a19cb7b27cf6a51576296877d1e8e7b0f94bf9a9f538bfa08efaf94de68cf",
+    sha256="94b15e884b6a914c7b94638eecee9925a277528f801d1058fbcc6a860b246cd7",
     symbol="SingleStageConfig and bootstrap",
 )
 _SURFACE_TERMS = SourceRef(
@@ -401,7 +401,7 @@ _BOOZER_CORE = SourceRef(
 )
 _BOOZER_EXACT = SourceRef(
     path="src/simsopt_jax_adapters/geo/boozer_surface.py",
-    sha256="efb92448dda14dc92c6b49d330f649fbf44dd6d4d3e896f4f94e61d210c5d892",
+    sha256="a61a8192638f0929fc0dd849361ad2a26c756b6a8f5514c96de479b4f6579dc8",
     symbol="exact masked residual and signed volume label",
 )
 

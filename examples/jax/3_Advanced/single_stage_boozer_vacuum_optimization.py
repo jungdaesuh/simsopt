@@ -6,6 +6,13 @@ GPU: an exact Boozer solve followed by an implicit-adjoint value/gradient
 evaluation. Fast mode uses bounded-memory SIMSOPT L-BFGS; parity mode uses
 SIMSOPT BFGS to match the native reference algorithm. The outer loop remains
 host-driven so nested optimization is not captured in one large JIT program.
+
+What "mirror" claims, and what it does not: this script is faithful in
+objective and physics (term-for-term, proven by endpoint cross-evaluation); the
+outer optimizer implementation and failed-solve handling differ from native
+(SIMSOPT BFGS reimplementation vs scipy BFGS; NaN-sentinel/accepted-incumbent
+vs 1.0e3-with-state-restore), so iterate trajectories are not comparable and the
+parity gate checks endpoint observables only.
 """
 
 from __future__ import annotations

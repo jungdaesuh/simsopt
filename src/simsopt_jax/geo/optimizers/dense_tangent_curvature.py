@@ -31,6 +31,9 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 import jax.scipy as jsp
+import numpy as np
+
+from simsopt_jax.backend.dtypes import explicit_device_array
 
 # Powell's damping threshold: a pair is rewritten toward ``B s`` whenever its
 # curvature falls below this fraction of the model's own predicted curvature,
@@ -57,13 +60,19 @@ def empty_dense_tangent_curvature(
     dimension: int,
     dtype: jnp.dtype,
 ) -> DenseTangentCurvature:
-    """Return the identity model, which steps along the projected gradient."""
+    """Return the identity model, which steps along the projected gradient.
+
+    Minted at an EXPLICIT host-to-device boundary for the reason
+    ``empty_quasi_newton_metric`` records: this construction runs on the host,
+    outside any traced kernel, where a strict transfer guard refuses the
+    implicit placement ``jnp.eye`` performs.
+    """
 
     return DenseTangentCurvature(
-        hessian=jnp.eye(dimension, dtype=dtype),
-        scaled=jnp.asarray(False),
-        damped_updates=jnp.asarray(0, dtype=jnp.int32),
-        updates=jnp.asarray(0, dtype=jnp.int32),
+        hessian=explicit_device_array(np.eye(dimension, dtype=dtype), dtype=dtype),
+        scaled=explicit_device_array(False, dtype=np.bool_),
+        damped_updates=explicit_device_array(0, dtype=jnp.int32),
+        updates=explicit_device_array(0, dtype=jnp.int32),
     )
 
 

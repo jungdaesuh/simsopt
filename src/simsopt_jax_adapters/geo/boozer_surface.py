@@ -3672,8 +3672,19 @@ def _exact_newton_reporting_fields(result):
 def _ls_newton_reporting_fields(result):
     """Pack Newton-polish Hessian diagnostics without changing solve paths."""
     fun = result.get("fun")
+    # The two literals are staged against ``fun`` rather than written inline:
+    # this runs on the host, where a bare ``2.0 * fun`` places a weak-typed
+    # scalar implicitly and a strict transfer guard refuses it.  Bit for bit
+    # the inline spelling wherever ``fun`` is finite or NaN; a TRACED ``fun``
+    # of +-inf reports NaN here where the literals reported inf, because
+    # ``staged_like`` builds its traced device zero from ``fun - fun``.  Every
+    # consumer of this field asks only whether it is finite.
     inner_penalty_residual_l2 = (
-        None if fun is None else jnp.sqrt(jnp.maximum(0.0, 2.0 * fun))
+        None
+        if fun is None
+        else jnp.sqrt(
+            jnp.maximum(_staged_like(fun, 0.0), _staged_like(fun, 2.0) * fun)
+        )
     )
     return {
         **{key: result.get(key) for key in _BOOZER_NEWTON_TRACE_RESULT_KEYS},

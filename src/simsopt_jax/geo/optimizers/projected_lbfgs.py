@@ -38,6 +38,15 @@ Newton solve is worth running at all: the tangent fraction ``||P g|| / ||g||``
 is free once the point is evaluated, and it separates the neighbourhoods where
 a reduced model earns its cost from the ones where it does not.
 
+The loop runs on the host, so it crosses the device boundary in both directions
+every iteration, and it crosses EXPLICITLY: every value it reads of an iterate
+goes through ``simsopt_jax.runtime.host_boundary`` and every host-decided number
+it hands back -- the line search's trial scale, the empty correction store --
+through ``simsopt_jax.backend.dtypes``.  That is what makes the engine legal
+under ``JAX_TRANSFER_GUARD=disallow``, which refuses implicit transfers and
+permits these; it changes nothing about WHAT is read or WHEN, and a bounded
+full-scale rehearsal reproduces the pre-change trajectory bit for bit.
+
 Curvature pairs are formed from the realized on-manifold displacement ``s``
 and the projected-gradient change ``y``.  Those two vectors are only
 comparable inside one tangent space, so ``vector_transport`` decides how the
@@ -60,6 +69,15 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+
+from simsopt_jax.backend.dtypes import explicit_device_array
+from simsopt_jax.runtime.host_boundary import (
+    host_array,
+    host_bool,
+    host_float,
+    host_int,
+    host_value,
+)
 
 from .dense_sqp import JointValueConstraints, materialize_joint_vjp_rows
 from .dense_tangent_curvature import (
@@ -330,7 +348,7 @@ class _PointScalars(NamedTuple):
 def _point_scalars(point: ProjectedPoint) -> _PointScalars:
     """Fetch one iterate's host scalars in a single device-to-host transfer.
 
-    ``jax.device_get`` over the whole tuple batches the copies: measured on the
+    ``host_value`` over the whole tuple batches the copies: measured on the
     certified GPU at 157 microseconds against 265 for the same eight values
     pulled one ``float()`` at a time.  Reading them in one place is also what
     keeps a second read of the same quantity from reappearing downstream --
@@ -341,7 +359,7 @@ def _point_scalars(point: ProjectedPoint) -> _PointScalars:
     return _PointScalars(
         *(
             float(value)
-            for value in jax.device_get(
+            for value in host_value(
                 (
                     point.objective,
                     point.feasibility_inf,
@@ -1168,9 +1186,9 @@ def run_projected_lbfgs(
     newton_rearm_index = 0
 
     solve_started = time.perf_counter()
-    if not bool(point.all_finite):
+    if not host_bool(point.all_finite):
         status = ProjectedLbfgsStatus.NONFINITE_STATE
-    elif float(point.feasibility_inf) > options.feasibility_tolerance:
+    elif host_float(point.feasibility_inf) > options.feasibility_tolerance:
         status = ProjectedLbfgsStatus.INFEASIBLE_START
 
     while status is ProjectedLbfgsStatus.RUNNING:
@@ -1243,12 +1261,14 @@ def run_projected_lbfgs(
                     metric,
                 )
             )
-            multiplier_norm = float(multipliers.norm)
-            multiplier_forward_error_bound = float(multipliers.forward_error_bound)
-            if bool(newton_step.usable):
+            multiplier_norm = host_float(multipliers.norm)
+            multiplier_forward_error_bound = host_float(
+                multipliers.forward_error_bound
+            )
+            if host_bool(newton_step.usable):
                 direction = newton_step.direction
                 lagrangian_newton_used = True
-                model_predicted = float(newton_step.predicted_reduction)
+                model_predicted = host_float(newton_step.predicted_reduction)
             else:
                 # A refused Newton solve is evidence, not a failure: the
                 # telemetry is kept and the secant store takes this iteration.
@@ -1261,14 +1281,14 @@ def run_projected_lbfgs(
                     coordinates, point.projector, point.projected_gradient
                 )
             )
-            if bool(gn_step.all_finite):
+            if host_bool(gn_step.all_finite):
                 direction = gn_step.direction
                 gauss_newton_used = True
-                gn_predicted = float(gn_step.predicted_reduction)
+                gn_predicted = host_float(gn_step.predicted_reduction)
                 model_predicted = gn_predicted
-                gn_condition = float(gn_step.reduced_hessian_reciprocal_condition)
-                gn_tangency = float(gn_step.tangency_relative_residual)
-                gn_direction_norm = float(jnp.linalg.norm(gn_step.direction))
+                gn_condition = host_float(gn_step.reduced_hessian_reciprocal_condition)
+                gn_tangency = host_float(gn_step.tangency_relative_residual)
+                gn_direction_norm = host_float(jnp.linalg.norm(gn_step.direction))
             else:
                 direction = jax.block_until_ready(
                     apply_metric(metric, -point.projected_gradient)
@@ -1278,19 +1298,19 @@ def run_projected_lbfgs(
                 dense_direction(curvature, point.projector, point.projected_gradient)
             )
             direction = dense_step.direction
-            dense_pd = bool(dense_step.positive_definite)
+            dense_pd = host_bool(dense_step.positive_definite)
         else:
             if options.vector_transport:
                 carried = jax.block_until_ready(
                     transport_metric(metric, point.projector)
                 )
                 applied_metric = carried.metric
-                masked_pairs = int(carried.masked_pairs)
+                masked_pairs = host_int(carried.masked_pairs)
             direction = jax.block_until_ready(
                 apply_metric(applied_metric, -point.projected_gradient)
             )
-        directional_derivative = float(point.projected_gradient @ direction)
-        direction_norm = float(jnp.linalg.norm(direction))
+        directional_derivative = host_float(point.projected_gradient @ direction)
+        direction_norm = host_float(jnp.linalg.norm(direction))
         # A Newton direction the SOLVE called usable can still measure as ascent
         # here: the solve certifies finiteness and a nonzero norm, not the sign
         # of ``Pg . d``, and a carried projector's rows, an L-BFGS-preconditioned
@@ -1312,8 +1332,8 @@ def run_projected_lbfgs(
             direction = jax.block_until_ready(
                 apply_metric(metric, -point.projected_gradient)
             )
-            directional_derivative = float(point.projected_gradient @ direction)
-            direction_norm = float(jnp.linalg.norm(direction))
+            directional_derivative = host_float(point.projected_gradient @ direction)
+            direction_norm = host_float(jnp.linalg.norm(direction))
             lagrangian_newton_used = False
             model_predicted = float("nan")
         direction_seconds = time.perf_counter() - direction_started
@@ -1363,6 +1383,11 @@ def run_projected_lbfgs(
             the closure cannot outlive the iteration that created it.  The
             objective is the iterate's, not the trial's: re-reading it from the
             device once per trial spends a synchronous copy on a constant.
+
+            The trial scale is the one host-decided number that has to reach the
+            device each trial, so it crosses through the explicit placement owner
+            at the iterate's own dtype rather than as an implicit weak-typed
+            literal a strict transfer guard refuses.
             """
 
             nonlocal trials, rejected_for_feasibility, retraction_seconds
@@ -1370,15 +1395,18 @@ def run_projected_lbfgs(
             while trials < options.maximum_line_search_trials and scale >= floor_scale:
                 trials += 1
                 started = time.perf_counter()
+                device_scale = explicit_device_array(scale, dtype=coordinates.dtype)
                 candidate = jax.block_until_ready(
-                    retract(point.projector, coordinates + scale * search_direction)
+                    retract(
+                        point.projector, coordinates + device_scale * search_direction
+                    )
                 )
                 retraction_seconds += time.perf_counter() - started
-                if bool(candidate.feasible):
+                if host_bool(candidate.feasible):
                     sufficient = objective + (
                         options.armijo_coefficient * scale * slope
                     )
-                    if float(candidate.objective) <= sufficient:
+                    if host_float(candidate.objective) <= sufficient:
                         return candidate, scale
                 else:
                     rejected_for_feasibility += 1
@@ -1400,8 +1428,8 @@ def run_projected_lbfgs(
             rescue_direction = jax.block_until_ready(
                 apply_metric(metric, -point.projected_gradient)
             )
-            rescue_slope = float(point.projected_gradient @ rescue_direction)
-            rescue_norm = float(jnp.linalg.norm(rescue_direction))
+            rescue_slope = host_float(point.projected_gradient @ rescue_direction)
+            rescue_norm = host_float(jnp.linalg.norm(rescue_direction))
             if (
                 math.isfinite(rescue_slope)
                 and rescue_slope < 0.0
@@ -1461,7 +1489,7 @@ def run_projected_lbfgs(
             projector_age = 0
             projector_materializations += 1
             line_search_forced_refreshes += 1
-            if not bool(point.all_finite):
+            if not host_bool(point.all_finite):
                 status = ProjectedLbfgsStatus.NONFINITE_STATE
                 break
             continue
@@ -1500,7 +1528,9 @@ def run_projected_lbfgs(
                     stored_pairs=stored_pairs,
                     masked_pairs=masked_pairs,
                     dense_damped_updates=(
-                        int(curvature.damped_updates) if options.dense_curvature else 0
+                        host_int(curvature.damped_updates)
+                        if options.dense_curvature
+                        else 0
                     ),
                     dense_positive_definite=dense_pd,
                     gauss_newton_used=gauss_newton_used,
@@ -1536,7 +1566,7 @@ def run_projected_lbfgs(
             next_point = jax.block_until_ready(
                 evaluate_carried(point.projector, accepted.coordinates)
             )
-            carry_tangency = float(next_point.true_tangency_relative_residual)
+            carry_tangency = host_float(next_point.true_tangency_relative_residual)
             # The carry is kept only while its own measurement says the tangent
             # space it names is still this point's.
             if options.projector_tangency_tolerance > 0.0 and not (
@@ -1578,7 +1608,7 @@ def run_projected_lbfgs(
             curvature = jax.block_until_ready(
                 update_curvature(curvature, pair_step, pair_gradient_change)
             )
-            dense_damped = int(curvature.damped_updates)
+            dense_damped = host_int(curvature.damped_updates)
         else:
             dense_damped = 0
         pair_update_seconds = time.perf_counter() - pair_started
@@ -1594,8 +1624,8 @@ def run_projected_lbfgs(
             step_scale * step_scale * model_predicted
             + (step_scale * step_scale - step_scale) * directional_derivative
         )
-        stored_pairs = int(live_pairs)
-        candidate_objective = float(accepted.objective)
+        stored_pairs = host_int(live_pairs)
+        candidate_objective = host_float(accepted.objective)
 
         record = ProjectedLbfgsIteration(
             index=index,
@@ -1615,16 +1645,16 @@ def run_projected_lbfgs(
             direction_norm=direction_norm,
             directional_derivative=directional_derivative,
             step_scale=step_scale,
-            step_norm=float(jnp.linalg.norm(step)),
+            step_norm=host_float(jnp.linalg.norm(step)),
             step_norm_capped=bool(capped),
             line_search_trials=trials + abandoned.trials,
             rejected_for_feasibility=rejected_for_feasibility
             + abandoned.rejected_for_feasibility,
-            retraction_corrections=int(accepted.corrections),
+            retraction_corrections=host_int(accepted.corrections),
             candidate_objective=candidate_objective,
-            candidate_feasibility_inf=float(accepted.feasibility_inf),
-            curvature=float(pair_curvature),
-            pair_admitted=bool(admitted),
+            candidate_feasibility_inf=host_float(accepted.feasibility_inf),
+            curvature=host_float(pair_curvature),
+            pair_admitted=host_bool(admitted),
             stored_pairs=stored_pairs,
             transport_masked_pairs=masked_pairs,
             dense_damped_updates=dense_damped,
@@ -1662,7 +1692,7 @@ def run_projected_lbfgs(
 
         coordinates = accepted.coordinates
         point = next_point
-        if not bool(point.all_finite):
+        if not host_bool(point.all_finite):
             status = ProjectedLbfgsStatus.NONFINITE_STATE
             break
 
@@ -1670,9 +1700,9 @@ def run_projected_lbfgs(
     return ProjectedLbfgsRun(
         status=status,
         coordinates=coordinates,
-        objective=float(point.objective),
-        feasibility_inf=float(point.feasibility_inf),
-        projected_gradient_inf=float(point.projected_gradient_inf),
+        objective=host_float(point.objective),
+        feasibility_inf=host_float(point.feasibility_inf),
+        projected_gradient_inf=host_float(point.projected_gradient_inf),
         stored_pairs=stored_pairs,
         iterations=tuple(records),
         compile_seconds=compile_seconds,
@@ -1731,25 +1761,27 @@ def _newton_telemetry(step: TangentNewtonCgStep | None) -> dict[str, object]:
     # every distinct CG count a run produces -- measured at 64 ms each on the
     # certified GPU, 1.9 s over a run reaching 29 of them -- to move at most 40
     # numbers that are already sitting in one fixed-shape array.
-    iterations = int(step.iterations)
-    curvature_rayleigh_window = jax.device_get(step.curvature_rayleigh_history)
+    iterations = host_int(step.iterations)
+    curvature_rayleigh_window = host_array(step.curvature_rayleigh_history)
     return {
         "newton_cg_iterations": iterations,
-        "newton_cg_termination": int(step.termination),
-        "newton_cg_negative_curvature": bool(step.negative_curvature),
-        "newton_cg_negative_curvature_before_any_step": bool(
+        "newton_cg_termination": host_int(step.termination),
+        "newton_cg_negative_curvature": host_bool(step.negative_curvature),
+        "newton_cg_negative_curvature_before_any_step": host_bool(
             step.negative_curvature_before_any_step
         ),
-        "newton_cg_forcing_eta": float(step.forcing_eta),
-        "newton_cg_initial_residual_norm": float(step.initial_residual_norm),
-        "newton_cg_final_residual_norm": float(step.final_residual_norm),
-        "newton_curvature": float(step.terminal_curvature),
-        "newton_normalized_curvature": float(step.terminal_normalized_curvature),
+        "newton_cg_forcing_eta": host_float(step.forcing_eta),
+        "newton_cg_initial_residual_norm": host_float(step.initial_residual_norm),
+        "newton_cg_final_residual_norm": host_float(step.final_residual_norm),
+        "newton_curvature": host_float(step.terminal_curvature),
+        "newton_normalized_curvature": host_float(
+            step.terminal_normalized_curvature
+        ),
         "newton_curvature_rayleigh_history": tuple(
             float(value) for value in curvature_rayleigh_window[:iterations]
         ),
-        "newton_direction_norm": float(step.direction_norm),
-        "newton_predicted_reduction": float(step.predicted_reduction),
+        "newton_direction_norm": host_float(step.direction_norm),
+        "newton_predicted_reduction": host_float(step.predicted_reduction),
     }
 
 
