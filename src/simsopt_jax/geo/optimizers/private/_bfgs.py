@@ -264,8 +264,16 @@ def _bfgs_accepted_step(
     xrtol_value: float,
     base_identity_host: np.ndarray,
     allow_decreasing_fallback: bool,
+    callback: _BFGSCallback | None = None,
+    progress_callback: _BFGSProgressCallback | None = None,
 ) -> _BFGSResults:
-    """Advance one BFGS step without a solve-length control loop or callback."""
+    """Advance one BFGS step without a solve-length control loop.
+
+    ``callback``/``progress_callback`` are emitted from the accepted branch via
+    ``jax.debug.callback``, which is how traced callers observe iterations. The
+    eager driver leaves them unset because it observes from its host loop, where
+    a raised ``StopIteration`` can still stop the solve.
+    """
 
     gtol_jax = _as_jax_dtype(gtol_value, state.g_k.dtype)
     wolfe_c1 = _as_jax_dtype(1e-4, state.f_k.dtype)
@@ -361,6 +369,9 @@ def _bfgs_accepted_step(
         )
 
     def accepted_step(_operand: object) -> _BFGSResults:
+        _emit_iteration_callbacks(
+            callback, progress_callback, x_kp1, next_k, f_kp1, g_kp1
+        )
         return state._replace(
             converged=converged,
             nfev=next_nfev,
@@ -738,10 +749,7 @@ def _minimize_bfgs_private(
     gtol_value = np.asarray(gtol, dtype=np.dtype(x0.dtype)).item()
     xrtol_value = np.asarray(xrtol, dtype=np.dtype(x0.dtype)).item()
     half_value = np.asarray(0.5, dtype=np.dtype(x0.dtype)).item()
-    wolfe_c1_value = np.asarray(1e-4, dtype=np.dtype(x0.dtype)).item()
-    wolfe_c2_value = np.asarray(0.9, dtype=np.dtype(x0.dtype)).item()
     allow_decreasing_fallback = np.dtype(x0.dtype).itemsize < 8
-    maxiter_value = np.int32(maxiter)
     base_identity_host = np.eye(d, dtype=np.dtype(x0.dtype))
     if initial_state is None:
         initial_H = _eye(d, x0.dtype)
@@ -771,213 +779,74 @@ def _minimize_bfgs_private(
         )
 
     def cond_fun(
-        carry: tuple[_BFGSResults, _BFGSConsts],
+        carry: tuple[_BFGSResults, _BFGSConsts, jax.Array],
     ) -> jax.Array:
-        state, _value_and_grad_consts = carry
-        maxiter_jax = _as_jax_dtype(maxiter_value, _state_dtype(state.k))
+        # ``maxiter_limit`` already carries the counter dtype; ``run_solver``
+        # converts it once before the loop.
+        state, _value_and_grad_consts, maxiter_limit = carry
         return (
             jnp.logical_not(state.converged)
             & jnp.logical_not(state.failed)
-            & (state.k < maxiter_jax)
+            & (state.k < maxiter_limit)
             & jnp.isfinite(state.f_k)
             & jnp.all(jnp.isfinite(state.g_k))
         )
 
     def body_fun(
-        carry: tuple[_BFGSResults, _BFGSConsts],
-    ) -> tuple[_BFGSResults, _BFGSConsts]:
-        state, explicit_value_and_grad_consts = carry
-        gtol_jax = _as_jax_dtype(gtol_value, state.g_k.dtype)
-        wolfe_c1 = _as_jax_dtype(wolfe_c1_value, state.f_k.dtype)
-        wolfe_c2 = _as_jax_dtype(wolfe_c2_value, state.f_k.dtype)
-        p_k = -_dot(state.H_k, state.g_k)
-
-        def explicit_value_and_grad(
-            x: jax.Array,
-        ) -> tuple[jax.Array, jax.Array]:
-            return converted_value_and_grad(x, explicit_value_and_grad_consts)
-
-        def explicit_objective(x: jax.Array) -> jax.Array:
-            value, _gradient = explicit_value_and_grad(x)
-            return value
-
-        if value_and_grad:
-            line_search_results = line_search(
-                explicit_value_and_grad,
-                state.x_k,
-                p_k,
-                old_fval=state.f_k,
-                old_old_fval=state.old_old_fval,
-                gfk=state.g_k,
-                maxiter=line_search_maxiter,
-            )
-        else:
-            line_search_results = line_search(
-                explicit_objective,
-                state.x_k,
-                p_k,
-                old_fval=state.f_k,
-                old_old_fval=state.old_old_fval,
-                gfk=state.g_k,
-                maxiter=line_search_maxiter,
-            )
-        line_search_status = _as_jax_dtype(
-            line_search_results.status,
-            _state_dtype(state.line_search_status),
+        carry: tuple[_BFGSResults, _BFGSConsts, jax.Array],
+    ) -> tuple[_BFGSResults, _BFGSConsts, jax.Array]:
+        state, explicit_value_and_grad_consts, maxiter_limit = carry
+        next_state = _bfgs_accepted_step(
+            state,
+            explicit_value_and_grad_consts,
+            converted_value_and_grad=converted_value_and_grad,
+            line_search=line_search,
+            value_and_grad=value_and_grad,
+            line_search_maxiter=line_search_maxiter,
+            norm=norm,
+            gtol_value=gtol_value,
+            xrtol_value=xrtol_value,
+            base_identity_host=base_identity_host,
+            allow_decreasing_fallback=allow_decreasing_fallback,
+            callback=callback,
+            progress_callback=progress_callback,
         )
-        next_nfev = state.nfev + line_search_results.nfev
-        next_ngev = state.ngev + line_search_results.ngev
-        s_k = line_search_results.a_k * p_k
-        x_kp1 = state.x_k + s_k
-        f_kp1 = line_search_results.f_k
-        g_kp1 = line_search_results.g_k
-        y_k = g_kp1 - state.g_k
-        _rho_k_inv, rho_k, valid_curvature = _bfgs_curvature_terms(
-            s_k,
-            y_k,
-            x_dtype=state.x_k.dtype,
-        )
-
-        sy_k = s_k[:, np.newaxis] * y_k[np.newaxis, :]
-        identity = _as_jax_dtype(base_identity_host, rho_k.dtype)
-        w = identity - rho_k * sy_k
-        H_kp1 = (
-            _einsum("ij,jk,lk", w, state.H_k, w)
-            + rho_k * s_k[:, np.newaxis] * s_k[np.newaxis, :]
-        )
-        H_kp1 = jnp.where(valid_curvature, H_kp1, state.H_k)
-        xrtol_jax = _as_jax_dtype(xrtol_value, state.x_k.dtype)
-        relative_step_converged = (xrtol_jax > _as_jax_dtype(0.0, xrtol_jax.dtype)) & (
-            _norm(s_k) <= xrtol_jax * (xrtol_jax + _norm(x_kp1))
-        )
-        converged = (_norm(g_kp1, ord=norm) < gtol_jax) | relative_step_converged
-        next_k = state.k + _int_scalar(1)
-        dphi_0 = jnp.real(_dot(state.g_k, p_k))
-        dphi_kp1 = jnp.real(_dot(g_kp1, p_k))
-        strong_wolfe = (
-            jnp.isfinite(f_kp1)
-            & jnp.all(jnp.isfinite(g_kp1))
-            & (f_kp1 <= state.f_k + wolfe_c1 * line_search_results.a_k * dphi_0)
-            & (jnp.abs(dphi_kp1) <= -wolfe_c2 * dphi_0)
-        )
-        decreasing_fallback = (
-            allow_decreasing_fallback & jnp.isfinite(f_kp1) & (f_kp1 < state.f_k)
-        )
-        wolfe_failure = (~strong_wolfe) & (~decreasing_fallback)
-        nonfinite_step = (~jnp.isfinite(f_kp1)) | (~jnp.all(jnp.isfinite(g_kp1)))
-        nonfinite_line_search_status = _as_jax_dtype(
-            -1,
-            _state_dtype(state.line_search_status),
-        )
-        failure_line_search_status = jnp.where(
-            line_search_results.failed,
-            line_search_status,
-            jnp.where(
-                wolfe_failure,
-                _as_jax_dtype(0, _state_dtype(state.line_search_status)),
-                line_search_status,
-            ),
-        )
-
-        def nonfinite_step_result(_):
-            return state._replace(
-                converged=_bool_scalar(False),
-                failed=_bool_scalar(True),
-                k=next_k,
-                nfev=next_nfev,
-                ngev=next_ngev,
-                line_search_status=nonfinite_line_search_status,
-            )
-
-        def failed_step(_):
-            return state._replace(
-                converged=_bool_scalar(False),
-                failed=_bool_scalar(True),
-                k=next_k,
-                nfev=next_nfev,
-                ngev=next_ngev,
-                line_search_status=failure_line_search_status,
-            )
-
-        def accepted_step(_):
-            _emit_iteration_callbacks(
-                callback, progress_callback, x_kp1, next_k, f_kp1, g_kp1
-            )
-            return state._replace(
-                converged=converged,
-                nfev=next_nfev,
-                ngev=next_ngev,
-                k=next_k,
-                x_k=x_kp1,
-                f_k=f_kp1,
-                g_k=g_kp1,
-                H_k=H_kp1,
-                old_old_fval=state.f_k,
-                line_search_status=line_search_status,
-            )
-
-        next_state = lax.cond(
-            nonfinite_step,
-            nonfinite_step_result,
-            lambda _: lax.cond(
-                line_search_results.failed | wolfe_failure,
-                failed_step,
-                accepted_step,
-                operand=None,
-            ),
-            operand=None,
-        )
-        return next_state, explicit_value_and_grad_consts
+        return next_state, explicit_value_and_grad_consts, maxiter_limit
 
     def run_solver(
         initial_state: _BFGSResults,
         explicit_value_and_grad_consts: _BFGSConsts,
+        maxiter_limit: jax.Array,
     ) -> _BFGSResults:
-        gtol_jax = _as_jax_dtype(gtol_value, initial_state.g_k.dtype)
-        maxiter_jax = _as_jax_dtype(maxiter_value, _state_dtype(initial_state.k))
-        state, _ = cast(
-            tuple[_BFGSResults, _BFGSConsts],
+        maxiter_jax = _as_jax_dtype(maxiter_limit, _state_dtype(initial_state.k))
+        state, _, _ = cast(
+            tuple[_BFGSResults, _BFGSConsts, jax.Array],
             lax.while_loop(
                 cond_fun,
                 body_fun,
-                (initial_state, explicit_value_and_grad_consts),
+                (initial_state, explicit_value_and_grad_consts, maxiter_jax),
             ),
         )
-        f_final, g_final = converted_value_and_grad(
-            state.x_k,
+        return _bfgs_finalize_state(
+            state,
             explicit_value_and_grad_consts,
+            converted_value_and_grad=converted_value_and_grad,
+            norm=norm,
+            gtol_value=gtol_value,
+            maxiter_value=maxiter_jax,
         )
-        converged_final = jnp.logical_not(state.failed) & (
-            state.converged | (_norm(g_final, ord=norm) < gtol_jax)
-        )
-        state = state._replace(
-            converged=converged_final,
-            nfev=state.nfev + _int_scalar(1),
-            ngev=state.ngev + _int_scalar(1),
-            f_k=_as_jax_dtype(f_final, state.f_k.dtype),
-            g_k=_as_jax_dtype(g_final, state.g_k.dtype),
-        )
-        failed_status = jnp.where(
-            state.line_search_status < _int_scalar(0),
-            _int_scalar(2),
-            _int_scalar(2) + state.line_search_status,
-        )
-        status = jnp.where(
-            state.converged,
-            _int_scalar(0),
-            jnp.where(
-                state.k == maxiter_jax,
-                _int_scalar(1),
-                jnp.where(
-                    state.failed,
-                    failed_status,
-                    _int_scalar(-1),
-                ),
-            ),
-        )
-        return state._replace(status=status)
 
-    if not isinstance(x0, jax.core.Tracer):
+    # Concrete observed solves need the eager driver: only its host loop can
+    # honour a callback that raises ``StopIteration`` (BFGS_STATUS_CALLBACK_STOP)
+    # and only it can report ``memory_analysis``. Traced solves cannot leave the
+    # trace at all, so they stay fused and deliver their (non-stopping)
+    # callbacks from ``body_fun`` through ``jax.debug.callback``.
+    host_observed = (
+        callback is not None
+        or progress_callback is not None
+        or memory_analysis_callback is not None
+    )
+    if host_observed and not isinstance(x0, jax.core.Tracer):
         return _run_bfgs_eager(
             state,
             value_and_grad_consts,
@@ -999,9 +868,7 @@ def _minimize_bfgs_private(
         )
 
     run_solver.__name__ = "bfgs_private_run_solver"
-    can_cache_solver = (
-        adapter is None and callback is None and progress_callback is None
-    )
+    can_cache_solver = adapter is None and not host_observed
     solver = _cached_private_solver(
         fun if can_cache_solver else None,
         cache_key=(
@@ -1013,8 +880,8 @@ def _minimize_bfgs_private(
             int(line_search_maxiter),
             float(gtol_value),
             float(xrtol_value),
-            int(maxiter_value),
+            _closure_constants_signature(value_and_grad_consts),
         ),
         builder=lambda: jax.jit(run_solver),
     )
-    return solver(state, value_and_grad_consts)
+    return solver(state, value_and_grad_consts, _int_scalar(maxiter))

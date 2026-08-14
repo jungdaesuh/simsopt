@@ -1671,3 +1671,23 @@ archive. This prevents unrelated dirty-tree files from entering the verdict.
   exact resolved Optax version.
 - Use the `2x` warm-time and `1.5x` RSS gates above unless this plan is revised
   before implementation.
+
+## 2026-08-14 amendment
+
+The eager-default and maxiter-in-fused-key contracts recorded above are
+superseded. "Eager is the concrete `_bfgs.py` route" (Current facts and
+evidence limits: "`_bfgs.py` uses a fixed-shape eager step plus host driver
+for concrete inputs") and "the traced route... keeps staged `maxiter` in its
+cache identity" no longer hold: eager is now the observer route, taken only
+when `callback`, `progress_callback`, or `memory_analysis_callback` is
+attached to `_minimize_bfgs_private`; the fused `lax.while_loop` program is
+the concrete (non-traced) default for unobserved solves, and `maxiter` is a
+runtime operand of `run_solver` rather than part of the fused program's cache
+key. Replacing evidence: `tests/jax/solve/test_bfgs_host_fused_gate.py`
+(routing gate, bitwise iterate/counter parity between the two drivers, and
+cache reuse across `maxiter` budgets) and
+`tests/jax/solve/test_lbfgsb_dispatch_run_mode.py` (the analogous
+observer-driven computed default for the `Driver.SIMSOPT_LBFGSB` dispatch
+lane). Checked items above that describe eager as the unconditional concrete
+BFGS route (e.g. Phase 2's "Route ordinary eager calls through the host
+driver") are historical: they record the pre-2026-08-14 contract.

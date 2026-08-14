@@ -30,6 +30,9 @@ WORKFLOW_STAGES = (
     "evaluate_final_flux_geometry_frame_and_gradient",
 )
 _TAYLOR_EPSILONS = (1.0e-3, 1.0e-4, 1.0e-5, 1.0e-6, 1.0e-7, 1.0e-8)
+# Published states report the unscaled objective; only the solve and its Taylor
+# evidence use the configured ``objective_scale``.
+_PUBLISHED_OBJECTIVE_SCALE = 1.0
 
 
 def _configuration(scale: ExecutionScale) -> dict[str, object]:
@@ -405,7 +408,7 @@ def _jax(
     from simsopt_jax.solve.driver import Driver
     from simsopt_jax.solve.serial import (
         TraceableArrayFunction,
-        TraceableScalarProblem,
+        TraceableParametricScalarProblem,
         serial_solve_jax,
     )
     from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
@@ -435,16 +438,25 @@ def _jax(
     device = get_runtime_jax_device()
     scale = _configuration_float(bundle, "objective_scale")
 
-    def scaled_objective(parameters: jax.Array) -> jax.Array:
-        return scale * objective(parameters)
+    def scaled_objective(
+        parameters: jax.Array,
+        objective_scale: jax.Array,
+    ) -> jax.Array:
+        return objective_scale * objective(parameters)
+
+    def objective_scale_parameter(value: float) -> jax.Array:
+        return jax.device_put(np.asarray(value, dtype=np.float64), device)
 
     initial_parameters = jax.device_put(arrays["initial_parameters"], device)
-    reporting_problem = TraceableScalarProblem(objective, initial_parameters)
-    scaled_problem = TraceableScalarProblem(scaled_objective, initial_parameters)
+    problem = TraceableParametricScalarProblem(
+        objective_fn=scaled_objective,
+        objective_parameter=objective_scale_parameter(_PUBLISHED_OBJECTIVE_SCALE),
+        x=initial_parameters,
+    )
     diagnostics_program = TraceableArrayFunction(diagnostics, initial_parameters)
 
     def state(prefix: str, parameters: jax.Array) -> dict[str, np.ndarray]:
-        objective_value, gradient = reporting_problem.value_and_grad(parameters)
+        objective_value, gradient = problem.value_and_grad(parameters)
         diagnostic_values = diagnostics_program(parameters)
         published = jax.device_get(
             (parameters, objective_value, gradient, diagnostic_values)
@@ -463,7 +475,8 @@ def _jax(
 
     initial_values = state("initial", initial_parameters)
     direction = jax.device_put(arrays["taylor_direction"], device)
-    _initial_scaled, initial_scaled_gradient = scaled_problem.value_and_grad(
+    problem.set_objective_parameter(objective_scale_parameter(scale))
+    _initial_scaled, initial_scaled_gradient = problem.value_and_grad(
         initial_parameters
     )
     directional_derivative = jnp.vdot(initial_scaled_gradient, direction)
@@ -473,13 +486,13 @@ def _jax(
     )
 
     def taylor_error(epsilon: jax.Array) -> jax.Array:
-        plus = scaled_problem.objective(initial_parameters + epsilon * direction)
-        minus = scaled_problem.objective(initial_parameters - epsilon * direction)
+        plus = problem.objective(initial_parameters + epsilon * direction)
+        minus = problem.objective(initial_parameters - epsilon * direction)
         return (plus - minus) / (epsilon + epsilon) - directional_derivative
 
     taylor_errors_device = jax.vmap(taylor_error)(epsilons)
     result = serial_solve_jax(
-        scaled_problem,
+        problem,
         driver=Driver.SIMSOPT_LBFGSB,
         max_steps=_configuration_int(bundle, "max_steps"),
         maxcor=min(_configuration_int(bundle, "max_steps"), 400),
@@ -487,7 +500,10 @@ def _jax(
         atol=_configuration_float(bundle, "atol"),
         require_success=False,
     )
-    final_values = state("final", scaled_problem.x)
+    problem.set_objective_parameter(
+        objective_scale_parameter(_PUBLISHED_OBJECTIVE_SCALE)
+    )
+    final_values = state("final", problem.x)
     taylor_errors = np.asarray(
         jax.device_get(taylor_errors_device),
         dtype=np.float64,

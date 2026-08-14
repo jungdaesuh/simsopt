@@ -793,6 +793,47 @@ def _dense_bfgs_update_memory_analysis(
     }
 
 
+def _bfgs_compiled_step_memory_analysis(
+    fixture_case: Fixture,
+    x0: np.ndarray,
+) -> dict[str, int]:
+    """Measure the compiled BFGS step's XLA buffers on an untimed probe solve.
+
+    Only the eager host driver can report them, so the report cannot come from
+    a timed solve without pinning the benchmark to the observer route instead of
+    the production fused program.  The probe therefore drives the private solver
+    directly instead of routing through :func:`_run_custom`: none of the timed
+    lane's plumbing (the cacheable-objective marker, the transfer audit, the
+    accepted-incumbent host controller) belongs to a measurement that only reads
+    one lowered step.  One iteration is enough: the reporter fires on the first
+    transition and the step's buffers do not depend on the budget.
+    """
+
+    fused_value_and_grad = fixture_case.value_and_grad
+    objective = fused_value_and_grad or fixture_case.objective
+    memory_analysis: dict[str, int] | None = None
+
+    def record_memory_analysis(report: dict[str, int]) -> None:
+        nonlocal memory_analysis
+        memory_analysis = dict(report)
+
+    _minimize_bfgs_private(
+        objective,
+        jnp.asarray(x0, dtype=jnp.float64),
+        maxiter=1,
+        gtol=_SOLVER_GTOL,
+        x_dtype=jnp.float64,
+        value_and_grad=fused_value_and_grad is not None,
+        memory_analysis_callback=record_memory_analysis,
+    )
+    if memory_analysis is None:
+        raise RuntimeError(
+            "compiled BFGS step probe reported no memory analysis; the probe "
+            "solve ended before its first transition"
+        )
+    return memory_analysis
+
+
 def _run_custom(
     fixture_case: Fixture,
     x0: np.ndarray,
@@ -811,6 +852,13 @@ def _run_custom(
     dict[str, int] | None,
     AcceptedIncumbentInnerState | None,
 ]:
+    """Execute one custom-provider solve on the route its receipt row names.
+
+    No compiled-step observer is attached here.  The private BFGS solver's compiled-step
+    reporter can only be served by the eager host driver, which would route the
+    solve off the production fused program, so it belongs exclusively to the
+    untimed probe in :func:`_bfgs_compiled_step_memory_analysis`.
+    """
     if prepared is not None:
         if method != "lbfgs":
             raise ValueError("prepared custom programs support only L-BFGS")
@@ -828,12 +876,7 @@ def _run_custom(
     uses_fused_value_and_grad = fused_value_and_grad is not None
     object.__setattr__(objective, "_simsopt_cache_jit_value_and_grad", True)
     x_device = jnp.asarray(x0, dtype=jnp.float64)
-    memory_analysis: dict[str, int] | None = None
     final_incumbent_state: AcceptedIncumbentInnerState | None = None
-
-    def record_memory_analysis(report: dict[str, int]) -> None:
-        nonlocal memory_analysis
-        memory_analysis = dict(report)
 
     with host_transfer_audit() as transfer_audit:
         if method == "bfgs":
@@ -846,7 +889,6 @@ def _run_custom(
                     gtol=_SOLVER_GTOL,
                     x_dtype=jnp.float64,
                     value_and_grad=uses_fused_value_and_grad,
-                    memory_analysis_callback=record_memory_analysis,
                 )
             else:
                 incumbent_controller = incumbent_factory()
@@ -901,7 +943,7 @@ def _run_custom(
         status,
         bool(np.asarray(result.converged)),
         transfer_summary,
-        memory_analysis,
+        None,
         final_incumbent_state,
     )
 
@@ -1241,6 +1283,11 @@ def _measurement(
         if method == "bfgs" and not accepted_incumbent_bfgs
         else None
     )
+    # Only the custom provider's non-incumbent BFGS lane executes the private
+    # solver whose compiled step the probe measures; a native or accepted-
+    # incumbent row could never carry the fields, so the probe solve would be
+    # pure overhead inside that row's RSS phase.
+    reports_compiled_step = provider == "custom" and not accepted_incumbent_bfgs
     if algorithm_memory_contract is not None:
         with _RSSPhase("algorithm_memory_analysis") as memory_phase:
             algorithm_memory_contract.update(
@@ -1249,6 +1296,10 @@ def _measurement(
                     np.dtype(np.float64),
                 )
             )
+            if reports_compiled_step:
+                algorithm_memory_contract.update(
+                    _bfgs_compiled_step_memory_analysis(fixture_case, x0)
+                )
         phase_rss.append(memory_phase.measurement())
     solver_start_rss_kib = _current_rss_kib()
     # One route decision drives preparation, execution, and the persisted
@@ -1342,7 +1393,7 @@ def _measurement(
             status,
             success,
             warm_transfer_audit,
-            warm_memory_analysis,
+            _warm_memory_analysis,
             final_incumbent_state,
         ) = run_once()
         _sync(result)
@@ -1450,9 +1501,6 @@ def _measurement(
         "stopping_reason": stopping_reason,
         "final_parameters": [float(value) for value in final_parameters],
     }
-
-    if algorithm_memory_contract is not None and warm_memory_analysis is not None:
-        algorithm_memory_contract.update(warm_memory_analysis)
 
     transfer_calls = sum(entry.calls for entry in warm_transfer_audit)
     transfer_leaves = sum(entry.leaves for entry in warm_transfer_audit)

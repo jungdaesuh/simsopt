@@ -138,6 +138,36 @@ so no new cross-GPU promotion claim is made here.
   earlier `rollback-rehearsal-20260802.md` covers the pre-fused
   prepared-runtime commits only.
 
+### Dispatch-lane and concrete-BFGS computed routing defaults (2026-08-14)
+
+The `fused_stepwise` migration record above describes the pre-2026-08-14
+state, in which `lbfgs_run_mode` was caller-selected and no public route was
+inferred from anything but explicit opt-in. As of 2026-08-14, two routing
+defaults are computed rather than caller-selected: (1)
+`src/simsopt_jax/solve/dispatch.py`'s `_legacy_lbfgsb_options` now derives
+`lbfgs_run_mode` from observer presence on the typed public `minimize()`
+entry point for `Driver.SIMSOPT_LBFGSB` — `"stepwise"` when a `callback` is
+attached, `"fused_stepwise"` otherwise — so observer-free SIMSOPT_LBFGSB
+solves route to the fused on-device driver by default; the private fused
+gate still fails closed on `callback`, `progress_callback`, or
+`record_optimizer_state_trace`. (2) `src/simsopt_jax/geo/optimizers/private/_bfgs.py`'s
+`_minimize_bfgs_private` now routes concrete (non-traced) UNOBSERVED BFGS
+solves to the cached fused `lax.while_loop` program; the eager host driver
+is reserved for solves carrying a host observer
+(`callback`/`progress_callback`/`memory_analysis_callback`). `maxiter` moved
+from the fused program's cache key to a runtime operand, so changing
+`maxiter` alone reuses the compiled fused program. Both defaults are proven
+bitwise-identical to their respective observer-carrying routes on CPU x64:
+endpoints and counters for the dispatch lane
+(`tests/jax/solve/test_lbfgsb_dispatch_run_mode.py`) and iterates/counters
+for concrete BFGS (`tests/jax/solve/test_bfgs_host_fused_gate.py`). The two
+explicit `lbfgs_run_mode="stepwise"` pins in
+`src/simsopt_jax/examples/strain_optimization.py` and
+`examples/jax/3_Advanced/single_stage_optimization.py` are unaffected caller
+choices — they set the option explicitly and are not subject to the new
+computed default. GPU lanes have not been re-measured under the new
+routing; the evidence above is CPU-only.
+
 ## Migration contracts and live gaps
 
 | Contract | Target requirement | Live status at audited snapshot |

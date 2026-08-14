@@ -1569,19 +1569,60 @@ class _StrictTargetScipyEvaluationProvider(
             )
 
 
+_STRICT_TARGET_LANE_WRAPPER_LOCK = Lock()
+_STRICT_TARGET_LANE_WRAPPER_ATTR = "_simsopt_strict_target_lane_wrapper"
+
+
 def wrap_strict_target_lane_value_and_grad(fun):
-    """Wrap target-lane value/grad calls in the stack-scoped purity guard."""
+    """Wrap target-lane value/grad calls in the stack-scoped purity guard.
+
+    ``functools.wraps`` copies the cacheable marker onto the wrapper, so the
+    wrapper — not ``fun`` — is what the solvers install their compiled-executable
+    caches on. A cacheable ``fun`` therefore memoizes its one guard wrapper, or a
+    per-solve wrapper would drop every compiled solver at the end of each solve.
+    Unmarked callables get a fresh wrapper: ``_cached_private_solver`` never
+    caches for them anyway, and only a marked callable is known to accept the
+    ``setattr`` (same contract as ``mark_cacheable_jit_value_and_grad``).
+    """
     if not target_lane_purity_requested():
         return fun
     if isinstance(fun, TargetScipyEvaluationProvider):
         return _StrictTargetScipyEvaluationProvider(provider=fun)
+    cacheable = bool(getattr(fun, _CACHEABLE_VALUE_AND_GRAD_ATTR, False))
+    if cacheable:
+        memoized = _memoized_strict_target_lane_wrapper(fun)
+        if memoized is not None:
+            return memoized
 
     @wraps(fun)
     def wrapped(*args, **kwargs):
         with strict_target_lane_purity():
             return fun(*args, **kwargs)
 
-    return wrapped
+    if not cacheable:
+        return wrapped
+    # Double-checked install under the wrapper lock. ``fun`` carries the
+    # cacheable marker (the check above gated this branch), so ``setattr``
+    # cannot raise.
+    with _STRICT_TARGET_LANE_WRAPPER_LOCK:
+        memoized = _memoized_strict_target_lane_wrapper(fun)
+        if memoized is not None:
+            return memoized
+        setattr(fun, _STRICT_TARGET_LANE_WRAPPER_ATTR, wrapped)
+        return wrapped
+
+
+def _memoized_strict_target_lane_wrapper(fun):
+    """Return ``fun``'s own memoized guard wrapper, or ``None``.
+
+    ``functools.wraps`` copies the attribute dictionary, so a wrapper of a
+    *different* callable can arrive here through ``fun.__dict__``; reusing it
+    would run the wrong objective. ``__wrapped__`` identity is the discriminator.
+    """
+    memoized = getattr(fun, _STRICT_TARGET_LANE_WRAPPER_ATTR, None)
+    if memoized is None or getattr(memoized, "__wrapped__", None) is not fun:
+        return None
+    return memoized
 
 
 def _cached_jit_value_and_grad(fun):

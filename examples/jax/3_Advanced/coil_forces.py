@@ -3,9 +3,16 @@
 The host builds the native Landreman-Paul surface, regularized coil graph, and
 symmetry-expanded currents.  Quadratic flux, engineering penalties, Lorentz
 force, vacuum energy, gradients, and both optimization stages then execute on
-the selected JAX CPU or GPU.  Fast mode uses bounded-memory SIMSOPT L-BFGS;
-parity mode uses SIMSOPT BFGS.  Only accepted endpoint diagnostics return to
-the host.
+the selected JAX CPU or GPU.  The stage length weight is an explicit device
+parameter, so one compiled graph serves both stages.  Fast mode uses
+bounded-memory SIMSOPT L-BFGS; parity mode uses SIMSOPT BFGS.  Only accepted
+endpoint diagnostics return to the host.
+
+Splitting the length penalty out of the stage objective is bitwise invariant
+against the pre-change formulation (and so is the aligned parity mirror) only
+while the total base-curve length stays under the 17.4 m target and the penalty
+is therefore exactly zero; once it is active the two spellings reassociate the
+same sum and their values differ at the ~1 ULP level.
 """
 
 from __future__ import annotations
@@ -28,26 +35,28 @@ from simsopt_jax.solve.contracts import OptimizerResult
 from simsopt_jax.solve.driver import Driver
 from simsopt_jax.solve.serial import (
     TraceableArrayFunction,
-    TraceableScalarProblem,
+    TraceableParametricScalarProblem,
     serial_solve_jax,
 )
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.objectives import (
     ForceStageTwoConfig,
     force_stage_two_diagnostics,
+    make_force_stage_two_length_penalty,
     make_force_stage_two_objective,
 )
 from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
 
 EXAMPLE_ID = "native-coil-forces"
 NATIVE_ITERATIONS = 400
+FIRST_LENGTH_WEIGHT = 1.0e-3
+SECOND_LENGTH_WEIGHT = 1.0e-4
 TEST_DATA = Path(__file__).resolve().parents[3] / "tests" / "test_files"
 
 
-def _stage_config(length_weight: float) -> StageTwoObjectiveConfig:
+def _stage_config() -> StageTwoObjectiveConfig:
     return StageTwoObjectiveConfig(
         num_base_curves=3,
-        length_weight=length_weight,
         length_target=17.4,
         length_target_mode="max",
         curve_curve_minimum_distance=0.1,
@@ -138,7 +147,7 @@ def _build_problem(
 
 
 def _run_stage(
-    problem: TraceableScalarProblem,
+    problem: TraceableParametricScalarProblem,
     *,
     driver: Driver,
     max_steps: int,
@@ -177,32 +186,39 @@ def solve(
     ) = _build_problem(scale)
     flux_objective = flux.traceable_objective()
     force_config = _force_config()
-    first_objective = make_force_stage_two_objective(
+    stage_config = _stage_config()
+    objective = make_force_stage_two_objective(
         field,
         flux_objective,
         surface_gamma,
         surface_normal,
         target_quadpoints,
         regularizations,
-        _stage_config(1.0e-3),
+        stage_config,
         force_config,
     )
-    second_objective = make_force_stage_two_objective(
-        field,
-        flux_objective,
-        surface_gamma,
-        surface_normal,
-        target_quadpoints,
-        regularizations,
-        _stage_config(1.0e-4),
-        force_config,
-    )
+    length_penalty = make_force_stage_two_length_penalty(field, stage_config)
+
+    def weighted_objective(
+        parameters: jax.Array,
+        length_weight: jax.Array,
+    ) -> jax.Array:
+        return objective(parameters) + length_penalty(parameters, length_weight)
+
     initial_device = jax.device_put(np.asarray(field.x, dtype=np.float64))
-    problem = TraceableScalarProblem(first_objective, initial_device)
+    problem = TraceableParametricScalarProblem(
+        objective_fn=weighted_objective,
+        objective_parameter=jax.device_put(
+            np.asarray(FIRST_LENGTH_WEIGHT, dtype=np.float64)
+        ),
+        x=initial_device,
+    )
     initial_objective_device = problem.objective(initial_device)
     driver = scalar_example_driver()
     first_result = _run_stage(problem, driver=driver, max_steps=max_steps)
-    problem = TraceableScalarProblem(second_objective, problem.x)
+    problem.set_objective_parameter(
+        jax.device_put(np.asarray(SECOND_LENGTH_WEIGHT, dtype=np.float64))
+    )
     second_result = _run_stage(problem, driver=driver, max_steps=max_steps)
     solution_device = jax.block_until_ready(problem.x)
     final_objective_device, gradient_device = problem.value_and_grad(solution_device)

@@ -67,13 +67,28 @@ def _zero(reference: jax.Array) -> jax.Array:
     return jnp.sum(reference[:0])
 
 
-def _length_penalty(total_length: jax.Array, config: StageTwoObjectiveConfig):
+def stage_two_length_penalty(
+    total_length: jax.Array,
+    config: StageTwoObjectiveConfig,
+    length_weight: float | jax.Array,
+) -> jax.Array:
+    """Weigh a total base-curve length against the configured length target.
+
+    The caller supplies the weight instead of the config carrying it, so a
+    device-resident weight can vary without retracing.  The config still owns
+    the target and whether the excess is one-sided.
+
+    ``length_weight`` is authoritative here: ``config.length_weight`` is never
+    read by this helper.  Static callers pass ``config.length_weight`` through
+    explicitly, and the parametric penalty factory requires
+    ``config.length_weight == 0`` so the two spellings cannot disagree.
+    """
     if config.length_target is None:
-        return config.length_weight * total_length
+        return length_weight * total_length
     excess = total_length - config.length_target
     if config.length_target_mode == "max":
         excess = jnp.maximum(excess, 0.0)
-    return 0.5 * config.length_weight * excess * excess
+    return 0.5 * length_weight * excess * excess
 
 
 def stage_two_linking_number(
@@ -123,7 +138,11 @@ def stage_two_geometric_penalty(
 
     if config.length_weight != 0.0:
         lengths = jnp.mean(jnp.linalg.norm(base_gammadash, axis=2), axis=1)
-        result = result + _length_penalty(jnp.sum(lengths), config)
+        result = result + stage_two_length_penalty(
+            jnp.sum(lengths),
+            config,
+            config.length_weight,
+        )
 
     if config.individual_length_weight != 0.0:
         if config.individual_length_target is None:

@@ -155,12 +155,20 @@ def _legacy_minimize_options(options: OptionsBase) -> dict[str, object]:
     return asdict(options)
 
 
-def _legacy_lbfgsb_options(options: ScipyLBFGSBOptions | SimsoptLBFGSBOptions):
+def _legacy_lbfgsb_options(
+    options: SimsoptLBFGSBOptions,
+    *,
+    observes_accepted_steps: bool,
+) -> dict[str, object]:
+    # The fused route runs the whole solve inside one device loop, so it has no
+    # host boundary left to deliver per-iteration events on. Keep the
+    # callback-capable stepwise driver exactly when an observer is attached.
     return {
         "ftol": options.ftol,
         "maxcor": options.maxcor,
         "maxfun": options.maxfun,
         "maxls": options.maxls,
+        "lbfgs_run_mode": "stepwise" if observes_accepted_steps else "fused_stepwise",
     }
 
 
@@ -693,7 +701,10 @@ def minimize(
             method=legacy_target_minimize_method(driver),
             tol=options_used.gtol,
             maxiter=options_used.maxiter,
-            options=_legacy_lbfgsb_options(options_used),
+            options=_legacy_lbfgsb_options(
+                options_used,
+                observes_accepted_steps=callback is not None,
+            ),
             value_and_grad=True,
             callback=legacy_callback,
             progress_callback=legacy_progress_callback,

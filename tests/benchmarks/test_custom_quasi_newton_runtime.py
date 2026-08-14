@@ -25,6 +25,7 @@ from benchmarks.process_gpu_monitor import (
     ProcessGpuMemorySample,
     ProcessGpuMemoryUnavailable,
 )
+from simsopt_jax.geo.optimizers.private._common import _PRIVATE_SOLVER_CACHE_ATTR
 from simsopt_jax.solve.endpoint_certificate import StatusConvention, StoppingReason
 
 
@@ -1165,6 +1166,87 @@ def test_bfgs_memory_analysis_has_a_separate_rss_phase() -> None:
         "cold_solver",
         "warm_solver",
     }
+
+
+def test_timed_custom_bfgs_run_stays_on_the_fused_program() -> None:
+    """A timed custom BFGS solve attaches no observer and compiles ``bfgs``.
+
+    The compiled-step report is the only reason to route a solve onto the eager
+    host driver, and it belongs to the untimed probe; a timed run that carried
+    it would time the observer route instead of the shipped fused program.
+    """
+    fixture_case = fixture("bfgs_quadratic")
+
+    memory_analysis = runtime._run_custom(
+        fixture_case,
+        np.asarray(fixture_case.initial, dtype=np.float64),
+        maxiter=2,
+        maxcor=10,
+        method="bfgs",
+    )[5]
+
+    assert memory_analysis is None
+    cache_keys = {
+        key[0]
+        for key in getattr(fixture_case.objective, _PRIVATE_SOLVER_CACHE_ATTR, {})
+    }
+    assert "bfgs" in cache_keys
+    assert "bfgs-eager-runtime" not in cache_keys
+
+
+def test_custom_bfgs_measurement_reports_the_compiled_step() -> None:
+    fixture_case = fixture("bfgs_quadratic")
+    measurement = runtime._measurement(
+        fixture_case,
+        "custom",
+        "cpu",
+        "parity",
+        np.asarray(fixture_case.initial, dtype=np.float64),
+        maxiter=1,
+        maxcor=10,
+        method="bfgs",
+        fixture_build_seconds=0.0,
+        fixture_build_peak_rss_kib=0,
+    )
+
+    contract = measurement.algorithm_memory_contract
+    assert contract is not None
+    assert contract["compiled_step_peak_live_bytes"] > 0
+    assert set(contract) >= {
+        "compiled_step_argument_bytes",
+        "compiled_step_output_bytes",
+        "compiled_step_alias_bytes",
+        "compiled_step_temp_bytes",
+        "compiled_step_peak_live_bytes",
+    }
+
+
+def test_native_bfgs_measurement_omits_the_compiled_step() -> None:
+    """The native baseline never executes the private solver's compiled step.
+
+    Stamping the custom lane's ``compiled_step_*`` fields onto a native row
+    would attribute buffers of a program that row never ran, and running the
+    probe to obtain them would charge a custom solve to the native row's RSS
+    phase.
+    """
+    fixture_case = fixture("bfgs_quadratic")
+    measurement = runtime._measurement(
+        fixture_case,
+        "native",
+        "cpu",
+        "parity",
+        np.asarray(fixture_case.initial, dtype=np.float64),
+        maxiter=1,
+        maxcor=10,
+        method="bfgs",
+        fixture_build_seconds=0.0,
+        fixture_build_peak_rss_kib=0,
+    )
+
+    contract = measurement.algorithm_memory_contract
+    assert contract is not None
+    assert not [key for key in contract if key.startswith("compiled_step_")]
+    assert not hasattr(fixture_case.objective, _PRIVATE_SOLVER_CACHE_ATTR)
 
 
 def test_measurement_passes_prepared_custom_program_to_both_runs(monkeypatch) -> None:
