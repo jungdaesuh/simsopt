@@ -481,9 +481,21 @@ def test_bfgs_dynamic_maxiter_reuses_eager_executables(monkeypatch) -> None:
 
     monkeypatch.setattr(_bfgs.jax, "jit", counted_jit)
     x0 = jnp.asarray([1.0, -2.0], dtype=jax.numpy.float64)
-    _bfgs._minimize_bfgs_private(objective, x0, maxiter=2)
+    # ``memory_analysis_callback`` pins the eager route, whose step and finalize
+    # executables this test claims are reused across iteration budgets.
+    _bfgs._minimize_bfgs_private(
+        objective,
+        x0,
+        maxiter=2,
+        memory_analysis_callback=lambda report: None,
+    )
     first_call_jits = jit_calls
-    _bfgs._minimize_bfgs_private(objective, x0, maxiter=7)
+    _bfgs._minimize_bfgs_private(
+        objective,
+        x0,
+        maxiter=7,
+        memory_analysis_callback=lambda report: None,
+    )
 
     assert first_call_jits > 0
     assert jit_calls == first_call_jits
@@ -768,10 +780,14 @@ def test_bfgs_eager_scalar_observation_has_one_host_boundary_per_step(
         return original_host_value(value)
 
     monkeypatch.setattr(_bfgs, "host_value", counted_host_value)
+    # ``memory_analysis_callback`` routes to the eager driver without installing
+    # an observation sink, so the driver materializes the scalar (no iterate)
+    # observation payload this test is about.
     result = _bfgs._minimize_bfgs_private(
         lambda x: 0.5 * jnp.dot(x, x),
         jnp.asarray([1.0, -2.0], dtype=jnp.float64),
         maxiter=1,
+        memory_analysis_callback=lambda report: None,
     )
 
     assert int(result.k) == 1
@@ -849,21 +865,49 @@ def test_lbfgsb_eager_driver_uses_one_status_boundary_per_transition(
     assert calls == 1
 
 
-def test_eager_transfer_audit_separates_initial_advance_and_final_phases() -> None:
+def test_eager_bfgs_transfer_audit_separates_initial_advance_and_final_phases() -> None:
     objective = lambda x: 0.5 * jnp.dot(x, x)
     x0 = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
 
     with host_transfer_audit() as audit:
-        bfgs_state = _bfgs._minimize_bfgs_private(objective, x0, maxiter=2)
-        _result_converters._private_bfgs_result_to_optimize_result(bfgs_state)
-        lbfgs_state = _lbfgs._minimize_lbfgs_private(objective, x0, maxiter=2)
-        _result_converters._private_lbfgs_result_to_optimize_result(lbfgs_state)
+        # The eager driver is required for the "advance" phase to exist at all;
+        # ``memory_analysis_callback`` selects it without adding a sink, which
+        # would relabel the phase "callback".
+        state = _bfgs._minimize_bfgs_private(
+            objective,
+            x0,
+            maxiter=2,
+            memory_analysis_callback=lambda report: None,
+        )
+        _result_converters._private_bfgs_result_to_optimize_result(state)
 
     summary = {entry.phase: entry for entry in audit.summary()}
-    assert summary["initialization"].calls >= 2
-    assert summary["advance"].calls >= 2
-    assert summary["final_result"].calls >= 2
+    assert summary["initialization"].calls >= 1
+    assert summary["advance"].calls >= 1
+    assert summary["final_result"].calls >= 1
     assert all(entry.leaves > 0 and entry.bytes > 0 for entry in summary.values())
+
+
+def test_eager_lbfgs_transfer_audit_separates_advance_and_final_phases() -> None:
+    objective = lambda x: 0.5 * jnp.dot(x, x)
+    x0 = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+
+    with host_transfer_audit() as audit:
+        state = _lbfgs._minimize_lbfgs_private(objective, x0, maxiter=2)
+        _result_converters._private_lbfgs_result_to_optimize_result(state)
+
+    summary = {entry.phase: entry for entry in audit.summary()}
+    assert summary["advance"].calls >= 1
+    assert summary["final_result"].calls >= 1
+    assert summary["initialization"].calls == 0, (
+        "the eager L-BFGS-B driver seeds its state on device; reading an "
+        "initial packet back would be a new host round trip"
+    )
+    assert all(
+        entry.leaves > 0 and entry.bytes > 0
+        for entry in summary.values()
+        if entry.calls > 0
+    )
 
 
 def test_eager_transfer_audit_marks_observer_payload_as_callback_phase() -> None:

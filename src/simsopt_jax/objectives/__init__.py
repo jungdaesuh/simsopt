@@ -14,6 +14,7 @@ from .stage_two import (
     make_stochastic_stage_two_objective,
     stage_two_coil_geometry,
     stage_two_geometric_penalty,
+    stage_two_length_penalty,
     stage_two_linking_number,
     stage_two_planar_topology_values,
 )
@@ -35,6 +36,7 @@ __all__ = (
     "make_stochastic_stage_two_objective",
     "stage_two_coil_geometry",
     "stage_two_geometric_penalty",
+    "stage_two_length_penalty",
     "stage_two_linking_number",
     "stage_two_planar_topology_values",
     "stochastic_flux_mean_from_geometry",

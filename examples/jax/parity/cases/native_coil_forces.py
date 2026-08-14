@@ -390,13 +390,14 @@ def _jax(
     from simsopt_jax.solve.driver import Driver
     from simsopt_jax.solve.serial import (
         TraceableArrayFunction,
-        TraceableScalarProblem,
+        TraceableParametricScalarProblem,
         serial_solve_jax,
     )
     from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
     from simsopt_jax_adapters.objectives import (
         ForceStageTwoConfig,
         force_stage_two_diagnostics,
+        make_force_stage_two_length_penalty,
         make_force_stage_two_objective,
     )
     from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
@@ -485,19 +486,29 @@ def _jax(
     )
     extraction = field.coil_dof_extraction_spec()
 
-    def objective(length_weight: float):
-        return make_force_stage_two_objective(
-            field,
-            flux_objective,
-            surface_gamma,
-            surface_normal,
-            target_quadpoints,
-            regularizations,
-            StageTwoObjectiveConfig(
-                **stage_config,
-                length_weight=length_weight,
-            ),
-            force_config,
+    stage_two_config = StageTwoObjectiveConfig(**stage_config)
+    objective = make_force_stage_two_objective(
+        field,
+        flux_objective,
+        surface_gamma,
+        surface_normal,
+        target_quadpoints,
+        regularizations,
+        stage_two_config,
+        force_config,
+    )
+    length_penalty = make_force_stage_two_length_penalty(field, stage_two_config)
+
+    def weighted_objective(
+        parameters: jax.Array,
+        length_weight: jax.Array,
+    ) -> jax.Array:
+        return objective(parameters) + length_penalty(parameters, length_weight)
+
+    def length_weight_parameter(name: str) -> jax.Array:
+        return jax.device_put(
+            np.asarray(_configuration_float(bundle, name), dtype=np.float64),
+            device,
         )
 
     num_base_curves = _configuration_int(bundle, "num_base_curves")
@@ -529,7 +540,7 @@ def _jax(
     def state(
         prefix: str,
         parameters: jax.Array,
-        problem: TraceableScalarProblem,
+        problem: TraceableParametricScalarProblem,
         state_program: TraceableArrayFunction,
     ):
         objective_value, gradient = problem.value_and_grad(parameters)
@@ -558,7 +569,7 @@ def _jax(
             ),
         )
 
-    def solve(problem: TraceableScalarProblem):
+    def solve(problem: TraceableParametricScalarProblem):
         result = serial_solve_jax(
             problem,
             driver=Driver.SIMSOPT_LBFGSB,
@@ -572,8 +583,11 @@ def _jax(
 
     initial_parameters = jax.device_put(arrays["initial_parameters"], device)
     direction = jax.device_put(arrays["taylor_direction"], device)
-    first_objective = objective(_configuration_float(bundle, "first_length_weight"))
-    first_problem = TraceableScalarProblem(first_objective, initial_parameters)
+    problem = TraceableParametricScalarProblem(
+        objective_fn=weighted_objective,
+        objective_parameter=length_weight_parameter("first_length_weight"),
+        x=initial_parameters,
+    )
     state_program = TraceableArrayFunction(
         state_diagnostics,
         initial_parameters,
@@ -581,10 +595,10 @@ def _jax(
     initial_values = state(
         "initial",
         initial_parameters,
-        first_problem,
+        problem,
         state_program,
     )
-    _initial_value, initial_gradient = first_problem.value_and_grad(initial_parameters)
+    _initial_value, initial_gradient = problem.value_and_grad(initial_parameters)
     directional_derivative = jnp.vdot(initial_gradient, direction)
     epsilons = jax.device_put(
         np.asarray(_TAYLOR_EPSILONS),
@@ -592,20 +606,19 @@ def _jax(
     )
 
     def taylor_error(epsilon: jax.Array) -> jax.Array:
-        plus = first_problem.objective(initial_parameters + epsilon * direction)
-        minus = first_problem.objective(initial_parameters - epsilon * direction)
+        plus = problem.objective(initial_parameters + epsilon * direction)
+        minus = problem.objective(initial_parameters - epsilon * direction)
         return (plus - minus) / (epsilon + epsilon) - directional_derivative
 
     taylor_errors_device = jax.vmap(taylor_error)(epsilons)
-    first_result, first_parameters = solve(first_problem)
-    first_values = state("first", first_parameters, first_problem, state_program)
-    second_objective = objective(_configuration_float(bundle, "second_length_weight"))
-    second_problem = TraceableScalarProblem(second_objective, first_parameters)
-    second_result, final_parameters = solve(second_problem)
+    first_result, first_parameters = solve(problem)
+    first_values = state("first", first_parameters, problem, state_program)
+    problem.set_objective_parameter(length_weight_parameter("second_length_weight"))
+    second_result, final_parameters = solve(problem)
     final_values = state(
         "final",
         final_parameters,
-        second_problem,
+        problem,
         state_program,
     )
     taylor_errors = np.asarray(

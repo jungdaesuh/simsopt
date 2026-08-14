@@ -1256,7 +1256,11 @@ class TestOptimizerAdapterPrivate:
         def quad(x):
             return 0.5 * jnp.dot(x, x)
 
+        def observed_quad(x):
+            return 0.5 * jnp.dot(x, x)
+
         quad._simsopt_cache_jit_value_and_grad = True
+        observed_quad._simsopt_cache_jit_value_and_grad = True
 
         def decreasing_non_wolfe_step(_fun, x, *_args, **_kwargs):
             dtype = x.dtype
@@ -1298,16 +1302,44 @@ class TestOptimizerAdapterPrivate:
         assert tuple(bool(state.failed) for state in states) == (False, False, True)
         cache_keys = tuple(quad._simsopt_cached_private_solver)
         assert len(cache_keys) <= _opt_common._PRIVATE_SOLVER_CACHE_CAPACITY
+        # Both solver namespaces share the runtime-signature layout: key[2] is
+        # the dtype string and key[3] is the x0 shape.
         runtime_keys = {
             (key[2], key[3])
             for key in cache_keys
-            if isinstance(key, tuple) and key and key[0] == "bfgs-eager-runtime"
+            if isinstance(key, tuple) and key and key[0] == "bfgs"
         }
         assert runtime_keys == {
             ("<f4", (1,)),
             ("<f4", (2,)),
             ("<f8", (1,)),
         }
+
+        observed_states = tuple(
+            _private_bfgs._minimize_bfgs_private(
+                observed_quad,
+                jnp.ones(shape, dtype=dtype),
+                maxiter=1,
+                gtol=0.0,
+                x_dtype=dtype,
+                memory_analysis_callback=lambda _report: None,
+            )
+            for dtype, shape in cases
+        )
+
+        assert tuple(bool(state.failed) for state in observed_states) == (
+            False,
+            False,
+            True,
+        )
+        observed_cache_keys = tuple(observed_quad._simsopt_cached_private_solver)
+        assert len(observed_cache_keys) <= _opt_common._PRIVATE_SOLVER_CACHE_CAPACITY
+        eager_runtime_keys = {
+            (key[2], key[3])
+            for key in observed_cache_keys
+            if isinstance(key, tuple) and key and key[0] == "bfgs-eager-runtime"
+        }
+        assert eager_runtime_keys == runtime_keys
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @pytest.mark.parametrize(

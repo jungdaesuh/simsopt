@@ -280,6 +280,16 @@ explicitly and emit that route in their receipts. No route is inferred from
 Promote option 2 only if it passes compilation, parity, transfer, and measured
 warm gates. Otherwise revert it and retain the measured limitation.
 
+**2026-08-14 addendum:** the "no route is inferred" contract above describes
+`--intent`-driven benchmark/application selection of `lbfgs_run_mode` and does
+not extend to the typed public dispatch lane. As of 2026-08-14,
+`src/simsopt_jax/solve/dispatch.py`'s `_legacy_lbfgsb_options` computes
+`lbfgs_run_mode` from observer presence for `Driver.SIMSOPT_LBFGSB` solves —
+`"fused_stepwise"` when no `callback` is attached, `"stepwise"` otherwise —
+so the dispatch lane does infer a route, from observer presence rather than
+from `--intent`. CPU bitwise evidence:
+`tests/jax/solve/test_lbfgsb_dispatch_run_mode.py`.
+
 ## Schema Evolution Contract
 
 | Object | Current | Planned | Promotion rule |

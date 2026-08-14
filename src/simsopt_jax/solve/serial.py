@@ -1,4 +1,10 @@
-"""Backend-neutral serial JAX solves for explicit immutable problems."""
+"""Backend-neutral serial JAX solves for explicit immutable problems.
+
+"Immutable" describes problem structure: the traced objective graph and the
+dtypes and shapes it was built for are fixed when a problem is constructed. The
+published ``x`` and ``objective_parameter`` state is deliberately mutable
+between solves.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +23,7 @@ from simsopt_jax.core._finite_difference import (
     forward_jacobian_shard_map,
     forward_jacobian_vmap,
 )
+from simsopt_jax.geo.optimizers._shared import mark_cacheable_jit_value_and_grad
 from simsopt_jax.runtime.host_boundary import host_array, host_float
 from simsopt_jax.runtime.jaxpr_closure import (
     closure_converted_array_function,
@@ -170,7 +177,9 @@ class TraceableScalarProblem:
             return value
 
         self._solver_objective_fn = solver_objective
-        self._solver_value_and_grad_fn = solver_value_and_grad
+        self._solver_value_and_grad_fn = mark_cacheable_jit_value_and_grad(
+            solver_value_and_grad
+        )
 
     @property
     def dof_size(self) -> int:
@@ -237,7 +246,15 @@ class TraceableParametricScalarProblem:
 
         self.x = x
         self.objective_parameter = objective_parameter
-        self._solver_value_and_grad_fn = solver_value_and_grad
+        # ``set_objective_parameter`` mutates state this callable reads, but the
+        # solver re-hoists it into the compiled program's closure operands on
+        # every solve, so a cached executable still sees the current parameter.
+        # The read is not synchronized against writes: one problem instance
+        # serves one solve at a time, and ``set_objective_parameter`` must not be
+        # called while another thread is solving this problem.
+        self._solver_value_and_grad_fn = mark_cacheable_jit_value_and_grad(
+            solver_value_and_grad
+        )
 
     @property
     def dof_size(self) -> int:

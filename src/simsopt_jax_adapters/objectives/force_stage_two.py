@@ -8,11 +8,12 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 
-from simsopt_jax.objectives import (
+from simsopt_jax.objectives.stage_two import (
     CoilDofExtractionProvider,
     StageTwoObjectiveConfig,
     stage_two_coil_geometry,
     stage_two_geometric_penalty,
+    stage_two_length_penalty,
 )
 from simsopt_jax_adapters.field.force import (
     b2energy_pure,
@@ -173,6 +174,40 @@ def make_force_stage_two_objective(
     return objective
 
 
+def make_force_stage_two_length_penalty(
+    field: CoilDofExtractionProvider,
+    stage_two_config: StageTwoObjectiveConfig,
+) -> Callable[[jax.Array, jax.Array], jax.Array]:
+    """Evaluate the base-curve length penalty for a device-resident weight.
+
+    The returned penalty completes an objective built from the same
+    zero-length-weight config, so one compiled graph serves every weight.
+    """
+    if stage_two_config.length_weight != 0.0:
+        raise ValueError(
+            "Parametric Stage-II length weights are explicit device parameters; "
+            "config length_weight must be zero."
+        )
+    extraction = field.coil_dof_extraction_spec()
+
+    def length_penalty(parameters: jax.Array, length_weight: jax.Array) -> jax.Array:
+        _, gammadash, _, _ = stage_two_coil_geometry(extraction, parameters)
+        lengths = jnp.mean(
+            jnp.linalg.norm(
+                gammadash[: stage_two_config.num_base_curves],
+                axis=2,
+            ),
+            axis=1,
+        )
+        return stage_two_length_penalty(
+            jnp.sum(lengths),
+            stage_two_config,
+            length_weight,
+        )
+
+    return length_penalty
+
+
 def force_stage_two_diagnostics(
     field: CoilDofExtractionProvider,
     target_quadpoints: jax.Array,
@@ -199,5 +234,6 @@ def force_stage_two_diagnostics(
 __all__ = (
     "ForceStageTwoConfig",
     "force_stage_two_diagnostics",
+    "make_force_stage_two_length_penalty",
     "make_force_stage_two_objective",
 )

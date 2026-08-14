@@ -4,7 +4,9 @@ The host constructs the native Landreman-Paul surface and immutable
 multifilament coil topology.  Pack-frame geometry, all filament copies,
 Biot-Savart field evaluation, quadratic flux, engineering penalties,
 gradients, and optimization then execute on the selected JAX CPU or GPU.
-Each shared pack frame is evaluated once per objective call.  Fast mode uses
+Each shared pack frame is evaluated once per objective call.  The objective
+scale is an explicit device parameter, so one compiled graph serves both the
+scaled solve and the published unscaled gradient.  Fast mode uses
 bounded-memory SIMSOPT L-BFGS; parity mode uses SIMSOPT BFGS.
 """
 
@@ -39,7 +41,7 @@ from simsopt_jax.solve.contracts import OptimizerResult
 from simsopt_jax.solve.driver import Driver
 from simsopt_jax.solve.serial import (
     TraceableArrayFunction,
-    TraceableScalarProblem,
+    TraceableParametricScalarProblem,
     serial_solve_jax,
 )
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
@@ -52,6 +54,8 @@ from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
 
 EXAMPLE_ID = "native-stage-two-optimization-finitebuild"
 NATIVE_ITERATIONS = 400
+SOLVE_OBJECTIVE_SCALE = 1.0e-4
+PUBLISHED_OBJECTIVE_SCALE = 1.0
 NUM_BASE_CURVES = 4
 NUM_FILAMENTS_N = 2
 NUM_FILAMENTS_B = 3
@@ -62,7 +66,7 @@ TEST_DATA = Path(__file__).resolve().parents[3] / "tests" / "test_files"
 
 
 def _run_optimizer(
-    problem: TraceableScalarProblem,
+    problem: TraceableParametricScalarProblem,
     *,
     driver: Driver,
     max_steps: int,
@@ -181,11 +185,20 @@ def solve(
         config,
     )
 
-    def scaled_objective(parameters: jax.Array) -> jax.Array:
-        return 1.0e-4 * objective(parameters)
+    def scaled_objective(
+        parameters: jax.Array,
+        objective_scale: jax.Array,
+    ) -> jax.Array:
+        return objective_scale * objective(parameters)
 
     initial_device = jax.device_put(np.asarray(field.x, dtype=np.float64))
-    problem = TraceableScalarProblem(scaled_objective, initial_device)
+    problem = TraceableParametricScalarProblem(
+        objective_fn=scaled_objective,
+        objective_parameter=jax.device_put(
+            np.asarray(SOLVE_OBJECTIVE_SCALE, dtype=np.float64)
+        ),
+        x=initial_device,
+    )
     diagnostics = TraceableArrayFunction(
         function_fn=finite_build_stage_two_diagnostics(
             field,
@@ -201,10 +214,10 @@ def solve(
         max_steps=max_steps,
     )
     solution_device = jax.block_until_ready(problem.x)
-    final_problem = TraceableScalarProblem(objective, solution_device)
-    _final_objective_device, gradient_device = final_problem.value_and_grad(
-        solution_device
+    problem.set_objective_parameter(
+        jax.device_put(np.asarray(PUBLISHED_OBJECTIVE_SCALE, dtype=np.float64))
     )
+    _final_objective_device, gradient_device = problem.value_and_grad(solution_device)
     final_values_device = jax.block_until_ready(diagnostics(solution_device))
     solution = np.asarray(jax.device_get(solution_device), dtype=np.float64)
     gradient = np.asarray(jax.device_get(gradient_device), dtype=np.float64)
