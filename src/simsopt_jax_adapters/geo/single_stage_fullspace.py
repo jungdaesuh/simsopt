@@ -13,6 +13,7 @@ import numpy as np
 from simsopt.configs import get_data
 from simsopt.geo import CurveLength, SurfaceXYZTensorFourier, Volume
 from simsopt.geo.curve import Curve
+from simsopt_jax.backend.dtypes import explicit_device_array
 from simsopt_jax.core.specs import make_surface_xyz_tensor_fourier_spec
 from simsopt_jax.geo._surface_stellsym import stellsym_mask_indices_for_grid_host
 from simsopt_jax.objectives.dynamic_surface_stage_two import (
@@ -116,9 +117,9 @@ def build_single_stage_fullspace_bootstrap() -> SingleStageFullSpaceBootstrap:
         Mapping[str, object],
         boozer_surface.run_code_traceable(
             field.coil_set_spec(),
-            jnp.asarray(surface.get_dofs(), dtype=jnp.float64),
-            jnp.asarray(-0.406, dtype=jnp.float64),
-            jnp.asarray(G0, dtype=jnp.float64),
+            explicit_device_array(surface.get_dofs(), dtype=jnp.float64),
+            explicit_device_array(-0.406, dtype=jnp.float64),
+            explicit_device_array(G0, dtype=jnp.float64),
         ),
     )
     if not host_bool(solve_result["success"]):
@@ -151,15 +152,17 @@ def build_single_stage_fullspace_bootstrap() -> SingleStageFullSpaceBootstrap:
         raise ValueError("NCSX exact Boozer mask must have 254 components")
 
     config = FullSpaceObjectiveConfig(
-        iota_target=jnp.asarray(iota_target, dtype=jnp.float64),
-        major_radius_target=jnp.asarray(major_radius_target, dtype=jnp.float64),
-        length_target=jnp.asarray(length_target, dtype=jnp.float64),
-        volume_target=jnp.asarray(volume_target, dtype=jnp.float64),
-        non_qs_weight=jnp.asarray(1.0, dtype=jnp.float64),
-        residual_weight=jnp.asarray(1.0, dtype=jnp.float64),
-        iota_weight=jnp.asarray(1.0, dtype=jnp.float64),
-        major_radius_weight=jnp.asarray(1.0, dtype=jnp.float64),
-        length_weight=jnp.asarray(1.0, dtype=jnp.float64),
+        iota_target=explicit_device_array(iota_target, dtype=jnp.float64),
+        major_radius_target=explicit_device_array(
+            major_radius_target, dtype=jnp.float64
+        ),
+        length_target=explicit_device_array(length_target, dtype=jnp.float64),
+        volume_target=explicit_device_array(volume_target, dtype=jnp.float64),
+        non_qs_weight=explicit_device_array(1.0, dtype=jnp.float64),
+        residual_weight=explicit_device_array(1.0, dtype=jnp.float64),
+        iota_weight=explicit_device_array(1.0, dtype=jnp.float64),
+        major_radius_weight=explicit_device_array(1.0, dtype=jnp.float64),
+        length_weight=explicit_device_array(1.0, dtype=jnp.float64),
         non_qs_axis=0,
         weight_inv_modB=False,
         length_coil_indices=(0, 1, 2),
@@ -173,16 +176,16 @@ def build_single_stage_fullspace_bootstrap() -> SingleStageFullSpaceBootstrap:
             non_qs_phi,
             non_qs_theta,
         ),
-        exact_mask_indices=jnp.asarray(mask_indices, dtype=jnp.int32),
+        exact_mask_indices=explicit_device_array(mask_indices, dtype=jnp.int32),
         config=config,
         layout=FROZEN_LAYOUT,
     )
     z0 = FROZEN_LAYOUT.pack(
         FullSpaceState(
-            coil_dofs=jnp.asarray(coil_dofs, dtype=jnp.float64),
-            surface_dofs=jnp.asarray(surface_dofs, dtype=jnp.float64),
-            iota=jnp.asarray(iota_target, dtype=jnp.float64),
-            G=jnp.asarray(solved_G, dtype=jnp.float64),
+            coil_dofs=explicit_device_array(coil_dofs, dtype=jnp.float64),
+            surface_dofs=explicit_device_array(surface_dofs, dtype=jnp.float64),
+            iota=explicit_device_array(iota_target, dtype=jnp.float64),
+            G=explicit_device_array(solved_G, dtype=jnp.float64),
         )
     )
     targets = (

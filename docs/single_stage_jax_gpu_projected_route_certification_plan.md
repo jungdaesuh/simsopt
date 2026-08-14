@@ -418,7 +418,13 @@ script beside the nested mirror rather than a rewrite of it. The mirror's value
 is that it reproduces the native example term for term — its correctness file
 asserts that numerically against `examples/3_Advanced/` at 1e-12 relative — and
 switching its formulation in place would have deleted that evidence to satisfy
-a wording point. The new script runs the certified configuration on the same
+a wording point. That evidence is faithful in objective and physics
+(term-for-term, proven by endpoint cross-evaluation); the outer optimizer
+implementation and failed-solve handling differ from native (SIMSOPT BFGS
+reimplementation vs scipy BFGS; NaN-sentinel/accepted-incumbent vs
+1.0e3-with-state-restore), so iterate trajectories are not comparable and the
+parity gate checks endpoint observables only. The new script runs the certified
+configuration on the same
 audited workload, and
 `tests/jax/examples/test_single_stage_boozer_vacuum_projected_route_example.py`
 pins its options to `CERTIFIED_ROUTE_OPTIONS` field for field so the two
@@ -670,7 +676,13 @@ Both halves of §9's phase-3 paragraph are ruled on, not merely described:
 
 * **A new file beside the nested mirror, not a rewrite of it — ACCEPTED.** The
   mirror's value is evidence: its correctness file asserts, numerically at 1e-12
-  relative, that it reproduces `examples/3_Advanced/` term for term. Switching
+  relative, that it reproduces `examples/3_Advanced/` term for term. That
+  evidence is faithful in objective and physics (term-for-term, proven by
+  endpoint cross-evaluation); the outer optimizer implementation and
+  failed-solve handling differ from native (SIMSOPT BFGS reimplementation vs
+  scipy BFGS; NaN-sentinel/accepted-incumbent vs 1.0e3-with-state-restore), so
+  iterate trajectories are not comparable and the parity gate checks endpoint
+  observables only. Switching
   its formulation in place would have deleted that evidence to satisfy a wording
   point, and the wording is satisfied by shipping the coupled formulation
   alongside it. The two spellings are held together by
@@ -687,6 +699,16 @@ Both halves of §9's phase-3 paragraph are ruled on, not merely described:
   root, which §9 forbids. The registration is therefore phase 4 follow-on work,
   and the shipped script's execution evidence at this freeze is its own contract
   test, not a manifest lane.
+  **EXECUTED after the seal — see §12.15.** The re-plumb landed, the entry is
+  registered `ready`, and the lane executes it. One correction to the reasoning
+  recorded above, found by measurement: on a CPU backend the guard's
+  device-to-host leg never fires, because there is no transfer to guard — the
+  reads the CPU lane actually refused were the HOST-TO-DEVICE ones (the line
+  search's trial scale, the empty correction store, the bootstrap's device
+  constants, and — first in execution order, in a lesson earlier than this
+  one — the Newton-polish reporting literals in the Boozer adapter). The
+  device-to-host half is real on the GPU lane, and the same re-plumb closes
+  both.
 
 ---
 
@@ -2462,6 +2484,39 @@ Changes landed after the seal, in that spirit:
   the Gram forward-error contract recorded at
   `factor_certified_gram_projector` with its deferral reason; the supervisor's
   parent CUDA context documented as accepted at the binding site.
+
+* **The host boundary is re-plumbed and the example is a manifest lesson**
+  (§12.7's phase-4 follow-on, executed). Every value the loop reads of an
+  iterate now goes through `simsopt_jax.runtime.host_boundary` and every
+  host-decided number it hands back through `simsopt_jax.backend.dtypes`
+  (`explicit_device_array`) — the line search's trial scale, the empty
+  correction store and the dense curvature identity, plus the bootstrap
+  adapter's device constants and the Newton-polish reporting literals in
+  `simsopt_jax_adapters/geo/boozer_surface.py`. Those last ones are not
+  housekeeping: at `6898b6eda` the strict lane's
+  `boozer-surface-optimization` lesson aborts on exactly that placement, so
+  the same re-plumb is what lets the lane reach its later lessons at all.
+  `examples/jax/manifest.json` registers
+  `single_stage_boozer_vacuum_projected_route.py` as a `ready` lesson, so the
+  strict transfer-guard lane executes it. **Inert, and checked rather than
+  argued:** a bounded full-scale CPU rehearsal at three and six iterations
+  reproduces the pre-change trajectory byte for byte — terminal coordinates
+  `c476054a…` and `ef776f87…` and every non-wall telemetry field of every
+  banked record. The placement change is invisible in the trajectory but not
+  in the build: the same bounded rehearsal compiles 85 executables where the
+  pre-change tree compiled 98, because a COMMITTED correction store stops
+  `apply_quasi_newton_metric` and `_admit_curvature_pair` compiling twice
+  (mistake-book P155). That is a compile count, not a result.
+  The reporting literals are inert on their own terms too, bit
+  for bit wherever the inner objective is finite or NaN; a traced `±inf`
+  objective now reports its residual norm as NaN rather than inf, and every
+  consumer of that field asks only whether it is finite. The example
+  additionally stops publishing `LINE_SEARCH_COLLAPSE` as `status: ok`: it
+  draws up to three attempts and names its own miss (`retry_exhausted`),
+  mirroring §4's protocol at lesson scale. Only a collapse whose OTHER
+  measurements held is redrawn — a collapse that also left the manifold or let
+  the objective rise is a defect, stops the budget, and publishes
+  `unsound_terminal_state`.
 
 None of these is quotable as an improvement to the published result. The
 result is the sealed one, at `b7857e6e8`, on the numbers of §12.14.

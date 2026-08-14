@@ -31,8 +31,8 @@ def test_active_pair_is_the_canonical_exact_mirror_contract() -> None:
     )
     assert runtime.version_pair == (3, 2)
     assert runtime.used_legacy_adapter is False
-    assert len(runtime.examples) == 38
-    assert sum(example.status == "ready" for example in runtime.examples) == 36
+    assert len(runtime.examples) == 39
+    assert sum(example.status == "ready" for example in runtime.examples) == 37
     one_to_one = tuple(
         example for example in runtime.examples if example.teaching_kind == "one_to_one"
     )

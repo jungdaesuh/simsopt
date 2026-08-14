@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import jax
 import jax.numpy as jnp
@@ -1052,3 +1054,112 @@ def test_building_kernels_rejects_a_residual_without_its_model() -> None:
             _sphere_problem,
             options=ProjectedLbfgsOptions(maximum_iterations=3, gauss_newton=True),
         )
+
+
+def test_the_loop_runs_under_a_strict_transfer_guard() -> None:
+    """The host-driven loop is legal where implicit device transfers are refused.
+
+    ``JAX_TRANSFER_GUARD=disallow`` is the environment the repository's strict
+    example lane runs its ready lessons in, and it refuses every IMPLICIT
+    crossing while permitting the explicit ones.  A loop that reads an iterate
+    with a bare ``float()`` or mints its correction store with ``jnp.zeros``
+    is refused there; this one reads through ``runtime.host_boundary`` and
+    places through ``backend.dtypes``, so it runs.  Both arms are exercised
+    because they cross the boundary differently: the certified Newton arm adds
+    the multiplier and Newton--CG reads, the secant arm the store apply.
+    """
+
+    start = _feasible_start()
+    secant_options = ProjectedLbfgsOptions(
+        maximum_iterations=3, feasibility_tolerance=1.0e-10
+    )
+
+    with jax.transfer_guard("disallow"):
+        certified = run_projected_lbfgs(
+            _sphere_problem, start, options=_certified_route_options(3)
+        )
+        secant = run_projected_lbfgs(_sphere_problem, start, options=secant_options)
+
+    for run in (certified, secant):
+        assert run.status is ProjectedLbfgsStatus.ITERATION_LIMIT
+        assert len(run.iterations) == 3
+        assert run.feasibility_inf <= 1.0e-10
+    assert certified.objective < float(_sphere_problem(start)[0])
+
+
+@contextmanager
+def _unrouted_host_reads_refused() -> Iterator[None]:
+    """Make ``float``/``int``/``bool`` of a JAX array raise for the block.
+
+    An unrouted host read in this loop spells itself as one of exactly these
+    three conversions, and a routed one reaches NumPy inside ``host_boundary``
+    before any of them, so refusing them separates the two.  The slots are
+    restored on the way out.
+    """
+
+    array_type = type(jnp.zeros(()))
+    slots = {
+        name: getattr(array_type, name)
+        for name in ("__float__", "__int__", "__bool__")
+    }
+
+    def _refuse(_self: object) -> None:
+        raise AssertionError(
+            "a device value crossed to the host without going through "
+            "simsopt_jax.runtime.host_boundary"
+        )
+
+    for name in slots:
+        setattr(array_type, name, _refuse)
+    try:
+        yield
+    finally:
+        for name, slot in slots.items():
+            setattr(array_type, name, slot)
+
+
+def test_every_iterate_value_the_loop_reads_is_recorded_at_the_boundary() -> None:
+    """Nothing is read behind the host boundary's back, in either arm.
+
+    Guard legality cannot prove this on a CPU backend, where a device-to-host
+    copy is a no-op and an unrouted read is never refused, and two mechanisms
+    are needed because a read can be unrouted in two different spellings.
+
+    A read spelled ``float(value)`` is caught by refusing that conversion for
+    the duration of the run.  A read spelled ``jax.device_get`` is legal
+    either way, so the ledger's own arithmetic catches it, in two shapes.
+    ``_PointScalars`` is the loop's only BATCHED read: it turns eight leaves
+    into one recorded call once per iterate, which pins ``leaves - calls`` at
+    seven per iterate however many single-leaf reads follow.  The Newton--CG
+    Rayleigh window is the loop's only NON-SCALAR read, and no scalar leaf is
+    wider than eight bytes, so bytes above ``8 * leaves`` appear in the arm
+    that reads the window and only there.
+    """
+
+    from simsopt_jax.runtime.host_boundary import host_transfer_audit
+
+    iterations = 3
+    arms = (
+        ("certified", _certified_route_options(iterations), True),
+        (
+            "secant",
+            ProjectedLbfgsOptions(
+                maximum_iterations=iterations, feasibility_tolerance=1.0e-10
+            ),
+            False,
+        ),
+    )
+
+    for arm, options, reads_the_rayleigh_window in arms:
+        with host_transfer_audit() as audit, _unrouted_host_reads_refused():
+            run = run_projected_lbfgs(
+                _sphere_problem, _feasible_start(), options=options
+            )
+
+        summary = audit.summary()
+        leaves = sum(entry.leaves for entry in summary)
+        calls = sum(entry.calls for entry in summary)
+        recorded_bytes = sum(entry.bytes for entry in summary)
+        assert len(run.iterations) == iterations, arm
+        assert leaves - calls == 7 * (iterations + 1), arm
+        assert (recorded_bytes > 8 * leaves) is reads_the_rayleigh_window, arm
