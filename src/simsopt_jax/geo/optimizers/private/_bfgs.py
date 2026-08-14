@@ -520,6 +520,7 @@ def _run_bfgs_eager(
                 int(line_search_maxiter),
                 float(gtol_value),
                 float(xrtol_value),
+                _closure_constants_signature(value_and_grad_consts),
             ),
             builder=lambda: (
                 jax.jit(step_transition),
@@ -784,6 +785,10 @@ def _minimize_bfgs_private(
         # ``maxiter_limit`` already carries the counter dtype; ``run_solver``
         # converts it once before the loop.
         state, _value_and_grad_consts, maxiter_limit = carry
+        # The finiteness terms are the entry guard, not a mid-solve check:
+        # ``_bfgs_accepted_step`` writes ``f_k``/``g_k`` only on an accepted
+        # step and sets ``failed`` on both failure branches, so a
+        # ``failed=False`` non-finite mid-solve state cannot exist.
         return (
             jnp.logical_not(state.converged)
             & jnp.logical_not(state.failed)

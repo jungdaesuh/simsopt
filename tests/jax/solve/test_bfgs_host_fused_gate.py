@@ -188,6 +188,45 @@ def test_traced_fused_solve_matches_the_concrete_eager_solve_bitwise() -> None:
     assert int(traced.status) == int(eager.status)
 
 
+def test_traced_solve_delivers_nonstopping_callbacks_without_changing_iterates() -> (
+    None
+):
+    """The fused program emits traced callbacks and matches the unobserved solve.
+
+    ``_bfgs_accepted_step``'s callback hook is reachable only on the
+    traced-observed path (``jax.debug.callback`` inside the fused loop); this
+    pins that the emissions fire once per accepted step, in order, and leave
+    the iterates byte-identical to the unobserved fused solve.
+    """
+    x0 = _start()
+    unobserved = jax.jit(
+        lambda start: _minimize_bfgs_private(
+            _rosenbrock,
+            start,
+            maxiter=8,
+            gtol=1.0e-14,
+        )
+    )(x0)
+    accepted_iterations: list[int] = []
+    observed = jax.jit(
+        lambda start: _minimize_bfgs_private(
+            _rosenbrock,
+            start,
+            maxiter=8,
+            gtol=1.0e-14,
+            progress_callback=lambda iteration, value, gradient_inf: (
+                accepted_iterations.append(int(iteration))
+            ),
+        )
+    )(x0)
+    jax.block_until_ready(observed.x_k)
+
+    assert accepted_iterations == list(range(1, int(observed.k) + 1))
+    np.testing.assert_array_equal(np.asarray(observed.x_k), np.asarray(unobserved.x_k))
+    assert int(observed.k) == int(unobserved.k)
+    assert int(observed.status) == int(unobserved.status)
+
+
 def _strict_lane_quartic(x: jax.Array) -> jax.Array:
     shifted = x - jnp.asarray([0.5, -1.5, 2.0], dtype=x.dtype)
     return jnp.sum(shifted**2) + 0.25 * jnp.sum(shifted**4)
@@ -238,6 +277,10 @@ def test_concurrent_strict_lane_solves_share_one_guard_wrapper(
     one memoized wrapper answers both threads and owns the compiled solvers —
     rather than proving the lock.  The lock itself is correct by inspection
     against its sibling, ``_cached_private_solver``'s double-checked install.
+    Sharing one problem across the two threads deliberately exceeds the
+    class's one-solve-at-a-time contract: every assertion here is
+    race-insensitive (wrapper identity and cache-key identity; shapes and
+    dtypes never vary), and no solve result is read.
     """
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("SIMSOPT_TARGET_LANE_STRICT", "1")
@@ -256,9 +299,10 @@ def test_concurrent_strict_lane_solves_share_one_guard_wrapper(
 
     monkeypatch.setattr(optimizer, "wraps", synchronized_wraps)
 
+    problem.x = _strict_lane_start()
+
     def solve_once():
         guard = wrap_strict_target_lane_value_and_grad(objective)
-        problem.x = _strict_lane_start()
         serial_solve_jax(
             problem,
             driver=Driver.SIMSOPT_BFGS,
