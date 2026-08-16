@@ -2289,7 +2289,7 @@ def _boozer_penalty_value_and_grad_inputs_cpu_ordered(
     Args:
         parity_policy: ``"production"`` (default) routes through the matmul /
             ``jax.jacfwd`` hot path; ``"cpu_ordered"`` selects the C++-ordered
-            surface kernels in ``surface_fourier_jax_cpu_ordered``. Phase 2
+            surface kernels in ``surface_fourier_cpu_ordered``. Phase 2
             of the bit-identity plan exercises ``"cpu_ordered"``.
 
     Returns:

@@ -543,21 +543,6 @@ def fullspace_physical_coordinates(
     return scaling.bootstrap_anchor + optimizer_coordinates * scaling.variable_scale
 
 
-def fullspace_scaled_constraints(
-    optimizer_coordinates: jax.Array,
-    problem: FullSpaceProblem,
-    scaling: FullSpaceScaling,
-) -> jax.Array:
-    """Return Boozer and volume equalities in their frozen scaled norm."""
-
-    physical_state = fullspace_physical_coordinates(optimizer_coordinates, scaling)
-    evaluation = evaluate_fullspace(physical_state, problem)
-    return (
-        flatten_fullspace_constraints(evaluation.constraints)
-        * scaling.constraint_inverse_scale
-    )
-
-
 def _cfs_p0_value_and_diagnostics(
     optimizer_coordinates: jax.Array,
     problem: FullSpaceProblem,

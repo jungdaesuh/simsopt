@@ -85,6 +85,7 @@ from simsopt_jax.core.specs import (
 )
 from simsopt_jax.core.surface_rzfourier import surface_rz_fourier_spec_from_dofs
 from .boozersurface_jax_test_helpers import _mock_linear_solve_status
+from .pairwise_test_helpers import set_pairwise_penalty_chunk_size
 from .surface_test_helpers import get_exact_surface, get_surface
 
 _MPOL = 1
@@ -502,26 +503,13 @@ def _dense_selected_smoothmin(values, temperature):
     )
 
 
-def _with_pairwise_chunk_size(monkeypatch, chunk_size):
-    monkeypatch.setenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", str(chunk_size))
-    invalidate_backend_cache()
-    # ``pairwise_thresholded_mean_square_distance_pure`` is jitted with
-    # ``chunk_size`` static, and the callers below leave it at ``None`` so the
-    # size is resolved from the environment *inside* the trace.  Clearing only
-    # simsopt_jax's backend cache therefore leaves JAX's executable cache keyed
-    # on ``(chunk_size=None, avals)``, and a second call at a new chunk size
-    # silently replays the first trace -- which would make every dense-vs-chunked
-    # comparison in this module compare a cached path against itself.
-    jax.clear_caches()
-
-
 def test_surface_to_surface_distance_chunking_matches_dense_value_and_grad(
     monkeypatch,
 ):
     gamma1, gamma2 = _surface_pairwise_reduction_inputs()
     minimum_distance = jnp.asarray(0.43, dtype=jnp.float64)
 
-    _with_pairwise_chunk_size(monkeypatch, 0)
+    set_pairwise_penalty_chunk_size(monkeypatch, 0)
     try:
         dense_value, dense_grad = _surface_distance_value_and_grad(
             gamma1,
@@ -529,7 +517,7 @@ def test_surface_to_surface_distance_chunking_matches_dense_value_and_grad(
             minimum_distance,
         )
 
-        _with_pairwise_chunk_size(monkeypatch, 2)
+        set_pairwise_penalty_chunk_size(monkeypatch, 2)
         chunked_value, chunked_grad = _surface_distance_value_and_grad(
             gamma1,
             gamma2,
@@ -567,7 +555,7 @@ def test_surface_to_surface_chunked_path_does_not_call_dense_matrix_api(
     def fail_pairwise_distances(current_gamma1, current_gamma2):
         raise AssertionError("chunked scalar reducer must not materialize dense matrix")
 
-    _with_pairwise_chunk_size(monkeypatch, 2)
+    set_pairwise_penalty_chunk_size(monkeypatch, 2)
     monkeypatch.setattr(
         pairwise_reductions_module,
         "_pairwise_distances",
@@ -591,7 +579,7 @@ def test_surface_to_surface_shortest_distance_chunking_matches_dense(
 ):
     gamma1, gamma2 = _surface_pairwise_reduction_inputs()
 
-    _with_pairwise_chunk_size(monkeypatch, 2)
+    set_pairwise_penalty_chunk_size(monkeypatch, 2)
     try:
         chunked_min = surfaceobjectives_traceable_jax_module.surface_to_surface_shortest_distance_pure(
             gamma1,
@@ -629,7 +617,7 @@ def test_surface_to_surface_chunked_gradient_respects_strict_transfer_guard(
     minimum_distance = jax.device_put(np.asarray(0.43, dtype=np.float64))
     seed = jax.device_put(np.asarray(1.0, dtype=np.float64))
 
-    _with_pairwise_chunk_size(monkeypatch, 2)
+    set_pairwise_penalty_chunk_size(monkeypatch, 2)
     try:
         with jax.transfer_guard("disallow"):
             value, pullback = jax.vjp(
@@ -660,7 +648,7 @@ def test_surface_to_surface_zero_penalty_has_finite_zero_gradient(monkeypatch):
         dtype=jnp.float64,
     ).reshape((3, 1, 3))
 
-    _with_pairwise_chunk_size(monkeypatch, 2)
+    set_pairwise_penalty_chunk_size(monkeypatch, 2)
     try:
         value, grad_gamma1 = jax.value_and_grad(
             lambda current_gamma1: (
@@ -690,7 +678,7 @@ def test_surface_to_surface_chunking_preserves_nan_semantics(monkeypatch):
         dtype=jnp.float64,
     ).reshape((2, 1, 3))
 
-    _with_pairwise_chunk_size(monkeypatch, 0)
+    set_pairwise_penalty_chunk_size(monkeypatch, 0)
     try:
         dense_value = surfaceobjectives_jax_module.surface_to_surface_distance_pure(
             gamma1,
@@ -698,7 +686,7 @@ def test_surface_to_surface_chunking_preserves_nan_semantics(monkeypatch):
             2.0,
         )
 
-        _with_pairwise_chunk_size(monkeypatch, 1)
+        set_pairwise_penalty_chunk_size(monkeypatch, 1)
         chunked_value = surfaceobjectives_jax_module.surface_to_surface_distance_pure(
             gamma1,
             gamma2,
@@ -800,11 +788,11 @@ def test_curve_curve_signed_constraint_chunking_matches_dense_value_and_grad(
             )
         )(current_coil_gamma)
 
-    _with_pairwise_chunk_size(monkeypatch, 0)
+    set_pairwise_penalty_chunk_size(monkeypatch, 0)
     try:
         dense_value, dense_grad = value_and_grad(coil_gamma)
 
-        _with_pairwise_chunk_size(monkeypatch, 2)
+        set_pairwise_penalty_chunk_size(monkeypatch, 2)
         chunked_value, chunked_grad = value_and_grad(coil_gamma)
     finally:
         monkeypatch.delenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", raising=False)
@@ -849,11 +837,11 @@ def test_curve_surface_signed_constraint_chunking_matches_dense_value_and_grad(
             )
         )(current_surface_gamma)
 
-    _with_pairwise_chunk_size(monkeypatch, 0)
+    set_pairwise_penalty_chunk_size(monkeypatch, 0)
     try:
         dense_value, dense_grad = value_and_grad(surface_gamma)
 
-        _with_pairwise_chunk_size(monkeypatch, 2)
+        set_pairwise_penalty_chunk_size(monkeypatch, 2)
         chunked_value, chunked_grad = value_and_grad(surface_gamma)
     finally:
         monkeypatch.delenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", raising=False)
@@ -887,7 +875,7 @@ def test_curve_surface_distance_batch_gradient_respects_strict_transfer_guard(
     surface_normal = jax.device_put(np.full((64, 3), 0.2, dtype=np.float32))
     minimum_distance = jax.device_put(np.asarray(0.05, dtype=np.float32))
 
-    _with_pairwise_chunk_size(monkeypatch, 2)
+    set_pairwise_penalty_chunk_size(monkeypatch, 2)
     try:
         with jax.transfer_guard("disallow"):
             value, pullback = jax.vjp(
@@ -1065,11 +1053,11 @@ def test_surface_surface_signed_constraint_chunking_matches_dense_value_and_grad
             )
         )(current_surface_gamma)
 
-    _with_pairwise_chunk_size(monkeypatch, 0)
+    set_pairwise_penalty_chunk_size(monkeypatch, 0)
     try:
         dense_value, dense_grad = value_and_grad(surface_gamma)
 
-        _with_pairwise_chunk_size(monkeypatch, 2)
+        set_pairwise_penalty_chunk_size(monkeypatch, 2)
         chunked_value, chunked_grad = value_and_grad(surface_gamma)
     finally:
         monkeypatch.delenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", raising=False)
@@ -1117,7 +1105,7 @@ def test_smoothmin_chunked_vjps_respect_strict_transfer_guard(monkeypatch):
     distance_smoothing = jax.device_put(np.asarray(0.05, dtype=np.float64))
     seed = jax.device_put(np.asarray(1.0, dtype=np.float64))
 
-    _with_pairwise_chunk_size(monkeypatch, 2)
+    set_pairwise_penalty_chunk_size(monkeypatch, 2)
     try:
         with jax.transfer_guard("disallow"):
             curve_curve_value, curve_curve_pullback = jax.vjp(
@@ -1215,7 +1203,7 @@ def test_surface_to_surface_distance_production_shape_dense_parity(monkeypatch):
     vessel_gamma = 1.4 * surface_gamma + jnp.asarray([0.05, -0.03, 0.02])
     minimum_distance = jnp.asarray(0.25, dtype=jnp.float64)
 
-    _with_pairwise_chunk_size(monkeypatch, 0)
+    set_pairwise_penalty_chunk_size(monkeypatch, 0)
     try:
         dense_value = surfaceobjectives_jax_module.surface_to_surface_distance_pure(
             surface_gamma,
@@ -1223,7 +1211,7 @@ def test_surface_to_surface_distance_production_shape_dense_parity(monkeypatch):
             minimum_distance,
         )
 
-        _with_pairwise_chunk_size(monkeypatch, 256)
+        set_pairwise_penalty_chunk_size(monkeypatch, 256)
         chunked_value = surfaceobjectives_jax_module.surface_to_surface_distance_pure(
             surface_gamma,
             vessel_gamma,

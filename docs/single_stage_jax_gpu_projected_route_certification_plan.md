@@ -2520,3 +2520,25 @@ Changes landed after the seal, in that spirit:
 
 None of these is quotable as an improvement to the published result. The
 result is the sealed one, at `b7857e6e8`, on the numbers of §12.14.
+
+---
+
+## Addendum (2026-08-16) — post-certification manifest refreeze to 614 entries
+
+A behavior-preserving cleanup pass (dead-code removal, comment corrections,
+scale-gate DRY-homing) refroze the execution-source manifest AFTER the sealed
+result this plan describes. The freeze this document's §"At this freeze"
+narrates (615 entries; src 328 with 327 broad `*.py`) is historical and stands
+as written for the sealed certificate at `b7857e6e8`.
+
+Current live freeze: **614 entries** — benchmarks 117, examples 157, src 327
+(326 broad `*.py` plus `src/simsopt/configs/NCSX.dat`), tests 12, docs 1.
+Membership delta vs the 615 freeze: `src/simsopt/_core/host_transfer_profile.py`
+removed (dead module, zero importers since 2026-06-25).
+
+Disambiguation warning: this 614 is a DIFFERENT manifest from the pre-615
+614-entry authority the sealed certificate cites (`entries_sha256 5a40391f…`,
+which contains `host_transfer_profile.py` and not
+`benchmarks/validate_projected_route_package.py`). The live 614 is
+`entries_sha256 bec20a83…`.
+Match freezes by `entries_sha256`, never by entry count.

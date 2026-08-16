@@ -13,6 +13,10 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from examples.jax._lane_environment import build_execution_environment
+from simsopt.single_stage_boozer_vacuum import (
+    SOUND_BOUNDED_STOPPING_REASONS,
+    scientific_success_for_scale,
+)
 
 ROOT = Path(__file__).resolve().parents[3]
 NATIVE = ROOT / "examples" / "3_Advanced" / "single_stage_boozer_vacuum_optimization.py"
@@ -281,39 +285,57 @@ def test_native_vacuum_single_stage_uses_scipy_bfgs_endpoint_certificate() -> No
     assert "scipy-bfgs" in constants
 
 
-def _scale_gate_source(path: Path) -> str:
-    """Return the mirror's bounded-soundness convention as standalone source."""
-    module = _module(path)
-    constant = next(
-        node
-        for node in module.body
-        if isinstance(node, ast.AnnAssign)
-        and isinstance(node.target, ast.Name)
-        and node.target.id == "SOUND_BOUNDED_STOPPING_REASONS"
-    )
-    function = next(
-        node
-        for node in module.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "scientific_success_for_scale"
-    )
-    return "\n".join((ast.unparse(constant), ast.unparse(function)))
-
-
 def test_both_single_stage_mirrors_share_one_bounded_soundness_convention() -> None:
     """The pair must judge an endpoint by one rule, not two that can drift."""
-    assert _scale_gate_source(NATIVE) == _scale_gate_source(JAX)
-    assert "('converged', 'iteration-limit')" in _scale_gate_source(NATIVE)
+    contract = _module(CONTRACT)
+    tuple_assignments = {
+        node.target.id: ast.literal_eval(node.value)
+        for node in contract.body
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and isinstance(node.value, ast.Tuple)
+    }
+    assert tuple_assignments["SOUND_BOUNDED_STOPPING_REASONS"] == (
+        "converged",
+        "iteration-limit",
+    )
+    assert SOUND_BOUNDED_STOPPING_REASONS == ("converged", "iteration-limit")
+    assert any(
+        isinstance(node, ast.FunctionDef)
+        and node.name == "scientific_success_for_scale"
+        for node in contract.body
+    )
+
+    # Structural drift guard: neither mirror may define the gate function or
+    # bind the stopping-reason constant locally (annotated or plain), and both
+    # must reach the contract module's single copy by import.
+    for path in (NATIVE, JAX):
+        module = _module(path)
+        assert any(
+            isinstance(node, ast.ImportFrom)
+            and node.module == "simsopt.single_stage_boozer_vacuum"
+            and any(
+                alias.name == "scientific_success_for_scale" for alias in node.names
+            )
+            for node in module.body
+        ), path
+        assert not any(
+            isinstance(node, ast.FunctionDef)
+            and node.name == "scientific_success_for_scale"
+            for node in ast.walk(module)
+        ), path
+        bound_names = {
+            node.id
+            for node in ast.walk(module)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+        }
+        assert "SOUND_BOUNDED_STOPPING_REASONS" not in bound_names, path
+        assert "scientific_success_for_scale" not in bound_names, path
 
 
 def test_scale_gate_certifies_convergence_only_at_native_default() -> None:
     """Only the status mapping is scale-aware; native_default stays fail-closed."""
-    namespace: dict[str, object] = {}
-    exec(  # noqa: S102 - executing the mirror's own convention, not external input
-        "from __future__ import annotations\n" + _scale_gate_source(NATIVE),
-        namespace,
-    )
-    gate = namespace["scientific_success_for_scale"]
+    gate = scientific_success_for_scale
     sound = {
         "accepted_step": True,
         "inner_success": True,

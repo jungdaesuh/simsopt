@@ -89,18 +89,6 @@ _VALID_DEFAULT_RESIDENCIES = ("device", "host")
 _VALID_DEFAULT_OPTIMIZER_BACKENDS = ("scipy", "ondevice")
 _VALID_GPU_ALLOCATORS = ("platform", "vmm")
 _VALID_TF_GPU_ALLOCATORS = ("cuda_malloc_async",)
-_VALID_SHARDING_STRATEGIES = (
-    "none",
-    "points",
-    "pairwise_rows",
-    "hybrid",
-    "coil_groups",
-    "points_coils",
-)
-_POINT_AXIS_SHARDING_STRATEGIES = frozenset(("points", "pairwise_rows", "hybrid"))
-_POINT_OWNED_SHARDING_STRATEGIES = frozenset(("points", "hybrid", "points_coils"))
-_PAIRWISE_ROW_SHARDING_STRATEGIES = frozenset(("pairwise_rows", "hybrid"))
-_COIL_AXIS_SHARDING_STRATEGIES = frozenset(("coil_groups", "points_coils"))
 _GUARDRAIL_ENV_VARS = (
     _DEBUG_NANS_ENV,
     _TRANSFER_GUARD_ENV,
@@ -131,11 +119,6 @@ _SYNCED_RUNTIME_ENV_VALUES = (
     (_PLATFORM_LEGACY_ENV, "jax_platform"),
     (_JAX_PLATFORMS_ENV, "jax_platforms"),
 )
-_GPU_DETERMINISM_XLA_FLAGS = ("--xla_gpu_exclude_nondeterministic_ops",)
-_STALE_GPU_DETERMINISM_XLA_FLAGS = ("--xla_gpu_deterministic_ops",)
-_CPU_OPT_PRESET_FLAG_NAME = "--xla_cpu_opt_preset"
-_CPU_OPT_PRESET_FAST_COMPILE = f"{_CPU_OPT_PRESET_FLAG_NAME}=FAST_COMPILE"
-
 VALID_BACKEND_MODES: tuple[BackendMode, ...] = (
     "native_cpu",
     "jax_cpu_fast",

@@ -54,7 +54,7 @@ _REQUIRED_ENVIRONMENT: Final = {
 }
 _BROAD_EXECUTION_SOURCE_COUNTS: Final = (
     ("benchmarks", 117),
-    ("src", 327),
+    ("src", 326),
     ("examples", 157),
 )
 

@@ -45,7 +45,6 @@ from simsopt_jax_adapters.geo.curve_objectives import (
     LinkingNumberJAX,
     MeanSquaredCurvatureJAX,
     cc_distance_barrier_pure,
-    cs_distance_pure,
     curvature_barrier_pure,
 )
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
@@ -69,20 +68,19 @@ from simsopt_jax.core import (
 from simsopt_jax.core.curve_geometry import (
     _curve_geometry_with_third_derivative_from_dofs,
 )
+from simsopt_jax.core import curve_kernels as curve_kernels_module
+from simsopt_jax.core._pairwise_reductions import _use_dense_pairwise_path
 from simsopt_jax.core.curve_kernels import curve_surface_distance_penalty_pure
 from simsopt_jax.core.framedcurve import frenet_frame
 from simsopt_jax_adapters.geo.curve_specs import curve_spec_from_adapter_curve
+
+from .pairwise_test_helpers import set_pairwise_penalty_chunk_size
 
 
 _DIRECT_KERNEL = parity_ladder_tolerances("direct_kernel")
 _FD_GRADIENT = parity_ladder_tolerances("fd-gradient")
 _RTOL = _DIRECT_KERNEL["rtol"]
 _ATOL = _DIRECT_KERNEL["atol"]
-
-
-def _set_pairwise_penalty_chunk_size(monkeypatch, chunk_size: int) -> None:
-    monkeypatch.setenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", str(chunk_size))
-    invalidate_backend_cache()
 
 
 def test_geo_pairwise_module_reexports_core_owner() -> None:
@@ -92,6 +90,31 @@ def test_geo_pairwise_module_reexports_core_owner() -> None:
     assert (
         geo_pairwise.pairwise_thresholded_mean_square_distance_pure
         is core_pairwise.pairwise_thresholded_mean_square_distance_pure
+    )
+
+
+def test_use_dense_pairwise_path_pins_the_chunking_boundary() -> None:
+    assert _use_dense_pairwise_path(64, 64, 0), (
+        "chunk_size=0 disables chunking, so even large point clouds stay dense"
+    )
+    assert _use_dense_pairwise_path(4, 4, 4), (
+        "counts equal to chunk_size fill exactly one block: the boundary is "
+        "inclusive, so the dense path must still be selected"
+    )
+    assert _use_dense_pairwise_path(4, 3, 4), (
+        "counts below chunk_size fit one block and must stay dense"
+    )
+    assert not _use_dense_pairwise_path(5, 4, 4), (
+        "a row count one past chunk_size must select the chunked path"
+    )
+    assert not _use_dense_pairwise_path(4, 5, 4), (
+        "a column count one past chunk_size must select the chunked path"
+    )
+    assert not _use_dense_pairwise_path(5, 5, 4), (
+        "both counts past chunk_size must select the chunked path"
+    )
+    assert _use_dense_pairwise_path(1, 1, 1), (
+        "the smallest enabled chunk_size still sweeps a single-point pair densely"
     )
 
 
@@ -547,30 +570,30 @@ def test_core_curve_surface_distance_dense_and_chunked_value_gradients_match(
             minimum_distance,
         )
 
+    def fail_pairwise_distances(current_curve_gamma, current_surface_gamma):
+        raise AssertionError(
+            "chunked curve-surface penalty must not materialize the dense "
+            "distance matrix"
+        )
+
     try:
-        _set_pairwise_penalty_chunk_size(monkeypatch, 0)
+        set_pairwise_penalty_chunk_size(monkeypatch, 0)
         dense_value, dense_grad = jax.value_and_grad(evaluate)(curve_gamma)
 
-        _set_pairwise_penalty_chunk_size(monkeypatch, 2)
+        set_pairwise_penalty_chunk_size(monkeypatch, 2)
         assert get_pairwise_penalty_chunk_size() == 2
+        monkeypatch.setattr(
+            curve_kernels_module,
+            "_pairwise_distances",
+            fail_pairwise_distances,
+        )
         chunked_value, chunked_grad = jax.value_and_grad(evaluate)(curve_gamma)
-        adapter_value, adapter_grad = jax.value_and_grad(
-            lambda curve_points: cs_distance_pure(
-                curve_points,
-                curve_gammadash,
-                surface_gamma,
-                surface_normal,
-                minimum_distance,
-            )
-        )(curve_gamma)
     finally:
         monkeypatch.delenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", raising=False)
         invalidate_backend_cache()
 
     np.testing.assert_allclose(dense_value, chunked_value, rtol=1e-12, atol=1e-12)
-    np.testing.assert_allclose(chunked_value, adapter_value, rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(dense_grad, chunked_grad, rtol=1e-12, atol=1e-12)
-    np.testing.assert_allclose(chunked_grad, adapter_grad, rtol=1e-12, atol=1e-12)
 
 
 def test_lp_curve_curvature_jax_value_composes_at_the_host_boundary():

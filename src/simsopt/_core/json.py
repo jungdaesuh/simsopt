@@ -108,6 +108,23 @@ def _merge_redirect(base, override):
     return merged
 
 
+def _recursive_as_dict(obj, serial_objs_dict):
+    if isinstance(obj, (list, tuple)):
+        return [_recursive_as_dict(it, serial_objs_dict) for it in obj]
+    if isinstance(obj, dict):
+        return {kk: _recursive_as_dict(vv, serial_objs_dict) for kk, vv in obj.items()}
+    if callable(obj) and not isinstance(obj, GSONable):
+        return _serialize_callable(obj, serial_objs_dict=serial_objs_dict)
+    if hasattr(obj, "as_dict"):
+        name = getattr(obj, "name", str(id(obj)))
+        if name not in serial_objs_dict:
+            # ``obj.as_dict`` mutates ``serial_objs_dict`` in place.
+            serial_obj = obj.as_dict(serial_objs_dict)
+            serial_objs_dict[name] = serial_obj
+        return {"$type": "ref", "value": name}
+    return obj
+
+
 class GSONable:
     """
     This is a mix-in base class specifying an API for GSONable objects. GSON
@@ -172,21 +189,6 @@ class GSONable:
         spec = getfullargspec(self.__class__.__init__)
         args = spec.args
 
-        def recursive_as_dict(obj):
-            if isinstance(obj, (list, tuple)):
-                return [recursive_as_dict(it) for it in obj]
-            if isinstance(obj, dict):
-                return {kk: recursive_as_dict(vv) for kk, vv in obj.items()}
-            if callable(obj) and not isinstance(obj, GSONable):
-                return _serialize_callable(obj, serial_objs_dict=serial_objs_dict)
-            if hasattr(obj, "as_dict"):
-                name = getattr(obj, "name", str(id(obj)))
-                if name not in serial_objs_dict:  # Add the path
-                    serial_obj = obj.as_dict(serial_objs_dict)  # serial_objs is modified in place
-                    serial_objs_dict[name] = serial_obj
-                return {"$type": "ref", "value": name}
-            return obj
-
         for c in args:
             if c != "self":
                 try:
@@ -205,7 +207,7 @@ class GSONable:
                             "determine the dict format. Alternatively, "
                             "you can implement both as_dict and from_dict."
                         )
-                d[c] = recursive_as_dict(a)
+                d[c] = _recursive_as_dict(a, serial_objs_dict)
         if hasattr(self, "kwargs"):
             # type: ignore
             d.update(**getattr(self, "kwargs"))  # pylint: disable=E1101
@@ -220,25 +222,11 @@ class GSONable:
 
     def as_dict2(self, serial_objs_dict):
         """
-        This is a slightly modified version of as_dict method to deal with the cases
-        where the supplied object itself needs to be added to serial_objs_dict.
+        Serialize like ``as_dict`` but for the cases where the supplied object
+        itself needs to be added to ``serial_objs_dict`` (delegates to the
+        shared recursive serializer, which registers ``self`` by reference).
         """
-        def recursive_as_dict(obj):
-            if isinstance(obj, (list, tuple)):
-                return [recursive_as_dict(it) for it in obj]
-            if isinstance(obj, dict):
-                return {kk: recursive_as_dict(vv) for kk, vv in obj.items()}
-            if callable(obj) and not isinstance(obj, GSONable):
-                return _serialize_callable(obj, serial_objs_dict=serial_objs_dict)
-            if hasattr(obj, "as_dict"):
-                name = getattr(obj, "name", str(id(obj)))
-                if name not in serial_objs_dict:  # Add the path
-                    serial_obj = obj.as_dict(serial_objs_dict)  # serial_objs is modified in place
-                    serial_objs_dict[name] = serial_obj
-                return {"$type": "ref", "value": name}
-            return obj
-
-        return recursive_as_dict(self)
+        return _recursive_as_dict(self, serial_objs_dict)
 
     @classmethod
     def from_dict(cls, d, serial_objs_dict, recon_objs):

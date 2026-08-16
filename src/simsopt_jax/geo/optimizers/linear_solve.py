@@ -978,10 +978,20 @@ def _linear_solve_finite(solution, residual):
     return jnp.all(jnp.isfinite(solution)) & jnp.all(jnp.isfinite(residual))
 
 
+# Growth-factor margin on the ``n * eps`` LU backward-error bound used by
+# ``_effective_dense_backward_error_tolerance``. Keeps the acceptance gate a tiny
+# multiple of attainable backward-stability (so degenerate solves with
+# eta ~ O(1) still fail closed by ~10 orders) while admitting backward-stable
+# solves of large, moderately ill-conditioned systems.
 _DENSE_LINEAR_SOLVE_RESIDUAL_DIMENSION_FACTOR = 64.0
 
 _DENSE_LINEAR_SOLVE_SMALL_SOLUTION_FACTOR = 100.0
 
+# Float64 dense solves still need a condition cap below the theoretical
+# ``1 / (n * eps)`` rank threshold at small n: a consistent near-singular
+# system can have machine-small residual but a 1e-4-scale wrong solution at
+# condition estimates around 2e13. Production Boozer adjoint estimates are
+# documented at least two orders below this cap.
 _FLOAT64_DENSE_MATRIX_MAX_CONDITION_ESTIMATE = 1.0e12
 
 

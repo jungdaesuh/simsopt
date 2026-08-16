@@ -381,13 +381,13 @@ class ProblemInvariantContract:
 
 _NATIVE_EXAMPLE = SourceRef(
     path="examples/3_Advanced/single_stage_boozer_vacuum_optimization.py",
-    sha256="cb6f178528a5dce58b7dcd03876fa2764b40c11f30ce3e3343a20df58260288f",
-    symbol="main objective construction",
+    sha256="9e01cb1f51c0354850c1da8148d87f61aa3a2f0fbba78a8aa8816352cd5d4041",
+    symbol="objective construction in solve()",
 )
 _JAX_EXAMPLE = SourceRef(
     path="examples/jax/3_Advanced/single_stage_boozer_vacuum_optimization.py",
-    sha256="67228ba93617fc67574c70e36ed11a22fc49e237f09dc5e62d843b7528300791",
-    symbol="SingleStageConfig and bootstrap",
+    sha256="d0828b93afae28702cce9a20ab70bcc73b1486c971f9d7aa55272629d53a06a6",
+    symbol="solve() and _objective_config()",
 )
 _SURFACE_TERMS = SourceRef(
     path="src/simsopt_jax_adapters/geo/surface_objectives.py",
@@ -401,7 +401,7 @@ _BOOZER_CORE = SourceRef(
 )
 _BOOZER_EXACT = SourceRef(
     path="src/simsopt_jax_adapters/geo/boozer_surface.py",
-    sha256="6d05dfb52d6105bcc698fe30d363d987a2037229d3cfef3a0646fc3ab1e81447",
+    sha256="f0fb4ca3c6345cf07361cb32e9eab93f9520690ce701256e46cb938766823863",
     symbol="exact masked residual and signed volume label",
 )
 
@@ -829,10 +829,6 @@ def fullspace_objective_residual_vector(
         z,
         problem,
     ).objective_residual_vector
-
-
-def fullspace_raw_terms(z: jax.Array, problem: FullSpaceProblem) -> FullSpaceRawTerms:
-    return evaluate_fullspace(z, problem).raw_terms
 
 
 def fullspace_value(z: jax.Array, problem: FullSpaceProblem) -> jax.Array:

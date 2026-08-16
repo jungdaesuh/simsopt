@@ -1,17 +1,8 @@
 """Shared JAX curve-method contract helpers."""
 
-from jax import jvp
 import jax.numpy as jnp
 
 from simsopt_jax.core.specs import make_optimizable_dof_map_spec
-
-
-def _quadpoint_jvp(geometry_fn):
-    return lambda dofs, quadpoints: jvp(
-        lambda qpts: geometry_fn(dofs, qpts),
-        (quadpoints,),
-        (jnp.ones_like(quadpoints),),
-    )[1]
 
 
 def _curve_uses_full_dofs(curve):
