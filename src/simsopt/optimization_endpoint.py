@@ -221,6 +221,17 @@ def _stopping_reason(
     return "failed"
 
 
+def accepted_step_contract(*, iterations: int, initial_stationary: bool) -> bool:
+    """A zero-step endpoint is acceptable only from an already-stationary start.
+
+    Single owner of the rule ``certify_optimization_endpoint`` folds into
+    ``success``; scale-aware gates that name the conjunct explicitly must call
+    this instead of re-deriving it.
+    """
+
+    return iterations > 0 or initial_stationary
+
+
 def certify_optimization_endpoint(
     *,
     provider_success: bool,
@@ -272,7 +283,10 @@ def certify_optimization_endpoint(
             and constraint_norm <= TERMINAL_CONSTRAINT_NORM_ATOL
         )
     )
-    accepted_step_contract = iterations > 0 or initial_stationary
+    accepted_step = accepted_step_contract(
+        iterations=iterations,
+        initial_stationary=initial_stationary,
+    )
     success = bool(
         valid_budget
         and inner_success
@@ -280,7 +294,7 @@ def certify_optimization_endpoint(
         and stopping_reason == "converged"
         and terminal_stationary
         and constraints_satisfied
-        and accepted_step_contract
+        and accepted_step
     )
     return OptimizationEndpointCertificate(
         success=success,

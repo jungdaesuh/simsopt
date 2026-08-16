@@ -8,8 +8,13 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from examples.jax.manifest_runtime import load_runtime_contract_pair
-from examples.jax.parity.arbiter import LaneObservation, arbitrate
+from examples.jax.parity.arbiter import (
+    QUALITY_BAND_VERDICT,
+    LaneObservation,
+    arbitrate,
+)
 from examples.jax.parity.artifacts import read_bytes
+from examples.jax.parity.cases import get_case
 from examples.jax.parity.input_bundle import read_input_bundle
 from examples.jax.parity.provenance import (
     ExecutedSource,
@@ -100,7 +105,8 @@ def audit_published_run(
     run_id = _string(summary, "run_id", "summary")
     if run_id != run_directory.name:
         raise ValueError("summary run_id does not match its directory")
-    if _string(summary, "verdict", "summary") != "pass":
+    summary_verdict = _string(summary, "verdict", "summary")
+    if summary_verdict not in ("pass", QUALITY_BAND_VERDICT):
         raise ValueError("only passing published runs can be audited")
     authoritative = _boolean(summary, "authoritative", "summary")
     if require_authoritative and not authoritative:
@@ -168,7 +174,8 @@ def audit_published_run(
         if case_id in case_ids:
             raise ValueError(f"duplicate case summary: {case_id}")
         case_ids.add(case_id)
-        if _string(case, "verdict", case_id) != "pass":
+        case_verdict = _string(case, "verdict", case_id)
+        if case_verdict not in ("pass", QUALITY_BAND_VERDICT):
             raise ValueError(f"case verdict is not pass: {case_id}")
         expected_input = _string(case, "input_fingerprint", case_id)
         expected_configuration = _string(case, "configuration_fingerprint", case_id)
@@ -277,7 +284,8 @@ def audit_published_run(
             raise ValueError(f"case has no comparisons: {case_id}")
         for comparison_value in comparisons_value:
             comparison = _mapping(comparison_value, "comparison")
-            if not _boolean(comparison, "passed", "comparison"):
+            passed = _boolean(comparison, "passed", "comparison")
+            if case_verdict == "pass" and not passed:
                 raise ValueError(f"failed comparison in passing case: {case_id}")
             comparison_count += 1
         relationship = relationships_by_case.get(case_id)
@@ -288,9 +296,30 @@ def audit_published_run(
             observations,
             required_lanes=frozenset(lanes),
             expected_workflow_stages=relationship.workflow_stages,
+            quality_band=(
+                get_case(case_id).native_default_quality_band
+                if scale_value == "native_default"
+                else None
+            ),
         )
-        if recomputed.verdict != "pass":
-            raise ValueError(f"recomputed comparison verdict is not pass: {case_id}")
+        if recomputed.verdict != case_verdict:
+            raise ValueError(
+                f"recomputed comparison verdict is not {case_verdict}: {case_id}"
+            )
+        recomputed_band_payload = [
+            {
+                "lane": band_result.lane,
+                "observable": band_result.observable,
+                "max_value": band_result.max_value,
+                "observed_value": band_result.observed_value,
+                "passed": band_result.passed,
+            }
+            for band_result in recomputed.quality_band_results
+        ]
+        if case.get("quality_band", []) != recomputed_band_payload:
+            raise ValueError(
+                f"stored quality band differs from recomputation: {case_id}"
+            )
         recomputed_payload = [
             {
                 "phase": comparison.phase,
@@ -310,7 +339,7 @@ def audit_published_run(
         lane_receipt_count=lane_receipt_count,
         comparison_count=comparison_count,
         authoritative=authoritative,
-        verdict="pass",
+        verdict=summary_verdict,
     )
 
 

@@ -381,12 +381,12 @@ class ProblemInvariantContract:
 
 _NATIVE_EXAMPLE = SourceRef(
     path="examples/3_Advanced/single_stage_boozer_vacuum_optimization.py",
-    sha256="38a918767587ca669f62346f863677b031d2e95e56f667d8984d9f970797c059",
+    sha256="cb6f178528a5dce58b7dcd03876fa2764b40c11f30ce3e3343a20df58260288f",
     symbol="main objective construction",
 )
 _JAX_EXAMPLE = SourceRef(
     path="examples/jax/3_Advanced/single_stage_boozer_vacuum_optimization.py",
-    sha256="49ea507ed1ecf2b96f33821f10fd72eeee3b4f64b7e34ba0500e709e8597725f",
+    sha256="67228ba93617fc67574c70e36ed11a22fc49e237f09dc5e62d843b7528300791",
     symbol="SingleStageConfig and bootstrap",
 )
 _SURFACE_TERMS = SourceRef(

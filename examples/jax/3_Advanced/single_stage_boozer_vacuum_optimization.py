@@ -28,6 +28,7 @@ from simsopt.geo import CurveLength, SurfaceXYZTensorFourier, Volume
 from simsopt.geo.curve import Curve
 from simsopt.optimization_endpoint import (
     OptimizationEndpointCertificate,
+    accepted_step_contract,
     certify_optimization_endpoint,
 )
 from simsopt.single_stage_boozer_vacuum import (
@@ -349,8 +350,10 @@ def solve(
     scientific_success = scientific_success_for_scale(
         native_scale=native_scale,
         certificate=endpoint_certificate,
-        accepted_step=int(optimizer_result.k) > 0
-        or endpoint_certificate.initial_stationary,
+        accepted_step=accepted_step_contract(
+            iterations=int(optimizer_result.k),
+            initial_stationary=endpoint_certificate.initial_stationary,
+        ),
         inner_success=inner_success,
         parameters_finite=parameters_finite,
         observables_finite=observables_finite,

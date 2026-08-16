@@ -25,6 +25,7 @@ from simsopt_jax.core.pm_optimization import (
 )
 from simsopt.solve.permanent_magnet_optimization import (
     GPMO,
+    MWPGP_HISTORY_STRIDE_DIVISOR,
     projection_L2_balls,
     prox_l0,
     prox_l1,
@@ -597,12 +598,52 @@ def test_relax_and_split_jax_updates_l0_proxy_for_fixed_outer_steps():
     )
 
 
+def test_relax_and_split_rejects_verbose_max_iter_below_history_stride() -> None:
+    """The CPU wrapper pins the MwPGP verbose history-stride contract.
+
+    ``MwPGP_algorithm`` evaluates ``k % int(max_iter / 5.0)`` when ``verbose``
+    is set, so ``max_iter < 5`` is an integer division by zero in C++ that kills
+    the interpreter with SIGFPE. The wrapper must reject it with a clear error.
+    """
+    cpu_grid = _gpmo_cpu_grid(seed=2035)
+    nu = 5.0
+    reg_l1 = 0.04 / nu
+    cpu_grid.ATA_scale += 1.0 / nu
+
+    with pytest.raises(ValueError, match=r"max_iter >= 5"):
+        relax_and_split(
+            cpu_grid,
+            max_iter=MWPGP_HISTORY_STRIDE_DIVISOR - 1,
+            max_iter_RS=1,
+            epsilon=0.0,
+            min_fb=0.0,
+            nu=nu,
+            reg_l1=reg_l1,
+            verbose=True,
+        )
+
+    # The guard enforces the native history-stride contract rather than a
+    # blanket floor on max_iter: non-verbose runs never evaluate the stride, so
+    # the same iteration count stays legal there.
+    errors, _m_history, _m_proxy_history = relax_and_split(
+        cpu_grid,
+        max_iter=MWPGP_HISTORY_STRIDE_DIVISOR - 1,
+        epsilon=0.0,
+        min_fb=0.0,
+        verbose=False,
+    )
+    assert errors == []
+    assert cpu_grid.m.shape == (cpu_grid.ndipoles * 3,)
+
+
 def test_relax_and_split_jax_outer_loop_stops_inside_scan() -> None:
     cpu_grid = _gpmo_cpu_grid(seed=2033)
     jax_grid = PermanentMagnetGridJAX.from_cpu(_gpmo_cpu_grid(seed=2033))
     nu = 5.0
     reg_l1 = 0.04 / nu
-    n_steps = 3
+    # Verbose MwPGP runs require max_iter >= MWPGP_HISTORY_STRIDE_DIVISOR;
+    # at that value the kernel records every convex iteration.
+    n_steps = MWPGP_HISTORY_STRIDE_DIVISOR
     n_outer = 4
     epsilon_rs = 1.0e9
     cpu_grid.ATA_scale += 1.0 / nu
@@ -698,7 +739,7 @@ def test_relax_and_split_jax_matches_cpu_after_multiple_outer_steps():
     jax_grid = PermanentMagnetGridJAX.from_cpu(_gpmo_cpu_grid(seed=2032))
     nu = 5.0
     reg_l1 = 0.04 / nu
-    n_steps = 4
+    n_steps = MWPGP_HISTORY_STRIDE_DIVISOR
     n_outer = 2
     cpu_grid.ATA_scale += 1.0 / nu
     alpha = 2.0 * (1.0 - 1.0e-5) / cpu_grid.ATA_scale
@@ -748,7 +789,7 @@ def test_relax_and_split_jax_default_epsilon_matches_cpu_early_stop():
     jax_grid = PermanentMagnetGridJAX.from_cpu(_small_rhs_gpmo_cpu_grid(seed=2034))
     nu = 5.0
     reg_l1 = 0.04 / nu
-    n_steps = 4
+    n_steps = MWPGP_HISTORY_STRIDE_DIVISOR
     n_outer = 4
     cpu_grid.ATA_scale += 1.0 / nu
     alpha = 2.0 * (1.0 - 1.0e-5) / cpu_grid.ATA_scale

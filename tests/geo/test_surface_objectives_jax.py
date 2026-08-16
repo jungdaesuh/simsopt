@@ -43,7 +43,6 @@ from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt.field.coil import Current, coils_via_symmetries
 from simsopt.configs.zoo import get_data
 from simsopt.geo.curve import create_equally_spaced_curves
-from simsopt.geo.boozersurface import BoozerSurface
 from simsopt_jax.geo.optimizers import (
     adjoint_linear_solve as adjoint_linear_solve_module,
 )
@@ -64,6 +63,7 @@ from simsopt_jax_adapters.geo.surface_objectives import (
 from simsopt.geo.curveobjectives import cs_distance_pure
 from simsopt.geo.qfmsurface import QfmSurface
 from simsopt_jax.backend import invalidate_backend_cache
+from simsopt_jax.core import _pairwise_reductions as pairwise_reductions_module
 from simsopt_jax.geo._pairwise_reductions import (
     pairwise_min_distance_batched_pure,
     pairwise_min_distance_pure,
@@ -437,9 +437,10 @@ def test_surface_to_surface_pairwise_distances_uses_square_primitive():
         dtype=jnp.float64,
     )
 
-    jaxpr = jax.make_jaxpr(
-        surfaceobjectives_module.surface_to_surface_pairwise_distances
-    )(gamma1, gamma2).jaxpr
+    jaxpr = jax.make_jaxpr(pairwise_reductions_module._pairwise_distances)(
+        gamma1,
+        gamma2,
+    ).jaxpr
     primitive_names = [eqn.primitive.name for eqn in jaxpr.eqns]
 
     assert "square" in primitive_names
@@ -475,7 +476,7 @@ def _surface_pairwise_reduction_inputs():
 def _surface_distance_value_and_grad(gamma1, gamma2, minimum_distance):
     return jax.value_and_grad(
         lambda current_gamma1, current_gamma2: (
-            surfaceobjectives_module.surface_to_surface_distance_pure(
+            surfaceobjectives_jax_module.surface_to_surface_distance_pure(
                 current_gamma1,
                 current_gamma2,
                 minimum_distance,
@@ -504,6 +505,14 @@ def _dense_selected_smoothmin(values, temperature):
 def _with_pairwise_chunk_size(monkeypatch, chunk_size):
     monkeypatch.setenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", str(chunk_size))
     invalidate_backend_cache()
+    # ``pairwise_thresholded_mean_square_distance_pure`` is jitted with
+    # ``chunk_size`` static, and the callers below leave it at ``None`` so the
+    # size is resolved from the environment *inside* the trace.  Clearing only
+    # simsopt_jax's backend cache therefore leaves JAX's executable cache keyed
+    # on ``(chunk_size=None, avals)``, and a second call at a new chunk size
+    # silently replays the first trace -- which would make every dense-vs-chunked
+    # comparison in this module compare a cached path against itself.
+    jax.clear_caches()
 
 
 def test_surface_to_surface_distance_chunking_matches_dense_value_and_grad(
@@ -560,12 +569,12 @@ def test_surface_to_surface_chunked_path_does_not_call_dense_matrix_api(
 
     _with_pairwise_chunk_size(monkeypatch, 2)
     monkeypatch.setattr(
-        surfaceobjectives_module,
-        "surface_to_surface_pairwise_distances",
+        pairwise_reductions_module,
+        "_pairwise_distances",
         fail_pairwise_distances,
     )
     try:
-        value = surfaceobjectives_module.surface_to_surface_distance_pure(
+        value = surfaceobjectives_jax_module.surface_to_surface_distance_pure(
             gamma1,
             gamma2,
             0.43,
@@ -584,17 +593,15 @@ def test_surface_to_surface_shortest_distance_chunking_matches_dense(
 
     _with_pairwise_chunk_size(monkeypatch, 2)
     try:
-        chunked_min = (
-            surfaceobjectives_module.surface_to_surface_shortest_distance_pure(
-                gamma1,
-                gamma2,
-            )
+        chunked_min = surfaceobjectives_traceable_jax_module.surface_to_surface_shortest_distance_pure(
+            gamma1,
+            gamma2,
         )
     finally:
         monkeypatch.setenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", "0")
         invalidate_backend_cache()
 
-    dense_min = surfaceobjectives_module.surface_to_surface_shortest_distance_pure(
+    dense_min = surfaceobjectives_traceable_jax_module.surface_to_surface_shortest_distance_pure(
         gamma1,
         gamma2,
     )
@@ -627,7 +634,7 @@ def test_surface_to_surface_chunked_gradient_respects_strict_transfer_guard(
         with jax.transfer_guard("disallow"):
             value, pullback = jax.vjp(
                 lambda current_gamma1: (
-                    surfaceobjectives_module.surface_to_surface_distance_pure(
+                    surfaceobjectives_jax_module.surface_to_surface_distance_pure(
                         current_gamma1,
                         gamma2,
                         minimum_distance,
@@ -657,7 +664,7 @@ def test_surface_to_surface_zero_penalty_has_finite_zero_gradient(monkeypatch):
     try:
         value, grad_gamma1 = jax.value_and_grad(
             lambda current_gamma1: (
-                surfaceobjectives_module.surface_to_surface_distance_pure(
+                surfaceobjectives_jax_module.surface_to_surface_distance_pure(
                     current_gamma1,
                     gamma2,
                     0.2,
@@ -685,14 +692,14 @@ def test_surface_to_surface_chunking_preserves_nan_semantics(monkeypatch):
 
     _with_pairwise_chunk_size(monkeypatch, 0)
     try:
-        dense_value = surfaceobjectives_module.surface_to_surface_distance_pure(
+        dense_value = surfaceobjectives_jax_module.surface_to_surface_distance_pure(
             gamma1,
             gamma2,
             2.0,
         )
 
         _with_pairwise_chunk_size(monkeypatch, 1)
-        chunked_value = surfaceobjectives_module.surface_to_surface_distance_pure(
+        chunked_value = surfaceobjectives_jax_module.surface_to_surface_distance_pure(
             gamma1,
             gamma2,
             2.0,
@@ -1210,14 +1217,14 @@ def test_surface_to_surface_distance_production_shape_dense_parity(monkeypatch):
 
     _with_pairwise_chunk_size(monkeypatch, 0)
     try:
-        dense_value = surfaceobjectives_module.surface_to_surface_distance_pure(
+        dense_value = surfaceobjectives_jax_module.surface_to_surface_distance_pure(
             surface_gamma,
             vessel_gamma,
             minimum_distance,
         )
 
         _with_pairwise_chunk_size(monkeypatch, 256)
-        chunked_value = surfaceobjectives_module.surface_to_surface_distance_pure(
+        chunked_value = surfaceobjectives_jax_module.surface_to_surface_distance_pure(
             surface_gamma,
             vessel_gamma,
             minimum_distance,
@@ -1930,26 +1937,16 @@ def test_direct_coil_value_helpers_keep_value_as_jax_scalar():
     np.testing.assert_allclose(np.asarray(gradient), np.asarray([3.0, -1.0]))
 
 
-def test_legacy_boozer_transpose_explicitly_hostifies_rhs_under_transfer_guard():
-    rhs = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
-    recorded: dict[str, object] = {}
-
-    class LegacyAdjointState:
-        linearization_kind = "hessian"
-
-        def solve_transpose(self, rhs_host):
-            recorded["rhs"] = rhs_host
-            return rhs_host + 1.0
-
-    with jax.transfer_guard("disallow"):
-        solved = surfaceobjectives_module._solve_boozer_runtime_transpose(
-            LegacyAdjointState(),
-            rhs,
-        )
-
-    assert isinstance(recorded["rhs"], np.ndarray)
-    np.testing.assert_allclose(recorded["rhs"], np.asarray([1.0, -2.0]))
-    np.testing.assert_allclose(solved, np.asarray([2.0, -1.0]))
+# ``test_legacy_boozer_transpose_explicitly_hostifies_rhs_under_transfer_guard``
+# used to sit here.  It pinned a ``_solve_boozer_runtime_transpose`` helper on
+# ``simsopt.geo.surfaceobjectives`` that hostified the RHS and then called a
+# status-less ``adjoint_state.solve_transpose``.  Upstream
+# ``simsopt.geo.surfaceobjectives`` has never exported that symbol (it is absent
+# from ``master`` and from every revision on this branch), and the JAX adapter
+# deliberately replaced the legacy status-less contract with a fail-closed
+# rejection -- see ``_checked_boozer_linear_solve`` and its live green test
+# ``test_checked_boozer_linear_solve_rejects_statusless_solver`` below, which
+# asserts the exact opposite behavior.
 
 
 def test_checked_boozer_linear_solve_rejects_factor_only_state():
@@ -2525,6 +2522,16 @@ def test_traceable_hessian_solve_uses_configured_stabilization_under_jit(
 
 
 def test_traceable_hessian_solve_uses_dense_plu_forward_and_transpose():
+    """Supplied PLU factors must solve both orientations of the live operator.
+
+    ``_traceable_solve_plu_linearization`` is the seam that consumes supplied
+    factors: it applies them as a provisional inverse and certifies the result
+    against the live FP64 operator passed as ``live_matvec``.  A deliberately
+    non-symmetric operator separates the forward and transpose lanes, so it is
+    driven here directly instead of through
+    ``_traceable_solve_linearization`` (whose Hessian branch can only build a
+    symmetric live operator out of a real Boozer penalty objective).
+    """
     matrix = jnp.asarray(
         [
             [3.0, -0.25, 0.5],
@@ -2536,37 +2543,29 @@ def test_traceable_hessian_solve_uses_dense_plu_forward_and_transpose():
     rhs = jnp.asarray([0.2, -0.6, 0.9], dtype=jnp.float64)
     linear_solve_factors = jax.scipy.linalg.lu(matrix)
 
-    forward_solution, forward_success = (
-        surfaceobjectives_traceable_jax_module._traceable_solve_linearization(
-            object(),
-            jnp.zeros_like(rhs),
+    forward_solution, forward_status = (
+        surfaceobjectives_traceable_jax_module._traceable_solve_plu_linearization(
+            linear_solve_factors,
             rhs,
-            coil_set_spec=None,
-            objective_kwargs={},
-            linear_solve_factors=linear_solve_factors,
-            linearization_kind="hessian",
+            live_matvec=lambda vector: matrix @ vector,
             linear_solve_tol=1.0e-10,
-            linear_solve_stab=0.0,
             transpose=False,
         )
     )
-    transpose_solution, transpose_success = (
-        surfaceobjectives_traceable_jax_module._traceable_solve_linearization(
-            object(),
-            jnp.zeros_like(rhs),
+    transpose_solution, transpose_status = (
+        surfaceobjectives_traceable_jax_module._traceable_solve_plu_linearization(
+            linear_solve_factors,
             rhs,
-            coil_set_spec=None,
-            objective_kwargs={},
-            linear_solve_factors=linear_solve_factors,
-            linearization_kind="hessian",
+            live_matvec=lambda vector: matrix.T @ vector,
             linear_solve_tol=1.0e-10,
-            linear_solve_stab=0.0,
             transpose=True,
         )
     )
 
-    assert bool(np.asarray(forward_success)) is True
-    assert bool(np.asarray(transpose_success)) is True
+    assert bool(np.asarray(forward_status.success)) is True
+    assert bool(np.asarray(transpose_status.success)) is True
+    assert int(np.asarray(forward_status.fp64_rebuild_count)) == 0
+    assert int(np.asarray(transpose_status.fp64_rebuild_count)) == 0
     np.testing.assert_allclose(
         np.asarray(forward_solution),
         np.linalg.solve(np.asarray(matrix), np.asarray(rhs)),
@@ -2591,104 +2590,29 @@ def test_traceable_plu_unpack_rejects_unsupported_factor_arity():
         )
 
 
-def test_traceable_hessian_plu_solve_rejects_when_quality_gates_fail(monkeypatch):
-    matrix = jnp.asarray(
-        [
-            [3.0, 0.25],
-            [-0.5, 2.0],
-        ],
-        dtype=jnp.float64,
-    )
-    rhs = jnp.asarray([0.2, -0.6], dtype=jnp.float64)
-    linear_solve_factors = jax.scipy.linalg.lu(matrix)
-    residual_norm_calls = {"count": 0}
-    original_relative_residual_1_norm = linear_solve_module._relative_residual_1_norm
-
-    def relative_residual_1_norm(residual, current_rhs):
-        residual_norm_calls["count"] += 1
-        return original_relative_residual_1_norm(residual, current_rhs)
-
-    monkeypatch.setattr(
-        linear_solve_module,
-        "_forward_error_success",
-        lambda *_args, **_kwargs: jnp.asarray(False),
-    )
-    monkeypatch.setattr(
-        linear_solve_module,
-        "_dense_matrix_backward_error_success",
-        lambda *_args, **_kwargs: jnp.asarray(False),
-    )
-    monkeypatch.setattr(
-        linear_solve_module,
-        "_relative_residual_1_norm",
-        relative_residual_1_norm,
-    )
-
-    _solution, success = (
-        surfaceobjectives_traceable_jax_module._traceable_solve_linearization(
-            object(),
-            jnp.zeros_like(rhs),
-            rhs,
-            coil_set_spec=None,
-            objective_kwargs={},
-            linear_solve_factors=linear_solve_factors,
-            linearization_kind="hessian",
-            linear_solve_tol=1.0e-10,
-            linear_solve_stab=0.0,
-            transpose=False,
-        )
-    )
-
-    assert bool(np.asarray(success)) is False
-    assert residual_norm_calls["count"] == 1
-
-
-def test_traceable_hessian_plu_solve_accepts_backward_error_success(monkeypatch):
-    matrix = jnp.asarray(
-        [
-            [3.0, 0.25],
-            [-0.5, 2.0],
-        ],
-        dtype=jnp.float64,
-    )
-    rhs = jnp.asarray([0.2, -0.6], dtype=jnp.float64)
-    linear_solve_factors = jax.scipy.linalg.lu(matrix)
-    backward_error_calls = {"count": 0}
-
-    def backward_error_success(current_matrix, solution, current_rhs, *, tol):
-        del solution, current_rhs, tol
-        backward_error_calls["count"] += 1
-        np.testing.assert_allclose(np.asarray(current_matrix), np.asarray(matrix))
-        return jnp.asarray(True)
-
-    monkeypatch.setattr(
-        linear_solve_module,
-        "_forward_error_success",
-        lambda *_args, **_kwargs: jnp.asarray(False),
-    )
-    monkeypatch.setattr(
-        linear_solve_module,
-        "_dense_matrix_backward_error_success",
-        backward_error_success,
-    )
-
-    _solution, success = (
-        surfaceobjectives_traceable_jax_module._traceable_solve_linearization(
-            object(),
-            jnp.zeros_like(rhs),
-            rhs,
-            coil_set_spec=None,
-            objective_kwargs={},
-            linear_solve_factors=linear_solve_factors,
-            linearization_kind="hessian",
-            linear_solve_tol=1.0e-10,
-            linear_solve_stab=0.0,
-            transpose=False,
-        )
-    )
-
-    assert bool(np.asarray(success)) is True
-    assert backward_error_calls["count"] == 1
+# ``test_traceable_hessian_plu_solve_rejects_when_quality_gates_fail`` and
+# ``test_traceable_hessian_plu_solve_accepts_backward_error_success`` used to sit
+# here.  Both were removed because two independent contracts they pinned are gone:
+#
+#  * How they actually died: they called ``_traceable_solve_linearization`` with
+#    ``objective_kwargs={}``, and ``da43e5014`` ("certify supplied factors on live
+#    operator") hoisted the inner-objective closure construction *above* the
+#    supplied-factor early return.  ``_traceable_inner_objective_kwargs`` therefore
+#    dereferences the empty mapping and raises ``KeyError: 'quadpoints_phi'``
+#    before any solve runs -- neither test ever reached a quality gate.  The same
+#    commit's replacement coverage is
+#    ``test_stale_supplied_factors_trigger_live_fp64_rebuild`` and
+#    ``test_fp32_supplied_factors_contract_against_live_fp64_operator`` in
+#    ``tests/integration/test_factor_once_adjoint_phase2.py``.
+#  * Why repointing them to the live seam would not have saved them either:
+#    ``_dense_matrix_solve_numerically_safe`` returns the condition-number screen
+#    alone for float64 solves and consults the forward-error bound only on the
+#    float32 lane, so ``_relative_residual_1_norm`` (asserted exactly once) and
+#    ``_dense_matrix_backward_error_success`` (asserted at all) are unreachable
+#    from an FP64 supplied-factor solve.
+#
+# ``test_traceable_hessian_plu_solve_fails_closed_on_ill_conditioned_live_operator``
+# below covers the fail-closed half of the surviving contract.
 
 
 def test_traceable_hessian_plu_solve_is_jittable():
@@ -2705,27 +2629,104 @@ def test_traceable_hessian_plu_solve_is_jittable():
 
     compiled_solve = jax.jit(
         lambda current_rhs: (
-            surfaceobjectives_traceable_jax_module._traceable_solve_linearization(
-                object(),
-                jnp.zeros_like(current_rhs),
+            surfaceobjectives_traceable_jax_module._traceable_solve_plu_linearization(
+                linear_solve_factors,
                 current_rhs,
-                coil_set_spec=None,
-                objective_kwargs={},
-                linear_solve_factors=linear_solve_factors,
-                linearization_kind="hessian",
+                live_matvec=lambda vector: matrix.T @ vector,
                 linear_solve_tol=1.0e-10,
-                linear_solve_stab=0.0,
                 transpose=True,
             )
         )
     )
 
-    solution, success = compiled_solve(rhs)
+    solution, status = compiled_solve(rhs)
 
-    assert bool(np.asarray(success)) is True
+    assert bool(np.asarray(status.success)) is True
     np.testing.assert_allclose(
         np.asarray(solution),
         np.linalg.solve(np.asarray(matrix.T), np.asarray(rhs)),
+        rtol=1.0e-12,
+        atol=1.0e-12,
+    )
+
+
+@pytest.mark.parametrize("transpose", [False, True])
+def test_traceable_hessian_plu_solve_fails_closed_on_ill_conditioned_live_operator(
+    transpose,
+):
+    """An FP64 rebuild must fail closed when the live operator is near-singular.
+
+    Stale supplied factors force the FP64 rebuild branch, and the rebuilt solve
+    is then screened by ``_dense_matrix_solve_numerically_safe``.  On the float64
+    lane that screen is the condition-number test alone (the function returns
+    ``nonsingular`` before the float32-only forward-error bound): a
+    backward-stable solve of a near-singular operator returns a *finite* but
+    forward-garbage solution with a small residual, so residual success alone
+    must not be allowed to certify it.  The
+    near-singular operator below sits at condition ~4e13, past the float64 cap of
+    ``_FLOAT64_DENSE_MATRIX_MAX_CONDITION_ESTIMATE`` (1e12), and must report
+    ``success=False`` even though the returned vector is finite.
+    """
+    stale_factors = jax.scipy.linalg.lu(jnp.eye(2, dtype=jnp.float64))
+    rhs = jnp.asarray([0.75, -0.5], dtype=jnp.float64)
+
+    near_singular = jnp.asarray(
+        [
+            [1.0, 1.0],
+            [1.0, 1.0 + 1.0e-13],
+        ],
+        dtype=jnp.float64,
+    )
+    oriented_near_singular = near_singular.T if transpose else near_singular
+
+    solution, status = (
+        surfaceobjectives_traceable_jax_module._traceable_solve_plu_linearization(
+            stale_factors,
+            rhs,
+            live_matvec=lambda vector: oriented_near_singular @ vector,
+            linear_solve_tol=1.0e-10,
+            transpose=transpose,
+        )
+    )
+
+    assert bool(np.asarray(status.success)) is False
+    assert int(np.asarray(status.fp64_rebuild_count)) == 1
+    # Fail-closed, not fail-noisy: the rejected solve still returns finite
+    # numbers, so ``success`` is the only signal separating it from an accepted
+    # one.  Asserting finiteness keeps the test honest about *why* the gate is
+    # needed -- a NaN would have been caught by the residual check instead.
+    assert np.all(np.isfinite(np.asarray(solution)))
+
+    # Control: the identical stale factors and rebuild path must still certify a
+    # well-conditioned live operator, so the rejection above is attributable to
+    # conditioning rather than to the stale-factor rebuild itself.
+    well_conditioned = jnp.asarray(
+        [
+            [3.0, 0.25],
+            [-0.5, 2.0],
+        ],
+        dtype=jnp.float64,
+    )
+    oriented_well_conditioned = well_conditioned.T if transpose else well_conditioned
+
+    control_solution, control_status = (
+        surfaceobjectives_traceable_jax_module._traceable_solve_plu_linearization(
+            stale_factors,
+            rhs,
+            live_matvec=lambda vector: oriented_well_conditioned @ vector,
+            linear_solve_tol=1.0e-10,
+            transpose=transpose,
+        )
+    )
+
+    assert bool(np.asarray(control_status.success)) is True
+    assert int(np.asarray(control_status.fp64_rebuild_count)) == 1
+    np.testing.assert_allclose(
+        np.asarray(control_solution),
+        np.linalg.solve(
+            np.asarray(oriented_well_conditioned),
+            np.asarray(rhs),
+        ),
         rtol=1.0e-12,
         atol=1.0e-12,
     )
@@ -4456,126 +4457,25 @@ def test_iotas_jax_exact_wrapper_gradient_matches_dense_projection_unit(
     assert residual_rel <= exact_lane["residual_rel_tol"]
 
 
-def test_boozersurface_get_adjoint_runtime_state_wraps_legacy_cpu_contract():
-    captured = {}
-
-    def legacy_vjp(adjoint, passed_booz, iota, G):
-        captured["adjoint"] = np.asarray(adjoint)
-        captured["booz"] = passed_booz
-        captured["iota"] = iota
-        captured["G"] = G
-        return "legacy-derivative"
-
-    fake_booz = types.SimpleNamespace(
-        need_to_run_code=False,
-        res={
-            "PLU": (
-                np.eye(2, dtype=np.float64),
-                np.eye(2, dtype=np.float64),
-                np.eye(2, dtype=np.float64),
-            ),
-            "vjp": legacy_vjp,
-            "iota": 0.23,
-            "G": 1.7,
-            "type": "ls",
-        },
-    )
-
-    adjoint_state = BoozerSurface.get_adjoint_runtime_state(fake_booz)
-
-    assert adjoint_state.linearization_kind == "hessian"
-    assert adjoint_state.decision_size == 2
-    np.testing.assert_allclose(
-        adjoint_state.solve_transpose(np.asarray([1.0, -2.0], dtype=np.float64)),
-        np.asarray([1.0, -2.0], dtype=np.float64),
-    )
-    assert (
-        adjoint_state.project_coil_adjoint_derivative(
-            np.asarray([3.0, 4.0], dtype=np.float64)
-        )
-        == "legacy-derivative"
-    )
-    np.testing.assert_allclose(captured["adjoint"], np.asarray([3.0, 4.0]))
-    assert captured["booz"] is fake_booz
-    assert captured["iota"] == 0.23
-    assert captured["G"] == 1.7
-
-
-def test_solve_boozer_coil_adjoint_derivative_uses_runtime_projection_hook():
-    adjoint_state = types.SimpleNamespace(
-        linearization_kind="hessian",
-        decision_size=2,
-        solve_transpose=lambda rhs: 2.0 * np.asarray(rhs, dtype=np.float64),
-        project_coil_adjoint_derivative=lambda adjoint: (
-            "projected",
-            tuple(np.asarray(adjoint, dtype=np.float64)),
-        ),
-    )
-    fake_booz = types.SimpleNamespace(
-        get_adjoint_runtime_state=lambda: adjoint_state,
-    )
-
-    derivative = surfaceobjectives_module._solve_boozer_coil_adjoint_derivative(
-        fake_booz,
-        np.asarray([1.0, -3.0], dtype=np.float64),
-    )
-
-    assert derivative == ("projected", (2.0, -6.0))
-
-
-def test_major_radius_gradient_uses_boozer_surface_biotsavart_fallback():
-    captured = {}
-
-    class _FakeBiotSavart:
-        def coil_cotangents_to_derivative(self, coil_arrays, coil_group_indices):
-            captured["coil_arrays"] = coil_arrays
-            captured["coil_group_indices"] = coil_group_indices
-            return surfaceobjectives_module.Derivative(
-                {"coil": np.asarray([3.0, -5.0], dtype=np.float64)}
-            )
-
-    fake_surface = types.SimpleNamespace(
-        major_radius=lambda: 7.5,
-        dmajor_radius_by_dcoeff=lambda: np.asarray([1.0, -2.0], dtype=np.float64),
-    )
-    adjoint_state = types.SimpleNamespace(
-        linearization_kind="hessian",
-        decision_size=2,
-        solve_transpose=lambda rhs: np.asarray(rhs, dtype=np.float64),
-        stream_group_vjps=lambda adjoint: iter(
-            [
-                (
-                    np.asarray(adjoint, dtype=np.float64),
-                    (0,),
-                )
-            ]
-        ),
-    )
-    fake_booz = types.SimpleNamespace(
-        need_to_run_code=False,
-        surface=fake_surface,
-        biotsavart=_FakeBiotSavart(),
-        get_adjoint_runtime_state=lambda: adjoint_state,
-    )
-
-    obj = object.__new__(surfaceobjectives_module.MajorRadius)
-    obj.boozer_surface = fake_booz
-    obj.surface = fake_surface
-    obj._J = None
-    obj._dJ = None
-    obj.compute(compute_gradient=True)
-
-    assert obj._J == 7.5
-    assert isinstance(obj._dJ, surfaceobjectives_module.Derivative)
-    np.testing.assert_allclose(
-        obj._dJ.data["coil"],
-        np.asarray([-3.0, 5.0], dtype=np.float64),
-    )
-    np.testing.assert_allclose(
-        np.asarray(captured["coil_arrays"][0], dtype=np.float64),
-        np.asarray([1.0, -2.0], dtype=np.float64),
-    )
-    assert captured["coil_group_indices"] == [(0,)]
+# Three tests used to sit here --
+# ``test_boozersurface_get_adjoint_runtime_state_wraps_legacy_cpu_contract``,
+# ``test_solve_boozer_coil_adjoint_derivative_uses_runtime_projection_hook`` and
+# ``test_major_radius_gradient_uses_boozer_surface_biotsavart_fallback`` -- all
+# pinned an abandoned adjoint-projection design:
+#
+#  * ``adjoint_state.project_coil_adjoint_derivative`` exists nowhere in ``src``.
+#    The live ``_BoozerAdjointRuntimeState`` streams per-group cotangents through
+#    ``stream_group_vjps`` instead, and coil projection happens in
+#    ``_adjoint_coil_dofs_gradient`` / ``coil_dofs_gradient_to_derivative``.
+#  * ``simsopt.geo.surfaceobjectives`` has never exported
+#    ``_solve_boozer_coil_adjoint_derivative``, and upstream
+#    ``simsopt.geo.boozersurface.BoozerSurface`` has no ``get_adjoint_runtime_state``
+#    at all -- that method belongs to ``BoozerSurfaceJAX`` and is covered by
+#    ``tests/geo/test_boozersurface_jax.py``.
+#  * Upstream ``MajorRadius.compute()`` takes no ``compute_gradient`` argument on
+#    ``master`` or on this branch; the keyword belongs to the JAX wrapper
+#    ``MajorRadiusJAX``, whose value-and-adjoint contract is covered by
+#    ``test_major_radius_jax_value_and_native_adjoint_gradient`` below.
 
 
 def test_traceable_runtime_entry_reuse_requires_retaining_the_session(
@@ -7937,7 +7837,19 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
         )
         assert term_name is not None
         grad = jnp.asarray([0.5, -0.75], dtype=jnp.float64)
-        return grad, grad, grad, jnp.asarray(True, dtype=bool)
+        # ``_traceable_objective_gradient_parts`` returns seven members:
+        # direct/implicit/total gradients, the linear-solve success flag, and the
+        # mixed-dense-IR trust, execution-count and adjoint-evidence telemetry
+        # that ``diagnose_traceable_objective_runtime`` discards.
+        return (
+            grad,
+            grad,
+            grad,
+            jnp.asarray(True, dtype=bool),
+            None,
+            None,
+            None,
+        )
 
     runtime_entry = {
         "compiled_bundle": {
@@ -9467,13 +9379,17 @@ class TestQfmPenaltyJAX:
 
 
 def test_major_radius_jax_value_and_native_adjoint_gradient():
-    """Match CPU ``MajorRadius`` value and adjoint gradient via fake BoozerSurface.
+    """Match the CPU major-radius value and adjoint gradient via fake BoozerSurface.
 
-    Oracle: type 1 — CPU ``MajorRadius.J()`` calls
-    ``Surface.major_radius()`` (Python composition over C++
-    ``Surface::volume`` and Python ``Surface.mean_cross_sectional_area``);
-    the ``dJ(partials=True).data`` projection is the adjoint contract that
-    the JAX wrapper's ``dJ_by_dcoil_dofs`` must satisfy.
+    Oracle: type 1 — ``Surface.major_radius()`` itself (Python composition over
+    C++ ``Surface::volume`` and Python ``Surface.mean_cross_sectional_area``),
+    which is the same quantity CPU ``MajorRadius.J()`` returns.  ``MajorRadiusJAX``
+    is not driven through the CPU wrapper object here: upstream
+    ``MajorRadius.compute()`` takes no arguments and reads ``res["PLU"]`` /
+    ``res["vjp"]`` off a real ``BoozerSurface``, so it cannot consume the
+    runtime-state fake this test builds.  The adjoint contract is asserted
+    directly against ``dJ_by_dcoil_dofs`` and the ``dJ(partials=True).data``
+    projection of the JAX wrapper.
     Lane: parity, rtol=1e-12 (value) / 1e-10 (gradient).
     """
     surface = _make_aspect_ratio_surface("SurfaceRZFourier", stellsym=False)
@@ -9541,11 +9457,6 @@ def test_major_radius_jax_value_and_native_adjoint_gradient():
             2.0 * rhs,
             _mock_linear_solve_status(True),
         ),
-        project_coil_adjoint_derivative=lambda _adjoint: (
-            surfaceobjectives_module.Derivative(
-                {dep_opt: np.asarray([expected_total, -expected_total])}
-            )
-        ),
         stream_group_vjps=lambda adjoint: iter(((adjoint, (0,)),)),
     )
     fake_booz = types.SimpleNamespace(
@@ -9573,25 +9484,12 @@ def test_major_radius_jax_value_and_native_adjoint_gradient():
         atol=_ASPECT_RATIO_VALUE_ATOL,
     )
     expected_total = float(jnp.sum(expected_adjoint))
-    cpu_obj = object.__new__(surfaceobjectives_module.MajorRadius)
-    cpu_obj.boozer_surface = fake_booz
-    cpu_obj.surface = surface
-    cpu_obj._J = None
-    cpu_obj._dJ = None
-    cpu_obj.compute(compute_gradient=True)
-
-    np.testing.assert_allclose(
-        obj.J(),
-        cpu_obj.J(),
-        rtol=_ASPECT_RATIO_VALUE_RTOL,
-        atol=_ASPECT_RATIO_VALUE_ATOL,
-    )
-    np.testing.assert_allclose(
-        cpu_obj.dJ(partials=True).data[dep_opt],
-        np.asarray([-expected_total, expected_total], dtype=np.float64),
-        rtol=_ASPECT_RATIO_GRAD_RTOL,
-        atol=_ASPECT_RATIO_GRAD_ATOL,
-    )
+    # The CPU oracle is ``surface.major_radius()``, asserted above.  The old
+    # cross-check instantiated ``simsopt.geo.surfaceobjectives.MajorRadius`` and
+    # called ``compute(compute_gradient=True)``; upstream ``MajorRadius.compute``
+    # takes no arguments and reads ``res["PLU"]``/``res["vjp"]`` off a real
+    # ``BoozerSurface``, so it can neither accept the keyword nor consume the
+    # runtime-state fake built here.
     np.testing.assert_allclose(
         np.asarray(obj.dJ_by_dcoil_dofs(), dtype=np.float64),
         np.asarray([-expected_total, expected_total], dtype=np.float64),

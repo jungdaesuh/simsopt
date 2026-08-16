@@ -16,22 +16,35 @@ from benchmarks.run_jax_native_example_measurements import (
     _scientific_comparison_document,
 )
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from examples.jax.manifest_runtime import load_runtime_contract_pair
 from examples.jax.parity._manifest import ComparisonRoute
 from examples.jax.parity.arbiter import (
     ArbitrationError,
     LaneObservation,
     arbitrate,
 )
-from examples.jax.parity.artifacts import canonical_json_bytes, write_array
+from examples.jax.parity.artifacts import (
+    canonical_json_bytes,
+    write_array,
+    write_bytes_exclusive,
+)
 from examples.jax.parity.audit import audit_published_run
-from examples.jax.parity.cases import get_case
+from examples.jax.parity.cases import (
+    SINGLE_STAGE_BOOZER_VACUUM_QUALITY_BAND,
+    get_case,
+    implemented_case_ids,
+)
+from examples.jax.parity.contracts import QualityBand
+from examples.jax.parity.input_bundle import create_input_bundle
 from examples.jax.parity.provenance import (
     DeviceMetadata,
     ExecutedSource,
     LaneProvenance,
+    collect_explicit_sources,
     collect_repository_state,
     generated_version_matches_checkout,
 )
+from examples.jax.parity.publication import begin_run, publish_run
 from examples.jax.parity.receipts import write_lane_observation
 from examples.jax.parity.runner import (
     ChildProcessResult,
@@ -683,6 +696,563 @@ def test_direct_native_gpu_gate_catches_transitive_tolerance_drift() -> None:
     assert comparisons["jax-cpu:jax-gpu"].passed
     assert not comparisons["native-cpu:jax-gpu"].passed
     assert result.verdict == "fail"
+
+
+# ---------------------------------------------------------- quality-band gate
+#
+# Rule 3 of the 2026-08-15 native_default certification-gate ruling. The lane
+# numbers below are the measured 2026-08-14 three-lane native_default run of
+# the boozer-vacuum mirror (durable archive
+# ~/simsopt-campaigns/ndparity-boozer-vacuum-20260814/): every lane
+# budget_exhausted at the matched 1000-iteration budget, final objectives
+# 4.3972e-08 / 4.5074e-08 / 4.5614e-08, forks of 2.5e-2 and 3.7e-2 against the
+# mirror_single_stage_final_value equality bucket's rtol 2e-8.
+_ARCHIVED_FINAL_OBJECTIVE = {
+    "native-cpu": 4.3972015892540963e-08,
+    "jax-cpu": 4.5074090114235766e-08,
+    "jax-gpu": 4.561437157279435e-08,
+}
+_ARCHIVED_MATCHED_BUDGET = 1000
+_ARCHIVED_QUALITY_BAND = QualityBand(
+    observable="final:objective",
+    max_value=1.0e-07,
+    derivation="test fixture mirroring the 2026-08-14 native_default archive",
+)
+
+
+def _final_objective_routes() -> tuple[ComparisonRoute, ...]:
+    return tuple(
+        ComparisonRoute(
+            phase="final",
+            observable="objective",
+            lane_pair=lane_pair,
+            applicable=True,
+            comparator="allclose",
+            tolerance_bucket="mirror_single_stage_final_value",
+        )
+        for lane_pair in (
+            "native-cpu:jax-cpu",
+            "native-cpu:jax-gpu",
+            "jax-cpu:jax-gpu",
+        )
+    )
+
+
+def _native_default_observations(
+    *,
+    final_objective: dict[str, float] | None = None,
+    budgets: dict[str, int] | None = None,
+    statuses: dict[str, str] | None = None,
+    successes: dict[str, bool] | None = None,
+) -> dict[str, LaneObservation]:
+    objectives = final_objective or _ARCHIVED_FINAL_OBJECTIVE
+    nits = budgets or dict.fromkeys(_ARCHIVED_FINAL_OBJECTIVE, _ARCHIVED_MATCHED_BUDGET)
+    normalized = statuses or dict.fromkeys(
+        _ARCHIVED_FINAL_OBJECTIVE, "budget_exhausted"
+    )
+    reported = successes or dict.fromkeys(_ARCHIVED_FINAL_OBJECTIVE, False)
+    return {
+        lane: dataclasses.replace(
+            observation,
+            scale="native_default",
+            normalized_status=normalized[lane],
+            raw_status="stopping_reason=iteration-limit",
+            success=reported[lane],
+            nit=nits[lane],
+            values={
+                "initial:objective_sum_squares": np.asarray(1.0, dtype=np.float64),
+                "final:objective": np.asarray([objectives[lane]], dtype=np.float64),
+            },
+            applicability={},
+        )
+        for lane, observation in _observations().items()
+    }
+
+
+def test_quality_band_certifies_matched_budget_exhausted_lanes() -> None:
+    result = arbitrate(
+        (*_routes(), *_final_objective_routes()),
+        _native_default_observations(),
+        quality_band=_ARCHIVED_QUALITY_BAND,
+    )
+
+    assert result.verdict == "quality-band"
+    assert result.verdict != "pass"
+    assert [item.lane for item in result.quality_band_results] == [
+        "jax-cpu",
+        "jax-gpu",
+        "native-cpu",
+    ]
+    assert all(item.passed for item in result.quality_band_results)
+    assert all(
+        item.observable == "final:objective" and item.max_value == 1.0e-07
+        for item in result.quality_band_results
+    )
+    final_objective_comparisons = [
+        comparison
+        for comparison in result.comparisons
+        if comparison.phase == "final" and comparison.observable == "objective"
+    ]
+    assert len(final_objective_comparisons) == 3
+    assert not any(comparison.passed for comparison in final_objective_comparisons)
+    assert all(
+        comparison.diagnostic.startswith("informational (quality-band, non-certifying)")
+        for comparison in result.comparisons
+    )
+
+
+def test_quality_band_rejects_an_endpoint_outside_the_band() -> None:
+    result = arbitrate(
+        (*_routes(), *_final_objective_routes()),
+        _native_default_observations(
+            final_objective={**_ARCHIVED_FINAL_OBJECTIVE, "jax-gpu": 4.6e-07}
+        ),
+        quality_band=_ARCHIVED_QUALITY_BAND,
+    )
+
+    assert result.verdict == "fail"
+    outside = {item.lane: item.passed for item in result.quality_band_results}
+    assert outside == {"jax-cpu": True, "jax-gpu": False, "native-cpu": True}
+
+
+def test_quality_band_requires_one_identical_matched_budget() -> None:
+    with pytest.raises(ArbitrationError, match="matched\n?\\s?iteration budget"):
+        arbitrate(
+            (*_routes(), *_final_objective_routes()),
+            _native_default_observations(
+                budgets={
+                    "native-cpu": _ARCHIVED_MATCHED_BUDGET,
+                    "jax-cpu": _ARCHIVED_MATCHED_BUDGET,
+                    "jax-gpu": _ARCHIVED_MATCHED_BUDGET - 1,
+                }
+            ),
+            quality_band=_ARCHIVED_QUALITY_BAND,
+        )
+
+
+def test_quality_band_fails_closed_when_a_lane_converged_early() -> None:
+    with pytest.raises(ArbitrationError, match="scientific success"):
+        arbitrate(
+            (*_routes(), *_final_objective_routes()),
+            _native_default_observations(
+                statuses={
+                    "native-cpu": "converged",
+                    "jax-cpu": "budget_exhausted",
+                    "jax-gpu": "budget_exhausted",
+                },
+                successes={
+                    "native-cpu": True,
+                    "jax-cpu": False,
+                    "jax-gpu": False,
+                },
+            ),
+            quality_band=_ARCHIVED_QUALITY_BAND,
+        )
+
+
+def test_quality_band_never_certifies_converged_lanes_as_equivalence() -> None:
+    result = arbitrate(
+        (*_routes(), *_final_objective_routes()),
+        _native_default_observations(
+            statuses=dict.fromkeys(_ARCHIVED_FINAL_OBJECTIVE, "converged"),
+            successes=dict.fromkeys(_ARCHIVED_FINAL_OBJECTIVE, True),
+        ),
+        quality_band=_ARCHIVED_QUALITY_BAND,
+    )
+
+    assert result.verdict == "quality-band"
+
+
+def test_quality_band_is_refused_outside_native_default() -> None:
+    observations = {
+        lane: dataclasses.replace(
+            observation,
+            values={
+                "initial:objective_sum_squares": np.asarray(1.0, dtype=np.float64),
+                "final:objective": np.asarray(
+                    [_ARCHIVED_FINAL_OBJECTIVE[lane]], dtype=np.float64
+                ),
+            },
+            applicability={},
+        )
+        for lane, observation in _observations().items()
+    }
+
+    with pytest.raises(ArbitrationError, match="requires the native_default scale"):
+        arbitrate(
+            (*_routes(), *_final_objective_routes()),
+            observations,
+            quality_band=_ARCHIVED_QUALITY_BAND,
+        )
+
+
+def test_budget_exhausted_stays_fatal_without_a_declared_band() -> None:
+    with pytest.raises(ArbitrationError, match="scientific success"):
+        arbitrate(
+            (*_routes(), *_final_objective_routes()),
+            _native_default_observations(),
+        )
+
+
+@pytest.mark.parametrize("mutation", ("unpublished", "disclaimed"))
+def test_quality_band_refuses_an_observable_no_lane_certifies(mutation: str) -> None:
+    observations = {
+        lane: dataclasses.replace(
+            observation,
+            values=(
+                {"initial:objective_sum_squares": np.asarray(1.0, dtype=np.float64)}
+                if mutation == "unpublished"
+                else observation.values
+            ),
+            applicability=(
+                {} if mutation == "unpublished" else {"final:objective": False}
+            ),
+        )
+        for lane, observation in _native_default_observations().items()
+    }
+
+    with pytest.raises(
+        ArbitrationError, match="quality-band observable is not applicable"
+    ):
+        arbitrate(_routes(), observations, quality_band=_ARCHIVED_QUALITY_BAND)
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_message"),
+    (
+        (np.asarray([0], dtype=np.int64), "quality-band observable must be FP64"),
+        (
+            np.asarray([], dtype=np.float64),
+            "non-finite quality-band observable",
+        ),
+    ),
+)
+def test_quality_band_refuses_an_unmeasurable_observable(
+    status: np.ndarray, expected_message: str
+) -> None:
+    status_routes = tuple(
+        ComparisonRoute(
+            phase="final",
+            observable="outer_solver_status",
+            lane_pair=lane_pair,
+            applicable=True,
+            comparator="exact",
+            tolerance_bucket="native_workflow",
+        )
+        for lane_pair in (
+            "native-cpu:jax-cpu",
+            "native-cpu:jax-gpu",
+            "jax-cpu:jax-gpu",
+        )
+    )
+    observations = {
+        lane: dataclasses.replace(
+            observation,
+            values={
+                "initial:objective_sum_squares": np.asarray(1.0, dtype=np.float64),
+                "final:outer_solver_status": status,
+            },
+            applicability={},
+        )
+        for lane, observation in _native_default_observations().items()
+    }
+
+    with pytest.raises(ArbitrationError, match=expected_message):
+        arbitrate(
+            (*_routes(), *status_routes),
+            observations,
+            quality_band=QualityBand(
+                observable="final:outer_solver_status",
+                max_value=1.0,
+                derivation="test fixture",
+            ),
+        )
+
+
+def test_quality_band_declaration_is_opt_in_per_case() -> None:
+    band = get_case(
+        "native-single-stage-boozer-vacuum-optimization"
+    ).native_default_quality_band
+
+    assert band == SINGLE_STAGE_BOOZER_VACUUM_QUALITY_BAND
+    assert band is not None
+    assert band.observable == "final:objective"
+    assert band.max_value == 1.0e-07
+    assert max(_ARCHIVED_FINAL_OBJECTIVE.values()) < band.max_value
+    assert "2026-08-14" in band.derivation
+    assert [
+        case_id
+        for case_id in implemented_case_ids()
+        if get_case(case_id).native_default_quality_band is not None
+    ] == ["native-single-stage-boozer-vacuum-optimization"]
+
+
+@pytest.mark.parametrize(
+    ("observable", "max_value", "derivation"),
+    (
+        ("objective", 1.0e-07, "measured"),
+        ("final:objective", float("inf"), "measured"),
+        ("final:objective", 1.0e-07, ""),
+    ),
+)
+def test_quality_band_declaration_rejects_an_unusable_floor(
+    observable: str, max_value: float, derivation: str
+) -> None:
+    with pytest.raises(ValueError, match="quality band"):
+        QualityBand(observable=observable, max_value=max_value, derivation=derivation)
+
+
+# ------------------------------------------- quality-band published-run audit
+#
+# audit_published_run's quality-band branches are only reachable from a
+# published native_default run, which costs hours to produce for real. These
+# tests synthesize one from the archived endpoint evidence -- real input bundle,
+# real lane receipts, real publication marker -- and drive the production
+# auditor over it.
+_BAND_CASE_ID = "native-single-stage-boozer-vacuum-optimization"
+
+
+def _band_case_receipt_values(
+    routes: tuple[ComparisonRoute, ...], lane: str, *, fork: bool
+) -> dict[str, np.ndarray]:
+    """Publish exactly the observables the case's route matrix names.
+
+    Every observable is lane-identical except ``final:objective``, which under
+    ``fork`` carries the archived per-lane endpoint so the equality bucket
+    genuinely fails while the declared quality band still holds.
+    """
+    values: dict[str, np.ndarray] = {}
+    for route in routes:
+        key = f"{route.phase}:{route.observable}"
+        if key in values:
+            continue
+        if key == "final:objective":
+            values[key] = np.asarray(
+                [
+                    _ARCHIVED_FINAL_OBJECTIVE[lane]
+                    if fork
+                    else _ARCHIVED_FINAL_OBJECTIVE["native-cpu"]
+                ],
+                dtype=np.float64,
+            )
+        elif key == "final:outer_solver_status":
+            values[key] = np.asarray(0, dtype=np.int64)
+        elif route.observable.endswith(("success", "stationary", "satisfied")):
+            values[key] = np.asarray(True, dtype=np.bool_)
+        else:
+            values[key] = np.asarray([1.0], dtype=np.float64)
+    return values
+
+
+def _publish_quality_band_run(
+    artifact_root: Path,
+    *,
+    verdict: str = "quality-band",
+    fork: bool = True,
+    tamper_band: bool = False,
+) -> tuple[Path, dict[str, object]]:
+    """Publish one synthetic native_default quality-band run for the auditor."""
+    repo_root = Path(__file__).resolve().parents[2]
+    contract_pair = load_runtime_contract_pair(
+        repo_root / "examples" / "jax" / "manifest.json",
+        repo_root / "examples" / "jax" / "parity_manifest.json",
+        repo_root=repo_root,
+    )
+    relationship = next(
+        item
+        for item in contract_pair.parity.relationships
+        if item.case_id == _BAND_CASE_ID
+    )
+    repository_state = collect_repository_state(repo_root)
+    explicit_sources = collect_explicit_sources(
+        repo_root, ("examples/jax/parity/publication.py",)
+    )
+    lanes = ("native-cpu", "jax-cpu", "jax-gpu")
+    paths = begin_run(artifact_root, "20260816T000000Z-0badc0de")
+    bundle = create_input_bundle(
+        paths.partial / _BAND_CASE_ID / "inputs",
+        case_id=_BAND_CASE_ID,
+        random_seed=1,
+        arrays={"seed": np.zeros(1, dtype=np.float64)},
+        configuration={"outer_maxiter": _ARCHIVED_MATCHED_BUDGET},
+        scale="native_default",
+    )
+    observations: dict[str, LaneObservation] = {}
+    for lane, template in _observations().items():
+        provenance = template.provenance
+        assert provenance is not None
+        observation = dataclasses.replace(
+            template,
+            scale="native_default",
+            input_fingerprint=bundle.input_fingerprint,
+            configuration_fingerprint=bundle.configuration_fingerprint,
+            driver=(
+                "simsopt_scipy_bfgs_with_boozer_newton"
+                if lane == "native-cpu"
+                else JAX_PARITY_DRIVER_ID
+            ),
+            normalized_status="budget_exhausted",
+            raw_status="stopping_reason=iteration-limit",
+            success=False,
+            nit=_ARCHIVED_MATCHED_BUDGET,
+            completed_workflow_stages=relationship.workflow_stages,
+            provenance=dataclasses.replace(
+                provenance,
+                repository_commit=repository_state.repository_commit,
+                repository_dirty=repository_state.repository_dirty,
+                tracked_diff_sha256=repository_state.tracked_diff_sha256,
+                untracked_files=repository_state.untracked_files,
+                executed_sources=explicit_sources,
+                authoritative=False,
+            ),
+            values=_band_case_receipt_values(
+                relationship.comparison_routes, lane, fork=fork
+            ),
+            applicability={},
+        )
+        write_lane_observation(paths.partial / _BAND_CASE_ID / lane, observation)
+        observations[lane] = observation
+    arbitration = arbitrate(
+        relationship.comparison_routes,
+        observations,
+        required_lanes=frozenset(lanes),
+        expected_workflow_stages=relationship.workflow_stages,
+        quality_band=get_case(_BAND_CASE_ID).native_default_quality_band,
+    )
+    quality_band_payload = [
+        {
+            "lane": band_result.lane,
+            "observable": band_result.observable,
+            "max_value": band_result.max_value,
+            "observed_value": (0.0 if tamper_band else band_result.observed_value),
+            "passed": band_result.passed,
+        }
+        for band_result in arbitration.quality_band_results
+    ]
+    case_record: dict[str, object] = {
+        "case_id": _BAND_CASE_ID,
+        "jax_example_id": relationship.jax_example_id,
+        "native_source": relationship.native_source,
+        "classification": relationship.classification,
+        "classification_reason": relationship.classification_reason,
+        "scale_tier": "native_default",
+        "oracle_kind": relationship.oracle_kind,
+        "cost_tier": relationship.cost_tier,
+        "omitted_scientific_stages": list(relationship.omitted_scientific_stages),
+        "excluded_teaching_stages": list(relationship.excluded_teaching_stages),
+        "authoritative": False,
+        "repository_changed_during_run": False,
+        "input_fingerprint": bundle.input_fingerprint,
+        "configuration_fingerprint": bundle.configuration_fingerprint,
+        "completed_workflow_stages": list(relationship.workflow_stages),
+        "verdict": verdict,
+        "comparisons": [
+            {
+                "phase": comparison.phase,
+                "observable": comparison.observable,
+                "lane_pair": comparison.lane_pair,
+                "passed": comparison.passed,
+                "tolerance_bucket": comparison.tolerance_bucket,
+                "diagnostic": comparison.diagnostic,
+            }
+            for comparison in arbitration.comparisons
+        ],
+        "quality_band": quality_band_payload,
+        "executions": [
+            {
+                "lane": lane,
+                "command": ["python", "-S", "-m", "examples.jax.parity.child"],
+                "stdout": "",
+                "stderr": "",
+                "returncode": 0,
+                "elapsed_seconds": 1.0,
+                "parent_peak_rss_bytes": 1024,
+                "result_directory": f"{_BAND_CASE_ID}/{lane}",
+            }
+            for lane in lanes
+        ],
+    }
+    summary: dict[str, object] = {
+        "schema_version": 2,
+        "manifest_schema_version": contract_pair.version_pair[0],
+        "parity_manifest_schema_version": contract_pair.version_pair[1],
+        "used_legacy_manifest_adapter": contract_pair.used_legacy_adapter,
+        "run_id": paths.run_id,
+        "lanes": list(lanes),
+        "scale": "native_default",
+        "smoke": False,
+        "authoritative": False,
+        "repository_commit": repository_state.repository_commit,
+        "repository_dirty": repository_state.repository_dirty,
+        "repository_changed_during_run": False,
+        "tracked_diff_sha256": repository_state.tracked_diff_sha256,
+        "untracked_files": list(repository_state.untracked_files),
+        "explicit_sources": [dataclasses.asdict(source) for source in explicit_sources],
+        "verdict": verdict,
+        "cases": [case_record],
+    }
+    write_bytes_exclusive(paths.partial, "summary.json", canonical_json_bytes(summary))
+    return publish_run(paths), summary
+
+
+def test_audit_accepts_a_published_quality_band_run(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    published, _summary = _publish_quality_band_run(tmp_path)
+
+    result = audit_published_run(published, repo_root=repo_root)
+
+    assert result.verdict == "quality-band"
+    assert result.case_count == 1
+    assert result.lane_receipt_count == 3
+    assert result.authoritative is False
+    assert result.comparison_count > 0
+
+
+def test_audit_keeps_failed_equality_comparisons_noncertifying(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    published, summary = _publish_quality_band_run(tmp_path)
+    cases = summary["cases"]
+    assert isinstance(cases, list)
+    comparisons = cases[0]["comparisons"]
+    assert isinstance(comparisons, list)
+    failed = [
+        comparison
+        for comparison in comparisons
+        if not comparison["passed"]
+        and comparison["phase"] == "final"
+        and comparison["observable"] == "objective"
+    ]
+
+    result = audit_published_run(published, repo_root=repo_root)
+
+    assert len(failed) == 3
+    assert all(
+        comparison["diagnostic"].startswith("informational (quality-band")
+        for comparison in comparisons
+    )
+    assert result.verdict == "quality-band"
+
+
+def test_audit_rejects_a_tampered_quality_band_payload(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    published, _summary = _publish_quality_band_run(tmp_path, tamper_band=True)
+
+    with pytest.raises(ValueError, match="stored quality band differs"):
+        audit_published_run(published, repo_root=repo_root)
+
+
+def test_audit_refuses_equivalence_labelling_for_a_banded_case(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    published, _summary = _publish_quality_band_run(
+        tmp_path, verdict="pass", fork=False
+    )
+
+    with pytest.raises(ValueError, match="recomputed comparison verdict is not pass"):
+        audit_published_run(published, repo_root=repo_root)
 
 
 def test_child_command_is_exact_and_bounded(tmp_path: Path) -> None:

@@ -1722,7 +1722,19 @@ require is follow-up work alongside rule 3's comparator.
    bands ("every lane reaches objective <= X at matched budget"), labeled
    quality-band, never equivalence. Implementing the quality-band comparator
    is follow-up work; until it lands, the boozer-vacuum native_default mirror
-   is uncertified-by-scope, not a parity failure.
+   is uncertified-by-scope, not a parity failure. [Update 2026-08-16: the
+   comparator landed. `arbitrate(..., quality_band=...)` in
+   `examples/jax/parity/arbiter.py` engages only for a case that declares a
+   band, and then admits `budget_exhausted` (rule 1) solely when every compared
+   lane reports one identical matched `nit`, certifies each lane's declared
+   observable against the band, demotes the pairwise equality comparisons to
+   informational, and returns the `quality-band` verdict that
+   `examples/jax/run_parity.py` and `examples/jax/parity/audit.py` carry
+   through instead of plain `pass`. The boozer-vacuum case declares
+   `NATIVE_DEFAULT_QUALITY_BAND` (`final:objective <= 1.0e-07`, one decade
+   above the worst archived lane endpoint 4.5614e-08) in
+   `examples/jax/parity/cases/native_single_stage_boozer_vacuum.py`; every case
+   without a declared band, and every bounded-scale run, is unchanged.]
 4. The 2026-08-14 diagnostic worktree may be archived; its artifacts are the
    evidence for this ruling.
 

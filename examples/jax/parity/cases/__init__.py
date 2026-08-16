@@ -71,6 +71,9 @@ from examples.jax.parity.cases.native_qfm import (
 )
 from examples.jax.parity.cases.native_qfm import execute as execute_native_qfm
 from examples.jax.parity.cases.native_single_stage_boozer_vacuum import (
+    NATIVE_DEFAULT_QUALITY_BAND as SINGLE_STAGE_BOOZER_VACUUM_QUALITY_BAND,
+)
+from examples.jax.parity.cases.native_single_stage_boozer_vacuum import (
     create_input as create_native_single_stage_boozer_vacuum_input,
 )
 from examples.jax.parity.cases.native_single_stage_boozer_vacuum import (
@@ -189,6 +192,7 @@ from examples.jax.parity.cases.traceable_least_squares import (
 )
 from examples.jax.parity.cases.wireframe import create_input as create_wireframe_input
 from examples.jax.parity.cases.wireframe import execute as execute_wireframe
+from examples.jax.parity.contracts import QualityBand
 from examples.jax.parity.input_bundle import InputBundle
 from examples.jax.parity.measurement import MeasurementExecution
 from examples.jax.parity.runtime import ParityLane
@@ -212,6 +216,12 @@ class CaseDefinition:
         ]
         | None
     ) = None
+    native_default_quality_band: QualityBand | None = None
+    """Endpoint quality floor certifiable at ``native_default`` (2026-08-15 rule 3).
+
+    ``None`` -- the default for every case -- keeps the certification-gate
+    behaviour unchanged at every scale.
+    """
 
 
 _CASES = {
@@ -320,6 +330,7 @@ _CASES = {
         create_input=create_native_single_stage_boozer_vacuum_input,
         execute=execute_native_single_stage_boozer_vacuum,
         measurement_execute=measure_native_single_stage_boozer_vacuum,
+        native_default_quality_band=SINGLE_STAGE_BOOZER_VACUUM_QUALITY_BAND,
     ),
     "native-wireframe-rcls-basic": CaseDefinition(
         case_id="native-wireframe-rcls-basic",

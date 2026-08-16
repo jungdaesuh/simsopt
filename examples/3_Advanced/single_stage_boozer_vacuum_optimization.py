@@ -34,6 +34,7 @@ from simsopt.geo import (
 from simsopt.objectives import QuadraticPenalty
 from simsopt.optimization_endpoint import (
     OptimizationEndpointCertificate,
+    accepted_step_contract,
     certify_optimization_endpoint,
 )
 from simsopt.single_stage_boozer_vacuum import (
@@ -237,8 +238,10 @@ def solve(max_steps: int, *, native_scale: bool) -> dict[str, object]:
     scientific_success = scientific_success_for_scale(
         native_scale=native_scale,
         certificate=endpoint_certificate,
-        accepted_step=int(optimizer_result.nit) > 0
-        or endpoint_certificate.initial_stationary,
+        accepted_step=accepted_step_contract(
+            iterations=int(optimizer_result.nit),
+            initial_stationary=endpoint_certificate.initial_stationary,
+        ),
         inner_success=inner_success,
         parameters_finite=parameters_finite,
         observables_finite=observables_finite,
