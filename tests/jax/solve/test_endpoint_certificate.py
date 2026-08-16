@@ -540,6 +540,16 @@ def _nan_off_the_start(x):
     return jnp.sum(x) + jnp.sqrt(1.0e-30 - jnp.sum((x - 1.0) ** 2))
 
 
+def _nonfinite_at_the_start(x):
+    import jax.numpy as jnp
+
+    # A log barrier evaluated exactly on its boundary: the start point
+    # itself is nonfinite (f = -inf, g = +inf), so no line-search trial
+    # rejection can hide it and the state stays nonfinite through the
+    # ABNORMAL termination.
+    return jnp.log(jnp.sum(x) - 2.0)
+
+
 def test_private_lbfgsb_line_search_failure_certifies_line_search_failed() -> None:
     import jax.numpy as jnp
     from simsopt_jax.geo.optimizers.private._lbfgs import _minimize_lbfgs_private
@@ -568,7 +578,49 @@ def test_private_lbfgsb_line_search_failure_certifies_line_search_failed() -> No
     )
 
 
-def test_private_lbfgsb_nonfinite_trial_certifies_nonfinite() -> None:
+def test_private_lbfgsb_nonfinite_state_certifies_nonfinite() -> None:
+    # Status 6 is "ABNORMAL with nonfinite state", which the emitter can
+    # only reach when the point it holds is itself nonfinite: nonfinite
+    # line-search *trials* are rejected and recovered from (see the test
+    # below), so they never leave a nonfinite value or gradient in the
+    # state. scipy.optimize.minimize(method="L-BFGS-B") on this fixture
+    # reports its own status 2 / "ABNORMAL" at the same nit=0, nfev=6,
+    # x=[1, 1]; status 6 is this emitter's finer split of that outcome,
+    # which is exactly what the private-lbfgsb table transcribes.
+    import jax.numpy as jnp
+    from simsopt_jax.geo.optimizers.private._lbfgs import _minimize_lbfgs_private
+
+    result = _minimize_lbfgs_private(
+        _nonfinite_at_the_start,
+        jnp.ones(2, dtype=jnp.float64),
+        maxiter=50,
+        maxcor=5,
+        gtol=1.0e-12,
+        maxls=5,
+        x_dtype=jnp.float64,
+    )
+
+    assert int(result.status) == 6
+    assert not bool(result.converged)
+    assert not bool(jnp.all(jnp.isfinite(result.g_k)))
+    assert (
+        _certify_emitter_result(
+            convention="private-lbfgsb",
+            success=bool(result.converged),
+            status=int(result.status),
+            iterations=int(result.k),
+            max_iterations=50,
+        )
+        == "nonfinite"
+    )
+
+
+def test_private_lbfgsb_nonfinite_trial_certifies_line_search_failed() -> None:
+    # A nonfinite line-search trial is rejected (substituted by a value
+    # above the incumbent) rather than propagated, so the run ends
+    # ABNORMAL with a finite state and the emitter reports status 2.
+    # scipy.optimize.minimize(method="L-BFGS-B") on this same fixture
+    # also reports status 2 / "ABNORMAL" at nit=0, nfev=6, x=[1, 1].
     import jax.numpy as jnp
     from simsopt_jax.geo.optimizers.private._lbfgs import _minimize_lbfgs_private
 
@@ -582,7 +634,11 @@ def test_private_lbfgsb_nonfinite_trial_certifies_nonfinite() -> None:
         x_dtype=jnp.float64,
     )
 
-    assert int(result.status) == 6
+    assert int(result.evaluated_nonfinite_count) > 0
+    assert bool(jnp.isfinite(result.f_k))
+    assert bool(jnp.all(jnp.isfinite(result.g_k)))
+    assert int(result.status) == 2
+    assert not bool(result.converged)
     assert (
         _certify_emitter_result(
             convention="private-lbfgsb",
@@ -591,7 +647,7 @@ def test_private_lbfgsb_nonfinite_trial_certifies_nonfinite() -> None:
             iterations=int(result.k),
             max_iterations=50,
         )
-        == "nonfinite"
+        == "line-search-failed"
     )
 
 

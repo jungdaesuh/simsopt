@@ -781,7 +781,7 @@ def minimize(
             progress_callback=legacy_progress_callback,
         )
     else:
-        raise ValueError(f"Unsupported minimize options {type(options_used).__name__}.")
+        raise TypeError(f"Unsupported minimize options {type(options_used).__name__}.")
     wallclock_s = time.perf_counter() - start
     return _public_result(
         result,
@@ -864,7 +864,7 @@ def least_squares(
             args=residual_args,
         )
     else:
-        raise ValueError(
+        raise TypeError(
             f"Unsupported least-squares options {type(options_used).__name__}."
         )
     wallclock_s = time.perf_counter() - start

@@ -4397,7 +4397,12 @@ class TestBoozerSurfaceJAXClass:
         np.testing.assert_allclose(np.asarray(res["residual"]), 0.0, atol=1e-12)
         assert solve_calls == [((xl0.size, xl0.size), (xl0.size,))]
 
-    def test_public_newton_api_routes_without_legacy_vectorize_kwarg(self, monkeypatch):
+    def test_public_newton_api_routes_without_legacy_vectorize_kwarg(
+        self, monkeypatch, request
+    ):
+        # The bfgs-ondevice routing assertion holds on the JAX lanes only; a
+        # bare process resolves the native_cpu policy's scipy backend instead.
+        enable_non_strict_jax_backend(monkeypatch, request, mode="jax_cpu_parity")
         booz = _make_mock_boozer_surface()
         target = booz._pack_decision_vector(0.3, 0.05) - 0.01
         captured = {}

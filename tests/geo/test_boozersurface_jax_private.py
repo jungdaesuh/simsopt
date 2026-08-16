@@ -1575,8 +1575,12 @@ class TestOptimizerAdapterPrivate:
         monkeypatch,
         request,
     ):
-        monkeypatch.setenv("SIMSOPT_PRECISION", "mixed")
-        enable_non_strict_jax_backend(monkeypatch, request, mode="jax_cpu_fast")
+        enable_non_strict_jax_backend(
+            monkeypatch,
+            request,
+            mode="jax_cpu_fast",
+            precision="mixed",
+        )
 
         def quad(x):
             return 0.5 * jnp.dot(x, x)
@@ -1600,8 +1604,12 @@ class TestOptimizerAdapterPrivate:
         monkeypatch,
         request,
     ):
-        monkeypatch.setenv("SIMSOPT_PRECISION", "mixed")
-        enable_non_strict_jax_backend(monkeypatch, request, mode="jax_cpu_fast")
+        enable_non_strict_jax_backend(
+            monkeypatch,
+            request,
+            mode="jax_cpu_fast",
+            precision="mixed",
+        )
 
         def quad(x):
             return 0.5 * jnp.dot(x, x)

@@ -20,8 +20,7 @@ def test_static_curve_dof_mapping_preserves_mixed_dtype_on_gpu(
     monkeypatch,
     request,
 ) -> None:
-    monkeypatch.setenv("SIMSOPT_PRECISION", "mixed")
-    enable_strict_parity_backend(monkeypatch, request, "gpu")
+    enable_strict_parity_backend(monkeypatch, request, "gpu", precision="mixed")
 
     with parity_default_device("gpu"):
         array = jax.device_put(np.linspace(-2.0, 3.0, num=6, dtype=np.float32))
@@ -48,8 +47,7 @@ def test_surface_geometry_preserves_mixed_dtype_on_gpu(
     monkeypatch,
     request,
 ) -> None:
-    monkeypatch.setenv("SIMSOPT_PRECISION", "mixed")
-    enable_strict_parity_backend(monkeypatch, request, "gpu")
+    enable_strict_parity_backend(monkeypatch, request, "gpu", precision="mixed")
 
     with parity_default_device("gpu"):
         dofs = jax.device_put(

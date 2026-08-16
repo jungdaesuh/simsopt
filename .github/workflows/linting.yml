@@ -21,4 +21,8 @@ jobs:
 
     - name: Run ruff
       uses: astral-sh/ruff-action@v1
+      with:
+        # Keep in lockstep with the jax_smoke.yml pin; unpinned resolution
+        # drifts with ruff's default-rule broadening (0.16.x).
+        version: 0.15.22
 

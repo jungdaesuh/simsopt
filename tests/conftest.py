@@ -308,7 +308,14 @@ def _guard_backend_runtime_state():
             gc.collect()
 
 
-def _activate_backend_mode(monkeypatch, request, *, mode, strict):
+def _activate_backend_mode(monkeypatch, request, *, mode, strict, precision=None):
+    """Move a single test onto ``mode`` and ``precision`` in one transition.
+
+    ``precision`` must travel with ``mode`` instead of being exported into
+    ``SIMSOPT_PRECISION`` beforehand: the previous-config snapshot below
+    resolves the *outgoing* mode against the already-exported precision, and
+    invalid pairs (``native_cpu`` + ``mixed``) fail closed there.
+    """
     _require_jax()
     lane = _PARITY_MODE_TO_LANE.get(mode)
     if lane is not None and not _parity_lane_available(lane):
@@ -333,6 +340,7 @@ def _activate_backend_mode(monkeypatch, request, *, mode, strict):
     set_backend(
         mode,
         strict=strict,
+        precision=precision,
         transfer_guard=transfer_guard,
         configure_runtime=False,
     )
@@ -369,24 +377,45 @@ def _apply_test_transfer_guard(mode, transfer_guard=None):
     )
 
 
-def enable_strict_jax_backend(monkeypatch, request, mode="jax_gpu_parity"):
+def enable_strict_jax_backend(
+    monkeypatch,
+    request,
+    mode="jax_gpu_parity",
+    precision=None,
+):
     """Activate strict JAX backend mode for a single test.
 
     Sets the backend mode and strict env vars, invalidates the config cache,
     and registers a finalizer to restore the env and re-invalidate after
-    test-local backend mode changes.
+    test-local backend mode changes.  ``precision`` (``"mixed"``, ``"fp64"``,
+    ``"mode_default"``) is applied together with ``mode``; ``None`` keeps the
+    env-resolved policy.
     """
-    _activate_backend_mode(monkeypatch, request, mode=mode, strict=True)
+    _activate_backend_mode(
+        monkeypatch,
+        request,
+        mode=mode,
+        strict=True,
+        precision=precision,
+    )
 
 
-def enable_non_strict_jax_backend(monkeypatch, request, mode):
+def enable_non_strict_jax_backend(monkeypatch, request, mode, precision=None):
     """Activate non-strict JAX backend mode for a single test.
 
     Sets the backend mode, removes the strict env var, and invalidates the
     config cache.  ``mode`` is required — callers must be explicit about which
     backend mode they intend (e.g. ``"jax_cpu_parity"`` or ``"jax_gpu_parity"``).
+    ``precision`` is applied together with ``mode``; ``None`` keeps the
+    env-resolved policy.
     """
-    _activate_backend_mode(monkeypatch, request, mode=mode, strict=False)
+    _activate_backend_mode(
+        monkeypatch,
+        request,
+        mode=mode,
+        strict=False,
+        precision=precision,
+    )
 
 
 def parity_mode(lane: str) -> str:
@@ -485,8 +514,18 @@ def parity_lane(request):
     return request.param
 
 
-def enable_strict_parity_backend(monkeypatch, request, lane: str) -> None:
-    enable_strict_jax_backend(monkeypatch, request, mode=parity_mode(lane))
+def enable_strict_parity_backend(
+    monkeypatch,
+    request,
+    lane: str,
+    precision=None,
+) -> None:
+    enable_strict_jax_backend(
+        monkeypatch,
+        request,
+        mode=parity_mode(lane),
+        precision=precision,
+    )
 
 
 def assert_array_on_device(array, device):

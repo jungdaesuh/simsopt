@@ -3682,9 +3682,7 @@ def _ls_newton_reporting_fields(result):
     inner_penalty_residual_l2 = (
         None
         if fun is None
-        else jnp.sqrt(
-            jnp.maximum(_staged_like(fun, 0.0), _staged_like(fun, 2.0) * fun)
-        )
+        else jnp.sqrt(jnp.maximum(_staged_like(fun, 0.0), _staged_like(fun, 2.0) * fun))
     )
     return {
         **{key: result.get(key) for key in _BOOZER_NEWTON_TRACE_RESULT_KEYS},
@@ -6938,7 +6936,7 @@ class BoozerSurfaceJAX(Optimizable):
         G,
         *,
         weight_inv_modB,
-        solver_contract: _optimizer_jax._TraceableExactNewtonVariantContract,
+        solver_contract: _optimizer_jax.TraceableExactNewtonVariantContract,
     ):
         """Return only array leaves for one preselected exact solver."""
 
@@ -7000,7 +6998,7 @@ class BoozerSurfaceJAX(Optimizable):
         array_result,
         *,
         weight_inv_modB,
-        solver_contract: _optimizer_jax._TraceableExactNewtonVariantContract,
+        solver_contract: _optimizer_jax.TraceableExactNewtonVariantContract,
     ):
         """Attach the Python reporting envelope outside the compiled kernel."""
 
@@ -7070,7 +7068,7 @@ class BoozerSurfaceJAX(Optimizable):
         G,
         *,
         weight_inv_modB,
-        solver_contract: _optimizer_jax._TraceableExactNewtonVariantContract,
+        solver_contract: _optimizer_jax.TraceableExactNewtonVariantContract,
     ):
         """Run the array kernel and attach its non-JIT reporting envelope."""
 
@@ -7095,7 +7093,7 @@ class BoozerSurfaceJAX(Optimizable):
             raise ValueError(
                 "exact Newton benchmark variants require boozer_type='exact'."
             )
-        solver_contract = _optimizer_jax._make_traceable_exact_newton_variant_contract(
+        solver_contract = _optimizer_jax.make_traceable_exact_newton_variant_contract(
             variant
         )
         if solver_contract.variant == "C0":
@@ -7174,7 +7172,9 @@ class BoozerSurfaceJAX(Optimizable):
         )
 
         if self.boozer_type == "exact":
-            c0_contract = _optimizer_jax._TraceableExactNewtonVariantContract(
+            # Constructed directly (not via the lru-cached factory) so tests
+            # can monkeypatch this module's newton_exact_traceable seam.
+            c0_contract = _optimizer_jax.TraceableExactNewtonVariantContract(
                 variant="C0",
                 solver=newton_exact_traceable,
                 factorization_backend=EXACT_FACTORIZATION_BACKEND,

@@ -70,8 +70,9 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
-from simsopt_jax.backend.dtypes import explicit_device_array
+from simsopt_jax.backend.dtypes import explicit_device_array, runtime_device_put_tree
 from simsopt_jax.runtime.host_boundary import (
+    block_until_ready,
     host_array,
     host_bool,
     host_float,
@@ -1145,8 +1146,8 @@ def run_projected_lbfgs(
     # in-loop call -- 31 s of the measured 92 s fixed cost on the coupled
     # full-space problem.  Committing the start once is numerically inert and
     # leaves one executable per kernel.
-    initial_coordinates = jax.device_put(
-        initial_coordinates, next(iter(initial_coordinates.devices()))
+    initial_coordinates = runtime_device_put_tree(
+        initial_coordinates, device=next(iter(initial_coordinates.devices()))
     )
     dimension = int(initial_coordinates.shape[0])
     dtype = initial_coordinates.dtype
@@ -1164,7 +1165,7 @@ def run_projected_lbfgs(
     gauss_newton_direction = kernels.gauss_newton_direction
 
     compile_started = time.perf_counter()
-    point = jax.block_until_ready(evaluate(initial_coordinates))
+    point = block_until_ready(evaluate(initial_coordinates))
     compile_seconds = time.perf_counter() - compile_started
 
     coordinates = initial_coordinates
@@ -1252,7 +1253,7 @@ def run_projected_lbfgs(
             and tangent_fraction < options.newton_tangent_fraction_threshold
         )
         if options.lagrangian_newton and newton_active and not newton_gate_skipped:
-            multipliers, newton_step = jax.block_until_ready(
+            multipliers, newton_step = block_until_ready(
                 lagrangian_newton_direction(
                     coordinates,
                     point.projector,
@@ -1272,11 +1273,11 @@ def run_projected_lbfgs(
             else:
                 # A refused Newton solve is evidence, not a failure: the
                 # telemetry is kept and the secant store takes this iteration.
-                direction = jax.block_until_ready(
+                direction = block_until_ready(
                     apply_metric(metric, -point.projected_gradient)
                 )
         elif options.gauss_newton:
-            gn_step = jax.block_until_ready(
+            gn_step = block_until_ready(
                 gauss_newton_direction(
                     coordinates, point.projector, point.projected_gradient
                 )
@@ -1290,23 +1291,21 @@ def run_projected_lbfgs(
                 gn_tangency = host_float(gn_step.tangency_relative_residual)
                 gn_direction_norm = host_float(jnp.linalg.norm(gn_step.direction))
             else:
-                direction = jax.block_until_ready(
+                direction = block_until_ready(
                     apply_metric(metric, -point.projected_gradient)
                 )
         elif options.dense_curvature:
-            dense_step = jax.block_until_ready(
+            dense_step = block_until_ready(
                 dense_direction(curvature, point.projector, point.projected_gradient)
             )
             direction = dense_step.direction
             dense_pd = host_bool(dense_step.positive_definite)
         else:
             if options.vector_transport:
-                carried = jax.block_until_ready(
-                    transport_metric(metric, point.projector)
-                )
+                carried = block_until_ready(transport_metric(metric, point.projector))
                 applied_metric = carried.metric
                 masked_pairs = host_int(carried.masked_pairs)
-            direction = jax.block_until_ready(
+            direction = block_until_ready(
                 apply_metric(applied_metric, -point.projected_gradient)
             )
         directional_derivative = host_float(point.projected_gradient @ direction)
@@ -1329,7 +1328,7 @@ def run_projected_lbfgs(
         # and the Gauss--Newton family is closed with a recorded negative
         # verdict rather than carrying evidence of this mode.
         if lagrangian_newton_used and directional_derivative >= 0.0:
-            direction = jax.block_until_ready(
+            direction = block_until_ready(
                 apply_metric(metric, -point.projected_gradient)
             )
             directional_derivative = host_float(point.projected_gradient @ direction)
@@ -1396,7 +1395,7 @@ def run_projected_lbfgs(
                 trials += 1
                 started = time.perf_counter()
                 device_scale = explicit_device_array(scale, dtype=coordinates.dtype)
-                candidate = jax.block_until_ready(
+                candidate = block_until_ready(
                     retract(
                         point.projector, coordinates + device_scale * search_direction
                     )
@@ -1425,7 +1424,7 @@ def run_projected_lbfgs(
             direction, directional_derivative, step_scale, rescue_floor
         )
         if accepted is None and model_step_used:
-            rescue_direction = jax.block_until_ready(
+            rescue_direction = block_until_ready(
                 apply_metric(metric, -point.projected_gradient)
             )
             rescue_slope = host_float(point.projected_gradient @ rescue_direction)
@@ -1474,7 +1473,7 @@ def run_projected_lbfgs(
         # have, and the retry produces the record's telemetry afresh.
         if accepted is None and projector_age > 0:
             refresh_started = time.perf_counter()
-            point = jax.block_until_ready(evaluate(coordinates))
+            point = block_until_ready(evaluate(coordinates))
             abandoned = _AbandonedAttempt(
                 direction_seconds=abandoned.direction_seconds + direction_seconds,
                 line_search_seconds=abandoned.line_search_seconds
@@ -1563,7 +1562,7 @@ def run_projected_lbfgs(
         step = accepted.coordinates - coordinates
         point_started = time.perf_counter()
         if projector_age + 1 < options.projector_refresh_period:
-            next_point = jax.block_until_ready(
+            next_point = block_until_ready(
                 evaluate_carried(point.projector, accepted.coordinates)
             )
             carry_tangency = host_float(next_point.true_tangency_relative_residual)
@@ -1572,14 +1571,14 @@ def run_projected_lbfgs(
             if options.projector_tangency_tolerance > 0.0 and not (
                 carry_tangency <= options.projector_tangency_tolerance
             ):
-                next_point = jax.block_until_ready(evaluate(accepted.coordinates))
+                next_point = block_until_ready(evaluate(accepted.coordinates))
                 projector_age = 0
                 projector_materializations += 1
                 tangency_forced_refreshes += 1
             else:
                 projector_age += 1
         else:
-            next_point = jax.block_until_ready(evaluate(accepted.coordinates))
+            next_point = block_until_ready(evaluate(accepted.coordinates))
             projector_age = 0
             projector_materializations += 1
         point_evaluation_seconds = (
@@ -1588,7 +1587,7 @@ def run_projected_lbfgs(
 
         pair_started = time.perf_counter()
         if options.vector_transport:
-            pair_step, pair_gradient_change = jax.block_until_ready(
+            pair_step, pair_gradient_change = block_until_ready(
                 transported_pair(
                     next_point.projector,
                     step,
@@ -1601,11 +1600,11 @@ def run_projected_lbfgs(
             pair_gradient_change = (
                 next_point.projected_gradient - point.projected_gradient
             )
-        metric, pair_curvature, admitted, live_pairs = jax.block_until_ready(
+        metric, pair_curvature, admitted, live_pairs = block_until_ready(
             admit_pair(metric, pair_step, pair_gradient_change)
         )
         if options.dense_curvature:
-            curvature = jax.block_until_ready(
+            curvature = block_until_ready(
                 update_curvature(curvature, pair_step, pair_gradient_change)
             )
             dense_damped = host_int(curvature.damped_updates)

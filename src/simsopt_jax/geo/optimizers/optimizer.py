@@ -408,6 +408,7 @@ __all__ = [
     "ReferenceOptimizerContract",
     "TargetObjectiveRoute",
     "TargetOptimizerContract",
+    "TraceableExactNewtonVariantContract",
     "TraceableNewtonLinearSolver",
     "adjoint_hessian_stabilization",
     "adam_optimize",
@@ -432,6 +433,7 @@ __all__ = [
     "levenberg_marquardt",
     "levenberg_marquardt_minpack_traceable",
     "levenberg_marquardt_traceable",
+    "make_traceable_exact_newton_variant_contract",
     "newton_polish",
     "newton_polish_traceable",
     "newton_exact",
@@ -886,8 +888,15 @@ class _TraceableExactNewtonSolver(Protocol):
 
 
 @dataclass(frozen=True)
-class _TraceableExactNewtonVariantContract:
-    """Immutable construction choice; no variant branch enters staged code."""
+class TraceableExactNewtonVariantContract:
+    """Immutable construction choice; no variant branch enters staged code.
+
+    Public because the Boozer adapter selects and carries the variant it
+    stages. Build one with
+    :func:`make_traceable_exact_newton_variant_contract`, or construct
+    directly when the caller stages a module-local solver seam (the Boozer
+    adapter's monkeypatchable C0 path does).
+    """
 
     variant: _TraceableExactNewtonVariant
     solver: _TraceableExactNewtonSolver
@@ -9328,27 +9337,27 @@ def _newton_exact_traceable_c2(
 
 
 @lru_cache(maxsize=3)
-def _make_traceable_exact_newton_variant_contract(
+def make_traceable_exact_newton_variant_contract(
     variant: object,
-) -> _TraceableExactNewtonVariantContract:
+) -> TraceableExactNewtonVariantContract:
     """Resolve C0/C1/C2 once, before callers stage the selected solver."""
 
     if variant == "C0":
-        return _TraceableExactNewtonVariantContract(
+        return TraceableExactNewtonVariantContract(
             variant="C0",
             solver=newton_exact_traceable,
             factorization_backend="operator-gmres",
             returns_jacobian=False,
         )
     if variant == "C1":
-        return _TraceableExactNewtonVariantContract(
+        return TraceableExactNewtonVariantContract(
             variant="C1",
             solver=_newton_exact_traceable_c1,
             factorization_backend="dense-lu",
             returns_jacobian=False,
         )
     if variant == "C2":
-        return _TraceableExactNewtonVariantContract(
+        return TraceableExactNewtonVariantContract(
             variant="C2",
             solver=_newton_exact_traceable_c2,
             factorization_backend="dense-lu",

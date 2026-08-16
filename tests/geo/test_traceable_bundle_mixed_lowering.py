@@ -13,7 +13,7 @@ from simsopt.geo.curve import create_equally_spaced_curves
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 
 import simsopt_jax_adapters.geo.surface_objectives_traceable as traceable_module
-from simsopt_jax.backend import invalidate_backend_cache
+from conftest import enable_non_strict_jax_backend
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
 
@@ -97,29 +97,27 @@ def _solved_small_boozer_fixture():
 
 def test_mixed_bundle_lowering_uses_matrix_free_surface_scatter(
     monkeypatch,
+    request,
 ) -> None:
     booz_jax, bs_jax = _solved_small_boozer_fixture()
     iota_target = jnp.asarray(booz_jax.res["iota"], dtype=jnp.float64)
     coil_dofs = jnp.asarray(np.asarray(bs_jax.x).copy(), dtype=jnp.float64)
 
-    monkeypatch.setenv("SIMSOPT_PRECISION", "mixed")
-    invalidate_backend_cache()
-    try:
-        state = traceable_module._build_traceable_objective_state(
-            booz_jax,
-            bs_jax,
-            iota_target,
-        )
-        bundle = traceable_module._build_traceable_objective_compiled_bundle_from_state(
-            booz_jax,
-            state,
-        )
-        stablehlo_text = (
-            jax.jit(bundle["compiled_value_and_grad_for"]).lower(coil_dofs).as_text()
-        )
-    finally:
-        monkeypatch.delenv("SIMSOPT_PRECISION", raising=False)
-        invalidate_backend_cache()
+    enable_non_strict_jax_backend(
+        monkeypatch, request, mode="jax_cpu_fast", precision="mixed"
+    )
+    state = traceable_module._build_traceable_objective_state(
+        booz_jax,
+        bs_jax,
+        iota_target,
+    )
+    bundle = traceable_module._build_traceable_objective_compiled_bundle_from_state(
+        booz_jax,
+        state,
+    )
+    stablehlo_text = (
+        jax.jit(bundle["compiled_value_and_grad_for"]).lower(coil_dofs).as_text()
+    )
 
     assert "stablehlo.scatter" in stablehlo_text
     census = _large_constant_dtype_census(stablehlo_text, min_elems=2048)

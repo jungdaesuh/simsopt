@@ -32,6 +32,13 @@ _OPTIMIZER_COMPAT_REEXPORT_ALLOWLIST = {
             "_CACHEABLE_LINEAR_OPERATOR_ATTR",
             "_CACHED_HVP_ATTR",
             "_CACHED_JVP_ATTR",
+            # Commit fed04522c's exact-Newton C1/C2 variant stack consumes
+            # five more linear_solve owners from optimizer.py (dense
+            # linearization telemetry and the counted incremental GMRES lane);
+            # _exact_newton_gmres_iteration_limits predates it (19194b957's
+            # bounded exact-Newton GMRES) and was omitted from this list at
+            # its introduction.
+            "_CountedIncrementalGmresTelemetry",
             "_DENSE_LINEAR_SOLVE_RESIDUAL_DIMENSION_FACTOR",
             "_DENSE_LINEAR_SOLVE_SMALL_SOLUTION_FACTOR",
             "_DENSE_OPERATOR_ACTIVATION_BYTES_PER_PARALLEL_COLUMN",
@@ -41,6 +48,7 @@ _OPTIMIZER_COMPAT_REEXPORT_ALLOWLIST = {
             "_DENSE_OPERATOR_CHUNK_BATCH_SIZE_MAX",
             "_DENSE_OPERATOR_DEFAULT_BUDGET_BYTES",
             "_DENSE_OPERATOR_LEGACY_BYTES_PER_PARALLEL_COLUMN",
+            "_DenseJacobianMaterializationTelemetry",
             "_EXACT_ADJOINT_DENSE_LU",
             "_FLOAT64_DENSE_MATRIX_MAX_CONDITION_ESTIMATE",
             "_HAGER_HIGHAM_CONDITION_ITERATIONS",
@@ -56,6 +64,7 @@ _OPTIMIZER_COMPAT_REEXPORT_ALLOWLIST = {
             "_dense_matrix_backward_error_success",
             "_dense_matrix_condition_estimate",
             "_dense_matrix_condition_estimate_numerically_safe",
+            "_dense_matrix_condition_estimate_with_telemetry",
             "_dense_matrix_nonsingular_threshold",
             "_dense_matrix_solve_forward_error_success",
             "_dense_matrix_solve_numerically_safe",
@@ -70,6 +79,7 @@ _OPTIMIZER_COMPAT_REEXPORT_ALLOWLIST = {
             "_device_scalar",
             "_effective_dense_backward_error_tolerance",
             "_effective_linear_solve_tolerance",
+            "_exact_newton_gmres_iteration_limits",
             "_factor_dense_hessian",
             "_forward_error_bound",
             "_forward_error_success",
@@ -90,6 +100,7 @@ _OPTIMIZER_COMPAT_REEXPORT_ALLOWLIST = {
             "_linear_solve_status",
             "_linear_solve_status_iterations",
             "_linear_solve_status_success",
+            "_linearize_and_materialize_dense_square_jacobian",
             "_lu_solve_dense_hessian",
             "_materialize_dense_hessian",
             "_materialize_dense_hessian_host",
@@ -103,6 +114,7 @@ _OPTIMIZER_COMPAT_REEXPORT_ALLOWLIST = {
             "_relative_residual_norm",
             "_resolve_dense_operator_chunk_batch_size",
             "_run_operator_gmres",
+            "_run_operator_gmres_counted_incremental",
             "_solve_dense_square_operator_least_squares_system_with_status",
             "_solve_dense_square_operator_lu_system_with_status",
             "_solve_jacobian_operator",
@@ -165,6 +177,60 @@ _OPTIMIZER_COMPAT_REEXPORT_ALLOWLIST = {
         }
     ),
 }
+
+
+# R08 pins which mutable traceable state may hang off a Boozer object.
+#
+# Commit 5fe3c5343 removed all five caches on the theory that
+# ``_mark_traceable_runner_cacheable``'s token-keyed cache made them redundant.
+# That holds for the runner cache but NOT for the compiled executable:
+# ``optimizer._cached_jit_value_and_grad`` installs
+# ``jax.jit(jax.value_and_grad(fun))`` as an attribute ON ``fun`` itself, so the
+# executable's lifetime is the closure's lifetime. Rebuilding the closure on each
+# of the eight ``_get_traceable_penalty_*`` call sites therefore retraces and
+# recompiles every time. Commit fd200f564 restored the two penalty memos for
+# exactly that reason, matching the ``_reference_penalty_*`` and
+# ``_kernel_bundle_cache`` memos that were never removed.
+#
+# Restored (legitimized by fd200f564): 2 of the original 5 names.
+# Still banned: the remaining 3 — they carry solve-scoped state, not
+# executable-owning closures, and belong to an explicit session.
+# _traceable_solve_state_token was never among the original 5: it is the
+# pre-existing session token the declared-state census below also pins.
+_FORBIDDEN_TRACEABLE_RUNTIME_STATE = (
+    "_traceable_runtime_entry_cache",
+    "_traceable_solved_state_value_and_grad_entry_cache",
+    "_traceable_exact_residual_cache",
+)
+_DECLARED_TRACEABLE_OBJECT_STATE = frozenset(
+    {
+        "_traceable_penalty_objective_cache",
+        "_traceable_penalty_residual_cache",
+        "_traceable_solve_state_token",
+    }
+)
+
+
+def _self_attributes_assigned(path: Path, *, prefix: str) -> frozenset[str]:
+    """Return ``self.<prefix>...`` attribute names assigned anywhere in ``path``."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    assigned: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = (node.target,)
+        else:
+            continue
+        for target in targets:
+            if (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "self"
+                and target.attr.startswith(prefix)
+            ):
+                assigned.add(target.attr)
+    return frozenset(assigned)
 
 
 def _top_level_definitions(path: Path) -> set[str]:
@@ -303,18 +369,20 @@ def test_linear_solve_owner_graph_has_no_reverse_or_facade_edges() -> None:
 
 def test_traceable_runtime_state_is_not_attached_to_boozer_objects() -> None:
     """R08: mutable traceable runtime state belongs to an explicit session."""
-    forbidden = (
-        "_traceable_runtime_entry_cache",
-        "_traceable_solved_state_value_and_grad_entry_cache",
-        "_traceable_penalty_objective_cache",
-        "_traceable_penalty_residual_cache",
-        "_traceable_exact_residual_cache",
-    )
     source = "\n".join(
         path.read_text(encoding="utf-8")
         for path in (TRACEABLE_OBJECTIVES, BOOZER_SURFACE)
     )
-    assert [name for name in forbidden if name in source] == []
+    present = [name for name in _FORBIDDEN_TRACEABLE_RUNTIME_STATE if name in source]
+    assert present == []
+    assert (
+        _self_attributes_assigned(BOOZER_SURFACE, prefix="_traceable_")
+        == _DECLARED_TRACEABLE_OBJECT_STATE
+    )
+    assert (
+        _self_attributes_assigned(TRACEABLE_OBJECTIVES, prefix="_traceable_")
+        == frozenset()
+    )
 
     traceable_tree = ast.parse(
         TRACEABLE_OBJECTIVES.read_text(encoding="utf-8"),

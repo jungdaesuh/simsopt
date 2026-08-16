@@ -19,14 +19,17 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
 import jax
 import numpy as np
 from simsopt.configs import get_data
 from simsopt.geo import CurveLength, SurfaceXYZTensorFourier, Volume
 from simsopt.geo.curve import Curve
-from simsopt.optimization_endpoint import certify_optimization_endpoint
+from simsopt.optimization_endpoint import (
+    OptimizationEndpointCertificate,
+    certify_optimization_endpoint,
+)
 from simsopt.single_stage_boozer_vacuum import (
     NATIVE_ITERATIONS,
     OUTER_GRADIENT_TOLERANCE,
@@ -53,6 +56,56 @@ from simsopt_jax_adapters.geo.surface_objectives import (
 )
 
 EXAMPLE_ID = "native-single-stage-boozer-vacuum-optimization"
+
+# Terminal states a SOUND bounded run can carry.  This follows the scale-aware
+# convention of ``_SOUND_TERMINAL_STATES`` in the projected-route lesson
+# (single_stage_boozer_vacuum_projected_route.py); the members differ because
+# the status vocabularies differ.  The bounded lane accepts exactly the draws
+# its truncated budget produces by construction -- ``converged`` and
+# ``iteration-limit``.  Everything else stays failed: ``evaluation-limit`` at
+# this budget indicates line-search churn rather than a spent outer budget,
+# and a nonfinite state, a collapsed line search, or a provider error is never
+# sound at any scale.
+SOUND_BOUNDED_STOPPING_REASONS: Final = ("converged", "iteration-limit")
+
+
+def scientific_success_for_scale(
+    *,
+    native_scale: bool,
+    certificate: OptimizationEndpointCertificate,
+    accepted_step: bool,
+    inner_success: bool,
+    parameters_finite: bool,
+    observables_finite: bool,
+    monotone_descent: bool,
+) -> bool:
+    """Judge one endpoint against the contract its own scale is held to.
+
+    ``native_default`` is the lane that claims convergence, so it keeps the full
+    endpoint certificate: a converged, stationary, inner-successful endpoint
+    that did not raise the objective.
+
+    ``bounded`` is the diagnostic and parity lane the smoke entry point
+    selects; its default two-step budget cannot reach stationarity by
+    construction, so certifying it against convergence would report every
+    honest run as a failure.  It instead claims only what a truncated run can
+    show -- the run stopped for a reason that is not a defect, at least one
+    step was accepted (or the start was already stationary), the inner Boozer
+    solves held, every published observable is finite, and the objective never
+    rose.  The published observables are unchanged either way:
+    ``outer_stopping_reason`` still reports ``iteration-limit`` and the
+    certificate's stationarity fields still report ``False``.
+    """
+    if native_scale:
+        return bool(certificate.success and monotone_descent)
+    return bool(
+        certificate.stopping_reason in SOUND_BOUNDED_STOPPING_REASONS
+        and accepted_step
+        and inner_success
+        and parameters_finite
+        and observables_finite
+        and monotone_descent
+    )
 
 
 def _host_array(value: object) -> np.ndarray:
@@ -274,6 +327,7 @@ def solve(
         if driver == Driver.SIMSOPT_LBFGSB
         else optimizer_result.converged
     )
+    inner_success = bool(initial_inner_success and inner_solver_success)
     endpoint_certificate = certify_optimization_endpoint(
         # The example's outer drivers are the HOST cores
         # (minimize_lbfgs_host_core / minimize_bfgs_host_core), whose
@@ -290,10 +344,17 @@ def solve(
         final_gradient_inf_norm=float(np.max(np.abs(gradient))),
         parameters_finite=parameters_finite,
         observables_finite=observables_finite,
-        inner_success=bool(initial_inner_success and inner_solver_success),
+        inner_success=inner_success,
     )
-    scientific_success = bool(
-        endpoint_certificate.success and final_value <= initial_value_and_gradient[0]
+    scientific_success = scientific_success_for_scale(
+        native_scale=native_scale,
+        certificate=endpoint_certificate,
+        accepted_step=int(optimizer_result.k) > 0
+        or endpoint_certificate.initial_stationary,
+        inner_success=inner_success,
+        parameters_finite=parameters_finite,
+        observables_finite=observables_finite,
+        monotone_descent=final_value <= initial_value_and_gradient[0],
     )
     return ExampleResult(
         example_id=EXAMPLE_ID,

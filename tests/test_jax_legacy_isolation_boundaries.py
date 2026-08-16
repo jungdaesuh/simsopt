@@ -13,16 +13,29 @@ JAX_NATIVE_MARKER = "_simsopt_jax_native_field"
 JAX_SOURCE_ROOTS = ("src/simsopt_jax", "src/simsopt_jax_adapters")
 
 ALLOWED_JAX_SOURCE_LOCAL_IMPORTS_BY_REASON = {
+    # The backend runtime decides the JAX platform/device policy, so it may only
+    # import ``jax`` after that policy has been applied. Commit 5ac6f12f8 split
+    # the chunk/sharding tuning out of ``runtime.py`` into ``_runtime_tuning.py``;
+    # the two device-count probes moved with it and keep the same reason.
     "jax_runtime_configuration_before_jax_import": (
         (
-            "src/simsopt_jax/backend/runtime.py",
+            "src/simsopt_jax/backend/_runtime_tuning.py",
             "_detect_local_jax_device_count",
             "jax",
             1,
         ),
         (
-            "src/simsopt_jax/backend/runtime.py",
+            "src/simsopt_jax/backend/_runtime_tuning.py",
             "_detect_global_jax_device_count",
+            "jax",
+            1,
+        ),
+        # get_runtime_jax_device never moved: its deferred import dates to the
+        # original port (c0134753d) and was simply omitted from this list at
+        # the ratchet's introduction.
+        (
+            "src/simsopt_jax/backend/runtime.py",
+            "get_runtime_jax_device",
             "jax",
             1,
         ),
@@ -40,11 +53,38 @@ ALLOWED_JAX_SOURCE_LOCAL_IMPORTS_BY_REASON = {
             1,
         ),
     ),
+    # ``runtime.py`` re-exports ``_runtime_tuning`` builders at module scope
+    # (the module-scope ``from simsopt_jax.backend._runtime_tuning import``
+    # block in runtime.py), so the tuning module cannot import the lifecycle cache
+    # owner back at module scope. Introduced with the split in commit 5ac6f12f8.
+    "runtime_tuning_cycle_break": (
+        (
+            "src/simsopt_jax/backend/_runtime_tuning.py",
+            "_build_sharding_tuning",
+            "simsopt_jax.backend.runtime",
+            2,
+        ),
+        (
+            "src/simsopt_jax/backend/_runtime_tuning.py",
+            "_detect_imported_jax_cuda_device_index",
+            "simsopt_jax.backend.runtime",
+            1,
+        ),
+    ),
 }
 
 
 ALLOWED_IMPORTS_BY_REASON = {
     "upstream_json_array_serialization": (("src/simsopt/_core/json.py", "jax", 1),),
+    # ``RegularizedCoil``'s self-field/force lane already computed in JAX; commit
+    # b6775bf23 made its device placement explicit (``jax.device_put`` on the
+    # curve/current inputs, ``jax.device_get`` on the returned self-force) so the
+    # legacy lane stops relying on implicit host<->device transfers and runs on a
+    # non-CPU backend. Three function-local ``import jax`` statements:
+    # ``B_regularized``, ``self_force``, ``force``.
+    "legacy_regularized_coil_explicit_device_placement": (
+        ("src/simsopt/field/coil.py", "jax", 3),
+    ),
     "direct_legacy_jax_math": (
         ("src/simsopt/field/coil.py", "jax.numpy", 1),
         ("src/simsopt/field/force.py", "jax", 1),

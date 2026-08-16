@@ -32,6 +32,9 @@ _ALLOWED_OWNER_CALLS = frozenset(
         # JAX library calls that internally stage scalar loop/GMRES constants.
         "src/simsopt_jax/geo/optimizers/linear_solve.py::_hager_higham_inverse_1_norm_estimate::transfer_guard_host_to_device",
         "src/simsopt_jax/geo/optimizers/linear_solve.py::_run_operator_gmres::transfer_guard_host_to_device",
+        # Commit fed04522c added the counted incremental GMRES sibling; it scopes
+        # the same allowance around one ``lax.custom_linear_solve`` call.
+        "src/simsopt_jax/geo/optimizers/linear_solve.py::_run_operator_gmres_counted_incremental::transfer_guard_host_to_device",
         "src/simsopt_jax/geo/optimizers/optimizer.py::_gmres_solve_least_squares_system::transfer_guard_host_to_device",
         "src/simsopt_jax/solve/dispatch.py::_run_optimistix_lm::transfer_guard_host_to_device",
         "src/simsopt_jax/solve/minimize_runtime.py::run_optimistix_minimize::transfer_guard_host_to_device",
