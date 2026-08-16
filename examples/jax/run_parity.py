@@ -17,7 +17,7 @@ for import_root in (str(_SOURCE_ROOT), str(_REPO_ROOT)):
         sys.path.insert(0, import_root)
 
 from examples.jax.manifest_runtime import load_runtime_contract_pair
-from examples.jax.parity.arbiter import arbitrate
+from examples.jax.parity.arbiter import QUALITY_BAND_VERDICT, arbitrate
 from examples.jax.parity.artifacts import canonical_json_bytes, write_bytes_exclusive
 from examples.jax.parity.cases import get_case, implemented_case_ids
 from examples.jax.parity.provenance import (
@@ -153,6 +153,11 @@ def main(argv: list[str] | None = None) -> int:
                 observations,
                 required_lanes=frozenset(args.lanes),
                 expected_workflow_stages=relationship.workflow_stages,
+                quality_band=(
+                    case.native_default_quality_band
+                    if scale == "native_default"
+                    else None
+                ),
             )
             for observation in observations.values():
                 provenance = observation.provenance
@@ -186,67 +191,75 @@ def main(argv: list[str] | None = None) -> int:
                 and observation.provenance.authoritative
                 for observation in observations.values()
             )
-            summaries.append(
-                {
-                    "case_id": case_id,
-                    "jax_example_id": relationship.jax_example_id,
-                    "native_source": relationship.native_source,
-                    "classification": relationship.classification,
-                    "classification_reason": relationship.classification_reason,
-                    "scale_tier": scale,
-                    "oracle_kind": relationship.oracle_kind,
-                    "cost_tier": relationship.cost_tier,
-                    "omitted_scientific_stages": list(
-                        relationship.omitted_scientific_stages
-                    ),
-                    "excluded_teaching_stages": list(
-                        relationship.excluded_teaching_stages
-                    ),
-                    "authoritative": case_authoritative,
-                    "repository_changed_during_run": any(
-                        observation.provenance is not None
-                        and (
-                            observation.provenance.repository_dirty
-                            != repository_state.repository_dirty
-                            or observation.provenance.tracked_diff_sha256
-                            != repository_state.tracked_diff_sha256
-                            or observation.provenance.untracked_files
-                            != repository_state.untracked_files
-                        )
-                        for observation in observations.values()
-                    ),
-                    "input_fingerprint": bundle.input_fingerprint,
-                    "configuration_fingerprint": bundle.configuration_fingerprint,
-                    "completed_workflow_stages": list(relationship.workflow_stages),
-                    "verdict": arbitration.verdict,
-                    "comparisons": [
-                        {
-                            "phase": comparison.phase,
-                            "observable": comparison.observable,
-                            "lane_pair": comparison.lane_pair,
-                            "passed": comparison.passed,
-                            "tolerance_bucket": comparison.tolerance_bucket,
-                            "diagnostic": comparison.diagnostic,
-                        }
-                        for comparison in arbitration.comparisons
-                    ],
-                    "executions": [
-                        {
-                            "lane": execution.lane,
-                            "command": list(execution.command),
-                            "stdout": execution.stdout,
-                            "stderr": execution.stderr,
-                            "returncode": execution.returncode,
-                            "elapsed_seconds": execution.elapsed_seconds,
-                            "parent_peak_rss_bytes": execution.parent_peak_rss_bytes,
-                            "result_directory": str(
-                                execution.result_directory.relative_to(paths.partial)
-                            ),
-                        }
-                        for execution in executions
-                    ],
-                }
-            )
+            case_record: dict[str, object] = {
+                "case_id": case_id,
+                "jax_example_id": relationship.jax_example_id,
+                "native_source": relationship.native_source,
+                "classification": relationship.classification,
+                "classification_reason": relationship.classification_reason,
+                "scale_tier": scale,
+                "oracle_kind": relationship.oracle_kind,
+                "cost_tier": relationship.cost_tier,
+                "omitted_scientific_stages": list(
+                    relationship.omitted_scientific_stages
+                ),
+                "excluded_teaching_stages": list(relationship.excluded_teaching_stages),
+                "authoritative": case_authoritative,
+                "repository_changed_during_run": any(
+                    observation.provenance is not None
+                    and (
+                        observation.provenance.repository_dirty
+                        != repository_state.repository_dirty
+                        or observation.provenance.tracked_diff_sha256
+                        != repository_state.tracked_diff_sha256
+                        or observation.provenance.untracked_files
+                        != repository_state.untracked_files
+                    )
+                    for observation in observations.values()
+                ),
+                "input_fingerprint": bundle.input_fingerprint,
+                "configuration_fingerprint": bundle.configuration_fingerprint,
+                "completed_workflow_stages": list(relationship.workflow_stages),
+                "verdict": arbitration.verdict,
+                "comparisons": [
+                    {
+                        "phase": comparison.phase,
+                        "observable": comparison.observable,
+                        "lane_pair": comparison.lane_pair,
+                        "passed": comparison.passed,
+                        "tolerance_bucket": comparison.tolerance_bucket,
+                        "diagnostic": comparison.diagnostic,
+                    }
+                    for comparison in arbitration.comparisons
+                ],
+                "executions": [
+                    {
+                        "lane": execution.lane,
+                        "command": list(execution.command),
+                        "stdout": execution.stdout,
+                        "stderr": execution.stderr,
+                        "returncode": execution.returncode,
+                        "elapsed_seconds": execution.elapsed_seconds,
+                        "parent_peak_rss_bytes": execution.parent_peak_rss_bytes,
+                        "result_directory": str(
+                            execution.result_directory.relative_to(paths.partial)
+                        ),
+                    }
+                    for execution in executions
+                ],
+            }
+            if arbitration.quality_band_results:
+                case_record["quality_band"] = [
+                    {
+                        "lane": band_result.lane,
+                        "observable": band_result.observable,
+                        "max_value": band_result.max_value,
+                        "observed_value": band_result.observed_value,
+                        "passed": band_result.passed,
+                    }
+                    for band_result in arbitration.quality_band_results
+                ]
+            summaries.append(case_record)
         validate_sources_current(repo_root, explicit_sources)
         final_repository_state = collect_repository_state(repo_root)
         final_repository_changed = final_repository_state != repository_state
@@ -255,10 +268,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         if not repository_state.repository_dirty and final_repository_changed:
             raise RunnerError("clean repository changed during parity execution")
+        case_verdicts = tuple(str(item["verdict"]) for item in summaries)
         verdict = (
-            "pass"
-            if summaries and all(item["verdict"] == "pass" for item in summaries)
-            else "fail"
+            "fail"
+            if not case_verdicts
+            or any(
+                value not in ("pass", QUALITY_BAND_VERDICT) for value in case_verdicts
+            )
+            else QUALITY_BAND_VERDICT
+            if QUALITY_BAND_VERDICT in case_verdicts
+            else "pass"
         )
         authoritative = not repository_state.repository_dirty and all(
             source.git_blob_id is not None for source in explicit_sources
@@ -294,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
                 }
             ),
         )
-        if verdict != "pass":
+        if verdict == "fail":
             mark_run_failed(paths, "one or more parity comparisons failed")
             return 1
         published = publish_run(paths)

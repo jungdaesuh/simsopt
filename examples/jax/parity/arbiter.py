@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Mapping
 
 import numpy as np
 from examples.jax.parity._manifest import ComparisonRoute
-from examples.jax.parity.contracts import ComparisonResult
+from examples.jax.parity.contracts import (
+    ComparisonResult,
+    QualityBand,
+    QualityBandResult,
+)
 from examples.jax.parity.provenance import LaneProvenance
 from simsopt_jax.config import ExecutionIntent
 from simsopt_jax.examples import ExecutionScale
@@ -18,6 +22,9 @@ _REQUIRED_LANES = frozenset({"native-cpu", "jax-cpu", "jax-gpu"})
 _REQUIRED_PAIRS = frozenset(
     {"native-cpu:jax-cpu", "native-cpu:jax-gpu", "jax-cpu:jax-gpu"}
 )
+QUALITY_BAND_SCALE: ExecutionScale = "native_default"
+QUALITY_BAND_VERDICT = "quality-band"
+_INFORMATIONAL_DIAGNOSTIC_PREFIX = "informational (quality-band, non-certifying): "
 
 
 class ArbitrationError(ValueError):
@@ -71,6 +78,7 @@ class LaneObservation:
 class ArbitrationResult:
     verdict: str
     comparisons: tuple[ComparisonResult, ...]
+    quality_band_results: tuple[QualityBandResult, ...] = ()
 
 
 def _validate_lanes(
@@ -78,6 +86,7 @@ def _validate_lanes(
     required_lanes: frozenset[str],
     expected_workflow_stages: tuple[str, ...] | None,
     execution_intent: ExecutionIntent = "parity",
+    quality_band: QualityBand | None = None,
 ) -> None:
     if execution_intent not in ("fast", "parity"):
         raise ArbitrationError(f"invalid execution intent: {execution_intent}")
@@ -86,6 +95,15 @@ def _validate_lanes(
     missing = required_lanes - set(observations)
     if missing:
         raise ArbitrationError(f"missing required lane: {sorted(missing)}")
+    if quality_band is not None and {
+        observations[lane].scale for lane in required_lanes
+    } != {QUALITY_BAND_SCALE}:
+        raise ArbitrationError(
+            f"quality-band certification requires the {QUALITY_BAND_SCALE} scale"
+        )
+    budget_exhausted_admissible = quality_band is not None and {
+        observations[lane].normalized_status for lane in required_lanes
+    } == {"budget_exhausted"}
     expected_runtime = {
         "native-cpu": ("native_cpu", "cpu", "fp64"),
         "jax-cpu": (f"jax_cpu_{execution_intent}", "cpu", "fp64"),
@@ -144,7 +162,7 @@ def _validate_lanes(
             raise ArbitrationError(
                 f"{lane} has invalid normalized status {observation.normalized_status}"
             )
-        if not observation.success:
+        if not observation.success and not budget_exhausted_admissible:
             raise ArbitrationError(f"{lane} did not report scientific success")
         if observation.normalized_status == "not_applicable" and (
             observation.nit is not None
@@ -158,6 +176,13 @@ def _validate_lanes(
             counter = getattr(observation, counter_name)
             if counter is not None and counter < 0:
                 raise ArbitrationError(f"{lane} has invalid {counter_name}: {counter}")
+    if budget_exhausted_admissible:
+        budgets = {observations[lane].nit for lane in required_lanes}
+        if len(budgets) != 1 or None in budgets:
+            raise ArbitrationError(
+                "quality-band budget_exhausted lanes must share one matched "
+                f"iteration budget: {sorted(budgets, key=repr)}"
+            )
     stage_contract = (
         expected_workflow_stages
         if expected_workflow_stages is not None
@@ -290,6 +315,45 @@ def _route_tolerance(route: ComparisonRoute) -> tuple[float, float]:
     return rtol, atol
 
 
+def _quality_band_results(
+    quality_band: QualityBand,
+    observations: Mapping[str, LaneObservation],
+    required_lanes: frozenset[str],
+) -> tuple[QualityBandResult, ...]:
+    """Measure every compared lane against one case-owned endpoint floor."""
+    results: list[QualityBandResult] = []
+    for lane in sorted(required_lanes):
+        observation = observations[lane]
+        # A receipt's applicability keys are exactly its published value keys,
+        # so this one gate covers both an absent and a disclaimed observable.
+        if not observation.applicability.get(quality_band.observable, False):
+            raise ArbitrationError(
+                "quality-band observable is not applicable "
+                f"{quality_band.observable}: {lane}"
+            )
+        value = np.asarray(observation.values[quality_band.observable])
+        if value.dtype != np.dtype(np.float64):
+            raise ArbitrationError(
+                f"{lane} quality-band observable must be FP64: "
+                f"{quality_band.observable}"
+            )
+        if value.size == 0 or not bool(np.all(np.isfinite(value))):
+            raise ArbitrationError(
+                f"non-finite quality-band observable {quality_band.observable}: {lane}"
+            )
+        observed_value = float(np.max(value))
+        results.append(
+            QualityBandResult(
+                lane=lane,
+                observable=quality_band.observable,
+                max_value=quality_band.max_value,
+                observed_value=observed_value,
+                passed=observed_value <= quality_band.max_value,
+            )
+        )
+    return tuple(results)
+
+
 def arbitrate(
     routes: tuple[ComparisonRoute, ...],
     observations: Mapping[str, LaneObservation],
@@ -297,16 +361,26 @@ def arbitrate(
     required_lanes: frozenset[str] = _REQUIRED_LANES,
     expected_workflow_stages: tuple[str, ...] | None = None,
     execution_intent: ExecutionIntent = "parity",
+    quality_band: QualityBand | None = None,
 ) -> ArbitrationResult:
     """Compare every direct pair under the declared JAX execution policy.
 
     The default retains the certification-oriented parity backend and guards.
+
+    A case that declares a ``quality_band`` opts that case into the 2026-08-15
+    ruling's rule-3 comparator at ``native_default``: ``budget_exhausted`` is an
+    admissible terminal state when every compared lane exhausts one identical
+    matched budget, certification is the declared endpoint floor rather than
+    final-value equality, and the verdict is labelled ``quality-band`` so it can
+    never be read as equivalence. Pairwise comparisons are still computed and
+    recorded, marked informational, and do not decide the verdict.
     """
     _validate_lanes(
         observations,
         required_lanes,
         expected_workflow_stages,
         execution_intent,
+        quality_band,
     )
     selected_routes = tuple(
         route
@@ -378,7 +452,26 @@ def arbitrate(
         )
     if not comparisons:
         raise ArbitrationError("no applicable comparison routes")
+    if quality_band is None:
+        return ArbitrationResult(
+            verdict="pass" if all(item.passed for item in comparisons) else "fail",
+            comparisons=tuple(comparisons),
+        )
+    band_results = _quality_band_results(quality_band, observations, required_lanes)
     return ArbitrationResult(
-        verdict="pass" if all(item.passed for item in comparisons) else "fail",
-        comparisons=tuple(comparisons),
+        verdict=(
+            QUALITY_BAND_VERDICT
+            if all(item.passed for item in band_results)
+            else "fail"
+        ),
+        comparisons=tuple(
+            replace(
+                comparison,
+                diagnostic=(
+                    f"{_INFORMATIONAL_DIAGNOSTIC_PREFIX}{comparison.diagnostic}"
+                ),
+            )
+            for comparison in comparisons
+        ),
+        quality_band_results=band_results,
     )

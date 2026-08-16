@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
@@ -86,6 +87,41 @@ class ComparisonResult:
     passed: bool
     tolerance_bucket: str
     diagnostic: str
+
+
+@dataclass(frozen=True)
+class QualityBand:
+    """One case-owned endpoint quality floor certifiable at ``native_default``.
+
+    The 2026-08-15 certification-gate ruling (rule 3) admits a continuous
+    optimizer whose lanes fork by rejection sentinel or line search at
+    ``native_default`` only as an endpoint quality band -- "every compared lane
+    reaches ``observable`` <= ``max_value`` at the matched budget" -- and never
+    as final-value equivalence. ``derivation`` records the measured evidence
+    the band was read off, so the floor can never become a free parameter.
+    """
+
+    observable: str
+    max_value: float
+    derivation: str
+
+    def __post_init__(self) -> None:
+        phase, separator, name = self.observable.partition(":")
+        if not phase or not separator or not name:
+            raise ValueError("quality band observable must be 'phase:name'")
+        if not isinstance(self.max_value, float) or not math.isfinite(self.max_value):
+            raise ValueError("quality band max_value must be a finite float")
+        if not self.derivation:
+            raise ValueError("quality band requires a recorded derivation")
+
+
+@dataclass(frozen=True)
+class QualityBandResult:
+    lane: str
+    observable: str
+    max_value: float
+    observed_value: float
+    passed: bool
 
 
 @dataclass(frozen=True)

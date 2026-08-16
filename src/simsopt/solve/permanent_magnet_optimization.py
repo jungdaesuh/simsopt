@@ -10,6 +10,16 @@ from .._core.types import RealArray
 __all__ = ['relax_and_split', 'GPMO']
 
 
+# The compiled MwPGP kernel records its loss history every
+# ``int(max_iter / 5.0)`` iterations and uses that stride as a modulo divisor
+# (``k % (int(max_iter / 5.0))`` in src/simsoptpp/permanent_magnet_optimization.cpp).
+# The stride is only evaluated when ``verbose`` is set, and it collapses to zero
+# for ``max_iter < 5``, which is an integer division by zero in C++ (SIGFPE, i.e.
+# the interpreter is killed rather than an exception being raised). Verbose runs
+# must therefore supply at least this many convex iterations.
+MWPGP_HISTORY_STRIDE_DIVISOR = 5
+
+
 def prox_l0(m: RealArray,
             mmax: RealArray,
             reg_l0: float,
@@ -156,9 +166,11 @@ def relax_and_split(pm_opt, m0=None, **kwargs):
             reg_l2:
                 Regularization value for any convex regularizers in the
                 optimization problem, such as the often-used L2 norm.
-            max_iter_MwPGP:
+            max_iter:
                 Maximum iterations to perform during a run of the convex
-                part of the relax-and-split algorithm (MwPGP).
+                part of the relax-and-split algorithm (MwPGP). When ``verbose``
+                is set, MwPGP records its history every ``int(max_iter / 5.0)``
+                iterations, so ``max_iter`` must then be at least 5.
             max_iter_RS:
                 Maximum iterations to perform of the overall relax-and-split
                 algorithm. Therefore, also the number of times that MwPGP is
@@ -181,6 +193,20 @@ def relax_and_split(pm_opt, m0=None, **kwargs):
             sub-problem is solved.
 
     """
+    # Enforce the MwPGP history-stride contract before crossing into C++:
+    # a verbose run with max_iter < MWPGP_HISTORY_STRIDE_DIVISOR makes the
+    # kernel's history stride zero and the resulting integer modulo by zero
+    # aborts the interpreter with SIGFPE instead of raising.
+    max_iter = kwargs.get('max_iter')
+    if kwargs.get('verbose', False) and max_iter is not None \
+            and max_iter < MWPGP_HISTORY_STRIDE_DIVISOR:
+        raise ValueError(
+            'The MwPGP algorithm records its history every '
+            f'int(max_iter / {MWPGP_HISTORY_STRIDE_DIVISOR}.0) iterations, so '
+            f'verbose runs require max_iter >= {MWPGP_HISTORY_STRIDE_DIVISOR}; '
+            f'got max_iter = {max_iter}.'
+        )
+
     # change to row-major order for the C++ code
     # A_obj = np.ascontiguousarray(pm_opt.A_obj)
     ATb = np.ascontiguousarray(np.reshape(pm_opt.ATb, (pm_opt.ndipoles, 3)))
