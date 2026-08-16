@@ -35,14 +35,17 @@ provenance:
 
 - **In-repo.** Reviewable from a clone, and drift-gated by the test:
   `docs/receipts/wireframe_gsco_multistep_native_default_receipt.md`,
+  `docs/receipts/wireframe_gsco_siblings_native_default.md`,
   `docs/single_stage_jax_gpu_projected_route_certification_plan.md`,
   `docs/jax_porting_progress_report.md`, and the example sources under
   `examples/jax/` that every `census-structural` row is read from.
 - **Host-local campaign artifacts** — *not* in this repository, not reviewable
   from a clone, not reproducible without this workstation. Marked
   **[host-local]** at every use: `~/simsopt-campaigns/winnable-six-20260815/`
-  (44-leg `receipt.json`, `silicon_probe_results.json`) and
-  `~/simsopt-campaigns/ndparity-boozer-vacuum-20260814/`.
+  (44-leg `receipt.json`, `silicon_probe_results.json`),
+  `~/simsopt-campaigns/ndparity-boozer-vacuum-20260814/`, and
+  `~/simsopt-campaigns/gsco-siblings-20260816/` (the two 2026-08-16
+  wireframe-GSCO sibling legs, box-state records and parity captures).
 - **Session-audit classification** — the 2026-08-13 audit's grouping of the
   mirrors into winnable / never-winnable / unmeasured classes. It has **no
   artifact of any kind**; it is a reasoned classification, and this document
@@ -185,8 +188,8 @@ GPU-slower overall, which is the size of the artifact, not of any device gap.
 | native-stage-two-optimization-planar-coils | unmeasured | unmeasured | no native_default timing for the stage-two coil family |
 | native-stage-two-optimization-stochastic | unmeasured | unmeasured | no native_default timing for the stage-two coil family |
 | native-strain-optimization | cpu | census-structural | tiny problem — 21 DOF (rotation order 10), host-bound by construction |
-| native-wireframe-gsco-modular | unmeasured | census-structural | [session-audit] classed it winnable; its source does share the 1024-row GSCO reduction of the certified multistep win, but a 48x50 wireframe carries roughly a quarter of the per-step work — no native_default receipt |
-| native-wireframe-gsco-sector-saddle | unmeasured | census-structural | [session-audit] classed it winnable; its source does share the 1024-row GSCO reduction of the certified multistep win, but a 48x50 wireframe carries roughly a quarter of the per-step work — no native_default receipt |
+| native-wireframe-gsco-modular | cpu | measured-diagnostic | sequential chain — 2,000-iteration loop-carried greedy over 4,800 segments; the 1024-row reduction it shares with the certified multistep win is not enough once per-step work drops to a quarter. Interleaved A/B: warm GPU solve 0.552 s vs 0.492 s best native (0.89x), 0.89x across the numerical region, a tie against OMP=32, and 2.75x behind cold; currents vector bitwise identical — `docs/receipts/wireframe_gsco_siblings_native_default.md` |
+| native-wireframe-gsco-sector-saddle | cpu | measured-diagnostic | sequential chain — 2,000-iteration loop-carried greedy over 4,800 segments; the 1024-row reduction it shares with the certified multistep win is not enough once per-step work drops to a quarter. Interleaved A/B: warm GPU solve 0.653 s vs 0.518 s best native (0.79x), 0.81x across the numerical region, 0.86x even against OMP=32; currents vector bitwise identical — `docs/receipts/wireframe_gsco_siblings_native_default.md` |
 | native-wireframe-rcls-basic | unmeasured | unmeasured | single dense regularized least-squares solve; [host-local: silicon probe] the dense-solve crossover sits between n=169 (CPU 2.4x) and n=716 (GPU ~5x), and this problem has not been placed against it |
 | native-wireframe-rcls-with-ports | unmeasured | unmeasured | single dense regularized least-squares solve; [host-local: silicon probe] the dense-solve crossover sits between n=169 (CPU 2.4x) and n=716 (GPU ~5x), and this problem has not been placed against it |
 | native-coil-forces | unmeasured | unmeasured | no native_default timing for the finite-build coil-force family |
@@ -197,29 +200,33 @@ GPU-slower overall, which is the size of the artifact, not of any device gap.
 
 ## Summary counts
 
-39 manifest examples: **1 gpu**, **23 cpu**, **0 either**, **15 unmeasured**.
+39 manifest examples: **1 gpu**, **25 cpu**, **0 either**, **13 unmeasured**.
 
-Restricted to the 27 `native-*` mirrors: 1 gpu, 13 cpu, 13 unmeasured.
+Restricted to the 27 `native-*` mirrors: 1 gpu, 15 cpu, 11 unmeasured.
 
-The 13 `cpu` mirrors are the 2026-08-13 session audit's 11 never-winnable mirrors (3 tracing,
+The 15 `cpu` mirrors are the 2026-08-13 session audit's 11 never-winnable mirrors (3 tracing,
 3 nested-Boozer, 5 tiny/fixed-size), plus `native-permanent-magnet-muse`
-(measured loss, not structural) and `native-single-stage-optimization` (VMEC
-host lane, `planned`, outside the 26 measured).
+(measured loss, not structural), `native-single-stage-optimization` (VMEC
+host lane, `planned`, outside the 26 measured), and the two 2026-08-16
+wireframe-GSCO siblings (measured loss, not structural).
 
-Four mirrors the 2026-08-13 session audit classed as winnable are marked `unmeasured`
+Two mirrors the 2026-08-13 session audit classed as winnable are marked `unmeasured`
 here, because a device recommendation needs a receipt and they have none:
-`native-permanent-magnet-pm4stell`, `native-permanent-magnet-qa`,
-`native-wireframe-gsco-modular`, `native-wireframe-gsco-sector-saddle`. For
-the two GPMO mirrors the nearest measurement — the same 256-row reduction in
+`native-permanent-magnet-pm4stell` and `native-permanent-magnet-qa`. For
+those two GPMO mirrors the nearest measurement — the same 256-row reduction in
 `native-permanent-magnet-muse` — points the other way, so `unmeasured` is a
-statement about a genuine conflict, not merely a missing number.
+statement about a genuine conflict, not merely a missing number. The other two
+the audit classed winnable, `native-wireframe-gsco-modular` and
+`native-wireframe-gsco-sector-saddle`, have now been measured and lose: the
+audit's classification is superseded for both.
 
 ## Scope note and amendment procedure
 
 These assignments were derived at the **2026-08-13 / 2026-08-16 evidence
 state**: the 2026-08-13 six-agent `examples/jax` audit, the 2026-08-14
-three-device silicon probe, the 2026-08-15 winnable-six campaign, and the
-2026-08-16 full-precision GSCO promotion. Hardware: RTX 5090 plus Threadripper
+three-device silicon probe, the 2026-08-15 winnable-six campaign, the
+2026-08-16 full-precision GSCO promotion, and the 2026-08-16 GSCO-siblings
+campaign. Hardware: RTX 5090 plus Threadripper
 9970X, with an A100-PCIE-40GB cross-check on the kernel probe only.
 
 To amend, **append a dated row to the log below and edit the table row it
@@ -234,3 +241,5 @@ untracked file, or a directory will not satisfy it. The same rule gates the
 | Date | Example ID | Change | Authority |
 | --- | --- | --- | --- |
 | 2026-08-16 | (all) | Record created at the 2026-08-13 / 2026-08-16 evidence state | `docs/receipts/wireframe_gsco_multistep_native_default_receipt.md` and the 2026-08-13 audit |
+| 2026-08-16 | native-wireframe-gsco-modular | unmeasured / census-structural → cpu / measured-diagnostic. Ten-round interleaved A/B: warm GPU device solve 0.552 s vs 0.612 s fair native (OMP=32) and 0.492 s best native (OMP=48) — 1.11x and 0.89x on the kernel, 1.01x and 0.89x on the numerical region. Placed `cpu` rather than `either` because best-configured native wins, a cold JAX process loses 2.75x, and the warm advantage needs a persistent compile cache nothing configures by default. Currents vector bitwise identical (0 ULP over 88 native x 15 GPU legs). The 10.3x lead over the shipped `OMP_NUM_THREADS`-unset default is the 64-thread OpenMP collapse on this box, not a GPU win. | `docs/receipts/wireframe_gsco_siblings_native_default.md` |
+| 2026-08-16 | native-wireframe-gsco-sector-saddle | unmeasured / census-structural → cpu / measured-diagnostic. Ten-round interleaved A/B: warm GPU device solve 0.653 s vs 0.560 s fair native (OMP=32) and 0.518 s best native (OMP=48) — 0.86x and 0.79x on the kernel, 0.85x and 0.81x on the numerical region. Currents vector bitwise identical (0 ULP over 88 native x 14 GPU legs). Same shipped-default caveat as the modular sibling (7.0x). | `docs/receipts/wireframe_gsco_siblings_native_default.md` |
