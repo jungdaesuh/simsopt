@@ -165,8 +165,14 @@ explicit `lbfgs_run_mode="stepwise"` pins in
 `src/simsopt_jax/examples/strain_optimization.py` and
 `examples/jax/3_Advanced/single_stage_optimization.py` are unaffected caller
 choices — they set the option explicitly and are not subject to the new
-computed default. GPU lanes have not been re-measured under the new
-routing; the evidence above is CPU-only.
+computed default. GPU lanes were re-measured on 2026-08-15 (CUDA, RTX 5090,
+JAX 0.10.0, fp64, strict transfer guard): both suites above pass on CUDA, and
+a same-HEAD example-level A/B — each affected example run once under the new
+routing and once with the pre-change routing restored in-process — published
+bitwise-identical observables across all 15 A/B pairs covering the 11
+`examples/jax` examples that reach either seam, with the concrete-BFGS seam
+exercised under `jax_gpu_parity` and the dispatch L-BFGS-B seam under
+`jax_gpu_fast`.
 
 ## Migration contracts and live gaps
 
