@@ -337,3 +337,10 @@ configuration (5.77-5.93 s vs 20.49 s). Scope: this single mirror only; the
 receipt and its qualifiers live in
 `docs/receipts/wireframe_gsco_multistep_native_default_receipt.md`. The
 bounded-scale rows above are unchanged.
+
+## Addendum — per-example device assignment record (2026-08-16)
+
+Per-example "run this on CPU or GPU" advice, with its evidence class and
+mechanism for every manifest example, now lives in
+[`docs/jax_example_device_assignment.md`](jax_example_device_assignment.md) and
+is drift-gated by `tests/test_jax_example_device_assignment.py`.
