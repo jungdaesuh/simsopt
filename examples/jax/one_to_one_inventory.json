@@ -1678,11 +1678,12 @@
           "pathlib",
           "scipy",
           "simsopt",
-          "tempfile"
+          "tempfile",
+          "typing"
         ]
       },
       "source": "3_Advanced/single_stage_boozer_vacuum_optimization.py",
-      "source_sha256": "fbf0b48a999d3f85dd9429d459c74d7739bd6e8f40711daa1653e2c9335728bc"
+      "source_sha256": "38a918767587ca669f62346f863677b031d2e95e56f667d8984d9f970797c059"
     },
     {
       "capability_probe": {

@@ -24,6 +24,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal, TypeVar
 
+import jax
 import numpy as np
 import numpy.typing as npt
 
@@ -117,8 +118,6 @@ def route_after_seed_gate(
 
     Production passes JAX branch callables; host tests may pass pure functions.
     """
-    import jax
-
     return jax.lax.cond(
         seed_gate_accepted,
         when_accepted,
@@ -134,8 +133,6 @@ def route_after_bounded_attempt(
     run_canonical: BranchFn[BranchResult],
 ) -> BranchResult:
     """Keep the bounded certificate result or fall back to full FP64 (step 3)."""
-    import jax
-
     return jax.lax.cond(
         bounded_certificate_success,
         keep_bounded,

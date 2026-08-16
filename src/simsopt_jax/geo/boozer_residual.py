@@ -488,9 +488,7 @@ def boozer_residual_scalar_from_vector(
 
     residual = jnp.asarray(residual)
     if reduction_mode == _BOOZER_CPU_ORDERED_REDUCTION_MODE:
-        square_sum = _cpu_ordered_boozer_square_sum(
-            residual.reshape((nphi, ntheta, 3))
-        )
+        square_sum = _cpu_ordered_boozer_square_sum(residual.reshape((nphi, ntheta, 3)))
     else:
         validate_reduction_mode(reduction_mode)
         square_sum = scalar_square_sum(

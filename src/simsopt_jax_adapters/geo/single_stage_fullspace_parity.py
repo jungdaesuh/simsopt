@@ -30,6 +30,7 @@ from simsopt_jax.objectives.single_stage_fullspace import (
     TermTolerance,
     evaluate_fullspace,
 )
+from simsopt_jax.runtime.host_boundary import host_value
 
 from simsopt_jax_adapters.geo import boozer_surface, surface_objectives
 
@@ -100,7 +101,7 @@ AuthoritativeEvaluator = Callable[[jax.Array, FullSpaceProblem], SameStateEvalua
 
 
 def _state_sha256(z: jax.Array) -> str:
-    values = np.ascontiguousarray(np.asarray(jax.device_get(z)), dtype="<f8")
+    values = np.ascontiguousarray(np.asarray(host_value(z)), dtype="<f8")
     return hashlib.sha256(values.tobytes()).hexdigest()
 
 
@@ -350,8 +351,8 @@ def _compare_field(
     candidate: jax.Array,
     tolerance: TermTolerance,
 ) -> SameStateFieldComparison:
-    left = np.asarray(jax.device_get(reference), dtype=np.float64)
-    right = np.asarray(jax.device_get(candidate), dtype=np.float64)
+    left = np.asarray(host_value(reference), dtype=np.float64)
+    right = np.asarray(host_value(candidate), dtype=np.float64)
     if (
         left.shape != right.shape
         or not np.all(np.isfinite(left))

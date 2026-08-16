@@ -14,7 +14,7 @@ def _affine_residual(values: jax.Array) -> jax.Array:
 
 
 def test_c0_contract_preserves_the_production_solver_identity() -> None:
-    contract = _optimizer._make_traceable_exact_newton_variant_contract("C0")
+    contract = _optimizer.make_traceable_exact_newton_variant_contract("C0")
 
     assert contract.variant == "C0"
     assert contract.solver is _optimizer.newton_exact_traceable
@@ -83,7 +83,7 @@ def test_c1_and_c2_cached_makers_invoke_only_their_distinct_builders(
 
 @pytest.mark.parametrize("variant", ["C1", "C2"])
 def test_dense_variant_contract_is_strict_transfer_clean(variant: str) -> None:
-    contract = _optimizer._make_traceable_exact_newton_variant_contract(variant)
+    contract = _optimizer.make_traceable_exact_newton_variant_contract(variant)
     initial = jax.device_put(np.asarray([1.25, 0.5], dtype=np.float64))
 
     with jax.transfer_guard("disallow"):
@@ -119,14 +119,14 @@ def test_dense_variant_contract_is_strict_transfer_clean(variant: str) -> None:
 @pytest.mark.parametrize("variant", [None, "", "c1", "C3", 1])
 def test_invalid_variant_fails_during_contract_construction(variant: object) -> None:
     with pytest.raises(ValueError, match="must be one of: C0, C1, C2"):
-        _optimizer._make_traceable_exact_newton_variant_contract(variant)
+        _optimizer.make_traceable_exact_newton_variant_contract(variant)
 
 
 def test_c2_contract_preserves_native_rollback_and_stop_telemetry() -> None:
     def residual(values: jax.Array) -> jax.Array:
         return values**3 - 1.0
 
-    contract = _optimizer._make_traceable_exact_newton_variant_contract("C2")
+    contract = _optimizer.make_traceable_exact_newton_variant_contract("C2")
     result = contract.solver(
         residual,
         jnp.asarray([0.1], dtype=jnp.float64),
@@ -146,7 +146,7 @@ def test_c1_dense_usage_flag_is_false_when_no_dense_work_runs() -> None:
     def converged_residual(values: jax.Array) -> jax.Array:
         return values - 1.0
 
-    contract = _optimizer._make_traceable_exact_newton_variant_contract("C1")
+    contract = _optimizer.make_traceable_exact_newton_variant_contract("C1")
     result = contract.solver(
         converged_residual,
         jnp.ones(2, dtype=jnp.float64),
@@ -192,7 +192,7 @@ def test_c1_projects_evidence_based_failure_reason(
     stalled: bool,
     numerical_failure: bool,
 ) -> None:
-    contract = _optimizer._make_traceable_exact_newton_variant_contract("C1")
+    contract = _optimizer.make_traceable_exact_newton_variant_contract("C1")
 
     result = contract.solver(
         residual,

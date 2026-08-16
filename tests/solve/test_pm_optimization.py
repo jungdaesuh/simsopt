@@ -1,6 +1,10 @@
+import dataclasses
 from pathlib import Path
 import unittest
+from unittest import mock
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 from monty.tempfile import ScratchDir
 
@@ -11,6 +15,109 @@ from simsopt.solve import relax_and_split, GPMO
 from simsopt.util import *
 from simsopt.geo import SurfaceRZFourier, PermanentMagnetGrid
 from simsopt.field import BiotSavart
+from simsopt_jax.core import pm_optimization
+from simsopt_jax.core.pm_optimization import (
+    GPMOArbVecBacktrackingSpec,
+    gpmo_arbvec_backtracking_solve,
+    gpmo_arbvec_backtracking_step,
+    gpmo_connectivity_matrix,
+    initialize_gpmo_arbvec,
+)
+
+# Iteration budget for the ArbVec-backtracking post-freeze-skip fixture.
+_ARBVEC_BACKTRACKING_K = 24
+
+
+def _arbvec_backtracking_fixture():
+    """Small ArbVec-backtracking problem that dewyrms and then freezes early.
+
+    ``max_nMagnets=6`` is reached at iteration 11 of ``_ARBVEC_BACKTRACKING_K``,
+    so the last 12 iterations run against an already-terminated state, and
+    ``thresh_angle=pi/2`` makes the dewyrming pass remove pairs before then.
+    """
+
+    rng = np.random.default_rng(7)
+    M, N, P = 14, 8, 3
+    A_scaled = np.ascontiguousarray(rng.standard_normal(size=(M, 3 * N)))
+    b = np.ascontiguousarray(rng.standard_normal(size=(M,)))
+    m_maxima = np.ascontiguousarray(0.3 + rng.random(size=N))
+    dipole_grid_xyz = np.ascontiguousarray(rng.standard_normal(size=(N, 3)))
+    raw = rng.standard_normal(size=(N, P, 3))
+    pol_vectors = np.ascontiguousarray(raw / np.linalg.norm(raw, axis=2)[:, :, None])
+    spec = GPMOArbVecBacktrackingSpec(
+        m_maxima=jnp.asarray(m_maxima, dtype=jnp.float64),
+        reg_l2=jnp.asarray(0.2, dtype=jnp.float64),
+        dipole_grid_xyz=jnp.asarray(dipole_grid_xyz, dtype=jnp.float64),
+        pol_vectors=jnp.asarray(pol_vectors, dtype=jnp.float64),
+        Nadjacent=3,
+        backtracking=3,
+        thresh_angle=float(np.pi / 2.0),
+        max_nMagnets=6,
+    )
+    return spec, jnp.asarray(A_scaled), jnp.asarray(b)
+
+
+def _solve_arbvec_backtracking(spec, A_scaled, b, *, record_every, post_freeze_skip):
+    """Solve with, or without, the post-freeze skip inside the step.
+
+    ``post_freeze_skip=False`` restores the pre-change semantics by routing the
+    solver straight at the always-scan branch. ``gpmo_arbvec_backtracking_solve``
+    is jitted, so the caches have to be dropped for the patch to be traced.
+    """
+
+    jax.clear_caches()
+    try:
+        if post_freeze_skip:
+            return jax.block_until_ready(
+                gpmo_arbvec_backtracking_solve(
+                    spec,
+                    A_scaled,
+                    b,
+                    K=_ARBVEC_BACKTRACKING_K,
+                    record_every=record_every,
+                )
+            )
+        with mock.patch.object(
+            pm_optimization,
+            "gpmo_arbvec_backtracking_step",
+            pm_optimization._gpmo_arbvec_backtracking_active_step,
+        ):
+            return jax.block_until_ready(
+                gpmo_arbvec_backtracking_solve(
+                    spec,
+                    A_scaled,
+                    b,
+                    K=_ARBVEC_BACKTRACKING_K,
+                    record_every=record_every,
+                )
+            )
+    finally:
+        jax.clear_caches()
+
+
+def _raw_bytes(array):
+    host = np.ascontiguousarray(np.atleast_1d(np.asarray(jax.device_get(array))))
+    return host.view(np.uint8)
+
+
+def _primitive_names(jaxpr):
+    """Every primitive reachable from ``jaxpr``, including nested sub-jaxprs."""
+
+    names = set()
+    pending = [jaxpr]
+    while pending:
+        current = pending.pop()
+        for equation in current.eqns:
+            names.add(equation.primitive.name)
+            for parameter in equation.params.values():
+                values = (
+                    parameter if isinstance(parameter, (tuple, list)) else (parameter,)
+                )
+                for value in values:
+                    inner = getattr(value, "jaxpr", value)
+                    if hasattr(inner, "eqns"):
+                        pending.append(inner)
+    return names
 
 
 class Testing(unittest.TestCase):
@@ -191,6 +298,115 @@ class Testing(unittest.TestCase):
             with self.assertRaises(ValueError):
                 kwargs['m_init'] = m_history6[:-1, :, -1]
                 errors6, Bn_errors6, m_history6 = GPMO(pm_opt, algorithm='ArbVec_backtracking', **kwargs)
+
+
+class TestGPMOArbVecBacktrackingPostFreezeSkip(unittest.TestCase):
+    """Post-freeze skip in ``gpmo_arbvec_backtracking_step``.
+
+    Once the run reports ``done`` the greedy loop is a fixed point, so the step
+    takes a cheap branch instead of re-scanning every candidate. Two properties
+    make that safe, and each gets a test: the results stay bitwise identical to
+    always scanning, and the expensive work really does sit behind the branch.
+    """
+
+    def test_outputs_are_bitwise_identical_to_always_scanning(self):
+        spec, A_scaled, b = _arbvec_backtracking_fixture()
+        for record_every in (None, 4):
+            with self.subTest(record_every=record_every):
+                reference = _solve_arbvec_backtracking(
+                    spec, A_scaled, b, record_every=record_every, post_freeze_skip=False
+                )
+                skipped = _solve_arbvec_backtracking(
+                    spec, A_scaled, b, record_every=record_every, post_freeze_skip=True
+                )
+                for field in dataclasses.fields(skipped):
+                    skipped_value = getattr(skipped, field.name)
+                    reference_value = getattr(reference, field.name)
+                    self.assertEqual(
+                        np.asarray(jax.device_get(skipped_value)).dtype,
+                        np.asarray(jax.device_get(reference_value)).dtype,
+                        f"{field.name} changed dtype under the post-freeze skip",
+                    )
+                    self.assertTrue(
+                        np.array_equal(
+                            _raw_bytes(skipped_value), _raw_bytes(reference_value)
+                        ),
+                        f"{field.name} is not bitwise identical to always scanning",
+                    )
+
+        # Guard against a vacuous comparison: the fixture must actually reach
+        # the frozen regime, and must exercise the dewyrming pass before it.
+        full_trace = _solve_arbvec_backtracking(
+            spec, A_scaled, b, record_every=None, post_freeze_skip=True
+        )
+        done_history = np.asarray(jax.device_get(full_trace.done_history))
+        removed = np.asarray(jax.device_get(full_trace.removed_pair_count_history))
+        self.assertTrue(
+            bool(done_history[:-1].any()),
+            "fixture never freezes, so the skip is never taken",
+        )
+        self.assertGreater(int(removed.sum()), 0, "fixture never runs a dewyrming pass")
+
+    def test_frozen_branch_omits_the_candidate_scan(self):
+        spec, A_scaled, b = _arbvec_backtracking_fixture()
+        ndipoles = int(spec.m_maxima.shape[0])
+        x0, residual0, available0, vector_indices0, signs0, _ = initialize_gpmo_arbvec(
+            jnp.zeros((ndipoles, 3), dtype=A_scaled.dtype),
+            spec.pol_vectors,
+            A_scaled,
+            b,
+        )
+        selected0 = jnp.full((_ARBVEC_BACKTRACKING_K,), -1, dtype=vector_indices0.dtype)
+        state = (
+            x0,
+            residual0,
+            available0,
+            vector_indices0,
+            signs0,
+            selected0,
+            selected0,
+            jnp.zeros((_ARBVEC_BACKTRACKING_K,), dtype=x0.dtype),
+            jnp.asarray(False),
+        )
+        connectivity = gpmo_connectivity_matrix(spec.dipole_grid_xyz)
+        cos_thresh_angle = jnp.cos(jnp.asarray(spec.thresh_angle, dtype=x0.dtype))
+
+        jaxpr = jax.make_jaxpr(
+            lambda step_state: gpmo_arbvec_backtracking_step(
+                spec,
+                step_state,
+                A_scaled,
+                connectivity,
+                cos_thresh_angle,
+                jnp.asarray(0, dtype=jnp.int32),
+            )
+        )(state).jaxpr
+        # The candidate scan is an einsum (``dot_general``) and the dewyrming
+        # pass is a ``lax.scan``. Neither may appear outside the branch, or a
+        # frozen iteration would still pay for it.
+        unconditional = {eqn.primitive.name for eqn in jaxpr.eqns}
+        self.assertFalse(
+            unconditional & {"dot_general", "scan"},
+            "step does work outside the done branch that a frozen iteration pays for",
+        )
+        conditionals = [eqn for eqn in jaxpr.eqns if eqn.primitive.name == "cond"]
+        self.assertEqual(
+            len(conditionals), 1, "step no longer branches on the done flag"
+        )
+        branches = [
+            _primitive_names(branch.jaxpr)
+            for branch in conditionals[0].params["branches"]
+        ]
+        # Exactly one branch carries both, and the other -- the one taken once
+        # ``done`` holds -- neither.
+        scanning = [names for names in branches if {"dot_general", "scan"} <= names]
+        cheap = [names for names in branches if not names & {"dot_general", "scan"}]
+        self.assertEqual(
+            len(scanning), 1, "no branch runs the candidate scan and dewyrming pass"
+        )
+        self.assertEqual(
+            len(cheap), 1, "no branch skips the candidate scan and dewyrming pass"
+        )
 
 
 if __name__ == "__main__":

@@ -1206,6 +1206,18 @@ def wireframe_gsco_multistep_loop_jax(
     if min_coil_size < 1:
         raise ValueError(f"min_coil_size must be positive; got {min_coil_size}.")
 
+    if base_params.loop_columns is None:
+        # Materialize the candidate gather once per solve as a structural
+        # guarantee. Measured at native_default, XLA's loop-invariant code
+        # motion already hoists _gsco_candidate_objectives' fallback gather
+        # (solve time is unchanged); this makes the hoist contractual instead
+        # of compiler-dependent and matches the precomputing entry at
+        # greedy_stellarator_coil_optimization_jax.
+        base_params = replace(
+            base_params,
+            loop_columns=_gsco_loop_columns(base_params.A, base_params.loops),
+        )
+
     state0 = _wireframe_gsco_multistep_initial_state(
         x_init,
         loop_count_init,

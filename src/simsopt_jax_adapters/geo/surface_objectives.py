@@ -360,6 +360,28 @@ _TRACEABLE_SINGLE_STAGE_OUTER_TERM_WEIGHT_KEYS = {
     for term_name, weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
 }
 
+
+def _traceable_single_stage_term_elidable(
+    outer_objective_config,
+    term_name: str,
+    threshold_key: str,
+) -> bool:
+    """True when a term's weight is inactive AND its threshold is exactly zero.
+
+    Elision is bitwise-invisible only for that pair: the weighted contribution
+    is the unconditional 0.0 constant either way, and a zero separation
+    threshold makes the raw penalty exactly +0.0. A zero-weight config with a
+    nonzero threshold keeps its term traced so the published raw value stays
+    the computed penalty.
+    """
+    weight_key = _TRACEABLE_SINGLE_STAGE_OUTER_TERM_WEIGHT_KEYS[term_name]
+    if _traceable_single_stage_weight_is_active(
+        outer_objective_config.get(weight_key, 0.0)
+    ):
+        return False
+    return float(_host_scalar(outer_objective_config[threshold_key])) == 0.0
+
+
 _TRACEABLE_SINGLE_STAGE_OUTER_TERM_DEPENDENCY_FLAGS = {
     "non_qs": (True, True),
     "residual": (True, True),
@@ -1384,7 +1406,12 @@ def _traceable_single_stage_outer_term_values(
     coil_dof_extraction_spec,
     outer_objective_config,
 ):
-    """Return the raw single-stage outer-objective term values at one state."""
+    """Return the raw single-stage outer-objective term values at one state.
+
+    A pairwise-distance term whose configured weight is zero is reported as an
+    exact ``0.0`` scalar instead of being traced, which is the value it already
+    carries under every zero-weight configuration this repo ships.
+    """
     J_boozer = _boozer_residual_J_of_x_inner(
         x_inner,
         coil_set_spec=coil_set_spec,
@@ -1484,36 +1511,61 @@ def _traceable_single_stage_outer_term_values(
         * major_radius_delta
     )
 
-    curve_curve_penalty = _curve_curve_penalty_from_grouped_spec(
-        coil_set_spec,
-        _runtime_float64_scalar(
-            outer_objective_config["curve_curve_threshold"],
-            reference=surface_gamma,
-        ),
-    )
+    # The three pairwise-distance penalties dominate this evaluation, so a
+    # term whose weight is inactive AND whose separation threshold is exactly
+    # zero stays out of the traced graph entirely: the weighted contribution
+    # is already the unconditional 0.0 constant built by
+    # _traceable_weighted_single_stage_outer_term_values, and a zero threshold
+    # makes the raw penalty exactly +0.0, so value, gradient, and the reported
+    # raw term are all unchanged (see _traceable_single_stage_term_elidable).
+    # The reported minimum-distance diagnostics are computed separately and
+    # are unaffected. The curvature penalty is deliberately not elided: it is
+    # nonzero at a zero curvature threshold, so eliding it would change the
+    # reported raw value.
+    zero_penalty = _runtime_float64_scalar(0.0, reference=surface_gamma)
 
-    curve_surface_penalty = _curve_surface_penalty_from_grouped_spec(
-        coil_set_spec,
-        surface_gamma,
-        surface_normal,
-        _runtime_float64_scalar(
-            outer_objective_config["curve_surface_threshold"],
-            reference=surface_gamma,
-        ),
-    )
+    curve_curve_penalty = zero_penalty
+    if not _traceable_single_stage_term_elidable(
+        outer_objective_config, "curve_curve", "curve_curve_threshold"
+    ):
+        curve_curve_penalty = _curve_curve_penalty_from_grouped_spec(
+            coil_set_spec,
+            _runtime_float64_scalar(
+                outer_objective_config["curve_curve_threshold"],
+                reference=surface_gamma,
+            ),
+        )
 
-    vessel_gamma = _runtime_float64_array(
-        outer_objective_config["vessel_gamma"],
-        reference=surface_gamma,
-    ).reshape((-1, 3))
-    surface_vessel_penalty = surface_to_surface_distance_pure(
-        surface_gamma,
-        vessel_gamma,
-        _runtime_float64_scalar(
-            outer_objective_config["surface_vessel_threshold"],
+    curve_surface_penalty = zero_penalty
+    if not _traceable_single_stage_term_elidable(
+        outer_objective_config, "curve_surface", "curve_surface_threshold"
+    ):
+        curve_surface_penalty = _curve_surface_penalty_from_grouped_spec(
+            coil_set_spec,
+            surface_gamma,
+            surface_normal,
+            _runtime_float64_scalar(
+                outer_objective_config["curve_surface_threshold"],
+                reference=surface_gamma,
+            ),
+        )
+
+    surface_vessel_penalty = zero_penalty
+    if not _traceable_single_stage_term_elidable(
+        outer_objective_config, "surface_vessel", "surface_vessel_threshold"
+    ):
+        vessel_gamma = _runtime_float64_array(
+            outer_objective_config["vessel_gamma"],
             reference=surface_gamma,
-        ),
-    )
+        ).reshape((-1, 3))
+        surface_vessel_penalty = surface_to_surface_distance_pure(
+            surface_gamma,
+            vessel_gamma,
+            _runtime_float64_scalar(
+                outer_objective_config["surface_vessel_threshold"],
+                reference=surface_gamma,
+            ),
+        )
     return {
         "non_qs": non_qs_penalty,
         "residual": J_boozer,

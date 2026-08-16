@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -280,6 +281,82 @@ def test_native_vacuum_single_stage_uses_scipy_bfgs_endpoint_certificate() -> No
     assert "scipy-bfgs" in constants
 
 
+def _scale_gate_source(path: Path) -> str:
+    """Return the mirror's bounded-soundness convention as standalone source."""
+    module = _module(path)
+    constant = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "SOUND_BOUNDED_STOPPING_REASONS"
+    )
+    function = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "scientific_success_for_scale"
+    )
+    return "\n".join((ast.unparse(constant), ast.unparse(function)))
+
+
+def test_both_single_stage_mirrors_share_one_bounded_soundness_convention() -> None:
+    """The pair must judge an endpoint by one rule, not two that can drift."""
+    assert _scale_gate_source(NATIVE) == _scale_gate_source(JAX)
+    assert "('converged', 'iteration-limit')" in _scale_gate_source(NATIVE)
+
+
+def test_scale_gate_certifies_convergence_only_at_native_default() -> None:
+    """Only the status mapping is scale-aware; native_default stays fail-closed."""
+    namespace: dict[str, object] = {}
+    exec(  # noqa: S102 - executing the mirror's own convention, not external input
+        "from __future__ import annotations\n" + _scale_gate_source(NATIVE),
+        namespace,
+    )
+    gate = namespace["scientific_success_for_scale"]
+    sound = {
+        "accepted_step": True,
+        "inner_success": True,
+        "parameters_finite": True,
+        "observables_finite": True,
+        "monotone_descent": True,
+    }
+    truncated = SimpleNamespace(success=False, stopping_reason="iteration-limit")
+    converged = SimpleNamespace(success=True, stopping_reason="converged")
+
+    # native_default keeps the full certificate: a truncated run is NOT success.
+    assert gate(native_scale=True, certificate=converged, **sound) is True
+    assert gate(native_scale=True, certificate=truncated, **sound) is False
+
+    # bounded accepts a sound truncated run, and only a sound one.
+    assert gate(native_scale=False, certificate=truncated, **sound) is True
+    assert gate(native_scale=False, certificate=converged, **sound) is True
+    for defect in ("line-search-failed", "nonfinite", "failed", "evaluation-limit"):
+        assert (
+            gate(
+                native_scale=False,
+                certificate=SimpleNamespace(success=False, stopping_reason=defect),
+                **sound,
+            )
+            is False
+        ), defect
+    for unsound in (
+        "accepted_step",
+        "inner_success",
+        "parameters_finite",
+        "observables_finite",
+        "monotone_descent",
+    ):
+        assert (
+            gate(
+                native_scale=False,
+                certificate=truncated,
+                **{**sound, unsound: False},
+            )
+            is False
+        ), unsound
+
+
 def test_jax_finalization_uses_one_controller_anchored_evaluation() -> None:
     module = _module(JAX)
     solve = next(
@@ -406,7 +483,7 @@ def test_public_vacuum_single_stage_matches_native_in_cpu_parity_mode(
         NATIVE,
         environment=dict(os.environ),
         output_directory=tmp_path / "native",
-        expected_returncode=1,
+        expected_returncode=0,
     )
     _, jax_environment = build_execution_environment(
         "cpu",
@@ -418,18 +495,29 @@ def test_public_vacuum_single_stage_matches_native_in_cpu_parity_mode(
         JAX,
         environment=jax_environment,
         output_directory=tmp_path / "jax",
-        expected_returncode=1,
+        expected_returncode=0,
     )
 
     native_values = _observables(native)
     jax_values = _observables(jax_result)
-    # Smoke is a bounded diagnostic/parity lane, never convergence evidence:
-    # both examples fail closed on their two-step budget. Observable parity
-    # below is the actual gate.
-    assert native["status"] == "failed"
-    assert jax_result["status"] == "failed"
+    # Smoke is a bounded diagnostic/parity lane, never convergence evidence.
+    # Both examples spend their two-step budget and publish a SOUND truncated
+    # run: status ok because nothing is defective, while the termination
+    # evidence stays honest -- the stopping reason is still the exhausted
+    # budget and neither endpoint claims stationarity.  Convergence remains
+    # gated at native_default. Observable parity below is the actual gate.
+    assert native["status"] == "ok"
+    assert jax_result["status"] == "ok"
     assert native_values["outer_stopping_reason"] == "iteration-limit"
     assert jax_values["outer_stopping_reason"] == "iteration-limit"
+    assert native_values["outer_solver_success"] is False
+    assert jax_values["outer_solver_success"] is False
+    assert native_values["terminal_stationary"] is False
+    assert jax_values["terminal_stationary"] is False
+    assert native_values["inner_solver_success"] is True
+    assert jax_values["inner_solver_success"] is True
+    assert native_values["final_objective"] <= native_values["initial_objective"]
+    assert jax_values["final_objective"] <= jax_values["initial_objective"]
     assert jax_result["backend_mode"] == "jax_cpu_parity"
     assert jax_result["platform"] == "cpu"
     assert jax_result["precision"] == "fp64"

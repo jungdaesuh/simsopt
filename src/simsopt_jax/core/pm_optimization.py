@@ -1831,7 +1831,7 @@ def _gpmo_arbvec_remove_pairs(
     return final_state
 
 
-def gpmo_arbvec_backtracking_step(
+def _gpmo_arbvec_backtracking_active_step(
     spec: GPMOArbVecBacktrackingSpec,
     state: tuple[jax.Array, ...],
     A_scaled: jax.Array,
@@ -1843,17 +1843,10 @@ def gpmo_arbvec_backtracking_step(
     col_sq: jax.Array | None = None,
     penalty: jax.Array | None = None,
 ) -> tuple[tuple[jax.Array, ...], tuple[jax.Array, ...]]:
-    """Run one arbitrary-vector backtracking GPMO placement step.
+    """Scan the full candidate set and place one dipole.
 
-    The step is composed of:
-      1. Pick the candidate ``(j, m, sign)`` that most reduces ``||residual + bnorm||^2``.
-      2. Place it: update ``x``, residual, available, sign-and-vector traces.
-      3. If ``iteration >= backtracking`` and ``iteration % backtracking == 0``,
-         run the dewyrming pass: for each placed dipole ``j``, find the most
-         anti-aligned placed adjacent dipole and remove the pair if their
-         cosine angle is below ``cos_thresh_angle``.
-      4. Carry-forward semantics for terminated runs (``num_nonzero >=
-         ndipoles`` or ``num_nonzero >= max_nMagnets``).
+    See ``gpmo_arbvec_backtracking_step`` for the step semantics; this is the
+    branch that runs while the state can still change.
     """
 
     (
@@ -1973,6 +1966,95 @@ def gpmo_arbvec_backtracking_step(
         done_new,
     )
     return next_state, trace
+
+
+def _gpmo_arbvec_backtracking_frozen_step(
+    state: tuple[jax.Array, ...],
+) -> tuple[tuple[jax.Array, ...], tuple[jax.Array, ...]]:
+    """Reproduce the active step's outputs when the run has already stopped.
+
+    ``done`` is monotone: the active step returns ``done | stop``. And every
+    ``next_state`` entry it returns is ``jnp.where(done, <incoming>, ...)``, so
+    a ``done`` state is a fixed point of the step — no later iteration can
+    change it, and each traced quantity collapses to the constant below. The
+    candidate scan and the dewyrming pass are therefore dead work once ``done``
+    holds, and this branch skips both while emitting the identical outputs.
+    """
+
+    (
+        x,
+        residual,
+        available,
+        _current_vector_indices,
+        _current_signs,
+        _selected_dipoles,
+        _selected_vector_indices,
+        _selected_signs,
+        done,
+    ) = state
+    trace = (
+        _device_scalar(-1, jnp.int64),
+        _device_scalar(-1, jnp.int64),
+        _scalar_like(residual, 0.0),
+        jnp.sum(residual * residual),
+        x,
+        jnp.sum((~available).astype(jnp.int64)),
+        _device_scalar(0, jnp.int64),
+        done,
+    )
+    return state, trace
+
+
+def gpmo_arbvec_backtracking_step(
+    spec: GPMOArbVecBacktrackingSpec,
+    state: tuple[jax.Array, ...],
+    A_scaled: jax.Array,
+    connectivity: jax.Array,
+    cos_thresh_angle: jax.Array,
+    iteration: jax.Array,
+    contributions: jax.Array | None = None,
+    *,
+    col_sq: jax.Array | None = None,
+    penalty: jax.Array | None = None,
+) -> tuple[tuple[jax.Array, ...], tuple[jax.Array, ...]]:
+    """Run one arbitrary-vector backtracking GPMO placement step.
+
+    The step is composed of:
+      1. Pick the candidate ``(j, m, sign)`` that most reduces ``||residual + bnorm||^2``.
+      2. Place it: update ``x``, residual, available, sign-and-vector traces.
+      3. If ``iteration % backtracking == 0`` (the ArbVec C++ gate has no
+         ``iteration >= backtracking`` guard, unlike baseline GPMO),
+         run the dewyrming pass: for each placed dipole ``j``, find the most
+         anti-aligned placed adjacent dipole and remove the pair if their
+         cosine angle is below ``cos_thresh_angle``.
+      4. Carry-forward semantics for terminated runs (``num_nonzero >=
+         ndipoles`` or ``num_nonzero >= max_nMagnets``).
+
+    Terminated runs take ``_gpmo_arbvec_backtracking_frozen_step`` instead,
+    which emits the same outputs without scanning the candidate set.
+    """
+
+    *_, done = state
+    # Per-geometry scalar control flow: under vmap this cond degrades to a
+    # select that executes both arms, so the skip's savings (not its
+    # correctness) vanish for batched callers -- same caveat as the file's
+    # other scalar conds.
+    return jax.lax.cond(
+        done,
+        _gpmo_arbvec_backtracking_frozen_step,
+        lambda active_state: _gpmo_arbvec_backtracking_active_step(
+            spec,
+            active_state,
+            A_scaled,
+            connectivity,
+            cos_thresh_angle,
+            iteration,
+            contributions,
+            col_sq=col_sq,
+            penalty=penalty,
+        ),
+        state,
+    )
 
 
 @partial(jax.jit, static_argnames=("K", "record_every"))
