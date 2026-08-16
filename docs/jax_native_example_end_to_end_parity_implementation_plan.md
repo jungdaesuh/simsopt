@@ -1683,3 +1683,50 @@ RED, but no production implementation for that slice may be added first.
   stable baseline exists?
 - How long should CI retain JSON/NPY parity artifacts, and which artifact store
   is authoritative for release claims?
+
+## Addendum — native_default certification-gate ruling (2026-08-15)
+
+Evidence: the 2026-08-14 native_default three-lane run of the boozer-vacuum
+mirror (durable archive
+`~/simsopt-campaigns/ndparity-boozer-vacuum-20260814/`, copied from the
+`.wt-simsopt-ndparity-6898b6eda` worktree's
+`.artifacts/jax-example-parity/20260814T010929Z-10f0606d.partial/`) ended with
+all three lanes -- native-cpu included -- `budget_exhausted` at the matched
+1000-iteration budget (`success=False`), with measured final-value forks of
+~2.5e-2 (jax-cpu) and ~3.7e-2 (jax-gpu) against the
+`mirror_single_stage_final_value` bucket's rtol 2e-8. The arbiter
+hard-requires `observation.success` plus final-value equality, so that mirror
+is structurally unable to pass at native_default regardless of physics
+agreement.
+
+Ruling (amends the gate, not the physics). Scope note: this ruling governs
+the three-lane parity ARBITER's certification gate. It is distinct from the
+example scripts' own published `status`, which is scale-aware in the opposite
+direction (strict certificate at native_default, sound-truncation at bounded)
+because it answers a different question -- "did this lane run soundly", not
+"do the lanes agree". Rules 1 and 2 are adopted policy for future
+native_default certification runs; the arbiter implementation change they
+require is follow-up work alongside rule 3's comparator.
+
+1. `success`-gating is a bounded-scale certification requirement. At
+   native_default, `budget_exhausted` at an identical matched budget in every
+   compared lane is an admissible terminal state for comparison.
+2. Final-value equality buckets (rtol <= 1e-6) apply at native_default only to
+   mirrors whose trajectories are fork-free by construction — discrete greedy
+   exact-arithmetic selections (GSCO, GPMO). The 2026-08-15
+   wireframe-gsco-multistep receipt (bitwise currents identity,
+   `docs/receipts/wireframe_gsco_multistep_native_default_receipt.md`) is the
+   first member of this class.
+3. Continuous optimizers with rejection-sentinel or line-search forks
+   (boozer-vacuum) may be certified at native_default only as endpoint quality
+   bands ("every lane reaches objective <= X at matched budget"), labeled
+   quality-band, never equivalence. Implementing the quality-band comparator
+   is follow-up work; until it lands, the boozer-vacuum native_default mirror
+   is uncertified-by-scope, not a parity failure.
+4. The 2026-08-14 diagnostic worktree may be archived; its artifacts are the
+   evidence for this ruling.
+
+This partially resolves the first Open Question above: bounded matched-workflow
+parity remains the presubmit basis for `full` workflow-coverage
+classification; native_default claims require either a fork-free equality
+receipt (class 2) or a quality-band receipt (class 3).

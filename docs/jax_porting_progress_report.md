@@ -323,3 +323,17 @@ survives this evidence: every isolated GPU launch was slower than native CPU,
 and only field-line/particle tracing cleared every warmed fast-mode gate. A
 quotable native-CPU/JAX-GPU speed comparison still needs cold, compile-only,
 and warmed samples with RSS and VRAM in machine-readable receipts.
+
+## Addendum — first native_default-scale GPU result (2026-08-15)
+
+The bottom line above is a bounded-scale verdict and stands unchanged for the
+`20260729T005942Z-5ade9aee` evidence it summarizes. On 2026-08-15 the
+wireframe-gsco-multistep mirror produced the repository's first
+native_default-scale native-CPU/JAX-GPU receipt with full-precision physics:
+the final 19,200-segment currents vector is bitwise identical (0 ULP) between
+the native example (`OMP_NUM_THREADS=32`) and the strict fp64 RTX 5090 lane,
+and the warmed device solve is ~3.5x faster than the best measured native
+configuration (5.77-5.93 s vs 20.49 s). Scope: this single mirror only; the
+receipt and its qualifiers live in
+`docs/receipts/wireframe_gsco_multistep_native_default_receipt.md`. The
+bounded-scale rows above are unchanged.
