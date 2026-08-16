@@ -940,9 +940,10 @@ def _traceable_solve_hessian_linearization(
     # supplies the residual-J closure to the same solver seam. Both remain fully
     # traceable under JIT and do not call a live host solver. Removing this path
     # would force every LS warm-start and adjoint solve to surface
-    # ``success=False`` and emit NaN gradients (verified by
-    # ``test_runtime_bundle_allows_strict_transfer_guard`` /
-    # ``test_runtime_bundle_host_wrappers_allow_host_inputs_under_strict_transfer_guard``).
+    # ``success=False`` and emit NaN gradients (the adjoint-selector coverage in
+    # tests/geo/test_surface_objectives_jax.py, e.g.
+    # ``test_explicit_adjoint_selector_overrides_supplied_dense_factors``,
+    # exercises this seam).
     residual_kwargs = {}
     if residual_jacobian_adjoint:
         residual_kwargs["residual_fn"] = _make_boozer_penalty_residual_closure(
@@ -4364,26 +4365,6 @@ def _build_traceable_optimizer_solved_pair(optimizer_compiled_bundle):
         require_exact_factor_handoff_for=require_exact_factor_handoff_for,
         seal_res_factors_for_reuse=seal_res_factors_for_reuse,
     )
-
-
-def _ensure_traceable_runtime_optimizer_solved_pair(runtime_entry, booz_jax):
-    """Residual dict-entry materializer for the decomposed solved pair.
-
-    Prefer :meth:`TraceableObjectiveSession.solved_pair` for new call sites.
-    This path remains for residual ``runtime_entry`` consumers that still store
-    lazy fields on the booz-attached cache dict (not yet session-owned).
-    """
-    optimizer_solved_pair = runtime_entry.get("optimizer_solved_pair")
-    if optimizer_solved_pair is None:
-        optimizer_compiled_bundle = _ensure_traceable_runtime_optimizer_compiled_bundle(
-            runtime_entry,
-            booz_jax,
-        )
-        optimizer_solved_pair = _build_traceable_optimizer_solved_pair(
-            optimizer_compiled_bundle
-        )
-        runtime_entry["optimizer_solved_pair"] = optimizer_solved_pair
-    return optimizer_solved_pair
 
 
 class TraceableObjectiveCandidateEvaluation(NamedTuple):

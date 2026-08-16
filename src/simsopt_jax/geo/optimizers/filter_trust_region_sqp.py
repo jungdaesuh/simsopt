@@ -518,11 +518,6 @@ def _initial_history(
     )
 
 
-def _zero_failure_counters() -> FilterTrustRegionSQPFailureCounters:
-    zero = jnp.asarray(0, dtype=jnp.int32)
-    return FilterTrustRegionSQPFailureCounters(zero, zero, zero, zero, zero, zero, zero)
-
-
 def _terminal_status(
     objective: jax.Array,
     constraints: jax.Array,

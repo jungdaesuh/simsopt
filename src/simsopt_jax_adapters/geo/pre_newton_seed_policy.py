@@ -39,15 +39,6 @@ BranchFn = Callable[[None], BranchResult]
 
 
 @dataclass(frozen=True, slots=True)
-class MixedPipelinePublishFlags:
-    """Telemetry flags published with a mixed-pipeline stage result."""
-
-    canonical_fallback_used: bool
-    mixed_seed_accepted: bool
-    mixed_bounded_certificate_accepted: bool
-
-
-@dataclass(frozen=True, slots=True)
 class MixedPreNewtonSeedPolicyResult:
     """Resolved mixed pre-Newton seed selection and pipeline telemetry.
 

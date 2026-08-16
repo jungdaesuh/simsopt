@@ -338,7 +338,7 @@ class LpCurveCurvatureJAX(Optimizable):
 
 
 class LpCurveCurvatureBarrierJAX(Optimizable):
-    """JAX-backed mirror of :class:`~simsopt.geo.LpCurveCurvatureBarrier`."""
+    """JAX-backed curve curvature strict barrier."""
 
     def __init__(self, curve, threshold):
         self.curve = curve

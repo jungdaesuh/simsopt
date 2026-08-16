@@ -412,10 +412,6 @@ def _optimizable_full_dof_map_spec(owner, opt):
     return _optimizable_input_dof_map_spec(owner, opt, input_mode="full")
 
 
-def _supports_curve_spec(curve):
-    return supports_adapter_curve_spec(curve)
-
-
 def _supports_curve_jax_methods(curve):
     return callable(getattr(curve, "gamma_jax", None)) and callable(
         getattr(curve, "gammadash_jax", None)
@@ -558,7 +554,7 @@ def _build_coil_state_entry(coil):
         coil.curve,
         coil.current,
     )
-    if _supports_curve_spec(curve):
+    if supports_adapter_curve_spec(curve):
         curve_spec_binding = _build_curve_spec_binding(coil, curve)
         curve_spec_map = _curve_spec_dof_map_spec(
             coil,

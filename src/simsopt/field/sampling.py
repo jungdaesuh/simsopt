@@ -9,8 +9,8 @@ def draw_uniform_on_curve(curve, nsamples, safetyfactor=10, randomgen=None):
     Args:
         curve: The :mod:`simsopt.geo.curve.Curve` to spawn the particles on.
         nsamples: number of samples.
-        safetyfactor: how many more samples than ``nsamples`` to generate for
-                      rejection/acceptance.
+        safetyfactor: currently unused; the number of candidates generated for
+                      rejection/acceptance is fixed at ``10 * nsamples``.
         randomgen: optional NumPy random generator with ``randint`` and
                    ``uniform`` methods. Defaults to the process-global
                    ``np.random`` module for backwards compatibility.
@@ -36,8 +36,8 @@ def draw_uniform_on_surface(surface, nsamples, safetyfactor=10, randomgen=None):
         surface: The :mod:`simsopt.geo.surface.Surface` to spawn the particles
                  on.
         nsamples: number of samples.
-        safetyfactor: how many more samples than ``nsamples`` to generate for
-                      rejection/acceptance.
+        safetyfactor: currently unused; the number of candidates generated for
+                      rejection/acceptance is fixed at ``10 * nsamples``.
         randomgen: optional NumPy random generator with ``randint`` and
                    ``uniform`` methods. Defaults to the process-global
                    ``np.random`` module for backwards compatibility.

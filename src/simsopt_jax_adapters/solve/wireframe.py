@@ -100,30 +100,9 @@ def _jax_native_ext_field_B(ext_field, points):
     )
 
 
-def _regularization_matrix(W: object, n: int) -> jax.Array:
-    W_arr = jnp.squeeze(_as_runtime_array(W))
-    indices = jax.lax.iota(jnp.int32, n)
-    identity = (indices[:, None] == indices[None, :]).astype(W_arr.dtype)
-    if W_arr.ndim == 0:
-        return W_arr * identity
-    if W_arr.ndim == 1:
-        if W_arr.shape[0] != n:
-            raise ValueError(
-                "Number of elements in vector-form W must match columns in A"
-            )
-        return W_arr[:, None] * identity
-    if W_arr.ndim == 2:
-        if W_arr.shape != (n, n):
-            raise ValueError(
-                "Number of rows and columns in matrix-form W must both equal "
-                "number of columns in A"
-            )
-        return W_arr
-    raise ValueError("W must be a scalar, 1d array, or 2d array")
-
-
 def _regularization_weighted_basis(W: object, n: int, basis: jax.Array) -> jax.Array:
-    """Apply scalar/vector diagonal regularization by row-scaling ``basis``."""
+    """Apply regularization ``W`` to ``basis``: scalar/vector forms row-scale,
+    matrix-form ``W`` left-multiplies."""
 
     W_arr = jnp.squeeze(_as_runtime_array(W))
     if W_arr.ndim == 0:

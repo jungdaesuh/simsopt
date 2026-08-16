@@ -752,7 +752,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Selects which JAX surface kernel feeds the census. "
             "'production' (default) is the matmul/jacfwd hot path; "
-            "'cpu_ordered' routes through the surface_fourier_jax_cpu_ordered "
+            "'cpu_ordered' routes through the surface_fourier_cpu_ordered "
             "twins introduced in Phase 2 of "
             + PLAN_DOC
             + ". Only affects the JAX side of the diff; the CPU side is the "

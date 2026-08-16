@@ -163,7 +163,6 @@ from simsopt_jax.geo._optimizer_backend_choices import (
 )
 from simsopt_jax.geo.optimizers._shared import (
     _CACHEABLE_VALUE_AND_GRAD_ATTR,
-    _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR,
     PRIVATE_OPTIMIZER_JAX_VERSION,
     _hostify_optimizer_tree,
     _is_flat_optimizer_vector,
@@ -361,6 +360,14 @@ from simsopt_jax.solve.minimize_runtime import (
 from simsopt_jax.solve.optax import OptaxLBFGSOptions
 from simsopt_jax.solve.optimistix import OptimistixLBFGSOptions
 
+# ---------------------------------------------------------------------------
+# Linear-solve, dense-IR, and adjoint-solve implementations live in their
+# dedicated owner modules. The explicit aliases above are compatibility
+# reexports only; mutable selectors must be read and patched on their owner.
+# ---------------------------------------------------------------------------
+# Explicit ``import X as X`` aliases keep the declared compatibility surface
+# visible and make the intentional reexports F401-safe for Ruff.
+
 
 class _PrivateOptimizerRuntime(NamedTuple):
     minimize_bfgs: Callable
@@ -542,6 +549,8 @@ _STRICT_REFERENCE_JAX_OPTIMIZER_DETAIL = "the host-side JAX reference optimizer 
 _STRICT_REFERENCE_LEAST_SQUARES_DETAIL = (
     "the host-side reference least-squares optimizer lane"
 )
+_STRICT_HOST_SCIPY_ADAPTER_DETAIL = "the host SciPy adapter"
+_STRICT_CPP_TRACE_ADAPTER_DETAIL = "the CPU/C++ trace adapter"
 _EISENSTAT_WALKER_GAMMA = 0.9
 # α=2 is inlined as ``ratio * ratio`` inside
 # ``_eisenstat_walker_choice2_tolerance`` for bit-stable evaluation; see
@@ -670,22 +679,6 @@ class _DeprecationCallSite:
 
 class _ArrayObjectiveWithArgs(Protocol):
     def __call__(self, x: jax.Array, *args: object) -> jax.Array: ...
-
-
-class _TraceableNewtonLinearTelemetry(NamedTuple):
-    """Typed provenance for one traceable Newton linear solve."""
-
-    ir_correction_count: jax.Array
-    ir_residual_relative_trace: jax.Array
-    ir_contraction_ratio_trace: jax.Array
-    ir_trace_length: jax.Array
-    ir_history_source_code: jax.Array
-    live_operator_certificate: jax.Array
-    factorization_dtype_bits: jax.Array
-    factor_application_dtype_bits: jax.Array
-    residual_dtype_bits: jax.Array
-    factorization_event_increment: jax.Array
-    fp64_refactor_retry: jax.Array
 
 
 class _DenseExactNewtonDirection(NamedTuple):
@@ -1037,14 +1030,17 @@ def _lookup_traceable_runner_callable(callable_ref, kind: str):
     return callable_fn
 
 
-def _traceable_newton_matvec_counts_requested() -> bool:
-    value = os.environ.get(_TRACEABLE_NEWTON_MATVEC_COUNT_ENV, "")
+def _env_flag_requested(name: str) -> bool:
+    value = os.environ.get(name, "")
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _traceable_newton_matvec_counts_requested() -> bool:
+    return _env_flag_requested(_TRACEABLE_NEWTON_MATVEC_COUNT_ENV)
 
 
 def _traceable_exact_newton_execution_counts_requested() -> bool:
-    value = os.environ.get(_TRACEABLE_EXACT_NEWTON_EXECUTION_COUNT_ENV, "")
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+    return _env_flag_requested(_TRACEABLE_EXACT_NEWTON_EXECUTION_COUNT_ENV)
 
 
 def _register_traceable_matvec_counter(maxiter: int) -> int:
@@ -1490,14 +1486,10 @@ def _require_native_cpu_reference_backend_for_scipy_adapter(
     component: str,
     method: str,
 ) -> None:
-    backend_config = get_backend_config()
-    if backend_config.backend != "jax":
-        return
-    raise RuntimeError(
-        f"{component} cannot use the host SciPy adapter for method={method!r} "
-        f"while simsopt backend mode {backend_config.mode!r} requires an "
-        "ondevice optimizer method. Select an ondevice optimizer method or "
-        "switch to the native_cpu reference backend."
+    _raise_if_target_lane_required(
+        component=component,
+        method=method,
+        detail=_STRICT_HOST_SCIPY_ADAPTER_DETAIL,
     )
 
 
@@ -1506,14 +1498,10 @@ def _require_native_cpu_reference_backend_for_trace_adapter(
     component: str,
     method: str,
 ) -> None:
-    backend_config = get_backend_config()
-    if backend_config.backend != "jax":
-        return
-    raise RuntimeError(
-        f"{component} cannot use the CPU/C++ trace adapter for method={method!r} "
-        f"while simsopt backend mode {backend_config.mode!r} requires an "
-        "ondevice optimizer method. Select an ondevice optimizer method or "
-        "switch to the native_cpu reference backend."
+    _raise_if_target_lane_required(
+        component=component,
+        method=method,
+        detail=_STRICT_CPP_TRACE_ADAPTER_DETAIL,
     )
 
 
@@ -1527,12 +1515,6 @@ def _mark_traceable_runner_cacheable(fun, *, cache_token):
     # Same contract as ``mark_cacheable_jit_value_and_grad``.
     setattr(fun, _TRACEABLE_RUNNER_CACHE_TOKEN_ATTR, cache_token)
     return fun
-
-
-def _mark_structured_private_solver_cacheable(fun, *, cache_token):
-    # Same contract as ``mark_cacheable_jit_value_and_grad``.
-    setattr(fun, _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR, cache_token)
-    return _mark_traceable_runner_cacheable(fun, cache_token=cache_token)
 
 
 _StrictDecisionT = TypeVar("_StrictDecisionT")
@@ -4862,28 +4844,6 @@ def _gmres_solve_exact_newton_system_counted(jvp_fn, x, rhs, *, tol):
     return dx, residual, matvec, telemetry
 
 
-# Growth-factor margin on the ``n * eps`` LU backward-error bound used by
-# ``_effective_dense_backward_error_tolerance``. Keeps the acceptance gate a tiny
-# multiple of attainable backward-stability (so degenerate solves with
-# eta ~ O(1) still fail closed by ~10 orders) while admitting backward-stable
-# solves of large, moderately ill-conditioned systems.
-# Float64 dense solves still need a condition cap below the theoretical
-# ``1 / (n * eps)`` rank threshold at small n: a consistent near-singular
-# system can have machine-small residual but a 1e-4-scale wrong solution at
-# condition estimates around 2e13. Production Boozer adjoint estimates are
-# documented at least two orders below this cap.
-
-
-def _linear_solve_requested_tolerance_reached(status):
-    """Return whether the diagnostic caller target was reached."""
-    return (
-        status.success
-        & jnp.isfinite(status.residual_relative)
-        & jnp.isfinite(status.requested_tolerance)
-        & (status.residual_relative <= status.requested_tolerance)
-    )
-
-
 def _linear_solve_status_with_relative_tolerance(
     solution,
     residual,
@@ -4985,18 +4945,6 @@ def _eisenstat_walker_strict_cap_applies(norm, tol_value, *, dtype):
     )
 
 
-def _mixed_loose_fp32_handoff_applies(norm, tol_value, *, dtype):
-    handoff_floor = jnp.maximum(
-        _device_scalar(
-            _EISENSTAT_WALKER_STRICT_CAP_NEAR_TARGET_FACTOR,
-            dtype=dtype,
-        )
-        * tol_value,
-        _device_scalar(jnp.finfo(dtype).eps, dtype=dtype),
-    )
-    return norm <= handoff_floor
-
-
 def _eisenstat_walker_choice2_tolerance(norm, previous_norm, *, tol):
     """Return the Eisenstat-Walker Choice-2 relative linear-solve tolerance.
 
@@ -5039,29 +4987,6 @@ def _eisenstat_walker_choice2_tolerance(norm, previous_norm, *, tol):
         ),
         capped_eta,
     )
-
-
-def _dense_matrix_condition_numerically_safe(
-    condition_estimate,
-    *,
-    size,
-    solve_dtype,
-):
-    """Apply the shared dtype-specific numerical-singularity condition screen."""
-    return _dense_matrix_condition_estimate_numerically_safe(
-        condition_estimate,
-        size=int(size),
-        dtype=np.dtype(solve_dtype),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Linear-solve, dense-IR, and adjoint-solve implementations live in their
-# dedicated owner modules. The explicit aliases above are compatibility
-# reexports only; mutable selectors must be read and patched on their owner.
-# ---------------------------------------------------------------------------
-# Explicit ``import X as X`` aliases keep the declared compatibility surface
-# visible and make the intentional reexports F401-safe for Ruff.
 
 
 def _solve_traceable_newton_operator_gmres_with_status(matvec, rhs, *, tol):
