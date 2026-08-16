@@ -7,8 +7,10 @@ with full-precision physics agreement. Scope: the
 `examples/3_Advanced/wireframe_gsco_multistep.py`). Nothing here generalizes
 to other mirrors; the bounded-scale campaign verdicts stand unchanged.
 
-Grade: DIAGNOSTIC until the clean-tree confirmation run below is appended;
-every cited artifact is self-labelled `diagnostic-not-certifying`.
+Grade: CERTIFYING — the clean-tree confirmation run below reproduced the
+bitwise identity at a committed SHA with `git_dirty_files: []`. The earlier
+captures remain self-labelled `diagnostic-not-certifying` and are superseded
+as evidence grade (not in content) by the confirmation run.
 
 ## Claim
 
@@ -97,9 +99,21 @@ script at this revision.
   (`docs/jax_native_example_end_to_end_parity_implementation_plan.md`,
   addendum). It is not evidence for continuous-optimizer mirrors.
 
-## Clean-tree confirmation run
+## Clean-tree confirmation run (2026-08-16)
 
-Pending: to be appended after the integration commit, re-running
-`docs/receipts/wireframe_gsco_multistep/{native_capture,jax_capture}.py` at
-the committed SHA with a clean tree (`git_dirty_files: []`) to upgrade this
-record from diagnostic-grade to certifying-grade.
+Executed at commit `b26eff5b6` with a clean tree, using the committed
+harnesses in `docs/receipts/wireframe_gsco_multistep/`:
+
+- Native lane (`OMP_NUM_THREADS=32`): `native-clean-b26eff5b6.{currents.npy,
+  meta.json}` — `git_head b26eff5b6`, full-script wall 55.3 s.
+- JAX GPU lane (strict fp64, warm cache): `jax-gpu-clean-b26eff5b6.{currents
+  .npy,meta.json}` — `git_head b26eff5b6`, `git_dirty_files: []`,
+  build+solve wall 7.4 s.
+- Comparison (`compare_fullprec.py`, output
+  `compare_clean_b26eff5b6.json`): `bitwise_identical: true`, 0 differing
+  entries, support 1750/1750, dyadic ladder identical. The clean-tree JAX
+  capture is also bitwise-equal to every earlier diagnostic capture
+  (`jax-gpu-head`, `jax-gpu-fixed-r{1,2}`), so the diagnostic evidence chain
+  and this certifying run describe one and the same solution vector.
+
+Artifacts: `~/simsopt-campaigns/winnable-six-20260815/parity-fullprec/`.
