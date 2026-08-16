@@ -214,3 +214,16 @@ exercised under `jax_gpu_parity` and the dispatch L-BFGS-B seam under
 | Diffrax | [Events](https://docs.kidger.site/diffrax/api/events/) |
 | JAX | [`jax.scipy.optimize.minimize`](https://docs.jax.dev/en/latest/_autosummary/jax.scipy.optimize.minimize.html); [JAX 0.10.0 hidden L-BFGS route](https://github.com/jax-ml/jax/blob/jax-v0.10.0/jax/_src/scipy/optimize/minimize.py#L98-L122); [sparse linear algebra](https://docs.jax.dev/en/latest/jax.scipy.html#module-jax.scipy.sparse.linalg) |
 | JAXopt | [Maintenance status](https://github.com/google/jaxopt#status); [L-BFGS-B](https://jaxopt.github.io/stable/_autosummary/jaxopt.LBFGSB.html) |
+
+## Addendum — authority evidence scale and staleness (2026-08-15)
+
+The tracked native/JAX campaign summary row in "Evidence status" is
+bounded-scale only and pinned to `11340c829690fdc0652e47588f5da549829c056a`,
+now roughly 190 commits behind the working tree; its run configuration
+predates the current execution-source manifest and cannot be re-executed as
+recorded. Permitted use narrows accordingly:
+`examples/jax/authority_evidence.json` remains a historical bounded-scale workflow/physics
+regression record, and no current-tree parity or performance claim may cite it
+without a fresh run. The first native_default-scale receipt superseding it for
+a single mirror is the 2026-08-15 wireframe-gsco-multistep full-precision
+record (`docs/receipts/wireframe_gsco_multistep_native_default_receipt.md`).
