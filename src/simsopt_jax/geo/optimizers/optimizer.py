@@ -566,6 +566,7 @@ _TRACEABLE_RUNNER_CACHE_LOCK = Lock()
 # Explicit traceable cache tokens own semantic reuse; bare callables stay
 # isolated by object identity because their closure state is not comparable.
 _TRACEABLE_LM_RUNNER_CACHE = {}
+_TRACEABLE_LM_QR_RUNNER_CACHE = {}
 _TRACEABLE_NEWTON_POLISH_RUNNER_CACHE = {}
 _TRACEABLE_EXACT_NEWTON_RUNNER_CACHE = {}
 _TRACEABLE_EXACT_NEWTON_C0_ORACLE_RUNNER_CACHE = {}
@@ -1220,6 +1221,19 @@ def _warn_deprecated_solve_jax_call(
             "stack": _shim_caller_stack(caller_frame),
         },
     )
+
+
+def _traceable_callback_token_operand(token: int) -> jax.Array:
+    """Stage a callback-registry token as a traced int32 solver operand.
+
+    Tokens are minted per call, so a token declared ``static_argnums`` compiles
+    one executable per instrumented solve — and, once the runner itself is
+    memoized, retains every one of them. Passed as a traced operand the token
+    only routes the host-side registry lookup in ``_lookup_traceable_callback``
+    (which already accepts arrays), so the solver numerics are unchanged and
+    every instrumented solve shares one executable.
+    """
+    return _device_scalar(token, dtype=jnp.int32)
 
 
 def _invoke_traceable_lm_callback(token, x) -> None:
@@ -2691,7 +2705,9 @@ def _build_traceable_levenberg_marquardt_runner(
 
         run_solver_without_callbacks.__name__ = run_solver.__name__
         return jax.jit(run_solver_without_callbacks)
-    return jax.jit(run_solver, static_argnums=(2, 3))
+    # Callback tokens stay traced operands, not static arguments; see
+    # ``_traceable_callback_token_operand``.
+    return jax.jit(run_solver)
 
 
 def _least_squares_matvec(flat_residual_fn, x, pullback, tangent):
@@ -3643,8 +3659,8 @@ def levenberg_marquardt_traceable(
             result = runner(
                 x0,
                 normalized_args,
-                callback_token,
-                progress_callback_token,
+                _traceable_callback_token_operand(callback_token),
+                _traceable_callback_token_operand(progress_callback_token),
             )
         if callback_token != 0 or progress_callback_token != 0:
             jax.effects_barrier()
@@ -3882,68 +3898,74 @@ def _qr_lm_iteration(
     }
 
 
-def levenberg_marquardt_minpack_traceable(
+def _make_traceable_levenberg_marquardt_minpack_runner(
     residual_fn,
-    x0,
-    *,
-    maxiter=1500,
-    tol=1e-10,
-    ftol=1e-8,
-    xtol=1e-8,
-    gtol=1e-8,
-    materialize_dense_linearization=True,
-    max_dense_linearization_bytes=None,
-    callback=None,
-    progress_callback=None,
-    args=(),
+    maxiter,
+    tol,
+    ftol,
+    xtol,
+    gtol,
+    callback_enabled,
+    progress_callback_enabled,
 ):
-    """Trace-safe QR Levenberg-Marquardt solver for least-squares residuals.
+    """Return the memoized compiled QR-LM runner for one residual callable.
 
-    This opt-in lane materializes the dense Jacobian each iteration and solves
-    the Marquardt augmented least-squares system with column-pivoted QR. It is
-    MINPACK-style and tolerance-equivalent; it does not claim MINPACK packed-QR
-    byte identity.
+    ``residual_fn`` identity owns the cache entry; the cache key is exactly the
+    constant set the builder bakes into the trace. The decision vector, the
+    residual ``args``, and the callback tokens stay runtime arguments, so
+    repeated solves reuse one executable instead of retracing per call.
     """
-    x = jax.tree.map(jnp.asarray, x0)
-    flat_x0, unravel = ravel_pytree(x)
-    normalized_args = _normalize_solver_args(args)
-    dtype = flat_x0.dtype
-
-    def residual_eval(flat_x):
-        return jnp.ravel(jnp.asarray(residual_fn(unravel(flat_x), *normalized_args)))
-
-    # Probe the residual row count by abstract shape inference on the original
-    # pytree (passed as a traced arg). jax.eval_shape traces without executing,
-    # so it avoids the OLD eager `residual0 = residual_eval(flat_x0)`, which
-    # tripped transfer_guard("disallow"): evaluating the residual materializes
-    # its weak host scalars (e.g. int64/float64 literals stacked by jnp.asarray)
-    # as an implicit host->device transfer. Routing x (not unravel(flat_x)) keeps
-    # the probe off ravel_pytree's unravel path as well.
-    residual_shape = jax.eval_shape(
-        lambda probe_x: jnp.ravel(jnp.asarray(residual_fn(probe_x, *normalized_args))),
-        x,
+    cache_key = (
+        int(maxiter),
+        float(tol),
+        float(ftol),
+        float(xtol),
+        None if gtol is None else float(gtol),
+        bool(callback_enabled),
+        bool(progress_callback_enabled),
     )
-    linearization_rows = int(np.prod(residual_shape.shape))
-    linearization_cols = int(flat_x0.size)
-    dense_linearization_within_budget, dense_report = (
-        _least_squares_dense_linearization_policy(
-            linearization_rows,
-            linearization_cols,
-            dtype,
-            max_dense_linearization_bytes,
-        )
+    return _cached_traceable_runner(
+        _TRACEABLE_LM_QR_RUNNER_CACHE,
+        residual_fn,
+        cache_key,
+        lambda residual_fn_ref: _build_traceable_levenberg_marquardt_minpack_runner(
+            residual_fn_ref,
+            int(maxiter),
+            float(tol),
+            float(ftol),
+            float(xtol),
+            None if gtol is None else float(gtol),
+            bool(callback_enabled),
+            bool(progress_callback_enabled),
+        ),
     )
-    if not dense_linearization_within_budget:
-        raise MemoryError(
-            _least_squares_required_dense_linearization_message(
-                linearization_rows,
-                linearization_cols,
-                dtype,
-                max_dense_linearization_bytes,
-            )
-        )
 
-    def run_solver(flat_x_init):
+
+def _build_traceable_levenberg_marquardt_minpack_runner(
+    residual_fn_ref,
+    maxiter,
+    tol,
+    ftol,
+    xtol,
+    gtol,
+    callback_enabled,
+    progress_callback_enabled,
+):
+    def run_solver(x_init, fn_args, callback_token, progress_callback_token):
+        residual_fn = _lookup_traceable_runner_callable(
+            residual_fn_ref,
+            "LM QR residual",
+        )
+        # Flatten inside the trace: the dense QR step needs one flat column
+        # space, and keeping ``unravel`` a traced-local keeps the decision
+        # pytree structure out of the runner cache key (``jax.jit`` already
+        # discriminates it through the argument signature).
+        flat_x_init, unravel = ravel_pytree(x_init)
+        dtype = flat_x_init.dtype
+
+        def residual_eval(flat_x):
+            return jnp.ravel(jnp.asarray(residual_fn(unravel(flat_x), *fn_args)))
+
         # Build tol scalars inside the trace so they are staged as constants
         # rather than closed-over concrete device arrays (which JAX bakes via
         # mlir.ir_constant -> a device->host copy, tripping transfer_guard).
@@ -3998,24 +4020,24 @@ def levenberg_marquardt_minpack_traceable(
                 gtol=gtol_value,
                 maxiter=maxiter,
             )
-            if callback is not None:
+            if callback_enabled:
                 lax.cond(
                     next_state["accepted"],
                     lambda _: jax.debug.callback(
-                        lambda flat_x: callback(
-                            _hostify_optimizer_tree(unravel(flat_x))
-                        ),
+                        _invoke_traceable_lm_callback,
+                        callback_token,
                         next_state["x"],
                         ordered=False,
                     ),
                     lambda _: None,
                     operand=None,
                 )
-            if progress_callback is not None:
+            if progress_callback_enabled:
                 lax.cond(
                     next_state["accepted"],
                     lambda _: jax.debug.callback(
-                        progress_callback,
+                        _invoke_traceable_progress_callback,
+                        progress_callback_token,
                         next_state["nit"],
                         next_state["cost"],
                         next_state["grad_norm_inf"],
@@ -4028,7 +4050,109 @@ def levenberg_marquardt_minpack_traceable(
 
         return lax.while_loop(cond_fun, body_fun, state0)
 
-    state = jax.jit(run_solver)(flat_x0)
+    run_solver.__name__ = "traceable_levenberg_marquardt_minpack_run_solver"
+    if not callback_enabled and not progress_callback_enabled:
+
+        def run_solver_without_callbacks(x_init, fn_args):
+            return run_solver(x_init, fn_args, 0, 0)
+
+        run_solver_without_callbacks.__name__ = run_solver.__name__
+        return jax.jit(run_solver_without_callbacks)
+    # Callback tokens stay traced operands, not static arguments; see
+    # ``_traceable_callback_token_operand``.
+    return jax.jit(run_solver)
+
+
+def levenberg_marquardt_minpack_traceable(
+    residual_fn,
+    x0,
+    *,
+    maxiter=1500,
+    tol=1e-10,
+    ftol=1e-8,
+    xtol=1e-8,
+    gtol=1e-8,
+    materialize_dense_linearization=True,
+    max_dense_linearization_bytes=None,
+    callback=None,
+    progress_callback=None,
+    args=(),
+):
+    """Trace-safe QR Levenberg-Marquardt solver for least-squares residuals.
+
+    This opt-in lane materializes the dense Jacobian each iteration and solves
+    the Marquardt augmented least-squares system with column-pivoted QR. It is
+    MINPACK-style and tolerance-equivalent; it does not claim MINPACK packed-QR
+    byte identity.
+    """
+    x = jax.tree.map(jnp.asarray, x0)
+    flat_x0, unravel = ravel_pytree(x)
+    normalized_args = _normalize_solver_args(args)
+    dtype = flat_x0.dtype
+
+    # Probe the residual row count by abstract shape inference on the original
+    # pytree (passed as a traced arg). jax.eval_shape traces without executing,
+    # so it avoids the OLD eager `residual0 = residual_eval(flat_x0)`, which
+    # tripped transfer_guard("disallow"): evaluating the residual materializes
+    # its weak host scalars (e.g. int64/float64 literals stacked by jnp.asarray)
+    # as an implicit host->device transfer. Routing x (not unravel(flat_x)) keeps
+    # the probe off ravel_pytree's unravel path as well.
+    residual_shape = jax.eval_shape(
+        lambda probe_x: jnp.ravel(jnp.asarray(residual_fn(probe_x, *normalized_args))),
+        x,
+    )
+    linearization_rows = int(np.prod(residual_shape.shape))
+    linearization_cols = int(flat_x0.size)
+    dense_linearization_within_budget, dense_report = (
+        _least_squares_dense_linearization_policy(
+            linearization_rows,
+            linearization_cols,
+            dtype,
+            max_dense_linearization_bytes,
+        )
+    )
+    if not dense_linearization_within_budget:
+        raise MemoryError(
+            _least_squares_required_dense_linearization_message(
+                linearization_rows,
+                linearization_cols,
+                dtype,
+                max_dense_linearization_bytes,
+            )
+        )
+
+    runner = _make_traceable_levenberg_marquardt_minpack_runner(
+        residual_fn,
+        maxiter,
+        tol,
+        ftol,
+        xtol,
+        gtol,
+        callback is not None,
+        progress_callback is not None,
+    )
+    # The compiled runner carries the flat iterate, so the registered step
+    # callback is the flat-vector adapter that restores the caller's pytree.
+    callback_token = _register_traceable_callback(
+        None
+        if callback is None
+        else lambda flat_x: callback(_hostify_optimizer_tree(unravel(flat_x)))
+    )
+    progress_callback_token = _register_traceable_callback(progress_callback)
+    try:
+        if callback_token == 0 and progress_callback_token == 0:
+            state = runner(x, normalized_args)
+        else:
+            state = runner(
+                x,
+                normalized_args,
+                _traceable_callback_token_operand(callback_token),
+                _traceable_callback_token_operand(progress_callback_token),
+            )
+            jax.effects_barrier()
+    finally:
+        _unregister_traceable_callback(callback_token)
+        _unregister_traceable_callback(progress_callback_token)
     return {
         "x": unravel(state["x"]),
         "residual": state["residual"],
