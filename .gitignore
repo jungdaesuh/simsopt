@@ -80,6 +80,7 @@ examples/single_stage_optimization/STAGE_2/outputs-*/
 .artifacts/jax-example-parity/
 .artifacts/jax-vmec-hybrid/
 .artifacts/jax-example-execution-modes/
+.artifacts/stage_two_finitebuild_native_gpu/
 .handoffs/
 
 # Agent scratch/learnings directories (not shipped source)

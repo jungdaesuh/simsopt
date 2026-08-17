@@ -50,7 +50,9 @@ claim; fresh-cache startup remains a separately reported result.
 
 ## Current Context
 
-- The live source is at commit `41dfda284e3ebdf79d9bb32582c21a9a5dc11d9d`.
+- Source modules under `src/`, `examples/`, and `benchmarks/` are unchanged
+  since commit `41dfda284e3ebdf79d9bb32582c21a9a5dc11d9d`; later commits are
+  docs-only.
 - The matched finite-build workload evaluates 96 symmetry-expanded filaments
   against 1024 surface points with 75 quadrature points, approximately 7.37
   million source-target interactions per field evaluation.
@@ -209,13 +211,13 @@ timing are different metrics and are never relabeled as each other.
      `CurveCurveDistance.shortest_distance()` and retain the distance-penalty
      value/gradient parity checks.
    - [ ] Run the warm value/gradient canary against native at
-     `OMP_NUM_THREADS=4,8,16,32`. Stop with `CLOSED_BOUNDED_NEGATIVE` before
+     `OMP_NUM_THREADS=4,8,16,32,48`. Stop with `CLOSED_BOUNDED_NEGATIVE` before
      workflow changes unless the refactored GPU kernel is at least `1.10x`
      faster than the best native kernel and all scientific checks pass.
 
 3. Select one fixed optimizer policy with a bounded canary.
-   - [ ] Measure the full native matrix of OpenMP counts `4,8,16,32` and L-BFGS
-     histories `10,20,40,400`; measure JAX histories `10,20,40`. Use three
+   - [ ] Measure the full native matrix of OpenMP counts `4,8,16,32,48` and
+     L-BFGS histories `10,20,40,400`; measure JAX histories `10,20,40`. Use three
      round-robin repetitions for selection and reserve five fresh repetitions
      for the final verdict.
    - [ ] Obtain native accepted-step calibration traces without recomputing the
