@@ -360,9 +360,11 @@ timing are different metrics and are never relabeled as each other.
      verdict publishes it alongside per-configuration qualifying counts, so
      rung-unreachability and repetition attrition stay auditable.
    - [ ] Because the fused GPU loop has no host trajectory, sweep the
-     preregistered budgets `40,80,160,240,400`. The first
-     qualifying GPU budget is an upper bound on its true crossing iteration;
-     use that exact budget for the no-callback final measurements.
+     preregistered coarse budget ladder (`GPU_BUDGET_SWEEP`; originally
+     `40,80,160,240,400`, extended to `40,80,160,240,400,560,800` by the
+     dated budget-parity amendment above). The first qualifying GPU budget is
+     an upper bound on its true crossing iteration; use that exact budget for
+     the no-callback final measurements.
    - [ ] Choose the fastest qualifying native configuration as the denominator.
      Choose the JAX history with the lowest qualifying no-callback warm time;
      bake it into the internal workflow rather than adding a configuration
