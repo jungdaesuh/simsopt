@@ -114,7 +114,13 @@ FINAL_PAIR_COUNT = 5
 NATIVE_OMP_SWEEP = (2, 4, 8, 16, 32, 48)
 NATIVE_HISTORY_SWEEP = (10, 20, 40, 400)
 JAX_HISTORY_SWEEP = (10, 20, 40)
-GPU_BUDGET_SWEEP = (40, 80, 160, 240, 400)
+# Amended 2026-08-17 (plan: budget-parity amendment): the fp64 rung is crossed
+# at median native iteration 736 off the reference trajectory, so a ladder
+# capped at 400 denies the GPU lane the 2x-reference allowance the native
+# callback-stop protocol already grants (NATIVE_STOP_MAX_STEPS = 800).  560
+# and 800 extend the coarse ladder to budget parity; the sweep kill criterion
+# is final at b <= 800.
+GPU_BUDGET_SWEEP = (40, 80, 160, 240, 400, 560, 800)
 SELECTION_REPETITIONS = 3
 FINAL_WARM_REPETITIONS = 3
 GATE_REFERENCE_OMP = 8
