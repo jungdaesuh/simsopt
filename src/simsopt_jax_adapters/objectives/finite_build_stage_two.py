@@ -15,7 +15,6 @@ from typing import cast
 
 import jax
 import jax.numpy as jnp
-
 from simsopt_jax.core import (
     CoilSetDofExtractionSpec,
     CurveFilamentSpec,
@@ -24,11 +23,11 @@ from simsopt_jax.core import (
     coil_specs_from_dof_extraction_spec,
     curve_geometry_from_dofs,
 )
+from simsopt_jax.core._pairwise_reductions import pairwise_min_distance_pure
 from simsopt_jax.core.curve_geometry import (
     optimizable_input_dofs_from_map_spec,
 )
 from simsopt_jax.core.curve_kernels import curve_curve_distance_penalty_pure
-from simsopt_jax.core._pairwise_reductions import pairwise_min_distance_pure
 from simsopt_jax.core.field import grouped_coil_set_spec_from_lists
 from simsopt_jax.core.objectives_flux import fixed_surface_flux_integral
 from simsopt_jax.core.specs import FixedSurfaceFluxSpec, GroupedCoilSetSpec
@@ -130,11 +129,29 @@ def _finite_build_geometry(
     )
 
 
+def _symmetric_pair_indices(count: int) -> tuple[jax.Array, jax.Array]:
+    pairs = tuple((first, second) for first in range(count) for second in range(first))
+    return (
+        jnp.asarray(tuple(pair[0] for pair in pairs), dtype=jnp.int32),
+        jnp.asarray(tuple(pair[1] for pair in pairs), dtype=jnp.int32),
+    )
+
+
+# Packing order of the diagnostics vector; coil lengths follow these entries.
+# Consumers index the packed array through this tuple, never by literal.
+FINITE_BUILD_DIAGNOSTIC_FIELDS = (
+    "squared_flux",
+    "length_penalty",
+    "distance_penalty",
+    "minimum_clearance",
+)
+
+
 def _finite_build_penalties(
     base_gammas: jax.Array,
     base_gammadashs: jax.Array,
     config: FiniteBuildStageTwoConfig,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+) -> tuple[jax.Array, jax.Array, jax.Array]:
     base_lengths = jnp.mean(
         jnp.linalg.norm(base_gammadashs[: config.num_base_curves], axis=-1),
         axis=1,
@@ -143,13 +160,7 @@ def _finite_build_penalties(
     length_excess = jnp.maximum(base_lengths - targets, 0.0)
     length_penalty = 0.5 * config.length_weight * jnp.sum(length_excess * length_excess)
 
-    pairs = tuple(
-        (first, second)
-        for first in range(int(base_gammas.shape[0]))
-        for second in range(first)
-    )
-    first = jnp.asarray(tuple(pair[0] for pair in pairs), dtype=jnp.int32)
-    second = jnp.asarray(tuple(pair[1] for pair in pairs), dtype=jnp.int32)
+    first, second = _symmetric_pair_indices(int(base_gammas.shape[0]))
     distances = jax.vmap(
         lambda gamma_1, gammadash_1, gamma_2, gammadash_2: (
             curve_curve_distance_penalty_pure(
@@ -167,13 +178,18 @@ def _finite_build_penalties(
         base_gammadashs[second],
     )
     distance_penalty = config.curve_curve_weight * jnp.sum(distances)
-    minimum_clearance = jnp.min(
+    return length_penalty, distance_penalty, base_lengths
+
+
+def _minimum_clearance(base_gammas: jax.Array) -> jax.Array:
+    """Diagnostics-only reduction: never part of the repeated objective."""
+    first, second = _symmetric_pair_indices(int(base_gammas.shape[0]))
+    return jnp.min(
         jax.vmap(pairwise_min_distance_pure)(
             base_gammas[first],
             base_gammas[second],
         )
     )
-    return length_penalty, distance_penalty, minimum_clearance, base_lengths
 
 
 def make_finite_build_stage_two_objective(
@@ -190,12 +206,10 @@ def make_finite_build_stage_two_objective(
             parameters,
             config,
         )
-        length_penalty, distance_penalty, _minimum_clearance, _lengths = (
-            _finite_build_penalties(
-                base_gammas,
-                base_gammadashs,
-                config,
-            )
+        length_penalty, distance_penalty, _lengths = _finite_build_penalties(
+            base_gammas,
+            base_gammadashs,
+            config,
         )
         return (
             fixed_surface_flux_integral(coil_set, flux_spec)
@@ -220,22 +234,27 @@ def finite_build_stage_two_diagnostics(
             parameters,
             config,
         )
-        length_penalty, distance_penalty, minimum_clearance, lengths = (
-            _finite_build_penalties(
-                base_gammas,
-                base_gammadashs,
-                config,
-            )
+        length_penalty, distance_penalty, lengths = _finite_build_penalties(
+            base_gammas,
+            base_gammadashs,
+            config,
         )
-        squared_flux = fixed_surface_flux_integral(coil_set, flux_spec)
+        diagnostics_by_field = {
+            "squared_flux": fixed_surface_flux_integral(coil_set, flux_spec),
+            "length_penalty": length_penalty,
+            "distance_penalty": distance_penalty,
+            "minimum_clearance": _minimum_clearance(base_gammas),
+        }
+        if set(diagnostics_by_field) != set(FINITE_BUILD_DIAGNOSTIC_FIELDS):
+            raise ValueError(
+                "diagnostics packing drifted from FINITE_BUILD_DIAGNOSTIC_FIELDS"
+            )
         return jnp.concatenate(
             (
                 jnp.stack(
-                    (
-                        squared_flux,
-                        length_penalty,
-                        distance_penalty,
-                        minimum_clearance,
+                    tuple(
+                        diagnostics_by_field[name]
+                        for name in FINITE_BUILD_DIAGNOSTIC_FIELDS
                     )
                 ),
                 lengths,
@@ -246,6 +265,7 @@ def finite_build_stage_two_diagnostics(
 
 
 __all__ = (
+    "FINITE_BUILD_DIAGNOSTIC_FIELDS",
     "FiniteBuildStageTwoConfig",
     "finite_build_stage_two_diagnostics",
     "make_finite_build_stage_two_objective",
