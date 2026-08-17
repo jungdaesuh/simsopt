@@ -164,6 +164,49 @@ matrix, jax sweep) is void for protocol defect and is regenerated under the
 amended environment. No selection had been frozen and no final pair had been
 run.*
 
+*Amended 2026-08-17, after the regenerated fp64 jax-sweep returned
+`CLOSED_BOUNDED_NEGATIVE` ("no JAX history reached the frozen endpoint
+contract") and before any selection was frozen: the preregistered coarse GPU
+budget ladder `[40, 80, 160, 240, 400]` capped the GPU lane at the reference
+budget (400) while the native callback-stop protocol grants
+`NATIVE_STOP_MAX_STEPS = 800`, and the regenerated evidence shows the fp64
+rung is crossed at median iteration **736** by the native lane's own
+selected configuration (omp2-h10) — off the reference trajectory the rung is
+not a ~400-step target for either lane. Within the capped ladder the h10 GPU
+configuration was still improving: from b240 to b400 the one-sided quality
+caps and geometry bands went from failing (`squared_flux` cap,
+`minimum_clearance` band) to clean, the objective descended `7.505e-7` →
+`5.719e-7` (4.8% above the rung), and **two clauses remain open at b400** —
+the objective itself and the gradient infinity-norm cap, whose ratio fell
+5.54 → 3.54 against the 1.05 margin. h20 had effectively stalled
+(`1.076e-6` → `1.012e-6`) and h40 terminated on its own tolerances
+(status 0, nit 349) at `8.83e-7` — the last a genuine per-history negative,
+recorded as such. Disclosure on the gradient clause: it anchors to the
+reference run's first qualifying iterate (nit 398, `|g|∞ = 1.349e-6`), and
+the reference's own converged endpoint two iterations later fails it
+(`|g|∞ = 2.808e-6`, ratio 2.08 > 1.05) — the infinity norm oscillates along
+a trajectory, so clearing this clause is a landing condition, not a descent
+condition; the native selection landed at ratio 0.95 at nit 736. Any
+b560/b800 qualification must be read as the budget carrying the lane into
+the region where rung-crossing iterates land under the cap, not as monotone
+convergence of `|g|∞`. Provenance: run
+`20260817T205932Z-jax-sweep-2666978` (verdict `CLOSED_BOUNDED_NEGATIVE`,
+reason "no JAX history reached the frozen endpoint contract"; oracle rows
+`rows/native-endpoint-jax-sweep-h{10,20,40}-b{40,80,160,240,400}.json`);
+revalidating that run under the amended ladder returns `NOT_PRODUCED`
+("sweep stopped early without a qualifying budget") by construction, so the
+pre-amendment verdict is archived here because the harness's
+recompute-from-rows promise cannot reproduce it post-amendment. Ruling: the
+ladder extends to budget parity, `[40, 80, 160, 240, 400, 560, 800]`; the
+quality contract, rung, and oracle mediation are untouched; and the sweep
+kill criterion is FINAL at `b ≤ 800` — if no JAX history reaches the frozen
+endpoint contract with the same iteration allowance the native lane has,
+the route closes on that stronger bound with no further ladder amendments.
+This is the
+V260/rho-floor class again — a frozen protocol constant structurally unable
+to express the claim under test — and, as with the fair-native OMP sweep
+rule, lane symmetry of the search domain is the fairness invariant.*
+
 The quality contract contains:
 
 - the exact input/configuration/source fingerprints (git commit plus SHA-256
