@@ -2542,3 +2542,99 @@ which contains `host_transfer_profile.py` and not
 `benchmarks/validate_projected_route_package.py`). The live 614 is
 `entries_sha256 bec20a83…`.
 Match freezes by `entries_sha256`, never by entry count.
+
+---
+
+---
+
+---
+
+---
+
+---
+
+---
+
+## Addendum (2026-08-17) — the native bar re-timed under pinned threads; the ratio family inverts
+
+**Nothing in this addendum edits a word above it, and nothing in it disputes the
+arithmetic of §12.14.** The sealed result stands as the historical record it is,
+and this campaign reproduces its ratio family exactly from its own published
+seconds: 2.304x, 1.832x, 1.810x, 1.683x, 1.271x and 1.260x
+against the 287.30421751597896 s bar. What changed is the **denominator's standing**,
+measured rather than argued.
+
+**What was measured.** The bar was re-timed **at its own boundary, in its own
+lane**, at HEAD `11f63f9fcf0b1d7fe6e0ed952b8989c025c65ca2`: the `native-cpu` lane of case
+`native-single-stage-boozer-vacuum-optimization` at `native_default`, driven
+through `examples.jax.parity.child` with a trajectory path, so the number read is
+again the `wall_seconds_from_start` of the final trajectory row — the same field,
+written by the same recorder, that produced 287.30421751597896. The retimed lane
+reproduces the sealed run's `input_fingerprint`, `configuration_fingerprint`
+**and** `effective_construction_fingerprint`, its driver, its six workflow
+stages, and its `budget_exhausted` termination at `nit = 1000`; the
+compiled `simsoptpp` extension is **byte-identical** to the one the sealed run
+loaded (`41b2ca791a720f325ffa9b382b31d29bade73f6516693805d41adc0de6f6ed4b`).
+
+**Result.** Under `OMP_NUM_THREADS=8` the same region takes a
+median **47.998 s** (n=4, range 47.533–48.183 s,
+interleaved rounds). The bar is therefore inflated **5.986x**, and
+every swept thread count in {4, 8, 16} threads sits
+5.317–5.986x below it, while the
+highest pinned rung swept, `32`, lands at 234.846 s —
+1.223x under the bar, i.e. the bar's magnitude is a
+high-thread-count magnitude. Recomputed
+against that denominator, at the identical boundary:
+
+| Boundary | GPU (s), sealed, not re-run | vs sealed bar | vs retimed bar |
+|---|---|---|---|
+| warm engine compile+solve (certified) | 124.707842 | 2.304x | **0.385x** |
+| cold-lane supervised wall (strictest published) | 228.083841 | 1.260x | **0.210x** |
+
+**The certified 2.304x inverts to 0.385x** —
+properly-threaded native is faster by 2.598x at the
+certified boundary and 4.752x at the strictest one. The
+boundary symmetry §12.14 relies on is preserved, not exploited: that section
+defends the engine boundary precisely because the bar "is *itself* an interior
+time-to-quality figure", and the retimed number is that same interior figure.
+
+**Mechanism, recovered from the bar campaign's own controller directory rather
+than inferred.** `2026-08-05T01:25:33-04:00 launching campaign; campaign_cpuset=0-23,32-55` — the collector ran under
+`taskset --cpu-list 0-23,32-55`, 48 of 64
+CPUs, with **no thread variable set by either the launcher or the collector's
+`native_cpu` profile**, so OpenMP sized itself from that mask; the launcher's
+CPU-quiet gate was **explicitly bypassed** at that launch; and a foreign workload
+was being pinned to the complementary 16 cores throughout,
+with 21 guard corrections logged inside the native
+lane's window. The bar's own receipt records `lane_environment_policy: {}`,
+which is why this was previously unrecoverable from the receipt alone.
+The mechanism is also **fingerprinted by the endpoint, not only recovered from
+logs**: re-running the lane under the bar's own mask with threads unset
+reproduces the sealed final trajectory row **bit for bit** (objective
+`4.4822246533126125e-08`, `nfev = 1274`) — an endpoint that `OMP_NUM_THREADS=48`
+also produces and that **no pinned rung at 4-32 threads produces** — so the
+sealed bar's trajectory is a 48-thread-class trajectory by bitwise identity.
+Those same reconstruction legs take 1501.7-1513.3 s today on a foreign-quiet
+box, so the bar's exact 287.30 s magnitude is not reproducible in either
+direction and belongs to its night; the regime, not the number, is what the
+probes fix.
+
+**Scope, stated so it is not overread.** The GPU numerator was **not** re-run;
+its seconds are quoted from the sealed record and the contention conditions of
+that run and of 2026-08-17 differ and cannot be reconciled after the fact. The
+bar run's tree was dirty and its measurement-shell bytes are unrecoverable,
+though its physics path is accounted for file by file. One box, one interpreter,
+one day. **The honest reading is that the certificate is sound against its bar
+and that its bar is not a properly-threaded native reference** — not that the
+GPU route has been re-measured and lost. The measurement that would settle
+*that* is an interleaved same-day head-to-head, which this campaign did not run.
+
+**Consequences recorded, not applied here.** `gates.warm_synchronized_solve_max_s`
+should not be used as a comparison denominator again without a stated thread
+setting. `benchmarks/run_single_stage_projected_route_gpu_root.py:23`'s claim
+that *"Native's 287.30 s bar excluded nothing"* is false and should be corrected
+to match §12.14; §1's provenance table likewise calls the bar a "wall", which
+§12.14 corrects.
+
+Full evidence: `docs/receipts/native_bar_retiming.md`; artifacts at
+`~/simsopt-campaigns/native-bar-retiming-20260817/` **[host-local]**.
