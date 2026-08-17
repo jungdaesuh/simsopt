@@ -36,6 +36,7 @@ provenance:
 - **In-repo.** Reviewable from a clone, and drift-gated by the test:
   `docs/receipts/wireframe_gsco_multistep_native_default_receipt.md`,
   `docs/receipts/wireframe_gsco_siblings_native_default.md`,
+  `docs/receipts/projected_route_example_promotion.md`,
   `docs/single_stage_jax_gpu_projected_route_certification_plan.md`,
   `docs/jax_porting_progress_report.md`, and the example sources under
   `examples/jax/` that every `census-structural` row is read from.
@@ -45,7 +46,14 @@ provenance:
   (44-leg `receipt.json`, `silicon_probe_results.json`),
   `~/simsopt-campaigns/ndparity-boozer-vacuum-20260814/`, and
   `~/simsopt-campaigns/gsco-siblings-20260816/` (the two 2026-08-16
-  wireframe-GSCO sibling legs, box-state records and parity captures).
+  wireframe-GSCO sibling legs, box-state records and parity captures), and
+  `~/simsopt-campaigns/projected-route-example-promotion-20260816/` (the
+  2026-08-17 projected-route example campaign: 41 leg JSONs, of which **37**
+  carry a whole-leg sampled contention record — the sampler was added after the
+  plumbing and first probe legs had run, and two of the four unsampled legs feed
+  published statistics, which its receipt §7 names; plus
+  `artifacts/receipt_numbers.json` binding every headline numeral of its receipt
+  to a source file and pointer).
 - **Session-audit classification** — the 2026-08-13 audit's grouping of the
   mirrors into winnable / never-winnable / unmeasured classes. It has **no
   artifact of any kind**; it is a reasoned classification, and this document
@@ -169,7 +177,7 @@ GPU-slower overall, which is the size of the artifact, not of any device gap.
 | wireframe-optimization | cpu | census-structural | tiny problem — 4x6 toy ToroidalWireframe |
 | coil-force-and-finite-build | cpu | census-structural | tiny problem — order-1 finite-build coil, fixed size at every scale |
 | single-stage-vacuum-optimization | unmeasured | unmeasured | manifest status is `planned` and the script is absent from the tree |
-| projected-route-single-stage-boozer-vacuum-optimization | unmeasured | unmeasured | wide coupled projected route; the certified 2.304x engine-boundary GPU win belongs to the benchmarks-path root run (`docs/single_stage_jax_gpu_projected_route_certification_plan.md`), not to this script |
+| projected-route-single-stage-boozer-vacuum-optimization | gpu | measured-diagnostic | wide coupled projected route — the GPU is the only device this script's own success criterion was met on. Interleaved A/B at native_default: on the CPU backend all three protocol attempts end `LINE_SEARCH_COLLAPSE` (the reported final attempt ran 74 iterations; the artifact does not publish the first two attempts' counts) and the run publishes `retry_exhausted` after 1294.4 s, while on GPU 8/8 legs reach `OBJECTIVE_TARGET_REACHED` at iteration 399 with a bitwise-identical 716-coordinate endpoint; matched truncated budgets put one CPU-backend iteration at 8.33x one GPU iteration (a mild upper bound — the matched CPU legs pinned 16 threads and the one uncapped datapoint is ~2% faster). Read with its bar: the *native two-stage mirror* reaches the same endpoint quality in 31.3 s (OMP=8), so this script is not the fast way to this physics — **5.14x** at matched process wall and **8.48x** to matched endpoint using this row's own warm median (265.6 s, 6 legs), or 5.07x and 8.37x pooling the 8 warm+cold GPU legs (pooled median 262.1 s) as the receipt's boundary table does. All seven pre-registered endpoint-physics gates pass through the native evaluator — `docs/receipts/projected_route_example_promotion.md` |
 | native-just-a-quadratic | cpu | census-structural | tiny problem — three independent DOFs |
 | native-minimize-curve-length | cpu | census-structural | tiny problem — order-4 CurveRZFourier, 8 free DOF |
 | native-permanent-magnet-simple | cpu | census-structural | tiny problem — fixed 2x2 quadrature grid (4 reduction rows), no native_default branch |
@@ -200,7 +208,7 @@ GPU-slower overall, which is the size of the artifact, not of any device gap.
 
 ## Summary counts
 
-39 manifest examples: **1 gpu**, **25 cpu**, **0 either**, **13 unmeasured**.
+39 manifest examples: **2 gpu**, **25 cpu**, **0 either**, **12 unmeasured**.
 
 Restricted to the 27 `native-*` mirrors: 1 gpu, 15 cpu, 11 unmeasured.
 
@@ -243,3 +251,4 @@ untracked file, or a directory will not satisfy it. The same rule gates the
 | 2026-08-16 | (all) | Record created at the 2026-08-13 / 2026-08-16 evidence state | `docs/receipts/wireframe_gsco_multistep_native_default_receipt.md` and the 2026-08-13 audit |
 | 2026-08-16 | native-wireframe-gsco-modular | unmeasured / census-structural → cpu / measured-diagnostic. Ten-round interleaved A/B: warm GPU device solve 0.552 s vs 0.612 s fair native (OMP=32) and 0.492 s best native (OMP=48) — 1.11x and 0.89x on the kernel, 1.01x and 0.89x on the numerical region. Placed `cpu` rather than `either` because best-configured native wins, a cold JAX process loses 2.75x, and the warm advantage needs a persistent compile cache nothing configures by default. Currents vector bitwise identical (0 ULP over 88 native x 15 GPU legs). The 10.3x lead over the shipped `OMP_NUM_THREADS`-unset default is the 64-thread OpenMP collapse on this box, not a GPU win. | `docs/receipts/wireframe_gsco_siblings_native_default.md` |
 | 2026-08-16 | native-wireframe-gsco-sector-saddle | unmeasured / census-structural → cpu / measured-diagnostic. Ten-round interleaved A/B: warm GPU device solve 0.653 s vs 0.560 s fair native (OMP=32) and 0.518 s best native (OMP=48) — 0.86x and 0.79x on the kernel, 0.85x and 0.81x on the numerical region. Currents vector bitwise identical (0 ULP over 88 native x 14 GPU legs). Same shipped-default caveat as the modular sibling (7.0x). | `docs/receipts/wireframe_gsco_siblings_native_default.md` |
+| 2026-08-17 | projected-route-single-stage-boozer-vacuum-optimization | unmeasured / unmeasured → gpu / measured-diagnostic. First timing of the script itself (the row previously recorded only that the certified 2.304x belongs to the benchmarks-path root run). Placed `gpu` on this record's own semantics — where to launch *this* example to finish fastest — because the CPU backend does not finish it at all: all 3 protocol attempts end `LINE_SEARCH_COLLAPSE` (the reported final attempt ran 74 iterations; the first two attempts' counts are not published by the example) and it reports `retry_exhausted` after 1294.4 s, while 8/8 GPU legs reach the objective target at iteration 399 with one bitwise-identical endpoint digest, and matched truncated budgets price one CPU-backend iteration at 8.33x one GPU iteration. The row states its bar in the same cell: the native two-stage mirror at its measured thread optimum (OMP=8, swept over 2/4/8/16/32/unset) beats this script 5.14x at matched process wall and 8.48x to matched endpoint quality on the row's own warm median (5.07x and 8.37x on the receipt's pooled warm+cold median), so the GPU placement is a device recommendation and never a formulation recommendation. Endpoint physics equivalence passes seven pre-registered gates on two independent endpoint pairs, both recomputed through the native evaluator; the campaign also recorded that a strict reuse of the native inner solve's 1e-13 stopping rule would have false-rejected the route by 94x at a measured objective cost of 1.08e-19. | `docs/receipts/projected_route_example_promotion.md` |
