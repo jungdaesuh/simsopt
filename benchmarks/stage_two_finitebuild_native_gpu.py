@@ -470,6 +470,10 @@ def _runtime_identity(*, lane: str) -> dict[str, object]:
         import jax
 
         identity["jax_default_backend"] = str(jax.default_backend())
+        # fp64 state is part of both lanes' physics specification: the
+        # 2026-08-17 taint showed a native leg whose transitive JAX ran
+        # float32 publishes gradients that are not the declared physics.
+        identity["jax_enable_x64"] = bool(jax.config.read("jax_enable_x64"))
     # nvidia-smi is lane-agnostic: a native leg sharing the box with GPU
     # compute is as compromised as a GPU leg would be.
     identity["gpu_compute_processes"] = _gpu_compute_processes()
@@ -480,7 +484,6 @@ def _runtime_identity(*, lane: str) -> dict[str, object]:
         devices = jax.local_devices()
         identity["jax_version"] = jax.__version__
         identity["jaxlib_version"] = jaxlib.__version__
-        identity["jax_enable_x64"] = bool(jax.config.read("jax_enable_x64"))
         identity["jax_platforms"] = os.environ.get("JAX_PLATFORMS")
         identity["xla_flags"] = os.environ.get("XLA_FLAGS")
         identity["devices"] = [
@@ -1248,6 +1251,16 @@ def _leg_environment(
         # JAX transitively; without this pin that import can initialize CUDA
         # and put a second context on the device a GPU leg is measured on.
         environment["JAX_PLATFORMS"] = "cpu"
+        # The same transitive import defaults to float32, and the prefix scrub
+        # above removes any inherited x64 setting.  Unpinned, the jax-jitted
+        # pieces of the native objective evaluate in fp32: measured 2026-08-17
+        # at the jax-sweep h20-b400 endpoint, the native gradient forked from
+        # the GPU lane's self-report by up to 2.6e-6 per component (8.9% of
+        # the inf norm, DOF block 38-68) while J moved only 3e-13; FD
+        # arbitration convicted the native value (see
+        # docs/jax_gpu_finitebuild_fp64_taint_diagnostic.md).  fp64 is part
+        # of the native lane's physics specification, not a tuning knob.
+        environment["JAX_ENABLE_X64"] = "1"
     return environment
 
 
@@ -3250,6 +3263,28 @@ def _threading_conformance_failure(
     return None
 
 
+def _fp64_conformance_failure(
+    data_rows: Sequence[Mapping[str, object]],
+) -> str | None:
+    """Any leg that imported JAX must have observed fp64 enabled.
+
+    Both lane environments pin ``JAX_ENABLE_X64``, but a pin in the launch
+    row is an orchestrator claim; only the child's own observation counts.
+    The 2026-08-17 taint showed a native leg whose transitive JAX ran
+    float32 publishes gradients that are not the declared physics, while
+    every identity and objective check stays green.
+    """
+    for row in data_rows:
+        identity = row.get("identity")
+        identity = identity if isinstance(identity, Mapping) else {}
+        if identity.get("jax_imported") and identity.get("jax_enable_x64") is not True:
+            return (
+                f"{row.get('leg_id')} imported JAX but observed "
+                f"jax_enable_x64={identity.get('jax_enable_x64')!r}"
+            )
+    return None
+
+
 def _worktree_evidence(
     data_rows: Sequence[Mapping[str, object]], manifest: Mapping[str, object]
 ) -> dict[str, object]:
@@ -3337,6 +3372,9 @@ def validate_run(run_directory: Path) -> dict[str, object]:
         threading_failure = _threading_conformance_failure(data_rows)
         if threading_failure is not None:
             raise BenchmarkError(threading_failure)
+        fp64_failure = _fp64_conformance_failure(data_rows)
+        if fp64_failure is not None:
+            raise BenchmarkError(fp64_failure)
         if phase == "baseline":
             reduction = reduce_baseline(data_rows)
         elif phase == "kernel-canary":

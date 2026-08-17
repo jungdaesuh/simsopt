@@ -42,7 +42,9 @@ from benchmarks.stage_two_finitebuild_native_gpu import (
     BenchmarkError,
     _canonical_json_bytes,
     _derive_quality_contract,
+    _fp64_conformance_failure,
     _gate_scaled_target,
+    _leg_environment,
     _sha256_bytes,
     _source_fingerprints,
     _threading_conformance_failure,
@@ -1145,6 +1147,53 @@ def test_threading_conformance_rejects_a_mislabeled_leg() -> None:
     assert failure is not None and "cpu_affinity" in failure
 
 
+def test_fp64_conformance_rejects_a_leg_whose_jax_ran_float32() -> None:
+    """Only the child's observed x64 state counts, never the declared pin.
+
+    The 2026-08-17 taint: a native leg's transitive JAX ran float32 and
+    published gradients that were not the declared physics. A row missing
+    the observation entirely (the pre-fix row shape) must also fail closed.
+    """
+    row = {
+        "leg_id": "native-time-to-quality-omp2-h10-rep0",
+        "identity": {"jax_imported": True, "jax_enable_x64": True},
+    }
+    assert _fp64_conformance_failure([row]) is None
+
+    row["identity"]["jax_enable_x64"] = False
+    failure = _fp64_conformance_failure([row])
+    assert failure is not None and "jax_enable_x64=False" in failure
+
+    del row["identity"]["jax_enable_x64"]
+    failure = _fp64_conformance_failure([row])
+    assert failure is not None and "jax_enable_x64=None" in failure
+
+    row["identity"] = {"jax_imported": False}
+    assert _fp64_conformance_failure([row]) is None
+
+
+def test_validate_run_fails_closed_on_an_fp32_leg(tmp_path: Path) -> None:
+    """The wiring, not just the clause: validation itself must consult it."""
+    row = {
+        "leg_id": "native-eval",
+        "kind": "native-eval",
+        "fingerprints": {"input_fingerprint": "a"},
+        "identity": {"jax_imported": True, "jax_enable_x64": False},
+    }
+    row_sha256 = _write_json_exclusive(tmp_path / "rows" / "native-eval.json", row)
+    _write_json_exclusive(
+        tmp_path / "manifest.json",
+        {
+            "schema": "stage-two-finitebuild-native-gpu-manifest-v1",
+            "phase": "baseline",
+            "rows": {"rows/native-eval.json": row_sha256},
+        },
+    )
+    verdict = validate_run(tmp_path)
+    assert verdict["verdict"] == VERDICT_NOT_PRODUCED
+    assert "jax_enable_x64=False" in str(verdict["reason"])
+
+
 def test_validate_run_not_produced_on_a_row_hash_mismatch(tmp_path: Path) -> None:
     row_path = tmp_path / "rows" / "leg.json"
     _write_json_exclusive(row_path, {"leg_id": "leg"})
@@ -1250,3 +1299,38 @@ def test_hlo_diff_not_produced_on_an_empty_capture_or_forked_inputs() -> None:
 
     forked = dict(complete, fingerprints={"input_fingerprint": "z"})
     assert reduce_hlo_diff(complete, forked)["classification"] == VERDICT_NOT_PRODUCED
+
+
+def test_leg_environment_pins_fp64_jax_in_both_lanes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The scrub removes inherited JAX settings, so each lane must re-pin the
+    load-bearing ones.  The native lane imports JAX transitively through
+    ``simsopt.geo``; without the x64 pin those pieces evaluate in fp32 and the
+    native gradient forks from the GPU lane's self-report (measured
+    2026-08-17: 2.6e-6 on a 2.9e-5 component at a sweep endpoint, with FD
+    arbitration convicting the native value).
+    """
+    monkeypatch.setenv("JAX_ENABLE_X64", "0")
+    monkeypatch.setenv("JAX_PLATFORMS", "cuda")
+    monkeypatch.setenv("OMP_NUM_THREADS", "77")
+    # Hostile inherited variables that no lane re-pins for a native leg:
+    # they must vanish through the scrub, not survive into the child.
+    monkeypatch.setenv("JAX_COMPILATION_CACHE_DIR", "/inherited/cache")
+    monkeypatch.setenv("XLA_FLAGS", "--xla_force_host_platform_device_count=7")
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "inherited")
+
+    native = _leg_environment("native", omp_threads=4, cache_root=None)
+    assert native["JAX_PLATFORMS"] == "cpu"
+    assert native["JAX_ENABLE_X64"] == "1"
+    assert native["OMP_NUM_THREADS"] == "4"
+    assert "JAX_COMPILATION_CACHE_DIR" not in native
+    assert "XLA_FLAGS" not in native
+    assert "SIMSOPT_BACKEND_MODE" not in native
+
+    jax_env = _leg_environment("jax", omp_threads=2, cache_root=tmp_path)
+    assert jax_env["JAX_PLATFORMS"] == "cuda"
+    assert jax_env["JAX_ENABLE_X64"] == "1"
+    assert jax_env["JAX_COMPILATION_CACHE_DIR"] == str(tmp_path)
+    assert jax_env["XLA_FLAGS"] == "--xla_gpu_exclude_nondeterministic_ops=true"
+    assert jax_env["SIMSOPT_BACKEND_MODE"] == "jax_gpu_fast"

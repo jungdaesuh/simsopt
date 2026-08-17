@@ -126,6 +126,44 @@ than the reference and truncated endpoints whose gradient norms are
 legitimately above the fully converged norm (the V260/rho-floor false-reject
 class). No selection or timed evidence existed under the earlier clauses.*
 
+*Amended 2026-08-17, defect disclosure before any selection was frozen: the
+native leg environment scrubbed inherited `JAX_*` variables and re-pinned only
+`JAX_PLATFORMS=cpu`, never `JAX_ENABLE_X64`. This repo's `simsopt.geo`
+objectives are jax-jitted, so the native lane's transitively imported JAX
+pieces evaluated in float32. Measured at the first jax-sweep endpoint
+(h20-b400): the native oracle gradient forked from the GPU lane's self-report
+by up to `2.6e-6` per component — the maximum lane gap, at DOF index 46 —
+8.9% of the gradient infinity norm, localized to DOF block 38–68, while the
+objective moved only `3.07e-13` absolute (`3.0e-7` relative on `J≈1.01e-6`,
+itself the fp32-epsilon signature). A finite-difference arbitration against
+the shared objective (lane value identity `~1e-20` per probed point;
+Richardson `fd(h)=g+c·h²` fit, residual `1.3e-7`) excludes the oracle value
+and confirms the JAX adjoint; with `JAX_ENABLE_X64=1` the native `dJ`
+matches the JAX adjoint to `1e-14` relative. The full probe protocol and
+verbatim outputs are archived in
+`docs/jax_gpu_finitebuild_fp64_taint_diagnostic.md`; the interrogated rows
+are cited there by path and sha256. The oracle cross-check clause fired
+exactly as designed (`NOT_PRODUCED`, broken evidence, never a speed verdict)
+— on the native side. Two fail-opens are disclosed alongside the fix: the
+baseline gradient-identity gate (rtol `1e-6` / atol `1e-8`, calibrated under
+the defective environment) passed under the defect — measured lane agreement
+`2.494e-9` on `3.5e-2` components, `~7e-8` relative, the fp32-epsilon
+signature — so baseline identity is not a precision detector; and the launch
+row's environment pin is an orchestrator claim the child never confirmed.
+Ruling: (1) `JAX_ENABLE_X64=1` joins the native leg's pinned environment as
+part of the native lane's physics specification; (2) every leg's child now
+publishes observed `jax_enable_x64` whenever JAX is imported, and every
+phase validation fails closed on a leg that imported JAX without observing
+x64 — the structural precision detector; (3) the baseline gradient
+tolerances are retained for the regeneration (blind tightening without fp64
+calibration data re-enters the V260 false-reject class) and are recalibrated
+from the regenerated fp64 baseline rows before any final pair is run; and
+(4) every artifact generated under the unpinned environment (gate contract
+`83118aec…`, baseline identity, kernel-canary `12.51x` PROCEED, native
+matrix, jax sweep) is void for protocol defect and is regenerated under the
+amended environment. No selection had been frozen and no final pair had been
+run.*
+
 The quality contract contains:
 
 - the exact input/configuration/source fingerprints (git commit plus SHA-256
@@ -188,6 +226,10 @@ timing are different metrics and are never relabeled as each other.
    - [ ] Record value, full gradient, and all diagnostics at the initial state
      and two deterministic perturbed states for the independent native and JAX
      evaluators before changing the hot path.
+   - [ ] Recalibrate the baseline gradient identity tolerances from the
+     regenerated fp64 baseline rows before any final pair is run (amendment
+     ruling 3, 2026-08-17): the shipped `rtol=1e-6`/`atol=1e-8` were
+     calibrated under the fp32-tainted environment and admit an fp32 lane.
    - [ ] Emit raw JSON rows for every phase and repetition. Bind git status and
      commit, changed-file hashes, interpreter and package paths/versions,
      `simsoptpp` binary hash, CPU affinity, OpenMP environment, JAX flags,
