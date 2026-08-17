@@ -6,7 +6,9 @@ import hashlib
 import itertools
 import os
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 from examples.jax.parity.arbiter import LaneObservation
@@ -17,6 +19,11 @@ from examples.jax.parity.input_bundle import (
 )
 from examples.jax.parity.runtime import ParityLane
 from simsopt_jax.examples import ExecutionScale
+
+if TYPE_CHECKING:
+    from simsopt._core.optimizable import Optimizable
+    from simsopt.geo import CurveCurveDistance, CurveLength, SurfaceRZFourier
+    from simsopt.objectives import SquaredFlux
 
 TEST_DATA = Path(__file__).resolve().parents[4] / "tests" / "test_files"
 SURFACE_INPUT = TEST_DATA / "input.LandremanPaul2021_QA"
@@ -279,8 +286,29 @@ def _state_values(
     }
 
 
-def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservation:
-    from scipy.optimize import minimize
+@dataclass(frozen=True)
+class NativeFiniteBuildEvaluator:
+    """Assembled native SIMSOPT/simsoptpp finite-build evaluator components.
+
+    The single native physics specification for this case: the parity lane
+    and the finite-build benchmark both consume this assembly instead of
+    re-deriving the objective composition.  The record freezes its
+    references only; evaluating any term mutates the shared simsopt graph
+    through ``objective.x``, so one evaluator serves one consumer at a time.
+    """
+
+    surface: SurfaceRZFourier
+    base_curves: tuple[Optimizable, ...]
+    flux: SquaredFlux
+    lengths: tuple[CurveLength, ...]
+    distance: CurveCurveDistance
+    length_term: Optimizable
+    distance_term: Optimizable
+    objective: Optimizable
+
+
+def build_native_evaluator(bundle: InputBundle) -> NativeFiniteBuildEvaluator:
+    """Assemble the native finite-build objective and its published terms."""
     from simsopt.field import BiotSavart
     from simsopt.geo import CurveCurveDistance, CurveLength
     from simsopt.objectives import QuadraticPenalty, SquaredFlux
@@ -288,7 +316,6 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
     surface, base_curves, symmetric_base_curves, coils, config = _build_geometry(
         bundle.configuration
     )
-    fingerprint = _fingerprint(bundle, arrays, surface, base_curves)
     field = BiotSavart(coils)
     field.set_points(surface.gamma().reshape((-1, 3)))
     flux = SquaredFlux(surface, field)
@@ -309,6 +336,30 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         * distance
     )
     objective = flux + length_term + distance_term
+    return NativeFiniteBuildEvaluator(
+        surface=surface,
+        base_curves=tuple(base_curves),
+        flux=flux,
+        lengths=tuple(lengths),
+        distance=distance,
+        length_term=length_term,
+        distance_term=distance_term,
+        objective=objective,
+    )
+
+
+def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservation:
+    from scipy.optimize import minimize
+
+    evaluator = build_native_evaluator(bundle)
+    surface = evaluator.surface
+    base_curves = evaluator.base_curves
+    fingerprint = _fingerprint(bundle, arrays, surface, base_curves)
+    flux = evaluator.flux
+    lengths = evaluator.lengths
+    length_term = evaluator.length_term
+    distance_term = evaluator.distance_term
+    objective = evaluator.objective
 
     def state(prefix: str, parameters: np.ndarray) -> dict[str, np.ndarray]:
         objective.x = parameters
@@ -337,7 +388,7 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         np.vdot(scale * initial_values["initial:objective_gradient"], direction)
     )
     taylor_errors = []
-    for epsilon in (1.0e-3, 1.0e-4, 1.0e-5, 1.0e-6, 1.0e-7, 1.0e-8):
+    for epsilon in _TAYLOR_EPSILONS:
         objective.x = initial_parameters + epsilon * direction
         plus = scale * float(objective.J())
         objective.x = initial_parameters - epsilon * direction

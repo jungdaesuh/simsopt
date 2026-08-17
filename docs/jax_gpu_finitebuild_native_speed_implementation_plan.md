@@ -110,21 +110,49 @@ search and tolerance policy.
 
 Before performance tuning, the benchmark writes an immutable gate-definition
 artifact from an untimed native reference run using the shipped 400-step,
-400-history formulation. Its hash is included in every later leg.
+400-history formulation. The truncated reference anchor is captured from the
+same run's own trajectory: the stopping callback records the first accepted
+iterate whose objective clears the target, and the anchor's full endpoint
+state is evaluated at that captured iterate. (An earlier same-day revision
+derived the anchor from a separate truncated replay; the measured ~1%
+cross-process OpenMP-reduction fork makes any replay a different trajectory,
+so the anchor must come from the reference run itself.) Its hash is included
+in every later leg.
+
+*Amended 2026-08-17, before any timed configuration was ranked or selected:
+the original two-sided endpoint bands and converged-norm gradient cap were
+revised after review showed they false-reject endpoints that converge better
+than the reference and truncated endpoints whose gradient norms are
+legitimately above the fully converged norm (the V260/rho-floor false-reject
+class). No selection or timed evidence existed under the earlier clauses.*
 
 The quality contract contains:
 
-- the exact input/configuration/source fingerprints and initial parameter
-  vector;
-- a target objective equal to `1.001` times the native reference endpoint;
+- the exact input/configuration/source fingerprints (git commit plus SHA-256
+  of the objective module, the parity case, and the benchmark) and the
+  initial parameter vector;
+- a target objective equal to `1.001` times the converged native reference
+  endpoint;
+- the truncated reference endpoint — the converged reference formulation
+  replayed to its own first qualifying iteration — as the like-for-like
+  comparison anchor for every measured, budget-truncated lane;
 - finite solution, objective, full gradient, and diagnostic arrays;
 - objective improvement from the common initial state;
-- endpoint objective, squared flux, length penalty, distance penalty, minimum
-  clearance, and each coil length within `rtol=5e-2, atol=1e-9` of the frozen
-  native reference endpoint, matching the existing final-objective parity
-  tolerance; endpoint gradient infinity norm no larger than `1.05` times the
-  native reference norm (with a `1e-12` denominator floor); and
+- one-sided quality caps: endpoint objective no larger than the target;
+  squared flux, length penalty, and distance penalty each no larger than
+  `atol=1e-9` plus `1.05` times the truncated reference value (converging
+  better than the reference is never a failure);
+- two-sided geometry bands: minimum clearance and each coil length within
+  `rtol=5e-2, atol=1e-9` of the truncated reference endpoint (a different
+  geometry regime is a failure in either direction);
+- endpoint gradient infinity norm no larger than `1.05` times the truncated
+  reference norm (with a `1e-12` denominator floor); and
 - positive minimum clearance.
+
+Every GPU endpoint is additionally re-evaluated through the independent
+native SIMSOPT/simsoptpp evaluator at the published solution vector, and the
+gate clauses are applied to that native re-evaluation; equivalence is never
+mediated by the JAX lane's own evaluator.
 
 Gate derivation is complete before any timed configuration is ranked. A timed
 leg that misses any clause is ineligible, regardless of speed.
@@ -211,19 +239,41 @@ timing are different metrics and are never relabeled as each other.
      `CurveCurveDistance.shortest_distance()` and retain the distance-penalty
      value/gradient parity checks.
    - [ ] Run the warm value/gradient canary against native at
-     `OMP_NUM_THREADS=4,8,16,32,48`. Stop with `CLOSED_BOUNDED_NEGATIVE` before
+     `OMP_NUM_THREADS=2,4,8,16,32,48`. Stop with `CLOSED_BOUNDED_NEGATIVE` before
      workflow changes unless the refactored GPU kernel is at least `1.10x`
      faster than the best native kernel and all scientific checks pass.
 
 3. Select one fixed optimizer policy with a bounded canary.
-   - [ ] Measure the full native matrix of OpenMP counts `4,8,16,32,48` and
-     L-BFGS histories `10,20,40,400`; measure JAX histories `10,20,40`. Use three
+   - [ ] Measure the full native matrix of OpenMP counts `2,4,8,16,32,48` and
+     L-BFGS histories `10,20,40,400`; measure JAX histories `10,20,40`. Record
+     one additional untimed shipped-default (`OMP_NUM_THREADS` unset)
+     disclosure lane, reported separately and never used as the denominator. Use three
      round-robin repetitions for selection and reserve five fresh repetitions
      for the final verdict.
-   - [ ] Obtain native accepted-step calibration traces without recomputing the
-     physics inside the callback. For each candidate, replay the first
-     qualifying iteration count as a no-callback run and require that replay to
-     clear the frozen gate.
+   - [ ] *Amended 2026-08-17, before any selection evidence existed: the
+     original trace-calibrate-then-replay protocol is unsound on this host.
+     Measured with same-environment, same-affinity A/B pairs: single-threaded
+     native solves are bitwise reproducible over 200 iterations, while
+     `OMP_NUM_THREADS=8` solves fork by ~1% at 400 iterations — OpenMP
+     reduction combination order in `sopp.integral_BdotN` (the squared-flux
+     term) is arrival-order and cannot be pinned by any environment variable.
+     A no-callback replay therefore lands ~1% from its calibration trace,
+     swamping the 0.1% target rung.* Instead, measure native time-to-quality
+     directly: each timed native solve runs with a stopping callback that
+     terminates via `StopIteration` at the first accepted iterate whose
+     scaled objective clears the frozen target, and its solve wall time is
+     the measurement. The callback does not recompute physics; its cost is
+     microseconds against ~150 ms iterations and is charged to the native
+     lane. The stop iterate's full endpoint state must clear the frozen gate
+     for the repetition to qualify; iteration counts are recorded and
+     reported, never forced. Stop legs run under a preregistered iteration
+     cap of twice the reference formulation's budget: the rung sits at the
+     end of a 400-iteration reference trajectory while sibling trajectories
+     fork ~1% two-sided, so a cap equal to the reference budget would fail
+     roughly half of all repetitions on noise rather than speed. The cap is
+     not a compared quantity — the stop rule decides the work — and every
+     verdict publishes it alongside per-configuration qualifying counts, so
+     rung-unreachability and repetition attrition stay auditable.
    - [ ] Because the fused GPU loop has no host trajectory, sweep the
      preregistered budgets `40,80,160,240,400`. The first
      qualifying GPU budget is an upper bound on its true crossing iteration;
