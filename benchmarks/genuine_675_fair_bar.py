@@ -303,10 +303,17 @@ def selftest_loader(source_manifest: Path, scratch: Path) -> dict[str, object]:
 # --------------------------------------------------------------------------
 
 _SITECUSTOMIZE = '''\
-"""Fair-bar in-child provenance capture (atexit, after the solve)."""
+"""Fair-bar in-child provenance capture.
+
+Affinity is recorded twice: at interpreter start (before any OpenMP
+runtime initializes, i.e. the mask the launcher actually granted) and at
+exit (after OMP_PROC_BIND may have re-bound the master thread).
+"""
 import atexit
 import json
 import os
+
+_AFFINITY_AT_IMPORT = sorted(os.sched_getaffinity(0))
 
 
 def _fair_bar_provenance() -> None:
@@ -314,7 +321,8 @@ def _fair_bar_provenance() -> None:
     if not out:
         return
     record = {"pid": os.getpid()}
-    record["sched_affinity"] = sorted(os.sched_getaffinity(0))
+    record["sched_affinity_at_import"] = _AFFINITY_AT_IMPORT
+    record["sched_affinity_at_exit"] = sorted(os.sched_getaffinity(0))
     record["cpu_count"] = os.cpu_count()
     record["env"] = {
         name: os.environ.get(name)
@@ -342,7 +350,7 @@ def _fair_bar_provenance() -> None:
         try:
             import ctypes
 
-            openmp_max_threads = ctypes.CDLL(None).omp_get_max_threads()
+            openmp_max_threads = ctypes.CDLL(libgomp).omp_get_max_threads()
         except (OSError, AttributeError):
             openmp_max_threads = None
     record["libgomp_path"] = libgomp
@@ -684,6 +692,8 @@ def run_oracle(
         (
             sys.executable,
             str(Path(__file__).resolve().parent / "genuine_675_fair_bar_oracle.py"),
+            "--platform",
+            "cpu",
             "--input-manifest",
             str(source_manifest),
             "--candidate-json",
