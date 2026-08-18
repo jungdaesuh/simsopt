@@ -1,5 +1,14 @@
 # Finite-build Stage-II native-vs-GPU speed route — terminal receipt
 
+> **Superseded as a speed verdict (2026-08-18):** the successor campaign this
+> receipt's close path called for was chartered
+> (`docs/jax_gpu_finitebuild_native_speed_successor_plan.md`) and measured a
+> **`WIN`** under a symmetric first-crossing protocol — for warm and
+> persistent-cache repeated workloads; cold start was measured and lost —
+> `docs/receipts/stage_two_finitebuild_native_gpu_successor.md`. The verdict
+> below stands unchanged under its own frozen contract; the two gates are
+> different frozen contracts, so this receipt is superseded, not contradicted.
+
 **Verdict: `CLOSED_BOUNDED_NEGATIVE`** (2026-08-17, preregistered Step-3 kill
 criterion, final at budget parity). The fused GPU lane reaches the frozen
 objective rung — `h10-b560` converges 0.524% *below* the target with every
