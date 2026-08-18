@@ -358,3 +358,37 @@ Amendments are permitted only before the evidence they govern exists, must
 be dated, must state their empirical basis, and append to this file. The
 win/kill thresholds, budgets, timers, and the five-pair rule are not
 amendable after the charter commit.
+
+## Amendment 1 — instrument substrate (2026-08-18, pre-evidence)
+
+Empirical basis: the first two Phase-1 smoke attempts (untimed; no timed
+evidence existed) were rejected by the archived instrument's own
+fail-closed input validator, which the recon had not surfaced:
+`validate_frozen_genuine_675_input_bundle` requires (a) a **clean** git
+checkout including untracked files, and (b) the checkout's HEAD to equal
+the frozen bundle's `launch_source.commit_sha1` — exactly
+`1c23f6c5f8964c74cc60f63d81b7f93f2db852f3`. The archived input bundle is
+therefore consumable only by an instrument tree at the measurement commit
+itself.
+
+Amended substrate (strictly stronger continuity than the frozen section's):
+
+- The instrument worktree (`../simsopt-genuine675-fairbar`) is pinned
+  **detached at `1c23f6c5`** — the timed lane driver, runtime, and input
+  bundle are **bit-identical to the archived r3 instrument**; the
+  `5fb968188` pin and its campaign branch are retired (its +2080 driver
+  lines are post-measurement certification machinery this campaign never
+  needed).
+- The harness (`benchmarks/genuine_675_fair_bar.py`) and oracle child
+  (`benchmarks/genuine_675_fair_bar_oracle.py`) live on
+  `pr/jax-port-squashed` — they cannot live in the instrument tree without
+  dirtying it — and always run with
+  `PYTHONPATH=<instrument>:<instrument>/src` plus a fail-closed guard that
+  the imported `simsopt_jax` resolves from the instrument tree. Run
+  artifacts are written outside the instrument tree
+  (`~/simsopt_mixed_artifacts/genuine675_fair_bar/`).
+- Every row records **two git identities**: the instrument commit (must
+  equal `1c23f6c5`, clean) and the harness commit (`pr/jax-port-squashed`
+  HEAD, clean for gate-consuming runs).
+
+No timer, threshold, budget, gate, or eligibility clause changes.
