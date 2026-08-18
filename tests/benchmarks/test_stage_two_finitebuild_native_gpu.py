@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 from benchmarks.stage_two_finitebuild_native_gpu import (
+    _DISCLOSED_SOURCE_PINS,
+    _PHYSICS_SOURCE_PINS,
     FINAL_PAIR_COUNT,
     FINAL_PAIR_WALL_NATIVE_ROLE,
     FINAL_PAIR_WARM_NATIVE_ROLE,
@@ -44,6 +46,7 @@ from benchmarks.stage_two_finitebuild_native_gpu import (
     _derive_quality_contract,
     _fp64_conformance_failure,
     _gate_scaled_target,
+    _gate_source_conformance,
     _leg_environment,
     _sha256_bytes,
     _source_fingerprints,
@@ -500,6 +503,20 @@ def test_final_pairs_not_produced_when_a_native_leg_never_reaches_the_rung() -> 
         "reason"
     ].startswith("pair 0 warm-native exhausted its")
 
+    below_cap = _mutate_leg(
+        _pair_rows(warm_ratios=_uniform(1.3), wall_ratios=_uniform(1.3)),
+        "native-wall-pair1",
+        "solver",
+        stopped_at_target=False,
+        nit=GATE_REFERENCE_STEPS // 2,
+    )
+    verdict = reduce_final_pairs(_gate(), _selection(), below_cap)
+    assert verdict["verdict"] == VERDICT_NOT_PRODUCED
+    assert (
+        f"stopped at nit {GATE_REFERENCE_STEPS // 2} of its "
+        f"{GATE_REFERENCE_STEPS}-iteration cap"
+    ) in verdict["reason"]
+
 
 def test_final_pairs_not_produced_when_a_leg_carries_the_wrong_protocol() -> None:
     """Wall legs must not be warm-protocol; warm legs must be."""
@@ -952,6 +969,20 @@ def test_native_matrix_rejects_a_configuration_with_one_non_crossing_repetition(
     assert entry["qualifying_repetitions"] == SELECTION_REPETITIONS - 1
     assert entry["nit"][0] == GATE_REFERENCE_STEPS
     assert "without reaching the frozen gate rung" in entry["failures"][0]
+    assert f"exhausted its {GATE_REFERENCE_STEPS}-iteration cap" in entry["failures"][0]
+
+    # A solver that terminated below its cap is named truthfully: it stopped
+    # on its own criteria, it did not exhaust the budget.
+    below_cap_rows = _matrix_rows(non_crossing=(8, 20))
+    for row in below_cap_rows:
+        if row["leg_id"] == "native-time-to-quality-omp8-h20-rep0":
+            row["solver"]["nit"] = 130
+    entry = reduce_native_matrix(_gate(), below_cap_rows)["table"]["omp8-h20"]
+    assert (
+        f"stopped at nit 130 of its {GATE_REFERENCE_STEPS}-iteration cap"
+        in entry["failures"][0]
+    )
+    assert "without reaching the frozen gate rung" in entry["failures"][0]
 
 
 def test_native_matrix_not_produced_when_no_configuration_reaches_the_rung() -> None:
@@ -1334,3 +1365,72 @@ def test_leg_environment_pins_fp64_jax_in_both_lanes(
     assert jax_env["JAX_COMPILATION_CACHE_DIR"] == str(tmp_path)
     assert jax_env["XLA_FLAGS"] == "--xla_gpu_exclude_nondeterministic_ops=true"
     assert jax_env["SIMSOPT_BACKEND_MODE"] == "jax_gpu_fast"
+
+
+def test_gate_source_conformance_binds_physics_and_discloses_harness_drift() -> None:
+    """Physics pins are fail-closed; harness/plan pins are disclosed drift.
+
+    The dirty-file branch is exercised directly; the commit branch is
+    exercised end-to-end by validating the real gate-consuming runs.
+    """
+    pins = dict(_PHYSICS_SOURCE_PINS) | dict(_DISCLOSED_SOURCE_PINS)
+    shas = {key: format(index, "x") * 64 for index, key in enumerate(pins, 1)}
+    shas = {key: value[:64] for key, value in shas.items()}
+    identity_git = {
+        "commit": "0" * 40,
+        "changed_file_sha256": {pins[key]: shas[key] for key in pins},
+    }
+    row = {"leg_id": "leg", "identity": {"git": identity_git}}
+    gate = {"source_fingerprints": dict(shas)}
+
+    failure, drift = _gate_source_conformance(gate, [row])
+    assert failure is None
+    assert all(entry["identical"] for entry in drift.values())
+
+    forked_physics = {
+        "source_fingerprints": dict(shas, objective_module_sha256="f" * 64)
+    }
+    failure, drift = _gate_source_conformance(forked_physics, [row])
+    assert failure is not None and "different physics" in failure
+    assert drift == {}
+
+    amended_harness = {"source_fingerprints": dict(shas, benchmark_sha256="e" * 64)}
+    failure, drift = _gate_source_conformance(amended_harness, [row])
+    assert failure is None
+    assert drift["benchmark_sha256"]["identical"] is False
+    assert drift["plan_sha256"]["identical"] is True
+
+
+def test_validate_run_fails_closed_on_a_physics_forked_gate_consumer(
+    tmp_path: Path,
+) -> None:
+    """The wiring: gate-consuming validation must run the conformance check."""
+    pins = dict(_PHYSICS_SOURCE_PINS) | dict(_DISCLOSED_SOURCE_PINS)
+    run_shas = {key: "a" * 64 for key in pins}
+    gate = {"source_fingerprints": dict(run_shas, objective_module_sha256="f" * 64)}
+    _write_json_exclusive(tmp_path / "gate" / "quality_contract.json", gate)
+    row = {
+        "leg_id": "jax-sweep-h10-b40",
+        "kind": "jax-solve",
+        "fingerprints": {"input_fingerprint": "a"},
+        "identity": {
+            "git": {
+                "commit": "0" * 40,
+                "changed_file_sha256": {pins[key]: run_shas[key] for key in pins},
+            }
+        },
+    }
+    row_sha256 = _write_json_exclusive(
+        tmp_path / "rows" / "jax-sweep-h10-b40.json", row
+    )
+    _write_json_exclusive(
+        tmp_path / "manifest.json",
+        {
+            "schema": "stage-two-finitebuild-native-gpu-manifest-v1",
+            "phase": "jax-sweep",
+            "rows": {"rows/jax-sweep-h10-b40.json": row_sha256},
+        },
+    )
+    verdict = validate_run(tmp_path)
+    assert verdict["verdict"] == VERDICT_NOT_PRODUCED
+    assert "different physics" in str(verdict["reason"])

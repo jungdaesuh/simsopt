@@ -34,6 +34,42 @@ Every GPU endpoint above was gated through its **native re-evaluation**
 (`native-endpoint-eval` oracle leg at the published solution vector);
 equivalence was never mediated by the JAX lane's own evaluator.
 
+Validation additionally binds the frozen gate to every consuming run's own
+sources: the physics pins (objective module, parity case) are enforced
+**fail-closed** — a consumer whose physics differs from the gate's is
+`NOT_PRODUCED`, never a verdict — and both pass here (the physics sources
+are byte-identical at `6bce010d0` and `8435ad814`). The harness and plan
+pins moved between the gate commit and the terminal sweep through the dated
+budget-parity amendment, and the validator publishes that drift verbatim
+(`gate_source_drift`: benchmark `ad2cde3118…` → `f608cb8340…`, plan
+`6106d772bb…` → `0b1c6d954a…`, identical `false`) instead of silently
+accepting or rejecting it.
+
+## Tracked evidence
+
+Byte-identical copies of every file this receipt's numbers derive from are
+committed under `docs/receipts/evidence/stage_two_finitebuild_native_gpu/`
+(260 KB: the six run manifests, the frozen quality contract, the selected
+native configuration's three timed rows plus the shipped-default disclosure
+row, and the decisive terminal-sweep rows `h10-b560`/`h10-b800` with their
+native oracle re-evaluations). Full hashes — the table above abbreviates
+these:
+
+```
+8f6ccfd583c9c213ca634b71ebab97d37dd8452d1034acb46f0ee2577b768ed5  gate manifest.json
+872834d86a16fef6b3d403bcdc5e31f8e3d2a86b744ee5a90b56e039e9102039  gate quality_contract.json
+d8a23455acba337d6b5ffb3f2f230f855740f24790c7c0e0fd914b4f8f4089a2  baseline manifest.json
+f5669f75848a45b30f154d28b934cb81d8a47e87b668fc00c23143f6a8d8be64  kernel-canary manifest.json
+5509b8609c8bc8bfa6a8e30d93c251c3e33e8dd4efaadc8b81d1810e3821dda2  native-matrix manifest.json
+cc23b02e5cd2e66705918b485251851327b7130dc9ab5fff61d7bfe6693e423b  jax-sweep (5-rung) manifest.json
+93c022a61c7db150367beb73268560eec27b797bcfaed9e1dfb3e655c0ac3f61  jax-sweep (terminal) manifest.json
+```
+
+The remaining raw rows (~54 MB) are **[host-local]** under `.artifacts/`
+on this workstation, per this repository's evidence-provenance convention;
+each one's integrity is bound by its run's tracked `manifest.json`, which
+enumerates every expected row file with its sha256.
+
 ## The terminal sweep table (oracle-evaluated endpoints vs the frozen gate)
 
 Unscaled objective vs target `5.455605e-07`; gradient ratio vs the truncated
@@ -66,9 +102,12 @@ anchor's `|g|∞ = 1.349e-06` under the 1.05 cap:
   publishes only its terminal iterate — its own first-crossing iterate near
   nit ~545 was never captured, because the on-device loop records no
   trajectory. The native lane corroborates the severity of the clause: 23
-  of 24 matrix configurations fail the contract — 16 exhaust the
-  800-iteration cap without reaching the rung, 6 (the h400 history at every
-  thread count) fail only the gradient landing clause, and 1 fails both —
+  of 24 matrix configurations fail the contract — 16 never reach the rung
+  in any repetition (of the 49 matrix legs that never reached the rung, 22
+  exhausted the 800-iteration cap and 27 stopped below it, at nit 93–693,
+  on the solver's own criteria; the other 24 legs were callback-stopped at
+  the rung), 6 (the h400 history at every thread count) fail only the
+  gradient landing clause, and 1 fails both —
   and the shipped-default disclosure lane crosses the rung with every cap
   and band clean yet fails only the landing clause (1.64 vs 1.05) *despite
   being callback-stopped at its first crossing iterate*. First-crossing
