@@ -2668,14 +2668,24 @@ def reduce_native_matrix(
             solver = repetition["solver"]
             iterations.append(int(solver["nit"]))
             if not bool(solver.get("stopped_at_target", False)):
-                # Rung-unreachability: the solve exhausted its cap without ever
-                # clearing the frozen rung, so this configuration has no
-                # time-to-quality at all -- not a slow one.
-                failures.append(
-                    f"{leg_id} exhausted its "
-                    f"{repetition['specification']['max_steps']}-iteration cap at "
-                    f"nit {solver['nit']} without reaching the frozen gate rung"
-                )
+                # Rung-unreachability: the callback never fired, so this
+                # configuration has no time-to-quality at all -- not a slow
+                # one.  Name the actual termination: cap exhaustion only when
+                # the solver spent its whole budget; otherwise it stopped on
+                # its own criteria below the cap.
+                cap = int(repetition["specification"]["max_steps"])
+                nit = int(solver["nit"])
+                if nit >= cap:
+                    failures.append(
+                        f"{leg_id} exhausted its {cap}-iteration cap "
+                        "without reaching the frozen gate rung"
+                    )
+                else:
+                    failures.append(
+                        f"{leg_id} stopped at nit {nit} of its {cap}-iteration "
+                        f"cap (solver status {solver.get('status')}) without "
+                        "reaching the frozen gate rung"
+                    )
             else:
                 gate_verdict = evaluate_quality_gate(gate, repetition["endpoint"])
                 if not gate_verdict["eligible"]:
@@ -3024,14 +3034,23 @@ def reduce_final_pairs(
             native_row = legs[key]
             native_steps = int(native_row["specification"]["max_steps"])
             # The native lane is measured as time to the frozen rung, so a leg
-            # that exhausted its cap without crossing produced no measurement:
-            # rung-unreachability, not a slow lane.
+            # whose callback never fired produced no measurement:
+            # rung-unreachability, not a slow lane.  Cap exhaustion is named
+            # only when the solver spent its whole budget.
             if not bool(native_row["solver"].get("stopped_at_target", False)):
+                native_nit = int(native_row["solver"]["nit"])
+                termination = (
+                    f"exhausted its {native_steps}-iteration cap"
+                    if native_nit >= native_steps
+                    else (
+                        f"stopped at nit {native_nit} of its "
+                        f"{native_steps}-iteration cap"
+                    )
+                )
                 return {
                     "verdict": VERDICT_NOT_PRODUCED,
                     "reason": (
-                        f"pair {pair_index} {key} exhausted its {native_steps}-"
-                        f"iteration cap at nit {native_row['solver']['nit']} "
+                        f"pair {pair_index} {key} {termination} "
                         "without reaching the frozen gate rung "
                         "(rung-unreachability), so it timed no quality "
                         f"(status {native_row['solver'].get('status')})"
@@ -3291,6 +3310,95 @@ def _fp64_conformance_failure(
     return None
 
 
+# Phases whose rows are measured against a previously frozen gate.  The gate
+# phase itself derives the pins; baseline and the kernel canary consume none.
+_GATE_CONSUMING_PHASES = frozenset({"native-matrix", "jax-sweep", "final-pairs"})
+
+# The rung is derived from these sources' physics: a consumer built from
+# different physics is measuring a different problem, so equality is
+# fail-closed.
+_PHYSICS_SOURCE_PINS: tuple[tuple[str, str], ...] = (
+    ("objective_module_sha256", _OBJECTIVE_SOURCE),
+    ("parity_case_sha256", _PARITY_CASE_SOURCE),
+)
+# Harness and plan sources may legitimately move between the gate commit and a
+# consumer commit through dated amendments; their drift is published, never
+# silently swallowed and never an equality requirement.
+_DISCLOSED_SOURCE_PINS: tuple[tuple[str, str], ...] = (
+    ("benchmark_sha256", _BENCHMARK_SOURCE),
+    ("plan_sha256", _PLAN_SOURCE),
+)
+
+
+def _run_source_sha256(identity_git: Mapping[str, object], path: str) -> str:
+    """The named source's content hash as the run actually executed it.
+
+    A dirty file's content is bound by the row's own ``changed_file_sha256``;
+    a clean file's content is bound by the row's commit.
+    """
+    changed = identity_git.get("changed_file_sha256")
+    if isinstance(changed, Mapping) and path in changed:
+        return str(changed[path])
+    commit = str(identity_git.get("commit"))
+    completed = subprocess.run(
+        ["git", "show", f"{commit}:{path}"],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        raise BenchmarkError(
+            f"cannot resolve {path} at commit {commit} for gate source conformance"
+        )
+    return hashlib.sha256(completed.stdout).hexdigest()
+
+
+def _gate_source_conformance(
+    gate: Mapping[str, object], data_rows: Sequence[Mapping[str, object]]
+) -> tuple[str | None, dict[str, object]]:
+    """Bind the gate's pinned sources to the consuming run's own sources.
+
+    The gate freezes source fingerprints at derivation time; without this
+    check they were republished but never enforced, so a consumer running
+    changed physics would still validate (fail-open).  Physics pins are
+    fail-closed; harness/plan pins are disclosed drift.
+    """
+    pinned = gate.get("source_fingerprints")
+    if not isinstance(pinned, Mapping):
+        return "gate publishes no source fingerprints", {}
+    identity_git = next(
+        (
+            row["identity"]["git"]
+            for row in data_rows
+            if isinstance(row.get("identity"), Mapping)
+            and isinstance(row["identity"].get("git"), Mapping)
+        ),
+        None,
+    )
+    if identity_git is None:
+        return "no data row carries git identity for gate source conformance", {}
+    for key, path in _PHYSICS_SOURCE_PINS:
+        run_sha = _run_source_sha256(identity_git, path)
+        if run_sha != pinned.get(key):
+            return (
+                (
+                    f"gate pins {key}={str(pinned.get(key))[:12]} but the run"
+                    f" executed {run_sha[:12]} — the frozen rung refers to"
+                    " different physics"
+                ),
+                {},
+            )
+    drift: dict[str, object] = {}
+    for key, path in _DISCLOSED_SOURCE_PINS:
+        run_sha = _run_source_sha256(identity_git, path)
+        drift[key] = {
+            "gate": pinned.get(key),
+            "run": run_sha,
+            "identical": run_sha == pinned.get(key),
+        }
+    return None, drift
+
+
 def _worktree_evidence(
     data_rows: Sequence[Mapping[str, object]], manifest: Mapping[str, object]
 ) -> dict[str, object]:
@@ -3381,6 +3489,13 @@ def validate_run(run_directory: Path) -> dict[str, object]:
         fp64_failure = _fp64_conformance_failure(data_rows)
         if fp64_failure is not None:
             raise BenchmarkError(fp64_failure)
+        gate_source_drift: dict[str, object] | None = None
+        if phase in _GATE_CONSUMING_PHASES:
+            conformance_failure, gate_source_drift = _gate_source_conformance(
+                _gate_from_run(run_directory), data_rows
+            )
+            if conformance_failure is not None:
+                raise BenchmarkError(conformance_failure)
         if phase == "baseline":
             reduction = reduce_baseline(data_rows)
         elif phase == "kernel-canary":
@@ -3423,6 +3538,8 @@ def validate_run(run_directory: Path) -> dict[str, object]:
                 "verdict": VERDICT_NOT_PRODUCED,
                 "reason": f"unknown phase {phase}",
             }
+        if gate_source_drift is not None:
+            reduction["gate_source_drift"] = gate_source_drift
     except (
         BenchmarkError,
         json.JSONDecodeError,

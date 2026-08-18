@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -38,7 +39,17 @@ from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
 
 # Packing layout is owned by ``FINITE_BUILD_DIAGNOSTIC_FIELDS``.
 _MINIMUM_CLEARANCE_INDEX = FINITE_BUILD_DIAGNOSTIC_FIELDS.index("minimum_clearance")
+_DISTANCE_PENALTY_INDEX = FINITE_BUILD_DIAGNOSTIC_FIELDS.index("distance_penalty")
 _STATE_IDS = ("initial", "perturbed_a", "perturbed_b")
+# Every state of this geometry clears 0.6363961030678926, so the parity
+# threshold leaves the clearance branch inactive and the raised threshold puts
+# every state strictly inside it.
+_INACTIVE_CURVE_CURVE_THRESHOLD = 0.1
+_ACTIVE_CURVE_CURVE_THRESHOLD = 0.7
+# The clearance penalty is only C^1, so the central difference converges
+# super-linearly rather than at the ideal quadratic rate.
+_FINITE_DIFFERENCE_EPSILONS = (1.0e-3, 1.0e-4)
+_FINITE_DIFFERENCE_MINIMUM_DECAY = 10.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,9 +58,11 @@ class _FiniteBuildCase:
 
     native_objective: Optimizable
     native_distance: CurveCurveDistance
+    native_distance_term: Optimizable
     objective: Callable[[jax.Array], jax.Array]
     diagnostics: Callable[[jax.Array], jax.Array]
     states: dict[str, np.ndarray]
+    taylor_direction: np.ndarray
 
 
 def _apply_state(case: _FiniteBuildCase, state_id: str) -> np.ndarray:
@@ -59,8 +72,17 @@ def _apply_state(case: _FiniteBuildCase, state_id: str) -> np.ndarray:
     return parameters
 
 
-@pytest.fixture(scope="module")
-def finite_build_case() -> _FiniteBuildCase:
+def _build_case(curve_curve_threshold: float) -> _FiniteBuildCase:
+    """Build both lanes from a single clearance threshold.
+
+    The axisymmetric circular-torus surface makes B·n symmetry-zero, so the
+    squared-flux and length branches contribute only ~1e-34 here and their
+    parity assertions are carried by ``atol``; non-vacuous flux/length parity
+    lives in the campaign baseline phase
+    (``benchmarks/stage_two_finitebuild_native_gpu.py`` baseline legs), not
+    in this fixture.  The active-threshold case exercises the distance
+    branch at genuine magnitude.
+    """
     surface = SurfaceRZFourier(
         mpol=1,
         ntor=1,
@@ -84,8 +106,8 @@ def finite_build_case() -> _FiniteBuildCase:
     base_currents = [Current(5.0e4) for _ in base_curves]
     base_currents[0].fix_all()
     filaments_per_base = 2
-    base_filaments = sum(
-        (
+    base_filaments = list(
+        itertools.chain.from_iterable(
             create_multifilament_grid(
                 curve,
                 numfilaments_n=2,
@@ -95,12 +117,12 @@ def finite_build_case() -> _FiniteBuildCase:
                 rotation_order=1,
             )
             for curve in base_curves
-        ),
-        [],
+        )
     )
-    filament_currents = sum(
-        ([current] * filaments_per_base for current in base_currents),
-        [],
+    filament_currents = list(
+        itertools.chain.from_iterable(
+            [current] * filaments_per_base for current in base_currents
+        )
     )
     curves = apply_symmetries_to_curves(base_curves, surface.nfp, True)
     filament_curves = apply_symmetries_to_curves(
@@ -125,7 +147,8 @@ def finite_build_case() -> _FiniteBuildCase:
     native_field = BiotSavart(coils)
     native_flux = SquaredFlux(surface, native_field)
     native_lengths = [CurveLength(curve) for curve in base_curves]
-    native_distance = CurveCurveDistance(curves, 0.1)
+    native_distance = CurveCurveDistance(curves, curve_curve_threshold)
+    native_distance_term = 10.0 * native_distance
     native_objective = (
         native_flux
         + 1.0e-2
@@ -137,7 +160,7 @@ def finite_build_case() -> _FiniteBuildCase:
                 strict=True,
             )
         )
-        + 10.0 * native_distance
+        + native_distance_term
     )
 
     field = BiotSavartJAX(coils)
@@ -153,7 +176,7 @@ def finite_build_case() -> _FiniteBuildCase:
         symmetry_copies=2,
         length_targets=tuple(float(value) for value in initial_lengths),
         length_weight=1.0e-2,
-        curve_curve_minimum_distance=0.1,
+        curve_curve_minimum_distance=curve_curve_threshold,
         curve_curve_weight=10.0,
     )
     flux_spec = flux.fixed_surface_flux_spec()
@@ -171,10 +194,22 @@ def finite_build_case() -> _FiniteBuildCase:
     return _FiniteBuildCase(
         native_objective=native_objective,
         native_distance=native_distance,
+        native_distance_term=native_distance_term,
         objective=objective,
         diagnostics=diagnostics,
         states=states,
+        taylor_direction=direction,
     )
+
+
+@pytest.fixture(scope="module")
+def finite_build_case() -> _FiniteBuildCase:
+    return _build_case(_INACTIVE_CURVE_CURVE_THRESHOLD)
+
+
+@pytest.fixture(scope="module")
+def active_distance_case() -> _FiniteBuildCase:
+    return _build_case(_ACTIVE_CURVE_CURVE_THRESHOLD)
 
 
 @pytest.mark.parametrize("state_id", _STATE_IDS)
@@ -219,3 +254,73 @@ def test_finite_build_minimum_clearance_matches_native_shortest_distance(
         native_clearance,
         rtol=1.0e-14,
     )
+
+
+@pytest.mark.parametrize("state_id", _STATE_IDS)
+def test_active_distance_penalty_matches_native_value_and_gradient(
+    active_distance_case: _FiniteBuildCase,
+    state_id: str,
+) -> None:
+    parameters = _apply_state(active_distance_case, state_id)
+    native_value = active_distance_case.native_objective.J()
+    native_gradient = np.asarray(
+        active_distance_case.native_objective.dJ(),
+        dtype=np.float64,
+    )
+    native_distance_penalty = active_distance_case.native_distance_term.J()
+    jax_value, jax_gradient = jax.value_and_grad(active_distance_case.objective)(
+        jax.device_put(parameters)
+    )
+    diagnostics = np.asarray(
+        active_distance_case.diagnostics(jax.device_put(parameters)),
+        dtype=np.float64,
+    )
+    jax_distance_penalty = diagnostics[_DISTANCE_PENALTY_INDEX]
+
+    # Activation guard: an inactive branch would make the comparisons below
+    # agree on zero without exercising the penalty at all.
+    assert native_distance_penalty > 0.0
+    assert jax_distance_penalty > 0.0
+
+    np.testing.assert_allclose(
+        jax_distance_penalty,
+        native_distance_penalty,
+        rtol=2.0e-11,
+        atol=1.0e-12,
+    )
+    np.testing.assert_allclose(jax_value, native_value, rtol=2.0e-11, atol=1.0e-12)
+    np.testing.assert_allclose(
+        jax_gradient,
+        native_gradient,
+        rtol=2.0e-8,
+        atol=2.0e-10,
+    )
+
+
+def test_active_distance_penalty_gradient_matches_finite_differences(
+    active_distance_case: _FiniteBuildCase,
+) -> None:
+    parameters = active_distance_case.states["initial"]
+    direction = active_distance_case.taylor_direction
+    _value, gradient = jax.value_and_grad(active_distance_case.objective)(
+        jax.device_put(parameters)
+    )
+    directional_derivative = float(
+        np.vdot(np.asarray(gradient, dtype=np.float64), direction)
+    )
+    errors = []
+    for epsilon in _FINITE_DIFFERENCE_EPSILONS:
+        plus = float(
+            active_distance_case.objective(
+                jax.device_put(parameters + epsilon * direction)
+            )
+        )
+        minus = float(
+            active_distance_case.objective(
+                jax.device_put(parameters - epsilon * direction)
+            )
+        )
+        errors.append(abs((plus - minus) / (2.0 * epsilon) - directional_derivative))
+
+    assert directional_derivative != 0.0
+    assert errors[1] * _FINITE_DIFFERENCE_MINIMUM_DECAY < errors[0]
