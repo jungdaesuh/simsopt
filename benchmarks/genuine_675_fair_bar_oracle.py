@@ -1,13 +1,19 @@
 """Native-oracle endpoint evaluation for the genuine-675 fair-bar campaign.
 
-Charter: docs/jax_gpu_genuine675_fair_bar_plan.md on pr/jax-port-squashed at
-commit 7b6d69041.  Re-evaluates one 675-coordinate candidate through the
-archived native evaluator (the same construction the timed native lane uses,
-mirrored from benchmarks/genuine_675_dynamic_lane.py) and reports the
-objective and gradient infinity norm.  The inner (iota, G) solve mode is
+Charter: docs/jax_gpu_genuine675_fair_bar_plan.md on pr/jax-port-squashed
+(Amendment 1: instrument pinned at 1c23f6c5).  Re-evaluates one
+675-coordinate candidate through the archived native evaluator — the same
+construction and the same bootstrap sequence the timed native lane uses at
+the pinned instrument commit — and reports the objective and gradient
+infinity norm.  The inner (iota, G) solve mode is
 CLOSED_FORM_DIRECT_QR_ANCHOR_INVARIANT, so the anchor supplied here cannot
 move the result; the caller passes the evaluated lane's own endpoint anchor
 for maximal defensibility.
+
+This file lives outside the instrument tree; the launching harness sets
+PYTHONPATH to the instrument worktree, so every import below resolves from
+the pinned instrument, mirroring benchmarks/genuine_675_dynamic_lane.py at
+1c23f6c5 (including its import-time runtime configuration side effects).
 """
 
 from __future__ import annotations
@@ -17,10 +23,31 @@ import json
 import sys
 from pathlib import Path
 
-from simsopt_jax.runtime.fixed_state_genuine_675_input_manifest import (
-    validate_frozen_genuine_675_input_bundle,
+from repo_bootstrap import configure_simsopt_entrypoint_runtime
+
+from benchmarks.validation_ladder_common import (
+    bootstrap_local_simsopt,
+    preparse_platform,
+    require_requested_platform_runtime,
+    require_x64_runtime,
 )
-from simsopt_jax.runtime.genuine_675_dynamic import Genuine675CompactAccepted
+
+REQUESTED_PLATFORM = preparse_platform(sys.argv[1:])
+configure_simsopt_entrypoint_runtime(sys.argv[1:])
+
+import jax
+
+require_x64_runtime(jax, context="Genuine-675 fair-bar oracle")
+require_requested_platform_runtime(
+    jax,
+    requested_platform=REQUESTED_PLATFORM,
+    context="Genuine-675 fair-bar oracle",
+)
+bootstrap_local_simsopt()
+
+from simsopt_jax.runtime.genuine_675_dynamic import (
+    Genuine675CompactAccepted,
+)
 from simsopt_jax.runtime.single_stage_fullspace_675 import (
     GENUINE_FULLSPACE_675,
     Fullspace675Candidate,
@@ -32,9 +59,14 @@ from simsopt_jax_adapters.geo.fixed_state_genuine_675_native import (
     Fullspace675NativeBoozerMaterial,
 )
 
+from benchmarks.fixed_state_genuine_675_input_manifest import (
+    validate_frozen_genuine_675_input_bundle,
+)
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--platform", choices=("cpu",), required=True)
     parser.add_argument("--input-manifest", type=Path, required=True)
     parser.add_argument("--candidate-json", type=Path, required=True)
     parser.add_argument("--output-json", type=Path, required=True)
