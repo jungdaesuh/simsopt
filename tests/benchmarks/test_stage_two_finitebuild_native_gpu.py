@@ -31,6 +31,8 @@ from benchmarks.stage_two_finitebuild_native_gpu import (
     GATE_REFERENCE_STEPS,
     GPU_BUDGET_SWEEP,
     GPU_HOST_OMP_THREADS,
+    JAX_BISECT_ROLE,
+    JAX_CROSSING_ROLE,
     JAX_HISTORY_SWEEP,
     KERNEL_CANARY_REPETITIONS,
     NATIVE_HISTORY_SWEEP,
@@ -214,8 +216,10 @@ def test_source_fingerprints_bind_the_preregistered_plan() -> None:
         "parity_case_sha256",
         "benchmark_sha256",
         "plan_sha256",
+        "successor_plan_sha256",
     }
     assert len(str(fingerprints["plan_sha256"])) == 64
+    assert len(str(fingerprints["successor_plan_sha256"])) == 64
 
 
 def test_quality_gate_does_not_reject_a_lower_penalty_than_the_reference() -> None:
@@ -254,6 +258,10 @@ def _gate_reference_row() -> dict[str, object]:
         "endpoint": _converged_endpoint(),
         "anchor_endpoint": _truncated_reference_endpoint(),
         "anchor_budget": 21,
+        # |g|inf over the last 21 accepted iterates up to the anchor; the
+        # median (1.3e-3) sits above the anchor draw (1.0e-3), matching the
+        # measured oscillation structure the successor clause exists for.
+        "anchor_gradient_window": [1.0e-3, 1.3e-3, 1.6e-3] * 7,
     }
 
 
@@ -269,6 +277,32 @@ def test_gate_contract_anchors_on_the_reference_run_own_trajectory() -> None:
     assert _gate_scaled_target(gate) == _OBJECTIVE_SCALE * float(
         gate["target_objective"]
     )
+    # The successor gradient clause: window-median scale, published with its
+    # audit inputs.
+    assert gate["gradient_reference_scale"] == pytest.approx(1.3e-3)
+    assert gate["anchor_gradient_window_count"] == 21
+    assert gate["gradient_scale_to_anchor_ratio"] == pytest.approx(1.3)
+
+
+def test_gate_halts_when_the_cap_would_admit_less_than_archived_landings() -> None:
+    """The freeze-time audit is a halt, not a disclosure."""
+    row = _gate_reference_row()
+    # Window median 0.9e-3 against anchor 1.0e-3: 2.3 x 0.9e-3 < 2.41 x 1e-3.
+    row["anchor_gradient_window"] = [0.8e-3, 0.9e-3, 1.0e-3] * 7
+    with pytest.raises(BenchmarkError, match="freeze audit failed"):
+        _derive_quality_contract(row)
+
+
+def test_gradient_clause_uses_the_window_scale_when_published() -> None:
+    """v4 contracts divide by the window median; v3 contracts keep the anchor."""
+    gate = _gate()
+    steep = _truncated_reference_endpoint()
+    steep["gradient_inf_norm"] = 2.5e-3
+    # v3 shape (no scale): ratio 2.5 exceeds the 2.3 margin.
+    assert _fired(evaluate_quality_gate(gate, steep), "gradient infinity norm")
+    # v4 shape: scale 1.3e-3 makes the same endpoint ratio 1.92 -- eligible.
+    v4 = dict(gate, gradient_reference_scale=1.3e-3)
+    assert evaluate_quality_gate(v4, steep)["eligible"] is True
 
 
 def test_gate_refuses_to_freeze_on_a_short_reference_run() -> None:
@@ -1434,3 +1468,197 @@ def test_validate_run_fails_closed_on_a_physics_forked_gate_consumer(
     verdict = validate_run(tmp_path)
     assert verdict["verdict"] == VERDICT_NOT_PRODUCED
     assert "different physics" in str(verdict["reason"])
+
+
+# ---------------------------------------------------------------------------
+# Successor bisection sweep
+# ---------------------------------------------------------------------------
+
+
+def _bisect_probe(
+    history: int,
+    budget: int,
+    *,
+    self_objective: float,
+    oracle_objective: float,
+    solution: list[float] | None = None,
+) -> list[dict[str, object]]:
+    """One untimed probe leg plus its native re-evaluation."""
+    leg_id = f"jax-bisect-h{history}-b{budget}"
+    endpoint = _truncated_reference_endpoint()
+    endpoint["objective"] = self_objective
+    if solution is not None:
+        endpoint["solution"] = solution
+    oracle_endpoint = _truncated_reference_endpoint()
+    oracle_endpoint["objective"] = oracle_objective
+    return [
+        {
+            "leg_id": leg_id,
+            "lane": "jax",
+            "kind": "jax-solve",
+            "gate_sha256": _gate_sha256(),
+            "specification": {
+                "role": JAX_BISECT_ROLE,
+                "history": history,
+                "max_steps": budget,
+                "warm_repetitions": 0,
+            },
+            "endpoint": endpoint,
+            "timings": {"warm_solve_seconds": []},
+            "solver": {"nit": budget, "nfev": budget + 4, "status": 1},
+        },
+        {
+            "leg_id": f"native-endpoint-{leg_id}",
+            "lane": "native",
+            "kind": "native-endpoint-eval",
+            "gate_sha256": _gate_sha256(),
+            "subject_leg_id": leg_id,
+            "endpoint": oracle_endpoint,
+        },
+    ]
+
+
+def _bisect_crossing(
+    history: int,
+    budget: int,
+    *,
+    warm: list[float],
+    solution: list[float] | None = None,
+) -> list[dict[str, object]]:
+    """The timed crossing leg plus its native re-evaluation."""
+    leg_id = f"jax-sweep-h{history}-b{budget}"
+    endpoint = _truncated_reference_endpoint()
+    if solution is not None:
+        endpoint["solution"] = solution
+    return [
+        {
+            "leg_id": leg_id,
+            "lane": "jax",
+            "kind": "jax-solve",
+            "gate_sha256": _gate_sha256(),
+            "specification": {
+                "role": JAX_CROSSING_ROLE,
+                "history": history,
+                "max_steps": budget,
+                "warm_repetitions": SELECTION_REPETITIONS,
+            },
+            "endpoint": endpoint,
+            "timings": {"warm_solve_seconds": warm},
+            "solver": {"nit": budget, "nfev": budget + 4, "status": 1},
+        },
+        {
+            "leg_id": f"native-endpoint-{leg_id}",
+            "lane": "native",
+            "kind": "native-endpoint-eval",
+            "gate_sha256": _gate_sha256(),
+            "subject_leg_id": leg_id,
+            "endpoint": _truncated_reference_endpoint(),
+        },
+    ]
+
+
+def _bisect_rows(**h10_overrides: object) -> list[dict[str, object]]:
+    """Minimal legal successor sweep: h10 crosses at the cap, h20/h40 never.
+
+    The reducer requires the cap probe, the crossing probe, and the
+    minimality probe at ``k*-1``; it does not require the full bisection
+    path, so the fixture carries exactly those.
+    """
+    cap = 800
+    rows: list[dict[str, object]] = []
+    rows += _bisect_probe(10, cap - 1, self_objective=10.2, oracle_objective=10.2)
+    rows += _bisect_probe(10, cap, self_objective=10.0, oracle_objective=10.0)
+    crossing_kwargs = {"warm": [1.0, 1.1, 1.2]}
+    crossing_kwargs.update(h10_overrides)
+    rows += _bisect_crossing(10, cap, **crossing_kwargs)
+    for history in (20, 40):
+        rows += _bisect_probe(history, cap, self_objective=10.2, oracle_objective=10.2)
+    return rows
+
+
+def test_bisection_sweep_selects_the_crossing_history() -> None:
+    verdict = reduce_jax_sweep(_gate(), _bisect_rows())
+    assert verdict["verdict"] == "JAX_SELECTED", verdict
+    selected = verdict["selected"]
+    assert selected["history"] == 10
+    assert selected["budget"] == 800
+    assert selected["median_solve_seconds"] == 1.1
+    assert selected["crossing_solution"] == [0.1, 0.2, 0.3]
+    assert len(selected["crossing_solution_sha256"]) == 64
+    assert verdict["table"]["h20"]["reached_rung"] is False
+    assert verdict["table"]["h40"]["reached_rung"] is False
+
+
+def test_bisection_sweep_closes_when_no_history_crosses() -> None:
+    rows: list[dict[str, object]] = []
+    for history in JAX_HISTORY_SWEEP:
+        rows += _bisect_probe(history, 800, self_objective=10.2, oracle_objective=10.2)
+    verdict = reduce_jax_sweep(_gate(), rows)
+    assert verdict["verdict"] == VERDICT_CLOSED
+    assert "no JAX history reached" in verdict["reason"]
+
+
+def test_bisection_sweep_fails_closed_on_a_monotonicity_violation() -> None:
+    """A self-reported objective that rises with budget breaks the instrument."""
+    rows = _bisect_rows()
+    for row in rows:
+        if row.get("leg_id") == "jax-bisect-h10-b799":
+            row["endpoint"]["objective"] = 9.9
+    verdict = reduce_jax_sweep(_gate(), rows)
+    assert verdict["verdict"] == VERDICT_NOT_PRODUCED
+    assert "monotonicity" in verdict["reason"]
+
+
+def test_bisection_sweep_requires_the_minimality_probe() -> None:
+    rows = [
+        row for row in _bisect_rows() if "h10-b799" not in str(row.get("leg_id", ""))
+    ]
+    verdict = reduce_jax_sweep(_gate(), rows)
+    assert verdict["verdict"] == VERDICT_NOT_PRODUCED
+    assert "unproved minimal" in verdict["reason"]
+
+
+def test_bisection_sweep_rejects_a_crossing_below_the_published_budget() -> None:
+    rows = _bisect_rows()
+    for row in rows:
+        if row.get("leg_id") == "native-endpoint-jax-bisect-h10-b799":
+            row["endpoint"]["objective"] = 10.0
+    verdict = reduce_jax_sweep(_gate(), rows)
+    assert verdict["verdict"] == VERDICT_NOT_PRODUCED
+    assert "below its published crossing budget" in verdict["reason"]
+
+
+def test_bisection_sweep_rejects_a_probe_crossing_fork() -> None:
+    """The timed crossing leg must be bitwise the probe at the same budget."""
+    verdict = reduce_jax_sweep(
+        _gate(), _bisect_rows(solution=[0.1, 0.2, 0.30000000001])
+    )
+    assert verdict["verdict"] == VERDICT_NOT_PRODUCED
+    assert "determinism is broken" in verdict["reason"]
+
+
+def test_final_pairs_verify_every_gpu_endpoint_against_the_frozen_solution() -> None:
+    selection = _selection()
+    selection["jax"] = dict(selection["jax"], crossing_solution=[0.1, 0.2, 0.3])
+    rows = _pair_rows(warm_ratios=_uniform(1.3), wall_ratios=_uniform(1.3))
+    verdict = reduce_final_pairs(_gate(), selection, rows)
+    assert verdict["verdict"] == VERDICT_WIN, verdict
+
+    forked = _pair_rows(warm_ratios=_uniform(1.3), wall_ratios=_uniform(1.3))
+    for row in forked:
+        if row.get("leg_id") == "jax-warm-pair3" and "endpoint" in row:
+            row["endpoint"] = dict(row["endpoint"], solution=[0.1, 0.2, 0.31])
+    verdict = reduce_final_pairs(_gate(), selection, forked)
+    assert verdict["verdict"] == VERDICT_NOT_PRODUCED
+    assert "deviates" in verdict["reason"] and "pair 3" in verdict["reason"]
+
+
+def test_bisection_sweep_requires_the_cap_probe() -> None:
+    """The final close at budget parity is evidenced by the cap probe."""
+    rows = [
+        row for row in _bisect_rows() if "h20-b800" not in str(row.get("leg_id", ""))
+    ]
+    rows += _bisect_probe(20, 400, self_objective=10.2, oracle_objective=10.2)
+    verdict = reduce_jax_sweep(_gate(), rows)
+    assert verdict["verdict"] == VERDICT_NOT_PRODUCED
+    assert "no cap probe" in verdict["reason"]
