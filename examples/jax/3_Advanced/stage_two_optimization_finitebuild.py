@@ -37,13 +37,11 @@ from simsopt_jax.examples import (
     run_example,
     scalar_example_driver,
 )
-from simsopt_jax.solve.contracts import OptimizerResult
-from simsopt_jax.solve.driver import Driver
-from simsopt_jax.solve.serial import (
-    TraceableArrayFunction,
-    TraceableParametricScalarProblem,
-    serial_solve_jax,
+from simsopt_jax.examples.stage_two_finitebuild import (
+    prepare_finite_build_stage_two,
+    solve_finite_build_stage_two,
 )
+from simsopt_jax.solve.driver import Driver
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.objectives import (
     FiniteBuildStageTwoConfig,
@@ -63,33 +61,6 @@ GAP_SIZE_N = 0.02
 GAP_SIZE_B = 0.04
 ROTATION_ORDER = 1
 TEST_DATA = Path(__file__).resolve().parents[3] / "tests" / "test_files"
-
-
-def _run_optimizer(
-    problem: TraceableParametricScalarProblem,
-    *,
-    driver: Driver,
-    max_steps: int,
-) -> OptimizerResult:
-    if driver == Driver.SIMSOPT_LBFGSB:
-        return serial_solve_jax(
-            problem,
-            driver=driver,
-            max_steps=max_steps,
-            maxcor=min(max_steps, 400),
-            rtol=1.0e-15,
-            atol=1.0e-12,
-            require_success=False,
-        )
-    return serial_solve_jax(
-        problem,
-        driver=driver,
-        max_steps=max_steps,
-        line_search_max_steps=40,
-        rtol=1.0e-15,
-        atol=1.0e-12,
-        require_success=False,
-    )
 
 
 def _build_problem(
@@ -185,40 +156,37 @@ def solve(
         config,
     )
 
-    def scaled_objective(
-        parameters: jax.Array,
-        objective_scale: jax.Array,
-    ) -> jax.Array:
-        return objective_scale * objective(parameters)
-
     initial_device = jax.device_put(np.asarray(field.x, dtype=np.float64))
-    problem = TraceableParametricScalarProblem(
-        objective_fn=scaled_objective,
-        objective_parameter=jax.device_put(
-            np.asarray(SOLVE_OBJECTIVE_SCALE, dtype=np.float64)
-        ),
-        x=initial_device,
-    )
-    diagnostics = TraceableArrayFunction(
-        function_fn=finite_build_stage_two_diagnostics(
+    prepared = prepare_finite_build_stage_two(
+        objective_fn=objective,
+        diagnostics_fn=finite_build_stage_two_diagnostics(
             field,
             flux.fixed_surface_flux_spec(),
             config,
         ),
-        x=initial_device,
+        initial_parameters=initial_device,
+        objective_scale=jax.device_put(
+            np.asarray(SOLVE_OBJECTIVE_SCALE, dtype=np.float64)
+        ),
     )
-    initial_values_device = diagnostics(initial_device)
-    result = _run_optimizer(
-        problem,
-        driver=scalar_example_driver(),
+    initial_values_device = prepared.diagnostics(initial_device)
+    driver = scalar_example_driver()
+    result = solve_finite_build_stage_two(
+        prepared,
+        driver=driver,
         max_steps=max_steps,
+        rtol=1.0e-15,
+        atol=1.0e-12,
+        line_search_max_steps=None if driver == Driver.SIMSOPT_LBFGSB else 40,
     )
-    solution_device = jax.block_until_ready(problem.x)
-    problem.set_objective_parameter(
+    solution_device = jax.block_until_ready(prepared.problem.x)
+    prepared.problem.set_objective_parameter(
         jax.device_put(np.asarray(PUBLISHED_OBJECTIVE_SCALE, dtype=np.float64))
     )
-    _final_objective_device, gradient_device = problem.value_and_grad(solution_device)
-    final_values_device = jax.block_until_ready(diagnostics(solution_device))
+    _final_objective_device, gradient_device = prepared.problem.value_and_grad(
+        solution_device
+    )
+    final_values_device = jax.block_until_ready(prepared.diagnostics(solution_device))
     solution = np.asarray(jax.device_get(solution_device), dtype=np.float64)
     gradient = np.asarray(jax.device_get(gradient_device), dtype=np.float64)
     values = np.asarray(

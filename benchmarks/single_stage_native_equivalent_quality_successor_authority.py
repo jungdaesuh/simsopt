@@ -380,7 +380,7 @@ DIAG5_FROZEN_NUMERICAL_PATHS: Final = frozenset(
         "src/simsopt_jax_adapters/geo/single_stage_native_endpoint.py",
     }
 )
-DIAG5_EXECUTION_SOURCE_ENTRY_COUNT: Final = 615
+DIAG5_EXECUTION_SOURCE_ENTRY_COUNT: Final = 616
 DIAG5_CPU_QUALIFICATION_SCHEMA_VERSION: Final = (
     "single-stage-neq-gntr3-cpu-trajectory-qualification-v2"
 )

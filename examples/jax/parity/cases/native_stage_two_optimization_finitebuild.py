@@ -8,7 +8,6 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import numpy as np
 from examples.jax.parity.arbiter import LaneObservation
@@ -18,12 +17,45 @@ from examples.jax.parity.input_bundle import (
     effective_construction_fingerprint,
 )
 from examples.jax.parity.runtime import ParityLane
+from scipy.optimize import minimize
+from simsopt._core.optimizable import Optimizable
+from simsopt.field import (
+    BiotSavart,
+    Coil,
+    Current,
+    apply_symmetries_to_currents,
+    apply_symmetries_to_curves,
+)
+from simsopt.geo import (
+    CurveCurveDistance,
+    CurveLength,
+    SurfaceRZFourier,
+    create_equally_spaced_curves,
+    create_multifilament_grid,
+)
+from simsopt.objectives import QuadraticPenalty, SquaredFlux
+from simsopt_jax.backend.runtime import get_runtime_jax_device
+from simsopt_jax.core import compute_filament_offsets
 from simsopt_jax.examples import ExecutionScale
+from simsopt_jax.examples.stage_two_finitebuild import (
+    FINITE_BUILD_LBFGS_HISTORY,
+    prepare_finite_build_stage_two,
+    solve_finite_build_stage_two,
+)
+from simsopt_jax.solve.driver import Driver
+from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
+from simsopt_jax_adapters.objectives import (
+    FiniteBuildStageTwoConfig,
+    finite_build_stage_two_diagnostics,
+    make_finite_build_stage_two_objective,
+)
+from simsopt_jax_adapters.objectives.finite_build_stage_two import (
+    FINITE_BUILD_DIAGNOSTIC_FIELDS,
+)
+from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
 
-if TYPE_CHECKING:
-    from simsopt._core.optimizable import Optimizable
-    from simsopt.geo import CurveCurveDistance, CurveLength, SurfaceRZFourier
-    from simsopt.objectives import SquaredFlux
+import jax
+import jax.numpy as jnp
 
 TEST_DATA = Path(__file__).resolve().parents[4] / "tests" / "test_files"
 SURFACE_INPUT = TEST_DATA / "input.LandremanPaul2021_QA"
@@ -40,6 +72,11 @@ _TAYLOR_EPSILONS = (1.0e-3, 1.0e-4, 1.0e-5, 1.0e-6, 1.0e-7, 1.0e-8)
 # Published states report the unscaled objective; only the solve and its Taylor
 # evidence use the configured ``objective_scale``.
 _PUBLISHED_OBJECTIVE_SCALE = 1.0
+# The adapter packs diagnostics in FINITE_BUILD_DIAGNOSTIC_FIELDS order;
+# indexing through the tuple (never by literal) keeps a reordering loud.
+_DIAGNOSTIC_INDEX = {
+    name: index for index, name in enumerate(FINITE_BUILD_DIAGNOSTIC_FIELDS)
+}
 
 
 def _configuration(scale: ExecutionScale) -> dict[str, object]:
@@ -97,21 +134,6 @@ def _mapping_float(configuration: Mapping[str, object], name: str) -> float:
 
 
 def _build_geometry(configuration: Mapping[str, object]):
-    from simsopt.field import (
-        Coil,
-        Current,
-        apply_symmetries_to_currents,
-        apply_symmetries_to_curves,
-    )
-    from simsopt.geo import (
-        CurveLength,
-        SurfaceRZFourier,
-        create_equally_spaced_curves,
-        create_multifilament_grid,
-    )
-    from simsopt_jax.core import compute_filament_offsets
-    from simsopt_jax_adapters.objectives import FiniteBuildStageTwoConfig
-
     surface = SurfaceRZFourier.from_vmec_input(
         SURFACE_INPUT,
         range="half period",
@@ -210,7 +232,6 @@ def _build_geometry(configuration: Mapping[str, object]):
 
 def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
     """Freeze source-equivalent finite-build DOFs and Taylor direction."""
-    from simsopt.field import BiotSavart
 
     configuration = _configuration(scale)
     _, _, _, coils, config = _build_geometry(configuration)
@@ -270,6 +291,7 @@ def _state_values(
     squared_flux: float,
     length_penalty: float,
     distance_penalty: float,
+    minimum_clearance: float,
     coil_lengths: np.ndarray,
 ) -> dict[str, np.ndarray]:
     return {
@@ -280,6 +302,10 @@ def _state_values(
         f"{prefix}:length_penalty": np.asarray(length_penalty, dtype=np.float64),
         f"{prefix}:distance_penalty": np.asarray(
             distance_penalty,
+            dtype=np.float64,
+        ),
+        f"{prefix}:minimum_clearance": np.asarray(
+            minimum_clearance,
             dtype=np.float64,
         ),
         f"{prefix}:coil_lengths": np.asarray(coil_lengths, dtype=np.float64),
@@ -309,9 +335,6 @@ class NativeFiniteBuildEvaluator:
 
 def build_native_evaluator(bundle: InputBundle) -> NativeFiniteBuildEvaluator:
     """Assemble the native finite-build objective and its published terms."""
-    from simsopt.field import BiotSavart
-    from simsopt.geo import CurveCurveDistance, CurveLength
-    from simsopt.objectives import QuadraticPenalty, SquaredFlux
 
     surface, base_curves, symmetric_base_curves, coils, config = _build_geometry(
         bundle.configuration
@@ -349,8 +372,6 @@ def build_native_evaluator(bundle: InputBundle) -> NativeFiniteBuildEvaluator:
 
 
 def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservation:
-    from scipy.optimize import minimize
-
     evaluator = build_native_evaluator(bundle)
     surface = evaluator.surface
     base_curves = evaluator.base_curves
@@ -374,6 +395,7 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
             squared_flux=squared_flux,
             length_penalty=length_penalty,
             distance_penalty=distance_penalty,
+            minimum_clearance=float(evaluator.distance.shortest_distance()),
             coil_lengths=np.asarray(
                 [length.J() for length in lengths],
                 dtype=np.float64,
@@ -409,7 +431,11 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         method="L-BFGS-B",
         options={
             "maxiter": _configuration_int(bundle, "max_steps"),
-            "maxcor": min(_configuration_int(bundle, "max_steps"), 400),
+            # The matched workflows share the production module's frozen
+            # history: the JAX lane routes through
+            # ``solve_finite_build_stage_two`` and cannot configure it, so
+            # the native twin pins the same value.
+            "maxcor": FINITE_BUILD_LBFGS_HISTORY,
             "gtol": 1.0e-20,
             "ftol": 1.0e-20,
         },
@@ -455,23 +481,6 @@ def _jax(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
-    from simsopt_jax.backend.runtime import get_runtime_jax_device
-    from simsopt_jax.solve.driver import Driver
-    from simsopt_jax.solve.serial import (
-        TraceableArrayFunction,
-        TraceableParametricScalarProblem,
-        serial_solve_jax,
-    )
-    from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
-    from simsopt_jax_adapters.objectives import (
-        finite_build_stage_two_diagnostics,
-        make_finite_build_stage_two_objective,
-    )
-    from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
-
-    import jax
-    import jax.numpy as jnp
-
     surface, base_curves, _, coils, config = _build_geometry(bundle.configuration)
     fingerprint = _fingerprint(bundle, arrays, surface, base_curves)
     field = BiotSavartJAX(coils)
@@ -489,26 +498,21 @@ def _jax(
     device = get_runtime_jax_device()
     scale = _configuration_float(bundle, "objective_scale")
 
-    def scaled_objective(
-        parameters: jax.Array,
-        objective_scale: jax.Array,
-    ) -> jax.Array:
-        return objective_scale * objective(parameters)
-
     def objective_scale_parameter(value: float) -> jax.Array:
         return jax.device_put(np.asarray(value, dtype=np.float64), device)
 
     initial_parameters = jax.device_put(arrays["initial_parameters"], device)
-    problem = TraceableParametricScalarProblem(
-        objective_fn=scaled_objective,
-        objective_parameter=objective_scale_parameter(_PUBLISHED_OBJECTIVE_SCALE),
-        x=initial_parameters,
+    prepared = prepare_finite_build_stage_two(
+        objective_fn=objective,
+        diagnostics_fn=diagnostics,
+        initial_parameters=initial_parameters,
+        objective_scale=objective_scale_parameter(_PUBLISHED_OBJECTIVE_SCALE),
     )
-    diagnostics_program = TraceableArrayFunction(diagnostics, initial_parameters)
+    problem = prepared.problem
 
     def state(prefix: str, parameters: jax.Array) -> dict[str, np.ndarray]:
         objective_value, gradient = problem.value_and_grad(parameters)
-        diagnostic_values = diagnostics_program(parameters)
+        diagnostic_values = prepared.diagnostics(parameters)
         published = jax.device_get(
             (parameters, objective_value, gradient, diagnostic_values)
         )
@@ -518,10 +522,11 @@ def _jax(
             parameters=np.asarray(published[0], dtype=np.float64),
             objective=float(published[1]),
             gradient=np.asarray(published[2], dtype=np.float64),
-            squared_flux=float(values[0]),
-            length_penalty=float(values[1]),
-            distance_penalty=float(values[2]),
-            coil_lengths=values[4:],
+            squared_flux=float(values[_DIAGNOSTIC_INDEX["squared_flux"]]),
+            length_penalty=float(values[_DIAGNOSTIC_INDEX["length_penalty"]]),
+            distance_penalty=float(values[_DIAGNOSTIC_INDEX["distance_penalty"]]),
+            minimum_clearance=float(values[_DIAGNOSTIC_INDEX["minimum_clearance"]]),
+            coil_lengths=values[len(FINITE_BUILD_DIAGNOSTIC_FIELDS) :],
         )
 
     initial_values = state("initial", initial_parameters)
@@ -542,14 +547,12 @@ def _jax(
         return (plus - minus) / (epsilon + epsilon) - directional_derivative
 
     taylor_errors_device = jax.vmap(taylor_error)(epsilons)
-    result = serial_solve_jax(
-        problem,
+    result = solve_finite_build_stage_two(
+        prepared,
         driver=Driver.SIMSOPT_LBFGSB,
         max_steps=_configuration_int(bundle, "max_steps"),
-        maxcor=min(_configuration_int(bundle, "max_steps"), 400),
         rtol=_configuration_float(bundle, "rtol"),
         atol=_configuration_float(bundle, "atol"),
-        require_success=False,
     )
     problem.set_objective_parameter(
         objective_scale_parameter(_PUBLISHED_OBJECTIVE_SCALE)

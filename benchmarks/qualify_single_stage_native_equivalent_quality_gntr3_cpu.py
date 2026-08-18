@@ -53,8 +53,8 @@ _REQUIRED_ENVIRONMENT: Final = {
     "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
 }
 _BROAD_EXECUTION_SOURCE_COUNTS: Final = (
-    ("benchmarks", 117),
-    ("src", 326),
+    ("benchmarks", 118),
+    ("src", 327),
     ("examples", 157),
 )
 
