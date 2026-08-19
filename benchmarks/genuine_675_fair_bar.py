@@ -49,8 +49,8 @@ from simsopt_jax.runtime.validation_ladder_common import repo_pythonpath_env
 # Frozen campaign identity
 # --------------------------------------------------------------------------
 
-CHARTER_SHA256 = "be4b262cbbb1e5e2b7fc2f1dcfb98238c23c738a9102296b23ef19f520c067fc"
-CHARTER_COMMIT = "0d1ca0607"
+CHARTER_SHA256 = "2dea1522ea77a2c67c790b94817b2f43aad21d3015f297732bf9a7dbb9b377b0"
+CHARTER_COMMIT = "e07bdc7c4"
 CHARTER_PATH = "docs/jax_gpu_genuine675_fair_bar_plan.md (pr/jax-port-squashed)"
 
 SOURCE_MANIFEST_SHA256 = (
