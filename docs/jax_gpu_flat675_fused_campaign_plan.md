@@ -394,3 +394,27 @@ This amendment rewords a measurement clause in the conservative direction
 before any timed evidence exists; thresholds, budgets, pair counts, anchor
 formulas, and the timer's identity (process wall of the timed child) are
 unchanged.
+
+## Amendment 2 (2026-08-19, pre-evidence — no F3 timed leg has run)
+
+**Disclosure verdict named.** The verdict vocabulary gains
+**`FRESH_REPORTED`** for the per-rung cold-disclosure pairs (matching the
+fair-bar campaign's token): a disclosure pair is *reported*, enters no
+verdict, and cannot be `NOT_PRODUCED` (which means "gates voided the
+rung" — a disclosure never attempted a verdict). `WIN` /
+`CLOSED_BOUNDED_NEGATIVE` / `NOT_PRODUCED` remain the only *rung* verdicts;
+`FRESH_REPORTED` labels disclosure evidence only.
+
+**Process-cap arithmetic corrected.** The r4 derivation (≤121) omitted the
+oracle children. The instrument's accounting is the chartered one: each
+warm pair spawns **6** solve-executing children (2 primers + 2 timed +
+2 oracle), each cold pair 4; full campaign shape = 3 rungs × 5 warm pairs
+(90) + 3 cold pairs (12) + BQ searches (1 fused search child + ≤12 native
+probe children + ≤12 probe primers = 25) = **127 ≤ 130**. The B37
+contingency sweep cannot fire (the fair-bar B37 matrix selected omp16,
+receipt `4d155174c`); were it ever revived, its ~30 additional children
+would breach the cap and the rung-admission rule refuses the rung — a
+dated amendment must precede any such run.
+
+Both clauses are pre-evidence; thresholds, budgets, pair counts, anchor
+formulas, and the timer law are unchanged.
