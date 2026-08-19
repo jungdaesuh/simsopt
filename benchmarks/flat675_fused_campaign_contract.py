@@ -40,10 +40,17 @@ F3_CHARTER_AMENDMENT_1_SHA256: Final[str] = (
 )
 # Amendment 2 (2026-08-19, pre-evidence): FRESH_REPORTED names the disclosure
 # outcome, and the process-cap arithmetic is corrected to 127 <= 130.
-F3_CHARTER_SHA256: Final[str] = (
+F3_CHARTER_AMENDMENT_2_SHA256: Final[str] = (
     "86db1058962d25048f3f16a5e616978985aaa86e08028d9b1c2dbe868ddfb994"
 )
-F3_CHARTER_COMMIT: Final[str] = "e8625f691"
+# Amendment 3 (2026-08-19, post-campaign): status line frozen, and the two
+# ledger-accounting defects disclosed -- the campaign wall was never
+# accumulated and the budget search never charged its children, so the
+# executed campaign's true child total was 137 against a cap of 130.
+F3_CHARTER_SHA256: Final[str] = (
+    "f8d3ff4a10ac684fea0dbe985419d5651d40ea4844132093aa3b52e968ac1acc"
+)
+F3_CHARTER_COMMIT: Final[str] = "PENDING"
 F3_CHARTER_PATH: Final[str] = (
     "docs/jax_gpu_flat675_fused_campaign_plan.md (pr/jax-port-squashed)"
 )
@@ -53,6 +60,7 @@ F3_CHARTER_PATH: Final[str] = (
 F3_CHARTER_LINEAGE: Final[tuple[str, ...]] = (
     F3_CHARTER_FREEZE_SHA256,
     F3_CHARTER_AMENDMENT_1_SHA256,
+    F3_CHARTER_AMENDMENT_2_SHA256,
     F3_CHARTER_SHA256,
 )
 
@@ -1219,6 +1227,31 @@ SOLVE_CHILDREN_PER_WARM_PAIR: Final[int] = 6
 SOLVE_CHILDREN_PER_COLD_PAIR: Final[int] = 4
 
 
+# Each fused probe spawns its own child plus an oracle child; each native
+# probe spawns a primer, the probe child, and an oracle child.  These are
+# measured from the executed campaign's run directory, not assumed: the
+# charter's r4 derivation predicted one reusing fused child and no search
+# oracles at all.
+SEARCH_CHILDREN_PER_FUSED_PROBE: Final[int] = 2
+SEARCH_CHILDREN_PER_NATIVE_PROBE: Final[int] = 3
+
+
+def budget_search_child_count(
+    *,
+    fused_probes: int,
+    native_probes: int,
+) -> int:
+    """Solve-executing children one budget-search phase spawned.
+
+    Derived from the probe counts the search itself recorded, so the number
+    follows what ran rather than a constant that can drift from it.
+    """
+    return (
+        _count(fused_probes, "fused_probes") * SEARCH_CHILDREN_PER_FUSED_PROBE
+        + _count(native_probes, "native_probes") * SEARCH_CHILDREN_PER_NATIVE_PROBE
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class CampaignState:
     """Cumulative campaign resource use and each rung's recorded fate."""
@@ -1303,6 +1336,7 @@ __all__ = [
     "DISCLOSURE_RUNGS",
     "DISCLOSURE_RUNG_SUFFIX",
     "F3_CHARTER_AMENDMENT_1_SHA256",
+    "F3_CHARTER_AMENDMENT_2_SHA256",
     "F3_CHARTER_COMMIT",
     "F3_CHARTER_FREEZE_SHA256",
     "F3_CHARTER_LINEAGE",
@@ -1331,6 +1365,8 @@ __all__ = [
     "POLICY_MAXLS",
     "QUALITY_OBJECTIVE_RTOL",
     "RUNG_BUDGETS",
+    "SEARCH_CHILDREN_PER_FUSED_PROBE",
+    "SEARCH_CHILDREN_PER_NATIVE_PROBE",
     "SOLVE_CHILDREN_PER_COLD_PAIR",
     "SOLVE_CHILDREN_PER_WARM_PAIR",
     "WIN_MEDIAN_THRESHOLD",
@@ -1352,6 +1388,7 @@ __all__ = [
     "bq_anchor",
     "bq_quality_failures",
     "budget_search_breaches",
+    "budget_search_child_count",
     "counter_liveness_failures",
     "f3_contract_sha256",
     "fixed_budget_quality_failures",

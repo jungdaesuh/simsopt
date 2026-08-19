@@ -84,6 +84,7 @@ from benchmarks.flat675_fused_campaign_contract import (
     F3ContractError,
     Verdict,
     adjudicate_rows,
+    budget_search_child_count,
     f3_contract_sha256,
     observed_policy_sha256,
     parse_row,
@@ -405,8 +406,16 @@ def _new_run_root(phase: str) -> Path:
     return root
 
 
-def _prepare_run(phase: str, source_manifest: Path) -> tuple[Path, Path, str, dict]:
-    """Open a run root and bind the frozen input, fair-bar pattern.
+def _prepare_run(
+    phase: str, source_manifest: Path
+) -> tuple[Path, Path, str, dict, float]:
+    """Open a run root, bind the frozen input, and start the phase clock.
+
+    The clock is returned rather than stashed in a module global: the
+    campaign ledger's twelve-hour cap only means something if every phase
+    charges its own elapsed wall, and a global would make that a hidden
+    input to every publish.
+
 
     ``source_manifest`` is the sealed BUNDLE's own manifest.json (the file the
     lane children consume); the campaign manifest is minted fresh into the run
@@ -414,6 +423,7 @@ def _prepare_run(phase: str, source_manifest: Path) -> tuple[Path, Path, str, di
     directory: the instrument's envelope check enforces an exact member census
     on the sealed 0550 bundle, so any cohabiting extra file fails it.
     """
+    started = time.monotonic()
     trees = require_clean_trees()
     root = _new_run_root(phase)
     shim_dir = write_provenance_shim(root)
@@ -422,7 +432,7 @@ def _prepare_run(phase: str, source_manifest: Path) -> tuple[Path, Path, str, di
     campaign_manifest_sha = load_campaign_manifest(
         campaign_manifest, source_manifest.parent
     )
-    return root, shim_dir, campaign_manifest_sha, trees
+    return root, shim_dir, campaign_manifest_sha, trees, started
 
 
 def _finish_run(root: Path, manifest: Mapping[str, object]) -> None:
@@ -610,7 +620,7 @@ def _run_pair(
 def cmd_pairs(args: argparse.Namespace) -> None:
     rung = str(args.rung)
     budget = RUNG_BUDGETS[rung]
-    root, shim_dir, campaign_manifest_sha, trees = _prepare_run(
+    root, shim_dir, campaign_manifest_sha, trees, started = _prepare_run(
         f"pairs-{rung}", args.input_manifest
     )
     _require_rung_admission(
@@ -636,7 +646,15 @@ def cmd_pairs(args: argparse.Namespace) -> None:
                 warm=True,
             )
         )
-    _publish_rung(root, rung, budget, rows, trees, campaign_manifest_sha)
+    _publish_rung(
+        root,
+        rung,
+        budget,
+        rows,
+        trees,
+        campaign_manifest_sha,
+        phase_wall_seconds=time.monotonic() - started,
+    )
 
 
 def _publish_rung(
@@ -647,6 +665,7 @@ def _publish_rung(
     trees: Mapping[str, Mapping[str, object]],
     campaign_manifest_sha: str,
     *,
+    phase_wall_seconds: float,
     quality_target: float | None = None,
     native_budget: int | None = None,
     cold_disclosure: bool = False,
@@ -675,7 +694,12 @@ def _publish_rung(
         else SOLVE_CHILDREN_PER_WARM_PAIR
     )
     state = _campaign_state()
-    updated = state.completing(rung, timed=timed_legs, solve_children=solve_children)
+    updated = state.completing(
+        rung,
+        timed=timed_legs,
+        solve_children=solve_children,
+        wall_seconds=phase_wall_seconds,
+    )
     _write_campaign_state(updated)
     # The disclosure token comes from the shared rule, not from a second
     # opinion here: a cold rung whose gates fail is voided like any evidence.
@@ -851,7 +875,7 @@ def cmd_budget_search(args: argparse.Namespace) -> None:
     budget the other's discipline would not grant it.  The fused probes share
     one warm compile cache; the native probes each keep their primer.
     """
-    root, shim_dir, campaign_manifest_sha, trees = _prepare_run(
+    root, shim_dir, campaign_manifest_sha, trees, started = _prepare_run(
         "budget-search", args.input_manifest
     )
     target = float(args.quality_target)
@@ -872,6 +896,20 @@ def cmd_budget_search(args: argparse.Namespace) -> None:
         )
         for lane in (L1_LANE, L2_LANE)
     }
+    # The search is untimed but it is not free: its probes spawn real
+    # solve-executing children, and a ledger that skips them under-counts the
+    # process cap for every rung that follows.
+    search_children = budget_search_child_count(
+        fused_probes=len(searches[L1_LANE].probes),
+        native_probes=len(searches[L2_LANE].probes),
+    )
+    updated = _campaign_state().completing(
+        "bq-budget-search",
+        timed=0,
+        solve_children=search_children,
+        wall_seconds=time.monotonic() - started,
+    )
+    _write_campaign_state(updated)
     _finish_run(
         root,
         {
@@ -882,6 +920,11 @@ def cmd_budget_search(args: argparse.Namespace) -> None:
             "f3_charter_sha256": F3_CHARTER_SHA256,
             "f3_charter_lineage": list(F3_CHARTER_LINEAGE),
             "campaign_input_manifest_sha256": campaign_manifest_sha,
+            "solve_child_processes": updated.ledger.solve_child_processes,
+            "search_child_processes": search_children,
+            "campaign_wall_seconds": updated.ledger.campaign_wall_seconds,
+            "cap_breaches": updated.ledger.breaches(),
+            "campaign_stopped_at_rung_boundary": updated.stopped,
             "searches": {
                 lane: search.as_payload() for lane, search in searches.items()
             },
@@ -912,7 +955,7 @@ def cmd_budget_search(args: argparse.Namespace) -> None:
 
 def cmd_pairs_bq(args: argparse.Namespace) -> None:
     """Five timed pairs: fused at m*, native at n*, both re-gated on Q*."""
-    root, shim_dir, campaign_manifest_sha, trees = _prepare_run(
+    root, shim_dir, campaign_manifest_sha, trees, started = _prepare_run(
         "pairs-bq", args.input_manifest
     )
     _require_rung_admission(
@@ -945,6 +988,7 @@ def cmd_pairs_bq(args: argparse.Namespace) -> None:
         rows,
         trees,
         campaign_manifest_sha,
+        phase_wall_seconds=time.monotonic() - started,
         quality_target=float(args.quality_target),
         native_budget=int(args.native_maxiter),
     )
@@ -958,7 +1002,7 @@ def cmd_cold_pair(args: argparse.Namespace) -> None:
         native_maxiter=args.native_maxiter,
         quality_target=args.quality_target,
     )
-    root, shim_dir, campaign_manifest_sha, trees = _prepare_run(
+    root, shim_dir, campaign_manifest_sha, trees, started = _prepare_run(
         f"cold-{budgets.rung}", args.input_manifest
     )
     _require_rung_admission(timed=2, solve_children=SOLVE_CHILDREN_PER_COLD_PAIR)
@@ -989,6 +1033,7 @@ def cmd_cold_pair(args: argparse.Namespace) -> None:
         rows,
         trees,
         campaign_manifest_sha,
+        phase_wall_seconds=time.monotonic() - started,
         quality_target=budgets.quality_target,
         native_budget=budgets.native_maxiter,
         cold_disclosure=True,
@@ -997,7 +1042,7 @@ def cmd_cold_pair(args: argparse.Namespace) -> None:
 
 def cmd_native_sweep(args: argparse.Namespace) -> None:
     """B37 contingency: five OMP configs x three reps, fair-bar selection rule."""
-    root, shim_dir, campaign_manifest_sha, trees = _prepare_run(
+    root, shim_dir, campaign_manifest_sha, trees, started = _prepare_run(
         "native-sweep", args.input_manifest
     )
     budget = RUNG_BUDGETS["b37"]
@@ -1038,11 +1083,25 @@ def cmd_native_sweep(args: argparse.Namespace) -> None:
             walls.append(leg.process_wall_seconds)
         medians[config.label] = statistics.median(walls)
     selection = select_sweep_config(medians)
+    # The contingency sweep runs one primer and one timed leg per rep, and
+    # charges both to the campaign ledger like every other phase.
+    timed_legs = len(NATIVE_SWEEP_OMP_MATRIX) * NATIVE_SWEEP_REPS
+    updated = _campaign_state().completing(
+        "b37-native-sweep",
+        timed=timed_legs,
+        solve_children=2 * timed_legs,
+        wall_seconds=time.monotonic() - started,
+    )
+    _write_campaign_state(updated)
     _finish_run(
         root,
         {
             "schema": F3_RUN_MANIFEST_SCHEMA,
             "rung": "b37-native-sweep",
+            "solve_child_processes": updated.ledger.solve_child_processes,
+            "campaign_wall_seconds": updated.ledger.campaign_wall_seconds,
+            "cap_breaches": updated.ledger.breaches(),
+            "campaign_stopped_at_rung_boundary": updated.stopped,
             "budget": budget,
             "f3_charter_sha256": F3_CHARTER_SHA256,
             "f3_charter_lineage": list(F3_CHARTER_LINEAGE),
@@ -1050,7 +1109,7 @@ def cmd_native_sweep(args: argparse.Namespace) -> None:
             "median_process_wall_seconds": medians,
             "selection": selection,
             "verdict": "SWEEP_COMPLETE",
-            "timed_legs": len(NATIVE_SWEEP_OMP_MATRIX) * NATIVE_SWEEP_REPS,
+            "timed_legs": updated.ledger.timed_legs,
             "git": {name: dict(value) for name, value in trees.items()},
         },
     )
