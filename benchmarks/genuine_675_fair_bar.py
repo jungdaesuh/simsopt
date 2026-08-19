@@ -52,6 +52,17 @@ from simsopt_jax.runtime.validation_ladder_common import repo_pythonpath_env
 CHARTER_SHA256 = "2dea1522ea77a2c67c790b94817b2f43aad21d3015f297732bf9a7dbb9b377b0"
 CHARTER_COMMIT = "e07bdc7c4"
 CHARTER_PATH = "docs/jax_gpu_genuine675_fair_bar_plan.md (pr/jax-port-squashed)"
+# Append-only charter lineage: the sha of the charter bytes at each
+# amendment commit (freeze, A1, A2, A2a, A3).  Runs bind the sha current
+# when they executed; validate accepts any lineage member and recomputes
+# row contracts against the run's own recorded sha.
+CHARTER_LINEAGE = (
+    "92e6a65742acba5f40589f5173bd639c28f2f41ec525b10c343b7ee369a6ed33",
+    "537d621b456dd15688fd960e88c6f15c66f6a03739245d5c160b3ada7e8f0fdb",
+    "1d82aece429f1d8e76b748d6aeaf36134956f49bc6b20a6948522be2d8d32872",
+    "be4b262cbbb1e5e2b7fc2f1dcfb98238c23c738a9102296b23ef19f520c067fc",
+    "2dea1522ea77a2c67c790b94817b2f43aad21d3015f297732bf9a7dbb9b377b0",
+)
 
 SOURCE_MANIFEST_SHA256 = (
     "84febc05d195d84c0802205b2b4c85ea1fa38faa7ff856efca7c12d980647c0c"
@@ -160,11 +171,16 @@ def policy_for_budget(budget: int) -> Genuine675LbfgsbPolicy:
     )
 
 
-def contract_sha256(*, campaign_manifest_sha256: str, budget: int) -> str:
+def contract_sha256(
+    *,
+    campaign_manifest_sha256: str,
+    budget: int,
+    charter_sha256: str = CHARTER_SHA256,
+) -> str:
     return _sha256_bytes(
         _canonical_bytes(
             {
-                "charter_sha256": CHARTER_SHA256,
+                "charter_sha256": charter_sha256,
                 "formulation_semantic_sha256": GENUINE_FULLSPACE_675.semantic_sha256,
                 "campaign_input_manifest_sha256": campaign_manifest_sha256,
                 "policy_semantic_sha256": policy_for_budget(budget).semantic_sha256,
@@ -1557,8 +1573,9 @@ def cmd_validate(args: argparse.Namespace) -> None:
     manifest = json.loads((run_root / "manifest.json").read_text())
     if manifest.get("schema") != RUN_MANIFEST_SCHEMA:
         raise ValueError("Not a fair-bar run manifest.")
-    if manifest.get("charter_sha256") != CHARTER_SHA256:
-        raise ValueError("Run manifest binds a foreign charter.")
+    run_charter = manifest.get("charter_sha256")
+    if run_charter not in CHARTER_LINEAGE:
+        raise ValueError("Run manifest binds a charter outside the lineage.")
     campaign_sha = manifest["campaign_input_manifest_sha256"]
     problems: list[str] = []
     recorded_manifest_sha = manifest["rows"].get("campaign_input_manifest.json")
@@ -1577,6 +1594,7 @@ def cmd_validate(args: argparse.Namespace) -> None:
             expected_contract = contract_sha256(
                 campaign_manifest_sha256=campaign_sha,
                 budget=int(row["budget"]),
+                charter_sha256=run_charter,
             )
             if row.get("campaign_contract_sha256") != expected_contract:
                 problems.append(f"contract_mismatch:{rel}")
