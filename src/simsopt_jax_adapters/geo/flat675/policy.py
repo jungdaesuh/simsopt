@@ -108,18 +108,6 @@ class Flat675HardwareSoftPenaltyPolicy:
         return self.common_scale * self.curvature_base_weight
 
 
-PRODUCTION_FLAT675_HARDWARE_SOFT_PENALTY_POLICY: Final[
-    Flat675HardwareSoftPenaltyPolicy
-] = Flat675HardwareSoftPenaltyPolicy(
-    common_scale=10.0,
-    curve_curve_base_weight=100.0,
-    curvature_base_weight=0.1,
-    curve_curve_threshold_m=0.05,
-    curvature_threshold_inverse_m=40.0,
-    penalty_exponent=2.0,
-)
-
-
 @dataclass(frozen=True, slots=True)
 class Flat675ObjectivePolicy:
     """Weights, targets, and thresholds of the eight production terms.
@@ -310,7 +298,6 @@ def flat675_outer_objective_config(
 
 __all__ = [
     "FLAT675_OBJECTIVE_TERM_KEYS",
-    "PRODUCTION_FLAT675_HARDWARE_SOFT_PENALTY_POLICY",
     "Flat675BoozerLabelType",
     "Flat675BoozerSystemPolicy",
     "Flat675HardwareSoftPenaltyPolicy",
