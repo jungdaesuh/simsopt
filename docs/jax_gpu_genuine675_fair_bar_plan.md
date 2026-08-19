@@ -392,3 +392,71 @@ Amended substrate (strictly stronger continuity than the frozen section's):
   HEAD, clean for gate-consuming runs).
 
 No timer, threshold, budget, gate, or eligibility clause changes.
+
+## Amendment 2 — shared-box partition protocol (2026-08-19, pre-evidence)
+
+Empirical basis: the box hosts a continuous multi-run foreign campaign
+(~50 cores per run, runs launching back-to-back), so the frozen Ops
+section's quiet-box condition is unavailable for the foreseeable window;
+the operator directed the campaign to proceed without an empty box. No
+timed evidence exists (Phase 1 and the divergence probe are untimed).
+Timing the native denominator against a ~50-core foreign job would
+reproduce the projected-route artifact class (a contended denominator can
+only flatter the GPU), so proceeding requires structural isolation plus an
+uncontaminated high-thread anchor — both defined here, both in the
+anti-GPU direction.
+
+**Partition.** The campaign reserves CPUs `{0–7, 32–39}` exclusively:
+cores 0–7 with their SMT siblings — exactly one CCD (L3 instance 0) of the
+9970X, giving the reserved set a private 32 MiB L3. All foreign compute
+processes are confined (reversibly, `taskset -apc`) to the complement
+`{8–31, 40–63}` (24 physical cores + siblings; the current foreign run's
+~50 threads oversubscribe that set by ~1.04×, a ≈4% cost to the foreign
+campaign). Before every timed leg the harness verifies, fail-closed:
+(a) no process with recent CPU activity outside the campaign has an
+affinity mask overlapping the reserved set; (b) reserved-set busy fraction
+< 20% (measured from `/proc/stat` over a 3 s window); (c) GPU utilization
+≤ 5% (unchanged). The runner re-confines any newly spawned foreign process
+between legs; the harness gate is the authority (violation = the leg fails
+closed). The whole-box load gate of Amendment-0 ops is superseded for this
+campaign by (a)–(c).
+
+**Native matrix under partition.** The sweep is restricted to what the
+reserved set can measure fairly: `OMP ∈ {1, 2, 4, 8}` pinned to dedicated
+physical cores `0–7`, plus `OMP=16` on `{0–7, 32–39}` (disclosed as
+SMT-assisted — 16 threads on 8 physical cores). `OMP ∈ {32, 64}` is
+unmeasurable under partition; its role is filled by the **archived
+high-thread anchor** below. The per-budget unpinned-default disclosure leg
+is dropped (meaningless inside a partition); the July condition is instead
+represented by the archived samples themselves.
+
+**Archived high-thread anchor (anti-GPU by construction).** The four
+archived maxiter=3 triads (2026-07-20/21, unpinned 64-thread native, the
+same instrument bytes) provide contention-free native samples: process
+walls 58.702 / 77.046 / 82.039 / 87.310 s, optimizer walls 53.603–82.246 s,
+fastest steady per-eval 5.867 s (r3: 52.807 s compact over 9 evals). The
+anchor bars are: **B3 anchor = 58.702 s** (the fastest archived process
+wall) and **B50 anchor = 66 × 5.867 = 387.2 s** (the fastest archived
+per-eval times the measured B50 evaluation count, with zero overhead
+added — an extrapolation constructed strictly in native's favor).
+Admitting these candidates can only lower the denominator bar, never
+raise it, so no partition-induced slowdown of the live native legs can
+inflate the ratio beyond what the archive licenses.
+
+**Amended verdict rule (strictly stronger than the frozen rule).** A
+budget rung is `WIN` only if BOTH hold: (1) the five interleaved
+partition pairs satisfy the frozen rule (median ≥ 1.10, every pair
+> 1.00) against the live swept denominator; **and** (2) the GPU lane's
+median process wall beats the archived anchor bar by the same margin
+(anchor / GPU-median ≥ 1.10). Failing (2) while passing (1) is
+`CLOSED_BOUNDED_NEGATIVE` with the anchor cited. Both conditions are
+reported with min/median/max.
+
+**Symmetric residence.** GPU pair legs' host process is pinned to the
+same reserved set, so both lanes of every pair live in the identical
+partition. Primers, alternation, work-matching, endpoint, and oracle
+gates are unchanged. Residual interference channel (shared DRAM
+bandwidth with the foreign complement) is disclosed; its direction on
+live legs is pro-GPU, which is exactly what condition (2) bounds.
+
+No budget, timer, or pair-count changes. The instrument is unchanged.
