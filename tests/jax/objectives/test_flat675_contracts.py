@@ -21,6 +21,19 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from simsopt_jax.core.specs import (
+    CoilDofExtractionSpec,
+    CoilSetDofExtractionSpec,
+    OptimizableDofMapSpec,
+    SurfaceRZFourierSpec,
+    SurfaceXYZTensorFourierSpec,
+    make_coil_dof_extraction_spec,
+    make_coil_set_dof_extraction_spec,
+    make_curve_xyzfourier_spec,
+    make_optimizable_dof_map_spec,
+    make_surface_rzfourier_spec,
+    make_surface_xyz_tensor_fourier_spec,
+)
 from simsopt_jax_adapters.geo.flat675 import (
     FLAT675_COIL_DOF_COUNT,
     FLAT675_OUTER_DOF_COUNT,
@@ -29,11 +42,15 @@ from simsopt_jax_adapters.geo.flat675 import (
     Flat675BoozerLabelType,
     Flat675BoozerMaterial,
     Flat675BoozerSystemPolicy,
+    Flat675Bundle,
     Flat675Candidate,
     Flat675ContractError,
     Flat675HardwareSoftPenaltyPolicy,
     Flat675Material,
     Flat675ObjectivePolicy,
+    build_flat675_boozer_system,
+    flat675_candidate_geometry,
+    load_flat675_bundle,
     load_flat675_input_manifest,
     load_flat675_runtime_spec,
     load_flat675_vessel_template,
@@ -41,6 +58,10 @@ from simsopt_jax_adapters.geo.flat675 import (
 )
 from simsopt_jax_adapters.geo.flat675._boozer_arrays import (
     build_flat675_boozer_system_arrays,
+)
+from simsopt_jax_adapters.geo.flat675.boozer_material import (
+    _coil_extraction_owner_indices,
+    _map_owner_indices,
 )
 from simsopt_jax_adapters.geo.flat675.policy import flat675_outer_objective_config
 
@@ -730,3 +751,572 @@ def test_boozer_arrays_leave_points_unweighted_when_the_policy_says_so() -> None
         rtol=1.0e-14,
         atol=1.0e-300,
     )
+
+
+# ---------------------------------------------------------------------------
+# Synthetic 675-shaped topology.  A flat-675 material is an eleven-owner coil
+# extraction over a 661-DOF surface; none of that needs a frozen bundle, so
+# the guards that decide whether a topology *is* flat-675 are held from
+# published spec constructors here.
+# ---------------------------------------------------------------------------
+
+_GRID_POINT_COUNT = 2
+_SURFACE_MPOL = 10
+_SURFACE_NTOR = 10
+_SURFACE_NFP = 1
+
+
+# A CurveXYZFourier at order 1 carries 3 * (2 * 1 + 1) = 9 DOFs, and a coil
+# current is one scalar.  The synthetic extraction respects both sizes so the
+# fixture is a topology the field layer could actually evaluate, not just a
+# shape the owner-index guards happen to accept.
+_CURVE_DOF_COUNT = 9
+_CURRENT_DOF_COUNT = 1
+
+
+def _owner_map(
+    owner_segments: tuple[tuple[int, int, int, int], ...],
+    *,
+    template_dof_count: int = FLAT675_COIL_DOF_COUNT,
+) -> OptimizableDofMapSpec:
+    return make_optimizable_dof_map_spec(
+        template_full_dofs=np.zeros(template_dof_count, dtype=np.float64),
+        owner_segments=owner_segments,
+        input_mode="slice",
+        input_start=0,
+        input_end=template_dof_count,
+    )
+
+
+def _coil(
+    *,
+    curve_segments: tuple[tuple[int, int, int, int], ...],
+    current_segments: tuple[tuple[int, int, int, int], ...],
+    surface_segments: tuple[tuple[int, int, int, int], ...] | None = None,
+) -> CoilDofExtractionSpec:
+    return make_coil_dof_extraction_spec(
+        curve=make_curve_xyzfourier_spec(
+            dofs=np.zeros(_CURVE_DOF_COUNT, dtype=np.float64),
+            quadpoints=np.linspace(0.0, 1.0, 4, endpoint=False, dtype=np.float64),
+            order=1,
+        ),
+        curve_map=_owner_map(curve_segments, template_dof_count=_CURVE_DOF_COUNT),
+        current_map=_owner_map(current_segments, template_dof_count=_CURRENT_DOF_COUNT),
+        surface_map=(
+            None
+            if surface_segments is None
+            else _owner_map(surface_segments, template_dof_count=_CURVE_DOF_COUNT)
+        ),
+    )
+
+
+def _coil_extraction(
+    coils: tuple[CoilDofExtractionSpec, ...] | None = None,
+) -> CoilSetDofExtractionSpec:
+    """Two coils whose maps claim all eleven owner DOFs between them.
+
+    The first takes nine shape DOFs and its current; the second takes only its
+    current.  Nine plus one plus one is the flat layout's eleven.
+    """
+    if coils is None:
+        coils = (
+            _coil(
+                curve_segments=((0, _CURVE_DOF_COUNT, 0, _CURVE_DOF_COUNT),),
+                current_segments=((9, 10, 0, 1),),
+            ),
+            _coil(curve_segments=(), current_segments=((10, 11, 0, 1),)),
+        )
+    return make_coil_set_dof_extraction_spec(coils)
+
+
+def _surface_template(
+    *,
+    dof_count: int = FLAT675_SURFACE_DOF_COUNT,
+) -> SurfaceXYZTensorFourierSpec:
+    grid = np.linspace(0.0, 1.0, _GRID_POINT_COUNT, endpoint=False, dtype=np.float64)
+    return make_surface_xyz_tensor_fourier_spec(
+        dofs=np.zeros(dof_count, dtype=np.float64),
+        quadpoints_phi=grid,
+        quadpoints_theta=grid,
+        nfp=_SURFACE_NFP,
+        stellsym=True,
+        mpol=_SURFACE_MPOL,
+        ntor=_SURFACE_NTOR,
+    )
+
+
+def _boozer_material() -> Flat675BoozerMaterial:
+    """A valid flat-675 topology built entirely from published constructors."""
+    return Flat675BoozerMaterial(
+        surface_template=_surface_template(),
+        coil_dof_extraction=_coil_extraction(),
+        mpol=_SURFACE_MPOL,
+        ntor=_SURFACE_NTOR,
+        nfp=_SURFACE_NFP,
+        nphi=_GRID_POINT_COUNT,
+        ntheta=_GRID_POINT_COUNT,
+    )
+
+
+def _vessel_template(*, poloidal_mode_count: int = 2) -> SurfaceRZFourierSpec:
+    """An RZ vessel; two poloidal rows is the three-free-DOF flat-675 shape."""
+    block = np.zeros((poloidal_mode_count, 1), dtype=np.float64)
+    block[0, 0] = 1.0
+    grid = np.array([0.0, 0.5], dtype=np.float64)
+    return make_surface_rzfourier_spec(
+        rc=block,
+        zs=block,
+        rs=np.zeros_like(block),
+        zc=np.zeros_like(block),
+        quadpoints_phi=grid,
+        quadpoints_theta=grid,
+        nfp=_SURFACE_NFP,
+        stellsym=True,
+    )
+
+
+# --- _map_owner_indices: the six-condition segment validator ---------------
+
+
+def test_owner_map_lists_every_index_its_segments_claim() -> None:
+    assert _map_owner_indices(_owner_map(((0, 11, 0, 11),))) == tuple(range(11))
+    assert _map_owner_indices(_owner_map(((0, 4, 0, 4), (7, 11, 4, 8)))) == (
+        0,
+        1,
+        2,
+        3,
+        7,
+        8,
+        9,
+        10,
+    )
+
+
+def test_owner_map_claims_nothing_when_it_declares_no_segment() -> None:
+    assert _map_owner_indices(_owner_map(())) == ()
+
+
+@pytest.mark.parametrize(
+    "segment",
+    [
+        pytest.param((-1, 10, 0, 11), id="negative-owner-start"),
+        pytest.param((5, 2, 0, -3), id="owner-end-before-its-start"),
+        pytest.param((0, 2, -1, 1), id="negative-target-start"),
+        pytest.param((0, 0, 5, 2), id="target-end-before-its-start"),
+        pytest.param((0, 11, 0, 5), id="owner-and-target-lengths-differ"),
+        pytest.param((0, 12, 0, 12), id="owner-end-past-the-eleventh-dof"),
+    ],
+)
+def test_owner_map_rejects_a_malformed_segment(
+    segment: tuple[int, int, int, int],
+) -> None:
+    """Each condition of the six-part segment guard refuses on its own."""
+    with pytest.raises(Flat675ContractError, match="invalid owner segment"):
+        _map_owner_indices(_owner_map((segment,)))
+
+
+# --- _coil_extraction_owner_indices: the per-coil union --------------------
+
+
+def test_extraction_unions_the_curve_and_current_maps_of_every_coil() -> None:
+    owners = _coil_extraction_owner_indices(_coil_extraction())
+
+    assert owners == frozenset(range(FLAT675_COIL_DOF_COUNT))
+
+
+def test_extraction_also_unions_a_coil_surface_map_when_one_is_present() -> None:
+    """The optional third map is read; without it these owners go unclaimed."""
+    shared = {
+        "curve_segments": ((0, 4, 0, 4),),
+        "current_segments": ((4, 5, 0, 1),),
+    }
+    without_surface_map = _coil_extraction((_coil(**shared),))
+    with_surface_map = _coil_extraction(
+        (_coil(**shared, surface_segments=((5, 11, 0, 6),)),)
+    )
+
+    assert _coil_extraction_owner_indices(without_surface_map) == frozenset(range(5))
+    assert _coil_extraction_owner_indices(with_surface_map) == frozenset(range(11))
+
+
+# --- Flat675BoozerMaterial: the layout contract ----------------------------
+
+
+def test_boozer_material_accepts_a_synthetic_675_topology() -> None:
+    """The control: eleven owner DOFs over a 661-DOF surface is flat-675."""
+    material = _boozer_material()
+
+    assert material.mpol == _SURFACE_MPOL
+    assert material.surface_template.dofs.shape == (FLAT675_SURFACE_DOF_COUNT,)
+
+
+def test_boozer_material_rejects_a_surface_of_the_wrong_spec_type() -> None:
+    with pytest.raises(
+        Flat675ContractError, match="SurfaceXYZTensorFourier runtime surface"
+    ):
+        dataclasses.replace(
+            _boozer_material(),
+            surface_template=_vessel_template(),  # type: ignore[arg-type]
+        )
+
+
+def test_boozer_material_rejects_an_extraction_of_the_wrong_spec_type() -> None:
+    with pytest.raises(Flat675ContractError, match="typed coil-DOF extraction"):
+        dataclasses.replace(
+            _boozer_material(),
+            coil_dof_extraction=_owner_map(()),  # type: ignore[arg-type]
+        )
+
+
+def test_boozer_material_rejects_a_surface_that_is_not_661_dofs() -> None:
+    with pytest.raises(
+        Flat675ContractError, match=f"exactly {FLAT675_SURFACE_DOF_COUNT} DOFs"
+    ):
+        dataclasses.replace(
+            _boozer_material(),
+            surface_template=_surface_template(dof_count=660),
+        )
+
+
+def test_boozer_material_rejects_float32_surface_dofs() -> None:
+    """Right count, wrong precision: the flat-675 lane is float64 only.
+
+    The published surface factory coerces its DOFs to float64, so this guard
+    is only reachable by rebuilding the frozen spec directly — which is
+    exactly the caller it defends against.  (The ignores below are because
+    ``_register_jax_spec`` carries no ``dataclass_transform``, so no spec
+    class reads as a dataclass to a type checker.)
+    """
+    single_precision = dataclasses.replace(
+        _surface_template(),  # type: ignore[type-var]
+        dofs=jnp.zeros(FLAT675_SURFACE_DOF_COUNT, dtype=jnp.float32),
+    )
+
+    with pytest.raises(Flat675ContractError, match="surface DOFs must use float64"):
+        dataclasses.replace(_boozer_material(), surface_template=single_precision)
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"mpol": _SURFACE_MPOL + 1},
+        {"ntor": _SURFACE_NTOR + 1},
+        {"nfp": _SURFACE_NFP + 1},
+        {"nphi": _GRID_POINT_COUNT + 1},
+        {"ntheta": _GRID_POINT_COUNT + 1},
+    ],
+)
+def test_boozer_material_rejects_grid_metadata_its_surface_contradicts(
+    override: dict[str, int],
+) -> None:
+    """Each declared grid number must be the one the surface actually carries."""
+    with pytest.raises(Flat675ContractError, match="grid metadata differs"):
+        dataclasses.replace(_boozer_material(), **override)
+
+
+def test_boozer_material_rejects_an_extraction_that_leaves_an_owner_unclaimed() -> None:
+    with pytest.raises(
+        Flat675ContractError,
+        match=f"every one of {FLAT675_COIL_DOF_COUNT} owner DOFs",
+    ):
+        dataclasses.replace(
+            _boozer_material(),
+            coil_dof_extraction=_coil_extraction(
+                (
+                    _coil(
+                        curve_segments=((0, _CURVE_DOF_COUNT, 0, _CURVE_DOF_COUNT),),
+                        current_segments=((9, 10, 0, 1),),
+                    ),
+                )
+            ),
+        )
+
+
+# --- Flat675Material: the vessel template's free-DOF contract --------------
+
+
+def test_material_accepts_a_vessel_template_with_three_free_dofs() -> None:
+    """The control the vessel rejection below is measured against."""
+    material = Flat675Material(
+        boozer=_boozer_material(),
+        vessel_template=_vessel_template(),
+    )
+
+    assert material.vessel_template.mpol == 1
+
+
+def test_material_rejects_a_vessel_template_without_three_free_dofs() -> None:
+    """A taller vessel carries five free DOFs and cannot take the 3-DOF block."""
+    with pytest.raises(
+        Flat675ContractError,
+        match=f"exactly {FLAT675_VESSEL_DOF_COUNT} free DOFs",
+    ):
+        Flat675Material(
+            boozer=_boozer_material(),
+            vessel_template=_vessel_template(poloidal_mode_count=3),
+        )
+
+
+# --- load_flat675_bundle: the three records wired together -----------------
+
+
+def _node_scalar(value: object) -> dict[str, Any]:
+    return {"kind": "scalar", "value": value}
+
+
+def _node_tuple(items: list[Any]) -> dict[str, Any]:
+    return {"kind": "tuple", "items": items}
+
+
+def _node_array(values: list[float], shape: list[int]) -> dict[str, Any]:
+    return {"kind": "array", "dtype": "float64", "shape": shape, "data": values}
+
+
+def _node_dataclass(class_name: str, fields: dict[str, Any]) -> dict[str, Any]:
+    return {"kind": "dataclass", "class": class_name, "fields": fields}
+
+
+def _owner_map_node(
+    owner_segments: tuple[tuple[int, int, int, int], ...],
+    *,
+    template_dof_count: int,
+) -> dict[str, Any]:
+    return _node_dataclass(
+        "OptimizableDofMapSpec",
+        {
+            "template_full_dofs": _node_array(
+                [0.0] * template_dof_count, [template_dof_count]
+            ),
+            "owner_segments": _node_tuple(
+                [
+                    _node_tuple([_node_scalar(bound) for bound in segment])
+                    for segment in owner_segments
+                ]
+            ),
+            "input_mode": _node_scalar("slice"),
+            "input_start": _node_scalar(0),
+            "input_end": _node_scalar(template_dof_count),
+        },
+    )
+
+
+def _coil_node(
+    *,
+    curve_segments: tuple[tuple[int, int, int, int], ...],
+    current_segments: tuple[tuple[int, int, int, int], ...],
+) -> dict[str, Any]:
+    return _node_dataclass(
+        "CoilDofExtractionSpec",
+        {
+            "curve": _node_dataclass(
+                "CurveXYZFourierSpec",
+                {
+                    "dofs": _node_array([0.0] * _CURVE_DOF_COUNT, [_CURVE_DOF_COUNT]),
+                    "quadpoints": _node_array([0.0, 0.25, 0.5, 0.75], [4]),
+                    "order": _node_scalar(1),
+                },
+            ),
+            "curve_map": _owner_map_node(
+                curve_segments, template_dof_count=_CURVE_DOF_COUNT
+            ),
+            "current_map": _owner_map_node(
+                current_segments, template_dof_count=_CURRENT_DOF_COUNT
+            ),
+            "symmetry": _node_dataclass(
+                "CoilSymmetrySpec",
+                {
+                    "rotmat": _node_array(
+                        [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], [3, 3]
+                    ),
+                    "scale": _node_scalar(1.0),
+                    "has_rotation": _node_scalar(False),
+                },
+            ),
+            "surface_map": _node_scalar(None),
+            "surface_output_index": _node_scalar(None),
+            "current_term_maps": _node_tuple([]),
+            "current_term_scales": _node_tuple([]),
+            "curve_source_index": _node_scalar(None),
+        },
+    )
+
+
+def _flat675_runtime_spec_payload() -> dict[str, Any]:
+    """The wire form of the synthetic topology the material tests build."""
+    grid = list(
+        np.linspace(0.0, 1.0, _GRID_POINT_COUNT, endpoint=False, dtype=np.float64)
+    )
+    payload = _runtime_spec_payload()
+    payload["surface"] = {
+        "surface_class": "SurfaceXYZTensorFourier",
+        "dofs": _spec_array([0.0] * FLAT675_SURFACE_DOF_COUNT, [661]),
+        "mpol": _SURFACE_MPOL,
+        "ntor": _SURFACE_NTOR,
+        "nfp": _SURFACE_NFP,
+        "stellsym": True,
+        "quadpoints_phi": _spec_array(grid, [_GRID_POINT_COUNT]),
+        "quadpoints_theta": _spec_array(grid, [_GRID_POINT_COUNT]),
+    }
+    payload["quadrature"] = {
+        "nphi": _GRID_POINT_COUNT,
+        "ntheta": _GRID_POINT_COUNT,
+    }
+    payload["field"]["coil_dofs"] = _spec_array(
+        [0.0] * FLAT675_COIL_DOF_COUNT, [FLAT675_COIL_DOF_COUNT]
+    )
+    payload["field"]["coil_dof_extraction"] = _node_dataclass(
+        "CoilSetDofExtractionSpec",
+        {
+            "coils": _node_tuple(
+                [
+                    _coil_node(
+                        curve_segments=((0, _CURVE_DOF_COUNT, 0, _CURVE_DOF_COUNT),),
+                        current_segments=((9, 10, 0, 1),),
+                    ),
+                    _coil_node(
+                        curve_segments=(),
+                        current_segments=((10, 11, 0, 1),),
+                    ),
+                ]
+            )
+        },
+    )
+    return payload
+
+
+def test_load_bundle_wires_the_manifest_seed_and_vessel_together(
+    tmp_path: Path,
+) -> None:
+    """The one call every flat-675 caller starts from, on a synthetic bundle."""
+    _write_bundle(
+        tmp_path,
+        manifest=_manifest_payload(),
+        vessel_material=_vessel_material_payload(),
+        runtime_spec=_flat675_runtime_spec_payload(),
+    )
+
+    bundle = load_flat675_bundle(tmp_path)
+
+    assert isinstance(bundle, Flat675Bundle)
+    assert bundle.start_candidate.outer_vector().shape == (FLAT675_OUTER_DOF_COUNT,)
+    assert bundle.material.boozer.surface_template.dofs.shape == (
+        FLAT675_SURFACE_DOF_COUNT,
+    )
+    assert bundle.material.vessel_template.mpol == 1
+    assert bundle.objective_policy.optimized_coil_index == 20
+    assert bundle.boozer_policy.weight_by_inverse_field_magnitude is True
+
+
+def test_load_bundle_refuses_a_seed_whose_topology_is_not_flat_675(
+    tmp_path: Path,
+) -> None:
+    """A bundle whose three records disagree must not assemble."""
+    payload = _flat675_runtime_spec_payload()
+    payload["field"]["coil_dofs"] = _spec_array([0.0] * 10, [10])
+    _write_bundle(
+        tmp_path,
+        manifest=_manifest_payload(),
+        vessel_material=_vessel_material_payload(),
+        runtime_spec=payload,
+    )
+
+    with pytest.raises(
+        Flat675ContractError,
+        match=f"exactly {FLAT675_COIL_DOF_COUNT} coil DOFs",
+    ):
+        load_flat675_bundle(tmp_path)
+
+
+# --- from_runtime_spec and the candidate geometry path ---------------------
+
+
+def test_boozer_material_rejects_something_that_is_not_a_runtime_spec() -> None:
+    with pytest.raises(TypeError, match="must be SingleStageRuntimeSpec"):
+        Flat675BoozerMaterial.from_runtime_spec(object())  # type: ignore[arg-type]
+
+
+def test_boozer_material_rejects_float32_seed_coil_dofs(tmp_path: Path) -> None:
+    """The seed's own DOFs must be float64 before any geometry is built."""
+    _write_bundle(tmp_path, runtime_spec=_flat675_runtime_spec_payload())
+    runtime_spec = load_flat675_runtime_spec(tmp_path)
+    # As above: the seed factory coerces to float64, so only a directly
+    # rebuilt spec can carry single-precision coil DOFs into this guard.
+    single_precision = dataclasses.replace(
+        runtime_spec,  # type: ignore[type-var]
+        seed=dataclasses.replace(
+            runtime_spec.seed,  # type: ignore[type-var]
+            coil_dofs=jnp.zeros(FLAT675_COIL_DOF_COUNT, dtype=jnp.float32),
+        ),
+    )
+
+    with pytest.raises(Flat675ContractError, match="coil DOFs must use float64"):
+        Flat675BoozerMaterial.from_runtime_spec(single_precision)
+
+
+def test_candidate_geometry_and_system_carry_the_two_column_shape() -> None:
+    """One candidate through geometry and assembly on the synthetic topology.
+
+    The design matrix has one row per flattened field component of the grid
+    and exactly two columns — the ``(iota, G)`` inner state the flat
+    formulation closes — and the right-hand side matches it row for row.
+    """
+    material = _boozer_material()
+    coil = (
+        jnp.zeros(FLAT675_COIL_DOF_COUNT, dtype=jnp.float64)
+        .at[0]
+        .set(1.0)
+        .at[9]
+        .set(1.0e5)
+        .at[10]
+        .set(1.0e5)
+    )
+    surface = jnp.zeros(FLAT675_SURFACE_DOF_COUNT, dtype=jnp.float64).at[0].set(1.0)
+    grid_point_count = _GRID_POINT_COUNT * _GRID_POINT_COUNT
+
+    geometry = flat675_candidate_geometry(material, coil, surface)
+    system = build_flat675_boozer_system(
+        geometry,
+        Flat675BoozerSystemPolicy(weight_by_inverse_field_magnitude=True),
+    )
+
+    assert geometry.surface_gamma.shape == (
+        _GRID_POINT_COUNT,
+        _GRID_POINT_COUNT,
+        3,
+    )
+    assert geometry.toroidal_tangent.shape == geometry.surface_gamma.shape
+    assert geometry.poloidal_tangent.shape == geometry.surface_gamma.shape
+    assert system.design_matrix.shape == (grid_point_count * 3, 2)
+    assert system.right_hand_side.shape == (grid_point_count * 3,)
+
+
+@pytest.mark.parametrize(
+    ("coil_dofs", "surface_dofs", "message"),
+    [
+        pytest.param(
+            jnp.zeros(10, dtype=jnp.float64),
+            jnp.zeros(FLAT675_SURFACE_DOF_COUNT, dtype=jnp.float64),
+            "coil coordinates must have shape",
+            id="coil-block-too-short",
+        ),
+        pytest.param(
+            jnp.zeros(FLAT675_COIL_DOF_COUNT, dtype=jnp.float64),
+            jnp.zeros(660, dtype=jnp.float64),
+            "surface coordinates must have shape",
+            id="surface-block-too-short",
+        ),
+        pytest.param(
+            jnp.zeros(FLAT675_COIL_DOF_COUNT, dtype=jnp.float32),
+            jnp.zeros(FLAT675_SURFACE_DOF_COUNT, dtype=jnp.float64),
+            "requires float64 inputs",
+            id="single-precision-coil-block",
+        ),
+    ],
+)
+def test_candidate_geometry_rejects_a_malformed_outer_block(
+    coil_dofs: jnp.ndarray,
+    surface_dofs: jnp.ndarray,
+    message: str,
+) -> None:
+    with pytest.raises(Flat675ContractError, match=message):
+        flat675_candidate_geometry(_boozer_material(), coil_dofs, surface_dofs)
