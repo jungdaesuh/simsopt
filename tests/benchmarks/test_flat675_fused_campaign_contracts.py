@@ -45,6 +45,7 @@ from benchmarks.flat675_fused_campaign_contract import (
     MAX_SOLVE_CHILD_PROCESSES,
     MAX_TIMED_LEGS,
     MAXFUN_MULTIPLIER,
+    OBSOLETE_PRECISION_ENV,
     PAIR_COUNT,
     POLICY_FIELDS,
     POLICY_MAXCOR,
@@ -73,6 +74,7 @@ from benchmarks.flat675_fused_campaign_contract import (
     policy_identity_failures,
     policy_identity_sha256,
     policy_payload,
+    production_child_environment,
     resolve_disclosure_budgets,
     row_paths,
     search_minimal_budget,
@@ -2002,3 +2004,114 @@ def test_a_bq_disclosure_requires_every_searched_value(omitted: str) -> None:
 def test_only_the_three_chartered_rungs_may_disclose() -> None:
     with pytest.raises(F3ContractError, match="not a disclosure rung"):
         resolve_disclosure_budgets("b50")
+
+
+# --------------------------------------------------------------------------
+# Cross-tree child environment (the L1 lane runs a production-tree child from
+# an environment the instrument built)
+# --------------------------------------------------------------------------
+
+# The variable set the instrument's builder actually produced for a GPU child,
+# transcribed from a live gpu_environment() call.
+INSTRUMENT_GPU_ENVIRONMENT = {
+    "JAX_ENABLE_X64": "1",
+    "JAX_PLATFORMS": "cuda,cpu",
+    "SIMSOPT_ADJOINT_LINEAR_SOLVER": "dense",
+    "SIMSOPT_BACKEND": "jax",
+    "SIMSOPT_BACKEND_MODE": "jax_gpu_parity",
+    "SIMSOPT_BACKEND_STRICT": "1",
+    "SIMSOPT_JAX_BACKEND": "cuda",
+    "SIMSOPT_JAX_CHUNK_AUTOTUNE": "1",
+    "SIMSOPT_JAX_CUDA_LIBRARY_MODE": "bundled",
+    "SIMSOPT_JAX_DEBUG_NANS": "0",
+    "SIMSOPT_JAX_DISABLE_JIT": "0",
+    "SIMSOPT_JAX_GPU_PREALLOCATE": "false",
+    "SIMSOPT_JAX_PLATFORM": "cuda",
+    "SIMSOPT_JAX_SHARDING": "none",
+    "SIMSOPT_JAX_TRANSFER_GUARD": "disallow",
+    "SIMSOPT_LBFGS_DEBUG": "0",
+    "SIMSOPT_MAX_DENSE_JACOBIAN_BYTES_GPU": "268435456",
+    "SIMSOPT_MIXED_PRECISION": "0",
+    "SIMSOPT_TRACEABLE_NEWTON_LINEAR_SOLVER": "hybrid_final_dense_ir",
+    "STAGE2_BACKEND": "jax",
+}
+
+
+def test_the_adapter_removes_the_variable_production_refuses() -> None:
+    adapted = production_child_environment(INSTRUMENT_GPU_ENVIRONMENT)
+
+    assert OBSOLETE_PRECISION_ENV in INSTRUMENT_GPU_ENVIRONMENT
+    assert OBSOLETE_PRECISION_ENV not in adapted
+
+
+def test_the_adapter_names_no_precision_of_its_own() -> None:
+    """Absence resolves to fp64; naming it would be a second source for it."""
+    adapted = production_child_environment(INSTRUMENT_GPU_ENVIRONMENT)
+
+    assert "SIMSOPT_PRECISION" not in adapted
+
+
+def test_the_adapter_changes_nothing_else() -> None:
+    """Exactly one variable moves, so the lane under test is otherwise intact."""
+    adapted = production_child_environment(INSTRUMENT_GPU_ENVIRONMENT)
+
+    assert set(INSTRUMENT_GPU_ENVIRONMENT) - set(adapted) == {OBSOLETE_PRECISION_ENV}
+    assert all(
+        adapted[name] == value
+        for name, value in INSTRUMENT_GPU_ENVIRONMENT.items()
+        if name != OBSOLETE_PRECISION_ENV
+    )
+
+
+def test_the_adapter_does_not_mutate_its_input() -> None:
+    original = dict(INSTRUMENT_GPU_ENVIRONMENT)
+
+    production_child_environment(INSTRUMENT_GPU_ENVIRONMENT)
+
+    assert INSTRUMENT_GPU_ENVIRONMENT == original
+
+
+def test_the_adapter_is_idempotent_and_accepts_a_clean_environment() -> None:
+    once = production_child_environment(INSTRUMENT_GPU_ENVIRONMENT)
+
+    assert production_child_environment(once) == once
+
+
+def _resolve_production_policy() -> Any:
+    """Resolve the production backend policy from the ambient environment."""
+    from simsopt_jax.backend._runtime_policy import (
+        _config_from_mode,
+        _policy_from_config,
+    )
+
+    return _policy_from_config(_config_from_mode("jax_gpu_parity", strict=True))
+
+
+def test_the_unadapted_environment_is_what_killed_the_l1_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bug, reproduced against the production tree's own resolver."""
+    for name, value in INSTRUMENT_GPU_ENVIRONMENT.items():
+        monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValueError, match="SIMSOPT_MIXED_PRECISION is not supported"):
+        _resolve_production_policy()
+
+
+def test_the_adapted_environment_resolves_to_float64(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The audit, executable: the whole instrument set minus one is accepted.
+
+    This is what makes "exactly one variable" a measurement rather than a
+    reading of the source, and it pins the fused lane's fp64 contract to the
+    absence of SIMSOPT_PRECISION rather than to a variable someone set.
+    """
+    monkeypatch.delenv(OBSOLETE_PRECISION_ENV, raising=False)
+    adapted = production_child_environment(INSTRUMENT_GPU_ENVIRONMENT)
+    for name, value in adapted.items():
+        monkeypatch.setenv(name, value)
+
+    policy = _resolve_production_policy()
+
+    assert policy.resolved_precision == "fp64"
