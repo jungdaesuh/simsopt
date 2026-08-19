@@ -49,8 +49,8 @@ from simsopt_jax.runtime.validation_ladder_common import repo_pythonpath_env
 # Frozen campaign identity
 # --------------------------------------------------------------------------
 
-CHARTER_SHA256 = "2dea1522ea77a2c67c790b94817b2f43aad21d3015f297732bf9a7dbb9b377b0"
-CHARTER_COMMIT = "e07bdc7c4"
+CHARTER_SHA256 = "6ca00d035ca374bd16085ae8a8cca814ccaa48ed9637a6184f31811fe7e7b87c"
+CHARTER_COMMIT = "cbf9a6a89"
 CHARTER_PATH = "docs/jax_gpu_genuine675_fair_bar_plan.md (pr/jax-port-squashed)"
 # Append-only charter lineage: the sha of the charter bytes at each
 # amendment commit (freeze, A1, A2, A2a, A3).  Runs bind the sha current
@@ -62,6 +62,7 @@ CHARTER_LINEAGE = (
     "1d82aece429f1d8e76b748d6aeaf36134956f49bc6b20a6948522be2d8d32872",
     "be4b262cbbb1e5e2b7fc2f1dcfb98238c23c738a9102296b23ef19f520c067fc",
     "2dea1522ea77a2c67c790b94817b2f43aad21d3015f297732bf9a7dbb9b377b0",
+    "6ca00d035ca374bd16085ae8a8cca814ccaa48ed9637a6184f31811fe7e7b87c",
 )
 
 SOURCE_MANIFEST_SHA256 = (
