@@ -13,10 +13,11 @@ and anchor protocol: those existed to keep a SciPy driver consistent across
 proposals whose inner solve could fail on the host, and no such boundary
 survives here.
 
-The L-BFGS history is read off the archived genuine-675 campaign whose
-certificate this workflow reproduces — the ``maxcor`` of the L-BFGS-B policy
-published in its lane record.  It is deliberately not a configuration knob:
-``solve_single_stage_flat675`` accepts no history argument.
+The L-BFGS history and line-search cap are read off the archived genuine-675
+campaign whose certificate this workflow reproduces — the ``maxcor`` and
+``maxls`` of the L-BFGS-B policy published in its lane record.  Neither is a
+configuration knob: ``solve_single_stage_flat675`` accepts no history or
+line-search argument.
 """
 
 from __future__ import annotations
@@ -32,6 +33,10 @@ from simsopt_jax.solve.driver import Driver
 # Frozen campaign selection, transcribed from the archived lane record's
 # ``policy.maxcor``.  Not a solve parameter.
 FLAT675_LBFGS_HISTORY = 300
+
+# Frozen campaign selection, transcribed from the archived lane record's
+# ``policy.maxls``.  Not a solve parameter.
+FLAT675_LBFGS_MAXLS = 8
 
 # The flat-675 lane prepares exactly the shared fused lane; the name is kept
 # so callers spell the workflow the way its tests and examples do.
@@ -55,11 +60,13 @@ def solve_single_stage_flat675(
         rtol=rtol,
         atol=atol,
         lbfgs_history=FLAT675_LBFGS_HISTORY,
+        lbfgs_line_search_max_steps=FLAT675_LBFGS_MAXLS,
     )
 
 
 __all__ = [
     "FLAT675_LBFGS_HISTORY",
+    "FLAT675_LBFGS_MAXLS",
     "PreparedSingleStageFlat675",
     "prepare_single_stage_flat675",
     "solve_single_stage_flat675",
