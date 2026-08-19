@@ -1,0 +1,115 @@
+{
+  "budget": 37,
+  "campaign_input_manifest_sha256": "2a381125e5d21008960766160cc72a2d81b943367b15f7acf2f89e7c123e157a",
+  "caps": {
+    "max_maxiter": 1024,
+    "max_probes_per_lane": 12,
+    "max_search_seconds": 7200.0
+  },
+  "f3_charter_lineage": [
+    "0a61ed647afc08424a149a06a6e247535d4da931136bc5d2294874634b9564dc",
+    "b710ff423667b7fa3c2d9e194ee1e3ccca94ed4821df7c9081fb4deb76e298d2",
+    "86db1058962d25048f3f16a5e616978985aaa86e08028d9b1c2dbe868ddfb994"
+  ],
+  "f3_charter_sha256": "86db1058962d25048f3f16a5e616978985aaa86e08028d9b1c2dbe868ddfb994",
+  "git": {
+    "instrument": {
+      "commit": "1c23f6c5f8964c74cc60f63d81b7f93f2db852f3",
+      "dirty_file_count": 0,
+      "label": "instrument"
+    },
+    "production": {
+      "commit": "580217e0cadc427f93721f12aa0f4d8e8915b4e9",
+      "dirty_file_count": 0,
+      "label": "production"
+    }
+  },
+  "quality_target": 0.013957201998345709,
+  "rung": "bq-budget-search",
+  "schema": "flat675-fused-campaign-manifest.v1",
+  "searches": {
+    "fused_gpu": {
+      "breaches": [],
+      "probes": [
+        {
+          "maxiter": 37,
+          "oracle_objective": 0.013957201998031181,
+          "reached_target": true
+        },
+        {
+          "maxiter": 18,
+          "oracle_objective": 0.030278331618558772,
+          "reached_target": false
+        },
+        {
+          "maxiter": 27,
+          "oracle_objective": 0.0206877688984672,
+          "reached_target": false
+        },
+        {
+          "maxiter": 32,
+          "oracle_objective": 0.01623795335720772,
+          "reached_target": false
+        },
+        {
+          "maxiter": 34,
+          "oracle_objective": 0.01575917703619341,
+          "reached_target": false
+        },
+        {
+          "maxiter": 35,
+          "oracle_objective": 0.015096184979058902,
+          "reached_target": false
+        },
+        {
+          "maxiter": 36,
+          "oracle_objective": 0.014583510269913736,
+          "reached_target": false
+        }
+      ],
+      "star": 37
+    },
+    "native_cpp_cpu": {
+      "breaches": [],
+      "probes": [
+        {
+          "maxiter": 37,
+          "oracle_objective": 0.013957201998345709,
+          "reached_target": true
+        },
+        {
+          "maxiter": 18,
+          "oracle_objective": 0.03027833161856467,
+          "reached_target": false
+        },
+        {
+          "maxiter": 27,
+          "oracle_objective": 0.020687768898258543,
+          "reached_target": false
+        },
+        {
+          "maxiter": 32,
+          "oracle_objective": 0.016237953357057553,
+          "reached_target": false
+        },
+        {
+          "maxiter": 34,
+          "oracle_objective": 0.015759177035991556,
+          "reached_target": false
+        },
+        {
+          "maxiter": 35,
+          "oracle_objective": 0.015096184978741567,
+          "reached_target": false
+        },
+        {
+          "maxiter": 36,
+          "oracle_objective": 0.014583510268929444,
+          "reached_target": false
+        }
+      ],
+      "star": 37
+    }
+  },
+  "verdict": "SEARCH_COMPLETE"
+}
