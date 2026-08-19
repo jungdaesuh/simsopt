@@ -49,8 +49,8 @@ from simsopt_jax.runtime.validation_ladder_common import repo_pythonpath_env
 # Frozen campaign identity
 # --------------------------------------------------------------------------
 
-CHARTER_SHA256 = "1d82aece429f1d8e76b748d6aeaf36134956f49bc6b20a6948522be2d8d32872"
-CHARTER_COMMIT = "2a832c7a7"
+CHARTER_SHA256 = "be4b262cbbb1e5e2b7fc2f1dcfb98238c23c738a9102296b23ef19f520c067fc"
+CHARTER_COMMIT = "0d1ca0607"
 CHARTER_PATH = "docs/jax_gpu_genuine675_fair_bar_plan.md (pr/jax-port-squashed)"
 
 SOURCE_MANIFEST_SHA256 = (
@@ -104,10 +104,12 @@ BUDGET_HEADLINE = 50
 OMP_MATRIX = (1, 2, 4, 8, 16)
 RESERVED_PHYSICAL = tuple(range(8))
 RESERVED_CPUS = tuple(range(8)) + tuple(range(32, 40))
-# Archived unpinned-64 high-thread anchors (anti-GPU denominator bars):
-# B3 = fastest archived process wall (r3); B50 = 66 evals x the fastest
-# archived steady per-eval (52.807 s / 9), zero overhead added.
-ANCHOR_PROCESS_WALL = {3: 58.702, 50: 66 * (52.807 / 9)}
+# Archived unpinned-64 anchor material (Amendment 2a): B3 uses the
+# fastest archived process wall directly; any other budget derives its
+# anchor from the campaign's own pair-measured matched eval count times
+# the fastest archived run's sustained per-eval mean.
+ARCHIVED_B3_PROCESS_WALL = 58.702
+ARCHIVED_STEADY_PER_EVAL = 52.807 / 9
 MATRIX_REPS = 3
 PAIR_COUNT = 5
 NOT_PRODUCED_ABORT = 3
@@ -721,6 +723,8 @@ def run_leg(
             check=False,
         )
     launcher_wall = time.perf_counter() - started
+    if timed:
+        partition_integrity_gate()
     if completed.returncode != 0:
         raise RuntimeError(
             f"Lane {lane} (budget {budget}, {role}) exited "
@@ -1286,6 +1290,10 @@ def cmd_native_matrix(args: argparse.Namespace) -> None:
             "dispersion_max_over_min": max(reps) / min(reps),
             "termination_reasons": termination_reasons,
             "eligible": eligible_config,
+            "smt_assisted": (
+                config.omp_threads is not None
+                and config.omp_threads > len(RESERVED_PHYSICAL)
+            ),
         }
     eligible_results = {
         label: entry for label, entry in results.items() if entry["eligible"]
@@ -1408,6 +1416,7 @@ def cmd_pairs(args: argparse.Namespace) -> None:
             ratio = native.process_wall_seconds / gpu.process_wall_seconds
             ratios.append(ratio)
             report["ratio_process_wall"] = ratio
+            report["matched_evals"] = native.compact_candidate_evaluations
             report["native_process_wall_seconds"] = native.process_wall_seconds
             report["gpu_process_wall_seconds"] = gpu.process_wall_seconds
             report["ratio_optimizer_wall"] = (
@@ -1426,13 +1435,27 @@ def cmd_pairs(args: argparse.Namespace) -> None:
                 extra={"budget": args.budget, "pairs": pair_reports},
             )
             return
-    anchor_bar = ANCHOR_PROCESS_WALL[args.budget]
+    matched_eval_counts = [
+        int(_json_float(report["matched_evals"], "pair.matched_evals"))
+        for report in pair_reports
+        if "matched_evals" in report
+    ]
+    if args.budget == BUDGET_CONTINUITY:
+        anchor_bar = ARCHIVED_B3_PROCESS_WALL
+    elif matched_eval_counts:
+        anchor_bar = statistics.median(matched_eval_counts) * ARCHIVED_STEADY_PER_EVAL
+    else:
+        anchor_bar = None
     gpu_walls = [
         _json_float(report["gpu_process_wall_seconds"], "pair.gpu_process_wall")
         for report in pair_reports
         if "gpu_process_wall_seconds" in report
     ]
-    anchor_ratio = anchor_bar / statistics.median(gpu_walls) if gpu_walls else None
+    anchor_ratio = (
+        anchor_bar / statistics.median(gpu_walls)
+        if gpu_walls and anchor_bar is not None
+        else None
+    )
     if len(ratios) == PAIR_COUNT:
         median_ratio = statistics.median(ratios)
         live_rule = median_ratio >= WIN_MEDIAN_THRESHOLD and all(
