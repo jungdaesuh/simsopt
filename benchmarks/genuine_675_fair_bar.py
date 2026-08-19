@@ -1180,6 +1180,7 @@ def cmd_native_matrix(args: argparse.Namespace) -> None:
     results: dict[str, dict[str, object]] = {}
     for config in configs:
         reps = []
+        termination_reasons = []
         for rep in range(MATRIX_REPS):
             leg = _native_leg(
                 config=config,
@@ -1195,10 +1196,16 @@ def cmd_native_matrix(args: argparse.Namespace) -> None:
                 primer=True,
             )
             reps.append(leg.process_wall_seconds)
+            termination_reasons.append(leg.termination_reason)
+        eligible_config = all(
+            reason == "scipy_completed" for reason in termination_reasons
+        )
         results[config.label] = {
             "reps_process_wall_seconds": reps,
             "median": statistics.median(reps),
             "dispersion_max_over_min": max(reps) / min(reps),
+            "termination_reasons": termination_reasons,
+            "eligible": eligible_config,
         }
     disclosure = _native_leg(
         config=NativeConfig.unpinned_default(),
@@ -1213,11 +1220,18 @@ def cmd_native_matrix(args: argparse.Namespace) -> None:
         git_identity=git,
         primer=True,
     )
-    best = min(results.items(), key=lambda item: float(item[1]["median"]))
+    eligible_results = {
+        label: entry for label, entry in results.items() if entry["eligible"]
+    }
+    if not eligible_results:
+        raise RuntimeError(
+            "No native matrix configuration completed scipy in all reps."
+        )
+    best = min(eligible_results.items(), key=lambda item: float(item[1]["median"]))
     best_median = float(best[1]["median"])
     headline_eligible = sorted(
         label
-        for label, entry in results.items()
+        for label, entry in eligible_results.items()
         if float(entry["median"]) <= NARROWING_FACTOR * best_median
     )
     _finish_run(
@@ -1281,19 +1295,39 @@ def cmd_pairs(args: argparse.Namespace) -> None:
                 primer=True,
             )
 
-        if native_first:
-            native = _native()
-            gpu = _gpu()
-        else:
-            gpu = _gpu()
-            native = _native()
-        oracle = run_oracle(
-            candidate=gpu.endpoint_candidate,
-            anchor=gpu.endpoint_inner_state,
-            oracle_root=run_root / f"pair{pair_index}-oracle",
-            source_manifest=args.source_manifest,
-            shim_dir=shim_dir,
-        )
+        try:
+            if native_first:
+                native = _native()
+                gpu = _gpu()
+            else:
+                gpu = _gpu()
+                native = _native()
+            oracle = run_oracle(
+                candidate=gpu.endpoint_candidate,
+                anchor=gpu.endpoint_inner_state,
+                oracle_root=run_root / f"pair{pair_index}-oracle",
+                source_manifest=args.source_manifest,
+            )
+        except RuntimeError as error:
+            not_produced += 1
+            pair_reports.append(
+                {
+                    "pair": pair_index,
+                    "order": "native-first" if native_first else "gpu-first",
+                    "not_produced": True,
+                    "failure": str(error),
+                }
+            )
+            if not_produced >= NOT_PRODUCED_ABORT:
+                _finish_run(
+                    run_root,
+                    phase=f"pairs-b{args.budget}",
+                    verdict="NOT_PRODUCED",
+                    campaign_manifest_sha256=campaign_sha,
+                    extra={"budget": args.budget, "pairs": pair_reports},
+                )
+                return
+            continue
         gates = evaluate_pair_gates(native, gpu, oracle)
         report: dict[str, object] = {
             "pair": pair_index,
@@ -1421,6 +1455,9 @@ def cmd_validate(args: argparse.Namespace) -> None:
         raise ValueError("Run manifest binds a foreign charter.")
     campaign_sha = manifest["campaign_input_manifest_sha256"]
     problems: list[str] = []
+    recorded_manifest_sha = manifest["rows"].get("campaign_input_manifest.json")
+    if recorded_manifest_sha != campaign_sha:
+        problems.append("campaign_manifest_sha_link_broken")
     for rel, expected_sha in manifest["rows"].items():
         path = run_root / rel
         if not path.is_file():
