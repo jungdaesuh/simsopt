@@ -53,9 +53,9 @@ CHARTER_SHA256 = "6ca00d035ca374bd16085ae8a8cca814ccaa48ed9637a6184f31811fe7e7b8
 CHARTER_COMMIT = "cbf9a6a89"
 CHARTER_PATH = "docs/jax_gpu_genuine675_fair_bar_plan.md (pr/jax-port-squashed)"
 # Append-only charter lineage: the sha of the charter bytes at each
-# amendment commit (freeze, A1, A2, A2a, A3).  Runs bind the sha current
-# when they executed; validate accepts any lineage member and recomputes
-# row contracts against the run's own recorded sha.
+# amendment commit (freeze, A1, A2, A2a, A3, A3a).  Runs bind the sha
+# current when they executed; validate accepts any lineage member and
+# recomputes row contracts against the run's own recorded sha.
 CHARTER_LINEAGE = (
     "92e6a65742acba5f40589f5173bd639c28f2f41ec525b10c343b7ee369a6ed33",
     "537d621b456dd15688fd960e88c6f15c66f6a03739245d5c160b3ada7e8f0fdb",

@@ -13,10 +13,12 @@ Three properties the charter rests on are enforced here rather than assumed:
 * **Timer construction.**  ``perf_counter`` starts at the top of ``main`` and
   the primary timer stops the moment the solve completes and its endpoint is
   materialized — the same construction the instrument's lane driver uses.
-* **Endpoint quality, after timing.**  The endpoint's own ``(iota, G)`` is
-  closed by the flat-675 y-solve *after* the primary timer has stopped, so the
-  oracle anchor the harness needs costs the timed region nothing.  Its cost is
-  reported separately rather than hidden.
+* **Endpoint quality, inside the timer.**  The endpoint's own ``(iota, G)``
+  is closed by the flat-675 y-solve after the *solve* but before the clock
+  stops (charter Amendment 1): that computation rebuilds the Boozer system and
+  compiles, and the native lane's own clock likewise runs through all its
+  post-solve work.  Charging it to the fused lane is the conservative
+  direction.  Its own duration is recorded separately, report-only.
 
 The child never adjudicates: it reports counters, walls, and the endpoint, and
 writes them for the harness to gate.
@@ -128,10 +130,9 @@ def main(argv: list[str] | None = None) -> int:
             atol=0.001,
         )
     endpoint = np.asarray(jax.device_get(result.x), dtype=np.float64)
-    primary_wall = perf_counter() - process_start
     transfer_ledger = {entry.phase: entry.calls for entry in audit.summary()}
 
-    # --- after the primary timer: the oracle anchor this endpoint needs ---
+    # --- after the solve, inside the timer (charter Amendment 1) ---
     endpoint_start = perf_counter()
     endpoint_device = jax.device_put(endpoint)
     geometry = flat675_candidate_geometry(
@@ -146,6 +147,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     inner_solution = np.asarray(jax.device_get(inner_state.solution), dtype=np.float64)
     endpoint_seconds = perf_counter() - endpoint_start
+    # The clock stops immediately before the payload is written, mirroring the
+    # instrument's native lane driver (genuine_675_dynamic_lane.py:418).
+    primary_wall = perf_counter() - process_start
 
     payload = {
         "schema": LANE_JSON_SCHEMA,
@@ -163,9 +167,9 @@ def main(argv: list[str] | None = None) -> int:
             "maxcor": int(FLAT675_LBFGS_HISTORY),
             "maxls": int(FLAT675_LBFGS_MAXLS),
         },
-        # The primary timer spans this process from the top of main to the
-        # moment the solve's endpoint is on the host; the endpoint y-solve
-        # below is charged separately, never to the claim.
+        # The primary timer spans this process from the top of main to just
+        # before this payload is written — the solve AND the endpoint
+        # inner-state computation are both inside it (Amendment 1).
         "process_wall_seconds": primary_wall,
         "endpoint_inner_state_seconds": endpoint_seconds,
         "host_transfer_ledger": transfer_ledger,
