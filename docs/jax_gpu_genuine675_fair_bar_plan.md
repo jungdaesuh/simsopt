@@ -460,3 +460,38 @@ bandwidth with the foreign complement) is disclosed; its direction on
 live legs is pro-GPU, which is exactly what condition (2) bounds.
 
 No budget, timer, or pair-count changes. The instrument is unchanged.
+
+## Amendment 2a — anchor derivation clarification (2026-08-19, pre-evidence)
+
+Review of Amendment 2 (adversarial, pre-launch; no timed pairs exist)
+surfaced three defects in the anchor paragraph, corrected here:
+
+1. **Derivation.** The headline-budget anchor is **not** a fixed constant:
+   it is computed as (the matched evaluation count measured by the
+   campaign's own work-matched pairs at that budget) × (the fastest
+   archived run's **sustained per-eval mean**, 52.807 s / 9 = 5.867 s).
+   This works at any headline budget — including a B_k\* contingency rung —
+   and the count it uses is validated by the work-matching gate on the
+   very pairs it bars. The B3 anchor remains the archived process wall
+   58.702 s (measured, no extrapolation). The "66 evaluations" figure in
+   Amendment 2 was observed on **supplementary A100 GPU runs** (the GPU
+   lane's count on different hardware) and is superseded by the
+   pair-measured count; it survives only as corroboration.
+2. **Direction, stated auditable rather than superlative.** "Constructed
+   strictly in native's favor" is replaced by: the anchor uses the fastest
+   archived run's sustained mean (within-run spread 5.591–6.353 s;
+   a min-single-eval construction would give ~4.9% less) and excludes the
+   archived 5.099 s of non-optimizer process overhead (~1.3% the other
+   way); net ≈3.5% pro-GPU at most, immaterial at the expected ratio
+   scale, and disclosed rather than asserted.
+3. **Provenance, stated outright.** The headline anchor is an
+   extrapolation never measured on any native lane at any thread count.
+   The receipt must publish all four archived unpinned-64 process walls
+   (58.702 / 77.046 / 82.039 / 87.310 s — spread 1.49×) beside the anchor,
+   and if the selected live denominator is the SMT-assisted omp16 config,
+   the receipt's selected-config line must carry that label.
+
+Additionally, every timed leg is now **bracketed** by the
+partition-integrity gate (entry and exit): a foreign run launching
+mid-leg converts that leg into a failure instead of an undetected
+contamination.
