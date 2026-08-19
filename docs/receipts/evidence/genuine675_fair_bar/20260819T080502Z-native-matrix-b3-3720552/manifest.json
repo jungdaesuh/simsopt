@@ -1,0 +1,144 @@
+{
+  "budget": 3,
+  "campaign_input_manifest_sha256": "1df141690bdedf157754eba233df60fdbca34dde8ca9d6b8950f1c2e3f9bce29",
+  "charter_sha256": "be4b262cbbb1e5e2b7fc2f1dcfb98238c23c738a9102296b23ef19f520c067fc",
+  "formulation_semantic_sha256": "0fe8e9e7fbabe69fa0dae82f92ca947304eef7b0d1c6a0050650c07282b4067a",
+  "git": {
+    "harness": {
+      "commit": "475e967c54196bc6d87f50fab79f9cf81631433e",
+      "dirty_file_count": 0
+    },
+    "instrument": {
+      "commit": "1c23f6c5f8964c74cc60f63d81b7f93f2db852f3",
+      "dirty_file_count": 0
+    }
+  },
+  "headline_eligible_configs": [
+    "omp1",
+    "omp16",
+    "omp2",
+    "omp4",
+    "omp8"
+  ],
+  "matrix": {
+    "omp1": {
+      "dispersion_max_over_min": 1.004474284006091,
+      "eligible": true,
+      "median": 70.09680388798006,
+      "reps_process_wall_seconds": [
+        69.92365119885653,
+        70.09680388798006,
+        70.23650947306305
+      ],
+      "smt_assisted": false,
+      "termination_reasons": [
+        "scipy_completed",
+        "scipy_completed",
+        "scipy_completed"
+      ]
+    },
+    "omp16": {
+      "dispersion_max_over_min": 1.002423691845195,
+      "eligible": true,
+      "median": 52.69511833204888,
+      "reps_process_wall_seconds": [
+        52.69511833204888,
+        52.70058156806044,
+        52.57316042785533
+      ],
+      "smt_assisted": true,
+      "termination_reasons": [
+        "scipy_completed",
+        "scipy_completed",
+        "scipy_completed"
+      ]
+    },
+    "omp2": {
+      "dispersion_max_over_min": 1.0057511327008957,
+      "eligible": true,
+      "median": 61.462991047883406,
+      "reps_process_wall_seconds": [
+        61.11327859200537,
+        61.4647491669748,
+        61.462991047883406
+      ],
+      "smt_assisted": false,
+      "termination_reasons": [
+        "scipy_completed",
+        "scipy_completed",
+        "scipy_completed"
+      ]
+    },
+    "omp4": {
+      "dispersion_max_over_min": 1.005944993407683,
+      "eligible": true,
+      "median": 56.48441994097084,
+      "reps_process_wall_seconds": [
+        56.48441994097084,
+        56.56093694991432,
+        56.22666976880282
+      ],
+      "smt_assisted": false,
+      "termination_reasons": [
+        "scipy_completed",
+        "scipy_completed",
+        "scipy_completed"
+      ]
+    },
+    "omp8": {
+      "dispersion_max_over_min": 1.0075847458869658,
+      "eligible": true,
+      "median": 53.73320064903237,
+      "reps_process_wall_seconds": [
+        54.138876972021535,
+        53.73133842390962,
+        53.73320064903237
+      ],
+      "smt_assisted": false,
+      "termination_reasons": [
+        "scipy_completed",
+        "scipy_completed",
+        "scipy_completed"
+      ]
+    }
+  },
+  "narrowing_factor": 2.0,
+  "phase": "native-matrix-b3",
+  "rows": {
+    "campaign_input_manifest.json": "1df141690bdedf157754eba233df60fdbca34dde8ca9d6b8950f1c2e3f9bce29",
+    "omp1-rep0-primer/row.json": "45715d10bb19f285bf045a5a146498e334e6b7c91a6dee1a5555f73fbe7abd7f",
+    "omp1-rep0/row.json": "c65cb31d1cae944ad5230c15da9eb3de8302bc04fe2ef8c8a3bdceb7e04ca3ce",
+    "omp1-rep1-primer/row.json": "a2056ee6a713c75ac88d8a6157b0037789fb10cbab67d086b76f95278c6b4d49",
+    "omp1-rep1/row.json": "66522e766b417a0f3f0fdf3ff39639e1f149daa94a08875ddfe9ec6ee52fa4c8",
+    "omp1-rep2-primer/row.json": "dcd9af126c4865f1e6de98b49f65fd2d1d82faff925d0d15934a1179cf14ae49",
+    "omp1-rep2/row.json": "8be481160ce1bf84754861438b9332590308e6c8c1aff42fcfba14e80e96e986",
+    "omp16-rep0-primer/row.json": "9b5b9e62c944748664871b2b9f5038a403b48b15b00c728256cb1a66d46db8ba",
+    "omp16-rep0/row.json": "a12782e3744b1122e12222216f0d781cb7a39112fd5fb3610364d25a9abff929",
+    "omp16-rep1-primer/row.json": "0f16a73fbf2d2ceede13e0459723fdcf6ca3c5e1967f5ea1cd7990ee22332c1b",
+    "omp16-rep1/row.json": "d137f9a5e87733fb50699bb9be34b878e0e8178bed44747022a4dd3f4146048c",
+    "omp16-rep2-primer/row.json": "7048ad9936c6c4c02f09141d736f0fec36c8e2249f8284e2be7346590e2c3ece",
+    "omp16-rep2/row.json": "6ded64a7dd29e4707456a4635d78fe3372c545b43c6dfe5388290da351bbe989",
+    "omp2-rep0-primer/row.json": "03c7cb03abe22fbfd67f8b43d779b7a9531d2f8c0e60f86796eae418671cd005",
+    "omp2-rep0/row.json": "df24d0f458b330199809e28f02b0e16e9498f33d5c200486d69bbbd2b48ffedf",
+    "omp2-rep1-primer/row.json": "d5b2cbab1dbf01d71bac73d2949555eefd6fed5377941f5f5b89629e7609a4b9",
+    "omp2-rep1/row.json": "bd6bb91b1e4f83823cd9f9aa0d64effb3528084742339d89526933a9a4aec3a3",
+    "omp2-rep2-primer/row.json": "025ddaeeff9fdcc0ba30ff6b18510e72a29591c0e6561f1c63e4d1c013dffe72",
+    "omp2-rep2/row.json": "27f30807cf89c0cf99d50cdc45cf94f079cfd0f7d95a106da6a2914cba16fc62",
+    "omp4-rep0-primer/row.json": "f8878faecb2ce885f5601f41651da86a54867f18ff13b875f3801be988feefec",
+    "omp4-rep0/row.json": "57b089079c5a3b792aa449831ee8b6ea16cbc43616ca593c395c9a0577001f66",
+    "omp4-rep1-primer/row.json": "87d98878569ad45de4430b64d1146adcabad6644bf0f2c2edce9ce834f109c5c",
+    "omp4-rep1/row.json": "814efa7c8c70887013180f7ef11e86098c738aafc1220ec04e5fc276dd04cd74",
+    "omp4-rep2-primer/row.json": "aeb29c87d912857dc6af3ca368ecf3cd04f208209829634bf0d3d7f0962393e2",
+    "omp4-rep2/row.json": "6af4b94ebb0c7d00b8196c939daa23860a199b5d15963b9211a03ee98f917c8c",
+    "omp8-rep0-primer/row.json": "cacd325c9e352372a7d6b98f8e90e318dae01852bcf7173bd839bac749ddf814",
+    "omp8-rep0/row.json": "db47bc4561f7f73572fa6f4e347c6c3b0c6705b281ef87b523518942019fa7a4",
+    "omp8-rep1-primer/row.json": "aa0b22280ac3fd58d4130292ffa55159878a7a645244ac833f1164b8bc995fc1",
+    "omp8-rep1/row.json": "e4b716fd6b190ed7fa7ecb3881bc887b18d90295de977b2a9948e8c5af6ca6da",
+    "omp8-rep2-primer/row.json": "528e3ecbe5e3ebaa3754921b4d8c914a111c786d7064d1c5c9791e16ef5bc763",
+    "omp8-rep2/row.json": "5dc17950efee7f9ef3bc5877d346a6435e6b454f4651fee73518ce1fba8ef048"
+  },
+  "schema": "genuine-675-fair-bar-manifest.v1",
+  "selected_config": "omp16",
+  "selected_median_process_wall_seconds": 52.69511833204888,
+  "verdict": "NATIVE_SELECTED"
+}
