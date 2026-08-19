@@ -1,0 +1,137 @@
+{
+  "anchor_over_gpu_median": 8.631634410733335,
+  "anchor_process_wall_seconds": 58.702,
+  "budget": 3,
+  "campaign_input_manifest_sha256": "2a381125e5d21008960766160cc72a2d81b943367b15f7acf2f89e7c123e157a",
+  "charter_sha256": "6ca00d035ca374bd16085ae8a8cca814ccaa48ed9637a6184f31811fe7e7b87c",
+  "formulation_semantic_sha256": "0fe8e9e7fbabe69fa0dae82f92ca947304eef7b0d1c6a0050650c07282b4067a",
+  "git": {
+    "harness": {
+      "commit": "fb0ad88d9eedc4b0f3e1a5747a5498f6b21d99de",
+      "dirty_file_count": 1
+    },
+    "instrument": {
+      "commit": "1c23f6c5f8964c74cc60f63d81b7f93f2db852f3",
+      "dirty_file_count": 0
+    }
+  },
+  "native_config": "omp16",
+  "pairs": [
+    {
+      "gates": {
+        "endpoint_gradient_relative_gap": 1.840275499856594e-13,
+        "endpoint_objective_relative_gap": 5.36331140354157e-14,
+        "failures": [],
+        "oracle_objective_relative_gap": 5.338821397132704e-14,
+        "passed": true
+      },
+      "gpu_process_wall_seconds": 6.787040811963379,
+      "matched_evals": 9,
+      "native_process_wall_seconds": 56.89982029190287,
+      "order": "native-first",
+      "pair": 0,
+      "ratio_optimizer_wall": 10.70884279180261,
+      "ratio_process_wall": 8.383597781172423
+    },
+    {
+      "gates": {
+        "endpoint_gradient_relative_gap": 1.840275499856594e-13,
+        "endpoint_objective_relative_gap": 5.36331140354157e-14,
+        "failures": [],
+        "oracle_objective_relative_gap": 5.338821397132704e-14,
+        "passed": true
+      },
+      "gpu_process_wall_seconds": 6.798050667159259,
+      "matched_evals": 9,
+      "native_process_wall_seconds": 54.96982047893107,
+      "order": "gpu-first",
+      "pair": 1,
+      "ratio_optimizer_wall": 10.331107676404823,
+      "ratio_process_wall": 8.08611514834467
+    },
+    {
+      "gates": {
+        "endpoint_gradient_relative_gap": 1.840275499856594e-13,
+        "endpoint_objective_relative_gap": 5.36331140354157e-14,
+        "failures": [],
+        "oracle_objective_relative_gap": 5.338821397132704e-14,
+        "passed": true
+      },
+      "gpu_process_wall_seconds": 6.804816983174533,
+      "matched_evals": 9,
+      "native_process_wall_seconds": 54.68696496891789,
+      "order": "native-first",
+      "pair": 2,
+      "ratio_optimizer_wall": 10.25358533295806,
+      "ratio_process_wall": 8.036507830281973
+    },
+    {
+      "gates": {
+        "endpoint_gradient_relative_gap": 1.840275499856594e-13,
+        "endpoint_objective_relative_gap": 5.36331140354157e-14,
+        "failures": [],
+        "oracle_objective_relative_gap": 5.338821397132704e-14,
+        "passed": true
+      },
+      "gpu_process_wall_seconds": 6.8308652229607105,
+      "matched_evals": 9,
+      "native_process_wall_seconds": 55.011333673028275,
+      "order": "gpu-first",
+      "pair": 3,
+      "ratio_optimizer_wall": 10.328830041817874,
+      "ratio_process_wall": 8.053347837711346
+    },
+    {
+      "gates": {
+        "endpoint_gradient_relative_gap": 1.840275499856594e-13,
+        "endpoint_objective_relative_gap": 5.36331140354157e-14,
+        "failures": [],
+        "oracle_objective_relative_gap": 5.338821397132704e-14,
+        "passed": true
+      },
+      "gpu_process_wall_seconds": 6.800797763979062,
+      "matched_evals": 9,
+      "native_process_wall_seconds": 54.860989081906155,
+      "order": "native-first",
+      "pair": 4,
+      "ratio_optimizer_wall": 10.291330285583676,
+      "ratio_process_wall": 8.066846123918214
+    }
+  ],
+  "phase": "pairs-b3",
+  "ratio_max": 8.383597781172423,
+  "ratio_median": 8.066846123918214,
+  "ratio_min": 8.036507830281973,
+  "ratios_process_wall": [
+    8.383597781172423,
+    8.08611514834467,
+    8.036507830281973,
+    8.053347837711346,
+    8.066846123918214
+  ],
+  "rows": {
+    "campaign_input_manifest.json": "2a381125e5d21008960766160cc72a2d81b943367b15f7acf2f89e7c123e157a",
+    "pair0-gpu-primer/row.json": "7ab4c8c5b8d5471f7f2560c6071365776b26caa7d29b53358431212f65e149bc",
+    "pair0-gpu/row.json": "e2cbebc874cb44a53ea1e92ae8d3cd3bb2b792ed457e423945e1c15dfcd8bf6b",
+    "pair0-native-primer/row.json": "5e1e1396cb6ae62ea603de923381cc5aab6637e42c668aa2d51d2bf254419899",
+    "pair0-native/row.json": "edd87404aaabacd0bee700873218980c8027b918e8d4ea000c03b7161438a06b",
+    "pair1-gpu-primer/row.json": "ddc5420e10564eed4b78f563cca87770568b143a4fb8b40f7cd4e7b6e0c6de1a",
+    "pair1-gpu/row.json": "c1ffe27efe71aa7a8088a3a85922f4f3d5496994d561379f120ecafd55a74f77",
+    "pair1-native-primer/row.json": "29777e2ef382b50db6d8924eb6547a20af1734133ef63a8c51d6ee309972b2d4",
+    "pair1-native/row.json": "013ed944f8595da000a09d0f3ff90a02f7b31971945f5cc7c5ab17f073699603",
+    "pair2-gpu-primer/row.json": "b1110b7d574fb733b0bcfd75b61c0cda3cee145147baa7cdaa705bc8a84a29f1",
+    "pair2-gpu/row.json": "ddf0faceb256c9b2183e53484d3dd2212c389514ddbe47b6155910148aaac92a",
+    "pair2-native-primer/row.json": "f8c5d9c4db51d80174d4a9600ca7e8edb26f4eb158ca6ab261837154c995b940",
+    "pair2-native/row.json": "ee95d4674518b305bc9b460028a591a337f82aab220b6f7923480fa26557c4b6",
+    "pair3-gpu-primer/row.json": "c90d65c1051113e2764889fdf8ef879fc5fb7cc45ddaac0c746bcf688ea0fe30",
+    "pair3-gpu/row.json": "0f126a849b7b497753d53eccafc98efe0870f61d72a2adda8be805f87d41038e",
+    "pair3-native-primer/row.json": "b92d5a54286749cd2b0220a5ded67ba5b9c95cdede8cf38dcb494c5525f61298",
+    "pair3-native/row.json": "3a0e1cd768145cb790b257f3c9adbb55ac1edca71e5ad97712fe90469269849a",
+    "pair4-gpu-primer/row.json": "46bd34107fe8832dbe37adbe3da7cd8b0910e251b4f54713487753244c273bae",
+    "pair4-gpu/row.json": "1b50a98f9f997352de59c7e9b595d1ad3708837558ead5b3826f10fbcaae1892",
+    "pair4-native-primer/row.json": "bb27d31fb0a2392940a0f553a0bb966808bd439bb21593288834659f494631be",
+    "pair4-native/row.json": "fa532d8ad41a68a47d21bd02e7956c3d5d94cf8659a5dcc91387fdd24177ce8b"
+  },
+  "schema": "genuine-675-fair-bar-manifest.v1",
+  "verdict": "WIN"
+}

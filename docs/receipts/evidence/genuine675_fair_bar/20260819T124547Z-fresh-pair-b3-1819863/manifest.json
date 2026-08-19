@@ -1,0 +1,27 @@
+{
+  "budget": 3,
+  "campaign_input_manifest_sha256": "2a381125e5d21008960766160cc72a2d81b943367b15f7acf2f89e7c123e157a",
+  "charter_sha256": "6ca00d035ca374bd16085ae8a8cca814ccaa48ed9637a6184f31811fe7e7b87c",
+  "formulation_semantic_sha256": "0fe8e9e7fbabe69fa0dae82f92ca947304eef7b0d1c6a0050650c07282b4067a",
+  "git": {
+    "harness": {
+      "commit": "a3639915ab8cddd3fcc88f78df989310952492ee",
+      "dirty_file_count": 0
+    },
+    "instrument": {
+      "commit": "1c23f6c5f8964c74cc60f63d81b7f93f2db852f3",
+      "dirty_file_count": 0
+    }
+  },
+  "gpu_process_wall_seconds": 19.556996657978743,
+  "native_process_wall_seconds": 55.08976534102112,
+  "phase": "fresh-pair-b3",
+  "ratio_process_wall": 2.8168826893236667,
+  "rows": {
+    "campaign_input_manifest.json": "2a381125e5d21008960766160cc72a2d81b943367b15f7acf2f89e7c123e157a",
+    "gpu/row.json": "16b3da3ee4e7f41645b2d58739562fd17aac336758f0fd6048000b68f7b1c6eb",
+    "native/row.json": "9f2d6d219d6314382ee435a47d1712d02f47309c2222f0c10f143d396641881a"
+  },
+  "schema": "genuine-675-fair-bar-manifest.v1",
+  "verdict": "FRESH_REPORTED"
+}

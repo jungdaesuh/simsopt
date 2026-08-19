@@ -1,0 +1,35 @@
+{
+  "campaign_input_manifest_sha256": "1df141690bdedf157754eba233df60fdbca34dde8ca9d6b8950f1c2e3f9bce29",
+  "charter_sha256": "be4b262cbbb1e5e2b7fc2f1dcfb98238c23c738a9102296b23ef19f520c067fc",
+  "conformance": "enforced-per-leg (enforce_child_conformance raises)",
+  "formulation_semantic_sha256": "0fe8e9e7fbabe69fa0dae82f92ca947304eef7b0d1c6a0050650c07282b4067a",
+  "gates": {
+    "endpoint_gradient_relative_gap": 1.840275499856594e-13,
+    "endpoint_objective_relative_gap": 5.36331140354157e-14,
+    "failures": [],
+    "oracle_objective_relative_gap": 5.338821397132704e-14,
+    "passed": true
+  },
+  "git": {
+    "harness": {
+      "commit": "475e967c54196bc6d87f50fab79f9cf81631433e",
+      "dirty_file_count": 0
+    },
+    "instrument": {
+      "commit": "1c23f6c5f8964c74cc60f63d81b7f93f2db852f3",
+      "dirty_file_count": 0
+    }
+  },
+  "native_primed_vs_cold_delta_seconds": 0.19937580917030573,
+  "phase": "phase1",
+  "rows": {
+    "campaign_input_manifest.json": "1df141690bdedf157754eba233df60fdbca34dde8ca9d6b8950f1c2e3f9bce29",
+    "gpu-primer/row.json": "a34a263b9c6f9c42bb712b4c1a6a62383cf033fd54ffcbc25f6b403b75c1bfba",
+    "gpu/row.json": "cb3c8d0c7e51f647d1fe0c4e92af9dff4651642b153a8c825acb75857c48cf46",
+    "native-cold/row.json": "1e671a5199daca4030147c946c93b2aa74ecd87bbf3d1aecabca7c0bcc82f619",
+    "native-primed-primer/row.json": "1dfd27fadc0e8d0977ae49577c0a81d136649ebe0b49dc4580958ad39d186648",
+    "native-primed/row.json": "ee5d86d4a244ae7daadad3be4eb1398af23b32d7b0be501492465b1b5f02cb46"
+  },
+  "schema": "genuine-675-fair-bar-manifest.v1",
+  "verdict": "PHASE1_OK"
+}
