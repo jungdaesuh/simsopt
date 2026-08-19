@@ -495,3 +495,27 @@ Additionally, every timed leg is now **bracketed** by the
 partition-integrity gate (entry and exit): a foreign run launching
 mid-leg converts that leg into a failure instead of an undetected
 contamination.
+
+## Amendment 3 — headline rung is B37 per the divergence contingency (2026-08-19, pre-evidence for the headline rung)
+
+The B50 divergence probe (run `20260819T083720Z-probe-3849441`, untimed,
+both legs conformance-gated inside the partition) executed the
+pre-registered contingency exactly: both lanes completed 50 accepted
+iterations over 66 matched evaluations, but the accepted-objective
+sequences **fork at iterate 38** — the matched prefix is **37** at the
+1e-10 elementwise clause (cross-architecture fp64 drift accumulating
+through the L-BFGS-B curvature pairs; both endpoints individually healthy,
+`scipy_completed` in both lanes). Certificate cadence at 50 iterations,
+recorded for the B-rationale: 2 attempts per lane (native 0.360 s, GPU
+1.313 s) — the event-driven certificate cost does not scale with accepted
+steps, as the Amendment-1 probe requirement was designed to verify.
+
+Per the frozen contingency, the **headline rung is B_k\* = B37** — the
+largest budget at which the probe's sequences match. No timed leg at any
+headline budget has run. The anchor derives per Amendment 2a from the
+B37 pairs' own matched evaluation counts × the archived sustained
+per-eval mean; the B3 rung is unaffected. The B3 matrix result is also
+noted here for the record: the partition sweep's best native
+(omp16 SMT-assisted, 52.70 s) is **faster** than the fastest archived
+unpinned-64 wall (58.702 s), so the live denominator undercuts the
+archive — the anti-GPU direction the partition design promised.
