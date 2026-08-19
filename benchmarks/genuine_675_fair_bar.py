@@ -49,8 +49,8 @@ from simsopt_jax.runtime.validation_ladder_common import repo_pythonpath_env
 # Frozen campaign identity
 # --------------------------------------------------------------------------
 
-CHARTER_SHA256 = "537d621b456dd15688fd960e88c6f15c66f6a03739245d5c160b3ada7e8f0fdb"
-CHARTER_COMMIT = "2f0381cde"
+CHARTER_SHA256 = "1d82aece429f1d8e76b748d6aeaf36134956f49bc6b20a6948522be2d8d32872"
+CHARTER_COMMIT = "2a832c7a7"
 CHARTER_PATH = "docs/jax_gpu_genuine675_fair_bar_plan.md (pr/jax-port-squashed)"
 
 SOURCE_MANIFEST_SHA256 = (
@@ -98,9 +98,16 @@ RUN_MANIFEST_SCHEMA = "genuine-675-fair-bar-manifest.v1"
 
 BUDGET_CONTINUITY = 3
 BUDGET_HEADLINE = 50
-OMP_MATRIX = (1, 2, 4, 8, 16, 32, 64)
-PHYSICAL_CORES = tuple(range(32))
-ALL_CPUS = tuple(range(64))
+# Amendment 2: the campaign owns one CCD exclusively (cores 0-7 + SMT
+# siblings 32-39, private L3); foreign compute is confined to the
+# complement. omp16 is SMT-assisted (16 threads on 8 physical cores).
+OMP_MATRIX = (1, 2, 4, 8, 16)
+RESERVED_PHYSICAL = tuple(range(8))
+RESERVED_CPUS = tuple(range(8)) + tuple(range(32, 40))
+# Archived unpinned-64 high-thread anchors (anti-GPU denominator bars):
+# B3 = fastest archived process wall (r3); B50 = 66 evals x the fastest
+# archived steady per-eval (52.807 s / 9), zero overhead added.
+ANCHOR_PROCESS_WALL = {3: 58.702, 50: 66 * (52.807 / 9)}
 MATRIX_REPS = 3
 PAIR_COUNT = 5
 NOT_PRODUCED_ABORT = 3
@@ -108,14 +115,10 @@ WIN_MEDIAN_THRESHOLD = 1.10
 SEQUENCE_RTOL = 1.0e-10
 ENDPOINT_OBJECTIVE_RTOL = 1.0e-10
 ENDPOINT_GRADIENT_RTOL = 1.0e-8
-# 3.0, not 1.0: this box's idle baseline is ~1.5-2 (a persistent foreign
-# single-core python plus desktop apps). Native legs pin physical cores
-# 0-31, so a one-core unpinned stray schedules onto the spare SMT half;
-# worst-case timed-leg contamination is ~3%. Disclosed in the receipt.
-IDLE_LOAD_MAX = 3.0
 IDLE_GPU_UTIL_MAX = 5
-IDLE_POLL_SECONDS = 30
-IDLE_MAX_WAIT_SECONDS = 7200
+PARTITION_BUSY_MAX_FRACTION = 0.20
+PARTITION_SAMPLE_SECONDS = 3.0
+FOREIGN_CPU_MIN_CORES = 0.5
 NARROWING_FACTOR = 2.0
 
 SOURCE_ROOT = DEFAULT_SOURCE_ROOT
@@ -400,12 +403,16 @@ class NativeConfig:
 
     @classmethod
     def pinned(cls, threads: int) -> NativeConfig:
-        affinity = PHYSICAL_CORES if threads <= 32 else ALL_CPUS
+        if threads <= len(RESERVED_PHYSICAL):
+            affinity = RESERVED_PHYSICAL
+        elif threads <= len(RESERVED_CPUS):
+            affinity = RESERVED_CPUS
+        else:
+            raise ValueError(
+                f"omp{threads} is unmeasurable inside the reserved partition; "
+                "the archived high-thread anchor covers it (Amendment 2)."
+            )
         return cls(label=f"omp{threads}", omp_threads=threads, affinity=affinity)
-
-    @classmethod
-    def unpinned_default(cls) -> NativeConfig:
-        return cls(label="unpinned-default", omp_threads=None, affinity=None)
 
 
 def native_environment(
@@ -484,33 +491,28 @@ def enforce_child_conformance(
     for name in SCRUBBED_THREADING_NAMES:
         if child_env.get(name) is not None:
             failures.append(f"{name.lower()}_leaked")
-    if lane == NATIVE_LANE:
-        if omp_threads is not None:
-            expected = {
-                "OMP_NUM_THREADS": str(omp_threads),
-                "OMP_PLACES": "cores",
-                "OMP_PROC_BIND": "close",
-                "OPENBLAS_NUM_THREADS": "1",
-            }
-            for name, value in expected.items():
-                if child_env.get(name) != value:
-                    failures.append(f"{name.lower()}_unobserved")
-            resolved = provenance.get("omp_get_max_threads")
-            if resolved != omp_threads:
-                failures.append(
-                    f"omp_get_max_threads_resolved_{resolved}_declared_{omp_threads}"
-                )
-        else:
-            for name in (
-                "OMP_NUM_THREADS",
-                "OMP_PLACES",
-                "OMP_PROC_BIND",
-                "OPENBLAS_NUM_THREADS",
-            ):
-                if child_env.get(name) is not None:
-                    failures.append(f"disclosure_{name.lower()}_set")
+    if lane == NATIVE_LANE and omp_threads is not None:
+        expected = {
+            "OMP_NUM_THREADS": str(omp_threads),
+            "OMP_PLACES": "cores",
+            "OMP_PROC_BIND": "close",
+            "OPENBLAS_NUM_THREADS": "1",
+        }
+        for name, value in expected.items():
+            if child_env.get(name) != value:
+                failures.append(f"{name.lower()}_unobserved")
+        resolved = provenance.get("omp_get_max_threads")
+        if resolved != omp_threads:
+            failures.append(
+                f"omp_get_max_threads_resolved_{resolved}_declared_{omp_threads}"
+            )
     granted = provenance.get("sched_affinity_at_import")
-    expected_mask = sorted(affinity) if affinity is not None else sorted(ALL_CPUS)
+    if affinity is None:
+        raise RuntimeError(
+            f"{lane} ({config_label}): every partition leg must declare an "
+            "affinity (Amendment 2)."
+        )
+    expected_mask = sorted(affinity)
     if granted != expected_mask:
         failures.append(
             f"affinity_granted_{len(granted) if isinstance(granted, list) else '?'}"
@@ -522,21 +524,96 @@ def enforce_child_conformance(
         )
 
 
-def wait_for_idle_box() -> float:
-    """Fail-closed idle gate: block timed legs while foreign compute is live."""
-    waited = 0.0
-    while True:
-        load1 = os.getloadavg()[0]
-        gpu_util = _gpu_utilization_percent()
-        if load1 <= IDLE_LOAD_MAX and gpu_util <= IDLE_GPU_UTIL_MAX:
-            return waited
-        if waited >= IDLE_MAX_WAIT_SECONDS:
-            raise RuntimeError(
-                f"Box never went idle (load {load1:.2f}, gpu {gpu_util}%) "
-                f"within {IDLE_MAX_WAIT_SECONDS}s."
-            )
-        time.sleep(IDLE_POLL_SECONDS)
-        waited += IDLE_POLL_SECONDS
+def _process_cpu_seconds() -> dict[int, tuple[float, str]]:
+    ticks = os.sysconf("SC_CLK_TCK")
+    table: dict[int, tuple[float, str]] = {}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text()
+            affinity_line = ""
+            for line in (entry / "status").read_text().splitlines():
+                if line.startswith("Cpus_allowed_list:"):
+                    affinity_line = line.split(":", 1)[1].strip()
+                    break
+        except OSError:
+            continue
+        fields = stat.rsplit(")", 1)[1].split()
+        cpu_seconds = (int(fields[11]) + int(fields[12])) / ticks
+        table[int(entry.name)] = (cpu_seconds, affinity_line)
+    return table
+
+
+def _expand_cpu_list(text: str) -> set[int]:
+    cpus: set[int] = set()
+    for part in text.split(","):
+        if "-" in part:
+            lo, hi = part.split("-")
+            cpus.update(range(int(lo), int(hi) + 1))
+        elif part:
+            cpus.add(int(part))
+    return cpus
+
+
+def _reserved_busy_fraction(sample_seconds: float) -> float:
+    def snapshot() -> dict[int, tuple[int, int]]:
+        values: dict[int, tuple[int, int]] = {}
+        for line in Path("/proc/stat").read_text().splitlines():
+            if line.startswith("cpu") and line[3].isdigit():
+                fields = line.split()
+                index = int(fields[0][3:])
+                if index in RESERVED_CPUS:
+                    total = sum(int(v) for v in fields[1:])
+                    idle = int(fields[4]) + int(fields[5])
+                    values[index] = (total, idle)
+        return values
+
+    before = snapshot()
+    time.sleep(sample_seconds)
+    after = snapshot()
+    total = sum(after[i][0] - before[i][0] for i in before)
+    idle = sum(after[i][1] - before[i][1] for i in before)
+    return 1.0 - (idle / total) if total else 1.0
+
+
+def partition_integrity_gate() -> float:
+    """Amendment 2: fail-closed partition check before every timed leg.
+
+    (a) No foreign process with recent CPU activity may have an affinity
+    mask overlapping the reserved set; (b) the reserved set must be quiet;
+    (c) the GPU must be idle.  Raises on violation — the runner owns
+    re-confinement; this gate is the authority.
+    """
+    started = time.perf_counter()
+    own = {os.getpid(), os.getppid()}
+    first = _process_cpu_seconds()
+    time.sleep(1.0)
+    second = _process_cpu_seconds()
+    reserved = set(RESERVED_CPUS)
+    violators: list[str] = []
+    for pid, (cpu_after, affinity_text) in second.items():
+        if pid in own:
+            continue
+        cpu_before = first.get(pid, (cpu_after, ""))[0]
+        if (cpu_after - cpu_before) < FOREIGN_CPU_MIN_CORES:
+            continue
+        if _expand_cpu_list(affinity_text) & reserved:
+            violators.append(f"pid{pid}@{affinity_text}")
+    if violators:
+        raise RuntimeError(
+            f"Partition violated by active foreign processes: {violators}."
+        )
+    busy = _reserved_busy_fraction(PARTITION_SAMPLE_SECONDS)
+    if busy > PARTITION_BUSY_MAX_FRACTION:
+        raise RuntimeError(
+            f"Reserved partition busy fraction {busy:.2f} exceeds "
+            f"{PARTITION_BUSY_MAX_FRACTION}."
+        )
+    gpu_util = _gpu_utilization_percent()
+    if gpu_util > IDLE_GPU_UTIL_MAX:
+        raise RuntimeError(f"GPU busy at {gpu_util}% before a timed leg.")
+    return time.perf_counter() - started
 
 
 def _gpu_utilization_percent() -> int:
@@ -624,7 +701,7 @@ def run_leg(
         "--expected-formulation-sha256",
         GENUINE_FULLSPACE_675.semantic_sha256,
     )
-    idle_wait = wait_for_idle_box() if timed else 0.0
+    idle_wait = partition_integrity_gate() if timed else 0.0
 
     def _preexec() -> None:
         if affinity is not None:
@@ -1026,7 +1103,7 @@ def _gpu_leg(
             budget=budget,
             environment=gpu_environment(cache_dir=cache_dir, shim_dir=shim_dir),
             omp_threads=None,
-            affinity=None,
+            affinity=RESERVED_CPUS,
             leg_root=primer_root,
             timed=False,
             role=f"{role}-primer",
@@ -1040,7 +1117,7 @@ def _gpu_leg(
         budget=budget,
         environment=gpu_environment(cache_dir=cache_dir, shim_dir=shim_dir),
         omp_threads=None,
-        affinity=None,
+        affinity=RESERVED_CPUS,
         leg_root=run_root / leg_name,
         timed=timed,
         role=role,
@@ -1210,19 +1287,6 @@ def cmd_native_matrix(args: argparse.Namespace) -> None:
             "termination_reasons": termination_reasons,
             "eligible": eligible_config,
         }
-    disclosure = _native_leg(
-        config=NativeConfig.unpinned_default(),
-        budget=args.budget,
-        run_root=run_root,
-        shim_dir=shim_dir,
-        leg_name="unpinned-default",
-        timed=True,
-        role="disclosure",
-        campaign_sha=campaign_sha,
-        source_manifest=args.source_manifest,
-        git_identity=git,
-        primer=True,
-    )
     eligible_results = {
         label: entry for label, entry in results.items() if entry["eligible"]
     }
@@ -1249,7 +1313,6 @@ def cmd_native_matrix(args: argparse.Namespace) -> None:
         extra={
             "budget": args.budget,
             "matrix": results,
-            "unpinned_default_process_wall_seconds": (disclosure.process_wall_seconds),
             "selected_config": best[0],
             "selected_median_process_wall_seconds": best_median,
             "headline_eligible_configs": headline_eligible,
@@ -1363,9 +1426,20 @@ def cmd_pairs(args: argparse.Namespace) -> None:
                 extra={"budget": args.budget, "pairs": pair_reports},
             )
             return
+    anchor_bar = ANCHOR_PROCESS_WALL[args.budget]
+    gpu_walls = [
+        _json_float(report["gpu_process_wall_seconds"], "pair.gpu_process_wall")
+        for report in pair_reports
+        if "gpu_process_wall_seconds" in report
+    ]
+    anchor_ratio = anchor_bar / statistics.median(gpu_walls) if gpu_walls else None
     if len(ratios) == PAIR_COUNT:
         median_ratio = statistics.median(ratios)
-        if median_ratio >= WIN_MEDIAN_THRESHOLD and all(r > 1.0 for r in ratios):
+        live_rule = median_ratio >= WIN_MEDIAN_THRESHOLD and all(
+            r > 1.0 for r in ratios
+        )
+        anchor_rule = anchor_ratio is not None and anchor_ratio >= WIN_MEDIAN_THRESHOLD
+        if live_rule and anchor_rule:
             verdict = "WIN"
         else:
             verdict = "CLOSED_BOUNDED_NEGATIVE"
@@ -1384,6 +1458,8 @@ def cmd_pairs(args: argparse.Namespace) -> None:
             "ratio_min": min(ratios) if ratios else None,
             "ratio_median": statistics.median(ratios) if ratios else None,
             "ratio_max": max(ratios) if ratios else None,
+            "anchor_process_wall_seconds": anchor_bar,
+            "anchor_over_gpu_median": anchor_ratio,
         },
     )
 
