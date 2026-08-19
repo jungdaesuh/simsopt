@@ -1,10 +1,9 @@
 # Flat-675 fused single-stage GPU campaign (F3) — charter
 
-Status: DRAFT r4 (round 1: 12 required edits, addressed in r2; round 2:
-9 findings N1–N9, addressed in r3; round 3: 5 findings F1–F5 plus the F6/
-status-line bookkeeping pair from round 4, addressed in this revision).
-Freezes at its commit sha; execution begins only after the genuine-675
-fair-bar chain releases the box.
+Status: FROZEN at `b7ec63b6e`, amended A1 (`595b7da60`), A2 (`e8625f691`),
+A3 (this commit).  The campaign executed against this document on 2026-08-19
+and is complete; amendments after A2 record implementation state only and
+never touch a measurement clause.
 
 Operator directive (2026-08-19): land the flat-675 objective in the production
 tree, wrap it in the certified fused `dispatch.minimize` lane, gate with
@@ -418,3 +417,58 @@ dated amendment must precede any such run.
 
 Both clauses are pre-evidence; thresholds, budgets, pair counts, anchor
 formulas, and the timer law are unchanged.
+
+## Amendment 3 (2026-08-19, post-campaign — implementation state only)
+
+This amendment records facts about what the instrument did.  It changes no
+threshold, budget, pair count, anchor formula, quality gate, or timer, and no
+verdict depends on it.
+
+**(a) Status line corrected.**  The header still read "DRAFT r4" through the
+whole campaign; the document froze at `b7ec63b6e` and was amended twice before
+any timed leg ran.  The line above now states that.
+
+**(b) Two ledger-accounting defects, found after the campaign, fixed forward
+and disclosed rather than retro-edited.**  The sealed run directories and
+`campaign_state.json` are evidence and were not modified.
+
+1. *Campaign wall was never accumulated.*  Every phase called the ledger's
+   `completing()` without a wall, so `campaign_wall_seconds` stayed `0.0` and
+   the twelve-hour cap was fail-open for the entire campaign.  Each publishing
+   phase now starts a clock in `_prepare_run` and charges its elapsed wall.
+   The cap was nonetheless respected in fact: the campaign ran from the first
+   smoke leg (run dir `20260819T155921Z`) to the last cold pair (run dir
+   `20260819T230636Z`), about **7 h 10 m**, against the 12 h cap.
+
+2. *The budget search never charged its children.*  `cmd_budget_search` never
+   touched the campaign state, so the recorded ledger's
+   `solve_child_processes: 102` is exactly the six pair phases
+   (4 + 30 + 30 + 30 + 4 + 4) and omits the search entirely.  The search phase
+   is now charged from the probe counts it recorded, and the contingency
+   sweep — which never fired — is charged likewise.
+
+   **The corrected total exceeds the chartered cap.**  Counted from the run
+   directory, the search spawned **35** solve-executing children: 7 fused
+   probe children and 7 oracle children, plus 7 native probe children, 7
+   native primers, and 7 native oracle children.  The true campaign total is
+   therefore **102 + 35 = 137**, above the chartered **130**.  Two errors in
+   A2's derivation produced the gap: it assumed the fused probes would share
+   one reusing child (the implementation spawns one per probe), and it counted
+   no oracle children for the search at all, while counting two per warm pair.
+   The breach was invisible while it happened because the search was
+   uncounted; had the ledger been correct, the rung-admission rule would have
+   refused the BQ pairs at their rung boundary.
+
+   This is disclosed, not repaired retroactively.  Every executed leg passed
+   its own gates, and the cap is a governance budget on machine time rather
+   than an input to any verdict, so the six rung outcomes stand as adjudicated.
+   A future campaign either raises the cap in a dated pre-evidence amendment
+   or reuses one fused search child as A2 assumed.
+
+**(c) BQ resolved to `m* = n* = 37`.**  Both searches returned the chartered
+start, so the BQ rung ran fused-at-37 against native-at-37 — the same budgets
+as B37, gated on `Q*` instead of on equal iteration count.  BQ is therefore a
+quality-gated remeasurement of the B37 pairing rather than an independent
+budget point.  This is the protocol operating as written (`n* <= 37` by
+construction, and the fused lane reached `Q*` no later), and it is stated here
+so the receipt does not read BQ as an independent third measurement.

@@ -32,7 +32,7 @@ from benchmarks.flat675_fused_campaign_contract import (
     DISCLOSURE_RUNG_SUFFIX,
     DISCLOSURE_RUNGS,
     F3_CHARTER_AMENDMENT_1_SHA256,
-    F3_CHARTER_COMMIT,
+    F3_CHARTER_AMENDMENT_2_SHA256,
     F3_CHARTER_FREEZE_SHA256,
     F3_CHARTER_LINEAGE,
     F3_CHARTER_SHA256,
@@ -42,6 +42,7 @@ from benchmarks.flat675_fused_campaign_contract import (
     GRADIENT_FACTOR_K,
     L1_LANE,
     L2_LANE,
+    MAX_CAMPAIGN_WALL_SECONDS,
     MAX_SOLVE_CHILD_PROCESSES,
     MAX_TIMED_LEGS,
     MAXFUN_MULTIPLIER,
@@ -51,6 +52,8 @@ from benchmarks.flat675_fused_campaign_contract import (
     POLICY_MAXCOR,
     POLICY_MAXLS,
     RUNG_BUDGETS,
+    SEARCH_CHILDREN_PER_FUSED_PROBE,
+    SEARCH_CHILDREN_PER_NATIVE_PROBE,
     SOLVE_CHILDREN_PER_COLD_PAIR,
     SOLVE_CHILDREN_PER_WARM_PAIR,
     CampaignState,
@@ -64,6 +67,7 @@ from benchmarks.flat675_fused_campaign_contract import (
     bq_anchor,
     bq_quality_failures,
     budget_search_breaches,
+    budget_search_child_count,
     counter_liveness_failures,
     f3_contract_sha256,
     fixed_budget_quality_failures,
@@ -104,9 +108,8 @@ INSTRUMENT_COMMIT = "1c23f6c5f8964c74cc60f63d81b7f93f2db852f3"
 def test_charter_identity_is_the_current_amendment() -> None:
     """The harness must bind the charter bytes it is executing under."""
     assert F3_CHARTER_SHA256 == (
-        "86db1058962d25048f3f16a5e616978985aaa86e08028d9b1c2dbe868ddfb994"
+        "f8d3ff4a10ac684fea0dbe985419d5651d40ea4844132093aa3b52e968ac1acc"
     )
-    assert F3_CHARTER_COMMIT == "e8625f691"
 
 
 def test_charter_lineage_is_append_only() -> None:
@@ -117,9 +120,13 @@ def test_charter_lineage_is_append_only() -> None:
     assert F3_CHARTER_AMENDMENT_1_SHA256 == (
         "b710ff423667b7fa3c2d9e194ee1e3ccca94ed4821df7c9081fb4deb76e298d2"
     )
+    assert F3_CHARTER_AMENDMENT_2_SHA256 == (
+        "86db1058962d25048f3f16a5e616978985aaa86e08028d9b1c2dbe868ddfb994"
+    )
     assert F3_CHARTER_LINEAGE == (
         F3_CHARTER_FREEZE_SHA256,
         F3_CHARTER_AMENDMENT_1_SHA256,
+        F3_CHARTER_AMENDMENT_2_SHA256,
         F3_CHARTER_SHA256,
     )
     assert len(set(F3_CHARTER_LINEAGE)) == len(F3_CHARTER_LINEAGE)
@@ -130,6 +137,7 @@ def test_charter_lineage_is_append_only() -> None:
     [
         pytest.param(F3_CHARTER_FREEZE_SHA256, id="freeze"),
         pytest.param(F3_CHARTER_AMENDMENT_1_SHA256, id="amendment-1"),
+        pytest.param(F3_CHARTER_AMENDMENT_2_SHA256, id="amendment-2"),
     ],
 )
 def test_validate_accepts_a_run_bound_to_any_earlier_lineage_member(
@@ -2115,3 +2123,83 @@ def test_the_adapted_environment_resolves_to_float64(
     policy = _resolve_production_policy()
 
     assert policy.resolved_precision == "fp64"
+
+
+# --------------------------------------------------------------------------
+# Ledger accounting (Amendment 3): wall and search children
+# --------------------------------------------------------------------------
+
+
+def test_the_wall_cap_was_fail_open_without_an_accumulated_wall() -> None:
+    """A phase that charges no wall leaves the twelve-hour cap unreachable."""
+    silent = CampaignState()
+    for rung in ("b3", "b37", "bq"):
+        silent = silent.completing(rung, timed=10, solve_children=30)
+
+    assert silent.ledger.campaign_wall_seconds == 0.0
+    # Nothing can ever trip the wall cap from here, however long it really ran.
+    assert silent.ledger.breaches() == []
+
+
+def test_completing_accumulates_each_phase_wall() -> None:
+    state = CampaignState()
+    for rung, wall in (("b3", 1800.0), ("b37", 3600.0), ("bq", 900.0)):
+        state = state.completing(rung, timed=10, solve_children=30, wall_seconds=wall)
+
+    assert state.ledger.campaign_wall_seconds == pytest.approx(6300.0)
+    assert state.ledger.breaches() == []
+
+
+def test_the_wall_cap_fires_once_a_phase_pushes_past_twelve_hours() -> None:
+    state = CampaignState().completing(
+        "b3", timed=2, solve_children=6, wall_seconds=MAX_CAMPAIGN_WALL_SECONDS - 1.0
+    )
+    assert state.ledger.breaches() == []
+
+    breached = state.completing("b37", timed=2, solve_children=6, wall_seconds=2.0)
+
+    assert any("campaign_wall" in breach for breach in breached.ledger.breaches())
+    assert breached.stopped is True
+
+
+def test_search_children_follow_the_probe_counts() -> None:
+    """Each fused probe costs a child and an oracle; each native adds a primer."""
+    assert SEARCH_CHILDREN_PER_FUSED_PROBE == 2
+    assert SEARCH_CHILDREN_PER_NATIVE_PROBE == 3
+    assert budget_search_child_count(fused_probes=1, native_probes=0) == 2
+    assert budget_search_child_count(fused_probes=0, native_probes=1) == 3
+
+
+def test_search_children_reproduce_the_executed_campaign() -> None:
+    """Seven probes per lane is what the executed search recorded.
+
+    The run directory holds 7 fused probe children + 7 fused oracles + 7
+    native probe children + 7 native primers + 7 native oracles = 35.
+    """
+    assert budget_search_child_count(fused_probes=7, native_probes=7) == 35
+
+
+def test_the_executed_campaign_total_exceeds_the_chartered_cap() -> None:
+    """Amendment 3's disclosure, as an assertion rather than a sentence.
+
+    The recorded ledger's 102 is the six pair phases alone; adding the search
+    the ledger never charged puts the campaign above the chartered cap.
+    """
+    pair_phase_children = (
+        SOLVE_CHILDREN_PER_COLD_PAIR
+        + 3 * PAIR_COUNT * SOLVE_CHILDREN_PER_WARM_PAIR
+        + 2 * SOLVE_CHILDREN_PER_COLD_PAIR
+    )
+    search_children = budget_search_child_count(fused_probes=7, native_probes=7)
+
+    assert pair_phase_children == 102
+    assert pair_phase_children + search_children == 137
+    assert pair_phase_children + search_children > MAX_SOLVE_CHILD_PROCESSES
+    # And a correctly-charged ledger refuses the next rung at its boundary.
+    charged = CampaignState().completing(
+        "campaign", timed=36, solve_children=pair_phase_children + search_children
+    )
+    assert charged.stopped is True
+    assert charged.admits(timed=2, solve_children=6) == [
+        "campaign_already_stopped_at_a_rung_boundary"
+    ]
