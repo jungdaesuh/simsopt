@@ -442,13 +442,11 @@ def _oracle_objective(oracle: Mapping[str, object]) -> float:
 
 
 def _oracle_gradient_inf(oracle: Mapping[str, object]) -> float:
-    gradient = oracle["gradient"]
-    if not isinstance(gradient, Mapping):
-        raise F3ContractError("oracle payload carries no gradient block.")
-    full = gradient["full_675"]
-    if not isinstance(full, list):
-        raise F3ContractError("oracle gradient.full_675 is not an array.")
-    return max(abs(float(str(entry))) for entry in full)
+    """The oracle's own gradient-inf norm (schema genuine-675-fair-bar-oracle.v1)."""
+    value = oracle.get("gradient_inf_norm")
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise F3ContractError("oracle payload carries no gradient_inf_norm.")
+    return float(value)
 
 
 def _oracle_for(
