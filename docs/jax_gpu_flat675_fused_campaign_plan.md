@@ -362,3 +362,35 @@ as the current claim, each with its timer named.
 - No projected-route / two-stage-example comparison (that bar needs
   P-as-matvec — separate track).
 - No re-litigation of the fair-bar verdict.
+
+---
+
+## Amendment 1 (2026-08-19, pre-evidence — no F3 timed leg has run)
+
+**Timer-tail resolution.** The frozen Quality-gate sentence "the harness
+computes the endpoint's own `(iota, G)` host-side **after timing**" is in
+tension with the Timer law ("`process_wall_seconds` of the timed child …
+exactly as the fair-bar harness measures it"): the endpoint inner-state
+computation is not a bare 2-column QR — it rebuilds the Boozer system
+(grouped Biot–Savart over the surface grid plus a fresh XLA compile) and
+measured 5.257 s (2.59 % of a B3 child's wall) on the instrument review's
+dry run, while the fair-bar native child stops its clock only after ALL its
+work, certificates included. Resolution, in the conservative (anti-GPU)
+direction: **the endpoint (iota, G) computation is charged INSIDE the L1
+primary timer** — the child stops its clock immediately before writing its
+result payload, mirroring the instrument's native lane
+(`genuine_675_dynamic_lane.py:418`). The Quality-gate sentence is amended
+to read "after the solve" (it remains outside the *solve*, inside the
+*timer*). The per-leg row additionally records the endpoint computation's
+own duration, report-only.
+
+**Disclosed counter-asymmetry (not engineered away):** the L1 child's
+timer necessarily starts before its `import jax` (the import-origin guard
+must run first), while the fair-bar native child's module-level imports
+precede its clock start. This term is anti-GPU and inherent to the two
+instruments; the receipt discloses it.
+
+This amendment rewords a measurement clause in the conservative direction
+before any timed evidence exists; thresholds, budgets, pair counts, anchor
+formulas, and the timer's identity (process wall of the timed child) are
+unchanged.
