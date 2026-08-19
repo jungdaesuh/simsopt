@@ -57,6 +57,7 @@ from benchmarks.flat675_fused_campaign_contract import (
     BQ_MAX_PROBES_PER_LANE,
     BQ_MAX_SEARCH_SECONDS,
     BQ_SEARCH_START,
+    DISCLOSURE_RUNGS,
     F3_CHARTER_COMMIT,
     F3_CHARTER_LINEAGE,
     F3_CHARTER_SHA256,
@@ -82,6 +83,7 @@ from benchmarks.flat675_fused_campaign_contract import (
     parse_row,
     policy_identity_failures,
     policy_payload,
+    resolve_disclosure_budgets,
     search_minimal_budget,
     select_sweep_config,
     validate_run_dir,
@@ -929,10 +931,14 @@ def cmd_pairs_bq(args: argparse.Namespace) -> None:
 
 def cmd_cold_pair(args: argparse.Namespace) -> None:
     """One fresh-cache disclosure pair per rung: report-only, never a verdict."""
-    rung = str(args.rung)
-    budget = RUNG_BUDGETS[rung]
+    budgets = resolve_disclosure_budgets(
+        str(args.rung),
+        fused_maxiter=args.fused_maxiter,
+        native_maxiter=args.native_maxiter,
+        quality_target=args.quality_target,
+    )
     root, shim_dir, campaign_manifest_sha, trees = _prepare_run(
-        f"cold-{rung}", args.input_manifest
+        f"cold-{budgets.rung}", args.input_manifest
     )
     _require_rung_admission(timed=2, solve_children=SOLVE_CHILDREN_PER_COLD_PAIR)
     cache_dir = root / "gpu-cache-cold"
@@ -941,27 +947,29 @@ def cmd_cold_pair(args: argparse.Namespace) -> None:
     cache_dir.mkdir(parents=True)
     rows = _run_pair(
         index=0,
-        rung=rung,
-        budget=budget,
+        rung=budgets.rung_label,
+        budget=budgets.fused_maxiter,
         root=root,
         shim_dir=shim_dir,
         source_manifest=args.input_manifest,
         campaign_manifest_sha=campaign_manifest_sha,
         trees=trees,
         native_config=NativeConfig.pinned(args.omp_threads),
-        quality_target=None,
-        native_budget=None,
+        quality_target=budgets.quality_target,
+        native_budget=budgets.native_maxiter,
         warm=False,
     )
-    # Cold legs are disclosed, never claimed: the rung publishes through the
-    # same rule but its verdict is fixed at NOT_PRODUCED.
+    # Cold legs are disclosed, never claimed: the pair publishes through the
+    # same rule, which labels it FRESH_REPORTED rather than entering a verdict.
     _publish_rung(
         root,
-        f"{rung}-cold-disclosure",
-        budget,
+        budgets.rung_label,
+        budgets.fused_maxiter,
         rows,
         trees,
         campaign_manifest_sha,
+        quality_target=budgets.quality_target,
+        native_budget=budgets.native_maxiter,
         cold_disclosure=True,
     )
 
@@ -1064,7 +1072,12 @@ def _parser() -> argparse.ArgumentParser:
     bq.set_defaults(handler=cmd_pairs_bq)
 
     cold = _with_common(subparsers.add_parser("cold-pair"))
-    cold.add_argument("--rung", required=True, choices=sorted(RUNG_BUDGETS))
+    cold.add_argument("--rung", required=True, choices=sorted(DISCLOSURE_RUNGS))
+    # Required for --rung bq, refused for the fixed-budget rungs; the check is
+    # in _cold_pair_budgets so both halves of the rule live in one place.
+    cold.add_argument("--fused-maxiter", type=int, default=None)
+    cold.add_argument("--native-maxiter", type=int, default=None)
+    cold.add_argument("--quality-target", type=float, default=None)
     cold.set_defaults(handler=cmd_cold_pair)
 
     sweep = _with_common(subparsers.add_parser("native-sweep"))

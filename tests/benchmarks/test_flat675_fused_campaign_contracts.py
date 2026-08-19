@@ -17,6 +17,7 @@ value this file invented.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,8 @@ from benchmarks.flat675_fused_campaign_contract import (
     BQ_MAX_PROBES_PER_LANE,
     BQ_MAX_SEARCH_SECONDS,
     BQ_SEARCH_START,
+    DISCLOSURE_RUNG_SUFFIX,
+    DISCLOSURE_RUNGS,
     F3_CHARTER_AMENDMENT_1_SHA256,
     F3_CHARTER_COMMIT,
     F3_CHARTER_FREEZE_SHA256,
@@ -70,6 +73,7 @@ from benchmarks.flat675_fused_campaign_contract import (
     policy_identity_failures,
     policy_identity_sha256,
     policy_payload,
+    resolve_disclosure_budgets,
     row_paths,
     search_minimal_budget,
     select_sweep_config,
@@ -1802,3 +1806,199 @@ def test_the_chartered_campaign_shape_is_127_children() -> None:
     assert total == 127
     assert CapLedger(solve_child_processes=total).breaches() == []
     assert total <= MAX_SOLVE_CHILD_PROCESSES
+
+
+# --------------------------------------------------------------------------
+# The BQ disclosure pair (charter: one fresh-cache pair PER RUNG, three total)
+# --------------------------------------------------------------------------
+
+
+def test_three_rungs_each_get_a_disclosure_pair() -> None:
+    """BQ is a disclosure rung even though it has no fixed budget."""
+    assert DISCLOSURE_RUNGS == ("b3", "b37", "bq")
+    assert set(RUNG_BUDGETS) < set(DISCLOSURE_RUNGS)
+    assert DISCLOSURE_RUNG_SUFFIX == "-cold-disclosure"
+
+
+def test_a_bq_disclosure_rung_keeps_the_quality_gate() -> None:
+    """Its lanes ran different budgets, so a fixed-budget gate would misjudge.
+
+    The fused endpoint here is worse than the native one — legitimate when the
+    two ran m* and n* — and only the Q*-relative gate reads that correctly.
+    """
+    rows = [
+        parse_row(row, source=f"{row['lane']}-pair0")
+        for row in (
+            _producer_row(
+                lane=L1_LANE,
+                pair_index=0,
+                rung=f"bq{DISCLOSURE_RUNG_SUFFIX}",
+                budget=22,
+                wall=140.0,
+                evaluations=24,
+                oracle_objective=1.4,
+            ),
+            _producer_row(
+                lane=L2_LANE,
+                pair_index=0,
+                rung=f"bq{DISCLOSURE_RUNG_SUFFIX}",
+                budget=31,
+                wall=60.0,
+                evaluations=31,
+                oracle_objective=1.2,
+            ),
+        )
+    ]
+
+    with_target, _pairs = adjudicate_rows(
+        rows,
+        rung=f"bq{DISCLOSURE_RUNG_SUFFIX}",
+        quality_target=1.5,
+        disclosure=True,
+    )
+    without_target, _pairs = adjudicate_rows(
+        rows, rung=f"bq{DISCLOSURE_RUNG_SUFFIX}", disclosure=True
+    )
+
+    assert with_target.verdict is Verdict.FRESH_REPORTED
+    assert with_target.failures == ()
+    # Absent Q* the pair cannot be judged at all, and says so.
+    assert any(
+        "bq_quality_target_absent" in failure for failure in without_target.failures
+    )
+
+
+def test_bq_disclosure_round_trips_at_m_star_not_equal_n_star(
+    tmp_path: Path,
+) -> None:
+    """The whole point: a cold BQ pair at searched budgets must validate."""
+    rows = [
+        _producer_row(
+            lane=L1_LANE,
+            pair_index=0,
+            rung=f"bq{DISCLOSURE_RUNG_SUFFIX}",
+            budget=22,
+            wall=140.0,
+            evaluations=24,
+            oracle_objective=1.4,
+        ),
+        _producer_row(
+            lane=L2_LANE,
+            pair_index=0,
+            rung=f"bq{DISCLOSURE_RUNG_SUFFIX}",
+            budget=31,
+            wall=60.0,
+            evaluations=31,
+            oracle_objective=1.2,
+        ),
+    ]
+    _write_rows(tmp_path, rows)
+    parsed = [parse_row(row, source=f"{row['lane']}-pair0") for row in rows]
+    outcome, pairs = adjudicate_rows(
+        parsed,
+        rung=f"bq{DISCLOSURE_RUNG_SUFFIX}",
+        quality_target=1.5,
+        disclosure=True,
+    )
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": F3_RUN_MANIFEST_SCHEMA,
+                "rung": f"bq{DISCLOSURE_RUNG_SUFFIX}",
+                "budget": 22,
+                "native_budget": 31,
+                "quality_target": 1.5,
+                "disclosure_only": True,
+                "f3_charter_sha256": F3_CHARTER_SHA256,
+                "anchor_process_wall_seconds": outcome.anchor_seconds,
+                "verdict": outcome.verdict.value,
+                "not_produced_pairs": outcome.not_produced_pairs,
+                "timed_legs": 2,
+                "solve_child_processes": SOLVE_CHILDREN_PER_COLD_PAIR,
+                "campaign_wall_seconds": 400.0,
+                "production_commit": PRODUCTION_COMMIT,
+                "instrument_commit": INSTRUMENT_COMMIT,
+                "campaign_input_manifest_sha256": BUNDLE_SHA,
+            },
+            sort_keys=True,
+        )
+    )
+
+    report = validate_run_dir(tmp_path)
+
+    assert report.findings == ()
+    assert report.valid is True
+    assert report.recomputed_verdict is Verdict.FRESH_REPORTED
+    assert len(pairs) == 1
+    # Each lane hashed at its own searched budget, as the timed BQ pairs do.
+    assert rows[0]["policy_identity_sha256"] == policy_identity_sha256(22)
+    assert rows[1]["policy_identity_sha256"] == policy_identity_sha256(31)
+
+
+@pytest.mark.parametrize("rung", ["b3", "b37"])
+def test_a_fixed_budget_disclosure_uses_its_chartered_budget(rung: str) -> None:
+    budgets = resolve_disclosure_budgets(rung)
+
+    assert budgets.fused_maxiter == budgets.native_maxiter == RUNG_BUDGETS[rung]
+    assert budgets.quality_target is None
+    assert budgets.rung_label == f"{rung}{DISCLOSURE_RUNG_SUFFIX}"
+
+
+@pytest.mark.parametrize("rung", ["b3", "b37"])
+@pytest.mark.parametrize(
+    "supply",
+    [
+        pytest.param(
+            lambda rung: resolve_disclosure_budgets(rung, fused_maxiter=22),
+            id="fused-maxiter",
+        ),
+        pytest.param(
+            lambda rung: resolve_disclosure_budgets(rung, native_maxiter=31),
+            id="native-maxiter",
+        ),
+        pytest.param(
+            lambda rung: resolve_disclosure_budgets(rung, quality_target=1.5),
+            id="quality-target",
+        ),
+    ],
+)
+def test_a_fixed_budget_disclosure_refuses_a_searched_budget(
+    rung: str, supply: Callable[[str], object]
+) -> None:
+    """B3/B37 disclose at the chartered budget; a searched one is a mistake."""
+    with pytest.raises(F3ContractError, match="takes no"):
+        supply(rung)
+
+
+def test_a_bq_disclosure_takes_the_searched_budgets() -> None:
+    budgets = resolve_disclosure_budgets(
+        "bq", fused_maxiter=22, native_maxiter=31, quality_target=1.5
+    )
+
+    assert (budgets.fused_maxiter, budgets.native_maxiter) == (22, 31)
+    assert budgets.quality_target == 1.5
+    assert budgets.rung_label == f"bq{DISCLOSURE_RUNG_SUFFIX}"
+
+
+@pytest.mark.parametrize(
+    "omitted",
+    [
+        pytest.param("fused_maxiter", id="no-m-star"),
+        pytest.param("native_maxiter", id="no-n-star"),
+        pytest.param("quality_target", id="no-quality-target"),
+    ],
+)
+def test_a_bq_disclosure_requires_every_searched_value(omitted: str) -> None:
+    """m*, n* and Q* have no chartered defaults, so none may be inferred."""
+    with pytest.raises(F3ContractError, match="requires"):
+        resolve_disclosure_budgets(
+            "bq",
+            fused_maxiter=None if omitted == "fused_maxiter" else 22,
+            native_maxiter=None if omitted == "native_maxiter" else 31,
+            quality_target=None if omitted == "quality_target" else 1.5,
+        )
+
+
+def test_only_the_three_chartered_rungs_may_disclose() -> None:
+    with pytest.raises(F3ContractError, match="not a disclosure rung"):
+        resolve_disclosure_budgets("b50")
