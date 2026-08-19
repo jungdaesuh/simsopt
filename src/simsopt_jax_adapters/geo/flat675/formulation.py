@@ -136,21 +136,6 @@ class Flat675Candidate:
             )
         )
 
-    @classmethod
-    def from_outer_vector(cls, values: object) -> Flat675Candidate:
-        """Split one flat 675-vector back into its three owner blocks."""
-        vector = np.asarray(values, dtype=np.float64)
-        if vector.shape != (FLAT675_OUTER_DOF_COUNT,):
-            raise Flat675ContractError(
-                "flat-675 outer vector must have shape "
-                f"({FLAT675_OUTER_DOF_COUNT},); got {vector.shape}."
-            )
-        return cls(
-            coil_coordinates=tuple(vector[FLAT675_COIL_SLICE].tolist()),
-            vessel_coordinates=tuple(vector[FLAT675_VESSEL_SLICE].tolist()),
-            surface_coordinates=tuple(vector[FLAT675_SURFACE_SLICE].tolist()),
-        )
-
 
 __all__ = [
     "FLAT675_COIL_DOF_COUNT",

@@ -80,31 +80,12 @@ class Flat675CandidateGeometry:
     coil_set: GroupedCoilSetSpec
 
 
-jax.tree_util.register_dataclass(
-    Flat675CandidateGeometry,
-    data_fields=[
-        "surface_gamma",
-        "toroidal_tangent",
-        "poloidal_tangent",
-        "coil_set",
-    ],
-    meta_fields=[],
-)
-
-
 @dataclass(frozen=True, slots=True)
 class Flat675BoozerSystem:
     """The two-column design matrix and right-hand side at one candidate."""
 
     design_matrix: jax.Array
     right_hand_side: jax.Array
-
-
-jax.tree_util.register_dataclass(
-    Flat675BoozerSystem,
-    data_fields=["design_matrix", "right_hand_side"],
-    meta_fields=[],
-)
 
 
 @dataclass(frozen=True, slots=True)

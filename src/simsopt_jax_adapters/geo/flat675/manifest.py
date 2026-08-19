@@ -296,11 +296,12 @@ def _vessel_array(arrays: dict[str, object], name: str) -> NDArray[np.float64]:
         for index, item in enumerate(raw_shape)
     )
     try:
-        return np.asarray(record["values"], dtype=np.float64).reshape(shape)
+        array = np.asarray(record["values"], dtype=np.float64).reshape(shape)
     except (KeyError, TypeError, ValueError) as error:
-        raise Flat675ContractError(
-            f"vessel_material.arrays.{name} is not a valid float64 array."
-        ) from error
+        raise Flat675ContractError(f"{where} is not a valid float64 array.") from error
+    if not np.all(np.isfinite(array)):
+        raise Flat675ContractError(f"{where} must be finite.")
+    return array
 
 
 def load_flat675_vessel_template(bundle_root: Path | str) -> SurfaceRZFourierSpec:

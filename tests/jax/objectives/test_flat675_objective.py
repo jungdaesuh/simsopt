@@ -23,7 +23,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from simsopt_jax_adapters.geo.flat675 import (
+    FLAT675_COIL_SLICE,
     FLAT675_OBJECTIVE_TERM_KEYS,
+    FLAT675_SURFACE_SLICE,
+    FLAT675_VESSEL_SLICE,
     Flat675Bundle,
     build_flat675_boozer_system,
     flat675_candidate_geometry,
@@ -61,6 +64,12 @@ CERTIFICATE_TERM_NAMES = (
 # reaches the vessel block.
 ARCHIVED_MINIMUM_SURFACE_VESSEL_DISTANCE_M = 0.05292932805459816
 ACTIVATING_SURFACE_VESSEL_THRESHOLD_M = 0.2
+# The vessel gradient this port measures at that activated threshold.
+ACTIVATED_VESSEL_GRADIENT = (
+    0.35290288750786897,
+    -0.3310626658438312,
+    -0.28375651703846133,
+)
 
 pytestmark = pytest.mark.skipif(
     not BUNDLE_ROOT.is_dir() or not CERTIFICATE_PATH.is_file(),
@@ -217,8 +226,8 @@ def test_start_candidate_reproduces_the_archived_inner_solve_certificate(
     """The two closed inner scalars and their conditioning match the archive."""
     geometry = flat675_candidate_geometry(
         bundle.material.boozer,
-        start_coordinates[0:11],
-        start_coordinates[14:675],
+        start_coordinates[FLAT675_COIL_SLICE],
+        start_coordinates[FLAT675_SURFACE_SLICE],
     )
     system = build_flat675_boozer_system(geometry, bundle.boozer_policy)
     inner_solve = solve_flat675_y_qr(system.design_matrix, system.right_hand_side)
@@ -261,7 +270,7 @@ def test_vessel_gradient_is_exactly_zero_outside_the_hinge(
         "threshold, so the zero below would stop being the expected value"
     )
     np.testing.assert_array_equal(
-        gradient[11:14],
+        gradient[FLAT675_VESSEL_SLICE],
         np.zeros(3),
         err_msg="the flat-675 objective grew a vessel dependence the archived "
         "native certificate does not have",
@@ -296,9 +305,16 @@ def test_vessel_gradient_is_live_once_the_hinge_activates(
         dtype=np.float64,
     )
 
-    vessel_gradient = gradient[11:14]
+    vessel_gradient = gradient[FLAT675_VESSEL_SLICE]
     assert np.all(np.isfinite(vessel_gradient))
-    assert float(np.linalg.norm(vessel_gradient)) > 0.0, (
-        "the surface-to-vessel term is active yet the vessel block has no "
-        "gradient, so the vessel geometry is not traced"
+    np.testing.assert_allclose(
+        vessel_gradient,
+        ACTIVATED_VESSEL_GRADIENT,
+        rtol=1.0e-11,
+        atol=0.0,
+        err_msg=(
+            "the activated vessel gradient moved off its recorded value; a "
+            "vessel geometry that stopped being traced reads as exact zeros, "
+            "and any other value means the surface-to-vessel term changed"
+        ),
     )

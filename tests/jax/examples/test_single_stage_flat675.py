@@ -161,7 +161,7 @@ def test_flat675_workflow_lands_on_the_archived_three_step_endpoint(
         abs(endpoint_objective - ARCHIVED_THREE_STEP_OBJECTIVE)
         / ARCHIVED_THREE_STEP_OBJECTIVE
     )
-    assert relative_error < 1.0e-9, (
+    assert relative_error < 1.0e-12, (
         "the fused three-step endpoint left the archived native trajectory: "
         f"got {endpoint_objective!r}, archive recorded "
         f"{ARCHIVED_THREE_STEP_OBJECTIVE!r} (relative error {relative_error:.3e})"
