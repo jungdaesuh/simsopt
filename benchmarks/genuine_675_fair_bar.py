@@ -130,6 +130,12 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _json_float(value: object, where: str) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise TypeError(f"{where} must be a JSON number, got {type(value).__name__}.")
+    return float(value)
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -683,8 +689,9 @@ def run_leg(
             abs(float(g)) for g in final_certificate["gradient"]["full_675"]
         ),
         endpoint_candidate=final_certificate["candidate"],
-        endpoint_inner_state=tuple(
-            float(v) for v in final_certificate["y_certificate"]["solution"]
+        endpoint_inner_state=(
+            float(final_certificate["y_certificate"]["solution"][0]),
+            float(final_certificate["y_certificate"]["solution"][1]),
         ),
         termination_reason=str(result["termination_reason"]),
         scipy_status=result["scipy"],
@@ -833,7 +840,8 @@ def evaluate_pair_gates(
     if gradient_gap > ENDPOINT_GRADIENT_RTOL:
         failures.append("endpoint_gradient_gap")
     oracle_gap = abs(
-        float(oracle["objective_value"]) - native.endpoint_objective
+        _json_float(oracle["objective_value"], "oracle.objective_value")
+        - native.endpoint_objective
     ) / abs(native.endpoint_objective)
     if oracle_gap > ENDPOINT_OBJECTIVE_RTOL:
         failures.append("oracle_objective_gap")
@@ -1088,18 +1096,9 @@ def cmd_phase1(args: argparse.Namespace) -> None:
         source_manifest=args.source_manifest,
     )
     gates = evaluate_pair_gates(native_primed, gpu, oracle)
-    conformance_failures = []
-    for leg, expected_x64 in ((native_primed, "1"), (gpu, "1")):
-        child_env = leg.provenance.get("env", {}) if leg.provenance else {}
-        if child_env.get("JAX_ENABLE_X64") != expected_x64:
-            conformance_failures.append(f"{leg.lane}_x64_unobserved")
-    child_env = native_primed.provenance.get("env", {})
-    if child_env.get("OMP_NUM_THREADS") != str(args.omp_threads):
-        conformance_failures.append("native_omp_pin_unobserved")
     primed_delta = native_cold.process_wall_seconds - native_primed.process_wall_seconds
-    verdict = (
-        "PHASE1_OK" if gates["passed"] and not conformance_failures else "NOT_PRODUCED"
-    )
+    phase1_ok = bool(gates["passed"])
+    verdict = "PHASE1_OK" if phase1_ok else "NOT_PRODUCED"
     _finish_run(
         run_root,
         phase="phase1",
@@ -1107,7 +1106,7 @@ def cmd_phase1(args: argparse.Namespace) -> None:
         campaign_manifest_sha256=campaign_sha,
         extra={
             "gates": gates,
-            "conformance_failures": conformance_failures,
+            "conformance": "enforced-per-leg (enforce_child_conformance raises)",
             "native_primed_vs_cold_delta_seconds": primed_delta,
         },
     )
@@ -1227,12 +1226,16 @@ def cmd_native_matrix(args: argparse.Namespace) -> None:
         raise RuntimeError(
             "No native matrix configuration completed scipy in all reps."
         )
-    best = min(eligible_results.items(), key=lambda item: float(item[1]["median"]))
-    best_median = float(best[1]["median"])
+    best = min(
+        eligible_results.items(),
+        key=lambda item: _json_float(item[1]["median"], "matrix.median"),
+    )
+    best_median = _json_float(best[1]["median"], "matrix.median")
     headline_eligible = sorted(
         label
         for label, entry in eligible_results.items()
-        if float(entry["median"]) <= NARROWING_FACTOR * best_median
+        if _json_float(entry["median"], "matrix.median")
+        <= NARROWING_FACTOR * best_median
     )
     _finish_run(
         run_root,
