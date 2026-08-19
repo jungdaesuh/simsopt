@@ -28,6 +28,7 @@ from benchmarks.flat675_fused_campaign_contract import (
     BQ_MAX_PROBES_PER_LANE,
     BQ_MAX_SEARCH_SECONDS,
     BQ_SEARCH_START,
+    F3_CHARTER_AMENDMENT_1_SHA256,
     F3_CHARTER_COMMIT,
     F3_CHARTER_FREEZE_SHA256,
     F3_CHARTER_LINEAGE,
@@ -97,31 +98,44 @@ INSTRUMENT_COMMIT = "1c23f6c5f8964c74cc60f63d81b7f93f2db852f3"
 def test_charter_identity_is_the_current_amendment() -> None:
     """The harness must bind the charter bytes it is executing under."""
     assert F3_CHARTER_SHA256 == (
-        "b710ff423667b7fa3c2d9e194ee1e3ccca94ed4821df7c9081fb4deb76e298d2"
+        "86db1058962d25048f3f16a5e616978985aaa86e08028d9b1c2dbe868ddfb994"
     )
-    assert F3_CHARTER_COMMIT == "595b7da60"
+    assert F3_CHARTER_COMMIT == "e8625f691"
 
 
 def test_charter_lineage_is_append_only() -> None:
-    """The freeze is never dropped, and the current sha is its last member."""
+    """Every earlier sha survives, in order, with the current one last."""
     assert F3_CHARTER_FREEZE_SHA256 == (
         "0a61ed647afc08424a149a06a6e247535d4da931136bc5d2294874634b9564dc"
     )
-    assert F3_CHARTER_LINEAGE[0] == F3_CHARTER_FREEZE_SHA256
-    assert F3_CHARTER_LINEAGE[-1] == F3_CHARTER_SHA256
+    assert F3_CHARTER_AMENDMENT_1_SHA256 == (
+        "b710ff423667b7fa3c2d9e194ee1e3ccca94ed4821df7c9081fb4deb76e298d2"
+    )
+    assert F3_CHARTER_LINEAGE == (
+        F3_CHARTER_FREEZE_SHA256,
+        F3_CHARTER_AMENDMENT_1_SHA256,
+        F3_CHARTER_SHA256,
+    )
     assert len(set(F3_CHARTER_LINEAGE)) == len(F3_CHARTER_LINEAGE)
 
 
-def test_validate_accepts_a_run_bound_to_the_superseded_freeze(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "charter_sha",
+    [
+        pytest.param(F3_CHARTER_FREEZE_SHA256, id="freeze"),
+        pytest.param(F3_CHARTER_AMENDMENT_1_SHA256, id="amendment-1"),
+    ],
+)
+def test_validate_accepts_a_run_bound_to_any_earlier_lineage_member(
+    tmp_path: Path, charter_sha: str
 ) -> None:
-    """A run that executed before Amendment 1 stays validatable."""
+    """A run that executed under an earlier amendment stays validatable."""
     _write_run_dir(
         tmp_path,
         l1_walls=[10.0] * PAIR_COUNT,
         l2_walls=[12.0] * PAIR_COUNT,
-        manifest_overrides={"f3_charter_sha256": F3_CHARTER_FREEZE_SHA256},
-        charter_sha=F3_CHARTER_FREEZE_SHA256,
+        manifest_overrides={"f3_charter_sha256": charter_sha},
+        charter_sha=charter_sha,
     )
 
     assert validate_run_dir(tmp_path).valid is True
@@ -958,6 +972,7 @@ def _publish_like_the_producer(
                 "anchor_process_wall_seconds": outcome.anchor_seconds,
                 "verdict": outcome.verdict.value,
                 "gate_failures": list(outcome.failures),
+                "not_produced_pairs": outcome.not_produced_pairs,
                 "timed_legs": 2 * len(pairs),
                 "solve_child_processes": SOLVE_CHILDREN_PER_WARM_PAIR * len(pairs),
                 "campaign_wall_seconds": 100.0,
@@ -1440,3 +1455,350 @@ def test_campaign_state_round_trips_through_its_payload() -> None:
 def test_campaign_state_refuses_a_foreign_schema() -> None:
     with pytest.raises(F3ContractError, match="campaign state schema"):
         CampaignState.from_payload({"schema": "something-else.v1"})
+
+
+# --------------------------------------------------------------------------
+# not_produced_pairs counts PAIRS, not the rung-wide failure list
+# --------------------------------------------------------------------------
+
+
+def _rows_with_one_failing_pair() -> list[Any]:
+    """Five pairs, of which pair 2 alone violates the quality gate."""
+    rows: list[dict[str, Any]] = []
+    for index in range(PAIR_COUNT):
+        rows.append(
+            _producer_row(
+                lane=L1_LANE,
+                pair_index=index,
+                rung="b37",
+                budget=37,
+                wall=10.0,
+                evaluations=30,
+                oracle_objective=5.0 if index == 2 else 1.0,
+            )
+        )
+        rows.append(
+            _producer_row(
+                lane=L2_LANE,
+                pair_index=index,
+                rung="b37",
+                budget=37,
+                wall=12.0,
+                evaluations=31,
+                oracle_objective=1.0,
+            )
+        )
+    return [
+        parse_row(row, source=f"{row['lane']}-pair{row['pair_index']}") for row in rows
+    ]
+
+
+def test_not_produced_pairs_counts_only_the_pairs_that_failed() -> None:
+    """One failing pair of five is one voided pair, not five."""
+    outcome, pairs = adjudicate_rows(_rows_with_one_failing_pair(), rung="b37")
+
+    assert len(pairs) == PAIR_COUNT
+    assert outcome.not_produced_pairs == 1
+    # Below the three-pair abort, so the rung is adjudicated, not aborted.
+    assert not any("rung_aborted" in failure for failure in outcome.failures)
+
+
+def test_not_produced_pairs_is_zero_when_every_pair_passes() -> None:
+    rows = [
+        parse_row(row, source=f"{row['lane']}-pair{row['pair_index']}")
+        for index in range(PAIR_COUNT)
+        for row in (
+            _producer_row(
+                lane=L1_LANE,
+                pair_index=index,
+                rung="b37",
+                budget=37,
+                wall=10.0,
+                evaluations=30,
+                oracle_objective=1.0,
+            ),
+            _producer_row(
+                lane=L2_LANE,
+                pair_index=index,
+                rung="b37",
+                budget=37,
+                wall=12.0,
+                evaluations=31,
+                oracle_objective=1.0,
+            ),
+        )
+    ]
+
+    outcome, _pairs = adjudicate_rows(rows, rung="b37")
+
+    assert outcome.not_produced_pairs == 0
+    assert outcome.verdict is Verdict.WIN
+
+
+def test_a_published_not_produced_count_must_match_the_recomputed_one(
+    tmp_path: Path,
+) -> None:
+    """The degenerate count published five voided pairs where one had failed."""
+    rows: list[dict[str, Any]] = []
+    for index in range(PAIR_COUNT):
+        rows.append(
+            _producer_row(
+                lane=L1_LANE,
+                pair_index=index,
+                rung="b37",
+                budget=37,
+                wall=10.0,
+                evaluations=30,
+                oracle_objective=5.0 if index == 2 else 1.0,
+            )
+        )
+        rows.append(
+            _producer_row(
+                lane=L2_LANE,
+                pair_index=index,
+                rung="b37",
+                budget=37,
+                wall=12.0,
+                evaluations=31,
+                oracle_objective=1.0,
+            )
+        )
+    outcome = _publish_like_the_producer(tmp_path, rows, rung="b37", budget=37)
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+
+    assert outcome.not_produced_pairs == 1
+    assert manifest["not_produced_pairs"] == 1
+    assert manifest["not_produced_pairs"] != PAIR_COUNT
+
+
+def test_three_voided_pairs_abort_the_rung() -> None:
+    """The abort rule reads the pair count, so it now fires when it should."""
+    rows: list[dict[str, Any]] = []
+    for index in range(PAIR_COUNT):
+        rows.append(
+            _producer_row(
+                lane=L1_LANE,
+                pair_index=index,
+                rung="b37",
+                budget=37,
+                wall=10.0,
+                evaluations=30,
+                oracle_objective=5.0 if index < 3 else 1.0,
+            )
+        )
+        rows.append(
+            _producer_row(
+                lane=L2_LANE,
+                pair_index=index,
+                rung="b37",
+                budget=37,
+                wall=12.0,
+                evaluations=31,
+                oracle_objective=1.0,
+            )
+        )
+    parsed = [
+        parse_row(row, source=f"{row['lane']}-pair{row['pair_index']}") for row in rows
+    ]
+
+    outcome, _pairs = adjudicate_rows(parsed, rung="b37")
+
+    assert outcome.not_produced_pairs == 3
+    assert outcome.verdict is Verdict.NOT_PRODUCED
+    assert any(
+        "rung_aborted_on_3_not_produced_pairs" in failure
+        for failure in outcome.failures
+    )
+
+
+# --------------------------------------------------------------------------
+# Required manifest identity (absence is a finding, not a pass)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        pytest.param("production_commit", id="production-commit"),
+        pytest.param("instrument_commit", id="instrument-commit"),
+        pytest.param("campaign_input_manifest_sha256", id="bundle-sha"),
+    ],
+)
+def test_validate_requires_every_manifest_identity_field(
+    tmp_path: Path, field: str
+) -> None:
+    """Omitting the field must not buy a pass the way a mismatch cannot."""
+    _write_run_dir(tmp_path, l1_walls=[10.0] * PAIR_COUNT, l2_walls=[12.0] * PAIR_COUNT)
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    del manifest[field]
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest, sort_keys=True))
+
+    report = validate_run_dir(tmp_path)
+
+    assert report.valid is False
+    assert any(
+        f"missing required identity field {field!r}" in finding
+        for finding in report.findings
+    )
+
+
+# --------------------------------------------------------------------------
+# FRESH_REPORTED: the disclosure token (Amendment 2)
+# --------------------------------------------------------------------------
+
+
+def _disclosure_rows(*, oracle_objective: float = 1.0) -> list[Any]:
+    """The single cold pair a disclosure rung produces."""
+    return [
+        parse_row(row, source=f"{row['lane']}-pair0")
+        for row in (
+            _producer_row(
+                lane=L1_LANE,
+                pair_index=0,
+                rung="b3-cold-disclosure",
+                budget=3,
+                wall=140.0,
+                evaluations=9,
+                oracle_objective=oracle_objective,
+            ),
+            _producer_row(
+                lane=L2_LANE,
+                pair_index=0,
+                rung="b3-cold-disclosure",
+                budget=3,
+                wall=60.0,
+                evaluations=9,
+                oracle_objective=1.0,
+            ),
+        )
+    ]
+
+
+def test_a_disclosure_pair_is_fresh_reported_not_not_produced() -> None:
+    """One cold pair is the whole shape; the five-pair rule does not apply."""
+    outcome, pairs = adjudicate_rows(
+        _disclosure_rows(), rung="b3-cold-disclosure", disclosure=True
+    )
+
+    assert len(pairs) == 1
+    assert outcome.verdict is Verdict.FRESH_REPORTED
+    assert outcome.failures == ()
+    # A cold fused leg is slower here, and that must not read as a verdict.
+    assert outcome.median_speedup is not None
+    assert outcome.median_speedup < 1.0
+
+
+def test_the_same_single_pair_is_not_produced_as_a_verdict_rung() -> None:
+    """Without the disclosure flag the pair-count rule still voids N=1."""
+    outcome, _pairs = adjudicate_rows(_disclosure_rows(), rung="b3")
+
+    assert outcome.verdict is Verdict.NOT_PRODUCED
+    assert any("pair_count_1_expected_5" in failure for failure in outcome.failures)
+
+
+def test_a_disclosure_whose_gates_fail_is_still_voided() -> None:
+    """FRESH_REPORTED labels evidence, it does not excuse a failed gate."""
+    outcome, _pairs = adjudicate_rows(
+        _disclosure_rows(oracle_objective=5.0),
+        rung="b3-cold-disclosure",
+        disclosure=True,
+    )
+
+    assert outcome.verdict is Verdict.NOT_PRODUCED
+    assert any(
+        "l1_objective_above_paired_native" in failure for failure in outcome.failures
+    )
+
+
+def test_validate_reads_the_disclosure_flag_from_the_manifest(
+    tmp_path: Path,
+) -> None:
+    """A disclosure run directory round-trips as FRESH_REPORTED."""
+    rows = [
+        _producer_row(
+            lane=L1_LANE,
+            pair_index=0,
+            rung="b3-cold-disclosure",
+            budget=3,
+            wall=140.0,
+            evaluations=9,
+            oracle_objective=1.0,
+        ),
+        _producer_row(
+            lane=L2_LANE,
+            pair_index=0,
+            rung="b3-cold-disclosure",
+            budget=3,
+            wall=60.0,
+            evaluations=9,
+            oracle_objective=1.0,
+        ),
+    ]
+    _write_rows(tmp_path, rows)
+    parsed = [parse_row(row, source=f"{row['lane']}-pair0") for row in rows]
+    outcome, pairs = adjudicate_rows(parsed, rung="b3-cold-disclosure", disclosure=True)
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": F3_RUN_MANIFEST_SCHEMA,
+                "rung": "b3-cold-disclosure",
+                "budget": 3,
+                "disclosure_only": True,
+                "f3_charter_sha256": F3_CHARTER_SHA256,
+                "anchor_process_wall_seconds": outcome.anchor_seconds,
+                "verdict": outcome.verdict.value,
+                "not_produced_pairs": outcome.not_produced_pairs,
+                "timed_legs": 2,
+                "solve_child_processes": SOLVE_CHILDREN_PER_COLD_PAIR,
+                "campaign_wall_seconds": 300.0,
+                "production_commit": PRODUCTION_COMMIT,
+                "instrument_commit": INSTRUMENT_COMMIT,
+                "campaign_input_manifest_sha256": BUNDLE_SHA,
+            },
+            sort_keys=True,
+        )
+    )
+
+    report = validate_run_dir(tmp_path)
+
+    assert report.findings == ()
+    assert report.valid is True
+    assert report.recomputed_verdict is Verdict.FRESH_REPORTED
+    assert len(pairs) == 1
+
+
+def test_fresh_reported_is_not_a_rung_verdict() -> None:
+    """The three rung verdicts stay exactly what the charter froze."""
+    assert {verdict.value for verdict in Verdict} == {
+        "WIN",
+        "CLOSED_BOUNDED_NEGATIVE",
+        "NOT_PRODUCED",
+        "FRESH_REPORTED",
+    }
+    for walls, anchor in (([10.0] * PAIR_COUNT, 58.702),):
+        outcome = adjudicate_rung(
+            l1_walls=walls, l2_walls=[12.0] * PAIR_COUNT, anchor_seconds=anchor
+        )
+        assert outcome.verdict is not Verdict.FRESH_REPORTED
+
+
+# --------------------------------------------------------------------------
+# Amendment 2's process-cap arithmetic
+# --------------------------------------------------------------------------
+
+
+def test_the_chartered_campaign_shape_is_127_children() -> None:
+    """Amendment 2 pins the arithmetic at this instrument's own accounting."""
+    warm_pairs = 3 * PAIR_COUNT
+    cold_pairs = 3
+    bq_search_children = 1 + BQ_MAX_PROBES_PER_LANE + BQ_MAX_PROBES_PER_LANE
+    total = (
+        warm_pairs * SOLVE_CHILDREN_PER_WARM_PAIR
+        + cold_pairs * SOLVE_CHILDREN_PER_COLD_PAIR
+        + bq_search_children
+    )
+
+    assert (warm_pairs, cold_pairs, bq_search_children) == (15, 3, 25)
+    assert total == 127
+    assert CapLedger(solve_child_processes=total).breaches() == []
+    assert total <= MAX_SOLVE_CHILD_PROCESSES
