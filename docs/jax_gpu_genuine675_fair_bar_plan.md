@@ -1,7 +1,10 @@
 # Genuine-675 flat single-stage fair-bar campaign — preregistration
 
-Status: DRAFT (becomes FROZEN at the charter commit; after that, dated
-pre-evidence amendments only). Author date: 2026-08-18.
+Status: **FROZEN** at commit `7b6d69041` (2026-08-18); amended by dated
+pre-evidence amendments A1 (`2f0381cde`), A2 (`2a832c7a7`), A2a
+(`0d1ca0607`), A3 (`e07bdc7c4`), A3a (below). Frozen-body text that an
+amendment supersedes carries an inline pointer and is retained verbatim
+per the amendment rule. Author date: 2026-08-18.
 
 ## Mission and verdict space
 
@@ -103,6 +106,9 @@ separate formulation that ruling required. The doc was never updated; this
 charter records the discharge rather than obeying the stale text.
 
 ## Substrate and lineage disclosure
+
+> **[Superseded by Amendment 1]** — the instrument is pinned detached at
+> `1c23f6c5`, not the `5fb968188` branch described below.
 
 The formulation does **not** exist on `pr/jax-port-squashed` (this branch's
 `single_stage_fullspace.py` is the different 716-DOF NEQ problem; merge-base
@@ -277,6 +283,10 @@ Phase 1 passes.
 
 ### Phase 2 — native OMP matrix (the fair bar)
 
+> **[Superseded by Amendment 2]** — under the partition the sweep is
+> `OMP ∈ {1, 2, 4, 8, 16*}` on the reserved set, the unpinned disclosure
+> leg is retired, and the archived anchor covers the high-thread regime.
+
 Native lane only, at each budget: `OMP_NUM_THREADS ∈ {1, 2, 4, 8, 16, 32,
 64}` with `OMP_PLACES=cores`, `OMP_PROC_BIND=close`,
 `OPENBLAS_NUM_THREADS=1`, CPU affinity pinned to physical cores `0-31` for
@@ -302,7 +312,7 @@ so this narrowing cannot flatter the GPU's opponent.
 
 Five native/GPU pairs, alternating start lane pair-to-pair, serialized (one
 timed process at a time), box-idle gate before every timed leg (fail-closed
-on load), native at the frozen denominator config, GPU as archived
+on load — **superseded by Amendment 2's partition-integrity gate**), native at the frozen denominator config, GPU as archived
 (`PRODUCTION_CUDA_CHILD_ENVIRONMENT` + per-campaign persistent cache dir).
 Ratio per pair = native `process_wall_seconds` / GPU `process_wall_seconds`.
 
@@ -338,6 +348,10 @@ measurement and supersedes the 9.8× explicitly, whichever direction the
 verdict goes.
 
 ## Ops constraints
+
+> **[Superseded by Amendment 2]** — the quiet-box wait is replaced by the
+> reserved-CCD partition with foreign-compute confinement; timed legs are
+> gated by partition integrity, not whole-box load.
 
 Shared box: the harness's idle gate blocks timed legs while foreign
 compute (e.g., the currently-running full-core native job) is live; runs
@@ -439,6 +453,8 @@ anchor bars are: **B3 anchor = 58.702 s** (the fastest archived process
 wall) and **B50 anchor = 66 × 5.867 = 387.2 s** (the fastest archived
 per-eval times the measured B50 evaluation count, with zero overhead
 added — an extrapolation constructed strictly in native's favor).
+**[Derivation superseded by Amendment 2a** — the headline anchor is
+pair-derived, not a fixed constant.**]**
 Admitting these candidates can only lower the denominator bar, never
 raise it, so no partition-induced slowdown of the live native legs can
 inflate the ratio beyond what the archive licenses.
@@ -519,3 +535,47 @@ noted here for the record: the partition sweep's best native
 (omp16 SMT-assisted, 52.70 s) is **faster** than the fastest archived
 unpinned-64 wall (58.702 s), so the live denominator undercuts the
 archive — the anti-GPU direction the partition design promised.
+
+## Amendment 3a — implementation record and corrections (2026-08-19, pre-verdict)
+
+Recorded before any headline-rung timed leg completes and before any
+verdict exists; nothing here changes a threshold, budget, timer, or the
+pair rule.
+
+1. **Charter-lineage validation (formalizes harness commit `23c147f32`).**
+   Amendments legitimately move the charter sha mid-campaign, so each row
+   binds the charter bytes **current when its run executed**, and
+   `validate` accepts the append-only lineage — `92e6a657…` (freeze),
+   `537d621b…` (A1), `1d82aece…` (A2), `be4b262c…` (A2a), `2dea1522…`
+   (A3) — recomputing every row's contract sha against its run's own
+   recorded member. The frozen sentence "charter bytes at the freeze
+   commit … refuses any row whose contract sha differs from the frozen
+   one" is superseded accordingly; out-of-lineage rows are still refused.
+2. **Probe sequencing deviation (disclosed).** The frozen text places the
+   divergence probe "immediately after Phase 1"; it actually ran after
+   the B3 matrix, at the matrix-selected configuration (omp16). The probe
+   remained untimed, conformance-gated, and complete before any
+   headline-budget timed leg — the clause's purpose — and running it at
+   the selected config makes its trajectory evidence match the config the
+   pairs will use.
+3. **In-child provenance, as implemented.** Captured from inside every
+   lane child (sitecustomize shim, read-only, atexit): granted affinity
+   mask at interpreter start and at exit, `os.cpu_count`, the threading
+   and JAX env echoes (`OMP_NUM_THREADS`, `OMP_PLACES`, `OMP_PROC_BIND`,
+   `OPENBLAS_NUM_THREADS`, `MKL/NUMEXPR/VECLIB`, `JAX_ENABLE_X64`,
+   `JAX_PLATFORMS`), the resolved `libgomp.so.1` path from
+   `/proc/self/maps`, `omp_get_max_threads()` through that handle, and
+   the CPU model line. Not captured in-child, contrary to the frozen
+   list, and evidenced instead at the stated level: `nvidia-smi`
+   name/driver (harness partition gate + receipt-level provenance),
+   `jax.__version__` (fixed by the pinned runtime env the charter names),
+   and `openblas_get_num_threads()` (evidenced by the fail-closed
+   `OPENBLAS_NUM_THREADS=1` echo). The receipt carries this mapping.
+4. **Correction to Amendment 3's attribution.** The probe requirement and
+   its certificate-cadence recording live in the frozen section "B50
+   divergence probe and contingency" (shaped by the pre-freeze review),
+   not in Amendment 1, which concerns only the instrument substrate.
+5. **Expected timed-leg count under Amendment 2.** The frozen estimate
+   (≈55–70, including disclosure legs) becomes ≈54: 15 B3-matrix +
+   15 headline-matrix + 20 pair + 4 fresh-cache timed legs, still under
+   the ≤96 cap; disclosure legs were retired by Amendment 2.
