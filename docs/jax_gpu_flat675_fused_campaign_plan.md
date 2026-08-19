@@ -1,9 +1,9 @@
 # Flat-675 fused single-stage GPU campaign (F3) — charter
 
 Status: FROZEN at `b7ec63b6e`, amended A1 (`595b7da60`), A2 (`e8625f691`),
-A3 (this commit).  The campaign executed against this document on 2026-08-19
-and is complete; amendments after A2 record implementation state only and
-never touch a measurement clause.
+A3 (`2181ecbf1`), A3a (this commit).  The campaign executed against this
+document on 2026-08-19 and is complete; amendments after A2 record
+implementation state only and never touch a measurement clause.
 
 Operator directive (2026-08-19): land the flat-675 objective in the production
 tree, wrap it in the certified fused `dispatch.minimize` lane, gate with
@@ -472,3 +472,44 @@ quality-gated remeasurement of the B37 pairing rather than an independent
 budget point.  This is the protocol operating as written (`n* <= 37` by
 construction, and the fused lane reached `Q*` no later), and it is stated here
 so the receipt does not read BQ as an independent third measurement.
+
+## Amendment 3a (2026-08-19, post-campaign — corrects one A3 sentence)
+
+A3's text is frozen and is not edited; this amendment corrects one factual
+error in it.  Everything else in A3 stands.
+
+**The error.**  A3(b)(2) ends its cap-breach paragraph with "had the ledger
+been correct, the rung-admission rule would have refused the BQ pairs at their
+rung boundary."  That is false.  The admission rule projects a rung's cost at
+its START (`admits()` = `ledger.with_legs(rung cost).breaches()`), and under a
+correct ledger the BQ pairs project inside the cap:
+
+| boundary | ledger before | rung cost | projected | admission |
+|---|---|---|---|---|
+| pairs-b3   |   4 | 30 |  34 | admitted |
+| pairs-b37  |  34 | 30 |  64 | admitted |
+| search     |  64 | 35 |  99 | (uncounted phase; no admission gate) |
+| **pairs-bq** | **99** | **30** | **129 ≤ 130** | **admitted** |
+| cold-b37   | 129 |  4 | **133 > 130** | **refused** |
+| cold-bq    | 129 |  4 | **133 > 130** | **refused** |
+
+Neither of the other two caps binds anywhere in that sequence: timed legs
+reach 32 of 51 before the BQ pairs, and the campaign wall reaches about 6.9 h
+of 12 h.  The child cap alone refuses, and only at the cold-b37 boundary.
+
+**The correction.**  All three *verdict* rungs — B3, B37 and BQ — were within
+the process cap and would have been admitted under correct accounting.  The
+breach materialised entirely in the two report-only cold disclosures
+(`b37-cold-disclosure` and `bq-cold-disclosure`), which a correct ledger would
+have refused as `NOT_PRODUCED` at their rung boundaries.  Those two
+disclosures are therefore the only evidence in this campaign that would not
+exist under correct accounting; they enter no verdict either way, and their
+`FRESH_REPORTED` N=1 status is unchanged by this correction.
+
+This matters because the sentence being corrected implies the BQ `WIN` survives
+only through the accounting defect.  It does not: BQ was admissible on the
+correct ledger, and no verdict rung depended on the undercount.
+
+The cap breach itself, the 137-child total, and A3's two accounting fixes are
+unaffected.  This amendment touches no threshold, budget, pair count, anchor
+formula, quality gate, or timer.
