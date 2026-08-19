@@ -83,6 +83,7 @@ from benchmarks.flat675_fused_campaign_contract import (
     parse_row,
     policy_identity_failures,
     policy_payload,
+    production_child_environment,
     resolve_disclosure_budgets,
     search_minimal_budget,
     select_sweep_config,
@@ -200,7 +201,12 @@ def run_fused_leg(
     leg_root.mkdir(parents=True, exist_ok=False)
     output_path = leg_root / "lane.json"
     provenance_out = leg_root / "child_provenance.json"
-    environment = gpu_environment(cache_dir=cache_dir, shim_dir=shim_dir)
+    # The fair-bar builder is the instrument's, and its output is shaped for
+    # the instrument tree; production_child_environment is the F3-owned
+    # adapter that makes it safe for a production-tree child.
+    environment = production_child_environment(
+        gpu_environment(cache_dir=cache_dir, shim_dir=shim_dir)
+    )
     environment["FAIR_BAR_PROVENANCE_OUT"] = str(provenance_out)
     # The child imports the flat-675 program from THIS tree; the instrument
     # PYTHONPATH this harness runs under must not follow it into the child.

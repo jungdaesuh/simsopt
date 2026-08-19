@@ -1174,6 +1174,33 @@ def resolve_disclosure_budgets(
     )
 
 
+# The instrument tree's child-environment builder always sets this variable
+# (its own GPU lane still reads it).  The production backend rejects the
+# variable's PRESENCE outright -- src/simsopt_jax/backend/_runtime_policy.py
+# raises "SIMSOPT_MIXED_PRECISION is not supported; use SIMSOPT_PRECISION=mixed
+# instead" -- so an L1 child handed the instrument's environment dies at
+# import before it can time anything.
+OBSOLETE_PRECISION_ENV: Final[str] = "SIMSOPT_MIXED_PRECISION"
+
+
+def production_child_environment(environment: Mapping[str, str]) -> dict[str, str]:
+    """Adapt an instrument-built child environment for the production tree.
+
+    Exactly one variable is removed and none is added.  Nothing sets
+    ``SIMSOPT_PRECISION``: its absence resolves to ``mode_default``, which
+    ``_resolved_precision_for_mode`` maps to ``fp64`` for every mode except
+    the float32 smoke lane -- so the fused lane's float64 contract is the
+    default, and naming it would only create a second source for it.
+
+    The audit behind "exactly one" is executable: the full instrument variable
+    set minus this one is accepted by the production policy resolver and
+    resolves to fp64 (see the contract tests).
+    """
+    adapted = dict(environment)
+    adapted.pop(OBSOLETE_PRECISION_ENV, None)
+    return adapted
+
+
 def select_sweep_config(medians: Mapping[str, float]) -> str:
     """The fair-bar selection rule: the config with the smallest median wall."""
     if not medians:
@@ -1296,6 +1323,7 @@ __all__ = [
     "NATIVE_SWEEP_OMP_MATRIX",
     "NATIVE_SWEEP_REPS",
     "NOT_PRODUCED_ABORT",
+    "OBSOLETE_PRECISION_ENV",
     "PAIR_COUNT",
     "POLICY_FIELDS",
     "POLICY_GTOL",
@@ -1335,6 +1363,7 @@ __all__ = [
     "policy_identity_failures",
     "policy_identity_sha256",
     "policy_payload",
+    "production_child_environment",
     "resolve_disclosure_budgets",
     "row_paths",
     "rung_anchor",
