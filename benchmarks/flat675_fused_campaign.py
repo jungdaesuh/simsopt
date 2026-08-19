@@ -34,6 +34,12 @@ tree — so the production root comes first and the instrument's ``src`` supplie
 The L1 children are launched with a production-only ``PYTHONPATH`` of their
 own, so the instrument tree never follows the harness into the lane under test.
 
+``--input-manifest`` is the sealed BUNDLE's own ``manifest.json`` (sha
+``84febc05…``), exactly as the fair-bar CLI takes it; the campaign manifest
+(the fair-bar reclassification wrapper, sha ``2a381125…``) is minted fresh
+into every run root rather than supplied — the sealed bundle's exact member
+census forbids it living beside the members.
+
 Subcommands: ``pairs``, ``budget-search``, ``pairs-bq``, ``cold-pair``,
 ``native-sweep``, ``validate``.
 """
@@ -101,6 +107,7 @@ from benchmarks.genuine_675_fair_bar import (
     enforce_child_conformance,
     gpu_environment,
     load_campaign_manifest,
+    mint_campaign_manifest,
     native_environment,
     partition_integrity_gate,
     run_leg,
@@ -399,11 +406,21 @@ def _new_run_root(phase: str) -> Path:
 
 
 def _prepare_run(phase: str, source_manifest: Path) -> tuple[Path, Path, str, dict]:
+    """Open a run root and bind the frozen input, fair-bar pattern.
+
+    ``source_manifest`` is the sealed BUNDLE's own manifest.json (the file the
+    lane children consume); the campaign manifest is minted fresh into the run
+    root and validated against the bundle directory.  The two cannot share a
+    directory: the instrument's envelope check enforces an exact member census
+    on the sealed 0550 bundle, so any cohabiting extra file fails it.
+    """
     trees = require_clean_trees()
     root = _new_run_root(phase)
     shim_dir = write_provenance_shim(root)
+    campaign_manifest = root / "campaign_input_manifest.json"
+    mint_campaign_manifest(source_manifest, campaign_manifest)
     campaign_manifest_sha = load_campaign_manifest(
-        source_manifest, source_manifest.parent
+        campaign_manifest, source_manifest.parent
     )
     return root, shim_dir, campaign_manifest_sha, trees
 
