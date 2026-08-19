@@ -332,6 +332,8 @@ def _fair_bar_provenance() -> None:
             "OMP_PROC_BIND",
             "OPENBLAS_NUM_THREADS",
             "MKL_NUM_THREADS",
+            "NUMEXPR_NUM_THREADS",
+            "VECLIB_MAXIMUM_THREADS",
             "JAX_ENABLE_X64",
             "JAX_PLATFORMS",
         )
@@ -437,6 +439,79 @@ def gpu_environment(
     return environment
 
 
+SCRUBBED_THREADING_NAMES = (
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+)
+
+
+def enforce_child_conformance(
+    *,
+    lane: str,
+    config_label: str,
+    omp_threads: int | None,
+    affinity: tuple[int, ...] | None,
+    provenance: Mapping[str, object],
+) -> None:
+    """Fail a leg closed unless the child-observed state matches the pins.
+
+    The declared environment proves what was requested; only the child's
+    resolved state (env echo, libgomp thread count, granted affinity mask)
+    proves what actually ran — the finite-build fp64-taint lesson.
+    """
+    if not provenance:
+        raise RuntimeError(
+            f"{lane} ({config_label}): no child provenance was captured."
+        )
+    child_env = provenance.get("env")
+    has_env_echo = isinstance(child_env, Mapping)
+    if not has_env_echo:
+        raise RuntimeError(f"{lane} ({config_label}): provenance has no env echo.")
+    failures: list[str] = []
+    if child_env.get("JAX_ENABLE_X64") != "1":
+        failures.append("x64_unobserved")
+    for name in SCRUBBED_THREADING_NAMES:
+        if child_env.get(name) is not None:
+            failures.append(f"{name.lower()}_leaked")
+    if lane == NATIVE_LANE:
+        if omp_threads is not None:
+            expected = {
+                "OMP_NUM_THREADS": str(omp_threads),
+                "OMP_PLACES": "cores",
+                "OMP_PROC_BIND": "close",
+                "OPENBLAS_NUM_THREADS": "1",
+            }
+            for name, value in expected.items():
+                if child_env.get(name) != value:
+                    failures.append(f"{name.lower()}_unobserved")
+            resolved = provenance.get("omp_get_max_threads")
+            if resolved != omp_threads:
+                failures.append(
+                    f"omp_get_max_threads_resolved_{resolved}_declared_{omp_threads}"
+                )
+        else:
+            for name in (
+                "OMP_NUM_THREADS",
+                "OMP_PLACES",
+                "OMP_PROC_BIND",
+                "OPENBLAS_NUM_THREADS",
+            ):
+                if child_env.get(name) is not None:
+                    failures.append(f"disclosure_{name.lower()}_set")
+    granted = provenance.get("sched_affinity_at_import")
+    expected_mask = sorted(affinity) if affinity is not None else sorted(ALL_CPUS)
+    if granted != expected_mask:
+        failures.append(
+            f"affinity_granted_{len(granted) if isinstance(granted, list) else '?'}"
+            f"_expected_{len(expected_mask)}"
+        )
+    if failures:
+        raise RuntimeError(
+            f"{lane} ({config_label}) child-conformance failures: {failures}"
+        )
+
+
 def wait_for_idle_box() -> float:
     """Fail-closed idle gate: block timed legs while foreign compute is live."""
     waited = 0.0
@@ -503,6 +578,7 @@ def run_leg(
     lane: str,
     budget: int,
     environment: dict[str, str],
+    omp_threads: int | None,
     affinity: tuple[int, ...] | None,
     leg_root: Path,
     timed: bool,
@@ -571,6 +647,13 @@ def run_leg(
     final_certificate = result["final_certificate"]
     provenance: Mapping[str, object] = (
         json.loads(provenance_out.read_text()) if provenance_out.is_file() else {}
+    )
+    enforce_child_conformance(
+        lane=lane,
+        config_label=config_label,
+        omp_threads=omp_threads,
+        affinity=affinity,
+        provenance=provenance,
     )
     leg = LegResult(
         lane=lane,
@@ -884,6 +967,7 @@ def _native_leg(
             lane=NATIVE_LANE,
             budget=budget,
             environment=native_environment(config, shim_dir=shim_dir),
+            omp_threads=config.omp_threads,
             affinity=config.affinity,
             leg_root=primer_root,
             timed=False,
@@ -897,6 +981,7 @@ def _native_leg(
         lane=NATIVE_LANE,
         budget=budget,
         environment=native_environment(config, shim_dir=shim_dir),
+        omp_threads=config.omp_threads,
         affinity=config.affinity,
         leg_root=run_root / leg_name,
         timed=timed,
@@ -928,6 +1013,7 @@ def _gpu_leg(
             lane=GPU_LANE,
             budget=budget,
             environment=gpu_environment(cache_dir=cache_dir, shim_dir=shim_dir),
+            omp_threads=None,
             affinity=None,
             leg_root=primer_root,
             timed=False,
@@ -941,6 +1027,7 @@ def _gpu_leg(
         lane=GPU_LANE,
         budget=budget,
         environment=gpu_environment(cache_dir=cache_dir, shim_dir=shim_dir),
+        omp_threads=None,
         affinity=None,
         leg_root=run_root / leg_name,
         timed=timed,
