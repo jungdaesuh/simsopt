@@ -47,10 +47,16 @@ F3_CHARTER_AMENDMENT_2_SHA256: Final[str] = (
 # ledger-accounting defects disclosed -- the campaign wall was never
 # accumulated and the budget search never charged its children, so the
 # executed campaign's true child total was 137 against a cap of 130.
-F3_CHARTER_SHA256: Final[str] = (
+F3_CHARTER_AMENDMENT_3_SHA256: Final[str] = (
     "f8d3ff4a10ac684fea0dbe985419d5651d40ea4844132093aa3b52e968ac1acc"
 )
-F3_CHARTER_COMMIT: Final[str] = "2181ecbf1"
+# Amendment 3a (2026-08-19, post-campaign): corrects one A3 sentence -- under
+# a correct ledger the BQ pairs were admissible (99 + 30 = 129 <= 130); the
+# breach refused only the two report-only cold disclosures (129 + 4 = 133).
+F3_CHARTER_SHA256: Final[str] = (
+    "60583d83042839a024956e3cc9d401bd3f4113a495628fbd57dda18d08921576"
+)
+F3_CHARTER_COMMIT: Final[str] = "PENDING"
 F3_CHARTER_PATH: Final[str] = (
     "docs/jax_gpu_flat675_fused_campaign_plan.md (pr/jax-port-squashed)"
 )
@@ -61,6 +67,7 @@ F3_CHARTER_LINEAGE: Final[tuple[str, ...]] = (
     F3_CHARTER_FREEZE_SHA256,
     F3_CHARTER_AMENDMENT_1_SHA256,
     F3_CHARTER_AMENDMENT_2_SHA256,
+    F3_CHARTER_AMENDMENT_3_SHA256,
     F3_CHARTER_SHA256,
 )
 
@@ -1337,6 +1344,7 @@ __all__ = [
     "DISCLOSURE_RUNG_SUFFIX",
     "F3_CHARTER_AMENDMENT_1_SHA256",
     "F3_CHARTER_AMENDMENT_2_SHA256",
+    "F3_CHARTER_AMENDMENT_3_SHA256",
     "F3_CHARTER_COMMIT",
     "F3_CHARTER_FREEZE_SHA256",
     "F3_CHARTER_LINEAGE",

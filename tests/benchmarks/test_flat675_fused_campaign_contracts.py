@@ -33,6 +33,7 @@ from benchmarks.flat675_fused_campaign_contract import (
     DISCLOSURE_RUNGS,
     F3_CHARTER_AMENDMENT_1_SHA256,
     F3_CHARTER_AMENDMENT_2_SHA256,
+    F3_CHARTER_AMENDMENT_3_SHA256,
     F3_CHARTER_FREEZE_SHA256,
     F3_CHARTER_LINEAGE,
     F3_CHARTER_SHA256,
@@ -108,7 +109,7 @@ INSTRUMENT_COMMIT = "1c23f6c5f8964c74cc60f63d81b7f93f2db852f3"
 def test_charter_identity_is_the_current_amendment() -> None:
     """The harness must bind the charter bytes it is executing under."""
     assert F3_CHARTER_SHA256 == (
-        "f8d3ff4a10ac684fea0dbe985419d5651d40ea4844132093aa3b52e968ac1acc"
+        "60583d83042839a024956e3cc9d401bd3f4113a495628fbd57dda18d08921576"
     )
 
 
@@ -123,10 +124,14 @@ def test_charter_lineage_is_append_only() -> None:
     assert F3_CHARTER_AMENDMENT_2_SHA256 == (
         "86db1058962d25048f3f16a5e616978985aaa86e08028d9b1c2dbe868ddfb994"
     )
+    assert F3_CHARTER_AMENDMENT_3_SHA256 == (
+        "f8d3ff4a10ac684fea0dbe985419d5651d40ea4844132093aa3b52e968ac1acc"
+    )
     assert F3_CHARTER_LINEAGE == (
         F3_CHARTER_FREEZE_SHA256,
         F3_CHARTER_AMENDMENT_1_SHA256,
         F3_CHARTER_AMENDMENT_2_SHA256,
+        F3_CHARTER_AMENDMENT_3_SHA256,
         F3_CHARTER_SHA256,
     )
     assert len(set(F3_CHARTER_LINEAGE)) == len(F3_CHARTER_LINEAGE)
@@ -138,6 +143,7 @@ def test_charter_lineage_is_append_only() -> None:
         pytest.param(F3_CHARTER_FREEZE_SHA256, id="freeze"),
         pytest.param(F3_CHARTER_AMENDMENT_1_SHA256, id="amendment-1"),
         pytest.param(F3_CHARTER_AMENDMENT_2_SHA256, id="amendment-2"),
+        pytest.param(F3_CHARTER_AMENDMENT_3_SHA256, id="amendment-3"),
     ],
 )
 def test_validate_accepts_a_run_bound_to_any_earlier_lineage_member(
