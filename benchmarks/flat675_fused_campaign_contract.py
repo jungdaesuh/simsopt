@@ -35,10 +35,15 @@ F3_CHARTER_FREEZE_SHA256: Final[str] = (
 )
 # Amendment 1 (2026-08-19, pre-evidence): the endpoint inner-state computation
 # is charged inside the L1 primary timer.
-F3_CHARTER_SHA256: Final[str] = (
+F3_CHARTER_AMENDMENT_1_SHA256: Final[str] = (
     "b710ff423667b7fa3c2d9e194ee1e3ccca94ed4821df7c9081fb4deb76e298d2"
 )
-F3_CHARTER_COMMIT: Final[str] = "595b7da60"
+# Amendment 2 (2026-08-19, pre-evidence): FRESH_REPORTED names the disclosure
+# outcome, and the process-cap arithmetic is corrected to 127 <= 130.
+F3_CHARTER_SHA256: Final[str] = (
+    "86db1058962d25048f3f16a5e616978985aaa86e08028d9b1c2dbe868ddfb994"
+)
+F3_CHARTER_COMMIT: Final[str] = "e8625f691"
 F3_CHARTER_PATH: Final[str] = (
     "docs/jax_gpu_flat675_fused_campaign_plan.md (pr/jax-port-squashed)"
 )
@@ -47,6 +52,7 @@ F3_CHARTER_PATH: Final[str] = (
 # accepts any lineage member and recomputes against the row's own sha.
 F3_CHARTER_LINEAGE: Final[tuple[str, ...]] = (
     F3_CHARTER_FREEZE_SHA256,
+    F3_CHARTER_AMENDMENT_1_SHA256,
     F3_CHARTER_SHA256,
 )
 
@@ -117,11 +123,18 @@ NATIVE_SWEEP_REPS: Final[int] = 3
 
 
 class Verdict(str, Enum):
-    """The charter's complete terminal vocabulary; no other outcome exists."""
+    """The charter's complete terminal vocabulary; no other outcome exists.
+
+    The first three are *rung* verdicts.  ``FRESH_REPORTED`` labels
+    cold-disclosure evidence only (Amendment 2): a disclosure pair is
+    reported, enters no verdict, and is never ``NOT_PRODUCED`` — that token
+    means gates voided a rung, and a disclosure never attempted one.
+    """
 
     WIN = "WIN"
     CLOSED_BOUNDED_NEGATIVE = "CLOSED_BOUNDED_NEGATIVE"
     NOT_PRODUCED = "NOT_PRODUCED"
+    FRESH_REPORTED = "FRESH_REPORTED"
 
 
 class F3ContractError(RuntimeError):
@@ -397,6 +410,7 @@ class RungOutcome:
     l2_median_wall: float | None
     live_rule_holds: bool
     anchor_rule_holds: bool
+    not_produced_pairs: int
     failures: tuple[str, ...]
 
 
@@ -425,16 +439,24 @@ def adjudicate_rung(
     anchor_seconds: float | None,
     not_produced_pairs: int = 0,
     gate_failures: Sequence[str] = (),
+    disclosure: bool = False,
 ) -> RungOutcome:
-    """Apply the dual verdict rule to one rung's completed pairs."""
+    """Apply the dual verdict rule to one rung's completed pairs.
+
+    A ``disclosure`` rung is the per-rung cold pair: it is a single pair by
+    construction, so the five-pair rule does not apply to it, and it reports
+    ``FRESH_REPORTED`` rather than entering a verdict (Amendment 2).  Its
+    gates are still recomputed — a disclosure whose gates fail is voided like
+    any other evidence.
+    """
     failures = list(gate_failures)
     if not_produced_pairs >= NOT_PRODUCED_ABORT:
         failures.append(f"rung_aborted_on_{not_produced_pairs}_not_produced_pairs")
-    if len(l1_walls) != PAIR_COUNT or len(l2_walls) != PAIR_COUNT:
+    if not disclosure and (len(l1_walls) != PAIR_COUNT or len(l2_walls) != PAIR_COUNT):
         failures.append(
             f"pair_count_{min(len(l1_walls), len(l2_walls))}_expected_{PAIR_COUNT}"
         )
-    if failures:
+    if failures or not l1_walls:
         return RungOutcome(
             verdict=Verdict.NOT_PRODUCED,
             pair_speedups=(),
@@ -446,6 +468,7 @@ def adjudicate_rung(
             l2_median_wall=None,
             live_rule_holds=False,
             anchor_rule_holds=False,
+            not_produced_pairs=not_produced_pairs,
             failures=tuple(failures),
         )
 
@@ -460,16 +483,21 @@ def adjudicate_rung(
     if anchor_seconds is None:
         anchor_ratio = None
         anchor_rule = False
-        failures.append("anchor_unavailable")
+        # The anchor rule is half of a verdict, and a disclosure enters no
+        # verdict, so a disclosure without an anchor is complete, not broken.
+        if not disclosure:
+            failures.append("anchor_unavailable")
     else:
         anchor_ratio = _finite(anchor_seconds, "anchor_seconds") / l1_median
         anchor_rule = anchor_ratio >= WIN_MEDIAN_THRESHOLD
+    if disclosure:
+        verdict = Verdict.FRESH_REPORTED
+    elif live_rule and anchor_rule:
+        verdict = Verdict.WIN
+    else:
+        verdict = Verdict.CLOSED_BOUNDED_NEGATIVE
     return RungOutcome(
-        verdict=(
-            Verdict.WIN
-            if live_rule and anchor_rule
-            else Verdict.CLOSED_BOUNDED_NEGATIVE
-        ),
+        verdict=verdict,
         pair_speedups=speedups,
         median_speedup=median_speedup,
         minimum_speedup=minimum_speedup,
@@ -479,6 +507,7 @@ def adjudicate_rung(
         l2_median_wall=l2_median,
         live_rule_holds=live_rule,
         anchor_rule_holds=anchor_rule,
+        not_produced_pairs=not_produced_pairs,
         failures=tuple(failures),
     )
 
@@ -824,6 +853,7 @@ def adjudicate_rows(
     *,
     rung: str,
     quality_target: float | None = None,
+    disclosure: bool = False,
 ) -> tuple[RungOutcome, tuple[PairEvidence, ...]]:
     """The single adjudication rule, shared by the producer and ``validate``.
 
@@ -848,6 +878,7 @@ def adjudicate_rows(
         anchor_seconds=rung_anchor(passing, rung=rung),
         not_produced_pairs=len(pairs) - len(passing),
         gate_failures=failures,
+        disclosure=disclosure,
     )
     return outcome, pairs
 
@@ -872,6 +903,19 @@ def validate_run_dir(run_dir: Path | str) -> ValidationReport:
             "run manifest binds a charter sha outside the append-only lineage."
         )
     rung = str(manifest.get("rung", ""))
+    disclosure = bool(manifest.get("disclosure_only", False))
+    # Identity is a required part of a run manifest: a manifest that omits
+    # what its rows are bound to cannot cross-check them, and silence must
+    # not read as agreement.
+    identity = {
+        field: manifest.get(field)
+        for field in (
+            "production_commit",
+            "instrument_commit",
+            "campaign_input_manifest_sha256",
+        )
+    }
+    missing_identity = sorted(name for name, value in identity.items() if value is None)
     quality_target = (
         None
         if manifest.get("quality_target") is None
@@ -886,7 +930,10 @@ def validate_run_dir(run_dir: Path | str) -> ValidationReport:
         for path in paths
     ]
 
-    findings: list[str] = []
+    findings: list[str] = [
+        f"run manifest is missing required identity field {name!r}"
+        for name in missing_identity
+    ]
     for row in rows:
         # Each lane runs its own budget (BQ pairs fused m* against native n*),
         # so the policy and contract a row must satisfy come from that row.
@@ -915,14 +962,16 @@ def validate_run_dir(run_dir: Path | str) -> ValidationReport:
             ("instrument_commit", row.instrument_commit),
             ("campaign_input_manifest_sha256", row.campaign_input_manifest_sha256),
         ):
-            expected = manifest.get(field)
+            expected = identity[field]
             if expected is not None and str(expected) != recorded:
                 findings.append(
                     f"{row.source}: {field} {recorded!r} differs from the "
                     f"manifest's {expected!r}"
                 )
 
-    outcome, pairs = adjudicate_rows(rows, rung=rung, quality_target=quality_target)
+    outcome, pairs = adjudicate_rows(
+        rows, rung=rung, quality_target=quality_target, disclosure=disclosure
+    )
     findings.extend(outcome.failures)
 
     recorded_anchor = manifest.get("anchor_process_wall_seconds")
@@ -1148,6 +1197,7 @@ __all__ = [
     "BQ_MAX_SEARCH_SECONDS",
     "BQ_SEARCH_START",
     "CAMPAIGN_STATE_SCHEMA",
+    "F3_CHARTER_AMENDMENT_1_SHA256",
     "F3_CHARTER_COMMIT",
     "F3_CHARTER_FREEZE_SHA256",
     "F3_CHARTER_LINEAGE",

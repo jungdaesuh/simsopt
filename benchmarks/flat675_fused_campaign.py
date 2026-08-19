@@ -639,7 +639,12 @@ def _publish_rung(
         parse_row(row, source=f"{row.get('lane')}-pair{row.get('pair_index')}")
         for row in rows
     ]
-    outcome, pairs = adjudicate_rows(parsed, rung=rung, quality_target=quality_target)
+    outcome, pairs = adjudicate_rows(
+        parsed,
+        rung=rung,
+        quality_target=quality_target,
+        disclosure=cold_disclosure,
+    )
     timed_legs = 2 * len(pairs)
     solve_children = len(pairs) * (
         SOLVE_CHILDREN_PER_COLD_PAIR
@@ -649,7 +654,9 @@ def _publish_rung(
     state = _campaign_state()
     updated = state.completing(rung, timed=timed_legs, solve_children=solve_children)
     _write_campaign_state(updated)
-    verdict = Verdict.NOT_PRODUCED if cold_disclosure else outcome.verdict
+    # The disclosure token comes from the shared rule, not from a second
+    # opinion here: a cold rung whose gates fail is voided like any evidence.
+    verdict = outcome.verdict
     _finish_run(
         root,
         {
@@ -676,8 +683,7 @@ def _publish_rung(
             "l2_median_wall_seconds": outcome.l2_median_wall,
             "live_rule_holds": outcome.live_rule_holds,
             "anchor_rule_holds": outcome.anchor_rule_holds,
-            "not_produced_pairs": len(pairs)
-            - len([p for p in pairs if not outcome.failures]),
+            "not_produced_pairs": outcome.not_produced_pairs,
             "gate_failures": list(outcome.failures),
             "verdict": verdict.value,
             "timed_legs": updated.ledger.timed_legs,
