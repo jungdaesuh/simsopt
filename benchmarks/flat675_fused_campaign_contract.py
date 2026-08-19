@@ -56,7 +56,7 @@ F3_CHARTER_AMENDMENT_3_SHA256: Final[str] = (
 F3_CHARTER_SHA256: Final[str] = (
     "60583d83042839a024956e3cc9d401bd3f4113a495628fbd57dda18d08921576"
 )
-F3_CHARTER_COMMIT: Final[str] = "PENDING"
+F3_CHARTER_COMMIT: Final[str] = "6d3b179d3"
 F3_CHARTER_PATH: Final[str] = (
     "docs/jax_gpu_flat675_fused_campaign_plan.md (pr/jax-port-squashed)"
 )
