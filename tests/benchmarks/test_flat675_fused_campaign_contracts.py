@@ -27,9 +27,12 @@ from benchmarks.flat675_fused_campaign_contract import (
     BQ_MAX_MAXITER,
     BQ_MAX_PROBES_PER_LANE,
     BQ_MAX_SEARCH_SECONDS,
+    BQ_SEARCH_START,
     F3_CHARTER_COMMIT,
+    F3_CHARTER_FREEZE_SHA256,
     F3_CHARTER_LINEAGE,
     F3_CHARTER_SHA256,
+    F3_ROW_DIRECTORY,
     F3_ROW_SCHEMA,
     F3_RUN_MANIFEST_SCHEMA,
     GRADIENT_FACTOR_K,
@@ -43,9 +46,13 @@ from benchmarks.flat675_fused_campaign_contract import (
     POLICY_MAXCOR,
     POLICY_MAXLS,
     RUNG_BUDGETS,
+    SOLVE_CHILDREN_PER_COLD_PAIR,
+    SOLVE_CHILDREN_PER_WARM_PAIR,
+    CampaignState,
     CapLedger,
     F3ContractError,
     Verdict,
+    adjudicate_rows,
     adjudicate_rung,
     b3_anchor,
     b37_anchor,
@@ -56,10 +63,15 @@ from benchmarks.flat675_fused_campaign_contract import (
     f3_contract_sha256,
     fixed_budget_quality_failures,
     observed_policy_sha256,
+    pair_rows,
     pair_speedups,
+    parse_row,
     policy_identity_failures,
     policy_identity_sha256,
     policy_payload,
+    row_paths,
+    search_minimal_budget,
+    select_sweep_config,
     validate_run_dir,
 )
 
@@ -82,15 +94,37 @@ INSTRUMENT_COMMIT = "1c23f6c5f8964c74cc60f63d81b7f93f2db852f3"
 # --------------------------------------------------------------------------
 
 
-def test_charter_identity_is_the_frozen_document() -> None:
-    """The harness must bind the charter this campaign was written against."""
+def test_charter_identity_is_the_current_amendment() -> None:
+    """The harness must bind the charter bytes it is executing under."""
     assert F3_CHARTER_SHA256 == (
+        "b710ff423667b7fa3c2d9e194ee1e3ccca94ed4821df7c9081fb4deb76e298d2"
+    )
+    assert F3_CHARTER_COMMIT == "595b7da60"
+
+
+def test_charter_lineage_is_append_only() -> None:
+    """The freeze is never dropped, and the current sha is its last member."""
+    assert F3_CHARTER_FREEZE_SHA256 == (
         "0a61ed647afc08424a149a06a6e247535d4da931136bc5d2294874634b9564dc"
     )
-    assert F3_CHARTER_COMMIT == "b7ec63b6e"
-    # Append-only: the freeze seeds the lineage and is never dropped from it.
-    assert F3_CHARTER_LINEAGE[0] == F3_CHARTER_SHA256
+    assert F3_CHARTER_LINEAGE[0] == F3_CHARTER_FREEZE_SHA256
+    assert F3_CHARTER_LINEAGE[-1] == F3_CHARTER_SHA256
     assert len(set(F3_CHARTER_LINEAGE)) == len(F3_CHARTER_LINEAGE)
+
+
+def test_validate_accepts_a_run_bound_to_the_superseded_freeze(
+    tmp_path: Path,
+) -> None:
+    """A run that executed before Amendment 1 stays validatable."""
+    _write_run_dir(
+        tmp_path,
+        l1_walls=[10.0] * PAIR_COUNT,
+        l2_walls=[12.0] * PAIR_COUNT,
+        manifest_overrides={"f3_charter_sha256": F3_CHARTER_FREEZE_SHA256},
+        charter_sha=F3_CHARTER_FREEZE_SHA256,
+    )
+
+    assert validate_run_dir(tmp_path).valid is True
 
 
 def test_frozen_rung_budgets_and_thresholds_match_the_charter() -> None:
@@ -379,6 +413,27 @@ def test_bq_gate_requires_both_endpoints_at_the_quality_target() -> None:
     ]
 
 
+def test_bq_gate_compares_to_the_target_exactly() -> None:
+    """The charter grants BQ no tolerance; the 1e-10 is the fixed-budget gate's."""
+    assert (
+        bq_quality_failures(
+            l1_oracle_objective=1.0,
+            l2_oracle_objective=1.0,
+            l1_oracle_gradient_inf=1.0,
+            l2_oracle_gradient_inf=1.0,
+            quality_target=1.0,
+        )
+        == []
+    )
+    assert bq_quality_failures(
+        l1_oracle_objective=1.0 + 1.0e-11,
+        l2_oracle_objective=1.0,
+        l1_oracle_gradient_inf=1.0,
+        l2_oracle_gradient_inf=1.0,
+        quality_target=1.0,
+    ) == ["l1_objective_above_quality_target"]
+
+
 # --------------------------------------------------------------------------
 # Verdict rule (dual; both must hold)
 # --------------------------------------------------------------------------
@@ -538,10 +593,13 @@ def test_budget_search_caps_are_the_chartered_ones() -> None:
 def _row(
     *,
     lane: str,
+    pair_index: int,
     wall: float,
     evaluations: int,
     budget: int = 37,
     oracle_objective: float = 1.0,
+    oracle_gradient: float = 1.0,
+    charter_sha: str = F3_CHARTER_SHA256,
 ) -> dict[str, Any]:
     policy = policy_payload(budget)
     return {
@@ -549,6 +607,7 @@ def _row(
         "lane": lane,
         "role": "timed",
         "rung": "b37",
+        "pair_index": pair_index,
         "budget": budget,
         "timed": True,
         "process_wall_seconds": wall,
@@ -560,12 +619,16 @@ def _row(
         "policy": policy,
         "policy_identity_sha256": observed_policy_sha256(policy),
         "oracle_objective": oracle_objective,
-        "f3_charter_sha256": F3_CHARTER_SHA256,
+        "oracle_gradient_inf_norm": oracle_gradient,
+        "host_transfer_ledger": {"initialization": 0, "final_result": 15},
+        "f3_charter_sha256": charter_sha,
         "fair_bar_charter_sha256": FAIR_BAR_SHA,
         "campaign_input_manifest_sha256": BUNDLE_SHA,
         "production_commit": PRODUCTION_COMMIT,
         "instrument_commit": INSTRUMENT_COMMIT,
-        "campaign_contract_sha256": _contract(budget=budget),
+        "campaign_contract_sha256": _contract(
+            budget=budget, charter_sha256=charter_sha
+        ),
     }
 
 
@@ -576,20 +639,27 @@ def _write_run_dir(
     l2_walls: list[float],
     manifest_overrides: dict[str, Any] | None = None,
     row_mutation: Any = None,
+    charter_sha: str = F3_CHARTER_SHA256,
 ) -> Path:
     l1_nfev = [30] * len(l1_walls)
     l2_compact = [31] * len(l2_walls)
+    rows: list[dict[str, Any]] = []
     for index, (l1_wall, l2_wall) in enumerate(zip(l1_walls, l2_walls, strict=True)):
         for lane, wall, evaluations in (
             (L1_LANE, l1_wall, l1_nfev[index]),
             (L2_LANE, l2_wall, l2_compact[index]),
         ):
-            row = _row(lane=lane, wall=wall, evaluations=evaluations)
+            row = _row(
+                lane=lane,
+                pair_index=index,
+                wall=wall,
+                evaluations=evaluations,
+                charter_sha=charter_sha,
+            )
             if row_mutation is not None:
                 row = row_mutation(row, index, lane)
-            leg = root / f"pair{index}-{'l1' if lane == L1_LANE else 'l2'}"
-            leg.mkdir(parents=True, exist_ok=True)
-            (leg / "row.json").write_text(json.dumps(row, indent=2, sort_keys=True))
+            rows.append(row)
+    _write_rows(root, rows)
     anchor = b37_anchor(l2_compact_evaluations=l2_compact, l1_nfev=l1_nfev)
     outcome = adjudicate_rung(
         l1_walls=l1_walls, l2_walls=l2_walls, anchor_seconds=anchor
@@ -598,18 +668,29 @@ def _write_run_dir(
         "schema": F3_RUN_MANIFEST_SCHEMA,
         "rung": "b37",
         "budget": 37,
-        "f3_charter_sha256": F3_CHARTER_SHA256,
+        "f3_charter_sha256": charter_sha,
         "anchor_process_wall_seconds": anchor,
         "verdict": outcome.verdict.value,
-        "not_produced_pairs": 0,
         "gate_failures": [],
         "timed_legs": 2 * len(l1_walls),
-        "solve_child_processes": 4 * len(l1_walls),
+        "solve_child_processes": SOLVE_CHILDREN_PER_WARM_PAIR * len(l1_walls),
         "campaign_wall_seconds": 100.0,
+        "production_commit": PRODUCTION_COMMIT,
+        "instrument_commit": INSTRUMENT_COMMIT,
+        "campaign_input_manifest_sha256": BUNDLE_SHA,
     }
     manifest.update(manifest_overrides or {})
     (root / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
     return root
+
+
+def _write_rows(root: Path, rows: list[dict[str, Any]]) -> None:
+    """Place rows exactly where the producer places them."""
+    row_dir = root / F3_ROW_DIRECTORY
+    row_dir.mkdir(parents=True, exist_ok=True)
+    for row in rows:
+        name = f"pair{row['pair_index']}-{'l1' if row['lane'] == L1_LANE else 'l2'}"
+        (row_dir / f"{name}.json").write_text(json.dumps(row, indent=2, sort_keys=True))
 
 
 def test_validate_accepts_a_consistent_run_directory(tmp_path: Path) -> None:
@@ -684,7 +765,8 @@ def test_validate_rejects_a_row_whose_policy_left_the_rung(tmp_path: Path) -> No
 
     assert report.valid is False
     assert any(
-        "differs from the rung constant" in finding for finding in report.findings
+        "differs from the constant for its budget" in finding
+        for finding in report.findings
     )
 
 
@@ -798,3 +880,563 @@ def test_validate_refuses_a_directory_with_no_rows(tmp_path: Path) -> None:
 
     with pytest.raises(F3ContractError, match="holds no rows"):
         validate_run_dir(tmp_path)
+
+
+# --------------------------------------------------------------------------
+# Producer/validator round trip: the layout the orchestrator actually writes
+# --------------------------------------------------------------------------
+
+
+def _producer_row(
+    *,
+    lane: str,
+    pair_index: int,
+    rung: str,
+    budget: int,
+    wall: float,
+    evaluations: int,
+    oracle_objective: float,
+    oracle_gradient: float = 1.0,
+) -> dict[str, Any]:
+    """A row shaped exactly as ``_write_row`` shapes it, including its key set."""
+    policy = policy_payload(budget)
+    return {
+        "schema": F3_ROW_SCHEMA,
+        "lane": lane,
+        "role": "timed",
+        "rung": rung,
+        "pair_index": pair_index,
+        "budget": budget,
+        "timed": True,
+        "process_wall_seconds": wall,
+        "evaluation_count": evaluations,
+        "evaluation_counter_name": (
+            "nfev" if lane == L1_LANE else "compact_candidate_evaluations"
+        ),
+        "nit": budget,
+        "policy": policy,
+        "policy_identity_sha256": observed_policy_sha256(policy),
+        "oracle_objective": oracle_objective,
+        "oracle_gradient_inf_norm": oracle_gradient,
+        "host_transfer_ledger": {"initialization": 0, "final_result": 15},
+        "f3_charter_sha256": F3_CHARTER_SHA256,
+        "fair_bar_charter_sha256": FAIR_BAR_SHA,
+        "campaign_input_manifest_sha256": BUNDLE_SHA,
+        "production_commit": PRODUCTION_COMMIT,
+        "instrument_commit": INSTRUMENT_COMMIT,
+        "campaign_contract_sha256": _contract(budget=budget),
+    }
+
+
+def _publish_like_the_producer(
+    root: Path,
+    rows: list[dict[str, Any]],
+    *,
+    rung: str,
+    budget: int,
+    quality_target: float | None = None,
+) -> Any:
+    """Write rows and publish the manifest through the shared rule.
+
+    This mirrors what ``_publish_rung`` does — parse the rows just written,
+    adjudicate them, record the outcome — so a round trip here exercises the
+    same agreement the orchestrator relies on.
+    """
+    _write_rows(root, rows)
+    parsed = [
+        parse_row(row, source=f"{row['lane']}-pair{row['pair_index']}") for row in rows
+    ]
+    outcome, pairs = adjudicate_rows(parsed, rung=rung, quality_target=quality_target)
+    (root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": F3_RUN_MANIFEST_SCHEMA,
+                "rung": rung,
+                "budget": budget,
+                "quality_target": quality_target,
+                "f3_charter_sha256": F3_CHARTER_SHA256,
+                "anchor_process_wall_seconds": outcome.anchor_seconds,
+                "verdict": outcome.verdict.value,
+                "gate_failures": list(outcome.failures),
+                "timed_legs": 2 * len(pairs),
+                "solve_child_processes": SOLVE_CHILDREN_PER_WARM_PAIR * len(pairs),
+                "campaign_wall_seconds": 100.0,
+                "production_commit": PRODUCTION_COMMIT,
+                "instrument_commit": INSTRUMENT_COMMIT,
+                "campaign_input_manifest_sha256": BUNDLE_SHA,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return outcome
+
+
+def test_row_paths_ignore_a_fair_bar_row_beside_a_leg(tmp_path: Path) -> None:
+    """The bug this layout fixes: run_leg writes its own row.json per leg."""
+    _write_rows(
+        tmp_path,
+        [
+            _producer_row(
+                lane=lane,
+                pair_index=0,
+                rung="b3",
+                budget=3,
+                wall=10.0,
+                evaluations=9,
+                oracle_objective=1.0,
+            )
+            for lane in (L1_LANE, L2_LANE)
+        ],
+    )
+    foreign = tmp_path / "pair0-l2"
+    foreign.mkdir()
+    (foreign / "row.json").write_text(
+        json.dumps({"schema": "genuine-675-fair-bar-row.v1", "lane": "native_cpp_cpu"})
+    )
+
+    discovered = row_paths(tmp_path)
+
+    assert [path.name for path in discovered] == ["pair0-l1.json", "pair0-l2.json"]
+
+
+@pytest.mark.parametrize(
+    ("rung", "l1_budget", "l2_budget", "quality_target"),
+    [
+        pytest.param("b3", 3, 3, None, id="b3"),
+        pytest.param("b37", 37, 37, None, id="b37"),
+        pytest.param("bq", 22, 31, 1.5, id="bq-m-star-differs-from-n-star"),
+    ],
+)
+def test_producer_layout_round_trips_through_validate(
+    tmp_path: Path,
+    rung: str,
+    l1_budget: int,
+    l2_budget: int,
+    quality_target: float | None,
+) -> None:
+    """A directory the producer wrote must validate, with the same verdict.
+
+    BQ is included with m* != n* because that is the case a validator keyed on
+    one campaign-wide budget silently mis-hashes.
+    """
+    rows: list[dict[str, Any]] = []
+    for index in range(PAIR_COUNT):
+        rows.append(
+            _producer_row(
+                lane=L1_LANE,
+                pair_index=index,
+                rung=rung,
+                budget=l1_budget,
+                wall=10.0,
+                evaluations=30,
+                oracle_objective=1.0,
+            )
+        )
+        rows.append(
+            _producer_row(
+                lane=L2_LANE,
+                pair_index=index,
+                rung=rung,
+                budget=l2_budget,
+                wall=12.0,
+                evaluations=31,
+                oracle_objective=1.0,
+            )
+        )
+    outcome = _publish_like_the_producer(
+        tmp_path, rows, rung=rung, budget=l1_budget, quality_target=quality_target
+    )
+
+    report = validate_run_dir(tmp_path)
+
+    assert report.findings == ()
+    assert report.valid is True
+    assert report.timed_pair_count == PAIR_COUNT
+    assert report.recomputed_verdict is outcome.verdict
+    assert report.recorded_verdict == outcome.verdict.value
+    assert report.recomputed_anchor_seconds == outcome.anchor_seconds
+
+
+def test_bq_round_trip_hashes_each_lane_at_its_own_budget(tmp_path: Path) -> None:
+    """m* and n* differ, so the two lanes' policy shas must differ too."""
+    l1 = _producer_row(
+        lane=L1_LANE,
+        pair_index=0,
+        rung="bq",
+        budget=22,
+        wall=10.0,
+        evaluations=30,
+        oracle_objective=1.0,
+    )
+    l2 = _producer_row(
+        lane=L2_LANE,
+        pair_index=0,
+        rung="bq",
+        budget=31,
+        wall=12.0,
+        evaluations=31,
+        oracle_objective=1.0,
+    )
+
+    assert l1["policy_identity_sha256"] != l2["policy_identity_sha256"]
+    assert l1["policy_identity_sha256"] == policy_identity_sha256(22)
+    assert l2["policy_identity_sha256"] == policy_identity_sha256(31)
+    assert l1["campaign_contract_sha256"] != l2["campaign_contract_sha256"]
+    _write_rows(tmp_path, [l1, l2])
+    assert len(row_paths(tmp_path)) == 2
+
+
+# --------------------------------------------------------------------------
+# Forgery battery: a manifest never overrides what the rows say
+# --------------------------------------------------------------------------
+
+
+def _forged_run_dir(tmp_path: Path, mutate: Any, **manifest: Any) -> Path:
+    rows: list[dict[str, Any]] = []
+    for index in range(PAIR_COUNT):
+        for lane, wall, evaluations in (
+            (L1_LANE, 10.0, 30),
+            (L2_LANE, 12.0, 31),
+        ):
+            row = _producer_row(
+                lane=lane,
+                pair_index=index,
+                rung="b37",
+                budget=37,
+                wall=wall,
+                evaluations=evaluations,
+                oracle_objective=1.0,
+            )
+            rows.append(mutate(row, index, lane))
+    _publish_like_the_producer(tmp_path, rows, rung="b37", budget=37)
+    if manifest:
+        payload = json.loads((tmp_path / "manifest.json").read_text())
+        payload.update(manifest)
+        (tmp_path / "manifest.json").write_text(json.dumps(payload, sort_keys=True))
+    return tmp_path
+
+
+def test_forged_manifest_cannot_hide_a_quality_gate_violation(
+    tmp_path: Path,
+) -> None:
+    """gate_failures:[] with a violating row must still fail validation."""
+
+    def _violate(row: dict[str, Any], index: int, lane: str) -> dict[str, Any]:
+        if index == 1 and lane == L1_LANE:
+            row["oracle_objective"] = 5.0
+        return row
+
+    _forged_run_dir(
+        tmp_path,
+        _violate,
+        gate_failures=[],
+        verdict=Verdict.WIN.value,
+    )
+
+    report = validate_run_dir(tmp_path)
+
+    assert report.valid is False
+    assert any(
+        "l1_objective_above_paired_native" in finding for finding in report.findings
+    )
+
+
+def test_forged_manifest_cannot_hide_a_gradient_violation(tmp_path: Path) -> None:
+    def _violate(row: dict[str, Any], index: int, lane: str) -> dict[str, Any]:
+        if index == 0 and lane == L1_LANE:
+            row["oracle_gradient_inf_norm"] = 2.5
+        return row
+
+    _forged_run_dir(tmp_path, _violate, gate_failures=[], verdict=Verdict.WIN.value)
+
+    report = validate_run_dir(tmp_path)
+
+    assert report.valid is False
+    assert any(
+        "l1_gradient_above_k_times_native" in finding for finding in report.findings
+    )
+
+
+def test_forged_manifest_cannot_hide_a_dead_counter(tmp_path: Path) -> None:
+    def _kill(row: dict[str, Any], index: int, lane: str) -> dict[str, Any]:
+        if index == 2 and lane == L2_LANE:
+            row["evaluation_count"] = 0
+        return row
+
+    _forged_run_dir(tmp_path, _kill, gate_failures=[], verdict=Verdict.WIN.value)
+
+    report = validate_run_dir(tmp_path)
+
+    assert report.valid is False
+    assert any(
+        "l2_compact_candidate_evaluations_nonpositive_0" in finding
+        for finding in report.findings
+    )
+
+
+def test_forged_manifest_cannot_hide_a_native_short_of_its_budget(
+    tmp_path: Path,
+) -> None:
+    """Work matching is fail-closed on BOTH lanes, not just the fused one."""
+
+    def _short(row: dict[str, Any], index: int, lane: str) -> dict[str, Any]:
+        if index == 0 and lane == L2_LANE:
+            row["nit"] = 36
+        return row
+
+    _forged_run_dir(tmp_path, _short, gate_failures=[], verdict=Verdict.WIN.value)
+
+    report = validate_run_dir(tmp_path)
+
+    assert report.valid is False
+    assert any("l2_nit_36_expected_37" in finding for finding in report.findings)
+
+
+def test_forged_manifest_cannot_hide_a_fused_host_transfer(tmp_path: Path) -> None:
+    def _leak(row: dict[str, Any], index: int, lane: str) -> dict[str, Any]:
+        if index == 3 and lane == L1_LANE:
+            row["host_transfer_ledger"] = {"advance": 37, "final_result": 15}
+        return row
+
+    _forged_run_dir(tmp_path, _leak, gate_failures=[], verdict=Verdict.WIN.value)
+
+    report = validate_run_dir(tmp_path)
+
+    assert report.valid is False
+    assert any("l1_host_advance_transfers" in finding for finding in report.findings)
+
+
+def test_forged_row_identity_must_match_the_manifest(tmp_path: Path) -> None:
+    def _swap(row: dict[str, Any], index: int, lane: str) -> dict[str, Any]:
+        if index == 0 and lane == L1_LANE:
+            row["production_commit"] = "9" * 40
+            row["campaign_contract_sha256"] = _contract(
+                budget=37, production_commit="9" * 40
+            )
+        return row
+
+    _forged_run_dir(tmp_path, _swap)
+
+    report = validate_run_dir(tmp_path)
+
+    assert report.valid is False
+    assert any(
+        "production_commit" in finding and "differs from the manifest" in finding
+        for finding in report.findings
+    )
+
+
+def test_unpaired_timed_row_is_a_contract_error(tmp_path: Path) -> None:
+    _write_rows(
+        tmp_path,
+        [
+            _producer_row(
+                lane=L1_LANE,
+                pair_index=0,
+                rung="b3",
+                budget=3,
+                wall=10.0,
+                evaluations=9,
+                oracle_objective=1.0,
+            )
+        ],
+    )
+
+    with pytest.raises(F3ContractError, match="missing its"):
+        pair_rows(
+            [
+                parse_row(
+                    json.loads(
+                        (tmp_path / F3_ROW_DIRECTORY / "pair0-l1.json").read_text()
+                    ),
+                    source="pair0-l1",
+                )
+            ]
+        )
+
+
+# --------------------------------------------------------------------------
+# BQ budget search, as a pure algorithm against a stubbed probe
+# --------------------------------------------------------------------------
+
+
+def _recording_probe(threshold: int) -> Any:
+    """A probe that reaches the target exactly at ``threshold`` iterations."""
+    seen: list[int] = []
+
+    def probe(maxiter: int) -> float:
+        seen.append(maxiter)
+        return 0.5 if maxiter >= threshold else 5.0
+
+    probe.seen = seen  # type: ignore[attr-defined]
+    return probe
+
+
+def test_budget_search_bisects_down_when_the_start_already_reaches() -> None:
+    probe = _recording_probe(20)
+
+    search = search_minimal_budget(probe, quality_target=1.0)
+
+    assert search.star == 20
+    assert search.breaches == ()
+    assert probe.seen[0] == 37  # the chartered start
+    assert all(objective is not None for objective in probe.seen)
+
+
+def test_budget_search_doubles_upward_before_bisecting() -> None:
+    probe = _recording_probe(100)
+
+    search = search_minimal_budget(probe, quality_target=1.0)
+
+    assert probe.seen[:3] == [37, 74, 148]
+    assert search.star == 100
+    assert search.breaches == ()
+
+
+def test_budget_search_reports_the_smallest_reaching_probe_it_saw() -> None:
+    """star is the minimum over reaching probes, not simply the last one.
+
+    Bisection can end on a probe that did NOT reach (the lower bound), so the
+    invariant is over the recorded history rather than its final entry.
+    """
+    search = search_minimal_budget(_recording_probe(20), quality_target=1.0)
+
+    reaching = [
+        int(str(probe["maxiter"])) for probe in search.probes if probe["reached_target"]
+    ]
+    assert search.probes[0]["maxiter"] == BQ_SEARCH_START
+    assert all("oracle_objective" in probe for probe in search.probes)
+    assert reaching
+    assert search.star == min(reaching) == 20
+
+
+def test_budget_search_stops_at_the_probe_cap() -> None:
+    """A long bisection must end at the probe cap rather than run on."""
+    search = search_minimal_budget(_recording_probe(1000), quality_target=1.0, start=1)
+
+    assert search.star is None
+    assert any("probes_13_over_12" in breach for breach in search.breaches)
+    assert len(search.probes) == BQ_MAX_PROBES_PER_LANE
+
+
+def test_budget_search_that_never_reaches_breaches_the_maxiter_cap() -> None:
+    """Doubling from 37 passes 1024 before it passes twelve probes."""
+    search = search_minimal_budget(lambda maxiter: 5.0, quality_target=1.0)
+
+    assert search.star is None
+    assert any("over_1024" in breach for breach in search.breaches)
+
+
+def test_budget_search_stops_at_the_maxiter_cap() -> None:
+    search = search_minimal_budget(lambda maxiter: 5.0, quality_target=1.0, start=1024)
+
+    assert search.star is None
+    assert any("maxiter_2048_over_1024" in breach for breach in search.breaches)
+
+
+def test_budget_search_stops_at_the_wall_cap() -> None:
+    search = search_minimal_budget(
+        _recording_probe(20),
+        quality_target=1.0,
+        elapsed_seconds=lambda: BQ_MAX_SEARCH_SECONDS + 1.0,
+    )
+
+    assert search.star is None
+    assert any("search_wall_7201s" in breach for breach in search.breaches)
+    assert search.probes == ()
+
+
+# --------------------------------------------------------------------------
+# Native sweep selection
+# --------------------------------------------------------------------------
+
+
+def test_sweep_selects_the_fastest_median_config() -> None:
+    assert (
+        select_sweep_config(
+            {"omp1": 210.0, "omp2": 120.0, "omp4": 70.0, "omp8": 55.0, "omp16": 52.7}
+        )
+        == "omp16"
+    )
+
+
+def test_sweep_selection_is_deterministic_under_a_tie() -> None:
+    """Two configs at the same median must not select by dict order."""
+    assert select_sweep_config({"omp8": 52.7, "omp16": 52.7}) == "omp16"
+    assert select_sweep_config({"omp16": 52.7, "omp8": 52.7}) == "omp16"
+
+
+def test_sweep_refuses_an_empty_matrix() -> None:
+    with pytest.raises(F3ContractError, match="at least one config"):
+        select_sweep_config({})
+
+
+# --------------------------------------------------------------------------
+# Campaign state: cap accumulation and the rung-boundary stop
+# --------------------------------------------------------------------------
+
+
+def test_campaign_state_accumulates_across_three_rungs() -> None:
+    state = CampaignState()
+    for rung in ("b3", "b37", "bq"):
+        assert (
+            state.admits(
+                timed=2 * PAIR_COUNT,
+                solve_children=SOLVE_CHILDREN_PER_WARM_PAIR * PAIR_COUNT,
+            )
+            == []
+        )
+        state = state.completing(
+            rung,
+            timed=2 * PAIR_COUNT,
+            solve_children=SOLVE_CHILDREN_PER_WARM_PAIR * PAIR_COUNT,
+        )
+
+    assert state.completed_rungs == ("b3", "b37", "bq")
+    assert state.ledger.timed_legs == 30
+    assert state.ledger.solve_child_processes == 90
+    assert state.stopped is False
+
+
+def test_campaign_state_counts_oracle_children_in_a_warm_pair() -> None:
+    """Six per warm pair: two primers, two timed legs, two oracle children."""
+    assert SOLVE_CHILDREN_PER_WARM_PAIR == 6
+    assert SOLVE_CHILDREN_PER_COLD_PAIR == 4
+
+
+def test_campaign_state_refuses_to_start_a_rung_that_would_breach() -> None:
+    """The stop lands at a rung boundary, before the rung begins."""
+    state = CampaignState(CapLedger(timed_legs=MAX_TIMED_LEGS - 2))
+
+    assert state.admits(timed=2, solve_children=6) == []
+    assert any(
+        "timed_legs" in breach for breach in state.admits(timed=4, solve_children=6)
+    )
+
+
+def test_campaign_state_stops_after_a_rung_that_exhausted_a_cap() -> None:
+    state = CampaignState(
+        CapLedger(solve_child_processes=MAX_SOLVE_CHILD_PROCESSES - 1)
+    ).completing("b37", timed=2, solve_children=6)
+
+    assert state.stopped is True
+    assert state.completed_rungs == ("b37",)
+    # A completed rung keeps its verdict; the NEXT rung is refused.
+    assert state.admits(timed=2, solve_children=6) == [
+        "campaign_already_stopped_at_a_rung_boundary"
+    ]
+
+
+def test_campaign_state_round_trips_through_its_payload() -> None:
+    state = CampaignState(
+        CapLedger(timed_legs=10, solve_child_processes=30, campaign_wall_seconds=99.5),
+        completed_rungs=("b3",),
+    )
+
+    assert CampaignState.from_payload(state.as_payload()) == state
+
+
+def test_campaign_state_refuses_a_foreign_schema() -> None:
+    with pytest.raises(F3ContractError, match="campaign state schema"):
+        CampaignState.from_payload({"schema": "something-else.v1"})

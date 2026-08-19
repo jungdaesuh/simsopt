@@ -60,6 +60,7 @@ from benchmarks.flat675_fused_campaign_contract import (
     F3_CHARTER_COMMIT,
     F3_CHARTER_LINEAGE,
     F3_CHARTER_SHA256,
+    F3_ROW_DIRECTORY,
     F3_ROW_SCHEMA,
     F3_RUN_MANIFEST_SCHEMA,
     L1_LANE,
@@ -69,21 +70,20 @@ from benchmarks.flat675_fused_campaign_contract import (
     NATIVE_SWEEP_REPS,
     PAIR_COUNT,
     RUNG_BUDGETS,
-    CapLedger,
+    SOLVE_CHILDREN_PER_COLD_PAIR,
+    SOLVE_CHILDREN_PER_WARM_PAIR,
+    BudgetSearch,
+    CampaignState,
     F3ContractError,
     Verdict,
-    adjudicate_rung,
-    b3_anchor,
-    b37_anchor,
-    bq_anchor,
-    bq_quality_failures,
-    budget_search_breaches,
-    counter_liveness_failures,
+    adjudicate_rows,
     f3_contract_sha256,
-    fixed_budget_quality_failures,
     observed_policy_sha256,
+    parse_row,
     policy_identity_failures,
     policy_payload,
+    search_minimal_budget,
+    select_sweep_config,
     validate_run_dir,
 )
 
@@ -280,11 +280,13 @@ def run_fused_leg(
 
 
 def _write_row(
-    path: Path,
+    run_root: Path,
     *,
+    name: str,
     lane: str,
     role: str,
     rung: str,
+    pair_index: int,
     budget: int,
     timed: bool,
     process_wall_seconds: float,
@@ -303,6 +305,7 @@ def _write_row(
         "lane": lane,
         "role": role,
         "rung": rung,
+        "pair_index": pair_index,
         "budget": budget,
         "timed": timed,
         "process_wall_seconds": process_wall_seconds,
@@ -332,14 +335,52 @@ def _write_row(
         "git": {name: dict(value) for name, value in trees.items()},
         **dict(extra),
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
+    # F3 rows live in their own subtree: the fair-bar run_leg writes its own
+    # row.json into each native leg directory, and a row discovered there
+    # would be that foreign row rather than this campaign's.
+    row_dir = run_root / F3_ROW_DIRECTORY
+    row_dir.mkdir(parents=True, exist_ok=True)
+    (row_dir / f"{name}.json").write_text(
+        json.dumps(row, indent=2, sort_keys=True) + "\n"
+    )
     return row
 
 
 # --------------------------------------------------------------------------
 # Run directories
 # --------------------------------------------------------------------------
+
+
+CAMPAIGN_STATE_PATH = OUTPUT_ROOT / "campaign_state.json"
+
+
+def _campaign_state() -> CampaignState:
+    """Cumulative caps across every phase this campaign has run."""
+    if not CAMPAIGN_STATE_PATH.is_file():
+        return CampaignState()
+    return CampaignState.from_payload(json.loads(CAMPAIGN_STATE_PATH.read_text()))
+
+
+def _write_campaign_state(state: CampaignState) -> None:
+    CAMPAIGN_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CAMPAIGN_STATE_PATH.write_text(
+        json.dumps(state.as_payload(), indent=2, sort_keys=True) + "\n"
+    )
+
+
+def _require_rung_admission(*, timed: int, solve_children: int) -> None:
+    """Refuse to START a rung whose cost would breach a cap.
+
+    The charter ends the campaign at a rung boundary: completed rungs keep
+    their verdicts and unstarted rungs are NOT_PRODUCED, so the check belongs
+    here rather than mid-rung.
+    """
+    breaches = _campaign_state().admits(timed=timed, solve_children=solve_children)
+    if breaches:
+        raise F3ContractError(
+            "campaign caps end this campaign at the previous rung boundary; "
+            f"this rung is NOT_PRODUCED: {breaches}"
+        )
 
 
 def _new_run_root(phase: str) -> Path:
@@ -368,37 +409,6 @@ def _finish_run(root: Path, manifest: Mapping[str, object]) -> None:
 # --------------------------------------------------------------------------
 # Pair phases (charter "Verdict rule", "Priming and cold-start")
 # --------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class PairOutcome:
-    """One interleaved pair's timings, counters, and gate result."""
-
-    index: int
-    l1_process_wall_seconds: float
-    l2_process_wall_seconds: float
-    l1_nfev: int
-    l2_compact_candidate_evaluations: int
-    l1_oracle_objective: float
-    l2_oracle_objective: float
-    failures: tuple[str, ...]
-
-    @property
-    def passed(self) -> bool:
-        return not self.failures
-
-    def as_payload(self) -> dict[str, object]:
-        return {
-            "index": self.index,
-            "l1_process_wall_seconds": self.l1_process_wall_seconds,
-            "l2_process_wall_seconds": self.l2_process_wall_seconds,
-            "l1_nfev": self.l1_nfev,
-            "l2_compact_candidate_evaluations": (self.l2_compact_candidate_evaluations),
-            "l1_oracle_objective": self.l1_oracle_objective,
-            "l2_oracle_objective": self.l2_oracle_objective,
-            "failures": list(self.failures),
-            "passed": self.passed,
-        }
 
 
 def _oracle_objective(oracle: Mapping[str, object]) -> float:
@@ -445,7 +455,7 @@ def _run_pair(
     quality_target: float | None,
     native_budget: int | None,
     warm: bool,
-) -> PairOutcome:
+) -> tuple[Mapping[str, object], Mapping[str, object]]:
     """One interleaved (L1, L2) pair with symmetric discarded primers."""
     native_maxiter = budget if native_budget is None else native_budget
     cache_dir = root / f"gpu-cache-pair{index}"
@@ -515,41 +525,13 @@ def _run_pair(
         source_manifest=source_manifest,
     )
 
-    failures = counter_liveness_failures(
-        l1_nfev=fused.nfev,
-        l2_compact_evaluations=native.compact_candidate_evaluations,
-    )
-    failures.extend(policy_identity_failures(fused.policy, budget=budget))
-    if quality_target is None:
-        failures.extend(
-            fixed_budget_quality_failures(
-                l1_oracle_objective=_oracle_objective(fused_oracle),
-                l2_oracle_objective=_oracle_objective(native_oracle),
-                l1_oracle_gradient_inf=_oracle_gradient_inf(fused_oracle),
-                l2_oracle_gradient_inf=_oracle_gradient_inf(native_oracle),
-            )
-        )
-        if fused.nit != budget:
-            failures.append(f"l1_nit_{fused.nit}_expected_{budget}")
-    else:
-        failures.extend(
-            bq_quality_failures(
-                l1_oracle_objective=_oracle_objective(fused_oracle),
-                l2_oracle_objective=_oracle_objective(native_oracle),
-                l1_oracle_gradient_inf=_oracle_gradient_inf(fused_oracle),
-                l2_oracle_gradient_inf=_oracle_gradient_inf(native_oracle),
-                quality_target=quality_target,
-            )
-        )
-    for phase in ("advance", "callback", "unclassified"):
-        if fused.host_transfer_ledger.get(phase, 0):
-            failures.append(f"l1_host_{phase}_transfers")
-
-    _write_row(
-        root / f"pair{index}-l1" / "row.json",
+    l1_row = _write_row(
+        root,
+        name=f"pair{index}-l1",
         lane=L1_LANE,
         role="timed",
         rung=rung,
+        pair_index=index,
         budget=budget,
         timed=True,
         process_wall_seconds=fused.process_wall_seconds,
@@ -568,11 +550,13 @@ def _run_pair(
             "child_provenance": dict(fused.provenance),
         },
     )
-    _write_row(
-        root / f"pair{index}-l2" / "f3_row.json",
+    l2_row = _write_row(
+        root,
+        name=f"pair{index}-l2",
         lane=L2_LANE,
         role="timed",
         rung=rung,
+        pair_index=index,
         budget=native_maxiter,
         timed=True,
         process_wall_seconds=native.process_wall_seconds,
@@ -595,16 +579,9 @@ def _run_pair(
             "fair_bar_row_path": str(native.row_path),
         },
     )
-    return PairOutcome(
-        index=index,
-        l1_process_wall_seconds=fused.process_wall_seconds,
-        l2_process_wall_seconds=native.process_wall_seconds,
-        l1_nfev=fused.nfev,
-        l2_compact_candidate_evaluations=native.compact_candidate_evaluations,
-        l1_oracle_objective=_oracle_objective(fused_oracle),
-        l2_oracle_objective=_oracle_objective(native_oracle),
-        failures=tuple(failures),
-    )
+    # No gate is evaluated here: the rows carry every number a gate reads and
+    # adjudicate_rows applies the one rule the validator also applies.
+    return (l1_row, l2_row)
 
 
 def cmd_pairs(args: argparse.Namespace) -> None:
@@ -613,10 +590,14 @@ def cmd_pairs(args: argparse.Namespace) -> None:
     root, shim_dir, campaign_manifest_sha, trees = _prepare_run(
         f"pairs-{rung}", args.input_manifest
     )
+    _require_rung_admission(
+        timed=2 * PAIR_COUNT,
+        solve_children=SOLVE_CHILDREN_PER_WARM_PAIR * PAIR_COUNT,
+    )
     native_config = NativeConfig.pinned(args.omp_threads)
-    pairs: list[PairOutcome] = []
+    rows: list[Mapping[str, object]] = []
     for index in range(PAIR_COUNT):
-        pairs.append(
+        rows.extend(
             _run_pair(
                 index=index,
                 rung=rung,
@@ -632,50 +613,43 @@ def cmd_pairs(args: argparse.Namespace) -> None:
                 warm=True,
             )
         )
-    _publish_rung(root, rung, budget, pairs, trees, campaign_manifest_sha)
+    _publish_rung(root, rung, budget, rows, trees, campaign_manifest_sha)
 
 
 def _publish_rung(
     root: Path,
     rung: str,
     budget: int,
-    pairs: Sequence[PairOutcome],
+    rows: Sequence[Mapping[str, object]],
     trees: Mapping[str, Mapping[str, object]],
     campaign_manifest_sha: str,
     *,
     quality_target: float | None = None,
     native_budget: int | None = None,
-) -> None:
-    passed = [pair for pair in pairs if pair.passed]
-    not_produced = len(pairs) - len(passed)
-    l1_walls = [pair.l1_process_wall_seconds for pair in passed]
-    l2_walls = [pair.l2_process_wall_seconds for pair in passed]
-    l1_nfev = [pair.l1_nfev for pair in passed]
-    l2_compact = [pair.l2_compact_candidate_evaluations for pair in passed]
-    if rung == "b3":
-        anchor = b3_anchor()
-    elif rung == "b37":
-        anchor = (
-            b37_anchor(l2_compact_evaluations=l2_compact, l1_nfev=l1_nfev)
-            if l1_nfev and l2_compact
-            else None
-        )
-    else:
-        anchor = (
-            bq_anchor(l2_compact_evaluations_at_nstar=l2_compact)
-            if l2_compact
-            else None
-        )
-    outcome = adjudicate_rung(
-        l1_walls=l1_walls,
-        l2_walls=l2_walls,
-        anchor_seconds=anchor,
-        not_produced_pairs=not_produced,
+    cold_disclosure: bool = False,
+) -> Verdict:
+    """Adjudicate the rung with the validator's own rule and publish it.
+
+    The producer does not carry a second opinion: it parses the rows it just
+    wrote and calls ``adjudicate_rows``, which is the function ``validate``
+    calls against the same bytes.  A published verdict is therefore one
+    ``validate`` must reproduce.
+    """
+    parsed = [
+        parse_row(row, source=f"{row.get('lane')}-pair{row.get('pair_index')}")
+        for row in rows
+    ]
+    outcome, pairs = adjudicate_rows(parsed, rung=rung, quality_target=quality_target)
+    timed_legs = 2 * len(pairs)
+    solve_children = len(pairs) * (
+        SOLVE_CHILDREN_PER_COLD_PAIR
+        if cold_disclosure
+        else SOLVE_CHILDREN_PER_WARM_PAIR
     )
-    ledger = CapLedger(
-        timed_legs=2 * len(pairs),
-        solve_child_processes=4 * len(pairs),
-    )
+    state = _campaign_state()
+    updated = state.completing(rung, timed=timed_legs, solve_children=solve_children)
+    _write_campaign_state(updated)
+    verdict = Verdict.NOT_PRODUCED if cold_disclosure else outcome.verdict
     _finish_run(
         root,
         {
@@ -684,13 +658,16 @@ def _publish_rung(
             "budget": budget,
             "native_budget": native_budget,
             "quality_target": quality_target,
+            "disclosure_only": cold_disclosure,
             "f3_charter_sha256": F3_CHARTER_SHA256,
             "f3_charter_commit": F3_CHARTER_COMMIT,
             "f3_charter_lineage": list(F3_CHARTER_LINEAGE),
             "fair_bar_charter_sha256": FAIR_BAR_CHARTER_SHA256,
             "campaign_input_manifest_sha256": campaign_manifest_sha,
+            "production_commit": trees["production"]["commit"],
+            "instrument_commit": trees["instrument"]["commit"],
             "rung_policy_sha256": observed_policy_sha256(policy_payload(budget)),
-            "anchor_process_wall_seconds": anchor,
+            "anchor_process_wall_seconds": outcome.anchor_seconds,
             "anchor_over_l1_median": outcome.anchor_over_l1_median,
             "median_speedup": outcome.median_speedup,
             "minimum_speedup": outcome.minimum_speedup,
@@ -699,26 +676,25 @@ def _publish_rung(
             "l2_median_wall_seconds": outcome.l2_median_wall,
             "live_rule_holds": outcome.live_rule_holds,
             "anchor_rule_holds": outcome.anchor_rule_holds,
-            "not_produced_pairs": not_produced,
-            "gate_failures": [f for pair in pairs for f in pair.failures],
-            "verdict": outcome.verdict.value,
-            "timed_legs": ledger.timed_legs,
-            "solve_child_processes": ledger.solve_child_processes,
-            "cap_breaches": ledger.breaches(),
-            "pairs": [pair.as_payload() for pair in pairs],
+            "not_produced_pairs": len(pairs)
+            - len([p for p in pairs if not outcome.failures]),
+            "gate_failures": list(outcome.failures),
+            "verdict": verdict.value,
+            "timed_legs": updated.ledger.timed_legs,
+            "solve_child_processes": updated.ledger.solve_child_processes,
+            "campaign_wall_seconds": updated.ledger.campaign_wall_seconds,
+            "cap_breaches": updated.ledger.breaches(),
+            "campaign_stopped_at_rung_boundary": updated.stopped,
             "git": {name: dict(value) for name, value in trees.items()},
         },
     )
-    print(json.dumps({"run_dir": str(root), "verdict": outcome.verdict.value}))
+    print(json.dumps({"run_dir": str(root), "verdict": verdict.value}))
+    return verdict
 
 
 # --------------------------------------------------------------------------
 # BQ budget search (charter "BQ protocol", step 2 — untimed, capped)
 # --------------------------------------------------------------------------
-
-
-def _probe_quality(objective: float, target: float) -> bool:
-    return objective <= target
 
 
 def _run_search_probe(
@@ -806,25 +782,23 @@ def _search_one_lane(
     campaign_manifest_sha: str,
     trees: Mapping[str, Mapping[str, object]],
     native_config: NativeConfig,
-) -> dict[str, object]:
-    """Smallest maxiter reaching the target: double upward, then bisect."""
+) -> BudgetSearch:
+    """Run the chartered search for one lane against real probe children.
+
+    The search itself is ``search_minimal_budget``: this supplies the probe
+    (a real untimed leg adjudicated by the oracle) and the clock, so the
+    doubling, bisection, and cap rules have exactly one implementation.
+    """
     started = time.perf_counter()
-    probes: list[dict[str, object]] = []
-    maxiter = BQ_SEARCH_START
-    low: int | None = None
-    high: int | None = None
-    while True:
-        breaches = budget_search_breaches(
-            probe_count=len(probes) + 1,
-            largest_maxiter=maxiter,
-            search_wall_seconds=time.perf_counter() - started,
-        )
-        if breaches:
-            return {"probes": probes, "breaches": breaches, "star": None}
-        objective = _run_search_probe(
+    probe_index = [0]
+
+    def probe(maxiter: int) -> float:
+        label = f"{lane}-probe{probe_index[0]}-m{maxiter}"
+        probe_index[0] += 1
+        return _run_search_probe(
             lane=lane,
             maxiter=maxiter,
-            label=f"{lane}-probe{len(probes)}-m{maxiter}",
+            label=label,
             root=root,
             shim_dir=shim_dir,
             cache_dir=cache_dir,
@@ -833,24 +807,12 @@ def _search_one_lane(
             trees=trees,
             native_config=native_config,
         )
-        reached = objective <= quality_target
-        probes.append(
-            {
-                "maxiter": maxiter,
-                "oracle_objective": objective,
-                "reached_target": reached,
-            }
-        )
-        if reached:
-            high = maxiter
-        else:
-            low = maxiter
-        if high is None:
-            maxiter *= 2
-            continue
-        if low is None or high - low <= 1:
-            return {"probes": probes, "breaches": [], "star": high}
-        maxiter = (low + high) // 2
+
+    return search_minimal_budget(
+        probe,
+        quality_target=quality_target,
+        elapsed_seconds=lambda: time.perf_counter() - started,
+    )
 
 
 def cmd_budget_search(args: argparse.Namespace) -> None:
@@ -867,7 +829,7 @@ def cmd_budget_search(args: argparse.Namespace) -> None:
     native_config = NativeConfig.pinned(args.omp_threads)
     cache_dir = root / "gpu-cache-search"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    searches = {
+    searches: dict[str, BudgetSearch] = {
         lane: _search_one_lane(
             lane=lane,
             quality_target=target,
@@ -891,10 +853,12 @@ def cmd_budget_search(args: argparse.Namespace) -> None:
             "f3_charter_sha256": F3_CHARTER_SHA256,
             "f3_charter_lineage": list(F3_CHARTER_LINEAGE),
             "campaign_input_manifest_sha256": campaign_manifest_sha,
-            "searches": searches,
+            "searches": {
+                lane: search.as_payload() for lane, search in searches.items()
+            },
             "verdict": (
                 Verdict.NOT_PRODUCED.value
-                if any(search["star"] is None for search in searches.values())
+                if any(search.star is None for search in searches.values())
                 else "SEARCH_COMPLETE"
             ),
             "caps": {
@@ -905,7 +869,16 @@ def cmd_budget_search(args: argparse.Namespace) -> None:
             "git": {name: dict(value) for name, value in trees.items()},
         },
     )
-    print(json.dumps({"run_dir": str(root), "searches": searches}, default=str))
+    print(
+        json.dumps(
+            {
+                "run_dir": str(root),
+                "searches": {
+                    lane: search.as_payload() for lane, search in searches.items()
+                },
+            }
+        )
+    )
 
 
 def cmd_pairs_bq(args: argparse.Namespace) -> None:
@@ -913,9 +886,15 @@ def cmd_pairs_bq(args: argparse.Namespace) -> None:
     root, shim_dir, campaign_manifest_sha, trees = _prepare_run(
         "pairs-bq", args.input_manifest
     )
+    _require_rung_admission(
+        timed=2 * PAIR_COUNT,
+        solve_children=SOLVE_CHILDREN_PER_WARM_PAIR * PAIR_COUNT,
+    )
     native_config = NativeConfig.pinned(args.omp_threads)
-    pairs = [
-        _run_pair(
+    rows = [
+        row
+        for index in range(PAIR_COUNT)
+        for row in _run_pair(
             index=index,
             rung="bq",
             budget=int(args.fused_maxiter),
@@ -929,13 +908,12 @@ def cmd_pairs_bq(args: argparse.Namespace) -> None:
             native_budget=int(args.native_maxiter),
             warm=True,
         )
-        for index in range(PAIR_COUNT)
     ]
     _publish_rung(
         root,
         "bq",
         int(args.fused_maxiter),
-        pairs,
+        rows,
         trees,
         campaign_manifest_sha,
         quality_target=float(args.quality_target),
@@ -950,11 +928,12 @@ def cmd_cold_pair(args: argparse.Namespace) -> None:
     root, shim_dir, campaign_manifest_sha, trees = _prepare_run(
         f"cold-{rung}", args.input_manifest
     )
+    _require_rung_admission(timed=2, solve_children=SOLVE_CHILDREN_PER_COLD_PAIR)
     cache_dir = root / "gpu-cache-cold"
     if cache_dir.exists():
         shutil.rmtree(cache_dir)
     cache_dir.mkdir(parents=True)
-    pair = _run_pair(
+    rows = _run_pair(
         index=0,
         rung=rung,
         budget=budget,
@@ -968,23 +947,17 @@ def cmd_cold_pair(args: argparse.Namespace) -> None:
         native_budget=None,
         warm=False,
     )
-    _finish_run(
+    # Cold legs are disclosed, never claimed: the rung publishes through the
+    # same rule but its verdict is fixed at NOT_PRODUCED.
+    _publish_rung(
         root,
-        {
-            "schema": F3_RUN_MANIFEST_SCHEMA,
-            "rung": f"{rung}-cold-disclosure",
-            "budget": budget,
-            "f3_charter_sha256": F3_CHARTER_SHA256,
-            "f3_charter_lineage": list(F3_CHARTER_LINEAGE),
-            "campaign_input_manifest_sha256": campaign_manifest_sha,
-            "disclosure_only": True,
-            "verdict": Verdict.NOT_PRODUCED.value,
-            "verdict_note": "cold legs are disclosed, never claimed",
-            "pairs": [pair.as_payload()],
-            "git": {name: dict(value) for name, value in trees.items()},
-        },
+        f"{rung}-cold-disclosure",
+        budget,
+        rows,
+        trees,
+        campaign_manifest_sha,
+        cold_disclosure=True,
     )
-    print(json.dumps({"run_dir": str(root), "pair": pair.as_payload()}))
 
 
 def cmd_native_sweep(args: argparse.Namespace) -> None:
@@ -1029,7 +1002,7 @@ def cmd_native_sweep(args: argparse.Namespace) -> None:
             )
             walls.append(leg.process_wall_seconds)
         medians[config.label] = statistics.median(walls)
-    selection = min(medians, key=lambda label: medians[label])
+    selection = select_sweep_config(medians)
     _finish_run(
         root,
         {
