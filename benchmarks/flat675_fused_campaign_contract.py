@@ -94,6 +94,11 @@ NATIVE_MAXFUN_SOURCE: Final[str] = (
 )
 
 RUNG_BUDGETS: Final[Mapping[str, int]] = {"b3": 3, "b37": 37}
+# The charter mandates one fresh-cache disclosure pair per rung, three total.
+# BQ is included even though it has no fixed budget: its pair runs at the
+# searched m*/n*, which only exist after the budget search completes.
+DISCLOSURE_RUNGS: Final[tuple[str, ...]] = ("b3", "b37", "bq")
+DISCLOSURE_RUNG_SUFFIX: Final[str] = "-cold-disclosure"
 
 # --------------------------------------------------------------------------
 # Anchors, thresholds, caps (charter "Verdict rule", "Caps and aborts")
@@ -808,7 +813,10 @@ def pair_gate_failures(
     ):
         failures.append(f"pair{pair.index}: oracle_gradient_absent")
         return failures
-    if rung == "bq":
+    # "bq" and "bq-cold-disclosure" are both quality-targeted: their two lanes
+    # ran different budgets, so a fixed-budget comparison would void a pair
+    # that is doing exactly what the protocol asked of it.
+    if rung.startswith("bq"):
         if quality_target is None:
             failures.append(f"pair{pair.index}: bq_quality_target_absent")
             return failures
@@ -1098,6 +1106,74 @@ def search_minimal_budget(
         maxiter = (lower_bound + high) // 2
 
 
+@dataclass(frozen=True, slots=True)
+class DisclosureBudgets:
+    """One disclosure pair's rung label and the budget each lane will run."""
+
+    rung: str
+    fused_maxiter: int
+    native_maxiter: int
+    quality_target: float | None
+
+    @property
+    def rung_label(self) -> str:
+        return f"{self.rung}{DISCLOSURE_RUNG_SUFFIX}"
+
+
+def resolve_disclosure_budgets(
+    rung: str,
+    *,
+    fused_maxiter: int | None = None,
+    native_maxiter: int | None = None,
+    quality_target: float | None = None,
+) -> DisclosureBudgets:
+    """Resolve a disclosure pair's budgets, refusing the wrong arguments.
+
+    B3 and B37 disclose at their own chartered budget and accept none of the
+    three arguments.  BQ has no chartered budget — its pair runs at the
+    searched ``m*``/``n*``, which exist only after the budget search — so all
+    three are required, the quality target included: a pair whose two lanes
+    ran different budgets cannot be judged by the fixed-budget gate.
+    """
+    if rung not in DISCLOSURE_RUNGS:
+        raise F3ContractError(
+            f"{rung!r} is not a disclosure rung; the charter mandates one "
+            f"fresh-cache pair for each of {list(DISCLOSURE_RUNGS)}."
+        )
+    named = {
+        "--fused-maxiter": fused_maxiter,
+        "--native-maxiter": native_maxiter,
+        "--quality-target": quality_target,
+    }
+    if rung == "bq":
+        missing = sorted(name for name, value in named.items() if value is None)
+        if missing:
+            raise F3ContractError(
+                f"cold-pair --rung bq requires {missing}: the BQ disclosure "
+                "pair runs at the searched budgets, which have no chartered "
+                "default."
+            )
+        return DisclosureBudgets(
+            rung=rung,
+            fused_maxiter=_positive_int(fused_maxiter, "--fused-maxiter"),
+            native_maxiter=_positive_int(native_maxiter, "--native-maxiter"),
+            quality_target=_finite(quality_target, "--quality-target"),
+        )
+    supplied = sorted(name for name, value in named.items() if value is not None)
+    if supplied:
+        raise F3ContractError(
+            f"cold-pair --rung {rung} takes no {supplied}: its budget is the "
+            f"chartered {RUNG_BUDGETS[rung]}, not a searched one."
+        )
+    budget = RUNG_BUDGETS[rung]
+    return DisclosureBudgets(
+        rung=rung,
+        fused_maxiter=budget,
+        native_maxiter=budget,
+        quality_target=None,
+    )
+
+
 def select_sweep_config(medians: Mapping[str, float]) -> str:
     """The fair-bar selection rule: the config with the smallest median wall."""
     if not medians:
@@ -1197,6 +1273,8 @@ __all__ = [
     "BQ_MAX_SEARCH_SECONDS",
     "BQ_SEARCH_START",
     "CAMPAIGN_STATE_SCHEMA",
+    "DISCLOSURE_RUNGS",
+    "DISCLOSURE_RUNG_SUFFIX",
     "F3_CHARTER_AMENDMENT_1_SHA256",
     "F3_CHARTER_COMMIT",
     "F3_CHARTER_FREEZE_SHA256",
@@ -1232,6 +1310,7 @@ __all__ = [
     "BudgetSearch",
     "CampaignState",
     "CapLedger",
+    "DisclosureBudgets",
     "F3ContractError",
     "PairEvidence",
     "RowEvidence",
@@ -1256,6 +1335,7 @@ __all__ = [
     "policy_identity_failures",
     "policy_identity_sha256",
     "policy_payload",
+    "resolve_disclosure_budgets",
     "row_paths",
     "rung_anchor",
     "search_minimal_budget",
