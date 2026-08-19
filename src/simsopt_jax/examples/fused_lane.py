@@ -85,6 +85,7 @@ def solve_fused_lane(
     rtol: float,
     atol: float,
     lbfgs_history: int,
+    lbfgs_line_search_max_steps: int | None = None,
     line_search_max_steps: int | None = None,
 ) -> OptimizerResult:
     """Solve from the prepared initial state under the campaign's policy.
@@ -95,12 +96,18 @@ def solve_fused_lane(
     L-BFGS path runs on device end to end, which is why this calls
     ``dispatch.minimize`` directly rather than ``serial_solve_jax`` (whose
     bounded-objective log materializes host arrays on every solve).
+
+    The two line-search arguments belong to different drivers and are guarded
+    against each other: ``lbfgs_line_search_max_steps`` is L-BFGS-B's
+    ``maxls``, ``line_search_max_steps`` is the BFGS zoom's step cap.  Either
+    left ``None`` takes its optimizer's own default, so a caller that names
+    neither gets exactly the behavior it got before the knobs existed.
     """
     if driver == Driver.SIMSOPT_LBFGSB:
         if line_search_max_steps is not None:
             raise TypeError(
                 "line_search_max_steps is a SIMSOPT_BFGS option; the L-BFGS-B "
-                "line search is not configurable here"
+                "line search is configured through lbfgs_line_search_max_steps"
             )
         options: SimsoptLBFGSBOptions | SimsoptBFGSOptions = SimsoptLBFGSBOptions(
             maxiter=max_steps,
@@ -108,8 +115,18 @@ def solve_fused_lane(
             gtol=atol,
             ftol=rtol,
             maxcor=lbfgs_history,
+            maxls=(
+                SimsoptLBFGSBOptions().maxls
+                if lbfgs_line_search_max_steps is None
+                else lbfgs_line_search_max_steps
+            ),
         )
     else:
+        if lbfgs_line_search_max_steps is not None:
+            raise TypeError(
+                "lbfgs_line_search_max_steps is a SIMSOPT_LBFGSB option; the "
+                "BFGS line search is configured through line_search_max_steps"
+            )
         options = SimsoptBFGSOptions(
             maxiter=max_steps,
             gtol=atol,
