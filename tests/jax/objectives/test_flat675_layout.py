@@ -356,6 +356,141 @@ def _small_layout_problem() -> tuple[
     return material, layout, start
 
 
+# --- the width does not pin the resolution ----------------------------------
+
+# ``mpol=4, ntor=4`` is not the only stellarator-symmetric resolution that
+# produces a 121-DOF block: so do ``(1, 13)`` and ``(13, 1)``.  Across
+# mpol 1..15 x ntor 0..15 in both symmetry modes, 202 of the 244 distinct
+# widths have more than one producer.  The certified 661 happens to be one of
+# the unambiguous ones, which is exactly why a width-only check looked
+# sufficient for as long as 675 was the only layout.
+AMBIGUOUS_WIDTH_RESOLUTIONS = ((4, 4), (1, 13), (13, 1))
+
+
+def _material_with(
+    *,
+    template_mpol: int,
+    template_ntor: int,
+    layout: FlatSingleStageLayout,
+    template_stellsym: bool = True,
+    dof_count: int | None = None,
+) -> Flat675Material:
+    """Build a material varying only the template resolution and the layout.
+
+    Everything else — coils, vessel, grid, DOF values — is held fixed, so a
+    refusal can only be about the disagreement under test.
+    """
+    _material, _layout, _start = _small_layout_problem()
+    boozer = _material.boozer
+    width = layout.surface_dof_count if dof_count is None else dof_count
+    template = make_surface_xyz_tensor_fourier_spec(
+        dofs=np.zeros(width, dtype=np.float64),
+        quadpoints_phi=np.asarray(
+            boozer.surface_template.quadpoints_phi, dtype=np.float64
+        ),
+        quadpoints_theta=np.asarray(
+            boozer.surface_template.quadpoints_theta, dtype=np.float64
+        ),
+        nfp=SMALL_NFP,
+        stellsym=template_stellsym,
+        mpol=template_mpol,
+        ntor=template_ntor,
+    )
+    return Flat675Material(
+        boozer=Flat675BoozerMaterial(
+            surface_template=template,
+            coil_dof_extraction=boozer.coil_dof_extraction,
+            # The grid metadata fields agree with the TEMPLATE, so the older
+            # metadata check is satisfied and only the layout triple can fail.
+            mpol=template_mpol,
+            ntor=template_ntor,
+            nfp=SMALL_NFP,
+            nphi=SMALL_GRID,
+            ntheta=SMALL_GRID,
+            layout=layout,
+        ),
+        vessel_template=_material.vessel_template,
+    )
+
+
+@pytest.mark.parametrize(("mpol", "ntor"), AMBIGUOUS_WIDTH_RESOLUTIONS)
+def test_every_ambiguous_resolution_produces_the_same_block_width(
+    mpol: int, ntor: int
+) -> None:
+    """The premise of the guard below: these really are indistinguishable."""
+    assert (
+        surface_block_dof_count(mpol=mpol, ntor=ntor, stellsym=True)
+        == SMALL_SURFACE_DOF_COUNT
+    )
+
+
+def test_material_refuses_a_template_the_layout_did_not_describe() -> None:
+    """A 121-DOF template built at (1, 13) is not a (4, 4) problem.
+
+    Every other check passes: the block width matches, the grid metadata
+    matches the template, the coils are untouched.  Only the layout's
+    resolution triple disagrees — which is the whole defect, because the
+    layout is constructed FROM that triple and everything downstream reads
+    the layout rather than the template.
+    """
+    layout = FlatSingleStageLayout(
+        coil_dof_count=FLAT675_COIL_DOF_COUNT,
+        surface_mpol=SMALL_MPOL,
+        surface_ntor=SMALL_NTOR,
+        surface_stellsym=True,
+    )
+
+    with pytest.raises(Flat675ContractError) as excinfo:
+        _material_with(template_mpol=1, template_ntor=13, layout=layout)
+
+    message = str(excinfo.value)
+    assert "(4, 4, True)" in message
+    assert "(1, 13, True)" in message
+    assert "width alone does not distinguish them" in message
+
+
+def test_material_accepts_the_template_its_layout_does_describe() -> None:
+    """The control: the same construction at the matching triple is fine."""
+    layout = FlatSingleStageLayout(
+        coil_dof_count=FLAT675_COIL_DOF_COUNT,
+        surface_mpol=1,
+        surface_ntor=13,
+        surface_stellsym=True,
+    )
+
+    material = _material_with(template_mpol=1, template_ntor=13, layout=layout)
+
+    assert material.layout.surface_dof_count == SMALL_SURFACE_DOF_COUNT
+    assert material.boozer.surface_template.mpol == 1
+
+
+def test_material_refuses_a_template_whose_symmetry_is_not_the_layouts() -> None:
+    """The stellsym leg of the same comparison, which G2 makes load-bearing.
+
+    No two resolutions in either symmetry mode share a width, so today a
+    symmetry mismatch is caught incidentally by the width check — an accident
+    of the arithmetic, not a contract. This pins it as a contract by handing
+    the guard a deliberately malformed template: declared asymmetric, but
+    carrying the symmetric block's 121 DOFs, so the width check passes and
+    only the triple can refuse it.
+    """
+    layout = FlatSingleStageLayout(
+        coil_dof_count=FLAT675_COIL_DOF_COUNT,
+        surface_mpol=SMALL_MPOL,
+        surface_ntor=SMALL_NTOR,
+        surface_stellsym=True,
+    )
+
+    with pytest.raises(Flat675ContractError, match="stellsym"):
+        _material_with(
+            template_mpol=SMALL_MPOL,
+            template_ntor=SMALL_NTOR,
+            template_stellsym=False,
+            layout=layout,
+            dof_count=SMALL_SURFACE_DOF_COUNT,
+        )
+
+
 def test_small_layout_material_carries_its_own_widths() -> None:
     """135 outer coordinates, not 675 — the core stopped assuming."""
     material, layout, start = _small_layout_problem()

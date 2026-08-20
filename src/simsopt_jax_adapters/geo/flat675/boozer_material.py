@@ -121,6 +121,28 @@ class Flat675BoozerMaterial:
                 "flat-675 runtime surface must expose exactly "
                 f"{surface_dof_count} DOFs."
             )
+        # The width does NOT pin the resolution that produced it: most widths
+        # have several producers, so a template can match the declared block
+        # size while parameterizing a different surface.  The layout is built
+        # from the triple, so the triple is what the template must match.
+        declared_resolution = (
+            self.layout.surface_mpol,
+            self.layout.surface_ntor,
+            self.layout.surface_stellsym,
+        )
+        template_resolution = (
+            surface_template.mpol,
+            surface_template.ntor,
+            bool(surface_template.stellsym),
+        )
+        if template_resolution != declared_resolution:
+            raise Flat675ContractError(
+                "flat-675 runtime surface resolution differs from the layout "
+                "it is declared under: the layout says (mpol, ntor, stellsym) "
+                f"= {declared_resolution} and the template carries "
+                f"{template_resolution}. Both produce a {surface_dof_count}-DOF "
+                "block, so the width alone does not distinguish them."
+            )
         if surface_template.dofs.dtype != jnp.dtype(jnp.float64):
             raise Flat675ContractError(
                 "flat-675 runtime surface DOFs must use float64."
