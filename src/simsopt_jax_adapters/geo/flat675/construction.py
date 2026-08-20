@@ -1,10 +1,12 @@
 """Build a flat-675 problem from simsopt objects.
 
-This is the single assembly path for the formulation.  Two front doors reach
-it: :func:`build_flat675_problem`, which fits user geometry onto the certified
-layout, and the frozen-bundle loader in :mod:`.bundle`, which reads the
-archived campaign inputs.  Neither keeps a private construction route — the
-bundle loader is one caller of :func:`assemble_flat675_problem` like any other.
+This is the single assembly path for the promoted flat coupled single-stage
+formulation.  Two front doors reach it: :func:`build_flat675_problem`, which
+fits user geometry onto the certified layout, and the frozen-bundle loader in
+:mod:`.bundle`, which reads the archived campaign inputs.  Neither keeps a
+private construction route — the bundle loader is one caller of
+:func:`assemble_flat675_problem` like any other.  The shipped lesson that
+drives both is ``examples/jax/3_Advanced/single_stage_flat675.py``.
 
 The layout is always 11 coil + 3 vessel + 661 surface.  "No vessel" therefore
 means "an inactive vessel term", never a 672-DOF vector: when the caller omits
