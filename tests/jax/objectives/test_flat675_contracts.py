@@ -48,6 +48,7 @@ from simsopt_jax_adapters.geo.flat675 import (
     Flat675HardwareSoftPenaltyPolicy,
     Flat675Material,
     Flat675ObjectivePolicy,
+    assemble_flat675_problem,
     build_flat675_boozer_system,
     flat675_candidate_geometry,
     load_flat675_bundle,
@@ -540,62 +541,6 @@ def test_runtime_spec_rejects_a_non_tensor_fourier_surface(tmp_path: Path) -> No
 # ---------------------------------------------------------------------------
 # boozer material: the layout contract a runtime seed must satisfy
 # ---------------------------------------------------------------------------
-
-
-def _runtime_spec_with(**field_overrides: Any) -> dict[str, Any]:
-    """The minimal runtime spec with named surface/field payloads replaced."""
-    payload = _runtime_spec_payload()
-    for name, value in field_overrides.items():
-        section, _, key = name.partition("__")
-        payload[section][key] = value
-    return payload
-
-
-def test_boozer_material_rejects_a_seed_without_eleven_coil_dofs(
-    tmp_path: Path,
-) -> None:
-    """The minimal seed is well-formed but is not a flat-675 problem."""
-    _write_bundle(tmp_path, runtime_spec=_runtime_spec_payload())
-    runtime_spec = load_flat675_runtime_spec(tmp_path)
-
-    with pytest.raises(
-        Flat675ContractError,
-        match=f"exactly {FLAT675_COIL_DOF_COUNT} coil DOFs",
-    ):
-        Flat675BoozerMaterial.from_runtime_spec(runtime_spec)
-
-
-def test_boozer_material_rejects_a_surface_without_661_dofs(tmp_path: Path) -> None:
-    """Eleven coil DOFs get past the seed check; the surface must also fit."""
-    payload = _runtime_spec_with(
-        field__coil_dofs=_spec_array([0.0] * FLAT675_COIL_DOF_COUNT, [11]),
-    )
-    _write_bundle(tmp_path, runtime_spec=payload)
-    runtime_spec = load_flat675_runtime_spec(tmp_path)
-
-    with pytest.raises(
-        Flat675ContractError,
-        match=f"exactly {FLAT675_SURFACE_DOF_COUNT} DOFs",
-    ):
-        Flat675BoozerMaterial.from_runtime_spec(runtime_spec)
-
-
-def test_boozer_material_rejects_an_extraction_that_leaves_coil_dofs_unread(
-    tmp_path: Path,
-) -> None:
-    """Both block sizes fit, but no coil consumes the eleven owner DOFs."""
-    payload = _runtime_spec_with(
-        field__coil_dofs=_spec_array([0.0] * FLAT675_COIL_DOF_COUNT, [11]),
-        surface__dofs=_spec_array([0.0] * FLAT675_SURFACE_DOF_COUNT, [661]),
-    )
-    _write_bundle(tmp_path, runtime_spec=payload)
-    runtime_spec = load_flat675_runtime_spec(tmp_path)
-
-    with pytest.raises(
-        Flat675ContractError,
-        match=f"every one of {FLAT675_COIL_DOF_COUNT} owner DOFs",
-    ):
-        Flat675BoozerMaterial.from_runtime_spec(runtime_spec)
 
 
 def test_material_rejects_a_boozer_record_of_the_wrong_type(
@@ -1146,10 +1091,14 @@ def _flat675_runtime_spec_payload() -> dict[str, Any]:
     grid = list(
         np.linspace(0.0, 1.0, _GRID_POINT_COUNT, endpoint=False, dtype=np.float64)
     )
+    # A real bundle's three records agree: the manifest publishes the same
+    # start the seed and the vessel material carry, and the loader now fails
+    # closed when they do not.  The synthetic bundle models that.
+    candidate = _candidate_payload()
     payload = _runtime_spec_payload()
     payload["surface"] = {
         "surface_class": "SurfaceXYZTensorFourier",
-        "dofs": _spec_array([0.0] * FLAT675_SURFACE_DOF_COUNT, [661]),
+        "dofs": _spec_array(candidate["surface_coordinates"], [661]),
         "mpol": _SURFACE_MPOL,
         "ntor": _SURFACE_NTOR,
         "nfp": _SURFACE_NFP,
@@ -1162,7 +1111,7 @@ def _flat675_runtime_spec_payload() -> dict[str, Any]:
         "ntheta": _GRID_POINT_COUNT,
     }
     payload["field"]["coil_dofs"] = _spec_array(
-        [0.0] * FLAT675_COIL_DOF_COUNT, [FLAT675_COIL_DOF_COUNT]
+        candidate["coil_coordinates"], [FLAT675_COIL_DOF_COUNT]
     )
     payload["field"]["coil_dof_extraction"] = _node_dataclass(
         "CoilSetDofExtractionSpec",
@@ -1207,6 +1156,54 @@ def test_load_bundle_wires_the_manifest_seed_and_vessel_together(
     assert bundle.boozer_policy.weight_by_inverse_field_magnitude is True
 
 
+def test_bundle_path_is_the_general_path_on_the_bundles_own_inputs(
+    tmp_path: Path,
+) -> None:
+    """SSOT: reading a bundle is calling the shared assembly on its records.
+
+    The start vector is compared bit-for-bit — a bundle-only route that
+    produced the same problem to within rounding is exactly the drift this
+    gate exists to catch.  The objective is not evaluated here: this synthetic
+    topology carries two coils and names coil 20 as the optimized one, so it
+    is assemblable but not evaluable.  Evaluated bitwise agreement is the
+    archived bundle's gate, which runs where that bundle exists.
+    """
+    _write_bundle(
+        tmp_path,
+        manifest=_manifest_payload(),
+        vessel_material=_vessel_material_payload(),
+        runtime_spec=_flat675_runtime_spec_payload(),
+    )
+    runtime_spec = load_flat675_runtime_spec(tmp_path)
+    manifest = load_flat675_input_manifest(tmp_path)
+
+    through_bundle = load_flat675_bundle(tmp_path)
+    through_general = assemble_flat675_problem(
+        surface_template=runtime_spec.seed.surface,
+        coil_dof_extraction=runtime_spec.seed.coil_dof_extraction,
+        coil_dofs=runtime_spec.seed.coil_dofs,
+        vessel_template=load_flat675_vessel_template(tmp_path),
+        objective_policy=manifest.objective_policy,
+        boozer_policy=manifest.boozer_construction_policy,
+        nphi=runtime_spec.nphi,
+        ntheta=runtime_spec.ntheta,
+    )
+
+    bundle_start = np.asarray(through_bundle.start_candidate.outer_vector())
+    general_start = np.asarray(through_general.start_candidate.outer_vector())
+    assert bundle_start.tobytes() == general_start.tobytes()
+    assert through_bundle.objective_policy == through_general.objective_policy
+    assert through_bundle.boozer_policy == through_general.boozer_policy
+    assert (
+        np.asarray(through_bundle.material.boozer.surface_template.dofs).tobytes()
+        == np.asarray(through_general.material.boozer.surface_template.dofs).tobytes()
+    )
+    assert (
+        np.asarray(through_bundle.material.vessel_template.rc).tobytes()
+        == np.asarray(through_general.material.vessel_template.rc).tobytes()
+    )
+
+
 def test_load_bundle_refuses_a_seed_whose_topology_is_not_flat_675(
     tmp_path: Path,
 ) -> None:
@@ -1222,35 +1219,48 @@ def test_load_bundle_refuses_a_seed_whose_topology_is_not_flat_675(
 
     with pytest.raises(
         Flat675ContractError,
-        match=f"exactly {FLAT675_COIL_DOF_COUNT} coil DOFs",
+        match=f"exactly {FLAT675_COIL_DOF_COUNT} owner DOFs",
     ):
         load_flat675_bundle(tmp_path)
 
 
-# --- from_runtime_spec and the candidate geometry path ---------------------
+@pytest.mark.parametrize(
+    ("block", "replacement"),
+    [
+        ("coil_coordinates", [0.0] * FLAT675_COIL_DOF_COUNT),
+        ("vessel_coordinates", [0.9, 0.2, 0.3]),
+        ("surface_coordinates", [0.0] * FLAT675_SURFACE_DOF_COUNT),
+    ],
+)
+def test_load_bundle_refuses_a_manifest_whose_start_is_not_its_geometry(
+    tmp_path: Path,
+    block: str,
+    replacement: list[float],
+) -> None:
+    """The manifest publishes the archived start; the seed carries it too.
 
-
-def test_boozer_material_rejects_something_that_is_not_a_runtime_spec() -> None:
-    with pytest.raises(TypeError, match="must be SingleStageRuntimeSpec"):
-        Flat675BoozerMaterial.from_runtime_spec(object())  # type: ignore[arg-type]
-
-
-def test_boozer_material_rejects_float32_seed_coil_dofs(tmp_path: Path) -> None:
-    """The seed's own DOFs must be float64 before any geometry is built."""
-    _write_bundle(tmp_path, runtime_spec=_flat675_runtime_spec_payload())
-    runtime_spec = load_flat675_runtime_spec(tmp_path)
-    # As above: the seed factory coerces to float64, so only a directly
-    # rebuilt spec can carry single-precision coil DOFs into this guard.
-    single_precision = dataclasses.replace(
-        runtime_spec,  # type: ignore[type-var]
-        seed=dataclasses.replace(
-            runtime_spec.seed,  # type: ignore[type-var]
-            coil_dofs=jnp.zeros(FLAT675_COIL_DOF_COUNT, dtype=jnp.float32),
-        ),
+    The loader derives the start from the geometry, so the manifest's copy is
+    no longer read into the problem — it is checked against it.  A bundle
+    whose two records disagree is not the archived problem, whichever record
+    is right, and each of the three blocks must be able to say so.
+    """
+    manifest = _manifest_payload()
+    manifest["candidate"][block] = replacement
+    _write_bundle(
+        tmp_path,
+        manifest=manifest,
+        vessel_material=_vessel_material_payload(),
+        runtime_spec=_flat675_runtime_spec_payload(),
     )
 
-    with pytest.raises(Flat675ContractError, match="coil DOFs must use float64"):
-        Flat675BoozerMaterial.from_runtime_spec(single_precision)
+    with pytest.raises(
+        Flat675ContractError,
+        match=f"manifest's {block.removesuffix('_coordinates')} block differs",
+    ):
+        load_flat675_bundle(tmp_path)
+
+
+# --- the candidate geometry path -------------------------------------------
 
 
 def test_candidate_geometry_and_system_carry_the_two_column_shape() -> None:
