@@ -414,3 +414,163 @@ more outside it.** The four cited line numbers verify exactly (`:78`,
 No package rename. No vessel generalization. No stellsym=False commitment
 ahead of R1's evidence. No changes to sealed campaign machinery, run
 directories, or receipts. No timing claims. No second example.
+
+## G3 closure (2026-08-20)
+
+Appended at close, after G1/G2 landed and were reviewed. Nothing above is
+rewritten; the plan's own text and the R1 amendment stand as written.
+
+### Delivery
+
+| Commit | What it did |
+| --- | --- |
+| `c5123bd09` | G1. Introduced `geo/flat675/layout.py` and threaded the record through the core (candidate, Boozer material, objective). The `FLAT675_*` constants became the certified instance read out under their existing names, so every consumer was untouched. |
+| `1755e2265` | G1 review fix. Pinned the surface template to the resolution its layout declares — width alone does not name a resolution. |
+| `8fe5d70ea` | G2. Generic coil sets, explicit `mpol`/`ntor`/`stellsym` with certified defaults, `stellsym=False` included with the quadrature range selected from the requested symmetry, the coil refusal retired and the surface refusal re-pointed. |
+| `21930ce22` | G2 bookkeeping. Dated additive line beside the F4 plan's generality-ladder bullet recording rung 2 as delivered. |
+| `6ad7bb349` | G2 review fix. Derived the certified triple from the record instead of re-declaring it as literals. |
+| this commit | G3. This closure section. Docs-only; no code, no manifest cascade. |
+
+### Acceptance gates
+
+1. **Certified-layout bitwise gate — PASS.** The five-value fingerprint,
+   recomputed on each work package's final tree against a baseline captured
+   at `2661ab1df` in a detached worktree (never a modified tree; that tree's
+   code is byte-identical to F4-final, `git diff 5ef18d852..2661ab1df` over
+   `src/ benchmarks/ examples/ tests/` being empty):
+   objective hex `0x1.5223a865c5038p+4`; gradient sha256
+   `29f834ca6f794481135a04a24e33b9723770b4f2addc0d0236d6187ee05b977a`;
+   weighted-terms sha256
+   `ca76c5e8430039aa2511966c483ce618a3962d87ae20c38181161c4972b88534`;
+   surface-template dofs sha256
+   `74b00942edd6e7678002725bafc375c8c93cdfe5f9d04b0ef371ba45e446343b`;
+   GATE-3 fused endpoint sha256
+   `91ca47a99fa0e4f6d30aabe76aa9804bdb7464019893ec27a0ade7d0dfe4996d`.
+   Bit-identical every time, with the full record — counters and transfer
+   ledger included — identical too. Baseline and every post-change capture
+   came from one unmodified script whose mtime predates all of them, so the
+   construction is identical by construction rather than by assertion.
+   Archive control unchanged throughout at `1.176746e-15` objective and
+   `2.081422e-15` gradient.
+2. **Generic coil set constructs and solves — PASS.**
+   `tests/jax/objectives/test_flat675_generality.py::test_generic_coil_set_constructs_and_solves`:
+   `create_equally_spaced_curves` plus a `Current` each — the configuration
+   rung 1 refused — on a small layout, finite endpoint, objective decreased,
+   endpoint gradient below start, zero `advance`/`callback` in the ledger.
+3. **Non-certified resolution constructs and solves — PASS.** Same file,
+   `test_non_certified_resolution_constructs_and_solves` at `(4, 4)` and
+   `(5, 2)`, plus `test_asymmetric_problem_constructs_and_solves` for the
+   `stellsym=False` layout. Requirement 3's acceptance addition — that the
+   selected quadrature range is proven rather than assumed — is
+   `test_asymmetric_range_selection_is_proven_by_the_volume_label`: the same
+   asymmetric boundary fitted on the selected `field period` range and on an
+   independently built full-torus grid gives volume labels agreeing to
+   **5.3e-16** (the certified symmetric convention sits at 1.2e-15 by the
+   same measurement, so the asymmetric selection is in the same class rather
+   than a new assumption).
+4. **Gradient liveness at active anchors — PASS.**
+   `test_new_blocks_carry_gradient` across three generalized configurations
+   (generic coils, non-certified resolution, asymmetric layout) asserts every
+   coil coordinate nonzero and the surface block live, read at the
+   constructor's own start where the residual, iota and non-QS terms are all
+   active. The F2 lesson is applied by pairing: the vessel block is exactly
+   zero when its hinge is inactive
+   (`test_vessel_block_is_exactly_zero_when_its_term_is_inactive`) and fully
+   nonzero once the threshold is raised on the same problem and the same
+   start (`test_vessel_block_is_live_once_its_term_switches_on`), so a zero
+   means an inactive term rather than a disconnected block.
+5. **stellsym decision executed, no stale pointer left — PASS.**
+   `stellsym=False` is INCLUDED on R1's quadrature-range basis.
+   `_RUNG_TWO_COIL_MESSAGE` retired with its validator;
+   `require_certified_surface_layout` retired outright;
+   `_RUNG_TWO_SURFACE_MESSAGE` re-pointed, not retired — the refusal survives
+   because an asymmetric boundary aimed at a symmetric target is still a
+   projection onto a proper subspace — and renamed to
+   `_ASYMMETRIC_BOUNDARY_REFUSAL`, since a name reading `RUNG_TWO` would
+   itself point at a charter that no longer owns the change. The three
+   message-text assertions that named the old text moved in the same commit
+   as the message, and one now asserts the message contains no "rung" at all.
+   Content sweep at close: zero "rung" references remain anywhere in
+   `src/simsopt_jax_adapters/geo/flat675/`, and no stale restriction prose.
+6. **Example and scoreboard byte-unchanged — PASS, by diff rather than by
+   assertion.** `git diff 2661ab1df..HEAD` over
+   `examples/`, `docs/jax_example_device_assignment.md`,
+   `benchmarks/flat675_fused_lane_child.py` and
+   `benchmarks/flat675_promotion_robustness_child.py` is empty. The
+   execution-source manifest ends at 638 — one module landed (`layout.py`, at
+   G1) and nothing since; G2 and G3 were digest refreshes and a docs edit.
+7. **Closing crucible pass — pending closing review.**
+
+### Requirement 5: the "fast whole-lane tests" expectation is measured-false
+
+Requirement 5 anticipated that small layouts would make cheap real solves
+possible and that these would become "the first fast whole-lane tests in CI".
+Half of that holds and half does not, and the half that does not is recorded
+here rather than quietly accepted.
+
+The tests are real: `test_flat675_generality.py` runs full fused solves on
+layouts that are not 675, and it passes. It is not fast. It costs **624 s**,
+and the cost is compile, not arithmetic. Five distinct problem shapes each
+pay their own XLA compile, and each of those five maps one-to-one onto a
+distinct proof obligation — generic coils, two non-certified resolutions, the
+asymmetric layout, and the liveness anchors — so the cost is intrinsic to the
+coverage rather than an artifact of how the file is written. This matches
+what F4 measured on the shipped example (~150 s, unmoved by a 4x problem
+shrink and only 12% by the frozen L-BFGS history): compile dominance in this
+formulation is a property of the objective graph, which the 661-DOF surface
+block fixes, and it does not fall away when the layout gets smaller.
+
+No trimming was done and none is chartered here. Reducing the wall time means
+reducing the number of distinct shapes, which means reducing what the suite
+proves, and that trade is not one this work package should make on its own.
+The mechanism that would make these tests fast without giving up coverage is
+the persistent XLA compile cache already chartered as follow-up in
+`docs/jax_flat675_promotion_plan.md`; **this suite is now that lever's second
+named consumer**, after the shipped example.
+
+### GPU witness (optional, run)
+
+The charter makes this optional and forbids minting a harness for it, so it
+was done with the existing test file and nothing else: the same
+`tests/jax/objectives/test_flat675_generality.py`, unmodified, run once under
+`JAX_PLATFORMS=cuda` on the RTX 5090 after a bounded sustained-quiet check on
+the device. **11/11 passed.** The off-675 zero-transfer ledger is therefore
+witnessed on the device and not only on CPU: the same assertions that hold
+`advance == 0` and `callback == 0` for a generic coil set, a non-certified
+resolution and an asymmetric layout passed with the solves executing on GPU.
+
+Seconds are incidental and non-verdict, recorded only so the run is
+identifiable: 735.65 s wall, against 624 s for the same file on CPU. Nothing
+is claimed from that comparison — the two ran under different contention on a
+box whose desktop compositor shares the device, and F5 makes no timing claims
+at all.
+
+### The dual-source class, caught three times
+
+Requirement 1's "no dual source" clause turned out to be the load-bearing one,
+and the same failure shape recurred at every layer. Recorded because a future
+editor adding a fourth path should expect it rather than rediscover it:
+
+- **Record versus template.** The material validated the surface block's
+  WIDTH against the layout but never tied the layout's `(mpol, ntor,
+  stellsym)` to the template's own. Width does not name a resolution — 202 of
+  244 widths under mpol 1..15 have several producers, and the certified 661
+  has three of its own at 1..25 — so a template could match the declared size
+  while parameterizing a different surface. Fixed in `1755e2265`.
+- **Owner width as a default parameter.** `_map_owner_indices` kept the
+  certified coil width as a DEFAULT, which would have refused any wider coil
+  set at G2 through an upper bound no caller passed, with an error message
+  naming the wrong reason. Fixed in `c5123bd09` (found by re-reading the diff,
+  not by a failing test).
+- **Constructor defaults as literals.** `CERTIFIED_MPOL`/`NTOR`/`STELLSYM`
+  were re-declared as literals rather than read from the record, so drifting
+  one would have handed the DEFAULT path a non-certified problem while the
+  record and every `FLAT675_*` constant still described 661 and 675 — and the
+  first fix above would not have caught it, because under drift the layout and
+  the template derive from the same wrong parameters and agree. Fixed in
+  `6ad7bb349`.
+
+The durable lesson is that an equality between two stored values is not a
+single source, however carefully it is checked: each fix replaced a pair with
+a derivation, which is why the surface width is a property rather than a
+field and the certified triple is a read rather than a literal.
