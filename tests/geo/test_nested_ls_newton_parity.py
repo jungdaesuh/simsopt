@@ -103,6 +103,50 @@ def _seed_both_lanes_from_native_lbfgs(native, jax_boozer, iota, g0):
     return float(polished["iota"]), float(polished["G"])
 
 
+def _initial_ls_newton_value_and_grad(jax_boozer, x0):
+    from simsopt_jax_adapters.geo.boozer_surface import (
+        _ls_newton_objective_value_and_grad,
+    )
+
+    return _ls_newton_objective_value_and_grad(
+        jax_boozer._make_penalty_objective_with(
+            True,
+            NESTED_LS_WEIGHT_INV_MODB,
+            NESTED_LS_CONSTRAINT_WEIGHT,
+            decision_split_mode="jvp",
+        ),
+        x0,
+        (),
+    )
+
+
+def _shifted_decision(x0, iota, g0, *, d_iota=0.5, d_g=0.25, d_s0=1.0e-3):
+    moved = np.array(x0, dtype=np.float64, copy=True)
+    moved[0] = float(moved[0]) + d_s0
+    moved[-2] = float(iota) + d_iota
+    moved[-1] = float(g0) + d_g
+    return moved
+
+
+def _run_mocked_jax_ls_newton(jax_boozer, iota, g0, monkeypatch, polish):
+    monkeypatch.setattr(
+        jax_boozer,
+        "_run_newton_polish_for_method",
+        lambda *_args, **_kwargs: polish,
+    )
+    jax_boozer.need_to_run_code = True
+    return jax_boozer.minimize_boozer_penalty_constraints_newton(
+        constraint_weight=NESTED_LS_CONSTRAINT_WEIGHT,
+        iota=float(iota),
+        G=float(g0),
+        tol=NESTED_LS_NEWTON_TOL,
+        maxiter=NESTED_LS_NEWTON_MAXITER,
+        stab=NESTED_LS_NEWTON_STAB,
+        verbose=False,
+        weight_inv_modB=NESTED_LS_WEIGHT_INV_MODB,
+    )
+
+
 @pytest.mark.boozer
 def test_nested_ls_penalty_matches_native_at_packed_state():
     native, jax_boozer, decision, _iota, _g0 = _nested_ls_volume_pair()
@@ -126,6 +170,319 @@ def test_nested_ls_newton_matches_native_on_frozen_coils():
         G=seed_g,
     )
     assert_nested_ls_newton_pair(pair)
+
+
+@pytest.mark.boozer
+def test_jax_ls_newton_rolls_back_when_gradient_worsens(monkeypatch):
+    _native, jax_boozer, decision, iota, g0 = _nested_ls_volume_pair()
+    del _native
+    trusted_dofs = np.array(jax_boozer.surface.get_dofs(), dtype=np.float64, copy=True)
+    x0 = np.asarray(jax_boozer._pack_decision_vector(iota, g0), dtype=np.float64)
+    initial_value, initial_grad = _initial_ls_newton_value_and_grad(jax_boozer, x0)
+    worse_grad = np.asarray(initial_grad, dtype=np.float64) * 10.0
+    result = _run_mocked_jax_ls_newton(
+        jax_boozer,
+        iota,
+        g0,
+        monkeypatch,
+        {
+            "x": _shifted_decision(x0, iota, g0),
+            "fun": 1.0,
+            "grad": worse_grad,
+            "hessian": np.eye(decision.size, dtype=np.float64),
+            "nit": 1,
+            "success": False,
+        },
+    )
+    assert result["success"] is False
+    np.testing.assert_allclose(float(result["iota"]), float(iota))
+    np.testing.assert_allclose(float(result["G"]), float(g0))
+    np.testing.assert_allclose(float(result["fun"]), float(initial_value))
+    np.testing.assert_allclose(
+        np.asarray(result["jacobian"], dtype=np.float64),
+        np.asarray(initial_grad, dtype=np.float64),
+    )
+    assert result["hessian"] is None
+    np.testing.assert_allclose(
+        float(result["final_gradient_norm"]),
+        float(np.linalg.norm(np.asarray(initial_grad, dtype=np.float64))),
+    )
+    np.testing.assert_allclose(
+        np.asarray(jax_boozer.surface.get_dofs(), dtype=np.float64),
+        trusted_dofs,
+    )
+
+
+@pytest.mark.boozer
+def test_jax_ls_newton_commits_successful_iterate_even_if_gradient_worsens(
+    monkeypatch,
+):
+    _native, jax_boozer, decision, iota, g0 = _nested_ls_volume_pair()
+    del _native
+    x0 = np.asarray(jax_boozer._pack_decision_vector(iota, g0), dtype=np.float64)
+    _initial_value, initial_grad = _initial_ls_newton_value_and_grad(jax_boozer, x0)
+    del _initial_value
+    worse_grad = np.asarray(initial_grad, dtype=np.float64) * 10.0
+    result = _run_mocked_jax_ls_newton(
+        jax_boozer,
+        iota,
+        g0,
+        monkeypatch,
+        {
+            "x": _shifted_decision(x0, iota, g0),
+            "fun": 1.0,
+            "grad": worse_grad,
+            "hessian": np.eye(decision.size, dtype=np.float64),
+            "nit": 1,
+            "success": True,
+        },
+    )
+    assert result["success"] is True
+    np.testing.assert_allclose(float(result["iota"]), float(iota) + 0.5)
+    np.testing.assert_allclose(float(result["G"]), float(g0) + 0.25)
+    np.testing.assert_allclose(float(result["fun"]), 1.0)
+    np.testing.assert_allclose(
+        np.asarray(result["jacobian"], dtype=np.float64),
+        worse_grad,
+    )
+    np.testing.assert_allclose(
+        float(jax_boozer.surface.get_dofs()[0]),
+        float(x0[0]) + 1.0e-3,
+    )
+    assert result["hessian"] is not None
+
+
+@pytest.mark.boozer
+def test_jax_ls_newton_commits_unmoved_iterate_even_if_gradient_worsens(
+    monkeypatch,
+):
+    _native, jax_boozer, decision, iota, g0 = _nested_ls_volume_pair()
+    del _native
+    trusted_dofs = np.array(jax_boozer.surface.get_dofs(), dtype=np.float64, copy=True)
+    x0 = np.asarray(jax_boozer._pack_decision_vector(iota, g0), dtype=np.float64)
+    _initial_value, initial_grad = _initial_ls_newton_value_and_grad(jax_boozer, x0)
+    del _initial_value
+    worse_grad = np.asarray(initial_grad, dtype=np.float64) * 10.0
+    hessian = np.eye(decision.size, dtype=np.float64)
+    result = _run_mocked_jax_ls_newton(
+        jax_boozer,
+        iota,
+        g0,
+        monkeypatch,
+        {
+            "x": np.array(x0, dtype=np.float64, copy=True),
+            "fun": 1.0,
+            "grad": worse_grad,
+            "hessian": hessian,
+            "nit": 0,
+            "success": False,
+        },
+    )
+    assert result["success"] is False
+    np.testing.assert_allclose(float(result["iota"]), float(iota))
+    np.testing.assert_allclose(float(result["G"]), float(g0))
+    np.testing.assert_allclose(
+        np.asarray(result["jacobian"], dtype=np.float64),
+        worse_grad,
+    )
+    assert result["hessian"] is not None
+    np.testing.assert_allclose(
+        np.asarray(result["hessian"], dtype=np.float64),
+        hessian,
+    )
+    np.testing.assert_allclose(
+        np.asarray(jax_boozer.surface.get_dofs(), dtype=np.float64),
+        trusted_dofs,
+    )
+
+
+@pytest.mark.boozer
+def test_jax_ls_newton_commits_when_hessian_is_nonfinite_but_iterate_is_finite(
+    monkeypatch,
+):
+    _native, jax_boozer, decision, iota, g0 = _nested_ls_volume_pair()
+    del _native
+    x0 = np.asarray(jax_boozer._pack_decision_vector(iota, g0), dtype=np.float64)
+    _initial_value, initial_grad = _initial_ls_newton_value_and_grad(jax_boozer, x0)
+    del _initial_value
+    better_grad = np.asarray(initial_grad, dtype=np.float64) * 0.1
+    result = _run_mocked_jax_ls_newton(
+        jax_boozer,
+        iota,
+        g0,
+        monkeypatch,
+        {
+            "x": _shifted_decision(x0, iota, g0),
+            "fun": 0.1,
+            "grad": better_grad,
+            "hessian": np.full(
+                (decision.size, decision.size), np.nan, dtype=np.float64
+            ),
+            "nit": 1,
+            "success": True,
+        },
+    )
+    assert result["success"] is True
+    np.testing.assert_allclose(float(result["iota"]), float(iota) + 0.5)
+    np.testing.assert_allclose(float(result["G"]), float(g0) + 0.25)
+    np.testing.assert_allclose(
+        np.asarray(result["jacobian"], dtype=np.float64),
+        better_grad,
+    )
+    assert result["hessian"] is None
+    np.testing.assert_allclose(
+        float(jax_boozer.surface.get_dofs()[0]),
+        float(x0[0]) + 1.0e-3,
+    )
+
+
+@pytest.mark.boozer
+def test_jax_ls_newton_rolls_back_nonfinite_gradient_even_if_polish_reports_success(
+    monkeypatch,
+):
+    _native, jax_boozer, decision, iota, g0 = _nested_ls_volume_pair()
+    del _native
+    trusted_dofs = np.array(jax_boozer.surface.get_dofs(), dtype=np.float64, copy=True)
+    x0 = np.asarray(jax_boozer._pack_decision_vector(iota, g0), dtype=np.float64)
+    initial_value, initial_grad = _initial_ls_newton_value_and_grad(jax_boozer, x0)
+    nan_grad = np.full(decision.size, np.nan, dtype=np.float64)
+    result = _run_mocked_jax_ls_newton(
+        jax_boozer,
+        iota,
+        g0,
+        monkeypatch,
+        {
+            "x": _shifted_decision(x0, iota, g0),
+            "fun": 0.0,
+            "grad": nan_grad,
+            "hessian": np.eye(decision.size, dtype=np.float64),
+            "nit": 1,
+            "success": True,
+        },
+    )
+    assert result["success"] is False
+    np.testing.assert_allclose(float(result["iota"]), float(iota))
+    np.testing.assert_allclose(float(result["G"]), float(g0))
+    np.testing.assert_allclose(float(result["fun"]), float(initial_value))
+    np.testing.assert_allclose(
+        np.asarray(result["jacobian"], dtype=np.float64),
+        np.asarray(initial_grad, dtype=np.float64),
+    )
+    np.testing.assert_allclose(
+        np.asarray(jax_boozer.surface.get_dofs(), dtype=np.float64),
+        trusted_dofs,
+    )
+
+
+@pytest.mark.boozer
+def test_jax_ls_newton_rolls_back_nonfinite_iterate_even_if_polish_reports_success(
+    monkeypatch,
+):
+    _native, jax_boozer, decision, iota, g0 = _nested_ls_volume_pair()
+    del _native
+    trusted_dofs = np.array(jax_boozer.surface.get_dofs(), dtype=np.float64, copy=True)
+    x0 = np.asarray(jax_boozer._pack_decision_vector(iota, g0), dtype=np.float64)
+    initial_value, initial_grad = _initial_ls_newton_value_and_grad(jax_boozer, x0)
+    moved = _shifted_decision(x0, iota, g0)
+    moved[-2] = np.nan
+    result = _run_mocked_jax_ls_newton(
+        jax_boozer,
+        iota,
+        g0,
+        monkeypatch,
+        {
+            "x": moved,
+            "fun": 0.0,
+            "grad": np.asarray(initial_grad, dtype=np.float64) * 0.1,
+            "hessian": np.eye(decision.size, dtype=np.float64),
+            "nit": 1,
+            "success": True,
+        },
+    )
+    assert result["success"] is False
+    np.testing.assert_allclose(float(result["iota"]), float(iota))
+    np.testing.assert_allclose(float(result["G"]), float(g0))
+    np.testing.assert_allclose(float(result["fun"]), float(initial_value))
+    np.testing.assert_allclose(
+        np.asarray(result["jacobian"], dtype=np.float64),
+        np.asarray(initial_grad, dtype=np.float64),
+    )
+    np.testing.assert_allclose(
+        np.asarray(jax_boozer.surface.get_dofs(), dtype=np.float64),
+        trusted_dofs,
+    )
+
+
+@pytest.mark.boozer
+def test_jax_ls_newton_commits_when_gradient_improves_without_success(monkeypatch):
+    _native, jax_boozer, decision, iota, g0 = _nested_ls_volume_pair()
+    del _native
+    x0 = np.asarray(jax_boozer._pack_decision_vector(iota, g0), dtype=np.float64)
+    _initial_value, initial_grad = _initial_ls_newton_value_and_grad(jax_boozer, x0)
+    del _initial_value
+    better_grad = np.asarray(initial_grad, dtype=np.float64) * 0.1
+    result = _run_mocked_jax_ls_newton(
+        jax_boozer,
+        iota,
+        g0,
+        monkeypatch,
+        {
+            "x": _shifted_decision(x0, iota, g0),
+            "fun": 0.1,
+            "grad": better_grad,
+            "hessian": np.eye(decision.size, dtype=np.float64),
+            "nit": 1,
+            "success": False,
+        },
+    )
+    assert result["success"] is False
+    np.testing.assert_allclose(float(result["iota"]), float(iota) + 0.5)
+    np.testing.assert_allclose(float(result["G"]), float(g0) + 0.25)
+    np.testing.assert_allclose(float(result["fun"]), 0.1)
+    np.testing.assert_allclose(
+        np.asarray(result["jacobian"], dtype=np.float64),
+        better_grad,
+    )
+    np.testing.assert_allclose(
+        float(jax_boozer.surface.get_dofs()[0]),
+        float(x0[0]) + 1.0e-3,
+    )
+
+
+@pytest.mark.boozer
+def test_jax_ls_newton_persist_uses_gradient_norm_not_objective(monkeypatch):
+    _native, jax_boozer, decision, iota, g0 = _nested_ls_volume_pair()
+    del _native
+    x0 = np.asarray(jax_boozer._pack_decision_vector(iota, g0), dtype=np.float64)
+    initial_value, initial_grad = _initial_ls_newton_value_and_grad(jax_boozer, x0)
+    better_grad = np.asarray(initial_grad, dtype=np.float64) * 0.1
+    worse_fun = float(initial_value) + 1.0e6
+    result = _run_mocked_jax_ls_newton(
+        jax_boozer,
+        iota,
+        g0,
+        monkeypatch,
+        {
+            "x": _shifted_decision(x0, iota, g0),
+            "fun": worse_fun,
+            "grad": better_grad,
+            "hessian": np.eye(decision.size, dtype=np.float64),
+            "nit": 1,
+            "success": False,
+        },
+    )
+    assert result["success"] is False
+    np.testing.assert_allclose(float(result["iota"]), float(iota) + 0.5)
+    np.testing.assert_allclose(float(result["G"]), float(g0) + 0.25)
+    np.testing.assert_allclose(float(result["fun"]), worse_fun)
+    np.testing.assert_allclose(
+        np.asarray(result["jacobian"], dtype=np.float64),
+        better_grad,
+    )
+    np.testing.assert_allclose(
+        float(jax_boozer.surface.get_dofs()[0]),
+        float(x0[0]) + 1.0e-3,
+    )
 
 
 @pytest.mark.boozer
