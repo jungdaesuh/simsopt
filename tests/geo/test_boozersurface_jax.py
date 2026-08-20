@@ -6424,8 +6424,15 @@ class TestBoozerSurfaceJAXClass:
         # Surface must hold LBFGS output (not garbage, not warm-start)
         np.testing.assert_allclose(booz.surface.get_dofs(), lbfgs_surface, atol=1e-12)
 
-    def test_run_code_invalid_newton_iterate_aborts_adjoint_state(self, monkeypatch):
-        """Finite iterates with invalid Newton derivatives must not build adjoint metadata."""
+    def test_run_code_invalid_newton_iterate_rolls_back_and_keeps_operator_vjp(
+        self, monkeypatch
+    ):
+        """A NaN Newton polish must restore the pre-Newton finite state.
+
+        C++ persist rolls back ``s``, ``ι``, ``G`` and keeps coil VJP on the
+        restored point. JAX publishes operator VJP at that restored finite
+        iterate and drops the last-iterate Hessian/PLU.
+        """
         booz = _make_mock_boozer_surface()
 
         def fake_newton_polish(
@@ -6439,8 +6446,9 @@ class TestBoozerSurfaceJAXClass:
             objective_args=(),
         ):
             del maxiter, tol, stab, progress_callback, objective_args
+            poisoned = jnp.asarray(x0, dtype=x0.dtype).at[0].add(0.25)
             return {
-                "x": x0,
+                "x": poisoned,
                 "fun": jnp.asarray(jnp.nan),
                 "grad": jnp.full_like(x0, jnp.nan),
                 "hessian": jnp.full(
@@ -6451,14 +6459,43 @@ class TestBoozerSurfaceJAXClass:
             }
 
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
+        booz_ref = _make_mock_boozer_surface()
+
+        def skipped_newton_polish(
+            _objective_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            stab,
+            progress_callback=None,
+            objective_args=(),
+        ):
+            del maxiter, tol, stab, progress_callback, objective_args
+            n = x0.shape[0]
+            return {
+                "x": x0,
+                "fun": jnp.asarray(0.0),
+                "grad": jnp.zeros_like(x0),
+                "hessian": jnp.eye(n, dtype=x0.dtype),
+                "nit": 0,
+                "success": False,
+            }
+
+        _patch_newton_polish_runner(monkeypatch, skipped_newton_polish)
+        booz_ref.run_code(iota=0.3, G=0.05)
+        lbfgs_surface = booz_ref.surface.get_dofs().copy()
+        _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
         res = booz.run_code(iota=0.3, G=0.05)
 
         assert res is not None
         assert res["success"] is False
         assert res["PLU"] is None
-        assert res["vjp"] is None
+        assert res["hessian"] is None
+        assert callable(res["vjp"])
+        assert np.all(np.isfinite(np.asarray(res["jacobian"])))
         assert booz.need_to_run_code is False
-        assert np.all(np.isfinite(booz.surface.get_dofs()))
+        np.testing.assert_allclose(booz.surface.get_dofs(), lbfgs_surface, atol=1e-12)
 
     def test_run_code_finite_unsuccessful_newton_keeps_adjoint_state(self, monkeypatch):
         """Finite maxiter-exhausted Newton exits must still keep dense metadata/VJPs."""

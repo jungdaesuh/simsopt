@@ -71,6 +71,7 @@ from simsopt_jax.core._math_utils import (
 )
 from simsopt_jax.core.state_tokens import make_state_token_factory
 from simsopt._core.optimizable import Optimizable
+from simsopt.geo.boozersurface import _boozer_iterate_is_persistable
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
 from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
@@ -3667,6 +3668,44 @@ def _exact_newton_reporting_fields(result):
             }
         )
     return fields
+
+
+def _ls_newton_objective_value_and_grad(obj_fn, x, objective_args):
+    """Evaluate the LS Newton scalar and gradient at one packed state."""
+    x_jax = _as_jax_float64(x)
+    if objective_args:
+        return jax.value_and_grad(lambda packed: obj_fn(packed, *objective_args))(
+            x_jax
+        )
+    return jax.value_and_grad(obj_fn)(x_jax)
+
+
+def _ls_newton_gradient_l2(gradient) -> float:
+    return float(np.linalg.norm(np.asarray(_host_numpy(gradient), dtype=np.float64)))
+
+
+def _ls_newton_gradient_inf(gradient) -> float:
+    return float(
+        np.linalg.norm(np.asarray(_host_numpy(gradient), dtype=np.float64), ord=np.inf)
+    )
+
+
+def _ls_newton_iterate_matches_start(x, x0) -> bool:
+    x_host = np.asarray(_host_numpy(x), dtype=np.float64).reshape(-1)
+    x0_host = np.asarray(_host_numpy(x0), dtype=np.float64).reshape(-1)
+    return x_host.shape == x0_host.shape and np.array_equal(x_host, x0_host)
+
+
+def _ls_newton_committed_reporting_fields(result, *, committed_fun, committed_grad):
+    """Newton-polish diagnostics restated on the committed iterate."""
+    return _ls_newton_reporting_fields(
+        {
+            **result,
+            "fun": committed_fun,
+            "final_gradient_norm": _ls_newton_gradient_l2(committed_grad),
+            "final_gradient_inf_norm": _ls_newton_gradient_inf(committed_grad),
+        }
+    )
 
 
 def _ls_newton_reporting_fields(result):
@@ -7887,6 +7926,11 @@ class BoozerSurfaceJAX(Optimizable):
                 decision_split_mode="jvp",
             )
 
+        _initial_value, initial_grad = _ls_newton_objective_value_and_grad(
+            obj_fn, x0, objective_args
+        )
+        initial_norm = _ls_newton_gradient_l2(initial_grad)
+
         result = self._run_newton_polish_for_method(
             method,
             obj_fn,
@@ -7900,51 +7944,45 @@ class BoozerSurfaceJAX(Optimizable):
             objective_args=objective_args,
         )
 
-        sdofs_final, iota_out, G_out = self._unpack_decision_vector(
+        sdofs_polished, iota_polished, G_polished = self._unpack_decision_vector(
             result["x"], optimize_G
         )
-
-        if (
-            not _host_all_finite(result["x"])
-            or not _host_all_finite(result["grad"])
-            or (
-                result["hessian"] is not None
-                and not _host_all_finite(result["hessian"])
+        finite_iterate = _host_all_finite(result["x"]) and _host_all_finite(
+            result["grad"]
+        )
+        final_norm = (
+            _ls_newton_gradient_l2(result["grad"]) if finite_iterate else float("inf")
+        )
+        effective_success = bool(finite_iterate) and bool(
+            _host_scalar(result["success"])
+        )
+        unmoved = bool(finite_iterate) and _ls_newton_iterate_matches_start(
+            result["x"], x0
+        )
+        persist_solved_state = unmoved or _boozer_iterate_is_persistable(
+            effective_success,
+            final_norm,
+            initial_norm,
+        )
+        if persist_solved_state:
+            sdofs_final = sdofs_polished
+            iota_out = iota_polished
+            G_out = G_polished
+            committed_grad = result["grad"]
+            H = result["hessian"]
+            if H is not None and not _host_all_finite(H):
+                H = None
+            committed_fun = result["fun"]
+            committed_success = effective_success
+        else:
+            sdofs_final, iota_out, G_out = self._unpack_decision_vector(
+                x0, optimize_G
             )
-        ):
-            solve_generation = _advance_solver_generation(self)
-            res = {
-                **_boozer_ls_newton_result_core(
-                    residual=None,
-                    jacobian=None,
-                    hessian=None,
-                    iteration_count=int(_host_scalar(result["nit"], dtype=np.int64)),
-                    success=False,
-                    sdofs=_as_jax_float64(sdofs_final),
-                    G=G_out,
-                    surface=s,
-                    iota=iota_out,
-                    weight_inv_modB=weight_inv_modB,
-                    plu=None,
-                    lu_piv=None,
-                    vjp=None,
-                    vjp_groups=None,
-                    optimizer_method=method,
-                    solve_generation=solve_generation,
-                    fun=float(_host_scalar(result["fun"])),
-                    linear_solve_backend="operator",
-                    dense_linear_solve_factors_available=False,
-                    linearization_residency=self.options["linearization_residency"],
-                ),
-                **_ls_newton_reporting_fields(result),
-                **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
-            }
-            res_record = self._store_boozer_result("newton", res)
-            self.need_to_run_code = False
-            return res_record
-
+            committed_grad = initial_grad
+            H = None
+            committed_fun = _initial_value
+            committed_success = False
         self._set_surface_dofs(sdofs_final)
-        H = result["hessian"]
         # Phase 2 (docs/parity_scientific_equivalence_contract_2026-05-09.md
         # §5.3): factor once via lu_factor when the dense factor fits in
         # the byte budget so the LS forward and adjoint solves share the
@@ -8023,10 +8061,10 @@ class BoozerSurfaceJAX(Optimizable):
         res = {
             **_boozer_ls_newton_result_core(
                 residual=residual_vec,
-                jacobian=result["grad"],
+                jacobian=committed_grad,
                 hessian=H,
                 iteration_count=int(_host_scalar(result["nit"], dtype=np.int64)),
-                success=bool(_host_scalar(result["success"])),
+                success=committed_success,
                 sdofs=_as_jax_float64(sdofs_final),
                 G=G_out,
                 surface=s,
@@ -8038,7 +8076,7 @@ class BoozerSurfaceJAX(Optimizable):
                 vjp_groups=vjp_groups_callback,
                 optimizer_method=method,
                 solve_generation=solve_generation,
-                fun=float(_host_scalar(result["fun"])),
+                fun=float(_host_scalar(committed_fun)),
                 linear_solve_backend=_ls_linear_solve_backend(
                     optimizer_backend=self.options["optimizer_backend"],
                     plu_available=plu is not None,
@@ -8047,7 +8085,15 @@ class BoozerSurfaceJAX(Optimizable):
                 dense_linear_solve_factors_available=plu is not None,
                 linearization_residency=linearization_residency,
             ),
-            **_ls_newton_reporting_fields(result),
+            **(
+                _ls_newton_reporting_fields(result)
+                if persist_solved_state
+                else _ls_newton_committed_reporting_fields(
+                    result,
+                    committed_fun=committed_fun,
+                    committed_grad=committed_grad,
+                )
+            ),
             # Scientific-equivalence ladder reporting fields per
             # docs/parity_scientific_equivalence_contract_2026-05-09.md §3.1.
             # action_max / step_abs_diff are populated by the parity

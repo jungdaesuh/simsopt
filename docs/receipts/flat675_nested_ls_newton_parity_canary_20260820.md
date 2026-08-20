@@ -27,6 +27,18 @@ and **not** exact Newton on 21×21.
    `||∇J_LS||_2 ≤ 1e-13` on both lanes.
 4. Native Newton `residual is jacobian` (length `n_s+2`); JAX Newton
    `residual` is the long LS vector, not `∇J_LS`.
+5. Public JAX LS Newton persist: C++ `_boozer_iterate_is_persistable`
+   (`success` or finite `‖∇J_LS‖₂` not worse than start) plus a JAX
+   finite-`x`/finite-`∇J` conjunct (a `success=True` polish with a
+   non-finite iterate rolls back). An exact no-move iterate stays
+   persisted so a second autodiff stream cannot drop Hessian on ULP
+   noise. Rollback restores surface, `(ι, G)`, `fun`, `jacobian`, and
+   stationarity reporting (`final_gradient_norm`,
+   `inner_penalty_residual_l2`), and reports `success=False`. A
+   non-finite Hessian does not veto a finite iterate. Rollback drops
+   the last-iterate Hessian (`hessian is None`) instead of recomputing
+   C++'s Hessian at the restored point; coil VJP still uses the
+   operator path. Persist is on `‖∇J_LS‖₂`, not `J_LS`.
 
 Post-Newton `J_LS`/`∇J_LS` are re-evaluated with the same cpu-ordered
 closure as the packed-state check, not taken from JAX's internal Newton
@@ -36,16 +48,18 @@ The CI surface is NCSX `SurfaceXYZTensorFourier` stellsym, `mpol=ntor=2`,
 `7×7` quadrature. It is the same **operator** as F3 255×64, not the same
 **scale**. Newton is locked after a native LBFGS seed (on-manifold polish,
 reconstruct-start style) and after a `+1e-3` ι perturbation that forces
-at least one Newton step. A cold 10-step walk from `fit_to_curve` is
-**not** locked: native rolls back on a worse gradient, JAX does not, so
-the endpoints diverge. That cold walk is the F3 B37 case and remains open.
+at least one Newton step. A cold 10-step `fit_to_curve` walk can still
+differ from C++ because JAX Newton backtracks while C++ takes full
+steps; that globalization is not this canary. Persist is on the public
+adapter method `minimize_boozer_penalty_constraints_newton` (every
+backend of that method). In-graph Newton inside
+`simsopt_jax.geo.optimizers.optimizer` is unchanged.
 
 ## Explicitly not claimed
 
 - F3 B37 nested-LS process-wall vs native banana.
 - Inheritance of 7.70× / 1.67× / 7.36×.
 - Reduced 661-state varpro Newton, IFT adjoint, or fused XLA inner.
-- Off-manifold 10-step Newton walks (native rollback vs JAX continue).
 - Three-point F3 (archived start, GPU B37, flat-native B37) JAX Newton.
   Reconstruct JSON still only has C++ Newton on start and GPU B37.
   Flat-native B37 is a second off-manifold point, not the nested timing bar.
