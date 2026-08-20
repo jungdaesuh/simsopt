@@ -6,6 +6,9 @@ because the LS residual is 3*255*64+2 = 48962 rows. Not an F3 timing claim.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import numpy as np
 import pytest
 from simsopt_jax.parity_tolerances import parity_ladder_tolerances
@@ -23,8 +26,20 @@ from simsopt_jax_adapters.geo.nested_ls_reduced import (
 from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     ARCHIVED_START_QR_G,
     ARCHIVED_START_QR_IOTA,
+    DEFAULT_F3_B37_GPU_LANE,
+    archived_f3_b37_lanes_available,
     archived_flat675_bundle_available,
+    evaluate_f3_b37_bounded_probe,
     load_archived_nested_ls_pair,
+    load_flat675_lane_blocks,
+)
+
+_F3_B37_BOUNDED_EVIDENCE = (
+    Path(__file__).resolve().parents[2]
+    / "docs"
+    / "receipts"
+    / "evidence"
+    / "nested_ls_reduced_gate1_f3_b37_bounded_20260820.json"
 )
 
 pytestmark = [
@@ -112,3 +127,48 @@ def test_reduced_newton_is_a_noop_at_archived_start():
         rtol=float(value_tol["rtol"]),
         atol=float(value_tol["atol"]),
     )
+
+
+def _assert_grid(native) -> None:
+    assert int(np.asarray(native.surface.quadpoints_phi).size) == 255
+    assert int(np.asarray(native.surface.quadpoints_theta).size) == 64
+    assert int(np.asarray(native.surface.get_dofs()).size) == 661
+
+
+@pytest.mark.skipif(
+    not archived_f3_b37_lanes_available(),
+    reason="the host-local F3 B37 pair2-l1 lane JSON is missing",
+)
+def test_f3_gpu_b37_bounded_hvp_and_native_reference():
+    coils, surface, _meta = load_flat675_lane_blocks(DEFAULT_F3_B37_GPU_LANE)
+    native, jax_boozer, _target = load_archived_nested_ls_pair(
+        coil_coordinates=coils,
+        surface_coordinates=surface,
+    )
+    _assert_grid(native)
+    probe = evaluate_f3_b37_bounded_probe(native, jax_boozer, one_newton_step=False)
+    _F3_B37_BOUNDED_EVIDENCE.write_text(
+        json.dumps(
+            {
+                "schema": "nested-ls-reduced-gate1-f3-b37-bounded.v1",
+                "one_newton_step": False,
+                "full_walk_attempted": probe.full_walk_attempted,
+                "probe": probe.as_payload(),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    assert probe.residual_rows == 3 * 255 * 64 + 2
+    assert probe.y_rank == 2
+    assert probe.reduced_grad_finite is True
+    assert probe.reduced_grad_l2 > 1.0e-6
+    assert probe.hvp_finite is True
+    assert probe.hvp_seconds > 0.0
+    assert probe.one_step_attempted is False
+    assert probe.full_walk_attempted is False
+    assert probe.native_ref_success is True
+    assert probe.native_ref_iter >= 1
+    assert abs(probe.native_ref_delta_iota) > 1.0e-3
+    assert probe.native_ref_coil_delta_inf == 0.0
