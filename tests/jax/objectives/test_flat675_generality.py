@@ -22,6 +22,8 @@ here is a measurement.
 
 from __future__ import annotations
 
+import dataclasses
+
 import jax
 import numpy as np
 import pytest
@@ -32,6 +34,7 @@ from simsopt.geo import (
     SurfaceXYZTensorFourier,
     create_equally_spaced_curves,
 )
+from simsopt_jax.core.specs import make_surface_xyz_tensor_fourier_spec
 from simsopt_jax.core.surface_dofs import surface_gamma_tangents_from_dofs
 from simsopt_jax.core.surface_integrals import surface_volume
 from simsopt_jax.examples.single_stage_flat675 import (
@@ -235,8 +238,6 @@ def test_asymmetric_range_selection_is_proven_by_the_volume_label() -> None:
     source.x = boundary.x
     reference.least_squares_fit(source.gamma())
 
-    from simsopt_jax.core.specs import make_surface_xyz_tensor_fourier_spec
-
     reference_spec = make_surface_xyz_tensor_fourier_spec(
         dofs=np.asarray(reference.get_dofs(), dtype=np.float64),
         quadpoints_phi=np.asarray(reference.quadpoints_phi, dtype=np.float64),
@@ -388,10 +389,9 @@ def test_vessel_block_is_live_once_its_term_switches_on() -> None:
         nphi=GRID,
         ntheta=GRID,
     )
-    base_policy = inactive.objective_policy
-    import dataclasses
-
-    active_policy = dataclasses.replace(base_policy, surface_vessel_threshold_m=1.0)
+    active_policy = dataclasses.replace(
+        inactive.objective_policy, surface_vessel_threshold_m=1.0
+    )
     active = build_flat675_problem(
         boundary=boundary,
         field=field,

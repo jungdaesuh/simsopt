@@ -55,14 +55,19 @@ from .policy import (
     Flat675ObjectivePolicy,
 )
 
-# The certified surface layout: mpol = ntor = 10 with stellarator symmetry,
-# which is 661 DOFs.  These are the constructor's DEFAULTS, not its limits —
-# they are the resolution the sealed receipts speak to.  nfp is free.
-CERTIFIED_MPOL: Final[int] = 10
-CERTIFIED_NTOR: Final[int] = 10
-CERTIFIED_STELLSYM: Final[bool] = True
+# The certified surface layout, read off the distinguished record rather than
+# re-declared.  These are the constructor's DEFAULTS, not its limits, and the
+# constructor builds its layout from whatever these resolve to — so a literal
+# here would be a second source for the triple that already defines 661, and
+# drifting it would quietly hand the default path a non-certified problem
+# while the record still said 675.  nfp is free.
+CERTIFIED_MPOL: Final[int] = CERTIFIED_FLAT_LAYOUT.surface_mpol
+CERTIFIED_NTOR: Final[int] = CERTIFIED_FLAT_LAYOUT.surface_ntor
+CERTIFIED_STELLSYM: Final[bool] = CERTIFIED_FLAT_LAYOUT.surface_stellsym
 # The campaign's quadrature: a half field period in phi, a full period in
-# theta.
+# theta.  Grid density is not layout — it changes how finely the surface is
+# sampled, not how many coordinates describe it — so these stay literals and
+# the record has nothing to say about them.
 CERTIFIED_NPHI: Final[int] = 255
 CERTIFIED_NTHETA: Final[int] = 64
 CERTIFIED_SURFACE_RANGE: Final[str] = "half period"
