@@ -132,6 +132,258 @@ file per pytest process.
   they follow the F4-C3 pattern: tracked summary, host-local raw,
   non-verdict seconds). Closing crucible pass over the delivery.
 
+### R1 findings (2026-08-20)
+
+Recon complete; no production code or tests were changed. This subsection
+amends the R1 work package above. Where a finding contradicts an assumption
+in the reviewer-cleared text, it says so rather than editing that text.
+
+**(a) Pin inventory — the review's measurement is confirmed exactly, and is
+a floor rather than the total.** The seven named layout symbols
+(`FLAT675_{OUTER,COIL,VESSEL,SURFACE}_DOF_COUNT`,
+`FLAT675_{COIL,VESSEL,SURFACE}_SLICE`) occur **158 times across 13 files**:
+src 69 (`formulation.py` 25, `__init__.py` 14, `objective.py` 12,
+`boozer_material.py` 11, `construction.py` 7), benchmarks 20
+(`flat675_promotion_robustness_child.py` 12, `flat675_fused_lane_child.py`
+8), tests 67 (`test_flat675_contracts.py` 30,
+`test_flat675_construction.py` 19, `test_single_stage_flat675_example.py`
+8, `test_flat675_objective.py` 7, `test_single_stage_flat675.py` 3),
+example 2 — matching the charter's per-file figures term for term.
+
+Four further classes of pin carry layout meaning and are **invisible to a
+named-token grep**, so requirement 1 is not discharged by chasing the 158:
+
+1. **The 661 is not defined by `FLAT675_SURFACE_DOF_COUNT`; it is produced
+   by the resolution triple.** `CERTIFIED_MPOL/NTOR/STELLSYM`
+   (`construction.py:62-64`) become a `SurfaceXYZTensorFourier` at
+   `construction.py:225-228` and a spec at `:251-253`; the DOF count
+   constant only *cross-checks* the result downstream
+   (`boozer_material.py:116-119`). The six `CERTIFIED_*` constants have 14
+   production use sites and 11 test use sites. A layout record that
+   generalizes the widths but leaves this triple pinned generalizes
+   nothing.
+2. **Bare numeric layout literals in executable test code — 16 sites, none
+   of which the 158 counts.** `test_flat675_contracts.py`: `:922`
+   `dof_count=660` and `:1314` `jnp.zeros(660)` (surface width − 1
+   negative cases), `:1101` `_spec_array(..., [661])` (wire payload),
+   `:770/:772/:973/:1123/:1127` current segments `((9,10,0,1),)` /
+   `((10,11,0,1),)`, `:827/:828/:880/:884` owner maps and
+   `frozenset(range(11))`, `:1280` `.at[10]`, `:1307` `jnp.zeros(10)`;
+   `test_flat675_objective.py:274` `np.zeros(3)`;
+   `test_flat675_construction.py:717` the regex
+   `"does not carry owner DOFs 1-10 contiguously"`. The width − 1 cases
+   and the `1-10` regex do not fail loudly on a width change — they become
+   false passes or spurious failures.
+3. **One string-encoded pin.** The archived certificate's gradient key is
+   literally `"full_675"` (`test_flat675_objective.py:109`,
+   `benchmarks/genuine_675_fair_bar.py:791`).
+4. **The vessel's width-3 is also unnamed at its source.**
+   `synthesize_flat675_vessel` builds `np.zeros((2, 1))` rc/zs blocks
+   (`construction.py:366-372`); the 3 is a consequence of that shape, and
+   `FLAT675_VESSEL_DOF_COUNT` is never referenced there. Harmless while the
+   vessel stays width-3 (a settled scope decision), recorded because the
+   constructor could otherwise emit a vessel its own material rejects.
+
+**(b) Polymorphism audit — the core math is already generic; every pin is a
+validator.**
+
+| Unit | Verdict | Evidence |
+| --- | --- | --- |
+| `solve_flat675_y_qr` | **Polymorphic** in row count | `y_solve.py:40-45` constrains only the 2 columns (the inner state, out of scope); rows free |
+| `build_flat675_boozer_system_arrays` | **Polymorphic** | `_boozer_arrays.py:34-41`: pointwise columns, `.reshape(-1)`, normalized by `magnetic_field.size` |
+| `build_flat675_boozer_system` | **Polymorphic**, zero pins | `boozer_material.py:190-207` uses `.reshape((-1, 3))` and `.shape` only |
+| `flat675_candidate_geometry` | Polymorphic body, **2 validator pins** | pins `boozer_material.py:163,167`; body `:176-186` is width-free |
+| `Flat675BoozerMaterial.__post_init__` | **4 validator pins** | `boozer_material.py:51,116,143` |
+| `flat675_weighted_terms` | **1 validator pin + 3 slices** | `objective.py:88` shape gate; `:93-95` block slices; everything after is generic |
+| `Flat675Candidate.__post_init__` | **3 validator pins**, table-driven | `formulation.py:89-100` — already a per-block width table; the natural layout-record seat |
+| `bind_flat675_programs` | **No pins** | `objective.py:187-214` closes over material only |
+| `require_certified_coil_layout` | **Pinned by design** (rung-1 gate) | `construction.py:299,320,323` |
+| `assemble_flat675_problem` | **1 validator pin** | `construction.py:432` |
+
+Downstream of the package the shared single-stage math is already width-free:
+`_split_x_inner_runtime` derives the surface width as
+`x_inner.shape[0] - 2` (`surface_objectives.py:1051-1058`), so the
+`661 + 2` concatenation at `objective.py:113-114` needs no change.
+
+**(c) stellsym — verdict: INCLUDED for requirement 3, but the charter's
+framing of the question is wrong and the amendment states so.**
+
+The charter asks whether "the objective/Boozer math is genuinely
+parameterization-agnostic with no symmetry assumption". It is — but that is
+not what decides the question, because there *is* a real symmetry
+assumption and it is not in the math.
+
+*Evidence that the math is agnostic* (positive, not argument-from-absence —
+these three kernels do not accept a `stellsym` or `nfp` argument at all):
+- `boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB)` —
+  `simsopt_jax/geo/boozer_residual.py:263-306`; pointwise residual
+  normalized by `3 * nphi * ntheta` (`:295`).
+- `surface_volume(gamma, normal)`, `surface_area`,
+  `surface_mean_cross_sectional_area`, `surface_major_radius` —
+  `simsopt_jax/core/surface_integrals.py:19,26,34,51`; each is a *mean over
+  the supplied grid*, dividing by the actual `nphi*ntheta`.
+- `non_quasi_symmetric_residual_primitives(xphi, xtheta, B, axis)` —
+  `simsopt_jax/core/quasisymmetry.py:14-34`; area-weighted variance of
+  `|B|` along one axis.
+
+*Evidence that the `stellsym=False` parameterization is implemented, not
+stubbed:* `stellsym` reaches the flat path only as a descriptor of which
+Fourier coefficients exist, always paired with `scatter_indices`
+(`objective.py:122,130` → `surface_objectives.py:1417,1447,1466` →
+`boozer_residual.py:736-750`). At `boozer_residual.py:744-748` the
+non-symmetric case substitutes an empty scatter array, and
+`surface_fourier_kernels.py:1231-1244` takes the complementary branch
+`_split_flat_to_xyzc` (`:1115-1132`), which unpacks
+`3 x (2*mpol+1) x (2*ntor+1)` coefficients — 1323 at `mpol=ntor=10`,
+matching the figure the F4 plan already quotes. The flat path never touches
+the stellsym-masked BoozerExact machinery
+(`surface_objectives.py:2061-2108`), which belongs to the nested
+formulation.
+
+*Where the symmetry assumption actually lives:* precisely because those
+integrals are means over the supplied grid, a half-field-period grid stands
+for the whole torus **only by symmetry**. That assumption enters at exactly
+one line — `range=CERTIFIED_SURFACE_RANGE` (`construction.py:220`,
+`CERTIFIED_SURFACE_RANGE = "half period"` at `:70`), a constructor input
+with one production use site. **G2 can therefore include stellsym=False by
+selecting the quadrature range from the boundary's symmetry instead of
+hardcoding "half period"; no kernel changes.** The refusal at
+`construction.py:271-275` is retired with the rest of
+`require_certified_surface_layout`, and the F4-era refusal in
+`fit_flat675_boundary` (`_RUNG_TWO_SURFACE_MESSAGE`) is retired with it.
+Recommended G2 gate: a stellsym=False problem constructs and solves, and
+its volume label is compared against the same boundary evaluated on a
+full-period grid, so the range selection is proven rather than assumed.
+
+**(d) Schema blast radius — 12 recorded strings mention 675; all 12 are
+sealed, and none blocks the work.**
+- **Sealed by file mode (0440/0550), and therefore pinned *in live code*:**
+  the frozen bundle's six schema strings —
+  `simsopt.single_stage.fixed_state_genuine_675.{frozen_input_manifest.v1,
+  objective_policy.v2, material_identity.v1, source_identity.v1}`,
+  `simsopt.single_stage.experimental_fullspace_675.{boozer_system_policy.v1,
+  candidate.v1}`. The loaders that must keep accepting them byte-for-byte
+  are `flat675/manifest.py:42,44,77,249,311` and
+  `flat675/runtime_spec_loader.py:32,160`. These are the only 675-bearing
+  strings inside `src/`, and they are data contracts, not layout pins.
+- **Sealed by tracked evidence:** `genuine-675-fair-bar-manifest.v1`
+  (8 tracked receipt files), `flat675-fused-campaign-manifest.v1` (7),
+  `flat675-promotion-robustness.v1` (2).
+- **Sealed by host-local campaign evidence:** `flat675-fused-lane.v1`
+  (named an invariant by this charter), `flat675-promotion-robustness-child.v1`,
+  `genuine-675-fair-bar-{input,row,loader-selftest}.v1`,
+  `genuine-675-fair-bar-oracle.v1`.
+- **Live and safe to extend:** none of the above needs a version bump for
+  rung 2, because no schema encodes a width — they carry named coordinate
+  blocks whose lengths are implicit in the payload.
+
+**(e) Rung-2 pointer sites — the charter's four are accurate but the
+enumeration is incomplete; the sweep finds 7 in `construction.py` and 14
+more outside it.** The four cited line numbers verify exactly (`:78`,
+`:89`, `:268`, `:16-20`). Additional sites:
+- `construction.py:61` — inline comment "the pair is forced at rung 1".
+- `construction.py:266` — `"rung 1 forces mpol=ntor="` (the rung-1 half of
+  the message whose rung-2 half the charter cites at `:268`).
+- `construction.py:272-274` — `"rung 1 forces stellsym=True: ... carries
+  1323 DOFs"`, a message separate from `:266-268` inside the same validator.
+- `construction.py:60`, `:192-206` (`fit_flat675_boundary`'s two-loss-mode
+  docstring), `:279` (section comment), `:478` (`build_flat675_problem`'s
+  pointer to those loss modes) — restriction prose that survives the
+  validators.
+- `tests/jax/objectives/test_flat675_construction.py:14, 611, 619, 623,
+  634, 636, 650` — seven sites that *assert* the rung-1 message text.
+- `docs/jax_flat675_promotion_plan.md:21, 27, 29, 89, 92, 94, 95` — the F4
+  plan's own rung-1/rung-2 statements.
+
+**Charter contradictions and gaps found (flagged, not fixed):**
+
+1. **Acceptance gates 5 and 6 collide on the example.** Gate 6 freezes
+   `examples/jax/3_Advanced/single_stage_flat675.py` byte-for-byte "full
+   stop"; gate 5 forbids leaving any "module/function docstring ...
+   asserting a rung-1 restriction G2 lifted". That example's docstring
+   (`:29-38`) is headed "THE LAYOUT IS FIXED AT 11 + 3 + 661" and states
+   that `build_flat675_problem` "fits any compatible simsopt boundary onto
+   that layout" — a claim about the *constructor* that G2 falsifies, even
+   though it stays true of this example's own configuration. The two gates
+   cannot both be satisfied as written. **Needs adjudication before G2**;
+   R1 recommends the narrow reading (gate 6 wins, the sentence is about the
+   example's configuration) with the ambiguity resolved by a one-word
+   change under an explicit documented exception if the reviewer disagrees.
+2. **Gate 5 does not cover the tests that assert the retired messages.**
+   Seven assertions in `test_flat675_construction.py` pin rung-1 message
+   text; they must change in the same commit that retires the messages or
+   CI fails. Gate 5's vocabulary ("refusal message, inline error string,
+   module/function docstring") should be read to include them.
+3. **Requirement 3's decision procedure is mis-framed** (see (c)): it
+   conditions stellsym=False on the math being symmetry-agnostic, which is
+   true but not sufficient. The operative condition is the quadrature-range
+   selection at `construction.py:220`. The verdict is INCLUDED on that
+   basis, not on the basis the charter names.
+4. **R1 process note.** The first bare-literal sweep run for (a) reported a
+   false clean: the filter excluded any line whose text matched `flat675`,
+   and `grep -n` prefixes each line with a path that itself contains
+   `flat675`, so every hit inside the flat675-named files was discarded.
+   The 16 literal sites in (a)(2) were recovered by a second, independent
+   sweep and each was then read at its line. Recorded because the same
+   filter shape would silently under-report any future inventory.
+
+### Adjudication of R1's flags (2026-08-20, orchestrator; delta-reviewed)
+
+1. **Gates 5/6 collision — resolved with NO example edit, secured by a G2
+   API constraint.** In the generalized constructor, surface-layout
+   selection (`mpol`, `ntor`, `stellsym`) is EXPLICIT with certified
+   defaults; the constructor never derives the target layout from the
+   boundary it is given. Under that API every sentence of the example
+   docstring stays true after G2: the example's own layout IS fixed at
+   11 + 3 + 661, and at the certified defaults the constructor still fits
+   any compatible boundary onto that layout and still REFUSES a boundary
+   that layout cannot represent — an asymmetric boundary targeted at a
+   stellsym=True layout is a projection onto a proper closed subspace and
+   stays refused per the F4 coercion line. What G2 changes is the
+   refusal's message (from "rung 2 will lift this" to "pass
+   stellsym=False"), not the refusal behavior at the certified target.
+   This supersedes one clause of finding (c): `_RUNG_TWO_SURFACE_MESSAGE`'s
+   refusal in `fit_flat675_boundary` is RE-POINTED, not retired — only the
+   `require_certified_surface_layout` validator (the certified-triple pin)
+   is retired outright. Gate 6 therefore holds as written (example
+   byte-unchanged, full stop) and gate 5 holds because the docstring
+   asserts no lifted restriction under the explicit-layout API. G2 adds
+   the pinning test: asymmetric boundary + stellsym=True target → typed
+   refusal naming the stellsym=False alternative.
+2. **Gate 5 vocabulary — clarified to include test assertions.** The seven
+   message-text assertions in `test_flat675_construction.py` (:14, :611,
+   :619, :623, :634, :636, :650) are in gate 5's scope: any commit that
+   retires or re-points a message updates the tests asserting its text in
+   the same commit.
+3. **Requirement 3 — stellsym=False INCLUDED, on R1's quadrature-range
+   basis.** The charter's literal condition ("no symmetry assumption") was
+   a proxy for "no kernel surgery needed"; R1 shows the kernels are
+   symmetry-free and the single assumption is the constructor's
+   quadrature-range input (`construction.py:220`). G2 includes
+   stellsym=False by selecting the range from the REQUESTED layout's
+   symmetry (stellsym=True → "half period", stellsym=False → full torus),
+   and adopts R1's recommended gate as a requirement-3 acceptance
+   addition: a stellsym=False problem constructs and solves, and its
+   volume label matches the same boundary evaluated on a full-period
+   grid — the range selection is proven, not assumed. (For an
+   `nfp`-periodic asymmetric boundary, "field period" tiles the torus at
+   1/nfp the phi cost and is equally correct; G2 may select either — the
+   volume gate proves the choice.)
+4. **Process note accepted**; the grep-filter false-clean trap is recorded
+   here and in the session learnings.
+5. **R1 finding (a)(1) — where the resolution triple lives** (added on
+   delta review, which correctly flagged this as unresolved). The layout
+   record is constructed FROM `(mpol, ntor, stellsym)` and CARRIES the
+   triple as members alongside the surface-block width it produces; the
+   width is derived inside the record's construction and is never
+   supplied independently, so triple and width are one source and
+   requirement 1's "no dual source" clause is satisfied explicitly, not
+   by inference. The constructor's explicit layout parameters
+   (adjudication 1) are the record-construction inputs, not a parallel
+   channel — everything downstream of construction reads the record. The
+   certified instance pins the triple `(10, 10, True)` and therefore the
+   661.
+
 ## Acceptance gates
 
 1. Certified-layout bitwise gate at final HEAD (the five-value F4
