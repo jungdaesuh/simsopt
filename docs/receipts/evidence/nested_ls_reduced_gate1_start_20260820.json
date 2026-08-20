@@ -1,0 +1,20 @@
+{
+  "schema": "nested-ls-reduced-gate1-start.v1",
+  "date": "2026-08-20",
+  "claim": "reduced nested-LS y* and Newton at archived F3 start (255x64), not an F3 timing claim",
+  "command": "JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu python -m pytest tests/geo/test_nested_ls_reduced_scale.py -q --tb=short",
+  "pytest": {
+    "passed": 2,
+    "failed": 0,
+    "seconds": 49.99,
+    "includes_native_cpp_newton_rejudge": true
+  },
+  "archived_start_qr": {
+    "iota": 0.1500517839808274,
+    "G": 2.010619295609829,
+    "source": "docs/receipts/boozer_unnest_newton_reconstruct_diagnostic_20260820.md"
+  },
+  "dense_hessian_materialization": false,
+  "dense_hessian_aborted_rss_kib_report_only": 65992732,
+  "f3_b37_points": "NOT_YET_PRODUCED"
+}
