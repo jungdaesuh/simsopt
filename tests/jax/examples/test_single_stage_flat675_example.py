@@ -89,17 +89,22 @@ def test_manifest_entry_points_at_this_script(
     assert manifest_entry["tier"] == "3_Advanced"
 
 
-def test_manifest_entry_declares_no_host_boundary(
+def test_manifest_entry_names_its_host_construction_seam(
     manifest_entry: dict[str, object],
 ) -> None:
-    """The empty declaration is the fused lane's GATE-3 discipline.
+    """``host_boundaries`` describes the workflow's seams, not the solve.
 
-    It is a claim about the demonstrated workflow — the solve — which the
-    example runs inside a strict transfer guard and reports a ledger for.
+    The two live on different sides of a line this example draws explicitly.
+    ``host_boundaries`` names the native construction the workflow still does
+    on the host — the boundary, the coils and the winding surface are built
+    from simsopt objects before anything is traced.  The claim that the SOLVE
+    crosses no host boundary is a different claim, and it is carried by the
+    transfer ledger this example publishes rather than by this field; a
+    non-empty declaration here does not weaken it.
     """
-    assert manifest_entry["host_boundaries"] == []
-    # An adapter or hybrid would be required to name boundaries; a tutorial is
-    # the classification that lets the empty declaration stand.
+    assert manifest_entry["host_boundaries"] == [
+        "native boundary, coil, and winding-surface construction"
+    ]
     assert manifest_entry["classification"] == "tutorial"
     assert manifest_entry["teaching_kind"] == "combined"
     assert manifest_entry["compatibility"] is None

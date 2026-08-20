@@ -153,3 +153,20 @@ pyright per repo law; one test file per pytest process.
 No mixed precision. No native twin example. No arbitrary-resolution
 guarantee beyond the reported rung. No re-timing. No changes to the sealed
 receipts or campaign evidence. No P-as-matvec (track C stays parked).
+
+## Chartered follow-up
+
+- **Persistent XLA compile cache for the examples lanes.** This document is
+  the SSOT for the decision; the example docstring discloses the symptom and
+  does not restate the lever. C2 measured the shipped example's CPU smoke at
+  ~150 s and established that the cost is compile, not arithmetic and not the
+  frozen L-BFGS history: a 4x problem shrink moved it 0.4% (136.97 s ->
+  136.43 s) and `maxcor` 300 -> 10 moved it 12% (142.07 s -> 125.05 s), which
+  leaves ~125 s in the objective and gradient program whose size the
+  formulation fixes at 661 surface DOFs. There is therefore no lever inside
+  the example, and shrinking it further would only shrink the lesson. The
+  accepted answer is a persistent compile cache configured by the lane
+  environment, which is also the mechanism the finite-build row already
+  depends on for its warm claim. Not attempted here: it changes shared
+  examples infrastructure, so it is a scoped change of its own rather than a
+  rider on this promotion.
