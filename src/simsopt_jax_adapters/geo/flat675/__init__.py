@@ -22,6 +22,7 @@ from .boozer_material import (
 )
 from .bundle import Flat675Bundle, load_flat675_bundle
 from .construction import (
+    ASYMMETRIC_SURFACE_RANGE,
     CERTIFIED_MPOL,
     CERTIFIED_NPHI,
     CERTIFIED_NTHETA,
@@ -30,14 +31,16 @@ from .construction import (
     CERTIFIED_SURFACE_RANGE,
     DEFAULT_FLAT675_BOOZER_POLICY,
     DEFAULT_VESSEL_CLEARANCE_FACTOR,
+    STELLSYM_SURFACE_RANGE,
     CoilDofExtractionProvider,
     Flat675Problem,
     assemble_flat675_problem,
     build_flat675_problem,
+    coil_owner_dof_count,
     default_flat675_objective_policy,
+    default_optimized_coil_index,
     fit_flat675_boundary,
-    require_certified_coil_layout,
-    require_certified_surface_layout,
+    surface_quadrature_range,
     synthesize_flat675_vessel,
 )
 from .formulation import (
@@ -81,6 +84,7 @@ from .runtime_spec_loader import load_flat675_runtime_spec
 from .y_solve import Flat675YSolution, solve_flat675_y_qr
 
 __all__ = [
+    "ASYMMETRIC_SURFACE_RANGE",
     "CERTIFIED_FLAT_LAYOUT",
     "CERTIFIED_MPOL",
     "CERTIFIED_NPHI",
@@ -99,6 +103,7 @@ __all__ = [
     "FLAT675_VESSEL_DOF_COUNT",
     "FLAT675_VESSEL_SLICE",
     "FLAT_VESSEL_DOF_COUNT",
+    "STELLSYM_SURFACE_RANGE",
     "CoilDofExtractionProvider",
     "Flat675BoozerLabelType",
     "Flat675BoozerMaterial",
@@ -121,7 +126,9 @@ __all__ = [
     "bind_flat675_programs",
     "build_flat675_boozer_system",
     "build_flat675_problem",
+    "coil_owner_dof_count",
     "default_flat675_objective_policy",
+    "default_optimized_coil_index",
     "fit_flat675_boundary",
     "flat675_candidate_geometry",
     "flat675_objective",
@@ -130,9 +137,8 @@ __all__ = [
     "load_flat675_input_manifest",
     "load_flat675_runtime_spec",
     "load_flat675_vessel_template",
-    "require_certified_coil_layout",
-    "require_certified_surface_layout",
     "solve_flat675_y_qr",
     "surface_block_dof_count",
+    "surface_quadrature_range",
     "synthesize_flat675_vessel",
 ]

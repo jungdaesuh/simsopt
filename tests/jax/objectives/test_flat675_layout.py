@@ -98,7 +98,8 @@ def test_surface_width_matches_simsopts_own_dof_count(
 
     This is the equality the record's docstring claims, checked against the
     class the boundary is actually built from — including the asymmetric mode,
-    whose count the layout must get right before rung 2 can offer it.
+    whose count the layout must get right for the asymmetric layouts it
+    now offers.
     """
     quadpoints = np.linspace(0.0, 1.0, 4, endpoint=False)
     surface = SurfaceXYZTensorFourier(
@@ -358,13 +359,20 @@ def _small_layout_problem() -> tuple[
 
 # --- the width does not pin the resolution ----------------------------------
 
-# ``mpol=4, ntor=4`` is not the only stellarator-symmetric resolution that
-# produces a 121-DOF block: so do ``(1, 13)`` and ``(13, 1)``.  Across
-# mpol 1..15 x ntor 0..15 in both symmetry modes, 202 of the 244 distinct
-# widths have more than one producer.  The certified 661 happens to be one of
-# the unambiguous ones, which is exactly why a width-only check looked
-# sufficient for as long as 675 was the only layout.
+# A width does not name the resolution that produced it.  ``mpol=4, ntor=4``
+# is not the only stellarator-symmetric resolution giving a 121-DOF block: so
+# do ``(1, 13)`` and ``(13, 1)``.  Nor is the CERTIFIED width exempt — 661 is
+# produced by ``(10, 10)``, ``(4, 24)`` and ``(24, 4)``.  Across
+# mpol 1..25 x ntor 0..25 in both symmetry modes, 532 of the 596 distinct
+# widths have more than one producer.
+#
+# 661 is pinned here beside 121 deliberately: it is the width the sealed
+# receipts and the shipped example depend on, and a premise test that covered
+# only the demonstration width would leave the certified one unguarded.  Below
+# mpol/ntor 15 the 661 collision does not appear, which is why a width-only
+# check survived as long as 675 was the only layout on offer.
 AMBIGUOUS_WIDTH_RESOLUTIONS = ((4, 4), (1, 13), (13, 1))
+CERTIFIED_WIDTH_RESOLUTIONS = ((10, 10), (4, 24), (24, 4))
 
 
 def _material_with(
@@ -422,6 +430,22 @@ def test_every_ambiguous_resolution_produces_the_same_block_width(
         surface_block_dof_count(mpol=mpol, ntor=ntor, stellsym=True)
         == SMALL_SURFACE_DOF_COUNT
     )
+
+
+@pytest.mark.parametrize(("mpol", "ntor"), CERTIFIED_WIDTH_RESOLUTIONS)
+def test_the_certified_width_is_ambiguous_too(mpol: int, ntor: int) -> None:
+    """661 has three producers, so the guard protects the certified layout.
+
+    This is the case that matters most: the sealed receipts and the shipped
+    example are posed at 661, and once resolutions are user-selectable a
+    width-only check would accept ``(4, 24)`` or ``(24, 4)`` wherever
+    ``(10, 10)`` was meant.
+    """
+    assert (
+        surface_block_dof_count(mpol=mpol, ntor=ntor, stellsym=True)
+        == FLAT675_SURFACE_DOF_COUNT
+    )
+    assert (mpol, ntor) != (CERTIFIED_FLAT_LAYOUT.surface_mpol, 24)
 
 
 def test_material_refuses_a_template_the_layout_did_not_describe() -> None:
