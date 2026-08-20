@@ -1,10 +1,14 @@
 """Immutable grid/topology material behind the flat-675 Boozer system.
 
-The material binds one runtime seed's surface template and coil-DOF extraction
-to the flat layout, evaluates a candidate's coil and surface blocks into
-physical geometry, and assembles the two-column ``(A, b)`` system whose
-least-squares solution is the inner state.  All arithmetic here is float64:
-the flat-675 port has no proposal precision.
+The material binds a surface template and a coil-DOF extraction to the flat
+layout, evaluates a candidate's coil and surface blocks into physical
+geometry, and assembles the two-column ``(A, b)`` system whose least-squares
+solution is the inner state.  All arithmetic here is float64: the flat-675
+port has no proposal precision.
+
+Construction goes through :mod:`.construction` — the material is built from
+specs, never from a file record, so the archived bundle and user geometry
+reach it the same way.
 """
 
 from __future__ import annotations
@@ -22,7 +26,6 @@ from simsopt_jax.core.specs import (
     CoilSetDofExtractionSpec,
     GroupedCoilSetSpec,
     OptimizableDofMapSpec,
-    SingleStageRuntimeSpec,
     SurfaceXYZTensorFourierSpec,
 )
 from simsopt_jax.core.surface_dofs import surface_gamma_tangents_from_dofs
@@ -143,34 +146,6 @@ class Flat675BoozerMaterial:
                 "flat-675 coil extraction must consume every one of "
                 f"{FLAT675_COIL_DOF_COUNT} owner DOFs."
             )
-
-    @classmethod
-    def from_runtime_spec(
-        cls,
-        runtime_spec: SingleStageRuntimeSpec,
-    ) -> Flat675BoozerMaterial:
-        """Bind one immutable runtime seed spec as flat-675 Boozer material."""
-        if not isinstance(runtime_spec, SingleStageRuntimeSpec):
-            raise TypeError("runtime_spec must be SingleStageRuntimeSpec.")
-        seed = runtime_spec.seed
-        if seed.coil_dofs.shape != (FLAT675_COIL_DOF_COUNT,):
-            raise Flat675ContractError(
-                "flat-675 runtime seed must expose exactly "
-                f"{FLAT675_COIL_DOF_COUNT} coil DOFs."
-            )
-        if seed.coil_dofs.dtype != jnp.dtype(jnp.float64):
-            raise Flat675ContractError(
-                "flat-675 runtime seed coil DOFs must use float64."
-            )
-        return cls(
-            surface_template=seed.surface,
-            coil_dof_extraction=seed.coil_dof_extraction,
-            mpol=runtime_spec.mpol,
-            ntor=runtime_spec.ntor,
-            nfp=runtime_spec.nfp,
-            nphi=runtime_spec.nphi,
-            ntheta=runtime_spec.ntheta,
-        )
 
 
 def flat675_candidate_geometry(

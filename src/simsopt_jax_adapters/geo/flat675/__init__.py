@@ -21,6 +21,25 @@ from .boozer_material import (
     flat675_candidate_geometry,
 )
 from .bundle import Flat675Bundle, load_flat675_bundle
+from .construction import (
+    CERTIFIED_MPOL,
+    CERTIFIED_NPHI,
+    CERTIFIED_NTHETA,
+    CERTIFIED_NTOR,
+    CERTIFIED_STELLSYM,
+    CERTIFIED_SURFACE_RANGE,
+    DEFAULT_FLAT675_BOOZER_POLICY,
+    DEFAULT_VESSEL_CLEARANCE_FACTOR,
+    CoilDofExtractionProvider,
+    Flat675Problem,
+    assemble_flat675_problem,
+    build_flat675_problem,
+    default_flat675_objective_policy,
+    fit_flat675_boundary,
+    require_certified_coil_layout,
+    require_certified_surface_layout,
+    synthesize_flat675_vessel,
+)
 from .formulation import (
     FLAT675_COIL_DOF_COUNT,
     FLAT675_COIL_SLICE,
@@ -55,6 +74,14 @@ from .runtime_spec_loader import load_flat675_runtime_spec
 from .y_solve import Flat675YSolution, solve_flat675_y_qr
 
 __all__ = [
+    "CERTIFIED_MPOL",
+    "CERTIFIED_NPHI",
+    "CERTIFIED_NTHETA",
+    "CERTIFIED_NTOR",
+    "CERTIFIED_STELLSYM",
+    "CERTIFIED_SURFACE_RANGE",
+    "DEFAULT_FLAT675_BOOZER_POLICY",
+    "DEFAULT_VESSEL_CLEARANCE_FACTOR",
     "FLAT675_COIL_DOF_COUNT",
     "FLAT675_COIL_SLICE",
     "FLAT675_OBJECTIVE_TERM_KEYS",
@@ -63,6 +90,7 @@ __all__ = [
     "FLAT675_SURFACE_SLICE",
     "FLAT675_VESSEL_DOF_COUNT",
     "FLAT675_VESSEL_SLICE",
+    "CoilDofExtractionProvider",
     "Flat675BoozerLabelType",
     "Flat675BoozerMaterial",
     "Flat675BoozerSystem",
@@ -75,10 +103,15 @@ __all__ = [
     "Flat675InputManifest",
     "Flat675Material",
     "Flat675ObjectivePolicy",
+    "Flat675Problem",
     "Flat675Programs",
     "Flat675YSolution",
+    "assemble_flat675_problem",
     "bind_flat675_programs",
     "build_flat675_boozer_system",
+    "build_flat675_problem",
+    "default_flat675_objective_policy",
+    "fit_flat675_boundary",
     "flat675_candidate_geometry",
     "flat675_objective",
     "flat675_weighted_terms",
@@ -86,5 +119,8 @@ __all__ = [
     "load_flat675_input_manifest",
     "load_flat675_runtime_spec",
     "load_flat675_vessel_template",
+    "require_certified_coil_layout",
+    "require_certified_surface_layout",
     "solve_flat675_y_qr",
+    "synthesize_flat675_vessel",
 ]
