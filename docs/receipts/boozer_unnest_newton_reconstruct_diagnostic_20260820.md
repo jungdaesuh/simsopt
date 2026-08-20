@@ -39,7 +39,8 @@
   (`newton_reconstruct_flat675.{py,json}`, `boozer_ls_exact_purpose.{py,json}`).
   Purpose JSON is the Aug 19 run output (sha256 `2fbd444d…`), including the 661
   LS-projected Fourier dofs at the F3 point (`ι = 0.1408571095530796`).
-  Reconstruct JSON is byte-identical to that run (sha256 `1b68f7f6…`). Host-local
+  Reconstruct JSON from that same campaign is hashed separately (sha256
+  `1b68f7f6…`). Host-local
   copies of the same bytes:
   `~/simsopt_mixed_artifacts/boozer_unnest_reconstruct_20260820_tmp_originals/`.
 
@@ -140,7 +141,7 @@ machine-zero LS gradient. Overdetermined LS cannot zero the residual.
 | `Δι` | — | **`−0.01079250523159378`** |
 | `‖Δs‖₂` / `‖Δs‖_∞` | — | **`8.806388241728436e-3` / `5.035304667539209e-3`** |
 | Coils | frozen | frozen |
-| Wall | — | **159.5 s** |
+| Wall | — | **159.5 s** (`ls_newton.seconds`: inclusive 10-step C++ Newton invocation — repeated `derivatives=2` evaluations, dense solves, reevaluations, and final LU — not a Hessian-assembly timer) |
 
 Un-nest QR vs the lane `endpoint_inner_state`
 `[0.1516496147846736, 2.010619298254679]` is **8 ULP in ι** and **6 ULP in G**
@@ -156,12 +157,50 @@ is a **different design** (ι `0.15165 → 0.14086`). The 661 LS-projected
 Fourier dofs are in
 `docs/receipts/evidence/boozer_unnest_newton_reconstruct_20260820/boozer_ls_exact_purpose.json`
 at `points[name=f3_b37_pair2_l1_endpoint].ls.surface_dofs`. The eight-term
-outer `J` was not re-scored after the walk.
+outer `J` rescore after the walk is reported separately in §2.3.
 
 Purpose of nested LS: held at start; **not** held at the F3 endpoint. Residual
 weight 1000 was not enough against ι-penalty / QS / geometry terms. Un-nest
 used the extra `s` freedom to keep ι near 0.15; nested LS would have projected
 back onto the Boozer LS manifold every eval.
+
+### 2.3 F3 eight-term outer `J` after LS projection
+
+A separate, nonpromoting native C++/CPU diagnostic replaced only the 661
+surface dofs with the archived LS-projected vector. The 11 coil and 3 vessel
+dofs stayed byte-identical. Both points were then re-evaluated through the
+canonical eight-term flat-675 evaluator, including a fresh QR closure of
+`(ι, G)` at each surface.
+
+| Quantity | Published F3 B37 | LS-projected surface | Projected − published |
+| --- | ---: | ---: | ---: |
+| Eight-term outer `J` | `0.013957201998031181` | **`0.014334402067809742`** | **`+3.772000697785608e-4` (`+2.702547902%`)** |
+| non-QS term | `8.409930231917141e-4` | `8.020210537993181e-4` | `−3.897196939239606e-5` |
+| Boozer-residual term | `0.01248811394612682` | `0.008860725148573258` | `−0.003627388797553562` |
+| ι-penalty term | `1.3606144689064936e-4` | `0.00417962228361517` | `+0.00404356083672452` |
+| `‖∇J_outer‖_∞` | `4.037081707929317` | `4.624900897882726` | report-only |
+
+The native rescore reproduces the lane's published
+`0.013957201998031098` to `5.97e-15` relative. The other five weighted terms
+are unchanged: curve length, curve-surface distance, and surface-vessel
+distance remain zero; curve-curve distance remains
+`2.863324671285698e-4`; curvature remains `2.0570111469342818e-4`.
+
+Projection is therefore modest in the **summed scalar** (`+2.70%`) but not a
+cosmetic correction or the same optimum. It trades a `29.05%` reduction in
+the weighted residual term for a `30.72×` larger ι penalty, consistent with
+the reconstructed `ι = 0.140857...` rather than the flat optimum's
+`ι = 0.151650...`. No outer re-optimization was performed.
+
+Receipt:
+`docs/receipts/evidence/flat675_ls_projected_rescore_20260820/`
+(`rescore_flat675_ls_projection.{py,json}`; driver sha256 `d83829e4…`, JSON
+sha256 `c07aab05…`). Runtime provenance records `omp_get_max_threads = 16`,
+the loaded `simsoptpp` path/hash, and hashes for its complete `ldd` dependency
+closure (including `libgomp`). The attested extension was built at `62a262b09c`;
+its `src/simsoptpp` git tree `50a56cdb44c2…` is identical to the pinned native
+instrument's tree at `1c23f6c5f`. This rescore does not revise the sealed F3
+timing or quality verdict.
 
 ---
 
@@ -251,10 +290,18 @@ on F3.
 A **fused exact lane** (collocation `s` in `x`, square `r=0` as equalities, KKT
 in XLA) would be a **new formulation**: new residual, constrained solver (not
 unconstrained L-BFGS-B), new init (must start already exact), new C++ bar.
-It was **not implemented**. Nested C++ exact on 21×21 is already ~1 s per
-reconstruct; F3 fused still pays a ~34–35 s per-process floor
-(`docs/receipts/flat675_fused_campaign.md`). There is no measured reason to
-expect an F3-like GPU× versus C++ nested exact.
+It was **not implemented**. Nested C++ exact reconstruct on 21×21 from these
+LS surfaces is already a **failed** ~1 s invocation (`success=false`,
+`iter=20`, rollback; JSON `exact_newton_collocation.seconds` 1.00 s / 0.93 s).
+That wall is not a successful nested-exact inner and is not LS Newton
+(16.87 s / 159.5 s). The current F3 fused child pays a measured ~34–35 s
+process/import/tracing/lowering floor
+(`docs/receipts/flat675_fused_campaign.md`, the fused-vs-host-loop table);
+that is this campaign's fused-process overhead, not a universal lower bound
+for a redesigned nested solver. Fusing an exact (or nested-LS) problem into
+one XLA loop is an architecture candidate, not a proven unique path.
+There is no measured F3-like GPU× of fused L-BFGS-B versus C++ nested exact,
+and that comparison would be a different problem.
 
 ---
 
@@ -287,9 +334,13 @@ this reconstruct and is not F3 production `580217e0c`.
 ## 8. Recommendation (from these experiments)
 
 1. **Cite F3 as LS-flat GPU vs native.** Do not call it nested banana or exact.
-2. **Do not build fused exact as the next GPU campaign** unless the science
-   requires `r=0` *and* many evals; the inner is already cheap and the fused
-   process floor is large.
+2. **Do not build fused exact as the next GPU campaign on this F3 evidence.**
+   Exact reconstruct from these LS states diverged; the ~1 s collocation
+   Newton wall is a failed invocation, not a cheap successful inner. F3's
+   ~34–35 s fused-process floor is this campaign's measured overhead, not a
+   nested-solver bound. Persistent-process, hybrid, reduced-basis, and
+   stronger-preconditioner routes are unexcluded. A fused-exact GPU lane
+   remains a new formulation that would need its own init, solver, and C++ bar.
 3. **If nested purpose is required on a flat design:** freeze coils, C++ LS
    Newton, gate `|Δι|` / `‖Δs‖_∞` / C++ `‖∇J‖₂`. Fail ⇒ project (publish the
    projected surface — for this F3 point, the 661 dofs in the purpose JSON)
@@ -311,7 +362,12 @@ needed.
 - That QR residual ~0 is the LS match criterion.
 - That exact-Newton `‖Δs‖=0` after rollback is a match.
 - A GPU exact fused win, or a public GPU exact `BoozerSurface`.
-- Re-evaluation of the eight-term outer `J` at the LS-projected F3 point
-  (not run).
+- An outer re-optimization or promotion of the LS-projected F3 surface.
+- That F3's 7.70× process-wall ratio transfers onto a nested-LS GPU route.
+  The paired native is flat L-BFGS-B, not nested-LS banana Newton.
+- That reconstruct `ls_newton.seconds` (16.87 s iter-0 / 159.5 s iter-10) is
+  a pure Hessian-assembly timer.
+- That F3's ~34–35 s fused-process floor is a universal nested-solver bound,
+  or that one fused XLA loop is the only GPU architecture.
 - Full banana `run_code` LS path (BFGS 1500 + Newton 50). Newton polish is
   the “already near a root?” probe; at F3, Newton alone reached `∇J ~ 1e-14`.
