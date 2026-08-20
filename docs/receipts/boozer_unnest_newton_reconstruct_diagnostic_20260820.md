@@ -19,11 +19,13 @@
     `1c23f6c5f8964c74cc60f63d81b7f93f2db852f3`
 - **Python:** v0c runtime
   `/home/jungdaesuh/simsopt_mixed_artifacts/v0c_62a262b09c_20260715T2150Z/runtime-env/bin/python`
-  (3.11, JAX 0.10.0, `JAX_PLATFORMS=cpu`). `simsoptpp` from that env;
-  `simsopt` Python from the fair-bar tree (`PYTHONPATH=<fairbar>:<fairbar>/src`).
+  (3.11, JAX 0.10.0, `JAX_PLATFORMS=cpu`). `simsoptpp` from that env.
+  Drivers do `sys.path.insert(0, fairbar)` then `sys.path.insert(0, fairbar/src)`
+  and `bootstrap_local_simsopt()` — they do not set `PYTHONPATH`.
   JAX is used only to materialize the native Boozer graph; the Newton judges
   are C++ `BoozerSurface` / `boozer_surface_residual`.
-- **Threads:** `OMP_NUM_THREADS=16`, `JAX_ENABLE_X64=1`
+- **Threads:** drivers `os.environ.setdefault("OMP_NUM_THREADS", "16")`; the
+  archive does not record the resolved `omp_get_max_threads`. `JAX_ENABLE_X64=1`
 - **Inputs:**
   - Frozen bundle `~/simsopt_mixed_artifacts/genuine675-r3-input-1c23f6c5-20260721-r1`
   - Archived native `y_certificate` (GATE 1 / start QR):
@@ -35,8 +37,11 @@
 - **Archived drivers and JSON:**
   `docs/receipts/evidence/boozer_unnest_newton_reconstruct_20260820/`
   (`newton_reconstruct_flat675.{py,json}`, `boozer_ls_exact_purpose.{py,json}`).
-  The purpose JSON copy omits the 661 LS-polished `surface_dofs`; the live run
-  kept them in-process for the LS→exact handoff.
+  Purpose JSON is the Aug 19 run output (sha256 `2fbd444d…`), including the 661
+  LS-projected Fourier dofs at the F3 point (`ι = 0.1408571095530796`).
+  Reconstruct JSON is byte-identical to that run (sha256 `1b68f7f6…`). Host-local
+  copies of the same bytes:
+  `~/simsopt_mixed_artifacts/boozer_unnest_reconstruct_20260820_tmp_originals/`.
 
 GATE 1 (`tests/jax/objectives/test_flat675_objective.py`) is **not** this
 check. GATE 1 is flat-vs-flat objective / QR `y` vs that archived native
@@ -73,7 +78,10 @@ For each point:
    `maxiter=10`, `G` free). Coils must not move (`‖Δx_coils‖_∞ = 0`).
 4. **Exact on 255×64:** expect the stellsym collocation exception.
 5. **Exact on 21×21:** copy the same Fourier dofs onto
-   `φ = linspace(0, 1/nfp, 21)`, `θ = linspace(0, 1, 21)`.
+   `φ = linspace(0, 1/nfp, 21, endpoint=False)`,
+   `θ = linspace(0, 1, 21, endpoint=False)`
+   (drivers and `solve_residual_equation_exactly_newton` docstring; omitting
+   `endpoint=False` is a different grid).
    Run A calls the library `solve_residual_equation_exactly_newton`
    (`maxiter=20`). Run B is a NumPy Newton loop on C++
    `boozer_surface_residual` (`maxiter=40`) with the same persist predicate
@@ -107,7 +115,8 @@ DOFs, LS grid 255×64, Volume target `0.1`, ι target `0.15`.
 | C++ LS Newton | **success, iter = 0** |
 | `Δι`, `ΔG`, `‖Δs‖₂`, `‖Δs‖_∞` | **all 0** |
 | Coils | frozen |
-| Wall (Newton + two Jacobian probes) | ~15–17 s |
+| Newton wall | `16.86650273296982` s (reconstruct `ls_newton.seconds`) |
+| Jacobian probes (timed separately) | `1.15978` s before + `0.20429` s after |
 
 QR `(ι, G)` match the archived native initial `y_certificate` exactly.
 QR `‖Ay−b‖₂` is `3.4839688084386477e-3` vs certificate `3.4839688084386472e-3`
@@ -124,16 +133,18 @@ machine-zero LS gradient. Overdetermined LS cannot zero the residual.
 | `(ι, G)` | `0.1516496147846734`, `2.0106192982546816` | `0.1408571095530796`, `2.0106193053897154` |
 | QR `‖Ay−b‖₂` | `4.994314449402845e-3` (rel `4.3018418488001585e-3`) | (not re-QR’d) |
 | Volume | `0.0998182004600127` | `0.09992911877773755` |
-| LS `‖∇J‖_∞` | `3.7103461544906323e-3` | `3.6163839464303325e-14` |
+| LS `‖∇J‖₂` (C++ `norm` / success) | — | `3.9396376879063985e-14` (`≤ 1e-13`) |
+| LS `‖∇J‖_∞` (report-only here) | `3.7103461544906323e-3` | `3.6163839464303325e-14` |
 | C++ `J_LS` (not F3 outer `J`) | `1.2488312566898948e-5` | `8.860896032364874e-6` |
-| Newton | — | **success, `iter=10`, `maxiter=10`**; `‖∇J‖_∞` already `3.62e-14` (below `1e-13`) |
+| Newton | — | **success** by C++ `‖∇J‖₂ ≤ 1e-13`; `iter=10`, `maxiter=10` |
 | `Δι` | — | **`−0.01079250523159378`** |
 | `‖Δs‖₂` / `‖Δs‖_∞` | — | **`8.806388241728436e-3` / `5.035304667539209e-3`** |
 | Coils | frozen | frozen |
 | Wall | — | **159.5 s** |
 
-Un-nest QR matches the lane `endpoint_inner_state`
-`[0.1516496147846736, 2.010619298254679]` to ~1 ULP.
+Un-nest QR vs the lane `endpoint_inner_state`
+`[0.1516496147846736, 2.010619298254679]` is **8 ULP in ι** and **6 ULP in G**
+(`≲1.5e-15` relative). That is not the 1-ULP residual gap of §2.1.
 
 The walk is **not** ULP. F3’s sealed B37/BQ oracle-relative between fused and
 native *lane* endpoints is `−2.25e-11`
@@ -141,8 +152,11 @@ native *lane* endpoints is `−2.25e-11`
 (~7.2% of the 0.15 target). `‖Δs‖_∞ = 5.035e-3` is the largest
 **Fourier-coefficient** change in metres (Cartesian `SurfaceXYZTensorFourier`
 dofs), not a measured pointwise surface displacement. Nested LS from this `s`
-is a **different design** (ι `0.15165 → 0.14086`). The eight-term outer `J`
-was not re-scored after the walk.
+is a **different design** (ι `0.15165 → 0.14086`). The 661 LS-projected
+Fourier dofs are in
+`docs/receipts/evidence/boozer_unnest_newton_reconstruct_20260820/boozer_ls_exact_purpose.json`
+at `points[name=f3_b37_pair2_l1_endpoint].ls.surface_dofs`. The eight-term
+outer `J` was not re-scored after the walk.
 
 Purpose of nested LS: held at start; **not** held at the F3 endpoint. Residual
 weight 1000 was not enough against ι-penalty / QS / geometry terms. Un-nest
@@ -277,9 +291,10 @@ this reconstruct and is not F3 production `580217e0c`.
    requires `r=0` *and* many evals; the inner is already cheap and the fused
    process floor is large.
 3. **If nested purpose is required on a flat design:** freeze coils, C++ LS
-   Newton, gate `|Δι|` / `‖Δs‖_∞` / `‖∇J_LS‖_∞`. Fail ⇒ project (publish the
-   projected surface) or tighten the LS constraint and re-optimize. Do **not**
-   exact-polish F3 states.
+   Newton, gate `|Δι|` / `‖Δs‖_∞` / C++ `‖∇J‖₂`. Fail ⇒ project (publish the
+   projected surface — for this F3 point, the 661 dofs in the purpose JSON)
+   or tighten the LS constraint and re-optimize. Do **not** exact-polish F3
+   states.
 4. **Keep exact nested** on 21×21 (C++ or JAX `run_code`). Two software
    contracts if both modes must exist.
 
