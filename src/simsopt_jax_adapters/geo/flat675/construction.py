@@ -473,9 +473,14 @@ def build_flat675_problem(
     """Build a flat-675 problem from simsopt geometry.
 
     ``boundary`` is any simsopt surface; it is fitted onto the certified
-    661-DOF layout.  ``field`` must expose the certified coil owner layout.
-    ``vessel`` is optional: omitting it synthesizes one whose hinge term is
-    exactly inactive at the start, so the 11+3+661 layout always holds.
+    661-DOF layout.  That fit has two loss modes, both spelled out on
+    :func:`fit_flat675_boundary`: a boundary that is not stellarator-symmetric
+    is refused outright, and resolution above ``mpol = ntor = 10`` is
+    truncated.  Read them before handing this function a boundary whose shape
+    you have not checked at the certified layout.  ``field`` must expose the
+    certified coil owner layout.  ``vessel`` is optional: omitting it
+    synthesizes one whose hinge term is exactly inactive at the start, so the
+    11+3+661 layout always holds.
 
     The default policy is the campaign's frozen one; the sealed receipts speak
     to that configuration, and a caller who overrides it is running a problem

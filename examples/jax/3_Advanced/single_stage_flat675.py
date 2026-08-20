@@ -53,7 +53,10 @@ Cold start is disclosed, not claimed: the first solve in a process pays the
 full XLA compile of the fused program (~150 s in the receipt's own cold
 measurement, N=1, reported and never claimed).  The win regime is repeated or
 warm work in a process that has already compiled -- which is also why
-``--smoke`` here is dominated by compilation rather than by arithmetic.
+``--smoke`` here is dominated by compilation rather than by arithmetic.  That
+cost is not something this script can tune away; what to do about it is
+recorded once, as chartered follow-up, in
+``docs/jax_flat675_promotion_plan.md``.
 
 ``--smoke`` runs the same production lane on a deliberately small problem for
 a couple of iterations.  Its ``ok`` status means the fused lane executed and
