@@ -1,8 +1,15 @@
 """Production flat-675 single-stage optimization workflow.
 
+This is the promoted, official VMEC-free single-stage problem statement, and
+the shipped lesson that drives it is
+``examples/jax/3_Advanced/single_stage_flat675.py``.
+
 The internal workflow every flat-675 JAX caller routes through: the adapter
-layer builds the physics (objective and diagnostics closures) from a frozen
-input bundle and hands them here; the fused lane in
+layer builds the physics (objective and diagnostics closures) — from ordinary
+simsopt objects via
+:func:`~simsopt_jax_adapters.geo.flat675.build_flat675_problem`, or from the
+archived frozen input bundle, which is one caller of that same construction
+path — and hands them here; the fused lane in
 :mod:`simsopt_jax.examples.fused_lane` owns the traceable program construction
 and the solve, and this module owns the campaign's frozen optimizer selection.
 
