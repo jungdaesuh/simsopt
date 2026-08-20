@@ -8,17 +8,22 @@ private construction route — the bundle loader is one caller of
 :func:`assemble_flat675_problem` like any other.  The shipped lesson that
 drives both is ``examples/jax/3_Advanced/single_stage_flat675.py``.
 
-The layout is always 11 coil + 3 vessel + 661 surface.  "No vessel" therefore
-means "an inactive vessel term", never a 672-DOF vector: when the caller omits
-a vessel this module synthesizes one placed far enough out that the
-surface-to-vessel hinge and its gradient are exactly zero at the start.
+"675" names the certified configuration, not a constraint.  The surface
+resolution is chosen by explicit ``mpol``/``ntor``/``stellsym`` parameters
+that default to the certified triple, and the coil block is however many
+owner DOFs the coil set exposes.  The layout is never inferred from the
+boundary handed in: a caller asks for a target and the boundary is fitted
+onto it, which is what lets a refusal mean "your boundary does not fit the
+target you asked for" rather than "your boundary is wrong".
 
-Rung-1 scope (charter ``docs/jax_flat675_promotion_plan.md``): the boundary
-must be stellarator-symmetric and is fitted at the campaign resolution, and
-the coil set must be the certified owner layout.  All three restrictions are
-enforced fail-closed, and each names the rung-2 change that would lift it.
-Nothing here silently reshapes an input to make it fit: a boundary the
-certified layout cannot represent is refused, never coerced.
+The vessel block stays three DOFs.  "No vessel" means "an inactive vessel
+term", never a shorter vector: when the caller omits a vessel this module
+synthesizes one placed far enough out that the surface-to-vessel hinge and
+its gradient are exactly zero at the start.
+
+Nothing here silently reshapes an input to make it fit.  A boundary that the
+requested layout cannot represent is refused, never coerced — and the refusal
+names the parameter that would accept it.
 """
 
 from __future__ import annotations
@@ -31,8 +36,6 @@ from numpy.typing import NDArray
 from simsopt.geo import Surface, SurfaceXYZTensorFourier
 from simsopt_jax.core.specs import (
     CoilSetDofExtractionSpec,
-    CurveCWSFourierRZSpec,
-    CurveXYZFourierSpec,
     SurfaceRZFourierSpec,
     SurfaceXYZTensorFourierSpec,
     make_surface_rzfourier_spec,
@@ -42,12 +45,8 @@ from simsopt_jax.core.surface_dofs import surface_gamma_tangents_from_dofs
 from simsopt_jax.core.surface_rzfourier import surface_rz_fourier_dofs_from_spec
 
 from .boozer_material import Flat675BoozerMaterial
-from .formulation import (
-    FLAT675_COIL_DOF_COUNT,
-    FLAT675_SURFACE_DOF_COUNT,
-    Flat675Candidate,
-    Flat675ContractError,
-)
+from .formulation import Flat675Candidate, Flat675ContractError
+from .layout import CERTIFIED_FLAT_LAYOUT, FlatSingleStageLayout
 from .objective import Flat675Material
 from .policy import (
     Flat675BoozerLabelType,
@@ -56,18 +55,33 @@ from .policy import (
     Flat675ObjectivePolicy,
 )
 
-# The certified surface layout.  mpol = ntor = 10 with stellarator symmetry is
-# exactly 661 DOFs; dropping the symmetry doubles it to 1323 and the layout
-# validators refuse that, so the pair is forced at rung 1.  nfp is free.
+# The certified surface layout: mpol = ntor = 10 with stellarator symmetry,
+# which is 661 DOFs.  These are the constructor's DEFAULTS, not its limits —
+# they are the resolution the sealed receipts speak to.  nfp is free.
 CERTIFIED_MPOL: Final[int] = 10
 CERTIFIED_NTOR: Final[int] = 10
 CERTIFIED_STELLSYM: Final[bool] = True
 # The campaign's quadrature: a half field period in phi, a full period in
-# theta.  Callers may resample, but this is the resolution the receipts speak
-# to and the default the constructor uses.
+# theta.
 CERTIFIED_NPHI: Final[int] = 255
 CERTIFIED_NTHETA: Final[int] = 64
 CERTIFIED_SURFACE_RANGE: Final[str] = "half period"
+
+# The phi range whose grid mean equals the whole-torus mean at each symmetry.
+# Every surface integral in this formulation — the Boozer residual, the label,
+# the non-QS ratio — is a mean over the supplied quadrature, so the range is
+# not a resolution knob: it is the assumption that the sampled patch stands
+# for the torus.  A stellarator-symmetric boundary is represented by a half
+# field period; an asymmetric one is not, and needs a full field period.  Both
+# tile the torus exactly, so both means are the torus mean.
+STELLSYM_SURFACE_RANGE: Final[str] = "half period"
+ASYMMETRIC_SURFACE_RANGE: Final[str] = "field period"
+
+
+def surface_quadrature_range(*, stellsym: bool) -> str:
+    """The phi range a boundary of this symmetry must be sampled over."""
+    return STELLSYM_SURFACE_RANGE if stellsym else ASYMMETRIC_SURFACE_RANGE
+
 
 # The synthesized vessel sits this many hinge thresholds outside the boundary's
 # own extent.  Any factor above one leaves the hinge exactly inactive; the
@@ -75,25 +89,19 @@ CERTIFIED_SURFACE_RANGE: Final[str] = "half period"
 # start.
 DEFAULT_VESSEL_CLEARANCE_FACTOR: Final[float] = 3.0
 
-_RUNG_TWO_SURFACE_MESSAGE: Final[str] = (
-    "Rung 1 fits onto the stellarator-symmetric 661-DOF layout, so a boundary "
-    "that is not stellarator-symmetric cannot be represented: its rs/zc "
-    "content has no home in the target layout at any resolution, and "
-    "returning the symmetrized shape would silently change the plasma. If the "
-    "boundary is in fact symmetric and only its flag says otherwise, rebuild "
-    "it with stellsym=True. Carrying genuine asymmetry through the "
-    "formulation is the rung-2 chartered change in "
-    "docs/jax_flat675_promotion_plan.md, reported rather than attempted."
-)
-
-_RUNG_TWO_COIL_MESSAGE: Final[str] = (
-    "Rung 1 accepts only the certified coil owner layout: one free current at "
-    "owner DOF 0, a CurveCWSFourierRZ family carrying owner DOFs 1-10, and "
-    "fixed CurveXYZFourier TF coils with empty owner maps. Generic coil sets "
-    "(for example create_equally_spaced_curves with per-coil Current objects) "
-    "cannot satisfy the 11-owner validator. Relaxing it is the rung-2 "
-    "chartered change in docs/jax_flat675_promotion_plan.md, reported rather "
-    "than attempted."
+# The refusal survives generality: an asymmetric boundary aimed at a
+# stellarator-symmetric target is a projection onto a proper subspace, and
+# returning the symmetrized shape would silently change the plasma.  What
+# changed is the remedy the message names — the formulation now carries
+# asymmetry, so the caller asks for it rather than waiting for a charter.
+_ASYMMETRIC_BOUNDARY_REFUSAL: Final[str] = (
+    "this boundary is not stellarator-symmetric, and a stellarator-symmetric "
+    "layout was requested (stellsym=True). Its rs/zc content has no "
+    "representation in that layout at any resolution, so fitting anyway would "
+    "return a different plasma shape under your own variable name. Pass "
+    "stellsym=False to build the problem on the asymmetric layout instead; if "
+    "the boundary is in fact symmetric and only its flag says otherwise, "
+    "rebuild it with stellsym=True."
 )
 
 
@@ -181,51 +189,60 @@ def default_flat675_objective_policy(
 def fit_flat675_boundary(
     boundary: Surface,
     *,
+    mpol: int = CERTIFIED_MPOL,
+    ntor: int = CERTIFIED_NTOR,
+    stellsym: bool = CERTIFIED_STELLSYM,
     nphi: int = CERTIFIED_NPHI,
     ntheta: int = CERTIFIED_NTHETA,
 ) -> SurfaceXYZTensorFourierSpec:
-    """Fit a boundary onto the certified 661-DOF surface layout.
+    """Fit a boundary onto the requested tensor-Fourier surface layout.
 
-    The fit is simsopt's own ``least_squares_fit`` against the boundary's
-    surface points sampled on the certified quadrature, so the result is the
-    boundary this repo's surface machinery would produce, not a reimplemented
-    projection.
+    The target is chosen by ``mpol``, ``ntor`` and ``stellsym``, which default
+    to the certified triple.  It is never inferred from ``boundary``: the
+    caller says what layout the problem is posed on, and this function reports
+    whether the boundary fits it.  The fit itself is simsopt's own
+    ``least_squares_fit`` against the boundary's surface points sampled on the
+    target's quadrature, so the result is the boundary this repo's surface
+    machinery would produce, not a reimplemented projection.
 
-    Two things the caller must know, because a fit onto a fixed layout cannot
-    be lossless in general:
+    The phi range follows the requested symmetry
+    (:func:`surface_quadrature_range`), because the formulation's integrals
+    are means over the supplied grid and only a range that tiles the torus
+    makes that mean the torus mean.
 
-    * **Stellarator symmetry is required, not imposed.**  The target layout is
-      stellarator-symmetric, so a boundary carrying ``rs``/``zc`` content has
-      no representation in it at any resolution.  Such a boundary is refused
-      rather than symmetrized: quietly dropping that content would return a
-      different plasma shape under the caller's own variable name.
-    * **Poloidal and toroidal resolution above the certified layout is
-      truncated**, and that is the documented meaning of "fit".  Unlike the
-      symmetry case this is an approximation *within* the target layout — it
-      converges to the boundary as the layout's resolution grows, and the
-      layout in question is stated here (``mpol = ntor = 10``).  A boundary
-      with content above those modes comes back smoothed; measure the
-      deviation if it matters to the study.
+    Two loss modes, unchanged in kind by generality:
+
+    * **Symmetry is required of the boundary, never imposed on it.**  A
+      boundary carrying ``rs``/``zc`` content has no representation in a
+      stellarator-symmetric target at any resolution, so it is refused rather
+      than symmetrized.  The refusal names ``stellsym=False``, which builds
+      the problem on the asymmetric layout and keeps that content.
+    * **Resolution above the target is truncated**, and that is the documented
+      meaning of "fit".  Unlike the symmetry case this is an approximation
+      *within* the target — it converges to the boundary as ``mpol``/``ntor``
+      grow, and the target is the caller's own argument.  A boundary with
+      content above those modes comes back smoothed; measure the deviation if
+      it matters to the study.
     """
     if not isinstance(boundary, Surface):
         raise Flat675ContractError(
             f"boundary must be a simsopt Surface; got {type(boundary).__name__}."
         )
     source = boundary.to_RZFourier()
-    if not source.stellsym:
-        raise Flat675ContractError(_RUNG_TWO_SURFACE_MESSAGE)
+    if stellsym and not source.stellsym:
+        raise Flat675ContractError(_ASYMMETRIC_BOUNDARY_REFUSAL)
     nfp = int(boundary.nfp)
     quadpoints = Surface.get_quadpoints(
         nfp=nfp,
-        range=CERTIFIED_SURFACE_RANGE,
+        range=surface_quadrature_range(stellsym=bool(stellsym)),
         nphi=int(nphi),
         ntheta=int(ntheta),
     )
     fitted = SurfaceXYZTensorFourier(
-        mpol=CERTIFIED_MPOL,
-        ntor=CERTIFIED_NTOR,
+        mpol=int(mpol),
+        ntor=int(ntor),
         nfp=nfp,
-        stellsym=CERTIFIED_STELLSYM,
+        stellsym=bool(stellsym),
         quadpoints_phi=quadpoints[0],
         quadpoints_theta=quadpoints[1],
     )
@@ -239,99 +256,96 @@ def fit_flat675_boundary(
     )
     resampled.x = source.x
     fitted.least_squares_fit(resampled.gamma())
-    # The width is not re-asserted here: ``fitted`` is built two statements
-    # above at the certified mpol/ntor/stellsym, so its DOF count is fixed by
-    # construction.  The material checks the 661 it actually depends on.
     dofs = np.asarray(fitted.get_dofs(), dtype=np.float64)
     return make_surface_xyz_tensor_fourier_spec(
         dofs=dofs,
         quadpoints_phi=np.asarray(fitted.quadpoints_phi, dtype=np.float64),
         quadpoints_theta=np.asarray(fitted.quadpoints_theta, dtype=np.float64),
         nfp=nfp,
-        stellsym=CERTIFIED_STELLSYM,
-        mpol=CERTIFIED_MPOL,
-        ntor=CERTIFIED_NTOR,
+        stellsym=bool(stellsym),
+        mpol=int(mpol),
+        ntor=int(ntor),
     )
 
 
-def require_certified_surface_layout(
-    surface_template: SurfaceXYZTensorFourierSpec,
-) -> None:
-    """Refuse a surface that is not the certified 661-DOF layout."""
-    if (
-        surface_template.mpol != CERTIFIED_MPOL
-        or surface_template.ntor != CERTIFIED_NTOR
-    ):
-        raise Flat675ContractError(
-            f"rung 1 forces mpol=ntor={CERTIFIED_MPOL}; got "
-            f"mpol={surface_template.mpol}, ntor={surface_template.ntor}. "
-            "Arbitrary resolutions are the rung-2 chartered change."
-        )
-    if not surface_template.stellsym:
-        raise Flat675ContractError(
-            "rung 1 forces stellsym=True: a non-symmetric surface at "
-            f"mpol=ntor={CERTIFIED_MPOL} carries 1323 DOFs, and the flat-675 "
-            f"layout validators require exactly {FLAT675_SURFACE_DOF_COUNT}."
-        )
-
-
 # --------------------------------------------------------------------------
-# Coils: the certified owner layout, or a named refusal
+# Coils: any contiguous owner map
 # --------------------------------------------------------------------------
 
 
-def require_certified_coil_layout(
-    extraction: CoilSetDofExtractionSpec,
-) -> int:
-    """Refuse anything but the certified owner layout; return the free index.
+def coil_owner_dof_count(extraction: CoilSetDofExtractionSpec) -> int:
+    """Return the coil block's width; refuse a map that is not contiguous.
 
-    The returned index is the first free winding-surface coil, which is the
-    coil the length and curvature penalties are written against.
+    The formulation's only requirement on a coil set is that its owner DOFs
+    are exactly ``0 .. N-1`` with nothing missing and nothing claimed twice
+    over — that is what makes a contiguous coil block meaningful.  Owner
+    count, per-segment widths and curve family are all free: a
+    curve-on-winding-surface family sharing one current, a set of plain
+    ``CurveXYZFourier`` curves with a ``Current`` each, or any mixture the
+    field machinery can evaluate.
+
+    A gap or an out-of-range index is refused because it would silently
+    change which coordinate drives which coil, which is a different problem
+    wearing the same shape.
     """
     if not isinstance(extraction, CoilSetDofExtractionSpec):
         raise Flat675ContractError(
             "coil extraction must be a CoilSetDofExtractionSpec; got "
             f"{type(extraction).__name__}."
         )
-    free_indices: list[int] = []
-    expected_curve_map = tuple(
-        (owner, owner + 1, owner - 1, owner)
-        for owner in range(1, FLAT675_COIL_DOF_COUNT)
-    )
+    owners: set[int] = set()
     for index, coil in enumerate(extraction.coils):
-        curve_segments = tuple(coil.curve_map.owner_segments)
-        current_segments = tuple(coil.current_map.owner_segments)
-        if isinstance(coil.curve, CurveXYZFourierSpec):
-            if curve_segments or current_segments:
-                raise Flat675ContractError(
-                    f"coil {index} is a CurveXYZFourier TF coil but claims owner "
-                    f"DOFs (curve={curve_segments}, current={current_segments}); "
-                    "the certified layout fixes them. " + _RUNG_TWO_COIL_MESSAGE
-                )
-            continue
-        if not isinstance(coil.curve, CurveCWSFourierRZSpec):
-            raise Flat675ContractError(
-                f"coil {index} has curve type {type(coil.curve).__name__}. "
-                + _RUNG_TWO_COIL_MESSAGE
-            )
-        if curve_segments != expected_curve_map:
-            raise Flat675ContractError(
-                f"coil {index} does not carry owner DOFs 1-"
-                f"{FLAT675_COIL_DOF_COUNT - 1} contiguously; got "
-                f"{curve_segments}. " + _RUNG_TWO_COIL_MESSAGE
-            )
-        if current_segments != ((0, 1, 0, 1),):
-            raise Flat675ContractError(
-                f"coil {index} does not share the single free current at owner "
-                f"DOF 0; got {current_segments}. " + _RUNG_TWO_COIL_MESSAGE
-            )
-        free_indices.append(index)
-    if not free_indices:
+        for mapping in (coil.curve_map, coil.current_map, coil.surface_map):
+            if mapping is None:
+                continue
+            for segment in mapping.owner_segments:
+                owner_start, owner_end, target_start, target_end = segment
+                if (
+                    owner_start < 0
+                    or owner_end < owner_start
+                    or target_start < 0
+                    or target_end < target_start
+                    or owner_end - owner_start != target_end - target_start
+                ):
+                    raise Flat675ContractError(
+                        f"coil {index} carries a malformed owner segment "
+                        f"{segment}: owner and target spans must be "
+                        "non-negative and equal in length."
+                    )
+                owners.update(range(owner_start, owner_end))
+    if not owners:
         raise Flat675ContractError(
-            "the coil set declares no free winding-surface coil. "
-            + _RUNG_TWO_COIL_MESSAGE
+            "the coil set claims no owner DOFs, so it has nothing to "
+            "optimize. At least one coil must expose a free curve or current."
         )
-    return free_indices[0]
+    owner_count = max(owners) + 1
+    missing = sorted(frozenset(range(owner_count)) - owners)
+    if missing:
+        raise Flat675ContractError(
+            f"the coil owner map must cover 0..{owner_count - 1} contiguously; "
+            f"it claims {owner_count} as its highest owner DOF but never "
+            f"claims {missing}. A gap means some coordinate of the coil block "
+            "drives nothing."
+        )
+    return owner_count
+
+
+def default_optimized_coil_index(extraction: CoilSetDofExtractionSpec) -> int:
+    """The first coil that owns any DOF — the one the shape penalties address.
+
+    The length and curvature penalties are written against a single coil.
+    Fixed coils (empty owner maps) are skipped because a penalty on a coil
+    nothing can move is a constant, and a constant in the objective is a
+    silent way to make a gate look satisfied.
+    """
+    for index, coil in enumerate(extraction.coils):
+        for mapping in (coil.curve_map, coil.current_map, coil.surface_map):
+            if mapping is not None and tuple(mapping.owner_segments):
+                return index
+    raise Flat675ContractError(
+        "the coil set declares no free coil, so no coil can carry the length "
+        "and curvature penalties."
+    )
 
 
 # --------------------------------------------------------------------------
@@ -408,16 +422,19 @@ def assemble_flat675_problem(
     boozer_policy: Flat675BoozerSystemPolicy,
     nphi: int,
     ntheta: int,
+    layout: FlatSingleStageLayout = CERTIFIED_FLAT_LAYOUT,
 ) -> Flat675Problem:
     """Bind validated material and policy into an evaluable problem.
 
     The start candidate is derived from the same specs the material is built
     from, so a problem cannot carry a start that disagrees with its own
-    geometry.  ``coil_dofs`` must already be float64; this is the one place
-    every caller's coil block passes through, so it is where the port's fp64
+    geometry.  ``layout`` says which block widths this problem has and
+    defaults to the certified one; the material refuses a surface template
+    whose resolution is not the layout's, so the two cannot drift apart.
+    ``coil_dofs`` must already be float64; this is the one place every
+    caller's coil block passes through, so it is where the port's fp64
     contract is enforced.
     """
-    require_certified_surface_layout(surface_template)
     boozer = Flat675BoozerMaterial(
         surface_template=surface_template,
         coil_dof_extraction=coil_dof_extraction,
@@ -426,12 +443,13 @@ def assemble_flat675_problem(
         nfp=surface_template.nfp,
         nphi=int(nphi),
         ntheta=int(ntheta),
+        layout=layout,
     )
     material = Flat675Material(boozer=boozer, vessel_template=vessel_template)
     coil_block = np.asarray(coil_dofs)
-    if coil_block.shape != (FLAT675_COIL_DOF_COUNT,):
+    if coil_block.shape != (layout.coil_dof_count,):
         raise Flat675ContractError(
-            f"the coil block must carry exactly {FLAT675_COIL_DOF_COUNT} owner "
+            f"the coil block must carry exactly {layout.coil_dof_count} owner "
             f"DOFs; got {coil_block.shape}."
         )
     # Refused rather than promoted: a single-precision block reaching here is a
@@ -455,6 +473,7 @@ def assemble_flat675_problem(
             surface_coordinates=tuple(
                 np.asarray(surface_template.dofs, dtype=np.float64).tolist()
             ),
+            layout=layout,
         ),
     )
 
@@ -464,33 +483,54 @@ def build_flat675_problem(
     boundary: Surface,
     field: CoilDofExtractionProvider,
     vessel: SurfaceRZFourierSpec | None = None,
+    mpol: int = CERTIFIED_MPOL,
+    ntor: int = CERTIFIED_NTOR,
+    stellsym: bool = CERTIFIED_STELLSYM,
     nphi: int = CERTIFIED_NPHI,
     ntheta: int = CERTIFIED_NTHETA,
     objective_policy: Flat675ObjectivePolicy | None = None,
     boozer_policy: Flat675BoozerSystemPolicy | None = None,
     vessel_clearance_factor: float = DEFAULT_VESSEL_CLEARANCE_FACTOR,
 ) -> Flat675Problem:
-    """Build a flat-675 problem from simsopt geometry.
+    """Build a flat coupled single-stage problem from simsopt geometry.
 
-    ``boundary`` is any simsopt surface; it is fitted onto the certified
-    661-DOF layout.  That fit has two loss modes, both spelled out on
-    :func:`fit_flat675_boundary`: a boundary that is not stellarator-symmetric
-    is refused outright, and resolution above ``mpol = ntor = 10`` is
-    truncated.  Read them before handing this function a boundary whose shape
-    you have not checked at the certified layout.  ``field`` must expose the
-    certified coil owner layout.  ``vessel`` is optional: omitting it
-    synthesizes one whose hinge term is exactly inactive at the start, so the
-    11+3+661 layout always holds.
+    The surface layout is REQUESTED, not inferred: ``mpol``, ``ntor`` and
+    ``stellsym`` name the target and default to the certified triple
+    ``(10, 10, True)``, which is the 661-DOF boundary block the sealed
+    receipts speak to.  ``boundary`` is then fitted onto that target — see
+    :func:`fit_flat675_boundary` for the two ways a fit can lose information,
+    and read them before handing this function a boundary whose shape you have
+    not checked at the layout you asked for.
 
-    The default policy is the campaign's frozen one; the sealed receipts speak
-    to that configuration, and a caller who overrides it is running a problem
-    those receipts do not certify.
+    ``field`` may expose any coil set whose owner DOFs cover ``0 .. N-1``
+    contiguously; ``N`` becomes the coil block's width.  ``vessel`` is
+    optional: omitting it synthesizes one whose hinge term is exactly inactive
+    at the start, so the coil + 3 + surface layout always holds.
+
+    The default policy is the campaign's frozen one, with its shape penalties
+    pointed at the first free coil.  The sealed receipts speak to that
+    configuration at the certified layout; a caller who changes either is
+    running a problem those receipts do not certify.
     """
-    surface_template = fit_flat675_boundary(boundary, nphi=nphi, ntheta=ntheta)
+    surface_template = fit_flat675_boundary(
+        boundary,
+        mpol=mpol,
+        ntor=ntor,
+        stellsym=stellsym,
+        nphi=nphi,
+        ntheta=ntheta,
+    )
     extraction = field.coil_dof_extraction_spec()
-    free_coil_index = require_certified_coil_layout(extraction)
+    layout = FlatSingleStageLayout(
+        coil_dof_count=coil_owner_dof_count(extraction),
+        surface_mpol=int(mpol),
+        surface_ntor=int(ntor),
+        surface_stellsym=bool(stellsym),
+    )
     policy = (
-        default_flat675_objective_policy(optimized_coil_index=free_coil_index)
+        default_flat675_objective_policy(
+            optimized_coil_index=default_optimized_coil_index(extraction)
+        )
         if objective_policy is None
         else objective_policy
     )
@@ -514,10 +554,12 @@ def build_flat675_problem(
         ),
         nphi=int(nphi),
         ntheta=int(ntheta),
+        layout=layout,
     )
 
 
 __all__ = [
+    "ASYMMETRIC_SURFACE_RANGE",
     "CERTIFIED_MPOL",
     "CERTIFIED_NPHI",
     "CERTIFIED_NTHETA",
@@ -526,13 +568,15 @@ __all__ = [
     "CERTIFIED_SURFACE_RANGE",
     "DEFAULT_FLAT675_BOOZER_POLICY",
     "DEFAULT_VESSEL_CLEARANCE_FACTOR",
+    "STELLSYM_SURFACE_RANGE",
     "CoilDofExtractionProvider",
     "Flat675Problem",
     "assemble_flat675_problem",
     "build_flat675_problem",
+    "coil_owner_dof_count",
     "default_flat675_objective_policy",
+    "default_optimized_coil_index",
     "fit_flat675_boundary",
-    "require_certified_coil_layout",
-    "require_certified_surface_layout",
+    "surface_quadrature_range",
     "synthesize_flat675_vessel",
 ]

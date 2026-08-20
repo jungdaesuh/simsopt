@@ -11,7 +11,7 @@ The synthetic problem is deliberately coarse (16x16 quadrature, order-2
 curves).  Nothing here asserts a physics value — the numbers a physicist
 would check live in the archived certificate.  What is asserted is the
 contract: the layout the constructor must always produce, the vessel branch's
-exact inactivity, and each refusal that keeps rung-1 scope honest.
+exact inactivity, and each refusal that survives generality.
 """
 
 from __future__ import annotations
@@ -36,14 +36,13 @@ from simsopt_jax.core.specs import (
     make_curve_cwsfourier_rz_spec,
     make_curve_xyzfourier_spec,
     make_optimizable_dof_map_spec,
-    make_oriented_curve_xyzfourier_spec,
     make_surface_rzfourier_spec,
-    make_surface_xyz_tensor_fourier_spec,
 )
 from simsopt_jax.core.surface_dofs import surface_gamma_tangents_from_dofs
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.geo import CurveCWSFourier
 from simsopt_jax_adapters.geo.flat675 import (
+    ASYMMETRIC_SURFACE_RANGE,
     CERTIFIED_MPOL,
     CERTIFIED_NPHI,
     CERTIFIED_NTHETA,
@@ -58,18 +57,21 @@ from simsopt_jax_adapters.geo.flat675 import (
     FLAT675_SURFACE_DOF_COUNT,
     FLAT675_VESSEL_DOF_COUNT,
     FLAT675_VESSEL_SLICE,
+    STELLSYM_SURFACE_RANGE,
     Flat675Bundle,
     Flat675ContractError,
     Flat675Problem,
     assemble_flat675_problem,
     bind_flat675_programs,
     build_flat675_problem,
+    coil_owner_dof_count,
     default_flat675_objective_policy,
+    default_optimized_coil_index,
     fit_flat675_boundary,
     flat675_objective,
     flat675_weighted_terms,
-    require_certified_coil_layout,
-    require_certified_surface_layout,
+    surface_block_dof_count,
+    surface_quadrature_range,
     synthesize_flat675_vessel,
 )
 
@@ -483,9 +485,10 @@ def _asymmetric_boundary(*, rs: float, zc: float) -> SurfaceRZFourier:
 def test_fit_refuses_a_boundary_that_is_not_stellarator_symmetric() -> None:
     """Refused, not symmetrized — the coercion this repo bans.
 
-    The rs/zc content has no representation in the stellarator-symmetric
-    target layout at any resolution, so fitting anyway would hand back a
-    different plasma shape under the caller's own variable name.
+    The rs/zc content has no representation in a stellarator-symmetric target
+    at any resolution, so fitting anyway would hand back a different plasma
+    shape under the caller's own variable name.  The refusal survives rung-2
+    generality; what changed is the remedy it names.
     """
     with pytest.raises(Flat675ContractError) as excinfo:
         fit_flat675_boundary(
@@ -495,8 +498,10 @@ def test_fit_refuses_a_boundary_that_is_not_stellarator_symmetric() -> None:
         )
 
     message = str(excinfo.value)
-    assert "not stellarator-symmetric cannot be represented" in message
-    assert "jax_flat675_promotion_plan.md" in message
+    assert "not stellarator-symmetric" in message
+    assert "stellsym=False" in message
+    # The message must not defer to a charter that no longer owns the change.
+    assert "rung" not in message.lower()
 
 
 def test_fit_refuses_an_asymmetric_flag_even_with_no_asymmetric_content() -> None:
@@ -510,6 +515,7 @@ def test_fit_refuses_an_asymmetric_flag_even_with_no_asymmetric_content() -> Non
     with pytest.raises(Flat675ContractError, match="rebuild it with stellsym=True"):
         fit_flat675_boundary(
             _asymmetric_boundary(rs=0.0, zc=0.0),
+            stellsym=True,
             nphi=_QUADRATURE,
             ntheta=_QUADRATURE,
         )
@@ -517,10 +523,11 @@ def test_fit_refuses_an_asymmetric_flag_even_with_no_asymmetric_content() -> Non
 
 def test_fit_refuses_asymmetry_before_the_constructor_can_use_it() -> None:
     """The refusal holds at the front door, not only in the fit helper."""
-    with pytest.raises(Flat675ContractError, match="not stellarator-symmetric"):
+    with pytest.raises(Flat675ContractError, match="stellsym=False"):
         build_flat675_problem(
             boundary=_asymmetric_boundary(rs=0.02, zc=0.015),
             field=_field(),
+            stellsym=True,
             nphi=_QUADRATURE,
             ntheta=_QUADRATURE,
         )
@@ -579,62 +586,84 @@ def test_certified_quadrature_defaults_are_the_campaign_resolution() -> None:
     assert CERTIFIED_SURFACE_RANGE == "half period"
 
 
-# --- the surface layout validator ------------------------------------------
+# --- the surface layout is requested, not inferred --------------------------
 
 
-def test_surface_validator_accepts_constructor_output() -> None:
-    """The control: without it a validator that refuses everything would pass."""
-    require_certified_surface_layout(_fitted_boundary())
+def test_quadrature_range_follows_the_requested_symmetry() -> None:
+    """The range is the assumption that the sampled patch stands for the torus.
+
+    Every surface integral in this formulation is a mean over the supplied
+    grid, so only a phi range that tiles the torus makes that mean the torus
+    mean.  A stellarator-symmetric boundary is tiled by a half field period;
+    an asymmetric one is not, and needs the full period.
+    """
+    assert surface_quadrature_range(stellsym=True) == STELLSYM_SURFACE_RANGE
+    assert surface_quadrature_range(stellsym=False) == ASYMMETRIC_SURFACE_RANGE
+    assert STELLSYM_SURFACE_RANGE == "half period"
+    assert ASYMMETRIC_SURFACE_RANGE == "field period"
+    # The certified configuration is the symmetric one, so its range is that.
+    assert CERTIFIED_SURFACE_RANGE == STELLSYM_SURFACE_RANGE
 
 
-def _surface_at(*, mpol: int, ntor: int, stellsym: bool) -> SurfaceXYZTensorFourierSpec:
-    """The fitted boundary re-declared at another layout."""
-    fitted = _fitted_boundary()
-    return make_surface_xyz_tensor_fourier_spec(
-        dofs=fitted.dofs,
-        quadpoints_phi=fitted.quadpoints_phi,
-        quadpoints_theta=fitted.quadpoints_theta,
-        nfp=fitted.nfp,
-        stellsym=stellsym,
-        mpol=mpol,
-        ntor=ntor,
+@pytest.mark.parametrize(("mpol", "ntor"), [(4, 4), (6, 2), (10, 10)])
+def test_fit_targets_the_requested_resolution(mpol: int, ntor: int) -> None:
+    """The target is the caller's argument, never read off the boundary."""
+    fitted = fit_flat675_boundary(
+        _boundary(), mpol=mpol, ntor=ntor, nphi=_QUADRATURE, ntheta=_QUADRATURE
+    )
+
+    assert (fitted.mpol, fitted.ntor) == (mpol, ntor)
+    assert fitted.dofs.shape == (
+        surface_block_dof_count(mpol=mpol, ntor=ntor, stellsym=True),
     )
 
 
-@pytest.mark.parametrize(
-    ("mpol", "ntor"),
-    [(8, CERTIFIED_NTOR), (CERTIFIED_MPOL, 8)],
-)
-def test_surface_validator_refuses_another_resolution(mpol: int, ntor: int) -> None:
-    relabelled = _surface_at(mpol=mpol, ntor=ntor, stellsym=CERTIFIED_STELLSYM)
+def test_fit_defaults_to_the_certified_triple() -> None:
+    """A caller who names no layout gets the configuration the receipts speak."""
+    fitted = fit_flat675_boundary(_boundary(), nphi=_QUADRATURE, ntheta=_QUADRATURE)
 
-    with pytest.raises(Flat675ContractError, match="rung 1 forces mpol=ntor"):
-        require_certified_surface_layout(relabelled)
-
-
-def test_surface_validator_refuses_a_non_symmetric_surface() -> None:
-    """stellsym=False is 1323 DOFs; the layout validators require 661."""
-    asymmetric = _surface_at(mpol=CERTIFIED_MPOL, ntor=CERTIFIED_NTOR, stellsym=False)
-
-    with pytest.raises(Flat675ContractError, match="rung 1 forces stellsym=True"):
-        require_certified_surface_layout(asymmetric)
+    assert (fitted.mpol, fitted.ntor, bool(fitted.stellsym)) == (
+        CERTIFIED_MPOL,
+        CERTIFIED_NTOR,
+        CERTIFIED_STELLSYM,
+    )
+    assert fitted.dofs.shape == (FLAT675_SURFACE_DOF_COUNT,)
 
 
-# --- the coil layout validator (rung-1 scope) -------------------------------
+def test_fit_builds_the_asymmetric_layout_when_it_is_asked_to() -> None:
+    """stellsym=False is now a layout the formulation carries, not a refusal."""
+    fitted = fit_flat675_boundary(
+        _asymmetric_boundary(rs=0.02, zc=0.015),
+        mpol=4,
+        ntor=4,
+        stellsym=False,
+        nphi=_QUADRATURE,
+        ntheta=_QUADRATURE,
+    )
+
+    assert bool(fitted.stellsym) is False
+    assert fitted.dofs.shape == (
+        surface_block_dof_count(mpol=4, ntor=4, stellsym=False),
+    )
 
 
-def test_coil_validator_accepts_the_certified_layout() -> None:
-    """Control, and the source of the free-coil index the policy is built on."""
+# --- the coil owner map: any contiguous cover -------------------------------
+
+
+def test_certified_coil_set_reports_its_own_owner_width() -> None:
+    """The control, and the source of the index the default policy uses."""
     extraction = _field().coil_dof_extraction_spec()
 
-    assert require_certified_coil_layout(extraction) == _EXPECTED_FREE_COIL_INDEX
+    assert coil_owner_dof_count(extraction) == FLAT675_COIL_DOF_COUNT
+    assert default_optimized_coil_index(extraction) == _EXPECTED_FREE_COIL_INDEX
 
 
-def test_coil_validator_refuses_a_generic_coil_set() -> None:
-    """Rung 1 does not accept ``create_equally_spaced_curves`` + ``Current``.
+def test_generic_coil_sets_are_accepted() -> None:
+    """The case rung 1 refused: plain curves, one Current each.
 
-    This is the refusal a user meets first, so it must name the rung-2 change
-    rather than merely reporting a shape mismatch.
+    ``create_equally_spaced_curves`` + ``Current`` produces per-coil owner
+    segments of arbitrary width — the layout the old validator could not
+    express.  It is now simply a coil block of whatever width it covers.
     """
     curves = create_equally_spaced_curves(
         3, _NFP, stellsym=True, R0=1.0, R1=0.5, order=3
@@ -642,101 +671,54 @@ def test_coil_validator_refuses_a_generic_coil_set() -> None:
     field = BiotSavartJAX(
         coils_via_symmetries(curves, [Current(1.0e5) for _ in curves], _NFP, True)
     )
+    extraction = field.coil_dof_extraction_spec()
 
-    with pytest.raises(Flat675ContractError) as excinfo:
-        require_certified_coil_layout(field.coil_dof_extraction_spec())
-
-    message = str(excinfo.value)
-    assert "Rung 1 accepts only the certified coil owner layout" in message
-    assert "jax_flat675_promotion_plan.md" in message
+    owner_count = coil_owner_dof_count(extraction)
+    assert owner_count == len(np.asarray(field.x))
+    assert default_optimized_coil_index(extraction) == 0
 
 
-def test_coil_validator_refuses_a_tf_coil_that_claims_owner_dofs() -> None:
-    """The certified layout fixes the TF coils; a free one is a different problem."""
+def test_coil_owner_map_refuses_a_gap() -> None:
+    """A gap means some coil coordinate drives nothing."""
     extraction = _coil_set(
-        curve=_xyz_curve_spec(),
-        curve_segments=((0, _CURVE_DOF_COUNT, 0, _CURVE_DOF_COUNT),),
+        curve=_cws_curve_spec(),
+        curve_segments=((0, 2, 0, 2), (3, 5, 2, 4)),
         current_segments=(),
     )
 
-    with pytest.raises(Flat675ContractError, match="claims owner DOFs"):
-        require_certified_coil_layout(extraction)
+    with pytest.raises(Flat675ContractError, match=r"never claims \[2\]"):
+        coil_owner_dof_count(extraction)
 
 
-def test_coil_validator_accepts_a_minimal_certified_set() -> None:
-    """The narrowest set the validator may accept: one free CWS coil."""
+def test_coil_owner_map_refuses_a_malformed_segment() -> None:
+    """Owner and target spans must be non-negative and equal in length."""
     extraction = _coil_set(
         curve=_cws_curve_spec(),
-        curve_segments=_CERTIFIED_CURVE_SEGMENTS,
-        current_segments=_CERTIFIED_CURRENT_SEGMENTS,
-    )
-
-    assert require_certified_coil_layout(extraction) == 0
-
-
-def test_coil_validator_refuses_an_unsupported_curve_type() -> None:
-    """Neither a fixed TF curve nor a curve-on-winding-surface."""
-    extraction = _coil_set(
-        curve=make_oriented_curve_xyzfourier_spec(
-            dofs=np.zeros(_CURVE_DOF_COUNT, dtype=np.float64),
-            quadpoints=_grid(4),
-            order=_CURVE_ORDER,
-        ),
-        curve_segments=_CERTIFIED_CURVE_SEGMENTS,
-        current_segments=_CERTIFIED_CURRENT_SEGMENTS,
-    )
-
-    with pytest.raises(
-        Flat675ContractError, match="has curve type OrientedCurveXYZFourierSpec"
-    ):
-        require_certified_coil_layout(extraction)
-
-
-def test_coil_validator_refuses_a_set_with_no_free_coil() -> None:
-    """Fixed TF coils alone are a field, not an optimizable coil set."""
-    extraction = _coil_set(
-        curve=_xyz_curve_spec(),
-        curve_segments=(),
+        curve_segments=((0, 4, 0, 2),),
         current_segments=(),
     )
 
-    with pytest.raises(
-        Flat675ContractError, match="declares no free winding-surface coil"
-    ):
-        require_certified_coil_layout(extraction)
+    with pytest.raises(Flat675ContractError, match="malformed owner segment"):
+        coil_owner_dof_count(extraction)
 
 
-def test_coil_validator_refuses_a_non_contiguous_owner_map() -> None:
+def test_coil_owner_map_refuses_a_set_that_owns_nothing() -> None:
+    """All-fixed coils are a field, not an optimizable coil set."""
     extraction = _coil_set(
-        curve=_cws_curve_spec(),
-        curve_segments=((1, 2, 0, 1), (3, 4, 1, 2)),
-        current_segments=_CERTIFIED_CURRENT_SEGMENTS,
+        curve=_xyz_curve_spec(), curve_segments=(), current_segments=()
     )
 
-    with pytest.raises(
-        Flat675ContractError, match="does not carry owner DOFs 1-10 contiguously"
-    ):
-        require_certified_coil_layout(extraction)
+    with pytest.raises(Flat675ContractError, match="claims no owner DOFs"):
+        coil_owner_dof_count(extraction)
+    with pytest.raises(Flat675ContractError, match="declares no free coil"):
+        default_optimized_coil_index(extraction)
 
 
-def test_coil_validator_refuses_a_current_that_is_not_the_shared_free_one() -> None:
-    extraction = _coil_set(
-        curve=_cws_curve_spec(),
-        curve_segments=_CERTIFIED_CURVE_SEGMENTS,
-        current_segments=((5, 6, 0, 1),),
-    )
-
-    with pytest.raises(
-        Flat675ContractError, match="does not share the single free current"
-    ):
-        require_certified_coil_layout(extraction)
-
-
-def test_coil_validator_refuses_something_that_is_not_an_extraction_spec() -> None:
+def test_coil_owner_map_refuses_something_that_is_not_an_extraction_spec() -> None:
     with pytest.raises(
         Flat675ContractError, match="must be a CoilSetDofExtractionSpec"
     ):
-        require_certified_coil_layout(object())  # type: ignore[arg-type]
+        coil_owner_dof_count(object())  # type: ignore[arg-type]
 
 
 # --- assembly and policy defaults ------------------------------------------
@@ -850,7 +832,7 @@ def test_the_constructor_is_a_caller_of_the_shared_assembly() -> None:
     field = _field()
     extraction = field.coil_dof_extraction_spec()
     policy = default_flat675_objective_policy(
-        optimized_coil_index=require_certified_coil_layout(extraction)
+        optimized_coil_index=default_optimized_coil_index(extraction)
     )
     assembled = assemble_flat675_problem(
         surface_template=surface,
