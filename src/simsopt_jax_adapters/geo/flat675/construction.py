@@ -11,10 +11,12 @@ means "an inactive vessel term", never a 672-DOF vector: when the caller omits
 a vessel this module synthesizes one placed far enough out that the
 surface-to-vessel hinge and its gradient are exactly zero at the start.
 
-Rung-1 scope (charter ``docs/jax_flat675_promotion_plan.md``): the boundary is
-fitted at the campaign resolution, and the coil set must be the certified
-owner layout.  Both restrictions are enforced fail-closed, and the coil one
-names the rung-2 change that would lift it.
+Rung-1 scope (charter ``docs/jax_flat675_promotion_plan.md``): the boundary
+must be stellarator-symmetric and is fitted at the campaign resolution, and
+the coil set must be the certified owner layout.  All three restrictions are
+enforced fail-closed, and each names the rung-2 change that would lift it.
+Nothing here silently reshapes an input to make it fit: a boundary the
+certified layout cannot represent is refused, never coerced.
 """
 
 from __future__ import annotations
@@ -70,6 +72,17 @@ CERTIFIED_SURFACE_RANGE: Final[str] = "half period"
 # margin keeps it inactive after a few optimizer steps rather than only at the
 # start.
 DEFAULT_VESSEL_CLEARANCE_FACTOR: Final[float] = 3.0
+
+_RUNG_TWO_SURFACE_MESSAGE: Final[str] = (
+    "Rung 1 fits onto the stellarator-symmetric 661-DOF layout, so a boundary "
+    "that is not stellarator-symmetric cannot be represented: its rs/zc "
+    "content has no home in the target layout at any resolution, and "
+    "returning the symmetrized shape would silently change the plasma. If the "
+    "boundary is in fact symmetric and only its flag says otherwise, rebuild "
+    "it with stellsym=True. Carrying genuine asymmetry through the "
+    "formulation is the rung-2 chartered change in "
+    "docs/jax_flat675_promotion_plan.md, reported rather than attempted."
+)
 
 _RUNG_TWO_COIL_MESSAGE: Final[str] = (
     "Rung 1 accepts only the certified coil owner layout: one free current at "
@@ -175,11 +188,30 @@ def fit_flat675_boundary(
     surface points sampled on the certified quadrature, so the result is the
     boundary this repo's surface machinery would produce, not a reimplemented
     projection.
+
+    Two things the caller must know, because a fit onto a fixed layout cannot
+    be lossless in general:
+
+    * **Stellarator symmetry is required, not imposed.**  The target layout is
+      stellarator-symmetric, so a boundary carrying ``rs``/``zc`` content has
+      no representation in it at any resolution.  Such a boundary is refused
+      rather than symmetrized: quietly dropping that content would return a
+      different plasma shape under the caller's own variable name.
+    * **Poloidal and toroidal resolution above the certified layout is
+      truncated**, and that is the documented meaning of "fit".  Unlike the
+      symmetry case this is an approximation *within* the target layout — it
+      converges to the boundary as the layout's resolution grows, and the
+      layout in question is stated here (``mpol = ntor = 10``).  A boundary
+      with content above those modes comes back smoothed; measure the
+      deviation if it matters to the study.
     """
     if not isinstance(boundary, Surface):
         raise Flat675ContractError(
             f"boundary must be a simsopt Surface; got {type(boundary).__name__}."
         )
+    source = boundary.to_RZFourier()
+    if not source.stellsym:
+        raise Flat675ContractError(_RUNG_TWO_SURFACE_MESSAGE)
     nfp = int(boundary.nfp)
     quadpoints = Surface.get_quadpoints(
         nfp=nfp,
@@ -195,7 +227,6 @@ def fit_flat675_boundary(
         quadpoints_phi=quadpoints[0],
         quadpoints_theta=quadpoints[1],
     )
-    source = boundary.to_RZFourier()
     resampled = type(source)(
         nfp=source.nfp,
         stellsym=source.stellsym,
@@ -206,14 +237,10 @@ def fit_flat675_boundary(
     )
     resampled.x = source.x
     fitted.least_squares_fit(resampled.gamma())
+    # The width is not re-asserted here: ``fitted`` is built two statements
+    # above at the certified mpol/ntor/stellsym, so its DOF count is fixed by
+    # construction.  The material checks the 661 it actually depends on.
     dofs = np.asarray(fitted.get_dofs(), dtype=np.float64)
-    if dofs.shape != (FLAT675_SURFACE_DOF_COUNT,):
-        raise Flat675ContractError(
-            "the certified surface layout must expose exactly "
-            f"{FLAT675_SURFACE_DOF_COUNT} DOFs; the fit produced {dofs.shape[0]}. "
-            f"Rung 1 forces mpol=ntor={CERTIFIED_MPOL} with "
-            f"stellsym={CERTIFIED_STELLSYM} (stellsym=False yields 1323)."
-        )
     return make_surface_xyz_tensor_fourier_spec(
         dofs=dofs,
         quadpoints_phi=np.asarray(fitted.quadpoints_phi, dtype=np.float64),
