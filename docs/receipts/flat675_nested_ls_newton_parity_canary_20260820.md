@@ -66,6 +66,8 @@ backend of that method). In-graph Newton inside
 
 ## Next
 
-Three-point F3 fixed-point on 255×64 using this pair API, then derivative
-identities, then predictor–corrector cost. Do not launch B37 nested-LS
-timing until those pass.
+Superseded as the active nested-LS plan by
+`docs/receipts/nested_ls_reduced_track_20260820.md`. Canary-1 remains the
+full-state operator lock. The reduced track owns QR `y*`, Newton on `s`,
+and Gate 1 255×64 start harness. Do not launch B37 nested-LS timing until
+that receipt's physics gates match. Do not inherit F3 7.70×.

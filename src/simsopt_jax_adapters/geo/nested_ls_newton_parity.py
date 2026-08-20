@@ -17,23 +17,25 @@ defaults (no ``stab``, looser ``tol``, BFGS then Newton).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final, Mapping
+from typing import Mapping
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from numpy.typing import NDArray
-
 from simsopt.geo import BoozerSurface
 from simsopt_jax.parity_tolerances import parity_ladder_tolerances
-from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
 
-NESTED_LS_CONSTRAINT_WEIGHT: Final[float] = 1.0
-NESTED_LS_WEIGHT_INV_MODB: Final[bool] = True
-NESTED_LS_NEWTON_STAB: Final[float] = 1.0e-4
-NESTED_LS_NEWTON_TOL: Final[float] = 1.0e-13
-NESTED_LS_NEWTON_MAXITER: Final[int] = 10
-NESTED_LS_REDUCTION_MODE: Final[str] = "cpu_ordered"
+from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
+from simsopt_jax_adapters.geo.nested_ls_contract import (
+    NESTED_LS_CONSTRAINT_WEIGHT,
+    NESTED_LS_NEWTON_MAXITER,
+    NESTED_LS_NEWTON_STAB,
+    NESTED_LS_NEWTON_TOL,
+    NESTED_LS_REDUCTION_MODE,
+    NESTED_LS_WEIGHT_INV_MODB,
+    nested_ls_physics_newton_kwargs,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,14 +173,9 @@ def _run_native_newton(
     coil_before = _coil_coordinates(native_boozer.biotsavart)
     native_boozer.need_to_run_code = True
     result = native_boozer.minimize_boozer_penalty_constraints_newton(
-        constraint_weight=NESTED_LS_CONSTRAINT_WEIGHT,
         iota=float(iota),
         G=float(G),
-        tol=NESTED_LS_NEWTON_TOL,
-        maxiter=NESTED_LS_NEWTON_MAXITER,
-        stab=NESTED_LS_NEWTON_STAB,
-        verbose=False,
-        weight_inv_modB=NESTED_LS_WEIGHT_INV_MODB,
+        **nested_ls_physics_newton_kwargs(),
     )
     iota_out = float(result["iota"])
     g_out = float(result["G"])
@@ -215,14 +212,9 @@ def _run_jax_newton(
     coil_before = _coil_coordinates(jax_boozer.biotsavart)
     jax_boozer.need_to_run_code = True
     result = jax_boozer.minimize_boozer_penalty_constraints_newton(
-        constraint_weight=NESTED_LS_CONSTRAINT_WEIGHT,
         iota=float(iota),
         G=float(G),
-        tol=NESTED_LS_NEWTON_TOL,
-        maxiter=NESTED_LS_NEWTON_MAXITER,
-        stab=NESTED_LS_NEWTON_STAB,
-        verbose=False,
-        weight_inv_modB=NESTED_LS_WEIGHT_INV_MODB,
+        **nested_ls_physics_newton_kwargs(),
     )
     iota_out = float(result["iota"])
     g_out = float(result["G"])
@@ -342,3 +334,24 @@ def assert_nested_ls_newton_pair(
         atol=float(grad_tol["atol"]),
         err_msg="nested-LS Newton ∇J_LS mismatch",
     )
+
+
+__all__ = [
+    "NESTED_LS_CONSTRAINT_WEIGHT",
+    "NESTED_LS_NEWTON_MAXITER",
+    "NESTED_LS_NEWTON_STAB",
+    "NESTED_LS_NEWTON_TOL",
+    "NESTED_LS_REDUCTION_MODE",
+    "NESTED_LS_WEIGHT_INV_MODB",
+    "NestedLsNewtonLane",
+    "NestedLsNewtonPair",
+    "NestedLsPenaltyEvaluation",
+    "NestedLsPenaltyPair",
+    "assert_nested_ls_newton_pair",
+    "assert_nested_ls_penalty_pair",
+    "evaluate_nested_ls_penalty_pair",
+    "jax_newton_residual_is_long_vector",
+    "nested_ls_gradient_from_newton_result",
+    "pack_nested_ls_decision",
+    "run_nested_ls_newton_pair",
+]
