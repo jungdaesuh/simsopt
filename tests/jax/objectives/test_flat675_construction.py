@@ -462,6 +462,118 @@ def test_fit_refuses_something_that_is_not_a_surface() -> None:
         fit_flat675_boundary(object())  # type: ignore[arg-type]
 
 
+def _asymmetric_boundary(*, rs: float, zc: float) -> SurfaceRZFourier:
+    """The synthetic boundary with stellarator symmetry deliberately broken."""
+    surface = SurfaceRZFourier(
+        nfp=_NFP,
+        stellsym=False,
+        mpol=2,
+        ntor=2,
+        quadpoints_phi=_grid(32),
+        quadpoints_theta=_grid(32),
+    )
+    surface.set_rc(0, 0, _BOUNDARY_MAJOR_RADIUS)
+    surface.set_rc(1, 0, _BOUNDARY_MINOR_RADIUS)
+    surface.set_zs(1, 0, _BOUNDARY_MINOR_RADIUS)
+    surface.set_rs(1, 0, rs)
+    surface.set_zc(1, 0, zc)
+    return surface
+
+
+def test_fit_refuses_a_boundary_that_is_not_stellarator_symmetric() -> None:
+    """Refused, not symmetrized — the coercion this repo bans.
+
+    The rs/zc content has no representation in the stellarator-symmetric
+    target layout at any resolution, so fitting anyway would hand back a
+    different plasma shape under the caller's own variable name.
+    """
+    with pytest.raises(Flat675ContractError) as excinfo:
+        fit_flat675_boundary(
+            _asymmetric_boundary(rs=0.02, zc=0.015),
+            nphi=_QUADRATURE,
+            ntheta=_QUADRATURE,
+        )
+
+    message = str(excinfo.value)
+    assert "not stellarator-symmetric cannot be represented" in message
+    assert "jax_flat675_promotion_plan.md" in message
+
+
+def test_fit_refuses_an_asymmetric_flag_even_with_no_asymmetric_content() -> None:
+    """The line is the symmetry declaration, not a smallness threshold.
+
+    A boundary whose rs/zc happen to be zero is representable, but deciding
+    that from the coefficients needs a "close enough to zero" tolerance, and a
+    tolerance is exactly the fudge that lets a real asymmetry through. The
+    flag is exact, and the refusal says how to clear it.
+    """
+    with pytest.raises(Flat675ContractError, match="rebuild it with stellsym=True"):
+        fit_flat675_boundary(
+            _asymmetric_boundary(rs=0.0, zc=0.0),
+            nphi=_QUADRATURE,
+            ntheta=_QUADRATURE,
+        )
+
+
+def test_fit_refuses_asymmetry_before_the_constructor_can_use_it() -> None:
+    """The refusal holds at the front door, not only in the fit helper."""
+    with pytest.raises(Flat675ContractError, match="not stellarator-symmetric"):
+        build_flat675_problem(
+            boundary=_asymmetric_boundary(rs=0.02, zc=0.015),
+            field=_field(),
+            nphi=_QUADRATURE,
+            ntheta=_QUADRATURE,
+        )
+
+
+def test_fit_truncates_resolution_above_the_certified_layout() -> None:
+    """Accepted and smoothed — stated behavior, adjudicated apart from symmetry.
+
+    Content above ``mpol = ntor = 10`` is an approximation *within* the target
+    layout: it converges to the boundary as the layout's resolution grows, and
+    the layout is documented.  That is what "fit" means, unlike the symmetry
+    case where no resolution ever recovers the input.  This test pins the
+    distinction so that collapsing the two is a deliberate act.
+    """
+    high_mpol, high_ntor, amplitude = 15, 12, 1.0e-2
+    boundary = SurfaceRZFourier(
+        nfp=_NFP,
+        stellsym=True,
+        mpol=high_mpol,
+        ntor=high_ntor,
+        quadpoints_phi=_grid(64),
+        quadpoints_theta=_grid(64),
+    )
+    boundary.set_rc(0, 0, _BOUNDARY_MAJOR_RADIUS)
+    boundary.set_rc(1, 0, _BOUNDARY_MINOR_RADIUS)
+    boundary.set_zs(1, 0, _BOUNDARY_MINOR_RADIUS)
+    boundary.set_rc(high_mpol, high_ntor, amplitude)
+    boundary.set_zs(high_mpol, high_ntor, amplitude)
+
+    fitted = fit_flat675_boundary(boundary, nphi=32, ntheta=32)
+
+    quadpoints = Surface.get_quadpoints(
+        nfp=_NFP, range=CERTIFIED_SURFACE_RANGE, nphi=32, ntheta=32
+    )
+    reference = SurfaceRZFourier(
+        nfp=_NFP,
+        stellsym=True,
+        mpol=high_mpol,
+        ntor=high_ntor,
+        quadpoints_phi=quadpoints[0],
+        quadpoints_theta=quadpoints[1],
+    )
+    reference.x = boundary.x
+    target = reference.gamma().reshape((-1, 3))
+    deviation = float(
+        np.linalg.norm(_cartesian_points(fitted) - target) / np.linalg.norm(target)
+    )
+
+    # Smoothed by roughly the amplitude that sits above the layout, not by an
+    # unbounded amount, and not to machine precision either.
+    assert 1.0e-4 < deviation < 1.0e-1
+
+
 def test_certified_quadrature_defaults_are_the_campaign_resolution() -> None:
     assert (CERTIFIED_NPHI, CERTIFIED_NTHETA) == (255, 64)
     assert CERTIFIED_SURFACE_RANGE == "half period"
