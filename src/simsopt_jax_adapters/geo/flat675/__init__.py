@@ -51,6 +51,13 @@ from .formulation import (
     Flat675Candidate,
     Flat675ContractError,
 )
+from .layout import (
+    CERTIFIED_FLAT_LAYOUT,
+    FLAT_VESSEL_DOF_COUNT,
+    FlatLayoutError,
+    FlatSingleStageLayout,
+    surface_block_dof_count,
+)
 from .manifest import (
     Flat675InputManifest,
     load_flat675_input_manifest,
@@ -74,6 +81,7 @@ from .runtime_spec_loader import load_flat675_runtime_spec
 from .y_solve import Flat675YSolution, solve_flat675_y_qr
 
 __all__ = [
+    "CERTIFIED_FLAT_LAYOUT",
     "CERTIFIED_MPOL",
     "CERTIFIED_NPHI",
     "CERTIFIED_NTHETA",
@@ -90,6 +98,7 @@ __all__ = [
     "FLAT675_SURFACE_SLICE",
     "FLAT675_VESSEL_DOF_COUNT",
     "FLAT675_VESSEL_SLICE",
+    "FLAT_VESSEL_DOF_COUNT",
     "CoilDofExtractionProvider",
     "Flat675BoozerLabelType",
     "Flat675BoozerMaterial",
@@ -106,6 +115,8 @@ __all__ = [
     "Flat675Problem",
     "Flat675Programs",
     "Flat675YSolution",
+    "FlatLayoutError",
+    "FlatSingleStageLayout",
     "assemble_flat675_problem",
     "bind_flat675_programs",
     "build_flat675_boozer_system",
@@ -122,5 +133,6 @@ __all__ = [
     "require_certified_coil_layout",
     "require_certified_surface_layout",
     "solve_flat675_y_qr",
+    "surface_block_dof_count",
     "synthesize_flat675_vessel",
 ]
