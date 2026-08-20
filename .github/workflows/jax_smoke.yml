@@ -398,7 +398,7 @@ jobs:
 
       - name: Install static-analysis dependencies
         run: |
-          pip install "ruff==0.15.22" "pyright==1.1.411" pytest \
+          pip install "pyright==1.1.411" pytest \
             "numpy>=2.0" "scipy>=1.13" \
             "jax==0.10.0" "jaxlib==0.10.0" \
             "optax>=0.2.8" "optimistix>=0.1" "lineax>=0.1.1" \
@@ -409,7 +409,7 @@ jobs:
 
       - name: Ruff check JAX modules
         run: |
-          ruff check \
+          bash scripts/lint.sh check \
             src/simsopt_jax \
             src/simsopt_jax_adapters \
             scripts/jax_ci_contract.py \
@@ -427,7 +427,7 @@ jobs:
 
       - name: Ruff format check
         run: |
-          ruff format --check \
+          bash scripts/lint.sh format \
             src/simsopt_jax/_constants.py \
             src/simsopt_jax/backend/__init__.py \
             src/simsopt_jax/backend/dtypes.py \
