@@ -93,6 +93,14 @@ pyright per repo law; one test file per pytest process.
   reports first): arbitrary resolutions AND generic coil sets (the
   11-owner coil validator relaxation). Shipping rung 1 alone is an
   acceptable F4 outcome if rung 2 is reported as chartered follow-up.
+  **Delivered by F5 (2026-08-20, `8fe5d70ea`).** F4 shipped rung 1 and
+  reported rung 2, as this bullet allows; F5 then delivered rung 2 in full
+  under `docs/jax_flat675_rung2_generality_plan.md` — generic coil sets,
+  arbitrary resolutions, and `stellsym=False` (which R1's recon showed the
+  objective and Boozer kernels never assumed). The certified 675
+  configuration is unchanged and bit-identical throughout; this line is added
+  beside the original text rather than replacing it, because what F4 decided
+  here stayed correct.
 - **The native side stays an oracle, not a shipped twin.** The C++
   evaluation of this formulation lives in the pinned instrument worktree;
   F4 does not port it. The example is registered as a JAX-native workflow
