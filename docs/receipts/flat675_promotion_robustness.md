@@ -85,11 +85,15 @@ otherwise.
 
 One reading worth stating plainly: `surface-0.001` ends with a *larger*
 gradient norm (17.97) than the unperturbed control (4.04) while reaching a
-comparable objective, and `coil-0.1` ends at 110.7. Neither is a gate
-failure — the chartered gate on bundle runs is objective decrease, not
-gradient decrease — but they are the honest signal that a perturbed start
-lands in a different place on the same surface at a fixed 37-step budget,
-which is what a robustness note should show rather than smooth over.
+comparable objective, and `coil-0.1` ends at 110.7. The same holds for the
+endpoint objectives at the largest amplitude: `coil-0.1` and `full-0.1` end
+at 1.459 and 2.785 — roughly 100–200× the control's 0.01396 — because 37
+budgeted steps recover less ground from a start perturbed to 125–9806.
+Neither is a gate failure — the chartered gate on bundle runs is objective
+decrease, not gradient decrease or endpoint parity with the control — but
+they are the honest signal that a perturbed start lands in a different
+place on the same surface at a fixed 37-step budget, which is what a
+robustness note should show rather than smooth over.
 
 ## How it ran, and what that costs the reader
 
