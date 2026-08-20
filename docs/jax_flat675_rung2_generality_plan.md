@@ -487,11 +487,35 @@ rewritten; the plan's own text and the R1 amendment stand as written.
    because an asymmetric boundary aimed at a symmetric target is still a
    projection onto a proper subspace — and renamed to
    `_ASYMMETRIC_BOUNDARY_REFUSAL`, since a name reading `RUNG_TWO` would
-   itself point at a charter that no longer owns the change. The three
-   message-text assertions that named the old text moved in the same commit
-   as the message, and one now asserts the message contains no "rung" at all.
+   itself point at a charter that no longer owns the change. **Twelve**
+   message-text assertions named retired or re-pointed text, and all twelve
+   moved in `8fe5d70ea`, the same commit as the messages: three on the
+   re-pointed surface refusal (its two in-test assertions plus the
+   front-door `match=`), two on the retired `require_certified_surface_layout`
+   (`rung 1 forces mpol=ntor`, `rung 1 forces stellsym=True`), and seven on
+   the retired coil validator and its message (`Rung 1 accepts only the
+   certified coil owner layout`, its charter-path assertion, `claims owner
+   DOFs`, `has curve type OrientedCurveXYZFourierSpec`, `declares no free
+   winding-surface coil`, `does not carry owner DOFs 1-10 contiguously`,
+   `does not share the single free current`). One now asserts the surface
+   message contains no "rung" at all. No message-text assertion moved in any
+   other commit of this delivery, which is the property gate 5 actually
+   needs. *(The closing review counted seven; that undercounted the retired
+   coil validator's group, where two of the seven were tallied. Recorded
+   because the count is the evidence, and R1's finding (e) in this same file
+   enumerates the pointer sites it derives from.)*
    Content sweep at close: zero "rung" references remain anywhere in
    `src/simsopt_jax_adapters/geo/flat675/`, and no stale restriction prose.
+   **Toolchain, named as run rather than as pinned.** Two ruff binaries
+   were used and they are different versions. Iterative `check`/`format`
+   during development ran the interpreter-local
+   `.venv-qn-gpu/bin/python -m ruff`, which is **ruff 0.16.1**. Every
+   branch-wide check quoted in this delivery ran the charter's pin explicitly
+   as `uvx ruff@0.15.22 check` / `uvx ruff@0.15.22 format --check`, verified
+   to report **ruff 0.15.22**. Both were clean on every commit; the record
+   names both because the installed toolchain is not the pinned one and a
+   reader reproducing this should know which produced which result. pyright
+   ran at the repository pin, 0 errors 0 warnings throughout.
 6. **Example and scoreboard byte-unchanged — PASS, by diff rather than by
    assertion.** `git diff 2661ab1df..HEAD` over
    `examples/`, `docs/jax_example_device_assignment.md`,
@@ -499,7 +523,20 @@ rewritten; the plan's own text and the R1 amendment stand as written.
    `benchmarks/flat675_promotion_robustness_child.py` is empty. The
    execution-source manifest ends at 638 — one module landed (`layout.py`, at
    G1) and nothing since; G2 and G3 were digest refreshes and a docs edit.
-7. **Closing crucible pass — pending closing review.**
+7. **Closing crucible pass (2026-08-20) — PASS on the work, with two
+   closure-record corrections.** The work was verified across the full
+   `2661ab1df..HEAD` range: the five-value gate independently re-derived a
+   third time at `3b422579f`, bit-identical, certifying the `6ad7bb349` code
+   state; requirement 2 confirmed BY EXECUTION rather than by reading the
+   tests — a `create_equally_spaced_curves` + `Current` set building a
+   48-coil-DOF / 121-surface / 172-outer problem at triple `(4, 4, True)`;
+   whole-range gate-6 empty diff; both charters append-only against their
+   reviewed predecessors; no assertion loosened anywhere across the arc.
+   The verdict was FAIL_ITERATE on two clauses of this closure record — the
+   gate-5 assertion count and the GPU-witness "unmodified" qualifier — and
+   both are corrected above in the commit that carries this line, under the
+   reviewer's pre-authorization. Correcting the count raised it further than
+   the review asked, from three to twelve. **F5 CLOSED.**
 
 ### Requirement 5: the "fast whole-lane tests" expectation is measured-false
 
@@ -532,9 +569,13 @@ named consumer**, after the shipped example.
 
 The charter makes this optional and forbids minting a harness for it, so it
 was done with the existing test file and nothing else: the same
-`tests/jax/objectives/test_flat675_generality.py`, unmodified, run once under
+`tests/jax/objectives/test_flat675_generality.py`, run once under
 `JAX_PLATFORMS=cuda` on the RTX 5090 after a bounded sustained-quiet check on
-the device. **11/11 passed.** The off-675 zero-transfer ledger is therefore
+the device. The file was unmodified **for** the GPU run — nothing was changed
+to make it run there — but it is not byte-identical to its G2 form: its only
+change since `8fe5d70ea` is the semantically inert import hoist in
+`6ad7bb349`, so the witness ran against the `6ad7bb349` tree. **11/11
+passed.** The off-675 zero-transfer ledger is therefore
 witnessed on the device and not only on CPU: the same assertions that hold
 `advance == 0` and `callback == 0` for a generic coil set, a non-certified
 resolution and an asymmetric layout passed with the solves executing on GPU.
