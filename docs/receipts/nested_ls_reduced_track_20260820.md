@@ -41,11 +41,14 @@ reconstruct Newton against banana `run_code`, and do not inherit 7.70×.
 
 ## Explicitly not produced
 
-- Gate 1 live C++/JAX Newton at F3 GPU B37 and flat-native B37.
+- One reduced Newton step or a ten-step walk at F3 B37 (AD-through-QR
+  GMRES). A `maxiter=1` probe was killed after 10 min; isolated HVP is
+  the bounded path.
+- C++ rejudge of a JAX Newton endpoint.
+- Gate 1 flat-native B37 (blocked until the F3 one-step gate passes).
 - Gate 2 mixed `H_sc`, predictor identity, implicit adjoint vs native.
-- Gate 3 dense-vs-Krylov warm inner cost at 661.
-- Gate 4 custom implicit VJP (autodiff-through-QR is the correctness path
-  here; IFT adjoint is the later GPU path).
+- Gate 3 dense-vs-Krylov / Schur `H_ss` operator at 661.
+- Gate 4 custom implicit VJP.
 - Gate 5 B3 and Gate 6 B37 nested timing.
 - In-graph fused outer L-BFGS-B. F3 is unchanged.
 
@@ -56,13 +59,30 @@ stationary branch under a native C++ reconstruct Newton rejudge.
 Trajectories may differ (JAX Armijo vs C++ full step). Gauss–Newton is
 not the certified reduced Hessian.
 
-**Produced:** 7×7 NCSX, and archived-start 255×64 (C++ Newton `iter=0`
-and reduced Newton `iter=0` on that already-critical point; `y*`
-recovered from a zero probe). **Not produced:** F3 B37 and
-flat-native B37 255×64 Newton walks.
+**Produced:** 7×7 NCSX; archived-start 255×64 no-op; F3 GPU B37
+**bounded** gate (`test_f3_gpu_b37_bounded_hvp_and_native_reference`,
+1 passed in 184.27 s):
+
+- Independent dual-lane load of `pair2-l1` `endpoint_candidate`.
+- JAX `y*` from a zero probe: `ι=0.15164961478467412`,
+  `G=2.010619298254682` (QR, not the 8-ULP lane inner state).
+- `‖∇_s Φ̂‖₂ = 0.01609557303688543` (finite, off-manifold).
+- One reduced HVP on the unit gradient: finite, **8.007 s**,
+  `‖Hv‖₂=833.169`, current RSS 1.93 GiB after, peak RSS 30.8 GiB
+  during the JAX AD graph (`ru_maxrss` / `VmRSS` on this process).
+- Frozen-coil C++ reconstruct Newton: success, `iter=10`, 156.82 s,
+  `Δι=-0.010792505231594696`, `‖Δs‖_∞=0.00503530466753932`,
+  `ι→0.14085710955307942`, `G→2.0106193053897154` (matches the
+  reconstruct diagnostic). Coils frozen.
+
+**Not produced:** one JAX Newton step, full reduced walk, C++ rejudge
+of a JAX endpoint, flat-native B37.
 
 ## Next
 
-C++ and JAX/reduced Newton at F3 B37 and flat-native B37 with frozen
-coils; then derivative identities including `H_sc`; then warm inner
-cost. Launch B3 nested timing only after those match. Do not reopen F3.
+Replace autodiff-through-QR HVPs with the exact two-variable Schur
+operator `Ĥ_ss v = Φ_ss v − Φ_sy Φ_yy⁻¹ Φ_ys v` (`Φ_yy` is 2×2).
+Then one reduced Newton step plus C++ rejudge of that JAX state.
+Repeat at flat-native B37 only after that passes. Do not reopen F3.
+Do not inherit 7.70×. Trajectories need not match; require the same
+native-rejudged branch.
