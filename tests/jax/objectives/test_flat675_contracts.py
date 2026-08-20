@@ -824,8 +824,12 @@ def _vessel_template(*, poloidal_mode_count: int = 2) -> SurfaceRZFourierSpec:
 
 
 def test_owner_map_lists_every_index_its_segments_claim() -> None:
-    assert _map_owner_indices(_owner_map(((0, 11, 0, 11),))) == tuple(range(11))
-    assert _map_owner_indices(_owner_map(((0, 4, 0, 4), (7, 11, 4, 8)))) == (
+    assert _map_owner_indices(
+        _owner_map(((0, 11, 0, 11),)), FLAT675_COIL_DOF_COUNT
+    ) == tuple(range(11))
+    assert _map_owner_indices(
+        _owner_map(((0, 4, 0, 4), (7, 11, 4, 8))), FLAT675_COIL_DOF_COUNT
+    ) == (
         0,
         1,
         2,
@@ -838,7 +842,7 @@ def test_owner_map_lists_every_index_its_segments_claim() -> None:
 
 
 def test_owner_map_claims_nothing_when_it_declares_no_segment() -> None:
-    assert _map_owner_indices(_owner_map(())) == ()
+    assert _map_owner_indices(_owner_map(()), FLAT675_COIL_DOF_COUNT) == ()
 
 
 @pytest.mark.parametrize(
@@ -857,14 +861,14 @@ def test_owner_map_rejects_a_malformed_segment(
 ) -> None:
     """Each condition of the six-part segment guard refuses on its own."""
     with pytest.raises(Flat675ContractError, match="invalid owner segment"):
-        _map_owner_indices(_owner_map((segment,)))
+        _map_owner_indices(_owner_map((segment,)), FLAT675_COIL_DOF_COUNT)
 
 
 # --- _coil_extraction_owner_indices: the per-coil union --------------------
 
 
 def test_extraction_unions_the_curve_and_current_maps_of_every_coil() -> None:
-    owners = _coil_extraction_owner_indices(_coil_extraction())
+    owners = _coil_extraction_owner_indices(_coil_extraction(), FLAT675_COIL_DOF_COUNT)
 
     assert owners == frozenset(range(FLAT675_COIL_DOF_COUNT))
 
@@ -880,8 +884,12 @@ def test_extraction_also_unions_a_coil_surface_map_when_one_is_present() -> None
         (_coil(**shared, surface_segments=((5, 11, 0, 6),)),)
     )
 
-    assert _coil_extraction_owner_indices(without_surface_map) == frozenset(range(5))
-    assert _coil_extraction_owner_indices(with_surface_map) == frozenset(range(11))
+    assert _coil_extraction_owner_indices(
+        without_surface_map, FLAT675_COIL_DOF_COUNT
+    ) == frozenset(range(5))
+    assert _coil_extraction_owner_indices(
+        with_surface_map, FLAT675_COIL_DOF_COUNT
+    ) == frozenset(range(11))
 
 
 # --- Flat675BoozerMaterial: the layout contract ----------------------------

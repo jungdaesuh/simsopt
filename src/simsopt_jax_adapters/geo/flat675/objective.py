@@ -31,14 +31,8 @@ from .boozer_material import (
     build_flat675_boozer_system,
     flat675_candidate_geometry,
 )
-from .formulation import (
-    FLAT675_COIL_SLICE,
-    FLAT675_OUTER_DOF_COUNT,
-    FLAT675_SURFACE_SLICE,
-    FLAT675_VESSEL_DOF_COUNT,
-    FLAT675_VESSEL_SLICE,
-    Flat675ContractError,
-)
+from .formulation import Flat675ContractError
+from .layout import FlatSingleStageLayout
 from .policy import (
     FLAT675_OBJECTIVE_TERM_KEYS,
     Flat675BoozerSystemPolicy,
@@ -57,16 +51,22 @@ class Flat675Material:
     boozer: Flat675BoozerMaterial
     vessel_template: SurfaceRZFourierSpec
 
+    @property
+    def layout(self) -> FlatSingleStageLayout:
+        """The block layout this material evaluates, owned by its Boozer half."""
+        return self.boozer.layout
+
     def __post_init__(self) -> None:
         if not isinstance(self.boozer, Flat675BoozerMaterial):
             raise Flat675ContractError("boozer must be Flat675BoozerMaterial.")
         if not isinstance(self.vessel_template, SurfaceRZFourierSpec):
             raise Flat675ContractError("vessel_template must be SurfaceRZFourierSpec.")
         vessel_dofs = surface_rz_fourier_dofs_from_spec(self.vessel_template)
-        if vessel_dofs.shape != (FLAT675_VESSEL_DOF_COUNT,):
+        vessel_dof_count = self.layout.vessel_dof_count
+        if vessel_dofs.shape != (vessel_dof_count,):
             raise Flat675ContractError(
                 "flat-675 vessel template must expose exactly "
-                f"{FLAT675_VESSEL_DOF_COUNT} free DOFs; got {vessel_dofs.shape}."
+                f"{vessel_dof_count} free DOFs; got {vessel_dofs.shape}."
             )
         if vessel_dofs.dtype != jnp.dtype(jnp.float64):
             raise Flat675ContractError("flat-675 vessel template must use float64.")
@@ -84,15 +84,16 @@ def flat675_weighted_terms(
     The returned vector is indexed by :data:`FLAT675_OBJECTIVE_TERM_KEYS`; the
     objective is its ordered sum.
     """
+    layout = material.layout
     coordinates = jnp.asarray(outer_coordinates)
-    if coordinates.shape != (FLAT675_OUTER_DOF_COUNT,):
+    if coordinates.shape != (layout.outer_dof_count,):
         raise Flat675ContractError(
             "flat-675 outer coordinates must have shape "
-            f"({FLAT675_OUTER_DOF_COUNT},); got {coordinates.shape}."
+            f"({layout.outer_dof_count},); got {coordinates.shape}."
         )
-    coil = coordinates[FLAT675_COIL_SLICE]
-    vessel = coordinates[FLAT675_VESSEL_SLICE]
-    surface = coordinates[FLAT675_SURFACE_SLICE]
+    coil = coordinates[layout.coil_slice]
+    vessel = coordinates[layout.vessel_slice]
+    surface = coordinates[layout.surface_slice]
 
     geometry = flat675_candidate_geometry(material.boozer, coil, surface)
     system = build_flat675_boozer_system(geometry, boozer_policy)

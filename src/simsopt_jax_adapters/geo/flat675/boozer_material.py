@@ -31,15 +31,15 @@ from simsopt_jax.core.specs import (
 from simsopt_jax.core.surface_dofs import surface_gamma_tangents_from_dofs
 
 from ._boozer_arrays import build_flat675_boozer_system_arrays
-from .formulation import (
-    FLAT675_COIL_DOF_COUNT,
-    FLAT675_SURFACE_DOF_COUNT,
-    Flat675ContractError,
-)
+from .formulation import Flat675ContractError
+from .layout import CERTIFIED_FLAT_LAYOUT, FlatSingleStageLayout
 from .policy import Flat675BoozerSystemPolicy
 
 
-def _map_owner_indices(mapping: OptimizableDofMapSpec) -> tuple[int, ...]:
+def _map_owner_indices(
+    mapping: OptimizableDofMapSpec,
+    coil_dof_count: int,
+) -> tuple[int, ...]:
     owner_indices: list[int] = []
     for owner_start, owner_end, target_start, target_end in mapping.owner_segments:
         if (
@@ -48,7 +48,7 @@ def _map_owner_indices(mapping: OptimizableDofMapSpec) -> tuple[int, ...]:
             or target_start < 0
             or target_end < target_start
             or owner_end - owner_start != target_end - target_start
-            or owner_end > FLAT675_COIL_DOF_COUNT
+            or owner_end > coil_dof_count
         ):
             raise Flat675ContractError(
                 "flat-675 coil extraction contains an invalid owner segment."
@@ -59,13 +59,14 @@ def _map_owner_indices(mapping: OptimizableDofMapSpec) -> tuple[int, ...]:
 
 def _coil_extraction_owner_indices(
     extraction: CoilSetDofExtractionSpec,
+    coil_dof_count: int,
 ) -> frozenset[int]:
     owner_indices: list[int] = []
     for coil in extraction.coils:
-        owner_indices.extend(_map_owner_indices(coil.curve_map))
-        owner_indices.extend(_map_owner_indices(coil.current_map))
+        owner_indices.extend(_map_owner_indices(coil.curve_map, coil_dof_count))
+        owner_indices.extend(_map_owner_indices(coil.current_map, coil_dof_count))
         if coil.surface_map is not None:
-            owner_indices.extend(_map_owner_indices(coil.surface_map))
+            owner_indices.extend(_map_owner_indices(coil.surface_map, coil_dof_count))
     return frozenset(owner_indices)
 
 
@@ -102,6 +103,7 @@ class Flat675BoozerMaterial:
     nfp: int
     nphi: int
     ntheta: int
+    layout: FlatSingleStageLayout = CERTIFIED_FLAT_LAYOUT
 
     def __post_init__(self) -> None:
         surface_template = self.surface_template
@@ -113,10 +115,11 @@ class Flat675BoozerMaterial:
             raise Flat675ContractError(
                 "flat-675 requires a typed coil-DOF extraction spec."
             )
-        if surface_template.dofs.shape != (FLAT675_SURFACE_DOF_COUNT,):
+        surface_dof_count = self.layout.surface_dof_count
+        if surface_template.dofs.shape != (surface_dof_count,):
             raise Flat675ContractError(
                 "flat-675 runtime surface must expose exactly "
-                f"{FLAT675_SURFACE_DOF_COUNT} DOFs."
+                f"{surface_dof_count} DOFs."
             )
         if surface_template.dofs.dtype != jnp.dtype(jnp.float64):
             raise Flat675ContractError(
@@ -139,12 +142,13 @@ class Flat675BoozerMaterial:
             raise Flat675ContractError(
                 "flat-675 runtime grid metadata differs from its surface."
             )
-        if _coil_extraction_owner_indices(self.coil_dof_extraction) != frozenset(
-            range(FLAT675_COIL_DOF_COUNT)
-        ):
+        coil_dof_count = self.layout.coil_dof_count
+        if _coil_extraction_owner_indices(
+            self.coil_dof_extraction, coil_dof_count
+        ) != frozenset(range(coil_dof_count)):
             raise Flat675ContractError(
                 "flat-675 coil extraction must consume every one of "
-                f"{FLAT675_COIL_DOF_COUNT} owner DOFs."
+                f"{coil_dof_count} owner DOFs."
             )
 
 
@@ -160,14 +164,15 @@ def flat675_candidate_geometry(
     """
     coil = jnp.asarray(coil_coordinates)
     surface = jnp.asarray(surface_coordinates)
-    if coil.shape != (FLAT675_COIL_DOF_COUNT,):
+    layout = material.layout
+    if coil.shape != (layout.coil_dof_count,):
         raise Flat675ContractError(
-            f"flat-675 coil coordinates must have shape ({FLAT675_COIL_DOF_COUNT},)."
+            f"flat-675 coil coordinates must have shape ({layout.coil_dof_count},)."
         )
-    if surface.shape != (FLAT675_SURFACE_DOF_COUNT,):
+    if surface.shape != (layout.surface_dof_count,):
         raise Flat675ContractError(
             "flat-675 surface coordinates must have shape "
-            f"({FLAT675_SURFACE_DOF_COUNT},)."
+            f"({layout.surface_dof_count},)."
         )
     if coil.dtype != jnp.dtype(jnp.float64) or surface.dtype != jnp.dtype(jnp.float64):
         raise Flat675ContractError(

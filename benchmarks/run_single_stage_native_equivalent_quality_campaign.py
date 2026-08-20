@@ -115,7 +115,7 @@ _DIAG5_BOOTSTRAP_COMPLETED_PLAN_SHA256: Final = (
 _DIAG5_BOOTSTRAP_SCIENCE_SCHEMA: Final = (
     "single-stage-neq-gntr3-trace-free-diagnostic-v2"
 )
-_DIAG5_BOOTSTRAP_EXECUTION_ENTRY_COUNT: Final = 637
+_DIAG5_BOOTSTRAP_EXECUTION_ENTRY_COUNT: Final = 638
 _DIAG5_BOOTSTRAP_NATIVE_COPY_PATH: Final = (
     "native/simsoptpp.cpython-311-x86_64-linux-gnu.so"
 )
