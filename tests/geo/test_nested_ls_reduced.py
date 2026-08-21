@@ -46,7 +46,9 @@ from simsopt_jax_adapters.geo.nested_ls_reduced import (
     NESTED_LS_EW_GAMMA,
     NESTED_LS_EW_SAFEGUARD,
     NESTED_LS_IMPLICIT_ADJOINT_DEFAULT_DENSE_BYTES,
+    NESTED_LS_SCHUR_GMRES_MAXITER,
     NESTED_LS_SCHUR_GMRES_MAXITER_CAP,
+    NESTED_LS_SCHUR_GMRES_RESTART,
     NESTED_LS_SCHUR_GMRES_RTOL,
     NestedLsReducedRankError,
     apply_reduced_mixed_schur_coil_tangent,
@@ -583,6 +585,20 @@ def test_eisenstat_walker_choice2_caps_safeguards_and_floors():
     assert eta_floor == pytest.approx(0.5 * 1.0e-13 / 1.0e-12, rel=0.0, abs=1.0e-15)
     assert linear_solve_meets_forcing(0.24, 0.24) is True
     assert linear_solve_meets_forcing(0.2400001, 0.24) is False
+
+
+def test_schur_gmres_defaults_are_one_restart_cycle_not_one_krylov_step():
+    """JAX ``gmres`` ``maxiter`` counts restart cycles, not Krylov vectors.
+
+    Default ``maxiter=1``, ``restart=8`` is one cycle of up to eight
+    Krylov iterations. ``gmres_matvecs`` stays 0 because incremental
+    GMRES does not report operator applications: unavailable telemetry,
+    not zero work.
+    """
+
+    assert NESTED_LS_SCHUR_GMRES_RESTART == 8
+    assert NESTED_LS_SCHUR_GMRES_MAXITER == 1
+    assert NESTED_LS_SCHUR_GMRES_MAXITER_CAP == 8
 
 
 def test_operator_gmres_rejects_unit_interval_eta_then_retries():
