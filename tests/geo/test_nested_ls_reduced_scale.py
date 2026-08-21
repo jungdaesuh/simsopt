@@ -17,16 +17,19 @@ import numpy as np
 import pytest
 from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt_jax_adapters.geo.nested_ls_contract import (
+    NESTED_LS_NEWTON_STAB,
     NESTED_LS_NEWTON_TOL,
     nested_ls_physics_newton_kwargs,
 )
 from simsopt_jax_adapters.geo.nested_ls_reduced import (
+    NESTED_LS_IMPLICIT_ADJOINT_DEFAULT_DENSE_BYTES,
     NestedLsB37TimingBlocked,
     nested_ls_reduced_closures,
     pack_surface_and_y,
     require_full_y_rank,
     run_reduced_nested_ls_newton,
     run_reduced_nested_ls_schur_newton,
+    schur_dense_operator_bytes,
     solve_projected_y,
 )
 from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
@@ -34,6 +37,11 @@ from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     ARCHIVED_START_QR_IOTA,
     DEFAULT_F3_B37_GPU_LANE,
     DEFAULT_F3_B37_NATIVE_LANE,
+    F3_B37_DENSE_LU_ENDPOINT_G,
+    F3_B37_DENSE_LU_ENDPOINT_GRAD_L2,
+    F3_B37_DENSE_LU_ENDPOINT_IOTA,
+    F3_B37_DENSE_LU_ENDPOINT_SURFACE_SHA256,
+    F3_B37_IFT_STAB,
     F3_B37_STEP6_CAP_2048,
     F3_B37_STEP6_CAP_2048_START_MAXITER,
     F3_B37_STEP6_MATERIAL_RESIDUAL_RATIO,
@@ -43,6 +51,7 @@ from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     archived_flat675_bundle_available,
     dump_strict_json,
     evaluate_f3_b37_bounded_probe,
+    evaluate_f3_b37_endpoint_adjoint_probe,
     evaluate_f3_b37_flat_native_probe,
     evaluate_f3_b37_nested_timing,
     evaluate_f3_b37_schur_newton_step,
@@ -106,6 +115,14 @@ _F3_B37_GPU_WALK_DENSE_LU_EVIDENCE = (
 _GPU_WALK_DENSE_LU_PUBLICATION = (
     "GPU dense-LU Schur walk canary. Opt-in linear_solver=dense_lu, "
     "not a default switch. Not a timing claim and not F3 7.70x."
+)
+_F3_B37_GPU_ENDPOINT_ADJOINT_EVIDENCE = (
+    _EVIDENCE_DIR / "nested_ls_reduced_gpu_endpoint_adjoint_20260821.json"
+)
+_GPU_ENDPOINT_ADJOINT_PUBLICATION = (
+    "GPU unregularized IFT adjoint canary at the dense-LU walk endpoint. "
+    "Opt-in past the 1 MiB stored-matrix cap. Not a walk, not cap-2048, "
+    "not a default switch, not a timing claim, and not F3 7.70x."
 )
 _GPU_WALK_PUBLICATION = (
     "GPU forcing-certified Schur walk. Not a timing claim and not F3 7.70x."
@@ -877,6 +894,163 @@ def test_authored_gpu_dense_lu_walk_json_is_strict_and_not_a_speed_claim():
     )
     assert probe["runtime"]["jax_default_backend"] == "gpu"
     assert int(payload["dense_chunk_batch_size"]) >= 1
+    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
+
+
+def test_endpoint_adjoint_probe_is_not_a_walk_or_cap2048_or_newton_stab_ift():
+    assert F3_B37_IFT_STAB == 0.0
+    assert F3_B37_IFT_STAB != NESTED_LS_NEWTON_STAB
+    assert (
+        schur_dense_operator_bytes(661) > NESTED_LS_IMPLICIT_ADJOINT_DEFAULT_DENSE_BYTES
+    )
+    assert F3_B37_DENSE_LU_ENDPOINT_SURFACE_SHA256 == (
+        "e25ca0f2fedf25cf411f7b7ad7192860c813ad5fd37bdb5471355834d42ede6c"
+    )
+    assert F3_B37_DENSE_LU_ENDPOINT_IOTA == pytest.approx(
+        0.14085710957665173, rel=0.0, abs=0.0
+    )
+    assert F3_B37_DENSE_LU_ENDPOINT_G == pytest.approx(
+        2.0106193053897154, rel=0.0, abs=0.0
+    )
+    assert F3_B37_DENSE_LU_ENDPOINT_GRAD_L2 == pytest.approx(
+        2.404212353322172e-14, rel=0.0, abs=0.0
+    )
+    source_path = Path(evaluate_f3_b37_endpoint_adjoint_probe.__code__.co_filename)
+    source = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(source_path))
+    fn_node = None
+    for node in tree.body:
+        if (
+            isinstance(node, ast.FunctionDef)
+            and node.name == "evaluate_f3_b37_endpoint_adjoint_probe"
+        ):
+            fn_node = node
+            break
+    assert fn_node is not None
+    text = ast.get_source_segment(source, fn_node)
+    assert text is not None
+    assert "evaluate_f3_b37_schur_newton_walk" not in text
+    assert "F3_B37_STEP6_CAP_2048" not in text
+    assert "maxiter_cap=2048" not in text
+
+    def _called(node: ast.Call) -> str | None:
+        func = node.func
+        if isinstance(func, ast.Name):
+            return func.id
+        if isinstance(func, ast.Attribute):
+            return func.attr
+        return None
+
+    def _is_float_name(expr: ast.AST, name: str) -> bool:
+        return (
+            isinstance(expr, ast.Call)
+            and isinstance(expr.func, ast.Name)
+            and expr.func.id == "float"
+            and len(expr.args) == 1
+            and isinstance(expr.args[0], ast.Name)
+            and expr.args[0].id == name
+        )
+
+    def _keyword(call: ast.Call, name: str) -> ast.AST | None:
+        for keyword in call.keywords:
+            if keyword.arg == name:
+                return keyword.value
+        return None
+
+    materialize_calls = [
+        node
+        for node in ast.walk(fn_node)
+        if isinstance(node, ast.Call)
+        and _called(node) == "materialize_stabilized_schur_dense"
+    ]
+    assert len(materialize_calls) == 1
+    materialize = materialize_calls[0]
+    assert len(materialize.args) >= 2
+    assert _is_float_name(materialize.args[1], "F3_B37_IFT_STAB")
+    cap = _keyword(materialize, "max_dense_linearization_bytes")
+    assert isinstance(cap, ast.Constant) and cap.value is None
+
+    adjoint_calls = [
+        node
+        for node in ast.walk(fn_node)
+        if isinstance(node, ast.Call)
+        and _called(node) == "implicit_adjoint_coil_gradient"
+    ]
+    assert len(adjoint_calls) == 1
+    adjoint = adjoint_calls[0]
+    adjoint_stab = _keyword(adjoint, "stab")
+    assert adjoint_stab is not None and _is_float_name(adjoint_stab, "F3_B37_IFT_STAB")
+    adjoint_solver = _keyword(adjoint, "linear_solver")
+    assert isinstance(adjoint_solver, ast.Constant) and adjoint_solver.value == (
+        "dense_lu"
+    )
+    adjoint_cap = _keyword(adjoint, "max_dense_linearization_bytes")
+    assert isinstance(adjoint_cap, ast.Constant) and adjoint_cap.value is None
+
+    newton_calls = [
+        node
+        for node in ast.walk(fn_node)
+        if isinstance(node, ast.Call)
+        and _called(node) == "run_reduced_nested_ls_schur_newton"
+    ]
+    assert len(newton_calls) == 2
+    for newton in newton_calls:
+        newton_stab = _keyword(newton, "stab")
+        assert newton_stab is not None and _is_float_name(
+            newton_stab, "F3_B37_IFT_STAB"
+        )
+        newton_solver = _keyword(newton, "linear_solver")
+        assert isinstance(newton_solver, ast.Constant) and newton_solver.value == (
+            "dense_lu"
+        )
+
+    walk_default = inspect.signature(evaluate_f3_b37_schur_newton_walk).parameters[
+        "linear_solver"
+    ]
+    assert walk_default.default == "gmres"
+    newton_default = inspect.signature(run_reduced_nested_ls_schur_newton).parameters[
+        "linear_solver"
+    ]
+    assert newton_default.default == "gmres"
+
+
+@pytest.mark.skipif(
+    not _F3_B37_GPU_ENDPOINT_ADJOINT_EVIDENCE.is_file(),
+    reason="authored GPU endpoint adjoint JSON not yet produced",
+)
+def test_authored_gpu_endpoint_adjoint_json_is_strict_and_not_a_walk():
+    raw = _F3_B37_GPU_ENDPOINT_ADJOINT_EVIDENCE.read_text(encoding="utf-8")
+    assert "NaN" not in raw
+    payload = json.loads(raw)
+    dump_strict_json(payload)
+    assert payload["schema"] == "nested-ls-reduced-gpu-endpoint-adjoint.v1"
+    assert payload["written_by_pytest"] is False
+    assert payload["publication"] == _GPU_ENDPOINT_ADJOINT_PUBLICATION
+    boundary = payload["claim_boundary"]
+    assert boundary["nested_speed_claim"] is False
+    assert boundary["inherits_f3_7_70x"] is False
+    assert boundary["explicit_inverse_m_production"] is False
+    assert boundary["full_walk_attempted"] is False
+    assert boundary["cap_2048_attempted"] is False
+    assert boundary["moving_coil_b3_outer"] is False
+    assert boundary["ift_used_newton_stab"] is False
+    probe = payload["probe"]
+    assert probe["reload_sha_match"] is True
+    assert probe["surface_sha256"] == F3_B37_DENSE_LU_ENDPOINT_SURFACE_SHA256
+    assert probe["ift_stab"] == 0.0
+    assert probe["ift_used_newton_stab"] is False
+    assert probe["default_cap_refuses_661"] is True
+    assert int(probe["default_adjoint_cap_bytes"]) == 1_048_576
+    assert int(probe["dense_bytes"]) == schur_dense_operator_bytes(661)
+    assert probe["fail_closed_reason"] is None
+    assert probe["unregularized_positive_definite"] is True
+    assert probe["adjoint_live_eta"] is not None
+    assert float(probe["adjoint_live_eta"]) <= 1.0e-10
+    assert probe["vjp_match"] is True
+    assert probe["fd_match"] is True
+    assert float(probe["coil_delta_inf"]) == 0.0
+    assert float(probe["coil_delta_inf_after"]) == 0.0
+    assert probe["runtime"]["jax_default_backend"] == "gpu"
     assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
 
 
