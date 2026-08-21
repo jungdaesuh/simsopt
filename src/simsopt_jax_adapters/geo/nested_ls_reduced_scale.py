@@ -626,6 +626,8 @@ class NestedLsSchurNewtonStepProbe:
     gmres_info: int
     gmres_matvecs: int
     gmres_residual_l2: float
+    gmres_forcing_eta: float
+    gmres_rtol: float
     gmres_restart: int
     gmres_maxiter: int
     factor_seconds: float
@@ -672,7 +674,7 @@ def evaluate_f3_b37_schur_newton_step(
     """One capped Schur Newton step from the F3 B37 point, then C++ rejudge.
 
     Does not run a ten-step walk and does not time nested-LS versus F3.
-    Host SciPy GMRES is telemetry, not a device-resident GPU Krylov.
+    The live Krylov is JAX incremental GMRES; this is not a GPU timing claim.
     """
 
     residual_fn, objective_fn, phi_hat = nested_ls_reduced_closures(jax_boozer)
@@ -781,6 +783,8 @@ def evaluate_f3_b37_schur_newton_step(
         gmres_info=int(step.gmres_info),
         gmres_matvecs=int(step.gmres_matvecs),
         gmres_residual_l2=float(step.gmres_residual_l2),
+        gmres_forcing_eta=float(step.gmres_forcing_eta),
+        gmres_rtol=float(step.gmres_rtol),
         gmres_restart=int(step.gmres_restart),
         gmres_maxiter=int(step.gmres_maxiter),
         factor_seconds=float(step.factor_seconds),
