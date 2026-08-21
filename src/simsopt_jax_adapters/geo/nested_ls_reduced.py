@@ -23,7 +23,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from numpy.typing import NDArray
-from simsopt.geo.boozersurface import _boozer_iterate_is_persistable
+from simsopt.geo.boozersurface import BoozerSurface, _boozer_iterate_is_persistable
 from simsopt_jax.geo.optimizers.linear_solve import (
     _hessian_vector_product_fn,
     _materialize_dense_linear_operator,
@@ -144,6 +144,47 @@ class NestedLsHvpComparison:
 
 
 @dataclass(frozen=True, slots=True)
+class NestedLsSchurNewtonStepRecord:
+    """One Schur-Newton linear solve plus Armijo attempt."""
+
+    iteration: int
+    iota: float
+    G: float
+    objective: float
+    grad_l2: float
+    gmres_forcing_eta: float
+    gmres_residual_l2: float
+    step_alpha: float
+    step_accepted: bool
+
+
+@dataclass(frozen=True, slots=True)
+class NestedLsBananaRunCodeLane:
+    """One banana ``run_code`` (BFGS then Newton, ``stab=0``)."""
+
+    success: bool
+    iteration_count: int
+    iota: float
+    G: float
+    surface_dofs: NDArray[np.float64]
+    coil_delta_inf: float
+    seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class NestedLsBananaRunCodePair:
+    """Native and JAX banana ``run_code`` from the same start."""
+
+    native: NestedLsBananaRunCodeLane
+    jax: NestedLsBananaRunCodeLane
+    physics_matched: bool
+
+
+class NestedLsB37TimingBlocked(RuntimeError):
+    """Raised when B37 nested timing is requested before B3 matches."""
+
+
+@dataclass(frozen=True, slots=True)
 class NestedLsSchurNewtonResult:
     """One capped Schur-Newton polish on ``s``, with Krylov telemetry.
 
@@ -179,6 +220,7 @@ class NestedLsSchurNewtonResult:
     factor_seconds: float
     gmres_seconds: float
     phi_yy_condition: float
+    steps: tuple[NestedLsSchurNewtonStepRecord, ...]
 
 
 def split_surface_and_y(decision: object) -> tuple[jax.Array, jax.Array]:
@@ -417,19 +459,28 @@ def nested_ls_reduced_closures(
     *,
     constraint_weight: float = NESTED_LS_CONSTRAINT_WEIGHT,
     weight_inv_modB: bool = NESTED_LS_WEIGHT_INV_MODB,
+    hostify_inputs: bool = True,
 ):
-    """Residual, full ``Φ``, and ``Φ̂`` closures on one JAX Boozer surface."""
+    """Residual, full ``Φ``, and ``Φ̂`` closures on one JAX Boozer surface.
+
+    Default ``hostify_inputs=True`` captures coils as host constants (frozen
+    coils). Pass ``False`` to keep device coil specs without making coil
+    DOFs arguments; runtime coil DOFs use
+    :func:`nested_ls_runtime_coil_closures`.
+    """
 
     residual_fn = jax_boozer._make_penalty_residual_with(
         True,
         weight_inv_modB,
         constraint_weight,
+        hostify_inputs=hostify_inputs,
         decision_split_mode="jvp",
     )
     objective_fn = jax_boozer._make_penalty_objective_with(
         True,
         weight_inv_modB,
         constraint_weight,
+        hostify_inputs=hostify_inputs,
         decision_split_mode="jvp",
     )
     return (
@@ -437,6 +488,58 @@ def nested_ls_reduced_closures(
         objective_fn,
         make_reduced_penalty_objective(residual_fn, objective_fn),
     )
+
+
+def nested_ls_runtime_coil_closures(
+    jax_boozer: BoozerSurfaceJAX,
+    *,
+    constraint_weight: float = NESTED_LS_CONSTRAINT_WEIGHT,
+    weight_inv_modB: bool = NESTED_LS_WEIGHT_INV_MODB,
+):
+    """Residual, ``Φ``, and ``Φ̂`` as functions of ``(packed, coil_dofs)``.
+
+    Coil DOFs stay runtime arguments through
+    ``BiotSavartJAX.coil_set_spec_from_dofs``. Frozen-coil Newton still
+    uses :func:`nested_ls_reduced_closures`.
+    """
+
+    biotsavart = jax_boozer.biotsavart
+
+    def residual_fn(packed: jax.Array, coil_dofs: jax.Array) -> jax.Array:
+        spec = biotsavart.coil_set_spec_from_dofs(coil_dofs)
+        return jax_boozer._make_penalty_residual_with(
+            True,
+            weight_inv_modB,
+            constraint_weight,
+            coil_set_spec=spec,
+            hostify_inputs=False,
+            decision_split_mode="jvp",
+        )(packed)
+
+    def objective_fn(packed: jax.Array, coil_dofs: jax.Array) -> jax.Array:
+        spec = biotsavart.coil_set_spec_from_dofs(coil_dofs)
+        return jax_boozer._make_penalty_objective_with(
+            True,
+            weight_inv_modB,
+            constraint_weight,
+            coil_set_spec=spec,
+            hostify_inputs=False,
+            decision_split_mode="jvp",
+        )(packed)
+
+    def phi_hat(surface_dofs: jax.Array, coil_dofs: jax.Array) -> jax.Array:
+        coil = jnp.asarray(coil_dofs, dtype=jnp.float64).reshape(-1)
+
+        def residual_at_coil(packed: jax.Array) -> jax.Array:
+            return residual_fn(packed, coil)
+
+        solution = solve_projected_y(residual_at_coil, surface_dofs)
+        y_star = solution.solution
+        projected = (solution.numerical_rank == _Y_SIZE) & solution.numerics_finite
+        y_star = jnp.where(projected, y_star, jnp.full_like(y_star, jnp.nan))
+        return objective_fn(pack_surface_and_y(surface_dofs, y_star), coil)
+
+    return residual_fn, objective_fn, phi_hat
 
 
 def _host_vector(values) -> NDArray[np.float64]:
@@ -805,6 +908,7 @@ def run_reduced_nested_ls_schur_newton(
     working_value = value
     working_grad = gradient
     working_solution = current_solution
+    step_records: list[NestedLsSchurNewtonStepRecord] = []
 
     while iteration_count < maxiter:
         grad_norm = float(np.linalg.norm(working_grad))
@@ -871,6 +975,20 @@ def run_reduced_nested_ls_schur_newton(
             )
         if quality_residual > quality_scale:
             step_accepted = False
+            y_now = _host_vector(working_solution.solution)
+            step_records.append(
+                NestedLsSchurNewtonStepRecord(
+                    iteration=iteration_count + 1,
+                    iota=float(y_now[0]),
+                    G=float(y_now[1]),
+                    objective=float(working_value),
+                    grad_l2=float(rhs_norm),
+                    gmres_forcing_eta=float(gmres_forcing_eta),
+                    gmres_residual_l2=float(gmres_residual_l2),
+                    step_alpha=float(step_alpha),
+                    step_accepted=False,
+                )
+            )
             break
         (
             working_surface,
@@ -887,6 +1005,20 @@ def run_reduced_nested_ls_schur_newton(
             working_grad,
             newton_direction,
             working_solution,
+        )
+        y_now = _host_vector(working_solution.solution)
+        step_records.append(
+            NestedLsSchurNewtonStepRecord(
+                iteration=iteration_count + 1,
+                iota=float(y_now[0]),
+                G=float(y_now[1]),
+                objective=float(working_value),
+                grad_l2=float(np.linalg.norm(working_grad)),
+                gmres_forcing_eta=float(gmres_forcing_eta),
+                gmres_residual_l2=float(gmres_residual_l2),
+                step_alpha=float(step_alpha),
+                step_accepted=bool(step_accepted),
+            )
         )
         if not step_accepted:
             break
@@ -946,6 +1078,175 @@ def run_reduced_nested_ls_schur_newton(
         factor_seconds=float(factor_seconds),
         gmres_seconds=float(gmres_seconds),
         phi_yy_condition=float(phi_yy_condition),
+        steps=tuple(step_records),
+    )
+
+
+def apply_reduced_mixed_schur_coil_tangent(
+    residual_fn,
+    objective_fn,
+    surface_dofs: object,
+    coil_dofs: object,
+    coil_tangent: object,
+    *,
+    operator: NestedLsReducedSchurOperator | None = None,
+) -> jax.Array:
+    """Return ``Ĥ_sc v_c = Φ_sc v_c − Φ_sy Φ_yy⁻¹ Φ_yc v_c`` at frozen ``s``.
+
+    ``residual_fn`` and ``objective_fn`` take ``(packed, coil_dofs)``.
+    """
+
+    coil = jnp.asarray(coil_dofs, dtype=jnp.float64).reshape(-1)
+    tangent = jnp.asarray(coil_tangent, dtype=jnp.float64).reshape(-1)
+    if tangent.shape != coil.shape:
+        raise ValueError(
+            "coil tangent shape "
+            f"{tangent.shape} does not match coil DOF shape {coil.shape}."
+        )
+    if operator is None:
+        operator = factor_reduced_nested_ls_schur(
+            lambda packed: residual_fn(packed, coil),
+            lambda packed: objective_fn(packed, coil),
+            surface_dofs,
+        )
+    packed = operator.packed
+
+    def packed_gradient(coil_vector: jax.Array) -> jax.Array:
+        return jax.grad(lambda packed_state: objective_fn(packed_state, coil_vector))(
+            packed
+        )
+
+    full_jvp = jax.jvp(packed_gradient, (coil,), (tangent,))[1]
+    phi_sc_v = full_jvp[: operator.surface_size]
+    phi_yc_v = full_jvp[operator.surface_size :]
+    return phi_sc_v - operator.phi_sy @ jnp.linalg.solve(operator.phi_yy, phi_yc_v)
+
+
+_IMPLICIT_ADJOINT_DEFAULT_DENSE_BYTES: Final[int] = 1_048_576
+
+
+def implicit_adjoint_coil_gradient(
+    residual_fn,
+    objective_fn,
+    surface_dofs: object,
+    coil_dofs: object,
+    surface_cotangent: object,
+    *,
+    stab: float = NESTED_LS_NEWTON_STAB,
+    operator: NestedLsReducedSchurOperator | None = None,
+    max_dense_linearization_bytes: int | None = _IMPLICIT_ADJOINT_DEFAULT_DENSE_BYTES,
+) -> jax.Array:
+    """Return ``−Ĥ_scᵀ λ`` with ``(Ĥ_ss+stab I) λ = v_s``.
+
+    ``Ĥ_ss`` is a Hessian, so the adjoint solve is the forward Schur
+    operator. Dense LU is the 7×7 canary. Default stored-matrix cap is
+    1 MiB (refuses 661²×8); pass a larger cap to opt in at F3.
+    """
+
+    coil = jnp.asarray(coil_dofs, dtype=jnp.float64).reshape(-1)
+    cotangent = jnp.asarray(surface_cotangent, dtype=jnp.float64).reshape(-1)
+    if operator is None:
+        operator = factor_reduced_nested_ls_schur(
+            lambda packed: residual_fn(packed, coil),
+            lambda packed: objective_fn(packed, coil),
+            surface_dofs,
+        )
+    if cotangent.shape != (operator.surface_size,):
+        raise ValueError(
+            "surface cotangent shape "
+            f"{cotangent.shape} does not match surface shape "
+            f"({operator.surface_size},)."
+        )
+    dense = materialize_stabilized_schur_dense(
+        operator,
+        stab,
+        max_dense_linearization_bytes=max_dense_linearization_bytes,
+    )
+    adjoint_state = solve_stabilized_schur_dense_lu(dense, cotangent)
+
+    def mixed_map(coil_tangent: jax.Array) -> jax.Array:
+        return apply_reduced_mixed_schur_coil_tangent(
+            residual_fn,
+            objective_fn,
+            surface_dofs,
+            coil,
+            coil_tangent,
+            operator=operator,
+        )
+
+    # Reverse-mode at a nonzero probe so coil reconstruction is not traced
+    # at the origin. The map is linear in the tangent.
+    probe = jnp.zeros_like(coil).at[0].set(1.0)
+    _primal, pullback = jax.vjp(mixed_map, probe)
+    del _primal
+    return -pullback(adjoint_state)[0]
+
+
+def _banana_run_code_lane(
+    boozer, *, iota: float, G: float
+) -> NestedLsBananaRunCodeLane:
+    coil_before = _coil_coordinates(boozer.biotsavart)
+    boozer.need_to_run_code = True
+    started = time.perf_counter()
+    result = boozer.run_code(float(iota), G=float(G))
+    seconds = time.perf_counter() - started
+    if result is None:
+        raise RuntimeError("banana run_code returned None; need_to_run_code was false.")
+    coil_after = _coil_coordinates(boozer.biotsavart)
+    return NestedLsBananaRunCodeLane(
+        success=bool(result["success"]),
+        iteration_count=int(result["iter"]),
+        iota=float(result["iota"]),
+        G=float(result["G"]),
+        surface_dofs=np.array(boozer.surface.get_dofs(), dtype=np.float64, copy=True),
+        coil_delta_inf=float(np.linalg.norm(coil_after - coil_before, ord=np.inf)),
+        seconds=float(seconds),
+    )
+
+
+def run_banana_run_code_pair(
+    native: BoozerSurface,
+    jax_boozer: BoozerSurfaceJAX,
+    *,
+    iota: float,
+    G: float,
+    iota_rtol: float = 1.0e-8,
+    iota_atol: float = 1.0e-10,
+    surface_rtol: float = 1.0e-8,
+    surface_atol: float = 1.0e-10,
+) -> NestedLsBananaRunCodePair:
+    """Native vs JAX banana ``run_code``. Coils stay frozen.
+
+    This is the timing bar, not reconstruct Newton. Trajectories may
+    differ from the physics bar. ``physics_matched`` is both successes,
+    frozen coils, and ``(ι, G, s)`` within the supplied tolerances.
+    """
+
+    native_lane = _banana_run_code_lane(native, iota=iota, G=G)
+    jax_lane = _banana_run_code_lane(jax_boozer, iota=iota, G=G)
+    iota_close = np.allclose(
+        jax_lane.iota, native_lane.iota, rtol=iota_rtol, atol=iota_atol
+    )
+    g_close = np.allclose(jax_lane.G, native_lane.G, rtol=iota_rtol, atol=iota_atol)
+    surface_close = np.allclose(
+        jax_lane.surface_dofs,
+        native_lane.surface_dofs,
+        rtol=surface_rtol,
+        atol=surface_atol,
+    )
+    physics_matched = (
+        native_lane.success
+        and jax_lane.success
+        and native_lane.coil_delta_inf == 0.0
+        and jax_lane.coil_delta_inf == 0.0
+        and iota_close
+        and g_close
+        and surface_close
+    )
+    return NestedLsBananaRunCodePair(
+        native=native_lane,
+        jax=jax_lane,
+        physics_matched=bool(physics_matched),
     )
 
 
@@ -953,25 +1254,33 @@ __all__ = [
     "NESTED_LS_SCHUR_GMRES_MAXITER",
     "NESTED_LS_SCHUR_GMRES_RESTART",
     "NESTED_LS_SCHUR_GMRES_RTOL",
+    "NestedLsB37TimingBlocked",
+    "NestedLsBananaRunCodeLane",
+    "NestedLsBananaRunCodePair",
     "NestedLsFourierBlockPreconditioner",
     "NestedLsHvpComparison",
     "NestedLsReducedNewtonResult",
     "NestedLsReducedRankError",
     "NestedLsSchurNewtonResult",
+    "NestedLsSchurNewtonStepRecord",
     "NestedLsYSolution",
+    "apply_reduced_mixed_schur_coil_tangent",
     "compare_ad_qr_and_schur_hvp",
     "dense_schur_inverse_preconditioner",
     "factor_reduced_nested_ls_schur",
     "factor_schur_fourier_block_preconditioner",
+    "implicit_adjoint_coil_gradient",
     "make_reduced_penalty_objective",
     "materialize_stabilized_schur_dense",
     "nested_ls_reduced_closures",
+    "nested_ls_runtime_coil_closures",
     "pack_surface_and_y",
     "projected_y_system",
     "reduced_penalty_gradient",
     "reduced_penalty_gradient_envelope",
     "reduced_penalty_hvp",
     "require_full_y_rank",
+    "run_banana_run_code_pair",
     "run_reduced_nested_ls_newton",
     "run_reduced_nested_ls_schur_newton",
     "schur_dense_operator_bytes",

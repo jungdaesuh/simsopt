@@ -37,9 +37,11 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_NEWTON_MAXITER,
     NESTED_LS_NEWTON_TOL,
     NESTED_LS_WEIGHT_INV_MODB,
+    nested_ls_banana_run_code_options,
     nested_ls_physics_newton_kwargs,
 )
 from simsopt_jax_adapters.geo.nested_ls_reduced import (
+    NestedLsB37TimingBlocked,
     compare_ad_qr_and_schur_hvp,
     factor_reduced_nested_ls_schur,
     nested_ls_reduced_closures,
@@ -816,19 +818,312 @@ def evaluate_f3_b37_schur_newton_step(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class NestedLsSchurNewtonWalkProbe:
+    """Ten-step frozen-coil Schur walk plus C++ reconstruct rejudge."""
+
+    y_star_iota: float
+    y_star_g: float
+    reduced_grad_l2_before: float
+    maxiter: int
+    iteration_count: int
+    step_accepted: bool
+    success: bool
+    persisted: bool
+    iota: float
+    G: float
+    grad_l2: float
+    coil_delta_inf: float
+    walk_seconds: float
+    gmres_forcing_eta: float
+    steps: tuple[dict[str, object], ...]
+    native_rejudge_success: bool
+    native_rejudge_iter: int
+    native_rejudge_iota: float
+    native_rejudge_g: float
+    native_rejudge_coil_delta_inf: float
+    native_rejudge_seconds: float
+    native_rejudge_grad_l2: float
+    reconstruct_ref_iota: float
+    rejudge_vs_reconstruct_surface_inf: float
+    runtime: dict[str, object]
+    provenance: dict[str, object]
+
+    def as_payload(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class NestedLsFlatNativeB37Probe:
+    """Reduced state at the F3 flat-native B37 (pair2-l2) point."""
+
+    residual_rows: int
+    y_star_iota: float
+    y_star_g: float
+    y_rank: int
+    reduced_grad_l2: float
+    native_ref_success: bool
+    native_ref_iter: int
+    native_ref_iota: float
+    native_ref_g: float
+    native_ref_coil_delta_inf: float
+    native_ref_seconds: float
+    runtime: dict[str, object]
+
+    def as_payload(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class NestedLsB37NestedTiming:
+    """Process-wall JAX reconstruct walk vs native banana ``run_code``.
+
+    Not an F3 7.70× claim. Requires B3 banana ``run_code`` physics match.
+    """
+
+    b3_matched: bool
+    jax_walk_seconds: float
+    jax_walk_iter: int
+    jax_walk_iota: float
+    jax_walk_success: bool
+    native_banana_seconds: float
+    native_banana_iter: int
+    native_banana_iota: float
+    native_banana_success: bool
+    coil_delta_inf: float
+    runtime: dict[str, object]
+
+    def as_payload(self) -> dict[str, object]:
+        return asdict(self)
+
+
+def evaluate_f3_b37_flat_native_probe(
+    native: BoozerSurface,
+    jax_boozer: BoozerSurfaceJAX,
+) -> NestedLsFlatNativeB37Probe:
+    """QR ``y*``, reduced gradient, and C++ reconstruct at flat-native B37."""
+
+    residual_fn, _objective_fn, phi_hat = nested_ls_reduced_closures(jax_boozer)
+    surface0 = np.asarray(jax_boozer.surface.get_dofs(), dtype=np.float64)
+    native_coils0 = np.asarray(native.biotsavart.x, dtype=np.float64)
+    solution = solve_projected_y(residual_fn, surface0, np.zeros(2, dtype=np.float64))
+    require_full_y_rank(solution)
+    y_star = np.asarray(solution.solution, dtype=np.float64)
+    gradient = np.asarray(reduced_penalty_gradient(phi_hat, surface0), dtype=np.float64)
+    native.need_to_run_code = True
+    started = time.perf_counter()
+    native_ref = native.minimize_boozer_penalty_constraints_newton(
+        iota=float(y_star[0]),
+        G=float(y_star[1]),
+        **nested_ls_physics_newton_kwargs(),
+    )
+    native_seconds = time.perf_counter() - started
+    native_coils1 = np.asarray(native.biotsavart.x, dtype=np.float64)
+    return NestedLsFlatNativeB37Probe(
+        residual_rows=int(np.asarray(solution.design_matrix).shape[0]),
+        y_star_iota=float(y_star[0]),
+        y_star_g=float(y_star[1]),
+        y_rank=int(np.asarray(solution.numerical_rank)),
+        reduced_grad_l2=float(np.linalg.norm(gradient)),
+        native_ref_success=bool(native_ref["success"]),
+        native_ref_iter=int(native_ref["iter"]),
+        native_ref_iota=float(native_ref["iota"]),
+        native_ref_g=float(native_ref["G"]),
+        native_ref_coil_delta_inf=float(
+            np.linalg.norm(native_coils1 - native_coils0, ord=np.inf)
+        ),
+        native_ref_seconds=float(native_seconds),
+        runtime=nested_ls_runtime_identity(),
+    )
+
+
+def evaluate_f3_b37_schur_newton_walk(
+    native: BoozerSurface,
+    jax_boozer: BoozerSurfaceJAX,
+    *,
+    maxiter: int = NESTED_LS_NEWTON_MAXITER,
+) -> NestedLsSchurNewtonWalkProbe:
+    """Frozen-coil Schur Newton walk from F3 B37, then C++ reconstruct rejudge.
+
+    Uses GMRES, not per-step dense LU. Coils stay frozen.
+    """
+
+    residual_fn, _objective_fn, _phi_hat = nested_ls_reduced_closures(jax_boozer)
+    surface0 = np.asarray(jax_boozer.surface.get_dofs(), dtype=np.float64)
+    native_start = np.asarray(native.surface.get_dofs(), dtype=np.float64)
+    solution = solve_projected_y(residual_fn, surface0, np.zeros(2, dtype=np.float64))
+    require_full_y_rank(solution)
+    y_star = np.asarray(solution.solution, dtype=np.float64)
+    gradient = np.asarray(
+        reduced_penalty_gradient_envelope(_objective_fn, surface0, y_star),
+        dtype=np.float64,
+    )
+    provenance = nested_ls_receipt_provenance()
+    runtime = {
+        "hostname": provenance["hostname"],
+        "python_executable": provenance["python_executable"],
+        "jax_default_backend": provenance["jax_default_backend"],
+        "jax_devices": provenance["jax_devices"],
+        "jax_platforms_env": provenance["jax_platforms_env"],
+        "jax_enable_x64_env": provenance["jax_enable_x64_env"],
+        "timestamp_utc": provenance["timestamp_utc"],
+    }
+    newton_kwargs = nested_ls_physics_newton_kwargs()
+    native.need_to_run_code = True
+    native.surface.set_dofs(native_start)
+    reconstruct_ref = native.minimize_boozer_penalty_constraints_newton(
+        iota=float(y_star[0]),
+        G=float(y_star[1]),
+        **newton_kwargs,
+    )
+    reconstruct_surface = np.asarray(native.surface.get_dofs(), dtype=np.float64)
+    reconstruct_ref_iota = float(reconstruct_ref["iota"])
+    walk_started = time.perf_counter()
+    walk = run_reduced_nested_ls_schur_newton(
+        jax_boozer,
+        iota=float(y_star[0]),
+        G=float(y_star[1]),
+        maxiter=int(maxiter),
+    )
+    walk_seconds = time.perf_counter() - walk_started
+    native.need_to_run_code = True
+    native.surface.set_dofs(walk.surface_dofs)
+    rejudge_coils0 = np.asarray(native.biotsavart.x, dtype=np.float64)
+    rejudge_started = time.perf_counter()
+    native_rejudge = native.minimize_boozer_penalty_constraints_newton(
+        iota=float(walk.iota),
+        G=float(walk.G),
+        **newton_kwargs,
+    )
+    rejudge_seconds = time.perf_counter() - rejudge_started
+    rejudge_coils1 = np.asarray(native.biotsavart.x, dtype=np.float64)
+    rejudge_surface = np.asarray(native.surface.get_dofs(), dtype=np.float64)
+    rejudge_grad_l2, _rejudge_inf = _native_ls_gradient_norms(native_rejudge)
+    del _rejudge_inf
+    return NestedLsSchurNewtonWalkProbe(
+        y_star_iota=float(y_star[0]),
+        y_star_g=float(y_star[1]),
+        reduced_grad_l2_before=float(np.linalg.norm(gradient)),
+        maxiter=int(maxiter),
+        iteration_count=int(walk.iteration_count),
+        step_accepted=bool(walk.step_accepted),
+        success=bool(walk.success),
+        persisted=bool(walk.persisted),
+        iota=float(walk.iota),
+        G=float(walk.G),
+        grad_l2=float(np.linalg.norm(walk.reduced_gradient)),
+        coil_delta_inf=float(walk.coil_delta_inf),
+        walk_seconds=float(walk_seconds),
+        gmres_forcing_eta=float(walk.gmres_forcing_eta),
+        steps=tuple(asdict(record) for record in walk.steps),
+        native_rejudge_success=bool(native_rejudge["success"]),
+        native_rejudge_iter=int(native_rejudge["iter"]),
+        native_rejudge_iota=float(native_rejudge["iota"]),
+        native_rejudge_g=float(native_rejudge["G"]),
+        native_rejudge_coil_delta_inf=float(
+            np.linalg.norm(rejudge_coils1 - rejudge_coils0, ord=np.inf)
+        ),
+        native_rejudge_seconds=float(rejudge_seconds),
+        native_rejudge_grad_l2=rejudge_grad_l2,
+        reconstruct_ref_iota=reconstruct_ref_iota,
+        rejudge_vs_reconstruct_surface_inf=float(
+            np.linalg.norm(rejudge_surface - reconstruct_surface, ord=np.inf)
+        ),
+        runtime=runtime,
+        provenance=provenance,
+    )
+
+
+def evaluate_f3_b37_nested_timing(
+    native: BoozerSurface,
+    jax_boozer: BoozerSurfaceJAX,
+    *,
+    b3_matched: bool,
+    maxiter: int = NESTED_LS_NEWTON_MAXITER,
+) -> NestedLsB37NestedTiming:
+    """Time JAX reconstruct Schur walk vs native banana ``run_code``.
+
+    Refuses unless B3 banana ``run_code`` already matched. Does not inherit
+    F3 7.70×.
+    """
+
+    if not b3_matched:
+        raise NestedLsB37TimingBlocked(
+            "B37 nested timing only after B3 banana run_code physics match"
+        )
+    residual_fn, _objective_fn, _phi_hat = nested_ls_reduced_closures(jax_boozer)
+    surface0 = np.asarray(jax_boozer.surface.get_dofs(), dtype=np.float64)
+    native_start = np.asarray(native.surface.get_dofs(), dtype=np.float64)
+    solution = solve_projected_y(residual_fn, surface0, np.zeros(2, dtype=np.float64))
+    require_full_y_rank(solution)
+    y_star = np.asarray(solution.solution, dtype=np.float64)
+    banana_options = nested_ls_banana_run_code_options()
+    previous_options = {
+        "newton_tol": native.options["newton_tol"],
+        "newton_maxiter": native.options["newton_maxiter"],
+        "bfgs_tol": native.options["bfgs_tol"],
+    }
+    native.options["newton_tol"] = banana_options["newton_tol"]
+    native.options["newton_maxiter"] = banana_options["newton_maxiter"]
+    native.options["bfgs_tol"] = banana_options["bfgs_tol"]
+    native.surface.set_dofs(native_start)
+    native_coils0 = np.asarray(native.biotsavart.x, dtype=np.float64)
+    native.need_to_run_code = True
+    banana_started = time.perf_counter()
+    banana = native.run_code(float(y_star[0]), G=float(y_star[1]))
+    banana_seconds = time.perf_counter() - banana_started
+    native.options.update(previous_options)
+    if banana is None:
+        raise RuntimeError("native banana run_code returned None.")
+    native_coils1 = np.asarray(native.biotsavart.x, dtype=np.float64)
+    jax_boozer.surface.set_dofs(surface0)
+    walk_started = time.perf_counter()
+    walk = run_reduced_nested_ls_schur_newton(
+        jax_boozer,
+        iota=float(y_star[0]),
+        G=float(y_star[1]),
+        maxiter=int(maxiter),
+    )
+    walk_seconds = time.perf_counter() - walk_started
+    return NestedLsB37NestedTiming(
+        b3_matched=True,
+        jax_walk_seconds=float(walk_seconds),
+        jax_walk_iter=int(walk.iteration_count),
+        jax_walk_iota=float(walk.iota),
+        jax_walk_success=bool(walk.success),
+        native_banana_seconds=float(banana_seconds),
+        native_banana_iter=int(banana["iter"]),
+        native_banana_iota=float(banana["iota"]),
+        native_banana_success=bool(banana["success"]),
+        coil_delta_inf=float(
+            max(
+                walk.coil_delta_inf,
+                float(np.linalg.norm(native_coils1 - native_coils0, ord=np.inf)),
+            )
+        ),
+        runtime=nested_ls_runtime_identity(),
+    )
+
+
 __all__ = [
     "ARCHIVED_START_QR_G",
     "ARCHIVED_START_QR_IOTA",
     "DEFAULT_F3_B37_GPU_LANE",
     "DEFAULT_F3_B37_NATIVE_LANE",
     "DEFAULT_FLAT675_BUNDLE_ROOT",
+    "NestedLsB37NestedTiming",
     "NestedLsBoundedF3B37Result",
+    "NestedLsFlatNativeB37Probe",
     "NestedLsSchurNewtonStepProbe",
+    "NestedLsSchurNewtonWalkProbe",
     "archived_f3_b37_lanes_available",
     "archived_flat675_bundle_available",
     "dump_strict_json",
     "evaluate_f3_b37_bounded_probe",
+    "evaluate_f3_b37_flat_native_probe",
+    "evaluate_f3_b37_nested_timing",
     "evaluate_f3_b37_schur_newton_step",
+    "evaluate_f3_b37_schur_newton_walk",
     "float64_ulps",
     "kib_to_gib",
     "load_archived_nested_ls_pair",
