@@ -44,6 +44,7 @@ from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     load_archived_nested_ls_pair,
     load_flat675_lane_blocks,
     nested_ls_receipt_provenance,
+    replace_native_solver_options,
 )
 
 _EVIDENCE_DIR = Path(__file__).resolve().parents[2] / "docs" / "receipts" / "evidence"
@@ -447,6 +448,28 @@ def test_b37_nested_timing_refuses_before_b3():
             jax_boozer=None,  # type: ignore[arg-type]
             b3_matched=False,
         )
+
+
+def test_replace_native_solver_options_restores_original_identity():
+    reconstruct = {
+        "newton_tol": 1.0e-13,
+        "newton_maxiter": 10,
+        "bfgs_tol": 1.0e-10,
+    }
+
+    class _Native:
+        def __init__(self):
+            self.options = reconstruct
+
+    native = _Native()
+    original = replace_native_solver_options(native, {"newton_tol": 1.0e-11})
+    assert original is reconstruct
+    assert native.options is not reconstruct
+    assert native.options["newton_tol"] == 1.0e-11
+    assert native.options["newton_maxiter"] == 10
+    native.options = original
+    assert native.options is reconstruct
+    assert native.options["newton_tol"] == 1.0e-13
 
 
 @_REQUIRES_BUNDLE

@@ -879,9 +879,12 @@ class NestedLsB37NestedTiming:
     """Process-wall JAX reconstruct walk vs native banana ``run_code``.
 
     Not an F3 7.70× claim. Requires B3 banana ``run_code`` physics match.
+    The two walls are different operators; ``comparable_operators`` is
+    always false.
     """
 
     b3_matched: bool
+    comparable_operators: bool
     jax_walk_seconds: float
     jax_walk_iter: int
     jax_walk_iota: float
@@ -1034,6 +1037,17 @@ def evaluate_f3_b37_schur_newton_walk(
     )
 
 
+def replace_native_solver_options(
+    native: BoozerSurface,
+    overlay: dict[str, object],
+) -> dict[str, object]:
+    """Replace ``native.options`` with a copy plus ``overlay``. Return the old dict."""
+
+    original = native.options
+    native.options = {**original, **overlay}
+    return original
+
+
 def evaluate_f3_b37_nested_timing(
     native: BoozerSurface,
     jax_boozer: BoozerSurfaceJAX,
@@ -1058,21 +1072,23 @@ def evaluate_f3_b37_nested_timing(
     require_full_y_rank(solution)
     y_star = np.asarray(solution.solution, dtype=np.float64)
     banana_options = nested_ls_banana_run_code_options()
-    previous_options = {
-        "newton_tol": native.options["newton_tol"],
-        "newton_maxiter": native.options["newton_maxiter"],
-        "bfgs_tol": native.options["bfgs_tol"],
-    }
-    native.options["newton_tol"] = banana_options["newton_tol"]
-    native.options["newton_maxiter"] = banana_options["newton_maxiter"]
-    native.options["bfgs_tol"] = banana_options["bfgs_tol"]
+    original_options = replace_native_solver_options(
+        native,
+        {
+            "newton_tol": banana_options["newton_tol"],
+            "newton_maxiter": banana_options["newton_maxiter"],
+            "bfgs_tol": banana_options["bfgs_tol"],
+        },
+    )
     native.surface.set_dofs(native_start)
     native_coils0 = np.asarray(native.biotsavart.x, dtype=np.float64)
     native.need_to_run_code = True
     banana_started = time.perf_counter()
-    banana = native.run_code(float(y_star[0]), G=float(y_star[1]))
-    banana_seconds = time.perf_counter() - banana_started
-    native.options.update(previous_options)
+    try:
+        banana = native.run_code(float(y_star[0]), G=float(y_star[1]))
+        banana_seconds = time.perf_counter() - banana_started
+    finally:
+        native.options = original_options
     if banana is None:
         raise RuntimeError("native banana run_code returned None.")
     native_coils1 = np.asarray(native.biotsavart.x, dtype=np.float64)
@@ -1087,6 +1103,7 @@ def evaluate_f3_b37_nested_timing(
     walk_seconds = time.perf_counter() - walk_started
     return NestedLsB37NestedTiming(
         b3_matched=True,
+        comparable_operators=False,
         jax_walk_seconds=float(walk_seconds),
         jax_walk_iter=int(walk.iteration_count),
         jax_walk_iota=float(walk.iota),
@@ -1130,6 +1147,7 @@ __all__ = [
     "load_flat675_lane_blocks",
     "nested_ls_receipt_provenance",
     "nested_ls_runtime_identity",
+    "replace_native_solver_options",
     "sha256_file",
     "sha256_float64",
 ]

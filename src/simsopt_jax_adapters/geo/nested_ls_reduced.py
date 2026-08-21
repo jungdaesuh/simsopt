@@ -498,46 +498,53 @@ def nested_ls_runtime_coil_closures(
 ):
     """Residual, ``Φ``, and ``Φ̂`` as functions of ``(packed, coil_dofs)``.
 
-    Coil DOFs stay runtime arguments through
+    Uses the binary ``(x, coil_set_spec)`` penalty kernels. Coil DOFs
+    stay runtime arguments through
     ``BiotSavartJAX.coil_set_spec_from_dofs``. Frozen-coil Newton still
     uses :func:`nested_ls_reduced_closures`.
     """
 
     biotsavart = jax_boozer.biotsavart
+    residual_kernel = jax_boozer._get_traceable_penalty_residual(
+        True,
+        weight_inv_modB,
+        constraint_weight,
+    )
+    objective_kernel = jax_boozer._get_traceable_penalty_objective(
+        True,
+        weight_inv_modB,
+        constraint_weight,
+    )
 
     def residual_fn(packed: jax.Array, coil_dofs: jax.Array) -> jax.Array:
         spec = biotsavart.coil_set_spec_from_dofs(coil_dofs)
-        return jax_boozer._make_penalty_residual_with(
-            True,
-            weight_inv_modB,
-            constraint_weight,
-            coil_set_spec=spec,
-            hostify_inputs=False,
-            decision_split_mode="jvp",
-        )(packed)
+        return residual_kernel(packed, spec)
 
     def objective_fn(packed: jax.Array, coil_dofs: jax.Array) -> jax.Array:
         spec = biotsavart.coil_set_spec_from_dofs(coil_dofs)
-        return jax_boozer._make_penalty_objective_with(
-            True,
-            weight_inv_modB,
-            constraint_weight,
-            coil_set_spec=spec,
-            hostify_inputs=False,
-            decision_split_mode="jvp",
-        )(packed)
+        return objective_kernel(packed, spec)
 
-    def phi_hat(surface_dofs: jax.Array, coil_dofs: jax.Array) -> jax.Array:
+    def residual_at_coil(coil_dofs: jax.Array):
         coil = jnp.asarray(coil_dofs, dtype=jnp.float64).reshape(-1)
 
-        def residual_at_coil(packed: jax.Array) -> jax.Array:
+        def residual_of_packed(packed: jax.Array) -> jax.Array:
             return residual_fn(packed, coil)
 
-        solution = solve_projected_y(residual_at_coil, surface_dofs)
-        y_star = solution.solution
-        projected = (solution.numerical_rank == _Y_SIZE) & solution.numerics_finite
-        y_star = jnp.where(projected, y_star, jnp.full_like(y_star, jnp.nan))
-        return objective_fn(pack_surface_and_y(surface_dofs, y_star), coil)
+        return residual_of_packed
+
+    def objective_at_coil(coil_dofs: jax.Array):
+        coil = jnp.asarray(coil_dofs, dtype=jnp.float64).reshape(-1)
+
+        def objective_of_packed(packed: jax.Array) -> jax.Array:
+            return objective_fn(packed, coil)
+
+        return objective_of_packed
+
+    def phi_hat(surface_dofs: jax.Array, coil_dofs: jax.Array) -> jax.Array:
+        return make_reduced_penalty_objective(
+            residual_at_coil(coil_dofs),
+            objective_at_coil(coil_dofs),
+        )(surface_dofs)
 
     return residual_fn, objective_fn, phi_hat
 
@@ -1122,7 +1129,7 @@ def apply_reduced_mixed_schur_coil_tangent(
     return phi_sc_v - operator.phi_sy @ jnp.linalg.solve(operator.phi_yy, phi_yc_v)
 
 
-_IMPLICIT_ADJOINT_DEFAULT_DENSE_BYTES: Final[int] = 1_048_576
+NESTED_LS_IMPLICIT_ADJOINT_DEFAULT_DENSE_BYTES: Final[int] = 1_048_576
 
 
 def implicit_adjoint_coil_gradient(
@@ -1134,7 +1141,9 @@ def implicit_adjoint_coil_gradient(
     *,
     stab: float = NESTED_LS_NEWTON_STAB,
     operator: NestedLsReducedSchurOperator | None = None,
-    max_dense_linearization_bytes: int | None = _IMPLICIT_ADJOINT_DEFAULT_DENSE_BYTES,
+    max_dense_linearization_bytes: int | None = (
+        NESTED_LS_IMPLICIT_ADJOINT_DEFAULT_DENSE_BYTES
+    ),
 ) -> jax.Array:
     """Return ``−Ĥ_scᵀ λ`` with ``(Ĥ_ss+stab I) λ = v_s``.
 
@@ -1251,6 +1260,7 @@ def run_banana_run_code_pair(
 
 
 __all__ = [
+    "NESTED_LS_IMPLICIT_ADJOINT_DEFAULT_DENSE_BYTES",
     "NESTED_LS_SCHUR_GMRES_MAXITER",
     "NESTED_LS_SCHUR_GMRES_RESTART",
     "NESTED_LS_SCHUR_GMRES_RTOL",
