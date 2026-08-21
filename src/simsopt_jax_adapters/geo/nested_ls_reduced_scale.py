@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import scipy
 import simsopt
@@ -35,15 +36,23 @@ from simsopt_jax_adapters.geo.flat675.bundle import load_flat675_bundle
 from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_CONSTRAINT_WEIGHT,
     NESTED_LS_NEWTON_MAXITER,
+    NESTED_LS_NEWTON_STAB,
     NESTED_LS_NEWTON_TOL,
     NESTED_LS_WEIGHT_INV_MODB,
     nested_ls_banana_run_code_options,
     nested_ls_physics_newton_kwargs,
 )
 from simsopt_jax_adapters.geo.nested_ls_reduced import (
+    NESTED_LS_SCHUR_GMRES_MAXITER_CAP,
+    NESTED_LS_SCHUR_GMRES_RESTART,
+    NESTED_LS_SCHUR_GMRES_RTOL,
     NestedLsB37TimingBlocked,
+    NestedLsReducedRankError,
     compare_ad_qr_and_schur_hvp,
+    eisenstat_walker_forcing_eta,
     factor_reduced_nested_ls_schur,
+    factor_schur_fourier_block_preconditioner,
+    linear_solve_meets_forcing,
     nested_ls_reduced_closures,
     pack_surface_and_y,
     reduced_penalty_gradient,
@@ -52,6 +61,7 @@ from simsopt_jax_adapters.geo.nested_ls_reduced import (
     require_full_y_rank,
     run_reduced_nested_ls_newton,
     run_reduced_nested_ls_schur_newton,
+    solve_operator_gmres_with_forcing,
     solve_projected_y,
 )
 
@@ -1066,6 +1076,205 @@ def evaluate_f3_b37_schur_newton_walk(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class NestedLsStep2ForcingProbe:
+    """Post-step-1 F3 B37 linear-solve η versus Krylov budget and Fourier ``M``.
+
+    Certificate is the independent unpreconditioned
+    ``η = ‖(Ĥ+stab I)δ − g‖₂ / ‖g‖₂``. Not a walk, not a timing claim,
+    and not F3 7.70×. ``gmres_matvecs`` is unavailable JAX telemetry.
+    """
+
+    reduced_grad_l2_before: float
+    reduced_grad_l2_after_step1: float
+    step1_accepted: bool
+    step1_eta_achieved: float
+    step1_eta_requested: float
+    step2_eta_requested: float
+    gmres_restart: int
+    coil_delta_inf: float
+    factor_seconds: float
+    fourier_m_seconds: float | None
+    fourier_m_error: str | None
+    rows: tuple[dict[str, object], ...]
+    any_row_meets_forcing: bool
+    runtime: dict[str, object]
+    provenance: dict[str, object]
+
+    def as_payload(self) -> dict[str, object]:
+        return asdict(self)
+
+
+def _step2_forcing_row(
+    matvec,
+    rhs: jax.Array,
+    *,
+    eta_requested: float,
+    restart: int,
+    maxiter: int,
+    maxiter_cap: int,
+    preconditioner,
+    preconditioner_name: str,
+) -> dict[str, object]:
+    started = time.perf_counter()
+    _delta, _residual, _info, residual_l2, eta, used = (
+        solve_operator_gmres_with_forcing(
+            matvec,
+            rhs,
+            eta_requested=float(eta_requested),
+            restart=int(restart),
+            maxiter=int(maxiter),
+            maxiter_cap=int(maxiter_cap),
+            preconditioner=preconditioner,
+        )
+    )
+    del _delta, _residual, _info
+    return {
+        "preconditioner": preconditioner_name,
+        "gmres_maxiter": int(maxiter),
+        "gmres_maxiter_used": int(used),
+        "gmres_maxiter_cap": int(maxiter_cap),
+        "gmres_restart": int(restart),
+        "eta_achieved": float(eta),
+        "eta_requested": float(eta_requested),
+        "meets_forcing": bool(linear_solve_meets_forcing(eta, eta_requested)),
+        "gmres_residual_l2": float(residual_l2),
+        "gmres_seconds": float(time.perf_counter() - started),
+    }
+
+
+def evaluate_f3_b37_step2_forcing_probe(
+    jax_boozer: BoozerSurfaceJAX,
+) -> NestedLsStep2ForcingProbe:
+    """One accepted F3 B37 Schur step, then η vs ``maxiter`` and Fourier ``M``.
+
+    Does not run C++ rejudge and does not walk to 1e-13. Restart stays 8.
+    """
+
+    residual_fn, objective_fn, _phi_hat = nested_ls_reduced_closures(jax_boozer)
+    del _phi_hat
+    surface0 = np.asarray(jax_boozer.surface.get_dofs(), dtype=np.float64)
+    solution = solve_projected_y(residual_fn, surface0, np.zeros(2, dtype=np.float64))
+    require_full_y_rank(solution)
+    y_star = np.asarray(solution.solution, dtype=np.float64)
+    gradient0 = np.asarray(
+        reduced_penalty_gradient_envelope(objective_fn, surface0, y_star),
+        dtype=np.float64,
+    )
+    g0 = float(np.linalg.norm(gradient0))
+    step = run_reduced_nested_ls_schur_newton(
+        jax_boozer,
+        iota=float(y_star[0]),
+        G=float(y_star[1]),
+        maxiter=1,
+    )
+    g1 = float(np.linalg.norm(step.reduced_gradient))
+    step1 = step.steps[0]
+    eta_k = eisenstat_walker_forcing_eta(
+        g1,
+        previous_grad_norm=g0,
+        previous_eta=float(step1.gmres_rtol),
+        eta_max=NESTED_LS_SCHUR_GMRES_RTOL,
+        nonlinear_tol=NESTED_LS_NEWTON_TOL,
+    )
+    factor_started = time.perf_counter()
+    operator = factor_reduced_nested_ls_schur(
+        residual_fn,
+        objective_fn,
+        step.surface_dofs,
+        y_probe=np.array([float(step.iota), float(step.G)], dtype=np.float64),
+    )
+    factor_seconds = time.perf_counter() - factor_started
+    stab = jnp.asarray(NESTED_LS_NEWTON_STAB, dtype=jnp.float64)
+
+    def matvec(tangent: jax.Array) -> jax.Array:
+        return operator.apply(tangent) + stab * tangent
+
+    rhs = jnp.asarray(step.reduced_gradient, dtype=jnp.float64)
+    restart = int(NESTED_LS_SCHUR_GMRES_RESTART)
+    rows = [
+        _step2_forcing_row(
+            matvec,
+            rhs,
+            eta_requested=eta_k,
+            restart=restart,
+            maxiter=budget,
+            maxiter_cap=budget,
+            preconditioner=None,
+            preconditioner_name="none",
+        )
+        for budget in (8, 16, 32)
+    ]
+    for cap in (32, NESTED_LS_SCHUR_GMRES_MAXITER_CAP):
+        rows.append(
+            _step2_forcing_row(
+                matvec,
+                rhs,
+                eta_requested=eta_k,
+                restart=restart,
+                maxiter=1,
+                maxiter_cap=cap,
+                preconditioner=None,
+                preconditioner_name="none",
+            )
+        )
+    fourier_m_seconds: float | None = None
+    fourier_m_error: str | None = None
+    try:
+        m_started = time.perf_counter()
+        names = tuple(jax_boozer.surface.local_full_dof_names)
+        preconditioner = factor_schur_fourier_block_preconditioner(
+            operator,
+            NESTED_LS_NEWTON_STAB,
+            names,
+            mpol=int(jax_boozer.surface.mpol),
+            ntor=int(jax_boozer.surface.ntor),
+        )
+        fourier_m_seconds = float(time.perf_counter() - m_started)
+        for maxiter, cap in ((1, 1), (1, 8)):
+            rows.append(
+                _step2_forcing_row(
+                    matvec,
+                    rhs,
+                    eta_requested=eta_k,
+                    restart=restart,
+                    maxiter=maxiter,
+                    maxiter_cap=cap,
+                    preconditioner=preconditioner.apply,
+                    preconditioner_name="fourier_block",
+                )
+            )
+    except NestedLsReducedRankError as error:
+        fourier_m_error = str(error)
+    provenance = nested_ls_receipt_provenance()
+    runtime = {
+        "hostname": provenance["hostname"],
+        "python_executable": provenance["python_executable"],
+        "jax_default_backend": provenance["jax_default_backend"],
+        "jax_devices": provenance["jax_devices"],
+        "jax_platforms_env": provenance["jax_platforms_env"],
+        "jax_enable_x64_env": provenance["jax_enable_x64_env"],
+        "timestamp_utc": provenance["timestamp_utc"],
+    }
+    return NestedLsStep2ForcingProbe(
+        reduced_grad_l2_before=g0,
+        reduced_grad_l2_after_step1=g1,
+        step1_accepted=bool(step.step_accepted),
+        step1_eta_achieved=float(step.gmres_forcing_eta),
+        step1_eta_requested=float(step1.gmres_rtol),
+        step2_eta_requested=float(eta_k),
+        gmres_restart=restart,
+        coil_delta_inf=float(step.coil_delta_inf),
+        factor_seconds=float(factor_seconds),
+        fourier_m_seconds=fourier_m_seconds,
+        fourier_m_error=fourier_m_error,
+        rows=tuple(rows),
+        any_row_meets_forcing=any(bool(row["meets_forcing"]) for row in rows),
+        runtime=runtime,
+        provenance=provenance,
+    )
+
+
 def replace_native_solver_options(
     native: BoozerSurface,
     overlay: dict[str, object],
@@ -1162,6 +1371,7 @@ __all__ = [
     "NestedLsFlatNativeB37Probe",
     "NestedLsSchurNewtonStepProbe",
     "NestedLsSchurNewtonWalkProbe",
+    "NestedLsStep2ForcingProbe",
     "archived_f3_b37_lanes_available",
     "archived_flat675_bundle_available",
     "dump_strict_json",
@@ -1170,6 +1380,7 @@ __all__ = [
     "evaluate_f3_b37_nested_timing",
     "evaluate_f3_b37_schur_newton_step",
     "evaluate_f3_b37_schur_newton_walk",
+    "evaluate_f3_b37_step2_forcing_probe",
     "float64_ulps",
     "kib_to_gib",
     "load_archived_nested_ls_pair",

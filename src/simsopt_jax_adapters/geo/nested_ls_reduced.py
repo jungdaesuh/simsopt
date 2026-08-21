@@ -49,9 +49,10 @@ PackedPenaltyHvp = Callable[[jax.Array, jax.Array], jax.Array]
 NESTED_LS_SCHUR_GMRES_RESTART: Final[int] = 8
 NESTED_LS_SCHUR_GMRES_MAXITER: Final[int] = 1
 # Outer GMRES restart-cycle cap. Raise this, not ``restart``, when a
-# step misses η_requested. Exact Fourier-block ``M`` at 661 still costs
-# one HVP per live DOF and is opt-in, not this default.
-NESTED_LS_SCHUR_GMRES_MAXITER_CAP: Final[int] = 8
+# step misses η_requested. F3 B37 step 2 needed 64 cycles to meet
+# Eisenstat–Walker η≈0.05; Fourier-block Jacobi ``M`` made the
+# unpreconditioned certificate worse and stays opt-in.
+NESTED_LS_SCHUR_GMRES_MAXITER_CAP: Final[int] = 64
 NESTED_LS_SCHUR_BACKTRACKING_MAX_STEPS: Final[int] = 8
 # Inexact-Newton forcing η_k = ‖(Ĥ_ss+stab I)δs − g‖₂ / ‖g‖₂. 0.24 is
 # η_max (F3 B37 SciPy-cap observation). Choice 2 of Eisenstat–Walker

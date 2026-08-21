@@ -56,8 +56,14 @@ _F3_B37_SCHUR_ONE_STEP_EVIDENCE = (
     _EVIDENCE_DIR / "nested_ls_reduced_gate1_f3_b37_schur_one_step_20260820.json"
 )
 _F3_B37_GPU_WALK_EVIDENCE = _EVIDENCE_DIR / "nested_ls_reduced_gpu_walk_20260821.json"
+_F3_B37_GPU_STEP2_EVIDENCE = (
+    _EVIDENCE_DIR / "nested_ls_reduced_gpu_step2_forcing_20260821.json"
+)
 _GPU_WALK_PUBLICATION = (
     "GPU forcing-certified Schur walk. Not a timing claim and not F3 7.70x."
+)
+_GPU_STEP2_PUBLICATION = (
+    "GPU step-2 forcing probe. Not a walk, not a timing claim, and not F3 7.70x."
 )
 _GPU_WALK_GMRES_MATVECS_NOTE = (
     "JAX incremental GMRES does not report operator applications; "
@@ -390,6 +396,47 @@ def test_authored_gpu_walk_json_is_strict_and_claim_grade():
     assert "speed" not in payload["publication"].lower() or "not a timing" in (
         payload["publication"].lower()
     )
+    assert payload["gmres_matvecs_note"] == _GPU_WALK_GMRES_MATVECS_NOTE
+
+
+@pytest.mark.skipif(
+    not _F3_B37_GPU_STEP2_EVIDENCE.is_file(),
+    reason="authored GPU step-2 forcing JSON not yet produced",
+)
+def test_authored_gpu_step2_forcing_json_is_strict_and_not_a_walk():
+    raw = _F3_B37_GPU_STEP2_EVIDENCE.read_text(encoding="utf-8")
+    assert "NaN" not in raw
+    payload = json.loads(raw)
+    dump_strict_json(payload)
+    assert payload["schema"] == "nested-ls-reduced-gpu-step2-forcing.v1"
+    assert payload["written_by_pytest"] is False
+    assert payload["publication"] == _GPU_STEP2_PUBLICATION
+    assert payload["driver"] == (
+        "simsopt_jax_adapters.geo.nested_ls_reduced_scale."
+        "evaluate_f3_b37_step2_forcing_probe"
+    )
+    boundary = payload["claim_boundary"]
+    assert boundary["nested_speed_claim"] is False
+    assert boundary["inherits_f3_7_70x"] is False
+    assert boundary["f3_sealed"] is True
+    assert boundary["full_walk_attempted"] is False
+    assert boundary["ten_step_walk"] is False
+    probe = payload["probe"]
+    assert probe["step1_accepted"] is True
+    assert float(probe["step2_eta_requested"]) < 0.24
+    assert int(probe["gmres_restart"]) == 8
+    assert float(probe["coil_delta_inf"]) == 0.0
+    assert probe["rows"]
+    assert all(int(row["gmres_restart"]) == 8 for row in probe["rows"])
+    assert all(not bool(row["meets_forcing"]) for row in probe["rows"])
+    follow_up = payload["follow_up_cap64"]
+    assert follow_up["preconditioner"] == "none"
+    assert int(follow_up["gmres_restart"]) == 8
+    assert int(follow_up["gmres_maxiter_used"]) == 64
+    assert float(follow_up["eta_achieved"]) <= float(probe["step2_eta_requested"])
+    assert follow_up["meets_forcing"] is True
+    runtime = probe["runtime"]
+    assert runtime["jax_default_backend"] == "gpu"
     assert payload["gmres_matvecs_note"] == _GPU_WALK_GMRES_MATVECS_NOTE
 
 
