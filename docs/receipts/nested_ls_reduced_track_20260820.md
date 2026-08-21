@@ -187,17 +187,22 @@ costs one HVP per live DOF and stays opt-in. Pytest still does not
 write evidence JSON; ``write_strict_json`` is the authored-snapshot
 entry. Do not publish a nested/banana ratio. Do not inherit 7.70×.
 
-Live GPU one-step / walk / B37 numbers quoted above remain the
-`f50642424` **prose** session, not a committed GPU JSON artifact.
+GPU one-step artifact (``d2bf1fd24``, ``jax_gpu_fast``, ``cuda:0``,
+2026-08-21):
+``docs/receipts/evidence/nested_ls_reduced_gpu_one_step_20260821.json``.
+``step_accepted=True``, ``η=0.23566 ≤ 0.24``, GMRES ``maxiter=1``,
+JAX 16.6 s, ``‖g‖₂`` 0.01610 → 0.00380, ``success=False``. C++
+rejudge reconstruct ``ι=0.14085710956609662``, ``‖∇J‖₂=2.24e-14``,
+surface inf vs reconstruct ``4.16e-12``. Schur vs AD-QR ``rel_l2 =
+8.62e-16``. Not a ten-step walk and not a timing claim.
 
 ## Next
 
-7×7 must reach reconstruct ``‖g‖₂ ≤ 1e-13`` under the forcing
-certificate. F3 661 still needs a GPU-authored JSON walk that JAX
-itself drives to ``1e-13`` (C++ rejudge then a no-op), a matrix-free
-661 IFT vs FD of reconverged surfaces, coil-optimizer VJP
-integration, and same-operator banana timing (B3, then B37) only
-after equal success. Do not reopen F3. Do not inherit 7.70×.
+F3 661 still needs a GPU-authored JSON walk that JAX itself drives
+to ``‖g‖₂ ≤ 1e-13`` (C++ rejudge then a no-op), a matrix-free 661
+IFT vs FD of reconverged surfaces, coil-optimizer VJP integration,
+and same-operator banana timing (B3, then B37) only after equal
+success. Do not reopen F3. Do not inherit 7.70×.
 
 ## Validation of the SciPy CPU packet (`063b4fe83` / `96a1e5856`)
 
