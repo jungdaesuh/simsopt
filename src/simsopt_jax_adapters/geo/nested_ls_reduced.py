@@ -13,8 +13,9 @@ reconstruct bar in :mod:`nested_ls_contract`.
 
 from __future__ import annotations
 
+import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -51,10 +52,11 @@ NESTED_LS_SCHUR_BACKTRACKING_MAX_STEPS: Final[int] = 8
 # residual ratio observed on the F3 B37 SciPy cap (restart=8, maxiter=1).
 # Eisenstat–Walker is not implemented.
 NESTED_LS_SCHUR_GMRES_RTOL: Final[float] = 0.24
+_TENSOR_FOURIER_DOF_NAME = re.compile(r"^([xyz])\((\d+),(\d+)\)$")
 
 
 class NestedLsReducedRankError(ValueError):
-    """Raised when the ``(ι, G)`` residual columns are rank-deficient."""
+    """Raised when projected ``(ι, G)`` or a Fourier block of ``Ĥ_ss`` is rank-deficient."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -598,6 +600,97 @@ def _stabilized_schur_matvec(
     return matvec
 
 
+def tensor_fourier_mode_blocks(
+    dof_names: Sequence[str],
+    *,
+    mpol: int,
+    ntor: int,
+) -> tuple[tuple[int, ...], ...]:
+    """Partition TensorFourier DOFs into physical ``(m, n)`` harmonic blocks.
+
+    Names are ``x(i,j)``, ``y(i,j)``, ``z(i,j)``. Tensor indices map to
+    ``m = i`` or ``i-mpol`` and ``n = j`` or ``j-ntor``. Stellsym keeps
+    the live xyz companions of each harmonic in one block.
+    """
+
+    if int(mpol) < 0 or int(ntor) < 0:
+        raise ValueError(f"mpol and ntor must be nonnegative; got {mpol}, {ntor}.")
+    groups: dict[tuple[int, int], list[int]] = {}
+    for index, raw_name in enumerate(dof_names):
+        matched = _TENSOR_FOURIER_DOF_NAME.fullmatch(str(raw_name))
+        if matched is None:
+            raise ValueError(
+                "Fourier-block partition requires TensorFourier names "
+                f"'x|y|z(i,j)'; got {raw_name!r} at index {index}."
+            )
+        i_index = int(matched.group(2))
+        j_index = int(matched.group(3))
+        mode_m = i_index if i_index <= mpol else i_index - mpol
+        mode_n = j_index if j_index <= ntor else j_index - ntor
+        groups.setdefault((mode_m, mode_n), []).append(index)
+    if not groups:
+        raise ValueError("Fourier-block partition received no TensorFourier names.")
+    return tuple(tuple(groups[key]) for key in sorted(groups))
+
+
+@dataclass(frozen=True, slots=True)
+class NestedLsFourierBlockPreconditioner:
+    """Left block-Jacobi inverse of the exact Fourier blocks of ``Ĥ_ss+stab I``.
+
+    Factoring applies the Schur matvec once per live DOF and stores only
+    the ``(m, n)`` slices, not the full ``n×n`` matrix.
+    """
+
+    blocks: tuple[tuple[int, ...], ...]
+    inverses: tuple[jax.Array, ...]
+
+    def apply(self, vector: jax.Array) -> jax.Array:
+        result = jnp.zeros_like(vector)
+        for indices, inverse in zip(self.blocks, self.inverses, strict=True):
+            index_array = jnp.asarray(indices, dtype=jnp.int32)
+            result = result.at[index_array].set(inverse @ vector[index_array])
+        return result
+
+
+def factor_schur_fourier_block_preconditioner(
+    operator: NestedLsReducedSchurOperator,
+    stab: float,
+    dof_names: Sequence[str],
+    *,
+    mpol: int,
+    ntor: int,
+) -> NestedLsFourierBlockPreconditioner:
+    """Factor exact physical ``(m, n)`` blocks of ``Ĥ_ss+stab I`` for GMRES ``M``."""
+
+    blocks = tensor_fourier_mode_blocks(dof_names, mpol=mpol, ntor=ntor)
+    if sum(len(indices) for indices in blocks) != operator.surface_size:
+        raise ValueError(
+            "Fourier-block DOF names do not cover the Schur surface vector; "
+            f"covered={sum(len(indices) for indices in blocks)}, "
+            f"surface_size={operator.surface_size}."
+        )
+    matvec = _stabilized_schur_matvec(operator, jnp.asarray(stab, dtype=jnp.float64))
+    dimension = operator.surface_size
+    inverses: list[jax.Array] = []
+    for indices in blocks:
+        index_array = jnp.asarray(indices, dtype=jnp.int32)
+        columns = []
+        for dof_index in indices:
+            unit = (
+                jnp.zeros((dimension,), dtype=jnp.float64).at[int(dof_index)].set(1.0)
+            )
+            columns.append(matvec(unit)[index_array])
+        block = jnp.stack(columns, axis=1)
+        inverse = jnp.linalg.inv(block)
+        if not np.all(np.isfinite(np.asarray(jax.device_get(inverse)))):
+            raise NestedLsReducedRankError(
+                "Fourier-block of Ĥ_ss+stab I is not finite-invertible; "
+                f"indices={indices}."
+            )
+        inverses.append(inverse)
+    return NestedLsFourierBlockPreconditioner(blocks=blocks, inverses=tuple(inverses))
+
+
 def run_reduced_nested_ls_schur_newton(
     jax_boozer: BoozerSurfaceJAX,
     *,
@@ -611,12 +704,14 @@ def run_reduced_nested_ls_schur_newton(
     gmres_restart: int = NESTED_LS_SCHUR_GMRES_RESTART,
     gmres_maxiter: int = NESTED_LS_SCHUR_GMRES_MAXITER,
     gmres_rtol: float = NESTED_LS_SCHUR_GMRES_RTOL,
+    gmres_preconditioner: Callable[[jax.Array], jax.Array] | None = None,
 ) -> NestedLsSchurNewtonResult:
     """Capped inexact Newton on ``s`` using Schur ``Ĥ_ss`` and device GMRES.
 
     Mutates ``jax_boozer.surface``. Does not write ``self.res``. Packed
-    HVPs never differentiate through QR. ``gmres_rtol`` is requested
-    forcing; the certificate is achieved ``‖(Ĥ+stab I)δs − g‖₂ / ‖g‖₂``.
+    HVPs never differentiate through QR. Optional ``gmres_preconditioner``
+    is JAX GMRES ``M``; the certificate remains unpreconditioned
+    ``‖(Ĥ+stab I)δs − g‖₂ / ‖g‖₂``.
     """
 
     residual_fn, objective_fn, _phi_hat = nested_ls_reduced_closures(
@@ -673,6 +768,7 @@ def run_reduced_nested_ls_schur_newton(
             tol=float(gmres_rtol),
             restart=int(gmres_restart),
             maxiter=int(gmres_maxiter),
+            M=gmres_preconditioner,
         )
         gmres_seconds += time.perf_counter() - gmres_started
         residual = matvec(newton_jax) - rhs
@@ -682,11 +778,22 @@ def run_reduced_nested_ls_schur_newton(
         gmres_info = int(_host_vector(jnp.reshape(jnp.asarray(info), (1,)))[0])
         rhs_norm = float(np.linalg.norm(working_grad))
         gmres_forcing_eta = gmres_residual_l2 / rhs_norm
-        # GMRES from x0=0 cannot increase ‖Aδs−g‖ above ‖g‖ in exact
-        # arithmetic. An iterate worse than x0 is not a Newton direction.
-        if (not np.all(np.isfinite(newton_direction))) or (
-            gmres_residual_l2 > rhs_norm
-        ):
+        # Unpreconditioned GMRES from x0=0 cannot increase ‖Aδs−g‖ above
+        # ‖g‖. With left M, the same bound is on ‖M(Aδs−g)‖ versus ‖Mg‖.
+        if not np.all(np.isfinite(newton_direction)):
+            step_accepted = False
+            break
+        if gmres_preconditioner is None:
+            quality_residual = gmres_residual_l2
+            quality_scale = rhs_norm
+        else:
+            quality_residual = float(
+                np.linalg.norm(_host_vector(gmres_preconditioner(residual)))
+            )
+            quality_scale = float(
+                np.linalg.norm(_host_vector(gmres_preconditioner(rhs)))
+            )
+        if quality_residual > quality_scale:
             step_accepted = False
             break
         (
@@ -770,6 +877,7 @@ __all__ = [
     "NESTED_LS_SCHUR_GMRES_MAXITER",
     "NESTED_LS_SCHUR_GMRES_RESTART",
     "NESTED_LS_SCHUR_GMRES_RTOL",
+    "NestedLsFourierBlockPreconditioner",
     "NestedLsHvpComparison",
     "NestedLsReducedNewtonResult",
     "NestedLsReducedRankError",
@@ -777,6 +885,7 @@ __all__ = [
     "NestedLsYSolution",
     "compare_ad_qr_and_schur_hvp",
     "factor_reduced_nested_ls_schur",
+    "factor_schur_fourier_block_preconditioner",
     "make_reduced_penalty_objective",
     "nested_ls_reduced_closures",
     "pack_surface_and_y",
@@ -789,4 +898,5 @@ __all__ = [
     "run_reduced_nested_ls_schur_newton",
     "solve_projected_y",
     "split_surface_and_y",
+    "tensor_fourier_mode_blocks",
 ]
