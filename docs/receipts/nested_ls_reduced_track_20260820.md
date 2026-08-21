@@ -154,14 +154,18 @@ physical ``(m, n)`` TensorFourier blocks of the exact ``Ĥ_ss+stab I``
 Schur operator, used as left GMRES ``M``. Default Newton remains
 unpreconditioned. 7×7 NCSX is the canary, not F3.
 
+**Chunked dense ``Ĥ_ss`` A/B (live path, this commit):**
+memory-capped chunked materialization of ``Ĥ_ss+stab I`` via the
+linear-solve SSOT. A is dense LU; B is the dense inverse as left GMRES
+``M``. Default Newton stays GMRES. 7×7 is the canary.
+
 ## Next
 
-1. Memory-capped chunked dense `Ĥ_ss` A/B.
-2. One GPU correction at F3 B37, C++ rejudge.
-3. Flat-native B37, then a ten-step frozen-coil walk.
-4. Runtime coil DOFs + implicit adjoint.
-5. B3 vs banana `run_code`.
-6. B37 nested timing only after B3.
+1. One GPU correction at F3 B37, C++ rejudge.
+2. Flat-native B37, then a ten-step frozen-coil walk.
+3. Runtime coil DOFs + implicit adjoint.
+4. B3 vs banana `run_code`.
+5. B37 nested timing only after B3.
 
 Do not reopen F3. Do not inherit 7.70×. Trajectories need not match;
 require the same native-rejudged branch.
