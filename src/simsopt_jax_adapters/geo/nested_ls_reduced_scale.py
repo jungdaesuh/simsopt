@@ -274,6 +274,12 @@ def dump_strict_json(payload: dict[str, object]) -> str:
     return json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n"
 
 
+def write_strict_json(path: Path, payload: dict[str, object]) -> None:
+    """Author an evidence JSON file. Pytest must not call this."""
+
+    path.write_text(dump_strict_json(payload), encoding="utf-8")
+
+
 def sha256_file(path: Path) -> str:
     """SHA-256 of a file's raw bytes."""
 
@@ -1150,4 +1156,5 @@ __all__ = [
     "replace_native_solver_options",
     "sha256_file",
     "sha256_float64",
+    "write_strict_json",
 ]

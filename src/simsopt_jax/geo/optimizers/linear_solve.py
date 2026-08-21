@@ -666,7 +666,9 @@ def _exact_newton_gmres_iteration_limits(n):
     return restart, maxiter
 
 
-def _run_operator_gmres(matvec, rhs, *, tol, restart=None, maxiter=None, M=None):
+def _run_operator_gmres(
+    matvec, rhs, *, tol, restart=None, maxiter=None, M=None, x0=None
+):
     n = rhs.shape[0]
     default_restart, default_maxiter = _gmres_iteration_limits(n)
     restart = default_restart if restart is None else int(restart)
@@ -679,6 +681,7 @@ def _run_operator_gmres(matvec, rhs, *, tol, restart=None, maxiter=None, M=None)
         return gmres(
             matvec,
             rhs,
+            x0,
             tol=tol,
             atol=0.0,
             restart=restart,

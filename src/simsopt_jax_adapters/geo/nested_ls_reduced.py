@@ -48,11 +48,18 @@ _Y_SIZE = FLAT675_Y_COLUMN_COUNT
 PackedPenaltyHvp = Callable[[jax.Array, jax.Array], jax.Array]
 NESTED_LS_SCHUR_GMRES_RESTART: Final[int] = 8
 NESTED_LS_SCHUR_GMRES_MAXITER: Final[int] = 1
+# Outer GMRES restart-cycle cap. Raise this, not ``restart``, when a
+# step misses η_requested. Exact Fourier-block ``M`` at 661 still costs
+# one HVP per live DOF and is opt-in, not this default.
+NESTED_LS_SCHUR_GMRES_MAXITER_CAP: Final[int] = 8
 NESTED_LS_SCHUR_BACKTRACKING_MAX_STEPS: Final[int] = 8
-# Inexact-Newton forcing η_k = ‖(Ĥ_ss+stab I)δs − g‖₂ / ‖g‖₂. 0.24 is the
-# residual ratio observed on the F3 B37 SciPy cap (restart=8, maxiter=1).
-# Eisenstat–Walker is not implemented.
+# Inexact-Newton forcing η_k = ‖(Ĥ_ss+stab I)δs − g‖₂ / ‖g‖₂. 0.24 is
+# η_max (F3 B37 SciPy-cap observation). Choice 2 of Eisenstat–Walker
+# 1996 adapts η_k downward from this cap.
 NESTED_LS_SCHUR_GMRES_RTOL: Final[float] = 0.24
+NESTED_LS_EW_GAMMA: Final[float] = 0.9
+NESTED_LS_EW_ALPHA: Final[float] = 2.0
+NESTED_LS_EW_SAFEGUARD: Final[float] = 0.1
 NESTED_LS_DENSE_FLOAT64_BYTES: Final[int] = 8
 _TENSOR_FOURIER_DOF_NAME = re.compile(r"^([xyz])\((\d+),(\d+)\)$")
 
@@ -154,6 +161,8 @@ class NestedLsSchurNewtonStepRecord:
     grad_l2: float
     gmres_forcing_eta: float
     gmres_residual_l2: float
+    gmres_rtol: float
+    gmres_maxiter: int
     step_alpha: float
     step_accepted: bool
 
@@ -188,12 +197,13 @@ class NestedLsB37TimingBlocked(RuntimeError):
 class NestedLsSchurNewtonResult:
     """One capped Schur-Newton polish on ``s``, with Krylov telemetry.
 
-    ``gmres_rtol`` is the requested forcing (JAX ``tol``).
-    ``gmres_forcing_eta`` is the achieved ``gmres_residual_l2 / ‖g‖₂``.
-    ``gmres_solution`` is the GMRES ``δs`` before Armijo. ``gmres_info``
-    is JAX's 0/−1 NaN placeholder, not SciPy's iteration count.
-    ``gmres_matvecs`` stays 0: JAX incremental GMRES does not report
-    operator applications.
+    ``gmres_rtol`` is η_max passed by the caller. Each step's requested
+    η_k is Eisenstat–Walker Choice 2, recorded on the step. Armijo runs
+    only when the independent unpreconditioned certificate satisfies
+    ``gmres_forcing_eta ≤ η_k``. ``gmres_maxiter`` is the last Krylov
+    restart-cycle count actually used. ``gmres_info`` is JAX's 0/−1
+    NaN placeholder, not SciPy's iteration count. ``gmres_matvecs``
+    stays 0: JAX incremental GMRES does not report operator applications.
     """
 
     success: bool
@@ -561,6 +571,101 @@ def _coil_coordinates(biotsavart) -> NDArray[np.float64]:
     return np.array(biotsavart.x, dtype=np.float64, copy=True)
 
 
+def eisenstat_walker_forcing_eta(
+    grad_norm: float,
+    *,
+    previous_grad_norm: float | None,
+    previous_eta: float | None,
+    eta_max: float,
+    nonlinear_tol: float,
+) -> float:
+    """Eisenstat–Walker 1996 Choice 2 forcing, capped at ``eta_max``.
+
+    ``η = γ (‖g_k‖/‖g_{k-1}‖)^α`` with ``γ=0.9``, ``α=2``. If
+    ``γ η_{k-1}^α > 0.1``, η cannot drop faster than that freeze.
+    Floor ``½ τ / ‖g_k‖`` prevents oversolving near the nonlinear
+    tolerance. The first iteration returns ``eta_max``.
+    """
+
+    cap = float(eta_max)
+    current = float(grad_norm)
+    if (
+        previous_grad_norm is None
+        or not np.isfinite(previous_grad_norm)
+        or float(previous_grad_norm) <= 0.0
+    ):
+        eta = cap
+    else:
+        ratio = current / float(previous_grad_norm)
+        eta = NESTED_LS_EW_GAMMA * ratio**NESTED_LS_EW_ALPHA
+        if previous_eta is not None and np.isfinite(previous_eta):
+            freeze = NESTED_LS_EW_GAMMA * float(previous_eta) ** NESTED_LS_EW_ALPHA
+            if freeze > NESTED_LS_EW_SAFEGUARD:
+                eta = max(eta, freeze)
+        eta = min(cap, eta)
+    if current > 0.0:
+        eta = min(cap, max(eta, 0.5 * float(nonlinear_tol) / current))
+    return float(eta)
+
+
+def linear_solve_meets_forcing(eta_achieved: float, eta_requested: float) -> bool:
+    """True when the unpreconditioned certificate is at most η_requested."""
+
+    return bool(np.isfinite(eta_achieved) and eta_achieved <= float(eta_requested))
+
+
+def solve_operator_gmres_with_forcing(
+    matvec: Callable[[jax.Array], jax.Array],
+    rhs: jax.Array,
+    *,
+    eta_requested: float,
+    restart: int,
+    maxiter: int,
+    maxiter_cap: int,
+    preconditioner: Callable[[jax.Array], jax.Array] | None = None,
+) -> tuple[jax.Array, jax.Array, jax.Array, float, float, int]:
+    """Device GMRES with doubling restart-cycles until η ≤ requested.
+
+    The accept/reject certificate is the independent unpreconditioned
+    ``‖Aδ − b‖₂ / ‖b‖₂``, not JAX ``info`` and not a comparison to the
+    zero guess. If that certificate misses, retry from the current ``δ``
+    with a tighter JAX ``tol`` so incremental GMRES cannot stop early
+    on its internal residual estimate.
+    """
+
+    rhs_host = _host_vector(rhs)
+    rhs_norm = float(np.linalg.norm(rhs_host))
+    used = max(1, int(maxiter))
+    cap = max(int(maxiter_cap), used)
+    jax_tol = float(eta_requested)
+    newton_jax = jnp.zeros_like(rhs)
+    residual = -rhs
+    info: object = jnp.asarray(-1, dtype=jnp.int32)
+    residual_l2 = rhs_norm
+    eta = 1.0 if rhs_norm > 0.0 else 0.0
+    x0 = None
+    while True:
+        newton_jax, info = _run_operator_gmres(
+            matvec,
+            rhs,
+            tol=float(jax_tol),
+            restart=int(restart),
+            maxiter=int(used),
+            M=preconditioner,
+            x0=x0,
+        )
+        residual = matvec(newton_jax) - rhs
+        residual_l2 = float(np.linalg.norm(_host_vector(residual)))
+        eta = residual_l2 / rhs_norm if rhs_norm > 0.0 else 0.0
+        if linear_solve_meets_forcing(eta, eta_requested) or used >= cap:
+            break
+        x0 = newton_jax
+        used = min(cap, used * 2)
+        if np.isfinite(eta) and eta > 0.0:
+            jax_tol = min(float(eta_requested), 0.25 * float(eta))
+    return newton_jax, residual, jnp.asarray(info), residual_l2, float(eta), int(used)
+
+
 def run_reduced_nested_ls_newton(
     jax_boozer: BoozerSurfaceJAX,
     *,
@@ -872,6 +977,7 @@ def run_reduced_nested_ls_schur_newton(
     maxiter: int = 1,
     gmres_restart: int = NESTED_LS_SCHUR_GMRES_RESTART,
     gmres_maxiter: int = NESTED_LS_SCHUR_GMRES_MAXITER,
+    gmres_maxiter_cap: int = NESTED_LS_SCHUR_GMRES_MAXITER_CAP,
     gmres_rtol: float = NESTED_LS_SCHUR_GMRES_RTOL,
     gmres_preconditioner: Callable[[jax.Array], jax.Array] | None = None,
     linear_solver: str = "gmres",
@@ -882,8 +988,10 @@ def run_reduced_nested_ls_schur_newton(
     Mutates ``jax_boozer.surface``. Does not write ``self.res``. Packed
     HVPs never differentiate through QR. ``linear_solver`` is ``gmres``
     or ``dense_lu``. Optional ``gmres_preconditioner`` is JAX GMRES
-    ``M``. The certificate remains unpreconditioned
-    ``‖(Ĥ+stab I)δs − g‖₂ / ‖g‖₂``.
+    ``M``. Armijo runs only when the independent unpreconditioned
+    ``η = ‖(Ĥ+stab I)δs − g‖₂ / ‖g‖₂`` is at most the Eisenstat–Walker
+    request. Weak solves retry by doubling GMRES ``maxiter`` up to
+    ``gmres_maxiter_cap``, not by raising ``restart``.
     """
 
     residual_fn, objective_fn, _phi_hat = nested_ls_reduced_closures(
@@ -908,6 +1016,10 @@ def run_reduced_nested_ls_schur_newton(
     gmres_residual_l2 = 0.0
     gmres_forcing_eta = 0.0
     gmres_solution = np.zeros(surface.size, dtype=np.float64)
+    used_gmres_maxiter = int(gmres_maxiter)
+    requested_eta = float(gmres_rtol)
+    previous_grad_norm: float | None = None
+    previous_eta: float | None = None
     factor_seconds = 0.0
     gmres_seconds = 0.0
     phi_yy_condition = 0.0
@@ -921,6 +1033,13 @@ def run_reduced_nested_ls_schur_newton(
         grad_norm = float(np.linalg.norm(working_grad))
         if grad_norm <= tol:
             break
+        requested_eta = eisenstat_walker_forcing_eta(
+            grad_norm,
+            previous_grad_norm=previous_grad_norm,
+            previous_eta=previous_eta,
+            eta_max=float(gmres_rtol),
+            nonlinear_tol=float(tol),
+        )
         factor_started = time.perf_counter()
         operator = factor_reduced_nested_ls_schur(
             residual_fn,
@@ -936,15 +1055,18 @@ def run_reduced_nested_ls_schur_newton(
         rhs = jnp.asarray(working_grad, dtype=jnp.float64)
         gmres_started = time.perf_counter()
         if linear_solver == "gmres":
-            newton_jax, info = _run_operator_gmres(
-                matvec,
-                rhs,
-                tol=float(gmres_rtol),
-                restart=int(gmres_restart),
-                maxiter=int(gmres_maxiter),
-                M=gmres_preconditioner,
+            newton_jax, residual, info, gmres_residual_l2, gmres_forcing_eta, used = (
+                solve_operator_gmres_with_forcing(
+                    matvec,
+                    rhs,
+                    eta_requested=float(requested_eta),
+                    restart=int(gmres_restart),
+                    maxiter=int(gmres_maxiter),
+                    maxiter_cap=int(gmres_maxiter_cap),
+                    preconditioner=gmres_preconditioner,
+                )
             )
-            residual = matvec(newton_jax) - rhs
+            used_gmres_maxiter = int(used)
         elif linear_solver == "dense_lu":
             dense = materialize_stabilized_schur_dense(
                 operator,
@@ -954,6 +1076,9 @@ def run_reduced_nested_ls_schur_newton(
             newton_jax = solve_stabilized_schur_dense_lu(dense, rhs)
             info = jnp.asarray(0, dtype=jnp.int32)
             residual = dense @ newton_jax - rhs
+            gmres_residual_l2 = float(np.linalg.norm(_host_vector(residual)))
+            gmres_forcing_eta = gmres_residual_l2 / grad_norm
+            used_gmres_maxiter = int(gmres_maxiter)
         else:
             raise ValueError(
                 f"linear_solver must be 'gmres' or 'dense_lu'; got {linear_solver!r}."
@@ -961,18 +1086,10 @@ def run_reduced_nested_ls_schur_newton(
         gmres_seconds += time.perf_counter() - gmres_started
         newton_direction = _host_vector(newton_jax)
         gmres_solution = np.array(newton_direction, dtype=np.float64, copy=True)
-        gmres_residual_l2 = float(np.linalg.norm(_host_vector(residual)))
         gmres_info = int(_host_vector(jnp.reshape(jnp.asarray(info), (1,)))[0])
-        rhs_norm = float(np.linalg.norm(working_grad))
-        gmres_forcing_eta = gmres_residual_l2 / rhs_norm
-        # Unpreconditioned GMRES from x0=0 cannot increase ‖Aδs−g‖ above
-        # ‖g‖. With left M, the same bound is on ‖M(Aδs−g)‖ versus ‖Mg‖.
-        if not np.all(np.isfinite(newton_direction)):
-            step_accepted = False
-            break
         if gmres_preconditioner is None:
             quality_residual = gmres_residual_l2
-            quality_scale = rhs_norm
+            quality_scale = grad_norm
         else:
             quality_residual = float(
                 np.linalg.norm(_host_vector(gmres_preconditioner(residual)))
@@ -980,7 +1097,9 @@ def run_reduced_nested_ls_schur_newton(
             quality_scale = float(
                 np.linalg.norm(_host_vector(gmres_preconditioner(rhs)))
             )
-        if quality_residual > quality_scale:
+        forcing_ok = linear_solve_meets_forcing(gmres_forcing_eta, requested_eta)
+        finite_direction = bool(np.all(np.isfinite(newton_direction)))
+        if not finite_direction or quality_residual > quality_scale or not forcing_ok:
             step_accepted = False
             y_now = _host_vector(working_solution.solution)
             step_records.append(
@@ -989,9 +1108,11 @@ def run_reduced_nested_ls_schur_newton(
                     iota=float(y_now[0]),
                     G=float(y_now[1]),
                     objective=float(working_value),
-                    grad_l2=float(rhs_norm),
+                    grad_l2=float(grad_norm),
                     gmres_forcing_eta=float(gmres_forcing_eta),
                     gmres_residual_l2=float(gmres_residual_l2),
+                    gmres_rtol=float(requested_eta),
+                    gmres_maxiter=int(used_gmres_maxiter),
                     step_alpha=float(step_alpha),
                     step_accepted=False,
                 )
@@ -1023,12 +1144,16 @@ def run_reduced_nested_ls_schur_newton(
                 grad_l2=float(np.linalg.norm(working_grad)),
                 gmres_forcing_eta=float(gmres_forcing_eta),
                 gmres_residual_l2=float(gmres_residual_l2),
+                gmres_rtol=float(requested_eta),
+                gmres_maxiter=int(used_gmres_maxiter),
                 step_alpha=float(step_alpha),
                 step_accepted=bool(step_accepted),
             )
         )
         if not step_accepted:
             break
+        previous_grad_norm = grad_norm
+        previous_eta = float(requested_eta)
         iteration_count += 1
 
     finite_iterate = _finite_vector(working_surface) and _finite_vector(working_grad)
@@ -1081,7 +1206,7 @@ def run_reduced_nested_ls_schur_newton(
         gmres_solution=np.array(gmres_solution, dtype=np.float64, copy=True),
         gmres_rtol=float(gmres_rtol),
         gmres_restart=int(gmres_restart),
-        gmres_maxiter=int(gmres_maxiter),
+        gmres_maxiter=int(used_gmres_maxiter),
         factor_seconds=float(factor_seconds),
         gmres_seconds=float(gmres_seconds),
         phi_yy_condition=float(phi_yy_condition),
@@ -1139,17 +1264,25 @@ def implicit_adjoint_coil_gradient(
     coil_dofs: object,
     surface_cotangent: object,
     *,
-    stab: float = NESTED_LS_NEWTON_STAB,
+    stab: float = 0.0,
+    linear_solver: str = "gmres",
+    gmres_rtol: float = 1.0e-10,
+    gmres_restart: int = 64,
+    gmres_maxiter: int = 10,
+    gmres_maxiter_cap: int = NESTED_LS_SCHUR_GMRES_MAXITER_CAP,
+    gmres_preconditioner: Callable[[jax.Array], jax.Array] | None = None,
     operator: NestedLsReducedSchurOperator | None = None,
     max_dense_linearization_bytes: int | None = (
         NESTED_LS_IMPLICIT_ADJOINT_DEFAULT_DENSE_BYTES
     ),
 ) -> jax.Array:
-    """Return ``−Ĥ_scᵀ λ`` with ``(Ĥ_ss+stab I) λ = v_s``.
+    """Return ``−Ĥ_scᵀ λ`` with ``Ĥ_ss λ = v_s`` (IFT, ``stab=0``).
 
     ``Ĥ_ss`` is a Hessian, so the adjoint solve is the forward Schur
-    operator. Dense LU is the 7×7 canary. Default stored-matrix cap is
-    1 MiB (refuses 661²×8); pass a larger cap to opt in at F3.
+    operator. Stabilization is not part of the IFT Jacobian; pass a
+    positive ``stab`` only as a regularized canary or fold it into
+    ``gmres_preconditioner``. Default GMRES is matrix-free. Dense LU
+    remains the 7×7 path and still honours the 1 MiB stored-matrix cap.
     """
 
     coil = jnp.asarray(coil_dofs, dtype=jnp.float64).reshape(-1)
@@ -1166,12 +1299,34 @@ def implicit_adjoint_coil_gradient(
             f"{cotangent.shape} does not match surface shape "
             f"({operator.surface_size},)."
         )
-    dense = materialize_stabilized_schur_dense(
-        operator,
-        stab,
-        max_dense_linearization_bytes=max_dense_linearization_bytes,
-    )
-    adjoint_state = solve_stabilized_schur_dense_lu(dense, cotangent)
+    if linear_solver == "dense_lu":
+        dense = materialize_stabilized_schur_dense(
+            operator,
+            stab,
+            max_dense_linearization_bytes=max_dense_linearization_bytes,
+        )
+        adjoint_state = solve_stabilized_schur_dense_lu(dense, cotangent)
+    elif linear_solver == "gmres":
+        matvec = _stabilized_schur_matvec(
+            operator, jnp.asarray(stab, dtype=jnp.float64)
+        )
+        adjoint_state, _, _, _, eta, _ = solve_operator_gmres_with_forcing(
+            matvec,
+            cotangent,
+            eta_requested=float(gmres_rtol),
+            restart=int(gmres_restart),
+            maxiter=int(gmres_maxiter),
+            maxiter_cap=int(gmres_maxiter_cap),
+            preconditioner=gmres_preconditioner,
+        )
+        if not linear_solve_meets_forcing(eta, gmres_rtol):
+            raise RuntimeError(
+                f"implicit adjoint GMRES forcing {eta} exceeded requested {gmres_rtol}."
+            )
+    else:
+        raise ValueError(
+            f"linear_solver must be 'gmres' or 'dense_lu'; got {linear_solver!r}."
+        )
 
     def mixed_map(coil_tangent: jax.Array) -> jax.Array:
         return apply_reduced_mixed_schur_coil_tangent(
@@ -1262,6 +1417,7 @@ def run_banana_run_code_pair(
 __all__ = [
     "NESTED_LS_IMPLICIT_ADJOINT_DEFAULT_DENSE_BYTES",
     "NESTED_LS_SCHUR_GMRES_MAXITER",
+    "NESTED_LS_SCHUR_GMRES_MAXITER_CAP",
     "NESTED_LS_SCHUR_GMRES_RESTART",
     "NESTED_LS_SCHUR_GMRES_RTOL",
     "NestedLsB37TimingBlocked",
@@ -1277,9 +1433,11 @@ __all__ = [
     "apply_reduced_mixed_schur_coil_tangent",
     "compare_ad_qr_and_schur_hvp",
     "dense_schur_inverse_preconditioner",
+    "eisenstat_walker_forcing_eta",
     "factor_reduced_nested_ls_schur",
     "factor_schur_fourier_block_preconditioner",
     "implicit_adjoint_coil_gradient",
+    "linear_solve_meets_forcing",
     "make_reduced_penalty_objective",
     "materialize_stabilized_schur_dense",
     "nested_ls_reduced_closures",
@@ -1294,6 +1452,7 @@ __all__ = [
     "run_reduced_nested_ls_newton",
     "run_reduced_nested_ls_schur_newton",
     "schur_dense_operator_bytes",
+    "solve_operator_gmres_with_forcing",
     "solve_projected_y",
     "solve_stabilized_schur_dense_lu",
     "split_surface_and_y",
