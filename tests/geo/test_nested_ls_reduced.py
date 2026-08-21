@@ -44,6 +44,7 @@ from simsopt_jax_adapters.geo.nested_ls_reduced import (
     NestedLsReducedRankError,
     compare_ad_qr_and_schur_hvp,
     factor_reduced_nested_ls_schur,
+    factor_schur_fourier_block_preconditioner,
     nested_ls_reduced_closures,
     pack_surface_and_y,
     projected_y_system,
@@ -55,6 +56,7 @@ from simsopt_jax_adapters.geo.nested_ls_reduced import (
     run_reduced_nested_ls_schur_newton,
     solve_projected_y,
     split_surface_and_y,
+    tensor_fourier_mode_blocks,
 )
 
 from .boozersurface_jax_test_helpers import _clone_upstream_surface
@@ -401,6 +403,86 @@ def test_schur_newton_forcing_eta_is_explicit_linear_residual_ratio():
     if schur.gmres_forcing_eta > 1.0:
         assert schur.step_accepted is False
         np.testing.assert_array_equal(schur.surface_dofs, shifted)
+
+
+@pytest.mark.boozer
+def test_fourier_block_m_canary_on_exact_schur():
+    _native_plain, jax_plain, _decision_p, iota, g0 = _nested_ls_volume_pair()
+    _native_prec, jax_prec, _decision_m, _iota_m, _g_m = _nested_ls_volume_pair()
+    del _native_plain, _native_prec, _decision_p, _decision_m, _iota_m, _g_m
+    shifted = np.array(jax_plain.surface.get_dofs(), dtype=np.float64, copy=True)
+    shifted[0] += 1.0e-3
+    jax_plain.surface.set_dofs(shifted)
+    jax_prec.surface.set_dofs(shifted)
+    names = tuple(jax_plain.surface.local_full_dof_names)
+    assert len(names) == shifted.size
+    mpol = int(jax_plain.surface.mpol)
+    ntor = int(jax_plain.surface.ntor)
+    blocks = tensor_fourier_mode_blocks(names, mpol=mpol, ntor=ntor)
+    covered = [index for block in blocks for index in block]
+    assert sorted(covered) == list(range(shifted.size))
+    assert {len(block) for block in blocks} == {1, 3, 6}
+    assert len(blocks) == (mpol + 1) * (ntor + 1)
+
+    residual_fn, objective_fn, _phi_hat = nested_ls_reduced_closures(jax_prec)
+    del _phi_hat
+    y_start = np.array([float(iota), float(g0)], dtype=np.float64)
+    y_star = solve_projected_y(residual_fn, shifted, y_start).solution
+    gradient = np.asarray(
+        reduced_penalty_gradient_envelope(objective_fn, shifted, y_star),
+        dtype=np.float64,
+    )
+    operator = factor_reduced_nested_ls_schur(
+        residual_fn, objective_fn, shifted, y_probe=y_star
+    )
+    preconditioner = factor_schur_fourier_block_preconditioner(
+        operator,
+        NESTED_LS_NEWTON_STAB,
+        names,
+        mpol=mpol,
+        ntor=ntor,
+    )
+    probe_block = max(preconditioner.blocks, key=len)
+    inverse = preconditioner.inverses[preconditioner.blocks.index(probe_block)]
+    index_array = np.asarray(probe_block)
+    columns = []
+    for dof_index in probe_block:
+        unit = np.zeros(shifted.size, dtype=np.float64)
+        unit[int(dof_index)] = 1.0
+        hv = np.asarray(operator.apply(unit), dtype=np.float64).reshape(-1)
+        hv = hv + NESTED_LS_NEWTON_STAB * unit
+        columns.append(hv[index_array])
+    probed = np.stack(columns, axis=1)
+    block_size = len(probe_block)
+    np.testing.assert_allclose(
+        np.asarray(inverse, dtype=np.float64) @ probed,
+        np.eye(block_size, dtype=np.float64),
+        rtol=1.0e-10,
+        atol=1.0e-10,
+        err_msg="Fourier-block inverse missed the exact Schur block",
+    )
+
+    plain = run_reduced_nested_ls_schur_newton(jax_plain, iota=iota, G=g0, maxiter=1)
+    prec = run_reduced_nested_ls_schur_newton(
+        jax_prec,
+        iota=iota,
+        G=g0,
+        maxiter=1,
+        gmres_preconditioner=preconditioner.apply,
+    )
+    assert plain.gmres_forcing_eta > 1.0
+    assert prec.gmres_forcing_eta < plain.gmres_forcing_eta
+    predicted = np.asarray(
+        operator.apply(prec.gmres_solution), dtype=np.float64
+    ).reshape(-1)
+    predicted = predicted + NESTED_LS_NEWTON_STAB * np.asarray(
+        prec.gmres_solution, dtype=np.float64
+    ).reshape(-1)
+    independent_l2 = float(np.linalg.norm(predicted - gradient))
+    assert prec.gmres_residual_l2 == pytest.approx(
+        independent_l2, rel=1.0e-12, abs=1.0e-12
+    )
+    assert prec.gmres_forcing_eta < plain.gmres_forcing_eta
 
 
 def test_schur_newton_module_does_not_import_host_scipy_gmres():

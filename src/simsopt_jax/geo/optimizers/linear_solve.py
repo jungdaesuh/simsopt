@@ -666,7 +666,7 @@ def _exact_newton_gmres_iteration_limits(n):
     return restart, maxiter
 
 
-def _run_operator_gmres(matvec, rhs, *, tol, restart=None, maxiter=None):
+def _run_operator_gmres(matvec, rhs, *, tol, restart=None, maxiter=None, M=None):
     n = rhs.shape[0]
     default_restart, default_maxiter = _gmres_iteration_limits(n)
     restart = default_restart if restart is None else int(restart)
@@ -683,6 +683,7 @@ def _run_operator_gmres(matvec, rhs, *, tol, restart=None, maxiter=None):
             atol=0.0,
             restart=restart,
             maxiter=maxiter,
+            M=M,
             # JAX documents the incremental method as numerically stabler than the
             # default batched variant, which matters more than lower GPU overhead
             # on the checked operator-only runtime path.

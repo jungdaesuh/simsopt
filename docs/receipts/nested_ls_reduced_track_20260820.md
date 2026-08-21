@@ -149,15 +149,19 @@ Independent CPU replay of `063b4fe83`: Schur vs AD-through-QR
 implemented. JAX `info` is the 0/−1 NaN placeholder, not SciPy's
 iteration count. Frozen F3 JSON above remains the SciPy CPU packet.
 
+**Fourier-block `M` canary (live path, this commit):**
+physical ``(m, n)`` TensorFourier blocks of the exact ``Ĥ_ss+stab I``
+Schur operator, used as left GMRES ``M``. Default Newton remains
+unpreconditioned. 7×7 NCSX is the canary, not F3.
+
 ## Next
 
-1. Fourier-block `M` canary on the exact Schur operator.
-2. Memory-capped chunked dense `Ĥ_ss` A/B.
-3. One GPU correction at F3 B37, C++ rejudge.
-4. Flat-native B37, then a ten-step frozen-coil walk.
-5. Runtime coil DOFs + implicit adjoint.
-6. B3 vs banana `run_code`.
-7. B37 nested timing only after B3.
+1. Memory-capped chunked dense `Ĥ_ss` A/B.
+2. One GPU correction at F3 B37, C++ rejudge.
+3. Flat-native B37, then a ten-step frozen-coil walk.
+4. Runtime coil DOFs + implicit adjoint.
+5. B3 vs banana `run_code`.
+6. B37 nested timing only after B3.
 
 Do not reopen F3. Do not inherit 7.70×. Trajectories need not match;
 require the same native-rejudged branch.
@@ -185,3 +189,11 @@ require the same native-rejudged branch.
 - always-on JSON/provenance tests (`-m "not slow"`): 4 passed
 - Slow F3 live `test_f3_b37_one_schur_newton_step_and_cpp_rejudge`
   was not rerun (GPU F3 correction is a later gate)
+
+## Validation of the Fourier-block `M` canary (CPU `.venv-qn-cpu`)
+
+- `ruff check` + `ruff format --check` on nested-LS + `linear_solve.py`: pass
+- targeted `pyright --pythonpath .venv-qn-cpu/bin/python`: 0 errors
+- `test_fourier_block_m_canary_on_exact_schur` + forcing-η: 2 passed in 35.26 s
+- identity, SciPy-import ratchet, JSON (`-m "not slow"`): 6 passed in 39.53 s
+- Default Newton remains unpreconditioned. Slow F3 live not rerun.
