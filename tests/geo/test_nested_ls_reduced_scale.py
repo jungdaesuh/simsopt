@@ -45,6 +45,7 @@ from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     load_flat675_lane_blocks,
     nested_ls_receipt_provenance,
     replace_native_solver_options,
+    sha256_file,
 )
 
 _EVIDENCE_DIR = Path(__file__).resolve().parents[2] / "docs" / "receipts" / "evidence"
@@ -53,6 +54,10 @@ _F3_B37_BOUNDED_EVIDENCE = (
 )
 _F3_B37_SCHUR_ONE_STEP_EVIDENCE = (
     _EVIDENCE_DIR / "nested_ls_reduced_gate1_f3_b37_schur_one_step_20260820.json"
+)
+_F3_B37_GPU_WALK_EVIDENCE = _EVIDENCE_DIR / "nested_ls_reduced_gpu_walk_20260821.json"
+_GPU_WALK_PUBLICATION = (
+    "GPU forcing-certified Schur walk. Not a timing claim and not F3 7.70x."
 )
 _RECONSTRUCT_IOTA = 0.14085710955307942
 _SCHUR_PUBLICATION = (
@@ -303,6 +308,70 @@ def test_f3_b37_schur_one_step_evidence_is_strict_authored_json():
     )
     assert payload["runtime"]["jax_default_backend"] == "cpu"
     assert payload["execution_log"] is None
+
+
+@pytest.mark.skipif(
+    not _F3_B37_GPU_WALK_EVIDENCE.is_file(),
+    reason="authored GPU walk JSON not yet produced",
+)
+def test_authored_gpu_walk_json_is_strict_and_claim_grade():
+    raw = _F3_B37_GPU_WALK_EVIDENCE.read_text(encoding="utf-8")
+    assert "NaN" not in raw
+    payload = json.loads(raw)
+    dump_strict_json(payload)
+    assert payload["schema"] == "nested-ls-reduced-gpu-walk.v1"
+    assert payload["written_by_pytest"] is False
+    assert payload["publication"] == _GPU_WALK_PUBLICATION
+    assert payload["driver"] == (
+        "simsopt_jax_adapters.geo.nested_ls_reduced_scale."
+        "evaluate_f3_b37_schur_newton_walk"
+    )
+    boundary = payload["claim_boundary"]
+    assert boundary["nested_speed_claim"] is False
+    assert boundary["inherits_f3_7_70x"] is False
+    assert boundary["f3_sealed"] is True
+    assert boundary["full_walk_attempted"] is True
+    assert boundary["ten_step_walk"] is True
+    assert boundary["device_resident_krylov"] is True
+    assert boundary["jax_success_1e13"] is True
+    assert boundary["endpoint_parity"] is True
+    assert boundary["newton_quality_linear_solve"] is True
+    probe = payload["probe"]
+    assert probe["success"] is True
+    assert float(probe["grad_l2"]) <= NESTED_LS_NEWTON_TOL
+    assert int(probe["native_rejudge_iter"]) == 0
+    assert float(probe["rejudge_vs_jax_surface_inf"]) == 0.0
+    assert float(probe["coil_delta_inf"]) == 0.0
+    assert all(bool(step["step_accepted"]) for step in probe["steps"])
+    assert all(
+        float(step["gmres_forcing_eta"]) <= float(step["gmres_rtol"])
+        for step in probe["steps"]
+        if bool(step["step_accepted"])
+    )
+    runtime = probe["runtime"]
+    assert runtime["jax_default_backend"] == "gpu"
+    provenance = probe["provenance"]
+    repo = Path(__file__).resolve().parents[2]
+    sources = provenance["source_sha256"]
+    assert sources["nested_ls_reduced.py"] == sha256_file(
+        repo / "src/simsopt_jax_adapters/geo/nested_ls_reduced.py"
+    )
+    assert sources["nested_ls_reduced_scale.py"] == sha256_file(
+        repo / "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py"
+    )
+    assert sources["nested_ls_contract.py"] == sha256_file(
+        repo / "src/simsopt_jax_adapters/geo/nested_ls_contract.py"
+    )
+    assert payload["krylov_backend"] == (
+        "jax.scipy.sparse.linalg.gmres incremental via _run_operator_gmres"
+    )
+    assert "speed" not in payload["publication"].lower() or "not a timing" in (
+        payload["publication"].lower()
+    )
+    assert payload["gmres_matvecs_note"] == (
+        "JAX incremental GMRES does not report operator applications; "
+        "gmres_matvecs stays 0."
+    )
 
 
 @_REQUIRES_BUNDLE
@@ -560,16 +629,34 @@ def test_f3_b37_schur_newton_walk_and_cpp_rejudge():
     assert probe.runtime["jax_default_backend"] == "gpu"
     assert probe.coil_delta_inf == 0.0
     assert probe.native_rejudge_coil_delta_inf == 0.0
-    assert probe.iteration_count >= 1
+    assert probe.success is True
+    assert probe.grad_l2 <= NESTED_LS_NEWTON_TOL
     assert probe.steps
-    assert any(bool(step["step_accepted"]) for step in probe.steps)
+    assert all(bool(step["step_accepted"]) for step in probe.steps)
     assert all(
         float(step["gmres_forcing_eta"]) <= float(step["gmres_rtol"])
         for step in probe.steps
         if bool(step["step_accepted"])
     )
-    assert probe.grad_l2 < probe.reduced_grad_l2_before
     assert probe.native_rejudge_success is True
+    assert probe.native_rejudge_iter == 0
+    assert probe.rejudge_vs_jax_surface_inf == 0.0
+    assert probe.rejudge_vs_jax_iota == pytest.approx(0.0, abs=1.0e-15)
+    assert probe.rejudge_vs_jax_g == pytest.approx(0.0, abs=1.0e-15)
+    np.testing.assert_allclose(
+        probe.native_rejudge_iota,
+        probe.jax_iota,
+        rtol=0.0,
+        atol=1.0e-15,
+        err_msg="C++ rejudge moved iota away from the JAX endpoint",
+    )
+    np.testing.assert_allclose(
+        probe.native_rejudge_g,
+        probe.jax_g,
+        rtol=0.0,
+        atol=1.0e-15,
+        err_msg="C++ rejudge moved G away from the JAX endpoint",
+    )
     value_tol = parity_ladder_tolerances("direct_kernel")
     np.testing.assert_allclose(
         probe.native_rejudge_iota,
