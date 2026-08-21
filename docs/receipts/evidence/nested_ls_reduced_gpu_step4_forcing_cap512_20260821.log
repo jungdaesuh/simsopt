@@ -1,0 +1,8 @@
+E0821 15:12:05.897402 3087114 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+E0821 15:12:05.906646 3086997 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+backend gpu
+load_sha 75c3765e14ae639608ca91e599fff6ff43869cc07d53bd4ca46bea9f1ac4b7b6 ndof 661 eta_k 0.04071795132091288 prev 3.294148561550581e-05
+reload_match True 75c3765e14ae639608ca91e599fff6ff43869cc07d53bd4ca46bea9f1ac4b7b6
+g 0.0007809972401622278
+cap512 used 512 eta 0.03864806249673127 requested 0.04071795132091288 resid 3.018403014756442e-05 prev 3.294148561550581e-05 decreased True meet True finite True sha_ok True s 349.58639544295147
+wrote /tmp/nested_ls_step4_cap512.json

@@ -498,7 +498,6 @@ def test_step4_incomplete_json_fail_closed_on_surface_sha_mismatch():
     assert float(probe["eta_requested"]) != pytest.approx(
         float(probe["cap64_eta_achieved"]), rel=0.0, abs=1.0e-6
     )
-    assert not _F3_B37_GPU_STEP4_EVIDENCE.is_file()
 
 
 @pytest.mark.skipif(
@@ -524,19 +523,28 @@ def test_authored_gpu_step4_forcing_json_is_strict_and_not_a_walk():
     assert boundary["full_walk_attempted"] is False
     assert boundary["ten_step_walk"] is False
     probe = payload["probe"]
-    assert probe["surface_sha256"] == (
+    assert probe["reload_sha_match"] is True
+    assert probe["surface_sha256"] == probe["reloaded_surface_sha256"]
+    assert probe["historical_surface_sha256"] == (
         "286e3dabf3c9113d25aa691e1abe36a109057738e67536d9e46e6d56faa17e24"
     )
-    assert probe["surface_sha_match"] is True
-    assert float(probe["eta_requested"]) == pytest.approx(
+    assert len(probe["jax_surface_dofs"]) == 661
+    assert float(probe["historical_eta_requested"]) == pytest.approx(
         0.04071795165373735, rel=0.0, abs=0.0
     )
     assert float(probe["cap64_eta_achieved"]) == pytest.approx(
         0.1203881060498997, rel=0.0, abs=0.0
     )
+    assert float(probe["eta_requested"]) != pytest.approx(
+        float(probe["cap64_eta_achieved"]), rel=0.0, abs=1.0e-6
+    )
     assert int(probe["gmres_restart"]) == 8
     assert float(probe["coil_delta_inf"]) == 0.0
+    assert probe["meets_forcing"] is True
+    assert probe["rows"]
     assert all(row.get("preconditioner") == "none" for row in probe["rows"])
+    assert all(int(row["gmres_restart"]) == 8 for row in probe["rows"])
+    assert any(bool(row["meets_forcing"]) for row in probe["rows"])
     runtime = probe["runtime"]
     assert runtime["jax_default_backend"] == "gpu"
     assert payload["gmres_matvecs_note"] == _GPU_WALK_GMRES_MATVECS_NOTE

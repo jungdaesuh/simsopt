@@ -630,7 +630,7 @@ def test_schur_gmres_defaults_are_one_restart_cycle_not_one_krylov_step():
 
     assert NESTED_LS_SCHUR_GMRES_RESTART == 8
     assert NESTED_LS_SCHUR_GMRES_MAXITER == 1
-    assert NESTED_LS_SCHUR_GMRES_MAXITER_CAP == 64
+    assert NESTED_LS_SCHUR_GMRES_MAXITER_CAP == 512
 
 
 def test_operator_gmres_rejects_unit_interval_eta_then_retries():

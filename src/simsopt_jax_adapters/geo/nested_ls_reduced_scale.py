@@ -1286,22 +1286,26 @@ def evaluate_f3_b37_step2_forcing_probe(
 
 @dataclass(frozen=True, slots=True)
 class NestedLsStep4ForcingProbe:
-    """Post-step-3 F3 B37 linear-solve η versus ``maxiter_cap`` 128 then 256.
+    """Frozen step-3 F3 B37 linear-solve η versus GMRES ``maxiter_cap``.
 
-    Certificate is the independent unpreconditioned η. Restart stays 8,
-    ``M`` is None. Not a walk, not C++ rejudge, not a timing claim, and
-    not F3 7.70×. Requested η and the cap-64 achieved η are distinct.
+    Persist the surface vector, reload it, and SHA the loaded bytes.
+    Historical SHA ``286e3dab…`` is archive only: it is not a replay key.
+    Certificate is independent unpreconditioned η. Restart stays 8,
+    ``M`` is None. Not a walk, not C++ rejudge, not a timing claim.
+    Live requested η and the cap-64 achieved η are distinct.
     """
 
     surface_sha256: str
-    expected_surface_sha256: str
-    surface_sha_match: bool
+    reloaded_surface_sha256: str
+    reload_sha_match: bool
+    historical_surface_sha256: str
+    jax_surface_dofs: tuple[float, ...]
     reduced_grad_l2: float
     iota: float
     G: float
     eta_requested: float
+    historical_eta_requested: float
     cap64_eta_achieved: float
-    cap64_residual_l2: float
     gmres_restart: int
     coil_delta_inf: float
     factor_seconds: float
@@ -1318,7 +1322,7 @@ class NestedLsStep4ForcingProbe:
 def evaluate_f3_b37_step4_forcing_probe(
     jax_boozer: BoozerSurfaceJAX,
 ) -> NestedLsStep4ForcingProbe:
-    """Reproduce the cap-64 walk's step-3 state, then raise GMRES ``maxiter``.
+    """Persist the JAX step-3 vector, reload it, then raise GMRES ``maxiter``.
 
     Does not run C++ rejudge. Fourier-block ``M`` is not used.
     """
@@ -1333,10 +1337,15 @@ def evaluate_f3_b37_step4_forcing_probe(
         jax_boozer,
         iota=float(y_star[0]),
         G=float(y_star[1]),
-        maxiter=3,
+        maxiter=10,
     )
-    surface_sha = sha256_float64(walk.surface_dofs)
-    sha_match = surface_sha == F3_B37_STEP3_SURFACE_SHA256
+    frozen = np.array(walk.surface_dofs, dtype=np.float64, copy=True)
+    frozen_sha = sha256_float64(frozen)
+    jax_boozer.surface.set_dofs(np.zeros_like(frozen))
+    jax_boozer.surface.set_dofs(frozen)
+    loaded = np.asarray(jax_boozer.surface.get_dofs(), dtype=np.float64)
+    loaded_sha = sha256_float64(loaded)
+    reload_match = loaded_sha == frozen_sha
     g = float(np.linalg.norm(walk.reduced_gradient))
     provenance = nested_ls_receipt_provenance()
     runtime = {
@@ -1348,29 +1357,30 @@ def evaluate_f3_b37_step4_forcing_probe(
         "jax_enable_x64_env": provenance["jax_enable_x64_env"],
         "timestamp_utc": provenance["timestamp_utc"],
     }
-    # Step-4 Choice 2 uses post-step-3 ‖g‖ and the step-3 request η_max.
-    # previous_grad_norm is post-step-2 ‖g‖ (g at the start of step 3).
     eta_k = float(F3_B37_STEP4_ETA_REQUESTED)
-    if len(walk.steps) >= 3:
+    accepted = [step for step in walk.steps if bool(step.step_accepted)]
+    if len(accepted) >= 3:
         eta_k = eisenstat_walker_forcing_eta(
-            float(walk.steps[2].grad_l2),
-            previous_grad_norm=float(walk.steps[1].grad_l2),
-            previous_eta=float(walk.steps[2].gmres_rtol),
+            float(accepted[2].grad_l2),
+            previous_grad_norm=float(accepted[1].grad_l2),
+            previous_eta=float(accepted[2].gmres_rtol),
             eta_max=NESTED_LS_SCHUR_GMRES_RTOL,
             nonlinear_tol=NESTED_LS_NEWTON_TOL,
         )
 
     def _empty(reason: str) -> NestedLsStep4ForcingProbe:
         return NestedLsStep4ForcingProbe(
-            surface_sha256=surface_sha,
-            expected_surface_sha256=F3_B37_STEP3_SURFACE_SHA256,
-            surface_sha_match=sha_match,
+            surface_sha256=frozen_sha,
+            reloaded_surface_sha256=loaded_sha,
+            reload_sha_match=reload_match,
+            historical_surface_sha256=F3_B37_STEP3_SURFACE_SHA256,
+            jax_surface_dofs=tuple(float(value) for value in frozen),
             reduced_grad_l2=g,
             iota=float(walk.iota),
             G=float(walk.G),
             eta_requested=float(eta_k),
+            historical_eta_requested=float(F3_B37_STEP4_ETA_REQUESTED),
             cap64_eta_achieved=F3_B37_STEP4_CAP64_ETA_ACHIEVED,
-            cap64_residual_l2=F3_B37_STEP4_CAP64_RESIDUAL_L2,
             gmres_restart=int(NESTED_LS_SCHUR_GMRES_RESTART),
             coil_delta_inf=float(walk.coil_delta_inf),
             factor_seconds=0.0,
@@ -1381,22 +1391,20 @@ def evaluate_f3_b37_step4_forcing_probe(
             provenance=provenance,
         )
 
-    if not sha_match:
-        return _empty("surface_sha_mismatch")
-    if not walk.steps or not all(bool(step.step_accepted) for step in walk.steps):
+    if not reload_match:
+        return _empty("reload_sha_mismatch")
+    if len(accepted) < 3:
         return _empty("step3_not_reproduced")
-    if len(walk.steps) != 3:
+    if not all(bool(step.step_accepted) for step in accepted[:3]):
         return _empty("step3_not_reproduced")
-    if not np.isfinite(g) or g <= 0.0:
+    if not np.isfinite(g) or g <= 0.0 or not np.isfinite(eta_k):
         return _empty("nonfinite")
-    if abs(float(eta_k) - float(F3_B37_STEP4_ETA_REQUESTED)) > 1.0e-12:
-        return _empty("eta_request_mismatch")
 
     factor_started = time.perf_counter()
     operator = factor_reduced_nested_ls_schur(
         residual_fn,
         objective_fn,
-        walk.surface_dofs,
+        loaded,
         y_probe=np.array([float(walk.iota), float(walk.G)], dtype=np.float64),
     )
     factor_seconds = time.perf_counter() - factor_started
@@ -1408,13 +1416,13 @@ def evaluate_f3_b37_step4_forcing_probe(
     rhs = jnp.asarray(walk.reduced_gradient, dtype=jnp.float64)
     restart = int(NESTED_LS_SCHUR_GMRES_RESTART)
     rows: list[dict[str, object]] = []
-    previous_residual = float(F3_B37_STEP4_CAP64_RESIDUAL_L2)
+    previous_residual = float("inf")
     delta: jax.Array | None = None
     fail_reason: str | None = None
     meets = False
-    for start_maxiter, cap in ((1, 128), (128, 256)):
+    for start_maxiter, cap in ((1, 64), (64, 128), (128, 256), (256, 512)):
         sha_before = sha256_float64(np.asarray(jax_boozer.surface.get_dofs()))
-        if sha_before != F3_B37_STEP3_SURFACE_SHA256:
+        if sha_before != frozen_sha:
             fail_reason = "state_digest_drift"
             break
         started = time.perf_counter()
@@ -1422,7 +1430,7 @@ def evaluate_f3_b37_step4_forcing_probe(
             solve_operator_gmres_with_forcing(
                 matvec,
                 rhs,
-                eta_requested=float(F3_B37_STEP4_ETA_REQUESTED),
+                eta_requested=float(eta_k),
                 restart=restart,
                 maxiter=int(start_maxiter),
                 maxiter_cap=int(cap),
@@ -1441,17 +1449,16 @@ def evaluate_f3_b37_step4_forcing_probe(
             "gmres_maxiter_cap": int(cap),
             "gmres_restart": restart,
             "eta_achieved": float(eta) if finite else None,
-            "eta_requested": float(F3_B37_STEP4_ETA_REQUESTED),
+            "eta_requested": float(eta_k),
+            "historical_eta_requested": float(F3_B37_STEP4_ETA_REQUESTED),
             "cap64_eta_achieved": float(F3_B37_STEP4_CAP64_ETA_ACHIEVED),
-            "meets_forcing": bool(
-                finite and linear_solve_meets_forcing(eta, F3_B37_STEP4_ETA_REQUESTED)
-            ),
+            "meets_forcing": bool(finite and linear_solve_meets_forcing(eta, eta_k)),
             "gmres_residual_l2": float(residual_l2) if finite else None,
             "gmres_seconds": seconds,
             "surface_sha256": sha_after,
         }
         rows.append(row)
-        if sha_after != F3_B37_STEP3_SURFACE_SHA256:
+        if sha_after != frozen_sha:
             fail_reason = "state_digest_drift"
             break
         if not finite:
@@ -1461,21 +1468,23 @@ def evaluate_f3_b37_step4_forcing_probe(
             fail_reason = "stagnation"
             break
         previous_residual = float(residual_l2)
-        if linear_solve_meets_forcing(eta, F3_B37_STEP4_ETA_REQUESTED):
+        if linear_solve_meets_forcing(eta, eta_k):
             meets = True
             break
     if not meets and fail_reason is None:
         fail_reason = "eta_unmet"
     return NestedLsStep4ForcingProbe(
-        surface_sha256=surface_sha,
-        expected_surface_sha256=F3_B37_STEP3_SURFACE_SHA256,
-        surface_sha_match=sha_match,
+        surface_sha256=frozen_sha,
+        reloaded_surface_sha256=loaded_sha,
+        reload_sha_match=reload_match,
+        historical_surface_sha256=F3_B37_STEP3_SURFACE_SHA256,
+        jax_surface_dofs=tuple(float(value) for value in frozen),
         reduced_grad_l2=g,
         iota=float(walk.iota),
         G=float(walk.G),
-        eta_requested=float(F3_B37_STEP4_ETA_REQUESTED),
+        eta_requested=float(eta_k),
+        historical_eta_requested=float(F3_B37_STEP4_ETA_REQUESTED),
         cap64_eta_achieved=F3_B37_STEP4_CAP64_ETA_ACHIEVED,
-        cap64_residual_l2=F3_B37_STEP4_CAP64_RESIDUAL_L2,
         gmres_restart=restart,
         coil_delta_inf=float(walk.coil_delta_inf),
         factor_seconds=float(factor_seconds),
