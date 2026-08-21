@@ -145,9 +145,10 @@ class NestedLsSchurNewtonResult:
 
     ``gmres_rtol`` is the requested forcing (JAX ``tol``).
     ``gmres_forcing_eta`` is the achieved ``gmres_residual_l2 / ‖g‖₂``.
-    ``gmres_info`` is JAX's 0/−1 NaN placeholder, not SciPy's iteration
-    count. ``gmres_matvecs`` stays 0: JAX incremental GMRES does not
-    report operator applications.
+    ``gmres_solution`` is the GMRES ``δs`` before Armijo. ``gmres_info``
+    is JAX's 0/−1 NaN placeholder, not SciPy's iteration count.
+    ``gmres_matvecs`` stays 0: JAX incremental GMRES does not report
+    operator applications.
     """
 
     success: bool
@@ -167,6 +168,7 @@ class NestedLsSchurNewtonResult:
     gmres_matvecs: int
     gmres_residual_l2: float
     gmres_forcing_eta: float
+    gmres_solution: NDArray[np.float64]
     gmres_rtol: float
     gmres_restart: int
     gmres_maxiter: int
@@ -638,6 +640,7 @@ def run_reduced_nested_ls_schur_newton(
     gmres_matvecs = 0
     gmres_residual_l2 = 0.0
     gmres_forcing_eta = 0.0
+    gmres_solution = np.zeros(surface.size, dtype=np.float64)
     factor_seconds = 0.0
     gmres_seconds = 0.0
     phi_yy_condition = 0.0
@@ -674,10 +677,16 @@ def run_reduced_nested_ls_schur_newton(
         gmres_seconds += time.perf_counter() - gmres_started
         residual = matvec(newton_jax) - rhs
         newton_direction = _host_vector(newton_jax)
+        gmres_solution = np.array(newton_direction, dtype=np.float64, copy=True)
         gmres_residual_l2 = float(np.linalg.norm(_host_vector(residual)))
         gmres_info = int(_host_vector(jnp.reshape(jnp.asarray(info), (1,)))[0])
-        gmres_forcing_eta = gmres_residual_l2 / float(np.linalg.norm(working_grad))
-        if not np.all(np.isfinite(newton_direction)):
+        rhs_norm = float(np.linalg.norm(working_grad))
+        gmres_forcing_eta = gmres_residual_l2 / rhs_norm
+        # GMRES from x0=0 cannot increase ‖Aδs−g‖ above ‖g‖ in exact
+        # arithmetic. An iterate worse than x0 is not a Newton direction.
+        if (not np.all(np.isfinite(newton_direction))) or (
+            gmres_residual_l2 > rhs_norm
+        ):
             step_accepted = False
             break
         (
@@ -747,6 +756,7 @@ def run_reduced_nested_ls_schur_newton(
         gmres_matvecs=int(gmres_matvecs),
         gmres_residual_l2=float(gmres_residual_l2),
         gmres_forcing_eta=float(gmres_forcing_eta),
+        gmres_solution=np.array(gmres_solution, dtype=np.float64, copy=True),
         gmres_rtol=float(gmres_rtol),
         gmres_restart=int(gmres_restart),
         gmres_maxiter=int(gmres_maxiter),
