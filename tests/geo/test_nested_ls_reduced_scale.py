@@ -38,6 +38,7 @@ from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     kib_to_gib,
     load_archived_nested_ls_pair,
     load_flat675_lane_blocks,
+    nested_ls_receipt_provenance,
 )
 
 _EVIDENCE_DIR = Path(__file__).resolve().parents[2] / "docs" / "receipts" / "evidence"
@@ -48,6 +49,15 @@ _F3_B37_SCHUR_ONE_STEP_EVIDENCE = (
     _EVIDENCE_DIR / "nested_ls_reduced_gate1_f3_b37_schur_one_step_20260820.json"
 )
 _RECONSTRUCT_IOTA = 0.14085710955307942
+_SCHUR_PUBLICATION = (
+    "The Schur operator and one accepted inexact CPU correction are "
+    "validated. Independent C++ rejudging confirms the reconstruct "
+    "branch. Scientific feasibility passes; receipt provenance and "
+    "GPU-performance qualification remain open."
+)
+_PAIR2_L1_SHA256 = "bde32ab9987d4f2116cf7c7410753c83a9d74ca7836031c25db0e12603155d64"
+_NATIVE_BIOT_SHA256 = "0415ae937c78b9f2d68e8463a9176e8f330a9aa172eece160341afccdc29429d"
+_SCIENTIFIC_COMMIT = "063b4fe83cb46a5537908a88e233c33030f6f107"
 _PUBLICATION = (
     "The bounded F3 B37 feasibility probe is complete: QR elimination, an "
     "off-manifold reduced gradient, a finite synchronized HVP, and the native "
@@ -211,23 +221,69 @@ def test_f3_b37_bounded_evidence_is_strict_authored_json():
     ) == pytest.approx(19.0, abs=0.5)
 
 
+def test_receipt_provenance_is_strict_json():
+    payload = nested_ls_receipt_provenance()
+    dump_strict_json(payload)
+    assert payload["git_commit"]
+    source = payload["source_sha256"]
+    assert isinstance(source, dict)
+    assert "nested_ls_reduced.py" in source
+
+
 def test_f3_b37_schur_one_step_evidence_is_strict_authored_json():
     raw = _F3_B37_SCHUR_ONE_STEP_EVIDENCE.read_text(encoding="utf-8")
     assert "NaN" not in raw
     payload = json.loads(raw)
     dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-reduced-gate1-f3-b37-schur-one-step.v1"
+    assert payload["schema"] == "nested-ls-reduced-gate1-f3-b37-schur-one-step.v2"
     assert payload["written_by_pytest"] is False
     assert payload["full_walk_attempted"] is False
-    assert payload["claim_boundary"]["nested_speed_claim"] is False
-    assert payload["claim_boundary"]["newton_quality_linear_solve"] is False
+    assert payload["publication"] == _SCHUR_PUBLICATION
+    boundary = payload["claim_boundary"]
+    assert boundary["nested_speed_claim"] is False
+    assert boundary["newton_quality_linear_solve"] is False
+    assert boundary["device_resident_krylov"] is False
+    assert boundary["endpoint_parity"] is False
+    assert boundary["f3_sealed"] is True
+    assert boundary["full_walk_attempted"] is False
+    assert boundary["provenance_gpu_performance_open"] is True
     assert payload["driver"] == (
         "simsopt_jax_adapters.geo.nested_ls_reduced_scale."
         "evaluate_f3_b37_schur_newton_step"
     )
+    assert payload["scientific_run"]["git_commit"] == _SCIENTIFIC_COMMIT
+    assert payload["scientific_run"]["git_dirty"] is False
+    assert payload["inputs"]["pair2-l1_lane.json"] == _PAIR2_L1_SHA256
+    assert payload["inputs"]["native_biot_savart.json"] == _NATIVE_BIOT_SHA256
+    sources = payload["scientific_run"]["source_sha256_at_scientific_run"]
+    assert sources["nested_ls_reduced.py"] == (
+        "132da0338415aa0d907a2096460464039f38708a0dd473a70bbca53ceb448159"
+    )
+    assert payload["runtime"]["jax_version"] == "0.10.0"
+    assert payload["runtime"]["scipy_version"] == "1.17.1"
+    assert payload["runtime"]["simsoptpp_sha256"] == (
+        "41b2ca791a720f325ffa9b382b31d29bade73f6516693805d41adc0de6f6ed4b"
+    )
+    schur = payload["independent_replay"]["schur_vs_ad_through_qr"]
+    assert schur["rel_l2"] == pytest.approx(8.2859e-16, rel=0, abs=1.0e-20)
+    assert schur["max_abs"] == pytest.approx(1.4210854715202004e-13, rel=0, abs=1.0e-20)
+    branch = payload["independent_replay"]["cpp_rejudge_branch"]
+    assert branch["grad_l2"] == pytest.approx(2.239e-14, rel=0, abs=1.0e-17)
+    assert branch["surface_inf_vs_reconstruct"] == pytest.approx(
+        4.157e-12, rel=0, abs=1.0e-15
+    )
+    assert branch["iota"] == pytest.approx(0.1408571095660965, rel=0, abs=1.0e-16)
+    sweep = payload["krylov_restart_sweep"]["rows"]
+    assert sweep == [
+        {"matvecs": 9, "residual_l2": 0.00379309, "restart": 8},
+        {"matvecs": 17, "residual_l2": 0.00177416, "restart": 16},
+        {"matvecs": 33, "residual_l2": 0.000834828, "restart": 32},
+    ]
     assert payload["gmres"]["info"] == 1
     assert payload["gmres"]["restart"] == 8
     assert payload["gmres"]["maxiter"] == 1
+    assert payload["krylov_backend"] == "scipy.sparse.linalg.gmres"
+    assert payload["hvp_transport"] == "jax.device_get"
     assert payload["probe"]["step_accepted"] is True
     assert payload["probe"]["step_iter"] == 1
     assert payload["probe"]["step_success"] is False
@@ -240,7 +296,7 @@ def test_f3_b37_schur_one_step_evidence_is_strict_authored_json():
         atol=1.0e-12,
     )
     assert payload["runtime"]["jax_default_backend"] == "cpu"
-    assert "fully solved Newton step" in payload["publication"]
+    assert payload["execution_log"] is None
 
 
 @_REQUIRES_BUNDLE
@@ -280,9 +336,8 @@ def test_f3_gpu_b37_bounded_hvp_and_native_reference():
     assert probe.schur_hvp_finite is True
     assert probe.schur_vs_ad_rel_l2 is not None
     assert probe.schur_vs_ad_max_abs is not None
-    derivative_tol = parity_ladder_tolerances("derivative_heavy")
-    assert probe.schur_vs_ad_rel_l2 <= float(derivative_tol["second_derivative_rtol"])
-    assert probe.schur_vs_ad_max_abs <= 1.0e-3
+    assert probe.schur_vs_ad_rel_l2 < 1.0e-12
+    assert probe.schur_vs_ad_max_abs < 1.0e-12
     assert jax.default_backend() == "cpu"
     np.testing.assert_allclose(
         probe.y_star_iota,
@@ -318,8 +373,10 @@ def test_f3_b37_one_schur_newton_step_and_cpp_rejudge():
     _assert_grid(native)
     probe = evaluate_f3_b37_schur_newton_step(native, jax_boozer)
     dump_strict_json(probe.as_payload())
-    assert probe.gmres_matvecs >= 1
-    assert probe.gmres_matvecs <= probe.gmres_restart * probe.gmres_maxiter + 2
+    frozen = json.loads(_F3_B37_SCHUR_ONE_STEP_EVIDENCE.read_text(encoding="utf-8"))
+    frozen_probe = frozen["probe"]
+    replay = frozen["independent_replay"]
+    assert probe.gmres_info == 1
     assert probe.gmres_restart == 8
     assert probe.gmres_maxiter == 1
     assert probe.step_coil_delta_inf == 0.0
@@ -327,13 +384,44 @@ def test_f3_b37_one_schur_newton_step_and_cpp_rejudge():
     assert probe.runtime["jax_default_backend"] == "cpu"
     assert probe.step_accepted is True
     assert probe.step_iter == 1
-    assert probe.step_grad_l2 < probe.reduced_grad_l2_before
+    assert probe.step_success is False
+    assert probe.native_rejudge_iter == 10
     value_tol = parity_ladder_tolerances("direct_kernel")
+    np.testing.assert_allclose(
+        probe.y_star_iota,
+        frozen_probe["y_star_iota"],
+        rtol=float(value_tol["rtol"]),
+        atol=float(value_tol["atol"]),
+    )
+    np.testing.assert_allclose(
+        probe.native_rejudge_iota,
+        frozen_probe["native_rejudge_iota"],
+        rtol=float(value_tol["rtol"]),
+        atol=float(value_tol["atol"]),
+        err_msg="C++ rejudge of the Schur step left the reconstruct iota branch",
+    )
     np.testing.assert_allclose(
         probe.native_rejudge_iota,
         _RECONSTRUCT_IOTA,
         rtol=float(value_tol["rtol"]),
         atol=float(value_tol["atol"]),
-        err_msg="C++ rejudge of the Schur step left the reconstruct iota branch",
     )
     assert probe.native_rejudge_success is True
+    assert probe.native_rejudge_grad_l2 < 1.0e-13
+    assert probe.rejudge_vs_reconstruct_surface_inf is not None
+    assert probe.rejudge_vs_reconstruct_surface_inf < 1.0e-9
+    np.testing.assert_allclose(
+        probe.rejudge_vs_reconstruct_surface_inf,
+        replay["cpp_rejudge_branch"]["surface_inf_vs_reconstruct"],
+        rtol=1.0e-2,
+        atol=1.0e-11,
+    )
+    assert probe.schur_vs_ad_rel_l2 is not None
+    assert probe.schur_vs_ad_rel_l2 < 1.0e-12
+    assert probe.schur_vs_ad_max_abs is not None
+    assert probe.schur_vs_ad_max_abs < 1.0e-12
+    assert probe.provenance["input_sha256"]["pair2-l1_lane.json"] == _PAIR2_L1_SHA256
+    assert (
+        probe.provenance["input_sha256"]["native_biot_savart.json"]
+        == _NATIVE_BIOT_SHA256
+    )

@@ -1,14 +1,18 @@
 {
   "claim_boundary": {
+    "device_resident_krylov": false,
     "endpoint_parity": false,
     "f3_sealed": true,
     "full_walk_attempted": false,
     "nested_speed_claim": false,
-    "newton_quality_linear_solve": false
+    "newton_quality_linear_solve": false,
+    "provenance_gpu_performance_open": true
   },
   "command": "JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv-qn-cpu/bin/python -m pytest tests/geo/test_nested_ls_reduced_scale.py::test_f3_b37_one_schur_newton_step_and_cpp_rejudge",
   "date": "2026-08-20",
   "driver": "simsopt_jax_adapters.geo.nested_ls_reduced_scale.evaluate_f3_b37_schur_newton_step",
+  "execution_log": null,
+  "execution_log_note": "No raw stdout log was retained for the original 10.26 s step. This v2 receipt binds commit 063b4fe83, input hashes, versions, independent-replay Schur errors, C++ terminal gradient, and surface inf-difference versus reconstruct.",
   "full_walk_attempted": false,
   "gmres": {
     "info": 1,
@@ -18,7 +22,52 @@
     "residual_l2": 0.003793094440447193,
     "restart": 8,
     "rtol": 1e-10,
+    "rtol_times_rhs_l2": 1.609557303688543e-12,
     "seconds": 4.608109823893756
+  },
+  "hvp_transport": "jax.device_get",
+  "independent_replay": {
+    "cpp_rejudge_branch": {
+      "grad_l2": 2.239e-14,
+      "iota": 0.1408571095660965,
+      "surface_inf_vs_reconstruct": 4.157e-12
+    },
+    "note": "Independent CPU replay of commit 063b4fe83. Tree was clean.",
+    "schur_vs_ad_through_qr": {
+      "max_abs": 1.4210854715202004e-13,
+      "phi_yy_condition": 25.623547055912574,
+      "rel_l2": 8.2859e-16
+    },
+    "step": {
+      "grad_l2_after": 0.003795976041010945,
+      "grad_l2_before": 0.01609557303688543,
+      "gmres_info": 1
+    }
+  },
+  "inputs": {
+    "native_biot_savart.json": "0415ae937c78b9f2d68e8463a9176e8f330a9aa172eece160341afccdc29429d",
+    "pair2-l1_lane.json": "bde32ab9987d4f2116cf7c7410753c83a9d74ca7836031c25db0e12603155d64"
+  },
+  "krylov_backend": "scipy.sparse.linalg.gmres",
+  "krylov_restart_sweep": {
+    "note": "Unpreconditioned GMRES residual drops too slowly to extrapolate to 1e-13. rtol=1e-10 at ||g||_2=0.0161 requests about 1.61e-12, not 1e-13. Do not raise restart as the next Newton-quality move.",
+    "rows": [
+      {
+        "matvecs": 9,
+        "residual_l2": 0.00379309,
+        "restart": 8
+      },
+      {
+        "matvecs": 17,
+        "residual_l2": 0.00177416,
+        "restart": 16
+      },
+      {
+        "matvecs": 33,
+        "residual_l2": 0.000834828,
+        "restart": 32
+      }
+    ]
   },
   "memory": {
     "peak_rss_after_step_gib": 17.257,
@@ -38,6 +87,7 @@
     "gmres_seconds": 4.608109823893756,
     "native_rejudge_coil_delta_inf": 0.0,
     "native_rejudge_g": 2.0106193053897154,
+    "native_rejudge_grad_l2": 2.239e-14,
     "native_rejudge_iota": 0.1408571095660965,
     "native_rejudge_iter": 10,
     "native_rejudge_seconds": 161.45685765286908,
@@ -45,6 +95,7 @@
     "peak_rss_kib_after_step": 18094940,
     "phi_yy_condition": 25.623547055912574,
     "reduced_grad_l2_before": 0.01609557303688543,
+    "rejudge_vs_reconstruct_surface_inf": 4.157e-12,
     "rss_kib_after_step": 1780452,
     "step_accepted": true,
     "step_alpha": 1.0,
@@ -59,7 +110,7 @@
     "y_star_g": 2.010619298254682,
     "y_star_iota": 0.15164961478467412
   },
-  "publication": "The Schur reduced Hessian matched AD-through-QR HVPs at 7x7 and at one F3 B37 direction. One capped Krylov Newton step (restart=8, maxiter=1, 9 matvecs) was accepted; ||g||_2 fell from 0.01610 to 0.00380. GMRES did not meet rtol (info=1), so this is not a fully solved Newton step. C++ reconstruct rejudge of that JAX point succeeded (iter=10, iota=0.1408571095660965) on the reconstruct branch. No full walk, endpoint parity, nested speed claim, or F3 inheritance.",
+  "publication": "The Schur operator and one accepted inexact CPU correction are validated. Independent C++ rejudging confirms the reconstruct branch. Scientific feasibility passes; receipt provenance and GPU-performance qualification remain open.",
   "runtime": {
     "hostname": "jungdaesuh-playstation",
     "input_lane": "fused_gpu pair2-l1",
@@ -70,9 +121,24 @@
     ],
     "jax_enable_x64_env": "1",
     "jax_platforms_env": "cpu",
+    "jax_version": "0.10.0",
+    "numpy_version": "2.4.6",
     "python_executable": "/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv-qn-cpu/bin/python",
+    "scipy_version": "1.17.1",
+    "simsopt_version": "1.10.7.dev1074+g320e5cba8.d20260806",
+    "simsoptpp_sha256": "41b2ca791a720f325ffa9b382b31d29bade73f6516693805d41adc0de6f6ed4b",
     "timestamp_utc": "2026-08-20T23:44:36.741987+00:00"
   },
-  "schema": "nested-ls-reduced-gate1-f3-b37-schur-one-step.v1",
+  "schema": "nested-ls-reduced-gate1-f3-b37-schur-one-step.v2",
+  "scientific_run": {
+    "git_branch": "pr/jax-port-squashed",
+    "git_commit": "063b4fe83cb46a5537908a88e233c33030f6f107",
+    "git_dirty": false,
+    "source_sha256_at_scientific_run": {
+      "nested_ls_contract.py": "253963867adc9b7b1600483207d32cd4e9e818e2326cfb0493a53795838cd6e0",
+      "nested_ls_reduced.py": "132da0338415aa0d907a2096460464039f38708a0dd473a70bbca53ceb448159",
+      "nested_ls_reduced_scale.py": "4ad76d491706f0efb7217ca26bb3a12a5b26c277a377d3aaa51ebc944d59b03a"
+    }
+  },
   "written_by_pytest": false
 }
