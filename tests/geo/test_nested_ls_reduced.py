@@ -20,6 +20,7 @@ from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
 from simsopt_jax_adapters.geo.nested_ls_contract import (
+    NESTED_LS_BANANA_BFGS_TOL,
     NESTED_LS_BANANA_NEWTON_MAXITER,
     NESTED_LS_BANANA_NEWTON_STAB,
     NESTED_LS_BANANA_NEWTON_TOL,
@@ -31,6 +32,7 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_PHYSICS_BAR,
     NESTED_LS_TIMING_BAR,
     NESTED_LS_WEIGHT_INV_MODB,
+    nested_ls_banana_run_code_options,
     nested_ls_physics_newton_kwargs,
 )
 from simsopt_jax_adapters.geo.nested_ls_newton_parity import (
@@ -42,18 +44,22 @@ from simsopt_jax_adapters.geo.nested_ls_newton_parity import (
 from simsopt_jax_adapters.geo.nested_ls_reduced import (
     NESTED_LS_SCHUR_GMRES_RTOL,
     NestedLsReducedRankError,
+    apply_reduced_mixed_schur_coil_tangent,
     compare_ad_qr_and_schur_hvp,
     dense_schur_inverse_preconditioner,
     factor_reduced_nested_ls_schur,
     factor_schur_fourier_block_preconditioner,
+    implicit_adjoint_coil_gradient,
     materialize_stabilized_schur_dense,
     nested_ls_reduced_closures,
+    nested_ls_runtime_coil_closures,
     pack_surface_and_y,
     projected_y_system,
     reduced_penalty_gradient,
     reduced_penalty_gradient_envelope,
     reduced_penalty_hvp,
     require_full_y_rank,
+    run_banana_run_code_pair,
     run_reduced_nested_ls_newton,
     run_reduced_nested_ls_schur_newton,
     schur_dense_operator_bytes,
@@ -152,6 +158,11 @@ def test_nested_ls_contract_keeps_banana_off_the_physics_bar():
     assert kwargs["stab"] == NESTED_LS_NEWTON_STAB
     assert kwargs["tol"] == NESTED_LS_NEWTON_TOL
     assert kwargs["maxiter"] == NESTED_LS_NEWTON_MAXITER
+    banana = nested_ls_banana_run_code_options()
+    assert banana["newton_tol"] == NESTED_LS_BANANA_NEWTON_TOL
+    assert banana["newton_maxiter"] == NESTED_LS_BANANA_NEWTON_MAXITER
+    assert banana["bfgs_tol"] == NESTED_LS_BANANA_BFGS_TOL
+    assert "stab" not in banana
 
 
 def test_rank_gate_rejects_rank_deficient_iota_g_columns():
@@ -710,4 +721,254 @@ def test_reduced_newton_matches_native_from_a_surface_step():
         0.0,
         atol=NESTED_LS_NEWTON_TOL,
         err_msg="reduced Newton did not reach ||∇_s Φ̂||_2 ≤ 1e-13",
+    )
+
+
+def _nested_ls_banana_pair():
+    _, base_currents, magnetic_axis, nfp, biotsavart = get_data("ncsx")
+    surface = get_surface(
+        "SurfaceXYZTensorFourier",
+        True,
+        mpol=2,
+        ntor=2,
+        nphi=7,
+        ntheta=7,
+        nfp=nfp,
+    )
+    surface.fit_to_curve(magnetic_axis, 0.1, flip_theta=True)
+    native_surface = _clone_upstream_surface(surface)
+    jax_surface = _clone_upstream_surface(surface)
+    native_label = Volume(native_surface)
+    jax_label = Volume(jax_surface)
+    target = float(native_label.J())
+    banana_options = nested_ls_banana_run_code_options()
+    native = BoozerSurface(
+        biotsavart,
+        native_surface,
+        native_label,
+        target,
+        constraint_weight=NESTED_LS_CONSTRAINT_WEIGHT,
+        options=dict(banana_options),
+    )
+    jax_boozer = BoozerSurfaceJAX(
+        BiotSavartJAX(biotsavart.coils),
+        jax_surface,
+        jax_label,
+        target,
+        constraint_weight=NESTED_LS_CONSTRAINT_WEIGHT,
+        options={
+            **banana_options,
+            "optimizer_backend": "scipy",
+            "materialize_dense_linearization": True,
+        },
+    )
+    g0 = _g_from_currents(base_currents, nfp)
+    return native, jax_boozer, _IOTA0, g0
+
+
+@pytest.mark.boozer
+def test_schur_newton_walk_records_accepted_steps():
+    _native, jax_boozer, _decision, iota, g0 = _nested_ls_volume_pair()
+    del _native, _decision
+    shifted = np.array(jax_boozer.surface.get_dofs(), dtype=np.float64, copy=True)
+    shifted[0] += 1.0e-3
+    jax_boozer.surface.set_dofs(shifted)
+    walk = run_reduced_nested_ls_schur_newton(
+        jax_boozer,
+        iota=iota,
+        G=g0,
+        maxiter=3,
+        gmres_restart=64,
+        gmres_maxiter=10,
+        gmres_rtol=1.0e-10,
+    )
+    assert walk.coil_delta_inf == 0.0
+    assert walk.iteration_count >= 2
+    assert walk.steps
+    assert walk.steps[0].step_accepted is True
+    assert walk.steps[0].iteration == 1
+    assert walk.steps[-1].grad_l2 < walk.steps[0].grad_l2
+    assert len(walk.steps) == walk.iteration_count or (
+        len(walk.steps) == walk.iteration_count + 1
+        and walk.steps[-1].step_accepted is False
+    )
+
+
+@pytest.mark.boozer
+def test_runtime_coil_closures_match_captured_and_mixed_hvp():
+    _native, jax_boozer, _decision, iota, g0 = _nested_ls_volume_pair()
+    del _native, _decision, iota, g0
+    residual_fn, objective_fn, _phi_hat = nested_ls_reduced_closures(jax_boozer)
+    residual_rt, objective_rt, phi_hat_rt = nested_ls_runtime_coil_closures(jax_boozer)
+    surface = np.asarray(jax_boozer.surface.get_dofs(), dtype=np.float64)
+    coil = np.asarray(jax.device_get(jax_boozer.biotsavart.x), dtype=np.float64)
+    solution = solve_projected_y(residual_fn, surface)
+    require_full_y_rank(solution)
+    packed = pack_surface_and_y(surface, solution.solution)
+    value_tol = parity_ladder_tolerances("direct_kernel")
+    np.testing.assert_allclose(
+        np.asarray(objective_rt(packed, coil), dtype=np.float64),
+        np.asarray(objective_fn(packed), dtype=np.float64),
+        rtol=float(value_tol["rtol"]),
+        atol=float(value_tol["atol"]),
+        err_msg="runtime-coil Φ missed captured-coil Φ",
+    )
+    np.testing.assert_allclose(
+        np.asarray(residual_rt(packed, coil), dtype=np.float64),
+        np.asarray(residual_fn(packed), dtype=np.float64),
+        rtol=float(value_tol["rtol"]),
+        atol=float(value_tol["atol"]),
+        err_msg="runtime-coil residual missed captured-coil residual",
+    )
+    tangent = np.zeros_like(coil)
+    tangent[0] = 1.0
+    mixed = np.asarray(
+        apply_reduced_mixed_schur_coil_tangent(
+            residual_rt,
+            objective_rt,
+            surface,
+            coil,
+            tangent,
+        ),
+        dtype=np.float64,
+    )
+    epsilon = 1.0e-6
+    plus = jax.grad(lambda s: phi_hat_rt(s, coil + epsilon * tangent))(
+        jnp.asarray(surface, dtype=jnp.float64)
+    )
+    minus = jax.grad(lambda s: phi_hat_rt(s, coil))(
+        jnp.asarray(surface, dtype=jnp.float64)
+    )
+    finite_difference = np.asarray((plus - minus) / epsilon, dtype=np.float64)
+    derivative_tol = parity_ladder_tolerances("derivative_heavy")
+    np.testing.assert_allclose(
+        mixed,
+        finite_difference,
+        rtol=float(derivative_tol["second_derivative_rtol"]),
+        atol=max(float(derivative_tol["second_derivative_atol"]), 1.0e-6),
+        err_msg="mixed Ĥ_sc v_c missed FD of ∇_s Φ̂",
+    )
+
+
+@pytest.mark.boozer
+def test_implicit_adjoint_matches_surface_response_to_coil_step():
+    native, jax_boozer, _decision, iota, g0 = _nested_ls_volume_pair()
+    del _decision
+    seed_iota, seed_g = _seed_both_lanes_from_native_lbfgs(native, jax_boozer, iota, g0)
+    polished = run_reduced_nested_ls_newton(jax_boozer, iota=seed_iota, G=seed_g)
+    assert polished.success is True
+    residual_rt, objective_rt, _phi_hat = nested_ls_runtime_coil_closures(jax_boozer)
+    surface0 = np.array(polished.surface_dofs, dtype=np.float64, copy=True)
+    coil0 = np.asarray(jax.device_get(jax_boozer.biotsavart.x), dtype=np.float64)
+    cotangent = np.zeros_like(surface0)
+    cotangent[0] = 1.0
+    tangent = None
+    mixed_dc = None
+    for index in range(min(12, coil0.size)):
+        candidate = np.zeros_like(coil0)
+        candidate[index] = 1.0
+        mixed_candidate = np.asarray(
+            apply_reduced_mixed_schur_coil_tangent(
+                residual_rt,
+                objective_rt,
+                surface0,
+                coil0,
+                candidate,
+            ),
+            dtype=np.float64,
+        )
+        if float(np.linalg.norm(mixed_candidate)) > 1.0e-8:
+            tangent = candidate
+            mixed_dc = mixed_candidate
+            break
+    assert tangent is not None
+    assert mixed_dc is not None
+    adjoint = np.asarray(
+        implicit_adjoint_coil_gradient(
+            residual_rt,
+            objective_rt,
+            surface0,
+            coil0,
+            cotangent,
+        ),
+        dtype=np.float64,
+    )
+    operator = factor_reduced_nested_ls_schur(
+        lambda packed: residual_rt(packed, coil0),
+        lambda packed: objective_rt(packed, coil0),
+        surface0,
+    )
+    dense = materialize_stabilized_schur_dense(operator, NESTED_LS_NEWTON_STAB)
+    lambda_s = np.asarray(
+        solve_stabilized_schur_dense_lu(dense, jnp.asarray(cotangent)),
+        dtype=np.float64,
+    )
+    predicted = -float(np.dot(lambda_s, mixed_dc))
+    np.testing.assert_allclose(
+        float(np.dot(adjoint, tangent)),
+        predicted,
+        rtol=1.0e-8,
+        atol=1.0e-10,
+        err_msg="coil-gradient VJP missed -λᵀ Ĥ_sc v_c",
+    )
+    epsilon = 1.0e-6
+    jax_boozer.surface.set_dofs(surface0)
+    jax_boozer.biotsavart.x = coil0
+    jax_boozer._refresh_coil_data()
+    control = run_reduced_nested_ls_schur_newton(
+        jax_boozer,
+        iota=float(polished.iota),
+        G=float(polished.G),
+        maxiter=1,
+        gmres_restart=64,
+        gmres_maxiter=10,
+        gmres_rtol=1.0e-10,
+    )
+    jax_boozer.surface.set_dofs(surface0)
+    jax_boozer.biotsavart.x = coil0 + epsilon * tangent
+    jax_boozer._refresh_coil_data()
+    perturbed = run_reduced_nested_ls_schur_newton(
+        jax_boozer,
+        iota=float(polished.iota),
+        G=float(polished.G),
+        maxiter=1,
+        gmres_restart=64,
+        gmres_maxiter=10,
+        gmres_rtol=1.0e-10,
+    )
+    finite_difference = (perturbed.surface_dofs[0] - control.surface_dofs[0]) / epsilon
+    assert control.coil_delta_inf == 0.0
+    assert perturbed.coil_delta_inf == 0.0
+    jax_boozer.biotsavart.x = coil0
+    jax_boozer._refresh_coil_data()
+    np.testing.assert_allclose(
+        predicted,
+        finite_difference,
+        rtol=5.0e-2,
+        atol=5.0e-4,
+        err_msg="implicit adjoint missed one Schur step of s[0] to a coil step",
+    )
+
+
+@pytest.mark.boozer
+def test_b3_banana_run_code_matches_native():
+    native, jax_boozer, iota, g0 = _nested_ls_banana_pair()
+    pair = run_banana_run_code_pair(native, jax_boozer, iota=iota, G=g0)
+    assert pair.native.coil_delta_inf == 0.0
+    assert pair.jax.coil_delta_inf == 0.0
+    assert pair.native.success is True
+    assert pair.jax.success is True
+    assert pair.physics_matched is True
+    value_tol = parity_ladder_tolerances("direct_kernel")
+    np.testing.assert_allclose(
+        pair.jax.iota,
+        pair.native.iota,
+        rtol=float(value_tol["rtol"]),
+        atol=float(value_tol["atol"]),
+    )
+    np.testing.assert_allclose(
+        pair.jax.G,
+        pair.native.G,
+        rtol=float(value_tol["rtol"]),
+        atol=float(value_tol["atol"]),
     )

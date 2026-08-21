@@ -48,6 +48,14 @@ class NestedLsPhysicsNewtonKwargs(TypedDict):
     weight_inv_modB: bool
 
 
+class NestedLsBananaRunCodeOptions(TypedDict):
+    verbose: bool
+    newton_tol: float
+    newton_maxiter: int
+    bfgs_tol: float
+    weight_inv_modB: bool
+
+
 def nested_ls_physics_newton_kwargs() -> NestedLsPhysicsNewtonKwargs:
     """Keyword arguments for reconstruct-bar LS Newton on either lane."""
 
@@ -57,6 +65,21 @@ def nested_ls_physics_newton_kwargs() -> NestedLsPhysicsNewtonKwargs:
         maxiter=NESTED_LS_NEWTON_MAXITER,
         stab=NESTED_LS_NEWTON_STAB,
         verbose=False,
+        weight_inv_modB=NESTED_LS_WEIGHT_INV_MODB,
+    )
+
+
+def nested_ls_banana_run_code_options() -> NestedLsBananaRunCodeOptions:
+    """``BoozerSurface`` / ``BoozerSurfaceJAX`` options for banana ``run_code``.
+
+    Banana Newton does not receive ``stab``; the method default is 0.
+    """
+
+    return NestedLsBananaRunCodeOptions(
+        verbose=False,
+        newton_tol=NESTED_LS_BANANA_NEWTON_TOL,
+        newton_maxiter=NESTED_LS_BANANA_NEWTON_MAXITER,
+        bfgs_tol=NESTED_LS_BANANA_BFGS_TOL,
         weight_inv_modB=NESTED_LS_WEIGHT_INV_MODB,
     )
 
@@ -77,6 +100,8 @@ __all__ = [
     "NESTED_LS_REDUCTION_MODE",
     "NESTED_LS_TIMING_BAR",
     "NESTED_LS_WEIGHT_INV_MODB",
+    "NestedLsBananaRunCodeOptions",
     "NestedLsPhysicsNewtonKwargs",
+    "nested_ls_banana_run_code_options",
     "nested_ls_physics_newton_kwargs",
 ]

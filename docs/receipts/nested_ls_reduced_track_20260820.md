@@ -159,16 +159,36 @@ memory-capped chunked materialization of ``Ĥ_ss+stab I`` via the
 linear-solve SSOT. A is dense LU; B is the dense inverse as left GMRES
 ``M``. Default Newton stays GMRES. 7×7 is the canary.
 
+**Steps 4–8 (live path, this commit):** GPU F3 B37 one Schur
+correction, flat-native B37, ten-step frozen-coil walk, runtime coil
+DOFs + implicit adjoint, B3 banana ``run_code``, and B37 nested
+timing after B3. Importing ``simsopt_jax`` without
+``SIMSOPT_BACKEND_MODE=jax_gpu_fast`` pins JAX to CPU even when
+``jax.devices()`` would have been CUDA. Frozen-coil Newton stays
+captured-coil; coil sensitivities use
+``nested_ls_runtime_coil_closures``. B37 nested timing is JAX
+reconstruct Schur walk vs native banana ``run_code`` — different
+operators, not F3 7.70×.
+
+Live GPU one-step (``jax_gpu_fast``, ``cuda:0``, 2026-08-21):
+``step_accepted=True``, ``η=0.23566``, JAX 19.3 s, C++ rejudge
+``ι=0.14085710956609662``, ``‖∇J‖₂=2.24e-14``, surface vs reconstruct
+``4.16e-12``. Ten-step walk: 10 accepted steps, ``‖g‖₂`` 0.01610 →
+0.000692, JAX 106 s, rejudge still reconstruct
+(``ι=0.14085710964186415``, surface inf ``2.84e-11``). Flat-native
+pair2-l2 reconstruct ``ι=0.14085710955509628``. B3 7×7 banana
+``run_code`` ``physics_matched=True``. B37 timing after B3: JAX walk
+144.1 s / 10 iter / ``success=False`` (not ``1e-13``); native banana
+263.1 s / Newton iter 1 / ``success=True`` / ``ι=0.1408571095830707``.
+Do not publish a speed ratio.
+
 ## Next
 
-1. One GPU correction at F3 B37, C++ rejudge.
-2. Flat-native B37, then a ten-step frozen-coil walk.
-3. Runtime coil DOFs + implicit adjoint.
-4. B3 vs banana `run_code`.
-5. B37 nested timing only after B3.
-
-Do not reopen F3. Do not inherit 7.70×. Trajectories need not match;
-require the same native-rejudged branch.
+Physics gates 4–8 of the amended order are produced. Remaining nested
+work is not F3: tighter inexact Newton (forcing / ``M``) so a ten-step
+walk can reach the reconstruct ``1e-13`` bar, and a same-operator banana
+timing at 255×64 only if that inner exists. Do not reopen F3. Do not
+inherit 7.70×.
 
 ## Validation of the SciPy CPU packet (`063b4fe83` / `96a1e5856`)
 
@@ -201,3 +221,16 @@ require the same native-rejudged branch.
 - `test_fourier_block_m_canary_on_exact_schur` + forcing-η: 2 passed in 35.26 s
 - identity, SciPy-import ratchet, JSON (`-m "not slow"`): 6 passed in 39.53 s
 - Default Newton remains unpreconditioned. Slow F3 live not rerun.
+
+## Validation of steps 4–8 (this commit)
+
+- `ruff check` + `ruff format --check` on nested-LS modules + tests: pass
+- targeted `pyright --pythonpath .venv-qn-cpu/bin/python` on
+  `nested_ls_contract.py`, `nested_ls_reduced.py`,
+  `nested_ls_reduced_scale.py`: 0 errors
+- `tests/geo/test_nested_ls_reduced.py` plus timing-refusal and
+  no-write scale tests: 21 passed in 610.19 s
+  (`JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv-qn-cpu`)
+- GPU one-step and ten-step walk: live `jax_gpu_fast` drivers, not
+  pytest (CPU collection skips GPU nodes). C++ reconstruct branch held.
+- B37 nested timing driver ran only after B3 `physics_matched=True`.
