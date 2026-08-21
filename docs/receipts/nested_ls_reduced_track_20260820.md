@@ -267,14 +267,25 @@ Default ``NESTED_LS_SCHUR_GMRES_MAXITER_CAP`` is therefore 512.
 Fourier-block ``M`` was not used. Not a ten-step walk and not a
 timing claim.
 
+GPU walk with ``maxiter_cap=512`` (``42ad7e11c``, ``jax_gpu_fast``,
+``cuda:0``, 2026-08-21): fail-closed. Diagnostic
+``docs/receipts/evidence/nested_ls_reduced_gpu_walk_20260821.cap512.incomplete.json``.
+Step 4 accepted ``η=0.02842 ≤ 0.04072`` at ``maxiter=512`` (the
+frozen-vector probe held). Step 5 accepted ``η=0.173 ≤ 0.24`` and
+cut ``‖g‖₂`` to ``1.45×10⁻⁴``. Step 6 refused ``η=0.09404 > 0.02703``
+at ``maxiter=512``. JAX ``success=False``, ``iters=5``. C++ rejudge
+``iter=8`` (``Δι=-0.00755``, ``Δs_inf=0.00275``) — basin, not no-op.
+Walk wall 1147 s is diagnostic only. Surface DOFs are persisted on the
+JSON. Not a nested speed claim and not F3 7.70×.
+
 ## Next
 
-Relaunch the forcing-certified 661 walk with ``maxiter_cap=512``.
-Require ``success``, JAX ``‖g‖₂ ≤ 1e-13``, η_achieved ≤ η_requested
-on every accepted step, and a C++ rejudge no-op. Do not relax the
-accept gate. Then: matrix-free 661 IFT vs FD of reconverged surfaces,
-coil-optimizer VJP, and same-operator banana timing (B3, then B37)
-only after equal success. Do not reopen F3. Do not inherit 7.70×.
+Probe the step-6 linear solve at the persisted cap-512 walk vector
+(``η_k≈0.027``, ``‖g‖₂=1.45×10⁻⁴``): raise ``maxiter`` further while
+the independent residual decreases, or treat unpreconditioned GMRES
+as insufficient and design a better ``M``. Do not default Fourier-block
+Jacobi. Do not relax the accept gate. Only then relaunch the 1e-13 / η
+/ C++ no-op walk. Do not reopen F3. Do not inherit 7.70×.
 
 ## Validation of the SciPy CPU packet (`063b4fe83` / `96a1e5856`)
 

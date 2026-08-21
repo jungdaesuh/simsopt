@@ -1,0 +1,16 @@
+E0821 15:20:29.670324 3177958 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+E0821 15:20:29.679439 3177875 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+backend gpu
+devices ['cuda:0']
+loaded F3 B37 GPU lane; starting reconstruct-ref + 10-step walk
+wrote /tmp/nested_ls_reduced_gpu_walk_20260821.json
+backend gpu
+success False iters 5 accepted_last False
+grad_l2 0.0001449305895138173 before 0.01609557303688532
+walk_s 1147.0145025749225 last_eta 0.09404256261986046 forcing_ok True
+rejudge_iter 8 rejudge_success True rejudge_s 120.46509016794153
+d_iota -0.007553239335292894 d_G 1.616760059164335e-10 d_s_inf 0.002750456941319257
+git_dirty False git_commit 42ad7e11cc5a5c8804d24f2819dc4c0b155cf021
+claim_ok False
+steps [{'i': 1, 'accepted': True, 'eta': 0.23566072681940672, 'rtol': 0.24, 'maxiter': 1, 'g': 0.003795976041011011, 'alpha': 1.0}, {'i': 2, 'accepted': True, 'eta': 0.038976432238395094, 'rtol': 0.05005835207396097, 'maxiter': 64, 'g': 0.003671789660022825, 'alpha': 1.0}, {'i': 3, 'accepted': True, 'eta': 0.21181377909259372, 'rtol': 0.24, 'maxiter': 16, 'g': 0.000780997243354473, 'alpha': 1.0}, {'i': 4, 'accepted': True, 'eta': 0.02841668364031828, 'rtol': 0.04071795165373735, 'maxiter': 512, 'g': 0.0008362182697971581, 'alpha': 1.0}, {'i': 5, 'accepted': True, 'eta': 0.17332942831288506, 'rtol': 0.24, 'maxiter': 8, 'g': 0.0001449305895138173, 'alpha': 1.0}, {'i': 6, 'accepted': False, 'eta': 0.09404256261986046, 'rtol': 0.027034810094191494, 'maxiter': 512, 'g': 0.0001449305895138173, 'alpha': 1.0}]
+not claim-grade
