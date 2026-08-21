@@ -100,6 +100,13 @@ _GPU_STEP6_ARCH_PUBLICATION = (
     "GPU step-6 solver-architecture canary. Not a walk, not cap-2048, "
     "not a timing claim, and not F3 7.70x."
 )
+_F3_B37_GPU_WALK_DENSE_LU_EVIDENCE = (
+    _EVIDENCE_DIR / "nested_ls_reduced_gpu_walk_20260821.dense_lu.json"
+)
+_GPU_WALK_DENSE_LU_PUBLICATION = (
+    "GPU dense-LU Schur walk canary. Opt-in linear_solver=dense_lu, "
+    "not a default switch. Not a timing claim and not F3 7.70x."
+)
 _GPU_WALK_PUBLICATION = (
     "GPU forcing-certified Schur walk. Not a timing claim and not F3 7.70x."
 )
@@ -829,6 +836,47 @@ def test_authored_gpu_step6_architecture_json_is_strict_and_not_a_walk():
         assert option_b["shared_dense_assembly"] is True
         assert option_b["excludes_assembly_seconds"] is True
         assert option_b["excludes_inversion_seconds"] is True
+    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
+
+
+@pytest.mark.skipif(
+    not _F3_B37_GPU_WALK_DENSE_LU_EVIDENCE.is_file(),
+    reason="authored GPU dense-LU walk JSON not yet produced",
+)
+def test_authored_gpu_dense_lu_walk_json_is_strict_and_not_a_speed_claim():
+    raw = _F3_B37_GPU_WALK_DENSE_LU_EVIDENCE.read_text(encoding="utf-8")
+    assert "NaN" not in raw
+    payload = json.loads(raw)
+    dump_strict_json(payload)
+    assert payload["schema"] == "nested-ls-reduced-gpu-walk.v1"
+    assert payload["written_by_pytest"] is False
+    assert payload["publication"] == _GPU_WALK_DENSE_LU_PUBLICATION
+    assert payload["linear_solver"] == "dense_lu"
+    boundary = payload["claim_boundary"]
+    assert boundary["nested_speed_claim"] is False
+    assert boundary["inherits_f3_7_70x"] is False
+    assert boundary["explicit_inverse_m_production"] is False
+    assert boundary["cap_2048_attempted"] is False
+    assert boundary["full_walk_attempted"] is True
+    assert boundary["jax_success_1e13"] is True
+    probe = payload["probe"]
+    assert probe["linear_solver"] == "dense_lu"
+    assert probe["success"] is True
+    assert probe["provenance"]["git_dirty"] is False
+    assert float(probe["grad_l2"]) <= NESTED_LS_NEWTON_TOL
+    assert int(probe["native_rejudge_iter"]) == 0
+    assert float(probe["rejudge_vs_jax_iota"]) == 0.0
+    assert float(probe["rejudge_vs_jax_g"]) == 0.0
+    assert float(probe["rejudge_vs_jax_surface_inf"]) == 0.0
+    assert float(probe["coil_delta_inf"]) == 0.0
+    assert last_step_meets_forcing(probe["steps"]) is True
+    assert all(bool(step["step_accepted"]) for step in probe["steps"])
+    assert all(
+        float(step["gmres_forcing_eta"]) <= float(step["gmres_rtol"])
+        for step in probe["steps"]
+    )
+    assert probe["runtime"]["jax_default_backend"] == "gpu"
+    assert int(payload["dense_chunk_batch_size"]) >= 1
     assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
 
 

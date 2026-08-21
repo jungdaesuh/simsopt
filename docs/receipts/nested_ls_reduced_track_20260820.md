@@ -385,18 +385,26 @@ Chunk batch width recorded as ``8`` (env unset). Live LU η
 ``excludes_assembly_seconds``, and ``excludes_inversion_seconds``.
 Do not remint the step-6 forcing receipt.
 
+GPU opt-in dense-LU walk canary (``4ee97459d``, ``git_dirty=False``,
+``jax_gpu_fast``, ``cuda:0``, chunk batch 8):
+``docs/receipts/evidence/nested_ls_reduced_gpu_walk_20260821.dense_lu.json``.
+``linear_solver="dense_lu"`` argument only; GMRES remains the code
+default. 8 accepted steps, JAX ``‖g‖₂=2.40×10⁻¹⁴``, C++ rejudge
+``iter=0`` (Δι=0, ΔG=0, Δs_inf=0), coils frozen. Live η ~10⁻¹⁴ at
+every step. Diagnostic walk wall 153 s is **not** a nested speed
+claim. Per-step linear seconds: 28.5 s cold then ~16.1–17.1 s warm;
+Schur factor 4.53 s then ~0.17 s. Claim-grade GMRES walk JSON
+``nested_ls_reduced_gpu_walk_20260821.json`` remains absent.
+
 ## Next
 
-1. Opt-in dense-LU walk canary (``linear_solver="dense_lu"``
-   argument, **not** a global default switch) with C++ rejudge,
-   frozen coils, fail-closed to ``1e-13``. Record warm per-step
-   assembly seconds and chunk batch width.
-2. **NO-GO:** cap-2048, global ``linear_solver`` default switch,
+1. **NO-GO:** cap-2048, global ``linear_solver`` default switch,
    explicit-inverse preconditioning, any nested speed claim, F3
    7.70× inheritance.
-3. Shamanskii / chunk-batch sweep / banana timing only after physics
-   closure **and** only if warm assembly still misses the native
-   reconstruct ~157 s bar.
+2. Warm assembly is still ~16 s/step at chunk width 8. Chunk-batch
+   sweep and Shamanskii lagged-LU only if a nested timing bar is
+   chartered against banana ``run_code``. Physics fail-closed walk
+   at 661 is closed for the opt-in dense-LU lane.
 
 ## Validation of the SciPy CPU packet (`063b4fe83` / `96a1e5856`)
 

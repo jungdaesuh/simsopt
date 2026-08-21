@@ -1,0 +1,16 @@
+E0821 18:02:25.832736  286625 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+E0821 18:02:25.843027  286564 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+backend gpu
+devices ['cuda:0']
+loaded F3 B37 GPU lane; dense_lu walk maxiter=10; chunk 8
+linear_solver dense_lu success True iters 8 grad 2.404212353322172e-14 walk_s 153.06041832105257
+forcing_ok True last_ok True rejudge_iter 0 coil 0.0 claim_ok True
+step 1 acc True eta 1.0128904616919738e-14 rtol 0.24 factor_s 4.526755989994854 linear_s 28.47005231399089 g 0.009129310300059703
+step 2 acc True eta 1.4540984616886344e-14 rtol 0.24 factor_s 0.173660506028682 linear_s 16.660871105035767 g 0.0036378765865506045
+step 3 acc True eta 2.0115698195857236e-14 rtol 0.142909959245359 factor_s 0.18090977985411882 linear_s 16.164414166938514 g 0.001010550353295925
+step 4 acc True eta 1.564240852353384e-14 rtol 0.06944844123650132 factor_s 0.17399774305522442 linear_s 16.061437487136573 g 6.370067059775699e-05
+step 5 acc True eta 9.428631061200454e-14 rtol 0.003576140734706278 factor_s 0.17775284498929977 linear_s 16.281726570799947 g 7.43988575395895e-06
+step 6 acc True eta 1.0021767156072986e-14 rtol 0.012276852386639664 factor_s 0.1720044978428632 linear_s 15.942777078133076 g 9.818604136678544e-10
+step 7 acc True eta 3.936696340962931e-13 rtol 5.092373549639216e-05 factor_s 0.17443506000563502 linear_s 17.136247779009864 g 2.0328628975882297e-12
+step 8 acc True eta 2.190370502903721e-12 rtol 0.02459585447661992 factor_s 0.17399648996070027 linear_s 17.108567682094872 g 2.404212353322172e-14
+wrote /tmp/nested_ls_reduced_gpu_walk_20260821.dense_lu.json claim_ok True
