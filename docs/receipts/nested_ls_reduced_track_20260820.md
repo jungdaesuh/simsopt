@@ -412,9 +412,10 @@ Coil-tangent scan picked index 1 (``‖Ĥ_sc v‖₂=56.5``). VJP matched
 ``−λᵀ Ĥ_sc v``. Unregularized dense-LU FD (ε=10⁻⁶, control 0 Newton
 steps, perturbed 2 steps) matched predicted ``ds/dc`` to
 relative ℓ₂ ``8.01×10⁻⁵``. Coils frozen. Diagnostic only; not B3,
-not a nested speed claim, not F3 7.70×. First JSON was minted with
-``git_dirty=True`` (protocol uncommitted); remint on a clean tree
-before treating provenance as claim-grade.
+not a nested speed claim, not F3 7.70×. Remint after protocol
+commit ``eaf4cef4f``: ``git_dirty=False``,
+``docs/receipts/evidence/nested_ls_reduced_gpu_endpoint_adjoint_20260821.json``,
+live η ``2.21×10⁻¹²``, FD relative ℓ₂ ``8.01×10⁻⁵``.
 
 ## Next
 
@@ -428,10 +429,9 @@ dimension/memory solver policy with matrix-free fallback:
    necessarily identical operators. Lagged LU only if assembly still
    loses. Do not inherit F3 7.70×.
 2. **Adjoint / E2E.** Unregularized 661 IFT at the frozen-coil
-   endpoint is certified (live residual + coil FD). Next is a short
-   moving-coil B3 outer on that adjoint, not a longer inner walk.
-   Remint the adjoint JSON with ``git_dirty=False`` after the
-   protocol commit.
+   endpoint is certified (live residual + coil FD,
+   ``git_dirty=False``). Next is a short moving-coil B3 outer on
+   that adjoint, not a longer inner walk.
 3. **NO-GO:** cap-2048, universal dense-LU default, explicit-inverse
    ``M``, nested speed claim, F3 7.70×, remint of the dirty step-6
    forcing JSON, claim-grade GMRES walk JSON

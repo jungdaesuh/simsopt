@@ -1,0 +1,29 @@
+E0821 19:12:52.596006  974674 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+E0821 19:12:52.604651  974464 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+backend gpu
+devices ['cuda:0']
+loaded F3 B37 GPU lane; unregularized IFT adjoint at dense-LU endpoint; chunk 8
+adjoint dense assemble s=27.350
+adjoint spectrum n_neg=0 eig_real_min=0.006538543293816258 live_eta=2.205061474099406e-12 lu_s=0.064 shift=1.6973631845986057
+adjoint mixed index=0 norm=0.31984559238927246
+adjoint mixed index=1 norm=56.47587088912487
+adjoint mixed index=2 norm=18.068015303488874
+adjoint mixed index=3 norm=46.38565074341663
+adjoint mixed index=4 norm=53.29187398951857
+adjoint mixed index=5 norm=30.715285204889767
+adjoint mixed index=6 norm=16.524585227273473
+adjoint mixed index=7 norm=7.814849587194542
+adjoint vjp dot=1.7254696489190802 predicted=1.7254696489192216 match=True api_s=31.187 pred_norm=1.8961322619621706
+adjoint fd control success=True iter=0 g=2.404212353322172e-14 coil=0.0
+adjoint fd perturbed success=True iter=2 g=3.759776868751345e-15 rel=8.008594998983317e-05 match=True s=49.596
+backend gpu
+sha e25ca0f2fedf25cf411f7b7ad7192860c813ad5fd37bdb5471355834d42ede6c reloaded e25ca0f2fedf25cf411f7b7ad7192860c813ad5fd37bdb5471355834d42ede6c match True expected e25ca0f2fedf25cf411f7b7ad7192860c813ad5fd37bdb5471355834d42ede6c
+iota 0.14085710957665173 expected_iota 0.14085710957665173 G 2.0106193053897154 expected_G 2.0106193053897154 g 2.404212353322172e-14 expected_g 2.404212353322172e-14
+ift_stab 0.0 expected_ift_stab 0.0 newton_stab 0.0001 ift_used_newton_stab False default_cap_refuses True
+spectrum_unreg {'dimension': 661, 'symmetry_frobenius': 1.2151033540883528e-11, 'symmetry_frobenius_rel': 9.134070737294335e-16, 'eig_real_min': 0.006538543293816258, 'eig_real_max': 1998.5033808514754, 'eig_abs_min': 0.006538543293816258, 'eig_abs_max': 1998.5033808514754, 'eig_condition': 305649.63647813327, 'n_eig_negative_real': 0, 'n_eig_complex': 0, 'rayleigh_rhs': 2.1315296561135484, 'rayleigh_delta': 0.00665890405157324}
+spectrum_stab {'dimension': 661, 'symmetry_frobenius': 1.2151033540883528e-11, 'symmetry_frobenius_rel': 9.134069455166076e-16, 'eig_real_min': 0.00663854329389073, 'eig_real_max': 1998.5034808514806, 'eig_abs_min': 0.00663854329389073, 'eig_abs_max': 1998.5034808514806, 'eig_condition': 301045.484284278, 'n_eig_negative_real': 0, 'n_eig_complex': 0, 'rayleigh_rhs': 2.1316296561135486, 'rayleigh_delta': 0.0067622951606531295}
+pd True shift 1.6973631845986057 live_eta 2.205061474099406e-12 dense_eta 1.0544899690571924e-12
+mixed_index 1 mixed_norm 56.47587088912487 pred_norm 1.8961322619621706 vjp True fd True fd_rel 8.008594998983317e-05
+fail None coil 0.0 coil_after 0.0 control_success True perturbed_success True
+wrote /tmp/nested_ls_reduced_gpu_endpoint_adjoint_20260821.json
+claim_ok True
