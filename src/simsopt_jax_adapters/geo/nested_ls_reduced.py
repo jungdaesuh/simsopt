@@ -624,6 +624,7 @@ def solve_operator_gmres_with_forcing(
     maxiter: int,
     maxiter_cap: int,
     preconditioner: Callable[[jax.Array], jax.Array] | None = None,
+    x0: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, float, float, int]:
     """Device GMRES with doubling restart-cycles until η ≤ requested.
 
@@ -631,7 +632,8 @@ def solve_operator_gmres_with_forcing(
     ``‖Aδ − b‖₂ / ‖b‖₂``, not JAX ``info`` and not a comparison to the
     zero guess. If that certificate misses, retry from the current ``δ``
     with a tighter JAX ``tol`` so incremental GMRES cannot stop early
-    on its internal residual estimate.
+    on its internal residual estimate. ``x0`` continues from a prior
+    ``δ`` when raising ``maxiter_cap``.
     """
 
     rhs_host = _host_vector(rhs)
@@ -639,12 +641,14 @@ def solve_operator_gmres_with_forcing(
     used = max(1, int(maxiter))
     cap = max(int(maxiter_cap), used)
     jax_tol = float(eta_requested)
-    newton_jax = jnp.zeros_like(rhs)
+    newton_jax = (
+        jnp.zeros_like(rhs) if x0 is None else jnp.asarray(x0, dtype=jnp.float64)
+    )
     residual = -rhs
     info: object = jnp.asarray(-1, dtype=jnp.int32)
     residual_l2 = rhs_norm
     eta = 1.0 if rhs_norm > 0.0 else 0.0
-    x0 = None
+    guess = None if x0 is None else newton_jax
     while True:
         newton_jax, info = _run_operator_gmres(
             matvec,
@@ -653,14 +657,14 @@ def solve_operator_gmres_with_forcing(
             restart=int(restart),
             maxiter=int(used),
             M=preconditioner,
-            x0=x0,
+            x0=guess,
         )
         residual = matvec(newton_jax) - rhs
         residual_l2 = float(np.linalg.norm(_host_vector(residual)))
         eta = residual_l2 / rhs_norm if rhs_norm > 0.0 else 0.0
         if linear_solve_meets_forcing(eta, eta_requested) or used >= cap:
             break
-        x0 = newton_jax
+        guess = newton_jax
         used = min(cap, used * 2)
         if np.isfinite(eta) and eta > 0.0:
             jax_tol = min(float(eta_requested), 0.25 * float(eta))

@@ -13,7 +13,7 @@
   "command": "SIMSOPT_BACKEND_MODE=jax_gpu_fast JAX_PLATFORMS=cuda,cpu JAX_ENABLE_X64=1 .venv-qn-gpu/bin/python evaluate_f3_b37_schur_newton_walk(maxiter=10)",
   "date": "2026-08-21",
   "driver": "simsopt_jax_adapters.geo.nested_ls_reduced_scale.evaluate_f3_b37_schur_newton_walk",
-  "execution_log": "docs/receipts/evidence/nested_ls_reduced_gpu_walk_20260821.log",
+  "execution_log": "docs/receipts/evidence/nested_ls_reduced_gpu_walk_20260821.cap64.log",
   "gmres_matvecs_note": "JAX incremental GMRES does not report operator applications; gmres_matvecs stays 0 as unavailable telemetry, not zero work. Default maxiter=1 with restart=8 is one restart cycle of up to eight Krylov iterations.",
   "krylov_backend": "jax.scipy.sparse.linalg.gmres incremental via _run_operator_gmres",
   "probe": {

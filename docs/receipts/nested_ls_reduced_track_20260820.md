@@ -241,16 +241,32 @@ reduced ``‖g‖₂``: 0.00380 → 0.00367). Step 4 refused:
 wall 248 s is diagnostic only. Not a nested speed claim and not F3
 7.70×.
 
+The cap-64 incomplete JSON at recording commit ``0f95d618c`` had
+SHA-256 ``1210d35beda7b54721d4846468f4bb73f111c5c41b8241bb0d117dda1b8c9287``
+and incorrectly pointed ``execution_log`` at the cap-8 log. The
+pointer is now
+``docs/receipts/evidence/nested_ls_reduced_gpu_walk_20260821.cap64.log``.
+Step 4 **requested** ``η=0.04071795165373735`` and **achieved**
+``η=0.1203881060498997``; those are distinct.
+
+GPU step-4 forcing probe: fail-closed on surface-digest drift.
+Required step-3 SHA ``286e3dab…17e24``. Live GPU replay produced
+``75c3765e…`` at ``maxiter=3`` (``‖g‖₂=7.8099724e-4``) and
+``f2ec78fa…`` at ``maxiter=10``; neither matched. Independent
+unpreconditioned residual sweep (128, 256) was **not** run. Diagnostic
+``docs/receipts/evidence/nested_ls_reduced_gpu_step4_forcing_20260821.incomplete.json``.
+A SHA-only freeze of 661 float64 DOFs is not GPU-reproducible; persist
+the surface vector. Not a walk and not a timing claim.
+
 ## Next
 
-The cap that closed step 2 does not close a later tighter Eisenstat–Walker
-request (``η_k≈0.041`` at ``‖g‖₂=7.81×10⁻⁴``). Probe that linear
-solve (raise ``maxiter`` further, not ``restart``; do not default
-Fourier-block ``M``). Then relaunch the same 1e-13 / η / C++ no-op
-walk. Do not relax the accept gate. Then: matrix-free 661 IFT vs FD
-of reconverged surfaces, coil-optimizer VJP, and same-operator banana
-timing (B3, then B37) only after equal success. Do not reopen F3. Do
-not inherit 7.70×.
+Persist the step-3 surface DOFs (not only SHA) from a walk, then rerun
+the bounded step-4 ``maxiter`` 128/256 probe against that frozen
+vector with ``restart=8``, ``M=None``, stop at first independent
+``η ≤ 0.04071795165373735``, fail-closed on stagnation/nonfinite/digest
+drift. Do not default Fourier-block ``M``. Only after that passes,
+relaunch the unchanged 1e-13 / η / C++ no-op walk. Do not reopen F3.
+Do not inherit 7.70×.
 
 ## Validation of the SciPy CPU packet (`063b4fe83` / `96a1e5856`)
 
