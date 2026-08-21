@@ -2411,6 +2411,13 @@ def test_diag3_snapshot_closure_is_frozen_against_later_diag2_growth() -> None:
         "src/simsopt_jax/geo/optimizers/projected_lbfgs.py",
         "src/simsopt_jax/geo/optimizers/quasi_newton_metric.py",
         "src/simsopt_jax/geo/optimizers/tangent_gauss_newton.py",
+        # Reduced nested-LS modules landed after DIAG1 sealed its baseline.
+        # They are new files, not edits to a reviewed numerical source, so
+        # the DIAG2 filter excludes them by path.
+        "src/simsopt_jax_adapters/geo/nested_ls_contract.py",
+        "src/simsopt_jax_adapters/geo/nested_ls_newton_parity.py",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py",
     }
     snapshot = SnapshotPublication(
         root=Path("/snapshot"),
