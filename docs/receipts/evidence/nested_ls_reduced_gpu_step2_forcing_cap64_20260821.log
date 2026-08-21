@@ -1,0 +1,5 @@
+E0821 13:43:18.690226 2587769 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+E0821 13:43:18.698748 2587720 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+backend gpu
+g0 0.01609557303688532 g1 0.0037959760410110127 eta_k 0.05005835207396101
+cap64 used 64 eta 0.0389764322383989 meet True resid 0.00014795360294105148 s 88.32315968419425

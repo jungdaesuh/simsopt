@@ -213,16 +213,29 @@ Walk wall 51.2 s is diagnostic only. Not a nested speed claim and
 not F3 7.70×. ``gmres_matvecs=0`` is unavailable JAX telemetry, not
 zero Krylov work.
 
+GPU step-2 forcing probe (``45c0643ce`` dirty tree, ``jax_gpu_fast``,
+``cuda:0``, 2026-08-21):
+``docs/receipts/evidence/nested_ls_reduced_gpu_step2_forcing_20260821.json``.
+After the accepted first step, Choice 2 requested ``η_k=0.05006``.
+Unpreconditioned GMRES ``restart=8`` from ``x0=0``: ``maxiter=8``
+``η=0.193``, ``16`` ``η=0.147``, ``32`` ``η=0.101``. Production-style
+doubling to ``maxiter_cap=32`` reached ``η=0.0648`` (still above
+``η_k``). Fourier-block Jacobi ``M`` factored in 9.3 s and made the
+unpreconditioned certificate worse (``η=0.470`` at ``maxiter=1`` and
+``8``). A same-session follow-up with doubling ``maxiter_cap=64``
+met the gate: ``η=0.03898 ≤ 0.05006`` in 88.3 s, ``used=64``. Default
+``NESTED_LS_SCHUR_GMRES_MAXITER_CAP`` is therefore 64. Fourier ``M``
+stays opt-in. Not a walk, not 1e-13, and not a timing claim.
+
 ## Next
 
-F3 661 still needs a GPU-authored JSON walk that JAX itself drives
-to ``‖g‖₂ ≤ 1e-13`` with η_achieved ≤ η_requested on every accepted
-step and a C++ rejudge no-op (``iter==0``, ``Δs=Δι=ΔG=0``). That
-requires a Krylov budget or device ``M`` that can meet the second-step
-Eisenstat–Walker request ``η≈0.05``; do not relax the accept gate.
-Then: matrix-free 661 IFT vs FD of reconverged surfaces, coil-optimizer
-VJP integration, and same-operator banana timing (B3, then B37) only
-after equal success. Do not reopen F3. Do not inherit 7.70×.
+Relaunch the forcing-certified 661 walk with ``maxiter_cap=64``.
+Require ``success``, JAX ``‖g‖₂ ≤ 1e-13``, η_achieved ≤ η_requested
+on every accepted step, and a C++ rejudge no-op (``iter==0``,
+``Δs=Δι=ΔG=0``). Do not relax the accept gate. Then: matrix-free 661
+IFT vs FD of reconverged surfaces, coil-optimizer VJP integration,
+and same-operator banana timing (B3, then B37) only after equal
+success. Do not reopen F3. Do not inherit 7.70×.
 
 ## Validation of the SciPy CPU packet (`063b4fe83` / `96a1e5856`)
 

@@ -587,6 +587,21 @@ def test_eisenstat_walker_choice2_caps_safeguards_and_floors():
     assert linear_solve_meets_forcing(0.2400001, 0.24) is False
 
 
+def test_eisenstat_walker_step2_matches_recorded_f3_walk():
+    """Choice 2 at the accepted F3 B37 point must request η≈0.05."""
+
+    eta = eisenstat_walker_forcing_eta(
+        0.003795976041011014,
+        previous_grad_norm=0.01609557303688532,
+        previous_eta=0.24,
+        eta_max=NESTED_LS_SCHUR_GMRES_RTOL,
+        nonlinear_tol=NESTED_LS_NEWTON_TOL,
+    )
+    assert eta == pytest.approx(0.05005835207396105, rel=0.0, abs=1.0e-12)
+    assert eta < 0.24
+    assert not linear_solve_meets_forcing(0.1514095713193289, eta)
+
+
 def test_schur_gmres_defaults_are_one_restart_cycle_not_one_krylov_step():
     """JAX ``gmres`` ``maxiter`` counts restart cycles, not Krylov vectors.
 
@@ -598,7 +613,7 @@ def test_schur_gmres_defaults_are_one_restart_cycle_not_one_krylov_step():
 
     assert NESTED_LS_SCHUR_GMRES_RESTART == 8
     assert NESTED_LS_SCHUR_GMRES_MAXITER == 1
-    assert NESTED_LS_SCHUR_GMRES_MAXITER_CAP == 8
+    assert NESTED_LS_SCHUR_GMRES_MAXITER_CAP == 64
 
 
 def test_operator_gmres_rejects_unit_interval_eta_then_retries():
