@@ -249,24 +249,32 @@ pointer is now
 Step 4 **requested** ``η=0.04071795165373735`` and **achieved**
 ``η=0.1203881060498997``; those are distinct.
 
-GPU step-4 forcing probe: fail-closed on surface-digest drift.
-Required step-3 SHA ``286e3dab…17e24``. Live GPU replay produced
-``75c3765e…`` at ``maxiter=3`` (``‖g‖₂=7.8099724e-4``) and
-``f2ec78fa…`` at ``maxiter=10``; neither matched. Independent
-unpreconditioned residual sweep (128, 256) was **not** run. Diagnostic
-``docs/receipts/evidence/nested_ls_reduced_gpu_step4_forcing_20260821.incomplete.json``.
-A SHA-only freeze of 661 float64 DOFs is not GPU-reproducible; persist
-the surface vector. Not a walk and not a timing claim.
+GPU step-4 forcing probe, vector freeze (``a99eb84a1`` dirty tree,
+``jax_gpu_fast``, ``cuda:0``, 2026-08-21):
+``docs/receipts/evidence/nested_ls_reduced_gpu_step4_forcing_20260821.json``.
+Persisted 661 DOFs, clobbered, reloaded; SHA of the loaded vector is
+``75c3765e…`` (reload match). Historical SHA ``286e3dab…`` remains
+archive only. Live Choice 2 **requested** ``η=0.04071795132091288``
+(distinct from cap-64 **achieved** ``η=0.12038811``). Unpreconditioned
+``restart=8``, ``M=None``, residual decreased at every cap:
+
+- cap 64: ``η=0.120388``, resid ``9.40e-5``, 86.7 s
+- cap 128: ``η=0.078691``, resid ``6.15e-5``, 86.6 s
+- cap 256: ``η=0.042179``, resid ``3.29e-5``, 164 s
+- cap 512: ``η=0.038648 ≤ 0.040718``, resid ``3.02e-5``, 350 s
+
+Default ``NESTED_LS_SCHUR_GMRES_MAXITER_CAP`` is therefore 512.
+Fourier-block ``M`` was not used. Not a ten-step walk and not a
+timing claim.
 
 ## Next
 
-Persist the step-3 surface DOFs (not only SHA) from a walk, then rerun
-the bounded step-4 ``maxiter`` 128/256 probe against that frozen
-vector with ``restart=8``, ``M=None``, stop at first independent
-``η ≤ 0.04071795165373735``, fail-closed on stagnation/nonfinite/digest
-drift. Do not default Fourier-block ``M``. Only after that passes,
-relaunch the unchanged 1e-13 / η / C++ no-op walk. Do not reopen F3.
-Do not inherit 7.70×.
+Relaunch the forcing-certified 661 walk with ``maxiter_cap=512``.
+Require ``success``, JAX ``‖g‖₂ ≤ 1e-13``, η_achieved ≤ η_requested
+on every accepted step, and a C++ rejudge no-op. Do not relax the
+accept gate. Then: matrix-free 661 IFT vs FD of reconverged surfaces,
+coil-optimizer VJP, and same-operator banana timing (B3, then B37)
+only after equal success. Do not reopen F3. Do not inherit 7.70×.
 
 ## Validation of the SciPy CPU packet (`063b4fe83` / `96a1e5856`)
 

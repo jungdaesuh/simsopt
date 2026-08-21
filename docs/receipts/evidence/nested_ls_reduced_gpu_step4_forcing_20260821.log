@@ -1,11 +1,15 @@
-E0821 14:43:00.806893 2916170 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
-E0821 14:43:00.816297 2915937 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+E0821 15:01:13.545592 3039082 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+E0821 15:01:13.554375 3038943 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
 backend gpu
 devices ['cuda:0']
-loaded F3 B37 GPU lane; reproducing step-3 then sweeping maxiter
+loaded F3 B37 GPU lane; persist/reload step-3 then sweep maxiter
 backend gpu
-sha 75c3765e14ae639608ca91e599fff6ff43869cc07d53bd4ca46bea9f1ac4b7b6 match False expected 286e3dabf3c9113d25aa691e1abe36a109057738e67536d9e46e6d56faa17e24
-g 0.0007809972401622277 eta_requested 0.04071795132091288 cap64_eta 0.1203881060498997
-meets False fail surface_sha_mismatch coil 0.0
-git_dirty True commit 0f95d618c8e5ac341bd17d70a582f7298775c08f
+frozen_sha 75c3765e14ae639608ca91e599fff6ff43869cc07d53bd4ca46bea9f1ac4b7b6 reloaded 75c3765e14ae639608ca91e599fff6ff43869cc07d53bd4ca46bea9f1ac4b7b6 reload_match True
+historical_sha 286e3dabf3c9113d25aa691e1abe36a109057738e67536d9e46e6d56faa17e24
+g 0.0007809972401622277 eta_requested 0.04071795132091288 historical_eta 0.04071795165373735 cap64_eta 0.1203881060498997
+meets False fail eta_unmet coil 0.0 ndof 661
+git_dirty True commit a99eb84a1d8207598d39577fd37f95677d65d2a1
+row cap 64 used 64 eta 0.12038810656509993 requested 0.04071795132091288 resid 9.402277897569921e-05 meet False s 86.71559979300946
+row cap 128 used 128 eta 0.07869077516137632 requested 0.04071795132091288 resid 6.145727822726129e-05 meet False s 86.55468720383942
+row cap 256 used 256 eta 0.04217874778746113 requested 0.04071795132091288 resid 3.294148561550581e-05 meet False s 164.01941433898173
 wrote /tmp/nested_ls_reduced_gpu_step4_forcing_20260821.json
