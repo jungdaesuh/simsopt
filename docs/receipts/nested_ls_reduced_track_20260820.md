@@ -227,15 +227,30 @@ met the gate: ``η=0.03898 ≤ 0.05006`` in 88.3 s, ``used=64``. Default
 ``NESTED_LS_SCHUR_GMRES_MAXITER_CAP`` is therefore 64. Fourier ``M``
 stays opt-in. Not a walk, not 1e-13, and not a timing claim.
 
+GPU walk with ``maxiter_cap=64`` (``98449f6ec``, ``jax_gpu_fast``,
+``cuda:0``, 2026-08-21): fail-closed. Diagnostic
+``docs/receipts/evidence/nested_ls_reduced_gpu_walk_20260821.cap64.incomplete.json``
+is **not** claim-grade. Step 1 accepted ``η=0.23566 ≤ 0.24`` at
+``maxiter=1``. Step 2 accepted ``η=0.03898 ≤ 0.05006`` at
+``maxiter=64``. Step 3 accepted ``η=0.21181 ≤ 0.24`` at
+``maxiter=16`` (Choice 2 returned ``η_max`` because step 2 barely
+reduced ``‖g‖₂``: 0.00380 → 0.00367). Step 4 refused:
+``η=0.12039 > 0.04072`` at ``maxiter=64``. JAX ``success=False``,
+``iters=3``, ``‖g‖₂=7.81×10⁻⁴``. C++ rejudge ``iter=9``
+(``Δι=-0.014688``, ``Δs_inf=0.004808``) — basin, not no-op. Walk
+wall 248 s is diagnostic only. Not a nested speed claim and not F3
+7.70×.
+
 ## Next
 
-Relaunch the forcing-certified 661 walk with ``maxiter_cap=64``.
-Require ``success``, JAX ``‖g‖₂ ≤ 1e-13``, η_achieved ≤ η_requested
-on every accepted step, and a C++ rejudge no-op (``iter==0``,
-``Δs=Δι=ΔG=0``). Do not relax the accept gate. Then: matrix-free 661
-IFT vs FD of reconverged surfaces, coil-optimizer VJP integration,
-and same-operator banana timing (B3, then B37) only after equal
-success. Do not reopen F3. Do not inherit 7.70×.
+The cap that closed step 2 does not close a later tighter Eisenstat–Walker
+request (``η_k≈0.041`` at ``‖g‖₂=7.81×10⁻⁴``). Probe that linear
+solve (raise ``maxiter`` further, not ``restart``; do not default
+Fourier-block ``M``). Then relaunch the same 1e-13 / η / C++ no-op
+walk. Do not relax the accept gate. Then: matrix-free 661 IFT vs FD
+of reconverged surfaces, coil-optimizer VJP, and same-operator banana
+timing (B3, then B37) only after equal success. Do not reopen F3. Do
+not inherit 7.70×.
 
 ## Validation of the SciPy CPU packet (`063b4fe83` / `96a1e5856`)
 
