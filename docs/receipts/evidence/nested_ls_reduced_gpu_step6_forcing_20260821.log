@@ -1,0 +1,14 @@
+E0821 16:14:15.907972 3569374 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+E0821 16:14:15.917664 3569308 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+backend gpu
+devices ['cuda:0']
+loaded F3 B37 GPU lane; load/reload step-5 vector then sweep
+backend gpu
+sha a0493560d7ebe3455b68bb834830ad59fb1fb510f79a447c61267547cdc0effe reloaded a0493560d7ebe3455b68bb834830ad59fb1fb510f79a447c61267547cdc0effe match True expected a0493560d7ebe3455b68bb834830ad59fb1fb510f79a447c61267547cdc0effe
+iota 0.1484103489869863 G 2.0106193052280394 g 0.0001449305895138173
+eta_requested 0.027034810094191494 cap512_eta 0.09404256261986046
+meets False fail wall_time_cap insufficient True coil 0.0
+git_dirty True commit b61b7899f04ab294a44bbc270a1f434725f661e0
+row cap 512 used 512 eta 0.09404256261916526 requested 0.027034810094191494 resid 1.36296440397857e-05 meet False s 486.09867957793176
+row cap 1024 used 1024 eta 0.03179540303099468 requested 0.027034810094191494 resid 4.608126505111472e-06 meet False s 628.6738862220664
+wrote /tmp/nested_ls_reduced_gpu_step6_forcing_20260821.json

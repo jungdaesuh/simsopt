@@ -278,14 +278,38 @@ at ``maxiter=512``. JAX ``success=False``, ``iters=5``. C++ rejudge
 Walk wall 1147 s is diagnostic only. Surface DOFs are persisted on the
 JSON. Not a nested speed claim and not F3 7.70×.
 
+The step-4 forcing JSON producer recorded ``git_dirty=True``; it is a
+numerical replay certificate, not independently clean-source
+promotion evidence. The clean cap-512 walk at ``42ad7e11c``
+corroborates step-4 acceptance (``η=0.02842 ≤ 0.04072``). Walk logs
+that printed ``forcing_ok True`` while the last step was rejected were
+scoring accepted steps only; last-step η vs that step's η_k is now
+the certificate (``last_step_meets_forcing``).
+
+GPU step-6 forcing probe (``b61b7899f`` dirty tree, ``jax_gpu_fast``,
+``cuda:0``, 2026-08-21):
+``docs/receipts/evidence/nested_ls_reduced_gpu_step6_forcing_20260821.json``.
+Loaded 661-vector SHA ``a0493560…effe``, clobber/reload match.
+Bound ``ι=0.1484103489869863``, ``G=2.0106193052280394``,
+``‖g‖₂=1.449305895×10⁻⁴``. Requested ``η=0.027034810094191494``
+(distinct from cap-512 achieved ``0.09404256``). ``restart=8``,
+``M=None``. Residual fell; 2048 skipped on the 1200 s wall:
+
+- cap 512: ``η=0.094043``, resid ``1.36×10⁻⁵``, 486 s
+- cap 1024: ``η=0.031795``, resid ``4.61×10⁻⁶``, 629 s
+- cap 2048: not started (``2×629 s > 1200 s``)
+
+Did not meet ``η≤0.02703``. Residual still falling (ratio 0.34), so
+this is not stagnation and not a declaration that unpreconditioned
+GMRES is insufficient. Physics-feasibility probe only; not nested
+performance. Claim-grade walk JSON remains absent.
+
 ## Next
 
-Probe the step-6 linear solve at the persisted cap-512 walk vector
-(``η_k≈0.027``, ``‖g‖₂=1.45×10⁻⁴``): raise ``maxiter`` further while
-the independent residual decreases, or treat unpreconditioned GMRES
-as insufficient and design a better ``M``. Do not default Fourier-block
-Jacobi. Do not relax the accept gate. Only then relaunch the 1e-13 / η
-/ C++ no-op walk. Do not reopen F3. Do not inherit 7.70×.
+Either raise the predeclared 2048 wall and continue while residual
+falls, or design a better-than-Fourier-block preconditioner. Do not
+auto-launch a walk. Do not default Fourier-block Jacobi. Do not
+inherit F3 7.70×.
 
 ## Validation of the SciPy CPU packet (`063b4fe83` / `96a1e5856`)
 
