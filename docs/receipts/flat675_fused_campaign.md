@@ -5,18 +5,7 @@ primary timer `process_wall_seconds` of the timed child — every ratio below
 is that timer unless explicitly labeled report-only). The production-tree
 fused on-device L-BFGS-B flat-675 lane
 (`simsopt_jax.examples.single_stage_flat675`, fp64, RTX 5090) beats the
-matched native C++/simsoptpp lane at equal budget and at matched quality.
-
-**Claim boundary.** This WIN is flat-675 JAX GPU versus matched **flat-native
-L-BFGS-B** on `process_wall_seconds` (**7.70× at B37**). It is **not**
-nested-LS, banana nested Newton, or exact Boozer. The published F3 B37
-surface is **not** the Newton Boozer surface of those coils: frozen-coil
-C++ LS Newton walks `Δι = −0.0107925`
-(`docs/receipts/boozer_unnest_newton_reconstruct_diagnostic_20260820.md`).
-The LS-projected candidate is a distinct design (eight-term outer `J`
-`0.013957201998031181 → 0.014334402067809742`, **+2.70%**). The 7.70×
-ratio does **not** transfer onto a nested-LS GPU route; that route must be
-retimed against canonical nested-LS native.
+matched native C++/simsoptpp lane at equal budget and at matched quality:
 
 | Rung | L1 fused (median) | L2 native omp16 (median) | Pair ratios | Live median | Anchor / L1 | Gates |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -198,3 +187,19 @@ adversarial review rounds to strict PASS before the first timed leg, plus
 live dry runs reproducing the fair-bar's native endpoint bitwise). Native
 lane and oracle: the fair-bar machinery imported unmodified, instrument
 worktree pinned clean at `1c23f6c5`.
+
+## Addendum (2026-08-21) — claim boundary: F3 is flat vs flat L-BFGS-B; 7.70× does not transfer
+
+**Nothing in this addendum edits a word above it, and nothing in it
+disputes the 2026-08-19 WIN arithmetic (B3 1.67× / B37 7.70× / BQ 7.36×
+on `process_wall_seconds`).** This WIN is flat-675 JAX GPU versus matched
+**flat-native L-BFGS-B**. It is **not** nested-LS, banana nested Newton,
+or exact Boozer. The published F3 B37 surface is **not** the Newton
+Boozer surface of those coils: frozen-coil C++ LS Newton walks
+`Δι = −0.0107925`
+(`docs/receipts/boozer_unnest_newton_reconstruct_diagnostic_20260820.md`).
+The LS-projected candidate is a distinct design (eight-term outer `J`
+`0.013957201998031181 → 0.014334402067809742`, **+2.70%**). The 7.70×
+ratio does **not** transfer onto a nested-LS GPU route; that route must
+be retimed against canonical nested-LS native. The reconstruct diagnostic
+does not supersede this receipt.
