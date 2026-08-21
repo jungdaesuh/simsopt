@@ -376,7 +376,7 @@ def test_f3_b37_one_schur_newton_step_and_cpp_rejudge():
     frozen = json.loads(_F3_B37_SCHUR_ONE_STEP_EVIDENCE.read_text(encoding="utf-8"))
     frozen_probe = frozen["probe"]
     replay = frozen["independent_replay"]
-    assert probe.gmres_info == 1
+    assert probe.gmres_info in (0, -1)
     assert probe.gmres_restart == 8
     assert probe.gmres_maxiter == 1
     assert probe.step_coil_delta_inf == 0.0

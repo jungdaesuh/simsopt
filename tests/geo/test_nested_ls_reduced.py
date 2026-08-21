@@ -7,6 +7,9 @@ same scale.
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -37,6 +40,7 @@ from simsopt_jax_adapters.geo.nested_ls_newton_parity import (
     run_nested_ls_newton_pair,
 )
 from simsopt_jax_adapters.geo.nested_ls_reduced import (
+    NESTED_LS_SCHUR_GMRES_RTOL,
     NestedLsReducedRankError,
     compare_ad_qr_and_schur_hvp,
     nested_ls_reduced_closures,
@@ -321,6 +325,7 @@ def test_schur_newton_one_step_matches_ad_through_qr():
         maxiter=1,
         gmres_restart=64,
         gmres_maxiter=10,
+        gmres_rtol=1.0e-10,
     )
     assert ad.coil_delta_inf == 0.0
     assert schur.coil_delta_inf == 0.0
@@ -342,6 +347,73 @@ def test_schur_newton_one_step_matches_ad_through_qr():
         atol=float(grad_tol["atol"]),
         err_msg="Schur Newton surface missed AD-through-QR Newton after one step",
     )
+    assert schur.gmres_rtol == pytest.approx(1.0e-10, rel=0.0, abs=0.0)
+    assert schur.gmres_info in (0, -1)
+    assert schur.gmres_forcing_eta <= 1.0e-8
+
+
+@pytest.mark.boozer
+def test_schur_newton_forcing_eta_is_explicit_linear_residual_ratio():
+    _native, jax_boozer, _decision, iota, g0 = _nested_ls_volume_pair()
+    del _native, _decision
+    shifted = np.array(jax_boozer.surface.get_dofs(), dtype=np.float64, copy=True)
+    shifted[0] += 1.0e-3
+    jax_boozer.surface.set_dofs(shifted)
+    residual_fn, objective_fn, _phi_hat = nested_ls_reduced_closures(jax_boozer)
+    del _phi_hat
+    y_start = np.array([float(iota), float(g0)], dtype=np.float64)
+    y_star = solve_projected_y(residual_fn, shifted, y_start).solution
+    gradient = np.asarray(
+        reduced_penalty_gradient_envelope(objective_fn, shifted, y_star),
+        dtype=np.float64,
+    )
+    grad_l2 = float(np.linalg.norm(gradient))
+    assert grad_l2 > 0.0
+    assert NESTED_LS_SCHUR_GMRES_RTOL == pytest.approx(0.24, rel=0.0, abs=0.0)
+    schur = run_reduced_nested_ls_schur_newton(
+        jax_boozer,
+        iota=iota,
+        G=g0,
+        maxiter=1,
+    )
+    assert schur.gmres_rtol == pytest.approx(0.24, rel=0.0, abs=0.0)
+    assert schur.gmres_info in (0, -1)
+    assert schur.gmres_matvecs == 0
+    assert schur.gmres_forcing_eta == pytest.approx(
+        schur.gmres_residual_l2 / grad_l2,
+        rel=1.0e-12,
+        abs=1.0e-12,
+    )
+
+
+def test_schur_newton_module_does_not_import_host_scipy_gmres():
+    source_path = (
+        Path(__file__).resolve().parents[2]
+        / "src"
+        / "simsopt_jax_adapters"
+        / "geo"
+        / "nested_ls_reduced.py"
+    )
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    scipy_names: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (
+            node.module == "scipy.sparse.linalg"
+            or (
+                node.module is not None
+                and node.module.startswith("scipy.sparse.linalg.")
+            )
+        ):
+            scipy_names.extend(alias.name for alias in node.names)
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "scipy.sparse.linalg" or alias.name.startswith(
+                    "scipy.sparse.linalg."
+                ):
+                    scipy_names.append(alias.name)
+    assert "gmres" not in scipy_names
+    assert "LinearOperator" not in scipy_names
+    assert all(not name.startswith("scipy.sparse.linalg") for name in scipy_names)
 
 
 @pytest.mark.boozer

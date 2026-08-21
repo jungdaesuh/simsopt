@@ -139,18 +139,30 @@ Independent CPU replay of `063b4fe83`: Schur vs AD-through-QR
 `rtol=1e-10` at `||g||_2=0.0161` requests about `1.61e-12`, not
 `1e-13`. Host SciPy GMRES uses `jax.device_get` per matvec.
 
+**Device GMRES (live path, this commit):**
+`run_reduced_nested_ls_schur_newton` no longer uses SciPy
+`LinearOperator` or per-matvec `device_get`. The linear solve is
+`_run_operator_gmres` (`solve_method="incremental"`, `atol=0`) on
+`v ↦ Ĥ_ss v + stab v`. The certificate is the explicit residual
+`‖(Ĥ+stab I)δs − g‖₂` and forcing `η = residual / ‖g‖₂`. Default
+`η = 0.24` (the observed SciPy-cap ratio). Eisenstat–Walker is not
+implemented. JAX `info` is the 0/−1 NaN placeholder, not SciPy's
+iteration count. Frozen F3 JSON above remains the SciPy CPU packet.
+
 ## Next
 
-1. Keep the CPU packet hash-bound (this receipt).
-2. Add a preconditioner and a device-resident JAX Krylov loop with an
-   inexact-Newton forcing rule. Do not raise unpreconditioned restart.
-3. Demonstrate one Newton-quality correction on GPU and rejudge it.
-4. Only then flat-native B37, then B3 timing.
+1. Fourier-block `M` canary on the exact Schur operator.
+2. Memory-capped chunked dense `Ĥ_ss` A/B.
+3. One GPU correction at F3 B37, C++ rejudge.
+4. Flat-native B37, then a ten-step frozen-coil walk.
+5. Runtime coil DOFs + implicit adjoint.
+6. B3 vs banana `run_code`.
+7. B37 nested timing only after B3.
 
 Do not reopen F3. Do not inherit 7.70×. Trajectories need not match;
 require the same native-rejudged branch.
 
-## Validation of this amendment (CPU `.venv-qn-cpu`)
+## Validation of the SciPy CPU packet (`063b4fe83` / `96a1e5856`)
 
 - `ruff check` + `ruff format --check` on the nested-LS modules: pass
 - `git diff --check`: pass
@@ -160,3 +172,16 @@ require the same native-rejudged branch.
 - `tests/geo/test_nested_ls_reduced.py`: 10 passed in 164.71 s
 - always-on JSON/provenance tests: 4 passed in 1.11 s
 - scale start + F3 bounded + F3 one-step: 4 passed in 569.26 s
+
+## Validation of the device-GMRES amendment (CPU `.venv-qn-cpu`)
+
+- `ruff check` + `ruff format --check` on the nested-LS modules: pass
+- `git diff --check`: pass
+- targeted `pyright --pythonpath .venv-qn-cpu/bin/python` on
+  `nested_ls_contract.py`, `nested_ls_reduced.py`,
+  `nested_ls_reduced_scale.py`: 0 errors
+- `tests/geo/test_nested_ls_reduced.py` identity, forcing-η, and
+  SciPy-import ratchet: 3 passed in 54.11 s
+- always-on JSON/provenance tests (`-m "not slow"`): 4 passed
+- Slow F3 live `test_f3_b37_one_schur_newton_step_and_cpp_rejudge`
+  was not rerun (GPU F3 correction is a later gate)

@@ -22,9 +22,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from numpy.typing import NDArray
-from scipy.sparse.linalg import LinearOperator, gmres
 from simsopt.geo.boozersurface import _boozer_iterate_is_persistable
-from simsopt_jax.geo.optimizers.linear_solve import _hessian_vector_product_fn
+from simsopt_jax.geo.optimizers.linear_solve import (
+    _hessian_vector_product_fn,
+    _run_operator_gmres,
+)
 from simsopt_jax.numerical_policy import NEWTON_ARMIJO_C1
 
 from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
@@ -45,7 +47,10 @@ PackedPenaltyHvp = Callable[[jax.Array, jax.Array], jax.Array]
 NESTED_LS_SCHUR_GMRES_RESTART: Final[int] = 8
 NESTED_LS_SCHUR_GMRES_MAXITER: Final[int] = 1
 NESTED_LS_SCHUR_BACKTRACKING_MAX_STEPS: Final[int] = 8
-NESTED_LS_SCHUR_GMRES_RTOL: Final[float] = 1.0e-10
+# Inexact-Newton forcing η_k = ‖(Ĥ_ss+stab I)δs − g‖₂ / ‖g‖₂. 0.24 is the
+# residual ratio observed on the F3 B37 SciPy cap (restart=8, maxiter=1).
+# Eisenstat–Walker is not implemented.
+NESTED_LS_SCHUR_GMRES_RTOL: Final[float] = 0.24
 
 
 class NestedLsReducedRankError(ValueError):
@@ -136,7 +141,14 @@ class NestedLsHvpComparison:
 
 @dataclass(frozen=True, slots=True)
 class NestedLsSchurNewtonResult:
-    """One capped Schur-Newton polish on ``s``, with Krylov telemetry."""
+    """One capped Schur-Newton polish on ``s``, with Krylov telemetry.
+
+    ``gmres_rtol`` is the requested forcing (JAX ``tol``).
+    ``gmres_forcing_eta`` is the achieved ``gmres_residual_l2 / ‖g‖₂``.
+    ``gmres_info`` is JAX's 0/−1 NaN placeholder, not SciPy's iteration
+    count. ``gmres_matvecs`` stays 0: JAX incremental GMRES does not
+    report operator applications.
+    """
 
     success: bool
     persisted: bool
@@ -154,6 +166,8 @@ class NestedLsSchurNewtonResult:
     gmres_info: int
     gmres_matvecs: int
     gmres_residual_l2: float
+    gmres_forcing_eta: float
+    gmres_rtol: float
     gmres_restart: int
     gmres_maxiter: int
     factor_seconds: float
@@ -292,33 +306,6 @@ def _packed_objective_hvp(objective_fn) -> PackedPenaltyHvp:
         return hvp(packed, tangent)
 
     return packed_hvp
-
-
-class _StabilizedSchurLinearOperator(LinearOperator):
-    """Host ``Ĥ_ss + stab I`` for capped SciPy GMRES.
-
-    Each matvec pulls a JAX HVP to host. That is telemetry, not a
-    device-resident GPU Krylov loop.
-    """
-
-    def __init__(
-        self,
-        apply_hvp: Callable[[object], jax.Array],
-        stab: float,
-        dimension: int,
-    ) -> None:
-        super().__init__(np.dtype(np.float64), (dimension, dimension))
-        self._apply_hvp = apply_hvp
-        self._stab = float(stab)
-        self.matvec_count = 0
-
-    def _matvec(self, x: NDArray[np.float64]) -> NDArray[np.float64]:
-        self.matvec_count += 1
-        vector = np.asarray(x, dtype=np.float64).reshape(-1)
-        hv = np.asarray(
-            jax.device_get(self._apply_hvp(vector)), dtype=np.float64
-        ).reshape(-1)
-        return hv + self._stab * vector
 
 
 def _require_full_phi_yy(phi_yy: jax.Array) -> tuple[NDArray[np.float64], float]:
@@ -597,6 +584,18 @@ def _schur_armijo_step(
     return surface, value, gradient, current_solution, alpha, False
 
 
+def _stabilized_schur_matvec(
+    operator: NestedLsReducedSchurOperator,
+    stab: jax.Array,
+) -> Callable[[jax.Array], jax.Array]:
+    """Return the device map ``v ↦ Ĥ_ss v + stab v``."""
+
+    def matvec(tangent: jax.Array) -> jax.Array:
+        return operator.apply(tangent) + stab * tangent
+
+    return matvec
+
+
 def run_reduced_nested_ls_schur_newton(
     jax_boozer: BoozerSurfaceJAX,
     *,
@@ -611,11 +610,11 @@ def run_reduced_nested_ls_schur_newton(
     gmres_maxiter: int = NESTED_LS_SCHUR_GMRES_MAXITER,
     gmres_rtol: float = NESTED_LS_SCHUR_GMRES_RTOL,
 ) -> NestedLsSchurNewtonResult:
-    """Capped GMRES Newton on ``s`` using the Schur ``Ĥ_ss`` operator.
+    """Capped inexact Newton on ``s`` using Schur ``Ĥ_ss`` and device GMRES.
 
     Mutates ``jax_boozer.surface``. Does not write ``self.res``. Packed
-    HVPs never differentiate through QR. Default Krylov budget is one
-    restart cycle of 8 matvecs — not a full walk.
+    HVPs never differentiate through QR. ``gmres_rtol`` is requested
+    forcing; the certificate is achieved ``‖(Ĥ+stab I)δs − g‖₂ / ‖g‖₂``.
     """
 
     residual_fn, objective_fn, _phi_hat = nested_ls_reduced_closures(
@@ -638,6 +637,7 @@ def run_reduced_nested_ls_schur_newton(
     gmres_info = -1
     gmres_matvecs = 0
     gmres_residual_l2 = 0.0
+    gmres_forcing_eta = 0.0
     factor_seconds = 0.0
     gmres_seconds = 0.0
     phi_yy_condition = 0.0
@@ -659,23 +659,24 @@ def run_reduced_nested_ls_schur_newton(
         )
         factor_seconds += time.perf_counter() - factor_started
         phi_yy_condition = float(operator.phi_yy_condition)
-        linear = _StabilizedSchurLinearOperator(
-            operator.apply, float(stab), operator.surface_size
+        matvec = _stabilized_schur_matvec(
+            operator, jnp.asarray(stab, dtype=jnp.float64)
         )
+        rhs = jnp.asarray(working_grad, dtype=jnp.float64)
         gmres_started = time.perf_counter()
-        newton_direction, gmres_info = gmres(
-            linear,
-            working_grad,
-            rtol=float(gmres_rtol),
-            atol=0.0,
+        newton_jax, info = _run_operator_gmres(
+            matvec,
+            rhs,
+            tol=float(gmres_rtol),
             restart=int(gmres_restart),
             maxiter=int(gmres_maxiter),
         )
         gmres_seconds += time.perf_counter() - gmres_started
-        gmres_matvecs += int(linear.matvec_count)
-        newton_direction = np.asarray(newton_direction, dtype=np.float64).reshape(-1)
-        residual = linear._matvec(newton_direction) - working_grad
-        gmres_residual_l2 = float(np.linalg.norm(residual))
+        residual = matvec(newton_jax) - rhs
+        newton_direction = _host_vector(newton_jax)
+        gmres_residual_l2 = float(np.linalg.norm(_host_vector(residual)))
+        gmres_info = int(_host_vector(jnp.reshape(jnp.asarray(info), (1,)))[0])
+        gmres_forcing_eta = gmres_residual_l2 / float(np.linalg.norm(working_grad))
         if not np.all(np.isfinite(newton_direction)):
             step_accepted = False
             break
@@ -745,6 +746,8 @@ def run_reduced_nested_ls_schur_newton(
         gmres_info=int(gmres_info),
         gmres_matvecs=int(gmres_matvecs),
         gmres_residual_l2=float(gmres_residual_l2),
+        gmres_forcing_eta=float(gmres_forcing_eta),
+        gmres_rtol=float(gmres_rtol),
         gmres_restart=int(gmres_restart),
         gmres_maxiter=int(gmres_maxiter),
         factor_seconds=float(factor_seconds),
@@ -756,6 +759,7 @@ def run_reduced_nested_ls_schur_newton(
 __all__ = [
     "NESTED_LS_SCHUR_GMRES_MAXITER",
     "NESTED_LS_SCHUR_GMRES_RESTART",
+    "NESTED_LS_SCHUR_GMRES_RTOL",
     "NestedLsHvpComparison",
     "NestedLsReducedNewtonResult",
     "NestedLsReducedRankError",
