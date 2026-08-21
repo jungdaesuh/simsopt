@@ -43,6 +43,7 @@ from simsopt_jax_adapters.geo.nested_ls_reduced import (
     NESTED_LS_SCHUR_GMRES_RTOL,
     NestedLsReducedRankError,
     compare_ad_qr_and_schur_hvp,
+    factor_reduced_nested_ls_schur,
     nested_ls_reduced_closures,
     pack_surface_and_y,
     projected_y_system,
@@ -378,12 +379,28 @@ def test_schur_newton_forcing_eta_is_explicit_linear_residual_ratio():
     )
     assert schur.gmres_rtol == pytest.approx(0.24, rel=0.0, abs=0.0)
     assert schur.gmres_info in (0, -1)
-    assert schur.gmres_matvecs == 0
+    operator = factor_reduced_nested_ls_schur(
+        residual_fn, objective_fn, shifted, y_probe=y_star
+    )
+    predicted = np.asarray(
+        operator.apply(schur.gmres_solution), dtype=np.float64
+    ).reshape(-1)
+    predicted = predicted + NESTED_LS_NEWTON_STAB * np.asarray(
+        schur.gmres_solution, dtype=np.float64
+    ).reshape(-1)
+    independent_residual = predicted - gradient
+    independent_l2 = float(np.linalg.norm(independent_residual))
+    assert schur.gmres_residual_l2 == pytest.approx(
+        independent_l2, rel=1.0e-12, abs=1.0e-12
+    )
     assert schur.gmres_forcing_eta == pytest.approx(
-        schur.gmres_residual_l2 / grad_l2,
+        independent_l2 / grad_l2,
         rel=1.0e-12,
         abs=1.0e-12,
     )
+    if schur.gmres_forcing_eta > 1.0:
+        assert schur.step_accepted is False
+        np.testing.assert_array_equal(schur.surface_dofs, shifted)
 
 
 def test_schur_newton_module_does_not_import_host_scipy_gmres():
