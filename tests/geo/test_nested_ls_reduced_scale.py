@@ -7,10 +7,12 @@ because the LS residual is 3*255*64+2 = 48962 rows. Not an F3 timing claim.
 from __future__ import annotations
 
 import ast
+import inspect
 import json
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 from simsopt_jax.parity_tolerances import parity_ladder_tolerances
@@ -24,6 +26,7 @@ from simsopt_jax_adapters.geo.nested_ls_reduced import (
     pack_surface_and_y,
     require_full_y_rank,
     run_reduced_nested_ls_newton,
+    run_reduced_nested_ls_schur_newton,
     solve_projected_y,
 )
 from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
@@ -31,6 +34,11 @@ from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     ARCHIVED_START_QR_IOTA,
     DEFAULT_F3_B37_GPU_LANE,
     DEFAULT_F3_B37_NATIVE_LANE,
+    F3_B37_STEP6_CAP_2048,
+    F3_B37_STEP6_CAP_2048_START_MAXITER,
+    F3_B37_STEP6_MATERIAL_RESIDUAL_RATIO,
+    F3_B37_STEP6_WALL_SECONDS_2048,
+    NestedLsCountedMatvec,
     archived_f3_b37_lanes_available,
     archived_flat675_bundle_available,
     dump_strict_json,
@@ -39,14 +47,18 @@ from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     evaluate_f3_b37_nested_timing,
     evaluate_f3_b37_schur_newton_step,
     evaluate_f3_b37_schur_newton_walk,
+    evaluate_f3_b37_step6_architecture_probe,
     float64_ulps,
+    gmres_doubling_cycle_budget,
     kib_to_gib,
     last_step_meets_forcing,
     load_archived_nested_ls_pair,
     load_flat675_lane_blocks,
     nested_ls_receipt_provenance,
+    predict_start_at_cap_wall_seconds,
     replace_native_solver_options,
     sha256_file,
+    unpreconditioned_gmres_is_insufficient,
 )
 
 _EVIDENCE_DIR = Path(__file__).resolve().parents[2] / "docs" / "receipts" / "evidence"
@@ -78,8 +90,15 @@ _F3_B37_GPU_WALK_CAP512_EVIDENCE = (
 _F3_B37_GPU_STEP6_EVIDENCE = (
     _EVIDENCE_DIR / "nested_ls_reduced_gpu_step6_forcing_20260821.json"
 )
+_F3_B37_GPU_STEP6_ARCH_EVIDENCE = (
+    _EVIDENCE_DIR / "nested_ls_reduced_gpu_step6_architecture_20260821.json"
+)
 _GPU_STEP6_PUBLICATION = (
     "GPU step-6 forcing probe. Not a walk, not a timing claim, and not F3 7.70x."
+)
+_GPU_STEP6_ARCH_PUBLICATION = (
+    "GPU step-6 solver-architecture canary. Not a walk, not cap-2048, "
+    "not a timing claim, and not F3 7.70x."
 )
 _GPU_WALK_PUBLICATION = (
     "GPU forcing-certified Schur walk. Not a timing claim and not F3 7.70x."
@@ -625,6 +644,191 @@ def test_authored_gpu_step6_forcing_json_is_strict_and_not_a_walk():
     assert int(probe["gmres_restart"]) == 8
     assert all(row.get("preconditioner") == "none" for row in probe["rows"])
     assert payload["gmres_matvecs_note"] == _GPU_WALK_GMRES_MATVECS_NOTE
+    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
+
+
+def test_step6_forcing_json_is_dirty_source_replay_not_promotion():
+    payload = json.loads(_F3_B37_GPU_STEP6_EVIDENCE.read_text(encoding="utf-8"))
+    dump_strict_json(payload)
+    assert payload["probe"]["provenance"]["git_dirty"] is True
+    assert payload["probe"]["provenance"]["source_sha256"][
+        "nested_ls_reduced_scale.py"
+    ].startswith("1f4d66ac")
+    assert payload["claim_boundary"]["nested_speed_claim"] is False
+    assert payload["claim_boundary"]["full_walk_attempted"] is False
+    assert payload["probe"]["unpreconditioned_gmres_insufficient"] is False
+    assert payload["probe"]["fail_closed_reason"] == "wall_time_cap"
+
+
+def test_unpreconditioned_gmres_insufficient_semantics():
+    ratio = F3_B37_STEP6_MATERIAL_RESIDUAL_RATIO
+    assert unpreconditioned_gmres_is_insufficient("stagnation") is True
+    assert (
+        unpreconditioned_gmres_is_insufficient(
+            "eta_unmet",
+            residual_ratio=0.34,
+            material_residual_ratio=ratio,
+        )
+        is False
+    )
+    assert (
+        unpreconditioned_gmres_is_insufficient(
+            "eta_unmet",
+            residual_ratio=0.95,
+            material_residual_ratio=ratio,
+        )
+        is True
+    )
+    assert (
+        unpreconditioned_gmres_is_insufficient(
+            "eta_unmet",
+            residual_ratio=None,
+            material_residual_ratio=ratio,
+        )
+        is True
+    )
+    assert unpreconditioned_gmres_is_insufficient("wall_time_cap") is False
+    assert unpreconditioned_gmres_is_insufficient("surface_sha_mismatch") is False
+
+
+def test_step6_2048_leg_starts_at_cap_and_predictor_drops_double_pay():
+    assert F3_B37_STEP6_CAP_2048_START_MAXITER == F3_B37_STEP6_CAP_2048 == 2048
+    assert gmres_doubling_cycle_budget(1024, 2048) == 1024 + 2048
+    assert gmres_doubling_cycle_budget(2048, 2048) == 2048
+    assert gmres_doubling_cycle_budget(512, 1024) == 512 + 1024
+    predicted = predict_start_at_cap_wall_seconds(
+        628.6738862220664,
+        previous_start_maxiter=512,
+        previous_cap=1024,
+        next_cap=2048,
+    )
+    assert predicted == pytest.approx(
+        628.6738862220664 * (2048.0 / 1536.0), rel=0.0, abs=1.0e-12
+    )
+    assert predicted <= F3_B37_STEP6_WALL_SECONDS_2048
+    source = Path(
+        evaluate_f3_b37_step6_architecture_probe.__code__.co_filename
+    ).read_text(encoding="utf-8")
+    assert "maxiter=int(F3_B37_STEP6_CAP_2048_START_MAXITER)" in source
+    assert "maxiter_cap=int(F3_B37_STEP6_CAP_2048)" in source
+    assert "maxiter=1024,\n                    maxiter_cap=2048" not in source
+
+
+def test_step6_architecture_probe_is_not_a_walk_or_cap2048():
+    source_path = Path(evaluate_f3_b37_step6_architecture_probe.__code__.co_filename)
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    fn_node = None
+    for node in tree.body:
+        if (
+            isinstance(node, ast.FunctionDef)
+            and node.name == "evaluate_f3_b37_step6_architecture_probe"
+        ):
+            fn_node = node
+            break
+    assert fn_node is not None
+    text = ast.get_source_segment(source_path.read_text(encoding="utf-8"), fn_node)
+    assert text is not None
+    assert "evaluate_f3_b37_schur_newton_walk" not in text
+    assert "F3_B37_STEP6_CAP_2048" not in text
+    assert "maxiter_cap=2048" not in text
+
+
+def test_schur_newton_walk_defaults_to_gmres():
+    parameter = inspect.signature(evaluate_f3_b37_schur_newton_walk).parameters[
+        "linear_solver"
+    ]
+    assert parameter.default == "gmres"
+    assert (
+        inspect.signature(run_reduced_nested_ls_schur_newton)
+        .parameters["linear_solver"]
+        .default
+        == "gmres"
+    )
+    source_path = Path(evaluate_f3_b37_schur_newton_walk.__code__.co_filename)
+    source = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(source_path))
+    fn_node = None
+    for node in tree.body:
+        if (
+            isinstance(node, ast.FunctionDef)
+            and node.name == "evaluate_f3_b37_schur_newton_walk"
+        ):
+            fn_node = node
+            break
+    assert fn_node is not None
+    text = ast.get_source_segment(source, fn_node)
+    assert text is not None
+    assert "linear_solver=str(linear_solver)" in text
+    assert 'linear_solver="dense_lu"' not in text
+    assert "linear_solver='dense_lu'" not in text
+
+
+def test_counted_matvec_increments_through_jax_gmres():
+    from jax.scipy.sparse.linalg import gmres as jax_gmres
+
+    diagonal = jnp.arange(1.0, 9.0, dtype=jnp.float64)
+
+    def matvec(tangent: jax.Array) -> jax.Array:
+        return diagonal * tangent
+
+    counter = NestedLsCountedMatvec(matvec)
+    solution, _info = jax_gmres(
+        counter,
+        jnp.ones((8,), dtype=jnp.float64),
+        None,
+        tol=1.0e-16,
+        atol=0.0,
+        restart=4,
+        maxiter=2,
+        solve_method="incremental",
+    )
+    jax.block_until_ready(solution)
+    assert counter.count >= 8
+
+
+@pytest.mark.skipif(
+    not _F3_B37_GPU_STEP6_ARCH_EVIDENCE.is_file(),
+    reason="authored GPU step-6 architecture JSON not yet produced",
+)
+def test_authored_gpu_step6_architecture_json_is_strict_and_not_a_walk():
+    raw = _F3_B37_GPU_STEP6_ARCH_EVIDENCE.read_text(encoding="utf-8")
+    assert "NaN" not in raw
+    payload = json.loads(raw)
+    dump_strict_json(payload)
+    assert payload["schema"] == "nested-ls-reduced-gpu-step6-architecture.v1"
+    assert payload["written_by_pytest"] is False
+    assert payload["publication"] == _GPU_STEP6_ARCH_PUBLICATION
+    boundary = payload["claim_boundary"]
+    assert boundary["newton_quality_linear_solve"] is True
+    assert boundary["explicit_inverse_m_production"] is False
+    assert boundary["nested_speed_claim"] is False
+    assert boundary["inherits_f3_7_70x"] is False
+    assert boundary["full_walk_attempted"] is False
+    assert boundary["cap_2048_attempted"] is False
+    probe = payload["probe"]
+    assert probe["reload_sha_match"] is True
+    assert probe["surface_sha256"] == (
+        "a0493560d7ebe3455b68bb834830ad59fb1fb510f79a447c61267547cdc0effe"
+    )
+    assert int(probe["hvp_budget"]) == 128
+    assert any(row.get("row") == "dense_lu" for row in probe["rows"])
+    assert probe["dense_meets_forcing"] is True
+    dense_row = next(row for row in probe["rows"] if row.get("row") == "dense_lu")
+    assert dense_row["eta_achieved"] is not None
+    assert float(dense_row["eta_achieved"]) <= float(probe["eta_requested"])
+    assert dense_row.get("eta_achieved_dense_materialization") is not None
+    dense_chunk_batch_size = probe.get("dense_chunk_batch_size")
+    if dense_chunk_batch_size is not None:
+        assert isinstance(dense_chunk_batch_size, int)
+        assert dense_chunk_batch_size >= 1
+    option_b = next(
+        (row for row in probe["rows"] if row.get("row") == "option_b_dense_inverse_m"),
+        None,
+    )
+    if option_b is not None and "shared_dense_assembly" in option_b:
+        assert option_b["shared_dense_assembly"] is True
+        assert option_b["excludes_assembly_seconds"] is True
+        assert option_b["excludes_inversion_seconds"] is True
     assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
 
 

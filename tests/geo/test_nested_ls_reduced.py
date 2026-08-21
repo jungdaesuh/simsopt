@@ -806,6 +806,21 @@ def test_fourier_block_m_canary_on_exact_schur():
     assert prec.gmres_forcing_eta < plain.gmres_forcing_eta
 
 
+def test_dense_lu_newton_certifies_live_matvec_not_dense_product():
+    source_path = (
+        Path(__file__).resolve().parents[2]
+        / "src"
+        / "simsopt_jax_adapters"
+        / "geo"
+        / "nested_ls_reduced.py"
+    )
+    source = source_path.read_text(encoding="utf-8")
+    branch = source.split('elif linear_solver == "dense_lu":', 1)[1]
+    newton_part = branch.split("else:", 1)[0]
+    assert "residual = matvec(newton_jax) - rhs" in newton_part
+    assert "residual = dense @ newton_jax - rhs" not in newton_part
+
+
 def test_schur_newton_module_does_not_import_host_scipy_gmres():
     source_path = (
         Path(__file__).resolve().parents[2]
