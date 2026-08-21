@@ -14,7 +14,7 @@ after the physics bar's branch matches.
 
 from __future__ import annotations
 
-from typing import Final
+from typing import Final, TypedDict
 
 NESTED_LS_CONSTRAINT_WEIGHT: Final[float] = 1.0
 NESTED_LS_WEIGHT_INV_MODB: Final[bool] = True
@@ -39,17 +39,26 @@ NESTED_LS_PHYSICS_BAR: Final[str] = "reconstruct_newton"
 NESTED_LS_TIMING_BAR: Final[str] = "banana_run_code"
 
 
-def nested_ls_physics_newton_kwargs() -> dict[str, object]:
+class NestedLsPhysicsNewtonKwargs(TypedDict):
+    constraint_weight: float
+    tol: float
+    maxiter: int
+    stab: float
+    verbose: bool
+    weight_inv_modB: bool
+
+
+def nested_ls_physics_newton_kwargs() -> NestedLsPhysicsNewtonKwargs:
     """Keyword arguments for reconstruct-bar LS Newton on either lane."""
 
-    return {
-        "constraint_weight": NESTED_LS_CONSTRAINT_WEIGHT,
-        "tol": NESTED_LS_NEWTON_TOL,
-        "maxiter": NESTED_LS_NEWTON_MAXITER,
-        "stab": NESTED_LS_NEWTON_STAB,
-        "verbose": False,
-        "weight_inv_modB": NESTED_LS_WEIGHT_INV_MODB,
-    }
+    return NestedLsPhysicsNewtonKwargs(
+        constraint_weight=NESTED_LS_CONSTRAINT_WEIGHT,
+        tol=NESTED_LS_NEWTON_TOL,
+        maxiter=NESTED_LS_NEWTON_MAXITER,
+        stab=NESTED_LS_NEWTON_STAB,
+        verbose=False,
+        weight_inv_modB=NESTED_LS_WEIGHT_INV_MODB,
+    )
 
 
 __all__ = [
@@ -68,5 +77,6 @@ __all__ = [
     "NESTED_LS_REDUCTION_MODE",
     "NESTED_LS_TIMING_BAR",
     "NESTED_LS_WEIGHT_INV_MODB",
+    "NestedLsPhysicsNewtonKwargs",
     "nested_ls_physics_newton_kwargs",
 ]

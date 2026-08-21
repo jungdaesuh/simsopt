@@ -7,10 +7,12 @@ does not evaluate F3's fused objective and does not inherit the 7.70× claim.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import resource
 import socket
+import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -19,6 +21,9 @@ from pathlib import Path
 
 import jax
 import numpy as np
+import scipy
+import simsopt
+import simsoptpp
 from numpy.typing import NDArray
 from simsopt._core.json import GSONDecoder
 from simsopt.field import BiotSavart
@@ -35,6 +40,7 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     nested_ls_physics_newton_kwargs,
 )
 from simsopt_jax_adapters.geo.nested_ls_reduced import (
+    compare_ad_qr_and_schur_hvp,
     factor_reduced_nested_ls_schur,
     nested_ls_reduced_closures,
     pack_surface_and_y,
@@ -189,11 +195,12 @@ def load_archived_nested_ls_pair(
         if surface_coordinates is None
         else np.asarray(surface_coordinates, dtype=np.float64)
     )
-    if coils.shape != native_field.x.shape:
+    archived_x = np.asarray(native_field.x, dtype=np.float64)
+    if coils.shape != archived_x.shape:
         raise ValueError(
             "coil coordinates shape "
             f"{coils.shape} does not match archived BiotSavart.x "
-            f"{native_field.x.shape}."
+            f"{archived_x.shape}."
         )
     native_field.x = coils
     jax_field.x = np.array(coils, dtype=np.float64, copy=True)
@@ -263,6 +270,71 @@ def dump_strict_json(payload: dict[str, object]) -> str:
     """Serialize evidence with ``allow_nan=False`` so NaN cannot sneak in."""
 
     return json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n"
+
+
+def sha256_file(path: Path) -> str:
+    """SHA-256 of a file's raw bytes."""
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def sha256_float64(values: object) -> str:
+    """SHA-256 of a C-contiguous float64 buffer."""
+
+    array = np.ascontiguousarray(np.asarray(values, dtype=np.float64))
+    return hashlib.sha256(array.view(np.uint8).tobytes()).hexdigest()
+
+
+def _git_output(*args: str) -> str:
+    repo = Path(__file__).resolve().parents[3]
+    return subprocess.check_output(["git", *args], cwd=repo, text=True).strip()
+
+
+def nested_ls_receipt_provenance() -> dict[str, object]:
+    """Commit, versions, source hashes, and F3 input hashes for a receipt."""
+
+    repo = Path(__file__).resolve().parents[3]
+    dirty = _git_output("status", "--porcelain")
+    biot_path = DEFAULT_FLAT675_BUNDLE_ROOT / NATIVE_BIOT_SAVART_FILENAME
+    simsoptpp_file = simsoptpp.__file__
+    if simsoptpp_file is None:
+        raise RuntimeError("simsoptpp has no __file__; cannot hash the extension.")
+    simsoptpp_path = Path(simsoptpp_file).resolve()
+    return {
+        **nested_ls_runtime_identity(),
+        "git_commit": _git_output("rev-parse", "HEAD"),
+        "git_branch": _git_output("rev-parse", "--abbrev-ref", "HEAD"),
+        "git_dirty": bool(dirty),
+        "git_status_porcelain": dirty,
+        "python_version": sys.version,
+        "jax_version": jax.__version__,
+        "numpy_version": np.__version__,
+        "scipy_version": scipy.__version__,
+        "simsopt_version": simsopt.__version__,
+        "simsoptpp_path": str(simsoptpp_path),
+        "simsoptpp_sha256": sha256_file(simsoptpp_path),
+        "source_sha256": {
+            "nested_ls_contract.py": sha256_file(
+                repo / "src/simsopt_jax_adapters/geo/nested_ls_contract.py"
+            ),
+            "nested_ls_reduced.py": sha256_file(
+                repo / "src/simsopt_jax_adapters/geo/nested_ls_reduced.py"
+            ),
+            "nested_ls_reduced_scale.py": sha256_file(
+                repo / "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py"
+            ),
+        },
+        "input_sha256": {
+            "native_biot_savart.json": (
+                sha256_file(biot_path) if biot_path.is_file() else None
+            ),
+            "pair2-l1_lane.json": (
+                sha256_file(DEFAULT_F3_B37_GPU_LANE)
+                if DEFAULT_F3_B37_GPU_LANE.is_file()
+                else None
+            ),
+        },
+    }
 
 
 def _peak_rss_kib() -> int:
@@ -567,23 +639,45 @@ class NestedLsSchurNewtonStepProbe:
     native_rejudge_g: float
     native_rejudge_coil_delta_inf: float
     native_rejudge_seconds: float
+    native_rejudge_grad_l2: float
+    native_rejudge_grad_inf: float
+    native_rejudge_surface_sha256: str
+    reconstruct_ref_iota: float | None
+    reconstruct_ref_g: float | None
+    reconstruct_ref_grad_l2: float | None
+    reconstruct_ref_surface_sha256: str | None
+    rejudge_vs_reconstruct_surface_inf: float | None
+    schur_vs_ad_rel_l2: float | None
+    schur_vs_ad_max_abs: float | None
+    phi_yy_condition_from_hvp: float | None
     runtime: dict[str, object]
+    provenance: dict[str, object]
 
     def as_payload(self) -> dict[str, object]:
         return asdict(self)
 
 
+def _native_ls_gradient_norms(result) -> tuple[float, float]:
+    gradient = np.asarray(result["jacobian"], dtype=np.float64).reshape(-1)
+    return float(np.linalg.norm(gradient)), float(np.linalg.norm(gradient, ord=np.inf))
+
+
 def evaluate_f3_b37_schur_newton_step(
     native: BoozerSurface,
     jax_boozer: BoozerSurfaceJAX,
+    *,
+    compare_reconstruct_branch: bool = True,
+    compare_schur_hvp: bool = True,
 ) -> NestedLsSchurNewtonStepProbe:
     """One capped Schur Newton step from the F3 B37 point, then C++ rejudge.
 
     Does not run a ten-step walk and does not time nested-LS versus F3.
+    Host SciPy GMRES is telemetry, not a device-resident GPU Krylov.
     """
 
-    residual_fn, objective_fn, _phi_hat = nested_ls_reduced_closures(jax_boozer)
+    residual_fn, objective_fn, phi_hat = nested_ls_reduced_closures(jax_boozer)
     surface0 = np.asarray(jax_boozer.surface.get_dofs(), dtype=np.float64)
+    native_start = np.asarray(native.surface.get_dofs(), dtype=np.float64)
     solution = solve_projected_y(residual_fn, surface0, np.zeros(2, dtype=np.float64))
     require_full_y_rank(solution)
     y_star = np.asarray(solution.solution, dtype=np.float64)
@@ -591,7 +685,33 @@ def evaluate_f3_b37_schur_newton_step(
         reduced_penalty_gradient_envelope(objective_fn, surface0, y_star),
         dtype=np.float64,
     )
-    runtime = nested_ls_runtime_identity()
+    grad_l2 = float(np.linalg.norm(gradient))
+    tangent = (
+        gradient / grad_l2
+        if np.isfinite(grad_l2) and grad_l2 > 0.0
+        else np.zeros_like(gradient)
+    )
+    if compare_schur_hvp:
+        comparison = compare_ad_qr_and_schur_hvp(
+            residual_fn, objective_fn, phi_hat, surface0, tangent
+        )
+        schur_vs_ad_rel_l2 = float(comparison.rel_l2)
+        schur_vs_ad_max_abs = float(comparison.max_abs)
+        phi_yy_condition_from_hvp = float(comparison.phi_yy_condition)
+    else:
+        schur_vs_ad_rel_l2 = None
+        schur_vs_ad_max_abs = None
+        phi_yy_condition_from_hvp = None
+    provenance = nested_ls_receipt_provenance()
+    runtime = {
+        "hostname": provenance["hostname"],
+        "python_executable": provenance["python_executable"],
+        "jax_default_backend": provenance["jax_default_backend"],
+        "jax_devices": provenance["jax_devices"],
+        "jax_platforms_env": provenance["jax_platforms_env"],
+        "jax_enable_x64_env": provenance["jax_enable_x64_env"],
+        "timestamp_utc": provenance["timestamp_utc"],
+    }
     step_started = time.perf_counter()
     step = run_reduced_nested_ls_schur_newton(
         jax_boozer,
@@ -602,6 +722,29 @@ def evaluate_f3_b37_schur_newton_step(
     step_seconds = time.perf_counter() - step_started
     rss_after_step = _current_rss_kib()
     peak_after_step = _peak_rss_kib()
+    newton_kwargs = nested_ls_physics_newton_kwargs()
+    if compare_reconstruct_branch:
+        native.need_to_run_code = True
+        native.surface.set_dofs(native_start)
+        reconstruct_ref = native.minimize_boozer_penalty_constraints_newton(
+            iota=float(y_star[0]),
+            G=float(y_star[1]),
+            **newton_kwargs,
+        )
+        reconstruct_surface = np.asarray(native.surface.get_dofs(), dtype=np.float64)
+        reconstruct_ref_iota = float(reconstruct_ref["iota"])
+        reconstruct_ref_g = float(reconstruct_ref["G"])
+        reconstruct_ref_grad_l2, _reconstruct_inf = _native_ls_gradient_norms(
+            reconstruct_ref
+        )
+        del _reconstruct_inf
+        reconstruct_ref_surface_sha256 = sha256_float64(reconstruct_surface)
+    else:
+        reconstruct_surface = None
+        reconstruct_ref_iota = None
+        reconstruct_ref_g = None
+        reconstruct_ref_grad_l2 = None
+        reconstruct_ref_surface_sha256 = None
     native.need_to_run_code = True
     native.surface.set_dofs(step.surface_dofs)
     rejudge_coils0 = np.asarray(native.biotsavart.x, dtype=np.float64)
@@ -609,10 +752,18 @@ def evaluate_f3_b37_schur_newton_step(
     native_rejudge = native.minimize_boozer_penalty_constraints_newton(
         iota=float(step.iota),
         G=float(step.G),
-        **nested_ls_physics_newton_kwargs(),
+        **newton_kwargs,
     )
     rejudge_seconds = time.perf_counter() - rejudge_started
     rejudge_coils1 = np.asarray(native.biotsavart.x, dtype=np.float64)
+    rejudge_surface = np.asarray(native.surface.get_dofs(), dtype=np.float64)
+    rejudge_grad_l2, rejudge_grad_inf = _native_ls_gradient_norms(native_rejudge)
+    if reconstruct_surface is None:
+        rejudge_vs_reconstruct_surface_inf = None
+    else:
+        rejudge_vs_reconstruct_surface_inf = float(
+            np.linalg.norm(rejudge_surface - reconstruct_surface, ord=np.inf)
+        )
     return NestedLsSchurNewtonStepProbe(
         y_star_iota=float(y_star[0]),
         y_star_g=float(y_star[1]),
@@ -645,7 +796,19 @@ def evaluate_f3_b37_schur_newton_step(
             np.linalg.norm(rejudge_coils1 - rejudge_coils0, ord=np.inf)
         ),
         native_rejudge_seconds=float(rejudge_seconds),
+        native_rejudge_grad_l2=rejudge_grad_l2,
+        native_rejudge_grad_inf=rejudge_grad_inf,
+        native_rejudge_surface_sha256=sha256_float64(rejudge_surface),
+        reconstruct_ref_iota=reconstruct_ref_iota,
+        reconstruct_ref_g=reconstruct_ref_g,
+        reconstruct_ref_grad_l2=reconstruct_ref_grad_l2,
+        reconstruct_ref_surface_sha256=reconstruct_ref_surface_sha256,
+        rejudge_vs_reconstruct_surface_inf=rejudge_vs_reconstruct_surface_inf,
+        schur_vs_ad_rel_l2=schur_vs_ad_rel_l2,
+        schur_vs_ad_max_abs=schur_vs_ad_max_abs,
+        phi_yy_condition_from_hvp=phi_yy_condition_from_hvp,
         runtime=runtime,
+        provenance=provenance,
     )
 
 
@@ -666,5 +829,8 @@ __all__ = [
     "kib_to_gib",
     "load_archived_nested_ls_pair",
     "load_flat675_lane_blocks",
+    "nested_ls_receipt_provenance",
     "nested_ls_runtime_identity",
+    "sha256_file",
+    "sha256_float64",
 ]

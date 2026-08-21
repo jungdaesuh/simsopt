@@ -120,14 +120,43 @@ tol). Then one host GMRES Newton step at F3 B37, cap `restart=8`,
   `docs/receipts/evidence/nested_ls_reduced_gate1_f3_b37_schur_one_step_20260820.json`.
   Pytest does not write it.
 
-**Still not produced:** a Newton-quality linear solve, a full reduced
-walk, endpoint parity of the JAX one-step itself, nested speed, F3
-inheritance, flat-native B37.
+**Still not produced:** a Newton-quality linear solve, a device-resident
+GPU Krylov, a full reduced walk, nested speed, F3 inheritance,
+flat-native B37.
+
+Publication wording for this packet:
+
+> The Schur operator and one accepted inexact CPU correction are
+> validated. Independent C++ rejudging confirms the reconstruct branch.
+> Scientific feasibility passes; receipt provenance and GPU-performance
+> qualification remain open.
+
+Independent CPU replay of `063b4fe83`: Schur vs AD-through-QR
+`rel_l2=8.29e-16`, `max_abs=1.42e-13`; C++ rejudge
+`||∇J_LS||_2=2.24e-14`; 661-DOF surface vs reconstruct endpoint
+`||Δs||_∞=4.16e-12`. Unpreconditioned GMRES restart 8/16/32 residuals
+`3.79e-3 / 1.77e-3 / 8.35e-4`. Do not raise restart toward `1e-13`.
+`rtol=1e-10` at `||g||_2=0.0161` requests about `1.61e-12`, not
+`1e-13`. Host SciPy GMRES uses `jax.device_get` per matvec.
 
 ## Next
 
-Raise the Schur Krylov budget only enough to drive the linear residual
-below the Newton tolerance, rejudge that better step in C++, then
-repeat at flat-native B37. Do not attempt a full walk or timing
-campaign before that. Do not reopen F3. Do not inherit 7.70×.
-Trajectories need not match; require the same native-rejudged branch.
+1. Keep the CPU packet hash-bound (this receipt).
+2. Add a preconditioner and a device-resident JAX Krylov loop with an
+   inexact-Newton forcing rule. Do not raise unpreconditioned restart.
+3. Demonstrate one Newton-quality correction on GPU and rejudge it.
+4. Only then flat-native B37, then B3 timing.
+
+Do not reopen F3. Do not inherit 7.70×. Trajectories need not match;
+require the same native-rejudged branch.
+
+## Validation of this amendment (CPU `.venv-qn-cpu`)
+
+- `ruff check` + `ruff format --check` on the nested-LS modules: pass
+- `git diff --check`: pass
+- targeted `pyright` with `.venv-qn-cpu` on
+  `nested_ls_contract.py`, `nested_ls_reduced.py`,
+  `nested_ls_reduced_scale.py`: 0 errors
+- `tests/geo/test_nested_ls_reduced.py`: 10 passed in 164.71 s
+- always-on JSON/provenance tests: 4 passed in 1.11 s
+- scale start + F3 bounded + F3 one-step: 4 passed in 569.26 s

@@ -14,6 +14,7 @@ reconstruct bar in :mod:`nested_ls_contract`.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final
 
@@ -40,6 +41,7 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
 )
 
 _Y_SIZE = FLAT675_Y_COLUMN_COUNT
+PackedPenaltyHvp = Callable[[jax.Array, jax.Array], jax.Array]
 NESTED_LS_SCHUR_GMRES_RESTART: Final[int] = 8
 NESTED_LS_SCHUR_GMRES_MAXITER: Final[int] = 1
 NESTED_LS_SCHUR_BACKTRACKING_MAX_STEPS: Final[int] = 8
@@ -83,8 +85,10 @@ class NestedLsReducedNewtonResult:
 class NestedLsReducedSchurOperator:
     """Cached ``Ĥ_ss v = Φ_ss v − Φ_sy Φ_yy⁻¹ Φ_ys v`` at one ``(s, y*)``.
 
-    ``Φ_yy`` is the exact 2×2 y-block, not Gauss–Newton ``AᵀA``. Packed
-    HVPs differentiate ``Φ(s, y)`` only; they do not go through QR.
+    Because the residual is affine in ``y=(ι, G)``, the exact inner
+    block is ``Φ_yy = AᵀA``. Surface and reduced blocks still carry
+    residual-curvature terms that Gauss–Newton would drop. Packed HVPs
+    differentiate ``Φ(s, y)`` only; they do not go through QR.
     """
 
     packed: jax.Array
@@ -94,7 +98,7 @@ class NestedLsReducedSchurOperator:
     y_star: jax.Array
     y_rank: int
     phi_yy_condition: float
-    _packed_hvp: object
+    _packed_hvp: PackedPenaltyHvp
 
     def apply(self, tangent: object) -> jax.Array:
         """Return ``Ĥ_ss v`` using one packed ``Φ`` HVP and the cached 2×2."""
@@ -281,8 +285,40 @@ def reduced_penalty_gradient_envelope(
     return jax.grad(objective_fn)(packed)[:-_Y_SIZE]
 
 
-def _packed_objective_hvp(objective_fn):
-    return _hessian_vector_product_fn(objective_fn)
+def _packed_objective_hvp(objective_fn) -> PackedPenaltyHvp:
+    hvp = _hessian_vector_product_fn(objective_fn)
+
+    def packed_hvp(packed: jax.Array, tangent: jax.Array) -> jax.Array:
+        return hvp(packed, tangent)
+
+    return packed_hvp
+
+
+class _StabilizedSchurLinearOperator(LinearOperator):
+    """Host ``Ĥ_ss + stab I`` for capped SciPy GMRES.
+
+    Each matvec pulls a JAX HVP to host. That is telemetry, not a
+    device-resident GPU Krylov loop.
+    """
+
+    def __init__(
+        self,
+        apply_hvp: Callable[[object], jax.Array],
+        stab: float,
+        dimension: int,
+    ) -> None:
+        super().__init__(np.dtype(np.float64), (dimension, dimension))
+        self._apply_hvp = apply_hvp
+        self._stab = float(stab)
+        self.matvec_count = 0
+
+    def _matvec(self, x: NDArray[np.float64]) -> NDArray[np.float64]:
+        self.matvec_count += 1
+        vector = np.asarray(x, dtype=np.float64).reshape(-1)
+        hv = np.asarray(
+            jax.device_get(self._apply_hvp(vector)), dtype=np.float64
+        ).reshape(-1)
+        return hv + self._stab * vector
 
 
 def _require_full_phi_yy(phi_yy: jax.Array) -> tuple[NDArray[np.float64], float]:
@@ -623,21 +659,8 @@ def run_reduced_nested_ls_schur_newton(
         )
         factor_seconds += time.perf_counter() - factor_started
         phi_yy_condition = float(operator.phi_yy_condition)
-        matvec_count = 0
-
-        def matvec(tangent, schur=operator, stab_value=float(stab)):
-            nonlocal matvec_count
-            matvec_count += 1
-            vector = np.asarray(tangent, dtype=np.float64).reshape(-1)
-            hv = np.asarray(
-                jax.device_get(schur.apply(vector)), dtype=np.float64
-            ).reshape(-1)
-            return hv + stab_value * vector
-
-        linear = LinearOperator(
-            (operator.surface_size, operator.surface_size),
-            matvec=matvec,
-            dtype=np.float64,
+        linear = _StabilizedSchurLinearOperator(
+            operator.apply, float(stab), operator.surface_size
         )
         gmres_started = time.perf_counter()
         newton_direction, gmres_info = gmres(
@@ -649,9 +672,9 @@ def run_reduced_nested_ls_schur_newton(
             maxiter=int(gmres_maxiter),
         )
         gmres_seconds += time.perf_counter() - gmres_started
-        gmres_matvecs += matvec_count
+        gmres_matvecs += int(linear.matvec_count)
         newton_direction = np.asarray(newton_direction, dtype=np.float64).reshape(-1)
-        residual = matvec(newton_direction) - working_grad
+        residual = linear._matvec(newton_direction) - working_grad
         gmres_residual_l2 = float(np.linalg.norm(residual))
         if not np.all(np.isfinite(newton_direction)):
             step_accepted = False
@@ -736,7 +759,6 @@ __all__ = [
     "NestedLsHvpComparison",
     "NestedLsReducedNewtonResult",
     "NestedLsReducedRankError",
-    "NestedLsReducedSchurOperator",
     "NestedLsSchurNewtonResult",
     "NestedLsYSolution",
     "compare_ad_qr_and_schur_hvp",
