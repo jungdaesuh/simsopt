@@ -1,12 +1,32 @@
 {
-  "full_walk_attempted": false,
-  "one_newton_step": false,
-  "one_newton_step_ad_qr_gmres": "killed after 10 min; isolated HVP is 8.007s",
-  "pytest": {
-    "test": "tests/geo/test_nested_ls_reduced_scale.py::test_f3_gpu_b37_bounded_hvp_and_native_reference",
-    "passed": 1,
-    "seconds": 184.27
+  "ad_through_qr_gmres": {
+    "auditable": false,
+    "classification": "session_narrative",
+    "note": "A maxiter=1 AD-through-QR GMRES probe was killed after about 10 minutes in the working session. No durable command, timeout exit/signal, timestamps, or raw log was retained. The architecture makes the stall plausible; the termination is not independently auditable."
   },
+  "claim_boundary": {
+    "endpoint_parity": false,
+    "f3_sealed": true,
+    "full_walk_attempted": false,
+    "jax_newton_step": false,
+    "nested_speed_claim": false
+  },
+  "command": "JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv-qn-cpu/bin/python -m pytest tests/geo/test_nested_ls_reduced_scale.py::test_f3_gpu_b37_bounded_hvp_and_native_reference",
+  "date": "2026-08-20",
+  "driver": "simsopt_jax_adapters.geo.nested_ls_reduced_scale.evaluate_f3_b37_bounded_probe",
+  "full_walk_attempted": false,
+  "git_commit": "7a7f1c3fd",
+  "memory": {
+    "peak_rss_after_hvp_gib": 30.825,
+    "peak_rss_kib_after_hvp": 32321968,
+    "peak_rss_kind": "ru_maxrss_process_lifetime",
+    "peak_rss_note": "Linux ru_maxrss at HVP capture is the process-lifetime peak in KiB, not an HVP-local or GPU-memory peak.",
+    "rss_after_hvp_gib": 1.879,
+    "rss_after_hvp_kind": "VmRSS_current",
+    "rss_after_hvp_note": "Linux VmRSS after the HVP is current process RSS. 1970732 KiB = 1.879 GiB, not 1.93 GiB.",
+    "rss_kib_after_hvp": 1970732
+  },
+  "one_newton_step": false,
   "probe": {
     "full_walk_attempted": false,
     "hvp_finite": true,
@@ -21,8 +41,8 @@
     "native_ref_seconds": 156.81753802183084,
     "native_ref_success": true,
     "native_rejudge_coil_delta_inf": 0.0,
-    "native_rejudge_g": NaN,
-    "native_rejudge_iota": NaN,
+    "native_rejudge_g": null,
+    "native_rejudge_iota": null,
     "native_rejudge_iter": 0,
     "native_rejudge_seconds": 0.0,
     "native_rejudge_success": false,
@@ -46,5 +66,32 @@
     "y_star_g": 2.010619298254682,
     "y_star_iota": 0.15164961478467412
   },
-  "schema": "nested-ls-reduced-gate1-f3-b37-bounded.v1"
+  "publication": "The bounded F3 B37 feasibility probe is complete: QR elimination, an off-manifold reduced gradient, a finite synchronized HVP, and the native reconstruction reference were produced. AD-through-QR GMRES did not produce a Newton step within the attempted bound. No JAX nested-LS walk, endpoint parity, or speed claim exists yet.",
+  "pytest_of_recorded_run": {
+    "passed": 1,
+    "seconds": 184.27,
+    "test": "tests/geo/test_nested_ls_reduced_scale.py::test_f3_gpu_b37_bounded_hvp_and_native_reference"
+  },
+  "runtime": {
+    "hostname": "jungdaesuh-playstation",
+    "input_lane": "fused_gpu pair2-l1",
+    "input_lane_is_not_hvp_hardware": true,
+    "jax_default_backend": "cpu",
+    "jax_devices": [
+      "cpu:0"
+    ],
+    "jax_enable_x64_env": "1",
+    "jax_platforms_env": "cpu",
+    "note": "F3 GPU B37 names the input lineage (pair2-l1 fused_gpu endpoint_candidate). The recorded HVP ran on JAX CPU in .venv-qn-cpu.",
+    "python_executable": "/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv-qn-cpu/bin/python"
+  },
+  "schema": "nested-ls-reduced-gate1-f3-b37-bounded.v2",
+  "written_by_pytest": false,
+  "y_star_versus_lane_inner": {
+    "g_ulp": 7.0,
+    "iota_ulp": 19.0,
+    "lane_inner_g": 2.010619298254679,
+    "lane_inner_iota": 0.1516496147846736,
+    "note": "QR y* differs from the fused lane inner state by about 19 ULP in iota and 7 ULP in G. It is not an 8-ULP slogan."
+  }
 }

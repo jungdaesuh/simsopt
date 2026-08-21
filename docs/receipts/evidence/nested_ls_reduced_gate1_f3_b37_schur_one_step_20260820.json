@@ -1,0 +1,78 @@
+{
+  "claim_boundary": {
+    "endpoint_parity": false,
+    "f3_sealed": true,
+    "full_walk_attempted": false,
+    "nested_speed_claim": false,
+    "newton_quality_linear_solve": false
+  },
+  "command": "JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv-qn-cpu/bin/python -m pytest tests/geo/test_nested_ls_reduced_scale.py::test_f3_b37_one_schur_newton_step_and_cpp_rejudge",
+  "date": "2026-08-20",
+  "driver": "simsopt_jax_adapters.geo.nested_ls_reduced_scale.evaluate_f3_b37_schur_newton_step",
+  "full_walk_attempted": false,
+  "gmres": {
+    "info": 1,
+    "info_meaning": "scipy.sparse.linalg.gmres: convergence not achieved within restart*maxiter",
+    "matvecs": 9,
+    "maxiter": 1,
+    "residual_l2": 0.003793094440447193,
+    "restart": 8,
+    "rtol": 1e-10,
+    "seconds": 4.608109823893756
+  },
+  "memory": {
+    "peak_rss_after_step_gib": 17.257,
+    "peak_rss_kib_after_step": 18094940,
+    "peak_rss_kind": "ru_maxrss_process_lifetime",
+    "rss_after_step_gib": 1.698,
+    "rss_after_step_kind": "VmRSS_current",
+    "rss_kib_after_step": 1780452
+  },
+  "probe": {
+    "factor_seconds": 2.513787791132927,
+    "gmres_info": 1,
+    "gmres_matvecs": 9,
+    "gmres_maxiter": 1,
+    "gmres_residual_l2": 0.003793094440447193,
+    "gmres_restart": 8,
+    "gmres_seconds": 4.608109823893756,
+    "native_rejudge_coil_delta_inf": 0.0,
+    "native_rejudge_g": 2.0106193053897154,
+    "native_rejudge_iota": 0.1408571095660965,
+    "native_rejudge_iter": 10,
+    "native_rejudge_seconds": 161.45685765286908,
+    "native_rejudge_success": true,
+    "peak_rss_kib_after_step": 18094940,
+    "phi_yy_condition": 25.623547055912574,
+    "reduced_grad_l2_before": 0.01609557303688543,
+    "rss_kib_after_step": 1780452,
+    "step_accepted": true,
+    "step_alpha": 1.0,
+    "step_coil_delta_inf": 0.0,
+    "step_g": 2.010619298313892,
+    "step_grad_l2": 0.003795976041010945,
+    "step_iota": 0.15288054398364126,
+    "step_iter": 1,
+    "step_persisted": true,
+    "step_seconds": 10.255433493060991,
+    "step_success": false,
+    "y_star_g": 2.010619298254682,
+    "y_star_iota": 0.15164961478467412
+  },
+  "publication": "The Schur reduced Hessian matched AD-through-QR HVPs at 7x7 and at one F3 B37 direction. One capped Krylov Newton step (restart=8, maxiter=1, 9 matvecs) was accepted; ||g||_2 fell from 0.01610 to 0.00380. GMRES did not meet rtol (info=1), so this is not a fully solved Newton step. C++ reconstruct rejudge of that JAX point succeeded (iter=10, iota=0.1408571095660965) on the reconstruct branch. No full walk, endpoint parity, nested speed claim, or F3 inheritance.",
+  "runtime": {
+    "hostname": "jungdaesuh-playstation",
+    "input_lane": "fused_gpu pair2-l1",
+    "input_lane_is_not_hvp_hardware": true,
+    "jax_default_backend": "cpu",
+    "jax_devices": [
+      "cpu:0"
+    ],
+    "jax_enable_x64_env": "1",
+    "jax_platforms_env": "cpu",
+    "python_executable": "/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv-qn-cpu/bin/python",
+    "timestamp_utc": "2026-08-20T23:44:36.741987+00:00"
+  },
+  "schema": "nested-ls-reduced-gate1-f3-b37-schur-one-step.v1",
+  "written_by_pytest": false
+}

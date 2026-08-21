@@ -8,11 +8,16 @@ does not evaluate F3's fused objective and does not inherit the 7.70× claim.
 from __future__ import annotations
 
 import json
+import os
 import resource
+import socket
+import sys
 import time
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
+import jax
 import numpy as np
 from numpy.typing import NDArray
 from simsopt._core.json import GSONDecoder
@@ -30,14 +35,19 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     nested_ls_physics_newton_kwargs,
 )
 from simsopt_jax_adapters.geo.nested_ls_reduced import (
+    factor_reduced_nested_ls_schur,
     nested_ls_reduced_closures,
     pack_surface_and_y,
     reduced_penalty_gradient,
+    reduced_penalty_gradient_envelope,
     reduced_penalty_hvp,
     require_full_y_rank,
     run_reduced_nested_ls_newton,
+    run_reduced_nested_ls_schur_newton,
     solve_projected_y,
 )
+
+KIB_PER_GIB = 1024 * 1024
 
 DEFAULT_FLAT675_BUNDLE_ROOT = (
     Path.home() / "simsopt_mixed_artifacts" / "genuine675-r3-input-1c23f6c5-20260721-r1"
@@ -220,8 +230,43 @@ def load_archived_nested_ls_pair(
     return native, jax_boozer, target
 
 
+def kib_to_gib(kib: int) -> float:
+    """Convert Linux kibibytes to gibibytes (1024³ bytes)."""
+
+    return float(kib) / float(KIB_PER_GIB)
+
+
+def float64_ulps(value: float, reference: float) -> float:
+    """Count float64 ULPs of ``value`` from ``reference`` using ``np.spacing``."""
+
+    left = np.float64(value)
+    right = np.float64(reference)
+    spacing = np.spacing(left)
+    return float(abs(left - right) / spacing)
+
+
+def nested_ls_runtime_identity() -> dict[str, object]:
+    """Host and JAX device identity for an evidence document."""
+
+    return {
+        "hostname": socket.gethostname(),
+        "python_executable": sys.executable,
+        "jax_default_backend": jax.default_backend(),
+        "jax_devices": [str(device) for device in jax.devices()],
+        "jax_platforms_env": os.environ.get("JAX_PLATFORMS"),
+        "jax_enable_x64_env": os.environ.get("JAX_ENABLE_X64"),
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def dump_strict_json(payload: dict[str, object]) -> str:
+    """Serialize evidence with ``allow_nan=False`` so NaN cannot sneak in."""
+
+    return json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n"
+
+
 def _peak_rss_kib() -> int:
-    """Linux ``ru_maxrss`` is kibibytes and is the process peak, not a delta."""
+    """Linux ``ru_maxrss`` is kibibytes and is the process-lifetime peak."""
 
     return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
 
@@ -274,11 +319,18 @@ class NestedLsBoundedF3B37Result:
     native_ref_seconds: float
     native_rejudge_success: bool
     native_rejudge_iter: int
-    native_rejudge_iota: float
-    native_rejudge_g: float
+    native_rejudge_iota: float | None
+    native_rejudge_g: float | None
     native_rejudge_coil_delta_inf: float
     native_rejudge_seconds: float
     full_walk_attempted: bool
+    schur_hvp_l2: float | None
+    schur_hvp_finite: bool | None
+    schur_hvp_seconds: float | None
+    schur_factor_seconds: float | None
+    schur_vs_ad_max_abs: float | None
+    schur_vs_ad_rel_l2: float | None
+    schur_phi_yy_condition: float | None
 
     def as_payload(self) -> dict[str, object]:
         return asdict(self)
@@ -289,13 +341,14 @@ def evaluate_f3_b37_bounded_probe(
     jax_boozer: BoozerSurfaceJAX,
     *,
     one_newton_step: bool = False,
+    compare_schur_hvp: bool = False,
 ) -> NestedLsBoundedF3B37Result:
     """C++ full reference plus JAX ``y*`` / ``g`` / one HVP.
 
     The JAX lane starts from the original F3 surface, not from the C++
     endpoint. One Newton step is opt-in: autodiff-through-QR GMRES is a
     many-HVP solve and is not the default bounded gate. Does not launch
-    a ten-step reduced walk.
+    a ten-step reduced walk. Unattempted rejudge scalars are ``None``.
     """
 
     residual_fn, _objective_fn, phi_hat = nested_ls_reduced_closures(jax_boozer)
@@ -328,6 +381,35 @@ def evaluate_f3_b37_bounded_probe(
     hvp_seconds = time.perf_counter() - hvp_started
     rss_after_hvp = _current_rss_kib()
     peak_after_hvp = _peak_rss_kib()
+
+    if compare_schur_hvp:
+        factor_started = time.perf_counter()
+        schur_operator = factor_reduced_nested_ls_schur(
+            residual_fn, _objective_fn, jax_surface0
+        )
+        schur_factor_seconds = time.perf_counter() - factor_started
+        schur_started = time.perf_counter()
+        schur_hvp = np.asarray(schur_operator.apply(tangent), dtype=np.float64)
+        schur_hvp_seconds = time.perf_counter() - schur_started
+        schur_delta = schur_hvp - hvp
+        ad_norm = float(np.linalg.norm(hvp))
+        schur_hvp_l2 = float(np.linalg.norm(schur_hvp))
+        schur_hvp_finite = bool(np.all(np.isfinite(schur_hvp)))
+        schur_vs_ad_max_abs = float(np.max(np.abs(schur_delta)))
+        schur_vs_ad_rel_l2 = (
+            float(np.linalg.norm(schur_delta) / ad_norm)
+            if ad_norm > 0.0
+            else float(np.linalg.norm(schur_delta))
+        )
+        schur_phi_yy_condition = float(schur_operator.phi_yy_condition)
+    else:
+        schur_hvp_l2 = None
+        schur_hvp_finite = None
+        schur_hvp_seconds = None
+        schur_factor_seconds = None
+        schur_vs_ad_max_abs = None
+        schur_vs_ad_rel_l2 = None
+        schur_phi_yy_condition = None
 
     native.need_to_run_code = True
     native_started = time.perf_counter()
@@ -396,8 +478,8 @@ def evaluate_f3_b37_bounded_probe(
         one_step_coil = 0.0
         rejudge_success = False
         rejudge_iter = 0
-        rejudge_iota = float("nan")
-        rejudge_g = float("nan")
+        rejudge_iota = None
+        rejudge_g = None
         rejudge_coil = 0.0
         rejudge_seconds = 0.0
     return NestedLsBoundedF3B37Result(
@@ -442,6 +524,128 @@ def evaluate_f3_b37_bounded_probe(
         native_rejudge_coil_delta_inf=rejudge_coil,
         native_rejudge_seconds=float(rejudge_seconds),
         full_walk_attempted=False,
+        schur_hvp_l2=schur_hvp_l2,
+        schur_hvp_finite=schur_hvp_finite,
+        schur_hvp_seconds=schur_hvp_seconds,
+        schur_factor_seconds=schur_factor_seconds,
+        schur_vs_ad_max_abs=schur_vs_ad_max_abs,
+        schur_vs_ad_rel_l2=schur_vs_ad_rel_l2,
+        schur_phi_yy_condition=schur_phi_yy_condition,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class NestedLsSchurNewtonStepProbe:
+    """One capped Schur Newton step plus a C++ rejudge of that JAX state."""
+
+    y_star_iota: float
+    y_star_g: float
+    reduced_grad_l2_before: float
+    step_iter: int
+    step_success: bool
+    step_persisted: bool
+    step_accepted: bool
+    step_alpha: float
+    step_iota: float
+    step_g: float
+    step_grad_l2: float
+    step_coil_delta_inf: float
+    step_seconds: float
+    gmres_info: int
+    gmres_matvecs: int
+    gmres_residual_l2: float
+    gmres_restart: int
+    gmres_maxiter: int
+    factor_seconds: float
+    gmres_seconds: float
+    phi_yy_condition: float
+    rss_kib_after_step: int
+    peak_rss_kib_after_step: int
+    native_rejudge_success: bool
+    native_rejudge_iter: int
+    native_rejudge_iota: float
+    native_rejudge_g: float
+    native_rejudge_coil_delta_inf: float
+    native_rejudge_seconds: float
+    runtime: dict[str, object]
+
+    def as_payload(self) -> dict[str, object]:
+        return asdict(self)
+
+
+def evaluate_f3_b37_schur_newton_step(
+    native: BoozerSurface,
+    jax_boozer: BoozerSurfaceJAX,
+) -> NestedLsSchurNewtonStepProbe:
+    """One capped Schur Newton step from the F3 B37 point, then C++ rejudge.
+
+    Does not run a ten-step walk and does not time nested-LS versus F3.
+    """
+
+    residual_fn, objective_fn, _phi_hat = nested_ls_reduced_closures(jax_boozer)
+    surface0 = np.asarray(jax_boozer.surface.get_dofs(), dtype=np.float64)
+    solution = solve_projected_y(residual_fn, surface0, np.zeros(2, dtype=np.float64))
+    require_full_y_rank(solution)
+    y_star = np.asarray(solution.solution, dtype=np.float64)
+    gradient = np.asarray(
+        reduced_penalty_gradient_envelope(objective_fn, surface0, y_star),
+        dtype=np.float64,
+    )
+    runtime = nested_ls_runtime_identity()
+    step_started = time.perf_counter()
+    step = run_reduced_nested_ls_schur_newton(
+        jax_boozer,
+        iota=float(y_star[0]),
+        G=float(y_star[1]),
+        maxiter=1,
+    )
+    step_seconds = time.perf_counter() - step_started
+    rss_after_step = _current_rss_kib()
+    peak_after_step = _peak_rss_kib()
+    native.need_to_run_code = True
+    native.surface.set_dofs(step.surface_dofs)
+    rejudge_coils0 = np.asarray(native.biotsavart.x, dtype=np.float64)
+    rejudge_started = time.perf_counter()
+    native_rejudge = native.minimize_boozer_penalty_constraints_newton(
+        iota=float(step.iota),
+        G=float(step.G),
+        **nested_ls_physics_newton_kwargs(),
+    )
+    rejudge_seconds = time.perf_counter() - rejudge_started
+    rejudge_coils1 = np.asarray(native.biotsavart.x, dtype=np.float64)
+    return NestedLsSchurNewtonStepProbe(
+        y_star_iota=float(y_star[0]),
+        y_star_g=float(y_star[1]),
+        reduced_grad_l2_before=float(np.linalg.norm(gradient)),
+        step_iter=int(step.iteration_count),
+        step_success=bool(step.success),
+        step_persisted=bool(step.persisted),
+        step_accepted=bool(step.step_accepted),
+        step_alpha=float(step.step_alpha),
+        step_iota=float(step.iota),
+        step_g=float(step.G),
+        step_grad_l2=float(np.linalg.norm(step.reduced_gradient)),
+        step_coil_delta_inf=float(step.coil_delta_inf),
+        step_seconds=float(step_seconds),
+        gmres_info=int(step.gmres_info),
+        gmres_matvecs=int(step.gmres_matvecs),
+        gmres_residual_l2=float(step.gmres_residual_l2),
+        gmres_restart=int(step.gmres_restart),
+        gmres_maxiter=int(step.gmres_maxiter),
+        factor_seconds=float(step.factor_seconds),
+        gmres_seconds=float(step.gmres_seconds),
+        phi_yy_condition=float(step.phi_yy_condition),
+        rss_kib_after_step=int(rss_after_step),
+        peak_rss_kib_after_step=int(peak_after_step),
+        native_rejudge_success=bool(native_rejudge["success"]),
+        native_rejudge_iter=int(native_rejudge["iter"]),
+        native_rejudge_iota=float(native_rejudge["iota"]),
+        native_rejudge_g=float(native_rejudge["G"]),
+        native_rejudge_coil_delta_inf=float(
+            np.linalg.norm(rejudge_coils1 - rejudge_coils0, ord=np.inf)
+        ),
+        native_rejudge_seconds=float(rejudge_seconds),
+        runtime=runtime,
     )
 
 
@@ -452,9 +656,15 @@ __all__ = [
     "DEFAULT_F3_B37_NATIVE_LANE",
     "DEFAULT_FLAT675_BUNDLE_ROOT",
     "NestedLsBoundedF3B37Result",
+    "NestedLsSchurNewtonStepProbe",
     "archived_f3_b37_lanes_available",
     "archived_flat675_bundle_available",
+    "dump_strict_json",
     "evaluate_f3_b37_bounded_probe",
+    "evaluate_f3_b37_schur_newton_step",
+    "float64_ulps",
+    "kib_to_gib",
     "load_archived_nested_ls_pair",
     "load_flat675_lane_blocks",
+    "nested_ls_runtime_identity",
 ]

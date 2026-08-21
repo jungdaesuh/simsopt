@@ -7,6 +7,7 @@ same scale.
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -37,13 +38,16 @@ from simsopt_jax_adapters.geo.nested_ls_newton_parity import (
 )
 from simsopt_jax_adapters.geo.nested_ls_reduced import (
     NestedLsReducedRankError,
+    compare_ad_qr_and_schur_hvp,
     nested_ls_reduced_closures,
     pack_surface_and_y,
     projected_y_system,
     reduced_penalty_gradient,
+    reduced_penalty_gradient_envelope,
     reduced_penalty_hvp,
     require_full_y_rank,
     run_reduced_nested_ls_newton,
+    run_reduced_nested_ls_schur_newton,
     solve_projected_y,
     split_surface_and_y,
 )
@@ -240,6 +244,103 @@ def test_reduced_gradient_and_hvp_match_finite_differences():
         rtol=1.0e-4,
         atol=1.0e-6,
         err_msg="reduced H_ss v finite-difference mismatch",
+    )
+
+
+@pytest.mark.boozer
+def test_envelope_gradient_matches_ad_through_qr():
+    _native, jax_boozer, decision, _iota, _g0 = _nested_ls_volume_pair()
+    del _native
+    residual_fn, objective_fn, phi_hat = nested_ls_reduced_closures(jax_boozer)
+    surface, _y = split_surface_and_y(decision)
+    solution = solve_projected_y(residual_fn, surface)
+    require_full_y_rank(solution)
+    ad_grad = np.asarray(reduced_penalty_gradient(phi_hat, surface), dtype=np.float64)
+    envelope = np.asarray(
+        reduced_penalty_gradient_envelope(objective_fn, surface, solution.solution),
+        dtype=np.float64,
+    )
+    packed = pack_surface_and_y(surface, solution.solution)
+    phi_y = np.asarray(jax.grad(objective_fn)(packed)[-2:], dtype=np.float64)
+    value_tol = parity_ladder_tolerances("ls_wrapper_gradient")
+    np.testing.assert_allclose(
+        envelope,
+        ad_grad,
+        rtol=float(value_tol["rtol"]),
+        atol=float(value_tol["atol"]),
+        err_msg="envelope ∇_s Φ(s, y*) missed AD-through-QR ∇_s Φ̂",
+    )
+    np.testing.assert_allclose(
+        phi_y,
+        0.0,
+        atol=1.0e-10,
+        err_msg="Φ_y at QR y* is not a stationary inner point",
+    )
+
+
+@pytest.mark.boozer
+def test_schur_hvp_matches_ad_through_qr():
+    _native, jax_boozer, decision, _iota, _g0 = _nested_ls_volume_pair()
+    del _native
+    residual_fn, objective_fn, phi_hat = nested_ls_reduced_closures(jax_boozer)
+    surface, _y = split_surface_and_y(decision)
+    gradient = np.asarray(reduced_penalty_gradient(phi_hat, surface), dtype=np.float64)
+    directions = [
+        np.eye(int(surface.size), dtype=np.float64)[0],
+        gradient / np.linalg.norm(gradient),
+    ]
+    derivative_tol = parity_ladder_tolerances("derivative_heavy")
+    for tangent in directions:
+        comparison = compare_ad_qr_and_schur_hvp(
+            residual_fn, objective_fn, phi_hat, surface, tangent
+        )
+        assert comparison.phi_yy_condition > 0.0
+        np.testing.assert_allclose(
+            comparison.schur,
+            comparison.ad_through_qr,
+            rtol=float(derivative_tol["second_derivative_rtol"]),
+            atol=float(derivative_tol["second_derivative_atol"]),
+            err_msg="Schur Ĥ_ss v missed the AD-through-QR HVP",
+        )
+
+
+@pytest.mark.boozer
+def test_schur_newton_one_step_matches_ad_through_qr():
+    _native_ad, jax_ad, _decision, iota, g0 = _nested_ls_volume_pair()
+    _native_schur, jax_schur, _decision_schur, _iota_s, _g_s = _nested_ls_volume_pair()
+    del _native_ad, _native_schur, _decision_schur, _iota_s, _g_s
+    shifted = np.array(jax_ad.surface.get_dofs(), dtype=np.float64, copy=True)
+    shifted[0] += 1.0e-3
+    jax_ad.surface.set_dofs(shifted)
+    jax_schur.surface.set_dofs(shifted)
+    ad = run_reduced_nested_ls_newton(jax_ad, iota=iota, G=g0, maxiter=1)
+    schur = run_reduced_nested_ls_schur_newton(
+        jax_schur,
+        iota=iota,
+        G=g0,
+        maxiter=1,
+        gmres_restart=64,
+        gmres_maxiter=10,
+    )
+    assert ad.coil_delta_inf == 0.0
+    assert schur.coil_delta_inf == 0.0
+    assert schur.step_accepted is True
+    assert schur.iteration_count == 1
+    value_tol = parity_ladder_tolerances("direct_kernel")
+    grad_tol = parity_ladder_tolerances("ls_wrapper_gradient")
+    np.testing.assert_allclose(
+        schur.iota,
+        ad.iota,
+        rtol=float(value_tol["rtol"]),
+        atol=float(value_tol["atol"]),
+        err_msg="Schur Newton iota missed AD-through-QR Newton after one step",
+    )
+    np.testing.assert_allclose(
+        schur.surface_dofs,
+        ad.surface_dofs,
+        rtol=float(grad_tol["rtol"]),
+        atol=float(grad_tol["atol"]),
+        err_msg="Schur Newton surface missed AD-through-QR Newton after one step",
     )
 
 

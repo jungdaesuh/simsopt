@@ -41,13 +41,9 @@ reconstruct Newton against banana `run_code`, and do not inherit 7.70×.
 
 ## Explicitly not produced
 
-- One reduced Newton step or a ten-step walk at F3 B37 (AD-through-QR
-  GMRES). A `maxiter=1` probe was killed after 10 min; isolated HVP is
-  the bounded path.
-- C++ rejudge of a JAX Newton endpoint.
+- A ten-step reduced walk at F3 B37.
 - Gate 1 flat-native B37 (blocked until the F3 one-step gate passes).
 - Gate 2 mixed `H_sc`, predictor identity, implicit adjoint vs native.
-- Gate 3 dense-vs-Krylov / Schur `H_ss` operator at 661.
 - Gate 4 custom implicit VJP.
 - Gate 5 B3 and Gate 6 B37 nested timing.
 - In-graph fused outer L-BFGS-B. F3 is unchanged.
@@ -60,29 +56,78 @@ Trajectories may differ (JAX Armijo vs C++ full step). Gauss–Newton is
 not the certified reduced Hessian.
 
 **Produced:** 7×7 NCSX; archived-start 255×64 no-op; F3 GPU B37
-**bounded** gate (`test_f3_gpu_b37_bounded_hvp_and_native_reference`,
-1 passed in 184.27 s):
+**bounded** feasibility probe. Frozen snapshot:
+`docs/receipts/evidence/nested_ls_reduced_gate1_f3_b37_bounded_20260820.json`
+(schema v2). Pytest does not write that file. Regenerable driver:
+`evaluate_f3_b37_bounded_probe`. Publication wording:
+
+> The bounded F3 B37 feasibility probe is complete: QR elimination, an
+> off-manifold reduced gradient, a finite synchronized HVP, and the
+> native reconstruction reference were produced. AD-through-QR GMRES
+> did not produce a Newton step within the attempted bound. No JAX
+> nested-LS walk, endpoint parity, or speed claim exists yet.
+
+Recorded 2026-08-20 CPU run
+(`JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv-qn-cpu/bin/python`, host
+`jungdaesuh-playstation`, `cpu:0`; "F3 GPU B37" is the input lineage,
+not the HVP hardware):
 
 - Independent dual-lane load of `pair2-l1` `endpoint_candidate`.
 - JAX `y*` from a zero probe: `ι=0.15164961478467412`,
-  `G=2.010619298254682` (QR, not the 8-ULP lane inner state).
+  `G=2.010619298254682`. Versus fused lane inner state
+  `(0.1516496147846736, 2.010619298254679)` this is 19 ULP in `ι`
+  and 7 ULP in `G`, not an 8-ULP slogan.
 - `‖∇_s Φ̂‖₂ = 0.01609557303688543` (finite, off-manifold).
-- One reduced HVP on the unit gradient: finite, **8.007 s**,
-  `‖Hv‖₂=833.169`, current RSS 1.93 GiB after, peak RSS 30.8 GiB
-  during the JAX AD graph (`ru_maxrss` / `VmRSS` on this process).
+- One AD-through-QR HVP on the unit gradient: finite, **8.007 s**,
+  `‖Hv‖₂=833.169`. After HVP, `VmRSS` 1,970,732 KiB = **1.879 GiB**
+  (current process RSS, not an HVP-local or GPU peak). `ru_maxrss`
+  32,321,968 KiB = 30.825 GiB is the process-lifetime peak at that
+  capture.
 - Frozen-coil C++ reconstruct Newton: success, `iter=10`, 156.82 s,
   `Δι=-0.010792505231594696`, `‖Δs‖_∞=0.00503530466753932`,
   `ι→0.14085710955307942`, `G→2.0106193053897154` (matches the
   reconstruct diagnostic). Coils frozen.
+- AD-through-QR GMRES (`maxiter=1`) did not produce a Newton step
+  within the attempted bound. The ~10 min kill is session narrative
+  and is not independently auditable (no durable command, timeout
+  exit/signal, timestamps, or raw log).
 
-**Not produced:** one JAX Newton step, full reduced walk, C++ rejudge
-of a JAX endpoint, flat-native B37.
+**Not produced by the bounded snapshot:** JAX Newton step, full reduced
+walk, C++ rejudge of a JAX endpoint, nested speed claim, F3 inheritance.
+
+**Schur operator and one capped step (this commit):** `Ĥ_ss v = Φ_ss v −
+Φ_sy Φ_yy⁻¹ Φ_ys v` with only the 2×2 `y=(ι, G)` block solved
+explicitly. Packed HVPs differentiate `Φ(s, y)` and do not go through
+QR. Full HVP vectors matched AD-through-QR at 7×7 NCSX and at the F3
+B37 unit-gradient direction (`derivative_heavy` second-derivative
+tol). Then one host GMRES Newton step at F3 B37, cap `restart=8`,
+`maxiter=1`:
+
+- Factor 2.51 s, GMRES 4.61 s / 9 matvecs, wall 10.26 s.
+- `gmres` info=1 (rtol 1e-10 not met). Linear residual
+  `‖(Ĥ+stab I)dx − g‖₂ = 0.00379`. This is not a fully solved Newton
+  step.
+- Step accepted, `α=1`. `‖g‖₂` 0.01610 → 0.00380. `ι`
+  0.15164961478467412 → 0.15288054398364126. Coils frozen.
+- C++ reconstruct rejudge of that JAX point: success, `iter=10`,
+  161.46 s, `ι=0.1408571095660965`, `G=2.0106193053897154` (same
+  reconstruct branch as the original-point native reference).
+- Runtime: JAX CPU `.venv-qn-cpu`, `cpu:0`, host
+  `jungdaesuh-playstation`. After the step, `VmRSS` 1,780,452 KiB =
+  1.698 GiB; `ru_maxrss` 18,094,940 KiB = 17.257 GiB process-lifetime
+  peak.
+- Snapshot:
+  `docs/receipts/evidence/nested_ls_reduced_gate1_f3_b37_schur_one_step_20260820.json`.
+  Pytest does not write it.
+
+**Still not produced:** a Newton-quality linear solve, a full reduced
+walk, endpoint parity of the JAX one-step itself, nested speed, F3
+inheritance, flat-native B37.
 
 ## Next
 
-Replace autodiff-through-QR HVPs with the exact two-variable Schur
-operator `Ĥ_ss v = Φ_ss v − Φ_sy Φ_yy⁻¹ Φ_ys v` (`Φ_yy` is 2×2).
-Then one reduced Newton step plus C++ rejudge of that JAX state.
-Repeat at flat-native B37 only after that passes. Do not reopen F3.
-Do not inherit 7.70×. Trajectories need not match; require the same
-native-rejudged branch.
+Raise the Schur Krylov budget only enough to drive the linear residual
+below the Newton tolerance, rejudge that better step in C++, then
+repeat at flat-native B37. Do not attempt a full walk or timing
+campaign before that. Do not reopen F3. Do not inherit 7.70×.
+Trajectories need not match; require the same native-rejudged branch.
