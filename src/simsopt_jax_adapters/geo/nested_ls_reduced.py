@@ -26,6 +26,7 @@ from numpy.typing import NDArray
 from simsopt.geo.boozersurface import _boozer_iterate_is_persistable
 from simsopt_jax.geo.optimizers.linear_solve import (
     _hessian_vector_product_fn,
+    _materialize_dense_linear_operator,
     _run_operator_gmres,
 )
 from simsopt_jax.numerical_policy import NEWTON_ARMIJO_C1
@@ -52,6 +53,7 @@ NESTED_LS_SCHUR_BACKTRACKING_MAX_STEPS: Final[int] = 8
 # residual ratio observed on the F3 B37 SciPy cap (restart=8, maxiter=1).
 # Eisenstat–Walker is not implemented.
 NESTED_LS_SCHUR_GMRES_RTOL: Final[float] = 0.24
+NESTED_LS_DENSE_FLOAT64_BYTES: Final[int] = 8
 _TENSOR_FOURIER_DOF_NAME = re.compile(r"^([xyz])\((\d+),(\d+)\)$")
 
 
@@ -691,6 +693,63 @@ def factor_schur_fourier_block_preconditioner(
     return NestedLsFourierBlockPreconditioner(blocks=blocks, inverses=tuple(inverses))
 
 
+def schur_dense_operator_bytes(dimension: int) -> int:
+    """Stored ``n×n`` float64 bytes for a dense stabilized Schur matrix."""
+
+    size = int(dimension)
+    return size * size * NESTED_LS_DENSE_FLOAT64_BYTES
+
+
+def materialize_stabilized_schur_dense(
+    operator: NestedLsReducedSchurOperator,
+    stab: float,
+    *,
+    max_dense_linearization_bytes: int | None = None,
+) -> jax.Array:
+    """Chunked dense ``Ĥ_ss+stab I`` via the linear-solve materializer.
+
+    Peak HVP parallelism is the SSOT chunk batch, not ``n``. The stored
+    matrix is ``n²`` float64 entries; refuse when that exceeds the cap.
+    """
+
+    dimension = int(operator.surface_size)
+    stored_bytes = schur_dense_operator_bytes(dimension)
+    if max_dense_linearization_bytes is not None and stored_bytes > int(
+        max_dense_linearization_bytes
+    ):
+        raise MemoryError(
+            "dense Ĥ_ss+stab I needs "
+            f"{stored_bytes} bytes for dimension {dimension}; "
+            f"max_dense_linearization_bytes={int(max_dense_linearization_bytes)}."
+        )
+    matvec = _stabilized_schur_matvec(operator, jnp.asarray(stab, dtype=jnp.float64))
+    dummy = jnp.zeros((dimension,), dtype=jnp.float64)
+
+    def linear_operator_fn(_linearization: jax.Array, tangent: jax.Array) -> jax.Array:
+        return matvec(tangent)
+
+    return _materialize_dense_linear_operator(linear_operator_fn, dummy)
+
+
+def solve_stabilized_schur_dense_lu(dense: jax.Array, rhs: jax.Array) -> jax.Array:
+    """A: direct LU of the chunked dense stabilized Schur matrix."""
+
+    return jnp.linalg.solve(dense, rhs)
+
+
+def dense_schur_inverse_preconditioner(
+    dense: jax.Array,
+) -> Callable[[jax.Array], jax.Array]:
+    """B: left GMRES ``M`` from the dense inverse of ``Ĥ_ss+stab I``."""
+
+    inverse = jnp.linalg.inv(dense)
+
+    def apply_m(vector: jax.Array) -> jax.Array:
+        return inverse @ vector
+
+    return apply_m
+
+
 def run_reduced_nested_ls_schur_newton(
     jax_boozer: BoozerSurfaceJAX,
     *,
@@ -705,12 +764,15 @@ def run_reduced_nested_ls_schur_newton(
     gmres_maxiter: int = NESTED_LS_SCHUR_GMRES_MAXITER,
     gmres_rtol: float = NESTED_LS_SCHUR_GMRES_RTOL,
     gmres_preconditioner: Callable[[jax.Array], jax.Array] | None = None,
+    linear_solver: str = "gmres",
+    max_dense_linearization_bytes: int | None = None,
 ) -> NestedLsSchurNewtonResult:
     """Capped inexact Newton on ``s`` using Schur ``Ĥ_ss`` and device GMRES.
 
     Mutates ``jax_boozer.surface``. Does not write ``self.res``. Packed
-    HVPs never differentiate through QR. Optional ``gmres_preconditioner``
-    is JAX GMRES ``M``; the certificate remains unpreconditioned
+    HVPs never differentiate through QR. ``linear_solver`` is ``gmres``
+    or ``dense_lu``. Optional ``gmres_preconditioner`` is JAX GMRES
+    ``M``. The certificate remains unpreconditioned
     ``‖(Ĥ+stab I)δs − g‖₂ / ‖g‖₂``.
     """
 
@@ -762,16 +824,30 @@ def run_reduced_nested_ls_schur_newton(
         )
         rhs = jnp.asarray(working_grad, dtype=jnp.float64)
         gmres_started = time.perf_counter()
-        newton_jax, info = _run_operator_gmres(
-            matvec,
-            rhs,
-            tol=float(gmres_rtol),
-            restart=int(gmres_restart),
-            maxiter=int(gmres_maxiter),
-            M=gmres_preconditioner,
-        )
+        if linear_solver == "gmres":
+            newton_jax, info = _run_operator_gmres(
+                matvec,
+                rhs,
+                tol=float(gmres_rtol),
+                restart=int(gmres_restart),
+                maxiter=int(gmres_maxiter),
+                M=gmres_preconditioner,
+            )
+            residual = matvec(newton_jax) - rhs
+        elif linear_solver == "dense_lu":
+            dense = materialize_stabilized_schur_dense(
+                operator,
+                stab,
+                max_dense_linearization_bytes=max_dense_linearization_bytes,
+            )
+            newton_jax = solve_stabilized_schur_dense_lu(dense, rhs)
+            info = jnp.asarray(0, dtype=jnp.int32)
+            residual = dense @ newton_jax - rhs
+        else:
+            raise ValueError(
+                f"linear_solver must be 'gmres' or 'dense_lu'; got {linear_solver!r}."
+            )
         gmres_seconds += time.perf_counter() - gmres_started
-        residual = matvec(newton_jax) - rhs
         newton_direction = _host_vector(newton_jax)
         gmres_solution = np.array(newton_direction, dtype=np.float64, copy=True)
         gmres_residual_l2 = float(np.linalg.norm(_host_vector(residual)))
@@ -884,9 +960,11 @@ __all__ = [
     "NestedLsSchurNewtonResult",
     "NestedLsYSolution",
     "compare_ad_qr_and_schur_hvp",
+    "dense_schur_inverse_preconditioner",
     "factor_reduced_nested_ls_schur",
     "factor_schur_fourier_block_preconditioner",
     "make_reduced_penalty_objective",
+    "materialize_stabilized_schur_dense",
     "nested_ls_reduced_closures",
     "pack_surface_and_y",
     "projected_y_system",
@@ -896,7 +974,9 @@ __all__ = [
     "require_full_y_rank",
     "run_reduced_nested_ls_newton",
     "run_reduced_nested_ls_schur_newton",
+    "schur_dense_operator_bytes",
     "solve_projected_y",
+    "solve_stabilized_schur_dense_lu",
     "split_surface_and_y",
     "tensor_fourier_mode_blocks",
 ]

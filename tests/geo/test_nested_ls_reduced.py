@@ -43,8 +43,10 @@ from simsopt_jax_adapters.geo.nested_ls_reduced import (
     NESTED_LS_SCHUR_GMRES_RTOL,
     NestedLsReducedRankError,
     compare_ad_qr_and_schur_hvp,
+    dense_schur_inverse_preconditioner,
     factor_reduced_nested_ls_schur,
     factor_schur_fourier_block_preconditioner,
+    materialize_stabilized_schur_dense,
     nested_ls_reduced_closures,
     pack_surface_and_y,
     projected_y_system,
@@ -54,7 +56,9 @@ from simsopt_jax_adapters.geo.nested_ls_reduced import (
     require_full_y_rank,
     run_reduced_nested_ls_newton,
     run_reduced_nested_ls_schur_newton,
+    schur_dense_operator_bytes,
     solve_projected_y,
+    solve_stabilized_schur_dense_lu,
     split_surface_and_y,
     tensor_fourier_mode_blocks,
 )
@@ -353,6 +357,99 @@ def test_schur_newton_one_step_matches_ad_through_qr():
     assert schur.gmres_rtol == pytest.approx(1.0e-10, rel=0.0, abs=0.0)
     assert schur.gmres_info in (0, -1)
     assert schur.gmres_forcing_eta <= 1.0e-8
+
+
+class _DummySchur:
+    surface_size = 2
+
+    def apply(self, tangent):
+        vector = jnp.asarray(tangent, dtype=jnp.float64).reshape(-1)
+        return vector
+
+
+def test_schur_dense_bytes_cap_refuses_oversize():
+    assert schur_dense_operator_bytes(37) == 37 * 37 * 8
+    with pytest.raises(MemoryError, match="max_dense_linearization_bytes=1"):
+        materialize_stabilized_schur_dense(
+            _DummySchur(),
+            1.0e-4,
+            max_dense_linearization_bytes=1,
+        )
+
+
+@pytest.mark.boozer
+def test_chunked_dense_hss_a_and_b_match_exact_schur():
+    _native_ad, jax_ad, _decision, iota, g0 = _nested_ls_volume_pair()
+    _native_lu, jax_lu, _d2, _i2, _g2 = _nested_ls_volume_pair()
+    del _native_ad, _native_lu, _d2, _i2, _g2, _decision
+    shifted = np.array(jax_ad.surface.get_dofs(), dtype=np.float64, copy=True)
+    shifted[0] += 1.0e-3
+    jax_ad.surface.set_dofs(shifted)
+    jax_lu.surface.set_dofs(shifted)
+    residual_fn, objective_fn, _phi_hat = nested_ls_reduced_closures(jax_lu)
+    del _phi_hat
+    y_star = solve_projected_y(
+        residual_fn, shifted, np.array([iota, g0], dtype=np.float64)
+    ).solution
+    operator = factor_reduced_nested_ls_schur(
+        residual_fn, objective_fn, shifted, y_probe=y_star
+    )
+    dense = materialize_stabilized_schur_dense(operator, NESTED_LS_NEWTON_STAB)
+    tangent = np.zeros(shifted.size, dtype=np.float64)
+    tangent[0] = 1.0
+    hv = np.asarray(operator.apply(tangent), dtype=np.float64).reshape(-1)
+    hv = hv + NESTED_LS_NEWTON_STAB * tangent
+    np.testing.assert_allclose(
+        np.asarray(dense, dtype=np.float64) @ tangent,
+        hv,
+        rtol=1.0e-10,
+        atol=1.0e-10,
+        err_msg="chunked dense Ĥ_ss missed the exact Schur matvec",
+    )
+    apply_m = dense_schur_inverse_preconditioner(dense)
+    recovered = np.asarray(apply_m(jnp.asarray(hv, dtype=jnp.float64)))
+    np.testing.assert_allclose(
+        recovered,
+        tangent,
+        rtol=1.0e-9,
+        atol=1.0e-9,
+        err_msg="dense inverse M missed B: M(Ĥ+stab I)v = v",
+    )
+    rhs = np.asarray(
+        reduced_penalty_gradient_envelope(objective_fn, shifted, y_star),
+        dtype=np.float64,
+    )
+    lu_delta = np.asarray(
+        solve_stabilized_schur_dense_lu(dense, jnp.asarray(rhs, dtype=jnp.float64)),
+        dtype=np.float64,
+    )
+    lu_residual = np.asarray(dense, dtype=np.float64) @ lu_delta - rhs
+    assert float(np.linalg.norm(lu_residual)) <= 1.0e-8 * float(np.linalg.norm(rhs))
+    ad = run_reduced_nested_ls_newton(jax_ad, iota=iota, G=g0, maxiter=1)
+    schur = run_reduced_nested_ls_schur_newton(
+        jax_lu,
+        iota=iota,
+        G=g0,
+        maxiter=1,
+        linear_solver="dense_lu",
+    )
+    value_tol = parity_ladder_tolerances("direct_kernel")
+    grad_tol = parity_ladder_tolerances("ls_wrapper_gradient")
+    np.testing.assert_allclose(
+        schur.surface_dofs,
+        ad.surface_dofs,
+        rtol=float(grad_tol["rtol"]),
+        atol=float(grad_tol["atol"]),
+        err_msg="dense-LU Schur Newton missed AD-through-QR after one step",
+    )
+    np.testing.assert_allclose(
+        schur.iota,
+        ad.iota,
+        rtol=float(value_tol["rtol"]),
+        atol=float(value_tol["atol"]),
+    )
+    assert schur.gmres_forcing_eta <= 1.0e-8
+    assert schur.step_accepted is True
 
 
 @pytest.mark.boozer
