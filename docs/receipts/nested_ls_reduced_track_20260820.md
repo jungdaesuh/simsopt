@@ -378,20 +378,23 @@ into a principled insufficiency of the *unpreconditioned restart-8
 lane*, which is a different flag from
 ``unpreconditioned_gmres_insufficient`` on a single probe row.
 
+Clean remint of the architecture canary (``0cf4b1359``,
+``git_dirty=False``, ``jax_gpu_fast``, ``cuda:0``): same file path.
+Chunk batch width recorded as ``8`` (env unset). Live LU η
+``3.79×10⁻¹³``. Option B rows now carry ``shared_dense_assembly``,
+``excludes_assembly_seconds``, and ``excludes_inversion_seconds``.
+Do not remint the step-6 forcing receipt.
+
 ## Next
 
-1. Commit protocol fixes + canary + tests + track + manifest (this
-   delivery).
-2. Clean-tree remint of the architecture canary only (do not remint
-   step-6 forcing; its 2048 row is superseded).
-3. Opt-in dense-LU walk canary (``linear_solver="dense_lu"``
+1. Opt-in dense-LU walk canary (``linear_solver="dense_lu"``
    argument, **not** a global default switch) with C++ rejudge,
    frozen coils, fail-closed to ``1e-13``. Record warm per-step
    assembly seconds and chunk batch width.
-4. **NO-GO:** cap-2048, global ``linear_solver`` default switch,
+2. **NO-GO:** cap-2048, global ``linear_solver`` default switch,
    explicit-inverse preconditioning, any nested speed claim, F3
    7.70× inheritance.
-5. Shamanskii / chunk-batch sweep / banana timing only after physics
+3. Shamanskii / chunk-batch sweep / banana timing only after physics
    closure **and** only if warm assembly still misses the native
    reconstruct ~157 s bar.
 
