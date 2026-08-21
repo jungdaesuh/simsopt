@@ -8,6 +8,7 @@ same scale.
 from __future__ import annotations
 
 import ast
+import inspect
 from pathlib import Path
 
 import jax
@@ -411,6 +412,37 @@ def test_schur_dense_bytes_cap_refuses_oversize():
             _DummySchur(),
             1.0e-4,
             max_dense_linearization_bytes=1,
+        )
+
+
+def test_implicit_adjoint_defaults_and_dense_lu_honours_1mib_cap():
+    signature = inspect.signature(implicit_adjoint_coil_gradient)
+    assert signature.parameters["stab"].default == 0.0
+    assert signature.parameters["linear_solver"].default == "gmres"
+    assert (
+        signature.parameters["max_dense_linearization_bytes"].default
+        == NESTED_LS_IMPLICIT_ADJOINT_DEFAULT_DENSE_BYTES
+        == 1_048_576
+    )
+    newton = inspect.signature(run_reduced_nested_ls_schur_newton)
+    assert newton.parameters["linear_solver"].default == "gmres"
+
+    class _F3DummySchur:
+        surface_size = 661
+
+        def apply(self, tangent):
+            return jnp.asarray(tangent, dtype=jnp.float64).reshape(-1)
+
+    cotangent = jnp.zeros((661,), dtype=jnp.float64).at[0].set(1.0)
+    with pytest.raises(MemoryError, match="max_dense_linearization_bytes="):
+        implicit_adjoint_coil_gradient(
+            lambda packed, coil: packed,
+            lambda packed, coil: jnp.sum(packed),
+            jnp.zeros((661,), dtype=jnp.float64),
+            jnp.zeros((3,), dtype=jnp.float64),
+            cotangent,
+            linear_solver="dense_lu",
+            operator=_F3DummySchur(),
         )
 
 

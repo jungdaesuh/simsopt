@@ -48,20 +48,24 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     nested_ls_physics_newton_kwargs,
 )
 from simsopt_jax_adapters.geo.nested_ls_reduced import (
+    NESTED_LS_IMPLICIT_ADJOINT_DEFAULT_DENSE_BYTES,
     NESTED_LS_SCHUR_GMRES_MAXITER_CAP,
     NESTED_LS_SCHUR_GMRES_RESTART,
     NESTED_LS_SCHUR_GMRES_RTOL,
     NestedLsB37TimingBlocked,
     NestedLsReducedRankError,
     NestedLsSchurNewtonStepRecord,
+    apply_reduced_mixed_schur_coil_tangent,
     compare_ad_qr_and_schur_hvp,
     dense_schur_inverse_preconditioner,
     eisenstat_walker_forcing_eta,
     factor_reduced_nested_ls_schur,
     factor_schur_fourier_block_preconditioner,
+    implicit_adjoint_coil_gradient,
     linear_solve_meets_forcing,
     materialize_stabilized_schur_dense,
     nested_ls_reduced_closures,
+    nested_ls_runtime_coil_closures,
     pack_surface_and_y,
     reduced_penalty_gradient,
     reduced_penalty_gradient_envelope,
@@ -125,6 +129,30 @@ F3_B37_CAP512_WALK_EVIDENCE = (
     / "evidence"
     / "nested_ls_reduced_gpu_walk_20260821.cap512.incomplete.json"
 )
+F3_B37_DENSE_LU_WALK_EVIDENCE = (
+    Path(__file__).resolve().parents[3]
+    / "docs"
+    / "receipts"
+    / "evidence"
+    / "nested_ls_reduced_gpu_walk_20260821.dense_lu.json"
+)
+F3_B37_DENSE_LU_ENDPOINT_SURFACE_SHA256 = (
+    "e25ca0f2fedf25cf411f7b7ad7192860c813ad5fd37bdb5471355834d42ede6c"
+)
+F3_B37_DENSE_LU_ENDPOINT_IOTA = 0.14085710957665173
+F3_B37_DENSE_LU_ENDPOINT_G = 2.0106193053897154
+F3_B37_DENSE_LU_ENDPOINT_GRAD_L2 = 2.404212353322172e-14
+F3_B37_IFT_STAB = 0.0
+F3_B37_ADJOINT_COIL_SCAN = 8
+F3_B37_ADJOINT_FD_EPSILON = 1.0e-6
+F3_B37_ADJOINT_WALL_SECONDS = 1800.0
+F3_B37_ADJOINT_LIVE_ETA_TOL = 1.0e-10
+F3_B37_ADJOINT_VJP_RTOL = 1.0e-6
+F3_B37_ADJOINT_VJP_ATOL = 1.0e-8
+F3_B37_ADJOINT_FD_RTOL = 5.0e-2
+F3_B37_ADJOINT_FD_ATOL_FLOOR = 1.0e-9
+F3_B37_ADJOINT_FD_ATOL_REL = 1.0e-2
+F3_B37_ADJOINT_MIXED_NORM_FLOOR = 1.0e-8
 
 
 def archived_flat675_bundle_available(bundle_root: Path | None = None) -> bool:
@@ -2580,6 +2608,658 @@ def evaluate_f3_b37_step6_architecture_probe(
     )
 
 
+def _empty_dense_spectrum() -> dict[str, object]:
+    return {
+        "dimension": 0,
+        "symmetry_frobenius": None,
+        "symmetry_frobenius_rel": None,
+        "eig_real_min": None,
+        "eig_real_max": None,
+        "eig_abs_min": None,
+        "eig_abs_max": None,
+        "eig_condition": None,
+        "n_eig_negative_real": 0,
+        "n_eig_complex": 0,
+        "rayleigh_rhs": None,
+        "rayleigh_delta": None,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class NestedLsEndpointAdjointProbe:
+    """Unregularized IFT adjoint canary at the dense-LU walk endpoint.
+
+    Opt-in past the 1 MiB stored-matrix cap. Uses ``stab=0`` Ĥ_ss, not
+    the Newton ``stab=1e-4`` factor. Not a walk, not cap-2048, not a
+    default switch, not B3, and not F3 7.70×.
+    """
+
+    surface_sha256: str
+    reloaded_surface_sha256: str
+    reload_sha_match: bool
+    reduced_grad_l2: float
+    iota: float
+    G: float
+    coil_delta_inf: float
+    factor_seconds: float
+    dense_bytes: int
+    dense_chunk_batch_size: int
+    dense_chunk_batch_size_env: str | None
+    default_adjoint_cap_bytes: int
+    default_cap_refuses_661: bool
+    ift_stab: float
+    newton_stab: float
+    ift_used_newton_stab: bool
+    wall_seconds: float
+    spectrum_unregularized: dict[str, object]
+    spectrum_stabilized_from_unregularized: dict[str, object]
+    unregularized_positive_definite: bool
+    lambda_shift_l2: float | None
+    adjoint_live_residual_l2: float | None
+    adjoint_live_eta: float | None
+    adjoint_dense_eta: float | None
+    mixed_scan_index: int | None
+    mixed_scan_norm: float | None
+    predicted_step_norm: float | None
+    vjp_dot: float | None
+    predicted_dot: float | None
+    vjp_match: bool | None
+    adjoint_api_seconds: float | None
+    fd_epsilon: float
+    fd_control_success: bool | None
+    fd_control_iter: int | None
+    fd_control_grad_l2: float | None
+    fd_perturbed_success: bool | None
+    fd_perturbed_iter: int | None
+    fd_perturbed_grad_l2: float | None
+    fd_rel_l2: float | None
+    fd_max_abs: float | None
+    fd_match: bool | None
+    fd_seconds: float | None
+    coil_delta_inf_after: float
+    fail_closed_reason: str | None
+    runtime: dict[str, object]
+    provenance: dict[str, object]
+
+    def as_payload(self) -> dict[str, object]:
+        return asdict(self)
+
+
+def evaluate_f3_b37_endpoint_adjoint_probe(
+    jax_boozer: BoozerSurfaceJAX,
+) -> NestedLsEndpointAdjointProbe:
+    """Unregularized 661 IFT adjoint at the opt-in dense-LU walk endpoint.
+
+    Lifts the 1 MiB adjoint cap for this call only. Materializes
+    ``Ĥ_ss`` at ``stab=0``. Finite-difference reconvergence uses the
+    same unregularized dense LU, not Newton ``stab=1e-4``. Does not
+    run a walk, cap-2048, or a moving-coil B3 outer.
+    """
+
+    if not F3_B37_DENSE_LU_WALK_EVIDENCE.is_file():
+        raise FileNotFoundError(str(F3_B37_DENSE_LU_WALK_EVIDENCE))
+    archived = json.loads(F3_B37_DENSE_LU_WALK_EVIDENCE.read_text(encoding="utf-8"))
+    archived_probe = archived["probe"]
+    frozen = np.ascontiguousarray(
+        np.asarray(archived_probe["jax_surface_dofs"], dtype=np.float64)
+    )
+    stored_sha = str(archived_probe["jax_surface_sha256"])
+    provenance = nested_ls_receipt_provenance()
+    runtime = {
+        "hostname": provenance["hostname"],
+        "python_executable": provenance["python_executable"],
+        "jax_default_backend": provenance["jax_default_backend"],
+        "jax_devices": provenance["jax_devices"],
+        "jax_platforms_env": provenance["jax_platforms_env"],
+        "jax_enable_x64_env": provenance["jax_enable_x64_env"],
+        "timestamp_utc": provenance["timestamp_utc"],
+    }
+    dense_chunk_batch_size = dense_operator_chunk_batch_size()
+    dense_chunk_batch_size_env = os.environ.get(
+        "SIMSOPT_DENSE_OPERATOR_CHUNK_BATCH_SIZE"
+    )
+    dense_bytes = schur_dense_operator_bytes(int(frozen.size))
+    default_cap = int(NESTED_LS_IMPLICIT_ADJOINT_DEFAULT_DENSE_BYTES)
+    default_cap_refuses = dense_bytes > default_cap
+    frozen_sha = sha256_float64(frozen)
+    empty_spectrum = _empty_dense_spectrum()
+
+    def _empty(
+        reason: str,
+        *,
+        loaded_sha: str,
+        reload_match: bool,
+        g_value: float,
+        iota: float,
+        g_const: float,
+        coil: float,
+        coil_after: float = 0.0,
+    ) -> NestedLsEndpointAdjointProbe:
+        grad_json = _json_finite(g_value)
+        iota_json = _json_finite(iota)
+        g_json = _json_finite(g_const)
+        coil_json = _json_finite(coil)
+        after_json = _json_finite(coil_after)
+        return NestedLsEndpointAdjointProbe(
+            surface_sha256=frozen_sha,
+            reloaded_surface_sha256=loaded_sha,
+            reload_sha_match=reload_match,
+            reduced_grad_l2=0.0 if grad_json is None else grad_json,
+            iota=0.0 if iota_json is None else iota_json,
+            G=0.0 if g_json is None else g_json,
+            coil_delta_inf=0.0 if coil_json is None else coil_json,
+            factor_seconds=0.0,
+            dense_bytes=int(dense_bytes),
+            dense_chunk_batch_size=dense_chunk_batch_size,
+            dense_chunk_batch_size_env=dense_chunk_batch_size_env,
+            default_adjoint_cap_bytes=default_cap,
+            default_cap_refuses_661=bool(default_cap_refuses),
+            ift_stab=float(F3_B37_IFT_STAB),
+            newton_stab=float(NESTED_LS_NEWTON_STAB),
+            ift_used_newton_stab=False,
+            wall_seconds=float(F3_B37_ADJOINT_WALL_SECONDS),
+            spectrum_unregularized=dict(empty_spectrum),
+            spectrum_stabilized_from_unregularized=dict(empty_spectrum),
+            unregularized_positive_definite=False,
+            lambda_shift_l2=None,
+            adjoint_live_residual_l2=None,
+            adjoint_live_eta=None,
+            adjoint_dense_eta=None,
+            mixed_scan_index=None,
+            mixed_scan_norm=None,
+            predicted_step_norm=None,
+            vjp_dot=None,
+            predicted_dot=None,
+            vjp_match=None,
+            adjoint_api_seconds=None,
+            fd_epsilon=float(F3_B37_ADJOINT_FD_EPSILON),
+            fd_control_success=None,
+            fd_control_iter=None,
+            fd_control_grad_l2=None,
+            fd_perturbed_success=None,
+            fd_perturbed_iter=None,
+            fd_perturbed_grad_l2=None,
+            fd_rel_l2=None,
+            fd_max_abs=None,
+            fd_match=None,
+            fd_seconds=None,
+            coil_delta_inf_after=0.0 if after_json is None else after_json,
+            fail_closed_reason=reason,
+            runtime=runtime,
+            provenance=provenance,
+        )
+
+    if frozen.size != 661 or frozen_sha != F3_B37_DENSE_LU_ENDPOINT_SURFACE_SHA256:
+        return _empty(
+            "surface_sha_mismatch",
+            loaded_sha=frozen_sha,
+            reload_match=False,
+            g_value=0.0,
+            iota=0.0,
+            g_const=0.0,
+            coil=0.0,
+        )
+    if stored_sha != F3_B37_DENSE_LU_ENDPOINT_SURFACE_SHA256:
+        return _empty(
+            "surface_sha_mismatch",
+            loaded_sha=stored_sha,
+            reload_match=False,
+            g_value=0.0,
+            iota=0.0,
+            g_const=0.0,
+            coil=0.0,
+        )
+    jax_boozer.surface.set_dofs(np.zeros_like(frozen))
+    jax_boozer.surface.set_dofs(frozen)
+    loaded = np.asarray(jax_boozer.surface.get_dofs(), dtype=np.float64)
+    loaded_sha = sha256_float64(loaded)
+    reload_match = loaded_sha == frozen_sha
+    coils_before = np.asarray(jax_boozer.biotsavart.x, dtype=np.float64)
+    if not reload_match:
+        return _empty(
+            "reload_sha_mismatch",
+            loaded_sha=loaded_sha,
+            reload_match=False,
+            g_value=0.0,
+            iota=F3_B37_DENSE_LU_ENDPOINT_IOTA,
+            g_const=F3_B37_DENSE_LU_ENDPOINT_G,
+            coil=0.0,
+        )
+    iota = float(F3_B37_DENSE_LU_ENDPOINT_IOTA)
+    g_const = float(F3_B37_DENSE_LU_ENDPOINT_G)
+    if abs(_as_float(archived_probe["iota"]) - iota) > 1.0e-15:
+        return _empty(
+            "iota_mismatch",
+            loaded_sha=loaded_sha,
+            reload_match=True,
+            g_value=0.0,
+            iota=_as_float(archived_probe["iota"]),
+            g_const=g_const,
+            coil=0.0,
+        )
+    if abs(_as_float(archived_probe["G"]) - g_const) > 1.0e-15:
+        return _empty(
+            "g_mismatch",
+            loaded_sha=loaded_sha,
+            reload_match=True,
+            g_value=0.0,
+            iota=iota,
+            g_const=_as_float(archived_probe["G"]),
+            coil=0.0,
+        )
+    residual_fn, objective_fn, _phi_hat = nested_ls_reduced_closures(jax_boozer)
+    del _phi_hat
+    y = np.array([iota, g_const], dtype=np.float64)
+    y_star = solve_projected_y(residual_fn, loaded, y).solution
+    coil = float(
+        np.linalg.norm(
+            np.asarray(jax_boozer.biotsavart.x, dtype=np.float64) - coils_before,
+            ord=np.inf,
+        )
+    )
+    gradient = np.asarray(
+        reduced_penalty_gradient_envelope(objective_fn, loaded, y_star),
+        dtype=np.float64,
+    )
+    g_value = float(np.linalg.norm(gradient))
+    if (
+        not np.isfinite(g_value)
+        or abs(g_value - F3_B37_DENSE_LU_ENDPOINT_GRAD_L2) > 1.0e-12
+    ):
+        return _empty(
+            "grad_mismatch",
+            loaded_sha=loaded_sha,
+            reload_match=True,
+            g_value=g_value,
+            iota=iota,
+            g_const=g_const,
+            coil=coil,
+        )
+
+    spectrum_unreg = dict(empty_spectrum)
+    spectrum_stab = dict(empty_spectrum)
+    unregularized_pd = False
+    lambda_shift_l2: float | None = None
+    live_residual_l2: float | None = None
+    live_eta: float | None = None
+    dense_eta: float | None = None
+    mixed_index: int | None = None
+    mixed_norm: float | None = None
+    predicted_norm: float | None = None
+    vjp_dot: float | None = None
+    predicted_dot: float | None = None
+    vjp_match: bool | None = None
+    adjoint_api_seconds: float | None = None
+    fd_control_success: bool | None = None
+    fd_control_iter: int | None = None
+    fd_control_grad_l2: float | None = None
+    fd_perturbed_success: bool | None = None
+    fd_perturbed_iter: int | None = None
+    fd_perturbed_grad_l2: float | None = None
+    fd_rel_l2: float | None = None
+    fd_max_abs: float | None = None
+    fd_match: bool | None = None
+    fd_seconds: float | None = None
+    fail_reason: str | None = None
+    factor_seconds = 0.0
+    coil_after = coil
+    deadline = time.perf_counter() + float(F3_B37_ADJOINT_WALL_SECONDS)
+
+    def _surface_sha() -> str:
+        return sha256_float64(np.asarray(jax_boozer.surface.get_dofs()))
+
+    if _surface_sha() != frozen_sha:
+        fail_reason = "state_digest_drift"
+    else:
+        factor_started = time.perf_counter()
+        operator = factor_reduced_nested_ls_schur(
+            residual_fn,
+            objective_fn,
+            loaded,
+            y_probe=np.asarray(y_star, dtype=np.float64),
+        )
+        factor_seconds = time.perf_counter() - factor_started
+
+        def live_matvec(tangent: jax.Array) -> jax.Array:
+            return operator.apply(tangent)
+
+        cotangent_np = np.zeros((int(frozen.size),), dtype=np.float64)
+        cotangent_np[0] = 1.0
+        cotangent = jnp.asarray(cotangent_np, dtype=jnp.float64)
+        dense_started = time.perf_counter()
+        materialized: jax.Array = jax.block_until_ready(
+            materialize_stabilized_schur_dense(
+                operator,
+                float(F3_B37_IFT_STAB),
+                max_dense_linearization_bytes=None,
+            )
+        )
+        dense_seconds = float(time.perf_counter() - dense_started)
+        print(f"adjoint dense assemble s={dense_seconds:.3f}", flush=True)
+        dense0_np = np.asarray(jax.device_get(materialized), dtype=np.float64)
+        if not np.all(np.isfinite(dense0_np)):
+            fail_reason = "nonfinite"
+        else:
+            lu_started = time.perf_counter()
+            lambda0 = jax.block_until_ready(
+                solve_stabilized_schur_dense_lu(materialized, cotangent)
+            )
+            lu_seconds = float(time.perf_counter() - lu_started)
+            lambda0_np = np.asarray(jax.device_get(lambda0), dtype=np.float64)
+            live_residual_l2, live_eta = _live_unpreconditioned_eta(
+                live_matvec, lambda0, cotangent
+            )
+            dense_residual = jax.block_until_ready(materialized @ lambda0 - cotangent)
+            dense_residual_l2 = float(
+                np.linalg.norm(
+                    np.asarray(jax.device_get(dense_residual), dtype=np.float64)
+                )
+            )
+            rhs_l2 = float(np.linalg.norm(cotangent_np))
+            dense_eta = dense_residual_l2 / rhs_l2 if rhs_l2 > 0.0 else 0.0
+            spectrum_unreg = _dense_schur_spectrum(dense0_np, cotangent_np, lambda0_np)
+            n = int(dense0_np.shape[0])
+            dense_stab_np = dense0_np + float(NESTED_LS_NEWTON_STAB) * np.eye(
+                n, dtype=np.float64
+            )
+            lambda_stab_np = np.linalg.solve(dense_stab_np, cotangent_np)
+            spectrum_stab = _dense_schur_spectrum(
+                dense_stab_np, cotangent_np, lambda_stab_np
+            )
+            lambda_shift_l2 = _json_finite(
+                float(np.linalg.norm(lambda0_np - lambda_stab_np))
+            )
+            n_negative = _as_int(spectrum_unreg["n_eig_negative_real"])
+            eig_abs_min = spectrum_unreg["eig_abs_min"]
+            eig_real_min = spectrum_unreg["eig_real_min"]
+            unregularized_pd = bool(
+                n_negative == 0
+                and eig_real_min is not None
+                and _as_float(eig_real_min) > 0.0
+            )
+            print(
+                "adjoint spectrum n_neg="
+                f"{n_negative} eig_real_min={eig_real_min!r} "
+                f"live_eta={live_eta!r} lu_s={lu_seconds:.3f} "
+                f"shift={lambda_shift_l2!r}",
+                flush=True,
+            )
+            if _surface_sha() != frozen_sha:
+                fail_reason = "state_digest_drift"
+            elif (
+                not np.all(np.isfinite(lambda0_np))
+                or live_eta is None
+                or not np.isfinite(live_eta)
+            ):
+                fail_reason = "nonfinite"
+            elif eig_abs_min is None or _as_float(eig_abs_min) <= 0.0:
+                fail_reason = "singular_unregularized_hss"
+            elif n_negative > 0:
+                fail_reason = "indefinite_unregularized_hss"
+            elif float(live_eta) > float(F3_B37_ADJOINT_LIVE_ETA_TOL):
+                fail_reason = "adjoint_residual_unmet"
+
+            if fail_reason is None and time.perf_counter() < deadline:
+                residual_rt, objective_rt, _phi_rt = nested_ls_runtime_coil_closures(
+                    jax_boozer
+                )
+                del _phi_rt
+                coil0 = np.array(coils_before, dtype=np.float64, copy=True)
+                tangent = None
+                mixed_dc = None
+                best_norm = -1.0
+                best_index = -1
+                scan_n = min(int(F3_B37_ADJOINT_COIL_SCAN), int(coil0.size))
+                for index in range(scan_n):
+                    candidate = np.zeros_like(coil0)
+                    candidate[index] = 1.0
+                    mixed_candidate = np.asarray(
+                        apply_reduced_mixed_schur_coil_tangent(
+                            residual_rt,
+                            objective_rt,
+                            loaded,
+                            coil0,
+                            candidate,
+                            operator=operator,
+                        ),
+                        dtype=np.float64,
+                    )
+                    candidate_norm = float(np.linalg.norm(mixed_candidate))
+                    print(
+                        f"adjoint mixed index={index} norm={candidate_norm!r}",
+                        flush=True,
+                    )
+                    if candidate_norm > best_norm:
+                        best_norm = candidate_norm
+                        best_index = index
+                        tangent = candidate
+                        mixed_dc = mixed_candidate
+                mixed_index = int(best_index) if best_index >= 0 else None
+                mixed_norm = _json_finite(best_norm) if best_norm >= 0.0 else None
+                if (
+                    tangent is None
+                    or mixed_dc is None
+                    or best_norm <= float(F3_B37_ADJOINT_MIXED_NORM_FLOOR)
+                ):
+                    if fail_reason is None:
+                        fail_reason = "mixed_scan_dead_zero"
+                else:
+                    predicted_step = np.asarray(
+                        -solve_stabilized_schur_dense_lu(
+                            materialized, jnp.asarray(mixed_dc, dtype=jnp.float64)
+                        ),
+                        dtype=np.float64,
+                    )
+                    predicted_norm = _json_finite(float(np.linalg.norm(predicted_step)))
+                    predicted_dot = _json_finite(-float(np.dot(lambda0_np, mixed_dc)))
+                    api_started = time.perf_counter()
+                    adjoint = np.asarray(
+                        implicit_adjoint_coil_gradient(
+                            residual_rt,
+                            objective_rt,
+                            loaded,
+                            coil0,
+                            cotangent_np,
+                            stab=float(F3_B37_IFT_STAB),
+                            linear_solver="dense_lu",
+                            operator=operator,
+                            max_dense_linearization_bytes=None,
+                        ),
+                        dtype=np.float64,
+                    )
+                    adjoint_api_seconds = float(time.perf_counter() - api_started)
+                    vjp_dot = _json_finite(float(np.dot(adjoint, tangent)))
+                    vjp_ok = bool(
+                        vjp_dot is not None
+                        and predicted_dot is not None
+                        and np.isfinite(vjp_dot)
+                        and np.isfinite(predicted_dot)
+                        and bool(
+                            np.allclose(
+                                vjp_dot,
+                                predicted_dot,
+                                rtol=float(F3_B37_ADJOINT_VJP_RTOL),
+                                atol=float(F3_B37_ADJOINT_VJP_ATOL),
+                            )
+                        )
+                    )
+                    vjp_match = vjp_ok
+                    print(
+                        "adjoint vjp "
+                        f"dot={vjp_dot!r} predicted={predicted_dot!r} "
+                        f"match={vjp_ok} api_s={adjoint_api_seconds:.3f} "
+                        f"pred_norm={predicted_norm!r}",
+                        flush=True,
+                    )
+                    if fail_reason is None and not vjp_ok:
+                        fail_reason = "adjoint_vjp_mismatch"
+                    run_fd = (
+                        fail_reason is None
+                        and predicted_norm is not None
+                        and float(predicted_norm)
+                        > float(F3_B37_ADJOINT_MIXED_NORM_FLOOR)
+                        and time.perf_counter() < deadline
+                    )
+                    if run_fd:
+                        epsilon = float(F3_B37_ADJOINT_FD_EPSILON)
+                        fd_started = time.perf_counter()
+                        try:
+                            jax_boozer.surface.set_dofs(loaded)
+                            jax_boozer.biotsavart.x = coil0
+                            jax_boozer._refresh_coil_data()
+                            control = run_reduced_nested_ls_schur_newton(
+                                jax_boozer,
+                                iota=iota,
+                                G=g_const,
+                                stab=float(F3_B37_IFT_STAB),
+                                maxiter=int(NESTED_LS_NEWTON_MAXITER),
+                                linear_solver="dense_lu",
+                            )
+                            fd_control_success = bool(control.success)
+                            fd_control_iter = int(control.iteration_count)
+                            fd_control_grad_l2 = _json_finite(
+                                float(np.linalg.norm(control.reduced_gradient))
+                            )
+                            print(
+                                "adjoint fd control "
+                                f"success={control.success} iter={control.iteration_count} "
+                                f"g={fd_control_grad_l2!r} coil={control.coil_delta_inf!r}",
+                                flush=True,
+                            )
+                            jax_boozer.surface.set_dofs(loaded)
+                            jax_boozer.biotsavart.x = coil0 + epsilon * tangent
+                            jax_boozer._refresh_coil_data()
+                            perturbed = run_reduced_nested_ls_schur_newton(
+                                jax_boozer,
+                                iota=iota,
+                                G=g_const,
+                                stab=float(F3_B37_IFT_STAB),
+                                maxiter=int(NESTED_LS_NEWTON_MAXITER),
+                                linear_solver="dense_lu",
+                            )
+                            fd_perturbed_success = bool(perturbed.success)
+                            fd_perturbed_iter = int(perturbed.iteration_count)
+                            fd_perturbed_grad_l2 = _json_finite(
+                                float(np.linalg.norm(perturbed.reduced_gradient))
+                            )
+                            finite_difference = (
+                                perturbed.surface_dofs - control.surface_dofs
+                            ) / epsilon
+                            delta = predicted_step - finite_difference
+                            pred_scale = float(np.linalg.norm(predicted_step))
+                            fd_rel_l2 = _json_finite(
+                                float(np.linalg.norm(delta) / pred_scale)
+                                if pred_scale > 0.0
+                                else float(np.linalg.norm(delta))
+                            )
+                            fd_max_abs = _json_finite(float(np.max(np.abs(delta))))
+                            fd_atol = max(
+                                float(F3_B37_ADJOINT_FD_ATOL_FLOOR),
+                                float(F3_B37_ADJOINT_FD_ATOL_REL) * pred_scale,
+                            )
+                            fd_match = bool(
+                                fd_control_success
+                                and fd_perturbed_success
+                                and control.coil_delta_inf == 0.0
+                                and perturbed.coil_delta_inf == 0.0
+                                and np.allclose(
+                                    predicted_step,
+                                    finite_difference,
+                                    rtol=float(F3_B37_ADJOINT_FD_RTOL),
+                                    atol=fd_atol,
+                                )
+                            )
+                            fd_seconds = float(time.perf_counter() - fd_started)
+                            print(
+                                "adjoint fd perturbed "
+                                f"success={perturbed.success} iter={perturbed.iteration_count} "
+                                f"g={fd_perturbed_grad_l2!r} rel={fd_rel_l2!r} "
+                                f"match={fd_match} s={fd_seconds:.3f}",
+                                flush=True,
+                            )
+                            if fail_reason is None and not bool(fd_control_success):
+                                fail_reason = "fd_control_failed"
+                            elif fail_reason is None and not bool(fd_perturbed_success):
+                                fail_reason = "fd_perturbed_failed"
+                            elif fail_reason is None and (
+                                control.coil_delta_inf != 0.0
+                                or perturbed.coil_delta_inf != 0.0
+                            ):
+                                fail_reason = "coil_moved"
+                            elif fail_reason is None and not bool(fd_match):
+                                fail_reason = "fd_mismatch"
+                        finally:
+                            jax_boozer.biotsavart.x = coil0
+                            jax_boozer._refresh_coil_data()
+                            jax_boozer.surface.set_dofs(loaded)
+                    elif fail_reason is None and time.perf_counter() >= deadline:
+                        fail_reason = "wall_time_cap"
+            elif fail_reason is None and time.perf_counter() >= deadline:
+                fail_reason = "wall_time_cap"
+
+    coil_after = float(
+        np.linalg.norm(
+            np.asarray(jax_boozer.biotsavart.x, dtype=np.float64) - coils_before,
+            ord=np.inf,
+        )
+    )
+    if fail_reason is None and coil_after != 0.0:
+        fail_reason = "coil_moved"
+    if fail_reason is None and _surface_sha() != frozen_sha:
+        fail_reason = "state_digest_drift"
+
+    return NestedLsEndpointAdjointProbe(
+        surface_sha256=frozen_sha,
+        reloaded_surface_sha256=loaded_sha,
+        reload_sha_match=reload_match,
+        reduced_grad_l2=g_value,
+        iota=iota,
+        G=g_const,
+        coil_delta_inf=coil,
+        factor_seconds=float(factor_seconds),
+        dense_bytes=int(dense_bytes),
+        dense_chunk_batch_size=dense_chunk_batch_size,
+        dense_chunk_batch_size_env=dense_chunk_batch_size_env,
+        default_adjoint_cap_bytes=default_cap,
+        default_cap_refuses_661=bool(default_cap_refuses),
+        ift_stab=float(F3_B37_IFT_STAB),
+        newton_stab=float(NESTED_LS_NEWTON_STAB),
+        ift_used_newton_stab=False,
+        wall_seconds=float(F3_B37_ADJOINT_WALL_SECONDS),
+        spectrum_unregularized=spectrum_unreg,
+        spectrum_stabilized_from_unregularized=spectrum_stab,
+        unregularized_positive_definite=bool(unregularized_pd),
+        lambda_shift_l2=lambda_shift_l2,
+        adjoint_live_residual_l2=_json_finite(live_residual_l2)
+        if live_residual_l2 is not None
+        else None,
+        adjoint_live_eta=_json_finite(live_eta) if live_eta is not None else None,
+        adjoint_dense_eta=_json_finite(dense_eta) if dense_eta is not None else None,
+        mixed_scan_index=mixed_index,
+        mixed_scan_norm=mixed_norm,
+        predicted_step_norm=predicted_norm,
+        vjp_dot=vjp_dot,
+        predicted_dot=predicted_dot,
+        vjp_match=vjp_match,
+        adjoint_api_seconds=adjoint_api_seconds,
+        fd_epsilon=float(F3_B37_ADJOINT_FD_EPSILON),
+        fd_control_success=fd_control_success,
+        fd_control_iter=fd_control_iter,
+        fd_control_grad_l2=fd_control_grad_l2,
+        fd_perturbed_success=fd_perturbed_success,
+        fd_perturbed_iter=fd_perturbed_iter,
+        fd_perturbed_grad_l2=fd_perturbed_grad_l2,
+        fd_rel_l2=fd_rel_l2,
+        fd_max_abs=fd_max_abs,
+        fd_match=fd_match,
+        fd_seconds=fd_seconds,
+        coil_delta_inf_after=coil_after,
+        fail_closed_reason=fail_reason,
+        runtime=runtime,
+        provenance=provenance,
+    )
+
+
 def replace_native_solver_options(
     native: BoozerSurface,
     overlay: dict[str, object],
@@ -2671,7 +3351,17 @@ __all__ = [
     "DEFAULT_F3_B37_GPU_LANE",
     "DEFAULT_F3_B37_NATIVE_LANE",
     "DEFAULT_FLAT675_BUNDLE_ROOT",
+    "F3_B37_ADJOINT_COIL_SCAN",
+    "F3_B37_ADJOINT_FD_EPSILON",
+    "F3_B37_ADJOINT_LIVE_ETA_TOL",
+    "F3_B37_ADJOINT_WALL_SECONDS",
     "F3_B37_CAP512_WALK_EVIDENCE",
+    "F3_B37_DENSE_LU_ENDPOINT_G",
+    "F3_B37_DENSE_LU_ENDPOINT_GRAD_L2",
+    "F3_B37_DENSE_LU_ENDPOINT_IOTA",
+    "F3_B37_DENSE_LU_ENDPOINT_SURFACE_SHA256",
+    "F3_B37_DENSE_LU_WALK_EVIDENCE",
+    "F3_B37_IFT_STAB",
     "F3_B37_STEP3_SURFACE_SHA256",
     "F3_B37_STEP4_CAP64_ETA_ACHIEVED",
     "F3_B37_STEP4_CAP64_RESIDUAL_L2",
@@ -2695,6 +3385,7 @@ __all__ = [
     "NestedLsB37NestedTiming",
     "NestedLsBoundedF3B37Result",
     "NestedLsCountedMatvec",
+    "NestedLsEndpointAdjointProbe",
     "NestedLsFlatNativeB37Probe",
     "NestedLsSchurNewtonStepProbe",
     "NestedLsSchurNewtonWalkProbe",
@@ -2706,6 +3397,7 @@ __all__ = [
     "archived_flat675_bundle_available",
     "dump_strict_json",
     "evaluate_f3_b37_bounded_probe",
+    "evaluate_f3_b37_endpoint_adjoint_probe",
     "evaluate_f3_b37_flat_native_probe",
     "evaluate_f3_b37_nested_timing",
     "evaluate_f3_b37_schur_newton_step",

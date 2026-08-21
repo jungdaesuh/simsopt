@@ -393,18 +393,53 @@ default. 8 accepted steps, JAX ``‖g‖₂=2.40×10⁻¹⁴``, C++ rejudge
 ``iter=0`` (Δι=0, ΔG=0, Δs_inf=0), coils frozen. Live η ~10⁻¹⁴ at
 every step. Diagnostic walk wall 153 s is **not** a nested speed
 claim. Per-step linear seconds: 28.5 s cold then ~16.1–17.1 s warm;
-Schur factor 4.53 s then ~0.17 s. Claim-grade GMRES walk JSON
+Schur factor 4.53 s then ~0.17 s. ``ten_step_walk=true`` means
+``maxiter=10``; eight steps were accepted. Linear-solve wall is
+still stored as ``gmres_seconds`` (future schema:
+``linear_solve_seconds``). Claim-grade GMRES walk JSON
 ``nested_ls_reduced_gpu_walk_20260821.json`` remains absent.
+
+GPU unregularized IFT adjoint canary at that walk endpoint
+(``evaluate_f3_b37_endpoint_adjoint_probe``, opt-in
+``max_dense_linearization_bytes=None``, ``stab=0``,
+``linear_solver="dense_lu"``; 1 MiB adjoint cap and Newton
+``gmres`` default unchanged). Unregularized Ĥ_ss is SPD:
+``λ∈[6.54×10⁻³, 1.999×10³]``, ``n_negative=0``, ``κ≈3.06×10⁵``.
+Stabilized spectrum from the same matrix plus ``10⁻⁴ I`` (no second
+assembly) has ``λ_min=6.64×10⁻³``; ``‖λ_0−λ_stab‖₂=1.70``, so the
+Newton factor is not the IFT factor. Live adjoint η ``2.10×10⁻¹²``.
+Coil-tangent scan picked index 1 (``‖Ĥ_sc v‖₂=56.5``). VJP matched
+``−λᵀ Ĥ_sc v``. Unregularized dense-LU FD (ε=10⁻⁶, control 0 Newton
+steps, perturbed 2 steps) matched predicted ``ds/dc`` to
+relative ℓ₂ ``8.01×10⁻⁵``. Coils frozen. Diagnostic only; not B3,
+not a nested speed claim, not F3 7.70×. First JSON was minted with
+``git_dirty=True`` (protocol uncommitted); remint on a clean tree
+before treating provenance as claim-grade.
 
 ## Next
 
-1. **NO-GO:** cap-2048, global ``linear_solver`` default switch,
-   explicit-inverse preconditioning, any nested speed claim, F3
-   7.70× inheritance.
-2. Warm assembly is still ~16 s/step at chunk width 8. Chunk-batch
-   sweep and Shamanskii lagged-LU only if a nested timing bar is
-   chartered against banana ``run_code``. Physics fail-closed walk
-   at 661 is closed for the opt-in dense-LU lane.
+Do not blindly default-switch to dense LU. That is product policy
+and does not advance coils+surface. Two parallel lanes, then a
+dimension/memory solver policy with matrix-free fallback:
+
+1. **Performance.** Charter banana ``run_code`` as the native inner
+   bar. Sweep dense assembly chunk widths ``{8,16,32,64}``. Compare
+   matched physics, initial state, tolerance, and endpoint — not
+   necessarily identical operators. Lagged LU only if assembly still
+   loses. Do not inherit F3 7.70×.
+2. **Adjoint / E2E.** Unregularized 661 IFT at the frozen-coil
+   endpoint is certified (live residual + coil FD). Next is a short
+   moving-coil B3 outer on that adjoint, not a longer inner walk.
+   Remint the adjoint JSON with ``git_dirty=False`` after the
+   protocol commit.
+3. **NO-GO:** cap-2048, universal dense-LU default, explicit-inverse
+   ``M``, nested speed claim, F3 7.70×, remint of the dirty step-6
+   forcing JSON, claim-grade GMRES walk JSON
+   ``nested_ls_reduced_gpu_walk_20260821.json``.
+
+Frozen-coil reconstruct physics at 661 is closed for opt-in
+``linear_solver="dense_lu"``. Unregularized IFT at that endpoint is
+closed for opt-in dense LU past the 1 MiB cap.
 
 ## Validation of the SciPy CPU packet (`063b4fe83` / `96a1e5856`)
 
