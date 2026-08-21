@@ -59,6 +59,12 @@ _F3_B37_GPU_WALK_EVIDENCE = _EVIDENCE_DIR / "nested_ls_reduced_gpu_walk_20260821
 _GPU_WALK_PUBLICATION = (
     "GPU forcing-certified Schur walk. Not a timing claim and not F3 7.70x."
 )
+_GPU_WALK_GMRES_MATVECS_NOTE = (
+    "JAX incremental GMRES does not report operator applications; "
+    "gmres_matvecs stays 0 as unavailable telemetry, not zero work. "
+    "Default maxiter=1 with restart=8 is one restart cycle of up to "
+    "eight Krylov iterations."
+)
 _RECONSTRUCT_IOTA = 0.14085710955307942
 _SCHUR_PUBLICATION = (
     "The Schur operator and one accepted inexact CPU correction are "
@@ -341,7 +347,23 @@ def test_authored_gpu_walk_json_is_strict_and_claim_grade():
     assert float(probe["grad_l2"]) <= NESTED_LS_NEWTON_TOL
     assert int(probe["native_rejudge_iter"]) == 0
     assert float(probe["rejudge_vs_jax_surface_inf"]) == 0.0
+    assert float(probe["rejudge_vs_jax_iota"]) == pytest.approx(0.0, abs=1.0e-15)
+    assert float(probe["rejudge_vs_jax_g"]) == pytest.approx(0.0, abs=1.0e-15)
     assert float(probe["coil_delta_inf"]) == 0.0
+    np.testing.assert_allclose(
+        probe["native_rejudge_iota"],
+        probe["jax_iota"],
+        rtol=0.0,
+        atol=1.0e-15,
+        err_msg="authored C++ rejudge moved iota away from the JAX endpoint",
+    )
+    np.testing.assert_allclose(
+        probe["native_rejudge_g"],
+        probe["jax_g"],
+        rtol=0.0,
+        atol=1.0e-15,
+        err_msg="authored C++ rejudge moved G away from the JAX endpoint",
+    )
     assert all(bool(step["step_accepted"]) for step in probe["steps"])
     assert all(
         float(step["gmres_forcing_eta"]) <= float(step["gmres_rtol"])
@@ -368,10 +390,7 @@ def test_authored_gpu_walk_json_is_strict_and_claim_grade():
     assert "speed" not in payload["publication"].lower() or "not a timing" in (
         payload["publication"].lower()
     )
-    assert payload["gmres_matvecs_note"] == (
-        "JAX incremental GMRES does not report operator applications; "
-        "gmres_matvecs stays 0."
-    )
+    assert payload["gmres_matvecs_note"] == _GPU_WALK_GMRES_MATVECS_NOTE
 
 
 @_REQUIRES_BUNDLE

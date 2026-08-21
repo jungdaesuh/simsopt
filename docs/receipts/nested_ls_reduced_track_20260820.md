@@ -196,13 +196,33 @@ rejudge reconstruct ``ι=0.14085710956609662``, ``‖∇J‖₂=2.24e-14``,
 surface inf vs reconstruct ``4.16e-12``. Schur vs AD-QR ``rel_l2 =
 8.62e-16``. Not a ten-step walk and not a timing claim.
 
+GPU walk attempt (``a03b51987``, ``jax_gpu_fast``, ``cuda:0``,
+2026-08-21): fail-closed under the JAX 1e-13 / η / C++ no-op
+contract. Diagnostic artifact
+``docs/receipts/evidence/nested_ls_reduced_gpu_walk_20260821.incomplete.json``
+is **not** claim-grade (the claim path is
+``nested_ls_reduced_gpu_walk_20260821.json``). Step 1 accepted
+``η=0.23566 ≤ 0.24`` at ``maxiter=1`` (one restart cycle of
+``restart=8``). Step 2 Eisenstat–Walker requested ``η≈0.05006``;
+unpreconditioned GMRES at ``maxiter=8`` (eight restart cycles)
+achieved ``η=0.15141`` and the forcing gate refused Armijo.
+``success=False``, ``iters=1``, JAX ``‖g‖₂=0.00380``. C++ rejudge
+took 10 iterations (``Δι=-0.012023``, ``ΔG=7.08e-9``,
+``Δs_inf=0.005023``) — reconstruct basin, not endpoint no-op.
+Walk wall 51.2 s is diagnostic only. Not a nested speed claim and
+not F3 7.70×. ``gmres_matvecs=0`` is unavailable JAX telemetry, not
+zero Krylov work.
+
 ## Next
 
 F3 661 still needs a GPU-authored JSON walk that JAX itself drives
-to ``‖g‖₂ ≤ 1e-13`` (C++ rejudge then a no-op), a matrix-free 661
-IFT vs FD of reconverged surfaces, coil-optimizer VJP integration,
-and same-operator banana timing (B3, then B37) only after equal
-success. Do not reopen F3. Do not inherit 7.70×.
+to ``‖g‖₂ ≤ 1e-13`` with η_achieved ≤ η_requested on every accepted
+step and a C++ rejudge no-op (``iter==0``, ``Δs=Δι=ΔG=0``). That
+requires a Krylov budget or device ``M`` that can meet the second-step
+Eisenstat–Walker request ``η≈0.05``; do not relax the accept gate.
+Then: matrix-free 661 IFT vs FD of reconverged surfaces, coil-optimizer
+VJP integration, and same-operator banana timing (B3, then B37) only
+after equal success. Do not reopen F3. Do not inherit 7.70×.
 
 ## Validation of the SciPy CPU packet (`063b4fe83` / `96a1e5856`)
 

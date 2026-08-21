@@ -1,0 +1,14 @@
+E0821 13:13:58.348207 2311999 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+E0821 13:13:58.356858 2311789 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+backend gpu
+devices ['cuda:0']
+loaded F3 B37 GPU lane; starting reconstruct-ref + 10-step walk
+wrote /tmp/tmp.PJmcSPHMsA/nested_ls_reduced_gpu_walk_20260821.json
+backend gpu
+success False iters 1 accepted_last False
+grad_l2 0.003795976041011014 before 0.01609557303688532
+walk_s 51.228894714964554 last_eta 0.1514095713193289 forcing_ok True
+rejudge_iter 10 rejudge_success True
+d_iota -0.012023434417544498 d_G 7.075819485891088e-09 d_s_inf 0.005023078260645852
+git_dirty False git_commit a03b5198730f5612c16d9f0190b687e646a55ad2
+steps [{'i': 1, 'accepted': True, 'eta': 0.23566072681940675, 'rtol': 0.24, 'maxiter': 1, 'g': 0.003795976041011014, 'alpha': 1.0}, {'i': 2, 'accepted': False, 'eta': 0.1514095713193289, 'rtol': 0.05005835207396105, 'maxiter': 8, 'g': 0.003795976041011014, 'alpha': 1.0}]
