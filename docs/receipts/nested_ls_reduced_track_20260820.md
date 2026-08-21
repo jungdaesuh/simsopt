@@ -180,7 +180,9 @@ pair2-l2 reconstruct ``ι=0.14085710955509628``. B3 7×7 banana
 ``run_code`` ``physics_matched=True``. B37 timing after B3: JAX walk
 144.1 s / 10 iter / ``success=False`` (not ``1e-13``); native banana
 263.1 s / Newton iter 1 / ``success=True`` / ``ι=0.1408571095830707``.
-Do not publish a speed ratio.
+Do not publish a speed ratio. The timing payload sets
+``comparable_operators=False``. Runtime coil closures use the binary
+``(x, coil_set_spec)`` kernels.
 
 ## Next
 

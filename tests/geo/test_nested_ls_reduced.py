@@ -42,6 +42,7 @@ from simsopt_jax_adapters.geo.nested_ls_newton_parity import (
     run_nested_ls_newton_pair,
 )
 from simsopt_jax_adapters.geo.nested_ls_reduced import (
+    NESTED_LS_IMPLICIT_ADJOINT_DEFAULT_DENSE_BYTES,
     NESTED_LS_SCHUR_GMRES_RTOL,
     NestedLsReducedRankError,
     apply_reduced_mixed_schur_coil_tangent,
@@ -380,6 +381,22 @@ class _DummySchur:
 
 def test_schur_dense_bytes_cap_refuses_oversize():
     assert schur_dense_operator_bytes(37) == 37 * 37 * 8
+    assert (
+        schur_dense_operator_bytes(661) > NESTED_LS_IMPLICIT_ADJOINT_DEFAULT_DENSE_BYTES
+    )
+
+    class _F3DummySchur:
+        surface_size = 661
+
+        def apply(self, tangent):
+            return jnp.asarray(tangent, dtype=jnp.float64).reshape(-1)
+
+    with pytest.raises(MemoryError, match="max_dense_linearization_bytes="):
+        materialize_stabilized_schur_dense(
+            _F3DummySchur(),
+            1.0e-4,
+            max_dense_linearization_bytes=NESTED_LS_IMPLICIT_ADJOINT_DEFAULT_DENSE_BYTES,
+        )
     with pytest.raises(MemoryError, match="max_dense_linearization_bytes=1"):
         materialize_stabilized_schur_dense(
             _DummySchur(),
@@ -820,18 +837,36 @@ def test_runtime_coil_closures_match_captured_and_mixed_hvp():
         atol=float(value_tol["atol"]),
         err_msg="runtime-coil residual missed captured-coil residual",
     )
-    tangent = np.zeros_like(coil)
-    tangent[0] = 1.0
-    mixed = np.asarray(
-        apply_reduced_mixed_schur_coil_tangent(
-            residual_rt,
-            objective_rt,
-            surface,
-            coil,
-            tangent,
-        ),
-        dtype=np.float64,
-    )
+    tangent = None
+    mixed = None
+    phi_unperturbed = float(np.asarray(objective_rt(packed, coil), dtype=np.float64))
+    for index in range(min(12, coil.size)):
+        candidate = np.zeros_like(coil)
+        candidate[index] = 1.0
+        phi_perturbed = float(
+            np.asarray(
+                objective_rt(packed, coil + 1.0e-3 * candidate), dtype=np.float64
+            )
+        )
+        mixed_candidate = np.asarray(
+            apply_reduced_mixed_schur_coil_tangent(
+                residual_rt,
+                objective_rt,
+                surface,
+                coil,
+                candidate,
+            ),
+            dtype=np.float64,
+        )
+        if (
+            abs(phi_perturbed - phi_unperturbed) > 0.0
+            and float(np.linalg.norm(mixed_candidate)) > 1.0e-8
+        ):
+            tangent = candidate
+            mixed = mixed_candidate
+            break
+    assert tangent is not None
+    assert mixed is not None
     epsilon = 1.0e-6
     plus = jax.grad(lambda s: phi_hat_rt(s, coil + epsilon * tangent))(
         jnp.asarray(surface, dtype=jnp.float64)
@@ -864,7 +899,8 @@ def test_implicit_adjoint_matches_surface_response_to_coil_step():
     cotangent[0] = 1.0
     tangent = None
     mixed_dc = None
-    for index in range(min(12, coil0.size)):
+    mixed_norm = -1.0
+    for index in range(min(8, coil0.size)):
         candidate = np.zeros_like(coil0)
         candidate[index] = 1.0
         mixed_candidate = np.asarray(
@@ -877,12 +913,14 @@ def test_implicit_adjoint_matches_surface_response_to_coil_step():
             ),
             dtype=np.float64,
         )
-        if float(np.linalg.norm(mixed_candidate)) > 1.0e-8:
+        candidate_norm = float(np.linalg.norm(mixed_candidate))
+        if candidate_norm > mixed_norm:
+            mixed_norm = candidate_norm
             tangent = candidate
             mixed_dc = mixed_candidate
-            break
     assert tangent is not None
     assert mixed_dc is not None
+    assert mixed_norm > 1.0e-8
     adjoint = np.asarray(
         implicit_adjoint_coil_gradient(
             residual_rt,
@@ -904,6 +942,10 @@ def test_implicit_adjoint_matches_surface_response_to_coil_step():
         dtype=np.float64,
     )
     predicted = -float(np.dot(lambda_s, mixed_dc))
+    predicted_step = np.asarray(
+        -solve_stabilized_schur_dense_lu(dense, jnp.asarray(mixed_dc)),
+        dtype=np.float64,
+    )
     np.testing.assert_allclose(
         float(np.dot(adjoint, tangent)),
         predicted,
@@ -911,6 +953,8 @@ def test_implicit_adjoint_matches_surface_response_to_coil_step():
         atol=1.0e-10,
         err_msg="coil-gradient VJP missed -λᵀ Ĥ_sc v_c",
     )
+    predicted_step_norm = float(np.linalg.norm(predicted_step))
+    assert predicted_step_norm > 1.0e-8
     epsilon = 1.0e-6
     jax_boozer.surface.set_dofs(surface0)
     jax_boozer.biotsavart.x = coil0
@@ -936,17 +980,17 @@ def test_implicit_adjoint_matches_surface_response_to_coil_step():
         gmres_maxiter=10,
         gmres_rtol=1.0e-10,
     )
-    finite_difference = (perturbed.surface_dofs[0] - control.surface_dofs[0]) / epsilon
+    finite_difference = (perturbed.surface_dofs - control.surface_dofs) / epsilon
     assert control.coil_delta_inf == 0.0
     assert perturbed.coil_delta_inf == 0.0
     jax_boozer.biotsavart.x = coil0
     jax_boozer._refresh_coil_data()
     np.testing.assert_allclose(
-        predicted,
+        predicted_step,
         finite_difference,
         rtol=5.0e-2,
-        atol=5.0e-4,
-        err_msg="implicit adjoint missed one Schur step of s[0] to a coil step",
+        atol=max(1.0e-9, 1.0e-2 * predicted_step_norm),
+        err_msg="implicit adjoint missed one Schur step of ds/dc",
     )
 
 
