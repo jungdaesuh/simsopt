@@ -1,0 +1,149 @@
+{
+  "claim_boundary": {
+    "device_resident_krylov": true,
+    "endpoint_parity": false,
+    "f3_sealed": true,
+    "full_walk_attempted": true,
+    "inherits_f3_7_70x": false,
+    "jax_success_1e13": false,
+    "nested_speed_claim": false,
+    "newton_quality_linear_solve": true,
+    "ten_step_walk": true
+  },
+  "command": "SIMSOPT_BACKEND_MODE=jax_gpu_fast JAX_PLATFORMS=cuda,cpu JAX_ENABLE_X64=1 .venv-qn-gpu/bin/python evaluate_f3_b37_schur_newton_walk(maxiter=10)",
+  "date": "2026-08-21",
+  "driver": "simsopt_jax_adapters.geo.nested_ls_reduced_scale.evaluate_f3_b37_schur_newton_walk",
+  "execution_log": "docs/receipts/evidence/nested_ls_reduced_gpu_walk_20260821.log",
+  "gmres_matvecs_note": "JAX incremental GMRES does not report operator applications; gmres_matvecs stays 0 as unavailable telemetry, not zero work. Default maxiter=1 with restart=8 is one restart cycle of up to eight Krylov iterations.",
+  "krylov_backend": "jax.scipy.sparse.linalg.gmres incremental via _run_operator_gmres",
+  "probe": {
+    "G": 2.010619304709917,
+    "coil_delta_inf": 0.0,
+    "gmres_forcing_eta": 0.1203881060498997,
+    "grad_l2": 0.000780997243354473,
+    "iota": 0.15554545707382791,
+    "iteration_count": 3,
+    "jax_g": 2.010619304709917,
+    "jax_iota": 0.15554545707382791,
+    "jax_surface_sha256": "286e3dabf3c9113d25aa691e1abe36a109057738e67536d9e46e6d56faa17e24",
+    "maxiter": 10,
+    "native_rejudge_coil_delta_inf": 0.0,
+    "native_rejudge_g": 2.0106193053897154,
+    "native_rejudge_grad_l2": 4.5382675700461477e-14,
+    "native_rejudge_iota": 0.14085710961769407,
+    "native_rejudge_iter": 9,
+    "native_rejudge_seconds": 155.08586022700183,
+    "native_rejudge_success": true,
+    "persisted": true,
+    "provenance": {
+      "git_branch": "pr/jax-port-squashed",
+      "git_commit": "98449f6eccaed35594737dfebb8d7f9596d44dd4",
+      "git_dirty": false,
+      "git_status_porcelain": "",
+      "hostname": "jungdaesuh-playstation",
+      "input_sha256": {
+        "native_biot_savart.json": "0415ae937c78b9f2d68e8463a9176e8f330a9aa172eece160341afccdc29429d",
+        "pair2-l1_lane.json": "bde32ab9987d4f2116cf7c7410753c83a9d74ca7836031c25db0e12603155d64"
+      },
+      "jax_default_backend": "gpu",
+      "jax_devices": [
+        "cuda:0"
+      ],
+      "jax_enable_x64_env": "1",
+      "jax_platforms_env": "cuda,cpu",
+      "jax_version": "0.10.0",
+      "numpy_version": "2.4.6",
+      "python_executable": "/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv-qn-gpu/bin/python",
+      "python_version": "3.11.15 (main, Jun 23 2026, 15:19:43) [Clang 22.1.3 ]",
+      "scipy_version": "1.17.1",
+      "simsopt_version": "1.10.7.dev1074+g320e5cba8.d20260806",
+      "simsoptpp_path": "/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv-qn-gpu/lib/python3.11/site-packages/simsoptpp.cpython-311-x86_64-linux-gnu.so",
+      "simsoptpp_sha256": "41b2ca791a720f325ffa9b382b31d29bade73f6516693805d41adc0de6f6ed4b",
+      "source_sha256": {
+        "nested_ls_contract.py": "a9b602f3ebc2c6c58bc010c328337fd523c46cd4a98b331059264ff9d270f28c",
+        "nested_ls_reduced.py": "4da45bdb6ddbe43110ceba82636615c342505e4b3b4aab28b2b04594576ae2c7",
+        "nested_ls_reduced_scale.py": "11e6e0b95e0e2422e8c26d4d243773eaa6fe8ae0ce4817fe03913f8ecec32ab4"
+      },
+      "timestamp_utc": "2026-08-21T18:15:54.440496+00:00"
+    },
+    "reconstruct_ref_iota": 0.14085710955308048,
+    "reduced_grad_l2_before": 0.01609557303688532,
+    "rejudge_vs_jax_g": 6.797984397621804e-10,
+    "rejudge_vs_jax_iota": -0.014688347456133843,
+    "rejudge_vs_jax_surface_inf": 0.004807893931617624,
+    "rejudge_vs_reconstruct_surface_inf": 2.0635826381010247e-11,
+    "runtime": {
+      "hostname": "jungdaesuh-playstation",
+      "jax_default_backend": "gpu",
+      "jax_devices": [
+        "cuda:0"
+      ],
+      "jax_enable_x64_env": "1",
+      "jax_platforms_env": "cuda,cpu",
+      "python_executable": "/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv-qn-gpu/bin/python",
+      "timestamp_utc": "2026-08-21T18:15:54.440496+00:00"
+    },
+    "step_accepted": false,
+    "steps": [
+      {
+        "G": 2.0106192983138955,
+        "gmres_forcing_eta": 0.23566072681940672,
+        "gmres_maxiter": 1,
+        "gmres_residual_l2": 0.0037930944404472398,
+        "gmres_rtol": 0.24,
+        "grad_l2": 0.003795976041011011,
+        "iota": 0.15288054398364112,
+        "iteration": 1,
+        "objective": 1.1000116361157161e-05,
+        "step_accepted": true,
+        "step_alpha": 1.0
+      },
+      {
+        "G": 2.0106193051513266,
+        "gmres_forcing_eta": 0.038976432238395094,
+        "gmres_maxiter": 64,
+        "gmres_residual_l2": 0.00014795360294103695,
+        "gmres_rtol": 0.05005835207396097,
+        "grad_l2": 0.003671789660022825,
+        "iota": 0.15731583650619219,
+        "iteration": 2,
+        "objective": 9.26381838310071e-06,
+        "step_accepted": true,
+        "step_alpha": 1.0
+      },
+      {
+        "G": 2.010619304709917,
+        "gmres_forcing_eta": 0.21181377909259372,
+        "gmres_maxiter": 16,
+        "gmres_residual_l2": 0.0007777356439225444,
+        "gmres_rtol": 0.24,
+        "grad_l2": 0.000780997243354473,
+        "iota": 0.15554545707382791,
+        "iteration": 3,
+        "objective": 9.223027177903892e-06,
+        "step_accepted": true,
+        "step_alpha": 1.0
+      },
+      {
+        "G": 2.010619304709917,
+        "gmres_forcing_eta": 0.1203881060498997,
+        "gmres_maxiter": 64,
+        "gmres_residual_l2": 9.402277895763763e-05,
+        "gmres_rtol": 0.04071795165373735,
+        "grad_l2": 0.000780997243354473,
+        "iota": 0.15554545707382791,
+        "iteration": 4,
+        "objective": 9.223027177903892e-06,
+        "step_accepted": false,
+        "step_alpha": 1.0
+      }
+    ],
+    "success": false,
+    "walk_seconds": 248.16765607800335,
+    "y_star_g": 2.010619298254679,
+    "y_star_iota": 0.15164961478467356
+  },
+  "publication": "GPU forcing-certified Schur walk. Not a timing claim and not F3 7.70x.",
+  "schema": "nested-ls-reduced-gpu-walk.v1",
+  "written_by_pytest": false
+}
