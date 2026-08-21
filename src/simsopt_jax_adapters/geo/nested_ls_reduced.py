@@ -166,6 +166,8 @@ class NestedLsSchurNewtonStepRecord:
     gmres_residual_l2: float
     gmres_rtol: float
     gmres_maxiter: int
+    factor_seconds: float
+    gmres_seconds: float
     step_alpha: float
     step_accepted: bool
 
@@ -1054,7 +1056,8 @@ def run_reduced_nested_ls_schur_newton(
             working_surface,
             y_probe=working_solution.solution,
         )
-        factor_seconds += time.perf_counter() - factor_started
+        step_factor_seconds = time.perf_counter() - factor_started
+        factor_seconds += step_factor_seconds
         phi_yy_condition = float(operator.phi_yy_condition)
         matvec = _stabilized_schur_matvec(
             operator, jnp.asarray(stab, dtype=jnp.float64)
@@ -1090,7 +1093,8 @@ def run_reduced_nested_ls_schur_newton(
             raise ValueError(
                 f"linear_solver must be 'gmres' or 'dense_lu'; got {linear_solver!r}."
             )
-        gmres_seconds += time.perf_counter() - gmres_started
+        step_linear_seconds = time.perf_counter() - gmres_started
+        gmres_seconds += step_linear_seconds
         newton_direction = _host_vector(newton_jax)
         gmres_solution = np.array(newton_direction, dtype=np.float64, copy=True)
         gmres_info = int(_host_vector(jnp.reshape(jnp.asarray(info), (1,)))[0])
@@ -1120,6 +1124,8 @@ def run_reduced_nested_ls_schur_newton(
                     gmres_residual_l2=float(gmres_residual_l2),
                     gmres_rtol=float(requested_eta),
                     gmres_maxiter=int(used_gmres_maxiter),
+                    factor_seconds=float(step_factor_seconds),
+                    gmres_seconds=float(step_linear_seconds),
                     step_alpha=float(step_alpha),
                     step_accepted=False,
                 )
@@ -1153,6 +1159,8 @@ def run_reduced_nested_ls_schur_newton(
                 gmres_residual_l2=float(gmres_residual_l2),
                 gmres_rtol=float(requested_eta),
                 gmres_maxiter=int(used_gmres_maxiter),
+                factor_seconds=float(step_factor_seconds),
+                gmres_seconds=float(step_linear_seconds),
                 step_alpha=float(step_alpha),
                 step_accepted=bool(step_accepted),
             )
