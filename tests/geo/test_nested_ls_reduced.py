@@ -42,15 +42,21 @@ from simsopt_jax_adapters.geo.nested_ls_newton_parity import (
     run_nested_ls_newton_pair,
 )
 from simsopt_jax_adapters.geo.nested_ls_reduced import (
+    NESTED_LS_EW_ALPHA,
+    NESTED_LS_EW_GAMMA,
+    NESTED_LS_EW_SAFEGUARD,
     NESTED_LS_IMPLICIT_ADJOINT_DEFAULT_DENSE_BYTES,
+    NESTED_LS_SCHUR_GMRES_MAXITER_CAP,
     NESTED_LS_SCHUR_GMRES_RTOL,
     NestedLsReducedRankError,
     apply_reduced_mixed_schur_coil_tangent,
     compare_ad_qr_and_schur_hvp,
     dense_schur_inverse_preconditioner,
+    eisenstat_walker_forcing_eta,
     factor_reduced_nested_ls_schur,
     factor_schur_fourier_block_preconditioner,
     implicit_adjoint_coil_gradient,
+    linear_solve_meets_forcing,
     materialize_stabilized_schur_dense,
     nested_ls_reduced_closures,
     nested_ls_runtime_coil_closures,
@@ -64,6 +70,7 @@ from simsopt_jax_adapters.geo.nested_ls_reduced import (
     run_reduced_nested_ls_newton,
     run_reduced_nested_ls_schur_newton,
     schur_dense_operator_bytes,
+    solve_operator_gmres_with_forcing,
     solve_projected_y,
     solve_stabilized_schur_dense_lu,
     split_surface_and_y,
@@ -525,9 +532,142 @@ def test_schur_newton_forcing_eta_is_explicit_linear_residual_ratio():
         rel=1.0e-12,
         abs=1.0e-12,
     )
-    if schur.gmres_forcing_eta > 1.0:
+    assert schur.steps[0].gmres_rtol <= NESTED_LS_SCHUR_GMRES_RTOL
+    if linear_solve_meets_forcing(schur.gmres_forcing_eta, schur.steps[0].gmres_rtol):
+        assert schur.step_accepted is True
+    else:
         assert schur.step_accepted is False
         np.testing.assert_array_equal(schur.surface_dofs, shifted)
+
+
+def test_eisenstat_walker_choice2_caps_safeguards_and_floors():
+    eta0 = eisenstat_walker_forcing_eta(
+        1.0,
+        previous_grad_norm=None,
+        previous_eta=None,
+        eta_max=0.24,
+        nonlinear_tol=1.0e-13,
+    )
+    assert eta0 == pytest.approx(0.24, rel=0.0, abs=0.0)
+    eta_fast = eisenstat_walker_forcing_eta(
+        0.05,
+        previous_grad_norm=1.0,
+        previous_eta=0.24,
+        eta_max=0.24,
+        nonlinear_tol=1.0e-13,
+    )
+    freeze_small = NESTED_LS_EW_GAMMA * 0.24**NESTED_LS_EW_ALPHA
+    assert freeze_small < NESTED_LS_EW_SAFEGUARD
+    assert eta_fast == pytest.approx(
+        NESTED_LS_EW_GAMMA * (0.05) ** NESTED_LS_EW_ALPHA,
+        rel=0.0,
+        abs=1.0e-15,
+    )
+    eta_frozen = eisenstat_walker_forcing_eta(
+        0.05,
+        previous_grad_norm=1.0,
+        previous_eta=0.9,
+        eta_max=0.9,
+        nonlinear_tol=1.0e-13,
+    )
+    freeze = NESTED_LS_EW_GAMMA * 0.9**NESTED_LS_EW_ALPHA
+    assert freeze > NESTED_LS_EW_SAFEGUARD
+    assert eta_frozen == pytest.approx(freeze, rel=0.0, abs=1.0e-15)
+    eta_floor = eisenstat_walker_forcing_eta(
+        1.0e-12,
+        previous_grad_norm=1.0,
+        previous_eta=0.24,
+        eta_max=0.24,
+        nonlinear_tol=1.0e-13,
+    )
+    assert eta_floor == pytest.approx(0.5 * 1.0e-13 / 1.0e-12, rel=0.0, abs=1.0e-15)
+    assert linear_solve_meets_forcing(0.24, 0.24) is True
+    assert linear_solve_meets_forcing(0.2400001, 0.24) is False
+
+
+def test_operator_gmres_rejects_unit_interval_eta_then_retries():
+    weights = jnp.linspace(1.0, 1.0e-3, 16)
+
+    def matvec(tangent: jax.Array) -> jax.Array:
+        return weights * tangent
+
+    rhs = jnp.ones((16,), dtype=jnp.float64)
+    _delta, _residual, _info, _residual_l2, eta_one, used_one = (
+        solve_operator_gmres_with_forcing(
+            matvec,
+            rhs,
+            eta_requested=NESTED_LS_SCHUR_GMRES_RTOL,
+            restart=2,
+            maxiter=1,
+            maxiter_cap=1,
+        )
+    )
+    assert used_one == 1
+    assert eta_one > NESTED_LS_SCHUR_GMRES_RTOL
+    assert eta_one <= 1.0
+    assert linear_solve_meets_forcing(eta_one, NESTED_LS_SCHUR_GMRES_RTOL) is False
+    _delta2, _residual2, _info2, _residual_l2_2, eta_retry, used_retry = (
+        solve_operator_gmres_with_forcing(
+            matvec,
+            rhs,
+            eta_requested=NESTED_LS_SCHUR_GMRES_RTOL,
+            restart=2,
+            maxiter=1,
+            maxiter_cap=NESTED_LS_SCHUR_GMRES_MAXITER_CAP,
+        )
+    )
+    assert used_retry > 1
+    assert eta_retry <= NESTED_LS_SCHUR_GMRES_RTOL
+    assert linear_solve_meets_forcing(eta_retry, NESTED_LS_SCHUR_GMRES_RTOL) is True
+
+
+@pytest.mark.boozer
+def test_schur_newton_rejects_eta_above_requested_forcing():
+    _native, jax_boozer, _decision, iota, g0 = _nested_ls_volume_pair()
+    del _native, _decision
+    shifted = np.array(jax_boozer.surface.get_dofs(), dtype=np.float64, copy=True)
+    shifted[0] += 1.0e-3
+    jax_boozer.surface.set_dofs(shifted)
+    schur = run_reduced_nested_ls_schur_newton(
+        jax_boozer,
+        iota=iota,
+        G=g0,
+        maxiter=1,
+        gmres_restart=8,
+        gmres_maxiter=1,
+        gmres_maxiter_cap=1,
+        gmres_rtol=1.0e-12,
+    )
+    assert schur.gmres_forcing_eta > 1.0e-12
+    assert schur.step_accepted is False
+    assert schur.step_alpha == pytest.approx(1.0, rel=0.0, abs=0.0)
+    np.testing.assert_array_equal(schur.surface_dofs, shifted)
+    assert schur.gmres_maxiter == 1
+
+
+@pytest.mark.boozer
+def test_schur_newton_retries_krylov_until_forcing_is_met():
+    _native, jax_boozer, _decision, iota, g0 = _nested_ls_volume_pair()
+    del _native, _decision
+    shifted = np.array(jax_boozer.surface.get_dofs(), dtype=np.float64, copy=True)
+    shifted[0] += 1.0e-3
+    jax_boozer.surface.set_dofs(shifted)
+    schur = run_reduced_nested_ls_schur_newton(
+        jax_boozer,
+        iota=iota,
+        G=g0,
+        maxiter=1,
+        gmres_restart=8,
+        gmres_maxiter=1,
+        gmres_maxiter_cap=NESTED_LS_SCHUR_GMRES_MAXITER_CAP,
+        gmres_rtol=NESTED_LS_SCHUR_GMRES_RTOL,
+    )
+    assert schur.gmres_forcing_eta <= NESTED_LS_SCHUR_GMRES_RTOL
+    assert schur.step_accepted is True
+    assert schur.gmres_maxiter > 1
+    assert schur.steps[0].gmres_rtol == pytest.approx(
+        NESTED_LS_SCHUR_GMRES_RTOL, rel=0.0, abs=0.0
+    )
 
 
 @pytest.mark.boozer
@@ -587,15 +727,23 @@ def test_fourier_block_m_canary_on_exact_schur():
         err_msg="Fourier-block inverse missed the exact Schur block",
     )
 
-    plain = run_reduced_nested_ls_schur_newton(jax_plain, iota=iota, G=g0, maxiter=1)
+    plain = run_reduced_nested_ls_schur_newton(
+        jax_plain,
+        iota=iota,
+        G=g0,
+        maxiter=1,
+        gmres_maxiter_cap=1,
+    )
     prec = run_reduced_nested_ls_schur_newton(
         jax_prec,
         iota=iota,
         G=g0,
         maxiter=1,
+        gmres_maxiter_cap=1,
         gmres_preconditioner=preconditioner.apply,
     )
     assert plain.gmres_forcing_eta > 1.0
+    assert plain.step_accepted is False
     assert prec.gmres_forcing_eta < plain.gmres_forcing_eta
     predicted = np.asarray(
         operator.apply(prec.gmres_solution), dtype=np.float64
@@ -809,6 +957,39 @@ def test_schur_newton_walk_records_accepted_steps():
         len(walk.steps) == walk.iteration_count + 1
         and walk.steps[-1].step_accepted is False
     )
+    assert all(
+        step.gmres_forcing_eta <= step.gmres_rtol
+        for step in walk.steps
+        if step.step_accepted
+    )
+
+
+@pytest.mark.boozer
+def test_schur_newton_reaches_reconstruct_gradient_tol():
+    native, jax_boozer, _decision, iota, g0 = _nested_ls_volume_pair()
+    del _decision
+    seed_iota, seed_g = _seed_both_lanes_from_native_lbfgs(native, jax_boozer, iota, g0)
+    shifted = np.array(jax_boozer.surface.get_dofs(), dtype=np.float64, copy=True)
+    shifted[0] += 1.0e-4
+    jax_boozer.surface.set_dofs(shifted)
+    walk = run_reduced_nested_ls_schur_newton(
+        jax_boozer,
+        iota=seed_iota,
+        G=seed_g,
+        maxiter=NESTED_LS_NEWTON_MAXITER,
+        gmres_restart=64,
+        gmres_maxiter=10,
+        gmres_rtol=1.0e-10,
+    )
+    assert walk.coil_delta_inf == 0.0
+    grad_l2 = float(np.linalg.norm(walk.reduced_gradient))
+    assert walk.success is True
+    assert grad_l2 <= NESTED_LS_NEWTON_TOL
+    assert all(
+        step.gmres_forcing_eta <= step.gmres_rtol
+        for step in walk.steps
+        if step.step_accepted
+    )
 
 
 @pytest.mark.boozer
@@ -928,6 +1109,8 @@ def test_implicit_adjoint_matches_surface_response_to_coil_step():
             surface0,
             coil0,
             cotangent,
+            stab=NESTED_LS_NEWTON_STAB,
+            linear_solver="dense_lu",
         ),
         dtype=np.float64,
     )
@@ -991,6 +1174,118 @@ def test_implicit_adjoint_matches_surface_response_to_coil_step():
         rtol=5.0e-2,
         atol=max(1.0e-9, 1.0e-2 * predicted_step_norm),
         err_msg="implicit adjoint missed one Schur step of ds/dc",
+    )
+
+
+@pytest.mark.boozer
+def test_unregularized_ift_adjoint_matches_reconverged_surface_fd():
+    native, jax_boozer, _decision, iota, g0 = _nested_ls_volume_pair()
+    del _decision
+    seed_iota, seed_g = _seed_both_lanes_from_native_lbfgs(native, jax_boozer, iota, g0)
+    polished = run_reduced_nested_ls_newton(jax_boozer, iota=seed_iota, G=seed_g)
+    assert polished.success is True
+    residual_rt, objective_rt, _phi_hat = nested_ls_runtime_coil_closures(jax_boozer)
+    surface0 = np.array(polished.surface_dofs, dtype=np.float64, copy=True)
+    coil0 = np.asarray(jax.device_get(jax_boozer.biotsavart.x), dtype=np.float64)
+    cotangent = np.zeros_like(surface0)
+    cotangent[0] = 1.0
+    tangent = None
+    mixed_dc = None
+    mixed_norm = -1.0
+    for index in range(min(8, coil0.size)):
+        candidate = np.zeros_like(coil0)
+        candidate[index] = 1.0
+        mixed_candidate = np.asarray(
+            apply_reduced_mixed_schur_coil_tangent(
+                residual_rt,
+                objective_rt,
+                surface0,
+                coil0,
+                candidate,
+            ),
+            dtype=np.float64,
+        )
+        candidate_norm = float(np.linalg.norm(mixed_candidate))
+        if candidate_norm > mixed_norm:
+            mixed_norm = candidate_norm
+            tangent = candidate
+            mixed_dc = mixed_candidate
+    assert tangent is not None
+    assert mixed_dc is not None
+    assert mixed_norm > 1.0e-8
+    adjoint = np.asarray(
+        implicit_adjoint_coil_gradient(
+            residual_rt,
+            objective_rt,
+            surface0,
+            coil0,
+            cotangent,
+            max_dense_linearization_bytes=1,
+        ),
+        dtype=np.float64,
+    )
+    operator = factor_reduced_nested_ls_schur(
+        lambda packed: residual_rt(packed, coil0),
+        lambda packed: objective_rt(packed, coil0),
+        surface0,
+    )
+    dense = materialize_stabilized_schur_dense(operator, 0.0)
+    lambda_s = np.asarray(
+        solve_stabilized_schur_dense_lu(dense, jnp.asarray(cotangent)),
+        dtype=np.float64,
+    )
+    predicted = -float(np.dot(lambda_s, mixed_dc))
+    predicted_step = np.asarray(
+        -solve_stabilized_schur_dense_lu(dense, jnp.asarray(mixed_dc)),
+        dtype=np.float64,
+    )
+    np.testing.assert_allclose(
+        float(np.dot(adjoint, tangent)),
+        predicted,
+        rtol=1.0e-6,
+        atol=1.0e-8,
+        err_msg="unregularized coil VJP missed -λᵀ Ĥ_ss⁻¹ Ĥ_sc v_c",
+    )
+    predicted_step_norm = float(np.linalg.norm(predicted_step))
+    assert predicted_step_norm > 1.0e-8
+    epsilon = 1.0e-6
+    jax_boozer.surface.set_dofs(surface0)
+    jax_boozer.biotsavart.x = coil0
+    jax_boozer._refresh_coil_data()
+    control = run_reduced_nested_ls_schur_newton(
+        jax_boozer,
+        iota=float(polished.iota),
+        G=float(polished.G),
+        maxiter=NESTED_LS_NEWTON_MAXITER,
+        gmres_restart=64,
+        gmres_maxiter=10,
+        gmres_rtol=1.0e-10,
+    )
+    assert control.success is True
+    jax_boozer.surface.set_dofs(surface0)
+    jax_boozer.biotsavart.x = coil0 + epsilon * tangent
+    jax_boozer._refresh_coil_data()
+    perturbed = run_reduced_nested_ls_schur_newton(
+        jax_boozer,
+        iota=float(polished.iota),
+        G=float(polished.G),
+        maxiter=NESTED_LS_NEWTON_MAXITER,
+        gmres_restart=64,
+        gmres_maxiter=10,
+        gmres_rtol=1.0e-10,
+    )
+    assert perturbed.success is True
+    finite_difference = (perturbed.surface_dofs - control.surface_dofs) / epsilon
+    assert control.coil_delta_inf == 0.0
+    assert perturbed.coil_delta_inf == 0.0
+    jax_boozer.biotsavart.x = coil0
+    jax_boozer._refresh_coil_data()
+    np.testing.assert_allclose(
+        predicted_step,
+        finite_difference,
+        rtol=5.0e-2,
+        atol=max(1.0e-9, 1.0e-2 * predicted_step_norm),
+        err_msg="unregularized IFT missed FD of reconverged ds/dc",
     )
 
 

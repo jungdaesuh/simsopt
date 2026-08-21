@@ -392,7 +392,10 @@ def test_f3_b37_one_schur_newton_step_and_cpp_rejudge():
     replay = frozen["independent_replay"]
     assert probe.gmres_info in (0, -1)
     assert probe.gmres_restart == 8
-    assert probe.gmres_maxiter == 1
+    assert probe.gmres_maxiter >= 1
+    assert probe.gmres_maxiter <= 8
+    if probe.step_accepted:
+        assert probe.gmres_forcing_eta <= probe.gmres_rtol
     assert probe.step_coil_delta_inf == 0.0
     assert probe.native_rejudge_coil_delta_inf == 0.0
     assert probe.runtime["jax_default_backend"] == "cpu"
@@ -493,6 +496,7 @@ def test_f3_b37_gpu_one_schur_newton_step_and_cpp_rejudge():
     assert probe.step_coil_delta_inf == 0.0
     assert probe.native_rejudge_coil_delta_inf == 0.0
     assert probe.step_accepted is True
+    assert probe.gmres_forcing_eta <= probe.gmres_rtol
     assert probe.step_iter == 1
     assert probe.native_rejudge_success is True
     assert probe.native_rejudge_iter == 10
@@ -556,9 +560,14 @@ def test_f3_b37_schur_newton_walk_and_cpp_rejudge():
     assert probe.runtime["jax_default_backend"] == "gpu"
     assert probe.coil_delta_inf == 0.0
     assert probe.native_rejudge_coil_delta_inf == 0.0
-    assert probe.iteration_count == 10
-    assert len(probe.steps) == 10
-    assert all(bool(step["step_accepted"]) for step in probe.steps)
+    assert probe.iteration_count >= 1
+    assert probe.steps
+    assert any(bool(step["step_accepted"]) for step in probe.steps)
+    assert all(
+        float(step["gmres_forcing_eta"]) <= float(step["gmres_rtol"])
+        for step in probe.steps
+        if bool(step["step_accepted"])
+    )
     assert probe.grad_l2 < probe.reduced_grad_l2_before
     assert probe.native_rejudge_success is True
     value_tol = parity_ladder_tolerances("direct_kernel")

@@ -145,8 +145,8 @@ Independent CPU replay of `063b4fe83`: Schur vs AD-through-QR
 `_run_operator_gmres` (`solve_method="incremental"`, `atol=0`) on
 `v ↦ Ĥ_ss v + stab v`. The certificate is the explicit residual
 `‖(Ĥ+stab I)δs − g‖₂` and forcing `η = residual / ‖g‖₂`. Default
-`η = 0.24` (the observed SciPy-cap ratio). Eisenstat–Walker is not
-implemented. JAX `info` is the 0/−1 NaN placeholder, not SciPy's
+`η_max = 0.24` (the observed SciPy-cap ratio). Eisenstat–Walker
+Choice 2 now selects η_k. JAX `info` is the 0/−1 NaN placeholder, not SciPy's
 iteration count. Frozen F3 JSON above remains the SciPy CPU packet.
 
 **Fourier-block `M` canary (live path, this commit):**
@@ -159,7 +159,7 @@ memory-capped chunked materialization of ``Ĥ_ss+stab I`` via the
 linear-solve SSOT. A is dense LU; B is the dense inverse as left GMRES
 ``M``. Default Newton stays GMRES. 7×7 is the canary.
 
-**Steps 4–8 (live path, this commit):** GPU F3 B37 one Schur
+**Steps 4–8 (live path at `f50642424`):** GPU F3 B37 one Schur
 correction, flat-native B37, ten-step frozen-coil walk, runtime coil
 DOFs + implicit adjoint, B3 banana ``run_code``, and B37 nested
 timing after B3. Importing ``simsopt_jax`` without
@@ -168,29 +168,36 @@ timing after B3. Importing ``simsopt_jax`` without
 captured-coil; coil sensitivities use
 ``nested_ls_runtime_coil_closures``. B37 nested timing is JAX
 reconstruct Schur walk vs native banana ``run_code`` — different
-operators, not F3 7.70×.
+operators, not F3 7.70×. Those steps are **feasibility / branch
+canaries**, not a closed nested GPU solve: the `f50642424` walk ended
+at ``‖g‖₂ = 6.92×10⁻⁴`` with ``success=False``, Armijo accepted
+``η > η_requested``, the adjoint was a regularized dense 7×7 canary,
+and Gate 8 timed different operators.
 
-Live GPU one-step (``jax_gpu_fast``, ``cuda:0``, 2026-08-21):
-``step_accepted=True``, ``η=0.23566``, JAX 19.3 s, C++ rejudge
-``ι=0.14085710956609662``, ``‖∇J‖₂=2.24e-14``, surface vs reconstruct
-``4.16e-12``. Ten-step walk: 10 accepted steps, ``‖g‖₂`` 0.01610 →
-0.000692, JAX 106 s, rejudge still reconstruct
-(``ι=0.14085710964186415``, surface inf ``2.84e-11``). Flat-native
-pair2-l2 reconstruct ``ι=0.14085710955509628``. B3 7×7 banana
-``run_code`` ``physics_matched=True``. B37 timing after B3: JAX walk
-144.1 s / 10 iter / ``success=False`` (not ``1e-13``); native banana
-263.1 s / Newton iter 1 / ``success=True`` / ``ι=0.1408571095830707``.
-Do not publish a speed ratio. The timing payload sets
-``comparable_operators=False``. Runtime coil closures use the binary
-``(x, coil_set_spec)`` kernels.
+**Forcing certificate (this commit):** Armijo runs only when the
+independent unpreconditioned ``η = ‖(Ĥ+stab I)δs − g‖₂ / ‖g‖₂`` is
+at most the Eisenstat–Walker Choice 2 request (``η_max = 0.24``).
+Misses retry by doubling GMRES ``maxiter`` up to
+``NESTED_LS_SCHUR_GMRES_MAXITER_CAP`` (not by raising ``restart``)
+and tightening JAX ``tol`` so incremental GMRES cannot stop early on
+its internal residual estimate. Default adjoint is unregularized
+(``stab=0``) matrix-free GMRES; dense LU with ``stab=1e-4`` remains
+the regularized 7×7 canary. Exact Fourier-block ``M`` at 661 still
+costs one HVP per live DOF and stays opt-in. Pytest still does not
+write evidence JSON; ``write_strict_json`` is the authored-snapshot
+entry. Do not publish a nested/banana ratio. Do not inherit 7.70×.
+
+Live GPU one-step / walk / B37 numbers quoted above remain the
+`f50642424` **prose** session, not a committed GPU JSON artifact.
 
 ## Next
 
-Physics gates 4–8 of the amended order are produced. Remaining nested
-work is not F3: tighter inexact Newton (forcing / ``M``) so a ten-step
-walk can reach the reconstruct ``1e-13`` bar, and a same-operator banana
-timing at 255×64 only if that inner exists. Do not reopen F3. Do not
-inherit 7.70×.
+7×7 must reach reconstruct ``‖g‖₂ ≤ 1e-13`` under the forcing
+certificate. F3 661 still needs a GPU-authored JSON walk that JAX
+itself drives to ``1e-13`` (C++ rejudge then a no-op), a matrix-free
+661 IFT vs FD of reconverged surfaces, coil-optimizer VJP
+integration, and same-operator banana timing (B3, then B37) only
+after equal success. Do not reopen F3. Do not inherit 7.70×.
 
 ## Validation of the SciPy CPU packet (`063b4fe83` / `96a1e5856`)
 
