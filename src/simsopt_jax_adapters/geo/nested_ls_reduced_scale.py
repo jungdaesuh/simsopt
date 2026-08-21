@@ -826,7 +826,13 @@ def evaluate_f3_b37_schur_newton_step(
 
 @dataclass(frozen=True, slots=True)
 class NestedLsSchurNewtonWalkProbe:
-    """Ten-step frozen-coil Schur walk plus C++ reconstruct rejudge."""
+    """Ten-step frozen-coil Schur walk plus C++ reconstruct rejudge.
+
+    ``iota`` / ``G`` / ``grad_l2`` are the JAX endpoint. Rejudge deltas
+    are versus that JAX state, not versus the independent reconstruct
+    reference. ``gmres_matvecs`` is not on this probe: JAX incremental
+    GMRES does not report operator applications.
+    """
 
     y_star_iota: float
     y_star_g: float
@@ -843,6 +849,9 @@ class NestedLsSchurNewtonWalkProbe:
     walk_seconds: float
     gmres_forcing_eta: float
     steps: tuple[dict[str, object], ...]
+    jax_iota: float
+    jax_g: float
+    jax_surface_sha256: str
     native_rejudge_success: bool
     native_rejudge_iter: int
     native_rejudge_iota: float
@@ -850,6 +859,9 @@ class NestedLsSchurNewtonWalkProbe:
     native_rejudge_coil_delta_inf: float
     native_rejudge_seconds: float
     native_rejudge_grad_l2: float
+    rejudge_vs_jax_iota: float
+    rejudge_vs_jax_g: float
+    rejudge_vs_jax_surface_inf: float
     reconstruct_ref_iota: float
     rejudge_vs_reconstruct_surface_inf: float
     runtime: dict[str, object]
@@ -1007,6 +1019,9 @@ def evaluate_f3_b37_schur_newton_walk(
     rejudge_seconds = time.perf_counter() - rejudge_started
     rejudge_coils1 = np.asarray(native.biotsavart.x, dtype=np.float64)
     rejudge_surface = np.asarray(native.surface.get_dofs(), dtype=np.float64)
+    jax_surface = np.asarray(walk.surface_dofs, dtype=np.float64)
+    rejudge_iota = float(native_rejudge["iota"])
+    rejudge_g = float(native_rejudge["G"])
     rejudge_grad_l2, _rejudge_inf = _native_ls_gradient_norms(native_rejudge)
     del _rejudge_inf
     return NestedLsSchurNewtonWalkProbe(
@@ -1025,15 +1040,23 @@ def evaluate_f3_b37_schur_newton_walk(
         walk_seconds=float(walk_seconds),
         gmres_forcing_eta=float(walk.gmres_forcing_eta),
         steps=tuple(asdict(record) for record in walk.steps),
+        jax_iota=float(walk.iota),
+        jax_g=float(walk.G),
+        jax_surface_sha256=sha256_float64(jax_surface),
         native_rejudge_success=bool(native_rejudge["success"]),
         native_rejudge_iter=int(native_rejudge["iter"]),
-        native_rejudge_iota=float(native_rejudge["iota"]),
-        native_rejudge_g=float(native_rejudge["G"]),
+        native_rejudge_iota=rejudge_iota,
+        native_rejudge_g=rejudge_g,
         native_rejudge_coil_delta_inf=float(
             np.linalg.norm(rejudge_coils1 - rejudge_coils0, ord=np.inf)
         ),
         native_rejudge_seconds=float(rejudge_seconds),
         native_rejudge_grad_l2=rejudge_grad_l2,
+        rejudge_vs_jax_iota=float(rejudge_iota - walk.iota),
+        rejudge_vs_jax_g=float(rejudge_g - walk.G),
+        rejudge_vs_jax_surface_inf=float(
+            np.linalg.norm(rejudge_surface - jax_surface, ord=np.inf)
+        ),
         reconstruct_ref_iota=reconstruct_ref_iota,
         rejudge_vs_reconstruct_surface_inf=float(
             np.linalg.norm(rejudge_surface - reconstruct_surface, ord=np.inf)
