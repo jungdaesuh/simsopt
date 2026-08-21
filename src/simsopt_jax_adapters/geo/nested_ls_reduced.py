@@ -48,9 +48,12 @@ _Y_SIZE = FLAT675_Y_COLUMN_COUNT
 PackedPenaltyHvp = Callable[[jax.Array, jax.Array], jax.Array]
 NESTED_LS_SCHUR_GMRES_RESTART: Final[int] = 8
 NESTED_LS_SCHUR_GMRES_MAXITER: Final[int] = 1
-# Outer GMRES restart-cycle cap. Raise this, not ``restart``, when a
-# step misses η_requested. F3 B37 step 4 needed 512 cycles to meet
-# live Choice 2 η≈0.0407; Fourier-block Jacobi ``M`` stays opt-in.
+# Outer GMRES restart-cycle cap for the matrix-free lane. Doubling
+# ``maxiter`` repeats an eight-vector Krylov space; it does not
+# enlarge it. F3 B37 step 4 needed 512 cycles at restart=8 to meet
+# live Choice 2 η≈0.0407; step 6 still missed η≈0.027 at 1024.
+# Dense LU of the 661×661 Ĥ_ss+stab I is the canary replacement.
+# Fourier-block Jacobi ``M`` stays opt-in.
 NESTED_LS_SCHUR_GMRES_MAXITER_CAP: Final[int] = 512
 NESTED_LS_SCHUR_BACKTRACKING_MAX_STEPS: Final[int] = 8
 # Inexact-Newton forcing η_k = ‖(Ĥ_ss+stab I)δs − g‖₂ / ‖g‖₂. 0.24 is
@@ -1079,7 +1082,7 @@ def run_reduced_nested_ls_schur_newton(
             )
             newton_jax = solve_stabilized_schur_dense_lu(dense, rhs)
             info = jnp.asarray(0, dtype=jnp.int32)
-            residual = dense @ newton_jax - rhs
+            residual = matvec(newton_jax) - rhs
             gmres_residual_l2 = float(np.linalg.norm(_host_vector(residual)))
             gmres_forcing_eta = gmres_residual_l2 / grad_norm
             used_gmres_maxiter = int(gmres_maxiter)

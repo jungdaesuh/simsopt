@@ -304,12 +304,96 @@ this is not stagnation and not a declaration that unpreconditioned
 GMRES is insufficient. Physics-feasibility probe only; not nested
 performance. Claim-grade walk JSON remains absent.
 
+Receipt qualification (same standard as step-4): the step-6 forcing
+JSON recorded ``git_dirty=True``. Its producer hash for
+``nested_ls_reduced_scale.py`` is ``1f4d66ac…``, which is not in git
+history (HEAD of that file is ``02b3a71f…`` at the later protocol
+fix). Solver modules ``nested_ls_reduced.py`` /
+``nested_ls_contract.py`` matched HEAD at the time. The cap-512 η
+reproduced the clean walk at ``42ad7e11c`` to ~1e-11 relative — that
+is reordered-reduction-level agreement, not bitwise. The load-bearing
+cap-1024 “residual still falling” row exists only under uncommitted
+producer bytes. It is a numerical replay certificate, not
+promotion-grade evidence.
+
+The 2048 skip used a ``2.0 × previous_seconds`` predictor on a
+double-pay schedule (``maxiter=1024``, ``cap=2048`` ⇒ 1024+2048
+cycles). The protocol now starts that leg at the cap
+(``maxiter=2048``, ``cap=2048``) and predicts
+``previous_seconds × 2048 / doubling_budget``. Do not remint the
+step-6 forcing receipt this turn: with the start-at-cap predictor the
+2048 row would run (~840 s ≤ 1200 s). Do not brute-force 2048.
+
+``unpreconditioned_gmres_insufficient`` previously fired on any
+``eta_unmet``. It now fires only on stagnation, or on ``eta_unmet``
+when the material residual-ratio test fails. Budget exhaustion while
+the residual is still falling is not insufficiency.
+
+GPU step-6 solver-architecture canary (dirty tree, ``jax_gpu_fast``,
+``cuda:0``, 2026-08-21):
+``docs/receipts/evidence/nested_ls_reduced_gpu_step6_architecture_20260821.json``.
+Same frozen SHA ``a0493560…effe``, requested ``η_k=0.0270348``,
+live-matvec unpreconditioned η. Not a walk, not cap-2048, not a
+timing claim. ``git_dirty=True`` (protocol + canary sources
+uncommitted); diagnostic, not promotion. Assemble ``~25 s`` is
+**cold / compile-inclusive** until a walk measures warm.
+
+- Dense LU of chunked 661×661 Ĥ_ss+stab I (3,495,368 bytes; 661 HVP
+  columns): live ``η=3.64×10⁻¹³``; assemble 24.6 s cold
+  compile-inclusive + LU 0.066 s. Materialization residual
+  ``η=1.51×10⁻¹³``. Operator factor 5.29 s. Complete first direct
+  step ≈ ``5.29+24.59+0.066 ≈ 29.95 s`` cold. Meets ``η≤0.02703``
+  by ten orders.
+- Option B, dense inverse as left ``M``, GMRES restart=8 maxiter=1:
+  live ``η=1.40×10⁻¹³`` in 16.6 s, 4 apps — **excludes** the shared
+  24.6 s assembly **and** the inversion. The 16.6 s is almost
+  certainly XLA compile of the preconditioned loop, not a cheaper
+  standalone solve. Option B is strictly dominated by dense LU; it
+  only falsifies “preconditioned Krylov can’t do it”; not a
+  production candidate. Do not productionize explicit ``H⁻¹``; reuse
+  LU factors if Shamanskii is ever chartered.
+- Full GMRES on the dense matvec (restart=661, one cycle): live
+  ``η=4.42×10⁻¹¹`` in 4.0 s, 664 apps — also excludes shared
+  assembly.
+- Equal-HVP live sweep (~130–146 apps): restart 8/32/64/128 →
+  ``η`` 0.270/0.229/0.202/0.192. None meet 0.027. Incremental vs
+  batched η agree to ~1e-14 relative.
+- Spectrum: symmetry defect ``9.1×10⁻¹⁶``, 0 negative, 0 complex,
+  ``λ∈[9.52×10⁻³, 2.01×10³]``, ``κ≈2.11×10⁵``.
+  ``λ_min=9.52×10⁻³ ≫ stab=10⁻⁴``, so ``H_ss`` is PD on its own at
+  this iterate, not stab-manufactured.
+
+Closed Krylov argument (same canary, SPD ``κ=2.11×10⁵`` ⇒
+``√κ≈459``). Chebyshev: unpreconditioned Krylov needs
+``k≈(√κ/2)·ln(2/0.027)≈990`` matvecs to reach ``η=0.027``, but
+exact termination at ``n=661`` arrives first. Minimum matrix-free
+budget equals the assembly budget (661 HVPs), so matrix-free cannot
+beat assemble-and-factor at this dimension at any restart or
+``solve_method``. The measured sweep (``η≈0.19–0.27`` at ~130 HVPs)
+sits on that bound. Therefore unpreconditioned Krylov is
+insufficient at any budget below the cost of the exact solve.
+Cap-2048 is the wrong lever. This upgrades the earlier “not
+declared insufficient” (budget-exhaustion while residual falling)
+into a principled insufficiency of the *unpreconditioned restart-8
+lane*, which is a different flag from
+``unpreconditioned_gmres_insufficient`` on a single probe row.
+
 ## Next
 
-Either raise the predeclared 2048 wall and continue while residual
-falls, or design a better-than-Fourier-block preconditioner. Do not
-auto-launch a walk. Do not default Fourier-block Jacobi. Do not
-inherit F3 7.70×.
+1. Commit protocol fixes + canary + tests + track + manifest (this
+   delivery).
+2. Clean-tree remint of the architecture canary only (do not remint
+   step-6 forcing; its 2048 row is superseded).
+3. Opt-in dense-LU walk canary (``linear_solver="dense_lu"``
+   argument, **not** a global default switch) with C++ rejudge,
+   frozen coils, fail-closed to ``1e-13``. Record warm per-step
+   assembly seconds and chunk batch width.
+4. **NO-GO:** cap-2048, global ``linear_solver`` default switch,
+   explicit-inverse preconditioning, any nested speed claim, F3
+   7.70× inheritance.
+5. Shamanskii / chunk-batch sweep / banana timing only after physics
+   closure **and** only if warm assembly still misses the native
+   reconstruct ~157 s bar.
 
 ## Validation of the SciPy CPU packet (`063b4fe83` / `96a1e5856`)
 
