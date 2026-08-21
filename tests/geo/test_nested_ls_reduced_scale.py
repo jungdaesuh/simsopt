@@ -59,6 +59,18 @@ _F3_B37_GPU_WALK_EVIDENCE = _EVIDENCE_DIR / "nested_ls_reduced_gpu_walk_20260821
 _F3_B37_GPU_STEP2_EVIDENCE = (
     _EVIDENCE_DIR / "nested_ls_reduced_gpu_step2_forcing_20260821.json"
 )
+_F3_B37_GPU_WALK_CAP64_EVIDENCE = (
+    _EVIDENCE_DIR / "nested_ls_reduced_gpu_walk_20260821.cap64.incomplete.json"
+)
+_F3_B37_GPU_STEP4_EVIDENCE = (
+    _EVIDENCE_DIR / "nested_ls_reduced_gpu_step4_forcing_20260821.json"
+)
+_F3_B37_GPU_STEP4_INCOMPLETE = (
+    _EVIDENCE_DIR / "nested_ls_reduced_gpu_step4_forcing_20260821.incomplete.json"
+)
+_GPU_STEP4_PUBLICATION = (
+    "GPU step-4 forcing probe. Not a walk, not a timing claim, and not F3 7.70x."
+)
 _GPU_WALK_PUBLICATION = (
     "GPU forcing-certified Schur walk. Not a timing claim and not F3 7.70x."
 )
@@ -435,6 +447,96 @@ def test_authored_gpu_step2_forcing_json_is_strict_and_not_a_walk():
     assert int(follow_up["gmres_maxiter_used"]) == 64
     assert float(follow_up["eta_achieved"]) <= float(probe["step2_eta_requested"])
     assert follow_up["meets_forcing"] is True
+    runtime = probe["runtime"]
+    assert runtime["jax_default_backend"] == "gpu"
+    assert payload["gmres_matvecs_note"] == _GPU_WALK_GMRES_MATVECS_NOTE
+
+
+def test_cap64_incomplete_walk_json_points_at_its_own_log():
+    raw = _F3_B37_GPU_WALK_CAP64_EVIDENCE.read_text(encoding="utf-8")
+    payload = json.loads(raw)
+    dump_strict_json(payload)
+    assert payload["execution_log"] == (
+        "docs/receipts/evidence/nested_ls_reduced_gpu_walk_20260821.cap64.log"
+    )
+    probe = payload["probe"]
+    assert probe["jax_surface_sha256"] == (
+        "286e3dabf3c9113d25aa691e1abe36a109057738e67536d9e46e6d56faa17e24"
+    )
+    step4 = probe["steps"][3]
+    assert float(step4["gmres_rtol"]) == pytest.approx(
+        0.04071795165373735, rel=0.0, abs=0.0
+    )
+    assert float(step4["gmres_forcing_eta"]) == pytest.approx(
+        0.1203881060498997, rel=0.0, abs=0.0
+    )
+    assert float(step4["gmres_forcing_eta"]) != pytest.approx(
+        float(step4["gmres_rtol"]), rel=0.0, abs=1.0e-6
+    )
+    assert payload["claim_boundary"]["nested_speed_claim"] is False
+    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
+
+
+def test_step4_incomplete_json_fail_closed_on_surface_sha_mismatch():
+    raw = _F3_B37_GPU_STEP4_INCOMPLETE.read_text(encoding="utf-8")
+    payload = json.loads(raw)
+    dump_strict_json(payload)
+    assert payload["schema"] == "nested-ls-reduced-gpu-step4-forcing.v1"
+    assert payload["written_by_pytest"] is False
+    assert payload["claim_boundary"]["nested_speed_claim"] is False
+    assert payload["claim_boundary"]["full_walk_attempted"] is False
+    probe = payload["probe"]
+    assert probe["surface_sha_match"] is False
+    assert probe["fail_closed_reason"] == "surface_sha_mismatch"
+    assert probe["rows"] == []
+    assert probe["expected_surface_sha256"] == (
+        "286e3dabf3c9113d25aa691e1abe36a109057738e67536d9e46e6d56faa17e24"
+    )
+    assert float(probe["cap64_eta_achieved"]) == pytest.approx(
+        0.1203881060498997, rel=0.0, abs=0.0
+    )
+    assert float(probe["eta_requested"]) != pytest.approx(
+        float(probe["cap64_eta_achieved"]), rel=0.0, abs=1.0e-6
+    )
+    assert not _F3_B37_GPU_STEP4_EVIDENCE.is_file()
+
+
+@pytest.mark.skipif(
+    not _F3_B37_GPU_STEP4_EVIDENCE.is_file(),
+    reason="authored GPU step-4 forcing JSON not yet produced",
+)
+def test_authored_gpu_step4_forcing_json_is_strict_and_not_a_walk():
+    raw = _F3_B37_GPU_STEP4_EVIDENCE.read_text(encoding="utf-8")
+    assert "NaN" not in raw
+    payload = json.loads(raw)
+    dump_strict_json(payload)
+    assert payload["schema"] == "nested-ls-reduced-gpu-step4-forcing.v1"
+    assert payload["written_by_pytest"] is False
+    assert payload["publication"] == _GPU_STEP4_PUBLICATION
+    assert payload["driver"] == (
+        "simsopt_jax_adapters.geo.nested_ls_reduced_scale."
+        "evaluate_f3_b37_step4_forcing_probe"
+    )
+    boundary = payload["claim_boundary"]
+    assert boundary["nested_speed_claim"] is False
+    assert boundary["inherits_f3_7_70x"] is False
+    assert boundary["f3_sealed"] is True
+    assert boundary["full_walk_attempted"] is False
+    assert boundary["ten_step_walk"] is False
+    probe = payload["probe"]
+    assert probe["surface_sha256"] == (
+        "286e3dabf3c9113d25aa691e1abe36a109057738e67536d9e46e6d56faa17e24"
+    )
+    assert probe["surface_sha_match"] is True
+    assert float(probe["eta_requested"]) == pytest.approx(
+        0.04071795165373735, rel=0.0, abs=0.0
+    )
+    assert float(probe["cap64_eta_achieved"]) == pytest.approx(
+        0.1203881060498997, rel=0.0, abs=0.0
+    )
+    assert int(probe["gmres_restart"]) == 8
+    assert float(probe["coil_delta_inf"]) == 0.0
+    assert all(row.get("preconditioner") == "none" for row in probe["rows"])
     runtime = probe["runtime"]
     assert runtime["jax_default_backend"] == "gpu"
     assert payload["gmres_matvecs_note"] == _GPU_WALK_GMRES_MATVECS_NOTE

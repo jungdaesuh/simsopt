@@ -83,6 +83,13 @@ DEFAULT_F3_B37_NATIVE_LANE = DEFAULT_F3_B37_RUN / "pair2-l2" / "lane.json"
 # Reconstruct §2.1 archived-start QR inner state (C++ Newton was a no-op).
 ARCHIVED_START_QR_IOTA = 0.1500517839808274
 ARCHIVED_START_QR_G = 2.010619295609829
+F3_B37_STEP3_SURFACE_SHA256 = (
+    "286e3dabf3c9113d25aa691e1abe36a109057738e67536d9e46e6d56faa17e24"
+)
+# Walk step 4 requested η (Choice 2). Distinct from achieved η=0.1203881060498997.
+F3_B37_STEP4_ETA_REQUESTED = 0.04071795165373735
+F3_B37_STEP4_CAP64_ETA_ACHIEVED = 0.1203881060498997
+F3_B37_STEP4_CAP64_RESIDUAL_L2 = 9.402277895763763e-05
 
 
 def archived_flat675_bundle_available(bundle_root: Path | None = None) -> bool:
@@ -862,6 +869,7 @@ class NestedLsSchurNewtonWalkProbe:
     jax_iota: float
     jax_g: float
     jax_surface_sha256: str
+    jax_surface_dofs: tuple[float, ...]
     native_rejudge_success: bool
     native_rejudge_iter: int
     native_rejudge_iota: float
@@ -1053,6 +1061,7 @@ def evaluate_f3_b37_schur_newton_walk(
         jax_iota=float(walk.iota),
         jax_g=float(walk.G),
         jax_surface_sha256=sha256_float64(jax_surface),
+        jax_surface_dofs=tuple(float(value) for value in jax_surface),
         native_rejudge_success=bool(native_rejudge["success"]),
         native_rejudge_iter=int(native_rejudge["iter"]),
         native_rejudge_iota=rejudge_iota,
@@ -1275,6 +1284,209 @@ def evaluate_f3_b37_step2_forcing_probe(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class NestedLsStep4ForcingProbe:
+    """Post-step-3 F3 B37 linear-solve η versus ``maxiter_cap`` 128 then 256.
+
+    Certificate is the independent unpreconditioned η. Restart stays 8,
+    ``M`` is None. Not a walk, not C++ rejudge, not a timing claim, and
+    not F3 7.70×. Requested η and the cap-64 achieved η are distinct.
+    """
+
+    surface_sha256: str
+    expected_surface_sha256: str
+    surface_sha_match: bool
+    reduced_grad_l2: float
+    iota: float
+    G: float
+    eta_requested: float
+    cap64_eta_achieved: float
+    cap64_residual_l2: float
+    gmres_restart: int
+    coil_delta_inf: float
+    factor_seconds: float
+    rows: tuple[dict[str, object], ...]
+    meets_forcing: bool
+    fail_closed_reason: str | None
+    runtime: dict[str, object]
+    provenance: dict[str, object]
+
+    def as_payload(self) -> dict[str, object]:
+        return asdict(self)
+
+
+def evaluate_f3_b37_step4_forcing_probe(
+    jax_boozer: BoozerSurfaceJAX,
+) -> NestedLsStep4ForcingProbe:
+    """Reproduce the cap-64 walk's step-3 state, then raise GMRES ``maxiter``.
+
+    Does not run C++ rejudge. Fourier-block ``M`` is not used.
+    """
+
+    residual_fn, objective_fn, _phi_hat = nested_ls_reduced_closures(jax_boozer)
+    del _phi_hat
+    surface0 = np.asarray(jax_boozer.surface.get_dofs(), dtype=np.float64)
+    solution = solve_projected_y(residual_fn, surface0, np.zeros(2, dtype=np.float64))
+    require_full_y_rank(solution)
+    y_star = np.asarray(solution.solution, dtype=np.float64)
+    walk = run_reduced_nested_ls_schur_newton(
+        jax_boozer,
+        iota=float(y_star[0]),
+        G=float(y_star[1]),
+        maxiter=3,
+    )
+    surface_sha = sha256_float64(walk.surface_dofs)
+    sha_match = surface_sha == F3_B37_STEP3_SURFACE_SHA256
+    g = float(np.linalg.norm(walk.reduced_gradient))
+    provenance = nested_ls_receipt_provenance()
+    runtime = {
+        "hostname": provenance["hostname"],
+        "python_executable": provenance["python_executable"],
+        "jax_default_backend": provenance["jax_default_backend"],
+        "jax_devices": provenance["jax_devices"],
+        "jax_platforms_env": provenance["jax_platforms_env"],
+        "jax_enable_x64_env": provenance["jax_enable_x64_env"],
+        "timestamp_utc": provenance["timestamp_utc"],
+    }
+    # Step-4 Choice 2 uses post-step-3 ‖g‖ and the step-3 request η_max.
+    # previous_grad_norm is post-step-2 ‖g‖ (g at the start of step 3).
+    eta_k = float(F3_B37_STEP4_ETA_REQUESTED)
+    if len(walk.steps) >= 3:
+        eta_k = eisenstat_walker_forcing_eta(
+            float(walk.steps[2].grad_l2),
+            previous_grad_norm=float(walk.steps[1].grad_l2),
+            previous_eta=float(walk.steps[2].gmres_rtol),
+            eta_max=NESTED_LS_SCHUR_GMRES_RTOL,
+            nonlinear_tol=NESTED_LS_NEWTON_TOL,
+        )
+
+    def _empty(reason: str) -> NestedLsStep4ForcingProbe:
+        return NestedLsStep4ForcingProbe(
+            surface_sha256=surface_sha,
+            expected_surface_sha256=F3_B37_STEP3_SURFACE_SHA256,
+            surface_sha_match=sha_match,
+            reduced_grad_l2=g,
+            iota=float(walk.iota),
+            G=float(walk.G),
+            eta_requested=float(eta_k),
+            cap64_eta_achieved=F3_B37_STEP4_CAP64_ETA_ACHIEVED,
+            cap64_residual_l2=F3_B37_STEP4_CAP64_RESIDUAL_L2,
+            gmres_restart=int(NESTED_LS_SCHUR_GMRES_RESTART),
+            coil_delta_inf=float(walk.coil_delta_inf),
+            factor_seconds=0.0,
+            rows=(),
+            meets_forcing=False,
+            fail_closed_reason=reason,
+            runtime=runtime,
+            provenance=provenance,
+        )
+
+    if not sha_match:
+        return _empty("surface_sha_mismatch")
+    if not walk.steps or not all(bool(step.step_accepted) for step in walk.steps):
+        return _empty("step3_not_reproduced")
+    if len(walk.steps) != 3:
+        return _empty("step3_not_reproduced")
+    if not np.isfinite(g) or g <= 0.0:
+        return _empty("nonfinite")
+    if abs(float(eta_k) - float(F3_B37_STEP4_ETA_REQUESTED)) > 1.0e-12:
+        return _empty("eta_request_mismatch")
+
+    factor_started = time.perf_counter()
+    operator = factor_reduced_nested_ls_schur(
+        residual_fn,
+        objective_fn,
+        walk.surface_dofs,
+        y_probe=np.array([float(walk.iota), float(walk.G)], dtype=np.float64),
+    )
+    factor_seconds = time.perf_counter() - factor_started
+    stab = jnp.asarray(NESTED_LS_NEWTON_STAB, dtype=jnp.float64)
+
+    def matvec(tangent: jax.Array) -> jax.Array:
+        return operator.apply(tangent) + stab * tangent
+
+    rhs = jnp.asarray(walk.reduced_gradient, dtype=jnp.float64)
+    restart = int(NESTED_LS_SCHUR_GMRES_RESTART)
+    rows: list[dict[str, object]] = []
+    previous_residual = float(F3_B37_STEP4_CAP64_RESIDUAL_L2)
+    delta: jax.Array | None = None
+    fail_reason: str | None = None
+    meets = False
+    for start_maxiter, cap in ((1, 128), (128, 256)):
+        sha_before = sha256_float64(np.asarray(jax_boozer.surface.get_dofs()))
+        if sha_before != F3_B37_STEP3_SURFACE_SHA256:
+            fail_reason = "state_digest_drift"
+            break
+        started = time.perf_counter()
+        delta, _residual, _info, residual_l2, eta, used = (
+            solve_operator_gmres_with_forcing(
+                matvec,
+                rhs,
+                eta_requested=float(F3_B37_STEP4_ETA_REQUESTED),
+                restart=restart,
+                maxiter=int(start_maxiter),
+                maxiter_cap=int(cap),
+                preconditioner=None,
+                x0=delta,
+            )
+        )
+        del _residual, _info
+        seconds = float(time.perf_counter() - started)
+        sha_after = sha256_float64(np.asarray(jax_boozer.surface.get_dofs()))
+        finite = bool(np.isfinite(eta) and np.isfinite(residual_l2))
+        row = {
+            "preconditioner": "none",
+            "gmres_maxiter": int(start_maxiter),
+            "gmres_maxiter_used": int(used),
+            "gmres_maxiter_cap": int(cap),
+            "gmres_restart": restart,
+            "eta_achieved": float(eta) if finite else None,
+            "eta_requested": float(F3_B37_STEP4_ETA_REQUESTED),
+            "cap64_eta_achieved": float(F3_B37_STEP4_CAP64_ETA_ACHIEVED),
+            "meets_forcing": bool(
+                finite and linear_solve_meets_forcing(eta, F3_B37_STEP4_ETA_REQUESTED)
+            ),
+            "gmres_residual_l2": float(residual_l2) if finite else None,
+            "gmres_seconds": seconds,
+            "surface_sha256": sha_after,
+        }
+        rows.append(row)
+        if sha_after != F3_B37_STEP3_SURFACE_SHA256:
+            fail_reason = "state_digest_drift"
+            break
+        if not finite:
+            fail_reason = "nonfinite"
+            break
+        if residual_l2 >= previous_residual:
+            fail_reason = "stagnation"
+            break
+        previous_residual = float(residual_l2)
+        if linear_solve_meets_forcing(eta, F3_B37_STEP4_ETA_REQUESTED):
+            meets = True
+            break
+    if not meets and fail_reason is None:
+        fail_reason = "eta_unmet"
+    return NestedLsStep4ForcingProbe(
+        surface_sha256=surface_sha,
+        expected_surface_sha256=F3_B37_STEP3_SURFACE_SHA256,
+        surface_sha_match=sha_match,
+        reduced_grad_l2=g,
+        iota=float(walk.iota),
+        G=float(walk.G),
+        eta_requested=float(F3_B37_STEP4_ETA_REQUESTED),
+        cap64_eta_achieved=F3_B37_STEP4_CAP64_ETA_ACHIEVED,
+        cap64_residual_l2=F3_B37_STEP4_CAP64_RESIDUAL_L2,
+        gmres_restart=restart,
+        coil_delta_inf=float(walk.coil_delta_inf),
+        factor_seconds=float(factor_seconds),
+        rows=tuple(rows),
+        meets_forcing=bool(meets),
+        fail_closed_reason=fail_reason,
+        runtime=runtime,
+        provenance=provenance,
+    )
+
+
 def replace_native_solver_options(
     native: BoozerSurface,
     overlay: dict[str, object],
@@ -1366,12 +1578,17 @@ __all__ = [
     "DEFAULT_F3_B37_GPU_LANE",
     "DEFAULT_F3_B37_NATIVE_LANE",
     "DEFAULT_FLAT675_BUNDLE_ROOT",
+    "F3_B37_STEP3_SURFACE_SHA256",
+    "F3_B37_STEP4_CAP64_ETA_ACHIEVED",
+    "F3_B37_STEP4_CAP64_RESIDUAL_L2",
+    "F3_B37_STEP4_ETA_REQUESTED",
     "NestedLsB37NestedTiming",
     "NestedLsBoundedF3B37Result",
     "NestedLsFlatNativeB37Probe",
     "NestedLsSchurNewtonStepProbe",
     "NestedLsSchurNewtonWalkProbe",
     "NestedLsStep2ForcingProbe",
+    "NestedLsStep4ForcingProbe",
     "archived_f3_b37_lanes_available",
     "archived_flat675_bundle_available",
     "dump_strict_json",
@@ -1381,6 +1598,7 @@ __all__ = [
     "evaluate_f3_b37_schur_newton_step",
     "evaluate_f3_b37_schur_newton_walk",
     "evaluate_f3_b37_step2_forcing_probe",
+    "evaluate_f3_b37_step4_forcing_probe",
     "float64_ulps",
     "kib_to_gib",
     "load_archived_nested_ls_pair",

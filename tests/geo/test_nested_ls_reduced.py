@@ -602,6 +602,23 @@ def test_eisenstat_walker_step2_matches_recorded_f3_walk():
     assert not linear_solve_meets_forcing(0.1514095713193289, eta)
 
 
+def test_eisenstat_walker_step4_requested_eta_is_not_the_achieved_eta():
+    """Cap-64 walk step 4 requested 0.04071795 and achieved 0.12038811."""
+
+    requested = eisenstat_walker_forcing_eta(
+        0.000780997243354473,
+        previous_grad_norm=0.003671789660022825,
+        previous_eta=0.24,
+        eta_max=NESTED_LS_SCHUR_GMRES_RTOL,
+        nonlinear_tol=NESTED_LS_NEWTON_TOL,
+    )
+    achieved = 0.1203881060498997
+    assert requested == pytest.approx(0.04071795165373735, rel=0.0, abs=0.0)
+    assert requested == pytest.approx(0.0407179517, rel=0.0, abs=5.0e-11)
+    assert achieved != pytest.approx(requested, rel=0.0, abs=1.0e-6)
+    assert not linear_solve_meets_forcing(achieved, requested)
+
+
 def test_schur_gmres_defaults_are_one_restart_cycle_not_one_krylov_step():
     """JAX ``gmres`` ``maxiter`` counts restart cycles, not Krylov vectors.
 
