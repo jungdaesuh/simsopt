@@ -560,33 +560,43 @@ to matrix-free below memory limits.
 
 ### Shamanskii / cache attribution (matched-cache rows)
 
-Committed log
-``docs/receipts/evidence/nested_ls_reduced_gpu_shamanskii_attr_20260822.log``.
-JSON not minted (40 min timeout). ``success`` was not in the log
-line. Every lane:
+Remint JSON
+``docs/receipts/evidence/nested_ls_reduced_gpu_shamanskii_attr_20260822.json``
+and floor
+``docs/receipts/evidence/nested_ls_reduced_gpu_jax_floor_20260822.json``
+from implementation SHA ``c279e37c7``, n=3 measures per lane, one
+lane per process, every row ``success=True``, rejudge iter=0.
+The 97.16 s log-only both row is superseded and remains not a
+claim.
 
-| lane | cache | role | inner walk (s) | reused | reassembled |
-|---|---|---|---|---|---|
-| cache_only | on | prime | 117.89 | [] | [] |
-| cache_only | on | measure | 110.78 | [] | [] |
-| cache_only | on | measure | 112.91 | [] | [] |
-| lag_only | off | measure | 137.18 | [8] | [2–7] |
-| lag_only | off | measure | 133.84 | [8] | [2–7] |
-| both | on | prime | 110.91 | [8] | [2–7] |
-| both | on | measure | **97.16** | [8] | [2–7] |
+Refinement-Shamanskii reuses steps 6 and 8 (step 6 with 1
+accepted refine; steps 5 and 7 take 3 refines then reassemble).
+Producer: ``benchmarks/nested_ls_shamanskii_attribution.py``.
 
-Matched-cache inner walks: Shamanskii **equal-or-faster** than
-dense_lu (97.16 and 110.91 vs 110.78–117.89). The 97.16 s both
-row is a **single warm measure**, uncertified: no JSON, no
-``success`` bit in the log, n=1. Provisional vs native OMP=16
-116.02 s is 1.19× inner-solver — **not a claim**. Lag-only
-(cache off) vs cache-only (cache on) is not a matched pair; that
-comparison produced the false “Shamanskii is slower” verdict.
+| lane | cache | role | inner walk (s) | jax_wall (s) | reused | reassembled | refine |
+|---|---|---|---|---|---|---|---|
+| cache_only | on | prime | 108.28 | 124.76 | [] | [] | zeros |
+| cache_only | on | measure | 107.84 | 124.77 | [] | [] | zeros |
+| cache_only | on | measure | 108.07 | 124.74 | [] | [] | zeros |
+| cache_only | on | measure | 106.34 | 122.81 | [] | [] | zeros |
+| lag_only | off | measure | 114.47 | 134.16 | [6, 8] | [2–5, 7] | [0,0,0,0,3,1,3,0] |
+| lag_only | off | measure | 113.88 | 133.24 | [6, 8] | [2–5, 7] | [0,0,0,0,3,1,3,0] |
+| lag_only | off | measure | 115.57 | 135.10 | [6, 8] | [2–5, 7] | [0,0,0,0,3,1,3,0] |
+| both | on | prime | 83.00 | 101.66 | [6, 8] | [2–5, 7] | [0,0,0,0,3,1,3,0] |
+| both | on | measure | 81.89 | 98.36 | [6, 8] | [2–5, 7] | [0,0,0,0,3,1,3,0] |
+| both | on | measure | 81.89 | 98.13 | [6, 8] | [2–5, 7] | [0,0,0,0,3,1,3,0] |
+| both | on | measure | 81.91 | 98.14 | [6, 8] | [2–5, 7] | [0,0,0,0,3,1,3,0] |
 
-Reuse is only step 8; steps 2–7 reassemble. Process wall is
-~300–340 s because the child still includes native reconstruct
-and rejudge. JAX process-wall floor (import+init+cache load) is
-unmeasured.
+Matched-cache inner walks: Shamanskii **faster** than dense_lu
+(measure min 81.89 s vs 106.34 s). Inner vs native OMP=16 116.02 s
+is 1.42× on the inner-solver clock — **not a Gate-6 claim**.
+``jax_wall`` is child ``_T0`` elapsed minus reconstruct and
+rejudge (import+QR+walk). Parent wait remains ~255–320 s because
+the child still runs native reconstruct and rejudge.
+
+Dedicated ``--lane floor`` (jax import + GPU check only):
+cache-on 0.54 s, cache-off 0.53 s. Walk-row derived floor
+(adapters + pair load + QR) is 16.2–16.9 s cache-on.
 
 ### Report-authoring rule
 
@@ -597,26 +607,19 @@ verdict before an independent read of the artifact.
 
 ## Next
 
-Protocol is implemented (refinement Shamanskii, split-lane
-attribution with ``REPEATS=3``, child ``_T0`` clocks, Gate-6
-driver). Numbers below still require a clean-tree remint.
+Attribution remint and JAX floor are closed. Remaining:
 
-1. Remint Shamanskii/cache attribution JSON from a clean tree:
-   ``--lane`` one process, ≥3 repeats, both included, ``success``
-   in the log line. Certifies or corrects 97.16 s.
-2. Measure the JAX process-wall floor (import+init+cache load)
-   via ``--lane floor`` (cache-on and cache-off).
-3. **Clean-tree** Gate-6 claim run against the frozen contract
+1. **Clean-tree** Gate-6 claim run against the frozen contract
    (``benchmarks/nested_ls_gate6_claim.py``). Both sides use parent
    subprocess wait; JAX subtracts native reconstruct and rejudge.
-4. A100 rung on Landau after Gate-6, with its own OMP contract.
-5. New eight-term outer optimizer charter: B3, then B37,
+2. A100 rung on Landau after Gate-6, with its own OMP contract.
+3. New eight-term outer optimizer charter: B3, then B37,
    after multi-direction step-halved FD. Optimistix/Lineax
    belong there, not as a mid-campaign linear-algebra swap.
 
 **NO-GO:** cap-2048, adjoint-1-MiB as inner LU budget, mimicking
 native BFGS in JAX, nested speed claim from 153/171, 153/116, or
-the uncertified 97.16 s both-lane row, unmatched-cache Shamanskii
+the superseded 97.16 s both-lane log row, unmatched-cache Shamanskii
 verdicts, F3 7.70×, remint of the dirty step-6 forcing JSON,
 claim-grade GMRES walk JSON
 ``nested_ls_reduced_gpu_walk_20260821.json``.

@@ -1,0 +1,183 @@
+{
+  "claim_boundary": {
+    "cap_2048_attempted": false,
+    "comparable_operators": false,
+    "explicit_inverse_m_production": false,
+    "f3_sealed": true,
+    "inherits_f3_7_70x": false,
+    "nested_speed_claim": false,
+    "shamanskii_attribution": true,
+    "inner_and_process_wall": true,
+    "one_lane_per_process": true,
+    "repeats": 3,
+    "jax_claim_clock": "parent_wait_minus_reconstruct_rejudge",
+    "jax_floor_on_walk_rows": "process_elapsed_minus_reconstruct_walk_rejudge",
+    "jax_floor_on_floor_rows": "import_init_cache_load"
+  },
+  "command": "SIMSOPT_BACKEND_MODE=jax_gpu_fast JAX_PLATFORMS=cuda,cpu JAX_ENABLE_X64=1 .venv-qn-gpu/bin/python benchmarks/nested_ls_shamanskii_attribution.py --lane lag_only",
+  "date": "2026-08-22",
+  "driver": "benchmarks.nested_ls_shamanskii_attribution.lag_only",
+  "execution_log": "docs/receipts/evidence/nested_ls_reduced_gpu_shamanskii_attr_20260822.log",
+  "publication": "Shamanskii and compile-cache attribution: cache-only, lag-only, and both. Not a nested speed claim and not F3 7.70x.",
+  "repeats": 3,
+  "rows": [
+    {
+      "linear_solver": "shamanskii",
+      "disable_cache": true,
+      "cache_dir": null,
+      "success": true,
+      "iteration_count": 8,
+      "grad_l2": 1.0830167714392577e-14,
+      "iota": 0.14085710958396738,
+      "G": 2.0106193053897154,
+      "coil_delta_inf": 0.0,
+      "native_rejudge_iter": 0,
+      "rejudge_vs_jax_surface_inf": 0.0,
+      "assembled_steps": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        7
+      ],
+      "shamanskii_reused_steps": [
+        6,
+        8
+      ],
+      "shamanskii_reassembled_steps": [
+        2,
+        3,
+        4,
+        5,
+        7
+      ],
+      "shamanskii_refine_passes": [
+        0,
+        0,
+        0,
+        0,
+        3,
+        1,
+        3,
+        0
+      ],
+      "process_wall_seconds": 291.0792056058999,
+      "process_elapsed_seconds": 289.7232051140163,
+      "reconstruct_seconds": 143.09890321199782,
+      "walk_seconds": 114.47235679300502,
+      "native_rejudge_seconds": 12.468949211062863,
+      "jax_process_wall_seconds": 134.15535269095562,
+      "jax_floor_seconds": 19.682995897950605,
+      "lane": "lag_only",
+      "role": "measure",
+      "repeat": 0
+    },
+    {
+      "linear_solver": "shamanskii",
+      "disable_cache": true,
+      "cache_dir": null,
+      "success": true,
+      "iteration_count": 8,
+      "grad_l2": 1.0830167714392577e-14,
+      "iota": 0.14085710958396738,
+      "G": 2.0106193053897154,
+      "coil_delta_inf": 0.0,
+      "native_rejudge_iter": 0,
+      "rejudge_vs_jax_surface_inf": 0.0,
+      "assembled_steps": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        7
+      ],
+      "shamanskii_reused_steps": [
+        6,
+        8
+      ],
+      "shamanskii_reassembled_steps": [
+        2,
+        3,
+        4,
+        5,
+        7
+      ],
+      "shamanskii_refine_passes": [
+        0,
+        0,
+        0,
+        0,
+        3,
+        1,
+        3,
+        0
+      ],
+      "process_wall_seconds": 293.5754883729387,
+      "process_elapsed_seconds": 292.2054527280852,
+      "reconstruct_seconds": 146.47128687915392,
+      "walk_seconds": 113.8773513098713,
+      "native_rejudge_seconds": 12.496376720024273,
+      "jax_process_wall_seconds": 133.23778912890702,
+      "jax_floor_seconds": 19.360437819035724,
+      "lane": "lag_only",
+      "role": "measure",
+      "repeat": 1
+    },
+    {
+      "linear_solver": "shamanskii",
+      "disable_cache": true,
+      "cache_dir": null,
+      "success": true,
+      "iteration_count": 8,
+      "grad_l2": 1.0830167714392577e-14,
+      "iota": 0.14085710958396738,
+      "G": 2.0106193053897154,
+      "coil_delta_inf": 0.0,
+      "native_rejudge_iter": 0,
+      "rejudge_vs_jax_surface_inf": 0.0,
+      "assembled_steps": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        7
+      ],
+      "shamanskii_reused_steps": [
+        6,
+        8
+      ],
+      "shamanskii_reassembled_steps": [
+        2,
+        3,
+        4,
+        5,
+        7
+      ],
+      "shamanskii_refine_passes": [
+        0,
+        0,
+        0,
+        0,
+        3,
+        1,
+        3,
+        0
+      ],
+      "process_wall_seconds": 298.54607734200545,
+      "process_elapsed_seconds": 296.9424860989675,
+      "reconstruct_seconds": 149.07863990589976,
+      "walk_seconds": 115.5719599109143,
+      "native_rejudge_seconds": 12.76421944797039,
+      "jax_process_wall_seconds": 135.09962674509734,
+      "jax_floor_seconds": 19.527666834183037,
+      "lane": "lag_only",
+      "role": "measure",
+      "repeat": 2
+    }
+  ],
+  "schema": "nested-ls-reduced-gpu-shamanskii-attr.v1",
+  "written_by_pytest": false
+}
