@@ -1,0 +1,10 @@
+lane cache_only
+attr solver=dense_lu cache_disabled=False walk=117.89494997193106 wall=303.836732233176 reused=[] reassembled=[]
+attr solver=dense_lu cache_disabled=False walk=110.78239642898552 wall=313.7559948619455 reused=[] reassembled=[]
+attr solver=dense_lu cache_disabled=False walk=112.91409069905058 wall=320.3700613339897 reused=[] reassembled=[]
+lane lag_only
+attr solver=shamanskii cache_disabled=True walk=137.1790284800809 wall=340.53679206990637 reused=[8] reassembled=[2, 3, 4, 5, 6, 7]
+attr solver=shamanskii cache_disabled=True walk=133.83886213600636 wall=331.6919494140893 reused=[8] reassembled=[2, 3, 4, 5, 6, 7]
+lane both
+attr solver=shamanskii cache_disabled=False walk=110.90691579808481 wall=314.90886467299424 reused=[8] reassembled=[2, 3, 4, 5, 6, 7]
+attr solver=shamanskii cache_disabled=False walk=97.16209350898862 wall=304.3207944009919 reused=[8] reassembled=[2, 3, 4, 5, 6, 7]

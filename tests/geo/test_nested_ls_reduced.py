@@ -47,12 +47,14 @@ from simsopt_jax_adapters.geo.nested_ls_reduced import (
     NESTED_LS_EW_GAMMA,
     NESTED_LS_EW_SAFEGUARD,
     NESTED_LS_IMPLICIT_ADJOINT_DEFAULT_DENSE_BYTES,
+    NESTED_LS_LINEAR_SOLVERS,
     NESTED_LS_SCHUR_GMRES_MAXITER,
     NESTED_LS_SCHUR_GMRES_MAXITER_CAP,
     NESTED_LS_SCHUR_GMRES_RESTART,
     NESTED_LS_SCHUR_GMRES_RTOL,
     NestedLsReducedRankError,
     apply_reduced_mixed_schur_coil_tangent,
+    attempt_shamanskii_schur_reuse,
     compare_ad_qr_and_schur_hvp,
     dense_schur_inverse_preconditioner,
     eisenstat_walker_forcing_eta,
@@ -79,6 +81,7 @@ from simsopt_jax_adapters.geo.nested_ls_reduced import (
     split_surface_and_y,
     tensor_fourier_mode_blocks,
 )
+from simsopt_jax_adapters.geo.nested_ls_reduced_scale import NestedLsCountedMatvec
 
 from .boozersurface_jax_test_helpers import _clone_upstream_surface
 from .surface_test_helpers import get_surface
@@ -434,6 +437,7 @@ def test_implicit_adjoint_defaults_and_dense_lu_honours_1mib_cap():
     newton = inspect.signature(run_reduced_nested_ls_schur_newton)
     assert newton.parameters["linear_solver"].default == "gmres"
     assert newton.parameters["max_dense_linearization_bytes"].default is None
+    assert NESTED_LS_LINEAR_SOLVERS == ("gmres", "dense_lu", "shamanskii")
     assert schur_dense_operator_bytes(661) == 3_495_368
 
     class _F3DummySchur:
@@ -453,6 +457,93 @@ def test_implicit_adjoint_defaults_and_dense_lu_honours_1mib_cap():
             linear_solver="dense_lu",
             operator=_F3DummySchur(),
         )
+
+
+def test_shamanskii_reuse_hits_matching_operator_and_misses_stale():
+    dimension = 8
+    diag = jnp.arange(1.0, dimension + 1.0, dtype=jnp.float64)
+    matrix = jnp.diag(diag)
+
+    def matvec(tangent: jax.Array) -> jax.Array:
+        return matrix @ tangent
+
+    rhs = jnp.ones((dimension,), dtype=jnp.float64)
+    eta_requested = 1.0e-10
+    counter = NestedLsCountedMatvec(matvec)
+    delta, _residual, eta, reused = attempt_shamanskii_schur_reuse(
+        counter,
+        rhs,
+        eta_requested=eta_requested,
+        stale_dense=matrix,
+    )
+    assert reused is True
+    expected = 1.0 / np.arange(1.0, dimension + 1.0, dtype=np.float64)
+    np.testing.assert_allclose(
+        np.asarray(delta, dtype=np.float64), expected, rtol=1.0e-8, atol=1.0e-10
+    )
+    live_eta = float(
+        np.linalg.norm(np.asarray(matrix @ delta - rhs))
+        / np.linalg.norm(np.asarray(rhs))
+    )
+    assert live_eta == pytest.approx(eta, rel=1.0e-6, abs=1.0e-12)
+    assert linear_solve_meets_forcing(live_eta, eta_requested) is True
+    assert counter.count == 1
+    stale = matrix + 50.0 * jnp.eye(dimension, dtype=jnp.float64)
+    _delta_miss, _residual_miss, eta_miss, reused_miss = attempt_shamanskii_schur_reuse(
+        matvec,
+        rhs,
+        eta_requested=eta_requested,
+        stale_dense=stale,
+    )
+    assert reused_miss is False
+    assert eta_miss > eta_requested
+
+
+@pytest.mark.boozer
+def test_schur_newton_shamanskii_reassembles_on_shifted_7x7():
+    _native, jax_boozer, _decision, iota, g0 = _nested_ls_volume_pair()
+    del _native, _decision
+    shifted = np.array(jax_boozer.surface.get_dofs(), dtype=np.float64, copy=True)
+    shifted[0] += 1.0e-3
+    jax_boozer.surface.set_dofs(shifted)
+    with pytest.raises(ValueError, match="cannot combine with gmres_preconditioner"):
+        run_reduced_nested_ls_schur_newton(
+            jax_boozer,
+            iota=iota,
+            G=g0,
+            maxiter=1,
+            linear_solver="shamanskii",
+            gmres_preconditioner=lambda vector: vector,
+        )
+    walk = run_reduced_nested_ls_schur_newton(
+        jax_boozer,
+        iota=iota,
+        G=g0,
+        maxiter=3,
+        linear_solver="shamanskii",
+    )
+    assert walk.coil_delta_inf == 0.0
+    assert len(walk.steps) >= 2
+    assert walk.steps[0].assembled is True
+    assert walk.steps[0].shamanskii_reused is False
+    assert walk.steps[0].shamanskii_reassembled is False
+    later = walk.steps[1:]
+    assert later
+    for step in later:
+        assert step.shamanskii_attempt_eta is not None
+        if step.shamanskii_reused:
+            assert step.assembled is False
+            assert step.shamanskii_reassembled is False
+            assert float(step.shamanskii_attempt_eta) <= step.gmres_rtol
+        else:
+            assert step.assembled is True
+            assert step.shamanskii_reassembled is True
+            assert float(step.shamanskii_attempt_eta) > step.gmres_rtol
+    assert all(
+        step.gmres_forcing_eta <= step.gmres_rtol
+        for step in walk.steps
+        if step.step_accepted
+    )
 
 
 @pytest.mark.boozer
@@ -856,7 +947,7 @@ def test_dense_lu_newton_certifies_live_matvec_not_dense_product():
         / "nested_ls_reduced.py"
     )
     source = source_path.read_text(encoding="utf-8")
-    branch = source.split('elif linear_solver == "dense_lu":', 1)[1]
+    branch = source.split('elif linear_solver in ("dense_lu", "shamanskii"):', 1)[1]
     newton_part = branch.split("else:", 1)[0]
     assert "residual = matvec(newton_jax) - rhs" in newton_part
     assert "residual = dense @ newton_jax - rhs" not in newton_part

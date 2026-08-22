@@ -177,6 +177,13 @@ _GPU_BANANA_OMP_MIN_BRACKET_PUBLICATION = (
     "the OMP=16 native peak on a 32-core box. Records process wall and "
     "inner solver time. Not a nested speed claim."
 )
+_F3_B37_GPU_SHAMANSKII_ATTR_EVIDENCE = (
+    _EVIDENCE_DIR / "nested_ls_reduced_gpu_shamanskii_attr_20260822.json"
+)
+_GPU_SHAMANSKII_ATTR_PUBLICATION = (
+    "Shamanskii and compile-cache attribution: cache-only, lag-only, and both. "
+    "Not a nested speed claim and not F3 7.70x."
+)
 _F3_B37_GPU_CHUNK_WARM_EVIDENCE = (
     _EVIDENCE_DIR / "nested_ls_reduced_gpu_chunk_warm_20260821.json"
 )
@@ -845,6 +852,8 @@ def test_schur_newton_walk_defaults_to_gmres():
     assert "linear_solver=str(linear_solver)" in text
     assert 'linear_solver="dense_lu"' not in text
     assert "linear_solver='dense_lu'" not in text
+    assert 'linear_solver="shamanskii"' not in text
+    assert "linear_solver='shamanskii'" not in text
 
 
 def test_counted_matvec_increments_through_jax_gmres():
@@ -1450,6 +1459,63 @@ def test_authored_gpu_chunk_warm_json_is_not_a_default_switch():
     assert all(bool(row["discarded_warmup"]) for row in probe["rows"])
     assert [int(row["chunk_batch_size"]) for row in probe["rows"]] == list(
         F3_B37_CHUNK_WIDTHS
+    )
+    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
+
+
+@pytest.mark.skipif(
+    not _F3_B37_GPU_SHAMANSKII_ATTR_EVIDENCE.is_file(),
+    reason="authored Shamanskii attribution JSON not yet produced",
+)
+def test_authored_gpu_shamanskii_attr_json_is_not_a_speed_claim():
+    raw = _F3_B37_GPU_SHAMANSKII_ATTR_EVIDENCE.read_text(encoding="utf-8")
+    assert "NaN" not in raw
+    payload = json.loads(raw)
+    dump_strict_json(payload)
+    assert payload["schema"] == "nested-ls-reduced-gpu-shamanskii-attr.v1"
+    assert payload["written_by_pytest"] is False
+    assert payload["publication"] == _GPU_SHAMANSKII_ATTR_PUBLICATION
+    boundary = payload["claim_boundary"]
+    assert boundary["nested_speed_claim"] is False
+    assert boundary["inherits_f3_7_70x"] is False
+    assert boundary["shamanskii_attribution"] is True
+    assert boundary["inner_and_process_wall"] is True
+    lanes = {str(row["lane"]) for row in payload["rows"]}
+    assert lanes == {"cache_only", "lag_only", "both"}
+    measures = [row for row in payload["rows"] if row["role"] == "measure"]
+    assert measures
+    assert {str(row["lane"]) for row in measures} == {"cache_only", "lag_only", "both"}
+    assert all(bool(row["success"]) for row in measures)
+    assert all(int(row["native_rejudge_iter"]) == 0 for row in measures)
+    assert all(float(row["coil_delta_inf"]) == 0.0 for row in measures)
+    assert all("process_wall_seconds" in row for row in measures)
+    assert all(
+        float(row["process_wall_seconds"]) >= float(row["walk_seconds"])
+        for row in measures
+    )
+    cache_only = [row for row in measures if row["lane"] == "cache_only"]
+    lag_only = [row for row in measures if row["lane"] == "lag_only"]
+    both = [row for row in measures if row["lane"] == "both"]
+    assert cache_only and lag_only and both
+    primes = [row for row in payload["rows"] if row["role"] == "prime"]
+    assert {str(row["lane"]) for row in primes} == {"cache_only", "both"}
+    assert all(row["linear_solver"] == "dense_lu" for row in cache_only)
+    assert all(row["linear_solver"] == "shamanskii" for row in lag_only)
+    assert all(row["linear_solver"] == "shamanskii" for row in both)
+    assert all(row["disable_cache"] is False for row in cache_only)
+    assert all(row["disable_cache"] is True for row in lag_only)
+    assert all(row["disable_cache"] is False for row in both)
+    assert all(row["cache_dir"] is not None for row in cache_only)
+    assert all(row["cache_dir"] is None for row in lag_only)
+    assert all(row["cache_dir"] is not None for row in both)
+    assert all(row["shamanskii_reused_steps"] == [] for row in cache_only)
+    assert all(
+        row["shamanskii_reused_steps"] or row["shamanskii_reassembled_steps"]
+        for row in lag_only
+    )
+    assert all(
+        row["shamanskii_reused_steps"] or row["shamanskii_reassembled_steps"]
+        for row in both
     )
     assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
 

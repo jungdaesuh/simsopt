@@ -1223,11 +1223,12 @@ def evaluate_f3_b37_schur_newton_walk(
 ) -> NestedLsSchurNewtonWalkProbe:
     """Frozen-coil Schur Newton walk from F3 B37, then C++ reconstruct rejudge.
 
-    GMRES is the default linear solver; dense_lu is opt-in, not a global
-    default. Coils stay frozen. ``walk_seconds`` is the inner Newton
-    loop only (not process wall): it excludes import, QR ``y*``, the
-    independent reconstruct reference, and the C++ rejudge. Gate-6
-    claim runs must record a fresh-process wall separately.
+    GMRES is the default linear solver; dense_lu and shamanskii are
+    opt-in, not a global default. Coils stay frozen. ``walk_seconds``
+    is the inner Newton loop only (not process wall): it excludes
+    import, QR ``y*``, the independent reconstruct reference, and the
+    C++ rejudge. Gate-6 claim runs must record a fresh-process wall
+    separately.
     """
 
     residual_fn, _objective_fn, _phi_hat = nested_ls_reduced_closures(jax_boozer)

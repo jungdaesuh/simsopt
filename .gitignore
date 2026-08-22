@@ -81,6 +81,8 @@ examples/single_stage_optimization/STAGE_2/outputs-*/
 .artifacts/jax-vmec-hybrid/
 .artifacts/jax-example-execution-modes/
 .artifacts/stage_two_finitebuild_native_gpu/
+.artifacts/nested-ls-shamanskii-xla-dense/
+.artifacts/nested-ls-shamanskii-xla-shamanskii/
 .handoffs/
 
 # Agent scratch/learnings directories (not shipped source)
