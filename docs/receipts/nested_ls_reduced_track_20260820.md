@@ -466,9 +466,22 @@ Newton steps is the GPU shape. ``OMP=32`` forked ``bfgs_iter``
 margin under a 10⁻¹¹ Gate-6 ι/G tolerance. Gap fill ``{20,24}``
 on this 32-core box (diagnostic, dirty at ``39e620eec``):
 ``OMP=20`` 128.2/126.2 s, ``OMP=24`` 135.4/134.5 s, both slower
-than ``OMP=16`` and faster than ``OMP=32``. Native best-of-contract
-remains ``OMP=16`` at 116.02 s. ``bfgs_iter`` stayed 682 (the
-682→683 fork is the OMP=32 datum). Still **not** a speed claim.
+than ``OMP=16`` and faster than ``OMP=32``. Native best-of-sampled
+remains ``OMP=16`` at 116.02 s after ``{20,24}``. Min-bracket fill
+``{12,14}`` (diagnostic, dirty at ``a378d49a9``): ``OMP=12``
+133.3/118.3 s inner, ``OMP=14`` 119.7/117.7 s inner. Neither
+beats 16. Repeat-0 of 12 was a slow first-touch outlier; the
+warm pair sits just above 16. Process wall is consistently
+~9–10 s above inner (import+setup). ``OMP_PROC_BIND`` /
+``OMP_PLACES`` recorded unset. Sweep set
+``{4,8,12,14,16,20,24,32}`` is now frozen: the inner minimum is
+16, bracketed by 14 (117.7 s) and 20 (126.2 s). ``bfgs_iter``
+stayed 682 at 12/14/20/24 (the 682→683 fork is the OMP=32
+datum). Still **not** a speed claim. The 153.06 vs 116.02 =
+0.76× row is **inner solver vs inner solver**: JAX
+``walk_seconds`` is the Newton loop; native ``seconds`` is
+BFGS+Newton. Parent process wall is now stored as
+``process_wall_seconds``; the OMP=16 receipt does not have it.
 
 Warm in-process chunk repeats (warmup discarded): mean assemble
 8:17.0 s, 16:16.6 s, 32:17.6 s, 64:18.0 s. Matches the walk's ~16 s
@@ -485,40 +498,73 @@ claim-bearing by construction: **clean tree from the first byte**.
 ### Gate-6 contract (pre-declared, pre-lever)
 
 Before Shamanskii or compile-cache land, so levers cannot move the
-goalposts:
+goalposts. The published 0.76× row is **not** process-wall vs
+process-wall; it is inner-solver vs inner-solver
+(``NESTED_LS_GATE6_PRE_LEVER_CLOCK="inner_solver"``).
 
 - Same F3 B37 start SHA; coils bitwise frozen.
-- Endpoint ι/G within ``10⁻¹¹`` (today ~10⁻¹²).
+- Endpoint ι/G within ``10⁻¹¹`` vs native banana (today ~10⁻¹²).
+- JAX stationarity ``‖g‖₂ ≤ 10⁻¹³``.
+- C++ rejudge of every JAX claim endpoint is a no-op (``‖Δs‖∞``,
+  Δι, ΔG; today ``native_rejudge_iter=0``). Record
+  ``‖s_JAX − s_native‖∞``; do not require the two solvers'
+  surfaces to match (different algorithms).
 - Each side its own solver to its own success criterion (native
   banana ``run_code`` vs JAX reconstruct dense-LU Newton).
-- Native = banana at **best-of-swept OMP**, sweep set
-  ``{4,8,16,20,24,32}``, interleaved ≥2 (claim runs ≥3).
-- Process wall vs process wall. Clean tree both sides.
-- **Pre-lever baseline row:** JAX walk 153.06 s vs native OMP=16
-  116.02 s = **0.76×**. Not a claim. Recorded so the eventual
-  claim shows before/after inside this contract.
+- Native = banana at **best-of-swept OMP**. Sweep set **frozen**
+  at ``{4,8,12,14,16,20,24,32}``. Inner minimum is OMP=16
+  (116.02 s), bracketed by 14 (117.7 s) and 20 (126.2 s).
+- Record **both** clocks on both lanes: ``process_wall_seconds``
+  (parent ``perf_counter`` around a fresh child: import + setup +
+  solver) and ``inner_solver_seconds`` (banana BFGS+Newton, or JAX
+  Newton walk). Claim comparison is process wall vs process wall.
+- Interleave **complete native/JAX processes**, not merely native
+  OMP configs. Aggregation: report every repeat; claim numerator
+  and denominator are the **minimum** of ≥3 interleaved process
+  walls per lane (also report the median).
+- Publish cold-cache and persistent-cache JAX rows separately. The
+  ~137 s cache-only figure is a **model**, not a measurement.
+- ``OMP_PROC_BIND`` / ``OMP_PLACES`` are recorded. Diagnostic fills
+  leave them unset to match the existing OMP=16 bar. Claim runs
+  use that same unset bind/places, or remint native under an
+  explicit pin.
+- Clean tree from the first byte.
+- **Pre-lever baseline row (inner solver):** JAX walk 153.06 s vs
+  native OMP=16 116.02 s = **0.76×** (JAX ~1.32× slower). Not a
+  claim. Process-wall before/after will be a new pair of numbers
+  on the claim receipts.
 
-Do **not** chase BFGS-then-polish in JAX. Bundle **compile cache**
-and **Shamanskii on-demand assembly** (stale LU as ``M``, 1–3 live
-HVPs, same unpreconditioned η vs Eisenstat–Walker, fail-closed
-reassemble on miss) in one GO; measure cache-only, lag-only, and
-both. Shamanskii is **required for Gate-6**, not contingent on it:
-cache-only still leaves ~137 vs 116.
+Assembly reuse is required for a plausible win; Shamanskii (stale
+LU as ``M``, 1–3 live HVPs, live unpreconditioned η vs
+Eisenstat–Walker, fail-closed reassemble on miss) is the selected
+hypothesis. Bundle compile-cache with that GO; measure cache-only,
+lag-only, and both. Cache-only leaves ~21 s to recover, so one
+avoided 16–17 s assembly is insufficient — at least two net
+avoided assemblies. The walk receipt must record which steps
+triggered stale-η reassembly.
+
+Do **not** chase BFGS-then-polish in JAX (envelope grad ~0.4 s ×
+682 ≈ 273 s).
 
 Product ``linear_solver="dense_lu"`` must **not** reuse the adjoint
 1 MiB cap. Inner Newton currently has ``max_dense_linearization_bytes=None``;
 661 stored Ĥ is **3,495,368 bytes** (3.50 MB) and would be refused by
-the adjoint default. Declare an explicit reconstruct-inner budget or
-dimension threshold after E2E, not 1 MiB.
+the adjoint default. After E2E the product cap is **memory-derived**
+(stored ``n²×8`` plus the transient chunk peak against a
+device-memory fraction), not a performance threshold: the
+spectrum/termination argument says the crossover never swings back
+to matrix-free below memory limits.
 
 ## Next
 
-1. Multi-direction, step-halved FD for the outer gradient.
-2. Shamanskii + compile-cache GO (cache / lag / both), then a
-   **clean-tree** Gate-6 claim run against the contract above.
-   Pre-lever baseline inside that contract: 153.06 vs 116.02 =
-   0.76×. Native best-of-contract is still OMP=16 after the
-   ``{20,24}`` fill.
+1. Multi-direction, step-halved FD for the outer gradient, **in
+   parallel with** Shamanskii + compile-cache GO (cache / lag /
+   both). Shamanskii GO records stale-η reassembly steps.
+   Both remain GO-gated.
+2. **Clean-tree** Gate-6 claim run against the contract above
+   (process wall vs process wall, interleaved native/JAX,
+   aggregation = **min** of ≥3). Pre-lever inner row stays
+   153.06 vs 116.02 = 0.76×.
 3. New eight-term outer optimizer charter: B3, then B37.
    Benchmark only after endpoint and KKT parity.
 

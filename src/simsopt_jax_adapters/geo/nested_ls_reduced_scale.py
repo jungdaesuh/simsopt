@@ -159,13 +159,18 @@ F3_B37_CHUNK_BANANA_WALL_SECONDS = 1800.0
 F3_B37_VOLUME_OUTER_WALL_SECONDS = 1800.0
 F3_B37_BANANA_OMP_THREADS = (4, 8, 16, 32)
 F3_B37_BANANA_OMP_GAP_THREADS = (20, 24)
-F3_B37_BANANA_OMP_CONTRACT_THREADS = (4, 8, 16, 20, 24, 32)
+F3_B37_BANANA_OMP_MIN_BRACKET_THREADS = (12, 14)
+F3_B37_BANANA_OMP_CONTRACT_THREADS = (4, 8, 12, 14, 16, 20, 24, 32)
 F3_B37_BANANA_OMP_REPEATS = 2
 F3_B37_BANANA_OMP_WALL_SECONDS = 3600.0
 F3_B37_CHUNK_WARM_REPEATS = 3
 NESTED_LS_GATE6_IOTA_G_TOL = 1.0e-11
+NESTED_LS_GATE6_CLAIM_REPEATS = 3
+NESTED_LS_GATE6_AGGREGATION = "min"
+NESTED_LS_GATE6_PRE_LEVER_CLOCK = "inner_solver"
 NESTED_LS_GATE6_PRE_LEVER_JAX_WALK_SECONDS = 153.06041832105257
 NESTED_LS_GATE6_PRE_LEVER_NATIVE_OMP16_SECONDS = 116.0183689862024
+NESTED_LS_GATE6_PRE_LEVER_NATIVE_SECONDS = 116.0183689862024
 
 
 def archived_flat675_bundle_available(bundle_root: Path | None = None) -> bool:
@@ -1219,7 +1224,10 @@ def evaluate_f3_b37_schur_newton_walk(
     """Frozen-coil Schur Newton walk from F3 B37, then C++ reconstruct rejudge.
 
     GMRES is the default linear solver; dense_lu is opt-in, not a global
-    default. Coils stay frozen.
+    default. Coils stay frozen. ``walk_seconds`` is the inner Newton
+    loop only (not process wall): it excludes import, QR ``y*``, the
+    independent reconstruct reference, and the C++ rejudge. Gate-6
+    claim runs must record a fresh-process wall separately.
     """
 
     residual_fn, _objective_fn, _phi_hat = nested_ls_reduced_closures(jax_boozer)
@@ -4154,8 +4162,13 @@ def evaluate_f3_b37_banana_omp_sweep(
     Default ``threads`` is the historical diagnostic set ``{4,8,16,32}``.
     Gate-6 claim runs must pass ``F3_B37_BANANA_OMP_CONTRACT_THREADS`` so
     the native bar is best-of-contract, not best-of-sampled. Each child
-    is a fresh process with ``OMP_NUM_THREADS`` set before import. Not a
-    nested speed claim.
+    is a fresh process with ``OMP_NUM_THREADS`` set before import.
+
+    ``seconds`` / ``inner_solver_seconds`` are the child's BFGS+Newton
+    wall. ``process_wall_seconds`` is the parent's subprocess wall
+    (import + setup + solver). The pre-lever 0.76× row uses inner
+    solver time, not process wall. ``OMP_PROC_BIND`` / ``OMP_PLACES``
+    are recorded, not set. Not a nested speed claim.
     """
 
     provenance = nested_ls_receipt_provenance()
@@ -4197,7 +4210,7 @@ def evaluate_f3_b37_banana_omp_sweep(
             capture_output=True,
             text=True,
         )
-        seconds = float(time.perf_counter() - started)
+        process_wall_seconds = float(time.perf_counter() - started)
         if completed.returncode != 0 or not child_out.is_file():
             fail_reason = "banana_child_failed"
             rows.append(
@@ -4205,7 +4218,8 @@ def evaluate_f3_b37_banana_omp_sweep(
                     "repeat": int(repeat),
                     "omp_num_threads": int(thread_count),
                     "returncode": int(completed.returncode),
-                    "seconds": seconds,
+                    "seconds": process_wall_seconds,
+                    "process_wall_seconds": process_wall_seconds,
                     "stderr_tail": completed.stderr[-2000:],
                 }
             )
@@ -4218,17 +4232,25 @@ def evaluate_f3_b37_banana_omp_sweep(
         child_out.unlink(missing_ok=True)
         pinned = bool(payload["omp_pinned"])
         any_unpinned = any_unpinned or (not pinned)
+        inner_seconds = _json_finite(payload["seconds"])
+        child_threading = payload["threading"]
+        if not isinstance(child_threading, dict):
+            raise TypeError("banana child threading must be an object")
         row = {
             "repeat": int(repeat),
             "omp_num_threads": int(thread_count),
             "observed_omp_num_threads": payload["omp_num_threads"],
             "omp_pinned": pinned,
+            "omp_proc_bind": child_threading["OMP_PROC_BIND"],
+            "omp_places": child_threading["OMP_PLACES"],
             "success": bool(payload["success"]),
             "bfgs_iter": int(payload["bfgs_iter"]),
             "newton_iter": int(payload["newton_iter"]),
             "bfgs_seconds": _json_finite(payload["bfgs_seconds"]),
             "newton_seconds": _json_finite(payload["newton_seconds"]),
-            "seconds": _json_finite(payload["seconds"]),
+            "seconds": inner_seconds,
+            "inner_solver_seconds": inner_seconds,
+            "process_wall_seconds": process_wall_seconds,
             "iota": _json_finite(payload["iota"]),
             "G": _json_finite(payload["G"]),
             "coil_delta_inf": _json_finite(payload["coil_delta_inf"]),
@@ -4237,7 +4259,8 @@ def evaluate_f3_b37_banana_omp_sweep(
         print(
             "banana omp"
             f" repeat={repeat} threads={thread_count}"
-            f" s={payload['seconds']!r} bfgs_iter={payload['bfgs_iter']}"
+            f" s={inner_seconds!r} wall={process_wall_seconds!r}"
+            f" bfgs_iter={payload['bfgs_iter']}"
             f" newton_iter={payload['newton_iter']} pinned={pinned}",
             flush=True,
         )
@@ -4459,6 +4482,7 @@ __all__ = [
     "F3_B37_ADJOINT_WALL_SECONDS",
     "F3_B37_BANANA_OMP_CONTRACT_THREADS",
     "F3_B37_BANANA_OMP_GAP_THREADS",
+    "F3_B37_BANANA_OMP_MIN_BRACKET_THREADS",
     "F3_B37_BANANA_OMP_REPEATS",
     "F3_B37_BANANA_OMP_THREADS",
     "F3_B37_BANANA_OMP_WALL_SECONDS",
@@ -4493,9 +4517,13 @@ __all__ = [
     "F3_B37_STEP6_MATERIAL_RESIDUAL_RATIO",
     "F3_B37_STEP6_WALL_SECONDS_2048",
     "F3_B37_VOLUME_OUTER_WALL_SECONDS",
+    "NESTED_LS_GATE6_AGGREGATION",
+    "NESTED_LS_GATE6_CLAIM_REPEATS",
     "NESTED_LS_GATE6_IOTA_G_TOL",
+    "NESTED_LS_GATE6_PRE_LEVER_CLOCK",
     "NESTED_LS_GATE6_PRE_LEVER_JAX_WALK_SECONDS",
     "NESTED_LS_GATE6_PRE_LEVER_NATIVE_OMP16_SECONDS",
+    "NESTED_LS_GATE6_PRE_LEVER_NATIVE_SECONDS",
     "NestedLsB37NestedTiming",
     "NestedLsBananaOmpSweep",
     "NestedLsBoundedF3B37Result",

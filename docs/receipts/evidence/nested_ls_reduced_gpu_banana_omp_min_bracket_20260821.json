@@ -4,25 +4,26 @@
     "comparable_operators": false,
     "explicit_inverse_m_production": false,
     "f3_sealed": true,
-    "gap_fill_20_24": true,
+    "gap_fill_12_14": true,
     "inherits_f3_7_70x": false,
+    "inner_and_process_wall": true,
     "interleaved_repeats": true,
     "nested_speed_claim": false,
     "omp_pinned": true,
     "omp_swept": true
   },
-  "command": "JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv-qn-gpu/bin/python benchmarks/nested_ls_banana_omp_gap.py",
+  "command": "JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv-qn-gpu/bin/python benchmarks/nested_ls_banana_omp_min_bracket.py",
   "date": "2026-08-22",
-  "driver": "benchmarks.nested_ls_banana_omp_gap",
-  "execution_log": "docs/receipts/evidence/nested_ls_reduced_gpu_banana_omp_gap_20260821.log",
+  "driver": "benchmarks.nested_ls_banana_omp_min_bracket",
+  "execution_log": "docs/receipts/evidence/nested_ls_reduced_gpu_banana_omp_min_bracket_20260821.log",
   "probe": {
     "any_unpinned": false,
     "fail_closed_reason": null,
     "provenance": {
       "git_branch": "pr/jax-port-squashed",
-      "git_commit": "39e620eeca2c3817d7e9ad757956d6b3eb83c095",
+      "git_commit": "a378d49a91d95f429f300deb6b168170d97c5f8e",
       "git_dirty": true,
-      "git_status_porcelain": "M docs/receipts/nested_ls_reduced_track_20260820.md\n M src/simsopt_jax_adapters/geo/nested_ls_reduced.py\n M src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py\n M tests/geo/test_nested_ls_reduced.py\n M tests/geo/test_nested_ls_reduced_scale.py\n?? benchmarks/nested_ls_banana_omp_gap.py\n?? docs/receipts/evidence/nested_ls_reduced_gpu_banana_omp_gap_20260821.log",
+      "git_status_porcelain": "M benchmarks/nested_ls_banana_omp_gap.py\n M docs/receipts/evidence/nested_ls_reduced_gpu_banana_omp_gap_20260821.json\n M docs/receipts/nested_ls_reduced_track_20260820.md\n M src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py\n M tests/geo/test_nested_ls_reduced_scale.py\n?? benchmarks/nested_ls_banana_omp_min_bracket.py\n?? docs/receipts/evidence/nested_ls_reduced_gpu_banana_omp_min_bracket_20260821.log",
       "hostname": "jungdaesuh-playstation",
       "input_sha256": {
         "native_biot_savart.json": "0415ae937c78b9f2d68e8463a9176e8f330a9aa172eece160341afccdc29429d",
@@ -47,7 +48,7 @@
       "source_sha256": {
         "nested_ls_contract.py": "a9b602f3ebc2c6c58bc010c328337fd523c46cd4a98b331059264ff9d270f28c",
         "nested_ls_reduced.py": "d1d70eab03512bc0d8cf76deba2e9d8d89026331884d10579397773060fe8fb4",
-        "nested_ls_reduced_scale.py": "1d7acf2ee954ef21d580477074da9de57cc3e5a39f6a2c7ef1f28a7b6725f30f"
+        "nested_ls_reduced_scale.py": "1cbab19b64b3d915cc24ad7e90b881faf364793403ba135b26306242be187a22"
       },
       "threading": {
         "MKL_NUM_THREADS": null,
@@ -57,68 +58,84 @@
         "OMP_PROC_BIND": null,
         "OPENBLAS_NUM_THREADS": null
       },
-      "timestamp_utc": "2026-08-22T02:31:51.235429+00:00"
+      "timestamp_utc": "2026-08-22T03:08:31.229076+00:00"
     },
     "repeats": 2,
     "rows": [
       {
         "G": 2.0106193053897154,
         "bfgs_iter": 682,
-        "bfgs_seconds": 97.32716480107047,
+        "bfgs_seconds": 103.61780679016374,
         "coil_delta_inf": 0.0,
-        "iota": 0.14085710958306907,
+        "inner_solver_seconds": 133.32709302101284,
+        "iota": 0.14085710958307185,
         "newton_iter": 1,
-        "newton_seconds": 30.88211342599243,
-        "observed_omp_num_threads": "20",
-        "omp_num_threads": 20,
+        "newton_seconds": 29.709286230849102,
+        "observed_omp_num_threads": "12",
+        "omp_num_threads": 12,
         "omp_pinned": true,
+        "omp_places": null,
+        "omp_proc_bind": null,
+        "process_wall_seconds": 143.5662097169552,
         "repeat": 0,
-        "seconds": 128.2092782270629,
+        "seconds": 133.32709302101284,
         "success": true
       },
       {
         "G": 2.0106193053897154,
         "bfgs_iter": 682,
-        "bfgs_seconds": 104.77050758013502,
+        "bfgs_seconds": 93.60806153016165,
         "coil_delta_inf": 0.0,
-        "iota": 0.14085710958306968,
+        "inner_solver_seconds": 119.67956819222309,
+        "iota": 0.1408571095830702,
         "newton_iter": 1,
-        "newton_seconds": 30.6451080259867,
-        "observed_omp_num_threads": "24",
-        "omp_num_threads": 24,
+        "newton_seconds": 26.071506662061438,
+        "observed_omp_num_threads": "14",
+        "omp_num_threads": 14,
         "omp_pinned": true,
+        "omp_places": null,
+        "omp_proc_bind": null,
+        "process_wall_seconds": 129.77280508796684,
         "repeat": 0,
-        "seconds": 135.41561560612172,
+        "seconds": 119.67956819222309,
         "success": true
       },
       {
         "G": 2.0106193053897154,
         "bfgs_iter": 682,
-        "bfgs_seconds": 96.1234138449654,
+        "bfgs_seconds": 92.92753737606108,
         "coil_delta_inf": 0.0,
-        "iota": 0.14085710958306907,
+        "inner_solver_seconds": 118.34541305690072,
+        "iota": 0.14085710958307185,
         "newton_iter": 1,
-        "newton_seconds": 30.050649127922952,
-        "observed_omp_num_threads": "20",
-        "omp_num_threads": 20,
+        "newton_seconds": 25.417875680839643,
+        "observed_omp_num_threads": "12",
+        "omp_num_threads": 12,
         "omp_pinned": true,
+        "omp_places": null,
+        "omp_proc_bind": null,
+        "process_wall_seconds": 127.7437582721468,
         "repeat": 1,
-        "seconds": 126.17406297288835,
+        "seconds": 118.34541305690072,
         "success": true
       },
       {
         "G": 2.0106193053897154,
         "bfgs_iter": 682,
-        "bfgs_seconds": 105.12430517398752,
+        "bfgs_seconds": 92.45995439286344,
         "coil_delta_inf": 0.0,
-        "iota": 0.14085710958306968,
+        "inner_solver_seconds": 117.74282065872103,
+        "iota": 0.1408571095830702,
         "newton_iter": 1,
-        "newton_seconds": 29.386525351088494,
-        "observed_omp_num_threads": "24",
-        "omp_num_threads": 24,
+        "newton_seconds": 25.282866265857592,
+        "observed_omp_num_threads": "14",
+        "omp_num_threads": 14,
         "omp_pinned": true,
+        "omp_places": null,
+        "omp_proc_bind": null,
+        "process_wall_seconds": 127.07437934400514,
         "repeat": 1,
-        "seconds": 134.51083052507602,
+        "seconds": 117.74282065872103,
         "success": true
       }
     ],
@@ -141,18 +158,18 @@
         "OMP_PROC_BIND": null,
         "OPENBLAS_NUM_THREADS": null
       },
-      "timestamp_utc": "2026-08-22T02:31:51.241493+00:00"
+      "timestamp_utc": "2026-08-22T03:08:31.234418+00:00"
     },
     "threads": [
-      20,
-      24
+      12,
+      14
     ]
   },
-  "publication": "OMP-pinned banana gap fill at 20 and 24 threads. Fills the 16-to-32 hole on a 32-core box. Not a nested speed claim.",
-  "schema": "nested-ls-reduced-gpu-banana-omp-gap.v1",
+  "publication": "OMP-pinned banana min-bracket fill at 12 and 14 threads. Brackets the OMP=16 native peak on a 32-core box. Records process wall and inner solver time. Not a nested speed claim.",
+  "schema": "nested-ls-reduced-gpu-banana-omp-min-bracket.v1",
   "threads": [
-    20,
-    24
+    12,
+    14
   ],
   "written_by_pytest": false
 }
