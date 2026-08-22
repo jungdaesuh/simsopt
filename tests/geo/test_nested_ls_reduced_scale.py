@@ -1312,6 +1312,13 @@ def test_omp_pin_requires_positive_integer_env():
     text = driver.read_text(encoding="utf-8")
     assert "docs/receipts/evidence" in text
     assert "/tmp/" not in text
+    attr = (
+        Path(__file__).resolve().parents[2]
+        / "benchmarks"
+        / "nested_ls_shamanskii_attribution.py"
+    )
+    attr_text = attr.read_text(encoding="utf-8")
+    assert "success={row['success']!r}" in attr_text
 
 
 @pytest.mark.skipif(

@@ -57,6 +57,7 @@ from simsopt_jax_adapters.geo.nested_ls_reduced import (
     attempt_shamanskii_schur_reuse,
     compare_ad_qr_and_schur_hvp,
     dense_schur_inverse_preconditioner,
+    dense_schur_lu_preconditioner,
     eisenstat_walker_forcing_eta,
     factor_reduced_nested_ls_schur,
     factor_schur_fourier_block_preconditioner,
@@ -67,6 +68,7 @@ from simsopt_jax_adapters.geo.nested_ls_reduced import (
     nested_ls_runtime_coil_closures,
     pack_surface_and_y,
     projected_y_system,
+    receipt_float,
     reduced_penalty_gradient,
     reduced_penalty_gradient_envelope,
     reduced_penalty_hvp,
@@ -470,11 +472,12 @@ def test_shamanskii_reuse_hits_matching_operator_and_misses_stale():
     rhs = jnp.ones((dimension,), dtype=jnp.float64)
     eta_requested = 1.0e-10
     counter = NestedLsCountedMatvec(matvec)
+    apply_stale = dense_schur_lu_preconditioner(matrix)
     delta, _residual, eta, reused = attempt_shamanskii_schur_reuse(
         counter,
         rhs,
         eta_requested=eta_requested,
-        stale_dense=matrix,
+        apply_stale=apply_stale,
     )
     assert reused is True
     expected = 1.0 / np.arange(1.0, dimension + 1.0, dtype=np.float64)
@@ -493,10 +496,30 @@ def test_shamanskii_reuse_hits_matching_operator_and_misses_stale():
         matvec,
         rhs,
         eta_requested=eta_requested,
-        stale_dense=stale,
+        apply_stale=dense_schur_lu_preconditioner(stale),
     )
     assert reused_miss is False
     assert eta_miss > eta_requested
+    nan_eta, nan_reason = receipt_float(float("nan"))
+    assert nan_eta is None
+    assert nan_reason == "nonfinite"
+    finite_eta, finite_reason = receipt_float(1.5e-12)
+    assert finite_eta == 1.5e-12
+    assert finite_reason is None
+
+    def nan_matvec(tangent: jax.Array) -> jax.Array:
+        return jnp.full_like(tangent, jnp.nan)
+
+    _delta_nan, _residual_nan, eta_nan, reused_nan = attempt_shamanskii_schur_reuse(
+        nan_matvec,
+        rhs,
+        eta_requested=0.24,
+        apply_stale=apply_stale,
+    )
+    assert reused_nan is False
+    coerced, reason = receipt_float(eta_nan)
+    assert coerced is None
+    assert reason == "nonfinite"
 
 
 @pytest.mark.boozer
@@ -534,10 +557,12 @@ def test_schur_newton_shamanskii_reassembles_on_shifted_7x7():
         if step.shamanskii_reused:
             assert step.assembled is False
             assert step.shamanskii_reassembled is False
+            assert step.shamanskii_attempt_eta_reason is None
             assert float(step.shamanskii_attempt_eta) <= step.gmres_rtol
         else:
             assert step.assembled is True
             assert step.shamanskii_reassembled is True
+            assert step.shamanskii_attempt_eta_reason is None
             assert float(step.shamanskii_attempt_eta) > step.gmres_rtol
     assert all(
         step.gmres_forcing_eta <= step.gmres_rtol
@@ -1157,6 +1182,7 @@ def test_schur_newton_walk_records_accepted_steps():
         for step in walk.steps
         if step.step_accepted
     )
+    assert all(step.assembled is False for step in walk.steps)
 
 
 @pytest.mark.boozer

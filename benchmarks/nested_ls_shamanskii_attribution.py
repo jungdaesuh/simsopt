@@ -110,6 +110,7 @@ def _launch(
     print(
         "attr"
         f" solver={linear_solver} cache_disabled={disable_cache}"
+        f" success={row['success']!r}"
         f" walk={row['walk_seconds']!r} wall={process_wall_seconds!r}"
         f" reused={row['shamanskii_reused_steps']}"
         f" reassembled={row['shamanskii_reassembled_steps']}",
