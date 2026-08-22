@@ -6,9 +6,10 @@
     "full_walk_attempted": false,
     "ift_used_newton_stab": false,
     "inherits_f3_7_70x": false,
-    "moving_coil_b3_outer": true,
+    "moving_coil_b3_outer": false,
     "nested_speed_claim": false,
-    "outer_optimizer_loop": false
+    "outer_optimizer_loop": false,
+    "volume_directional_gradient": true
   },
   "command": "SIMSOPT_BACKEND_MODE=jax_gpu_fast JAX_PLATFORMS=cuda,cpu JAX_ENABLE_X64=1 .venv-qn-gpu/bin/python evaluate_f3_b37_volume_outer_probe()",
   "date": "2026-08-21",
@@ -79,7 +80,7 @@
     "volume": 0.09992911877766064,
     "volume_grad_l2": 2.1278030177348572
   },
-  "publication": "GPU moving-coil Volume outer gradient at the dense-LU endpoint. Unregularized IFT, one coil-direction FD. Not an outer optimizer loop, not a nested speed claim, and not F3 7.70x.",
+  "publication": "GPU F3-B37 Volume directional-gradient canary at the dense-LU endpoint. Unregularized IFT, one coil-direction FD. Not a B3 outer optimization, not an outer optimizer loop, not a nested speed claim, and not F3 7.70x.",
   "schema": "nested-ls-reduced-gpu-volume-outer.v1",
   "written_by_pytest": false
 }

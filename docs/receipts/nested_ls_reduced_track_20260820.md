@@ -417,40 +417,74 @@ commit ``eaf4cef4f``: ``git_dirty=False``,
 ``docs/receipts/evidence/nested_ls_reduced_gpu_endpoint_adjoint_20260821.json``,
 live η ``2.21×10⁻¹²``, FD relative ℓ₂ ``8.01×10⁻⁵``.
 
-Native banana ``run_code`` bar at F3 B37 start plus dense-assemble
-chunk sweep at the LU endpoint
-(``evaluate_f3_b37_chunk_banana_probe``): banana success, 1 iter,
-171 s, coils frozen. Chunk assemble walls 8:23.1 s, 16:17.8 s,
-32:24.4 s, 64:18.0 s; LU 0.060 s. Matrices agree to
-``≲5×10⁻¹⁶`` relative Frobenius. Not monotonic in width; do not
-switch the production batch of 8 from this diagnostic. Lagged LU
-is not the remaining cost (assembly still dominates). Reconstruct
-walk 153 s remains a different operator; ``comparable_operators``
-is false; not a nested speed claim.
+Native banana ``run_code`` at F3 B37 start
+(``evaluate_f3_b37_chunk_banana_probe``): success, coils frozen,
+171 s **BFGS+Newton wall**. ``banana_iter=1`` is the **Newton
+polish** nit that ``run_code`` returns after BFGS; it is not “native
+needed one iteration of anything.” This receipt has **no
+``OMP_NUM_THREADS`` pin, sweep, or interleaved repeats**, so 171 s
+is an anecdote, not a Gate-6 bar. The dense-LU reconstruct walk
+(``55c4ec46f``) is closed physics: 8 exact-Newton steps, JAX
+``‖g‖₂=2.40×10⁻¹⁴``, C++ rejudge ``iter=0``, 153 s diagnostic.
+Banana and walk land on the same ι to ``~6×10⁻¹²``. That is
+scaffolding for a later fair-bar contract, **not** a 1.12× speed
+claim: different algorithms, no OMP law, no interleaved process
+timing, ``comparable_operators=false``.
 
-Moving-coil Volume outer at the same endpoint
-(``evaluate_f3_b37_volume_outer_probe``): cotangent ``∇_s Volume``,
-unregularized dense LU IFT, one coil-direction FD. Live η
-``1.15×10⁻¹⁴``, VJP match, FD relative ``4.32×10⁻⁶`` (control 0
-Newton steps, perturbed 2). Not an outer optimizer loop.
+Cold single-shot chunk assemble at the LU endpoint: 8:23.1 s,
+16:17.8 s, 32:24.4 s, 64:18.0 s; LU 0.060 s. Matrices agree to
+``≲5×10⁻¹⁶``. The walk's **warm** per-step assemble at width 8 was
+~16 s, faster than every cold-sweep number, so this sweep is
+first-touch/XLA, not the production regime. Keep production batch
+8 because the cold sweep is **insufficient repeated/interleaved
+evidence**, not because “width is not monotonic.” Re-decide only
+on a warm repeated sweep. Lagging the **LU** (0.06 s) saves
+nothing; Shamanskii **lagged assembly** (~16 s/warm step) remains
+chartered and is contingent on an OMP-disciplined banana bar.
+
+F3-B37 Volume **directional-gradient** canary (not a B3 outer
+optimizer): cotangent ``∇_s Volume``, unregularized dense LU IFT,
+one coil-direction FD. Live η ``1.15×10⁻¹⁴``, FD relative
+``4.32×10⁻⁶``. Receipt flag ``moving_coil_b3_outer`` is **false**;
+``outer_optimizer_loop`` is false. One direction certifies a
+projection; more directions/step-halving belong before an outer
+coil optimizer.
+
+OMP-pinned interleaved banana sweep
+(``evaluate_f3_b37_banana_omp_sweep``, threads ``{4,8,16,32}`` × 2):
+all pinned, coils frozen, BFGS ~682 iters then Newton 1. Fastest
+``OMP=16`` ~116–119 s; ``OMP=32`` slower (~145–149 s). Unpinned 171 s
+was a weak native, not the bar. Still **not** a 153-vs-banana speed
+claim (no Gate-6 contract).
+
+Warm in-process chunk repeats (warmup discarded): mean assemble
+8:17.0 s, 16:16.6 s, 32:17.6 s, 64:18.0 s. Matches the walk's ~16 s
+warm width-8. Keep production batch 8; 16 is not a proven win.
 
 ## Next
 
-Do not blindly default-switch to dense LU. Chunk 16 was the fastest
-assemble in this sweep and is a candidate later, not a default.
-Remaining product policy: choose dense LU by dimension/memory with
-a matrix-free fallback. A longer outer coil optimizer is a new
-charter, not a missing certificate on this gradient.
+1. Charter Gate-6: same start, same endpoint within a predeclared
+   tolerance, each side its own best solver, process wall, OMP law.
+   OMP banana now exists (best ~116 s at 16 threads); 153-vs-116 is
+   still not a claim.
+2. FD extension (more coil directions + step-halving), then a
+   **new** outer-optimizer charter (full objective, reconverge
+   inner after each coil update, B3 then B37).
+3. Product ``dense_lu`` iff stored Schur bytes fit the existing
+   dense budget; GMRES otherwise. Not a prerequisite for the outer
+   experiment. Lagged **assembly** is the remaining inner margin
+   lever, contingent on Gate-6.
 
-**NO-GO:** cap-2048, universal dense-LU default, explicit-inverse
-``M``, nested speed claim, F3 7.70×, remint of the dirty step-6
-forcing JSON, claim-grade GMRES walk JSON
+**NO-GO:** cap-2048, universal dense-LU default-before-E2E,
+explicit-inverse ``M``, nested speed claim from 153/171 or
+153/116, F3 7.70×, remint of the dirty step-6 forcing JSON,
+claim-grade GMRES walk JSON
 ``nested_ls_reduced_gpu_walk_20260821.json``.
 
 Frozen-coil reconstruct physics at 661 is closed for opt-in
 ``linear_solver="dense_lu"``. Unregularized IFT at that endpoint is
-closed. Native banana bar and Volume outer gradient are closed as
-diagnostics (JSON ``git_dirty=True``; remint only if promoted).
+closed. Volume directional FD is a one-direction canary. Native
+timing bar is the OMP sweep, not the unpinned 171 s anecdote.
 
 ## Validation of the SciPy CPU packet (`063b4fe83` / `96a1e5856`)
 

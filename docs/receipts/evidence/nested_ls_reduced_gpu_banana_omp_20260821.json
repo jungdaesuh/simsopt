@@ -1,0 +1,221 @@
+{
+  "claim_boundary": {
+    "cap_2048_attempted": false,
+    "comparable_operators": false,
+    "explicit_inverse_m_production": false,
+    "f3_sealed": true,
+    "inherits_f3_7_70x": false,
+    "interleaved_repeats": true,
+    "nested_speed_claim": false,
+    "omp_pinned": true,
+    "omp_swept": true
+  },
+  "command": "SIMSOPT_BACKEND_MODE=jax_gpu_fast JAX_PLATFORMS=cuda,cpu JAX_ENABLE_X64=1 .venv-qn-gpu/bin/python benchmarks/nested_ls_f3_b37_gpu_canaries.py",
+  "date": "2026-08-22",
+  "driver": "benchmarks.nested_ls_f3_b37_gpu_canaries",
+  "execution_log": "docs/receipts/evidence/nested_ls_reduced_gpu_banana_omp_20260821.log",
+  "probe": {
+    "any_unpinned": false,
+    "fail_closed_reason": null,
+    "provenance": {
+      "git_branch": "pr/jax-port-squashed",
+      "git_commit": "94eb99e1e762f5f2054ee2e08742e12abaa2d876",
+      "git_dirty": true,
+      "git_status_porcelain": "M docs/receipts/evidence/nested_ls_reduced_gpu_volume_outer_20260821.json\n M docs/receipts/nested_ls_reduced_track_20260820.md\n M src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py\n M tests/geo/test_nested_ls_reduced_scale.py\n?? benchmarks/nested_ls_banana_omp_child.py\n?? benchmarks/nested_ls_f3_b37_gpu_canaries.py",
+      "hostname": "jungdaesuh-playstation",
+      "input_sha256": {
+        "native_biot_savart.json": "0415ae937c78b9f2d68e8463a9176e8f330a9aa172eece160341afccdc29429d",
+        "pair2-l1_lane.json": "bde32ab9987d4f2116cf7c7410753c83a9d74ca7836031c25db0e12603155d64"
+      },
+      "jax_default_backend": "gpu",
+      "jax_devices": [
+        "cuda:0"
+      ],
+      "jax_enable_x64_env": "1",
+      "jax_platforms_env": "cuda,cpu",
+      "jax_version": "0.10.0",
+      "numpy_version": "2.4.6",
+      "omp_num_threads": null,
+      "omp_pinned": false,
+      "python_executable": "/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv-qn-gpu/bin/python",
+      "python_version": "3.11.15 (main, Jun 23 2026, 15:19:43) [Clang 22.1.3 ]",
+      "scipy_version": "1.17.1",
+      "simsopt_version": "1.10.7.dev1074+g320e5cba8.d20260806",
+      "simsoptpp_path": "/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv-qn-gpu/lib/python3.11/site-packages/simsoptpp.cpython-311-x86_64-linux-gnu.so",
+      "simsoptpp_sha256": "41b2ca791a720f325ffa9b382b31d29bade73f6516693805d41adc0de6f6ed4b",
+      "source_sha256": {
+        "nested_ls_contract.py": "a9b602f3ebc2c6c58bc010c328337fd523c46cd4a98b331059264ff9d270f28c",
+        "nested_ls_reduced.py": "94bf5dd258cbf8cb9ed5862f522b485a2b4a1a8197e476790a779eb14e6e9a94",
+        "nested_ls_reduced_scale.py": "e782e7602050bdac1f8c9ae74f6d63864cc6b1b8f8c6d2feef7f400b4c591f7d"
+      },
+      "threading": {
+        "MKL_NUM_THREADS": null,
+        "NUMEXPR_NUM_THREADS": null,
+        "OMP_NUM_THREADS": null,
+        "OMP_PLACES": null,
+        "OMP_PROC_BIND": null,
+        "OPENBLAS_NUM_THREADS": null
+      },
+      "timestamp_utc": "2026-08-22T00:46:32.778768+00:00"
+    },
+    "repeats": 2,
+    "rows": [
+      {
+        "G": 2.0106193053897154,
+        "bfgs_iter": 682,
+        "bfgs_seconds": 115.87804034887813,
+        "coil_delta_inf": 0.0,
+        "iota": 0.14085710958307104,
+        "newton_iter": 1,
+        "newton_seconds": 30.859356812899932,
+        "observed_omp_num_threads": "4",
+        "omp_num_threads": 4,
+        "omp_pinned": true,
+        "repeat": 0,
+        "seconds": 146.73739716177806,
+        "success": true
+      },
+      {
+        "G": 2.0106193053897154,
+        "bfgs_iter": 682,
+        "bfgs_seconds": 103.76572407595813,
+        "coil_delta_inf": 0.0,
+        "iota": 0.14085710958306957,
+        "newton_iter": 1,
+        "newton_seconds": 26.51071409205906,
+        "observed_omp_num_threads": "8",
+        "omp_num_threads": 8,
+        "omp_pinned": true,
+        "repeat": 0,
+        "seconds": 130.2764381680172,
+        "success": true
+      },
+      {
+        "G": 2.0106193053897154,
+        "bfgs_iter": 682,
+        "bfgs_seconds": 92.61527888895944,
+        "coil_delta_inf": 0.0,
+        "iota": 0.1408571095830703,
+        "newton_iter": 1,
+        "newton_seconds": 26.037319011054933,
+        "observed_omp_num_threads": "16",
+        "omp_num_threads": 16,
+        "omp_pinned": true,
+        "repeat": 0,
+        "seconds": 118.65259790001437,
+        "success": true
+      },
+      {
+        "G": 2.0106193053897154,
+        "bfgs_iter": 683,
+        "bfgs_seconds": 119.88267557811923,
+        "coil_delta_inf": 0.0,
+        "iota": 0.14085710958307082,
+        "newton_iter": 1,
+        "newton_seconds": 25.25576905813068,
+        "observed_omp_num_threads": "32",
+        "omp_num_threads": 32,
+        "omp_pinned": true,
+        "repeat": 0,
+        "seconds": 145.13844463624991,
+        "success": true
+      },
+      {
+        "G": 2.0106193053897154,
+        "bfgs_iter": 682,
+        "bfgs_seconds": 108.33683212893084,
+        "coil_delta_inf": 0.0,
+        "iota": 0.14085710958307104,
+        "newton_iter": 1,
+        "newton_seconds": 25.732375303981826,
+        "observed_omp_num_threads": "4",
+        "omp_num_threads": 4,
+        "omp_pinned": true,
+        "repeat": 1,
+        "seconds": 134.06920743291266,
+        "success": true
+      },
+      {
+        "G": 2.0106193053897154,
+        "bfgs_iter": 682,
+        "bfgs_seconds": 97.10850758804008,
+        "coil_delta_inf": 0.0,
+        "iota": 0.14085710958306957,
+        "newton_iter": 1,
+        "newton_seconds": 24.95057894801721,
+        "observed_omp_num_threads": "8",
+        "omp_num_threads": 8,
+        "omp_pinned": true,
+        "repeat": 1,
+        "seconds": 122.0590865360573,
+        "success": true
+      },
+      {
+        "G": 2.0106193053897154,
+        "bfgs_iter": 682,
+        "bfgs_seconds": 90.91725838114507,
+        "coil_delta_inf": 0.0,
+        "iota": 0.1408571095830703,
+        "newton_iter": 1,
+        "newton_seconds": 25.10111060505733,
+        "observed_omp_num_threads": "16",
+        "omp_num_threads": 16,
+        "omp_pinned": true,
+        "repeat": 1,
+        "seconds": 116.0183689862024,
+        "success": true
+      },
+      {
+        "G": 2.0106193053897154,
+        "bfgs_iter": 683,
+        "bfgs_seconds": 122.81415107287467,
+        "coil_delta_inf": 0.0,
+        "iota": 0.14085710958307082,
+        "newton_iter": 1,
+        "newton_seconds": 26.196489430963993,
+        "observed_omp_num_threads": "32",
+        "omp_num_threads": 32,
+        "omp_pinned": true,
+        "repeat": 1,
+        "seconds": 149.01064050383866,
+        "success": true
+      }
+    ],
+    "runtime": {
+      "hostname": "jungdaesuh-playstation",
+      "jax_default_backend": "gpu",
+      "jax_devices": [
+        "cuda:0"
+      ],
+      "jax_enable_x64_env": "1",
+      "jax_platforms_env": "cuda,cpu",
+      "omp_num_threads": null,
+      "omp_pinned": false,
+      "python_executable": "/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv-qn-gpu/bin/python",
+      "threading": {
+        "MKL_NUM_THREADS": null,
+        "NUMEXPR_NUM_THREADS": null,
+        "OMP_NUM_THREADS": null,
+        "OMP_PLACES": null,
+        "OMP_PROC_BIND": null,
+        "OPENBLAS_NUM_THREADS": null
+      },
+      "timestamp_utc": "2026-08-22T00:46:32.783814+00:00"
+    },
+    "threads": [
+      4,
+      8,
+      16,
+      32
+    ]
+  },
+  "publication": "OMP-pinned interleaved native banana run_code sweep. Not a nested speed claim and not F3 7.70x.",
+  "schema": "nested-ls-reduced-gpu-banana-omp.v1",
+  "threads": [
+    4,
+    8,
+    16,
+    32
+  ],
+  "written_by_pytest": false
+}
