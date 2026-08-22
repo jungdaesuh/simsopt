@@ -14,6 +14,7 @@ import resource
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
@@ -156,6 +157,10 @@ F3_B37_ADJOINT_MIXED_NORM_FLOOR = 1.0e-8
 F3_B37_CHUNK_WIDTHS = (8, 16, 32, 64)
 F3_B37_CHUNK_BANANA_WALL_SECONDS = 1800.0
 F3_B37_VOLUME_OUTER_WALL_SECONDS = 1800.0
+F3_B37_BANANA_OMP_THREADS = (4, 8, 16, 32)
+F3_B37_BANANA_OMP_REPEATS = 2
+F3_B37_CHUNK_WARM_REPEATS = 3
+F3_B37_BANANA_OMP_WALL_SECONDS = 3600.0
 
 
 def archived_flat675_bundle_available(bundle_root: Path | None = None) -> bool:
@@ -337,9 +342,36 @@ def float64_ulps(value: float, reference: float) -> float:
     return float(abs(left - right) / spacing)
 
 
+def nested_ls_threading_env() -> dict[str, str | None]:
+    """OpenMP and BLAS thread knobs observed in this process."""
+
+    return {
+        "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"),
+        "OMP_PROC_BIND": os.environ.get("OMP_PROC_BIND"),
+        "OMP_PLACES": os.environ.get("OMP_PLACES"),
+        "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS"),
+        "OPENBLAS_NUM_THREADS": os.environ.get("OPENBLAS_NUM_THREADS"),
+        "NUMEXPR_NUM_THREADS": os.environ.get("NUMEXPR_NUM_THREADS"),
+    }
+
+
+def nested_ls_omp_threads_pinned(env: dict[str, str | None] | None = None) -> bool:
+    """True when ``OMP_NUM_THREADS`` is a positive integer in the process env."""
+
+    observed = nested_ls_threading_env() if env is None else env
+    raw = observed.get("OMP_NUM_THREADS")
+    if raw is None or str(raw).strip() == "":
+        return False
+    try:
+        return int(str(raw).strip()) >= 1
+    except ValueError:
+        return False
+
+
 def nested_ls_runtime_identity() -> dict[str, object]:
     """Host and JAX device identity for an evidence document."""
 
+    threading = nested_ls_threading_env()
     return {
         "hostname": socket.gethostname(),
         "python_executable": sys.executable,
@@ -347,6 +379,9 @@ def nested_ls_runtime_identity() -> dict[str, object]:
         "jax_devices": [str(device) for device in jax.devices()],
         "jax_platforms_env": os.environ.get("JAX_PLATFORMS"),
         "jax_enable_x64_env": os.environ.get("JAX_ENABLE_X64"),
+        "threading": threading,
+        "omp_num_threads": threading["OMP_NUM_THREADS"],
+        "omp_pinned": nested_ls_omp_threads_pinned(threading),
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -3369,10 +3404,17 @@ class NestedLsChunkBananaProbe:
 
     banana_success: bool
     banana_iter: int
+    banana_newton_iter: int
+    banana_bfgs_iter: int | None
+    banana_iter_meaning: str
     banana_iota: float
     banana_G: float
     banana_seconds: float
+    banana_bfgs_seconds: float | None
+    banana_newton_seconds: float | None
     banana_coil_delta_inf: float
+    banana_omp_pinned: bool
+    banana_omp_num_threads: str | None
     reconstruct_walk_seconds: float | None
     reconstruct_walk_success: bool | None
     y_star_iota: float
@@ -3439,10 +3481,20 @@ def evaluate_f3_b37_chunk_banana_probe(
         return NestedLsChunkBananaProbe(
             banana_success=banana_success,
             banana_iter=banana_iter,
+            banana_newton_iter=banana_iter,
+            banana_bfgs_iter=None,
+            banana_iter_meaning=(
+                "run_code returns Newton polish nit after BFGS; "
+                "seconds are BFGS+Newton wall"
+            ),
             banana_iota=banana_iota,
             banana_G=banana_g,
             banana_seconds=banana_seconds,
+            banana_bfgs_seconds=None,
+            banana_newton_seconds=None,
             banana_coil_delta_inf=banana_coil,
+            banana_omp_pinned=nested_ls_omp_threads_pinned(),
+            banana_omp_num_threads=nested_ls_threading_env()["OMP_NUM_THREADS"],
             reconstruct_walk_seconds=walk_seconds,
             reconstruct_walk_success=walk_success,
             y_star_iota=y_iota,
@@ -3494,10 +3546,13 @@ def evaluate_f3_b37_chunk_banana_probe(
     banana_iter = int(banana["iter"])
     banana_iota = float(banana["iota"])
     banana_g = float(banana["G"])
+    banana_omp_pinned = nested_ls_omp_threads_pinned()
+    banana_omp_threads = nested_ls_threading_env()["OMP_NUM_THREADS"]
     print(
         "banana native"
-        f" success={banana_success} iter={banana_iter}"
-        f" s={banana_seconds:.3f} coil={banana_coil!r}",
+        f" success={banana_success} newton_iter={banana_iter}"
+        f" s={banana_seconds:.3f} coil={banana_coil!r}"
+        f" omp={banana_omp_threads!r} pinned={banana_omp_pinned}",
         flush=True,
     )
     loaded, coils, y_end, _iota, _g_const, _g_value, freeze_reason = (
@@ -3599,10 +3654,20 @@ def evaluate_f3_b37_chunk_banana_probe(
     return NestedLsChunkBananaProbe(
         banana_success=banana_success,
         banana_iter=banana_iter,
+        banana_newton_iter=banana_iter,
+        banana_bfgs_iter=None,
+        banana_iter_meaning=(
+            "run_code returns Newton polish nit after BFGS; "
+            "seconds are BFGS+Newton wall"
+        ),
         banana_iota=banana_iota,
         banana_G=banana_g,
         banana_seconds=float(banana_seconds),
+        banana_bfgs_seconds=None,
+        banana_newton_seconds=None,
         banana_coil_delta_inf=banana_coil,
+        banana_omp_pinned=banana_omp_pinned,
+        banana_omp_num_threads=banana_omp_threads,
         reconstruct_walk_seconds=walk_seconds,
         reconstruct_walk_success=walk_success,
         y_star_iota=float(y_star[0]),
@@ -3983,6 +4048,321 @@ def replace_native_solver_options(
     return original
 
 
+def _run_native_banana_bfgs_then_newton(
+    native: BoozerSurface,
+    *,
+    iota: float,
+    G: float,
+) -> dict[str, object]:
+    """BFGS then Newton as ``run_code`` does, with split walls and OMP env."""
+
+    banana_options = nested_ls_banana_run_code_options()
+    original_options = replace_native_solver_options(
+        native,
+        {
+            "newton_tol": banana_options["newton_tol"],
+            "newton_maxiter": banana_options["newton_maxiter"],
+            "bfgs_tol": banana_options["bfgs_tol"],
+        },
+    )
+    coils0 = np.asarray(native.biotsavart.x, dtype=np.float64)
+    threading = nested_ls_threading_env()
+    try:
+        native.need_to_run_code = True
+        bfgs_started = time.perf_counter()
+        bfgs = native.minimize_boozer_penalty_constraints_LBFGS(
+            constraint_weight=NESTED_LS_CONSTRAINT_WEIGHT,
+            iota=float(iota),
+            G=float(G),
+            tol=float(banana_options["bfgs_tol"]),
+            maxiter=_as_int(native.options.get("bfgs_maxiter", 1500)),
+            verbose=False,
+            limited_memory=bool(native.options.get("limited_memory", False)),
+            weight_inv_modB=NESTED_LS_WEIGHT_INV_MODB,
+        )
+        bfgs_seconds = float(time.perf_counter() - bfgs_started)
+        native.need_to_run_code = True
+        newton_started = time.perf_counter()
+        newton = native.minimize_boozer_penalty_constraints_newton(
+            constraint_weight=NESTED_LS_CONSTRAINT_WEIGHT,
+            iota=float(bfgs["iota"]),
+            G=float(bfgs["G"]),
+            verbose=False,
+            tol=float(banana_options["newton_tol"]),
+            maxiter=int(banana_options["newton_maxiter"]),
+            weight_inv_modB=NESTED_LS_WEIGHT_INV_MODB,
+        )
+        newton_seconds = float(time.perf_counter() - newton_started)
+    finally:
+        native.options = original_options
+    coil_delta = float(
+        np.linalg.norm(
+            np.asarray(native.biotsavart.x, dtype=np.float64) - coils0,
+            ord=np.inf,
+        )
+    )
+    return {
+        "success": bool(newton["success"]),
+        "bfgs_iter": int(bfgs["iter"]),
+        "newton_iter": int(newton["iter"]),
+        "iter": int(newton["iter"]),
+        "iota": float(newton["iota"]),
+        "G": float(newton["G"]),
+        "bfgs_seconds": bfgs_seconds,
+        "newton_seconds": newton_seconds,
+        "seconds": bfgs_seconds + newton_seconds,
+        "coil_delta_inf": coil_delta,
+        "threading": threading,
+        "omp_pinned": nested_ls_omp_threads_pinned(threading),
+        "omp_num_threads": threading["OMP_NUM_THREADS"],
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class NestedLsBananaOmpSweep:
+    """OMP-pinned interleaved native banana ``run_code`` sweep.
+
+    Each row is a fresh process with ``OMP_NUM_THREADS`` set before
+    import. Not a nested speed claim.
+    """
+
+    threads: tuple[int, ...]
+    repeats: int
+    rows: tuple[dict[str, object], ...]
+    any_unpinned: bool
+    fail_closed_reason: str | None
+    runtime: dict[str, object]
+    provenance: dict[str, object]
+
+    def as_payload(self) -> dict[str, object]:
+        return asdict(self)
+
+
+def evaluate_f3_b37_banana_omp_sweep(
+    *,
+    python_executable: str | None = None,
+    threads: tuple[int, ...] = F3_B37_BANANA_OMP_THREADS,
+    repeats: int = F3_B37_BANANA_OMP_REPEATS,
+) -> NestedLsBananaOmpSweep:
+    """Launch interleaved native banana children with pinned OpenMP."""
+
+    provenance = nested_ls_receipt_provenance()
+    runtime = nested_ls_runtime_identity()
+    child = (
+        Path(__file__).resolve().parents[3]
+        / "benchmarks"
+        / "nested_ls_banana_omp_child.py"
+    )
+    python = python_executable or sys.executable
+    rows: list[dict[str, object]] = []
+    fail_reason: str | None = None
+    any_unpinned = False
+    deadline = time.perf_counter() + float(F3_B37_BANANA_OMP_WALL_SECONDS)
+    schedule = [
+        (repeat, int(thread))
+        for repeat in range(int(repeats))
+        for thread in threads
+    ]
+    for repeat, thread_count in schedule:
+        if fail_reason is not None:
+            break
+        if time.perf_counter() >= deadline:
+            fail_reason = "wall_time_cap"
+            break
+        env = dict(os.environ)
+        env["OMP_NUM_THREADS"] = str(thread_count)
+        env["JAX_PLATFORMS"] = "cpu"
+        env["JAX_ENABLE_X64"] = "1"
+        env.pop("SIMSOPT_BACKEND_MODE", None)
+        started = time.perf_counter()
+        with tempfile.NamedTemporaryFile(
+            suffix=".json", prefix="nested_ls_banana_omp_", delete=False
+        ) as handle:
+            child_out = Path(handle.name)
+        completed = subprocess.run(
+            [python, str(child), str(child_out)],
+            cwd=str(Path(__file__).resolve().parents[3]),
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        seconds = float(time.perf_counter() - started)
+        if completed.returncode != 0 or not child_out.is_file():
+            fail_reason = "banana_child_failed"
+            rows.append(
+                {
+                    "repeat": int(repeat),
+                    "omp_num_threads": int(thread_count),
+                    "returncode": int(completed.returncode),
+                    "seconds": seconds,
+                    "stderr_tail": completed.stderr[-2000:],
+                }
+            )
+            print(
+                f"banana omp child fail threads={thread_count} rc={completed.returncode}",
+                flush=True,
+            )
+            break
+        payload = json.loads(child_out.read_text(encoding="utf-8"))
+        child_out.unlink(missing_ok=True)
+        pinned = bool(payload["omp_pinned"])
+        any_unpinned = any_unpinned or (not pinned)
+        row = {
+            "repeat": int(repeat),
+            "omp_num_threads": int(thread_count),
+            "observed_omp_num_threads": payload["omp_num_threads"],
+            "omp_pinned": pinned,
+            "success": bool(payload["success"]),
+            "bfgs_iter": int(payload["bfgs_iter"]),
+            "newton_iter": int(payload["newton_iter"]),
+            "bfgs_seconds": _json_finite(payload["bfgs_seconds"]),
+            "newton_seconds": _json_finite(payload["newton_seconds"]),
+            "seconds": _json_finite(payload["seconds"]),
+            "iota": _json_finite(payload["iota"]),
+            "G": _json_finite(payload["G"]),
+            "coil_delta_inf": _json_finite(payload["coil_delta_inf"]),
+        }
+        rows.append(row)
+        print(
+            "banana omp"
+            f" repeat={repeat} threads={thread_count}"
+            f" s={payload['seconds']!r} bfgs_iter={payload['bfgs_iter']}"
+            f" newton_iter={payload['newton_iter']} pinned={pinned}",
+            flush=True,
+        )
+        if not pinned:
+            fail_reason = "banana_omp_unpinned"
+        elif not bool(payload["success"]):
+            fail_reason = "banana_failed"
+        elif float(payload["coil_delta_inf"]) != 0.0:
+            fail_reason = "coil_moved"
+    if fail_reason is None and not rows:
+        fail_reason = "banana_child_failed"
+    if fail_reason is None and any_unpinned:
+        fail_reason = "banana_omp_unpinned"
+    return NestedLsBananaOmpSweep(
+        threads=tuple(int(value) for value in threads),
+        repeats=int(repeats),
+        rows=tuple(rows),
+        any_unpinned=bool(any_unpinned),
+        fail_closed_reason=fail_reason,
+        runtime=runtime,
+        provenance=provenance,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class NestedLsChunkWarmProbe:
+    """Warm in-process dense-assemble repeats at the LU endpoint.
+
+    Cold first-touch is discarded per width. Not a production default
+    switch and not a nested speed claim.
+    """
+
+    endpoint_sha256: str
+    newton_stab: float
+    warm_repeats: int
+    rows: tuple[dict[str, object], ...]
+    fail_closed_reason: str | None
+    runtime: dict[str, object]
+    provenance: dict[str, object]
+
+    def as_payload(self) -> dict[str, object]:
+        return asdict(self)
+
+
+def evaluate_f3_b37_chunk_warm_probe(
+    jax_boozer: BoozerSurfaceJAX,
+    *,
+    warm_repeats: int = F3_B37_CHUNK_WARM_REPEATS,
+) -> NestedLsChunkWarmProbe:
+    """Repeated warm Ĥ+stab I assemblies after one discarded warmup."""
+
+    provenance = nested_ls_receipt_provenance()
+    runtime = nested_ls_runtime_identity()
+    loaded, coils, y_end, _iota, _g_const, _g_value, freeze_reason = (
+        _freeze_dense_lu_walk_endpoint(jax_boozer)
+    )
+    sha = sha256_float64(loaded)
+
+    def _empty(reason: str) -> NestedLsChunkWarmProbe:
+        return NestedLsChunkWarmProbe(
+            endpoint_sha256=sha,
+            newton_stab=float(NESTED_LS_NEWTON_STAB),
+            warm_repeats=int(warm_repeats),
+            rows=(),
+            fail_closed_reason=reason,
+            runtime=runtime,
+            provenance=provenance,
+        )
+
+    if freeze_reason is not None:
+        return _empty(freeze_reason)
+    residual_fn, objective_fn, _phi_hat = nested_ls_reduced_closures(jax_boozer)
+    del _phi_hat
+    operator = factor_reduced_nested_ls_schur(
+        residual_fn,
+        objective_fn,
+        loaded,
+        y_probe=np.asarray(y_end, dtype=np.float64),
+    )
+    rows: list[dict[str, object]] = []
+    fail_reason: str | None = None
+    for width in F3_B37_CHUNK_WIDTHS:
+        jax.block_until_ready(
+            materialize_stabilized_schur_dense(
+                operator,
+                float(NESTED_LS_NEWTON_STAB),
+                chunk_batch_size=int(width),
+            )
+        )
+        samples: list[float] = []
+        for _repeat in range(int(warm_repeats)):
+            started = time.perf_counter()
+            jax.block_until_ready(
+                materialize_stabilized_schur_dense(
+                    operator,
+                    float(NESTED_LS_NEWTON_STAB),
+                    chunk_batch_size=int(width),
+                )
+            )
+            samples.append(float(time.perf_counter() - started))
+        mean = float(sum(samples) / len(samples))
+        minimum = float(min(samples))
+        print(
+            f"chunk warm width={width} samples={samples} mean={mean:.3f}",
+            flush=True,
+        )
+        rows.append(
+            {
+                "chunk_batch_size": int(width),
+                "warm_repeats": int(warm_repeats),
+                "dense_seconds": [_json_finite(value) for value in samples],
+                "dense_seconds_mean": _json_finite(mean),
+                "dense_seconds_min": _json_finite(minimum),
+                "discarded_warmup": True,
+            }
+        )
+    coil_after = float(
+        np.linalg.norm(
+            np.asarray(jax_boozer.biotsavart.x, dtype=np.float64) - coils,
+            ord=np.inf,
+        )
+    )
+    if fail_reason is None and coil_after != 0.0:
+        fail_reason = "coil_moved"
+    return NestedLsChunkWarmProbe(
+        endpoint_sha256=sha,
+        newton_stab=float(NESTED_LS_NEWTON_STAB),
+        warm_repeats=int(warm_repeats),
+        rows=tuple(rows),
+        fail_closed_reason=fail_reason,
+        runtime=runtime,
+        provenance=provenance,
+    )
+
+
 def evaluate_f3_b37_nested_timing(
     native: BoozerSurface,
     jax_boozer: BoozerSurfaceJAX,
@@ -4067,8 +4447,12 @@ __all__ = [
     "F3_B37_ADJOINT_FD_EPSILON",
     "F3_B37_ADJOINT_LIVE_ETA_TOL",
     "F3_B37_ADJOINT_WALL_SECONDS",
+    "F3_B37_BANANA_OMP_REPEATS",
+    "F3_B37_BANANA_OMP_THREADS",
+    "F3_B37_BANANA_OMP_WALL_SECONDS",
     "F3_B37_CAP512_WALK_EVIDENCE",
     "F3_B37_CHUNK_BANANA_WALL_SECONDS",
+    "F3_B37_CHUNK_WARM_REPEATS",
     "F3_B37_CHUNK_WIDTHS",
     "F3_B37_DENSE_LU_ENDPOINT_G",
     "F3_B37_DENSE_LU_ENDPOINT_GRAD_L2",
@@ -4098,8 +4482,10 @@ __all__ = [
     "F3_B37_STEP6_WALL_SECONDS_2048",
     "F3_B37_VOLUME_OUTER_WALL_SECONDS",
     "NestedLsB37NestedTiming",
+    "NestedLsBananaOmpSweep",
     "NestedLsBoundedF3B37Result",
     "NestedLsChunkBananaProbe",
+    "NestedLsChunkWarmProbe",
     "NestedLsCountedMatvec",
     "NestedLsEndpointAdjointProbe",
     "NestedLsFlatNativeB37Probe",
@@ -4113,8 +4499,10 @@ __all__ = [
     "archived_f3_b37_lanes_available",
     "archived_flat675_bundle_available",
     "dump_strict_json",
+    "evaluate_f3_b37_banana_omp_sweep",
     "evaluate_f3_b37_bounded_probe",
     "evaluate_f3_b37_chunk_banana_probe",
+    "evaluate_f3_b37_chunk_warm_probe",
     "evaluate_f3_b37_endpoint_adjoint_probe",
     "evaluate_f3_b37_flat_native_probe",
     "evaluate_f3_b37_nested_timing",
@@ -4131,8 +4519,10 @@ __all__ = [
     "last_step_meets_forcing",
     "load_archived_nested_ls_pair",
     "load_flat675_lane_blocks",
+    "nested_ls_omp_threads_pinned",
     "nested_ls_receipt_provenance",
     "nested_ls_runtime_identity",
+    "nested_ls_threading_env",
     "predict_start_at_cap_wall_seconds",
     "replace_native_solver_options",
     "sha256_file",

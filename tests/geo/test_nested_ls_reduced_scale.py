@@ -37,6 +37,7 @@ from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     ARCHIVED_START_QR_IOTA,
     DEFAULT_F3_B37_GPU_LANE,
     DEFAULT_F3_B37_NATIVE_LANE,
+    F3_B37_BANANA_OMP_THREADS,
     F3_B37_CHUNK_WIDTHS,
     F3_B37_DENSE_LU_ENDPOINT_G,
     F3_B37_DENSE_LU_ENDPOINT_GRAD_L2,
@@ -51,6 +52,7 @@ from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     archived_f3_b37_lanes_available,
     archived_flat675_bundle_available,
     dump_strict_json,
+    evaluate_f3_b37_banana_omp_sweep,
     evaluate_f3_b37_bounded_probe,
     evaluate_f3_b37_chunk_banana_probe,
     evaluate_f3_b37_endpoint_adjoint_probe,
@@ -66,6 +68,7 @@ from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     last_step_meets_forcing,
     load_archived_nested_ls_pair,
     load_flat675_lane_blocks,
+    nested_ls_omp_threads_pinned,
     nested_ls_receipt_provenance,
     predict_start_at_cap_wall_seconds,
     replace_native_solver_options,
@@ -138,9 +141,23 @@ _F3_B37_GPU_VOLUME_OUTER_EVIDENCE = (
     _EVIDENCE_DIR / "nested_ls_reduced_gpu_volume_outer_20260821.json"
 )
 _GPU_VOLUME_OUTER_PUBLICATION = (
-    "GPU moving-coil Volume outer gradient at the dense-LU endpoint. "
-    "Unregularized IFT, one coil-direction FD. Not an outer optimizer loop, "
-    "not a nested speed claim, and not F3 7.70x."
+    "GPU F3-B37 Volume directional-gradient canary at the dense-LU endpoint. "
+    "Unregularized IFT, one coil-direction FD. Not a B3 outer optimization, "
+    "not an outer optimizer loop, not a nested speed claim, and not F3 7.70x."
+)
+_F3_B37_GPU_BANANA_OMP_EVIDENCE = (
+    _EVIDENCE_DIR / "nested_ls_reduced_gpu_banana_omp_20260821.json"
+)
+_GPU_BANANA_OMP_PUBLICATION = (
+    "OMP-pinned interleaved native banana run_code sweep. "
+    "Not a nested speed claim and not F3 7.70x."
+)
+_F3_B37_GPU_CHUNK_WARM_EVIDENCE = (
+    _EVIDENCE_DIR / "nested_ls_reduced_gpu_chunk_warm_20260821.json"
+)
+_GPU_CHUNK_WARM_PUBLICATION = (
+    "Warm in-process dense-assemble repeats at the LU endpoint. "
+    "Cold first-touch discarded. Not a default switch and not a nested speed claim."
 )
 _GPU_WALK_PUBLICATION = (
     "GPU forcing-certified Schur walk. Not a timing claim and not F3 7.70x."
@@ -1162,6 +1179,7 @@ def test_authored_gpu_chunk_banana_json_is_strict_and_not_a_speed_claim():
     widths = [int(row["chunk_batch_size"]) for row in probe["rows"]]
     assert widths == list(F3_B37_CHUNK_WIDTHS)
     assert probe["fail_closed_reason"] is None
+    assert probe.get("banana_omp_pinned") is not True
     assert probe["runtime"]["jax_default_backend"] == "gpu"
     assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
 
@@ -1181,8 +1199,9 @@ def test_authored_gpu_volume_outer_json_is_strict_and_not_a_walk():
     boundary = payload["claim_boundary"]
     assert boundary["nested_speed_claim"] is False
     assert boundary["inherits_f3_7_70x"] is False
-    assert boundary["moving_coil_b3_outer"] is True
+    assert boundary["moving_coil_b3_outer"] is False
     assert boundary["outer_optimizer_loop"] is False
+    assert boundary.get("volume_directional_gradient") is True
     assert boundary["cap_2048_attempted"] is False
     probe = payload["probe"]
     assert probe["surface_sha256"] == F3_B37_DENSE_LU_ENDPOINT_SURFACE_SHA256
@@ -1191,6 +1210,74 @@ def test_authored_gpu_volume_outer_json_is_strict_and_not_a_walk():
     assert probe["fd_match"] is True
     assert float(probe["coil_delta_inf_after"]) == 0.0
     assert probe["runtime"]["jax_default_backend"] == "gpu"
+    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
+
+
+def test_omp_pin_requires_positive_integer_env():
+    assert nested_ls_omp_threads_pinned({"OMP_NUM_THREADS": None}) is False
+    assert nested_ls_omp_threads_pinned({"OMP_NUM_THREADS": ""}) is False
+    assert nested_ls_omp_threads_pinned({"OMP_NUM_THREADS": "unset"}) is False
+    assert nested_ls_omp_threads_pinned({"OMP_NUM_THREADS": "8"}) is True
+    assert F3_B37_BANANA_OMP_THREADS == (4, 8, 16, 32)
+    source = Path(evaluate_f3_b37_banana_omp_sweep.__code__.co_filename).read_text(
+        encoding="utf-8"
+    )
+    assert "OMP_NUM_THREADS" in source
+    driver = Path(__file__).resolve().parents[2] / "benchmarks" / "nested_ls_f3_b37_gpu_canaries.py"
+    text = driver.read_text(encoding="utf-8")
+    assert "docs/receipts/evidence" in text
+    assert "/tmp/" not in text
+
+
+@pytest.mark.skipif(
+    not _F3_B37_GPU_BANANA_OMP_EVIDENCE.is_file(),
+    reason="authored OMP banana sweep JSON not yet produced",
+)
+def test_authored_gpu_banana_omp_json_is_pinned_and_not_a_speed_claim():
+    raw = _F3_B37_GPU_BANANA_OMP_EVIDENCE.read_text(encoding="utf-8")
+    assert "NaN" not in raw
+    payload = json.loads(raw)
+    dump_strict_json(payload)
+    assert payload["schema"] == "nested-ls-reduced-gpu-banana-omp.v1"
+    assert payload["written_by_pytest"] is False
+    assert payload["publication"] == _GPU_BANANA_OMP_PUBLICATION
+    boundary = payload["claim_boundary"]
+    assert boundary["nested_speed_claim"] is False
+    assert boundary["omp_pinned"] is True
+    assert boundary["interleaved_repeats"] is True
+    probe = payload["probe"]
+    assert probe["fail_closed_reason"] is None
+    assert probe["any_unpinned"] is False
+    assert {int(row["omp_num_threads"]) for row in probe["rows"]} == set(
+        F3_B37_BANANA_OMP_THREADS
+    )
+    assert all(bool(row["omp_pinned"]) for row in probe["rows"])
+    assert all(float(row["coil_delta_inf"]) == 0.0 for row in probe["rows"])
+    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
+
+
+@pytest.mark.skipif(
+    not _F3_B37_GPU_CHUNK_WARM_EVIDENCE.is_file(),
+    reason="authored warm chunk JSON not yet produced",
+)
+def test_authored_gpu_chunk_warm_json_is_not_a_default_switch():
+    raw = _F3_B37_GPU_CHUNK_WARM_EVIDENCE.read_text(encoding="utf-8")
+    assert "NaN" not in raw
+    payload = json.loads(raw)
+    dump_strict_json(payload)
+    assert payload["schema"] == "nested-ls-reduced-gpu-chunk-warm.v1"
+    assert payload["written_by_pytest"] is False
+    assert payload["publication"] == _GPU_CHUNK_WARM_PUBLICATION
+    boundary = payload["claim_boundary"]
+    assert boundary["nested_speed_claim"] is False
+    assert boundary["production_chunk_default_unchanged"] is True
+    assert boundary["warm_repeated"] is True
+    probe = payload["probe"]
+    assert probe["fail_closed_reason"] is None
+    assert all(bool(row["discarded_warmup"]) for row in probe["rows"])
+    assert [int(row["chunk_batch_size"]) for row in probe["rows"]] == list(
+        F3_B37_CHUNK_WIDTHS
+    )
     assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
 
 
