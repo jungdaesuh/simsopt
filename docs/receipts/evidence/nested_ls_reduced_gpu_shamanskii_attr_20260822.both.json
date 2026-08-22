@@ -1,0 +1,235 @@
+{
+  "claim_boundary": {
+    "cap_2048_attempted": false,
+    "comparable_operators": false,
+    "explicit_inverse_m_production": false,
+    "f3_sealed": true,
+    "inherits_f3_7_70x": false,
+    "nested_speed_claim": false,
+    "shamanskii_attribution": true,
+    "inner_and_process_wall": true,
+    "one_lane_per_process": true,
+    "repeats": 3,
+    "jax_claim_clock": "parent_wait_minus_reconstruct_rejudge",
+    "jax_floor_on_walk_rows": "process_elapsed_minus_reconstruct_walk_rejudge",
+    "jax_floor_on_floor_rows": "import_init_cache_load"
+  },
+  "command": "SIMSOPT_BACKEND_MODE=jax_gpu_fast JAX_PLATFORMS=cuda,cpu JAX_ENABLE_X64=1 .venv-qn-gpu/bin/python benchmarks/nested_ls_shamanskii_attribution.py --lane both",
+  "date": "2026-08-22",
+  "driver": "benchmarks.nested_ls_shamanskii_attribution.both",
+  "execution_log": "docs/receipts/evidence/nested_ls_reduced_gpu_shamanskii_attr_20260822.log",
+  "publication": "Shamanskii and compile-cache attribution: cache-only, lag-only, and both. Not a nested speed claim and not F3 7.70x.",
+  "repeats": 3,
+  "rows": [
+    {
+      "linear_solver": "shamanskii",
+      "disable_cache": false,
+      "cache_dir": ".artifacts/nested-ls-shamanskii-xla-shamanskii",
+      "success": true,
+      "iteration_count": 8,
+      "grad_l2": 1.0826215341384488e-14,
+      "iota": 0.14085710958396597,
+      "G": 2.0106193053897154,
+      "coil_delta_inf": 0.0,
+      "native_rejudge_iter": 0,
+      "rejudge_vs_jax_surface_inf": 0.0,
+      "assembled_steps": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        7
+      ],
+      "shamanskii_reused_steps": [
+        6,
+        8
+      ],
+      "shamanskii_reassembled_steps": [
+        2,
+        3,
+        4,
+        5,
+        7
+      ],
+      "shamanskii_refine_passes": [
+        0,
+        0,
+        0,
+        0,
+        3,
+        1,
+        3,
+        0
+      ],
+      "process_wall_seconds": 270.1013109968044,
+      "process_elapsed_seconds": 268.8137031898368,
+      "reconstruct_seconds": 154.66427801689133,
+      "walk_seconds": 83.003034704132,
+      "native_rejudge_seconds": 12.491928888019174,
+      "jax_process_wall_seconds": 101.65749628492631,
+      "jax_floor_seconds": 18.654461580794305,
+      "lane": "both",
+      "role": "prime",
+      "repeat": -1
+    },
+    {
+      "linear_solver": "shamanskii",
+      "disable_cache": false,
+      "cache_dir": ".artifacts/nested-ls-shamanskii-xla-shamanskii",
+      "success": true,
+      "iteration_count": 8,
+      "grad_l2": 1.0826215341384488e-14,
+      "iota": 0.14085710958396597,
+      "G": 2.0106193053897154,
+      "coil_delta_inf": 0.0,
+      "native_rejudge_iter": 0,
+      "rejudge_vs_jax_surface_inf": 0.0,
+      "assembled_steps": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        7
+      ],
+      "shamanskii_reused_steps": [
+        6,
+        8
+      ],
+      "shamanskii_reassembled_steps": [
+        2,
+        3,
+        4,
+        5,
+        7
+      ],
+      "shamanskii_refine_passes": [
+        0,
+        0,
+        0,
+        0,
+        3,
+        1,
+        3,
+        0
+      ],
+      "process_wall_seconds": 260.43099392205477,
+      "process_elapsed_seconds": 259.1269968650304,
+      "reconstruct_seconds": 148.30632061487995,
+      "walk_seconds": 81.89340494014323,
+      "native_rejudge_seconds": 12.457332837861031,
+      "jax_process_wall_seconds": 98.3633434122894,
+      "jax_floor_seconds": 16.46993847214617,
+      "lane": "both",
+      "role": "measure",
+      "repeat": 0
+    },
+    {
+      "linear_solver": "shamanskii",
+      "disable_cache": false,
+      "cache_dir": ".artifacts/nested-ls-shamanskii-xla-shamanskii",
+      "success": true,
+      "iteration_count": 8,
+      "grad_l2": 1.0826215341384488e-14,
+      "iota": 0.14085710958396597,
+      "G": 2.0106193053897154,
+      "coil_delta_inf": 0.0,
+      "native_rejudge_iter": 0,
+      "rejudge_vs_jax_surface_inf": 0.0,
+      "assembled_steps": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        7
+      ],
+      "shamanskii_reused_steps": [
+        6,
+        8
+      ],
+      "shamanskii_reassembled_steps": [
+        2,
+        3,
+        4,
+        5,
+        7
+      ],
+      "shamanskii_refine_passes": [
+        0,
+        0,
+        0,
+        0,
+        3,
+        1,
+        3,
+        0
+      ],
+      "process_wall_seconds": 255.2633793510031,
+      "process_elapsed_seconds": 253.98668956710026,
+      "reconstruct_seconds": 143.3425202490762,
+      "walk_seconds": 81.88793102186173,
+      "native_rejudge_seconds": 12.516813264926895,
+      "jax_process_wall_seconds": 98.12735605309717,
+      "jax_floor_seconds": 16.23942503123544,
+      "lane": "both",
+      "role": "measure",
+      "repeat": 1
+    },
+    {
+      "linear_solver": "shamanskii",
+      "disable_cache": false,
+      "cache_dir": ".artifacts/nested-ls-shamanskii-xla-shamanskii",
+      "success": true,
+      "iteration_count": 8,
+      "grad_l2": 1.0826215341384488e-14,
+      "iota": 0.14085710958396597,
+      "G": 2.0106193053897154,
+      "coil_delta_inf": 0.0,
+      "native_rejudge_iter": 0,
+      "rejudge_vs_jax_surface_inf": 0.0,
+      "assembled_steps": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        7
+      ],
+      "shamanskii_reused_steps": [
+        6,
+        8
+      ],
+      "shamanskii_reassembled_steps": [
+        2,
+        3,
+        4,
+        5,
+        7
+      ],
+      "shamanskii_refine_passes": [
+        0,
+        0,
+        0,
+        0,
+        3,
+        1,
+        3,
+        0
+      ],
+      "process_wall_seconds": 256.7787459900137,
+      "process_elapsed_seconds": 255.53477139002644,
+      "reconstruct_seconds": 144.932149594184,
+      "walk_seconds": 81.91269274614751,
+      "native_rejudge_seconds": 12.46741876914166,
+      "jax_process_wall_seconds": 98.13520302670076,
+      "jax_floor_seconds": 16.22251028055325,
+      "lane": "both",
+      "role": "measure",
+      "repeat": 2
+    }
+  ],
+  "schema": "nested-ls-reduced-gpu-shamanskii-attr.v1",
+  "written_by_pytest": false
+}

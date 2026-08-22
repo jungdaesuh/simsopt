@@ -1,10 +1,31 @@
 lane cache_only
-attr solver=dense_lu cache_disabled=False walk=117.89494997193106 wall=303.836732233176 reused=[] reassembled=[]
-attr solver=dense_lu cache_disabled=False walk=110.78239642898552 wall=313.7559948619455 reused=[] reassembled=[]
-attr solver=dense_lu cache_disabled=False walk=112.91409069905058 wall=320.3700613339897 reused=[] reassembled=[]
+lane cache_only
+attr solver=dense_lu cache_disabled=False success=True walk=108.27692459803075 wall=320.3737242401112 jax_wall=124.76059633190744 floor=16.48367173387669 reused=[] reassembled=[] refine=[0, 0, 0, 0, 0, 0, 0, 0]
+attr solver=dense_lu cache_disabled=False success=True walk=107.84220695798285 wall=293.3914716159925 jax_wall=124.76616722904146 floor=16.923960271058604 reused=[] reassembled=[] refine=[0, 0, 0, 0, 0, 0, 0, 0]
+attr solver=dense_lu cache_disabled=False success=True walk=108.06815392198041 wall=301.77201209403574 jax_wall=124.73744348599575 floor=16.669289564015344 reused=[] reassembled=[] refine=[0, 0, 0, 0, 0, 0, 0, 0]
+attr solver=dense_lu cache_disabled=False success=True walk=106.34084907011129 wall=287.3688215520233 jax_wall=122.81176933995448 floor=16.47092026984319 reused=[] reassembled=[] refine=[0, 0, 0, 0, 0, 0, 0, 0]
+wrote /home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/docs/receipts/evidence/nested_ls_reduced_gpu_shamanskii_attr_20260822.cache_only.json
 lane lag_only
-attr solver=shamanskii cache_disabled=True walk=137.1790284800809 wall=340.53679206990637 reused=[8] reassembled=[2, 3, 4, 5, 6, 7]
-attr solver=shamanskii cache_disabled=True walk=133.83886213600636 wall=331.6919494140893 reused=[8] reassembled=[2, 3, 4, 5, 6, 7]
+lane lag_only
+attr solver=shamanskii cache_disabled=True success=True walk=114.47235679300502 wall=291.0792056058999 jax_wall=134.15535269095562 floor=19.682995897950605 reused=[6, 8] reassembled=[2, 3, 4, 5, 7] refine=[0, 0, 0, 0, 3, 1, 3, 0]
+attr solver=shamanskii cache_disabled=True success=True walk=113.8773513098713 wall=293.5754883729387 jax_wall=133.23778912890702 floor=19.360437819035724 reused=[6, 8] reassembled=[2, 3, 4, 5, 7] refine=[0, 0, 0, 0, 3, 1, 3, 0]
+attr solver=shamanskii cache_disabled=True success=True walk=115.5719599109143 wall=298.54607734200545 jax_wall=135.09962674509734 floor=19.527666834183037 reused=[6, 8] reassembled=[2, 3, 4, 5, 7] refine=[0, 0, 0, 0, 3, 1, 3, 0]
+wrote /home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/docs/receipts/evidence/nested_ls_reduced_gpu_shamanskii_attr_20260822.lag_only.json
 lane both
-attr solver=shamanskii cache_disabled=False walk=110.90691579808481 wall=314.90886467299424 reused=[8] reassembled=[2, 3, 4, 5, 6, 7]
-attr solver=shamanskii cache_disabled=False walk=97.16209350898862 wall=304.3207944009919 reused=[8] reassembled=[2, 3, 4, 5, 6, 7]
+lane both
+attr solver=shamanskii cache_disabled=False success=True walk=83.003034704132 wall=270.1013109968044 jax_wall=101.65749628492631 floor=18.654461580794305 reused=[6, 8] reassembled=[2, 3, 4, 5, 7] refine=[0, 0, 0, 0, 3, 1, 3, 0]
+attr solver=shamanskii cache_disabled=False success=True walk=81.89340494014323 wall=260.43099392205477 jax_wall=98.3633434122894 floor=16.46993847214617 reused=[6, 8] reassembled=[2, 3, 4, 5, 7] refine=[0, 0, 0, 0, 3, 1, 3, 0]
+attr solver=shamanskii cache_disabled=False success=True walk=81.88793102186173 wall=255.2633793510031 jax_wall=98.12735605309717 floor=16.23942503123544 reused=[6, 8] reassembled=[2, 3, 4, 5, 7] refine=[0, 0, 0, 0, 3, 1, 3, 0]
+attr solver=shamanskii cache_disabled=False success=True walk=81.91269274614751 wall=256.7787459900137 jax_wall=98.13520302670076 floor=16.22251028055325 reused=[6, 8] reassembled=[2, 3, 4, 5, 7] refine=[0, 0, 0, 0, 3, 1, 3, 0]
+wrote /home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/docs/receipts/evidence/nested_ls_reduced_gpu_shamanskii_attr_20260822.both.json
+lane floor
+lane floor
+attr solver=floor cache_disabled=False success=True floor=0.5436905811075121 wall=0.7434560591354966
+attr solver=floor cache_disabled=True success=True floor=0.5315642249770463 wall=0.72960364096798
+wrote /home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/docs/receipts/evidence/nested_ls_reduced_gpu_jax_floor_20260822.json
+refusing to mint claim-grade attribution JSON on a dirty tree:
+M docs/receipts/evidence/nested_ls_reduced_gpu_shamanskii_attr_20260822.log
+?? docs/receipts/evidence/nested_ls_reduced_gpu_jax_floor_20260822.json
+?? docs/receipts/evidence/nested_ls_reduced_gpu_shamanskii_attr_20260822.both.json
+?? docs/receipts/evidence/nested_ls_reduced_gpu_shamanskii_attr_20260822.cache_only.json
+?? docs/receipts/evidence/nested_ls_reduced_gpu_shamanskii_attr_20260822.lag_only.json
