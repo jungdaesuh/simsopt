@@ -433,6 +433,8 @@ def test_implicit_adjoint_defaults_and_dense_lu_honours_1mib_cap():
     )
     newton = inspect.signature(run_reduced_nested_ls_schur_newton)
     assert newton.parameters["linear_solver"].default == "gmres"
+    assert newton.parameters["max_dense_linearization_bytes"].default is None
+    assert schur_dense_operator_bytes(661) == 3_495_368
 
     class _F3DummySchur:
         surface_size = 661

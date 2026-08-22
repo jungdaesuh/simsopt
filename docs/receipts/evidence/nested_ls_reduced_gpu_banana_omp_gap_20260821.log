@@ -1,0 +1,11 @@
+banana omp repeat=0 threads=20 s=128.2092782270629 bfgs_iter=682 newton_iter=1 pinned=True
+banana omp repeat=0 threads=24 s=135.41561560612172 bfgs_iter=682 newton_iter=1 pinned=True
+banana omp repeat=1 threads=20 s=126.17406297288835 bfgs_iter=682 newton_iter=1 pinned=True
+banana omp repeat=1 threads=24 s=134.51083052507602 bfgs_iter=682 newton_iter=1 pinned=True
+banana_omp_gap fail None rows 4
+row {'repeat': 0, 'omp_num_threads': 20, 'observed_omp_num_threads': '20', 'omp_pinned': True, 'success': True, 'bfgs_iter': 682, 'newton_iter': 1, 'bfgs_seconds': 97.32716480107047, 'newton_seconds': 30.88211342599243, 'seconds': 128.2092782270629, 'iota': 0.14085710958306907, 'G': 2.0106193053897154, 'coil_delta_inf': 0.0}
+row {'repeat': 0, 'omp_num_threads': 24, 'observed_omp_num_threads': '24', 'omp_pinned': True, 'success': True, 'bfgs_iter': 682, 'newton_iter': 1, 'bfgs_seconds': 104.77050758013502, 'newton_seconds': 30.6451080259867, 'seconds': 135.41561560612172, 'iota': 0.14085710958306968, 'G': 2.0106193053897154, 'coil_delta_inf': 0.0}
+row {'repeat': 1, 'omp_num_threads': 20, 'observed_omp_num_threads': '20', 'omp_pinned': True, 'success': True, 'bfgs_iter': 682, 'newton_iter': 1, 'bfgs_seconds': 96.1234138449654, 'newton_seconds': 30.050649127922952, 'seconds': 126.17406297288835, 'iota': 0.14085710958306907, 'G': 2.0106193053897154, 'coil_delta_inf': 0.0}
+row {'repeat': 1, 'omp_num_threads': 24, 'observed_omp_num_threads': '24', 'omp_pinned': True, 'success': True, 'bfgs_iter': 682, 'newton_iter': 1, 'bfgs_seconds': 105.12430517398752, 'newton_seconds': 29.386525351088494, 'seconds': 134.51083052507602, 'iota': 0.14085710958306968, 'G': 2.0106193053897154, 'coil_delta_inf': 0.0}
+wrote /home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/docs/receipts/evidence/nested_ls_reduced_gpu_banana_omp_gap_20260821.json
+ok True
