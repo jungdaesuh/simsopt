@@ -558,32 +558,62 @@ device-memory fraction), not a performance threshold: the
 spectrum/termination argument says the crossover never swings back
 to matrix-free below memory limits.
 
-Partial GPU attribution (killed at 40 min before JSON mint;
-cache-only and lag-only complete; both incomplete). Inner walk:
-dense_lu cache-only 110.8–117.9 s; Shamanskii lag-only 133.8–137.2 s
-with reuse only on step 8 and reassembly on steps 2–7. One avoided
-assembly is not a win; the failed attempts make Shamanskii slower
-than always-assemble. Process wall is ~300 s because the child
-includes native reconstruct+rejudge. Not a speed claim.
+### Shamanskii / cache attribution (matched-cache rows)
+
+Committed log
+``docs/receipts/evidence/nested_ls_reduced_gpu_shamanskii_attr_20260822.log``.
+JSON not minted (40 min timeout). ``success`` was not in the log
+line. Every lane:
+
+| lane | cache | role | inner walk (s) | reused | reassembled |
+|---|---|---|---|---|---|
+| cache_only | on | prime | 117.89 | [] | [] |
+| cache_only | on | measure | 110.78 | [] | [] |
+| cache_only | on | measure | 112.91 | [] | [] |
+| lag_only | off | measure | 137.18 | [8] | [2–7] |
+| lag_only | off | measure | 133.84 | [8] | [2–7] |
+| both | on | prime | 110.91 | [8] | [2–7] |
+| both | on | measure | **97.16** | [8] | [2–7] |
+
+Matched-cache inner walks: Shamanskii **equal-or-faster** than
+dense_lu (97.16 and 110.91 vs 110.78–117.89). The 97.16 s both
+row is a **single warm measure**, uncertified: no JSON, no
+``success`` bit in the log, n=1. Provisional vs native OMP=16
+116.02 s is 1.19× inner-solver — **not a claim**. Lag-only
+(cache off) vs cache-only (cache on) is not a matched pair; that
+comparison produced the false “Shamanskii is slower” verdict.
+
+Reuse is only step 8; steps 2–7 reassemble. Process wall is
+~300–340 s because the child still includes native reconstruct
+and rejudge. JAX process-wall floor (import+init+cache load) is
+unmeasured.
+
+### Report-authoring rule
+
+Every comparative verdict cites **matched-state** rows from the
+committed artifact. Every lane in the log appears in the table.
+Every native number carries its OMP pin inline. Do not author a
+verdict before an independent read of the artifact.
 
 ## Next
 
-1. Remint Shamanskii/cache attribution JSON from a clean tree
-   (cache-only / lag-only / both). Gate-6 numerator stays dense_lu
-   until reuse skips ≥2 net assemblies.
-2. Multi-direction, step-halved FD for the outer gradient (parallel
-   lane).
-3. **Clean-tree** Gate-6 claim run against the contract above
-   (process wall vs process wall, interleaved native/JAX,
-   aggregation = **min** of ≥3). Pre-lever inner row stays
-   153.06 vs 116.02 = 0.76×.
-4. New eight-term outer optimizer charter: B3, then B37.
-   Benchmark only after endpoint and KKT parity.
+1. Remint Shamanskii/cache attribution JSON from a clean tree:
+   one lane per process, ≥3 repeats, both included, ``success``
+   in the log line. Certifies or corrects 97.16 s.
+2. Measure the JAX process-wall floor (import+init+cache load).
+3. Optional: refinement-Shamanskii (≤3 stale-LU residual
+   corrections) if remint still only reuses step 8.
+4. **Clean-tree** Gate-6 claim run against the frozen contract.
+5. New eight-term outer optimizer charter: B3, then B37,
+   after multi-direction step-halved FD. Optimistix/Lineax
+   belong there, not as a mid-campaign linear-algebra swap.
 
 **NO-GO:** cap-2048, adjoint-1-MiB as inner LU budget, mimicking
-native BFGS in JAX, nested speed claim from 153/171 or 153/116,
-F3 7.70×, remint of the dirty step-6 forcing JSON, claim-grade
-GMRES walk JSON ``nested_ls_reduced_gpu_walk_20260821.json``.
+native BFGS in JAX, nested speed claim from 153/171, 153/116, or
+the uncertified 97.16 s both-lane row, unmatched-cache Shamanskii
+verdicts, F3 7.70×, remint of the dirty step-6 forcing JSON,
+claim-grade GMRES walk JSON
+``nested_ls_reduced_gpu_walk_20260821.json``.
 
 Frozen-coil reconstruct physics at 661 is closed for opt-in
 ``linear_solver="dense_lu"``. Unregularized IFT at that endpoint is

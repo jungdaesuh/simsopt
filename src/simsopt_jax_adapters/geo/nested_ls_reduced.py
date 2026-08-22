@@ -172,10 +172,11 @@ class NestedLsSchurNewtonStepRecord:
     gmres_seconds: float
     step_alpha: float
     step_accepted: bool
-    assembled: bool = True
+    assembled: bool = False
     shamanskii_reused: bool = False
     shamanskii_reassembled: bool = False
     shamanskii_attempt_eta: float | None = None
+    shamanskii_attempt_eta_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -625,6 +626,14 @@ def linear_solve_meets_forcing(eta_achieved: float, eta_requested: float) -> boo
     return bool(np.isfinite(eta_achieved) and eta_achieved <= float(eta_requested))
 
 
+def receipt_float(value: float) -> tuple[float | None, str | None]:
+    """JSON-safe float: non-finite values become ``None`` plus a reason."""
+
+    if np.isfinite(value):
+        return float(value), None
+    return None, "nonfinite"
+
+
 def solve_operator_gmres_with_forcing(
     matvec: Callable[[jax.Array], jax.Array],
     rhs: jax.Array,
@@ -990,17 +999,18 @@ def attempt_shamanskii_schur_reuse(
     rhs: jax.Array,
     *,
     eta_requested: float,
-    stale_dense: jax.Array,
+    apply_stale: Callable[[jax.Array], jax.Array],
 ) -> tuple[jax.Array, jax.Array, float, bool]:
     """Cheap first Newton attempt: ``δ = H_stale⁻¹ g``, one live HVP, live η.
 
+    ``apply_stale`` is a cached LU apply, not a per-attempt refactor.
     JAX GMRES with ``M`` and ``x0=0`` can skip the Krylov loop when
     ``‖M g‖ ≤ η ‖g‖`` and return zeros. Direct LU apply avoids that.
     Certificate is unpreconditioned ``‖Aδ − b‖₂ / ‖b‖₂``. Does not
     assemble. Caller reassembles on ``False``.
     """
 
-    newton_jax = dense_schur_lu_preconditioner(stale_dense)(rhs)
+    newton_jax = apply_stale(rhs)
     residual = matvec(newton_jax) - rhs
     rhs_norm = float(np.linalg.norm(_host_vector(rhs)))
     residual_l2 = float(np.linalg.norm(_host_vector(residual)))
@@ -1105,7 +1115,7 @@ def run_reduced_nested_ls_schur_newton(
     working_grad = gradient
     working_solution = current_solution
     step_records: list[NestedLsSchurNewtonStepRecord] = []
-    stale_dense: jax.Array | None = None
+    stale_apply: Callable[[jax.Array], jax.Array] | None = None
 
     while iteration_count < maxiter:
         grad_norm = float(np.linalg.norm(working_grad))
@@ -1133,10 +1143,11 @@ def run_reduced_nested_ls_schur_newton(
         )
         rhs = jnp.asarray(working_grad, dtype=jnp.float64)
         gmres_started = time.perf_counter()
-        assembled = True
+        assembled = False
         shamanskii_reused = False
         shamanskii_reassembled = False
         shamanskii_attempt_eta: float | None = None
+        shamanskii_attempt_eta_reason: str | None = None
         newton_jax = jnp.zeros_like(rhs)
         residual = -rhs
         info = jnp.asarray(-1, dtype=jnp.int32)
@@ -1157,23 +1168,24 @@ def run_reduced_nested_ls_schur_newton(
             )
             used_gmres_maxiter = int(used)
         elif linear_solver in ("dense_lu", "shamanskii"):
-            if linear_solver == "shamanskii" and stale_dense is not None:
+            if linear_solver == "shamanskii" and stale_apply is not None:
                 newton_jax, residual, gmres_forcing_eta, shamanskii_reused = (
                     attempt_shamanskii_schur_reuse(
                         matvec,
                         rhs,
                         eta_requested=float(requested_eta),
-                        stale_dense=stale_dense,
+                        apply_stale=stale_apply,
                     )
                 )
-                shamanskii_attempt_eta = float(gmres_forcing_eta)
+                shamanskii_attempt_eta, shamanskii_attempt_eta_reason = receipt_float(
+                    gmres_forcing_eta
+                )
                 gmres_residual_l2 = float(np.linalg.norm(_host_vector(residual)))
                 info = jnp.asarray(0, dtype=jnp.int32)
                 used_gmres_maxiter = 0
-                assembled = not shamanskii_reused
             if not shamanskii_reused:
                 shamanskii_reassembled = (
-                    linear_solver == "shamanskii" and stale_dense is not None
+                    linear_solver == "shamanskii" and stale_apply is not None
                 )
                 dense = materialize_stabilized_schur_dense(
                     operator,
@@ -1188,7 +1200,7 @@ def run_reduced_nested_ls_schur_newton(
                     gmres_residual_l2 / grad_norm if grad_norm > 0.0 else 0.0
                 )
                 used_gmres_maxiter = int(gmres_maxiter)
-                stale_dense = dense
+                stale_apply = dense_schur_lu_preconditioner(dense)
                 assembled = True
         else:
             raise ValueError(
@@ -1234,6 +1246,7 @@ def run_reduced_nested_ls_schur_newton(
                     shamanskii_reused=bool(shamanskii_reused),
                     shamanskii_reassembled=bool(shamanskii_reassembled),
                     shamanskii_attempt_eta=shamanskii_attempt_eta,
+                    shamanskii_attempt_eta_reason=shamanskii_attempt_eta_reason,
                 )
             )
             break
@@ -1273,6 +1286,7 @@ def run_reduced_nested_ls_schur_newton(
                 shamanskii_reused=bool(shamanskii_reused),
                 shamanskii_reassembled=bool(shamanskii_reassembled),
                 shamanskii_attempt_eta=shamanskii_attempt_eta,
+                shamanskii_attempt_eta_reason=shamanskii_attempt_eta_reason,
             )
         )
         if not step_accepted:
@@ -1574,6 +1588,7 @@ __all__ = [
     "nested_ls_runtime_coil_closures",
     "pack_surface_and_y",
     "projected_y_system",
+    "receipt_float",
     "reduced_penalty_gradient",
     "reduced_penalty_gradient_envelope",
     "reduced_penalty_hvp",
