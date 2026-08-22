@@ -62,6 +62,7 @@ NESTED_LS_SCHUR_BACKTRACKING_MAX_STEPS: Final[int] = 8
 # 1996 adapts η_k downward from this cap.
 NESTED_LS_SCHUR_GMRES_RTOL: Final[float] = 0.24
 NESTED_LS_LINEAR_SOLVERS: Final[tuple[str, ...]] = ("gmres", "dense_lu", "shamanskii")
+NESTED_LS_SHAMANSKII_REFINE_PASSES: Final[int] = 3
 NESTED_LS_EW_GAMMA: Final[float] = 0.9
 NESTED_LS_EW_ALPHA: Final[float] = 2.0
 NESTED_LS_EW_SAFEGUARD: Final[float] = 0.1
@@ -177,6 +178,7 @@ class NestedLsSchurNewtonStepRecord:
     shamanskii_reassembled: bool = False
     shamanskii_attempt_eta: float | None = None
     shamanskii_attempt_eta_reason: str | None = None
+    shamanskii_refine_passes: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -1000,26 +1002,47 @@ def attempt_shamanskii_schur_reuse(
     *,
     eta_requested: float,
     apply_stale: Callable[[jax.Array], jax.Array],
-) -> tuple[jax.Array, jax.Array, float, bool]:
-    """Cheap first Newton attempt: ``δ = H_stale⁻¹ g``, one live HVP, live η.
+    refine_passes: int = NESTED_LS_SHAMANSKII_REFINE_PASSES,
+) -> tuple[jax.Array, jax.Array, float, bool, int]:
+    """Stale-LU Newton: ``δ = H_stale⁻¹ g``, live η, optional refinement.
 
-    ``apply_stale`` is a cached LU apply, not a per-attempt refactor.
-    JAX GMRES with ``M`` and ``x0=0`` can skip the Krylov loop when
-    ``‖M g‖ ≤ η ‖g‖`` and return zeros. Direct LU apply avoids that.
-    Certificate is unpreconditioned ``‖Aδ − b‖₂ / ‖b‖₂``. Does not
-    assemble. Caller reassembles on ``False``.
+    ``apply_stale`` is a cached LU apply. Direct apply avoids JAX GMRES
+    ``M``+``x0=0`` returning zeros. After the first live HVP, up to
+    ``refine_passes`` corrections ``δ ← δ + H_stale⁻¹(g − H_live δ)``
+    run; bail and let the caller reassemble if η is non-finite or does
+    not decrease. Certificate is unpreconditioned ``‖Aδ − b‖₂ / ‖b‖₂``.
     """
 
+    rhs_norm = float(np.linalg.norm(_host_vector(rhs)))
     newton_jax = apply_stale(rhs)
     residual = matvec(newton_jax) - rhs
-    rhs_norm = float(np.linalg.norm(_host_vector(rhs)))
     residual_l2 = float(np.linalg.norm(_host_vector(residual)))
     eta = residual_l2 / rhs_norm if rhs_norm > 0.0 else 0.0
+    used_refines = 0
+    if linear_solve_meets_forcing(eta, eta_requested):
+        return newton_jax, residual, float(eta), True, used_refines
+    limit = max(0, int(refine_passes))
+    while used_refines < limit:
+        if not np.isfinite(eta):
+            break
+        candidate = newton_jax + apply_stale(-residual)
+        new_residual = matvec(candidate) - rhs
+        new_l2 = float(np.linalg.norm(_host_vector(new_residual)))
+        new_eta = new_l2 / rhs_norm if rhs_norm > 0.0 else 0.0
+        if (not np.isfinite(new_eta)) or new_eta >= eta:
+            break
+        newton_jax = candidate
+        residual = new_residual
+        eta = new_eta
+        used_refines += 1
+        if linear_solve_meets_forcing(eta, eta_requested):
+            return newton_jax, residual, float(eta), True, used_refines
     return (
         newton_jax,
         residual,
         float(eta),
         linear_solve_meets_forcing(eta, eta_requested),
+        used_refines,
     )
 
 
@@ -1064,8 +1087,11 @@ def run_reduced_nested_ls_schur_newton(
     unpreconditioned ``η = ‖(Ĥ+stab I)δs − g‖₂ / ‖g‖₂`` is at most the
     Eisenstat–Walker request. Weak GMRES retries by doubling
     ``maxiter`` up to ``gmres_maxiter_cap``, not by raising
-    ``restart``. Shamanskii applies the stale LU once (``δ = H_old⁻¹ g``),
-    certifies with one live HVP, and reassembles on a forcing miss.
+    ``restart``. Shamanskii applies the stale LU (``δ = H_old⁻¹ g``),
+    certifies with a live HVP, then up to
+    ``NESTED_LS_SHAMANSKII_REFINE_PASSES`` residual corrections
+    ``δ ← δ + H_old⁻¹(g − H_live δ)``. Bail and reassemble if η is
+    non-finite or does not decrease.
     Inner dense LU has no default
     stored-matrix cap; the adjoint 1 MiB default is a different budget
     and would refuse the 661 matrix (3,495,368 bytes).
@@ -1148,6 +1174,7 @@ def run_reduced_nested_ls_schur_newton(
         shamanskii_reassembled = False
         shamanskii_attempt_eta: float | None = None
         shamanskii_attempt_eta_reason: str | None = None
+        shamanskii_refine_passes = 0
         newton_jax = jnp.zeros_like(rhs)
         residual = -rhs
         info = jnp.asarray(-1, dtype=jnp.int32)
@@ -1169,13 +1196,17 @@ def run_reduced_nested_ls_schur_newton(
             used_gmres_maxiter = int(used)
         elif linear_solver in ("dense_lu", "shamanskii"):
             if linear_solver == "shamanskii" and stale_apply is not None:
-                newton_jax, residual, gmres_forcing_eta, shamanskii_reused = (
-                    attempt_shamanskii_schur_reuse(
-                        matvec,
-                        rhs,
-                        eta_requested=float(requested_eta),
-                        apply_stale=stale_apply,
-                    )
+                (
+                    newton_jax,
+                    residual,
+                    gmres_forcing_eta,
+                    shamanskii_reused,
+                    shamanskii_refine_passes,
+                ) = attempt_shamanskii_schur_reuse(
+                    matvec,
+                    rhs,
+                    eta_requested=float(requested_eta),
+                    apply_stale=stale_apply,
                 )
                 shamanskii_attempt_eta, shamanskii_attempt_eta_reason = receipt_float(
                     gmres_forcing_eta
@@ -1247,6 +1278,7 @@ def run_reduced_nested_ls_schur_newton(
                     shamanskii_reassembled=bool(shamanskii_reassembled),
                     shamanskii_attempt_eta=shamanskii_attempt_eta,
                     shamanskii_attempt_eta_reason=shamanskii_attempt_eta_reason,
+                    shamanskii_refine_passes=int(shamanskii_refine_passes),
                 )
             )
             break
@@ -1287,6 +1319,7 @@ def run_reduced_nested_ls_schur_newton(
                 shamanskii_reassembled=bool(shamanskii_reassembled),
                 shamanskii_attempt_eta=shamanskii_attempt_eta,
                 shamanskii_attempt_eta_reason=shamanskii_attempt_eta_reason,
+                shamanskii_refine_passes=int(shamanskii_refine_passes),
             )
         )
         if not step_accepted:
@@ -1562,6 +1595,7 @@ __all__ = [
     "NESTED_LS_SCHUR_GMRES_MAXITER_CAP",
     "NESTED_LS_SCHUR_GMRES_RESTART",
     "NESTED_LS_SCHUR_GMRES_RTOL",
+    "NESTED_LS_SHAMANSKII_REFINE_PASSES",
     "NestedLsB37TimingBlocked",
     "NestedLsBananaRunCodeLane",
     "NestedLsBananaRunCodePair",

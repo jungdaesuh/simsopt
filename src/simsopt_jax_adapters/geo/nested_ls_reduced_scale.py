@@ -41,6 +41,10 @@ from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
 from simsopt_jax_adapters.geo.flat675.bundle import load_flat675_bundle
 from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_CONSTRAINT_WEIGHT,
+    NESTED_LS_GATE6_AGGREGATION,
+    NESTED_LS_GATE6_CLAIM_REPEATS,
+    NESTED_LS_GATE6_IOTA_G_TOL,
+    NESTED_LS_GATE6_NATIVE_OMP_THREADS,
     NESTED_LS_NEWTON_MAXITER,
     NESTED_LS_NEWTON_STAB,
     NESTED_LS_NEWTON_TOL,
@@ -164,9 +168,6 @@ F3_B37_BANANA_OMP_CONTRACT_THREADS = (4, 8, 12, 14, 16, 20, 24, 32)
 F3_B37_BANANA_OMP_REPEATS = 2
 F3_B37_BANANA_OMP_WALL_SECONDS = 3600.0
 F3_B37_CHUNK_WARM_REPEATS = 3
-NESTED_LS_GATE6_IOTA_G_TOL = 1.0e-11
-NESTED_LS_GATE6_CLAIM_REPEATS = 3
-NESTED_LS_GATE6_AGGREGATION = "min"
 NESTED_LS_GATE6_PRE_LEVER_CLOCK = "inner_solver"
 NESTED_LS_GATE6_PRE_LEVER_JAX_WALK_SECONDS = 153.06041832105257
 NESTED_LS_GATE6_PRE_LEVER_NATIVE_OMP16_SECONDS = 116.0183689862024
@@ -1099,6 +1100,7 @@ class NestedLsSchurNewtonWalkProbe:
     grad_l2: float
     coil_delta_inf: float
     walk_seconds: float
+    reconstruct_seconds: float
     gmres_forcing_eta: float
     last_step_eta_achieved: float
     last_step_eta_requested: float
@@ -1227,8 +1229,9 @@ def evaluate_f3_b37_schur_newton_walk(
     opt-in, not a global default. Coils stay frozen. ``walk_seconds``
     is the inner Newton loop only (not process wall): it excludes
     import, QR ``y*``, the independent reconstruct reference, and the
-    C++ rejudge. Gate-6 claim runs must record a fresh-process wall
-    separately.
+    C++ rejudge. ``reconstruct_seconds`` is that native reconstruct
+    reference. Gate-6 claim runs must record a fresh-process wall
+    separately and subtract reconstruct plus rejudge from it.
     """
 
     residual_fn, _objective_fn, _phi_hat = nested_ls_reduced_closures(jax_boozer)
@@ -1254,11 +1257,13 @@ def evaluate_f3_b37_schur_newton_walk(
     newton_kwargs = nested_ls_physics_newton_kwargs()
     native.need_to_run_code = True
     native.surface.set_dofs(native_start)
+    reconstruct_started = time.perf_counter()
     reconstruct_ref = native.minimize_boozer_penalty_constraints_newton(
         iota=float(y_star[0]),
         G=float(y_star[1]),
         **newton_kwargs,
     )
+    reconstruct_seconds = time.perf_counter() - reconstruct_started
     reconstruct_surface = np.asarray(native.surface.get_dofs(), dtype=np.float64)
     reconstruct_ref_iota = float(reconstruct_ref["iota"])
     walk_started = time.perf_counter()
@@ -1302,6 +1307,7 @@ def evaluate_f3_b37_schur_newton_walk(
         grad_l2=float(np.linalg.norm(walk.reduced_gradient)),
         coil_delta_inf=float(walk.coil_delta_inf),
         walk_seconds=float(walk_seconds),
+        reconstruct_seconds=float(reconstruct_seconds),
         gmres_forcing_eta=float(walk.gmres_forcing_eta),
         last_step_eta_achieved=float(walk.steps[-1].gmres_forcing_eta)
         if walk.steps
@@ -4521,6 +4527,7 @@ __all__ = [
     "NESTED_LS_GATE6_AGGREGATION",
     "NESTED_LS_GATE6_CLAIM_REPEATS",
     "NESTED_LS_GATE6_IOTA_G_TOL",
+    "NESTED_LS_GATE6_NATIVE_OMP_THREADS",
     "NESTED_LS_GATE6_PRE_LEVER_CLOCK",
     "NESTED_LS_GATE6_PRE_LEVER_JAX_WALK_SECONDS",
     "NESTED_LS_GATE6_PRE_LEVER_NATIVE_OMP16_SECONDS",

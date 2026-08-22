@@ -52,6 +52,7 @@ from simsopt_jax_adapters.geo.nested_ls_reduced import (
     NESTED_LS_SCHUR_GMRES_MAXITER_CAP,
     NESTED_LS_SCHUR_GMRES_RESTART,
     NESTED_LS_SCHUR_GMRES_RTOL,
+    NESTED_LS_SHAMANSKII_REFINE_PASSES,
     NestedLsReducedRankError,
     apply_reduced_mixed_schur_coil_tangent,
     attempt_shamanskii_schur_reuse,
@@ -473,13 +474,14 @@ def test_shamanskii_reuse_hits_matching_operator_and_misses_stale():
     eta_requested = 1.0e-10
     counter = NestedLsCountedMatvec(matvec)
     apply_stale = dense_schur_lu_preconditioner(matrix)
-    delta, _residual, eta, reused = attempt_shamanskii_schur_reuse(
+    delta, _residual, eta, reused, refine_passes = attempt_shamanskii_schur_reuse(
         counter,
         rhs,
         eta_requested=eta_requested,
         apply_stale=apply_stale,
     )
     assert reused is True
+    assert refine_passes == 0
     expected = 1.0 / np.arange(1.0, dimension + 1.0, dtype=np.float64)
     np.testing.assert_allclose(
         np.asarray(delta, dtype=np.float64), expected, rtol=1.0e-8, atol=1.0e-10
@@ -492,13 +494,20 @@ def test_shamanskii_reuse_hits_matching_operator_and_misses_stale():
     assert linear_solve_meets_forcing(live_eta, eta_requested) is True
     assert counter.count == 1
     stale = matrix + 50.0 * jnp.eye(dimension, dtype=jnp.float64)
-    _delta_miss, _residual_miss, eta_miss, reused_miss = attempt_shamanskii_schur_reuse(
+    (
+        _delta_miss,
+        _residual_miss,
+        eta_miss,
+        reused_miss,
+        refine_miss,
+    ) = attempt_shamanskii_schur_reuse(
         matvec,
         rhs,
         eta_requested=eta_requested,
         apply_stale=dense_schur_lu_preconditioner(stale),
     )
     assert reused_miss is False
+    assert refine_miss <= NESTED_LS_SHAMANSKII_REFINE_PASSES
     assert eta_miss > eta_requested
     nan_eta, nan_reason = receipt_float(float("nan"))
     assert nan_eta is None
@@ -510,16 +519,74 @@ def test_shamanskii_reuse_hits_matching_operator_and_misses_stale():
     def nan_matvec(tangent: jax.Array) -> jax.Array:
         return jnp.full_like(tangent, jnp.nan)
 
-    _delta_nan, _residual_nan, eta_nan, reused_nan = attempt_shamanskii_schur_reuse(
+    (
+        _delta_nan,
+        _residual_nan,
+        eta_nan,
+        reused_nan,
+        refine_nan,
+    ) = attempt_shamanskii_schur_reuse(
         nan_matvec,
         rhs,
         eta_requested=0.24,
         apply_stale=apply_stale,
     )
     assert reused_nan is False
+    assert refine_nan == 0
     coerced, reason = receipt_float(eta_nan)
     assert coerced is None
     assert reason == "nonfinite"
+
+
+def test_shamanskii_refinement_accepts_decrease_and_bails_when_eta_does_not():
+    assert NESTED_LS_SHAMANSKII_REFINE_PASSES == 3
+    dimension = 8
+    diag = jnp.arange(1.0, dimension + 1.0, dtype=jnp.float64)
+    matrix = jnp.diag(diag)
+
+    def matvec(tangent: jax.Array) -> jax.Array:
+        return matrix @ tangent
+
+    rhs = jnp.ones((dimension,), dtype=jnp.float64)
+    stale = matrix + 0.2 * jnp.eye(dimension, dtype=jnp.float64)
+    counter = NestedLsCountedMatvec(matvec)
+    _delta, _residual, eta, reused, passes = attempt_shamanskii_schur_reuse(
+        counter,
+        rhs,
+        eta_requested=5.0e-2,
+        apply_stale=dense_schur_lu_preconditioner(stale),
+    )
+    assert reused is True
+    assert 1 <= passes <= NESTED_LS_SHAMANSKII_REFINE_PASSES
+    assert counter.count == 1 + passes
+    assert linear_solve_meets_forcing(eta, 5.0e-2) is True
+
+    def apply_zero(vector: jax.Array) -> jax.Array:
+        return jnp.zeros_like(vector)
+
+    counter0 = NestedLsCountedMatvec(matvec)
+    _d0, _r0, eta0, reused0, passes0 = attempt_shamanskii_schur_reuse(
+        counter0,
+        rhs,
+        eta_requested=1.0e-10,
+        apply_stale=apply_zero,
+    )
+    assert reused0 is False
+    assert passes0 == 0
+    assert counter0.count == 2
+    assert eta0 == pytest.approx(1.0, rel=1.0e-12, abs=1.0e-12)
+
+    counter_cap = NestedLsCountedMatvec(matvec)
+    _dc, _rc, _etac, reused_cap, passes_cap = attempt_shamanskii_schur_reuse(
+        counter_cap,
+        rhs,
+        eta_requested=1.0e-10,
+        apply_stale=dense_schur_lu_preconditioner(stale),
+        refine_passes=0,
+    )
+    assert reused_cap is False
+    assert passes_cap == 0
+    assert counter_cap.count == 1
 
 
 @pytest.mark.boozer
@@ -550,10 +617,12 @@ def test_schur_newton_shamanskii_reassembles_on_shifted_7x7():
     assert walk.steps[0].assembled is True
     assert walk.steps[0].shamanskii_reused is False
     assert walk.steps[0].shamanskii_reassembled is False
+    assert walk.steps[0].shamanskii_refine_passes == 0
     later = walk.steps[1:]
     assert later
     for step in later:
         assert step.shamanskii_attempt_eta is not None
+        assert 0 <= step.shamanskii_refine_passes <= NESTED_LS_SHAMANSKII_REFINE_PASSES
         if step.shamanskii_reused:
             assert step.assembled is False
             assert step.shamanskii_reassembled is False

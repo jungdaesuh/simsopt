@@ -38,6 +38,14 @@ NESTED_LS_BANANA_USES_BFGS_THEN_NEWTON: Final[bool] = True
 NESTED_LS_PHYSICS_BAR: Final[str] = "reconstruct_newton"
 NESTED_LS_TIMING_BAR: Final[str] = "banana_run_code"
 
+# Gate-6 claim protocol. Jax-free so GPU parents can import it without
+# initializing a device. Pre-lever measured seconds stay in
+# nested_ls_reduced_scale.
+NESTED_LS_GATE6_IOTA_G_TOL: Final[float] = 1.0e-11
+NESTED_LS_GATE6_CLAIM_REPEATS: Final[int] = 3
+NESTED_LS_GATE6_AGGREGATION: Final[str] = "min"
+NESTED_LS_GATE6_NATIVE_OMP_THREADS: Final[int] = 16
+
 
 class NestedLsPhysicsNewtonKwargs(TypedDict):
     constraint_weight: float
@@ -91,6 +99,10 @@ __all__ = [
     "NESTED_LS_BANANA_NEWTON_TOL",
     "NESTED_LS_BANANA_USES_BFGS_THEN_NEWTON",
     "NESTED_LS_CONSTRAINT_WEIGHT",
+    "NESTED_LS_GATE6_AGGREGATION",
+    "NESTED_LS_GATE6_CLAIM_REPEATS",
+    "NESTED_LS_GATE6_IOTA_G_TOL",
+    "NESTED_LS_GATE6_NATIVE_OMP_THREADS",
     "NESTED_LS_LABEL",
     "NESTED_LS_NEWTON_MAXITER",
     "NESTED_LS_NEWTON_STAB",
