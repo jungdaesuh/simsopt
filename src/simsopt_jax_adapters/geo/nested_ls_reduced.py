@@ -929,11 +929,14 @@ def materialize_stabilized_schur_dense(
     stab: float,
     *,
     max_dense_linearization_bytes: int | None = None,
+    chunk_batch_size: int | None = None,
 ) -> jax.Array:
     """Chunked dense ``Ĥ_ss+stab I`` via the linear-solve materializer.
 
     Peak HVP parallelism is the SSOT chunk batch, not ``n``. The stored
     matrix is ``n²`` float64 entries; refuse when that exceeds the cap.
+    Optional ``chunk_batch_size`` overrides the import-time SSOT for a
+    canary; ``None`` keeps the production batch.
     """
 
     dimension = int(operator.surface_size)
@@ -952,7 +955,9 @@ def materialize_stabilized_schur_dense(
     def linear_operator_fn(_linearization: jax.Array, tangent: jax.Array) -> jax.Array:
         return matvec(tangent)
 
-    return _materialize_dense_linear_operator(linear_operator_fn, dummy)
+    return _materialize_dense_linear_operator(
+        linear_operator_fn, dummy, batch_width=chunk_batch_size
+    )
 
 
 def solve_stabilized_schur_dense_lu(dense: jax.Array, rhs: jax.Array) -> jax.Array:

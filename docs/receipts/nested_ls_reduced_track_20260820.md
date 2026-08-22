@@ -417,29 +417,40 @@ commit ``eaf4cef4f``: ``git_dirty=False``,
 ``docs/receipts/evidence/nested_ls_reduced_gpu_endpoint_adjoint_20260821.json``,
 live η ``2.21×10⁻¹²``, FD relative ℓ₂ ``8.01×10⁻⁵``.
 
+Native banana ``run_code`` bar at F3 B37 start plus dense-assemble
+chunk sweep at the LU endpoint
+(``evaluate_f3_b37_chunk_banana_probe``): banana success, 1 iter,
+171 s, coils frozen. Chunk assemble walls 8:23.1 s, 16:17.8 s,
+32:24.4 s, 64:18.0 s; LU 0.060 s. Matrices agree to
+``≲5×10⁻¹⁶`` relative Frobenius. Not monotonic in width; do not
+switch the production batch of 8 from this diagnostic. Lagged LU
+is not the remaining cost (assembly still dominates). Reconstruct
+walk 153 s remains a different operator; ``comparable_operators``
+is false; not a nested speed claim.
+
+Moving-coil Volume outer at the same endpoint
+(``evaluate_f3_b37_volume_outer_probe``): cotangent ``∇_s Volume``,
+unregularized dense LU IFT, one coil-direction FD. Live η
+``1.15×10⁻¹⁴``, VJP match, FD relative ``4.32×10⁻⁶`` (control 0
+Newton steps, perturbed 2). Not an outer optimizer loop.
+
 ## Next
 
-Do not blindly default-switch to dense LU. That is product policy
-and does not advance coils+surface. Two parallel lanes, then a
-dimension/memory solver policy with matrix-free fallback:
+Do not blindly default-switch to dense LU. Chunk 16 was the fastest
+assemble in this sweep and is a candidate later, not a default.
+Remaining product policy: choose dense LU by dimension/memory with
+a matrix-free fallback. A longer outer coil optimizer is a new
+charter, not a missing certificate on this gradient.
 
-1. **Performance.** Charter banana ``run_code`` as the native inner
-   bar. Sweep dense assembly chunk widths ``{8,16,32,64}``. Compare
-   matched physics, initial state, tolerance, and endpoint — not
-   necessarily identical operators. Lagged LU only if assembly still
-   loses. Do not inherit F3 7.70×.
-2. **Adjoint / E2E.** Unregularized 661 IFT at the frozen-coil
-   endpoint is certified (live residual + coil FD,
-   ``git_dirty=False``). Next is a short moving-coil B3 outer on
-   that adjoint, not a longer inner walk.
-3. **NO-GO:** cap-2048, universal dense-LU default, explicit-inverse
-   ``M``, nested speed claim, F3 7.70×, remint of the dirty step-6
-   forcing JSON, claim-grade GMRES walk JSON
-   ``nested_ls_reduced_gpu_walk_20260821.json``.
+**NO-GO:** cap-2048, universal dense-LU default, explicit-inverse
+``M``, nested speed claim, F3 7.70×, remint of the dirty step-6
+forcing JSON, claim-grade GMRES walk JSON
+``nested_ls_reduced_gpu_walk_20260821.json``.
 
 Frozen-coil reconstruct physics at 661 is closed for opt-in
 ``linear_solver="dense_lu"``. Unregularized IFT at that endpoint is
-closed for opt-in dense LU past the 1 MiB cap.
+closed. Native banana bar and Volume outer gradient are closed as
+diagnostics (JSON ``git_dirty=True``; remint only if promoted).
 
 ## Validation of the SciPy CPU packet (`063b4fe83` / `96a1e5856`)
 

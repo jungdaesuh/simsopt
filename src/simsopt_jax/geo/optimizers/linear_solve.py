@@ -223,7 +223,9 @@ _EXACT_ADJOINT_DENSE_LU = os.environ.get(
 ).strip().lower() not in ("", "0", "false", "off", "no")
 
 
-def _materialize_dense_linear_operator(linear_operator_fn, x):
+def _materialize_dense_linear_operator(
+    linear_operator_fn, x, *, batch_width: int | None = None
+):
     eye = jnp.eye(x.shape[0], dtype=x.dtype)
     # Assemble the dense operator in column batches rather than mapping all N basis
     # columns in parallel: numerically identical up to floating-point reduction
@@ -233,10 +235,13 @@ def _materialize_dense_linear_operator(linear_operator_fn, x):
     # BiotSavart JVP). Mirrors the chunked dense Boozer-Jacobian fix in
     # simsopt_jax_adapters/geo/boozer_surface.py (commit dcd70a2ae); without it the
     # dense linearization OOMs under XLA preallocation.
+    dimension = int(x.shape[0])
+    width = _resolve_dense_operator_batch_width(batch_width, dimension=dimension)
+    width = min(int(width), dimension) if dimension > 0 else int(width)
     cols = lax.map(
         lambda basis: linear_operator_fn(x, basis),
         eye,
-        batch_size=_DENSE_OPERATOR_CHUNK_BATCH_SIZE,
+        batch_size=width,
     )
     return jnp.swapaxes(cols, 0, 1)
 

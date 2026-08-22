@@ -37,6 +37,7 @@ from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     ARCHIVED_START_QR_IOTA,
     DEFAULT_F3_B37_GPU_LANE,
     DEFAULT_F3_B37_NATIVE_LANE,
+    F3_B37_CHUNK_WIDTHS,
     F3_B37_DENSE_LU_ENDPOINT_G,
     F3_B37_DENSE_LU_ENDPOINT_GRAD_L2,
     F3_B37_DENSE_LU_ENDPOINT_IOTA,
@@ -51,12 +52,14 @@ from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     archived_flat675_bundle_available,
     dump_strict_json,
     evaluate_f3_b37_bounded_probe,
+    evaluate_f3_b37_chunk_banana_probe,
     evaluate_f3_b37_endpoint_adjoint_probe,
     evaluate_f3_b37_flat_native_probe,
     evaluate_f3_b37_nested_timing,
     evaluate_f3_b37_schur_newton_step,
     evaluate_f3_b37_schur_newton_walk,
     evaluate_f3_b37_step6_architecture_probe,
+    evaluate_f3_b37_volume_outer_probe,
     float64_ulps,
     gmres_doubling_cycle_budget,
     kib_to_gib,
@@ -123,6 +126,21 @@ _GPU_ENDPOINT_ADJOINT_PUBLICATION = (
     "GPU unregularized IFT adjoint canary at the dense-LU walk endpoint. "
     "Opt-in past the 1 MiB stored-matrix cap. Not a walk, not cap-2048, "
     "not a default switch, not a timing claim, and not F3 7.70x."
+)
+_F3_B37_GPU_CHUNK_BANANA_EVIDENCE = (
+    _EVIDENCE_DIR / "nested_ls_reduced_gpu_chunk_banana_20260821.json"
+)
+_GPU_CHUNK_BANANA_PUBLICATION = (
+    "GPU native banana run_code bar plus dense-assemble chunk sweep. "
+    "Operators are not comparable. Not a nested speed claim and not F3 7.70x."
+)
+_F3_B37_GPU_VOLUME_OUTER_EVIDENCE = (
+    _EVIDENCE_DIR / "nested_ls_reduced_gpu_volume_outer_20260821.json"
+)
+_GPU_VOLUME_OUTER_PUBLICATION = (
+    "GPU moving-coil Volume outer gradient at the dense-LU endpoint. "
+    "Unregularized IFT, one coil-direction FD. Not an outer optimizer loop, "
+    "not a nested speed claim, and not F3 7.70x."
 )
 _GPU_WALK_PUBLICATION = (
     "GPU forcing-certified Schur walk. Not a timing claim and not F3 7.70x."
@@ -1049,6 +1067,128 @@ def test_authored_gpu_endpoint_adjoint_json_is_strict_and_not_a_walk():
     assert probe["vjp_match"] is True
     assert probe["fd_match"] is True
     assert float(probe["coil_delta_inf"]) == 0.0
+    assert float(probe["coil_delta_inf_after"]) == 0.0
+    assert probe["runtime"]["jax_default_backend"] == "gpu"
+    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
+
+
+def test_chunk_banana_and_volume_outer_are_not_walks_or_default_switches():
+    assert F3_B37_CHUNK_WIDTHS == (8, 16, 32, 64)
+    assert (
+        inspect.signature(run_reduced_nested_ls_schur_newton)
+        .parameters["linear_solver"]
+        .default
+        == "gmres"
+    )
+    assert (
+        inspect.signature(evaluate_f3_b37_schur_newton_walk)
+        .parameters["linear_solver"]
+        .default
+        == "gmres"
+    )
+    assert evaluate_f3_b37_volume_outer_probe.__name__ == (
+        "evaluate_f3_b37_volume_outer_probe"
+    )
+    source_path = Path(evaluate_f3_b37_chunk_banana_probe.__code__.co_filename)
+    source = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(source_path))
+
+    def _fn(name: str) -> ast.FunctionDef:
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                return node
+        raise AssertionError(name)
+
+    def _called(node: ast.Call) -> str | None:
+        func = node.func
+        if isinstance(func, ast.Name):
+            return func.id
+        if isinstance(func, ast.Attribute):
+            return func.attr
+        return None
+
+    chunk_fn = _fn("evaluate_f3_b37_chunk_banana_probe")
+    chunk_text = ast.get_source_segment(source, chunk_fn)
+    assert chunk_text is not None
+    assert "evaluate_f3_b37_schur_newton_walk" not in chunk_text
+    assert "F3_B37_STEP6_CAP_2048" not in chunk_text
+    assert any(
+        isinstance(node, ast.Call)
+        and _called(node) == "materialize_stabilized_schur_dense"
+        and any(kw.arg == "chunk_batch_size" for kw in node.keywords)
+        for node in ast.walk(chunk_fn)
+    )
+    volume_fn = _fn("evaluate_f3_b37_volume_outer_probe")
+    volume_text = ast.get_source_segment(source, volume_fn)
+    assert volume_text is not None
+    assert "evaluate_f3_b37_schur_newton_walk" not in volume_text
+    newton_calls = [
+        node
+        for node in ast.walk(volume_fn)
+        if isinstance(node, ast.Call)
+        and _called(node) == "run_reduced_nested_ls_schur_newton"
+    ]
+    assert len(newton_calls) == 2
+    for call in newton_calls:
+        stab = next(kw.value for kw in call.keywords if kw.arg == "stab")
+        solver = next(kw.value for kw in call.keywords if kw.arg == "linear_solver")
+        assert isinstance(stab, ast.Call)
+        assert isinstance(stab.func, ast.Name) and stab.func.id == "float"
+        assert isinstance(stab.args[0], ast.Name)
+        assert stab.args[0].id == "F3_B37_IFT_STAB"
+        assert isinstance(solver, ast.Constant) and solver.value == "dense_lu"
+
+
+@pytest.mark.skipif(
+    not _F3_B37_GPU_CHUNK_BANANA_EVIDENCE.is_file(),
+    reason="authored GPU chunk/banana JSON not yet produced",
+)
+def test_authored_gpu_chunk_banana_json_is_strict_and_not_a_speed_claim():
+    raw = _F3_B37_GPU_CHUNK_BANANA_EVIDENCE.read_text(encoding="utf-8")
+    assert "NaN" not in raw
+    payload = json.loads(raw)
+    dump_strict_json(payload)
+    assert payload["schema"] == "nested-ls-reduced-gpu-chunk-banana.v1"
+    assert payload["written_by_pytest"] is False
+    assert payload["publication"] == _GPU_CHUNK_BANANA_PUBLICATION
+    boundary = payload["claim_boundary"]
+    assert boundary["nested_speed_claim"] is False
+    assert boundary["inherits_f3_7_70x"] is False
+    assert boundary["comparable_operators"] is False
+    assert boundary["cap_2048_attempted"] is False
+    probe = payload["probe"]
+    assert probe["banana_success"] is True
+    assert float(probe["banana_coil_delta_inf"]) == 0.0
+    widths = [int(row["chunk_batch_size"]) for row in probe["rows"]]
+    assert widths == list(F3_B37_CHUNK_WIDTHS)
+    assert probe["fail_closed_reason"] is None
+    assert probe["runtime"]["jax_default_backend"] == "gpu"
+    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
+
+
+@pytest.mark.skipif(
+    not _F3_B37_GPU_VOLUME_OUTER_EVIDENCE.is_file(),
+    reason="authored GPU Volume outer JSON not yet produced",
+)
+def test_authored_gpu_volume_outer_json_is_strict_and_not_a_walk():
+    raw = _F3_B37_GPU_VOLUME_OUTER_EVIDENCE.read_text(encoding="utf-8")
+    assert "NaN" not in raw
+    payload = json.loads(raw)
+    dump_strict_json(payload)
+    assert payload["schema"] == "nested-ls-reduced-gpu-volume-outer.v1"
+    assert payload["written_by_pytest"] is False
+    assert payload["publication"] == _GPU_VOLUME_OUTER_PUBLICATION
+    boundary = payload["claim_boundary"]
+    assert boundary["nested_speed_claim"] is False
+    assert boundary["inherits_f3_7_70x"] is False
+    assert boundary["moving_coil_b3_outer"] is True
+    assert boundary["outer_optimizer_loop"] is False
+    assert boundary["cap_2048_attempted"] is False
+    probe = payload["probe"]
+    assert probe["surface_sha256"] == F3_B37_DENSE_LU_ENDPOINT_SURFACE_SHA256
+    assert probe["fail_closed_reason"] is None
+    assert probe["vjp_match"] is True
+    assert probe["fd_match"] is True
     assert float(probe["coil_delta_inf_after"]) == 0.0
     assert probe["runtime"]["jax_default_backend"] == "gpu"
     assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()

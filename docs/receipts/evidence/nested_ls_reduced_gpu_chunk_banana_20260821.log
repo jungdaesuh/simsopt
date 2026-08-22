@@ -1,0 +1,29 @@
+E0821 20:20:31.370645 1339136 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+E0821 20:20:31.378943 1338924 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+backend gpu
+devices ['cuda:0']
+loaded F3 B37 GPU lane; banana bar then chunk sweep then Volume outer
+banana native success=True iter=1 s=171.394 coil=0.0
+chunk width=8 dense_s=23.113 lu_s=0.060 rel=0.0 eta=5.895550651836888e-14
+chunk width=16 dense_s=17.801 lu_s=0.000 rel=1.8069272994252312e-17 eta=None
+chunk width=32 dense_s=24.401 lu_s=0.000 rel=4.90898716336346e-16 eta=None
+chunk width=64 dense_s=18.025 lu_s=0.000 rel=1.0520657029900461e-16 eta=None
+banana True 1 171.39421237795614 rows 4 fail None
+chunk {'chunk_batch_size': 8, 'dense_seconds': 23.112719255965203, 'lu_seconds': 0.05992334196344018, 'live_eta': 5.895550651836888e-14, 'matrix_rel_frobenius': 0.0, 'dense_bytes': 3495368}
+chunk {'chunk_batch_size': 16, 'dense_seconds': 17.8014442010317, 'lu_seconds': 0.0, 'live_eta': None, 'matrix_rel_frobenius': 1.8069272994252312e-17, 'dense_bytes': 3495368}
+chunk {'chunk_batch_size': 32, 'dense_seconds': 24.401274394011125, 'lu_seconds': 0.0, 'live_eta': None, 'matrix_rel_frobenius': 4.90898716336346e-16, 'dense_bytes': 3495368}
+chunk {'chunk_batch_size': 64, 'dense_seconds': 18.02537915413268, 'lu_seconds': 0.0, 'live_eta': None, 'matrix_rel_frobenius': 1.0520657029900461e-16, 'dense_bytes': 3495368}
+volume outer live_eta=1.1468700653334382e-14 V=0.09992911877766064
+volume mixed index=0 norm=0.31984559238927246
+volume mixed index=1 norm=56.47587088912487
+volume mixed index=2 norm=18.068015303488874
+volume mixed index=3 norm=46.38565074341663
+volume mixed index=4 norm=53.29187398951857
+volume mixed index=5 norm=30.715285204889767
+volume mixed index=6 norm=16.524585227273473
+volume mixed index=7 norm=7.814849587194542
+volume fd pred=0.005813065303329472 fd=0.005813040188096252 rel=4.3204801441219545e-06 match=True ctrl_iter=0 pert_iter=2
+volume sha e25ca0f2fedf25cf411f7b7ad7192860c813ad5fd37bdb5471355834d42ede6c expected e25ca0f2fedf25cf411f7b7ad7192860c813ad5fd37bdb5471355834d42ede6c fd True vjp True fail None
+wrote /tmp/nested_ls_reduced_gpu_chunk_banana_20260821.json
+wrote /tmp/nested_ls_reduced_gpu_volume_outer_20260821.json
+chunk_ok True volume_ok True
