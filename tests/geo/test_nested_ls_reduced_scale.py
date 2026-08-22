@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+import sys
 from pathlib import Path
 
 import jax
@@ -54,11 +55,13 @@ from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     NESTED_LS_GATE6_AGGREGATION,
     NESTED_LS_GATE6_CLAIM_REPEATS,
     NESTED_LS_GATE6_IOTA_G_TOL,
+    NESTED_LS_GATE6_NATIVE_OMP_THREADS,
     NESTED_LS_GATE6_PRE_LEVER_CLOCK,
     NESTED_LS_GATE6_PRE_LEVER_JAX_WALK_SECONDS,
     NESTED_LS_GATE6_PRE_LEVER_NATIVE_OMP16_SECONDS,
     NESTED_LS_GATE6_PRE_LEVER_NATIVE_SECONDS,
     NestedLsCountedMatvec,
+    NestedLsSchurNewtonWalkProbe,
     archived_f3_b37_lanes_available,
     archived_flat675_bundle_available,
     dump_strict_json,
@@ -183,6 +186,15 @@ _F3_B37_GPU_SHAMANSKII_ATTR_EVIDENCE = (
 _GPU_SHAMANSKII_ATTR_PUBLICATION = (
     "Shamanskii and compile-cache attribution: cache-only, lag-only, and both. "
     "Not a nested speed claim and not F3 7.70x."
+)
+_F3_B37_GPU_JAX_FLOOR_EVIDENCE = (
+    _EVIDENCE_DIR / "nested_ls_reduced_gpu_jax_floor_20260822.json"
+)
+_F3_B37_GPU_GATE6_EVIDENCE = _EVIDENCE_DIR / "nested_ls_reduced_gpu_gate6_20260822.json"
+_GPU_GATE6_PUBLICATION = (
+    "Gate-6 process-wall vs process-wall claim run. Native banana at "
+    "best-of-contract OMP=16, JAX Shamanskii with persistent compile "
+    "cache. Not F3 7.70x."
 )
 _F3_B37_GPU_CHUNK_WARM_EVIDENCE = (
     _EVIDENCE_DIR / "nested_ls_reduced_gpu_chunk_warm_20260821.json"
@@ -1319,6 +1331,62 @@ def test_omp_pin_requires_positive_integer_env():
     )
     attr_text = attr.read_text(encoding="utf-8")
     assert "success={row['success']!r}" in attr_text
+    assert "REPEATS = NESTED_LS_GATE6_CLAIM_REPEATS" in attr_text
+    assert NESTED_LS_GATE6_CLAIM_REPEATS == 3
+    assert NESTED_LS_GATE6_NATIVE_OMP_THREADS == 16
+    _repo = Path(__file__).resolve().parents[2]
+    if str(_repo) not in sys.path:
+        sys.path.insert(0, str(_repo))
+    from benchmarks.nested_ls_shamanskii_attribution import (
+        REPEATS as ATTR_REPEATS,
+    )
+    from benchmarks.nested_ls_shamanskii_attribution import (
+        jax_claim_wall_seconds,
+        parse_args,
+    )
+
+    assert ATTR_REPEATS == NESTED_LS_GATE6_CLAIM_REPEATS
+    assert parse_args(["--lane", "lag_only"]).lane == "lag_only"
+    assert jax_claim_wall_seconds(
+        {
+            "process_wall_seconds": 10.0,
+            "reconstruct_seconds": 3.0,
+            "native_rejudge_seconds": 2.0,
+        }
+    ) == pytest.approx(5.0)
+    assert '"--lane"' in attr_text
+    assert "lane per process" in attr_text
+    assert "jax_floor_seconds" in attr_text
+    assert "jax_process_wall_seconds" in attr_text
+    assert "reconstruct_seconds" in attr_text
+    assert "jax_claim_wall_seconds" in attr_text
+    assert "--allow-dirty" in attr_text
+    child = (
+        Path(__file__).resolve().parents[2]
+        / "benchmarks"
+        / "nested_ls_shamanskii_child.py"
+    )
+    child_text = child.read_text(encoding="utf-8")
+    assert "_T0 = time.perf_counter()" in child_text
+    assert 'linear_solver == "floor"' in child_text
+    assert "jax_floor_seconds" in child_text
+    assert "process_elapsed_seconds" in child_text
+    assert "reconstruct_seconds" in NestedLsSchurNewtonWalkProbe.__dataclass_fields__
+    walk_source = Path(
+        evaluate_f3_b37_schur_newton_walk.__code__.co_filename
+    ).read_text(encoding="utf-8")
+    assert "reconstruct_seconds=float(reconstruct_seconds)" in walk_source
+    gate6 = (
+        Path(__file__).resolve().parents[2] / "benchmarks" / "nested_ls_gate6_claim.py"
+    )
+    gate6_text = gate6.read_text(encoding="utf-8")
+    assert "nested_speed_claim" in gate6_text
+    assert "jax_claim_wall_seconds" in gate6_text
+    assert "parent_wait_minus_reconstruct_rejudge" in gate6_text
+    assert "OMP_NUM_THREADS" in gate6_text
+    assert "clean tree" in gate6_text
+    assert "shamanskii" in gate6_text
+    assert "observed_omp_num_threads" in gate6_text
 
 
 @pytest.mark.skipif(
@@ -1487,18 +1555,60 @@ def test_authored_gpu_shamanskii_attr_json_is_not_a_speed_claim():
     assert boundary["inherits_f3_7_70x"] is False
     assert boundary["shamanskii_attribution"] is True
     assert boundary["inner_and_process_wall"] is True
-    lanes = {str(row["lane"]) for row in payload["rows"]}
+    lanes = {
+        str(row["lane"])
+        for row in payload["rows"]
+        if row["role"] in {"prime", "measure"}
+    }
     assert lanes == {"cache_only", "lag_only", "both"}
     measures = [row for row in payload["rows"] if row["role"] == "measure"]
     assert measures
     assert {str(row["lane"]) for row in measures} == {"cache_only", "lag_only", "both"}
+    measure_counts = {
+        lane: sum(1 for row in measures if row["lane"] == lane)
+        for lane in ("cache_only", "lag_only", "both")
+    }
+    assert all(count >= 3 for count in measure_counts.values())
     assert all(bool(row["success"]) for row in measures)
     assert all(int(row["native_rejudge_iter"]) == 0 for row in measures)
     assert all(float(row["coil_delta_inf"]) == 0.0 for row in measures)
     assert all("process_wall_seconds" in row for row in measures)
+    assert all("process_elapsed_seconds" in row for row in measures)
+    assert all("jax_process_wall_seconds" in row for row in measures)
+    assert all("jax_floor_seconds" in row for row in measures)
+    assert all("reconstruct_seconds" in row for row in measures)
+    assert all("shamanskii_refine_passes" in row for row in measures)
     assert all(
         float(row["process_wall_seconds"]) >= float(row["walk_seconds"])
         for row in measures
+    )
+    assert all(
+        float(row["jax_process_wall_seconds"]) >= float(row["walk_seconds"])
+        for row in measures
+    )
+    assert all(
+        float(row["jax_process_wall_seconds"])
+        == pytest.approx(
+            float(row["process_elapsed_seconds"])
+            - float(row["reconstruct_seconds"])
+            - float(row["native_rejudge_seconds"]),
+            abs=1.0e-6,
+        )
+        for row in measures
+    )
+    assert all(
+        float(row["jax_floor_seconds"])
+        == pytest.approx(
+            float(row["jax_process_wall_seconds"]) - float(row["walk_seconds"]),
+            abs=1.0e-6,
+        )
+        for row in measures
+    )
+    assert payload["claim_boundary"]["one_lane_per_process"] is True
+    assert payload["claim_boundary"]["repeats"] == NESTED_LS_GATE6_CLAIM_REPEATS
+    assert (
+        payload["claim_boundary"]["jax_claim_clock"]
+        == "parent_wait_minus_reconstruct_rejudge"
     )
     cache_only = [row for row in measures if row["lane"] == "cache_only"]
     lag_only = [row for row in measures if row["lane"] == "lag_only"]
@@ -1524,6 +1634,114 @@ def test_authored_gpu_shamanskii_attr_json_is_not_a_speed_claim():
         row["shamanskii_reused_steps"] or row["shamanskii_reassembled_steps"]
         for row in both
     )
+    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
+
+
+@pytest.mark.skipif(
+    not _F3_B37_GPU_JAX_FLOOR_EVIDENCE.is_file(),
+    reason="authored JAX process-wall floor JSON not yet produced",
+)
+def test_authored_gpu_jax_floor_json_is_not_a_speed_claim():
+    raw = _F3_B37_GPU_JAX_FLOOR_EVIDENCE.read_text(encoding="utf-8")
+    assert "NaN" not in raw
+    payload = json.loads(raw)
+    dump_strict_json(payload)
+    assert payload["written_by_pytest"] is False
+    floors = [row for row in payload["rows"] if row["role"] == "floor"]
+    assert {str(row["lane"]) for row in floors} == {
+        "floor_cache_on",
+        "floor_cache_off",
+    }
+    assert all(row["linear_solver"] == "floor" for row in floors)
+    assert all(bool(row["success"]) for row in floors)
+    assert all(float(row["walk_seconds"]) == 0.0 for row in floors)
+    assert all(float(row["reconstruct_seconds"]) == 0.0 for row in floors)
+    assert all("jax_floor_seconds" in row for row in floors)
+    assert all(float(row["jax_floor_seconds"]) > 0.0 for row in floors)
+    assert all(
+        float(row["jax_floor_seconds"])
+        == pytest.approx(float(row["process_elapsed_seconds"]), abs=1.0e-6)
+        for row in floors
+    )
+    cache_on = [row for row in floors if row["lane"] == "floor_cache_on"]
+    cache_off = [row for row in floors if row["lane"] == "floor_cache_off"]
+    assert cache_on and cache_off
+    assert all(row["disable_cache"] is False for row in cache_on)
+    assert all(row["disable_cache"] is True for row in cache_off)
+    assert payload["claim_boundary"]["nested_speed_claim"] is False
+    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
+
+
+@pytest.mark.skipif(
+    not _F3_B37_GPU_GATE6_EVIDENCE.is_file(),
+    reason="authored Gate-6 claim JSON not yet produced",
+)
+def test_authored_gpu_gate6_json_matches_frozen_contract():
+    raw = _F3_B37_GPU_GATE6_EVIDENCE.read_text(encoding="utf-8")
+    assert "NaN" not in raw
+    payload = json.loads(raw)
+    dump_strict_json(payload)
+    assert payload["schema"] == "nested-ls-reduced-gpu-gate6.v1"
+    assert payload["written_by_pytest"] is False
+    assert payload["publication"] == _GPU_GATE6_PUBLICATION
+    boundary = payload["claim_boundary"]
+    assert boundary["inherits_f3_7_70x"] is False
+    assert boundary["comparable_operators"] is False
+    assert boundary["aggregation"] == NESTED_LS_GATE6_AGGREGATION
+    assert boundary["repeats"] == NESTED_LS_GATE6_CLAIM_REPEATS
+    assert boundary["native_omp_num_threads"] == NESTED_LS_GATE6_NATIVE_OMP_THREADS
+    assert boundary["jax_linear_solver"] == "shamanskii"
+    assert boundary["jax_persistent_cache"] is True
+    assert boundary["interleaved_repeats"] is True
+    assert boundary["jax_claim_clock"] == "parent_wait_minus_reconstruct_rejudge"
+    assert boundary["native_claim_clock"] == "parent_wait"
+    pairs = payload["pairs"]
+    assert len(pairs) >= NESTED_LS_GATE6_CLAIM_REPEATS
+    assert {int(pair["repeat"]) for pair in pairs} >= set(
+        range(NESTED_LS_GATE6_CLAIM_REPEATS)
+    )
+    assert all(pair["physics_ok"] for pair in pairs)
+    assert payload["fail_closed_reason"] is None
+    jax_claim_walls: list[float] = []
+    native_claim_walls: list[float] = []
+    for pair in pairs:
+        native = pair["native"]
+        jax_row = pair["jax"]
+        assert (
+            int(native["observed_omp_num_threads"])
+            == NESTED_LS_GATE6_NATIVE_OMP_THREADS
+        )
+        assert bool(native["omp_pinned"]) is True
+        assert float(native["coil_delta_inf"]) == 0.0
+        assert float(jax_row["coil_delta_inf"]) == 0.0
+        assert int(jax_row["native_rejudge_iter"]) == 0
+        assert float(jax_row["grad_l2"]) <= NESTED_LS_NEWTON_TOL
+        assert (
+            abs(float(jax_row["iota"]) - float(native["iota"]))
+            <= NESTED_LS_GATE6_IOTA_G_TOL
+        )
+        assert (
+            abs(float(jax_row["G"]) - float(native["G"])) <= NESTED_LS_GATE6_IOTA_G_TOL
+        )
+        native_claim = float(native["claim_wall_seconds"])
+        jax_claim = float(jax_row["claim_wall_seconds"])
+        native_claim_walls.append(native_claim)
+        jax_claim_walls.append(jax_claim)
+        assert native_claim == pytest.approx(
+            float(native["process_wall_seconds"]), abs=1.0e-9
+        )
+        assert jax_claim == pytest.approx(
+            float(jax_row["process_wall_seconds"])
+            - float(jax_row["reconstruct_seconds"])
+            - float(jax_row["native_rejudge_seconds"]),
+            abs=1.0e-6,
+        )
+    assert payload["native_min_process_wall_seconds"] == min(native_claim_walls)
+    assert payload["jax_min_process_wall_seconds"] == min(jax_claim_walls)
+    expected_claim = payload["fail_closed_reason"] is None and min(
+        jax_claim_walls
+    ) < min(native_claim_walls)
+    assert boundary["nested_speed_claim"] is expected_claim
     assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
 
 

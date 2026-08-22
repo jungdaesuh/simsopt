@@ -597,13 +597,19 @@ verdict before an independent read of the artifact.
 
 ## Next
 
+Protocol is implemented (refinement Shamanskii, split-lane
+attribution with ``REPEATS=3``, child ``_T0`` clocks, Gate-6
+driver). Numbers below still require a clean-tree remint.
+
 1. Remint Shamanskii/cache attribution JSON from a clean tree:
-   one lane per process, ≥3 repeats, both included, ``success``
+   ``--lane`` one process, ≥3 repeats, both included, ``success``
    in the log line. Certifies or corrects 97.16 s.
-2. Measure the JAX process-wall floor (import+init+cache load).
-3. Optional: refinement-Shamanskii (≤3 stale-LU residual
-   corrections) if remint still only reuses step 8.
-4. **Clean-tree** Gate-6 claim run against the frozen contract.
+2. Measure the JAX process-wall floor (import+init+cache load)
+   via ``--lane floor`` (cache-on and cache-off).
+3. **Clean-tree** Gate-6 claim run against the frozen contract
+   (``benchmarks/nested_ls_gate6_claim.py``). Both sides use parent
+   subprocess wait; JAX subtracts native reconstruct and rejudge.
+4. A100 rung on Landau after Gate-6, with its own OMP contract.
 5. New eight-term outer optimizer charter: B3, then B37,
    after multi-direction step-halved FD. Optimistix/Lineax
    belong there, not as a mid-campaign linear-algebra swap.
