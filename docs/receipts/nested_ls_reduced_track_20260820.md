@@ -534,14 +534,17 @@ process-wall; it is inner-solver vs inner-solver
   claim. Process-wall before/after will be a new pair of numbers
   on the claim receipts.
 
-Assembly reuse is required for a plausible win; Shamanskii (stale
-LU as ``M``, 1–3 live HVPs, live unpreconditioned η vs
-Eisenstat–Walker, fail-closed reassemble on miss) is the selected
-hypothesis. Bundle compile-cache with that GO; measure cache-only,
-lag-only, and both. Cache-only leaves ~21 s to recover, so one
-avoided 16–17 s assembly is insufficient — at least two net
-avoided assemblies. The walk receipt must record which steps
-triggered stale-η reassembly.
+Assembly reuse is required for a plausible win; Shamanskii is the
+selected hypothesis: ``δ = H_stale⁻¹ g`` (direct LU apply; JAX
+GMRES+``M``+``x0=0`` can return zeros), one live HVP, live
+unpreconditioned η vs Eisenstat–Walker, fail-closed reassemble on
+miss. Opt-in ``linear_solver="shamanskii"``; default remains
+``gmres``. Step records store ``assembled``, ``shamanskii_reused``,
+``shamanskii_reassembled``, and the pre-reassembly
+``shamanskii_attempt_eta``. Bundle compile-cache attribution
+(cache-only / lag-only / both). Cache-only is a measurement, not
+the ~137 s model. One avoided 16–17 s assembly is insufficient —
+at least two net avoided assemblies.
 
 Do **not** chase BFGS-then-polish in JAX (envelope grad ~0.4 s ×
 682 ≈ 273 s).
@@ -555,17 +558,26 @@ device-memory fraction), not a performance threshold: the
 spectrum/termination argument says the crossover never swings back
 to matrix-free below memory limits.
 
+Partial GPU attribution (killed at 40 min before JSON mint;
+cache-only and lag-only complete; both incomplete). Inner walk:
+dense_lu cache-only 110.8–117.9 s; Shamanskii lag-only 133.8–137.2 s
+with reuse only on step 8 and reassembly on steps 2–7. One avoided
+assembly is not a win; the failed attempts make Shamanskii slower
+than always-assemble. Process wall is ~300 s because the child
+includes native reconstruct+rejudge. Not a speed claim.
+
 ## Next
 
-1. Multi-direction, step-halved FD for the outer gradient, **in
-   parallel with** Shamanskii + compile-cache GO (cache / lag /
-   both). Shamanskii GO records stale-η reassembly steps.
-   Both remain GO-gated.
-2. **Clean-tree** Gate-6 claim run against the contract above
+1. Remint Shamanskii/cache attribution JSON from a clean tree
+   (cache-only / lag-only / both). Gate-6 numerator stays dense_lu
+   until reuse skips ≥2 net assemblies.
+2. Multi-direction, step-halved FD for the outer gradient (parallel
+   lane).
+3. **Clean-tree** Gate-6 claim run against the contract above
    (process wall vs process wall, interleaved native/JAX,
    aggregation = **min** of ≥3). Pre-lever inner row stays
    153.06 vs 116.02 = 0.76×.
-3. New eight-term outer optimizer charter: B3, then B37.
+4. New eight-term outer optimizer charter: B3, then B37.
    Benchmark only after endpoint and KKT parity.
 
 **NO-GO:** cap-2048, adjoint-1-MiB as inner LU budget, mimicking

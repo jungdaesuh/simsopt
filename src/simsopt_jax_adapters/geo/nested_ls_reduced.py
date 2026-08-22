@@ -21,6 +21,7 @@ from typing import Final
 
 import jax
 import jax.numpy as jnp
+import jax.scipy.linalg as jsp_linalg
 import numpy as np
 from numpy.typing import NDArray
 from simsopt.geo.boozersurface import BoozerSurface, _boozer_iterate_is_persistable
@@ -60,6 +61,7 @@ NESTED_LS_SCHUR_BACKTRACKING_MAX_STEPS: Final[int] = 8
 # η_max (F3 B37 SciPy-cap observation). Choice 2 of Eisenstat–Walker
 # 1996 adapts η_k downward from this cap.
 NESTED_LS_SCHUR_GMRES_RTOL: Final[float] = 0.24
+NESTED_LS_LINEAR_SOLVERS: Final[tuple[str, ...]] = ("gmres", "dense_lu", "shamanskii")
 NESTED_LS_EW_GAMMA: Final[float] = 0.9
 NESTED_LS_EW_ALPHA: Final[float] = 2.0
 NESTED_LS_EW_SAFEGUARD: Final[float] = 0.1
@@ -170,6 +172,10 @@ class NestedLsSchurNewtonStepRecord:
     gmres_seconds: float
     step_alpha: float
     step_accepted: bool
+    assembled: bool = True
+    shamanskii_reused: bool = False
+    shamanskii_reassembled: bool = False
+    shamanskii_attempt_eta: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -966,6 +972,47 @@ def solve_stabilized_schur_dense_lu(dense: jax.Array, rhs: jax.Array) -> jax.Arr
     return jnp.linalg.solve(dense, rhs)
 
 
+def dense_schur_lu_preconditioner(
+    dense: jax.Array,
+) -> Callable[[jax.Array], jax.Array]:
+    """Left GMRES ``M`` from LU of stored ``Ĥ_ss+stab I``. Not an explicit inverse."""
+
+    lu_and_pivots = jsp_linalg.lu_factor(dense)
+
+    def apply_m(vector: jax.Array) -> jax.Array:
+        return jsp_linalg.lu_solve(lu_and_pivots, vector)
+
+    return apply_m
+
+
+def attempt_shamanskii_schur_reuse(
+    matvec: Callable[[jax.Array], jax.Array],
+    rhs: jax.Array,
+    *,
+    eta_requested: float,
+    stale_dense: jax.Array,
+) -> tuple[jax.Array, jax.Array, float, bool]:
+    """Cheap first Newton attempt: ``δ = H_stale⁻¹ g``, one live HVP, live η.
+
+    JAX GMRES with ``M`` and ``x0=0`` can skip the Krylov loop when
+    ``‖M g‖ ≤ η ‖g‖`` and return zeros. Direct LU apply avoids that.
+    Certificate is unpreconditioned ``‖Aδ − b‖₂ / ‖b‖₂``. Does not
+    assemble. Caller reassembles on ``False``.
+    """
+
+    newton_jax = dense_schur_lu_preconditioner(stale_dense)(rhs)
+    residual = matvec(newton_jax) - rhs
+    rhs_norm = float(np.linalg.norm(_host_vector(rhs)))
+    residual_l2 = float(np.linalg.norm(_host_vector(residual)))
+    eta = residual_l2 / rhs_norm if rhs_norm > 0.0 else 0.0
+    return (
+        newton_jax,
+        residual,
+        float(eta),
+        linear_solve_meets_forcing(eta, eta_requested),
+    )
+
+
 def dense_schur_inverse_preconditioner(
     dense: jax.Array,
 ) -> Callable[[jax.Array], jax.Array]:
@@ -1000,15 +1047,29 @@ def run_reduced_nested_ls_schur_newton(
     """Capped inexact Newton on ``s`` using Schur ``Ĥ_ss`` and device GMRES.
 
     Mutates ``jax_boozer.surface``. Does not write ``self.res``. Packed
-    HVPs never differentiate through QR. ``linear_solver`` is ``gmres``
-    or ``dense_lu``. Optional ``gmres_preconditioner`` is JAX GMRES
-    ``M``. Armijo runs only when the independent unpreconditioned
-    ``η = ‖(Ĥ+stab I)δs − g‖₂ / ‖g‖₂`` is at most the Eisenstat–Walker
-    request. Weak solves retry by doubling GMRES ``maxiter`` up to
-    ``gmres_maxiter_cap``, not by raising ``restart``. Inner dense LU
-    has no default stored-matrix cap; the adjoint 1 MiB default is a
-    different budget and would refuse the 661 matrix (3,495,368 bytes).
+    HVPs never differentiate through QR. ``linear_solver`` is ``gmres``,
+    ``dense_lu``, or opt-in ``shamanskii``. Optional
+    ``gmres_preconditioner`` is JAX GMRES ``M`` and is incompatible
+    with Shamanskii. Armijo runs only when the independent
+    unpreconditioned ``η = ‖(Ĥ+stab I)δs − g‖₂ / ‖g‖₂`` is at most the
+    Eisenstat–Walker request. Weak GMRES retries by doubling
+    ``maxiter`` up to ``gmres_maxiter_cap``, not by raising
+    ``restart``. Shamanskii applies the stale LU once (``δ = H_old⁻¹ g``),
+    certifies with one live HVP, and reassembles on a forcing miss.
+    Inner dense LU has no default
+    stored-matrix cap; the adjoint 1 MiB default is a different budget
+    and would refuse the 661 matrix (3,495,368 bytes).
     """
+
+    if linear_solver not in NESTED_LS_LINEAR_SOLVERS:
+        raise ValueError(
+            "linear_solver must be 'gmres', 'dense_lu', or 'shamanskii'; "
+            f"got {linear_solver!r}."
+        )
+    if linear_solver == "shamanskii" and gmres_preconditioner is not None:
+        raise ValueError(
+            "linear_solver='shamanskii' cannot combine with gmres_preconditioner."
+        )
 
     residual_fn, objective_fn, _phi_hat = nested_ls_reduced_closures(
         jax_boozer,
@@ -1044,6 +1105,7 @@ def run_reduced_nested_ls_schur_newton(
     working_grad = gradient
     working_solution = current_solution
     step_records: list[NestedLsSchurNewtonStepRecord] = []
+    stale_dense: jax.Array | None = None
 
     while iteration_count < maxiter:
         grad_norm = float(np.linalg.norm(working_grad))
@@ -1071,6 +1133,16 @@ def run_reduced_nested_ls_schur_newton(
         )
         rhs = jnp.asarray(working_grad, dtype=jnp.float64)
         gmres_started = time.perf_counter()
+        assembled = True
+        shamanskii_reused = False
+        shamanskii_reassembled = False
+        shamanskii_attempt_eta: float | None = None
+        newton_jax = jnp.zeros_like(rhs)
+        residual = -rhs
+        info = jnp.asarray(-1, dtype=jnp.int32)
+        gmres_residual_l2 = float(grad_norm)
+        gmres_forcing_eta = 1.0 if grad_norm > 0.0 else 0.0
+        used_gmres_maxiter = int(gmres_maxiter)
         if linear_solver == "gmres":
             newton_jax, residual, info, gmres_residual_l2, gmres_forcing_eta, used = (
                 solve_operator_gmres_with_forcing(
@@ -1084,21 +1156,44 @@ def run_reduced_nested_ls_schur_newton(
                 )
             )
             used_gmres_maxiter = int(used)
-        elif linear_solver == "dense_lu":
-            dense = materialize_stabilized_schur_dense(
-                operator,
-                stab,
-                max_dense_linearization_bytes=max_dense_linearization_bytes,
-            )
-            newton_jax = solve_stabilized_schur_dense_lu(dense, rhs)
-            info = jnp.asarray(0, dtype=jnp.int32)
-            residual = matvec(newton_jax) - rhs
-            gmres_residual_l2 = float(np.linalg.norm(_host_vector(residual)))
-            gmres_forcing_eta = gmres_residual_l2 / grad_norm
-            used_gmres_maxiter = int(gmres_maxiter)
+        elif linear_solver in ("dense_lu", "shamanskii"):
+            if linear_solver == "shamanskii" and stale_dense is not None:
+                newton_jax, residual, gmres_forcing_eta, shamanskii_reused = (
+                    attempt_shamanskii_schur_reuse(
+                        matvec,
+                        rhs,
+                        eta_requested=float(requested_eta),
+                        stale_dense=stale_dense,
+                    )
+                )
+                shamanskii_attempt_eta = float(gmres_forcing_eta)
+                gmres_residual_l2 = float(np.linalg.norm(_host_vector(residual)))
+                info = jnp.asarray(0, dtype=jnp.int32)
+                used_gmres_maxiter = 0
+                assembled = not shamanskii_reused
+            if not shamanskii_reused:
+                shamanskii_reassembled = (
+                    linear_solver == "shamanskii" and stale_dense is not None
+                )
+                dense = materialize_stabilized_schur_dense(
+                    operator,
+                    stab,
+                    max_dense_linearization_bytes=max_dense_linearization_bytes,
+                )
+                newton_jax = solve_stabilized_schur_dense_lu(dense, rhs)
+                info = jnp.asarray(0, dtype=jnp.int32)
+                residual = matvec(newton_jax) - rhs
+                gmres_residual_l2 = float(np.linalg.norm(_host_vector(residual)))
+                gmres_forcing_eta = (
+                    gmres_residual_l2 / grad_norm if grad_norm > 0.0 else 0.0
+                )
+                used_gmres_maxiter = int(gmres_maxiter)
+                stale_dense = dense
+                assembled = True
         else:
             raise ValueError(
-                f"linear_solver must be 'gmres' or 'dense_lu'; got {linear_solver!r}."
+                "linear_solver must be 'gmres', 'dense_lu', or 'shamanskii'; "
+                f"got {linear_solver!r}."
             )
         step_linear_seconds = time.perf_counter() - gmres_started
         gmres_seconds += step_linear_seconds
@@ -1135,6 +1230,10 @@ def run_reduced_nested_ls_schur_newton(
                     gmres_seconds=float(step_linear_seconds),
                     step_alpha=float(step_alpha),
                     step_accepted=False,
+                    assembled=bool(assembled),
+                    shamanskii_reused=bool(shamanskii_reused),
+                    shamanskii_reassembled=bool(shamanskii_reassembled),
+                    shamanskii_attempt_eta=shamanskii_attempt_eta,
                 )
             )
             break
@@ -1170,6 +1269,10 @@ def run_reduced_nested_ls_schur_newton(
                 gmres_seconds=float(step_linear_seconds),
                 step_alpha=float(step_alpha),
                 step_accepted=bool(step_accepted),
+                assembled=bool(assembled),
+                shamanskii_reused=bool(shamanskii_reused),
+                shamanskii_reassembled=bool(shamanskii_reassembled),
+                shamanskii_attempt_eta=shamanskii_attempt_eta,
             )
         )
         if not step_accepted:
@@ -1440,6 +1543,7 @@ def run_banana_run_code_pair(
 
 __all__ = [
     "NESTED_LS_IMPLICIT_ADJOINT_DEFAULT_DENSE_BYTES",
+    "NESTED_LS_LINEAR_SOLVERS",
     "NESTED_LS_SCHUR_GMRES_MAXITER",
     "NESTED_LS_SCHUR_GMRES_MAXITER_CAP",
     "NESTED_LS_SCHUR_GMRES_RESTART",
@@ -1455,8 +1559,10 @@ __all__ = [
     "NestedLsSchurNewtonStepRecord",
     "NestedLsYSolution",
     "apply_reduced_mixed_schur_coil_tangent",
+    "attempt_shamanskii_schur_reuse",
     "compare_ad_qr_and_schur_hvp",
     "dense_schur_inverse_preconditioner",
+    "dense_schur_lu_preconditioner",
     "eisenstat_walker_forcing_eta",
     "factor_reduced_nested_ls_schur",
     "factor_schur_fourier_block_preconditioner",
