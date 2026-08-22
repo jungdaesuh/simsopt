@@ -111,6 +111,18 @@ def git_status_short() -> str:
     )
 
 
+def git_implementation_dirty() -> str:
+    """Tracked/untracked paths outside the evidence directory."""
+
+    lines: list[str] = []
+    for line in git_status_short().splitlines():
+        path = line[3:].strip().split(" -> ", 1)[-1]
+        if path.startswith("docs/receipts/evidence/"):
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def launch_nested_ls_gpu_child(
     *,
     linear_solver: str,
@@ -344,7 +356,7 @@ def write_lane_json(lane: str, rows: list[dict[str, object]]) -> Path:
 
 def merge_lane_files(*, allow_dirty: bool) -> dict[str, object]:
     if not allow_dirty:
-        dirty = git_status_short().strip()
+        dirty = git_implementation_dirty().strip()
         if dirty:
             raise SystemExit(
                 "refusing to mint claim-grade attribution JSON on a dirty tree:\n"

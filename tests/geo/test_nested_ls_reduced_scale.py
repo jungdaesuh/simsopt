@@ -1361,6 +1361,8 @@ def test_omp_pin_requires_positive_integer_env():
     assert "reconstruct_seconds" in attr_text
     assert "jax_claim_wall_seconds" in attr_text
     assert "--allow-dirty" in attr_text
+    assert "git_implementation_dirty" in attr_text
+    assert "docs/receipts/evidence/" in attr_text
     child = (
         Path(__file__).resolve().parents[2]
         / "benchmarks"

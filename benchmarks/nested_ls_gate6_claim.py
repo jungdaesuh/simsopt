@@ -34,6 +34,7 @@ from benchmarks.nested_ls_shamanskii_attribution import (
     CACHE_SHAMANSKII,
     PYTHON,
     REPEATS,
+    git_implementation_dirty,
     jax_claim_wall_seconds,
     launch_nested_ls_gpu_child,
     write_strict_json,
@@ -54,11 +55,11 @@ GRAD_TOL = NESTED_LS_NEWTON_TOL
 
 
 def _require_clean_tree() -> str:
-    dirty = subprocess.check_output(
-        ["git", "status", "--porcelain"], cwd=str(REPO), text=True
-    ).strip()
+    dirty = git_implementation_dirty().strip()
     if dirty:
-        raise SystemExit(f"Gate-6 requires a clean tree:\n{dirty}")
+        raise SystemExit(
+            f"Gate-6 requires a clean tree (implementation, not evidence):\n{dirty}"
+        )
     return subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=str(REPO), text=True
     ).strip()
