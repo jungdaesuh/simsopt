@@ -415,6 +415,13 @@ def test_schur_dense_bytes_cap_refuses_oversize():
         )
 
 
+def test_materialize_chunk_batch_size_defaults_to_production_ssot():
+    signature = inspect.signature(materialize_stabilized_schur_dense)
+    assert signature.parameters["chunk_batch_size"].default is None
+    newton = inspect.signature(run_reduced_nested_ls_schur_newton)
+    assert newton.parameters["linear_solver"].default == "gmres"
+
+
 def test_implicit_adjoint_defaults_and_dense_lu_honours_1mib_cap():
     signature = inspect.signature(implicit_adjoint_coil_gradient)
     assert signature.parameters["stab"].default == 0.0

@@ -153,6 +153,9 @@ F3_B37_ADJOINT_FD_RTOL = 5.0e-2
 F3_B37_ADJOINT_FD_ATOL_FLOOR = 1.0e-9
 F3_B37_ADJOINT_FD_ATOL_REL = 1.0e-2
 F3_B37_ADJOINT_MIXED_NORM_FLOOR = 1.0e-8
+F3_B37_CHUNK_WIDTHS = (8, 16, 32, 64)
+F3_B37_CHUNK_BANANA_WALL_SECONDS = 1800.0
+F3_B37_VOLUME_OUTER_WALL_SECONDS = 1800.0
 
 
 def archived_flat675_bundle_available(bundle_root: Path | None = None) -> bool:
@@ -3260,6 +3263,715 @@ def evaluate_f3_b37_endpoint_adjoint_probe(
     )
 
 
+def _freeze_dense_lu_walk_endpoint(
+    jax_boozer: BoozerSurfaceJAX,
+) -> tuple[
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    float,
+    float,
+    float,
+    str | None,
+]:
+    """Load the dense-LU walk endpoint onto ``jax_boozer``. Coils stay frozen."""
+
+    if not F3_B37_DENSE_LU_WALK_EVIDENCE.is_file():
+        raise FileNotFoundError(str(F3_B37_DENSE_LU_WALK_EVIDENCE))
+    archived = json.loads(F3_B37_DENSE_LU_WALK_EVIDENCE.read_text(encoding="utf-8"))
+    archived_probe = archived["probe"]
+    frozen = np.ascontiguousarray(
+        np.asarray(archived_probe["jax_surface_dofs"], dtype=np.float64)
+    )
+    stored_sha = str(archived_probe["jax_surface_sha256"])
+    frozen_sha = sha256_float64(frozen)
+    coils_before = np.asarray(jax_boozer.biotsavart.x, dtype=np.float64)
+    empty = (
+        frozen,
+        coils_before,
+        np.zeros(2, dtype=np.float64),
+        0.0,
+        0.0,
+        0.0,
+    )
+    if frozen.size != 661 or frozen_sha != F3_B37_DENSE_LU_ENDPOINT_SURFACE_SHA256:
+        return (*empty, "surface_sha_mismatch")
+    if stored_sha != F3_B37_DENSE_LU_ENDPOINT_SURFACE_SHA256:
+        return (*empty, "surface_sha_mismatch")
+    iota = float(F3_B37_DENSE_LU_ENDPOINT_IOTA)
+    g_const = float(F3_B37_DENSE_LU_ENDPOINT_G)
+    if abs(_as_float(archived_probe["iota"]) - iota) > 1.0e-15:
+        return (*empty, "iota_mismatch")
+    if abs(_as_float(archived_probe["G"]) - g_const) > 1.0e-15:
+        return (*empty, "g_mismatch")
+    jax_boozer.surface.set_dofs(np.zeros_like(frozen))
+    jax_boozer.surface.set_dofs(frozen)
+    loaded = np.asarray(jax_boozer.surface.get_dofs(), dtype=np.float64)
+    if sha256_float64(loaded) != frozen_sha:
+        return (*empty, "reload_sha_mismatch")
+    residual_fn, objective_fn, _phi_hat = nested_ls_reduced_closures(jax_boozer)
+    del _phi_hat
+    y_star = solve_projected_y(
+        residual_fn, loaded, np.array([iota, g_const], dtype=np.float64)
+    ).solution
+    gradient = np.asarray(
+        reduced_penalty_gradient_envelope(objective_fn, loaded, y_star),
+        dtype=np.float64,
+    )
+    g_value = float(np.linalg.norm(gradient))
+    coil = float(
+        np.linalg.norm(
+            np.asarray(jax_boozer.biotsavart.x, dtype=np.float64) - coils_before,
+            ord=np.inf,
+        )
+    )
+    if coil != 0.0:
+        return (
+            loaded,
+            coils_before,
+            np.asarray(y_star),
+            iota,
+            g_const,
+            g_value,
+            "coil_moved",
+        )
+    if (
+        not np.isfinite(g_value)
+        or abs(g_value - F3_B37_DENSE_LU_ENDPOINT_GRAD_L2) > 1.0e-12
+    ):
+        return (
+            loaded,
+            coils_before,
+            np.asarray(y_star),
+            iota,
+            g_const,
+            g_value,
+            "grad_mismatch",
+        )
+    return (
+        loaded,
+        coils_before,
+        np.asarray(y_star, dtype=np.float64),
+        iota,
+        g_const,
+        g_value,
+        None,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class NestedLsChunkBananaProbe:
+    """Native banana ``run_code`` plus dense-assemble chunk sweep.
+
+    Reconstruct Newton is a different operator; ``comparable_operators``
+    is false. Not a nested speed claim and not F3 7.70×.
+    """
+
+    banana_success: bool
+    banana_iter: int
+    banana_iota: float
+    banana_G: float
+    banana_seconds: float
+    banana_coil_delta_inf: float
+    reconstruct_walk_seconds: float | None
+    reconstruct_walk_success: bool | None
+    y_star_iota: float
+    y_star_g: float
+    endpoint_sha256: str
+    newton_stab: float
+    default_chunk_batch_size: int
+    rows: tuple[dict[str, object], ...]
+    matrix_rel_frobenius_max: float | None
+    fail_closed_reason: str | None
+    runtime: dict[str, object]
+    provenance: dict[str, object]
+
+    def as_payload(self) -> dict[str, object]:
+        return asdict(self)
+
+
+def evaluate_f3_b37_chunk_banana_probe(
+    native: BoozerSurface,
+    jax_boozer: BoozerSurfaceJAX,
+) -> NestedLsChunkBananaProbe:
+    """Native banana bar from F3 B37 start; chunk sweep at the LU endpoint.
+
+    Does not rerun the reconstruct walk. Does not switch the Newton
+    default. Chunk widths are opt-in ``chunk_batch_size`` arguments.
+    """
+
+    provenance = nested_ls_receipt_provenance()
+    runtime = {
+        "hostname": provenance["hostname"],
+        "python_executable": provenance["python_executable"],
+        "jax_default_backend": provenance["jax_default_backend"],
+        "jax_devices": provenance["jax_devices"],
+        "jax_platforms_env": provenance["jax_platforms_env"],
+        "jax_enable_x64_env": provenance["jax_enable_x64_env"],
+        "timestamp_utc": provenance["timestamp_utc"],
+    }
+    default_chunk = dense_operator_chunk_batch_size()
+    walk_seconds: float | None = None
+    walk_success: bool | None = None
+    if F3_B37_DENSE_LU_WALK_EVIDENCE.is_file():
+        walk_payload = json.loads(
+            F3_B37_DENSE_LU_WALK_EVIDENCE.read_text(encoding="utf-8")
+        )
+        walk_probe = walk_payload["probe"]
+        walk_seconds = _json_finite(_as_float(walk_probe["walk_seconds"]))
+        walk_success = bool(walk_probe["success"])
+
+    def _empty(
+        reason: str,
+        *,
+        banana_success: bool = False,
+        banana_iter: int = 0,
+        banana_iota: float = 0.0,
+        banana_g: float = 0.0,
+        banana_seconds: float = 0.0,
+        banana_coil: float = 0.0,
+        y_iota: float = 0.0,
+        y_g: float = 0.0,
+        sha: str = "",
+        rows: tuple[dict[str, object], ...] = (),
+        matrix_rel: float | None = None,
+    ) -> NestedLsChunkBananaProbe:
+        return NestedLsChunkBananaProbe(
+            banana_success=banana_success,
+            banana_iter=banana_iter,
+            banana_iota=banana_iota,
+            banana_G=banana_g,
+            banana_seconds=banana_seconds,
+            banana_coil_delta_inf=banana_coil,
+            reconstruct_walk_seconds=walk_seconds,
+            reconstruct_walk_success=walk_success,
+            y_star_iota=y_iota,
+            y_star_g=y_g,
+            endpoint_sha256=sha,
+            newton_stab=float(NESTED_LS_NEWTON_STAB),
+            default_chunk_batch_size=default_chunk,
+            rows=rows,
+            matrix_rel_frobenius_max=matrix_rel,
+            fail_closed_reason=reason,
+            runtime=runtime,
+            provenance=provenance,
+        )
+
+    residual_fn, _objective_fn, _phi_hat = nested_ls_reduced_closures(jax_boozer)
+    del _phi_hat
+    surface0 = np.asarray(jax_boozer.surface.get_dofs(), dtype=np.float64)
+    native_start = np.asarray(native.surface.get_dofs(), dtype=np.float64)
+    solution = solve_projected_y(residual_fn, surface0, np.zeros(2, dtype=np.float64))
+    require_full_y_rank(solution)
+    y_star = np.asarray(solution.solution, dtype=np.float64)
+    banana_options = nested_ls_banana_run_code_options()
+    original_options = replace_native_solver_options(
+        native,
+        {
+            "newton_tol": banana_options["newton_tol"],
+            "newton_maxiter": banana_options["newton_maxiter"],
+            "bfgs_tol": banana_options["bfgs_tol"],
+        },
+    )
+    native.surface.set_dofs(native_start)
+    native_coils0 = np.asarray(native.biotsavart.x, dtype=np.float64)
+    native.need_to_run_code = True
+    banana_started = time.perf_counter()
+    try:
+        banana = native.run_code(float(y_star[0]), G=float(y_star[1]))
+        banana_seconds = time.perf_counter() - banana_started
+    finally:
+        native.options = original_options
+    if banana is None:
+        return _empty("banana_none", y_iota=float(y_star[0]), y_g=float(y_star[1]))
+    banana_coil = float(
+        np.linalg.norm(
+            np.asarray(native.biotsavart.x, dtype=np.float64) - native_coils0,
+            ord=np.inf,
+        )
+    )
+    banana_success = bool(banana["success"])
+    banana_iter = int(banana["iter"])
+    banana_iota = float(banana["iota"])
+    banana_g = float(banana["G"])
+    print(
+        "banana native"
+        f" success={banana_success} iter={banana_iter}"
+        f" s={banana_seconds:.3f} coil={banana_coil!r}",
+        flush=True,
+    )
+    loaded, coils, y_end, _iota, _g_const, _g_value, freeze_reason = (
+        _freeze_dense_lu_walk_endpoint(jax_boozer)
+    )
+    if freeze_reason is not None:
+        return _empty(
+            freeze_reason,
+            banana_success=banana_success,
+            banana_iter=banana_iter,
+            banana_iota=banana_iota,
+            banana_g=banana_g,
+            banana_seconds=float(banana_seconds),
+            banana_coil=banana_coil,
+            y_iota=float(y_star[0]),
+            y_g=float(y_star[1]),
+            sha=sha256_float64(loaded),
+        )
+    residual_fn, objective_fn, _phi_hat = nested_ls_reduced_closures(jax_boozer)
+    del _phi_hat
+    operator = factor_reduced_nested_ls_schur(
+        residual_fn,
+        objective_fn,
+        loaded,
+        y_probe=np.asarray(y_end, dtype=np.float64),
+    )
+    reference: np.ndarray | None = None
+    rel_max = 0.0
+    rows: list[dict[str, object]] = []
+    deadline = time.perf_counter() + float(F3_B37_CHUNK_BANANA_WALL_SECONDS)
+    fail_reason: str | None = None
+    for width in F3_B37_CHUNK_WIDTHS:
+        if time.perf_counter() >= deadline:
+            fail_reason = "wall_time_cap"
+            break
+        started = time.perf_counter()
+        dense = jax.block_until_ready(
+            materialize_stabilized_schur_dense(
+                operator,
+                float(NESTED_LS_NEWTON_STAB),
+                chunk_batch_size=int(width),
+            )
+        )
+        dense_seconds = float(time.perf_counter() - started)
+        dense_np = np.asarray(jax.device_get(dense), dtype=np.float64)
+        if not np.all(np.isfinite(dense_np)):
+            fail_reason = "nonfinite"
+            break
+        lu_seconds = 0.0
+        live_eta: float | None = None
+        if reference is None:
+            lu_started = time.perf_counter()
+            rhs = jnp.ones((int(loaded.size),), dtype=jnp.float64)
+            delta = jax.block_until_ready(solve_stabilized_schur_dense_lu(dense, rhs))
+            lu_seconds = float(time.perf_counter() - lu_started)
+            residual = jax.block_until_ready(
+                operator.apply(delta) + float(NESTED_LS_NEWTON_STAB) * delta - rhs
+            )
+            residual_l2 = float(
+                np.linalg.norm(np.asarray(jax.device_get(residual), dtype=np.float64))
+            )
+            rhs_l2 = float(np.linalg.norm(np.ones(int(loaded.size), dtype=np.float64)))
+            live_eta = residual_l2 / rhs_l2 if rhs_l2 > 0.0 else 0.0
+            reference = dense_np
+            rel = 0.0
+        else:
+            scale = float(np.linalg.norm(reference, ord="fro"))
+            rel = (
+                float(np.linalg.norm(dense_np - reference, ord="fro") / scale)
+                if scale > 0.0
+                else float(np.linalg.norm(dense_np - reference, ord="fro"))
+            )
+            rel_max = max(rel_max, rel)
+        print(
+            f"chunk width={width} dense_s={dense_seconds:.3f} lu_s={lu_seconds:.3f}"
+            f" rel={rel!r} eta={live_eta!r}",
+            flush=True,
+        )
+        rows.append(
+            {
+                "chunk_batch_size": int(width),
+                "dense_seconds": dense_seconds,
+                "lu_seconds": lu_seconds,
+                "live_eta": _json_finite(live_eta) if live_eta is not None else None,
+                "matrix_rel_frobenius": _json_finite(rel),
+                "dense_bytes": schur_dense_operator_bytes(int(loaded.size)),
+            }
+        )
+    coil_after = float(
+        np.linalg.norm(
+            np.asarray(jax_boozer.biotsavart.x, dtype=np.float64) - coils,
+            ord=np.inf,
+        )
+    )
+    if fail_reason is None and coil_after != 0.0:
+        fail_reason = "coil_moved"
+    if fail_reason is None and banana_coil != 0.0:
+        fail_reason = "coil_moved"
+    return NestedLsChunkBananaProbe(
+        banana_success=banana_success,
+        banana_iter=banana_iter,
+        banana_iota=banana_iota,
+        banana_G=banana_g,
+        banana_seconds=float(banana_seconds),
+        banana_coil_delta_inf=banana_coil,
+        reconstruct_walk_seconds=walk_seconds,
+        reconstruct_walk_success=walk_success,
+        y_star_iota=float(y_star[0]),
+        y_star_g=float(y_star[1]),
+        endpoint_sha256=sha256_float64(loaded),
+        newton_stab=float(NESTED_LS_NEWTON_STAB),
+        default_chunk_batch_size=default_chunk,
+        rows=tuple(rows),
+        matrix_rel_frobenius_max=_json_finite(rel_max),
+        fail_closed_reason=fail_reason,
+        runtime=runtime,
+        provenance=provenance,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class NestedLsVolumeOuterProbe:
+    """Moving-coil Volume outer gradient at the dense-LU endpoint.
+
+    Cotangent is ``∇_s Volume``. Inner reconvergence is unregularized
+    dense LU. One coil-direction FD. Not an outer optimizer loop.
+    """
+
+    surface_sha256: str
+    volume: float
+    volume_grad_l2: float
+    iota: float
+    G: float
+    reduced_grad_l2: float
+    mixed_scan_index: int | None
+    mixed_scan_norm: float | None
+    predicted_dot: float | None
+    fd_dot: float | None
+    fd_rel: float | None
+    fd_match: bool | None
+    vjp_match: bool | None
+    adjoint_live_eta: float | None
+    fd_control_success: bool | None
+    fd_perturbed_success: bool | None
+    fd_control_iter: int | None
+    fd_perturbed_iter: int | None
+    coil_delta_inf: float
+    coil_delta_inf_after: float
+    fail_closed_reason: str | None
+    runtime: dict[str, object]
+    provenance: dict[str, object]
+
+    def as_payload(self) -> dict[str, object]:
+        return asdict(self)
+
+
+def evaluate_f3_b37_volume_outer_probe(
+    jax_boozer: BoozerSurfaceJAX,
+) -> NestedLsVolumeOuterProbe:
+    """Volume IFT outer gradient + one-direction coil FD at the LU endpoint."""
+
+    provenance = nested_ls_receipt_provenance()
+    runtime = {
+        "hostname": provenance["hostname"],
+        "python_executable": provenance["python_executable"],
+        "jax_default_backend": provenance["jax_default_backend"],
+        "jax_devices": provenance["jax_devices"],
+        "jax_platforms_env": provenance["jax_platforms_env"],
+        "jax_enable_x64_env": provenance["jax_enable_x64_env"],
+        "timestamp_utc": provenance["timestamp_utc"],
+    }
+
+    def _empty(
+        reason: str,
+        *,
+        sha: str = "",
+        volume: float = 0.0,
+        volume_grad: float = 0.0,
+        iota: float = 0.0,
+        g_const: float = 0.0,
+        g_value: float = 0.0,
+        coil: float = 0.0,
+        coil_after: float = 0.0,
+    ) -> NestedLsVolumeOuterProbe:
+        return NestedLsVolumeOuterProbe(
+            surface_sha256=sha,
+            volume=volume,
+            volume_grad_l2=volume_grad,
+            iota=iota,
+            G=g_const,
+            reduced_grad_l2=g_value,
+            mixed_scan_index=None,
+            mixed_scan_norm=None,
+            predicted_dot=None,
+            fd_dot=None,
+            fd_rel=None,
+            fd_match=None,
+            vjp_match=None,
+            adjoint_live_eta=None,
+            fd_control_success=None,
+            fd_perturbed_success=None,
+            fd_control_iter=None,
+            fd_perturbed_iter=None,
+            coil_delta_inf=coil,
+            coil_delta_inf_after=coil_after,
+            fail_closed_reason=reason,
+            runtime=runtime,
+            provenance=provenance,
+        )
+
+    loaded, coils, y_star, iota, g_const, g_value, freeze_reason = (
+        _freeze_dense_lu_walk_endpoint(jax_boozer)
+    )
+    sha = sha256_float64(loaded)
+    if freeze_reason is not None:
+        return _empty(
+            freeze_reason,
+            sha=sha,
+            iota=iota,
+            g_const=g_const,
+            g_value=g_value,
+        )
+    label = jax_boozer.label
+    if not isinstance(label, Volume):
+        return _empty(
+            "label_not_volume",
+            sha=sha,
+            iota=iota,
+            g_const=g_const,
+            g_value=g_value,
+        )
+    volume0 = float(label.J())
+    volume_grad = np.asarray(label.dJ_by_dsurfacecoefficients(), dtype=np.float64)
+    volume_grad_l2 = float(np.linalg.norm(volume_grad))
+    if not np.isfinite(volume0) or volume_grad_l2 <= 0.0:
+        return _empty(
+            "volume_grad_dead",
+            sha=sha,
+            volume=volume0,
+            volume_grad=volume_grad_l2,
+            iota=iota,
+            g_const=g_const,
+            g_value=g_value,
+        )
+    residual_fn, objective_fn, _phi_hat = nested_ls_reduced_closures(jax_boozer)
+    del _phi_hat
+    operator = factor_reduced_nested_ls_schur(
+        residual_fn,
+        objective_fn,
+        loaded,
+        y_probe=np.asarray(y_star, dtype=np.float64),
+    )
+    cotangent = jnp.asarray(volume_grad, dtype=jnp.float64)
+    dense = jax.block_until_ready(
+        materialize_stabilized_schur_dense(
+            operator,
+            float(F3_B37_IFT_STAB),
+            max_dense_linearization_bytes=None,
+        )
+    )
+    lambda0 = jax.block_until_ready(solve_stabilized_schur_dense_lu(dense, cotangent))
+    residual = jax.block_until_ready(operator.apply(lambda0) - cotangent)
+    residual_l2 = float(
+        np.linalg.norm(np.asarray(jax.device_get(residual), dtype=np.float64))
+    )
+    rhs_l2 = float(np.linalg.norm(volume_grad))
+    live_eta = residual_l2 / rhs_l2 if rhs_l2 > 0.0 else 0.0
+    print(f"volume outer live_eta={live_eta!r} V={volume0!r}", flush=True)
+    fail_reason: str | None = None
+    if not np.isfinite(live_eta):
+        fail_reason = "nonfinite"
+    elif live_eta > float(F3_B37_ADJOINT_LIVE_ETA_TOL):
+        fail_reason = "adjoint_residual_unmet"
+    mixed_index: int | None = None
+    mixed_norm: float | None = None
+    predicted_dot: float | None = None
+    fd_dot: float | None = None
+    fd_rel: float | None = None
+    fd_match: bool | None = None
+    vjp_match: bool | None = None
+    fd_control_success: bool | None = None
+    fd_perturbed_success: bool | None = None
+    fd_control_iter: int | None = None
+    fd_perturbed_iter: int | None = None
+    coil0 = np.array(coils, dtype=np.float64, copy=True)
+    if fail_reason is None:
+        residual_rt, objective_rt, _phi_rt = nested_ls_runtime_coil_closures(jax_boozer)
+        del _phi_rt
+        tangent = None
+        best_norm = -1.0
+        best_index = -1
+        scan_n = min(int(F3_B37_ADJOINT_COIL_SCAN), int(coil0.size))
+        for index in range(scan_n):
+            candidate = np.zeros_like(coil0)
+            candidate[index] = 1.0
+            mixed_candidate = np.asarray(
+                apply_reduced_mixed_schur_coil_tangent(
+                    residual_rt,
+                    objective_rt,
+                    loaded,
+                    coil0,
+                    candidate,
+                    operator=operator,
+                ),
+                dtype=np.float64,
+            )
+            candidate_norm = float(np.linalg.norm(mixed_candidate))
+            print(f"volume mixed index={index} norm={candidate_norm!r}", flush=True)
+            if candidate_norm > best_norm:
+                best_norm = candidate_norm
+                best_index = index
+                tangent = candidate
+        mixed_index = int(best_index) if best_index >= 0 else None
+        mixed_norm = _json_finite(best_norm) if best_norm >= 0.0 else None
+        if tangent is None or best_norm <= float(F3_B37_ADJOINT_MIXED_NORM_FLOOR):
+            fail_reason = "mixed_scan_dead_zero"
+        else:
+            lambda_np = np.asarray(jax.device_get(lambda0), dtype=np.float64)
+            adjoint = np.asarray(
+                implicit_adjoint_coil_gradient(
+                    residual_rt,
+                    objective_rt,
+                    loaded,
+                    coil0,
+                    volume_grad,
+                    stab=float(F3_B37_IFT_STAB),
+                    linear_solver="dense_lu",
+                    operator=operator,
+                    max_dense_linearization_bytes=None,
+                ),
+                dtype=np.float64,
+            )
+            predicted_dot = _json_finite(float(np.dot(adjoint, tangent)))
+            mixed_dc = np.asarray(
+                apply_reduced_mixed_schur_coil_tangent(
+                    residual_rt,
+                    objective_rt,
+                    loaded,
+                    coil0,
+                    tangent,
+                    operator=operator,
+                ),
+                dtype=np.float64,
+            )
+            envelope_dot = _json_finite(-float(np.dot(lambda_np, mixed_dc)))
+            vjp_ok = bool(
+                predicted_dot is not None
+                and envelope_dot is not None
+                and np.allclose(
+                    predicted_dot,
+                    envelope_dot,
+                    rtol=float(F3_B37_ADJOINT_VJP_RTOL),
+                    atol=float(F3_B37_ADJOINT_VJP_ATOL),
+                )
+            )
+            vjp_match = vjp_ok
+            if not vjp_ok:
+                fail_reason = "adjoint_vjp_mismatch"
+            else:
+                epsilon = float(F3_B37_ADJOINT_FD_EPSILON)
+                try:
+                    jax_boozer.surface.set_dofs(loaded)
+                    jax_boozer.biotsavart.x = coil0
+                    jax_boozer._refresh_coil_data()
+                    control = run_reduced_nested_ls_schur_newton(
+                        jax_boozer,
+                        iota=iota,
+                        G=g_const,
+                        stab=float(F3_B37_IFT_STAB),
+                        maxiter=int(NESTED_LS_NEWTON_MAXITER),
+                        linear_solver="dense_lu",
+                    )
+                    fd_control_success = bool(control.success)
+                    fd_control_iter = int(control.iteration_count)
+                    volume_ctrl = float(label.J())
+                    jax_boozer.surface.set_dofs(loaded)
+                    jax_boozer.biotsavart.x = coil0 + epsilon * tangent
+                    jax_boozer._refresh_coil_data()
+                    perturbed = run_reduced_nested_ls_schur_newton(
+                        jax_boozer,
+                        iota=iota,
+                        G=g_const,
+                        stab=float(F3_B37_IFT_STAB),
+                        maxiter=int(NESTED_LS_NEWTON_MAXITER),
+                        linear_solver="dense_lu",
+                    )
+                    fd_perturbed_success = bool(perturbed.success)
+                    fd_perturbed_iter = int(perturbed.iteration_count)
+                    volume_pert = float(label.J())
+                    fd_dot = _json_finite((volume_pert - volume_ctrl) / epsilon)
+                    pred_scale = (
+                        abs(float(predicted_dot)) if predicted_dot is not None else 0.0
+                    )
+                    fd_rel = _json_finite(
+                        abs(float(predicted_dot) - float(fd_dot)) / pred_scale
+                        if predicted_dot is not None
+                        and fd_dot is not None
+                        and pred_scale > 0.0
+                        else float("nan")
+                    )
+                    fd_atol = max(
+                        float(F3_B37_ADJOINT_FD_ATOL_FLOOR),
+                        float(F3_B37_ADJOINT_FD_ATOL_REL) * pred_scale,
+                    )
+                    fd_match = bool(
+                        fd_control_success
+                        and fd_perturbed_success
+                        and control.coil_delta_inf == 0.0
+                        and perturbed.coil_delta_inf == 0.0
+                        and predicted_dot is not None
+                        and fd_dot is not None
+                        and np.allclose(
+                            predicted_dot,
+                            fd_dot,
+                            rtol=float(F3_B37_ADJOINT_FD_RTOL),
+                            atol=fd_atol,
+                        )
+                    )
+                    print(
+                        "volume fd"
+                        f" pred={predicted_dot!r} fd={fd_dot!r} rel={fd_rel!r}"
+                        f" match={fd_match} ctrl_iter={fd_control_iter}"
+                        f" pert_iter={fd_perturbed_iter}",
+                        flush=True,
+                    )
+                    if not bool(fd_control_success):
+                        fail_reason = "fd_control_failed"
+                    elif not bool(fd_perturbed_success):
+                        fail_reason = "fd_perturbed_failed"
+                    elif (
+                        control.coil_delta_inf != 0.0 or perturbed.coil_delta_inf != 0.0
+                    ):
+                        fail_reason = "coil_moved"
+                    elif not bool(fd_match):
+                        fail_reason = "fd_mismatch"
+                finally:
+                    jax_boozer.biotsavart.x = coil0
+                    jax_boozer._refresh_coil_data()
+                    jax_boozer.surface.set_dofs(loaded)
+    coil_after = float(
+        np.linalg.norm(
+            np.asarray(jax_boozer.biotsavart.x, dtype=np.float64) - coil0,
+            ord=np.inf,
+        )
+    )
+    if fail_reason is None and coil_after != 0.0:
+        fail_reason = "coil_moved"
+    return NestedLsVolumeOuterProbe(
+        surface_sha256=sha,
+        volume=volume0,
+        volume_grad_l2=volume_grad_l2,
+        iota=iota,
+        G=g_const,
+        reduced_grad_l2=g_value,
+        mixed_scan_index=mixed_index,
+        mixed_scan_norm=mixed_norm,
+        predicted_dot=predicted_dot,
+        fd_dot=fd_dot,
+        fd_rel=fd_rel,
+        fd_match=fd_match,
+        vjp_match=vjp_match,
+        adjoint_live_eta=_json_finite(live_eta),
+        fd_control_success=fd_control_success,
+        fd_perturbed_success=fd_perturbed_success,
+        fd_control_iter=fd_control_iter,
+        fd_perturbed_iter=fd_perturbed_iter,
+        coil_delta_inf=0.0,
+        coil_delta_inf_after=coil_after,
+        fail_closed_reason=fail_reason,
+        runtime=runtime,
+        provenance=provenance,
+    )
+
+
 def replace_native_solver_options(
     native: BoozerSurface,
     overlay: dict[str, object],
@@ -3356,6 +4068,8 @@ __all__ = [
     "F3_B37_ADJOINT_LIVE_ETA_TOL",
     "F3_B37_ADJOINT_WALL_SECONDS",
     "F3_B37_CAP512_WALK_EVIDENCE",
+    "F3_B37_CHUNK_BANANA_WALL_SECONDS",
+    "F3_B37_CHUNK_WIDTHS",
     "F3_B37_DENSE_LU_ENDPOINT_G",
     "F3_B37_DENSE_LU_ENDPOINT_GRAD_L2",
     "F3_B37_DENSE_LU_ENDPOINT_IOTA",
@@ -3382,8 +4096,10 @@ __all__ = [
     "F3_B37_STEP6_IOTA",
     "F3_B37_STEP6_MATERIAL_RESIDUAL_RATIO",
     "F3_B37_STEP6_WALL_SECONDS_2048",
+    "F3_B37_VOLUME_OUTER_WALL_SECONDS",
     "NestedLsB37NestedTiming",
     "NestedLsBoundedF3B37Result",
+    "NestedLsChunkBananaProbe",
     "NestedLsCountedMatvec",
     "NestedLsEndpointAdjointProbe",
     "NestedLsFlatNativeB37Probe",
@@ -3393,10 +4109,12 @@ __all__ = [
     "NestedLsStep4ForcingProbe",
     "NestedLsStep6ArchitectureProbe",
     "NestedLsStep6ForcingProbe",
+    "NestedLsVolumeOuterProbe",
     "archived_f3_b37_lanes_available",
     "archived_flat675_bundle_available",
     "dump_strict_json",
     "evaluate_f3_b37_bounded_probe",
+    "evaluate_f3_b37_chunk_banana_probe",
     "evaluate_f3_b37_endpoint_adjoint_probe",
     "evaluate_f3_b37_flat_native_probe",
     "evaluate_f3_b37_nested_timing",
@@ -3406,6 +4124,7 @@ __all__ = [
     "evaluate_f3_b37_step4_forcing_probe",
     "evaluate_f3_b37_step6_architecture_probe",
     "evaluate_f3_b37_step6_forcing_probe",
+    "evaluate_f3_b37_volume_outer_probe",
     "float64_ulps",
     "gmres_doubling_cycle_budget",
     "kib_to_gib",
