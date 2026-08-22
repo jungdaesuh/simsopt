@@ -9,6 +9,7 @@ physics holds and min JAX claim wall beats min native parent wait.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import statistics
@@ -42,16 +43,24 @@ from benchmarks.nested_ls_shamanskii_attribution import (
 
 EVIDENCE = REPO / "docs" / "receipts" / "evidence"
 BANANA_CHILD = REPO / "benchmarks" / "nested_ls_banana_omp_child.py"
-OUT_JSON = EVIDENCE / "nested_ls_reduced_gpu_gate6_20260822.json"
-OUT_LOG = EVIDENCE / "nested_ls_reduced_gpu_gate6_20260822.log"
-PUBLICATION = (
-    "Gate-6 process-wall vs process-wall claim run. Native banana at "
-    "best-of-contract OMP=16, JAX Shamanskii with persistent compile "
-    "cache. Not F3 7.70x."
-)
-NATIVE_OMP_THREADS = NESTED_LS_GATE6_NATIVE_OMP_THREADS
 IOTA_G_TOL = NESTED_LS_GATE6_IOTA_G_TOL
 GRAD_TOL = NESTED_LS_NEWTON_TOL
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Gate-6 process-wall claim run.")
+    parser.add_argument(
+        "--omp",
+        type=int,
+        default=NESTED_LS_GATE6_NATIVE_OMP_THREADS,
+        help="Native banana OMP_NUM_THREADS (best-of-contract on this host).",
+    )
+    parser.add_argument(
+        "--tag",
+        default="",
+        help="Receipt suffix, e.g. a100 → nested_ls_reduced_gpu_gate6_20260822.a100.json",
+    )
+    return parser.parse_args(argv)
 
 
 def _require_clean_tree() -> str:
@@ -65,9 +74,9 @@ def _require_clean_tree() -> str:
     ).strip()
 
 
-def _launch_native_banana() -> dict[str, object]:
+def _launch_native_banana(*, omp_num_threads: int) -> dict[str, object]:
     env = dict(os.environ)
-    env["OMP_NUM_THREADS"] = str(NATIVE_OMP_THREADS)
+    env["OMP_NUM_THREADS"] = str(omp_num_threads)
     env["JAX_PLATFORMS"] = "cpu"
     env["JAX_ENABLE_X64"] = "1"
     env.pop("SIMSOPT_BACKEND_MODE", None)
@@ -96,7 +105,7 @@ def _launch_native_banana() -> dict[str, object]:
     observed_omp = int(payload["omp_num_threads"])
     row = {
         "side": "native",
-        "omp_num_threads": int(NATIVE_OMP_THREADS),
+        "omp_num_threads": int(omp_num_threads),
         "observed_omp_num_threads": observed_omp,
         "omp_pinned": bool(payload["omp_pinned"]),
         "omp_proc_bind": threading["OMP_PROC_BIND"],
@@ -114,7 +123,7 @@ def _launch_native_banana() -> dict[str, object]:
     print(
         "gate6 native"
         f" success={row['success']!r} inner={row['inner_solver_seconds']!r}"
-        f" wall={process_wall_seconds!r} omp={NATIVE_OMP_THREADS}",
+        f" wall={process_wall_seconds!r} omp={omp_num_threads}",
         flush=True,
     )
     return row
@@ -125,7 +134,7 @@ def _physics_ok(native: dict[str, object], jax_row: dict[str, object]) -> str | 
         return "native_failed"
     if not bool(native["omp_pinned"]):
         return "native_omp_unpinned"
-    if int(native["observed_omp_num_threads"]) != int(NATIVE_OMP_THREADS):
+    if int(native["observed_omp_num_threads"]) != int(native["omp_num_threads"]):
         return "native_omp_not_contract"
     if float(native["coil_delta_inf"]) != 0.0:
         return "native_coil_moved"
@@ -144,9 +153,20 @@ def _physics_ok(native: dict[str, object], jax_row: dict[str, object]) -> str | 
     return None
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    omp_num_threads = int(args.omp)
+    tag = str(args.tag).strip()
+    suffix = f".{tag}" if tag else ""
+    out_json = EVIDENCE / f"nested_ls_reduced_gpu_gate6_20260822{suffix}.json"
+    out_log = EVIDENCE / f"nested_ls_reduced_gpu_gate6_20260822{suffix}.log"
+    publication = (
+        "Gate-6 process-wall vs process-wall claim run. Native banana at "
+        f"best-of-contract OMP={omp_num_threads}, JAX Shamanskii with "
+        "persistent compile cache. Not F3 7.70x."
+    )
     sha = _require_clean_tree()
-    print("gate6 prime shamanskii cache", flush=True)
+    print("gate6 prime shamanskii cache", "omp", omp_num_threads, flush=True)
     prime = launch_nested_ls_gpu_child(
         linear_solver="shamanskii",
         cache_dir=CACHE_SHAMANSKII,
@@ -161,7 +181,7 @@ def main() -> None:
     jax_walls: list[float] = []
     fail_reason: str | None = None
     for repeat in range(REPEATS):
-        native = _launch_native_banana()
+        native = _launch_native_banana(omp_num_threads=omp_num_threads)
         native["role"] = "measure"
         native["repeat"] = int(repeat)
         jax_row = launch_nested_ls_gpu_child(
@@ -215,18 +235,21 @@ def main() -> None:
             "interleaved_repeats": True,
             "jax_linear_solver": "shamanskii",
             "jax_persistent_cache": True,
-            "native_omp_num_threads": NATIVE_OMP_THREADS,
+            "native_omp_num_threads": omp_num_threads,
             "nested_speed_claim": nested_speed_claim,
             "one_lane_per_process": True,
             "repeats": int(REPEATS),
+            "tag": tag or None,
         },
         "command": (
             "SIMSOPT_BACKEND_MODE=jax_gpu_fast JAX_PLATFORMS=cuda,cpu JAX_ENABLE_X64=1 "
-            ".venv-qn-gpu/bin/python benchmarks/nested_ls_gate6_claim.py"
+            "python benchmarks/nested_ls_gate6_claim.py"
+            + (f" --omp {omp_num_threads}" if omp_num_threads else "")
+            + (f" --tag {tag}" if tag else "")
         ),
         "date": datetime.now(timezone.utc).date().isoformat(),
         "driver": "benchmarks.nested_ls_gate6_claim",
-        "execution_log": str(OUT_LOG.relative_to(REPO)),
+        "execution_log": str(out_log.relative_to(REPO)),
         "fail_closed_reason": fail_reason,
         "git_head": sha,
         "native_min_process_wall_seconds": native_min,
@@ -235,12 +258,12 @@ def main() -> None:
         "jax_median_process_wall_seconds": float(statistics.median(jax_walls)),
         "pairs": pairs,
         "prime": prime,
-        "publication": PUBLICATION,
+        "publication": publication,
         "schema": "nested-ls-reduced-gpu-gate6.v1",
         "written_by_pytest": False,
     }
-    write_strict_json(OUT_JSON, payload)
-    print("wrote", OUT_JSON, flush=True)
+    write_strict_json(out_json, payload)
+    print("wrote", out_json, flush=True)
     print(
         "ok",
         physics_ok,
