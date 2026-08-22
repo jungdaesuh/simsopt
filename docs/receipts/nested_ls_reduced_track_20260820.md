@@ -627,12 +627,62 @@ remain different (``comparable_operators=false``).
 ``nested_speed_claim=true`` under the frozen Gate-6 contract.
 Not F3 7.70×.
 
+### Gate-6 5090 remint at HEAD (2026-08-22, tag ``5090``)
+
+Receipt
+``docs/receipts/evidence/nested_ls_reduced_gpu_gate6_20260822.5090.json``.
+Producer SHA ``ae86f2b27`` (clean implementation tree; evidence-only
+untracked). Same frozen contract: interleaved n=3, native banana OMP=16
+(observed), JAX Shamanskii + persistent cache. Physics: Δι=8.96e-13,
+ΔG=0, ``‖g‖₂=1.08e-14``, coils frozen, rejudge iter=0.
+
+| repeat | native wall (s) OMP=16 | native inner (s) | JAX claim wall (s) | JAX inner walk (s) | physics |
+|---|---|---|---|---|---|
+| 0 | 136.05 | 126.40 | 99.85 | 81.90 | True |
+| 1 | 127.71 | 118.65 | 99.69 | 81.95 | True |
+| 2 | 126.45 | 117.45 | 99.45 | 81.75 | True |
+
+Aggregation min: JAX 99.45 s / native 126.45 s = **1.27×**
+(medians 99.69 / 127.71). Confirms the sealed ``aa65b24b0`` claim at
+current HEAD; the untagged JSON above remains the claim of record.
+Not F3 7.70×.
+
+### Gate-6 A100 rung (2026-08-22, tag ``a100``, Landau)
+
+Receipt
+``docs/receipts/evidence/nested_ls_reduced_gpu_gate6_20260822.a100.json``.
+Producer: Landau mirror tree ``3e999bcf8`` (separate lineage;
+``.landau_origin_sha`` = workstation ``ab3d36db4``; the 14400 s sweep-wall
+fix is mirrored on the workstation as ``d26b928ea``; the four nested-LS
+implementation files — ``nested_ls_reduced_scale.py``,
+``nested_ls_gate6_claim.py``, ``nested_ls_shamanskii_attribution.py``,
+``nested_ls_a100_banana_omp.py`` — verified sha256-identical to
+workstation HEAD ``ae86f2b27`` at landing). Native banana at this host's
+best-of-contract OMP=20
+(``nested_ls_reduced_a100_banana_omp_20260822.json``). JAX Shamanskii +
+persistent cache on the A100-PCIE-40GB. Physics: Δι=8.96e-13, ΔG=0,
+``‖g‖₂=1.09e-14``, coils frozen, rejudge iter=0.
+
+| repeat | native wall (s) OMP=20 | native inner (s) | JAX claim wall (s) | JAX inner walk (s) | physics |
+|---|---|---|---|---|---|
+| 0 | 379.27 | 351.55 | 295.01 | 251.77 | True |
+| 1 | 379.88 | 352.35 | 220.31 | 170.11 | True |
+| 2 | 379.56 | 352.26 | 300.61 | 251.62 | True |
+
+Aggregation min: JAX 220.31 s / native 379.27 s = **1.72×**
+(medians 295.01 / 379.56 = 1.29×). The JAX walk is bimodal on this host
+(170.1 s vs 251.6–251.8 s across repeats; native walls are flat at
+379.3–379.9 s) — min is the frozen contract aggregation, medians are
+published beside it and the per-repeat rows are in the artifact.
+``nested_speed_claim=true`` under the frozen Gate-6 contract on this
+second host. Not F3 7.70×.
+
 ## Next
 
-Gate-6 on this 5090 box is closed. Remaining:
+Gate-6 is closed on both hosts (5090 OMP=16 min 1.27×; A100 OMP=20
+min 1.72×, median 1.29×). Remaining:
 
-1. A100 rung on Landau, with its own OMP contract.
-2. New eight-term outer optimizer charter: B3, then B37,
+1. New eight-term outer optimizer charter: B3, then B37,
    after multi-direction step-halved FD. Optimistix/Lineax
    belong there, not as a mid-campaign linear-algebra swap.
 

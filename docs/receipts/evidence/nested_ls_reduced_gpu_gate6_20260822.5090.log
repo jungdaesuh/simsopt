@@ -1,0 +1,13 @@
+gate6 prime shamanskii cache omp 16
+attr solver=shamanskii cache_disabled=False success=True walk=88.38463751482777 wall=306.93729205895215 jax_wall=105.1471249293536 floor=16.762487414525822 reused=[6, 8] reassembled=[2, 3, 4, 5, 7] refine=[0, 0, 0, 0, 3, 1, 3, 0]
+gate6 native success=True inner=126.39615948800929 wall=136.05295638903044 omp=16
+attr solver=shamanskii cache_disabled=False success=True walk=81.89611850003712 wall=276.4904689490795 jax_wall=98.55210746289231 floor=16.65598896285519 reused=[6, 8] reassembled=[2, 3, 4, 5, 7] refine=[0, 0, 0, 0, 3, 1, 3, 0]
+gate6 pair repeat=0 physics=True native_wall=136.05295638903044 jax_wall=99.8474372040946 reason=None
+gate6 native success=True inner=118.64735985524021 wall=127.70599434780888 omp=16
+attr solver=shamanskii cache_disabled=False success=True walk=81.94998409086838 wall=264.25580518785864 jax_wall=98.38568065012805 floor=16.435696559259668 reused=[6, 8] reassembled=[2, 3, 4, 5, 7] refine=[0, 0, 0, 0, 3, 1, 3, 0]
+gate6 pair repeat=1 physics=True native_wall=127.70599434780888 jax_wall=99.69050245499238 reason=None
+gate6 native success=True inner=117.44898576103151 wall=126.45090126711875 omp=16
+attr solver=shamanskii cache_disabled=False success=True walk=81.74561023991555 wall=263.59155060793273 jax_wall=98.18569449009374 floor=16.440084250178188 reused=[6, 8] reassembled=[2, 3, 4, 5, 7] refine=[0, 0, 0, 0, 3, 1, 3, 0]
+gate6 pair repeat=2 physics=True native_wall=126.45090126711875 jax_wall=99.45423458702862 reason=None
+wrote /home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/docs/receipts/evidence/nested_ls_reduced_gpu_gate6_20260822.5090.json
+ok True nested_speed_claim True jax_min 99.45423458702862 native_min 126.45090126711875
