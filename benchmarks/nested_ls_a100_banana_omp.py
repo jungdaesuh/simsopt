@@ -25,7 +25,11 @@ PUBLICATION = (
 OUT_JSON = EVIDENCE / "nested_ls_reduced_a100_banana_omp_20260822.json"
 OUT_LOG = EVIDENCE / "nested_ls_reduced_a100_banana_omp_20260822.log"
 
-probe = evaluate_f3_b37_banana_omp_sweep(threads=F3_B37_BANANA_OMP_CONTRACT_THREADS)
+# Dual-socket EPYC 7452 banana is ~400 s/child; 16 children need >3600 s.
+probe = evaluate_f3_b37_banana_omp_sweep(
+    threads=F3_B37_BANANA_OMP_CONTRACT_THREADS,
+    wall_seconds=14400.0,
+)
 print(
     "banana_omp_a100 fail",
     probe.fail_closed_reason,

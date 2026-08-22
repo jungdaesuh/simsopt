@@ -4163,6 +4163,7 @@ def evaluate_f3_b37_banana_omp_sweep(
     python_executable: str | None = None,
     threads: tuple[int, ...] = F3_B37_BANANA_OMP_THREADS,
     repeats: int = F3_B37_BANANA_OMP_REPEATS,
+    wall_seconds: float | None = None,
 ) -> NestedLsBananaOmpSweep:
     """Launch interleaved native banana children with pinned OpenMP.
 
@@ -4189,7 +4190,9 @@ def evaluate_f3_b37_banana_omp_sweep(
     rows: list[dict[str, object]] = []
     fail_reason: str | None = None
     any_unpinned = False
-    deadline = time.perf_counter() + float(F3_B37_BANANA_OMP_WALL_SECONDS)
+    deadline = time.perf_counter() + float(
+        F3_B37_BANANA_OMP_WALL_SECONDS if wall_seconds is None else wall_seconds
+    )
     schedule = [
         (repeat, int(thread)) for repeat in range(int(repeats)) for thread in threads
     ]
