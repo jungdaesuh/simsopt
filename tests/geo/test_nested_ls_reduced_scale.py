@@ -196,6 +196,10 @@ _GPU_GATE6_PUBLICATION = (
     "best-of-contract OMP=16, JAX Shamanskii with persistent compile "
     "cache. Not F3 7.70x."
 )
+_A100_BANANA_OMP_EVIDENCE = (
+    _EVIDENCE_DIR / "nested_ls_reduced_a100_banana_omp_20260822.json"
+)
+_A100_GATE6_EVIDENCE = _EVIDENCE_DIR / "nested_ls_reduced_gpu_gate6_20260822.a100.json"
 _F3_B37_GPU_CHUNK_WARM_EVIDENCE = (
     _EVIDENCE_DIR / "nested_ls_reduced_gpu_chunk_warm_20260821.json"
 )
@@ -1744,6 +1748,62 @@ def test_authored_gpu_gate6_json_matches_frozen_contract():
         jax_claim_walls
     ) < min(native_claim_walls)
     assert boundary["nested_speed_claim"] is expected_claim
+    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
+
+
+@pytest.mark.skipif(
+    not _A100_BANANA_OMP_EVIDENCE.is_file(),
+    reason="authored A100 banana OMP JSON not yet produced",
+)
+def test_authored_a100_banana_omp_json_is_host_best_of_contract():
+    raw = _A100_BANANA_OMP_EVIDENCE.read_text(encoding="utf-8")
+    assert "NaN" not in raw
+    payload = json.loads(raw)
+    dump_strict_json(payload)
+    assert payload["schema"] == "nested-ls-reduced-a100-banana-omp.v1"
+    assert payload["written_by_pytest"] is False
+    boundary = payload["claim_boundary"]
+    assert boundary["nested_speed_claim"] is False
+    assert boundary["inherits_f3_7_70x"] is False
+    assert boundary["host"] == "landau"
+    assert boundary["omp_pinned"] is True
+    assert payload["threads"] == list(F3_B37_BANANA_OMP_CONTRACT_THREADS)
+    rows = payload["probe"]["rows"]
+    assert {int(row["omp_num_threads"]) for row in rows} == set(
+        F3_B37_BANANA_OMP_CONTRACT_THREADS
+    )
+    assert all(bool(row["omp_pinned"]) for row in rows)
+    assert all(bool(row["success"]) for row in rows)
+    best = int(payload["best_omp_num_threads"])
+    assert best in F3_B37_BANANA_OMP_CONTRACT_THREADS
+    best_inner = min(float(row["inner_solver_seconds"]) for row in rows)
+    assert float(payload["best_inner_solver_seconds"]) == pytest.approx(best_inner)
+    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
+
+
+@pytest.mark.skipif(
+    not _A100_GATE6_EVIDENCE.is_file(),
+    reason="authored A100 Gate-6 JSON not yet produced",
+)
+def test_authored_a100_gate6_json_uses_host_best_omp():
+    raw = _A100_GATE6_EVIDENCE.read_text(encoding="utf-8")
+    assert "NaN" not in raw
+    payload = json.loads(raw)
+    dump_strict_json(payload)
+    assert payload["schema"] == "nested-ls-reduced-gpu-gate6.v1"
+    assert payload["written_by_pytest"] is False
+    boundary = payload["claim_boundary"]
+    assert boundary["inherits_f3_7_70x"] is False
+    assert boundary["tag"] == "a100"
+    assert boundary["repeats"] == NESTED_LS_GATE6_CLAIM_REPEATS
+    omp = int(boundary["native_omp_num_threads"])
+    if _A100_BANANA_OMP_EVIDENCE.is_file():
+        omp_payload = json.loads(_A100_BANANA_OMP_EVIDENCE.read_text(encoding="utf-8"))
+        assert omp == int(omp_payload["best_omp_num_threads"])
+    pairs = payload["pairs"]
+    assert len(pairs) >= NESTED_LS_GATE6_CLAIM_REPEATS
+    assert all(pair["physics_ok"] for pair in pairs)
+    assert payload["fail_closed_reason"] is None
     assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
 
 
