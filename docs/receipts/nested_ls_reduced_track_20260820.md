@@ -439,8 +439,8 @@ first-touch/XLA, not the production regime. Keep production batch
 8 because the cold sweep is **insufficient repeated/interleaved
 evidence**, not because “width is not monotonic.” Re-decide only
 on a warm repeated sweep. Lagging the **LU** (0.06 s) saves
-nothing; Shamanskii **lagged assembly** (~16 s/warm step) remains
-chartered and is contingent on an OMP-disciplined banana bar.
+nothing. Shamanskii **lagged assembly** is now the Gate-6
+**numerator** lever, not an optional extra after a timing claim.
 
 F3-B37 Volume **directional-gradient** canary (not a B3 outer
 optimizer): cotangent ``∇_s Volume``, unregularized dense LU IFT,
@@ -454,32 +454,78 @@ OMP-pinned interleaved banana sweep
 (``evaluate_f3_b37_banana_omp_sweep``, threads ``{4,8,16,32}`` × 2):
 all pinned, coils frozen, BFGS ~682 iters then Newton 1. Fastest
 ``OMP=16`` ~116–119 s; ``OMP=32`` slower (~145–149 s). Unpinned 171 s
-was a weak native, not the bar. Still **not** a 153-vs-banana speed
-claim (no Gate-6 contract).
+was a weak native, not the bar. At ``OMP=16`` the split is BFGS
+≈91–93 s (682 steps) + Newton polish ≈25–26 s. JAX's **warm**
+Newton step (~16.7 s assemble+factor) **beats** native polish
+(~25.5 s). The walk loses on (a) cold step-1 XLA premium
+(~16 s) and (b) six extra Newton steps doing work native covers
+with cheap BFGS. Mimicking BFGS-then-polish in JAX loses: envelope
+grad ~0.4 s × 682 ≈ 273 s. Fewer, heavier, batched-assembly
+Newton steps is the GPU shape. ``OMP=32`` forked ``bfgs_iter``
+682→683 with endpoint still ~10⁻¹² — threading-fork class, and
+margin under a 10⁻¹¹ Gate-6 ι/G tolerance. Gap fill ``{20,24}``
+on this 32-core box (diagnostic, dirty at ``39e620eec``):
+``OMP=20`` 128.2/126.2 s, ``OMP=24`` 135.4/134.5 s, both slower
+than ``OMP=16`` and faster than ``OMP=32``. Native best-of-contract
+remains ``OMP=16`` at 116.02 s. ``bfgs_iter`` stayed 682 (the
+682→683 fork is the OMP=32 datum). Still **not** a speed claim.
 
 Warm in-process chunk repeats (warmup discarded): mean assemble
 8:17.0 s, 16:16.6 s, 32:17.6 s, 64:18.0 s. Matches the walk's ~16 s
 warm width-8. Keep production batch 8; 16 is not a proven win.
 
+### Receipt metadata rule
+
+Diagnostic receipts may receive **metadata-only** amendments
+(``claim_boundary`` labels, publication sentence) via a **named
+commit** that does not touch payload numbers. Claim-grade receipts
+are **reminted**, never edited in place. Gate-6 runs are
+claim-bearing by construction: **clean tree from the first byte**.
+
+### Gate-6 contract (pre-declared, pre-lever)
+
+Before Shamanskii or compile-cache land, so levers cannot move the
+goalposts:
+
+- Same F3 B37 start SHA; coils bitwise frozen.
+- Endpoint ι/G within ``10⁻¹¹`` (today ~10⁻¹²).
+- Each side its own solver to its own success criterion (native
+  banana ``run_code`` vs JAX reconstruct dense-LU Newton).
+- Native = banana at **best-of-swept OMP**, sweep set
+  ``{4,8,16,20,24,32}``, interleaved ≥2 (claim runs ≥3).
+- Process wall vs process wall. Clean tree both sides.
+- **Pre-lever baseline row:** JAX walk 153.06 s vs native OMP=16
+  116.02 s = **0.76×**. Not a claim. Recorded so the eventual
+  claim shows before/after inside this contract.
+
+Do **not** chase BFGS-then-polish in JAX. Bundle **compile cache**
+and **Shamanskii on-demand assembly** (stale LU as ``M``, 1–3 live
+HVPs, same unpreconditioned η vs Eisenstat–Walker, fail-closed
+reassemble on miss) in one GO; measure cache-only, lag-only, and
+both. Shamanskii is **required for Gate-6**, not contingent on it:
+cache-only still leaves ~137 vs 116.
+
+Product ``linear_solver="dense_lu"`` must **not** reuse the adjoint
+1 MiB cap. Inner Newton currently has ``max_dense_linearization_bytes=None``;
+661 stored Ĥ is **3,495,368 bytes** (3.50 MB) and would be refused by
+the adjoint default. Declare an explicit reconstruct-inner budget or
+dimension threshold after E2E, not 1 MiB.
+
 ## Next
 
-1. Charter Gate-6: same start, same endpoint within a predeclared
-   tolerance, each side its own best solver, process wall, OMP law.
-   OMP banana now exists (best ~116 s at 16 threads); 153-vs-116 is
-   still not a claim.
-2. FD extension (more coil directions + step-halving), then a
-   **new** outer-optimizer charter (full objective, reconverge
-   inner after each coil update, B3 then B37).
-3. Product ``dense_lu`` iff stored Schur bytes fit the existing
-   dense budget; GMRES otherwise. Not a prerequisite for the outer
-   experiment. Lagged **assembly** is the remaining inner margin
-   lever, contingent on Gate-6.
+1. Multi-direction, step-halved FD for the outer gradient.
+2. Shamanskii + compile-cache GO (cache / lag / both), then a
+   **clean-tree** Gate-6 claim run against the contract above.
+   Pre-lever baseline inside that contract: 153.06 vs 116.02 =
+   0.76×. Native best-of-contract is still OMP=16 after the
+   ``{20,24}`` fill.
+3. New eight-term outer optimizer charter: B3, then B37.
+   Benchmark only after endpoint and KKT parity.
 
-**NO-GO:** cap-2048, universal dense-LU default-before-E2E,
-explicit-inverse ``M``, nested speed claim from 153/171 or
-153/116, F3 7.70×, remint of the dirty step-6 forcing JSON,
-claim-grade GMRES walk JSON
-``nested_ls_reduced_gpu_walk_20260821.json``.
+**NO-GO:** cap-2048, adjoint-1-MiB as inner LU budget, mimicking
+native BFGS in JAX, nested speed claim from 153/171 or 153/116,
+F3 7.70×, remint of the dirty step-6 forcing JSON, claim-grade
+GMRES walk JSON ``nested_ls_reduced_gpu_walk_20260821.json``.
 
 Frozen-coil reconstruct physics at 661 is closed for opt-in
 ``linear_solver="dense_lu"``. Unregularized IFT at that endpoint is

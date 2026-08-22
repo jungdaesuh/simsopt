@@ -158,9 +158,14 @@ F3_B37_CHUNK_WIDTHS = (8, 16, 32, 64)
 F3_B37_CHUNK_BANANA_WALL_SECONDS = 1800.0
 F3_B37_VOLUME_OUTER_WALL_SECONDS = 1800.0
 F3_B37_BANANA_OMP_THREADS = (4, 8, 16, 32)
+F3_B37_BANANA_OMP_GAP_THREADS = (20, 24)
+F3_B37_BANANA_OMP_CONTRACT_THREADS = (4, 8, 16, 20, 24, 32)
 F3_B37_BANANA_OMP_REPEATS = 2
-F3_B37_CHUNK_WARM_REPEATS = 3
 F3_B37_BANANA_OMP_WALL_SECONDS = 3600.0
+F3_B37_CHUNK_WARM_REPEATS = 3
+NESTED_LS_GATE6_IOTA_G_TOL = 1.0e-11
+NESTED_LS_GATE6_PRE_LEVER_JAX_WALK_SECONDS = 153.06041832105257
+NESTED_LS_GATE6_PRE_LEVER_NATIVE_OMP16_SECONDS = 116.0183689862024
 
 
 def archived_flat675_bundle_available(bundle_root: Path | None = None) -> bool:
@@ -4144,7 +4149,14 @@ def evaluate_f3_b37_banana_omp_sweep(
     threads: tuple[int, ...] = F3_B37_BANANA_OMP_THREADS,
     repeats: int = F3_B37_BANANA_OMP_REPEATS,
 ) -> NestedLsBananaOmpSweep:
-    """Launch interleaved native banana children with pinned OpenMP."""
+    """Launch interleaved native banana children with pinned OpenMP.
+
+    Default ``threads`` is the historical diagnostic set ``{4,8,16,32}``.
+    Gate-6 claim runs must pass ``F3_B37_BANANA_OMP_CONTRACT_THREADS`` so
+    the native bar is best-of-contract, not best-of-sampled. Each child
+    is a fresh process with ``OMP_NUM_THREADS`` set before import. Not a
+    nested speed claim.
+    """
 
     provenance = nested_ls_receipt_provenance()
     runtime = nested_ls_runtime_identity()
@@ -4159,9 +4171,7 @@ def evaluate_f3_b37_banana_omp_sweep(
     any_unpinned = False
     deadline = time.perf_counter() + float(F3_B37_BANANA_OMP_WALL_SECONDS)
     schedule = [
-        (repeat, int(thread))
-        for repeat in range(int(repeats))
-        for thread in threads
+        (repeat, int(thread)) for repeat in range(int(repeats)) for thread in threads
     ]
     for repeat, thread_count in schedule:
         if fail_reason is not None:
@@ -4447,6 +4457,8 @@ __all__ = [
     "F3_B37_ADJOINT_FD_EPSILON",
     "F3_B37_ADJOINT_LIVE_ETA_TOL",
     "F3_B37_ADJOINT_WALL_SECONDS",
+    "F3_B37_BANANA_OMP_CONTRACT_THREADS",
+    "F3_B37_BANANA_OMP_GAP_THREADS",
     "F3_B37_BANANA_OMP_REPEATS",
     "F3_B37_BANANA_OMP_THREADS",
     "F3_B37_BANANA_OMP_WALL_SECONDS",
@@ -4481,6 +4493,9 @@ __all__ = [
     "F3_B37_STEP6_MATERIAL_RESIDUAL_RATIO",
     "F3_B37_STEP6_WALL_SECONDS_2048",
     "F3_B37_VOLUME_OUTER_WALL_SECONDS",
+    "NESTED_LS_GATE6_IOTA_G_TOL",
+    "NESTED_LS_GATE6_PRE_LEVER_JAX_WALK_SECONDS",
+    "NESTED_LS_GATE6_PRE_LEVER_NATIVE_OMP16_SECONDS",
     "NestedLsB37NestedTiming",
     "NestedLsBananaOmpSweep",
     "NestedLsBoundedF3B37Result",

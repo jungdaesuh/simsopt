@@ -1005,7 +1005,9 @@ def run_reduced_nested_ls_schur_newton(
     ``M``. Armijo runs only when the independent unpreconditioned
     ``η = ‖(Ĥ+stab I)δs − g‖₂ / ‖g‖₂`` is at most the Eisenstat–Walker
     request. Weak solves retry by doubling GMRES ``maxiter`` up to
-    ``gmres_maxiter_cap``, not by raising ``restart``.
+    ``gmres_maxiter_cap``, not by raising ``restart``. Inner dense LU
+    has no default stored-matrix cap; the adjoint 1 MiB default is a
+    different budget and would refuse the 661 matrix (3,495,368 bytes).
     """
 
     residual_fn, objective_fn, _phi_hat = nested_ls_reduced_closures(
@@ -1303,6 +1305,8 @@ def implicit_adjoint_coil_gradient(
     positive ``stab`` only as a regularized canary or fold it into
     ``gmres_preconditioner``. Default GMRES is matrix-free. Dense LU
     remains the 7×7 path and still honours the 1 MiB stored-matrix cap.
+    That 1 MiB default is the adjoint budget, not the reconstruct-inner
+    Newton budget.
     """
 
     coil = jnp.asarray(coil_dofs, dtype=jnp.float64).reshape(-1)

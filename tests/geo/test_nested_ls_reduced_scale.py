@@ -37,6 +37,8 @@ from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     ARCHIVED_START_QR_IOTA,
     DEFAULT_F3_B37_GPU_LANE,
     DEFAULT_F3_B37_NATIVE_LANE,
+    F3_B37_BANANA_OMP_CONTRACT_THREADS,
+    F3_B37_BANANA_OMP_GAP_THREADS,
     F3_B37_BANANA_OMP_THREADS,
     F3_B37_CHUNK_WIDTHS,
     F3_B37_DENSE_LU_ENDPOINT_G,
@@ -48,6 +50,9 @@ from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     F3_B37_STEP6_CAP_2048_START_MAXITER,
     F3_B37_STEP6_MATERIAL_RESIDUAL_RATIO,
     F3_B37_STEP6_WALL_SECONDS_2048,
+    NESTED_LS_GATE6_IOTA_G_TOL,
+    NESTED_LS_GATE6_PRE_LEVER_JAX_WALK_SECONDS,
+    NESTED_LS_GATE6_PRE_LEVER_NATIVE_OMP16_SECONDS,
     NestedLsCountedMatvec,
     archived_f3_b37_lanes_available,
     archived_flat675_bundle_available,
@@ -151,6 +156,13 @@ _F3_B37_GPU_BANANA_OMP_EVIDENCE = (
 _GPU_BANANA_OMP_PUBLICATION = (
     "OMP-pinned interleaved native banana run_code sweep. "
     "Not a nested speed claim and not F3 7.70x."
+)
+_F3_B37_GPU_BANANA_OMP_GAP_EVIDENCE = (
+    _EVIDENCE_DIR / "nested_ls_reduced_gpu_banana_omp_gap_20260821.json"
+)
+_GPU_BANANA_OMP_GAP_PUBLICATION = (
+    "OMP-pinned banana gap fill at 20 and 24 threads. Completes the "
+    "Gate-6 native sweep set on a 32-core box. Not a nested speed claim."
 )
 _F3_B37_GPU_CHUNK_WARM_EVIDENCE = (
     _EVIDENCE_DIR / "nested_ls_reduced_gpu_chunk_warm_20260821.json"
@@ -1219,11 +1231,48 @@ def test_omp_pin_requires_positive_integer_env():
     assert nested_ls_omp_threads_pinned({"OMP_NUM_THREADS": "unset"}) is False
     assert nested_ls_omp_threads_pinned({"OMP_NUM_THREADS": "8"}) is True
     assert F3_B37_BANANA_OMP_THREADS == (4, 8, 16, 32)
+    assert F3_B37_BANANA_OMP_GAP_THREADS == (20, 24)
+    assert F3_B37_BANANA_OMP_CONTRACT_THREADS == (4, 8, 16, 20, 24, 32)
+    assert F3_B37_BANANA_OMP_CONTRACT_THREADS == tuple(
+        sorted(set(F3_B37_BANANA_OMP_THREADS) | set(F3_B37_BANANA_OMP_GAP_THREADS))
+    )
+    assert NESTED_LS_GATE6_IOTA_G_TOL == 1.0e-11
+    assert NESTED_LS_GATE6_PRE_LEVER_JAX_WALK_SECONDS == 153.06041832105257
+    assert NESTED_LS_GATE6_PRE_LEVER_NATIVE_OMP16_SECONDS == 116.0183689862024
+    assert schur_dense_operator_bytes(661) == 3_495_368
+    assert (
+        schur_dense_operator_bytes(661) > NESTED_LS_IMPLICIT_ADJOINT_DEFAULT_DENSE_BYTES
+    )
+    newton_cap = inspect.signature(run_reduced_nested_ls_schur_newton).parameters[
+        "max_dense_linearization_bytes"
+    ]
+    assert newton_cap.default is None
+    if _F3_B37_GPU_WALK_DENSE_LU_EVIDENCE.is_file():
+        walk_seconds = float(
+            json.loads(_F3_B37_GPU_WALK_DENSE_LU_EVIDENCE.read_text(encoding="utf-8"))[
+                "probe"
+            ]["walk_seconds"]
+        )
+        assert walk_seconds == NESTED_LS_GATE6_PRE_LEVER_JAX_WALK_SECONDS
+    if _F3_B37_GPU_BANANA_OMP_EVIDENCE.is_file():
+        omp_rows = json.loads(
+            _F3_B37_GPU_BANANA_OMP_EVIDENCE.read_text(encoding="utf-8")
+        )["probe"]["rows"]
+        best16 = min(
+            float(row["seconds"])
+            for row in omp_rows
+            if int(row["omp_num_threads"]) == 16
+        )
+        assert best16 == NESTED_LS_GATE6_PRE_LEVER_NATIVE_OMP16_SECONDS
     source = Path(evaluate_f3_b37_banana_omp_sweep.__code__.co_filename).read_text(
         encoding="utf-8"
     )
     assert "OMP_NUM_THREADS" in source
-    driver = Path(__file__).resolve().parents[2] / "benchmarks" / "nested_ls_f3_b37_gpu_canaries.py"
+    driver = (
+        Path(__file__).resolve().parents[2]
+        / "benchmarks"
+        / "nested_ls_f3_b37_gpu_canaries.py"
+    )
     text = driver.read_text(encoding="utf-8")
     assert "docs/receipts/evidence" in text
     assert "/tmp/" not in text
@@ -1253,6 +1302,47 @@ def test_authored_gpu_banana_omp_json_is_pinned_and_not_a_speed_claim():
     )
     assert all(bool(row["omp_pinned"]) for row in probe["rows"])
     assert all(float(row["coil_delta_inf"]) == 0.0 for row in probe["rows"])
+    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
+
+
+@pytest.mark.skipif(
+    not _F3_B37_GPU_BANANA_OMP_GAP_EVIDENCE.is_file(),
+    reason="authored OMP banana 20/24 gap JSON not yet produced",
+)
+def test_authored_gpu_banana_omp_gap_json_fills_16_to_32():
+    raw = _F3_B37_GPU_BANANA_OMP_GAP_EVIDENCE.read_text(encoding="utf-8")
+    assert "NaN" not in raw
+    payload = json.loads(raw)
+    dump_strict_json(payload)
+    assert payload["schema"] == "nested-ls-reduced-gpu-banana-omp-gap.v1"
+    assert payload["written_by_pytest"] is False
+    assert payload["publication"] == _GPU_BANANA_OMP_GAP_PUBLICATION
+    boundary = payload["claim_boundary"]
+    assert boundary["nested_speed_claim"] is False
+    assert boundary["omp_pinned"] is True
+    assert boundary["gap_fill_20_24"] is True
+    assert boundary["interleaved_repeats"] is True
+    probe = payload["probe"]
+    assert probe["fail_closed_reason"] is None
+    assert probe["repeats"] == 2
+    assert payload["threads"] == list(F3_B37_BANANA_OMP_GAP_THREADS)
+    assert {int(row["omp_num_threads"]) for row in probe["rows"]} == set(
+        F3_B37_BANANA_OMP_GAP_THREADS
+    )
+    assert all(bool(row["omp_pinned"]) for row in probe["rows"])
+    assert all(bool(row["success"]) for row in probe["rows"])
+    assert all(float(row["coil_delta_inf"]) == 0.0 for row in probe["rows"])
+    assert all(
+        abs(float(row["iota"]) - F3_B37_DENSE_LU_ENDPOINT_IOTA)
+        <= NESTED_LS_GATE6_IOTA_G_TOL
+        for row in probe["rows"]
+    )
+    assert all(
+        abs(float(row["G"]) - F3_B37_DENSE_LU_ENDPOINT_G) <= NESTED_LS_GATE6_IOTA_G_TOL
+        for row in probe["rows"]
+    )
+    gap_best = min(float(row["seconds"]) for row in probe["rows"])
+    assert gap_best > NESTED_LS_GATE6_PRE_LEVER_NATIVE_OMP16_SECONDS
     assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
 
 
