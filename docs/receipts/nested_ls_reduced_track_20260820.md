@@ -605,15 +605,34 @@ committed artifact. Every lane in the log appears in the table.
 Every native number carries its OMP pin inline. Do not author a
 verdict before an independent read of the artifact.
 
+### Gate-6 claim (process wall vs process wall)
+
+Receipt
+``docs/receipts/evidence/nested_ls_reduced_gpu_gate6_20260822.json``.
+Producer SHA ``aa65b24b0``. Interleaved n=3. Native banana
+OMP=16 (observed). JAX Shamanskii + persistent cache. Physics:
+ι/G vs the paired banana ≤1e-11 (measured Δι=8.96e-13, ΔG=0),
+``‖g‖₂=1.08e-14``, coils frozen, rejudge iter=0.
+
+| repeat | native wall (s) OMP=16 | native inner (s) | JAX claim wall (s) | JAX inner walk (s) | physics |
+|---|---|---|---|---|---|
+| 0 | 124.83 | 115.59 | 99.31 | 81.85 | True |
+| 1 | 125.13 | 116.19 | 99.31 | 81.86 | True |
+| 2 | 125.10 | 116.30 | 99.24 | 81.81 | True |
+
+Aggregation min: JAX 99.24 s / native 124.83 s = **1.26×**.
+Medians 99.31 / 125.10. JAX claim clock is parent wait minus
+native reconstruct and rejudge; native is parent wait. Operators
+remain different (``comparable_operators=false``).
+``nested_speed_claim=true`` under the frozen Gate-6 contract.
+Not F3 7.70×.
+
 ## Next
 
-Attribution remint and JAX floor are closed. Remaining:
+Gate-6 on this 5090 box is closed. Remaining:
 
-1. **Clean-tree** Gate-6 claim run against the frozen contract
-   (``benchmarks/nested_ls_gate6_claim.py``). Both sides use parent
-   subprocess wait; JAX subtracts native reconstruct and rejudge.
-2. A100 rung on Landau after Gate-6, with its own OMP contract.
-3. New eight-term outer optimizer charter: B3, then B37,
+1. A100 rung on Landau, with its own OMP contract.
+2. New eight-term outer optimizer charter: B3, then B37,
    after multi-direction step-halved FD. Optimistix/Lineax
    belong there, not as a mid-campaign linear-algebra swap.
 
