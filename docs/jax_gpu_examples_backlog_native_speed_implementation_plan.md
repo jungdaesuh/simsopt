@@ -1,6 +1,6 @@
 # JAX GPU examples backlog — native-speed implementation plan
 
-**Status:** In progress
+**Status:** Done (probe phase; certified campaigns are chartered follow-ups)
 **Last updated:** 2026-08-23
 
 ## Purpose
@@ -275,7 +275,7 @@ identity JSON, and writes its artifact under
 
 ### Phase 1 — `stage_two_optimization_stochastic` (likeliest shipped-scale win)
 
-- [ ] `[probe]` P1.1 Baseline probe, shipped scale (16 samples, matched
+- [x] `[probe]` P1.1 (2026-08-23 — warm GPU 1.35×/1.24× at maxcor 10/400, matched nit=400, cold 157–214 s; see §Probe outcomes) Baseline probe, shipped scale (16 samples, matched
       budget, **matched policy**): both lanes at the same `maxcor` — one
       matched pair set at 10 (mirror default,
       `examples/jax/2_Intermediate/stage_two_optimization_stochastic.py:263`)
@@ -295,9 +295,9 @@ identity JSON, and writes its artifact under
       Parity test vs the scan path at the `native_workflow` tolerance bucket
       — bit-identity is NOT assumed because the sample-sum reduction order
       changes; record the max diff. Keep the scan path as the oracle.
-- [ ] `[probe]` P1.3 Re-probe P1.1 with the winning tile; record the ratio
+- [x] `[probe]` P1.3 (2026-08-23 — tiles measured NEUTRAL-to-negative: 24.94–25.21 s vs 24.62 s untiled at budget 400; no winning tile exists, the fused scan lane is already the production configuration) Re-probe P1.1 with the winning tile; record the ratio
       table (warm solve, process wall, per-eval marginal) in §Probe outcomes.
-- [ ] `[charter]` P1.4 If ≥1.10× warm: charter draft
+- [x] `[charter]` P1.4 (2026-08-23 — bar cleared at 1.24–1.35×; draft written, incl. a coil-forces rung) charter draft
       `docs/jax_gpu_stochastic_stage_two_campaign_plan.md` per §Campaign
       protocol — includes the matched-sample identity gate
       (fingerprints from `src/simsopt_jax/examples/stochastic_samples.py:98-130`),
@@ -315,15 +315,15 @@ identity JSON, and writes its artifact under
       (`src/simsopt_jax_adapters/solve/wireframe.py:241`). Reuse the capture
       pattern of `docs/receipts/wireframe_gsco_multistep/`; do not edit the
       example scripts.
-- [ ] `[probe]` P2.2 Interleaved A/B at reference scale per sibling: warm
+- [x] `[probe]` P2.2 (2026-08-23 — see §Probe outcomes: 5.3×/4.4× WINs, bitwise) Interleaved A/B at reference scale per sibling: warm
       device solve vs swept-OMP native; full-precision final segment-currents
       comparison (bitwise expected — GSCO is exact greedy arithmetic; the
       siblings receipt proved 0 ULP at shipped scale).
-- [ ] `[probe]` P2.3 Quantify the aggregate-structure caveat: per-iteration
+- [x] `[probe]` P2.3 (2026-08-23 — GPU per-iteration near-flat 0.20→0.26 ms/it; caveat dissolved) Quantify the aggregate-structure caveat: per-iteration
       device time and native per-iteration time at both 48×50 and 96×100, so
       the flat-20,000-iteration vs staged-17,500 difference is measured, not
       argued.
-- [ ] `[charter]` P2.4 If ≥1.10× warm on either sibling: charter draft
+- [x] `[charter]` P2.4 (2026-08-23 — both siblings cleared at 5.3×/4.4×; draft written incl. the shipped-scale conflict re-adjudication rung) charter draft
       `docs/jax_gpu_gsco_siblings_reference_scale_campaign_plan.md`, claim
       scoped to the reference configuration by name (the shipped-scale
       `cpu` rows stand unless separately overturned).
@@ -345,46 +345,46 @@ identity JSON, and writes its artifact under
       procedure — "fixed 2x2 quadrature grid … no native_default branch"
       becomes stale; the row stays `cpu` and re-opens with the `narrow
       matrix` family (256-row reduction) until a probe says otherwise.
-- [ ] `[probe]` P3.2 `permanent_magnet_simple` matched-work A/B at native
+- [x] `[probe]` P3.2 (2026-08-23 — 5.2× WIN, bitwise; supersedes the 2026-07-26 ~2× diagnostic) `permanent_magnet_simple` matched-work A/B at native
       non-CI scale (16×16, downsample=4, K=500, GPMO baseline): swept-OMP
       native vs warm+cold GPU, interleaved, bitwise moments check —
       supersedes the 2026-07-26 N=3 diagnostic (~2.0×) under probe
       conventions. History bookkeeping equalized (native `nhistory` vs
       mirror `record_every`) before timing.
-- [ ] `[probe]` P3.3 MUSE shipped-scale retime (nφ=16, matched work,
+- [x] `[probe]` P3.3 (2026-08-23 — 0.64×: the 4.05× was stale; still CPU-favored at nφ=16) MUSE shipped-scale retime (nφ=16, matched work,
       ArbVec-backtracking with the now-landed frozen-step skip,
       `src/simsopt_jax/core/pm_optimization.py:1971,2042-2052`): directly
       tests whether the 4.05× loss on the device row is stale even at
       shipped scale.
-- [ ] `[probe]` P3.4 MUSE + PM4Stell at nφ=nθ=64 ("real run" resolution named
+- [x] `[probe]` P3.4 (2026-08-23 — MUSE 2.9× WIN bitwise; PM4Stell 3.0× speed but BLOCKED on the k=201 greedy fork, dumps archived) MUSE + PM4Stell at nφ=nθ=64 ("real run" resolution named
       in the native sources), matched iterations, matched algorithm variant,
       matched history bookkeeping. Memory pre-cleared by U2 estimates
       (≈3.3 GB / ≈6.8 GB fp64 on a 32 GB 5090); keep `downsample=10` — the
       `(N,N)` connectivity tensors bind if it drops.
-- [ ] `[probe]` P3.5 `permanent_magnet_QA` (relax-and-split → MwPGP,
+- [x] `[probe]` P3.5 (2026-08-23 — grid 29,286 dipoles / 2.88 GB fits; native RS ~32.4 s OMP-insensitive; GPU lane BLOCKED fail-closed: the native alpha formula exceeds the JAX MwPGP 2/λ_max bound by ~1e-4 — named charter adjudication item) `permanent_magnet_QA` (relax-and-split → MwPGP,
       `src/simsopt_jax/solve/permanent_magnet.py:919`) at nφ=64: first
       measure ndipoles/memory at that grid (unmeasured — grid is built
       per-φ-plane), then time if it fits; else record the blocker with the
       measured number.
-- [ ] `[charter]` P3.6 Charter draft for any family member clearing ≥1.10×
+- [x] `[charter]` P3.6 (2026-08-23 — draft written: Rung A pm-simple 5.2×, Rung B muse-64 2.9×, pm4stell BLOCKED on the k=201 fork with a pre-registered two-hypothesis adjudication) Charter draft for any family member clearing ≥1.10×
       warm; the nφ=64 rung lands as a `_scale_configuration()` addition in
       the relevant parity cases so the charter has a frozen scale to cite.
 
 ### Phase 4 — Marginal quartet (kill-fast probes only)
 
-- [ ] `[probe]` P4.1 `stage_two_optimization` + `_planar_coils`: warm fused
+- [x] `[probe]` P4.1 (2026-08-23 — KILLED: 0.30×/0.33×, kill rule fired; policy+quadrature asymmetries disclosed and insufficient to flip the verdict) `stage_two_optimization` + `_planar_coils`: warm fused
       GPU (already the default lane) vs swept-OMP native at native_default,
       N=3 interleaved pairs; disclose the `serial_solve_jax` bounded-log
       overhead (`src/simsopt_jax/solve/serial.py:629-637`); kill at <1.0×
       warm.
-- [ ] `[probe]` P4.2 `coil_forces`: same probe shape (0.92M pairs + 202.5k
+- [x] `[probe]` P4.2 (2026-08-23 — NOT killed: ~1.6× GPU with a better endpoint objective; chartered as a rung of the stochastic campaign draft) `coil_forces`: same probe shape (0.92M pairs + 202.5k
       force terms per eval); kill at <1.0× warm.
-- [ ] `[probe]` P4.3 `wireframe_rcls_with_ports`: time the actual device
+- [x] `[probe]` P4.3 (2026-08-23 — KILL: 0.57× matched solve window; crossover prediction held at n_free=497) `wireframe_rcls_with_ports`: time the actual device
       solve (QR 497×254 + lstsq 1,521×243,
       `src/simsopt_jax_adapters/solve/wireframe.py:150,172-176`) vs the
       native RCLS at the shipped system; one probe, then close the row with
       the measured number.
-- [ ] `[doc]` P4.4 Record outcomes in §Probe outcomes; propose `cpu`-row
+- [x] `[doc]` P4.4 (2026-08-23 — recorded; scoreboard amendments per P6.2) Record outcomes in §Probe outcomes; propose `cpu`-row
       mechanism-text updates where a probe closes a question (amendment
       procedure; the rows stay `cpu`/`unmeasured` unless a certified receipt
       later moves them).
@@ -404,42 +404,59 @@ identity JSON, and writes its artifact under
 
 ### Phase 6 — Bookkeeping
 
-- [ ] `[doc]` P6.1 Fill §Probe outcomes for every probed family; every row
+- [x] `[doc]` P6.1 (2026-08-23) Fill §Probe outcomes for every probed family; every row
       carries scale, warm/cold, ratio vs swept-native, physics-check result,
       and artifact path.
-- [ ] `[doc]` P6.2 Amend `docs/jax_example_device_assignment.md` only where
+- [x] `[doc]` P6.2 (2026-08-23 — ten-row amendment pass, drift test green) Amend `docs/jax_example_device_assignment.md` only where
       §Probe outcomes justifies a mechanism-text update, per its procedure;
       `gpu` moves wait for certified receipts from follow-up charters.
-- [ ] `[doc]` P6.3 Update session memory records (auto-memory + OpenMemory)
+- [x] `[doc]` P6.3 (2026-08-23 — backlog-probe-campaign-2026-08-23.md + OpenMemory 94077643) Update session memory records (auto-memory + OpenMemory)
       with probe outcomes; move this plan's Status forward.
 
 ## Probe outcomes
 
+All rows diagnostic-not-certifying; ratio = GPU vs swept-OMP native optimum,
+warm windows matched per the probe's disclosures; artifacts under
+`docs/receipts/evidence/` (2026-08-23 suffix) plus the shared leg ledger.
+
 | Family | Scale | Lane ratio (warm) | Cold | Physics check | Artifact |
 | --- | --- | --- | --- | --- | --- |
-| _(filled by Phases 1–4)_ | | | | | |
+| rcls-with-ports | shipped | **0.57× (kill)** solve-window; 1.08× whole-window (sub-bar) | GPU 0.34 s | objectives rel 1.4e-14 | `marginal_rcls_*` |
+| pm-simple | native 16×16, K=500 | **5.2× WIN** (0.0306 s vs omp32 0.1586 s; omp48 collapses 6.07 s) | GPU 0.10–0.46 s | bitwise, 0 ULP | `pm_simple16_*` |
+| MUSE | shipped nφ=16 | **0.64×** (4.71 s vs omp32 3.01 s) — the row's 4.05× is stale (post-cond-skip) | GPU 5.6–6.5 s | bitwise, 0 ULP | `muse_shipped_*` |
+| MUSE | nφ=64 "real run" | **2.9× WIN** (7.32 s vs omp32 21.22 s); device mem 10.5 GiB | GPU 8.3–8.8 s (beats all native) | bitwise, 0 ULP | `muse64_*` |
+| PM4Stell | nφ=64 | 3.0× speed (9.51 s vs omp32 28.7 s) — **BLOCKED: greedy forks at k=201** (inputs digest-identical, lanes internally stable, agree ≤200) | GPU 10.5–11.0 s | **DIVERGES** from k=201; fork dumps archived | `pm4stell64_*` incl. `_fork_k201_*` |
+| GSCO modular | reference 96×100/20k | **5.3× WIN** (5.25 s vs omp32 27.7 s; omp48 154 s) | GPU 5.4–6.1 s | bitwise, 0 ULP (19,200 seg) | `gsco_modular_reference_*` |
+| GSCO sector-saddle | reference | **4.4× WIN** (8.06 s vs omp32 35.2 s; omp48 233 s) | GPU 8.3 s | bitwise, 0 ULP | `gsco_sector_saddle_reference_*` |
+| GSCO both siblings | shipped 48×50/2k | **~1.6× GPU** (0.405 s vs omp32 0.669 s) — direction REVERSED vs the sealed 2026-08-16 receipt (0.79–0.89×); genuine conflict, adjudication chartered | GPU 0.51–1.56 s | bitwise, 0 ULP | `gsco_*_shipped_*` |
+| P2.3 per-iteration | both | GPU 0.20→0.26 ms/it (2k→20k, near-flat); native 0.335→1.385 ms/it | — | — | same artifacts |
+| stochastic | shipped, mc10 / mc400, nit=400 both lanes | **1.35× / 1.24× WIN** (22.15 / 24.62 s vs omp16 29.99 / 30.53 s) | GPU 157–214 s (XLA compile — heavy) | endpoints within `native_workflow` bucket; samples bitwise-shared | `stoch_*` |
+| stochastic tiles | shipped, tile ∈ {4,8,16} | 24.94–25.21 s vs 24.62 s untiled — **lever neutral-to-negative** | — | — | `stoch_jaxgpu_mc400_tile*` |
+| stage-two / planar | shipped-vs-shipped | **0.30× / 0.33× — KILL** (34.5 / 15.3 s vs 10.4 / 5.0 s; policy + 1.33× quadrature asymmetry disclosed, anti-GPU direction) | GPU 38.6–76.2 s | endpoint objectives within family tolerance | `quartet_stage_two_*`, `quartet_planar_*` |
+| coil-forces | shipped-vs-shipped, full two-stage | **~1.6×** (24.5 s vs best native 40.0 s of noisy 40–82 s legs); GPU endpoint objective BETTER (2.77e-5 vs 2.9e-5) | GPU 26.7–57.5 s | report-only objective compare | `quartet_coil_forces_*` |
+| QA relax-split | nφ=64 | **BLOCKED**: GPU fail-closes on the alpha bound (native 2(1−1e−5)/ATA_scale > JAX 2/λ_max(H) by ~1e-4); native ~32.4 s (OMP-insensitive) | — | n/a | `qa64_*` |
 
 ## Validation Plan
 
-- [ ] `pytest tests/test_jax_example_device_assignment.py` green after any
+- [x] (2026-08-23: 11 passed after the ten-row amendment) `pytest tests/test_jax_example_device_assignment.py` green after any
       scoreboard edit.
-- [ ] Per-family focused tests green, one file per process (JAX x64 rule):
+- [x] (2026-08-23: 101 tests across six files, one per process) Per-family focused tests green, one file per process (JAX x64 rule):
       stochastic tile-parity test (P1.2), pm_simple mirror scale tests
       (P3.1), probe-conventions unit test (P0.1).
 - [x] `bash scripts/lint.sh check` AND `format` clean on every file this
       plan touches (the pinned gate; unpinned `uvx ruff` is the documented
       drift trap — a format-only regression slipped past `check` alone once
       during review).
-- [ ] Every probe artifact contains per-leg identity JSON (commit, observed
+- [x] (2026-08-23: identity + ledger present in every published artifact; executed order in `docs/receipts/evidence/probe_leg_ledger.jsonl`) Every probe artifact contains per-leg identity JSON (commit, observed
       OMP, jax platform/x64, device list, nvidia-smi processes) and the
       interleave order; probes without them are invalid and rerun.
-- [ ] Physics checks per family: GSCO endpoints bitwise (proven 0 ULP at
+- [x] (2026-08-23: GSCO bitwise at both scales; GPMO bitwise except the pm4stell k=201 fork, recorded and blocked; stochastic within bucket) Physics checks per family: GSCO endpoints bitwise (proven 0 ULP at
       shipped scale); GPMO endpoints bitwise expected (proven for baseline
       at 16×16; ArbVec at nφ=64 has never been compared — any nonzero diff
       is recorded and gated at `native_workflow`); stochastic and
       stage-two-family endpoints within the `native_workflow` tolerance
       bucket (`src/simsopt_jax/parity_tolerances.py`).
-- [ ] No diff under the Phase-5 fence paths (`git diff --stat` inspected
+- [x] (2026-08-23: fence diff empty at every commit) No diff under the Phase-5 fence paths (`git diff --stat` inspected
       before every commit).
 
 ## Risks and Mitigations
@@ -469,14 +486,14 @@ identity JSON, and writes its artifact under
 
 ## Completion Criteria
 
-- [ ] Phases 0–4 and 6 tasks each checked or closed with a named blocker
+- [x] Phases 0–4 and 6 tasks each checked or closed with a named blocker
       recorded in place (Phase 5 is tracking-only and closes with a status
       note).
-- [ ] §Probe outcomes has a row for every probed family (or a named blocker
+- [x] §Probe outcomes has a row for every probed family (or a named blocker
       where a probe could not run).
-- [ ] Charter drafts exist for every family that cleared 1.10× warm; none
+- [x] Charter drafts exist for every family that cleared 1.10× warm; none
       exists for a family that didn't.
-- [ ] Validation Plan checkboxes all green at final commit.
+- [x] Validation Plan checkboxes all green at final commit.
 
 ## Open Questions
 
