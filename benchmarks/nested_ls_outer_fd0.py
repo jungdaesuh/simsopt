@@ -2,9 +2,11 @@
 
 Freezes the dense-LU walk endpoint, evaluates the outer gradient there,
 and central-differences the eight-term ``J`` along all 11 coil unit
-directions at the frozen per-direction step and at half of it. Every
-perturbed inner re-solve is rejudged by the C++ LS Newton judge. Physics
-gate only: no timing content, no speed claim, not F3 7.70x.
+directions on Charter Amendment 3's fail-closed descent ladder: from the
+rule step, halving while halving still improves, bounded by the declared
+depth and by the measured base-point ``J`` scatter. Every perturbed inner
+re-solve is rejudged by the C++ LS Newton judge. Physics gate only: no
+timing content, no speed claim, not F3 7.70x.
 """
 
 from __future__ import annotations
@@ -74,29 +76,43 @@ def _log_lines(probe: NestedLsOuterFd0Probe, git_head: str) -> list[str]:
             f" tol={probe.adjoint_live_eta_tol!r}"
             f" mixed_form_max_abs={probe.mixed_form_max_abs_difference!r}"
         ),
+        (
+            f"base scatter delta_J={probe.base_objective_scatter!r}"
+            f" over {len(probe.base_objectives)} evaluations"
+            f" min_step_rule {probe.min_step_rule}"
+        ),
     ]
     for row in probe.rows:
         lines.append(
             f"dir={row['index']} coil={row['coil_value']!r}"
-            f" eps={row['epsilon']!r} eps_half={row['epsilon_half']!r}"
-            f" pred={row['predicted_dot']!r} fd={row['fd_dot']!r}"
-            f" fd_half={row['fd_dot_half']!r} rel={row['rel_error']!r}"
-            f" rel_half={row['rel_error_half']!r}"
+            f" eps0={row['epsilon_initial']!r} eps_min={row['epsilon_min']!r}"
+            f" pred={row['predicted_dot']!r}"
+            f" rungs={row['rungs']} halvings={row['halvings']}"
+            f" best_rel={row['better_rel_error']!r}"
+            f" best_eps={row['better_step']!r}"
             f" halved_better={row['halving_reduced_error']}"
-            f" pass={row['direction_pass']}"
+            f" pass={row['direction_pass']} reason={row['fail_reason']!r}"
         )
-        evaluations = row["evaluations"]
-        for evaluation in evaluations if isinstance(evaluations, tuple) else ():
+        ladder = row["ladder"]
+        for rung in ladder if isinstance(ladder, tuple) else ():
             lines.append(
-                f"  dir={evaluation['index']} step={evaluation['requested_step']!r}"
-                f" realized={evaluation['realized_step']!r}"
-                f" J={evaluation['objective']!r}"
-                f" inner_iter={evaluation['inner_iterations']}"
-                f" inner_grad={evaluation['inner_grad_l2']!r}"
-                f" rejudge_iter={evaluation['rejudge_iter']}"
-                f" rejudge_grad={evaluation['rejudge_grad_l2']!r}"
-                f" step_exact={evaluation['rejudge_coil_step_exact']}"
+                f"  rung={rung['rung']} eps={rung['epsilon']!r}"
+                f" span={rung['realized_span']!r}"
+                f" J+={rung['objective_plus']!r} J-={rung['objective_minus']!r}"
+                f" fd={rung['fd_dot']!r} rel={rung['rel_error']!r}"
             )
+            evaluations = rung["evaluations"]
+            for evaluation in evaluations if isinstance(evaluations, tuple) else ():
+                lines.append(
+                    f"    step={evaluation['requested_step']!r}"
+                    f" realized={evaluation['realized_step']!r}"
+                    f" J={evaluation['objective']!r}"
+                    f" inner_iter={evaluation['inner_iterations']}"
+                    f" inner_grad={evaluation['inner_grad_l2']!r}"
+                    f" rejudge_iter={evaluation['rejudge_iter']}"
+                    f" rejudge_grad={evaluation['rejudge_grad_l2']!r}"
+                    f" step_exact={evaluation['rejudge_coil_step_exact']}"
+                )
     lines.append(
         f"directions_passed {probe.directions_passed}/{probe.directions}"
         f" worst_rel={probe.worst_rel_error!r}"
@@ -146,7 +162,7 @@ def main(argv: list[str] | None = None) -> None:
         "lane": lane,
         "probe": probe.as_payload(),
         "publication": PUBLICATION,
-        "schema": "nested-ls-outer-fd0.v1",
+        "schema": "nested-ls-outer-fd0.v2",
         "written_by_pytest": False,
     }
     write_strict_json(out_json, payload)
