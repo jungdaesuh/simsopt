@@ -107,6 +107,31 @@ rung:
   receipt, before B37 runs. The reconstruct no-op gate is unchanged and
   not provisional.
 
+## Amendment 2 (2026-08-23, pre-B3, no clock has run)
+
+Mechanics pinned from external review before the first timed rung:
+
+- **The B3 native OMP is artifact-bound, not CLI-trusted.** A native-only
+  outer OMP sweep (frozen host set, n=2 interleaved, full parent wall,
+  own evidence schema) precedes the B3 claim; the claim requires the
+  sweep artifact, refuses an `--omp` that is not its best, and binds the
+  artifact's sha. `omp_provenance="swept_artifact"` at B3;
+  `"b3_receipt"` at B37, which additionally refuses a B3 whose own
+  provenance is not the swept artifact.
+- **J-parity is observational at B3 and frozen for B37.** B3 records the
+  per-pair endpoint-J gap and publishes `measured_j_rel_gap_max`
+  without gating on it (rejudge gates unchanged); B37 requires an
+  explicit `--j-parity-rtol` that is ≥ the B3-measured value, gates
+  one-sided at that frozen band, and records both numbers. Freezing the
+  value is an adjudicated act recorded in the receipt.
+- **Native-lane residual JAX overhead is disclosed-bounded, not zero.**
+  The timed native child no longer runs any JAX solve or QR, but its
+  loaders transitively import JAX and construct-and-discard the twin;
+  the child publishes `module_import_seconds` and
+  `problem_build_seconds` so every receipt can bound the padding
+  (measured ~1.4 s + ~3.5 s against ~10³ s walls, and it biases
+  against the JAX lane).
+
 ## NO-GO (inherited and binding)
 
 Mimicking native BFGS-shape gradients in JAX (measured ~273 s envelope);

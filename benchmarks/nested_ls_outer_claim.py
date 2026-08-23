@@ -36,11 +36,12 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "src"))
 
 from simsopt_jax_adapters.geo.nested_ls_contract import (
+    F3_B37_BANANA_OMP_CONTRACT_THREADS,
     NESTED_LS_GATE6_AGGREGATION,
     NESTED_LS_GATE6_NATIVE_OMP_THREADS,
+    NESTED_LS_OUTER_OMP_SWEEP_REPEATS,
 )
 
-from benchmarks.flat675_fused_campaign_contract import QUALITY_OBJECTIVE_RTOL
 from benchmarks.nested_ls_shamanskii_attribution import (
     PYTHON,
     REPEATS,
@@ -55,6 +56,7 @@ CACHE_OUTER = REPO / ".artifacts" / "nested-ls-outer-xla"
 EVIDENCE_DATE: Final[str] = "20260823"
 CLAIM_BUDGETS: Final[tuple[int, ...]] = (3, 37)
 CLAIM_SCHEMA: Final[str] = "nested-ls-outer-claim.v1"
+SWEEP_SCHEMA: Final[str] = "nested-ls-outer-native-omp-sweep.v1"
 # Charter: "B37 runs only after B3 lands physics-green." The interlock is
 # the receipt, not a promise, so B37 must be handed the B3 artifact.
 B3_BUDGET: Final[int] = 3
@@ -64,6 +66,19 @@ B37_BUDGET: Final[int] = 37
 # same sealed F3 lane policy loader, so the lanes cannot drift apart. The
 # per-pair gate re-checks that the two published policies are identical.
 DEFAULT_MAXCOR: Final[int] = 10
+# The frozen 5090 contract sweep set and repeat count, restated here
+# because the parent must not import the jax-side module that seals them
+# (F3_B37_BANANA_OMP_CONTRACT_THREADS / F3_B37_BANANA_OMP_REPEATS in
+# nested_ls_reduced_scale): importing it would initialize a device in the
+# process that owns the claim clock. Other hosts pass --omp-set.
+DEFAULT_OMP_SET: Final[str] = ",".join(
+    str(threads) for threads in F3_B37_BANANA_OMP_CONTRACT_THREADS
+)
+SWEEP_REPEATS: Final[int] = NESTED_LS_OUTER_OMP_SWEEP_REPEATS
+# The charter sweeps the native denominator per rung. A number typed on
+# the command line is not a swept bar, so claim runs must cite the sweep
+# artifact and B37 must inherit that provenance through its B3 receipt.
+OMP_PROVENANCE_SWEPT: Final[str] = "swept_artifact"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -101,7 +116,46 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Physics-green B3 claim receipt. Required for --budget 37 and "
             "forbidden for --budget 3: the charter runs B37 only after B3 "
             "lands green, and the B3 receipt is also where this run's --omp "
-            "provenance comes from."
+            "provenance and frozen J-parity band come from."
+        ),
+    )
+    parser.add_argument(
+        "--sweep-native-omp",
+        action="store_true",
+        help=(
+            "Sweep the native denominator over --omp-set instead of running a "
+            "claim: no JAX lane, no prime, no pairs. Produces the OMP evidence "
+            "artifact a B3 claim run must cite."
+        ),
+    )
+    parser.add_argument(
+        "--omp-set",
+        default=None,
+        help=(
+            "Comma-separated OMP_NUM_THREADS values for --sweep-native-omp "
+            f"(default {DEFAULT_OMP_SET}, the frozen 5090 contract set). "
+            "Sweep mode only."
+        ),
+    )
+    parser.add_argument(
+        "--omp-evidence",
+        default=None,
+        help=(
+            "Native OMP sweep artifact whose best_omp_num_threads must equal "
+            "--omp. Required for --budget 3 claim runs; forbidden for "
+            f"--budget {B37_BUDGET}, which inherits the swept bar through its "
+            "B3 receipt."
+        ),
+    )
+    parser.add_argument(
+        "--j-parity-rtol",
+        type=float,
+        default=None,
+        help=(
+            "Frozen one-sided endpoint-J band for B37. No default: charter "
+            "Amendment 1 has B3 measure the achievable fork band and B37 "
+            "freeze it, so this must be at least the B3 receipt's "
+            "measured_j_rel_gap_max. Forbidden at B3, which only observes."
         ),
     )
     return parser.parse_args(argv)
@@ -139,6 +193,44 @@ def _make_logger(out_log: Path) -> Callable[[str], None]:
     return log
 
 
+def _require_omp_evidence(
+    *, omp_evidence: Path, omp_num_threads: int
+) -> dict[str, object]:
+    """Refuse a claim run whose native OMP is not the swept artifact's best.
+
+    The charter sweeps the native denominator per rung and takes
+    best-of-contract as the bar. Binding the artifact here is what makes
+    ``--omp`` a measurement rather than an assertion.
+    """
+
+    if not omp_evidence.is_file():
+        raise SystemExit(f"--omp-evidence does not exist: {omp_evidence}")
+    raw = omp_evidence.read_bytes()
+    payload = json.loads(raw.decode("utf-8"))
+    schema = str(payload["schema"])
+    if schema != SWEEP_SCHEMA:
+        raise SystemExit(
+            f"--omp-evidence schema is {schema!r}, expected {SWEEP_SCHEMA!r}"
+        )
+    best = int(payload["best_omp_num_threads"])
+    if best != int(omp_num_threads):
+        raise SystemExit(
+            f"--omp {omp_num_threads} is not the swept best-of-contract "
+            f"{best}; the claim must run at the swept bar"
+        )
+    rows = payload["rows"]
+    if not rows:
+        raise SystemExit("--omp-evidence carries no rows")
+    return {
+        "path": str(omp_evidence),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "best_omp_num_threads": best,
+        "rows": int(len(rows)),
+        "omp_set": [int(value) for value in payload["omp_set"]],
+        "git_head": str(payload["git_head"]),
+    }
+
+
 def _require_b3_green(*, b3_receipt: Path, omp_num_threads: int) -> dict[str, object]:
     """Refuse B37 unless the handed B3 receipt is a green B3 at this OMP."""
 
@@ -173,11 +265,29 @@ def _require_b3_green(*, b3_receipt: Path, omp_num_threads: int) -> dict[str, ob
             f"--omp {omp_num_threads} does not match the B3 receipt's swept "
             f"native OMP {receipt_omp}; B37 must run at B3's bar"
         )
+    # B37 inherits its swept bar transitively, so the inheritance has to be
+    # of a swept bar: a B3 that only asserted its OMP cannot launder one.
+    provenance = str(boundary["omp_provenance"])
+    if provenance != OMP_PROVENANCE_SWEPT:
+        raise SystemExit(
+            f"--b3-receipt omp_provenance is {provenance!r}, expected "
+            f"{OMP_PROVENANCE_SWEPT!r}; B37 cannot inherit an unswept bar"
+        )
+    # Charter Amendment 1: B3 measures the achievable fork band and B37
+    # freezes it. A B3 receipt without the measurement cannot found a band.
+    if "measured_j_rel_gap_max" not in boundary:
+        raise SystemExit(
+            "--b3-receipt has no claim_boundary.measured_j_rel_gap_max; it "
+            "predates the Amendment-1 J-parity protocol and cannot feed B37"
+        )
+    measured = float(boundary["measured_j_rel_gap_max"])
     return {
         "path": str(b3_receipt),
         "sha256": hashlib.sha256(raw).hexdigest(),
         "git_head": str(payload["git_head"]),
         "native_omp_num_threads": receipt_omp,
+        "omp_provenance": provenance,
+        "measured_j_rel_gap_max": measured,
         "pairs": int(len(pairs)),
     }
 
@@ -388,6 +498,7 @@ def _physics_ok(
     native_rejudge: dict[str, object],
     jax_rejudge: dict[str, object],
     omp_num_threads: int,
+    j_parity_rtol: float | None,
 ) -> str | None:
     if not bool(native["success"]):
         return "native_failed"
@@ -413,11 +524,149 @@ def _physics_ok(
     jax_rejudge_reason = jax_rejudge["fail_closed_reason"]
     if jax_rejudge_reason is not None:
         return f"jax_{jax_rejudge_reason}"
+    # Charter Amendment 1: at B3 the endpoint-J comparison is observational
+    # — lane-vs-lane gradient agreement is ~1e-8, so budget-truncated
+    # trajectories fork and a hard band here is a known false-reject class.
+    # B3 measures the band; B37 gates on the value frozen from it.
+    if j_parity_rtol is None:
+        return None
     native_j = float(native["endpoint_j"])
     jax_j = float(jax_row["endpoint_j"])
-    if jax_j > native_j * (1.0 + QUALITY_OBJECTIVE_RTOL):
-        return "jax_endpoint_j_above_native"
+    if jax_j > native_j * (1.0 + j_parity_rtol):
+        return "jax_endpoint_j_above_frozen_band"
     return None
+
+
+def _parse_omp_set(raw: str) -> tuple[int, ...]:
+    values = tuple(int(entry.strip()) for entry in str(raw).split(",") if entry.strip())
+    if not values:
+        raise SystemExit(f"--omp-set parsed to nothing: {raw!r}")
+    if len(set(values)) != len(values):
+        raise SystemExit(f"--omp-set repeats a value: {raw!r}")
+    if any(value < 1 for value in values):
+        raise SystemExit(f"--omp-set has a non-positive value: {raw!r}")
+    return values
+
+
+def _run_native_omp_sweep(
+    *,
+    budget: int,
+    omp_values: tuple[int, ...],
+    maxcor: int,
+    tag: str,
+    sha: str,
+) -> None:
+    """Sweep the native denominator. No JAX lane, no prime, no pairs.
+
+    This produces the artifact a claim run cites for ``--omp``. Repeats
+    are interleaved across the whole set rather than run back to back, so
+    a thermal or scheduling drift lands on every value instead of
+    concentrating on whichever one happened to run last.
+    """
+
+    suffix = f".{tag}" if tag else ""
+    stem = f"nested_ls_outer_native_omp_sweep_{EVIDENCE_DATE}{suffix}"
+    out_json = EVIDENCE / f"{stem}.json"
+    out_log = EVIDENCE / f"{stem}.log"
+    log = _make_logger(out_log)
+    log(
+        f"outer native omp sweep budget {budget} maxcor {maxcor}"
+        f" set {','.join(str(value) for value in omp_values)}"
+        f" repeats {SWEEP_REPEATS} git_head {sha}"
+    )
+    rows: list[dict[str, object]] = []
+    for repeat in range(SWEEP_REPEATS):
+        for omp_num_threads in omp_values:
+            row, child_out = _launch_native(
+                omp_num_threads=omp_num_threads,
+                budget=budget,
+                maxcor=maxcor,
+                log=log,
+            )
+            child_out.unlink(missing_ok=True)
+            rows.append(
+                {
+                    "omp_num_threads": int(omp_num_threads),
+                    "observed_omp_num_threads": int(row["observed_omp_num_threads"]),
+                    "omp_pinned": bool(row["omp_pinned"]),
+                    "repeat": int(repeat),
+                    "success": bool(row["success"]),
+                    "nit": int(row["nit"]),
+                    "nfev": int(row["nfev"]),
+                    "endpoint_j": float(row["endpoint_j"]),
+                    "endpoint_iota": float(row["endpoint_iota"]),
+                    "process_wall_seconds": float(row["process_wall_seconds"]),
+                }
+            )
+    for row in rows:
+        if not bool(row["success"]):
+            raise SystemExit(
+                f"native sweep run failed at omp {row['omp_num_threads']} "
+                f"repeat {row['repeat']}"
+            )
+        if not bool(row["omp_pinned"]):
+            raise SystemExit(
+                f"native sweep run at omp {row['omp_num_threads']} "
+                "did not observe a pinned OMP_NUM_THREADS"
+            )
+        if int(row["observed_omp_num_threads"]) != int(row["omp_num_threads"]):
+            raise SystemExit(
+                f"native sweep run asked for omp {row['omp_num_threads']} but "
+                f"observed {row['observed_omp_num_threads']}"
+            )
+    per_omp_min = {
+        value: min(
+            float(row["process_wall_seconds"])
+            for row in rows
+            if int(row["omp_num_threads"]) == value
+        )
+        for value in omp_values
+    }
+    # Ties resolve to the smaller thread count: same wall, less machine.
+    best_omp = min(omp_values, key=lambda value: (per_omp_min[value], value))
+    payload: dict[str, object] = {
+        "aggregation": NESTED_LS_GATE6_AGGREGATION,
+        "best_omp_num_threads": int(best_omp),
+        "budget": int(budget),
+        "claim": None,
+        "command": (
+            "JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python "
+            "benchmarks/nested_ls_outer_claim.py --sweep-native-omp"
+            f" --budget {budget} --maxcor {maxcor}"
+            f" --omp-set {','.join(str(value) for value in omp_values)}"
+            + (f" --tag {tag}" if tag else "")
+        ),
+        "date": datetime.now(timezone.utc).date().isoformat(),
+        "driver": "benchmarks.nested_ls_outer_claim",
+        "execution_log": str(out_log.relative_to(REPO)),
+        "git_head": sha,
+        "interleaved_repeats": True,
+        "jax_lane_run": False,
+        "maxcor": int(maxcor),
+        "omp_set": [int(value) for value in omp_values],
+        "per_omp_min_process_wall_seconds": {
+            str(value): per_omp_min[value] for value in omp_values
+        },
+        "publication": (
+            f"Native nested-twin OMP sweep at B{budget}: full parent process "
+            f"wall per run, {SWEEP_REPEATS} interleaved repeats per value, "
+            "best-of-contract by min wall. Denominator evidence only; not a "
+            "speed claim and not F3 7.70x."
+        ),
+        "repeats": int(SWEEP_REPEATS),
+        "rows": rows,
+        "schema": SWEEP_SCHEMA,
+        "tag": tag or None,
+        "written_by_pytest": False,
+    }
+    write_strict_json(out_json, payload)
+    log(f"wrote {out_json}")
+    log(
+        f"best_omp_num_threads {best_omp}"
+        f" min_wall {per_omp_min[best_omp]!r}"
+        " per_omp_min "
+        + " ".join(f"{value}:{per_omp_min[value]!r}" for value in omp_values)
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -426,24 +675,94 @@ def main(argv: list[str] | None = None) -> None:
     omp_num_threads = int(args.omp)
     maxcor = int(args.maxcor)
     tag = str(args.tag).strip()
-    if budget == B3_BUDGET and args.b3_receipt is not None:
-        raise SystemExit(
-            f"--b3-receipt is forbidden for --budget {B3_BUDGET}: this run is "
-            "the B3 rung, it cannot be gated on itself"
+    if args.sweep_native_omp:
+        if budget != B3_BUDGET:
+            raise SystemExit(
+                f"--sweep-native-omp runs at --budget {B3_BUDGET}: the sweep "
+                "produces the B3 rung's denominator evidence"
+            )
+        for flag, value in (
+            ("--b3-receipt", args.b3_receipt),
+            ("--omp-evidence", args.omp_evidence),
+            ("--j-parity-rtol", args.j_parity_rtol),
+        ):
+            if value is not None:
+                raise SystemExit(f"{flag} is forbidden with --sweep-native-omp")
+        omp_values = _parse_omp_set(
+            DEFAULT_OMP_SET if args.omp_set is None else args.omp_set
         )
-    if budget == B37_BUDGET and args.b3_receipt is None:
-        raise SystemExit(
-            f"--budget {B37_BUDGET} requires --b3-receipt: the charter runs "
-            "B37 only after B3 lands physics-green"
+        _run_native_omp_sweep(
+            budget=budget,
+            omp_values=omp_values,
+            maxcor=maxcor,
+            tag=tag,
+            sha=_require_clean_tree(),
+        )
+        return
+    if args.omp_set is not None:
+        raise SystemExit("--omp-set is only meaningful with --sweep-native-omp")
+    if budget == B3_BUDGET:
+        if args.b3_receipt is not None:
+            raise SystemExit(
+                f"--b3-receipt is forbidden for --budget {B3_BUDGET}: this run "
+                "is the B3 rung, it cannot be gated on itself"
+            )
+        if args.j_parity_rtol is not None:
+            raise SystemExit(
+                f"--j-parity-rtol is forbidden for --budget {B3_BUDGET}: "
+                "Amendment 1 has B3 measure the fork band, not gate on one"
+            )
+        if args.omp_evidence is None:
+            raise SystemExit(
+                f"--budget {B3_BUDGET} requires --omp-evidence: the charter "
+                "sweeps the native denominator per rung, so the bar must come "
+                "from a sweep artifact and not from the command line"
+            )
+    if budget == B37_BUDGET:
+        if args.b3_receipt is None:
+            raise SystemExit(
+                f"--budget {B37_BUDGET} requires --b3-receipt: the charter "
+                "runs B37 only after B3 lands physics-green"
+            )
+        if args.j_parity_rtol is None:
+            raise SystemExit(
+                f"--budget {B37_BUDGET} requires --j-parity-rtol: Amendment 1 "
+                "freezes the band from B3's measurement before B37 runs"
+            )
+        if args.omp_evidence is not None:
+            raise SystemExit(
+                f"--omp-evidence is forbidden for --budget {B37_BUDGET}: the "
+                "swept bar is inherited through --b3-receipt"
+            )
+    if args.omp_evidence is None:
+        omp_evidence: dict[str, object] | None = None
+    else:
+        omp_evidence = _require_omp_evidence(
+            omp_evidence=Path(args.omp_evidence), omp_num_threads=omp_num_threads
         )
     if args.b3_receipt is None:
         b3_receipt: dict[str, object] | None = None
-        omp_provenance = "cli"
     else:
         b3_receipt = _require_b3_green(
             b3_receipt=Path(args.b3_receipt), omp_num_threads=omp_num_threads
         )
-        omp_provenance = "b3_receipt"
+    # Both rungs stand on a swept bar: B3 cites the sweep artifact, B37
+    # inherits it through a B3 receipt that was itself required to cite one.
+    omp_provenance = OMP_PROVENANCE_SWEPT
+    if b3_receipt is None:
+        j_parity_rtol: float | None = None
+        j_parity_mode = "observational_b3"
+        b3_measured_gap: float | None = None
+    else:
+        j_parity_rtol = float(args.j_parity_rtol)
+        j_parity_mode = "frozen_from_b3"
+        b3_measured_gap = float(b3_receipt["measured_j_rel_gap_max"])
+        if j_parity_rtol < b3_measured_gap:
+            raise SystemExit(
+                f"--j-parity-rtol {j_parity_rtol!r} is below the B3 receipt's "
+                f"measured_j_rel_gap_max {b3_measured_gap!r}; the frozen band "
+                "cannot be tighter than the fork B3 actually measured"
+            )
     suffix = f".{tag}" if tag else ""
     stem = f"nested_ls_outer_b{budget}_{EVIDENCE_DATE}{suffix}"
     out_json = EVIDENCE / f"{stem}.json"
@@ -462,12 +781,21 @@ def main(argv: list[str] | None = None) -> None:
         f" omp {omp_num_threads} omp_provenance {omp_provenance}"
         f" git_head {sha}"
     )
+    if omp_evidence is not None:
+        log(
+            f"outer omp evidence path {omp_evidence['path']}"
+            f" sha256 {omp_evidence['sha256']}"
+            f" best_omp {omp_evidence['best_omp_num_threads']}"
+            f" rows {omp_evidence['rows']}"
+        )
     if b3_receipt is not None:
         log(
             f"outer b3 interlock path {b3_receipt['path']}"
             f" sha256 {b3_receipt['sha256']}"
             f" pairs {b3_receipt['pairs']}"
             f" native_omp {b3_receipt['native_omp_num_threads']}"
+            f" measured_j_rel_gap_max {b3_receipt['measured_j_rel_gap_max']!r}"
+            f" frozen j_parity_rtol {j_parity_rtol!r}"
         )
     prime, prime_endpoint = _launch_jax(budget=budget, maxcor=maxcor, log=log)
     prime_endpoint.unlink(missing_ok=True)
@@ -521,7 +849,13 @@ def main(argv: list[str] | None = None) -> None:
             native_rejudge=native_rejudge,
             jax_rejudge=jax_rejudge,
             omp_num_threads=omp_num_threads,
+            j_parity_rtol=j_parity_rtol,
         )
+        native_j = float(native["endpoint_j"])
+        jax_j = float(jax_row["endpoint_j"])
+        # Signed, so the receipt shows which way the fork went; the band
+        # measure below is one-sided because only "JAX worse" can fail.
+        j_rel_gap = (jax_j - native_j) / abs(native_j)
         pairs.append(
             {
                 "repeat": int(repeat),
@@ -529,11 +863,14 @@ def main(argv: list[str] | None = None) -> None:
                 "jax": jax_row,
                 "native_rejudge": native_rejudge,
                 "jax_rejudge": jax_rejudge,
-                "endpoint_j_native": float(native["endpoint_j"]),
-                "endpoint_j_jax": float(jax_row["endpoint_j"]),
-                "endpoint_j_one_sided_ok": bool(
-                    float(jax_row["endpoint_j"])
-                    <= float(native["endpoint_j"]) * (1.0 + QUALITY_OBJECTIVE_RTOL)
+                "endpoint_j_native": native_j,
+                "endpoint_j_jax": jax_j,
+                "endpoint_j_rel_gap": j_rel_gap,
+                "endpoint_j_rel_gap_worse_direction": max(0.0, j_rel_gap),
+                "endpoint_j_within_frozen_band": (
+                    None
+                    if j_parity_rtol is None
+                    else bool(jax_j <= native_j * (1.0 + j_parity_rtol))
                 ),
                 "physics_ok": reason is None,
                 "fail_closed_reason": reason,
@@ -544,7 +881,8 @@ def main(argv: list[str] | None = None) -> None:
             f" repeat={repeat} physics={reason is None}"
             f" native_wall={native['claim_wall_seconds']!r}"
             f" jax_wall={jax_row['claim_wall_seconds']!r}"
-            f" native_J={native['endpoint_j']!r} jax_J={jax_row['endpoint_j']!r}"
+            f" native_J={native_j!r} jax_J={jax_j!r}"
+            f" j_rel_gap={j_rel_gap!r}"
             f" reason={reason!r}"
         )
         if fail_reason is None and reason is not None:
@@ -554,15 +892,18 @@ def main(argv: list[str] | None = None) -> None:
     jax_min = min(jax_walls)
     physics_ok = fail_reason is None
     nested_speed_claim = bool(physics_ok and jax_min < native_min)
+    measured_j_rel_gap_max = max(
+        float(pair["endpoint_j_rel_gap_worse_direction"]) for pair in pairs
+    )
     payload: dict[str, object] = {
         "claim_boundary": {
             "aggregation": NESTED_LS_GATE6_AGGREGATION,
+            "b3_measured_j_rel_gap_max": b3_measured_gap,
             "b3_receipt": b3_receipt,
             "budget": budget,
             "cap_2048_attempted": False,
             "comparable_operators": False,
             "endpoint_j_parity_one_sided": True,
-            "endpoint_j_parity_rtol": float(QUALITY_OBJECTIVE_RTOL),
             "explicit_inverse_m_production": False,
             "f3_sealed": True,
             "inherits_f3_7_70x": False,
@@ -570,6 +911,10 @@ def main(argv: list[str] | None = None) -> None:
             "jax_claim_clock": "parent_wait",
             "jax_persistent_cache": True,
             "jax_start_policy": str(prime["start_policy"]),
+            # Amendment 1: B3 measures the achievable fork band and does not
+            # gate on it; B37 gates at the value frozen from that receipt.
+            "j_parity_mode": j_parity_mode,
+            "j_parity_rtol": j_parity_rtol,
             # Charter Amendment 1: both lanes open on the raw un-nest
             # archived lane surface and pay their own start-point inner
             # convergence inside their own claim wall.
@@ -580,11 +925,13 @@ def main(argv: list[str] | None = None) -> None:
             # per-lane.
             "lane_rejection_reasons": ["iota_branch_guard", "inner_solve_failed"],
             "maxcor": maxcor,
+            "measured_j_rel_gap_max": measured_j_rel_gap_max,
             "moving_coil": True,
             "native_claim_clock": "parent_wait",
             "native_start_policy": "start_point_inner_solve_inside_wall",
             "native_omp_num_threads": omp_num_threads,
             "nested_speed_claim": nested_speed_claim,
+            "omp_evidence": omp_evidence,
             "omp_provenance": omp_provenance,
             "one_lane_per_process": True,
             "outer_optimizer_loop": True,
@@ -600,7 +947,17 @@ def main(argv: list[str] | None = None) -> None:
             "JAX_ENABLE_X64=1 python benchmarks/nested_ls_outer_claim.py"
             f" --budget {budget} --omp {omp_num_threads} --maxcor {maxcor}"
             + (f" --tag {tag}" if tag else "")
+            + (
+                f" --omp-evidence {omp_evidence['path']}"
+                if omp_evidence is not None
+                else ""
+            )
             + (f" --b3-receipt {b3_receipt['path']}" if b3_receipt is not None else "")
+            + (
+                f" --j-parity-rtol {j_parity_rtol!r}"
+                if j_parity_rtol is not None
+                else ""
+            )
         ),
         "date": datetime.now(timezone.utc).date().isoformat(),
         "driver": "benchmarks.nested_ls_outer_claim",

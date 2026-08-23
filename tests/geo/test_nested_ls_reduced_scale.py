@@ -1942,7 +1942,7 @@ def _assert_outer_claim_walls(payload: dict[str, object]) -> None:
     not _OUTER_B3_EVIDENCE.is_file(),
     reason="authored outer B3 claim JSON not yet produced",
 )
-def test_authored_outer_b3_json_is_cli_omp_claim():
+def test_authored_outer_b3_json_is_swept_omp_claim():
     raw = _OUTER_B3_EVIDENCE.read_text(encoding="utf-8")
     assert "NaN" not in raw
     payload = json.loads(raw)
@@ -1953,7 +1953,19 @@ def test_authored_outer_b3_json_is_cli_omp_claim():
     boundary = payload["claim_boundary"]
     _assert_outer_claim_boundary(boundary)
     assert boundary["budget"] == 3
-    assert boundary["omp_provenance"] == "cli"
+    assert boundary["omp_provenance"] == "swept_artifact"
+    assert boundary["j_parity_mode"] == "observational_b3"
+    assert boundary["j_parity_rtol"] is None
+    assert boundary["b3_measured_j_rel_gap_max"] is None
+    assert boundary["b3_receipt"] is None
+    omp_evidence = boundary["omp_evidence"]
+    assert isinstance(omp_evidence, dict)
+    assert omp_evidence["path"]
+    assert omp_evidence["sha256"]
+    measured_j_rel_gap_max = float(boundary["measured_j_rel_gap_max"])
+    assert measured_j_rel_gap_max >= 0.0
+    for pair in payload["pairs"]:
+        assert pair["endpoint_j_within_frozen_band"] is None
     _assert_outer_claim_walls(payload)
     assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
 
@@ -1973,11 +1985,17 @@ def test_authored_outer_b37_json_uses_b3_receipt_omp():
     boundary = payload["claim_boundary"]
     _assert_outer_claim_boundary(boundary)
     assert boundary["budget"] == 37
-    assert boundary["omp_provenance"] == "b3_receipt"
+    assert boundary["omp_provenance"] == "swept_artifact"
+    assert boundary["j_parity_mode"] == "frozen_from_b3"
+    assert isinstance(boundary["j_parity_rtol"], float)
+    assert isinstance(boundary["b3_measured_j_rel_gap_max"], float)
+    assert boundary["omp_evidence"] is None
     b3_receipt = boundary["b3_receipt"]
     assert isinstance(b3_receipt, dict)
     assert b3_receipt["path"]
     assert b3_receipt["sha256"]
+    for pair in payload["pairs"]:
+        assert isinstance(pair["endpoint_j_within_frozen_band"], bool)
     _assert_outer_claim_walls(payload)
     assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
 
