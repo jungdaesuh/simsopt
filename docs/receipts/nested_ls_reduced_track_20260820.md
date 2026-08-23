@@ -677,6 +677,32 @@ published beside it and the per-repeat rows are in the artifact.
 ``nested_speed_claim=true`` under the frozen Gate-6 contract on this
 second host. Not F3 7.70×.
 
+## Outer charter — Gate FD-0 GREEN (2026-08-23, 5090)
+
+Receipt ``docs/receipts/evidence/nested_ls_outer_fd0_20260823.json``
+(schema v2, producer HEAD ``a91295194``; the certified nested-LS
+implementation bytes are unchanged since ``4f0b8bdbd``). **11/11 coil
+directions pass the 1e-5 band** under the Amendment-3 descent ladder:
+ladders of 2–6 rungs, worst best-rel ``8.1e-6`` (dir 9), deepest
+descents to ``ε = 9.4e-7`` with monotone improvement throughout.
+
+The road there is part of the certification: the first run under the
+fixed two-rung ε rule failed 8/11 directions (preserved as-run at
+``…fd0_20260823.amendment2-red.json``); the chartered discriminator
+then proved the gradient itself correct — the independent native
+composition agrees with the JAX composition **component-wise to max
+rel 5.7e-9** (``…outer_gradient_discriminator_20260823.{py,txt}``) —
+so the defect was the gate's step rule (third instance of the
+gate-parameter law), fixed as charter Amendment 3. Disclosure: the
+measured base-J scatter was exactly 0.0 over three repeated
+evaluations (deterministic warm re-solves), so the ladder's noise
+floor was unexercised this run; descent was bounded by the band, the
+depth cap, and the halving-improvement clause, and the visited region
+(down to 9.4e-7) was empirically noise-free.
+
+B3 is unblocked. Its native bar comes from the Amendment-2 sweep
+artifact (bracket set per the standing KISS ruling, extend-on-edge).
+
 ## Next
 
 Gate-6 is closed on both hosts (5090 OMP=16 min 1.27×; A100 OMP=20
