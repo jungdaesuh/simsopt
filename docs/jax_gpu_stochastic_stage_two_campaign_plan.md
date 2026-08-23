@@ -15,7 +15,8 @@ The 2026-08-23 P1.1/P1.3 and P4.2 probes (`benchmarks/stochastic_stage_two_probe
 `benchmarks/marginal_quartet_probes.py`, self-stamped `diagnostic-not-certifying`) supply **no admissible
 number**: ≤3 timed solves per leg, no interleaving, no quiet gate, no five-pair rule, an incomplete sweep. Their
 artifacts (`docs/receipts/evidence/stoch_*_20260823.json`/`.npz`, `quartet_coil_forces_*_20260823.json`) are
-**untracked at drafting time**, so clause 7 does not even let them be cited. Every number below is re-measured
+tracked since `fbab4f2b8` — but they are self-labelled diagnostic and belong to no `docs/receipts/` campaign
+receipt, so clause 7 gives them no evidentiary standing. Every number below is re-measured
 here or it does not exist.
 
 Shipped stochastic scale — 16 training samples, 64×16 surface (1,024 points), order 24, 360 quadrature points,
@@ -27,7 +28,9 @@ budget 400, 1 MPI rank, shared-sample injection, matched `nit=400` both lanes:
 | stochastic-mc400 | `maxcor=400` both lanes | 24.617 / 24.619 | 30.525 (OMP=16) | **1.24×** | 213.9 |
 
 Sweep observed: mc10 41.320 (4), 32.257 (8), **29.994 (16)**, 33.405 (32); mc400 41.402 (4), 33.200 (8), **30.525
-(16)**, 50.720 (32) — `OMP ∈ {2,48}` **not measured**, a *sampled* optimum §5 refuses. Endpoints GPU
+(16)**, 50.720 (32) — `OMP ∈ {2,48}` **not measured**, a *sampled* optimum §5 refuses; and each native value is
+one fresh-process solve (each artifact's only solve, labelled `cold_in_process`), an N=1 statistic §6 will not
+admit. Endpoints GPU
 `2.879160e-05` vs native `2.864290e-05` (mc10) and `2.368170e-05` vs `2.371265e-05` (mc400, GPU marginally
 better); fingerprint `c96661e2c9…` identical on every leg. **Cold is a heavy bounded negative** (157–214 s of XLA
 compile) against warm 22–25 s, so the claim shape is warm/persistent-cache only — the finite-build precedent
@@ -94,8 +97,10 @@ the two stochastic rungs are two policies, not two samples of one:
   `minimize_region_seconds` against the mirror's `solve_call_seconds`, conservative for the GPU by the probe's
   disclosure (the mirror carries host construction and the Taylor evaluation; the native region carries both
   `minimize` calls and the VTK writes between them).
-- **No dual-anchor clause**: no archived anchor of the kind `docs/jax_gpu_flat675_fused_campaign_plan.md:226-232`
-  binds exists here; all three rows are `unmeasured` (`docs/jax_example_device_assignment.md rows native-stage-two-optimization / -planar-coils / -stochastic and native-coil-forces`).
+- **No dual-anchor clause**: no archived anchor of the kind `docs/jax_gpu_flat675_fused_campaign_plan.md:226-245`
+  binds exists here; the two rows this charter can move — `native-stage-two-optimization-stochastic` and
+  `native-coil-forces` — are `unmeasured` in `docs/jax_example_device_assignment.md`, and the stage-two /
+  planar-coils rows sit at `cpu`/`measured-diagnostic` outside this charter's scope (§4).
 
 ## 4. Scope law
 
@@ -105,7 +110,7 @@ the two stochastic rungs are two policies, not two samples of one:
   `native-stage-two-optimization-stochastic` off `unmeasured`, through this campaign's receipt (§11); R3 the only
   path for `native-coil-forces`, scoped by §5.1.
 - **The stage-two and planar-coils rows are out of scope**: their P4.1 kill numbers are recorded as
-  `cpu`/`measured-diagnostic` by the backlog plan's P6.2 (`…backlog…plan.md:410-412`), independent of this
+  `cpu`/`measured-diagnostic` by the backlog plan's P6.2 (`…backlog…plan.md` §P6.2), independent of this
   charter, and no verdict here is evidence about them.
 - Row movement follows `docs/jax_example_device_assignment.md`'s own procedure: append a dated log row and edit
   the table row it refers to **in the same commit**, never rewriting a log entry; `gpu` requires a receipt tracked
@@ -176,12 +181,14 @@ tolerance bucket** (`src/simsopt_jax/parity_tolerances.py`), not bitwise:
   `dofs_within_bucket` and `objective_within_bucket` must both be true; iteration counts publish per side,
   ungated.
 - **Shared-sample fingerprint identity is mandatory**: both lanes draw the perturbations from one PCG64DXSM stream
-  through `materialize_stochastic_coil_perturbations` (`src/simsopt_jax/examples/stochastic_samples.py:98-130`)
+  through `materialize_stochastic_coil_perturbations` (`src/simsopt_jax/examples/stochastic_samples.py:133`, the
+  PCG64DXSM stream at `:158`)
   and record the bundle `sha256`; a pair whose `training_sha256` differs is `NOT_PRODUCED`.
 - **The nit-at-exhaustion disclosure must be confirmed on the first GPU pair.** The publication gate assumes the
   fused JAX driver reports `nit == budget` at exhaustion as SciPy does; if it reports `budget-1` the gate refuses
   the leg fail-closed rather than minting a number (`benchmarks/stochastic_stage_two_probe.py:223,435-439`). The
-  probe legs show `nit: 400, nfev: 405, status: 1`, a *diagnostic* observation the first certifying GPU pair
+  probe legs show `nit: 400, status: 1` on every leg, with `nfev` 405 on all mc400 legs and 418–422 on the mc10
+legs (418 on both legs of the mc10 timed pair) — a *diagnostic* observation the first certifying GPU pair
   re-confirms, updating that line in the same commit. R3 additionally uses §5.1's endpoint gate with its two-digit
   bound disclosed.
 
@@ -219,7 +226,7 @@ state. Clean tree at every pair leg.
 §§2–9 and §11 are **frozen text** at the freezing commit. Dated amendments are permitted **only before the
 evidence they govern exists**, are append-only, never edit frozen text in place, and each cites its empirical
 basis by artifact path and sha256 (clause 1, `…backlog…plan.md:190-193`; `…finitebuild…successor_plan.md:247-251`;
-`docs/jax_gpu_flat675_fused_campaign_plan.md:265-269,291-294`). **Non-amendable post-evidence:** the win rule
+`docs/jax_gpu_flat675_fused_campaign_plan.md:267-271,293-294`). **Non-amendable post-evidence:** the win rule
 (§3), the scope law (§4), the denominator rule including the full OMP set and the ranks × OMP law (§5), the §5.1
 option chosen, warm/cold scoping (§6), the physics gate (§7), every kill criterion (§9). Amendable pre-evidence
 only: rung ordering, repetitions above the five-pair floor, the rank set, and the instrument shas (re-freezing

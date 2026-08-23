@@ -175,7 +175,7 @@ file:line anchors before acting on them):
   (`fail_closed_reason="fd_rel_error_unmet"`, 3/11 directions,
   `docs/receipts/evidence/nested_ls_outer_fd0_20260823.amendment2-red.*`);
   Amendment 3 (committed `4f0b8bdbd`) replaces the FD ladder; next steps are
-  the canonical FD-0 rerun, then B3 (swept-OMP artifact-bound), then B37.
+  the canonical FD-0 rerun, then B3 (swept-OMP artifact-bound), then B37. **Resolved later on 2026-08-23: the rerun landed GREEN 11/11 (`484b3fc26`); B3/B37 remain.**
   The charter mints a **benchmarks-path claim only** — it never names the
   example; example-level promotion would be a separate F4-style step
   (`docs/jax_flat675_promotion_plan.md` precedent), and the outer
@@ -190,7 +190,7 @@ Any charter draft produced by this plan must carry, with these citations:
 1. **Preregistration**: new campaign = new preregistration with its own gate
    derivation; amendments dated, pre-evidence only, append-only
    (`docs/jax_gpu_finitebuild_native_speed_successor_plan.md:7-8,209,247-251`;
-   `docs/jax_gpu_flat675_fused_campaign_plan.md:267-269,293-294`).
+   `docs/jax_gpu_flat675_fused_campaign_plan.md:267-271,293-294`).
 2. **Win rule**: five interleaved pairs, alternating order; median paired
    `native/gpu ≥ 1.10` with every pair `> 1.00`
    (`…successor_plan.md:198-206`). F3 additionally binds a dual anchor rule
@@ -315,7 +315,7 @@ identity JSON, and writes its artifact under
       (`src/simsopt_jax_adapters/solve/wireframe.py:241`). Reuse the capture
       pattern of `docs/receipts/wireframe_gsco_multistep/`; do not edit the
       example scripts.
-- [x] `[probe]` P2.2 (2026-08-23 — see §Probe outcomes: 5.3×/4.4× WINs, bitwise) Interleaved A/B at reference scale per sibling: warm
+- [x] `[probe]` P2.2 (2026-08-23 — see §Probe outcomes: 5.2×/4.4× WINs, bitwise) Interleaved A/B at reference scale per sibling: warm
       device solve vs swept-OMP native; full-precision final segment-currents
       comparison (bitwise expected — GSCO is exact greedy arithmetic; the
       siblings receipt proved 0 ULP at shipped scale).
@@ -323,7 +323,7 @@ identity JSON, and writes its artifact under
       device time and native per-iteration time at both 48×50 and 96×100, so
       the flat-20,000-iteration vs staged-17,500 difference is measured, not
       argued.
-- [x] `[charter]` P2.4 (2026-08-23 — both siblings cleared at 5.3×/4.4×; draft written incl. the shipped-scale conflict re-adjudication rung) charter draft
+- [x] `[charter]` P2.4 (2026-08-23 — both siblings cleared at 5.2×/4.4×; draft written incl. the shipped-scale conflict re-adjudication rung) charter draft
       `docs/jax_gpu_gsco_siblings_reference_scale_campaign_plan.md`, claim
       scoped to the reference configuration by name (the shipped-scale
       `cpu` rows stand unless separately overturned).
@@ -397,6 +397,10 @@ identity JSON, and writes its artifact under
       all pending, owned by the concurrent session) Track under the live charter (owned by the concurrent
       session): canonical FD-0 rerun → B3 → B37; no file in the fence list
       is touched by this plan.
+      **Addendum (2026-08-23, later):** the canonical FD-0 rerun landed
+      GREEN — 11/11 directions under the Amendment-3 descent ladder
+      (`484b3fc26`); the owning session's native OMP sweep for B3 is in
+      flight. B3 → B37 remain.
 - [ ] `[doc]` P5.2 If B37 closes green, add a follow-up entry here for the
       F4-style example-promotion charter — noting the instrument-vs-example
       configuration gap (`surface_vessel_weight`, host driver) promotion
@@ -426,9 +430,9 @@ warm windows matched per the probe's disclosures; artifacts under
 | MUSE | shipped nφ=16 | **0.64×** (4.71 s vs omp32 3.01 s) — the row's 4.05× is stale (post-cond-skip) | GPU 5.6–6.5 s | bitwise, 0 ULP | `muse_shipped_*` |
 | MUSE | nφ=64 "real run" | **2.9× WIN** (7.32 s vs omp32 21.22 s); device mem 10.5 GiB | GPU 8.3–8.8 s (beats all native) | bitwise, 0 ULP | `muse64_*` |
 | PM4Stell | nφ=64 | 3.0× speed (9.51 s vs omp32 28.7 s) — **BLOCKED: greedy forks at k=201** (inputs digest-identical, lanes internally stable, agree ≤200) | GPU 10.5–11.0 s | **DIVERGES** from k=201; fork dumps archived | `pm4stell64_*` incl. `_fork_k201_*` |
-| GSCO modular | reference 96×100/20k | **5.3× WIN** (5.25 s vs omp32 27.7 s; omp48 154 s) | GPU 5.4–6.1 s | bitwise, 0 ULP (19,200 seg) | `gsco_modular_reference_*` |
-| GSCO sector-saddle | reference | **4.4× WIN** (8.06 s vs omp32 35.2 s; omp48 233 s) | GPU 8.3 s | bitwise, 0 ULP | `gsco_sector_saddle_reference_*` |
-| GSCO both siblings | shipped 48×50/2k | **~1.6× GPU** (0.405 s vs omp32 0.669 s) — direction REVERSED vs the sealed 2026-08-16 receipt (0.79–0.89×); genuine conflict, adjudication chartered | GPU 0.51–1.56 s | bitwise, 0 ULP | `gsco_*_shipped_*` |
+| GSCO modular | reference 96×100/20k | **5.2× WIN** (warm median 5.27 s vs best omp32 leg 27.4 s; omp48 154 s) | GPU 5.4–6.1 s | bitwise, 0 ULP (19,200 seg) | `gsco_modular_reference_*` |
+| GSCO sector-saddle | reference | **4.4× WIN** (warm median 8.08 s vs best omp32 leg 35.2 s; omp48 233 s) | GPU 8.3 s | bitwise, 0 ULP | `gsco_sector_saddle_reference_*` |
+| GSCO both siblings | shipped 48×50/2k | **~1.6× GPU** (warm median 0.408 s vs omp32 0.669 s) — direction REVERSED vs the sealed 2026-08-16 receipt (0.79–0.89×); genuine conflict, adjudication chartered | GPU 0.51–1.56 s | bitwise, 0 ULP | `gsco_*_shipped_*` |
 | P2.3 per-iteration | both | GPU 0.20→0.26 ms/it (2k→20k, near-flat); native 0.335→1.385 ms/it | — | — | same artifacts |
 | stochastic | shipped, mc10 / mc400, nit=400 both lanes | **1.35× / 1.24× WIN** (22.15 / 24.62 s vs omp16 29.99 / 30.53 s) | GPU 157–214 s (XLA compile — heavy) | endpoints within `native_workflow` bucket; samples bitwise-shared | `stoch_*` |
 | stochastic tiles | shipped, tile ∈ {4,8,16} | 24.94–25.21 s vs 24.62 s untiled — **lever neutral-to-negative** | — | — | `stoch_jaxgpu_mc400_tile*` |

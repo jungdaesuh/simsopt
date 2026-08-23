@@ -26,7 +26,8 @@ in `examples/jax/parity/cases/native_permanent_magnet_simple.py`. Rung B's is **
 is therefore a configuration-scoped claim carrying its resolution in its name, as
 `flat675-single-stage-coupled-optimization` does; §Scoreboard consequences pre-registers what each
 verdict may do to `docs/jax_example_device_assignment.md`. Out of scope: `permanent_magnet_QA` /
-relax-and-split (P3.5 — footprint, not speed); nφ=64 for `pm-simple`; contended-box claims;
+relax-and-split (P3.5 — a footprint probe plus a native-only ~32.4 s timing; no matched GPU
+number exists); nφ=64 for `pm-simple`; contended-box claims;
 batched-instance workloads (that record's scope guard).
 
 ## Motivation — diagnostic probe evidence, never campaign evidence
@@ -35,12 +36,14 @@ The 2026-08-23 Phase-3 probes (`benchmarks/pm_gpmo_probes.py`, self-labelled
 `diagnostic-not-certifying`) motivate this charter and supply **no admissible number**: two timed
 solves per leg, no interleaving, no quiet gate, no five-pair rule. Their artifacts sit in-tree under
 `docs/receipts/evidence/` (`pm_simple16_*_20260823.json`, `muse_shipped_*_20260823.json`,
-`muse64_*_20260823.json`, `pm4stell64_*_20260823.json`) and are **untracked** at drafting time, so
-they are not even citable under plan clause 7. Every number below is re-measured or it does not
-exist.
+`muse64_*_20260823.json`, `pm4stell64_*_20260823.json`), tracked since `fbab4f2b8` — but they are
+self-labelled diagnostic and belong to no `docs/receipts/` campaign receipt, so plan clause 7 gives
+them no evidentiary standing. Every number below is re-measured or it does not exist.
 
-- **Rung A.** GPU warm 0.0306 s vs swept-native optimum 0.1586 s (OMP=32) → ≈5.2×. Sweep: 1.2097
-  (2), 0.7943 (4), 0.3468 (8), 0.2004 (16), 0.1586 (32), **6.0664 (48)** — OMP=48 is the
+- **Rung A.** GPU warm 0.0306 s vs swept-native optimum 0.1586 s (OMP=32) → ≈5.2×; numerator and
+  denominator are each leg's mean of its two warm samples (GPU 0.03085/0.03034, native
+  0.15953/0.15762). Sweep (first warm sample per leg): 1.2097
+  (2), 0.7943 (4), 0.3468 (8), 0.2004 (16), 0.1595 (32), **6.0664 (48)** — OMP=48 is the
   all-hardware-threads collapse the device record names, never a usable denominator. Moments bitwise
   (0 ULP, 43,008 elements, one sha both lanes).
 - **Rung B.** GPU warm 7.32 s vs swept-native optimum 21.22 s (OMP=32) → ≈2.9×; observed 42.39 (8),
@@ -73,7 +76,8 @@ pre-freeze work, all instrument-side:
 1. **Certifying driver mode**, in this file or a thin sibling delegating to it (the
    `benchmarks/nested_ls_a100_banana_omp.py` precedent, 86 lines) — either is acceptable, but the
    choice is frozen here, not discovered mid-campaign. Today one invocation times one leg
-   (`--lane/--omp/--repeat`) and `interleave_schedule` prints as a *suggestion only*
+   (positional case plus `--lane/--omp/--repeat`, e.g. `pm-simple-16 --lane native --omp 32`)
+   and `interleave_schedule` prints as a *suggestion only*
    (`benchmarks/pm_gpmo_probes.py:2429-2434`); the driver must execute the alternation itself in
    fresh processes, publishing the executed order from the ledger — never a planned one.
 2. **Quiet gates enforced, not merely available.** `cpu_utilization_delta` and
@@ -235,11 +239,12 @@ procedure).
 
 ## Scoreboard consequences, pre-registered per rung
 
-- **Rung A WIN** → `native-permanent-magnet-simple` moves `unmeasured/unmeasured` →
-  `gpu/measured-certified`, citing the receipt; it is the one row a rung here can move to `gpu`,
-  because Rung A's configuration *is* that mirror's `native_default`. **CLOSE** → `cpu` only if the
-  evidence establishes native faster, else it stays `unmeasured` with its 2026-08-23 conflict cell
-  replaced by the measured number.
+- **Rung A WIN** → `native-permanent-magnet-simple` moves `gpu/measured-diagnostic` (its state
+  since the 2026-08-23 P3.2 amendment) → `gpu/measured-certified`, citing the receipt; it is the one
+  row a rung here can hold at `gpu`, because Rung A's configuration *is* that mirror's
+  `native_default`. **CLOSE** → the row leaves `gpu`: `cpu/measured-certified` if the evidence
+  establishes native faster, else back to `unmeasured` with the diagnostic 5.2× superseded in the
+  cell by this campaign's measured number.
 - **Rung B WIN** → `native-permanent-magnet-muse` **stays `cpu`**: its `native_default` is nφ=16,
   where the GPU loses, so a `gpu` move on a nφ=64 result would misstate the record's own semantics
   ("where do I launch *this example*"). The amendment supersedes the stale host-local 4.05× with the

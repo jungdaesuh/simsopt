@@ -26,22 +26,25 @@ each self-labelled `diagnostic-not-certifying`) measured at reference scale:
 
 | sibling | GPU warm | native OMP=16 | OMP=32 | OMP=48 | accepted iters |
 | --- | --- | --- | --- | --- | --- |
-| modular | 5.25 s | 30.0–30.5 s | 27.4–28.0 s | 153.8–154.1 s | 8,031 |
-| sector-saddle | 8.06 s | 37.7–38.8 s | 35.2–37.6 s | 233.1–234.2 s | 12,589 |
+| modular | 5.25–5.33 s (median 5.27) | 30.0–30.5 s | 27.4–28.0 s | 153.8–154.1 s | 8,031 |
+| sector-saddle | 8.05–10.01 s (median 8.08; two of six warm samples ≈10.0 s) | 37.7–38.8 s | 35.2–37.6 s | 233.1–234.2 s | 12,589 |
 
-— ~5.3x and ~4.4x against the sampled optimum (OMP=32), final 19,200-entry currents vector
+— ~5.2x and ~4.4x, the best native OMP=32 leg over the six-sample GPU warm median
+(27.4/5.27 and 35.2/8.08; any consistent statistic pair gives the same two ratios to one
+decimal), final 19,200-entry currents vector
 **bitwise identical** (0 ULP) for both siblings, GPU per-iteration cost nearly flat 2,000 ->
 20,000 iterations (0.20 -> 0.26 ms/it). Not a claim; the reason to spend a campaign.
 
 **The conflict this charter must also resolve.** The same probe re-measured *shipped* scale
-and came back in the **opposite direction** from the sealed receipt: GPU warm 0.405–0.413 s
-(modular) against a sampled-native optimum of 0.669 s (OMP=32) — ~1.62x *for* the GPU where
+and came back in the **opposite direction** from the sealed receipt: GPU warm 0.404–0.413 s
+(modular, median 0.408) against a sampled-native optimum of 0.669 s (OMP=32) — ~1.6x *for* the GPU where
 the receipt recorded 0.79–0.89x against it. Two things moved at once and the charter must
 not keep only the flattering half: the GPU lane got faster (0.41 vs the receipt's 0.552 s)
 *and* the probe's OMP=48 legs are pathological on this box in this session (33.9 s modular,
 30.1 s sector-saddle, where the receipt measured 0.492 / 0.518 s and called OMP=48 the
-configuration a native user should run). A ~65x native regression at the receipt's own best
-configuration is a defect until proven otherwise, and adopting it would mint exactly the
+configuration a native user should run). Native regressions of ~69x (modular, 33.94/0.492)
+and ~58x (sector-saddle, 30.10/0.518) at the receipt's own best
+configuration are a defect until proven otherwise, and adopting them would mint exactly the
 false win this repository's OMP law exists to kill. Hence §4's shipped-scale re-adjudication
 rungs.
 
@@ -73,9 +76,18 @@ inherited from `docs/jax_gpu_finitebuild_native_speed_successor_plan.md:198-206`
   `warm_solve_s` / `warm_repeat_*_s` GPU); the matrix build is timed separately on both
   lanes and subtracted from neither. Process wall is recorded but **not ratioed** — the
   native lane renders plots and writes VTK, the JAX lane does not (sealed-receipt rule).
+  This is a **declared deviation from the inherited two-timer law**: the cited
+  `…successor_plan.md:198-206` requires the ≥ 1.10 median on warm persistent-cache
+  `process_wall_seconds` as well, and the PM and stochastic sibling charters keep both
+  timers. It follows the sealed sibling receipt's single-timer rule instead because the
+  native wall is inflated by rendering work the JAX lane does not perform; the freeze
+  review must either ratify this single-timer rule or restore the wall gate before
+  freezing.
 - **Four rungs, adjudicated independently** — R1 modular and R2 sector-saddle at *reference*
   scale (each mints at most a benchmarks-path claim naming that configuration), R3 modular
-  and R4 sector-saddle at *shipped* scale (each may re-adjudicate its 2026-08-16 `cpu` row).
+  and R4 sector-saddle at *shipped* scale (each may re-adjudicate its shipped-scale row,
+  `unmeasured` since the same-commit conflict amendment superseded its 2026-08-16 `cpu`
+  placement).
   One rung's verdict is never evidence for another.
 
 ## 4. Scope law
@@ -86,7 +98,8 @@ inherited from `docs/jax_gpu_finitebuild_native_speed_successor_plan.md:198-206`
   `examples/jax` mirror and no selector in the shipped examples**, so an R1/R2 win moves
   **no example row**: it is a dated scope-note entry in
   `docs/jax_example_device_assignment.md` (the flat-675 precedent, under that record's
-  "Scope note and amendment procedure"), naming its timer, the two `cpu` rows untouched.
+  "Scope note and amendment procedure"), naming its timer, the two shipped-scale rows (now
+  `unmeasured`) untouched.
 - **R3/R4 are the only path by which the 2026-08-16 rows may move.** They may supersede
   `docs/receipts/wireframe_gsco_siblings_native_default.md` only through this campaign's own
   certified protocol, in a receipt that (a) states the superseded numbers, (b) reproduces or
@@ -138,8 +151,9 @@ Backlog item 4 (`…backlog_native_speed_implementation_plan.md §Campaign proto
   after every timed solve and **a warm leg whose count grows is disqualified as warm**
   (`cache_entries_before` / `_after_first_solve` / `_after_second_solve`).
 - **Cold is measured and disclosed, never folded into any ratio.** A cold claim exists only
-  if the cold numbers independently pass §3; the probe's reference-scale cold solves (5.39 s
-  modular, 8.28 s sector-saddle) suggest they might — measure, do not assume. Module-import
+  if the cold numbers independently pass §3; the probe's reference-scale cold solves
+  (5.39–6.09 s modular, 8.26–8.28 s sector-saddle) suggest they might — measure, do not
+  assume. Module-import
   time is excluded from every ratio, both lanes, and reported.
 
 ## 7. Physics gate
@@ -159,8 +173,9 @@ Backlog item 5 (`…backlog_native_speed_implementation_plan.md §Campaign proto
   the `A` and `b` they solve against. The probe found `b` **equal** across lanes at both
   scales (`target_vector_sha256 9f1dcbc35c…`) while `A` **differs** (`eb6bd4ecc3…` native vs
   `368a4bd0a3…` JAX at reference; `d9f1b92a83…` vs `dac60da1e3…` at shipped):
-  `bnorm_obj_matrices_jax` reduces in a different order, a reported ~2.5e-12 relative
-  last-bit difference the probe published nothing to bound and said so. **Before any pair
+  `bnorm_obj_matrices_jax` reduces in a different order — a last-bit-level difference the
+  probe observed but published nothing to bound (the artifacts hold only the digests, so no
+  magnitude may be quoted). **Before any pair
   runs this campaign must** publish the elementwise max relative and absolute `A` difference
   at both scales and either (i) feed the JAX lane the native `A` so the compared problem is
   digest-identical, or (ii) accept the difference in the frozen text with the measured bound
@@ -187,7 +202,7 @@ Backlog item 6 (`…backlog_native_speed_implementation_plan.md §Campaign proto
 
 ## 9. Kill criteria (fail-closed; none amendable post-evidence)
 
-- **Any pair `<= 1.00` at reference scale (R1/R2) closes that rung**
+- **Any pair `<= 1.00`, on any rung R1–R4, closes that rung**
   `CLOSED_BOUNDED_NEGATIVE`; median `>= 1.10` is the second gate, not the first.
 - **Physics non-bitwise** on any pair, either scale: `NOT_PRODUCED` — a forked greedy
   trajectory is an instrument or input defect, not a slow lane; investigate before rerun.
@@ -206,7 +221,7 @@ Backlog item 6 (`…backlog_native_speed_implementation_plan.md §Campaign proto
   place, and each cites its empirical basis by artifact path and sha256 (backlog item 1,
   `…backlog_native_speed_implementation_plan.md §Campaign protocol item 1`;
   `…finitebuild_native_speed_successor_plan.md:247-251`;
-  `docs/jax_gpu_flat675_fused_campaign_plan.md:267-269,293-294`).
+  `docs/jax_gpu_flat675_fused_campaign_plan.md:267-271,293-294`).
 - **Non-amendable post-evidence, on any lane's evidence:** the win rule (§3), the scope law
   (§4), the denominator rule including the full OMP set (§5), warm/cold scoping (§6), the
   physics gate and the `A`-digest option chosen in §7, and every kill criterion (§9).
