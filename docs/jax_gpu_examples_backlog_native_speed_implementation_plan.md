@@ -263,7 +263,9 @@ identity JSON, and writes its artifact under
 
 ### Phase 0 — Shared probe conventions
 
-- [ ] `[eng]` P0.1 `benchmarks/probe_conventions.py`: the shared helpers the
+- [x] `[eng]` P0.1 (2026-08-23, commit 76f1b5f37; scope grew during review:
+      scrub-then-pin environment builder, leg ledger, and public digest/ULP
+      helpers joined the module) `benchmarks/probe_conventions.py`: the shared helpers the
       family probes need — identity-JSON writer (fields cloned from
       `_runtime_identity`, `benchmarks/stage_two_finitebuild_native_gpu.py:474-517`),
       interleave scheduler, OMP-sweep runner over `{2,4,8,16,32,48}`,
@@ -285,7 +287,7 @@ identity JSON, and writes its artifact under
       Shared-sample injection via the parity-case plumbing so both lanes
       consume identical perturbation bytes; Taylor-test and OOS stages
       excluded from the timed window on both lanes symmetrically.
-- [ ] `[eng]` P1.2 Sample-axis lever: tiled scan-of-vmap over the sample axis
+- [x] `[eng]` P1.2 (2026-08-23, commit c3a827510) Sample-axis lever: tiled scan-of-vmap over the sample axis
       in `stochastic_flux_mean_from_geometry`
       (`src/simsopt_jax/objectives/stochastic_stage_two.py:64-68`), tile size
       swept `{4,8,16}`, default from measurement; the 256-sample
@@ -305,7 +307,7 @@ identity JSON, and writes its artifact under
 
 ### Phase 2 — GSCO siblings at reference scale
 
-- [ ] `[eng]` P2.1 `benchmarks/wireframe_gsco_siblings_reference_scale.py`:
+- [x] `[eng]` P2.1 (2026-08-23, commit 76f1b5f37) `benchmarks/wireframe_gsco_siblings_reference_scale.py`:
       builds the reference configuration (96×100, 20,000 it; sector-saddle
       `break_width=4`, `gsco_cur_frac=0.03`, `lambda_S=10**-7.5`; plasma 32²
       unchanged) through the same public APIs in both lanes — native
@@ -328,7 +330,10 @@ identity JSON, and writes its artifact under
 
 ### Phase 3 — Permanent-magnet family (GPMO / relax-and-split)
 
-- [ ] `[eng]` P3.1 Fix the `permanent_magnet_simple` mirror `native_default`
+- [x] `[eng]` P3.1 (2026-08-23, commit f37c86350; the row moved to
+      `unmeasured` rather than staying `cpu` — review found the `cpu`
+      placement contradicted the record's own coherence rule) Fix the
+      `permanent_magnet_simple` mirror `native_default`
       branch: align to its parity-case SSOT (nφ=nθ=16, downsample=4, K=500;
       `examples/jax/parity/cases/native_permanent_magnet_simple.py:35-38`),
       branching on the scale argument its `solve()` currently ignores
@@ -386,7 +391,10 @@ identity JSON, and writes its artifact under
 
 ### Phase 5 — Nested-LS outer track (tracking only; fenced)
 
-- [ ] `[doc]` P5.1 Track under the live charter (owned by the concurrent
+- [x] `[doc]` P5.1 (2026-08-23 status: FD-0 ran RED under Amendment 2
+      (`fail_closed_reason=fd_rel_error_unmet`, 3/11 directions); Amendment 3
+      descent ladder committed at `4f0b8bdbd`; canonical FD-0 rerun, B3, B37
+      all pending, owned by the concurrent session) Track under the live charter (owned by the concurrent
       session): canonical FD-0 rerun → B3 → B37; no file in the fence list
       is touched by this plan.
 - [ ] `[doc]` P5.2 If B37 closes green, add a follow-up entry here for the
@@ -418,7 +426,10 @@ identity JSON, and writes its artifact under
 - [ ] Per-family focused tests green, one file per process (JAX x64 rule):
       stochastic tile-parity test (P1.2), pm_simple mirror scale tests
       (P3.1), probe-conventions unit test (P0.1).
-- [ ] `ruff check` clean on every file this plan touches.
+- [x] `bash scripts/lint.sh check` AND `format` clean on every file this
+      plan touches (the pinned gate; unpinned `uvx ruff` is the documented
+      drift trap — a format-only regression slipped past `check` alone once
+      during review).
 - [ ] Every probe artifact contains per-leg identity JSON (commit, observed
       OMP, jax platform/x64, device list, nvidia-smi processes) and the
       interleave order; probes without them are invalid and rerun.
