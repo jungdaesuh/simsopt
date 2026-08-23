@@ -39,6 +39,7 @@ from simsopt_jax.geo.optimizers.optimizer import dense_operator_chunk_batch_size
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
 from simsopt_jax_adapters.geo.flat675.bundle import load_flat675_bundle
+from simsopt_jax_adapters.geo.flat675.objective import bind_flat675_programs
 from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_CONSTRAINT_WEIGHT,
     NESTED_LS_GATE6_AGGREGATION,
@@ -48,8 +49,16 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_NEWTON_MAXITER,
     NESTED_LS_NEWTON_STAB,
     NESTED_LS_NEWTON_TOL,
+    NESTED_LS_OUTER_FD0_DIRECTIONS,
+    NESTED_LS_OUTER_FD0_REL_TOL,
+    NESTED_LS_OUTER_FD0_STEP_HALVING,
+    NESTED_LS_OUTER_FD0_STEP_RELATIVE,
+    NESTED_LS_OUTER_FD0_STEP_RULE,
+    NESTED_LS_OUTER_FD0_STEP_SCALE_FLOOR,
+    NESTED_LS_OUTER_IOTA_BRANCH_GUARD,
     NESTED_LS_WEIGHT_INV_MODB,
     nested_ls_banana_run_code_options,
+    nested_ls_outer_fd0_step,
     nested_ls_physics_newton_kwargs,
 )
 from simsopt_jax_adapters.geo.nested_ls_reduced import (
@@ -59,6 +68,7 @@ from simsopt_jax_adapters.geo.nested_ls_reduced import (
     NESTED_LS_SCHUR_GMRES_RTOL,
     NestedLsB37TimingBlocked,
     NestedLsReducedRankError,
+    NestedLsSchurNewtonResult,
     NestedLsSchurNewtonStepRecord,
     apply_reduced_mixed_schur_coil_tangent,
     compare_ad_qr_and_schur_hvp,
@@ -4480,6 +4490,859 @@ def evaluate_f3_b37_nested_timing(
     )
 
 
+Flat675OuterValueAndGrad = Callable[[jax.Array], tuple[jax.Array, jax.Array]]
+
+
+def _optional_finite(value: float | None) -> float | None:
+    """``_json_finite`` that carries a missing measurement through as ``None``."""
+
+    return None if value is None else _json_finite(value)
+
+
+# The two sentinel-eligible physics events an outer evaluation can hit.
+# Both are things the surface can legitimately do to a moving-coil step,
+# both leave the rolling anchor exactly where it was, and both exist as
+# distinct types so a lane catches a physics event on purpose rather than
+# catching ``RuntimeError`` and swallowing a defect with it. Everything
+# else out of the inner solve — coils moving under a frozen-coil solve
+# above all — stays an untyped fatal error: an invariant violation is not
+# a physics event and must never be answered with a rejection sentinel.
+
+
+class NestedLsInnerSolveFailed(RuntimeError):
+    """The inner solve ran its budget without reaching the nested branch.
+
+    The native lane answers inner non-convergence with its sealed
+    rejection sentinel, so the JAX lane raises a signal its lane can
+    catch and answer identically instead of crashing. Lane symmetry is
+    the point: an evaluation neither lane can complete must cost both
+    lanes the same thing.
+    """
+
+    def __init__(
+        self,
+        *,
+        iteration_count: int,
+        grad_l2: float,
+        tol: float,
+    ) -> None:
+        super().__init__(
+            "nested-LS inner solve did not reach the nested branch: "
+            f"{int(iteration_count)} iterations left ||grad||_2 "
+            f"{float(grad_l2)!r} above tol {float(tol)!r}."
+        )
+        self.iteration_count = int(iteration_count)
+        self.grad_l2 = float(grad_l2)
+        self.tol = float(tol)
+
+
+class NestedLsBranchJump(RuntimeError):
+    """The inner solve landed off the anchor's Boozer branch.
+
+    Charter Amendment 1's typed signal: ``s*(c)`` is only locally
+    defined, and a converged inner solve on a *different* branch is a
+    failed outer evaluation, not a cheaper one. Raised only by the outer
+    value-and-gradient path, and only for this reason, so an outer
+    optimizer lane can catch this exact type and apply the sealed
+    rejection sentinel. The anchor is never advanced onto the rejected
+    branch.
+    """
+
+    def __init__(self, *, iota: float, anchor_iota: float, guard: float) -> None:
+        super().__init__(
+            "nested-LS inner solve left the anchor's iota branch: "
+            f"iota {float(iota)!r} against anchor {float(anchor_iota)!r} "
+            f"moves more than the guard {float(guard)!r}."
+        )
+        self.iota = float(iota)
+        self.anchor_iota = float(anchor_iota)
+        self.guard = float(guard)
+
+
+@dataclass(slots=True)
+class NestedLsOuterState:
+    """Frozen eight-term outer problem plus a rolling ``s*`` warm start.
+
+    The outer variable is the 11-DOF coil block. The vessel block is
+    frozen at the archived bundle candidate and the 661 surface DOFs are
+    eliminated by the reduced nested-LS inner solve, so this record holds
+    exactly what an outer evaluation needs and a coil vector cannot
+    carry: the bound flat-675 program, the frozen vessel block, the block
+    slices of the 675-vector, and the anchor the next inner solve
+    warm-starts from. The anchor is the only mutable physics: every
+    accepted inner solve rolls it forward.
+
+    ``adjoint_live_eta``, ``inner_iterations`` and ``inner_grad_l2``
+    report the last gradient evaluation so a gate can read them without
+    widening the value-and-gradient signature.
+
+    ``record_mixed_cross_check`` is off in production. A gate that wants
+    the mixed term assembled the second way turns it on and reads
+    ``mixed_cross_check_gradient`` and ``mixed_cross_check_max_abs``
+    after the call; nothing else pays for it.
+    """
+
+    jax_boozer: BoozerSurfaceJAX
+    flat_value_and_grad: Flat675OuterValueAndGrad
+    vessel_dofs: NDArray[np.float64]
+    coil_slice: slice
+    surface_slice: slice
+    anchor_surface_dofs: NDArray[np.float64]
+    anchor_iota: float
+    anchor_G: float
+    adjoint_live_eta: float
+    inner_iterations: int
+    inner_grad_l2: float
+    record_mixed_cross_check: bool
+    mixed_cross_check_gradient: NDArray[np.float64] | None
+    mixed_cross_check_max_abs: float | None
+
+    def set_anchor(self, surface_dofs: object, iota: float, G: float) -> None:
+        """Move the rolling warm start onto one accepted nested point."""
+
+        self.anchor_surface_dofs = np.array(surface_dofs, dtype=np.float64, copy=True)
+        self.anchor_iota = float(iota)
+        self.anchor_G = float(G)
+
+
+def prepare_f3_b37_outer_state(
+    jax_boozer: BoozerSurfaceJAX,
+    bundle_root: Path | None = None,
+) -> NestedLsOuterState:
+    """Bind the frozen flat-675 bundle to one JAX Boozer surface.
+
+    The warm-start anchor starts at whatever surface ``jax_boozer``
+    already carries, so the caller freezes the outer point (the dense-LU
+    walk endpoint for Gate FD-0) before preparing. The vessel block is
+    read from the bundle's archived candidate and never moves again: it
+    is not an outer variable in this charter.
+    """
+
+    root = DEFAULT_FLAT675_BUNDLE_ROOT if bundle_root is None else Path(bundle_root)
+    problem = load_flat675_bundle(root)
+    layout = problem.material.layout
+    programs = bind_flat675_programs(
+        material=problem.material,
+        objective_policy=problem.objective_policy,
+        boozer_policy=problem.boozer_policy,
+    )
+    compiled = jax.jit(jax.value_and_grad(programs.objective_fn))
+
+    def flat_value_and_grad(outer: jax.Array) -> tuple[jax.Array, jax.Array]:
+        value, gradient = compiled(outer)
+        return value, gradient
+
+    surface = np.asarray(jax_boozer.surface.get_dofs(), dtype=np.float64)
+    if surface.size != layout.surface_dof_count:
+        raise ValueError(
+            "outer state surface block "
+            f"{surface.size} does not match the flat layout's "
+            f"{layout.surface_dof_count}."
+        )
+    coils = np.asarray(jax_boozer.biotsavart.x, dtype=np.float64)
+    if coils.size != layout.coil_dof_count:
+        raise ValueError(
+            "outer state coil block "
+            f"{coils.size} does not match the flat layout's "
+            f"{layout.coil_dof_count}."
+        )
+    residual_fn, _objective_fn, _phi_hat = nested_ls_reduced_closures(jax_boozer)
+    del _objective_fn, _phi_hat
+    projected = solve_projected_y(residual_fn, surface)
+    require_full_y_rank(projected)
+    y_star = np.asarray(jax.device_get(projected.solution), dtype=np.float64)
+    return NestedLsOuterState(
+        jax_boozer=jax_boozer,
+        flat_value_and_grad=flat_value_and_grad,
+        vessel_dofs=np.asarray(
+            problem.start_candidate.vessel_coordinates, dtype=np.float64
+        ),
+        coil_slice=layout.coil_slice,
+        surface_slice=layout.surface_slice,
+        anchor_surface_dofs=np.array(surface, dtype=np.float64, copy=True),
+        anchor_iota=float(y_star[0]),
+        anchor_G=float(y_star[1]),
+        adjoint_live_eta=0.0,
+        inner_iterations=0,
+        inner_grad_l2=0.0,
+        record_mixed_cross_check=False,
+        mixed_cross_check_gradient=None,
+        mixed_cross_check_max_abs=None,
+    )
+
+
+def _solve_nested_inner_at_coils(
+    state: NestedLsOuterState,
+    coil_dofs: NDArray[np.float64],
+) -> NestedLsSchurNewtonResult:
+    """Re-solve ``s*(c)`` from the rolling anchor. Raise unless it lands.
+
+    Landing means three things: the coils never moved, the Newton reached
+    the nested branch, and the branch it reached is still the anchor's.
+    The first is an invariant of a frozen-coil solve and its violation is
+    a fatal untyped error. The other two are physics: a solve that spent
+    its budget above ``NESTED_LS_NEWTON_TOL`` raises
+    :class:`NestedLsInnerSolveFailed`, and a converged solve whose
+    ``iota`` left the anchor by more than
+    ``NESTED_LS_OUTER_IOTA_BRANCH_GUARD`` raises
+    :class:`NestedLsBranchJump`. Both take the same rejection path — the
+    last accepted geometry goes back onto the surface and the anchor is
+    left alone — so the next evaluation still warm-starts from the last
+    *accepted* point whichever signal fired.
+    """
+
+    jax_boozer = state.jax_boozer
+    jax_boozer.surface.set_dofs(state.anchor_surface_dofs)
+    jax_boozer.biotsavart.x = np.array(coil_dofs, dtype=np.float64, copy=True)
+    jax_boozer._refresh_coil_data()
+    solution = run_reduced_nested_ls_schur_newton(
+        jax_boozer,
+        iota=state.anchor_iota,
+        G=state.anchor_G,
+        stab=float(F3_B37_IFT_STAB),
+        maxiter=int(NESTED_LS_NEWTON_MAXITER),
+        linear_solver="dense_lu",
+    )
+    grad_l2 = float(np.linalg.norm(solution.reduced_gradient))
+    # The invariant first: a frozen-coil solve that moved the coils is a
+    # defect, and a defect must not be reachable through a path that a
+    # lane answers with a rejection sentinel.
+    if solution.coil_delta_inf != 0.0:
+        raise RuntimeError(
+            "nested-LS outer inner solve moved the coils by "
+            f"{solution.coil_delta_inf!r}."
+        )
+    guard = float(NESTED_LS_OUTER_IOTA_BRANCH_GUARD)
+    rejection: RuntimeError | None = None
+    if not solution.success:
+        rejection = NestedLsInnerSolveFailed(
+            iteration_count=int(solution.iteration_count),
+            grad_l2=grad_l2,
+            tol=float(NESTED_LS_NEWTON_TOL),
+        )
+    elif abs(float(solution.iota) - state.anchor_iota) > guard:
+        rejection = NestedLsBranchJump(
+            iota=float(solution.iota),
+            anchor_iota=state.anchor_iota,
+            guard=guard,
+        )
+    if rejection is not None:
+        # The solve already wrote its own iterate onto the surface
+        # (nested_ls_reduced.py:1358), so put the last accepted geometry
+        # back before signalling: a rejected evaluation must leave no
+        # trace of what it rejected. One restore for both signals, so the
+        # two cannot drift apart.
+        jax_boozer.surface.set_dofs(state.anchor_surface_dofs)
+        raise rejection
+    state.set_anchor(solution.surface_dofs, solution.iota, solution.G)
+    state.inner_iterations = int(solution.iteration_count)
+    state.inner_grad_l2 = grad_l2
+    return solution
+
+
+def _flat675_value_and_grad_at(
+    state: NestedLsOuterState,
+    coil_dofs: NDArray[np.float64],
+    surface_dofs: NDArray[np.float64],
+) -> tuple[float, NDArray[np.float64]]:
+    """Eight-term ``J`` and its 675-gradient at ``(c, v_frozen, s)``."""
+
+    outer = np.concatenate((coil_dofs, state.vessel_dofs, surface_dofs))
+    value, gradient = state.flat_value_and_grad(jnp.asarray(outer, dtype=jnp.float64))
+    return (
+        float(jax.device_get(value)),
+        np.asarray(jax.device_get(gradient), dtype=np.float64),
+    )
+
+
+def _nested_ls_outer_objective(
+    state: NestedLsOuterState,
+    coil_dofs: NDArray[np.float64],
+) -> tuple[float, NDArray[np.float64], NestedLsSchurNewtonResult]:
+    """Solve the inner, then read the eight-term ``J`` and its 675-gradient."""
+
+    solution = _solve_nested_inner_at_coils(state, coil_dofs)
+    value, gradient = _flat675_value_and_grad_at(
+        state, coil_dofs, solution.surface_dofs
+    )
+    return value, gradient, solution
+
+
+def _mixed_coil_correction_vjp(
+    residual_rt,
+    objective_rt,
+    surface_dofs: NDArray[np.float64],
+    coil_dofs: NDArray[np.float64],
+    adjoint: jax.Array,
+    *,
+    operator,
+) -> NDArray[np.float64]:
+    """Production ``−λᵀ Ĥ_sc``: one pullback of the linear mixed map.
+
+    The map is the sealed forward action ``Ĥ_sc v_c``
+    (:func:`apply_reduced_mixed_schur_coil_tangent`), transposed exactly
+    as :func:`implicit_adjoint_coil_gradient` does it
+    (``nested_ls_reduced.py:1505-1520``), at the same nonzero probe so
+    the coil reconstruction is not traced at the origin. That function is
+    not called outright because it would re-solve for ``λ`` behind a
+    second 661 dense assembly, and ``λ`` is already in hand here — it is
+    the one the live-η above certifies.
+    """
+
+    coil = jnp.asarray(coil_dofs, dtype=jnp.float64).reshape(-1)
+
+    def mixed_map(coil_tangent: jax.Array) -> jax.Array:
+        return apply_reduced_mixed_schur_coil_tangent(
+            residual_rt,
+            objective_rt,
+            surface_dofs,
+            coil,
+            coil_tangent,
+            operator=operator,
+        )
+
+    probe = jnp.zeros_like(coil).at[0].set(1.0)
+    _primal, pullback = jax.vjp(mixed_map, probe)
+    del _primal
+    return -np.asarray(
+        jax.device_get(pullback(jnp.asarray(adjoint, dtype=jnp.float64))[0]),
+        dtype=np.float64,
+    )
+
+
+def _mixed_coil_correction_loop(
+    residual_rt,
+    objective_rt,
+    surface_dofs: NDArray[np.float64],
+    coil_dofs: NDArray[np.float64],
+    adjoint: NDArray[np.float64],
+    *,
+    operator,
+) -> NDArray[np.float64]:
+    """Cross-check ``−λᵀ Ĥ_sc``: one forward action per unit direction.
+
+    The same envelope term the production pullback assembles, read out
+    column by column instead. Eleven traces where the pullback needs one,
+    so this is a gate's second opinion, never the production path.
+    """
+
+    directions = np.eye(coil_dofs.size, dtype=np.float64)
+    return np.asarray(
+        [
+            -float(
+                np.dot(
+                    adjoint,
+                    np.asarray(
+                        apply_reduced_mixed_schur_coil_tangent(
+                            residual_rt,
+                            objective_rt,
+                            surface_dofs,
+                            coil_dofs,
+                            directions[index],
+                            operator=operator,
+                        ),
+                        dtype=np.float64,
+                    ),
+                )
+            )
+            for index in range(coil_dofs.size)
+        ],
+        dtype=np.float64,
+    )
+
+
+def nested_ls_outer_value_and_grad(
+    state: NestedLsOuterState,
+    coil_dofs: np.ndarray,
+) -> tuple[float, np.ndarray]:
+    """Eight-term outer ``J`` and its 11-vector coil gradient at ``s*(c)``.
+
+    ``g(c) = ∇_c J_flat(c, v, s*) − λᵀ Ĥ_sc`` with ``Ĥ_ss λ = ∇_s
+    J_flat(c, v, s*)`` solved by the stabilized Schur dense LU at
+    ``F3_B37_IFT_STAB``. The mixed term is one reverse-mode pullback of
+    ``Ĥ_sc``, not one forward action per coil direction. The
+    ``y = (ι, G)`` chain is inside both flat blocks because the flat
+    gradient differentiates through the QR.
+    Fail-closed: the inner re-solve must land at the nested branch, and
+    the value and gradient must be finite. The rolling anchor advances on
+    every success, so consecutive outer iterates warm-start each other.
+
+    Two typed signals, raised only by this path and only for these
+    reasons, mark the evaluations a lane answers with the sealed
+    rejection sentinel — the same events the native lane sentinels, so
+    neither lane is charged for what the other survives:
+
+    * :class:`NestedLsInnerSolveFailed` — the inner solve spent its
+      budget with ``‖∇Φ̂‖₂`` still above ``NESTED_LS_NEWTON_TOL``.
+    * :class:`NestedLsBranchJump` — the inner solve converged, but off
+      the anchor's ``iota`` branch by more than
+      ``NESTED_LS_OUTER_IOTA_BRANCH_GUARD``.
+
+    Both leave the anchor where it was and put the last accepted
+    geometry back on the surface, so a lane that catches either keeps
+    warm-starting from the last accepted point. Anything else out of the
+    inner solve — coils moving under a frozen-coil solve above all — is
+    an invariant violation and stays a fatal untyped error: it must
+    reach the operator, not a sentinel. A certification leg (Gate FD-0)
+    catches neither and fails closed by raising.
+    """
+
+    coil = np.asarray(coil_dofs, dtype=np.float64).reshape(-1)
+    value, flat_gradient, solution = _nested_ls_outer_objective(state, coil)
+    surface = np.asarray(solution.surface_dofs, dtype=np.float64)
+    coil_block = np.asarray(flat_gradient[state.coil_slice], dtype=np.float64)
+    surface_block = np.asarray(flat_gradient[state.surface_slice], dtype=np.float64)
+    residual_fn, objective_fn, _phi_hat = nested_ls_reduced_closures(state.jax_boozer)
+    del _phi_hat
+    operator = factor_reduced_nested_ls_schur(
+        residual_fn,
+        objective_fn,
+        surface,
+        y_probe=np.array([solution.iota, solution.G], dtype=np.float64),
+    )
+    cotangent = jnp.asarray(surface_block, dtype=jnp.float64)
+    dense = jax.block_until_ready(
+        materialize_stabilized_schur_dense(
+            operator,
+            float(F3_B37_IFT_STAB),
+            max_dense_linearization_bytes=None,
+        )
+    )
+    adjoint = jax.block_until_ready(solve_stabilized_schur_dense_lu(dense, cotangent))
+    live_residual = jax.block_until_ready(operator.apply(adjoint) - cotangent)
+    rhs_l2 = float(np.linalg.norm(surface_block))
+    residual_l2 = float(
+        np.linalg.norm(np.asarray(jax.device_get(live_residual), dtype=np.float64))
+    )
+    state.adjoint_live_eta = residual_l2 / rhs_l2 if rhs_l2 > 0.0 else 0.0
+    residual_rt, objective_rt, _phi_rt = nested_ls_runtime_coil_closures(
+        state.jax_boozer
+    )
+    del _phi_rt
+    correction = _mixed_coil_correction_vjp(
+        residual_rt,
+        objective_rt,
+        surface,
+        coil,
+        adjoint,
+        operator=operator,
+    )
+    gradient = coil_block + correction
+    if state.record_mixed_cross_check:
+        cross_check = coil_block + _mixed_coil_correction_loop(
+            residual_rt,
+            objective_rt,
+            surface,
+            coil,
+            np.asarray(jax.device_get(adjoint), dtype=np.float64),
+            operator=operator,
+        )
+        state.mixed_cross_check_gradient = cross_check
+        state.mixed_cross_check_max_abs = float(
+            np.linalg.norm(cross_check - gradient, ord=np.inf)
+        )
+    if not np.isfinite(value) or not bool(np.all(np.isfinite(gradient))):
+        raise RuntimeError(
+            f"nested-LS outer evaluation is not finite: J={value!r}, "
+            f"||g||_2={float(np.linalg.norm(gradient))!r}."
+        )
+    return value, gradient
+
+
+@dataclass(frozen=True, slots=True)
+class NestedLsOuterFd0Probe:
+    """Gate FD-0: every coil direction, central differences, step halved.
+
+    Frozen point is the dense-LU walk endpoint. Each perturbed evaluation
+    is a full warm-started inner re-solve whose solution the C++ LS
+    Newton judge must accept as a no-op. No timing content: this is a
+    physics gate, not a speed receipt, and it is not F3 7.70×.
+
+    The finite differences are gated against ``outer_gradient``, the
+    production pullback form. ``outer_gradient_mixed_loop`` is the same
+    gradient with the mixed term read out one coil direction at a time,
+    and ``mixed_form_max_abs_difference`` is what separates them: the
+    Volume canary's ``vjp_match`` identity carried up to the assembled
+    outer gradient, published rather than asserted here.
+    """
+
+    surface_sha256: str
+    iota: float
+    G: float
+    reduced_grad_l2: float
+    objective: float | None
+    outer_gradient: tuple[float, ...]
+    outer_gradient_l2: float | None
+    outer_gradient_mixed_loop: tuple[float, ...]
+    mixed_form_max_abs_difference: float | None
+    adjoint_live_eta: float | None
+    adjoint_live_eta_tol: float
+    directions: int
+    rel_tol: float
+    step_rule: str
+    step_relative: float
+    step_scale_floor: float
+    step_halving: float
+    ift_stab: float
+    inner_linear_solver: str
+    inner_maxiter: int
+    inner_tol: float
+    rows: tuple[dict[str, object], ...]
+    worst_rel_error: float | None
+    directions_passed: int
+    coil_delta_inf_after: float
+    fail_closed_reason: str | None
+    runtime: dict[str, object]
+    provenance: dict[str, object]
+
+    def as_payload(self) -> dict[str, object]:
+        return asdict(self)
+
+
+def _outer_fd0_evaluation(
+    state: NestedLsOuterState,
+    native: BoozerSurface,
+    *,
+    base_surface: NDArray[np.float64],
+    base_iota: float,
+    base_g: float,
+    coil_base: NDArray[np.float64],
+    index: int,
+    step: float,
+) -> tuple[float, float, dict[str, object]]:
+    """One perturbed outer evaluation plus its C++ LS Newton rejudge.
+
+    Returns the realized coil displacement, the eight-term ``J`` there,
+    and the receipt row. The displacement is read back from the perturbed
+    vector rather than assumed: ``c_i + ε`` is not ``c_i`` plus exactly
+    ``ε`` in float64, and a 1e-5 gate cannot absorb that.
+    """
+
+    coil = np.array(coil_base, dtype=np.float64, copy=True)
+    coil[index] = coil_base[index] + step
+    realized = float(coil[index] - coil_base[index])
+    state.set_anchor(base_surface, base_iota, base_g)
+    value, _flat_gradient, solution = _nested_ls_outer_objective(state, coil)
+    del _flat_gradient
+    native.need_to_run_code = True
+    native.biotsavart.x = np.array(coil, dtype=np.float64, copy=True)
+    native.surface.set_dofs(solution.surface_dofs)
+    rejudge_coils0 = np.asarray(native.biotsavart.x, dtype=np.float64)
+    rejudge = native.minimize_boozer_penalty_constraints_newton(
+        iota=float(solution.iota),
+        G=float(solution.G),
+        **nested_ls_physics_newton_kwargs(),
+    )
+    rejudge_coils1 = np.asarray(native.biotsavart.x, dtype=np.float64)
+    rejudge_grad_l2, _rejudge_inf = _native_ls_gradient_norms(rejudge)
+    del _rejudge_inf
+    moved = np.flatnonzero(rejudge_coils0 != coil_base)
+    row: dict[str, object] = {
+        "index": int(index),
+        "requested_step": float(step),
+        "realized_step": realized,
+        "objective": _json_finite(value),
+        "inner_success": bool(solution.success),
+        "inner_iterations": int(solution.iteration_count),
+        "inner_grad_l2": _json_finite(float(np.linalg.norm(solution.reduced_gradient))),
+        "inner_coil_delta_inf": float(solution.coil_delta_inf),
+        "inner_iota": _json_finite(float(solution.iota)),
+        "inner_G": _json_finite(float(solution.G)),
+        "rejudge_success": bool(rejudge["success"]),
+        "rejudge_iter": int(rejudge["iter"]),
+        "rejudge_grad_l2": _json_finite(rejudge_grad_l2),
+        "rejudge_coil_delta_inf": float(
+            np.linalg.norm(rejudge_coils1 - rejudge_coils0, ord=np.inf)
+        ),
+        "rejudge_coil_step_exact": bool(
+            np.array_equal(rejudge_coils0, coil) and moved.tolist() == [index]
+        ),
+    }
+    return realized, value, row
+
+
+def _outer_fd0_evaluation_failed(row: dict[str, object]) -> str | None:
+    """The fail-closed reason one perturbed evaluation carries, if any."""
+
+    if not bool(row["inner_success"]):
+        return "fd_inner_solve_failed"
+    if _as_float(row["inner_coil_delta_inf"]) != 0.0:
+        return "fd_inner_coil_moved"
+    if not bool(row["rejudge_coil_step_exact"]):
+        return "fd_coil_step_not_exact"
+    if not bool(row["rejudge_success"]):
+        return "fd_rejudge_failed"
+    if _as_int(row["rejudge_iter"]) != 0:
+        return "fd_rejudge_not_noop"
+    if _as_float(row["rejudge_coil_delta_inf"]) != 0.0:
+        return "fd_rejudge_coil_moved"
+    return None
+
+
+def evaluate_f3_b37_outer_fd0_probe(
+    jax_boozer: BoozerSurfaceJAX,
+    native: BoozerSurface | None = None,
+) -> NestedLsOuterFd0Probe:
+    """Gate FD-0 of the eight-term outer charter, all 11 coil directions.
+
+    Freezes the dense-LU walk endpoint, evaluates the outer gradient
+    there, then central-differences the eight-term ``J`` along every coil
+    unit direction at the frozen per-direction step and at half of it.
+    A direction passes when the better step's relative error is at most
+    ``NESTED_LS_OUTER_FD0_REL_TOL`` and halving reduced that error. Any
+    failed inner re-solve, non-no-op C++ rejudge, or adjoint live-η above
+    ``F3_B37_ADJOINT_LIVE_ETA_TOL`` fails the whole gate closed; there is
+    no partial pass. ``native`` defaults to a fresh archived twin.
+    """
+
+    provenance = nested_ls_receipt_provenance()
+    runtime = nested_ls_runtime_identity()
+    loaded, coils, _y_star, iota, g_const, g_value, freeze_reason = (
+        _freeze_dense_lu_walk_endpoint(jax_boozer)
+    )
+    del _y_star
+    sha = sha256_float64(loaded)
+
+    def _empty(
+        reason: str,
+        *,
+        rows: tuple[dict[str, object], ...] = (),
+        objective: float | None = None,
+        gradient: tuple[float, ...] = (),
+        gradient_l2: float | None = None,
+        cross_check: tuple[float, ...] = (),
+        cross_check_max_abs: float | None = None,
+        live_eta: float | None = None,
+        worst: float | None = None,
+        passed: int = 0,
+        coil_after: float = 0.0,
+    ) -> NestedLsOuterFd0Probe:
+        return NestedLsOuterFd0Probe(
+            surface_sha256=sha,
+            iota=iota,
+            G=g_const,
+            reduced_grad_l2=g_value,
+            objective=objective,
+            outer_gradient=gradient,
+            outer_gradient_l2=gradient_l2,
+            outer_gradient_mixed_loop=cross_check,
+            mixed_form_max_abs_difference=cross_check_max_abs,
+            adjoint_live_eta=live_eta,
+            adjoint_live_eta_tol=float(F3_B37_ADJOINT_LIVE_ETA_TOL),
+            directions=int(NESTED_LS_OUTER_FD0_DIRECTIONS),
+            rel_tol=float(NESTED_LS_OUTER_FD0_REL_TOL),
+            step_rule=str(NESTED_LS_OUTER_FD0_STEP_RULE),
+            step_relative=float(NESTED_LS_OUTER_FD0_STEP_RELATIVE),
+            step_scale_floor=float(NESTED_LS_OUTER_FD0_STEP_SCALE_FLOOR),
+            step_halving=float(NESTED_LS_OUTER_FD0_STEP_HALVING),
+            ift_stab=float(F3_B37_IFT_STAB),
+            inner_linear_solver="dense_lu",
+            inner_maxiter=int(NESTED_LS_NEWTON_MAXITER),
+            inner_tol=float(NESTED_LS_NEWTON_TOL),
+            rows=rows,
+            worst_rel_error=worst,
+            directions_passed=int(passed),
+            coil_delta_inf_after=coil_after,
+            fail_closed_reason=reason,
+            runtime=runtime,
+            provenance=provenance,
+        )
+
+    if freeze_reason is not None:
+        return _empty(freeze_reason)
+    coil_base = np.array(coils, dtype=np.float64, copy=True)
+    if coil_base.size != int(NESTED_LS_OUTER_FD0_DIRECTIONS):
+        return _empty("direction_count_mismatch")
+    rejudge_twin = native
+    if rejudge_twin is None:
+        rejudge_twin, _twin_jax, _twin_target = load_archived_nested_ls_pair(
+            coil_coordinates=coil_base,
+            surface_coordinates=loaded,
+        )
+        del _twin_jax, _twin_target
+    state = prepare_f3_b37_outer_state(jax_boozer)
+    base_surface = np.array(state.anchor_surface_dofs, dtype=np.float64, copy=True)
+    base_iota = float(state.anchor_iota)
+    base_g = float(state.anchor_G)
+    # The base point is the one evaluation that also assembles the mixed
+    # term the second way; the perturbed evaluations pay production cost.
+    state.record_mixed_cross_check = True
+    objective, gradient = nested_ls_outer_value_and_grad(state, coil_base)
+    state.record_mixed_cross_check = False
+    gradient_tuple = tuple(float(value) for value in gradient)
+    gradient_l2 = float(np.linalg.norm(gradient))
+    cross_check = state.mixed_cross_check_gradient
+    cross_check_tuple = (
+        () if cross_check is None else tuple(float(value) for value in cross_check)
+    )
+    cross_check_max_abs = _optional_finite(state.mixed_cross_check_max_abs)
+    live_eta = float(state.adjoint_live_eta)
+    print(
+        f"outer fd0 base J={objective!r} ||g||_2={gradient_l2!r} live_eta={live_eta!r}"
+        f" mixed_form_max_abs={cross_check_max_abs!r}",
+        flush=True,
+    )
+    if not np.isfinite(live_eta) or live_eta > float(F3_B37_ADJOINT_LIVE_ETA_TOL):
+        return _empty(
+            "adjoint_residual_unmet",
+            objective=_json_finite(objective),
+            gradient=gradient_tuple,
+            gradient_l2=_json_finite(gradient_l2),
+            cross_check=cross_check_tuple,
+            cross_check_max_abs=cross_check_max_abs,
+            live_eta=_json_finite(live_eta),
+        )
+    rows: list[dict[str, object]] = []
+    fail_reason: str | None = None
+    worst: float | None = None
+    passed = 0
+    try:
+        for index in range(coil_base.size):
+            full_step = nested_ls_outer_fd0_step(float(coil_base[index]))
+            half_step = float(NESTED_LS_OUTER_FD0_STEP_HALVING) * full_step
+            predicted = float(gradient[index])
+            evaluations: list[dict[str, object]] = []
+            differences: list[float | None] = []
+            for step in (full_step, half_step):
+                plus_delta, plus_value, plus_row = _outer_fd0_evaluation(
+                    state,
+                    rejudge_twin,
+                    base_surface=base_surface,
+                    base_iota=base_iota,
+                    base_g=base_g,
+                    coil_base=coil_base,
+                    index=index,
+                    step=step,
+                )
+                minus_delta, minus_value, minus_row = _outer_fd0_evaluation(
+                    state,
+                    rejudge_twin,
+                    base_surface=base_surface,
+                    base_iota=base_iota,
+                    base_g=base_g,
+                    coil_base=coil_base,
+                    index=index,
+                    step=-step,
+                )
+                evaluations.extend((plus_row, minus_row))
+                span = plus_delta - minus_delta
+                differences.append(
+                    (plus_value - minus_value) / span if span != 0.0 else None
+                )
+            for row in evaluations:
+                reason = _outer_fd0_evaluation_failed(row)
+                if reason is not None and fail_reason is None:
+                    fail_reason = reason
+            errors = [
+                abs(predicted - difference) / abs(predicted)
+                if difference is not None and predicted != 0.0
+                else None
+                for difference in differences
+            ]
+            finite_errors = [
+                error
+                for error in errors
+                if error is not None and np.isfinite(float(error))
+            ]
+            better = min(finite_errors) if finite_errors else None
+            halving_reduced = bool(
+                errors[0] is not None
+                and errors[1] is not None
+                and float(errors[1]) < float(errors[0])
+            )
+            direction_pass = bool(
+                better is not None
+                and float(better) <= float(NESTED_LS_OUTER_FD0_REL_TOL)
+                and halving_reduced
+                and all(
+                    _outer_fd0_evaluation_failed(row) is None for row in evaluations
+                )
+            )
+            passed += int(direction_pass)
+            if better is not None and (worst is None or float(better) > worst):
+                worst = float(better)
+            rows.append(
+                {
+                    "index": int(index),
+                    "coil_value": float(coil_base[index]),
+                    "epsilon": float(full_step),
+                    "epsilon_half": float(half_step),
+                    "predicted_dot": _json_finite(predicted),
+                    "fd_dot": _optional_finite(differences[0]),
+                    "fd_dot_half": _optional_finite(differences[1]),
+                    "rel_error": _optional_finite(errors[0]),
+                    "rel_error_half": _optional_finite(errors[1]),
+                    "better_rel_error": _optional_finite(better),
+                    "better_step": (
+                        None
+                        if better is None
+                        else float(
+                            half_step
+                            if errors[1] is not None
+                            and float(errors[1]) == float(better)
+                            else full_step
+                        )
+                    ),
+                    "halving_reduced_error": halving_reduced,
+                    "direction_pass": direction_pass,
+                    "evaluations": tuple(evaluations),
+                }
+            )
+            print(
+                f"outer fd0 dir={index} eps={full_step!r}"
+                f" pred={predicted!r} fd={differences[0]!r} fd_half={differences[1]!r}"
+                f" rel={errors[0]!r} rel_half={errors[1]!r}"
+                f" halved_better={halving_reduced} pass={direction_pass}",
+                flush=True,
+            )
+            if fail_reason is None and not direction_pass:
+                fail_reason = "fd_rel_error_unmet"
+    finally:
+        jax_boozer.biotsavart.x = np.array(coil_base, dtype=np.float64, copy=True)
+        jax_boozer._refresh_coil_data()
+        jax_boozer.surface.set_dofs(loaded)
+    coil_after = float(
+        np.linalg.norm(
+            np.asarray(jax_boozer.biotsavart.x, dtype=np.float64) - coil_base,
+            ord=np.inf,
+        )
+    )
+    if fail_reason is None and coil_after != 0.0:
+        fail_reason = "coil_moved"
+    if fail_reason is None and passed != int(NESTED_LS_OUTER_FD0_DIRECTIONS):
+        fail_reason = "fd_rel_error_unmet"
+    return NestedLsOuterFd0Probe(
+        surface_sha256=sha,
+        iota=iota,
+        G=g_const,
+        reduced_grad_l2=g_value,
+        objective=_json_finite(objective),
+        outer_gradient=gradient_tuple,
+        outer_gradient_l2=_json_finite(gradient_l2),
+        outer_gradient_mixed_loop=cross_check_tuple,
+        mixed_form_max_abs_difference=cross_check_max_abs,
+        adjoint_live_eta=_json_finite(live_eta),
+        adjoint_live_eta_tol=float(F3_B37_ADJOINT_LIVE_ETA_TOL),
+        directions=int(NESTED_LS_OUTER_FD0_DIRECTIONS),
+        rel_tol=float(NESTED_LS_OUTER_FD0_REL_TOL),
+        step_rule=str(NESTED_LS_OUTER_FD0_STEP_RULE),
+        step_relative=float(NESTED_LS_OUTER_FD0_STEP_RELATIVE),
+        step_scale_floor=float(NESTED_LS_OUTER_FD0_STEP_SCALE_FLOOR),
+        step_halving=float(NESTED_LS_OUTER_FD0_STEP_HALVING),
+        ift_stab=float(F3_B37_IFT_STAB),
+        inner_linear_solver="dense_lu",
+        inner_maxiter=int(NESTED_LS_NEWTON_MAXITER),
+        inner_tol=float(NESTED_LS_NEWTON_TOL),
+        rows=tuple(rows),
+        worst_rel_error=worst,
+        directions_passed=int(passed),
+        coil_delta_inf_after=coil_after,
+        fail_closed_reason=fail_reason,
+        runtime=runtime,
+        provenance=provenance,
+    )
+
+
 __all__ = [
     "ARCHIVED_START_QR_G",
     "ARCHIVED_START_QR_IOTA",
@@ -4527,6 +5390,7 @@ __all__ = [
     "F3_B37_STEP6_MATERIAL_RESIDUAL_RATIO",
     "F3_B37_STEP6_WALL_SECONDS_2048",
     "F3_B37_VOLUME_OUTER_WALL_SECONDS",
+    "Flat675OuterValueAndGrad",
     "NESTED_LS_GATE6_AGGREGATION",
     "NESTED_LS_GATE6_CLAIM_REPEATS",
     "NESTED_LS_GATE6_IOTA_G_TOL",
@@ -4538,11 +5402,15 @@ __all__ = [
     "NestedLsB37NestedTiming",
     "NestedLsBananaOmpSweep",
     "NestedLsBoundedF3B37Result",
+    "NestedLsBranchJump",
     "NestedLsChunkBananaProbe",
     "NestedLsChunkWarmProbe",
     "NestedLsCountedMatvec",
     "NestedLsEndpointAdjointProbe",
     "NestedLsFlatNativeB37Probe",
+    "NestedLsInnerSolveFailed",
+    "NestedLsOuterFd0Probe",
+    "NestedLsOuterState",
     "NestedLsSchurNewtonStepProbe",
     "NestedLsSchurNewtonWalkProbe",
     "NestedLsStep2ForcingProbe",
@@ -4560,6 +5428,7 @@ __all__ = [
     "evaluate_f3_b37_endpoint_adjoint_probe",
     "evaluate_f3_b37_flat_native_probe",
     "evaluate_f3_b37_nested_timing",
+    "evaluate_f3_b37_outer_fd0_probe",
     "evaluate_f3_b37_schur_newton_step",
     "evaluate_f3_b37_schur_newton_walk",
     "evaluate_f3_b37_step2_forcing_probe",
@@ -4574,10 +5443,12 @@ __all__ = [
     "load_archived_nested_ls_pair",
     "load_flat675_lane_blocks",
     "nested_ls_omp_threads_pinned",
+    "nested_ls_outer_value_and_grad",
     "nested_ls_receipt_provenance",
     "nested_ls_runtime_identity",
     "nested_ls_threading_env",
     "predict_start_at_cap_wall_seconds",
+    "prepare_f3_b37_outer_state",
     "replace_native_solver_options",
     "sha256_file",
     "sha256_float64",
