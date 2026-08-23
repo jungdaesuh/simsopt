@@ -413,7 +413,7 @@ def _launch_jax(
         "success": bool(payload["success"]),
         "nit": int(payload["nit"]),
         "nfev": int(payload["nfev"]),
-        "endpoint_is_optimizer_endpoint": bool(payload["optimizer_endpoint_is_anchor"]),
+        "endpoint_is_optimizer_endpoint": bool(payload["endpoint_is_optimizer_x"]),
         "outer_policy": payload["outer_policy"],
         "start_policy": str(payload["start_policy"]),
         "iota_branch_guard": float(payload["iota_branch_guard"]),
