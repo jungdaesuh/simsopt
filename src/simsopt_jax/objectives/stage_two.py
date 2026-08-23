@@ -30,6 +30,7 @@ from simsopt_jax.core.specs import (
 
 from .stochastic_stage_two import (
     StochasticCoilPerturbations,
+    _validate_sample_tile,
     stochastic_flux_mean_from_geometry,
 )
 
@@ -427,8 +428,19 @@ def make_stochastic_stage_two_objective(
     surface_gamma: jax.Array,
     surface_normal: jax.Array,
     config: StageTwoObjectiveConfig,
+    *,
+    sample_tile: int | None = None,
 ) -> Callable[[jax.Array], jax.Array]:
-    """Compose a scan-based stochastic flux mean with nominal coil penalties."""
+    """Compose a scan-based stochastic flux mean with nominal coil penalties.
+
+    ``sample_tile`` selects the sample-axis lever of
+    ``stochastic_flux_mean_from_geometry`` and is validated here, at build
+    time, against this bundle's sample count; ``None`` keeps the sequential
+    scan oracle. Callers build one objective per perturbation bundle, so the
+    same lever also reaches the 256-sample out-of-sample bundle, where a tile
+    of ``t`` multiplies peak memory by ``t`` -- that lane stays scanned.
+    """
+    _validate_sample_tile(sample_tile, perturbations.gamma.shape[0])
     extraction = field.coil_dof_extraction_spec()
 
     def objective(parameters: jax.Array) -> jax.Array:
@@ -442,6 +454,7 @@ def make_stochastic_stage_two_objective(
             currents,
             flux_spec,
             perturbations,
+            sample_tile=sample_tile,
         )
         return stochastic_flux + stage_two_geometric_penalty(
             gamma,
