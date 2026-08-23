@@ -180,7 +180,7 @@ GPU-slower overall, which is the size of the artifact, not of any device gap.
 | projected-route-single-stage-boozer-vacuum-optimization | gpu | measured-diagnostic | wide coupled projected route — the GPU is the only device this script's own success criterion was met on. Interleaved A/B at native_default: on the CPU backend all three protocol attempts end `LINE_SEARCH_COLLAPSE` (the reported final attempt ran 74 iterations; the artifact does not publish the first two attempts' counts) and the run publishes `retry_exhausted` after 1294.4 s, while on GPU 8/8 legs reach `OBJECTIVE_TARGET_REACHED` at iteration 399 with a bitwise-identical 716-coordinate endpoint; matched truncated budgets put one CPU-backend iteration at 8.33x one GPU iteration (a mild upper bound — the matched CPU legs pinned 16 threads and the one uncapped datapoint is ~2% faster). Read with its bar: the *native two-stage mirror* reaches the same endpoint quality in 31.3 s (OMP=8), so this script is not the fast way to this physics — **5.14x** at matched process wall and **8.48x** to matched endpoint using this row's own warm median (265.6 s, 6 legs), or 5.07x and 8.37x pooling the 8 warm+cold GPU legs (pooled median 262.1 s) as the receipt's boundary table does. All seven pre-registered endpoint-physics gates pass through the native evaluator — `docs/receipts/projected_route_example_promotion.md` |
 | native-just-a-quadratic | cpu | census-structural | tiny problem — three independent DOFs |
 | native-minimize-curve-length | cpu | census-structural | tiny problem — order-4 CurveRZFourier, 8 free DOF |
-| native-permanent-magnet-simple | cpu | census-structural | tiny problem — fixed 2x2 quadrature grid (4 reduction rows), no native_default branch |
+| native-permanent-magnet-simple | unmeasured | unmeasured | Genuine conflict, no receipt. The mirror now branches on its execution scale (`examples/jax/1_Simple/permanent_magnet_simple.py`), building the 16x16 half-period quadrature grid at `downsample=4` — 14,336 dipoles, a 256 x 43,008 response matrix — where before 2026-08-23 it built the bounded 2x2 / `downsample=100` grid (4 reduction rows) at both scales, which is why this row used to read `cpu` / `tiny problem`. The structural read of that 256-row reduction points at the CPU, and the nearest measurement of a 256-row GPMO — `native-permanent-magnet-muse`, 4.05x GPU slower — points the same way; but MUSE times a *different algorithm variant* (ArbVec-backtracking, whose frozen-step `lax.cond` skip postdates that number), and the one direct measurement of this mirror's own baseline kernel points the other way: a dated host-local N=3 diagnostic (2026-07-26) put the GPU ~2.0x **faster** at this 16x16 workload. Neither number is a matched-work A/B and neither is committed, so this row is unplaced rather than placed on the weaker of two conflicting readings — the probe that settles it is pre-registered as P3.2 in `docs/jax_gpu_examples_backlog_native_speed_implementation_plan.md` |
 | native-qfm | unmeasured | unmeasured | no native_default timing; the port also swaps SLSQP for an augmented-Lagrangian solve, so a timing would not be matched work |
 | native-stage-two-optimization-minimal | unmeasured | unmeasured | no native_default timing for the stage-two coil family |
 | native-surf-vol-area | cpu | census-structural | tiny problem — mpol=1 / ntor=0 surface, two sequential scalar targets |
@@ -209,15 +209,19 @@ GPU-slower overall, which is the size of the artifact, not of any device gap.
 
 ## Summary counts
 
-40 manifest examples: **4 gpu**, **25 cpu**, **0 either**, **11 unmeasured**.
+40 manifest examples: **4 gpu**, **24 cpu**, **0 either**, **12 unmeasured**.
 
-Restricted to the 27 `native-*` mirrors: 2 gpu, 15 cpu, 10 unmeasured.
+Restricted to the 27 `native-*` mirrors: 2 gpu, 14 cpu, 11 unmeasured.
 
-The 15 `cpu` mirrors are the 2026-08-13 session audit's 11 never-winnable mirrors (3 tracing,
-3 nested-Boozer, 5 tiny/fixed-size), plus `native-permanent-magnet-muse`
-(measured loss, not structural), `native-single-stage-optimization` (VMEC
-host lane, `planned`, outside the 26 measured), and the two 2026-08-16
-wireframe-GSCO siblings (measured loss, not structural).
+The 14 `cpu` mirrors are 10 of the 2026-08-13 session audit's 11 never-winnable
+mirrors (3 tracing, 3 nested-Boozer, and 4 of the audit's 5 tiny/fixed-size —
+`native-permanent-magnet-simple` is the fifth and is no longer in the family:
+its `native_default` scale turned out to build a 256-row reduction over 14,336
+dipoles rather than a fixed 2x2 grid, and it is reclassified `unmeasured` on
+2026-08-23), plus `native-permanent-magnet-muse` (measured loss, not
+structural), `native-single-stage-optimization` (VMEC host lane, `planned`,
+outside the 26 measured), and the two 2026-08-16 wireframe-GSCO siblings
+(measured loss, not structural).
 
 Two mirrors the 2026-08-13 session audit classed as winnable are marked `unmeasured`
 here, because a device recommendation needs a receipt and they have none:
@@ -228,6 +232,12 @@ statement about a genuine conflict, not merely a missing number. The other two
 the audit classed winnable, `native-wireframe-gsco-modular` and
 `native-wireframe-gsco-sector-saddle`, have now been measured and lose: the
 audit's classification is superseded for both.
+
+`native-permanent-magnet-simple` is `unmeasured` for the same reason from the
+opposite direction: the audit classed it never-winnable on a workload shape
+that was a mirror defect, and the two readings now available to it — MUSE's
+4.05x loss on a different GPMO variant, and a dated host-local ~2.0x GPU win on
+this mirror's own baseline kernel — disagree.
 
 ## Scope note and amendment procedure
 
@@ -279,3 +289,4 @@ untracked file, or a directory will not satisfy it. The same rule gates the
 | 2026-08-18 | native-stage-two-optimization-finitebuild | unmeasured / unmeasured → gpu / measured-certified. The successor campaign (new preregistration, symmetric first-crossing endpoints + window-median gradient clause) produced the comparison its predecessor could not: five interleaved pairs, warm solve 13.58x median (13.01–13.96, native omp2-h400 45.23 s vs GPU h10/k*=500 3.353 s) and warm persistent-cache process wall 3.11x median (2.90–3.24), every pair > 1.00 on both timers, every GPU endpoint bitwise-identical to the frozen crossing solution and oracle-gated under the frozen v4 contract (freeze audit passed; the native denominator landed within 1% of the charter's pre-registered estimate). Fresh-empty-cache measured separately and lost (0.88x, ~42 s XLA compile): the row certifies a repeated-workload/persistent-cache win only. Pairs ran clean-tree at 66003ee45 in a pinned worktree; the shipped module reproduces the crossing solution bitwise at the production commit (see receipt disclosure). | `docs/receipts/stage_two_finitebuild_native_gpu_successor.md` |
 | 2026-08-19 | flat675-single-stage-coupled-optimization | Row created: **gpu / measured-certified**. The flat-675 formulation gained its first `examples/jax` mirror in F4/C2 (`examples/jax/3_Advanced/single_stage_flat675.py`), so the same-dated scope-note entry below — written when the formulation had no example row — is superseded on that one point and stands otherwise. The class is scoped in the row itself and is NOT extended past the receipt: the sealed campaign measured the frozen-bundle configuration at one archived start (1.67x / 7.70x / 7.36x process wall at budgets 3 / 37 / quality-matched), and the example reaches exactly that configuration through `--bundle`. The clone-runnable default builds the same production fused lane from repository test-file geometry and is not timed here or anywhere; it inherits the device recommendation, not the number. Cold start stays a disclosure: the fused child pays ~150 s of XLA compile on first solve, N=1, reported not claimed. | `docs/receipts/flat675_fused_campaign.md` |
 | 2026-08-19 | (scope note) | Recorded two sealed benchmarks-path campaign receipts for the flat-675 formulation, which has no example mirror and changes no assignment row: the fair-bar re-adjudication of the archived flat-675 "9.8x" (host-loop instrument, 8.07x B3 / 25.87x B37 process wall; the archived claim survives strengthened) and the F3 fused production campaign (1.67x / 7.70x / 7.36x process wall, superseding the 9.8x as the citable fused production number; host-loop remains faster at those budgets on that timer). Timers named in the scope note; example assignment counts unchanged. | `docs/receipts/genuine675_fair_bar.md` and `docs/receipts/flat675_fused_campaign.md` |
+| 2026-08-23 | native-permanent-magnet-simple | cpu / census-structural → **unmeasured / unmeasured**; no timing is minted here. Two things changed together. (1) The mirror was defective: `solve()` accepted an execution-scale argument and discarded it, so `--smoke` and the native default both built the bounded 2x2 / `downsample=100` grid, and the old cell ("tiny problem — fixed 2x2 quadrature grid (4 reduction rows), no native_default branch") described that defect rather than the example. The mirror now branches on that argument, aligning native_default with the values its parity case had already frozen (`examples/jax/parity/cases/native_permanent_magnet_simple.py`): 16x16 quadrature, `downsample=4`, 14,336 dipoles, a 256 x 43,008 response matrix, K=500 — and the iteration budgets are now pinned to that case by test rather than being a second independent literal. Bounded scale is byte-for-byte unchanged in its physics; only the published observable shape changed, from the full (ndipoles, 3) moment array to the placed rows, their dipole indices, the row count, and a SHA-256 of the full array (the native_default JSON payload was 244 KB of ~96% zeros). (2) With the real workload in view the `tiny problem` family no longer applies, and the replacement is not `narrow matrix` on the MUSE read: MUSE's 4.05x GPU loss times ArbVec-backtracking, a different algorithm variant whose frozen-step skip postdates that number, while the only direct measurement of *this* mirror's baseline kernel — a host-local N=3 diagnostic dated 2026-07-26 — put the GPU ~2.0x faster at the same 16x16 workload. Two uncommitted, unmatched readings that disagree are not a placement, so the row is unplaced until the pre-registered matched-work A/B (P3.2) runs. | `examples/jax/1_Simple/permanent_magnet_simple.py`, `examples/jax/parity/cases/native_permanent_magnet_simple.py`, and `docs/jax_gpu_examples_backlog_native_speed_implementation_plan.md` |
