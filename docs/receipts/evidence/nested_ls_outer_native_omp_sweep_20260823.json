@@ -1,0 +1,129 @@
+{
+  "aggregation": "min",
+  "best_omp_num_threads": 14,
+  "budget": 3,
+  "claim": null,
+  "command": "JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python benchmarks/nested_ls_outer_claim.py --sweep-native-omp --budget 3 --maxcor 10 --omp-set 8,14,16,20",
+  "date": "2026-08-23",
+  "driver": "benchmarks.nested_ls_outer_claim",
+  "execution_log": "docs/receipts/evidence/nested_ls_outer_native_omp_sweep_20260823.log",
+  "git_head": "484b3fc262fa0d720f542fb87754f7e1ded5a4f0",
+  "interleaved_repeats": true,
+  "jax_lane_run": false,
+  "maxcor": 10,
+  "omp_set": [
+    8,
+    14,
+    16,
+    20
+  ],
+  "per_omp_min_process_wall_seconds": {
+    "8": 1117.3638475569896,
+    "14": 1044.7085998009425,
+    "16": 1060.1504282578826,
+    "20": 1511.963955037063
+  },
+  "publication": "Native nested-twin OMP sweep at B3: full parent process wall per run, 2 interleaved repeats per value, best-of-contract by min wall. Denominator evidence only; not a speed claim and not F3 7.70x.",
+  "repeats": 2,
+  "rows": [
+    {
+      "omp_num_threads": 8,
+      "observed_omp_num_threads": 8,
+      "omp_pinned": true,
+      "repeat": 0,
+      "success": true,
+      "nit": 3,
+      "nfev": 7,
+      "endpoint_j": 0.013104620459203183,
+      "endpoint_iota": 0.14468195002368198,
+      "process_wall_seconds": 1248.8290046278853
+    },
+    {
+      "omp_num_threads": 14,
+      "observed_omp_num_threads": 14,
+      "omp_pinned": true,
+      "repeat": 0,
+      "success": true,
+      "nit": 3,
+      "nfev": 7,
+      "endpoint_j": 0.013104620459202207,
+      "endpoint_iota": 0.14468195002369505,
+      "process_wall_seconds": 2682.6121754630003
+    },
+    {
+      "omp_num_threads": 16,
+      "observed_omp_num_threads": 16,
+      "omp_pinned": true,
+      "repeat": 0,
+      "success": true,
+      "nit": 3,
+      "nfev": 7,
+      "endpoint_j": 0.013104620459202463,
+      "endpoint_iota": 0.14468195002369635,
+      "process_wall_seconds": 2401.846047244966
+    },
+    {
+      "omp_num_threads": 20,
+      "observed_omp_num_threads": 20,
+      "omp_pinned": true,
+      "repeat": 0,
+      "success": true,
+      "nit": 3,
+      "nfev": 7,
+      "endpoint_j": 0.013104620459201627,
+      "endpoint_iota": 0.14468195002370174,
+      "process_wall_seconds": 1511.9778368689585
+    },
+    {
+      "omp_num_threads": 8,
+      "observed_omp_num_threads": 8,
+      "omp_pinned": true,
+      "repeat": 1,
+      "success": true,
+      "nit": 3,
+      "nfev": 7,
+      "endpoint_j": 0.013104620459203183,
+      "endpoint_iota": 0.14468195002368198,
+      "process_wall_seconds": 1117.3638475569896
+    },
+    {
+      "omp_num_threads": 14,
+      "observed_omp_num_threads": 14,
+      "omp_pinned": true,
+      "repeat": 1,
+      "success": true,
+      "nit": 3,
+      "nfev": 7,
+      "endpoint_j": 0.013104620459202207,
+      "endpoint_iota": 0.14468195002369505,
+      "process_wall_seconds": 1044.7085998009425
+    },
+    {
+      "omp_num_threads": 16,
+      "observed_omp_num_threads": 16,
+      "omp_pinned": true,
+      "repeat": 1,
+      "success": true,
+      "nit": 3,
+      "nfev": 7,
+      "endpoint_j": 0.013104620459202463,
+      "endpoint_iota": 0.14468195002369635,
+      "process_wall_seconds": 1060.1504282578826
+    },
+    {
+      "omp_num_threads": 20,
+      "observed_omp_num_threads": 20,
+      "omp_pinned": true,
+      "repeat": 1,
+      "success": true,
+      "nit": 3,
+      "nfev": 7,
+      "endpoint_j": 0.013104620459201627,
+      "endpoint_iota": 0.14468195002370174,
+      "process_wall_seconds": 1511.963955037063
+    }
+  ],
+  "schema": "nested-ls-outer-native-omp-sweep.v1",
+  "tag": null,
+  "written_by_pytest": false
+}
