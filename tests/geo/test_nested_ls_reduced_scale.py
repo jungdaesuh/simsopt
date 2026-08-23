@@ -1897,7 +1897,7 @@ def test_authored_outer_fd0_json_passes_all_directions():
     assert "NaN" not in raw
     payload = json.loads(raw)
     dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-outer-fd0.v1"
+    assert payload["schema"] == "nested-ls-outer-fd0.v2"
     assert payload["written_by_pytest"] is False
     assert payload["fail_closed_reason"] is None
     rows = payload["probe"]["rows"]
