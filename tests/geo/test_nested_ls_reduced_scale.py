@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+import statistics
 import sys
 from pathlib import Path
 
@@ -20,6 +21,8 @@ from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_NEWTON_STAB,
     NESTED_LS_NEWTON_TOL,
+    NESTED_LS_OUTER_FD0_DIRECTIONS,
+    NESTED_LS_OUTER_FD0_REL_TOL,
     nested_ls_physics_newton_kwargs,
 )
 from simsopt_jax_adapters.geo.nested_ls_reduced import (
@@ -200,6 +203,10 @@ _A100_BANANA_OMP_EVIDENCE = (
     _EVIDENCE_DIR / "nested_ls_reduced_a100_banana_omp_20260822.json"
 )
 _A100_GATE6_EVIDENCE = _EVIDENCE_DIR / "nested_ls_reduced_gpu_gate6_20260822.a100.json"
+_GATE6_5090_EVIDENCE = _EVIDENCE_DIR / "nested_ls_reduced_gpu_gate6_20260822.5090.json"
+_OUTER_FD0_EVIDENCE = _EVIDENCE_DIR / "nested_ls_outer_fd0_20260823.json"
+_OUTER_B3_EVIDENCE = _EVIDENCE_DIR / "nested_ls_outer_b3_20260823.json"
+_OUTER_B37_EVIDENCE = _EVIDENCE_DIR / "nested_ls_outer_b37_20260823.json"
 _F3_B37_GPU_CHUNK_WARM_EVIDENCE = (
     _EVIDENCE_DIR / "nested_ls_reduced_gpu_chunk_warm_20260821.json"
 )
@@ -1804,6 +1811,174 @@ def test_authored_a100_gate6_json_uses_host_best_omp():
     assert len(pairs) >= NESTED_LS_GATE6_CLAIM_REPEATS
     assert all(pair["physics_ok"] for pair in pairs)
     assert payload["fail_closed_reason"] is None
+    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
+
+
+@pytest.mark.skipif(
+    not _GATE6_5090_EVIDENCE.is_file(),
+    reason="authored 5090 Gate-6 claim JSON not yet produced",
+)
+def test_authored_gpu_gate6_5090_json_matches_frozen_contract():
+    raw = _GATE6_5090_EVIDENCE.read_text(encoding="utf-8")
+    assert "NaN" not in raw
+    payload = json.loads(raw)
+    dump_strict_json(payload)
+    assert payload["schema"] == "nested-ls-reduced-gpu-gate6.v1"
+    assert payload["written_by_pytest"] is False
+    assert payload["publication"] == _GPU_GATE6_PUBLICATION
+    boundary = payload["claim_boundary"]
+    assert boundary["inherits_f3_7_70x"] is False
+    assert boundary["comparable_operators"] is False
+    assert boundary["tag"] == "5090"
+    assert boundary["aggregation"] == NESTED_LS_GATE6_AGGREGATION
+    assert boundary["repeats"] == NESTED_LS_GATE6_CLAIM_REPEATS
+    assert boundary["native_omp_num_threads"] == NESTED_LS_GATE6_NATIVE_OMP_THREADS
+    assert boundary["jax_linear_solver"] == "shamanskii"
+    assert boundary["jax_persistent_cache"] is True
+    assert boundary["interleaved_repeats"] is True
+    assert boundary["jax_claim_clock"] == "parent_wait_minus_reconstruct_rejudge"
+    assert boundary["native_claim_clock"] == "parent_wait"
+    pairs = payload["pairs"]
+    assert len(pairs) >= NESTED_LS_GATE6_CLAIM_REPEATS
+    assert {int(pair["repeat"]) for pair in pairs} >= set(
+        range(NESTED_LS_GATE6_CLAIM_REPEATS)
+    )
+    assert all(pair["physics_ok"] for pair in pairs)
+    assert payload["fail_closed_reason"] is None
+    jax_claim_walls: list[float] = []
+    native_claim_walls: list[float] = []
+    for pair in pairs:
+        native = pair["native"]
+        jax_row = pair["jax"]
+        assert (
+            int(native["observed_omp_num_threads"])
+            == NESTED_LS_GATE6_NATIVE_OMP_THREADS
+        )
+        assert bool(native["omp_pinned"]) is True
+        assert float(native["coil_delta_inf"]) == 0.0
+        assert float(jax_row["coil_delta_inf"]) == 0.0
+        assert int(jax_row["native_rejudge_iter"]) == 0
+        assert float(jax_row["grad_l2"]) <= NESTED_LS_NEWTON_TOL
+        assert (
+            abs(float(jax_row["iota"]) - float(native["iota"]))
+            <= NESTED_LS_GATE6_IOTA_G_TOL
+        )
+        assert (
+            abs(float(jax_row["G"]) - float(native["G"])) <= NESTED_LS_GATE6_IOTA_G_TOL
+        )
+        native_claim = float(native["claim_wall_seconds"])
+        jax_claim = float(jax_row["claim_wall_seconds"])
+        native_claim_walls.append(native_claim)
+        jax_claim_walls.append(jax_claim)
+        assert native_claim == pytest.approx(
+            float(native["process_wall_seconds"]), abs=1.0e-9
+        )
+        assert jax_claim == pytest.approx(
+            float(jax_row["process_wall_seconds"])
+            - float(jax_row["reconstruct_seconds"])
+            - float(jax_row["native_rejudge_seconds"]),
+            abs=1.0e-6,
+        )
+    assert payload["native_min_process_wall_seconds"] == min(native_claim_walls)
+    assert payload["jax_min_process_wall_seconds"] == min(jax_claim_walls)
+    expected_claim = payload["fail_closed_reason"] is None and min(
+        jax_claim_walls
+    ) < min(native_claim_walls)
+    assert boundary["nested_speed_claim"] is expected_claim
+    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
+
+
+@pytest.mark.skipif(
+    not _OUTER_FD0_EVIDENCE.is_file(),
+    reason="authored outer FD-0 JSON not yet produced",
+)
+def test_authored_outer_fd0_json_passes_all_directions():
+    raw = _OUTER_FD0_EVIDENCE.read_text(encoding="utf-8")
+    assert "NaN" not in raw
+    payload = json.loads(raw)
+    dump_strict_json(payload)
+    assert payload["schema"] == "nested-ls-outer-fd0.v1"
+    assert payload["written_by_pytest"] is False
+    assert payload["fail_closed_reason"] is None
+    rows = payload["probe"]["rows"]
+    assert len(rows) == NESTED_LS_OUTER_FD0_DIRECTIONS
+    for row in rows:
+        assert float(row["better_rel_error"]) <= NESTED_LS_OUTER_FD0_REL_TOL
+        assert row["halving_reduced_error"] is True
+        assert row["direction_pass"] is True
+    mixed_form_max_abs = payload["probe"]["mixed_form_max_abs_difference"]
+    assert mixed_form_max_abs is not None
+    assert np.isfinite(float(mixed_form_max_abs))
+    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
+
+
+def _assert_outer_claim_boundary(boundary: dict[str, object]) -> None:
+    assert boundary["jax_claim_clock"] == "parent_wait"
+    assert boundary["native_claim_clock"] == "parent_wait"
+    assert boundary["subtractions"] == "none"
+    assert boundary["lane_start_work_symmetric"] is True
+    assert boundary["moving_coil"] is True
+    assert boundary["outer_optimizer_loop"] is True
+    assert boundary["rejudged_lanes"] == ["native", "jax"]
+
+
+def _assert_outer_claim_walls(payload: dict[str, object]) -> None:
+    pairs = payload["pairs"]
+    assert pairs
+    assert all(pair["physics_ok"] for pair in pairs)
+    native_walls = [float(pair["native"]["claim_wall_seconds"]) for pair in pairs]
+    jax_walls = [float(pair["jax"]["claim_wall_seconds"]) for pair in pairs]
+    assert float(payload["native_min_process_wall_seconds"]) == min(native_walls)
+    assert float(payload["native_median_process_wall_seconds"]) == statistics.median(
+        native_walls
+    )
+    assert float(payload["jax_min_process_wall_seconds"]) == min(jax_walls)
+    assert float(payload["jax_median_process_wall_seconds"]) == statistics.median(
+        jax_walls
+    )
+
+
+@pytest.mark.skipif(
+    not _OUTER_B3_EVIDENCE.is_file(),
+    reason="authored outer B3 claim JSON not yet produced",
+)
+def test_authored_outer_b3_json_is_cli_omp_claim():
+    raw = _OUTER_B3_EVIDENCE.read_text(encoding="utf-8")
+    assert "NaN" not in raw
+    payload = json.loads(raw)
+    dump_strict_json(payload)
+    assert payload["schema"] == "nested-ls-outer-claim.v1"
+    assert payload["written_by_pytest"] is False
+    assert payload["fail_closed_reason"] is None
+    boundary = payload["claim_boundary"]
+    _assert_outer_claim_boundary(boundary)
+    assert boundary["budget"] == 3
+    assert boundary["omp_provenance"] == "cli"
+    _assert_outer_claim_walls(payload)
+    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
+
+
+@pytest.mark.skipif(
+    not _OUTER_B37_EVIDENCE.is_file(),
+    reason="authored outer B37 claim JSON not yet produced",
+)
+def test_authored_outer_b37_json_uses_b3_receipt_omp():
+    raw = _OUTER_B37_EVIDENCE.read_text(encoding="utf-8")
+    assert "NaN" not in raw
+    payload = json.loads(raw)
+    dump_strict_json(payload)
+    assert payload["schema"] == "nested-ls-outer-claim.v1"
+    assert payload["written_by_pytest"] is False
+    assert payload["fail_closed_reason"] is None
+    boundary = payload["claim_boundary"]
+    _assert_outer_claim_boundary(boundary)
+    assert boundary["budget"] == 37
+    assert boundary["omp_provenance"] == "b3_receipt"
+    b3_receipt = boundary["b3_receipt"]
+    assert isinstance(b3_receipt, dict)
+    assert b3_receipt["path"]
+    assert b3_receipt["sha256"]
+    _assert_outer_claim_walls(payload)
     assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
 
 

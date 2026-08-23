@@ -46,6 +46,43 @@ NESTED_LS_GATE6_CLAIM_REPEATS: Final[int] = 3
 NESTED_LS_GATE6_AGGREGATION: Final[str] = "min"
 NESTED_LS_GATE6_NATIVE_OMP_THREADS: Final[int] = 16
 
+# Gate FD-0 of the eight-term outer charter
+# (``docs/jax_nested_ls_outer_charter.md``). The outer variable is the
+# coil block only; every coil unit direction is differenced centrally at
+# ``eps`` and ``eps/2``, and both the tolerance and the step rule are
+# frozen here so no probe carries a bare number.
+#
+# The step is deliberately on the truncation side of the round-off
+# optimum, because the gate asks for two things at once: an error at or
+# under ``NESTED_LS_OUTER_FD0_REL_TOL`` and an error that *falls* when
+# the step halves. Writing the central-difference error as
+# ``A*eps^2 + n/eps`` (truncation plus the inner solve's noise floor),
+# halving only improves it while ``eps`` exceeds ~1.4x the optimum, so a
+# step chosen at the optimum would fail the order clause. The archived
+# unregularized Schur spectrum at the frozen endpoint
+# (``sigma_min = 6.5e-3``) bounds the inner-solve noise near 1e-11, which
+# puts that crossover near 3e-4 of the coil scale.
+NESTED_LS_OUTER_FD0_DIRECTIONS: Final[int] = 11
+NESTED_LS_OUTER_FD0_REL_TOL: Final[float] = 1.0e-5
+NESTED_LS_OUTER_FD0_STEP_RELATIVE: Final[float] = 3.0e-4
+NESTED_LS_OUTER_FD0_STEP_SCALE_FLOOR: Final[float] = 1.0e-1
+NESTED_LS_OUTER_FD0_STEP_HALVING: Final[float] = 0.5
+NESTED_LS_OUTER_FD0_STEP_RULE: Final[str] = (
+    "eps_i = NESTED_LS_OUTER_FD0_STEP_RELATIVE * max(abs(coil_i), "
+    "NESTED_LS_OUTER_FD0_STEP_SCALE_FLOOR); the halved step is "
+    "NESTED_LS_OUTER_FD0_STEP_HALVING * eps_i"
+)
+
+# Charter Amendment 1 (2026-08-22): the implicit surface ``s*(c)`` is only
+# locally defined, and the B3 shakedown measured a unit-scale coil step
+# throwing the inner solve onto a different Boozer branch
+# (iota 0.1409 -> -0.0024, J 0.0143 -> 10.43) with every inner solve
+# converging, so convergence alone rejects nothing. An accepted evaluation
+# must stay on the anchor's branch: an inner solve whose iota moves more
+# than this guard from the last accepted anchor is a failed evaluation and
+# takes the sealed rejection sentinel, identically in both lanes.
+NESTED_LS_OUTER_IOTA_BRANCH_GUARD: Final[float] = 0.05
+
 
 class NestedLsPhysicsNewtonKwargs(TypedDict):
     constraint_weight: float
@@ -92,6 +129,17 @@ def nested_ls_banana_run_code_options() -> NestedLsBananaRunCodeOptions:
     )
 
 
+def nested_ls_outer_fd0_step(coil_value: float) -> float:
+    """The frozen FD-0 central-difference step for one coil DOF.
+
+    One rule, one implementation: the probe records what this returns
+    per direction rather than restating the arithmetic.
+    """
+
+    scale = max(abs(float(coil_value)), NESTED_LS_OUTER_FD0_STEP_SCALE_FLOOR)
+    return NESTED_LS_OUTER_FD0_STEP_RELATIVE * scale
+
+
 __all__ = [
     "NESTED_LS_BANANA_BFGS_TOL",
     "NESTED_LS_BANANA_NEWTON_MAXITER",
@@ -108,6 +156,13 @@ __all__ = [
     "NESTED_LS_NEWTON_STAB",
     "NESTED_LS_NEWTON_TOL",
     "NESTED_LS_OPTIMIZE_G",
+    "NESTED_LS_OUTER_FD0_DIRECTIONS",
+    "NESTED_LS_OUTER_FD0_REL_TOL",
+    "NESTED_LS_OUTER_FD0_STEP_HALVING",
+    "NESTED_LS_OUTER_FD0_STEP_RELATIVE",
+    "NESTED_LS_OUTER_FD0_STEP_RULE",
+    "NESTED_LS_OUTER_FD0_STEP_SCALE_FLOOR",
+    "NESTED_LS_OUTER_IOTA_BRANCH_GUARD",
     "NESTED_LS_PHYSICS_BAR",
     "NESTED_LS_REDUCTION_MODE",
     "NESTED_LS_TIMING_BAR",
@@ -115,5 +170,6 @@ __all__ = [
     "NestedLsBananaRunCodeOptions",
     "NestedLsPhysicsNewtonKwargs",
     "nested_ls_banana_run_code_options",
+    "nested_ls_outer_fd0_step",
     "nested_ls_physics_newton_kwargs",
 ]

@@ -76,6 +76,37 @@ canary). Fail-closed probe, one receipt:
   eight-term `J` parity vs the native lane under the F3-style one-sided
   `1e-10` gate. Trajectory parity is NOT claimed.
 
+## Amendment 1 (2026-08-22, pre-B3, no clock has run)
+
+Two rulings from the implementation shakedown, frozen before any timed
+rung:
+
+- **Iota-branch guard, both lanes.** The B3 smoke measured L-BFGS-B's
+  first unit-scale coil step throwing the nested inner solve onto a
+  different Boozer branch (ι 0.1409 → −0.0024, J 0.0143 → 10.43) with
+  every inner solve converging, so no rejection fired. The implicit
+  surface `s*(c)` is only locally defined; an inner solve whose ι moves
+  more than `NESTED_LS_OUTER_IOTA_BRANCH_GUARD` (contract module) from
+  the last **accepted** anchor is a failed evaluation and takes the
+  sealed rejection sentinel (anchor `J` + offset + scale·‖Δc‖, anchor
+  gradient) in **both** lanes identically. FD-0 is unaffected (its
+  steps move ι negligibly).
+- **Inner-solve non-convergence sentinels in both lanes.** The sealed
+  lane policy's rejection knobs exist for expected inner failures; the
+  native child already sentinels them, so the JAX lane does the same
+  (typed signal, receipt reason `inner_solve_failed`) rather than
+  crashing — asymmetric brittleness would bias the comparison.
+  Coil motion inside an inner solve stays fatal in both lanes (invariant
+  violation, not a physics event); FD-0 legs never sentinel — a
+  certification probe fails closed.
+- **The endpoint eight-term J parity rtol is provisional.** Lane-vs-lane
+  gradient agreement is ~1e-8 (native adjoint vs reduced Schur adjoint),
+  so budget-truncated trajectories will fork; a hard 1e-10 endpoint gate
+  is the known false-reject landmine class. B3 measures the achievable
+  fork band; the B37 gate value is frozen from that measurement, in the
+  receipt, before B37 runs. The reconstruct no-op gate is unchanged and
+  not provisional.
+
 ## NO-GO (inherited and binding)
 
 Mimicking native BFGS-shape gradients in JAX (measured ~273 s envelope);
