@@ -6,10 +6,17 @@ matrices.  ``PermanentMagnetGridJAX.from_cpu`` is the explicit immutable
 boundary; the greedy GPMO iterations and residual updates then execute on the
 selected JAX device.  Optional VTK/FAMUS reporting is intentionally outside the
 numerical JAX region.
+
+GPMO places one dipole per iteration, so the published moment array is zero on
+all but ``K`` of its rows.  The result therefore publishes the selected rows and
+their dipole indices — the shape its permanent-magnet siblings publish — plus
+the row count and a SHA-256 digest of the full moment array, so a bitwise
+cross-check against another lane remains possible without shipping the zeros.
 """
 
 from __future__ import annotations
 
+import hashlib
 import io
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -24,6 +31,8 @@ from simsopt_jax.geo.permanent_magnet_grid import PermanentMagnetGridJAX
 from simsopt_jax.solve.permanent_magnet import GPMO_baseline_jax
 
 EXAMPLE_ID = "native-permanent-magnet-simple"
+BOUNDED_ITERATIONS = 40
+NATIVE_ITERATIONS = 500
 TEST_DATA = Path(__file__).resolve().parents[3] / "tests" / "test_files"
 
 
@@ -45,9 +54,11 @@ def _device_publication(
     )
 
 
-def _build_grid() -> PermanentMagnetGridJAX:
-    nphi = 2
-    ntheta = 2
+def _build_grid(scale: ExecutionScale) -> PermanentMagnetGridJAX:
+    native_scale = scale == "native_default"
+    nphi = 16 if native_scale else 2
+    ntheta = 16 if native_scale else 2
+    downsample = 4 if native_scale else 100
     surface = SurfaceRZFourier.from_wout(
         str(TEST_DATA / "wout_c09r00_fixedBoundary_0.5T_vacuum_ns201.nc"),
         range="half period",
@@ -71,15 +82,15 @@ def _build_grid() -> PermanentMagnetGridJAX:
             normal_field,
             TEST_DATA / "init_orient_pm_nonorm_5E4_q4_dp.focus",
             coordinate_flag="cylindrical",
-            downsample=100,
+            downsample=downsample,
         )
     return PermanentMagnetGridJAX.from_cpu(cpu_grid)
 
 
 def solve(
-    _output_directory: Path, max_steps: int, _scale: ExecutionScale
+    _output_directory: Path, max_steps: int, scale: ExecutionScale
 ) -> ExampleResult:
-    grid = _build_grid()
+    grid = _build_grid(scale)
     result = GPMO_baseline_jax(grid, K=max_steps, retain_history=False)
     device_publication = _device_publication(
         result.m,
@@ -95,6 +106,9 @@ def solve(
         finite_moments,
         final_moments,
     ) = jax.device_get(device_publication)
+    moments = np.ascontiguousarray(final_moments, dtype=np.float64)
+    placed = np.flatnonzero(np.linalg.norm(moments, axis=1) > 0.0)
+    selected_moments = moments[placed]
     scientific_success = bool(
         selected.size == max_steps
         and finite_moments
@@ -109,9 +123,13 @@ def solve(
             "selected_dipoles": tuple(int(value) for value in selected),
             "nonzero_fraction": float(nonzero_fraction),
             "solver_success": scientific_success,
-            "moments": tuple(
-                tuple(float(component) for component in row) for row in final_moments
+            "ndipoles": int(moments.shape[0]),
+            "selected_moment_count": int(placed.size),
+            "selected_moment_indices": tuple(int(index) for index in placed),
+            "selected_moments": tuple(
+                tuple(float(component) for component in row) for row in selected_moments
             ),
+            "moments_sha256": hashlib.sha256(moments.tobytes()).hexdigest(),
         },
         status="ok" if scientific_success else "failed",
     )
@@ -122,8 +140,8 @@ def main(arguments: list[str] | None = None) -> int:
         arguments,
         description=__doc__,
         temporary_prefix="simsopt-jax-permanent-magnet-simple-",
-        bounded_steps=40,
-        native_default_steps=500,
+        bounded_steps=BOUNDED_ITERATIONS,
+        native_default_steps=NATIVE_ITERATIONS,
         solve=solve,
     )
 
