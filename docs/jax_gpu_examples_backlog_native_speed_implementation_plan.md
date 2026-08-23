@@ -356,7 +356,12 @@ identity JSON, and writes its artifact under
       `src/simsopt_jax/core/pm_optimization.py:1971,2042-2052`): directly
       tests whether the 4.05× loss on the device row is stale even at
       shipped scale.
-- [x] `[probe]` P3.4 (2026-08-23 — MUSE 2.9× WIN bitwise; PM4Stell 3.0× speed but BLOCKED on the k=201 greedy fork, dumps archived) MUSE + PM4Stell at nφ=nθ=64 ("real run" resolution named
+- [x] `[probe]` P3.4 (2026-08-23 — MUSE 2.9× WIN bitwise; PM4Stell 3.0× speed but BLOCKED on the k=201 greedy fork, dumps archived.
+      **Addendum (2026-08-23, later):** the fork adjudication's static phase closed — the 201 placements are identical in both
+      lanes; the fork is the k=200 dewyrming sweep's removal set, an FMA-contraction near-tie (native `-ffp-contract=fast` vs
+      XLA's uncontracted dot) at the equality-grade `cos ≤ cos(π) = −1` test, 0–2 ULP; verdict, repair decision and the
+      pre-registered `-ffp-contract=off` confirming replay live in the GPMO charter §Blocked rung adjudication record.)
+      MUSE + PM4Stell at nφ=nθ=64 ("real run" resolution named
       in the native sources), matched iterations, matched algorithm variant,
       matched history bookkeeping. Memory pre-cleared by U2 estimates
       (≈3.3 GB / ≈6.8 GB fp64 on a 32 GB 5090); keep `downsample=10` — the
@@ -366,6 +371,36 @@ identity JSON, and writes its artifact under
       measure ndipoles/memory at that grid (unmeasured — grid is built
       per-φ-plane), then time if it fits; else record the blocker with the
       measured number.
+      **Adjudication (2026-08-23, later, revised same day after adversarial review — the P3.5 item
+      is settled; execution is instrument work):** the refusal is a **false reject from a
+      double-applied `1/nu` shift in the probe's staging sequence — there is no step-rule
+      divergence between the lanes.** Chain, from code: the probe calls
+      `grid.rescale_for_opt(...)`, which adds `2*reg_l2 + 1/nu` into `ATA_scale` **in place**
+      (`src/simsopt/geo/permanent_magnet_grid.py:590`; the probe's own comment at
+      `benchmarks/pm_gpmo_probes.py:1656-1659` says so), then computes the explicit
+      `alpha = 2(1-1e-5)/ATA_scale` from the already-shifted value
+      (`benchmarks/pm_gpmo_probes.py:1852-1853`) — an α *inside* the true contraction bound
+      `2/λ_max(H)` by exactly its 1e-5 margin — and then stages the shifted grid through
+      `PermanentMagnetGridJAX.from_cpu`, which copies `ATA_scale` unchanged
+      (`src/simsopt_jax/geo/permanent_magnet_grid.py:75`); the validator, whose contract takes
+      `ATA_scale` as the raw spectral scale (as `from_fixed_state` computes it, `…grid.py:152`),
+      adds the shift a second time (`src/simsopt_jax/solve/permanent_magnet.py:738`) and rejects a
+      legitimate step. The observed ValueError gap (150.5/1.8377e6 = 8.2e-5, with the QA case's
+      `reg_l2 = 0` from the call literals at `pm_gpmo_probes.py:1852` plus the
+      `reg_l2: float = 0.0` default at `…solve/permanent_magnet.py:929`, and `nu = 1.0e10` at
+      `pm_gpmo_probes.py:1217`) is numerically consistent with either a missing-shift or a
+      double-shift reading — only the code discriminates, and it says double-shift. Consequence:
+      once the instrument stages the **un-rescaled** grid (or unshifts before staging) and passes
+      the same ν, the two lanes' default step rules coincide *exactly* —
+      `2(1-1e-5)/(σ₀² + 2·reg_l2 + 1/ν)` both sides — the validator passes the very α it rejected,
+      and the "which step rule is matched work" question dissolves. Production code is untouched
+      and **vindicated** (the validator caught a real instrument inconsistency, fail-closed, as
+      designed); no unvalidated-α override is needed or wanted (none exists publicly:
+      `relax_and_split_jax` validates at `…permanent_magnet.py:983` before reaching the private
+      `_run_mwpgp_with_alpha:779`). Named hazard for the future QA charter: `ATA_scale` is a
+      dual-meaning field — raw σ₀² under the JAX contract, silently shifted after native
+      `rescale_for_opt` — the same dual-source class the flat-675 review chronicled; the fix is to
+      derive, never to copy across that boundary.
 - [x] `[charter]` P3.6 (2026-08-23 — draft written: Rung A pm-simple 5.2×, Rung B muse-64 2.9×, pm4stell BLOCKED on the k=201 fork with a pre-registered two-hypothesis adjudication) Charter draft for any family member clearing ≥1.10×
       warm; the nφ=64 rung lands as a `_scale_configuration()` addition in
       the relevant parity cases so the charter has a frozen scale to cite.
@@ -429,7 +464,7 @@ warm windows matched per the probe's disclosures; artifacts under
 | pm-simple | native 16×16, K=500 | **5.2× WIN** (0.0306 s vs omp32 0.1586 s; omp48 collapses 6.07 s) | GPU 0.10–0.46 s | bitwise, 0 ULP | `pm_simple16_*` |
 | MUSE | shipped nφ=16 | **0.64×** (4.71 s vs omp32 3.01 s) — the row's 4.05× is stale (post-cond-skip) | GPU 5.6–6.5 s | bitwise, 0 ULP | `muse_shipped_*` |
 | MUSE | nφ=64 "real run" | **2.9× WIN** (7.32 s vs omp32 21.22 s); device mem 10.5 GiB | GPU 8.3–8.8 s (beats all native) | bitwise, 0 ULP | `muse64_*` |
-| PM4Stell | nφ=64 | 3.0× speed (9.51 s vs omp32 28.7 s) — **BLOCKED: greedy forks at k=201** (inputs digest-identical, lanes internally stable, agree ≤200) | GPU 10.5–11.0 s | **DIVERGES** from k=201; fork dumps archived | `pm4stell64_*` incl. `_fork_k201_*` |
+| PM4Stell | nφ=64 | 3.0× speed (9.51 s vs omp32 28.7 s) — **BLOCKED: greedy forks in the first dewyrming sweep** (k=200 of the 201-iteration probe; adjudicated 2026-08-23 — FMA-contraction near-tie at the `cos ≤ −1` removal test, see GPMO charter §Blocked rung) | GPU 10.5–11.0 s | **DIVERGES**: 10 rows / 5 antiparallel removal pairs; placements identical; fork dumps archived | `pm4stell64_*` incl. `_fork_k201_*` |
 | GSCO modular | reference 96×100/20k | **5.2× WIN** (warm median 5.27 s vs best omp32 leg 27.4 s; omp48 154 s) | GPU 5.4–6.1 s | bitwise, 0 ULP (19,200 seg) | `gsco_modular_reference_*` |
 | GSCO sector-saddle | reference | **4.4× WIN** (warm median 8.08 s vs best omp32 leg 35.2 s; omp48 233 s) | GPU 8.3 s | bitwise, 0 ULP | `gsco_sector_saddle_reference_*` |
 | GSCO both siblings | shipped 48×50/2k | **~1.6× GPU** (warm median 0.408 s vs omp32 0.669 s) — direction REVERSED vs the sealed 2026-08-16 receipt (0.79–0.89×); genuine conflict, adjudication chartered | GPU 0.51–1.56 s | bitwise, 0 ULP | `gsco_*_shipped_*` |

@@ -200,6 +200,57 @@ bucket, its derivation, and why bitwise is unattainable. Only then may a `pm4ste
 amendment — and a tie-break change is a **solver change**, so it also requires parity
 re-certification of that mirror before any timing.
 
+**Adjudication record (dated 2026-08-23, later — static phase complete; confirming replay
+pre-registered below, pending a quiet box).** Verdict: **the fork site is H2's; the mechanism is a
+near-tie broken differently per lane — H1's *kind* of cause, though by FMA contraction rather than
+the reduction-order route H1 posited (the summation order is sequential in both lanes); neither
+lane is buggy.** The archived dumps are whole-run endpoints of
+`iterations: 201` runs (`write_moments`, `benchmarks/pm_gpmo_probes.py:1919-1941` — no
+mid-iteration capture exists), and an off-by-one in this section's own framing is corrected here:
+the C++ gate is `(k % backtracking) == 0` with no `k >= backtracking` guard
+(`src/simsoptpp/permanent_magnet_optimization.cpp:861`), so with `iterations=201` the last executed
+iteration k=200 runs the **first non-trivial dewyrming sweep** — the fork is *inside* that sweep,
+not one iteration past it. The same correction applies to this section's opening claim that "the
+lanes agree bitwise for k ≤ 200": agreement holds through all 201 *placements* (the state entering
+the sweep); the end-of-k=200 states differ, because the sweep runs inside k=200. Forensics (from
+the archived endpoint dumps — which hold moments only, so placement-identity is *inferred* from
+the exactly-antiparallel survivor structure, not read directly): the 201 placements
+entering the sweep are identical in both lanes, exonerating H1's argmax site; native removed 34
+exactly-antiparallel pairs (201 − 2·34 = 133), JAX 31 (201 − 2·31 = 139); the 10 differing rows are
+five single-polarization antiparallel pairs, three of them direct threshold flips and two cascade
+consequences. Mechanism: the removal test `min_cos_angle <= cos(threshold_angle)` is an
+equality-grade test at this case's `threshold_angle = π` (`cos = −1.0` exactly), and the two lanes
+round the 3-term dot differently — the local build compiles the C++ accumulation loop
+(`…optimization.cpp:885-888`) with `-O3 -march=native -ffp-contract=fast` (`CMakeLists.txt:59`,
+confirmed in `build/cp311-cp311-linux_x86_64/compile_commands.json`), i.e. FMA-contracted, while
+the JAX lane's `jnp.sum(moment_j * moment_c)` (`src/simsopt_jax/core/pm_optimization.py:1772`) is
+uncontracted. All five deciding pairs straddle −1.0 within 0–2 ULP; sequential-order-with-FMA is
+the unique scheme (of 18 tested — session analysis, unarchived; the pre-registered replay below is
+the durable check) reproducing every native decision. The `muse-64` discriminant is
+resolved and favors this verdict: with `nAdjacent=1` the neighbor scan sees only `Connect(j,0) = j`
+itself (self-dot ≈ +1, never ≤ −1), so MUSE's sweep is a structural no-op and *cannot* fork,
+regardless of polarization set. Fragility disclosed (same session analysis, unarchived): 10.4% of
+all 157,302 antiparallel (dipole, polarization) self-dots flip the `<= −1.0` test between FMA and
+non-FMA evaluation.
+Line-for-line comparison found **no semantic difference** in the sweep (seed order, neighbor order,
+strict-`<` first-wins argmin, cascade bookkeeping all match); two second-order reduction-order
+divergences in the residual updates (`…optimization.cpp:903-916` vs `…pm_optimization.py:1706-1708`;
+`…optimization.cpp:848-852` vs `:1885`) are noted for later iterations and are not implicated at
+k=200. Consequences: (a) "make JAX match native" is not a well-defined target — the CI build
+(`-O3 -march=westmere`, `CMakeLists.txt:48`, pre-FMA3) would take the non-FMA branch and agree
+with JAX on the three direct pairs, so the native lane is not self-consistent across its own
+builds; the work item's **exact-arithmetic tie-break rule is adopted** (at `threshold_angle = π`
+the intended predicate is exactly testable as same polarization index ∧ opposite signs; a general
+angle needs a correctly-rounded compensated dot with `-ffp-contract=off` pinned on that translation
+unit) — a solver change requiring parity re-certification before any timing, per the work item.
+Clamping the cosine into [−1, 1] is rejected as a fix: it would move all 157,302 near-boundary
+pairs and change the physics on both lanes. (b) **Confirming replay, pre-registered:** rebuild
+`simsoptpp` in a separate build dir with `-ffp-contract=off` appended and nothing else changed;
+rerun `pm4stell-64` native at `iterations=201`; compare moments to the archived JAX dump. Expected
+under this record: the three direct pairs invert (native placed count moves toward 139), ideally
+bitwise-identical to the JAX dump; a result byte-identical to the archived *native* dump instead
+**refutes** this record and reopens the adjudication.
+
 ## Provenance, ledger, quiet gates
 
 Plan clause 6 (`…backlog…plan.md:215-217`). Every leg writes a `probe_conventions.runtime_identity`
