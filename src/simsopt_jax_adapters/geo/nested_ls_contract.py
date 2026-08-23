@@ -82,6 +82,21 @@ NESTED_LS_OUTER_FD0_STEP_RULE: Final[str] = (
 # than this guard from the last accepted anchor is a failed evaluation and
 # takes the sealed rejection sentinel, identically in both lanes.
 NESTED_LS_OUTER_IOTA_BRANCH_GUARD: Final[float] = 0.05
+# Frozen per-host native OMP sweep set for F3 B37 banana-class work, and
+# the outer sweep's interleaved repeat count. Jax-free single source: the
+# claim driver's clock-owning parent must not import a device-initializing
+# module to learn the contract set.
+F3_B37_BANANA_OMP_CONTRACT_THREADS: Final[tuple[int, ...]] = (
+    4,
+    8,
+    12,
+    14,
+    16,
+    20,
+    24,
+    32,
+)
+NESTED_LS_OUTER_OMP_SWEEP_REPEATS: Final[int] = 2
 
 
 class NestedLsPhysicsNewtonKwargs(TypedDict):
@@ -162,7 +177,9 @@ __all__ = [
     "NESTED_LS_OUTER_FD0_STEP_RELATIVE",
     "NESTED_LS_OUTER_FD0_STEP_RULE",
     "NESTED_LS_OUTER_FD0_STEP_SCALE_FLOOR",
+    "F3_B37_BANANA_OMP_CONTRACT_THREADS",
     "NESTED_LS_OUTER_IOTA_BRANCH_GUARD",
+    "NESTED_LS_OUTER_OMP_SWEEP_REPEATS",
     "NESTED_LS_PHYSICS_BAR",
     "NESTED_LS_REDUCTION_MODE",
     "NESTED_LS_TIMING_BAR",
