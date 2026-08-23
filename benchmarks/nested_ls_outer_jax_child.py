@@ -38,7 +38,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.optimize import minimize
 
-JAX_CHILD_SCHEMA = "nested-ls-outer-jax-child.v1"
+JAX_CHILD_SCHEMA = "nested-ls-outer-jax-child.v2"
 # Declared by benchmarks/nested_ls_outer_native_child.py. Named here so the
 # rejudge gate can judge the native endpoint on the same path it judges
 # this lane's, without importing that child's process-level module.
@@ -418,12 +418,24 @@ def _run_outer(*, budget: int, maxcor: int) -> dict[str, object]:
         callback=_callback,
     )
     optimize_seconds = float(time.perf_counter() - optimize_started)
-    # The endpoint is the last ACCEPTED nested point, never a rejection
-    # sentinel: only an accepted iterate carries a surface the C++ rejudge
-    # can judge. ``optimizer_endpoint_is_anchor`` publishes whether
-    # L-BFGS-B's own ``x`` is that point, the same flag the native twin
-    # publishes, and the driver gates it on both lanes.
-    endpoint_anchor = accepted[-1]
+    # The endpoint is the ACCEPTED nested point at L-BFGS-B's own ``x``,
+    # never a rejection sentinel: only an accepted iterate carries a
+    # surface the C++ rejudge can judge. The search runs over every
+    # accepted iterate, mirroring the native twin's ``endpoint_at`` —
+    # scipy's final ``x`` is not always the newest acceptance when a
+    # trailing line search rejected and handed back an earlier iterate.
+    optimizer_x = np.asarray(result.x, dtype=np.float64)
+    endpoint_anchor = next(
+        (
+            candidate
+            for candidate in reversed(accepted)
+            if np.array_equal(candidate.coil_dofs, optimizer_x)
+        ),
+        None,
+    )
+    endpoint_is_optimizer_x = endpoint_anchor is not None
+    if endpoint_anchor is None:
+        endpoint_anchor = accepted[-1]
     endpoint = np.array(endpoint_anchor.coil_dofs, dtype=np.float64, copy=True)
     endpoint_surface = endpoint_anchor.surface_dofs
     process_elapsed_seconds = float(time.perf_counter() - _T0)
@@ -432,16 +444,22 @@ def _run_outer(*, budget: int, maxcor: int) -> dict[str, object]:
         "mode": "outer",
         "budget": int(budget),
         "maxcor": int(maxcor),
-        "success": bool(result.success),
+        # A fixed-budget run stops on maxiter, which scipy reports as
+        # success=False, so the child's own flag is the usable-endpoint
+        # predicate the driver gates on — the reported endpoint is the
+        # optimizer's own final iterate *and* an accepted one — exactly
+        # as the native twin publishes it. scipy's raw verdict lands in
+        # ``optimizer_success``.
+        "success": endpoint_is_optimizer_x,
+        "optimizer_success": bool(result.success),
         "status": int(result.status),
         "message": str(result.message),
         "nit": int(result.nit),
         "nfev": int(result.nfev),
         "njev": int(result.njev),
         "result_fun": float(result.fun),
-        "optimizer_endpoint_is_anchor": bool(
-            np.array_equal(np.asarray(result.x, dtype=np.float64), endpoint)
-        ),
+        "endpoint_is_optimizer_x": endpoint_is_optimizer_x,
+        "optimizer_x": [float(value) for value in optimizer_x],
         "outer_policy": outer_policy.as_payload(),
         "iota_branch_guard": float(NESTED_LS_OUTER_IOTA_BRANCH_GUARD),
         "accepted_evaluations": int(len(accepted)),
