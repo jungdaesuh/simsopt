@@ -132,6 +132,40 @@ Mechanics pinned from external review before the first timed rung:
   (measured ~1.4 s + ~3.5 s against ~10³ s walls, and it biases
   against the JAX lane).
 
+## Amendment 3 (2026-08-23, pre-FD-0-rerun, written while the red run executes)
+
+The first FD-0 run (5090, all 11 directions, as-run receipt preserved)
+failed every ε-floor-clamped direction and passed both derived-ε
+directions, with **every failure improving under halving** — the
+truncation signature, not the composition-bug plateau and not the noise
+signature (worsening under halving). Root cause: the fixed two-rung ε
+ladder with an absolute floor makes a fixed step a large *relative*
+perturbation on small-|c| DOFs, outside the quadratic FD regime (the
+same soft-mode nonlinearity the branch-guard smoke exposed at unit
+scale). Third instance of the program's gate-parameter law: when a gate
+fails, audit the gate's own parameter before touching the physics.
+
+Replacement, fail-closed descent ladder per direction:
+
+- Start from the existing per-direction ε rule; keep halving while the
+  halved step improves the relative error and the error exceeds the
+  1e-5 band, to a pre-declared maximum depth (contract constant).
+- The noise floor is **measured, not guessed**: repeated inner
+  re-solves at the base point publish the J scatter δJ, and the
+  per-direction minimum step follows from δJ, the band, and |g·d|
+  (contract-defined formula). Descending past it is forbidden.
+- Distinct fail-closed reasons, all published with the full ladder
+  (every rung's ε, FD values, error): `ladder_exhausted` (max depth),
+  `halving_stopped_improving` (the composition-bug detector — a wrong
+  gradient plateaus above the band), `noise_floor_reached_above_tol`
+  (the valley never dips under the band — adjudicated in the open on
+  the published scatter, never silently relaxed).
+- The red first-run receipt is certification data, not an
+  embarrassment: it lands as-run under a `.amendment2-red` suffix (its
+  internal `execution_log` name predates the rename; disclosed here),
+  and the Amendment-3 rerun writes the canonical receipt the
+  skip-until test gates.
+
 ## NO-GO (inherited and binding)
 
 Mimicking native BFGS-shape gradients in JAX (measured ~273 s envelope);

@@ -51,7 +51,11 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_NEWTON_STAB,
     NESTED_LS_NEWTON_TOL,
     NESTED_LS_OUTER_FD0_DIRECTIONS,
+    NESTED_LS_OUTER_FD0_MAX_HALVINGS,
+    NESTED_LS_OUTER_FD0_MIN_STEP_RULE,
+    NESTED_LS_OUTER_FD0_NOISE_SAFETY,
     NESTED_LS_OUTER_FD0_REL_TOL,
+    NESTED_LS_OUTER_FD0_SCATTER_REPEATS,
     NESTED_LS_OUTER_FD0_STEP_HALVING,
     NESTED_LS_OUTER_FD0_STEP_RELATIVE,
     NESTED_LS_OUTER_FD0_STEP_RULE,
@@ -59,6 +63,7 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_OUTER_IOTA_BRANCH_GUARD,
     NESTED_LS_WEIGHT_INV_MODB,
     nested_ls_banana_run_code_options,
+    nested_ls_outer_fd0_minimum_step,
     nested_ls_outer_fd0_step,
     nested_ls_physics_newton_kwargs,
 )
@@ -4952,12 +4957,20 @@ def nested_ls_outer_value_and_grad(
 
 @dataclass(frozen=True, slots=True)
 class NestedLsOuterFd0Probe:
-    """Gate FD-0: every coil direction, central differences, step halved.
+    """Gate FD-0: every coil direction, on a fail-closed descent ladder.
 
     Frozen point is the dense-LU walk endpoint. Each perturbed evaluation
     is a full warm-started inner re-solve whose solution the C++ LS
     Newton judge must accept as a no-op. No timing content: this is a
     physics gate, not a speed receipt, and it is not F3 7.70×.
+
+    Charter Amendment 3: a direction starts at the rule step and keeps
+    halving while the halved step improves the relative error, stopping
+    at the band, at ``NESTED_LS_OUTER_FD0_MAX_HALVINGS``, or at the
+    measured noise floor — whichever comes first. Every rung it took is
+    published in the row's ``ladder``, and ``base_objectives`` /
+    ``base_objective_scatter`` publish the repeated base-point re-solves
+    the floor is measured from.
 
     The finite differences are gated against ``outer_gradient``, the
     production pullback form. ``outer_gradient_mixed_loop`` is the same
@@ -4972,6 +4985,9 @@ class NestedLsOuterFd0Probe:
     G: float
     reduced_grad_l2: float
     objective: float | None
+    base_objectives: tuple[float, ...]
+    base_objective_scatter: float | None
+    scatter_repeats: int
     outer_gradient: tuple[float, ...]
     outer_gradient_l2: float | None
     outer_gradient_mixed_loop: tuple[float, ...]
@@ -4984,6 +5000,9 @@ class NestedLsOuterFd0Probe:
     step_relative: float
     step_scale_floor: float
     step_halving: float
+    max_halvings: int
+    noise_safety: float
+    min_step_rule: str
     ift_stab: float
     inner_linear_solver: str
     inner_maxiter: int
@@ -5062,6 +5081,67 @@ def _outer_fd0_evaluation(
     return realized, value, row
 
 
+def _outer_fd0_rung(
+    state: NestedLsOuterState,
+    native: BoozerSurface,
+    *,
+    base_surface: NDArray[np.float64],
+    base_iota: float,
+    base_g: float,
+    coil_base: NDArray[np.float64],
+    index: int,
+    step: float,
+    rung: int,
+    predicted: float,
+) -> tuple[float | None, dict[str, object]]:
+    """One rung of a direction's descent: the two legs and their error.
+
+    The denominator is the realized span ``c⁺_i − c⁻_i``, not ``2·ε``,
+    so the float64 representation of the perturbed coil never leaks into
+    a 1e-5 gate.
+    """
+
+    plus_delta, plus_value, plus_row = _outer_fd0_evaluation(
+        state,
+        native,
+        base_surface=base_surface,
+        base_iota=base_iota,
+        base_g=base_g,
+        coil_base=coil_base,
+        index=index,
+        step=step,
+    )
+    minus_delta, minus_value, minus_row = _outer_fd0_evaluation(
+        state,
+        native,
+        base_surface=base_surface,
+        base_iota=base_iota,
+        base_g=base_g,
+        coil_base=coil_base,
+        index=index,
+        step=-step,
+    )
+    span = plus_delta - minus_delta
+    difference = (plus_value - minus_value) / span if span != 0.0 else None
+    error = (
+        abs(predicted - difference) / abs(predicted)
+        if difference is not None and predicted != 0.0
+        else None
+    )
+    if error is not None and not np.isfinite(float(error)):
+        error = None
+    return error, {
+        "rung": int(rung),
+        "epsilon": float(step),
+        "realized_span": float(span),
+        "objective_plus": _json_finite(plus_value),
+        "objective_minus": _json_finite(minus_value),
+        "fd_dot": _optional_finite(difference),
+        "rel_error": _optional_finite(error),
+        "evaluations": (plus_row, minus_row),
+    }
+
+
 def _outer_fd0_evaluation_failed(row: dict[str, object]) -> str | None:
     """The fail-closed reason one perturbed evaluation carries, if any."""
 
@@ -5109,6 +5189,8 @@ def evaluate_f3_b37_outer_fd0_probe(
         *,
         rows: tuple[dict[str, object], ...] = (),
         objective: float | None = None,
+        base_objectives: tuple[float, ...] = (),
+        scatter: float | None = None,
         gradient: tuple[float, ...] = (),
         gradient_l2: float | None = None,
         cross_check: tuple[float, ...] = (),
@@ -5124,6 +5206,9 @@ def evaluate_f3_b37_outer_fd0_probe(
             G=g_const,
             reduced_grad_l2=g_value,
             objective=objective,
+            base_objectives=base_objectives,
+            base_objective_scatter=scatter,
+            scatter_repeats=int(NESTED_LS_OUTER_FD0_SCATTER_REPEATS),
             outer_gradient=gradient,
             outer_gradient_l2=gradient_l2,
             outer_gradient_mixed_loop=cross_check,
@@ -5136,6 +5221,9 @@ def evaluate_f3_b37_outer_fd0_probe(
             step_relative=float(NESTED_LS_OUTER_FD0_STEP_RELATIVE),
             step_scale_floor=float(NESTED_LS_OUTER_FD0_STEP_SCALE_FLOOR),
             step_halving=float(NESTED_LS_OUTER_FD0_STEP_HALVING),
+            max_halvings=int(NESTED_LS_OUTER_FD0_MAX_HALVINGS),
+            noise_safety=float(NESTED_LS_OUTER_FD0_NOISE_SAFETY),
+            min_step_rule=str(NESTED_LS_OUTER_FD0_MIN_STEP_RULE),
             ift_stab=float(F3_B37_IFT_STAB),
             inner_linear_solver="dense_lu",
             inner_maxiter=int(NESTED_LS_NEWTON_MAXITER),
@@ -5187,25 +5275,85 @@ def evaluate_f3_b37_outer_fd0_probe(
         return _empty(
             "adjoint_residual_unmet",
             objective=_json_finite(objective),
+            base_objectives=(float(objective),),
             gradient=gradient_tuple,
             gradient_l2=_json_finite(gradient_l2),
             cross_check=cross_check_tuple,
             cross_check_max_abs=cross_check_max_abs,
             live_eta=_json_finite(live_eta),
         )
+    # The noise floor is measured here, not guessed: repeat the base
+    # point's own inner re-solve and J evaluation exactly as an FD leg
+    # runs one, and let the spread of those values set how far any
+    # direction may descend.
+    base_objectives = [float(objective)]
+    for _repeat in range(int(NESTED_LS_OUTER_FD0_SCATTER_REPEATS)):
+        state.set_anchor(base_surface, base_iota, base_g)
+        repeat_value, _repeat_gradient, _repeat_solution = _nested_ls_outer_objective(
+            state, coil_base
+        )
+        del _repeat_gradient, _repeat_solution
+        base_objectives.append(float(repeat_value))
+    scatter = float(
+        max(abs(left - right) for left in base_objectives for right in base_objectives)
+    )
+    print(
+        f"outer fd0 base scatter delta_J={scatter!r} over {len(base_objectives)}"
+        " base evaluations",
+        flush=True,
+    )
     rows: list[dict[str, object]] = []
     fail_reason: str | None = None
     worst: float | None = None
     passed = 0
+    tol = float(NESTED_LS_OUTER_FD0_REL_TOL)
     try:
         for index in range(coil_base.size):
-            full_step = nested_ls_outer_fd0_step(float(coil_base[index]))
-            half_step = float(NESTED_LS_OUTER_FD0_STEP_HALVING) * full_step
             predicted = float(gradient[index])
-            evaluations: list[dict[str, object]] = []
-            differences: list[float | None] = []
-            for step in (full_step, half_step):
-                plus_delta, plus_value, plus_row = _outer_fd0_evaluation(
+            step = nested_ls_outer_fd0_step(float(coil_base[index]))
+            minimum_step = nested_ls_outer_fd0_minimum_step(scatter, predicted)
+            ladder: list[dict[str, object]] = []
+            errors: list[float | None] = []
+            improved = False
+            direction_reason: str | None = None
+            error, rung = _outer_fd0_rung(
+                state,
+                rejudge_twin,
+                base_surface=base_surface,
+                base_iota=base_iota,
+                base_g=base_g,
+                coil_base=coil_base,
+                index=index,
+                step=step,
+                rung=0,
+                predicted=predicted,
+            )
+            ladder.append(rung)
+            errors.append(error)
+            print(
+                f"outer fd0 dir={index} rung=0 eps={step!r} pred={predicted!r}"
+                f" fd={rung['fd_dot']!r} rel={error!r} eps_min={minimum_step!r}",
+                flush=True,
+            )
+            # Descend while halving still buys accuracy: stop at the band
+            # with order sanity shown, at the declared depth, at the
+            # measured floor, or the moment halving stops improving.
+            while True:
+                best = min(
+                    (value for value in errors if value is not None),
+                    default=None,
+                )
+                if best is not None and best <= tol and improved:
+                    break
+                if len(ladder) > int(NESTED_LS_OUTER_FD0_MAX_HALVINGS):
+                    direction_reason = "ladder_exhausted"
+                    break
+                next_step = float(NESTED_LS_OUTER_FD0_STEP_HALVING) * step
+                if next_step < minimum_step:
+                    direction_reason = "noise_floor_reached_above_tol"
+                    break
+                step = next_step
+                error, rung = _outer_fd0_rung(
                     state,
                     rejudge_twin,
                     base_surface=base_surface,
@@ -5214,49 +5362,57 @@ def evaluate_f3_b37_outer_fd0_probe(
                     coil_base=coil_base,
                     index=index,
                     step=step,
+                    rung=len(ladder),
+                    predicted=predicted,
                 )
-                minus_delta, minus_value, minus_row = _outer_fd0_evaluation(
-                    state,
-                    rejudge_twin,
-                    base_surface=base_surface,
-                    base_iota=base_iota,
-                    base_g=base_g,
-                    coil_base=coil_base,
-                    index=index,
-                    step=-step,
+                ladder.append(rung)
+                errors.append(error)
+                previous = errors[-2]
+                halved_better = bool(
+                    error is not None
+                    and previous is not None
+                    and float(error) < float(previous)
                 )
-                evaluations.extend((plus_row, minus_row))
-                span = plus_delta - minus_delta
-                differences.append(
-                    (plus_value - minus_value) / span if span != 0.0 else None
+                print(
+                    f"outer fd0 dir={index} rung={rung['rung']} eps={step!r}"
+                    f" fd={rung['fd_dot']!r} rel={error!r}"
+                    f" improved={halved_better}",
+                    flush=True,
                 )
-            for row in evaluations:
-                reason = _outer_fd0_evaluation_failed(row)
+                if not halved_better:
+                    direction_reason = "halving_stopped_improving"
+                    break
+                improved = True
+            evaluations = [
+                evaluation
+                for entry in ladder
+                for evaluation in cast(
+                    tuple[dict[str, object], ...], entry["evaluations"]
+                )
+            ]
+            for evaluation in evaluations:
+                reason = _outer_fd0_evaluation_failed(evaluation)
                 if reason is not None and fail_reason is None:
                     fail_reason = reason
-            errors = [
-                abs(predicted - difference) / abs(predicted)
-                if difference is not None and predicted != 0.0
-                else None
-                for difference in differences
-            ]
-            finite_errors = [
-                error
-                for error in errors
-                if error is not None and np.isfinite(float(error))
-            ]
+            finite_errors = [value for value in errors if value is not None]
             better = min(finite_errors) if finite_errors else None
-            halving_reduced = bool(
-                errors[0] is not None
-                and errors[1] is not None
-                and float(errors[1]) < float(errors[0])
+            best_step = (
+                None
+                if better is None
+                else float(
+                    cast(
+                        float,
+                        ladder[errors.index(better)]["epsilon"],
+                    )
+                )
             )
             direction_pass = bool(
                 better is not None
-                and float(better) <= float(NESTED_LS_OUTER_FD0_REL_TOL)
-                and halving_reduced
+                and float(better) <= tol
+                and improved
                 and all(
-                    _outer_fd0_evaluation_failed(row) is None for row in evaluations
+                    _outer_fd0_evaluation_failed(evaluation) is None
+                    for evaluation in evaluations
                 )
             )
             passed += int(direction_pass)
@@ -5266,38 +5422,30 @@ def evaluate_f3_b37_outer_fd0_probe(
                 {
                     "index": int(index),
                     "coil_value": float(coil_base[index]),
-                    "epsilon": float(full_step),
-                    "epsilon_half": float(half_step),
-                    "predicted_dot": _json_finite(predicted),
-                    "fd_dot": _optional_finite(differences[0]),
-                    "fd_dot_half": _optional_finite(differences[1]),
-                    "rel_error": _optional_finite(errors[0]),
-                    "rel_error_half": _optional_finite(errors[1]),
-                    "better_rel_error": _optional_finite(better),
-                    "better_step": (
-                        None
-                        if better is None
-                        else float(
-                            half_step
-                            if errors[1] is not None
-                            and float(errors[1]) == float(better)
-                            else full_step
-                        )
+                    "epsilon_initial": float(
+                        cast(float, ladder[0]["epsilon"]),
                     ),
-                    "halving_reduced_error": halving_reduced,
+                    "epsilon_min": _json_finite(minimum_step),
+                    "predicted_dot": _json_finite(predicted),
+                    "rungs": int(len(ladder)),
+                    "halvings": int(len(ladder) - 1),
+                    "ladder": tuple(ladder),
+                    "better_rel_error": _optional_finite(better),
+                    "better_step": best_step,
+                    "halving_reduced_error": improved,
                     "direction_pass": direction_pass,
-                    "evaluations": tuple(evaluations),
+                    "fail_reason": direction_reason,
                 }
             )
             print(
-                f"outer fd0 dir={index} eps={full_step!r}"
-                f" pred={predicted!r} fd={differences[0]!r} fd_half={differences[1]!r}"
-                f" rel={errors[0]!r} rel_half={errors[1]!r}"
-                f" halved_better={halving_reduced} pass={direction_pass}",
+                f"outer fd0 dir={index} rungs={len(ladder)}"
+                f" best_rel={better!r} best_eps={best_step!r}"
+                f" improved={improved} pass={direction_pass}"
+                f" reason={direction_reason!r}",
                 flush=True,
             )
-            if fail_reason is None and not direction_pass:
-                fail_reason = "fd_rel_error_unmet"
+            if fail_reason is None and direction_reason is not None:
+                fail_reason = direction_reason
     finally:
         jax_boozer.biotsavart.x = np.array(coil_base, dtype=np.float64, copy=True)
         jax_boozer._refresh_coil_data()
@@ -5311,13 +5459,16 @@ def evaluate_f3_b37_outer_fd0_probe(
     if fail_reason is None and coil_after != 0.0:
         fail_reason = "coil_moved"
     if fail_reason is None and passed != int(NESTED_LS_OUTER_FD0_DIRECTIONS):
-        fail_reason = "fd_rel_error_unmet"
+        fail_reason = "directions_not_all_passed"
     return NestedLsOuterFd0Probe(
         surface_sha256=sha,
         iota=iota,
         G=g_const,
         reduced_grad_l2=g_value,
         objective=_json_finite(objective),
+        base_objectives=tuple(base_objectives),
+        base_objective_scatter=_json_finite(scatter),
+        scatter_repeats=int(NESTED_LS_OUTER_FD0_SCATTER_REPEATS),
         outer_gradient=gradient_tuple,
         outer_gradient_l2=_json_finite(gradient_l2),
         outer_gradient_mixed_loop=cross_check_tuple,
@@ -5330,6 +5481,9 @@ def evaluate_f3_b37_outer_fd0_probe(
         step_relative=float(NESTED_LS_OUTER_FD0_STEP_RELATIVE),
         step_scale_floor=float(NESTED_LS_OUTER_FD0_STEP_SCALE_FLOOR),
         step_halving=float(NESTED_LS_OUTER_FD0_STEP_HALVING),
+        max_halvings=int(NESTED_LS_OUTER_FD0_MAX_HALVINGS),
+        noise_safety=float(NESTED_LS_OUTER_FD0_NOISE_SAFETY),
+        min_step_rule=str(NESTED_LS_OUTER_FD0_MIN_STEP_RULE),
         ift_stab=float(F3_B37_IFT_STAB),
         inner_linear_solver="dense_lu",
         inner_maxiter=int(NESTED_LS_NEWTON_MAXITER),
