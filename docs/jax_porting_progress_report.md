@@ -142,7 +142,19 @@ route.
 > native-versus-JAX last-bit mechanism was discharged on 2026-08-24: with
 > FMA contraction disabled, the rebuilt native GPMO state is bitwise
 > identical to the archived JAX dump — 0 of 5,826 dipole rows differ
-> (commit `b2c099489`, `docs/jax_gpu_pm_gpmo_campaign_plan.md`).
+> (commit `b2c099489`, `docs/jax_gpu_pm_gpmo_campaign_plan.md`) — and
+> REPAIRED the same day (commit `aa04f698c`): the equality-grade
+> `thresh_angle = pi` removal is now evaluated exactly (componentwise
+> negation) in both lanes, lane-parity re-certified at full scale with FMA
+> contraction ON (163 placed dipoles, bitwise-identical endpoints, CPU
+> native vs RTX 5090 JAX). The prebuilt `simsoptpp` kernel this report's
+> native lanes load was then rebuilt from the repaired source and installed
+> 2026-08-24 (sha `41b2ca79…` → `95190afa…`; pre-swap kernel preserved as
+> `build/cp311-cp311-linux_x86_64/simsoptpp.so.pre-predicate-41b2ca79.bak`).
+> The bounded-scale table rows above are unaffected — their dewyrming
+> sweeps are structurally no-op at bounded budgets — and the PM, force,
+> strain, and curve parity suites all re-ran green against the rebuilt
+> kernel on 2026-08-24.
 >
 > A second-architecture leg (2026-08-24, NVIDIA A100-PCIE-40GB on a
 > different host, AMD EPYC 7452, glibc 2.31, jax/jaxlib 0.10.0, same
