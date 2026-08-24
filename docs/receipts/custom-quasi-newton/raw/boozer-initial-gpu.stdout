@@ -1,4 +1,0 @@
-E0802 07:10:34.498081  370359 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
-E0802 07:10:34.506363  370164 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
-NEWTON solve - True  iter=0, iota=-0.1924157185150936, ||residual||_inf = 9.076e-15
-{"backend": "cuda", "dimension": 65, "gradient_max_abs_diff": 2.084703937255128e-15, "jax_gradient_inf": 0.0038700625919860713, "jax_initial_objective": 0.0003902843220850029, "native_gradient_inf": 0.0038700625919864456, "native_initial_objective": 0.0003902843220850033, "objective_abs_diff": 3.7947076036992655e-19}

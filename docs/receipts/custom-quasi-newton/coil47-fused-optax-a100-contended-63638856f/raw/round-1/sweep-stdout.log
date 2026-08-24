@@ -1,9 +1,0 @@
- 17:05:59 up  6:17,  0 users,  load average: 4.81, 14.45, 51.29
-round=0 providers=custom,optax exit=0
-round=1 providers=optax,custom exit=0
-round=2 providers=custom,optax exit=0
-round=3 providers=optax,custom exit=0
-round=4 providers=custom,optax exit=0
-round=5 providers=optax,custom exit=0
- 17:13:04 up  6:24,  0 users,  load average: 50.51, 43.00, 51.56
-A100 CONTENDED SWEEP DONE

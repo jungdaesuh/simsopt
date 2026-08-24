@@ -1,2 +1,0 @@
-NEWTON solve - True  iter=0, iota=-0.1924157185150936, ||residual||_inf = 9.076e-15
-{"backend": "cpu", "dimension": 65, "gradient_max_abs_diff": 7.428953285870676e-16, "jax_gradient_inf": 0.0038700625919863463, "jax_initial_objective": 0.0003902843220850035, "native_gradient_inf": 0.0038700625919864456, "native_initial_objective": 0.0003902843220850033, "objective_abs_diff": 2.168404344971009e-19}
