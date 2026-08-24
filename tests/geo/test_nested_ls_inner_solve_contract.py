@@ -1,7 +1,10 @@
-"""Three-valued inner exit for the nested Boozer-LS Schur-Newton walk.
+"""Inner-solve contract for the nested Boozer-LS Schur-Newton walk.
 
-Phase 3 of ``docs/nested_ls_upgrade_implementation_plan.md``. The walk has
-always published one bit, ``success``. ``exit_status`` splits the failing
+Two Phase-3 rungs of ``docs/nested_ls_upgrade_implementation_plan.md``, both
+pure and both testable without a solve: the three-valued exit status, and the
+Delta-c sub-step ladder's point planner.
+
+The walk has always published one bit, ``success``. ``exit_status`` splits the failing
 half into ``coarse_converged`` and ``failed`` without moving ``success``, so
 these tests exist to prove two things at once: that the new status
 discriminates where it claims to, and that it changed nothing a consumer
@@ -17,12 +20,14 @@ import math
 import numpy as np
 import pytest
 from simsopt_jax_adapters.geo.nested_ls_contract import (
+    NESTED_LS_INNER_SUBSTEP_LEGS,
     NESTED_LS_NEWTON_COARSE_TOL,
     NESTED_LS_NEWTON_EXIT_COARSE_CONVERGED,
     NESTED_LS_NEWTON_EXIT_CONVERGED,
     NESTED_LS_NEWTON_EXIT_FAILED,
     NESTED_LS_NEWTON_EXIT_STATUSES,
     NESTED_LS_NEWTON_TOL,
+    nested_ls_inner_substep_points,
     nested_ls_newton_exit_status,
 )
 
@@ -230,3 +235,147 @@ def test_the_result_carries_exit_status_beside_success() -> None:
     assert "exit_status" in fields
     assert fields["exit_status"].type in ("str", str)
     assert "success" in fields
+
+
+# --------------------------------------------------------------------------
+# Inner Delta-c sub-stepping (Phase 3)
+# --------------------------------------------------------------------------
+
+
+def test_one_leg_is_the_undivided_step_and_returns_the_trial_itself() -> None:
+    """The first ladder rung must cost nothing and change nothing.
+
+    This is what makes sub-stepping free to enable: rung 1 is the step the
+    un-sub-stepped lane already takes, so a run with the ladder on
+    reproduces a run with it off exactly until the first failure.
+    """
+
+    anchor = np.array([0.25, -0.5, 1.0e-9])
+    trial = np.array([0.2531863066098380, -0.5031863066098380, 2.0e-9])
+    points = nested_ls_inner_substep_points(
+        anchor_coil_dofs=anchor, trial_coil_dofs=trial, legs=1
+    )
+    assert len(points) == 1
+    assert np.array_equal(points[0], trial)
+
+
+@pytest.mark.parametrize("legs", NESTED_LS_INNER_SUBSTEP_LEGS)
+def test_the_last_point_is_the_trial_bitwise_at_every_rung(legs: int) -> None:
+    """The endpoint is the caller's coils, not a reconstruction of them.
+
+    The outer objective is evaluated at the coils the caller named, so a
+    solve that landed at a neighbour would publish ``s*(c')`` labelled
+    ``s*(c)``. Asserted bitwise at every rung of the sealed ladder.
+    """
+
+    anchor = np.array([0.25, -0.5])
+    trial = np.array([0.2531863066098380, -0.5031863066098380])
+    points = nested_ls_inner_substep_points(
+        anchor_coil_dofs=anchor, trial_coil_dofs=trial, legs=legs
+    )
+    assert len(points) == legs
+    assert np.array_equal(points[-1], trial)
+    # And it is a copy, so a caller mutating the result cannot reach back
+    # into the trial it was handed.
+    assert points[-1] is not trial
+
+
+@pytest.mark.parametrize("legs", NESTED_LS_INNER_SUBSTEP_LEGS)
+def test_the_points_advance_monotonically_along_the_displacement(
+    legs: int,
+) -> None:
+    """Each leg is strictly further from the anchor than the last.
+
+    A ladder that repeated or reversed a point would spend solves without
+    shortening any step, which is the entire mechanism.
+    """
+
+    anchor = np.array([1.0, -2.0, 0.5])
+    trial = np.array([1.007, -2.003, 0.5072])
+    points = nested_ls_inner_substep_points(
+        anchor_coil_dofs=anchor, trial_coil_dofs=trial, legs=legs
+    )
+    distances = [float(np.linalg.norm(point - anchor)) for point in points]
+    assert distances == sorted(distances)
+    assert len(set(distances)) == legs
+    # No point overshoots the trial.
+    total = float(np.linalg.norm(trial - anchor))
+    assert distances[-1] == pytest.approx(total, rel=0.0, abs=0.0)
+
+
+def test_the_anchor_itself_is_never_a_point_to_solve_at() -> None:
+    """The anchor is already solved; re-solving it would waste a leg."""
+
+    anchor = np.array([0.25, -0.5])
+    trial = np.array([0.3, -0.45])
+    for legs in NESTED_LS_INNER_SUBSTEP_LEGS:
+        points = nested_ls_inner_substep_points(
+            anchor_coil_dofs=anchor, trial_coil_dofs=trial, legs=legs
+        )
+        assert not any(np.array_equal(point, anchor) for point in points)
+
+
+def test_each_leg_shortens_the_maximum_step_by_the_leg_count() -> None:
+    """The property the whole rung rests on, stated as a number.
+
+    The B37 failures exhaust a fixed Newton budget on a displacement of
+    3.2e-3 to 7.3e-3. Dividing into ``legs`` legs makes every step
+    ``||dc||/legs``, which is the only lever here -- the budget per leg is
+    unchanged.
+    """
+
+    anchor = np.array([1.0, -2.0])
+    trial = anchor + np.array([7.305683117781034e-3, 0.0])
+    total = float(np.linalg.norm(trial - anchor))
+    for legs in NESTED_LS_INNER_SUBSTEP_LEGS:
+        points = nested_ls_inner_substep_points(
+            anchor_coil_dofs=anchor, trial_coil_dofs=trial, legs=legs
+        )
+        walk = [anchor, *points]
+        steps = [
+            float(np.linalg.norm(walk[index + 1] - walk[index]))
+            for index in range(len(walk) - 1)
+        ]
+        assert max(steps) == pytest.approx(total / legs)
+
+
+def test_a_zero_displacement_still_yields_the_trial_at_every_rung() -> None:
+    """A trial at the anchor is a real case: scipy re-evaluates x0."""
+
+    anchor = np.array([0.25, -0.5])
+    for legs in NESTED_LS_INNER_SUBSTEP_LEGS:
+        points = nested_ls_inner_substep_points(
+            anchor_coil_dofs=anchor, trial_coil_dofs=anchor, legs=legs
+        )
+        assert len(points) == legs
+        assert np.array_equal(points[-1], anchor)
+
+
+def test_a_non_positive_leg_count_is_refused() -> None:
+    anchor = np.array([0.25, -0.5])
+    for legs in (0, -1):
+        with pytest.raises(ValueError, match="at least 1"):
+            nested_ls_inner_substep_points(
+                anchor_coil_dofs=anchor, trial_coil_dofs=anchor, legs=legs
+            )
+
+
+def test_mismatched_coil_blocks_are_refused_rather_than_broadcast() -> None:
+    """numpy would happily broadcast (1,) against (11,) and solve nonsense."""
+
+    with pytest.raises(ValueError, match="same shape"):
+        nested_ls_inner_substep_points(
+            anchor_coil_dofs=np.array([0.25]),
+            trial_coil_dofs=np.array([0.25, -0.5]),
+            legs=2,
+        )
+
+
+def test_the_sealed_ladder_starts_undivided_and_only_refines() -> None:
+    """Ladder shape, pinned: starts at 1, strictly increasing, all positive."""
+
+    ladder = NESTED_LS_INNER_SUBSTEP_LEGS
+    assert ladder[0] == 1
+    assert list(ladder) == sorted(ladder)
+    assert len(set(ladder)) == len(ladder)
+    assert all(isinstance(legs, int) and legs >= 1 for legs in ladder)
