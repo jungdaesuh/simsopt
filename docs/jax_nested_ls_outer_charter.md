@@ -215,8 +215,12 @@ rungs; a bounded negative at B37 is a legitimate closure of this charter.
 
 ## Amendment 4 (2026-08-24, pre-relaunch, after the pair-2 fault)
 
-The first B37 run died at 9.6 h when an operator-launched GPU probe
-starved its pair-2 JAX child of device memory (cuSolver init failure) —
+The first B37 run died at ~6.2 h (erratum: first written as "9.6 h"
+here and in this amendment's commit message — the correct figure is the
+sum of its completed legs, 3873 + 8558 + 3837 + ~6360 s; the commit
+message is immutable as the running rerun's producer) when an
+operator-launched GPU probe starved its next JAX child of device
+memory (cuSolver init failure) —
 an infrastructure fault, not a physics event; the incident, its
 mechanism (default XLA preallocation on the probe), and the quiet-box
 lesson are disclosed here and in the receipt narrative. Rulings for the
