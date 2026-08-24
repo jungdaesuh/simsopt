@@ -4,8 +4,7 @@ Green side: the repository manifest passes every check in
 ``scripts/jax_native_unit_coverage.py``, which implements the coverage
 contract formerly defined by
 ``docs/jax_native_unit_test_coverage_implementation_plan.md`` (Draft,
-2026-07-29; commit 6fec6e4ca; removed from this branch by the 2026-08-24 docs
-curation).
+2026-07-29; commit 6fec6e4ca).
 
 RED side: the contract requires "RED tests first" — proof that the validator
 rejects every one of the following manifest defects. Each RED test corrupts
@@ -59,8 +58,9 @@ from __future__ import annotations
 
 import copy
 import json
-from pathlib import Path
+import stat
 import sys
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -71,7 +71,7 @@ while str(REPO_ROOT) in sys.path:
 sys.path.insert(0, str(REPO_ROOT))
 sys.modules.pop("scripts", None)
 
-from scripts import jax_native_unit_coverage as COV  # noqa: E402
+from scripts import jax_native_unit_coverage as COV
 
 
 @pytest.fixture(scope="module")
@@ -126,9 +126,7 @@ def test_check_mode_exits_zero_without_touching_the_artifacts():
 
 def test_generated_document_is_reproducible_from_the_manifest(manifest):
     """The committed document is exactly what the manifest renders to."""
-    surface = COV.native_test_surface(
-        REPO_ROOT, manifest["baseline"]["upstream_authority_commit"]
-    )
+    surface = COV.native_test_surface(REPO_ROOT, COV.TRUSTED_UPSTREAM_AUTHORITY_COMMIT)
     assert COV.render_document(manifest, surface) == COV.DOC_PATH.read_text(
         encoding="utf-8"
     )
@@ -136,9 +134,7 @@ def test_generated_document_is_reproducible_from_the_manifest(manifest):
 
 def test_every_native_surface_file_has_exactly_one_row(manifest):
     """The manifest covers the pinned native surface once per file."""
-    surface = COV.native_test_surface(
-        REPO_ROOT, manifest["baseline"]["upstream_authority_commit"]
-    )
+    surface = COV.native_test_surface(REPO_ROOT, COV.TRUSTED_UPSTREAM_AUTHORITY_COMMIT)
     paths = [row["path"] for row in manifest["native_test_files"]]
 
     assert sorted(paths) == sorted(surface)
@@ -156,9 +152,7 @@ def test_unclassified_rows_are_listed_and_never_counted_as_covered(manifest):
     at all.
     """
     constructed = copy.deepcopy(manifest)
-    surface = COV.native_test_surface(
-        REPO_ROOT, constructed["baseline"]["upstream_authority_commit"]
-    )
+    surface = COV.native_test_surface(REPO_ROOT, COV.TRUSTED_UPSTREAM_AUTHORITY_COMMIT)
     target_path = constructed["native_test_files"][0]["path"]
     _row(constructed, target_path).update(
         {
@@ -274,6 +268,18 @@ def test_red_source_tree_hash_drift_is_rejected(manifest):
     message = _assert_rejected(corrupted, "source_tree_drift")
 
     assert "re-mint with --write" in message
+
+
+def test_red_manifest_cannot_replace_the_trusted_upstream_authority(manifest):
+    """A root commit that self-certifies no files cannot replace code authority."""
+    corrupted = copy.deepcopy(manifest)
+    root_commit = COV._git(REPO_ROOT, "rev-list", "--max-parents=0", "HEAD").strip()
+    assert COV.native_test_surface(REPO_ROOT, root_commit) == ()
+    corrupted["baseline"]["upstream_authority_commit"] = root_commit
+
+    message = _assert_rejected(corrupted, "upstream_authority_mismatch")
+
+    assert root_commit in message
 
 
 def test_red_orphan_jax_test_id_is_rejected(manifest):
@@ -527,6 +533,80 @@ def test_red_generated_document_drift_is_rejected(manifest, tmp_path):
 
     matching = [f for f in failures if f.startswith("generated_doc_drift:")]
     assert matching, f"expected generated_doc_drift, got {failures or 'no failures'}"
+
+
+def test_red_incomplete_contract_write_preserves_both_targets(manifest, tmp_path):
+    """An unrenderable contract fails before either --write target is replaced."""
+    corrupted = copy.deepcopy(manifest)
+    corrupted["contract"] = {}
+    manifest_path = tmp_path / "coverage_manifest.json"
+    doc_path = tmp_path / "coverage_document.md"
+    manifest_path.write_text(
+        json.dumps(corrupted, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    doc_path.write_text("original generated document\n", encoding="utf-8")
+    manifest_before = manifest_path.read_bytes()
+    doc_before = doc_path.read_bytes()
+
+    assert (
+        COV.main(["--write", "--manifest", str(manifest_path), "--doc", str(doc_path)])
+        == 1
+    )
+
+    assert manifest_path.read_bytes() == manifest_before
+    assert doc_path.read_bytes() == doc_before
+
+
+def test_write_preserves_existing_artifact_modes(manifest, tmp_path):
+    """Publishing generated artifacts must not replace their repository modes."""
+    manifest_path = tmp_path / "coverage_manifest.json"
+    doc_path = tmp_path / "coverage_document.md"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    doc_path.write_text("stale generated document\n", encoding="utf-8")
+    manifest_path.chmod(0o640)
+    doc_path.chmod(0o644)
+
+    assert (
+        COV.main(["--write", "--manifest", str(manifest_path), "--doc", str(doc_path)])
+        == 0
+    )
+
+    assert stat.S_IMODE(manifest_path.stat().st_mode) == 0o640
+    assert stat.S_IMODE(doc_path.stat().st_mode) == 0o644
+
+
+def test_red_second_replace_failure_rolls_back_and_cleans_staging(
+    manifest, tmp_path, monkeypatch
+):
+    """A failed document replace restores the manifest and removes temp files."""
+    manifest_path = tmp_path / "coverage_manifest.json"
+    doc_path = tmp_path / "coverage_document.md"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    doc_path.write_text("original generated document\n", encoding="utf-8")
+    manifest_before = manifest_path.read_bytes()
+    doc_before = doc_path.read_bytes()
+    original_replace = Path.replace
+    replace_calls = 0
+
+    def fail_second_replace(source: Path, target: Path) -> Path:
+        nonlocal replace_calls
+        replace_calls += 1
+        if replace_calls == 2:
+            raise OSError("injected document replace failure")
+        return original_replace(source, target)
+
+    monkeypatch.setattr(Path, "replace", fail_second_replace)
+
+    with pytest.raises(OSError, match="injected document replace failure"):
+        COV.main(["--write", "--manifest", str(manifest_path), "--doc", str(doc_path)])
+
+    assert manifest_path.read_bytes() == manifest_before
+    assert doc_path.read_bytes() == doc_before
+    assert list(tmp_path.glob(".*.tmp")) == []
 
 
 def test_red_missing_pinned_surface_file_is_rejected_not_crashed(manifest, monkeypatch):

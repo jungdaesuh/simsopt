@@ -1,7 +1,12 @@
 # JAX Native-Test Mirror Wave Implementation Plan
 
-**Status:** Draft
-**Last updated:** 2026-08-23
+**Status:** Completed — historical implementation plan
+**Last updated:** 2026-08-24
+
+The wave landed in `9ddae94a8`, with validator/boundary hardening in `37898306a` and the
+first `jax_equivalent` GPU-parity row in `116225d95`. The current coverage authority is
+`docs/jax_native_unit_test_coverage.md` plus its manifest and validator; this document records
+the completed scope and is not an active work queue.
 
 ## Purpose
 
@@ -69,7 +74,7 @@ its artifact names and disposition vocabulary verbatim.
   ports natively and records `constrained_segments`; the JAX adapter consumes
   `wframe.unconstrained_segments()` (`src/simsopt_jax_adapters/solve/wireframe.py:314`).
   Port geometry never executes through JAX.
-- Coverage SSOT: all five artifacts required by the 2026-07-29 plan are missing
+- Coverage SSOT: all five artifacts required by the 2026-07-29 plan landed in the wave
   (`tests/fixtures/jax_native_unit_coverage_manifest.json`,
   `scripts/jax_native_unit_coverage.py`,
   `tests/jax/test_native_unit_coverage_manifest.py`,
@@ -215,21 +220,19 @@ follows the existing integration-test convention in `tests/integration/`.
   Mitigation: one file per process (established repo law); native oracle calls stay
   inside the same single-file process.
 
-## Completion Criteria
+## Completion Record
 
-- [ ] All six units merged, per-file validations green, crucible PASS on the combined diff.
-- [ ] Every Goal bullet satisfied; the three Decisions recorded as dated manifest rows.
-- [ ] Coverage answerable by command: the manifest validator enumerates
-      mirrored / partial / missing / hybrid / native_only for every seeded domain.
-- [ ] Follow-ups filed (not gated): strict-GPU pass of the force suite; full manifest
-      population per the 2026-07-29 plan's own checklist.
+- [x] The wave artifacts, parity suites, manifest, and drift gate landed in `9ddae94a8`.
+- [x] Validator and ports-boundary hardening landed in `37898306a`; the first
+      `jax_equivalent` GPU-parity row landed in `116225d95`.
+- [x] Current validation of `tests/jax/test_native_unit_coverage_manifest.py` passes; the
+      manifest remains the commandable source for seeded-domain dispositions.
+- [x] Strict-GPU force/strain/curve-subclass suites landed in `116225d95`.
+- [ ] Deferred, not wave-gating: full native-manifest population remains follow-up work
+      under the coverage authority above.
 
-## Open Questions
+## Historical Open Questions
 
-- Confirm the three non-port rulings (CoilSet `native_only`, PortSet `hybrid_boundary`,
-  `fourier_interpolation` `native_only`) — owner: user; unit 6 freezes them once confirmed.
-- Does `force.py` cover the regularized-coil *subclasses* the native suite tests
-  (circular/rectangular subclass methods), or only the generic path? Unit 1 discovers;
-  answer determines how many `jax_partial` rows the manifest opens with.
-- Should the QS-residual frozen-data test (JAX `core/quasisymmetry.py`, currently
-  untested) join this wave as a seventh unit or ride the 2026-07-29 plan's later phases?
+- The three non-port rulings are recorded in the landed manifest; they are no longer pending
+  confirmation in this completed wave.
+- The QS-residual frozen-data test remains outside this wave and belongs to later coverage work.

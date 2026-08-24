@@ -1746,12 +1746,13 @@ def _gpmo_arbvec_remove_pairs(
     loop iterates over **dipole indices** ``j ∈ [0, N)`` (NOT over placement
     history). For each ``j`` that is currently placed (``current_signs[j] !=
     0``), search its ``Nadjacent`` nearest dipoles for the one with the
-    smallest ``cos_angle`` (most anti-aligned). If that smallest cosine is
-    ``<= cos_thresh_angle``, remove the pair (at ``thresh_angle == pi`` the
-    decision is instead the exact predicate below): revert both placements and
-    add both dipoles back to the available set. Cascaded removals are allowed
-    within a single dewyrming pass because the state propagates between
-    seed iterations.
+    smallest ``cos_angle`` (most anti-aligned). The polarization-vector
+    contract makes these unit directions, so this dot product is a cosine.
+    If that smallest cosine is ``<= cos_thresh_angle``, remove the pair (at
+    literal ``thresh_angle == pi`` the decision is instead the exact predicate
+    below): revert both placements and add both dipoles back to the available
+    set. Cascaded removals are allowed within a single dewyrming pass because
+    the state propagates between seed iterations.
 
     ``exact_pi`` is the trace-time flag for ``thresh_angle == pi``: there the
     removal test is equality-grade (``cos <= -1`` can only mean exactly
@@ -1953,9 +1954,10 @@ def _gpmo_arbvec_backtracking_active_step(
             *args,
             ndipoles=ndipoles,
             Nadjacent=spec.Nadjacent,
-            # Trace-time: ``spec.thresh_angle`` is a static meta-field, and
-            # ``math.cos`` is the same libm cosine the C++ twin gates on.
-            exact_pi=(math.cos(spec.thresh_angle) == -1.0),
+            # Trace-time: ``spec.thresh_angle`` is a static meta-field. Only the
+            # literal canonical pi selects equality-grade componentwise removal;
+            # near-pi thresholds retain the host-libm cosine comparison below.
+            exact_pi=(spec.thresh_angle == math.pi),
         ),
         lambda args: (
             args[0],
@@ -2198,11 +2200,10 @@ def gpmo_arbvec_backtracking_solve(
         thresh_angle=spec.thresh_angle,
         max_nMagnets=spec.max_nMagnets,
     )
-    # Host libm, not jnp.cos: the C++ twin thresholds on std::cos (same libm),
-    # and _gpmo_arbvec_backtracking_active_step's exact-pi gate is
-    # math.cos-derived — one cosine implementation must own BOTH the gate and
-    # the threshold, or a near-pi angle could take the FP path against a
-    # device-rounded -1.0 and re-admit the fork the exact predicate removes.
+    # Host libm, not jnp.cos: the C++ twin uses std::cos for every general
+    # threshold. The separate literal-pi gate above deliberately never derives
+    # its branch selection from this rounded cosine, so near-pi values remain on
+    # the general comparison path even when their cosine rounds to -1.0.
     cos_thresh_angle = _scalar_like(A_arr, math.cos(spec.thresh_angle))
     contributions = _gpmo_arbvec_contributions(A_arr, pol_vectors)
     col_sq = jnp.sum(contributions * contributions, axis=0)

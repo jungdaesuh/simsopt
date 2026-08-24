@@ -268,16 +268,19 @@ under this record: the three direct pairs invert (native placed count moves towa
 bitwise-identical to the JAX dump; a result byte-identical to the archived *native* dump instead
 **refutes** this record and reopens the adjudication.
 
-**Confirming replay — executed and CONFIRMED (dated 2026-08-24).** The pre-registered replay ran
+**Contract-off replay — executed, suggestive diagnostic only (dated 2026-08-24).** The pre-registered replay ran
 on 2026-08-24: `simsoptpp` rebuilt in a separate cloned build dir with `-ffp-contract=fast`
 substituted by `-ffp-contract=off` (verified on the `permanent_magnet_optimization.cpp.o` compile
-line), then the `pm4stell-64` native leg rerun at the archived configuration (`iterations=201`,
-`--history off`, OMP=8, `--repeat 2`). Result: the contract-off native endpoint is
+line), then the `pm4stell-64` native leg rerun at the archived high-level configuration (`iterations=201`,
+`--history off`, OMP=8, `--repeat 2`). The contract-off native endpoint is
 **bitwise-identical to the archived JAX dump** — `np.array_equal` true, 0 of 5,826 rows differ,
 139 placed rows, both in-process solves removing 31 antiparallel pairs where the production build
-removes 34 — and it differs from the archived *native* dump in exactly the 10 known rows. This is
-the record's ideal outcome, stronger than the minimum "three direct pairs invert": the **entire
-fork is FMA contraction**, and the adjudication record above stands confirmed. Artifacts:
+removes 34 — and it differs from the archived *native* dump in exactly the 10 known rows. This
+outcome is consistent with the FMA-contraction hypothesis, but it is **not a controlled causal
+confirmation**: the retained archive metadata reports `A_obj_sha256` `2888324a…` and
+`b_obj_sha256` `01116735…`, while both archived 2026-08-23 endpoints report `6fd19146…` and
+`d87e3be1…`. The input-byte mismatch prevents this replay from attributing the entire fork solely
+to FMA; it remains a diagnostic and does not close the adjudication by itself. Artifacts:
 `docs/receipts/evidence/pm4stell64_fork_k201_native_ffpoff_20260824.npz` (endpoint),
 `docs/receipts/evidence/pm4stell64_native_ffpoff_20260824.json` (whose
 `identity.simsoptpp.sha256` names the contract-off binary, `7c560e6b…`, against the production
@@ -312,7 +315,9 @@ family's own convention. Re-certification at the fork scale: a rebuilt native ke
 contraction left ON** (``-ffp-contract=fast``, sha ``95190afa…``) and the JAX GPU lane (RTX
 5090) produced **bitwise-identical `pm4stell-64` endpoints** at ``iterations=201``/history off —
 ``np.array_equal`` true, 163 placed on both (`docs/receipts/evidence/pm4stell64_fork_k201_{native,jaxgpu}_predicate_20260824.npz`
-+ paired JSONs/logs; identity blocks name the binaries). The bitwise cross-lane gate this
++ paired JSONs/logs; identity blocks name the binaries). Unlike the contract-off replay, both
+paired predicate archives retain the archived `A_obj_sha256` `6fd19146…` and `b_obj_sha256`
+`d87e3be1…`; this is independent, source-bound repair validation. The bitwise cross-lane gate this
 section required is restored, build-scheme-independently. Both endpoints differ from both
 archived pre-repair dumps, as the exact semantics require: the exact predicate removes the 19
 exactly-antiparallel pairs (201 − 2·19 = 163) while the FP predicates also removed rounded
@@ -320,19 +325,13 @@ near-ties (34 native-FMA / 31 uncontracted). Committed regression pins
 (`tests/jax/core/test_pm_optimization_jax_item25.py::TestGPMOArbVecBacktracking::test_thresh_pi_removal_is_exact_componentwise_negation`):
 exact pair removed, one-ULP-off pair kept (the pre-repair FP predicate removed it on every
 build), mixed ``+-0.0`` negation removed, general ``0.9 pi`` FP path unchanged with C++ oracle
-parity. Two review-hardening notes: every shipped caller of the JAX step — the jitted solve entry,
-the live-loop workflow (`src/simsopt_jax/core/pm_workflow.py`), and the step-level test
-harnesses — now derives BOTH the exact-mode gate and the general-angle threshold from the host
-libm cosine (``math.cos``), the same libm the C++ twin's ``std::cos`` uses, so one cosine
-implementation owns the branch decision and the FP threshold in both lanes and a
-device-rounded ``jnp.cos`` can no longer split them at a near-``pi`` angle (the audit caught
-the live-loop path still on ``jnp.cos`` and it was closed before landing; folding the
-derivation into the step itself — dropping the ``cos_thresh_angle`` parameter so an
-inconsistent pair is unrepresentable — is a named pre-freeze follow-up). Note the gate is
-``cos(thresh_angle) == -1.0``, not a literal ``pi`` comparison: it deliberately captures every
-angle whose cosine rounds to exactly ``-1.0`` (a ~1e-8 band around ``pi``), throughout which
-the FP test is equality-grade and the exact predicate is the correct semantics. And the exact
-predicate is precisely the moment-cancellation test (``m_j == -m_c``), which for
+parity. A 2026-08-24 review correction separates the two decisions: the general-angle
+threshold remains owned by host libm (JAX ``math.cos`` / C++ ``std::cos``), while only the
+literal canonical ``thresh_angle == pi`` selects exact componentwise removal. The prior
+rounded-cosine gate was falsified by ``pi - 1e-8``: its cosine rounds to ``-1.0``, yet its
+near-antiparallel unit-vector pair belongs to the general threshold and must be removed. Both
+lanes now pin that discriminator. The exact predicate is the moment-cancellation test
+(``m_j == -m_c``), which for
 the unit polarization vectors every in-repo builder produces coincides with antiparallelism —
 for hypothetical non-unit ``pol_vectors`` the old dot-threshold was already angle-incorrect in
 both directions, so no valid behavior is lost. Disclosures: (i) RESOLVED same day, on operator instruction: the shipped prebuilt
@@ -346,12 +345,13 @@ shipped), and the full suite re-ran green against the installed kernel (item25 6
 pm_optimization, pm_workflow_jax, mirror-parity muse/pm4stell, and the force/strain/curve
 native-oracle suites). Install-time boundary disclosed: concurrent nested-LS legs running at
 swap time keep the old inode (replacement by rename); their session was notified with the
-pin-back recipe, and any leg's loaded binary is self-recorded in its artifact identity. The committed re-cert receipts pin the leg-time sources in their
-``identity.git.changed_file_sha256`` blocks; the post-leg C++ delta is a comment trim only,
-and this is sha-proven, not asserted — replacing the committed 5-line comment inside the
-``if (cos_thresh_angle == -1.0)`` body with the pre-trim block below reproduces the leg-time
-file byte-for-byte (``6fb2bba505a629a13eba6392b9899cc8106dbdada4cfdf8263a78080a5cb64d6``,
-independently re-derived by the review's auditor from a pre-trim diff artifact):
+pin-back recipe, and any leg's loaded binary is self-recorded in its artifact identity. The
+committed re-cert receipts pin the leg-time sources in their ``identity.git.changed_file_sha256``
+blocks. They remain evidence for the literal-``pi`` campaign case, but they predate the semantic
+near-``pi`` gate correction and do not certify that new branch. The corrected source was rebuilt
+and installed locally as ``d4a6e028…b35d`` in the build tree and both venvs; the superseded
+``95190afa…`` binary is preserved as ``simsoptpp.so.pre-literal-pi-95190afa.bak``. The block
+below is retained only as the historical leg-time comment reconstruction:
 
 ```cpp
                     // thresh_angle == pi: the removal test is equality-grade
