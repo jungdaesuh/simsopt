@@ -43,6 +43,7 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_NEWTON_STAB,
     NESTED_LS_NEWTON_TOL,
     NESTED_LS_WEIGHT_INV_MODB,
+    nested_ls_newton_exit_status,
 )
 
 _Y_SIZE = FLAT675_Y_COLUMN_COUNT
@@ -218,9 +219,19 @@ class NestedLsSchurNewtonResult:
     restart-cycle count actually used. ``gmres_info`` is JAX's 0/−1
     NaN placeholder, not SciPy's iteration count. ``gmres_matvecs``
     stays 0: JAX incremental GMRES does not report operator applications.
+
+    ``success`` is the two-valued bit every consumer already reads:
+    ``reduced_gradient`` under ``tol`` on a persisted walk. ``exit_status``
+    is the three-valued refinement from ``nested_ls_newton_exit_status`` --
+    ``converged`` / ``coarse_converged`` / ``failed``. It is recorded
+    evidence, not a license: ``success`` stays true only for ``converged``,
+    so a coarse exit behaves exactly as a failure until Phase 4 of
+    ``docs/nested_ls_upgrade_implementation_plan.md`` measures the adjoint
+    error budget that would license reading it otherwise.
     """
 
     success: bool
+    exit_status: str
     persisted: bool
     iteration_count: int
     iota: float
@@ -1359,6 +1370,15 @@ def run_reduced_nested_ls_schur_newton(
     coil_after = _coil_coordinates(jax_boozer.biotsavart)
     return NestedLsSchurNewtonResult(
         success=committed_success,
+        # Derived from the same three quantities ``committed_success`` is,
+        # so ``exit_status == "converged"`` is identically ``success``; the
+        # refinement is only in what the two failing cases are called.
+        exit_status=nested_ls_newton_exit_status(
+            persisted=bool(persist),
+            finite_iterate=bool(finite_iterate),
+            reduced_gradient_l2=final_norm,
+            tol=float(tol),
+        ),
         persisted=bool(persist),
         iteration_count=iteration_count,
         iota=float(y_final[0]),

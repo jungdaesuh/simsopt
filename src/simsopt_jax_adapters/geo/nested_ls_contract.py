@@ -30,6 +30,45 @@ NESTED_LS_NEWTON_TOL: Final[float] = 1.0e-13
 NESTED_LS_NEWTON_MAXITER: Final[int] = 10
 NESTED_LS_REDUCTION_MODE: Final[str] = "cpu_ordered"
 
+# Three-valued inner exit (Phase 3 of
+# ``docs/nested_ls_upgrade_implementation_plan.md``).
+#
+# The inner Schur-Newton walk has always published one bit, ``success``, set
+# by ``reduced_gradient_l2 <= NESTED_LS_NEWTON_TOL``. That bit collapses two
+# materially different outcomes: a walk that stopped five orders of magnitude
+# short of tolerance reads the same as one that produced nothing usable. The
+# distinction is not hypothetical. In the B37 v2 diagnostic the three late
+# rejections stop at ``||g||_2`` of 1.89e-2 (eval 39), 9.93e-4 (eval 43) and
+# 4.99e-3 (eval 53), having SPENT 9, 10 and 10 of
+# ``NESTED_LS_NEWTON_MAXITER = 10`` Newton iterations -- evals 43 and 53 on
+# budget exhaustion, eval 39 on the Armijo/quality bail at its tenth step.
+#
+# Read the published ledgers carefully here: ``NestedLsInnerSolveFailed``
+# rendered that count under the label "iterations left" while passing
+# ``iteration_count``, which ``nested_ls_reduced.py`` defines as iterations
+# COMPLETED. Every rejection string sealed before that label was corrected
+# reads inverted, and taking it at face value inverts which lever these
+# failures call for: they are a budget/step-size problem, not an early bail.
+#
+# ``NESTED_LS_NEWTON_COARSE_TOL`` is DESC's production inner setting. A
+# persisted walk landing in ``(NESTED_LS_NEWTON_TOL, COARSE_TOL]`` is
+# ``coarse_converged``. That is TYPED EVIDENCE ONLY: ``success`` stays true
+# for ``converged`` alone, so every existing consumer treats a coarse exit
+# exactly as it treated a failure before this constant existed. Phase 4 must
+# measure the IFT adjoint's gradient error as a function of inner residual
+# norm before any consumer is allowed to read ``coarse_converged`` as
+# usable; until then the status is recorded and not acted on.
+NESTED_LS_NEWTON_COARSE_TOL: Final[float] = 1.0e-8
+
+NESTED_LS_NEWTON_EXIT_CONVERGED: Final[str] = "converged"
+NESTED_LS_NEWTON_EXIT_COARSE_CONVERGED: Final[str] = "coarse_converged"
+NESTED_LS_NEWTON_EXIT_FAILED: Final[str] = "failed"
+NESTED_LS_NEWTON_EXIT_STATUSES: Final[tuple[str, str, str]] = (
+    NESTED_LS_NEWTON_EXIT_CONVERGED,
+    NESTED_LS_NEWTON_EXIT_COARSE_CONVERGED,
+    NESTED_LS_NEWTON_EXIT_FAILED,
+)
+
 # Banana run_code / later timing bar. Newton does not pass stab, so it
 # keeps the method default of 0. BFGS runs first.
 NESTED_LS_BANANA_NEWTON_STAB: Final[float] = 0.0
@@ -412,6 +451,37 @@ def nested_ls_outer_attempt_fun_is_objective(
     ) == nested_ls_outer_parameter_bytes(last_evaluated_parameters)
 
 
+def nested_ls_newton_exit_status(
+    *,
+    persisted: bool,
+    finite_iterate: bool,
+    reduced_gradient_l2: float,
+    tol: float,
+    coarse_tol: float = NESTED_LS_NEWTON_COARSE_TOL,
+) -> str:
+    """Classify one inner Schur-Newton walk as converged/coarse/failed.
+
+    ``persisted`` gates everything. When the walk does not persist, the
+    result carries the START surface and start gradient, so
+    ``reduced_gradient_l2`` describes a point the result does not report;
+    classifying it by that norm would label the caller's own input as a
+    solve outcome. A non-persisted walk is ``failed``, full stop.
+
+    The bands are ordered so ``converged`` is decided first. That keeps the
+    classification correct even if a caller passes ``coarse_tol < tol``:
+    the coarse band is then empty and the status degrades to the two-valued
+    answer ``success`` already gives, rather than demoting a converged walk.
+    """
+
+    if not persisted or not finite_iterate:
+        return NESTED_LS_NEWTON_EXIT_FAILED
+    if float(reduced_gradient_l2) <= float(tol):
+        return NESTED_LS_NEWTON_EXIT_CONVERGED
+    if float(reduced_gradient_l2) <= float(coarse_tol):
+        return NESTED_LS_NEWTON_EXIT_COARSE_CONVERGED
+    return NESTED_LS_NEWTON_EXIT_FAILED
+
+
 def nested_ls_outer_ftol_zero_stop(*, ftol: float, message: str) -> bool:
     """Whether scipy claimed FTOL convergence while FTOL was disabled."""
 
@@ -509,6 +579,11 @@ __all__ = [
     "NESTED_LS_GATE6_IOTA_G_TOL",
     "NESTED_LS_GATE6_NATIVE_OMP_THREADS",
     "NESTED_LS_LABEL",
+    "NESTED_LS_NEWTON_COARSE_TOL",
+    "NESTED_LS_NEWTON_EXIT_COARSE_CONVERGED",
+    "NESTED_LS_NEWTON_EXIT_CONVERGED",
+    "NESTED_LS_NEWTON_EXIT_FAILED",
+    "NESTED_LS_NEWTON_EXIT_STATUSES",
     "NESTED_LS_NEWTON_MAXITER",
     "NESTED_LS_NEWTON_STAB",
     "NESTED_LS_NEWTON_TOL",
@@ -543,6 +618,7 @@ __all__ = [
     "NestedLsOuterCandidateStore",
     "NestedLsPhysicsNewtonKwargs",
     "nested_ls_banana_run_code_options",
+    "nested_ls_newton_exit_status",
     "nested_ls_outer_attempt_fun_is_objective",
     "nested_ls_outer_endpoint_success",
     "nested_ls_outer_ftol_zero_stop",

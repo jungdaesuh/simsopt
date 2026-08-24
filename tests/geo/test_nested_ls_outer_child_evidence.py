@@ -45,6 +45,7 @@ different but nearby anchor, which is what the bit exists to catch.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 import json
 import os
@@ -78,16 +79,23 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
 )
 from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     NestedLsInnerSolveFailed,
+    NestedLsOuterAnchor,
+    NestedLsOuterTrialReadout,
     nested_ls_runtime_identity,
 )
 
 from ._nested_ls_outer_fakes import (
+    SEED_G as _SEED_G,
+    SEED_IOTA as _SEED_IOTA,
+    fake_solved_surface,
+    fake_trial_telemetry,
+    _FakeJaxOuterState,
     _FakeBoozer,
     _FakeJaxBoozer,
-    _FakeJaxOuterState,
     _FakeObjective,
     objective_at,
 )
+
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -108,8 +116,11 @@ NEAR_ANCHOR_TRIAL = (FEASIBLE_TRIAL[0] + 1.0e-9, FEASIBLE_TRIAL[1])
 
 REJECTION_DISTANCE_SCALE = 1.0
 BUDGET = 3
-SEED_IOTA = 0.14
-SEED_G = 2.0
+# Re-exported from the shared fakes so the fake inner solve's branch has one
+# definition: fake_trial_telemetry derives its iota and G from these, and a
+# second copy here would let the two drift.
+SEED_IOTA = _SEED_IOTA
+SEED_G = _SEED_G
 LANES = ("jax", "native")
 
 # The two real scipy 1.17.1 stop lines this file replays. ``ABNORMAL`` is the
@@ -291,6 +302,40 @@ def completing_transcript() -> _FakeMinimize:
     )
 
 
+def revisits_a_trial_transcript() -> _FakeMinimize:
+    """P -> Q -> P, all after the prime, with nothing accepted.
+
+    The 38 -> 39 -> 38 replay in miniature, and the smallest transcript shape
+    that can expose the B37 v1 rolling anchor.
+
+    The driver evaluates x0 itself before replaying these steps, so the rows
+    are START, FEASIBLE_TRIAL, NEAR_ANCHOR_TRIAL, FEASIBLE_TRIAL. The x0 row
+    is the PRIME and is deliberately NOT the comparison point: priming is a
+    legitimate one-time commit (``NestedLsOuterCandidateStore.record`` commits
+    at x0 because there is no incumbent yet), and on the native lane it runs
+    off the archived seed rather than off any anchor, so its warm start is not
+    the one the later rows use.
+
+    Rows 1 and 3 carry the invariant: same coils, both after the prime, with a
+    feasible-but-unaccepted evaluation between them. Under the transactional
+    rule both warm-start from the primed incumbent and land on bitwise
+    identical surfaces. Under the rolling anchor row 3 inherits row 2's
+    iterate and lands somewhere else.
+    """
+
+    return _FakeMinimize(
+        _Attempt(
+            steps=(
+                evaluate(FEASIBLE_TRIAL),
+                evaluate(NEAR_ANCHOR_TRIAL),
+                evaluate(FEASIBLE_TRIAL),
+            ),
+            status=1,
+            message=MAXITER_STOP,
+        )
+    )
+
+
 def barrier_rounds_to_the_anchor_transcript() -> _FakeMinimize:
     """A step is accepted, then a trial so close to it that the barrier hides.
 
@@ -400,11 +445,33 @@ def _jax_inner_solve(inner_refuses: object) -> object:
     ) -> tuple[float, NDArray[np.float64]]:
         coils = np.asarray(coil_dofs, dtype=np.float64)
         if inner_refuses(coils):
-            raise NestedLsInnerSolveFailed(iteration_count=40, grad_l2=1.0, tol=1.0e-11)
-        state.set_anchor(np.array([float(np.sum(coils))]), SEED_IOTA, SEED_G)
-        state.inner_iterations = 3
-        state.inner_grad_l2 = 1.0e-14
-        state.adjoint_live_eta = 2.0e-14
+            raise NestedLsInnerSolveFailed(
+                iteration_count=40, maxiter=40, grad_l2=1.0, tol=1.0e-11
+            )
+        # Publishes a readout, exactly as production does, and commits
+        # nothing: a fake that advanced the anchor here would let the
+        # child pass while relying on the mutation the refactor deleted.
+        #
+        # The iterate depends on the WARM START, which is the committed
+        # anchor's surface. That dependence is what makes the B37 v1
+        # rolling anchor observable at all: if the anchor advanced on a
+        # rejected trial, a later evaluation at the same coils would solve
+        # from a different warm start and land somewhere else. The
+        # telemetry is five mutually distinct coil-derived numbers so a
+        # published field can be checked for being the RIGHT field.
+        telemetry = fake_trial_telemetry(coils)
+        state.last_trial = NestedLsOuterTrialReadout(
+            anchor=NestedLsOuterAnchor.at(
+                coil_dofs=coils,
+                surface_dofs=fake_solved_surface(coils, state.anchor.surface_dofs),
+                iota=telemetry["iota"],
+                G=telemetry["G"],
+                schur_lu=None,
+            ),
+            inner_iterations=int(telemetry["inner_iterations"]),
+            inner_grad_l2=telemetry["inner_grad_l2"],
+            adjoint_live_eta=telemetry["adjoint_live_eta"],
+        )
         return objective_at(coils), 2.0 * coils
 
     return solve
@@ -415,17 +482,28 @@ def _native_inner_solve(inner_refuses: object) -> object:
 
     def solve(boozer: _FakeBoozer, *, iota: float, G: float) -> dict[str, object]:
         coils = np.asarray(boozer.biotsavart.x, dtype=np.float64)
-        boozer.surface.set_dofs(np.array([float(np.sum(coils))]))
+        # The native lane's warm start is whatever surface is installed on
+        # the boozer when the solve begins, so read it before overwriting
+        # it. Ignoring it -- which this fake used to do -- makes the rolling
+        # anchor unobservable on this lane exactly as it did on the JAX one.
+        warm_start = boozer.surface.get_dofs()
+        boozer.surface.set_dofs(fake_solved_surface(coils, warm_start))
+        # Coil-derived, exactly as the JAX twin's fake is. Echoing the warm
+        # start's iota and G back -- which this fake used to do -- publishes
+        # the same number on every row, so a lane that transported the WRONG
+        # field would be indistinguishable from one that transported the
+        # right one.
+        telemetry = fake_trial_telemetry(coils)
         return {
             "success": not inner_refuses(coils),
             "bfgs_iter": 1,
-            "newton_iter": 1,
+            "newton_iter": int(telemetry["inner_iterations"]),
             "bfgs_seconds": 0.0,
             "newton_seconds": 0.0,
             "seconds": 0.0,
             "coil_delta_inf": 0.0,
-            "iota": iota,
-            "G": G,
+            "iota": telemetry["iota"],
+            "G": telemetry["G"],
         }
 
     return solve
@@ -436,8 +514,15 @@ def _jax_context(inner_refuses: object) -> jax_child._OuterRunContext:
 
     start_coils = np.asarray(START, dtype=np.float64)
     start_surface = np.array([float(np.sum(start_coils))], dtype=np.float64)
-    state = _FakeJaxOuterState()
-    state.set_anchor(start_surface, SEED_IOTA, SEED_G)
+    state = _FakeJaxOuterState(
+        NestedLsOuterAnchor.at(
+            coil_dofs=start_coils,
+            surface_dofs=start_surface,
+            iota=SEED_IOTA,
+            G=SEED_G,
+            schur_lu=None,
+        )
+    )
     return jax_child._OuterRunContext(
         state=state,
         jax_boozer=_FakeJaxBoozer(start_coils, start_surface),
@@ -687,8 +772,29 @@ def test_a_rejected_row_names_no_solved_surface_of_its_own(lane: str, monkeypatc
     solved = [row for row in rows if row["rejection_reason"] is None]
     assert len(rejected) == 1 and len(solved) == 2
 
-    start_surface_hash = _surface_hash([sum(START)])
-    feasible_surface_hash = _surface_hash([sum(FEASIBLE_TRIAL)])
+    # The warm-start chain this transcript must produce, derived from the
+    # transactional rule rather than from the trial coils.
+    #
+    # The declared start surface is the anchor only until the first feasible
+    # evaluation, which PRIMES the store: ``record`` commits at x0 exactly
+    # once (nested_ls_contract.NestedLsOuterCandidateStore.record) because
+    # there is no incumbent before it. So evaluation 1 legitimately warm-
+    # starts from evaluation 0's own iterate.
+    #
+    # Evaluation 1 is feasible and is NOT accepted when it runs, so it only
+    # stages. The rejected evaluation that follows must therefore still name
+    # evaluation 0's iterate as its anchor. That is the B37 v1 detector: a
+    # lane that advances the warm start per feasible evaluation names
+    # evaluation 1's surface there instead, and the two are different because
+    # ``fake_solved_surface`` depends on its warm start.
+    declared_start_surface = [sum(START)]
+    start_surface_hash = _surface_hash(declared_start_surface)
+    primed_surface = fake_solved_surface(START, declared_start_surface)
+    staged_surface = fake_solved_surface(FEASIBLE_TRIAL, primed_surface)
+    primed_surface_hash = _surface_hash(primed_surface)
+    solved_surface_hashes = [primed_surface_hash, _surface_hash(staged_surface)]
+    assert primed_surface_hash != start_surface_hash
+    assert solved_surface_hashes[1] != primed_surface_hash
 
     assert rejected[0]["inner_surface_sha256"] is None, (
         f"{lane} lane published inner_surface_sha256="
@@ -696,15 +802,16 @@ def test_a_rejected_row_names_no_solved_surface_of_its_own(lane: str, monkeypatc
         f"{rejected[0]['coil_dofs']}; that is the committed anchor's surface, "
         "not one this evaluation solved for"
     )
-    assert rejected[0]["anchor_surface_sha256"] == start_surface_hash, (
+    assert rejected[0]["anchor_surface_sha256"] == primed_surface_hash, (
         f"{lane} lane published anchor_surface_sha256="
-        f"{rejected[0]['anchor_surface_sha256']!r} on a row the start point "
-        "was still the committed anchor for; the forensic content the rename "
-        "was supposed to preserve is gone"
+        f"{rejected[0]['anchor_surface_sha256']!r} on a rejected row whose "
+        f"committed anchor is the primed evaluation's iterate "
+        f"({primed_surface_hash!r}). If it named the staged evaluation's "
+        f"surface ({solved_surface_hashes[1]!r}) the warm start advanced on a "
+        "feasible-but-unaccepted evaluation, which is the B37 v1 root cause."
     )
     assert [row["inner_surface_sha256"] for row in solved] == [
-        start_surface_hash,
-        feasible_surface_hash,
+        *solved_surface_hashes,
     ], (
         f"{lane} lane's solved rows name surfaces "
         f"{[row['inner_surface_sha256'] for row in solved]}, not the ones "
@@ -712,17 +819,188 @@ def test_a_rejected_row_names_no_solved_surface_of_its_own(lane: str, monkeypatc
     )
     assert [row["anchor_surface_sha256"] for row in solved] == [
         start_surface_hash,
-        start_surface_hash,
+        primed_surface_hash,
     ], (
         f"{lane} lane's solved rows name anchors "
-        f"{[row['anchor_surface_sha256'] for row in solved]}; both solved from "
-        "the start point, which was the committed anchor throughout"
+        f"{[row['anchor_surface_sha256'] for row in solved]}; the first solved "
+        "from the declared start and the second from the primed incumbent"
     )
+    # The anchor moved exactly once across three evaluations, at the prime.
+    # Two feasible evaluations and one rejection, one commit: that ratio is
+    # the transactional invariant, and it is what the old fixture could not
+    # see. This assertion used to read "the committed anchor throughout",
+    # which was true only because the old fake's solved surface at x0 was
+    # bitwise equal to the declared start surface and hid the prime.
+    assert len({row["anchor_surface_sha256"] for row in rows}) == 2
     assert solved[1]["inner_surface_sha256"] != solved[1]["anchor_surface_sha256"], (
         f"{lane} lane published the same hash for the surface an evaluation "
         "solved and the anchor it started from, so this test cannot tell the "
         "two fields apart"
     )
+
+
+@pytest.mark.parametrize("lane", LANES)
+def test_a_feasible_but_unaccepted_evaluation_does_not_move_the_warm_start(
+    lane: str, monkeypatch
+):
+    """Two evaluations at the same coils, one feasible trial between them.
+
+    This is the B37 v1 root cause stated as an executable property, at the
+    smallest scale that can hold it. v1 committed the warm start per
+    inner-feasible EVALUATION rather than per scipy-accepted iterate, so a
+    line-search trial the optimizer went on to reject still poisoned every
+    later solve. Here the middle evaluation is feasible and unaccepted; if it
+    moves the anchor, the third evaluation solves from a different warm start
+    than the first and publishes a different surface.
+
+    The assertion is bitwise, not toleranced: same coils, same anchor, same
+    arithmetic, so the only thing that can separate the two surfaces is the
+    warm start. It discriminates only because ``fake_solved_surface`` depends
+    on its warm start -- a fake whose iterate is a pure function of the trial
+    coils makes this property untestable, which is how the defect survived
+    the suite before.
+    """
+
+    payload = drive_lane(
+        lane, monkeypatch.setattr, transcript=revisits_a_trial_transcript()
+    )
+    rows = payload["outer_evals"] if lane == "jax" else payload["evaluations"]
+    assert [row["rejection_reason"] for row in rows] == [None] * 4
+
+    prime, first, middle, revisit = rows
+    assert list(prime["coil_dofs"]) == list(START)
+    assert list(first["coil_dofs"]) == list(FEASIBLE_TRIAL)
+    assert list(revisit["coil_dofs"]) == list(FEASIBLE_TRIAL)
+    assert list(middle["coil_dofs"]) == list(NEAR_ANCHOR_TRIAL)
+
+    assert first["inner_surface_sha256"] == revisit["inner_surface_sha256"], (
+        f"{lane} lane solved the same coils twice from what must be the same "
+        f"committed anchor and got {first['inner_surface_sha256']!r} then "
+        f"{revisit['inner_surface_sha256']!r}. The only input that can differ "
+        "is the warm start, so the feasible evaluation between them moved it "
+        "-- the B37 v1 rolling anchor."
+    )
+    # The middle evaluation really did solve somewhere else, so the equality
+    # above is a statement about the warm start and not an artifact of a fake
+    # that returns one surface for every input.
+    assert middle["inner_surface_sha256"] != first["inner_surface_sha256"]
+    # The committed anchor moved once, at the prime, and never again: nothing
+    # in this transcript is accepted. The prime row is excluded because its
+    # own anchor is the pre-prime one.
+    assert len({row["anchor_surface_sha256"] for row in rows[1:]}) == 1, (
+        f"{lane} lane's committed anchor moved during an attempt with no accepted step"
+    )
+
+
+def test_a_stale_trial_readout_is_refused_rather_than_published(monkeypatch):
+    """The JAX lane refuses a readout that belongs to another evaluation.
+
+    Only ``nested_ls_outer_value_and_grad`` publishes ``state.last_trial``,
+    so "the call above just ran" is an assumption about the callee, not a
+    property of the type. FD-0 already reaches the objective by another route
+    for every leg and every scatter repeat, so a readout that was not
+    refreshed is reachable today; what makes it dangerous is that it is
+    PLAUSIBLE -- the previous evaluation's iota, its residual, its adjoint
+    eta, all real numbers, stamped onto this row.
+
+    Here the fake inner solve publishes a readout for a point one ULP away
+    from the one being evaluated. Nothing about the numbers looks wrong; only
+    the provenance does, and the provenance check is the whole defence.
+    """
+
+    def solve_publishing_a_foreign_readout(
+        state: _FakeJaxOuterState,
+        coil_dofs: NDArray[np.float64],
+    ) -> tuple[float, NDArray[np.float64]]:
+        coils = np.asarray(coil_dofs, dtype=np.float64)
+        foreign = np.array(coils, copy=True)
+        foreign[0] = np.nextafter(foreign[0], np.inf)
+        telemetry = fake_trial_telemetry(foreign)
+        state.last_trial = NestedLsOuterTrialReadout(
+            anchor=NestedLsOuterAnchor.at(
+                coil_dofs=foreign,
+                surface_dofs=fake_solved_surface(foreign, state.anchor.surface_dofs),
+                iota=telemetry["iota"],
+                G=telemetry["G"],
+                schur_lu=None,
+            ),
+            inner_iterations=int(telemetry["inner_iterations"]),
+            inner_grad_l2=telemetry["inner_grad_l2"],
+            adjoint_live_eta=telemetry["adjoint_live_eta"],
+        )
+        return objective_at(coils), 2.0 * coils
+
+    context = _jax_context(refuses_only_the_failing_trial)
+    monkeypatch.setattr(
+        context.__class__, "__setattr__", object.__setattr__, raising=False
+    )
+    context = dataclasses.replace(
+        context, inner_value_and_grad=solve_publishing_a_foreign_readout
+    )
+    monkeypatch.setattr(jax_child, "nested_ls_runtime_identity", _fake_runtime_identity)
+    monkeypatch.setattr(jax_child, "minimize", completing_transcript())
+
+    with pytest.raises(RuntimeError, match="stale"):
+        jax_child._drive_outer_run(context)
+
+
+@pytest.mark.parametrize("lane", LANES)
+def test_published_inner_telemetry_is_the_field_it_names(lane: str, monkeypatch):
+    """Each telemetry field carries its OWN quantity, not a neighbour's.
+
+    Five numbers are transported from the trial readout onto every solved
+    row. Publishing ``G`` under ``inner_iota``, or the adjoint residual under
+    ``inner_grad_l2``, is a one-token slip that changes no shape and raises
+    nothing -- it just puts a plausible number under the wrong physics name,
+    which is the failure class this whole change set exists to close.
+
+    ``fake_trial_telemetry`` separates the five by orders of magnitude and
+    derives them from the coils, so this is a transport check rather than an
+    assertion that the fixture equals itself: what is being proven is WHICH
+    quantity arrived, and a swap puts a number no other field could hold.
+    """
+
+    payload = drive_lane(
+        lane, monkeypatch.setattr, transcript=revisits_a_trial_transcript()
+    )
+    rows = payload["outer_evals"] if lane == "jax" else payload["evaluations"]
+    solved = [row for row in rows if row["rejection_reason"] is None]
+    assert len(solved) == 4
+
+    # The two lanes name the same quantities differently, and only the JAX
+    # lane publishes the reduced-gradient and adjoint telemetry — the native
+    # twin's inner solve is BFGS-then-Newton and reports iteration counts
+    # instead. Map rather than branch, so the shared assertions below read
+    # identically for both.
+    fields = (
+        {
+            "inner_iota": "iota",
+            "inner_g": "G",
+            "inner_iterations": "inner_iterations",
+            "inner_grad_l2": "inner_grad_l2",
+            "adjoint_live_eta": "adjoint_live_eta",
+        }
+        if lane == "jax"
+        else {
+            "iota": "iota",
+            "G": "G",
+            "inner_newton_iter": "inner_iterations",
+        }
+    )
+
+    for row in solved:
+        expected = fake_trial_telemetry(row["coil_dofs"])
+        # Mutually distinct on this row, so no assertion below could pass
+        # against a neighbour's value by coincidence.
+        assert len({float(value) for value in expected.values()}) == len(expected)
+        for published, quantity in fields.items():
+            assert row[published] == expected[quantity], (
+                f"{lane} lane published {published}={row[published]!r}, which is "
+                f"not its {quantity} ({expected[quantity]!r}). Published values "
+                f"on this row: "
+                f"{ {k: row[k] for k in fields} }; the five distinct quantities "
+                f"were {expected}."
+            )
 
 
 @pytest.mark.parametrize("lane", LANES)

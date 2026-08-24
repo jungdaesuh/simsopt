@@ -20,7 +20,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
 import jax
 import jax.numpy as jnp
@@ -4552,15 +4552,24 @@ class NestedLsInnerSolveFailed(RuntimeError):
         self,
         *,
         iteration_count: int,
+        maxiter: int,
         grad_l2: float,
         tol: float,
     ) -> None:
+        # ``iteration_count`` is the walk's COMPLETED iterations
+        # (``nested_ls_reduced.py`` initializes it to 0 and increments only
+        # after an accepted step). This message used to render it as
+        # "N iterations left", which inverts the reading of every rejection
+        # it explains: an exhausted budget printed as an untouched one.
+        # Ledgers sealed before this correction carry the old wording; the
+        # number in them is iterations spent.
         super().__init__(
             "nested-LS inner solve did not reach the nested branch: "
-            f"{int(iteration_count)} iterations left ||grad||_2 "
-            f"{float(grad_l2)!r} above tol {float(tol)!r}."
+            f"{int(iteration_count)} of {int(maxiter)} iterations spent, "
+            f"||grad||_2 {float(grad_l2)!r} above tol {float(tol)!r}."
         )
         self.iteration_count = int(iteration_count)
+        self.maxiter = int(maxiter)
         self.grad_l2 = float(grad_l2)
         self.tol = float(tol)
 
@@ -4588,9 +4597,138 @@ class NestedLsBranchJump(RuntimeError):
         self.guard = float(guard)
 
 
+def _immutable_float64(values: object) -> NDArray[np.float64]:
+    """A read-only float64 copy, so a record cannot alias a caller's buffer."""
+
+    array = np.array(values, dtype=np.float64, copy=True)
+    array.flags.writeable = False
+    # Views of this array cannot re-enable the flag, so no caller can obtain
+    # a writable window onto it -- slices, .T, reshape and np.asarray all
+    # stay read-only. The OWNING array's flag can be set back to True by a
+    # caller that goes looking for it: numpy permits that on an array that
+    # owns its data. This is a guard against accident, not against intent,
+    # and the class docstring must not promise more than that.
+    return array
+
+
+def _writable_copy(values: NDArray[np.float64]) -> NDArray[np.float64]:
+    """A private writable copy for a consumer that keeps what it is given."""
+
+    return np.array(values, dtype=np.float64, copy=True)
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class NestedLsOuterAnchor:
+    """One committed nested point, and everything a warm start needs of it.
+
+    The four physics fields are one indivisible fact: the surface
+    ``s*(c)`` solved *those* coils and reached *that* ``(iota, G)``. They
+    were three loose mutable fields on the outer state and the B37 v1
+    root cause was exactly that looseness — a converged line-search probe
+    onto a worse Boozer sheet became the warm start because any inner
+    solve could advance them. Here the record is built whole and installed
+    whole, and only :meth:`NestedLsOuterState.commit_anchor` installs one.
+
+    ``coil_dofs`` is on the record because the predictor's displacement
+    ``δc = c_trial − c_anchor`` is undefined without it: a surface alone
+    does not say which coils it solved.
+
+    ``schur_lu`` is the slot Phase 2's predictor will read: the LU of the
+    stabilized Schur ``Ĥ_ss + stab·I`` at this point, kept as an applied
+    solve rather than an explicit inverse. ``stab = F3_B37_IFT_STAB = 0.0``
+    in production, so the factor would be of ``Ĥ_ss`` itself and not of a
+    regularized surrogate — a reader who assumes otherwise will misread the
+    predictor built on it.
+
+    It is ``None`` EVERYWHERE today, on purpose. See
+    :func:`nested_ls_outer_value_and_grad`: filling it costs a second full
+    661x661 factorization per feasible evaluation, inside the timed wall of
+    a sealed speed claim, for a consumer that does not exist yet. Do not
+    write code that assumes it is populated; Phase 2 must land the single-
+    factorization refactor described there before this field means anything.
+    """
+
+    coil_dofs: NDArray[np.float64]
+    surface_dofs: NDArray[np.float64]
+    iota: float
+    G: float
+    schur_lu: Callable[[jax.Array], jax.Array] | None
+
+    @classmethod
+    def at(
+        cls,
+        *,
+        coil_dofs: object,
+        surface_dofs: object,
+        iota: float,
+        G: float,
+        schur_lu: Callable[[jax.Array], jax.Array] | None,
+    ) -> NestedLsOuterAnchor:
+        """The only constructor: copies both blocks and freezes them."""
+
+        return cls(
+            coil_dofs=_immutable_float64(coil_dofs),
+            surface_dofs=_immutable_float64(surface_dofs),
+            iota=float(iota),
+            G=float(G),
+            schur_lu=schur_lu,
+        )
+
+
+#: Telemetry for "no trial has run here". Negative, so it cannot be
+#: mistaken for a converged solve: an ``inner_grad_l2`` or an
+#: ``adjoint_live_eta`` is a norm and cannot be negative, and an iteration
+#: count cannot be either. Zeros were the previous value and were the worst
+#: available choice — 0.0 is a PERFECT residual on both float fields, so a
+#: ``<= tol`` gate reads an unset readout as an excellent one.
+NESTED_LS_OUTER_NO_TRIAL_SENTINEL: Final[float] = -1.0
+NESTED_LS_OUTER_NO_TRIAL_SENTINEL_INT: Final[int] = -1
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class NestedLsOuterTrialReadout:
+    """What the last outer evaluation measured, published not committed.
+
+    ``anchor`` is the anchor this trial *would* become if a lane commits
+    it; reading this record advances nothing. The three telemetry fields
+    are the per-evaluation numbers callers used to read off three loose
+    mutable attributes of the state — one record so a caller cannot read
+    a live ``adjoint_live_eta`` beside a stale ``inner_iterations``.
+
+    One record does not make the record CURRENT. Only
+    :func:`nested_ls_outer_value_and_grad` publishes here, so a caller that
+    reached the objective another way is reading the previous evaluation.
+    Use :meth:`solved_at` rather than trusting position in the file.
+
+    ``eq=False`` because the generated ``__eq__`` compares numpy arrays
+    field-wise through the anchor and raises ``ValueError`` on the truth
+    value of an array; identity comparison is what every consumer wants
+    and the only thing that works.
+    """
+
+    anchor: NestedLsOuterAnchor
+    inner_iterations: int
+    inner_grad_l2: float
+    adjoint_live_eta: float
+
+    def solved_at(self, coil_dofs: object) -> bool:
+        """Whether this readout is the trial solved at ``coil_dofs``.
+
+        The staleness check the type cannot enforce. Bitwise, because the
+        question is "is this the same evaluation", not "is this nearby".
+        """
+
+        return bool(
+            np.array_equal(
+                self.anchor.coil_dofs,
+                np.asarray(coil_dofs, dtype=np.float64).reshape(-1),
+            )
+        )
+
+
 @dataclass(slots=True)
 class NestedLsOuterState:
-    """Frozen eight-term outer problem plus a rolling ``s*`` warm start.
+    """Frozen eight-term outer problem plus one committed ``s*`` warm start.
 
     The outer variable is the 11-DOF coil block. The vessel block is
     frozen at the archived bundle candidate and the 661 surface DOFs are
@@ -4598,12 +4736,30 @@ class NestedLsOuterState:
     exactly what an outer evaluation needs and a coil vector cannot
     carry: the bound flat-675 program, the frozen vessel block, the block
     slices of the 675-vector, and the anchor the next inner solve
-    warm-starts from. The anchor is the only mutable physics: every
-    accepted inner solve rolls it forward.
+    warm-starts from.
 
-    ``adjoint_live_eta``, ``inner_iterations`` and ``inner_grad_l2``
-    report the last gradient evaluation so a gate can read them without
-    widening the value-and-gradient signature.
+    The anchor moves at exactly one instant: :meth:`commit_anchor`. An
+    evaluation — however feasible, however converged — cannot advance it,
+    which is what makes a rejected line-search trial harmless by
+    construction rather than by a caller remembering to restore.
+
+    ``last_trial`` reports the last gradient evaluation so a gate can read
+    its telemetry without widening the value-and-gradient signature. Before
+    any trial has run it carries IMPOSSIBLE telemetry, not zeros: this
+    project's own fakes use values no real solve can produce precisely so a
+    lane that reads a field nobody set publishes an obvious sentinel
+    instead of a plausible number. Zeros would have been the worst
+    available choice here — ``inner_grad_l2 = 0.0`` is perfect inner
+    convergence and ``adjoint_live_eta = 0.0`` is a perfect adjoint
+    residual, so the FD-0 probe's ``live_eta <= tol`` gate would PASS on a
+    readout that measured nothing.
+
+    ``last_trial`` is written by :func:`nested_ls_outer_value_and_grad`
+    alone. Callers that reach the objective by another route — FD-0 goes
+    through ``_nested_ls_outer_objective`` for every leg and every scatter
+    repeat — do not refresh it, so a reader must confirm the readout
+    belongs to the point it thinks it does. ``last_trial.anchor.coil_dofs``
+    is the coils that trial actually solved; compare it, do not assume it.
 
     ``record_mixed_cross_check`` is off in production. A gate that wants
     the mixed term assembled the second way turns it on and reads
@@ -4616,22 +4772,21 @@ class NestedLsOuterState:
     vessel_dofs: NDArray[np.float64]
     coil_slice: slice
     surface_slice: slice
-    anchor_surface_dofs: NDArray[np.float64]
-    anchor_iota: float
-    anchor_G: float
-    adjoint_live_eta: float
-    inner_iterations: int
-    inner_grad_l2: float
+    anchor: NestedLsOuterAnchor
+    last_trial: NestedLsOuterTrialReadout
     record_mixed_cross_check: bool
     mixed_cross_check_gradient: NDArray[np.float64] | None
     mixed_cross_check_max_abs: float | None
 
-    def set_anchor(self, surface_dofs: object, iota: float, G: float) -> None:
-        """Move the rolling warm start onto one accepted nested point."""
+    def commit_anchor(self, anchor: NestedLsOuterAnchor) -> None:
+        """Install one committed nested point as the warm start.
 
-        self.anchor_surface_dofs = np.array(surface_dofs, dtype=np.float64, copy=True)
-        self.anchor_iota = float(iota)
-        self.anchor_G = float(G)
+        The single write site for the anchor. A lane calls this when its
+        outer optimizer has accepted the point, never when an evaluation
+        merely succeeded.
+        """
+
+        self.anchor = anchor
 
 
 def prepare_f3_b37_outer_state(
@@ -4680,6 +4835,14 @@ def prepare_f3_b37_outer_state(
     projected = solve_projected_y(residual_fn, surface)
     require_full_y_rank(projected)
     y_star = np.asarray(jax.device_get(projected.solution), dtype=np.float64)
+    # No adjoint has run at the start point, so it carries no Schur factor.
+    start_anchor = NestedLsOuterAnchor.at(
+        coil_dofs=coils,
+        surface_dofs=surface,
+        iota=float(y_star[0]),
+        G=float(y_star[1]),
+        schur_lu=None,
+    )
     return NestedLsOuterState(
         jax_boozer=jax_boozer,
         flat_value_and_grad=flat_value_and_grad,
@@ -4688,12 +4851,13 @@ def prepare_f3_b37_outer_state(
         ),
         coil_slice=layout.coil_slice,
         surface_slice=layout.surface_slice,
-        anchor_surface_dofs=np.array(surface, dtype=np.float64, copy=True),
-        anchor_iota=float(y_star[0]),
-        anchor_G=float(y_star[1]),
-        adjoint_live_eta=0.0,
-        inner_iterations=0,
-        inner_grad_l2=0.0,
+        anchor=start_anchor,
+        last_trial=NestedLsOuterTrialReadout(
+            anchor=start_anchor,
+            inner_iterations=NESTED_LS_OUTER_NO_TRIAL_SENTINEL_INT,
+            inner_grad_l2=NESTED_LS_OUTER_NO_TRIAL_SENTINEL,
+            adjoint_live_eta=NESTED_LS_OUTER_NO_TRIAL_SENTINEL,
+        ),
         record_mixed_cross_check=False,
         mixed_cross_check_gradient=None,
         mixed_cross_check_max_abs=None,
@@ -4704,7 +4868,7 @@ def _solve_nested_inner_at_coils(
     state: NestedLsOuterState,
     coil_dofs: NDArray[np.float64],
 ) -> NestedLsSchurNewtonResult:
-    """Re-solve ``s*(c)`` from the rolling anchor. Raise unless it lands.
+    """Re-solve ``s*(c)`` from the committed anchor. Raise unless it lands.
 
     Landing means three things: the coils never moved, the Newton reached
     the nested branch, and the branch it reached is still the anchor's.
@@ -4715,19 +4879,30 @@ def _solve_nested_inner_at_coils(
     ``iota`` left the anchor by more than
     ``NESTED_LS_OUTER_IOTA_BRANCH_GUARD`` raises
     :class:`NestedLsBranchJump`. Both take the same rejection path — the
-    last accepted geometry goes back onto the surface and the anchor is
-    left alone — so the next evaluation still warm-starts from the last
-    *accepted* point whichever signal fired.
+    last accepted geometry goes back onto the surface — so the next
+    evaluation still warm-starts from the last *accepted* point whichever
+    signal fired.
+
+    The solve is a measurement and writes nothing to the anchor, on
+    success as on failure: this returns its result and the caller decides
+    what to do with it. Advancing the warm start per feasible evaluation
+    is the B37 v1 root cause, and it is not reachable from here.
     """
 
     jax_boozer = state.jax_boozer
-    jax_boozer.surface.set_dofs(state.anchor_surface_dofs)
+    anchor = state.anchor
+    # A writable copy, never the record's own buffer: ``set_dofs`` binds
+    # what it is handed straight onto ``Dofs._x``
+    # (``simsopt/_core/optimizable.py:364``), so passing the anchor array
+    # itself would put the committed warm start inside a mutable object
+    # the solve is about to write through.
+    jax_boozer.surface.set_dofs(_writable_copy(anchor.surface_dofs))
     jax_boozer.biotsavart.x = np.array(coil_dofs, dtype=np.float64, copy=True)
     jax_boozer._refresh_coil_data()
     solution = run_reduced_nested_ls_schur_newton(
         jax_boozer,
-        iota=state.anchor_iota,
-        G=state.anchor_G,
+        iota=anchor.iota,
+        G=anchor.G,
         stab=float(F3_B37_IFT_STAB),
         maxiter=int(NESTED_LS_NEWTON_MAXITER),
         linear_solver="dense_lu",
@@ -4746,13 +4921,14 @@ def _solve_nested_inner_at_coils(
     if not solution.success:
         rejection = NestedLsInnerSolveFailed(
             iteration_count=int(solution.iteration_count),
+            maxiter=int(NESTED_LS_NEWTON_MAXITER),
             grad_l2=grad_l2,
             tol=float(NESTED_LS_NEWTON_TOL),
         )
-    elif abs(float(solution.iota) - state.anchor_iota) > guard:
+    elif abs(float(solution.iota) - anchor.iota) > guard:
         rejection = NestedLsBranchJump(
             iota=float(solution.iota),
-            anchor_iota=state.anchor_iota,
+            anchor_iota=anchor.iota,
             guard=guard,
         )
     if rejection is not None:
@@ -4761,11 +4937,8 @@ def _solve_nested_inner_at_coils(
         # back before signalling: a rejected evaluation must leave no
         # trace of what it rejected. One restore for both signals, so the
         # two cannot drift apart.
-        jax_boozer.surface.set_dofs(state.anchor_surface_dofs)
+        jax_boozer.surface.set_dofs(_writable_copy(anchor.surface_dofs))
         raise rejection
-    state.set_anchor(solution.surface_dofs, solution.iota, solution.G)
-    state.inner_iterations = int(solution.iteration_count)
-    state.inner_grad_l2 = grad_l2
     return solution
 
 
@@ -4893,8 +5066,15 @@ def nested_ls_outer_value_and_grad(
     ``y = (ι, G)`` chain is inside both flat blocks because the flat
     gradient differentiates through the QR.
     Fail-closed: the inner re-solve must land at the nested branch, and
-    the value and gradient must be finite. The rolling anchor advances on
-    every success, so consecutive outer iterates warm-start each other.
+    the value and gradient must be finite.
+
+    This publishes ``state.last_trial`` and commits nothing. The readout
+    carries the evaluation's telemetry and the anchor this trial would
+    become — the solved surface, its ``(iota, G)``, the coils it solved,
+    and the LU of the Schur matrix assembled here — so a lane whose outer
+    optimizer accepts these coils has the whole committed point in hand
+    without re-deriving it. A lane that does not accept them does
+    nothing, and the warm start has not moved.
 
     Two typed signals, raised only by this path and only for these
     reasons, mark the evaluations a lane answers with the sealed
@@ -4943,7 +5123,39 @@ def nested_ls_outer_value_and_grad(
     residual_l2 = float(
         np.linalg.norm(np.asarray(jax.device_get(live_residual), dtype=np.float64))
     )
-    state.adjoint_live_eta = residual_l2 / rhs_l2 if rhs_l2 > 0.0 else 0.0
+    # The trial readout, published where the loose telemetry fields used
+    # to be written.
+    #
+    # ``schur_lu`` stays ``None`` here, deliberately. The slot exists for
+    # Phase 2's predictor, but populating it before that predictor lands
+    # is a pure regression: ``dense_schur_lu_preconditioner`` calls
+    # ``jsp_linalg.lu_factor`` EAGERLY (``nested_ls_reduced.py``), and the
+    # adjoint two lines above already factored the same matrix inside
+    # ``solve_stabilized_schur_dense_lu``, which is ``jnp.linalg.solve``
+    # and keeps no factor. Caching here therefore buys a second full
+    # 661x661 factorization per feasible outer evaluation (measured on
+    # this host, CPU fp64: solve 83 ms, lu_factor 165 ms) that nothing
+    # reads — inside the timed wall of the sealed nested_speed_claim
+    # receipts, which were measured without it.
+    #
+    # Phase 2 must not simply flip this on. The SSOT fix is to factor
+    # ONCE: replace the adjoint's ``jnp.linalg.solve`` with
+    # ``lu_factor`` + ``lu_solve`` and hand the same factor to the
+    # predictor, so the anchor's LU and the adjoint's solve are the same
+    # arithmetic rather than two independent factorizations of one
+    # matrix. Until then the honest value is ``None``.
+    state.last_trial = NestedLsOuterTrialReadout(
+        anchor=NestedLsOuterAnchor.at(
+            coil_dofs=coil,
+            surface_dofs=solution.surface_dofs,
+            iota=float(solution.iota),
+            G=float(solution.G),
+            schur_lu=None,
+        ),
+        inner_iterations=int(solution.iteration_count),
+        inner_grad_l2=float(np.linalg.norm(solution.reduced_gradient)),
+        adjoint_live_eta=residual_l2 / rhs_l2 if rhs_l2 > 0.0 else 0.0,
+    )
     residual_rt, objective_rt, _phi_rt = nested_ls_runtime_coil_closures(
         state.jax_boozer
     )
@@ -5046,9 +5258,6 @@ def _outer_fd0_evaluation(
     state: NestedLsOuterState,
     native: BoozerSurface,
     *,
-    base_surface: NDArray[np.float64],
-    base_iota: float,
-    base_g: float,
     coil_base: NDArray[np.float64],
     index: int,
     step: float,
@@ -5059,12 +5268,15 @@ def _outer_fd0_evaluation(
     and the receipt row. The displacement is read back from the perturbed
     vector rather than assumed: ``c_i + ε`` is not ``c_i`` plus exactly
     ``ε`` in float64, and a 1e-5 gate cannot absorb that.
+
+    Every leg warm-starts from the frozen base anchor because no leg can
+    move it: the gate re-pinned it by hand while a feasible evaluation
+    still advanced the anchor, and that mutation is gone.
     """
 
     coil = np.array(coil_base, dtype=np.float64, copy=True)
     coil[index] = coil_base[index] + step
     realized = float(coil[index] - coil_base[index])
-    state.set_anchor(base_surface, base_iota, base_g)
     value, _flat_gradient, solution = _nested_ls_outer_objective(state, coil)
     del _flat_gradient
     native.need_to_run_code = True
@@ -5108,9 +5320,6 @@ def _outer_fd0_rung(
     state: NestedLsOuterState,
     native: BoozerSurface,
     *,
-    base_surface: NDArray[np.float64],
-    base_iota: float,
-    base_g: float,
     coil_base: NDArray[np.float64],
     index: int,
     step: float,
@@ -5127,9 +5336,6 @@ def _outer_fd0_rung(
     plus_delta, plus_value, plus_row = _outer_fd0_evaluation(
         state,
         native,
-        base_surface=base_surface,
-        base_iota=base_iota,
-        base_g=base_g,
         coil_base=coil_base,
         index=index,
         step=step,
@@ -5137,9 +5343,6 @@ def _outer_fd0_rung(
     minus_delta, minus_value, minus_row = _outer_fd0_evaluation(
         state,
         native,
-        base_surface=base_surface,
-        base_iota=base_iota,
-        base_g=base_g,
         coil_base=coil_base,
         index=index,
         step=-step,
@@ -5273,9 +5476,6 @@ def evaluate_f3_b37_outer_fd0_probe(
         )
         del _twin_jax, _twin_target
     state = prepare_f3_b37_outer_state(jax_boozer)
-    base_surface = np.array(state.anchor_surface_dofs, dtype=np.float64, copy=True)
-    base_iota = float(state.anchor_iota)
-    base_g = float(state.anchor_G)
     # The base point is the one evaluation that also assembles the mixed
     # term the second way; the perturbed evaluations pay production cost.
     state.record_mixed_cross_check = True
@@ -5288,7 +5488,7 @@ def evaluate_f3_b37_outer_fd0_probe(
         () if cross_check is None else tuple(float(value) for value in cross_check)
     )
     cross_check_max_abs = _optional_finite(state.mixed_cross_check_max_abs)
-    live_eta = float(state.adjoint_live_eta)
+    live_eta = float(state.last_trial.adjoint_live_eta)
     print(
         f"outer fd0 base J={objective!r} ||g||_2={gradient_l2!r} live_eta={live_eta!r}"
         f" mixed_form_max_abs={cross_check_max_abs!r}",
@@ -5308,10 +5508,10 @@ def evaluate_f3_b37_outer_fd0_probe(
     # The noise floor is measured here, not guessed: repeat the base
     # point's own inner re-solve and J evaluation exactly as an FD leg
     # runs one, and let the spread of those values set how far any
-    # direction may descend.
+    # direction may descend. Every repeat re-solves from the same frozen
+    # anchor for the same reason an FD leg does: nothing here can move it.
     base_objectives = [float(objective)]
     for _repeat in range(int(NESTED_LS_OUTER_FD0_SCATTER_REPEATS)):
-        state.set_anchor(base_surface, base_iota, base_g)
         repeat_value, _repeat_gradient, _repeat_solution = _nested_ls_outer_objective(
             state, coil_base
         )
@@ -5342,9 +5542,6 @@ def evaluate_f3_b37_outer_fd0_probe(
             error, rung = _outer_fd0_rung(
                 state,
                 rejudge_twin,
-                base_surface=base_surface,
-                base_iota=base_iota,
-                base_g=base_g,
                 coil_base=coil_base,
                 index=index,
                 step=step,
@@ -5379,9 +5576,6 @@ def evaluate_f3_b37_outer_fd0_probe(
                 error, rung = _outer_fd0_rung(
                     state,
                     rejudge_twin,
-                    base_surface=base_surface,
-                    base_iota=base_iota,
-                    base_g=base_g,
                     coil_base=coil_base,
                     index=index,
                     step=step,
@@ -5587,8 +5781,10 @@ __all__ = [
     "NestedLsEndpointAdjointProbe",
     "NestedLsFlatNativeB37Probe",
     "NestedLsInnerSolveFailed",
+    "NestedLsOuterAnchor",
     "NestedLsOuterFd0Probe",
     "NestedLsOuterState",
+    "NestedLsOuterTrialReadout",
     "NestedLsSchurNewtonStepProbe",
     "NestedLsSchurNewtonWalkProbe",
     "NestedLsStep2ForcingProbe",

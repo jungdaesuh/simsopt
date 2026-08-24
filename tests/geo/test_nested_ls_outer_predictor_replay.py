@@ -648,3 +648,64 @@ def test_the_recorded_and_regenerated_anchor_hashes_are_disclosed_not_gated() ->
         objective_j=0.07471552895095307,
     )
     assert verdict.passed is True
+
+
+def test_duplicate_achieved_residuals_collapse_to_one_fit_point():
+    """Rungs that landed on the same iterate count once, not once each.
+
+    The requested inner tolerance is not the achieved residual: the Newton walk
+    overshoots a loose request, so several rungs converge to the same iterate
+    and report a bitwise-identical residual and error. Counting each of those as
+    a fit point is one point counted N times. It is not a cosmetic issue — it
+    drives the least-squares RMS residual toward zero, so the published fit
+    reads as a near-perfect power law when it actually rests on however many
+    distinct abscissae survived.
+
+    The first real run measured exactly this: five requested rungs
+    (1e-13, 1e-11, 1e-9, 1e-8, 1e-6) collapsed to TWO distinct achieved
+    residuals, three of them sharing 1.7138743890707156e-13.
+
+    Fails against the predecessor, which filtered only the reference rung and
+    non-positive values and so admitted all four non-reference rungs.
+    """
+
+    measured = (
+        (1.7138743890707156e-13, 6.757e-13),
+        (1.7138743890707156e-13, 6.757e-13),
+        (1.7138743890707156e-13, 6.757e-13),
+        (2.8933745912225497e-08, 8.244e-08),
+    )
+    points, collapsed = probe.distinct_fit_points(measured)
+
+    assert len(points) == 2, (
+        "three rungs share the achieved residual 1.7138743890707156e-13, so "
+        f"only two distinct abscissae exist; the fit was handed {len(points)}"
+    )
+    assert collapsed == 2, (
+        "two of the three duplicates must be reported as collapsed so the "
+        f"receipt can disclose them; got {collapsed}"
+    )
+    assert [residual for residual, _error in points] == sorted(
+        {residual for residual, _error in measured}
+    ), "the surviving abscissae must be the distinct residuals, in order"
+
+
+def test_fit_points_drop_values_a_log_fit_cannot_take():
+    """A non-positive residual or error is excluded, not passed to log10.
+
+    The reference rung's error against itself is identically zero. Handing that
+    to a log-log fit is a domain error, so it has to be filtered before the fit
+    rather than guarded inside it.
+    """
+
+    points, collapsed = probe.distinct_fit_points(
+        ((1.0e-13, 0.0), (0.0, 1.0e-9), (-1.0e-13, 1.0e-9), (1.0e-8, 1.0e-6))
+    )
+
+    assert points == ((1.0e-8, 1.0e-6),), (
+        f"only the strictly positive pair can enter a log-log fit; got {points}"
+    )
+    assert collapsed == 0, (
+        "values dropped for being non-positive are not duplicate abscissae "
+        f"and must not be counted as collapsed; got {collapsed}"
+    )
