@@ -1734,12 +1734,14 @@ class TestGPMOArbVecBacktracking:
     def test_thresh_pi_removal_is_exact_componentwise_negation(self):
         """At ``thresh_angle == pi`` dewyrming removes EXACT antiparallel pairs only.
 
-        ``cos(pi) == -1.0`` exactly, so the removal test is equality-grade and
-        is evaluated exactly (componentwise negation), never through the
-        rounded 3-term dot whose ``<= -1.0`` outcome forks between
-        FMA-contracted and plain-rounded builds of the C++ twin (the
-        pm4stell-64 133-vs-139 placed fork, adjudicated 2026-08-23 and
-        replay-confirmed 2026-08-24). Four behaviors pinned here:
+        The literal canonical ``pi`` selects the equality-grade removal test,
+        evaluated exactly (componentwise negation), never through the rounded
+        3-term dot whose ``<= -1.0`` outcome forks between FMA-contracted and
+        plain-rounded builds of the C++ twin (the pm4stell-64 133-vs-139 placed
+        fork, adjudicated 2026-08-23). The later FFP-off replay matched the
+        archived JAX endpoint but used different input hashes, so it is
+        suggestive rather than controlled causal confirmation. Five behaviors
+        are pinned here:
 
         1. an exactly antiparallel adjacent pair is removed (C++ oracle
            agrees: its rounded dot of exact negations is exactly -1.0 here);
@@ -1751,7 +1753,10 @@ class TestGPMOArbVecBacktracking:
            shipped prebuilt kernel was rebuilt from the repaired source
            (re-cert: docs/receipts/evidence/pm4stell64_*_predicate_20260824.*);
         4. a general threshold (0.9 pi) keeps the FP-dot path: the exact pair
-           is still removed there, C++ oracle compared.
+           is still removed there, C++ oracle compared;
+        5. ``pi - 1e-8`` remains a general threshold even though its host cosine
+           rounds to ``-1.0``: it removes a unit-scale near-antiparallel pair
+           that literal ``pi`` correctly keeps.
         """
 
         def _endpoints(d1_vec, thresh_angle):
@@ -1820,6 +1825,18 @@ class TestGPMOArbVecBacktracking:
         jax_placed, cpp_placed = _endpoints([-1.0, 0.0, 0.0], 0.9 * pi)
         assert jax_placed == 0
         assert cpp_placed == 0
+
+        near_pi = pi - 1.0e-8
+        near_antiparallel = [-1.0, 1.0e-8, 0.0]
+        assert np.linalg.norm(near_antiparallel) == 1.0
+        assert float(np.cos(near_pi)) == -1.0
+
+        near_pi_jax_placed, near_pi_cpp_placed = _endpoints(near_antiparallel, near_pi)
+        literal_pi_jax_placed, literal_pi_cpp_placed = _endpoints(near_antiparallel, pi)
+        assert near_pi_jax_placed == 0
+        assert near_pi_cpp_placed == 0
+        assert literal_pi_jax_placed == 2
+        assert literal_pi_cpp_placed == 2
 
     def test_gpmo_arbvec_backtracking_jits_under_strict_transfer_guard(self):
         """Solver compiles and executes under strict device-to-host guard."""

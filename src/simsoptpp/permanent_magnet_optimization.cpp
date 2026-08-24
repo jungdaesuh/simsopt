@@ -872,12 +872,15 @@ std::tuple<Array, Array, Array, Array, Array> GPMO_ArbVec_backtracking(
 
                 int cj_min = -1;
                 bool remove_pair;
-                if (cos_thresh_angle == -1.0) {
-                    // thresh_angle == pi is equality-grade, so the removal is
-                    // decided exactly (componentwise negation, first hit wins,
-                    // like GPMO_backtracking's integer test): the rounded
-                    // 3-term dot straddles -1.0 differently under FMA
-                    // contraction, forking the removal set between builds.
+                if (thresh_angle == M_PI) {
+                    // Only the literal canonical thresh_angle == pi is
+                    // equality-grade. Polarization vectors are unit directions,
+                    // so the general branch's 3-term dot is their cosine; do not
+                    // derive this branch from cos(thresh_angle), since a near-pi
+                    // threshold can round to -1.0. The literal-pi removal is
+                    // componentwise negation (first hit wins, like
+                    // GPMO_backtracking's integer test), avoiding FMA-dependent
+                    // rounding of the 3-term dot at the equality boundary.
                     remove_pair = false;
                     for (int jj = 0; jj < Nadjacent; ++jj) {
                         int cj = Connect(j, jj);

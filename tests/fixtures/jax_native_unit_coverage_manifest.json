@@ -3,7 +3,7 @@
     "baseline_commit": "7781d707a51c6e83173a76bf80b2d51646d65fdc",
     "baseline_commit_description": "Fork HEAD on branch pr/jax-port-squashed at which this slice was minted.",
     "native_test_surface_rule": "Every path under tests/ in upstream_authority_commit whose basename matches test_*.py. Enumerated from git, not from a working-tree glob: the fork adds test_*.py files inside the native domain directories that no path pattern can separate from upstream files.",
-    "source_tree_hash": "sha256:07cd42c50ea9c1b684bf88ad66bdcf1a001705780978e2ebc70a0fba3b663d97",
+    "source_tree_hash": "sha256:25f057c4fc97465ff59a758e88b8d2ec3b0a39f73e49f21e1ca628f023beedfb",
     "source_tree_hash_recipe": "sha256 over, for each enumerated native test file in ascending path order, the utf-8 encoding of '{path}\\n{sha256_hexdigest(working tree file bytes)}\\n'.",
     "upstream_authority_commit": "377cf665158f47a9bed4a8b03a00352457ea27c8",
     "upstream_authority_description": "merge base of this fork's HEAD with hiddenSymmetries/simsopt master; every file it lists is present in the working tree by construction"
@@ -723,11 +723,11 @@
       "evidence": [
         {
           "anchor": "def test_perturbed_curve_distance_objective_matches_native_through_bundle",
-          "cite": "tests/jax/examples/test_stochastic_samples.py:315"
+          "cite": "tests/jax/examples/test_stochastic_samples.py"
         },
         {
           "anchor": "Measured relative error 5.7e-16 (pure recombination of the same terms",
-          "cite": "tests/jax/examples/test_stochastic_samples.py:379-381"
+          "cite": "tests/jax/examples/test_stochastic_samples.py"
         },
         {
           "anchor": "def curve_curve_distance_penalty_pure(",
@@ -771,7 +771,7 @@
       "decision": {
         "decided_by": "session orchestrator under the user's 2026-08-24 execute-all directive; named-maintainer countersignature pending",
         "decided_on": "2026-08-24",
-        "proposed_by": "2026-08-23 mirror-wave plan (formerly docs/jax_native_test_mirror_wave_implementation_plan.md, commit 2221b542a; removed by the 2026-08-24 docs curation), unit 6",
+        "proposed_by": "2026-08-23 mirror-wave plan (docs/jax_native_test_mirror_wave_implementation_plan.md, commit 2221b542a), unit 6",
         "proposed_on": "2026-08-23"
       },
       "disposition": "hybrid_boundary",
@@ -806,7 +806,7 @@
         "value_or_residual",
         "shape_dtype_pytree"
       ],
-      "reason": "Port-collision geometry is one-shot host-side work with no gradient and no GPU value: it runs once to decide which wireframe segments are constrained, then the JAX RCLS lane consumes the resulting free segment index set. Porting 1032 LOC of collision geometry would buy nothing, so the boundary is retained and tested instead. The wireframe grid is 12x22 at every scale _scale_configuration defines (only the plasma quadrature varies by scale), so the JAX lane's consumed index set is the exact complement of the native wireframe's constrained segments (528 segments, 31 constrained, 497 free) at both scales, not just \"bounded\". The boundary is now verified two ways: an independent collision oracle re-derives the constrained-segment set from public wireframe geometry and a freshly built PortSet.collides predicate (never calling constrained_segments()/unconstrained_segments() internally, unlike the prior version of this test), and a second test calls the real rcls_wireframe_jax adapter and asserts its solved currents are exactly zero on every native-constrained segment and only ever nonzero on native-free segments -- strictly stronger evidence than an index-set comparison, since it proves the constraint is honored in the solved VALUES. Nothing in either test batches or broadcasts, so batching_broadcasting_edge_cases is not claimed as a covered observable.",
+      "reason": "Port-collision geometry is one-shot host-side work with no gradient and no GPU value: it runs once to decide which wireframe segments are constrained, then the JAX RCLS lane consumes the resulting free segment index set. Porting 1032 LOC of collision geometry would buy nothing, so the boundary is retained and tested instead. The wireframe grid is 12x22 at every scale _scale_configuration defines (only the plasma quadrature varies by scale), so the JAX lane's consumed index set is the exact complement of the native wireframe's constrained segments (528 segments, 31 constrained, 497 free) at both scales, not just \"bounded\". The boundary is now verified two ways: an independent collision oracle re-derives the constrained-segment set from public wireframe geometry and a freshly built PortSet.collides predicate (never calling constrained_segments()/unconstrained_segments() internally, unlike the prior version of this test), and a second test calls the real rcls_wireframe_jax adapter, compares every free-segment current with an independent native reduced-system solve, requires every native reference free current to be nonzero so a dropped free index cannot pass, and confirms all constrained currents remain zero. Nothing in either test batches or broadcasts, so batching_broadcasting_edge_cases is not claimed as a covered observable.",
       "required_lanes": {
         "jax_cpu": "passing",
         "jax_gpu": "not_applicable",
@@ -814,10 +814,10 @@
       },
       "test_ids": [
         "tests/integration/test_jax_rcls_ports_boundary.py::test_native_constrained_segments_match_independent_collision_oracle",
-        "tests/integration/test_jax_rcls_ports_boundary.py::test_jax_rcls_solution_currents_vanish_on_native_constrained_segments"
+        "tests/integration/test_jax_rcls_ports_boundary.py::test_jax_rcls_solution_currents_match_native_reduced_system"
       ],
       "title": "PortSet collision geometry and wireframe segment constraints",
-      "tolerance_owner": "not_applicable"
+      "tolerance_owner": "local_test_tolerances"
     },
     {
       "blocker": "A dedicated frozen-data unit test for non_quasi_symmetric_ratio and non_quasi_symmetric_residual_primitives is deferred to the 2026-07-29 plan's later phases (ruled 2026-08-24 not to be a seventh unit of this wave).",
@@ -877,7 +877,7 @@
       "decision": {
         "decided_by": "session orchestrator under the user's 2026-08-24 execute-all directive; named-maintainer countersignature pending",
         "decided_on": "2026-08-24",
-        "proposed_by": "2026-08-23 mirror-wave plan (formerly docs/jax_native_test_mirror_wave_implementation_plan.md, commit 2221b542a; removed by the 2026-08-24 docs curation), unit 6",
+        "proposed_by": "2026-08-23 mirror-wave plan (docs/jax_native_test_mirror_wave_implementation_plan.md, commit 2221b542a), unit 6",
         "proposed_on": "2026-08-23"
       },
       "disposition": "native_only",
@@ -922,7 +922,7 @@
       "decision": {
         "decided_by": "session orchestrator under the user's 2026-08-24 execute-all directive; named-maintainer countersignature pending",
         "decided_on": "2026-08-24",
-        "proposed_by": "2026-08-23 mirror-wave plan (formerly docs/jax_native_test_mirror_wave_implementation_plan.md, commit 2221b542a; removed by the 2026-08-24 docs curation), unit 6",
+        "proposed_by": "2026-08-23 mirror-wave plan (docs/jax_native_test_mirror_wave_implementation_plan.md, commit 2221b542a), unit 6",
         "proposed_on": "2026-08-23"
       },
       "disposition": "native_only",
@@ -1149,10 +1149,10 @@
       "native_only"
     ],
     "counting_rule": "jax_partial and jax_missing are valid planning states that fail final completion; they are never converted into a percent-covered claim. unclassified rows are listed and never counted as covered.",
-    "coverage_contract_plan": "formerly docs/jax_native_unit_test_coverage_implementation_plan.md, commit 6fec6e4ca, removed by the 2026-08-24 docs curation",
+    "coverage_contract_plan": "docs/jax_native_unit_test_coverage_implementation_plan.md, commit 6fec6e4ca",
     "coverage_contract_status": "Draft, 2026-07-29",
     "executing_wave_item": "Implementation Plan item 6 (unit 6)",
-    "executing_wave_plan": "formerly docs/jax_native_test_mirror_wave_implementation_plan.md, commit 2221b542a, removed by the 2026-08-24 docs curation",
+    "executing_wave_plan": "docs/jax_native_test_mirror_wave_implementation_plan.md, commit 2221b542a",
     "follow_ups": [
       "DONE 2026-08-24: GPU evidence for the force/strain/curve-subclass mirror suites landed \u2014 gpu_parity lane green on the RTX 5090 (3/12/75 per suite) under PYTHONPATH=src:build/cp311-cp311-linux_x86_64 JAX_ENABLE_X64=1 JAX_PLATFORMS=cuda,cpu with .venv-qn-gpu. JAX_PLATFORMS must name cuda explicitly: with it unset, pytest initializes CPU-only and the gpu lane skip-silently vanishes.",
       "Register the `jax_native_unit_parity` pytest marker in pyproject.toml and require each jax_equivalent capability to be collected by the CPU and default-backend-mode gpu_parity lanes (2026-07-29 plan step 6). Deferred here because pyproject.toml is outside this unit's file ownership.",

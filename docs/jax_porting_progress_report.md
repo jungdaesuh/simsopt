@@ -132,9 +132,10 @@ route.
 > at HEAD (fail-closed on its promoted scale tier; see Evidence
 > provenance).
 >
-> pm4stell's last-bit native-vs-JAX mechanism was discharged and repaired
-> 2026-08-24: with FMA contraction off, the native GPMO state is bitwise
-> identical to the archived JAX dump (0 of 5,826 rows, `b2c099489`); the
+> pm4stell's last-bit native-vs-JAX mechanism was repaired 2026-08-24. An
+> FMA-off diagnostic matched the archived JAX endpoint (0 of 5,826 rows,
+> `b2c099489`), but its archived input hashes differ, so that replay is
+> suggestive rather than controlled causal confirmation. Independently, the
 > `thresh_angle = pi` removal predicate is now evaluated exactly in both
 > lanes (`aa04f698c`), lane-parity re-certified at full scale with FMA on
 > (163 dipoles, bitwise endpoints). The prebuilt `simsoptpp` kernel was

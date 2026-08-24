@@ -1,14 +1,12 @@
 """Native-test coverage manifest: deterministic inventory, validation, report.
 
-This is the first executable slice of the coverage contract formerly defined
-by ``docs/jax_native_unit_test_coverage_implementation_plan.md`` (Draft,
-2026-07-29; commit 6fec6e4ca; removed from this branch by the 2026-08-24 docs
-curation). That plan originated the artifact names, the allowed disposition
-vocabulary, the required parity dimensions, and the fail-closed rules this
-module implements. It was executed for the domains seeded by the mirror-wave
-plan (formerly ``docs/jax_native_test_mirror_wave_implementation_plan.md``,
-commit 2221b542a; also removed by the 2026-08-24 docs curation), item 6 of
-its Implementation Plan.
+This is the first executable slice of the coverage contract defined by
+``docs/jax_native_unit_test_coverage_implementation_plan.md`` (Draft,
+2026-07-29; commit 6fec6e4ca). That plan originated the artifact names, the
+allowed disposition vocabulary, the required parity dimensions, and the
+fail-closed rules this module implements. It was executed for the domains
+seeded by ``docs/jax_native_test_mirror_wave_implementation_plan.md`` (commit
+2221b542a), item 6 of its Implementation Plan.
 
 Scope of this slice: rows are FILE-level for the native test surface plus
 CAPABILITY records for the seeded domains. The 2026-07-29 plan's full
@@ -53,11 +51,12 @@ friends), so ``tests/{configs,core,field,geo,mhd,objectives,solve,util}`` minus
     every path under ``tests/`` in the pinned upstream authority commit whose
     basename matches ``test_*.py``
 
-The pinned commit is ``baseline.upstream_authority_commit`` in the manifest. It
-is the merge base of this fork's HEAD with upstream ``master``, so every
-enumerated file is present in the working tree by construction. Files that
-upstream added *after* that merge base (for example ``tests/util/test_logger.py``
-at ``4ad6fd99...``) are outside this baseline and are reported as an upstream
+The trusted authority commit is code-owned, not manifest-controlled. It is the
+merge base of this fork's HEAD with upstream ``master``, so every enumerated
+file is present in the working tree by construction. A manifest repeats it as
+an auditable assertion, and validation rejects a mismatch. Files that upstream
+added *after* that merge base (for example ``tests/util/test_logger.py`` at
+``4ad6fd99...``) are outside this baseline and are reported as an upstream
 drift follow-up rather than silently classified.
 
 Source-tree hash recipe
@@ -96,29 +95,22 @@ import argparse
 import ast
 import hashlib
 import json
-from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 from typing import Any
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = REPO_ROOT / "tests/fixtures/jax_native_unit_coverage_manifest.json"
 DOC_PATH = REPO_ROOT / "docs/jax_native_unit_test_coverage.md"
 
-# Both plan documents were removed from this branch by the 2026-08-24 docs
-# curation; these hold historical citations, not live doc-relative paths, so
-# render_document renders them as plain text rather than a markdown link.
-# No validator existence check touches either constant.
-COVERAGE_CONTRACT_HISTORICAL_REFERENCE = (
-    "formerly docs/jax_native_unit_test_coverage_implementation_plan.md, "
-    "commit 6fec6e4ca, removed by the 2026-08-24 docs curation"
+COVERAGE_CONTRACT_PLAN_PATH = (
+    "docs/jax_native_unit_test_coverage_implementation_plan.md"
 )
-MIRROR_WAVE_HISTORICAL_REFERENCE = (
-    "formerly docs/jax_native_test_mirror_wave_implementation_plan.md, "
-    "commit 2221b542a, removed by the 2026-08-24 docs curation"
-)
+MIRROR_WAVE_PLAN_PATH = "docs/jax_native_test_mirror_wave_implementation_plan.md"
+TRUSTED_UPSTREAM_AUTHORITY_COMMIT = "377cf665158f47a9bed4a8b03a00352457ea27c8"
 
 # Verbatim from the 2026-07-29 plan, section "Allowed dispositions".
 ALLOWED_DISPOSITIONS = (
@@ -230,10 +222,9 @@ def load_manifest(manifest_path: Path) -> dict[str, Any]:
     return json.loads(manifest_path.read_text(encoding="utf-8"))
 
 
-def dump_manifest(manifest: dict[str, Any], manifest_path: Path) -> None:
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+def manifest_payload(manifest: dict[str, Any]) -> str:
+    """Return the canonical JSON payload that ``--write`` publishes."""
+    return json.dumps(manifest, indent=2, sort_keys=True) + "\n"
 
 
 def _reason_failures(check: str, label: str, reason: object) -> list[str]:
@@ -243,8 +234,10 @@ def _reason_failures(check: str, label: str, reason: object) -> list[str]:
         return [f"{check}: {label} has the generic reason {reason.strip()!r}"]
     if len(reason.strip()) < MINIMUM_REASON_CHARACTERS:
         return [
-            f"{check}: {label} reason is shorter than "
-            f"{MINIMUM_REASON_CHARACTERS} characters: {reason.strip()!r}"
+            (
+                f"{check}: {label} reason is shorter than "
+                f"{MINIMUM_REASON_CHARACTERS} characters: {reason.strip()!r}"
+            )
         ]
     return []
 
@@ -410,19 +403,50 @@ def _test_id_failures(
 
 def _validate_header(manifest: dict[str, Any]) -> list[str]:
     failures: list[str] = []
-    for key in ("baseline", "capabilities", "contract", "native_test_files"):
-        if key not in manifest:
-            failures.append(f"manifest_schema: missing top-level key {key!r}")
-    baseline = manifest.get("baseline", {})
+    required_containers = {
+        "baseline": dict,
+        "capabilities": list,
+        "contract": dict,
+        "native_test_files": list,
+    }
+    for key, expected_type in required_containers.items():
+        value = manifest.get(key)
+        if not isinstance(value, expected_type):
+            failures.append(
+                f"manifest_schema: top-level key {key!r} must be a "
+                f"{expected_type.__name__}"
+            )
+    if failures:
+        return failures
+
+    baseline = manifest["baseline"]
     for key in (
         "baseline_commit",
         "source_tree_hash",
         "source_tree_hash_recipe",
         "upstream_authority_commit",
+        "upstream_authority_description",
     ):
         value = baseline.get(key)
         if not isinstance(value, str) or not value.strip():
             failures.append(f"manifest_schema: baseline.{key} is missing or empty")
+    upstream_authority_commit = baseline.get("upstream_authority_commit")
+    if upstream_authority_commit != TRUSTED_UPSTREAM_AUTHORITY_COMMIT:
+        failures.append(
+            "upstream_authority_mismatch: "
+            "baseline.upstream_authority_commit must equal the code-owned "
+            f"trusted authority {TRUSTED_UPSTREAM_AUTHORITY_COMMIT}, got "
+            f"{upstream_authority_commit!r}"
+        )
+
+    contract = manifest["contract"]
+    follow_ups = contract.get("follow_ups")
+    if not isinstance(follow_ups, list) or not all(
+        isinstance(follow_up, str) for follow_up in follow_ups
+    ):
+        failures.append(
+            "manifest_schema: contract.follow_ups must be a list of strings"
+        )
     return failures
 
 
@@ -706,8 +730,7 @@ def validate(
     failures = _validate_header(manifest)
     if failures:
         return failures
-    upstream_commit = manifest["baseline"]["upstream_authority_commit"]
-    surface = native_test_surface(repo_root, upstream_commit)
+    surface = native_test_surface(repo_root, TRUSTED_UPSTREAM_AUTHORITY_COMMIT)
     failures.extend(_validate_file_rows(repo_root, manifest, surface))
     failures.extend(_validate_capabilities(repo_root, manifest, surface))
     if check_hash:
@@ -788,13 +811,13 @@ def render_document(manifest: dict[str, Any], surface: tuple[str, ...]) -> str:
     )
     lines.append("")
     lines.append(
-        f"Coverage contract: {COVERAGE_CONTRACT_HISTORICAL_REFERENCE}. "
+        f"Coverage contract: {COVERAGE_CONTRACT_PLAN_PATH}, commit 6fec6e4ca. "
         "That plan (Draft, 2026-07-29) owns the schema, the disposition "
         "vocabulary, and the fail-closed rules; this document reports them."
     )
     lines.append("")
     lines.append(
-        f"Executing wave: {MIRROR_WAVE_HISTORICAL_REFERENCE}, "
+        f"Executing wave: {MIRROR_WAVE_PLAN_PATH}, commit 2221b542a, "
         "Implementation Plan item 6."
     )
     lines.append("")
@@ -953,6 +976,52 @@ def render_document(manifest: dict[str, Any], surface: tuple[str, ...]) -> str:
     return "\n".join(lines)
 
 
+def _stage_payload(target: Path, payload: str) -> Path:
+    """Write a complete payload beside its target and return the staged path."""
+    target_mode = target.stat().st_mode & 0o777 if target.exists() else 0o644
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=target.parent,
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as staged:
+        staged.write(payload)
+        staged_path = Path(staged.name)
+    staged_path.chmod(target_mode)
+    return staged_path
+
+
+def _publish_artifacts(
+    manifest_path: Path,
+    manifest_contents: str,
+    doc_path: Path,
+    document_contents: str,
+) -> None:
+    """Publish both staged payloads, rolling back if the second replace fails."""
+    staged_paths: list[Path] = []
+    try:
+        staged_manifest = _stage_payload(manifest_path, manifest_contents)
+        staged_paths.append(staged_manifest)
+        staged_document = _stage_payload(doc_path, document_contents)
+        staged_paths.append(staged_document)
+        manifest_backup = _stage_payload(
+            manifest_path, manifest_path.read_text(encoding="utf-8")
+        )
+        staged_paths.append(manifest_backup)
+
+        staged_manifest.replace(manifest_path)
+        try:
+            staged_document.replace(doc_path)
+        except OSError:
+            manifest_backup.replace(manifest_path)
+            raise
+    finally:
+        for staged_path in staged_paths:
+            staged_path.unlink(missing_ok=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -997,13 +1066,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    surface = native_test_surface(
-        repo_root, manifest["baseline"]["upstream_authority_commit"]
-    )
+    surface = native_test_surface(repo_root, TRUSTED_UPSTREAM_AUTHORITY_COMMIT)
     if arguments.write:
         manifest["baseline"]["source_tree_hash"] = source_tree_hash(repo_root, surface)
-        dump_manifest(manifest, arguments.manifest)
-        arguments.doc.write_text(render_document(manifest, surface), encoding="utf-8")
+        manifest_contents = manifest_payload(manifest)
+        document_contents = render_document(manifest, surface)
+        _publish_artifacts(
+            arguments.manifest,
+            manifest_contents,
+            arguments.doc,
+            document_contents,
+        )
         print(
             f"jax_native_unit_coverage: wrote {arguments.manifest} and {arguments.doc}"
         )

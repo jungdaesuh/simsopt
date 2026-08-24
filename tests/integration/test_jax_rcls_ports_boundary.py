@@ -24,35 +24,34 @@ module pins that hybrid boundary at two levels:
    guaranteed true by that method's own implementation and cannot fail; the
    oracle here is a genuinely separate computation.
 
-2. ``test_jax_rcls_solution_currents_vanish_on_native_constrained_segments``
+2. ``test_jax_rcls_solution_currents_match_native_reduced_system``
    exercises the real JAX lane -- calls ``rcls_wireframe_jax`` at the
-   "bounded" scale and asserts the solved currents are exactly zero on every
-   native-constrained segment (and only ever nonzero on native-free
-   segments). Measured standalone runtime at this scale (528 segments, 256
-   plasma test points) is ~1.3 s wall on CPU (geometry + response matrix +
-   first JIT compile + solve), so the full lane is exercised directly
-   instead of falling back to an index-set-only check on the adapter's
-   consumed expression. What this pins is WHICH indices the adapter treats
-   as free: the solver writes results only through ``.at[free].set(...)``,
-   so a wrong consumed index set would place current on a constrained
-   segment and fail here. Solve accuracy itself is owned by the rcls parity
-   cases, not this boundary test; the finite/nonzero guards below reject
-   degenerate solves.
+   "bounded" scale and independently solves the native reduced system over
+   the complete native-free index set. It compares every JAX free current to
+   that reference while retaining constrained-zero and finite/nonzero guards.
+   Measured standalone runtime at this scale (528 segments, 256 plasma test
+   points) is ~1.3 s wall on CPU (geometry + response matrix + first JIT
+   compile + solve), so the full lane is exercised directly instead of
+   falling back to an index-set-only check on the adapter's consumed
+   expression. This catches a constrained index added to the solve and a
+   native-free index dropped from it. Solve accuracy is still owned by the
+   rcls parity cases; the reduced-system comparison is the discriminating
+   oracle for the consumed free-index boundary.
 
 NOT independently re-verified here: the pure set-complement arithmetic
 inside ``unconstrained_segments()`` itself (``free_segs[constrained] =
 False; return where(free_segs)``) is guaranteed correct by construction once
 ``constrained_segments()`` is correct (test 1) and ``n_segments`` is right
-(implicitly confirmed by test 2, which partitions every current onto either
-the constrained or the free set with no segment double-counted or
-dropped) -- re-deriving that same complement a second time would restate the
-same tautology the prior version of this test had, not add information.
+(confirmed by test 2, which solves directly over the full native-free set and
+compares every resulting current) -- re-deriving that same complement a
+second time would restate the same tautology the prior version of this test
+had, not add information.
 
 For the reader: at the "bounded" scale (12x22 wireframe grid) HEAD currently
 produces 528 segments total, 31 native-constrained, 497 free. These numbers
 are documentation, not assertions -- the asserted properties are the oracle
-equality (test 1) and the placement partition plus the finite/nonzero solve
-guards (test 2).
+equality (test 1) and the direct full-free reduced-system comparison plus the
+finite/nonzero solve guards (test 2).
 """
 
 from __future__ import annotations
@@ -66,9 +65,11 @@ from examples.jax.parity.cases.native_wireframe_rcls_with_ports import (
     _ports_on_surface,
     _scale_configuration,
 )
-
 from simsopt.geo import SurfaceRZFourier
-from simsopt.solve.wireframe_optimization import bnorm_obj_matrices
+from simsopt.solve.wireframe_optimization import (
+    bnorm_obj_matrices,
+    regularized_constrained_least_squares,
+)
 from simsopt_jax_adapters.solve.wireframe import rcls_wireframe_jax
 
 # Matches the ``pts_per_seg`` default of
@@ -143,19 +144,50 @@ def test_native_constrained_segments_match_independent_collision_oracle() -> Non
     )
 
 
-def test_jax_rcls_solution_currents_vanish_on_native_constrained_segments() -> None:
-    """``rcls_wireframe_jax``'s solved currents are exactly zero on every constrained segment."""
+def test_jax_rcls_solution_currents_match_native_reduced_system() -> None:
+    """JAX RCLS consumes the complete native-free segment set at the ports boundary."""
     configuration = _scale_configuration("bounded")
     plasma, wireframe = _build_geometry(configuration)
     response, target = bnorm_obj_matrices(
         wireframe, plasma, area_weighted=True, verbose=False
+    )
+    regularization_weight = float(configuration["regularization_weight"])
+
+    constrained_segments = np.asarray(wireframe.constrained_segments(), dtype=np.int64)
+    free_segments = np.asarray(wireframe.unconstrained_segments(), dtype=np.int64)
+    constraints, constraint_targets = wireframe.constraint_matrices(
+        assume_no_crossings=bool(configuration["assume_no_crossings"]),
+        remove_constrained_segments=True,
+    )
+    native_free_currents = np.asarray(
+        regularized_constrained_least_squares(
+            np.asarray(response)[:, free_segments],
+            np.asarray(target),
+            regularization_weight,
+            constraints,
+            constraint_targets,
+        ),
+        dtype=np.float64,
+    ).reshape(-1)
+
+    assert constrained_segments.size > 0, (
+        "the port geometry did not constrain any segments at this scale; "
+        "the boundary this test exists to guard cannot be exercised"
+    )
+    assert np.all(np.isfinite(native_free_currents)), (
+        "the native reduced-system reference returned non-finite currents; "
+        "the free-index boundary cannot be certified"
+    )
+    assert np.all(native_free_currents != 0.0), (
+        "a native-free segment has zero reference current, so dropping that "
+        "index would not be observable in this boundary fixture"
     )
 
     result = rcls_wireframe_jax(
         wireframe,
         jnp.asarray(response),
         jnp.asarray(target),
-        float(configuration["regularization_weight"]),
+        regularization_weight,
         assume_no_crossings=bool(configuration["assume_no_crossings"]),
     )
     currents = np.asarray(jax.device_get(result.x), dtype=np.float64).reshape(-1)
@@ -165,13 +197,6 @@ def test_jax_rcls_solution_currents_vanish_on_native_constrained_segments() -> N
         "cannot certify the constrained/free placement boundary"
     )
 
-    constrained_segments = np.asarray(wireframe.constrained_segments(), dtype=np.int64)
-    free_segments = np.asarray(wireframe.unconstrained_segments(), dtype=np.int64)
-
-    assert constrained_segments.size > 0, (
-        "the port geometry did not constrain any segments at this scale; "
-        "the boundary this test exists to guard cannot be exercised"
-    )
     np.testing.assert_array_equal(
         currents[constrained_segments], np.zeros(constrained_segments.size)
     )
@@ -184,4 +209,7 @@ def test_jax_rcls_solution_currents_vanish_on_native_constrained_segments() -> N
     assert np.all(np.isin(nonzero_segments, free_segments)), (
         "the JAX RCLS solution carries nonzero current on a segment the "
         "native wireframe marked constrained"
+    )
+    np.testing.assert_allclose(
+        currents[free_segments], native_free_currents, rtol=1.0e-6, atol=0.0
     )

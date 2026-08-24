@@ -10,19 +10,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-import simsoptpp
-
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
-from simsopt_jax.geo.permanent_magnet_grid import (
-    PermanentMagnetGridJAX,
-    mwpgp_alpha_from_grid,
-)
 import simsopt_jax.solve.permanent_magnet as _pm_solve
-from simsopt_jax.core.pm_optimization import (
-    GPMOBaselineResult as CoreGPMOBaselineResult,
-    PMOptimizationSpec,
-    mwpgp_solve,
-)
+import simsoptpp
+from benchmarks import pm_gpmo_probes
+from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 from simsopt.solve.permanent_magnet_optimization import (
     GPMO,
     MWPGP_HISTORY_STRIDE_DIVISOR,
@@ -31,6 +22,17 @@ from simsopt.solve.permanent_magnet_optimization import (
     prox_l1,
     relax_and_split,
     setup_initial_condition,
+)
+from simsopt_jax.core.pm_optimization import (
+    GPMOBaselineResult as CoreGPMOBaselineResult,
+)
+from simsopt_jax.core.pm_optimization import (
+    PMOptimizationSpec,
+    mwpgp_solve,
+)
+from simsopt_jax.geo.permanent_magnet_grid import (
+    PermanentMagnetGridJAX,
+    mwpgp_alpha_from_grid,
 )
 from simsopt_jax.solve.permanent_magnet import (
     GPMO_ArbVec_backtracking_jax,
@@ -564,6 +566,49 @@ def test_relax_and_split_jax_staging_order_contract_single_shift():
     )
     with pytest.raises(ValueError, match="contraction"):
         relax_and_split_jax(staged_shifted, alpha=alpha, max_iter=2, nu=nu)
+
+
+def test_probe_relax_split_stages_raw_ata_scale_before_host_rescale(monkeypatch):
+    """The probe stages raw ``ATA_scale`` and returns a real finite endpoint."""
+
+    cpu_grid = _gpmo_cpu_grid(seed=2031)
+    raw_ata_scale = cpu_grid.ATA_scale
+    nu = 5.0
+    staged_ata_scales: list[float] = []
+    original_stage = pm_gpmo_probes._stage_jax_grid
+
+    def rescale_for_opt(self, reg_l0, reg_l1, reg_l2, nu_value):
+        self.ATA_scale += 2.0 * reg_l2 + 1.0 / nu_value
+        return reg_l0 / (2.0 * nu_value), reg_l1 / nu_value, reg_l2, nu_value
+
+    def observe_stage(build):
+        staged_ata_scales.append(float(build.grid.ATA_scale))
+        return original_stage(build)
+
+    monkeypatch.setattr(_GPMOCPUGrid, "rescale_for_opt", rescale_for_opt, raising=False)
+    monkeypatch.setattr(pm_gpmo_probes, "_stage_jax_grid", observe_stage)
+
+    result = pm_gpmo_probes.run_jax_relax_split(
+        pm_gpmo_probes.GridBuild(
+            grid=cpu_grid,
+            seconds=0.0,
+            input_sha256={},
+            polarization_count=None,
+        ),
+        pm_gpmo_probes.RelaxSplitSpec(
+            stages=1,
+            reg_l0=0.05,
+            nu=nu,
+            max_iter=2,
+            max_iter_rs=1,
+        ),
+        repeat=1,
+    )
+
+    assert staged_ata_scales == [raw_ata_scale]
+    assert cpu_grid.ATA_scale == raw_ata_scale + 1.0 / nu
+    assert result.moments.shape == (cpu_grid.ndipoles, 3)
+    assert np.isfinite(result.moments).all()
 
 
 def test_relax_and_split_jax_matches_cpp_mwpgp_oracle_one_convex_step():

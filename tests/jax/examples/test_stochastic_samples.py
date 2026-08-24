@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from numpy.random import PCG64DXSM, Generator
+from dataclasses import replace
+
 import numpy as np
 import pytest
+from numpy.random import PCG64DXSM, Generator
 from simsopt.field import Coil, Current, coils_via_symmetries
 from simsopt.geo import (
     CurveCurveDistance,
@@ -15,7 +17,6 @@ from simsopt.geo import (
     RotatedCurve,
     create_equally_spaced_curves,
 )
-
 from simsopt_jax.core.curve_kernels import curve_curve_distance_penalty_pure
 from simsopt_jax.examples import materialize_stochastic_coil_perturbations
 
@@ -112,10 +113,31 @@ def test_materialized_sample_hash_binds_values_and_metadata() -> None:
 
     first = materialize_stochastic_coil_perturbations(sampler, seed=0, **arguments)
     repeated = materialize_stochastic_coil_perturbations(sampler, seed=0, **arguments)
-    changed = materialize_stochastic_coil_perturbations(sampler, seed=1, **arguments)
+
+    metadata_only_change = replace(first, sigma=first.sigma * 2.0)
+    changed_gamma = np.array(first.gamma, copy=True)
+    changed_gamma[0, 0, 0, 0] = np.nextafter(changed_gamma[0, 0, 0, 0], np.inf)
+    values_only_change = replace(first, gamma=changed_gamma)
 
     assert first.sha256 == repeated.sha256
-    assert changed.sha256 != first.sha256
+    np.testing.assert_array_equal(metadata_only_change.gamma, first.gamma)
+    np.testing.assert_array_equal(metadata_only_change.gammadash, first.gammadash)
+    assert metadata_only_change.sigma != first.sigma
+    assert metadata_only_change.sha256 != first.sha256
+
+    assert not np.array_equal(values_only_change.gamma, first.gamma)
+    np.testing.assert_array_equal(values_only_change.gammadash, first.gammadash)
+    assert values_only_change.seed == first.seed
+    assert values_only_change.base_curve_count == first.base_curve_count
+    assert values_only_change.source_indices == first.source_indices
+    np.testing.assert_array_equal(values_only_change.rotations, first.rotations)
+    np.testing.assert_array_equal(
+        values_only_change.sampler_points, first.sampler_points
+    )
+    assert values_only_change.sigma == first.sigma
+    assert values_only_change.length_scale == first.length_scale
+    assert values_only_change.n_derivs == first.n_derivs
+    assert values_only_change.sha256 != first.sha256
     with pytest.raises(ValueError, match="read-only"):
         first.gamma[0, 0, 0, 0] = 1.0
 
