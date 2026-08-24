@@ -240,3 +240,59 @@ relaunch, frozen before its first byte:
   lanes) are preserved as evidence of the trending verdict and of
   trajectory determinism, but are not receipt rows; the receipt is the
   rerun's own.
+
+## Closure (2026-08-24): B37 bounded negative on recovered evidence
+
+The Amendment-4 single-pair rerun (producer `997bbacd5`, launched 03:12,
+its 3-line driver log at `nested_ls_outer_b37_20260823.log`) was
+**killed at 04:33 by operator decision on the user's explicit
+instruction**, 1 h 21 m into its native leg, after the rerun's marginal
+information value collapsed: at ~04:00 the faulted run's complete
+per-eval ledgers were recovered from the driver's tempfile path and
+fingerprint-matched to the trend log (`nit=27 nfev=44`,
+`endpoint_j` to all 16 digits), and the A100 diagnostic probe had
+already reproduced the stall at identical rejection eval indices
+(1, 2, 3, 40, 41, 42, 43) on different silicon. No receipt exists and
+none is claimed; this closure rests on the recovered evidence set, each
+file sha256-pinned in the reduced-track narrative:
+
+- `nested_ls_outer_b37_20260823_recovered_jax.json` /
+  `_recovered_native.json` — the faulted run's per-eval ledgers
+  (5090 JAX lane nit=27, J=0.007253464731833192; native lane nit=37,
+  J=0.006737776589829025, its 3 rejections all `iota_branch_guard`).
+- `nested_ls_outer_b37_20260823_probe_restart.a100.{json,log}` — the
+  A100 blind-restart probe (restart_nits=[27,0]; 7+9 rejections;
+  ABNORMAL; J unchanged).
+- `nested_ls_outer_b37_20260823_trend.log` — the faulted driver's rows.
+- `nested_ls_outer_b37_20260824_transaction_replay.log` — the 5090
+  38→39→38 execution proof: old semantics reproduce the failure at the
+  optimizer's own point; transactional semantics are bitwise stable.
+
+**Verdict: bounded negative for the original (v1) algorithm at B37**,
+per this charter's own non-claims clause. Mechanism, fully discharged:
+(1) root — the rolling anchor committed per *inner-feasible evaluation*
+rather than per scipy-accepted iterate, so a converged line-search probe
+onto a worse Boozer sheet (eval 39: J ×10, ‖∇J‖ ×400, iota delta 0.0081
+— under the 0.05 guard and inside the legitimate-move band) silently
+became the warm start, after which coil vectors bitwise-equal to a
+previously solved point fail their inner solves; (2) amplifier — the
+lanes run in lockstep (‖Δx‖ ≤ 1.1e-9 through eval 38, no chaotic fork)
+until the shared post-poisoning point, where the native inner solver
+(LBFGS+Newton, tol 1e-11) recovers and the JAX inner (10 Newton
+iterations, tol 1e-13) cannot; (3) terminator — with the sealed
+`ftol=0.0`, scipy's reduction test degenerates to `f_old − f ≤ 0` and a
+terminal rejection sentinel reads as `CONVERGENCE`, `success=True`, ten
+iterations early. Erratum discharged with the ledgers: the "7
+iota-branch-guard rejections" in earlier narrative were in fact 7
+`inner_solve_failed`; the guard never fired on the JAX lane in any
+recorded run. The iota guard itself is retained unchanged (native data:
+legitimate steps ≤ 0.0108, true jumps ≥ 0.0563).
+
+The corrective contract is the transactional containment recorded in the
+preceding amendment (branch `fix-b37-restart`, commit `01fefbadd`;
+adversarially reviewed; the 38→39→38 replay above is its full-scale
+execution proof). v1 evidence cannot authorize a v2 B37: the fixed lane
+re-establishes B3 first, and only a green transactional B3 admits a B37
+v2 attempt. Note for the merge: this branch's amendment shares the
+"Amendment 4" ordinal with the fault-rerun amendment committed earlier
+at `997bbacd5`; it renumbers to Amendment 5 when the branch lands.

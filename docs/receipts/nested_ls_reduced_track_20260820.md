@@ -834,3 +834,59 @@ timing bar is the OMP sweep, not the unpinned 171 s anecdote.
 - GPU one-step and ten-step walk: live `jax_gpu_fast` drivers, not
   pytest (CPU collection skips GPU nodes). C++ reconstruct branch held.
 - B37 nested timing driver ran only after B3 `physics_matched=True`.
+
+## B37 outer verdict (2026-08-24): bounded negative, closed on recovered evidence
+
+No B37 receipt exists. The first (3-pair) run died at ~6.5 h to an
+operator GPU-probe collision (charter Amendment 4); the Amendment-4
+single-pair rerun (producer `997bbacd5`, log stub
+`nested_ls_outer_b37_20260823.log`) was killed at 04:33 by operator
+decision on the user's instruction after the faulted run's own per-eval
+ledgers were recovered and fingerprint-matched, making the rerun's
+information value ~zero. Closure basis, sha256-pinned (first 16 hex):
+
+- `nested_ls_outer_b37_20260823_recovered_jax.json` `21ddaf82562d5e56` —
+  5090 JAX lane: nit=27, nfev=44, 37 feasible + 7 rejected (ALL
+  `inner_solve_failed`; the iota guard fired zero times), endpoint
+  J `0.007253464731833192`, scipy `success=True status=0` on the FTOL
+  message with grad_inf `0.8727` ≫ gtol `1e-3`.
+- `nested_ls_outer_b37_20260823_recovered_native.json`
+  `93f6d26f612086fe` — native lane: nit=37, J `0.006737776589829025`,
+  3 rejections all `iota_branch_guard` (evals 1–3). Lanes lockstep
+  ‖Δx‖ ≤ 1.1e-9 through eval 38; fork is the inner-solver robustness
+  gap at the shared post-poisoning point, not chaos.
+- `nested_ls_outer_b37_20260823_probe_restart.a100.json`
+  `231418c31836edea` (+ `.log`) — A100 reproduction: identical
+  rejection eval indices, nit=27, values to ~1e-11 (dJ 8.5e-12);
+  blind restart restart_nits=[27,0], 9/9 restart evals rejected
+  (incl. re-evaluating its own start point), ABNORMAL.
+- `nested_ls_outer_b37_20260823_trend.log` `3034523510ecc322` — the
+  faulted driver's preserved rows.
+- `nested_ls_outer_b37_20260824_transaction_replay.log`
+  `fe17ca93210eb83f` — 5090 full-scale execution proof: under v1
+  semantics, x38 solves (J bitwise vs ledger surface, sha
+  `07c00c33e7bfddbd…`), x39 reproduces the wrong-branch capture
+  bitwise (J `0.07471552895095307`, 9 inner iterations), then x38
+  FAILS (`inner_solve_failed`, ‖g‖ 2.0087e-3); under transactional
+  semantics B1==B3 bitwise in J, gradient, and surface sha. Known
+  2-ULP cross-code-path delta vs the ledger's eval-38 J disclosed in
+  the log's FAIL lines (0-iteration vs 4-iteration inner path; the
+  harness's cross-process bitwise assertion was over-strict).
+
+Mechanism (three stacked defects, each independently proven): per-eval
+anchor commit poisoned by a feasible line-search probe (eval 39);
+JAX-vs-native inner-solver budget/tolerance asymmetry deciding which
+lane survives it; `ftol=0.0` degenerating scipy's reduction test to
+`f_old − f ≤ 0` so a terminal barrier value reads as CONVERGENCE.
+Errata discharged: "7 iota-guard rejections" → 7 `inner_solve_failed`;
+"chaotic fork" → lockstep; "curvature memory poisoned" → memory is
+wiped on the maxls path, never poisoned (sentinel NEW_X trips CONV_F
+before the (s,y) update).
+
+Corrective contract: branch `fix-b37-restart` commit `01fefbadd`
+(transactional candidate store, coherent quadratic barrier, ftol-zero
+fail-closed verdict; unit-validated, adversarially reviewed, and
+execution-proven by the replay above). Transactional B3 v2 launched
+05:19 from a detached worktree at `01fefbadd` (receipt stem
+`nested_ls_outer_b3_20260824`); B37 v2 only if B3 v2 lands green.
+No timing claim of any kind attaches to any run in this section.

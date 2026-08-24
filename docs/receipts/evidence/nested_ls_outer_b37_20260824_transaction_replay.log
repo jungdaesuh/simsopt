@@ -1,0 +1,17 @@
+92 %, 15360 MiB
+E0824 04:39:35.343638  759210 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+E0824 04:39:35.363202  758954 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+== PHASE A: old semantics (no restore) — bug must reproduce ==
+[A1 x38] J=0.007253464731833194 iota=0.14809710769644205 inner_it=0 sha=07c00c33e7bfddbd (101.2s)
+[A2 x39] J=0.07471552895095307 iota=0.13999122130082076 inner_it=9 sha=7daf6c3223b66041 (439.7s)
+[A3 x38] REJECTED NestedLsInnerSolveFailed (547.3s): nested-LS inner solve did not reach the nested branch: 10 iterations left ||grad||_2 0.0020087310206471937 above tol 1e-13.
+A3 failed as predicted: the poisoned anchor breaks the optimizer's own point.
+== PHASE B: transactional semantics (restore after every eval) ==
+[B1 x38] J=0.007253464731833194 iota=0.14809710769644205 inner_it=0 sha=07c00c33e7bfddbd (82.7s)
+[B2 x39] J=0.07471552895095307 iota=0.13999122130082076 inner_it=9 sha=7daf6c3223b66041 (434.1s)
+[B3 x38] J=0.007253464731833194 iota=0.14809710769644205 inner_it=0 sha=07c00c33e7bfddbd (43.6s)
+== VERDICT ==
+FAIL: A1 J 0.007253464731833194 != ledger 0.007253464731833192
+FAIL: B1 J 0.007253464731833194 != ledger 0.007253464731833192
+
+[exited with code 0]

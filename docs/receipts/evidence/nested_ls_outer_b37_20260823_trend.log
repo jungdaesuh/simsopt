@@ -1,0 +1,42 @@
+outer prime jax cache budget 37 maxcor 10 omp 14 omp_provenance swept_artifact git_head e2f8a65d61cc3ef0f5e17f40bb481424bdb51603
+outer b3 interlock path docs/receipts/evidence/nested_ls_outer_b3_20260823.json sha256 4701e3be9136e6b016caedcd4e24abcaa81328b34f6c125c348ec1b19c1cd0c5 pairs 3 native_omp 14 measured_j_rel_gap_max 0.0 frozen j_parity_rtol 1e-09
+outer jax success=True nit=27 nfev=44 accepted=37 rejected=7 J=0.007253464731833192 grad_l2=1.4222514565915558 wall=3873.0819187080488
+outer native success=True nit=37 nfev=57 J=0.006737776589829025 iota=0.14760038669253328 wall=8558.429445001995 omp=14
+outer jax success=True nit=27 nfev=44 accepted=37 rejected=7 J=0.007253464731833192 grad_l2=1.4222514565915558 wall=3837.316319331061
+outer native success=True nit=37 nfev=57 J=0.006737776589829025 iota=0.14760038669253328 wall=7647.080965765985 omp=14
+Traceback (most recent call last):
+  File "/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/benchmarks/nested_ls_outer_claim.py", line 996, in <module>
+    main()
+  File "/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/benchmarks/nested_ls_outer_claim.py", line 819, in main
+    jax_row, jax_endpoint = _launch_jax(budget=budget, maxcor=maxcor, log=log)
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/benchmarks/nested_ls_outer_claim.py", line 404, in _launch_jax
+    payload, process_wall_seconds = _run_child(
+                                    ^^^^^^^^^^^
+  File "/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/benchmarks/nested_ls_outer_claim.py", line 335, in _run_child
+    raise RuntimeError(
+RuntimeError: outer jax child failed rc=1 stderr=.numerics_finite)))
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv-qn-gpu/lib/python3.11/site-packages/jax/_src/api.py", line 2385, in device_get
+    return tree_map(_device_get, x)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv-qn-gpu/lib/python3.11/site-packages/jax/_src/tree_util.py", line 397, in tree_map
+    return treedef.unflatten(f(*xs) for xs in zip(*all_leaves))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv-qn-gpu/lib/python3.11/site-packages/jax/_src/tree_util.py", line 397, in <genexpr>
+    return treedef.unflatten(f(*xs) for xs in zip(*all_leaves))
+                             ^^^^^^
+  File "/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv-qn-gpu/lib/python3.11/site-packages/jax/_src/api.py", line 2346, in _device_get
+    return toarray()
+           ^^^^^^^^^
+  File "/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv-qn-gpu/lib/python3.11/site-packages/jax/_src/array.py", line 414, in __array__
+    return np.asarray(self._value, dtype=dtype, **kwds)  # pyrefly: ignore[no-matching-overload]
+                      ^^^^^^^^^^^
+  File "/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv-qn-gpu/lib/python3.11/site-packages/jax/_src/profiler.py", line 384, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv-qn-gpu/lib/python3.11/site-packages/jax/_src/array.py", line 614, in _value
+    npy_value, did_copy = self._single_device_array_to_np_array_did_copy()
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+jax.errors.JaxRuntimeError: INTERNAL: jaxlib/gpu/solver_handle_pool.cc:37: operation gpusolverDnCreate(&handle) failed: cuSolver internal error
+
