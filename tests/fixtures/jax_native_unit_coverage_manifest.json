@@ -380,7 +380,7 @@
         },
         {
           "anchor": "if spec.frame_kind == \"frenet\":",
-          "cite": "src/simsopt_jax/core/finitebuild.py:101"
+          "cite": "src/simsopt_jax/core/finitebuild.py:97"
         }
       ],
       "id": "ST-1",
