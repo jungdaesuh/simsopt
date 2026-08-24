@@ -309,10 +309,10 @@ own 5090 receipt (blocked in / absent from this run).
 | stage-two-optimization-planar-coils | 10.48 | 59.31 | 101.96 | 0.10x | 0.3x warm — native faster | measured once |
 | wireframe-rcls-with-ports | 3.26 | 3.94 | 5.01 | 0.65x | 0.6x device solve — native faster | measured once |
 | permanent-magnet-qa | — | — | — | — | plausible at nphi=64 | blocked (`.vtu` bug) |
-| wireframe-rcls-basic | 3.14 | 3.76 | 4.75 | 0.66x | plausible at larger size | untested |
-| tracing-fieldlines-ncsx | 3.18 | 39.04 | 102.64 | 0.03x | plausible batching 1000s of trajectories | untested |
-| tracing-fieldlines-qa | 3.18 | 38.30 | 100.44 | 0.03x | plausible batching 1000s of trajectories | untested |
-| tracing-particle | 3.05 | 24.87 | 71.01 | 0.04x | plausible batching 1000s of trajectories | untested |
+| wireframe-rcls-basic | 3.14 | 3.76 | 4.75 | 0.66x | 0.6x at native_default — still too small | measured once |
+| tracing-fieldlines-ncsx | 3.18 | 39.04 | 102.64 | 0.03x | — GPU OOM at reference scale (native 78 s, JAX CPU 518 s) | blocked (GPU memory) |
+| tracing-fieldlines-qa | 3.18 | 38.30 | 100.44 | 0.03x | — GPU OOM at reference scale (native 171 s, JAX CPU 253 s) | blocked (GPU memory) |
+| tracing-particle | 3.05 | 24.87 | 71.01 | 0.04x | — GPU OOM at reference scale (native 109 s, JAX CPU 1435 s) | blocked (GPU memory) |
 | boozer | 3.79 | 19.38 | 28.46 | 0.13x | stays on CPU — too small to fill a GPU | settled |
 | boozerqa | 3.23 | 56.37 | 108.73 | 0.03x | stays on CPU | settled |
 | just-a-quadratic | 2.94 | 4.21 | 5.28 | 0.56x | stays on CPU | settled |
@@ -330,6 +330,17 @@ once" = one dated measurement. One rule explains every row: the GPU wins
 once each optimizer step carries ~1e7 elements of parallel work to
 amortize its dispatch — via resolution, segment count, filaments,
 ensembles, or coupling DOFs, not nested solves.
+
+The rcls-basic and tracing rows were probed 2026-08-24 on the A100
+(diagnostic, `native_default` scale, same lane protocol, cold). All
+three tracing GPU lanes fail **before tracing begins**:
+`build_regular_grid_interpolant_3d`
+(`src/simsopt_jax_adapters/field/interpolated.py`) materializes
+29–60 GiB during field-interpolant construction and OOMs the 40 GB
+A100, while the native and JAX CPU lanes complete. The
+batched-trajectory GPU thesis is blocked by construction memory, not
+disproven on speed; the enabling fix is a chunked or streamed
+interpolant build.
 
 Scope of the cold total (0.11x = GPU 9.47x slower): it excludes
 single-stage (scale refusal), pm-qa, and finitebuild (Appendix B bugs);
