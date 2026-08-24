@@ -212,3 +212,27 @@ sections.
 Not F3 7.70× and not a supersession of it; not exact (`r=0`) Boozer; no
 VMEC anywhere; no claim about formulations or hosts outside the two
 rungs; a bounded negative at B37 is a legitimate closure of this charter.
+
+## Amendment 4 (2026-08-24, pre-relaunch, after the pair-2 fault)
+
+The first B37 run died at 9.6 h when an operator-launched GPU probe
+starved its pair-2 JAX child of device memory (cuSolver init failure) —
+an infrastructure fault, not a physics event; the incident, its
+mechanism (default XLA preallocation on the probe), and the quiet-box
+lesson are disclosed here and in the receipt narrative. Rulings for the
+relaunch, frozen before its first byte:
+
+- **The rerun's verdict is the physics gate, which is deterministic**:
+  the JAX lane reproduced its trajectory bitwise across the prime and
+  pair 0 (J identical to the last digit), and the endpoint-J parity
+  outcome at the frozen 1e-9 band is therefore repeat-independent. The
+  rerun runs **one interleaved pair** (`--pairs 1`); walls publish as
+  informational, min==median==the single row, and no timing claim of
+  any kind attaches to this receipt.
+- **The untimed cache prime may be skipped** (`--skip-prime`): the
+  persistent compile cache is demonstrably warm from the faulted run's
+  own legs; the flag and reason land in the receipt.
+- The first run's logged rows (prime, pair 0 both lanes, pair 1 both
+  lanes) are preserved as evidence of the trending verdict and of
+  trajectory determinism, but are not receipt rows; the receipt is the
+  rerun's own.
