@@ -379,14 +379,14 @@ identity JSON, and writes its artifact under
       (`src/simsopt/geo/permanent_magnet_grid.py:590`; the probe's own comment at
       `benchmarks/pm_gpmo_probes.py:1656-1659` says so), then computes the explicit
       `alpha = 2(1-1e-5)/ATA_scale` from the already-shifted value
-      (`benchmarks/pm_gpmo_probes.py:1852-1853`) — an α *inside* the true contraction bound
+      (`benchmarks/pm_gpmo_probes.py::run_jax_relax_split`) — an α *inside* the true contraction bound
       `2/λ_max(H)` by exactly its 1e-5 margin — and then stages the shifted grid through
       `PermanentMagnetGridJAX.from_cpu`, which copies `ATA_scale` unchanged
-      (`src/simsopt_jax/geo/permanent_magnet_grid.py:75`); the validator, whose contract takes
-      `ATA_scale` as the raw spectral scale (as `from_fixed_state` computes it, `…grid.py:152`),
+      (`src/simsopt_jax/geo/permanent_magnet_grid.py::PermanentMagnetGridJAX.from_cpu`, the `ATA_scale` copy); the validator, whose contract takes
+      `ATA_scale` as the raw spectral scale (as `PermanentMagnetGridJAX.from_fixed_state` computes it, the `singular_values[0]**2` raw-scale derivation),
       adds the shift a second time (`src/simsopt_jax/solve/permanent_magnet.py:738`) and rejects a
       legitimate step. The observed ValueError gap (150.5/1.8377e6 = 8.2e-5, with the QA case's
-      `reg_l2 = 0` from the call literals at `pm_gpmo_probes.py:1852` plus the
+      `reg_l2 = 0` from the call literals at `pm_gpmo_probes.py::run_jax_relax_split` plus the
       `reg_l2: float = 0.0` default at `…solve/permanent_magnet.py:929`, and `nu = 1.0e10` at
       `pm_gpmo_probes.py:1217`) is numerically consistent with either a missing-shift or a
       double-shift reading — only the code discriminates, and it says double-shift. Consequence:
@@ -401,6 +401,14 @@ identity JSON, and writes its artifact under
       dual-meaning field — raw σ₀² under the JAX contract, silently shifted after native
       `rescale_for_opt` — the same dual-source class the flat-675 review chronicled; the fix is to
       derive, never to copy across that boundary.
+      **RESOLVED 2026-08-24: the staging fix is applied** — `run_jax_relax_split` now stages the
+      raw grid before `rescale_for_opt` (ordering documented as the contract in its docstring),
+      the validator passes the very α it rejected, and the qa-64 jax-gpu solve leg completes
+      (rc=0, all-finite endpoint; `docs/receipts/evidence/qa64_jaxgpu_solve_20260824.json`).
+      Ordering-contract regression:
+      `tests/solve/test_permanent_magnet_optimization_jax_item28.py::test_relax_and_split_jax_staging_order_contract_single_shift`.
+      The same commit lands the pm4stell exact-predicate repair with lane-parity re-cert
+      (campaign plan §Blocked rung, repair record).
 - [x] `[charter]` P3.6 (2026-08-23 — draft written: Rung A pm-simple 5.2×, Rung B muse-64 2.9×, pm4stell BLOCKED on the k=201 fork with a pre-registered two-hypothesis adjudication) Charter draft for any family member clearing ≥1.10×
       warm; the nφ=64 rung lands as a `_scale_configuration()` addition in
       the relevant parity cases so the charter has a frozen scale to cite.

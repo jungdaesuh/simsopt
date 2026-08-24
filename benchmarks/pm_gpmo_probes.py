@@ -1829,18 +1829,20 @@ def run_jax_relax_split(
 ) -> SolveResult:
     """Time ``relax_and_split_jax`` on the same continuation the native lane runs.
 
-    Known defect, adjudicated 2026-08-23 (backlog plan P3.5): this function
-    fail-closes on the MwPGP step-size validator by double-applying the
-    ``1/nu`` shift. ``rescale_for_opt`` below folds ``2 reg_l2 + 1/nu`` into
-    ``grid.ATA_scale`` **in place**, the explicit ``alpha`` is then computed
-    from the shifted scale (a legitimate step, inside the true bound by its
-    own 1e-5 margin), and the shifted grid is staged through
-    ``PermanentMagnetGridJAX.from_cpu`` — whose ``_mwpgp_spec`` validator
-    takes ``ATA_scale`` as the *raw* spectral scale and re-applies the shift,
-    rejecting the alpha. Staged un-rescaled, the two lanes' default step
-    rules coincide exactly, so there is no step-size asymmetry to disclose;
-    the staging fix is owned by the QA campaign charter and is deliberately
-    not hot-patched here (the refusal itself is archived evidence).
+    Staging happens BEFORE ``rescale_for_opt``, and the ordering is the
+    contract (double-shift defect adjudicated 2026-08-23, backlog plan P3.5;
+    fixed 2026-08-24): ``rescale_for_opt`` folds ``2 reg_l2 + 1/nu`` into
+    ``grid.ATA_scale`` **in place**, while ``PermanentMagnetGridJAX.from_cpu``'s
+    ``_mwpgp_spec`` validator takes ``ATA_scale`` as the *raw* spectral scale
+    and applies that same shift itself. Staging the already-shifted grid made
+    the validator re-shift and reject a legitimate step (the refusal is
+    archived: ``docs/receipts/evidence/qa64_jaxgpu_solve_refusal_20260824.log``).
+    Staged raw, the explicit ``alpha`` below — still computed from the
+    post-rescale host scale, exactly as the native lane's step rule derives
+    it — sits inside the validator's bound by its own 1e-5 margin and equals
+    the solver's default-step formula on the same operands. Staging is a
+    device copy, so the later in-place host rescale cannot reach the staged
+    arrays.
 
     Every row this returns is cold.  See :data:`JAX_RELAX_SPLIT_RETRACE`: the
     solve path is unjitted and rebuilds its scan closure per call, so repeat 1
@@ -1853,11 +1855,11 @@ def run_jax_relax_split(
 
     grid = build.grid
     ndipoles = int(grid.ndipoles)
-    reg_l0, _, _, nu = grid.rescale_for_opt(spec.reg_l0, 0.0, 0.0, spec.nu)
-    alpha = 2.0 * (1.0 - 1.0e-5) / float(grid.ATA_scale)
     before_staging = device_memory_used_mib()
     staged = _stage_jax_grid(build)
     after_staging = device_memory_used_mib()
+    reg_l0, _, _, nu = grid.rescale_for_opt(spec.reg_l0, 0.0, 0.0, spec.nu)
+    alpha = 2.0 * (1.0 - 1.0e-5) / float(grid.ATA_scale)
 
     seconds: list[float] = []
     moments = np.zeros((ndipoles, 3), dtype=np.float64)

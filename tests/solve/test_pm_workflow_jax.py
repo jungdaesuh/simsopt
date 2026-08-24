@@ -6,6 +6,8 @@ and pm_mwpgp_fixed_step for fixed-state PM math covered by wrapper tests.
 
 from __future__ import annotations
 
+import math
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -249,9 +251,13 @@ def _assert_direct_gpmo_solver_reuses_shapes(
     second_result = solver(spec, A, b + 0.1, K=K, **solver_kwargs)
     second_result.x.block_until_ready()
 
-    assert first_result.x.shape == second_result.x.shape == (
-        spec.m_maxima.shape[0],
-        3,
+    assert (
+        first_result.x.shape
+        == second_result.x.shape
+        == (
+            spec.m_maxima.shape[0],
+            3,
+        )
     )
     assert first_result.residual_history.shape == second_result.residual_history.shape
     assert second_result.residual_history.shape == expected_residual_history_shape
@@ -549,7 +555,7 @@ def _run_arbvec_backtracking_step_by_step(
 ) -> PMGPMOArbVecBacktrackingLiveState:
     current = state
     connectivity = gpmo_connectivity_matrix(spec.dipole_grid_xyz)
-    cos_thresh_angle = jnp.cos(jnp.asarray(spec.thresh_angle, dtype=A.dtype))
+    cos_thresh_angle = jnp.asarray(math.cos(spec.thresh_angle), dtype=A.dtype)
     contributions = _gpmo_arbvec_contributions(A, spec.pol_vectors)
     for _ in range(n_steps):
         next_core, trace = gpmo_arbvec_backtracking_step(

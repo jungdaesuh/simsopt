@@ -1,0 +1,16 @@
+predicate preload: simsoptpp <- /tmp/claude-1000/-home-jungdaesuh-code-columbia-simsopt-pr-jax-port-squashed/02484c36-678d-4fce-8d1b-52df3bb2783f/scratchpad/predicate-build/simsoptpp.cpython-311-x86_64-linux-gnu.so
+predicate preload: simsoptpp <- /tmp/claude-1000/-home-jungdaesuh-code-columbia-simsopt-pr-jax-port-squashed/02484c36-678d-4fce-8d1b-52df3bb2783f/scratchpad/predicate-build/simsoptpp.cpython-311-x86_64-linux-gnu.so
+/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/src/simsopt/geo/permanent_magnet_grid.py:58: UserWarning: Cartesian grid of rectangular cubes will be built, since coordinate_flag = "cartesian". However, such a grid can be appropriately reflected only for nfp = 2 and nfp = 4, unlike the uniform cylindrical grid, which has continuous rotational symmetry.
+  warnings.warn('Cartesian grid of rectangular cubes will be built, since '
+wrote /home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/docs/receipts/evidence/pm4stell64_native_predicate_20260824.json
+ledger docs/receipts/evidence/probe_leg_ledger.jsonl
+solve[0] cold_in_process 15.195578 s
+solve[1] warm 19.642953 s
+Iteration ... |Am - b|^2 ... lam*|m|^2
+0 ... 1.61e-01 ... 0.00e+00 
+Backtracking: 0 wyrms removed
+Backtracking: 19 wyrms removed
+Iteration ... |Am - b|^2 ... lam*|m|^2
+0 ... 1.61e-01 ... 0.00e+00 
+Backtracking: 0 wyrms removed
+Backtracking: 19 wyrms removed

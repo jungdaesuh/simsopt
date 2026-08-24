@@ -62,6 +62,7 @@ materialise ``A^T A``, which would cost ``O((3 N)^2)`` memory.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from functools import partial
 
@@ -341,10 +342,13 @@ class GPMOArbVecBacktrackingSpec:
     """Immutable payload for the JAX arbitrary-vector backtracking GPMO solver.
 
     ``thresh_angle`` is the half-angle threshold (radians) used by the
-    dewyrming pass: a placed pair is removed when ``cos_angle`` between the
-    seed dipole and its most-anti-aligned placed neighbor drops below
-    ``cos(thresh_angle)``. Matches the C++ test
-    ``min_cos_angle <= cos_thresh_angle``.
+    dewyrming pass. At a general angle a placed pair is removed when
+    ``cos_angle`` between the seed dipole and its most-anti-aligned placed
+    neighbor drops below ``cos(thresh_angle)`` — the C++ test
+    ``min_cos_angle <= cos_thresh_angle``. At the default ``pi``
+    (``cos == -1.0`` exactly) both lanes instead evaluate the equality-grade
+    removal exactly, as componentwise moment negation — see
+    :func:`_gpmo_arbvec_remove_pairs`.
     """
 
     m_maxima: jax.Array
@@ -784,8 +788,8 @@ def gpmo_baseline_candidate_costs(
 ) -> jax.Array:
     """Return baseline GPMO plus/minus candidate costs.
 
-    Mirrors ``GPMO_baseline`` in
-    ``legacy native extension/permanent_magnet_optimization.cpp:1270-1292``. The returned
+    Mirrors ``GPMO_baseline``'s candidate loop in the legacy native extension
+    (``permanent_magnet_optimization.cpp``). The returned
     vector has shape ``(6 N,)`` with all ``+`` candidates first followed by all
     ``-`` candidates, matching the C++ ``std::min_element`` tie order.
     """
@@ -1089,8 +1093,8 @@ def gpmo_arbvec_candidate_costs(
 ) -> jax.Array:
     """Return arbitrary-vector GPMO plus/minus candidate costs.
 
-    Mirrors ``GPMO_ArbVec`` in
-    ``legacy native extension/permanent_magnet_optimization.cpp:1168-1195``. Candidate
+    Mirrors ``GPMO_ArbVec``'s candidate loop in the legacy native extension
+    (``permanent_magnet_optimization.cpp``). Candidate
     order is dipole-major, polarization-vector-minor, with all plus candidates
     followed by all minus candidates.
     """
@@ -1485,7 +1489,7 @@ def initialize_gpmo_arbvec(
     """Initialize the arbitrary-vector backtracking solver state.
 
     Mirrors ``initialize_GPMO_ArbVec`` in
-    ``permanent_magnet_optimization.cpp:994-1117``. For each dipole ``j``
+    ``permanent_magnet_optimization.cpp``. For each dipole ``j``
     whose ``x_init[j]`` is nonzero, find the nearest allowable polarization
     vector ``pol_vectors[j, m_min]`` and sign ``sign_min in {-1, 0, +1}``.
     Sign ``0`` is selected when the squared distance to the zero vector is
@@ -1732,18 +1736,31 @@ def _gpmo_arbvec_remove_pairs(
     *,
     ndipoles: int,
     Nadjacent: int,
+    exact_pi: bool,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Run the C++ dewyrming pass for the arbitrary-vector variant.
 
-    Mirrors ``permanent_magnet_optimization.cpp:861-939`` exactly: the outer
+    Mirrors ``GPMO_ArbVec_backtracking``'s dewyrming block (the
+    ``(k % backtracking) == 0`` body in ``permanent_magnet_optimization.cpp``)
+    exactly: the outer
     loop iterates over **dipole indices** ``j ∈ [0, N)`` (NOT over placement
     history). For each ``j`` that is currently placed (``current_signs[j] !=
     0``), search its ``Nadjacent`` nearest dipoles for the one with the
     smallest ``cos_angle`` (most anti-aligned). If that smallest cosine is
-    ``<= cos_thresh_angle``, remove the pair: revert both placements and add
-    both dipoles back to the available set. Cascaded removals are allowed
+    ``<= cos_thresh_angle``, remove the pair (at ``thresh_angle == pi`` the
+    decision is instead the exact predicate below): revert both placements and
+    add both dipoles back to the available set. Cascaded removals are allowed
     within a single dewyrming pass because the state propagates between
     seed iterations.
+
+    ``exact_pi`` is the trace-time flag for ``thresh_angle == pi``: there the
+    removal test is equality-grade (``cos <= -1`` can only mean exactly
+    antiparallel), so both lanes evaluate it exactly -- first adjacent placed
+    neighbor whose moment is the componentwise negation of ``moment_j`` --
+    instead of through the rounded 3-term dot, whose <= -1.0 outcome forks
+    between FMA-contracted and plain-rounded builds of the C++ twin. First
+    qualifying neighbor wins, which is the exact-arithmetic limit of the
+    strict-``<`` first-wins argmin the general-angle path keeps.
     """
 
     removed_count0 = _device_scalar(0, jnp.int64)
@@ -1763,29 +1780,53 @@ def _gpmo_arbvec_remove_pairs(
         vector_j_idx = vector_idx_seed[jk]
         moment_j = sign_j * pol_vectors[jk, vector_j_idx, :]
 
-        def _neighbor_body_clean(neighbor_state, neighbor_index):
-            min_cos_angle, cj_min_idx = neighbor_state
-            cj = connectivity[jk, neighbor_index]
-            sign_c = signs_seed[cj]
-            vector_c_idx = vector_idx_seed[cj]
-            moment_c = sign_c * pol_vectors[cj, vector_c_idx, :]
-            cos_angle = jnp.sum(moment_j * moment_c)
-            # ``if Gamma_complement(cj) continue`` -> skip when ``sign_c == 0``.
-            neighbor_placed = sign_c != 0.0
-            candidate_cos = jnp.where(neighbor_placed, cos_angle, sentinel_cos)
-            update = candidate_cos < min_cos_angle
-            return (
-                jnp.where(update, candidate_cos, min_cos_angle),
-                jnp.where(update, cj, cj_min_idx),
-            ), None
+        if exact_pi:
 
-        (min_cos_angle, cj_min), _ = jax.lax.scan(
-            _neighbor_body_clean,
-            (sentinel_cos, _device_scalar(0, connectivity.dtype)),
-            jnp.arange(Nadjacent),
-        )
+            def _neighbor_body_exact(neighbor_state, neighbor_index):
+                found, cj_sel = neighbor_state
+                cj = connectivity[jk, neighbor_index]
+                sign_c = signs_seed[cj]
+                vector_c_idx = vector_idx_seed[cj]
+                moment_c = sign_c * pol_vectors[cj, vector_c_idx, :]
+                # ``if Gamma_complement(cj) continue`` -> skip when ``sign_c == 0``.
+                neighbor_placed = sign_c != 0.0
+                # FP equality, not bitwise: negation is exact, and +-0.0
+                # components must compare equal whatever their sign.
+                exact_hit = neighbor_placed & jnp.all(moment_j == -moment_c)
+                take = jnp.logical_not(found) & exact_hit
+                return (found | exact_hit, jnp.where(take, cj, cj_sel)), None
 
-        should_remove = seed_active & (min_cos_angle <= cos_thresh_angle)
+            (found_exact, cj_min), _ = jax.lax.scan(
+                _neighbor_body_exact,
+                (_bool_scalar(False), _device_scalar(0, connectivity.dtype)),
+                jnp.arange(Nadjacent),
+            )
+            should_remove = seed_active & found_exact
+        else:
+
+            def _neighbor_body_clean(neighbor_state, neighbor_index):
+                min_cos_angle, cj_min_idx = neighbor_state
+                cj = connectivity[jk, neighbor_index]
+                sign_c = signs_seed[cj]
+                vector_c_idx = vector_idx_seed[cj]
+                moment_c = sign_c * pol_vectors[cj, vector_c_idx, :]
+                cos_angle = jnp.sum(moment_j * moment_c)
+                # ``if Gamma_complement(cj) continue`` -> skip when ``sign_c == 0``.
+                neighbor_placed = sign_c != 0.0
+                candidate_cos = jnp.where(neighbor_placed, cos_angle, sentinel_cos)
+                update = candidate_cos < min_cos_angle
+                return (
+                    jnp.where(update, candidate_cos, min_cos_angle),
+                    jnp.where(update, cj, cj_min_idx),
+                ), None
+
+            (min_cos_angle, cj_min), _ = jax.lax.scan(
+                _neighbor_body_clean,
+                (sentinel_cos, _device_scalar(0, connectivity.dtype)),
+                jnp.arange(Nadjacent),
+            )
+
+            should_remove = seed_active & (min_cos_angle <= cos_thresh_angle)
         updated_state = jax.lax.cond(
             should_remove,
             lambda args: _gpmo_arbvec_remove_one_pair(*args),
@@ -1909,7 +1950,12 @@ def _gpmo_arbvec_backtracking_active_step(
     ) = jax.lax.cond(
         backtrack_due,
         lambda args: _gpmo_arbvec_remove_pairs(
-            *args, ndipoles=ndipoles, Nadjacent=spec.Nadjacent
+            *args,
+            ndipoles=ndipoles,
+            Nadjacent=spec.Nadjacent,
+            # Trace-time: ``spec.thresh_angle`` is a static meta-field, and
+            # ``math.cos`` is the same libm cosine the C++ twin gates on.
+            exact_pi=(math.cos(spec.thresh_angle) == -1.0),
         ),
         lambda args: (
             args[0],
@@ -2026,7 +2072,8 @@ def gpmo_arbvec_backtracking_step(
          ``iteration >= backtracking`` guard, unlike baseline GPMO),
          run the dewyrming pass: for each placed dipole ``j``, find the most
          anti-aligned placed adjacent dipole and remove the pair if their
-         cosine angle is below ``cos_thresh_angle``.
+         cosine angle is below ``cos_thresh_angle`` (exact componentwise
+         negation at ``thresh_angle == pi`` — the spec default).
       4. Carry-forward semantics for terminated runs (``num_nonzero >=
          ndipoles`` or ``num_nonzero >= max_nMagnets``).
 
@@ -2070,7 +2117,7 @@ def gpmo_arbvec_backtracking_solve(
     """Run the arbitrary-vector backtracking greedy permanent-magnet optimizer.
 
     Mirrors ``GPMO_ArbVec_backtracking`` in
-    ``permanent_magnet_optimization.cpp:729-987``. The scan length is fixed
+    ``permanent_magnet_optimization.cpp``. The scan length is fixed
     by ``K``. Once the CPU stopping condition
     ``num_nonzero >= ndipoles`` or ``num_nonzero >= max_nMagnets`` is reached,
     later scan iterations carry the final state unchanged. The ``x_init``
@@ -2151,7 +2198,12 @@ def gpmo_arbvec_backtracking_solve(
         thresh_angle=spec.thresh_angle,
         max_nMagnets=spec.max_nMagnets,
     )
-    cos_thresh_angle = jnp.cos(_scalar_like(A_arr, spec.thresh_angle))
+    # Host libm, not jnp.cos: the C++ twin thresholds on std::cos (same libm),
+    # and _gpmo_arbvec_backtracking_active_step's exact-pi gate is
+    # math.cos-derived — one cosine implementation must own BOTH the gate and
+    # the threshold, or a near-pi angle could take the FP path against a
+    # device-rounded -1.0 and re-admit the fork the exact predicate removes.
+    cos_thresh_angle = _scalar_like(A_arr, math.cos(spec.thresh_angle))
     contributions = _gpmo_arbvec_contributions(A_arr, pol_vectors)
     col_sq = jnp.sum(contributions * contributions, axis=0)
     # Left-associated ``(reg_l2*cm)*cm`` to match the backtracking candidate-cost
