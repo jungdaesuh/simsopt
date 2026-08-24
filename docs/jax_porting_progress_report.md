@@ -111,98 +111,69 @@ route.
 | wireframe-rcls-basic | `final:total_objective` | scalar | 0.0072593110819 | 0.0072593110819 | 2.60208521397e-18 | 3.58448e-14% | 1/1 | — |
 | wireframe-rcls-with-ports | `final:total_objective` | scalar | 3.12796971953e-06 | 3.12796971953e-06 | 1.38489886876e-19 | 4.42747e-12% | 1/1 | — |
 
-> **Row falsified at HEAD, and a 2026-08-24 re-validation of this table.**
-> The `stage-two-optimization-planar-coils` row is correct for the authority
-> revision but no longer describes the current code: commit `fd200f564`
-> (2026-08-02) aligned the mirror's mean-squared-curvature penalty with the
-> upstream example's `identity` target mode (the parity case previously used
-> `"max"`), which changes the optimization problem itself. Re-measured at HEAD
-> on 2026-08-24 (bounded scale, jax/jaxlib 0.10.0, RTX 5090 for the GPU lane;
-> a replay environment, not the authority environment): native
-> `final:objective` = 0.00221946821602, JAX CPU 0.00103232035072, strict GPU
-> 0.00103939304979, and **all lanes converge** instead of hitting the
-> iteration cap. The row's raw values, difference cells, `100/100` iteration
-> cell, and Note are stale, as is the executive summary's "16.3% lower"
-> bullet — at HEAD the GPU endpoint is ~53% below native.
+> **Row falsified at HEAD (checked 2026-08-24).** Commit `fd200f564`
+> (2026-08-02) switched the planar-coils mirror's mean-squared-curvature
+> penalty from `"max"` to the upstream `identity` target mode, changing the
+> optimization problem itself. Re-measured at HEAD (bounded, jax 0.10.0,
+> RTX 5090 replay environment): native `final:objective` 0.00221946821602,
+> JAX CPU 0.00103232035072, GPU 0.00103939304979, all lanes converge (no
+> iteration cap). The row's values, `100/100` cell, Note, and the executive
+> summary's "16.3% lower" bullet are stale — at HEAD the GPU endpoint is
+> ~53% below native.
 >
-> The other rows were re-validated in the same replay pass (native and JAX
-> CPU lanes for all bounded cases): 23 of 26 native endpoints reproduce the
-> table to its printed precision. Two environment-sensitivity effects
-> surfaced, each present identically at the authority revision and at HEAD
-> (so neither is a code regression): `permanent-magnet-qa`'s MwPGP endpoint
-> lands 3.3e-05 (relative) away from the table in this environment (its
-> parity gate still passes), and `tracing-fieldlines-ncsx` — the only gate
-> failure of the pass — misses its Poincaré-positions bucket at one of 66
-> crossings (0.041 versus `atol` 0.030) from chaotic amplification of
-> environment-level FP differences; both lanes' trajectories are bitwise
-> identical across the two revisions.
-> `single-stage-boozer-vacuum-optimization` cannot be re-validated at
-> bounded scale at HEAD (the runner fails closed on its promoted scale tier;
-> see the pin note under Evidence provenance). Separately, the pm4stell
-> native-versus-JAX last-bit mechanism was discharged on 2026-08-24: with
-> FMA contraction disabled, the rebuilt native GPMO state is bitwise
-> identical to the archived JAX dump — 0 of 5,826 dipole rows differ
-> (commit `b2c099489`, `docs/jax_gpu_pm_gpmo_campaign_plan.md`) — and
-> REPAIRED the same day (commit `aa04f698c`): the equality-grade
-> `thresh_angle = pi` removal is now evaluated exactly (componentwise
-> negation) in both lanes, lane-parity re-certified at full scale with FMA
-> contraction ON (163 placed dipoles, bitwise-identical endpoints, CPU
-> native vs RTX 5090 JAX). The prebuilt `simsoptpp` kernel this report's
-> native lanes load was then rebuilt from the repaired source and installed
-> 2026-08-24 (sha `41b2ca79…` → `95190afa…`; pre-swap kernel preserved as
-> `build/cp311-cp311-linux_x86_64/simsoptpp.so.pre-predicate-41b2ca79.bak`).
-> The bounded-scale table rows above are unaffected — their dewyrming
-> sweeps are structurally no-op at bounded budgets — and the PM, force,
-> strain, and curve parity suites all re-ran green against the rebuilt
-> kernel on 2026-08-24.
+> The same pass re-validated every other row (native + JAX CPU lanes): 23
+> of 26 native endpoints reproduce the table to printed precision. Two
+> effects are environment sensitivity, not code drift (identical at the
+> authority revision and HEAD): pm-qa's MwPGP endpoint sits 3.3e-5 relative
+> off-table (gate still passes), and fieldlines-ncsx misses one of 66
+> Poincaré crossings (0.041 vs `atol` 0.030) — the only gate failure; both
+> lanes' trajectories are bitwise identical across revisions.
+> `single-stage-boozer-vacuum-optimization` cannot replay at bounded scale
+> at HEAD (fail-closed on its promoted scale tier; see Evidence
+> provenance).
 >
-> A second-architecture leg (2026-08-24, NVIDIA A100-PCIE-40GB on a
-> different host, AMD EPYC 7452, glibc 2.31, jax/jaxlib 0.10.0, same
-> revision) re-ran the three-lane bounded matrix for 25 of the 26 cases —
-> the 26th, `single-stage-boozer-vacuum-optimization`, is excluded by the
-> fail-closed scale refusal above, not by any failure. Result: **1,108 of
-> 1,122 executed comparisons pass**; of the 23 cases that produced
-> verdicts, 19 are fully clean and 4 carry failures. These fractions must
-> not be read against the header's 1,248/1,248 — that was a clean pass in
-> one pinned environment; this one contains failures. All 14 failures
-> were quantified from the retained value arrays as exact
-> allclose-overshoot factors (max elementwise |a-b| divided by its own
-> `atol + rtol*|b|` bound). By class: the chaotic tracers miss modestly —
-> fieldlines-ncsx (24/30) at 1.60x-1.83x, worst 5.5e-2 against `atol`
-> 3e-2, and fieldlines-qa (26/30) at 1.05x-1.41x. The most
-> consequential number in the set is also the most benign-looking:
-> fieldlines-qa's **native-cpu:jax-cpu** states pair at 1.05x over a
-> loose absolute tolerance — a CPU-versus-CPU divergence with no device
-> involved, establishing that the cross-host trajectory divergence exists
-> independent of any GPU. planar-coils' jax-cpu:jax-gpu final objective
-> misses at 1.32x, but its first-phase objective misses at 5.26x (3.5e-4
-> absolute). And wireframe-rcls-with-ports' near-zero
-> `initial:constraint_residual` (88/90) overshoots its very tight bound
-> by 466x — an absolute miss of only 4.7e-10, but against `atol` 1e-12 +
-> `rtol` 1e-10 on a dense linear-solve residual, making it the one
-> failure that is neither small relative to its own gate nor a chaotic
-> trajectory. The absolute misses are small everywhere; the relative
-> overshoots are not uniformly so, and no blanket "all marginal" summary
-> survives these numbers. One inversion worth naming: field-line
-> tracing supplies 10 of these 14 failures yet is the one workload that
-> cleared every warmed fast-mode gate below — chaotic amplification of
-> floating-point differences is the plausible mechanism, plausible but not
-> proven. Two cases could not complete there:
-> finitebuild (the manifest-route gap; see the controlled re-measurement)
-> and permanent-magnet-qa, whose lane writes `.vtu` grid files into the
-> checkout and trips the runner's repository-integrity guard on any fresh
-> clone. pm-qa's three lanes still agree internally to ~3e-6 relative on
-> that host, but its endpoint lands 16% from this report's value — the
-> MwPGP environment sensitivity noted above, at much larger scale across
-> architectures. For that case, lane-to-lane parity within an environment
-> is the invariant that holds; endpoints do not transport between
-> environments.
+> pm4stell's last-bit native-vs-JAX mechanism was discharged and repaired
+> 2026-08-24: with FMA contraction off, the native GPMO state is bitwise
+> identical to the archived JAX dump (0 of 5,826 rows, `b2c099489`); the
+> `thresh_angle = pi` removal predicate is now evaluated exactly in both
+> lanes (`aa04f698c`), lane-parity re-certified at full scale with FMA on
+> (163 dipoles, bitwise endpoints). The prebuilt `simsoptpp` kernel was
+> rebuilt from the repaired source (sha `41b2ca79…` → `95190afa…`;
+> pre-swap kernel kept as `….pre-predicate-41b2ca79.bak`). Bounded rows
+> above are unaffected (dewyrming sweeps are no-op at bounded budgets);
+> the PM, force, strain, and curve parity suites re-ran green.
+> Review then found that the exact branch was selected by a rounded cosine,
+> incorrectly capturing a near-`pi` band. Both lanes now select it only at
+> literal `pi`; the source was rebuilt and installed locally as
+> `d4a6e028…b35d` in the build tree and both venvs, with `95190afa…`
+> preserved as `….pre-literal-pi-95190afa.bak`. The earlier receipts remain
+> valid for their literal-`pi` inputs but do not certify the new near-`pi`
+> branch.
 >
-> Scope of this re-validation: endpoints and parity gates, plus a targeted
-> GPU-lane re-measurement of six cases with same-environment
-> authority-revision controls. For the timing, memory, and precision
-> verdicts see "Appendix B — 2026-08-24 controlled re-measurement" under
-> the wall-time section.
+> A second-architecture leg (A100-PCIE-40GB / EPYC 7452, glibc 2.31, jax
+> 0.10.0, same revision) ran the three-lane bounded matrix for 25 of 26
+> cases: **1,108/1,122 comparisons pass**; 19 of 23 verdict cases clean, 4
+> with failures — not comparable to the header's clean 1,248/1,248 (one
+> pinned environment there). All 14 failures were quantified as exact
+> allclose overshoots (max |a−b| / (atol + rtol·|b|)): fieldlines-ncsx
+> 1.60–1.83x (worst 5.5e-2 vs `atol` 3e-2); fieldlines-qa 1.05–1.41x,
+> including a **CPU-vs-CPU** states pair at 1.05x — the cross-host
+> trajectory divergence exists with no GPU involved; planar-coils 1.32x
+> final / 5.26x first phase (3.5e-4 absolute); rcls-with-ports' near-zero
+> constraint residual 466x over its tight bound (4.7e-10 absolute vs
+> `atol` 1e-12 + `rtol` 1e-10). Absolute misses are small everywhere;
+> relative overshoots are not, so no blanket "all marginal" summary
+> survives. Tracing supplies 10 of the 14 failures yet cleared every
+> warmed fast-mode gate below — chaotic FP amplification is plausible,
+> not proven. Two cases could not run there: finitebuild (manifest-route
+> gap, Appendix B) and pm-qa (`.vtu` side-writes trip the integrity
+> guard); pm-qa's lanes still agree to ~3e-6 internally while its endpoint
+> lands 16% off this report's — lane-to-lane parity within an environment
+> holds; endpoints do not transport between environments.
+>
+> Scope: endpoints and parity gates, plus six GPU-lane re-measurements
+> with same-environment authority-revision controls; timing, memory, and
+> precision verdicts are in Appendix B.
 
 ## Solver, iteration, evaluation, and status parity
 
@@ -250,14 +221,11 @@ The nonzero counter differences are:
 All other paired counters match. Fewer GPU evaluations does not mean less wall
 time. `normalized_status` records workflow acceptance; raw statuses include
 fixed budgets, iteration limits, and Boozer `inner=True;outer=False`. (Format
-note, 2026-08-24: since the fail-closed endpoint certificate landed —
-`91e1133b9`, 2026-08-02 — the Boozer cases can also emit a seven-field raw
-status (`inner`/`outer`/`certificate`/`stopping_reason`/`initial_stationary`/
-`terminal_stationary`/`constraints_satisfied`) and normalize budget-capped
-endpoints to `budget_exhausted`, but only when the case enforces the endpoint
-certificate. The bounded parity path does not, so a bounded replay at HEAD
-still reproduces the two-field form and `converged` statuses above — verified
-2026-08-24.)
+note, 2026-08-24: since `91e1133b9` the Boozer cases can emit a seven-field
+raw status and normalize capped endpoints to `budget_exhausted`, but only
+when the endpoint certificate is enforced; the bounded parity path does not,
+so bounded replays still reproduce the two-field `converged` statuses above —
+verified 2026-08-24.)
 
 Parity targets scientific behavior, not identical implementations:
 
@@ -309,24 +277,20 @@ MiB (Boozer-vacuum GPU), and device 703.567 MiB (particle tracing).
 
 ## Wall time and GPU speed — one table (2026-08-24)
 
-The three wall-time columns are the 2026-08-24 run at HEAD (revision
-`f5a3c9821`) on a quiet dedicated host (AMD EPYC 7452, NVIDIA
-A100-PCIE-40GB, glibc 2.31, jax/jaxlib 0.10.0): one isolated **cold**
-launch per lane per case at the default bounded size, startup and XLA
-compilation included, native lane pinned to `OMP_NUM_THREADS=1` (a
-threaded native baseline would be faster, so the GPU deficits in the
-cold column are floors). Each wall time is one full unrepeated
-subprocess — the parity protocol has no compile-only or warmed samples;
-warm numbers come from the per-example receipts.
+Wall-time columns: the 2026-08-24 run at HEAD (`f5a3c9821`) on a quiet
+A100-PCIE-40GB / EPYC 7452 host (glibc 2.31, jax/jaxlib 0.10.0) — one
+isolated **cold** launch per lane per case at bounded size, startup and
+XLA compile included, native lane pinned to `OMP_NUM_THREADS=1`
+(threaded native would be faster: the cold GPU deficits are floors).
+One unrepeated subprocess per cell; warm numbers come from the
+per-example receipts.
 
-Both ratio columns state GPU speed as a multiple of native C++ (1.0x =
-equal; higher = GPU faster). **Cold, default size** = native s / GPU s
-from this table. **Enlarged workload** = warm or realistic-scale
-measurement with a receipt: larger resolution, grid, filament count,
-ensemble, or coupling DOFs, per row. Per-row evidence:
-`docs/jax_example_device_assignment.md`. The finitebuild and flat675
-cold ratios come from their own 5090 receipts (blocked in / absent from
-this run, marked †).
+Both ratios state GPU speed as a multiple of native C++ (higher = GPU
+faster): **cold** = native s / GPU s from this table; **enlarged** =
+warm or realistic-scale receipt (bigger resolution, grid, filaments,
+ensemble, or coupling DOFs). Per-row evidence:
+`docs/jax_example_device_assignment.md`. † = cold ratio from the case's
+own 5090 receipt (blocked in / absent from this run).
 
 | Example | Native CPU s | JAX CPU s | JAX GPU s | GPU vs native, cold default size | GPU vs native, enlarged workload | Confidence |
 |---|---:|---:|---:|---:|---|---|
@@ -336,7 +300,7 @@ this run, marked †).
 | permanent-magnet-simple | 2.91 | 3.67 | 4.18 | 0.70x | **5.2x**, bitwise | measured once |
 | wireframe-gsco-modular | 2.95 | 5.15 | 6.50 | 0.45x | **5.2x** at 96x100 grid | measured once |
 | wireframe-gsco-sector-saddle | 2.98 | 5.05 | 5.83 | 0.51x | **4.4x** at 96x100 | measured once |
-| permanent-magnet-pm4stell | 3.37 | 4.09 | 5.71 | 0.59x | **3.0x** at nphi=64 | measured once; predicate repaired `aa04f698c`, bitwise re-certified |
+| permanent-magnet-pm4stell | 3.37 | 4.09 | 5.71 | 0.59x | — pre-repair 3.0x not comparable | unmeasured — predicate repaired `aa04f698c`, parity re-certified; timing rung pending |
 | permanent-magnet-muse | 4.39 | 4.08 | 5.62 | 0.78x | **2.9x** at nphi=64 | measured once |
 | coil-forces | 12.37 | 59.96 | 117.23 | 0.11x | **1.6x** warm | measured once |
 | stage-two-optimization-stochastic | 8.15 | 19.57 | 40.95 | 0.20x | **1.2-1.4x**, grows with ensemble | measured once |
@@ -362,42 +326,31 @@ this run, marked †).
 | **Total (23 measured cases)** | **106.45** | **486.30** | **1008.09** | **0.11x** | — | — |
 
 "Certified" = sealed multi-run receipt with verified physics; "measured
-once" = one dated measurement awaiting that treatment. One rule explains
-every row: the GPU wins once each optimizer step carries enough parallel
-work (~1e7 elements) to amortize its dispatch — via resolution, segment
-count, filaments, ensembles, or coupling DOFs instead of nesting solves.
+once" = one dated measurement. One rule explains every row: the GPU wins
+once each optimizer step carries ~1e7 elements of parallel work to
+amortize its dispatch — via resolution, segment count, filaments,
+ensembles, or coupling DOFs, not nested solves.
 
-Scope of the cold total (GPU 9.47x slower = 0.11x), stated plainly: it
-is computed over a case set that excludes one case by scale refusal
-(`single-stage-boozer-vacuum-optimization`, promoted to `native_default`),
-excludes two by the bugs documented in Appendix B (permanent-magnet-qa's
-`.vtu` side-writes; finitebuild's unrouted `minimum_clearance`
-observables), and contains four cases with failing parity comparisons
-(quantified in Appendix B: absolute misses at most 5.5e-2, allclose
-overshoots from 1.05x to 466x on one near-zero residual). Cold XLA
-compilation dominates the JAX lanes at bounded scale, so the cold
-columns measure deployment cost of one-shot runs, not device
-throughput; the enlarged-workload column is the device-throughput
-evidence, and neither column supersedes the other. This A100 host is a
-**different environment** from the archived 5090 authority run in
-Appendix A — their totals (9.47x here, 14.1x there) are two
-measurements, not a trend. Host RSS and GPU memory for these runs are
-in the peak-memory section above and in Appendix A; the VMEC-hybrid
-local run retained no claim-grade metrics (see "VMEC-hybrid evidence
-gap").
+Scope of the cold total (0.11x = GPU 9.47x slower): it excludes
+single-stage (scale refusal), pm-qa, and finitebuild (Appendix B bugs);
+four included cases carry failing parity comparisons (Appendix B:
+absolute misses ≤ 5.5e-2, overshoots 1.05x–466x on one near-zero
+residual). Cold columns measure one-shot deployment cost (XLA compile
+dominates); the enlarged column measures device throughput; neither
+supersedes the other. The A100 host is a **different environment** from
+Appendix A's 5090 authority run — 9.47x and 14.1x are two measurements,
+not a trend. RSS and GPU memory: the peak-memory section and Appendix A;
+the VMEC-hybrid run retained no claim-grade metrics ("VMEC-hybrid
+evidence gap").
 
 ### Appendix A — archived authority wall times (2026-07-29, RTX 5090)
 
-The pinned original measurement this report is built on; superseded for
-current-code reading by the one-table section above, retained for
-replayability and as the only per-case memory record. The 78-launch
-campaign took 29 minutes 21 seconds under the same protocol as the
-A100 columns above (one isolated cold launch per lane, no compile-only
-or warmed samples), on the RTX 5090 / Threadripper 9970X box, native
-lane pinned to `OMP_NUM_THREADS=1` (`examples/jax/parity/runtime.py`,
-present at the authority revision) — a threaded native baseline would
-be faster, so the 14.1x total is a floor on the GPU-lane deficit, not
-an overstatement of it.
+The pinned original measurement this report is built on — superseded for
+current-code reading by the one-table above, retained for replay and as
+the only per-case memory record. 78 launches, 29 m 21 s, same protocol,
+on the RTX 5090 / Threadripper 9970X box, native lane pinned to
+`OMP_NUM_THREADS=1` (`examples/jax/parity/runtime.py`) — so the 14.1x
+total is a floor on the GPU deficit.
 
 Parent RSS is the launched child's peak `VmHWM`; it excludes descendants.
 
@@ -545,44 +498,31 @@ whose authority-bound SHA-256 is
 Artifacts are host-local and Git-ignored. Retention and replay instructions:
 `.artifacts/jax-authority-evidence/README.md`.
 
-> **Pin superseded (checked 2026-08-24).** That SHA-256 is the manifest as of
-> the authority revision `11340c829`, and it is the value this report's results
-> must be replayed against — it is correct here and must not be "refreshed."
-> The **live** file no longer matches it: commit `3c6dfea62` (2026-08-05,
-> "feat(bench): promote single-stage speed campaign") edited one route, so
-> `examples/jax/parity_manifest.json` at HEAD hashes to
-> `cd9e3c2d191e7934bd5240a9de3f2f7eb79d79e66789aaccf24ed9452588bf30`.
-> The single change is `native-single-stage-boozer-vacuum-optimization`,
-> `scale_tier: bounded` → `native_default` (plus its `comparison_routes`); no
-> route was added or removed, and the other 26 declarations are byte-identical.
-> Verify with
-> `git diff 11340c829 HEAD -- examples/jax/parity_manifest.json`.
-> In consequence the live manifest declares 1,260 applicable comparisons over
-> 420 routes (192 exact) versus the 1,248/416/180 this report's verdict
-> counts; the whole delta sits inside the promoted route's declarations
-> (45 → 57). A bounded replay at HEAD also executes at most 25 of the 26
-> cases: `run_parity.py` fails closed on the promoted route's scale tier, so
-> the 26th case replays only at the authority revision (or at
-> `native_default` scale). Separately, the finitebuild case's three-lane
-> replay fails closed at HEAD on unrouted `minimum_clearance` observables
-> (see the 2026-08-24 controlled re-measurement), leaving 24 of 26 cases
-> fully replayable.
+> **Pin superseded (checked 2026-08-24).** That SHA-256 is the manifest at
+> authority revision `11340c829` — replay against it; do not "refresh" it.
+> The live file hashes
+> `cd9e3c2d191e7934bd5240a9de3f2f7eb79d79e66789aaccf24ed9452588bf30`:
+> commit `3c6dfea62` (2026-08-05) promoted
+> `native-single-stage-boozer-vacuum-optimization` from `bounded` to
+> `native_default` (its routes 45 → 57; the other 26 declarations are
+> byte-identical — verify with
+> `git diff 11340c829 HEAD -- examples/jax/parity_manifest.json`). Live
+> totals: 1,260 comparisons / 420 routes / 192 exact vs this report's
+> 1,248/416/180. At HEAD a bounded replay runs at most 25 of 26 cases
+> (fail-closed on the promoted tier), and finitebuild's three-lane replay
+> fails closed on unrouted `minimum_clearance` observables (Appendix B) —
+> 24 of 26 fully replayable.
 
 Limitations:
 
-1. Bounded scale only; native-default is `not_run`. **Superseded for one route
-   (2026-08-24):** this was true of the manifest at the authority revision and
-   remains true of every measurement in this report, but the live manifest now
-   declares `native-single-stage-boozer-vacuum-optimization` at
-   `scale_tier: native_default` (see the pin note above). This report's rows for
-   that example — lines in the initial-state, final-state, solver, and memory
-   tables — were measured at the **bounded** tier and are not native-default
-   evidence for it. Bounded scale is a design choice, not a shortcut:
-   pinned budgets keep the three lanes' work identical and the 26-case
-   matrix affordable to replay on any revision, where shipped-scale runs
-   cost hours and amplify environment noise past comparability.
-   Example-scale GPU evidence is certified per example instead — see the
-   addendum and `docs/jax_example_device_assignment.md`.
+1. Bounded scale only; native-default is `not_run`. (Still true of every
+   measurement here; the live manifest has since promoted the single-stage
+   route to `native_default` — see the pin note — and this report's rows for
+   that example remain bounded-tier evidence.) Bounded scale is a design
+   choice: pinned budgets keep the three lanes' work identical and the
+   matrix cheap to replay on any revision. Example-scale GPU evidence is
+   certified per example instead (addendum;
+   `docs/jax_example_device_assignment.md`).
 2. Timing and memory are one sample per lane, imports and compilation
    included; no compile-only or warmed measurements, so no steady-state speed
    claim.
@@ -623,23 +563,13 @@ is drift-gated by `tests/test_jax_example_device_assignment.py`.
 
 ## Addendum — native_default-scale results since 2026-08-16 (2026-08-24)
 
-The bounded-scale verdict above stands unchanged for the
-`20260729T005942Z-5ade9aee` evidence it summarizes, and **no newer aggregate
-parity run exists**: that run is still the newest under
-`.artifacts/jax-example-parity/`, so every parity, timing, and memory row above
-is current as published. What follows is not a revision of those rows. It is a
+The bounded verdict above stands for its `20260729T005942Z-5ade9aee`
+evidence, and **no newer aggregate parity run exists**. What follows is a
 different measurement class — native_default or reference scale, warmed or
-persistent-cache, per example rather than aggregate — and it is summarized here
-only so a reader of this report is not left with the bounded numbers as the
-program's last word.
-
-Why the numbers below cannot replace the numbers above: this report times **one
-cold isolated launch per lane with imports and compilation included**
-(Limitation 2), at bounded scale (Limitation 1). The results below are warmed
-or persistent-cache solves at the examples' own reference scales. The aggregate
-14.1x GPU-slower figure remains correct for what it measures — a launch-bound
-artifact, not a device gap — and pairing it against a warm solve ratio compares
-two different experiments.
+persistent-cache, per example — and cannot replace the cold bounded rows
+(Limitations 1–2): the 14.1x figure is a launch-bound artifact, not a
+device gap, and pairing it with a warm solve ratio compares two different
+experiments.
 
 Current per-example placements live in
 [`docs/jax_example_device_assignment.md`](jax_example_device_assignment.md),
@@ -673,19 +603,13 @@ The three certified GPU wins, each with the scope its receipt states:
    own. Repeated-workload only: the cold fused child pays ~150 s of XLA compile,
    measured at N=1. `docs/receipts/flat675_fused_campaign.md`
 
-Two qualifiers a reader should carry out of this addendum. First, every
-certified win above is a **warm or persistent-cache** claim, and none of the
-three carries a cold-start claim. Their cold measurements differ and must not
-be summarized as one: finite-build loses cold (0.88x, ~42 s compile) and GSCO
-likewise, while flat675's cold results **split** — 0.47x at B3 but 1.53x at B37
-and 1.54x at BQ, i.e. the fused lane wins cold at two of its three rungs
-(`docs/receipts/flat675_fused_campaign.md:107-111`, all N=1, reported and never
-claimed). Compile cost is disclosed in each receipt rather than amortized away.
-Second, 10 of the 40 rows are `unmeasured` — including both
-`wireframe-gsco` siblings, which two dated diagnostics of the *same shipped
-configuration* place in opposite directions, so this record's own rule unplaces
-them pending re-adjudication. Placement is per example and per scale; there is
-still no repository-wide native-CPU/JAX-GPU speed claim, and the closing
-paragraph above continues to state what one would require.
-
-The bounded-scale rows above are unchanged.
+Two qualifiers. First, every certified win is **warm or persistent-cache**;
+cold results differ per receipt and must not be pooled — finite-build loses
+cold (0.88x, ~42 s compile), GSCO likewise, flat675 splits (0.47x at B3,
+1.53x at B37, 1.54x at BQ, all N=1;
+`docs/receipts/flat675_fused_campaign.md:107-111`). Second, 10 of the 40
+rows are `unmeasured` — including both `wireframe-gsco` siblings, unplaced
+by the record's own rule after two dated diagnostics of the same shipped
+configuration disagreed. Placement is per example and per scale; there is
+still no repository-wide native-CPU/JAX-GPU speed claim. The bounded-scale
+rows above are unchanged.
