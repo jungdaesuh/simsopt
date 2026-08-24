@@ -27,7 +27,9 @@ comparisons passed
   at fixed budgets.
 - Timing is one isolated launch per lane, startup and JIT included. Total GPU
   time was 14.1x native CPU. No steady-state claim follows, and the separate
-  fast/parity benchmark has no native baseline.
+  fast/parity benchmark has no native baseline. (A 2026-08-24 re-measurement
+  at HEAD on an A100 host puts the same protocol at 9.47x there — see "Wall
+  time at HEAD"; two hosts, two environments, not a trend.)
 - Everything here is bounded scale; native-default remains `not_run`. (True of
   every measurement below and of the manifest at this report's authority
   revision. The live manifest has since promoted one route to `native_default`
@@ -131,17 +133,34 @@ route.
 > identical across the two revisions.
 > `single-stage-boozer-vacuum-optimization` cannot be re-validated at
 > bounded scale at HEAD (the runner fails closed on its promoted scale tier;
-> see the pin note under Evidence provenance).
+> see the pin note under Evidence provenance). Separately, the pm4stell
+> native-versus-JAX last-bit mechanism was discharged on 2026-08-24: with
+> FMA contraction disabled, the rebuilt native GPMO state is bitwise
+> identical to the archived JAX dump — 0 of 5,826 dipole rows differ
+> (commit `b2c099489`, `docs/jax_gpu_pm_gpmo_campaign_plan.md`).
 >
 > A second-architecture leg (2026-08-24, NVIDIA A100-PCIE-40GB on a
-> different host, glibc 2.31, jax/jaxlib 0.10.0, same revision) re-ran the
-> full three-lane bounded matrix: **1,108 of 1,122 executed comparisons
-> pass**, with 19 of 25 cases fully clean. All 14 failures sit in four
-> cases, in the sensitivity classes above: the chaotic tracers
-> (fieldlines-ncsx 24/30, fieldlines-qa 26/30), planar-coils'
-> jax-cpu:jax-gpu objective pair at the gpu_runtime tolerance (28/30), and
-> one near-zero `initial:constraint_residual` pair in
-> wireframe-rcls-with-ports (88/90). Two cases could not complete there:
+> different host, AMD EPYC 7452, glibc 2.31, jax/jaxlib 0.10.0, same
+> revision) re-ran the three-lane bounded matrix for 25 of the 26 cases —
+> the 26th, `single-stage-boozer-vacuum-optimization`, is excluded by the
+> fail-closed scale refusal above, not by any failure. Result: **1,108 of
+> 1,122 executed comparisons pass**; of the 23 cases that produced
+> verdicts, 19 are fully clean and 4 carry failures. These fractions must
+> not be read against the header's 1,248/1,248 — that was a clean pass in
+> one pinned environment; this one contains failures. All 14 failures
+> were quantified from the retained value arrays, and every one is a
+> marginal miss — none exceeds about 2x its tolerance: the chaotic
+> tracers (fieldlines-ncsx 24/30, worst 5.5e-2 vs `atol` 3e-2;
+> fieldlines-qa 26/30, worst 2.1e-3 vs `atol` 2e-3 — including one
+> **CPU-versus-CPU** pair, native-cpu:jax-cpu, a cross-host CPU trajectory
+> divergence with no GPU involved), planar-coils' jax-cpu:jax-gpu
+> objective pair (28/30, 3.5% vs `rtol` 3%), and a near-zero
+> `initial:constraint_residual` pair in wireframe-rcls-with-ports (88/90,
+> 4.7e-10 against `rtol` 1e-10). One inversion worth naming: field-line
+> tracing supplies 10 of these 14 failures yet is the one workload that
+> cleared every warmed fast-mode gate below — chaotic amplification of
+> floating-point differences is the plausible mechanism, plausible but not
+> proven. Two cases could not complete there:
 > finitebuild (the manifest-route gap; see the controlled re-measurement)
 > and permanent-magnet-qa, whose lane writes `.vtu` grid files into the
 > checkout and trips the runner's repository-integrity guard on any fresh
@@ -326,6 +345,60 @@ controls to separate code change from environment change. Verdicts:
   routes for those observables are added, only 24 of 26 cases can replay
   the full three-lane bounded matrix at HEAD (this case, plus the promoted
   single-stage route).
+
+### Wall time at HEAD: the 2026-08-24 A100 three-lane run
+
+This is the current-code counterpart to the authority wall-time table
+above, measured under the same protocol — one isolated cold launch per
+lane per case, startup and compilation included, native lane pinned to
+`OMP_NUM_THREADS=1` — at revision `f5a3c9821` on a quiet dedicated host
+(AMD EPYC 7452, NVIDIA A100-PCIE-40GB, glibc 2.31, jax/jaxlib 0.10.0).
+It is a **different host and environment** from the authority table:
+the two tables are each valid within their own environment, and their
+totals (14.1x there, 9.47x here) are two measurements, not a trend.
+
+| Case | Native CPU wall s | JAX CPU wall s | JAX GPU wall s | GPU/native |
+|---|---:|---:|---:|---:|
+| boozer | 3.79 | 19.38 | 28.46 | 7.51x |
+| boozerqa | 3.23 | 56.37 | 108.73 | 33.62x |
+| coil-forces | 12.37 | 59.96 | 117.23 | 9.47x |
+| just-a-quadratic | 2.94 | 4.21 | 5.28 | 1.79x |
+| minimize-curve-length | 2.95 | 5.93 | 9.58 | 3.25x |
+| permanent-magnet-muse | 4.39 | 4.08 | 5.62 | 1.28x |
+| permanent-magnet-pm4stell | 3.37 | 4.09 | 5.71 | 1.69x |
+| permanent-magnet-qa | — | — | — | blocked |
+| permanent-magnet-simple | 2.91 | 3.67 | 4.18 | 1.44x |
+| qfm | 3.57 | 32.59 | 84.81 | 23.76x |
+| stage-two-optimization | 8.61 | 44.03 | 79.15 | 9.19x |
+| stage-two-optimization-finitebuild | — | — | — | blocked |
+| stage-two-optimization-minimal | 3.29 | 20.07 | 49.33 | 15.01x |
+| stage-two-optimization-planar-coils | 10.48 | 59.31 | 101.96 | 9.73x |
+| stage-two-optimization-stochastic | 8.15 | 19.57 | 40.95 | 5.03x |
+| strain-optimization | 8.65 | 9.99 | 24.26 | 2.81x |
+| surf-vol-area | 2.99 | 18.63 | 40.67 | 13.62x |
+| tracing-fieldlines-ncsx | 3.18 | 39.04 | 102.64 | 32.30x |
+| tracing-fieldlines-qa | 3.18 | 38.30 | 100.44 | 31.61x |
+| tracing-particle | 3.05 | 24.87 | 71.01 | 23.28x |
+| wireframe-gsco-modular | 2.95 | 5.15 | 6.50 | 2.21x |
+| wireframe-gsco-multistep | 3.05 | 4.34 | 5.99 | 1.96x |
+| wireframe-gsco-sector-saddle | 2.98 | 5.05 | 5.83 | 1.96x |
+| wireframe-rcls-basic | 3.14 | 3.76 | 4.75 | 1.51x |
+| wireframe-rcls-with-ports | 3.26 | 3.94 | 5.01 | 1.54x |
+| **Total (23 measured cases)** | **106.45** | **486.30** | **1008.09** | **9.47x** |
+
+Scope of the 9.47x total, stated plainly: it is computed over a case set
+that excludes one case by scale refusal
+(`single-stage-boozer-vacuum-optimization`, promoted to `native_default`),
+excludes two by the bugs documented above (permanent-magnet-qa's `.vtu`
+side-writes; finitebuild's unrouted `minimum_clearance` observables), and
+contains four cases whose parity comparisons carry marginal failures
+(quantified in the re-validation note — all within ~2x tolerance). The
+per-case spread is 1.28x-33.62x; the launch-bound structure is the same
+as the authority run's: cold XLA compilation dominates the JAX lanes at
+bounded scale, so this table measures deployment cost of one-shot runs,
+not device throughput. The GPU-favorable regime — warmed or
+persistent-cache solves at the examples' own scales — is the addendum's
+per-example certified evidence, and this table does not supersede it.
 
 ### Authority-run isolated end-to-end wall time
 
