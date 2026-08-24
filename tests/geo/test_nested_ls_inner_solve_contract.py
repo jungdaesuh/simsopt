@@ -634,3 +634,291 @@ def test_the_harness_and_the_contract_are_the_same_rule() -> None:
     assert probe.select_arm(1.0, 1.0) == nested_ls_predictor_arm(
         bare_gradient_l2=1.0, predicted_gradient_l2=1.0
     )
+
+
+# --------------------------------------------------------------------------
+# Predictor fallback semantics in production (Phase 2 wiring)
+# --------------------------------------------------------------------------
+
+
+def _outer_state(**overrides: object):
+    """A ``NestedLsOuterState`` carrying only what the fallback branches read.
+
+    The three branches under test return before touching ``jax_boozer``, the
+    flat program, or any device, which is exactly why they are worth testing
+    on CPU: they are the paths that decide NOT to predict, and a predictor
+    that silently predicts anyway is the failure this covers.
+    """
+
+    from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
+        NestedLsOuterAnchor,
+        NestedLsOuterState,
+        NestedLsOuterTrialReadout,
+    )
+
+    anchor = NestedLsOuterAnchor.at(
+        coil_dofs=np.array([0.25, -0.5]),
+        surface_dofs=np.array([1.0, 2.0, 3.0]),
+        iota=0.14,
+        G=2.0,
+        schur_lu=None,
+    )
+    fields: dict[str, object] = {
+        "jax_boozer": None,
+        "flat_value_and_grad": None,
+        "vessel_dofs": np.zeros(1),
+        "coil_slice": slice(0, 2),
+        "surface_slice": slice(2, 5),
+        "anchor": anchor,
+        "last_trial": NestedLsOuterTrialReadout(
+            anchor=anchor,
+            inner_iterations=-1,
+            inner_grad_l2=-1.0,
+            adjoint_live_eta=-1.0,
+        ),
+        "inner_substep_legs": (1,),
+        "inner_predictor": False,
+        "predictor_source": None,
+        "last_predictor_arm": NESTED_LS_PREDICTOR_ARM_BARE,
+        "last_predictor_raw_delta_l2": -1.0,
+        "last_predictor_applied_delta_l2": -1.0,
+        "last_predictor_scaled": False,
+        "record_mixed_cross_check": False,
+        "mixed_cross_check_gradient": None,
+        "mixed_cross_check_max_abs": None,
+    }
+    fields.update(overrides)
+    return NestedLsOuterState(**fields)  # type: ignore[arg-type]
+
+
+def test_the_predictor_is_off_by_default_on_both_new_policies() -> None:
+    """A run must opt in to either trajectory change, never inherit it."""
+
+    import inspect
+
+    from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
+        prepare_f3_b37_outer_state,
+    )
+
+    parameters = inspect.signature(prepare_f3_b37_outer_state).parameters
+    assert parameters["inner_substep"].default is False
+    assert parameters["inner_predictor"].default is False
+    for name in ("inner_substep", "inner_predictor"):
+        assert parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_a_predictor_off_state_starts_from_the_bare_anchor_bytes() -> None:
+    """The OFF path must hand back the anchor's own array, untouched.
+
+    The state is given VALID cached machinery, built at the anchor's own
+    coils, so the only thing stopping a prediction is the flag. A test that
+    left the cache empty would pass whether the flag was checked or not --
+    it would prove the source guard twice and the flag guard never.
+    """
+
+    from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
+        NestedLsPredictorSource,
+        _predicted_inner_start,
+    )
+
+    def _explode(_vector):  # pragma: no cover - must never be called
+        raise AssertionError("predicted with the predictor switched off")
+
+    state = _outer_state(inner_predictor=False)
+    usable = NestedLsPredictorSource(
+        coil_dofs=np.array(state.anchor.coil_dofs, copy=True),
+        operator=object(),
+        apply_lu=_explode,
+    )
+    assert usable.built_at(state.anchor.coil_dofs)
+    state.predictor_source = usable
+
+    surface, arm, raw, applied, scaled = _predicted_inner_start(
+        state, np.array([0.3, -0.45])
+    )
+    assert surface is state.anchor.surface_dofs
+    assert arm == NESTED_LS_PREDICTOR_ARM_BARE
+    assert (raw, applied, scaled) == (0.0, 0.0, False)
+
+
+def test_a_predictor_on_state_with_no_cached_machinery_falls_back() -> None:
+    """Turning the flag on is not enough; an evaluation must have run."""
+
+    from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
+        _predicted_inner_start,
+    )
+
+    state = _outer_state(inner_predictor=True, predictor_source=None)
+    surface, arm, _raw, _applied, _scaled = _predicted_inner_start(
+        state, np.array([0.3, -0.45])
+    )
+    assert surface is state.anchor.surface_dofs
+    assert arm == NESTED_LS_PREDICTOR_ARM_BARE
+
+
+def test_machinery_built_at_other_coils_is_refused_not_reused() -> None:
+    """The provenance guard, and the reason the cache is safe at all.
+
+    ``predictor_source`` holds whatever the LAST evaluation produced, and
+    the last evaluation is frequently a REJECTED trial rather than the
+    incumbent. Using that operator would predict a displacement measured
+    from a point the committed anchor is not — it would compile, run, and
+    return a plausible surface. Nothing else in the system would notice.
+    """
+
+    from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
+        NestedLsPredictorSource,
+        _predicted_inner_start,
+    )
+
+    def _explode(_vector):  # pragma: no cover - must never be called
+        raise AssertionError("the predictor used machinery from another point")
+
+    stale = NestedLsPredictorSource(
+        coil_dofs=np.array([9.0, 9.0]),  # not the anchor's (0.25, -0.5)
+        operator=object(),
+        apply_lu=_explode,
+    )
+    state = _outer_state(inner_predictor=True, predictor_source=stale)
+    assert not stale.built_at(state.anchor.coil_dofs)
+    surface, arm, _raw, _applied, _scaled = _predicted_inner_start(
+        state, np.array([0.3, -0.45])
+    )
+    assert surface is state.anchor.surface_dofs
+    assert arm == NESTED_LS_PREDICTOR_ARM_BARE
+
+
+def test_built_at_is_bitwise_and_shape_tolerant() -> None:
+    """One ULP is a different point; a row vector is the same one."""
+
+    from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
+        NestedLsPredictorSource,
+    )
+
+    coils = np.array([0.25, -0.5])
+    source = NestedLsPredictorSource(
+        coil_dofs=coils, operator=object(), apply_lu=lambda v: v
+    )
+    assert source.built_at(coils)
+    assert source.built_at(coils.reshape(1, -1))
+    nudged = np.array(coils, copy=True)
+    nudged[0] = np.nextafter(nudged[0], math.inf)
+    assert not source.built_at(nudged)
+
+
+def _predicting_state(monkeypatch, *, raw_delta, bare_grad_l2, predicted_grad_l2):
+    """A state whose prediction path runs entirely on fakes.
+
+    ``_predicted_inner_start``'s three collaborators are module-level names
+    in the scale module, so they can be replaced the same way the outer
+    children's are. Without this the only CPU-reachable branches are the
+    ones that decide NOT to predict, and the trust region and the arm rule
+    -- the two decisions the prediction path actually makes -- go
+    untested. Mutating either survived the suite until this existed.
+    """
+
+    from simsopt_jax_adapters.geo import nested_ls_reduced_scale as scale
+
+    state = _outer_state(inner_predictor=True)
+    state.predictor_source = scale.NestedLsPredictorSource(
+        coil_dofs=np.array(state.anchor.coil_dofs, copy=True),
+        operator=object(),
+        # The LU returns the NEGATED raw delta, because the production line
+        # is ``raw_delta = -apply_lu(mixed)``.
+        apply_lu=lambda _mixed: -np.asarray(raw_delta, dtype=np.float64),
+    )
+    monkeypatch.setattr(
+        scale, "nested_ls_runtime_coil_closures", lambda _b: (object(), object(), None)
+    )
+    monkeypatch.setattr(
+        scale,
+        "apply_reduced_mixed_schur_coil_tangent",
+        lambda *a, **k: np.zeros_like(np.asarray(raw_delta, dtype=np.float64)),
+    )
+
+    def _fake_envelope(_residual, _objective, surface):
+        is_bare = np.array_equal(surface, state.anchor.surface_dofs)
+        norm = bare_grad_l2 if is_bare else predicted_grad_l2
+        return 0.0, np.array([float(norm), 0.0, 0.0]), None
+
+    monkeypatch.setattr(scale, "_envelope_value_and_grad", _fake_envelope)
+    return state, scale
+
+
+def test_the_trust_region_is_applied_to_the_predicted_start(monkeypatch) -> None:
+    """An oversized prediction must be CLIPPED before it becomes a start.
+
+    ``‖s_anchor‖`` here is ‖(1,2,3)‖ = 3.7417, so the cap at ratio 0.1 is
+    0.37417. A raw step of length 10 must arrive scaled to exactly the cap,
+    with its direction intact — using the raw step instead survived the
+    suite before this test.
+    """
+
+    raw = np.array([10.0, 0.0, 0.0])
+    state, _scale = _predicting_state(
+        monkeypatch, raw_delta=raw, bare_grad_l2=5.0, predicted_grad_l2=1.0
+    )
+    from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
+        _predicted_inner_start,
+    )
+
+    surface, arm, raw_l2, applied_l2, scaled = _predicted_inner_start(
+        state, np.array([0.3, -0.45])
+    )
+    cap = 0.1 * float(np.linalg.norm(state.anchor.surface_dofs))
+    assert arm == NESTED_LS_PREDICTOR_ARM_PREDICTED
+    assert scaled is True
+    assert raw_l2 == pytest.approx(10.0)
+    assert applied_l2 == pytest.approx(cap)
+    # The start is anchor + CLIPPED step, not anchor + raw step.
+    np.testing.assert_allclose(
+        surface, np.asarray(state.anchor.surface_dofs) + np.array([cap, 0.0, 0.0])
+    )
+    assert not np.allclose(surface, np.asarray(state.anchor.surface_dofs) + raw)
+
+
+def test_a_prediction_with_a_worse_envelope_gradient_is_discarded(
+    monkeypatch,
+) -> None:
+    """The arm rule decides, and losing means the bare anchor's own bytes."""
+
+    state, _scale = _predicting_state(
+        monkeypatch,
+        raw_delta=np.array([0.01, 0.0, 0.0]),
+        bare_grad_l2=1.0,
+        predicted_grad_l2=2.0,  # strictly worse
+    )
+    from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
+        _predicted_inner_start,
+    )
+
+    surface, arm, raw_l2, _applied, _scaled = _predicted_inner_start(
+        state, np.array([0.3, -0.45])
+    )
+    assert arm == NESTED_LS_PREDICTOR_ARM_BARE
+    assert surface is state.anchor.surface_dofs
+    # The step was still measured and reported, so a receipt can show that a
+    # prediction was made and rejected rather than never attempted.
+    assert raw_l2 == pytest.approx(0.01)
+
+
+def test_a_prediction_with_a_better_envelope_gradient_is_kept(monkeypatch) -> None:
+    state, _scale = _predicting_state(
+        monkeypatch,
+        raw_delta=np.array([0.01, 0.0, 0.0]),
+        bare_grad_l2=2.0,
+        predicted_grad_l2=1.0,
+    )
+    from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
+        _predicted_inner_start,
+    )
+
+    surface, arm, _raw, applied_l2, scaled = _predicted_inner_start(
+        state, np.array([0.3, -0.45])
+    )
+    assert arm == NESTED_LS_PREDICTOR_ARM_PREDICTED
+    assert scaled is False
+    assert applied_l2 == pytest.approx(0.01)
+    np.testing.assert_allclose(
+        surface, np.asarray(state.anchor.surface_dofs) + np.array([0.01, 0.0, 0.0])
+    )
