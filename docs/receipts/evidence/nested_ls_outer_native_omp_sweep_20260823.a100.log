@@ -1,0 +1,11 @@
+outer native omp sweep budget 3 maxcor 10 set 14,16,20,24 repeats 2 git_head bfef9aa9c8896d7413eb9c6b53746ff15c41ce0f
+outer native success=True nit=3 nfev=7 J=0.013104620459202155 iota=0.14468195002369644 wall=3122.474996356992 omp=14
+outer native success=True nit=3 nfev=7 J=0.013104620459203648 iota=0.14468195002369055 wall=3208.1524804450455 omp=16
+outer native success=True nit=3 nfev=7 J=0.013104620459204158 iota=0.14468195002368966 wall=2995.741524252051 omp=20
+outer native success=True nit=3 nfev=7 J=0.013104620459201837 iota=0.14468195002369746 wall=3196.136681689997 omp=24
+outer native success=True nit=3 nfev=7 J=0.013104620459202155 iota=0.14468195002369644 wall=3145.376476617006 omp=14
+outer native success=True nit=3 nfev=7 J=0.013104620459203648 iota=0.14468195002369055 wall=3225.824162787001 omp=16
+outer native success=True nit=3 nfev=7 J=0.013104620459204158 iota=0.14468195002368966 wall=2949.01847449498 omp=20
+outer native success=True nit=3 nfev=7 J=0.013104620459201837 iota=0.14468195002369746 wall=3220.41966602701 omp=24
+wrote /mnt/homes_global/jdsuh/code/columbia/simsopt-pr-jax-port-squashed/docs/receipts/evidence/nested_ls_outer_native_omp_sweep_20260823.a100.json
+best_omp_num_threads 20 min_wall 2949.01847449498 per_omp_min 14:3122.474996356992 16:3208.1524804450455 20:2949.01847449498 24:3196.136681689997
