@@ -69,6 +69,50 @@ NESTED_LS_NEWTON_EXIT_STATUSES: Final[tuple[str, str, str]] = (
     NESTED_LS_NEWTON_EXIT_FAILED,
 )
 
+# Licensed coarse tier (Phase 4 of the upgrade plan).
+#
+# Which achieved inner residual may feed which consumer, decided from the
+# measured adjoint error curve rather than proposed. The measurement is
+# ``docs/receipts/evidence/nested_ls_outer_predictor_replay_20260824.json``:
+# eight distinct achieved residuals from 4.3e-2 to 1.7e-13 at one recorded
+# anchor and one recorded trial displacement, sampled by CAPPING NEWTON
+# ITERATIONS -- loosening the tolerance cannot sample this curve, because a
+# quadratically convergent walk overshoots a loose request.
+#
+# Three results decide the tiers, and two of them are not what the plan
+# expected:
+#
+# 1. kappa_2(H_ss) = 2.055e5 at stab = 0, and the IFT adjoint DOES NOT
+#    amplify by it. Measured relative gradient error is 0.30x to 3.94x the
+#    achieved residual across eleven decades -- order unity.
+# 2. The relative error in the OBJECTIVE is LARGER than in the gradient:
+#    worst 14.8x the achieved residual against the gradient's 3.94x. The
+#    plan ordered its tiers with "line-search trial values only" as the
+#    LOOSEST, on the assumption that a value tolerates more error than a
+#    gradient. At this state the opposite holds, so the value is the
+#    BINDING constraint and the two tiers collapse into one.
+# 3. Neither curve is monotone in the residual (rho = 4.3e-2 gives a
+#    smaller error than rho = 2.0e-2, in both quantities). A tier therefore
+#    cannot be read off the fitted slope; it is licensed from the measured
+#    WORST ratio over the sampled rungs, which is what these constants are.
+#
+# SINGLE STATE. One anchor, one displacement, one host. These bounds are
+# the best available evidence and are not a proof of an envelope; a second
+# state may move the worst ratio, and Phase 5 must not widen a tier on this
+# evidence alone.
+NESTED_LS_COARSE_AMPLIFICATION_GRADIENT: Final[float] = 3.943
+NESTED_LS_COARSE_AMPLIFICATION_VALUE: Final[float] = 14.805
+
+#: What a solve result may be used for, tightest first.
+NESTED_LS_COARSE_USE_COMMITTED_ANCHOR: Final[str] = "committed_anchor"
+NESTED_LS_COARSE_USE_OUTER_GRADIENT: Final[str] = "outer_gradient"
+NESTED_LS_COARSE_USE_LINE_SEARCH_VALUE: Final[str] = "line_search_value"
+NESTED_LS_COARSE_USES: Final[tuple[str, str, str]] = (
+    NESTED_LS_COARSE_USE_COMMITTED_ANCHOR,
+    NESTED_LS_COARSE_USE_OUTER_GRADIENT,
+    NESTED_LS_COARSE_USE_LINE_SEARCH_VALUE,
+)
+
 # Inner Δc sub-stepping (Phase 3 of the upgrade plan).
 #
 # The ladder of leg counts an inner solve may retry a failed displacement
@@ -468,6 +512,78 @@ def nested_ls_outer_attempt_fun_is_objective(
     ) == nested_ls_outer_parameter_bytes(last_evaluated_parameters)
 
 
+def nested_ls_coarse_tier_admits(
+    *,
+    achieved_residual_l2: float,
+    use: str,
+) -> bool:
+    """Whether a solve at this achieved residual may be used this way.
+
+    ``committed_anchor`` is admitted only at ``NESTED_LS_NEWTON_TOL``, and
+    that is not a margin argument: the anchor is the warm start every later
+    evaluation inherits and the point FD-0 differences about, so an error
+    there is not attenuated, it is propagated. Committed anchors are always
+    tight.
+
+    ``outer_gradient`` and ``line_search_value`` share the coarse tier at
+    ``NESTED_LS_NEWTON_COARSE_TOL``. They share it because the measurement
+    says the value is the binding one -- see the tier comment above -- so
+    splitting them would license the value looser than the evidence allows.
+
+    Fails CLOSED on an unrecognized use. A default-admit branch here would
+    silently license whatever consumer someone adds next, which is the
+    whole failure mode this predicate exists to prevent.
+    """
+
+    residual = float(achieved_residual_l2)
+    if not residual >= 0.0:  # NaN included: NaN fails every comparison
+        return False
+    if use == NESTED_LS_COARSE_USE_COMMITTED_ANCHOR:
+        return residual <= float(NESTED_LS_NEWTON_TOL)
+    if use in (
+        NESTED_LS_COARSE_USE_OUTER_GRADIENT,
+        NESTED_LS_COARSE_USE_LINE_SEARCH_VALUE,
+    ):
+        return residual <= float(NESTED_LS_NEWTON_COARSE_TOL)
+    raise ValueError(
+        f"unknown nested-LS coarse-tier use {use!r}; expected one of "
+        f"{NESTED_LS_COARSE_USES}."
+    )
+
+
+def nested_ls_coarse_tier_error_bound(
+    *,
+    achieved_residual_l2: float,
+    use: str,
+) -> float:
+    """The relative error this use inherits at this achieved residual.
+
+    The measured worst amplification times the residual. Linear because the
+    measurement is: the fitted slope is 0.943 over eleven decades, and the
+    amplification constants are worst-case ratios over the sampled rungs
+    rather than the fit's own coefficient, so this over-states rather than
+    under-states inside the sampled range.
+
+    Outside that range it is an extrapolation and says nothing. Callers
+    that need a guarantee should gate on
+    :func:`nested_ls_coarse_tier_admits` and read this as the size of the
+    error they are accepting, not as a certificate.
+    """
+
+    residual = float(achieved_residual_l2)
+    if use == NESTED_LS_COARSE_USE_OUTER_GRADIENT:
+        return float(NESTED_LS_COARSE_AMPLIFICATION_GRADIENT) * residual
+    if use in (
+        NESTED_LS_COARSE_USE_LINE_SEARCH_VALUE,
+        NESTED_LS_COARSE_USE_COMMITTED_ANCHOR,
+    ):
+        return float(NESTED_LS_COARSE_AMPLIFICATION_VALUE) * residual
+    raise ValueError(
+        f"unknown nested-LS coarse-tier use {use!r}; expected one of "
+        f"{NESTED_LS_COARSE_USES}."
+    )
+
+
 def nested_ls_inner_substep_points(
     *,
     anchor_coil_dofs: NDArray[np.float64],
@@ -643,6 +759,12 @@ __all__ = [
     "NESTED_LS_BANANA_NEWTON_TOL",
     "NESTED_LS_BANANA_USES_BFGS_THEN_NEWTON",
     "NESTED_LS_CONSTRAINT_WEIGHT",
+    "NESTED_LS_COARSE_AMPLIFICATION_GRADIENT",
+    "NESTED_LS_COARSE_AMPLIFICATION_VALUE",
+    "NESTED_LS_COARSE_USES",
+    "NESTED_LS_COARSE_USE_COMMITTED_ANCHOR",
+    "NESTED_LS_COARSE_USE_LINE_SEARCH_VALUE",
+    "NESTED_LS_COARSE_USE_OUTER_GRADIENT",
     "NESTED_LS_GATE6_AGGREGATION",
     "NESTED_LS_GATE6_CLAIM_REPEATS",
     "NESTED_LS_GATE6_IOTA_G_TOL",
@@ -688,6 +810,8 @@ __all__ = [
     "NestedLsOuterCandidateStore",
     "NestedLsPhysicsNewtonKwargs",
     "nested_ls_banana_run_code_options",
+    "nested_ls_coarse_tier_admits",
+    "nested_ls_coarse_tier_error_bound",
     "nested_ls_inner_substep_points",
     "nested_ls_newton_exit_status",
     "nested_ls_outer_attempt_fun_is_objective",
