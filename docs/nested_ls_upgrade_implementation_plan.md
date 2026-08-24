@@ -25,9 +25,14 @@ Closure section, commit `55e87b294`), track verdict
 - One SSOT transactional state model shared by both nested children and the
   fused lane's host boundary (incumbent/candidate, commit-on-accept).
 - Inner-solve robustness at outer trial points: predictor warm start,
-  refresh-before-abandon, damping, sub-stepping — closing the measured lane
-  fork (JAX inner 10 undamped Newton @1e-13 vs native LBFGS≤1500+Newton≤40
-  @1e-11) without abandoning the JAX lane's per-evaluation speed edge.
+  retry-with-regularization instead of abandoning on the first rejected
+  step, Δc sub-stepping — closing the measured lane fork (JAX inner Newton
+  capped at 10 iterations @1e-13 vs native LBFGS≤1500 + Newton≤40 @1e-11)
+  without abandoning the JAX lane's per-evaluation speed edge. **Corrected
+  from the draft, which said "undamped" and "refresh-before-abandon":** the
+  inner walk is already damped (`nested_ls_reduced.py:803-831`), and the
+  production `dense_lu` path re-factors every iteration so no stale factor
+  exists to refresh. See Phase 3.
 - Typed, evidence-grade trial semantics: three-valued inner exit,
   `value_is_valid` ledger bit, per-leg binary provenance.
 - A defensible tolerance/error budget before any coarse inner result feeds
@@ -77,18 +82,36 @@ Closure section, commit `55e87b294`), track verdict
   (`_traceable_predict_warmstart_result_from_anchor`: JVP forcing +
   factor-reuse + anchor fallback) and the transactional host boundary
   `AcceptedIncumbentHostValueAndGrad` at `:422`.
-- Inner-walk internals: `nested_ls_reduced.py:1146-1329` (undamped Newton +
-  Armijo, counter semantics), `dense_schur_lu_preconditioner` `:986-996`,
+- Inner-walk internals: `nested_ls_reduced.py:1146-1329` (the Newton loop and
+  its counter semantics) with the damping in `_schur_armijo_step` at
+  `:803-831` — 8 halvings, non-finite trials rejected twice, accepted on the
+  objective Armijo condition **or** residual-norm monotonicity. The walk's
+  abandon point is `:1325` (`if not step_accepted: break`) and the quality
+  bail at `:1258-1284`; those, not the step rule, are what Phase 3 targets.
+  `dense_schur_lu_preconditioner` `:986-996`,
   `apply_reduced_mixed_schur_coil_tangent` `:1389-1426`. Predictor expression
   already FD-validated by `tests/geo/test_nested_ls_reduced.py:1360,1471`
   (`test_implicit_adjoint_matches_surface_response_to_coil_step`,
   `test_unregularized_ift_adjoint_matches_reconverged_surface_fd`).
 - **B37 v2 JAX-only diagnostic: LANDED `59ccbe8a0`**, and it answers the
   plan's second open question — see "Adjudicated" below.
-- B3 v2 receipt (producer `01fefbadd`, stem `nested_ls_outer_b3_20260824`)
-  was still executing in worktree `.wt-b3v2-run` at this writing (started
-  05:12, pairs 0 and 1 green, pair 2 native mid-flight). **It is bridge
-  evidence only and cannot gate a merged-tree B37** — the merged driver
+- B3 v2 bridge run (producer `01fefbadd`, stem `nested_ls_outer_b3_20260824`,
+  worktree `.wt-b3v2-run`, started 05:12): **died at ~08:19 inside pair 1's
+  first rejudge child and wrote NO receipt.** Its structured log is 12 lines
+  with no traceback and the rejudge child payload is 0 bytes. What survived
+  on disk is strong and is the evidence to cite: all six timed child payloads
+  intact; all three pairs **bitwise identical on every endpoint field**
+  (native `J = 0.012982793095001662`, `iota = 0.144818275423838`; JAX
+  `J = 0.012982793095005024`); pair 0 fully recorded `physics=True`,
+  `j_rel_gap = 2.5894998648152005e-13`, `reason=None`, both rejudges
+  `noop=True iter=0` at `‖∇J‖ ≈ 3e-15` against a 1e-13 gate.
+  **The pair-2 canary came back clean anyway**: pair 2's native leg ran on
+  simsoptpp `95190afa` and matched pairs 0/1 on `41b2ca79` bitwise; pair 2's
+  JAX leg ran on `d4a6e028` and matched the earlier JAX legs bitwise. The
+  endpoints are indifferent to the swaps on the lanes that ran them, so
+  pinning one `.so` in Phase 1 is hygiene rather than a correction for a
+  measured fork. (Weaker on the JAX side — that lane barely touches the C++
+  binary.) **Even completed, this receipt could not gate a merged-tree B37** — the merged driver
   refuses it on five independent interlocks: claim schema `v1` not `v2`
   (`benchmarks/nested_ls_outer_claim.py:484-506`), `git_head` `01fefbadd`
   not the B37 run's HEAD (`:621-668`), a v1 sweep artifact at
@@ -130,30 +153,91 @@ accepts that error silently — we budget it).
 ## Implementation Plan
 
 0. **Tier-0 hardening (~1 day; lands on the merged main, not on the branch)**
-   - [ ] Pin scipy 1.17.1 `StopIteration`-from-callback control flow with a
-         test: raise from a new-style callback under L-BFGS-B, assert the
-         observed status/message/success triple (expected: caught, returned
-         `success=False`; exact status code to be pinned by the test, not
-         assumed — sources disagree between 2/99).
-   - [ ] Add `value_is_valid: bool` to `_OuterEval` rows + native twin
-         records; barrier rows carry `False`.
-   - [ ] Barrier contraction assertion: unit test that dcsrch interpolation
-         on the quadratic barrier contracts at least geometrically over
-         `maxls=8` trials (Ceres-gap check).
-   - [ ] `test_overstepping`-class regression (DESC pattern): noise the
-         gradient so every step rejects, cripple the inner solve, assert the
-         returned endpoint is bitwise the start state.
-   - [ ] Parameterized sweep test of `nested_ls_outer_restart_reason` and
+   - [x] Pin scipy 1.17.1 `StopIteration`-from-callback control flow.
+         **Observed, not assumed — and the 2-vs-99 disagreement is not a
+         disagreement: both are real, at different boundaries.** Through
+         `scipy.optimize.minimize(method="L-BFGS-B")` the triple is
+         `status=99`, message ``"`callback` raised `StopIteration`."``,
+         `success=False`; through `_minimize_lbfgsb` directly, before
+         `minimize`'s override, it is `status=2`,
+         `"STOP: CALLBACK REQUESTED HALT"`. The children go through
+         `minimize`, so **99 is what they see**. The catch is in
+         `scipy/_lib/_util.py:1006-1011` (`_call_callback_maybe_halt`), the
+         status is set at `scipy/optimize/_lbfgsb_py.py:475-477,492,506-510`,
+         and `minimize` overrides it at `scipy/optimize/_minimize.py:823-826`.
+         The catch is `StopIteration`-specific (a `RuntimeError` from the same
+         callback propagates); a `StopIteration` **subclass** is also caught.
+         **Plan correction: the children pass OLD-style single-positional
+         callbacks** (`nested_ls_outer_jax_child.py:446`,
+         `nested_ls_outer_native_child.py:709`), not new-style. The triple,
+         `nit`, `nfev` and `x` are identical either way, but a new-style
+         callback receives an `OptimizeResult` whose `.x` **is the live buffer
+         L-BFGS-B mutates in place** — a migration must copy at the record
+         site or every recorded candidate collapses onto the last one.
+         **Defect found and fixed while pinning this:**
+         `nested_ls_outer_endpoint_success` excluded stop codes by name
+         (`status != 2`), so a status-99 halt published as a good endpoint.
+         Now an allow-list, `NESTED_LS_OUTER_PUBLISHABLE_STOP_STATUSES`.
+   - [x] Add `value_is_valid: bool` to `_OuterEval` rows + native twin
+         records; barrier rows carry `False`. **Item was under-scoped: the
+         same defect exists one level up.** scipy does not restore
+         `result.fun` after a wholly-rejected attempt — it leaves the last
+         rejected trial's barrier value (measured `0.31250004043721513`
+         against a true anchor objective of `0.3125`), and both children
+         published that straight through as `restart_attempts[*]["fun"]`
+         (JAX also as top-level `result_fun`). Both levels now carry the bit.
+   - [x] Barrier contraction assertion (Ceres-gap check). Measured **≤ 1/3
+         per trial**, worst ratio 0.3333333247815527 over 320 configurations
+         driving real scipy against the real barrier, corroborated
+         analytically from MINPACK `dcstep`. **Honest limitation:** five
+         sentinel variants (coherent barrier, stale-gradient, zero-gradient,
+         constant penalty, under-reporting) ALL contract at ≤ 1/3, so
+         contraction cannot discriminate a coherent barrier from an
+         incoherent one, and **a non-contracting line search is not a viable
+         explanation for the B37 stall**. The test is a guard on the sealed
+         barrier and the scipy pin, not evidence for the mechanism.
+   - [x] `test_overstepping`-class regression (DESC pattern). Asserts the
+         endpoint coils, surface, iota, G **and the live Boozer objects** are
+         bitwise the start state, driving the real candidate store and real
+         `scipy.minimize`; failure names the drifting block and its ULP gap.
+         Falsified against a no-op restore. Note: an all-rejected run reports
+         `nit=0` and fires no callback, so the path exercised is `record()`
+         priming plus restore-on-rejection — the accept path is not reached.
+   - [x] Parameterized sweep of `nested_ls_outer_restart_reason` and
          `nested_ls_outer_endpoint_success` alone (TORAX `test_cond_fun`
-         pattern) — extend `tests/geo/test_nested_ls_outer_transaction.py`
-         (file exists on `fix-b37-restart` only until Phase 1 merges it).
-   - [ ] Add `simsoptpp_sha256` (and `.so` path) to
-         `nested_ls_runtime_identity` (`nested_ls_reduced_scale.py:398`).
-   - [ ] Soften the `accept()` KeyError crash: on a missing candidate, emit
-         an honest-failure payload (child writes JSON with
-         `success=False`, reason `accept_without_candidate`) before exiting
-         nonzero — fail closed without destroying evidence (dcsrch
-         XTOL-promotion corner).
+         pattern), extending `tests/geo/test_nested_ls_outer_transaction.py`
+         (38 → 101 tests). **Plan corrections:** the status set is
+         `{0,1,2,99}`, not `{0,1,2}`; and status 2 is not synonymous with
+         restartable — `"STOP: CALLBACK REQUESTED HALT"` is status 2 without
+         the `ABNORMAL` prefix, terminal *and* unpublishable. A producer test
+         drives scipy six ways and requires set equality so the table cannot
+         go stale.
+   - [x] Add `simsoptpp_sha256` (and `.so` path) to
+         `nested_ls_runtime_identity`. This was a **de-duplication**:
+         `nested_ls_receipt_provenance` already derived both keys and already
+         spread the identity dict, so receipt provenance is byte-unchanged
+         while **five bare-identity consumers that had no binding now get
+         one**. Missing-`simsoptpp` fails closed (raises) rather than
+         recording `None` — a native-lane receipt with no binary bound to it
+         is exactly the drift the field exists to catch.
+   - [x] Soften the `accept()` crash into an honest-failure payload.
+         **Plan correction: it is a `RuntimeError`, not a `KeyError`**
+         (`nested_ls_contract.py:298`) — an implementer who writes
+         `except KeyError` would leave the crash untouched while the test
+         appeared to pass. **And the item was half a fix as written:** the
+         parent's `_run_child` raised on `rc != 0` *before* reading the
+         payload, so a schema-valid failure receipt was invisible to the
+         parent no matter how well the child wrote it; the parent now names
+         `failure_reason` and the payload path. The shared vocabulary lives
+         in `nested_ls_contract.py` as
+         `NESTED_LS_OUTER_ACCEPT_WITHOUT_CANDIDATE_REASON`, beside
+         `restart_reason`'s vocabulary, not in one lane.
+   - [x] **Not in the original list, and required to meet this phase's own
+         validation line.** Both children buried their optimizer loop,
+         callback and payload builder inside a function whose heavy imports
+         were function-local, so no CPU test could reach any of them. Each is
+         now split into a composition root (`_prepare_*` → a frozen context)
+         and the logic (`_drive_*`). Phases 2–4 need the same seam.
 
 1. **Merge + re-baseline (review step 1–2; ~1 day + 11–14 h machine)**
    - [x] Squash-merge `fix-b37-restart` onto current main; resolve the
@@ -187,7 +271,16 @@ accepts that error silently — we budget it).
          entrants (the 8 `nested_ls_*` benchmarks, including the outer claim
          and both children, plus 10 from earlier campaigns) were **never**
          members, so this is a debt refreeze the merge forces into the open,
-         not merge-caused drift: the merge's own net effect on the count is
+         not merge-caused drift. Note what admission actually means here:
+         `_diag4_execution_source_membership` (`…successor_authority.py:4828-4843`)
+         is a **broad sweep** — every regular `*.py` under `benchmarks/`,
+         `examples/`, `src/`, unioned with the qualified and frozen sets — so
+         `--admit` is an operator acknowledgement that files entered, not a
+         curation decision about whether each belongs. The count must be
+         **recomputed at run time**, not copied from here: this plan's own
+         Phase-2 work adds `benchmarks/nested_ls_outer_predictor_replay.py`
+         under a broad root, taking it to 661 with 19 admissions, and any
+         other session's new benchmark moves it again. Consequence: the merge's own net effect on the count is
          zero, because `tests/` is not one of
          `DIAG4_EXECUTION_SOURCE_BROAD_ROOTS = ("benchmarks","examples","src")`
          and the new test file therefore does not enter membership. Run only
@@ -418,11 +511,18 @@ accepts that error silently — we budget it).
   `95190afa`, and pair 2's JAX leg plus all six rejudge children will load
   `d4a6e028`. Pair 2 therefore straddles two binaries whatever its native leg
   reports, and the `95190afa` → `d4a6e028` step is unmeasured on the native
-  lane entirely. **Ruling: freeze the `.so`, record its sha in
-  `nested_ls_runtime_identity` (Phase 0), and run the fresh sweep + B3 v2
-  from first leg to last rejudge on that one binary.** The in-flight receipt
-  is bridge evidence with a disclosed three-binary boundary, not a
-  source-bound baseline.
+  lane entirely. **Outcome, measured after the fact: it did not matter.**
+  Pair 2's native leg on `95190afa` reproduced pairs 0/1's endpoint on
+  `41b2ca79` bitwise on every field, and pair 2's JAX leg on `d4a6e028`
+  reproduced the earlier JAX legs bitwise. So the *designed* canary — one
+  pair-2 comparison adjudicating one boundary — was made unresolvable by the
+  third binary, while the *observed* answer is indifference across all three.
+  The ruling is unchanged and is now hygiene rather than a correction:
+  **freeze the `.so`, record its sha in `nested_ls_runtime_identity`
+  (Phase 0, done), and run the fresh sweep + B3 v2 from first leg to last
+  rejudge on that one binary.** The bridge run is evidence with a disclosed
+  three-binary boundary, not a source-bound baseline — and it died before
+  writing a receipt at all.
 - **B37 v2 endpoint (Open Question 2): YES, the transactional lane reaches
   native-class J at budget 37 unaided.** Diagnostic `59ccbe8a0`
   (`nested_ls_outer_b37v2_20260824_jax_diagnostic.json`, schema
