@@ -2306,6 +2306,23 @@ def solve_plan(mode: str) -> list[dict[str, object]]:
             }
             for tol in TOLERANCE_RUNGS
         )
+        # The iteration-capped ladder. Listed because a pre-flight that
+        # under-reports the solve count is exactly the class of defect this
+        # file's own gates exist to catch: an operator sizing a GPU window
+        # from this plan must see every solve the run will take.
+        plan.extend(
+            {
+                "solve": f"iteration rung maxiter={cap}",
+                "coils": "x39",
+                "warm_start": "s38",
+                "tol": float(NESTED_LS_NEWTON_TOL),
+                "maxiter": int(cap),
+                "recorded_wall_seconds": (
+                    "proportional to the cap; the full walk took 9 iterations"
+                ),
+            }
+            for cap in ITERATION_RUNGS
+        )
     return plan
 
 
