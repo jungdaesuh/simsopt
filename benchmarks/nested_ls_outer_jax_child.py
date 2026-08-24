@@ -25,7 +25,10 @@ if TYPE_CHECKING:
 
     from benchmarks.nested_ls_outer_native_child import OuterOptimizerPolicy
     from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
-    from simsopt_jax_adapters.geo.nested_ls_reduced_scale import NestedLsOuterState
+    from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
+        NestedLsOuterAnchor,
+        NestedLsOuterState,
+    )
 
 os.environ.setdefault("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
 os.environ.setdefault("JAX_PLATFORMS", "cuda,cpu")
@@ -194,17 +197,19 @@ class _NestedCandidate:
     The candidate carries the complete state needed to promote or restore
     one point atomically. A successful inner solve alone does not make it
     the outer incumbent; scipy's accepted-step callback does that.
+
+    ``anchor`` is the outer state's own frozen anchor record — the coils,
+    the surface that solved them, its ``(iota, G)`` and the Schur factor
+    assembled there — carried rather than restated, so promoting a
+    candidate installs exactly the point the evaluation measured.
     """
 
     eval_index: int
-    coil_dofs: NDArray[np.float64]
+    anchor: NestedLsOuterAnchor
     j: float
     gradient: NDArray[np.float64]
     grad_l2: float
     grad_inf: float
-    surface_dofs: NDArray[np.float64]
-    iota: float
-    G: float
     inner_iterations: int
     inner_grad_l2: float
     adjoint_live_eta: float
@@ -215,14 +220,23 @@ def _restore_nested_candidate(
     jax_boozer: BoozerSurfaceJAX,
     candidate: _NestedCandidate,
 ) -> None:
-    """Restore one committed candidate as the sole continuation anchor."""
+    """Commit one candidate as the sole continuation anchor.
 
-    state.set_anchor(candidate.surface_dofs, candidate.iota, candidate.G)
-    state.inner_iterations = int(candidate.inner_iterations)
-    state.inner_grad_l2 = float(candidate.inner_grad_l2)
-    state.adjoint_live_eta = float(candidate.adjoint_live_eta)
-    jax_boozer.surface.set_dofs(candidate.surface_dofs)
-    jax_boozer.biotsavart.x = np.array(candidate.coil_dofs, dtype=np.float64, copy=True)
+    The lane's single commit site. Nothing else in this child moves the
+    outer state's anchor, and no evaluation can move it on its own, so
+    the warm start is the last point scipy accepted and nothing else.
+    """
+
+    state.commit_anchor(candidate.anchor)
+    # Copies, never the record's own buffers: ``set_dofs`` binds what it is
+    # handed straight onto ``Dofs._x``, and the committed anchor must not
+    # live inside an object the next solve writes through.
+    jax_boozer.surface.set_dofs(
+        np.array(candidate.anchor.surface_dofs, dtype=np.float64, copy=True)
+    )
+    jax_boozer.biotsavart.x = np.array(
+        candidate.anchor.coil_dofs, dtype=np.float64, copy=True
+    )
     jax_boozer._refresh_coil_data()
 
 
@@ -405,9 +419,9 @@ def _prepare_outer_run(*, budget: int, maxcor: int) -> _OuterRunContext:
     state = prepare_f3_b37_outer_state(jax_boozer)
     prepare_seconds = float(time.perf_counter() - prepare_started)
     start_coils = np.asarray(jax_boozer.biotsavart.x, dtype=np.float64)
-    start_surface = np.array(state.anchor_surface_dofs, dtype=np.float64, copy=True)
-    start_iota = float(state.anchor_iota)
-    start_g = float(state.anchor_G)
+    start_surface = np.array(state.anchor.surface_dofs, dtype=np.float64, copy=True)
+    start_iota = float(state.anchor.iota)
+    start_g = float(state.anchor.G)
     return _OuterRunContext(
         state=state,
         jax_boozer=jax_boozer,
@@ -431,7 +445,11 @@ def _drive_outer_run(context: _OuterRunContext) -> dict[str, object]:
     jax_boozer = context.jax_boozer
     outer_policy = context.outer_policy
     evals: list[_OuterEval] = []
-    feasible: list[_NestedCandidate] = []
+    # A count, not a list: every candidate now carries a committed anchor
+    # whose Schur factor is a 661x661 device array, and a per-evaluation
+    # list of them would pin one per evaluation for the whole run to
+    # publish two integers.
+    feasible_evaluations = 0
     iterates: list[_OuterIterate] = []
     candidates = NestedLsOuterCandidateStore[_NestedCandidate](context.start_coils)
     optimize_started = time.perf_counter()
@@ -440,6 +458,7 @@ def _drive_outer_run(context: _OuterRunContext) -> dict[str, object]:
         _restore_nested_candidate(state, jax_boozer, candidate)
 
     def _value_and_grad(x: np.ndarray) -> tuple[float, np.ndarray]:
+        nonlocal feasible_evaluations
         point = np.array(x, dtype=np.float64, copy=True)
         started = time.perf_counter()
         try:
@@ -451,8 +470,8 @@ def _drive_outer_run(context: _OuterRunContext) -> dict[str, object]:
             seconds = float(time.perf_counter() - started)
             if not candidates.is_primed:
                 raise
-            anchor = candidates.committed
-            _restore(anchor)
+            incumbent = candidates.committed
+            _restore(incumbent)
             if candidates.committed_matches(point):
                 raise RuntimeError(
                     "the nested inner solve rejected the exact committed outer "
@@ -468,10 +487,10 @@ def _drive_outer_run(context: _OuterRunContext) -> dict[str, object]:
                 rejection_reason = "inner_solve_failed"
                 rejected_iota = None
                 branch_delta = None
-            distance = float(np.linalg.norm(point - anchor.coil_dofs))
+            distance = float(np.linalg.norm(point - incumbent.anchor.coil_dofs))
             sentinel, sentinel_grad = nested_ls_outer_rejection_barrier(
-                anchor_value=anchor.j,
-                anchor_parameters=anchor.coil_dofs,
+                anchor_value=incumbent.j,
+                anchor_parameters=incumbent.anchor.coil_dofs,
                 trial_parameters=point,
                 scale=float(outer_policy.rejection_distance_scale),
             )
@@ -500,7 +519,7 @@ def _drive_outer_run(context: _OuterRunContext) -> dict[str, object]:
                 inner_grad_l2=None,
                 adjoint_live_eta=None,
                 inner_surface_sha256=None,
-                anchor_surface_sha256=sha256_float64(anchor.surface_dofs),
+                anchor_surface_sha256=sha256_float64(incumbent.anchor.surface_dofs),
             )
             evals.append(rejected)
             print(
@@ -515,15 +534,31 @@ def _drive_outer_run(context: _OuterRunContext) -> dict[str, object]:
             return sentinel, sentinel_grad
         seconds = float(time.perf_counter() - started)
         grad = np.asarray(gradient, dtype=np.float64).reshape(-1)
-        inner_surface = np.array(state.anchor_surface_dofs, dtype=np.float64, copy=True)
+        # What this evaluation measured, and the anchor it WOULD become.
+        # Reading it commits nothing: the warm start moves only in
+        # ``_restore``, below and in the accepted-step callback.
+        #
+        # Only ``nested_ls_outer_value_and_grad`` publishes ``last_trial``,
+        # so "the call above just ran" is an assumption about the callee,
+        # not a property of the type. Check it: an unrefreshed readout is
+        # the PREVIOUS evaluation's telemetry stamped onto this row, which
+        # publishes plausible wrong physics instead of failing.
+        trial = state.last_trial
+        if not trial.solved_at(point):
+            raise RuntimeError(
+                "nested-LS outer trial readout is stale: it was solved at "
+                "different coils than this evaluation's point."
+            )
         # The state this evaluation's inner solve warm-started from: the
         # committed anchor once one exists, and the declared start otherwise.
         # ``iota_branch_delta`` below is measured against the same anchor.
         warm_start_iota = (
-            candidates.committed.iota if candidates.is_primed else context.start_iota
+            candidates.committed.anchor.iota
+            if candidates.is_primed
+            else context.start_iota
         )
         warm_start_surface = (
-            candidates.committed.surface_dofs
+            candidates.committed.anchor.surface_dofs
             if candidates.is_primed
             else context.start_surface
         )
@@ -538,37 +573,36 @@ def _drive_outer_run(context: _OuterRunContext) -> dict[str, object]:
             grad_l2=float(np.linalg.norm(grad)),
             grad_inf=float(np.linalg.norm(grad, ord=np.inf)),
             anchor_distance=0.0,
-            iota_branch_delta=abs(float(state.anchor_iota) - warm_start_iota),
+            iota_branch_delta=abs(trial.anchor.iota - warm_start_iota),
             seconds=seconds,
             seconds_since_optimize_start=float(time.perf_counter() - optimize_started),
             coil_dofs=tuple(float(entry) for entry in point),
-            inner_iota=float(state.anchor_iota),
-            inner_g=float(state.anchor_G),
-            inner_iterations=int(state.inner_iterations),
-            inner_grad_l2=float(state.inner_grad_l2),
-            adjoint_live_eta=float(state.adjoint_live_eta),
-            inner_surface_sha256=sha256_float64(inner_surface),
+            inner_iota=trial.anchor.iota,
+            inner_g=trial.anchor.G,
+            inner_iterations=trial.inner_iterations,
+            inner_grad_l2=trial.inner_grad_l2,
+            adjoint_live_eta=trial.adjoint_live_eta,
+            inner_surface_sha256=sha256_float64(trial.anchor.surface_dofs),
             anchor_surface_sha256=sha256_float64(warm_start_surface),
         )
         evals.append(record)
         candidate = _NestedCandidate(
             eval_index=record.eval_index,
-            coil_dofs=point,
+            anchor=trial.anchor,
             j=record.j,
             gradient=np.array(grad, dtype=np.float64, copy=True),
             grad_l2=record.grad_l2,
             grad_inf=record.grad_inf,
-            surface_dofs=inner_surface,
-            iota=float(state.anchor_iota),
-            G=float(state.anchor_G),
-            inner_iterations=int(state.inner_iterations),
-            inner_grad_l2=float(state.inner_grad_l2),
-            adjoint_live_eta=float(state.adjoint_live_eta),
+            inner_iterations=trial.inner_iterations,
+            inner_grad_l2=trial.inner_grad_l2,
+            adjoint_live_eta=trial.adjoint_live_eta,
         )
-        feasible.append(candidate)
-        primed = candidates.record(point, candidate)
-        if not primed:
-            _restore(candidates.committed)
+        feasible_evaluations += 1
+        # Priming x0 commits it; a later record only stages it. Either way
+        # the committed candidate is what stays installed, so the inner
+        # solve's own iterate never survives the evaluation that made it.
+        candidates.record(point, candidate)
+        _restore(candidates.committed)
         print(
             "outer jax eval"
             f" index={record.eval_index} J={record.j!r}"
@@ -618,7 +652,7 @@ def _drive_outer_run(context: _OuterRunContext) -> dict[str, object]:
     result = None
     while True:
         attempts_started += 1
-        rejected_before = len(evals) - len(feasible)
+        rejected_before = len(evals) - feasible_evaluations
         evals_before = len(evals)
         iterates_before = len(iterates)
         attempt_options = outer_policy.as_scipy_options()
@@ -669,7 +703,7 @@ def _drive_outer_run(context: _OuterRunContext) -> dict[str, object]:
             last_evaluated_parameters=np.asarray(last_row.coil_dofs, dtype=np.float64),
             last_evaluation_value_is_valid=last_row.value_is_valid,
         )
-        rejected_this_attempt = (len(evals) - len(feasible)) - rejected_before
+        rejected_this_attempt = (len(evals) - feasible_evaluations) - rejected_before
         # The shared classifier restarts an abnormal line search or an FTOL
         # stop that the sealed ftol=0 policy explicitly disabled.
         restart_reason = nested_ls_outer_restart_reason(
@@ -704,7 +738,7 @@ def _drive_outer_run(context: _OuterRunContext) -> dict[str, object]:
         ):
             break
         attempt_x0 = np.array(
-            candidates.committed.coil_dofs,
+            candidates.committed.anchor.coil_dofs,
             dtype=np.float64,
             copy=True,
         )
@@ -748,9 +782,10 @@ def _drive_outer_run(context: _OuterRunContext) -> dict[str, object]:
         ftol_zero_stop = False
         success = False
         child_fault_reason = NESTED_LS_OUTER_ACCEPT_WITHOUT_CANDIDATE_REASON
-    endpoint_anchor = candidates.committed
-    endpoint = np.array(endpoint_anchor.coil_dofs, dtype=np.float64, copy=True)
-    endpoint_surface = endpoint_anchor.surface_dofs
+    endpoint_candidate = candidates.committed
+    endpoint_point = endpoint_candidate.anchor
+    endpoint = np.array(endpoint_point.coil_dofs, dtype=np.float64, copy=True)
+    endpoint_surface = endpoint_point.surface_dofs
     process_elapsed_seconds = float(time.perf_counter() - _T0)
     return {
         "schema": NESTED_LS_OUTER_JAX_CHILD_SCHEMA,
@@ -795,8 +830,8 @@ def _drive_outer_run(context: _OuterRunContext) -> dict[str, object]:
         "optimizer_x": [float(value) for value in optimizer_x],
         "outer_policy": outer_policy.as_payload(),
         "iota_branch_guard": float(NESTED_LS_OUTER_IOTA_BRANCH_GUARD),
-        "feasible_evaluations": int(len(feasible)),
-        "rejected_evaluations": int(len(evals) - len(feasible)),
+        "feasible_evaluations": int(feasible_evaluations),
+        "rejected_evaluations": int(len(evals) - feasible_evaluations),
         # Charter Amendment 1 / start symmetry: this lane opens on the raw
         # un-nest archived lane surface, so its first outer evaluation pays
         # the inner convergence inside the timed wall, exactly as the
@@ -807,19 +842,19 @@ def _drive_outer_run(context: _OuterRunContext) -> dict[str, object]:
         "start_surface_sha256": sha256_float64(context.start_surface),
         "start_iota": context.start_iota,
         "start_g": context.start_g,
-        "endpoint_eval_index": int(endpoint_anchor.eval_index),
+        "endpoint_eval_index": int(endpoint_candidate.eval_index),
         "endpoint_coil_dofs": [float(entry) for entry in endpoint],
         "endpoint_coil_sha256": sha256_float64(endpoint),
         "endpoint_surface_dofs": [float(entry) for entry in endpoint_surface],
         "endpoint_surface_sha256": sha256_float64(endpoint_surface),
-        "endpoint_j": endpoint_anchor.j,
-        "endpoint_grad_l2": endpoint_anchor.grad_l2,
-        "endpoint_grad_inf": endpoint_anchor.grad_inf,
-        "endpoint_iota": endpoint_anchor.iota,
-        "endpoint_g": endpoint_anchor.G,
-        "endpoint_inner_iterations": endpoint_anchor.inner_iterations,
-        "endpoint_inner_grad_l2": endpoint_anchor.inner_grad_l2,
-        "endpoint_adjoint_live_eta": endpoint_anchor.adjoint_live_eta,
+        "endpoint_j": endpoint_candidate.j,
+        "endpoint_grad_l2": endpoint_candidate.grad_l2,
+        "endpoint_grad_inf": endpoint_candidate.grad_inf,
+        "endpoint_iota": endpoint_point.iota,
+        "endpoint_g": endpoint_point.G,
+        "endpoint_inner_iterations": endpoint_candidate.inner_iterations,
+        "endpoint_inner_grad_l2": endpoint_candidate.inner_grad_l2,
+        "endpoint_adjoint_live_eta": endpoint_candidate.adjoint_live_eta,
         "outer_evals": [asdict(record) for record in evals],
         "outer_iterates": [asdict(record) for record in iterates],
         "wall_splits": {

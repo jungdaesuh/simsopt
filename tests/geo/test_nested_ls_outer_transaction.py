@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 import hashlib
 import json
@@ -40,6 +41,14 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     nested_ls_outer_parameter_bytes,
     nested_ls_outer_rejection_barrier,
     nested_ls_outer_restart_reason,
+)
+from simsopt_jax_adapters.geo.nested_ls_reduced_scale import NestedLsOuterAnchor
+
+from ._nested_ls_outer_fakes import (
+    _FakeBoozer,
+    _FakeJaxBoozer,
+    _FakeJaxOuterState,
+    _FakeObjective,
 )
 
 
@@ -1060,80 +1069,26 @@ def test_ftol_zero_message_is_fail_closed_without_sentinel_preconditions():
     )
 
 
-class _FakeSurface:
-    def __init__(self, dofs: np.ndarray) -> None:
-        self._dofs = np.array(dofs, dtype=np.float64, copy=True)
-
-    def get_dofs(self) -> np.ndarray:
-        return np.array(self._dofs, copy=True)
-
-    def set_dofs(self, dofs: np.ndarray) -> None:
-        self._dofs = np.array(dofs, dtype=np.float64, copy=True)
-
-
-class _FakeBiotSavart:
-    def __init__(self, coil_dofs: np.ndarray) -> None:
-        self.x = np.array(coil_dofs, dtype=np.float64, copy=True)
-
-
-class _FakeBoozer:
-    def __init__(self, coil_dofs: np.ndarray, surface_dofs: np.ndarray) -> None:
-        self.biotsavart = _FakeBiotSavart(coil_dofs)
-        self.surface = _FakeSurface(surface_dofs)
-        self.need_to_run_code = False
-
-
-class _FakeJaxBoozer(_FakeBoozer):
-    def __init__(self, coil_dofs: np.ndarray, surface_dofs: np.ndarray) -> None:
-        super().__init__(coil_dofs, surface_dofs)
-        self.refresh_count = 0
-
-    def _refresh_coil_data(self) -> None:
-        self.refresh_count += 1
-
-
-class _FakeJaxOuterState:
-    def __init__(self) -> None:
-        self.anchor_surface_dofs = np.array([-1.0], dtype=np.float64)
-        self.anchor_iota = -1.0
-        self.anchor_G = -1.0
-        self.inner_iterations = -1
-        self.inner_grad_l2 = -1.0
-        self.adjoint_live_eta = -1.0
-
-    def set_anchor(self, surface_dofs: object, iota: float, G: float) -> None:
-        self.anchor_surface_dofs = np.array(surface_dofs, dtype=np.float64, copy=True)
-        self.anchor_iota = float(iota)
-        self.anchor_G = float(G)
-
-
-class _FakeObjective:
-    def __init__(self, boozer: _FakeBoozer) -> None:
-        self.boozer = boozer
-
-    def evaluate(self) -> tuple[float, dict[str, float], np.ndarray]:
-        coil = np.asarray(self.boozer.biotsavart.x, dtype=np.float64)
-        value = float(np.dot(coil, coil))
-        terms = {key: value for key in native_child.FLAT675_OBJECTIVE_TERM_KEYS}
-        return value, terms, 2.0 * coil
-
-
 def test_jax_candidate_restore_reinstates_all_transaction_state():
     state = _FakeJaxOuterState()
     boozer = _FakeJaxBoozer(
         np.array([9.0, 9.0], dtype=np.float64),
         np.array([9.0], dtype=np.float64),
     )
+    anchor = NestedLsOuterAnchor.at(
+        coil_dofs=np.array([0.25, -0.5], dtype=np.float64),
+        surface_dofs=np.array([-0.25], dtype=np.float64),
+        iota=0.14,
+        G=2.0,
+        schur_lu=None,
+    )
     candidate = jax_child._NestedCandidate(
         eval_index=3,
-        coil_dofs=np.array([0.25, -0.5], dtype=np.float64),
+        anchor=anchor,
         j=0.25,
         gradient=np.array([1.0, 2.0], dtype=np.float64),
         grad_l2=3.0,
         grad_inf=2.0,
-        surface_dofs=np.array([-0.25], dtype=np.float64),
-        iota=0.14,
-        G=2.0,
         inner_iterations=4,
         inner_grad_l2=1.0e-14,
         adjoint_live_eta=2.0e-14,
@@ -1145,15 +1100,36 @@ def test_jax_candidate_restore_reinstates_all_transaction_state():
         candidate,
     )
 
-    np.testing.assert_array_equal(state.anchor_surface_dofs, candidate.surface_dofs)
-    assert state.anchor_iota == candidate.iota
-    assert state.anchor_G == candidate.G
-    assert state.inner_iterations == candidate.inner_iterations
-    assert state.inner_grad_l2 == candidate.inner_grad_l2
-    assert state.adjoint_live_eta == candidate.adjoint_live_eta
-    np.testing.assert_array_equal(boozer.surface.get_dofs(), candidate.surface_dofs)
-    np.testing.assert_array_equal(boozer.biotsavart.x, candidate.coil_dofs)
+    # The whole point installed at once: restoring is committing the
+    # candidate's own anchor record, not copying four fields out of it.
+    assert state.anchor is anchor
+    np.testing.assert_array_equal(boozer.surface.get_dofs(), anchor.surface_dofs)
+    np.testing.assert_array_equal(boozer.biotsavart.x, anchor.coil_dofs)
     assert boozer.refresh_count == 1
+
+
+def test_jax_outer_anchor_record_cannot_alias_or_be_mutated():
+    """The anchor is frozen by construction, not by caller discipline."""
+
+    coils = np.array([0.25, -0.5], dtype=np.float64)
+    surface = np.array([-0.25], dtype=np.float64)
+    anchor = NestedLsOuterAnchor.at(
+        coil_dofs=coils,
+        surface_dofs=surface,
+        iota=0.14,
+        G=2.0,
+        schur_lu=None,
+    )
+
+    coils[0] = 99.0
+    surface[0] = 99.0
+
+    assert anchor.coil_dofs[0] == 0.25
+    assert anchor.surface_dofs[0] == -0.25
+    with pytest.raises(ValueError):
+        anchor.surface_dofs[0] = 1.0
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        anchor.iota = 0.2  # type: ignore[misc]
 
 
 def test_native_outer_trial_order_cannot_change_the_committed_objective(monkeypatch):

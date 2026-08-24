@@ -102,6 +102,7 @@ from simsopt_jax_adapters.geo.nested_ls_reduced import (
 from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     DEFAULT_F3_B37_GPU_LANE,
     F3_B37_IFT_STAB,
+    NestedLsOuterAnchor,
     _flat675_value_and_grad_at,
     _mixed_coil_correction_vjp,
     dump_strict_json,
@@ -248,6 +249,25 @@ TOLERANCE_RUNGS = (1.0e-13, 1.0e-11, 1.0e-9, 1.0e-8, 1.0e-6)
 # Raised well above NESTED_LS_NEWTON_MAXITER so every rung stops on its
 # tolerance, not on its budget. ``iteration_count`` per rung says which.
 TOLERANCE_RUNG_MAXITER = 40
+
+# Loosening the TOLERANCE cannot sample the error curve, and the first run
+# proved it: five requested tolerances produced two distinct achieved
+# residuals, because a quadratically convergent Newton overshoots a loose
+# request -- the step that would have landed at 1e-9 lands at 1e-13 instead,
+# and 1e-11, 1e-9 and 1e-8 all return the same iterate bitwise. A fit over
+# those rungs is a line through two points wearing a five-point label.
+#
+# Capping the ITERATION COUNT samples the same walk where it actually is.
+# Each rung stops mid-trajectory, so the achieved residuals are spread by
+# construction instead of by hope, and the reference is the identical walk
+# run to convergence. The cap is the only knob that moves; the tolerance
+# stays at NESTED_LS_NEWTON_TOL so it can never be what stopped the walk.
+ITERATION_RUNGS = (1, 2, 3, 4, 5, 6, 7, 8)
+
+#: Which knob a rung varied. Published per rung so a reader never has to
+#: infer from the numbers which ladder a row came from.
+LIMIT_TOLERANCE = "tolerance"
+LIMIT_ITERATIONS = "iterations"
 BUDGET_THRESHOLDS = (1.0e-6, 1.0e-8, 1.0e-10)
 # The mirror of production's adjoint must BE production's gradient, not
 # merely near it. Checked at the tight rung.
@@ -399,8 +419,12 @@ def check_regenerated_anchor_physics(
             "tolerance_source": (
                 "1.8e7x the 5.551115123125783e-17 (2 ULP) iota drift measured "
                 "between the ledger's outer_evals[39].inner_iota and the "
-                "committed replay's A2/B2, and 8.1e-6 of the "
-                "0.008105886395621348 branch separation it must resolve"
+                "committed replay's A2/B2, and 1.2e-7 of the "
+                "0.008105886395621348 branch separation it must resolve "
+                "(this read 8.1e-6 until 2026-08-24: that is the "
+                "separation-over-tolerance ratio 8.1e6 with a flipped sign, "
+                "which overstated the gate's margin 66x in the safe "
+                "direction)"
             ),
             "passed": delta_recorded <= float(REGEN_IOTA_ABS_TOL),
         },
@@ -465,7 +489,20 @@ def trajectory_drift_discrepancies(
             ),
             "committed_replay_source": "replay log lines 6 and 11 (A2, B2)",
             "this_run": regenerated_surface_sha256,
-            "agreement": "none (different bits, reproduced twice)",
+            "agreement": (
+                "not measured in this mode: no regeneration ran"
+                if regenerated_surface_sha256 is None
+                else "this run matches the ledger bitwise; the committed "
+                "replay did not, twice"
+                if regenerated_surface_sha256 == POISONED_SURFACE_SHA256
+                else "none: three distinct hashes"
+                if regenerated_surface_sha256[
+                    : len(COMMITTED_REPLAY_REGENERATED_SURFACE_SHA256_PREFIX)
+                ]
+                != COMMITTED_REPLAY_REGENERATED_SURFACE_SHA256_PREFIX
+                else "this run matches the committed replay, and neither "
+                "matches the ledger"
+            ),
         },
         {
             "quantity": "eight-term J at the eval-38 anchor",
@@ -536,6 +573,51 @@ def trajectory_drift_finding(
         ),
         "current_simsoptpp_sha256_is_in": "runtime.simsoptpp_sha256",
     }
+
+
+def distinct_fit_points(
+    residual_error_pairs: tuple[tuple[float, float], ...],
+) -> tuple[tuple[tuple[float, float], ...], int]:
+    """Collapse duplicate abscissae before a log-log fit sees them.
+
+    Returns ``(points, collapsed)`` — the pairs keyed by their FIRST
+    occurrence of each distinct residual, sorted, plus how many were dropped.
+
+    The requested inner tolerance is not the achieved residual: the Newton
+    walk overshoots a loose request, so several rungs land on the same iterate
+    and carry bitwise-identical residual and error. Feeding those to
+    least-squares is one point counted N times, not N points.
+
+    Be precise about what this does and does not fix, because the obvious
+    story is wrong. Deduplicating does NOT repair the fit: replicated points
+    with identical ``y`` leave the least-squares line exactly on both group
+    means, so on the measured data the intercept is bit-identical, the slope
+    moves by one ULP, and the RMS residual goes 1.78e-15 -> 6.28e-16 — still
+    "~1e-15" either way. The RMS is near zero because only TWO distinct
+    abscissae exist, and a two-point fit is exact; that was equally true
+    before the dedup.
+
+    What the dedup fixes is the published COUNT. ``points_used: 4`` invites a
+    reader to read a 1e-15 RMS as a four-point power law holding to machine
+    precision. ``distinct_points_used: 2`` beside the same RMS says the
+    opposite, and is what makes the ``confidence`` field's disclosure
+    checkable rather than decorative. The correction is epistemic, not
+    numerical.
+
+    Pairs with a non-positive residual or error are dropped too: log10 is
+    undefined there.
+    """
+
+    seen: dict[float, float] = {}
+    collapsed = 0
+    for residual, error in residual_error_pairs:
+        if residual <= 0.0 or error <= 0.0:
+            continue
+        if residual in seen:
+            collapsed += 1
+            continue
+        seen[residual] = error
+    return tuple(sorted(seen.items())), collapsed
 
 
 def loglog_slope(
@@ -905,8 +987,20 @@ def install_anchor(
 ) -> None:
     """Install one committed anchor, in ``_restore_nested_candidate`` order."""
 
-    world.state.set_anchor(surface_dofs, iota, G)
-    world.jax_boozer.surface.set_dofs(surface_dofs)
+    world.state.commit_anchor(
+        NestedLsOuterAnchor.at(
+            coil_dofs=coil_dofs,
+            surface_dofs=surface_dofs,
+            iota=iota,
+            G=G,
+            # No adjoint has run at this recorded point, so there is no
+            # cached Schur factor to carry. The probe never uses one.
+            schur_lu=None,
+        )
+    )
+    world.jax_boozer.surface.set_dofs(
+        np.array(surface_dofs, dtype=np.float64, copy=True)
+    )
     world.jax_boozer.biotsavart.x = np.array(coil_dofs, dtype=np.float64, copy=True)
     world.jax_boozer._refresh_coil_data()
 
@@ -918,7 +1012,16 @@ def install_solve_point(
 ) -> None:
     """Stage one inner solve, in ``_solve_nested_inner_at_coils`` order."""
 
-    world.jax_boozer.surface.set_dofs(start_surface)
+    # A writable copy, for the same reason ``install_anchor`` takes one:
+    # ``set_dofs`` binds what it is handed straight onto ``Dofs._x``, and the
+    # ladder calls this with the ledger's own anchor array -- the bytes this
+    # receipt's SHA gate rests on. Nothing on today's path writes
+    # ``surface.x`` in place, so this is a guard rather than a fix, but the
+    # asymmetry with ``install_anchor`` is the kind noticed only after it
+    # bites, and it also blocks passing a read-only anchor array in.
+    world.jax_boozer.surface.set_dofs(
+        np.array(start_surface, dtype=np.float64, copy=True)
+    )
     world.jax_boozer.biotsavart.x = np.array(coil_dofs, dtype=np.float64, copy=True)
     world.jax_boozer._refresh_coil_data()
 
@@ -1329,6 +1432,8 @@ class BudgetRung:
     """One inner tolerance rung and the IFT adjoint gradient there."""
 
     requested_tol: float
+    requested_maxiter: int
+    limit: str
     achieved_residual: float
     iteration_count: int
     tolerance_limited: bool
@@ -1346,6 +1451,8 @@ class BudgetRung:
     def as_payload(self) -> dict[str, object]:
         return {
             "requested_tol": self.requested_tol,
+            "requested_maxiter": self.requested_maxiter,
+            "limit": self.limit,
             "achieved_inner_residual_l2": self.achieved_residual,
             "iteration_count": self.iteration_count,
             "tolerance_limited": self.tolerance_limited,
@@ -1511,18 +1618,39 @@ def run_tolerance_budget(
         world.state, ledger.anchor_coil_dofs
     )
     production_seconds = float(time.perf_counter() - production_started)
-    anchor_inner_iterations = int(world.state.inner_iterations)
-    anchor_inner_grad_l2 = float(world.state.inner_grad_l2)
-    production_live_eta = float(world.state.adjoint_live_eta)
-    # ``_solve_nested_inner_at_coils`` commits its own result to the anchor,
-    # so these three ARE the (s, iota, G) production assembled its adjoint
-    # at. The mirror is fed those, not the ledger's, so any difference the
-    # gate below reports is the mirror's, never a different input point.
-    production_surface = np.array(
-        world.state.anchor_surface_dofs, dtype=np.float64, copy=True
+    # Read the TRIAL readout, never the committed anchor. Since the anchor
+    # became immutable, ``_solve_nested_inner_at_coils`` commits nothing and
+    # returns its result; ``nested_ls_outer_value_and_grad`` — the call
+    # directly above, and the ONLY publisher — puts it on ``last_trial``.
+    # Those are the exact (s, iota, G) production assembled its adjoint at,
+    # so the mirror is fed those and any difference the gate below reports is
+    # the mirror's, never a different input point. Reading ``state.anchor``
+    # here would compile, run, and quietly hand the mirror the COMMITTED
+    # surface instead of the solved trial — a wrong Phase-4 gate rather than
+    # a crash.
+    #
+    # Note honestly what that hazard costs AT THIS FIXTURE: the recorded s38
+    # is already converged (||grad|| 1.4e-15, under tol), so the inner walk
+    # breaks before iteration 1 and the solved trial's surface IS the
+    # committed anchor's surface, bitwise. A swap here would therefore pass
+    # the mirror gate. The guard below is what actually catches it, and the
+    # three telemetry reads are what a swap fails on — ``NestedLsOuterAnchor``
+    # carries no telemetry, so the swap is an AttributeError, not a number.
+    trial = world.state.last_trial
+    require(
+        trial.solved_at(ledger.anchor_coil_dofs),
+        "production trial readout point",
+        "solved at the ledger anchor coils",
+        "solved at different coils (stale readout)",
     )
-    production_iota = float(world.state.anchor_iota)
-    production_g = float(world.state.anchor_G)
+    anchor_inner_iterations = int(trial.inner_iterations)
+    anchor_inner_grad_l2 = float(trial.inner_grad_l2)
+    production_live_eta = float(trial.adjoint_live_eta)
+    production_surface = np.array(
+        trial.anchor.surface_dofs, dtype=np.float64, copy=True
+    )
+    production_iota = float(trial.anchor.iota)
+    production_g = float(trial.anchor.G)
 
     mirror = ift_adjoint_gradient_at(
         world,
@@ -1543,9 +1671,16 @@ def run_tolerance_budget(
 
     condition = schur_condition(mirror.dense)
 
-    # 2. The ladder, at the trial coils from the recorded anchor surface.
-    rungs: list[BudgetRung] = []
-    for requested in TOLERANCE_RUNGS:
+    # 2. The ladders, at the trial coils from the recorded anchor surface.
+    #
+    # One rung runner, two ladders. The tolerance ladder is kept because it is
+    # what the plan asked for and because its degeneracy is itself the finding;
+    # the iteration ladder is what actually spreads the abscissae. Sharing the
+    # runner is not tidiness -- it guarantees the two ladders differ ONLY in the
+    # knob under test, so a difference between their curves cannot be an
+    # artifact of two hand-written solve/adjoint paths drifting apart.
+    def run_rung(*, requested_tol: float, maxiter: int, limit: str) -> BudgetRung:
+        label = f"{limit} rung tol={requested_tol!r} maxiter={maxiter!r}"
         install_solve_point(world, ledger.anchor_surface_dofs, ledger.trial_coil_dofs)
         solve_started = time.perf_counter()
         solution = run_reduced_nested_ls_schur_newton(
@@ -1553,13 +1688,13 @@ def run_tolerance_budget(
             iota=ledger.anchor_iota,
             G=ledger.anchor_G,
             stab=float(F3_B37_IFT_STAB),
-            tol=float(requested),
-            maxiter=int(TOLERANCE_RUNG_MAXITER),
+            tol=float(requested_tol),
+            maxiter=int(maxiter),
             linear_solver="dense_lu",
         )
         solve_seconds = float(time.perf_counter() - solve_started)
         achieved = require_finite(
-            f"tolerance rung {requested!r} achieved inner residual",
+            f"{label} achieved inner residual",
             float(np.linalg.norm(solution.reduced_gradient)),
         )
         sample = ift_adjoint_gradient_at(
@@ -1569,33 +1704,61 @@ def run_tolerance_budget(
             iota=float(solution.iota),
             G=float(solution.G),
         )
-        rungs.append(
-            BudgetRung(
-                requested_tol=float(requested),
-                achieved_residual=achieved,
-                iteration_count=int(solution.iteration_count),
-                tolerance_limited=(
-                    int(solution.iteration_count) < int(TOLERANCE_RUNG_MAXITER)
-                ),
-                success=bool(solution.success),
-                iota=require_finite(f"rung {requested!r} iota", solution.iota),
-                G=require_finite(f"rung {requested!r} G", solution.G),
-                surface_sha256=sha256_float64(solution.surface_dofs),
-                outer_objective_j=sample.objective_j,
-                gradient=sample.gradient,
-                gradient_l2=float(np.linalg.norm(sample.gradient)),
-                adjoint_live_eta=sample.live_eta,
-                solve_seconds=solve_seconds,
-                adjoint_seconds=sample.seconds,
-            )
+        return BudgetRung(
+            requested_tol=float(requested_tol),
+            requested_maxiter=int(maxiter),
+            limit=str(limit),
+            achieved_residual=achieved,
+            iteration_count=int(solution.iteration_count),
+            tolerance_limited=int(solution.iteration_count) < int(maxiter),
+            success=bool(solution.success),
+            iota=require_finite(f"{label} iota", solution.iota),
+            G=require_finite(f"{label} G", solution.G),
+            surface_sha256=sha256_float64(solution.surface_dofs),
+            outer_objective_j=sample.objective_j,
+            gradient=sample.gradient,
+            gradient_l2=float(np.linalg.norm(sample.gradient)),
+            adjoint_live_eta=sample.live_eta,
+            solve_seconds=solve_seconds,
+            adjoint_seconds=sample.seconds,
         )
 
-    reference = rungs[0]
+    tolerance_rungs = [
+        run_rung(
+            requested_tol=float(requested),
+            maxiter=int(TOLERANCE_RUNG_MAXITER),
+            limit=LIMIT_TOLERANCE,
+        )
+        for requested in TOLERANCE_RUNGS
+    ]
+    # The tolerance stays at the certification tolerance so the cap is provably
+    # what stopped each walk: any rung that reports tolerance_limited here
+    # reached NESTED_LS_NEWTON_TOL inside its cap and is a duplicate of the
+    # reference, not a coarse sample.
+    iteration_rungs = [
+        run_rung(
+            requested_tol=float(NESTED_LS_NEWTON_TOL),
+            maxiter=int(cap),
+            limit=LIMIT_ITERATIONS,
+        )
+        for cap in ITERATION_RUNGS
+    ]
+    rungs = tolerance_rungs + iteration_rungs
+
+    reference = tolerance_rungs[0]
     require(
         reference.requested_tol == float(NESTED_LS_NEWTON_TOL),
         "tolerance ladder reference rung",
         float(NESTED_LS_NEWTON_TOL),
         reference.requested_tol,
+    )
+    # The reference must be the CONVERGED walk, or every error below is
+    # measured against a coarse point and the whole curve shifts silently.
+    require(
+        reference.tolerance_limited and reference.success,
+        "reference rung reached its tolerance inside its budget",
+        "tolerance_limited and success",
+        f"tolerance_limited={reference.tolerance_limited} success={reference.success}",
     )
     reference_l2 = float(np.linalg.norm(reference.gradient))
     require(reference_l2 > 0.0, "reference gradient norm", "> 0.0", reference_l2)
@@ -1617,14 +1780,28 @@ def run_tolerance_budget(
         for rung, absolute, relative in error_rows
     ]
 
-    # The reference rung's error against itself is identically zero, so it
-    # has no log10 and cannot enter the fit. Any other rung that landed on
-    # the same iterate is excluded for the same reason. Both exclusions are
-    # published (``points_used``) rather than assumed away.
-    fit_rows = tuple(
-        (rung.achieved_residual, relative)
-        for rung, _absolute, relative in error_rows
-        if rung is not reference and relative > 0.0 and rung.achieved_residual > 0.0
+    # The reference rung's error against itself is identically zero, so it has
+    # no log10 and cannot enter the fit.
+    #
+    # Then DEDUPLICATE by achieved residual. The requested tolerance is not the
+    # achieved one: the Newton walk overshoots a loose request, so several rungs
+    # land on the same iterate and carry bitwise-identical residual AND error.
+    # Feeding those to a least-squares line is not extra evidence -- it is one
+    # point counted N times.
+    #
+    # This does NOT move the fit (see distinct_fit_points): with identical y the
+    # line already passes through both group means, so intercept is unchanged,
+    # slope moves one ULP, and the RMS stays ~1e-15. It changes the COUNT, which
+    # is the only thing that tells a reader whether that ~1e-15 is a power law
+    # holding to machine precision or a two-point line that cannot miss.
+    # Measured on the first run: five requested rungs collapsed to two distinct
+    # residuals -- which is why the iteration ladder above exists.
+    fit_rows, collapsed = distinct_fit_points(
+        tuple(
+            (rung.achieved_residual, relative)
+            for rung, _absolute, relative in error_rows
+            if rung is not reference
+        )
     )
     require(
         len(fit_rows) >= 2,
@@ -1674,9 +1851,17 @@ def run_tolerance_budget(
             "production_adjoint_live_eta": production_live_eta,
             "production_seconds": production_seconds,
             "production_surface_sha256": sha256_float64(production_surface),
+            # True by construction at this fixture, and labelled so rather
+            # than left to read as an independent confirmation. The recorded
+            # s38 is already converged, so the inner walk breaks before
+            # iteration 1 and hands back the very surface ``install_anchor``
+            # installed -- whose hash was gated at load. This can only be
+            # False if the anchor's residual exceeded the tolerance, which
+            # ``anchor_ladder_degeneracy`` separately reports it does not.
             "production_surface_equals_ledger_s38": (
                 sha256_float64(production_surface) == ANCHOR_SURFACE_SHA256
             ),
+            "production_surface_equals_ledger_s38_is_independent": False,
             "production_iota": production_iota,
             "production_G": production_g,
             "mirror_gradient": [float(v) for v in mirror.gradient],
@@ -1708,6 +1893,24 @@ def run_tolerance_budget(
             "requested_tolerances": [float(t) for t in TOLERANCE_RUNGS],
             "maxiter": int(TOLERANCE_RUNG_MAXITER),
             "production_maxiter": int(NESTED_LS_NEWTON_MAXITER),
+            "iteration_caps": [int(cap) for cap in ITERATION_RUNGS],
+            "iteration_ladder_tol": float(NESTED_LS_NEWTON_TOL),
+            "why_two_ladders": (
+                "Loosening the tolerance cannot sample this curve: a "
+                "quadratically convergent Newton overshoots a loose request, "
+                "so several requested tolerances return the same iterate "
+                "bitwise and a fit over them is one point counted N times. "
+                "The iteration ladder stops the SAME walk mid-trajectory, so "
+                "its achieved residuals are spread by construction. Both are "
+                "published; distinct_abscissae_by_limit says which ladder "
+                "actually produced distinct points."
+            ),
+            "distinct_abscissae_by_limit": {
+                LIMIT_TOLERANCE: len(
+                    {r.achieved_residual for r in tolerance_rungs if r is not reference}
+                ),
+                LIMIT_ITERATIONS: len({r.achieved_residual for r in iteration_rungs}),
+            },
             "rungs": curve,
         },
         "scaling_fit": {
@@ -1715,10 +1918,22 @@ def run_tolerance_budget(
             "slope": slope,
             "intercept": intercept,
             "rms_residual_log10": rms,
-            "points_used": len(fit_rows),
+            "distinct_points_used": len(fit_rows),
+            "rungs_collapsed_as_duplicate_residuals": collapsed,
             "excluded": (
-                "the reference rung (error identically zero) and any rung "
-                "that reproduced it exactly"
+                "the reference rung (error identically zero), any rung with a "
+                "non-positive residual or error, and any rung whose ACHIEVED "
+                "residual duplicates one already counted -- the requested "
+                "tolerance is not the achieved one, and a duplicated abscissa "
+                "is one point counted twice, not two points"
+            ),
+            "confidence": (
+                "a two-point fit passes through both points exactly, so a "
+                "near-zero rms_residual_log10 at distinct_points_used == 2 is "
+                "arithmetic, NOT evidence of a clean power law"
+                if len(fit_rows) < 3
+                else "rms_residual_log10 is meaningful at three or more "
+                "distinct abscissae"
             ),
             "note": (
                 "Measured, not asserted: no theoretical exponent is claimed "
@@ -1904,14 +2119,48 @@ def run_predictor_mode(
             "anchor's bytes -- those were never stored, only hashed. It ran "
             "off a regeneration that is physically equivalent to the recorded "
             "anchor (same iota branch, same inner iteration count, same J "
-            "within the stated bands) and bitwise distinct from it "
-            f"({regenerated_sha} against the recorded "
-            f"{POISONED_SURFACE_SHA256}). Any claim from this leg inherits "
-            "that qualifier."
+            "within the stated bands)"
+            + (
+                f", and bitwise IDENTICAL to it ({regenerated_sha}). The "
+                "physics fingerprint is what this leg gates on; on this run "
+                "the stronger bitwise property also held. The result is "
+                "still a regeneration -- that provenance does not go away -- "
+                "but the DISTINCTNESS qualifier does not attach, so a claim "
+                "from this leg need not carry 'ran off different bytes'."
+                if regenerated_sha == POISONED_SURFACE_SHA256
+                else (
+                    f", and bitwise distinct from it ({regenerated_sha} "
+                    f"against the recorded {POISONED_SURFACE_SHA256}). Any "
+                    "claim from this leg inherits that qualifier."
+                )
+            )
         ),
         "anchor_bitwise_matches_recorded": (regenerated_sha == POISONED_SURFACE_SHA256),
         "control_success": leg4_control.success,
-        "control_reproduced_recorded_failure": not leg4_control.success,
+        "control_persisted": leg4_control.persisted,
+        "control_reduced_gradient_l2": leg4_control.reduced_gradient_l2,
+        "control_iteration_count": leg4_control.iteration_count,
+        # ``not success`` alone is NOT reproduction: the recorded eval-43
+        # failure is a specific one -- a persisted walk that spent its budget
+        # and stopped at LEDGER_FAILED_RESIDUAL -- and a solve that produced
+        # nothing at all also reports ``success == False``, with
+        # ``iteration_count`` reset to 0 on the non-persist path. Requiring
+        # the walk to have persisted and to have landed within an order of
+        # magnitude of the recorded residual is what makes this a claim about
+        # the recorded failure rather than about any failure. The band is
+        # wide on purpose: the recorded ledger is not bitwise reproducible on
+        # the current binary and this is the non-converged quantity, which
+        # drifts ~1.1e-4 relative (see recorded_ledger_trajectory_drift).
+        "control_reproduced_recorded_failure": bool(
+            not leg4_control.success
+            and leg4_control.persisted
+            and 0.1 <= leg4_control.reduced_gradient_l2 / LEDGER_FAILED_RESIDUAL <= 10.0
+        ),
+        "control_reproduction_rule": (
+            "not success AND persisted AND the achieved residual within 10x "
+            f"of the recorded {LEDGER_FAILED_RESIDUAL!r}; a bare `not success` "
+            "also admits a non-persisted walk that produced nothing"
+        ),
         "predicted_success": leg4_predicted.success,
         "predicted_branch_label": leg4_predicted.branch_label,
         "predicted_surface_equals_anchor_s38": (
@@ -2004,7 +2253,16 @@ def solve_plan(mode: str) -> list[dict[str, object]]:
                     "warm_start": "s39 (regenerated)",
                     "tol": float(NESTED_LS_NEWTON_TOL),
                     "maxiter": int(NESTED_LS_NEWTON_MAXITER),
-                    "gated_on": "regenerated s39 hash == the ledger's 052923e7...",
+                    "gated_on": (
+                        "check_regenerated_anchor_physics: iota within "
+                        "REGEN_IOTA_ABS_TOL of the recorded trial, iota "
+                        "nearer the capture than the anchor branch, "
+                        "iteration_count == 9 exactly, J within REGEN_J_REL_TOL. "
+                        "NOT a hash gate: the recorded s39 bytes were never "
+                        "stored, and the committed replay regenerated a "
+                        "different sha twice, so a bitwise match is measured "
+                        "and disclosed, never required."
+                    ),
                     "recorded_wall_seconds": "547 (committed replay A3)",
                 },
                 {
@@ -2013,7 +2271,16 @@ def solve_plan(mode: str) -> list[dict[str, object]]:
                     "warm_start": "s39 + delta_s_pred",
                     "tol": float(NESTED_LS_NEWTON_TOL),
                     "maxiter": int(NESTED_LS_NEWTON_MAXITER),
-                    "gated_on": "regenerated s39 hash == the ledger's 052923e7...",
+                    "gated_on": (
+                        "check_regenerated_anchor_physics: iota within "
+                        "REGEN_IOTA_ABS_TOL of the recorded trial, iota "
+                        "nearer the capture than the anchor branch, "
+                        "iteration_count == 9 exactly, J within REGEN_J_REL_TOL. "
+                        "NOT a hash gate: the recorded s39 bytes were never "
+                        "stored, and the committed replay regenerated a "
+                        "different sha twice, so a bitwise match is measured "
+                        "and disclosed, never required."
+                    ),
                     "recorded_wall_seconds": "unmeasured",
                 },
             ]
@@ -2096,7 +2363,7 @@ def print_plan(
             f"{COMMITTED_REPLAY_TRIAL_IOTA_ABS_DRIFT!r} drift;"
         )
         print(
-            "                     8.1e-6 of the "
+            "                     1.2e-7 of the "
             f"{RECORDED_BRANCH_SEPARATION!r} branch separation)"
         )
         print("  branch side     : strictly nearer the capture than the anchor")
@@ -2120,11 +2387,15 @@ def print_plan(
             "(twice: log lines A2 and B2)"
         )
         print(
-            "  A bitwise match is not attainable across the simsoptpp binary\n"
-            "  boundary between the recorded run and this one. The hash is\n"
-            "  published with bitwise_matches_recorded_anchor, and leg 4's\n"
-            "  verdict states it ran on a REGENERATED anchor: physically\n"
-            "  equivalent to, and bitwise distinct from, the recorded one."
+            "  A bitwise match is not GATED ON, because it is not reliably\n"
+            "  attainable across the simsoptpp binary boundary between the\n"
+            "  recorded run and this one -- the committed replay regenerated\n"
+            "  a different sha twice. It is measured and disclosed: the hash\n"
+            "  is published with anchor_bitwise_matches_recorded, and leg 4's\n"
+            "  verdict states it ran on a REGENERATED anchor, physically\n"
+            "  equivalent to the recorded one. Whether it is ALSO bitwise\n"
+            "  identical is a per-run measurement, not a prediction: it has\n"
+            "  come out both ways, and the verdict string says which."
         )
         print("")
         print("--- recorded_ledger_trajectory_drift (published finding) ---")

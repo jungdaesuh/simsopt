@@ -1461,14 +1461,24 @@ def main(argv: list[str] | None = None) -> None:
             f" frozen j_parity_rtol {j_parity_rtol!r}"
         )
     if args.skip_prime:
+        # Amendment 5 of docs/jax_nested_ls_outer_charter.md authorizes this
+        # flag. Both strings said "amendment-4" until the charter's ordinal
+        # collision was resolved (997bbacd5 renumbered 4 -> 5) and the sweep
+        # for citations matched only capitalized "Amendment", missing these
+        # two. The receipt field is the one that mattered: it is minted into
+        # every fault-rerun receipt, so the stale ordinal would have pointed
+        # readers at a prose-only correction instead of the amendment that
+        # licenses skipping the prime. Artifacts sealed before this fix --
+        # nested_ls_outer_b37_20260823.log among them -- keep the old
+        # string and are read as Amendment 5.
         prime = {
             "role": "prime",
             "repeat": -1,
             "timed": False,
             "skipped": True,
-            "reason": "amendment-4 fault-rerun: persistent compile cache warm",
+            "reason": "amendment-5 fault-rerun: persistent compile cache warm",
         }
-        log("outer prime skipped (amendment-4 fault-rerun, warm cache)")
+        log("outer prime skipped (amendment-5 fault-rerun, warm cache)")
     else:
         prime, prime_endpoint = _launch_jax(budget=budget, maxcor=maxcor, log=log)
         prime_endpoint.unlink(missing_ok=True)
