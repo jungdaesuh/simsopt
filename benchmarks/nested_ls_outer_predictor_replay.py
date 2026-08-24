@@ -1950,7 +1950,11 @@ def run_tolerance_budget(
             ),
         },
     }
-    return payload, len(TOLERANCE_RUNGS) + 1
+    # Counted from the rungs this run actually walked, plus the production
+    # mirror's own solve -- not recomputed from a formula over the rung
+    # tuples. The formula version said 6 while the run took 14, because it
+    # predated the iteration ladder and nothing made it wrong out loud.
+    return payload, len(rungs) + 1
 
 
 # ==========================================================================

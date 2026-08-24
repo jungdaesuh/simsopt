@@ -47,6 +47,7 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_GATE6_CLAIM_REPEATS,
     NESTED_LS_GATE6_IOTA_G_TOL,
     NESTED_LS_GATE6_NATIVE_OMP_THREADS,
+    NESTED_LS_INNER_SUBSTEP_LEGS,
     NESTED_LS_NEWTON_MAXITER,
     NESTED_LS_NEWTON_STAB,
     NESTED_LS_NEWTON_TOL,
@@ -63,6 +64,7 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_OUTER_IOTA_BRANCH_GUARD,
     NESTED_LS_WEIGHT_INV_MODB,
     nested_ls_banana_run_code_options,
+    nested_ls_inner_substep_points,
     nested_ls_outer_fd0_minimum_step,
     nested_ls_outer_fd0_step,
     nested_ls_physics_newton_kwargs,
@@ -4774,6 +4776,7 @@ class NestedLsOuterState:
     surface_slice: slice
     anchor: NestedLsOuterAnchor
     last_trial: NestedLsOuterTrialReadout
+    inner_substep_legs: tuple[int, ...]
     record_mixed_cross_check: bool
     mixed_cross_check_gradient: NDArray[np.float64] | None
     mixed_cross_check_max_abs: float | None
@@ -4792,6 +4795,8 @@ class NestedLsOuterState:
 def prepare_f3_b37_outer_state(
     jax_boozer: BoozerSurfaceJAX,
     bundle_root: Path | None = None,
+    *,
+    inner_substep: bool = False,
 ) -> NestedLsOuterState:
     """Bind the frozen flat-675 bundle to one JAX Boozer surface.
 
@@ -4800,6 +4805,17 @@ def prepare_f3_b37_outer_state(
     walk endpoint for Gate FD-0) before preparing. The vessel block is
     read from the bundle's archived candidate and never moves again: it
     is not an outer variable in this charter.
+
+    ``inner_substep`` opts this run into the sealed Δc sub-step ladder
+    (``NESTED_LS_INNER_SUBSTEP_LEGS``): a displacement the inner solve
+    cannot take whole is retried in 2, then 4, then 8 legs from the
+    committed anchor. It defaults to False and must stay a per-run
+    decision, because a run with it on and a run with it off are not the
+    same optimization -- the first rung is the undivided step, so the
+    trajectories agree exactly until the first failure and diverge from
+    there. Receipts measured without it cannot be compared to receipts
+    measured with it, and the flag belongs in the sealed policy of any
+    run that sets it.
     """
 
     root = DEFAULT_FLAT675_BUNDLE_ROOT if bundle_root is None else Path(bundle_root)
@@ -4858,10 +4874,142 @@ def prepare_f3_b37_outer_state(
             inner_grad_l2=NESTED_LS_OUTER_NO_TRIAL_SENTINEL,
             adjoint_live_eta=NESTED_LS_OUTER_NO_TRIAL_SENTINEL,
         ),
+        # Sub-stepping OFF by default. Enabling it changes the inner
+        # trajectory, and a trajectory change silently invalidates every
+        # sealed receipt measured without it, so the default reproduces
+        # today's lane exactly and a caller opts in per run.
+        inner_substep_legs=(
+            tuple(NESTED_LS_INNER_SUBSTEP_LEGS) if inner_substep else (1,)
+        ),
         record_mixed_cross_check=False,
         mixed_cross_check_gradient=None,
         mixed_cross_check_max_abs=None,
     )
+
+
+def _solve_nested_inner_leg(
+    state: NestedLsOuterState,
+    *,
+    coil_dofs: NDArray[np.float64],
+    warm_surface_dofs: NDArray[np.float64],
+    warm_iota: float,
+    warm_G: float,
+) -> tuple[NestedLsSchurNewtonResult, RuntimeError | None]:
+    """One frozen-coil solve at one point, from one warm start.
+
+    Returns the result and the physics rejection it earned, if any. It
+    applies no policy of its own: it does not restore the surface, does not
+    touch the anchor, and does not decide whether a rejection is final.
+    The caller owns all three, which is what lets the undivided step and
+    every sub-step leg run through identical arithmetic.
+
+    The iota branch guard is measured against the COMMITTED ANCHOR, never
+    against this leg's own warm start. That is the load-bearing choice for
+    sub-stepping: guarding each leg against its predecessor would let a walk
+    cross to another branch in several small steps, each one inside the
+    guard, and arrive somewhere the undivided step would have been refused
+    for reaching. The guard bounds total displacement from the anchor, so
+    dividing the step cannot buy a branch change.
+    """
+
+    jax_boozer = state.jax_boozer
+    # A writable copy, never the record's own buffer: ``set_dofs`` binds
+    # what it is handed straight onto ``Dofs._x``
+    # (``simsopt/_core/optimizable.py``), so passing the anchor array
+    # itself would put the committed warm start inside a mutable object
+    # the solve is about to write through.
+    jax_boozer.surface.set_dofs(_writable_copy(warm_surface_dofs))
+    jax_boozer.biotsavart.x = np.array(coil_dofs, dtype=np.float64, copy=True)
+    jax_boozer._refresh_coil_data()
+    solution = run_reduced_nested_ls_schur_newton(
+        jax_boozer,
+        iota=float(warm_iota),
+        G=float(warm_G),
+        stab=float(F3_B37_IFT_STAB),
+        maxiter=int(NESTED_LS_NEWTON_MAXITER),
+        linear_solver="dense_lu",
+    )
+    # The invariant first: a frozen-coil solve that moved the coils is a
+    # defect, and a defect must not be reachable through a path that a
+    # lane answers with a rejection sentinel.
+    if solution.coil_delta_inf != 0.0:
+        raise RuntimeError(
+            "nested-LS outer inner solve moved the coils by "
+            f"{solution.coil_delta_inf!r}."
+        )
+    guard = float(NESTED_LS_OUTER_IOTA_BRANCH_GUARD)
+    if not solution.success:
+        return solution, NestedLsInnerSolveFailed(
+            iteration_count=int(solution.iteration_count),
+            maxiter=int(NESTED_LS_NEWTON_MAXITER),
+            grad_l2=float(np.linalg.norm(solution.reduced_gradient)),
+            tol=float(NESTED_LS_NEWTON_TOL),
+        )
+    if abs(float(solution.iota) - state.anchor.iota) > guard:
+        return solution, NestedLsBranchJump(
+            iota=float(solution.iota),
+            anchor_iota=state.anchor.iota,
+            guard=guard,
+        )
+    return solution, None
+
+
+def _walk_nested_inner_ladder(
+    state: NestedLsOuterState,
+    coil_dofs: NDArray[np.float64],
+    legs_ladder: tuple[int, ...],
+) -> tuple[NestedLsSchurNewtonResult, RuntimeError | None]:
+    """Try the displacement whole, then divided into more and more legs.
+
+    Every rung restarts from the committed anchor, never from the residue of
+    the rung that just failed: a failed walk's last iterate is not a better
+    starting point, it is an unexplained one.
+
+    On total failure the FIRST rung's rejection is the one raised, not the
+    last. The first rung is the undivided step, which is the question the
+    outer optimizer actually asked; the eight-leg rung's rejection describes
+    a different question and would put a leg count the optimizer never chose
+    into the published ``rejection_detail``.
+
+    With the default single-rung ladder this is exactly the previous
+    behaviour, one solve and one decision — sub-stepping is opt-in because
+    turning it on changes the trajectory, and a trajectory change silently
+    invalidates every sealed receipt that was measured without it.
+    """
+
+    anchor = state.anchor
+    first_solution: NestedLsSchurNewtonResult | None = None
+    first_rejection: RuntimeError | None = None
+    for legs in legs_ladder:
+        warm_surface = anchor.surface_dofs
+        warm_iota = anchor.iota
+        warm_g = anchor.G
+        solution: NestedLsSchurNewtonResult | None = None
+        rejection: RuntimeError | None = None
+        for point in nested_ls_inner_substep_points(
+            anchor_coil_dofs=anchor.coil_dofs,
+            trial_coil_dofs=coil_dofs,
+            legs=int(legs),
+        ):
+            solution, rejection = _solve_nested_inner_leg(
+                state,
+                coil_dofs=point,
+                warm_surface_dofs=warm_surface,
+                warm_iota=warm_iota,
+                warm_G=warm_g,
+            )
+            if rejection is not None:
+                break
+            warm_surface = solution.surface_dofs
+            warm_iota = float(solution.iota)
+            warm_g = float(solution.G)
+        assert solution is not None  # every ladder rung solves at least once
+        if first_solution is None:
+            first_solution, first_rejection = solution, rejection
+        if rejection is None:
+            return solution, None
+    assert first_solution is not None
+    return first_solution, first_rejection
 
 
 def _solve_nested_inner_at_coils(
@@ -4891,46 +5039,8 @@ def _solve_nested_inner_at_coils(
 
     jax_boozer = state.jax_boozer
     anchor = state.anchor
-    # A writable copy, never the record's own buffer: ``set_dofs`` binds
-    # what it is handed straight onto ``Dofs._x``
-    # (``simsopt/_core/optimizable.py:364``), so passing the anchor array
-    # itself would put the committed warm start inside a mutable object
-    # the solve is about to write through.
-    jax_boozer.surface.set_dofs(_writable_copy(anchor.surface_dofs))
-    jax_boozer.biotsavart.x = np.array(coil_dofs, dtype=np.float64, copy=True)
-    jax_boozer._refresh_coil_data()
-    solution = run_reduced_nested_ls_schur_newton(
-        jax_boozer,
-        iota=anchor.iota,
-        G=anchor.G,
-        stab=float(F3_B37_IFT_STAB),
-        maxiter=int(NESTED_LS_NEWTON_MAXITER),
-        linear_solver="dense_lu",
-    )
-    grad_l2 = float(np.linalg.norm(solution.reduced_gradient))
-    # The invariant first: a frozen-coil solve that moved the coils is a
-    # defect, and a defect must not be reachable through a path that a
-    # lane answers with a rejection sentinel.
-    if solution.coil_delta_inf != 0.0:
-        raise RuntimeError(
-            "nested-LS outer inner solve moved the coils by "
-            f"{solution.coil_delta_inf!r}."
-        )
-    guard = float(NESTED_LS_OUTER_IOTA_BRANCH_GUARD)
-    rejection: RuntimeError | None = None
-    if not solution.success:
-        rejection = NestedLsInnerSolveFailed(
-            iteration_count=int(solution.iteration_count),
-            maxiter=int(NESTED_LS_NEWTON_MAXITER),
-            grad_l2=grad_l2,
-            tol=float(NESTED_LS_NEWTON_TOL),
-        )
-    elif abs(float(solution.iota) - anchor.iota) > guard:
-        rejection = NestedLsBranchJump(
-            iota=float(solution.iota),
-            anchor_iota=anchor.iota,
-            guard=guard,
-        )
+    legs_ladder = tuple(state.inner_substep_legs) or (1,)
+    solution, rejection = _walk_nested_inner_ladder(state, coil_dofs, legs_ladder)
     if rejection is not None:
         # The solve already wrote its own iterate onto the surface
         # (nested_ls_reduced.py:1358), so put the last accepted geometry

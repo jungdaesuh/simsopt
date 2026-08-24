@@ -413,6 +413,13 @@ def test_solve_plan_counts_match_the_declared_budget() -> None:
     assert len(probe.solve_plan("predictor")) == 4
     assert len(probe.solve_plan("tolerance-budget")) == tolerance_solves
     assert len(probe.solve_plan("all")) == 4 + tolerance_solves
+    # The plan and the receipt's own solve counter must agree. They did not
+    # when the iteration ladder landed: the plan listed 10 and the counter
+    # published 10 while the run took 18, because both were computed from a
+    # formula that predated the ladder rather than from what ran.
+    assert tolerance_solves == 1 + len(probe.TOLERANCE_RUNGS) + len(
+        probe.ITERATION_RUNGS
+    )
     # The iteration ladder is the half that can actually spread the
     # abscissae, so it must not be empty and must not overlap the converged
     # reference: every cap is below the walk's own 9 iterations.

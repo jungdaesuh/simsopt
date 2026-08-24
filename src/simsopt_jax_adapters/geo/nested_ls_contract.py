@@ -69,6 +69,23 @@ NESTED_LS_NEWTON_EXIT_STATUSES: Final[tuple[str, str, str]] = (
     NESTED_LS_NEWTON_EXIT_FAILED,
 )
 
+# Inner Δc sub-stepping (Phase 3 of the upgrade plan).
+#
+# The ladder of leg counts an inner solve may retry a failed displacement
+# with, each rung restarting from the committed anchor. This is the rung the
+# B37 v2 evidence actually points at, once its ledger strings are read the
+# right way round: the three late failures spend 9, 10 and 10 of 10 Newton
+# iterations at ``‖Δc‖`` of 7.3e-3, 3.2e-3 and 7.2e-3 from a committed
+# anchor. Two of the three exhaust the budget on a walk that is still
+# converging, which is a step-size problem — shorten the step and the same
+# budget reaches the branch. It is NOT what retry-with-regularization
+# addresses; that rung was withdrawn.
+#
+# The first rung is 1, i.e. the undivided step, so a lane with sub-stepping
+# enabled takes exactly today's trajectory whenever today's trajectory
+# works, and pays nothing for the option.
+NESTED_LS_INNER_SUBSTEP_LEGS: Final[tuple[int, ...]] = (1, 2, 4, 8)
+
 # Banana run_code / later timing bar. Newton does not pass stab, so it
 # keeps the method default of 0. BFGS runs first.
 NESTED_LS_BANANA_NEWTON_STAB: Final[float] = 0.0
@@ -451,6 +468,58 @@ def nested_ls_outer_attempt_fun_is_objective(
     ) == nested_ls_outer_parameter_bytes(last_evaluated_parameters)
 
 
+def nested_ls_inner_substep_points(
+    *,
+    anchor_coil_dofs: NDArray[np.float64],
+    trial_coil_dofs: NDArray[np.float64],
+    legs: int,
+) -> tuple[NDArray[np.float64], ...]:
+    """The coil points one sub-stepped inner solve walks through.
+
+    ``legs`` equal fractions of ``Δc = trial − anchor``, returned as the
+    points to solve AT — so the tuple has ``legs`` entries and never
+    includes the anchor itself, which is already solved.
+
+    The last entry is the trial's own bytes, copied, never a reconstruction
+    ``anchor + Δc``. This matters because the outer objective and its
+    gradient are evaluated at the coils the CALLER named, so a solve that
+    landed at a reconstructed neighbour would publish ``s*(c′)`` under the
+    label ``s*(c)``. The intermediate points are scratch and may be anything
+    on the segment; the endpoint may not.
+
+    Be precise about why this is a copy rather than a computation: NOT
+    because the reconstruction is observably wrong. Probing 120 000 random
+    pairs across six magnitude regimes (anchor 1e-8 to 1e6, displacement
+    1e-9 to 1e8) found ZERO cases where ``a + (t - a) != t`` in binary64 —
+    the subtraction is exact in the Sterbenz range and rounds back
+    elsewhere. The copy is here so that exactness is a property of this
+    function rather than of a floating-point regularity that holds on every
+    input anyone has tried. A guarantee and an empirical regularity are
+    different things to build a certification on.
+
+    ``legs = 1`` returns exactly ``(trial,)``, which is the undivided step.
+    That is what makes the first rung of the ladder free: a lane with
+    sub-stepping enabled reproduces the un-sub-stepped trajectory bitwise
+    whenever the undivided step succeeds.
+    """
+
+    if int(legs) < 1:
+        raise ValueError(f"legs must be at least 1; got {legs!r}.")
+    anchor = np.asarray(anchor_coil_dofs, dtype=np.float64).reshape(-1)
+    trial = np.asarray(trial_coil_dofs, dtype=np.float64).reshape(-1)
+    if anchor.shape != trial.shape:
+        raise ValueError(
+            "anchor and trial coil blocks must have the same shape; got "
+            f"{anchor.shape} and {trial.shape}."
+        )
+    delta = trial - anchor
+    points = [
+        anchor + delta * (float(index) / float(legs)) for index in range(1, int(legs))
+    ]
+    points.append(np.array(trial, dtype=np.float64, copy=True))
+    return tuple(points)
+
+
 def nested_ls_newton_exit_status(
     *,
     persisted: bool,
@@ -578,6 +647,7 @@ __all__ = [
     "NESTED_LS_GATE6_CLAIM_REPEATS",
     "NESTED_LS_GATE6_IOTA_G_TOL",
     "NESTED_LS_GATE6_NATIVE_OMP_THREADS",
+    "NESTED_LS_INNER_SUBSTEP_LEGS",
     "NESTED_LS_LABEL",
     "NESTED_LS_NEWTON_COARSE_TOL",
     "NESTED_LS_NEWTON_EXIT_COARSE_CONVERGED",
@@ -618,6 +688,7 @@ __all__ = [
     "NestedLsOuterCandidateStore",
     "NestedLsPhysicsNewtonKwargs",
     "nested_ls_banana_run_code_options",
+    "nested_ls_inner_substep_points",
     "nested_ls_newton_exit_status",
     "nested_ls_outer_attempt_fun_is_objective",
     "nested_ls_outer_endpoint_success",
