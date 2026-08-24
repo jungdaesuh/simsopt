@@ -20,7 +20,9 @@ comparisons passed
   including all 416 native-CPU/JAX-GPU routes.
 - Initial states agree exactly or at FP64 roundoff. The largest real final gap
   is planar Stage-II, where the GPU objective ends 16.3% lower (better) after
-  both lanes hit the 100-iteration cap.
+  both lanes hit the 100-iteration cap. (Stale at HEAD, checked 2026-08-24: a
+  2026-08-02 mirror fix changed this case's objective — see the dated
+  correction under the final-result table.)
 - Passing means workflow acceptance, not solver convergence; several runs end
   at fixed budgets.
 - Timing is one isolated launch per lane, startup and JIT included. Total GPU
@@ -76,7 +78,7 @@ route.
 | Case | Representative observable | Representation | Native CPU raw | JAX GPU raw | Max elementwise absolute difference | Relative difference | Iterations native/GPU | Note |
 |---|---|---:|---:|---:|---:|---:|---:|---|
 | boozer | `area:residual_norm` | scalar | 1.84773545566e-12 | 5.53361289101e-13 | 1.29437416656e-12 | 70.0519% | —/— | Near zero; use the absolute difference. |
-| boozerqa | `final:objective` | scalar | 5.22338676454e-05 | 5.2233867645e-05 | 3.69204721049e-16 | 7.0683e-10% | 5/5 | — |
+| boozerqa | `final:objective` | scalar | 5.22338676454e-05 | 5.2233867645e-05 | 3.69204721049e-16 | 7.0683e-10% | 5/5 | Fixed iteration budget. |
 | coil-forces | `final:objective` | scalar | 0.00342419993098 | 0.00342419993098 | 1.96457433654e-16 | 5.73732e-12% | 6/6 | — |
 | just-a-quadratic | `final:objective_sum_squares` | scalar | 0 | 2.50167514568e-28 | 2.50167514568e-28 | — | —/4 | — |
 | minimize-curve-length | `final:objective_sum_squares` | scalar | 355.305758558 | 355.305758439 | 1.18418256534e-07 | 3.33285e-08% | —/16 | — |
@@ -85,7 +87,7 @@ route.
 | permanent-magnet-qa | `final:objective_sum_squares` | scalar | 0.00221072852511 | 0.00221074238204 | 1.38569253082e-08 | 0.000626804% | 2/2 | — |
 | permanent-magnet-simple | `final:objective_sum_squares` | scalar | 0.36520685775 | 0.36520685775 | 2.22044604925e-16 | 6.07997e-14% | 40/40 | — |
 | qfm | `area:exact:qfm_value` | scalar | 0.00114616121041 | 0.00114616114267 | 6.77404924689e-11 | 5.91021e-06% | 210/76 | — |
-| single-stage-boozer-vacuum-optimization | `final:objective` | scalar | 0.000270780779834 | 0.000270780779834 | 5.96311194867e-18 | 2.20219e-12% | 2/2 | — |
+| single-stage-boozer-vacuum-optimization | `final:objective` | scalar | 0.000270780779834 | 0.000270780779834 | 5.96311194867e-18 | 2.20219e-12% | 2/2 | Fixed iteration budget. |
 | stage-two-optimization | `final:objective` | scalar | 1.44163437495e-06 | 1.4641292451e-06 | 2.24948701511e-08 | 1.56037% | 100/100 | Both stages hit the iteration limit. |
 | stage-two-optimization-finitebuild | `final:objective` | scalar | 0.00531308145509 | 0.00531308145511 | 1.79188261451e-14 | 3.37259e-10% | 3/3 | Iteration limit reached. |
 | stage-two-optimization-minimal | `final:objective` | scalar | 1.00446449822e-18 | 1.20783727368e-19 | 8.83680770853e-19 | 87.9753% | 76/76 | Near-zero objective; final curve length differs by 21.38%. |
@@ -101,6 +103,35 @@ route.
 | wireframe-gsco-sector-saddle | `final:total_objective` | scalar | 0.022028207044 | 0.022028207044 | 1.73472347598e-17 | 7.87501e-14% | 40/40 | Fixed iteration budget. |
 | wireframe-rcls-basic | `final:total_objective` | scalar | 0.0072593110819 | 0.0072593110819 | 2.60208521397e-18 | 3.58448e-14% | 1/1 | — |
 | wireframe-rcls-with-ports | `final:total_objective` | scalar | 3.12796971953e-06 | 3.12796971953e-06 | 1.38489886876e-19 | 4.42747e-12% | 1/1 | — |
+
+> **Row falsified at HEAD, and a 2026-08-24 re-validation of this table.**
+> The `stage-two-optimization-planar-coils` row is correct for the authority
+> revision but no longer describes the current code: commit `fd200f564`
+> (2026-08-02) aligned the mirror's mean-squared-curvature penalty with the
+> upstream example's `identity` target mode (the parity case previously used
+> `"max"`), which changes the optimization problem itself. Re-measured at HEAD
+> on 2026-08-24 (bounded scale, jax/jaxlib 0.10.0, RTX 5090 for the GPU lane;
+> a replay environment, not the authority environment): native
+> `final:objective` = 0.00221946821602, JAX CPU 0.00103232035072, strict GPU
+> 0.00103939304979, and **all lanes converge** instead of hitting the
+> iteration cap. The row's raw values, difference cells, `100/100` iteration
+> cell, and Note are stale, as is the executive summary's "16.3% lower"
+> bullet — at HEAD the GPU endpoint is ~53% below native.
+>
+> The other rows were re-validated in the same replay pass (native and JAX
+> CPU lanes for all bounded cases): 23 of 26 native endpoints reproduce the
+> table to its printed precision. Two environment-sensitivity effects
+> surfaced, each present identically at the authority revision and at HEAD
+> (so neither is a code regression): `permanent-magnet-qa`'s MwPGP endpoint
+> lands 3.3e-05 (relative) away from the table in this environment (its
+> parity gate still passes), and `tracing-fieldlines-ncsx` — the only gate
+> failure of the pass — misses its Poincaré-positions bucket at one of 66
+> crossings (0.041 versus `atol` 0.030) from chaotic amplification of
+> environment-level FP differences; both lanes' trajectories are bitwise
+> identical across the two revisions.
+> `single-stage-boozer-vacuum-optimization` cannot be re-validated at
+> bounded scale at HEAD (the runner fails closed on its promoted scale tier;
+> see the pin note under Evidence provenance).
 
 ## Solver, iteration, evaluation, and status parity
 
@@ -147,7 +178,14 @@ The nonzero counter differences are:
 
 All other paired counters match. Fewer GPU evaluations does not mean less wall
 time. `normalized_status` records workflow acceptance; raw statuses include
-fixed budgets, iteration limits, and Boozer `inner=True;outer=False`.
+fixed budgets, iteration limits, and Boozer `inner=True;outer=False`. (Format
+note, 2026-08-24: that two-field Boozer raw status is what this run's receipts
+recorded. Since the fail-closed endpoint certificate landed — `91e1133b9`,
+2026-08-02 — the Boozer cases emit a seven-field raw status
+(`inner`/`outer`/`certificate`/`stopping_reason`/`initial_stationary`/
+`terminal_stationary`/`constraints_satisfied`), so a replay at HEAD reports a
+different raw-status shape, and budget-capped Boozer endpoints may normalize
+to `budget_exhausted` rather than `converged`.)
 
 Parity targets scientific behavior, not identical implementations:
 
@@ -211,6 +249,14 @@ The 78-launch campaign took 29 minutes 21 seconds. No compile-only or warmed
 samples exist: each wall time is one full subprocess, startup through receipt
 publication, unrepeated.
 
+Hardware and threading (added 2026-08-24): the authority run's host-local
+artifacts live on the same RTX 5090 / Threadripper 9970X box as the
+fast/parity benchmark below. The parity runtime pins every native-lane child
+to `OMP_NUM_THREADS=1` (for determinism; `examples/jax/parity/runtime.py`,
+present at the authority revision), so the native wall times below are
+single-threaded. A threaded native baseline would be faster, which makes the
+14.1x total a floor on the GPU-lane deficit, not an overstatement of it.
+
 ### Authority-run isolated end-to-end wall time
 
 Parent RSS is the launched child's peak `VmHWM`; it excludes descendants.
@@ -246,6 +292,14 @@ Parent RSS is the launched child's peak `VmHWM`; it excludes descendants.
 | **Sum of lane elapsed times** | **84.740877** | **457.572343** | **1196.250171** | **+1311.657%** | — | — |
 
 GPU was slower in every launch.
+
+> **Scope note (added 2026-08-24):** true of these one-shot cold launches,
+> which include startup and compilation, and of nothing else. Under a
+> different measurement class — warmed or persistent-cache solves at the
+> examples' reference scales — two of the rows above are now certified GPU
+> **wins** (`stage-two-optimization-finitebuild` 13.58x warmed solve,
+> `wireframe-gsco-multistep` 3.5x device solve); see the addendum at the end
+> of this report.
 
 ### JAX GPU fast versus JAX GPU parity: cold and warmed measurements
 
@@ -319,6 +373,13 @@ Artifacts are host-local and Git-ignored. Retention and replay instructions:
 > route was added or removed, and the other 26 declarations are byte-identical.
 > Verify with
 > `git diff 11340c829 HEAD -- examples/jax/parity_manifest.json`.
+> In consequence the live manifest declares 1,260 applicable comparisons over
+> 420 routes (192 exact) versus the 1,248/416/180 this report's verdict
+> counts; the whole delta sits inside the promoted route's declarations
+> (45 → 57). A bounded replay at HEAD also executes at most 25 of the 26
+> cases: `run_parity.py` fails closed on the promoted route's scale tier, so
+> the 26th case replays only at the authority revision (or at
+> `native_default` scale).
 
 Limitations:
 
