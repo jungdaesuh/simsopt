@@ -336,7 +336,7 @@ this run, marked †).
 | permanent-magnet-simple | 2.91 | 3.67 | 4.18 | 0.70x | **5.2x**, bitwise | measured once |
 | wireframe-gsco-modular | 2.95 | 5.15 | 6.50 | 0.45x | **5.2x** at 96x100 grid | measured once |
 | wireframe-gsco-sector-saddle | 2.98 | 5.05 | 5.83 | 0.51x | **4.4x** at 96x100 | measured once |
-| permanent-magnet-pm4stell | 3.37 | 4.09 | 5.71 | 0.59x | **3.0x** at nphi=64 | measured once, fix pending |
+| permanent-magnet-pm4stell | 3.37 | 4.09 | 5.71 | 0.59x | **3.0x** at nphi=64 | measured once; predicate repaired `aa04f698c`, bitwise re-certified |
 | permanent-magnet-muse | 4.39 | 4.08 | 5.62 | 0.78x | **2.9x** at nphi=64 | measured once |
 | coil-forces | 12.37 | 59.96 | 117.23 | 0.11x | **1.6x** warm | measured once |
 | stage-two-optimization-stochastic | 8.15 | 19.57 | 40.95 | 0.20x | **1.2-1.4x**, grows with ensemble | measured once |
