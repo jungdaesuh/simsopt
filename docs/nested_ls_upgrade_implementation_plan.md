@@ -72,7 +72,9 @@ Closure section, commit `55e87b294`), track verdict
 - Inner-walk internals: `nested_ls_reduced.py:1146-1329` (undamped Newton +
   Armijo, counter semantics), `dense_schur_lu_preconditioner` `:986-996`,
   `apply_reduced_mixed_schur_coil_tangent` `:1389-1426`. Predictor expression
-  already FD-validated by `tests/geo/test_nested_ls_reduced.py:1360,1470`.
+  already FD-validated by `tests/geo/test_nested_ls_reduced.py:1360,1471`
+  (`test_implicit_adjoint_matches_surface_response_to_coil_step`,
+  `test_unregularized_ift_adjoint_matches_reconverged_surface_fd`).
 - Evidence in flight: B3 v2 receipt (producer `01fefbadd`, stem
   `nested_ls_outer_b3_20260824`) and the B37 v2 JAX-only diagnostic. A
   simsoptpp binary boundary (sha `41b2ca79`→`95190afa`, ~07:0x) falls
@@ -123,7 +125,8 @@ accepts that error silently — we budget it).
          returned endpoint is bitwise the start state.
    - [ ] Parameterized sweep test of `nested_ls_outer_restart_reason` and
          `nested_ls_outer_endpoint_success` alone (TORAX `test_cond_fun`
-         pattern) — extend `tests/geo/test_nested_ls_outer_transaction.py`.
+         pattern) — extend `tests/geo/test_nested_ls_outer_transaction.py`
+         (file exists on `fix-b37-restart` only until Phase 1 merges it).
    - [ ] Add `simsoptpp_sha256` (and `.so` path) to
          `nested_ls_runtime_identity` (`nested_ls_reduced_scale.py:398`).
    - [ ] Soften the `accept()` KeyError crash: on a missing candidate, emit
@@ -154,8 +157,12 @@ accepts that error silently — we budget it).
    - [ ] Cache the adjoint's dense LU (via `dense_schur_lu_preconditioner`)
          on the state at commit; predictor per trial = one
          `apply_reduced_mixed_schur_coil_tangent` JVP + one cached LU solve.
-   - [ ] DESC cascade cap: reject the prediction (fall back to bare anchor)
-         when `‖δs_pred‖ > 0.1·‖s_anchor‖`; envelope-gradient fallback check.
+   - [ ] Trust-region cap on the prediction, DESC `tr_ratio` semantics
+         (DESC *scales* the step to the bound `‖δs_pred‖ ≤ 0.1·‖s_anchor‖`,
+         it does not reject): clip to the cap, then the reject-to-bare-anchor
+         condition is ours, not DESC's — fall back when the predicted start's
+         envelope gradient exceeds the anchor's at the same coils (one cheap
+         `_envelope_value_and_grad` evaluation).
    - [ ] Offline validation on recorded states BEFORE wiring into children:
          replay legs 3/4 from the synthesis validation ladder — predictor at
          the recorded x₃₈→x₃₉ displacement (does it prevent the wrong-branch
@@ -218,10 +225,14 @@ accepts that error silently — we budget it).
       physics-green (J-parity ≤1e-9 band, per-pair); DIAG4 manifest counts
       match pinned expectations.
 - [ ] Phase 2: recorded-displacement replay results written to the track doc
-      (both falsifiable predictions adjudicated); with predictor ON and no
-      rejections in a B3 run, endpoint must remain bitwise identical to the
-      predictor-OFF B3 (predictor only changes warm starts of *rejected-era*
-      solves; a converged anchor start is `inner_iter=0` either way).
+      (both falsifiable predictions adjudicated). Predictor ON changes the
+      warm start of **every** evaluation at coils ≠ anchor, so a
+      predictor-ON B3 is a *new trajectory* — the gates are the per-pair
+      physics parity band and FD-0 (not bitwise identity vs predictor-OFF).
+      The one bitwise invariant that must hold: an evaluation at coils
+      bitwise-equal to the committed anchor has δc = 0 ⇒ δs_pred = 0 and
+      must reproduce the predictor-OFF result exactly (extends the stp=0
+      invariant test).
 - [ ] Phase 3: B37-class stress replay — re-run the recorded stall
       neighborhood (evals 38–44) under the full ladder; expected: zero
       `inner_solve_failed` at bitwise-repeated coils; sub-step ledger rows
