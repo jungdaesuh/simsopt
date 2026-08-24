@@ -88,7 +88,6 @@ from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     nested_ls_receipt_provenance,
     predict_start_at_cap_wall_seconds,
     replace_native_solver_options,
-    sha256_file,
     unpreconditioned_gmres_is_insufficient,
 )
 
@@ -213,9 +212,6 @@ _F3_B37_GPU_CHUNK_WARM_EVIDENCE = (
 _GPU_CHUNK_WARM_PUBLICATION = (
     "Warm in-process dense-assemble repeats at the LU endpoint. "
     "Cold first-touch discarded. Not a default switch and not a nested speed claim."
-)
-_GPU_WALK_PUBLICATION = (
-    "GPU forcing-certified Schur walk. Not a timing claim and not F3 7.70x."
 )
 _GPU_STEP2_PUBLICATION = (
     "GPU step-2 forcing probe. Not a walk, not a timing claim, and not F3 7.70x."
@@ -477,81 +473,9 @@ def test_f3_b37_schur_one_step_evidence_is_strict_authored_json():
     assert payload["execution_log"] is None
 
 
-@pytest.mark.skipif(
-    not _F3_B37_GPU_WALK_EVIDENCE.is_file(),
-    reason="authored GPU walk JSON not yet produced",
-)
-def test_authored_gpu_walk_json_is_strict_and_claim_grade():
-    raw = _F3_B37_GPU_WALK_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-reduced-gpu-walk.v1"
-    assert payload["written_by_pytest"] is False
-    assert payload["publication"] == _GPU_WALK_PUBLICATION
-    assert payload["driver"] == (
-        "simsopt_jax_adapters.geo.nested_ls_reduced_scale."
-        "evaluate_f3_b37_schur_newton_walk"
-    )
-    boundary = payload["claim_boundary"]
-    assert boundary["nested_speed_claim"] is False
-    assert boundary["inherits_f3_7_70x"] is False
-    assert boundary["f3_sealed"] is True
-    assert boundary["full_walk_attempted"] is True
-    assert boundary["ten_step_walk"] is True
-    assert boundary["device_resident_krylov"] is True
-    assert boundary["jax_success_1e13"] is True
-    assert boundary["endpoint_parity"] is True
-    assert boundary["newton_quality_linear_solve"] is True
-    probe = payload["probe"]
-    assert probe["success"] is True
-    assert float(probe["grad_l2"]) <= NESTED_LS_NEWTON_TOL
-    assert int(probe["native_rejudge_iter"]) == 0
-    assert float(probe["rejudge_vs_jax_surface_inf"]) == 0.0
-    assert float(probe["rejudge_vs_jax_iota"]) == pytest.approx(0.0, abs=1.0e-15)
-    assert float(probe["rejudge_vs_jax_g"]) == pytest.approx(0.0, abs=1.0e-15)
-    assert float(probe["coil_delta_inf"]) == 0.0
-    np.testing.assert_allclose(
-        probe["native_rejudge_iota"],
-        probe["jax_iota"],
-        rtol=0.0,
-        atol=1.0e-15,
-        err_msg="authored C++ rejudge moved iota away from the JAX endpoint",
-    )
-    np.testing.assert_allclose(
-        probe["native_rejudge_g"],
-        probe["jax_g"],
-        rtol=0.0,
-        atol=1.0e-15,
-        err_msg="authored C++ rejudge moved G away from the JAX endpoint",
-    )
-    assert all(bool(step["step_accepted"]) for step in probe["steps"])
-    assert all(
-        float(step["gmres_forcing_eta"]) <= float(step["gmres_rtol"])
-        for step in probe["steps"]
-        if bool(step["step_accepted"])
-    )
-    runtime = probe["runtime"]
-    assert runtime["jax_default_backend"] == "gpu"
-    provenance = probe["provenance"]
-    repo = Path(__file__).resolve().parents[2]
-    sources = provenance["source_sha256"]
-    assert sources["nested_ls_reduced.py"] == sha256_file(
-        repo / "src/simsopt_jax_adapters/geo/nested_ls_reduced.py"
-    )
-    assert sources["nested_ls_reduced_scale.py"] == sha256_file(
-        repo / "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py"
-    )
-    assert sources["nested_ls_contract.py"] == sha256_file(
-        repo / "src/simsopt_jax_adapters/geo/nested_ls_contract.py"
-    )
-    assert payload["krylov_backend"] == (
-        "jax.scipy.sparse.linalg.gmres incremental via _run_operator_gmres"
-    )
-    assert "speed" not in payload["publication"].lower() or "not a timing" in (
-        payload["publication"].lower()
-    )
-    assert payload["gmres_matvecs_note"] == _GPU_WALK_GMRES_MATVECS_NOTE
+# There is deliberately no authored test for the claim-grade walk JSON: the
+# reduced-track NO-GO list forbids ever minting it, and the active
+# assert-not-exists guards below are the enforcement.
 
 
 @pytest.mark.skipif(

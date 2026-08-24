@@ -11,6 +11,14 @@ binding, and fail-closed verdicts.
 The timed instrument is the archived lane driver
 (benchmarks/genuine_675_dynamic_lane.py) invoked unmodified; this harness
 owns only environment construction, sequencing, gating, and evidence.
+
+This harness lives on pr/jax-port-squashed and runs only with
+PYTHONPATH=<instrument-worktree>:<instrument-worktree>/src pinned at
+1c23f6c5 (the receipt's ``Instrument:`` line in
+docs/receipts/genuine675_fair_bar.md; the ``Harness:`` line pins this
+file's own commit chain): its ``simsopt_jax.runtime.*`` imports resolve
+from that instrument and deliberately do not resolve at this branch's
+tip, where the file is retained as the sealed campaign's cited source.
 Subcommands: mint-manifest, selftest-loader, phase1, probe, native-matrix,
 pairs, validate.
 """
