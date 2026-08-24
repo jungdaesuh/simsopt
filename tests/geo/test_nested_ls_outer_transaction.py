@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from typing import cast
+from typing import Final, cast
 
 import numpy as np
 import pytest
@@ -26,14 +26,16 @@ from benchmarks.nested_ls_outer_claim import (
     _require_omp_evidence,
     _rejudge_endpoint_mismatch,
 )
-from scipy.optimize import minimize
+from scipy.optimize import fmin_l_bfgs_b, minimize
 from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_OUTER_FTOL_STALL_MESSAGE,
     NESTED_LS_OUTER_JAX_CHILD_SCHEMA,
+    NESTED_LS_OUTER_PUBLISHABLE_STOP_STATUSES,
     NESTED_LS_OUTER_REJUDGE_SCHEMA,
     NestedLsOuterCandidateStore,
     nested_ls_outer_endpoint_success,
     nested_ls_outer_ftol_zero_stop,
+    nested_ls_outer_parameter_bytes,
     nested_ls_outer_rejection_barrier,
     nested_ls_outer_restart_reason,
 )
@@ -1120,3 +1122,848 @@ def test_native_outer_trial_order_cannot_change_the_committed_objective(monkeypa
         run(bad_trial)
     np.testing.assert_array_equal(boozer.biotsavart.x, bad_trial)
     np.testing.assert_array_equal(boozer.surface.get_dofs(), np.array([1.75]))
+
+
+# --------------------------------------------------------------------------
+# Tier-0 hardening. The sealed outer policy's own line-search contract, the
+# all-rejected containment endpoint, and the shared stop classifiers.
+# --------------------------------------------------------------------------
+
+# The F3 B37 native lane (``pair2-l2/lane.json``, read at runtime through
+# ``load_outer_optimizer_policy``) seals these outer knobs. They are repeated
+# as literals because that lane JSON lives in the campaign artifact tree, not
+# in this repository, so a unit test cannot read it.
+_SEALED_OUTER_FTOL: Final[float] = 0.0
+_SEALED_OUTER_GTOL: Final[float] = 1.0e-3
+_SEALED_OUTER_MAXLS: Final[int] = 8
+_SEALED_OUTER_MAXCOR: Final[int] = 10
+_SEALED_REJECTION_DISTANCE_SCALE: Final[float] = 1.0
+_B37_OUTER_BUDGET: Final[int] = 37
+
+# Ceiling on dcsrch's trial-to-trial step ratio when every trial is answered
+# by the sealed quadratic barrier. Measured live against scipy 1.17.1 by
+# ``_drive_fully_rejecting_line_search`` below, not modelled here. It is also
+# the exact limit of MINPACK dcstep's "the new point is worse" branch: with
+# the incumbent pinned at the left end of the bracket, the cubic minimiser
+# sits at one third of the bracket as the barrier's rise vanishes and closer
+# to the incumbent as the rise grows, so 1/3 is approached and never passed.
+_DCSRCH_BARRIER_CONTRACTION_CEILING: Final[float] = 1.0 / 3.0
+
+
+@dataclass(frozen=True, slots=True)
+class _RejectedLineSearch:
+    """What one fully-rejected scipy line search actually did."""
+
+    trial_steps: tuple[float, ...]
+    trial_barriers: tuple[float, ...]
+    status: int
+    message: str
+
+
+def _drive_fully_rejecting_line_search(
+    *,
+    anchor_value: float,
+    gradient_scale: float,
+    dimension: int,
+    seed: int,
+) -> _RejectedLineSearch:
+    """Run the real L-BFGS-B line search against the real barrier.
+
+    Evaluation 0 returns a declared incumbent value and gradient; every later
+    evaluation is answered by :func:`nested_ls_outer_rejection_barrier`
+    anchored at that incumbent, which is exactly what both outer children do
+    when an inner solve refuses a trial. Nothing about dcsrch is modelled
+    here -- the returned step lengths are the distances scipy itself asked
+    for.
+    """
+
+    generator = np.random.default_rng(seed)
+    anchor_point = generator.standard_normal(dimension) * 0.1
+    anchor_gradient = generator.standard_normal(dimension) * gradient_scale
+    trial_steps: list[float] = []
+    trial_barriers: list[float] = []
+    evaluations = 0
+
+    def rejecting_objective(point: np.ndarray) -> tuple[float, np.ndarray]:
+        nonlocal evaluations
+        evaluations += 1
+        trial = np.asarray(point, dtype=np.float64)
+        if evaluations == 1:
+            return anchor_value, np.array(anchor_gradient, copy=True)
+        value, gradient = nested_ls_outer_rejection_barrier(
+            anchor_value=anchor_value,
+            anchor_parameters=anchor_point,
+            trial_parameters=trial,
+            scale=_SEALED_REJECTION_DISTANCE_SCALE,
+        )
+        trial_steps.append(float(np.linalg.norm(trial - anchor_point)))
+        trial_barriers.append(value)
+        return value, gradient
+
+    result = minimize(
+        rejecting_objective,
+        np.array(anchor_point, copy=True),
+        jac=True,
+        method="L-BFGS-B",
+        options={
+            "ftol": _SEALED_OUTER_FTOL,
+            "gtol": _SEALED_OUTER_GTOL,
+            "maxls": _SEALED_OUTER_MAXLS,
+            "maxiter": _B37_OUTER_BUDGET,
+            "maxcor": _SEALED_OUTER_MAXCOR,
+        },
+    )
+    return _RejectedLineSearch(
+        trial_steps=tuple(trial_steps),
+        trial_barriers=tuple(trial_barriers),
+        status=int(result.status),
+        message=str(result.message),
+    )
+
+
+@pytest.mark.parametrize(
+    ("anchor_value", "gradient_scale", "dimension", "seed"),
+    (
+        (1.0, 1.0, 2, 0),
+        (12.5, 1.0e-2, 8, 3),
+        (1.0e4, 1.0e3, 675, 1),
+    ),
+)
+def test_rejected_barrier_trials_contract_by_at_least_three_per_trial(
+    anchor_value: float,
+    gradient_scale: float,
+    dimension: int,
+    seed: int,
+):
+    """Each rejected trial step is at most a third of the previous one.
+
+    Operationally: a rejecting line search that does not contract burns its
+    whole ``maxls`` budget at a near-constant step, never returns to the
+    incumbent's neighbourhood, and hands scipy a bracket it cannot close --
+    one of the mechanisms behind the measured B37 stall. Geometric
+    contraction is what makes the sealed barrier a containment device rather
+    than a way to spend evaluations.
+
+    This pins measured scipy 1.17.1 behaviour rather than flipping a repo
+    behaviour, so there is no "old behaviour" build to fail it against. It
+    fails if the barrier stops being one differentiable function of the
+    distance to the incumbent, or if the scipy pin moves to a line search
+    with a different interpolation rule -- which is what it is here to catch.
+    """
+
+    measured = _drive_fully_rejecting_line_search(
+        anchor_value=anchor_value,
+        gradient_scale=gradient_scale,
+        dimension=dimension,
+        seed=seed,
+    )
+
+    assert len(measured.trial_steps) >= 2, (
+        "the line search did not take enough rejected trials to measure a "
+        f"contraction: steps {measured.trial_steps!r}, stop "
+        f"{measured.status}/{measured.message!r}"
+    )
+    # The one-third bound is the cubic-interpolation limit for a bracket
+    # whose best point is the incumbent and whose barrier strictly exceeds
+    # the incumbent's value. Once the rise underflows into the incumbent's
+    # own ULP the interpolation data is degenerate and the bound no longer
+    # models anything, so the regime is asserted, not assumed.
+    assert all(value > anchor_value for value in measured.trial_barriers), (
+        "the barrier collapsed into the incumbent value's ULP, so this cell "
+        "no longer measures dcsrch interpolation: barriers "
+        f"{measured.trial_barriers!r} against incumbent {anchor_value!r}"
+    )
+
+    ratios = tuple(
+        measured.trial_steps[index + 1] / measured.trial_steps[index]
+        for index in range(len(measured.trial_steps) - 1)
+    )
+    worst_ratio = max(ratios)
+    assert worst_ratio <= _DCSRCH_BARRIER_CONTRACTION_CEILING, (
+        "dcsrch stopped contracting on the sealed rejection barrier: the "
+        f"worst measured trial-to-trial step ratio was {worst_ratio!r}, above "
+        f"the {_DCSRCH_BARRIER_CONTRACTION_CEILING!r} ceiling. Measured step "
+        f"sequence {measured.trial_steps!r}; measured ratios {ratios!r}."
+    )
+
+
+def test_rejected_line_search_spends_its_whole_budget_collapsing_to_the_anchor():
+    """A fully-rejected line search ends its ``maxls`` budget at the anchor.
+
+    The observable is the end of the budget, not the trend: after the sealed
+    ``maxls=8`` trials the last point scipy asked for sits within
+    ``(1/3)**7`` of the first trial's distance from the incumbent, and scipy
+    reports the abnormal stop that the shared classifier restarts on. A
+    non-contracting sentinel would instead leave the final trial a
+    significant fraction of a full step away, which is what turns a rejected
+    outer step into wall clock spent far from the incumbent.
+
+    Like the contraction test this pins measured scipy 1.17.1 behaviour, so
+    there is no prior in-tree behaviour to falsify it against.
+    """
+
+    measured = _drive_fully_rejecting_line_search(
+        anchor_value=12.5,
+        gradient_scale=1.0e-2,
+        dimension=8,
+        seed=3,
+    )
+
+    assert len(measured.trial_steps) == _SEALED_OUTER_MAXLS, (
+        f"the rejected line search took {len(measured.trial_steps)} trials, "
+        f"not the sealed maxls={_SEALED_OUTER_MAXLS}: steps "
+        f"{measured.trial_steps!r}"
+    )
+    assert measured.status == 2 and measured.message.startswith("ABNORMAL"), (
+        "a fully-rejected line search must end in scipy's abnormal stop, the "
+        "one the shared classifier restarts on; got "
+        f"{measured.status}/{measured.message!r}"
+    )
+    collapse = measured.trial_steps[-1] / measured.trial_steps[0]
+    budget_collapse = _DCSRCH_BARRIER_CONTRACTION_CEILING ** (_SEALED_OUTER_MAXLS - 1)
+    assert collapse <= budget_collapse, (
+        "the rejected line search ended its budget far from the incumbent: "
+        f"final/first step ratio {collapse!r} exceeds the geometric budget "
+        f"collapse {budget_collapse!r}. Measured step sequence "
+        f"{measured.trial_steps!r}."
+    )
+
+
+def _float64_ulp_gap(actual: object, expected: object) -> int:
+    """Largest IEEE-754 float64 ULP distance between two equal-shaped blocks."""
+
+    left = np.ascontiguousarray(actual, dtype=np.float64).reshape(-1)
+    right = np.ascontiguousarray(expected, dtype=np.float64).reshape(-1)
+    if left.shape != right.shape:
+        raise AssertionError(
+            f"cannot measure a ULP gap between shapes {left.shape} and {right.shape}"
+        )
+    ordered = [
+        [
+            bits if bits >= 0 else -(1 << 63) - bits
+            for bits in (int(word) for word in block.view(np.int64))
+        ]
+        for block in (left, right)
+    ]
+    return max(
+        (abs(a - b) for a, b in zip(ordered[0], ordered[1], strict=True)),
+        default=0,
+    )
+
+
+def _assert_block_is_bitwise(block: str, actual: object, expected: object) -> None:
+    """Assert one float64 block is bit-for-bit its declared value."""
+
+    left = np.ascontiguousarray(actual, dtype=np.float64).reshape(-1)
+    right = np.ascontiguousarray(expected, dtype=np.float64).reshape(-1)
+    # ``array_equal`` alone would accept +0.0 against -0.0, and the byte
+    # comparison alone would accept nothing useful about shape, so the
+    # endpoint contract asserts both.
+    identical = left.shape == right.shape and bool(np.array_equal(left, right))
+    if identical:
+        identical = nested_ls_outer_parameter_bytes(
+            left
+        ) == nested_ls_outer_parameter_bytes(right)
+    gap = _float64_ulp_gap(left, right) if left.shape == right.shape else -1
+    drift = {
+        -1: f"a shape change, {left.shape} against {right.shape}",
+        0: "0 ULP -- a signed-zero flip that only the byte comparison sees",
+    }.get(gap, f"{gap} ULP")
+    assert identical, (
+        f"the {block} block drifted from the declared start state by {drift}: "
+        f"returned {left.tolist()!r}, declared {right.tolist()!r}"
+    )
+
+
+class _NoisedGradientObjective(_FakeObjective):
+    """Objective whose reported gradient is deliberately not its own gradient.
+
+    DESC's ``test_overstepping`` perturbs the reported derivative so the
+    optimizer proposes steps the true model would never take. The same
+    perturbation here guarantees the outer line search leaves the start point
+    on every trial instead of converging on it.
+    """
+
+    def __init__(self, boozer: _FakeBoozer, *, gradient_noise: np.ndarray) -> None:
+        super().__init__(boozer)
+        self._gradient_noise = np.array(gradient_noise, dtype=np.float64, copy=True)
+
+    def evaluate(self) -> tuple[float, dict[str, float], np.ndarray]:
+        value, terms, gradient = super().evaluate()
+        return value, terms, gradient + self._gradient_noise
+
+
+def test_outer_run_rejecting_every_step_returns_the_start_state_bitwise(monkeypatch):
+    """An all-rejected outer run returns exactly the bytes it started from.
+
+    The inner solve is crippled so that only the declared start point is ever
+    feasible, and the reported gradient is noised so scipy keeps proposing
+    steps. Every trial therefore lands on the rejection barrier, the
+    transaction restores the incumbent, and the run's endpoint -- coil DOFs,
+    surface DOFs, iota and G -- must be the start state bit for bit, not
+    merely close to it. This is the containment promise the whole
+    commit-on-accept design exists to make.
+
+    Falsification, run against a subclass whose ``_restore_anchor`` is a
+    no-op -- the pre-transaction behaviour: the immutable anchor record still
+    reads back correctly, but the live Boozer object is left holding the last
+    rejected trial (coil DOFs off the start point, surface ``-0.12490983...``
+    against the declared ``-0.125``), so the two live-state assertions below
+    fail. Those are the assertions that make this a containment test rather
+    than a test that a frozen dataclass stayed frozen.
+    """
+
+    start_coil_dofs = np.array([0.25, -0.5, 0.125], dtype=np.float64)
+    # The declared start state, derived here rather than read back out of the
+    # run: the crippled inner solve writes ``sum(coils)`` into the surface,
+    # and holds iota and G at the seed the run was warm started from.
+    declared_surface_dofs = np.array([float(np.sum(start_coil_dofs))])
+    declared_iota = 0.14
+    declared_g = 2.0
+    start_bytes = nested_ls_outer_parameter_bytes(start_coil_dofs)
+
+    boozer = _FakeBoozer(start_coil_dofs, np.array([99.0], dtype=np.float64))
+    objective = _NoisedGradientObjective(
+        boozer,
+        gradient_noise=np.array([0.75, 0.5, -1.5], dtype=np.float64),
+    )
+
+    def crippled_inner(fake_boozer, *, iota: float, G: float):
+        coil = np.asarray(fake_boozer.biotsavart.x, dtype=np.float64)
+        # A failed inner solve still leaves its partial state behind; only
+        # the transaction's restore puts the surface back.
+        fake_boozer.surface.set_dofs(np.array([float(np.sum(coil))]))
+        return {
+            "success": nested_ls_outer_parameter_bytes(coil) == start_bytes,
+            "bfgs_iter": 1,
+            "newton_iter": 1,
+            "bfgs_seconds": 0.0,
+            "newton_seconds": 0.0,
+            "seconds": 0.0,
+            "coil_delta_inf": 0.0,
+            "iota": iota,
+            "G": G,
+        }
+
+    monkeypatch.setattr(
+        native_child,
+        "_run_native_banana_bfgs_then_newton",
+        crippled_inner,
+    )
+    run = native_child.NativeOuterRun(
+        objective,  # type: ignore[arg-type]
+        seed=native_child.InnerWarmStart(
+            surface_dofs=np.array([99.0], dtype=np.float64),
+            iota=declared_iota,
+            G=declared_g,
+        ),
+        rejection_distance_scale=_SEALED_REJECTION_DISTANCE_SCALE,
+        start_coil_dofs=start_coil_dofs,
+    )
+
+    result = minimize(
+        run,
+        np.array(start_coil_dofs, copy=True),
+        jac=True,
+        method="L-BFGS-B",
+        callback=run.accept,
+        options={
+            "ftol": _SEALED_OUTER_FTOL,
+            "gtol": _SEALED_OUTER_GTOL,
+            "maxls": _SEALED_OUTER_MAXLS,
+            "maxiter": _B37_OUTER_BUDGET,
+            "maxcor": _SEALED_OUTER_MAXCOR,
+        },
+    )
+
+    assert run.records[0]["rejection_reason"] is None
+    assert len(run.feasible) == 1, (
+        "the crippled inner solve was supposed to accept the start point and "
+        f"nothing else; feasible evaluations: {len(run.feasible)}"
+    )
+    trial_reasons = [record["rejection_reason"] for record in run.records[1:]]
+    assert trial_reasons and set(trial_reasons) == {"inner_solve_failed"}, (
+        "this regression only means something when every trial after the "
+        f"start point rejected; observed reasons {trial_reasons!r}"
+    )
+
+    endpoint = run.endpoint_at(np.asarray(result.x, dtype=np.float64))
+    assert endpoint is not None, (
+        "the optimizer's final iterate is not the committed transaction "
+        f"point: result.x={np.asarray(result.x).tolist()!r} against committed "
+        f"{run.candidates.committed.coil_dofs.tolist()!r}"
+    )
+
+    _assert_block_is_bitwise("endpoint coil DOF", endpoint.coil_dofs, start_coil_dofs)
+    _assert_block_is_bitwise(
+        "endpoint surface DOF",
+        endpoint.warm_start.surface_dofs,
+        declared_surface_dofs,
+    )
+    _assert_block_is_bitwise("endpoint iota", endpoint.warm_start.iota, declared_iota)
+    _assert_block_is_bitwise("endpoint G", endpoint.warm_start.G, declared_g)
+    # Containment is a property of the live objects too, not only of the
+    # record the run hands back.
+    _assert_block_is_bitwise("live coil DOF", boozer.biotsavart.x, start_coil_dofs)
+    _assert_block_is_bitwise(
+        "live surface DOF",
+        boozer.surface.get_dofs(),
+        declared_surface_dofs,
+    )
+
+    assert not nested_ls_outer_endpoint_success(
+        endpoint_matches=True,
+        ftol=_SEALED_OUTER_FTOL,
+        status=int(result.status),
+        message=str(result.message),
+    ), (
+        "an outer run that never left its start point must not be published "
+        f"as a successful endpoint; scipy stopped with {result.status}/"
+        f"{str(result.message)!r}"
+    )
+
+
+# The exact strings scipy 1.17.1 composes for L-BFGS-B, read out of the
+# installed interpreter's own source. ``result.message`` is
+# ``status_messages[task[0]] + ": " + task_messages[task[1]]``
+# (.venv-qn-cpu/lib/python3.11/site-packages/scipy/optimize/_lbfgsb_py.py:505)
+# over the two tables at _lbfgsb_py.py:51-62 and _lbfgsb_py.py:64-92;
+# ``result.status`` is the warnflag derived at _lbfgsb_py.py:487-493, so the
+# only codes L-BFGS-B itself can return are 0, 1 and 2. ``minimize`` then
+# overwrites status and message with 99 / "`callback` raised `StopIteration`."
+# at _minimize.py:823-826, which is a fourth code the classifiers must judge.
+# Every literal below is reproduced from a live run by
+# ``test_stop_table_quotes_only_the_stops_scipy_actually_emits``.
+_MSG_PGTOL: Final[str] = "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL"
+_MSG_MAXITER: Final[str] = "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT"
+_MSG_MAXFUN: Final[str] = "STOP: TOTAL NO. OF F,G EVALUATIONS EXCEEDS LIMIT"
+# task_messages[0] is the empty string, so the abnormal stop carries no
+# detail at all -- the trailing space is scipy's, not a typo.
+_MSG_ABNORMAL: Final[str] = "ABNORMAL: "
+# Composed by _lbfgsb_py.py but unreachable through ``minimize``, which
+# rewrites it to the status-99 pair; ``fmin_l_bfgs_b`` still returns it.
+_MSG_CALLBACK_HALT: Final[str] = "STOP: CALLBACK REQUESTED HALT"
+_MSG_STOP_ITERATION: Final[str] = "`callback` raised `StopIteration`."
+
+_POSITIVE_FTOL: Final[float] = 1.0e-12
+
+
+@dataclass(frozen=True, slots=True)
+class _StopCase:
+    """One cell of the lane-agnostic stop decision table."""
+
+    label: str
+    ftol: float
+    status: int
+    message: str
+    endpoint_matches: bool
+    restart_reason: str | None
+    endpoint_success: bool
+
+
+# The decision table both outer children share. Written out cell by cell on
+# purpose: a generator that derived these from the same predicates the
+# classifiers use would agree with any drift instead of catching it.
+_LBFGSB_STOP_CASES: Final[tuple[_StopCase, ...]] = (
+    # scipy status 0, projected-gradient convergence. Never an FTOL stop, so
+    # the sealed ftol=0 policy has nothing to object to.
+    _StopCase("pgtol|ftol=0|matched", 0.0, 0, _MSG_PGTOL, True, None, True),
+    _StopCase("pgtol|ftol=0|unmatched", 0.0, 0, _MSG_PGTOL, False, None, False),
+    _StopCase("pgtol|ftol>0|matched", _POSITIVE_FTOL, 0, _MSG_PGTOL, True, None, True),
+    _StopCase(
+        "pgtol|ftol>0|unmatched", _POSITIVE_FTOL, 0, _MSG_PGTOL, False, None, False
+    ),
+    # scipy status 0, relative-reduction convergence. Under ftol=0 this stop
+    # is impossible by construction, so seeing it is a false stall to restart
+    # from and never a publishable endpoint. Under a positive ftol it is an
+    # ordinary convergence.
+    _StopCase(
+        "factr|ftol=0|matched",
+        0.0,
+        0,
+        NESTED_LS_OUTER_FTOL_STALL_MESSAGE,
+        True,
+        "false_ftol_stall",
+        False,
+    ),
+    _StopCase(
+        "factr|ftol=0|unmatched",
+        0.0,
+        0,
+        NESTED_LS_OUTER_FTOL_STALL_MESSAGE,
+        False,
+        "false_ftol_stall",
+        False,
+    ),
+    _StopCase(
+        "factr|ftol>0|matched",
+        _POSITIVE_FTOL,
+        0,
+        NESTED_LS_OUTER_FTOL_STALL_MESSAGE,
+        True,
+        None,
+        True,
+    ),
+    _StopCase(
+        "factr|ftol>0|unmatched",
+        _POSITIVE_FTOL,
+        0,
+        NESTED_LS_OUTER_FTOL_STALL_MESSAGE,
+        False,
+        None,
+        False,
+    ),
+    # scipy status 1, budget exhausted. This is the expected stop of a
+    # fixed-budget rung: terminal, and a usable endpoint whenever the
+    # optimizer's final iterate is the committed transaction point.
+    _StopCase("maxiter|ftol=0|matched", 0.0, 1, _MSG_MAXITER, True, None, True),
+    _StopCase("maxiter|ftol=0|unmatched", 0.0, 1, _MSG_MAXITER, False, None, False),
+    _StopCase(
+        "maxiter|ftol>0|matched", _POSITIVE_FTOL, 1, _MSG_MAXITER, True, None, True
+    ),
+    _StopCase(
+        "maxiter|ftol>0|unmatched", _POSITIVE_FTOL, 1, _MSG_MAXITER, False, None, False
+    ),
+    _StopCase("maxfun|ftol=0|matched", 0.0, 1, _MSG_MAXFUN, True, None, True),
+    _StopCase("maxfun|ftol=0|unmatched", 0.0, 1, _MSG_MAXFUN, False, None, False),
+    _StopCase(
+        "maxfun|ftol>0|matched", _POSITIVE_FTOL, 1, _MSG_MAXFUN, True, None, True
+    ),
+    _StopCase(
+        "maxfun|ftol>0|unmatched", _POSITIVE_FTOL, 1, _MSG_MAXFUN, False, None, False
+    ),
+    # scipy status 2 with the ABNORMAL message: the line search gave up.
+    # Restartable from the committed incumbent, never a usable endpoint.
+    _StopCase(
+        "abnormal|ftol=0|matched",
+        0.0,
+        2,
+        _MSG_ABNORMAL,
+        True,
+        "abnormal_line_search",
+        False,
+    ),
+    _StopCase(
+        "abnormal|ftol=0|unmatched",
+        0.0,
+        2,
+        _MSG_ABNORMAL,
+        False,
+        "abnormal_line_search",
+        False,
+    ),
+    _StopCase(
+        "abnormal|ftol>0|matched",
+        _POSITIVE_FTOL,
+        2,
+        _MSG_ABNORMAL,
+        True,
+        "abnormal_line_search",
+        False,
+    ),
+    _StopCase(
+        "abnormal|ftol>0|unmatched",
+        _POSITIVE_FTOL,
+        2,
+        _MSG_ABNORMAL,
+        False,
+        "abnormal_line_search",
+        False,
+    ),
+    # scipy status 2 WITHOUT the ABNORMAL message: a halting callback. The
+    # endpoint judge refuses it on the status alone, but restarting would
+    # just re-run whatever asked to stop, so it is terminal.
+    _StopCase(
+        "callback_halt|ftol=0|matched", 0.0, 2, _MSG_CALLBACK_HALT, True, None, False
+    ),
+    _StopCase(
+        "callback_halt|ftol=0|unmatched", 0.0, 2, _MSG_CALLBACK_HALT, False, None, False
+    ),
+    _StopCase(
+        "callback_halt|ftol>0|matched",
+        _POSITIVE_FTOL,
+        2,
+        _MSG_CALLBACK_HALT,
+        True,
+        None,
+        False,
+    ),
+    _StopCase(
+        "callback_halt|ftol>0|unmatched",
+        _POSITIVE_FTOL,
+        2,
+        _MSG_CALLBACK_HALT,
+        False,
+        None,
+        False,
+    ),
+    # scipy status 99: ``minimize``'s StopIteration rewrite. A callback that
+    # raised did not let the optimizer finish, so the endpoint judge refuses
+    # it on the status alone -- 99 is outside
+    # ``NESTED_LS_OUTER_PUBLISHABLE_STOP_STATUSES``. Restarting would just
+    # re-run whatever asked to stop, so it is terminal. Pinned here because
+    # the lanes' callback is the transaction's own ``accept``, and the
+    # upgrade plan intends to raise ``StopIteration`` from it.
+    _StopCase(
+        "stop_iteration|ftol=0|matched", 0.0, 99, _MSG_STOP_ITERATION, True, None, False
+    ),
+    _StopCase(
+        "stop_iteration|ftol=0|unmatched",
+        0.0,
+        99,
+        _MSG_STOP_ITERATION,
+        False,
+        None,
+        False,
+    ),
+    _StopCase(
+        "stop_iteration|ftol>0|matched",
+        _POSITIVE_FTOL,
+        99,
+        _MSG_STOP_ITERATION,
+        True,
+        None,
+        False,
+    ),
+    _StopCase(
+        "stop_iteration|ftol>0|unmatched",
+        _POSITIVE_FTOL,
+        99,
+        _MSG_STOP_ITERATION,
+        False,
+        None,
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    "case",
+    _LBFGSB_STOP_CASES,
+    ids=[case.label for case in _LBFGSB_STOP_CASES],
+)
+def test_restart_reason_classifies_every_real_lbfgsb_stop(case: _StopCase):
+    """``nested_ls_outer_restart_reason`` returns the table's verdict.
+
+    Both outer children route their restart decision through this one pure
+    function, so any drift here forks the lanes silently: one lane would burn
+    budget restarting a stop the other treats as terminal, and the two
+    endpoints would stop being comparable. The table is exhaustive over the
+    ``(status, message)`` pairs scipy 1.17.1 can produce crossed with both
+    FTOL regimes, including the cells that must return ``None``.
+
+    This pins current behaviour rather than changing it; it fails against any
+    edit that widens the abnormal predicate past ``ABNORMAL``-prefixed
+    status-2 stops (the callback-halt cells) or that lets a positive FTOL
+    still report a false stall (the ``factr|ftol>0`` cells).
+    """
+
+    assert (
+        nested_ls_outer_restart_reason(
+            ftol=case.ftol,
+            status=case.status,
+            message=case.message,
+        )
+        == case.restart_reason
+    ), (
+        f"stop {case.label} (status={case.status}, message={case.message!r}, "
+        f"ftol={case.ftol!r}) must classify as {case.restart_reason!r}"
+    )
+
+
+def test_endpoint_judge_refuses_a_stop_status_it_has_never_seen():
+    """An unrecognised scipy stop code is unpublishable, not publishable.
+
+    The stop table above pins the codes scipy 1.17.1 emits today. The point of
+    this test is the codes it does not: the judge admits from
+    ``NESTED_LS_OUTER_PUBLISHABLE_STOP_STATUSES`` rather than excluding the
+    codes we happened to think of, so a scipy upgrade that introduces a new
+    terminal status cannot make a truncated run's endpoint publishable by
+    default. That is the failure the predecessor had — it excluded status 2 by
+    name and so silently admitted status 99 when ``minimize`` grew its
+    ``StopIteration`` rewrite.
+
+    Fails against any edit that turns the allow-list back into a deny-list.
+    """
+
+    unseen = sorted(
+        {case.status for case in _LBFGSB_STOP_CASES}
+        | NESTED_LS_OUTER_PUBLISHABLE_STOP_STATUSES
+    )
+    novel = max(unseen) + 1
+    assert novel not in NESTED_LS_OUTER_PUBLISHABLE_STOP_STATUSES
+
+    assert (
+        nested_ls_outer_endpoint_success(
+            endpoint_matches=True,
+            ftol=0.0,
+            status=novel,
+            message="STOP: A REASON THIS CONTRACT HAS NEVER SEEN",
+        )
+        is False
+    ), (
+        f"an endpoint stopped on unrecognised scipy status {novel} was judged "
+        "publishable; the judge must admit only "
+        f"{sorted(NESTED_LS_OUTER_PUBLISHABLE_STOP_STATUSES)} and refuse "
+        "everything else, so that a new scipy status fails closed"
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    _LBFGSB_STOP_CASES,
+    ids=[case.label for case in _LBFGSB_STOP_CASES],
+)
+def test_endpoint_success_classifies_every_real_lbfgsb_stop(case: _StopCase):
+    """``nested_ls_outer_endpoint_success`` returns the table's verdict.
+
+    This is the flag the claim parent reads to decide whether a child's
+    endpoint may be published at all, so a drift here would let one lane
+    publish an endpoint the other refuses. The table is exhaustive over the
+    real scipy stops crossed with both FTOL regimes and both values of
+    ``endpoint_matches``, including the cells that must return ``True``.
+
+    It pins current behaviour; it fails against any edit that publishes an
+    endpoint whose bytes are not the optimizer's final iterate (every
+    ``unmatched`` cell), that publishes a status-2 or status-99 stop, or that
+    publishes an FTOL stall the sealed ``ftol=0`` policy made impossible. The
+    four ``stop_iteration`` cells are the falsification of the predecessor
+    implementation, which excluded status 2 by name (``int(status) != 2``)
+    and therefore published a callback-halted run's endpoint as a good one.
+    """
+
+    assert (
+        nested_ls_outer_endpoint_success(
+            endpoint_matches=case.endpoint_matches,
+            ftol=case.ftol,
+            status=case.status,
+            message=case.message,
+        )
+        is case.endpoint_success
+    ), (
+        f"stop {case.label} (status={case.status}, message={case.message!r}, "
+        f"ftol={case.ftol!r}, endpoint_matches={case.endpoint_matches}) must "
+        f"judge as endpoint_success={case.endpoint_success}"
+    )
+
+
+def _quadratic(point: np.ndarray) -> tuple[float, np.ndarray]:
+    values = np.asarray(point, dtype=np.float64)
+    return float(values @ values), 2.0 * values
+
+
+def _rosenbrock(point: np.ndarray) -> tuple[float, np.ndarray]:
+    values = np.asarray(point, dtype=np.float64)
+    residual = values[1] - values[0] ** 2
+    return (
+        float(100.0 * residual**2 + (1.0 - values[0]) ** 2),
+        np.array(
+            [
+                -400.0 * values[0] * residual - 2.0 * (1.0 - values[0]),
+                200.0 * residual,
+            ],
+            dtype=np.float64,
+        ),
+    )
+
+
+def _halt_on_second_iteration():
+    seen = 0
+
+    def callback(intermediate_result):
+        nonlocal seen
+        seen += 1
+        if seen >= 2:
+            raise StopIteration
+
+    return callback
+
+
+def test_stop_table_quotes_only_the_stops_scipy_actually_emits():
+    """Every table row's stop is one scipy 1.17.1 really produces.
+
+    A decision table over invented message strings classifies nothing. This
+    drives the installed scipy six ways -- projected-gradient convergence,
+    relative-reduction convergence, the iteration and evaluation budgets, the
+    fully-rejected line search, and a halting callback on both entry points
+    -- and requires the produced ``(status, message)`` pairs and the table's
+    pairs to be the same set.
+
+    It fails today against the previously hand-written literal
+    ``"ABNORMAL: LINE SEARCH FAILED"``: scipy composes ``"ABNORMAL: "`` with
+    an empty task message, so that string is never emitted.
+    """
+
+    _halted_x, _halted_f, halted_info = fmin_l_bfgs_b(
+        _rosenbrock,
+        np.array([-1.2, 1.0]),
+        factr=0.0,
+        pgtol=0.0,
+        callback=_halt_on_second_iteration(),
+    )
+    rejected = _drive_fully_rejecting_line_search(
+        anchor_value=12.5,
+        gradient_scale=1.0e-2,
+        dimension=8,
+        seed=3,
+    )
+    produced = {
+        (rejected.status, rejected.message),
+        (int(halted_info["warnflag"]), str(halted_info["task"])),
+    }
+    for label, result in (
+        (
+            "pgtol",
+            minimize(_quadratic, np.array([1.0, 2.0]), jac=True, method="L-BFGS-B"),
+        ),
+        (
+            "factr",
+            minimize(
+                _rosenbrock,
+                np.array([-1.2, 1.0]),
+                jac=True,
+                method="L-BFGS-B",
+                options={"ftol": 1.0e-1, "gtol": 0.0},
+            ),
+        ),
+        (
+            "maxiter",
+            minimize(
+                _quadratic,
+                np.array([1.0e6, 2.0e6]),
+                jac=True,
+                method="L-BFGS-B",
+                options={"maxiter": 1, "gtol": 0.0, "ftol": 0.0},
+            ),
+        ),
+        (
+            "maxfun",
+            minimize(
+                _quadratic,
+                np.array([1.0e6, 2.0e6]),
+                jac=True,
+                method="L-BFGS-B",
+                options={"maxfun": 2, "gtol": 0.0, "ftol": 0.0},
+            ),
+        ),
+        (
+            "stop_iteration",
+            minimize(
+                _rosenbrock,
+                np.array([-1.2, 1.0]),
+                jac=True,
+                method="L-BFGS-B",
+                callback=_halt_on_second_iteration(),
+                options={"ftol": 0.0, "gtol": 0.0},
+            ),
+        ),
+    ):
+        assert result is not None, label
+        produced.add((int(result.status), str(result.message)))
+
+    tabled = {(case.status, case.message) for case in _LBFGSB_STOP_CASES}
+    assert produced == tabled, (
+        "the stop decision table has drifted from what scipy emits. Produced "
+        f"but not tabled: {sorted(produced - tabled)!r}; tabled but never "
+        f"produced: {sorted(tabled - produced)!r}"
+    )

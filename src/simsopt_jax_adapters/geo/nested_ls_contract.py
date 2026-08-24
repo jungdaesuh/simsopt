@@ -338,6 +338,18 @@ def nested_ls_outer_ftol_zero_stop(*, ftol: float, message: str) -> bool:
     return float(ftol) == 0.0 and "RELATIVE REDUCTION OF F" in str(message).upper()
 
 
+#: The only scipy L-BFGS-B stop codes whose endpoint is a completed
+#: optimization: 0 (a convergence test fired) and 1 (a declared budget ran
+#: out). Everything else means the run was cut short — 2 is an abandoned line
+#: search or a halting callback, and 99 is ``minimize``'s rewrite of a
+#: ``StopIteration`` raised from the callback
+#: (``scipy/optimize/_minimize.py:823-826``, scipy 1.17.1). Membership is an
+#: allow-list on purpose: a status this contract has never seen must fail
+#: closed, not inherit "publishable" by not being the one code we thought to
+#: exclude.
+NESTED_LS_OUTER_PUBLISHABLE_STOP_STATUSES: Final[frozenset[int]] = frozenset({0, 1})
+
+
 def nested_ls_outer_endpoint_success(
     *,
     endpoint_matches: bool,
@@ -345,11 +357,18 @@ def nested_ls_outer_endpoint_success(
     status: int,
     message: str,
 ) -> bool:
-    """Judge a child endpoint under the shared transaction and stop contract."""
+    """Judge a child endpoint under the shared transaction and stop contract.
+
+    Three independent conditions, all required. The optimizer's final iterate
+    must be the committed transaction point (``endpoint_matches``); the stop
+    code must be one the run could legitimately end on
+    (:data:`NESTED_LS_OUTER_PUBLISHABLE_STOP_STATUSES`); and the stop must not
+    be the FTOL fiction that ``ftol=0`` makes impossible by construction.
+    """
 
     return (
         bool(endpoint_matches)
-        and int(status) != 2
+        and int(status) in NESTED_LS_OUTER_PUBLISHABLE_STOP_STATUSES
         and not nested_ls_outer_ftol_zero_stop(
             ftol=ftol,
             message=message,
@@ -422,6 +441,7 @@ __all__ = [
     "NESTED_LS_OUTER_FTOL_STALL_MESSAGE",
     "NESTED_LS_OUTER_MAX_RESTARTS",
     "NESTED_LS_OUTER_OMP_SWEEP_REPEATS",
+    "NESTED_LS_OUTER_PUBLISHABLE_STOP_STATUSES",
     "NESTED_LS_PHYSICS_BAR",
     "NESTED_LS_REDUCTION_MODE",
     "NESTED_LS_TIMING_BAR",
