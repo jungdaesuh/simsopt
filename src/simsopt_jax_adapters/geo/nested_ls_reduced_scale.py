@@ -4981,9 +4981,14 @@ def _predicted_inner_start(
     coil_step = np.asarray(trial_coil_dofs, dtype=np.float64).reshape(-1) - np.asarray(
         anchor.coil_dofs, dtype=np.float64
     )
-    residual_rt, objective_rt, _phi_rt = nested_ls_runtime_coil_closures(
-        state.jax_boozer
-    )
+    jax_boozer = state.jax_boozer
+    # The mixed term is evaluated with the ANCHOR point installed, because
+    # ``source.operator`` was factored there and the two must describe the
+    # same linearization.
+    jax_boozer.surface.set_dofs(_writable_copy(bare))
+    jax_boozer.biotsavart.x = np.array(anchor.coil_dofs, dtype=np.float64, copy=True)
+    jax_boozer._refresh_coil_data()
+    residual_rt, objective_rt, _phi_rt = nested_ls_runtime_coil_closures(jax_boozer)
     del _phi_rt
     mixed = apply_reduced_mixed_schur_coil_tangent(
         residual_rt,
@@ -5008,15 +5013,27 @@ def _predicted_inner_start(
     )
     predicted = np.asarray(bare, dtype=np.float64) + applied
 
-    # The fallback test, at the TRIAL coils: a predicted start is only
-    # better if the envelope gradient there says so. The runtime-coil
-    # closures above already carry the trial coils, so both evaluations
-    # measure the same problem.
+    # The fallback test, at the TRIAL coils.
+    #
+    # These are FROZEN-coil closures, and the distinction is not stylistic:
+    # ``nested_ls_reduced_closures`` captures the coil DOFs as host constants
+    # at construction, so its residual takes only the packed decision, while
+    # ``nested_ls_runtime_coil_closures`` above takes ``(packed, coil_dofs)``
+    # and is the right family for the mixed term alone. Handing the runtime
+    # pair to ``_envelope_value_and_grad`` is a TypeError, which is how the
+    # first draft of this function announced itself on its first real run.
+    # The coils must be installed BEFORE the closures are built, and both
+    # candidate starts must be measured against the SAME closures.
+    jax_boozer.surface.set_dofs(_writable_copy(bare))
+    jax_boozer.biotsavart.x = np.array(trial_coil_dofs, dtype=np.float64, copy=True)
+    jax_boozer._refresh_coil_data()
+    residual_fn, objective_fn, _phi_fn = nested_ls_reduced_closures(jax_boozer)
+    del _phi_fn
     _bare_value, bare_grad, _bare_y = _envelope_value_and_grad(
-        residual_rt, objective_rt, bare
+        residual_fn, objective_fn, bare
     )
     _pred_value, pred_grad, _pred_y = _envelope_value_and_grad(
-        residual_rt, objective_rt, predicted
+        residual_fn, objective_fn, predicted
     )
     arm = nested_ls_predictor_arm(
         bare_gradient_l2=float(np.linalg.norm(bare_grad)),
