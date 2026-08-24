@@ -1747,9 +1747,9 @@ class TestGPMOArbVecBacktracking:
            equality, not bitwise), C++ oracle compared;
         3. a pair one ULP away from antiparallel is KEPT — its rounded dot,
            -(1 + 2**-52), is <= -1.0, so the pre-repair FP predicate removed
-           it on every build; no C++ oracle comparison until the shipped
-           prebuilt kernel is rebuilt from the repaired source (native-lane
-           proof: docs/receipts/evidence/pm4stell64_*_predicate_20260824.*);
+           it on every build; C++ oracle compared since 2026-08-24, when the
+           shipped prebuilt kernel was rebuilt from the repaired source
+           (re-cert: docs/receipts/evidence/pm4stell64_*_predicate_20260824.*);
         4. a general threshold (0.9 pi) keeps the FP-dot path: the exact pair
            is still removed there, C++ oracle compared.
         """
@@ -1813,8 +1813,9 @@ class TestGPMOArbVecBacktracking:
 
         # One ULP off antiparallel: kept under the exact predicate, removed
         # by the pre-repair FP predicate (dot = -(1 + 2**-52) <= -1.0).
-        jax_placed, _ = _endpoints([-(1.0 + 2.0**-52), 0.0, 0.0], pi)
+        jax_placed, cpp_placed = _endpoints([-(1.0 + 2.0**-52), 0.0, 0.0], pi)
         assert jax_placed == 2
+        assert cpp_placed == 2
 
         jax_placed, cpp_placed = _endpoints([-1.0, 0.0, 0.0], 0.9 * pi)
         assert jax_placed == 0

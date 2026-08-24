@@ -335,12 +335,18 @@ the FP test is equality-grade and the exact predicate is the correct semantics. 
 predicate is precisely the moment-cancellation test (``m_j == -m_c``), which for
 the unit polarization vectors every in-repo builder produces coincides with antiparallelism —
 for hypothetical non-unit ``pol_vectors`` the old dot-threshold was already angle-incorrect in
-both directions, so no valid behavior is lost. Disclosures: (i) the shipped prebuilt ``build/cp311-cp311-linux_x86_64`` binary is NOT
-rebuilt by this repair — committed C++ source now leads it; the full suite (item25 66, item28
-51, mirror-parity muse/pm4stell, pm_optimization, pm_workflow_jax — all green 2026-08-24)
-remains valid against the old binary because no committed test constructs a reachable near-tie,
-and the one new assertion that forks (the one-ULP-off case) is deliberately JAX-only until a
-rebuild ships. The committed re-cert receipts pin the leg-time sources in their
+both directions, so no valid behavior is lost. Disclosures: (i) RESOLVED same day, on operator instruction: the shipped prebuilt
+``build/cp311-cp311-linux_x86_64`` binary (and both venv site-packages copies, re-hardlinked)
+was rebuilt from the repaired committed source and installed 2026-08-24 — sha ``41b2ca79…`` →
+``95190afa…``, byte-reproducible from HEAD (the rebuild reproduced the re-cert leg's binary
+bit-for-bit). The pre-swap kernel is preserved byte-exact as
+``build/cp311-cp311-linux_x86_64/simsoptpp.so.pre-predicate-41b2ca79.bak``. The one-ULP-off
+regression assertion is now full C++-oracle parity (it was JAX-only while the old binary
+shipped), and the full suite re-ran green against the installed kernel (item25 66, item28 51,
+pm_optimization, pm_workflow_jax, mirror-parity muse/pm4stell, and the force/strain/curve
+native-oracle suites). Install-time boundary disclosed: concurrent nested-LS legs running at
+swap time keep the old inode (replacement by rename); their session was notified with the
+pin-back recipe, and any leg's loaded binary is self-recorded in its artifact identity. The committed re-cert receipts pin the leg-time sources in their
 ``identity.git.changed_file_sha256`` blocks; the post-leg C++ delta is a comment trim only,
 and this is sha-proven, not asserted — replacing the committed 5-line comment inside the
 ``if (cos_thresh_angle == -1.0)`` body with the pre-trim block below reproduces the leg-time
