@@ -30,12 +30,15 @@ from benchmarks.nested_ls_outer_claim import (
 import scipy
 from scipy.optimize import fmin_l_bfgs_b, minimize
 from simsopt_jax_adapters.geo.nested_ls_contract import (
+    NESTED_LS_JAX_INNER_STAB,
     NESTED_LS_OUTER_FTOL_STALL_MESSAGE,
     NESTED_LS_OUTER_JAX_CHILD_SCHEMA,
     NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA,
     NESTED_LS_OUTER_PUBLISHABLE_STOP_STATUSES,
     NESTED_LS_OUTER_REJUDGE_SCHEMA,
     NestedLsOuterCandidateStore,
+    nested_ls_jax_inner_policy,
+    nested_ls_native_inner_policy,
     nested_ls_outer_endpoint_success,
     nested_ls_outer_ftol_zero_stop,
     nested_ls_outer_parameter_bytes,
@@ -126,13 +129,16 @@ def test_outer_entrypoint_bootstraps_this_worktree_before_local_imports(
     assert all(path.is_relative_to(repo / "src") for path in source_paths)
 
 
-def test_transaction_schema_refuses_historical_b3_as_a_b37_parent():
-    assert CLAIM_SCHEMA == "nested-ls-outer-claim.v2"
-    historical_b3 = (
-        Path(__file__).resolve().parents[2]
-        / "docs/receipts/evidence/nested_ls_outer_b3_20260823.json"
+def test_transaction_schema_refuses_historical_b3_as_a_b37_parent(
+    tmp_path: Path,
+):
+    assert CLAIM_SCHEMA == "nested-ls-outer-claim.v3"
+    historical_b3 = tmp_path / "historical-b3-v2.json"
+    historical_b3.write_text(
+        json.dumps({"schema": "nested-ls-outer-claim.v2"}),
+        encoding="utf-8",
     )
-    with pytest.raises(SystemExit, match="expected 'nested-ls-outer-claim.v2'"):
+    with pytest.raises(SystemExit, match="expected 'nested-ls-outer-claim.v3'"):
         _require_b3_green(
             b3_receipt=historical_b3,
             omp_num_threads=14,
@@ -307,6 +313,7 @@ def _claim_pair(repeat: int) -> dict[str, object]:
         "restart_count": 0,
         "endpoint_is_optimizer_x": True,
         "outer_policy": policy,
+        "inner_policy": nested_ls_native_inner_policy(),
         "start": {"coil_dofs": [0.0]},
         "endpoint": {
             "objective": 1.0,
@@ -358,6 +365,11 @@ def _claim_pair(repeat: int) -> dict[str, object]:
         "restart_count": 0,
         "endpoint_is_optimizer_x": True,
         "outer_policy": policy,
+        "inner_policy": nested_ls_jax_inner_policy(
+            ift_stab=NESTED_LS_JAX_INNER_STAB,
+            inner_substep_legs=(1,),
+            inner_predictor=False,
+        ),
         "start_policy": "symmetric",
         "iota_branch_guard": 0.02,
         "feasible_evaluations": 4,

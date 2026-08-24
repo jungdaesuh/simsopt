@@ -16,18 +16,13 @@ from __future__ import annotations
 import dataclasses
 import inspect
 import math
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from simsopt_jax_adapters.geo.nested_ls_contract import (
-    NESTED_LS_COARSE_AMPLIFICATION_GRADIENT,
-    NESTED_LS_COARSE_AMPLIFICATION_VALUE,
-    NESTED_LS_COARSE_USE_COMMITTED_ANCHOR,
-    NESTED_LS_COARSE_USE_LINE_SEARCH_VALUE,
-    NESTED_LS_COARSE_USE_OUTER_GRADIENT,
-    NESTED_LS_COARSE_USES,
-    NESTED_LS_INNER_POLICY_NAME,
     NESTED_LS_INNER_SUBSTEP_LEGS,
+    NESTED_LS_JAX_INNER_POLICY_NAME,
     NESTED_LS_NEWTON_COARSE_TOL,
     NESTED_LS_NEWTON_MAXITER,
     NESTED_LS_NEWTON_EXIT_COARSE_CONVERGED,
@@ -35,16 +30,12 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_NEWTON_EXIT_FAILED,
     NESTED_LS_NEWTON_EXIT_STATUSES,
     NESTED_LS_NEWTON_TOL,
-    NESTED_LS_OUTER_FD0_REL_TOL,
-    NESTED_LS_OUTER_IOTA_BRANCH_GUARD,
     NESTED_LS_OUTER_JAX_CHILD_SCHEMA,
     NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA,
     NESTED_LS_PREDICTOR_ARM_BARE,
     NESTED_LS_PREDICTOR_ARM_PREDICTED,
     NESTED_LS_PREDICTOR_TRUST_REGION_RATIO,
-    nested_ls_coarse_tier_admits,
-    nested_ls_coarse_tier_error_bound,
-    nested_ls_inner_policy,
+    nested_ls_jax_inner_policy,
     nested_ls_inner_substep_points,
     nested_ls_predictor_arm,
     nested_ls_predictor_trust_region,
@@ -115,8 +106,8 @@ def test_the_measured_b37_late_rejections_are_not_rescued_by_the_coarse_tier() -
 
     This is the honest, load-bearing negative. All three late rejections
     sit at least five orders of magnitude above
-    ``NESTED_LS_NEWTON_COARSE_TOL``, so licensing a coarse tier in Phase 4
-    cannot turn any of them into a usable result -- and two of the three
+    ``NESTED_LS_NEWTON_COARSE_TOL``, so the diagnostic threshold cannot turn
+    any of them into a usable result -- and two of the three
     exhausted the inner budget, which no exit-status refinement addresses
     either. If someone later widens the coarse band far enough to swallow
     them, this test fails and forces that decision into the open.
@@ -410,140 +401,164 @@ def test_the_sealed_ladder_starts_undivided_and_only_refines() -> None:
 
 
 # --------------------------------------------------------------------------
-# Licensed coarse tier and its red test (Phase 4)
+# Diagnostic coarse exit, with no admission contract (Phase 4)
 # --------------------------------------------------------------------------
 
 
-def test_a_committed_anchor_is_never_admitted_at_a_coarse_residual() -> None:
-    """The red test: coarse bytes must not become a warm start.
-
-    An anchor is the point every later evaluation inherits and the point
-    FD-0 differences about, so error there is propagated rather than
-    attenuated. This is the assertion that fails if someone widens the
-    anchor tier to reuse a cheap solve.
-    """
-
-    assert nested_ls_coarse_tier_admits(
-        achieved_residual_l2=NESTED_LS_NEWTON_TOL,
-        use=NESTED_LS_COARSE_USE_COMMITTED_ANCHOR,
-    )
-    for residual in (
-        np.nextafter(NESTED_LS_NEWTON_TOL, math.inf),
-        NESTED_LS_NEWTON_COARSE_TOL,
-        1.0e-3,
-    ):
-        assert not nested_ls_coarse_tier_admits(
-            achieved_residual_l2=float(residual),
-            use=NESTED_LS_COARSE_USE_COMMITTED_ANCHOR,
-        ), f"a coarse residual {residual!r} was admitted as a committed anchor"
-
-
-def test_a_coarse_result_outside_the_budget_is_refused_for_the_adjoint() -> None:
-    """The red test the plan asks for, stated at the tier boundary."""
-
-    assert nested_ls_coarse_tier_admits(
-        achieved_residual_l2=NESTED_LS_NEWTON_COARSE_TOL,
-        use=NESTED_LS_COARSE_USE_OUTER_GRADIENT,
-    )
-    assert not nested_ls_coarse_tier_admits(
-        achieved_residual_l2=float(np.nextafter(NESTED_LS_NEWTON_COARSE_TOL, math.inf)),
-        use=NESTED_LS_COARSE_USE_OUTER_GRADIENT,
-    )
-
-
-def test_production_cannot_reach_the_adjoint_with_a_coarse_result_today() -> None:
-    """The tier is a licence nothing has claimed yet, and that is the point.
-
-    ``success`` stays true only for ``converged``, and the outer objective
-    raises on a non-successful inner solve BEFORE assembling any adjoint
-    (``_nested_ls_outer_objective`` calls ``_solve_nested_inner_at_coils``
-    first). So a coarse-converged result is already fail-closed against the
-    adjoint without any consumer honouring the tier. This test pins that
-    interlock, so licensing the tier later is a deliberate act rather than
-    something that happens by a status becoming readable.
-    """
-
-    coarse = nested_ls_newton_exit_status(
+def test_the_coarse_threshold_classifies_but_never_reports_success() -> None:
+    status = nested_ls_newton_exit_status(
         persisted=True,
         finite_iterate=True,
         reduced_gradient_l2=NESTED_LS_NEWTON_COARSE_TOL,
         tol=NESTED_LS_NEWTON_TOL,
     )
-    assert coarse == NESTED_LS_NEWTON_EXIT_COARSE_CONVERGED
-    assert coarse != NESTED_LS_NEWTON_EXIT_CONVERGED
+    assert status == NESTED_LS_NEWTON_EXIT_COARSE_CONVERGED
+    assert status != NESTED_LS_NEWTON_EXIT_CONVERGED
 
 
-def test_the_value_tier_is_not_looser_than_the_gradient_tier() -> None:
-    """The measured inversion, pinned so a future edit cannot undo it quietly.
+def test_no_affirmative_coarse_admission_api_is_exported() -> None:
+    from simsopt_jax_adapters.geo import nested_ls_contract
 
-    The plan ordered its tiers with line-search values as the loosest. The
-    measurement says the objective's relative error is ~3.8x the gradient's
-    at the same achieved residual, so the value is the BINDING constraint.
-    If someone later re-separates the tiers with the value looser, this
-    fails.
-    """
+    assert "nested_ls_coarse_tier_admits" not in nested_ls_contract.__all__
+    assert "nested_ls_coarse_tier_error_bound" not in nested_ls_contract.__all__
 
-    assert (
-        NESTED_LS_COARSE_AMPLIFICATION_VALUE > NESTED_LS_COARSE_AMPLIFICATION_GRADIENT
+
+def test_production_refuses_a_coarse_inner_exit_before_objective_assembly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from simsopt_jax_adapters.geo import nested_ls_reduced_scale as reduced_scale
+
+    state = _outer_state()
+    solution = SimpleNamespace(surface_dofs=np.array([4.0, 5.0, 6.0]))
+    rejection = reduced_scale.NestedLsInnerSolveFailed(
+        iteration_count=NESTED_LS_NEWTON_MAXITER,
+        maxiter=NESTED_LS_NEWTON_MAXITER,
+        grad_l2=NESTED_LS_NEWTON_COARSE_TOL,
+        tol=NESTED_LS_NEWTON_TOL,
     )
-    for residual in (1.0e-13, 1.0e-10, NESTED_LS_NEWTON_COARSE_TOL):
-        value_admitted = nested_ls_coarse_tier_admits(
-            achieved_residual_l2=residual,
-            use=NESTED_LS_COARSE_USE_LINE_SEARCH_VALUE,
+    monkeypatch.setattr(
+        reduced_scale,
+        "_walk_nested_inner_ladder",
+        lambda *_args: (solution, rejection),
+    )
+
+    def _objective_must_not_run(*_args: object) -> None:
+        raise AssertionError("outer objective assembled after a coarse inner exit")
+
+    monkeypatch.setattr(
+        reduced_scale, "_flat675_value_and_grad_at", _objective_must_not_run
+    )
+    with pytest.raises(reduced_scale.NestedLsInnerSolveFailed):
+        reduced_scale._nested_ls_outer_objective(state, np.array([0.3, -0.45]))
+    np.testing.assert_array_equal(
+        state.jax_boozer.surface.dofs,
+        state.anchor.surface_dofs,
+    )
+
+
+def _ladder_solution(surface: list[float], *, iota: float = 0.14) -> SimpleNamespace:
+    return SimpleNamespace(
+        surface_dofs=np.array(surface, dtype=np.float64),
+        iota=iota,
+        G=2.0,
+    )
+
+
+def test_ladder_retries_from_anchor_and_predicts_only_each_rungs_first_leg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from simsopt_jax_adapters.geo import nested_ls_reduced_scale as reduced_scale
+
+    state = _outer_state(inner_substep_legs=(1, 2))
+    trial = np.array([0.3, -0.45])
+    predicted_points: list[np.ndarray] = []
+    calls: list[tuple[np.ndarray, np.ndarray]] = []
+
+    def _predict(_state: object, point: np.ndarray):
+        predicted_points.append(np.array(point, copy=True))
+        return state.anchor.surface_dofs, NESTED_LS_PREDICTOR_ARM_BARE, 0.0, 0.0, False
+
+    outcomes = iter(
+        (
+            (_ladder_solution([9.0, 9.0, 9.0]), RuntimeError("undivided failed")),
+            (_ladder_solution([4.0, 5.0, 6.0]), None),
+            (_ladder_solution([7.0, 8.0, 9.0]), None),
         )
-        gradient_admitted = nested_ls_coarse_tier_admits(
-            achieved_residual_l2=residual,
-            use=NESTED_LS_COARSE_USE_OUTER_GRADIENT,
-        )
-        assert value_admitted == gradient_admitted
-        assert nested_ls_coarse_tier_error_bound(
-            achieved_residual_l2=residual,
-            use=NESTED_LS_COARSE_USE_LINE_SEARCH_VALUE,
-        ) > nested_ls_coarse_tier_error_bound(
-            achieved_residual_l2=residual,
-            use=NESTED_LS_COARSE_USE_OUTER_GRADIENT,
-        )
+    )
 
-
-def test_the_licensed_tier_sits_far_under_the_fd0_band() -> None:
-    """Why 1e-8 is the tier, in the units the decision was made in.
-
-    FD-0's relative band is ``NESTED_LS_OUTER_FD0_REL_TOL``. At the coarse
-    tolerance the worst measured amplification puts both the gradient and
-    the value error orders of magnitude under it; that margin is the
-    licence. Recomputed here rather than quoted, so moving either the tier
-    or an amplification constant moves this assertion.
-    """
-
-    for use in (
-        NESTED_LS_COARSE_USE_OUTER_GRADIENT,
-        NESTED_LS_COARSE_USE_LINE_SEARCH_VALUE,
+    def _solve(
+        _state: object,
+        *,
+        coil_dofs: np.ndarray,
+        warm_surface_dofs: np.ndarray,
+        warm_iota: float,
+        warm_G: float,
     ):
-        bound = nested_ls_coarse_tier_error_bound(
-            achieved_residual_l2=NESTED_LS_NEWTON_COARSE_TOL, use=use
+        del warm_iota, warm_G
+        calls.append(
+            (np.array(coil_dofs, copy=True), np.array(warm_surface_dofs, copy=True))
         )
-        assert bound < NESTED_LS_OUTER_FD0_REL_TOL / 50.0, (
-            f"{use} inherits {bound:.3e} at the coarse tier, which is not "
-            f"comfortably under the FD-0 band {NESTED_LS_OUTER_FD0_REL_TOL:.0e}"
+        return next(outcomes)
+
+    monkeypatch.setattr(reduced_scale, "_predicted_inner_start", _predict)
+    monkeypatch.setattr(reduced_scale, "_solve_nested_inner_leg", _solve)
+    solution, rejection = reduced_scale._walk_nested_inner_ladder(
+        state,
+        trial,
+        (1, 2),
+    )
+
+    assert rejection is None
+    np.testing.assert_array_equal(solution.surface_dofs, [7.0, 8.0, 9.0])
+    midpoint = state.anchor.coil_dofs + (trial - state.anchor.coil_dofs) * 0.5
+    np.testing.assert_array_equal(predicted_points, [trial, midpoint])
+    np.testing.assert_array_equal(calls[0][0], trial)
+    np.testing.assert_array_equal(calls[1][0], midpoint)
+    np.testing.assert_array_equal(calls[2][0], trial)
+    np.testing.assert_array_equal(calls[0][1], state.anchor.surface_dofs)
+    np.testing.assert_array_equal(calls[1][1], state.anchor.surface_dofs)
+    np.testing.assert_array_equal(calls[2][1], [4.0, 5.0, 6.0])
+
+
+def test_total_ladder_failure_returns_the_undivided_result_and_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from simsopt_jax_adapters.geo import nested_ls_reduced_scale as reduced_scale
+
+    state = _outer_state(inner_substep_legs=(1, 2))
+    first_solution = _ladder_solution([1.0, 1.0, 1.0])
+    later_solution = _ladder_solution([2.0, 2.0, 2.0])
+    first_rejection = RuntimeError("undivided failed")
+    outcomes = iter(
+        (
+            (first_solution, first_rejection),
+            (later_solution, RuntimeError("refined failed")),
         )
+    )
+    monkeypatch.setattr(
+        reduced_scale,
+        "_predicted_inner_start",
+        lambda _state, _point: (
+            state.anchor.surface_dofs,
+            NESTED_LS_PREDICTOR_ARM_BARE,
+            0.0,
+            0.0,
+            False,
+        ),
+    )
+    monkeypatch.setattr(
+        reduced_scale,
+        "_solve_nested_inner_leg",
+        lambda *_args, **_kwargs: next(outcomes),
+    )
 
-
-def test_an_unknown_use_fails_closed_rather_than_defaulting_to_admitted() -> None:
-    """A default-admit branch would license the next consumer silently."""
-
-    for function in (nested_ls_coarse_tier_admits, nested_ls_coarse_tier_error_bound):
-        with pytest.raises(ValueError, match="unknown nested-LS coarse-tier use"):
-            function(achieved_residual_l2=1.0e-14, use="whatever_lands_next")
-
-
-def test_a_non_finite_residual_is_never_admitted() -> None:
-    """NaN fails every comparison, so it must be refused explicitly."""
-
-    for use in NESTED_LS_COARSE_USES:
-        for residual in (math.nan, -1.0, -math.inf):
-            assert not nested_ls_coarse_tier_admits(
-                achieved_residual_l2=residual, use=use
-            )
+    solution, rejection = reduced_scale._walk_nested_inner_ladder(
+        state,
+        np.array([0.3, -0.45]),
+        (1, 2),
+    )
+    assert solution is first_solution
+    assert rejection is first_rejection
 
 
 # --------------------------------------------------------------------------
@@ -832,6 +847,53 @@ def test_machinery_built_at_other_coils_is_refused_not_reused() -> None:
     assert arm == NESTED_LS_PREDICTOR_ARM_BARE
 
 
+def test_a_nonfinite_production_prediction_returns_exact_bare_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from simsopt_jax_adapters.geo import nested_ls_reduced_scale as reduced_scale
+
+    anchor = reduced_scale.NestedLsOuterAnchor.at(
+        coil_dofs=np.array([0.25, -0.5]),
+        surface_dofs=np.array([-0.0, 2.0, 3.0]),
+        iota=0.14,
+        G=2.0,
+        schur_lu=None,
+    )
+    state = _outer_state(anchor=anchor, inner_predictor=True)
+    state.predictor_source = reduced_scale.NestedLsPredictorSource(
+        coil_dofs=np.array(anchor.coil_dofs, copy=True),
+        operator=object(),
+        apply_lu=lambda _mixed: np.array([np.nan, 0.0, 0.0]),
+    )
+    monkeypatch.setattr(
+        reduced_scale,
+        "nested_ls_runtime_coil_closures",
+        lambda _boozer: (object(), object(), object()),
+    )
+    monkeypatch.setattr(
+        reduced_scale,
+        "apply_reduced_mixed_schur_coil_tangent",
+        lambda *_args, **_kwargs: object(),
+    )
+
+    def _predicted_envelope_must_not_run(_boozer: object) -> None:
+        raise AssertionError("evaluated a predicted envelope after a nonfinite tangent")
+
+    monkeypatch.setattr(
+        reduced_scale,
+        "nested_ls_reduced_closures",
+        _predicted_envelope_must_not_run,
+    )
+    surface, arm, raw_l2, applied_l2, scaled = reduced_scale._predicted_inner_start(
+        state,
+        np.array([0.3, -0.45]),
+    )
+    assert surface is anchor.surface_dofs
+    assert surface.tobytes() == anchor.surface_dofs.tobytes()
+    assert arm == NESTED_LS_PREDICTOR_ARM_BARE
+    assert (raw_l2, applied_l2, scaled) == (0.0, 0.0, False)
+
+
 def test_built_at_is_bitwise_and_shape_tolerant() -> None:
     """One ULP is a different point; a row vector is the same one."""
 
@@ -1028,14 +1090,17 @@ def test_a_prediction_with_a_better_envelope_gradient_is_kept(monkeypatch) -> No
 # --------------------------------------------------------------------------
 
 
-def _policy(**overrides: object) -> dict:
-    fields: dict[str, object] = {
-        "ift_stab": 0.0,
-        "inner_substep_legs": (1,),
-        "inner_predictor": False,
-    }
-    fields.update(overrides)
-    return nested_ls_inner_policy(**fields)  # type: ignore[arg-type]
+def _policy(
+    *,
+    ift_stab: float = 0.0,
+    inner_substep_legs: tuple[int, ...] = (1,),
+    inner_predictor: bool = False,
+) -> dict[str, object]:
+    return nested_ls_jax_inner_policy(
+        ift_stab=ift_stab,
+        inner_substep_legs=inner_substep_legs,
+        inner_predictor=inner_predictor,
+    )
 
 
 def test_the_stock_lane_declares_itself_stock() -> None:
@@ -1043,18 +1108,21 @@ def test_the_stock_lane_declares_itself_stock() -> None:
     assert policy["trajectory_is_stock"] is True
     assert policy["inner_substep_enabled"] is False
     assert policy["inner_predictor_enabled"] is False
-    assert policy["policy"] == NESTED_LS_INNER_POLICY_NAME
+    assert policy["policy"] == NESTED_LS_JAX_INNER_POLICY_NAME
 
 
 @pytest.mark.parametrize(
-    "overrides",
+    ("inner_substep_legs", "inner_predictor"),
     [
-        {"inner_substep_legs": NESTED_LS_INNER_SUBSTEP_LEGS},
-        {"inner_predictor": True},
-        {"inner_substep_legs": NESTED_LS_INNER_SUBSTEP_LEGS, "inner_predictor": True},
+        (NESTED_LS_INNER_SUBSTEP_LEGS, False),
+        ((1,), True),
+        (NESTED_LS_INNER_SUBSTEP_LEGS, True),
     ],
 )
-def test_every_non_stock_lane_refuses_to_look_stock(overrides: dict) -> None:
+def test_every_non_stock_lane_refuses_to_look_stock(
+    inner_substep_legs: tuple[int, ...],
+    inner_predictor: bool,
+) -> None:
     """The whole reason the block exists.
 
     Before it, a run with either lever enabled published a policy
@@ -1064,9 +1132,11 @@ def test_every_non_stock_lane_refuses_to_look_stock(overrides: dict) -> None:
     ``trajectory_is_stock`` off True.
     """
 
-    policy = _policy(**overrides)
+    policy = _policy(
+        inner_substep_legs=inner_substep_legs,
+        inner_predictor=inner_predictor,
+    )
     assert policy["trajectory_is_stock"] is False
-    assert "NON-STOCK" in str(policy["comparability"])
 
 
 def test_the_stock_and_non_stock_blocks_are_not_equal() -> None:
@@ -1085,32 +1155,26 @@ def test_the_trust_region_ratio_appears_only_when_the_predictor_runs() -> None:
     )
 
 
-def test_the_coarse_tier_is_reported_licensed_but_unclaimed() -> None:
-    """``None`` is the honest answer today, not a placeholder.
-
-    Phase 4 licensed a coarse tier; no consumer honours it, because
-    ``success`` stays true only for ``converged``. The block says the
-    licence exists and is unexercised, and a run that starts honouring it
-    has to say so here -- at which point receipts on either side of the
-    change stop being comparable.
-    """
+def test_the_coarse_threshold_is_reported_as_diagnostic_only() -> None:
+    """The single-state threshold is observable but grants no admission."""
 
     policy = _policy()
-    assert policy["coarse_tier_licensed_residual"] == NESTED_LS_NEWTON_COARSE_TOL
+    assert policy["coarse_tier_diagnostic_residual"] == NESTED_LS_NEWTON_COARSE_TOL
     assert policy["coarse_tier_honoured"] is None
-    assert _policy(coarse_tier_honoured="outer_gradient")["coarse_tier_honoured"] == (
-        "outer_gradient"
-    )
 
 
 def test_the_block_records_values_not_a_preset_name() -> None:
     """A preset name is only as honest as the reader's copy of its meaning."""
 
     policy = _policy(ift_stab=1.0e-4)
-    assert policy["ift_stab"] == 1.0e-4
-    assert policy["newton_maxiter"] == NESTED_LS_NEWTON_MAXITER
-    assert policy["newton_tol"] == NESTED_LS_NEWTON_TOL
-    assert policy["iota_branch_guard"] == NESTED_LS_OUTER_IOTA_BRANCH_GUARD
+    assert policy["solver_family"] == "reduced_schur_newton"
+    stages = policy["stages"]
+    assert isinstance(stages, dict)
+    newton = stages["reduced_schur_newton"]
+    assert isinstance(newton, dict)
+    assert newton["stab"] == 1.0e-4
+    assert newton["maxiter"] == NESTED_LS_NEWTON_MAXITER
+    assert newton["tol"] == NESTED_LS_NEWTON_TOL
 
 
 def test_both_child_schemas_moved_for_the_block() -> None:
@@ -1121,5 +1185,5 @@ def test_both_child_schemas_moved_for_the_block() -> None:
     prevent. Only the version stops it.
     """
 
-    assert NESTED_LS_OUTER_JAX_CHILD_SCHEMA.endswith(".v6")
-    assert NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA.endswith(".v5")
+    assert NESTED_LS_OUTER_JAX_CHILD_SCHEMA.endswith(".v7")
+    assert NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA.endswith(".v6")

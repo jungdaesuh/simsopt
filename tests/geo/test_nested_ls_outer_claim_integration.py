@@ -67,6 +67,7 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     F3_B37_BANANA_OMP_CONTRACT_THREADS,
     NESTED_LS_GATE6_AGGREGATION,
     NESTED_LS_GATE6_NATIVE_OMP_THREADS,
+    NESTED_LS_JAX_INNER_STAB,
     NESTED_LS_NEWTON_TOL,
     NESTED_LS_OUTER_ACCEPT_WITHOUT_CANDIDATE_REASON,
     NESTED_LS_OUTER_IOTA_BRANCH_GUARD,
@@ -74,6 +75,8 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA,
     NESTED_LS_OUTER_OMP_SWEEP_REPEATS,
     NESTED_LS_OUTER_REJUDGE_SCHEMA,
+    nested_ls_jax_inner_policy,
+    nested_ls_native_inner_policy,
 )
 
 # The fake clean-tree HEAD every artifact in this file is minted against.
@@ -329,6 +332,7 @@ def _native_child_template() -> dict[str, object]:
         "endpoint_is_optimizer_x": True,
         "optimizer_x": _NATIVE_ENDPOINT_COILS,
         "outer_policy": dict(_OUTER_POLICY),
+        "inner_policy": nested_ls_native_inner_policy(),
         "start": {"coil_dofs": _START_COILS, "evaluation": 0},
         "endpoint": {
             "coil_dofs": _NATIVE_ENDPOINT_COILS,
@@ -369,6 +373,11 @@ def _jax_child_template() -> dict[str, object]:
         "endpoint_is_optimizer_x": True,
         "optimizer_x": _JAX_ENDPOINT_COILS,
         "outer_policy": dict(_OUTER_POLICY),
+        "inner_policy": nested_ls_jax_inner_policy(
+            ift_stab=NESTED_LS_JAX_INNER_STAB,
+            inner_substep_legs=(1,),
+            inner_predictor=False,
+        ),
         "iota_branch_guard": NESTED_LS_OUTER_IOTA_BRANCH_GUARD,
         "feasible_evaluations": 1,
         "rejected_evaluations": 1,
@@ -608,13 +617,13 @@ def green_b3(tmp_path_factory: pytest.TempPathFactory) -> dict[str, object]:
         }
 
 
-def test_b3_run_consumes_both_child_schemas_into_a_green_v2_receipt(
+def test_b3_run_consumes_both_child_schemas_into_a_green_v3_receipt(
     green_b3: dict[str, object],
 ) -> None:
-    """A full B3 run publishes a green claim.v2 receipt over both lanes."""
+    """A full B3 run publishes a green claim.v3 receipt over both lanes."""
 
     receipt = green_b3["receipt"]
-    assert receipt["schema"] == "nested-ls-outer-claim.v2"
+    assert receipt["schema"] == claim.CLAIM_SCHEMA
     assert receipt["fail_closed_reason"] is None
     assert receipt["git_head"] == _RUN_HEAD
     boundary = receipt["claim_boundary"]
@@ -634,6 +643,19 @@ def test_b3_run_consumes_both_child_schemas_into_a_green_v2_receipt(
     )
     assert [pair["jax"]["child_payload"]["schema"] for pair in pairs] == (
         [NESTED_LS_OUTER_JAX_CHILD_SCHEMA] * claim.REPEATS
+    )
+    assert [pair["native"]["child_payload"]["inner_policy"] for pair in pairs] == (
+        [nested_ls_native_inner_policy()] * claim.REPEATS
+    )
+    assert [pair["jax"]["child_payload"]["inner_policy"] for pair in pairs] == (
+        [
+            nested_ls_jax_inner_policy(
+                ift_stab=NESTED_LS_JAX_INNER_STAB,
+                inner_substep_legs=(1,),
+                inner_predictor=False,
+            )
+        ]
+        * claim.REPEATS
     )
     assert [pair["native"]["observed_omp_num_threads"] for pair in pairs] == (
         [NESTED_LS_GATE6_NATIVE_OMP_THREADS] * claim.REPEATS
@@ -657,6 +679,44 @@ def test_b3_receipt_carries_an_untimed_rejudge_of_each_lane_per_pair(
             assert payload["budget"] == claim.B3_BUDGET
             assert payload["source_child_payload_sha256"] == row["child_payload_sha256"]
             assert payload["endpoint_j"] == row["endpoint_j"]
+
+
+@pytest.mark.parametrize("lane", ("native", "jax"))
+def test_b3_refuses_a_child_missing_its_inner_policy(
+    tmp_path: Path,
+    lane: str,
+) -> None:
+    plan = _plan(tmp_path / "child_payload_paths.txt")
+    child = plan[lane]
+    assert isinstance(child, dict)
+    child.pop("inner_policy")
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        harness = _install(monkeypatch, tmp_path, plan=plan)
+        with pytest.raises(SystemExit) as refusal:
+            claim.main(harness.b3_argv())
+    reason = f"{lane}_child_inner_policy_mismatch"
+    assert reason in str(refusal.value)
+    assert harness.read_receipt(claim.B3_BUDGET)["fail_closed_reason"] == reason
+
+
+@pytest.mark.parametrize("lane", ("native", "jax"))
+def test_b3_refuses_a_child_with_a_mutated_inner_policy(
+    tmp_path: Path,
+    lane: str,
+) -> None:
+    plan = _plan(tmp_path / "child_payload_paths.txt")
+    child = plan[lane]
+    assert isinstance(child, dict)
+    inner_policy = child["inner_policy"]
+    assert isinstance(inner_policy, dict)
+    inner_policy["solver_family"] = "mutated"
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        harness = _install(monkeypatch, tmp_path, plan=plan)
+        with pytest.raises(SystemExit) as refusal:
+            claim.main(harness.b3_argv())
+    reason = f"{lane}_child_inner_policy_mismatch"
+    assert reason in str(refusal.value)
+    assert harness.read_receipt(claim.B3_BUDGET)["fail_closed_reason"] == reason
 
 
 def test_b3_measures_the_j_fork_without_gating_on_it(
@@ -894,6 +954,36 @@ def test_b37_accepts_a_green_b3_receipt_and_gates_the_frozen_band(
     assert boundary["b3_measured_j_rel_gap_max"] == measured
     assert receipt["pairs"][0]["endpoint_j_within_frozen_band"] is True
     assert receipt["pairs"][0]["native"]["child_payload"]["budget"] == claim.B37_BUDGET
+
+
+def test_b37_refuses_an_old_v2_b3_receipt(
+    tmp_path: Path,
+    green_b3: dict[str, object],
+) -> None:
+    receipt = json.loads(json.dumps(green_b3["receipt"]))
+    receipt["schema"] = "nested-ls-outer-claim.v2"
+    old_receipt = tmp_path / "old_v2_b3_receipt.json"
+    old_receipt.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _install(monkeypatch, tmp_path)
+        with pytest.raises(SystemExit) as refusal:
+            claim.main(
+                [
+                    "--budget",
+                    str(claim.B37_BUDGET),
+                    "--omp",
+                    str(NESTED_LS_GATE6_NATIVE_OMP_THREADS),
+                    "--maxcor",
+                    str(claim.DEFAULT_MAXCOR),
+                    "--pairs",
+                    "1",
+                    "--b3-receipt",
+                    str(old_receipt),
+                    "--j-parity-rtol",
+                    repr(_FROZEN_J_BAND),
+                ]
+            )
+    assert "expected 'nested-ls-outer-claim.v3'" in str(refusal.value)
 
 
 def test_b37_refuses_a_b3_receipt_whose_embedded_child_bytes_were_edited(

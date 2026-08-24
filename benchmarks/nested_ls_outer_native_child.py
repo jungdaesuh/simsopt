@@ -63,14 +63,13 @@ from simsopt_jax_adapters.geo.flat675.policy import (
     flat675_outer_objective_config,
 )
 from simsopt_jax_adapters.geo.nested_ls_contract import (
-    NESTED_LS_BANANA_NEWTON_STAB,
     NESTED_LS_OUTER_ACCEPT_WITHOUT_CANDIDATE_REASON,
     NESTED_LS_OUTER_IOTA_BRANCH_GUARD,
     NESTED_LS_OUTER_MAX_RESTARTS,
     NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA,
     NestedLsOuterAcceptWithoutCandidate,
     NestedLsOuterCandidateStore,
-    nested_ls_inner_policy,
+    nested_ls_native_inner_policy,
     nested_ls_outer_attempt_fun_is_objective,
     nested_ls_outer_endpoint_success,
     nested_ls_outer_ftol_zero_stop,
@@ -994,18 +993,7 @@ def _drive_native_run(context: NativeOuterRunContext) -> dict[str, object]:
         "endpoint_is_optimizer_x": endpoint_is_optimizer_x,
         "optimizer_x": [float(value) for value in optimizer_x],
         "outer_policy": outer_policy.as_payload(),
-        # The native twin has no JAX inner lane -- no sub-stepping, no
-        # predictor, no coarse tier -- so it publishes the STOCK block. That
-        # is not a formality: the whole point of the block is that a
-        # consumer can compare two receipts' inner lanes, and it can only do
-        # that if BOTH lanes state theirs. A native receipt with the field
-        # absent would be indistinguishable from one written before the
-        # field existed.
-        "inner_policy": nested_ls_inner_policy(
-            ift_stab=float(NESTED_LS_BANANA_NEWTON_STAB),
-            inner_substep_legs=(1,),
-            inner_predictor=False,
-        ),
+        "inner_policy": nested_ls_native_inner_policy(),
         "start": {
             "lane": context.lane_meta,
             "coil_dofs": [float(value) for value in context.start_coil_dofs],

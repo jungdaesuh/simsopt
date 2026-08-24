@@ -44,10 +44,13 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     F3_B37_BANANA_OMP_CONTRACT_THREADS,
     NESTED_LS_GATE6_AGGREGATION,
     NESTED_LS_GATE6_NATIVE_OMP_THREADS,
+    NESTED_LS_JAX_INNER_STAB,
     NESTED_LS_OUTER_JAX_CHILD_SCHEMA,
     NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA,
     NESTED_LS_OUTER_OMP_SWEEP_REPEATS,
     NESTED_LS_OUTER_REJUDGE_SCHEMA,
+    nested_ls_jax_inner_policy,
+    nested_ls_native_inner_policy,
 )
 
 from benchmarks.nested_ls_shamanskii_attribution import (
@@ -63,7 +66,11 @@ JAX_CHILD = REPO / "benchmarks" / "nested_ls_outer_jax_child.py"
 CACHE_OUTER = REPO / ".artifacts" / "nested-ls-outer-xla"
 EVIDENCE_DATE: Final[str] = "20260824"
 CLAIM_BUDGETS: Final[tuple[int, ...]] = (3, 37)
-CLAIM_SCHEMA: Final[str] = "nested-ls-outer-claim.v2"
+# v2 -> v3 seals each embedded child's exact inner solver policy. Existing v2
+# receipts are intentionally incompatible and must be rerun; consumers are
+# this driver's B3 interlock and receipt readers. Rollback is code-only because
+# receipts are immutable evidence rather than migrated state.
+CLAIM_SCHEMA: Final[str] = "nested-ls-outer-claim.v3"
 SWEEP_SCHEMA: Final[str] = "nested-ls-outer-native-omp-sweep.v2"
 # Charter: "B37 runs only after B3 lands physics-green." The interlock is
 # the receipt, not a promise, so B37 must be handed the B3 artifact.
@@ -1103,6 +1110,17 @@ def _physics_ok(
             return f"{lane}_child_budget_mismatch"
         if int(child_payload["maxcor"]) != maxcor:
             return f"{lane}_child_maxcor_mismatch"
+        expected_inner_policy = (
+            nested_ls_native_inner_policy()
+            if lane == "native"
+            else nested_ls_jax_inner_policy(
+                ift_stab=NESTED_LS_JAX_INNER_STAB,
+                inner_substep_legs=(1,),
+                inner_predictor=False,
+            )
+        )
+        if child_payload.get("inner_policy") != expected_inner_policy:
+            return f"{lane}_child_inner_policy_mismatch"
         boolean_fields = ["success", "endpoint_is_optimizer_x"]
         if lane == "native":
             boolean_fields.append("omp_pinned")

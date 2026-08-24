@@ -76,4 +76,3 @@ src/simsopt/_version.py
 # tests/benchmarks/test_jax_example_execution_mode_contract.py.
 .artifacts/jax-example-parity/
 .artifacts/jax-example-execution-modes/
-.handoffs/
