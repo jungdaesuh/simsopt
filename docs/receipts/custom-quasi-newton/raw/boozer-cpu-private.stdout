@@ -1,8 +1,0 @@
-............................s....................................        [100%]
-=============================== warnings summary ===============================
-src/simsopt/field/force.py:368
-  /tmp/qn-broad-current/src/simsopt/field/force.py:368: DeprecationWarning: invalid escape sequence '\P'
-    """
-
--- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-64 passed, 1 skipped, 95 deselected, 1 warning in 84.99s (0:01:24)
