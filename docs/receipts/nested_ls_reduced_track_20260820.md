@@ -740,6 +740,23 @@ parent process walls, no subtractions, n=3 interleaved pairs:
   killed run — the fix changed reporting, not the trajectory. No
   timed content from the killed run is cited anywhere.
 
+## Outer charter — A100 B3 GREEN, 3.856× (2026-08-24)
+
+Receipt ``docs/receipts/evidence/nested_ls_outer_b3_20260823.a100.{json,log}``
+(``fail_closed_reason: null``, ``nested_speed_claim: true``, producer =
+landau mirror ``af66c572b`` of the ``566c409b8`` predicate fix). Native
+bar OMP=20, bound to the A100 swept artifact by sha ``064d6afc…``
+(byte-identical to the workstation copy committed at ``7485ac327``).
+**JAX min 767.60 s / median 767.71 s vs native min 2959.91 s / median
+2987.96 s → min-over-min 3.856×.** Physics 3/3 pairs: reconstruct
+no-op both lanes (``iter=0``, ``‖∇J_LS‖₂ ≈ 2.7e-15``), endpoint J gap
+``−1.452e-12`` every pair — the JAX endpoint again strictly lower, so
+the one-sided measured max is 0.0; endpoint ι agrees to 1.1e-12.
+Cross-host observational: both hosts' lanes land the same physics
+(J ≈ 0.0131046204592, ι ≈ 0.144682) to ~1e-12, at 2.292× (5090,
+OMP=14 bar) and 3.856× (A100, OMP=20 bar). The A100 B37 band freeze is
+deferred pending the 5090 B37 adjudication.
+
 **B37 J-parity band frozen (adjudicated here): ``--j-parity-rtol
 1e-9``.** The B3-measured one-sided max is 0.0 (the gate law's floor
 is satisfied by any positive value); the two-sided band is
