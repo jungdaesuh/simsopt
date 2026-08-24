@@ -401,7 +401,11 @@ not device throughput. The GPU-favorable regime — warmed or
 persistent-cache solves at the examples' own scales — is the addendum's
 per-example certified evidence, and this table does not supersede it.
 
-### Authority-run isolated end-to-end wall time
+### Appendix A — archived authority wall times (2026-07-29, RTX 5090)
+
+The pinned original measurement this report is built on; superseded for
+current-code reading by the two sections above, retained for
+replayability and as the only per-case memory record.
 
 Parent RSS is the launched child's peak `VmHWM`; it excludes descendants.
 
@@ -445,7 +449,7 @@ GPU was slower in every launch.
 > `wireframe-gsco-multistep` 3.5x device solve); see the addendum at the end
 > of this report.
 
-### 2026-08-24 controlled re-measurement: what is and is not still current
+### Appendix B — 2026-08-24 controlled re-measurement: what is and is not still current
 
 Six cases (coil-forces, boozerqa, wireframe-gsco-multistep, tracing-particle,
 planar-coils, finitebuild) were re-run at HEAD on the same RTX 5090 box in a
@@ -489,7 +493,7 @@ controls to separate code change from environment change. Verdicts:
   the full three-lane bounded matrix at HEAD (this case, plus the promoted
   single-stage route).
 
-### JAX GPU fast versus JAX GPU parity: cold and warmed measurements
+### Appendix C — JAX GPU fast versus JAX GPU parity (not a native comparison)
 
 This RTX 5090 diagnostic compares JAX fast and parity modes, not native C++ and
 JAX GPU. Cold runs used empty profile caches; warm results use seven balanced
