@@ -73,7 +73,7 @@ def test_public_result_contains_only_public_jax_array_state() -> None:
     assert result.state.__class__.__module__ == (
         "simsopt_jax.geo.optimizers.fused_lbfgs"
     )
-    assert result.invalid_step_log.__class__.__module__ == (
+    assert result.invalid_step_record.__class__.__module__ == (
         "simsopt_jax.geo.optimizers.fused_lbfgs"
     )
     assert all(
@@ -107,7 +107,7 @@ def test_fused_solver_counts_rejected_recovered_nonfinite_trial_on_device() -> N
     assert np.isfinite(np.asarray(result.state.objective_value))
     assert np.all(np.isfinite(np.asarray(result.state.gradient)))
     assert np.all(np.isfinite(np.asarray(result.state.parameters)))
-    assert not bool(np.asarray(result.invalid_step_log.nonfinite_step[0]))
+    assert not bool(np.asarray(result.invalid_step_record.nonfinite_step))
 
 
 def test_public_contract_has_no_private_mode_or_callback_controls() -> None:

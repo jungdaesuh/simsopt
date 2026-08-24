@@ -37,7 +37,7 @@ from ._result_converters import (
 )
 from ._types import (
     _BFGSResults,
-    _LBFGSInvalidStepLog,
+    _LBFGSInvalidStepRecord,
     _LBFGSResults,
     _LineSearchResults,
     _LineSearchState,

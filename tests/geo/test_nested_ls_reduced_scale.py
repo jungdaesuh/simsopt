@@ -576,6 +576,11 @@ def test_step4_forcing_json_is_dirty_source_replay_not_promotion():
     assert payload["probe"]["meets_forcing"] is True
 
 
+@pytest.mark.skipif(
+    not _F3_B37_GPU_STEP4_INCOMPLETE.is_file(),
+    reason="fail-closed step-4 forcing JSON was moved out of the upstream diff "
+    "(b9405eb54); the guard matches every other evidence-backed test here",
+)
 def test_step4_incomplete_json_fail_closed_on_surface_sha_mismatch():
     raw = _F3_B37_GPU_STEP4_INCOMPLETE.read_text(encoding="utf-8")
     payload = json.loads(raw)

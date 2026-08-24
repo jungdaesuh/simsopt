@@ -12,6 +12,8 @@ import numpy as np
 
 from simsopt_jax.geo.optimizer_host_lbfgs import (
     LINE_SEARCH_FAILURE_REASON_FAILED,
+    LINE_SEARCH_FAILURE_REASON_MAXITER,
+    LINE_SEARCH_FAILURE_REASON_NOT_DESCENT,
     line_search_failure_reason_to_code,
 )
 from simsopt_jax.runtime.host_boundary import (
@@ -41,7 +43,7 @@ from ._common import (
     _scalar_value_and_grad,
 )
 from ._types import (
-    _LBFGSInvalidStepLog,
+    _LBFGSInvalidStepRecord,
     _LBFGSResults,
 )
 
@@ -832,43 +834,72 @@ def _lbfgsb_rho_history(history: lbfgsb.LbfgsbInverseHessianHistory) -> jax.Arra
     return jnp.zeros((history.s.shape[0],), dtype=history.s.dtype)
 
 
-def _lbfgsb_invalid_step_log(state: lbfgsb.LbfgsbState) -> _LBFGSInvalidStepLog:
-    int_zero = state.nfev - state.nfev
-    int_slot = jnp.zeros_like(state.workspace.isave[:1])
-    float_slot = jnp.zeros_like(state.workspace.dsave[:1])
-    abnormal = state.workspace.task[0] == lbfgsb.ABNORMAL
-    abnormal_slot = jnp.reshape(abnormal, (1,))
-    false_slot = jnp.zeros_like(int_slot, dtype=bool)
-    true_slot = jnp.ones_like(int_slot, dtype=bool)
-    failed_reason = jnp.asarray(
-        line_search_failure_reason_to_code(LINE_SEARCH_FAILURE_REASON_FAILED),
-        dtype=state.workspace.isave.dtype,
-    )
-    step = jnp.where(abnormal, state.workspace.dsave[13], state.workspace.dsave[13] * 0)
-    step_slot = jnp.reshape(step, (1,))
-    nonfinite = (~jnp.isfinite(state.f)) | jnp.any(~jnp.isfinite(state.g))
-    nonfinite_slot = jnp.reshape(abnormal & nonfinite, (1,))
-    failure_reason_slot = jnp.where(abnormal_slot, failed_reason, int_slot)
-    return _LBFGSInvalidStepLog(
-        count=jnp.where(abnormal, int_zero + 1, int_zero),
-        write_index=int_zero,
-        iteration=jnp.where(
-            abnormal_slot, jnp.reshape(state.n_iterations, (1,)), int_slot
+def _lbfgsb_failure_reason_code(info: jax.Array) -> jax.Array:
+    """Name the terminal line-search failure ``isave[34]`` reports."""
+    dtype = info.dtype
+
+    def code(reason: str) -> jax.Array:
+        return jnp.asarray(line_search_failure_reason_to_code(reason), dtype=dtype)
+
+    return jnp.where(
+        info == lbfgsb.LBFGSB_LINE_SEARCH_INFO_NOT_DESCENT,
+        code(LINE_SEARCH_FAILURE_REASON_NOT_DESCENT),
+        jnp.where(
+            info == lbfgsb.LBFGSB_LINE_SEARCH_INFO_MAXLS,
+            code(LINE_SEARCH_FAILURE_REASON_MAXITER),
+            code(LINE_SEARCH_FAILURE_REASON_FAILED),
         ),
-        step_scale=step_slot,
-        line_search_failed=abnormal_slot,
-        nonfinite_step=nonfinite_slot,
-        stalled_step=false_slot,
-        valid_curvature=true_slot,
-        trial_converged=false_slot,
-        ls_status=jnp.where(abnormal_slot, state.workspace.isave[34:35], int_slot),
-        requested_initial_step=step_slot,
-        first_tested_alpha=step_slot,
-        best_finite_alpha=float_slot,
-        returned_alpha=float_slot,
-        failure_reason=failure_reason_slot,
-        armijo_margin=float_slot,
-        curvature_margin=float_slot,
+    )
+
+
+def _lbfgsb_invalid_step_record(
+    state: lbfgsb.LbfgsbState,
+) -> _LBFGSInvalidStepRecord:
+    """Read the terminal rejected-step record out of the L-BFGS-B workspace.
+
+    Only ``dsave``/``isave`` values that survive to ABNORMAL are published.  In
+    particular ``dsave[13]`` is the line search's *current* step scale at the
+    moment it was abandoned -- ``dcsrch``'s next proposal once ``maxls``
+    backtracks are spent, or the untried initial step on a non-descent direction
+    -- and not the step any trial was evaluated at, so it is reported only under
+    the unqualified name ``step_scale``.
+    """
+    workspace = state.workspace
+    int_zero = jnp.zeros_like(workspace.isave[0])
+    float_zero = jnp.zeros_like(workspace.dsave[0])
+    abnormal = workspace.task[0] == lbfgsb.ABNORMAL
+    info = workspace.isave[34]
+
+    # dcsrch's curvature test is ``abs(g) <= gtol*(-ginit)``; its residual needs
+    # only the directional derivative at the last evaluated trial and the one at
+    # alpha=0, both of which the workspace still holds -- but only once dcsrch
+    # has run.  ``lnsrlb`` rejects a non-descent direction before calling it and
+    # returns the save area untouched, leaving ``dsave[16]`` holding a previous
+    # line search's ginit (zero on the first), so the difference would be a
+    # plausible number that is the residual of nothing.  MAXLS is the only
+    # terminal info that implies dcsrch ran.
+    dcsrch_ran = info == lbfgsb.LBFGSB_LINE_SEARCH_INFO_MAXLS
+    curvature_margin_measured = abnormal & dcsrch_ran
+    directional_derivative = workspace.dsave[lbfgsb.LBFGSB_DSAVE_GD]
+    initial_directional_derivative = workspace.dsave[lbfgsb.LBFGSB_DCSRCH_DSAVE_GINIT]
+    curvature_margin = jnp.abs(directional_derivative) - (
+        lbfgsb.LBFGSB_LINE_SEARCH_GTOL * (-initial_directional_derivative)
+    )
+    not_measured = jnp.asarray(jnp.nan, dtype=workspace.dsave.dtype)
+
+    nonfinite = (~jnp.isfinite(state.f)) | jnp.any(~jnp.isfinite(state.g))
+    return _LBFGSInvalidStepRecord(
+        recorded=abnormal,
+        iteration=jnp.where(abnormal, state.n_iterations, int_zero),
+        step_scale=jnp.where(abnormal, workspace.dsave[13], float_zero),
+        line_search_failed=abnormal,
+        nonfinite_step=abnormal & nonfinite,
+        ls_status=jnp.where(abnormal, info, int_zero),
+        failure_reason=jnp.where(abnormal, _lbfgsb_failure_reason_code(info), int_zero),
+        curvature_margin_measured=curvature_margin_measured,
+        curvature_margin=jnp.where(
+            curvature_margin_measured, curvature_margin, not_measured
+        ),
     )
 
 
@@ -988,7 +1019,7 @@ def _lbfgsb_state_to_lbfgs_results(
         ls_status=state.workspace.isave[34],
         evaluated_nonfinite_count=state.evaluated_nonfinite_count,
         all_accepted_states_finite=state.all_accepted_states_finite,
-        invalid_step_log=_lbfgsb_invalid_step_log(state),
+        invalid_step_record=_lbfgsb_invalid_step_record(state),
         optimizer_state_trace=tuple(optimizer_state_trace),
         hess_inv_s=history.s,
         hess_inv_y=history.y,

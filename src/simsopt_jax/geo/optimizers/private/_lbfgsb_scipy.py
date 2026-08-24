@@ -272,6 +272,34 @@ class LbfgsbInverseHessianHistory(NamedTuple):
     n_corrs: jax.Array
 
 
+# Line-search tolerances ``lnsrlb`` hands to ``dcsrch``: ``ftol`` scales the
+# sufficient-decrease (Armijo) test ``f <= finit + stp*ftol*ginit`` and ``gtol``
+# the curvature test ``abs(g) <= gtol*(-ginit)``.  Diagnostics that report the
+# residual of either test must read them from here rather than restate them.
+LBFGSB_LINE_SEARCH_FTOL = 1.0e-3
+LBFGSB_LINE_SEARCH_GTOL = 0.9
+LBFGSB_LINE_SEARCH_XTOL = 0.1
+
+# Offset of the 13-slot ``dcsrch`` save area inside the ``lnsrlb`` ``dsave``
+# workspace, written as ``dsave[16:29] = search.dsave``.  ``dcsrch`` packs its
+# variables in the order ``(ginit, gtest, gx, gy, finit, fx, fy, stx, sty,
+# stmin, stmax, width, width1)`` -- see ``_dcsrch_save_variables``.
+LBFGSB_DCSRCH_DSAVE_OFFSET = 16
+LBFGSB_DCSRCH_DSAVE_GINIT = LBFGSB_DCSRCH_DSAVE_OFFSET + 0
+
+# ``lnsrlb`` slot holding ``gd``, the directional derivative ``g . d`` recomputed
+# from the incoming gradient on every entry, i.e. phi'(alpha) at the trial point
+# the driver last evaluated.
+LBFGSB_DSAVE_GD = 10
+
+# The two terminal values ``isave[34]`` can hold once ``setulb`` reports
+# ABNORMAL: ``lnsrlb`` sets NOT_DESCENT when the first directional derivative of
+# a line search is not negative, and the abnormal handler rewrites a still-zero
+# info to MAXLS when the search exhausted its ``maxls`` backtracks.
+LBFGSB_LINE_SEARCH_INFO_NOT_DESCENT = -4
+LBFGSB_LINE_SEARCH_INFO_MAXLS = -9
+
+
 def lbfgsb_workspace_size(n: int, m: int) -> int:
     return 2 * m * n + 5 * n + 11 * m * m + 8 * m
 
@@ -1387,7 +1415,11 @@ def _lbfgsb_setulb_line_search_abnormal(
         jnp.asarray(1, dtype=jnp.int32),
         jnp.asarray(0, dtype=jnp.int32),
     )
-    info = jnp.where(maxls_exhausted, jnp.asarray(-9, dtype=jnp.int32), search.info)
+    info = jnp.where(
+        maxls_exhausted,
+        jnp.asarray(LBFGSB_LINE_SEARCH_INFO_MAXLS, dtype=jnp.int32),
+        search.info,
+    )
     nfgv = search.nfgv - maxls_correction
     ifun = search.ifun - maxls_correction
     iback = search.iback - maxls_correction
@@ -4362,7 +4394,7 @@ def lbfgsb_lnsrlb(
             ifun=ifun,
             iback=iback,
             nfgv=nfgv,
-            info=jnp.asarray(-4, dtype=jnp.int32),
+            info=jnp.asarray(LBFGSB_LINE_SEARCH_INFO_NOT_DESCENT, dtype=jnp.int32),
             task=task,
             task_msg=task_msg,
             isave=isave,
@@ -4376,9 +4408,9 @@ def lbfgsb_lnsrlb(
             f,
             next_gd,
             stp,
-            1.0e-3,
-            0.9,
-            0.1,
+            LBFGSB_LINE_SEARCH_FTOL,
+            LBFGSB_LINE_SEARCH_GTOL,
+            LBFGSB_LINE_SEARCH_XTOL,
             0.0,
             stpmx,
             temp_task,

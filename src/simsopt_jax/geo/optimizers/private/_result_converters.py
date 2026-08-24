@@ -108,55 +108,30 @@ def _lbfgs_message(status, invalid_state, state):
     return _status_message_lbfgs(status, invalid_state)
 
 
-def _private_lbfgs_invalid_step_log_to_host(invalid_step_log):
-    count = _host_int(invalid_step_log.count)
-    if count <= 0:
+def _private_lbfgs_invalid_step_record_to_host(invalid_step_record):
+    """Publish the L-BFGS-B rejected-step record as a zero- or one-event list.
+
+    An L-BFGS-B solve stops at its first abnormal line-search termination, so the
+    record is a single terminal observation rather than a buffer of trials.
+    """
+    if not _host_bool(invalid_step_record.recorded):
         return []
-    iterations = _as_host_numpy(invalid_step_log.iteration)
-    capacity = int(iterations.shape[0])
-    if capacity <= 0:
-        return []
-    write_index = _host_int(invalid_step_log.write_index)
-    start_index = (write_index - count) % capacity
-    step_scales = _as_host_numpy(invalid_step_log.step_scale)
-    line_search_failed = _as_host_numpy(invalid_step_log.line_search_failed)
-    nonfinite_step = _as_host_numpy(invalid_step_log.nonfinite_step)
-    stalled_step = _as_host_numpy(invalid_step_log.stalled_step)
-    valid_curvature = _as_host_numpy(invalid_step_log.valid_curvature)
-    trial_converged = _as_host_numpy(invalid_step_log.trial_converged)
-    line_search_statuses = _as_host_numpy(invalid_step_log.ls_status)
-    requested_initial_steps = _as_host_numpy(invalid_step_log.requested_initial_step)
-    first_tested_alphas = _as_host_numpy(invalid_step_log.first_tested_alpha)
-    best_finite_alphas = _as_host_numpy(invalid_step_log.best_finite_alpha)
-    returned_alphas = _as_host_numpy(invalid_step_log.returned_alpha)
-    failure_reasons = _as_host_numpy(invalid_step_log.failure_reason)
-    armijo_margins = _as_host_numpy(invalid_step_log.armijo_margin)
-    curvature_margins = _as_host_numpy(invalid_step_log.curvature_margin)
-    events = []
-    for offset in range(count):
-        index = (start_index + offset) % capacity
-        events.append(
-            {
-                "iteration": int(iterations[index]),
-                "step_scale": float(step_scales[index]),
-                "line_search_failed": bool(line_search_failed[index]),
-                "nonfinite_step": bool(nonfinite_step[index]),
-                "stalled_step": bool(stalled_step[index]),
-                "valid_curvature": bool(valid_curvature[index]),
-                "trial_converged": bool(trial_converged[index]),
-                "ls_status": int(line_search_statuses[index]),
-                "requested_initial_step": float(requested_initial_steps[index]),
-                "first_tested_alpha": float(first_tested_alphas[index]),
-                "best_finite_alpha": float(best_finite_alphas[index]),
-                "returned_alpha": float(returned_alphas[index]),
-                "failure_reason": line_search_failure_reason_from_code(
-                    failure_reasons[index]
-                ),
-                "armijo_margin": float(armijo_margins[index]),
-                "curvature_margin": float(curvature_margins[index]),
-            }
-        )
-    return events
+    event = {
+        "iteration": _host_int(invalid_step_record.iteration),
+        "step_scale": _host_float(invalid_step_record.step_scale),
+        "line_search_failed": _host_bool(invalid_step_record.line_search_failed),
+        "nonfinite_step": _host_bool(invalid_step_record.nonfinite_step),
+        "ls_status": _host_int(invalid_step_record.ls_status),
+        "failure_reason": line_search_failure_reason_from_code(
+            _host_int(invalid_step_record.failure_reason)
+        ),
+    }
+    # A non-descent direction is rejected before dcsrch runs, so no curvature
+    # test was ever evaluated and the key is absent rather than carrying a
+    # number derived from a stale save area.
+    if _host_bool(invalid_step_record.curvature_margin_measured):
+        event["curvature_margin"] = _host_float(invalid_step_record.curvature_margin)
+    return [event]
 
 
 def _private_bfgs_result_to_optimize_result(state, *, total_nit=None):
@@ -195,8 +170,8 @@ def _private_lbfgs_result_to_optimize_result(state):
         invalid_state = _is_invalid_state(state.f_k, state.g_k)
         status = _host_int(state.status)
         ls_status = _host_int(state.ls_status)
-        invalid_step_log = _private_lbfgs_invalid_step_log_to_host(
-            state.invalid_step_log
+        invalid_step_log = _private_lbfgs_invalid_step_record_to_host(
+            state.invalid_step_record
         )
         optimizer_state_trace = tuple(state.optimizer_state_trace)
         result_fields = {

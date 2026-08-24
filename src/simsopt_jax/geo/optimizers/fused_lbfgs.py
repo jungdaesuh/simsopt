@@ -15,7 +15,7 @@ from .private import prepare_lbfgs_private as _prepare_lbfgs_private
 from .private import (
     prepare_parametric_lbfgs_private as _prepare_parametric_lbfgs_private,
 )
-from .private._types import _LBFGSInvalidStepLog, _LBFGSResults
+from .private._types import _LBFGSInvalidStepRecord, _LBFGSResults
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,25 +44,27 @@ class FusedLBFGSState(NamedTuple):
     inverse_hessian_corrections: jax.Array
 
 
-class FusedLBFGSInvalidStepLog(NamedTuple):
-    """Fixed-shape device-array diagnostics for an invalid terminal step."""
+class FusedLBFGSInvalidStepRecord(NamedTuple):
+    """Fixed-shape device-array diagnostics for an invalid terminal step.
 
-    event_count: jax.Array
-    write_index: jax.Array
+    A solve publishes at most one such record -- ``recorded`` says whether it
+    exists -- and every field is a scalar read from the terminal L-BFGS-B
+    workspace.  ``step_scale`` is the line search's step scale at the moment it
+    was abandoned, which is not the step any trial was evaluated at, while
+    ``curvature_margin`` describes the trial that was: they are two different
+    alphas.  ``curvature_margin`` is NaN unless ``curvature_margin_measured``,
+    which is false when a non-descent direction was rejected before ``dcsrch``
+    ever ran.
+    """
+
+    recorded: jax.Array
     iteration: jax.Array
     step_scale: jax.Array
     line_search_failed: jax.Array
     nonfinite_step: jax.Array
-    stalled_step: jax.Array
-    valid_curvature: jax.Array
-    trial_converged: jax.Array
     line_search_status: jax.Array
-    requested_initial_step: jax.Array
-    first_tested_alpha: jax.Array
-    best_finite_alpha: jax.Array
-    returned_alpha: jax.Array
     failure_reason: jax.Array
-    armijo_margin: jax.Array
+    curvature_margin_measured: jax.Array
     curvature_margin: jax.Array
 
 
@@ -84,7 +86,7 @@ class FusedLBFGSResult(NamedTuple):
     line_search_status: jax.Array
     evaluated_nonfinite_count: jax.Array
     all_accepted_states_finite: jax.Array
-    invalid_step_log: FusedLBFGSInvalidStepLog
+    invalid_step_record: FusedLBFGSInvalidStepRecord
     task: jax.Array
 
 
@@ -147,27 +149,19 @@ class PreparedParametricFusedLBFGS:
         return self._run_staged(x0, parameter)
 
 
-def _public_invalid_step_log(
-    log: _LBFGSInvalidStepLog,
-) -> FusedLBFGSInvalidStepLog:
-    return FusedLBFGSInvalidStepLog(
-        event_count=cast(jax.Array, log.count),
-        write_index=cast(jax.Array, log.write_index),
-        iteration=log.iteration,
-        step_scale=log.step_scale,
-        line_search_failed=log.line_search_failed,
-        nonfinite_step=log.nonfinite_step,
-        stalled_step=log.stalled_step,
-        valid_curvature=log.valid_curvature,
-        trial_converged=log.trial_converged,
-        line_search_status=log.ls_status,
-        requested_initial_step=log.requested_initial_step,
-        first_tested_alpha=log.first_tested_alpha,
-        best_finite_alpha=log.best_finite_alpha,
-        returned_alpha=log.returned_alpha,
-        failure_reason=log.failure_reason,
-        armijo_margin=log.armijo_margin,
-        curvature_margin=log.curvature_margin,
+def _public_invalid_step_record(
+    record: _LBFGSInvalidStepRecord,
+) -> FusedLBFGSInvalidStepRecord:
+    return FusedLBFGSInvalidStepRecord(
+        recorded=record.recorded,
+        iteration=record.iteration,
+        step_scale=record.step_scale,
+        line_search_failed=record.line_search_failed,
+        nonfinite_step=record.nonfinite_step,
+        line_search_status=record.ls_status,
+        failure_reason=record.failure_reason,
+        curvature_margin_measured=record.curvature_margin_measured,
+        curvature_margin=record.curvature_margin,
     )
 
 
@@ -192,7 +186,7 @@ def _public_result(result: _LBFGSResults) -> FusedLBFGSResult:
         line_search_status=cast(jax.Array, result.ls_status),
         evaluated_nonfinite_count=result.evaluated_nonfinite_count,
         all_accepted_states_finite=result.all_accepted_states_finite,
-        invalid_step_log=_public_invalid_step_log(result.invalid_step_log),
+        invalid_step_record=_public_invalid_step_record(result.invalid_step_record),
         task=cast(jax.Array, result.task),
     )
 
@@ -289,7 +283,7 @@ def prepare_parametric_fused_lbfgs(
 
 
 __all__ = (
-    "FusedLBFGSInvalidStepLog",
+    "FusedLBFGSInvalidStepRecord",
     "FusedLBFGSOptions",
     "FusedLBFGSResult",
     "FusedLBFGSState",
