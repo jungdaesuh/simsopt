@@ -380,7 +380,20 @@ DIAG5_FROZEN_NUMERICAL_PATHS: Final = frozenset(
         "src/simsopt_jax_adapters/geo/single_stage_native_endpoint.py",
     }
 )
-DIAG5_EXECUTION_SOURCE_ENTRY_COUNT: Final = 642
+# Refrozen 2026-08-24: 642 -> 661. Nineteen files entered the broad sweep
+# (``benchmarks/``, ``examples/``, ``src/``) since the last freeze -- 13
+# nested-LS benchmarks from the eight-term outer campaign plus 6 from earlier
+# ones -- and none left. Admitted explicitly, one ``--admit`` each, per
+# ``benchmarks/regenerate_execution_source_manifest.py``.
+#
+# Run in a DEDICATED CLEAN WORKTREE, because the regenerator hashes
+# working-tree bytes and the shared tree is not quiescent. One trap that
+# cost a false answer first time round: ``src/simsopt/_version.py`` is a
+# gitignored setuptools_scm artifact that the membership rule includes, so a
+# freshly-added worktree does not have it and the refreeze silently DROPS it
+# -- removing a gate, which is the exact failure the regenerator's docstring
+# warns about. The worktree must be quiescent AND built.
+DIAG5_EXECUTION_SOURCE_ENTRY_COUNT: Final = 661
 DIAG5_CPU_QUALIFICATION_SCHEMA_VERSION: Final = (
     "single-stage-neq-gntr3-cpu-trajectory-qualification-v2"
 )
