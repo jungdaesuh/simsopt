@@ -187,9 +187,22 @@ class _FakeJaxOuterState:
     state to start at a specific real point passes one.
     """
 
-    def __init__(self, anchor: NestedLsOuterAnchor | None = None) -> None:
+    def __init__(
+        self,
+        anchor: NestedLsOuterAnchor | None = None,
+        *,
+        inner_substep_legs: tuple[int, ...] = (1,),
+        inner_predictor: bool = False,
+    ) -> None:
         anchor = sentinel_anchor() if anchor is None else anchor
         self.anchor = anchor
+        # The inner-lane policy the child reads to build its ``inner_policy``
+        # block. Settable, so a test can drive a NON-stock lane and check the
+        # receipt says so -- a fake pinned to the stock values could only ever
+        # confirm that a stock run reports stock, which is the half that
+        # cannot be wrong.
+        self.inner_substep_legs = tuple(inner_substep_legs)
+        self.inner_predictor = bool(inner_predictor)
         self.commit_count = 0
         self.last_trial = NestedLsOuterTrialReadout(
             anchor=anchor,

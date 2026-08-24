@@ -26,19 +26,25 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_COARSE_USE_LINE_SEARCH_VALUE,
     NESTED_LS_COARSE_USE_OUTER_GRADIENT,
     NESTED_LS_COARSE_USES,
+    NESTED_LS_INNER_POLICY_NAME,
     NESTED_LS_INNER_SUBSTEP_LEGS,
     NESTED_LS_NEWTON_COARSE_TOL,
+    NESTED_LS_NEWTON_MAXITER,
     NESTED_LS_NEWTON_EXIT_COARSE_CONVERGED,
     NESTED_LS_NEWTON_EXIT_CONVERGED,
     NESTED_LS_NEWTON_EXIT_FAILED,
     NESTED_LS_NEWTON_EXIT_STATUSES,
     NESTED_LS_NEWTON_TOL,
     NESTED_LS_OUTER_FD0_REL_TOL,
+    NESTED_LS_OUTER_IOTA_BRANCH_GUARD,
+    NESTED_LS_OUTER_JAX_CHILD_SCHEMA,
+    NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA,
     NESTED_LS_PREDICTOR_ARM_BARE,
     NESTED_LS_PREDICTOR_ARM_PREDICTED,
     NESTED_LS_PREDICTOR_TRUST_REGION_RATIO,
     nested_ls_coarse_tier_admits,
     nested_ls_coarse_tier_error_bound,
+    nested_ls_inner_policy,
     nested_ls_inner_substep_points,
     nested_ls_predictor_arm,
     nested_ls_predictor_trust_region,
@@ -1015,3 +1021,105 @@ def test_a_prediction_with_a_better_envelope_gradient_is_kept(monkeypatch) -> No
     np.testing.assert_allclose(
         surface, np.asarray(state.anchor.surface_dofs) + np.array([0.01, 0.0, 0.0])
     )
+
+
+# --------------------------------------------------------------------------
+# Sealed inner-lane policy (Phase 5)
+# --------------------------------------------------------------------------
+
+
+def _policy(**overrides: object) -> dict:
+    fields: dict[str, object] = {
+        "ift_stab": 0.0,
+        "inner_substep_legs": (1,),
+        "inner_predictor": False,
+    }
+    fields.update(overrides)
+    return nested_ls_inner_policy(**fields)  # type: ignore[arg-type]
+
+
+def test_the_stock_lane_declares_itself_stock() -> None:
+    policy = _policy()
+    assert policy["trajectory_is_stock"] is True
+    assert policy["inner_substep_enabled"] is False
+    assert policy["inner_predictor_enabled"] is False
+    assert policy["policy"] == NESTED_LS_INNER_POLICY_NAME
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"inner_substep_legs": NESTED_LS_INNER_SUBSTEP_LEGS},
+        {"inner_predictor": True},
+        {"inner_substep_legs": NESTED_LS_INNER_SUBSTEP_LEGS, "inner_predictor": True},
+    ],
+)
+def test_every_non_stock_lane_refuses_to_look_stock(overrides: dict) -> None:
+    """The whole reason the block exists.
+
+    Before it, a run with either lever enabled published a policy
+    byte-identical to a run without them -- two different optimizations, one
+    receipt shape, and a consumer free to compare numbers that must not be
+    compared. Each lever alone, and both together, must move
+    ``trajectory_is_stock`` off True.
+    """
+
+    policy = _policy(**overrides)
+    assert policy["trajectory_is_stock"] is False
+    assert "NON-STOCK" in str(policy["comparability"])
+
+
+def test_the_stock_and_non_stock_blocks_are_not_equal() -> None:
+    """Stated as the comparison a consumer would actually make."""
+
+    assert _policy() != _policy(inner_predictor=True)
+    assert _policy() != _policy(inner_substep_legs=NESTED_LS_INNER_SUBSTEP_LEGS)
+
+
+def test_the_trust_region_ratio_appears_only_when_the_predictor_runs() -> None:
+    """A cap reported for a lane that never capped anything is noise."""
+
+    assert _policy()["predictor_trust_region_ratio"] is None
+    assert _policy(inner_predictor=True)["predictor_trust_region_ratio"] == (
+        NESTED_LS_PREDICTOR_TRUST_REGION_RATIO
+    )
+
+
+def test_the_coarse_tier_is_reported_licensed_but_unclaimed() -> None:
+    """``None`` is the honest answer today, not a placeholder.
+
+    Phase 4 licensed a coarse tier; no consumer honours it, because
+    ``success`` stays true only for ``converged``. The block says the
+    licence exists and is unexercised, and a run that starts honouring it
+    has to say so here -- at which point receipts on either side of the
+    change stop being comparable.
+    """
+
+    policy = _policy()
+    assert policy["coarse_tier_licensed_residual"] == NESTED_LS_NEWTON_COARSE_TOL
+    assert policy["coarse_tier_honoured"] is None
+    assert _policy(coarse_tier_honoured="outer_gradient")["coarse_tier_honoured"] == (
+        "outer_gradient"
+    )
+
+
+def test_the_block_records_values_not_a_preset_name() -> None:
+    """A preset name is only as honest as the reader's copy of its meaning."""
+
+    policy = _policy(ift_stab=1.0e-4)
+    assert policy["ift_stab"] == 1.0e-4
+    assert policy["newton_maxiter"] == NESTED_LS_NEWTON_MAXITER
+    assert policy["newton_tol"] == NESTED_LS_NEWTON_TOL
+    assert policy["iota_branch_guard"] == NESTED_LS_OUTER_IOTA_BRANCH_GUARD
+
+
+def test_both_child_schemas_moved_for_the_block() -> None:
+    """One bump, not three, and it had to move rather than stay additive.
+
+    An old consumer reading a new receipt would still see every field it
+    knows, and would still draw the wrong comparison the block exists to
+    prevent. Only the version stops it.
+    """
+
+    assert NESTED_LS_OUTER_JAX_CHILD_SCHEMA.endswith(".v6")
+    assert NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA.endswith(".v5")
