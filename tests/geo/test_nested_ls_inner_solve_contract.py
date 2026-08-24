@@ -34,9 +34,14 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_NEWTON_EXIT_STATUSES,
     NESTED_LS_NEWTON_TOL,
     NESTED_LS_OUTER_FD0_REL_TOL,
+    NESTED_LS_PREDICTOR_ARM_BARE,
+    NESTED_LS_PREDICTOR_ARM_PREDICTED,
+    NESTED_LS_PREDICTOR_TRUST_REGION_RATIO,
     nested_ls_coarse_tier_admits,
     nested_ls_coarse_tier_error_bound,
     nested_ls_inner_substep_points,
+    nested_ls_predictor_arm,
+    nested_ls_predictor_trust_region,
     nested_ls_newton_exit_status,
 )
 
@@ -533,3 +538,99 @@ def test_a_non_finite_residual_is_never_admitted() -> None:
             assert not nested_ls_coarse_tier_admits(
                 achieved_residual_l2=residual, use=use
             )
+
+
+# --------------------------------------------------------------------------
+# Predictor trust region and arm rule (Phase 2), now one implementation
+# --------------------------------------------------------------------------
+
+
+def test_the_trust_region_scales_and_never_rejects() -> None:
+    """DESC ``tr_ratio``: an oversized step is clipped, not discarded."""
+
+    anchor = np.array([3.0, 4.0])  # norm 5, cap 0.5 at ratio 0.1
+    delta = np.array([2.0, 0.0])
+    applied, raw, applied_norm, cap, scaled = nested_ls_predictor_trust_region(
+        delta_surface=delta, anchor_surface_dofs=anchor, ratio=0.1
+    )
+    assert scaled is True
+    assert cap == pytest.approx(0.5)
+    assert raw == pytest.approx(2.0)
+    assert applied_norm == pytest.approx(cap)
+    # Direction preserved: clipping, not rejection.
+    np.testing.assert_allclose(applied, np.array([0.5, 0.0]))
+
+
+def test_a_step_exactly_at_the_bound_is_left_untouched() -> None:
+    """Strict ``>`` triggers scaling, so the boundary is inside the region."""
+
+    anchor = np.array([3.0, 4.0])
+    delta = np.array([0.5, 0.0])
+    applied, _raw, _applied_norm, cap, scaled = nested_ls_predictor_trust_region(
+        delta_surface=delta, anchor_surface_dofs=anchor, ratio=0.1
+    )
+    assert scaled is False
+    assert np.array_equal(applied, delta)
+    assert float(np.linalg.norm(delta)) == pytest.approx(cap)
+
+
+def test_the_applied_step_never_aliases_the_caller_s_array() -> None:
+    """Both branches return a fresh array, so a caller cannot write back."""
+
+    anchor = np.array([3.0, 4.0])
+    for delta in (np.array([0.1, 0.0]), np.array([9.0, 0.0])):
+        applied, *_ = nested_ls_predictor_trust_region(
+            delta_surface=delta, anchor_surface_dofs=anchor, ratio=0.1
+        )
+        assert applied is not delta
+
+
+def test_a_tie_keeps_the_prediction_so_a_zero_step_is_an_identity() -> None:
+    """The tie-break is load-bearing, not arbitrary.
+
+    At ``Δc = 0`` the predicted step is zero, the two starts are the same
+    vector, and the two envelope gradients are bitwise equal. Keeping the
+    prediction on a tie is what makes a predictor-ON run reproduce a
+    predictor-OFF run exactly at an unmoved point.
+    """
+
+    assert (
+        nested_ls_predictor_arm(bare_gradient_l2=1.5, predicted_gradient_l2=1.5)
+        == NESTED_LS_PREDICTOR_ARM_PREDICTED
+    )
+
+
+def test_the_bare_anchor_wins_only_when_the_prediction_is_strictly_worse() -> None:
+    assert (
+        nested_ls_predictor_arm(bare_gradient_l2=1.0, predicted_gradient_l2=1.0 + 1e-15)
+        == NESTED_LS_PREDICTOR_ARM_BARE
+    )
+    assert (
+        nested_ls_predictor_arm(bare_gradient_l2=1.0, predicted_gradient_l2=1.0 - 1e-15)
+        == NESTED_LS_PREDICTOR_ARM_PREDICTED
+    )
+
+
+def test_the_harness_and_the_contract_are_the_same_rule() -> None:
+    """The measured arithmetic and the shipped arithmetic must be one thing.
+
+    The replay harness is what produced the Phase-2 evidence, so a second
+    copy of these rules living there is how a receipt's number quietly stops
+    describing the lane it claims to describe. The harness now delegates;
+    this pins that it still does.
+    """
+
+    from benchmarks import nested_ls_outer_predictor_replay as probe
+
+    assert probe.TRUST_REGION_RATIO == NESTED_LS_PREDICTOR_TRUST_REGION_RATIO
+    anchor = np.array([3.0, 4.0])
+    for delta in (np.array([2.0, 0.0]), np.array([0.1, 0.0]), np.zeros(2)):
+        harness = probe.apply_trust_region(delta, anchor, 0.1)
+        shared = nested_ls_predictor_trust_region(
+            delta_surface=delta, anchor_surface_dofs=anchor, ratio=0.1
+        )
+        assert np.array_equal(harness[0], shared[0])
+        assert harness[1:] == shared[1:]
+    assert probe.select_arm(1.0, 1.0) == nested_ls_predictor_arm(
+        bare_gradient_l2=1.0, predicted_gradient_l2=1.0
+    )
