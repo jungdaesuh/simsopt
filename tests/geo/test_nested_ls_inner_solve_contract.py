@@ -663,8 +663,46 @@ def _outer_state(**overrides: object):
         G=2.0,
         schur_lu=None,
     )
+
+    class _FakeSurface:
+        def __init__(self) -> None:
+            self.dofs = None
+
+        def set_dofs(self, dofs: object) -> None:
+            self.dofs = np.array(dofs, dtype=np.float64, copy=True)
+
+    class _FakeBiotSavart:
+        def __init__(self, owner: object) -> None:
+            self._owner = owner
+            self._x = None
+
+        @property
+        def x(self):
+            return self._x
+
+        @x.setter
+        def x(self, value: object) -> None:
+            self._x = np.array(value, dtype=np.float64, copy=True)
+            # Record every coil point installed, in order. WHICH point the
+            # mixed term is evaluated at is as load-bearing as which closure
+            # family evaluates it: ``source.operator`` was factored at the
+            # committed anchor, so evaluating the mixed term anywhere else
+            # linearizes about a point the operator does not describe -- and
+            # it returns a plausible array rather than raising.
+            self._owner.installed_coils.append(self._x)
+
+    class _FakeBoozer:
+        def __init__(self) -> None:
+            self.surface = _FakeSurface()
+            self.installed_coils: list = []
+            self.biotsavart = _FakeBiotSavart(self)
+            self.refresh_count = 0
+
+        def _refresh_coil_data(self) -> None:
+            self.refresh_count += 1
+
     fields: dict[str, object] = {
-        "jax_boozer": None,
+        "jax_boozer": _FakeBoozer(),
         "flat_value_and_grad": None,
         "vessel_dofs": np.zeros(1),
         "coil_slice": slice(0, 2),
@@ -817,6 +855,8 @@ def _predicting_state(monkeypatch, *, raw_delta, bare_grad_l2, predicted_grad_l2
     untested. Mutating either survived the suite until this existed.
     """
 
+    import inspect
+
     from simsopt_jax_adapters.geo import nested_ls_reduced_scale as scale
 
     state = _outer_state(inner_predictor=True)
@@ -827,16 +867,61 @@ def _predicting_state(monkeypatch, *, raw_delta, bare_grad_l2, predicted_grad_l2
         # is ``raw_delta = -apply_lu(mixed)``.
         apply_lu=lambda _mixed: -np.asarray(raw_delta, dtype=np.float64),
     )
+
+    # The two closure families have DIFFERENT arities in production, and the
+    # fakes mirror that on purpose. ``nested_ls_reduced_closures`` captures
+    # the coils at construction, so its residual takes only the packed
+    # decision; ``nested_ls_runtime_coil_closures`` takes
+    # ``(packed, coil_dofs)``. The first draft of these fakes handed back
+    # bare ``object()``s, which accept anything and therefore could not tell
+    # the families apart -- production shipped with the runtime pair wired
+    # into the envelope evaluation and these tests stayed green until a real
+    # run raised TypeError. Fakes that do not mirror the contract do not
+    # defend it.
+    def _runtime_residual(_packed, _coil_dofs):  # pragma: no cover - arity only
+        raise AssertionError("runtime-coil residual called as a frozen-coil one")
+
+    def _frozen_residual(_packed):  # pragma: no cover - arity only
+        raise AssertionError("frozen-coil residual called directly")
+
     monkeypatch.setattr(
-        scale, "nested_ls_runtime_coil_closures", lambda _b: (object(), object(), None)
+        scale,
+        "nested_ls_runtime_coil_closures",
+        lambda _b: (_runtime_residual, _runtime_residual, None),
     )
     monkeypatch.setattr(
         scale,
-        "apply_reduced_mixed_schur_coil_tangent",
-        lambda *a, **k: np.zeros_like(np.asarray(raw_delta, dtype=np.float64)),
+        "nested_ls_reduced_closures",
+        lambda _b: (_frozen_residual, _frozen_residual, None),
     )
 
-    def _fake_envelope(_residual, _objective, surface):
+    def _fake_mixed(residual, objective, _surface, _coils, _step, *, operator):
+        # The mirror of the envelope check, in the other direction. The mixed
+        # term REQUIRES the runtime-coil family, because it differentiates
+        # with respect to the coils; handing it frozen-coil closures does not
+        # raise, it silently returns a wrong delta_s. Arity is the only thing
+        # that separates them from outside, so assert it.
+        del operator
+        for closure in (residual, objective):
+            parameters = inspect.signature(closure).parameters
+            assert len(parameters) == 2, (
+                "mixed term evaluated with a frozen-coil closure "
+                f"(arity {len(parameters)}); it requires the runtime-coil family"
+            )
+        return np.zeros_like(np.asarray(raw_delta, dtype=np.float64))
+
+    monkeypatch.setattr(scale, "apply_reduced_mixed_schur_coil_tangent", _fake_mixed)
+
+    def _fake_envelope(residual, objective, surface):
+        # Assert the FAMILY, not just that something was passed. A
+        # frozen-coil residual takes one argument; the runtime-coil one takes
+        # two. This is the check that would have caught the shipped swap.
+        for closure in (residual, objective):
+            parameters = inspect.signature(closure).parameters
+            assert len(parameters) == 1, (
+                "envelope evaluated with a runtime-coil closure "
+                f"(arity {len(parameters)}); it requires the frozen-coil family"
+            )
         is_bare = np.array_equal(surface, state.anchor.surface_dofs)
         norm = bare_grad_l2 if is_bare else predicted_grad_l2
         return 0.0, np.array([float(norm), 0.0, 0.0]), None
@@ -866,6 +951,14 @@ def test_the_trust_region_is_applied_to_the_predicted_start(monkeypatch) -> None
         state, np.array([0.3, -0.45])
     )
     cap = 0.1 * float(np.linalg.norm(state.anchor.surface_dofs))
+    # The mixed term is evaluated at the ANCHOR, the envelope comparison at
+    # the TRIAL, in that order. Evaluating the mixed term at the trial
+    # linearizes about a point ``source.operator`` was not factored at, and
+    # returns a plausible array rather than raising.
+    installed = state.jax_boozer.installed_coils
+    assert len(installed) == 2
+    np.testing.assert_array_equal(installed[0], np.asarray(state.anchor.coil_dofs))
+    np.testing.assert_array_equal(installed[1], np.array([0.3, -0.45]))
     assert arm == NESTED_LS_PREDICTOR_ARM_PREDICTED
     assert scaled is True
     assert raw_l2 == pytest.approx(10.0)
