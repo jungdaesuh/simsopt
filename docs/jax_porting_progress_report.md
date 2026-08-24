@@ -148,15 +148,25 @@ route.
 > verdicts, 19 are fully clean and 4 carry failures. These fractions must
 > not be read against the header's 1,248/1,248 — that was a clean pass in
 > one pinned environment; this one contains failures. All 14 failures
-> were quantified from the retained value arrays, and every one is a
-> marginal miss — none exceeds about 2x its tolerance: the chaotic
-> tracers (fieldlines-ncsx 24/30, worst 5.5e-2 vs `atol` 3e-2;
-> fieldlines-qa 26/30, worst 2.1e-3 vs `atol` 2e-3 — including one
-> **CPU-versus-CPU** pair, native-cpu:jax-cpu, a cross-host CPU trajectory
-> divergence with no GPU involved), planar-coils' jax-cpu:jax-gpu
-> objective pair (28/30, 3.5% vs `rtol` 3%), and a near-zero
-> `initial:constraint_residual` pair in wireframe-rcls-with-ports (88/90,
-> 4.7e-10 against `rtol` 1e-10). One inversion worth naming: field-line
+> were quantified from the retained value arrays as exact
+> allclose-overshoot factors (max elementwise |a-b| divided by its own
+> `atol + rtol*|b|` bound). By class: the chaotic tracers miss modestly —
+> fieldlines-ncsx (24/30) at 1.60x-1.83x, worst 5.5e-2 against `atol`
+> 3e-2, and fieldlines-qa (26/30) at 1.05x-1.41x. The most
+> consequential number in the set is also the most benign-looking:
+> fieldlines-qa's **native-cpu:jax-cpu** states pair at 1.05x over a
+> loose absolute tolerance — a CPU-versus-CPU divergence with no device
+> involved, establishing that the cross-host trajectory divergence exists
+> independent of any GPU. planar-coils' jax-cpu:jax-gpu final objective
+> misses at 1.32x, but its first-phase objective misses at 5.26x (3.5e-4
+> absolute). And wireframe-rcls-with-ports' near-zero
+> `initial:constraint_residual` (88/90) overshoots its very tight bound
+> by 466x — an absolute miss of only 4.7e-10, but against `atol` 1e-12 +
+> `rtol` 1e-10 on a dense linear-solve residual, making it the one
+> failure that is neither small relative to its own gate nor a chaotic
+> trajectory. The absolute misses are small everywhere; the relative
+> overshoots are not uniformly so, and no blanket "all marginal" summary
+> survives these numbers. One inversion worth naming: field-line
 > tracing supplies 10 of these 14 failures yet is the one workload that
 > cleared every warmed fast-mode gate below — chaotic amplification of
 > floating-point differences is the plausible mechanism, plausible but not
@@ -391,8 +401,9 @@ that excludes one case by scale refusal
 (`single-stage-boozer-vacuum-optimization`, promoted to `native_default`),
 excludes two by the bugs documented above (permanent-magnet-qa's `.vtu`
 side-writes; finitebuild's unrouted `minimum_clearance` observables), and
-contains four cases whose parity comparisons carry marginal failures
-(quantified in the re-validation note — all within ~2x tolerance). The
+contains four cases with failing parity comparisons (quantified in the
+re-validation note: absolute misses at most 5.5e-2, allclose overshoots
+from 1.05x to 466x on one near-zero residual). The
 per-case spread is 1.28x-33.62x; the launch-bound structure is the same
 as the authority run's: cold XLA compilation dominates the JAX lanes at
 bounded scale, so this table measures deployment cost of one-shot runs,
