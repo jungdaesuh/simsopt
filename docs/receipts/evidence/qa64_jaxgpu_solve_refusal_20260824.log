@@ -1,0 +1,23 @@
+/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/src/simsopt_jax/backend/runtime.py:954: RuntimeWarning: Backend mode 'jax_gpu_fast' selects CUDA execution, but XLA_FLAGS does not enable --xla_gpu_exclude_nondeterministic_ops=true. Set XLA_FLAGS before importing or touching JAX devices, because changing XLA flags after JAX backend initialization has no effect.
+  _raise_or_warn_runtime_issue(config, message)
+E0824 04:28:01.616011  630783 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+E0824 04:28:01.745226  630603 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/src/simsopt/geo/permanent_magnet_grid.py:360: UserWarning: Plasma boundary and inner and outer toroidal surfaces should all have the same "range" parameter in order for a permanent magnet grid to be correctly initialized.
+  warnings.warn(
+L2 regularization being used with coefficient = 0.00e+00
+Traceback (most recent call last):
+  File "/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/benchmarks/pm_gpmo_probes.py", line 2800, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/benchmarks/pm_gpmo_probes.py", line 2628, in main
+    result = run_jax_relax_split(build, case.relax_split, arguments.repeat)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/benchmarks/pm_gpmo_probes.py", line 1868, in run_jax_relax_split
+    result = relax_and_split_jax(
+             ^^^^^^^^^^^^^^^^^^^^
+  File "/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/src/simsopt_jax/solve/permanent_magnet.py", line 983, in relax_and_split_jax
+    scan_spec = _mwpgp_spec(grid, m_proxy, alpha=alpha, nu=nu, reg_l2=reg_l2)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/src/simsopt_jax/solve/permanent_magnet.py", line 752, in _mwpgp_spec
+    raise ValueError(
+ValueError: alpha must be <= 2/lambda_max(H) for MwPGP fixed-step contraction; got 1837891.6017776239 > 1837741.1007418663.

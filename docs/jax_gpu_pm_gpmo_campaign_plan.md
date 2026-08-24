@@ -251,6 +251,37 @@ under this record: the three direct pairs invert (native placed count moves towa
 bitwise-identical to the JAX dump; a result byte-identical to the archived *native* dump instead
 **refutes** this record and reopens the adjudication.
 
+**Confirming replay — executed and CONFIRMED (dated 2026-08-24).** The pre-registered replay ran
+on 2026-08-24: `simsoptpp` rebuilt in a separate cloned build dir with `-ffp-contract=fast`
+substituted by `-ffp-contract=off` (verified on the `permanent_magnet_optimization.cpp.o` compile
+line), then the `pm4stell-64` native leg rerun at the archived configuration (`iterations=201`,
+`--history off`, OMP=8, `--repeat 2`). Result: the contract-off native endpoint is
+**bitwise-identical to the archived JAX dump** — `np.array_equal` true, 0 of 5,826 rows differ,
+139 placed rows, both in-process solves removing 31 antiparallel pairs where the production build
+removes 34 — and it differs from the archived *native* dump in exactly the 10 known rows. This is
+the record's ideal outcome, stronger than the minimum "three direct pairs invert": the **entire
+fork is FMA contraction**, and the adjudication record above stands confirmed. Artifacts:
+`docs/receipts/evidence/pm4stell64_fork_k201_native_ffpoff_20260824.npz` (endpoint),
+`docs/receipts/evidence/pm4stell64_native_ffpoff_20260824.json` (whose
+`identity.simsoptpp.sha256` names the contract-off binary, `7c560e6b…`, against the production
+`41b2ca79…`), `docs/receipts/evidence/pm4stell64_native_ffpoff_20260824.log`. Deviations from the
+pre-registration, disclosed: (i) the box was **not quiet** (concurrent campaign legs; run
+`nice -n 19`) — admissible because the deliverable is a bitwise endpoint, not a timing, and the
+repeats agree; (ii) "nothing else changed" required two build-infrastructure repairs with no
+codegen effect on the kernel: the cloned dir's cmake regen edge was deleted (its dependencies
+name a deleted ephemeral uv build env, so ninja would otherwise re-run cmake against the
+production tree) and two dead include roots were re-pointed (donor pybind11 2.13.6 headers —
+binding glue only — and the venv's numpy `_core/include`); (iii) a **first replay attempt the
+same morning is VOID and adjudicates nothing**: its parent-process module preload did not survive
+`_reexec_native_child`'s scrubbed re-exec, so the leg ran the production binary while labeled
+ffp-off — proven by its own `identity.simsoptpp.sha256` = `41b2ca79…` — and trivially matched the
+native dump. Its ledger line (2026-08-24T08:48Z) stands as an executed-leg fact; its artifacts
+were removed from the evidence tree. The working mechanism for any future replay is a
+`sitecustomize.py` preload on `PYTHONPATH` (which `pinned_environment` deliberately preserves
+into the child), verified after the fact by the artifact's identity block. Consequence unchanged:
+the exact-arithmetic predicate repair remains chartered (solver change → parity re-certification
+before any timing); this replay mints no `pm4stell` timing rung.
+
 ## Provenance, ledger, quiet gates
 
 Plan clause 6 (`…backlog…plan.md:215-217`). Every leg writes a `probe_conventions.runtime_identity`
