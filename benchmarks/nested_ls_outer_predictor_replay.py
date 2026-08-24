@@ -88,6 +88,7 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_NEWTON_TOL,
     NESTED_LS_OUTER_IOTA_BRANCH_GUARD,
     NESTED_LS_PREDICTOR_TRUST_REGION_RATIO,
+    NESTED_LS_PREDICTOR_ARM_BARE,
     nested_ls_predictor_arm,
     nested_ls_predictor_trust_region,
 )
@@ -113,6 +114,8 @@ from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     load_flat675_lane_blocks,
     nested_ls_outer_value_and_grad,
     nested_ls_runtime_identity,
+    NestedLsPredictorSource,
+    _predicted_inner_start,
     prepare_f3_b37_outer_state,
     sha256_float64,
 )
@@ -1054,6 +1057,11 @@ class PredictorDiagnostics:
     mixed_term_l2: float
     phi_yy_condition: float
     build_seconds: float
+    # Carried so the production entry point can be handed the SAME Schur
+    # machinery this harness built. Without that, a mirror would compare two
+    # operators as well as two assemblies and could not localize a gap.
+    operator: object
+    apply_lu: object
 
     def as_payload(self) -> dict[str, object]:
         return {
@@ -1156,6 +1164,8 @@ def build_predictor(
         ),
         phi_yy_condition=float(operator.phi_yy_condition),
         build_seconds=float(time.perf_counter() - started),
+        operator=operator,
+        apply_lu=apply_lu,
     )
 
 
@@ -1192,6 +1202,94 @@ def envelope_gradient_norms(
         float(np.linalg.norm(pred_grad)),
     )
     return bare_norm, pred_norm, float(time.perf_counter() - started)
+
+
+# The production predictor must agree with this harness's assembly BITWISE,
+# not to a tolerance: both are handed the same Schur operator and the same LU,
+# both apply the same contract trust region, so every remaining difference is
+# assembly order. A tolerance here would hide exactly the class of defect the
+# gate exists for.
+PRODUCTION_PREDICTOR_MIRROR_BITWISE = True
+
+
+def production_predicted_start(
+    world: LoadedWorld,
+    *,
+    anchor_coils: NDArray[np.float64],
+    trial_coils: NDArray[np.float64],
+    predictor: PredictorDiagnostics,
+) -> tuple[NDArray[np.float64], str, float, float, bool]:
+    """``_predicted_inner_start`` -- the SHIPPED entry point -- at this leg.
+
+    The legs must run production's assembly, not this file's. An earlier
+    revision computed the predicted start here and never called production;
+    that is why this harness stayed green while the shipped predictor raised
+    ``TypeError: residual_fn() missing 1 required positional argument`` on its
+    first real call. A harness that cannot fail when production is broken is
+    not evidence about production.
+
+    ``world.state`` is a real ``NestedLsOuterState`` from
+    ``prepare_f3_b37_outer_state``, so nothing is faked: the only thing
+    installed is the machinery the caller already built, published as the
+    provenance-checked source production expects.
+    """
+
+    state = world.state
+    state.inner_predictor = True
+    state.predictor_source = NestedLsPredictorSource(
+        coil_dofs=np.array(anchor_coils, dtype=np.float64, copy=True),
+        operator=predictor.operator,
+        apply_lu=predictor.apply_lu,
+    )
+    return _predicted_inner_start(state, np.asarray(trial_coils, dtype=np.float64))
+
+
+def require_predictor_provenance_refusal(
+    world: LoadedWorld,
+    *,
+    anchor_surface: NDArray[np.float64],
+    trial_coils: NDArray[np.float64],
+    predictor: PredictorDiagnostics,
+) -> None:
+    """Production must REFUSE a source built somewhere the anchor is not.
+
+    This is the half a value-comparison mirror cannot reach. ``built_at`` is
+    bitwise provenance on the coils the operator was factored at, and a
+    predictor that answered without it would apply a displacement measured
+    from another point -- which compiles, runs, and returns a plausible
+    array. So the check is not "do the numbers agree" but "does the guard
+    fire", and the only way to ask is to hand it a mis-provenanced source.
+    """
+
+    state = world.state
+    state.inner_predictor = True
+    state.predictor_source = NestedLsPredictorSource(
+        # Deliberately the TRIAL coils: the anchor was committed elsewhere.
+        coil_dofs=np.array(trial_coils, dtype=np.float64, copy=True),
+        operator=predictor.operator,
+        apply_lu=predictor.apply_lu,
+    )
+    surface, arm, raw_l2, applied_l2, scaled = _predicted_inner_start(
+        state, np.asarray(trial_coils, dtype=np.float64)
+    )
+    require(
+        arm == NESTED_LS_PREDICTOR_ARM_BARE,
+        "predictor arm under a mis-provenanced source",
+        NESTED_LS_PREDICTOR_ARM_BARE,
+        arm,
+    )
+    require(
+        bool(np.array_equal(np.asarray(surface, dtype=np.float64), anchor_surface)),
+        "predicted start under a mis-provenanced source",
+        "the bare anchor surface, bitwise",
+        "a displaced surface",
+    )
+    require(
+        (raw_l2 == 0.0) and (applied_l2 == 0.0) and (scaled is False),
+        "predictor telemetry under a mis-provenanced source",
+        "(0.0, 0.0, False)",
+        (raw_l2, applied_l2, scaled),
+    )
 
 
 # ==========================================================================
@@ -1357,8 +1455,52 @@ def run_predictor_leg(
         anchor_coils=anchor_coils,
         trial_coils=trial_coils,
     )
-    predicted_surface = (
+    harness_predicted_surface = (
         np.asarray(anchor_surface, dtype=np.float64) + predictor.delta_surface
+    )
+    # The legs run PRODUCTION's assembly. The harness's own is kept only as
+    # the mirror below, which is what localizes a gap to assembly order.
+    predicted_surface, production_arm, production_raw_l2, production_applied_l2, (
+        production_scaled
+    ) = production_predicted_start(
+        world,
+        anchor_coils=anchor_coils,
+        trial_coils=trial_coils,
+        predictor=predictor,
+    )
+    mirror_equal = bool(
+        np.array_equal(
+            np.asarray(predicted_surface, dtype=np.float64),
+            harness_predicted_surface,
+        )
+    )
+    if production_arm != NESTED_LS_PREDICTOR_ARM_BARE:
+        # Production keeps the bare anchor when its own fallback test rejects
+        # the prediction; only the PREDICTED arm asserts the same displacement.
+        require(
+            mirror_equal,
+            "production predictor mirror",
+            "bitwise-equal to this harness's predicted start",
+            float(
+                np.linalg.norm(
+                    np.asarray(predicted_surface, dtype=np.float64)
+                    - harness_predicted_surface
+                )
+            ),
+        )
+    require_predictor_provenance_refusal(
+        world,
+        anchor_surface=np.asarray(anchor_surface, dtype=np.float64),
+        trial_coils=trial_coils,
+        predictor=predictor,
+    )
+    # The refusal check left a mis-provenanced source installed; restore the
+    # legitimate one so the legs below run the real lane.
+    production_predicted_start(
+        world,
+        anchor_coils=anchor_coils,
+        trial_coils=trial_coils,
+        predictor=predictor,
     )
     bare_norm, predicted_norm, envelope_seconds = envelope_gradient_norms(
         world,
