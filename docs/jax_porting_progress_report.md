@@ -15,9 +15,10 @@ comparisons passed
 
 ## Executive summary
 
-**Performance in one place:** "GPU performance in one table
-(2026-08-24)", under the wall-time section — every GPU-vs-native number
-with its confidence level, one row per example.
+**Performance in one place:** "Wall time and GPU speed — one table
+(2026-08-24)" — per example: cold three-lane wall times at HEAD on an
+A100, the cold GPU-vs-native ratio, the enlarged-workload
+GPU-vs-native ratio, and its confidence level.
 
 - All 26 bounded examples pass native CPU, JAX CPU, and strict RTX 5090 GPU
   lanes: 1,248/1,248 comparisons (1,064 `allclose`, 180 exact, 4 `not_worse`),
@@ -32,8 +33,8 @@ with its confidence level, one row per example.
 - Timing is one isolated launch per lane, startup and JIT included. Total GPU
   time was 14.1x native CPU. No steady-state claim follows, and the separate
   fast/parity benchmark has no native baseline. (A 2026-08-24 re-measurement
-  at HEAD on an A100 host puts the same protocol at 9.47x there — see "Wall
-  time at HEAD"; two hosts, two environments, not a trend.)
+  at HEAD on an A100 host puts the same protocol at 9.47x there — see the
+  one-table section; two hosts, two environments, not a trend.)
 - Everything here is bounded scale; native-default remains `not_run`. (True of
   every measurement below and of the manifest at this report's authority
   revision. The live manifest has since promoted one route to `native_default`
@@ -294,58 +295,59 @@ state.
 Maxima: child host 2,116.461 MiB (Boozer QA), parent-observed child 2,185.898
 MiB (Boozer-vacuum GPU), and device 703.567 MiB (particle tracing).
 
-## Wall time, cold time, compile time, and warm time
+## Wall time and GPU speed — one table (2026-08-24)
 
-### What is and is not measured
+The three wall-time columns are the 2026-08-24 run at HEAD (revision
+`f5a3c9821`) on a quiet dedicated host (AMD EPYC 7452, NVIDIA
+A100-PCIE-40GB, glibc 2.31, jax/jaxlib 0.10.0): one isolated **cold**
+launch per lane per case at the default bounded size, startup and XLA
+compilation included, native lane pinned to `OMP_NUM_THREADS=1` (a
+threaded native baseline would be faster, so the GPU deficits in the
+cold column are floors). Each wall time is one full unrepeated
+subprocess — the parity protocol has no compile-only or warmed samples;
+warm numbers come from the per-example receipts.
 
-| Evidence set | Native/GPU matched wall time | Cold | Compile-only | Warm | Host RSS | GPU memory |
-|---|---:|---:|---:|---:|---:|---:|
-| 26-case authority run | one isolated launch per lane | not controlled | not measured | not measured | yes | yes |
-| Five-workload JAX fast/parity benchmark | JAX-only, no native baseline | yes | not isolated | 7 paired repetitions | yes | yes |
-| VMEC-hybrid local run | metrics not retained in a receipt | not established | not measured | not measured | not claim-grade | not retained |
+Both ratio columns state GPU speed as a multiple of native C++ (1.0x =
+equal; higher = GPU faster). **Cold, default size** = native s / GPU s
+from this table. **Enlarged workload** = warm or realistic-scale
+measurement with a receipt: larger resolution, grid, filament count,
+ensemble, or coupling DOFs, per row. Per-row evidence:
+`docs/jax_example_device_assignment.md`. The finitebuild and flat675
+cold ratios come from their own 5090 receipts (blocked in / absent from
+this run, marked †).
 
-The 78-launch campaign took 29 minutes 21 seconds. No compile-only or warmed
-samples exist: each wall time is one full subprocess, startup through receipt
-publication, unrepeated.
-
-Hardware and threading (added 2026-08-24): the authority run's host-local
-artifacts live on the same RTX 5090 / Threadripper 9970X box as the
-fast/parity benchmark below. The parity runtime pins every native-lane child
-to `OMP_NUM_THREADS=1` (for determinism; `examples/jax/parity/runtime.py`,
-present at the authority revision), so the native wall times below are
-single-threaded. A threaded native baseline would be faster, which makes the
-14.1x total a floor on the GPU-lane deficit, not an overstatement of it.
-
-### GPU performance in one table (2026-08-24)
-
-GPU speed as a multiple of native C++ (1.0x = equal; higher = GPU
-faster). "One-shot small run" is a cold launch including compile — from
-the A100 table below (inverted) where the case appears there; the
-finitebuild and flat675 cold figures come from their own 5090 receipts
-(those cases are blocked in / absent from the A100 table). "Real
-workload" is warm or realistic-scale, each with a receipt. Per-row
-evidence: `docs/jax_example_device_assignment.md`.
-
-| Example | One-shot small run | Real workload | Confidence |
-|---|---:|---|---|
-| stage-two-finitebuild | 0.9x | **13.6x** warm solve | certified |
-| flat675 single-stage | 0.5x | **7.7x** at budget 37 | certified |
-| wireframe-gsco-multistep | 0.5x | **3.5x**, bitwise | certified |
-| permanent-magnet-simple | 0.7x | **5.2x**, bitwise | measured once |
-| wireframe-gsco-modular | 0.5x | **5.2x** at 96x100 grid | measured once |
-| wireframe-gsco-sector-saddle | 0.5x | **4.4x** at 96x100 | measured once |
-| permanent-magnet-pm4stell | 0.6x | **3.0x** at nphi=64 | measured once, fix pending |
-| permanent-magnet-muse | 0.8x | **2.9x** at nphi=64 | measured once |
-| coil-forces | 0.1x | **1.6x** warm | measured once |
-| stage-two-stochastic | 0.2x | **1.2-1.4x**, grows with ensemble | measured once |
-| projected-route single-stage | — | only device that finishes the script | measured once |
-| stage-two-optimization | 0.1x | 0.3x warm — native faster | measured once |
-| stage-two-planar-coils | 0.1x | 0.3x warm — native faster | measured once |
-| wireframe-rcls-with-ports | 0.7x | 0.6x device solve — native faster | measured once |
-| permanent-magnet-qa | — | plausible at nphi=64 | blocked |
-| wireframe-rcls-basic | 0.7x | plausible at larger size | untested |
-| tracing (3 examples) | 0.03-0.04x | plausible batching 1000s of trajectories | untested |
-| all others (21 of 40) | slower | stays on CPU — too small to fill a GPU | settled |
+| Example | Native CPU s | JAX CPU s | JAX GPU s | GPU vs native, cold default size | GPU vs native, enlarged workload | Confidence |
+|---|---:|---:|---:|---:|---|---|
+| stage-two-optimization-finitebuild | — | — | — | 0.9x † | **13.6x** warm solve | certified |
+| flat675 single-stage | — | — | — | 0.5x † | **7.7x** at budget 37 | certified |
+| wireframe-gsco-multistep | 3.05 | 4.34 | 5.99 | 0.51x | **3.5x**, bitwise | certified |
+| permanent-magnet-simple | 2.91 | 3.67 | 4.18 | 0.70x | **5.2x**, bitwise | measured once |
+| wireframe-gsco-modular | 2.95 | 5.15 | 6.50 | 0.45x | **5.2x** at 96x100 grid | measured once |
+| wireframe-gsco-sector-saddle | 2.98 | 5.05 | 5.83 | 0.51x | **4.4x** at 96x100 | measured once |
+| permanent-magnet-pm4stell | 3.37 | 4.09 | 5.71 | 0.59x | **3.0x** at nphi=64 | measured once, fix pending |
+| permanent-magnet-muse | 4.39 | 4.08 | 5.62 | 0.78x | **2.9x** at nphi=64 | measured once |
+| coil-forces | 12.37 | 59.96 | 117.23 | 0.11x | **1.6x** warm | measured once |
+| stage-two-optimization-stochastic | 8.15 | 19.57 | 40.95 | 0.20x | **1.2-1.4x**, grows with ensemble | measured once |
+| projected-route single-stage | — | — | — | — | only device that finishes the script | measured once |
+| stage-two-optimization | 8.61 | 44.03 | 79.15 | 0.11x | 0.3x warm — native faster | measured once |
+| stage-two-optimization-planar-coils | 10.48 | 59.31 | 101.96 | 0.10x | 0.3x warm — native faster | measured once |
+| wireframe-rcls-with-ports | 3.26 | 3.94 | 5.01 | 0.65x | 0.6x device solve — native faster | measured once |
+| permanent-magnet-qa | — | — | — | — | plausible at nphi=64 | blocked (`.vtu` bug) |
+| wireframe-rcls-basic | 3.14 | 3.76 | 4.75 | 0.66x | plausible at larger size | untested |
+| tracing-fieldlines-ncsx | 3.18 | 39.04 | 102.64 | 0.03x | plausible batching 1000s of trajectories | untested |
+| tracing-fieldlines-qa | 3.18 | 38.30 | 100.44 | 0.03x | plausible batching 1000s of trajectories | untested |
+| tracing-particle | 3.05 | 24.87 | 71.01 | 0.04x | plausible batching 1000s of trajectories | untested |
+| boozer | 3.79 | 19.38 | 28.46 | 0.13x | stays on CPU — too small to fill a GPU | settled |
+| boozerqa | 3.23 | 56.37 | 108.73 | 0.03x | stays on CPU | settled |
+| just-a-quadratic | 2.94 | 4.21 | 5.28 | 0.56x | stays on CPU | settled |
+| minimize-curve-length | 2.95 | 5.93 | 9.58 | 0.31x | stays on CPU | settled |
+| qfm | 3.57 | 32.59 | 84.81 | 0.04x | stays on CPU | settled |
+| stage-two-optimization-minimal | 3.29 | 20.07 | 49.33 | 0.07x | stays on CPU | settled |
+| strain-optimization | 8.65 | 9.99 | 24.26 | 0.36x | stays on CPU | settled |
+| surf-vol-area | 2.99 | 18.63 | 40.67 | 0.07x | stays on CPU | settled |
+| single-stage-boozer-vacuum-optimization | — | — | — | — | excluded: runs at `native_default` scale only | excluded |
+| all other device-assignment rows (12 of 40) | — | — | — | — | no at-scale GPU claim | settled |
+| **Total (23 measured cases)** | **106.45** | **486.30** | **1008.09** | **0.11x** | — | — |
 
 "Certified" = sealed multi-run receipt with verified physics; "measured
 once" = one dated measurement awaiting that treatment. One rule explains
@@ -353,66 +355,37 @@ every row: the GPU wins once each optimizer step carries enough parallel
 work (~1e7 elements) to amortize its dispatch — via resolution, segment
 count, filaments, ensembles, or coupling DOFs instead of nesting solves.
 
-### Wall time at HEAD: the 2026-08-24 A100 three-lane run
-
-This is the current-code counterpart to the authority wall-time table
-below, measured under the same protocol — one isolated cold launch per
-lane per case, startup and compilation included, native lane pinned to
-`OMP_NUM_THREADS=1` — at revision `f5a3c9821` on a quiet dedicated host
-(AMD EPYC 7452, NVIDIA A100-PCIE-40GB, glibc 2.31, jax/jaxlib 0.10.0).
-It is a **different host and environment** from the authority table:
-the two tables are each valid within their own environment, and their
-totals (14.1x there, 9.47x here) are two measurements, not a trend.
-
-| Case | Native CPU wall s | JAX CPU wall s | JAX GPU wall s | GPU/native |
-|---|---:|---:|---:|---:|
-| boozer | 3.79 | 19.38 | 28.46 | 7.51x |
-| boozerqa | 3.23 | 56.37 | 108.73 | 33.62x |
-| coil-forces | 12.37 | 59.96 | 117.23 | 9.47x |
-| just-a-quadratic | 2.94 | 4.21 | 5.28 | 1.79x |
-| minimize-curve-length | 2.95 | 5.93 | 9.58 | 3.25x |
-| permanent-magnet-muse | 4.39 | 4.08 | 5.62 | 1.28x |
-| permanent-magnet-pm4stell | 3.37 | 4.09 | 5.71 | 1.69x |
-| permanent-magnet-qa | — | — | — | blocked |
-| permanent-magnet-simple | 2.91 | 3.67 | 4.18 | 1.44x |
-| qfm | 3.57 | 32.59 | 84.81 | 23.76x |
-| stage-two-optimization | 8.61 | 44.03 | 79.15 | 9.19x |
-| stage-two-optimization-finitebuild | — | — | — | blocked |
-| stage-two-optimization-minimal | 3.29 | 20.07 | 49.33 | 15.01x |
-| stage-two-optimization-planar-coils | 10.48 | 59.31 | 101.96 | 9.73x |
-| stage-two-optimization-stochastic | 8.15 | 19.57 | 40.95 | 5.03x |
-| strain-optimization | 8.65 | 9.99 | 24.26 | 2.81x |
-| surf-vol-area | 2.99 | 18.63 | 40.67 | 13.62x |
-| tracing-fieldlines-ncsx | 3.18 | 39.04 | 102.64 | 32.30x |
-| tracing-fieldlines-qa | 3.18 | 38.30 | 100.44 | 31.61x |
-| tracing-particle | 3.05 | 24.87 | 71.01 | 23.28x |
-| wireframe-gsco-modular | 2.95 | 5.15 | 6.50 | 2.21x |
-| wireframe-gsco-multistep | 3.05 | 4.34 | 5.99 | 1.96x |
-| wireframe-gsco-sector-saddle | 2.98 | 5.05 | 5.83 | 1.96x |
-| wireframe-rcls-basic | 3.14 | 3.76 | 4.75 | 1.51x |
-| wireframe-rcls-with-ports | 3.26 | 3.94 | 5.01 | 1.54x |
-| **Total (23 measured cases)** | **106.45** | **486.30** | **1008.09** | **9.47x** |
-
-Scope of the 9.47x total, stated plainly: it is computed over a case set
-that excludes one case by scale refusal
+Scope of the cold total (GPU 9.47x slower = 0.11x), stated plainly: it
+is computed over a case set that excludes one case by scale refusal
 (`single-stage-boozer-vacuum-optimization`, promoted to `native_default`),
-excludes two by the bugs documented in the controlled re-measurement note below (permanent-magnet-qa's `.vtu`
-side-writes; finitebuild's unrouted `minimum_clearance` observables), and
-contains four cases with failing parity comparisons (quantified in the
-re-validation note: absolute misses at most 5.5e-2, allclose overshoots
-from 1.05x to 466x on one near-zero residual). The
-per-case spread is 1.28x-33.62x; the launch-bound structure is the same
-as the authority run's: cold XLA compilation dominates the JAX lanes at
-bounded scale, so this table measures deployment cost of one-shot runs,
-not device throughput. The GPU-favorable regime — warmed or
-persistent-cache solves at the examples' own scales — is the addendum's
-per-example certified evidence, and this table does not supersede it.
+excludes two by the bugs documented in Appendix B (permanent-magnet-qa's
+`.vtu` side-writes; finitebuild's unrouted `minimum_clearance`
+observables), and contains four cases with failing parity comparisons
+(quantified in Appendix B: absolute misses at most 5.5e-2, allclose
+overshoots from 1.05x to 466x on one near-zero residual). Cold XLA
+compilation dominates the JAX lanes at bounded scale, so the cold
+columns measure deployment cost of one-shot runs, not device
+throughput; the enlarged-workload column is the device-throughput
+evidence, and neither column supersedes the other. This A100 host is a
+**different environment** from the archived 5090 authority run in
+Appendix A — their totals (9.47x here, 14.1x there) are two
+measurements, not a trend. Host RSS and GPU memory for these runs are
+in the peak-memory section above and in Appendix A; the VMEC-hybrid
+local run retained no claim-grade metrics (see "VMEC-hybrid evidence
+gap").
 
 ### Appendix A — archived authority wall times (2026-07-29, RTX 5090)
 
 The pinned original measurement this report is built on; superseded for
-current-code reading by the two sections above, retained for
-replayability and as the only per-case memory record.
+current-code reading by the one-table section above, retained for
+replayability and as the only per-case memory record. The 78-launch
+campaign took 29 minutes 21 seconds under the same protocol as the
+A100 columns above (one isolated cold launch per lane, no compile-only
+or warmed samples), on the RTX 5090 / Threadripper 9970X box, native
+lane pinned to `OMP_NUM_THREADS=1` (`examples/jax/parity/runtime.py`,
+present at the authority revision) — a threaded native baseline would
+be faster, so the 14.1x total is a floor on the GPU-lane deficit, not
+an overstatement of it.
 
 Parent RSS is the launched child's peak `VmHWM`; it excludes descendants.
 
