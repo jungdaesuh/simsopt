@@ -69,6 +69,23 @@ NESTED_LS_NEWTON_EXIT_STATUSES: Final[tuple[str, str, str]] = (
     NESTED_LS_NEWTON_EXIT_FAILED,
 )
 
+# Sealed inner-lane policy (Phase 5 of the upgrade plan).
+#
+# ``OuterOptimizerPolicy`` seals the OUTER scipy knobs -- ftol, gtol, maxls,
+# maxiter, maxcor, the rejection scale. It says nothing about the inner
+# lane, and that was a real hole: a run with sub-stepping or the predictor
+# enabled published a policy BYTE-IDENTICAL to a run without them. Two
+# different optimizations, one receipt shape, and no way for a consumer to
+# tell them apart -- which is the precondition for comparing numbers that
+# must not be compared.
+#
+# ``nested_ls_inner_policy`` closes it by naming the whole inner lane in one
+# place. It is deliberately a FLAT record of what was in force, not a
+# reference to a named preset: a preset name is only as honest as the
+# reader's copy of what the name meant, and this campaign has already been
+# bitten by a schema string that stopped identifying a shape.
+NESTED_LS_INNER_POLICY_NAME: Final[str] = "anchor_frozen_predictor_v3"
+
 # Licensed coarse tier (Phase 4 of the upgrade plan).
 #
 # Which achieved inner residual may feed which consumer, decided from the
@@ -163,8 +180,20 @@ NESTED_LS_GATE6_NATIVE_OMP_THREADS: Final[int] = 16
 # Fresh-process child payload schemas. These live in the JAX-free contract
 # module so producers, the claim parent, and the rejudge consumer share one
 # source of truth without importing either process-level child module.
-NESTED_LS_OUTER_JAX_CHILD_SCHEMA: Final[str] = "nested-ls-outer-jax-child.v5"
-NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA: Final[str] = "nested-ls-outer-native-child.v4"
+# v5 -> v6 / v4 -> v5 (2026-08-24): both payloads gained an ``inner_policy``
+# block. ONE bump covering sub-stepping, the predictor and the coarse tier
+# together, rather than three: a schema string that sometimes carries the
+# block and sometimes does not has stopped identifying a shape, which is the
+# defect that forced the previous bump.
+#
+# The bump is not merely additive bookkeeping. Before the block existed a
+# consumer could not distinguish a stock inner lane from a sub-stepped or
+# predicted one, so it could compare numbers that must not be compared. An
+# old consumer reading a new receipt would still see the fields it knows and
+# would still draw that wrong conclusion -- so the version has to move, to
+# stop it.
+NESTED_LS_OUTER_JAX_CHILD_SCHEMA: Final[str] = "nested-ls-outer-jax-child.v6"
+NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA: Final[str] = "nested-ls-outer-native-child.v5"
 NESTED_LS_OUTER_REJUDGE_SCHEMA: Final[str] = "nested-ls-outer-rejudge.v1"
 
 # Gate FD-0 of the eight-term outer charter
@@ -571,6 +600,69 @@ def nested_ls_predictor_arm(
     return NESTED_LS_PREDICTOR_ARM_PREDICTED
 
 
+def nested_ls_inner_policy(
+    *,
+    ift_stab: float,
+    inner_substep_legs: tuple[int, ...],
+    inner_predictor: bool,
+    coarse_tier_honoured: str | None = None,
+) -> dict[str, object]:
+    """Everything that decides what the inner solve does, in one record.
+
+    Published beside ``outer_policy`` so a receipt states its inner lane
+    rather than leaving it inferred from a schema version. Every field is a
+    value that was actually in force for the run, not a preset name.
+
+    ``ift_stab`` is passed in rather than read from a constant here: it
+    lives in the scale module, and this module is deliberately jax-free so
+    GPU parents can import it without initializing a device. A second
+    spelling of that constant would be the twin-constant failure this
+    campaign has already paid for.
+
+    ``coarse_tier_honoured`` is ``None`` today and that is the honest
+    answer, not a placeholder: Phase 4 LICENSED a coarse tier and no
+    consumer CLAIMS it -- ``success`` stays true only for ``converged``, so
+    a coarse result is still refused everywhere. Recording ``None`` says the
+    licence exists and is unexercised. A future run that honours it says so
+    here, and receipts on either side of that change stop being comparable.
+
+    ``trajectory_is_stock`` is the field a comparator should actually read.
+    Both levers reproduce the stock lane exactly until their first
+    divergence -- sub-stepping's first rung IS the undivided step, and the
+    predictor falls back to the bare anchor whenever it cannot improve on
+    it -- so "enabled" is not the same as "diverged". But a receipt cannot
+    know whether it diverged without inspecting its own ledger, and the
+    conservative statement is the useful one: if either lever was enabled,
+    do not compare these numbers to a receipt where it was not.
+    """
+
+    legs = tuple(int(leg) for leg in inner_substep_legs)
+    stock = legs == (1,) and not bool(inner_predictor)
+    return {
+        "policy": NESTED_LS_INNER_POLICY_NAME,
+        "ift_stab": float(ift_stab),
+        "newton_maxiter": int(NESTED_LS_NEWTON_MAXITER),
+        "newton_tol": float(NESTED_LS_NEWTON_TOL),
+        "iota_branch_guard": float(NESTED_LS_OUTER_IOTA_BRANCH_GUARD),
+        "inner_substep_legs": list(legs),
+        "inner_substep_enabled": legs != (1,),
+        "inner_predictor_enabled": bool(inner_predictor),
+        "predictor_trust_region_ratio": (
+            float(NESTED_LS_PREDICTOR_TRUST_REGION_RATIO) if inner_predictor else None
+        ),
+        "coarse_tier_licensed_residual": float(NESTED_LS_NEWTON_COARSE_TOL),
+        "coarse_tier_honoured": coarse_tier_honoured,
+        "trajectory_is_stock": stock,
+        "comparability": (
+            "stock inner lane: comparable to any receipt with trajectory_is_stock true"
+            if stock
+            else "NON-STOCK inner lane: do not compare these numbers to a "
+            "receipt with a different inner_substep_legs or "
+            "inner_predictor_enabled"
+        ),
+    }
+
+
 def nested_ls_coarse_tier_admits(
     *,
     achieved_residual_l2: float,
@@ -829,6 +921,7 @@ __all__ = [
     "NESTED_LS_GATE6_IOTA_G_TOL",
     "NESTED_LS_GATE6_NATIVE_OMP_THREADS",
     "NESTED_LS_INNER_SUBSTEP_LEGS",
+    "NESTED_LS_INNER_POLICY_NAME",
     "NESTED_LS_LABEL",
     "NESTED_LS_NEWTON_COARSE_TOL",
     "NESTED_LS_NEWTON_EXIT_COARSE_CONVERGED",
@@ -875,6 +968,7 @@ __all__ = [
     "nested_ls_coarse_tier_admits",
     "nested_ls_coarse_tier_error_bound",
     "nested_ls_inner_substep_points",
+    "nested_ls_inner_policy",
     "nested_ls_newton_exit_status",
     "nested_ls_outer_attempt_fun_is_objective",
     "nested_ls_outer_endpoint_success",

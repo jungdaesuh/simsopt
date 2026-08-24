@@ -61,6 +61,7 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_OUTER_REJUDGE_SCHEMA,
     NestedLsOuterAcceptWithoutCandidate,
     NestedLsOuterCandidateStore,
+    nested_ls_inner_policy,
     nested_ls_outer_attempt_fun_is_objective,
     nested_ls_outer_endpoint_success,
     nested_ls_outer_ftol_zero_stop,
@@ -77,6 +78,7 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
 # value it injected itself.
 from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     DEFAULT_F3_B37_GPU_LANE,
+    F3_B37_IFT_STAB,
     DEFAULT_F3_B37_NATIVE_LANE,
     NestedLsBranchJump,
     NestedLsInnerSolveFailed,
@@ -829,6 +831,14 @@ def _drive_outer_run(context: _OuterRunContext) -> dict[str, object]:
         "endpoint_is_optimizer_x": endpoint_is_optimizer_x,
         "optimizer_x": [float(value) for value in optimizer_x],
         "outer_policy": outer_policy.as_payload(),
+        # Read off the STATE this run actually used, never re-derived from
+        # the defaults: a receipt that reported the default policy while the
+        # run used another would be worse than no block at all.
+        "inner_policy": nested_ls_inner_policy(
+            ift_stab=float(F3_B37_IFT_STAB),
+            inner_substep_legs=tuple(state.inner_substep_legs),
+            inner_predictor=bool(state.inner_predictor),
+        ),
         "iota_branch_guard": float(NESTED_LS_OUTER_IOTA_BRANCH_GUARD),
         "feasible_evaluations": int(feasible_evaluations),
         "rejected_evaluations": int(len(evals) - feasible_evaluations),
