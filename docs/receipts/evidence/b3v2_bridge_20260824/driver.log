@@ -1,0 +1,12 @@
+outer prime jax cache budget 3 maxcor 10 omp 14 omp_provenance swept_artifact git_head 01fefbadd7b885a31b326fbcfcd52cf76e4244fe
+outer omp evidence path docs/receipts/evidence/nested_ls_outer_native_omp_sweep_20260823.json sha256 d93d8b0bc158aa23aa875e69c1f35e55dc6d4ae62c2dcc24c4590bf2768c4d9c best_omp 14 rows 8
+outer jax success=True nit=3 nfev=10 feasible=5 rejected=5 J=0.012982793095005024 grad_l2=2.470925850054119 wall=1093.304653561907
+outer native success=True nit=3 nfev=10 J=0.012982793095001662 iota=0.144818275423838 wall=1772.7382564661093 omp=14
+outer jax success=True nit=3 nfev=10 feasible=5 rejected=5 J=0.012982793095005024 grad_l2=2.470925850054119 wall=1837.7462932369672
+outer native success=True nit=3 nfev=10 J=0.012982793095001662 iota=0.144818275423838 wall=1705.2854128209874 omp=14
+outer jax success=True nit=3 nfev=10 feasible=5 rejected=5 J=0.012982793095005024 grad_l2=2.470925850054119 wall=1823.690893869847
+outer native success=True nit=3 nfev=10 J=0.012982793095001662 iota=0.144818275423838 wall=1882.9658135070931 omp=14
+outer jax success=True nit=3 nfev=10 feasible=5 rejected=5 J=0.012982793095005024 grad_l2=2.470925850054119 wall=1067.0674784760922
+outer rejudge lane=native noop=True iter=0 native_grad_l2=3.065396557984368e-15 reduced_grad_l2=2.5730857594809865e-15 reason=None wall=36.51134195784107
+outer rejudge lane=jax noop=True iter=0 native_grad_l2=2.76153598317e-15 reduced_grad_l2=1.8558192925947662e-15 reason=None wall=35.149577881908044
+outer pair repeat=0 physics=True native_wall=1772.7382564661093 jax_wall=1837.7462932369672 native_J=0.012982793095001662 jax_J=0.012982793095005024 j_rel_gap=2.5894998648152005e-13 reason=None
