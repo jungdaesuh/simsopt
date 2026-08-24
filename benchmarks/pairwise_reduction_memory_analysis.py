@@ -22,7 +22,7 @@ bootstrap_local_simsopt(SRC_ROOT)
 import jax
 import jax.numpy as jnp
 
-from simsopt.geo._pairwise_reductions import (
+from simsopt_jax.core._pairwise_reductions import (
     pairwise_thresholded_mean_square_distance_pure,
 )
 
@@ -77,9 +77,7 @@ def memory_analysis_for_chunk_size(
         )
 
     compiled = (
-        jax.jit(jax.grad(objective, argnums=0))
-        .lower(points_a, points_b)
-        .compile()
+        jax.jit(jax.grad(objective, argnums=0)).lower(points_a, points_b).compile()
     )
     stats = compiled.memory_analysis()
     total_size_in_bytes = (
