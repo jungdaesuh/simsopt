@@ -411,6 +411,41 @@ not device throughput. The GPU-favorable regime — warmed or
 persistent-cache solves at the examples' own scales — is the addendum's
 per-example certified evidence, and this table does not supersede it.
 
+### GPU results and outlook at a glance (2026-08-24)
+
+One compact view of where JAX-GPU stands against native per workload —
+cold bounded launches (the table above) versus each example's realistic
+scale. Every number carries its evidence class; the long-form evidence
+per row is `docs/jax_example_device_assignment.md` (the drift-gated
+SSOT), and none of the "at scale" figures below is a cold-launch number.
+
+| Example | GPU at shipped/bounded scale | GPU at realistic scale | Evidence class |
+|---|---|---|---|
+| stage-two-finitebuild | 0.88x cold | **13.58x** warm solve | certified |
+| flat675 single-stage (coupled) | loses cold at budget 3 | **7.70x** at budget 37 | certified |
+| wireframe-gsco-multistep | ~2x slower cold | **3.5x** device solve, bitwise | certified |
+| permanent-magnet-simple | ~1.4x slower cold | **5.2x** warm, bitwise | diagnostic |
+| projected-route single-stage | — | GPU is the only device that finishes it (CPU collapses); the native two-stage mirror still beats the script 5.14x | diagnostic |
+| wireframe-gsco-modular | ~2x slower cold | **5.2x** at 96x100 reference grid, bitwise | diagnostic, chartered |
+| wireframe-gsco-sector-saddle | ~2x slower cold | **4.4x** at 96x100, bitwise | diagnostic, chartered |
+| permanent-magnet-muse | 0.64x warm at nphi=16 | **2.9x** at nphi=64, bitwise | diagnostic, chartered |
+| permanent-magnet-pm4stell | — | **3.0x** at nphi=64; timing blocked on the exact-predicate repair (FMA mechanism bitwise-resolved) | diagnostic, blocked |
+| stage-two-stochastic | — | **1.24-1.35x** at a modest ensemble; the vmap sample axis grows with ensemble size | diagnostic, chartered |
+| coil-forces | ~15x slower cold | **~1.6x** warm | diagnostic, chartered |
+| permanent-magnet-qa | — | plausible at nphi=64 (29k dipoles); JAX lane blocked by an adjudicated instrument false-reject, fix owned | blocked |
+| wireframe-rcls-basic | ~1.5x slower cold | plausible past the dense-solve crossover (n between 169 and 716) | structural |
+| tracing (fieldlines, particle) | 23-32x slower cold | plausible only as a different workload — batch thousands of trajectories instead of 9 | structural, unmeasured |
+| everything else (13 rows) | slower | structurally CPU: per-step work far below the ~1e7-element dispatch-amortization threshold | census |
+
+Reading rule: "certified" = sealed receipt, interleaved pairs, bitwise or
+oracle-gated endpoints; "diagnostic" = one dated measurement, real but
+uncertified, with its campaign charter named in the SSOT; "blocked" and
+"structural" rows carry no speed claim. The pattern is uniform: the GPU
+verdict flips where per-evaluation parallel width crosses the
+dispatch-amortization threshold — resolution, segment count, filament
+multiplicity, ensemble size, or coupling the DOFs instead of nesting a
+serial inner solve.
+
 ### Authority-run isolated end-to-end wall time
 
 Parent RSS is the launched child's peak `VmHWM`; it excludes descendants.
