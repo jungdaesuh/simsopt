@@ -26,7 +26,10 @@ comparisons passed
 - Timing is one isolated launch per lane, startup and JIT included. Total GPU
   time was 14.1x native CPU. No steady-state claim follows, and the separate
   fast/parity benchmark has no native baseline.
-- Everything here is bounded scale; native-default remains `not_run`.
+- Everything here is bounded scale; native-default remains `not_run`. (True of
+  every measurement below and of the manifest at this report's authority
+  revision. The live manifest has since promoted one route to `native_default`
+  — see the pin note under Limitations.)
 
 ## How to read the tables
 
@@ -304,9 +307,29 @@ whose authority-bound SHA-256 is
 Artifacts are host-local and Git-ignored. Retention and replay instructions:
 `.artifacts/jax-authority-evidence/README.md`.
 
+> **Pin superseded (checked 2026-08-24).** That SHA-256 is the manifest as of
+> the authority revision `11340c829`, and it is the value this report's results
+> must be replayed against — it is correct here and must not be "refreshed."
+> The **live** file no longer matches it: commit `3c6dfea62` (2026-08-05,
+> "feat(bench): promote single-stage speed campaign") edited one route, so
+> `examples/jax/parity_manifest.json` at HEAD hashes to
+> `cd9e3c2d191e7934bd5240a9de3f2f7eb79d79e66789aaccf24ed9452588bf30`.
+> The single change is `native-single-stage-boozer-vacuum-optimization`,
+> `scale_tier: bounded` → `native_default` (plus its `comparison_routes`); no
+> route was added or removed, and the other 26 declarations are byte-identical.
+> Verify with
+> `git diff 11340c829 HEAD -- examples/jax/parity_manifest.json`.
+
 Limitations:
 
-1. Bounded scale only; native-default is `not_run`.
+1. Bounded scale only; native-default is `not_run`. **Superseded for one route
+   (2026-08-24):** this was true of the manifest at the authority revision and
+   remains true of every measurement in this report, but the live manifest now
+   declares `native-single-stage-boozer-vacuum-optimization` at
+   `scale_tier: native_default` (see the pin note above). This report's rows for
+   that example — lines in the initial-state, final-state, solver, and memory
+   tables — were measured at the **bounded** tier and are not native-default
+   evidence for it.
 2. Timing and memory are one sample per lane, imports and compilation
    included; no compile-only or warmed measurements, so no steady-state speed
    claim.
@@ -344,3 +367,72 @@ Per-example "run this on CPU or GPU" advice, with its evidence class and
 mechanism for every manifest example, now lives in
 [`docs/jax_example_device_assignment.md`](jax_example_device_assignment.md) and
 is drift-gated by `tests/test_jax_example_device_assignment.py`.
+
+## Addendum — native_default-scale results since 2026-08-16 (2026-08-24)
+
+The bounded-scale verdict above stands unchanged for the
+`20260729T005942Z-5ade9aee` evidence it summarizes, and **no newer aggregate
+parity run exists**: that run is still the newest under
+`.artifacts/jax-example-parity/`, so every parity, timing, and memory row above
+is current as published. What follows is not a revision of those rows. It is a
+different measurement class — native_default or reference scale, warmed or
+persistent-cache, per example rather than aggregate — and it is summarized here
+only so a reader of this report is not left with the bounded numbers as the
+program's last word.
+
+Why the numbers below cannot replace the numbers above: this report times **one
+cold isolated launch per lane with imports and compilation included**
+(Limitation 2), at bounded scale (Limitation 1). The results below are warmed
+or persistent-cache solves at the examples' own reference scales. The aggregate
+14.1x GPU-slower figure remains correct for what it measures — a launch-bound
+artifact, not a device gap — and pairing it against a warm solve ratio compares
+two different experiments.
+
+Current per-example placements live in
+[`docs/jax_example_device_assignment.md`](jax_example_device_assignment.md),
+which is the SSOT for this and is drift-gated by
+`tests/test_jax_example_device_assignment.py`. As of 2026-08-23 its 40 rows
+read: 3 `gpu`/`measured-certified`, 2 `gpu`/`measured-diagnostic`, 4
+`cpu`/`measured-diagnostic`, 21 `cpu`/`census-structural`, 10 `unmeasured`.
+(30 of the 40 are *placed*; that record defines `unmeasured` as not placed.)
+
+The three certified GPU wins, each with the scope its receipt states:
+
+1. **`native-stage-two-optimization-finitebuild`** — 13.58x warmed solve
+   (median of five pair ratios; the receipt's median native 45.23 s and median
+   GPU 3.353 s divide to 13.49x — the 13.58x is the median of the per-pair
+   ratios, not the ratio of the medians) and 3.11x warm persistent-cache wall
+   (50.1 s vs 16.11 s) over the fastest qualifying swept native lane, five
+   interleaved pairs per rung with every pair > 1.00 and every GPU endpoint
+   bitwise identical to the frozen crossing solution. **Repeated-workload only:**
+   a fresh empty-cache process loses 0.88x to ~42 s of XLA compile — measured,
+   reported, and never claimed as a cold-start win.
+   `docs/receipts/stage_two_finitebuild_native_gpu_successor.md`
+2. **`native-wireframe-gsco-multistep`** — 3.5x warmed device solve
+   (5.77-5.93 s vs 20.49 s best native), 19,200-segment currents vector bitwise
+   identical (0 ULP). Already recorded in the 2026-08-15 addendum above.
+   `docs/receipts/wireframe_gsco_multistep_native_default_receipt.md`
+3. **`flat675-single-stage-coupled-optimization`** — the certified frozen-bundle
+   configuration, reached through the example's `--bundle` mode: 1.67x at equal
+   budget 3, **7.70x at equal budget 37** (headline) and 7.36x quality-matched,
+   all on process wall, five interleaved pairs per rung with every pair > 1.00.
+   The configuration the example ships by default carries no timing claim of its
+   own. Repeated-workload only: the cold fused child pays ~150 s of XLA compile,
+   measured at N=1. `docs/receipts/flat675_fused_campaign.md`
+
+Two qualifiers a reader should carry out of this addendum. First, every
+certified win above is a **warm or persistent-cache** claim, and none of the
+three carries a cold-start claim. Their cold measurements differ and must not
+be summarized as one: finite-build loses cold (0.88x, ~42 s compile) and GSCO
+likewise, while flat675's cold results **split** — 0.47x at B3 but 1.53x at B37
+and 1.54x at BQ, i.e. the fused lane wins cold at two of its three rungs
+(`docs/receipts/flat675_fused_campaign.md:107-111`, all N=1, reported and never
+claimed). Compile cost is disclosed in each receipt rather than amortized away.
+Second, 10 of the 40 rows are `unmeasured` — including both
+`wireframe-gsco` siblings, which two dated diagnostics of the *same shipped
+configuration* place in opposite directions, so this record's own rule unplaces
+them pending re-adjudication. Placement is per example and per scale; there is
+still no repository-wide native-CPU/JAX-GPU speed claim, and the closing
+paragraph above continues to state what one would require.
+
+The bounded-scale rows above are unchanged.
