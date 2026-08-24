@@ -316,54 +316,40 @@ present at the authority revision), so the native wall times below are
 single-threaded. A threaded native baseline would be faster, which makes the
 14.1x total a floor on the GPU-lane deficit, not an overstatement of it.
 
-### 2026-08-24 controlled re-measurement: what is and is not still current
+### GPU performance in one table (2026-08-24)
 
-Six cases (coil-forces, boozerqa, wireframe-gsco-multistep, tracing-particle,
-planar-coils, finitebuild) were re-run at HEAD on the same RTX 5090 box in a
-fresh CUDA environment (jax/jaxlib 0.10.0, matching the authority lane's
-recorded version), with same-environment runs at the authority revision as
-controls to separate code change from environment change. Verdicts:
+GPU speed as a multiple of native C++ (1.0x = equal; higher = GPU
+faster). "One-shot small run" is a cold launch including compile (the A100 table below, inverted); "real workload" is warm or realistic-scale, each
+with a receipt. Per-row evidence: `docs/jax_example_device_assignment.md`.
 
-- **Precision: current.** Every re-measured GPU endpoint reproduces the
-  final-result table to its printed precision (2e-13 to 7e-12 relative);
-  the 2026-08-14 solver fusing/caching did not move physics.
-- **Device memory: current.** Peak device bytes are identical to the table
-  in every re-measured case.
-- **Host memory: one real change.** The fused/cached lanes cost more host
-  RSS at HEAD: the coil-forces GPU lane went 2041 -> 2328 MiB (+14%), with
-  the authority revision reproducing the table's value in the same
-  environment. Other re-measured cases sit within about 5% of the table.
-- **GPU wall time: the table is environment-bound, not stale.**
-  Same-environment controls put HEAD near parity with the authority
-  revision (coil-forces 86.9 -> 84.5 s and tracing-particle 96.9 -> 94.9 s,
-  both within 3%; boozerqa 108.6 -> 99.5 s, -8%). The large differences
-  from the table (coil-forces 147.3 s there versus ~86 s here;
-  tracing-particle 54.8 s there versus ~96 s here) appear at the **same
-  revision** and run in both directions — they are environment effects.
-  Consequence: the wall-time table above is valid only in its authority
-  environment, and quoting its GPU numbers against any other environment
-  or hardware is invalid.
-- **JAX CPU wall time: no single-sample claim survives controls.** Within
-  one environment, HEAD versus the authority revision moves in both
-  directions (coil-forces 48.6 -> 41.3 s; boozerqa 26.9 -> 37.7 s), and
-  the same lane differs by up to 40% between this pass's two replay
-  environments at one revision. These one-shot launches cannot separate
-  code effects from compile/environment variance; per-case receipts with
-  repeated interleaved pairs (see the addendum) are the only wall-time
-  evidence class that can.
-- **finitebuild could not be re-measured through the harness:** at HEAD its
-  lanes publish `initial:minimum_clearance` and `final:minimum_clearance`
-  (added by `ead83eaef`, 2026-08-18) with no comparison routes in
-  `parity_manifest.json`, so a full three-lane bounded replay fails closed
-  ("complete direct lane-pair matrix") — reproduced on two machines. Until
-  routes for those observables are added, only 24 of 26 cases can replay
-  the full three-lane bounded matrix at HEAD (this case, plus the promoted
-  single-stage route).
+| Example | One-shot small run | Real workload | Confidence |
+|---|---:|---|---|
+| stage-two-finitebuild | 0.9x | **13.6x** warm solve | certified |
+| flat675 single-stage | 0.5x | **7.7x** at budget 37 | certified |
+| wireframe-gsco-multistep | 0.5x | **3.5x**, bitwise | certified |
+| permanent-magnet-simple | 0.7x | **5.2x**, bitwise | measured once |
+| wireframe-gsco-modular | 0.5x | **5.2x** at 96x100 grid | measured once |
+| wireframe-gsco-sector-saddle | 0.5x | **4.4x** at 96x100 | measured once |
+| permanent-magnet-pm4stell | 0.6x | **3.0x** at nphi=64 | measured once, fix pending |
+| permanent-magnet-muse | 0.8x | **2.9x** at nphi=64 | measured once |
+| coil-forces | 0.1x | **1.6x** warm | measured once |
+| stage-two-stochastic | 0.2x | **1.2-1.4x**, grows with ensemble | measured once |
+| projected-route single-stage | — | only device that finishes the script | measured once |
+| permanent-magnet-qa | — | plausible at nphi=64 | blocked |
+| wireframe-rcls-basic | 0.7x | plausible at larger size | untested |
+| tracing (3 examples) | 0.03x | plausible batching 1000s of trajectories | untested |
+| all others (13) | slower | stays on CPU — too small to fill a GPU | settled |
+
+"Certified" = sealed multi-run receipt with verified physics; "measured
+once" = one dated measurement awaiting that treatment. One rule explains
+every row: the GPU wins once each optimizer step carries enough parallel
+work (~1e7 elements) to amortize its dispatch — via resolution, segment
+count, filaments, ensembles, or coupling DOFs instead of nesting solves.
 
 ### Wall time at HEAD: the 2026-08-24 A100 three-lane run
 
 This is the current-code counterpart to the authority wall-time table
-above, measured under the same protocol — one isolated cold launch per
+below, measured under the same protocol — one isolated cold launch per
 lane per case, startup and compilation included, native lane pinned to
 `OMP_NUM_THREADS=1` — at revision `f5a3c9821` on a quiet dedicated host
 (AMD EPYC 7452, NVIDIA A100-PCIE-40GB, glibc 2.31, jax/jaxlib 0.10.0).
@@ -403,7 +389,7 @@ totals (14.1x there, 9.47x here) are two measurements, not a trend.
 Scope of the 9.47x total, stated plainly: it is computed over a case set
 that excludes one case by scale refusal
 (`single-stage-boozer-vacuum-optimization`, promoted to `native_default`),
-excludes two by the bugs documented above (permanent-magnet-qa's `.vtu`
+excludes two by the bugs documented in the controlled re-measurement note below (permanent-magnet-qa's `.vtu`
 side-writes; finitebuild's unrouted `minimum_clearance` observables), and
 contains four cases with failing parity comparisons (quantified in the
 re-validation note: absolute misses at most 5.5e-2, allclose overshoots
@@ -414,37 +400,6 @@ bounded scale, so this table measures deployment cost of one-shot runs,
 not device throughput. The GPU-favorable regime — warmed or
 persistent-cache solves at the examples' own scales — is the addendum's
 per-example certified evidence, and this table does not supersede it.
-
-### GPU performance in one table (2026-08-24)
-
-GPU speed as a multiple of native C++ (1.0x = equal; higher = GPU
-faster). "One-shot small run" is a cold launch including compile (the
-table above, inverted); "real workload" is warm or realistic-scale, each
-with a receipt. Per-row evidence: `docs/jax_example_device_assignment.md`.
-
-| Example | One-shot small run | Real workload | Confidence |
-|---|---:|---|---|
-| stage-two-finitebuild | 0.9x | **13.6x** warm solve | certified |
-| flat675 single-stage | 0.5x | **7.7x** at budget 37 | certified |
-| wireframe-gsco-multistep | 0.5x | **3.5x**, bitwise | certified |
-| permanent-magnet-simple | 0.7x | **5.2x**, bitwise | measured once |
-| wireframe-gsco-modular | 0.5x | **5.2x** at 96x100 grid | measured once |
-| wireframe-gsco-sector-saddle | 0.5x | **4.4x** at 96x100 | measured once |
-| permanent-magnet-pm4stell | 0.6x | **3.0x** at nphi=64 | measured once, fix pending |
-| permanent-magnet-muse | 0.8x | **2.9x** at nphi=64 | measured once |
-| coil-forces | 0.1x | **1.6x** warm | measured once |
-| stage-two-stochastic | 0.2x | **1.2-1.4x**, grows with ensemble | measured once |
-| projected-route single-stage | — | only device that finishes the script | measured once |
-| permanent-magnet-qa | — | plausible at nphi=64 | blocked |
-| wireframe-rcls-basic | 0.7x | plausible at larger size | untested |
-| tracing (3 examples) | 0.03x | plausible batching 1000s of trajectories | untested |
-| all others (13) | slower | stays on CPU — too small to fill a GPU | settled |
-
-"Certified" = sealed multi-run receipt with verified physics; "measured
-once" = one dated measurement awaiting that treatment. One rule explains
-every row: the GPU wins once each optimizer step carries enough parallel
-work (~1e7 elements) to amortize its dispatch — via resolution, segment
-count, filaments, ensembles, or coupling DOFs instead of nesting solves.
 
 ### Authority-run isolated end-to-end wall time
 
@@ -489,6 +444,50 @@ GPU was slower in every launch.
 > **wins** (`stage-two-optimization-finitebuild` 13.58x warmed solve,
 > `wireframe-gsco-multistep` 3.5x device solve); see the addendum at the end
 > of this report.
+
+### 2026-08-24 controlled re-measurement: what is and is not still current
+
+Six cases (coil-forces, boozerqa, wireframe-gsco-multistep, tracing-particle,
+planar-coils, finitebuild) were re-run at HEAD on the same RTX 5090 box in a
+fresh CUDA environment (jax/jaxlib 0.10.0, matching the authority lane's
+recorded version), with same-environment runs at the authority revision as
+controls to separate code change from environment change. Verdicts:
+
+- **Precision: current.** Every re-measured GPU endpoint reproduces the
+  final-result table to its printed precision (2e-13 to 7e-12 relative);
+  the 2026-08-14 solver fusing/caching did not move physics.
+- **Device memory: current.** Peak device bytes are identical to the table
+  in every re-measured case.
+- **Host memory: one real change.** The fused/cached lanes cost more host
+  RSS at HEAD: the coil-forces GPU lane went 2041 -> 2328 MiB (+14%), with
+  the authority revision reproducing the table's value in the same
+  environment. Other re-measured cases sit within about 5% of the table.
+- **GPU wall time: the table is environment-bound, not stale.**
+  Same-environment controls put HEAD near parity with the authority
+  revision (coil-forces 86.9 -> 84.5 s and tracing-particle 96.9 -> 94.9 s,
+  both within 3%; boozerqa 108.6 -> 99.5 s, -8%). The large differences
+  from the table (coil-forces 147.3 s there versus ~86 s here;
+  tracing-particle 54.8 s there versus ~96 s here) appear at the **same
+  revision** and run in both directions — they are environment effects.
+  Consequence: the wall-time table above is valid only in its authority
+  environment, and quoting its GPU numbers against any other environment
+  or hardware is invalid.
+- **JAX CPU wall time: no single-sample claim survives controls.** Within
+  one environment, HEAD versus the authority revision moves in both
+  directions (coil-forces 48.6 -> 41.3 s; boozerqa 26.9 -> 37.7 s), and
+  the same lane differs by up to 40% between this pass's two replay
+  environments at one revision. These one-shot launches cannot separate
+  code effects from compile/environment variance; per-case receipts with
+  repeated interleaved pairs (see the addendum) are the only wall-time
+  evidence class that can.
+- **finitebuild could not be re-measured through the harness:** at HEAD its
+  lanes publish `initial:minimum_clearance` and `final:minimum_clearance`
+  (added by `ead83eaef`, 2026-08-18) with no comparison routes in
+  `parity_manifest.json`, so a full three-lane bounded replay fails closed
+  ("complete direct lane-pair matrix") — reproduced on two machines. Until
+  routes for those observables are added, only 24 of 26 cases can replay
+  the full three-lane bounded matrix at HEAD (this case, plus the promoted
+  single-stage route).
 
 ### JAX GPU fast versus JAX GPU parity: cold and warmed measurements
 
