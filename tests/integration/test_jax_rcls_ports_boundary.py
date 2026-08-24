@@ -32,9 +32,12 @@ module pins that hybrid boundary at two levels:
    plasma test points) is ~1.3 s wall on CPU (geometry + response matrix +
    first JIT compile + solve), so the full lane is exercised directly
    instead of falling back to an index-set-only check on the adapter's
-   consumed expression. This is strictly stronger evidence than an index
-   check: it proves the constraint is honored in the solved VALUES, not
-   merely that two index sets happen to agree.
+   consumed expression. What this pins is WHICH indices the adapter treats
+   as free: the solver writes results only through ``.at[free].set(...)``,
+   so a wrong consumed index set would place current on a constrained
+   segment and fail here. Solve accuracy itself is owned by the rcls parity
+   cases, not this boundary test; the finite/nonzero guards below reject
+   degenerate solves.
 
 NOT independently re-verified here: the pure set-complement arithmetic
 inside ``unconstrained_segments()`` itself (``free_segs[constrained] =
@@ -45,9 +48,11 @@ the constrained or the free set with no segment double-counted or
 dropped) -- re-deriving that same complement a second time would restate the
 same tautology the prior version of this test had, not add information.
 
-Known facts at the "bounded" scale (12x22 wireframe grid, sanity-checked at
-runtime below, never hardcoded into the assertions): 528 segments total, 31
-native-constrained, 497 free.
+For the reader: at the "bounded" scale (12x22 wireframe grid) HEAD currently
+produces 528 segments total, 31 native-constrained, 497 free. These numbers
+are documentation, not assertions -- the asserted properties are the oracle
+equality (test 1) and the placement partition plus the finite/nonzero solve
+guards (test 2).
 """
 
 from __future__ import annotations
@@ -155,6 +160,11 @@ def test_jax_rcls_solution_currents_vanish_on_native_constrained_segments() -> N
     )
     currents = np.asarray(jax.device_get(result.x), dtype=np.float64).reshape(-1)
 
+    assert np.all(np.isfinite(currents)), (
+        "the JAX RCLS solve returned non-finite currents; a degenerate solve "
+        "cannot certify the constrained/free placement boundary"
+    )
+
     constrained_segments = np.asarray(wireframe.constrained_segments(), dtype=np.int64)
     free_segments = np.asarray(wireframe.unconstrained_segments(), dtype=np.int64)
 
@@ -167,6 +177,10 @@ def test_jax_rcls_solution_currents_vanish_on_native_constrained_segments() -> N
     )
 
     nonzero_segments = np.flatnonzero(currents)
+    assert nonzero_segments.size > 0, (
+        "the JAX RCLS solve returned an all-zero current vector; a degenerate "
+        "solve cannot certify the constrained/free placement boundary"
+    )
     assert np.all(np.isin(nonzero_segments, free_segments)), (
         "the JAX RCLS solution carries nonzero current on a segment the "
         "native wireframe marked constrained"

@@ -47,6 +47,12 @@ and its generated document are never touched:
     (``stale_path``)
 23. a central ``tolerance_owner`` claim whose bound test file never imports
     ``simsopt_jax.parity_tolerances`` (``tolerance_owner_unsupported``)
+24. a duplicate capability ``id`` (``duplicate_capability``)
+25. an evidence anchor found in the file but outside the cited line range
+    (``stale_path``)
+26. an evidence anchor too short to pin a distinctive site (``stale_path``)
+27. an evidence citation with an invalid line range, such as ``:9-4``
+    (``stale_path``)
 """
 
 from __future__ import annotations
@@ -399,6 +405,58 @@ def test_red_central_owner_claim_without_import_is_rejected(manifest):
     message = _assert_rejected(corrupted, "tolerance_owner_unsupported")
 
     assert "test_stochastic_samples.py" in message
+
+
+def test_red_duplicate_capability_id_is_rejected(manifest):
+    """Two capability records sharing one id must fail, not silently double-list."""
+    corrupted = copy.deepcopy(manifest)
+    corrupted["capabilities"].append(copy.deepcopy(_capability(corrupted, "MF-1")))
+
+    message = _assert_rejected(corrupted, "duplicate_capability")
+
+    assert "MF-1" in message
+
+
+def test_red_evidence_anchor_outside_cited_range_is_rejected(manifest):
+    """An anchor that exists in the file but not inside the cited lines fails."""
+    corrupted = copy.deepcopy(manifest)
+    _capability(corrupted, "MF-1")["evidence"] = [
+        {
+            "anchor": "import jax.numpy as jnp",
+            "cite": "src/simsopt/field/selffield.py:1-2",
+        }
+    ]
+
+    message = _assert_rejected(corrupted, "stale_path")
+
+    assert "not within the cited line range" in message
+
+
+def test_red_evidence_anchor_too_short_is_rejected(manifest):
+    """A trivially short anchor cannot pin a distinctive site and must fail."""
+    corrupted = copy.deepcopy(manifest)
+    _capability(corrupted, "MF-1")["evidence"] = [
+        {"anchor": "jnp", "cite": "src/simsopt/field/selffield.py:18"}
+    ]
+
+    message = _assert_rejected(corrupted, "stale_path")
+
+    assert "shorter than" in message
+
+
+def test_red_invalid_evidence_line_range_is_rejected(manifest):
+    """A reversed line range in a citation must fail as invalid."""
+    corrupted = copy.deepcopy(manifest)
+    _capability(corrupted, "MF-1")["evidence"] = [
+        {
+            "anchor": "import jax.numpy as jnp",
+            "cite": "src/simsopt/field/selffield.py:9-4",
+        }
+    ]
+
+    message = _assert_rejected(corrupted, "stale_path")
+
+    assert "invalid line range" in message
 
 
 def test_red_capability_missing_title_is_rejected(manifest):

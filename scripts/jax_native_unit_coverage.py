@@ -38,6 +38,8 @@ amended:
   be. Needed for the same purpose: the plan asks for a real rationale but
   states no checkable floor, and a single non-generic word would otherwise
   pass ``GENERIC_REASONS`` without being a rationale.
+* ``MINIMUM_ANCHOR_CHARACTERS`` -- the shortest an evidence ``anchor`` may
+  be; a shorter token cannot pin a distinctive source site.
 
 Native test surface
 -------------------
@@ -159,6 +161,7 @@ GENERIC_REASONS = frozenset(
     {"unsupported", "n/a", "na", "tbd", "todo", "none", "not supported", "-"}
 )
 MINIMUM_REASON_CHARACTERS = 40
+MINIMUM_ANCHOR_CHARACTERS = 12
 
 _EVIDENCE_RE = re.compile(r"^(?P<path>[^:]+)(?::(?P<start>\d+)(?:-(?P<end>\d+))?)?$")
 # A collectible pytest node id: either a bare function ('path::function', the
@@ -297,26 +300,47 @@ def _evidence_failures(
             failures.append(f"{check}: {label} evidence path does not exist: {path}")
             continue
         file_text = target.read_text(encoding="utf-8")
+        lines = file_text.splitlines()
+        line_count = len(lines)
+        start_text = match.group("start")
+        end_text = match.group("end") or start_text
+        if start_text is not None:
+            if int(start_text) < 1 or int(end_text) < int(start_text):
+                failures.append(
+                    f"{check}: {label} evidence {cite!r} has an invalid line "
+                    "range (lines are 1-indexed; end must not precede start)"
+                )
+                continue
+            if int(end_text) > line_count:
+                failures.append(
+                    f"{check}: {label} evidence {cite!r} points past the end of "
+                    f"{path} ({line_count} lines)"
+                )
+                continue
         if path not in surface_set:
             if not isinstance(anchor, str) or not anchor.strip():
                 failures.append(
                     f"{check}: {label} evidence {cite!r} cites a path outside the "
                     "pinned native surface and has no anchor"
                 )
+            elif len(anchor) < MINIMUM_ANCHOR_CHARACTERS:
+                failures.append(
+                    f"{check}: {label} evidence {cite!r} anchor {anchor!r} is "
+                    f"shorter than {MINIMUM_ANCHOR_CHARACTERS} characters and "
+                    "cannot pin a distinctive site"
+                )
             elif anchor not in file_text:
                 failures.append(
                     f"{check}: {label} evidence {cite!r} anchor {anchor!r} was not "
                     f"found in {path}"
                 )
-        end = match.group("end") or match.group("start")
-        if end is None:
-            continue
-        line_count = len(file_text.splitlines())
-        if int(end) > line_count:
-            failures.append(
-                f"{check}: {label} evidence {cite!r} points past the end of "
-                f"{path} ({line_count} lines)"
-            )
+            elif start_text is not None and anchor not in "\n".join(
+                lines[int(start_text) - 1 : int(end_text)]
+            ):
+                failures.append(
+                    f"{check}: {label} evidence {cite!r} anchor {anchor!r} is not "
+                    f"within the cited line range of {path}"
+                )
     return failures
 
 
@@ -488,6 +512,18 @@ def _validate_capabilities(
         for capability_id in row.get("capabilities", []) or []:
             referenced.add(capability_id)
 
+    id_counts: dict[str, int] = {}
+    for capability in manifest.get("capabilities", []):
+        raw_id = capability.get("id")
+        if isinstance(raw_id, str) and raw_id:
+            id_counts[raw_id] = id_counts.get(raw_id, 0) + 1
+    for duplicate_id, count in sorted(id_counts.items()):
+        if count > 1:
+            failures.append(
+                f"duplicate_capability: capability id {duplicate_id} appears "
+                f"{count} times"
+            )
+
     for capability in manifest.get("capabilities", []):
         capability_id = capability.get("id")
         if not isinstance(capability_id, str) or not capability_id:
@@ -590,7 +626,11 @@ def _validate_capabilities(
                 bound_file = repo_root / bound_path
                 if not bound_file.exists():
                     continue  # reported by the orphan_test_id existence check
-                if "simsopt_jax.parity_tolerances" not in bound_file.read_text():
+                bound_text = bound_file.read_text()
+                if (
+                    "simsopt_jax.parity_tolerances" not in bound_text
+                    and "from simsopt_jax import parity_tolerances" not in bound_text
+                ):
                     failures.append(
                         f"tolerance_owner_unsupported: {label} claims "
                         f"{CENTRAL_TOLERANCE_OWNER} but {bound_path} never "
