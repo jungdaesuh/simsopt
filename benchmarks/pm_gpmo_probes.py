@@ -1829,14 +1829,18 @@ def run_jax_relax_split(
 ) -> SolveResult:
     """Time ``relax_and_split_jax`` on the same continuation the native lane runs.
 
-    ``alpha`` is passed explicitly rather than left to the JAX default: the
-    native wrapper uses ``2 (1 - 1e-5) / ATA_scale``
-    (``src/simsopt/solve/permanent_magnet_optimization.py``,
-    ``relax_and_split``) while the
-    JAX default divides by ``ATA_scale + 2 reg_l2 + 1/nu``
-    (``src/simsopt_jax/solve/permanent_magnet.py``, ``relax_and_split_jax``).
-    Different step
-    sizes are different work, not a faster lane.
+    Known defect, adjudicated 2026-08-23 (backlog plan P3.5): this function
+    fail-closes on the MwPGP step-size validator by double-applying the
+    ``1/nu`` shift. ``rescale_for_opt`` below folds ``2 reg_l2 + 1/nu`` into
+    ``grid.ATA_scale`` **in place**, the explicit ``alpha`` is then computed
+    from the shifted scale (a legitimate step, inside the true bound by its
+    own 1e-5 margin), and the shifted grid is staged through
+    ``PermanentMagnetGridJAX.from_cpu`` — whose ``_mwpgp_spec`` validator
+    takes ``ATA_scale`` as the *raw* spectral scale and re-applies the shift,
+    rejecting the alpha. Staged un-rescaled, the two lanes' default step
+    rules coincide exactly, so there is no step-size asymmetry to disclose;
+    the staging fix is owned by the QA campaign charter and is deliberately
+    not hot-patched here (the refusal itself is archived evidence).
 
     Every row this returns is cold.  See :data:`JAX_RELAX_SPLIT_RETRACE`: the
     solve path is unjitted and rebuilds its scan closure per call, so repeat 1

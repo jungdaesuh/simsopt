@@ -57,7 +57,15 @@ class PermanentMagnetGridJAX:
 
     @classmethod
     def from_cpu(cls, pm_grid) -> "PermanentMagnetGridJAX":
-        """Stage an already-initialized CPU ``PermanentMagnetGrid`` payload."""
+        """Stage an already-initialized CPU ``PermanentMagnetGrid`` payload.
+
+        ``pm_grid.ATA_scale`` must still be the raw spectral scale: native
+        ``rescale_for_opt`` mutates it in place to ``ATA_scale + 2 reg_l2 +
+        1/nu``, and the MwPGP validator derives its step bound by applying
+        that same shift to the staged value — a grid staged after
+        ``rescale_for_opt`` gets the shift twice and legitimate native steps
+        are rejected.
+        """
 
         ndipoles = int(pm_grid.ndipoles)
         if hasattr(pm_grid, "m_proxy"):
