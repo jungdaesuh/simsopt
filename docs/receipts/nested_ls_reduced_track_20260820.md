@@ -921,3 +921,38 @@ alone suffices at B37 on this trajectory). NOT a parity or timing claim —
 the certified B37 v2 requires the paired single-process run with both
 lanes under the merged v2 lineage per
 `docs/nested_ls_upgrade_implementation_plan.md` Phase 5.
+
+## B3 v2 bridge run (2026-08-24): all legs green, no receipt minted — driver killed during aggregation
+
+The transactional B3 v2 bridge run (producer `01fefbadd` in detached
+worktree `.wt-b3v2-run`, launched 05:19, sealed sweep artifact as OMP
+evidence) completed **all seven legs** (untimed prime + 3 interleaved
+pairs) and was killed by an external background-task stop at ~08:1x,
+during per-pair aggregation, after pair 0's full verdict chain and before
+receipt serialization. Per the remint-only law **no receipt exists and
+none is claimed**; this section preserves the evidence
+(`docs/receipts/evidence/b3v2_bridge_20260824/`: driver log sha16
+`afb677555d74b24a` + 8 single-process child payloads).
+
+What the preserved record proves:
+- **Pair 0 (driver-gated):** C++ rejudge no-op both lanes (iter=0,
+  grad_l2 3.07e-15 / 2.76e-15), `physics=True`,
+  `j_rel_gap = 2.5895e-13` vs the frozen 1e-9 band. JAX
+  J = 0.012982793095005024, native J = 0.012982793095001662.
+- **Determinism:** JAX J bitwise identical across 4 executions (prime +
+  3 pairs); native bitwise across 3 pairs.
+- **simsoptpp binary-boundary canary PASSED bitwise:** pair 2's legs ran
+  on the replaced binary (sha16 41b2ca79 → 95190afa, swapped ~07:0x;
+  live-process inode evidence in the closure narrative) and reproduced
+  pairs 0/1 bit-for-bit in both lanes — the recompile is
+  floating-point-irrelevant for this workload, proven by execution.
+- Pairs 1/2 lack driver-side rejudge rows (killed before their
+  aggregation), but their endpoint states are bitwise-equal to pair 0's,
+  whose rejudge verdict therefore covers the same bytes.
+
+Status: bridge evidence only. Independently of the kill, the merged-tree
+driver refuses this lineage for B37 gating on five interlocks (see
+`docs/nested_ls_upgrade_implementation_plan.md`, Current Context) — the
+Phase-1 fresh sweep + B3 at the merged SHA was already the only path to a
+B37-eligible receipt and now also supersedes this run's certification
+role. No timing claim attaches to any leg.
