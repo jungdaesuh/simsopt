@@ -105,6 +105,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="scipy L-BFGS-B maxcor, identical on both lanes.",
     )
     parser.add_argument(
+        "--pairs",
+        type=int,
+        default=int(REPEATS),
+        help=(
+            "Interleaved measure pairs. The charter default is the contract "
+            "REPEATS; Amendment 4 permits 1 for a fault-rerun whose verdict "
+            "is the deterministic physics gate, walls informational."
+        ),
+    )
+    parser.add_argument(
+        "--skip-prime",
+        action="store_true",
+        help=(
+            "Skip the untimed JAX cache-priming run (Amendment 4 fault-rerun "
+            "only: requires a demonstrably warm persistent compile cache)."
+        ),
+    )
+    parser.add_argument(
         "--tag",
         default="",
         help="Receipt suffix, e.g. a100 → nested_ls_outer_b3_20260823.a100.json",
@@ -797,16 +815,29 @@ def main(argv: list[str] | None = None) -> None:
             f" measured_j_rel_gap_max {b3_receipt['measured_j_rel_gap_max']!r}"
             f" frozen j_parity_rtol {j_parity_rtol!r}"
         )
-    prime, prime_endpoint = _launch_jax(budget=budget, maxcor=maxcor, log=log)
-    prime_endpoint.unlink(missing_ok=True)
-    prime["role"] = "prime"
-    prime["repeat"] = -1
-    prime["timed"] = False
+    if args.skip_prime:
+        prime = {
+            "role": "prime",
+            "repeat": -1,
+            "timed": False,
+            "skipped": True,
+            "reason": "amendment-4 fault-rerun: persistent compile cache warm",
+        }
+        log("outer prime skipped (amendment-4 fault-rerun, warm cache)")
+    else:
+        prime, prime_endpoint = _launch_jax(budget=budget, maxcor=maxcor, log=log)
+        prime_endpoint.unlink(missing_ok=True)
+        prime["role"] = "prime"
+        prime["repeat"] = -1
+        prime["timed"] = False
 
     measures: list[tuple[dict[str, object], dict[str, object], Path, Path]] = []
     native_walls: list[float] = []
     jax_walls: list[float] = []
-    for repeat in range(REPEATS):
+    pairs_n = int(args.pairs)
+    if pairs_n < 1:
+        raise SystemExit(f"--pairs must be >= 1, got {pairs_n}")
+    for repeat in range(pairs_n):
         native, native_endpoint = _launch_native(
             omp_num_threads=omp_num_threads,
             budget=budget,
@@ -937,7 +968,7 @@ def main(argv: list[str] | None = None) -> None:
             "outer_optimizer_loop": True,
             "physics_gate_untimed": True,
             "rejudged_lanes": ["native", "jax"],
-            "repeats": int(REPEATS),
+            "repeats": int(pairs_n),
             "subtractions": "none",
             "tag": tag or None,
             "trajectory_parity_claimed": False,
