@@ -18,6 +18,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from benchmarks.nested_ls_outer_claim import CLAIM_SCHEMA
 from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_NEWTON_STAB,
@@ -1935,7 +1936,7 @@ def test_authored_outer_b37_json_uses_b3_receipt_omp():
 
 
 def _assert_outer_transaction_claim(payload: dict[str, object], *, budget: int) -> None:
-    assert payload["schema"] == "nested-ls-outer-claim.v2"
+    assert payload["schema"] == CLAIM_SCHEMA
     assert payload["written_by_pytest"] is False
     assert payload["fail_closed_reason"] is None
     boundary = payload["claim_boundary"]

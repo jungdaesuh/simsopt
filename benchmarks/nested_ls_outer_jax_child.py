@@ -61,7 +61,7 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_OUTER_REJUDGE_SCHEMA,
     NestedLsOuterAcceptWithoutCandidate,
     NestedLsOuterCandidateStore,
-    nested_ls_inner_policy,
+    nested_ls_jax_inner_policy,
     nested_ls_outer_attempt_fun_is_objective,
     nested_ls_outer_endpoint_success,
     nested_ls_outer_ftol_zero_stop,
@@ -146,11 +146,10 @@ class _OuterEval:
     # This is a different question from ``inner_feasible``, which reports
     # whether the inner solve landed on the anchor's Boozer branch within
     # budget. The two answers coincide today, and they are still separate
-    # questions: Phase 4 of ``docs/nested_ls_upgrade_implementation_plan.md``
-    # licenses coarse inner tolerances to feed line-search trial values, and
-    # a row produced that way is inner-feasible while its ``j`` is a coarse
-    # surrogate rather than the objective. Do not simplify either field into
-    # the other.
+    # questions: a future, separately certified coarse inner tolerance could
+    # feed line-search trial values, and a row produced that way would be
+    # inner-feasible while its ``j`` is a coarse surrogate rather than the
+    # objective. Do not simplify either field into the other.
     #
     # The bit exists because any consumer that aggregates ``j`` across rows
     # without reading it averages surrogate values into a physics figure.
@@ -834,7 +833,7 @@ def _drive_outer_run(context: _OuterRunContext) -> dict[str, object]:
         # Read off the STATE this run actually used, never re-derived from
         # the defaults: a receipt that reported the default policy while the
         # run used another would be worse than no block at all.
-        "inner_policy": nested_ls_inner_policy(
+        "inner_policy": nested_ls_jax_inner_policy(
             ift_stab=float(F3_B37_IFT_STAB),
             inner_substep_legs=tuple(state.inner_substep_legs),
             inner_predictor=bool(state.inner_predictor),

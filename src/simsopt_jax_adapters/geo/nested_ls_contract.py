@@ -79,56 +79,36 @@ NESTED_LS_NEWTON_EXIT_STATUSES: Final[tuple[str, str, str]] = (
 # tell them apart -- which is the precondition for comparing numbers that
 # must not be compared.
 #
-# ``nested_ls_inner_policy`` closes it by naming the whole inner lane in one
-# place. It is deliberately a FLAT record of what was in force, not a
-# reference to a named preset: a preset name is only as honest as the
-# reader's copy of what the name meant, and this campaign has already been
-# bitten by a schema string that stopped identifying a shape.
-NESTED_LS_INNER_POLICY_NAME: Final[str] = "anchor_frozen_predictor_v3"
+# Inner receipts name solver families, sequences, and per-stage options rather
+# than a lane-agnostic policy. The JAX and native children use materially
+# different inner solvers, so a shared record that omits that distinction is
+# false provenance.
+NESTED_LS_JAX_INNER_POLICY_NAME: Final[str] = "reduced_schur_newton_v1"
+NESTED_LS_NATIVE_INNER_POLICY_NAME: Final[str] = "banana_bfgs_then_newton_v1"
+NESTED_LS_JAX_INNER_STAB: Final[float] = 0.0
 
-# Licensed coarse tier (Phase 4 of the upgrade plan).
+# Coarse diagnostic threshold (Phase 4 of the upgrade plan).
 #
-# Which achieved inner residual may feed which consumer, decided from the
-# measured adjoint error curve rather than proposed. The measurement is
-# ``docs/receipts/evidence/nested_ls_outer_predictor_replay_20260824.json``:
-# eight distinct achieved residuals from 4.3e-2 to 1.7e-13 at one recorded
-# anchor and one recorded trial displacement, sampled by CAPPING NEWTON
-# ITERATIONS -- loosening the tolerance cannot sample this curve, because a
-# quadratically convergent walk overshoots a loose request.
+# This threshold classifies a completed solve for diagnostic evidence only;
+# no outer consumer is authorized to use it in place of the tight Newton
+# tolerance. A local diagnostic sampled eight achieved residuals from 4.3e-2
+# to 1.7e-13 at one anchor and one trial displacement by capping Newton
+# iterations. That artifact is not retained at HEAD, so these observations
+# explain the diagnostic threshold but cannot certify a consumer policy.
 #
-# Three results decide the tiers, and two of them are not what the plan
-# expected:
+# The measurements are informative but do not license a coarse use:
 #
 # 1. kappa_2(H_ss) = 2.055e5 at stab = 0, and the IFT adjoint DOES NOT
 #    amplify by it. Measured relative gradient error is 0.30x to 3.94x the
 #    achieved residual across eleven decades -- order unity.
-# 2. The relative error in the OBJECTIVE is LARGER than in the gradient:
-#    worst 14.8x the achieved residual against the gradient's 3.94x. The
-#    plan ordered its tiers with "line-search trial values only" as the
-#    LOOSEST, on the assumption that a value tolerates more error than a
-#    gradient. At this state the opposite holds, so the value is the
-#    BINDING constraint and the two tiers collapse into one.
-# 3. Neither curve is monotone in the residual (rho = 4.3e-2 gives a
-#    smaller error than rho = 2.0e-2, in both quantities). A tier therefore
-#    cannot be read off the fitted slope; it is licensed from the measured
-#    WORST ratio over the sampled rungs, which is what these constants are.
+# 2. Neither curve is monotone in the residual (rho = 4.3e-2 gives a
+#    smaller error than rho = 2.0e-2, in both quantities), so this single
+#    state cannot establish an envelope.
 #
 # SINGLE STATE. One anchor, one displacement, one host. These bounds are
 # the best available evidence and are not a proof of an envelope; a second
-# state may move the worst ratio, and Phase 5 must not widen a tier on this
-# evidence alone.
-NESTED_LS_COARSE_AMPLIFICATION_GRADIENT: Final[float] = 3.943
-NESTED_LS_COARSE_AMPLIFICATION_VALUE: Final[float] = 14.805
-
-#: What a solve result may be used for, tightest first.
-NESTED_LS_COARSE_USE_COMMITTED_ANCHOR: Final[str] = "committed_anchor"
-NESTED_LS_COARSE_USE_OUTER_GRADIENT: Final[str] = "outer_gradient"
-NESTED_LS_COARSE_USE_LINE_SEARCH_VALUE: Final[str] = "line_search_value"
-NESTED_LS_COARSE_USES: Final[tuple[str, str, str]] = (
-    NESTED_LS_COARSE_USE_COMMITTED_ANCHOR,
-    NESTED_LS_COARSE_USE_OUTER_GRADIENT,
-    NESTED_LS_COARSE_USE_LINE_SEARCH_VALUE,
-)
+# state may move the observed behavior, so Phase 5 may record this threshold
+# but must not promote it into a solver-use policy.
 
 # Predictor trust region (Phase 2 of the upgrade plan).
 #
@@ -180,11 +160,9 @@ NESTED_LS_GATE6_NATIVE_OMP_THREADS: Final[int] = 16
 # Fresh-process child payload schemas. These live in the JAX-free contract
 # module so producers, the claim parent, and the rejudge consumer share one
 # source of truth without importing either process-level child module.
-# v5 -> v6 / v4 -> v5 (2026-08-24): both payloads gained an ``inner_policy``
-# block. ONE bump covering sub-stepping, the predictor and the coarse tier
-# together, rather than three: a schema string that sometimes carries the
-# block and sometimes does not has stopped identifying a shape, which is the
-# defect that forced the previous bump.
+# v6 -> v7 / v5 -> v6 (2026-08-24): ``inner_policy`` now identifies each
+# child's actual solver family and sequence. The prior block claimed the JAX
+# reduced-Schur Newton settings for the native banana BFGS-then-Newton lane.
 #
 # The bump is not merely additive bookkeeping. Before the block existed a
 # consumer could not distinguish a stock inner lane from a sub-stepped or
@@ -192,9 +170,10 @@ NESTED_LS_GATE6_NATIVE_OMP_THREADS: Final[int] = 16
 # old consumer reading a new receipt would still see the fields it knows and
 # would still draw that wrong conclusion -- so the version has to move, to
 # stop it.
-NESTED_LS_OUTER_JAX_CHILD_SCHEMA: Final[str] = "nested-ls-outer-jax-child.v6"
-NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA: Final[str] = "nested-ls-outer-native-child.v5"
+NESTED_LS_OUTER_JAX_CHILD_SCHEMA: Final[str] = "nested-ls-outer-jax-child.v7"
+NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA: Final[str] = "nested-ls-outer-native-child.v6"
 NESTED_LS_OUTER_REJUDGE_SCHEMA: Final[str] = "nested-ls-outer-rejudge.v1"
+NESTED_LS_OUTER_FD0_SCHEMA: Final[str] = "nested-ls-outer-fd0.v3"
 
 # Gate FD-0 of the eight-term outer charter
 # (``docs/jax_nested_ls_outer_charter.md``). The outer variable is the
@@ -510,9 +489,8 @@ def nested_ls_outer_rejection_barrier(
 #:
 #: It is a DIFFERENT question from ``inner_feasible``, which reports whether
 #: the inner solve landed on the anchor's branch within budget. The two
-#: coincide today and diverge at Phase 4 of
-#: ``docs/nested_ls_upgrade_implementation_plan.md``, where a licensed coarse
-#: inner tolerance may feed a line-search trial value: that row is
+#: coincide today but could diverge if a future, separately certified coarse
+#: inner tolerance feeds a line-search trial value: that row would be
 #: inner-feasible while its number is a coarse surrogate. A consumer that
 #: aggregates values across rows without reading this bit averages
 #: surrogates into a physics figure, which is the failure the bit prevents.
@@ -568,12 +546,17 @@ def nested_ls_predictor_trust_region(
     Scaling rather than rejecting is DESC's rule and is deliberately kept:
     a predicted step that is too long is still pointing somewhere useful,
     and clipping keeps its direction. Whether to fall back to the bare
-    anchor is a separate question this function does not answer.
+    anchor is a separate question this function does not answer. A nonfinite
+    tangent is not a direction, so this pure arithmetic helper replaces it
+    with a zero increment; the production caller detects it first and returns
+    the original bare-anchor array.
     """
 
     delta = np.asarray(delta_surface, dtype=np.float64)
     cap = float(ratio) * float(np.linalg.norm(anchor_surface_dofs))
     raw_norm = float(np.linalg.norm(delta))
+    if not np.all(np.isfinite(delta)):
+        return np.zeros_like(delta, dtype=np.float64), raw_norm, 0.0, cap, False
     if raw_norm > cap:
         applied = delta * (cap / raw_norm)
         return applied, raw_norm, float(np.linalg.norm(applied)), cap, True
@@ -595,143 +578,85 @@ def nested_ls_predictor_arm(
     the bare anchor on a tie would break that identity for no gain.
     """
 
-    if float(predicted_gradient_l2) > float(bare_gradient_l2):
+    predicted = float(predicted_gradient_l2)
+    if not np.isfinite(predicted) or predicted > float(bare_gradient_l2):
         return NESTED_LS_PREDICTOR_ARM_BARE
     return NESTED_LS_PREDICTOR_ARM_PREDICTED
 
 
-def nested_ls_inner_policy(
+def _nested_ls_inner_policy_record(
+    *,
+    policy: str,
+    solver_family: str,
+    solver_sequence: tuple[str, ...],
+    stages: tuple[tuple[str, dict[str, float | int]], ...],
+) -> dict[str, object]:
+    """Build the common immutable-shaped receipt portion for an inner lane."""
+
+    return {
+        "policy": policy,
+        "solver_family": solver_family,
+        "solver_sequence": list(solver_sequence),
+        "stages": {name: dict(options) for name, options in stages},
+    }
+
+
+def nested_ls_jax_inner_policy(
     *,
     ift_stab: float,
     inner_substep_legs: tuple[int, ...],
     inner_predictor: bool,
-    coarse_tier_honoured: str | None = None,
 ) -> dict[str, object]:
-    """Everything that decides what the inner solve does, in one record.
-
-    Published beside ``outer_policy`` so a receipt states its inner lane
-    rather than leaving it inferred from a schema version. Every field is a
-    value that was actually in force for the run, not a preset name.
-
-    ``ift_stab`` is passed in rather than read from a constant here: it
-    lives in the scale module, and this module is deliberately jax-free so
-    GPU parents can import it without initializing a device. A second
-    spelling of that constant would be the twin-constant failure this
-    campaign has already paid for.
-
-    ``coarse_tier_honoured`` is ``None`` today and that is the honest
-    answer, not a placeholder: Phase 4 LICENSED a coarse tier and no
-    consumer CLAIMS it -- ``success`` stays true only for ``converged``, so
-    a coarse result is still refused everywhere. Recording ``None`` says the
-    licence exists and is unexercised. A future run that honours it says so
-    here, and receipts on either side of that change stop being comparable.
-
-    ``trajectory_is_stock`` is the field a comparator should actually read.
-    Both levers reproduce the stock lane exactly until their first
-    divergence -- sub-stepping's first rung IS the undivided step, and the
-    predictor falls back to the bare anchor whenever it cannot improve on
-    it -- so "enabled" is not the same as "diverged". But a receipt cannot
-    know whether it diverged without inspecting its own ledger, and the
-    conservative statement is the useful one: if either lever was enabled,
-    do not compare these numbers to a receipt where it was not.
-    """
+    """Publish the active reduced-Schur Newton lane and its predictor settings."""
 
     legs = tuple(int(leg) for leg in inner_substep_legs)
     stock = legs == (1,) and not bool(inner_predictor)
     return {
-        "policy": NESTED_LS_INNER_POLICY_NAME,
-        "ift_stab": float(ift_stab),
-        "newton_maxiter": int(NESTED_LS_NEWTON_MAXITER),
-        "newton_tol": float(NESTED_LS_NEWTON_TOL),
-        "iota_branch_guard": float(NESTED_LS_OUTER_IOTA_BRANCH_GUARD),
+        **_nested_ls_inner_policy_record(
+            policy=NESTED_LS_JAX_INNER_POLICY_NAME,
+            solver_family="reduced_schur_newton",
+            solver_sequence=("reduced_schur_newton",),
+            stages=(
+                (
+                    "reduced_schur_newton",
+                    {
+                        "stab": float(ift_stab),
+                        "tol": float(NESTED_LS_NEWTON_TOL),
+                        "maxiter": int(NESTED_LS_NEWTON_MAXITER),
+                    },
+                ),
+            ),
+        ),
         "inner_substep_legs": list(legs),
         "inner_substep_enabled": legs != (1,),
         "inner_predictor_enabled": bool(inner_predictor),
         "predictor_trust_region_ratio": (
             float(NESTED_LS_PREDICTOR_TRUST_REGION_RATIO) if inner_predictor else None
         ),
-        "coarse_tier_licensed_residual": float(NESTED_LS_NEWTON_COARSE_TOL),
-        "coarse_tier_honoured": coarse_tier_honoured,
+        "coarse_tier_diagnostic_residual": float(NESTED_LS_NEWTON_COARSE_TOL),
+        "coarse_tier_honoured": None,
         "trajectory_is_stock": stock,
-        "comparability": (
-            "stock inner lane: comparable to any receipt with trajectory_is_stock true"
-            if stock
-            else "NON-STOCK inner lane: do not compare these numbers to a "
-            "receipt with a different inner_substep_legs or "
-            "inner_predictor_enabled"
-        ),
     }
 
 
-def nested_ls_coarse_tier_admits(
-    *,
-    achieved_residual_l2: float,
-    use: str,
-) -> bool:
-    """Whether a solve at this achieved residual may be used this way.
+def nested_ls_native_inner_policy() -> dict[str, object]:
+    """Publish the native banana ``run_code`` BFGS-then-Newton lane."""
 
-    ``committed_anchor`` is admitted only at ``NESTED_LS_NEWTON_TOL``, and
-    that is not a margin argument: the anchor is the warm start every later
-    evaluation inherits and the point FD-0 differences about, so an error
-    there is not attenuated, it is propagated. Committed anchors are always
-    tight.
-
-    ``outer_gradient`` and ``line_search_value`` share the coarse tier at
-    ``NESTED_LS_NEWTON_COARSE_TOL``. They share it because the measurement
-    says the value is the binding one -- see the tier comment above -- so
-    splitting them would license the value looser than the evidence allows.
-
-    Fails CLOSED on an unrecognized use. A default-admit branch here would
-    silently license whatever consumer someone adds next, which is the
-    whole failure mode this predicate exists to prevent.
-    """
-
-    residual = float(achieved_residual_l2)
-    if not residual >= 0.0:  # NaN included: NaN fails every comparison
-        return False
-    if use == NESTED_LS_COARSE_USE_COMMITTED_ANCHOR:
-        return residual <= float(NESTED_LS_NEWTON_TOL)
-    if use in (
-        NESTED_LS_COARSE_USE_OUTER_GRADIENT,
-        NESTED_LS_COARSE_USE_LINE_SEARCH_VALUE,
-    ):
-        return residual <= float(NESTED_LS_NEWTON_COARSE_TOL)
-    raise ValueError(
-        f"unknown nested-LS coarse-tier use {use!r}; expected one of "
-        f"{NESTED_LS_COARSE_USES}."
-    )
-
-
-def nested_ls_coarse_tier_error_bound(
-    *,
-    achieved_residual_l2: float,
-    use: str,
-) -> float:
-    """The relative error this use inherits at this achieved residual.
-
-    The measured worst amplification times the residual. Linear because the
-    measurement is: the fitted slope is 0.943 over eleven decades, and the
-    amplification constants are worst-case ratios over the sampled rungs
-    rather than the fit's own coefficient, so this over-states rather than
-    under-states inside the sampled range.
-
-    Outside that range it is an extrapolation and says nothing. Callers
-    that need a guarantee should gate on
-    :func:`nested_ls_coarse_tier_admits` and read this as the size of the
-    error they are accepting, not as a certificate.
-    """
-
-    residual = float(achieved_residual_l2)
-    if use == NESTED_LS_COARSE_USE_OUTER_GRADIENT:
-        return float(NESTED_LS_COARSE_AMPLIFICATION_GRADIENT) * residual
-    if use in (
-        NESTED_LS_COARSE_USE_LINE_SEARCH_VALUE,
-        NESTED_LS_COARSE_USE_COMMITTED_ANCHOR,
-    ):
-        return float(NESTED_LS_COARSE_AMPLIFICATION_VALUE) * residual
-    raise ValueError(
-        f"unknown nested-LS coarse-tier use {use!r}; expected one of "
-        f"{NESTED_LS_COARSE_USES}."
+    return _nested_ls_inner_policy_record(
+        policy=NESTED_LS_NATIVE_INNER_POLICY_NAME,
+        solver_family="banana_run_code",
+        solver_sequence=("BFGS", "Newton"),
+        stages=(
+            ("BFGS", {"tol": float(NESTED_LS_BANANA_BFGS_TOL)}),
+            (
+                "Newton",
+                {
+                    "stab": float(NESTED_LS_BANANA_NEWTON_STAB),
+                    "tol": float(NESTED_LS_BANANA_NEWTON_TOL),
+                    "maxiter": int(NESTED_LS_BANANA_NEWTON_MAXITER),
+                },
+            ),
+        ),
     )
 
 
@@ -910,18 +835,13 @@ __all__ = [
     "NESTED_LS_BANANA_NEWTON_TOL",
     "NESTED_LS_BANANA_USES_BFGS_THEN_NEWTON",
     "NESTED_LS_CONSTRAINT_WEIGHT",
-    "NESTED_LS_COARSE_AMPLIFICATION_GRADIENT",
-    "NESTED_LS_COARSE_AMPLIFICATION_VALUE",
-    "NESTED_LS_COARSE_USES",
-    "NESTED_LS_COARSE_USE_COMMITTED_ANCHOR",
-    "NESTED_LS_COARSE_USE_LINE_SEARCH_VALUE",
-    "NESTED_LS_COARSE_USE_OUTER_GRADIENT",
     "NESTED_LS_GATE6_AGGREGATION",
     "NESTED_LS_GATE6_CLAIM_REPEATS",
     "NESTED_LS_GATE6_IOTA_G_TOL",
     "NESTED_LS_GATE6_NATIVE_OMP_THREADS",
     "NESTED_LS_INNER_SUBSTEP_LEGS",
-    "NESTED_LS_INNER_POLICY_NAME",
+    "NESTED_LS_JAX_INNER_POLICY_NAME",
+    "NESTED_LS_JAX_INNER_STAB",
     "NESTED_LS_LABEL",
     "NESTED_LS_NEWTON_COARSE_TOL",
     "NESTED_LS_NEWTON_EXIT_COARSE_CONVERGED",
@@ -931,6 +851,7 @@ __all__ = [
     "NESTED_LS_NEWTON_MAXITER",
     "NESTED_LS_NEWTON_STAB",
     "NESTED_LS_NEWTON_TOL",
+    "NESTED_LS_NATIVE_INNER_POLICY_NAME",
     "NESTED_LS_OPTIMIZE_G",
     "NESTED_LS_OUTER_ACCEPT_WITHOUT_CANDIDATE_REASON",
     "NESTED_LS_OUTER_FD0_DIRECTIONS",
@@ -939,6 +860,7 @@ __all__ = [
     "NESTED_LS_OUTER_FD0_NOISE_SAFETY",
     "NESTED_LS_OUTER_FD0_REL_TOL",
     "NESTED_LS_OUTER_FD0_SCATTER_REPEATS",
+    "NESTED_LS_OUTER_FD0_SCHEMA",
     "NESTED_LS_OUTER_FD0_STEP_HALVING",
     "NESTED_LS_OUTER_FD0_STEP_RELATIVE",
     "NESTED_LS_OUTER_FD0_STEP_RULE",
@@ -965,10 +887,9 @@ __all__ = [
     "NestedLsOuterCandidateStore",
     "NestedLsPhysicsNewtonKwargs",
     "nested_ls_banana_run_code_options",
-    "nested_ls_coarse_tier_admits",
-    "nested_ls_coarse_tier_error_bound",
     "nested_ls_inner_substep_points",
-    "nested_ls_inner_policy",
+    "nested_ls_jax_inner_policy",
+    "nested_ls_native_inner_policy",
     "nested_ls_newton_exit_status",
     "nested_ls_outer_attempt_fun_is_objective",
     "nested_ls_outer_endpoint_success",

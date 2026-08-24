@@ -12,6 +12,7 @@ timing content, no speed claim, not F3 7.70x.
 from __future__ import annotations
 
 import argparse
+import shlex
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -21,8 +22,13 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "src"))
 
+from simsopt_jax_adapters.geo.nested_ls_contract import (
+    NESTED_LS_OUTER_FD0_SCHEMA,
+    nested_ls_jax_inner_policy,
+)
 from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     DEFAULT_F3_B37_GPU_LANE,
+    F3_B37_IFT_STAB,
     NestedLsOuterFd0Probe,
     evaluate_f3_b37_outer_fd0_probe,
     load_archived_nested_ls_pair,
@@ -135,7 +141,9 @@ def _log_lines(probe: NestedLsOuterFd0Probe, git_head: str) -> list[str]:
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     tag = str(args.tag).strip()
-    suffix = f".{tag}" if tag else ""
+    predictor_enabled = bool(args.inner_predictor)
+    mode_suffix = ".predictor" if predictor_enabled else ""
+    suffix = mode_suffix + (f".{tag}" if tag else "")
     out_json = EVIDENCE / f"nested_ls_outer_fd0_20260823{suffix}.json"
     out_log = EVIDENCE / f"nested_ls_outer_fd0_20260823{suffix}.log"
     sha = _require_clean_tree()
@@ -146,8 +154,21 @@ def main(argv: list[str] | None = None) -> None:
     )
     del _target
     probe = evaluate_f3_b37_outer_fd0_probe(
-        jax_boozer, native, inner_predictor=bool(args.inner_predictor)
+        jax_boozer, native, inner_predictor=predictor_enabled
     )
+    inner_policy = nested_ls_jax_inner_policy(
+        ift_stab=F3_B37_IFT_STAB,
+        inner_substep_legs=(1,),
+        inner_predictor=predictor_enabled,
+    )
+    command_args = [
+        ".venv-qn-gpu/bin/python",
+        "benchmarks/nested_ls_outer_fd0.py",
+    ]
+    if predictor_enabled:
+        command_args.append("--inner-predictor")
+    if tag:
+        command_args.extend(("--tag", tag))
     payload: dict[str, object] = {
         "claim_boundary": {
             "cap_2048_attempted": False,
@@ -156,28 +177,35 @@ def main(argv: list[str] | None = None) -> None:
             "f3_sealed": True,
             "gate": "fd0",
             "inherits_f3_7_70x": False,
+            "inner_predictor_enabled": predictor_enabled,
             "moving_coil_outer_loop": False,
             "nested_speed_claim": False,
             "physics_gate_only": True,
             "tag": tag or None,
             "timing_content": False,
+            "trajectory_is_stock": bool(inner_policy["trajectory_is_stock"]),
         },
         "command": (
             "SIMSOPT_BACKEND_MODE=jax_gpu_fast JAX_PLATFORMS=cuda,cpu JAX_ENABLE_X64=1 "
-            ".venv-qn-gpu/bin/python benchmarks/nested_ls_outer_fd0.py"
-            + (f" --tag {tag}" if tag else "")
+            + shlex.join(command_args)
         ),
         "date": datetime.now(timezone.utc).date().isoformat(),
         "driver": "benchmarks.nested_ls_outer_fd0",
         "execution_log": str(out_log.relative_to(REPO)),
         "fail_closed_reason": probe.fail_closed_reason,
         "git_head": sha,
+        "inner_policy": inner_policy,
         "lane": lane,
         "probe": probe.as_payload(),
         "publication": PUBLICATION,
-        "schema": "nested-ls-outer-fd0.v2",
+        "schema": NESTED_LS_OUTER_FD0_SCHEMA,
         "written_by_pytest": False,
     }
+    final_sha = _require_clean_tree()
+    if final_sha != sha:
+        raise SystemExit(
+            f"HEAD changed during Gate FD-0: started at {sha}, ended at {final_sha}"
+        )
     write_strict_json(out_json, payload)
     out_log.write_text("\n".join(_log_lines(probe, sha)) + "\n", encoding="utf-8")
     print("wrote", out_json, flush=True)

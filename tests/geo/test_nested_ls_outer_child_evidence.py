@@ -72,12 +72,19 @@ from benchmarks import nested_ls_outer_jax_child as jax_child
 from benchmarks import nested_ls_outer_native_child as native_child
 from numpy.typing import NDArray
 from simsopt_jax_adapters.geo.nested_ls_contract import (
+    NESTED_LS_BANANA_BFGS_TOL,
+    NESTED_LS_BANANA_NEWTON_MAXITER,
+    NESTED_LS_BANANA_NEWTON_STAB,
+    NESTED_LS_BANANA_NEWTON_TOL,
+    NESTED_LS_NEWTON_MAXITER,
+    NESTED_LS_NEWTON_TOL,
     NESTED_LS_OUTER_ACCEPT_WITHOUT_CANDIDATE_REASON,
     NESTED_LS_OUTER_JAX_CHILD_SCHEMA,
     NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA,
     nested_ls_outer_rejection_barrier,
 )
 from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
+    F3_B37_IFT_STAB,
     NestedLsInnerSolveFailed,
     NestedLsOuterAnchor,
     NestedLsOuterTrialReadout,
@@ -1417,6 +1424,60 @@ def test_both_lanes_publish_a_runtime_block(lane: str, monkeypatch):
         "must stamp the identity through the module attribute the other lane "
         "stamps"
     )
+
+
+def test_child_payloads_publish_their_actual_distinct_inner_solver_policies(
+    monkeypatch,
+) -> None:
+    """Each child receipt identifies its own inner solver, not a shared fiction.
+
+    This drives both real child payload builders. The fields below are what a
+    receipt consumer observes, so a shared helper that happens to construct
+    the wrong record cannot satisfy the test by itself.
+    """
+
+    jax_payload = drive_lane(
+        "jax", monkeypatch.setattr, transcript=completing_transcript()
+    )
+    native_payload = drive_lane(
+        "native", monkeypatch.setattr, transcript=completing_transcript()
+    )
+    jax_policy = jax_payload["inner_policy"]
+    native_policy = native_payload["inner_policy"]
+
+    assert jax_policy == {
+        "policy": "reduced_schur_newton_v1",
+        "solver_family": "reduced_schur_newton",
+        "solver_sequence": ["reduced_schur_newton"],
+        "stages": {
+            "reduced_schur_newton": {
+                "stab": F3_B37_IFT_STAB,
+                "tol": NESTED_LS_NEWTON_TOL,
+                "maxiter": NESTED_LS_NEWTON_MAXITER,
+            }
+        },
+        "inner_substep_legs": [1],
+        "inner_substep_enabled": False,
+        "inner_predictor_enabled": False,
+        "predictor_trust_region_ratio": None,
+        "coarse_tier_diagnostic_residual": 1.0e-8,
+        "coarse_tier_honoured": None,
+        "trajectory_is_stock": True,
+    }
+    assert native_policy == {
+        "policy": "banana_bfgs_then_newton_v1",
+        "solver_family": "banana_run_code",
+        "solver_sequence": ["BFGS", "Newton"],
+        "stages": {
+            "BFGS": {"tol": NESTED_LS_BANANA_BFGS_TOL},
+            "Newton": {
+                "stab": NESTED_LS_BANANA_NEWTON_STAB,
+                "tol": NESTED_LS_BANANA_NEWTON_TOL,
+                "maxiter": NESTED_LS_BANANA_NEWTON_MAXITER,
+            },
+        },
+    }
+    assert jax_policy != native_policy
 
 
 def test_both_lanes_bind_their_binary_through_one_identity_function():

@@ -48,6 +48,7 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_GATE6_IOTA_G_TOL,
     NESTED_LS_GATE6_NATIVE_OMP_THREADS,
     NESTED_LS_INNER_SUBSTEP_LEGS,
+    NESTED_LS_JAX_INNER_STAB,
     NESTED_LS_NEWTON_MAXITER,
     NESTED_LS_NEWTON_STAB,
     NESTED_LS_NEWTON_TOL,
@@ -80,6 +81,7 @@ from simsopt_jax_adapters.geo.nested_ls_reduced import (
     NESTED_LS_SCHUR_GMRES_RTOL,
     NestedLsB37TimingBlocked,
     NestedLsReducedRankError,
+    NestedLsReducedSchurOperator,
     NestedLsSchurNewtonResult,
     NestedLsSchurNewtonStepRecord,
     _envelope_value_and_grad,
@@ -109,7 +111,6 @@ from simsopt_jax_adapters.geo.nested_ls_reduced import (
 )
 
 KIB_PER_GIB = 1024 * 1024
-
 DEFAULT_FLAT675_BUNDLE_ROOT = (
     Path.home() / "simsopt_mixed_artifacts" / "genuine675-r3-input-1c23f6c5-20260721-r1"
 )
@@ -122,7 +123,6 @@ DEFAULT_F3_B37_RUN = (
 )
 DEFAULT_F3_B37_GPU_LANE = DEFAULT_F3_B37_RUN / "pair2-l1" / "lane.json"
 DEFAULT_F3_B37_NATIVE_LANE = DEFAULT_F3_B37_RUN / "pair2-l2" / "lane.json"
-
 # Reconstruct §2.1 archived-start QR inner state (C++ Newton was a no-op).
 ARCHIVED_START_QR_IOTA = 0.1500517839808274
 ARCHIVED_START_QR_G = 2.010619295609829
@@ -171,7 +171,7 @@ F3_B37_DENSE_LU_ENDPOINT_SURFACE_SHA256 = (
 F3_B37_DENSE_LU_ENDPOINT_IOTA = 0.14085710957665173
 F3_B37_DENSE_LU_ENDPOINT_G = 2.0106193053897154
 F3_B37_DENSE_LU_ENDPOINT_GRAD_L2 = 2.404212353322172e-14
-F3_B37_IFT_STAB = 0.0
+F3_B37_IFT_STAB = NESTED_LS_JAX_INNER_STAB
 F3_B37_ADJOINT_COIL_SCAN = 8
 F3_B37_ADJOINT_FD_EPSILON = 1.0e-6
 F3_B37_ADJOINT_WALL_SECONDS = 1800.0
@@ -4754,7 +4754,7 @@ class NestedLsPredictorSource:
     """
 
     coil_dofs: NDArray[np.float64]
-    operator: object
+    operator: NestedLsReducedSchurOperator
     apply_lu: Callable[[jax.Array], jax.Array]
 
     def built_at(self, coil_dofs: object) -> bool:
@@ -5007,6 +5007,8 @@ def _predicted_inner_start(
     raw_delta = -np.asarray(
         jax.device_get(source.apply_lu(mixed)), dtype=np.float64
     ).reshape(-1)
+    if not np.all(np.isfinite(raw_delta)):
+        return bare, NESTED_LS_PREDICTOR_ARM_BARE, 0.0, 0.0, False
     applied, raw_l2, applied_l2, _cap, scaled = nested_ls_predictor_trust_region(
         delta_surface=raw_delta,
         anchor_surface_dofs=bare,
