@@ -133,13 +133,30 @@ route.
 > bounded scale at HEAD (the runner fails closed on its promoted scale tier;
 > see the pin note under Evidence provenance).
 >
-> Scope of this re-validation: endpoints and parity gates only. The GPU
-> column was re-executed for `stage-two-optimization-planar-coils` alone,
-> and the wall-time and memory tables were **not** re-measured — they
-> remain the authority run's one-shot launches. Coarse per-case durations
-> from the re-validation pass are consistent in magnitude with the
-> authority CPU wall times (no case shifted even 2x), but that is a sanity
-> observation under uncontrolled load, not a timing claim.
+> A second-architecture leg (2026-08-24, NVIDIA A100-PCIE-40GB on a
+> different host, glibc 2.31, jax/jaxlib 0.10.0, same revision) re-ran the
+> full three-lane bounded matrix: **1,108 of 1,122 executed comparisons
+> pass**, with 19 of 25 cases fully clean. All 14 failures sit in four
+> cases, in the sensitivity classes above: the chaotic tracers
+> (fieldlines-ncsx 24/30, fieldlines-qa 26/30), planar-coils'
+> jax-cpu:jax-gpu objective pair at the gpu_runtime tolerance (28/30), and
+> one near-zero `initial:constraint_residual` pair in
+> wireframe-rcls-with-ports (88/90). Two cases could not complete there:
+> finitebuild (the manifest-route gap; see the controlled re-measurement)
+> and permanent-magnet-qa, whose lane writes `.vtu` grid files into the
+> checkout and trips the runner's repository-integrity guard on any fresh
+> clone. pm-qa's three lanes still agree internally to ~3e-6 relative on
+> that host, but its endpoint lands 16% from this report's value — the
+> MwPGP environment sensitivity noted above, at much larger scale across
+> architectures. For that case, lane-to-lane parity within an environment
+> is the invariant that holds; endpoints do not transport between
+> environments.
+>
+> Scope of this re-validation: endpoints and parity gates, plus a targeted
+> GPU-lane re-measurement of six cases with same-environment
+> authority-revision controls. For the timing, memory, and precision
+> verdicts see "2026-08-24 controlled re-measurement" under the wall-time
+> section.
 
 ## Solver, iteration, evaluation, and status parity
 
@@ -266,6 +283,50 @@ present at the authority revision), so the native wall times below are
 single-threaded. A threaded native baseline would be faster, which makes the
 14.1x total a floor on the GPU-lane deficit, not an overstatement of it.
 
+### 2026-08-24 controlled re-measurement: what is and is not still current
+
+Six cases (coil-forces, boozerqa, wireframe-gsco-multistep, tracing-particle,
+planar-coils, finitebuild) were re-run at HEAD on the same RTX 5090 box in a
+fresh CUDA environment (jax/jaxlib 0.10.0, matching the authority lane's
+recorded version), with same-environment runs at the authority revision as
+controls to separate code change from environment change. Verdicts:
+
+- **Precision: current.** Every re-measured GPU endpoint reproduces the
+  final-result table to its printed precision (2e-13 to 7e-12 relative);
+  the 2026-08-14 solver fusing/caching did not move physics.
+- **Device memory: current.** Peak device bytes are identical to the table
+  in every re-measured case.
+- **Host memory: one real change.** The fused/cached lanes cost more host
+  RSS at HEAD: the coil-forces GPU lane went 2041 -> 2328 MiB (+14%), with
+  the authority revision reproducing the table's value in the same
+  environment. Other re-measured cases sit within about 5% of the table.
+- **GPU wall time: the table is environment-bound, not stale.**
+  Same-environment controls put HEAD near parity with the authority
+  revision (coil-forces 86.9 -> 84.5 s and tracing-particle 96.9 -> 94.9 s,
+  both within 3%; boozerqa 108.6 -> 99.5 s, -8%). The large differences
+  from the table (coil-forces 147.3 s there versus ~86 s here;
+  tracing-particle 54.8 s there versus ~96 s here) appear at the **same
+  revision** and run in both directions — they are environment effects.
+  Consequence: the wall-time table above is valid only in its authority
+  environment, and quoting its GPU numbers against any other environment
+  or hardware is invalid.
+- **JAX CPU wall time: no single-sample claim survives controls.** Within
+  one environment, HEAD versus the authority revision moves in both
+  directions (coil-forces 48.6 -> 41.3 s; boozerqa 26.9 -> 37.7 s), and
+  the same lane differs by up to 40% between this pass's two replay
+  environments at one revision. These one-shot launches cannot separate
+  code effects from compile/environment variance; per-case receipts with
+  repeated interleaved pairs (see the addendum) are the only wall-time
+  evidence class that can.
+- **finitebuild could not be re-measured through the harness:** at HEAD its
+  lanes publish `initial:minimum_clearance` and `final:minimum_clearance`
+  (added by `ead83eaef`, 2026-08-18) with no comparison routes in
+  `parity_manifest.json`, so a full three-lane bounded replay fails closed
+  ("complete direct lane-pair matrix") — reproduced on two machines. Until
+  routes for those observables are added, only 24 of 26 cases can replay
+  the full three-lane bounded matrix at HEAD (this case, plus the promoted
+  single-stage route).
+
 ### Authority-run isolated end-to-end wall time
 
 Parent RSS is the launched child's peak `VmHWM`; it excludes descendants.
@@ -388,7 +449,10 @@ Artifacts are host-local and Git-ignored. Retention and replay instructions:
 > (45 → 57). A bounded replay at HEAD also executes at most 25 of the 26
 > cases: `run_parity.py` fails closed on the promoted route's scale tier, so
 > the 26th case replays only at the authority revision (or at
-> `native_default` scale).
+> `native_default` scale). Separately, the finitebuild case's three-lane
+> replay fails closed at HEAD on unrouted `minimum_clearance` observables
+> (see the 2026-08-24 controlled re-measurement), leaving 24 of 26 cases
+> fully replayable.
 
 Limitations:
 
@@ -399,7 +463,12 @@ Limitations:
    `scale_tier: native_default` (see the pin note above). This report's rows for
    that example — lines in the initial-state, final-state, solver, and memory
    tables — were measured at the **bounded** tier and are not native-default
-   evidence for it.
+   evidence for it. Bounded scale is a design choice, not a shortcut:
+   pinned budgets keep the three lanes' work identical and the 26-case
+   matrix affordable to replay on any revision, where shipped-scale runs
+   cost hours and amplify environment noise past comparability.
+   Example-scale GPU evidence is certified per example instead — see the
+   addendum and `docs/jax_example_device_assignment.md`.
 2. Timing and memory are one sample per lane, imports and compilation
    included; no compile-only or warmed measurements, so no steady-state speed
    claim.
