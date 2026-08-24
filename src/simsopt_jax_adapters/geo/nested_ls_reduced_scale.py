@@ -62,9 +62,13 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_OUTER_FD0_STEP_RULE,
     NESTED_LS_OUTER_FD0_STEP_SCALE_FLOOR,
     NESTED_LS_OUTER_IOTA_BRANCH_GUARD,
+    NESTED_LS_PREDICTOR_ARM_BARE,
+    NESTED_LS_PREDICTOR_ARM_PREDICTED,
     NESTED_LS_WEIGHT_INV_MODB,
     nested_ls_banana_run_code_options,
     nested_ls_inner_substep_points,
+    nested_ls_predictor_arm,
+    nested_ls_predictor_trust_region,
     nested_ls_outer_fd0_minimum_step,
     nested_ls_outer_fd0_step,
     nested_ls_physics_newton_kwargs,
@@ -78,11 +82,13 @@ from simsopt_jax_adapters.geo.nested_ls_reduced import (
     NestedLsReducedRankError,
     NestedLsSchurNewtonResult,
     NestedLsSchurNewtonStepRecord,
+    _envelope_value_and_grad,
     apply_reduced_mixed_schur_coil_tangent,
     compare_ad_qr_and_schur_hvp,
     dense_schur_inverse_preconditioner,
     eisenstat_walker_forcing_eta,
     factor_reduced_nested_ls_schur,
+    dense_schur_lu_preconditioner,
     factor_schur_fourier_block_preconditioner,
     implicit_adjoint_coil_gradient,
     linear_solve_meets_forcing,
@@ -4728,6 +4734,40 @@ class NestedLsOuterTrialReadout:
         )
 
 
+@dataclass(frozen=True, slots=True, eq=False)
+class NestedLsPredictorSource:
+    """The Schur machinery one evaluation left behind, and where it is valid.
+
+    The predictor needs both the Schur OPERATOR (for the mixed term
+    ``Ĥ_sc δc``) and its LU (to apply ``Ĥ_ss⁻¹``). Both are produced by
+    :func:`nested_ls_outer_value_and_grad` at the point it evaluated, so
+    rather than pinning them on every anchor -- which would hold a
+    ~3.5 MB factor per STAGED line-search candidate, not just per accepted
+    one -- exactly one is cached here and validated by provenance.
+
+    ``coil_dofs`` is that provenance. The machinery is only usable as the
+    committed anchor's when it was built AT the committed anchor's coils,
+    and scipy accepting a point means the last evaluation there produced
+    this. A cache that answered without checking would hand the predictor
+    a different point's operator, which compiles, runs, and predicts a
+    displacement from somewhere the anchor is not.
+    """
+
+    coil_dofs: NDArray[np.float64]
+    operator: object
+    apply_lu: Callable[[jax.Array], jax.Array]
+
+    def built_at(self, coil_dofs: object) -> bool:
+        """Whether this machinery was built at ``coil_dofs``, bitwise."""
+
+        return bool(
+            np.array_equal(
+                self.coil_dofs,
+                np.asarray(coil_dofs, dtype=np.float64).reshape(-1),
+            )
+        )
+
+
 @dataclass(slots=True)
 class NestedLsOuterState:
     """Frozen eight-term outer problem plus one committed ``s*`` warm start.
@@ -4777,6 +4817,12 @@ class NestedLsOuterState:
     anchor: NestedLsOuterAnchor
     last_trial: NestedLsOuterTrialReadout
     inner_substep_legs: tuple[int, ...]
+    inner_predictor: bool
+    predictor_source: NestedLsPredictorSource | None
+    last_predictor_arm: str
+    last_predictor_raw_delta_l2: float
+    last_predictor_applied_delta_l2: float
+    last_predictor_scaled: bool
     record_mixed_cross_check: bool
     mixed_cross_check_gradient: NDArray[np.float64] | None
     mixed_cross_check_max_abs: float | None
@@ -4797,6 +4843,7 @@ def prepare_f3_b37_outer_state(
     bundle_root: Path | None = None,
     *,
     inner_substep: bool = False,
+    inner_predictor: bool = False,
 ) -> NestedLsOuterState:
     """Bind the frozen flat-675 bundle to one JAX Boozer surface.
 
@@ -4881,10 +4928,103 @@ def prepare_f3_b37_outer_state(
         inner_substep_legs=(
             tuple(NESTED_LS_INNER_SUBSTEP_LEGS) if inner_substep else (1,)
         ),
+        # Predictor OFF by default, for the same reason sub-stepping is:
+        # it changes the inner trajectory, AND it changes the adjoint's own
+        # arithmetic (factor-once instead of jnp.linalg.solve), so a
+        # predictor-ON run is not comparable to any sealed receipt.
+        inner_predictor=bool(inner_predictor),
+        predictor_source=None,
+        # Impossible telemetry until a solve sets it, matching the trial
+        # readout's own convention: 0.0 would be a real predicted step of
+        # zero length, which is a physics answer, not "nothing ran".
+        last_predictor_arm=NESTED_LS_PREDICTOR_ARM_BARE,
+        last_predictor_raw_delta_l2=NESTED_LS_OUTER_NO_TRIAL_SENTINEL,
+        last_predictor_applied_delta_l2=NESTED_LS_OUTER_NO_TRIAL_SENTINEL,
+        last_predictor_scaled=False,
         record_mixed_cross_check=False,
         mixed_cross_check_gradient=None,
         mixed_cross_check_max_abs=None,
     )
+
+
+def _predicted_inner_start(
+    state: NestedLsOuterState,
+    trial_coil_dofs: NDArray[np.float64],
+) -> tuple[NDArray[np.float64], str, float, float, bool]:
+    """The surface the inner solve should start from at ``trial_coil_dofs``.
+
+    Returns ``(surface, arm, raw_delta_l2, applied_delta_l2, scaled)``.
+
+    ``δs_pred = −(Ĥ_ss + stab·I)⁻¹ Ĥ_sc δc`` at the committed anchor, capped
+    by the contract's trust region, then kept only if its envelope gradient
+    at the trial coils is no worse than the bare anchor's. Both the cap and
+    that comparison are the contract's rules -- the same code the replay
+    harness measured, not a second copy of it.
+
+    Falls back to the bare anchor, reporting the bare arm, whenever the
+    predictor is off, no machinery is cached, or the cached machinery was
+    built somewhere other than the committed anchor. That last case is the
+    one worth naming: it is not an error, it is what happens when the last
+    evaluation was at a rejected trial rather than at the incumbent, and
+    silently using that operator would predict a displacement measured from
+    a point the anchor is not.
+    """
+
+    anchor = state.anchor
+    bare = anchor.surface_dofs
+    source = state.predictor_source
+    if not state.inner_predictor or source is None:
+        return bare, NESTED_LS_PREDICTOR_ARM_BARE, 0.0, 0.0, False
+    if not source.built_at(anchor.coil_dofs):
+        return bare, NESTED_LS_PREDICTOR_ARM_BARE, 0.0, 0.0, False
+
+    coil_step = np.asarray(trial_coil_dofs, dtype=np.float64).reshape(-1) - np.asarray(
+        anchor.coil_dofs, dtype=np.float64
+    )
+    residual_rt, objective_rt, _phi_rt = nested_ls_runtime_coil_closures(
+        state.jax_boozer
+    )
+    del _phi_rt
+    mixed = apply_reduced_mixed_schur_coil_tangent(
+        residual_rt,
+        objective_rt,
+        bare,
+        anchor.coil_dofs,
+        coil_step,
+        operator=source.operator,
+    )
+    # ONE host-boundary crossing, and it is intrinsic: the predicted start
+    # has to reach the host as a numpy array because ``set_dofs`` takes one.
+    # ``device_get`` already blocks, so bracketing the JVP with a separate
+    # ``block_until_ready`` would add a second boundary call that buys
+    # nothing -- the host-boundary ratchet refused the pair, which is what
+    # it is for.
+    raw_delta = -np.asarray(
+        jax.device_get(source.apply_lu(mixed)), dtype=np.float64
+    ).reshape(-1)
+    applied, raw_l2, applied_l2, _cap, scaled = nested_ls_predictor_trust_region(
+        delta_surface=raw_delta,
+        anchor_surface_dofs=bare,
+    )
+    predicted = np.asarray(bare, dtype=np.float64) + applied
+
+    # The fallback test, at the TRIAL coils: a predicted start is only
+    # better if the envelope gradient there says so. The runtime-coil
+    # closures above already carry the trial coils, so both evaluations
+    # measure the same problem.
+    _bare_value, bare_grad, _bare_y = _envelope_value_and_grad(
+        residual_rt, objective_rt, bare
+    )
+    _pred_value, pred_grad, _pred_y = _envelope_value_and_grad(
+        residual_rt, objective_rt, predicted
+    )
+    arm = nested_ls_predictor_arm(
+        bare_gradient_l2=float(np.linalg.norm(bare_grad)),
+        predicted_gradient_l2=float(np.linalg.norm(pred_grad)),
+    )
+    if arm == NESTED_LS_PREDICTOR_ARM_PREDICTED:
+        return predicted, arm, raw_l2, applied_l2, scaled
+    return bare, arm, raw_l2, applied_l2, scaled
 
 
 def _solve_nested_inner_leg(
@@ -4981,16 +5121,29 @@ def _walk_nested_inner_ladder(
     first_solution: NestedLsSchurNewtonResult | None = None
     first_rejection: RuntimeError | None = None
     for legs in legs_ladder:
-        warm_surface = anchor.surface_dofs
+        points = nested_ls_inner_substep_points(
+            anchor_coil_dofs=anchor.coil_dofs,
+            trial_coil_dofs=coil_dofs,
+            legs=int(legs),
+        )
+        # The predictor improves the START; sub-stepping improves the PATH.
+        # They compose at exactly one place -- the first leg, whose warm
+        # start would otherwise be the bare anchor. Every later leg starts
+        # from the previous leg's own solve, which is the whole mechanism of
+        # sub-stepping and is strictly better information than a prediction
+        # made from the anchor.
+        warm_surface, arm, raw_l2, applied_l2, scaled = _predicted_inner_start(
+            state, points[0]
+        )
+        state.last_predictor_arm = arm
+        state.last_predictor_raw_delta_l2 = raw_l2
+        state.last_predictor_applied_delta_l2 = applied_l2
+        state.last_predictor_scaled = scaled
         warm_iota = anchor.iota
         warm_g = anchor.G
         solution: NestedLsSchurNewtonResult | None = None
         rejection: RuntimeError | None = None
-        for point in nested_ls_inner_substep_points(
-            anchor_coil_dofs=anchor.coil_dofs,
-            trial_coil_dofs=coil_dofs,
-            legs=int(legs),
-        ):
+        for point in points:
             solution, rejection = _solve_nested_inner_leg(
                 state,
                 coil_dofs=point,
@@ -5227,7 +5380,30 @@ def nested_ls_outer_value_and_grad(
             max_dense_linearization_bytes=None,
         )
     )
-    adjoint = jax.block_until_ready(solve_stabilized_schur_dense_lu(dense, cotangent))
+    # ONE factorization when the predictor is on, and the OFF path
+    # untouched. ``solve_stabilized_schur_dense_lu`` is ``jnp.linalg.solve``
+    # and keeps no factor, so a predictor that wanted a cached LU beside it
+    # would buy a SECOND full 661x661 factorization per evaluation (measured
+    # CPU fp64: solve 83 ms, lu_factor 165 ms) inside the timed wall of a
+    # sealed speed claim. Factoring once and applying it serves both.
+    #
+    # The OFF branch must stay bitwise what it was. ``lu_factor`` +
+    # ``lu_solve`` is not the same arithmetic as ``jnp.linalg.solve``, so
+    # flipping this unconditionally would move every sealed receipt in its
+    # last bits -- which is exactly why ``inner_predictor`` is a per-run
+    # policy and not a default.
+    if state.inner_predictor:
+        apply_lu = dense_schur_lu_preconditioner(dense)
+        adjoint = jax.block_until_ready(apply_lu(cotangent))
+        state.predictor_source = NestedLsPredictorSource(
+            coil_dofs=_immutable_float64(coil),
+            operator=operator,
+            apply_lu=apply_lu,
+        )
+    else:
+        adjoint = jax.block_until_ready(
+            solve_stabilized_schur_dense_lu(dense, cotangent)
+        )
     live_residual = jax.block_until_ready(operator.apply(adjoint) - cotangent)
     rhs_l2 = float(np.linalg.norm(surface_block))
     residual_l2 = float(
