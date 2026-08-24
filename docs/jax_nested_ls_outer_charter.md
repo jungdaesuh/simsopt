@@ -166,6 +166,28 @@ Replacement, fail-closed descent ladder per direction:
   and the Amendment-3 rerun writes the canonical receipt the
   skip-until test gates.
 
+## Amendment 4 (2026-08-24, prose-only correction, no clock affected)
+
+**Defect.** The B3 → B37 contract prose above (native lane bullet) reads
+`(BFGS 1500 / Newton 50)`. The Newton budget was never 50. The frozen
+constant is `NESTED_LS_BANANA_NEWTON_MAXITER = 40`
+(`src/simsopt_jax_adapters/geo/nested_ls_contract.py:34`), consumed as
+`newton_maxiter=` at `:175`, and it matches the upstream SIMSOPT default
+of 40 (`src/simsopt/geo/boozersurface.py:103`, applied at `:134` and
+`:141`). BFGS 1500 is correct and unchanged.
+
+**Ruling.** 40 is, and has always been, the contract value. No executed
+leg ever ran a Newton budget of 50, so no receipt, no gate, and no
+published number is affected, and nothing is re-run on account of this.
+The defect is descriptive prose only.
+
+**Disposition.** Per the append-only discipline the original bullet is
+left byte-identical rather than edited in place; this amendment carries
+the correction, and a reader who reaches the prose before this section
+should take 40. Recorded because the charter's value is that its text can
+be checked against the code — a prose/constant mismatch found by a
+reviewer costs more than the typo it describes.
+
 ## NO-GO (inherited and binding)
 
 Mimicking native BFGS-shape gradients in JAX (measured ~273 s envelope);
