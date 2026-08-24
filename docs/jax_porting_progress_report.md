@@ -179,13 +179,14 @@ The nonzero counter differences are:
 All other paired counters match. Fewer GPU evaluations does not mean less wall
 time. `normalized_status` records workflow acceptance; raw statuses include
 fixed budgets, iteration limits, and Boozer `inner=True;outer=False`. (Format
-note, 2026-08-24: that two-field Boozer raw status is what this run's receipts
-recorded. Since the fail-closed endpoint certificate landed — `91e1133b9`,
-2026-08-02 — the Boozer cases emit a seven-field raw status
-(`inner`/`outer`/`certificate`/`stopping_reason`/`initial_stationary`/
-`terminal_stationary`/`constraints_satisfied`), so a replay at HEAD reports a
-different raw-status shape, and budget-capped Boozer endpoints may normalize
-to `budget_exhausted` rather than `converged`.)
+note, 2026-08-24: since the fail-closed endpoint certificate landed —
+`91e1133b9`, 2026-08-02 — the Boozer cases can also emit a seven-field raw
+status (`inner`/`outer`/`certificate`/`stopping_reason`/`initial_stationary`/
+`terminal_stationary`/`constraints_satisfied`) and normalize budget-capped
+endpoints to `budget_exhausted`, but only when the case enforces the endpoint
+certificate. The bounded parity path does not, so a bounded replay at HEAD
+still reproduces the two-field form and `converged` statuses above — verified
+2026-08-24.)
 
 Parity targets scientific behavior, not identical implementations:
 
