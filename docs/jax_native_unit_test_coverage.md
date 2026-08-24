@@ -20,7 +20,7 @@ Executing wave: formerly docs/jax_native_test_mirror_wave_implementation_plan.md
 - `unclassified` is a valid planning state: the file is listed, and it is **never** counted as covered.
 - `jax_partial` and `jax_missing` are valid planning states that fail final completion. They are **not** converted into a percent-covered claim, per the contract.
 - A classified file row's `reason` states which capabilities of that file this slice enumerated; anything it does not name is still open.
-- **No capability record reaches `jax_equivalent`.** The contract requires native CPU, JAX CPU *and* strict JAX GPU evidence, and no GPU lane was executed in this wave, so every otherwise-complete capability is recorded as `jax_partial` with `jax_gpu=pending`.
+- 1 capability record(s) reach `jax_equivalent`: native CPU, JAX CPU and strict JAX GPU evidence for every declared observable.
 
 ## Native test files by disposition
 
@@ -46,8 +46,9 @@ Executing wave: formerly docs/jax_native_test_mirror_wave_implementation_plan.md
 | curveperturbed | `jax_partial` | 1 |
 | curves | `jax_missing` | 2 |
 | curves | `jax_partial` | 1 |
+| force | `jax_equivalent` | 1 |
 | force | `jax_missing` | 3 |
-| force | `jax_partial` | 3 |
+| force | `jax_partial` | 2 |
 | force | `native_only` | 1 |
 | force | `shared_python` | 1 |
 | fourier_interpolation | `native_only` | 1 |
@@ -108,7 +109,7 @@ Executing wave: formerly docs/jax_native_test_mirror_wave_implementation_plan.md
 - **CP-3 — LpCurveTorsion evaluated through perturbed curves**
   - disposition: `jax_missing`
   - reason: torsion_pure needs the first three curve derivatives. The JAX perturbation bundle carries gamma and gammadash only, so a torsion objective cannot be evaluated through it without extending the bundle to second and third derivatives.
-  - lanes: native_cpu=passing, jax_cpu=pending, jax_gpu=pending
+  - lanes: native_cpu=passing, jax_cpu=not_applicable, jax_gpu=not_applicable
   - evidence: `src/simsopt_jax/objectives/stochastic_stage_two.py:16-35` (anchor: `class StochasticCoilPerturbations`), `src/simsopt/geo/curveobjectives.py:137-154` (anchor: `def Lp_torsion_pure(torsion, gammadash, p, threshold):`)
   - blocker: Widening StochasticCoilPerturbations to carry d2/d3 is a production change with a real memory cost; no JAX example needs it today.
   - tolerance owner: `not_applicable`
@@ -126,7 +127,7 @@ Executing wave: formerly docs/jax_native_test_mirror_wave_implementation_plan.md
 - **CV-1 — Named Fourier coefficient accessors on curve subclasses**
   - disposition: `jax_missing`
   - reason: Native CurveRZFourier and CurveHelical expose named DOF access (.rc/.rs/.zc/.zs arrays, set('rc(i)'), get('A_0')) backed by local_dof_names. The JAX curve kernels take a flat dofs vector with positional slicing and publish no name-to-index mapping, so the named-accessor contract has no JAX counterpart. The bound tests' geometry comparisons (via _assert_spec_geometry_matches_native) use module-local constants (_GAMMA_RTOL=1e-10, _DERIV_RTOL=1e-9) declared in test_curve_subclasses_parity.py itself; that file never imports src/simsopt_jax/parity_tolerances.py, so the tolerance owner is local, not not_applicable -- a real numeric comparison is made, it is just not centrally owned.
-  - lanes: native_cpu=passing, jax_cpu=pending, jax_gpu=pending
+  - lanes: native_cpu=passing, jax_cpu=not_applicable, jax_gpu=not_applicable
   - evidence: `tests/geo/test_curve.py:995-1019`, `tests/geo/test_curve_helical.py:7-30`, `src/simsopt_jax/core/curve_rz_fourier.py:14-20` (anchor: `def curverzfourier_pure(dofs, quadpoints, order, nfp, stellsym):`)
   - JAX-side tests: `tests/jax/native_unit_parity/test_curve_subclasses_parity.py::test_curve_rzfourier_dof_round_trip_matches_native`, `tests/jax/native_unit_parity/test_curve_subclasses_parity.py::test_curve_helical_dof_round_trip_matches_native`
   - blocker: Named-DOF plumbing belongs to the Optimizable layer, which the JAX kernels deliberately do not own; the mirror pins the flat-vector round trip instead.
@@ -134,7 +135,7 @@ Executing wave: formerly docs/jax_native_test_mirror_wave_implementation_plan.md
 - **CV-2 — CurvePlanarFourier near-zero-quaternion regularization**
   - disposition: `jax_partial`
   - reason: Native regularizes a degenerate quaternion as q/(norm+1e-8), which keeps the direction; the JAX kernel returns the zero quaternion instead. The two lanes therefore diverge behaviorally in a non-physical degenerate case that neither test suite currently pins. Ordinary (normalized) quaternions agree.
-  - lanes: native_cpu=passing, jax_cpu=passing, jax_gpu=pending
+  - lanes: native_cpu=passing, jax_cpu=passing, jax_gpu=passing
   - evidence: `src/simsopt/geo/curveplanarfourier.py:116-119` (anchor: `q / (norm_q + 1e-8)`), `src/simsopt_jax/core/curve_planar_fourier.py:14-21` (anchor: `jnp.where(norm_sq > zero, normalized, zero_quaternion)`)
   - JAX-side tests: `tests/jax/native_unit_parity/test_curve_subclasses_parity.py::test_curve_planarfourier_pure_kernel_matches_native_position`, `tests/jax/native_unit_parity/test_curve_subclasses_parity.py::test_curve_planarfourier_position_and_derivatives_match_native`
   - blocker: Deciding which degenerate-quaternion convention is correct is a numerics ruling, not a test gap; recorded here so the divergence is visible rather than discovered by a future caller.
@@ -152,21 +153,21 @@ Executing wave: formerly docs/jax_native_test_mirror_wave_implementation_plan.md
 - **MF-1 — Self-field reduced model kernels**
   - disposition: `shared_python`
   - reason: The reduced self-field model (_rectangular_xsection_k/_delta, regularization_circ/rect, B_regularized_pure) has exactly one jax.numpy implementation, in simsopt.field.selffield, and the JAX force adapter imports B_regularized_pure from it rather than reimplementing it. The algebra is backend-independent Python exercised once by both lanes; a duplicate JAX port would create a second source of truth for the same formula. Every comparison in the bound tests uses a literal tolerance declared in test_force_parity.py itself (rtol=1e-10, rtol=1e-3, rtol=1e-6, rtol=1e-12), never src/simsopt_jax/parity_tolerances.py, so the tolerance owner is local, not central. test_regularizations_stay_traceable_under_jit_and_grad exercises jit and grad on these kernels but never vmap, so jit_vmap_autodiff_compatibility is not claimed as a covered observable here.
-  - lanes: native_cpu=passing, jax_cpu=passing, jax_gpu=pending
+  - lanes: native_cpu=passing, jax_cpu=passing, jax_gpu=passing
   - evidence: `src/simsopt/field/selffield.py:18` (anchor: `import jax.numpy as jnp`), `src/simsopt/field/selffield.py:23` (anchor: `__all__ = ['B_regularized_pure', 'regularization_rect', 'regularization_circ']`), `src/simsopt_jax_adapters/field/force.py:22` (anchor: `from simsopt.field.selffield import B_regularized_pure`)
   - JAX-side tests: `tests/jax/native_unit_parity/test_force_parity.py::test_rectangular_xsection_k_matches_published_square_value`, `tests/jax/native_unit_parity/test_force_parity.py::test_rectangular_xsection_delta_matches_published_square_value`, `tests/jax/native_unit_parity/test_force_parity.py::test_rectangular_xsection_functions_are_symmetric_in_a_and_b`, `tests/jax/native_unit_parity/test_force_parity.py::test_rectangular_xsection_functions_match_thin_strip_limits`, `tests/jax/native_unit_parity/test_force_parity.py::test_regularization_circ_matches_closed_form_and_scales_quadratically`, `tests/jax/native_unit_parity/test_force_parity.py::test_regularization_rect_is_area_times_delta_and_symmetric`, `tests/jax/native_unit_parity/test_force_parity.py::test_regularizations_stay_traceable_under_jit_and_grad`
   - tolerance owner: `local_test_tolerances`
 - **MF-2 — RegularizedCoil force and torque vector methods**
   - disposition: `jax_missing`
   - reason: Native RegularizedCoil exposes a coil-method layer returning force and torque VECTORS per quadrature point (B_regularized, self_force, force, torque, net_force, net_torque). The JAX adapter's public surface publishes magnitudes and integrated objectives only, so no JAX API returns the vector fields the native layer promises.
-  - lanes: native_cpu=passing, jax_cpu=pending, jax_gpu=pending
+  - lanes: native_cpu=passing, jax_cpu=not_applicable, jax_gpu=not_applicable
   - evidence: `src/simsopt/field/coil.py:119-231` (anchor: `def B_regularized(self):`), `src/simsopt_jax_adapters/field/force.py:55-67` (anchor: `"curve_force_norms_pure",`)
   - blocker: Adding a per-quadrature-point force/torque vector API to src/simsopt_jax_adapters/field/force.py is a production-surface change outside this wave's scope; it needs its own capability review.
   - tolerance owner: `not_applicable`
 - **MF-3 — Circular and rectangular RegularizedCoil subclasses**
   - disposition: `jax_missing`
   - reason: CircularRegularizedCoil and RectangularRegularizedCoil build the regularization from the cross-section dimensions. The JAX adapter has no subclass equivalent: it reads .regularization off native instances, so subclass construction and its dof plumbing remain native-owned behavior with no JAX counterpart.
-  - lanes: native_cpu=passing, jax_cpu=pending, jax_gpu=pending
+  - lanes: native_cpu=passing, jax_cpu=not_applicable, jax_gpu=not_applicable
   - evidence: `src/simsopt/field/coil.py:253` (anchor: `class CircularRegularizedCoil(RegularizedCoil):`), `src/simsopt/field/coil.py:272` (anchor: `class RectangularRegularizedCoil(RegularizedCoil):`), `src/simsopt_jax_adapters/field/force.py:1379-1380` (anchor: `self.regularizations = _as_jax_float64(`), `src/simsopt_jax_adapters/field/force.py:2290` (anchor: `self.regularizations = _as_jax_float64([c.regularization for c in target_coils])`)
   - blocker: A JAX regularized-coil subclass would duplicate the native constructor; the adapter deliberately consumes native instances instead. Revisit only if a JAX example needs to build one.
   - tolerance owner: `not_applicable`
@@ -181,7 +182,7 @@ Executing wave: formerly docs/jax_native_test_mirror_wave_implementation_plan.md
 - **MF-5 — HSX coil-1 F_x component against the CoilForces.jl benchmark**
   - disposition: `jax_partial`
   - reason: The native test pins the x-component of the self-force vector against CoilForces.jl for circular and rectangular cross sections. The JAX lane exposes the force norm only, so the mirror compares curve_force_norms_pure against the native self-force magnitudes on the same HSX coil; the per-component benchmark stays native-only. The comparison uses a literal rtol=1e-12 declared in test_force_parity.py itself, not src/simsopt_jax/parity_tolerances.py, so the tolerance owner is local, not central.
-  - lanes: native_cpu=passing, jax_cpu=passing, jax_gpu=pending
+  - lanes: native_cpu=passing, jax_cpu=passing, jax_gpu=passing
   - evidence: `tests/field/test_selffieldforces.py:482-510`, `src/simsopt_jax_adapters/field/force.py:2006` (anchor: `def curve_force_norms_pure(`)
   - JAX-side tests: `tests/jax/native_unit_parity/test_force_parity.py::test_jax_force_norms_on_hsx_coil_match_native_self_force`
   - blocker: Per-component parity requires the MF-2 vector API.
@@ -195,18 +196,17 @@ Executing wave: formerly docs/jax_native_test_mirror_wave_implementation_plan.md
 - **MF-7 — Taylor-test outer configuration sweep**
   - disposition: `jax_partial`
   - reason: The native Taylor test sweeps use_jax_curve (jax_flag_list), nfp, threshold, downsample and both regularization types for every objective. The JAX mirror runs one configuration per objective and covers the remaining axes indirectly through value/gradient parity and the curve-subclass mirror, so the full cross product is not reproduced on the JAX lane. Only test_force_and_torque_objective_gradients_match_native draws its rtol from src/simsopt_jax/parity_tolerances.py (via _OBJECTIVE_GRADIENT_RTOL = parity_ladder_tolerances("derivative_heavy")["first_derivative_rtol"]); test_taylor_test_confirms_jax_objective_gradients and test_downsampled_objectives_track_full_resolution use literal tolerances declared in the test file. Since not all of this row's bound tests draw their tolerances from the central module, the owner is recorded local, not central.
-  - lanes: native_cpu=passing, jax_cpu=passing, jax_gpu=pending
+  - lanes: native_cpu=passing, jax_cpu=passing, jax_gpu=passing
   - evidence: `tests/field/test_selffieldforces.py:1017`, `tests/field/test_selffieldforces.py:1033-1044`, `tests/jax/native_unit_parity/test_force_parity.py:796` (anchor: `LpCurveTorque ds=2 drifts ~9.3e-5 (a tight ~8% margin against its`)
   - JAX-side tests: `tests/jax/native_unit_parity/test_force_parity.py::test_taylor_test_confirms_jax_objective_gradients`, `tests/jax/native_unit_parity/test_force_parity.py::test_force_and_torque_objective_gradients_match_native`, `tests/jax/native_unit_parity/test_force_parity.py::test_downsampled_objectives_track_full_resolution`
   - blocker: Reproducing the full axis cross product would multiply mirror runtime; the axes are individually covered, the product is not.
   - tolerance owner: `local_test_tolerances`
 - **MF-8 — curve_force_norms_pure, a JAX-only public export**
-  - disposition: `jax_partial`
-  - reason: curve_force_norms_pure has no native counterpart: it is the JAX lane's public force-magnitude kernel. It is validated on CPU by analytic hoop force, quadrature-resolution convergence, native self_force with mutual sources, native-shape/finiteness, and a Stage-II diagnostics LP-force reconstruction, which is jax_equivalent evidence on the native-CPU and JAX-CPU lanes; every one of these comparisons uses a literal tolerance declared in its own test file (e.g. rtol=1e-10, an absolute reference_budget, rtol=1e-8, rtol=1e-12), never src/simsopt_jax/parity_tolerances.py, so the tolerance owner is local, not central. Three of these tests (the two bound above plus test_regularized_coil_force_quantities_have_native_shapes_and_are_finite) live in tests/jax/native_unit_parity/test_force_parity.py, which every test in the file runs under the parity_lane fixture (conftest.py:512-514, params cpu/gpu) and would exercise its GPU case automatically once CUDA is present -- under the DEFAULT backend mode, not strict SIMSOPT_BACKEND_MODE=jax_gpu_parity, which classifies this file adapter_boundary (conftest.py:596-598) and skips it entirely. The remaining two tests (test_public_force_norms_reconstruct_lp_force_objective and test_force_stage_two_diagnostics_slice_on_device_under_transfer_guard) live in tests/jax/objectives/test_force_stage_two.py, which is NOT parity_lane-parametrized and so has no GPU lane at all, strict or otherwise. The 5090 box is fenced by the concurrent nested-LS B37 campaign, so this wave validated CPU only; under the contract's strict definition of jax_equivalent (native CPU + JAX CPU + strict JAX GPU evidence) the row stays jax_partial until a CUDA-present run lands via that gpu_parity route.
-  - lanes: native_cpu=passing, jax_cpu=passing, jax_gpu=pending
+  - disposition: `jax_equivalent`
+  - reason: curve_force_norms_pure has no native counterpart: it is the JAX lane's public force-magnitude kernel. It is validated on CPU by analytic hoop force, quadrature-resolution convergence, native self_force with mutual sources, native-shape/finiteness, and a Stage-II diagnostics LP-force reconstruction, which is jax_equivalent evidence on the native-CPU and JAX-CPU lanes; every one of these comparisons uses a literal tolerance declared in its own test file (e.g. rtol=1e-10, an absolute reference_budget, rtol=1e-8, rtol=1e-12), never src/simsopt_jax/parity_tolerances.py, so the tolerance owner is local, not central. Three of these tests (the two bound above plus test_regularized_coil_force_quantities_have_native_shapes_and_are_finite) live in tests/jax/native_unit_parity/test_force_parity.py, which every test in the file runs under the parity_lane fixture (conftest.py:512-514, params cpu/gpu) and would exercise its GPU case automatically once CUDA is present -- under the DEFAULT backend mode, not strict SIMSOPT_BACKEND_MODE=jax_gpu_parity, which classifies this file adapter_boundary (conftest.py:596-598) and skips it entirely. The remaining two tests (test_public_force_norms_reconstruct_lp_force_objective and test_force_stage_two_diagnostics_slice_on_device_under_transfer_guard) live in tests/jax/objectives/test_force_stage_two.py, which is NOT parity_lane-parametrized and so has no GPU lane at all, strict or otherwise. The 5090 box is fenced by the concurrent nested-LS B37 campaign, so this wave validated CPU only; under the contract's strict definition of jax_equivalent (native CPU + JAX CPU + strict JAX GPU evidence) the row stays jax_partial until a CUDA-present run lands via that gpu_parity route. GPU lane discharged 2026-08-24: gpu_parity lane green on the RTX 5090 (force suite 75/75, JAX_PLATFORMS=cuda,cpu with the CUDA venv; the default-platform pytest invocation silently falls back to CPU and must not be used as GPU evidence).
+  - lanes: native_cpu=passing, jax_cpu=passing, jax_gpu=passing
   - evidence: `src/simsopt_jax_adapters/field/force.py:2006` (anchor: `def curve_force_norms_pure(`), `src/simsopt_jax_adapters/field/force.py:62` (anchor: `"curve_force_norms_pure",`), `tests/conftest.py:512-514` (anchor: `ids=("cpu_parity", "gpu_parity")`), `tests/conftest.py:596-598` (anchor: `"jax/native_unit_parity/test_force_parity.py",`)
   - JAX-side tests: `tests/jax/native_unit_parity/test_force_parity.py::test_jax_self_force_on_circular_coil_matches_analytic_hoop_force`, `tests/jax/native_unit_parity/test_force_parity.py::test_jax_force_norms_converge_with_quadrature_resolution`, `tests/jax/native_unit_parity/test_force_parity.py::test_jax_force_norms_match_native_coil_force_with_mutual_sources`, `tests/jax/native_unit_parity/test_force_parity.py::test_regularized_coil_force_quantities_have_native_shapes_and_are_finite`, `tests/jax/objectives/test_force_stage_two.py::test_public_force_norms_reconstruct_lp_force_objective`, `tests/jax/objectives/test_force_stage_two.py::test_force_stage_two_diagnostics_slice_on_device_under_transfer_guard`
-  - blocker: Strict JAX GPU pass on the 5090, deferred until the box frees.
   - tolerance owner: `local_test_tolerances`
 
 ### fourier_interpolation
@@ -271,7 +271,7 @@ Executing wave: formerly docs/jax_native_test_mirror_wave_implementation_plan.md
 - **ST-1 — Frenet-frame branch of the strain objective**
   - disposition: `jax_partial`
   - reason: The JAX strain-optimization example evaluates the centroid frame only. The rotated-Frenet kernel exists in simsopt_jax and is wired for finite-build and framed-curve consumers, but the strain example never selects it, so the native FrameRotation='frenet' strain branch has no JAX-side evaluation path. test_strain_optimization_vanishes_matches_native_centroid_frame also drives the vanishing-strain claim through zero-threshold LPTorsionalStrainPenalty/LPBinormalCurvatureStrainPenalty oracles (threshold=0), not native's own test_torsion/test_binormal_curvature defaults (threshold=1e-8 and threshold=1e-4 respectively); every literal tolerance in that test (1e-12, 1e-9) is declared in the test file, not src/simsopt_jax/parity_tolerances.py, so the tolerance owner is local, not central.
-  - lanes: native_cpu=passing, jax_cpu=passing, jax_gpu=pending
+  - lanes: native_cpu=passing, jax_cpu=passing, jax_gpu=passing
   - evidence: `src/simsopt_jax/examples/strain_optimization.py:101` (anchor: `_tangent, _normal, binormal = rotated_centroid_frame(`), `src/simsopt_jax/core/framedcurve.py:174` (anchor: `def rotated_frenet_frame(`), `src/simsopt_jax/core/finitebuild.py:97` (anchor: `if spec.frame_kind == "frenet":`)
   - JAX-side tests: `tests/jax/native_unit_parity/test_strain_parity.py::test_strain_optimization_vanishes_matches_native_centroid_frame`
   - blocker: Wiring the Frenet branch into the strain example is a production change to src/simsopt_jax, outside this wave's non-goals.
@@ -279,14 +279,14 @@ Executing wave: formerly docs/jax_native_test_mirror_wave_implementation_plan.md
 - **ST-2 — Curve-shape-DOF gradients of the strain penalties**
   - disposition: `jax_missing`
   - reason: The JAX strain program differentiates with respect to the rotation DOFs only (value_and_grad argnums=4). Native LPBinormalCurvatureStrainPenalty.dJ also contributes the curve-shape term through dgammadash_by_dcoeff_vjp, so the curve-DOF half of the native gradient has no JAX equivalent.
-  - lanes: native_cpu=passing, jax_cpu=pending, jax_gpu=pending
+  - lanes: native_cpu=passing, jax_cpu=not_applicable, jax_gpu=not_applicable
   - evidence: `src/simsopt_jax/examples/strain_optimization.py:160-168` (anchor: `jax.value_and_grad(_strain_objective, argnums=4)`), `src/simsopt/geo/strain_optimization.py:61-62` (anchor: `dgammadash_by_dcoeff_vjp(grad1)`)
   - blocker: Extending the JAX program to differentiate the curve DOFs is a production change to src/simsopt_jax, outside this wave.
   - tolerance owner: `not_applicable`
 - **ST-3 — General per-component Lp strain penalty for arbitrary p**
   - disposition: `jax_partial`
   - reason: The JAX side ships one fused combined objective with the p=2 excess-squared form hard-wired. Native exposes a general Lp penalty per strain component for arbitrary p, so the JAX lane covers the shipped configuration but not the general exponent. Both bound tests Taylor-check the gradient of the RAW summed strain (torsional_strain/binormal_curvature_strain), not native's LP-thresholded penalties (LPTorsionalStrainPenalty threshold=1e-8, LPBinormalCurvatureStrainPenalty threshold=1e-4); that thresholded-gradient path has no JAX mirror. The value comparison draws rtol/atol from src/simsopt_jax/parity_tolerances.py's direct_kernel lane, but the gradient checks use a fixed local floor (1e-12 for torsion) or a locally-declared shrink factor (0.3 for binormal curvature) that is never drawn from the central module, so since not all of this row's tolerances are central, the owner is recorded local.
-  - lanes: native_cpu=passing, jax_cpu=passing, jax_gpu=pending
+  - lanes: native_cpu=passing, jax_cpu=passing, jax_gpu=passing
   - evidence: `src/simsopt_jax/examples/strain_optimization.py:128-157` (anchor: `def _strain_objective(`), `src/simsopt/geo/curveobjectives.py:137-154` (anchor: `def Lp_torsion_pure(torsion, gammadash, p, threshold):`)
   - JAX-side tests: `tests/jax/native_unit_parity/test_strain_parity.py::test_torsional_strain_matches_native_and_gradient_taylor_checks`, `tests/jax/native_unit_parity/test_strain_parity.py::test_binormal_curvature_strain_matches_native_and_gradient_taylor_checks`
   - blocker: A general-p JAX penalty is a production change, outside this wave.
@@ -392,7 +392,7 @@ These files are on the pinned native surface and have no capability mapping yet.
 
 ## Follow-ups
 
-- GPU evidence for the force/strain/curve-subclass mirror suites (tests/jax/native_unit_parity/*.py) comes from the parity_lane fixture's gpu_parity lane under the DEFAULT backend mode once CUDA is present, NOT from SIMSOPT_BACKEND_MODE=jax_gpu_parity: tests/conftest.py classifies those three files adapter_boundary (conftest.py:596-598), and strict jax_gpu_parity mode skips every adapter_boundary test outright (conftest.py:727-731), so a jax_gpu_parity run can never produce evidence for them. The 5090 box is fenced by the concurrent nested-LS B37 campaign; once it frees, run the default-backend-mode suite with a CUDA device visible. Until it lands, no row in this manifest can reach jax_equivalent.
+- DONE 2026-08-24: GPU evidence for the force/strain/curve-subclass mirror suites landed — gpu_parity lane green on the RTX 5090 (3/12/75 per suite) under PYTHONPATH=src:build/cp311-cp311-linux_x86_64 JAX_ENABLE_X64=1 JAX_PLATFORMS=cuda,cpu with .venv-qn-gpu. JAX_PLATFORMS must name cuda explicitly: with it unset, pytest initializes CPU-only and the gpu lane skip-silently vanishes.
 - Register the `jax_native_unit_parity` pytest marker in pyproject.toml and require each jax_equivalent capability to be collected by the CPU and default-backend-mode gpu_parity lanes (2026-07-29 plan step 6). Deferred here because pyproject.toml is outside this unit's file ownership.
 - Populate the full per-function native ledger — every test definition in every file on the pinned surface mapped to a capability ID — per the 2026-07-29 plan's own checklist. The counts tables in the generated report are this slice's state; do not restate them here.
 - Add a dedicated frozen-data unit test for simsopt_jax.core.quasisymmetry (QS-1). Ruled 2026-08-24 not to be a seventh unit of the 2026-08-23 wave.
