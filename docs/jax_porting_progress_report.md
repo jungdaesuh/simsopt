@@ -15,6 +15,10 @@ comparisons passed
 
 ## Executive summary
 
+**Performance in one place:** "GPU performance in one table
+(2026-08-24)", under the wall-time section — every GPU-vs-native number
+with its confidence level, one row per example.
+
 - All 26 bounded examples pass native CPU, JAX CPU, and strict RTX 5090 GPU
   lanes: 1,248/1,248 comparisons (1,064 `allclose`, 180 exact, 4 `not_worse`),
   including all 416 native-CPU/JAX-GPU routes.
