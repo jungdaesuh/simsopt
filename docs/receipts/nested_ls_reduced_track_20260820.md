@@ -703,14 +703,63 @@ depth cap, and the halving-improvement clause, and the visited region
 B3 is unblocked. Its native bar comes from the Amendment-2 sweep
 artifact (bracket set per the standing KISS ruling, extend-on-edge).
 
+## Outer charter — B3 GREEN, 2.292× (2026-08-23, 5090)
+
+Receipt ``docs/receipts/evidence/nested_ls_outer_b3_20260823.{json,log}``
+(schema ``nested-ls-outer-claim.v1``, producer ``c1eca51d9``,
+``fail_closed_reason: null``, ``nested_speed_claim: true``). Native bar
+OMP=14, bound to the swept artifact by sha
+``d93d8b0bc158…`` (set {8,14,16,20}, 8 rows, best interior). Full
+parent process walls, no subtractions, n=3 interleaved pairs:
+
+- **JAX lane min 700.86 s / median 748.93 s**; native min 1606.50 s /
+  median 1702.71 s → **min-over-min 2.292×** (median-over-median
+  2.273×). Per-pair native walls 1702.7 / 1606.5 / 2563.8 s — pair 2's
+  native leg is a contended outlier the pre-declared min aggregation
+  discards; all rows are in the artifact. JAX pair walls 761.4 /
+  700.9 / 748.9 s; cache-priming row 734.6 s (outside the pairs).
+- **Physics 3/3 pairs green.** C++ LS Newton reconstruct is a strict
+  no-op on both lane endpoints in every pair: ``iter=0``,
+  ``‖∇J_LS‖₂ ≈ 2.9e-15`` (gate 1e-13), coil and surface deltas exactly
+  ``0.0``. Endpoint eight-term J gap ``−1.588e-12`` in every pair —
+  the JAX endpoint's J is strictly *lower*, so the one-sided
+  ``measured_j_rel_gap_max`` is ``0.0``. Observational (ungated):
+  endpoint ι 0.144681950023695 (native) vs 0.144681950023821 (JAX),
+  abs gap 1.3e-13. Both lanes are bitwise-deterministic: each lane's
+  endpoint J is identical across all pairs (and the JAX prime).
+- **Certification road (disclosed):** the first B3 launch was killed
+  ~30 min in as deterministically doomed — the JAX child published
+  scipy's raw ``result.success`` (always ``False`` at a fixed-budget
+  maxiter stop) where the native twin publishes a usable-endpoint
+  predicate, plus a last-anchor-only endpoint comparison where the
+  native twin searches all accepted iterates; every pair would have
+  failed closed as ``jax_failed`` before physics or timing was judged.
+  Fixed at ``566c409b8`` (native-twin semantics for both flags, child
+  schema v2, ``optimizer_x`` published for audit). The relaunched
+  prime printed ``success=True`` with J bitwise-identical to the
+  killed run — the fix changed reporting, not the trajectory. No
+  timed content from the killed run is cited anywhere.
+
+**B37 J-parity band frozen (adjudicated here): ``--j-parity-rtol
+1e-9``.** The B3-measured one-sided max is 0.0 (the gate law's floor
+is satisfied by any positive value); the two-sided band is
+``1.588e-12``. B37 runs 37/3 ≈ 12.3× the outer iterations on lanes
+whose gradients agree to 5.7e-9, so trajectories legitimately fork;
+1e-9 is ~630× the measured two-sided band — far above any plausible
+fork noise, and at J ≈ 0.0131 it still bounds the endpoints to
+``|ΔJ| ≤ 1.3e-11``, far below any physics-meaningful difference.
+B3 speed is not the claim; the charter's rung is B37.
+
 ## Next
 
 Gate-6 is closed on both hosts (5090 OMP=16 min 1.27×; A100 OMP=20
 min 1.72×, median 1.29×). Remaining:
 
-1. New eight-term outer optimizer charter: B3, then B37,
-   after multi-direction step-halved FD. Optimistix/Lineax
-   belong there, not as a mid-campaign linear-algebra swap.
+1. Eight-term outer charter: FD-0 GREEN and B3 GREEN (2.292×,
+   above) on the 5090; remaining = 5090 B37 at the frozen 1e-9
+   band, and the A100 rung (its own sweep → B3 → freeze → B37).
+   Optimistix/Lineax belong to a future charter revision, not a
+   mid-campaign linear-algebra swap.
 
 **NO-GO:** cap-2048, adjoint-1-MiB as inner LU budget, mimicking
 native BFGS in JAX, nested speed claim from 153/171, 153/116, or
