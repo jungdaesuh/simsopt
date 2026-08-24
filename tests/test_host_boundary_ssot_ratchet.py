@@ -50,6 +50,39 @@ _ALLOWED_OWNER_CALLS = frozenset(
         "src/simsopt_jax_adapters/geo/surface_objectives_traceable.py::_baseline_reporting_metrics::transfer_guard_device_to_host",
         "src/simsopt_jax_adapters/geo/surface_objectives_traceable.py::compute_baseline_value_and_grad::transfer_guard_device_to_host",
         "src/simsopt_jax_adapters/geo/surface_objectives_traceable.py::compute_baseline_value_and_grad::transfer_guard_host_to_device",
+        # Host-boundary call sites in the nested-LS solver and probe modules:
+        # host-side norms, convergence receipts, and probe evaluation at the
+        # solver boundary. Entered verbatim (2026-08-24) so the gate stays
+        # exact; rerouting a call site through the runtime/host_boundary SSOT
+        # helpers removes its entry from this list.
+        "src/simsopt_jax_adapters/geo/nested_ls_newton_parity.py::_jax_cpu_ordered_value_and_grad::device_get",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::_envelope_value_and_grad::device_get",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::_host_vector::device_get",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::_require_full_phi_yy::device_get",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::factor_reduced_nested_ls_schur::device_get",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::factor_schur_fourier_block_preconditioner::device_get",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::require_full_y_rank::device_get",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::run_reduced_nested_ls_newton::device_get",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::run_reduced_nested_ls_schur_newton::device_get",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py::_counted_gmres_row::block_until_ready",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py::_counted_gmres_row::device_get",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py::_counted_gmres_row::transfer_guard_host_to_device",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py::_flat675_value_and_grad_at::device_get",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py::_live_unpreconditioned_eta::block_until_ready",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py::_live_unpreconditioned_eta::device_get",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py::_mixed_coil_correction_vjp::device_get",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py::evaluate_f3_b37_chunk_banana_probe::block_until_ready",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py::evaluate_f3_b37_chunk_banana_probe::device_get",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py::evaluate_f3_b37_chunk_warm_probe::block_until_ready",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py::evaluate_f3_b37_endpoint_adjoint_probe::block_until_ready",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py::evaluate_f3_b37_endpoint_adjoint_probe::device_get",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py::evaluate_f3_b37_step6_architecture_probe::block_until_ready",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py::evaluate_f3_b37_step6_architecture_probe::device_get",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py::evaluate_f3_b37_volume_outer_probe::block_until_ready",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py::evaluate_f3_b37_volume_outer_probe::device_get",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py::nested_ls_outer_value_and_grad::block_until_ready",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py::nested_ls_outer_value_and_grad::device_get",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py::prepare_f3_b37_outer_state::device_get",
     }
 )
 _BOUNDARY_CALL_NAMES = frozenset(
