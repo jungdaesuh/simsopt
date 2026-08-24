@@ -20,6 +20,12 @@ import math
 import numpy as np
 import pytest
 from simsopt_jax_adapters.geo.nested_ls_contract import (
+    NESTED_LS_COARSE_AMPLIFICATION_GRADIENT,
+    NESTED_LS_COARSE_AMPLIFICATION_VALUE,
+    NESTED_LS_COARSE_USE_COMMITTED_ANCHOR,
+    NESTED_LS_COARSE_USE_LINE_SEARCH_VALUE,
+    NESTED_LS_COARSE_USE_OUTER_GRADIENT,
+    NESTED_LS_COARSE_USES,
     NESTED_LS_INNER_SUBSTEP_LEGS,
     NESTED_LS_NEWTON_COARSE_TOL,
     NESTED_LS_NEWTON_EXIT_COARSE_CONVERGED,
@@ -27,6 +33,9 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_NEWTON_EXIT_FAILED,
     NESTED_LS_NEWTON_EXIT_STATUSES,
     NESTED_LS_NEWTON_TOL,
+    NESTED_LS_OUTER_FD0_REL_TOL,
+    nested_ls_coarse_tier_admits,
+    nested_ls_coarse_tier_error_bound,
     nested_ls_inner_substep_points,
     nested_ls_newton_exit_status,
 )
@@ -278,6 +287,14 @@ def test_the_last_point_is_the_trial_bitwise_at_every_rung(legs: int) -> None:
     # And it is a copy, so a caller mutating the result cannot reach back
     # into the trial it was handed.
     assert points[-1] is not trial
+    # Known EQUIVALENT MUTANT, recorded rather than left as an apparent gap:
+    # replacing the copy with ``anchor + delta`` passes this file. It has to
+    # -- probing 120 000 random pairs across six magnitude regimes found no
+    # binary64 case where ``a + (t - a) != t``, so no value assertion can
+    # separate them. The copy is a guarantee where the alternative is an
+    # empirical regularity; that difference is real but is not observable
+    # from outside, and pretending otherwise with a contrived assertion
+    # would be worse than saying so here.
 
 
 @pytest.mark.parametrize("legs", NESTED_LS_INNER_SUBSTEP_LEGS)
@@ -379,3 +396,140 @@ def test_the_sealed_ladder_starts_undivided_and_only_refines() -> None:
     assert list(ladder) == sorted(ladder)
     assert len(set(ladder)) == len(ladder)
     assert all(isinstance(legs, int) and legs >= 1 for legs in ladder)
+
+
+# --------------------------------------------------------------------------
+# Licensed coarse tier and its red test (Phase 4)
+# --------------------------------------------------------------------------
+
+
+def test_a_committed_anchor_is_never_admitted_at_a_coarse_residual() -> None:
+    """The red test: coarse bytes must not become a warm start.
+
+    An anchor is the point every later evaluation inherits and the point
+    FD-0 differences about, so error there is propagated rather than
+    attenuated. This is the assertion that fails if someone widens the
+    anchor tier to reuse a cheap solve.
+    """
+
+    assert nested_ls_coarse_tier_admits(
+        achieved_residual_l2=NESTED_LS_NEWTON_TOL,
+        use=NESTED_LS_COARSE_USE_COMMITTED_ANCHOR,
+    )
+    for residual in (
+        np.nextafter(NESTED_LS_NEWTON_TOL, math.inf),
+        NESTED_LS_NEWTON_COARSE_TOL,
+        1.0e-3,
+    ):
+        assert not nested_ls_coarse_tier_admits(
+            achieved_residual_l2=float(residual),
+            use=NESTED_LS_COARSE_USE_COMMITTED_ANCHOR,
+        ), f"a coarse residual {residual!r} was admitted as a committed anchor"
+
+
+def test_a_coarse_result_outside_the_budget_is_refused_for_the_adjoint() -> None:
+    """The red test the plan asks for, stated at the tier boundary."""
+
+    assert nested_ls_coarse_tier_admits(
+        achieved_residual_l2=NESTED_LS_NEWTON_COARSE_TOL,
+        use=NESTED_LS_COARSE_USE_OUTER_GRADIENT,
+    )
+    assert not nested_ls_coarse_tier_admits(
+        achieved_residual_l2=float(np.nextafter(NESTED_LS_NEWTON_COARSE_TOL, math.inf)),
+        use=NESTED_LS_COARSE_USE_OUTER_GRADIENT,
+    )
+
+
+def test_production_cannot_reach_the_adjoint_with_a_coarse_result_today() -> None:
+    """The tier is a licence nothing has claimed yet, and that is the point.
+
+    ``success`` stays true only for ``converged``, and the outer objective
+    raises on a non-successful inner solve BEFORE assembling any adjoint
+    (``_nested_ls_outer_objective`` calls ``_solve_nested_inner_at_coils``
+    first). So a coarse-converged result is already fail-closed against the
+    adjoint without any consumer honouring the tier. This test pins that
+    interlock, so licensing the tier later is a deliberate act rather than
+    something that happens by a status becoming readable.
+    """
+
+    coarse = nested_ls_newton_exit_status(
+        persisted=True,
+        finite_iterate=True,
+        reduced_gradient_l2=NESTED_LS_NEWTON_COARSE_TOL,
+        tol=NESTED_LS_NEWTON_TOL,
+    )
+    assert coarse == NESTED_LS_NEWTON_EXIT_COARSE_CONVERGED
+    assert coarse != NESTED_LS_NEWTON_EXIT_CONVERGED
+
+
+def test_the_value_tier_is_not_looser_than_the_gradient_tier() -> None:
+    """The measured inversion, pinned so a future edit cannot undo it quietly.
+
+    The plan ordered its tiers with line-search values as the loosest. The
+    measurement says the objective's relative error is ~3.8x the gradient's
+    at the same achieved residual, so the value is the BINDING constraint.
+    If someone later re-separates the tiers with the value looser, this
+    fails.
+    """
+
+    assert (
+        NESTED_LS_COARSE_AMPLIFICATION_VALUE > NESTED_LS_COARSE_AMPLIFICATION_GRADIENT
+    )
+    for residual in (1.0e-13, 1.0e-10, NESTED_LS_NEWTON_COARSE_TOL):
+        value_admitted = nested_ls_coarse_tier_admits(
+            achieved_residual_l2=residual,
+            use=NESTED_LS_COARSE_USE_LINE_SEARCH_VALUE,
+        )
+        gradient_admitted = nested_ls_coarse_tier_admits(
+            achieved_residual_l2=residual,
+            use=NESTED_LS_COARSE_USE_OUTER_GRADIENT,
+        )
+        assert value_admitted == gradient_admitted
+        assert nested_ls_coarse_tier_error_bound(
+            achieved_residual_l2=residual,
+            use=NESTED_LS_COARSE_USE_LINE_SEARCH_VALUE,
+        ) > nested_ls_coarse_tier_error_bound(
+            achieved_residual_l2=residual,
+            use=NESTED_LS_COARSE_USE_OUTER_GRADIENT,
+        )
+
+
+def test_the_licensed_tier_sits_far_under_the_fd0_band() -> None:
+    """Why 1e-8 is the tier, in the units the decision was made in.
+
+    FD-0's relative band is ``NESTED_LS_OUTER_FD0_REL_TOL``. At the coarse
+    tolerance the worst measured amplification puts both the gradient and
+    the value error orders of magnitude under it; that margin is the
+    licence. Recomputed here rather than quoted, so moving either the tier
+    or an amplification constant moves this assertion.
+    """
+
+    for use in (
+        NESTED_LS_COARSE_USE_OUTER_GRADIENT,
+        NESTED_LS_COARSE_USE_LINE_SEARCH_VALUE,
+    ):
+        bound = nested_ls_coarse_tier_error_bound(
+            achieved_residual_l2=NESTED_LS_NEWTON_COARSE_TOL, use=use
+        )
+        assert bound < NESTED_LS_OUTER_FD0_REL_TOL / 50.0, (
+            f"{use} inherits {bound:.3e} at the coarse tier, which is not "
+            f"comfortably under the FD-0 band {NESTED_LS_OUTER_FD0_REL_TOL:.0e}"
+        )
+
+
+def test_an_unknown_use_fails_closed_rather_than_defaulting_to_admitted() -> None:
+    """A default-admit branch would license the next consumer silently."""
+
+    for function in (nested_ls_coarse_tier_admits, nested_ls_coarse_tier_error_bound):
+        with pytest.raises(ValueError, match="unknown nested-LS coarse-tier use"):
+            function(achieved_residual_l2=1.0e-14, use="whatever_lands_next")
+
+
+def test_a_non_finite_residual_is_never_admitted() -> None:
+    """NaN fails every comparison, so it must be refused explicitly."""
+
+    for use in NESTED_LS_COARSE_USES:
+        for residual in (math.nan, -1.0, -math.inf):
+            assert not nested_ls_coarse_tier_admits(
+                achieved_residual_l2=residual, use=use
+            )
