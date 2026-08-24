@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import statistics
 import subprocess
@@ -29,17 +30,24 @@ import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Final
+from typing import Final, Never
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "src"))
 
+from repo_bootstrap import bootstrap_local_simsopt
+
+bootstrap_local_simsopt(REPO / "src")
+
 from simsopt_jax_adapters.geo.nested_ls_contract import (
     F3_B37_BANANA_OMP_CONTRACT_THREADS,
     NESTED_LS_GATE6_AGGREGATION,
     NESTED_LS_GATE6_NATIVE_OMP_THREADS,
+    NESTED_LS_OUTER_JAX_CHILD_SCHEMA,
+    NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA,
     NESTED_LS_OUTER_OMP_SWEEP_REPEATS,
+    NESTED_LS_OUTER_REJUDGE_SCHEMA,
 )
 
 from benchmarks.nested_ls_shamanskii_attribution import (
@@ -53,10 +61,10 @@ EVIDENCE = REPO / "docs" / "receipts" / "evidence"
 NATIVE_CHILD = REPO / "benchmarks" / "nested_ls_outer_native_child.py"
 JAX_CHILD = REPO / "benchmarks" / "nested_ls_outer_jax_child.py"
 CACHE_OUTER = REPO / ".artifacts" / "nested-ls-outer-xla"
-EVIDENCE_DATE: Final[str] = "20260823"
+EVIDENCE_DATE: Final[str] = "20260824"
 CLAIM_BUDGETS: Final[tuple[int, ...]] = (3, 37)
-CLAIM_SCHEMA: Final[str] = "nested-ls-outer-claim.v1"
-SWEEP_SCHEMA: Final[str] = "nested-ls-outer-native-omp-sweep.v1"
+CLAIM_SCHEMA: Final[str] = "nested-ls-outer-claim.v2"
+SWEEP_SCHEMA: Final[str] = "nested-ls-outer-native-omp-sweep.v2"
 # Charter: "B37 runs only after B3 lands physics-green." The interlock is
 # the receipt, not a promise, so B37 must be handed the B3 artifact.
 B3_BUDGET: Final[int] = 3
@@ -74,11 +82,138 @@ DEFAULT_MAXCOR: Final[int] = 10
 DEFAULT_OMP_SET: Final[str] = ",".join(
     str(threads) for threads in F3_B37_BANANA_OMP_CONTRACT_THREADS
 )
+A100_OMP_SET: Final[tuple[int, ...]] = (14, 16, 20, 24)
 SWEEP_REPEATS: Final[int] = NESTED_LS_OUTER_OMP_SWEEP_REPEATS
 # The charter sweeps the native denominator per rung. A number typed on
 # the command line is not a swept bar, so claim runs must cite the sweep
 # artifact and B37 must inherit that provenance through its B3 receipt.
 OMP_PROVENANCE_SWEPT: Final[str] = "swept_artifact"
+
+
+def _reject_nonfinite_json_constant(token: str) -> Never:
+    raise ValueError(f"non-finite JSON constant {token!r}")
+
+
+def _load_strict_evidence_json(raw: bytes, *, label: str) -> dict[str, object]:
+    try:
+        payload = json.loads(
+            raw.decode("utf-8"),
+            parse_constant=_reject_nonfinite_json_constant,
+        )
+    except ValueError as error:
+        raise SystemExit(f"{label} is not strict finite JSON: {error}") from error
+    if not isinstance(payload, dict):
+        raise SystemExit(f"{label} must contain a JSON object")
+    return payload
+
+
+def _require_finite_number(
+    value: object,
+    *,
+    label: str,
+    positive: bool = False,
+    nonnegative: bool = False,
+) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SystemExit(f"{label} must be a JSON number")
+    number = float(value)
+    if not math.isfinite(number):
+        raise SystemExit(f"{label} must be finite")
+    if positive and number <= 0.0:
+        raise SystemExit(f"{label} must be positive")
+    if nonnegative and number < 0.0:
+        raise SystemExit(f"{label} must be nonnegative")
+    return number
+
+
+def _parse_j_parity_rtol(value: object) -> float:
+    return _require_finite_number(
+        value,
+        label="--j-parity-rtol",
+        nonnegative=True,
+    )
+
+
+def _verified_embedded_child_payload(
+    *, lane: str, row: dict[str, object]
+) -> tuple[dict[str, object] | None, str | None]:
+    raw = row.get("child_payload_raw")
+    if not isinstance(raw, str):
+        return None, f"{lane}_child_payload_raw_missing"
+    if hashlib.sha256(raw.encode("utf-8")).hexdigest() != str(
+        row.get("child_payload_sha256")
+    ):
+        return None, f"{lane}_child_payload_sha256_mismatch"
+    try:
+        payload = json.loads(
+            raw,
+            parse_constant=_reject_nonfinite_json_constant,
+        )
+    except ValueError:
+        return None, f"{lane}_child_payload_not_strict_json"
+    if not isinstance(payload, dict):
+        return None, f"{lane}_child_payload_not_object"
+    if payload != row.get("child_payload"):
+        return None, f"{lane}_embedded_child_payload_mismatch"
+    return payload, None
+
+
+def _child_row_mismatch(
+    *, lane: str, row: dict[str, object], payload: dict[str, object]
+) -> str | None:
+    if lane == "native":
+        endpoint = payload["endpoint"]
+        start = payload["start"]
+        threading = payload["threading"]
+        expected = {
+            "observed_omp_num_threads": int(payload["omp_num_threads"]),
+            "omp_pinned": payload["omp_pinned"],
+            "omp_proc_bind": threading["OMP_PROC_BIND"],
+            "omp_places": threading["OMP_PLACES"],
+            "success": payload["success"],
+            "nit": int(payload["nit"]),
+            "nfev": int(payload["nfev"]),
+            "restart_count": int(payload["restart_count"]),
+            "endpoint_is_optimizer_endpoint": payload["endpoint_is_optimizer_x"],
+            "outer_policy": payload["outer_policy"],
+            "endpoint_j": float(endpoint["objective"]),
+            "endpoint_iota": float(endpoint["iota"]),
+            "endpoint_g": float(endpoint["G"]),
+            "endpoint_gradient_l2": float(endpoint["gradient_l2"]),
+            "endpoint_coil_sha256": str(endpoint["coil_sha256"]),
+            "endpoint_surface_sha256": str(endpoint["surface_sha256"]),
+            "start_coil_dofs": [float(entry) for entry in start["coil_dofs"]],
+            "endpoint_coil_dofs": [float(entry) for entry in endpoint["coil_dofs"]],
+        }
+    else:
+        expected = {
+            "success": payload["success"],
+            "nit": int(payload["nit"]),
+            "nfev": int(payload["nfev"]),
+            "restart_count": int(payload["restart_count"]),
+            "endpoint_is_optimizer_endpoint": payload["endpoint_is_optimizer_x"],
+            "outer_policy": payload["outer_policy"],
+            "start_policy": str(payload["start_policy"]),
+            "iota_branch_guard": float(payload["iota_branch_guard"]),
+            "feasible_evaluations": int(payload["feasible_evaluations"]),
+            "rejected_evaluations": int(payload["rejected_evaluations"]),
+            "endpoint_j": float(payload["endpoint_j"]),
+            "endpoint_grad_l2": float(payload["endpoint_grad_l2"]),
+            "endpoint_grad_inf": float(payload["endpoint_grad_inf"]),
+            "endpoint_iota": float(payload["endpoint_iota"]),
+            "endpoint_g": float(payload["endpoint_g"]),
+            "endpoint_adjoint_live_eta": float(payload["endpoint_adjoint_live_eta"]),
+            "endpoint_coil_sha256": str(payload["endpoint_coil_sha256"]),
+            "endpoint_surface_sha256": str(payload["endpoint_surface_sha256"]),
+            "start_coil_dofs": [float(entry) for entry in payload["start_coil_dofs"]],
+            "endpoint_coil_dofs": [
+                float(entry) for entry in payload["endpoint_coil_dofs"]
+            ],
+        }
+    for field, expected_value in expected.items():
+        if row.get(field) != expected_value:
+            return f"{lane}_row_{field}_mismatch"
+    return None
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -110,7 +245,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=int(REPEATS),
         help=(
             "Interleaved measure pairs. The charter default is the contract "
-            "REPEATS; Amendment 4 permits 1 for a fault-rerun whose verdict "
+            "REPEATS; Amendment 5 permits 1 for a fault-rerun whose verdict "
             "is the deterministic physics gate, walls informational."
         ),
     )
@@ -118,14 +253,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--skip-prime",
         action="store_true",
         help=(
-            "Skip the untimed JAX cache-priming run (Amendment 4 fault-rerun "
+            "Skip the untimed JAX cache-priming run (Amendment 5 fault-rerun "
             "only: requires a demonstrably warm persistent compile cache)."
         ),
     )
     parser.add_argument(
         "--tag",
         default="",
-        help="Receipt suffix, e.g. a100 → nested_ls_outer_b3_20260823.a100.json",
+        help="Receipt suffix, e.g. a100 → nested_ls_outer_b3_20260824.a100.json",
     )
     parser.add_argument(
         "--b3-receipt",
@@ -212,7 +347,12 @@ def _make_logger(out_log: Path) -> Callable[[str], None]:
 
 
 def _require_omp_evidence(
-    *, omp_evidence: Path, omp_num_threads: int
+    *,
+    omp_evidence: Path,
+    omp_num_threads: int,
+    expected_git_head: str,
+    expected_maxcor: int,
+    expected_omp_set: tuple[int, ...],
 ) -> dict[str, object]:
     """Refuse a claim run whose native OMP is not the swept artifact's best.
 
@@ -224,59 +364,260 @@ def _require_omp_evidence(
     if not omp_evidence.is_file():
         raise SystemExit(f"--omp-evidence does not exist: {omp_evidence}")
     raw = omp_evidence.read_bytes()
-    payload = json.loads(raw.decode("utf-8"))
+    payload = _load_strict_evidence_json(raw, label="--omp-evidence")
     schema = str(payload["schema"])
     if schema != SWEEP_SCHEMA:
         raise SystemExit(
             f"--omp-evidence schema is {schema!r}, expected {SWEEP_SCHEMA!r}"
         )
+    artifact_git_head = str(payload["git_head"])
+    if artifact_git_head != expected_git_head:
+        raise SystemExit(
+            f"--omp-evidence git_head is {artifact_git_head!r}, expected the "
+            f"claim implementation {expected_git_head!r}"
+        )
+    if int(payload["budget"]) != B3_BUDGET:
+        raise SystemExit(f"--omp-evidence is not a B{B3_BUDGET} sweep")
+    if int(payload["maxcor"]) != expected_maxcor:
+        raise SystemExit(
+            f"--omp-evidence maxcor is {payload['maxcor']!r}, expected "
+            f"{expected_maxcor}"
+        )
+    if str(payload["aggregation"]) != NESTED_LS_GATE6_AGGREGATION:
+        raise SystemExit(
+            f"--omp-evidence aggregation is {payload['aggregation']!r}, expected "
+            f"{NESTED_LS_GATE6_AGGREGATION!r}"
+        )
+    repeats = int(payload["repeats"])
+    if repeats != SWEEP_REPEATS:
+        raise SystemExit(
+            f"--omp-evidence repeats is {repeats}, expected {SWEEP_REPEATS}"
+        )
+    omp_set = tuple(int(value) for value in payload["omp_set"])
+    if not omp_set or len(set(omp_set)) != len(omp_set):
+        raise SystemExit("--omp-evidence omp_set is empty or contains duplicates")
+    if omp_set != expected_omp_set:
+        raise SystemExit(
+            f"--omp-evidence omp_set is {omp_set!r}, expected the frozen host "
+            f"set {expected_omp_set!r}"
+        )
+    rows = payload["rows"]
+    expected_row_keys = {
+        (repeat, value) for repeat in range(repeats) for value in omp_set
+    }
+    observed_row_keys: set[tuple[int, int]] = set()
+    per_omp_walls: dict[int, list[float]] = {value: [] for value in omp_set}
+    for row in rows:
+        row_key = (int(row["repeat"]), int(row["omp_num_threads"]))
+        if row_key in observed_row_keys:
+            raise SystemExit(f"--omp-evidence repeats row {row_key}")
+        observed_row_keys.add(row_key)
+        if row.get("success") is not True:
+            raise SystemExit(f"--omp-evidence row {row_key} did not succeed")
+        if row.get("omp_pinned") is not True:
+            raise SystemExit(f"--omp-evidence row {row_key} was not OMP-pinned")
+        if int(row["observed_omp_num_threads"]) != row_key[1]:
+            raise SystemExit(
+                f"--omp-evidence row {row_key} observed a different OMP count"
+            )
+        if str(row["child_schema"]) != NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA:
+            raise SystemExit(f"--omp-evidence row {row_key} has a stale child schema")
+        if row_key[1] in per_omp_walls:
+            wall = _require_finite_number(
+                row["process_wall_seconds"],
+                label=f"--omp-evidence row {row_key} process wall",
+                positive=True,
+            )
+            per_omp_walls[row_key[1]].append(wall)
+    if observed_row_keys != expected_row_keys:
+        raise SystemExit(
+            "--omp-evidence rows do not cover every declared "
+            "(repeat, omp_num_threads) pair exactly once"
+        )
+    recomputed_best = min(
+        omp_set,
+        key=lambda value: (min(per_omp_walls[value]), value),
+    )
+    declared_minima = payload["per_omp_min_process_wall_seconds"]
+    for value in omp_set:
+        declared_minimum = _require_finite_number(
+            declared_minima[str(value)],
+            label=f"--omp-evidence minimum wall for OMP {value}",
+            positive=True,
+        )
+        if declared_minimum != min(per_omp_walls[value]):
+            raise SystemExit(f"--omp-evidence minimum wall for OMP {value} is stale")
     best = int(payload["best_omp_num_threads"])
+    if best != recomputed_best:
+        raise SystemExit(
+            f"--omp-evidence declares best OMP {best}, but its rows recompute "
+            f"to {recomputed_best}"
+        )
     if best != int(omp_num_threads):
         raise SystemExit(
             f"--omp {omp_num_threads} is not the swept best-of-contract "
             f"{best}; the claim must run at the swept bar"
         )
-    rows = payload["rows"]
-    if not rows:
-        raise SystemExit("--omp-evidence carries no rows")
     return {
         "path": str(omp_evidence),
         "sha256": hashlib.sha256(raw).hexdigest(),
         "best_omp_num_threads": best,
         "rows": int(len(rows)),
-        "omp_set": [int(value) for value in payload["omp_set"]],
-        "git_head": str(payload["git_head"]),
+        "omp_set": list(omp_set),
+        "git_head": artifact_git_head,
     }
 
 
-def _require_b3_green(*, b3_receipt: Path, omp_num_threads: int) -> dict[str, object]:
+def _require_b3_green(
+    *,
+    b3_receipt: Path,
+    omp_num_threads: int,
+    expected_git_head: str,
+    expected_maxcor: int,
+    expected_omp_set: tuple[int, ...],
+) -> dict[str, object]:
     """Refuse B37 unless the handed B3 receipt is a green B3 at this OMP."""
 
     if not b3_receipt.is_file():
         raise SystemExit(f"--b3-receipt does not exist: {b3_receipt}")
     raw = b3_receipt.read_bytes()
-    payload = json.loads(raw.decode("utf-8"))
+    payload = _load_strict_evidence_json(raw, label="--b3-receipt")
     schema = str(payload["schema"])
     if schema != CLAIM_SCHEMA:
         raise SystemExit(
             f"--b3-receipt schema is {schema!r}, expected {CLAIM_SCHEMA!r}"
         )
+    receipt_git_head = str(payload["git_head"])
+    if receipt_git_head != expected_git_head:
+        raise SystemExit(
+            f"--b3-receipt git_head is {receipt_git_head!r}, expected the "
+            f"B37 implementation {expected_git_head!r}"
+        )
     boundary = payload["claim_boundary"]
     receipt_budget = int(boundary["budget"])
     if receipt_budget != B3_BUDGET:
         raise SystemExit(f"--b3-receipt is a B{receipt_budget} run, not B{B3_BUDGET}")
+    if int(boundary["maxcor"]) != expected_maxcor:
+        raise SystemExit(
+            f"--b3-receipt maxcor is {boundary['maxcor']!r}, expected {expected_maxcor}"
+        )
     reason = payload["fail_closed_reason"]
     if reason is not None:
         raise SystemExit(f"--b3-receipt is not physics-green: {reason!r}")
     pairs = payload["pairs"]
-    if not pairs:
-        raise SystemExit("--b3-receipt carries no pairs")
+    if len(pairs) != REPEATS or int(boundary["repeats"]) != REPEATS:
+        raise SystemExit(f"--b3-receipt must carry exactly {REPEATS} chartered pairs")
+    observed_repeats: set[int] = set()
+    recomputed_gaps: list[float] = []
     for pair in pairs:
-        if not bool(pair["physics_ok"]):
+        repeat = int(pair["repeat"])
+        if repeat in observed_repeats:
+            raise SystemExit(f"--b3-receipt repeats pair {repeat}")
+        observed_repeats.add(repeat)
+        for lane, row in (("native", pair["native"]), ("jax", pair["jax"])):
+            if int(row.get("repeat", -1)) != repeat:
+                raise SystemExit(
+                    f"--b3-receipt {lane} row repeat disagrees at pair {repeat}"
+                )
+            if row.get("role") != "measure" or row.get("timed") is not True:
+                raise SystemExit(
+                    f"--b3-receipt {lane} row is not a timed measure at repeat {repeat}"
+                )
+            process_wall = _require_finite_number(
+                row.get("process_wall_seconds"),
+                label=f"--b3-receipt {lane} process wall at repeat {repeat}",
+                positive=True,
+            )
+            claim_wall = _require_finite_number(
+                row.get("claim_wall_seconds"),
+                label=f"--b3-receipt {lane} claim wall at repeat {repeat}",
+                positive=True,
+            )
+            if process_wall != claim_wall:
+                raise SystemExit(
+                    f"--b3-receipt {lane} claim wall excludes work at repeat {repeat}"
+                )
+        for lane, envelope in (
+            ("native", pair["native_rejudge"]),
+            ("jax", pair["jax_rejudge"]),
+        ):
+            if int(envelope.get("repeat", -1)) != repeat:
+                raise SystemExit(
+                    f"--b3-receipt {lane} rejudge repeat disagrees at pair {repeat}"
+                )
+            if envelope.get("timed") is not False:
+                raise SystemExit(
+                    f"--b3-receipt {lane} rejudge must be untimed at repeat {repeat}"
+                )
+        recomputed_reason = _physics_ok(
+            native=pair["native"],
+            jax_row=pair["jax"],
+            native_rejudge=pair["native_rejudge"],
+            jax_rejudge=pair["jax_rejudge"],
+            omp_num_threads=omp_num_threads,
+            j_parity_rtol=None,
+            budget=B3_BUDGET,
+            maxcor=expected_maxcor,
+        )
+        if recomputed_reason is not None:
             raise SystemExit(
                 "--b3-receipt has a failed pair at repeat "
-                f"{pair['repeat']}: {pair['fail_closed_reason']!r}"
+                f"{repeat}: {recomputed_reason!r}"
             )
+        if pair.get("physics_ok") is not True or pair["fail_closed_reason"] is not None:
+            raise SystemExit(
+                f"--b3-receipt pair {repeat} disagrees with recomputed physics"
+            )
+        native_j = _require_finite_number(
+            pair["native"]["endpoint_j"],
+            label=f"--b3-receipt native endpoint J at repeat {repeat}",
+            positive=True,
+        )
+        jax_j = _require_finite_number(
+            pair["jax"]["endpoint_j"],
+            label=f"--b3-receipt JAX endpoint J at repeat {repeat}",
+            nonnegative=True,
+        )
+        signed_gap = (jax_j - native_j) / abs(native_j)
+        recomputed_gap = max(0.0, signed_gap)
+        declared_native_j = _require_finite_number(
+            pair.get("endpoint_j_native"),
+            label=f"--b3-receipt endpoint_j_native at repeat {repeat}",
+            positive=True,
+        )
+        declared_jax_j = _require_finite_number(
+            pair.get("endpoint_j_jax"),
+            label=f"--b3-receipt endpoint_j_jax at repeat {repeat}",
+            nonnegative=True,
+        )
+        declared_signed_gap = _require_finite_number(
+            pair.get("endpoint_j_rel_gap"),
+            label=f"--b3-receipt signed endpoint-J gap at repeat {repeat}",
+        )
+        if (
+            declared_native_j != native_j
+            or declared_jax_j != jax_j
+            or declared_signed_gap != signed_gap
+        ):
+            raise SystemExit(
+                f"--b3-receipt pair {repeat} carries stale endpoint-J fields"
+            )
+        if pair.get("endpoint_j_within_frozen_band") is not None:
+            raise SystemExit(
+                f"--b3-receipt pair {repeat} must keep the B3 J band observational"
+            )
+        declared_gap = _require_finite_number(
+            pair["endpoint_j_rel_gap_worse_direction"],
+            label=f"--b3-receipt endpoint-J gap at repeat {repeat}",
+            nonnegative=True,
+        )
+        if declared_gap != recomputed_gap:
+            raise SystemExit(
+                f"--b3-receipt pair {repeat} carries a stale endpoint-J gap"
+            )
+        recomputed_gaps.append(recomputed_gap)
+    if observed_repeats != set(range(REPEATS)):
+        raise SystemExit("--b3-receipt repeat indices are not the chartered set")
     receipt_omp = int(boundary["native_omp_num_threads"])
     if receipt_omp != int(omp_num_threads):
         raise SystemExit(
@@ -298,11 +639,74 @@ def _require_b3_green(*, b3_receipt: Path, omp_num_threads: int) -> dict[str, ob
             "--b3-receipt has no claim_boundary.measured_j_rel_gap_max; it "
             "predates the Amendment-1 J-parity protocol and cannot feed B37"
         )
-    measured = float(boundary["measured_j_rel_gap_max"])
+    measured = _require_finite_number(
+        boundary["measured_j_rel_gap_max"],
+        label="--b3-receipt measured_j_rel_gap_max",
+        nonnegative=True,
+    )
+    if measured != max(recomputed_gaps):
+        raise SystemExit(
+            "--b3-receipt measured_j_rel_gap_max does not match its pair rows"
+        )
+    omp_evidence = boundary["omp_evidence"]
+    if str(omp_evidence["git_head"]) != expected_git_head:
+        raise SystemExit(
+            "--b3-receipt inherited OMP evidence from a different implementation"
+        )
+    omp_path = Path(str(omp_evidence["path"]))
+    if not omp_path.is_absolute():
+        omp_path = REPO / omp_path
+    validated_omp = _require_omp_evidence(
+        omp_evidence=omp_path,
+        omp_num_threads=omp_num_threads,
+        expected_git_head=expected_git_head,
+        expected_maxcor=expected_maxcor,
+        expected_omp_set=expected_omp_set,
+    )
+    if str(validated_omp["sha256"]) != str(omp_evidence["sha256"]):
+        raise SystemExit("--b3-receipt OMP evidence SHA does not match its artifact")
+    native_walls = [
+        _require_finite_number(
+            pair["native"]["claim_wall_seconds"],
+            label=f"--b3-receipt native wall at repeat {pair['repeat']}",
+            positive=True,
+        )
+        for pair in pairs
+    ]
+    jax_walls = [
+        _require_finite_number(
+            pair["jax"]["claim_wall_seconds"],
+            label=f"--b3-receipt JAX wall at repeat {pair['repeat']}",
+            positive=True,
+        )
+        for pair in pairs
+    ]
+    native_min = min(native_walls)
+    jax_min = min(jax_walls)
+    expected_aggregates = {
+        "native_min_process_wall_seconds": native_min,
+        "native_median_process_wall_seconds": float(statistics.median(native_walls)),
+        "native_max_process_wall_seconds": max(native_walls),
+        "jax_min_process_wall_seconds": jax_min,
+        "jax_median_process_wall_seconds": float(statistics.median(jax_walls)),
+        "jax_max_process_wall_seconds": max(jax_walls),
+        "speedup_min_over_min": native_min / jax_min,
+    }
+    for field, expected_value in expected_aggregates.items():
+        declared_value = _require_finite_number(
+            payload[field],
+            label=f"--b3-receipt aggregate {field}",
+            positive=True,
+        )
+        if declared_value != expected_value:
+            raise SystemExit(f"--b3-receipt aggregate {field} is stale")
+    expected_speed_claim = jax_min < native_min
+    if boundary.get("nested_speed_claim") is not expected_speed_claim:
+        raise SystemExit("--b3-receipt nested_speed_claim is stale")
     return {
         "path": str(b3_receipt),
         "sha256": hashlib.sha256(raw).hexdigest(),
-        "git_head": str(payload["git_head"]),
+        "git_head": receipt_git_head,
         "native_omp_num_threads": receipt_omp,
         "omp_provenance": provenance,
         "measured_j_rel_gap_max": measured,
@@ -323,8 +727,15 @@ def _jax_env() -> dict[str, str]:
 
 
 def _child_json_path(prefix: str) -> Path:
+    # Child payloads live under the repo's ignored artifact tree, never the
+    # shared /tmp: a usrquota-exhausted /tmp killed a live run's shell
+    # environment on 2026-08-24 and would have destroyed the run itself at
+    # the next payload write. The artifact filesystem is the one whose
+    # health the campaign already depends on.
+    tmp_dir = REPO / ".artifacts" / "nested-ls-outer-tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
-        suffix=".json", prefix=prefix, delete=False
+        suffix=".json", prefix=prefix, dir=tmp_dir, delete=False
     ) as handle:
         return Path(handle.name)
 
@@ -336,6 +747,7 @@ def _run_child(
     extra_argv: list[str],
     env: dict[str, str],
     out_path: Path,
+    expected_schema: str,
 ) -> tuple[dict[str, object], float]:
     """Full parent subprocess wait around one child. No subtraction."""
 
@@ -354,10 +766,26 @@ def _run_child(
             f"outer {label} child failed rc={completed.returncode} "
             f"stderr={completed.stderr[-2000:]}"
         )
-    return (
-        json.loads(out_path.read_text(encoding="utf-8")),
-        process_wall_seconds,
+    payload = json.loads(out_path.read_text(encoding="utf-8"))
+    _require_child_schema(
+        payload,
+        label=label,
+        expected_schema=expected_schema,
     )
+    return payload, process_wall_seconds
+
+
+def _require_child_schema(
+    payload: dict[str, object], *, label: str, expected_schema: str
+) -> None:
+    """Refuse a child payload whose producer contract is not this campaign's."""
+
+    observed_schema = str(payload.get("schema"))
+    if observed_schema != expected_schema:
+        raise RuntimeError(
+            f"outer {label} child schema is {observed_schema!r}, "
+            f"expected {expected_schema!r}"
+        )
 
 
 def _launch_native(
@@ -379,10 +807,12 @@ def _launch_native(
         extra_argv=["--budget", str(budget), "--maxcor", str(maxcor)],
         env=env,
         out_path=child_out,
+        expected_schema=NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA,
     )
     threading = payload["threading"]
     start = payload["start"]
     endpoint = payload["endpoint"]
+    child_payload_raw = child_out.read_text(encoding="utf-8")
     row = {
         "side": "native",
         "omp_num_threads": int(omp_num_threads),
@@ -393,18 +823,24 @@ def _launch_native(
         "success": bool(payload["success"]),
         "nit": int(payload["nit"]),
         "nfev": int(payload["nfev"]),
+        "restart_count": int(payload["restart_count"]),
         "endpoint_is_optimizer_endpoint": bool(payload["endpoint_is_optimizer_x"]),
         "outer_policy": payload["outer_policy"],
         "endpoint_j": float(endpoint["objective"]),
         "endpoint_iota": float(endpoint["iota"]),
         "endpoint_g": float(endpoint["G"]),
         "endpoint_gradient_l2": float(endpoint["gradient_l2"]),
+        "endpoint_coil_sha256": str(endpoint["coil_sha256"]),
         "endpoint_surface_sha256": str(endpoint["surface_sha256"]),
         "start_coil_dofs": [float(entry) for entry in start["coil_dofs"]],
         "endpoint_coil_dofs": [float(entry) for entry in endpoint["coil_dofs"]],
         "process_wall_seconds": process_wall_seconds,
         "claim_wall_seconds": process_wall_seconds,
         "child_payload": payload,
+        "child_payload_raw": child_payload_raw,
+        "child_payload_sha256": hashlib.sha256(
+            child_payload_raw.encode("utf-8")
+        ).hexdigest(),
     }
     log(
         "outer native"
@@ -425,17 +861,20 @@ def _launch_jax(
         extra_argv=["--budget", str(budget), "--maxcor", str(maxcor)],
         env=_jax_env(),
         out_path=child_out,
+        expected_schema=NESTED_LS_OUTER_JAX_CHILD_SCHEMA,
     )
+    child_payload_raw = child_out.read_text(encoding="utf-8")
     row = {
         "side": "jax",
         "success": bool(payload["success"]),
         "nit": int(payload["nit"]),
         "nfev": int(payload["nfev"]),
+        "restart_count": int(payload["restart_count"]),
         "endpoint_is_optimizer_endpoint": bool(payload["endpoint_is_optimizer_x"]),
         "outer_policy": payload["outer_policy"],
         "start_policy": str(payload["start_policy"]),
         "iota_branch_guard": float(payload["iota_branch_guard"]),
-        "accepted_evaluations": int(payload["accepted_evaluations"]),
+        "feasible_evaluations": int(payload["feasible_evaluations"]),
         "rejected_evaluations": int(payload["rejected_evaluations"]),
         "endpoint_j": float(payload["endpoint_j"]),
         "endpoint_grad_l2": float(payload["endpoint_grad_l2"]),
@@ -443,17 +882,22 @@ def _launch_jax(
         "endpoint_iota": float(payload["endpoint_iota"]),
         "endpoint_g": float(payload["endpoint_g"]),
         "endpoint_adjoint_live_eta": float(payload["endpoint_adjoint_live_eta"]),
+        "endpoint_coil_sha256": str(payload["endpoint_coil_sha256"]),
         "start_coil_dofs": [float(entry) for entry in payload["start_coil_dofs"]],
         "endpoint_coil_dofs": [float(entry) for entry in payload["endpoint_coil_dofs"]],
         "endpoint_surface_sha256": str(payload["endpoint_surface_sha256"]),
         "process_wall_seconds": process_wall_seconds,
         "claim_wall_seconds": process_wall_seconds,
         "child_payload": payload,
+        "child_payload_raw": child_payload_raw,
+        "child_payload_sha256": hashlib.sha256(
+            child_payload_raw.encode("utf-8")
+        ).hexdigest(),
     }
     log(
         "outer jax"
         f" success={row['success']!r} nit={row['nit']} nfev={row['nfev']}"
-        f" accepted={row['accepted_evaluations']}"
+        f" feasible={row['feasible_evaluations']}"
         f" rejected={row['rejected_evaluations']}"
         f" J={row['endpoint_j']!r} grad_l2={row['endpoint_grad_l2']!r}"
         f" wall={process_wall_seconds!r}"
@@ -467,6 +911,7 @@ def _launch_rejudge(
     endpoint_path: Path,
     budget: int,
     maxcor: int,
+    expected_child_payload_sha256: str,
     log: Callable[[str], None],
 ) -> dict[str, object]:
     """Untimed physics gate on one lane's endpoint, after every timed pair.
@@ -475,6 +920,14 @@ def _launch_rejudge(
     per-lane-endpoint physics gate, so the native endpoint earns it too.
     """
 
+    observed_child_payload_sha256 = hashlib.sha256(
+        endpoint_path.read_bytes()
+    ).hexdigest()
+    if observed_child_payload_sha256 != expected_child_payload_sha256:
+        raise RuntimeError(
+            f"rejudge {lane} endpoint payload changed after the timed child: "
+            f"{observed_child_payload_sha256} != {expected_child_payload_sha256}"
+        )
     child_out = _child_json_path("nested_ls_outer_rejudge_")
     payload, process_wall_seconds = _run_child(
         label="rejudge",
@@ -489,14 +942,14 @@ def _launch_rejudge(
         ],
         env=_jax_env(),
         out_path=child_out,
+        expected_schema=NESTED_LS_OUTER_REJUDGE_SCHEMA,
     )
-    child_out.unlink(missing_ok=True)
     if str(payload["judged_lane"]) != lane:
         raise RuntimeError(
             f"rejudge judged lane {payload['judged_lane']!r}, expected {lane!r}"
         )
-    payload["process_wall_seconds"] = process_wall_seconds
-    payload["timed"] = False
+    payload_sha256 = hashlib.sha256(child_out.read_bytes()).hexdigest()
+    child_out.unlink(missing_ok=True)
     log(
         "outer rejudge"
         f" lane={lane} noop={payload['rejudge_noop']!r}"
@@ -506,7 +959,51 @@ def _launch_rejudge(
         f" reason={payload['fail_closed_reason']!r}"
         f" wall={process_wall_seconds!r}"
     )
-    return payload
+    return {
+        "payload": payload,
+        "payload_sha256": payload_sha256,
+        "process_wall_seconds": process_wall_seconds,
+        "timed": False,
+    }
+
+
+def _rejudge_endpoint_mismatch(
+    *,
+    lane: str,
+    row: dict[str, object],
+    rejudge_envelope: dict[str, object],
+    budget: int,
+    maxcor: int,
+) -> str | None:
+    rejudge = rejudge_envelope["payload"]
+    reencoded_payload = json.dumps(rejudge, allow_nan=False, indent=2) + "\n"
+    if hashlib.sha256(reencoded_payload.encode("utf-8")).hexdigest() != str(
+        rejudge_envelope["payload_sha256"]
+    ):
+        return f"{lane}_rejudge_payload_sha256_mismatch"
+    if str(rejudge["schema"]) != NESTED_LS_OUTER_REJUDGE_SCHEMA:
+        return f"{lane}_rejudge_schema_mismatch"
+    if str(rejudge["judged_lane"]) != lane:
+        return f"{lane}_rejudge_lane_mismatch"
+    if int(rejudge["budget"]) != budget:
+        return f"{lane}_rejudge_budget_mismatch"
+    if int(rejudge["maxcor"]) != maxcor:
+        return f"{lane}_rejudge_maxcor_mismatch"
+    if str(rejudge["source_child_schema"]) != str(row["child_payload"]["schema"]):
+        return f"{lane}_rejudge_source_child_schema_mismatch"
+    if str(rejudge["source_child_payload_sha256"]) != str(row["child_payload_sha256"]):
+        return f"{lane}_rejudge_source_child_payload_sha256_mismatch"
+    for field in ("endpoint_coil_sha256", "endpoint_surface_sha256"):
+        if str(rejudge[field]) != str(row[field]):
+            return f"{lane}_rejudge_{field}_mismatch"
+    for row_field, rejudge_field in (
+        ("endpoint_j", "endpoint_j"),
+        ("endpoint_iota", "endpoint_iota"),
+        ("endpoint_g", "endpoint_g"),
+    ):
+        if float(rejudge[rejudge_field]) != float(row[row_field]):
+            return f"{lane}_rejudge_{rejudge_field}_mismatch"
+    return None
 
 
 def _physics_ok(
@@ -517,18 +1014,49 @@ def _physics_ok(
     jax_rejudge: dict[str, object],
     omp_num_threads: int,
     j_parity_rtol: float | None,
+    budget: int,
+    maxcor: int,
 ) -> str | None:
-    if not bool(native["success"]):
+    for lane, row, expected_schema in (
+        ("native", native, NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA),
+        ("jax", jax_row, NESTED_LS_OUTER_JAX_CHILD_SCHEMA),
+    ):
+        child_payload, payload_mismatch = _verified_embedded_child_payload(
+            lane=lane,
+            row=row,
+        )
+        if payload_mismatch is not None or child_payload is None:
+            return payload_mismatch
+        if str(child_payload["schema"]) != expected_schema:
+            return f"{lane}_child_schema_mismatch"
+        if int(child_payload["budget"]) != budget:
+            return f"{lane}_child_budget_mismatch"
+        if int(child_payload["maxcor"]) != maxcor:
+            return f"{lane}_child_maxcor_mismatch"
+        boolean_fields = ["success", "endpoint_is_optimizer_x"]
+        if lane == "native":
+            boolean_fields.append("omp_pinned")
+        for field in boolean_fields:
+            if not isinstance(child_payload.get(field), bool):
+                return f"{lane}_child_{field}_not_boolean"
+        row_mismatch = _child_row_mismatch(
+            lane=lane,
+            row=row,
+            payload=child_payload,
+        )
+        if row_mismatch is not None:
+            return row_mismatch
+    if native.get("success") is not True:
         return "native_failed"
-    if not bool(native["omp_pinned"]):
+    if native.get("omp_pinned") is not True:
         return "native_omp_unpinned"
     if int(native["observed_omp_num_threads"]) != int(omp_num_threads):
         return "native_omp_not_contract"
-    if not bool(native["endpoint_is_optimizer_endpoint"]):
+    if native.get("endpoint_is_optimizer_endpoint") is not True:
         return "native_endpoint_not_optimizer_endpoint"
-    if not bool(jax_row["success"]):
+    if jax_row.get("success") is not True:
         return "jax_failed"
-    if not bool(jax_row["endpoint_is_optimizer_endpoint"]):
+    if jax_row.get("endpoint_is_optimizer_endpoint") is not True:
         return "jax_endpoint_not_optimizer_endpoint"
     if native["outer_policy"] != jax_row["outer_policy"]:
         return "outer_optimizer_policy_differs"
@@ -536,10 +1064,25 @@ def _physics_ok(
         return "start_coils_differ"
     if len(native["endpoint_coil_dofs"]) != len(jax_row["endpoint_coil_dofs"]):
         return "endpoint_coil_dim_mismatch"
-    native_rejudge_reason = native_rejudge["fail_closed_reason"]
+    for lane, row, rejudge_envelope in (
+        ("native", native, native_rejudge),
+        ("jax", jax_row, jax_rejudge),
+    ):
+        mismatch = _rejudge_endpoint_mismatch(
+            lane=lane,
+            row=row,
+            rejudge_envelope=rejudge_envelope,
+            budget=budget,
+            maxcor=maxcor,
+        )
+        if mismatch is not None:
+            return mismatch
+    native_rejudge_payload = native_rejudge["payload"]
+    jax_rejudge_payload = jax_rejudge["payload"]
+    native_rejudge_reason = native_rejudge_payload["fail_closed_reason"]
     if native_rejudge_reason is not None:
         return f"native_{native_rejudge_reason}"
-    jax_rejudge_reason = jax_rejudge["fail_closed_reason"]
+    jax_rejudge_reason = jax_rejudge_payload["fail_closed_reason"]
     if jax_rejudge_reason is not None:
         return f"jax_{jax_rejudge_reason}"
     # Charter Amendment 1: at B3 the endpoint-J comparison is observational
@@ -550,6 +1093,12 @@ def _physics_ok(
         return None
     native_j = float(native["endpoint_j"])
     jax_j = float(jax_row["endpoint_j"])
+    if not math.isfinite(native_j) or native_j <= 0.0:
+        return "native_endpoint_j_invalid"
+    if not math.isfinite(jax_j) or jax_j < 0.0:
+        return "jax_endpoint_j_invalid"
+    if not math.isfinite(j_parity_rtol) or j_parity_rtol < 0.0:
+        return "j_parity_rtol_invalid"
     if jax_j > native_j * (1.0 + j_parity_rtol):
         return "jax_endpoint_j_above_frozen_band"
     return None
@@ -564,6 +1113,17 @@ def _parse_omp_set(raw: str) -> tuple[int, ...]:
     if any(value < 1 for value in values):
         raise SystemExit(f"--omp-set has a non-positive value: {raw!r}")
     return values
+
+
+def _host_omp_set(tag: str) -> tuple[int, ...]:
+    if tag == "":
+        return F3_B37_BANANA_OMP_CONTRACT_THREADS
+    if tag == "a100":
+        return A100_OMP_SET
+    raise SystemExit(
+        f"--tag {tag!r} has no frozen native OMP set; declare it in the contract "
+        "before running a claim"
+    )
 
 
 def _run_native_omp_sweep(
@@ -609,6 +1169,7 @@ def _run_native_omp_sweep(
                     "omp_pinned": bool(row["omp_pinned"]),
                     "repeat": int(repeat),
                     "success": bool(row["success"]),
+                    "child_schema": str(row["child_payload"]["schema"]),
                     "nit": int(row["nit"]),
                     "nfev": int(row["nfev"]),
                     "endpoint_j": float(row["endpoint_j"]),
@@ -693,6 +1254,7 @@ def main(argv: list[str] | None = None) -> None:
     omp_num_threads = int(args.omp)
     maxcor = int(args.maxcor)
     tag = str(args.tag).strip()
+    host_omp_set = _host_omp_set(tag)
     if args.sweep_native_omp:
         if budget != B3_BUDGET:
             raise SystemExit(
@@ -709,6 +1271,11 @@ def main(argv: list[str] | None = None) -> None:
         omp_values = _parse_omp_set(
             DEFAULT_OMP_SET if args.omp_set is None else args.omp_set
         )
+        if omp_values != host_omp_set:
+            raise SystemExit(
+                f"--omp-set is {omp_values!r}, expected the frozen host set "
+                f"{host_omp_set!r} for tag {tag!r}"
+            )
         _run_native_omp_sweep(
             budget=budget,
             omp_values=omp_values,
@@ -752,17 +1319,26 @@ def main(argv: list[str] | None = None) -> None:
                 f"--omp-evidence is forbidden for --budget {B37_BUDGET}: the "
                 "swept bar is inherited through --b3-receipt"
             )
+    sha = _require_clean_tree()
     if args.omp_evidence is None:
         omp_evidence: dict[str, object] | None = None
     else:
         omp_evidence = _require_omp_evidence(
-            omp_evidence=Path(args.omp_evidence), omp_num_threads=omp_num_threads
+            omp_evidence=Path(args.omp_evidence),
+            omp_num_threads=omp_num_threads,
+            expected_git_head=sha,
+            expected_maxcor=maxcor,
+            expected_omp_set=host_omp_set,
         )
     if args.b3_receipt is None:
         b3_receipt: dict[str, object] | None = None
     else:
         b3_receipt = _require_b3_green(
-            b3_receipt=Path(args.b3_receipt), omp_num_threads=omp_num_threads
+            b3_receipt=Path(args.b3_receipt),
+            omp_num_threads=omp_num_threads,
+            expected_git_head=sha,
+            expected_maxcor=maxcor,
+            expected_omp_set=host_omp_set,
         )
     # Both rungs stand on a swept bar: B3 cites the sweep artifact, B37
     # inherits it through a B3 receipt that was itself required to cite one.
@@ -772,7 +1348,7 @@ def main(argv: list[str] | None = None) -> None:
         j_parity_mode = "observational_b3"
         b3_measured_gap: float | None = None
     else:
-        j_parity_rtol = float(args.j_parity_rtol)
+        j_parity_rtol = _parse_j_parity_rtol(args.j_parity_rtol)
         j_parity_mode = "frozen_from_b3"
         b3_measured_gap = float(b3_receipt["measured_j_rel_gap_max"])
         if j_parity_rtol < b3_measured_gap:
@@ -792,7 +1368,6 @@ def main(argv: list[str] | None = None) -> None:
         f"{omp_num_threads}. Full parent process wall on both sides, no "
         "subtraction; physics gates untimed. Not F3 7.70x."
     )
-    sha = _require_clean_tree()
     log = _make_logger(out_log)
     log(
         f"outer prime jax cache budget {budget} maxcor {maxcor}"
@@ -863,6 +1438,7 @@ def main(argv: list[str] | None = None) -> None:
             endpoint_path=native_endpoint,
             budget=budget,
             maxcor=maxcor,
+            expected_child_payload_sha256=str(native["child_payload_sha256"]),
             log=log,
         )
         native_rejudge["repeat"] = int(repeat)
@@ -871,6 +1447,7 @@ def main(argv: list[str] | None = None) -> None:
             endpoint_path=jax_endpoint,
             budget=budget,
             maxcor=maxcor,
+            expected_child_payload_sha256=str(jax_row["child_payload_sha256"]),
             log=log,
         )
         jax_rejudge["repeat"] = int(repeat)
@@ -881,6 +1458,8 @@ def main(argv: list[str] | None = None) -> None:
             jax_rejudge=jax_rejudge,
             omp_num_threads=omp_num_threads,
             j_parity_rtol=j_parity_rtol,
+            budget=budget,
+            maxcor=maxcor,
         )
         native_j = float(native["endpoint_j"])
         jax_j = float(jax_row["endpoint_j"])

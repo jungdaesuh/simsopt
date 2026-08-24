@@ -18,6 +18,11 @@ import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
+    from simsopt_jax_adapters.geo.nested_ls_reduced_scale import NestedLsOuterState
 
 os.environ.setdefault("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
 os.environ.setdefault("JAX_PLATFORMS", "cuda,cpu")
@@ -29,6 +34,10 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "src"))
 
+from repo_bootstrap import bootstrap_local_simsopt
+
+bootstrap_local_simsopt(REPO / "src")
+
 from benchmarks.validation_ladder_common import apply_compilation_cache_policy
 
 apply_compilation_cache_policy(os.environ.get("JAX_COMPILATION_CACHE_DIR"))
@@ -37,12 +46,11 @@ import jax
 import numpy as np
 from numpy.typing import NDArray
 from scipy.optimize import minimize
-
-JAX_CHILD_SCHEMA = "nested-ls-outer-jax-child.v2"
-# Declared by benchmarks/nested_ls_outer_native_child.py. Named here so the
-# rejudge gate can judge the native endpoint on the same path it judges
-# this lane's, without importing that child's process-level module.
-NATIVE_CHILD_SCHEMA = "nested-ls-outer-native-child.v1"
+from simsopt_jax_adapters.geo.nested_ls_contract import (
+    NESTED_LS_OUTER_JAX_CHILD_SCHEMA,
+    NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA,
+    NESTED_LS_OUTER_REJUDGE_SCHEMA,
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -75,7 +83,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 @dataclass(frozen=True, slots=True)
 class _OuterEval:
-    """One outer evaluation, accepted or rejected. Ledger row only.
+    """One outer evaluation, inner-feasible or rejected. Ledger row only.
 
     Mirrors the native twin's per-evaluation record so the two lanes'
     receipts line up row for row, including its ``rejection_reason``
@@ -85,7 +93,7 @@ class _OuterEval:
     """
 
     eval_index: int
-    accepted: bool
+    inner_feasible: bool
     rejection_reason: str | None
     rejection_detail: str | None
     j: float
@@ -111,14 +119,12 @@ class _OuterEval:
 
 
 @dataclass(frozen=True, slots=True)
-class _AcceptedIterate:
-    """One accepted nested point: the anchor a rejection is priced against.
+class _NestedCandidate:
+    """One feasible nested point pending outer acceptance.
 
-    The JAX-lane twin of the native child's ``OuterAnchor``. It supplies
-    the sentinel's ``J``, gradient and ``‖Δc‖`` origin, and it is the
-    endpoint the receipt publishes — a rejection sentinel is never an
-    endpoint, because only an accepted iterate carries a surface the C++
-    rejudge can judge.
+    The candidate carries the complete state needed to promote or restore
+    one point atomically. A successful inner solve alone does not make it
+    the outer incumbent; scipy's accepted-step callback does that.
     """
 
     eval_index: int
@@ -133,6 +139,22 @@ class _AcceptedIterate:
     inner_iterations: int
     inner_grad_l2: float
     adjoint_live_eta: float
+
+
+def _restore_nested_candidate(
+    state: NestedLsOuterState,
+    jax_boozer: BoozerSurfaceJAX,
+    candidate: _NestedCandidate,
+) -> None:
+    """Restore one committed candidate as the sole continuation anchor."""
+
+    state.set_anchor(candidate.surface_dofs, candidate.iota, candidate.G)
+    state.inner_iterations = int(candidate.inner_iterations)
+    state.inner_grad_l2 = float(candidate.inner_grad_l2)
+    state.adjoint_live_eta = float(candidate.adjoint_live_eta)
+    jax_boozer.surface.set_dofs(candidate.surface_dofs)
+    jax_boozer.biotsavart.x = np.array(candidate.coil_dofs, dtype=np.float64, copy=True)
+    jax_boozer._refresh_coil_data()
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,14 +176,15 @@ class _EndpointRecord:
     The rejudge gate is charter-symmetric — it judges the native endpoint
     exactly as it judges the JAX one — so it reads both layouts into this
     single record rather than growing a second rejudge path. The native
-    child nests its endpoint under ``endpoint`` and declares no coil
-    sha256; the JAX child writes flat ``endpoint_*`` keys.
+    child nests its endpoint under ``endpoint``; the JAX child writes
+    flat ``endpoint_*`` keys.
     """
 
     lane: str
     schema: str
     coil_dofs: NDArray[np.float64]
     surface_dofs: NDArray[np.float64]
+    declared_coil_sha256: str
     declared_surface_sha256: str
     iota: float
     G: float
@@ -173,24 +196,26 @@ def _load_endpoint_record(endpoint_path: Path) -> _EndpointRecord:
 
     payload = json.loads(endpoint_path.read_text(encoding="utf-8"))
     schema = str(payload["schema"])
-    if schema == JAX_CHILD_SCHEMA:
+    if schema == NESTED_LS_OUTER_JAX_CHILD_SCHEMA:
         return _EndpointRecord(
             lane="jax",
             schema=schema,
             coil_dofs=np.asarray(payload["endpoint_coil_dofs"], dtype=np.float64),
             surface_dofs=np.asarray(payload["endpoint_surface_dofs"], dtype=np.float64),
+            declared_coil_sha256=str(payload["endpoint_coil_sha256"]),
             declared_surface_sha256=str(payload["endpoint_surface_sha256"]),
             iota=float(payload["endpoint_iota"]),
             G=float(payload["endpoint_g"]),
             j=float(payload["endpoint_j"]),
         )
-    if schema == NATIVE_CHILD_SCHEMA:
+    if schema == NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA:
         endpoint = payload["endpoint"]
         return _EndpointRecord(
             lane="native",
             schema=schema,
             coil_dofs=np.asarray(endpoint["coil_dofs"], dtype=np.float64),
             surface_dofs=np.asarray(endpoint["surface_dofs"], dtype=np.float64),
+            declared_coil_sha256=str(endpoint["coil_sha256"]),
             declared_surface_sha256=str(endpoint["surface_sha256"]),
             iota=float(endpoint["iota"]),
             G=float(endpoint["G"]),
@@ -198,8 +223,22 @@ def _load_endpoint_record(endpoint_path: Path) -> _EndpointRecord:
         )
     raise SystemExit(
         f"rejudge cannot read endpoint schema {schema!r}; expected "
-        f"{JAX_CHILD_SCHEMA!r} or {NATIVE_CHILD_SCHEMA!r}."
+        f"{NESTED_LS_OUTER_JAX_CHILD_SCHEMA!r} or "
+        f"{NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA!r}."
     )
+
+
+def _endpoint_declaration_mismatch(
+    record: _EndpointRecord,
+    *,
+    expected_coil_sha256: str,
+    expected_surface_sha256: str,
+) -> str | None:
+    if record.declared_coil_sha256 != expected_coil_sha256:
+        return "endpoint_coil_declaration_mismatch"
+    if record.declared_surface_sha256 != expected_surface_sha256:
+        return "endpoint_surface_declaration_mismatch"
+    return None
 
 
 def _cache_meta() -> dict[str, object]:
@@ -217,6 +256,12 @@ def _run_outer(*, budget: int, maxcor: int) -> dict[str, object]:
         raise SystemExit(f"expected gpu, got {jax.default_backend()!r}")
     from simsopt_jax_adapters.geo.nested_ls_contract import (
         NESTED_LS_OUTER_IOTA_BRANCH_GUARD,
+        NESTED_LS_OUTER_MAX_RESTARTS,
+        NestedLsOuterCandidateStore,
+        nested_ls_outer_endpoint_success,
+        nested_ls_outer_ftol_zero_stop,
+        nested_ls_outer_rejection_barrier,
+        nested_ls_outer_restart_reason,
     )
     from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
         DEFAULT_F3_B37_GPU_LANE,
@@ -262,9 +307,13 @@ def _run_outer(*, budget: int, maxcor: int) -> dict[str, object]:
     start_g = float(state.anchor_G)
 
     evals: list[_OuterEval] = []
-    accepted: list[_AcceptedIterate] = []
+    feasible: list[_NestedCandidate] = []
     iterates: list[_OuterIterate] = []
+    candidates = NestedLsOuterCandidateStore[_NestedCandidate](start_coils)
     optimize_started = time.perf_counter()
+
+    def _restore(candidate: _NestedCandidate) -> None:
+        _restore_nested_candidate(state, jax_boozer, candidate)
 
     def _value_and_grad(x: np.ndarray) -> tuple[float, np.ndarray]:
         point = np.array(x, dtype=np.float64, copy=True)
@@ -272,22 +321,19 @@ def _run_outer(*, budget: int, maxcor: int) -> dict[str, object]:
         try:
             value, gradient = nested_ls_outer_value_and_grad(state, point)
         except (NestedLsBranchJump, NestedLsInnerSolveFailed) as signal:
-            # Lane symmetry: an evaluation neither lane can complete must
-            # cost both lanes the same thing. The native twin answers both
-            # a lost branch and inner non-convergence with its sealed
-            # rejection sentinel, so this lane answers the matching typed
-            # signals identically — the anchor's gradient with a raised
-            # value, so the line search shortens instead of stepping
-            # somewhere unsolved. Unit A leaves the anchor and the surface
-            # on the last accepted point before raising either signal, so
-            # ``retain_accepted_anchor`` needs no rollback here.
-            #
             # Only these two types are caught. Coil motion is deliberately
             # untyped upstream and must stay fatal, and evaluation 0 has no
-            # anchor to price against, so both re-raise.
+            # committed anchor to price against, so both re-raise.
             seconds = float(time.perf_counter() - started)
-            if not accepted:
+            if not candidates.is_primed:
                 raise
+            anchor = candidates.committed
+            _restore(anchor)
+            if candidates.committed_matches(point):
+                raise RuntimeError(
+                    "the nested inner solve rejected the exact committed outer "
+                    "point; no line-search barrier can represent that failure"
+                ) from signal
             if isinstance(signal, NestedLsBranchJump):
                 rejection_reason = "iota_branch_guard"
                 rejected_iota: float | None = signal.iota
@@ -298,22 +344,23 @@ def _run_outer(*, budget: int, maxcor: int) -> dict[str, object]:
                 rejection_reason = "inner_solve_failed"
                 rejected_iota = None
                 branch_delta = None
-            anchor = accepted[-1]
             distance = float(np.linalg.norm(point - anchor.coil_dofs))
-            sentinel = (
-                anchor.j
-                + float(outer_policy.rejection_value_offset)
-                + float(outer_policy.rejection_distance_scale) * distance
+            sentinel, sentinel_grad = nested_ls_outer_rejection_barrier(
+                anchor_value=anchor.j,
+                anchor_parameters=anchor.coil_dofs,
+                trial_parameters=point,
+                scale=float(outer_policy.rejection_distance_scale),
             )
-            sentinel_grad = np.array(anchor.gradient, dtype=np.float64, copy=True)
+            sentinel_grad_l2 = float(np.linalg.norm(sentinel_grad))
+            sentinel_grad_inf = float(np.linalg.norm(sentinel_grad, ord=np.inf))
             rejected = _OuterEval(
                 eval_index=len(evals),
-                accepted=False,
+                inner_feasible=False,
                 rejection_reason=rejection_reason,
                 rejection_detail=str(signal),
                 j=sentinel,
-                grad_l2=anchor.grad_l2,
-                grad_inf=anchor.grad_inf,
+                grad_l2=sentinel_grad_l2,
+                grad_inf=sentinel_grad_inf,
                 anchor_distance=distance,
                 iota_branch_delta=branch_delta,
                 seconds=seconds,
@@ -342,12 +389,12 @@ def _run_outer(*, budget: int, maxcor: int) -> dict[str, object]:
         seconds = float(time.perf_counter() - started)
         grad = np.asarray(gradient, dtype=np.float64).reshape(-1)
         inner_surface = np.array(state.anchor_surface_dofs, dtype=np.float64, copy=True)
-        # Measured against the state this solve warm-started from: the
-        # accepted anchor once one exists, the prepared start otherwise.
-        warm_start_iota = accepted[-1].iota if accepted else start_iota
+        warm_start_iota = (
+            candidates.committed.iota if candidates.is_primed else start_iota
+        )
         record = _OuterEval(
             eval_index=len(evals),
-            accepted=True,
+            inner_feasible=True,
             rejection_reason=None,
             rejection_detail=None,
             j=float(value),
@@ -366,22 +413,24 @@ def _run_outer(*, budget: int, maxcor: int) -> dict[str, object]:
             inner_surface_sha256=sha256_float64(inner_surface),
         )
         evals.append(record)
-        accepted.append(
-            _AcceptedIterate(
-                eval_index=record.eval_index,
-                coil_dofs=point,
-                j=record.j,
-                gradient=np.array(grad, dtype=np.float64, copy=True),
-                grad_l2=record.grad_l2,
-                grad_inf=record.grad_inf,
-                surface_dofs=inner_surface,
-                iota=float(state.anchor_iota),
-                G=float(state.anchor_G),
-                inner_iterations=int(state.inner_iterations),
-                inner_grad_l2=float(state.inner_grad_l2),
-                adjoint_live_eta=float(state.adjoint_live_eta),
-            )
+        candidate = _NestedCandidate(
+            eval_index=record.eval_index,
+            coil_dofs=point,
+            j=record.j,
+            gradient=np.array(grad, dtype=np.float64, copy=True),
+            grad_l2=record.grad_l2,
+            grad_inf=record.grad_inf,
+            surface_dofs=inner_surface,
+            iota=float(state.anchor_iota),
+            G=float(state.anchor_G),
+            inner_iterations=int(state.inner_iterations),
+            inner_grad_l2=float(state.inner_grad_l2),
+            adjoint_live_eta=float(state.adjoint_live_eta),
         )
+        feasible.append(candidate)
+        primed = candidates.record(point, candidate)
+        if not primed:
+            _restore(candidates.committed)
         print(
             "outer jax eval"
             f" index={record.eval_index} J={record.j!r}"
@@ -395,13 +444,14 @@ def _run_outer(*, budget: int, maxcor: int) -> dict[str, object]:
         return float(value), grad
 
     def _callback(xk: np.ndarray) -> None:
-        latest = evals[-1]
+        committed = candidates.accept(np.asarray(xk, dtype=np.float64))
+        _restore(committed)
         iterates.append(
             _OuterIterate(
                 iterate_index=len(iterates),
                 evals_completed=len(evals),
-                j=latest.j,
-                grad_l2=latest.grad_l2,
+                j=committed.j,
+                grad_l2=committed.grad_l2,
                 coil_dofs=tuple(float(entry) for entry in np.asarray(xk)),
                 seconds_since_optimize_start=float(
                     time.perf_counter() - optimize_started
@@ -409,61 +459,113 @@ def _run_outer(*, budget: int, maxcor: int) -> dict[str, object]:
             )
         )
 
-    result = minimize(
-        _value_and_grad,
-        start_coils,
-        jac=True,
-        method=outer_policy.method,
-        options=outer_policy.as_scipy_options(),
-        callback=_callback,
-    )
+    # Recovery only: a qualifying early stop restarts from the transaction's
+    # complete incumbent with fresh L-BFGS memory. Trial evaluations cannot
+    # alter that incumbent; the identical rule lives in the native twin.
+    budget_total = int(budget)
+    consumed_nit = 0
+    total_nfev = 0
+    total_njev = 0
+    restart_nits: list[int] = []
+    restart_attempts: list[dict[str, object]] = []
+    attempt_x0 = start_coils
+    while True:
+        rejected_before = len(evals) - len(feasible)
+        attempt_options = outer_policy.as_scipy_options()
+        attempt_options["maxiter"] = budget_total - consumed_nit
+        result = minimize(
+            _value_and_grad,
+            attempt_x0,
+            jac=True,
+            method=outer_policy.method,
+            options=attempt_options,
+            callback=_callback,
+        )
+        attempt_nit = int(result.nit)
+        grad_inf = float(np.max(np.abs(np.asarray(result.jac, dtype=np.float64))))
+        rejected_this_attempt = (len(evals) - len(feasible)) - rejected_before
+        # The shared classifier restarts an abnormal line search or an FTOL
+        # stop that the sealed ftol=0 policy explicitly disabled.
+        restart_reason = nested_ls_outer_restart_reason(
+            ftol=float(outer_policy.ftol),
+            status=int(result.status),
+            message=str(result.message),
+        )
+        restart_nits.append(attempt_nit)
+        restart_attempts.append(
+            {
+                "nit": attempt_nit,
+                "nfev": int(result.nfev),
+                "njev": int(result.njev),
+                "optimizer_success": bool(result.success),
+                "status": int(result.status),
+                "message": str(result.message),
+                "fun": float(result.fun),
+                "grad_inf": grad_inf,
+                "rejected_this_attempt": int(rejected_this_attempt),
+                "restart_reason": restart_reason,
+            }
+        )
+        consumed_nit += attempt_nit
+        total_nfev += int(result.nfev)
+        total_njev += int(result.njev)
+        if (
+            consumed_nit >= budget_total
+            or attempt_nit == 0
+            or restart_reason is None
+            or len(restart_nits) > NESTED_LS_OUTER_MAX_RESTARTS
+        ):
+            break
+        attempt_x0 = np.array(
+            candidates.committed.coil_dofs,
+            dtype=np.float64,
+            copy=True,
+        )
     optimize_seconds = float(time.perf_counter() - optimize_started)
-    # The endpoint is the ACCEPTED nested point at L-BFGS-B's own ``x``,
-    # never a rejection sentinel: only an accepted iterate carries a
-    # surface the C++ rejudge can judge. The search runs over every
-    # accepted iterate, mirroring the native twin's ``endpoint_at`` —
-    # scipy's final ``x`` is not always the newest acceptance when a
-    # trailing line search rejected and handed back an earlier iterate.
     optimizer_x = np.asarray(result.x, dtype=np.float64)
-    endpoint_anchor = next(
-        (
-            candidate
-            for candidate in reversed(accepted)
-            if np.array_equal(candidate.coil_dofs, optimizer_x)
-        ),
-        None,
+    endpoint_anchor = candidates.committed
+    endpoint_is_optimizer_x = candidates.committed_matches(optimizer_x)
+    ftol_zero_stop = nested_ls_outer_ftol_zero_stop(
+        ftol=float(outer_policy.ftol),
+        message=str(result.message),
     )
-    endpoint_is_optimizer_x = endpoint_anchor is not None
-    if endpoint_anchor is None:
-        endpoint_anchor = accepted[-1]
     endpoint = np.array(endpoint_anchor.coil_dofs, dtype=np.float64, copy=True)
     endpoint_surface = endpoint_anchor.surface_dofs
     process_elapsed_seconds = float(time.perf_counter() - _T0)
     return {
-        "schema": JAX_CHILD_SCHEMA,
+        "schema": NESTED_LS_OUTER_JAX_CHILD_SCHEMA,
         "mode": "outer",
         "budget": int(budget),
         "maxcor": int(maxcor),
         # A fixed-budget run stops on maxiter, which scipy reports as
         # success=False, so the child's own flag is the usable-endpoint
         # predicate the driver gates on — the reported endpoint is the
-        # optimizer's own final iterate *and* an accepted one — exactly
-        # as the native twin publishes it. scipy's raw verdict lands in
-        # ``optimizer_success``.
-        "success": endpoint_is_optimizer_x,
+        # optimizer's own final iterate and the committed transaction point.
+        # An FTOL stop is never success under the sealed ftol=0 policy;
+        # scipy's raw verdict remains separately visible.
+        "success": nested_ls_outer_endpoint_success(
+            endpoint_matches=endpoint_is_optimizer_x,
+            ftol=float(outer_policy.ftol),
+            status=int(result.status),
+            message=str(result.message),
+        ),
         "optimizer_success": bool(result.success),
         "status": int(result.status),
         "message": str(result.message),
-        "nit": int(result.nit),
-        "nfev": int(result.nfev),
-        "njev": int(result.njev),
+        "ftol_zero_stop": ftol_zero_stop,
+        "nit": int(consumed_nit),
+        "nfev": int(total_nfev),
+        "njev": int(total_njev),
+        "restart_count": int(len(restart_nits) - 1),
+        "restart_nits": [int(value) for value in restart_nits],
+        "restart_attempts": restart_attempts,
         "result_fun": float(result.fun),
         "endpoint_is_optimizer_x": endpoint_is_optimizer_x,
         "optimizer_x": [float(value) for value in optimizer_x],
         "outer_policy": outer_policy.as_payload(),
         "iota_branch_guard": float(NESTED_LS_OUTER_IOTA_BRANCH_GUARD),
-        "accepted_evaluations": int(len(accepted)),
-        "rejected_evaluations": int(len(evals) - len(accepted)),
+        "feasible_evaluations": int(len(feasible)),
+        "rejected_evaluations": int(len(evals) - len(feasible)),
         # Charter Amendment 1 / start symmetry: this lane opens on the raw
         # un-nest archived lane surface, so its first outer evaluation pays
         # the inner convergence inside the timed wall, exactly as the
@@ -519,15 +621,26 @@ def _rejudge(*, endpoint_path: Path, budget: int, maxcor: int) -> dict[str, obje
         _native_ls_gradient_norms,
         load_archived_nested_ls_pair,
         nested_ls_runtime_identity,
+        sha256_file,
         sha256_float64,
     )
 
     record = _load_endpoint_record(endpoint_path)
+    source_child_payload_sha = sha256_file(endpoint_path)
     # The declared sha is the producer's own witness; the written array is
     # what this gate reconstructs from. Both must agree, and the reload
     # must reproduce the array, or the judge is not judging the endpoint.
     expected_coil_sha = sha256_float64(record.coil_dofs)
     expected_surface_sha = sha256_float64(record.surface_dofs)
+    declaration_mismatch = _endpoint_declaration_mismatch(
+        record,
+        expected_coil_sha256=expected_coil_sha,
+        expected_surface_sha256=expected_surface_sha,
+    )
+    if declaration_mismatch is not None:
+        raise SystemExit(
+            f"rejudge endpoint declaration failed closed: {declaration_mismatch}"
+        )
     native, jax_boozer, _target = load_archived_nested_ls_pair(
         coil_coordinates=record.coil_dofs,
         surface_coordinates=record.surface_dofs,
@@ -576,10 +689,8 @@ def _rejudge(*, endpoint_path: Path, budget: int, maxcor: int) -> dict[str, obje
         and grad_l2 <= grad_tol
     )
     reduced_grad_ok = bool(np.isfinite(reduced_grad_l2) and reduced_grad_l2 <= grad_tol)
-    if record.declared_surface_sha256 != expected_surface_sha:
-        reason: str | None = "endpoint_surface_declaration_mismatch"
-    elif reloaded_coil_sha != expected_coil_sha:
-        reason = "endpoint_coil_reload_mismatch"
+    if reloaded_coil_sha != expected_coil_sha:
+        reason: str | None = "endpoint_coil_reload_mismatch"
     elif reloaded_surface_sha != expected_surface_sha:
         reason = "endpoint_surface_reload_mismatch"
     elif not rejudge_success:
@@ -604,12 +715,15 @@ def _rejudge(*, endpoint_path: Path, budget: int, maxcor: int) -> dict[str, obje
         flush=True,
     )
     return {
+        "schema": NESTED_LS_OUTER_REJUDGE_SCHEMA,
         "mode": "rejudge",
         "judged_lane": record.lane,
         "judged_schema": record.schema,
         "budget": int(budget),
         "maxcor": int(maxcor),
-        "endpoint_json": str(endpoint_path),
+        "source_child_payload_sha256": source_child_payload_sha,
+        "source_child_schema": record.schema,
+        "declared_coil_sha256": record.declared_coil_sha256,
         "declared_surface_sha256": record.declared_surface_sha256,
         "endpoint_coil_sha256": expected_coil_sha,
         "endpoint_surface_sha256": expected_surface_sha,

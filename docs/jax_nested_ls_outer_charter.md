@@ -213,7 +213,7 @@ Not F3 7.70× and not a supersession of it; not exact (`r=0`) Boozer; no
 VMEC anywhere; no claim about formulations or hosts outside the two
 rungs; a bounded negative at B37 is a legitimate closure of this charter.
 
-## Amendment 4 (2026-08-24, pre-relaunch, after the pair-2 fault)
+## Amendment 5 (2026-08-24, pre-relaunch, after the pair-2 fault)
 
 The first B37 run died at ~6.2 h (erratum: first written as "9.6 h"
 here and in this amendment's commit message — the correct figure is the
@@ -240,6 +240,48 @@ relaunch, frozen before its first byte:
   lanes) are preserved as evidence of the trending verdict and of
   trajectory determinism, but are not receipt rows; the receipt is the
   rerun's own.
+
+## Amendment 6 (2026-08-24, post-B37 diagnosis, pre-fixed-lane rerun)
+
+The B37 failure reproduced at the same outer iterate and objective on
+two GPU models. A restart made no progress because all restart trials
+failed their nested inner solves. Inspection then separated two states
+that the prior implementation had conflated: an **inner-feasible trial**
+and a scipy-**accepted outer iterate**. The containment contract is now:
+
+- Evaluation zero commits immediately; scipy does not call its callback
+  for `x0`. Every later inner-feasible result is a pending candidate,
+  keyed by the exact float64 coil bytes. Only scipy's accepted-step
+  callback may commit it. Every trial evaluation restores the complete
+  incumbent surface, `(iota, G)`, coils, and telemetry before returning.
+- A restart starts from those committed coil bytes with fresh L-BFGS
+  memory. Restart remains recovery machinery, not the B37 root fix; the
+  tangent predictor is deferred to the successor campaign.
+- Rejected trials use one differentiable barrier in both lanes,
+  `J_a + 0.5 mu ||c-c_a||^2`, with derivative `mu(c-c_a)`. The prior
+  constant offset, linear distance, and anchor-gradient combination is
+  retired because its reported value and derivative were not one
+  coherent function and the offset could manufacture apparent FTOL
+  convergence.
+- Any scipy FTOL message when the sealed policy has `ftol=0`, and any
+  terminal abnormal line-search status, is child failure even when the
+  last committed incumbent remains physically valid.
+
+The child schemas advance and the parent claim schema is v2. Existing
+v1 B3/B37 receipts remain historical evidence but cannot authorize a v2
+B37 run; the fixed lane must re-establish B3 first. This amendment is a
+state-integrity correction, not a speed or endpoint-quality claim.
+
+The fixed-lane interlocks are source-bound and recomputed rather than
+label-trusted. The native OMP sweep is v2: it must come from the exact
+claim implementation, cover every frozen host OMP/repeat cell, and reproduce
+its declared minima and best thread count. B37 likewise accepts only a B3
+from that implementation and recomputes its per-pair physics, J-gap, wall
+aggregates, and speed verdict. Each timed child endpoint is bound to its
+untimed rejudge by the exact embedded child JSON bytes and their SHA-256,
+plus the coil and surface SHA-256 declarations. The claim validator reparses
+those bytes and derives every duplicated endpoint field from them; temporary
+endpoint paths are not published after the files are removed.
 
 ## Closure (2026-08-24): B37 bounded negative on recovered evidence
 
@@ -293,6 +335,12 @@ preceding amendment (branch `fix-b37-restart`, commit `01fefbadd`;
 adversarially reviewed; the 38→39→38 replay above is its full-scale
 execution proof). v1 evidence cannot authorize a v2 B37: the fixed lane
 re-establishes B3 first, and only a green transactional B3 admits a B37
-v2 attempt. Note for the merge: this branch's amendment shares the
-"Amendment 4" ordinal with the fault-rerun amendment committed earlier
-at `997bbacd5`; it renumbers to Amendment 5 when the branch lands.
+v2 attempt. Merge disposition (landed): three sections had claimed the
+"Amendment 4" ordinal — the Newton-budget prose correction (`e118fa813`,
+first claimant, keeps 4), the single-pair fault-rerun (`997bbacd5`,
+renumbered to **Amendment 5**; its three ordinal citations in
+`benchmarks/nested_ls_outer_claim.py` and the reduced-track receipt were
+updated in the same commit), and this branch's transactional containment
+(`01fefbadd`, landed as **Amendment 6**, immediately above). Ordinals are
+now unique and monotonic in document order; only the headings moved, no
+amendment prose was edited.
