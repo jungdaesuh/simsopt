@@ -113,6 +113,17 @@ NESTED_LS_COARSE_USES: Final[tuple[str, str, str]] = (
     NESTED_LS_COARSE_USE_LINE_SEARCH_VALUE,
 )
 
+# Predictor trust region (Phase 2 of the upgrade plan).
+#
+# DESC ``tr_ratio`` semantics: the bound SCALES the step, it does not reject
+# it. The reject-to-bare-anchor decision is a separate rule of ours
+# (:func:`nested_ls_predictor_arm`), because DESC has no equivalent.
+NESTED_LS_PREDICTOR_TRUST_REGION_RATIO: Final[float] = 0.1
+
+#: Which start an outer evaluation used.
+NESTED_LS_PREDICTOR_ARM_BARE: Final[str] = "bare_anchor"
+NESTED_LS_PREDICTOR_ARM_PREDICTED: Final[str] = "predicted"
+
 # Inner Δc sub-stepping (Phase 3 of the upgrade plan).
 #
 # The ladder of leg counts an inner solve may retry a failed displacement
@@ -512,6 +523,54 @@ def nested_ls_outer_attempt_fun_is_objective(
     ) == nested_ls_outer_parameter_bytes(last_evaluated_parameters)
 
 
+def nested_ls_predictor_trust_region(
+    *,
+    delta_surface: NDArray[np.float64],
+    anchor_surface_dofs: NDArray[np.float64],
+    ratio: float = NESTED_LS_PREDICTOR_TRUST_REGION_RATIO,
+) -> tuple[NDArray[np.float64], float, float, float, bool]:
+    """DESC ``tr_ratio``: scale the step to the bound, never reject it.
+
+    Returns ``(applied, raw_norm, applied_norm, cap, scaled)``. The bound is
+    ``ratio * ||s_anchor||_2``, and a step exactly at the bound is left
+    untouched -- strict ``>`` triggers scaling, so the boundary is inside
+    the region.
+
+    Scaling rather than rejecting is DESC's rule and is deliberately kept:
+    a predicted step that is too long is still pointing somewhere useful,
+    and clipping keeps its direction. Whether to fall back to the bare
+    anchor is a separate question this function does not answer.
+    """
+
+    delta = np.asarray(delta_surface, dtype=np.float64)
+    cap = float(ratio) * float(np.linalg.norm(anchor_surface_dofs))
+    raw_norm = float(np.linalg.norm(delta))
+    if raw_norm > cap:
+        applied = delta * (cap / raw_norm)
+        return applied, raw_norm, float(np.linalg.norm(applied)), cap, True
+    return np.array(delta, dtype=np.float64, copy=True), raw_norm, raw_norm, cap, False
+
+
+def nested_ls_predictor_arm(
+    *,
+    bare_gradient_l2: float,
+    predicted_gradient_l2: float,
+) -> str:
+    """Envelope-gradient fallback: bare anchor when the prediction is worse.
+
+    Ours, not DESC's. A tie keeps the prediction, and that tie-break is
+    load-bearing rather than arbitrary: at ``Δc = 0`` the predicted step is
+    zero, the two starts are the same vector, the two envelope gradients are
+    bitwise equal, and keeping the prediction makes a predictor-ON run
+    reproduce a predictor-OFF run exactly at an unmoved point. Preferring
+    the bare anchor on a tie would break that identity for no gain.
+    """
+
+    if float(predicted_gradient_l2) > float(bare_gradient_l2):
+        return NESTED_LS_PREDICTOR_ARM_BARE
+    return NESTED_LS_PREDICTOR_ARM_PREDICTED
+
+
 def nested_ls_coarse_tier_admits(
     *,
     achieved_residual_l2: float,
@@ -802,6 +861,9 @@ __all__ = [
     "NESTED_LS_OUTER_OMP_SWEEP_REPEATS",
     "NESTED_LS_OUTER_PUBLISHABLE_STOP_STATUSES",
     "NESTED_LS_PHYSICS_BAR",
+    "NESTED_LS_PREDICTOR_ARM_BARE",
+    "NESTED_LS_PREDICTOR_ARM_PREDICTED",
+    "NESTED_LS_PREDICTOR_TRUST_REGION_RATIO",
     "NESTED_LS_REDUCTION_MODE",
     "NESTED_LS_TIMING_BAR",
     "NESTED_LS_WEIGHT_INV_MODB",
@@ -823,4 +885,6 @@ __all__ = [
     "nested_ls_outer_restart_reason",
     "nested_ls_outer_fd0_step",
     "nested_ls_physics_newton_kwargs",
+    "nested_ls_predictor_arm",
+    "nested_ls_predictor_trust_region",
 ]

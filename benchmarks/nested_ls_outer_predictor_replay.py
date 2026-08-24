@@ -87,6 +87,9 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_NEWTON_MAXITER,
     NESTED_LS_NEWTON_TOL,
     NESTED_LS_OUTER_IOTA_BRANCH_GUARD,
+    NESTED_LS_PREDICTOR_TRUST_REGION_RATIO,
+    nested_ls_predictor_arm,
+    nested_ls_predictor_trust_region,
 )
 from simsopt_jax_adapters.geo.nested_ls_reduced import (
     _envelope_value_and_grad,
@@ -241,8 +244,10 @@ REGEN_ITERATION_COUNT = 9
 
 # --- Predictor policy (upgrade plan Phase 2). ------------------------------
 # DESC ``tr_ratio`` semantics: DESC SCALES the perturbation step to the
-# bound, it does not reject it.
-TRUST_REGION_RATIO = 0.1
+# bound, it does not reject it. Re-exported from the contract so this
+# harness and production cap by the same number, not by two numbers that
+# happen to match today.
+TRUST_REGION_RATIO = NESTED_LS_PREDICTOR_TRUST_REGION_RATIO
 
 # --- Tolerance-budget policy (upgrade plan Phase 4). -----------------------
 TOLERANCE_RUNGS = (1.0e-13, 1.0e-11, 1.0e-9, 1.0e-8, 1.0e-6)
@@ -317,34 +322,28 @@ def apply_trust_region(
     anchor_surface: NDArray[np.float64],
     ratio: float,
 ) -> tuple[NDArray[np.float64], float, float, float, bool]:
-    """DESC ``tr_ratio``: scale the step to the bound, never reject it.
+    """The contract's trust region, under this file's argument order.
 
-    Returns ``(applied, raw_norm, applied_norm, cap, scaled)``. The bound
-    is ``ratio * ||s_anchor||_2``, and a step exactly at the bound is left
-    untouched.
+    The rule itself lives in ``nested_ls_contract`` so the arithmetic this
+    harness MEASURED and the arithmetic production SHIPS are the same code.
+    Two implementations of a rule that a receipt quotes is exactly how a
+    measured number stops describing the shipped lane.
     """
 
-    cap = float(ratio) * float(np.linalg.norm(anchor_surface))
-    raw_norm = float(np.linalg.norm(delta))
-    if raw_norm > cap:
-        applied = np.asarray(delta, dtype=np.float64) * (cap / raw_norm)
-        return applied, raw_norm, float(np.linalg.norm(applied)), cap, True
-    applied = np.array(delta, dtype=np.float64, copy=True)
-    return applied, raw_norm, raw_norm, cap, False
+    return nested_ls_predictor_trust_region(
+        delta_surface=delta,
+        anchor_surface_dofs=anchor_surface,
+        ratio=ratio,
+    )
 
 
 def select_arm(bare_gradient_norm: float, predicted_gradient_norm: float) -> str:
-    """Envelope-gradient fallback: bare anchor when the prediction is worse.
+    """The contract's arm rule, under this file's argument order."""
 
-    Ours, not DESC's. A tie keeps the prediction, which is what makes the
-    ``delta_c = 0`` invariant hold: no coil motion gives ``delta_s = 0``,
-    the two starts are the same vector, the two norms are equal, and the
-    predicted arm reproduces the predictor-OFF result exactly.
-    """
-
-    if float(predicted_gradient_norm) > float(bare_gradient_norm):
-        return "bare_anchor"
-    return "predicted"
+    return nested_ls_predictor_arm(
+        bare_gradient_l2=bare_gradient_norm,
+        predicted_gradient_l2=predicted_gradient_norm,
+    )
 
 
 def classify_branch(iota: float) -> str:
