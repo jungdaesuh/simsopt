@@ -132,6 +132,14 @@ route.
 > `single-stage-boozer-vacuum-optimization` cannot be re-validated at
 > bounded scale at HEAD (the runner fails closed on its promoted scale tier;
 > see the pin note under Evidence provenance).
+>
+> Scope of this re-validation: endpoints and parity gates only. The GPU
+> column was re-executed for `stage-two-optimization-planar-coils` alone,
+> and the wall-time and memory tables were **not** re-measured — they
+> remain the authority run's one-shot launches. Coarse per-case durations
+> from the re-validation pass are consistent in magnitude with the
+> authority CPU wall times (no case shifted even 2x), but that is a sanity
+> observation under uncontrolled load, not a timing claim.
 
 ## Solver, iteration, evaluation, and status parity
 
