@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 import pickle
-from dataclasses import FrozenInstanceError, asdict, dataclass, fields
+from dataclasses import FrozenInstanceError, asdict, dataclass, fields, replace
 
 import jax
 import jax.numpy as jnp
@@ -131,7 +131,7 @@ class _GPMOCPUGrid:
         return None
 
 
-def _synthetic_grid(seed: int = 28) -> PermanentMagnetGridJAX:
+def _synthetic_cpu_grid(seed: int = 28) -> _CPUGrid:
     rng = np.random.default_rng(seed)
     ndipoles = 4
     nquad = 17
@@ -142,25 +142,27 @@ def _synthetic_grid(seed: int = 28) -> PermanentMagnetGridJAX:
     m0 = np.zeros(ndipoles * 3, dtype=np.float64)
     m_maxima = np.full(ndipoles, 0.55, dtype=np.float64)
     dipoles = np.ascontiguousarray(rng.standard_normal(size=(ndipoles, 3)))
-    return PermanentMagnetGridJAX.from_cpu(
-        _CPUGrid(
-            A_obj=A_obj,
-            b_obj=b_obj,
-            ATb=ATb,
-            ATA_scale=ATA_scale,
-            m0=m0,
-            m=m0,
-            m_proxy=m0,
-            m_maxima=m_maxima,
-            dipole_grid_xyz=dipoles,
-            coordinate_flag="cartesian",
-            R0=0.0,
-            plasma_boundary=_PlasmaBoundary(nfp=1, stellsym=False),
-            nphi=1,
-            ntheta=nquad,
-            ndipoles=ndipoles,
-        )
+    return _CPUGrid(
+        A_obj=A_obj,
+        b_obj=b_obj,
+        ATb=ATb,
+        ATA_scale=ATA_scale,
+        m0=m0,
+        m=m0,
+        m_proxy=m0,
+        m_maxima=m_maxima,
+        dipole_grid_xyz=dipoles,
+        coordinate_flag="cartesian",
+        R0=0.0,
+        plasma_boundary=_PlasmaBoundary(nfp=1, stellsym=False),
+        nphi=1,
+        ntheta=nquad,
+        ndipoles=ndipoles,
     )
+
+
+def _synthetic_grid(seed: int = 28) -> PermanentMagnetGridJAX:
+    return PermanentMagnetGridJAX.from_cpu(_synthetic_cpu_grid(seed))
 
 
 def _gpmo_cpu_grid(seed: int = 2801) -> _GPMOCPUGrid:
@@ -525,6 +527,43 @@ def test_relax_and_split_jax_rejects_oversized_alpha():
             nu=nu,
             reg_l2=reg_l2,
         )
+
+
+def test_relax_and_split_jax_staging_order_contract_single_shift():
+    """Stage the RAW grid; the host ``rescale_for_opt`` shift comes after.
+
+    ``rescale_for_opt`` folds ``2 reg_l2 + 1/nu`` into the host grid's
+    ``ATA_scale`` in place, and ``_mwpgp_spec`` applies that same shift itself
+    from the raw spectral scale.  Staged raw, an explicit alpha computed from
+    the post-rescale host scale is exactly the solver's default-step formula
+    on the same operands and passes validation; staged after the rescale, the
+    validator re-applies the shift and must refuse that same alpha (the
+    double-shift false reject adjudicated at P3.5 of the backlog plan and
+    reproduced at qa-64 scale in
+    ``docs/receipts/evidence/qa64_jaxgpu_solve_refusal_20260824.log``).
+    """
+    nu = 5.0
+    cpu = _synthetic_cpu_grid(seed=2030)
+    staged_raw = PermanentMagnetGridJAX.from_cpu(cpu)
+    # What rescale_for_opt does to the host grid with reg_l0=reg_l2=0.
+    shifted_scale = cpu.ATA_scale + (2.0 * 0.0 + 1.0 / nu)
+    alpha = 2.0 * (1.0 - 1.0e-5) / shifted_scale
+
+    result = relax_and_split_jax(staged_raw, alpha=alpha, max_iter=2, nu=nu)
+    assert np.isfinite(np.asarray(result.m)).all()
+
+    # The explicit alpha IS the solver's default-step formula on the same
+    # operands: same shift, same association, so bitwise-equal in fp64.
+    hessian_scale = np.asarray(staged_raw.ATA_scale) + (2.0 * 0.0 + 1.0 / nu)
+    assert alpha == float(2.0 * (1.0 - 1.0e-5) / hessian_scale)
+
+    # Buggy order: staging the already-shifted grid double-applies the shift
+    # and the validator refuses the very alpha it accepted above.
+    staged_shifted = PermanentMagnetGridJAX.from_cpu(
+        replace(cpu, ATA_scale=shifted_scale)
+    )
+    with pytest.raises(ValueError, match="contraction"):
+        relax_and_split_jax(staged_shifted, alpha=alpha, max_iter=2, nu=nu)
 
 
 def test_relax_and_split_jax_matches_cpp_mwpgp_oracle_one_convex_step():

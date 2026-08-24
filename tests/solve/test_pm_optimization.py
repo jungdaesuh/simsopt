@@ -1,4 +1,5 @@
 import dataclasses
+import math
 from pathlib import Path
 import unittest
 from unittest import mock
@@ -369,7 +370,7 @@ class TestGPMOArbVecBacktrackingPostFreezeSkip(unittest.TestCase):
             jnp.asarray(False),
         )
         connectivity = gpmo_connectivity_matrix(spec.dipole_grid_xyz)
-        cos_thresh_angle = jnp.cos(jnp.asarray(spec.thresh_angle, dtype=x0.dtype))
+        cos_thresh_angle = jnp.asarray(math.cos(spec.thresh_angle), dtype=x0.dtype)
 
         jaxpr = jax.make_jaxpr(
             lambda step_state: gpmo_arbvec_backtracking_step(

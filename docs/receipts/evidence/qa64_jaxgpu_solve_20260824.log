@@ -1,0 +1,11 @@
+/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/src/simsopt_jax/backend/runtime.py:954: RuntimeWarning: Backend mode 'jax_gpu_fast' selects CUDA execution, but XLA_FLAGS does not enable --xla_gpu_exclude_nondeterministic_ops=true. Set XLA_FLAGS before importing or touching JAX devices, because changing XLA flags after JAX backend initialization has no effect.
+  _raise_or_warn_runtime_issue(config, message)
+E0824 05:53:39.260103 1611979 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+E0824 05:53:39.272343 1611964 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/src/simsopt/geo/permanent_magnet_grid.py:360: UserWarning: Plasma boundary and inner and outer toroidal surfaces should all have the same "range" parameter in order for a permanent magnet grid to be correctly initialized.
+  warnings.warn(
+L2 regularization being used with coefficient = 0.00e+00
+wrote /home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/docs/receipts/evidence/qa64_jaxgpu_solve_20260824.json
+ledger docs/receipts/evidence/probe_leg_ledger.jsonl
+solve[0] cold_in_process 5.336872 s
+solve[1] repeat_retrace 4.930887 s

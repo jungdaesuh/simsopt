@@ -92,6 +92,23 @@ pre-freeze work, all instrument-side:
    disclosed deviation from P3.6's `_scale_configuration()` route, because a third scale value
    ripples through the whole parity harness.
 
+**Amendment (dated 2026-08-24, pre-freeze; basis:
+`docs/receipts/evidence/qa64_jaxgpu_solve_refusal_20260824.log`, sha256
+`de004deb63b3524b31739d35a8a86c685bef37eaa30549571b751df6a1e0cc73`, and the P3.5 adjudication in
+`docs/jax_gpu_examples_backlog_native_speed_implementation_plan.md`).** The instrument's
+`run_jax_relax_split` staging order is repaired — raw grid staged before the host
+`rescale_for_opt` shift, the P3.5 double-shift false reject — on operator instruction
+(2026-08-24), which lifts the "deliberately not hot-patched; owned by the QA charter" deferral
+the instrument's own 2026-08-23 docstring recorded (commit `8c25d4780`). The freeze rule's
+window has not opened: the charter is a draft, none of pre-freeze items 1–3 exist yet, and no
+campaign leg has run — the 2026-08-23/24 legs are all `grade: diagnostic-not-certifying` under
+§Motivation and mint nothing. Post-repair instrument content sha256:
+`5ef087a1555cae60b464bca55ab1c4252c313676d4ac112aebbb7d19b6703b0a` (re-pinned, as this rule requires, at freeze time
+against the committed instrument). The 2026-08-24 diagnostic legs that validated the repair ran
+against this edit while uncommitted and self-disclose it: their artifacts'
+`identity.git.status` records the dirty instrument — provenance working as designed, not
+evidence contamination, because nothing they produced is campaign evidence.
+
 ## Fair-native denominator
 
 Plan clause 3 (`…backlog…plan.md:199-207`;
@@ -281,6 +298,87 @@ were removed from the evidence tree. The working mechanism for any future replay
 into the child), verified after the fact by the artifact's identity block. Consequence unchanged:
 the exact-arithmetic predicate repair remains chartered (solver change → parity re-certification
 before any timing); this replay mints no `pm4stell` timing rung.
+
+**Repair — implemented and lane-parity re-certified (dated 2026-08-24, same day).** The adopted
+exact-arithmetic predicate is now in both lanes: at ``thresh_angle == pi`` (``cos_thresh_angle ==
+-1.0``, an equality-grade test) the dewyrming removal decision and partner selection use exact
+componentwise negation — first adjacent placed neighbor with ``x_cj == -x_j`` in all three
+components, FP equality so ``+-0.0`` compares equal — instead of the rounded 3-term dot
+(``src/simsoptpp/permanent_magnet_optimization.cpp`` sweep; ``src/simsopt_jax/core/pm_optimization.py::_gpmo_arbvec_remove_pairs``,
+gated at trace time off the static spec angle). First-qualifying-neighbor-wins is the exact
+limit of the strict-``<`` first-wins argmin the general-angle path keeps unchanged, and the
+integer predicate the plain ``GPMO_backtracking`` variant always used — the repair restores the
+family's own convention. Re-certification at the fork scale: a rebuilt native kernel **with FMA
+contraction left ON** (``-ffp-contract=fast``, sha ``95190afa…``) and the JAX GPU lane (RTX
+5090) produced **bitwise-identical `pm4stell-64` endpoints** at ``iterations=201``/history off —
+``np.array_equal`` true, 163 placed on both (`docs/receipts/evidence/pm4stell64_fork_k201_{native,jaxgpu}_predicate_20260824.npz`
++ paired JSONs/logs; identity blocks name the binaries). The bitwise cross-lane gate this
+section required is restored, build-scheme-independently. Both endpoints differ from both
+archived pre-repair dumps, as the exact semantics require: the exact predicate removes the 19
+exactly-antiparallel pairs (201 − 2·19 = 163) while the FP predicates also removed rounded
+near-ties (34 native-FMA / 31 uncontracted). Committed regression pins
+(`tests/jax/core/test_pm_optimization_jax_item25.py::TestGPMOArbVecBacktracking::test_thresh_pi_removal_is_exact_componentwise_negation`):
+exact pair removed, one-ULP-off pair kept (the pre-repair FP predicate removed it on every
+build), mixed ``+-0.0`` negation removed, general ``0.9 pi`` FP path unchanged with C++ oracle
+parity. Two review-hardening notes: every shipped caller of the JAX step — the jitted solve entry,
+the live-loop workflow (`src/simsopt_jax/core/pm_workflow.py`), and the step-level test
+harnesses — now derives BOTH the exact-mode gate and the general-angle threshold from the host
+libm cosine (``math.cos``), the same libm the C++ twin's ``std::cos`` uses, so one cosine
+implementation owns the branch decision and the FP threshold in both lanes and a
+device-rounded ``jnp.cos`` can no longer split them at a near-``pi`` angle (the audit caught
+the live-loop path still on ``jnp.cos`` and it was closed before landing; folding the
+derivation into the step itself — dropping the ``cos_thresh_angle`` parameter so an
+inconsistent pair is unrepresentable — is a named pre-freeze follow-up). Note the gate is
+``cos(thresh_angle) == -1.0``, not a literal ``pi`` comparison: it deliberately captures every
+angle whose cosine rounds to exactly ``-1.0`` (a ~1e-8 band around ``pi``), throughout which
+the FP test is equality-grade and the exact predicate is the correct semantics. And the exact
+predicate is precisely the moment-cancellation test (``m_j == -m_c``), which for
+the unit polarization vectors every in-repo builder produces coincides with antiparallelism —
+for hypothetical non-unit ``pol_vectors`` the old dot-threshold was already angle-incorrect in
+both directions, so no valid behavior is lost. Disclosures: (i) the shipped prebuilt ``build/cp311-cp311-linux_x86_64`` binary is NOT
+rebuilt by this repair — committed C++ source now leads it; the full suite (item25 66, item28
+51, mirror-parity muse/pm4stell, pm_optimization, pm_workflow_jax — all green 2026-08-24)
+remains valid against the old binary because no committed test constructs a reachable near-tie,
+and the one new assertion that forks (the one-ULP-off case) is deliberately JAX-only until a
+rebuild ships. The committed re-cert receipts pin the leg-time sources in their
+``identity.git.changed_file_sha256`` blocks; the post-leg C++ delta is a comment trim only,
+and this is sha-proven, not asserted — replacing the committed 5-line comment inside the
+``if (cos_thresh_angle == -1.0)`` body with the pre-trim block below reproduces the leg-time
+file byte-for-byte (``6fb2bba505a629a13eba6392b9899cc8106dbdada4cfdf8263a78080a5cb64d6``,
+independently re-derived by the review's auditor from a pre-trim diff artifact):
+
+```cpp
+                    // thresh_angle == pi: the removal test is equality-grade
+                    // (cos <= -1 can only mean exactly antiparallel), so it is
+                    // evaluated exactly -- componentwise negation, no dot
+                    // product -- because the rounded 3-term dot straddles -1.0
+                    // differently under FMA contraction than under plain
+                    // rounding, forking the removal set between builds of this
+                    // same file. First qualifying neighbor wins, matching the
+                    // exact-arithmetic limit of the strict-< argmin below and
+                    // the integer predicate GPMO_backtracking already uses.
+```
+
+(ii) the re-cert legs ran ``nice -n 19`` on a non-quiet box — admissible for
+bitwise endpoints, and **no timing rung is minted**: fair-timing legs remain chartered under
+this plan's frozen-instrument rules, now unblocked.
+
+**QA companion (same commit): the P3.5 instrument-side staging fix is applied** — on operator instruction (2026-08-24), lifting the deliberate 2026-08-23 deferral to the future QA charter (see the dated instrument amendment under §Preregistration discipline).
+``benchmarks/pm_gpmo_probes.py::run_jax_relax_split`` now stages the RAW grid before the host
+``rescale_for_opt`` shift (the ordering is the contract; docstring rewritten), so the explicit
+alpha — still derived exactly as the native lane derives its step — passes the ``_mwpgp_spec``
+validator it used to false-trip. The historically-refusing qa-64 jax-gpu solve leg now
+completes: rc=0, both continuation solves finite over all 29,286 dipoles
+(`docs/receipts/evidence/qa64_jaxgpu_solve_20260824.json` + `.log`, endpoint
+`qa64_rs_jaxgpu_20260824.npz`; diagnostic seconds 5.34 cold / 4.93 repeat_retrace — no
+denominator, no claim). Ordering-contract regression pinned at
+`tests/solve/test_permanent_magnet_optimization_jax_item28.py::test_relax_and_split_jax_staging_order_contract_single_shift`
+(fixed order accepted and equal to the default-step formula; buggy order refused with the
+archived operand signature). One transient during validation, disclosed: the first fixed-leg
+attempt crashed with an async ``CUDA_ERROR_ILLEGAL_ADDRESS`` at the post-solve sync right
+after the pm4stell GPU leg vacated the card; the clean-GPU retry ran green with zero CUDA
+errors, and the crash is recorded as environment-transient, not a defect of the fix (rerun on
+a quiet card before treating any recurrence as real).
 
 ## Provenance, ledger, quiet gates
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from typing import Callable
 
@@ -980,7 +981,10 @@ def pm_gpmo_arbvec_backtracking_live_loop_jax(
         pol_vectors=_as_runtime_array(spec.pol_vectors),
     )
     connectivity = gpmo_connectivity_matrix(scan_spec.dipole_grid_xyz)
-    cos_thresh_angle = jnp.cos(_runtime_init_scalar(spec.thresh_angle, A_arr.dtype))
+    # Host libm, matching gpmo_arbvec_backtracking_solve: one cosine
+    # implementation owns both the exact-pi gate (math.cos inside the step)
+    # and this FP-path threshold, in every caller.
+    cos_thresh_angle = _runtime_init_scalar(math.cos(spec.thresh_angle), A_arr.dtype)
     contributions = _gpmo_arbvec_contributions(A_arr, scan_spec.pol_vectors)
 
     def _active_step(

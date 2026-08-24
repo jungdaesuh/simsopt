@@ -1731,6 +1731,95 @@ class TestGPMOArbVecBacktracking:
         # Initial state should reflect the two seeded dipoles.
         assert int(result.initial_num_nonzero) == 2
 
+    def test_thresh_pi_removal_is_exact_componentwise_negation(self):
+        """At ``thresh_angle == pi`` dewyrming removes EXACT antiparallel pairs only.
+
+        ``cos(pi) == -1.0`` exactly, so the removal test is equality-grade and
+        is evaluated exactly (componentwise negation), never through the
+        rounded 3-term dot whose ``<= -1.0`` outcome forks between
+        FMA-contracted and plain-rounded builds of the C++ twin (the
+        pm4stell-64 133-vs-139 placed fork, adjudicated 2026-08-23 and
+        replay-confirmed 2026-08-24). Four behaviors pinned here:
+
+        1. an exactly antiparallel adjacent pair is removed (C++ oracle
+           agrees: its rounded dot of exact negations is exactly -1.0 here);
+        2. mixed ``+-0.0`` components still count as exact negation (FP
+           equality, not bitwise), C++ oracle compared;
+        3. a pair one ULP away from antiparallel is KEPT — its rounded dot,
+           -(1 + 2**-52), is <= -1.0, so the pre-repair FP predicate removed
+           it on every build; no C++ oracle comparison until the shipped
+           prebuilt kernel is rebuilt from the repaired source (native-lane
+           proof: docs/receipts/evidence/pm4stell64_*_predicate_20260824.*);
+        4. a general threshold (0.9 pi) keeps the FP-dot path: the exact pair
+           is still removed there, C++ oracle compared.
+        """
+
+        def _endpoints(d1_vec, thresh_angle):
+            N = 2
+            pol = np.zeros((N, 1, 3))
+            pol[0, 0] = [1.0, 0.0, 0.0]
+            pol[1, 0] = d1_vec
+            dipoles = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+            m_maxima = np.ones(N)
+            A_scaled = np.eye(6)
+            b = np.array([1.0, 0.0, 0.0, *d1_vec])
+            result = gpmo_arbvec_backtracking_solve(
+                GPMOArbVecBacktrackingSpec(
+                    m_maxima=jnp.asarray(m_maxima),
+                    reg_l2=jnp.asarray(0.0),
+                    dipole_grid_xyz=jnp.asarray(dipoles),
+                    pol_vectors=jnp.asarray(pol),
+                    Nadjacent=2,
+                    backtracking=1,
+                    thresh_angle=float(thresh_angle),
+                    max_nMagnets=2,
+                ),
+                jnp.asarray(A_scaled),
+                jnp.asarray(b),
+                K=2,
+            )
+            _, _, _, _, x_cpp = simsoptpp.GPMO_ArbVec_backtracking(
+                np.ascontiguousarray(A_scaled.T),
+                b,
+                np.zeros(6),
+                np.ones(6),
+                np.ascontiguousarray(pol),
+                K=2,
+                verbose=False,
+                nhistory=1,
+                backtracking=1,
+                dipole_grid_xyz=dipoles,
+                Nadjacent=2,
+                thresh_angle=float(thresh_angle),
+                max_nMagnets=2,
+                x_init=np.zeros((N, 3)),
+            )
+
+            def placed(x):
+                return int((np.abs(np.asarray(x)).sum(axis=1) > 0).sum())
+
+            return placed(result.x), placed(x_cpp)
+
+        pi = float(np.pi)
+
+        jax_placed, cpp_placed = _endpoints([-1.0, 0.0, 0.0], pi)
+        assert jax_placed == 0
+        assert cpp_placed == 0
+
+        # Docstring item 2: 0.0 == -0.0 under FP equality.
+        jax_placed, cpp_placed = _endpoints([-1.0, -0.0, 0.0], pi)
+        assert jax_placed == 0
+        assert cpp_placed == 0
+
+        # One ULP off antiparallel: kept under the exact predicate, removed
+        # by the pre-repair FP predicate (dot = -(1 + 2**-52) <= -1.0).
+        jax_placed, _ = _endpoints([-(1.0 + 2.0**-52), 0.0, 0.0], pi)
+        assert jax_placed == 2
+
+        jax_placed, cpp_placed = _endpoints([-1.0, 0.0, 0.0], 0.9 * pi)
+        assert jax_placed == 0
+        assert cpp_placed == 0
+
     def test_gpmo_arbvec_backtracking_jits_under_strict_transfer_guard(self):
         """Solver compiles and executes under strict device-to-host guard."""
 

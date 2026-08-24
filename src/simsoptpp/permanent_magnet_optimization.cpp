@@ -870,32 +870,53 @@ std::tuple<Array, Array, Array, Array, Array> GPMO_ArbVec_backtracking(
 
                 int m = x_vec[j];
 
-                // Loop over adjacent dipoles and check if a nearby one exceeds
-                // the maximum allowable angle difference
-                double min_cos_angle = 2.0; // initialize > max possible value
-                int cj_min;
-                for (int jj = 0; jj < Nadjacent; ++jj) {
-
-                    int cj = Connect(j, jj);
-
-                    // Skip if dipole has not been placed
-                    if (Gamma_complement(cj)) continue;
-
-                    // Evaluate angle between moments; save if greatest so far 
-                    double cos_angle = 0;
-                    for (int l = 0; l < 3; ++l) {
-                        cos_angle += x(j, l) * x(cj, l);
+                int cj_min = -1;
+                bool remove_pair;
+                if (cos_thresh_angle == -1.0) {
+                    // thresh_angle == pi is equality-grade, so the removal is
+                    // decided exactly (componentwise negation, first hit wins,
+                    // like GPMO_backtracking's integer test): the rounded
+                    // 3-term dot straddles -1.0 differently under FMA
+                    // contraction, forking the removal set between builds.
+                    remove_pair = false;
+                    for (int jj = 0; jj < Nadjacent; ++jj) {
+                        int cj = Connect(j, jj);
+                        if (Gamma_complement(cj)) continue;
+                        if ((x(j, 0) == -x(cj, 0)) && (x(j, 1) == -x(cj, 1))
+                                && (x(j, 2) == -x(cj, 2))) {
+                            cj_min = cj;
+                            remove_pair = true;
+                            break;
+                        }
                     }
-                    if (cos_angle < min_cos_angle) {
-                        min_cos_angle = cos_angle;
-                        cj_min = cj;
-                    }
+                } else {
+                    // Loop over adjacent dipoles and check if a nearby one exceeds
+                    // the maximum allowable angle difference
+                    double min_cos_angle = 2.0; // initialize > max possible value
+                    for (int jj = 0; jj < Nadjacent; ++jj) {
 
+                        int cj = Connect(j, jj);
+
+                        // Skip if dipole has not been placed
+                        if (Gamma_complement(cj)) continue;
+
+                        // Evaluate angle between moments; save if greatest so far
+                        double cos_angle = 0;
+                        for (int l = 0; l < 3; ++l) {
+                            cos_angle += x(j, l) * x(cj, l);
+                        }
+                        if (cos_angle < min_cos_angle) {
+                            min_cos_angle = cos_angle;
+                            cj_min = cj;
+                        }
+
+                    }
+                    remove_pair = (min_cos_angle <= cos_thresh_angle);
                 }
 
-                // If angle between dipole j and the nearby magnet with the 
+                // If angle between dipole j and the nearby magnet with the
                 // max angle difference the threshold, eliminate the pair
-                if (min_cos_angle <= cos_thresh_angle) {
+                if (remove_pair) {
 
                     int cm_min = x_vec[cj_min];
 
