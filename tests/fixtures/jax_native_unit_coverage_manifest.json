@@ -1,0 +1,1886 @@
+{
+  "baseline": {
+    "baseline_commit": "7781d707a51c6e83173a76bf80b2d51646d65fdc",
+    "baseline_commit_description": "Fork HEAD on branch pr/jax-port-squashed at which this slice was minted.",
+    "native_test_surface_rule": "Every path under tests/ in upstream_authority_commit whose basename matches test_*.py. Enumerated from git, not from a working-tree glob: the fork adds test_*.py files inside the native domain directories that no path pattern can separate from upstream files.",
+    "source_tree_hash": "sha256:07cd42c50ea9c1b684bf88ad66bdcf1a001705780978e2ebc70a0fba3b663d97",
+    "source_tree_hash_recipe": "sha256 over, for each enumerated native test file in ascending path order, the utf-8 encoding of '{path}\\n{sha256_hexdigest(working tree file bytes)}\\n'.",
+    "upstream_authority_commit": "377cf665158f47a9bed4a8b03a00352457ea27c8",
+    "upstream_authority_description": "merge base of this fork's HEAD with hiddenSymmetries/simsopt master; every file it lists is present in the working tree by construction"
+  },
+  "capabilities": [
+    {
+      "blocker": "",
+      "decision": {
+        "decided_by": "session orchestrator under the user's 2026-08-24 execute-all directive; named-maintainer countersignature pending",
+        "decided_on": "2026-08-24",
+        "proposed_by": "unit 1 slice (shared-implementation rule: a jax.numpy module imported directly by both lanes needs no duplicate port)",
+        "proposed_on": "2026-08-24"
+      },
+      "disposition": "shared_python",
+      "domain": "force",
+      "evidence": [
+        {
+          "anchor": "import jax.numpy as jnp",
+          "cite": "src/simsopt/field/selffield.py:18"
+        },
+        {
+          "anchor": "__all__ = ['B_regularized_pure', 'regularization_rect', 'regularization_circ']",
+          "cite": "src/simsopt/field/selffield.py:23"
+        },
+        {
+          "anchor": "from simsopt.field.selffield import B_regularized_pure",
+          "cite": "src/simsopt_jax_adapters/field/force.py:22"
+        }
+      ],
+      "id": "MF-1",
+      "jax_api": [
+        "src/simsopt/field/selffield.py",
+        "src/simsopt_jax_adapters/field/force.py"
+      ],
+      "native_test_files": [
+        "tests/field/test_selffieldforces.py"
+      ],
+      "native_test_ids": [
+        "tests/field/test_selffieldforces.py::SpecialFunctionsTests::test_k_square",
+        "tests/field/test_selffieldforces.py::SpecialFunctionsTests::test_delta_square",
+        "tests/field/test_selffieldforces.py::SpecialFunctionsTests::test_symmetry",
+        "tests/field/test_selffieldforces.py::SpecialFunctionsTests::test_limits",
+        "tests/field/test_selffieldforces.py::SpecialFunctionsTests::test_regularization_circ",
+        "tests/field/test_selffieldforces.py::SpecialFunctionsTests::test_regularization_rect"
+      ],
+      "observables": [
+        "value_or_residual",
+        "symmetry_periodicity_orientation"
+      ],
+      "reason": "The reduced self-field model (_rectangular_xsection_k/_delta, regularization_circ/rect, B_regularized_pure) has exactly one jax.numpy implementation, in simsopt.field.selffield, and the JAX force adapter imports B_regularized_pure from it rather than reimplementing it. The algebra is backend-independent Python exercised once by both lanes; a duplicate JAX port would create a second source of truth for the same formula. Every comparison in the bound tests uses a literal tolerance declared in test_force_parity.py itself (rtol=1e-10, rtol=1e-3, rtol=1e-6, rtol=1e-12), never src/simsopt_jax/parity_tolerances.py, so the tolerance owner is local, not central. test_regularizations_stay_traceable_under_jit_and_grad exercises jit and grad on these kernels but never vmap, so jit_vmap_autodiff_compatibility is not claimed as a covered observable here.",
+      "required_lanes": {
+        "jax_cpu": "passing",
+        "jax_gpu": "pending",
+        "native_cpu": "passing"
+      },
+      "test_ids": [
+        "tests/jax/native_unit_parity/test_force_parity.py::test_rectangular_xsection_k_matches_published_square_value",
+        "tests/jax/native_unit_parity/test_force_parity.py::test_rectangular_xsection_delta_matches_published_square_value",
+        "tests/jax/native_unit_parity/test_force_parity.py::test_rectangular_xsection_functions_are_symmetric_in_a_and_b",
+        "tests/jax/native_unit_parity/test_force_parity.py::test_rectangular_xsection_functions_match_thin_strip_limits",
+        "tests/jax/native_unit_parity/test_force_parity.py::test_regularization_circ_matches_closed_form_and_scales_quadratically",
+        "tests/jax/native_unit_parity/test_force_parity.py::test_regularization_rect_is_area_times_delta_and_symmetric",
+        "tests/jax/native_unit_parity/test_force_parity.py::test_regularizations_stay_traceable_under_jit_and_grad"
+      ],
+      "title": "Self-field reduced model kernels",
+      "tolerance_owner": "local_test_tolerances"
+    },
+    {
+      "blocker": "Adding a per-quadrature-point force/torque vector API to src/simsopt_jax_adapters/field/force.py is a production-surface change outside this wave's scope; it needs its own capability review.",
+      "disposition": "jax_missing",
+      "domain": "force",
+      "evidence": [
+        {
+          "anchor": "def B_regularized(self):",
+          "cite": "src/simsopt/field/coil.py:119-231"
+        },
+        {
+          "anchor": "\"curve_force_norms_pure\",",
+          "cite": "src/simsopt_jax_adapters/field/force.py:55-67"
+        }
+      ],
+      "id": "MF-2",
+      "jax_api": [
+        "src/simsopt_jax_adapters/field/force.py"
+      ],
+      "native_test_files": [
+        "tests/field/test_selffieldforces.py"
+      ],
+      "native_test_ids": [
+        "tests/field/test_selffieldforces.py::CoilForcesTest::test_net_force_and_torque",
+        "tests/field/test_selffieldforces.py::CoilForcesTest::test_regularized_coil_methods_comprehensive"
+      ],
+      "observables": [
+        "value_or_residual",
+        "shape_dtype_pytree"
+      ],
+      "reason": "Native RegularizedCoil exposes a coil-method layer returning force and torque VECTORS per quadrature point (B_regularized, self_force, force, torque, net_force, net_torque). The JAX adapter's public surface publishes magnitudes and integrated objectives only, so no JAX API returns the vector fields the native layer promises.",
+      "required_lanes": {
+        "jax_cpu": "pending",
+        "jax_gpu": "pending",
+        "native_cpu": "passing"
+      },
+      "test_ids": [],
+      "title": "RegularizedCoil force and torque vector methods",
+      "tolerance_owner": "not_applicable"
+    },
+    {
+      "blocker": "A JAX regularized-coil subclass would duplicate the native constructor; the adapter deliberately consumes native instances instead. Revisit only if a JAX example needs to build one.",
+      "disposition": "jax_missing",
+      "domain": "force",
+      "evidence": [
+        {
+          "anchor": "class CircularRegularizedCoil(RegularizedCoil):",
+          "cite": "src/simsopt/field/coil.py:253"
+        },
+        {
+          "anchor": "class RectangularRegularizedCoil(RegularizedCoil):",
+          "cite": "src/simsopt/field/coil.py:272"
+        },
+        {
+          "anchor": "self.regularizations = _as_jax_float64(",
+          "cite": "src/simsopt_jax_adapters/field/force.py:1379-1380"
+        },
+        {
+          "anchor": "self.regularizations = _as_jax_float64([c.regularization for c in target_coils])",
+          "cite": "src/simsopt_jax_adapters/field/force.py:2290"
+        }
+      ],
+      "id": "MF-3",
+      "jax_api": [
+        "src/simsopt_jax_adapters/field/force.py"
+      ],
+      "native_test_files": [
+        "tests/field/test_selffieldforces.py"
+      ],
+      "native_test_ids": [
+        "tests/field/test_selffieldforces.py::CoilForcesTest::test_circular_regularized_coil_subclass",
+        "tests/field/test_selffieldforces.py::CoilForcesTest::test_rectangular_regularized_coil_subclass"
+      ],
+      "observables": [
+        "value_or_residual",
+        "mutation_cache_state_tokens"
+      ],
+      "reason": "CircularRegularizedCoil and RectangularRegularizedCoil build the regularization from the cross-section dimensions. The JAX adapter has no subclass equivalent: it reads .regularization off native instances, so subclass construction and its dof plumbing remain native-owned behavior with no JAX counterpart.",
+      "required_lanes": {
+        "jax_cpu": "pending",
+        "jax_gpu": "pending",
+        "native_cpu": "passing"
+      },
+      "test_ids": [],
+      "title": "Circular and rectangular RegularizedCoil subclasses",
+      "tolerance_owner": "not_applicable"
+    },
+    {
+      "blocker": "Blocked by MF-2: the guarded methods do not exist on the JAX lane.",
+      "disposition": "jax_missing",
+      "domain": "force",
+      "evidence": [
+        {
+          "anchor": "def B_regularized(self):",
+          "cite": "src/simsopt/field/coil.py:119-231"
+        },
+        {
+          "anchor": "raise ValueError(\"B2Energy can only be used with RegularizedCoil objects\")",
+          "cite": "src/simsopt_jax_adapters/field/force.py:1375-1376"
+        },
+        {
+          "anchor": "\"LpCurveForce can only be used with RegularizedCoil objects\"",
+          "cite": "src/simsopt_jax_adapters/field/force.py:2286-2289"
+        }
+      ],
+      "id": "MF-4",
+      "jax_api": [
+        "src/simsopt_jax_adapters/field/force.py"
+      ],
+      "native_test_files": [
+        "tests/field/test_selffieldforces.py"
+      ],
+      "native_test_ids": [
+        "tests/field/test_selffieldforces.py::CoilForcesTest::test_coil_force_requires_regularized_coil",
+        "tests/field/test_selffieldforces.py::CoilForcesTest::test_regularized_coil_requirement"
+      ],
+      "observables": [
+        "exception_status_behavior"
+      ],
+      "reason": "The native AttributeError guard belongs to the MF-2 vector-method layer, which has no JAX counterpart, so the guard itself cannot be mirrored. The adapter's own ValueError analogue on the objective constructors IS mirrored, so the failure contract is covered everywhere a JAX API actually exists: test_self_field_objectives_require_regularized_coils exercises that substitute guard on jax_cpu (and would on jax_gpu once a CUDA lane runs). That passing run is evidence for the substitute ValueError contract, not for the missing native AttributeError guard itself, so both jax lanes on this row are recorded not_applicable rather than passing/pending.",
+      "required_lanes": {
+        "jax_cpu": "not_applicable",
+        "jax_gpu": "not_applicable",
+        "native_cpu": "passing"
+      },
+      "test_ids": [
+        "tests/jax/native_unit_parity/test_force_parity.py::test_self_field_objectives_require_regularized_coils"
+      ],
+      "title": "Regularization guard when force methods are called on a plain Coil",
+      "tolerance_owner": "not_applicable"
+    },
+    {
+      "blocker": "Per-component parity requires the MF-2 vector API.",
+      "disposition": "jax_partial",
+      "domain": "force",
+      "evidence": [
+        "tests/field/test_selffieldforces.py:482-510",
+        {
+          "anchor": "def curve_force_norms_pure(",
+          "cite": "src/simsopt_jax_adapters/field/force.py:2006"
+        }
+      ],
+      "id": "MF-5",
+      "jax_api": [
+        "src/simsopt_jax_adapters/field/force.py"
+      ],
+      "native_test_files": [
+        "tests/field/test_selffieldforces.py"
+      ],
+      "native_test_ids": [
+        "tests/field/test_selffieldforces.py::CoilForcesTest::test_hsx_coil"
+      ],
+      "observables": [
+        "value_or_residual"
+      ],
+      "reason": "The native test pins the x-component of the self-force vector against CoilForces.jl for circular and rectangular cross sections. The JAX lane exposes the force norm only, so the mirror compares curve_force_norms_pure against the native self-force magnitudes on the same HSX coil; the per-component benchmark stays native-only. The comparison uses a literal rtol=1e-12 declared in test_force_parity.py itself, not src/simsopt_jax/parity_tolerances.py, so the tolerance owner is local, not central.",
+      "required_lanes": {
+        "jax_cpu": "passing",
+        "jax_gpu": "pending",
+        "native_cpu": "passing"
+      },
+      "test_ids": [
+        "tests/jax/native_unit_parity/test_force_parity.py::test_jax_force_norms_on_hsx_coil_match_native_self_force"
+      ],
+      "title": "HSX coil-1 F_x component against the CoilForces.jl benchmark",
+      "tolerance_owner": "local_test_tolerances"
+    },
+    {
+      "blocker": "",
+      "decision": {
+        "decided_by": "session orchestrator under the user's 2026-08-24 execute-all directive; named-maintainer countersignature pending",
+        "decided_on": "2026-08-24",
+        "proposed_by": "unit 1 slice (performance-measurement-ownership rule: wall-clock timing and plotting sweeps belong to benchmarks/, not parity tests)",
+        "proposed_on": "2026-08-24"
+      },
+      "disposition": "native_only",
+      "domain": "force",
+      "evidence": [
+        "tests/field/test_selffieldforces.py:1154",
+        "tests/field/test_selffieldforces.py:1156"
+      ],
+      "id": "MF-6",
+      "jax_api": [],
+      "native_test_files": [
+        "tests/field/test_selffieldforces.py"
+      ],
+      "native_test_ids": [
+        "tests/field/test_selffieldforces.py::CoilForcesTest::test_objectives_time"
+      ],
+      "observables": [],
+      "reason": "test_objectives_time measures wall-clock time and draws a matplotlib figure. Performance measurement in this repository is owned by benchmarks/ under the measurement contract (matched inputs, warmup policy, synchronization, provenance); mirroring a bare timing loop into a parity test would mint an unprovenanced speed signal.",
+      "required_lanes": {
+        "jax_cpu": "not_applicable",
+        "jax_gpu": "not_applicable",
+        "native_cpu": "passing"
+      },
+      "test_ids": [],
+      "title": "Objective wall-clock timing and error-decay plotting sweep",
+      "tolerance_owner": "not_applicable"
+    },
+    {
+      "blocker": "Reproducing the full axis cross product would multiply mirror runtime; the axes are individually covered, the product is not.",
+      "disposition": "jax_partial",
+      "domain": "force",
+      "evidence": [
+        "tests/field/test_selffieldforces.py:1017",
+        "tests/field/test_selffieldforces.py:1033-1044",
+        {
+          "anchor": "LpCurveTorque ds=2 drifts ~9.3e-5 (a tight ~8% margin against its",
+          "cite": "tests/jax/native_unit_parity/test_force_parity.py:796"
+        }
+      ],
+      "id": "MF-7",
+      "jax_api": [
+        "src/simsopt_jax_adapters/field/force.py"
+      ],
+      "native_test_files": [
+        "tests/field/test_selffieldforces.py"
+      ],
+      "native_test_ids": [
+        "tests/field/test_selffieldforces.py::CoilForcesTest::test_Taylor",
+        "tests/field/test_selffieldforces.py::CoilForcesTest::test_lpcurveforces_taylor_test"
+      ],
+      "observables": [
+        "gradient_jacobian_vjp_hessian"
+      ],
+      "reason": "The native Taylor test sweeps use_jax_curve (jax_flag_list), nfp, threshold, downsample and both regularization types for every objective. The JAX mirror runs one configuration per objective and covers the remaining axes indirectly through value/gradient parity and the curve-subclass mirror, so the full cross product is not reproduced on the JAX lane. Only test_force_and_torque_objective_gradients_match_native draws its rtol from src/simsopt_jax/parity_tolerances.py (via _OBJECTIVE_GRADIENT_RTOL = parity_ladder_tolerances(\"derivative_heavy\")[\"first_derivative_rtol\"]); test_taylor_test_confirms_jax_objective_gradients and test_downsampled_objectives_track_full_resolution use literal tolerances declared in the test file. Since not all of this row's bound tests draw their tolerances from the central module, the owner is recorded local, not central.",
+      "required_lanes": {
+        "jax_cpu": "passing",
+        "jax_gpu": "pending",
+        "native_cpu": "passing"
+      },
+      "test_ids": [
+        "tests/jax/native_unit_parity/test_force_parity.py::test_taylor_test_confirms_jax_objective_gradients",
+        "tests/jax/native_unit_parity/test_force_parity.py::test_force_and_torque_objective_gradients_match_native",
+        "tests/jax/native_unit_parity/test_force_parity.py::test_downsampled_objectives_track_full_resolution"
+      ],
+      "title": "Taylor-test outer configuration sweep",
+      "tolerance_owner": "local_test_tolerances"
+    },
+    {
+      "blocker": "Strict JAX GPU pass on the 5090, deferred until the box frees.",
+      "disposition": "jax_partial",
+      "domain": "force",
+      "evidence": [
+        {
+          "anchor": "def curve_force_norms_pure(",
+          "cite": "src/simsopt_jax_adapters/field/force.py:2006"
+        },
+        {
+          "anchor": "\"curve_force_norms_pure\",",
+          "cite": "src/simsopt_jax_adapters/field/force.py:62"
+        },
+        {
+          "anchor": "ids=(\"cpu_parity\", \"gpu_parity\")",
+          "cite": "tests/conftest.py:512-514"
+        },
+        {
+          "anchor": "\"jax/native_unit_parity/test_force_parity.py\",",
+          "cite": "tests/conftest.py:596-598"
+        }
+      ],
+      "id": "MF-8",
+      "jax_api": [
+        "src/simsopt_jax_adapters/field/force.py"
+      ],
+      "native_test_files": [
+        "tests/field/test_selffieldforces.py"
+      ],
+      "native_test_ids": [
+        "tests/field/test_selffieldforces.py::CoilForcesTest::test_circular_coil",
+        "tests/field/test_selffieldforces.py::CoilForcesTest::test_force_convergence"
+      ],
+      "observables": [
+        "value_or_residual",
+        "shape_dtype_pytree",
+        "device_placement_and_transfer"
+      ],
+      "reason": "curve_force_norms_pure has no native counterpart: it is the JAX lane's public force-magnitude kernel. It is validated on CPU by analytic hoop force, quadrature-resolution convergence, native self_force with mutual sources, native-shape/finiteness, and a Stage-II diagnostics LP-force reconstruction, which is jax_equivalent evidence on the native-CPU and JAX-CPU lanes; every one of these comparisons uses a literal tolerance declared in its own test file (e.g. rtol=1e-10, an absolute reference_budget, rtol=1e-8, rtol=1e-12), never src/simsopt_jax/parity_tolerances.py, so the tolerance owner is local, not central. Three of these tests (the two bound above plus test_regularized_coil_force_quantities_have_native_shapes_and_are_finite) live in tests/jax/native_unit_parity/test_force_parity.py, which every test in the file runs under the parity_lane fixture (conftest.py:512-514, params cpu/gpu) and would exercise its GPU case automatically once CUDA is present -- under the DEFAULT backend mode, not strict SIMSOPT_BACKEND_MODE=jax_gpu_parity, which classifies this file adapter_boundary (conftest.py:596-598) and skips it entirely. The remaining two tests (test_public_force_norms_reconstruct_lp_force_objective and test_force_stage_two_diagnostics_slice_on_device_under_transfer_guard) live in tests/jax/objectives/test_force_stage_two.py, which is NOT parity_lane-parametrized and so has no GPU lane at all, strict or otherwise. The 5090 box is fenced by the concurrent nested-LS B37 campaign, so this wave validated CPU only; under the contract's strict definition of jax_equivalent (native CPU + JAX CPU + strict JAX GPU evidence) the row stays jax_partial until a CUDA-present run lands via that gpu_parity route.",
+      "required_lanes": {
+        "jax_cpu": "passing",
+        "jax_gpu": "pending",
+        "native_cpu": "passing"
+      },
+      "test_ids": [
+        "tests/jax/native_unit_parity/test_force_parity.py::test_jax_self_force_on_circular_coil_matches_analytic_hoop_force",
+        "tests/jax/native_unit_parity/test_force_parity.py::test_jax_force_norms_converge_with_quadrature_resolution",
+        "tests/jax/native_unit_parity/test_force_parity.py::test_jax_force_norms_match_native_coil_force_with_mutual_sources",
+        "tests/jax/native_unit_parity/test_force_parity.py::test_regularized_coil_force_quantities_have_native_shapes_and_are_finite",
+        "tests/jax/objectives/test_force_stage_two.py::test_public_force_norms_reconstruct_lp_force_objective",
+        "tests/jax/objectives/test_force_stage_two.py::test_force_stage_two_diagnostics_slice_on_device_under_transfer_guard"
+      ],
+      "title": "curve_force_norms_pure, a JAX-only public export",
+      "tolerance_owner": "local_test_tolerances"
+    },
+    {
+      "blocker": "Wiring the Frenet branch into the strain example is a production change to src/simsopt_jax, outside this wave's non-goals.",
+      "disposition": "jax_partial",
+      "domain": "strain",
+      "evidence": [
+        {
+          "anchor": "_tangent, _normal, binormal = rotated_centroid_frame(",
+          "cite": "src/simsopt_jax/examples/strain_optimization.py:101"
+        },
+        {
+          "anchor": "def rotated_frenet_frame(",
+          "cite": "src/simsopt_jax/core/framedcurve.py:174"
+        },
+        {
+          "anchor": "if spec.frame_kind == \"frenet\":",
+          "cite": "src/simsopt_jax/core/finitebuild.py:101"
+        }
+      ],
+      "id": "ST-1",
+      "jax_api": [
+        "src/simsopt_jax/examples/strain_optimization.py",
+        "src/simsopt_jax/core/framedcurve.py"
+      ],
+      "native_test_files": [
+        "tests/geo/test_strainopt.py"
+      ],
+      "native_test_ids": [
+        "tests/geo/test_strainopt.py::CoilStrainTesting::test_torsion",
+        "tests/geo/test_strainopt.py::CoilStrainTesting::test_binormal_curvature"
+      ],
+      "observables": [
+        "value_or_residual",
+        "symmetry_periodicity_orientation"
+      ],
+      "reason": "The JAX strain-optimization example evaluates the centroid frame only. The rotated-Frenet kernel exists in simsopt_jax and is wired for finite-build and framed-curve consumers, but the strain example never selects it, so the native FrameRotation='frenet' strain branch has no JAX-side evaluation path. test_strain_optimization_vanishes_matches_native_centroid_frame also drives the vanishing-strain claim through zero-threshold LPTorsionalStrainPenalty/LPBinormalCurvatureStrainPenalty oracles (threshold=0), not native's own test_torsion/test_binormal_curvature defaults (threshold=1e-8 and threshold=1e-4 respectively); every literal tolerance in that test (1e-12, 1e-9) is declared in the test file, not src/simsopt_jax/parity_tolerances.py, so the tolerance owner is local, not central.",
+      "required_lanes": {
+        "jax_cpu": "passing",
+        "jax_gpu": "pending",
+        "native_cpu": "passing"
+      },
+      "test_ids": [
+        "tests/jax/native_unit_parity/test_strain_parity.py::test_strain_optimization_vanishes_matches_native_centroid_frame"
+      ],
+      "title": "Frenet-frame branch of the strain objective",
+      "tolerance_owner": "local_test_tolerances"
+    },
+    {
+      "blocker": "Extending the JAX program to differentiate the curve DOFs is a production change to src/simsopt_jax, outside this wave.",
+      "disposition": "jax_missing",
+      "domain": "strain",
+      "evidence": [
+        {
+          "anchor": "jax.value_and_grad(_strain_objective, argnums=4)",
+          "cite": "src/simsopt_jax/examples/strain_optimization.py:160-168"
+        },
+        {
+          "anchor": "dgammadash_by_dcoeff_vjp(grad1)",
+          "cite": "src/simsopt/geo/strain_optimization.py:61-62"
+        }
+      ],
+      "id": "ST-2",
+      "jax_api": [
+        "src/simsopt_jax/examples/strain_optimization.py"
+      ],
+      "native_test_files": [
+        "tests/geo/test_strainopt.py"
+      ],
+      "native_test_ids": [
+        "tests/geo/test_strainopt.py::CoilStrainTesting::test_strain_opt"
+      ],
+      "observables": [
+        "gradient_jacobian_vjp_hessian"
+      ],
+      "reason": "The JAX strain program differentiates with respect to the rotation DOFs only (value_and_grad argnums=4). Native LPBinormalCurvatureStrainPenalty.dJ also contributes the curve-shape term through dgammadash_by_dcoeff_vjp, so the curve-DOF half of the native gradient has no JAX equivalent.",
+      "required_lanes": {
+        "jax_cpu": "pending",
+        "jax_gpu": "pending",
+        "native_cpu": "passing"
+      },
+      "test_ids": [],
+      "title": "Curve-shape-DOF gradients of the strain penalties",
+      "tolerance_owner": "not_applicable"
+    },
+    {
+      "blocker": "A general-p JAX penalty is a production change, outside this wave.",
+      "disposition": "jax_partial",
+      "domain": "strain",
+      "evidence": [
+        {
+          "anchor": "def _strain_objective(",
+          "cite": "src/simsopt_jax/examples/strain_optimization.py:128-157"
+        },
+        {
+          "anchor": "def Lp_torsion_pure(torsion, gammadash, p, threshold):",
+          "cite": "src/simsopt/geo/curveobjectives.py:137-154"
+        }
+      ],
+      "id": "ST-3",
+      "jax_api": [
+        "src/simsopt_jax/examples/strain_optimization.py"
+      ],
+      "native_test_files": [
+        "tests/geo/test_strainopt.py"
+      ],
+      "native_test_ids": [
+        "tests/geo/test_strainopt.py::CoilStrainTesting::test_torsion",
+        "tests/geo/test_strainopt.py::CoilStrainTesting::test_binormal_curvature"
+      ],
+      "observables": [
+        "value_or_residual",
+        "batching_broadcasting_edge_cases"
+      ],
+      "reason": "The JAX side ships one fused combined objective with the p=2 excess-squared form hard-wired. Native exposes a general Lp penalty per strain component for arbitrary p, so the JAX lane covers the shipped configuration but not the general exponent. Both bound tests Taylor-check the gradient of the RAW summed strain (torsional_strain/binormal_curvature_strain), not native's LP-thresholded penalties (LPTorsionalStrainPenalty threshold=1e-8, LPBinormalCurvatureStrainPenalty threshold=1e-4); that thresholded-gradient path has no JAX mirror. The value comparison draws rtol/atol from src/simsopt_jax/parity_tolerances.py's direct_kernel lane, but the gradient checks use a fixed local floor (1e-12 for torsion) or a locally-declared shrink factor (0.3 for binormal curvature) that is never drawn from the central module, so since not all of this row's tolerances are central, the owner is recorded local.",
+      "required_lanes": {
+        "jax_cpu": "passing",
+        "jax_gpu": "pending",
+        "native_cpu": "passing"
+      },
+      "test_ids": [
+        "tests/jax/native_unit_parity/test_strain_parity.py::test_torsional_strain_matches_native_and_gradient_taylor_checks",
+        "tests/jax/native_unit_parity/test_strain_parity.py::test_binormal_curvature_strain_matches_native_and_gradient_taylor_checks"
+      ],
+      "title": "General per-component Lp strain penalty for arbitrary p",
+      "tolerance_owner": "local_test_tolerances"
+    },
+    {
+      "blocker": "Named-DOF plumbing belongs to the Optimizable layer, which the JAX kernels deliberately do not own; the mirror pins the flat-vector round trip instead.",
+      "disposition": "jax_missing",
+      "domain": "curves",
+      "evidence": [
+        "tests/geo/test_curve.py:995-1019",
+        "tests/geo/test_curve_helical.py:7-30",
+        {
+          "anchor": "def curverzfourier_pure(dofs, quadpoints, order, nfp, stellsym):",
+          "cite": "src/simsopt_jax/core/curve_rz_fourier.py:14-20"
+        }
+      ],
+      "id": "CV-1",
+      "jax_api": [
+        "src/simsopt_jax/core/curve_rz_fourier.py",
+        "src/simsopt_jax/core/curve_helical.py"
+      ],
+      "native_test_files": [
+        "tests/geo/test_curve.py",
+        "tests/geo/test_curve_helical.py"
+      ],
+      "native_test_ids": [
+        "tests/geo/test_curve.py::Testing::test_curverzfourier_dofnames",
+        "tests/geo/test_curve_helical.py::Tests::test_dof_names"
+      ],
+      "observables": [
+        "mutation_cache_state_tokens",
+        "shape_dtype_pytree"
+      ],
+      "reason": "Native CurveRZFourier and CurveHelical expose named DOF access (.rc/.rs/.zc/.zs arrays, set('rc(i)'), get('A_0')) backed by local_dof_names. The JAX curve kernels take a flat dofs vector with positional slicing and publish no name-to-index mapping, so the named-accessor contract has no JAX counterpart. The bound tests' geometry comparisons (via _assert_spec_geometry_matches_native) use module-local constants (_GAMMA_RTOL=1e-10, _DERIV_RTOL=1e-9) declared in test_curve_subclasses_parity.py itself; that file never imports src/simsopt_jax/parity_tolerances.py, so the tolerance owner is local, not not_applicable -- a real numeric comparison is made, it is just not centrally owned.",
+      "required_lanes": {
+        "jax_cpu": "pending",
+        "jax_gpu": "pending",
+        "native_cpu": "passing"
+      },
+      "test_ids": [
+        "tests/jax/native_unit_parity/test_curve_subclasses_parity.py::test_curve_rzfourier_dof_round_trip_matches_native",
+        "tests/jax/native_unit_parity/test_curve_subclasses_parity.py::test_curve_helical_dof_round_trip_matches_native"
+      ],
+      "title": "Named Fourier coefficient accessors on curve subclasses",
+      "tolerance_owner": "local_test_tolerances"
+    },
+    {
+      "blocker": "Deciding which degenerate-quaternion convention is correct is a numerics ruling, not a test gap; recorded here so the divergence is visible rather than discovered by a future caller.",
+      "disposition": "jax_partial",
+      "domain": "curves",
+      "evidence": [
+        {
+          "anchor": "q / (norm_q + 1e-8)",
+          "cite": "src/simsopt/geo/curveplanarfourier.py:116-119"
+        },
+        {
+          "anchor": "jnp.where(norm_sq > zero, normalized, zero_quaternion)",
+          "cite": "src/simsopt_jax/core/curve_planar_fourier.py:14-21"
+        }
+      ],
+      "id": "CV-2",
+      "jax_api": [
+        "src/simsopt_jax/core/curve_planar_fourier.py"
+      ],
+      "native_test_files": [
+        "tests/geo/test_curve.py"
+      ],
+      "native_test_ids": [
+        "tests/geo/test_curve.py::Testing::test_curve_centroid"
+      ],
+      "observables": [
+        "value_or_residual",
+        "batching_broadcasting_edge_cases"
+      ],
+      "reason": "Native regularizes a degenerate quaternion as q/(norm+1e-8), which keeps the direction; the JAX kernel returns the zero quaternion instead. The two lanes therefore diverge behaviorally in a non-physical degenerate case that neither test suite currently pins. Ordinary (normalized) quaternions agree.",
+      "required_lanes": {
+        "jax_cpu": "passing",
+        "jax_gpu": "pending",
+        "native_cpu": "passing"
+      },
+      "test_ids": [
+        "tests/jax/native_unit_parity/test_curve_subclasses_parity.py::test_curve_planarfourier_pure_kernel_matches_native_position",
+        "tests/jax/native_unit_parity/test_curve_subclasses_parity.py::test_curve_planarfourier_position_and_derivatives_match_native"
+      ],
+      "title": "CurvePlanarFourier near-zero-quaternion regularization",
+      "tolerance_owner": "local_test_tolerances"
+    },
+    {
+      "blocker": "Representing RotatedCurve as a CurveSpec would duplicate placement knowledge that CoilSymmetrySpec already owns.",
+      "disposition": "jax_missing",
+      "domain": "curves",
+      "evidence": [
+        {
+          "anchor": "rotation/reflection placement is a wrapper transform with no owned DOFs.",
+          "cite": "src/simsopt_jax/core/curve_geometry.py:196-214"
+        }
+      ],
+      "id": "CV-3",
+      "jax_api": [
+        "src/simsopt_jax/core/curve_geometry.py"
+      ],
+      "native_test_files": [
+        "tests/geo/test_curve.py"
+      ],
+      "native_test_ids": [
+        "tests/geo/test_curve.py::Testing::test_rotated_curve_gamma_impl",
+        "tests/geo/test_curve.py::Testing::test_curve_centroid"
+      ],
+      "observables": [
+        "symmetry_periodicity_orientation",
+        "exception_status_behavior"
+      ],
+      "reason": "curve_spec_from_curve refuses RotatedCurve by design and says so in its own docstring: rotation/reflection placement is a wrapper transform with no owned DOFs, routed through CoilSymmetrySpec instead. Standalone rotated-curve geometry stays a documented CPU-only wrapper, so there is no JAX spec to mirror.",
+      "required_lanes": {
+        "jax_cpu": "not_applicable",
+        "jax_gpu": "not_applicable",
+        "native_cpu": "passing"
+      },
+      "test_ids": [],
+      "title": "RotatedCurve wrapping a direct curve subclass",
+      "tolerance_owner": "not_applicable"
+    },
+    {
+      "blocker": "Immutability is the reformulation's design premise; adding mutation would break the fingerprint contract the stochastic lane relies on.",
+      "disposition": "jax_missing",
+      "domain": "curveperturbed",
+      "evidence": [
+        {
+          "anchor": "class StochasticPerturbationBundle:",
+          "cite": "src/simsopt_jax/examples/stochastic_samples.py:35-91"
+        }
+      ],
+      "id": "CP-1",
+      "jax_api": [
+        "src/simsopt_jax/examples/stochastic_samples.py"
+      ],
+      "native_test_files": [
+        "tests/geo/test_curveperturbed.py"
+      ],
+      "native_test_ids": [
+        "tests/geo/test_curveperturbed.py::CurvePerturbationTesting::test_perturbed_objective_distance"
+      ],
+      "observables": [
+        "mutation_cache_state_tokens",
+        "deterministic_seeded_behavior"
+      ],
+      "reason": "Native CurvePerturbed.resample redraws the perturbation in place and invalidates caches. The JAX reformulation materializes samples into a frozen dataclass whose fields are set once in __post_init__ and fingerprinted, so in-place redraw is structurally impossible by design; a new draw means a new bundle.",
+      "required_lanes": {
+        "jax_cpu": "not_applicable",
+        "jax_gpu": "not_applicable",
+        "native_cpu": "passing"
+      },
+      "test_ids": [],
+      "title": "CurvePerturbed.resample in-place redraw",
+      "tolerance_owner": "not_applicable"
+    },
+    {
+      "blocker": "Serialization formats are an explicit non-goal of the coverage contract; the fingerprint is the JAX-side identity contract.",
+      "disposition": "jax_missing",
+      "domain": "curveperturbed",
+      "evidence": [
+        {
+          "anchor": "def _fingerprint(self) -> str:",
+          "cite": "src/simsopt_jax/examples/stochastic_samples.py:98"
+        }
+      ],
+      "id": "CP-2",
+      "jax_api": [
+        "src/simsopt_jax/examples/stochastic_samples.py"
+      ],
+      "native_test_files": [
+        "tests/geo/test_curveperturbed.py"
+      ],
+      "native_test_ids": [
+        "tests/geo/test_curveperturbed.py::CurvePerturbationTesting::test_serialization"
+      ],
+      "observables": [
+        "mutation_cache_state_tokens",
+        "shape_dtype_pytree"
+      ],
+      "reason": "The native test round-trips a CurvePerturbed through the GSON object graph. The JAX bundle carries plain FP64 tensor data plus a SHA-256 fingerprint and is not GSONable, so there is no equivalent graph round trip; identity is proven by the fingerprint instead.",
+      "required_lanes": {
+        "jax_cpu": "not_applicable",
+        "jax_gpu": "not_applicable",
+        "native_cpu": "passing"
+      },
+      "test_ids": [
+        "tests/jax/examples/test_stochastic_samples.py::test_materialized_sample_hash_binds_values_and_metadata"
+      ],
+      "title": "CurvePerturbed GSON serialization round trip",
+      "tolerance_owner": "not_applicable"
+    },
+    {
+      "blocker": "Widening StochasticCoilPerturbations to carry d2/d3 is a production change with a real memory cost; no JAX example needs it today.",
+      "disposition": "jax_missing",
+      "domain": "curveperturbed",
+      "evidence": [
+        {
+          "anchor": "class StochasticCoilPerturbations",
+          "cite": "src/simsopt_jax/objectives/stochastic_stage_two.py:16-35"
+        },
+        {
+          "anchor": "def Lp_torsion_pure(torsion, gammadash, p, threshold):",
+          "cite": "src/simsopt/geo/curveobjectives.py:137-154"
+        }
+      ],
+      "id": "CP-3",
+      "jax_api": [
+        "src/simsopt_jax/objectives/stochastic_stage_two.py"
+      ],
+      "native_test_files": [
+        "tests/geo/test_curveperturbed.py"
+      ],
+      "native_test_ids": [
+        "tests/geo/test_curveperturbed.py::CurvePerturbationTesting::test_perturbed_objective_torsion"
+      ],
+      "observables": [
+        "value_or_residual",
+        "gradient_jacobian_vjp_hessian"
+      ],
+      "reason": "torsion_pure needs the first three curve derivatives. The JAX perturbation bundle carries gamma and gammadash only, so a torsion objective cannot be evaluated through it without extending the bundle to second and third derivatives.",
+      "required_lanes": {
+        "jax_cpu": "pending",
+        "jax_gpu": "pending",
+        "native_cpu": "passing"
+      },
+      "test_ids": [],
+      "title": "LpCurveTorsion evaluated through perturbed curves",
+      "tolerance_owner": "not_applicable"
+    },
+    {
+      "blocker": "No GPU lane exists for tests/jax/examples/test_stochastic_samples.py; adding parity_lane parametrization is a filed follow-up.",
+      "disposition": "jax_partial",
+      "domain": "curveperturbed",
+      "evidence": [
+        {
+          "anchor": "def test_perturbed_curve_distance_objective_matches_native_through_bundle",
+          "cite": "tests/jax/examples/test_stochastic_samples.py:315"
+        },
+        {
+          "anchor": "Measured relative error 5.7e-16 (pure recombination of the same terms",
+          "cite": "tests/jax/examples/test_stochastic_samples.py:379-381"
+        },
+        {
+          "anchor": "def curve_curve_distance_penalty_pure(",
+          "cite": "src/simsopt_jax/core/curve_kernels.py:65"
+        }
+      ],
+      "id": "CP-4",
+      "jax_api": [
+        "src/simsopt_jax/core/curve_kernels.py",
+        "src/simsopt_jax/examples/stochastic_samples.py"
+      ],
+      "native_test_files": [
+        "tests/geo/test_curveperturbed.py"
+      ],
+      "native_test_ids": [
+        "tests/geo/test_curveperturbed.py::CurvePerturbationTesting::test_perturbed_objective_distance",
+        "tests/geo/test_curveperturbed.py::CurvePerturbationTesting::test_perturbed_gammadash",
+        "tests/geo/test_curveperturbed.py::CurvePerturbationTesting::test_perturbed_periodic"
+      ],
+      "observables": [
+        "value_or_residual",
+        "deterministic_seeded_behavior"
+      ],
+      "reason": "The distance objective evaluated on the materialized bundle matches the native CurveCurveDistance through nested CurvePerturbed wrappers to 5.7e-16 relative, which is jax_equivalent evidence on the native-CPU and JAX-CPU lanes. The stochastic sample tests are not parity_lane-parametrized, so there is no GPU lane at all here; the row stays jax_partial under the contract's strict definition. Native's own test_perturbed_objective_distance also Taylor-tests the objective's derivative (dJ = J.dJ(), shrinking finite-difference steps); test_perturbed_curve_distance_objective_matches_native_through_bundle reproduces only the scalar J() value, because the materialized bundle exposes no curve-DOF gradient graph to Taylor-test dJ() against, so that thresholded-gradient path is uncovered here too.",
+      "required_lanes": {
+        "jax_cpu": "passing",
+        "jax_gpu": "pending",
+        "native_cpu": "passing"
+      },
+      "test_ids": [
+        "tests/jax/examples/test_stochastic_samples.py::test_perturbed_curve_distance_objective_matches_native_through_bundle",
+        "tests/jax/examples/test_stochastic_samples.py::test_materialized_samples_reproduce_native_perturbed_coil_geometry",
+        "tests/jax/examples/test_stochastic_samples.py::test_materialized_gammadash_matches_finite_difference_of_gamma",
+        "tests/jax/examples/test_stochastic_samples.py::test_materialized_samples_preserve_periodicity_of_perturbation"
+      ],
+      "title": "Curve-curve distance objective through perturbed curves",
+      "tolerance_owner": "local_test_tolerances"
+    },
+    {
+      "blocker": "",
+      "decision": {
+        "decided_by": "session orchestrator under the user's 2026-08-24 execute-all directive; named-maintainer countersignature pending",
+        "decided_on": "2026-08-24",
+        "proposed_by": "2026-08-23 mirror-wave plan (formerly docs/jax_native_test_mirror_wave_implementation_plan.md, commit 2221b542a; removed by the 2026-08-24 docs curation), unit 6",
+        "proposed_on": "2026-08-23"
+      },
+      "disposition": "hybrid_boundary",
+      "domain": "ports",
+      "evidence": [
+        {
+          "anchor": "def _ports_on_surface(surface):",
+          "cite": "examples/jax/parity/cases/native_wireframe_rcls_with_ports.py:41-110"
+        },
+        {
+          "anchor": "free_segs_host = np.asarray(wframe.unconstrained_segments(), dtype=np.intp)",
+          "cite": "src/simsopt_jax_adapters/solve/wireframe.py:314"
+        },
+        {
+          "anchor": "def constrained_segments(self, include='all', update=True):",
+          "cite": "src/simsopt/geo/wireframe_toroidal.py:773-831"
+        },
+        {
+          "anchor": "class PortSet(object):",
+          "cite": "src/simsopt/geo/ports.py"
+        }
+      ],
+      "id": "PT-1",
+      "jax_api": [
+        "src/simsopt_jax_adapters/solve/wireframe.py"
+      ],
+      "native_test_files": [
+        "tests/geo/test_ports.py"
+      ],
+      "native_test_ids": [],
+      "observables": [
+        "value_or_residual",
+        "shape_dtype_pytree"
+      ],
+      "reason": "Port-collision geometry is one-shot host-side work with no gradient and no GPU value: it runs once to decide which wireframe segments are constrained, then the JAX RCLS lane consumes the resulting free segment index set. Porting 1032 LOC of collision geometry would buy nothing, so the boundary is retained and tested instead. The wireframe grid is 12x22 at every scale _scale_configuration defines (only the plasma quadrature varies by scale), so the JAX lane's consumed index set is the exact complement of the native wireframe's constrained segments (528 segments, 31 constrained, 497 free) at both scales, not just \"bounded\". The boundary is now verified two ways: an independent collision oracle re-derives the constrained-segment set from public wireframe geometry and a freshly built PortSet.collides predicate (never calling constrained_segments()/unconstrained_segments() internally, unlike the prior version of this test), and a second test calls the real rcls_wireframe_jax adapter and asserts its solved currents are exactly zero on every native-constrained segment and only ever nonzero on native-free segments -- strictly stronger evidence than an index-set comparison, since it proves the constraint is honored in the solved VALUES. Nothing in either test batches or broadcasts, so batching_broadcasting_edge_cases is not claimed as a covered observable.",
+      "required_lanes": {
+        "jax_cpu": "passing",
+        "jax_gpu": "not_applicable",
+        "native_cpu": "passing"
+      },
+      "test_ids": [
+        "tests/integration/test_jax_rcls_ports_boundary.py::test_native_constrained_segments_match_independent_collision_oracle",
+        "tests/integration/test_jax_rcls_ports_boundary.py::test_jax_rcls_solution_currents_vanish_on_native_constrained_segments"
+      ],
+      "title": "PortSet collision geometry and wireframe segment constraints",
+      "tolerance_owner": "not_applicable"
+    },
+    {
+      "blocker": "A dedicated frozen-data unit test for non_quasi_symmetric_ratio and non_quasi_symmetric_residual_primitives is deferred to the 2026-07-29 plan's later phases (ruled 2026-08-24 not to be a seventh unit of this wave).",
+      "disposition": "jax_partial",
+      "domain": "quasisymmetry",
+      "evidence": [
+        {
+          "anchor": "def non_quasi_symmetric_residual_primitives(",
+          "cite": "src/simsopt_jax/core/quasisymmetry.py:14"
+        },
+        {
+          "anchor": "def non_quasi_symmetric_ratio(",
+          "cite": "src/simsopt_jax/core/quasisymmetry.py:37"
+        },
+        {
+          "anchor": "return non_quasi_symmetric_ratio(",
+          "cite": "src/simsopt_jax_adapters/geo/surface_objectives.py:2574"
+        },
+        {
+          "anchor": "class NonQuasiSymmetricRatioJAX(_BoozerObjectiveBase):",
+          "cite": "src/simsopt_jax_adapters/geo/surface_objectives.py:3071"
+        },
+        {
+          "anchor": "return non_quasi_symmetric_residual_primitives(",
+          "cite": "src/simsopt_jax/objectives/single_stage_fullspace.py:594"
+        }
+      ],
+      "id": "QS-1",
+      "jax_api": [
+        "src/simsopt_jax/core/quasisymmetry.py",
+        "src/simsopt_jax_adapters/geo/surface_objectives.py"
+      ],
+      "native_test_files": [
+        "tests/geo/test_surface_objectives.py"
+      ],
+      "native_test_ids": [
+        "tests/geo/test_surface_objectives.py::NonQSRatioTests::test_nonQSratio_derivative"
+      ],
+      "observables": [
+        "value_or_residual",
+        "gradient_jacobian_vjp_hessian"
+      ],
+      "reason": "The JAX kernel exists and is consumed in production by NonQuasiSymmetricRatioJAX and by the single-stage fullspace objective, but it owns no dedicated unit test. The only tests that name NonQuasiSymmetricRatioJAX build it with object.__new__ and patched attributes to check gradient plumbing, which the coverage contract explicitly refuses as scientific parity evidence, and no test file contains both the native and the JAX class. Scientific reach is therefore example-level only, through the BoozerQA and single-stage Boozer-vacuum parity mirrors. test_exact_boozerqa_workflow_matches_native_and_jax_cpu's tolerances (rtol=1e-10/atol=1e-12, rtol=1e-3/atol=1e-8, rtol=0.0/atol=2e-3) are numerically identical to entries in src/simsopt_jax/parity_tolerances.py, but the test hardcodes them as literals and never imports or calls parity_ladder_tolerances, so the owner is recorded local, not central: a future change to the central ladder would not automatically flow into this test.",
+      "required_lanes": {
+        "jax_cpu": "passing",
+        "jax_gpu": "pending",
+        "native_cpu": "passing"
+      },
+      "test_ids": [
+        "tests/integration/test_jax_mirror_boozerqa_parity.py::test_exact_boozerqa_workflow_matches_native_and_jax_cpu"
+      ],
+      "title": "Non-quasi-symmetric residual ratio kernel",
+      "tolerance_owner": "local_test_tolerances"
+    },
+    {
+      "blocker": "",
+      "decision": {
+        "decided_by": "session orchestrator under the user's 2026-08-24 execute-all directive; named-maintainer countersignature pending",
+        "decided_on": "2026-08-24",
+        "proposed_by": "2026-08-23 mirror-wave plan (formerly docs/jax_native_test_mirror_wave_implementation_plan.md, commit 2221b542a; removed by the 2026-08-24 docs curation), unit 6",
+        "proposed_on": "2026-08-23"
+      },
+      "disposition": "native_only",
+      "domain": "coilset",
+      "evidence": [
+        {
+          "anchor": "class CoilSet(Optimizable):",
+          "cite": "src/simsopt/field/coilset.py:18"
+        },
+        {
+          "anchor": "class ReducedCoilSet(CoilSet):",
+          "cite": "src/simsopt/field/coilset.py:383"
+        },
+        {
+          "anchor": "from .coilset import CoilSet",
+          "cite": "src/simsopt/field/normal_field.py:7"
+        },
+        {
+          "anchor": "self._coilset = CoilSet()",
+          "cite": "src/simsopt/field/normal_field.py:549"
+        }
+      ],
+      "id": "CS-1",
+      "jax_api": [],
+      "native_test_files": [
+        "tests/field/test_coilset.py"
+      ],
+      "native_test_ids": [],
+      "observables": [],
+      "reason": "The sole in-repo consumer of the CoilSet class is simsopt.field.normal_field, which belongs to the SPEC family and is excluded by the project rule. No example and no JAX-side module imports it, and the JAX stage-two objectives express coil collections in their own grouped-spec idiom. Porting 647 LOC with zero JAX-side consumers is YAGNI. Revisit only if a JAX example adopts the CoilSet API.",
+      "required_lanes": {
+        "jax_cpu": "not_applicable",
+        "jax_gpu": "not_applicable",
+        "native_cpu": "passing"
+      },
+      "test_ids": [],
+      "title": "CoilSet and ReducedCoilSet",
+      "tolerance_owner": "not_applicable"
+    },
+    {
+      "blocker": "",
+      "decision": {
+        "decided_by": "session orchestrator under the user's 2026-08-24 execute-all directive; named-maintainer countersignature pending",
+        "decided_on": "2026-08-24",
+        "proposed_by": "2026-08-23 mirror-wave plan (formerly docs/jax_native_test_mirror_wave_implementation_plan.md, commit 2221b542a; removed by the 2026-08-24 docs curation), unit 6",
+        "proposed_on": "2026-08-23"
+      },
+      "disposition": "native_only",
+      "domain": "fourier_interpolation",
+      "evidence": [
+        {
+          "anchor": "def fourier_interpolation(fk, x):",
+          "cite": "src/simsopt/util/fourier_interpolation.py:16"
+        }
+      ],
+      "id": "FI-1",
+      "jax_api": [],
+      "native_test_files": [
+        "tests/util/test_fourier_interpolation.py"
+      ],
+      "native_test_ids": [],
+      "observables": [],
+      "reason": "54 LOC with zero in-repo consumers: the only occurrence of the name outside its own module is the definition itself. Porting a utility nothing calls would add a JAX surface with no caller and no way to keep it honest.",
+      "required_lanes": {
+        "jax_cpu": "not_applicable",
+        "jax_gpu": "not_applicable",
+        "native_cpu": "passing"
+      },
+      "test_ids": [],
+      "title": "fourier_interpolation utility",
+      "tolerance_owner": "not_applicable"
+    },
+    {
+      "blocker": "",
+      "decision": {
+        "decided_by": "session orchestrator under the user's 2026-08-24 execute-all directive; named-maintainer countersignature pending",
+        "decided_on": "2026-08-24",
+        "proposed_by": "unit 6 slice (project exclusion rule: VMEC-, SPEC-, third-party-dependent code needs no mirror)",
+        "proposed_on": "2026-08-24"
+      },
+      "disposition": "native_only",
+      "domain": "normal_field",
+      "evidence": [
+        {
+          "anchor": "import py_spec",
+          "cite": "src/simsopt/field/normal_field.py:12"
+        },
+        {
+          "anchor": "computational boundary of SPEC free-boundary",
+          "cite": "src/simsopt/field/normal_field.py:23"
+        },
+        {
+          "anchor": "def from_spec(cls, filename):",
+          "cite": "src/simsopt/field/normal_field.py:101"
+        }
+      ],
+      "id": "NF-1",
+      "jax_api": [],
+      "native_test_files": [
+        "tests/field/test_normal_field.py"
+      ],
+      "native_test_ids": [],
+      "observables": [],
+      "reason": "NormalField is the SPEC free-boundary computational-boundary representation, stores its harmonics in the SPEC convention, and loads through py_spec. It is SPEC-family code, excluded by the project rule that no JAX mirror is required for VMEC-, SPEC-, or third-party-dependent behavior.",
+      "required_lanes": {
+        "jax_cpu": "not_applicable",
+        "jax_gpu": "not_applicable",
+        "native_cpu": "passing"
+      },
+      "test_ids": [],
+      "title": "NormalField and CoilSet-derived normal field",
+      "tolerance_owner": "not_applicable"
+    },
+    {
+      "blocker": "",
+      "decision": {
+        "decided_by": "session orchestrator under the user's 2026-08-24 execute-all directive; named-maintainer countersignature pending",
+        "decided_on": "2026-08-24",
+        "proposed_by": "unit 6 slice (project exclusion rule: VMEC-, SPEC-, third-party-dependent code needs no mirror)",
+        "proposed_on": "2026-08-24"
+      },
+      "disposition": "native_only",
+      "domain": "spec",
+      "evidence": [
+        {
+          "anchor": "This module provides a class that handles the SPEC equilibrium code.",
+          "cite": "src/simsopt/mhd/spec.py"
+        },
+        "tests/mhd/test_spec.py"
+      ],
+      "id": "SP-1",
+      "jax_api": [],
+      "native_test_files": [
+        "tests/mhd/test_spec.py",
+        "tests/mhd/test_integrated_mpi.py"
+      ],
+      "native_test_ids": [],
+      "observables": [],
+      "reason": "The SPEC tests drive an external Fortran equilibrium executable through py_spec. Replacing an external scientific solver is an explicit non-goal of the coverage contract, and the project rule excludes SPEC-dependent code from mirroring.",
+      "required_lanes": {
+        "jax_cpu": "not_applicable",
+        "jax_gpu": "not_applicable",
+        "native_cpu": "passing"
+      },
+      "test_ids": [],
+      "title": "SPEC equilibrium driver",
+      "tolerance_owner": "not_applicable"
+    },
+    {
+      "blocker": "",
+      "decision": {
+        "decided_by": "session orchestrator under the user's 2026-08-24 execute-all directive; named-maintainer countersignature pending",
+        "decided_on": "2026-08-24",
+        "proposed_by": "unit 6 slice (project exclusion rule: VMEC-, SPEC-, third-party-dependent code needs no mirror)",
+        "proposed_on": "2026-08-24"
+      },
+      "disposition": "native_only",
+      "domain": "vmec",
+      "evidence": [
+        {
+          "anchor": "This module provides a class that handles the VMEC equilibrium code.",
+          "cite": "src/simsopt/mhd/vmec.py"
+        },
+        "tests/mhd/test_vmec_f90wrap.py:9"
+      ],
+      "id": "VM-1",
+      "jax_api": [],
+      "native_test_files": [
+        "tests/mhd/test_vmec.py",
+        "tests/mhd/test_vmec_diagnostics.py",
+        "tests/mhd/test_vmec_f90wrap.py",
+        "tests/mhd/test_bootstrap.py",
+        "tests/mhd/test_integrated_mpi.py"
+      ],
+      "native_test_ids": [],
+      "observables": [],
+      "reason": "These files construct and run the external VMEC executable (or import the f90wrap `vmec` module directly) and read its output files. Replacing VMEC is an explicit non-goal of the coverage contract, and the project rule excludes VMEC-dependent code. The portable pieces that were ported already live behind their own JAX-named tests.",
+      "required_lanes": {
+        "jax_cpu": "not_applicable",
+        "jax_gpu": "not_applicable",
+        "native_cpu": "passing"
+      },
+      "test_ids": [],
+      "title": "VMEC equilibrium driver and diagnostics",
+      "tolerance_owner": "not_applicable"
+    },
+    {
+      "blocker": "",
+      "decision": {
+        "decided_by": "session orchestrator under the user's 2026-08-24 execute-all directive; named-maintainer countersignature pending",
+        "decided_on": "2026-08-24",
+        "proposed_by": "unit 6 slice (project exclusion rule: VMEC-, SPEC-, third-party-dependent code needs no mirror)",
+        "proposed_on": "2026-08-24"
+      },
+      "disposition": "native_only",
+      "domain": "virtual_casing",
+      "evidence": [
+        {
+          "anchor": "from .vmec import Vmec",
+          "cite": "src/simsopt/mhd/virtual_casing.py:24"
+        },
+        {
+          "anchor": "def from_vmec(cls, vmec, src_nphi, src_ntheta=None",
+          "cite": "src/simsopt/mhd/virtual_casing.py:124"
+        }
+      ],
+      "id": "VC-1",
+      "jax_api": [],
+      "native_test_files": [
+        "tests/mhd/test_virtual_casing.py"
+      ],
+      "native_test_ids": [],
+      "observables": [],
+      "reason": "VirtualCasing is driven from a VMEC equilibrium and delegates the surface integral to the third-party virtual_casing package, writing and reading NetCDF along the way. It is VMEC- and third-party-dependent, excluded by the project rule.",
+      "required_lanes": {
+        "jax_cpu": "not_applicable",
+        "jax_gpu": "not_applicable",
+        "native_cpu": "passing"
+      },
+      "test_ids": [],
+      "title": "Virtual casing principle",
+      "tolerance_owner": "not_applicable"
+    },
+    {
+      "blocker": "",
+      "decision": {
+        "decided_by": "session orchestrator under the user's 2026-08-24 execute-all directive; named-maintainer countersignature pending",
+        "decided_on": "2026-08-24",
+        "proposed_by": "unit 6 slice (project exclusion rule: VMEC-, SPEC-, third-party-dependent code needs no mirror)",
+        "proposed_on": "2026-08-24"
+      },
+      "disposition": "native_only",
+      "domain": "mgrid",
+      "evidence": [
+        {
+          "anchor": "class MGrid():",
+          "cite": "src/simsopt/field/mgrid.py:22"
+        },
+        {
+          "anchor": "This class reads and writes mgrid (NetCDF) files",
+          "cite": "src/simsopt/field/mgrid.py:24"
+        }
+      ],
+      "id": "MG-1",
+      "jax_api": [],
+      "native_test_files": [
+        "tests/field/test_mgrid.py"
+      ],
+      "native_test_ids": [],
+      "observables": [],
+      "reason": "MGrid reads and writes the NetCDF mgrid file format for free-boundary VMEC. File-format behavior is an explicit non-goal of the coverage contract, and the consumer is VMEC, excluded by the project rule.",
+      "required_lanes": {
+        "jax_cpu": "not_applicable",
+        "jax_gpu": "not_applicable",
+        "native_cpu": "passing"
+      },
+      "test_ids": [],
+      "title": "MGrid file reader and writer",
+      "tolerance_owner": "not_applicable"
+    }
+  ],
+  "contract": {
+    "allowed_dispositions": [
+      "jax_equivalent",
+      "jax_partial",
+      "jax_missing",
+      "hybrid_boundary",
+      "shared_python",
+      "native_only"
+    ],
+    "counting_rule": "jax_partial and jax_missing are valid planning states that fail final completion; they are never converted into a percent-covered claim. unclassified rows are listed and never counted as covered.",
+    "coverage_contract_plan": "formerly docs/jax_native_unit_test_coverage_implementation_plan.md, commit 6fec6e4ca, removed by the 2026-08-24 docs curation",
+    "coverage_contract_status": "Draft, 2026-07-29",
+    "executing_wave_item": "Implementation Plan item 6 (unit 6)",
+    "executing_wave_plan": "formerly docs/jax_native_test_mirror_wave_implementation_plan.md, commit 2221b542a, removed by the 2026-08-24 docs curation",
+    "follow_ups": [
+      "GPU evidence for the force/strain/curve-subclass mirror suites (tests/jax/native_unit_parity/*.py) comes from the parity_lane fixture's gpu_parity lane under the DEFAULT backend mode once CUDA is present, NOT from SIMSOPT_BACKEND_MODE=jax_gpu_parity: tests/conftest.py classifies those three files adapter_boundary (conftest.py:596-598), and strict jax_gpu_parity mode skips every adapter_boundary test outright (conftest.py:727-731), so a jax_gpu_parity run can never produce evidence for them. The 5090 box is fenced by the concurrent nested-LS B37 campaign; once it frees, run the default-backend-mode suite with a CUDA device visible. Until it lands, no row in this manifest can reach jax_equivalent.",
+      "Register the `jax_native_unit_parity` pytest marker in pyproject.toml and require each jax_equivalent capability to be collected by the CPU and default-backend-mode gpu_parity lanes (2026-07-29 plan step 6). Deferred here because pyproject.toml is outside this unit's file ownership.",
+      "Populate the full per-function native ledger \u2014 every test definition in every file on the pinned surface mapped to a capability ID \u2014 per the 2026-07-29 plan's own checklist. The counts tables in the generated report are this slice's state; do not restate them here.",
+      "Add a dedicated frozen-data unit test for simsopt_jax.core.quasisymmetry (QS-1). Ruled 2026-08-24 not to be a seventh unit of the 2026-08-23 wave.",
+      "Parametrize tests/jax/examples/test_stochastic_samples.py over the parity_lane fixture so the CurvePerturbed reformulation gains a GPU lane (CP-4).",
+      "Move the capabilities whose tolerance owner is `local_test_tolerances` onto src/simsopt_jax/parity_tolerances.py, which the contract names as the centralized owner: CV-1, CV-2, CP-4, MF-1, MF-5, MF-7, MF-8, ST-1, ST-3, QS-1.",
+      "Upstream drift: hiddenSymmetries master at 4ad6fd99189b99d9722ad33aaeb5d30adc81680f adds tests/util/test_logger.py, which this fork does not contain. It is outside the pinned merge-base baseline and must be classified when the baseline is advanced.",
+      "Wire this coverage validator into a PR-blocking CI job. No CI invocation of scripts/jax_native_unit_coverage.py exists today (verified); this needs a workflow edit, which is outside this slice's file ownership.",
+      "Add the new files this slice touches (scripts/jax_native_unit_coverage.py, tests/jax/test_native_unit_coverage_manifest.py) to pyproject.toml's curated pyright include list. pyproject.toml is outside this slice's file ownership.",
+      "Obtain named maintainer countersignature for every native_only/hybrid_boundary/shared_python decision recorded in this manifest. The contract requires a named reviewer; every decision.decided_by in this slice currently reads 'session orchestrator under the user's 2026-08-24 execute-all directive; named-maintainer countersignature pending'."
+    ],
+    "planning_state": "unclassified",
+    "slice": "First executable slice of the 2026-07-29 coverage contract: file-level rows for the pinned native test surface plus capability records for the domains the 2026-08-23 mirror wave seeded. The contract's full per-function ledger over all native test definitions is deferred to its own later phases."
+  },
+  "native_test_files": [
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "configs",
+      "evidence": [],
+      "path": "tests/configs/test_LHD_like.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "configs",
+      "evidence": [],
+      "path": "tests/configs/test_quasr_integration.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "configs",
+      "evidence": [],
+      "path": "tests/configs/test_zoo.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "configs",
+      "evidence": [],
+      "path": "tests/configs/test_zoo_mock_quasr.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "core",
+      "evidence": [],
+      "path": "tests/core/test_derivative.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "core",
+      "evidence": [],
+      "path": "tests/core/test_descriptor.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "core",
+      "evidence": [],
+      "path": "tests/core/test_dev.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "core",
+      "evidence": [],
+      "path": "tests/core/test_dofs.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "core",
+      "evidence": [],
+      "path": "tests/core/test_finite_difference.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "core",
+      "evidence": [],
+      "path": "tests/core/test_integrated.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "core",
+      "evidence": [],
+      "path": "tests/core/test_json.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "core",
+      "evidence": [],
+      "path": "tests/core/test_optimizable.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "core",
+      "evidence": [],
+      "path": "tests/core/test_util.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "field",
+      "evidence": [],
+      "path": "tests/field/test_biotsavart.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "field",
+      "evidence": [],
+      "path": "tests/field/test_boozermagneticfields.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "field",
+      "evidence": [],
+      "path": "tests/field/test_coil.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [
+        "CS-1"
+      ],
+      "disposition": "native_only",
+      "domain": "coilset",
+      "evidence": [
+        {
+          "anchor": "class CoilSet(Optimizable):",
+          "cite": "src/simsopt/field/coilset.py:18"
+        }
+      ],
+      "path": "tests/field/test_coilset.py",
+      "reason": "Dated non-port ruling: CoilSet has zero JAX-side consumers and its only in-repo consumer is SPEC-family normal_field, so the whole file stays native. See capability CS-1 for the rationale and the review record."
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "field",
+      "evidence": [],
+      "path": "tests/field/test_fieldline.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "field",
+      "evidence": [],
+      "path": "tests/field/test_interpolant.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "field",
+      "evidence": [],
+      "path": "tests/field/test_magnetic_axis_helpers.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "field",
+      "evidence": [],
+      "path": "tests/field/test_magneticfields.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "field",
+      "evidence": [],
+      "path": "tests/field/test_magneticfields_optimization.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [
+        "MG-1"
+      ],
+      "disposition": "native_only",
+      "domain": "mgrid",
+      "evidence": [
+        {
+          "anchor": "class MGrid():",
+          "cite": "src/simsopt/field/mgrid.py:22"
+        }
+      ],
+      "path": "tests/field/test_mgrid.py",
+      "reason": "NetCDF mgrid file-format reader/writer for free-boundary VMEC; file formats are an explicit contract non-goal. See capability MG-1."
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "field",
+      "evidence": [],
+      "path": "tests/field/test_mpi_tracing.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [
+        "NF-1"
+      ],
+      "disposition": "native_only",
+      "domain": "normal_field",
+      "evidence": [
+        {
+          "anchor": "computational boundary of SPEC free-boundary",
+          "cite": "src/simsopt/field/normal_field.py:23"
+        }
+      ],
+      "path": "tests/field/test_normal_field.py",
+      "reason": "SPEC-family boundary representation excluded by the project rule that no JAX mirror is required for VMEC-, SPEC-, or third-party-dependent code. See capability NF-1."
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "field",
+      "evidence": [],
+      "path": "tests/field/test_particle.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "field",
+      "evidence": [],
+      "path": "tests/field/test_sampling.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [
+        "MF-1",
+        "MF-2",
+        "MF-3",
+        "MF-4",
+        "MF-5",
+        "MF-6",
+        "MF-7",
+        "MF-8"
+      ],
+      "disposition": "jax_partial",
+      "domain": "force",
+      "evidence": [
+        {
+          "anchor": "JAX mirror of the native self-field-force suite.",
+          "cite": "tests/jax/native_unit_parity/test_force_parity.py"
+        },
+        {
+          "anchor": "Pure-JAX force Stage-II objective contracts.",
+          "cite": "tests/jax/objectives/test_force_stage_two.py"
+        }
+      ],
+      "path": "tests/field/test_selffieldforces.py",
+      "reason": "18 of this file's 23 native test functions were individually cited by native_test_ids under the eight force capabilities MF-1..MF-8 (unit 1 of the 2026-08-23 mirror wave); the remaining five (test_force_objectives, test_force_and_torque_objectives_with_different_quadpoints, test_downsample_must_divide_quadpoints, test_mixed_quadpoints_in_coil_lists_raises, test_source_coils_coarse_and_fine) are covered only by this file-level jax_partial disposition, without an individual native_test_ids citation. The mirror suite covers the reduced model, the objective layer, the guards and the Taylor gradients; the force/torque vector method layer and its subclasses have no JAX API, and no lane ran on GPU this wave (GPU evidence would come from the parity_lane fixture's gpu_parity lane under the default backend mode; strict jax_gpu_parity classifies this mirror file adapter_boundary and skips it)."
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "field",
+      "evidence": [],
+      "path": "tests/field/test_wireframefield.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "geo",
+      "evidence": [],
+      "path": "tests/geo/test_boozersurface.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [
+        "CV-1",
+        "CV-2",
+        "CV-3"
+      ],
+      "disposition": "jax_partial",
+      "domain": "curves",
+      "evidence": [
+        {
+          "anchor": "Direct parity coverage for the JAX curve-subclass kernels.",
+          "cite": "tests/jax/native_unit_parity/test_curve_subclasses_parity.py"
+        }
+      ],
+      "partial_scope": true,
+      "path": "tests/geo/test_curve.py",
+      "reason": "This slice classifies only the curve-subclass capabilities of this file (CV-1..CV-3), which is what unit 3 of the mirror wave enumerated. The file's remaining test functions (XYZ Fourier symmetries, Frenet frames, VTK and plotting, makegrid loading) are not classified here and are deferred to the 2026-07-29 plan's per-function inventory."
+    },
+    {
+      "capabilities": [
+        "CV-1"
+      ],
+      "disposition": "jax_missing",
+      "domain": "curves",
+      "evidence": [
+        {
+          "anchor": "def test_curve_helical_dof_round_trip_matches_native():",
+          "cite": "tests/jax/native_unit_parity/test_curve_subclasses_parity.py:234"
+        }
+      ],
+      "path": "tests/geo/test_curve_helical.py",
+      "reason": "This file holds exactly one test, test_dof_names, which is entirely the named-DOF-accessor contract recorded as CV-1. The JAX helical curve kernel takes a flat dofs vector and publishes no names, so the file's whole capability is jax_missing; the flat-vector round trip is mirrored instead."
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "geo",
+      "evidence": [],
+      "path": "tests/geo/test_curve_objectives.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "geo",
+      "evidence": [],
+      "path": "tests/geo/test_curve_optimizable.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [
+        "CP-1",
+        "CP-2",
+        "CP-3",
+        "CP-4"
+      ],
+      "disposition": "jax_partial",
+      "domain": "curveperturbed",
+      "evidence": [
+        {
+          "anchor": "Canonical native-compatible stochastic sample materialization contracts.",
+          "cite": "tests/jax/examples/test_stochastic_samples.py"
+        }
+      ],
+      "path": "tests/geo/test_curveperturbed.py",
+      "reason": "All five native test functions were mapped by unit 4. Perturbed geometry, gammadash, periodicity and the distance objective match the native oracle through the materialized bundle; in-place resample, GSON serialization and torsion through perturbed curves have no JAX counterpart by design."
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "geo",
+      "evidence": [],
+      "path": "tests/geo/test_finitebuild.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "geo",
+      "evidence": [],
+      "path": "tests/geo/test_plot.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "geo",
+      "evidence": [],
+      "path": "tests/geo/test_pm_grid.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [
+        "PT-1"
+      ],
+      "disposition": "hybrid_boundary",
+      "domain": "ports",
+      "evidence": [
+        {
+          "anchor": "Ports boundary parity: native geometry owns the constraint, JAX consumes it.",
+          "cite": "tests/integration/test_jax_rcls_ports_boundary.py"
+        }
+      ],
+      "path": "tests/geo/test_ports.py",
+      "reason": "Port geometry is retained on the host on purpose and the boundary is tested rather than ported: the JAX RCLS lane consumes the native wireframe's free-segment index set, and that set is pinned as the exact complement of the constrained segments."
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "geo",
+      "evidence": [],
+      "path": "tests/geo/test_qfm.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [
+        "ST-1",
+        "ST-2",
+        "ST-3"
+      ],
+      "disposition": "jax_partial",
+      "domain": "strain",
+      "evidence": [
+        {
+          "anchor": "Native-oracle unit-parity tests for the JAX strain-optimization example.",
+          "cite": "tests/jax/native_unit_parity/test_strain_parity.py"
+        }
+      ],
+      "path": "tests/geo/test_strainopt.py",
+      "reason": "All three native test functions were mapped by unit 2. The centroid frame branch has value and Taylor-gradient parity; the Frenet branch, the curve-shape-DOF gradient half, and the general-p penalty are open."
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "geo",
+      "evidence": [],
+      "path": "tests/geo/test_surface.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "geo",
+      "evidence": [],
+      "path": "tests/geo/test_surface_garabedian.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [
+        "QS-1"
+      ],
+      "disposition": "jax_partial",
+      "domain": "quasisymmetry",
+      "evidence": [
+        {
+          "anchor": "class NonQuasiSymmetricRatioJAX(_BoozerObjectiveBase):",
+          "cite": "src/simsopt_jax_adapters/geo/surface_objectives.py:3071"
+        },
+        {
+          "anchor": "Exact parity for the ``2_Intermediate/boozerQA.py`` mirror.",
+          "cite": "tests/integration/test_jax_mirror_boozerqa_parity.py"
+        }
+      ],
+      "partial_scope": true,
+      "path": "tests/geo/test_surface_objectives.py",
+      "reason": "This slice classifies only the non-quasi-symmetric ratio capability (QS-1) of this file, per the 2026-08-24 ruling that quasisymmetry is not a seventh unit of this wave. The file's other objectives (toroidal flux, area/volume labels, major radius, iotas, Boozer residual, principal curvature) are not classified here and are deferred to the 2026-07-29 plan's per-function inventory."
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "geo",
+      "evidence": [],
+      "path": "tests/geo/test_surface_rzfourier.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "geo",
+      "evidence": [],
+      "path": "tests/geo/test_surface_taylor.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "geo",
+      "evidence": [],
+      "path": "tests/geo/test_surface_xyzfourier.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "geo",
+      "evidence": [],
+      "path": "tests/geo/test_surfacehenneberg.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "geo",
+      "evidence": [],
+      "path": "tests/geo/test_wireframe_toroidal.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [
+        "VM-1"
+      ],
+      "disposition": "native_only",
+      "domain": "vmec",
+      "evidence": [
+        {
+          "anchor": "This module provides functions to compute the bootstrap current",
+          "cite": "src/simsopt/mhd/bootstrap.py"
+        }
+      ],
+      "path": "tests/mhd/test_bootstrap.py",
+      "reason": "Bootstrap-current tests construct VMEC equilibria throughout; VMEC-dependent and excluded by the project rule. See capability VM-1."
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "mhd",
+      "evidence": [],
+      "path": "tests/mhd/test_boozer.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [
+        "VM-1",
+        "SP-1"
+      ],
+      "disposition": "native_only",
+      "domain": "vmec",
+      "evidence": [
+        {
+          "anchor": "This module provides a class that handles the VMEC equilibrium code.",
+          "cite": "src/simsopt/mhd/vmec.py"
+        },
+        {
+          "anchor": "This module provides a class that handles the SPEC equilibrium code.",
+          "cite": "src/simsopt/mhd/spec.py"
+        }
+      ],
+      "path": "tests/mhd/test_integrated_mpi.py",
+      "reason": "Integrated MPI tests drive both VMEC and SPEC equilibria under MPI process management; VMEC-, SPEC- and MPI-orchestration dependent, all excluded by the project rule and the contract's non-goals."
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "mhd",
+      "evidence": [],
+      "path": "tests/mhd/test_profiles.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [
+        "SP-1"
+      ],
+      "disposition": "native_only",
+      "domain": "spec",
+      "evidence": [
+        {
+          "anchor": "This module provides a class that handles the SPEC equilibrium code.",
+          "cite": "src/simsopt/mhd/spec.py"
+        }
+      ],
+      "path": "tests/mhd/test_spec.py",
+      "reason": "Drives the external SPEC executable through py_spec; excluded by the project rule and by the coverage contract's own non-goal on external scientific solvers. See capability SP-1."
+    },
+    {
+      "capabilities": [
+        "VC-1"
+      ],
+      "disposition": "native_only",
+      "domain": "virtual_casing",
+      "evidence": [
+        {
+          "anchor": "from .vmec import Vmec",
+          "cite": "src/simsopt/mhd/virtual_casing.py:24"
+        }
+      ],
+      "path": "tests/mhd/test_virtual_casing.py",
+      "reason": "VMEC-driven and delegated to the third-party virtual_casing package; excluded by the project rule. See capability VC-1."
+    },
+    {
+      "capabilities": [
+        "VM-1"
+      ],
+      "disposition": "native_only",
+      "domain": "vmec",
+      "evidence": [
+        {
+          "anchor": "This module provides a class that handles the VMEC equilibrium code.",
+          "cite": "src/simsopt/mhd/vmec.py"
+        }
+      ],
+      "path": "tests/mhd/test_vmec.py",
+      "reason": "Runs the external VMEC executable; excluded by the project rule and by the coverage contract's non-goal on external scientific solvers. See capability VM-1."
+    },
+    {
+      "capabilities": [
+        "VM-1"
+      ],
+      "disposition": "native_only",
+      "domain": "vmec",
+      "evidence": [
+        {
+          "anchor": "This module contains functions that can postprocess VMEC output.",
+          "cite": "src/simsopt/mhd/vmec_diagnostics.py"
+        }
+      ],
+      "path": "tests/mhd/test_vmec_diagnostics.py",
+      "reason": "VMEC-driven diagnostics over VMEC output files; excluded by the project rule. The portable pieces that were ported already carry their own JAX-named tests. See capability VM-1."
+    },
+    {
+      "capabilities": [
+        "VM-1"
+      ],
+      "disposition": "native_only",
+      "domain": "vmec",
+      "evidence": [
+        "tests/mhd/test_vmec_f90wrap.py:9"
+      ],
+      "path": "tests/mhd/test_vmec_f90wrap.py",
+      "reason": "Imports the f90wrap `vmec` Fortran module directly and exercises its run modes; third-party and VMEC dependent, excluded by the project rule. See capability VM-1."
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "objectives",
+      "evidence": [],
+      "path": "tests/objectives/test_constrained.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "objectives",
+      "evidence": [],
+      "path": "tests/objectives/test_fluxobjective.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "objectives",
+      "evidence": [],
+      "path": "tests/objectives/test_least_squares.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "objectives",
+      "evidence": [],
+      "path": "tests/objectives/test_utilities.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "solve",
+      "evidence": [],
+      "path": "tests/solve/test_constrained.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "solve",
+      "evidence": [],
+      "path": "tests/solve/test_least_squares.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "solve",
+      "evidence": [],
+      "path": "tests/solve/test_mpi.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "solve",
+      "evidence": [],
+      "path": "tests/solve/test_pm_optimization.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "solve",
+      "evidence": [],
+      "path": "tests/solve/test_wf_optimization.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "util",
+      "evidence": [],
+      "path": "tests/util/test_coil_optimization_helper_functions.py",
+      "reason": ""
+    },
+    {
+      "capabilities": [
+        "FI-1"
+      ],
+      "disposition": "native_only",
+      "domain": "fourier_interpolation",
+      "evidence": [
+        {
+          "anchor": "def fourier_interpolation(fk, x):",
+          "cite": "src/simsopt/util/fourier_interpolation.py:16"
+        }
+      ],
+      "path": "tests/util/test_fourier_interpolation.py",
+      "reason": "Dated non-port ruling: 54 LOC utility with zero in-repo consumers, so the whole file stays native. See capability FI-1."
+    },
+    {
+      "capabilities": [],
+      "disposition": "unclassified",
+      "domain": "util",
+      "evidence": [],
+      "path": "tests/util/test_mpi_partition.py",
+      "reason": ""
+    }
+  ],
+  "schema_version": 1
+}

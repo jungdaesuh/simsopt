@@ -5,7 +5,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
-from simsopt.field import Current, coils_via_symmetries
+from simsopt.field import B2Energy, Current, LpCurveForce, coils_via_symmetries
 from simsopt.geo import SurfaceRZFourier, create_equally_spaced_curves
 
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
@@ -36,7 +36,18 @@ def _circle(radius: float, point_count: int) -> tuple[jax.Array, jax.Array]:
     return gamma, gammadash
 
 
-def test_force_stage_two_diagnostics_slice_on_device_under_transfer_guard() -> None:
+_REGULARIZATION = 0.05**2 / np.sqrt(np.e)
+
+
+def _stage_two_force_case():
+    """Two-base-curve stellarator-symmetric case shared by the diagnostics tests.
+
+    Returns ``(field, parameters, target_quadpoints, regularizations, curves,
+    currents, surface)``: the JAX field and its device dof vector for the
+    diagnostics under test, plus the base ``curves``, ``currents``, and
+    ``surface`` a caller needs to rebuild the same symmetry-expanded coil set
+    as native ``RegularizedCoil`` objects for an oracle comparison.
+    """
     surface = SurfaceRZFourier(nfp=2, stellsym=True, mpol=1, ntor=0)
     curves = create_equally_spaced_curves(
         2,
@@ -50,12 +61,7 @@ def test_force_stage_two_diagnostics_slice_on_device_under_transfer_guard() -> N
     )
     currents = [Current(1.0e5), Current(1.0e5)]
     currents[0].fix_all()
-    coils = coils_via_symmetries(
-        curves,
-        currents,
-        surface.nfp,
-        surface.stellsym,
-    )
+    coils = coils_via_symmetries(curves, currents, surface.nfp, surface.stellsym)
     field = BiotSavartJAX(coils)
     parameters = jax.device_put(jnp.asarray(field.x, dtype=jnp.float64))
     target_quadpoints = jax.device_put(
@@ -64,8 +70,29 @@ def test_force_stage_two_diagnostics_slice_on_device_under_transfer_guard() -> N
         )
     )
     regularizations = jax.device_put(
-        jnp.full((len(coils),), 0.05**2 / np.sqrt(np.e), dtype=jnp.float64)
+        jnp.full((len(coils),), _REGULARIZATION, dtype=jnp.float64)
     )
+    return (
+        field,
+        parameters,
+        target_quadpoints,
+        regularizations,
+        curves,
+        currents,
+        surface,
+    )
+
+
+def test_force_stage_two_diagnostics_slice_on_device_under_transfer_guard() -> None:
+    (
+        field,
+        parameters,
+        target_quadpoints,
+        regularizations,
+        curves,
+        _,
+        _,
+    ) = _stage_two_force_case()
     diagnostics = force_stage_two_diagnostics(
         field,
         target_quadpoints,
@@ -79,6 +106,88 @@ def test_force_stage_two_diagnostics_slice_on_device_under_transfer_guard() -> N
 
     assert values.shape == (3,)
     assert bool(jnp.all(jnp.isfinite(values)))
+
+
+def test_force_stage_two_diagnostics_match_native_force_objectives() -> None:
+    """The three diagnostics equal native LpCurveForce, max |F|, and B2Energy.
+
+    ``num_force_coils`` splits the symmetry-expanded coil list into targets
+    (the leading base-curve slots) and sources (the rest), passed to native
+    ``LpCurveForce`` as ``target_coils`` / ``source_coils_coarse``.  Native's
+    own docstring notes that coils common to both lists are removed during
+    initialization, so this split is not independently checkable through
+    ``diagnostics[0]`` alone when, as here, ``target_coils`` is disjoint from
+    ``source_coils_coarse`` and no dedup fires; ``diagnostics[1]`` (max |F|
+    over the target coils only) does exercise the target/source distinction.
+
+    Native ``LpCurveForce``/``B2Energy`` (``simsopt.field.force``) are
+    themselves ``jax.numpy``-based and, as of this test, byte-identical to
+    ``hiddenSymmetries/simsopt``'s current ``master``; the diagnostics under
+    test are an independent fork re-implementation, so this oracle check is
+    fork-reimplementation vs. upstream implementation, not two copies of the
+    same code.  The comparison still exercises the compiled C++ leg: native
+    ``RegularizedCoil.force()`` — called here to compute
+    ``native_max_force_mn_per_m`` — reaches the mutual field through
+    ``simsopt.field.biotsavart.BiotSavart`` (a subclass of the compiled
+    ``simsoptpp.BiotSavart``), combined with a ``jax.numpy`` self-field term.
+    """
+    (
+        field,
+        parameters,
+        target_quadpoints,
+        regularizations,
+        curves,
+        currents,
+        surface,
+    ) = _stage_two_force_case()
+    config = ForceStageTwoConfig(num_force_coils=len(curves))
+    diagnostics = np.asarray(
+        force_stage_two_diagnostics(
+            field,
+            target_quadpoints,
+            regularizations,
+            config,
+        )(parameters)
+    )
+
+    regularized_coils = coils_via_symmetries(
+        curves,
+        currents,
+        surface.nfp,
+        surface.stellsym,
+        regularizations=[_REGULARIZATION] * len(curves),
+    )
+    target_coils = regularized_coils[: config.num_force_coils]
+    source_coils = regularized_coils[config.num_force_coils :]
+
+    native_force_objective = float(
+        LpCurveForce(
+            target_coils,
+            source_coils,
+            p=config.force_power,
+            threshold=config.force_threshold,
+        ).J()
+    )
+    native_max_force_mn_per_m = (
+        max(
+            float(
+                np.max(
+                    np.linalg.norm(np.asarray(coil.force(regularized_coils)), axis=1)
+                )
+            )
+            for coil in target_coils
+        )
+        / 1.0e6
+    )
+    native_energy = float(B2Energy(regularized_coils).J())
+
+    np.testing.assert_allclose(
+        diagnostics[0], native_force_objective, rtol=1.0e-12, atol=0.0
+    )
+    np.testing.assert_allclose(
+        diagnostics[1], native_max_force_mn_per_m, rtol=1.0e-8, atol=0.0
+    )
+    np.testing.assert_allclose(diagnostics[2], native_energy, rtol=1.0e-12, atol=0.0)
 
 
 def test_public_force_norms_reconstruct_lp_force_objective() -> None:
