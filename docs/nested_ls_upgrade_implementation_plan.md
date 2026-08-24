@@ -1,7 +1,7 @@
 # Nested-LS Prior-Art Upgrade — Implementation Plan
 
-**Status:** Draft
-**Last updated:** 2026-08-24
+**Status:** In execution
+**Last updated:** 2026-08-24 (execution pass 1)
 
 ## Purpose
 
@@ -48,13 +48,21 @@ Closure section, commit `55e87b294`), track verdict
 
 ## Current Context (confirmed facts, 2026-08-24)
 
-- Main `pr/jax-port-squashed` @ `051323e71` still carries the v1
-  rolling-anchor implementation. The transactional containment lives only on
-  branch `fix-b37-restart` (`01fefbadd` transactional trials + `19d5e65fb`
-  evidence source-binding), worktree `.wt-simsopt-fix-b37-restart`
-  (Codex-authored; adversarially reviewed GO; execution-proven by the
-  38→39→38 replay, transcript committed as
-  `docs/receipts/evidence/nested_ls_outer_b37_20260824_transaction_replay.log`).
+- **LANDED `d835c43ee`.** `fix-b37-restart` is squash-merged onto
+  `pr/jax-port-squashed` (all five commits: `290fc4238` restartable stops,
+  `6572daef3` stop classification, `ce8e5a31a` child payload staging,
+  `01fefbadd` transactional trials, `19d5e65fb` evidence source-binding).
+  The charter Amendment-4 ordinal collision is resolved: three sections had
+  claimed 4 — `e118fa813` (prose correction) keeps 4, `997bbacd5`
+  (fault-rerun) renumbered to **Amendment 5** with its three ordinal
+  citations updated, and the branch's transactional containment landed as
+  **Amendment 6** immediately above the Closure section. Upstream provenance
+  unchanged: Codex-authored, adversarially reviewed GO, execution-proven by
+  the 38→39→38 replay
+  (`docs/receipts/evidence/nested_ls_outer_b37_20260824_transaction_replay.log`).
+- **LANDED `d3bd48ecd`.** The parked `_lbfgs` worktree branch
+  (`worktree-agent-a294f051ffd23f1c9` @ `92ec95f52`) is merged; its three
+  test files are green (68 + 4 + 19 passed).
 - The containment is at the **child layer**: children restore the committed
   candidate after every evaluation. `nested_ls_reduced_scale.py:4743` still
   mutates the anchor per-eval inside `_solve_nested_inner_at_coils`; the
@@ -75,10 +83,18 @@ Closure section, commit `55e87b294`), track verdict
   already FD-validated by `tests/geo/test_nested_ls_reduced.py:1360,1471`
   (`test_implicit_adjoint_matches_surface_response_to_coil_step`,
   `test_unregularized_ift_adjoint_matches_reconverged_surface_fd`).
-- Evidence in flight: B3 v2 receipt (producer `01fefbadd`, stem
-  `nested_ls_outer_b3_20260824`) and the B37 v2 JAX-only diagnostic. A
-  simsoptpp binary boundary (sha `41b2ca79`→`95190afa`, ~07:0x) falls
-  between B3 v2 pairs 1 and 2; the cross-pair bitwise canary adjudicates it.
+- **B37 v2 JAX-only diagnostic: LANDED `59ccbe8a0`**, and it answers the
+  plan's second open question — see "Adjudicated" below.
+- B3 v2 receipt (producer `01fefbadd`, stem `nested_ls_outer_b3_20260824`)
+  was still executing in worktree `.wt-b3v2-run` at this writing (started
+  05:12, pairs 0 and 1 green, pair 2 native mid-flight). **It is bridge
+  evidence only and cannot gate a merged-tree B37** — the merged driver
+  refuses it on five independent interlocks: claim schema `v1` not `v2`
+  (`benchmarks/nested_ls_outer_claim.py:484-506`), `git_head` `01fefbadd`
+  not the B37 run's HEAD (`:621-668`), a v1 sweep artifact at
+  `git_head 484b3fc26`, that artifact's `omp_set [8,14,16,20]` not the
+  frozen host set, and sweep rows lacking `child_schema`. Phase 1's fresh
+  sweep is therefore not polish; it is the only path to a B37-eligible B3.
 - Recorded replay inputs for predictor testing: the recovered 5090 ledger
   (`docs/receipts/evidence/nested_ls_outer_b37_20260823_recovered_jax.json`)
   and the A100 probe JSON carry per-eval coil DOFs and the endpoint surface.
@@ -98,18 +114,22 @@ accepts that error silently — we budget it).
 
 ## Assumptions
 
-- The B3 v2 receipt lands green (pair-0 parity 2.6e-13 and pair-0/1 bitwise
-  native determinism already observed). If pair-2 forks bitwise across the
-  binary boundary, the merge proceeds but the re-baseline (Phase 1) must pin
-  a single simsoptpp sha.
-- Codex remains the owner of `fix-b37-restart` content-wise; merge conflicts
-  with concurrent main-tree docs commits are mechanical only.
+- The re-baseline (Phase 1) **pins a single simsoptpp sha** — this is now a
+  ruling, not a contingency. See "Adjudicated" below.
+- Codex owned `fix-b37-restart` content-wise; the merge conflict was one
+  docs section and was mechanical, as predicted.
+- Every claim/sweep run needs a **dedicated clean worktree at the frozen
+  SHA**. `_require_clean_tree()` (`benchmarks/nested_ls_outer_claim.py:317-326`
+  → `benchmarks/nested_ls_shamanskii_attribution.py:114-123`) aborts before
+  any child launches if any tracked-or-untracked path outside
+  `docs/receipts/evidence/` is dirty, and this repo is a shared worktree with
+  several concurrent sessions writing to it.
 - scipy stays pinned at 1.17.1 for the certification era; the StopIteration
   control-flow pin (Phase 0) is version-scoped.
 
 ## Implementation Plan
 
-0. **Tier-0 hardening (can land on `fix-b37-restart` before the merge; ~1 day)**
+0. **Tier-0 hardening (~1 day; lands on the merged main, not on the branch)**
    - [ ] Pin scipy 1.17.1 `StopIteration`-from-callback control flow with a
          test: raise from a new-style callback under L-BFGS-B, assert the
          observed status/message/success triple (expected: caught, returned
@@ -135,28 +155,63 @@ accepts that error silently — we budget it).
          nonzero — fail closed without destroying evidence (dcsrch
          XTOL-promotion corner).
 
-1. **Merge + re-baseline (review step 1–2; ~1 day + machine time)**
-   - [ ] Squash-merge `fix-b37-restart` (`01fefbadd`+`19d5e65fb`+Tier-0)
-         onto current main; resolve the charter Amendment-4 ordinal (their
-         amendment renumbers to 5; closure section already records this).
+1. **Merge + re-baseline (review step 1–2; ~1 day + 11–14 h machine)**
+   - [x] Squash-merge `fix-b37-restart` onto current main; resolve the
+         charter Amendment-4 ordinal. **Done `d835c43ee`** — landed as
+         Amendment 6, with `997bbacd5` renumbered 4→5 and its three ordinal
+         citations updated. All five branch commits went in, not the two the
+         draft named.
    - [ ] One child→parent→dual-rejudge B3 integration test (fast, stubbed
          inner) proving the driver consumes both children's v2 schemas
          end-to-end.
-   - [ ] Fresh native OMP sweep on the merged source; mint the
-         source-bound B3 v2 receipt at the merged SHA (the in-flight
-         `01fefbadd` receipt remains bridge evidence, cited not superseded).
+   - [ ] **Pin one simsoptpp sha for the whole re-baseline** and record it in
+         `nested_ls_runtime_identity` before the first leg starts (Phase 0).
+   - [ ] Fresh native OMP sweep on the merged source — 16 legs (the frozen
+         host set `(4,8,12,14,16,20,24,32)` × 2 interleaved repeats,
+         `src/simsopt_jax_adapters/geo/nested_ls_contract.py:133-143`), in a
+         **dedicated clean worktree**; then mint the source-bound B3 v2
+         receipt at the merged SHA. The `01fefbadd` receipt stays bridge
+         evidence, cited not superseded — and cannot gate B37 (Current
+         Context lists the five refusals).
    - [ ] Post-merge: DIAG4 execution-source manifest regeneration
-         (`benchmarks/regenerate_execution_source_manifest.py`; pinned
-         counts at `single_stage_native_equivalent_quality_successor_authority.py:212,451`).
-   - [ ] Merge the parked `_lbfgs` worktree branch
-         (`worktree-agent-a294f051ffd23f1c9` @ `92ec95f5`, strict-PASS).
+         (`benchmarks/regenerate_execution_source_manifest.py --admit … --expect-count …`).
+         **Corrected citation.** The live pin is
+         `single_stage_native_equivalent_quality_successor_authority.py:383`
+         (`DIAG5_EXECUTION_SOURCE_ENTRY_COUNT = 642`), with derived checks at
+         `:1732` (`+3`) and `:3829` (`+2`). `:212` is only the default used
+         when a caller passes no explicit count — every live caller passes
+         one — and `:451` is a **sealed historical record of the
+         predecessor's failed DIAG4 run**, compared against archived evidence
+         at `:895-903` and `:2196`; it must not be touched. Regeneration moves
+         `:383` 642 → 660 and needs **18 explicit `--admit` flags**. All 18
+         entrants (the 8 `nested_ls_*` benchmarks, including the outer claim
+         and both children, plus 10 from earlier campaigns) were **never**
+         members, so this is a debt refreeze the merge forces into the open,
+         not merge-caused drift: the merge's own net effect on the count is
+         zero, because `tests/` is not one of
+         `DIAG4_EXECUTION_SOURCE_BROAD_ROOTS = ("benchmarks","examples","src")`
+         and the new test file therefore does not enter membership. Run only
+         on a quiescent, committed tree at the exact SHA the receipts cite —
+         the regenerator hashes **working-tree** bytes, so a dirty peer edit
+         gets certified.
+   - [x] Merge the parked `_lbfgs` worktree branch
+         (`worktree-agent-a294f051ffd23f1c9` @ `92ec95f52`, strict-PASS).
+         **Done `d3bd48ecd`**; 68 + 4 + 19 tests green, pinned ruff clean.
 
 2. **Predictor on recorded displacements (review step 3; ~2 days)**
    - [ ] Add `anchor_coil_dofs` to `NestedLsOuterState`
          (`nested_ls_reduced_scale.py:4568-4611`), written at commit time.
+         Do this **together with** Phase 3's deletion of the per-eval
+         `set_anchor` (see the ordering note under Phase 3): building the
+         predictor on the still-mutable rolling anchor means plumbing it
+         twice.
    - [ ] Cache the adjoint's dense LU (via `dense_schur_lu_preconditioner`)
          on the state at commit; predictor per trial = one
          `apply_reduced_mixed_schur_coil_tangent` JVP + one cached LU solve.
+         The LU already exists and is thrown away: `nested_ls_outer_value_and_grad`
+         assembles `materialize_stabilized_schur_dense` at
+         `nested_ls_reduced_scale.py:4910-4917` and discards it after the
+         adjoint solve.
    - [ ] Trust-region cap on the prediction, DESC `tr_ratio` semantics
          (DESC *scales* the step to the bound `‖δs_pred‖ ≤ 0.1·‖s_anchor‖`,
          it does not reject): clip to the cap, then the reject-to-bare-anchor
@@ -167,30 +222,85 @@ accepts that error silently — we budget it).
          replay legs 3/4 from the synthesis validation ladder — predictor at
          the recorded x₃₈→x₃₉ displacement (does it prevent the wrong-branch
          capture?) and at the post-poisoning x₃₉→x₃₈ trial (expected: no
-         rescue — falsifiable prediction). Inputs from the recovered ledger
-         and probe JSON. Quiet GPU, ~5 solves.
+         rescue — falsifiable prediction). Quiet GPU, ~5 solves; the committed
+         replay log shows 43–547 s per solve, so budget ~20–45 min.
+         **Input audit (done).** Leg 3 is fully reconstructable offline:
+         `nested_ls_outer_b37_20260823_recovered_jax.json` has
+         `endpoint_eval_index = 38`, and `outer_evals[38].coil_dofs` and
+         `.inner_surface_sha256` both equal the endpoint's, so the eval-38
+         anchor is complete on disk — coils (11), surface (661), ι, G — and
+         x₃₉ = `outer_evals[39].coil_dofs` with `‖Δc‖₂ = 4.4728e-3`.
+         Leg 4 is **replay-then-predict, not pure replay**: the trial is
+         recorded (eval 43's `coil_dofs` are bitwise x₃₈, and it failed
+         `inner_solve_failed`), but the poisoned eval-39 *anchor surface* is
+         stored only as a hash (`inner_surface_sha256 = 052923e7b92e…`), so
+         s₃₉ must be regenerated by one inner solve at x₃₉ from the recorded
+         s₃₈ and verified against that hash. The regeneration is already
+         execution-proven by the transaction replay log (J = 0.07471552895095307,
+         9 inner iterations, from ledger surface `07c00c33e7bfddbd…`). Costs
+         one of the ~5 solves. Neither JAX ledger carries `vessel_dofs` (the
+         native twin does, at `$.endpoint.vessel_dofs`) and neither carries
+         the start surface — that comes from the `$.lane.path` bundle.
    - [ ] Wire into `_solve_nested_inner_at_coils` behind an explicit policy
          flag; transactional rollback covers the predictor state.
 
 3. **Inner-solve robustness ladder (review step 4; ~3 days)**
-   - [ ] Refresh-before-abandon (CVODE rule): on `inner_solve_failed` with a
-         stale factorization, re-assemble/re-factor once and retry before
-         declaring failure.
-   - [ ] Damped Newton: residual-norm backtracking with NaN rejection in the
-         inner walk (TORAX `root_newton_raphson` shape), replacing the
-         undamped step at `nested_ls_reduced.py:1146-1329`; keep the
-         existing Armijo/quality bails as-is where they are stricter.
+
+   **Re-scoped against the code and the B37 v2 evidence.** Two of the draft's
+   rungs rested on premises that do not survive contact with the source, and
+   the sufficiency question that motivated the ladder is now answered (see
+   "Adjudicated"). What remains is real but is **hygiene and headroom, not
+   sufficiency-critical** — with one rung the data actively motivates.
+
+   - [ ] ~~Refresh-before-abandon (CVODE rule): on `inner_solve_failed` with
+         a stale factorization, re-assemble/re-factor once and retry.~~
+         **Premise false as written.** The production path is
+         `linear_solver="dense_lu"` (`nested_ls_reduced_scale.py:4704-4711`),
+         and that path re-factors `factor_reduced_nested_ls_schur` at the top
+         of *every* Newton iteration (`nested_ls_reduced.py:1163-1170`). A
+         stale factorization exists only in `shamanskii` mode
+         (`stale_apply`, `:1144`, `:1217-1234`), which production does not
+         use. **Replaced by the rung the measurement actually points at:**
+         *don't abandon on the first rejected step.* In the B37 v2 diagnostic
+         all three late rejections (evals 39, 43, 53) bail with **9–10 of 10
+         Newton iterations unspent** at `‖g‖ ≈ 1e-3`, i.e. the walk quit on
+         the Armijo/quality bail (`nested_ls_reduced.py:1258-1284`,
+         `if not step_accepted: break` at `:1325`), not on budget. Retry the
+         rejected iteration once with increased `stab` before declaring
+         failure, and record the retry in the step ledger.
+   - [ ] ~~Damped Newton: residual-norm backtracking with NaN rejection,
+         replacing the undamped step at `nested_ls_reduced.py:1146-1329`.~~
+         **Already implemented.** `_schur_armijo_step`
+         (`nested_ls_reduced.py:803-831`) is a backtracking line search over
+         `NESTED_LS_SCHUR_BACKTRACKING_MAX_STEPS = 8` halvings that rejects
+         non-finite trials twice (`:815`, `:822`) and accepts on **either**
+         the objective Armijo condition **or** residual-norm monotonicity
+         (`trial_norm <= current_norm`, `:823`). The walk is damped; the
+         draft's "undamped Newton" is wrong. Nothing to do beyond the retry
+         rung above.
    - [ ] Three-valued exit on `NestedLsSchurNewtonResult`:
          `{converged, coarse_converged, failed}` with
          `NESTED_LS_NEWTON_COARSE_TOL` (proposed 1e-8, DESC's production
          setting) — recorded in ledgers; **treated as failed** until Phase 4
-         licenses coarse use.
+         licenses coarse use. Keep: this is the typed-evidence half of the
+         plan and Phase 4 depends on it.
    - [ ] Inner Δc sub-stepping from the committed anchor (1→2→4→8 legs,
-         halve on failure, floor, honest halt).
+         halve on failure, floor, honest halt). Keep, and it is the natural
+         partner to the retry rung: the three late failures are at
+         `‖Δc‖ = 7.3e-3, 3.2e-3, 7.2e-3` from a committed anchor, which is
+         exactly the regime sub-stepping addresses.
    - [ ] Delete the per-eval `state.set_anchor` at
          `nested_ls_reduced_scale.py:4743-4745` and return a frozen trial
          record instead; delete FD-0's now-redundant manual pins
          (`:5044`, `:5291`) and prove FD-0 no-op (scatter 0.0, 11/11).
+         **Ordering note: do this FIRST, before Phase 2.** It is the enabling
+         SSOT refactor — once the anchor moves only at commit, Phase 2's
+         `anchor_coil_dofs` and cached LU have exactly one write site. Doing
+         Phase 2 first means plumbing the predictor through a mutable anchor
+         and then re-plumbing it. Caller inventory is bounded: 3 read sites in
+         `nested_ls_reduced_scale.py`, 9 in `benchmarks/nested_ls_outer_jax_child.py`,
+         and a fake state plus 3 assertions in
+         `tests/geo/test_nested_ls_outer_transaction.py:979-1032`.
 
 4. **Tolerance/error budget for the adjoint (review step 5; ~2 days, gates Phase 5)**
    - [ ] Derive and test the bound: gradient error of the IFT adjoint as a
@@ -203,12 +313,27 @@ accepts that error silently — we budget it).
    - [ ] Red test: a coarse-converged result feeding the adjoint outside the
          budget must fail closed.
 
-5. **New sealed policy + B37 v2 certification (~1 day + ~4 h machine)**
+5. **New sealed policy + B37 v2 certification (~1 day + 15–18 h machine)**
    - [ ] Seal policy `anchor_frozen_predictor_v3` (names all Phase 2–4
          behaviors); bump child/claim schemas; charter amendment.
    - [ ] Fresh OMP sweep; B3 v3 physics gate; then paired single-process
          B37 v2 (single-pair rule) on a quiet box; walls informational.
    - [ ] Verdict section + receipts to the track doc.
+
+   **Machine budget, corrected.** The draft's "~4 h machine" covers only the
+   paired B37 leg. Grounded per-leg: the sweep is 16 legs, and the one
+   executed sweep (`nested_ls_outer_native_omp_sweep_20260823.json`, 8 legs,
+   Σ `process_wall_seconds` = 12 579 s) scales by ×2 for the doubled leg
+   count and ×~1.43 for v2's `nfev` 7 → 10, giving **8–11 h**; B3 v3 must be
+   3 pairs (the B37 interlock at `benchmarks/nested_ls_outer_claim.py:621-668`
+   requires exactly 3) at **~3.3 h** measured live; paired B37 at
+   `--pairs 1 --skip-prime` is **~4.1 h** (JAX leg 6866 s from the v2
+   diagnostic's `wall_splits.process_elapsed_seconds`, native leg 7646 s from
+   the recovered ledger's `walls.child_total_seconds`, plus 2 rejudges).
+   **Total 15–18 h**, and the same arithmetic makes Phase 1 11–14 h.
+   `--skip-prime` is legitimate only against a cache demonstrably warm in
+   *that worktree's* `.artifacts/nested-ls-outer-xla` — the cache is
+   per-worktree, so a fresh certification worktree starts cold.
 
 6. **Deferred (explicitly out of this plan's scope, revisit after Phase 5)**
    - Lineax reroute (test bit-identity under the B3 gate first),
@@ -222,8 +347,13 @@ accepts that error silently — we budget it).
       + the StopIteration pin test; `ruff` + targeted `pyright` clean
       (CPU venv, one file per process per repo rule).
 - [ ] Phase 1: B3 integration test green; merged-source B3 v2 receipt
-      physics-green (J-parity ≤1e-9 band, per-pair); DIAG4 manifest counts
-      match pinned expectations.
+      physics-green — the B3 gates are the per-lane C++ LS Newton reconstruct
+      no-op and `fail_closed_reason is None`, and the endpoint-J gap is
+      **measured and published, not gated** (`--j-parity-rtol` is forbidden at
+      budget 3, `benchmarks/nested_ls_outer_claim.py:1295-1299`); the 1e-9
+      band is the B37 gate frozen from this measurement. DIAG4 manifest
+      counts match pinned expectations (`…successor_authority.py:383`, not
+      `:212,451`).
 - [ ] Phase 2: recorded-displacement replay results written to the track doc
       (both falsifiable predictions adjudicated). Predictor ON changes the
       warm start of **every** evaluation at coils ≠ anchor, so a
@@ -275,14 +405,69 @@ accepts that error silently — we budget it).
 - [ ] Track doc + charter amendments record every policy change; no timing
       claim without the new sealed policy + fresh sweep.
 
+## Adjudicated (execution pass 1, 2026-08-24)
+
+- **The pair-2 bitwise canary is unresolvable as designed; Phase 1 pins one
+  simsoptpp sha.** The plan assumed a single binary boundary
+  (`41b2ca79` → `95190afa`) between B3 v2 pairs 1 and 2. A **third** binary
+  replaced it at 07:39:04, ten minutes into pair 2's native leg
+  (`d4a6e028…`, hardlinked into both venvs, while a peer rebuilt
+  `src/simsoptpp/permanent_magnet_optimization.cpp`). The three binaries are
+  pinned by process maps: the driver (PID 1133505, 05:12) holds the deleted
+  inode of `41b2ca79`, pair 2's native child (PID 2187449, 07:29) holds
+  `95190afa`, and pair 2's JAX leg plus all six rejudge children will load
+  `d4a6e028`. Pair 2 therefore straddles two binaries whatever its native leg
+  reports, and the `95190afa` → `d4a6e028` step is unmeasured on the native
+  lane entirely. **Ruling: freeze the `.so`, record its sha in
+  `nested_ls_runtime_identity` (Phase 0), and run the fresh sweep + B3 v2
+  from first leg to last rejudge on that one binary.** The in-flight receipt
+  is bridge evidence with a disclosed three-binary boundary, not a
+  source-bound baseline.
+- **B37 v2 endpoint (Open Question 2): YES, the transactional lane reaches
+  native-class J at budget 37 unaided.** Diagnostic `59ccbe8a0`
+  (`nested_ls_outer_b37v2_20260824_jax_diagnostic.json`, schema
+  `nested-ls-outer-jax-child.v4`): `endpoint_j = 0.006746235108545951` against
+  the v1 native reference `0.006737776589829025` — **+0.1255 %**, where v1
+  stalled **+7.65 %** away at `nit = 27`. Full budget consumed
+  (`nit = 37`, `nfev = njev = 60`, `restart_count = 0`), honest exit
+  (`status = 1`, ITERATIONS LIMIT, `ftol_zero_stop = False`), endpoint on the
+  optimizer's own x, `endpoint_inner_grad_l2 = 1.9e-15`. The poisoning class
+  is survived by construction: `outer_evals[25]` is a feasible probe at
+  `j = 10.6957`, `grad_l2 = 19627`, `iota_branch_delta = 0.0071` (under the
+  0.05 guard) that the line search rejected with the committed anchor intact —
+  the exact event that killed v1 at eval 39. **Consequence: Phase 3 is
+  robustness hygiene, not sufficiency-critical**, and Phase 3 is re-scoped
+  accordingly. Qualifier: single-lane, single-trajectory, non-certifying — no
+  native twin ran under v2 semantics and the GPU was shared, so walls are
+  informational.
+- **Where the remaining headroom is.** All 8 v2 rejections are
+  `inner_solve_failed`, zero `iota_branch_guard`, at evals 1–5 (start
+  transient) and 39, 43, 53. The three late ones bail with **9–10 of 10
+  Newton iterations unspent** at `‖g‖ ≈ 1e-3` and `‖Δc‖` of 7.3e-3, 3.2e-3,
+  7.2e-3 — an Armijo/quality bail on the *first* Newton step, not budget
+  exhaustion. That is what Phase 3's retry-with-regularization and
+  Δc sub-stepping rungs must target. The stall neighbourhood itself is gone:
+  v2 walks 38 → 39(rej) → 40 → 41 → 42 → 43(rej) → 44 and keeps descending,
+  where v1 was terminal after the eval-39 capture.
+- **B3 does not gate on J parity.** `--j-parity-rtol` is *forbidden* at
+  `--budget 3` (`benchmarks/nested_ls_outer_claim.py:1295-1299`) and
+  `endpoint_j_within_frozen_band` must be `None` on B3 pairs (`:605-609`).
+  B3 measures; 1e-9 is the **B37** gate, frozen from B3. Measured on the
+  in-flight pairs 0/1 (bitwise identical to each other on every endpoint
+  field): native `0.012982793095001662`, JAX `0.012982793095005024`,
+  relative gap **2.5895e-13** — inside 1e-9 by 3862×, but with the sign
+  flipped versus v1 (v1 measured −1.588e-12 with worse-direction 0.0), so a
+  B3 v2 receipt carries `measured_j_rel_gap_max = 2.59e-13` rather than 0.0.
+
 ## Open Questions
 
-- Does the B3 v2 pair-2 bitwise canary confirm binary-boundary indifference
-  (receipt in flight)? If not, Phase 1's re-baseline pins one sha.
-- B37 v2 diagnostic endpoint (in flight): does the transactional lane reach
-  native-class J at budget 37 unaided? Outcome decides how much of Phase 3
-  is sufficiency-critical vs robustness-hygiene.
-- Owner split: which phases run in this session vs Codex vs peer sessions
-  (fix-branch ownership is Codex's; coordinate before Phase 1).
+- Owner split: which phases run in this session vs Codex vs peer sessions.
+  The B3 v2 bridge run is a peer's; the B37 v2 diagnostic was a peer's; this
+  session owns the merge, Phase 0, and Phases 2–5 implementation.
+- Scheduling the certification runs. Phase 1 (11–14 h) plus Phase 5
+  (15–18 h) is 26–32 h of machine time that wants a quiet box, and this box
+  currently carries a DESC continuation, a pytest suite, and the bridge B3
+  run. Whether to serialize them here, defer, or move a leg to the A100 is a
+  scheduling decision, not a technical one.
 - `NESTED_LS_NEWTON_COARSE_TOL=1e-8`: adopt DESC's value or derive from the
   Phase 4 budget? (Plan assumes derive; 1e-8 is the starting hypothesis.)
