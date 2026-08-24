@@ -1,0 +1,20 @@
+outer prime jax cache budget 3 maxcor 10 omp 14 omp_provenance swept_artifact git_head c1eca51d982204d97ca080cab68685915df8209f
+outer omp evidence path docs/receipts/evidence/nested_ls_outer_native_omp_sweep_20260823.json sha256 d93d8b0bc158aa23aa875e69c1f35e55dc6d4ae62c2dcc24c4590bf2768c4d9c best_omp 14 rows 8
+outer jax success=True nit=3 nfev=7 accepted=4 rejected=3 J=0.013104620459181402 grad_l2=4.468385119308359 wall=734.5650555340108
+outer native success=True nit=3 nfev=7 J=0.013104620459202207 iota=0.14468195002369505 wall=1702.711376179941 omp=14
+outer jax success=True nit=3 nfev=7 accepted=4 rejected=3 J=0.013104620459181402 grad_l2=4.468385119308359 wall=761.3788406609092
+outer native success=True nit=3 nfev=7 J=0.013104620459202207 iota=0.14468195002369505 wall=1606.5008900179528 omp=14
+outer jax success=True nit=3 nfev=7 accepted=4 rejected=3 J=0.013104620459181402 grad_l2=4.468385119308359 wall=700.8573197820224
+outer native success=True nit=3 nfev=7 J=0.013104620459202207 iota=0.14468195002369505 wall=2563.8180192729924 omp=14
+outer jax success=True nit=3 nfev=7 accepted=4 rejected=3 J=0.013104620459181402 grad_l2=4.468385119308359 wall=748.9301687749103
+outer rejudge lane=native noop=True iter=0 native_grad_l2=2.909625158237741e-15 reduced_grad_l2=2.612129826151793e-15 reason=None wall=32.16997713013552
+outer rejudge lane=jax noop=True iter=0 native_grad_l2=2.5751710361664474e-15 reduced_grad_l2=1.4305534519754368e-15 reason=None wall=32.57992001599632
+outer pair repeat=0 physics=True native_wall=1702.711376179941 jax_wall=761.3788406609092 native_J=0.013104620459202207 jax_J=0.013104620459181402 j_rel_gap=-1.5875727734472976e-12 reason=None
+outer rejudge lane=native noop=True iter=0 native_grad_l2=2.909625158237741e-15 reduced_grad_l2=2.612129826151793e-15 reason=None wall=32.215354562038556
+outer rejudge lane=jax noop=True iter=0 native_grad_l2=2.5751710361664474e-15 reduced_grad_l2=1.4305534519754368e-15 reason=None wall=31.43319751205854
+outer pair repeat=1 physics=True native_wall=1606.5008900179528 jax_wall=700.8573197820224 native_J=0.013104620459202207 jax_J=0.013104620459181402 j_rel_gap=-1.5875727734472976e-12 reason=None
+outer rejudge lane=native noop=True iter=0 native_grad_l2=2.909625158237741e-15 reduced_grad_l2=2.612129826151793e-15 reason=None wall=31.900154881877825
+outer rejudge lane=jax noop=True iter=0 native_grad_l2=2.5751710361664474e-15 reduced_grad_l2=1.4305534519754368e-15 reason=None wall=31.83534248615615
+outer pair repeat=2 physics=True native_wall=2563.8180192729924 jax_wall=748.9301687749103 native_J=0.013104620459202207 jax_J=0.013104620459181402 j_rel_gap=-1.5875727734472976e-12 reason=None
+wrote /home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/docs/receipts/evidence/nested_ls_outer_b3_20260823.json
+ok True nested_speed_claim True jax_min 700.8573197820224 native_min 1606.5008900179528 speedup 2.292193924032355
