@@ -188,8 +188,8 @@ route.
 > Scope of this re-validation: endpoints and parity gates, plus a targeted
 > GPU-lane re-measurement of six cases with same-environment
 > authority-revision controls. For the timing, memory, and precision
-> verdicts see "2026-08-24 controlled re-measurement" under the wall-time
-> section.
+> verdicts see "Appendix B — 2026-08-24 controlled re-measurement" under
+> the wall-time section.
 
 ## Solver, iteration, evaluation, and status parity
 
@@ -319,8 +319,12 @@ single-threaded. A threaded native baseline would be faster, which makes the
 ### GPU performance in one table (2026-08-24)
 
 GPU speed as a multiple of native C++ (1.0x = equal; higher = GPU
-faster). "One-shot small run" is a cold launch including compile (the A100 table below, inverted); "real workload" is warm or realistic-scale, each
-with a receipt. Per-row evidence: `docs/jax_example_device_assignment.md`.
+faster). "One-shot small run" is a cold launch including compile — from
+the A100 table below (inverted) where the case appears there; the
+finitebuild and flat675 cold figures come from their own 5090 receipts
+(those cases are blocked in / absent from the A100 table). "Real
+workload" is warm or realistic-scale, each with a receipt. Per-row
+evidence: `docs/jax_example_device_assignment.md`.
 
 | Example | One-shot small run | Real workload | Confidence |
 |---|---:|---|---|
@@ -335,10 +339,13 @@ with a receipt. Per-row evidence: `docs/jax_example_device_assignment.md`.
 | coil-forces | 0.1x | **1.6x** warm | measured once |
 | stage-two-stochastic | 0.2x | **1.2-1.4x**, grows with ensemble | measured once |
 | projected-route single-stage | — | only device that finishes the script | measured once |
+| stage-two-optimization | 0.1x | 0.3x warm — native faster | measured once |
+| stage-two-planar-coils | 0.1x | 0.3x warm — native faster | measured once |
+| wireframe-rcls-with-ports | 0.7x | 0.6x device solve — native faster | measured once |
 | permanent-magnet-qa | — | plausible at nphi=64 | blocked |
 | wireframe-rcls-basic | 0.7x | plausible at larger size | untested |
-| tracing (3 examples) | 0.03x | plausible batching 1000s of trajectories | untested |
-| all others (13) | slower | stays on CPU — too small to fill a GPU | settled |
+| tracing (3 examples) | 0.03-0.04x | plausible batching 1000s of trajectories | untested |
+| all others (21 of 40) | slower | stays on CPU — too small to fill a GPU | settled |
 
 "Certified" = sealed multi-run receipt with verified physics; "measured
 once" = one dated measurement awaiting that treatment. One rule explains
