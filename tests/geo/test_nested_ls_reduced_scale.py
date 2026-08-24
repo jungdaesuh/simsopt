@@ -24,6 +24,8 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_NEWTON_TOL,
     NESTED_LS_OUTER_FD0_DIRECTIONS,
     NESTED_LS_OUTER_FD0_REL_TOL,
+    NESTED_LS_OUTER_JAX_CHILD_SCHEMA,
+    NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA,
     nested_ls_physics_newton_kwargs,
 )
 from simsopt_jax_adapters.geo.nested_ls_reduced import (
@@ -1956,8 +1958,8 @@ def _assert_outer_transaction_claim(payload: dict[str, object], *, budget: int) 
                 == row["child_payload_sha256"]
             )
             assert json.loads(child_raw) == row["child_payload"]
-        assert native_payload["schema"] == "nested-ls-outer-native-child.v3"
-        assert jax_payload["schema"] == "nested-ls-outer-jax-child.v4"
+        assert native_payload["schema"] == NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA
+        assert jax_payload["schema"] == NESTED_LS_OUTER_JAX_CHILD_SCHEMA
         assert native_payload["outer_policy"] == jax_payload["outer_policy"]
         assert (
             native_payload["outer_policy"]["transaction_policy_names"]

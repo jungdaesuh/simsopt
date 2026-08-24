@@ -396,9 +396,25 @@ def nested_ls_omp_threads_pinned(env: dict[str, str | None] | None = None) -> bo
 
 
 def nested_ls_runtime_identity() -> dict[str, object]:
-    """Host and JAX device identity for an evidence document."""
+    """Host, JAX device, and native-extension identity for an evidence document.
+
+    ``simsoptpp_path``/``simsoptpp_sha256`` bind the compiled binary the
+    native lane's numbers came out of, taken from the imported module's own
+    ``__file__`` rather than the venv layout or a fresh ``find_spec`` (which
+    can resolve to a copy other than the one already in ``sys.modules``).
+    The sha is of the bytes at that path when this is called: replacing the
+    file mid-run moves the sha while the loaded inode keeps serving the old
+    code, which is the drift this exists to record (``41b2ca79…`` →
+    ``95190afa…`` → ``d4a6e028…``). ``__file__`` is ``None`` only for a
+    statically linked extension, whose bytes cannot be read back; that
+    raises rather than minting an evidence document with no native identity.
+    """
 
     threading = nested_ls_threading_env()
+    simsoptpp_file = simsoptpp.__file__
+    if simsoptpp_file is None:
+        raise RuntimeError("simsoptpp has no __file__; cannot hash the extension.")
+    simsoptpp_path = Path(simsoptpp_file).resolve()
     return {
         "hostname": socket.gethostname(),
         "python_executable": sys.executable,
@@ -409,6 +425,8 @@ def nested_ls_runtime_identity() -> dict[str, object]:
         "threading": threading,
         "omp_num_threads": threading["OMP_NUM_THREADS"],
         "omp_pinned": nested_ls_omp_threads_pinned(threading),
+        "simsoptpp_path": str(simsoptpp_path),
+        "simsoptpp_sha256": sha256_file(simsoptpp_path),
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -566,18 +584,25 @@ def _git_output(*args: str) -> str:
     return subprocess.check_output(["git", *args], cwd=repo, text=True).strip()
 
 
-def nested_ls_receipt_provenance() -> dict[str, object]:
-    """Commit, versions, source hashes, and F3 input hashes for a receipt."""
+def nested_ls_receipt_provenance(
+    identity: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Commit, versions, source hashes, and F3 input hashes for a receipt.
+
+    Pass ``identity`` when the same evidence document also publishes a
+    standalone ``runtime`` block, so both come from ONE
+    :func:`nested_ls_runtime_identity` sample. Sampling twice can put two
+    answers in one document for the binary it ran on, which is the same as
+    having none: this campaign has measured the extension being replaced
+    three times mid-campaign, once ten minutes into a timed leg. It also
+    halves the work, since each sample digests the ~2.9 MB extension.
+    """
 
     repo = Path(__file__).resolve().parents[3]
     dirty = _git_output("status", "--porcelain")
     biot_path = DEFAULT_FLAT675_BUNDLE_ROOT / NATIVE_BIOT_SAVART_FILENAME
-    simsoptpp_file = simsoptpp.__file__
-    if simsoptpp_file is None:
-        raise RuntimeError("simsoptpp has no __file__; cannot hash the extension.")
-    simsoptpp_path = Path(simsoptpp_file).resolve()
     return {
-        **nested_ls_runtime_identity(),
+        **(nested_ls_runtime_identity() if identity is None else identity),
         "git_commit": _git_output("rev-parse", "HEAD"),
         "git_branch": _git_output("rev-parse", "--abbrev-ref", "HEAD"),
         "git_dirty": bool(dirty),
@@ -587,8 +612,6 @@ def nested_ls_receipt_provenance() -> dict[str, object]:
         "numpy_version": np.__version__,
         "scipy_version": scipy.__version__,
         "simsopt_version": simsopt.__version__,
-        "simsoptpp_path": str(simsoptpp_path),
-        "simsoptpp_sha256": sha256_file(simsoptpp_path),
         "source_sha256": {
             "nested_ls_contract.py": sha256_file(
                 repo / "src/simsopt_jax_adapters/geo/nested_ls_contract.py"
@@ -4195,8 +4218,8 @@ def evaluate_f3_b37_banana_omp_sweep(
     are recorded, not set. Not a nested speed claim.
     """
 
-    provenance = nested_ls_receipt_provenance()
     runtime = nested_ls_runtime_identity()
+    provenance = nested_ls_receipt_provenance(runtime)
     child = (
         Path(__file__).resolve().parents[3]
         / "benchmarks"
@@ -4338,8 +4361,8 @@ def evaluate_f3_b37_chunk_warm_probe(
 ) -> NestedLsChunkWarmProbe:
     """Repeated warm Ĥ+stab I assemblies after one discarded warmup."""
 
-    provenance = nested_ls_receipt_provenance()
     runtime = nested_ls_runtime_identity()
+    provenance = nested_ls_receipt_provenance(runtime)
     loaded, coils, y_end, _iota, _g_const, _g_value, freeze_reason = (
         _freeze_dense_lu_walk_endpoint(jax_boozer)
     )
@@ -5176,8 +5199,8 @@ def evaluate_f3_b37_outer_fd0_probe(
     no partial pass. ``native`` defaults to a fresh archived twin.
     """
 
-    provenance = nested_ls_receipt_provenance()
     runtime = nested_ls_runtime_identity()
+    provenance = nested_ls_receipt_provenance(runtime)
     loaded, coils, _y_star, iota, g_const, g_value, freeze_reason = (
         _freeze_dense_lu_walk_endpoint(jax_boozer)
     )

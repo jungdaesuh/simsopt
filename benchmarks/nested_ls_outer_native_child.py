@@ -63,10 +63,13 @@ from simsopt_jax_adapters.geo.flat675.policy import (
     flat675_outer_objective_config,
 )
 from simsopt_jax_adapters.geo.nested_ls_contract import (
+    NESTED_LS_OUTER_ACCEPT_WITHOUT_CANDIDATE_REASON,
     NESTED_LS_OUTER_IOTA_BRANCH_GUARD,
     NESTED_LS_OUTER_MAX_RESTARTS,
     NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA,
+    NestedLsOuterAcceptWithoutCandidate,
     NestedLsOuterCandidateStore,
+    nested_ls_outer_attempt_fun_is_objective,
     nested_ls_outer_endpoint_success,
     nested_ls_outer_ftol_zero_stop,
     nested_ls_outer_rejection_barrier,
@@ -80,6 +83,7 @@ from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     load_archived_nested_ls_pair,
     load_flat675_lane_blocks,
     nested_ls_omp_threads_pinned,
+    nested_ls_runtime_identity,
     nested_ls_threading_env,
     sha256_float64,
 )
@@ -484,7 +488,13 @@ class NativeOuterRun:
     def accept(self, coil_dofs: NDArray[np.float64]) -> None:
         """Promote exactly the candidate named by scipy's accepted callback."""
 
-        committed = self.candidates.accept(np.asarray(coil_dofs, dtype=np.float64))
+        parameters = np.asarray(coil_dofs, dtype=np.float64)
+        # ``accept`` raises the contract's own typed
+        # ``NestedLsOuterAcceptWithoutCandidate`` when the announced bytes
+        # match neither the incumbent nor a staged candidate; the restart
+        # loop catches it so the run publishes its evidence and exits
+        # nonzero instead of dying inside scipy. No retry, no fallback.
+        committed = self.candidates.accept(parameters)
         self._restore_anchor(committed)
 
     def _reinstate_warm_start(self) -> InnerWarmStart:
@@ -527,6 +537,12 @@ class NativeOuterRun:
             "iota": float(solve["iota"]),
             "G": float(solve["G"]),
             "iota_branch_delta": iota_branch_delta,
+            # The state this evaluation's nested solve warm-started from, and
+            # the state a refusal restores to — the same anchor
+            # ``iota_branch_delta`` and ``anchor_distance`` are measured
+            # against. Published under a name that says whose surface it is,
+            # on every row, exactly as the JAX twin does.
+            "anchor_surface_sha256": sha256_float64(warm_start.surface_dofs),
             "rejection_reason": reason,
         }
         if reason is not None:
@@ -552,6 +568,19 @@ class NativeOuterRun:
             record.update(
                 {
                     "inner_feasible": False,
+                    # Barrier row: ``objective`` and ``gradient_l2`` below are
+                    # the containment barrier and its derivative, not the
+                    # eight-term outer objective. See the ``value_is_valid``
+                    # field comment on ``_OuterEval`` in
+                    # benchmarks/nested_ls_outer_jax_child.py for the full
+                    # semantics the two lanes share. Nothing else on this row
+                    # is the anchor's either: ``iota``/``G``/the iteration
+                    # counts are this evaluation's own refused solve, and the
+                    # refused solve produced no surface of its own, so the
+                    # row names none — the anchor's stays under
+                    # ``anchor_surface_sha256`` above.
+                    "value_is_valid": False,
+                    "inner_surface_sha256": None,
                     "objective": value,
                     "objective_seconds": 0.0,
                     "gradient_l2": float(np.linalg.norm(gradient)),
@@ -596,6 +625,16 @@ class NativeOuterRun:
         record.update(
             {
                 "inner_feasible": True,
+                # Objective row: ``objective`` and ``gradient_l2`` below are
+                # the eight-term outer objective and its coil gradient, so
+                # this row is the one a physics aggregate may read.
+                "value_is_valid": True,
+                # The surface THIS solve produced, read from the candidate's
+                # captured copy rather than off the Boozer, which the restore
+                # above may already have wound back to the incumbent.
+                "inner_surface_sha256": sha256_float64(
+                    candidate.warm_start.surface_dofs
+                ),
                 "objective": value,
                 "objective_seconds": objective_seconds,
                 "gradient_l2": float(np.linalg.norm(gradient)),
@@ -630,14 +669,42 @@ def _term_ledger(
     ]
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
+@dataclass(frozen=True, slots=True)
+class NativeOuterRunContext:
+    """Everything one native outer run needs from the heavy world.
+
+    :func:`_prepare_native_run` is the composition root: the flat-675
+    bundle, the native ``BoozerSurface`` pair, the frozen vessel and the
+    eight-term objective all resolve there. :func:`_drive_native_run`
+    owns the optimizer loop, the transaction and the payload, and reaches
+    physics only through ``run``. The split is what lets the rejection
+    ledger and the honest-failure endpoint be exercised without the
+    bundle on disk.
+    """
+
+    run: NativeOuterRun
+    outer_policy: OuterOptimizerPolicy
+    objective_weights: tuple[float, ...]
+    vessel_dofs: NDArray[np.float64]
+    lane_meta: dict[str, object]
+    seed_iota: float
+    seed_G: float
+    start_coil_dofs: NDArray[np.float64]
+    threading: dict[str, str | None]
+    module_import_seconds: float
+    build_seconds: float
+    child_started: float
+
+
+def _prepare_native_run(*, budget: int, maxcor: int) -> NativeOuterRunContext:
+    """Load the bundle, build the eight-term objective, seed the transaction."""
+
     child_started = time.perf_counter()
     threading = nested_ls_threading_env()
     outer_policy = load_outer_optimizer_policy(
         DEFAULT_F3_B37_NATIVE_LANE,
-        budget=int(args.budget),
-        maxcor=int(args.maxcor),
+        budget=int(budget),
+        maxcor=int(maxcor),
     )
 
     build_started = time.perf_counter()
@@ -682,34 +749,117 @@ def main(argv: list[str] | None = None) -> int:
         rejection_distance_scale=outer_policy.rejection_distance_scale,
         start_coil_dofs=start_coil_dofs,
     )
+    return NativeOuterRunContext(
+        run=run,
+        outer_policy=outer_policy,
+        objective_weights=objective.weights,
+        # A real snapshot, not ``np.asarray``: ``local_full_x`` hands back the
+        # ``DOFs`` object's own ``_x`` buffer, and ``asarray`` on a float64
+        # array does not copy, so the frozen context would hold a live alias
+        # to the vessel for the whole run and serialize whatever it had become
+        # at payload time.
+        vessel_dofs=np.array(vessel.local_full_x, dtype=np.float64, copy=True),
+        lane_meta=lane_meta,
+        seed_iota=seed_iota,
+        seed_G=seed_g,
+        start_coil_dofs=start_coil_dofs,
+        threading=threading,
+        module_import_seconds=MODULE_IMPORT_SECONDS,
+        build_seconds=build_seconds,
+        child_started=child_started,
+    )
 
+
+def _drive_native_run(context: NativeOuterRunContext) -> dict[str, object]:
+    """Run the outer optimizer and return this child's complete payload."""
+
+    run = context.run
+    outer_policy = context.outer_policy
     solve_started = time.perf_counter()
     # Recovery only: a qualifying early stop restarts from the transaction's
     # complete incumbent with fresh L-BFGS memory. Trial evaluations cannot
     # alter that incumbent; the identical rule lives in the JAX twin.
-    budget_total = int(args.budget)
+    budget_total = int(outer_policy.maxiter)
     consumed_nit = 0
     total_nfev = 0
     total_njev = 0
+    attempts_started = 0
     restart_nits: list[int] = []
     restart_attempts: list[dict[str, object]] = []
-    attempt_x0 = start_coil_dofs
+    attempt_x0 = context.start_coil_dofs
+    faulted: NestedLsOuterAcceptWithoutCandidate | None = None
+    result = None
+    accepted_iterates = 0
+
+    def _accept(coil_dofs: NDArray[np.float64]) -> None:
+        """Promote the announced iterate and count it.
+
+        The count is the only record of how far an attempt got when scipy
+        never returns, which is the accept-without-candidate path. The JAX
+        twin reads the same quantity off its ``outer_iterates`` ledger.
+        """
+
+        nonlocal accepted_iterates
+        run.accept(coil_dofs)
+        accepted_iterates += 1
+
     while True:
+        attempts_started += 1
         rejected_before = sum(
             1 for record in run.records if record["rejection_reason"] is not None
         )
+        records_before = len(run.records)
+        accepted_before = accepted_iterates
         attempt_options = outer_policy.as_scipy_options()
         attempt_options["maxiter"] = budget_total - consumed_nit
-        result = minimize(
-            run,
-            attempt_x0,
-            jac=True,
-            method=outer_policy.method,
-            options=attempt_options,
-            callback=run.accept,
-        )
+        try:
+            result = minimize(
+                run,
+                attempt_x0,
+                jac=True,
+                method=outer_policy.method,
+                options=attempt_options,
+                callback=_accept,
+            )
+        except NestedLsOuterAcceptWithoutCandidate as fault:
+            # Fail closed, but not before the evidence is published: this
+            # attempt produced no scipy verdict, and every row already in
+            # the ledger stays in the payload below.
+            #
+            # scipy returned nothing to count with, so this attempt's share
+            # of the published counters comes from the ledger the child kept
+            # itself: one evaluation row per call into ``run``, and
+            # ``jac=True`` means every such call returned the gradient too,
+            # so nfev and njev are the same count. ``nit`` is the number of
+            # accepted iterates this attempt completed — the faulting
+            # callback completed none, which is why it can be zero beside a
+            # nonzero nfev. No scipy verdict is fabricated: this attempt
+            # contributes no ``restart_attempts`` row.
+            faulted = fault
+            faulted_nfev = len(run.records) - records_before
+            consumed_nit += accepted_iterates - accepted_before
+            total_nfev += faulted_nfev
+            total_njev += faulted_nfev
+            break
         attempt_nit = int(result.nit)
         grad_inf = float(np.max(np.abs(np.asarray(result.jac, dtype=np.float64))))
+        # ``result.fun`` is whatever this attempt's last evaluation returned,
+        # and a wholly rejected line search leaves it holding a containment
+        # barrier while ``result.x`` and ``result.jac`` are restored to the
+        # incumbent (reproduced by
+        # tests/geo/test_nested_ls_outer_child_evidence.py on the shipped
+        # fixture: barrier 0.31250004043721513 beside an anchor objective of
+        # 0.3125). The raw scipy datum stays published and the shared
+        # provenance rule decides, from this lane's own last ledger row,
+        # whether it IS the objective. Both lanes call the one rule.
+        last_record = run.records[-1]
+        attempt_fun_is_objective = nested_ls_outer_attempt_fun_is_objective(
+            reported_parameters=np.asarray(result.x, dtype=np.float64),
+            last_evaluated_parameters=np.asarray(
+                last_record["coil_dofs"], dtype=np.float64
+            ),
+            last_evaluation_value_is_valid=bool(last_record["value_is_valid"]),
+        )
         rejected_this_attempt = (
             sum(1 for record in run.records if record["rejection_reason"] is not None)
             - rejected_before
@@ -731,6 +881,7 @@ def main(argv: list[str] | None = None) -> int:
                 "status": int(result.status),
                 "message": str(result.message),
                 "fun": float(result.fun),
+                "value_is_valid": attempt_fun_is_objective,
                 "grad_inf": grad_inf,
                 "rejected_this_attempt": int(rejected_this_attempt),
                 "restart_reason": restart_reason,
@@ -753,18 +904,47 @@ def main(argv: list[str] | None = None) -> int:
         )
     solve_seconds = float(time.perf_counter() - solve_started)
 
-    optimizer_x = np.asarray(result.x, dtype=np.float64)
-    endpoint = run.endpoint_at(optimizer_x)
-    endpoint_is_optimizer_x = endpoint is not None
+    if faulted is None:
+        optimizer_x = np.asarray(result.x, dtype=np.float64)
+        endpoint: OuterAnchor | None = run.endpoint_at(optimizer_x)
+        endpoint_is_optimizer_x = endpoint is not None
+        status: int | None = int(result.status)
+        message = str(result.message)
+        optimizer_success = bool(result.success)
+        ftol_zero_stop = nested_ls_outer_ftol_zero_stop(
+            ftol=float(outer_policy.ftol),
+            message=message,
+        )
+        success = nested_ls_outer_endpoint_success(
+            endpoint_matches=endpoint_is_optimizer_x,
+            ftol=float(outer_policy.ftol),
+            status=int(result.status),
+            message=message,
+        )
+        child_fault_reason: str | None = None
+    else:
+        # The fault fired inside scipy's accepted-step callback, so this run
+        # has no scipy verdict at all: ``status`` and ``message`` say that
+        # rather than borrowing a previous attempt's. ``optimizer_x`` is the
+        # point scipy announced and the store could not match — the honest
+        # subject of the failure — and it is by construction not the
+        # committed incumbent, which is why the store refused it. This path
+        # names no endpoint of its own; the committed-incumbent fallback
+        # below is the one that supplies it.
+        optimizer_x = np.array(faulted.parameters, dtype=np.float64, copy=True)
+        endpoint = None
+        endpoint_is_optimizer_x = False
+        status = None
+        message = str(faulted)
+        optimizer_success = False
+        ftol_zero_stop = False
+        success = False
+        child_fault_reason = NESTED_LS_OUTER_ACCEPT_WITHOUT_CANDIDATE_REASON
     if endpoint is None:
         endpoint = run.anchor
     if endpoint is None:
         raise ValueError("the native outer twin accepted no outer iterate.")
     endpoint_surface = np.asarray(endpoint.warm_start.surface_dofs, dtype=np.float64)
-    ftol_zero_stop = nested_ls_outer_ftol_zero_stop(
-        ftol=float(outer_policy.ftol),
-        message=str(result.message),
-    )
     payload: dict[str, object] = {
         "schema": NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA,
         "publication": PUBLICATION,
@@ -773,13 +953,15 @@ def main(argv: list[str] | None = None) -> int:
         # predicate the parent needs: the reported endpoint is the
         # optimizer's own final iterate and the committed transaction point.
         # An FTOL stop is never success under the sealed ftol=0 policy.
-        "success": nested_ls_outer_endpoint_success(
-            endpoint_matches=endpoint_is_optimizer_x,
-            ftol=float(outer_policy.ftol),
-            status=int(result.status),
-            message=str(result.message),
-        ),
-        "optimizer_success": bool(result.success),
+        "success": success,
+        # None on every completed run. A named fault means this payload is
+        # published evidence of a failure, never a result: read it before
+        # reading anything else here. It answers a different question from
+        # ``success``, which is the judged outcome of a run that did produce
+        # a scipy verdict; this key says the child could not complete and
+        # produced no scipy verdict at all.
+        "child_fault_reason": child_fault_reason,
+        "optimizer_success": optimizer_success,
         "ftol_zero_stop": ftol_zero_stop,
         "feasible_evaluations": len(run.feasible),
         "rejected_evaluations": sum(
@@ -792,24 +974,29 @@ def main(argv: list[str] | None = None) -> int:
                 if record["rejection_reason"] is not None
             }
         ),
-        "budget": int(args.budget),
-        "maxcor": int(args.maxcor),
+        "budget": int(outer_policy.maxiter),
+        "maxcor": int(outer_policy.maxcor),
         "nit": int(consumed_nit),
         "nfev": int(total_nfev),
         "njev": int(total_njev),
-        "restart_count": int(len(restart_nits) - 1),
+        # One restart per attempt after the first. Counted when an attempt
+        # begins, not when scipy returns: an attempt that faults at the
+        # accepted-step callback records no ``restart_nits`` entry, so
+        # counting entries would under-report the restarts that really
+        # happened on exactly the path where a reader most needs the truth.
+        "restart_count": int(attempts_started - 1),
         "restart_nits": [int(value) for value in restart_nits],
         "restart_attempts": restart_attempts,
-        "status": int(result.status),
-        "message": str(result.message),
+        "status": status,
+        "message": message,
         "endpoint_is_optimizer_x": endpoint_is_optimizer_x,
         "optimizer_x": [float(value) for value in optimizer_x],
         "outer_policy": outer_policy.as_payload(),
         "start": {
-            "lane": lane_meta,
-            "coil_dofs": [float(value) for value in start_coil_dofs],
-            "qr_seed_iota": seed_iota,
-            "qr_seed_G": seed_g,
+            "lane": context.lane_meta,
+            "coil_dofs": [float(value) for value in context.start_coil_dofs],
+            "qr_seed_iota": context.seed_iota,
+            "qr_seed_G": context.seed_G,
             "seed_provenance": (
                 "lane result.endpoint_inner_state, read as archived; the live "
                 "QR that produced it is deliberately not rerun on this lane"
@@ -820,41 +1007,64 @@ def main(argv: list[str] | None = None) -> int:
             "coil_dofs": [float(value) for value in endpoint.coil_dofs],
             "coil_sha256": sha256_float64(endpoint.coil_dofs),
             "objective": endpoint.objective,
-            "terms": _term_ledger(endpoint.terms, objective.weights),
+            "terms": _term_ledger(endpoint.terms, context.objective_weights),
             "iota": endpoint.warm_start.iota,
             "G": endpoint.warm_start.G,
             "gradient": [float(value) for value in endpoint.gradient],
             "gradient_l2": float(np.linalg.norm(endpoint.gradient)),
             "surface_dofs": [float(value) for value in endpoint_surface],
             "surface_sha256": sha256_float64(endpoint_surface),
-            "vessel_dofs": [float(value) for value in np.asarray(vessel.local_full_x)],
+            "vessel_dofs": [float(value) for value in context.vessel_dofs],
         },
         "evaluations": run.records,
         "walls": {
             "clock": "informational_child_splits_only",
             # module_import_seconds bounds the residual JAX cost on this lane:
             # nothing here traces, but the adapter loaders import JAX.
-            "module_import_seconds": MODULE_IMPORT_SECONDS,
-            "problem_build_seconds": build_seconds,
+            "module_import_seconds": context.module_import_seconds,
+            "problem_build_seconds": context.build_seconds,
             "outer_solve_seconds": solve_seconds,
             "inner_seconds_total": float(
                 sum(float(record["inner_seconds"]) for record in run.records)
             ),
-            "main_seconds": float(time.perf_counter() - child_started),
+            "main_seconds": float(time.perf_counter() - context.child_started),
             "child_total_seconds": float(time.perf_counter() - _IMPORT_STARTED),
         },
-        "threading": threading,
-        "omp_pinned": nested_ls_omp_threads_pinned(threading),
-        "omp_num_threads": threading["OMP_NUM_THREADS"],
+        "threading": context.threading,
+        "omp_pinned": nested_ls_omp_threads_pinned(context.threading),
+        "omp_num_threads": context.threading["OMP_NUM_THREADS"],
+        # This lane's numbers come out of the compiled extension, so this
+        # lane must bind it. The parent's own record cannot stand in: the
+        # children are separate processes launched with rewritten
+        # environments, so only the child that loaded a binary can witness
+        # which one it loaded. Sampled at payload time because
+        # ``nested_ls_runtime_identity`` ends in a wall-clock
+        # ``timestamp_utc`` and hashes the extension's bytes as they are when
+        # it is called — both are write-time facts. Same function on both
+        # lanes, so the two receipts are comparable field for field.
+        "runtime": nested_ls_runtime_identity(),
     }
+    return payload
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    context = _prepare_native_run(budget=int(args.budget), maxcor=int(args.maxcor))
+    payload = _drive_native_run(context)
     write_strict_json(args.out_json, payload)
+    endpoint = payload["endpoint"]
     print(
         "native outer"
         f" nit={payload['nit']} nfev={payload['nfev']}"
-        f" J={endpoint.objective!r} iota={endpoint.warm_start.iota!r}"
+        f" J={endpoint['objective']!r} iota={endpoint['iota']!r}"
+        f" child_fault_reason={payload['child_fault_reason']!r}"
         f" wrote={args.out_json}",
         flush=True,
     )
+    # Fail closed only after the receipt is on disk. The parent sees a
+    # nonzero child, and the evidence the run did accumulate survives it.
+    if payload["child_fault_reason"] is not None:
+        return 1
     return 0
 
 

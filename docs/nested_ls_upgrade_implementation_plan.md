@@ -69,7 +69,7 @@ Closure section, commit `55e87b294`), track verdict
   (`worktree-agent-a294f051ffd23f1c9` @ `92ec95f52`) is merged; its three
   test files are green (68 + 4 + 19 passed).
 - The containment is at the **child layer**: children restore the committed
-  candidate after every evaluation. `nested_ls_reduced_scale.py:4743` still
+  candidate after every evaluation. `nested_ls_reduced_scale.py:4766` still
   mutates the anchor per-eval inside `_solve_nested_inner_at_coils`; the
   restore makes it harmless but the mutation itself is un-deleted (SSOT debt).
 - Key seams (main-tree line numbers, scale module identical on both
@@ -113,8 +113,8 @@ Closure section, commit `55e87b294`), track verdict
   measured fork. (Weaker on the JAX side — that lane barely touches the C++
   binary.) **Even completed, this receipt could not gate a merged-tree B37** — the merged driver
   refuses it on five independent interlocks: claim schema `v1` not `v2`
-  (`benchmarks/nested_ls_outer_claim.py:484-506`), `git_head` `01fefbadd`
-  not the B37 run's HEAD (`:621-668`), a v1 sweep artifact at
+  (`benchmarks/nested_ls_outer_claim.py:476`), `git_head` `01fefbadd`
+  not the B37 run's HEAD (`:476`), a v1 sweep artifact at
   `git_head 484b3fc26`, that artifact's `omp_set [8,14,16,20]` not the
   frozen host set, and sweep rows lacking `child_schema`. Phase 1's fresh
   sweep is therefore not polish; it is the only path to a B37-eligible B3.
@@ -142,7 +142,7 @@ accepts that error silently — we budget it).
 - Codex owned `fix-b37-restart` content-wise; the merge conflict was one
   docs section and was mechanical, as predicted.
 - Every claim/sweep run needs a **dedicated clean worktree at the frozen
-  SHA**. `_require_clean_tree()` (`benchmarks/nested_ls_outer_claim.py:317-326`
+  SHA**. `_require_clean_tree()` (`benchmarks/nested_ls_outer_claim.py:317`
   → `benchmarks/nested_ls_shamanskii_attribution.py:114-123`) aborts before
   any child launches if any tracked-or-untracked path outside
   `docs/receipts/evidence/` is dirty, and this repo is a shared worktree with
@@ -168,8 +168,9 @@ accepts that error silently — we budget it).
          The catch is `StopIteration`-specific (a `RuntimeError` from the same
          callback propagates); a `StopIteration` **subclass** is also caught.
          **Plan correction: the children pass OLD-style single-positional
-         callbacks** (`nested_ls_outer_jax_child.py:446`,
-         `nested_ls_outer_native_child.py:709`), not new-style. The triple,
+         callbacks** — `nested_ls_outer_jax_child.py:584` (`def _callback(xk)`)
+         and the native twin's counting wrapper around
+         `run.accept` (`nested_ls_outer_native_child.py:803`) — not new-style. The triple,
          `nit`, `nfev` and `x` are identical either way, but a new-style
          callback receives an `OptimizeResult` whose `.x` **is the live buffer
          L-BFGS-B mutates in place** — a migration must copy at the record
@@ -222,13 +223,16 @@ accepts that error silently — we budget it).
          is exactly the drift the field exists to catch.
    - [x] Soften the `accept()` crash into an honest-failure payload.
          **Plan correction: it is a `RuntimeError`, not a `KeyError`**
-         (`nested_ls_contract.py:298`) — an implementer who writes
+         (`nested_ls_contract.py:314`) — an implementer who writes
          `except KeyError` would leave the crash untouched while the test
          appeared to pass. **And the item was half a fix as written:** the
          parent's `_run_child` raised on `rc != 0` *before* reading the
          payload, so a schema-valid failure receipt was invisible to the
          parent no matter how well the child wrote it; the parent now names
-         `failure_reason` and the payload path. The shared vocabulary lives
+         `child_fault_reason` and the payload path (renamed from
+         `failure_reason`, which collided with three other live vocabularies
+         in the same call stack and was narrower than the sealed charter's
+         definition of child failure). The shared vocabulary lives
          in `nested_ls_contract.py` as
          `NESTED_LS_OUTER_ACCEPT_WITHOUT_CANDIDATE_REASON`, beside
          `restart_reason`'s vocabulary, not in one lane.
@@ -293,7 +297,7 @@ accepts that error silently — we budget it).
 
 2. **Predictor on recorded displacements (review step 3; ~2 days)**
    - [ ] Add `anchor_coil_dofs` to `NestedLsOuterState`
-         (`nested_ls_reduced_scale.py:4568-4611`), written at commit time.
+         (`nested_ls_reduced_scale.py:4592-4646`), written at commit time.
          Do this **together with** Phase 3's deletion of the per-eval
          `set_anchor` (see the ordering note under Phase 3): building the
          predictor on the still-mutable rolling anchor means plumbing it
@@ -303,7 +307,7 @@ accepts that error silently — we budget it).
          `apply_reduced_mixed_schur_coil_tangent` JVP + one cached LU solve.
          The LU already exists and is thrown away: `nested_ls_outer_value_and_grad`
          assembles `materialize_stabilized_schur_dense` at
-         `nested_ls_reduced_scale.py:4910-4917` and discards it after the
+         `nested_ls_reduced_scale.py:4933-4940` and discards it after the
          adjoint solve.
    - [ ] Trust-region cap on the prediction, DESC `tr_ratio` semantics
          (DESC *scales* the step to the bound `‖δs_pred‖ ≤ 0.1·‖s_anchor‖`,
@@ -348,9 +352,9 @@ accepts that error silently — we budget it).
    - [ ] ~~Refresh-before-abandon (CVODE rule): on `inner_solve_failed` with
          a stale factorization, re-assemble/re-factor once and retry.~~
          **Premise false as written.** The production path is
-         `linear_solver="dense_lu"` (`nested_ls_reduced_scale.py:4704-4711`),
+         `linear_solver="dense_lu"` (`nested_ls_reduced_scale.py:4727-4734`),
          and that path re-factors `factor_reduced_nested_ls_schur` at the top
-         of *every* Newton iteration (`nested_ls_reduced.py:1163-1170`). A
+         of *every* Newton iteration (`nested_ls_reduced.py:1158-1163`). A
          stale factorization exists only in `shamanskii` mode
          (`stale_apply`, `:1144`, `:1217-1234`), which production does not
          use. **Replaced by the rung the measurement actually points at:**
@@ -383,9 +387,9 @@ accepts that error silently — we budget it).
          `‖Δc‖ = 7.3e-3, 3.2e-3, 7.2e-3` from a committed anchor, which is
          exactly the regime sub-stepping addresses.
    - [ ] Delete the per-eval `state.set_anchor` at
-         `nested_ls_reduced_scale.py:4743-4745` and return a frozen trial
+         `nested_ls_reduced_scale.py:4766` and return a frozen trial
          record instead; delete FD-0's now-redundant manual pins
-         (`:5044`, `:5291`) and prove FD-0 no-op (scatter 0.0, 11/11).
+         (`:5067`, `:5314`) and prove FD-0 no-op (scatter 0.0, 11/11).
          **Ordering note: do this FIRST, before Phase 2.** It is the enabling
          SSOT refactor — once the anchor moves only at commit, Phase 2's
          `anchor_coil_dofs` and cached LU have exactly one write site. Doing
@@ -393,7 +397,7 @@ accepts that error silently — we budget it).
          and then re-plumbing it. Caller inventory is bounded: 3 read sites in
          `nested_ls_reduced_scale.py`, 9 in `benchmarks/nested_ls_outer_jax_child.py`,
          and a fake state plus 3 assertions in
-         `tests/geo/test_nested_ls_outer_transaction.py:979-1032`.
+         `tests/geo/test_nested_ls_outer_transaction.py:1095-1148`.
 
 4. **Tolerance/error budget for the adjoint (review step 5; ~2 days, gates Phase 5)**
    - [ ] Derive and test the bound: gradient error of the IFT adjoint as a
@@ -418,7 +422,7 @@ accepts that error silently — we budget it).
    executed sweep (`nested_ls_outer_native_omp_sweep_20260823.json`, 8 legs,
    Σ `process_wall_seconds` = 12 579 s) scales by ×2 for the doubled leg
    count and ×~1.43 for v2's `nfev` 7 → 10, giving **8–11 h**; B3 v3 must be
-   3 pairs (the B37 interlock at `benchmarks/nested_ls_outer_claim.py:621-668`
+   3 pairs (the B37 interlock at `benchmarks/nested_ls_outer_claim.py:476`
    requires exactly 3) at **~3.3 h** measured live; paired B37 at
    `--pairs 1 --skip-prime` is **~4.1 h** (JAX leg 6866 s from the v2
    diagnostic's `wall_splits.process_elapsed_seconds`, native leg 7646 s from
@@ -443,7 +447,7 @@ accepts that error silently — we budget it).
       physics-green — the B3 gates are the per-lane C++ LS Newton reconstruct
       no-op and `fail_closed_reason is None`, and the endpoint-J gap is
       **measured and published, not gated** (`--j-parity-rtol` is forbidden at
-      budget 3, `benchmarks/nested_ls_outer_claim.py:1295-1299`); the 1e-9
+      budget 3, `benchmarks/nested_ls_outer_claim.py:1367`); the 1e-9
       band is the B37 gate frozen from this measurement. DIAG4 manifest
       counts match pinned expectations (`…successor_authority.py:383`, not
       `:212,451`).
@@ -550,7 +554,7 @@ accepts that error silently — we budget it).
   v2 walks 38 → 39(rej) → 40 → 41 → 42 → 43(rej) → 44 and keeps descending,
   where v1 was terminal after the eval-39 capture.
 - **B3 does not gate on J parity.** `--j-parity-rtol` is *forbidden* at
-  `--budget 3` (`benchmarks/nested_ls_outer_claim.py:1295-1299`) and
+  `--budget 3` (`benchmarks/nested_ls_outer_claim.py:1367`) and
   `endpoint_j_within_frozen_band` must be `None` on B3 pairs (`:605-609`).
   B3 measures; 1e-9 is the **B37** gate, frozen from B3. Measured on the
   in-flight pairs 0/1 (bitwise identical to each other on every endpoint

@@ -26,10 +26,12 @@ from benchmarks.nested_ls_outer_claim import (
     _require_omp_evidence,
     _rejudge_endpoint_mismatch,
 )
+import scipy
 from scipy.optimize import fmin_l_bfgs_b, minimize
 from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_OUTER_FTOL_STALL_MESSAGE,
     NESTED_LS_OUTER_JAX_CHILD_SCHEMA,
+    NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA,
     NESTED_LS_OUTER_PUBLISHABLE_STOP_STATUSES,
     NESTED_LS_OUTER_REJUDGE_SCHEMA,
     NestedLsOuterCandidateStore,
@@ -39,6 +41,18 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     nested_ls_outer_rejection_barrier,
     nested_ls_outer_restart_reason,
 )
+
+
+def _production_child_encoding(payload: dict[str, object]) -> str:
+    """Serialize exactly as the outer children write their payload files.
+
+    Compact separators, insertion order, one trailing newline — see
+    ``benchmarks/nested_ls_outer_jax_child.py``'s ``main``. Every fixture that
+    stands in for a child's bytes goes through here so no test can quietly
+    adopt the parent's encoding and mask a producer/consumer disagreement.
+    """
+
+    return json.dumps(payload, allow_nan=False) + "\n"
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,7 +158,7 @@ def _omp_payload(git_head: str) -> dict[str, object]:
             "omp_pinned": True,
             "repeat": repeat,
             "success": True,
-            "child_schema": "nested-ls-outer-native-child.v3",
+            "child_schema": NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA,
             "process_wall_seconds": float(20 - omp + repeat),
         }
         for repeat in range(SWEEP_REPEATS)
@@ -272,7 +286,7 @@ def test_omp_interlock_refuses_nonfinite_or_nonpositive_walls(
 def _claim_pair(repeat: int) -> dict[str, object]:
     policy = {"method": "L-BFGS-B", "maxiter": 3, "maxcor": 10}
     native_payload: dict[str, object] = {
-        "schema": "nested-ls-outer-native-child.v3",
+        "schema": NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA,
         "budget": 3,
         "maxcor": 10,
         "omp_num_threads": 8,
@@ -404,10 +418,16 @@ def _claim_pair(repeat: int) -> dict[str, object]:
             "endpoint_g": row["endpoint_g"],
             "fail_closed_reason": None,
         }
-        reencoded = json.dumps(payload, allow_nan=False, indent=2) + "\n"
+        # Encode the way the PRODUCTION child writes its payload — compact,
+        # insertion-ordered — not the way the parent happens to re-encode.
+        # A fixture that adopts the consumer's convention can never catch a
+        # producer/consumer disagreement, which is how the rejudge binding
+        # stayed broken end to end without a red test.
+        payload_raw = _production_child_encoding(payload)
         return {
             "payload": payload,
-            "payload_sha256": hashlib.sha256(reencoded.encode("utf-8")).hexdigest(),
+            "payload_raw": payload_raw,
+            "payload_sha256": hashlib.sha256(payload_raw.encode("utf-8")).hexdigest(),
             "process_wall_seconds": 1.0,
             "timed": False,
             "repeat": repeat,
@@ -666,16 +686,28 @@ def test_b3_interlock_refuses_row_endpoint_tampering(tmp_path: Path):
 
 
 def test_claim_parent_rejects_a_child_from_another_schema():
+    """The parent admits this campaign's child contract and refuses any other.
+
+    Both sides come from the live constant rather than a literal. A frozen
+    literal here would keep passing after a schema bump while every producer
+    had moved, which is the drift the schema string exists to catch. The
+    refusal case is built by mutating the live constant, so it cannot
+    accidentally become the accepted one.
+    """
+
+    foreign_schema = f"{NESTED_LS_OUTER_JAX_CHILD_SCHEMA}-not-this-contract"
+    assert foreign_schema != NESTED_LS_OUTER_JAX_CHILD_SCHEMA
+
     _require_child_schema(
-        {"schema": "nested-ls-outer-jax-child.v4"},
+        {"schema": NESTED_LS_OUTER_JAX_CHILD_SCHEMA},
         label="jax",
-        expected_schema="nested-ls-outer-jax-child.v4",
+        expected_schema=NESTED_LS_OUTER_JAX_CHILD_SCHEMA,
     )
     with pytest.raises(RuntimeError, match="outer jax child schema"):
         _require_child_schema(
-            {"schema": "nested-ls-outer-jax-child.v3"},
+            {"schema": foreign_schema},
             label="jax",
-            expected_schema="nested-ls-outer-jax-child.v4",
+            expected_schema=NESTED_LS_OUTER_JAX_CHILD_SCHEMA,
         )
 
 
@@ -684,7 +716,7 @@ def test_claim_parent_accepts_only_the_distinct_rejudge_payload_schema():
         "schema": NESTED_LS_OUTER_REJUDGE_SCHEMA,
         "mode": "rejudge",
         "judged_lane": "jax",
-        "judged_schema": "nested-ls-outer-jax-child.v4",
+        "judged_schema": NESTED_LS_OUTER_JAX_CHILD_SCHEMA,
     }
     _require_child_schema(
         rejudge_payload,
@@ -695,7 +727,7 @@ def test_claim_parent_accepts_only_the_distinct_rejudge_payload_schema():
         _require_child_schema(
             rejudge_payload,
             label="rejudge",
-            expected_schema="nested-ls-outer-jax-child.v4",
+            expected_schema=NESTED_LS_OUTER_JAX_CHILD_SCHEMA,
         )
 
 
@@ -722,10 +754,11 @@ def test_rejudge_identity_is_bound_to_the_exact_child_payload_and_endpoint():
         "endpoint_iota": 0.14,
         "endpoint_g": 2.0,
     }
-    reencoded = json.dumps(rejudge_payload, allow_nan=False, indent=2) + "\n"
+    payload_raw = _production_child_encoding(rejudge_payload)
     envelope: dict[str, object] = {
         "payload": rejudge_payload,
-        "payload_sha256": hashlib.sha256(reencoded.encode("utf-8")).hexdigest(),
+        "payload_raw": payload_raw,
+        "payload_sha256": hashlib.sha256(payload_raw.encode("utf-8")).hexdigest(),
     }
 
     assert (
@@ -749,10 +782,11 @@ def test_rejudge_identity_is_bound_to_the_exact_child_payload_and_endpoint():
         )
         == "jax_rejudge_payload_sha256_mismatch"
     )
-    envelope["payload_sha256"] = hashlib.sha256(reencoded.encode("utf-8")).hexdigest()
+    envelope["payload_sha256"] = hashlib.sha256(payload_raw.encode("utf-8")).hexdigest()
     rejudge_payload["source_child_payload_sha256"] = "other-child"
-    reencoded = json.dumps(rejudge_payload, allow_nan=False, indent=2) + "\n"
-    envelope["payload_sha256"] = hashlib.sha256(reencoded.encode("utf-8")).hexdigest()
+    payload_raw = _production_child_encoding(rejudge_payload)
+    envelope["payload_raw"] = payload_raw
+    envelope["payload_sha256"] = hashlib.sha256(payload_raw.encode("utf-8")).hexdigest()
     assert (
         _rejudge_endpoint_mismatch(
             lane="jax",
@@ -765,8 +799,9 @@ def test_rejudge_identity_is_bound_to_the_exact_child_payload_and_endpoint():
     )
     rejudge_payload["source_child_payload_sha256"] = "child-bytes"
     rejudge_payload["endpoint_coil_sha256"] = "other-coils"
-    reencoded = json.dumps(rejudge_payload, allow_nan=False, indent=2) + "\n"
-    envelope["payload_sha256"] = hashlib.sha256(reencoded.encode("utf-8")).hexdigest()
+    payload_raw = _production_child_encoding(rejudge_payload)
+    envelope["payload_raw"] = payload_raw
+    envelope["payload_sha256"] = hashlib.sha256(payload_raw.encode("utf-8")).hexdigest()
     assert (
         _rejudge_endpoint_mismatch(
             lane="jax",
@@ -777,6 +812,83 @@ def test_rejudge_identity_is_bound_to_the_exact_child_payload_and_endpoint():
         )
         == "jax_rejudge_endpoint_coil_sha256_mismatch"
     )
+
+
+def test_rejudge_binding_survives_a_receipt_reload_that_reorders_keys():
+    """The rejudge digest still matches after the receipt round-trips to disk.
+
+    The parent writes receipts with ``dump_strict_json``, i.e. ``sort_keys=True``,
+    and ``json.loads`` preserves document order — so the parsed rejudge payload
+    a reload hands back is key-reordered relative to the compact,
+    insertion-ordered bytes the child wrote. The binding must be immune to
+    that, because the same check runs twice: live, on the envelope
+    ``_launch_rejudge`` just built, and again on the reloaded receipt inside
+    ``_require_b3_green``. A check that re-serializes the parsed payload passes
+    in one context and fails in the other; one that re-hashes the child's
+    stored bytes passes in both.
+
+    Fails against the predecessor, which re-encoded the parsed payload with
+    ``indent=2``: that could not match the child's compact bytes in EITHER
+    context, so every claim.v2 pair failed closed on
+    ``{lane}_rejudge_payload_sha256_mismatch``.
+    """
+
+    rejudge_payload: dict[str, object] = {
+        "schema": NESTED_LS_OUTER_REJUDGE_SCHEMA,
+        "judged_lane": "jax",
+        "source_child_schema": NESTED_LS_OUTER_JAX_CHILD_SCHEMA,
+        "source_child_payload_sha256": "child-bytes",
+        "budget": 3,
+        "maxcor": 10,
+        "endpoint_coil_sha256": "coil-bytes",
+        "endpoint_surface_sha256": "surface-bytes",
+        "endpoint_j": 0.25,
+        "endpoint_iota": 0.14,
+        "endpoint_g": 2.0,
+    }
+    row: dict[str, object] = {
+        "child_payload": {"schema": NESTED_LS_OUTER_JAX_CHILD_SCHEMA},
+        "child_payload_sha256": "child-bytes",
+        "endpoint_coil_sha256": "coil-bytes",
+        "endpoint_surface_sha256": "surface-bytes",
+        "endpoint_j": 0.25,
+        "endpoint_iota": 0.14,
+        "endpoint_g": 2.0,
+    }
+    payload_raw = _production_child_encoding(rejudge_payload)
+    live_envelope: dict[str, object] = {
+        "payload": rejudge_payload,
+        "payload_raw": payload_raw,
+        "payload_sha256": hashlib.sha256(payload_raw.encode("utf-8")).hexdigest(),
+    }
+    reloaded_envelope = json.loads(
+        json.dumps(live_envelope, allow_nan=False, sort_keys=True, indent=2)
+    )
+    reloaded_keys = list(reloaded_envelope["payload"])
+    assert reloaded_keys == sorted(reloaded_keys), (
+        "this test is pointless unless the reload actually reorders the "
+        f"payload's keys; got {reloaded_keys}"
+    )
+    assert reloaded_keys != list(rejudge_payload), (
+        "the fixture must not already be in sorted order, or the reordering "
+        "the reload performs is invisible"
+    )
+
+    for label, envelope in (("live", live_envelope), ("reloaded", reloaded_envelope)):
+        assert (
+            _rejudge_endpoint_mismatch(
+                lane="jax",
+                row=row,
+                rejudge_envelope=envelope,
+                budget=3,
+                maxcor=10,
+            )
+            is None
+        ), (
+            f"the {label} rejudge envelope was refused; the binding must hold "
+            "both when the parent has just built it and after the receipt has "
+            "round-tripped through disk"
+        )
 
 
 def test_rejudge_refuses_changed_child_payload_before_launch(tmp_path: Path):
@@ -806,6 +918,10 @@ def test_endpoint_loader_preserves_declared_coil_hash_for_rejudge(tmp_path: Path
                 "endpoint_iota": 0.14,
                 "endpoint_g": 2.0,
                 "endpoint_j": 0.25,
+                # Required by the child schema, and read by the loader: a
+                # receipt a child wrote while failing closed is not a
+                # rejudgeable endpoint. None is what a completed run carries.
+                "child_fault_reason": None,
             }
         ),
         encoding="utf-8",
@@ -1129,6 +1245,26 @@ def test_native_outer_trial_order_cannot_change_the_committed_objective(monkeypa
 # all-rejected containment endpoint, and the shared stop classifiers.
 # --------------------------------------------------------------------------
 
+# Everything from here down was READ OFF a real run on the installed scipy --
+# the dcsrch contraction ratios, the abnormal-stop message strings, the stop
+# decision table. None of it is derived from documentation, so a scipy bump
+# invalidates the observation rather than the code, and the gate below says so
+# in one place instead of leaving the bump to surface as an opaque numeric
+# failure somewhere in the parametrised tables.
+_PINNED_SCIPY_VERSION: Final[str] = "1.17.1"
+
+
+def test_installed_scipy_is_the_version_these_pins_were_observed_on() -> None:
+    assert scipy.__version__ == _PINNED_SCIPY_VERSION, (
+        "scipy version drifted: every scipy-behaviour pin below this line was "
+        f"observed on {_PINNED_SCIPY_VERSION} and must be RE-OBSERVED on "
+        f"{scipy.__version__}, not edited to match. Editing a pin to make a "
+        "test pass again would relabel a changed line search, a changed stop "
+        "message or a changed status code as unchanged, and both outer lanes "
+        "route their restart and publish decisions through exactly those."
+    )
+
+
 # The F3 B37 native lane (``pair2-l2/lane.json``, read at runtime through
 # ``load_outer_optimizer_policy``) seals these outer knobs. They are repeated
 # as literals because that lane JSON lives in the campaign artifact tree, not
@@ -1148,6 +1284,28 @@ _B37_OUTER_BUDGET: Final[int] = 37
 # sits at one third of the bracket as the barrier's rise vanishes and closer
 # to the incumbent as the rise grows, so 1/3 is approached and never passed.
 _DCSRCH_BARRIER_CONTRACTION_CEILING: Final[float] = 1.0 / 3.0
+
+# The ceiling is ATTAINED IN THE LIMIT, not merely bounded: dcstep's bound
+# ``r = (g - v) / (2g + u + 2v)`` with ``g = sqrt(u**2 + 4uv + v**2)`` reduces
+# to ``0 <= 6uv + 24v**2``, an equality as ``v -> 0``. Asserting ``<= 1/3``
+# exactly therefore tests floating-point rounding in scipy's cubic
+# interpolation as much as it tests contraction. Measured relative headroom
+# ``(1/3 - worst) / (1/3)`` over the three parametrised cells on scipy 1.17.1:
+# 5.25e-4, 1.13e-3, and 2.57e-8 -- the last (the 675-DOF cell, whose barrier
+# rise is largest and so sits closest to the limit) is within a few hundred
+# million ULP of the bare ceiling, close enough that one differently-rounded
+# interpolation would fail the test for no behavioural reason.
+#
+# So the bound carries an explicit relative margin. 1e-6 is ~39x the tightest
+# measured headroom, which is ample for rounding, while a line search that
+# genuinely STOPPED contracting geometrically would show ratios of order 0.5
+# to 1.0 -- five orders of magnitude coarser than the margin. The bound still
+# discriminates "the search contracts geometrically" from "it does not"; it
+# just no longer discriminates the last ULP of a limit it cannot exceed.
+_DCSRCH_CONTRACTION_ROUNDING_MARGIN: Final[float] = 1.0e-6
+_DCSRCH_BARRIER_CONTRACTION_BOUND: Final[float] = (
+    _DCSRCH_BARRIER_CONTRACTION_CEILING * (1.0 + _DCSRCH_CONTRACTION_ROUNDING_MARGIN)
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1237,6 +1395,10 @@ def test_rejected_barrier_trials_contract_by_at_least_three_per_trial(
 ):
     """Each rejected trial step is at most a third of the previous one.
 
+    "At most a third" to within an explicit rounding margin -- see
+    ``_DCSRCH_CONTRACTION_ROUNDING_MARGIN`` for why the bare 1/3 is a
+    knife-edge and why the margin does not blunt the test.
+
     Operationally: a rejecting line search that does not contract burns its
     whole ``maxls`` budget at a near-constant step, never returns to the
     incumbent's neighbourhood, and hands scipy a bracket it cannot close --
@@ -1279,11 +1441,23 @@ def test_rejected_barrier_trials_contract_by_at_least_three_per_trial(
         for index in range(len(measured.trial_steps) - 1)
     )
     worst_ratio = max(ratios)
-    assert worst_ratio <= _DCSRCH_BARRIER_CONTRACTION_CEILING, (
+    headroom = (
+        _DCSRCH_BARRIER_CONTRACTION_CEILING - worst_ratio
+    ) / _DCSRCH_BARRIER_CONTRACTION_CEILING
+    assert worst_ratio <= _DCSRCH_BARRIER_CONTRACTION_BOUND, (
         "dcsrch stopped contracting on the sealed rejection barrier: the "
         f"worst measured trial-to-trial step ratio was {worst_ratio!r}, above "
-        f"the {_DCSRCH_BARRIER_CONTRACTION_CEILING!r} ceiling. Measured step "
-        f"sequence {measured.trial_steps!r}; measured ratios {ratios!r}."
+        f"the {_DCSRCH_BARRIER_CONTRACTION_BOUND!r} bound (the analytic "
+        f"dcstep ceiling {_DCSRCH_BARRIER_CONTRACTION_CEILING!r} plus a "
+        f"{_DCSRCH_CONTRACTION_ROUNDING_MARGIN!r} relative rounding margin). "
+        f"Relative headroom against the bare ceiling was {headroom!r}; the "
+        "margin exists because that ceiling is attained in the limit as the "
+        "barrier's rise vanishes, and the tightest cell measured on scipy "
+        "1.17.1 cleared it by only 2.57e-08. A negative headroom of this "
+        "order is rounding; one of order 0.1 or more means the line search "
+        "is no longer contracting geometrically, which is the finding this "
+        f"guards. Measured step sequence {measured.trial_steps!r}; measured "
+        f"ratios {ratios!r}."
     )
 
 
@@ -1527,8 +1701,8 @@ def test_outer_run_rejecting_every_step_returns_the_start_state_bitwise(monkeypa
 # installed interpreter's own source. ``result.message`` is
 # ``status_messages[task[0]] + ": " + task_messages[task[1]]``
 # (.venv-qn-cpu/lib/python3.11/site-packages/scipy/optimize/_lbfgsb_py.py:505)
-# over the two tables at _lbfgsb_py.py:51-62 and _lbfgsb_py.py:64-92;
-# ``result.status`` is the warnflag derived at _lbfgsb_py.py:487-493, so the
+# over the two tables at _lbfgsb_py.py:51-61 and _lbfgsb_py.py:64-92;
+# ``result.status`` is the warnflag derived at _lbfgsb_py.py:487-492, so the
 # only codes L-BFGS-B itself can return are 0, 1 and 2. ``minimize`` then
 # overwrites status and message with 99 / "`callback` raised `StopIteration`."
 # at _minimize.py:823-826, which is a fourth code the classifiers must judge.
@@ -1786,12 +1960,13 @@ def test_endpoint_judge_refuses_a_stop_status_it_has_never_seen():
     Fails against any edit that turns the allow-list back into a deny-list.
     """
 
-    unseen = sorted(
-        {case.status for case in _LBFGSB_STOP_CASES}
-        | NESTED_LS_OUTER_PUBLISHABLE_STOP_STATUSES
+    # Every status this contract has ever met: the ones the table pins plus
+    # the ones the judge admits. One above the largest of them is novel by
+    # construction -- it cannot be in either set.
+    seen_statuses = {case.status for case in _LBFGSB_STOP_CASES} | set(
+        NESTED_LS_OUTER_PUBLISHABLE_STOP_STATUSES
     )
-    novel = max(unseen) + 1
-    assert novel not in NESTED_LS_OUTER_PUBLISHABLE_STOP_STATUSES
+    novel = max(seen_statuses) + 1
 
     assert (
         nested_ls_outer_endpoint_success(
