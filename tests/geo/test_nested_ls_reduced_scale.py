@@ -7,6 +7,7 @@ because the LS residual is 3*255*64+2 = 48962 rows. Not an F3 timing claim.
 from __future__ import annotations
 
 import ast
+import hashlib
 import inspect
 import json
 import statistics
@@ -206,6 +207,8 @@ _GATE6_5090_EVIDENCE = _EVIDENCE_DIR / "nested_ls_reduced_gpu_gate6_20260822.509
 _OUTER_FD0_EVIDENCE = _EVIDENCE_DIR / "nested_ls_outer_fd0_20260823.json"
 _OUTER_B3_EVIDENCE = _EVIDENCE_DIR / "nested_ls_outer_b3_20260823.json"
 _OUTER_B37_EVIDENCE = _EVIDENCE_DIR / "nested_ls_outer_b37_20260823.json"
+_OUTER_B3_TRANSACTION_EVIDENCE = _EVIDENCE_DIR / "nested_ls_outer_b3_20260824.json"
+_OUTER_B37_TRANSACTION_EVIDENCE = _EVIDENCE_DIR / "nested_ls_outer_b37_20260824.json"
 _F3_B37_GPU_CHUNK_WARM_EVIDENCE = (
     _EVIDENCE_DIR / "nested_ls_reduced_gpu_chunk_warm_20260821.json"
 )
@@ -1922,6 +1925,80 @@ def test_authored_outer_b37_json_uses_b3_receipt_omp():
         assert isinstance(pair["endpoint_j_within_frozen_band"], bool)
     _assert_outer_claim_walls(payload)
     assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
+
+
+def _assert_outer_transaction_claim(payload: dict[str, object], *, budget: int) -> None:
+    assert payload["schema"] == "nested-ls-outer-claim.v2"
+    assert payload["written_by_pytest"] is False
+    assert payload["fail_closed_reason"] is None
+    boundary = payload["claim_boundary"]
+    _assert_outer_claim_boundary(boundary)
+    assert boundary["budget"] == budget
+    expected_policy = {
+        "accepted_state_policy": "commit_on_scipy_accept",
+        "rejection_gradient_policy": "quadratic_barrier_derivative_v2",
+        "rejection_rollback_policy": "restore_committed_anchor",
+        "rejection_value_policy": "anchor_plus_half_scaled_distance_squared_v2",
+    }
+    for pair in payload["pairs"]:
+        assert pair["physics_ok"] is True
+        native_payload = pair["native"]["child_payload"]
+        jax_payload = pair["jax"]["child_payload"]
+        for row in (pair["native"], pair["jax"]):
+            child_raw = row["child_payload_raw"]
+            assert (
+                hashlib.sha256(child_raw.encode("utf-8")).hexdigest()
+                == row["child_payload_sha256"]
+            )
+            assert json.loads(child_raw) == row["child_payload"]
+        assert native_payload["schema"] == "nested-ls-outer-native-child.v3"
+        assert jax_payload["schema"] == "nested-ls-outer-jax-child.v4"
+        assert native_payload["outer_policy"] == jax_payload["outer_policy"]
+        assert (
+            native_payload["outer_policy"]["transaction_policy_names"]
+            == expected_policy
+        )
+        assert "feasible_evaluations" in native_payload
+        assert "feasible_evaluations" in jax_payload
+        assert native_payload["ftol_zero_stop"] is False
+        assert jax_payload["ftol_zero_stop"] is False
+        for lane, row, envelope in (
+            ("native", pair["native"], pair["native_rejudge"]),
+            ("jax", pair["jax"], pair["jax_rejudge"]),
+        ):
+            rejudge = envelope["payload"]
+            assert rejudge["schema"] == "nested-ls-outer-rejudge.v1"
+            assert rejudge["judged_lane"] == lane
+            assert rejudge["source_child_payload_sha256"] == row["child_payload_sha256"]
+            assert rejudge["endpoint_coil_sha256"] == row["endpoint_coil_sha256"]
+            assert rejudge["endpoint_surface_sha256"] == row["endpoint_surface_sha256"]
+            assert len(envelope["payload_sha256"]) == 64
+            assert "endpoint_json" not in rejudge
+    _assert_outer_claim_walls(payload)
+
+
+@pytest.mark.skipif(
+    not _OUTER_B3_TRANSACTION_EVIDENCE.is_file(),
+    reason="authored transactional outer B3 claim JSON not yet produced",
+)
+def test_authored_outer_b3_transaction_json_is_claim_grade():
+    raw = _OUTER_B3_TRANSACTION_EVIDENCE.read_text(encoding="utf-8")
+    assert "NaN" not in raw
+    payload = json.loads(raw)
+    dump_strict_json(payload)
+    _assert_outer_transaction_claim(payload, budget=3)
+
+
+@pytest.mark.skipif(
+    not _OUTER_B37_TRANSACTION_EVIDENCE.is_file(),
+    reason="authored transactional outer B37 claim JSON not yet produced",
+)
+def test_authored_outer_b37_transaction_json_is_claim_grade():
+    raw = _OUTER_B37_TRANSACTION_EVIDENCE.read_text(encoding="utf-8")
+    assert "NaN" not in raw
+    payload = json.loads(raw)
+    dump_strict_json(payload)
+    _assert_outer_transaction_claim(payload, budget=37)
 
 
 @_REQUIRES_BUNDLE

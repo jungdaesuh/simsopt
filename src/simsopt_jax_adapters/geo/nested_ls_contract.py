@@ -14,7 +14,10 @@ after the physics bar's branch matches.
 
 from __future__ import annotations
 
-from typing import Final, TypedDict
+from typing import Final, Generic, TypedDict, TypeVar
+
+import numpy as np
+from numpy.typing import NDArray
 
 NESTED_LS_CONSTRAINT_WEIGHT: Final[float] = 1.0
 NESTED_LS_WEIGHT_INV_MODB: Final[bool] = True
@@ -45,6 +48,13 @@ NESTED_LS_GATE6_IOTA_G_TOL: Final[float] = 1.0e-11
 NESTED_LS_GATE6_CLAIM_REPEATS: Final[int] = 3
 NESTED_LS_GATE6_AGGREGATION: Final[str] = "min"
 NESTED_LS_GATE6_NATIVE_OMP_THREADS: Final[int] = 16
+
+# Fresh-process child payload schemas. These live in the JAX-free contract
+# module so producers, the claim parent, and the rejudge consumer share one
+# source of truth without importing either process-level child module.
+NESTED_LS_OUTER_JAX_CHILD_SCHEMA: Final[str] = "nested-ls-outer-jax-child.v4"
+NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA: Final[str] = "nested-ls-outer-native-child.v3"
+NESTED_LS_OUTER_REJUDGE_SCHEMA: Final[str] = "nested-ls-outer-rejudge.v1"
 
 # Gate FD-0 of the eight-term outer charter
 # (``docs/jax_nested_ls_outer_charter.md``). The outer variable is the
@@ -212,6 +222,172 @@ def nested_ls_outer_fd0_minimum_step(
     )
 
 
+NESTED_LS_OUTER_MAX_RESTARTS: Final[int] = 8
+NESTED_LS_OUTER_FTOL_STALL_MESSAGE: Final[str] = (
+    "CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH"
+)
+
+_CandidateT = TypeVar("_CandidateT")
+
+
+def nested_ls_outer_parameter_bytes(parameters: NDArray[np.float64]) -> bytes:
+    """Return the exact little-endian float64 bytes of one outer point."""
+
+    canonical = np.ascontiguousarray(parameters, dtype=np.dtype("<f8")).reshape(-1)
+    return canonical.tobytes(order="C")
+
+
+class NestedLsOuterCandidateStore(Generic[_CandidateT]):
+    """Keep trial candidates pending until scipy accepts their exact parameters.
+
+    The first record must be the declared start point and becomes the initial
+    incumbent immediately because scipy never calls its callback for ``x0``.
+    Later records stay pending until :meth:`accept` matches callback bytes.
+    """
+
+    __slots__ = (
+        "_committed",
+        "_committed_parameter_bytes",
+        "_pending",
+        "_start_parameter_bytes",
+    )
+
+    def __init__(self, start_parameters: NDArray[np.float64]) -> None:
+        self._start_parameter_bytes = nested_ls_outer_parameter_bytes(start_parameters)
+        self._committed: _CandidateT | None = None
+        self._committed_parameter_bytes: bytes | None = None
+        self._pending: dict[bytes, _CandidateT] = {}
+
+    @property
+    def is_primed(self) -> bool:
+        return self._committed is not None
+
+    @property
+    def committed(self) -> _CandidateT:
+        candidate = self._committed
+        if candidate is None:
+            raise RuntimeError("the outer candidate store has no committed start")
+        return candidate
+
+    def record(
+        self,
+        parameters: NDArray[np.float64],
+        candidate: _CandidateT,
+    ) -> bool:
+        """Prime ``x0`` or stage one later candidate; return whether it primed."""
+
+        parameter_bytes = nested_ls_outer_parameter_bytes(parameters)
+        if self._committed is None:
+            if parameter_bytes != self._start_parameter_bytes:
+                raise RuntimeError(
+                    "the first feasible outer evaluation does not match x0"
+                )
+            self._committed = candidate
+            self._committed_parameter_bytes = parameter_bytes
+            return True
+        self._pending[parameter_bytes] = candidate
+        return False
+
+    def accept(self, parameters: NDArray[np.float64]) -> _CandidateT:
+        """Commit the pending candidate whose exact bytes match scipy's callback."""
+
+        parameter_bytes = nested_ls_outer_parameter_bytes(parameters)
+        candidate = self._pending.get(parameter_bytes)
+        if candidate is None:
+            if parameter_bytes != self._committed_parameter_bytes:
+                raise RuntimeError(
+                    "accepted outer parameters match neither the incumbent nor "
+                    "a pending candidate"
+                )
+            candidate = self.committed
+        self._committed = candidate
+        self._committed_parameter_bytes = parameter_bytes
+        self._pending.clear()
+        return candidate
+
+    def committed_matches(self, parameters: NDArray[np.float64]) -> bool:
+        """Whether ``parameters`` are the exact committed outer point."""
+
+        return self._committed_parameter_bytes == nested_ls_outer_parameter_bytes(
+            parameters
+        )
+
+
+def nested_ls_outer_rejection_barrier(
+    *,
+    anchor_value: float,
+    anchor_parameters: NDArray[np.float64],
+    trial_parameters: NDArray[np.float64],
+    scale: float,
+) -> tuple[float, NDArray[np.float64]]:
+    """Return the containment barrier and its exact derivative at one trial."""
+
+    displacement = np.asarray(trial_parameters, dtype=np.float64) - np.asarray(
+        anchor_parameters, dtype=np.float64
+    )
+    gradient = float(scale) * displacement
+    value = float(anchor_value) + 0.5 * float(scale) * float(
+        np.dot(displacement, displacement)
+    )
+    return value, gradient
+
+
+def nested_ls_outer_ftol_zero_stop(*, ftol: float, message: str) -> bool:
+    """Whether scipy claimed FTOL convergence while FTOL was disabled."""
+
+    return float(ftol) == 0.0 and "RELATIVE REDUCTION OF F" in str(message).upper()
+
+
+def nested_ls_outer_endpoint_success(
+    *,
+    endpoint_matches: bool,
+    ftol: float,
+    status: int,
+    message: str,
+) -> bool:
+    """Judge a child endpoint under the shared transaction and stop contract."""
+
+    return (
+        bool(endpoint_matches)
+        and int(status) != 2
+        and not nested_ls_outer_ftol_zero_stop(
+            ftol=ftol,
+            message=message,
+        )
+    )
+
+
+def nested_ls_outer_restart_reason(
+    *,
+    ftol: float,
+    status: int,
+    message: str,
+) -> str | None:
+    """Classify one scipy L-BFGS-B stop as restartable, or None if terminal.
+
+    Two stop classes may consume less than the iteration budget without the
+    outer problem being finished, both produced by the sealed rejection
+    sentinel's interaction with dcsrch (measured at B37, 2026-08-24):
+
+    - ``abnormal_line_search``: scipy status 2 with an ``ABNORMAL`` message —
+      the line search abandoned outright.
+    - ``false_ftol_stall``: scipy reports FTOL convergence while the sealed
+      policy set ``ftol=0``. That policy permits no relative-reduction stop;
+      convergence belongs to the separately declared projected-gradient gate.
+
+    Both outer children call this one classifier so the lanes cannot drift.
+    """
+
+    if int(status) == 2 and str(message).startswith("ABNORMAL"):
+        return "abnormal_line_search"
+    if int(status) == 0 and nested_ls_outer_ftol_zero_stop(
+        ftol=ftol,
+        message=message,
+    ):
+        return "false_ftol_stall"
+    return None
+
+
 __all__ = [
     "NESTED_LS_BANANA_BFGS_TOL",
     "NESTED_LS_BANANA_NEWTON_MAXITER",
@@ -240,15 +416,26 @@ __all__ = [
     "NESTED_LS_OUTER_FD0_STEP_SCALE_FLOOR",
     "F3_B37_BANANA_OMP_CONTRACT_THREADS",
     "NESTED_LS_OUTER_IOTA_BRANCH_GUARD",
+    "NESTED_LS_OUTER_JAX_CHILD_SCHEMA",
+    "NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA",
+    "NESTED_LS_OUTER_REJUDGE_SCHEMA",
+    "NESTED_LS_OUTER_FTOL_STALL_MESSAGE",
+    "NESTED_LS_OUTER_MAX_RESTARTS",
     "NESTED_LS_OUTER_OMP_SWEEP_REPEATS",
     "NESTED_LS_PHYSICS_BAR",
     "NESTED_LS_REDUCTION_MODE",
     "NESTED_LS_TIMING_BAR",
     "NESTED_LS_WEIGHT_INV_MODB",
     "NestedLsBananaRunCodeOptions",
+    "NestedLsOuterCandidateStore",
     "NestedLsPhysicsNewtonKwargs",
     "nested_ls_banana_run_code_options",
+    "nested_ls_outer_endpoint_success",
+    "nested_ls_outer_ftol_zero_stop",
     "nested_ls_outer_fd0_minimum_step",
+    "nested_ls_outer_parameter_bytes",
+    "nested_ls_outer_rejection_barrier",
+    "nested_ls_outer_restart_reason",
     "nested_ls_outer_fd0_step",
     "nested_ls_physics_newton_kwargs",
 ]

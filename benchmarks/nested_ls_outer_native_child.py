@@ -18,6 +18,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 # The adapter modules below pull JAX in transitively even though nothing on
 # this lane traces. That import is the only JAX cost left in the native
@@ -31,6 +32,10 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "src"))
+
+from repo_bootstrap import bootstrap_local_simsopt
+
+bootstrap_local_simsopt(REPO / "src")
 
 import numpy as np
 from numpy.typing import NDArray
@@ -59,6 +64,13 @@ from simsopt_jax_adapters.geo.flat675.policy import (
 )
 from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_OUTER_IOTA_BRANCH_GUARD,
+    NESTED_LS_OUTER_MAX_RESTARTS,
+    NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA,
+    NestedLsOuterCandidateStore,
+    nested_ls_outer_endpoint_success,
+    nested_ls_outer_ftol_zero_stop,
+    nested_ls_outer_rejection_barrier,
+    nested_ls_outer_restart_reason,
 )
 from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     DEFAULT_F3_B37_GPU_LANE,
@@ -80,10 +92,9 @@ from benchmarks.nested_ls_shamanskii_attribution import write_strict_json
 
 MODULE_IMPORT_SECONDS = time.perf_counter() - _IMPORT_STARTED
 
-SCHEMA = "nested-ls-outer-native-child.v1"
-# The sealed F3 native-lane behaviours this child reimplements. A lane whose
-# policy names differ is a different outer formulation, so the child refuses it
-# rather than silently optimizing something else.
+# The sealed F3 lane names are source provenance. The transactional containment
+# below deliberately supersedes the four state/rejection behaviours and records
+# that override separately in every new child payload.
 IMPLEMENTED_LANE_POLICY_NAMES = {
     "accepted_state_policy": "rolling_last_accepted_anchor",
     "method": "L-BFGS-B",
@@ -91,6 +102,15 @@ IMPLEMENTED_LANE_POLICY_NAMES = {
     "rejection_rollback_policy": "retain_accepted_anchor",
     "rejection_value_policy": "anchor_plus_offset_plus_distance_v1",
 }
+TRANSACTION_POLICY_NAME_ITEMS: Final[tuple[tuple[str, str], ...]] = (
+    ("accepted_state_policy", "commit_on_scipy_accept"),
+    ("rejection_gradient_policy", "quadratic_barrier_derivative_v2"),
+    ("rejection_rollback_policy", "restore_committed_anchor"),
+    (
+        "rejection_value_policy",
+        "anchor_plus_half_scaled_distance_squared_v2",
+    ),
+)
 PUBLICATION = (
     "Native-twin outer L-BFGS-B over the 11 flat-675 coil DOFs with a nested "
     "banana run_code inner solve per evaluation. Charter "
@@ -125,8 +145,8 @@ class OuterOptimizerPolicy:
     """The F3 native lane's sealed outer policy plus this run's budget/maxcor.
 
     ``ftol``, ``gtol``, and ``maxls`` are the sealed lane's; ``maxiter`` and
-    ``maxcor`` are the charter rung's. The two rejection scalars parameterize
-    the lane's ``anchor_plus_offset_plus_distance_v1`` policy.
+    ``maxcor`` are the charter rung's. The source lane's rejection scale is
+    retained while the transactional containment owns its coherent barrier.
     """
 
     source: str
@@ -136,7 +156,6 @@ class OuterOptimizerPolicy:
     maxls: int
     maxiter: int
     maxcor: int
-    rejection_value_offset: float
     rejection_distance_scale: float
     lane_policy_names: dict[str, str]
 
@@ -158,10 +177,10 @@ class OuterOptimizerPolicy:
             "maxls": self.maxls,
             "maxiter": self.maxiter,
             "maxcor": self.maxcor,
-            "rejection_value_offset": self.rejection_value_offset,
             "rejection_distance_scale": self.rejection_distance_scale,
             "iota_branch_guard": float(NESTED_LS_OUTER_IOTA_BRANCH_GUARD),
             "lane_policy_names": self.lane_policy_names,
+            "transaction_policy_names": dict(TRANSACTION_POLICY_NAME_ITEMS),
         }
 
 
@@ -188,7 +207,6 @@ def load_outer_optimizer_policy(
         maxls=int(policy["maxls"]),
         maxiter=int(budget),
         maxcor=int(maxcor),
-        rejection_value_offset=float(policy["rejection_value_offset"]),
         rejection_distance_scale=float(policy["rejection_distance_scale"]),
         lane_policy_names=names,
     )
@@ -406,7 +424,7 @@ class InnerWarmStart:
     G: float
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class OuterAnchor:
     """Last accepted outer iterate: the state every solve warm-starts from."""
 
@@ -418,19 +436,17 @@ class OuterAnchor:
 
 
 class NativeOuterRun:
-    """scipy-facing ``fun(x) -> (J, dJ/dc)`` with a rolling accepted anchor.
+    """scipy-facing objective with transactional nested candidates.
 
     An evaluation is accepted only when its nested solve converges *and*
     stays on the warm start's Boozer branch: charter Amendment 1 rules that
     ``s*(c)`` is local, so an ``iota`` moving more than
     ``NESTED_LS_OUTER_IOTA_BRANCH_GUARD`` is a failed evaluation however
-    well it converged. Either rejection reinstates the anchor and reports
-    its objective raised by ``rejection_value_offset`` plus the scaled
-    distance travelled, with the anchor's gradient, so the line search
-    shortens instead of stepping onto another branch. Evaluation 0 has no
-    anchor to fall back to and fails the run instead of sentinelling — a
-    start point that cannot be solved on the archived seed's own branch is
-    not this problem.
+    well it converged. Later feasible evaluations remain pending until scipy's
+    callback accepts
+    their exact coil bytes. Rejections restore the incumbent and return the
+    coherent quadratic containment barrier. Evaluation 0 commits immediately
+    because scipy never calls its callback for ``x0``.
     """
 
     def __init__(
@@ -438,24 +454,38 @@ class NativeOuterRun:
         objective: NativeOuterObjective,
         *,
         seed: InnerWarmStart,
-        rejection_value_offset: float,
         rejection_distance_scale: float,
+        start_coil_dofs: NDArray[np.float64],
     ) -> None:
         self.objective = objective
         self.seed = seed
-        self.anchor: OuterAnchor | None = None
-        self.rejection_value_offset = rejection_value_offset
         self.rejection_distance_scale = rejection_distance_scale
+        self.candidates = NestedLsOuterCandidateStore[OuterAnchor](start_coil_dofs)
         self.records: list[dict[str, object]] = []
-        self.accepted: list[OuterAnchor] = []
+        self.feasible: list[OuterAnchor] = []
+
+    @property
+    def anchor(self) -> OuterAnchor | None:
+        """The committed outer incumbent, absent only before solving ``x0``."""
+
+        return self.candidates.committed if self.candidates.is_primed else None
 
     def endpoint_at(self, coil_dofs: NDArray[np.float64]) -> OuterAnchor | None:
         """Return the accepted iterate whose coil DOFs are exactly ``coil_dofs``."""
 
-        for candidate in reversed(self.accepted):
-            if np.array_equal(candidate.coil_dofs, coil_dofs):
-                return candidate
-        return None
+        return self.anchor if self.candidates.committed_matches(coil_dofs) else None
+
+    def _restore_anchor(self, anchor: OuterAnchor) -> None:
+        boozer = self.objective.boozer
+        boozer.biotsavart.x = np.array(anchor.coil_dofs, dtype=np.float64, copy=True)
+        boozer.surface.set_dofs(np.array(anchor.warm_start.surface_dofs, copy=True))
+        boozer.need_to_run_code = True
+
+    def accept(self, coil_dofs: NDArray[np.float64]) -> None:
+        """Promote exactly the candidate named by scipy's accepted callback."""
+
+        committed = self.candidates.accept(np.asarray(coil_dofs, dtype=np.float64))
+        self._restore_anchor(committed)
 
     def _reinstate_warm_start(self) -> InnerWarmStart:
         warm_start = self.seed if self.anchor is None else self.anchor.warm_start
@@ -506,17 +536,22 @@ class NativeOuterRun:
                     "the native outer twin's start-point evaluation was rejected "
                     f"({reason}); there is no accepted anchor to fall back to."
                 )
-            self._reinstate_warm_start()
+            self._restore_anchor(anchor)
+            if self.candidates.committed_matches(coil_dofs):
+                raise RuntimeError(
+                    "the native nested inner solve rejected the exact committed "
+                    "outer point; no line-search barrier can represent that failure"
+                )
             distance = float(np.linalg.norm(coil_dofs - anchor.coil_dofs))
-            value = (
-                anchor.objective
-                + self.rejection_value_offset
-                + self.rejection_distance_scale * distance
+            value, gradient = nested_ls_outer_rejection_barrier(
+                anchor_value=anchor.objective,
+                anchor_parameters=anchor.coil_dofs,
+                trial_parameters=coil_dofs,
+                scale=self.rejection_distance_scale,
             )
-            gradient = np.array(anchor.gradient, copy=True)
             record.update(
                 {
-                    "accepted": False,
+                    "inner_feasible": False,
                     "objective": value,
                     "objective_seconds": 0.0,
                     "gradient_l2": float(np.linalg.norm(gradient)),
@@ -541,21 +576,26 @@ class NativeOuterRun:
                 "the native outer objective produced a nonfinite value or gradient "
                 f"at evaluation {len(self.records)}."
             )
-        self.anchor = OuterAnchor(
+        candidate = OuterAnchor(
             coil_dofs=np.array(coil_dofs, copy=True),
             warm_start=InnerWarmStart(
-                surface_dofs=np.asarray(boozer.surface.get_dofs(), dtype=np.float64),
+                surface_dofs=np.array(
+                    boozer.surface.get_dofs(), dtype=np.float64, copy=True
+                ),
                 iota=float(solve["iota"]),
                 G=float(solve["G"]),
             ),
             objective=value,
             gradient=np.array(gradient, copy=True),
-            terms=terms,
+            terms=dict(terms),
         )
-        self.accepted.append(self.anchor)
+        self.feasible.append(candidate)
+        primed = self.candidates.record(coil_dofs, candidate)
+        if not primed:
+            self._restore_anchor(self.candidates.committed)
         record.update(
             {
-                "accepted": True,
+                "inner_feasible": True,
                 "objective": value,
                 "objective_seconds": objective_seconds,
                 "gradient_l2": float(np.linalg.norm(gradient)),
@@ -639,18 +679,78 @@ def main(argv: list[str] | None = None) -> int:
             iota=seed_iota,
             G=seed_g,
         ),
-        rejection_value_offset=outer_policy.rejection_value_offset,
         rejection_distance_scale=outer_policy.rejection_distance_scale,
+        start_coil_dofs=start_coil_dofs,
     )
 
     solve_started = time.perf_counter()
-    result = minimize(
-        run,
-        start_coil_dofs,
-        jac=True,
-        method=outer_policy.method,
-        options=outer_policy.as_scipy_options(),
-    )
+    # Recovery only: a qualifying early stop restarts from the transaction's
+    # complete incumbent with fresh L-BFGS memory. Trial evaluations cannot
+    # alter that incumbent; the identical rule lives in the JAX twin.
+    budget_total = int(args.budget)
+    consumed_nit = 0
+    total_nfev = 0
+    total_njev = 0
+    restart_nits: list[int] = []
+    restart_attempts: list[dict[str, object]] = []
+    attempt_x0 = start_coil_dofs
+    while True:
+        rejected_before = sum(
+            1 for record in run.records if record["rejection_reason"] is not None
+        )
+        attempt_options = outer_policy.as_scipy_options()
+        attempt_options["maxiter"] = budget_total - consumed_nit
+        result = minimize(
+            run,
+            attempt_x0,
+            jac=True,
+            method=outer_policy.method,
+            options=attempt_options,
+            callback=run.accept,
+        )
+        attempt_nit = int(result.nit)
+        grad_inf = float(np.max(np.abs(np.asarray(result.jac, dtype=np.float64))))
+        rejected_this_attempt = (
+            sum(1 for record in run.records if record["rejection_reason"] is not None)
+            - rejected_before
+        )
+        # The shared classifier restarts an abnormal line search or an FTOL
+        # stop that the sealed ftol=0 policy explicitly disabled.
+        restart_reason = nested_ls_outer_restart_reason(
+            ftol=float(outer_policy.ftol),
+            status=int(result.status),
+            message=str(result.message),
+        )
+        restart_nits.append(attempt_nit)
+        restart_attempts.append(
+            {
+                "nit": attempt_nit,
+                "nfev": int(result.nfev),
+                "njev": int(result.njev),
+                "optimizer_success": bool(result.success),
+                "status": int(result.status),
+                "message": str(result.message),
+                "fun": float(result.fun),
+                "grad_inf": grad_inf,
+                "rejected_this_attempt": int(rejected_this_attempt),
+                "restart_reason": restart_reason,
+            }
+        )
+        consumed_nit += attempt_nit
+        total_nfev += int(result.nfev)
+        total_njev += int(result.njev)
+        if (
+            consumed_nit >= budget_total
+            or attempt_nit == 0
+            or restart_reason is None
+            or len(restart_nits) > NESTED_LS_OUTER_MAX_RESTARTS
+        ):
+            break
+        attempt_x0 = np.array(
+            run.candidates.committed.coil_dofs,
+            dtype=np.float64,
+            copy=True,
+        )
     solve_seconds = float(time.perf_counter() - solve_started)
 
     optimizer_x = np.asarray(result.x, dtype=np.float64)
@@ -661,19 +761,27 @@ def main(argv: list[str] | None = None) -> int:
     if endpoint is None:
         raise ValueError("the native outer twin accepted no outer iterate.")
     endpoint_surface = np.asarray(endpoint.warm_start.surface_dofs, dtype=np.float64)
+    ftol_zero_stop = nested_ls_outer_ftol_zero_stop(
+        ftol=float(outer_policy.ftol),
+        message=str(result.message),
+    )
     payload: dict[str, object] = {
-        "schema": SCHEMA,
+        "schema": NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA,
         "publication": PUBLICATION,
         # A fixed-budget run stops on maxiter, which scipy reports as
         # success=False, so the child's own flag is the usable-endpoint
         # predicate the parent needs: the reported endpoint is the
-        # optimizer's own final iterate *and* an accepted one, since only
-        # converged on-branch evaluations enter ``run.accepted``. Rejected
-        # line-search trials are the sealed policy working, not a failed
-        # run, so they are counted rather than folded into this flag.
-        "success": endpoint_is_optimizer_x,
+        # optimizer's own final iterate and the committed transaction point.
+        # An FTOL stop is never success under the sealed ftol=0 policy.
+        "success": nested_ls_outer_endpoint_success(
+            endpoint_matches=endpoint_is_optimizer_x,
+            ftol=float(outer_policy.ftol),
+            status=int(result.status),
+            message=str(result.message),
+        ),
         "optimizer_success": bool(result.success),
-        "accepted_evaluations": len(run.accepted),
+        "ftol_zero_stop": ftol_zero_stop,
+        "feasible_evaluations": len(run.feasible),
         "rejected_evaluations": sum(
             1 for record in run.records if record["rejection_reason"] is not None
         ),
@@ -686,9 +794,12 @@ def main(argv: list[str] | None = None) -> int:
         ),
         "budget": int(args.budget),
         "maxcor": int(args.maxcor),
-        "nit": int(result.nit),
-        "nfev": int(result.nfev),
-        "njev": int(result.njev),
+        "nit": int(consumed_nit),
+        "nfev": int(total_nfev),
+        "njev": int(total_njev),
+        "restart_count": int(len(restart_nits) - 1),
+        "restart_nits": [int(value) for value in restart_nits],
+        "restart_attempts": restart_attempts,
         "status": int(result.status),
         "message": str(result.message),
         "endpoint_is_optimizer_x": endpoint_is_optimizer_x,
@@ -707,6 +818,7 @@ def main(argv: list[str] | None = None) -> int:
         },
         "endpoint": {
             "coil_dofs": [float(value) for value in endpoint.coil_dofs],
+            "coil_sha256": sha256_float64(endpoint.coil_dofs),
             "objective": endpoint.objective,
             "terms": _term_ledger(endpoint.terms, objective.weights),
             "iota": endpoint.warm_start.iota,

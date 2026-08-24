@@ -838,7 +838,8 @@ timing bar is the OMP sweep, not the unpinned 171 s anecdote.
 ## B37 outer verdict (2026-08-24): bounded negative, closed on recovered evidence
 
 No B37 receipt exists. The first (3-pair) run died at ~6.5 h to an
-operator GPU-probe collision (charter Amendment 4); the Amendment-4
+operator GPU-probe collision (charter Amendment 5,
+renumbered from 4 at the transactional merge); the Amendment-5
 single-pair rerun (producer `997bbacd5`, log stub
 `nested_ls_outer_b37_20260823.log`) was killed at 04:33 by operator
 decision on the user's instruction after the faulted run's own per-eval
@@ -890,3 +891,33 @@ execution-proven by the replay above). Transactional B3 v2 launched
 05:19 from a detached worktree at `01fefbadd` (receipt stem
 `nested_ls_outer_b3_20260824`); B37 v2 only if B3 v2 lands green.
 No timing claim of any kind attaches to any run in this section.
+
+## B37 v2 JAX-only diagnostic (2026-08-24): the transactional lane completes the budget at native-class quality
+
+DIAGNOSTIC, NOT CERTIFYING — single-lane, single-process, launched 05:39
+from the detached worktree at `01fefbadd` (v2 transactional semantics),
+warm cache, GPU shared with the concurrent B3 v2 legs for most of the run
+(walls informational only). Evidence sha256 (first 16):
+`nested_ls_outer_b37v2_20260824_jax_diagnostic.json` `ff99f39714d79165`
+(+ `.log` `3efbb9cef4580fbd`, per-eval rows).
+
+Verdict: **nit=37/37** (v1 stalled at 27), honest exit
+`STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT` (`status=1`,
+`ftol_zero_stop=False`, `restart_nits=[37]` — no restart consumed),
+endpoint `J = 0.006746235108545951` = **+0.13%** vs the v1 native full-37
+reference `0.006737776589829025` (v1's poisoned stall was +7.7%),
+endpoint on-manifold (`endpoint_inner_grad_l2 = 1.90e-15`),
+`endpoint_is_optimizer_x = True`. 52 feasible + 8 rejected evaluations;
+the ledger shows repeated wrong-branch feasible probes (worst: eval 25 at
+J = 10.7, ‖∇J‖ ≈ 1.96e4, iota delta 0.0071 — under the 0.05 guard) each
+rejected by the line search with the committed anchor intact — the exact
+poisoning-class events that killed v1, survived by construction. Two
+marginal `inner_solve_failed` rejections at ‖g‖ ~1e-3–5e-3 after 10
+iterations document the inner-budget headroom item the upgrade plan's
+Phase 3 addresses.
+
+Scope: answers the survival/sufficiency question only (commit-on-accept
+alone suffices at B37 on this trajectory). NOT a parity or timing claim —
+the certified B37 v2 requires the paired single-process run with both
+lanes under the merged v2 lineage per
+`docs/nested_ls_upgrade_implementation_plan.md` Phase 5.
