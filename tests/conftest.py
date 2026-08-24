@@ -581,7 +581,6 @@ _STRICT_GPU_EXCLUDED_MARKERS = {
 
 _ADAPTER_BOUNDARY_TEST_FILES = frozenset(
     {
-        "field/test_force_item09_closeout.py",
         "field/test_magnetic_axis_helpers_jax_item21.py",
         "field/test_selffieldforces.py",
         "geo/test_curvexyzfouriersymmetries_spec_jax.py",
@@ -594,6 +593,9 @@ _ADAPTER_BOUNDARY_TEST_FILES = frozenset(
         "geo/test_surface_rzfourier_jax_item06_closeout.py",
         "geo/test_surface_rzfourier_transfer_guard_jax.py",
         "geo/test_surface_xyz_tensor_clamped_jax.py",
+        "jax/native_unit_parity/test_curve_subclasses_parity.py",
+        "jax/native_unit_parity/test_force_parity.py",
+        "jax/native_unit_parity/test_strain_parity.py",
         "objectives/test_fluxobjective_jax_parity.py",
     }
 )
@@ -601,6 +603,7 @@ _ADAPTER_BOUNDARY_TEST_FILES = frozenset(
 _NATIVE_CPU_REFERENCE_TEST_FILES = frozenset(
     {
         "jax/solve/test_compat_shim_translation.py",
+        "jax/test_native_unit_coverage_manifest.py",
     }
 )
 
@@ -608,6 +611,7 @@ _NATIVE_CPU_REFERENCE_NODE_PREFIXES = frozenset(
     {
         "jax/solve/test_value_grad_contract.py::test_optax_lbfgs_uses_explicit_vjp_for_io_callback_value_grad",
         "jax/solve/test_value_grad_contract.py::test_simsopt_bfgs_uses_explicit_value_grad_under_strict_transfer_guard",
+        "jax/objectives/test_force_stage_two.py::test_force_stage_two_diagnostics_match_native_force_objectives",
         "geo/test_boozer_derivatives_jax.py::TestBoozerDirectCppOracles::",
         "geo/test_boozer_derivatives_jax.py::TestBoozerResidualJacobianComposed::test_jacobian_matches_cpp_dresidual_dc_oracle",
         "geo/test_boozer_derivatives_jax.py::TestBoozerHessianComposed::test_hessian_matches_cpp_boozer_residual_ds2_oracle",
@@ -629,7 +633,6 @@ _NATIVE_CPU_REFERENCE_NODE_PREFIXES = frozenset(
         "geo/test_boozersurface_jax.py::TestOptimizerAdapter::test_newton_exact_linear_system",
         "geo/test_boozersurface_jax.py::TestOptimizerAdapter::test_newton_exact_materializes_dense_jacobian_once_at_final_iterate",
         "geo/test_boozersurface_jax.py::TestOptimizerAdapter::test_newton_exact_skips_dense_jacobian_when_ceiling_is_exceeded",
-        "geo/test_boozersurface_jax.py::TestOptimizerAdapter::test_newton_polish_backtracks_gradient_increasing_step",
         "geo/test_boozersurface_jax.py::TestNewtonPolishBoozer::",
         "geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_backend_mutation_does_not_rewrite_dense_linearization_default",
         "geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_instantiation_defaults_optimizer_backend_from_runtime_contract",
@@ -643,7 +646,6 @@ _NATIVE_CPU_REFERENCE_NODE_PREFIXES = frozenset(
         "geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_public_exact_constraints_newton_nonstellsym_uses_full_jacobian_solve",
         "geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_public_newton_api_routes_without_legacy_vectorize_kwarg",
         "geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_private_options_rejected_with_scipy_backend",
-        "geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_newton_polish_returns_stabilized_hessian_when_requested",
         "geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_run_code_routes_backend_contract_to_expected_method",
         "geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_scipy_bfgs_pre_newton_contract_uses_cpu_call_shape",
         "geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_run_code_reference_lm_forwards_least_squares_options",
@@ -708,7 +710,6 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(pytest.mark.build_compat_native)
         if relpath_str in {
             "integration/test_single_stage_jax.py",
-            "geo/test_single_stage_example.py",
         }:
             item.add_marker(pytest.mark.single_stage)
             item.add_marker(pytest.mark.slow)
