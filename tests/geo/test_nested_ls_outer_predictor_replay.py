@@ -400,11 +400,24 @@ def test_strict_json_refuses_a_non_finite_number() -> None:
 
 
 def test_solve_plan_counts_match_the_declared_budget() -> None:
-    """4 predictor solves, 6 tolerance solves, 10 together."""
+    """4 predictor solves; 1 production mirror + both ladders; 18 together.
 
+    Derived from the rung tuples rather than written as literals, so adding a
+    rung cannot leave the pre-flight under-reporting the run. An operator
+    sizes a GPU window from this plan, and a plan that lists fewer solves
+    than the run takes is the same class of defect as a receipt that names a
+    gate it does not run.
+    """
+
+    tolerance_solves = 1 + len(probe.TOLERANCE_RUNGS) + len(probe.ITERATION_RUNGS)
     assert len(probe.solve_plan("predictor")) == 4
-    assert len(probe.solve_plan("tolerance-budget")) == len(probe.TOLERANCE_RUNGS) + 1
-    assert len(probe.solve_plan("all")) == 10
+    assert len(probe.solve_plan("tolerance-budget")) == tolerance_solves
+    assert len(probe.solve_plan("all")) == 4 + tolerance_solves
+    # The iteration ladder is the half that can actually spread the
+    # abscissae, so it must not be empty and must not overlap the converged
+    # reference: every cap is below the walk's own 9 iterations.
+    assert probe.ITERATION_RUNGS
+    assert max(probe.ITERATION_RUNGS) < probe.REGEN_ITERATION_COUNT
 
 
 def test_default_out_path_lands_under_the_evidence_directory() -> None:
