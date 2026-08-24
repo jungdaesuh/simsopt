@@ -420,6 +420,11 @@ def _require_omp_evidence(
             raise SystemExit(
                 f"--omp-evidence row {row_key} observed a different OMP count"
             )
+        if "child_schema" not in row:
+            raise SystemExit(
+                f"--omp-evidence row {row_key} declares no child schema; it "
+                "predates the source-binding contract and cannot be cited"
+            )
         if str(row["child_schema"]) != NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA:
             raise SystemExit(f"--omp-evidence row {row_key} has a stale child schema")
         if row_key[1] in per_omp_walls:
@@ -764,6 +769,7 @@ def _run_child(
     if completed.returncode != 0 or not out_path.is_file():
         raise RuntimeError(
             f"outer {label} child failed rc={completed.returncode} "
+            f"{_child_failure_evidence(out_path, expected_schema=expected_schema)}"
             f"stderr={completed.stderr[-2000:]}"
         )
     payload = json.loads(out_path.read_text(encoding="utf-8"))
@@ -773,6 +779,53 @@ def _run_child(
         expected_schema=expected_schema,
     )
     return payload, process_wall_seconds
+
+
+def _child_failure_evidence(out_path: Path, *, expected_schema: str) -> str:
+    """Name the honest-failure receipt a nonzero child left behind, if any.
+
+    A child that fails closed at the accepted-step callback writes its
+    complete payload — ledger rows, committed incumbent, telemetry — and
+    only then exits nonzero. Without this the parent would report a return
+    code and a stderr tail and never mention the evidence the child went
+    out of its way to preserve.
+
+    This runs only on the failure path, and it is spliced into the message
+    of the ``RuntimeError`` the caller is already raising. It therefore has
+    one hard obligation: **never make the report worse than saying nothing**.
+    A child that died mid-write is the expected cause here — the recorded
+    incident that moved child payloads off a quota-exhausted ``/tmp`` was
+    exactly a truncated write — so a half-written file must degrade to a
+    note, not to a decode traceback that swallows the return code and the
+    stderr tail. Hence the widened guard and the shape check: ``json.loads``
+    accepts ``3`` and ``[]`` as valid JSON, and ``.get`` on those raises.
+    """
+
+    if not out_path.is_file():
+        return ""
+    if out_path.stat().st_size == 0:
+        # `_child_json_path` creates the file before the child starts
+        # (`NamedTemporaryFile(delete=False)`), so an empty file means the
+        # child wrote nothing — a segfault, an OOM kill, an import error.
+        # Calling that "unreadable" would accuse it of leaving a corrupt
+        # receipt, which is the opposite of the truth.
+        return ""
+    try:
+        payload = json.loads(out_path.read_bytes())
+    except (OSError, ValueError):
+        # OSError: unreadable. ValueError: covers both JSONDecodeError and
+        # the UnicodeDecodeError a non-UTF-8 truncation raises.
+        return f"child_payload={out_path} (unreadable) "
+    if not isinstance(payload, dict):
+        return f"child_payload={out_path} (not a JSON object) "
+    if payload.get("schema") != expected_schema:
+        return ""
+    if "child_fault_reason" not in payload:
+        return f"child_payload={out_path} (no fault reason recorded) "
+    return (
+        f"child_fault_reason={payload['child_fault_reason']!r} "
+        f"child_payload={out_path} "
+    )
 
 
 def _require_child_schema(
@@ -948,7 +1001,16 @@ def _launch_rejudge(
         raise RuntimeError(
             f"rejudge judged lane {payload['judged_lane']!r}, expected {lane!r}"
         )
-    payload_sha256 = hashlib.sha256(child_out.read_bytes()).hexdigest()
+    # Bind by the child's exact bytes, never by a re-encode. The timed-child
+    # binding above already works this way (``child_payload_raw`` +
+    # ``_verified_embedded_child_payload``); the rejudge binding used to
+    # re-serialize the parsed payload to check its own digest, which cannot
+    # round-trip: the child writes compact and insertion-ordered, the parent
+    # re-encoded with ``indent=2``, and a reload re-encodes in sorted order
+    # because the receipt writer sets ``sort_keys=True``. Every claim.v2 pair
+    # would have failed closed on ``{lane}_rejudge_payload_sha256_mismatch``.
+    payload_raw = child_out.read_text(encoding="utf-8")
+    payload_sha256 = hashlib.sha256(payload_raw.encode("utf-8")).hexdigest()
     child_out.unlink(missing_ok=True)
     log(
         "outer rejudge"
@@ -961,6 +1023,7 @@ def _launch_rejudge(
     )
     return {
         "payload": payload,
+        "payload_raw": payload_raw,
         "payload_sha256": payload_sha256,
         "process_wall_seconds": process_wall_seconds,
         "timed": False,
@@ -976,11 +1039,18 @@ def _rejudge_endpoint_mismatch(
     maxcor: int,
 ) -> str | None:
     rejudge = rejudge_envelope["payload"]
-    reencoded_payload = json.dumps(rejudge, allow_nan=False, indent=2) + "\n"
-    if hashlib.sha256(reencoded_payload.encode("utf-8")).hexdigest() != str(
+    payload_raw = rejudge_envelope.get("payload_raw")
+    if not isinstance(payload_raw, str):
+        return f"{lane}_rejudge_payload_raw_missing"
+    if hashlib.sha256(payload_raw.encode("utf-8")).hexdigest() != str(
         rejudge_envelope["payload_sha256"]
     ):
         return f"{lane}_rejudge_payload_sha256_mismatch"
+    if (
+        json.loads(payload_raw, parse_constant=_reject_nonfinite_json_constant)
+        != rejudge
+    ):
+        return f"{lane}_rejudge_embedded_payload_mismatch"
     if str(rejudge["schema"]) != NESTED_LS_OUTER_REJUDGE_SCHEMA:
         return f"{lane}_rejudge_schema_mismatch"
     if str(rejudge["judged_lane"]) != lane:
@@ -1430,6 +1500,19 @@ def main(argv: list[str] | None = None) -> None:
         jax_walls.append(float(jax_row["claim_wall_seconds"]))
         measures.append((native, jax_row, native_endpoint, jax_endpoint))
 
+    # The lane's start policy is a property of the TIMED lane, so read it off
+    # the timed rows and not off the prime. The prime is an untimed cache
+    # warm-up that ``--skip-prime`` legitimately omits, and reading a published
+    # claim field out of it meant every Amendment-5 fault-rerun died with a
+    # KeyError at receipt time, after burning its whole wall.
+    jax_start_policies = {str(row["start_policy"]) for _n, row, _ne, _je in measures}
+    if len(jax_start_policies) != 1:
+        raise SystemExit(
+            "the timed JAX rows disagree on their start policy: "
+            f"{sorted(jax_start_policies)}"
+        )
+    jax_start_policy = jax_start_policies.pop()
+
     pairs: list[dict[str, object]] = []
     fail_reason: str | None = None
     for repeat, (native, jax_row, native_endpoint, jax_endpoint) in enumerate(measures):
@@ -1520,7 +1603,7 @@ def main(argv: list[str] | None = None) -> None:
             "interleaved_repeats": True,
             "jax_claim_clock": "parent_wait",
             "jax_persistent_cache": True,
-            "jax_start_policy": str(prime["start_policy"]),
+            "jax_start_policy": jax_start_policy,
             # Amendment 1: B3 measures the achievable fork band and does not
             # gate on it; B37 gates at the value frozen from that receipt.
             "j_parity_mode": j_parity_mode,

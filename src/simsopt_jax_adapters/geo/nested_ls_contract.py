@@ -52,8 +52,8 @@ NESTED_LS_GATE6_NATIVE_OMP_THREADS: Final[int] = 16
 # Fresh-process child payload schemas. These live in the JAX-free contract
 # module so producers, the claim parent, and the rejudge consumer share one
 # source of truth without importing either process-level child module.
-NESTED_LS_OUTER_JAX_CHILD_SCHEMA: Final[str] = "nested-ls-outer-jax-child.v4"
-NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA: Final[str] = "nested-ls-outer-native-child.v3"
+NESTED_LS_OUTER_JAX_CHILD_SCHEMA: Final[str] = "nested-ls-outer-jax-child.v5"
+NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA: Final[str] = "nested-ls-outer-native-child.v4"
 NESTED_LS_OUTER_REJUDGE_SCHEMA: Final[str] = "nested-ls-outer-rejudge.v1"
 
 # Gate FD-0 of the eight-term outer charter
@@ -237,6 +237,29 @@ def nested_ls_outer_parameter_bytes(parameters: NDArray[np.float64]) -> bytes:
     return canonical.tobytes(order="C")
 
 
+class NestedLsOuterAcceptWithoutCandidate(RuntimeError):
+    """scipy accepted outer parameters no candidate was ever staged for.
+
+    Control flow only: raised by :meth:`NestedLsOuterCandidateStore.accept`
+    and caught at each lane's accepted-step callback seam so the child can
+    publish its ledger, its committed incumbent and its telemetry before
+    exiting nonzero. It never means the run recovered.
+
+    Typed at the raise site rather than retyped by each caller, because
+    ``accept`` reaches a second ``RuntimeError`` through
+    :attr:`NestedLsOuterCandidateStore.committed` — an ``except RuntimeError``
+    at the callback would publish an unprimed-store bug under this one's
+    name. One class here also keeps the two lanes from inventing two.
+    """
+
+    def __init__(self, parameters: NDArray[np.float64]) -> None:
+        super().__init__(
+            "accepted outer parameters match neither the incumbent nor "
+            "a pending candidate"
+        )
+        self.parameters = np.array(parameters, dtype=np.float64, copy=True)
+
+
 class NestedLsOuterCandidateStore(Generic[_CandidateT]):
     """Keep trial candidates pending until scipy accepts their exact parameters.
 
@@ -289,16 +312,17 @@ class NestedLsOuterCandidateStore(Generic[_CandidateT]):
         return False
 
     def accept(self, parameters: NDArray[np.float64]) -> _CandidateT:
-        """Commit the pending candidate whose exact bytes match scipy's callback."""
+        """Commit the pending candidate whose exact bytes match scipy's callback.
+
+        Raises :class:`NestedLsOuterAcceptWithoutCandidate` when the accepted
+        bytes are neither the incumbent's nor any staged candidate's.
+        """
 
         parameter_bytes = nested_ls_outer_parameter_bytes(parameters)
         candidate = self._pending.get(parameter_bytes)
         if candidate is None:
             if parameter_bytes != self._committed_parameter_bytes:
-                raise RuntimeError(
-                    "accepted outer parameters match neither the incumbent nor "
-                    "a pending candidate"
-                )
+                raise NestedLsOuterAcceptWithoutCandidate(parameters)
             candidate = self.committed
         self._committed = candidate
         self._committed_parameter_bytes = parameter_bytes
@@ -330,6 +354,62 @@ def nested_ls_outer_rejection_barrier(
         np.dot(displacement, displacement)
     )
     return value, gradient
+
+
+#: What ``value_is_valid`` means, in one place, for both lanes and both
+#: levels at which it is published (per evaluation row, and per restart
+#: attempt beside scipy's ``fun``).
+#:
+#: ``True``  — the number IS the eight-term outer objective, and the
+#:             ``grad_*`` norms beside it are its coil gradient.
+#: ``False`` — the number is the containment barrier
+#:             ``J_a + 0.5*mu*||c - c_a||^2`` and its derivative
+#:             ``mu*(c - c_a)``: a real number in a real ledger row, priced
+#:             off the committed anchor, but not a measurement of the
+#:             objective at those coils.
+#:
+#: It is a DIFFERENT question from ``inner_feasible``, which reports whether
+#: the inner solve landed on the anchor's branch within budget. The two
+#: coincide today and diverge at Phase 4 of
+#: ``docs/nested_ls_upgrade_implementation_plan.md``, where a licensed coarse
+#: inner tolerance may feed a line-search trial value: that row is
+#: inner-feasible while its number is a coarse surrogate. A consumer that
+#: aggregates values across rows without reading this bit averages
+#: surrogates into a physics figure, which is the failure the bit prevents.
+NESTED_LS_OUTER_VALUE_IS_VALID_MEANING: Final[str] = (
+    "true when the published value is the eight-term outer objective; "
+    "false when it is the containment barrier priced off the committed anchor"
+)
+
+
+def nested_ls_outer_attempt_fun_is_objective(
+    *,
+    reported_parameters: NDArray[np.float64],
+    last_evaluated_parameters: NDArray[np.float64],
+    last_evaluation_value_is_valid: bool,
+) -> bool:
+    """Whether one attempt's scipy ``result.fun`` IS the outer objective.
+
+    scipy restores ``result.x`` and ``result.jac`` to the incumbent when a
+    line search rejects every step, but it does **not** restore
+    ``result.fun``: that field keeps the last rejected trial's containment
+    barrier. Both lanes publish scipy's raw datum and this bit beside it, so
+    a consumer can tell an objective from a surrogate.
+
+    This is a **provenance** check, not a value comparison. ``result.fun`` is
+    whatever the last evaluation of the attempt returned, so it is the
+    objective exactly when that evaluation published the objective and stood
+    at the point the attempt reports. Comparing ``result.fun`` against the
+    incumbent's stored value instead would be a coincidence test that the
+    barrier can pass: ``J_a + 0.5*mu*||d||^2`` rounds to bitwise ``J_a`` for
+    small ``||d||`` (measured: anchor 0.328125, ``||d|| = 1e-9``, scale 1.0),
+    and dcsrch contracts toward exactly that regime, so a rejected trial near
+    convergence would be stamped valid.
+    """
+
+    return bool(last_evaluation_value_is_valid) and nested_ls_outer_parameter_bytes(
+        reported_parameters
+    ) == nested_ls_outer_parameter_bytes(last_evaluated_parameters)
 
 
 def nested_ls_outer_ftol_zero_stop(*, ftol: float, message: str) -> bool:
@@ -374,6 +454,16 @@ def nested_ls_outer_endpoint_success(
             message=message,
         )
     )
+
+
+#: The one published name for the one way an outer child can die at the
+#: accepted-step callback seam: scipy announced parameters that are neither
+#: the incumbent nor any staged candidate. It lives here, beside
+#: ``nested_ls_outer_restart_reason``'s ``abnormal_line_search`` /
+#: ``false_ftol_stall``, because this module is the JAX-free single source
+#: both lanes import at module level — a fault vocabulary that lived in one
+#: lane would make the other lane's copy a deferred import away from drift.
+NESTED_LS_OUTER_ACCEPT_WITHOUT_CANDIDATE_REASON: Final[str] = "accept_without_candidate"
 
 
 def nested_ls_outer_restart_reason(
@@ -423,6 +513,7 @@ __all__ = [
     "NESTED_LS_NEWTON_STAB",
     "NESTED_LS_NEWTON_TOL",
     "NESTED_LS_OPTIMIZE_G",
+    "NESTED_LS_OUTER_ACCEPT_WITHOUT_CANDIDATE_REASON",
     "NESTED_LS_OUTER_FD0_DIRECTIONS",
     "NESTED_LS_OUTER_FD0_MAX_HALVINGS",
     "NESTED_LS_OUTER_FD0_MIN_STEP_RULE",
@@ -438,6 +529,7 @@ __all__ = [
     "NESTED_LS_OUTER_JAX_CHILD_SCHEMA",
     "NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA",
     "NESTED_LS_OUTER_REJUDGE_SCHEMA",
+    "NESTED_LS_OUTER_VALUE_IS_VALID_MEANING",
     "NESTED_LS_OUTER_FTOL_STALL_MESSAGE",
     "NESTED_LS_OUTER_MAX_RESTARTS",
     "NESTED_LS_OUTER_OMP_SWEEP_REPEATS",
@@ -447,9 +539,11 @@ __all__ = [
     "NESTED_LS_TIMING_BAR",
     "NESTED_LS_WEIGHT_INV_MODB",
     "NestedLsBananaRunCodeOptions",
+    "NestedLsOuterAcceptWithoutCandidate",
     "NestedLsOuterCandidateStore",
     "NestedLsPhysicsNewtonKwargs",
     "nested_ls_banana_run_code_options",
+    "nested_ls_outer_attempt_fun_is_objective",
     "nested_ls_outer_endpoint_success",
     "nested_ls_outer_ftol_zero_stop",
     "nested_ls_outer_fd0_minimum_step",
