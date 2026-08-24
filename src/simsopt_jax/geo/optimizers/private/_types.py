@@ -113,7 +113,7 @@ class _LBFGSResults(NamedTuple):
     ls_status: int | jax.Array
     evaluated_nonfinite_count: jax.Array
     all_accepted_states_finite: jax.Array
-    invalid_step_log: _LBFGSInvalidStepLog
+    invalid_step_record: _LBFGSInvalidStepRecord
     optimizer_state_trace: tuple[dict[str, object], ...] = ()
     hess_inv_s: jax.Array | None = None
     hess_inv_y: jax.Array | None = None
@@ -121,21 +121,49 @@ class _LBFGSResults(NamedTuple):
     task: jax.Array | None = None
 
 
-class _LBFGSInvalidStepLog(NamedTuple):
-    count: int | jax.Array
-    write_index: int | jax.Array
+class _LBFGSInvalidStepRecord(NamedTuple):
+    """The one rejected-step record an L-BFGS-B solve can publish.
+
+    ``setulb`` reports ABNORMAL only when a line search fails with no correction
+    pairs left to refresh from, which ends the solve.  There is therefore at most
+    one record per solve -- ``recorded`` says whether it exists -- and no history
+    to ring, so every field is a scalar rather than a slot in a buffer.
+
+    Every field is read from the terminal ``dsave``/``isave`` workspace.  Fields
+    the workspace does not survive to answer are absent rather than defaulted:
+    ``lnsrlb`` keeps a single ``stp`` slot that ``dcsrch`` overwrites on each
+    entry, so the requested initial step and the first tested alpha are gone by
+    the time the search is abandoned, and the alpha the last trial was evaluated
+    at is gone too -- which is why an Armijo residual cannot be published while a
+    curvature residual, which needs no alpha, can.
+
+    ``step_scale`` and ``curvature_margin`` belong to two *different* alphas and
+    must not be read as one observation.  ``step_scale`` is ``dsave[13]``, the
+    step ``dcsrch`` proposed next and that no trial was ever evaluated at;
+    ``curvature_margin`` is built from ``dsave[10]``, the directional derivative
+    at the trial the driver last actually evaluated.
+
+    ``curvature_margin`` is published only when ``curvature_margin_measured``:
+    ``lnsrlb`` rejects a non-descent direction before calling ``dcsrch`` at all
+    and returns the save area untouched, so on that path ``dsave[16]`` holds a
+    previous line search's ``ginit`` -- zero on the first -- and the difference
+    is not the residual of any curvature test.
+
+    That path is reachable, not theoretical.  This lane is always unbounded, so
+    a solve that terminates ABNORMAL has no live correction pair and searches
+    along ``-g/theta``, making ``g . d = -|g|^2/theta`` non-positive in exact
+    arithmetic.  XLA nonetheless flushes subnormal float64 products to ``-0.0``,
+    so a gradient small enough that ``|g|^2`` is subnormal (``|g|`` below about
+    1.5e-154) yields ``gd == -0.0``, which satisfies ``gd >= 0`` and reports
+    NOT_DESCENT.
+    """
+
+    recorded: jax.Array
     iteration: jax.Array
     step_scale: jax.Array
     line_search_failed: jax.Array
     nonfinite_step: jax.Array
-    stalled_step: jax.Array
-    valid_curvature: jax.Array
-    trial_converged: jax.Array
     ls_status: jax.Array
-    requested_initial_step: jax.Array
-    first_tested_alpha: jax.Array
-    best_finite_alpha: jax.Array
-    returned_alpha: jax.Array
     failure_reason: jax.Array
-    armijo_margin: jax.Array
+    curvature_margin_measured: jax.Array
     curvature_margin: jax.Array

@@ -2774,3 +2774,131 @@ def test_lbfgsb_lnsrlb_is_jittable_for_fixed_workspace_shapes():
 
     assert int(actual.task) == lbfgsb.FG
     assert int(actual.task_msg) == lbfgsb.FG_LNSRCH
+
+
+# The exact set of workspace slots the port is allowed to write, read off the
+# assignments in _lbfgsb_scipy.py rather than assumed:
+#   dsave -- [0] and [2] in _lbfgsb_setulb_start; [0] again on memory refresh
+#   and on a theta update; the [1],[3],[10],[11],[12],[13],[14],[15] block plus
+#   the [16:29] dcsrch save area written by every line-search transition.
+#   isave -- [:16] (workspace partition) and [37] in _lbfgsb_setulb_start; the
+#   per-transition scalars [21],[24],[25],[26],[27],[28],[29],[30],[32]..[40];
+#   and the [42:44] dcsrch save area.
+# Everything else is dead storage.  dsave[4:10] in particular is unused by the
+# port -- dcsrch's own dsave[4]..dsave[9] live in the 13-slot array at
+# dsave[16:29], not here -- and diagnostics deliberately do not colonise it, so
+# that this port stays a faithful mirror of SciPy's workspace usage.  This test
+# turns that from a convention into a guard.
+_DSAVE_WRITE_SLOTS = frozenset({0, 1, 2, 3, 10, 11, 12, 13, 14, 15}) | frozenset(
+    range(16, 29)
+)
+_ISAVE_WRITE_SLOTS = (
+    frozenset(range(16))
+    | {21, 24, 25, 26, 27, 28, 29, 30}
+    | frozenset(range(32, 41))
+    | {42, 43}
+)
+
+
+def _seed_unwritten_workspace_slots(state):
+    """Stamp every slot outside the write set with a unique foreign value."""
+    dsave = state.workspace.dsave
+    isave = state.workspace.isave
+    for slot in range(int(dsave.shape[0])):
+        if slot not in _DSAVE_WRITE_SLOTS:
+            dsave = dsave.at[slot].set(-1.0e100 * (slot + 1))
+    for slot in range(int(isave.shape[0])):
+        if slot not in _ISAVE_WRITE_SLOTS:
+            isave = isave.at[slot].set(-(slot + 1000))
+    return state._replace(workspace=state.workspace._replace(dsave=dsave, isave=isave))
+
+
+def _drive_lbfgsb_to_termination(objective, x0, *, gtol, unconstrained_fast_path):
+    state = lbfgsb.lbfgsb_initial_state(
+        jnp.asarray(x0, dtype=jnp.float64), m=5, gtol=gtol, maxls=20
+    )
+    seeded = _seed_unwritten_workspace_slots(state)
+    result = lbfgsb.lbfgsb_advance_from_start_to_next_observable(
+        objective,
+        seeded,
+        maxiter=8,
+        maxfun=64,
+        unconstrained_fast_path=unconstrained_fast_path,
+    )
+    for _ in range(64):
+        if bool(np.asarray(result.terminal)):
+            return seeded, result.state
+        result = lbfgsb.lbfgsb_advance_to_next_observable(
+            objective, result.state, maxiter=8, maxfun=64
+        )
+    raise AssertionError("lbfgsb driver did not reach a terminal task")
+
+
+def _converging_quadratic(x):
+    shifted = x - 0.25
+    return 0.5 * jnp.dot(shifted, shifted), shifted
+
+
+def _flat_with_constant_slope(x):
+    # Every trial fails Armijo, so the search spends its backtrack budget.
+    return jnp.asarray(0.0, dtype=x.dtype), jnp.ones_like(x)
+
+
+def _subnormal_squared_gradient(x):
+    # |g|^2 is subnormal, so the directional derivative flushes to -0.0 and the
+    # search is rejected as non-descent before dcsrch runs.
+    return jnp.asarray(0.0, dtype=x.dtype), jnp.full_like(x, 1.0e-180)
+
+
+@pytest.mark.parametrize("unconstrained_fast_path", [False, True])
+@pytest.mark.parametrize(
+    ("objective", "gtol"),
+    [
+        (_converging_quadratic, 1.0e-10),
+        (_flat_with_constant_slope, 1.0e-10),
+        (_subnormal_squared_gradient, 1.0e-200),
+    ],
+    ids=["descent_accepted", "maxls_exhausted", "non_descent"],
+)
+def test_lbfgsb_scipy_port_workspace_write_footprint_is_fidelity_bounded(
+    objective, gtol, unconstrained_fast_path
+):
+    """The port must not write workspace slots SciPy leaves alone.
+
+    Slots outside the documented write set are stamped with unique foreign
+    values before the solve; a faithful port returns every one of them bit
+    unchanged.  Any stray write -- a diagnostic parking a value in the free
+    dsave[4:10] window, or a future kernel spilling scratch into dead storage --
+    turns this red instead of silently forking the workspace layout from SciPy.
+    """
+    seeded, final = _drive_lbfgsb_to_termination(
+        objective,
+        [1.0, -2.0],
+        gtol=gtol,
+        unconstrained_fast_path=unconstrained_fast_path,
+    )
+
+    dsave_before = np.asarray(seeded.workspace.dsave)
+    dsave_after = np.asarray(final.workspace.dsave)
+    isave_before = np.asarray(seeded.workspace.isave)
+    isave_after = np.asarray(final.workspace.isave)
+
+    unwritten_dsave = [
+        slot for slot in range(dsave_before.shape[0]) if slot not in _DSAVE_WRITE_SLOTS
+    ]
+    unwritten_isave = [
+        slot for slot in range(isave_before.shape[0]) if slot not in _ISAVE_WRITE_SLOTS
+    ]
+    # The free float window the diagnostics decline to use must really be free.
+    assert unwritten_dsave == [4, 5, 6, 7, 8, 9]
+
+    np.testing.assert_array_equal(
+        dsave_after[unwritten_dsave],
+        dsave_before[unwritten_dsave],
+        err_msg=f"port wrote dsave slots outside {sorted(_DSAVE_WRITE_SLOTS)}",
+    )
+    np.testing.assert_array_equal(
+        isave_after[unwritten_isave],
+        isave_before[unwritten_isave],
+        err_msg=f"port wrote isave slots outside {sorted(_ISAVE_WRITE_SLOTS)}",
+    )
