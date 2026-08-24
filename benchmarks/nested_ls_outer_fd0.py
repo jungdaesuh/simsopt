@@ -45,6 +45,17 @@ PUBLICATION = (
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Gate FD-0 outer gradient probe.")
     parser.add_argument(
+        "--inner-predictor",
+        action="store_true",
+        help=(
+            "run with the Phase-2 predictor ON. Changes the inner warm start "
+            "AND the adjoint's arithmetic (lu_factor/lu_solve instead of "
+            "jnp.linalg.solve), so the result is NOT comparable to a "
+            "predictor-off receipt as a no-op check -- it is a separate "
+            "physics gate on a separate lane."
+        ),
+    )
+    parser.add_argument(
         "--tag",
         default="",
         help="Receipt suffix, e.g. a100 -> nested_ls_outer_fd0_20260823.a100.json",
@@ -134,7 +145,9 @@ def main(argv: list[str] | None = None) -> None:
         surface_coordinates=surface,
     )
     del _target
-    probe = evaluate_f3_b37_outer_fd0_probe(jax_boozer, native)
+    probe = evaluate_f3_b37_outer_fd0_probe(
+        jax_boozer, native, inner_predictor=bool(args.inner_predictor)
+    )
     payload: dict[str, object] = {
         "claim_boundary": {
             "cap_2048_attempted": False,

@@ -5675,6 +5675,8 @@ def _outer_fd0_evaluation_failed(row: dict[str, object]) -> str | None:
 def evaluate_f3_b37_outer_fd0_probe(
     jax_boozer: BoozerSurfaceJAX,
     native: BoozerSurface | None = None,
+    *,
+    inner_predictor: bool = False,
 ) -> NestedLsOuterFd0Probe:
     """Gate FD-0 of the eight-term outer charter, all 11 coil directions.
 
@@ -5761,7 +5763,13 @@ def evaluate_f3_b37_outer_fd0_probe(
             surface_coordinates=loaded,
         )
         del _twin_jax, _twin_target
-    state = prepare_f3_b37_outer_state(jax_boozer)
+    # FD-0 is the natural first exercise of a predictor-ON lane: it drives
+    # ``nested_ls_outer_value_and_grad`` at a frozen anchor and perturbs the
+    # coils around it, so every leg is a genuine committed-anchor-to-trial
+    # displacement — which is exactly what the predictor predicts. It also
+    # carries no timing content, so it can run on a contended box, and it
+    # has a bitwise OFF baseline to be compared against.
+    state = prepare_f3_b37_outer_state(jax_boozer, inner_predictor=inner_predictor)
     # The base point is the one evaluation that also assembles the mixed
     # term the second way; the perturbed evaluations pay production cost.
     state.record_mixed_cross_check = True
