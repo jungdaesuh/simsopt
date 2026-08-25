@@ -1,0 +1,20 @@
+outer prime jax cache budget 3 maxcor 10 omp 20 omp_provenance swept_artifact git_head e75865e0af2aee27924ef48f3e355c716def0dbc
+outer omp evidence path /home/jungdaesuh/code/columbia/.wt-cert-sweep/docs/receipts/evidence/nested_ls_outer_native_omp_sweep_20260824.json sha256 f69eab90dc2853cb607d0e7609014fb8bfd99f228c4a6958571455f0fe970b41 best_omp 20 rows 16
+outer jax success=True nit=3 nfev=10 feasible=5 rejected=5 J=0.012982793095005024 grad_l2=2.470925850054119 wall=1075.4433287428692
+outer native success=True nit=3 nfev=10 J=0.012982793095001393 iota=0.14481827542383685 wall=1478.3296605299693 omp=20
+outer jax success=True nit=3 nfev=10 feasible=5 rejected=5 J=0.012982793095005024 grad_l2=2.470925850054119 wall=962.8850940659177
+outer native success=True nit=3 nfev=10 J=0.012982793095001393 iota=0.14481827542383685 wall=1494.6104647191241 omp=20
+outer jax success=True nit=3 nfev=10 feasible=5 rejected=5 J=0.012982793095005024 grad_l2=2.470925850054119 wall=1042.1263247570023
+outer native success=True nit=3 nfev=10 J=0.012982793095001393 iota=0.14481827542383685 wall=1491.4171983229462 omp=20
+outer jax success=True nit=3 nfev=10 feasible=5 rejected=5 J=0.012982793095005024 grad_l2=2.470925850054119 wall=1045.2577173740137
+outer rejudge lane=native noop=True iter=0 native_grad_l2=3.285306341834699e-15 reduced_grad_l2=2.709031424028713e-15 reason=None wall=32.67294582189061
+outer rejudge lane=jax noop=True iter=0 native_grad_l2=2.76153598317e-15 reduced_grad_l2=1.8558192925947662e-15 reason=None wall=32.92209247709252
+outer pair repeat=0 physics=True native_wall=1478.3296605299693 jax_wall=962.8850940659177 native_J=0.012982793095001393 jax_J=0.012982793095005024 j_rel_gap=2.7966064071508394e-13 reason=None
+outer rejudge lane=native noop=True iter=0 native_grad_l2=3.285306341834699e-15 reduced_grad_l2=2.709031424028713e-15 reason=None wall=32.684636450139806
+outer rejudge lane=jax noop=True iter=0 native_grad_l2=2.76153598317e-15 reduced_grad_l2=1.8558192925947662e-15 reason=None wall=32.71251649199985
+outer pair repeat=1 physics=True native_wall=1494.6104647191241 jax_wall=1042.1263247570023 native_J=0.012982793095001393 jax_J=0.012982793095005024 j_rel_gap=2.7966064071508394e-13 reason=None
+outer rejudge lane=native noop=True iter=0 native_grad_l2=3.285306341834699e-15 reduced_grad_l2=2.709031424028713e-15 reason=None wall=32.96370118809864
+outer rejudge lane=jax noop=True iter=0 native_grad_l2=2.76153598317e-15 reduced_grad_l2=1.8558192925947662e-15 reason=None wall=32.86907037394121
+outer pair repeat=2 physics=True native_wall=1491.4171983229462 jax_wall=1045.2577173740137 native_J=0.012982793095001393 jax_J=0.012982793095005024 j_rel_gap=2.7966064071508394e-13 reason=None
+wrote /home/jungdaesuh/code/columbia/.wt-cert-sweep/docs/receipts/evidence/nested_ls_outer_b3_20260824.json
+ok True nested_speed_claim True jax_min 962.8850940659177 native_min 1478.3296605299693 speedup 1.5353126449257974
