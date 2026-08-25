@@ -43,6 +43,7 @@ from simsopt_jax_adapters.geo.nested_ls_ncsx import (
     NcsxNestedLsBranchJump,
     NcsxNestedLsInnerSolveFailed,
     NcsxNestedLsProblem,
+    NcsxNestedLsSelfIntersecting,
     clone_surface_xyz_tensor_fourier,
     commit_ncsx_anchor,
     ncsx_nested_ls_outer_value_and_grad,
@@ -95,34 +96,55 @@ def _summarize_schur(out) -> dict[str, object]:
     }
 
 
-def _load_ncsx(*, mpol: int | None, ntor: int | None, nphi: int, ntheta: int):
+def _scale_ncsx_surface(old, *, mpol: int, ntor: int, nphi: int, ntheta: int):
+    if mpol == old.mpol and ntor == old.ntor and nphi == len(old.quadpoints_phi):
+        return clone_surface_xyz_tensor_fourier(old)
+    return upsample_surface_xyz_tensor_fourier(
+        old, mpol=mpol, ntor=ntor, nphi=nphi, ntheta=ntheta
+    )
+
+
+def _load_ncsx(
+    *,
+    mpol: int | None,
+    ntor: int | None,
+    nphi: int,
+    ntheta: int,
+    nsurfaces: int = 1,
+):
     packed = load(str(NCSX_EXAMPLE_JSON))
     base_curves, base_currents, coils, curves, surfaces, boozer_surfaces, ress = packed
-    old = surfaces[0]
-    native_bz0 = boozer_surfaces[0]
-    iota0 = float(ress[0]["iota"])
-    g0 = float(ress[0]["G"])
+    nsurf = int(nsurfaces)
+    if nsurf < 1 or nsurf > len(surfaces):
+        raise ValueError(
+            f"nsurfaces must be in [1, {len(surfaces)}]; got {nsurf}."
+        )
+    old0 = surfaces[0]
     if mpol is None:
-        mpol = int(old.mpol)
+        mpol = int(old0.mpol)
     if ntor is None:
-        ntor = int(old.ntor)
-    if mpol == old.mpol and ntor == old.ntor and nphi == len(old.quadpoints_phi):
-        surface = clone_surface_xyz_tensor_fourier(old)
-    else:
-        surface = upsample_surface_xyz_tensor_fourier(
+        ntor = int(old0.ntor)
+    scaled = [
+        _scale_ncsx_surface(
             old, mpol=mpol, ntor=ntor, nphi=nphi, ntheta=ntheta
         )
+        for old in surfaces[:nsurf]
+    ]
     return {
         "base_curves": base_curves,
         "base_currents": base_currents,
         "coils": coils,
         "curves": curves,
-        "surface": surface,
-        "constraint_weight": float(native_bz0.constraint_weight),
-        "iota0": iota0,
-        "g0": g0,
+        "surface": scaled[0],
+        "surfaces": scaled,
+        "iotas": [float(res["iota"]) for res in ress[:nsurf]],
+        "gs": [float(res["G"]) for res in ress[:nsurf]],
+        "constraint_weight": float(boozer_surfaces[0].constraint_weight),
+        "iota0": float(ress[0]["iota"]),
+        "g0": float(ress[0]["G"]),
         "mpol": mpol,
         "ntor": ntor,
+        "nsurfaces": nsurf,
     }
 
 
@@ -336,34 +358,44 @@ def _lane_jax_outer(problem, *, maxiter: int):
     # Match boozerQA_ls_mpi.py: freeze the first current so overall current
     # scale is not a free outer DOF.
     problem["base_currents"][0].fix_all()
-    land_surface = clone_surface_xyz_tensor_fourier(problem["surface"])
-    land_label = Volume(land_surface)
-    lander = BoozerSurfaceJAX(
-        BiotSavartJAX(problem["coils"]),
-        land_surface,
-        land_label,
-        float(land_label.J()),
-        constraint_weight=problem["constraint_weight"],
-        options={
-            "verbose": False,
-            "optimizer_backend": "ondevice",
-            "bfgs_maxiter": 20,
-            "weight_inv_modB": True,
-        },
-    )
-    lander.need_to_run_code = True
-    landed = lander.run_code(problem["iota0"], problem["g0"])
-    if landed is None or not bool(landed["success"]):
-        return {
-            "seconds": 0.0,
-            "success": False,
-            "message": "banana run_code land for NCSX outer failed",
-            "last_inner": None,
-        }
+    landers = []
+    landed_iotas = []
+    landed_gs = []
+    for surface, iota0, g0 in zip(
+        problem["surfaces"], problem["iotas"], problem["gs"], strict=True
+    ):
+        land_surface = clone_surface_xyz_tensor_fourier(surface)
+        land_label = Volume(land_surface)
+        lander = BoozerSurfaceJAX(
+            BiotSavartJAX(problem["coils"]),
+            land_surface,
+            land_label,
+            float(land_label.J()),
+            constraint_weight=problem["constraint_weight"],
+            options={
+                "verbose": False,
+                "optimizer_backend": "ondevice",
+                "bfgs_maxiter": 20,
+                "weight_inv_modB": True,
+            },
+        )
+        lander.need_to_run_code = True
+        landed = lander.run_code(iota0, g0)
+        if landed is None or not bool(landed["success"]):
+            return {
+                "seconds": 0.0,
+                "success": False,
+                "message": "banana run_code land for NCSX outer failed",
+                "nsurfaces": int(problem["nsurfaces"]),
+                "last_inner": None,
+            }
+        landers.append(lander)
+        landed_iotas.append(float(landed["iota"]))
+        landed_gs.append(float(landed["G"]))
     nested = ncsx_problem_from_jax_boozers(
-        [lander],
-        iotas=[float(landed["iota"])],
-        g_values=[float(landed["G"])],
+        landers,
+        iotas=landed_iotas,
+        g_values=landed_gs,
         base_curves=problem["base_curves"],
         curves=problem["curves"],
     )
@@ -379,7 +411,11 @@ def _lane_jax_outer(problem, *, maxiter: int):
         point = np.array(dofs, dtype=np.float64, copy=True)
         try:
             value, gradient = ncsx_nested_ls_outer_value_and_grad(nested, point)
-        except (NcsxNestedLsInnerSolveFailed, NcsxNestedLsBranchJump) as signal:
+        except (
+            NcsxNestedLsInnerSolveFailed,
+            NcsxNestedLsBranchJump,
+            NcsxNestedLsSelfIntersecting,
+        ) as signal:
             restore_ncsx_anchor(nested)
             if not candidates.is_primed:
                 raise
@@ -422,6 +458,7 @@ def _lane_jax_outer(problem, *, maxiter: int):
         NestedLsOuterAcceptWithoutCandidate,
         NcsxNestedLsInnerSolveFailed,
         NcsxNestedLsBranchJump,
+        NcsxNestedLsSelfIntersecting,
     ) as error:
         seconds = float(time.perf_counter() - started)
         return {
@@ -432,6 +469,7 @@ def _lane_jax_outer(problem, *, maxiter: int):
             "n_rejected": n_rejected,
             "rejection_distance_scale": rejection_scale,
             "coil_dofs": int(x0.size),
+            "nsurfaces": int(problem["nsurfaces"]),
             "committed": _summarize_committed(candidates),
             "last_inner": None
             if nested.last_inner is None
@@ -447,6 +485,7 @@ def _lane_jax_outer(problem, *, maxiter: int):
         "n_rejected": n_rejected,
         "rejection_distance_scale": rejection_scale,
         "coil_dofs": int(x0.size),
+        "nsurfaces": int(problem["nsurfaces"]),
         "fun": float(result.fun),
         "message": str(result.message),
         "committed": _summarize_committed(candidates),
@@ -470,6 +509,12 @@ def main() -> None:
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--bfgs-maxiter", type=int, default=20)
     parser.add_argument("--outer-maxiter", type=int, default=2)
+    parser.add_argument(
+        "--nsurfaces",
+        type=int,
+        default=1,
+        help="Outer lane surface count (boozerQA_ls_mpi.py uses 2). Inner lanes use surface 0.",
+    )
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = parser.parse_args()
     loaded = _load_ncsx(
@@ -477,6 +522,7 @@ def main() -> None:
         ntor=args.ntor,
         nphi=args.nphi,
         ntheta=args.ntheta,
+        nsurfaces=args.nsurfaces,
     )
     surface = loaded["surface"]
     payload: dict[str, object] = {
@@ -486,6 +532,7 @@ def main() -> None:
         "nphi": len(surface.quadpoints_phi),
         "ntheta": len(surface.quadpoints_theta),
         "surface_dofs": int(surface.x.size),
+        "nsurfaces": loaded["nsurfaces"],
         "constraint_weight": loaded["constraint_weight"],
         "diagnostic": True,
         "sealed_claim": False,
