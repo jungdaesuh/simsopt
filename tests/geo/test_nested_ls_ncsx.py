@@ -19,16 +19,21 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
 )
 from simsopt_jax_adapters.geo import nested_ls_ncsx as ncsx_mod
 from simsopt_jax_adapters.geo.nested_ls_ncsx import (
+    NCSX_EVAL_TIMING_KEYS,
     NCSX_MR_WEIGHT,
     NcsxNestedLsBranchJump,
     NcsxNestedLsInnerSolveFailed,
     NcsxNestedLsSelfIntersecting,
     clone_surface_xyz_tensor_fourier,
+    empty_ncsx_eval_timing,
+    ncsx_native_outer_value_and_grad,
     ncsx_nested_ls_outer_value_and_grad,
+    ncsx_problem_from_native_boozers,
     prepare_ncsx_nested_ls_problem,
     remap_tensor_fourier_index,
     restore_ncsx_anchor,
     run_ncsx_schur_inner,
+    summarize_ncsx_eval_timings,
     upsample_surface_xyz_tensor_fourier,
 )
 from simsopt_jax_adapters.geo.nested_ls_reduced import (
@@ -222,6 +227,13 @@ def test_ncsx_outer_value_and_grad_is_finite_on_7x7(monkeypatch):
     assert bool(np.all(np.isfinite(gradient)))
     assert problem.last_inner is not None
     assert problem.last_inner.success
+    assert tuple(problem.last_eval_timing) == NCSX_EVAL_TIMING_KEYS
+    assert problem.last_eval_timing["total"] > 0.0
+    assert problem.last_eval_timing["inner"] > 0.0
+    assert problem.last_eval_timing["y_coil_jacobian"] > 0.0
+    assert problem.surfaces[0].jax_boozer.options["newton_linear_solver"] == (
+        "dense_lu"
+    )
 
 
 @pytest.mark.boozer
@@ -327,11 +339,18 @@ def _ncsx_prepared_7x7():
 
 def _stub_surfaces_not_self_intersecting(monkeypatch, problem):
     for surface_state in problem.surfaces:
-        monkeypatch.setattr(
-            surface_state.jax_boozer.surface,
-            "is_self_intersecting",
-            lambda *args, **kwargs: False,
-        )
+        if surface_state.jax_boozer is not None:
+            monkeypatch.setattr(
+                surface_state.jax_boozer.surface,
+                "is_self_intersecting",
+                lambda *args, **kwargs: False,
+            )
+        if surface_state.native is not None:
+            monkeypatch.setattr(
+                surface_state.native.surface,
+                "is_self_intersecting",
+                lambda *args, **kwargs: False,
+            )
 
 
 def _assert_anchor_restored(problem, *, surface, iota, g_value):
@@ -484,4 +503,104 @@ def test_ncsx_prepare_rejects_empty_surfaces():
             iotas=[],
             g_values=[],
             constraint_weight=1.0,
+        )
+
+
+def test_ncsx_eval_timing_summary_means_match_sums():
+    zeros = empty_ncsx_eval_timing()
+    assert tuple(zeros) == NCSX_EVAL_TIMING_KEYS
+    empty = summarize_ncsx_eval_timings([])
+    assert empty["n"] == 0
+    first = empty_ncsx_eval_timing()
+    first["inner"] = 4.0
+    first["total"] = 10.0
+    second = empty_ncsx_eval_timing()
+    second["inner"] = 6.0
+    second["total"] = 14.0
+    summary = summarize_ncsx_eval_timings([first, second])
+    assert summary["n"] == 2
+    assert summary["sum"]["inner"] == 10.0
+    assert summary["mean"]["inner"] == 5.0
+    assert summary["mean"]["total"] == 12.0
+
+
+def _ncsx_prepared_7x7_native():
+    native, jax_boozer, base_curves, biotsavart, iota0, g0 = _ncsx_7x7_pair()
+    iota, g_value = _seed_from_native_lbfgs(native, jax_boozer, iota0, g0)
+    curves = [coil.curve for coil in biotsavart.coils]
+    return prepare_ncsx_nested_ls_problem(
+        coils=biotsavart.coils,
+        base_curves=base_curves,
+        curves=curves,
+        surfaces=[clone_surface_xyz_tensor_fourier(native.surface)],
+        iotas=[iota],
+        g_values=[g_value],
+        constraint_weight=NESTED_LS_CONSTRAINT_WEIGHT,
+        include_native=True,
+    )
+
+
+@pytest.mark.boozer
+def test_ncsx_native_outer_value_and_grad_is_finite_on_7x7(monkeypatch):
+    problem = _ncsx_prepared_7x7_native()
+    assert problem.native_objective is not None
+    assert problem.surfaces[0].native is not None
+    _stub_surfaces_not_self_intersecting(monkeypatch, problem)
+    coil = np.asarray(problem.native_biotsavart.x, dtype=np.float64)
+    value, gradient = ncsx_native_outer_value_and_grad(problem, coil)
+    assert np.isfinite(value)
+    assert gradient.shape == coil.shape
+    assert bool(np.all(np.isfinite(gradient)))
+    assert tuple(problem.last_eval_timing) == NCSX_EVAL_TIMING_KEYS
+    assert problem.last_eval_timing["inner"] > 0.0
+    assert problem.last_eval_timing["direct_partials"] > 0.0
+    assert problem.last_eval_timing["y_coil_jacobian"] == 0.0
+    assert problem.last_native_inner is not None
+    assert bool(problem.last_native_inner["success"])
+
+
+@pytest.mark.boozer
+def test_ncsx_native_failed_inner_restores_persistable_poison(monkeypatch):
+    problem = _ncsx_prepared_7x7_native()
+    state = problem.surfaces[0]
+    committed_surface = np.array(state.anchor_surface_dofs, dtype=np.float64, copy=True)
+    committed_iota = float(state.anchor_iota)
+    committed_g = float(state.anchor_G)
+    coil = np.asarray(problem.native_biotsavart.x, dtype=np.float64)
+
+    def poison_and_fail(_iota, _g=None):
+        wrecked = np.array(state.native.surface.get_dofs(), dtype=np.float64, copy=True)
+        wrecked[0] += 1.0
+        state.native.surface.set_dofs(wrecked)
+        return {
+            "success": False,
+            "iter": 3,
+            "iota": 99.0,
+            "G": -99.0,
+            "jacobian": np.array([510.0], dtype=np.float64),
+        }
+
+    monkeypatch.setattr(state.native, "run_code", poison_and_fail)
+    with pytest.raises(NcsxNestedLsInnerSolveFailed):
+        ncsx_native_outer_value_and_grad(problem, coil)
+    np.testing.assert_array_equal(
+        np.asarray(state.native.surface.get_dofs(), dtype=np.float64),
+        committed_surface,
+    )
+    _assert_anchor_restored(
+        problem,
+        surface=committed_surface,
+        iota=committed_iota,
+        g_value=committed_g,
+    )
+
+
+def test_ncsx_problem_from_native_boozers_rejects_empty():
+    with pytest.raises(ValueError, match="at least one surface"):
+        ncsx_problem_from_native_boozers(
+            [],
+            iotas=[],
+            g_values=[],
+            base_curves=[],
+            curves=[],
         )

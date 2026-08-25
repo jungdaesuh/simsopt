@@ -1,16 +1,20 @@
 """NCSX boozerQA nested-LS: reduced Schur inner and 9-term outer.
 
 This is not F3/flat-675 and does not call ``prepare_f3_b37_outer_state``.
-The inner is :func:`run_reduced_nested_ls_schur_newton` with dense LU.
+The JAX inner is :func:`run_reduced_nested_ls_schur_newton` with dense LU.
+The native inner is banana ``BoozerSurface.run_code`` (BFGS then Newton).
+Those are not the same operator; a ratio is still the point of the twin.
 The outer variable is the free coil DOF vector; surface DOFs are
-eliminated by the Schur implicit-function theorem. C++ reconstruct
-Newton remains the untimed rejudge. MPI multi-rank splitting is out of
-scope: one process takes the :class:`~simsopt.objectives.MPIObjective`
-mean of each per-surface term, matching serial ``boozerQA_ls_mpi.py``.
+eliminated by the implicit-function theorem (JAX Schur adjoint, native
+``PLU``/``vjp``). C++ reconstruct Newton remains the untimed rejudge.
+MPI multi-rank splitting is out of scope: one process takes the
+:class:`~simsopt.objectives.MPIObjective` mean of each per-surface term,
+matching serial ``boozerQA_ls_mpi.py``.
 """
 
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,9 +25,21 @@ import jax.numpy as jnp
 import numpy as np
 from numpy.typing import NDArray
 from simsopt.field import BiotSavart
-from simsopt.geo import SurfaceXYZTensorFourier, Volume
+from simsopt.geo import (
+    ArclengthVariation,
+    BoozerResidual,
+    CurveCurveDistance,
+    CurveLength,
+    Iotas,
+    LpCurveCurvature,
+    MajorRadius,
+    MeanSquaredCurvature,
+    NonQuasiSymmetricRatio,
+    SurfaceXYZTensorFourier,
+    Volume,
+)
 from simsopt.geo.boozersurface import BoozerSurface
-from simsopt.objectives import QuadraticPenalty
+from simsopt.objectives import MPIObjective, QuadraticPenalty
 
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
@@ -79,6 +95,61 @@ NCSX_KAPPA_WEIGHT: Final[float] = 1.0
 NCSX_MSC_WEIGHT: Final[float] = 1.0
 NCSX_IOTAS_WEIGHT: Final[float] = 1.0
 NCSX_ARCLENGTH_WEIGHT: Final[float] = 1.0e-2
+NCSX_EVAL_TIMING_KEYS: Final[tuple[str, ...]] = (
+    "inner",
+    "self_intersection",
+    "y_surface_jacobian",
+    "y_coil_jacobian",
+    "direct_partials",
+    "implicit_adjoint",
+    "coil_terms",
+    "total",
+)
+NCSX_NATIVE_BFGS_MAXITER: Final[int] = 20
+
+
+def empty_ncsx_eval_timing() -> dict[str, float]:
+    """Zero wall-clock seconds for every published outer-eval bucket."""
+
+    return {key: 0.0 for key in NCSX_EVAL_TIMING_KEYS}
+
+
+def _accumulate_timing(timing: dict[str, float], key: str, started: float) -> None:
+    timing[key] = timing.get(key, 0.0) + (time.perf_counter() - started)
+
+
+def summarize_ncsx_eval_timings(
+    records: Sequence[dict[str, float]],
+) -> dict[str, object]:
+    """Sum and mean wall-clock seconds across feasible outer evaluations."""
+
+    packed = tuple(records)
+    if not packed:
+        return {
+            "n": 0,
+            "keys": list(NCSX_EVAL_TIMING_KEYS),
+            "sum": empty_ncsx_eval_timing(),
+            "mean": empty_ncsx_eval_timing(),
+        }
+    sums = empty_ncsx_eval_timing()
+    for row in packed:
+        for key in NCSX_EVAL_TIMING_KEYS:
+            sums[key] += float(row.get(key, 0.0))
+    count = float(len(packed))
+    return {
+        "n": len(packed),
+        "keys": list(NCSX_EVAL_TIMING_KEYS),
+        "sum": sums,
+        "mean": {key: sums[key] / count for key in NCSX_EVAL_TIMING_KEYS},
+    }
+
+
+def _live_ncsx_surface(state: "NcsxNestedLsSurfaceState"):
+    if state.jax_boozer is not None:
+        return state.jax_boozer.surface
+    if state.native is not None:
+        return state.native.surface
+    raise ValueError("NCSX surface state has neither a JAX nor a native Boozer.")
 
 
 class NcsxNestedLsInnerSolveFailed(RuntimeError):
@@ -275,37 +346,43 @@ def _sum_objectives(terms):
 
 @dataclass
 class NcsxNestedLsSurfaceState:
-    """One NCSX surface plus the JAX objectives that read it.
+    """One NCSX surface plus the JAX or native objectives that read it.
 
     Live ``iota`` / ``G`` are the last inner guess. The committed warm
     start is ``anchor_surface_dofs`` with ``anchor_iota`` and
     ``anchor_G``. Only :func:`commit_ncsx_anchor` advances the anchor.
+    JAX fields are filled on the Schur outer; native fields on the banana
+    outer. A state must have at least one Boozer.
     """
 
-    jax_boozer: BoozerSurfaceJAX
+    jax_boozer: BoozerSurfaceJAX | None
     native: BoozerSurface | None
     iota: float
     G: float
     anchor_iota: float
     anchor_G: float
     anchor_surface_dofs: NDArray[np.float64]
-    nonqs: NonQuasiSymmetricRatioJAX
-    residual: BoozerResidualJAX
-    major_radius: MajorRadiusJAX
+    nonqs: NonQuasiSymmetricRatioJAX | None
+    residual: BoozerResidualJAX | None
+    major_radius: MajorRadiusJAX | None
     radius_target: float
     radius_scale: float
 
 
 @dataclass
 class NcsxNestedLsProblem:
-    """Coil-outer NCSX 9-term problem with reduced-Schur inners."""
+    """Coil-outer NCSX 9-term problem with JAX Schur or native banana inners."""
 
     surfaces: tuple[NcsxNestedLsSurfaceState, ...]
     coil_terms: object
     iota_target: float
     length_target: float
-    biotsavart: BiotSavartJAX
+    biotsavart: BiotSavartJAX | None
     last_inner: NestedLsSchurNewtonResult | None = field(default=None, repr=False)
+    last_native_inner: dict[str, object] | None = field(default=None, repr=False)
+    last_eval_timing: dict[str, float] = field(default_factory=dict, repr=False)
+    native_objective: object | None = field(default=None, repr=False)
+    native_biotsavart: BiotSavart | None = field(default=None, repr=False)
 
 
 def _surface_partials_at_solved(
@@ -317,6 +394,7 @@ def _surface_partials_at_solved(
     residual_rt,
     iota_dval: float,
     nsurf: int,
+    timing: dict[str, float] | None = None,
 ) -> tuple[float, NDArray[np.float64], NDArray[np.float64]]:
     """Return ``(J_surface_except_iota, ∂J/∂c, ∂J/∂s)`` including the y chain.
 
@@ -327,17 +405,26 @@ def _surface_partials_at_solved(
 
     sdofs = jnp.asarray(inner.surface_dofs, dtype=jnp.float64)
     y_probe = np.array([float(inner.iota), float(inner.G)], dtype=np.float64)
+    started = time.perf_counter()
     _y_solution, y_jacobian = _projected_y_surface_jacobian(
         residual_fn, sdofs, y_probe
     )
     del _y_solution
-    y_jac_s = jnp.asarray(y_jacobian, dtype=jnp.float64)
+    y_jac_s = jnp.asarray(jax.block_until_ready(y_jacobian), dtype=jnp.float64)
+    if timing is not None:
+        _accumulate_timing(timing, "y_surface_jacobian", started)
+    started = time.perf_counter()
     y_jac_c = jnp.asarray(
-        _projected_y_coil_jacobian(residual_rt, sdofs, coil_dofs, y_probe),
+        jax.block_until_ready(
+            _projected_y_coil_jacobian(residual_rt, sdofs, coil_dofs, y_probe)
+        ),
         dtype=jnp.float64,
     )
+    if timing is not None:
+        _accumulate_timing(timing, "y_coil_jacobian", started)
     inv_n = 1.0 / float(nsurf)
 
+    started = time.perf_counter()
     qs_value, qs_dc, qs_ds = state.nonqs._direct_objective_value_and_gradients(
         coil_dofs,
         sdofs,
@@ -385,6 +472,8 @@ def _surface_partials_at_solved(
     y_partial = y_partial + inv_n * NCSX_RES_WEIGHT * res_dy.reshape(-1)
     surface_grad = surface_grad + y_jac_s.T @ y_partial
     coil_grad = coil_grad + _host_float64(y_jac_c.T @ y_partial)
+    if timing is not None:
+        _accumulate_timing(timing, "direct_partials", started)
     return value, coil_grad, _host_float64(surface_grad)
 
 
@@ -401,9 +490,18 @@ def ncsx_nested_ls_outer_value_and_grad(
     anchor before raising.
     """
 
+    if problem.biotsavart is None or any(
+        surface_state.jax_boozer is None for surface_state in problem.surfaces
+    ):
+        raise ValueError(
+            "ncsx_nested_ls_outer_value_and_grad requires JAX Boozer surfaces."
+        )
     restore_ncsx_anchor(problem)
     coil = np.asarray(coil_dofs, dtype=np.float64).reshape(-1)
     problem.biotsavart.x = np.array(coil, dtype=np.float64, copy=True)
+    timing = empty_ncsx_eval_timing()
+    problem.last_eval_timing = timing
+    eval_started = time.perf_counter()
     succeeded = False
     try:
         inners: list[NestedLsSchurNewtonResult] = []
@@ -411,11 +509,13 @@ def ncsx_nested_ls_outer_value_and_grad(
             jax_boozer = surface_state.jax_boozer
             jax_boozer.biotsavart.x = np.array(coil, dtype=np.float64, copy=True)
             jax_boozer._refresh_coil_data()
+            started = time.perf_counter()
             inner = run_ncsx_schur_inner(
                 jax_boozer,
                 iota=surface_state.anchor_iota,
                 G=surface_state.anchor_G,
             )
+            _accumulate_timing(timing, "inner", started)
             problem.last_inner = inner
             if not inner.success:
                 raise NcsxNestedLsInnerSolveFailed(
@@ -433,9 +533,11 @@ def ncsx_nested_ls_outer_value_and_grad(
                 )
             inners.append(inner)
 
+        started = time.perf_counter()
         for index, surface_state in enumerate(problem.surfaces):
             if surface_state.jax_boozer.surface.is_self_intersecting():
                 raise NcsxNestedLsSelfIntersecting(surface_index=index)
+        _accumulate_timing(timing, "self_intersection", started)
 
         nsurf = len(inners)
         mean_iota = float(sum(inner.iota for inner in inners) / nsurf)
@@ -460,7 +562,9 @@ def ncsx_nested_ls_outer_value_and_grad(
                 residual_rt=residual_rt,
                 iota_dval=iota_dval,
                 nsurf=nsurf,
+                timing=timing,
             )
+            started = time.perf_counter()
             correction = implicit_adjoint_coil_gradient(
                 residual_rt,
                 objective_rt,
@@ -471,14 +575,19 @@ def ncsx_nested_ls_outer_value_and_grad(
                 linear_solver="dense_lu",
                 max_dense_linearization_bytes=None,
             )
+            coil_grad = coil_grad + term_dc + _host_float64(
+                jax.block_until_ready(correction)
+            )
+            _accumulate_timing(timing, "implicit_adjoint", started)
             total += float(term_j)
-            coil_grad = coil_grad + term_dc + _host_float64(correction)
 
+        started = time.perf_counter()
         coil_j, coil_dj = _coil_term_value_and_grad(
             problem.coil_terms, problem.biotsavart
         )
         total += coil_j
         coil_grad = coil_grad + coil_dj
+        _accumulate_timing(timing, "coil_terms", started)
         if not np.isfinite(total) or not bool(np.all(np.isfinite(coil_grad))):
             raise RuntimeError(
                 f"NCSX nested-LS outer evaluation is not finite: J={total!r}."
@@ -489,6 +598,7 @@ def ncsx_nested_ls_outer_value_and_grad(
         succeeded = True
         return total, coil_grad
     finally:
+        _accumulate_timing(timing, "total", eval_started)
         if not succeeded:
             restore_ncsx_anchor(problem)
 
@@ -497,11 +607,20 @@ def commit_ncsx_anchor(problem: NcsxNestedLsProblem) -> None:
     """Snapshot the live ``(s, ι, G)`` as the committed warm start."""
 
     for surface_state in problem.surfaces:
+        live = _live_ncsx_surface(surface_state)
         surface_state.anchor_surface_dofs = np.array(
-            surface_state.jax_boozer.surface.get_dofs(),
+            live.get_dofs(),
             dtype=np.float64,
             copy=True,
         )
+        if (
+            surface_state.jax_boozer is not None
+            and surface_state.native is not None
+            and surface_state.native.surface is not live
+        ):
+            surface_state.native.surface.set_dofs(
+                np.array(surface_state.anchor_surface_dofs, dtype=np.float64, copy=True)
+            )
         surface_state.anchor_iota = float(surface_state.iota)
         surface_state.anchor_G = float(surface_state.G)
 
@@ -510,11 +629,114 @@ def restore_ncsx_anchor(problem: NcsxNestedLsProblem) -> None:
     """Install the committed ``(s, ι, G)``; discard any unaccepted trial."""
 
     for surface_state in problem.surfaces:
-        surface_state.jax_boozer.surface.set_dofs(
-            np.array(surface_state.anchor_surface_dofs, dtype=np.float64, copy=True)
-        )
+        dofs = np.array(surface_state.anchor_surface_dofs, dtype=np.float64, copy=True)
+        if surface_state.jax_boozer is not None:
+            surface_state.jax_boozer.surface.set_dofs(dofs)
+        if surface_state.native is not None:
+            surface_state.native.surface.set_dofs(
+                np.array(dofs, dtype=np.float64, copy=True)
+            )
+            residual_state = getattr(surface_state.native, "res", None)
+            if residual_state is not None:
+                residual_state["iota"] = float(surface_state.anchor_iota)
+                residual_state["G"] = float(surface_state.anchor_G)
+            surface_state.native.need_to_run_code = True
         surface_state.iota = float(surface_state.anchor_iota)
         surface_state.G = float(surface_state.anchor_G)
+
+
+def ncsx_native_outer_value_and_grad(
+    problem: NcsxNestedLsProblem,
+    coil_dofs: object,
+) -> tuple[float, NDArray[np.float64]]:
+    """Nine-term native ``J(c)`` at banana ``s*(c)``, with the B3 restore.
+
+    Always warm-starts from the committed anchor. A successful return
+    leaves the trial surface on the native Boozer objects; it does not
+    commit the anchor. Failures restore the anchor before raising.
+    ``last_eval_timing`` uses the same keys as the JAX twin: native
+    ``J()``/``dJ()`` fill ``direct_partials`` (the cached adjoint lives
+    inside ``compute()``), and the JAX-only Jacobian buckets stay zero.
+    """
+
+    if problem.native_objective is None or problem.native_biotsavart is None:
+        raise ValueError(
+            "ncsx_native_outer_value_and_grad requires native_objective "
+            "and native_biotsavart."
+        )
+    if any(surface_state.native is None for surface_state in problem.surfaces):
+        raise ValueError(
+            "ncsx_native_outer_value_and_grad requires a native Boozer "
+            "on every surface."
+        )
+    restore_ncsx_anchor(problem)
+    coil = np.asarray(coil_dofs, dtype=np.float64).reshape(-1)
+    problem.native_biotsavart.x = np.array(coil, dtype=np.float64, copy=True)
+    timing = empty_ncsx_eval_timing()
+    problem.last_eval_timing = timing
+    eval_started = time.perf_counter()
+    succeeded = False
+    try:
+        native_results: list[dict[str, object]] = []
+        for surface_state in problem.surfaces:
+            native = surface_state.native
+            native.need_to_run_code = True
+            started = time.perf_counter()
+            inner = native.run_code(
+                surface_state.anchor_iota, surface_state.anchor_G
+            )
+            _accumulate_timing(timing, "inner", started)
+            if inner is None:
+                raise RuntimeError(
+                    "native run_code returned None after need_to_run_code=True."
+                )
+            problem.last_native_inner = inner
+            if not bool(inner["success"]):
+                raise NcsxNestedLsInnerSolveFailed(
+                    iteration_count=int(inner.get("iter", -1)),
+                    grad_l2=float(np.linalg.norm(inner["jacobian"])),
+                    exit_status="failed",
+                )
+            if abs(float(inner["iota"]) - float(surface_state.anchor_iota)) > float(
+                NESTED_LS_OUTER_IOTA_BRANCH_GUARD
+            ):
+                raise NcsxNestedLsBranchJump(
+                    iota=float(inner["iota"]),
+                    anchor_iota=float(surface_state.anchor_iota),
+                    guard=float(NESTED_LS_OUTER_IOTA_BRANCH_GUARD),
+                )
+            native_results.append(inner)
+
+        started = time.perf_counter()
+        for index, surface_state in enumerate(problem.surfaces):
+            if surface_state.native.surface.is_self_intersecting():
+                raise NcsxNestedLsSelfIntersecting(surface_index=index)
+        _accumulate_timing(timing, "self_intersection", started)
+
+        started = time.perf_counter()
+        total = float(problem.native_objective.J())
+        coil_grad = np.asarray(problem.native_objective.dJ(), dtype=np.float64)
+        _accumulate_timing(timing, "direct_partials", started)
+        if coil_grad.shape != coil.shape:
+            raise RuntimeError(
+                "native NCSX outer gradient shape "
+                f"{coil_grad.shape} does not match coil DOFs {coil.shape}."
+            )
+        if not np.isfinite(total) or not bool(np.all(np.isfinite(coil_grad))):
+            raise RuntimeError(
+                f"NCSX native outer evaluation is not finite: J={total!r}."
+            )
+        for surface_state, inner in zip(
+            problem.surfaces, native_results, strict=True
+        ):
+            surface_state.iota = float(inner["iota"])
+            surface_state.G = float(inner["G"])
+        succeeded = True
+        return total, coil_grad
+    finally:
+        _accumulate_timing(timing, "total", eval_started)
+        if not succeeded:
+            restore_ncsx_anchor(problem)
 
 
 def _build_coil_terms(base_curves, curves) -> tuple[object, float]:
@@ -543,6 +765,78 @@ def _build_coil_terms(base_curves, curves) -> tuple[object, float]:
         length_penalty + distance + curvature + msc_term + arclength,
         length_target,
     )
+
+
+def _build_native_coil_terms(base_curves, curves) -> tuple[object, float]:
+    lengths = [CurveLength(curve) for curve in base_curves]
+    length_sum = _sum_objectives(lengths)
+    length_target = float(length_sum.J())
+    length_penalty = NCSX_LENGTH_WEIGHT * QuadraticPenalty(
+        length_sum, length_target, "max"
+    )
+    distance = NCSX_MIN_DIST_WEIGHT * CurveCurveDistance(
+        list(curves),
+        NCSX_MIN_DIST_THRESHOLD,
+        num_basecurves=len(base_curves),
+    )
+    curvature = NCSX_KAPPA_WEIGHT * _sum_objectives(
+        LpCurveCurvature(curve, 2, NCSX_KAPPA_THRESHOLD) for curve in base_curves
+    )
+    msc_term = NCSX_MSC_WEIGHT * _sum_objectives(
+        QuadraticPenalty(MeanSquaredCurvature(curve), NCSX_MSC_THRESHOLD, "max")
+        for curve in base_curves
+    )
+    arclength = NCSX_ARCLENGTH_WEIGHT * _sum_objectives(
+        ArclengthVariation(curve) for curve in base_curves
+    )
+    return (
+        length_penalty + distance + curvature + msc_term + arclength,
+        length_target,
+    )
+
+
+def _assemble_native_nine_term(
+    natives: Sequence[BoozerSurface],
+    *,
+    base_curves,
+    curves,
+) -> tuple[object, float, object]:
+    """Serial MPIObjective mean of the example 9-term native outer."""
+
+    packed = tuple(natives)
+    nsurf = len(packed)
+    if nsurf == 0:
+        raise ValueError("native 9-term objective requires at least one surface.")
+    coils = packed[0].biotsavart.coils
+    radii = [MajorRadius(boozer) for boozer in packed]
+    radius_penalties = [
+        (
+            nsurf
+            * QuadraticPenalty(
+                radius, float(radius.boozer_surface.surface.major_radius()), "identity"
+            )
+            if index == nsurf - 1
+            else 0
+            * QuadraticPenalty(
+                radius, float(radius.boozer_surface.surface.major_radius()), "identity"
+            )
+        )
+        for index, radius in enumerate(radii)
+    ]
+    iotas = [Iotas(boozer) for boozer in packed]
+    non_qs = [NonQuasiSymmetricRatio(boozer, BiotSavart(coils)) for boozer in packed]
+    residuals = [BoozerResidual(boozer, BiotSavart(coils)) for boozer in packed]
+    mean_iota = MPIObjective(iotas, None, needs_splitting=True)
+    coil_terms, length_target = _build_native_coil_terms(base_curves, curves)
+    objective = (
+        MPIObjective(non_qs, None, needs_splitting=True)
+        + NCSX_RES_WEIGHT * MPIObjective(residuals, None, needs_splitting=True)
+        + NCSX_IOTAS_WEIGHT
+        * QuadraticPenalty(mean_iota, NCSX_IOTAS_TARGET, "identity")
+        + NCSX_MR_WEIGHT * MPIObjective(radius_penalties, None, needs_splitting=True)
+        + coil_terms
+    )
+    return objective, length_target, coil_terms
 
 
 def _make_jax_boozer(
@@ -583,6 +877,10 @@ def _make_native_boozer(
         options={
             "verbose": False,
             "weight_inv_modB": NESTED_LS_WEIGHT_INV_MODB,
+            "bfgs_tol": 1e-10,
+            "newton_tol": NESTED_LS_BANANA_NEWTON_TOL,
+            "newton_maxiter": NESTED_LS_BANANA_NEWTON_MAXITER,
+            "bfgs_maxiter": NCSX_NATIVE_BFGS_MAXITER,
         },
     )
 
@@ -637,12 +935,81 @@ def ncsx_problem_from_jax_boozers(
             )
         )
     coil_terms, length_target = _build_coil_terms(list(base_curves), list(curves))
+    native_objective = None
+    native_biotsavart = None
+    if native_list and all(native is not None for native in native_list):
+        native_objective, _native_length, _native_coil = _assemble_native_nine_term(
+            native_list,
+            base_curves=base_curves,
+            curves=curves,
+        )
+        del _native_length, _native_coil
+        native_biotsavart = native_list[0].biotsavart
     problem = NcsxNestedLsProblem(
         surfaces=tuple(surface_states),
         coil_terms=coil_terms,
         iota_target=NCSX_IOTAS_TARGET,
         length_target=length_target,
         biotsavart=packed[0].biotsavart,
+        native_objective=native_objective,
+        native_biotsavart=native_biotsavart,
+    )
+    commit_ncsx_anchor(problem)
+    return problem
+
+
+def ncsx_problem_from_native_boozers(
+    natives: Sequence[BoozerSurface],
+    *,
+    iotas: Sequence[float],
+    g_values: Sequence[float],
+    base_curves,
+    curves,
+) -> NcsxNestedLsProblem:
+    """Attach the 9-term native outer to already-constructed banana Boozers."""
+
+    packed = tuple(natives)
+    nsurf = len(packed)
+    if nsurf == 0:
+        raise ValueError(
+            "ncsx_problem_from_native_boozers requires at least one surface."
+        )
+    surface_states = []
+    for index, (native, iota, g_value) in enumerate(
+        zip(packed, iotas, g_values, strict=True)
+    ):
+        radius_target = float(native.surface.major_radius())
+        surface_states.append(
+            NcsxNestedLsSurfaceState(
+                jax_boozer=None,
+                native=native,
+                iota=float(iota),
+                G=float(g_value),
+                anchor_iota=float(iota),
+                anchor_G=float(g_value),
+                anchor_surface_dofs=np.array(
+                    native.surface.get_dofs(), dtype=np.float64, copy=True
+                ),
+                nonqs=None,
+                residual=None,
+                major_radius=None,
+                radius_target=radius_target,
+                radius_scale=(NCSX_MR_WEIGHT if index == nsurf - 1 else 0.0),
+            )
+        )
+    native_objective, length_target, coil_terms = _assemble_native_nine_term(
+        packed,
+        base_curves=base_curves,
+        curves=curves,
+    )
+    problem = NcsxNestedLsProblem(
+        surfaces=tuple(surface_states),
+        coil_terms=coil_terms,
+        iota_target=NCSX_IOTAS_TARGET,
+        length_target=length_target,
+        biotsavart=None,
+        native_objective=native_objective,
+        native_biotsavart=packed[0].biotsavart,
     )
     commit_ncsx_anchor(problem)
     return problem
