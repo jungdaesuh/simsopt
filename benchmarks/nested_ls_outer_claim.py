@@ -231,8 +231,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--budget",
         type=int,
         required=True,
-        choices=CLAIM_BUDGETS,
-        help="Charter rung: outer scipy L-BFGS-B maxiter on both lanes.",
+        help=(
+            "Charter rung: outer scipy L-BFGS-B maxiter on both lanes. "
+            f"A CLAIM run must use one of {CLAIM_BUDGETS}; --diagnostic "
+            "accepts any positive budget."
+        ),
+    )
+    parser.add_argument(
+        "--diagnostic",
+        action="store_true",
+        help=(
+            "Trend-number mode. Opens the budget, the tag, and the "
+            "evidence/maxcor match, and FORCES a '.diag' receipt stem plus "
+            "nested_speed_claim=False. It cannot produce a claim: every "
+            "relaxation below is gated on this flag, so the claim path is "
+            "byte-for-byte what it was."
+        ),
     )
     parser.add_argument(
         "--omp",
@@ -321,16 +335,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _require_clean_tree() -> str:
+def _require_clean_tree(*, diagnostic: bool = False) -> tuple[str, str]:
+    """The implementation SHA, and the dirt a diagnostic is allowed to carry.
+
+    A claim still refuses outright: a receipt whose bytes are not the bytes
+    of a commit cannot be re-derived by anyone. A diagnostic may run dirty --
+    that is most of what a working tree ever is -- but it does not get to be
+    quiet about it: the dirt is returned, printed, and stored on the receipt
+    as ``git_dirty``/``git_status_porcelain`` so no later reader can mistake
+    a trend number for a reproducible one.
+    """
+
     dirty = git_implementation_dirty().strip()
-    if dirty:
+    if dirty and not diagnostic:
         raise SystemExit(
             "Outer claim requires a clean tree (implementation, not evidence):\n"
             f"{dirty}"
         )
-    return subprocess.check_output(
+    head = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=str(REPO), text=True
     ).strip()
+    return head, dirty
 
 
 def _make_logger(out_log: Path) -> Callable[[str], None]:
@@ -360,6 +385,7 @@ def _require_omp_evidence(
     expected_git_head: str,
     expected_maxcor: int,
     expected_omp_set: tuple[int, ...],
+    diagnostic: bool = False,
 ) -> dict[str, object]:
     """Refuse a claim run whose native OMP is not the swept artifact's best.
 
@@ -386,9 +412,16 @@ def _require_omp_evidence(
     if int(payload["budget"]) != B3_BUDGET:
         raise SystemExit(f"--omp-evidence is not a B{B3_BUDGET} sweep")
     if int(payload["maxcor"]) != expected_maxcor:
-        raise SystemExit(
-            f"--omp-evidence maxcor is {payload['maxcor']!r}, expected "
-            f"{expected_maxcor}"
+        if not diagnostic:
+            raise SystemExit(
+                f"--omp-evidence maxcor is {payload['maxcor']!r}, expected "
+                f"{expected_maxcor}"
+            )
+        print(
+            f"outer diagnostic omp evidence maxcor {payload['maxcor']!r} != run "
+            f"maxcor {expected_maxcor}; the native bar was swept at a different "
+            "maxcor, so this run's ratio is NOT a claim",
+            flush=True,
         )
     if str(payload["aggregation"]) != NESTED_LS_GATE6_AGGREGATION:
         raise SystemExit(
@@ -498,6 +531,14 @@ def _require_b3_green(
     if schema != CLAIM_SCHEMA:
         raise SystemExit(
             f"--b3-receipt schema is {schema!r}, expected {CLAIM_SCHEMA!r}"
+        )
+    # A diagnostic "cannot produce a claim" -- and seeding B37's bar IS
+    # producing claim material, so the refusal has to live here too, not
+    # only in the diagnostic's own nested_speed_claim.
+    if payload.get("diagnostic") or payload.get("git_dirty"):
+        raise SystemExit(
+            "--b3-receipt is a diagnostic (or dirty-tree) receipt; a "
+            "diagnostic cannot mint a claim, so B37 cannot inherit its bar"
         )
     receipt_git_head = str(payload["git_head"])
     if receipt_git_head != expected_git_head:
@@ -1203,11 +1244,21 @@ def _parse_omp_set(raw: str) -> tuple[int, ...]:
     return values
 
 
-def _host_omp_set(tag: str) -> tuple[int, ...]:
+def _host_omp_set(tag: str, *, diagnostic: bool = False) -> tuple[int, ...]:
     if tag == "":
         return F3_B37_BANANA_OMP_CONTRACT_THREADS
     if tag == "a100":
         return A100_OMP_SET
+    if diagnostic:
+        # A diagnostic names its own lane freely; it shares this host's frozen
+        # set because it runs on this host, and it cannot mint a claim.
+        return F3_B37_BANANA_OMP_CONTRACT_THREADS
+    if tag == "diag":
+        # Diagnostic runs on THIS host share the frozen contract set, but must
+        # not share the claim receipt's filename: the stem is
+        # f"nested_ls_outer_b{budget}_{EVIDENCE_DATE}{suffix}", so an untagged
+        # second budget-3 run today would overwrite a sealed receipt.
+        return F3_B37_BANANA_OMP_CONTRACT_THREADS
     raise SystemExit(
         f"--tag {tag!r} has no frozen native OMP set; declare it in the contract "
         "before running a claim"
@@ -1339,11 +1390,24 @@ def _run_native_omp_sweep(
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     budget = int(args.budget)
+    diagnostic = bool(args.diagnostic)
+    if budget < 1:
+        raise SystemExit(f"--budget must be positive, got {budget}")
+    if not diagnostic and budget not in CLAIM_BUDGETS:
+        raise SystemExit(
+            f"--budget {budget} is not a charter rung {CLAIM_BUDGETS}; pass "
+            "--diagnostic to run it as a trend number instead of a claim"
+        )
     omp_num_threads = int(args.omp)
     maxcor = int(args.maxcor)
     tag = str(args.tag).strip()
-    host_omp_set = _host_omp_set(tag)
+    host_omp_set = _host_omp_set(tag, diagnostic=diagnostic)
     if args.sweep_native_omp:
+        if diagnostic:
+            # The sweep exists to mint the claim bar, and its receipt has no
+            # dirt fields: a diagnostic sweep would be a bar from a run
+            # licensed to be dirty, silently.
+            raise SystemExit("--diagnostic is forbidden with --sweep-native-omp")
         if budget != B3_BUDGET:
             raise SystemExit(
                 f"--sweep-native-omp runs at --budget {B3_BUDGET}: the sweep "
@@ -1369,7 +1433,7 @@ def main(argv: list[str] | None = None) -> None:
             omp_values=omp_values,
             maxcor=maxcor,
             tag=tag,
-            sha=_require_clean_tree(),
+            sha=_require_clean_tree()[0],
         )
         return
     if args.omp_set is not None:
@@ -1385,7 +1449,7 @@ def main(argv: list[str] | None = None) -> None:
                 f"--j-parity-rtol is forbidden for --budget {B3_BUDGET}: "
                 "Amendment 1 has B3 measure the fork band, not gate on one"
             )
-        if args.omp_evidence is None:
+        if args.omp_evidence is None and not diagnostic:
             raise SystemExit(
                 f"--budget {B3_BUDGET} requires --omp-evidence: the charter "
                 "sweeps the native denominator per rung, so the bar must come "
@@ -1407,11 +1471,18 @@ def main(argv: list[str] | None = None) -> None:
                 f"--omp-evidence is forbidden for --budget {B37_BUDGET}: the "
                 "swept bar is inherited through --b3-receipt"
             )
-    sha = _require_clean_tree()
+    sha, tree_dirt = _require_clean_tree(diagnostic=diagnostic)
+    if tree_dirt:
+        print(
+            "outer diagnostic DIRTY TREE -- not reproducible from a commit:\n"
+            f"{tree_dirt}",
+            flush=True,
+        )
     if args.omp_evidence is None:
         omp_evidence: dict[str, object] | None = None
     else:
         omp_evidence = _require_omp_evidence(
+            diagnostic=diagnostic,
             omp_evidence=Path(args.omp_evidence),
             omp_num_threads=omp_num_threads,
             expected_git_head=sha,
@@ -1446,6 +1517,11 @@ def main(argv: list[str] | None = None) -> None:
                 "cannot be tighter than the fork B3 actually measured"
             )
     suffix = f".{tag}" if tag else ""
+    if diagnostic:
+        # Structural, not conventional: the claim stem is budget+date only, so
+        # an untagged second run on the same day would silently overwrite a
+        # sealed receipt. A diagnostic always carries its own component.
+        suffix = f"{suffix}.diag"
     stem = f"nested_ls_outer_b{budget}_{EVIDENCE_DATE}{suffix}"
     out_json = EVIDENCE / f"{stem}.json"
     out_log = EVIDENCE / f"{stem}.log"
@@ -1612,11 +1688,16 @@ def main(argv: list[str] | None = None) -> None:
     native_min = min(native_walls)
     jax_min = min(jax_walls)
     physics_ok = fail_reason is None
-    nested_speed_claim = bool(physics_ok and jax_min < native_min)
+    # A diagnostic has no swept-matched denominator by construction, so it
+    # cannot mint a speed claim no matter how the walls land.
+    nested_speed_claim = bool(physics_ok and jax_min < native_min and not diagnostic)
     measured_j_rel_gap_max = max(
         float(pair["endpoint_j_rel_gap_worse_direction"]) for pair in pairs
     )
     payload: dict[str, object] = {
+        "diagnostic": diagnostic,
+        "git_dirty": bool(tree_dirt),
+        "git_status_porcelain": tree_dirt,
         "claim_boundary": {
             "aggregation": NESTED_LS_GATE6_AGGREGATION,
             "b3_measured_j_rel_gap_max": b3_measured_gap,
