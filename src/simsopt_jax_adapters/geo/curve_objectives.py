@@ -13,21 +13,21 @@ import jax.numpy as jnp
 import numpy as np
 from jax import grad, lax
 from scipy.spatial.distance import cdist
-
 from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt._core.optimizable import Optimizable
 from simsopt.geo._curve_surface_distance_owners import (
     curve_surface_distance_owners,
 )
+from simsopt.geo.curveobjectives import curve_arclengthvariation_pure
 from simsopt_jax.core._math_utils import (
     as_jax_float64 as _as_jax_float64,
 )
 from simsopt_jax.core.curve_geometry import pair_linking_number_pure
 from simsopt_jax.core.curve_kernels import (
-    curve_curve_distance_penalty_pure,
-    curve_surface_distance_penalty_pure,
-    curve_length_from_incremental_arclength_pure,
     curvature_p_norm_from_kappa_pure,
+    curve_curve_distance_penalty_pure,
+    curve_length_from_incremental_arclength_pure,
+    curve_surface_distance_penalty_pure,
 )
 from simsopt_jax.geo._pairwise_reductions import (
     _chunk_rows,
@@ -44,13 +44,14 @@ from simsopt_jax.runtime.host_boundary import (
 jit = jax.jit
 
 __all__ = [
+    "ArclengthVariationJAX",
     "CurveCurveDistanceBarrierJAX",
     "CurveCurveDistanceJAX",
     "CurveLengthJAX",
     "CurveSurfaceDistanceJAX",
+    "LinkingNumberJAX",
     "LpCurveCurvatureBarrierJAX",
     "LpCurveCurvatureJAX",
-    "LinkingNumberJAX",
     "MeanSquaredCurvatureJAX",
 ]
 
@@ -63,6 +64,13 @@ def curve_length_pure(l):
 @jit
 def _curve_length_grad(l):
     return grad(curve_length_pure)(l)
+
+
+@jit
+def _arclength_variation_grad(incremental_arclength, interval_matrix):
+    return grad(curve_arclengthvariation_pure)(
+        incremental_arclength, interval_matrix
+    )
 
 
 def _curve_jax_position_and_tangent(curve):
@@ -389,6 +397,65 @@ class MeanSquaredCurvatureJAX(Optimizable):
         return self.curve.dkappa_by_dcoeff_vjp(
             _as_numpy_float64(grad_kappa)
         ) + self.curve.dgammadash_by_dcoeff_vjp(_as_numpy_float64(grad_gammadash))
+
+    return_fn_map = {"J": J, "dJ": dJ}
+
+
+class ArclengthVariationJAX(Optimizable):
+    """JAX-backed mirror of :class:`~simsopt.geo.ArclengthVariation`."""
+
+    def __init__(self, curve, nintervals="full"):
+        super().__init__(depends_on=[curve])
+        if nintervals not in ("full", "partial") and not (
+            isinstance(nintervals, int) and 0 < nintervals <= curve.gamma().shape[0]
+        ):
+            raise ValueError(
+                "nintervals must be 'full', 'partial', or an integer in "
+                f"(0, nquadpoints]; got {nintervals!r}."
+            )
+        self.curve = curve
+        nquadpoints = len(curve.quadpoints)
+        if nintervals == "full":
+            resolved_intervals = int(curve.gamma().shape[0])
+        elif nintervals == "partial":
+            from simsopt.geo.curvexyzfourier import CurveXYZFourier, JaxCurveXYZFourier
+
+            if not isinstance(curve, (CurveXYZFourier, JaxCurveXYZFourier)):
+                raise RuntimeError(
+                    "Please provide a value other than `partial` for `nintervals`. "
+                    "We only have a default for `CurveXYZFourier` and "
+                    "`JaxCurveXYZFourier`."
+                )
+            resolved_intervals = 2 * curve.order
+        else:
+            resolved_intervals = int(nintervals)
+        self.nintervals = resolved_intervals
+        indices = np.floor(
+            np.linspace(0, nquadpoints, resolved_intervals + 1, endpoint=True)
+        ).astype(int)
+        mat = np.zeros((resolved_intervals, nquadpoints))
+        for i in range(resolved_intervals):
+            mat[i, indices[i] : indices[i + 1]] = 1 / (indices[i + 1] - indices[i])
+        self.mat = mat
+
+    def J(self):
+        return float(
+            curve_arclengthvariation_pure(
+                _as_jax_float64(self.curve.incremental_arclength()),
+                _as_jax_float64(self.mat),
+            )
+        )
+
+    @derivative_dec
+    def dJ(self):
+        return self.curve.dincremental_arclength_by_dcoeff_vjp(
+            _as_numpy_float64(
+                _arclength_variation_grad(
+                    _as_jax_float64(self.curve.incremental_arclength()),
+                    _as_jax_float64(self.mat),
+                )
+            )
+        )
 
     return_fn_map = {"J": J, "dJ": dJ}
 

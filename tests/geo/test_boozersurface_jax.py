@@ -4533,6 +4533,20 @@ class TestBoozerSurfaceJAXClass:
                 "ls",
             )
 
+    def test_ls_default_newton_linear_solver_is_dense_lu(self):
+        """On-device LS Newton matches native dense ``np.linalg.solve``."""
+        options = _bsj._normalize_solver_options({}, "ls")
+        assert options["newton_linear_solver"] == "dense_lu"
+        booz = _make_mock_boozer_surface()
+        assert booz.options["newton_linear_solver"] == "dense_lu"
+
+    def test_ls_explicit_operator_gmres_newton_linear_solver_is_preserved(self):
+        options = _bsj._normalize_solver_options(
+            {"newton_linear_solver": "operator_gmres"},
+            "ls",
+        )
+        assert options["newton_linear_solver"] == "operator_gmres"
+
     def test_private_options_rejected_with_scipy_backend(self):
         """Private optimizer options must be rejected when backend is scipy."""
         bs = _MockBiotSavart(_make_mock_coils())
@@ -7735,6 +7749,63 @@ class TestBoozerSurfaceJAXClass:
         _assert_solver_completion_payload(after_newton_payload)
         assert np.isfinite(after_newton_payload["residual_inf"])
         assert progress_events == []
+
+    def test_run_code_ondevice_default_newton_linear_solver_is_dense_lu(
+        self, monkeypatch
+    ):
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        captured = {}
+
+        def fake_target_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            progress_callback=None,
+        ):
+            del fun, method, tol, maxiter, options, progress_callback
+            return _successful_minimize_result(x0)
+
+        def fake_newton_polish_traceable(
+            _objective_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            stab,
+            materialize_hessian=True,
+            max_dense_hessian_bytes=None,
+            linear_solver="operator_gmres",
+            progress_callback=None,
+            args=(),
+        ):
+            del (
+                maxiter,
+                tol,
+                stab,
+                materialize_hessian,
+                max_dense_hessian_bytes,
+                progress_callback,
+                args,
+            )
+            captured["linear_solver"] = linear_solver
+            return _successful_newton_polish_result(x0, nit=1)
+
+        monkeypatch.setattr(_bsj, "target_minimize", fake_target_minimize)
+        monkeypatch.setattr(
+            _bsj,
+            "newton_polish_traceable",
+            fake_newton_polish_traceable,
+        )
+
+        res = booz.run_code(iota=0.3, G=0.05)
+
+        assert res is not None
+        assert captured["linear_solver"] == "dense_lu"
 
     def test_run_code_skip_policy_returns_ls_state_without_newton(self, monkeypatch):
         """The explicit skip policy must not enter the Newton polish runner."""

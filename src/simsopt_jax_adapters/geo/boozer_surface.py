@@ -3968,6 +3968,12 @@ def _ls_factor_once_dispatch_eligible(H, *, max_dense_jacobian_bytes) -> bool:
 _DEFAULT_MAX_DENSE_JACOBIAN_BYTES = 512 * 1024 * 1024
 
 
+# Native C++ LS Newton is dense ``np.linalg.solve`` of the Hessian.
+# Traceable operator GMRES (restart ≤ 64, 10 cycles) cannot land that
+# system at NCSX 48×48 (1633 DOFs). Callers that want the matrix-free
+# path still pass newton_linear_solver="operator_gmres" explicitly.
+_DEFAULT_LS_NEWTON_LINEAR_SOLVER = "dense_lu"
+
 _DEFAULT_OPTIONS_LS = {
     "verbose": True,
     "bfgs_tol": 1e-10,
@@ -3977,7 +3983,7 @@ _DEFAULT_OPTIONS_LS = {
     "newton_tol": 1e-11,
     "newton_maxiter": 40,
     "newton_polish_policy": "run",
-    "newton_linear_solver": "operator_gmres",
+    "newton_linear_solver": _DEFAULT_LS_NEWTON_LINEAR_SOLVER,
     "newton_stab": 0.0,
     "weight_inv_modB": True,
     "materialize_dense_linearization": None,
@@ -4519,7 +4525,9 @@ def _normalize_solver_options(raw_options, boozer_type):
             raise ValueError(f"newton_polish_policy must be one of: {allowed}.")
         normalized_options["newton_linear_solver"] = (
             _resolve_traceable_newton_linear_solver(
-                normalized_options.get("newton_linear_solver", "operator_gmres")
+                normalized_options.get(
+                    "newton_linear_solver", _DEFAULT_LS_NEWTON_LINEAR_SOLVER
+                )
             )
         )
     if is_parity_mode() and float(normalized_options.get("newton_stab", 0.0)) != 0.0:
@@ -4589,7 +4597,9 @@ class BoozerSurfaceJAX(Optimizable):
             preserves the historical BFGS/L-BFGS route; ``"lm"`` enables the
             residual-vector Levenberg-Marquardt route on supported backends.
             ``newton_linear_solver`` selects one of the four exact traceable
-            Newton solver names and defaults to ``"operator_gmres"``. Legacy
+            Newton solver names and defaults to ``"dense_lu"``, matching
+            native C++ LS Newton (``np.linalg.solve``). Pass
+            ``"operator_gmres"`` to keep the matrix-free polish. Legacy
             environment aliases are not interpreted.
         surface_runtime_state: optional immutable surface-metadata snapshot.
             When provided, traceable and exact JAX solver paths use this cached

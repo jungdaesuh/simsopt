@@ -36,6 +36,7 @@ from simsopt.geo.curveobjectives import (
     curve_msc_pure,
 )
 from simsopt_jax_adapters.geo.curve_objectives import (
+    ArclengthVariationJAX,
     CurveCurveDistanceBarrierJAX,
     CurveCurveDistanceJAX,
     CurveLengthJAX,
@@ -513,6 +514,7 @@ def _assert_curve_objective_directional_fd(objective, curve):
         lambda curve: CurveLengthJAX(curve),
         lambda curve: LpCurveCurvatureJAX(curve, p=2, threshold=0.0),
         lambda curve: MeanSquaredCurvatureJAX(curve),
+        lambda curve: ArclengthVariationJAX(curve),
         lambda curve: LpCurveCurvatureBarrierJAX(
             curve,
             2.0 * float(np.max(curve.kappa())),
@@ -537,6 +539,18 @@ def test_public_curve_objective_jax_wrappers_match_cpu_values_and_gradients():
     _assert_objective_matches_cpu(
         MeanSquaredCurvature(curve),
         MeanSquaredCurvatureJAX(curve),
+    )
+    _assert_objective_matches_cpu(
+        ArclengthVariation(curve),
+        ArclengthVariationJAX(curve),
+    )
+    _assert_objective_matches_cpu(
+        ArclengthVariation(curve, nintervals="partial"),
+        ArclengthVariationJAX(curve, nintervals="partial"),
+    )
+    _assert_objective_matches_cpu(
+        ArclengthVariation(curve, nintervals=2),
+        ArclengthVariationJAX(curve, nintervals=2),
     )
 
 
