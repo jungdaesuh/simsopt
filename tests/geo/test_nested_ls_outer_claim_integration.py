@@ -132,6 +132,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 PLAN = json.loads(Path(os.environ["NESTED_LS_STUB_PLAN"]).read_text(encoding="utf-8"))
@@ -188,6 +189,9 @@ _STUB_NATIVE = (
     + """
 
 ARGS = parse()
+# The parent times this whole process; a plan-keyed sleep makes the lane
+# ordering deterministic for the tests that assert on it.
+time.sleep(float(PLAN.get("native_sleep_seconds", 0.0)))
 PAYLOAD = rung(dict(PLAN["native"]), ARGS)
 THREADING = {
     name: os.environ.get(name)
@@ -448,6 +452,7 @@ def _plan(ledger: Path) -> dict[str, object]:
         # the sha of the bytes the child wrote, so no real pair could pass.
         "rejudge_encoding": "compact",
         "mutate_recorded_native_endpoint": False,
+        "native_sleep_seconds": 0.0,
     }
 
 
@@ -556,6 +561,7 @@ def _install(
     *,
     plan: dict[str, object] | None = None,
     sweep: dict[str, object] | None = None,
+    tree_dirt: str = "",
 ) -> _Harness:
     """Repoint the four module-level seams and write the run's fixtures."""
 
@@ -581,7 +587,16 @@ def _install(
     monkeypatch.setattr(claim, "JAX_CHILD", jax_script)
     monkeypatch.setattr(claim, "EVIDENCE", evidence)
     monkeypatch.setattr(claim, "CACHE_OUTER", evidence / "xla-cache")
-    monkeypatch.setattr(claim, "_require_clean_tree", lambda: _RUN_HEAD)
+
+    # Mirrors the real signature and return shape (memory law: fakes must
+    # mirror real arity). The real gate refuses a dirty tree unless
+    # ``diagnostic``; that refusal is exercised on the REAL function in
+    # ``test_dirty_tree_refused_for_claims_recorded_for_diagnostics``, so
+    # the fake here only has to hand main() the (head, dirt) it would get.
+    def _fake_clean_tree(*, diagnostic: bool = False) -> tuple[str, str]:
+        return _RUN_HEAD, tree_dirt if diagnostic else ""
+
+    monkeypatch.setattr(claim, "_require_clean_tree", _fake_clean_tree)
     monkeypatch.setenv("NESTED_LS_STUB_PLAN", str(plan_path))
     return _Harness(workdir=workdir, evidence=evidence, ledger=ledger, sweep=sweep_path)
 
@@ -1048,3 +1063,135 @@ def test_rejudge_binding_accepts_the_bytes_the_child_actually_wrote(
         claim.main(harness.b3_argv())
         receipt = harness.read_receipt(claim.B3_BUDGET)
     assert receipt["fail_closed_reason"] is None
+
+
+def _diag_receipt(harness: _Harness, budget: int) -> Path:
+    """The stem ``--diagnostic`` forces: claim stem + a ``.diag`` component."""
+
+    return harness.evidence / (
+        f"nested_ls_outer_b{budget}_{claim.EVIDENCE_DATE}.diag.json"
+    )
+
+
+def test_claim_path_still_refuses_what_diagnostic_relaxes(tmp_path: Path) -> None:
+    """Without ``--diagnostic`` every relaxed gate is byte-for-byte intact.
+
+    The two gates the flag opens — the charter-rung budget check and the
+    evidence/maxcor match — must still refuse a plain claim run, or the
+    diagnostic mode quietly weakened the claim path it promises not to touch.
+    """
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        harness = _install(monkeypatch, tmp_path)
+        argv = harness.b3_argv()
+        argv[argv.index("--budget") + 1] = "2"
+        with pytest.raises(SystemExit) as budget_refusal:
+            claim.main(argv)
+    assert "--budget 2 is not a charter rung" in str(budget_refusal.value)
+    assert "--diagnostic" in str(budget_refusal.value)
+
+    mismatched = _sweep_payload(maxcor=claim.DEFAULT_MAXCOR + 1)
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        harness = _install(monkeypatch, tmp_path, sweep=mismatched)
+        with pytest.raises(SystemExit) as maxcor_refusal:
+            claim.main(harness.b3_argv())
+        assert not harness.receipt(claim.B3_BUDGET).exists()
+    message = str(maxcor_refusal.value)
+    assert f"--omp-evidence maxcor is {claim.DEFAULT_MAXCOR + 1}" in message
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        harness = _install(monkeypatch, tmp_path)
+        with pytest.raises(SystemExit) as sweep_refusal:
+            claim.main(harness.b3_argv("--diagnostic", "--sweep-native-omp"))
+    assert "--diagnostic is forbidden with --sweep-native-omp" in str(
+        sweep_refusal.value
+    )
+
+
+def test_diagnostic_receipt_lands_in_a_diag_stem(tmp_path: Path) -> None:
+    """``--diagnostic`` never writes to (or overwrites) a claim stem."""
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        harness = _install(monkeypatch, tmp_path)
+        claim.main(harness.b3_argv("--diagnostic"))
+        diag_path = _diag_receipt(harness, claim.B3_BUDGET)
+        assert diag_path.is_file()
+        assert not harness.receipt(claim.B3_BUDGET).exists()
+        receipt = json.loads(diag_path.read_text(encoding="utf-8"))
+    assert receipt["diagnostic"] is True
+    assert receipt["fail_closed_reason"] is None
+
+
+def test_diagnostic_forces_nested_speed_claim_false(tmp_path: Path) -> None:
+    """A diagnostic cannot mint a speed claim even when its JAX lane wins."""
+
+    plan = _plan(tmp_path / "child_payload_paths.txt")
+    plan["native_sleep_seconds"] = 0.4
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        harness = _install(monkeypatch, tmp_path, plan=plan)
+        claim.main(harness.b3_argv("--diagnostic"))
+        receipt = json.loads(
+            _diag_receipt(harness, claim.B3_BUDGET).read_text(encoding="utf-8")
+        )
+    assert receipt["fail_closed_reason"] is None
+    # The premise the forcing is proven against: the JAX lane really won.
+    assert (
+        receipt["jax_min_process_wall_seconds"]
+        < receipt["native_min_process_wall_seconds"]
+    )
+    assert receipt["claim_boundary"]["nested_speed_claim"] is False
+
+
+def test_dirty_tree_refused_for_claims_recorded_for_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A claim refuses dirt outright; a diagnostic carries it on the receipt."""
+
+    dirt = " M benchmarks/nested_ls_outer_claim.py"
+    monkeypatch.setattr(claim, "git_implementation_dirty", lambda: dirt)
+    with pytest.raises(SystemExit) as refusal:
+        claim._require_clean_tree()
+    assert "requires a clean tree" in str(refusal.value)
+    head, returned_dirt = claim._require_clean_tree(diagnostic=True)
+    assert re.fullmatch(r"[0-9a-f]{40}", head)
+    assert returned_dirt == dirt.strip()
+
+    with pytest.MonkeyPatch.context() as run_patch:
+        harness = _install(run_patch, tmp_path, tree_dirt=dirt.strip())
+        claim.main(harness.b3_argv("--diagnostic"))
+        receipt = json.loads(
+            _diag_receipt(harness, claim.B3_BUDGET).read_text(encoding="utf-8")
+        )
+    assert receipt["git_dirty"] is True
+    assert receipt["git_status_porcelain"] == dirt.strip()
+
+
+def test_b37_refuses_a_diagnostic_b3_receipt(
+    tmp_path: Path, green_b3: dict[str, object]
+) -> None:
+    """A ``.diag`` B3 receipt cannot seed a B37 claim's inherited bar."""
+
+    receipt = json.loads(json.dumps(green_b3["receipt"]))
+    receipt["diagnostic"] = True
+    diag_b3 = tmp_path / "diag_b3_receipt.json"
+    diag_b3.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _install(monkeypatch, tmp_path)
+        with pytest.raises(SystemExit) as refusal:
+            claim.main(
+                [
+                    "--budget",
+                    str(claim.B37_BUDGET),
+                    "--omp",
+                    str(NESTED_LS_GATE6_NATIVE_OMP_THREADS),
+                    "--maxcor",
+                    str(claim.DEFAULT_MAXCOR),
+                    "--pairs",
+                    "1",
+                    "--b3-receipt",
+                    str(diag_b3),
+                    "--j-parity-rtol",
+                    repr(_FROZEN_J_BAND),
+                ]
+            )
+    assert "B37 cannot inherit its bar" in str(refusal.value)
