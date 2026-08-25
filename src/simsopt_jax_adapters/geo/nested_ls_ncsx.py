@@ -108,6 +108,21 @@ class NcsxNestedLsBranchJump(RuntimeError):
         self.guard = float(guard)
 
 
+class NcsxNestedLsSelfIntersecting(RuntimeError):
+    """A trial surface is self-intersecting at the default cylindrical cut.
+
+    Native ``boozerQA_ls_mpi.py`` rejects that geometry. This signal takes
+    the B3 containment barrier, not the example's flipped-gradient sentinel.
+    """
+
+    def __init__(self, *, surface_index: int):
+        super().__init__(
+            "NCSX nested-LS trial surface "
+            f"{int(surface_index)} is self-intersecting."
+        )
+        self.surface_index = int(surface_index)
+
+
 def remap_tensor_fourier_index(index: int, m_old: int, m_new: int) -> int:
     """Map a stellsym-aware TensorFourier cosine/sine slot onto a padded grid."""
 
@@ -382,7 +397,8 @@ def ncsx_nested_ls_outer_value_and_grad(
     Always warm-starts from the committed anchor, never from a previous
     trial. A successful return leaves the trial ``s*(c)`` on the Boozer
     objects for the caller to snapshot; it does not commit the anchor.
-    Failures restore the anchor before raising.
+    Failures, including a self-intersecting trial surface, restore the
+    anchor before raising.
     """
 
     restore_ncsx_anchor(problem)
@@ -416,6 +432,10 @@ def ncsx_nested_ls_outer_value_and_grad(
                     guard=float(NESTED_LS_OUTER_IOTA_BRANCH_GUARD),
                 )
             inners.append(inner)
+
+        for index, surface_state in enumerate(problem.surfaces):
+            if surface_state.jax_boozer.surface.is_self_intersecting():
+                raise NcsxNestedLsSelfIntersecting(surface_index=index)
 
         nsurf = len(inners)
         mean_iota = float(sum(inner.iota for inner in inners) / nsurf)

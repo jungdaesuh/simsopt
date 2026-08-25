@@ -22,6 +22,7 @@ from simsopt_jax_adapters.geo.nested_ls_ncsx import (
     NCSX_MR_WEIGHT,
     NcsxNestedLsBranchJump,
     NcsxNestedLsInnerSolveFailed,
+    NcsxNestedLsSelfIntersecting,
     clone_surface_xyz_tensor_fourier,
     ncsx_nested_ls_outer_value_and_grad,
     prepare_ncsx_nested_ls_problem,
@@ -29,6 +30,10 @@ from simsopt_jax_adapters.geo.nested_ls_ncsx import (
     restore_ncsx_anchor,
     run_ncsx_schur_inner,
     upsample_surface_xyz_tensor_fourier,
+)
+from simsopt_jax_adapters.geo.nested_ls_reduced import (
+    nested_ls_runtime_coil_closures,
+    solve_projected_y,
 )
 
 from .boozersurface_jax_test_helpers import _clone_upstream_surface
@@ -148,7 +153,54 @@ def test_ncsx_schur_inner_lands_on_seeded_7x7():
 
 
 @pytest.mark.boozer
-def test_ncsx_outer_value_and_grad_is_finite_on_7x7():
+def test_ncsx_projected_y_coil_jacobian_matches_frozen_surface_fd():
+    import jax.numpy as jnp
+
+    native, jax_boozer, _base_curves, _bs, iota0, g0 = _ncsx_7x7_pair()
+    iota, g_value = _seed_from_native_lbfgs(native, jax_boozer, iota0, g0)
+    result = run_ncsx_schur_inner(jax_boozer, iota=iota, G=g_value)
+    assert result.success
+    residual_rt, _objective, _phi = nested_ls_runtime_coil_closures(jax_boozer)
+    del _objective, _phi
+    coil = np.asarray(jax_boozer.biotsavart.x, dtype=np.float64).reshape(-1)
+    y_probe = np.array([float(result.iota), float(result.G)], dtype=np.float64)
+    jacobian = np.asarray(
+        ncsx_mod._projected_y_coil_jacobian(
+            residual_rt,
+            result.surface_dofs,
+            coil,
+            y_probe,
+        ),
+        dtype=np.float64,
+    )
+    assert jacobian.shape == (2, coil.size)
+    column = int(np.argmax(np.linalg.norm(jacobian, axis=0)))
+    step = 1.0e-6 * max(1.0, abs(float(coil[column])))
+
+    def y_at(coil_vector):
+        coil_jax = jnp.asarray(coil_vector, dtype=jnp.float64)
+
+        def residual_fn(packed):
+            return residual_rt(packed, coil_jax)
+
+        solution = solve_projected_y(residual_fn, result.surface_dofs, y_probe)
+        return np.asarray(solution.solution, dtype=np.float64)
+
+    plus = np.array(coil, dtype=np.float64, copy=True)
+    minus = np.array(coil, dtype=np.float64, copy=True)
+    plus[column] += step
+    minus[column] -= step
+    finite_difference = (y_at(plus) - y_at(minus)) / (2.0 * step)
+    np.testing.assert_allclose(
+        jacobian[:, column],
+        finite_difference,
+        rtol=1.0e-4,
+        atol=1.0e-6,
+    )
+
+
+@pytest.mark.boozer
+def test_ncsx_outer_value_and_grad_is_finite_on_7x7(monkeypatch):
     native, jax_boozer, base_curves, biotsavart, iota0, g0 = _ncsx_7x7_pair()
     iota, g_value = _seed_from_native_lbfgs(native, jax_boozer, iota0, g0)
     jax_boozer.surface.set_dofs(native.surface.get_dofs())
@@ -162,6 +214,7 @@ def test_ncsx_outer_value_and_grad_is_finite_on_7x7():
         g_values=[g_value],
         constraint_weight=NESTED_LS_CONSTRAINT_WEIGHT,
     )
+    _stub_surfaces_not_self_intersecting(monkeypatch, problem)
     coil = np.asarray(problem.biotsavart.x, dtype=np.float64)
     value, gradient = ncsx_nested_ls_outer_value_and_grad(problem, coil)
     assert np.isfinite(value)
@@ -204,6 +257,7 @@ def test_ncsx_restore_anchor_discards_poisoned_trial(monkeypatch):
     assert state.G == committed_g
     state.jax_boozer.surface.set_dofs(wrecked)
     state.iota = 99.0
+    _stub_surfaces_not_self_intersecting(monkeypatch, problem)
     coil = np.asarray(problem.biotsavart.x, dtype=np.float64)
     seen: list[tuple[np.ndarray, float, float]] = []
     real_inner = ncsx_mod.run_ncsx_schur_inner
@@ -229,7 +283,7 @@ def test_ncsx_restore_anchor_discards_poisoned_trial(monkeypatch):
 
 
 @pytest.mark.boozer
-def test_ncsx_outer_eval_does_not_commit_anchor():
+def test_ncsx_outer_eval_does_not_commit_anchor(monkeypatch):
     native, jax_boozer, base_curves, biotsavart, iota0, g0 = _ncsx_7x7_pair()
     iota, g_value = _seed_from_native_lbfgs(native, jax_boozer, iota0, g0)
     jax_boozer.surface.set_dofs(native.surface.get_dofs())
@@ -246,6 +300,7 @@ def test_ncsx_outer_eval_does_not_commit_anchor():
     state = problem.surfaces[0]
     committed_iota = float(state.anchor_iota)
     committed_surface = np.array(state.anchor_surface_dofs, dtype=np.float64, copy=True)
+    _stub_surfaces_not_self_intersecting(monkeypatch, problem)
     coil = np.asarray(problem.biotsavart.x, dtype=np.float64)
     ncsx_nested_ls_outer_value_and_grad(problem, coil)
     np.testing.assert_array_equal(state.anchor_surface_dofs, committed_surface)
@@ -268,6 +323,15 @@ def _ncsx_prepared_7x7():
         constraint_weight=NESTED_LS_CONSTRAINT_WEIGHT,
     )
     return problem
+
+
+def _stub_surfaces_not_self_intersecting(monkeypatch, problem):
+    for surface_state in problem.surfaces:
+        monkeypatch.setattr(
+            surface_state.jax_boozer.surface,
+            "is_self_intersecting",
+            lambda *args, **kwargs: False,
+        )
 
 
 def _assert_anchor_restored(problem, *, surface, iota, g_value):
@@ -346,7 +410,30 @@ def test_ncsx_failed_inner_restores_persistable_poison(monkeypatch):
 
 
 @pytest.mark.boozer
-def test_ncsx_identical_two_surface_mean_matches_one_surface():
+def test_ncsx_self_intersecting_trial_restores_anchor(monkeypatch):
+    problem = _ncsx_prepared_7x7()
+    state = problem.surfaces[0]
+    committed_surface = np.array(state.anchor_surface_dofs, dtype=np.float64, copy=True)
+    committed_iota = float(state.anchor_iota)
+    committed_g = float(state.anchor_G)
+    coil = np.asarray(problem.biotsavart.x, dtype=np.float64)
+    monkeypatch.setattr(
+        state.jax_boozer.surface,
+        "is_self_intersecting",
+        lambda *args, **kwargs: True,
+    )
+    with pytest.raises(NcsxNestedLsSelfIntersecting):
+        ncsx_nested_ls_outer_value_and_grad(problem, coil)
+    _assert_anchor_restored(
+        problem,
+        surface=committed_surface,
+        iota=committed_iota,
+        g_value=committed_g,
+    )
+
+
+@pytest.mark.boozer
+def test_ncsx_identical_two_surface_mean_matches_one_surface(monkeypatch):
     native, jax_boozer, base_curves, biotsavart, iota0, g0 = _ncsx_7x7_pair()
     iota, g_value = _seed_from_native_lbfgs(native, jax_boozer, iota0, g0)
     jax_boozer.surface.set_dofs(native.surface.get_dofs())
@@ -378,6 +465,8 @@ def test_ncsx_identical_two_surface_mean_matches_one_surface():
     )
     assert two.surfaces[0].radius_scale == 0.0
     assert two.surfaces[1].radius_scale == NCSX_MR_WEIGHT
+    _stub_surfaces_not_self_intersecting(monkeypatch, one)
+    _stub_surfaces_not_self_intersecting(monkeypatch, two)
     coil = np.asarray(one.biotsavart.x, dtype=np.float64)
     value_one, grad_one = ncsx_nested_ls_outer_value_and_grad(one, coil)
     value_two, grad_two = ncsx_nested_ls_outer_value_and_grad(two, coil)
