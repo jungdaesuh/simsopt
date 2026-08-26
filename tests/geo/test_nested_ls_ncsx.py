@@ -472,6 +472,30 @@ def test_ncsx_banana_polish_only_caps_newton_maxiter(monkeypatch):
     assert seen[1] > seen[0]
 
 
+@pytest.mark.boozer
+def test_ncsx_outer_forwards_newton_maxiter_cap(monkeypatch):
+    problem = _ncsx_prepared_7x7()
+    seen: list[object] = []
+
+    def fake_inner(jax_boozer, iota, G=None, *, sdofs=None, **kwargs):
+        del jax_boozer, iota, G, sdofs
+        seen.append(kwargs.get("newton_maxiter_cap"))
+        raise NcsxNestedLsInnerSolveFailed(
+            iteration_count=0, grad_l2=1.0, exit_status="failed"
+        )
+
+    monkeypatch.setattr(ncsx_mod, "ncsx_banana_run_code", fake_inner)
+    coil = np.asarray(problem.biotsavart.x, dtype=np.float64)
+    with pytest.raises(NcsxNestedLsInnerSolveFailed):
+        ncsx_nested_ls_outer_value_and_grad(problem, coil)
+    with pytest.raises(NcsxNestedLsInnerSolveFailed):
+        ncsx_nested_ls_outer_value_and_grad(
+            problem, coil, newton_maxiter_cap=ncsx_mod.NCSX_OUTER_NEWTON_MAXITER
+        )
+    assert seen[0] == NESTED_LS_BANANA_NEWTON_MAXITER
+    assert seen[1] == ncsx_mod.NCSX_OUTER_NEWTON_MAXITER
+
+
 def _stub_surfaces_not_self_intersecting(monkeypatch, problem):
     for surface_state in problem.surfaces:
         if surface_state.jax_boozer is not None:

@@ -12,6 +12,8 @@ Do not put native-outer and jax-outer in one process.
 from __future__ import annotations
 
 import argparse
+import functools
+import hashlib
 import json
 import os
 import sys
@@ -37,6 +39,7 @@ from simsopt.geo.boozersurface import BoozerSurface
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
 from simsopt_jax_adapters.geo.nested_ls_contract import (
+    NESTED_LS_BANANA_NEWTON_MAXITER,
     NestedLsOuterAcceptWithoutCandidate,
     NestedLsOuterCandidateStore,
     nested_ls_outer_rejection_barrier,
@@ -64,6 +67,42 @@ DEFAULT_OUT = REPO / ".artifacts" / "ncsx_boozerqa_inner_compare.json"
 # Containment barrier coefficient for infeasible trials. Same number the
 # sealed B3 outer uses; this diagnostic does not inherit F3 ftol/gtol/maxls.
 NCSX_REJECTION_DISTANCE_SCALE = 1.0
+
+
+def _coil_digest(dofs) -> str:
+    packed = np.asarray(dofs, dtype=np.float64).reshape(-1)
+    return hashlib.blake2b(packed.tobytes(), digest_size=8).hexdigest()
+
+
+def _record_outer_eval(
+    *,
+    nfev: int,
+    rejected: bool,
+    value: float,
+    gradient,
+    coil,
+    nested: NcsxNestedLsProblem,
+) -> dict[str, object]:
+    inner = nested.last_run_code or nested.last_native_inner or {}
+    grad_l2 = float(np.linalg.norm(np.asarray(gradient, dtype=np.float64)))
+    record = {
+        "nfev": int(nfev),
+        "rejected": bool(rejected),
+        "j": float(value),
+        "grad_l2": grad_l2,
+        "coil_digest": _coil_digest(coil),
+        "inner_iter": int(inner.get("iter", -1)),
+        "inner_success": bool(inner.get("success", False)),
+    }
+    print(
+        "ncsx-outer-eval "
+        f"nfev={record['nfev']} rejected={int(record['rejected'])} "
+        f"J={record['j']:.16e} g={record['grad_l2']:.6e} "
+        f"coil={record['coil_digest']} inner_iter={record['inner_iter']} "
+        f"inner_success={int(record['inner_success'])}",
+        flush=True,
+    )
+    return record
 
 
 def _stats(xs):
@@ -396,6 +435,7 @@ def _run_ncsx_lbfgs_outer(
     n_rejected = 0
     eval_timings: list[dict[str, float]] = []
     rejected_timings: list[dict[str, float]] = []
+    eval_trace: list[dict[str, object]] = []
 
     def fun(dofs):
         nonlocal nfev, n_rejected
@@ -425,8 +465,28 @@ def _run_ncsx_lbfgs_outer(
                 trial_parameters=point,
                 scale=rejection_scale,
             )
+            eval_trace.append(
+                _record_outer_eval(
+                    nfev=nfev,
+                    rejected=True,
+                    value=float(sentinel),
+                    gradient=sentinel_grad,
+                    coil=point,
+                    nested=nested,
+                )
+            )
             return float(sentinel), np.asarray(sentinel_grad, dtype=np.float64)
         eval_timings.append(dict(nested.last_eval_timing))
+        eval_trace.append(
+            _record_outer_eval(
+                nfev=nfev,
+                rejected=False,
+                value=float(value),
+                gradient=gradient,
+                coil=point,
+                nested=nested,
+            )
+        )
         candidate = _snapshot_ncsx_candidate(
             nested, value=value, gradient=gradient, coil_dofs=point
         )
@@ -469,6 +529,7 @@ def _run_ncsx_lbfgs_outer(
             "committed": _summarize_committed(candidates),
             "eval_timing": summarize_ncsx_eval_timings(eval_timings),
             "rejected_eval_timing": summarize_ncsx_eval_timings(rejected_timings),
+            "eval_trace": eval_trace,
             "last_inner": _summarize_problem_inner(nested),
         }
     seconds = float(time.perf_counter() - started)
@@ -489,11 +550,12 @@ def _run_ncsx_lbfgs_outer(
         "committed": _summarize_committed(candidates),
         "eval_timing": summarize_ncsx_eval_timings(eval_timings),
         "rejected_eval_timing": summarize_ncsx_eval_timings(rejected_timings),
+        "eval_trace": eval_trace,
         "last_inner": _summarize_problem_inner(nested),
     }
 
 
-def _lane_jax_outer(problem, *, maxiter: int):
+def _lane_jax_outer(problem, *, maxiter: int, newton_maxiter_cap: int):
     _configure_jax_gpu()
     import jax
 
@@ -551,9 +613,13 @@ def _lane_jax_outer(problem, *, maxiter: int):
         nested,
         maxiter=maxiter,
         nsurfaces=int(problem["nsurfaces"]),
-        evaluate=ncsx_nested_ls_outer_value_and_grad,
+        evaluate=functools.partial(
+            ncsx_nested_ls_outer_value_and_grad,
+            newton_maxiter_cap=int(newton_maxiter_cap),
+        ),
     )
     payload["land_seconds"] = land_seconds
+    payload["newton_maxiter_cap"] = int(newton_maxiter_cap)
     return payload
 
 
@@ -639,6 +705,12 @@ def main() -> None:
     parser.add_argument("--bfgs-maxiter", type=int, default=20)
     parser.add_argument("--outer-maxiter", type=int, default=2)
     parser.add_argument(
+        "--newton-cap",
+        type=int,
+        default=NESTED_LS_BANANA_NEWTON_MAXITER,
+        help="JAX outer continuation Newton maxiter (native BoozerLS default is 40).",
+    )
+    parser.add_argument(
         "--nsurfaces",
         type=int,
         default=1,
@@ -663,6 +735,8 @@ def main() -> None:
         "surface_dofs": int(surface.x.size),
         "nsurfaces": loaded["nsurfaces"],
         "constraint_weight": loaded["constraint_weight"],
+        "newton_maxiter_cap": int(args.newton_cap),
+        "omp_num_threads": os.environ.get("OMP_NUM_THREADS"),
         "diagnostic": True,
         "sealed_claim": False,
     }
@@ -690,7 +764,9 @@ def main() -> None:
             payload["jax_schur"] = _lane_jax_schur(loaded, repeats=args.repeats)
         elif lane == "jax-outer":
             payload["jax_outer"] = _lane_jax_outer(
-                loaded, maxiter=args.outer_maxiter
+                loaded,
+                maxiter=args.outer_maxiter,
+                newton_maxiter_cap=int(args.newton_cap),
             )
         else:
             payload["native_outer"] = _lane_native_outer(

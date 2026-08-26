@@ -595,15 +595,18 @@ def ncsx_banana_run_code(
 def ncsx_nested_ls_outer_value_and_grad(
     problem: NcsxNestedLsProblem,
     coil_dofs: object,
+    *,
+    newton_maxiter_cap: int | None = NESTED_LS_BANANA_NEWTON_MAXITER,
 ) -> tuple[float, NDArray[np.float64]]:
     """Nine-term ``J(c)`` and coil gradient at banana ``s*(c)``.
 
     Inner is :func:`ncsx_banana_run_code` with ``polish_only=True``
     (dense-LU Newton continuation from the committed banana land,
-    coils as kernel arguments). Surface-term gradients use one batched
-    solved-state IFT adjoint, not Schur jacrev. Always warm-starts
-    from the committed anchor. Failures restore the anchor before
-    raising.
+    coils as kernel arguments). ``newton_maxiter_cap`` defaults to the
+    shipped BoozerLS Newton budget (40). Pass a smaller cap only for
+    harness speed runs. Surface-term gradients use one batched
+    solved-state IFT adjoint. Always warm-starts from the committed
+    anchor. Failures restore the anchor before raising.
     """
 
     if problem.biotsavart is None or any(
@@ -631,7 +634,7 @@ def ncsx_nested_ls_outer_value_and_grad(
                 surface_state.anchor_iota,
                 surface_state.anchor_G,
                 polish_only=True,
-                newton_maxiter_cap=NCSX_OUTER_NEWTON_MAXITER,
+                newton_maxiter_cap=newton_maxiter_cap,
             )
             _accumulate_timing(timing, "inner", started)
             if inner is None:
