@@ -19,6 +19,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
+from weakref import WeakKeyDictionary
 
 import jax
 import jax.numpy as jnp
@@ -57,21 +58,21 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_OUTER_IOTA_BRANCH_GUARD,
     NESTED_LS_WEIGHT_INV_MODB,
 )
+from simsopt_jax_adapters.geo.flat675.y_solve import solve_flat675_y_qr
 from simsopt_jax_adapters.geo.nested_ls_reduced import (
     NestedLsSchurNewtonResult,
-    implicit_adjoint_coil_gradient,
-    nested_ls_reduced_closures,
+    NestedLsYSolution,
     nested_ls_runtime_coil_closures,
+    pack_surface_and_y,
     require_full_y_rank,
     run_reduced_nested_ls_schur_newton,
     solve_projected_y,
 )
 from simsopt_jax_adapters.geo.surface_objectives import (
     BoozerResidualJAX,
+    IotasJAX,
     MajorRadiusJAX,
     NonQuasiSymmetricRatioJAX,
-    surface_dmajor_radius_jax_from_dofs,
-    surface_major_radius_jax_from_dofs,
 )
 
 NCSX_EXAMPLE_JSON: Final[Path] = (
@@ -106,6 +107,7 @@ NCSX_EVAL_TIMING_KEYS: Final[tuple[str, ...]] = (
     "total",
 )
 NCSX_NATIVE_BFGS_MAXITER: Final[int] = 20
+_NCSX_RUNTIME_KERNELS: WeakKeyDictionary = WeakKeyDictionary()
 
 
 def empty_ncsx_eval_timing() -> dict[str, float]:
@@ -264,6 +266,135 @@ def _identity_quadratic(value: float, target: float) -> tuple[float, float]:
     return 0.5 * diff * diff, diff
 
 
+def _ncsx_runtime_kernels(jax_boozer: BoozerSurfaceJAX):
+    """Compile-once residual/HVP/y-chain with coil as a kernel argument."""
+
+    cached = _NCSX_RUNTIME_KERNELS.get(jax_boozer)
+    if cached is not None:
+        return cached
+    residual_rt, objective_rt, _phi = nested_ls_runtime_coil_closures(jax_boozer)
+    del _phi
+
+    @jax.jit
+    def packed_hvp(packed, tangent, coil):
+        def phi(decision: jax.Array) -> jax.Array:
+            return objective_rt(decision, coil)
+
+        return jax.jvp(jax.grad(phi), (packed,), (tangent,))[1]
+
+    @jax.jit
+    def envelope(surface, coil, y_probe):
+        surface = jnp.asarray(surface, dtype=jnp.float64).reshape(-1)
+        coil = jnp.asarray(coil, dtype=jnp.float64).reshape(-1)
+        probe = jnp.asarray(y_probe, dtype=jnp.float64).reshape(-1)
+
+        def residual_of_y(y: jax.Array) -> jax.Array:
+            return residual_rt(pack_surface_and_y(surface, y), coil)
+
+        residual = residual_of_y(probe)
+        design = jax.jacfwd(residual_of_y)(probe)
+        rhs = design @ probe - residual
+        y_raw = solve_flat675_y_qr(design, rhs)
+        packed = pack_surface_and_y(surface, y_raw.solution)
+        value, full_grad = jax.value_and_grad(
+            lambda decision: objective_rt(decision, coil)
+        )(packed)
+        return (
+            value,
+            full_grad[:-2],
+            y_raw.solution,
+            y_raw.singular_values,
+            y_raw.numerical_rank,
+            y_raw.numerics_finite,
+            design,
+            rhs,
+        )
+
+    @jax.jit
+    def y_partial_vjps(surface, coil, y_star, lam):
+        """``(∂y/∂s)ᵀ λ`` and ``(∂y/∂c)ᵀ λ`` by VJP through the QR ``y*``."""
+
+        surface = jnp.asarray(surface, dtype=jnp.float64).reshape(-1)
+        coil = jnp.asarray(coil, dtype=jnp.float64).reshape(-1)
+        probe = jnp.asarray(y_star, dtype=jnp.float64).reshape(-1)
+        lam = jnp.asarray(lam, dtype=jnp.float64).reshape(-1)
+
+        def y_of_surface(surface_dofs: jax.Array) -> jax.Array:
+            return solve_projected_y(
+                lambda packed: residual_rt(packed, coil),
+                surface_dofs,
+                probe,
+            ).solution
+
+        def y_of_coil(coil_vector: jax.Array) -> jax.Array:
+            return solve_projected_y(
+                lambda packed: residual_rt(packed, coil_vector),
+                surface,
+                probe,
+            ).solution
+
+        surface_bar = jax.vjp(y_of_surface, surface)[1](lam)[0]
+        coil_bar = jax.vjp(y_of_coil, coil)[1](lam)[0]
+        return surface_bar, coil_bar
+
+    kernels = {
+        "residual_rt": residual_rt,
+        "objective_rt": objective_rt,
+        "packed_hvp": packed_hvp,
+        "envelope": envelope,
+        "y_partial_vjps": y_partial_vjps,
+    }
+    _NCSX_RUNTIME_KERNELS[jax_boozer] = kernels
+    return kernels
+
+
+def _ncsx_bound_inner_functions(jax_boozer: BoozerSurfaceJAX, coil: jax.Array):
+    kernels = _ncsx_runtime_kernels(jax_boozer)
+    y_probe = jnp.zeros((2,), dtype=jnp.float64)
+
+    def residual_fn(packed: jax.Array) -> jax.Array:
+        return kernels["residual_rt"](packed, coil)
+
+    def objective_fn(packed: jax.Array) -> jax.Array:
+        return kernels["objective_rt"](packed, coil)
+
+    def packed_hvp(packed: jax.Array, tangent: jax.Array) -> jax.Array:
+        return kernels["packed_hvp"](packed, tangent, coil)
+
+    def envelope_value_and_grad(_residual_fn, _objective_fn, surface_dofs):
+        del _residual_fn, _objective_fn
+        (
+            value,
+            surface_grad,
+            y_sol,
+            singular_values,
+            numerical_rank,
+            numerics_finite,
+            design,
+            rhs,
+        ) = kernels["envelope"](
+            jnp.asarray(surface_dofs, dtype=jnp.float64).reshape(-1),
+            coil,
+            y_probe,
+        )
+        solution = NestedLsYSolution(
+            solution=y_sol,
+            singular_values=singular_values,
+            numerical_rank=numerical_rank,
+            numerics_finite=numerics_finite,
+            design_matrix=design,
+            right_hand_side=rhs,
+        )
+        require_full_y_rank(solution)
+        return (
+            float(np.asarray(jax.device_get(value))),
+            _host_float64(surface_grad),
+            solution,
+        )
+
+    return residual_fn, objective_fn, packed_hvp, envelope_value_and_grad, kernels
+
+
 def run_ncsx_schur_inner(
     jax_boozer: BoozerSurfaceJAX,
     *,
@@ -278,12 +409,17 @@ def run_ncsx_schur_inner(
 
     Defaults follow the banana ``run_code`` bar (``newton_tol=1e-11``,
     ``maxiter=40``, ``stab=0``), not the 675 reconstruct ``1e-13`` judge.
+    Coil DOFs are kernel arguments so L-BFGS outer evals reuse XLA.
     """
 
     weight = (
         float(jax_boozer.constraint_weight)
         if constraint_weight is None
         else float(constraint_weight)
+    )
+    coil = jnp.asarray(jax_boozer.biotsavart.x, dtype=jnp.float64).reshape(-1)
+    residual_fn, objective_fn, packed_hvp, envelope, _kernels = (
+        _ncsx_bound_inner_functions(jax_boozer, coil)
     )
     return run_reduced_nested_ls_schur_newton(
         jax_boozer,
@@ -296,34 +432,29 @@ def run_ncsx_schur_inner(
         maxiter=int(maxiter),
         linear_solver="dense_lu",
         max_dense_linearization_bytes=None,
+        residual_fn=residual_fn,
+        objective_fn=objective_fn,
+        packed_hvp=packed_hvp,
+        envelope_value_and_grad=envelope,
     )
 
 
-def _projected_y_surface_jacobian(residual_fn, surface, y_probe):
-    surface_jax = jnp.asarray(surface, dtype=jnp.float64).reshape(-1)
-    probe = jnp.asarray(y_probe, dtype=jnp.float64).reshape(-1)
+def _projected_y_coil_vjp(residual_rt, surface, coil_dofs, y_star, lam):
+    """One-shot ``(∂y/∂c)ᵀ λ`` through the QR ``y*``; production uses the jit."""
 
-    def y_of_surface(surface_dofs: jax.Array) -> jax.Array:
-        return solve_projected_y(residual_fn, surface_dofs, probe).solution
-
-    solution = solve_projected_y(residual_fn, surface_jax, probe)
-    require_full_y_rank(solution)
-    jacobian = jax.jacrev(y_of_surface)(surface_jax)
-    return solution, jacobian
-
-
-def _projected_y_coil_jacobian(residual_rt, surface, coil_dofs, y_probe):
     surface_jax = jnp.asarray(surface, dtype=jnp.float64).reshape(-1)
     coil = jnp.asarray(coil_dofs, dtype=jnp.float64).reshape(-1)
-    probe = jnp.asarray(y_probe, dtype=jnp.float64).reshape(-1)
+    probe = jnp.asarray(y_star, dtype=jnp.float64).reshape(-1)
+    lam = jnp.asarray(lam, dtype=jnp.float64).reshape(-1)
 
     def y_of_coil(coil_vector: jax.Array) -> jax.Array:
-        def residual_fn(packed: jax.Array) -> jax.Array:
-            return residual_rt(packed, coil_vector)
+        return solve_projected_y(
+            lambda packed: residual_rt(packed, coil_vector),
+            surface_jax,
+            probe,
+        ).solution
 
-        return solve_projected_y(residual_fn, surface_jax, probe).solution
-
-    return jax.jacrev(y_of_coil)(coil)
+    return jax.vjp(y_of_coil, coil)[1](lam)[0]
 
 
 def _coil_term_value_and_grad(
@@ -351,8 +482,8 @@ class NcsxNestedLsSurfaceState:
     Live ``iota`` / ``G`` are the last inner guess. The committed warm
     start is ``anchor_surface_dofs`` with ``anchor_iota`` and
     ``anchor_G``. Only :func:`commit_ncsx_anchor` advances the anchor.
-    JAX fields are filled on the Schur outer; native fields on the banana
-    outer. A state must have at least one Boozer.
+    JAX and native outers both use banana ``run_code``. A state must
+    have at least one Boozer.
     """
 
     jax_boozer: BoozerSurfaceJAX | None
@@ -365,6 +496,7 @@ class NcsxNestedLsSurfaceState:
     nonqs: NonQuasiSymmetricRatioJAX | None
     residual: BoozerResidualJAX | None
     major_radius: MajorRadiusJAX | None
+    iotas_term: IotasJAX | None
     radius_target: float
     radius_scale: float
 
@@ -380,114 +512,22 @@ class NcsxNestedLsProblem:
     biotsavart: BiotSavartJAX | None
     last_inner: NestedLsSchurNewtonResult | None = field(default=None, repr=False)
     last_native_inner: dict[str, object] | None = field(default=None, repr=False)
+    last_run_code: dict[str, object] | None = field(default=None, repr=False)
     last_eval_timing: dict[str, float] = field(default_factory=dict, repr=False)
     native_objective: object | None = field(default=None, repr=False)
     native_biotsavart: BiotSavart | None = field(default=None, repr=False)
-
-
-def _surface_partials_at_solved(
-    state: NcsxNestedLsSurfaceState,
-    *,
-    coil_dofs: jax.Array,
-    inner: NestedLsSchurNewtonResult,
-    residual_fn,
-    residual_rt,
-    iota_dval: float,
-    nsurf: int,
-    timing: dict[str, float] | None = None,
-) -> tuple[float, NDArray[np.float64], NDArray[np.float64]]:
-    """Return ``(J_surface_except_iota, ∂J/∂c, ∂J/∂s)`` including the y chain.
-
-    NonQS and residual enter as the MPIObjective mean over ``nsurf``.
-    Major radius is already the last-surface identity penalty (no extra
-    ``× nsurf``). ``∂y/∂s`` and ``∂y/∂c|_s`` both multiply ``∂J/∂y``.
-    """
-
-    sdofs = jnp.asarray(inner.surface_dofs, dtype=jnp.float64)
-    y_probe = np.array([float(inner.iota), float(inner.G)], dtype=np.float64)
-    started = time.perf_counter()
-    _y_solution, y_jacobian = _projected_y_surface_jacobian(
-        residual_fn, sdofs, y_probe
-    )
-    del _y_solution
-    y_jac_s = jnp.asarray(jax.block_until_ready(y_jacobian), dtype=jnp.float64)
-    if timing is not None:
-        _accumulate_timing(timing, "y_surface_jacobian", started)
-    started = time.perf_counter()
-    y_jac_c = jnp.asarray(
-        jax.block_until_ready(
-            _projected_y_coil_jacobian(residual_rt, sdofs, coil_dofs, y_probe)
-        ),
-        dtype=jnp.float64,
-    )
-    if timing is not None:
-        _accumulate_timing(timing, "y_coil_jacobian", started)
-    inv_n = 1.0 / float(nsurf)
-
-    started = time.perf_counter()
-    qs_value, qs_dc, qs_ds = state.nonqs._direct_objective_value_and_gradients(
-        coil_dofs,
-        sdofs,
-    )
-    x_inner, optimize_G = state.residual._inner_objective_state(
-        float(inner.iota),
-        float(inner.G),
-        sdofs=sdofs,
-    )
-    res_value, res_dc, res_dx = state.residual._direct_objective_value_and_gradients(
-        coil_dofs,
-        x_inner,
-        optimize_G,
-        NESTED_LS_WEIGHT_INV_MODB,
-    )
-    res_dx = jnp.asarray(res_dx, dtype=jnp.float64).reshape(-1)
-    res_ds = res_dx[: sdofs.size]
-    res_dy = res_dx[sdofs.size :]
-
-    radius = surface_major_radius_jax_from_dofs(
-        state.major_radius._surface_spec(), sdofs
-    )
-    radius_ds = surface_dmajor_radius_jax_from_dofs(
-        state.major_radius._surface_spec(), sdofs
-    )
-    radius_j, radius_dval = _identity_quadratic(
-        float(_host_float64(radius)[0]), state.radius_target
-    )
-
-    qs_j = inv_n * float(_host_float64(qs_value)[0])
-    res_j = inv_n * float(_host_float64(res_value)[0])
-    value = qs_j + NCSX_RES_WEIGHT * res_j + state.radius_scale * radius_j
-    coil_grad = inv_n * (
-        _host_float64(qs_dc) + NCSX_RES_WEIGHT * _host_float64(res_dc)
-    )
-    surface_grad = (
-        inv_n
-        * (
-            jnp.asarray(qs_ds, dtype=jnp.float64).reshape(-1)
-            + NCSX_RES_WEIGHT * res_ds
-        )
-        + state.radius_scale * radius_dval * jnp.asarray(radius_ds, dtype=jnp.float64)
-    )
-    y_partial = jnp.zeros((2,), dtype=jnp.float64).at[0].set(iota_dval)
-    y_partial = y_partial + inv_n * NCSX_RES_WEIGHT * res_dy.reshape(-1)
-    surface_grad = surface_grad + y_jac_s.T @ y_partial
-    coil_grad = coil_grad + _host_float64(y_jac_c.T @ y_partial)
-    if timing is not None:
-        _accumulate_timing(timing, "direct_partials", started)
-    return value, coil_grad, _host_float64(surface_grad)
 
 
 def ncsx_nested_ls_outer_value_and_grad(
     problem: NcsxNestedLsProblem,
     coil_dofs: object,
 ) -> tuple[float, NDArray[np.float64]]:
-    """Nine-term ``J(c)`` and coil gradient at ``s*(c)`` via Schur IFT.
+    """Nine-term ``J(c)`` and coil gradient at banana ``s*(c)``.
 
-    Always warm-starts from the committed anchor, never from a previous
-    trial. A successful return leaves the trial ``s*(c)`` on the Boozer
-    objects for the caller to snapshot; it does not commit the anchor.
-    Failures, including a self-intersecting trial surface, restore the
-    anchor before raising.
+    Inner is ``BoozerSurfaceJAX.run_code`` (same BFGS-then-Newton as
+    native). Surface-term gradients use the solved-state IFT adjoint on
+    the JAX objectives, not Schur jacrev. Always warm-starts from the
+    committed anchor. Failures restore the anchor before raising.
     """
 
     if problem.biotsavart is None or any(
@@ -504,34 +544,37 @@ def ncsx_nested_ls_outer_value_and_grad(
     eval_started = time.perf_counter()
     succeeded = False
     try:
-        inners: list[NestedLsSchurNewtonResult] = []
+        run_codes: list[dict[str, object]] = []
         for surface_state in problem.surfaces:
             jax_boozer = surface_state.jax_boozer
             jax_boozer.biotsavart.x = np.array(coil, dtype=np.float64, copy=True)
             jax_boozer._refresh_coil_data()
+            jax_boozer.need_to_run_code = True
             started = time.perf_counter()
-            inner = run_ncsx_schur_inner(
-                jax_boozer,
-                iota=surface_state.anchor_iota,
-                G=surface_state.anchor_G,
+            inner = jax_boozer.run_code(
+                surface_state.anchor_iota, surface_state.anchor_G
             )
             _accumulate_timing(timing, "inner", started)
-            problem.last_inner = inner
-            if not inner.success:
-                raise NcsxNestedLsInnerSolveFailed(
-                    iteration_count=int(inner.iteration_count),
-                    grad_l2=float(np.linalg.norm(inner.reduced_gradient)),
-                    exit_status=str(inner.exit_status),
+            if inner is None:
+                raise RuntimeError(
+                    "JAX run_code returned None after need_to_run_code=True."
                 )
-            if abs(float(inner.iota) - float(surface_state.anchor_iota)) > float(
+            problem.last_run_code = inner
+            if not bool(inner["success"]):
+                raise NcsxNestedLsInnerSolveFailed(
+                    iteration_count=int(inner.get("iter", -1)),
+                    grad_l2=float(np.linalg.norm(inner.get("jacobian", [np.inf]))),
+                    exit_status="failed",
+                )
+            if abs(float(inner["iota"]) - float(surface_state.anchor_iota)) > float(
                 NESTED_LS_OUTER_IOTA_BRANCH_GUARD
             ):
                 raise NcsxNestedLsBranchJump(
-                    iota=float(inner.iota),
+                    iota=float(inner["iota"]),
                     anchor_iota=float(surface_state.anchor_iota),
                     guard=float(NESTED_LS_OUTER_IOTA_BRANCH_GUARD),
                 )
-            inners.append(inner)
+            run_codes.append(inner)
 
         started = time.perf_counter()
         for index, surface_state in enumerate(problem.surfaces):
@@ -539,47 +582,49 @@ def ncsx_nested_ls_outer_value_and_grad(
                 raise NcsxNestedLsSelfIntersecting(surface_index=index)
         _accumulate_timing(timing, "self_intersection", started)
 
-        nsurf = len(inners)
-        mean_iota = float(sum(inner.iota for inner in inners) / nsurf)
-        iota_j, mean_dval = _identity_quadratic(mean_iota, problem.iota_target)
-        iota_dval = NCSX_IOTAS_WEIGHT * mean_dval / float(nsurf)
-        total = NCSX_IOTAS_WEIGHT * iota_j
+        nsurf = len(run_codes)
+        inv_n = 1.0 / float(nsurf)
+        total = 0.0
         coil_grad = np.zeros_like(coil)
-        coil_jax = jnp.asarray(coil, dtype=jnp.float64)
-        for surface_state, inner in zip(problem.surfaces, inners, strict=True):
-            jax_boozer = surface_state.jax_boozer
-            residual_fn, _objective_fn, _phi = nested_ls_reduced_closures(jax_boozer)
-            del _objective_fn, _phi
-            residual_rt, objective_rt, _phi_rt = nested_ls_runtime_coil_closures(
-                jax_boozer
+        iota_values: list[float] = []
+        iota_grads: list[NDArray[np.float64]] = []
+        started = time.perf_counter()
+        for surface_state in problem.surfaces:
+            qs_j = float(surface_state.nonqs.J())
+            qs_dj = np.asarray(
+                surface_state.nonqs.dJ_by_dcoil_dofs(), dtype=np.float64
             )
-            del _phi_rt
-            term_j, term_dc, term_ds = _surface_partials_at_solved(
-                surface_state,
-                coil_dofs=coil_jax,
-                inner=inner,
-                residual_fn=residual_fn,
-                residual_rt=residual_rt,
-                iota_dval=iota_dval,
-                nsurf=nsurf,
-                timing=timing,
+            res_j = float(surface_state.residual.J())
+            res_dj = np.asarray(
+                surface_state.residual.dJ_by_dcoil_dofs(), dtype=np.float64
             )
-            started = time.perf_counter()
-            correction = implicit_adjoint_coil_gradient(
-                residual_rt,
-                objective_rt,
-                inner.surface_dofs,
-                coil,
-                term_ds,
-                stab=float(NESTED_LS_JAX_INNER_STAB),
-                linear_solver="dense_lu",
-                max_dense_linearization_bytes=None,
+            total += inv_n * (qs_j + NCSX_RES_WEIGHT * res_j)
+            coil_grad = coil_grad + inv_n * (qs_dj + NCSX_RES_WEIGHT * res_dj)
+            radius = float(surface_state.major_radius.J())
+            radius_j, radius_dval = _identity_quadratic(
+                radius, surface_state.radius_target
             )
-            coil_grad = coil_grad + term_dc + _host_float64(
-                jax.block_until_ready(correction)
+            total += surface_state.radius_scale * radius_j
+            if surface_state.radius_scale != 0.0:
+                coil_grad = coil_grad + surface_state.radius_scale * radius_dval * (
+                    np.asarray(
+                        surface_state.major_radius.dJ_by_dcoil_dofs(),
+                        dtype=np.float64,
+                    )
+                )
+            iota_values.append(float(surface_state.iotas_term.J()))
+            iota_grads.append(
+                np.asarray(
+                    surface_state.iotas_term.dJ_by_dcoil_dofs(), dtype=np.float64
+                )
             )
-            _accumulate_timing(timing, "implicit_adjoint", started)
-            total += float(term_j)
+        mean_iota = float(sum(iota_values) / nsurf)
+        iota_j, mean_dval = _identity_quadratic(mean_iota, problem.iota_target)
+        total += NCSX_IOTAS_WEIGHT * iota_j
+        iota_scale = NCSX_IOTAS_WEIGHT * mean_dval / float(nsurf)
+        for iota_dj in iota_grads:
+            coil_grad = coil_grad + iota_scale * iota_dj
+        _accumulate_timing(timing, "implicit_adjoint", started)
 
         started = time.perf_counter()
         coil_j, coil_dj = _coil_term_value_and_grad(
@@ -592,9 +637,9 @@ def ncsx_nested_ls_outer_value_and_grad(
             raise RuntimeError(
                 f"NCSX nested-LS outer evaluation is not finite: J={total!r}."
             )
-        for surface_state, inner in zip(problem.surfaces, inners, strict=True):
-            surface_state.iota = float(inner.iota)
-            surface_state.G = float(inner.G)
+        for surface_state, inner in zip(problem.surfaces, run_codes, strict=True):
+            surface_state.iota = float(inner["iota"])
+            surface_state.G = float(inner["G"])
         succeeded = True
         return total, coil_grad
     finally:
@@ -930,6 +975,7 @@ def ncsx_problem_from_jax_boozers(
                 nonqs=NonQuasiSymmetricRatioJAX(jax_boozer, jax_boozer.biotsavart),
                 residual=BoozerResidualJAX(jax_boozer, jax_boozer.biotsavart),
                 major_radius=major_radius,
+                iotas_term=IotasJAX(jax_boozer),
                 radius_target=radius_target,
                 radius_scale=(NCSX_MR_WEIGHT if index == nsurf - 1 else 0.0),
             )
@@ -993,6 +1039,7 @@ def ncsx_problem_from_native_boozers(
                 nonqs=None,
                 residual=None,
                 major_radius=None,
+                iotas_term=None,
                 radius_target=radius_target,
                 radius_scale=(NCSX_MR_WEIGHT if index == nsurf - 1 else 0.0),
             )

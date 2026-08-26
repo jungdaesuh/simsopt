@@ -372,6 +372,8 @@ def _summarize_committed(candidates: NestedLsOuterCandidateStore[_NcsxOuterCandi
 def _summarize_problem_inner(nested: NcsxNestedLsProblem):
     if nested.last_inner is not None:
         return _summarize_schur(nested.last_inner)
+    if nested.last_run_code is not None:
+        return _summarize_run_code(nested.last_run_code)
     if nested.last_native_inner is not None:
         return _summarize_run_code(nested.last_native_inner)
     return None
