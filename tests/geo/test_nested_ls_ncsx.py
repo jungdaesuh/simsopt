@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import types
+
 import numpy as np
 import pytest
 from simsopt.configs.zoo import get_data
@@ -24,6 +26,7 @@ from simsopt_jax_adapters.geo.nested_ls_ncsx import (
     NcsxNestedLsSelfIntersecting,
     clone_surface_xyz_tensor_fourier,
     empty_ncsx_eval_timing,
+    ncsx_banana_run_code,
     ncsx_native_outer_value_and_grad,
     ncsx_nested_ls_outer_value_and_grad,
     ncsx_problem_from_native_boozers,
@@ -243,6 +246,9 @@ def test_ncsx_outer_value_and_grad_is_finite_on_7x7(monkeypatch):
     assert problem.surfaces[0].jax_boozer.options["newton_linear_solver"] == (
         "dense_lu"
     )
+    assert problem.surfaces[0].jax_boozer.options["bfgs_maxiter"] == (
+        ncsx_mod.NCSX_NATIVE_BFGS_MAXITER
+    )
 
 
 @pytest.mark.boozer
@@ -281,21 +287,22 @@ def test_ncsx_restore_anchor_discards_poisoned_trial(monkeypatch):
     _stub_surfaces_not_self_intersecting(monkeypatch, problem)
     coil = np.asarray(problem.biotsavart.x, dtype=np.float64)
     seen: list[tuple[np.ndarray, float, float]] = []
-    real_inner = state.jax_boozer.run_code
+    real_inner = ncsx_mod.ncsx_banana_run_code
 
-    def spy_inner(iota, G=None):
+    def spy_inner(jax_boozer, iota, G=None, *, sdofs=None, **kwargs):
         seen.append(
             (
                 np.array(
-                    state.jax_boozer.surface.get_dofs(), dtype=np.float64, copy=True
+                    jax_boozer.surface.get_dofs(), dtype=np.float64, copy=True
                 ),
                 float(iota),
                 float(G),
             )
         )
-        return real_inner(iota, G)
+        assert kwargs.get("polish_only") is True
+        return real_inner(jax_boozer, iota, G, sdofs=sdofs, **kwargs)
 
-    monkeypatch.setattr(state.jax_boozer, "run_code", spy_inner)
+    monkeypatch.setattr(ncsx_mod, "ncsx_banana_run_code", spy_inner)
     value, gradient = ncsx_nested_ls_outer_value_and_grad(problem, coil)
     assert np.isfinite(value)
     assert bool(np.all(np.isfinite(gradient)))
@@ -348,6 +355,109 @@ def _ncsx_prepared_7x7():
     return problem
 
 
+@pytest.mark.boozer
+def test_ncsx_banana_run_code_reuses_kernel_bundle_when_coils_change(monkeypatch):
+    problem = _ncsx_prepared_7x7()
+    jax_boozer = problem.surfaces[0].jax_boozer
+    captured_ids: list[int] = []
+    captured_cache: list[int] = []
+
+    def fake_host_jax(fun, x0, **kwargs):
+        del kwargs
+        value, grad = fun(x0)
+        bundle = jax_boozer._get_penalty_kernel_bundle(
+            True,
+            jax_boozer.options["weight_inv_modB"],
+            jax_boozer.constraint_weight,
+        )
+        captured_ids.append(id(bundle))
+        captured_cache.append(bundle.value_and_grad._cache_size())
+        return types.SimpleNamespace(
+            x=x0,
+            fun=value,
+            jac=grad,
+            nit=0,
+            nfev=1,
+            njev=1,
+            success=True,
+            status=0,
+        )
+
+    def fake_newton(*args, **kwargs):
+        del args, kwargs
+        jax_boozer.need_to_run_code = False
+        return {
+            "success": True,
+            "iter": 0,
+            "iota": float(problem.surfaces[0].anchor_iota),
+            "G": float(problem.surfaces[0].anchor_G),
+            "jacobian": np.zeros(1, dtype=np.float64),
+        }
+
+    monkeypatch.setattr(ncsx_mod, "host_jax_minimize_value_and_grad", fake_host_jax)
+    monkeypatch.setattr(
+        jax_boozer, "minimize_boozer_penalty_constraints_newton", fake_newton
+    )
+    jax_boozer.need_to_run_code = True
+    first = ncsx_banana_run_code(
+        jax_boozer,
+        problem.surfaces[0].anchor_iota,
+        problem.surfaces[0].anchor_G,
+    )
+    assert bool(first["success"])
+    coil = np.asarray(jax_boozer.biotsavart.x, dtype=np.float64).reshape(-1)
+    jax_boozer.biotsavart.x = coil + 1.0e-6
+    jax_boozer.need_to_run_code = True
+    second = ncsx_banana_run_code(
+        jax_boozer,
+        problem.surfaces[0].anchor_iota,
+        problem.surfaces[0].anchor_G,
+    )
+    assert bool(second["success"])
+    assert captured_ids == [captured_ids[0], captured_ids[0]]
+    assert captured_cache == [1, 1]
+
+
+@pytest.mark.boozer
+def test_ncsx_banana_polish_only_caps_newton_maxiter(monkeypatch):
+    problem = _ncsx_prepared_7x7()
+    jax_boozer = problem.surfaces[0].jax_boozer
+    seen: list[int] = []
+
+    def fake_newton(*args, **kwargs):
+        del args
+        seen.append(int(kwargs["maxiter"]))
+        jax_boozer.need_to_run_code = False
+        return {
+            "success": True,
+            "iter": 1,
+            "iota": float(problem.surfaces[0].anchor_iota),
+            "G": float(problem.surfaces[0].anchor_G),
+            "jacobian": np.zeros(1, dtype=np.float64),
+        }
+
+    monkeypatch.setattr(
+        jax_boozer, "minimize_boozer_penalty_constraints_newton", fake_newton
+    )
+    jax_boozer.need_to_run_code = True
+    ncsx_banana_run_code(
+        jax_boozer,
+        problem.surfaces[0].anchor_iota,
+        problem.surfaces[0].anchor_G,
+        polish_only=True,
+    )
+    jax_boozer.need_to_run_code = True
+    ncsx_banana_run_code(
+        jax_boozer,
+        problem.surfaces[0].anchor_iota,
+        problem.surfaces[0].anchor_G,
+        polish_only=False,
+    )
+    assert seen[0] == ncsx_mod.NCSX_OUTER_NEWTON_MAXITER
+    assert seen[1] == int(jax_boozer.options["newton_maxiter"])
+    assert seen[1] > seen[0]
+
+
 def _stub_surfaces_not_self_intersecting(monkeypatch, problem):
     for surface_state in problem.surfaces:
         if surface_state.jax_boozer is not None:
@@ -386,13 +496,13 @@ def test_ncsx_failed_inner_restores_persistable_poison(monkeypatch):
     committed_g = float(state.anchor_G)
     coil = np.asarray(problem.biotsavart.x, dtype=np.float64)
 
-    def poison_and_fail(iota, G=None):
-        del iota, G
+    def poison_and_fail(jax_boozer, iota, G=None, *, sdofs=None, **kwargs):
+        del iota, G, sdofs, kwargs
         wrecked = np.array(
-            state.jax_boozer.surface.get_dofs(), dtype=np.float64, copy=True
+            jax_boozer.surface.get_dofs(), dtype=np.float64, copy=True
         )
         wrecked[0] += 1.0
-        state.jax_boozer.surface.set_dofs(wrecked)
+        jax_boozer.surface.set_dofs(wrecked)
         return {
             "success": False,
             "iter": 3,
@@ -401,7 +511,7 @@ def test_ncsx_failed_inner_restores_persistable_poison(monkeypatch):
             "jacobian": np.array([510.0], dtype=np.float64),
         }
 
-    monkeypatch.setattr(state.jax_boozer, "run_code", poison_and_fail)
+    monkeypatch.setattr(ncsx_mod, "ncsx_banana_run_code", poison_and_fail)
     with pytest.raises(NcsxNestedLsInnerSolveFailed):
         ncsx_nested_ls_outer_value_and_grad(problem, coil)
     _assert_anchor_restored(
@@ -411,12 +521,13 @@ def test_ncsx_failed_inner_restores_persistable_poison(monkeypatch):
         g_value=committed_g,
     )
 
-    def poison_and_jump(iota, G=None):
+    def poison_and_jump(jax_boozer, iota, G=None, *, sdofs=None, **kwargs):
+        del sdofs, kwargs
         wrecked = np.array(
-            state.jax_boozer.surface.get_dofs(), dtype=np.float64, copy=True
+            jax_boozer.surface.get_dofs(), dtype=np.float64, copy=True
         )
         wrecked[0] += 1.0
-        state.jax_boozer.surface.set_dofs(wrecked)
+        jax_boozer.surface.set_dofs(wrecked)
         return {
             "success": True,
             "iter": 4,
@@ -425,7 +536,7 @@ def test_ncsx_failed_inner_restores_persistable_poison(monkeypatch):
             "jacobian": np.zeros(1, dtype=np.float64),
         }
 
-    monkeypatch.setattr(state.jax_boozer, "run_code", poison_and_jump)
+    monkeypatch.setattr(ncsx_mod, "ncsx_banana_run_code", poison_and_jump)
     with pytest.raises(NcsxNestedLsBranchJump):
         ncsx_nested_ls_outer_value_and_grad(problem, coil)
     _assert_anchor_restored(

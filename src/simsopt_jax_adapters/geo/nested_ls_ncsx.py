@@ -1,13 +1,10 @@
-"""NCSX boozerQA nested-LS: reduced Schur inner and 9-term outer.
+"""NCSX boozerQA nested-LS: 9-term coil outer with banana inner.
 
 This is not F3/flat-675 and does not call ``prepare_f3_b37_outer_state``.
-The JAX inner is :func:`run_reduced_nested_ls_schur_newton` with dense LU.
-The native inner is banana ``BoozerSurface.run_code`` (BFGS then Newton).
-Those are not the same operator; a ratio is still the point of the twin.
-The outer variable is the free coil DOF vector; surface DOFs are
-eliminated by the implicit-function theorem (JAX Schur adjoint, native
-``PLU``/``vjp``). C++ reconstruct Newton remains the untimed rejudge.
-MPI multi-rank splitting is out of scope: one process takes the
+The JAX and native outers both land ``s*(c)`` with banana BFGS-then-Newton
+and take the solved-state IFT coil gradient. Schur Newton remains a
+unit-test inner, not the outer. MPI multi-rank splitting is out of
+scope: one process takes the
 :class:`~simsopt.objectives.MPIObjective` mean of each per-surface term,
 matching serial ``boozerQA_ls_mpi.py``.
 """
@@ -68,11 +65,13 @@ from simsopt_jax_adapters.geo.nested_ls_reduced import (
     run_reduced_nested_ls_schur_newton,
     solve_projected_y,
 )
+from simsopt_jax.geo.optimizers.optimizer import host_jax_minimize_value_and_grad
 from simsopt_jax_adapters.geo.surface_objectives import (
     BoozerResidualJAX,
     IotasJAX,
     MajorRadiusJAX,
     NonQuasiSymmetricRatioJAX,
+    compute_standard_surface_objective_gradients,
 )
 
 NCSX_EXAMPLE_JSON: Final[Path] = (
@@ -107,6 +106,10 @@ NCSX_EVAL_TIMING_KEYS: Final[tuple[str, ...]] = (
     "total",
 )
 NCSX_NATIVE_BFGS_MAXITER: Final[int] = 20
+# Continuation Newton from a committed banana land. Feasible 18² evals
+# finish in 4–5 steps; infeasible coil trials otherwise grind the
+# lander's 40-step budget at GPU-negative cost.
+NCSX_OUTER_NEWTON_MAXITER: Final[int] = 8
 _NCSX_RUNTIME_KERNELS: WeakKeyDictionary = WeakKeyDictionary()
 
 
@@ -518,16 +521,89 @@ class NcsxNestedLsProblem:
     native_biotsavart: BiotSavart | None = field(default=None, repr=False)
 
 
+def ncsx_banana_run_code(
+    jax_boozer: BoozerSurfaceJAX,
+    iota,
+    G=None,
+    *,
+    sdofs=None,
+    polish_only: bool = False,
+) -> dict[str, object]:
+    """Banana inner with coil geometry as kernel arguments.
+
+    Public ondevice ``BoozerSurfaceJAX.run_code`` closure-converts the
+    penalty objective and hashes coil bytes into the BFGS compile key.
+    Outer L-BFGS-B changes coils every eval, so that path recompiles.
+    Land uses host BFGS then dense-LU Newton. Outer evals pass
+    ``polish_only=True``: the committed ``(s, ι, G)`` is already a
+    Newton point, so continuation is Newton from that warm start.
+    Large infeasible coil steps then fail in a few Newton iterations
+    instead of a 20-step BFGS grind. The Newton ``res`` is persisted
+    for solved-state IFT.
+    """
+
+    if not jax_boozer.need_to_run_code:
+        stored = jax_boozer.res
+        if stored is None:
+            raise RuntimeError(
+                "ncsx_banana_run_code found need_to_run_code=False with no stored res."
+            )
+        return stored
+    if sdofs is not None:
+        jax_boozer._set_surface_dofs(sdofs)
+    jax_boozer._refresh_coil_data()
+    optimize_G = G is not None
+    weight_inv_modB = jax_boozer.options["weight_inv_modB"]
+    iota_out = iota
+    g_out = G
+    if not polish_only:
+        value_and_grad = jax_boozer._make_penalty_value_and_grad_host_jax_with(
+            optimize_G,
+            weight_inv_modB,
+            jax_boozer.constraint_weight,
+        )
+        x0 = jax_boozer._pack_decision_vector(iota, G)
+        ls_result = host_jax_minimize_value_and_grad(
+            value_and_grad,
+            x0,
+            method="bfgs",
+            tol=jax_boozer.options["bfgs_tol"],
+            maxiter=int(jax_boozer.options["bfgs_maxiter"]),
+            value_and_grad=True,
+        )
+        accepted_x = getattr(ls_result, "x_device", ls_result.x)
+        sdofs_out, iota_out, g_out = jax_boozer._unpack_penalty_optimizer_state(
+            accepted_x, optimize_G
+        )
+        jax_boozer._set_surface_dofs(sdofs_out)
+    jax_boozer.need_to_run_code = True
+    newton_maxiter = int(jax_boozer.options["newton_maxiter"])
+    if polish_only:
+        newton_maxiter = min(newton_maxiter, NCSX_OUTER_NEWTON_MAXITER)
+    return jax_boozer.minimize_boozer_penalty_constraints_newton(
+        constraint_weight=jax_boozer.constraint_weight,
+        iota=iota_out,
+        G=g_out,
+        verbose=jax_boozer.options["verbose"],
+        tol=jax_boozer.options["newton_tol"],
+        maxiter=newton_maxiter,
+        stab=jax_boozer.options["newton_stab"],
+        weight_inv_modB=weight_inv_modB,
+    )
+
+
 def ncsx_nested_ls_outer_value_and_grad(
     problem: NcsxNestedLsProblem,
     coil_dofs: object,
 ) -> tuple[float, NDArray[np.float64]]:
     """Nine-term ``J(c)`` and coil gradient at banana ``s*(c)``.
 
-    Inner is ``BoozerSurfaceJAX.run_code`` (same BFGS-then-Newton as
-    native). Surface-term gradients use the solved-state IFT adjoint on
-    the JAX objectives, not Schur jacrev. Always warm-starts from the
-    committed anchor. Failures restore the anchor before raising.
+    Inner is :func:`ncsx_banana_run_code` with ``polish_only=True``
+    (dense-LU Newton continuation from the committed banana land,
+    coils as kernel arguments). Surface-term gradients use one batched
+    solved-state IFT adjoint, not Schur jacrev. Always warm-starts
+    from the committed anchor. Failures restore the anchor before
+    raising.
     """
 
     if problem.biotsavart is None or any(
@@ -548,11 +624,13 @@ def ncsx_nested_ls_outer_value_and_grad(
         for surface_state in problem.surfaces:
             jax_boozer = surface_state.jax_boozer
             jax_boozer.biotsavart.x = np.array(coil, dtype=np.float64, copy=True)
-            jax_boozer._refresh_coil_data()
             jax_boozer.need_to_run_code = True
             started = time.perf_counter()
-            inner = jax_boozer.run_code(
-                surface_state.anchor_iota, surface_state.anchor_G
+            inner = ncsx_banana_run_code(
+                jax_boozer,
+                surface_state.anchor_iota,
+                surface_state.anchor_G,
+                polish_only=True,
             )
             _accumulate_timing(timing, "inner", started)
             if inner is None:
@@ -590,6 +668,11 @@ def ncsx_nested_ls_outer_value_and_grad(
         iota_grads: list[NDArray[np.float64]] = []
         started = time.perf_counter()
         for surface_state in problem.surfaces:
+            compute_standard_surface_objective_gradients(
+                surface_state.residual,
+                surface_state.iotas_term,
+                surface_state.nonqs,
+            )
             qs_j = float(surface_state.nonqs.J())
             qs_dj = np.asarray(
                 surface_state.nonqs.dJ_by_dcoil_dofs(), dtype=np.float64
@@ -600,17 +683,18 @@ def ncsx_nested_ls_outer_value_and_grad(
             )
             total += inv_n * (qs_j + NCSX_RES_WEIGHT * res_j)
             coil_grad = coil_grad + inv_n * (qs_dj + NCSX_RES_WEIGHT * res_dj)
-            radius = float(surface_state.major_radius.J())
-            radius_j, radius_dval = _identity_quadratic(
-                radius, surface_state.radius_target
-            )
-            total += surface_state.radius_scale * radius_j
             if surface_state.radius_scale != 0.0:
-                coil_grad = coil_grad + surface_state.radius_scale * radius_dval * (
-                    np.asarray(
-                        surface_state.major_radius.dJ_by_dcoil_dofs(),
-                        dtype=np.float64,
-                    )
+                radius_dj = np.asarray(
+                    surface_state.major_radius.dJ_by_dcoil_dofs(),
+                    dtype=np.float64,
+                )
+                radius = float(surface_state.major_radius.J())
+                radius_j, radius_dval = _identity_quadratic(
+                    radius, surface_state.radius_target
+                )
+                total += surface_state.radius_scale * radius_j
+                coil_grad = coil_grad + (
+                    surface_state.radius_scale * radius_dval * radius_dj
                 )
             iota_values.append(float(surface_state.iotas_term.J()))
             iota_grads.append(
@@ -902,6 +986,10 @@ def _make_jax_boozer(
             "verbose": False,
             "optimizer_backend": optimizer_backend,
             "weight_inv_modB": NESTED_LS_WEIGHT_INV_MODB,
+            "bfgs_tol": 1e-10,
+            "bfgs_maxiter": NCSX_NATIVE_BFGS_MAXITER,
+            "newton_tol": NESTED_LS_BANANA_NEWTON_TOL,
+            "newton_maxiter": NESTED_LS_BANANA_NEWTON_MAXITER,
         },
     )
 

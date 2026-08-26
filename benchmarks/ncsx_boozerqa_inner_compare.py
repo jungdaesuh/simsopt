@@ -3,11 +3,10 @@
 
 Lanes: native inner, JAX run_code, JAX Schur, JAX outer, native outer.
 Not a sealed claim. Isolation: one lane per process. Native inner and
-native outer use banana ``run_code``; JAX run_code uses the LS Newton
-dense-LU default; JAX Schur/outer use reduced nested-LS inner plus IFT.
-Those outer operators are not the same; the ratio is still the point.
-Do not inherit F3 7.70×. Do not put native-outer and jax-outer in one
-process.
+native outer use banana ``run_code``. JAX outer uses compile-once banana
+(host BFGS + dense-LU Newton, coils as kernel arguments) plus batched
+IFT. JAX Schur remains a dedicated inner lane. Do not inherit F3 7.70×.
+Do not put native-outer and jax-outer in one process.
 """
 
 from __future__ import annotations
@@ -50,6 +49,7 @@ from simsopt_jax_adapters.geo.nested_ls_ncsx import (
     NcsxNestedLsSelfIntersecting,
     clone_surface_xyz_tensor_fourier,
     commit_ncsx_anchor,
+    ncsx_banana_run_code,
     ncsx_native_outer_value_and_grad,
     ncsx_nested_ls_outer_value_and_grad,
     ncsx_problem_from_jax_boozers,
@@ -524,7 +524,7 @@ def _lane_jax_outer(problem, *, maxiter: int):
             },
         )
         lander.need_to_run_code = True
-        landed = lander.run_code(iota0, g0)
+        landed = ncsx_banana_run_code(lander, iota0, g0)
         if landed is None or not bool(landed["success"]):
             return {
                 "seconds": float(time.perf_counter() - land_started),
