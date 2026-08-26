@@ -3671,13 +3671,16 @@ def _exact_newton_reporting_fields(result):
 
 
 def _ls_newton_objective_value_and_grad(obj_fn, x, objective_args):
-    """Evaluate the LS Newton scalar and gradient at one packed state."""
+    """Evaluate the LS Newton scalar and gradient at one packed state.
+
+    Extra ``objective_args`` stay dynamic arguments of the compiled
+    value/gradient kernel. Capturing them in a Python lambda would bake
+    coil geometry into the JAXPR and recompile on every outer eval.
+    """
     x_jax = _as_jax_float64(x)
-    if objective_args:
-        return jax.value_and_grad(lambda packed: obj_fn(packed, *objective_args))(
-            x_jax
-        )
-    return jax.value_and_grad(obj_fn)(x_jax)
+    return _optimizer_jax._cached_jit_value_and_grad(obj_fn)(
+        x_jax, *tuple(objective_args)
+    )
 
 
 def _ls_newton_gradient_l2(gradient) -> float:
@@ -7921,7 +7924,7 @@ class BoozerSurfaceJAX(Optimizable):
         x0 = self._pack_decision_vector(iota, G)
         method = self._resolve_optimizer_method(optimize_G=optimize_G)
         objective_args = ()
-        if self.options["optimizer_backend"] == "host-jax":
+        if self.options["optimizer_backend"] in {"host-jax", "ondevice"}:
             obj_fn = self._get_traceable_penalty_objective(
                 optimize_G,
                 weight_inv_modB,
