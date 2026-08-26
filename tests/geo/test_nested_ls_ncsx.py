@@ -252,6 +252,19 @@ def test_ncsx_outer_value_and_grad_is_finite_on_7x7(monkeypatch):
 
 
 @pytest.mark.boozer
+def test_ncsx_make_native_boozer_keeps_shipped_ls_defaults():
+    native, _jax_boozer, _base_curves, biotsavart, _iota0, _g0 = _ncsx_7x7_pair()
+    built = ncsx_mod._make_native_boozer(
+        biotsavart.coils,
+        clone_surface_xyz_tensor_fourier(native.surface),
+        constraint_weight=NESTED_LS_CONSTRAINT_WEIGHT,
+    )
+    assert built.options["bfgs_maxiter"] == 1500
+    assert built.options["newton_maxiter"] == 40
+    assert built.options["newton_tol"] == 1.0e-11
+
+
+@pytest.mark.boozer
 def test_ncsx_restore_anchor_discards_poisoned_trial(monkeypatch):
     native, jax_boozer, base_curves, biotsavart, iota0, g0 = _ncsx_7x7_pair()
     iota, g_value = _seed_from_native_lbfgs(native, jax_boozer, iota0, g0)
@@ -445,13 +458,14 @@ def test_ncsx_banana_polish_only_caps_newton_maxiter(monkeypatch):
         problem.surfaces[0].anchor_iota,
         problem.surfaces[0].anchor_G,
         polish_only=True,
+        newton_maxiter_cap=ncsx_mod.NCSX_OUTER_NEWTON_MAXITER,
     )
     jax_boozer.need_to_run_code = True
     ncsx_banana_run_code(
         jax_boozer,
         problem.surfaces[0].anchor_iota,
         problem.surfaces[0].anchor_G,
-        polish_only=False,
+        polish_only=True,
     )
     assert seen[0] == ncsx_mod.NCSX_OUTER_NEWTON_MAXITER
     assert seen[1] == int(jax_boozer.options["newton_maxiter"])
