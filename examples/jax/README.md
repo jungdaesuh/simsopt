@@ -170,9 +170,14 @@ remotely reproducible retention claim.
 Memory receipts use `XLA_PYTHON_CLIENT_PREALLOCATE=false`, synchronize the JAX
 publication boundary, and report one combined import/compile/warmup/bounded-run
 peak. They do not claim a separate steady-state peak and support no speed
-claim. This diagnostic policy is distinct from the supported production
-default, which leaves JAX GPU preallocation enabled unless the user explicitly
-changes it for their workload.
+claim. The receipts pin that setting explicitly rather than relying on the
+runtime: the `jax_gpu_parity` and `jax_gpu_fast` modes already default
+`xla_gpu_preallocate` to `False`
+(`src/simsopt_jax/backend/_runtime_policy.py`, `_GPU_MEMORY_MODE_DEFAULTS`),
+so preallocation is off under any supported GPU mode unless the user sets
+`SIMSOPT_JAX_GPU_PREALLOCATE` or passes `xla_gpu_preallocate=True`. A script
+that selects a device through `JAX_PLATFORMS` alone, without going through
+`set_backend`, gets JAX's own preallocating default instead.
 
 Generate a results table from an independently audited authority bundle with:
 
