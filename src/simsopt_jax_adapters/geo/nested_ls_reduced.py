@@ -417,6 +417,7 @@ def factor_reduced_nested_ls_schur(
     objective_fn,
     surface_dofs: object,
     y_probe: object | None = None,
+    packed_hvp: PackedPenaltyHvp | None = None,
 ) -> NestedLsReducedSchurOperator:
     """Factor ``Ĥ_ss`` at ``y*(s)`` from two packed ``Φ`` HVPs of the y-basis."""
 
@@ -424,7 +425,8 @@ def factor_reduced_nested_ls_schur(
     solution = solve_projected_y(residual_fn, surface, y_probe)
     require_full_y_rank(solution)
     packed = pack_surface_and_y(surface, solution.solution)
-    packed_hvp = _packed_objective_hvp(objective_fn)
+    if packed_hvp is None:
+        packed_hvp = _packed_objective_hvp(objective_fn)
     surface_size = int(surface.size)
     sy_columns = []
     yy_columns = []
@@ -819,6 +821,7 @@ def _schur_armijo_step(
     gradient,
     newton_direction,
     current_solution,
+    envelope_value_and_grad=_envelope_value_and_grad,
 ):
     descent = float(np.real(np.vdot(gradient, newton_direction)))
     alpha = 1.0
@@ -828,7 +831,7 @@ def _schur_armijo_step(
         if not np.all(np.isfinite(trial)):
             alpha *= 0.5
             continue
-        trial_value, trial_grad, trial_solution = _envelope_value_and_grad(
+        trial_value, trial_grad, trial_solution = envelope_value_and_grad(
             residual_fn, objective_fn, trial
         )
         trial_norm = float(np.linalg.norm(trial_grad))
@@ -1087,6 +1090,10 @@ def run_reduced_nested_ls_schur_newton(
     gmres_preconditioner: Callable[[jax.Array], jax.Array] | None = None,
     linear_solver: str = "gmres",
     max_dense_linearization_bytes: int | None = None,
+    residual_fn=None,
+    objective_fn=None,
+    packed_hvp: PackedPenaltyHvp | None = None,
+    envelope_value_and_grad=None,
 ) -> NestedLsSchurNewtonResult:
     """Capped inexact Newton on ``s`` using Schur ``Ĥ_ss`` and device GMRES.
 
@@ -1118,17 +1125,23 @@ def run_reduced_nested_ls_schur_newton(
             "linear_solver='shamanskii' cannot combine with gmres_preconditioner."
         )
 
-    residual_fn, objective_fn, _phi_hat = nested_ls_reduced_closures(
-        jax_boozer,
-        constraint_weight=constraint_weight,
-        weight_inv_modB=weight_inv_modB,
-    )
+    if residual_fn is None and objective_fn is None:
+        residual_fn, objective_fn, _phi_hat = nested_ls_reduced_closures(
+            jax_boozer,
+            constraint_weight=constraint_weight,
+            weight_inv_modB=weight_inv_modB,
+        )
+        del _phi_hat
+    elif residual_fn is None or objective_fn is None:
+        raise ValueError("residual_fn and objective_fn must be provided together.")
+    if envelope_value_and_grad is None:
+        envelope_value_and_grad = _envelope_value_and_grad
     surface = _host_vector(jax_boozer.surface.get_dofs())
     y_start = np.array([float(iota), float(G)], dtype=np.float64)
     coil_before = _coil_coordinates(jax_boozer.biotsavart)
     start_solution = solve_projected_y(residual_fn, surface, y_start)
     require_full_y_rank(start_solution)
-    value, gradient, current_solution = _envelope_value_and_grad(
+    value, gradient, current_solution = envelope_value_and_grad(
         residual_fn, objective_fn, surface
     )
     initial_norm = float(np.linalg.norm(gradient))
@@ -1171,6 +1184,7 @@ def run_reduced_nested_ls_schur_newton(
             objective_fn,
             working_surface,
             y_probe=working_solution.solution,
+            packed_hvp=packed_hvp,
         )
         step_factor_seconds = time.perf_counter() - factor_started
         factor_seconds += step_factor_seconds
@@ -1308,6 +1322,7 @@ def run_reduced_nested_ls_schur_newton(
             working_grad,
             newton_direction,
             working_solution,
+            envelope_value_and_grad=envelope_value_and_grad,
         )
         y_now = _host_vector(working_solution.solution)
         step_records.append(

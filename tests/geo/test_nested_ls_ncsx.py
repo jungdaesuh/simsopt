@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import numpy as np
 import pytest
 from simsopt.configs.zoo import get_data
@@ -158,7 +156,7 @@ def test_ncsx_schur_inner_lands_on_seeded_7x7():
 
 
 @pytest.mark.boozer
-def test_ncsx_projected_y_coil_jacobian_matches_frozen_surface_fd():
+def test_ncsx_projected_y_coil_vjp_matches_frozen_surface_fd():
     import jax.numpy as jnp
 
     native, jax_boozer, _base_curves, _bs, iota0, g0 = _ncsx_7x7_pair()
@@ -168,18 +166,19 @@ def test_ncsx_projected_y_coil_jacobian_matches_frozen_surface_fd():
     residual_rt, _objective, _phi = nested_ls_runtime_coil_closures(jax_boozer)
     del _objective, _phi
     coil = np.asarray(jax_boozer.biotsavart.x, dtype=np.float64).reshape(-1)
-    y_probe = np.array([float(result.iota), float(result.G)], dtype=np.float64)
-    jacobian = np.asarray(
-        ncsx_mod._projected_y_coil_jacobian(
+    y_star = np.array([float(result.iota), float(result.G)], dtype=np.float64)
+    iota_vjp = np.asarray(
+        ncsx_mod._projected_y_coil_vjp(
             residual_rt,
             result.surface_dofs,
             coil,
-            y_probe,
+            y_star,
+            np.array([1.0, 0.0], dtype=np.float64),
         ),
         dtype=np.float64,
     )
-    assert jacobian.shape == (2, coil.size)
-    column = int(np.argmax(np.linalg.norm(jacobian, axis=0)))
+    assert iota_vjp.shape == coil.shape
+    column = int(np.argmax(np.abs(iota_vjp)))
     step = 1.0e-6 * max(1.0, abs(float(coil[column])))
 
     def y_at(coil_vector):
@@ -188,7 +187,7 @@ def test_ncsx_projected_y_coil_jacobian_matches_frozen_surface_fd():
         def residual_fn(packed):
             return residual_rt(packed, coil_jax)
 
-        solution = solve_projected_y(residual_fn, result.surface_dofs, y_probe)
+        solution = solve_projected_y(residual_fn, result.surface_dofs, y_star)
         return np.asarray(solution.solution, dtype=np.float64)
 
     plus = np.array(coil, dtype=np.float64, copy=True)
@@ -196,8 +195,18 @@ def test_ncsx_projected_y_coil_jacobian_matches_frozen_surface_fd():
     plus[column] += step
     minus[column] -= step
     finite_difference = (y_at(plus) - y_at(minus)) / (2.0 * step)
+    g_vjp = np.asarray(
+        ncsx_mod._projected_y_coil_vjp(
+            residual_rt,
+            result.surface_dofs,
+            coil,
+            y_star,
+            np.array([0.0, 1.0], dtype=np.float64),
+        ),
+        dtype=np.float64,
+    )
     np.testing.assert_allclose(
-        jacobian[:, column],
+        np.array([iota_vjp[column], g_vjp[column]], dtype=np.float64),
         finite_difference,
         rtol=1.0e-4,
         atol=1.0e-6,
@@ -225,12 +234,12 @@ def test_ncsx_outer_value_and_grad_is_finite_on_7x7(monkeypatch):
     assert np.isfinite(value)
     assert gradient.shape == coil.shape
     assert bool(np.all(np.isfinite(gradient)))
-    assert problem.last_inner is not None
-    assert problem.last_inner.success
+    assert problem.last_run_code is not None
+    assert bool(problem.last_run_code["success"])
     assert tuple(problem.last_eval_timing) == NCSX_EVAL_TIMING_KEYS
     assert problem.last_eval_timing["total"] > 0.0
     assert problem.last_eval_timing["inner"] > 0.0
-    assert problem.last_eval_timing["y_coil_jacobian"] > 0.0
+    assert problem.last_eval_timing["implicit_adjoint"] > 0.0
     assert problem.surfaces[0].jax_boozer.options["newton_linear_solver"] == (
         "dense_lu"
     )
@@ -272,19 +281,21 @@ def test_ncsx_restore_anchor_discards_poisoned_trial(monkeypatch):
     _stub_surfaces_not_self_intersecting(monkeypatch, problem)
     coil = np.asarray(problem.biotsavart.x, dtype=np.float64)
     seen: list[tuple[np.ndarray, float, float]] = []
-    real_inner = ncsx_mod.run_ncsx_schur_inner
+    real_inner = state.jax_boozer.run_code
 
-    def spy_inner(jax_boozer, **kwargs):
+    def spy_inner(iota, G=None):
         seen.append(
             (
-                np.array(jax_boozer.surface.get_dofs(), dtype=np.float64, copy=True),
-                float(kwargs["iota"]),
-                float(kwargs["G"]),
+                np.array(
+                    state.jax_boozer.surface.get_dofs(), dtype=np.float64, copy=True
+                ),
+                float(iota),
+                float(G),
             )
         )
-        return real_inner(jax_boozer, **kwargs)
+        return real_inner(iota, G)
 
-    monkeypatch.setattr(ncsx_mod, "run_ncsx_schur_inner", spy_inner)
+    monkeypatch.setattr(state.jax_boozer, "run_code", spy_inner)
     value, gradient = ncsx_nested_ls_outer_value_and_grad(problem, coil)
     assert np.isfinite(value)
     assert bool(np.all(np.isfinite(gradient)))
@@ -375,23 +386,22 @@ def test_ncsx_failed_inner_restores_persistable_poison(monkeypatch):
     committed_g = float(state.anchor_G)
     coil = np.asarray(problem.biotsavart.x, dtype=np.float64)
 
-    def poison_and_fail(jax_boozer, **_kwargs):
-        wrecked = np.array(jax_boozer.surface.get_dofs(), dtype=np.float64, copy=True)
-        wrecked[0] += 1.0
-        jax_boozer.surface.set_dofs(wrecked)
-        return SimpleNamespace(
-            success=False,
-            iteration_count=3,
-            reduced_gradient=np.array([510.0], dtype=np.float64),
-            exit_status="failed",
-            iota=99.0,
-            G=-99.0,
+    def poison_and_fail(iota, G=None):
+        del iota, G
+        wrecked = np.array(
+            state.jax_boozer.surface.get_dofs(), dtype=np.float64, copy=True
         )
+        wrecked[0] += 1.0
+        state.jax_boozer.surface.set_dofs(wrecked)
+        return {
+            "success": False,
+            "iter": 3,
+            "iota": 99.0,
+            "G": -99.0,
+            "jacobian": np.array([510.0], dtype=np.float64),
+        }
 
-    monkeypatch.setattr(
-        "simsopt_jax_adapters.geo.nested_ls_ncsx.run_ncsx_schur_inner",
-        poison_and_fail,
-    )
+    monkeypatch.setattr(state.jax_boozer, "run_code", poison_and_fail)
     with pytest.raises(NcsxNestedLsInnerSolveFailed):
         ncsx_nested_ls_outer_value_and_grad(problem, coil)
     _assert_anchor_restored(
@@ -401,23 +411,21 @@ def test_ncsx_failed_inner_restores_persistable_poison(monkeypatch):
         g_value=committed_g,
     )
 
-    def poison_and_jump(jax_boozer, *, iota, G, **_kwargs):
-        wrecked = np.array(jax_boozer.surface.get_dofs(), dtype=np.float64, copy=True)
-        wrecked[0] += 1.0
-        jax_boozer.surface.set_dofs(wrecked)
-        return SimpleNamespace(
-            success=True,
-            iteration_count=4,
-            reduced_gradient=np.zeros(1, dtype=np.float64),
-            exit_status="converged",
-            iota=float(iota) + 0.2,
-            G=float(G),
+    def poison_and_jump(iota, G=None):
+        wrecked = np.array(
+            state.jax_boozer.surface.get_dofs(), dtype=np.float64, copy=True
         )
+        wrecked[0] += 1.0
+        state.jax_boozer.surface.set_dofs(wrecked)
+        return {
+            "success": True,
+            "iter": 4,
+            "iota": float(iota) + 0.2,
+            "G": float(G),
+            "jacobian": np.zeros(1, dtype=np.float64),
+        }
 
-    monkeypatch.setattr(
-        "simsopt_jax_adapters.geo.nested_ls_ncsx.run_ncsx_schur_inner",
-        poison_and_jump,
-    )
+    monkeypatch.setattr(state.jax_boozer, "run_code", poison_and_jump)
     with pytest.raises(NcsxNestedLsBranchJump):
         ncsx_nested_ls_outer_value_and_grad(problem, coil)
     _assert_anchor_restored(
