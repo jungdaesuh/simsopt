@@ -1,12 +1,13 @@
-"""NCSX boozerQA nested-LS: 9-term coil outer with banana inner.
+"""Serial 9-term NCSX nested-LS outer used by the compare harness.
 
-This is not F3/flat-675 and does not call ``prepare_f3_b37_outer_state``.
-The JAX and native outers both land ``s*(c)`` with banana BFGS-then-Newton
-and take the solved-state IFT coil gradient. Schur Newton remains a
-unit-test inner, not the outer. MPI multi-rank splitting is out of
-scope: one process takes the
-:class:`~simsopt.objectives.MPIObjective` mean of each per-surface term,
-matching serial ``boozerQA_ls_mpi.py``.
+This is not F3/flat-675, not ``examples/jax``, and not a one-to-one
+mirror of ``examples/2_Intermediate/boozerQA_ls_mpi.py``. The 9-term
+weights and last-surface major-radius identity follow that example's
+serial ``MPIObjective`` mean. Inner iteration budgets, Newton
+continuation caps, and the B3 restore-reject barrier are caller-owned
+harness policy. The shipped example's BoozerLS defaults remain
+BFGS 1500 then Newton 40, and its failed-trial contract is
+``(J_prev, -dJ_prev)``. Schur Newton is a unit-test inner only.
 """
 
 from __future__ import annotations
@@ -105,10 +106,11 @@ NCSX_EVAL_TIMING_KEYS: Final[tuple[str, ...]] = (
     "coil_terms",
     "total",
 )
+# Compare-harness land cap. Not the shipped BoozerLS default (1500).
 NCSX_NATIVE_BFGS_MAXITER: Final[int] = 20
-# Continuation Newton from a committed banana land. Feasible 18² evals
-# finish in 4–5 steps; infeasible coil trials otherwise grind the
-# lander's 40-step budget at GPU-negative cost.
+# Compare-harness continuation cap. Not the shipped Newton default (40).
+# Feasible 18² evals finish in 4–5 steps; infeasible coil trials otherwise
+# grind the lander's 40-step budget at GPU-negative cost.
 NCSX_OUTER_NEWTON_MAXITER: Final[int] = 8
 _NCSX_RUNTIME_KERNELS: WeakKeyDictionary = WeakKeyDictionary()
 
@@ -528,18 +530,16 @@ def ncsx_banana_run_code(
     *,
     sdofs=None,
     polish_only: bool = False,
+    newton_maxiter_cap: int | None = None,
 ) -> dict[str, object]:
     """Banana inner with coil geometry as kernel arguments.
 
     Public ondevice ``BoozerSurfaceJAX.run_code`` closure-converts the
     penalty objective and hashes coil bytes into the BFGS compile key.
-    Outer L-BFGS-B changes coils every eval, so that path recompiles.
-    Land uses host BFGS then dense-LU Newton. Outer evals pass
-    ``polish_only=True``: the committed ``(s, ι, G)`` is already a
-    Newton point, so continuation is Newton from that warm start.
-    Large infeasible coil steps then fail in a few Newton iterations
-    instead of a 20-step BFGS grind. The Newton ``res`` is persisted
-    for solved-state IFT.
+    Land uses host BFGS then dense-LU Newton. Outer evals may pass
+    ``polish_only=True`` and an explicit ``newton_maxiter_cap``; those
+    are harness knobs, not BoozerLS defaults. The Newton ``res`` is
+    persisted for solved-state IFT.
     """
 
     if not jax_boozer.need_to_run_code:
@@ -578,8 +578,8 @@ def ncsx_banana_run_code(
         jax_boozer._set_surface_dofs(sdofs_out)
     jax_boozer.need_to_run_code = True
     newton_maxiter = int(jax_boozer.options["newton_maxiter"])
-    if polish_only:
-        newton_maxiter = min(newton_maxiter, NCSX_OUTER_NEWTON_MAXITER)
+    if newton_maxiter_cap is not None:
+        newton_maxiter = min(newton_maxiter, int(newton_maxiter_cap))
     return jax_boozer.minimize_boozer_penalty_constraints_newton(
         constraint_weight=jax_boozer.constraint_weight,
         iota=iota_out,
@@ -631,6 +631,7 @@ def ncsx_nested_ls_outer_value_and_grad(
                 surface_state.anchor_iota,
                 surface_state.anchor_G,
                 polish_only=True,
+                newton_maxiter_cap=NCSX_OUTER_NEWTON_MAXITER,
             )
             _accumulate_timing(timing, "inner", started)
             if inner is None:
@@ -968,12 +969,37 @@ def _assemble_native_nine_term(
     return objective, length_target, coil_terms
 
 
+def _ls_inner_options(
+    *,
+    optimizer_backend: str | None = None,
+    bfgs_maxiter: int | None = None,
+    newton_maxiter: int | None = None,
+) -> dict[str, object]:
+    """LS inner options. Omitted maxiters keep BoozerLS constructor defaults."""
+
+    options: dict[str, object] = {
+        "verbose": False,
+        "weight_inv_modB": NESTED_LS_WEIGHT_INV_MODB,
+        "bfgs_tol": 1e-10,
+        "newton_tol": NESTED_LS_BANANA_NEWTON_TOL,
+    }
+    if optimizer_backend is not None:
+        options["optimizer_backend"] = optimizer_backend
+    if bfgs_maxiter is not None:
+        options["bfgs_maxiter"] = int(bfgs_maxiter)
+    if newton_maxiter is not None:
+        options["newton_maxiter"] = int(newton_maxiter)
+    return options
+
+
 def _make_jax_boozer(
     coils,
     surface: SurfaceXYZTensorFourier,
     *,
     constraint_weight: float,
     optimizer_backend: str,
+    bfgs_maxiter: int | None = None,
+    newton_maxiter: int | None = None,
 ) -> BoozerSurfaceJAX:
     label = Volume(surface)
     return BoozerSurfaceJAX(
@@ -982,15 +1008,11 @@ def _make_jax_boozer(
         label,
         float(label.J()),
         constraint_weight=float(constraint_weight),
-        options={
-            "verbose": False,
-            "optimizer_backend": optimizer_backend,
-            "weight_inv_modB": NESTED_LS_WEIGHT_INV_MODB,
-            "bfgs_tol": 1e-10,
-            "bfgs_maxiter": NCSX_NATIVE_BFGS_MAXITER,
-            "newton_tol": NESTED_LS_BANANA_NEWTON_TOL,
-            "newton_maxiter": NESTED_LS_BANANA_NEWTON_MAXITER,
-        },
+        options=_ls_inner_options(
+            optimizer_backend=optimizer_backend,
+            bfgs_maxiter=bfgs_maxiter,
+            newton_maxiter=newton_maxiter,
+        ),
     )
 
 
@@ -999,6 +1021,8 @@ def _make_native_boozer(
     surface: SurfaceXYZTensorFourier,
     *,
     constraint_weight: float,
+    bfgs_maxiter: int | None = None,
+    newton_maxiter: int | None = None,
 ) -> BoozerSurface:
     label = Volume(surface)
     return BoozerSurface(
@@ -1007,14 +1031,10 @@ def _make_native_boozer(
         label,
         float(label.J()),
         constraint_weight=float(constraint_weight),
-        options={
-            "verbose": False,
-            "weight_inv_modB": NESTED_LS_WEIGHT_INV_MODB,
-            "bfgs_tol": 1e-10,
-            "newton_tol": NESTED_LS_BANANA_NEWTON_TOL,
-            "newton_maxiter": NESTED_LS_BANANA_NEWTON_MAXITER,
-            "bfgs_maxiter": NCSX_NATIVE_BFGS_MAXITER,
-        },
+        options=_ls_inner_options(
+            bfgs_maxiter=bfgs_maxiter,
+            newton_maxiter=newton_maxiter,
+        ),
     )
 
 
@@ -1161,11 +1181,11 @@ def prepare_ncsx_nested_ls_problem(
     constraint_weight: float,
     include_native: bool = False,
 ) -> NcsxNestedLsProblem:
-    """Build the 9-term NCSX outer around reduced-Schur inners.
+    """Build the 9-term NCSX outer for the compare harness.
 
     ``surfaces`` are already at the intended Fourier/quadrature scale.
-    The last surface carries the major-radius equality, matching
-    ``boozerQA_ls_mpi.py``.
+    The last surface carries the major-radius equality. Inner iteration
+    budgets are the harness caps, not the shipped BoozerLS defaults.
     """
 
     packed_surfaces = tuple(surfaces)
@@ -1183,6 +1203,8 @@ def prepare_ncsx_nested_ls_problem(
                 jax_surface,
                 constraint_weight=constraint_weight,
                 optimizer_backend="ondevice",
+                bfgs_maxiter=NCSX_NATIVE_BFGS_MAXITER,
+                newton_maxiter=NESTED_LS_BANANA_NEWTON_MAXITER,
             )
         )
         natives.append(
@@ -1190,6 +1212,8 @@ def prepare_ncsx_nested_ls_problem(
                 coils,
                 clone_surface_xyz_tensor_fourier(surface),
                 constraint_weight=constraint_weight,
+                bfgs_maxiter=NCSX_NATIVE_BFGS_MAXITER,
+                newton_maxiter=NESTED_LS_BANANA_NEWTON_MAXITER,
             )
             if include_native
             else None
