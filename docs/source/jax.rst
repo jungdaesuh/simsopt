@@ -244,8 +244,8 @@ workflow at once.
 Runnable examples
 ~~~~~~~~~~~~~~~~~
 
-The `JAX-first examples <../../examples/jax/README.md>`_ collection provides
-pure and adapter lessons plus isolated CPU and strict-GPU runner commands. Its
+The JAX-first examples collection in :simsopt:`examples/jax` provides pure and
+adapter lessons plus isolated CPU and strict-GPU runner commands.  Its
 machine-readable manifest records native-example inspiration, remaining host
 boundaries, correctness owners, and deliberately deferred external workflows.
 
@@ -317,7 +317,9 @@ Optimizer lanes
 
 The native ``optimizer_backend="scipy"`` lane remains the CPU reference.  JAX
 workflows can select among these control strategies where the objective
-supports them:
+supports them.  This table is the complete outer-loop vocabulary; the
+machine-readable source of truth is ``VALID_OUTER_OPTIMIZER_BACKENDS`` in
+``simsopt_jax.geo._optimizer_backend_choices``:
 
 .. list-table::
    :header-rows: 1
@@ -325,12 +327,24 @@ supports them:
 
    * - Backend
      - Control model
+   * - ``scipy``
+     - Native SciPy control on the host; the CPU reference lane.
    * - ``scipy-jax``
      - SciPy controls L-BFGS-B on the host; JAX evaluates target-lane values
        and gradients.
+   * - ``scipy-jax-decomposed``
+     - SciPy host control over a third traceable-objective route, distinct
+       from ``scipy-jax`` and ``scipy-jax-fullgraph``
+       (``TargetObjectiveRoute.SCIPY_JAX_DECOMPOSED``).  Read that route
+       before selecting it; its evaluation contract is not documented here.
    * - ``scipy-jax-fullgraph``
      - SciPy retains host control while JAX evaluates the full traceable
        objective graph.
+   * - ``host-jax``
+     - Bounded-kernel bridge: Python owns the solver iterations while
+       static-shape residual, value-gradient, and Jacobian kernels run through
+       JAX with dynamic coil state passed as explicit arguments.  It buys GPU
+       kernel residency without tracing the optimizer loop.
    * - ``ondevice``
      - The supported optimization loop executes through JAX control flow on
        the target device.
@@ -338,6 +352,11 @@ supports them:
      - Optional Optax L-BFGS target lane.
    * - ``optimistix-lbfgs``
      - Optional Optimistix L-BFGS target lane.
+
+``optimizer_backend="auto"`` (or ``None``) is a resolvable request rather than
+an outer control model: ``resolve_optimizer_backend`` returns the active
+backend policy's ``default_optimizer_backend`` for it, and rejects any value
+outside the table above.
 
 Choose an optimizer lane explicitly and verify that the objective supports its
 traceability contract.  Host callbacks, Python mutation, and implicit NumPy
@@ -389,9 +408,10 @@ For subprocesses, use ``SIMSOPT_PRECISION=fp64`` or
 ``SIMSOPT_PRECISION=mixed``.  An explicit ``precision=`` value takes
 precedence over the environment.  The compatibility value
 ``precision="mode_default"`` restores the selected mode's established policy.
-The source-only ``SIMSOPT_MIXED_PRECISION`` spelling is rejected, and the
-import-time ``SIMSOPT_TRACEABLE_NEWTON_LINEAR_SOLVER`` selector is not part of
-the public API.
+The obsolete ``SIMSOPT_MIXED_PRECISION`` spelling is rejected with a
+``ValueError`` rather than silently ignored.  The Newton linear solver has no
+environment selector; set it through the typed ``newton_linear_solver`` option
+described below.
 
 Mixed precision changes proposal computation, not acceptance authority.  A
 mixed candidate must pass live FP64 residual, refinement, condition, and final
