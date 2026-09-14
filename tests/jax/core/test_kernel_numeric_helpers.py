@@ -59,16 +59,18 @@ def test_safe_divide_has_finite_zero_denominator_gradient():
     np.testing.assert_allclose(np.asarray(gradient), 0.0)
 
 
-def test_constant_row_accepts_traced_value():
-    @jax.jit
-    def row_for(value):
-        return _constant_row(3, value, reference=jnp.asarray(1.0, dtype=jnp.float64))
+def test_constant_row_builds_its_row_from_a_traced_reference():
+    """The row is selected statically but sourced from the reference's device."""
 
-    np.testing.assert_allclose(
-        np.asarray(row_for(jnp.asarray(1.0, dtype=jnp.float64))),
-        np.ones((1, 3)),
-    )
-    np.testing.assert_allclose(
-        np.asarray(row_for(jnp.asarray(0.0, dtype=jnp.float64))),
-        np.zeros((1, 3)),
-    )
+    @jax.jit
+    def rows_for(reference):
+        return (
+            _constant_row(3, is_one=True, reference=reference),
+            _constant_row(3, is_one=False, reference=reference),
+        )
+
+    ones_row, zeros_row = rows_for(jnp.asarray(1.0, dtype=jnp.float64))
+
+    np.testing.assert_allclose(np.asarray(ones_row), np.ones((1, 3)))
+    np.testing.assert_allclose(np.asarray(zeros_row), np.zeros((1, 3)))
+

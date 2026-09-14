@@ -19,6 +19,7 @@ from simsopt.geo._curve_surface_distance_owners import (
     curve_surface_distance_owners,
 )
 from simsopt.geo.curveobjectives import curve_arclengthvariation_pure
+from simsopt.geo.curvexyzfourier import CurveXYZFourier, JaxCurveXYZFourier
 from simsopt_jax.core._math_utils import (
     as_jax_float64 as _as_jax_float64,
 )
@@ -418,8 +419,6 @@ class ArclengthVariationJAX(Optimizable):
         if nintervals == "full":
             resolved_intervals = int(curve.gamma().shape[0])
         elif nintervals == "partial":
-            from simsopt.geo.curvexyzfourier import CurveXYZFourier, JaxCurveXYZFourier
-
             if not isinstance(curve, (CurveXYZFourier, JaxCurveXYZFourier)):
                 raise RuntimeError(
                     "Please provide a value other than `partial` for `nintervals`. "
