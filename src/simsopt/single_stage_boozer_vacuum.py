@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Final
 
-from simsopt.optimization_endpoint import OptimizationEndpointCertificate
+from simsopt_contracts.optimization_endpoint import OptimizationEndpointCertificate
 
 NATIVE_ITERATIONS: Final[int] = 1_000
 OUTER_GRADIENT_TOLERANCE: Final[float] = 1.0e-15

@@ -16,8 +16,13 @@ from examples.jax.parity.cases.native_boozerqa import (
 from examples.jax.parity.cases.native_single_stage_boozer_vacuum import SPEC
 from examples.jax.parity.input_bundle import InputBundle, load_input_bundle
 from examples.jax.parity.measurement import MeasurementExecution
-from simsopt.optimization_endpoint import certify_optimization_endpoint
 from simsopt.single_stage_boozer_vacuum import JAX_OPTAX_DRIVER_ID, NATIVE_ITERATIONS
+from simsopt_contracts.optimization_endpoint import certify_optimization_endpoint
+from simsopt_jax_adapters.geo.single_stage_boozer_vacuum_problem import (
+    BOUNDED_SCALE,
+    NATIVE_SCALE,
+    NCSX_INITIAL_IOTA,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CASE_ID = "native-single-stage-boozer-vacuum-optimization"
@@ -50,6 +55,35 @@ def test_single_stage_boozer_vacuum_routes_native_default_without_solving() -> N
     assert configuration["outer_maxiter"] == NATIVE_ITERATIONS
     assert configuration["mpol"] == 6
     assert configuration["ntor"] == 6
+
+
+def test_parity_harness_and_shipped_mirror_size_the_same_problem() -> None:
+    """The harness case and the shipped example must configure one problem, not two.
+
+    The harness lane and the example still run different JAX evaluation routes
+    (see the case module's docstring); the problem they evaluate may not also
+    differ, or neither lane's numbers describe the other.
+    """
+    for scale, shipped in (
+        ("native_default", NATIVE_SCALE),
+        ("bounded", BOUNDED_SCALE),
+    ):
+        configuration = _scale_configuration(scale, SPEC)
+
+        assert configuration["mpol"] == shipped.surface_resolution, scale
+        assert configuration["ntor"] == shipped.surface_resolution, scale
+        assert configuration["non_qs_sdim"] == shipped.non_qs_resolution, scale
+        assert configuration["initial_iota"] == NCSX_INITIAL_IOTA, scale
+        reduced = {
+            "coil_order": configuration["reduced_coil_order"],
+            "magnetic_axis_order": configuration["reduced_axis_order"],
+            "points_per_period": configuration["reduced_points_per_period"],
+        }
+        assert (
+            dict(shipped.ncsx_options) == reduced
+            if scale == "bounded"
+            else dict(shipped.ncsx_options) == {}
+        ), scale
 
 
 def test_single_stage_parity_preserves_public_solver_boundaries() -> None:
