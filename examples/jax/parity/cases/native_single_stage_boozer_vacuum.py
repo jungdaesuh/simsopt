@@ -1,4 +1,19 @@
-"""Matched VMEC-free implicit-Boozer single-stage workflow."""
+"""Matched VMEC-free implicit-Boozer single-stage workflow.
+
+Route note (2026-09-13).  The shipped mirror
+``examples/jax/3_Advanced/single_stage_boozer_vacuum_optimization.py`` now runs
+native's own SciPy BFGS over the exact analytic evaluator
+(``simsopt_jax_adapters.geo.single_stage_boozer_vacuum_problem``), which
+reproduces native's iterate trajectory -- at bounded scale the two examples
+spend the same iterations and evaluations and agree to 1.4e-15 in the initial
+objective and 5.2e-13 in the relative L2 of the initial gradient.  This harness
+case's JAX lane is unchanged: it still executes the traceable-session route
+shared with ``native_boozerqa``, whose outer optimizer and rejection sentinel
+differ from native.  Everything below -- in particular the quality band -- is
+evidence about THAT lane, not about the shipped example.  Rerouting this case
+onto the shipped evaluator requires changes in ``native_boozerqa._jax``, which
+also owns the Boozer-QA case.
+"""
 
 from __future__ import annotations
 

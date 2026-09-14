@@ -414,9 +414,9 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         method="L-BFGS-B",
         options={
             "maxiter": _configuration_int(bundle, "max_steps"),
-            "maxcor": 400,
+            "maxcor": _configuration_int(bundle, "lbfgs_history_size"),
         },
-        tol=1.0e-15,
+        tol=_configuration_float(bundle, "rtol"),
     )
     final_parameters = np.asarray(optimizer.x, dtype=np.float64)
     final_values = state("final", final_parameters)
@@ -468,8 +468,9 @@ def _jax(
         stage_two_geometric_penalty,
         stochastic_flux_mean_from_geometry,
     )
+    from simsopt_jax.examples.stochastic_stage_two import solve_stochastic_stage_two
     from simsopt_jax.solve.driver import Driver
-    from simsopt_jax.solve.serial import TraceableScalarProblem, serial_solve_jax
+    from simsopt_jax.solve.serial import TraceableScalarProblem
     from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
     from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
 
@@ -540,14 +541,17 @@ def _jax(
     direction = jax.device_put(arrays["taylor_direction"], device)
     problem = TraceableScalarProblem(objective_fn=objective, x=initial_parameters)
     initial_objective, initial_gradient = problem.value_and_grad(initial_parameters)
-    optimizer = serial_solve_jax(
+    # The route the shipped mirror runs, so this lane certifies what ships:
+    # SciPy L-BFGS-B over the device objective at the native example's policy
+    # (`ScipyLBFGSBOptions.native_matched` expands the single tol into
+    # ftol=gtol and leaves maxfun/maxls at SciPy's defaults), matching the
+    # native lane below term for term.
+    optimizer = solve_stochastic_stage_two(
         problem,
-        driver=Driver.SIMSOPT_BFGS,
+        driver=Driver.SCIPY_LBFGSB,
         max_steps=_configuration_int(bundle, "max_steps"),
-        line_search_max_steps=40,
-        rtol=_configuration_float(bundle, "rtol"),
-        atol=_configuration_float(bundle, "atol"),
-        require_success=False,
+        maxcor=_configuration_int(bundle, "lbfgs_history_size"),
+        tol=_configuration_float(bundle, "rtol"),
     )
     final_parameters = problem.x
     final_objective, final_gradient = problem.value_and_grad(final_parameters)

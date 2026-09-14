@@ -16,11 +16,13 @@ import numpy as np
 from simsopt.field import Current, coils_via_symmetries
 from simsopt.geo import SurfaceRZFourier, create_equally_spaced_curves
 from simsopt_jax.backend.runtime import get_runtime_jax_device
+from simsopt_jax.solve.driver import Driver
 from simsopt_jax.examples import (
     ExampleResult,
     ExecutionScale,
     run_example,
     solve_standard_stage_two,
+    standard_stage_two_optimizer_observables,
 )
 from simsopt_jax.objectives import StageTwoObjectiveConfig
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
@@ -37,7 +39,7 @@ def _build_problem(
     native_scale = scale == "native_default"
     surface_resolution = 32 if native_scale else 4
     curve_order = 5 if native_scale else 2
-    curve_quadrature = 100 if native_scale else 16
+    curve_quadrature = 75 if native_scale else 16
     surface = SurfaceRZFourier.from_vmec_input(
         str(TEST_DATA / "input.LandremanPaul2021_QA"),
         range="half period",
@@ -119,8 +121,9 @@ def solve(
         first_length_weight=first_length_weight_device,
         second_length_weight=second_length_weight_device,
         max_steps=max_steps,
-        rtol=1.0e-12,
-        atol=1.0e-10,
+        rtol=1.0e-15,
+        atol=1.0e-15,
+        driver=Driver.SCIPY_LBFGSB,
     )
     initial, first, final, taylor_errors = jax.device_get(
         (
@@ -134,9 +137,6 @@ def solve(
     final_gradient = np.asarray(final.objective_gradient, dtype=np.float64)
     field.x = solution
     field.save(str(output_directory / "biot_savart_opt.json"))
-    solver_success = bool(
-        device_result.first_optimizer.success and device_result.second_optimizer.success
-    )
     scientific_success = bool(
         device_result.first_optimizer.status in (0, 1)
         and device_result.second_optimizer.status in (0, 1)
@@ -165,15 +165,10 @@ def solve(
             "maximum_normal_field": float(final.maximum_normal_field),
             "total_curve_length": float(final.total_curve_length),
             "taylor_errors": tuple(float(value) for value in taylor_errors),
-            "solver_success": solver_success,
-            "solver_status": (
-                device_result.first_optimizer.status,
-                device_result.second_optimizer.status,
-            ),
-            "solver_iterations": (
-                device_result.first_optimizer.nit,
-                device_result.second_optimizer.nit,
-            ),
+            # status below is the scientific gate, never a convergence claim:
+            # the per-stage optimizer verdicts published here are what a reader
+            # applies, and an "ok" run can still carry success=False.
+            **standard_stage_two_optimizer_observables(device_result),
         },
         status="ok" if scientific_success else "failed",
     )

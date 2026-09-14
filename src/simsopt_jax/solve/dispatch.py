@@ -315,10 +315,28 @@ def _run_scipy_minimize(
 ) -> OptimizeResult:
     iteration = 0
     start = time.perf_counter()
+    # SciPy runs on the host, so this route hands the objective the parameters
+    # where ``x0`` already lives: a device ``x0`` is a device objective and each
+    # evaluation crosses the boundary once in each direction, while a host
+    # ``x0`` never leaves the host.  Both crossings are ``jax.device_put`` /
+    # ``jax.device_get``, they are the only ones on this route, and they are all
+    # in ``value_and_gradient_at`` -- so a caller may hold JAX's strict transfer
+    # guard around the whole solve.
+    placement = x0.sharding if isinstance(x0, jax.Array) else None
+
+    def value_and_gradient_at(x_host):
+        """Host parameters in, host value and gradient out."""
+        parameters = x_host if placement is None else jax.device_put(x_host, placement)
+        value, gradient = value_and_grad_fn(parameters)
+        return jax.device_get(value), jax.device_get(gradient)
+
+    # Every ``np.asarray`` below acts on a host value ``value_and_gradient_at``
+    # has already brought across, and normalizes what SciPy's float64 drivers
+    # were already handed: a callable may return a Python float for the value.
 
     def scipy_fun(x_host):
-        value, grad = value_and_grad_fn(np.asarray(x_host))
-        return float(np.asarray(value).reshape(())), np.asarray(grad, dtype=float)
+        value, gradient = value_and_gradient_at(x_host)
+        return float(np.asarray(value).reshape(())), np.asarray(gradient, dtype=float)
 
     def scipy_callback(x_host):
         nonlocal iteration
@@ -326,8 +344,8 @@ def _run_scipy_minimize(
             return
 
         iteration += 1
-        value, grad = value_and_grad_fn(np.asarray(x_host))
-        grad_host = np.asarray(grad, dtype=float)
+        value, gradient = value_and_gradient_at(x_host)
+        grad_host = np.asarray(gradient, dtype=float)
         event_fields = {
             "iteration": iteration,
             "x": np.asarray(x_host, dtype=float).copy(),
@@ -360,7 +378,7 @@ def _run_scipy_minimize(
         }
     result = scipy_minimize(
         scipy_fun,
-        np.asarray(x0, dtype=float),
+        np.asarray(jax.device_get(x0), dtype=float),
         jac=True,
         method=scipy_method,
         options=scipy_options,

@@ -238,11 +238,15 @@ def solve_minimal_stage_two(
         objective_fn=objective,
         x=initial_device,
     )
+    # Native's minimal example returns normally when L-BFGS-B exhausts its
+    # iteration budget at tol=1e-15; the fused loop publishes the same bounded
+    # endpoint instead of raising, and reports the optimizer verdict beside it.
     optimizer = serial_solve_jax(
         problem,
         max_steps=max_steps,
         rtol=rtol,
         atol=atol,
+        require_success=False,
     )
     final = state(problem.x)
     completed = block_until_ready(
