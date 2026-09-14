@@ -26,18 +26,8 @@ def test_static_curve_dof_mapping_preserves_mixed_dtype_on_gpu(
         array = jax.device_put(np.linspace(-2.0, 3.0, num=6, dtype=np.float32))
         replacement = jax.device_put(np.asarray([10.0, 20.0, 30.0], dtype=np.float32))
         with jax.transfer_guard("disallow"):
-            segment = _slice_1d_static(
-                array,
-                2,
-                5,
-                use_compute_dtype=True,
-            )
-            updated = _update_1d_static(
-                array,
-                1,
-                replacement,
-                use_compute_dtype=True,
-            )
+            segment = _slice_1d_static(array, 2, 5)
+            updated = _update_1d_static(array, 1, replacement)
 
     assert segment.dtype == jnp.float32
     assert updated.dtype == jnp.float32

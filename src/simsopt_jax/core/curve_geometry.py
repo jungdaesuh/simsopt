@@ -10,6 +10,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from simsopt_jax.backend.dtypes import explicit_device_array
+
 from .curve_kernels import (
     curve_length_from_incremental_arclength_pure as _curve_length_from_incremental_arclength_pure,
     curve_cws_rz_gamma_from_dofs,
@@ -148,50 +150,35 @@ def _element_count_runtime(array: jax.Array) -> jax.Array:
     return _runtime_scalar(float(np.prod(array.shape)), reference=array)
 
 
-def _slice_1d_static(
-    array: jax.Array,
-    start: int,
-    end: int,
-    *,
-    use_compute_dtype: bool = False,
-) -> jax.Array:
+def _slice_1d_static(array: jax.Array, start: int, end: int) -> jax.Array:
+    """``array[start:end]`` along axis 0 with static bounds.
+
+    Exact selection: dtype and placement follow ``array``; no staged constant.
+    """
+    return jax.lax.slice_in_dim(array, int(start), int(end), axis=0)
+
+
+def _update_1d_static(array: jax.Array, start: int, values: jax.Array) -> jax.Array:
+    """``array`` with ``array[start:start + len(values)]`` replaced by ``values``.
+
+    A full-width ``values`` is the result itself. A partial update is the
+    masked sum ``array * keep + placement @ values`` with staged one-hot
+    constants: exact for finite entries, and bilinear, so a linearization
+    never instantiates zero tangents for the untouched entries (a slice
+    concatenation or ``dynamic_update_slice`` would, as host constants).
+    """
     start = int(start)
-    end = int(end)
-    selector = np.zeros((end - start, int(array.shape[0])), dtype=float)
-    selector[np.arange(end - start), np.arange(start, end)] = 1.0
+    width = int(values.shape[0])
+    size = int(array.shape[0])
+    if start == 0 and width == size:
+        return values
+    placement = np.zeros((size, width), dtype=float)
+    placement[np.arange(start, start + width), np.arange(width)] = 1.0
+    keep = 1.0 - np.sum(placement, axis=1)
     return (
-        _as_explicit_array(
-            selector,
-            reference=array,
-            use_compute_dtype=use_compute_dtype,
-        )
-        @ array
+        array * explicit_device_array(keep, dtype=array.dtype, reference=array)
+        + explicit_device_array(placement, dtype=array.dtype, reference=array) @ values
     )
-
-
-def _update_1d_static(
-    array: jax.Array,
-    start: int,
-    values: jax.Array,
-    *,
-    use_compute_dtype: bool = False,
-) -> jax.Array:
-    start = int(start)
-    stop = start + int(values.shape[0])
-    update_matrix = np.zeros((int(array.shape[0]), int(values.shape[0])), dtype=float)
-    update_matrix[np.arange(start, stop), np.arange(int(values.shape[0]))] = 1.0
-    keep_mask = 1.0 - np.sum(update_matrix, axis=1)
-    runtime_update_matrix = _as_explicit_array(
-        update_matrix,
-        reference=array,
-        use_compute_dtype=use_compute_dtype,
-    )
-    runtime_keep_mask = _as_explicit_array(
-        keep_mask,
-        reference=array,
-        use_compute_dtype=use_compute_dtype,
-    )
-    return array * runtime_keep_mask + runtime_update_matrix @ values
 
 
 def curve_spec_from_curve(curve):
@@ -397,17 +384,10 @@ def _mapped_full_dofs(
     )
     for owner_start, owner_end, target_start, target_end in map_spec.owner_segments:
         del target_end
-        segment = _slice_1d_static(
-            owner_dofs,
-            owner_start,
-            owner_end,
-            use_compute_dtype=use_compute_dtype,
-        )
         mapped = _update_1d_static(
             mapped,
             target_start,
-            segment,
-            use_compute_dtype=use_compute_dtype,
+            _slice_1d_static(owner_dofs, owner_start, owner_end),
         )
     return mapped
 
@@ -425,12 +405,7 @@ def _mapped_input_dofs(
     )
     if map_spec.input_mode == "full":
         return mapped_full
-    return _slice_1d_static(
-        mapped_full,
-        map_spec.input_start,
-        map_spec.input_end,
-        use_compute_dtype=use_compute_dtype,
-    )
+    return _slice_1d_static(mapped_full, map_spec.input_start, map_spec.input_end)
 
 
 def optimizable_input_dofs_from_map_spec(

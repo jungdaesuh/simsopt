@@ -1126,6 +1126,30 @@ def _take_positions_1d(array: jax.Array, positions) -> jax.Array:
     return jnp.take(_as_jax_float64(array), indexer, axis=0)
 
 
+def _owner_segments_from_free_positions(
+    owner_start: int,
+    free_positions,
+) -> tuple[tuple[int, int, int, int], ...]:
+    """Copy ranges ``owner[o0:o1] -> target[t0:t1]`` for one block of free dofs.
+
+    ``free_positions[i]`` is where owner dof ``owner_start + i`` lands in the
+    target's local full vector; each run of consecutive positions is one range.
+    """
+    free_positions = np.asarray(free_positions, dtype=np.int64)
+    run_breaks = np.flatnonzero(np.diff(free_positions) != 1) + 1
+    run_bounds = np.concatenate(([0], run_breaks, [free_positions.size]))
+    return tuple(
+        (
+            int(owner_start + first),
+            int(owner_start + last),
+            int(free_positions[first]),
+            int(free_positions[last - 1]) + 1,
+        )
+        for first, last in zip(run_bounds[:-1], run_bounds[1:])
+        if last > first
+    )
+
+
 def _scatter_free_values(template: jax.Array, free_positions, free_values: jax.Array):
     free_positions = np.asarray(free_positions, dtype=np.int64)
     if np.array_equal(free_positions, np.arange(int(template.shape[0]))):
@@ -1899,16 +1923,9 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
             return self._full_input_dof_map_spec(template_full_dofs, ())
 
         owner_start, _owner_end = self.dof_indices[opt]
-        owner_segments = tuple(
-            (
-                int(owner_start + source_offset),
-                int(owner_start + source_offset + 1),
-                int(target_position),
-                int(target_position + 1),
-            )
-            for source_offset, target_position in enumerate(
-                self._local_free_positions(opt)
-            )
+        owner_segments = _owner_segments_from_free_positions(
+            owner_start,
+            self._local_free_positions(opt),
         )
         return self._full_input_dof_map_spec(template_full_dofs, owner_segments)
 
