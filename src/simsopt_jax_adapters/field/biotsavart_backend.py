@@ -529,7 +529,10 @@ class SpecBackedCurve(Optimizable):
             coeff_cotangent,
             owner_dofs,
         )
-        return Derivative({self._owner: owner_gradient})
+        # ``Derivative`` values are NumPy: cross to the host here, explicitly, or
+        # ``Derivative.__call__``'s ``np.asarray`` performs an implicit transfer
+        # that ``jax.transfer_guard("disallow")`` rejects.
+        return Derivative({self._owner: host_array(owner_gradient, dtype=np.float64)})
 
     def _rotate_cotangent_to_base_frame(self, values: object) -> jax.Array:
         cotangent = _as_jax_float64(values)
