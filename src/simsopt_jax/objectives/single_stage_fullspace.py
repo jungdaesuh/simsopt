@@ -381,27 +381,27 @@ class ProblemInvariantContract:
 
 _NATIVE_EXAMPLE = SourceRef(
     path="examples/3_Advanced/single_stage_boozer_vacuum_optimization.py",
-    sha256="9e01cb1f51c0354850c1da8148d87f61aa3a2f0fbba78a8aa8816352cd5d4041",
+    sha256="53d87139097067b0ca3bfed6370b4e10c356872bb7fe55c0e2e5c021e9f84a71",
     symbol="objective construction in solve()",
 )
 _JAX_EXAMPLE = SourceRef(
-    path="examples/jax/3_Advanced/single_stage_boozer_vacuum_optimization.py",
-    sha256="d0828b93afae28702cce9a20ab70bcc73b1486c971f9d7aa55272629d53a06a6",
-    symbol="solve() and _objective_config()",
+    path="src/simsopt_jax_adapters/geo/single_stage_boozer_vacuum_problem.py",
+    sha256="1cce177f46aa55be3cc7814b6d946f1878a1d71802bdb8d965aa45acbfe47102",
+    symbol="_outer_objective_config()",
 )
 _SURFACE_TERMS = SourceRef(
     path="src/simsopt_jax_adapters/geo/surface_objectives.py",
-    sha256="17bb02df157246da23556b20771ddae625d891f7fc630de7efd4d1d8899ad9d7",
+    sha256="ee45f99a2f8816709a89c1a0db32fca6cda62b05e4bc8a6d758b172dd0936eb2",
     symbol="_traceable_single_stage_outer_term_values",
 )
 _BOOZER_CORE = SourceRef(
     path="src/simsopt_jax/geo/boozer_residual.py",
-    sha256="52dcfe2a5fec45ad92872ed3a0e44bddbc478a7cf7afa162fa5d206a38ac6f0c",
+    sha256="a812d5a8cc9effc14f8dac55a91e3591c26e9d37c0a529a0e5bccb4cde8c9b5d",
     symbol="boozer_residual_vector and boozer_residual_scalar",
 )
 _BOOZER_EXACT = SourceRef(
     path="src/simsopt_jax_adapters/geo/boozer_surface.py",
-    sha256="4d295f0d121099a1915beb15641ce1f7064ebca23afc2f7ea5173f67961dabaf",
+    sha256="9e43747af12c8e2422c1f74bc92fcdd9b887cf35d60912823c30d986f8f77479",
     symbol="exact masked residual and signed volume label",
 )
 
