@@ -19,6 +19,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from simsopt_jax.runtime.host_boundary import host_value
+
 from ._math_utils import (
     as_jax_float64 as _as_float64_array,
     as_jax_int32 as _as_int32_array,
@@ -93,12 +95,14 @@ __all__ = [
     "make_surface_rzfourier_spec",
     "make_zero_rotation_spec",
     "garabedian_to_rzfourier_spec",
+    "host_resident_spec",
     "make_surface_xyz_fourier_spec",
     "make_surface_xyz_tensor_fourier_spec",
 ]
 
 
 _SpecClass = TypeVar("_SpecClass", bound=type)
+_SpecT = TypeVar("_SpecT")
 
 
 def _gson_encode_numpy_array(value: np.ndarray) -> dict[str, object]:
@@ -162,6 +166,21 @@ def gson_decode_spec_value(value: object) -> object:
             return spec_cls.from_dict(data)
         return {key: gson_decode_spec_value(item) for key, item in value.items()}
     return value
+
+
+def host_resident_spec(spec: _SpecT) -> _SpecT:
+    """Return ``spec`` with every array leaf materialized on the host.
+
+    Call this on any spec a compiled program captures in a closure rather than
+    receives as an argument. XLA turns a captured concrete array into an MLIR
+    literal by copying it back to the host, once per lowering, which
+    ``jax.transfer_guard("disallow")`` refuses on a real device; host leaves
+    lower to the same literals with no copy. Specs passed as program arguments
+    must NOT be host-resident -- that placement is the argument's own implicit
+    host-to-device transfer. The read-back goes through the host-boundary
+    owner so it is audited like every other device-to-host crossing.
+    """
+    return host_value(spec)
 
 
 def _register_jax_spec(
@@ -432,7 +451,13 @@ class CoilSpec:
     ),
 )
 class CoilDofExtractionSpec:
-    """Immutable owner-DOF -> coil-spec reconstruction payload."""
+    """Immutable owner-DOF -> coil-spec reconstruction payload.
+
+    Frozen: only the owner DOF vector varies per call. A program that takes
+    this payload as an *argument* wants it device-resident, which is how the
+    maker returns it; a program that *captures* it in a closure must first
+    call ``host_resident_spec`` on it -- see that function for why.
+    """
 
     curve: CurveSpec
     curve_map: OptimizableDofMapSpec

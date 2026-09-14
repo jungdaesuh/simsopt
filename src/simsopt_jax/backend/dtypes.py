@@ -118,7 +118,7 @@ def _reference_placement(reference, *, ndim: int | None = None):
         sharding = getattr(reference, "sharding", None)
         if isinstance(sharding, NamedSharding):
             return _compatible_reference_sharding(sharding, ndim=ndim)
-        return sharding
+        return _single_device_placement(sharding)
     if isinstance(reference, (list, tuple)):
         for leaf in jax.tree.leaves(reference):
             if isinstance(leaf, jax.Array) and not _is_jax_tracer(leaf):
@@ -126,8 +126,30 @@ def _reference_placement(reference, *, ndim: int | None = None):
                 if sharding is not None:
                     if isinstance(sharding, NamedSharding):
                         return _compatible_reference_sharding(sharding, ndim=ndim)
-                    return sharding
+                    return _single_device_placement(sharding)
     return None
+
+
+def _single_device_placement(sharding):
+    """Reduce a single-device reference sharding to the bare device it names.
+
+    Both forms place identically when ``device_put`` runs eagerly: the result is
+    committed to the same device with the same sharding. They differ when the
+    put is staged into a ``jit`` trace, which happens whenever a host literal is
+    placed next to a *concrete* reference captured by a traced function. A
+    concrete ``SingleDeviceSharding`` carries ``memory_kind='device'``, so jax
+    both wraps the staged constant in a single-device sharding op and folds that
+    sharding into the computation's device assignment
+    (``dispatch.get_intermediate_shardings`` and ``_tpu_gpu_device_put_lowering``
+    key on ``isinstance(device, Sharding) and device.memory_kind is not None``).
+    That pins the whole jaxpr to one device and is rejected outright when an
+    argument is replicated or point-axis sharded across several. A bare device
+    is ignored by both, leaving the constant's placement to XLA.
+    """
+    if not isinstance(sharding, Sharding) or len(sharding.device_set) != 1:
+        return sharding
+    (device,) = sharding.device_set
+    return device
 
 
 def _reference_sharding(reference, *, ndim: int | None = None):

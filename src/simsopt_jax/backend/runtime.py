@@ -260,6 +260,8 @@ _GPU_DETERMINISM_XLA_FLAGS = ("--xla_gpu_exclude_nondeterministic_ops",)
 _STALE_GPU_DETERMINISM_XLA_FLAGS = ("--xla_gpu_deterministic_ops",)
 _CPU_OPT_PRESET_FLAG_NAME = "--xla_cpu_opt_preset"
 _CPU_OPT_PRESET_FAST_COMPILE = f"{_CPU_OPT_PRESET_FLAG_NAME}=FAST_COMPILE"
+_GPU_FUSION_AUTOTUNER_FLAG_NAME = "--xla_gpu_experimental_enable_fusion_autotuner"
+_GPU_FUSION_AUTOTUNER_DISABLED = f"{_GPU_FUSION_AUTOTUNER_FLAG_NAME}=false"
 
 
 _BackendCacheClearCallbackKey = tuple[str, str]
@@ -326,6 +328,24 @@ def _enabled_gpu_determinism_flags_text() -> str:
     return " or ".join(f"{flag_name}=true" for flag_name in _GPU_DETERMINISM_XLA_FLAGS)
 
 
+def _xla_flags_with_token(xla_flags: str | None, flag_name: str, token: str) -> str:
+    """Return ``xla_flags`` with ``token`` appended unless ``flag_name`` is already set.
+
+    Idempotent and non-destructive: existing tokens are preserved verbatim, and
+    a caller-provided ``flag_name`` (any value) is respected rather than
+    overridden. ``None``/empty input yields just ``token``.
+    """
+    stripped_xla_flags = "" if xla_flags is None else xla_flags.strip()
+    if any(
+        existing == flag_name or existing.startswith(f"{flag_name}=")
+        for existing in _split_xla_flag_tokens(xla_flags)
+    ):
+        return xla_flags or ""
+    if not stripped_xla_flags:
+        return token
+    return f"{stripped_xla_flags} {token}"
+
+
 def _xla_flags_with_cpu_compile_preset(xla_flags: str | None) -> str:
     """Return ``xla_flags`` with the CPU FAST_COMPILE preset appended.
 
@@ -333,17 +353,21 @@ def _xla_flags_with_cpu_compile_preset(xla_flags: str | None) -> str:
     a caller-provided ``--xla_cpu_opt_preset`` (any value) is respected rather
     than overridden. ``None``/empty input yields just the preset token.
     """
-    stripped_xla_flags = "" if xla_flags is None else xla_flags.strip()
-    tokens = _split_xla_flag_tokens(xla_flags)
-    if any(
-        token == _CPU_OPT_PRESET_FLAG_NAME
-        or token.startswith(f"{_CPU_OPT_PRESET_FLAG_NAME}=")
-        for token in tokens
-    ):
-        return xla_flags or ""
-    if not stripped_xla_flags:
-        return _CPU_OPT_PRESET_FAST_COMPILE
-    return f"{stripped_xla_flags} {_CPU_OPT_PRESET_FAST_COMPILE}"
+    return _xla_flags_with_token(
+        xla_flags, _CPU_OPT_PRESET_FLAG_NAME, _CPU_OPT_PRESET_FAST_COMPILE
+    )
+
+
+def _xla_flags_with_gpu_fusion_autotuner_disabled(xla_flags: str | None) -> str:
+    """Return ``xla_flags`` with XLA's experimental GPU fusion autotuner disabled.
+
+    Same composition contract as :func:`_xla_flags_with_cpu_compile_preset`: a
+    caller-provided ``--xla_gpu_experimental_enable_fusion_autotuner`` (any
+    value) is respected, and re-applying is a no-op.
+    """
+    return _xla_flags_with_token(
+        xla_flags, _GPU_FUSION_AUTOTUNER_FLAG_NAME, _GPU_FUSION_AUTOTUNER_DISABLED
+    )
 
 
 def target_lane_purity_requested() -> bool:
@@ -1049,6 +1073,35 @@ def _apply_cpu_compile_preset_env(config: BackendConfig, policy: BackendPolicy) 
     )
 
 
+def _apply_cuda_fusion_autotuner_env(config: BackendConfig) -> None:
+    """Disable XLA's experimental GPU fusion autotuner in ``XLA_FLAGS`` before JAX inits.
+
+    The fusion autotuner (``--xla_gpu_experimental_enable_fusion_autotuner``,
+    on by default in jaxlib 0.10) runs during compilation. Observed on the
+    RTX 5090 with jax/jaxlib 0.10.0 (2026-09-13): with it enabled, fresh
+    compiles of ``gpmo_arbvec_backtracking_solve`` at PM4Stell nphi=64 died
+    inside the autotuner with ``CUDA_ERROR_ILLEGAL_ADDRESS`` (kernel log: NVRM
+    Xid 31 MMU fault) in a drifting fraction of runs -- interleaved 4 of 6
+    versus 0 of 6 with it disabled -- almost always before any executable was
+    cached; with it disabled no compile faulted, and the surviving default
+    compiles and the disabled ones produced bitwise-identical moments for that
+    program. The inferred, unproven mechanism is that its Triton block-level
+    candidate kernels run on autotuning buffers whose contents are not the
+    program's, so a fusion whose addresses depend on data (here a
+    ``dynamic-slice`` into the neighbour table at computed indices) reads
+    wherever those values point. The helper sets no other flag, so GEMM/conv
+    autotuning (``--xla_gpu_autotune_level``) keeps its default (not separately
+    verified under this flag), a caller-provided value for the flag is
+    respected, and the flag is inert on the CPU backend, so this is CUDA-only.
+    """
+    if config.jax_platform != "cuda":
+        return
+    _set_runtime_env(
+        _XLA_FLAGS_ENV,
+        _xla_flags_with_gpu_fusion_autotuner_disabled(os.environ.get(_XLA_FLAGS_ENV)),
+    )
+
+
 def apply_jax_runtime_config() -> None:
     """Apply the resolved JAX runtime settings to the active process."""
     config = get_backend_config()
@@ -1058,6 +1111,7 @@ def apply_jax_runtime_config() -> None:
     _validate_cuda_parity_determinism_env(config, policy)
     _apply_jax_gpu_memory_env(config)
     _apply_cpu_compile_preset_env(config, policy)
+    _apply_cuda_fusion_autotuner_env(config)
 
     import jax
 
