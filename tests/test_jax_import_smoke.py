@@ -735,6 +735,23 @@ def test_legacy_jax_environment_defaults_to_fast(case_name: str) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "case_name",
+    (
+        "case_env_cuda_backend_pins_xla_autotuners_without_initializing_jax",
+        "case_env_cpu_backend_leaves_xla_flags_alone",
+        "case_cuda_config_installed_after_jax_init_warns",
+    ),
+)
+def test_backend_config_install_pins_cuda_autotuners(case_name: str) -> None:
+    """Installing a CUDA config pins XLA's GPU autotuners on every configuration path."""
+    _assert_python_script_passes(
+        _IMPORT_SMOKE_CASES_PATH,
+        args=(case_name,),
+        failure_message=f"{case_name} failed",
+    )
+
+
 def test_programmatic_backend_persistent_cache_writes_small_kernel():
     """Runtime cache thresholds should let even a tiny compiled kernel persist."""
     _assert_python_script_passes(

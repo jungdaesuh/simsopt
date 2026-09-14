@@ -1,4 +1,4 @@
-"""Regression tests for the CUDA ``--xla_gpu_experimental_enable_fusion_autotuner=false`` knob.
+"""Regression tests for the CUDA ``XLA_FLAGS`` pins applied before JAX initializes.
 
 ``apply_jax_runtime_config`` pulls the flag into ``XLA_FLAGS`` before JAX
 initializes on CUDA lanes, because on the RTX 5090 with jaxlib 0.10.0
@@ -11,7 +11,13 @@ that matter:
 
 - ``_xla_flags_with_gpu_fusion_autotuner_disabled`` composes the flag
   non-destructively and idempotently, and never overrides a caller-supplied value.
-- ``_apply_cuda_fusion_autotuner_env`` applies it on CUDA lanes only.
+- ``_xla_flags_with_gpu_autotune_level_pinned`` composes the GEMM/convolution
+  autotuner pin (``--xla_gpu_autotune_level=0``) under the same contract: with
+  autotuning on, each fresh compile keeps whichever cuBLAS algorithm timed
+  fastest, so fresh compiles of one program differed at 3e-15 relative
+  (RTX 5090, 2026-09-14); level 0 made them bitwise-reproducible at unchanged
+  evaluation speed.
+- ``_apply_cuda_autotuner_env`` applies both on CUDA lanes only.
 """
 
 from __future__ import annotations
@@ -22,12 +28,17 @@ import types
 import pytest
 from simsopt_jax.backend.runtime import (
     _CPU_OPT_PRESET_FAST_COMPILE,
+    _GPU_AUTOTUNE_LEVEL_PINNED,
     _GPU_FUSION_AUTOTUNER_DISABLED,
     _XLA_FLAGS_ENV,
-    _apply_cuda_fusion_autotuner_env,
+    _apply_cuda_autotuner_env,
+    apply_cuda_xla_flag_pins,
     _xla_flags_with_cpu_compile_preset,
+    _xla_flags_with_gpu_autotune_level_pinned,
     _xla_flags_with_gpu_fusion_autotuner_disabled,
 )
+
+_CUDA_PINS = f"{_GPU_FUSION_AUTOTUNER_DISABLED} {_GPU_AUTOTUNE_LEVEL_PINNED}"
 
 
 @pytest.mark.parametrize("empty", [None, "", "   "])
@@ -79,32 +90,71 @@ def test_compose_composes_with_the_cpu_preset_helper():
     assert _xla_flags_with_cpu_compile_preset(both) == both
 
 
+@pytest.mark.parametrize("empty", [None, "", "   "])
+def test_autotune_pin_yields_lone_flag_for_empty_input(empty):
+    assert (
+        _xla_flags_with_gpu_autotune_level_pinned(empty) == _GPU_AUTOTUNE_LEVEL_PINNED
+    )
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [
+        "--xla_gpu_autotune_level=4",
+        "--xla_gpu_autotune_level=0",
+        "--a=1 --xla_gpu_autotune_level=2 --b=2",
+    ],
+)
+def test_autotune_pin_respects_caller_supplied_level(existing):
+    """A caller who deliberately keeps autotuning on is not overridden."""
+    assert _xla_flags_with_gpu_autotune_level_pinned(existing) == existing
+
+
+def test_autotune_pin_is_idempotent():
+    once = _xla_flags_with_gpu_autotune_level_pinned(None)
+    assert _xla_flags_with_gpu_autotune_level_pinned(once) == once
+
+
+def test_public_pin_entry_point_sets_both_pins(monkeypatch):
+    monkeypatch.delenv(_XLA_FLAGS_ENV, raising=False)
+    assert apply_cuda_xla_flag_pins() == _CUDA_PINS
+    assert os.environ[_XLA_FLAGS_ENV] == _CUDA_PINS
+
+
 def _config(jax_platform):
     return types.SimpleNamespace(jax_platform=jax_platform)
 
 
 def test_apply_is_noop_on_cpu(monkeypatch):
     monkeypatch.delenv(_XLA_FLAGS_ENV, raising=False)
-    _apply_cuda_fusion_autotuner_env(_config("cpu"))
+    _apply_cuda_autotuner_env(_config("cpu"))
     assert _XLA_FLAGS_ENV not in os.environ
 
 
 def test_apply_sets_flag_on_cuda(monkeypatch):
     monkeypatch.delenv(_XLA_FLAGS_ENV, raising=False)
-    _apply_cuda_fusion_autotuner_env(_config("cuda"))
-    assert os.environ[_XLA_FLAGS_ENV] == _GPU_FUSION_AUTOTUNER_DISABLED
+    _apply_cuda_autotuner_env(_config("cuda"))
+    assert os.environ[_XLA_FLAGS_ENV] == _CUDA_PINS
 
 
 def test_apply_keeps_caller_flags_on_cuda(monkeypatch):
     monkeypatch.setenv(_XLA_FLAGS_ENV, "--xla_gpu_exclude_nondeterministic_ops=true")
-    _apply_cuda_fusion_autotuner_env(_config("cuda"))
+    _apply_cuda_autotuner_env(_config("cuda"))
     assert os.environ[_XLA_FLAGS_ENV] == (
-        f"--xla_gpu_exclude_nondeterministic_ops=true {_GPU_FUSION_AUTOTUNER_DISABLED}"
+        f"--xla_gpu_exclude_nondeterministic_ops=true {_CUDA_PINS}"
+    )
+
+
+def test_apply_respects_caller_autotune_level_on_cuda(monkeypatch):
+    monkeypatch.setenv(_XLA_FLAGS_ENV, "--xla_gpu_autotune_level=4")
+    _apply_cuda_autotuner_env(_config("cuda"))
+    assert os.environ[_XLA_FLAGS_ENV] == (
+        f"--xla_gpu_autotune_level=4 {_GPU_FUSION_AUTOTUNER_DISABLED}"
     )
 
 
 def test_apply_is_idempotent_across_repeated_calls(monkeypatch):
     monkeypatch.delenv(_XLA_FLAGS_ENV, raising=False)
-    _apply_cuda_fusion_autotuner_env(_config("cuda"))
-    _apply_cuda_fusion_autotuner_env(_config("cuda"))
-    assert os.environ[_XLA_FLAGS_ENV] == _GPU_FUSION_AUTOTUNER_DISABLED
+    _apply_cuda_autotuner_env(_config("cuda"))
+    _apply_cuda_autotuner_env(_config("cuda"))
+    assert os.environ[_XLA_FLAGS_ENV] == _CUDA_PINS

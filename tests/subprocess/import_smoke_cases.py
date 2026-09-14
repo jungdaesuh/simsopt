@@ -847,6 +847,76 @@ def case_legacy_jax_cuda_environment_defaults_to_fast_without_initializing_jax()
     assert config.jax_platform == "cuda"
 
 
+def case_env_cuda_backend_pins_xla_autotuners_without_initializing_jax() -> None:
+    """Resolving a CUDA config from the environment pins XLA's GPU autotuners.
+
+    Both pins are lane invariants applied wherever a CUDA config is installed,
+    so environment-configured processes get them before JAX initializes -- the
+    persistent compile cache had once been applied on the explicit path only.
+    """
+    import os
+
+    block_jax_imports(message="CUDA resolution must not initialize JAX")
+    os.environ["SIMSOPT_BACKEND_MODE"] = "jax_gpu_fast"
+    os.environ.pop("XLA_FLAGS", None)
+
+    import simsopt_jax.config as simsopt_config
+    from simsopt_jax.backend.runtime import (
+        _GPU_AUTOTUNE_LEVEL_PINNED,
+        _GPU_FUSION_AUTOTUNER_DISABLED,
+    )
+
+    config = simsopt_config.get_backend_config()
+    assert config.jax_platform == "cuda"
+    assert os.environ["XLA_FLAGS"] == (
+        f"{_GPU_FUSION_AUTOTUNER_DISABLED} {_GPU_AUTOTUNE_LEVEL_PINNED}"
+    )
+
+    from simsopt_jax.backend import invalidate_backend_cache
+
+    invalidate_backend_cache()
+    os.environ["XLA_FLAGS"] = "--xla_gpu_autotune_level=4"
+    simsopt_config.get_backend_config()
+    assert os.environ["XLA_FLAGS"] == (
+        f"--xla_gpu_autotune_level=4 {_GPU_FUSION_AUTOTUNER_DISABLED}"
+    )
+
+
+def case_cuda_config_installed_after_jax_init_warns() -> None:
+    """Installing a CUDA config after JAX initialized warns that the pins came late."""
+    import os
+    import warnings
+
+    import jax.numpy as jnp
+
+    os.environ.pop("XLA_FLAGS", None)
+    jnp.zeros(1).block_until_ready()
+
+    import simsopt_jax.config as simsopt_config
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        simsopt_config.set_backend("jax_gpu_fast", configure_runtime=False)
+
+    late = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+    assert len(late) == 1
+    assert "before the CUDA autotuner pins" in str(late[0].message)
+
+
+def case_env_cpu_backend_leaves_xla_flags_alone() -> None:
+    import os
+
+    block_jax_imports(message="CPU resolution must not initialize JAX")
+    os.environ["SIMSOPT_BACKEND_MODE"] = "jax_cpu_fast"
+    os.environ.pop("XLA_FLAGS", None)
+
+    import simsopt_jax.config as simsopt_config
+
+    config = simsopt_config.get_backend_config()
+    assert config.jax_platform == "cpu"
+    assert "XLA_FLAGS" not in os.environ
+
+
 def case_programmatic_backend_persistent_cache_writes_small_kernel() -> None:
     import tempfile
 
