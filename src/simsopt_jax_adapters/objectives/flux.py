@@ -32,7 +32,6 @@ import numpy as np
 from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt._core.optimizable import Optimizable
 from simsopt._core.util import ObjectiveFailure
-from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 from simsopt_jax.core._math_utils import (
     as_jax_float64 as _as_jax_float64,
 )
@@ -46,9 +45,8 @@ from simsopt_jax.core.objectives_flux import (
     build_fourier_basis,
     fixed_surface_flux_integral,
     fixed_surface_flux_integral_from_B,
-    fixed_surface_flux_specs_from_surface,
+    fixed_surface_flux_specs_from_spec as _fixed_surface_flux_specs_from_spec,
 )
-from simsopt_jax.core.surface_rzfourier import surface_rz_fourier_spec_from_dofs
 from simsopt_jax.core.specs import FixedSurfaceFluxSpec
 from simsopt_jax.runtime.host_boundary import (
     host_array as _host_array,
@@ -58,11 +56,13 @@ from simsopt_jax.runtime.host_boundary import (
 )
 
 from simsopt_jax_adapters.geo.curve_specs import adapter_curve_dof_mode
+from simsopt_jax_adapters.geo.surface_specs import surface_spec_from_surface
 
 __all__ = [
     "SquaredFluxJAX",
     "coil_current_fixed_geometry_flux_jax",
     "coil_current_fixed_geometry_value_and_grad_jax",
+    "fixed_surface_flux_specs_from_surface",
 ]
 
 
@@ -118,44 +118,15 @@ def _surface_dofs_fingerprint(surface) -> bytes:
     return hashlib.blake2b(dofs.tobytes(), digest_size=16).digest()
 
 
-class _SurfaceSpecProvider:
-    def __init__(self, surface_spec) -> None:
-        self._surface_spec = surface_spec
-
-    def surface_spec(self):
-        return self._surface_spec
-
-
-def _surface_spec_from_adapter_surface(surface):
-    surface_spec_fn = getattr(surface, "surface_spec", None)
-    if callable(surface_spec_fn):
-        return surface_spec_fn()
-
-    if isinstance(surface, SurfaceRZFourier):
-        return surface_rz_fourier_spec_from_dofs(
-            _as_jax_float64(surface.get_dofs()),
-            quadpoints_phi=_as_jax_float64(surface.quadpoints_phi),
-            quadpoints_theta=_as_jax_float64(surface.quadpoints_theta),
-            mpol=surface.mpol,
-            ntor=surface.ntor,
-            nfp=surface.nfp,
-            stellsym=surface.stellsym,
-        )
-
-    raise NotImplementedError(
-        "SquaredFluxJAX fixed-surface setup requires a surface exposing "
-        f"surface_spec(); unsupported adapter surface {type(surface).__name__}."
-    )
-
-
-def _fixed_surface_flux_specs_from_adapter_surface(
+def fixed_surface_flux_specs_from_surface(
     surface,
     *,
-    target,
+    target=None,
     definition: str,
 ):
-    return fixed_surface_flux_specs_from_surface(
-        _SurfaceSpecProvider(_surface_spec_from_adapter_surface(surface)),
+    """Field-evaluation and flux specs for a simsopt surface (see ``surface_spec_from_surface``)."""
+    return _fixed_surface_flux_specs_from_spec(
+        surface_spec_from_surface(surface),
         target=target,
         definition=definition,
     )
@@ -330,12 +301,10 @@ class SquaredFluxJAX(Optimizable):
         self.definition = definition
 
         target_array = None if target is None else np.ascontiguousarray(target)
-        field_eval_spec, self._flux_spec = (
-            _fixed_surface_flux_specs_from_adapter_surface(
-                surface,
-                target=target_array,
-                definition=definition,
-            )
+        field_eval_spec, self._flux_spec = fixed_surface_flux_specs_from_surface(
+            surface,
+            target=target_array,
+            definition=definition,
         )
 
         # Set evaluation points on the field adapter from the immutable spec.
