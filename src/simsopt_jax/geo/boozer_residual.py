@@ -97,6 +97,7 @@ __all__ = [
     "boozer_residual_grad",
     "boozer_residual_hessian",
     "boozer_residual_vector",
+    "boozer_residual_vector_and_jacobian",
     "select_boozer_residual_mask",
     "boozer_penalty_composed",
     "boozer_penalty_grad_composed",
@@ -475,6 +476,77 @@ def boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB=False, dtyp
         xtheta,
         weight_inv_modB,
     ).ravel()
+
+
+def boozer_residual_vector_and_jacobian(
+    G,
+    iota,
+    B,
+    dB_dX,
+    xphi,
+    xtheta,
+    dx_ds,
+    dxphi_ds,
+    dxtheta_ds,
+    *,
+    optimize_G=True,
+    weight_inv_modB=False,
+):
+    """Return the analytic Boozer residual and its surface/iota/G Jacobian.
+
+    ``dB_dX[..., k, m]`` uses the native direction-first convention
+    ``dB_dX[..., k, m] = d_k B_m``; rows flatten point then vector component,
+    and columns are ``[surface coefficients, iota, G]`` when ``optimize_G``.
+    """
+    B, xphi, xtheta = _require_boozer_runtime_inputs(B, xphi, xtheta)
+    dB_dX = jnp.asarray(dB_dX)
+    dx_ds = jnp.asarray(dx_ds)
+    dxphi_ds = jnp.asarray(dxphi_ds)
+    dxtheta_ds = jnp.asarray(dxtheta_ds)
+    G = _dtype_scalar_like(B, G)
+    iota = _dtype_scalar_like(B, iota)
+
+    # Contract the spatial field derivative with the surface coefficient basis.
+    dB_ds = jnp.einsum("...km,...ka->...ma", dB_dX, dx_ds)
+    tang = xphi + iota * xtheta
+    B2 = pairwise_sum_axis(B * B, axis=-1)
+    residual = G * B - B2[..., None] * tang
+
+    surface_tangent_ds = dxphi_ds + iota * dxtheta_ds
+    dB2_ds = _dtype_scalar_like(B, 2.0) * jnp.einsum(
+        "...m,...ma->...a", B, dB_ds
+    )
+    dresidual_ds = (
+        G * dB_ds
+        - tang[..., :, None] * dB2_ds[..., None, :]
+        - B2[..., None, None] * surface_tangent_ds
+    )
+    dresidual_diota = -B2[..., None] * xtheta
+
+    if weight_inv_modB:
+        weight = _inverse_modB(B2)
+        dweight_ds = -_dtype_scalar_like(B, 0.5) * weight[..., None] * dB2_ds / B2[
+            ..., None
+        ]
+        residual_unweighted = residual
+        residual = weight[..., None] * residual
+        dresidual_ds = (
+            weight[..., None, None] * dresidual_ds
+            + residual_unweighted[..., :, None] * dweight_ds[..., None, :]
+        )
+        dresidual_diota = weight[..., None] * dresidual_diota
+        dresidual_dG = weight[..., None] * B
+    else:
+        dresidual_dG = B
+
+    jacobian_columns = [dresidual_ds, dresidual_diota[..., None]]
+    if optimize_G:
+        jacobian_columns.append(dresidual_dG[..., None])
+    jacobian = jnp.concatenate(jacobian_columns, axis=-1)
+
+    nres = 3 * int(np.prod(B.shape[:-1]))
+    ncols = int(dx_ds.shape[-1]) + 1 + int(optimize_G)
+    return residual.reshape((nres,)), jacobian.reshape((nres, ncols))
 
 
 def boozer_residual_scalar_from_vector(

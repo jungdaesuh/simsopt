@@ -25,6 +25,9 @@ import jax.scipy.linalg as jsp_linalg
 import numpy as np
 from numpy.typing import NDArray
 from simsopt.geo.boozersurface import BoozerSurface, _boozer_iterate_is_persistable
+from simsopt_jax.core._math_utils import as_jax_float64
+from simsopt_jax.core.field import coil_set_spec_from_dof_extraction_spec
+from simsopt_jax.core.specs import host_resident_spec
 from simsopt_jax.geo.optimizers.linear_solve import (
     _hessian_vector_product_fn,
     _materialize_dense_linear_operator,
@@ -536,12 +539,25 @@ def nested_ls_runtime_coil_closures(
     """Residual, ``Φ``, and ``Φ̂`` as functions of ``(packed, coil_dofs)``.
 
     Uses the binary ``(x, coil_set_spec)`` penalty kernels. Coil DOFs
-    stay runtime arguments through
-    ``BiotSavartJAX.coil_set_spec_from_dofs``. Frozen-coil Newton still
-    uses :func:`nested_ls_reduced_closures`.
+    stay runtime arguments: the grouped spec is rebuilt from them on
+    every call, against a host-resident reconstruction template.
+    Frozen-coil Newton still uses :func:`nested_ls_reduced_closures`.
     """
 
     biotsavart = jax_boozer.biotsavart
+    # The kernels below are traced with ``coil_dofs`` as an argument, but the
+    # frozen reconstruction template is CAPTURED in the closure, so XLA would
+    # copy every template leaf back to the host once per lowering; see
+    # ``simsopt_jax.core.specs.host_resident_spec``. ``BiotSavartJAX`` keeps
+    # its own copy device-resident for the callers that pass a spec as a
+    # program argument.
+    coil_extraction_spec = host_resident_spec(biotsavart.coil_dof_extraction_spec())
+
+    def coil_set_spec_from_dofs(coil_dofs: object):
+        return coil_set_spec_from_dof_extraction_spec(
+            coil_extraction_spec, as_jax_float64(coil_dofs)
+        )
+
     residual_kernel = jax_boozer._get_traceable_penalty_residual(
         True,
         weight_inv_modB,
@@ -554,12 +570,10 @@ def nested_ls_runtime_coil_closures(
     )
 
     def residual_fn(packed: jax.Array, coil_dofs: jax.Array) -> jax.Array:
-        spec = biotsavart.coil_set_spec_from_dofs(coil_dofs)
-        return residual_kernel(packed, spec)
+        return residual_kernel(packed, coil_set_spec_from_dofs(coil_dofs))
 
     def objective_fn(packed: jax.Array, coil_dofs: jax.Array) -> jax.Array:
-        spec = biotsavart.coil_set_spec_from_dofs(coil_dofs)
-        return objective_kernel(packed, spec)
+        return objective_kernel(packed, coil_set_spec_from_dofs(coil_dofs))
 
     def residual_at_coil(coil_dofs: jax.Array):
         coil = jnp.asarray(coil_dofs, dtype=jnp.float64).reshape(-1)

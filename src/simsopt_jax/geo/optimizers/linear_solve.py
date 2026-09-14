@@ -83,6 +83,7 @@ class _DenseJacobianAssembler(IntEnum):
 
     LINEARIZE_ONCE = 0
     CHECKPOINTED_BATCHED_JVP = 1
+    VALUE_AND_JACOBIAN = 2
 
 
 class _DenseJacobianMaterializationTelemetry(NamedTuple):

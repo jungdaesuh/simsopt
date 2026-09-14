@@ -7,6 +7,14 @@ native outer use banana ``run_code``. JAX outer uses compile-once banana
 (host BFGS + dense-LU Newton, coils as kernel arguments) plus batched
 IFT. JAX Schur remains a dedicated inner lane. Do not inherit F3 7.70×.
 Do not put native-outer and jax-outer in one process.
+
+``--device`` selects the JAX lanes' platform. It is pre-parsed below,
+before ``jax`` is imported, because that is the only moment jax reads
+``JAX_PLATFORMS``. The pre-import pin is applied only when ``--lane``
+names a single JAX lane: ``--lane all`` runs the native lane in the same
+process, and its environment must stay unpinned so the denominator does
+not move. Under ``--lane all`` the JAX lanes therefore still need
+``JAX_PLATFORMS`` exported by the caller.
 """
 
 from __future__ import annotations
@@ -28,8 +36,81 @@ sys.path.insert(0, str(REPO / "src"))
 
 from repo_bootstrap import bootstrap_local_simsopt
 
+LANE_CHOICES = (
+    "native",
+    "jax-runcode",
+    "jax-schur",
+    "jax-outer",
+    "native-outer",
+    "all",
+)
+# The lanes whose device placement this driver owns. "all" is excluded on
+# purpose: it runs the native lane in the same process.
+JAX_LANE_CHOICES = ("jax-runcode", "jax-schur", "jax-outer")
+DEVICE_CHOICES = ("auto", "cpu", "cuda")
+_DEVICE_PLATFORMS = {"cpu": "cpu", "cuda": "cuda,cpu"}
+# The backend mode is derived from the platform actually pinned, never chosen
+# independently: SIMSOPT_BACKEND_MODE=jax_gpu_fast on a cpu-only runtime makes
+# the backend request the 'gpu' platform and raises at the first device use.
+_PLATFORM_BACKEND_MODES = {"cpu": "jax_cpu_fast", "cuda": "jax_gpu_fast"}
+
+
+def _add_lane_and_device_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add the two arguments whose values are needed before ``jax`` is imported.
+
+    The pre-import pin below and ``main``'s authoritative parser both build
+    from this one definition, so the names, choices and defaults have a single
+    owner.
+    """
+    parser.add_argument("--lane", choices=LANE_CHOICES, default="all")
+    parser.add_argument(
+        "--device",
+        choices=DEVICE_CHOICES,
+        default="auto",
+        help=(
+            "JAX lane platform. 'auto' keeps an exported JAX_PLATFORMS and "
+            "otherwise requests cuda,cpu; 'cpu'/'cuda' override the export."
+        ),
+    )
+
+
+def _pin_jax_lane_environment(device: str) -> None:
+    """Pin the platform and matching backend mode a JAX lane runs under.
+
+    ``JAX_PLATFORMS`` is read by jax only while jax is being imported, so it
+    takes effect only from the pre-import call below. ``SIMSOPT_BACKEND_MODE``
+    is read later and takes effect whenever this runs. ``auto`` keeps an
+    exported platform; ``cpu``/``cuda`` override it.
+    """
+    if device == "auto":
+        platforms = os.environ.setdefault("JAX_PLATFORMS", "cuda,cpu")
+    else:
+        platforms = _DEVICE_PLATFORMS[device]
+        os.environ["JAX_PLATFORMS"] = platforms
+    os.environ.setdefault(
+        "SIMSOPT_BACKEND_MODE", _PLATFORM_BACKEND_MODES[platforms.split(",")[0]]
+    )
+
+
+_lane_and_device_preparser = argparse.ArgumentParser(add_help=False)
+_add_lane_and_device_arguments(_lane_and_device_preparser)
+_PRESELECTED, _ = _lane_and_device_preparser.parse_known_args()
+
+# Everything jax reads while it is being imported has to be pinned here:
+# bootstrap_local_simsopt imports simsopt, which imports jax
+# (simsopt/_core/json.py), long before argparse runs in main().
+#
+# Native's curvature/arclength/MSC coil terms evaluate through JAX on CPU and
+# are float32 unless x64 is enabled; float64 is a physics requirement of this
+# comparison on BOTH lanes, so an inherited JAX_ENABLE_X64=0 is overridden
+# rather than honoured.
+os.environ["JAX_ENABLE_X64"] = "1"
+if _PRESELECTED.lane in JAX_LANE_CHOICES:
+    _pin_jax_lane_environment(_PRESELECTED.device)
+
 bootstrap_local_simsopt(REPO / "src")
 
+import jax
 import numpy as np
 from scipy.optimize import minimize
 from simsopt._core import load
@@ -45,6 +126,7 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     nested_ls_outer_rejection_barrier,
 )
 from simsopt_jax_adapters.geo.nested_ls_ncsx import (
+    NCSX_DERIVATIVE_ASSEMBLIES,
     NCSX_EXAMPLE_JSON,
     NcsxNestedLsBranchJump,
     NcsxNestedLsInnerSolveFailed,
@@ -92,6 +174,7 @@ def _record_outer_eval(
         "grad_l2": grad_l2,
         "coil_digest": _coil_digest(coil),
         "inner_iter": int(inner.get("iter", -1)),
+        "inner_bfgs_nit": nested.last_inner_bfgs_nit,
         "inner_success": bool(inner.get("success", False)),
     }
     print(
@@ -99,6 +182,7 @@ def _record_outer_eval(
         f"nfev={record['nfev']} rejected={int(record['rejected'])} "
         f"J={record['j']:.16e} g={record['grad_l2']:.6e} "
         f"coil={record['coil_digest']} inner_iter={record['inner_iter']} "
+        f"inner_bfgs_nit={record['inner_bfgs_nit']} "
         f"inner_success={int(record['inner_success'])}",
         flush=True,
     )
@@ -250,17 +334,10 @@ def _lane_native(problem, *, bfgs_maxiter: int, repeats: int):
     return timed
 
 
-def _configure_jax_gpu() -> None:
-    os.environ.setdefault("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
-    os.environ.setdefault("JAX_PLATFORMS", "cuda,cpu")
-    os.environ.setdefault("JAX_ENABLE_X64", "1")
-
-
-def _lane_jax_runcode(problem, *, bfgs_maxiter: int, repeats: int):
-    _configure_jax_gpu()
-    import jax
-
-    jax.config.update("jax_enable_x64", True)
+def _lane_jax_runcode(problem, *, device: str, bfgs_maxiter: int, repeats: int):
+    # Idempotent under --lane all, where the pre-import pin is skipped so the
+    # native lane in this process keeps its unpinned environment.
+    _pin_jax_lane_environment(device)
     surf = clone_surface_xyz_tensor_fourier(problem["surface"])
     vol = Volume(surf)
     jax_bz = BoozerSurfaceJAX(
@@ -293,11 +370,8 @@ def _lane_jax_runcode(problem, *, bfgs_maxiter: int, repeats: int):
     return payload
 
 
-def _lane_jax_schur(problem, *, repeats: int):
-    _configure_jax_gpu()
-    import jax
-
-    jax.config.update("jax_enable_x64", True)
+def _lane_jax_schur(problem, *, device: str, repeats: int):
+    _pin_jax_lane_environment(device)
     surf = clone_surface_xyz_tensor_fourier(problem["surface"])
     vol = Volume(surf)
     jax_bz = BoozerSurfaceJAX(
@@ -555,11 +629,16 @@ def _run_ncsx_lbfgs_outer(
     }
 
 
-def _lane_jax_outer(problem, *, maxiter: int, newton_maxiter_cap: int):
-    _configure_jax_gpu()
-    import jax
-
-    jax.config.update("jax_enable_x64", True)
+def _lane_jax_outer(
+    problem,
+    *,
+    device: str,
+    maxiter: int,
+    newton_maxiter_cap: int,
+    derivative_assembly: str,
+    polish_only: bool,
+):
+    _pin_jax_lane_environment(device)
     # Match boozerQA_ls_mpi.py: freeze the first current so overall current
     # scale is not a free outer DOF.
     problem["base_currents"][0].fix_all()
@@ -586,7 +665,9 @@ def _lane_jax_outer(problem, *, maxiter: int, newton_maxiter_cap: int):
             },
         )
         lander.need_to_run_code = True
-        landed = ncsx_banana_run_code(lander, iota0, g0)
+        landed = ncsx_banana_run_code(
+            lander, iota0, g0, derivative_assembly=derivative_assembly
+        )
         if landed is None or not bool(landed["success"]):
             return {
                 "seconds": float(time.perf_counter() - land_started),
@@ -616,10 +697,14 @@ def _lane_jax_outer(problem, *, maxiter: int, newton_maxiter_cap: int):
         evaluate=functools.partial(
             ncsx_nested_ls_outer_value_and_grad,
             newton_maxiter_cap=int(newton_maxiter_cap),
+            polish_only=polish_only,
+            derivative_assembly=derivative_assembly,
         ),
     )
     payload["land_seconds"] = land_seconds
     payload["newton_maxiter_cap"] = int(newton_maxiter_cap)
+    payload["derivative_assembly"] = derivative_assembly
+    payload["polish_only"] = bool(polish_only)
     return payload
 
 
@@ -685,18 +770,7 @@ def _lane_native_outer(problem, *, maxiter: int, bfgs_maxiter: int):
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--lane",
-        choices=(
-            "native",
-            "jax-runcode",
-            "jax-schur",
-            "jax-outer",
-            "native-outer",
-            "all",
-        ),
-        default="all",
-    )
+    _add_lane_and_device_arguments(parser)
     parser.add_argument("--mpol", type=int, default=None)
     parser.add_argument("--ntor", type=int, default=None)
     parser.add_argument("--nphi", type=int, default=18)
@@ -715,6 +789,21 @@ def main() -> None:
         type=int,
         default=1,
         help="Outer lane surface count (boozerQA_ls_mpi.py uses 2). Inner lanes use surface 0.",
+    )
+    parser.add_argument(
+        "--jax-inner",
+        choices=NCSX_DERIVATIVE_ASSEMBLIES,
+        default="ad",
+        help="JAX outer inner-derivative assembly: basis-HVP AD or analytic field jets.",
+    )
+    parser.add_argument(
+        "--jax-policy",
+        choices=("polish", "banana"),
+        default="polish",
+        help=(
+            "JAX outer inner policy: Newton continuation only, or the native "
+            "banana BFGS-then-Newton on every evaluation (matched operators)."
+        ),
     )
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = parser.parse_args()
@@ -736,6 +825,14 @@ def main() -> None:
         "nsurfaces": loaded["nsurfaces"],
         "constraint_weight": loaded["constraint_weight"],
         "newton_maxiter_cap": int(args.newton_cap),
+        "jax_inner": args.jax_inner,
+        "jax_policy": args.jax_policy,
+        "device": args.device,
+        # The pinned environment as jax saw it at import, recorded without
+        # touching a device.
+        "jax_platforms": os.environ.get("JAX_PLATFORMS"),
+        "simsopt_backend_mode": os.environ.get("SIMSOPT_BACKEND_MODE"),
+        "jax_enable_x64": os.environ.get("JAX_ENABLE_X64"),
         "omp_num_threads": os.environ.get("OMP_NUM_THREADS"),
         "diagnostic": True,
         "sealed_claim": False,
@@ -758,15 +855,23 @@ def main() -> None:
             )
         elif lane == "jax-runcode":
             payload["jax_runcode"] = _lane_jax_runcode(
-                loaded, bfgs_maxiter=args.bfgs_maxiter, repeats=args.repeats
+                loaded,
+                device=args.device,
+                bfgs_maxiter=args.bfgs_maxiter,
+                repeats=args.repeats,
             )
         elif lane == "jax-schur":
-            payload["jax_schur"] = _lane_jax_schur(loaded, repeats=args.repeats)
+            payload["jax_schur"] = _lane_jax_schur(
+                loaded, device=args.device, repeats=args.repeats
+            )
         elif lane == "jax-outer":
             payload["jax_outer"] = _lane_jax_outer(
                 loaded,
+                device=args.device,
                 maxiter=args.outer_maxiter,
                 newton_maxiter_cap=int(args.newton_cap),
+                derivative_assembly=args.jax_inner,
+                polish_only=args.jax_policy == "polish",
             )
         else:
             payload["native_outer"] = _lane_native_outer(

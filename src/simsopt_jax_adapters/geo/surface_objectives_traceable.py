@@ -2990,11 +2990,21 @@ def _build_traceable_exact_payload_fused_value_and_gradient(
         [jax.Array, jax.Array, tuple[jax.Array, ...], tuple[jax.Array, ...]],
         jax.Array,
     ],
+    exact_value_jacobian_fn: Callable[
+        [jax.Array, jax.Array, tuple[jax.Array, ...], tuple[jax.Array, ...]],
+        tuple[jax.Array, jax.Array],
+    ]
+    | None = None,
     residual_configuration: tuple[jax.Array, ...],
     producer_residual_tol: float,
     linear_solve_tol: float,
 ) -> Callable[[jax.Array], _TraceableExactPayloadFusedResult]:
-    """Build one closed state/linearization/factor/adjoint graph for coil DOFs."""
+    """Build one closed state/linearization/factor/adjoint graph for coil DOFs.
+
+    ``exact_value_jacobian_fn`` can provide the final state's residual and
+    state Jacobian directly; its inputs are the same runtime snapshot passed
+    to ``exact_residual_fn``.
+    """
 
     fixed_residual_configuration = tuple(residual_configuration)
 
@@ -3006,20 +3016,73 @@ def _build_traceable_exact_payload_fused_value_and_gradient(
             fixed_residual_configuration,
         )
 
-        def residual_at_returned_coils(current_state):
-            return exact_residual_fn(
-                current_state,
-                coil_dofs,
-                coil_dynamic_inputs,
-                fixed_residual_configuration,
-            )
+        if exact_value_jacobian_fn is None:
 
-        with device_scope(PhaseId.ADJOINT_DENSE_MATRIX):
-            materialization = (
-                _linear_solve._linearize_and_materialize_dense_square_jacobian(
-                    residual_at_returned_coils,
-                    returned_state.solved_state,
+            def residual_at_returned_coils(current_state):
+                return exact_residual_fn(
+                    current_state,
+                    coil_dofs,
+                    coil_dynamic_inputs,
+                    fixed_residual_configuration,
                 )
+
+            with device_scope(PhaseId.ADJOINT_DENSE_MATRIX):
+                materialization = (
+                    _linear_solve._linearize_and_materialize_dense_square_jacobian(
+                        residual_at_returned_coils,
+                        returned_state.solved_state,
+                    )
+                )
+        else:
+            with device_scope(PhaseId.ADJOINT_DENSE_MATRIX):
+                residual, jacobian = exact_value_jacobian_fn(
+                    returned_state.solved_state,
+                    coil_dofs,
+                    coil_dynamic_inputs,
+                    fixed_residual_configuration,
+                )
+            residual = jnp.asarray(residual)
+            jacobian = jnp.asarray(jacobian)
+            materialization = _linear_solve._DenseJacobianMaterialization(
+                residual=residual,
+                jacobian=jacobian,
+                telemetry=_linear_solve._DenseJacobianMaterializationTelemetry(
+                    assembler_code=_staged_like(
+                        residual,
+                        int(_linear_solve._DenseJacobianAssembler.VALUE_AND_JACOBIAN),
+                        dtype=jnp.int32,
+                    ),
+                    residual_evaluation_count=_staged_like(
+                        residual,
+                        1,
+                        dtype=jnp.int32,
+                    ),
+                    primal_traversal_count=_staged_like(
+                        residual,
+                        1,
+                        dtype=jnp.int32,
+                    ),
+                    tangent_batch_count=_staged_like(
+                        residual,
+                        0,
+                        dtype=jnp.int32,
+                    ),
+                    tangent_direction_count=_staged_like(
+                        residual,
+                        0,
+                        dtype=jnp.int32,
+                    ),
+                    batch_width=_staged_like(
+                        residual,
+                        0,
+                        dtype=jnp.int32,
+                    ),
+                    tail_width=_staged_like(
+                        residual,
+                        0,
+                        dtype=jnp.int32,
+                    ),
+                ),
             )
         residual_inf_norm = jnp.linalg.norm(
             materialization.residual,
@@ -3385,10 +3448,15 @@ def _build_traceable_objective_cache_state(
     )
     optimize_G = warmstart_G is not None
     predictor_kind = booz_jax.boozer_type
-    solve_quadpoints_phi = _as_jax_float64(booz_jax.quadpoints_phi)
-    solve_quadpoints_theta = _as_jax_float64(booz_jax.quadpoints_theta)
-    label_quadpoints_phi = _as_jax_float64(booz_jax.label_quadpoints_phi)
-    label_quadpoints_theta = _as_jax_float64(booz_jax.label_quadpoints_theta)
+    # The solve and label grids are frozen: they stay host arrays so the
+    # objective program embeds them as literals instead of reading a captured
+    # device array back at lowering. See ``_BoozerSurfaceRuntimeState``.
+    solve_quadpoints_phi = np.asarray(booz_jax.quadpoints_phi, dtype=np.float64)
+    solve_quadpoints_theta = np.asarray(booz_jax.quadpoints_theta, dtype=np.float64)
+    label_quadpoints_phi = np.asarray(booz_jax.label_quadpoints_phi, dtype=np.float64)
+    label_quadpoints_theta = np.asarray(
+        booz_jax.label_quadpoints_theta, dtype=np.float64
+    )
     exact_quadpoints_phi, exact_quadpoints_theta, mask_indices = (
         _canonicalize_traceable_exact_quadrature(booz_jax)
     )
@@ -3415,11 +3483,18 @@ def _build_traceable_objective_cache_state(
         "targetlabel": booz_jax.targetlabel,
         "label_type": booz_jax.label_type,
         "phi_idx": booz_jax.phi_idx,
-        "iota_target": _as_jax_float64(iota_target),
+        # Frozen scalars and grids stay on the host: every traced consumer
+        # places them as part of its program, while a captured device array
+        # would be read back to the host once per lowering.
+        "iota_target": np.asarray(iota_target, dtype=np.float64),
         "exact_quadpoints_phi": exact_quadpoints_phi,
         "exact_quadpoints_theta": exact_quadpoints_theta,
-        "surface_quadpoints_phi": _as_jax_float64(booz_jax.surface.quadpoints_phi),
-        "surface_quadpoints_theta": _as_jax_float64(booz_jax.surface.quadpoints_theta),
+        "surface_quadpoints_phi": np.asarray(
+            booz_jax.surface.quadpoints_phi, dtype=np.float64
+        ),
+        "surface_quadpoints_theta": np.asarray(
+            booz_jax.surface.quadpoints_theta, dtype=np.float64
+        ),
         "coil_dof_extraction_spec": coil_dof_extraction_spec,
         "outer_objective_config": outer_objective_config,
         "mask_indices": mask_indices,

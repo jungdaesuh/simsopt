@@ -35,6 +35,7 @@ import inspect
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from typing import NamedTuple
 import functools
 from functools import partial
 
@@ -67,7 +68,9 @@ from simsopt_jax.core._math_utils import (
     as_jax_int32 as _as_jax_int32,
     as_runtime_float64 as _as_runtime_float64,
     concat_jax_float64 as _concat_jax_float64,
+    _explicit_device_array,
     runtime_device_put,
+    runtime_init_array as _runtime_init_array,
 )
 from simsopt_jax.core.state_tokens import make_state_token_factory
 from simsopt._core.optimizable import Optimizable
@@ -109,6 +112,7 @@ from simsopt_jax.core.field import (
     grouped_biot_savart_B_and_dB_from_spec,
     grouped_biot_savart_B_from_inputs,
     grouped_biot_savart_B_from_spec,
+    grouped_biot_savart_d2B_by_dXdX_from_spec,
     grouped_biot_savart_dA_by_dX_from_spec,
     grouped_coil_currents_from_inputs,
     grouped_coil_currents_from_spec,
@@ -135,9 +139,15 @@ from simsopt_jax.geo.boozer_residual import (
     boozer_residual_scalar_and_grad_cpu_ordered,
     boozer_residual_scalar,
     boozer_residual_vector,
+    boozer_residual_vector_and_jacobian,
     _validate_decision_vector_tail as _validate_boozer_decision_vector_tail,
     _surface_geometry_from_dofs,
 )
+from simsopt_jax.geo.boozer_analytic_hessian import (
+    boozer_residual_analytic_value_grad,
+    boozer_residual_analytic_value_grad_hessian,
+)
+from simsopt_jax.geo.optimizers.native_ls_newton import newton_ls_native_dense
 from simsopt_jax.geo.label_constraints import (
     area_jax,
     volume_jax,
@@ -954,12 +964,18 @@ class _BoozerSurfaceRuntimeState:
     Compact stellsym indices and XYZ-tensor clamping flags are captured together;
     callers never rebuild either representation from mutable surface objects.
     Array signatures bind dtype, shape, and contents into compilation cache keys.
+
+    The grids and index arrays stay on the host. Every compiled lane captures
+    them as closure constants, and XLA materializes a captured device array by
+    copying it back to the host once per lowering -- a copy
+    ``jax.transfer_guard("disallow")`` refuses outright. Host arrays lower to
+    the same literals; traced consumers place them as part of the program.
     """
 
-    quadpoints_phi: jax.Array
-    quadpoints_theta: jax.Array
-    scatter_indices: jax.Array | None
-    exact_mask_indices: jax.Array | None
+    quadpoints_phi: np.ndarray
+    quadpoints_theta: np.ndarray
+    scatter_indices: np.ndarray | None
+    exact_mask_indices: np.ndarray | None
     quadpoints_phi_signature: tuple = field(metadata={"static": True})
     quadpoints_theta_signature: tuple = field(metadata={"static": True})
     scatter_indices_signature: tuple | None = field(metadata={"static": True})
@@ -1267,7 +1283,7 @@ def build_boozer_surface_runtime_state(
             surface.mpol,
             surface.ntor,
         )
-        scatter_indices = _as_jax_int32(scatter_indices_host)
+        scatter_indices = np.asarray(scatter_indices_host, dtype=np.int32)
     if include_exact_mask and surface_kind == "xyztensorfourier":
         exact_mask_indices_host = stellsym_mask_indices_for_grid_host(
             mpol=surface.mpol,
@@ -1277,10 +1293,10 @@ def build_boozer_surface_runtime_state(
             quadpoints_phi=quadpoints_phi,
             quadpoints_theta=quadpoints_theta,
         )
-        exact_mask_indices = _as_jax_int32(exact_mask_indices_host)
+        exact_mask_indices = np.asarray(exact_mask_indices_host, dtype=np.int32)
     return _BoozerSurfaceRuntimeState(
-        quadpoints_phi=_as_jax_float64(quadpoints_phi),
-        quadpoints_theta=_as_jax_float64(quadpoints_theta),
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
         scatter_indices=scatter_indices,
         exact_mask_indices=exact_mask_indices,
         quadpoints_phi_signature=_host_array_signature(quadpoints_phi),
@@ -2024,6 +2040,18 @@ def _field_terms_for_toroidal_flux(
     )
 
 
+def _forward_mode_identity_basis(size, dtype):
+    """Identity tangent basis for a forward-mode Jacobian, explicitly placed.
+
+    Same values as ``jnp.eye(size, dtype=dtype)``, but built on the host and
+    moved across with one explicit transfer, so it can be constructed at host
+    setup under ``jax.transfer_guard("disallow")``.
+    """
+    return _explicit_device_array(
+        np.eye(int(size), dtype=np.dtype(dtype)), dtype=dtype
+    )
+
+
 def _surface_geometry_and_derivatives_from_dofs(
     surface_dofs,
     *,
@@ -2091,7 +2119,15 @@ def _surface_geometry_and_derivatives_from_dofs(
         )
 
     gamma, xphi, xtheta = geometry_arrays(surface_dofs)
-    dgamma, dxphi, dxtheta = jax.jacfwd(geometry_arrays)(surface_dofs)
+    # ``jax.jacfwd`` is exactly this vmapped JVP over the identity basis, and
+    # the two agree bit for bit. It is spelled out here because ``jacfwd``
+    # builds that basis with ``jnp.eye``, whose fill scalar crosses the host
+    # boundary implicitly when host setup calls this function outside a trace --
+    # which is what ``jax.transfer_guard("disallow")`` refuses.
+    dgamma, dxphi, dxtheta = jax.vmap(
+        lambda tangent: jax.jvp(geometry_arrays, (surface_dofs,), (tangent,))[1],
+        out_axes=-1,
+    )(_forward_mode_identity_basis(surface_dofs.shape[0], surface_dofs.dtype))
     return (
         _place_active_replicated_geometry(
             _BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta)
@@ -4560,6 +4596,39 @@ def _normalize_solver_options(raw_options, boozer_type):
     return normalized_options
 
 
+class _AnalyticPenaltyBundle(NamedTuple):
+    """Jitted analytic LS evaluators for one penalty configuration.
+
+    ``value_grad(x, coil_set_spec) -> (value, gradient)`` and
+    ``value_grad_hessian(x, coil_set_spec) -> (value, gradient, hessian)``
+    follow the native normalization; ``newton_runners`` memoizes jitted
+    native-order Newton walks by ``(maxiter, tol, stab)``.
+    """
+
+    value_grad: Callable
+    value_grad_hessian: Callable
+    newton_runners: dict
+
+    def newton_runner(self, *, maxiter: int, tol: float, stab: float) -> Callable:
+        key = (maxiter, tol, stab)
+        runner = self.newton_runners.get(key)
+        if runner is None:
+
+            def run(x0, coil_set_spec):
+                return newton_ls_native_dense(
+                    self.value_grad_hessian,
+                    x0,
+                    maxiter=maxiter,
+                    tol=tol,
+                    stab=stab,
+                    args=(coil_set_spec,),
+                )
+
+            runner = jax.jit(run)
+            self.newton_runners[key] = runner
+        return runner
+
+
 class BoozerSurfaceJAX(Optimizable):
     """JAX-native Boozer surface solver.
 
@@ -4750,6 +4819,7 @@ class BoozerSurfaceJAX(Optimizable):
         self._traceable_penalty_objective_cache = {}
         self._traceable_penalty_residual_cache = {}
         self._kernel_bundle_cache = {}
+        self._analytic_penalty_bundle_cache = {}
         self._coil_set_static_signature = None
 
         # Coil data (extracted once, updated via _refresh_coil_data)
@@ -6544,6 +6614,205 @@ class BoozerSurfaceJAX(Optimizable):
             self._kernel_bundle_cache[key] = bundle
         return bundle
 
+    def _make_analytic_geometry_terms(self):
+        """Capture coefficient-independent geometry bases for one surface setup.
+
+        All supported Boozer surface parameterizations are affine in their
+        coefficients. The basis is computed once here, outside Newton, while
+        the label retains its complete dependence on runtime coils.
+        """
+        surface_args = self._traceable_surface_runtime_args()
+        geometry_args = {
+            key: surface_args[key]
+            for key in (
+                "quadpoints_phi",
+                "quadpoints_theta",
+                "mpol",
+                "ntor",
+                "nfp",
+                "stellsym",
+                "scatter_indices",
+                "surface_kind",
+                "clamped_dims",
+            )
+        }
+        # This basis evaluation is eager JAX, so it is the construction
+        # boundary at which the host runtime args become device arrays. Move
+        # each of them across once, explicitly, and allocate the zero seed from
+        # its shape and dtype: implicit placement (``jnp.zeros_like``, or
+        # feeding a NumPy array straight into an eager op) is what
+        # ``jax.transfer_guard("disallow")`` refuses.
+        cached_surface_dofs = self._get_cached_surface_dofs()
+        zero_dofs = _runtime_init_array(
+            cached_surface_dofs.shape, 0.0, cached_surface_dofs.dtype
+        )
+        geometry_args.update(
+            jax.tree.map(
+                lambda array: _explicit_device_array(array, dtype=array.dtype),
+                {
+                    key: geometry_args[key]
+                    for key in ("quadpoints_phi", "quadpoints_theta", "scatter_indices")
+                },
+            )
+        )
+        origin, basis = _surface_geometry_and_derivatives_from_dofs(
+            zero_dofs, **geometry_args
+        )
+        # These coefficient-independent constants belong to host setup. Keeping
+        # device arrays in the closure makes nested JIT lowering copy them back
+        # to the host inside the guarded solve.
+        origin, basis = _hostify_tree((origin, basis))
+
+        def geometry_from_dofs(sdofs):
+            return jax.tree.map(
+                lambda offset, coefficients: (
+                    offset + jnp.einsum("...s,s->...", coefficients, sdofs)
+                ),
+                origin,
+                basis,
+            )
+
+        label_args = {
+            key: value
+            for key, value in surface_args.items()
+            if key.startswith("label_") or key == "phi_idx"
+        }
+
+        def label_value(sdofs, coil_set_spec):
+            return _label_value_from_surface_dofs(
+                sdofs, coil_set_spec=coil_set_spec, **label_args
+            )
+
+        return geometry_from_dofs, basis, label_value
+
+    def _make_analytic_exact_value_jacobian(self, weight_inv_modB):
+        """Build the native masked exact operator with runtime coil inputs."""
+        geometry_fn, basis, label_fn = self._make_analytic_geometry_terms()
+        label_value_grad = jax.value_and_grad(label_fn, argnums=0)
+        mask_indices = _hostify_tree(self._compute_stellsym_mask_indices())
+        include_axis = not self.stellsym
+        target = self.targetlabel
+
+        def value_jacobian(x, coil_set_spec):
+            sdofs, iota, G = _split_decision_vector_jax(x, optimize_G=True)
+            geometry = geometry_fn(sdofs)
+            grid_shape = geometry.gamma.shape
+            B, dB = grouped_biot_savart_B_and_dB_from_spec(
+                geometry.gamma.reshape((-1, 3)), coil_set_spec
+            )
+            residual, jacobian = boozer_residual_vector_and_jacobian(
+                G,
+                iota,
+                B.reshape(grid_shape),
+                dB.reshape((*grid_shape, 3)),
+                geometry.xphi,
+                geometry.xtheta,
+                basis.gamma,
+                basis.xphi,
+                basis.xtheta,
+                weight_inv_modB=weight_inv_modB,
+            )
+            label, label_gradient = label_value_grad(sdofs, coil_set_spec)
+            tail = jnp.reshape(label - target, (1,))
+            tail_jacobian = jnp.pad(label_gradient[None, :], ((0, 0), (0, 2)))
+            if include_axis:
+                tail = jnp.concatenate((tail, geometry.gamma[0, 0, 2:3]))
+                axis_row = jnp.pad(basis.gamma[0, 0, 2, :], (0, 2))
+                tail_jacobian = jnp.concatenate((tail_jacobian, axis_row[None, :]))
+            return (
+                jnp.concatenate((residual[mask_indices], tail)),
+                jnp.concatenate((jacobian[mask_indices], tail_jacobian)),
+            )
+
+        return _mark_traceable_runner_cacheable(
+            value_jacobian,
+            cache_token=(
+                "boozer-analytic-exact-value-jacobian",
+                self._traceable_exact_cache_key(weight_inv_modB, mask_indices),
+            ),
+        )
+
+    def _make_analytic_penalty_derivatives(
+        self,
+        optimize_G,
+        weight_inv_modB,
+        constraint_weight=None,
+    ):
+        """Build separate LS value/gradient and true-Hessian evaluators.
+
+        The field is differentiated in physical space; coefficient contractions
+        are tiled by the core. Label and axis penalties are added after Boozer
+        normalization, and the returned Hessian has no Newton stabilization.
+        """
+        geometry_fn, basis, label_fn = self._make_analytic_geometry_terms()
+        label_value_grad = jax.value_and_grad(label_fn, argnums=0)
+        label_hessian = jax.hessian(label_fn, argnums=0)
+        weight = self._resolve_constraint_weight(constraint_weight)
+        target = self.targetlabel
+
+        def evaluate(x, coil_set_spec, *, derivatives):
+            sdofs, iota, G = self._unpack_decision_vector_jax(
+                x, optimize_G, coil_set_spec=coil_set_spec
+            )
+            geometry = geometry_fn(sdofs)
+            grid_shape = geometry.gamma.shape
+            points = geometry.gamma.reshape((-1, 3))
+            B, dB = grouped_biot_savart_B_and_dB_from_spec(points, coil_set_spec)
+            common = (
+                geometry.xphi,
+                geometry.xtheta,
+                basis.gamma,
+                basis.xphi,
+                basis.xtheta,
+            )
+            if derivatives == 2:
+                d2B = grouped_biot_savart_d2B_by_dXdX_from_spec(points, coil_set_spec)
+                value, gradient, hessian = boozer_residual_analytic_value_grad_hessian(
+                    G,
+                    iota,
+                    B.reshape(grid_shape),
+                    dB.reshape((*grid_shape, 3)),
+                    d2B.reshape((*grid_shape, 3, 3)),
+                    *common,
+                    optimize_G=optimize_G,
+                    weight_inv_modB=weight_inv_modB,
+                )
+            else:
+                value, gradient = boozer_residual_analytic_value_grad(
+                    G,
+                    iota,
+                    B.reshape(grid_shape),
+                    dB.reshape((*grid_shape, 3)),
+                    *common,
+                    optimize_G=optimize_G,
+                    weight_inv_modB=weight_inv_modB,
+                )
+            label, label_gradient = label_value_grad(sdofs, coil_set_spec)
+            label_delta = label - target
+            axis_z = geometry.gamma[0, 0, 2]
+            axis_gradient = basis.gamma[0, 0, 2, :]
+            nsurface = sdofs.shape[0]
+            value = value + 0.5 * weight * (label_delta**2 + axis_z**2)
+            gradient = gradient.at[:nsurface].add(
+                weight * (label_delta * label_gradient + axis_z * axis_gradient)
+            )
+            if derivatives == 1:
+                return value, gradient
+            hessian = hessian.at[:nsurface, :nsurface].add(
+                weight
+                * (
+                    jnp.outer(label_gradient, label_gradient)
+                    + label_delta * label_hessian(sdofs, coil_set_spec)
+                    + jnp.outer(axis_gradient, axis_gradient)
+                )
+            )
+            return value, gradient, hessian
+
+        return (
+            partial(evaluate, derivatives=1),
+            partial(evaluate, derivatives=2),
+        )
+
     def _get_traceable_exact_residual(self, weight_inv_modB):
         mask_indices = self._compute_stellsym_mask_indices()
         key = self._traceable_exact_cache_key(weight_inv_modB, mask_indices)
@@ -6989,8 +7258,15 @@ class BoozerSurfaceJAX(Optimizable):
         *,
         weight_inv_modB,
         solver_contract: _optimizer_jax.TraceableExactNewtonVariantContract,
+        value_jacobian_fn=None,
+        condition_estimate=True,
     ):
-        """Return only array leaves for one preselected exact solver."""
+        """Return only array leaves for one preselected exact solver.
+
+        ``condition_estimate=False`` omits the Hager-Higham estimate of the
+        returned Jacobian (a reporting-only quantity costing several extra
+        solves per call) from the compiled program.
+        """
 
         G_exact = (
             G
@@ -7001,13 +7277,21 @@ class BoozerSurfaceJAX(Optimizable):
         )
         x0 = _concat_boozer_state(sdofs, iota, G_exact)
         res_fn = self._get_traceable_exact_residual(weight_inv_modB)
-        result = solver_contract.solver(
-            res_fn,
-            x0,
-            maxiter=self.options["newton_maxiter"],
-            tol=self.options["newton_tol"],
-            args=(certificate_coil_set_spec,),
-        )
+        if value_jacobian_fn is None:
+            result = solver_contract.solver(
+                res_fn, x0,
+                maxiter=self.options["newton_maxiter"],
+                tol=self.options["newton_tol"],
+                args=(certificate_coil_set_spec,),
+            )
+        else:
+            result = _optimizer_jax._newton_exact_traceable_c2(
+                res_fn, x0,
+                maxiter=self.options["newton_maxiter"],
+                tol=self.options["newton_tol"],
+                args=(certificate_coil_set_spec,),
+                value_jacobian_fn=value_jacobian_fn,
+            )
         jacobian = result["jacobian"] if solver_contract.returns_jacobian else None
         finite = jnp.all(jnp.isfinite(result["x"])) & jnp.all(
             jnp.isfinite(result["residual"])
@@ -7032,9 +7316,10 @@ class BoozerSurfaceJAX(Optimizable):
         }
         if solver_contract.returns_jacobian:
             array_result["jacobian"] = jacobian
-            array_result["exact_condition_estimate"] = (
-                _dense_condition_estimate_or_none(jacobian)
-            )
+            if condition_estimate:
+                array_result["exact_condition_estimate"] = (
+                    _dense_condition_estimate_or_none(jacobian)
+                )
         for key in (
             "exact_newton_linear_residual_rel",
             "exact_refinement_correction_rel",
@@ -7138,7 +7423,9 @@ class BoozerSurfaceJAX(Optimizable):
             solver_contract=solver_contract,
         )
 
-    def _make_run_code_traceable_exact_benchmark_variant(self, variant: object):
+    def _make_run_code_traceable_exact_benchmark_variant(
+        self, variant: object, *, analytic: bool = False, condition_estimate: bool = True,
+    ):
         """Build a C1/C2 compiled array kernel and host reporting projection."""
 
         if self.boozer_type != "exact":
@@ -7150,8 +7437,14 @@ class BoozerSurfaceJAX(Optimizable):
         )
         if solver_contract.variant == "C0":
             raise ValueError("benchmark exact Newton variant must be C1 or C2.")
+        if analytic and solver_contract.variant != "C2":
+            raise ValueError("analytic exact assembly requires native-order C2.")
 
         weight_inv_modB = self.options["weight_inv_modB"]
+        value_jacobian_fn = (
+            self._make_analytic_exact_value_jacobian(weight_inv_modB)
+            if analytic else None
+        )
 
         def array_kernel(
             coil_source,
@@ -7173,6 +7466,8 @@ class BoozerSurfaceJAX(Optimizable):
                 G,
                 weight_inv_modB=weight_inv_modB,
                 solver_contract=solver_contract,
+                value_jacobian_fn=value_jacobian_fn,
+                condition_estimate=condition_estimate,
             )
 
         def project_result(array_result):
@@ -7957,6 +8252,122 @@ class BoozerSurfaceJAX(Optimizable):
             objective_args=objective_args,
         )
 
+        return self._finalize_ls_newton_result(
+            result,
+            x0=x0,
+            optimize_G=optimize_G,
+            G_provided=G_provided,
+            initial_value=_initial_value,
+            initial_grad=initial_grad,
+            method=method,
+            weight_inv_modB=weight_inv_modB,
+            verbose=verbose,
+        )
+
+    def _minimize_boozer_penalty_constraints_newton_analytic(
+        self,
+        constraint_weight=1.0,
+        iota=0.0,
+        G=None,
+        tol=None,
+        maxiter=None,
+        stab=0.0,
+        verbose=None,
+        weight_inv_modB=None,
+    ):
+        """Newton polish with the analytic full LS Hessian and native-order dense LU.
+
+        Same policy, tolerances, rollback rule and result envelope as
+        :meth:`minimize_boozer_penalty_constraints_newton`; only the derivative
+        assembly differs (one field jet per iterate instead of basis HVPs).
+        Compiled once per (optimize_G, weight, tol, maxiter, stab); coils enter
+        as kernel arguments, so moving coils never recompile.
+        """
+        if not self.need_to_run_code:
+            return self.res
+        tol = tol if tol is not None else self.options["newton_tol"]
+        maxiter = maxiter if maxiter is not None else self.options["newton_maxiter"]
+        verbose = verbose if verbose is not None else self.options["verbose"]
+        weight_inv_modB = (
+            weight_inv_modB
+            if weight_inv_modB is not None
+            else self.options["weight_inv_modB"]
+        )
+        optimize_G = G is not None
+        x0 = self._pack_decision_vector(iota, G)
+        bundle = self._get_analytic_penalty_bundle(
+            optimize_G, weight_inv_modB, constraint_weight
+        )
+        runner = bundle.newton_runner(maxiter=int(maxiter), tol=float(tol), stab=float(stab))
+        result = runner(x0, self.coil_set_spec)
+        return self._finalize_ls_newton_result(
+            result,
+            x0=x0,
+            optimize_G=optimize_G,
+            G_provided=optimize_G,
+            initial_value=result["initial_fun"],
+            initial_grad=result["initial_grad"],
+            method=self._resolve_optimizer_method(optimize_G=optimize_G),
+            weight_inv_modB=weight_inv_modB,
+            verbose=verbose,
+        )
+
+    def _get_analytic_penalty_bundle(
+        self,
+        optimize_G,
+        weight_inv_modB,
+        constraint_weight=None,
+    ) -> "_AnalyticPenaltyBundle":
+        """Compiled analytic LS value/gradient and value/gradient/Hessian evaluators.
+
+        Keyed on the penalty configuration and label target; the surface basis
+        is fixed per instance. Coils are runtime arguments of every evaluator.
+        """
+        resolved_constraint_weight = self._resolve_constraint_weight(constraint_weight)
+        key = (
+            bool(optimize_G),
+            bool(weight_inv_modB),
+            float(resolved_constraint_weight),
+            self.targetlabel,
+        )
+        bundle = self._analytic_penalty_bundle_cache.get(key)
+        if bundle is None:
+            value_grad, value_grad_hessian = self._make_analytic_penalty_derivatives(
+                optimize_G,
+                weight_inv_modB,
+                resolved_constraint_weight,
+            )
+            bundle = _AnalyticPenaltyBundle(
+                value_grad=jax.jit(value_grad),
+                value_grad_hessian=jax.jit(value_grad_hessian),
+                newton_runners={},
+            )
+            self._analytic_penalty_bundle_cache[key] = bundle
+        return bundle
+
+    def _finalize_ls_newton_result(
+        self,
+        result,
+        *,
+        x0,
+        optimize_G,
+        G_provided,
+        initial_value,
+        initial_grad,
+        method,
+        weight_inv_modB,
+        verbose,
+    ):
+        """Commit or roll back a Newton polish and build the public LS result.
+
+        ``result`` carries the attempted iterate (``x``, ``fun``, ``grad``,
+        ``hessian``, ``nit``, ``success``); ``initial_value``/``initial_grad``
+        describe ``x0`` for the rollback branch. Factors, VJP callbacks and
+        diagnostics are derived here so every Newton assembly shares one
+        result envelope.
+        """
+        s = self.surface
+        initial_norm = _ls_newton_gradient_l2(initial_grad)
         sdofs_polished, iota_polished, G_polished = self._unpack_decision_vector(
             result["x"], optimize_G
         )
@@ -7993,7 +8404,7 @@ class BoozerSurfaceJAX(Optimizable):
             )
             committed_grad = initial_grad
             H = None
-            committed_fun = _initial_value
+            committed_fun = initial_value
             committed_success = False
         self._set_surface_dofs(sdofs_final)
         # Phase 2 (docs/parity_scientific_equivalence_contract_2026-05-09.md
