@@ -206,15 +206,27 @@ def test_explicit_device_array_preserves_requested_float_dtype(monkeypatch):
 
 
 def test_explicit_device_array_preserves_single_device_reference(monkeypatch):
-    """Concrete single-device placement must not fall back to the runtime device."""
+    """Concrete single-device placement must not fall back to the runtime device.
+
+    The reference's device is used verbatim; the runtime device is never
+    consulted. The placement is the bare device rather than the reference's
+    concrete ``SingleDeviceSharding``: the two are identical for an eager put,
+    but the sharding form pins a put staged inside ``jit`` to one device (see
+    ``dtypes._single_device_placement``).
+    """
     reference = jnp.zeros(3)
+    (reference_device,) = reference.sharding.device_set
     placements: list[object | None] = []
 
     def _device_put(array, placement=None):
         placements.append(placement)
         return array, placement
 
+    def _unexpected_runtime_device():
+        raise AssertionError("reference placement must not query runtime device")
+
     monkeypatch.setattr(dtypes, "maybe_initialize_distributed_jax", lambda: None)
+    monkeypatch.setattr(dtypes, "get_runtime_jax_device", _unexpected_runtime_device)
     monkeypatch.setattr(dtypes.jax, "device_put", _device_put)
 
     array, placement = dtypes.explicit_device_array(
@@ -224,8 +236,8 @@ def test_explicit_device_array_preserves_single_device_reference(monkeypatch):
     )
 
     assert isinstance(array, np.ndarray)
-    assert placement == reference.sharding
-    assert placements == [reference.sharding]
+    assert placement is reference_device
+    assert placements == [reference_device]
 
 
 def test_mixed_compute_dtype_does_not_change_runtime_dtype(monkeypatch):
