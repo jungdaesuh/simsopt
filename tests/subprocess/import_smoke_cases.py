@@ -919,6 +919,36 @@ def case_env_backend_persistent_cache_shared_small_kernel() -> None:
     _run_shared_persistent_cache_small_kernel(cache_dir)
 
 
+def case_env_backend_persistent_cache_applies_without_runtime_config() -> None:
+    """An environment-selected mode must reach the persistent cache on its own.
+
+    Example mirrors and driver children select their mode through the
+    environment and never call ``apply_jax_runtime_config``; resolving the
+    backend config has to be enough for JAX to see the cache directory, or
+    every such process compiles cold (single-stage example, 2026-09-14).
+    """
+    import os
+
+    cache_dir = os.environ["SIMSOPT_TEST_PERSISTENT_CACHE_DIR"]
+    os.environ["SIMSOPT_BACKEND_MODE"] = "jax_cpu_fast"
+    os.environ["SIMSOPT_JAX_COMPILATION_CACHE_DIR"] = cache_dir
+
+    import jax
+
+    assert jax.config.jax_compilation_cache_dir != cache_dir
+
+    import simsopt_jax.config as simsopt_config
+    from simsopt_jax.backend.runtime import get_runtime_jax_device
+
+    assert simsopt_config.get_compilation_cache_dir() == cache_dir
+    # Config resolution stays JAX-free; the first JAX-facing runtime call -- the
+    # device placement every mirror performs before compiling -- applies it.
+    assert jax.config.jax_compilation_cache_dir != cache_dir
+    assert get_runtime_jax_device() is not None
+    assert jax.config.jax_compilation_cache_dir == cache_dir
+    _run_shared_persistent_cache_small_kernel(cache_dir)
+
+
 def case_parity_mode_defaults_transfer_guard_and_keeps_x64_enabled() -> None:
     import simsopt_jax.config as simsopt_config
     import jax
