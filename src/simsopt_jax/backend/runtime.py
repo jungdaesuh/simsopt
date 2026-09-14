@@ -200,6 +200,7 @@ __all__ = [
     "PrecisionSelection",
     "ResolvedPrecision",
     "ShardingTuning",
+    "apply_cuda_xla_flag_pins",
     "apply_jax_runtime_config",
     "get_active_cuda_device_index",
     "get_backend",
@@ -262,6 +263,8 @@ _CPU_OPT_PRESET_FLAG_NAME = "--xla_cpu_opt_preset"
 _CPU_OPT_PRESET_FAST_COMPILE = f"{_CPU_OPT_PRESET_FLAG_NAME}=FAST_COMPILE"
 _GPU_FUSION_AUTOTUNER_FLAG_NAME = "--xla_gpu_experimental_enable_fusion_autotuner"
 _GPU_FUSION_AUTOTUNER_DISABLED = f"{_GPU_FUSION_AUTOTUNER_FLAG_NAME}=false"
+_GPU_AUTOTUNE_LEVEL_FLAG_NAME = "--xla_gpu_autotune_level"
+_GPU_AUTOTUNE_LEVEL_PINNED = f"{_GPU_AUTOTUNE_LEVEL_FLAG_NAME}=0"
 
 
 _BackendCacheClearCallbackKey = tuple[str, str]
@@ -370,6 +373,18 @@ def _xla_flags_with_gpu_fusion_autotuner_disabled(xla_flags: str | None) -> str:
     )
 
 
+def _xla_flags_with_gpu_autotune_level_pinned(xla_flags: str | None) -> str:
+    """Return ``xla_flags`` with XLA's GPU GEMM/convolution autotuner at level 0.
+
+    Same composition contract as :func:`_xla_flags_with_cpu_compile_preset`: a
+    caller-provided ``--xla_gpu_autotune_level`` (any value) is respected, and
+    re-applying is a no-op.
+    """
+    return _xla_flags_with_token(
+        xla_flags, _GPU_AUTOTUNE_LEVEL_FLAG_NAME, _GPU_AUTOTUNE_LEVEL_PINNED
+    )
+
+
 def target_lane_purity_requested() -> bool:
     """Return whether strict target-lane purity checks are requested."""
     return _env_bool(_TARGET_LANE_STRICT_ENV)
@@ -464,6 +479,7 @@ def get_backend_config() -> BackendConfig:
             )
 
         _cached_backend_config = config
+        _apply_cuda_autotuner_env(config)
         return config
 
 
@@ -1076,8 +1092,31 @@ def _apply_cpu_compile_preset_env(config: BackendConfig, policy: BackendPolicy) 
     )
 
 
-def _apply_cuda_fusion_autotuner_env(config: BackendConfig) -> None:
-    """Disable XLA's experimental GPU fusion autotuner in ``XLA_FLAGS`` before JAX inits.
+def _jax_backends_initialized() -> bool:
+    # A loaded ``jax._src.xla_bridge`` is the only witness of backend
+    # initialization that costs no import of JAX itself.
+    xla_bridge = sys.modules.get("jax._src.xla_bridge")
+    if xla_bridge is None:
+        return False
+    return bool(xla_bridge.backends_are_initialized())
+
+
+def apply_cuda_xla_flag_pins() -> str:
+    """Put both CUDA autotuner pins into ``XLA_FLAGS`` and return its value.
+
+    Inert on the CPU backend, so a host that probes devices before it installs
+    a backend config (a test session, a notebook) can call this at import time;
+    the config-install sites call it through :func:`_apply_cuda_autotuner_env`.
+    """
+    pinned = _xla_flags_with_gpu_autotune_level_pinned(
+        _xla_flags_with_gpu_fusion_autotuner_disabled(os.environ.get(_XLA_FLAGS_ENV))
+    )
+    _set_runtime_env(_XLA_FLAGS_ENV, pinned)
+    return pinned
+
+
+def _apply_cuda_autotuner_env(config: BackendConfig) -> None:
+    """Pin XLA's GPU autotuners in ``XLA_FLAGS`` before JAX initializes.
 
     The fusion autotuner (``--xla_gpu_experimental_enable_fusion_autotuner``,
     on by default in jaxlib 0.10) runs during compilation. Observed on the
@@ -1092,17 +1131,41 @@ def _apply_cuda_fusion_autotuner_env(config: BackendConfig) -> None:
     candidate kernels run on autotuning buffers whose contents are not the
     program's, so a fusion whose addresses depend on data (here a
     ``dynamic-slice`` into the neighbour table at computed indices) reads
-    wherever those values point. The helper sets no other flag, so GEMM/conv
-    autotuning (``--xla_gpu_autotune_level``) keeps its default (not separately
-    verified under this flag), a caller-provided value for the flag is
-    respected, and the flag is inert on the CPU backend, so this is CUDA-only.
+    wherever those values point.
+
+    The GEMM/convolution autotuner (``--xla_gpu_autotune_level``, default 4)
+    times cuBLAS algorithm candidates during each fresh compile and keeps the
+    fastest, so two compiles of one program can pick algorithms with different
+    reduction orders: on the RTX 5090 (2026-09-14) three fresh compiles of the
+    single-stage example gave three initial objectives differing at 3e-15
+    relative, and the chunked per-coil Biot-Savart field differed from its
+    unchunked reference by one ulp. Level 0 takes the library defaults, which
+    made fresh compiles bitwise-reproducible at unchanged evaluation speed
+    (single-stage 4.86 vs 4.87 ms, coil-forces 1.74 vs 1.72 ms per evaluation,
+    LS 48² outer 44.0 vs 44.6 s) and slightly faster compiles.
+
+    A caller-provided value for either flag is respected, and both flags are
+    inert on the CPU backend, so this is CUDA-only. Both pins are lane
+    invariants rather than opt-in runtime configuration, so they are applied
+    wherever a CUDA config is installed -- environment resolution in
+    :func:`get_backend_config`, :func:`set_backend` with or without
+    ``configure_runtime`` -- which is before the first backend initialization
+    of every process that resolves its backend at all.
     """
     if config.jax_platform != "cuda":
         return
-    _set_runtime_env(
-        _XLA_FLAGS_ENV,
-        _xla_flags_with_gpu_fusion_autotuner_disabled(os.environ.get(_XLA_FLAGS_ENV)),
-    )
+    previous = os.environ.get(_XLA_FLAGS_ENV)
+    if apply_cuda_xla_flag_pins() != previous and _jax_backends_initialized():
+        warnings.warn(
+            "XLA already initialized its backends before the CUDA autotuner pins "
+            f"reached {_XLA_FLAGS_ENV}; this process compiles with XLA's default "
+            "GPU autotuning, so fresh compiles are not bitwise-reproducible. "
+            "Resolve the simsopt backend config (or call "
+            "simsopt_jax.backend.runtime.apply_cuda_xla_flag_pins()) before "
+            "touching JAX devices.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
 
 
 _compilation_cache_applied_dir: str | None = None
@@ -1145,7 +1208,7 @@ def apply_jax_runtime_config() -> None:
     _validate_cuda_parity_determinism_env(config, policy)
     _apply_jax_gpu_memory_env(config)
     _apply_cpu_compile_preset_env(config, policy)
-    _apply_cuda_fusion_autotuner_env(config)
+    _apply_cuda_autotuner_env(config)
 
     import jax
 
@@ -1292,6 +1355,7 @@ def set_backend(
                 attribute_name,
                 getattr(config, config_attribute_name),
             )
+        _apply_cuda_autotuner_env(config)
     if configure_runtime:
         apply_jax_runtime_config()
     return config

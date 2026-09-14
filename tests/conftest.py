@@ -27,6 +27,13 @@ from simsopt_jax.backend import (
     invalidate_backend_cache,
     set_backend,
 )
+from simsopt_jax.backend.runtime import apply_cuda_xla_flag_pins
+
+# XLA reads ``XLA_FLAGS`` when it initializes a backend, and this session probes
+# devices (lane availability) before any test installs a backend config, so the
+# CUDA autotuner pins must already be in the environment here; both are inert
+# on the CPU backend.
+apply_cuda_xla_flag_pins()
 
 try:
     import jax
