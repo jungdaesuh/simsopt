@@ -363,6 +363,27 @@ def _quadrature_block_integral(
     return integral_sum / quadrature_count
 
 
+# The Hessian integrand carries 27 doubles per (point, quadrature node) where
+# ``B`` and ``dB`` together carry 12, and its ``jacfwd(jacfwd)`` trace keeps
+# both tangent levels live.  The tuning table sizes ``point_chunk_size`` for
+# the ``B``/``B+dB`` hot paths, so the Hessian kernel takes one eighth of it:
+# 2048 points at 18 NCSX coils x 250 nodes otherwise materializes >20 GB and
+# fails on a 32 GB device, while 256 points stay near 2 GB.
+_HESSIAN_POINT_CHUNK_DIVISOR = 8
+
+
+def hessian_point_chunk_size(point_chunk_size: int) -> int:
+    """Point tile for ``d2B/dXdX`` derived from the ``B``-sized tuning value.
+
+    ``0`` (tiling disabled) is preserved so audit policies that pin every
+    chunk to the dense layout keep their contract; any positive size is
+    divided by ``_HESSIAN_POINT_CHUNK_DIVISOR`` and floored at one point.
+    """
+    if point_chunk_size <= 0:
+        return 0
+    return max(1, point_chunk_size // _HESSIAN_POINT_CHUNK_DIVISOR)
+
+
 def _point_chunk_reduce(points, chunk_kernel, chunk_size):
     """Evaluate *chunk_kernel* over *points* with optional point-axis tiling.
 
@@ -716,6 +737,12 @@ def _make_kernel(
                 basis = lax.pcast(basis, point_vma_axis_name, to="varying")
             return primals, jax.vmap(tangents_fn, in_axes=(0,))(basis)
 
+    kernel_point_cs = (
+        hessian_point_chunk_size(point_cs)
+        if diff_mode is _DiffMode.HESSIAN
+        else point_cs
+    )
+
     def kernel(points, gammas, gammadashs, currents):
         with device_scope(PhaseId.BIOTSAVART_FORWARD):
 
@@ -725,7 +752,7 @@ def _make_kernel(
                     in_axes=(0,),
                 )(chunk_points)
 
-            return _point_chunk_reduce(points, chunk_fn, point_cs)
+            return _point_chunk_reduce(points, chunk_fn, kernel_point_cs)
 
     kernel.__name__ = "biotsavart_forward"
     return jax.jit(kernel)

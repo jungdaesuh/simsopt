@@ -194,6 +194,8 @@ from simsopt_jax.geo.optimizers.linear_solve import (
     _JIT_LINEAR_OPERATOR_CACHE_LOCK as _JIT_LINEAR_OPERATOR_CACHE_LOCK,
     _LINEAR_SOLVE_ITERATIONS_UNKNOWN as _LINEAR_SOLVE_ITERATIONS_UNKNOWN,
     _CountedIncrementalGmresTelemetry as _CountedIncrementalGmresTelemetry,
+    _DenseJacobianAssembler as _DenseJacobianAssembler,
+    _DenseJacobianMaterialization as _DenseJacobianMaterialization,
     _DenseJacobianMaterializationTelemetry as _DenseJacobianMaterializationTelemetry,
     _LinearSolveStatus as _LinearSolveStatus,
     _SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS as _SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS,
@@ -679,6 +681,12 @@ class _DeprecationCallSite:
 
 class _ArrayObjectiveWithArgs(Protocol):
     def __call__(self, x: jax.Array, *args: object) -> jax.Array: ...
+
+
+class _ArrayValueAndJacobianWithArgs(Protocol):
+    def __call__(
+        self, x: jax.Array, *args: object
+    ) -> tuple[jax.Array, jax.Array]: ...
 
 
 class _DenseExactNewtonDirection(NamedTuple):
@@ -7400,23 +7408,109 @@ def _make_traceable_dense_direct_exact_newton_c1_runner(
     )
 
 
+def _materialize_traceable_dense_exact_newton_c2_state(
+    residual_fn: Callable[[jax.Array], jax.Array],
+    x: jax.Array,
+    fn_args: tuple[object, ...],
+    *,
+    value_jacobian_fn: _ArrayValueAndJacobianWithArgs | None,
+) -> _DenseJacobianMaterialization:
+    """Materialize C2's state pair from a provider or the legacy AD path."""
+
+    x = jnp.asarray(x)
+    if value_jacobian_fn is None:
+        with device_scope(PhaseId.NEWTON_RESIDUAL_JVP):
+            return _linearize_and_materialize_dense_square_jacobian(
+                residual_fn,
+                x,
+                jacobian_construction_phase=PhaseId.NEWTON_JACOBIAN_CONSTRUCTION,
+                dense_materialization_phase=PhaseId.NEWTON_DENSE_MATERIALIZATION,
+            )
+
+    with device_scope(
+        PhaseId.NEWTON_JACOBIAN_CONSTRUCTION
+    ), device_scope(PhaseId.NEWTON_DENSE_MATERIALIZATION):
+        residual, jacobian = value_jacobian_fn(x, *fn_args)
+    residual = jnp.asarray(residual)
+    jacobian = jnp.asarray(jacobian)
+    return _DenseJacobianMaterialization(
+        residual=residual,
+        jacobian=jacobian,
+        telemetry=_DenseJacobianMaterializationTelemetry(
+            assembler_code=_staged_like(
+                residual,
+                int(_DenseJacobianAssembler.VALUE_AND_JACOBIAN),
+                dtype=jnp.int32,
+            ),
+            residual_evaluation_count=_staged_like(
+                residual,
+                1,
+                dtype=jnp.int32,
+            ),
+            primal_traversal_count=_staged_like(
+                residual,
+                1,
+                dtype=jnp.int32,
+            ),
+            tangent_batch_count=_staged_like(
+                residual,
+                0,
+                dtype=jnp.int32,
+            ),
+            tangent_direction_count=_staged_like(
+                residual,
+                0,
+                dtype=jnp.int32,
+            ),
+            batch_width=_staged_like(
+                residual,
+                0,
+                dtype=jnp.int32,
+            ),
+            tail_width=_staged_like(
+                residual,
+                0,
+                dtype=jnp.int32,
+            ),
+        ),
+    )
+
+
 def _make_traceable_dense_direct_exact_newton_c2_runner(
     residual_fn: Callable[..., jax.Array],
     maxiter: int,
     tol: float,
+    *,
+    value_jacobian_fn: _ArrayValueAndJacobianWithArgs | None = None,
 ):
-    """Return the cached C2 runner for one immutable residual construction."""
+    """Return a C2 runner keyed by residual and pair-provider identity."""
 
-    cache_key = (int(maxiter), float(tol))
+    pair_provider_key = (
+        None
+        if value_jacobian_fn is None
+        else ("value-jacobian-callable", id(value_jacobian_fn))
+    )
+    cache_key = (int(maxiter), float(tol), pair_provider_key)
+
+    def build_runner(residual_fn_ref):
+        if value_jacobian_fn is None:
+            return _build_traceable_dense_direct_exact_newton_c2_runner(
+                residual_fn_ref,
+                int(maxiter),
+                float(tol),
+            )
+        return _build_traceable_dense_direct_exact_newton_c2_runner(
+            residual_fn_ref,
+            int(maxiter),
+            float(tol),
+            value_jacobian_fn=value_jacobian_fn,
+        )
+
     return _cached_traceable_runner(
         _TRACEABLE_DENSE_EXACT_NEWTON_C2_RUNNER_CACHE,
         residual_fn,
         cache_key,
-        lambda residual_fn_ref: _build_traceable_dense_direct_exact_newton_c2_runner(
-            residual_fn_ref,
-            int(maxiter),
-            float(tol),
-        ),
+        build_runner,
     )
 
 
@@ -8768,8 +8862,9 @@ def _build_traceable_dense_direct_exact_newton_c2_runner(
     tol: float,
     *,
     telemetry_enabled: bool = False,
+    value_jacobian_fn: _ArrayValueAndJacobianWithArgs | None = None,
 ):
-    """Build native finite-path C2 with explicit fail-closed safety status."""
+    """Build native finite-path C2 with optional exact pair assembly."""
 
     def run_solver(x_init, fn_args):
         residual_fn = _lookup_traceable_runner_callable(
@@ -8784,13 +8879,12 @@ def _build_traceable_dense_direct_exact_newton_c2_runner(
             tol_value,
             dtype=dtype,
         )
-        with device_scope(PhaseId.NEWTON_RESIDUAL_JVP):
-            initial_materialization = _linearize_and_materialize_dense_square_jacobian(
-                residual_eval,
-                x_init_array,
-                jacobian_construction_phase=PhaseId.NEWTON_JACOBIAN_CONSTRUCTION,
-                dense_materialization_phase=PhaseId.NEWTON_DENSE_MATERIALIZATION,
-            )
+        initial_materialization = _materialize_traceable_dense_exact_newton_c2_state(
+            residual_eval,
+            x_init_array,
+            fn_args,
+            value_jacobian_fn=value_jacobian_fn,
+        )
         initial_residual = initial_materialization.residual
         zero_count = _device_int32(0, like=x_init_array)
         one_count = _device_int32(1, like=x_init_array)
@@ -8957,19 +9051,14 @@ def _build_traceable_dense_direct_exact_newton_c2_runner(
 
             def materialize_updated_state(current_state):
                 candidate_x = current_state["x"] - current.direction
-                with device_scope(PhaseId.NEWTON_RESIDUAL_JVP):
-                    candidate_materialization = (
-                        _linearize_and_materialize_dense_square_jacobian(
-                            residual_eval,
-                            candidate_x,
-                            jacobian_construction_phase=(
-                                PhaseId.NEWTON_JACOBIAN_CONSTRUCTION
-                            ),
-                            dense_materialization_phase=(
-                                PhaseId.NEWTON_DENSE_MATERIALIZATION
-                            ),
-                        )
+                candidate_materialization = (
+                    _materialize_traceable_dense_exact_newton_c2_state(
+                        residual_eval,
+                        candidate_x,
+                        fn_args,
+                        value_jacobian_fn=value_jacobian_fn,
                     )
+                )
                 candidate_residual = candidate_materialization.residual
                 candidate_jacobian = candidate_materialization.jacobian
                 candidate_finite = (
@@ -9109,13 +9198,12 @@ def _build_traceable_dense_direct_exact_newton_c2_runner(
         rollback_branch_taken = ~persist_solved_state
 
         def rebuild_initial_residual(_operand):
-            with device_scope(PhaseId.NEWTON_RESIDUAL_JVP):
-                rebuilt = _linearize_and_materialize_dense_square_jacobian(
-                    residual_eval,
-                    x_init_array,
-                    jacobian_construction_phase=(PhaseId.NEWTON_JACOBIAN_CONSTRUCTION),
-                    dense_materialization_phase=(PhaseId.NEWTON_DENSE_MATERIALIZATION),
-                )
+            rebuilt = _materialize_traceable_dense_exact_newton_c2_state(
+                residual_eval,
+                x_init_array,
+                fn_args,
+                value_jacobian_fn=value_jacobian_fn,
+            )
             if telemetry_enabled:
                 return (
                     rebuilt.residual,
@@ -9336,6 +9424,7 @@ def _newton_exact_traceable_c2(
     maxiter: int,
     tol: float,
     args: tuple[object, ...] = (),
+    value_jacobian_fn: _ArrayValueAndJacobianWithArgs | None = None,
 ) -> dict[str, object]:
     """Run C2 and normalize its returned-state linearization for the adapter."""
 
@@ -9343,6 +9432,7 @@ def _newton_exact_traceable_c2(
         residual_fn,
         maxiter,
         tol,
+        value_jacobian_fn=value_jacobian_fn,
     )
     result = runner(x0, _normalize_solver_args(args))
     jacobian = result.returned_jacobian

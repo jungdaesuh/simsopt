@@ -37,7 +37,7 @@ from simsopt.geo import (
     SurfaceXYZTensorFourier,
     Volume,
 )
-from simsopt.geo.boozersurface import BoozerSurface
+from simsopt.geo.boozersurface import BoozerSurface, _boozer_iterate_is_persistable
 from simsopt.objectives import MPIObjective, QuadraticPenalty
 
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
@@ -98,6 +98,8 @@ NCSX_IOTAS_WEIGHT: Final[float] = 1.0
 NCSX_ARCLENGTH_WEIGHT: Final[float] = 1.0e-2
 NCSX_EVAL_TIMING_KEYS: Final[tuple[str, ...]] = (
     "inner",
+    "inner_bfgs",
+    "inner_newton",
     "self_intersection",
     "y_surface_jacobian",
     "y_coil_jacobian",
@@ -112,6 +114,7 @@ NCSX_NATIVE_BFGS_MAXITER: Final[int] = 20
 # Feasible 18² evals finish in 4–5 steps; infeasible coil trials otherwise
 # grind the lander's 40-step budget at GPU-negative cost.
 NCSX_OUTER_NEWTON_MAXITER: Final[int] = 8
+NCSX_DERIVATIVE_ASSEMBLIES: Final[tuple[str, ...]] = ("ad", "analytic")
 _NCSX_RUNTIME_KERNELS: WeakKeyDictionary = WeakKeyDictionary()
 
 
@@ -518,9 +521,56 @@ class NcsxNestedLsProblem:
     last_inner: NestedLsSchurNewtonResult | None = field(default=None, repr=False)
     last_native_inner: dict[str, object] | None = field(default=None, repr=False)
     last_run_code: dict[str, object] | None = field(default=None, repr=False)
+    last_inner_bfgs_nit: int | None = field(default=None, repr=False)
     last_eval_timing: dict[str, float] = field(default_factory=dict, repr=False)
     native_objective: object | None = field(default=None, repr=False)
     native_biotsavart: BiotSavart | None = field(default=None, repr=False)
+
+
+@dataclass
+class NcsxInnerReport:
+    """Stage counts and wall seconds of one banana inner solve."""
+
+    bfgs_nit: int = 0
+    bfgs_seconds: float = 0.0
+    newton_seconds: float = 0.0
+    bfgs_rolled_back: bool = False
+
+
+def _ncsx_penalty_value_and_grad(
+    jax_boozer: BoozerSurfaceJAX,
+    optimize_G: bool,
+    weight_inv_modB: bool,
+    derivative_assembly: str,
+):
+    """Host-callable ``x -> (value, gradient)`` for the BFGS pre-solve."""
+
+    if derivative_assembly == "ad":
+        return jax_boozer._make_penalty_value_and_grad_host_jax_with(
+            optimize_G,
+            weight_inv_modB,
+            jax_boozer.constraint_weight,
+        )
+    bundle = jax_boozer._get_analytic_penalty_bundle(
+        optimize_G,
+        weight_inv_modB,
+        jax_boozer.constraint_weight,
+    )
+    coil_set_spec = jax_boozer.coil_set_spec
+
+    def value_and_grad(x):
+        return bundle.value_grad(x, coil_set_spec)
+
+    return value_and_grad
+
+
+def _require_derivative_assembly(derivative_assembly: str) -> str:
+    if derivative_assembly not in NCSX_DERIVATIVE_ASSEMBLIES:
+        raise ValueError(
+            f"derivative_assembly must be one of {NCSX_DERIVATIVE_ASSEMBLIES}, "
+            f"got {derivative_assembly!r}."
+        )
+    return derivative_assembly
 
 
 def ncsx_banana_run_code(
@@ -531,6 +581,8 @@ def ncsx_banana_run_code(
     sdofs=None,
     polish_only: bool = False,
     newton_maxiter_cap: int | None = None,
+    derivative_assembly: str = "ad",
+    report: NcsxInnerReport | None = None,
 ) -> dict[str, object]:
     """Banana inner with coil geometry as kernel arguments.
 
@@ -538,10 +590,14 @@ def ncsx_banana_run_code(
     penalty objective and hashes coil bytes into the BFGS compile key.
     Land uses host BFGS then dense-LU Newton. Outer evals may pass
     ``polish_only=True`` and an explicit ``newton_maxiter_cap``; those
-    are harness knobs, not BoozerLS defaults. The Newton ``res`` is
-    persisted for solved-state IFT.
+    are harness knobs, not BoozerLS defaults. ``derivative_assembly``
+    selects basis-HVP AD (``"ad"``) or the analytic field-jet operators
+    (``"analytic"``) for both stages; the policy is identical. A caller's
+    ``report`` receives the BFGS iteration count and both stage walls. The
+    Newton ``res`` is persisted for solved-state IFT.
     """
 
+    derivative_assembly = _require_derivative_assembly(derivative_assembly)
     if not jax_boozer.need_to_run_code:
         stored = jax_boozer.res
         if stored is None:
@@ -556,13 +612,19 @@ def ncsx_banana_run_code(
     weight_inv_modB = jax_boozer.options["weight_inv_modB"]
     iota_out = iota
     g_out = G
+    bfgs_nit = 0
+    bfgs_rolled_back = False
+    bfgs_started = time.perf_counter()
     if not polish_only:
-        value_and_grad = jax_boozer._make_penalty_value_and_grad_host_jax_with(
-            optimize_G,
-            weight_inv_modB,
-            jax_boozer.constraint_weight,
+        value_and_grad = _ncsx_penalty_value_and_grad(
+            jax_boozer, optimize_G, weight_inv_modB, derivative_assembly
         )
         x0 = jax_boozer._pack_decision_vector(iota, G)
+        # Native evaluates the pre-BFGS objective first and keeps the BFGS
+        # endpoint only when it converged or is a finite non-worsening
+        # objective (``minimize_boozer_penalty_constraints_LBFGS``);
+        # otherwise Newton starts from the pre-BFGS state.
+        initial_fun = float(np.asarray(value_and_grad(x0)[0]))
         ls_result = host_jax_minimize_value_and_grad(
             value_and_grad,
             x0,
@@ -571,16 +633,31 @@ def ncsx_banana_run_code(
             maxiter=int(jax_boozer.options["bfgs_maxiter"]),
             value_and_grad=True,
         )
-        accepted_x = getattr(ls_result, "x_device", ls_result.x)
-        sdofs_out, iota_out, g_out = jax_boozer._unpack_penalty_optimizer_state(
-            accepted_x, optimize_G
+        bfgs_nit = int(ls_result.nit)
+        bfgs_persist = _boozer_iterate_is_persistable(
+            bool(ls_result.success),
+            abs(float(np.asarray(ls_result.fun))),
+            abs(initial_fun),
         )
-        jax_boozer._set_surface_dofs(sdofs_out)
+        if bfgs_persist:
+            accepted_x = getattr(ls_result, "x_device", ls_result.x)
+            sdofs_out, iota_out, g_out = jax_boozer._unpack_penalty_optimizer_state(
+                accepted_x, optimize_G
+            )
+            jax_boozer._set_surface_dofs(sdofs_out)
+        bfgs_rolled_back = not bfgs_persist
+    bfgs_seconds = time.perf_counter() - bfgs_started
     jax_boozer.need_to_run_code = True
     newton_maxiter = int(jax_boozer.options["newton_maxiter"])
     if newton_maxiter_cap is not None:
         newton_maxiter = min(newton_maxiter, int(newton_maxiter_cap))
-    return jax_boozer.minimize_boozer_penalty_constraints_newton(
+    newton = (
+        jax_boozer.minimize_boozer_penalty_constraints_newton
+        if derivative_assembly == "ad"
+        else jax_boozer._minimize_boozer_penalty_constraints_newton_analytic
+    )
+    newton_started = time.perf_counter()
+    res = newton(
         constraint_weight=jax_boozer.constraint_weight,
         iota=iota_out,
         G=g_out,
@@ -590,6 +667,12 @@ def ncsx_banana_run_code(
         stab=jax_boozer.options["newton_stab"],
         weight_inv_modB=weight_inv_modB,
     )
+    if report is not None:
+        report.bfgs_nit = bfgs_nit
+        report.bfgs_rolled_back = bfgs_rolled_back
+        report.bfgs_seconds = bfgs_seconds
+        report.newton_seconds = time.perf_counter() - newton_started
+    return res
 
 
 def ncsx_nested_ls_outer_value_and_grad(
@@ -597,18 +680,23 @@ def ncsx_nested_ls_outer_value_and_grad(
     coil_dofs: object,
     *,
     newton_maxiter_cap: int | None = NESTED_LS_BANANA_NEWTON_MAXITER,
+    polish_only: bool = True,
+    derivative_assembly: str = "ad",
 ) -> tuple[float, NDArray[np.float64]]:
     """Nine-term ``J(c)`` and coil gradient at banana ``s*(c)``.
 
-    Inner is :func:`ncsx_banana_run_code` with ``polish_only=True``
-    (dense-LU Newton continuation from the committed banana land,
-    coils as kernel arguments). ``newton_maxiter_cap`` defaults to the
-    shipped BoozerLS Newton budget (40). Pass a smaller cap only for
-    harness speed runs. Surface-term gradients use one batched
-    solved-state IFT adjoint. Always warm-starts from the committed
-    anchor. Failures restore the anchor before raising.
+    Inner is :func:`ncsx_banana_run_code`; ``polish_only=True`` (the
+    default) runs dense-LU Newton continuation from the committed banana
+    land with coils as kernel arguments, ``polish_only=False`` runs the
+    native banana policy (BFGS then Newton) on every evaluation.
+    ``derivative_assembly`` selects the AD or analytic operators.
+    ``newton_maxiter_cap`` defaults to the shipped BoozerLS Newton budget
+    (40). Pass a smaller cap only for harness speed runs. Surface-term
+    gradients use one batched solved-state IFT adjoint. Always warm-starts
+    from the committed anchor. Failures restore the anchor before raising.
     """
 
+    derivative_assembly = _require_derivative_assembly(derivative_assembly)
     if problem.biotsavart is None or any(
         surface_state.jax_boozer is None for surface_state in problem.surfaces
     ):
@@ -629,14 +717,20 @@ def ncsx_nested_ls_outer_value_and_grad(
             jax_boozer.biotsavart.x = np.array(coil, dtype=np.float64, copy=True)
             jax_boozer.need_to_run_code = True
             started = time.perf_counter()
+            inner_report = NcsxInnerReport()
             inner = ncsx_banana_run_code(
                 jax_boozer,
                 surface_state.anchor_iota,
                 surface_state.anchor_G,
-                polish_only=True,
+                polish_only=polish_only,
                 newton_maxiter_cap=newton_maxiter_cap,
+                derivative_assembly=derivative_assembly,
+                report=inner_report,
             )
             _accumulate_timing(timing, "inner", started)
+            timing["inner_bfgs"] += inner_report.bfgs_seconds
+            timing["inner_newton"] += inner_report.newton_seconds
+            problem.last_inner_bfgs_nit = inner_report.bfgs_nit
             if inner is None:
                 raise RuntimeError(
                     "JAX run_code returned None after need_to_run_code=True."

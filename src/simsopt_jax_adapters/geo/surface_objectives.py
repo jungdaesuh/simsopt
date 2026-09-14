@@ -75,6 +75,7 @@ from simsopt_jax.core._device_scalars import (
     two_pi as _two_pi,
 )
 from simsopt_jax.core.specs import (
+    host_resident_spec,
     make_surface_xyz_fourier_spec,
     make_surface_xyz_tensor_fourier_spec,
     surface_spec_kind,
@@ -2351,25 +2352,16 @@ def _traceable_contract_tree_signature(tree):
     )
 
 
-def _traceable_runtime_hostify_leaf(leaf):
-    """Explicitly materialize JAX runtime constants on the host once.
-
-    JAX transfer guard permits explicit host/device boundaries but rejects
-    implicit transfers. The traceable runtime bundle captures solved baseline
-    arrays in closures, so those leaves must be converted to host-backed
-    NumPy values before compilation rather than being captured as device
-    constants.
-    """
-    if isinstance(leaf, jax.Array):
-        return _host_array(leaf)
-    if isinstance(leaf, np.ndarray):
-        return np.asarray(leaf)
-    return leaf
-
-
 def _traceable_runtime_hostify_tree(tree):
-    """Recursively hostify runtime constants used by traceable closures."""
-    return jax.tree.map(_traceable_runtime_hostify_leaf, tree)
+    """Host-materialize the runtime constants a traceable closure captures.
+
+    Alias for :func:`simsopt_jax.core.specs.host_resident_spec`, which states
+    the placement rule once: a payload a compiled program CAPTURES must be
+    host-resident, a payload it receives as an ARGUMENT must not. The name is
+    kept because this bundle applies the rule to non-spec trees too (solved
+    baselines, objective kwargs, optimizer config).
+    """
+    return host_resident_spec(tree)
 
 
 def _traceable_runtime_deviceify_leaf(leaf, device):

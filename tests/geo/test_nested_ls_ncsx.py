@@ -525,6 +525,14 @@ def _assert_anchor_restored(problem, *, surface, iota, g_value):
     assert state.anchor_G == g_value
 
 
+def _fill_fake_inner_report(report: ncsx_mod.NcsxInnerReport) -> None:
+    """Honor the ``report`` contract of ``ncsx_banana_run_code`` in fakes."""
+
+    report.bfgs_nit = 0
+    report.bfgs_seconds = 0.0
+    report.newton_seconds = 0.0
+
+
 @pytest.mark.boozer
 def test_ncsx_failed_inner_restores_persistable_poison(monkeypatch):
     problem = _ncsx_prepared_7x7()
@@ -535,7 +543,8 @@ def test_ncsx_failed_inner_restores_persistable_poison(monkeypatch):
     coil = np.asarray(problem.biotsavart.x, dtype=np.float64)
 
     def poison_and_fail(jax_boozer, iota, G=None, *, sdofs=None, **kwargs):
-        del iota, G, sdofs, kwargs
+        del iota, G, sdofs
+        _fill_fake_inner_report(kwargs["report"])
         wrecked = np.array(
             jax_boozer.surface.get_dofs(), dtype=np.float64, copy=True
         )
@@ -560,7 +569,8 @@ def test_ncsx_failed_inner_restores_persistable_poison(monkeypatch):
     )
 
     def poison_and_jump(jax_boozer, iota, G=None, *, sdofs=None, **kwargs):
-        del sdofs, kwargs
+        del sdofs
+        _fill_fake_inner_report(kwargs["report"])
         wrecked = np.array(
             jax_boozer.surface.get_dofs(), dtype=np.float64, copy=True
         )
@@ -761,3 +771,126 @@ def test_ncsx_problem_from_native_boozers_rejects_empty():
             base_curves=[],
             curves=[],
         )
+
+def _fake_newton_recording_seed(jax_boozer, seeds: list[tuple[np.ndarray, float, float]]):
+    def fake_newton(*args, **kwargs):
+        del args
+        seeds.append(
+            (
+                np.array(jax_boozer._get_cached_surface_dofs(), copy=True),
+                float(kwargs["iota"]),
+                float(kwargs["G"]),
+            )
+        )
+        jax_boozer.need_to_run_code = False
+        return {
+            "success": True,
+            "iter": 0,
+            "iota": float(kwargs["iota"]),
+            "G": float(kwargs["G"]),
+            "jacobian": np.zeros(1, dtype=np.float64),
+        }
+
+    return fake_newton
+
+
+def _fake_bfgs_endpoint(scale: float, fun_factor: float):
+    # A failed BFGS whose endpoint is ``x0 * scale`` with objective
+    # ``fun_factor`` times the pre-BFGS objective.
+    def fake_host_jax(fun, x0, **kwargs):
+        del kwargs
+        value, grad = fun(x0)
+        return types.SimpleNamespace(
+            x=np.asarray(x0, dtype=np.float64) * scale,
+            fun=float(np.asarray(value)) * fun_factor,
+            jac=grad,
+            nit=1,
+            nfev=2,
+            njev=2,
+            success=False,
+            status=2,
+        )
+
+    return fake_host_jax
+
+
+def test_ncsx_banana_run_code_restores_pre_bfgs_state_when_bfgs_fails_worse(monkeypatch):
+    # Native (``minimize_boozer_penalty_constraints_LBFGS``) discards a failed
+    # BFGS endpoint whose objective worsened and seeds Newton from the
+    # pre-BFGS state.
+    problem = _ncsx_prepared_7x7()
+    surface_state = problem.surfaces[0]
+    jax_boozer = surface_state.jax_boozer
+    seed_dofs = np.array(jax_boozer._get_cached_surface_dofs(), copy=True)
+    seeds: list[tuple[np.ndarray, float, float]] = []
+    monkeypatch.setattr(ncsx_mod, "host_jax_minimize_value_and_grad", _fake_bfgs_endpoint(9.0, 1.0e6))
+    monkeypatch.setattr(
+        jax_boozer, "minimize_boozer_penalty_constraints_newton", _fake_newton_recording_seed(jax_boozer, seeds)
+    )
+    jax_boozer.need_to_run_code = True
+    report = ncsx_mod.NcsxInnerReport()
+    ncsx_banana_run_code(
+        jax_boozer, surface_state.anchor_iota, surface_state.anchor_G, polish_only=False, report=report
+    )
+    assert report.bfgs_rolled_back
+    assert report.bfgs_nit == 1
+    dofs, iota, G = seeds[0]
+    np.testing.assert_array_equal(dofs, seed_dofs)
+    assert iota == float(surface_state.anchor_iota)
+    assert G == float(surface_state.anchor_G)
+
+
+def test_ncsx_banana_run_code_keeps_failed_but_improved_bfgs_endpoint(monkeypatch):
+    # Native keeps a finite, non-worsening endpoint even when BFGS reports
+    # failure; Newton then starts from that endpoint.
+    problem = _ncsx_prepared_7x7()
+    surface_state = problem.surfaces[0]
+    jax_boozer = surface_state.jax_boozer
+    x0 = np.asarray(jax_boozer._pack_decision_vector(surface_state.anchor_iota, surface_state.anchor_G), dtype=np.float64)
+    seeds: list[tuple[np.ndarray, float, float]] = []
+    monkeypatch.setattr(ncsx_mod, "host_jax_minimize_value_and_grad", _fake_bfgs_endpoint(1.0 + 1.0e-3, 0.5))
+    monkeypatch.setattr(
+        jax_boozer, "minimize_boozer_penalty_constraints_newton", _fake_newton_recording_seed(jax_boozer, seeds)
+    )
+    jax_boozer.need_to_run_code = True
+    report = ncsx_mod.NcsxInnerReport()
+    ncsx_banana_run_code(
+        jax_boozer, surface_state.anchor_iota, surface_state.anchor_G, polish_only=False, report=report
+    )
+    assert not report.bfgs_rolled_back
+    dofs, iota, G = seeds[0]
+    endpoint = x0 * (1.0 + 1.0e-3)
+    np.testing.assert_allclose(dofs, endpoint[:-2], rtol=0, atol=0)
+    assert iota == endpoint[-2]
+    assert G == endpoint[-1]
+
+
+@pytest.mark.parametrize("bad_objective", [np.nan, np.inf], ids=["nan", "inf"])
+def test_ncsx_banana_run_code_rolls_back_nonfinite_bfgs_endpoint(monkeypatch, bad_objective):
+    # A nonfinite BFGS endpoint objective is not a "non-worsening" endpoint:
+    # native's persistability rule (``_boozer_iterate_is_persistable``) requires
+    # a finite final norm, so the endpoint is discarded and Newton seeds from
+    # the native pre-BFGS state. Without the finiteness test, ``nan <= f0`` is
+    # False but ``inf <= f0`` is also False, while a nonfinite *residual* norm
+    # compared with ``>`` would have persisted the poisoned endpoint.
+    problem = _ncsx_prepared_7x7()
+    surface_state = problem.surfaces[0]
+    jax_boozer = surface_state.jax_boozer
+    seed_dofs = np.array(jax_boozer._get_cached_surface_dofs(), copy=True)
+    seeds: list[tuple[np.ndarray, float, float]] = []
+    monkeypatch.setattr(
+        ncsx_mod, "host_jax_minimize_value_and_grad", _fake_bfgs_endpoint(9.0, float(bad_objective))
+    )
+    monkeypatch.setattr(
+        jax_boozer, "minimize_boozer_penalty_constraints_newton", _fake_newton_recording_seed(jax_boozer, seeds)
+    )
+    jax_boozer.need_to_run_code = True
+    report = ncsx_mod.NcsxInnerReport()
+    ncsx_banana_run_code(
+        jax_boozer, surface_state.anchor_iota, surface_state.anchor_G, polish_only=False, report=report
+    )
+    assert report.bfgs_rolled_back, "a nonfinite BFGS endpoint objective must not be persisted"
+    dofs, iota, G = seeds[0]
+    np.testing.assert_array_equal(dofs, seed_dofs)
+    assert iota == float(surface_state.anchor_iota)
+    assert G == float(surface_state.anchor_G)
