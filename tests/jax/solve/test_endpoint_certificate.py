@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from simsopt.optimization_endpoint import (
+from simsopt_contracts.optimization_endpoint import (
     TERMINAL_CONSTRAINT_NORM_ATOL,
     TERMINAL_STATIONARITY_ATOL,
     StatusConvention,

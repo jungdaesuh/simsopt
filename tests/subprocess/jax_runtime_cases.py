@@ -310,6 +310,100 @@ def _assert_lbfgs_private_step_kernels_compile_once_each(
     }
 
 
+_LBFGS_FUSED_DEVICE_ROUTE_FRAGMENTS = (
+    "lbfgs_private_value_and_grad)",
+    "lbfgs_private_initial_state_solver)",
+    "lbfgs_private_macro_step_solver)",
+    "lbfgs_private_result_payload_solver)",
+    "lbfgs_private_monolithic_mainlb_solver)",
+    "lbfgsb_fused_stepwise)",
+)
+
+_LBFGS_FUSED_DEVICE_ROUTE_FIRST_RUN_COMPILES = {
+    "lbfgs_private_value_and_grad)": 0,
+    "lbfgs_private_initial_state_solver)": 1,
+    "lbfgs_private_macro_step_solver)": 0,
+    "lbfgs_private_result_payload_solver)": 0,
+    "lbfgs_private_monolithic_mainlb_solver)": 0,
+    "lbfgsb_fused_stepwise)": 1,
+}
+
+
+def _lbfgs_compile_counts_per_run(
+    run_once,
+    *,
+    fragments: tuple[str, ...],
+    run_count: int,
+) -> tuple[dict[str, int], ...]:
+    """Count compilations separately for each repeat of ``run_once``."""
+
+    logger = logging.getLogger("jax")
+    old_level = logger.level
+    counts_per_run: list[dict[str, int]] = []
+    try:
+        jax.clear_caches()
+        with jax.log_compiles(True):
+            for _ in range(run_count):
+                handler = _CompileCounter(fragments)
+                logger.addHandler(handler)
+                logger.setLevel(logging.WARNING)
+                try:
+                    run_once()
+                finally:
+                    logger.removeHandler(handler)
+                counts_per_run.append(dict(handler.counts_by_fragment))
+    finally:
+        logger.setLevel(old_level)
+    return tuple(counts_per_run)
+
+
+def _assert_lbfgs_fused_device_route_compiles_once(
+    run_once,
+    *,
+    run_count: int,
+) -> dict[str, object]:
+    """Pin the compile budget of the unobserved on-device L-BFGS route.
+
+    ``simsopt_jax.solve.dispatch`` selects ``lbfgs_run_mode='fused_stepwise'``
+    whenever no accepted-step observer is attached, so the solve compiles the
+    bounded initial-state kernel plus one fused device program and must reuse
+    both executables on every identical repeat.  The host-observed macro-step
+    and result-payload kernels and the monolithic debug program stay
+    uncompiled on this route; the repeat runs must compile nothing at all.
+    """
+
+    counts_per_run = _lbfgs_compile_counts_per_run(
+        run_once,
+        fragments=_LBFGS_FUSED_DEVICE_ROUTE_FRAGMENTS,
+        run_count=run_count,
+    )
+    first_run_counts = counts_per_run[0]
+    assert first_run_counts == _LBFGS_FUSED_DEVICE_ROUTE_FIRST_RUN_COMPILES, (
+        first_run_counts
+    )
+    repeat_counts = counts_per_run[1:]
+    recompile_count = sum(sum(counts.values()) for counts in repeat_counts)
+    assert recompile_count == 0, counts_per_run
+    counts_by_fragment = {
+        fragment: sum(counts[fragment] for counts in counts_per_run)
+        for fragment in _LBFGS_FUSED_DEVICE_ROUTE_FRAGMENTS
+    }
+    return {
+        "compile_count": sum(counts_by_fragment.values()),
+        "first_run_compile_count": sum(first_run_counts.values()),
+        "recompile_count": recompile_count,
+        "fused_compile_count": counts_by_fragment["lbfgsb_fused_stepwise)"],
+        "host_stepwise_compile_count": (
+            counts_by_fragment["lbfgs_private_macro_step_solver)"]
+            + counts_by_fragment["lbfgs_private_result_payload_solver)"]
+        ),
+        "monolithic_compile_count": counts_by_fragment[
+            "lbfgs_private_monolithic_mainlb_solver)"
+        ],
+        "counts_by_fragment": counts_by_fragment,
+    }
+
+
 def _run_compile_count_case(method: OptimizerMethod) -> None:
     if not _configure_strict_cpu_parity_backend():
         _skip_case(_STRICT_CPU_PARITY_SKIP_REASON)
@@ -333,8 +427,14 @@ def _run_compile_count_case(method: OptimizerMethod) -> None:
         )
         assert result.success is True
 
+    run_count = 3
     if method == "lbfgs-ondevice":
-        compile_payload = _assert_lbfgs_private_step_kernels_compile_once_each(run_once)
+        compile_payload: dict[str, object] | _CompileCountPayload = (
+            _assert_lbfgs_fused_device_route_compiles_once(
+                run_once,
+                run_count=run_count,
+            )
+        )
     else:
         compile_payload = _assert_run_solver_compiles_once(run_once)
     print(
@@ -342,7 +442,7 @@ def _run_compile_count_case(method: OptimizerMethod) -> None:
             {
                 "case": "compile-count",
                 "method": str(method),
-                "run_count": 3,
+                "run_count": run_count,
                 **compile_payload,
             },
             sort_keys=True,

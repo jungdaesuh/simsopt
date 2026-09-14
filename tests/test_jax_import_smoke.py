@@ -884,13 +884,21 @@ def _assert_ondevice_optimizer_reuses_compiled_solver(method: str) -> None:
         extra_env={"JAX_ENABLE_COMPILATION_CACHE": "0"},
         expected_case="compile-count",
     )
-    expected_compile_count = 5 if method == "lbfgs-ondevice" else 1
+    # The unobserved dispatch lane runs lbfgs_run_mode='fused_stepwise'
+    # (src/simsopt_jax/solve/dispatch.py), so the first solve compiles the
+    # bounded initial-state kernel plus one fused device program and every
+    # identical repeat compiles nothing. The host-observed stepwise kernels are
+    # pinned by the target-lane compile-count smoke below.
+    expected_compile_count = 2 if method == "lbfgs-ondevice" else 1
     assert payload["case"] == "compile-count"
     assert payload["method"] == method
     assert payload["compile_count"] == expected_compile_count
     assert payload["run_count"] == 3
     if method == "lbfgs-ondevice":
-        assert payload["stepwise_compile_count"] == expected_compile_count
+        assert payload["first_run_compile_count"] == expected_compile_count
+        assert payload["recompile_count"] == 0
+        assert payload["fused_compile_count"] == 1
+        assert payload["host_stepwise_compile_count"] == 0
         assert payload["monolithic_compile_count"] == 0
         assert sum(payload["counts_by_fragment"].values()) == expected_compile_count
 
