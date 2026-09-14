@@ -531,8 +531,8 @@ def test_static_slice_and_update_preserve_compute_dtype_in_mixed_mode(
         array = jax.device_put(jnp.asarray(array_host))
         replacement = jax.device_put(jnp.asarray(replacement_host))
 
-        segment = _slice_1d_static(array, 2, 5, use_compute_dtype=True)
-        updated = _update_1d_static(array, 1, replacement, use_compute_dtype=True)
+        segment = _slice_1d_static(array, 2, 5)
+        updated = _update_1d_static(array, 1, replacement)
 
         assert segment.dtype == jnp.float32
         assert updated.dtype == jnp.float32
