@@ -7,6 +7,17 @@ through one reusable parametric pure-JAX Stage-II objective.  Both optimization
 stages run on the selected device, and independent endpoint topology checks
 fail closed if a solver crosses into a linked component.  Initial and final
 state trees return through one batched host publication.
+
+The optimized space is the coil set alone: 72 planar-Fourier curve coordinates
+plus the three free currents, ordered exactly as ``BiotSavart(coils).x``.  The
+admissible native reference is therefore the fixed-surface twin built by
+``examples/jax/parity/cases/native_stage_two_optimization_planar_coils.py``,
+the same construction ``examples/2_Intermediate/stage_two_optimization.py``
+uses.  The shipped planar script instead leaves the 121 ``SurfaceRZFourier``
+coordinates free, which ``CurveSurfaceDistance`` pulls into ``JF.x``; that is a
+defect of the script, not a narrowing here -- ``SquaredFlux`` owns no surface
+partial and never re-sets the Biot-Savart evaluation points, so the extra
+coordinates carry a gradient that fails its own Taylor test.
 """
 
 from __future__ import annotations
@@ -20,11 +31,13 @@ from simsopt.field import Current, coils_via_symmetries
 from simsopt.geo import SurfaceRZFourier, create_equally_spaced_planar_curves
 from simsopt_jax.backend.runtime import get_runtime_jax_device
 from simsopt_jax.core import CoilSetDofExtractionSpec
+from simsopt_jax.solve.driver import Driver
 from simsopt_jax.examples import (
     ExampleResult,
     ExecutionScale,
     run_example,
     solve_standard_stage_two,
+    standard_stage_two_optimizer_observables,
 )
 from simsopt_jax.objectives import (
     StageTwoObjectiveConfig,
@@ -45,7 +58,7 @@ def _build_problem(
     native_scale = scale == "native_default"
     surface_resolution = 32 if native_scale else 4
     curve_order = 5 if native_scale else 2
-    curve_quadrature = 100 if native_scale else 32
+    curve_quadrature = 75 if native_scale else 32
     surface = SurfaceRZFourier.from_vmec_input(
         TEST_DATA / "input.LandremanPaul2021_QA",
         range="half period",
@@ -153,8 +166,9 @@ def solve(
         first_length_weight=first_length_weight_device,
         second_length_weight=second_length_weight_device,
         max_steps=max_steps,
-        rtol=1.0e-8,
-        atol=1.0e-7,
+        rtol=1.0e-15,
+        atol=1.0e-15,
+        driver=Driver.SCIPY_LBFGSB,
     )
     topology_device = _topology_diagnostics(
         field.coil_dof_extraction_spec(),
@@ -188,9 +202,6 @@ def solve(
         topology_states,
         1,
     )
-    solver_success = bool(
-        device_result.first_optimizer.success and device_result.second_optimizer.success
-    )
     solver_accepted = bool(
         device_result.first_optimizer.status in (0, 1)
         and device_result.second_optimizer.status in (0, 1)
@@ -218,15 +229,10 @@ def solve(
             "planarity_penalty": planarity_penalty,
             "linking_number": linking_number,
             "squared_flux": squared_flux,
-            "solver_success": solver_success,
-            "solver_status": (
-                device_result.first_optimizer.status,
-                device_result.second_optimizer.status,
-            ),
-            "solver_iterations": (
-                device_result.first_optimizer.nit,
-                device_result.second_optimizer.nit,
-            ),
+            # status below is the scientific gate, never a convergence claim:
+            # the per-stage optimizer verdicts published here are what a reader
+            # applies, and an "ok" run can still carry success=False.
+            **standard_stage_two_optimizer_observables(device_result),
         },
         status="ok" if scientific_success else "failed",
     )

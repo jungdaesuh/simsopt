@@ -33,11 +33,20 @@ _COMPILED_PROGRAM = re.compile(r"^Compiling jit\(([^)]*)\)")
 _OBJECTIVE_PROGRAM = "value_and_grad_from_jaxpr"
 # ``main()`` runs both examples with this budget in bounded mode.
 _BOUNDED_STEPS = 3
-# Objective-graph compilations one shipped bounded solve is allowed: the solver
-# entry evaluation, the solver's own executable, and one re-entry after the
-# solve. Both examples reuse a single traced objective across their second
-# stage or republication, so neither budget includes a stage-specific graph.
-_FINITEBUILD_OBJECTIVE_GRAPHS = 3
+# Objective value/gradient executables one shipped bounded solve is allowed.
+# Both examples reuse a single traced objective across their second stage or
+# republication, so neither budget includes a stage-specific graph.  What a
+# budget does count is one executable per ``jax.jit`` wrapper that runs the
+# objective: the private BFGS solver closure-converts the problem's callable
+# and jits its own copy for the entry evaluation it makes before its fused
+# loop, which compiles the same jaxpr at the same signature a second time.
+#
+# Re-anchored 2026-09-13 for the finite-build example: the budget is the
+# solver's own copy plus the prepared problem's executable, which the shipped
+# solve first invokes at the post-solve republication.  The retired value 3
+# belonged to the ``serial_solve_jax`` routing this example left in ead83eaef,
+# whose bounded-objective log entered the problem's executable once more.
+_FINITEBUILD_OBJECTIVE_GRAPHS = 2
 _COIL_FORCES_OBJECTIVE_GRAPHS = 3
 
 
@@ -317,8 +326,12 @@ def test_finitebuild_example_solve_publishes_one_objective_graph(tmp_path) -> No
     """The shipped solve reuses one objective graph and lands where it did.
 
     ``solve()`` drives the optimizer and then republishes at
-    ``PUBLISHED_OBJECTIVE_SCALE``; if the scale were baked in rather than an
-    operand, the republication would compile a further objective graph.
+    ``PUBLISHED_OBJECTIVE_SCALE``.  The scale is a device operand of the solve's
+    graph, so every objective executable the solve compiles carries the same
+    signature; baking the scale in would need a second problem, whose graph
+    carries one operand fewer and so shows up as a second distinct signature.
+    That distinct-signature count is the claim.  The executable count is the
+    separate budget: one per ``jax.jit`` wrapper that runs the objective.
     """
     example = _example("stage_two_optimization_finitebuild")
 
@@ -326,10 +339,17 @@ def test_finitebuild_example_solve_publishes_one_objective_graph(tmp_path) -> No
         result = example.solve(tmp_path, _BOUNDED_STEPS, "bounded")
 
     objective_graphs = _objective_graph_compilations(compilations)
+    assert len(set(objective_graphs)) == 1, (
+        "the shipped solve compiled objective graphs at "
+        f"{len(set(objective_graphs))} distinct signatures; the unscaled "
+        "republication must re-enter the solve's graph with the scale as a "
+        "device operand rather than trace one with the scale baked in"
+    )
     assert len(objective_graphs) == _FINITEBUILD_OBJECTIVE_GRAPHS, (
-        "the shipped solve compiled a different number of objective graphs "
-        f"({len(objective_graphs)}, {len(set(objective_graphs))} distinct); the "
-        "unscaled republication must reuse the solve's graph"
+        "the shipped solve compiled a different number of objective "
+        f"executables ({len(objective_graphs)}) of its one objective graph; "
+        "the budget is the private solver's own closure-converted copy plus "
+        "the prepared problem's executable"
     )
     assert result.status == "ok"
     assert result.observables["solver_iterations"] == _BOUNDED_STEPS
@@ -372,21 +392,23 @@ def test_coil_forces_example_solve_publishes_one_objective_graph(tmp_path) -> No
     )
     assert result.status == "ok"
     assert result.observables["solver_iterations"] == (_BOUNDED_STEPS, _BOUNDED_STEPS)
+    # Regression pin retaken 2026-09-13 after the mirror adopted native's
+    # post-Taylor start state and SciPy L-BFGS-B at native policy (ftol=gtol=1e-15).
     np.testing.assert_allclose(
         result.observables["final_objective"],
-        0.003021471629855961,
+        0.003424195336484035,
         rtol=1.0e-12,
         atol=0.0,
     )
     np.testing.assert_allclose(
         result.observables["squared_flux"],
-        0.0029510118547222707,
+        0.0033617810994737273,
         rtol=1.0e-12,
         atol=0.0,
     )
     np.testing.assert_allclose(
         result.observables["vacuum_energy"],
-        0.6891898578003501,
+        0.6148225859961913,
         rtol=1.0e-12,
         atol=0.0,
     )

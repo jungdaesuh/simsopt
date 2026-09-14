@@ -5,6 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .execution import ExecutionScale
+from .scalar_stage import (
+    STAGE_OPTIMIZER_OBSERVABLES,
+    solve_scalar_stage,
+    stage_optimizer_observables,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +39,18 @@ class StochasticStageTwoConfiguration:
     training_seed: int
     out_of_sample_seed: int
     max_steps: int
+    #: L-BFGS history size, the native example's ``maxcor=400``
+    #: (``examples/2_Intermediate/stage_two_optimization_stochastic.py:198``).
+    #: One value for both routes and both scales: a history that tracked
+    #: ``max_steps`` would be a different policy at every scale.
+    lbfgs_history_size: int
+    #: Convergence tolerances, in the ``serial_solve_jax`` vocabulary that maps
+    #: ``rtol -> ftol`` and ``atol -> gtol``.  Both are pinned to the native
+    #: example's ``tol=1e-15``: SciPy's ``minimize(..., tol=)`` sets *both*
+    #: ``ftol`` and ``gtol`` for L-BFGS-B, so
+    #: ``examples/2_Intermediate/stage_two_optimization_stochastic.py:198``
+    #: runs at ``ftol = gtol = 1e-15`` and a mirror at ``gtol = 1e-8`` would
+    #: stop on a gradient test seven orders looser than the lane it mirrors.
     rtol: float
     atol: float
 
@@ -67,6 +84,18 @@ def stochastic_stage_two_configuration(
         training_seed=0,
         out_of_sample_seed=1,
         max_steps=400 if native_scale else 20,
+        lbfgs_history_size=400,
         rtol=1.0e-15,
-        atol=1.0e-8,
+        atol=1.0e-15,
     )
+
+
+#: This family's spelling of the shared single-stage route.  The stochastic
+#: mirror and its parity twin call the solve under this name; the route, and
+#: the drivers it accepts, are :func:`.scalar_stage.solve_scalar_stage`'s.
+solve_stochastic_stage_two = solve_scalar_stage
+
+#: This family's spelling of the shared single-stage name tuple and its
+#: producer, kept importable under the names the mirror already reads.
+STOCHASTIC_STAGE_TWO_OPTIMIZER_OBSERVABLES = STAGE_OPTIMIZER_OBSERVABLES
+stochastic_stage_two_optimizer_observables = stage_optimizer_observables

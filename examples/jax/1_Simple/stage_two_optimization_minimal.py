@@ -37,7 +37,7 @@ def _build_problem(
     native_scale = scale == "native_default"
     surface_resolution = 32 if native_scale else 4
     curve_order = 5 if native_scale else 2
-    curve_quadrature = 100 if native_scale else 16
+    curve_quadrature = 75 if native_scale else 16
     surface = SurfaceRZFourier.from_vmec_input(
         TEST_DATA / "input.LandremanPaul2021_QA",
         range="half period",
@@ -91,8 +91,8 @@ def solve(
         length_weight=LENGTH_WEIGHT,
         length_target=LENGTH_TARGET,
         max_steps=max_steps,
-        rtol=1.0e-12,
-        atol=1.0e-10,
+        rtol=1.0e-15,
+        atol=1.0e-15,
     )
     initial, final, taylor_errors = jax.device_get(
         (
@@ -105,9 +105,12 @@ def solve(
     final_gradient = np.asarray(final.objective_gradient, dtype=np.float64)
     field.x = solution
     field.save(str(output_directory / "biot_savart_opt.json"))
+    # The scientific gate is the same finite-improvement test the other mirrors
+    # publish as ``status``; the optimizer verdict (an iteration cap at
+    # tol=1e-15 is native's normal termination) is published beside it as
+    # ``solver_success``, never folded into ``status``.
     scientific_success = bool(
-        device_result.optimizer.success
-        and np.isfinite(final.objective)
+        np.isfinite(final.objective)
         and final.objective < initial.objective
         and np.linalg.norm(final_gradient, ord=np.inf) <= 1.0e-5
         and float(final.total_curve_length) <= 1.1 * LENGTH_TARGET

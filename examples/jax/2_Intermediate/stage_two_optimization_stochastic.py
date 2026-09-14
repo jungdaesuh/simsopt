@@ -30,8 +30,11 @@ from simsopt_jax.examples import (
     StochasticStageTwoConfiguration,
     materialize_stochastic_coil_perturbations,
     run_example,
-    scalar_example_driver,
     stochastic_stage_two_configuration,
+)
+from simsopt_jax.examples.stochastic_stage_two import (
+    solve_stochastic_stage_two,
+    stochastic_stage_two_optimizer_observables,
 )
 from simsopt_jax.objectives import (
     StageTwoObjectiveConfig,
@@ -42,13 +45,11 @@ from simsopt_jax.solve.driver import Driver
 from simsopt_jax.solve.serial import (
     TraceableArrayFunction,
     TraceableScalarProblem,
-    serial_solve_jax,
 )
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
 
 EXAMPLE_ID = "native-stage-two-optimization-stochastic"
-_STOCHASTIC_LBFGS_HISTORY_SIZE = 10
 TEST_DATA = Path(__file__).resolve().parents[3] / "tests" / "test_files"
 
 
@@ -254,27 +255,17 @@ def solve(
     initial_objective_device, initial_gradient_device = problem.value_and_grad(
         initial_device
     )
-    driver = scalar_example_driver()
-    if driver == Driver.SIMSOPT_LBFGSB:
-        result = serial_solve_jax(
-            problem,
-            driver=driver,
-            max_steps=max_steps,
-            maxcor=_STOCHASTIC_LBFGS_HISTORY_SIZE,
-            rtol=configuration.rtol,
-            atol=configuration.atol,
-            require_success=False,
-        )
-    else:
-        result = serial_solve_jax(
-            problem,
-            driver=driver,
-            max_steps=max_steps,
-            line_search_max_steps=40,
-            rtol=configuration.rtol,
-            atol=configuration.atol,
-            require_success=False,
-        )
+    # The live route is the native example's own optimizer: SciPy L-BFGS-B over
+    # the device objective at native policy.  Driver.SIMSOPT_LBFGSB selects the
+    # fused device port through the same argument, as the other mirrors expose
+    # it (``solve_standard_stage_two(..., driver=)``).
+    result = solve_stochastic_stage_two(
+        problem,
+        driver=Driver.SCIPY_LBFGSB,
+        max_steps=max_steps,
+        maxcor=configuration.lbfgs_history_size,
+        tol=configuration.rtol,
+    )
     solution_device = problem.x
     final_objective_device, final_gradient_device = problem.value_and_grad(
         solution_device
@@ -380,9 +371,11 @@ def solve(
             "training_flux_objective": training_objective,
             "nominal_flux_objective": nominal_objective,
             "out_of_sample_objective": out_of_sample_objective,
-            "solver_success": bool(result.success),
-            "solver_status": result.status,
-            "solver_iterations": result.nit,
+            # status below is the scientific gate, never a convergence claim:
+            # the optimizer's own verdict published here is what a reader
+            # applies, and an "ok" run can still carry success=False at the
+            # iteration cap.
+            **stochastic_stage_two_optimizer_observables(result),
         },
         status="ok" if scientific_success else "failed",
     )

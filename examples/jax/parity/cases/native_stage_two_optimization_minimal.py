@@ -34,7 +34,7 @@ def _scale_configuration(scale: ExecutionScale) -> dict[str, object]:
     return {
         "surface_resolution": 32 if native_scale else 4,
         "curve_order": 5 if native_scale else 2,
-        "curve_quadrature": 100 if native_scale else 16,
+        "curve_quadrature": 75 if native_scale else 16,
         "num_base_curves": 4,
         "major_radius": 1.0,
         "minor_radius": 0.5,

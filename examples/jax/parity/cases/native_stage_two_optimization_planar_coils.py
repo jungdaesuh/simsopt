@@ -36,7 +36,7 @@ def _scale_configuration(scale: ExecutionScale) -> dict[str, object]:
     return {
         "surface_resolution": 32 if native_scale else 4,
         "curve_order": 5 if native_scale else 2,
-        "curve_quadrature": 100 if native_scale else 32,
+        "curve_quadrature": 75 if native_scale else 32,
         "num_base_curves": 4,
         "major_radius": 1.0,
         "minor_radius": 0.5,
@@ -54,8 +54,10 @@ def _scale_configuration(scale: ExecutionScale) -> dict[str, object]:
         "mean_squared_curvature_weight": 1.0e-6,
         "linking_number_weight": 1.0,
         "max_steps": 400 if native_scale else 50,
-        "rtol": 1.0e-8,
-        "atol": 1.0e-7,
+        # One configured stopping rule for both lanes, equal to what the native
+        # script's tol=1e-15 makes scipy.optimize.minimize set: ftol and gtol.
+        "rtol": 1.0e-15,
+        "atol": 1.0e-15,
         "surface_input_sha256": hashlib.sha256(SURFACE_INPUT.read_bytes()).hexdigest(),
     }
 
@@ -340,10 +342,15 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
             jac=True,
             method="L-BFGS-B",
             options={
+                # scipy.optimize.minimize expands the native script's tol=1e-15
+                # into exactly these two for L-BFGS-B; naming them here is the
+                # same rule, read from the same configuration the JAX lane reads,
+                # so neither lane can drift to a different stopping condition.
                 "maxiter": _configuration_int(bundle, "max_steps"),
                 "maxcor": 300,
+                "ftol": _configuration_float(bundle, "rtol"),
+                "gtol": _configuration_float(bundle, "atol"),
             },
-            tol=1.0e-15,
         )
 
     first_result = minimize_objective(first_objective, initial_parameters)
@@ -398,6 +405,7 @@ def _jax(
         StageTwoObjectiveConfig,
         stage_two_planar_topology_values,
     )
+    from simsopt_jax.solve.driver import Driver
     from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
     from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
 
@@ -478,6 +486,9 @@ def _jax(
         max_steps=_configuration_int(bundle, "max_steps"),
         rtol=_configuration_float(bundle, "rtol"),
         atol=_configuration_float(bundle, "atol"),
+        # The shipped mirror selects this driver; a parity twin that solved with
+        # a different optimizer would certify a route nothing ships.
+        driver=Driver.SCIPY_LBFGSB,
     )
     extraction = field.coil_dof_extraction_spec()
     parameter_states = jnp.stack(

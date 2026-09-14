@@ -36,7 +36,7 @@ def _scale_configuration(scale: ExecutionScale) -> dict[str, object]:
     return {
         "surface_resolution": 32 if native_scale else 4,
         "curve_order": 5 if native_scale else 2,
-        "curve_quadrature": 100 if native_scale else 16,
+        "curve_quadrature": 75 if native_scale else 16,
         "num_base_curves": 4,
         "major_radius": 1.0,
         "minor_radius": 0.5,
@@ -52,8 +52,10 @@ def _scale_configuration(scale: ExecutionScale) -> dict[str, object]:
         "mean_squared_curvature_threshold": 5.0,
         "mean_squared_curvature_weight": 1.0e-6,
         "max_steps": 400 if native_scale else 50,
-        "rtol": 1.0e-12,
-        "atol": 1.0e-10,
+        # One configured stopping rule for both lanes, equal to what the native
+        # script's tol=1e-15 makes scipy.optimize.minimize set: ftol and gtol.
+        "rtol": 1.0e-15,
+        "atol": 1.0e-15,
         "surface_input_sha256": hashlib.sha256(SURFACE_INPUT.read_bytes()).hexdigest(),
     }
 
@@ -199,8 +201,13 @@ def _values(
     }
 
 
-def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservation:
-    from scipy.optimize import minimize
+def _native_problem(bundle: InputBundle):
+    """The native objective graph, built once for whoever needs it.
+
+    Both the solving lane and the cross-lane evaluator run the same terms with
+    the same weights; building them in one place is what makes a cross
+    evaluation a comparison of evaluators rather than of two constructions.
+    """
     from simsopt.field import BiotSavart
     from simsopt.geo import (
         CurveCurveDistance,
@@ -212,12 +219,6 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
     from simsopt.objectives import QuadraticPenalty, SquaredFlux
 
     surface, base_curves, coils = _build_geometry(dict(bundle.configuration))
-    construction_fingerprint = _effective_fingerprint(
-        bundle,
-        arrays,
-        surface,
-        base_curves,
-    )
     field = BiotSavart(coils)
     field.set_points(surface.gamma().reshape((-1, 3)))
     flux = SquaredFlux(surface, field)
@@ -261,6 +262,28 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
             + _configuration_float(bundle, "mean_squared_curvature_weight")
             * sum(mean_squared_penalties)
         )
+
+    return surface, base_curves, field, flux, lengths, unit_normal, objective
+
+
+def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservation:
+    from scipy.optimize import minimize
+
+    (
+        surface,
+        base_curves,
+        field,
+        flux,
+        lengths,
+        unit_normal,
+        objective,
+    ) = _native_problem(bundle)
+    construction_fingerprint = _effective_fingerprint(
+        bundle,
+        arrays,
+        surface,
+        base_curves,
+    )
 
     def state(
         prefix: str,
@@ -320,10 +343,15 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
             jac=True,
             method="L-BFGS-B",
             options={
+                # scipy.optimize.minimize expands the native script's tol=1e-15
+                # into exactly these two for L-BFGS-B; naming them here is the
+                # same rule, read from the same configuration the JAX lane reads,
+                # so neither lane can drift to a different stopping condition.
                 "maxiter": _configuration_int(bundle, "max_steps"),
                 "maxcor": 300,
+                "ftol": _configuration_float(bundle, "rtol"),
+                "gtol": _configuration_float(bundle, "atol"),
             },
-            tol=1.0e-15,
         )
 
     first_result = minimize_objective(first_objective, initial_parameters)
@@ -373,6 +401,35 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
     )
 
 
+def _regularization_config(bundle: InputBundle):
+    """The mirror's regularization weights for this bundle, built in one place."""
+    from simsopt_jax.objectives import StageTwoObjectiveConfig
+
+    return StageTwoObjectiveConfig(
+        num_base_curves=_configuration_int(bundle, "num_base_curves"),
+        curve_curve_minimum_distance=_configuration_float(
+            bundle,
+            "curve_curve_threshold",
+        ),
+        curve_curve_weight=_configuration_float(bundle, "curve_curve_weight"),
+        curve_surface_minimum_distance=_configuration_float(
+            bundle,
+            "curve_surface_threshold",
+        ),
+        curve_surface_weight=_configuration_float(bundle, "curve_surface_weight"),
+        curvature_threshold=_configuration_float(bundle, "curvature_threshold"),
+        curvature_weight=_configuration_float(bundle, "curvature_weight"),
+        mean_squared_curvature_threshold=_configuration_float(
+            bundle,
+            "mean_squared_curvature_threshold",
+        ),
+        mean_squared_curvature_weight=_configuration_float(
+            bundle,
+            "mean_squared_curvature_weight",
+        ),
+    )
+
+
 def _jax(
     lane: ParityLane,
     bundle: InputBundle,
@@ -380,7 +437,7 @@ def _jax(
 ) -> LaneObservation:
     from simsopt_jax.backend.runtime import get_runtime_jax_device
     from simsopt_jax.examples import solve_standard_stage_two
-    from simsopt_jax.objectives import StageTwoObjectiveConfig
+    from simsopt_jax.solve.driver import Driver
     from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
     from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
 
@@ -412,40 +469,6 @@ def _jax(
         device,
     )
 
-    def regularization_config() -> StageTwoObjectiveConfig:
-        return StageTwoObjectiveConfig(
-            num_base_curves=_configuration_int(bundle, "num_base_curves"),
-            curve_curve_minimum_distance=_configuration_float(
-                bundle,
-                "curve_curve_threshold",
-            ),
-            curve_curve_weight=_configuration_float(
-                bundle,
-                "curve_curve_weight",
-            ),
-            curve_surface_minimum_distance=_configuration_float(
-                bundle,
-                "curve_surface_threshold",
-            ),
-            curve_surface_weight=_configuration_float(
-                bundle,
-                "curve_surface_weight",
-            ),
-            curvature_threshold=_configuration_float(
-                bundle,
-                "curvature_threshold",
-            ),
-            curvature_weight=_configuration_float(bundle, "curvature_weight"),
-            mean_squared_curvature_threshold=_configuration_float(
-                bundle,
-                "mean_squared_curvature_threshold",
-            ),
-            mean_squared_curvature_weight=_configuration_float(
-                bundle,
-                "mean_squared_curvature_weight",
-            ),
-        )
-
     device_result = solve_standard_stage_two(
         field=field,
         flux_spec=flux.fixed_surface_flux_spec(),
@@ -459,12 +482,15 @@ def _jax(
         ),
         initial_parameters=jax.device_put(arrays["initial_parameters"], device),
         taylor_direction=jax.device_put(arrays["taylor_direction"], device),
-        regularization_config=regularization_config(),
+        regularization_config=_regularization_config(bundle),
         first_length_weight=first_length_weight_device,
         second_length_weight=second_length_weight_device,
         max_steps=_configuration_int(bundle, "max_steps"),
         rtol=_configuration_float(bundle, "rtol"),
         atol=_configuration_float(bundle, "atol"),
+        # The shipped mirror selects this driver; a parity twin that solved with
+        # a different optimizer would certify a route nothing ships.
+        driver=Driver.SCIPY_LBFGSB,
     )
     initial, first, final, taylor_errors = jax.device_get(
         (
@@ -526,6 +552,69 @@ def _jax(
             "taylor:errors": np.asarray(taylor_errors, dtype=np.float64),
         },
     )
+
+
+def _native_evaluate_at(
+    bundle: InputBundle, parameters: np.ndarray
+) -> dict[str, np.ndarray]:
+    _surface, _curves, _field, _flux, _lengths, _normal, objective = _native_problem(
+        bundle
+    )
+    current = objective(_configuration_float(bundle, "second_length_weight"))
+    current.x = np.asarray(parameters, dtype=np.float64)
+    return {
+        "objective": np.asarray(float(current.J()), dtype=np.float64),
+        "objective_gradient": np.asarray(current.dJ(), dtype=np.float64),
+    }
+
+
+def _jax_evaluate_at(
+    bundle: InputBundle, parameters: np.ndarray
+) -> dict[str, np.ndarray]:
+    from simsopt_jax.examples import standard_stage_two_state
+    from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
+    from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
+
+    import jax
+
+    surface, _base_curves, coils = _build_geometry(dict(bundle.configuration))
+    field = BiotSavartJAX(coils)
+    flux = SquaredFluxJAX(surface, field)
+    state = jax.device_get(
+        standard_stage_two_state(
+            field=field,
+            flux_spec=flux.fixed_surface_flux_spec(),
+            surface_gamma=np.asarray(surface.gamma(), dtype=np.float64).reshape((-1, 3)),
+            surface_normal=np.asarray(surface.normal(), dtype=np.float64).reshape(
+                (-1, 3)
+            ),
+            parameters=parameters,
+            regularization_config=_regularization_config(bundle),
+            length_weight=_configuration_float(bundle, "second_length_weight"),
+        )
+    )
+    return {
+        "objective": np.asarray(float(state.objective), dtype=np.float64),
+        "objective_gradient": np.asarray(state.objective_gradient, dtype=np.float64),
+    }
+
+
+def evaluate_at(
+    lane: ParityLane,
+    bundle: InputBundle,
+    parameters: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Evaluate the second-stage objective on one lane at a given state.
+
+    The cross-lane quality check runs this twice per endpoint -- once per lane,
+    at the same coordinates -- so a difference it reports is a difference between
+    the two evaluators and not between two optimization trajectories.  The second
+    stage is the one both lanes finish in, and its length weight is the weight the
+    final state was measured under.
+    """
+    if lane == "native-cpu":
+        return _native_evaluate_at(bundle, parameters)
+    return _jax_evaluate_at(bundle, parameters)
 
 
 def execute(

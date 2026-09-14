@@ -218,7 +218,7 @@ EXTERNAL_SOLVER_FREE_CONTRACTS = (
             {
                 "force_objective",
                 "maximum_force",
-                "gradient",
+                "final_gradient",
                 "solver_success",
             }
         ),
