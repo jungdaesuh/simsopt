@@ -23,10 +23,20 @@ What "matched" means here, and what it costs:
   sets ``ftol=gtol=1e-15``, and the JAX leg passes those two values
   explicitly.  ``maxfun``/``maxls`` are left at their defaults, which are
   already identical (15000 / 20) on both sides.
+* **Matched state.** Endpoint coordinates are *reported*, never a parity
+  criterion: at a fixed iteration cap neither lane has converged, and the
+  native lane's own endpoint moves by more than the cross-lane gap when only
+  ``OMP_NUM_THREADS`` changes (see :func:`compare_endpoints`).  What is
+  comparable is the evaluator at a state both lanes are handed: every leg
+  records value and gradient at the matched initial state, at its own endpoint
+  (lane-specific, reported only), and at any operator-supplied ``--evaluate-at``
+  state — which is how a *cross-lane* endpoint check is taken, by handing one
+  lane's endpoint to the other lane.
 * **Matched window.** The timed window is the ``minimize`` call and nothing
-  else.  The 5-epsilon Taylor test and the 256-sample out-of-sample loop of
-  the native example are outside it on both lanes — the out-of-sample bundle
-  is not even materialized here.
+  else.  The matched-state evaluations are taken outside it.  The 5-epsilon
+  Taylor test and the 256-sample out-of-sample loop of the native example are
+  outside it on both lanes — the out-of-sample bundle is not even materialized
+  here.
 * **Single rank.** No MPI anywhere (``MPI4PY_RC_INITIALIZE=false``);
   ``mpi_ranks`` is recorded as 1.  The native example's two-dimensional
   ranks x OMP denominator is a charter problem, not a probe problem.
@@ -102,10 +112,18 @@ Run recipe (from the repository root; interpreters differ per lane)::
       --output $EV/stochastic_p13_jaxgpu_tile8_maxcor400.json \
       --endpoint-out $EV/stochastic_p13_jaxgpu_tile8_maxcor400.npz
 
-    # endpoint agreement, native_workflow tolerance bucket
+    # endpoint agreement (reported) and matched-state evaluator parity (bounded)
     $NATIVE_PY benchmarks/stochastic_stage_two_probe.py --compare \
       $EV/stochastic_p11_native_omp32_maxcor400.npz \
       $EV/stochastic_p11_jaxgpu_maxcor400.npz
+
+    # cross-lane endpoint check: re-run BOTH lanes at one lane's endpoint, so
+    # --compare has a 'probe' state that is the same state on both sides
+    for lane in native jax-gpu; do
+      ... --lane $lane --evaluate-at $EV/stochastic_p11_native_omp32_maxcor400.npz \
+        --output $EV/stochastic_p11_at_native_endpoint_${lane}.json \
+        --endpoint-out $EV/stochastic_p11_at_native_endpoint_${lane}.npz
+    done
 
 Alternate the two lanes pair by pair (``probe_conventions.interleave_schedule``
 prints the order under ``--dry-run``); position bias in a ratio is otherwise
@@ -120,7 +138,7 @@ import os
 import subprocess
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -175,6 +193,16 @@ MATCHED_MAXCOR = (10, 400)
 
 _LANES = ("native", "jax-gpu")
 
+#: The two JAX-lane optimizer routes, and what each one measures.
+#: ``simsopt_lbfgsb`` is the fused device port -- the route every published
+#: mc10/mc400 row was taken on.  ``scipy_lbfgsb`` is the shipped mirror's LIVE
+#: route since the mirror was switched to the native example's own optimizer
+#: (``simsopt_jax.examples.stochastic_stage_two.solve_stochastic_stage_two``),
+#: and is the route a row that claims to time the mirror must use.  The default
+#: stays on the fused port so an old command keeps producing a number
+#: comparable with the rows already published.
+JAX_DRIVERS = ("simsopt_lbfgsb", "scipy_lbfgsb")
+
 #: Probe artifacts published inside this repository live here and nowhere else.
 #: A run whose ``--output`` lands entirely outside the repository is a scratch
 #: run: it is allowed, and it is stamped ``published_under_evidence_root:
@@ -221,6 +249,17 @@ _SHARED_DISCLOSURES = (
 
 _JAX_LANE_DISCLOSURES = (
     "SOLVE-GATE ASSUMPTION (unverified on GPU): the gate's budget-exhaustion clause assumes the fused JAX driver reports nit == budget at exhaustion, as scipy does. If it reports budget-1 the gate refuses the leg loudly (fail-closed, publishable=false in the ledger) rather than minting a number; the first GPU run must confirm the convention and this line be updated.",
+    (
+        "ROUTE SELECTOR: --jax-driver picks which optimizer this lane measures. "
+        "simsopt_lbfgsb is the fused device port and is the route every published "
+        "mc10/mc400 row was taken on; scipy_lbfgsb is the shipped mirror's live "
+        "route since examples/jax/2_Intermediate/stage_two_optimization_stochastic.py "
+        "was switched to the native example's own optimizer via "
+        "simsopt_jax.examples.stochastic_stage_two.solve_stochastic_stage_two. A row "
+        "taken on simsopt_lbfgsb does not time the shipped mirror's live path, and "
+        "the two routes carry different evaluation caps (the fused port's maxfun = "
+        "20 * maxiter against SciPy's 15000)."
+    ),
     (
         "The timed JAX window calls simsopt_jax.solve.dispatch.minimize directly on "
         "the cache-marked private problem._solver_value_and_grad_fn -- the same "
@@ -463,13 +502,74 @@ def refused_solve_rows(rows: Sequence[SolveRow], *, budget: int) -> list[SolveRo
     ]
 
 
+#: The states a leg evaluates value and gradient at.  ``initial`` is matched
+#: across lanes by construction (same builder, same fingerprint); ``probe`` is
+#: whatever the operator handed ``--evaluate-at`` and is matched because both
+#: lanes are handed the same file; ``final`` is this leg's own endpoint and is
+#: lane-specific by definition, so it is reported and never compared.
+MATCHED_EVALUATION_STATES = ("initial", "probe")
+EVALUATION_STATES = (*MATCHED_EVALUATION_STATES, "final")
+
+
+def evaluate_states(
+    value_and_gradient: Callable[
+        [NDArray[np.float64]], tuple[float, NDArray[np.float64]]
+    ],
+    *,
+    initial_parameters: NDArray[np.float64],
+    final_parameters: NDArray[np.float64],
+    probe_parameters: NDArray[np.float64] | None,
+) -> dict[str, dict[str, object]]:
+    """Value and gradient at every state this leg can be pinned to.
+
+    One owner for *which* states are evaluated and what is kept: the caller
+    supplies only its lane's evaluator. Keyed by :data:`EVALUATION_STATES`;
+    ``probe`` is absent when ``--evaluate-at`` was omitted. Full fp64 values and
+    gradient arrays are returned — the artifact stamps scalars, the endpoint
+    archive stores the arrays.
+    """
+    import numpy as np
+
+    if (
+        probe_parameters is not None
+        and probe_parameters.shape != initial_parameters.shape
+    ):
+        raise ProbeConventionError(
+            f"--evaluate-at supplied a {probe_parameters.shape} state but this "
+            f"leg's DOF vector is {initial_parameters.shape}: the state belongs "
+            "to a different configuration or scale, so evaluating there would "
+            "compare two different problems"
+        )
+    states = {
+        "initial": initial_parameters,
+        "probe": probe_parameters,
+        "final": final_parameters,
+    }
+    evaluated: dict[str, dict[str, object]] = {}
+    for name, parameters in states.items():
+        if parameters is None:
+            continue
+        value, gradient = value_and_gradient(np.asarray(parameters, dtype=np.float64))
+        evaluated[name] = {
+            "objective": float(value),
+            "gradient": np.ascontiguousarray(np.asarray(gradient, dtype=np.float64)),
+        }
+    return evaluated
+
+
 def run_native_leg(
-    shared: SharedInputs, *, budget: int, maxcor: int, repeat: int
+    shared: SharedInputs,
+    *,
+    budget: int,
+    maxcor: int,
+    repeat: int,
+    probe_parameters: NDArray[np.float64] | None,
 ) -> tuple[list[SolveRow], dict[str, object]]:
     """SciPy L-BFGS-B over the simsopt objective; timed window = ``minimize``.
 
     Returns the timed rows — which the caller gates and serializes — and the
-    rest of the leg payload.
+    rest of the leg payload. ``shared``'s live geometry is left at the DOFs it
+    arrived with, so the two lanes may be run against one ``SharedInputs``.
     """
     import numpy as np
     from scipy.optimize import minimize
@@ -582,6 +682,18 @@ def run_native_leg(
         print(
             f"native solve {index} seconds={seconds:.6f} nit={result.nit}", flush=True
         )
+    final_parameters = np.asarray(result.x, dtype=np.float64)
+    evaluations = evaluate_states(
+        value_and_gradient,
+        initial_parameters=initial_parameters,
+        final_parameters=final_parameters,
+        probe_parameters=probe_parameters,
+    )
+    # ``shared`` holds one live simsopt geometry, and every ``objective.x =``
+    # above — the solve's and the evaluations' — mutated it.  Hand it back as
+    # found so a caller that runs both lanes in one process (the matched-state
+    # parity test) starts the second lane from the coordinates the first did.
+    objective.x = initial_parameters
     return rows, {
         "driver": "scipy_lbfgsb",
         "policy": {
@@ -594,8 +706,9 @@ def run_native_leg(
         "construction_seconds": construction_seconds,
         "dof_count": int(initial_parameters.size),
         "initial_parameters": initial_parameters,
-        "final_parameters": np.asarray(result.x, dtype=np.float64),
+        "final_parameters": final_parameters,
         "final_objective": float(result.fun),
+        "evaluations": evaluations,
     }
 
 
@@ -606,8 +719,10 @@ def run_jax_leg(
     maxcor: int,
     repeat: int,
     sample_tile: int | None,
+    probe_parameters: NDArray[np.float64] | None,
+    jax_driver: str = "simsopt_lbfgsb",
 ) -> tuple[list[SolveRow], dict[str, object]]:
-    """The mirror's fused on-device L-BFGS-B lane; timed window = ``minimize``.
+    """The mirror's device L-BFGS-B lane; timed window = ``minimize``.
 
     Returns the timed rows — which the caller gates and serializes — and the
     rest of the leg payload.
@@ -622,6 +737,7 @@ def run_jax_leg(
     )
     from simsopt_jax.solve.dispatch import minimize
     from simsopt_jax.solve.driver import Driver
+    from simsopt_jax.solve.scipy.contracts import ScipyLBFGSBOptions
     from simsopt_jax.solve.serial import TraceableScalarProblem
     from simsopt_jax.solve.simsopt.contracts import SimsoptLBFGSBOptions
     from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
@@ -676,12 +792,23 @@ def run_jax_leg(
     jax.block_until_ready(initial_device)
     construction_seconds = time.perf_counter() - construction_start
 
-    options = SimsoptLBFGSBOptions(
-        maxiter=budget,
-        maxcor=maxcor,
-        ftol=MATCHED_TOLERANCE,
-        gtol=MATCHED_TOLERANCE,
-    )
+    # One matched policy, spelled in each route's own options class.  The SciPy
+    # route builds it through ``ScipyLBFGSBOptions.native_matched``, the one
+    # owner of "what a native script that names only maxiter/maxcor/tol means",
+    # so this lane and the shipped mirror cannot drift apart silently.
+    if jax_driver == "scipy_lbfgsb":
+        driver_choice = Driver.SCIPY_LBFGSB
+        options = ScipyLBFGSBOptions.native_matched(
+            maxiter=budget, maxcor=maxcor, tol=MATCHED_TOLERANCE
+        )
+    else:
+        driver_choice = Driver.SIMSOPT_LBFGSB
+        options = SimsoptLBFGSBOptions(
+            maxiter=budget,
+            maxcor=maxcor,
+            ftol=MATCHED_TOLERANCE,
+            gtol=MATCHED_TOLERANCE,
+        )
     # The cache-marked solver callable, exactly as ``serial_solve_jax`` passes it
     # (``benchmarks/stage_two_finitebuild_native_gpu.py::_leg_jax_solve``): the
     # public bound method is unmarked, so the fused L-BFGS executable cache would
@@ -694,7 +821,7 @@ def run_jax_leg(
         return minimize(
             solver_value_and_grad,
             initial_device,
-            driver=Driver.SIMSOPT_LBFGSB,
+            driver=driver_choice,
             options=options,
         )
 
@@ -721,13 +848,34 @@ def run_jax_leg(
             )
         )
         print(f"jax solve {index} seconds={seconds:.6f} nit={result.nit}", flush=True)
+
+    # Outside every timed window: the public bound method, so this is the same
+    # evaluator ``serial_solve_jax`` reports its bounded objective from, and the
+    # comparable half of a cross-lane check that endpoint coordinates are not.
+    def value_and_gradient(parameters: NDArray[np.float64]):
+        value_device, gradient_device = problem.value_and_grad(
+            jax.device_put(np.asarray(parameters, dtype=np.float64), device)
+        )
+        value, gradient = jax.device_get(
+            jax.block_until_ready((value_device, gradient_device))
+        )
+        return float(value), np.asarray(gradient, dtype=np.float64)
+
+    final_parameters = np.asarray(result.x, dtype=np.float64)
+    evaluations = evaluate_states(
+        value_and_gradient,
+        initial_parameters=initial_parameters,
+        final_parameters=final_parameters,
+        probe_parameters=probe_parameters,
+    )
     devices = [
         {"platform": str(item.platform), "kind": str(item.device_kind)}
         for item in jax.local_devices()
     ]
     return rows, {
-        "driver": "simsopt_lbfgsb",
+        "driver": jax_driver,
         "policy": {
+            "options_type": type(options).__name__,
             **asdict(options),
             "step_observer_attached": False,
             "sample_tile": sample_tile,
@@ -735,8 +883,9 @@ def run_jax_leg(
         "construction_seconds": construction_seconds,
         "dof_count": int(initial_parameters.size),
         "initial_parameters": initial_parameters,
-        "final_parameters": np.asarray(result.x, dtype=np.float64),
+        "final_parameters": final_parameters,
         "final_objective": float(result.fun),
+        "evaluations": evaluations,
         "jax_devices": devices,
         "solve_device": None if device is None else str(device.platform),
     }
@@ -859,18 +1008,46 @@ def validate_endpoint_path(path: Path) -> Path:
     return path
 
 
+def read_probe_state(path: Path | None) -> NDArray[np.float64] | None:
+    """The ``--evaluate-at`` state: one endpoint archive's ``dofs``, or ``None``.
+
+    The state is taken from the archive's coordinates rather than its filename,
+    so a leg's artifact records which numbers it was actually handed.
+    """
+    import numpy as np
+
+    if path is None:
+        return None
+    with np.load(path, allow_pickle=False) as archive:
+        return np.ascontiguousarray(np.asarray(archive["dofs"], dtype=np.float64))
+
+
 def write_endpoint(
-    path: Path, *, metadata: dict[str, object], leg: dict[str, object]
+    path: Path,
+    *,
+    metadata: dict[str, object],
+    leg: dict[str, object],
+    evaluations: Mapping[str, Mapping[str, object]],
 ) -> None:
-    """Publish final DOFs and objective for cross-lane comparison.
+    """Publish final DOFs, objective and matched-state evaluations for ``--compare``.
 
     ``np.savez`` is handed an open ``"xb"`` handle rather than a path: the
     handle is the overwrite refusal (:func:`validate_endpoint_path` checks it
     early, the kernel enforces it at the write), and passing a handle also
     stops ``np.savez`` appending a second ``.npz`` to the operator's path.
+    Each evaluated state contributes ``<state>_objective`` and
+    ``<state>_gradient`` arrays; ``probe_dofs`` records the state
+    ``--evaluate-at`` supplied so a reader never has to trust the filename.
     """
     import numpy as np
 
+    arrays = {
+        f"{state}_{quantity}": np.asarray(evaluation[quantity], dtype=np.float64)
+        for state, evaluation in evaluations.items()
+        for quantity in ("objective", "gradient")
+    }
+    if "probe" in evaluations:
+        arrays["probe_dofs"] = np.asarray(leg["probe_parameters"], dtype=np.float64)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "xb") as handle:
         np.savez(
@@ -881,6 +1058,7 @@ def write_endpoint(
             metadata=np.asarray(
                 json.dumps(metadata, sort_keys=True, separators=(",", ":"))
             ),
+            **arrays,
         )
 
 
@@ -919,6 +1097,124 @@ def _endpoint_field(metadata: Mapping[str, object], name: str, path: Path) -> ob
     return metadata[name]
 
 
+#: The endpoint-coordinate wording this probe stands behind, carried in every
+#: ``--compare`` report so a reader of the JSON alone cannot restate it as a
+#: parity gate.  It is a statement about iteration-capped L-BFGS-B, not about
+#: either lane: the reference spread is measured, not assumed.
+ENDPOINT_COORDINATE_CRITERION = (
+    "Endpoint coordinates are reported, not a parity criterion. Both lanes stop "
+    "at the iteration cap (scipy status 1, success false), so neither endpoint "
+    "is a converged stationary point and neither is reproducible: the native "
+    "lane's own endpoint moves under nothing but a change of OMP_NUM_THREADS, "
+    "by the same order as the cross-lane difference. The comparable quantity is "
+    "the evaluator at a matched state -- see matched_state_evaluator, which is "
+    "bounded against this bucket."
+)
+
+
+def _state_evaluations(
+    archive: np.lib.npyio.NpzFile, path: Path
+) -> dict[str, dict[str, object]]:
+    """Matched-state value/gradient pairs this archive retained, by state name.
+
+    An archive written before :func:`evaluate_states` existed retains none, and
+    that is reported as a missing state rather than refused: the published
+    endpoints of earlier campaigns are still comparable on the coordinates they
+    do carry.
+    """
+    import numpy as np
+
+    stored = set(archive.files)
+    return {
+        state: {
+            "objective": float(np.asarray(archive[f"{state}_objective"])),
+            "gradient": np.asarray(archive[f"{state}_gradient"], dtype=np.float64),
+            "source": str(path),
+        }
+        for state in EVALUATION_STATES
+        if {f"{state}_objective", f"{state}_gradient"} <= stored
+    }
+
+
+def _difference_report(
+    first: float | NDArray[np.float64],
+    second: float | NDArray[np.float64],
+    *,
+    rtol: float,
+    atol: float,
+) -> dict[str, object]:
+    """Absolute/relative difference of two fp64 quantities against one bucket."""
+    import numpy as np
+
+    first_array = np.atleast_1d(np.asarray(first, dtype=np.float64))
+    second_array = np.atleast_1d(np.asarray(second, dtype=np.float64))
+    absolute = np.abs(first_array - second_array)
+    scale = np.maximum(np.abs(second_array), np.finfo(np.float64).tiny)
+    return {
+        "max_abs_diff": float(np.max(absolute)),
+        "max_rel_diff": float(np.max(absolute / scale)),
+        "within_bucket": bool(np.all(absolute <= atol + rtol * np.abs(second_array))),
+    }
+
+
+def matched_state_report(
+    first_states: Mapping[str, Mapping[str, object]],
+    second_states: Mapping[str, Mapping[str, object]],
+    *,
+    rtol: float,
+    atol: float,
+) -> dict[str, object]:
+    """Evaluator agreement at every state both legs were handed.
+
+    Only :data:`MATCHED_EVALUATION_STATES` are compared: ``final`` is each
+    leg's own endpoint, a different state on each side, so comparing it would
+    be the endpoint-coordinate mistake wearing a gradient's name.  Its norms
+    are reported per side instead.
+    """
+    import numpy as np
+
+    compared: dict[str, object] = {}
+    for state in MATCHED_EVALUATION_STATES:
+        if state not in first_states or state not in second_states:
+            continue
+        compared[state] = {
+            "objective_a": first_states[state]["objective"],
+            "objective_b": second_states[state]["objective"],
+            "objective": _difference_report(
+                first_states[state]["objective"],
+                second_states[state]["objective"],
+                rtol=rtol,
+                atol=atol,
+            ),
+            "gradient": _difference_report(
+                first_states[state]["gradient"],
+                second_states[state]["gradient"],
+                rtol=rtol,
+                atol=atol,
+            ),
+        }
+    return {
+        "bucket": TOLERANCE_BUCKET,
+        "states_compared": sorted(compared),
+        "states_retained_a": sorted(first_states),
+        "states_retained_b": sorted(second_states),
+        "comparisons": compared,
+        "endpoint_gradient_norms": {
+            side: (
+                None
+                if "final" not in states
+                else {
+                    "max_abs": float(np.max(np.abs(states["final"]["gradient"]))),
+                    "l2": float(np.linalg.norm(states["final"]["gradient"])),
+                    "objective": states["final"]["objective"],
+                }
+            )
+            for side, states in (("a", first_states), ("b", second_states))
+        },
+        "endpoint_gradient_compared": False,
+    }
+
+
 def compare_endpoints(first: Path, second: Path) -> dict[str, object]:
     """Report endpoint agreement against the ``native_workflow`` bucket."""
     import numpy as np
@@ -928,10 +1224,12 @@ def compare_endpoints(first: Path, second: Path) -> dict[str, object]:
         first_dofs = np.asarray(archive["dofs"], dtype=np.float64)
         first_objective = float(archive["objective"])
         first_metadata = json.loads(str(archive["metadata"].item()))
+        first_states = _state_evaluations(archive, first)
     with np.load(second, allow_pickle=False) as archive:
         second_dofs = np.asarray(archive["dofs"], dtype=np.float64)
         second_objective = float(archive["objective"])
         second_metadata = json.loads(str(archive["metadata"].item()))
+        second_states = _state_evaluations(archive, second)
 
     mismatched = {
         name: (
@@ -996,6 +1294,12 @@ def compare_endpoints(first: Path, second: Path) -> dict[str, object]:
             },
             "gated": False,
         },
+        # The wording the endpoint numbers above are allowed to carry, and the
+        # bounded criterion that replaces them.
+        "endpoint_coordinate_criterion": ENDPOINT_COORDINATE_CRITERION,
+        "matched_state_evaluator": matched_state_report(
+            first_states, second_states, rtol=rtol, atol=atol
+        ),
     }
     return report
 
@@ -1072,6 +1376,33 @@ def _parse(argv: list[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--jax-driver",
+        choices=JAX_DRIVERS,
+        default="simsopt_lbfgsb",
+        help=(
+            "JAX lane optimizer route; like --jax-platforms it carries a "
+            "default, so it is stamped only into a JAX artifact and ignored on "
+            "--lane native rather than refused. "
+            "simsopt_lbfgsb is the fused device port every published mc10/mc400 "
+            "row was taken on; scipy_lbfgsb is the shipped mirror's live route "
+            "(SciPy L-BFGS-B over the device objective at the native example's "
+            "policy) and is what a row claiming to time the mirror must use."
+        ),
+    )
+    parser.add_argument(
+        "--evaluate-at",
+        type=Path,
+        default=None,
+        metavar="STATE.npz",
+        help=(
+            "Endpoint NPZ whose 'dofs' this leg also evaluates value and gradient "
+            "at, outside every timed window. --compare compares this state only "
+            "when both legs of the pair were handed the SAME file, so an endpoint "
+            "check means re-running both lanes at one lane's endpoint; endpoint "
+            "coordinates themselves are reported, never a parity criterion."
+        ),
+    )
+    parser.add_argument(
         "--compile-cache",
         type=Path,
         default=None,
@@ -1138,6 +1469,7 @@ def _dry_run(arguments: argparse.Namespace) -> None:
         f"mpi_ranks 1 omp_sweep {list(OMP_SWEEP)} matched_maxcor {list(MATCHED_MAXCOR)}"
     )
     print(f"matched_tolerance {MATCHED_TOLERANCE}")
+    print(f"jax_drivers {list(JAX_DRIVERS)} (default simsopt_lbfgsb)")
     # A suggested alternation for the operator, printed and never published:
     # nothing here observed it being followed.  What ran is the ledger's.
     print(
@@ -1160,6 +1492,7 @@ def _run_leg(arguments: argparse.Namespace) -> int:
             f"{observed_omp!r}; the pin did not survive to the interpreter"
         )
     shared = build_shared_inputs(arguments.scale)
+    probe_parameters = read_probe_state(arguments.evaluate_at)
     started_ns = time.time_ns()
     if arguments.lane == "native":
         rows, leg = run_native_leg(
@@ -1167,6 +1500,7 @@ def _run_leg(arguments: argparse.Namespace) -> int:
             budget=arguments.budget,
             maxcor=arguments.maxcor,
             repeat=arguments.repeat,
+            probe_parameters=probe_parameters,
         )
     else:
         rows, leg = run_jax_leg(
@@ -1175,6 +1509,8 @@ def _run_leg(arguments: argparse.Namespace) -> int:
             maxcor=arguments.maxcor,
             repeat=arguments.repeat,
             sample_tile=arguments.sample_tile,
+            probe_parameters=probe_parameters,
+            jax_driver=arguments.jax_driver,
         )
     finished_ns = time.time_ns()
     # Taken here rather than at entry: libgomp is mapped by the leg's own
@@ -1213,7 +1549,27 @@ def _run_leg(arguments: argparse.Namespace) -> int:
         )
     initial_parameters = np.ascontiguousarray(leg.pop("initial_parameters"))
     final_parameters = np.ascontiguousarray(leg.pop("final_parameters"))
+    evaluations = leg.pop("evaluations")
     initial_sha256 = array_sha256(initial_parameters)
+    # Scalars and fingerprints in the artifact; the fp64 arrays themselves go to
+    # the endpoint archive, which is the file --compare reads.
+    leg["evaluated_states"] = {
+        state: {
+            "objective": evaluation["objective"],
+            "gradient_max_abs": float(np.max(np.abs(evaluation["gradient"]))),
+            "gradient_l2": float(np.linalg.norm(evaluation["gradient"])),
+            "gradient_sha256": array_sha256(
+                np.ascontiguousarray(evaluation["gradient"])
+            ),
+        }
+        for state, evaluation in evaluations.items()
+    }
+    leg["evaluate_at"] = (
+        None if arguments.evaluate_at is None else str(arguments.evaluate_at)
+    )
+    leg["probe_state_sha256"] = (
+        None if probe_parameters is None else array_sha256(probe_parameters)
+    )
     samples = sample_identity(shared)
     identity = runtime_identity(arguments.lane)
     # What the OpenMP runtime reports, next to what the pin requested: the two
@@ -1225,6 +1581,7 @@ def _run_leg(arguments: argparse.Namespace) -> int:
     # that could not have moved its number.
     lane_options: dict[str, object] = (
         {
+            "jax_driver": arguments.jax_driver,
             "sample_tile": arguments.sample_tile,
             "compile_cache_dir": (
                 None
@@ -1296,6 +1653,9 @@ def _run_leg(arguments: argparse.Namespace) -> int:
                 "training_sha256": samples["training_sha256"],
                 "initial_parameters_sha256": initial_sha256,
                 "final_objective": leg["final_objective"],
+                "evaluated_states": sorted(evaluations),
+                "probe_state_sha256": leg["probe_state_sha256"],
+                "endpoint_coordinate_criterion": ENDPOINT_COORDINATE_CRITERION,
                 "artifact": str(arguments.output),
                 **lane_options,
             },
@@ -1303,7 +1663,9 @@ def _run_leg(arguments: argparse.Namespace) -> int:
                 "final_parameters": final_parameters,
                 "initial_parameters": initial_parameters,
                 "final_objective": leg["final_objective"],
+                "probe_parameters": probe_parameters,
             },
+            evaluations=evaluations,
         )
         print(f"wrote {arguments.endpoint_out}", flush=True)
     return 0
