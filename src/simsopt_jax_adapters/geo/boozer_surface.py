@@ -2047,9 +2047,7 @@ def _forward_mode_identity_basis(size, dtype):
     moved across with one explicit transfer, so it can be constructed at host
     setup under ``jax.transfer_guard("disallow")``.
     """
-    return _explicit_device_array(
-        np.eye(int(size), dtype=np.dtype(dtype)), dtype=dtype
-    )
+    return _explicit_device_array(np.eye(int(size), dtype=np.dtype(dtype)), dtype=dtype)
 
 
 def _surface_geometry_and_derivatives_from_dofs(
@@ -7279,14 +7277,16 @@ class BoozerSurfaceJAX(Optimizable):
         res_fn = self._get_traceable_exact_residual(weight_inv_modB)
         if value_jacobian_fn is None:
             result = solver_contract.solver(
-                res_fn, x0,
+                res_fn,
+                x0,
                 maxiter=self.options["newton_maxiter"],
                 tol=self.options["newton_tol"],
                 args=(certificate_coil_set_spec,),
             )
         else:
             result = _optimizer_jax._newton_exact_traceable_c2(
-                res_fn, x0,
+                res_fn,
+                x0,
                 maxiter=self.options["newton_maxiter"],
                 tol=self.options["newton_tol"],
                 args=(certificate_coil_set_spec,),
@@ -7424,7 +7424,11 @@ class BoozerSurfaceJAX(Optimizable):
         )
 
     def _make_run_code_traceable_exact_benchmark_variant(
-        self, variant: object, *, analytic: bool = False, condition_estimate: bool = True,
+        self,
+        variant: object,
+        *,
+        analytic: bool = False,
+        condition_estimate: bool = True,
     ):
         """Build a C1/C2 compiled array kernel and host reporting projection."""
 
@@ -7443,7 +7447,8 @@ class BoozerSurfaceJAX(Optimizable):
         weight_inv_modB = self.options["weight_inv_modB"]
         value_jacobian_fn = (
             self._make_analytic_exact_value_jacobian(weight_inv_modB)
-            if analytic else None
+            if analytic
+            else None
         )
 
         def array_kernel(
@@ -8215,7 +8220,6 @@ class BoozerSurfaceJAX(Optimizable):
 
         optimize_G = G is not None
         G_provided = optimize_G
-        s = self.surface
         x0 = self._pack_decision_vector(iota, G)
         method = self._resolve_optimizer_method(optimize_G=optimize_G)
         objective_args = ()
@@ -8237,7 +8241,6 @@ class BoozerSurfaceJAX(Optimizable):
         _initial_value, initial_grad = _ls_newton_objective_value_and_grad(
             obj_fn, x0, objective_args
         )
-        initial_norm = _ls_newton_gradient_l2(initial_grad)
 
         result = self._run_newton_polish_for_method(
             method,
@@ -8298,7 +8301,9 @@ class BoozerSurfaceJAX(Optimizable):
         bundle = self._get_analytic_penalty_bundle(
             optimize_G, weight_inv_modB, constraint_weight
         )
-        runner = bundle.newton_runner(maxiter=int(maxiter), tol=float(tol), stab=float(stab))
+        runner = bundle.newton_runner(
+            maxiter=int(maxiter), tol=float(tol), stab=float(stab)
+        )
         result = runner(x0, self.coil_set_spec)
         return self._finalize_ls_newton_result(
             result,
@@ -8399,9 +8404,7 @@ class BoozerSurfaceJAX(Optimizable):
             committed_fun = result["fun"]
             committed_success = effective_success
         else:
-            sdofs_final, iota_out, G_out = self._unpack_decision_vector(
-                x0, optimize_G
-            )
+            sdofs_final, iota_out, G_out = self._unpack_decision_vector(x0, optimize_G)
             committed_grad = initial_grad
             H = None
             committed_fun = initial_value

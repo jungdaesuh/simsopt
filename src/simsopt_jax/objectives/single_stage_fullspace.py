@@ -401,7 +401,7 @@ _BOOZER_CORE = SourceRef(
 )
 _BOOZER_EXACT = SourceRef(
     path="src/simsopt_jax_adapters/geo/boozer_surface.py",
-    sha256="9e43747af12c8e2422c1f74bc92fcdd9b887cf35d60912823c30d986f8f77479",
+    sha256="1e4f7b895c70878a1030d38869c932933ce7241fea535314a460d14dc47b14c8",
     symbol="exact masked residual and signed volume label",
 )
 
