@@ -808,6 +808,7 @@ def _assert_persistent_cache_case_reuses_small_kernel(case_name: str) -> None:
     (
         "case_programmatic_backend_persistent_cache_shared_small_kernel",
         "case_env_backend_persistent_cache_shared_small_kernel",
+        "case_env_backend_persistent_cache_applies_without_runtime_config",
     ),
 )
 def test_backend_persistent_cache_reuses_small_kernel_across_processes(case_name):

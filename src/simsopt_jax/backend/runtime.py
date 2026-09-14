@@ -679,6 +679,7 @@ def get_runtime_jax_device(mode: str | None = None):
 
     import jax
 
+    _apply_compilation_cache_config(jax, get_backend_config())
     backend_name = _runtime_jax_backend_name(platform)
     return jax.local_devices(backend=backend_name)[0]
 
@@ -775,8 +776,10 @@ def _run_backend_cache_clear_callbacks() -> None:
 
 def _reset_backend_runtime_caches() -> None:
     global _cached_backend_policy, _cached_distributed_runtime_config
+    global _compilation_cache_applied_dir
     with _backend_runtime_lock:
         _cached_backend_policy = None
+        _compilation_cache_applied_dir = None
         _invalidate_distributed_tuning_caches()
         _cached_distributed_runtime_config = None
         _warned_jax_fallbacks.clear()
@@ -1102,6 +1105,37 @@ def _apply_cuda_fusion_autotuner_env(config: BackendConfig) -> None:
     )
 
 
+_compilation_cache_applied_dir: str | None = None
+
+
+def _apply_compilation_cache_config(jax, config: BackendConfig) -> None:
+    """Point JAX's persistent compilation cache at the resolved directory.
+
+    Called from every runtime entry that already holds ``jax`` for a resolved
+    config -- ``apply_jax_runtime_config`` and ``get_runtime_jax_device`` -- so a
+    process configured through the environment alone (every example mirror,
+    every driver child) reaches the cache before its first compile instead of
+    compiling cold forever. Idempotent per resolved directory.
+    """
+    global _compilation_cache_applied_dir
+    if config.backend != "jax" or config.compilation_cache_dir is None:
+        return
+    with _backend_runtime_lock:
+        if _compilation_cache_applied_dir == config.compilation_cache_dir:
+            return
+        _compilation_cache_applied_dir = config.compilation_cache_dir
+    jax.config.update("jax_compilation_cache_dir", config.compilation_cache_dir)
+    jax.config.update("jax_persistent_cache_min_compile_time_secs", 0.0)
+    jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+    # Follow JAX's documented GPU persistent-cache setting. Wider XLA cache
+    # modes can force nvlink through container CUDA toolkits that differ
+    # from the NVIDIA libraries bundled with the JAX wheel.
+    jax.config.update(
+        "jax_persistent_cache_enable_xla_caches",
+        "xla_gpu_per_fusion_autotune_cache_dir",
+    )
+
+
 def apply_jax_runtime_config() -> None:
     """Apply the resolved JAX runtime settings to the active process."""
     config = get_backend_config()
@@ -1125,17 +1159,7 @@ def apply_jax_runtime_config() -> None:
     jax.config.update("jax_disable_jit", config.disable_jit)
     if config.transfer_guard is not None:
         jax.config.update("jax_transfer_guard", config.transfer_guard)
-    if config.compilation_cache_dir is not None:
-        jax.config.update("jax_compilation_cache_dir", config.compilation_cache_dir)
-        jax.config.update("jax_persistent_cache_min_compile_time_secs", 0.0)
-        jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
-        # Follow JAX's documented GPU persistent-cache setting. Wider XLA cache
-        # modes can force nvlink through container CUDA toolkits that differ
-        # from the NVIDIA libraries bundled with the JAX wheel.
-        jax.config.update(
-            "jax_persistent_cache_enable_xla_caches",
-            "xla_gpu_per_fusion_autotune_cache_dir",
-        )
+    _apply_compilation_cache_config(jax, config)
     _validate_initialized_jax_runtime(jax, config)
 
 
