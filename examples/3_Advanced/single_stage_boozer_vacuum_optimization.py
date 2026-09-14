@@ -31,14 +31,14 @@ from simsopt.geo import (
     boozer_surface_residual,
 )
 from simsopt.objectives import QuadraticPenalty
-from simsopt.optimization_endpoint import (
-    accepted_step_contract,
-    certify_optimization_endpoint,
-)
 from simsopt.single_stage_boozer_vacuum import (
     NATIVE_ITERATIONS,
     OUTER_GRADIENT_TOLERANCE,
     scientific_success_for_scale,
+)
+from simsopt_contracts.optimization_endpoint import (
+    accepted_step_contract,
+    certify_optimization_endpoint,
 )
 
 EXAMPLE_ID = "native-single-stage-boozer-vacuum-optimization"

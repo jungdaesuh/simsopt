@@ -20,10 +20,6 @@ from examples.jax.parity.input_bundle import (
 )
 from examples.jax.parity.measurement import MeasurementExecution
 from examples.jax.parity.runtime import ParityLane
-from simsopt.optimization_endpoint import (
-    OptimizationEndpointCertificate,
-    certify_optimization_endpoint,
-)
 from simsopt.optimization_trajectory import (
     OptimizationMeasurementWindow,
     OptimizationTrajectoryRecorder,
@@ -33,6 +29,10 @@ from simsopt.single_stage_boozer_vacuum import (
     JAX_OPTAX_DRIVER_ID,
     JAX_PARITY_DRIVER_ID,
     OUTER_GRADIENT_TOLERANCE,
+)
+from simsopt_contracts.optimization_endpoint import (
+    OptimizationEndpointCertificate,
+    certify_optimization_endpoint,
 )
 from simsopt_jax.examples import ExecutionScale, scalar_example_driver
 from simsopt_jax.solve.driver import Driver
