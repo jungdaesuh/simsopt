@@ -62,7 +62,10 @@ whole ``OMP_``/``JAX_``/``XLA_``/``SIMSOPT_``/``CUDA_``/``MPI4PY_`` family out
 of the inherited shell first, then pin what the leg needs.  Popping only the
 variables one thinks to name leaves ``SIMSOPT_BACKEND_MODE``, ``XLA_FLAGS``,
 ``KMP_AFFINITY``, ``OMP_PROC_BIND``, ``CUDA_VISIBLE_DEVICES`` and
-``JAX_COMPILATION_CACHE_DIR`` alive inside a "native" denominator.  The CI
+``JAX_COMPILATION_CACHE_DIR`` alive inside a "native" denominator.  The mirror
+lane re-pins its production backend mode explicitly (``--backend-mode``,
+default ``jax_gpu_fast``): unset, the runtime falls back to an unconfigured
+default that ran the stage-two mirror ~7x slower (2026-09-13).  The CI
 family is the one thing ``pinned_environment`` does not cover -- ``CI``,
 ``GITHUB_ACTIONS`` and ``IN_GITHUB_ACTIONS`` match none of its prefixes -- so
 this module pops those three on top and records that it did.
@@ -88,9 +91,9 @@ faster at the same work".
 *Dimensions are published per lane, never as one shared number.*  The policy
 mismatch above is not the only one: the two stage-two native scripts leave
 ``numquadpoints`` at the ``create_equally_spaced_curves`` default of
-``15 * order = 75`` while their mirrors pass ``numquadpoints=100``, so the JAX
-lane evaluates 1.33x more Biot-Savart pairs per evaluation than the lane it is
-being timed against.  A single ``declared_dimensions`` block cannot state that,
+``15 * order = 75``; the mirrors passed ``numquadpoints=100`` until 2026-09-13,
+when they were matched to 75, so older receipts timed a JAX lane evaluating
+1.33x more Biot-Savart pairs.  A single ``declared_dimensions`` block cannot state that,
 and stating only one of the two numbers publishes a per-evaluation work figure
 that is wrong for one lane by that factor.  Each family therefore derives its
 pair count per lane from ``coils * curve_quadrature_points * surface_points``
@@ -101,9 +104,11 @@ pair count per lane from ``coils * curve_quadrature_points * surface_points``
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import math
 import os
+import shutil
 import statistics
 import subprocess
 import sys
@@ -131,6 +136,7 @@ from benchmarks.probe_conventions import (
     observed_openmp_threads,
     pinned_environment,
     runtime_identity,
+    sha256_file,
     ulp_distance,
     write_probe_artifact,
 )
@@ -226,6 +232,33 @@ NATIVE_LBFGSB_POLICY: Mapping[str, object] = {
     "maxiter_symbol": "MAXITER",
 }
 
+#: SciPy's own L-BFGS-B defaults, for the options a native script leaves unnamed.
+#: ``scipy.optimize.fmin_l_bfgs_b`` carries both in its public signature, and
+#: ``ScipyLBFGSBOptions`` (src/simsopt_jax/solve/scipy/contracts.py) repeats them
+#: as its dataclass defaults -- which is what makes an option named on one lane
+#: comparable with the same option left unnamed on the other.  A native lane
+#: that names neither and a mirror lane that passes 15000/20 are running the
+#: same rule, and :func:`_policy_comparison` must be able to say so.
+SCIPY_LBFGSB_DEFAULTS: Mapping[str, object] = {"maxfun": 15000, "maxls": 20}
+
+#: The stopping rule, option by option.  ``tol`` is not in this list because it
+#: is not an option: ``scipy.optimize.minimize`` expands it into ``ftol`` and
+#: ``gtol`` for L-BFGS-B, and the two lanes must be compared on what the solver
+#: actually reads.
+COMPARED_LBFGSB_OPTIONS = ("maxiter", "maxcor", "ftol", "gtol", "maxfun", "maxls")
+
+#: Vector observables retained at full precision, per leg, in the npz beside the
+#: artifact.  JSON carries them too; the archive is what a later comparison step
+#: loads without re-parsing a megabyte of text, and it is written for whichever
+#: of these names the mirror publishes.
+ENDPOINT_VECTOR_OBSERVABLES = (
+    "initial_parameters",
+    "start_parameters",
+    "start_gradient",
+    "solution",
+    "final_gradient",
+)
+
 #: RCLS constants shared by the native example and its mirror.
 RCLS_REGULARIZATION_WEIGHT = 1.0e-10
 RCLS_PORT_GAP = 0.04
@@ -277,7 +310,7 @@ def _mirror_dimensions(
     The native scripts and their mirrors do not agree about curve quadrature:
     the stage-two pair leaves ``numquadpoints`` unset, taking
     ``create_equally_spaced_curves``' ``15 * order`` default, while the mirrors
-    pass ``numquadpoints=100`` explicitly.  A single shared
+    pass ``numquadpoints`` explicitly (100 before 2026-09-13, 75 since).  A single shared
     ``biot_savart_pairs_per_evaluation`` therefore cannot be true of both lanes,
     and publishing one of the two numbers as if it were shared overstates the
     native lane's work by the ratio between them.
@@ -362,8 +395,8 @@ _STAGE_TWO_OBSERVABLES = (
 #: probe a consumer of an interface the module does not offer.
 _STAGE_TWO_MIRROR_MAXCOR_SYMBOL = (
     "src/simsopt_jax/examples/stage_two_standard.py"
-    "::_STAGE_TWO_LBFGS_HISTORY_SIZE (=10, consumed by "
-    "::solve_standard_stage_two for both of its serial_solve_jax stages)"
+    "::_STAGE_TWO_LBFGS_HISTORY_SIZE (=300, consumed by "
+    "::solve_standard_stage_two for both of its stages under either driver)"
 )
 
 #: How the native lane gets 75 quadrature points without ever naming a number:
@@ -396,11 +429,11 @@ MIRROR_FAMILIES: Mapping[str, MirrorFamily] = {
         ),
         evaluation_marker="║∇J║",
         mirror_policy={
-            "optimizer": "Driver.SIMSOPT_LBFGSB via serial_solve_jax",
-            "maxcor": 10,
+            "optimizer": "Driver.SCIPY_LBFGSB via dispatch.minimize (SciPy L-BFGS-B over the device objective)",
+            "maxcor": 300,
             "maxcor_symbol": _STAGE_TWO_MIRROR_MAXCOR_SYMBOL,
-            "rtol": 1.0e-12,
-            "atol": 1.0e-10,
+            "rtol": 1.0e-15,
+            "atol": 1.0e-15,
             "source": "examples/jax/2_Intermediate/stage_two_optimization.py::solve",
         },
         declared_dimensions=_mirror_dimensions(
@@ -417,10 +450,10 @@ MIRROR_FAMILIES: Mapping[str, MirrorFamily] = {
                 ),
             ),
             mirror_quadrature=LaneQuadrature(
-                points=100,
+                points=75,
                 source=(
                     "examples/jax/2_Intermediate/stage_two_optimization.py"
-                    "::_build_problem (numquadpoints=100 at native_default)"
+                    "::_build_problem (numquadpoints=75 at native_default)"
                 ),
             ),
             shared_source=(
@@ -452,11 +485,11 @@ MIRROR_FAMILIES: Mapping[str, MirrorFamily] = {
         ),
         evaluation_marker="║∇J║",
         mirror_policy={
-            "optimizer": "Driver.SIMSOPT_LBFGSB via serial_solve_jax",
-            "maxcor": 10,
+            "optimizer": "Driver.SCIPY_LBFGSB via dispatch.minimize (SciPy L-BFGS-B over the device objective)",
+            "maxcor": 300,
             "maxcor_symbol": _STAGE_TWO_MIRROR_MAXCOR_SYMBOL,
-            "rtol": 1.0e-8,
-            "atol": 1.0e-7,
+            "rtol": 1.0e-15,
+            "atol": 1.0e-15,
             "source": (
                 "examples/jax/2_Intermediate/"
                 "stage_two_optimization_planar_coils.py::solve"
@@ -477,11 +510,11 @@ MIRROR_FAMILIES: Mapping[str, MirrorFamily] = {
                 ),
             ),
             mirror_quadrature=LaneQuadrature(
-                points=100,
+                points=75,
                 source=(
                     "examples/jax/2_Intermediate/"
                     "stage_two_optimization_planar_coils.py::_build_problem "
-                    "(numquadpoints=100 at native_default)"
+                    "(numquadpoints=75 at native_default)"
                 ),
             ),
             shared_source=(
@@ -517,11 +550,12 @@ MIRROR_FAMILIES: Mapping[str, MirrorFamily] = {
         ),
         evaluation_marker="B2Energy=",
         mirror_policy={
-            "optimizer": "Driver.SIMSOPT_LBFGSB via serial_solve_jax",
-            "maxcor": None,
-            "maxcor_expression": "min(max_steps, 300)",
+            "optimizer": "Driver.SCIPY_LBFGSB via simsopt_jax.solve.dispatch.minimize",
+            "maxcor": 300,
+            "maxcor_expression": "NATIVE_HISTORY_SIZE",
             "rtol": 1.0e-15,
-            "atol": 1.0e-8,
+            "atol": 1.0e-15,
+            "maxfun": 15000,
             "source": "examples/jax/3_Advanced/coil_forces.py::_run_stage",
         },
         declared_dimensions=_mirror_dimensions(
@@ -561,11 +595,13 @@ MIRROR_FAMILIES: Mapping[str, MirrorFamily] = {
             ),
         ),
         observable_names=(
+            "start_objective",
             "final_objective",
             "squared_flux",
             "force_objective",
             "maximum_force",
             "vacuum_energy",
+            "taylor_errors",
             "solver_success",
             "solver_status",
             "solver_iterations",
@@ -597,10 +633,11 @@ _SHARED_DISCLOSURES = (
         "the JAX leg pays it twice per solve call."
     ),
     (
-        "The fused on-device L-BFGS driver is already the mirrors' default lane "
-        "(Driver.SIMSOPT_LBFGSB -> dispatch.minimize -> fused_stepwise, "
-        "src/simsopt_jax/solve/dispatch.py::_legacy_lbfgsb_options); this probe "
-        "times what ships, it does not add a lever."
+        "This probe times what ships and adds no lever: each mirror's own solve() "
+        "selects its driver, and the three mirror families in this quartet now "
+        "select Driver.SCIPY_LBFGSB (SciPy L-BFGS-B over the device objective). "
+        "The driver each leg actually ran under is published per leg as the "
+        "solver_driver observable, and the options it ran under as solver_options."
     ),
     (
         "Every leg's environment is built by probe_conventions.pinned_environment: "
@@ -637,11 +674,42 @@ _MIRROR_DISCLOSURES = (
         "also contains interpreter startup, imports, and the whole problem build."
     ),
     (
-        "The JAX leg's solve_call_seconds is the mirror's whole solve() call, which "
-        "includes host problem construction, the five-epsilon Taylor evaluation, and "
-        "both stages -- the same content as the native leg's process wall minus "
-        "interpreter startup and VTK output. Compared against the native minimize "
-        "region alone it is conservative."
+        "Two JAX clocks are published, not one. solve_call_seconds is the mirror's "
+        "whole solve() call -- host problem construction, the five-epsilon Taylor "
+        "evaluation, and both stages -- which is the same content as the native "
+        "leg's process wall minus interpreter startup and VTK output. "
+        "minimize_region_seconds is the mirror's own two_stage_minimize_seconds: "
+        "first stage's minimize call entry to second stage's minimize call return, "
+        "inter-stage state evaluation included, which is the bracket the native "
+        "leg's minimize_region_seconds also has. Compare like with like: "
+        "solve_call against process_wall, minimize_region against minimize_region. "
+        "A mirror that publishes no such clock gets null and no substitute."
+    ),
+    (
+        "Execution device is attested per leg from the mirror's execution_device "
+        "observable, which the mirror reads off the solved endpoint array before "
+        "the host boundary. jax.default_backend() and jax.devices() are published "
+        "beside it and are runtime facts, not attestations about this result: a "
+        "certification that needs to know a leg ran on CUDA reads "
+        "execution_device_attestation.result_array_device and nothing else."
+    ),
+    (
+        "policy_matched is computed, never declared. The native side is parsed "
+        "from the native script's own minimize calls (options dict plus the tol "
+        "that scipy.optimize.minimize expands into ftol and gtol), the mirror side "
+        "is the OptimizerResult.options_used the leg actually ran under, and "
+        "options neither side names fall back to SCIPY_LBFGSB_DEFAULTS. A native "
+        "lane artifact carries policy_matched null with its reason, because the "
+        "mirror's options exist only inside a mirror leg."
+    ),
+    (
+        "Endpoints are retained, not summarized. The JAX lane writes every "
+        "full-precision vector observable it published to an npz beside the "
+        "artifact and records each vector's sha256 per leg; the native lane keeps "
+        "a digest manifest of every file its child wrote and copies out the saved "
+        "field. The saved field is the last state the objective was evaluated at, "
+        "which L-BFGS-B does not promise equals res.x -- the artifact says so "
+        "beside the copy."
     ),
     (
         "Both lanes run the FULL two-stage length-weight ladder; neither the native "
@@ -649,11 +717,25 @@ _MIRROR_DISCLOSURES = (
         "stage one alone would mean editing both lanes."
     ),
     (
-        "shipped-vs-shipped comparison: the ratio mixes optimizer policy (maxcor 300 "
-        "vs 10; tol 1e-15 vs the mirror's) with hardware -- this matches the "
-        "device-assignment row semantics (where to launch this example as shipped) "
-        "and must never be quoted as a matched-work number. Both policies are "
-        "published as native_policy and mirror_policy on both lanes."
+        "shipped-vs-shipped comparison: the ratio is only a matched-policy number "
+        "where policy_matched is true, and only a matched-work number where "
+        "work_matched_per_evaluation is true. Where either is false the ratio "
+        "still answers the device-assignment question (where to launch this "
+        "example as shipped) and must not be quoted as a matched number. The "
+        "option-by-option comparison is published as native_optimizer_options, "
+        "mirror_optimizer_options and policy_differences."
+    ),
+    (
+        "MIRROR BINDING: this probe executes the shipped mirror's own solve(), "
+        "loaded from its file path, because no import statement can name a module "
+        "under examples/jax/2_Intermediate. The alternative -- importing the "
+        "library entry point the mirror wraps -- does not reach the mirror's "
+        "problem construction, which every mirror in this quartet owns, so it "
+        "would mean re-typing that construction here and timing a second source "
+        "of truth. mirror_binding publishes the mechanism, the mirror's own "
+        "module-level function list, whether the mirror is a thin wrapper (derived "
+        "from that list, not declared), and the promotion that would let this "
+        "family bind to a library callable instead."
     ),
     (
         "The native mirror lane runs the UNMODIFIED example script as a child "
@@ -684,8 +766,12 @@ _MIRROR_DISCLOSURES = (
     (
         "native_final_objective is parsed from the last per-evaluation stdout line, "
         "which the native scripts print with the '.1e' format: two significant "
-        "digits. The endpoint comparison is a coarse diagnostic that can detect a "
-        "lane solving a different problem, not a parity check."
+        "digits. That is all an unmodified native run publishes about its "
+        "objective, so the endpoint comparison is a coarse diagnostic that can "
+        "detect a lane solving a different problem and is not a parity check. The "
+        "JAX lane's final_objective is full precision; a full-precision NATIVE "
+        "objective requires instrumenting the native script and is out of this "
+        "probe's scope."
     ),
 )
 
@@ -928,7 +1014,7 @@ def _native_child_environment(omp: int, cache_dir: Path | None) -> dict[str, str
 
 
 def _pin_process_environment(
-    lane: str, omp: int, cache_dir: Path | None
+    lane: str, omp: int, cache_dir: Path | None, backend_mode: str
 ) -> dict[str, str]:
     """Pin this process's own environment, before anything numerical is loaded.
 
@@ -953,9 +1039,20 @@ def _pin_process_environment(
     environment = pinned_environment(
         lane=lane,
         omp=omp,
-        jax_platforms="cpu" if lane == "native" else None,
+        # The mirror lane pins its platform too: ``src/simsopt/geo/jit.py`` sets
+        # ``jax_platform_name`` to CPU when neither ``JAX_PLATFORMS`` nor
+        # ``JAX_PLATFORM_NAME`` is set, and every mirror imports native simsopt
+        # before ``simsopt_jax``; a mirror that places on the process default
+        # would then run its "GPU" leg on the CPU (coil-forces, 2026-09-13).
+        jax_platforms="cpu" if lane == "native" else "cuda,cpu",
         compile_cache_dir=cache_dir,
     )
+    if lane == "jax-gpu":
+        # The scrub above removes the shell's backend mode so a native leg can
+        # never be rerouted; the mirror lane re-pins its production mode
+        # explicitly. Left unset, the runtime falls back to an unconfigured
+        # default that ran the stage-two mirror seven times slower.
+        environment["SIMSOPT_BACKEND_MODE"] = backend_mode
     for name in _CI_VARIABLES:
         environment.pop(name, None)
     os.environ.clear()
@@ -1026,6 +1123,13 @@ def _final_objective_from_line(family: MirrorFamily, line: str) -> float:
     return float(head[2:])
 
 
+# SciPy L-BFGS-B with ``maxls`` 20 aborts a first line search after 21 objective evaluations; when a
+# stage restarts cold at a converged point (coil-forces stage 2 with its inert length penalty) that
+# payload is the whole stage, and its trial objectives span orders of magnitude above the final one.
+ABORT_PAYLOAD_EVALUATIONS = 21
+ABORT_SIGNATURE_RATIO = 100.0
+
+
 def _timeline_regions(
     family: MirrorFamily,
     timeline: Sequence[tuple[float, str]],
@@ -1054,6 +1158,13 @@ def _timeline_regions(
             f"more than the {TAYLOR_EVALUATIONS} the Taylor test alone emits; the "
             "solver produced nothing to time"
         )
+    terminal_objectives = [
+        _final_objective_from_line(family, line)
+        for _, line in evaluations[-ABORT_PAYLOAD_EVALUATIONS:]
+    ]
+    stage_two_abort_signature = (
+        max(terminal_objectives) > ABORT_SIGNATURE_RATIO * terminal_objectives[-1]
+    )
     return {
         "taylor_last_error_elapsed_seconds": errors[-1],
         "taylor_last_error_elapsed_definition": (
@@ -1069,6 +1180,13 @@ def _timeline_regions(
         "evaluations_total": len(evaluations),
         "evaluations_in_minimize_region": len(evaluations) - TAYLOR_EVALUATIONS,
         "terminal_evaluation_lines": [line for _, line in evaluations[-2:]],
+        "terminal_evaluation_objectives": terminal_objectives,
+        "stage_two_abort_signature": stage_two_abort_signature,
+        "stage_two_abort_signature_definition": (
+            f"max of the last {ABORT_PAYLOAD_EVALUATIONS} objective values exceeds "
+            f"{ABORT_SIGNATURE_RATIO:g}x the final one: the cold-restart line-search abort payload; "
+            "a full final stage ends with near-final trials"
+        ),
         **_endpoint_fields(
             "native_final_objective",
             _final_objective_from_line(family, evaluations[-1][1]),
@@ -1137,12 +1255,18 @@ def _native_mirror_legs(
     omp: int,
     cache_dir: Path | None,
     ledger_path: Path,
+    retain_directory: Path | None,
 ) -> list[dict[str, object]]:
     legs: list[dict[str, object]] = []
     for index in range(repeat):
         parent_identity = runtime_identity("native")
         with tempfile.TemporaryDirectory(prefix="marginal-quartet-native-") as name:
-            leg = _run_native_child(family, omp, cache_dir, Path(name))
+            workdir = Path(name)
+            leg = _run_native_child(family, omp, cache_dir, workdir)
+            if retain_directory is not None:
+                leg.update(
+                    _retain_native_outputs(family, workdir, retain_directory, index)
+                )
         record: dict[str, object] = {
             "index": index,
             "leg_kind": FRESH_PROCESS_COLD,
@@ -1158,6 +1282,169 @@ def _native_mirror_legs(
             timer="process_wall_seconds",
         )
     return legs
+
+
+def _minimize_region(observables: Mapping[str, object]) -> dict[str, object]:
+    """The mirror's own minimize-region clock, bracketed like the native region.
+
+    The native leg's ``minimize_region_seconds`` runs from the last Taylor ``err``
+    line to the last objective-evaluation line, so it contains both minimize
+    calls and whatever the script does between them.  A mirror that publishes
+    ``two_stage_minimize_seconds`` measures the same shape -- entry of the first
+    stage's minimize call to return of the second's, inter-stage state
+    evaluation included -- which is the only pair of numbers on the two lanes
+    that brackets comparable work.  A mirror that publishes no such clock gets
+    ``None``, never a substitute.
+    """
+    region = observables.get("two_stage_minimize_seconds")
+    if not isinstance(region, float):
+        return {
+            "minimize_region_seconds": None,
+            "minimize_region_unavailable_because": (
+                "this mirror publishes no two_stage_minimize_seconds observable; "
+                "only solve_call_seconds (the whole solve() call) is available, "
+                "and it is not the boundary the native leg reports"
+            ),
+        }
+    return {
+        "minimize_region_seconds": region,
+        "minimize_region_definition": (
+            "mirror observable two_stage_minimize_seconds: entry of the first "
+            "stage's minimize call to return of the second's, inter-stage state "
+            "evaluation included -- the same shape as the native leg's region"
+        ),
+        "first_stage_minimize_seconds": observables.get(
+            "first_stage_minimize_seconds"
+        ),
+        "second_stage_minimize_seconds": observables.get(
+            "second_stage_minimize_seconds"
+        ),
+    }
+
+
+def _execution_device_attestation(
+    jax_module, observables: Mapping[str, object]
+) -> dict[str, object]:
+    """Where this leg's result was actually produced, and who says so.
+
+    ``jax.devices()`` and ``jax.default_backend()`` describe what the runtime
+    would choose; neither is evidence about a particular result.  The mirror's
+    ``execution_device`` observable is read off the solved endpoint array before
+    it crosses the host boundary, which is the only one of the three that names
+    the device this leg's numbers came from.  All three are published, and the
+    artifact says which is which rather than letting a reader promote the
+    process-level fact into an attestation.
+    """
+    attested = observables.get("execution_device")
+    return {
+        "result_array_device": attested if isinstance(attested, str) else None,
+        "result_array_device_source": (
+            "mirror observable execution_device, read from the solved endpoint "
+            "array before jax.device_get"
+        ),
+        "result_array_device_unavailable_because": (
+            None
+            if isinstance(attested, str)
+            else "this mirror publishes no execution_device observable; the "
+            "process-level fields below describe the runtime, not this result"
+        ),
+        "process_default_backend": str(jax_module.default_backend()),
+        "process_devices": [str(device) for device in jax_module.devices()],
+        "process_device_platforms": sorted(
+            {str(device.platform) for device in jax_module.devices()}
+        ),
+    }
+
+
+def _retain_native_outputs(
+    family: MirrorFamily, workdir: Path, retain_directory: Path, index: int
+) -> dict[str, object]:
+    """Keep what one native child wrote, instead of deleting it with its workdir.
+
+    Every file the child produced is recorded with its size and digest, and the
+    saved field -- the one output a later full-precision comparison needs -- is
+    copied out before the temporary workdir is destroyed.  What the copy is NOT
+    is the optimizer's returned endpoint: the native script saves the field
+    object as it stands after the last objective evaluation, which L-BFGS-B does
+    not promise is ``res.x``.  That distinction is published with the file so the
+    copy is never read as something it is not.
+    """
+    written = sorted(path for path in workdir.rglob("*") if path.is_file())
+    manifest = [
+        {
+            "path": str(path.relative_to(workdir)),
+            "bytes": path.stat().st_size,
+            "sha256": sha256_file(path),
+        }
+        for path in written
+    ]
+    retained: dict[str, object] = {
+        "workdir_file_manifest": manifest,
+        "workdir_file_count": len(manifest),
+    }
+    saved = [path for path in written if path.name == "biot_savart_opt.json"]
+    if not saved:
+        retained["saved_field_retained"] = None
+        retained["saved_field_unavailable_because"] = (
+            f"{family.native_script.name} wrote no biot_savart_opt.json in this run"
+        )
+        return retained
+    retain_directory.mkdir(parents=True, exist_ok=True)
+    destination = retain_directory / f"leg{index}-{saved[0].name}"
+    shutil.copy2(saved[0], destination)
+    retained["saved_field_retained"] = str(destination)
+    retained["saved_field_sha256"] = sha256_file(destination)
+    retained["saved_field_is_not_the_optimizer_endpoint"] = (
+        "this is the field object at save time, i.e. the last state the objective "
+        "was evaluated at, which L-BFGS-B does not promise equals res.x; an "
+        "authoritative native endpoint requires instrumenting the native script "
+        "(see .artifacts/certify-20260913/quality-instrumentation/quartet_quality.py"
+        "::native_capture_source) and is not something this probe can read from "
+        "an unmodified run"
+    )
+    return retained
+
+
+def _endpoint_root(output: Path | None) -> Path | None:
+    """Where a run keeps what it would otherwise have thrown away.
+
+    Beside the artifact and named after it, so an artifact and its retained
+    endpoints travel together and two runs writing to different ``--output``
+    paths cannot collide in one directory.
+    """
+    if output is None:
+        return None
+    return output.resolve().parent / f"{output.stem}-endpoints"
+
+
+def _write_endpoint_archive(
+    root: Path | None, lane: str, arrays: Mapping[str, object]
+) -> dict[str, object]:
+    """Publish this lane's full-precision vectors as an npz beside the artifact.
+
+    JSON carries these numbers too, at full ``repr`` precision; the archive is
+    what a later comparison loads without re-parsing them, and its digest is
+    what pins the two to each other.
+    """
+    if root is None or not arrays:
+        return {
+            "endpoint_archive": None,
+            "endpoint_archive_unavailable_because": (
+                "this lane published no vector observable that "
+                f"{list(ENDPOINT_VECTOR_OBSERVABLES)} names"
+            ),
+        }
+    import numpy as np
+
+    root.mkdir(parents=True, exist_ok=True)
+    destination = root / f"{lane}-endpoints.npz"
+    with open(destination, "wb") as handle:
+        np.savez(handle, **{name: arrays[name] for name in sorted(arrays)})
+    return {
+        "endpoint_archive": str(destination),
+        "endpoint_archive_sha256": sha256_file(destination),
+        "endpoint_archive_keys": sorted(arrays),
+    }
 
 
 def _load_mirror_module(family: MirrorFamily):
@@ -1186,7 +1473,7 @@ def _jax_mirror_legs(
     budget: int,
     omp: int,
     ledger_path: Path,
-) -> tuple[list[dict[str, object]], float]:
+) -> tuple[list[dict[str, object]], float, dict[str, object]]:
     """Run the mirror's ``native_default`` solve ``repeat`` times in one process.
 
     Leg 0 is ``cold_in_process``.  Every later leg is ``repeat_persistent_cache``
@@ -1196,16 +1483,30 @@ def _jax_mirror_legs(
     :func:`_validate` requires whenever ``--repeat > 1``.
 
     The mirror's ``solve`` returns host floats, so the timed region is already
-    fully synchronized -- ``solve_standard_stage_two`` blocks at
-    ``src/simsopt_jax/examples/stage_two_standard.py:336-338`` and the mirrors
-    finish with ``jax.device_get``.
+    fully synchronized -- ``solve_standard_stage_two`` blocks before it returns
+    and the mirrors finish with ``jax.device_get``.
+
+    Two things are recorded per leg beside the clock.  The execution device is
+    taken from the mirror's own attestation, which it reads off the solved
+    endpoint array before the host boundary -- a process-level default backend
+    describes what JAX would choose, not where this result was produced -- and
+    the full-precision endpoint vectors are kept, so the artifact carries the
+    numbers a later comparison needs instead of a printed summary of them.
     """
     started = perf_counter()
     module = _load_mirror_module(family)
     mirror_import_seconds = perf_counter() - started
 
     import jax
+    import numpy as np
 
+    from simsopt_jax.examples import STANDARD_STAGE_TWO_OPTIMIZER_OBSERVABLES
+
+    published_names = family.observable_names + tuple(
+        name
+        for name in STANDARD_STAGE_TWO_OPTIMIZER_OBSERVABLES
+        if name not in family.observable_names
+    )
     if not bool(jax.config.read("jax_enable_x64")):
         raise ProbeConfigurationError(
             "the JAX lane requires JAX_ENABLE_X64=1; this process is running fp32"
@@ -1218,6 +1519,7 @@ def _jax_mirror_legs(
         )
 
     legs: list[dict[str, object]] = []
+    endpoint_arrays: dict[str, object] = {}
     with tempfile.TemporaryDirectory(prefix="marginal-quartet-mirror-") as name:
         output_directory = Path(name)
         for index in range(repeat):
@@ -1226,6 +1528,17 @@ def _jax_mirror_legs(
             started = perf_counter()
             result = module.solve(output_directory, budget, "native_default")
             solve_call_seconds = perf_counter() - started
+            endpoint_digests: dict[str, object] = {}
+            for observable_name in ENDPOINT_VECTOR_OBSERVABLES:
+                vector = result.observables.get(observable_name)
+                if not isinstance(vector, (list, tuple)):
+                    continue
+                array = np.asarray(vector, dtype=np.float64)
+                endpoint_arrays[f"leg{index}:{observable_name}"] = array
+                endpoint_digests[observable_name] = {
+                    "sha256": array_sha256(array),
+                    "size": int(array.size),
+                }
             record: dict[str, object] = {
                 "index": index,
                 "identity": identity,
@@ -1236,10 +1549,23 @@ def _jax_mirror_legs(
                 "requested_omp": omp,
                 "observed_omp_threads": observed_omp_threads,
                 "solve_call_seconds": solve_call_seconds,
+                "solve_call_definition": (
+                    "the mirror's whole solve() call: host problem construction, "
+                    "the five-epsilon Taylor evaluation, and both stages"
+                ),
+                **_minimize_region(result.observables),
+                "execution_device_attestation": _execution_device_attestation(
+                    jax, result.observables
+                ),
+                "endpoint_digests": endpoint_digests,
                 "example_id": result.example_id,
                 "example_status": result.status,
+                "example_status_is_not_convergence": (
+                    "status is the mirror's scientific gate; the solver verdict is "
+                    "solver_stage_success/solver_status/solver_message"
+                ),
                 "observables": _publishable_observables(
-                    result.observables, family.observable_names
+                    result.observables, published_names
                 ),
             }
             legs.append(record)
@@ -1250,7 +1576,7 @@ def _jax_mirror_legs(
                 leg=record,
                 timer="solve_call_seconds",
             )
-    return legs, mirror_import_seconds
+    return legs, mirror_import_seconds, endpoint_arrays
 
 
 @dataclass(frozen=True)
@@ -1935,6 +2261,213 @@ def _native_policy(family: MirrorFamily) -> dict[str, object]:
     }
 
 
+def _mirror_binding(family: MirrorFamily) -> dict[str, object]:
+    """How this probe reaches the mirror's ``solve``, and why it is not an import.
+
+    A static ``import`` statement cannot name a mirror module at all: the
+    mirrors live under ``examples/jax/1_Simple``, ``2_Intermediate`` and
+    ``3_Advanced``, directory names that ``tests/test_jax_examples_one_to_one_inventory.py``
+    pins one-to-one to the native example tree and that are not Python
+    identifiers.  Importing the *library* entry point a mirror wraps is not a
+    substitute either: every mirror in this quartet builds its own problem
+    before calling it, so the alternative to executing the shipped file is
+    re-typing that construction here -- the second source of truth this module's
+    header refuses.  ``mirror_is_thin_wrapper`` is derived from the mirror's own
+    module body rather than declared, so the day a mirror becomes a thin wrapper
+    the artifact says so and the path load can be retired for that family.
+    """
+    module = ast.parse(family.mirror_module.read_text(encoding="utf-8"))
+    module_level_functions = tuple(
+        sorted(
+            node.name
+            for node in module.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        )
+    )
+    return {
+        "mechanism": "path_load",
+        "mechanism_source": (
+            "benchmarks/marginal_quartet_probes.py::_load_mirror_module "
+            "(importlib.util.spec_from_file_location)"
+        ),
+        "loaded_from": str(family.mirror_module.relative_to(REPO_ROOT)),
+        "mirror_module_level_functions": list(module_level_functions),
+        "mirror_is_thin_wrapper": set(module_level_functions) <= {"solve", "main"},
+        "static_import_blocked_because": (
+            "examples/jax/<n>_<Tier> is not a Python identifier, so no import "
+            "statement can name the mirror module; the one-to-one mirror "
+            "inventory pins those directory names to the native tree"
+        ),
+        "promotion_that_would_allow_a_static_import": (
+            "move the mirror's problem construction into src/simsopt_jax/examples "
+            "(the precedent is simsopt_jax_adapters.geo.flat675::build_flat675_problem) "
+            "until the mirror script is a thin wrapper, then bind this family to "
+            "that library callable"
+        ),
+    }
+
+
+def _option_literal(family: MirrorFamily, node: ast.AST) -> object:
+    """One optimizer-option value as written in a native script's call."""
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        return f"<symbol {node.id}>"
+    raise ProbeConventionError(
+        f"{family.name}: the native minimize call passes an optimizer option this "
+        f"probe cannot read from source ({ast.dump(node)}); the policy comparison "
+        "would be published from a guess"
+    )
+
+
+def _native_minimize_call_options(
+    family: MirrorFamily, call: ast.Call
+) -> dict[str, object]:
+    """The stopping rule of one native ``minimize`` call, read from the call.
+
+    ``tol`` is expanded here the way ``scipy.optimize.minimize`` expands it for
+    L-BFGS-B -- into ``ftol`` and ``gtol``, each only where the ``options``
+    mapping did not already name it -- because the solver reads those two and
+    not ``tol``.  Options neither the call nor ``tol`` supplies fall back to
+    :data:`SCIPY_LBFGSB_DEFAULTS`.
+    """
+    keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+    method = keywords.get("method")
+    if not isinstance(method, ast.Constant) or method.value != "L-BFGS-B":
+        raise ProbeConventionError(
+            f"{family.name}: the native minimize call is no longer method="
+            "'L-BFGS-B'; its policy cannot be compared against the mirror's"
+        )
+    options_node = keywords.get("options")
+    if not isinstance(options_node, ast.Dict):
+        raise ProbeConventionError(
+            f"{family.name}: the native minimize call no longer passes an inline "
+            "options dict; this probe reads the native policy from that literal"
+        )
+    named: dict[str, object] = {}
+    for key, value in zip(options_node.keys, options_node.values):
+        if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+            raise ProbeConventionError(
+                f"{family.name}: the native options dict has a non-literal key"
+            )
+        named[key.value] = _option_literal(family, value)
+    tolerance = _option_literal(family, keywords["tol"]) if "tol" in keywords else None
+    resolved = dict(SCIPY_LBFGSB_DEFAULTS)
+    if tolerance is not None:
+        resolved["ftol"] = tolerance
+        resolved["gtol"] = tolerance
+    resolved.update(named)
+    resolved["tol_argument"] = tolerance
+    return resolved
+
+
+def _native_optimizer_options(family: MirrorFamily) -> dict[str, object]:
+    """The native script's actual stopping rule, parsed from its own call sites.
+
+    Parsed rather than declared: a hand-kept copy of another file's call is the
+    thing that goes stale without anyone noticing, and ``policy_matched`` is only
+    worth publishing if both sides of it are read off what runs.  Both stages
+    must carry the same rule, because a script whose two stages stop differently
+    has no single policy to compare.
+    """
+    module = ast.parse(family.native_script.read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(module)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "minimize"
+    ]
+    if len(calls) != len(family.minimize_call_sources):
+        raise ProbeConventionError(
+            f"{family.name}: {family.native_script.name} makes {len(calls)} "
+            f"minimize calls, but {len(family.minimize_call_sources)} are anchored "
+            "in minimize_call_sources; the native policy is not the one recorded"
+        )
+    policies = [_native_minimize_call_options(family, call) for call in calls]
+    if any(policy != policies[0] for policy in policies[1:]):
+        raise ProbeConventionError(
+            f"{family.name}: the native stages do not share one stopping rule "
+            f"({policies}); there is no single native policy to compare"
+        )
+    resolved = dict(policies[0])
+    maxiter = resolved.get("maxiter")
+    if isinstance(maxiter, str) and maxiter.startswith("<symbol "):
+        # The budget symbol is resolved by the family's own anchor rather than by
+        # evaluating the native module, whose MAXITER is a CI-dependent ternary.
+        resolved["maxiter"] = family.native_budget
+        resolved["maxiter_symbol"] = maxiter
+        resolved["maxiter_source"] = family.native_budget_source
+    resolved["optimizer"] = "scipy.optimize.minimize(method='L-BFGS-B')"
+    resolved["source"] = list(family.minimize_call_sources)
+    resolved["unnamed_options_resolved_from"] = (
+        "scipy.optimize.fmin_l_bfgs_b signature defaults, recorded as "
+        "SCIPY_LBFGSB_DEFAULTS"
+    )
+    return resolved
+
+
+def _mirror_optimizer_options(
+    observables: Mapping[str, object],
+) -> list[Mapping[str, object]] | None:
+    """The per-stage options a mirror leg actually ran under, if it published them.
+
+    ``solver_options`` is the mirror's own ``OptimizerResult.options_used``
+    (``simsopt_jax.examples.stage_two_standard::standard_stage_two_optimizer_observables``),
+    so it is what the solver received and not what anybody declared.  ``None``
+    means this mirror does not publish it yet and no comparison can be computed.
+    """
+    published = observables.get("solver_options")
+    if not isinstance(published, (list, tuple)) or not published:
+        return None
+    if not all(isinstance(stage, Mapping) for stage in published):
+        return None
+    return [dict(stage) for stage in published]
+
+
+def _policy_comparison(
+    family: MirrorFamily, observed_stages: list[Mapping[str, object]] | None
+) -> dict[str, object]:
+    """Whether both lanes stop under the same rule, computed from both lanes.
+
+    ``policy_matched`` is ``None`` -- not ``False`` -- whenever one side was not
+    observed: a lane that did not publish its options has not been shown to
+    differ, and publishing ``False`` for it would be a claim the run did not
+    make.  A native lane artifact always lands here, because the mirror's actual
+    options only exist inside a mirror leg.
+    """
+    native = _native_optimizer_options(family)
+    comparison: dict[str, object] = {
+        "native_optimizer_options": native,
+        "compared_options": list(COMPARED_LBFGSB_OPTIONS),
+    }
+    if observed_stages is None:
+        comparison["mirror_optimizer_options"] = None
+        comparison["policy_matched"] = None
+        comparison["policy_matched_unavailable_because"] = (
+            "this lane observed no mirror optimizer options; the mirror's "
+            "options_used exists only inside a jax-gpu leg, and this family's "
+            "mirror publishes it as the 'solver_options' observable or not at all"
+        )
+        return comparison
+    comparison["mirror_optimizer_options"] = observed_stages
+    if any(stage != observed_stages[0] for stage in observed_stages[1:]):
+        comparison["policy_matched"] = False
+        comparison["policy_differences"] = {
+            "stages_disagree": [dict(stage) for stage in observed_stages]
+        }
+        return comparison
+    mirror = observed_stages[0]
+    differences = {
+        name: {"native": native.get(name), "mirror": mirror.get(name)}
+        for name in COMPARED_LBFGSB_OPTIONS
+        if native.get(name) != mirror.get(name)
+    }
+    comparison["policy_matched"] = not differences
+    comparison["policy_differences"] = differences
+    return comparison
+
+
 def _run_mirror_family(arguments: argparse.Namespace, budget: int) -> dict[str, object]:
     family = MIRROR_FAMILIES[arguments.family]
     payload: dict[str, object] = {
@@ -1945,7 +2478,7 @@ def _run_mirror_family(arguments: argparse.Namespace, budget: int) -> dict[str, 
         "native_minimize_calls": list(family.minimize_call_sources),
         "native_policy": _native_policy(family),
         "mirror_policy": dict(family.mirror_policy),
-        "policy_matched": False,
+        "mirror_binding": _mirror_binding(family),
         "declared_dimensions": dict(family.declared_dimensions),
         "work_matched_per_evaluation": (
             float(family.declared_dimensions["jax_over_native_pairs_per_evaluation"])
@@ -1953,6 +2486,7 @@ def _run_mirror_family(arguments: argparse.Namespace, budget: int) -> dict[str, 
         ),
     }
     observable_maps: list[Mapping[str, object]] = []
+    endpoint_root = _endpoint_root(arguments.output)
     if arguments.lane == "native":
         legs = _native_mirror_legs(
             family,
@@ -1960,8 +2494,10 @@ def _run_mirror_family(arguments: argparse.Namespace, budget: int) -> dict[str, 
             arguments.omp,
             arguments.compile_cache,
             arguments.ledger,
+            endpoint_root,
         )
         payload["legs"] = legs
+        payload.update(_policy_comparison(family, None))
         payload.update(
             {
                 name: value
@@ -1987,12 +2523,17 @@ def _run_mirror_family(arguments: argparse.Namespace, budget: int) -> dict[str, 
             ),
         }
     else:
-        legs, mirror_import_seconds = _jax_mirror_legs(
+        legs, mirror_import_seconds, endpoint_arrays = _jax_mirror_legs(
             family, arguments.repeat, budget, arguments.omp, arguments.ledger
         )
         payload["legs"] = legs
         payload["mirror_import_seconds"] = mirror_import_seconds
         observable_maps = [leg["observables"] for leg in legs]
+        payload.update(
+            _policy_comparison(
+                family, _mirror_optimizer_options(legs[-1]["observables"])
+            )
+        )
         payload.update(
             {
                 name: value
@@ -2001,12 +2542,20 @@ def _run_mirror_family(arguments: argparse.Namespace, budget: int) -> dict[str, 
             }
         )
         payload.setdefault("final_objective", None)
+        payload.update(_write_endpoint_archive(endpoint_root, arguments.lane, endpoint_arrays))
         payload["summary"] = {
             "solve_call": _summarize(
                 legs,
                 "solve_call_seconds",
                 series_kind=COLD_THEN_PERSISTENT_CACHE,
             ),
+            "minimize_region": _summarize(
+                legs,
+                "minimize_region_seconds",
+                series_kind=COLD_THEN_PERSISTENT_CACHE,
+            )
+            if all(isinstance(leg["minimize_region_seconds"], float) for leg in legs)
+            else None,
             "mirror_import_seconds": mirror_import_seconds,
         }
     payload["disclosures"] = [
@@ -2191,6 +2740,11 @@ def _parse(argv: Sequence[str] | None) -> argparse.Namespace:
             "--budget-override", type=int, default=None, help=budget_help
         )
         family_parser.add_argument("--compile-cache", type=Path, default=None)
+        family_parser.add_argument(
+            "--backend-mode",
+            default="jax_gpu_fast",
+            help="SIMSOPT_BACKEND_MODE pinned for the jax-gpu lane (ignored for native)",
+        )
         family_parser.add_argument("--output", type=Path, default=None)
         family_parser.add_argument(
             "--ledger",
@@ -2226,7 +2780,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # what make this ordering possible.  The scrub is the load-bearing half, so
     # this replaces os.environ rather than updating it.
     pinned = _pin_process_environment(
-        arguments.lane, arguments.omp, arguments.compile_cache
+        arguments.lane, arguments.omp, arguments.compile_cache, arguments.backend_mode
     )
     budget = _resolve_budget(arguments)
     configuration = _configuration(arguments, budget, pinned)
@@ -2254,6 +2808,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             report["native_budget_source"] = family.native_budget_source
             report["native_policy"] = _native_policy(family)
             report["mirror_policy"] = dict(family.mirror_policy)
+            report["mirror_binding"] = _mirror_binding(family)
+            report.update(_policy_comparison(family, None))
             # The per-lane dimensions and the work-asymmetry disclosure are the
             # two things an operator needs *before* committing a lane to a
             # timed run, so the dry run prints exactly what the artifact will.
