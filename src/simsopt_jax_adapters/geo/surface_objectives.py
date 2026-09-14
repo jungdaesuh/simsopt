@@ -51,7 +51,10 @@ from simsopt_jax.core._math_utils import (
     runtime_device_put,
     zeros as _zeros,
 )
-from simsopt_jax.core.curve_geometry import curve_geometry_from_spec, curve_length_from_spec
+from simsopt_jax.core.curve_geometry import (
+    curve_geometry_from_spec,
+    curve_length_from_spec,
+)
 from simsopt_jax.core.field import (
     coil_set_spec_from_dof_extraction_spec,
     coil_specs_from_dof_extraction_spec,
@@ -76,8 +79,6 @@ from simsopt_jax.core._device_scalars import (
 )
 from simsopt_jax.core.specs import (
     host_resident_spec,
-    make_surface_xyz_fourier_spec,
-    make_surface_xyz_tensor_fourier_spec,
     surface_spec_kind,
 )
 from simsopt_jax.core.surface_fourier import (
@@ -99,7 +100,6 @@ from simsopt_jax.core.surface_integrals import (
     surface_mean_cross_sectional_area as _core_surface_mean_cross_sectional_area,
 )
 from simsopt_jax.core.surface_rzfourier import (
-    surface_rz_fourier_spec_from_dofs,
     surface_rz_fourier_gamma_from_dofs,
     surface_rz_fourier_gammadash1_from_dofs,
     surface_rz_fourier_gammadash1dash1_from_dofs,
@@ -128,51 +128,13 @@ from .boozer_surface import (
     _BoozerPenaltyGeometry,
     _compute_label,
 )
+from .surface_specs import surface_spec_from_surface as _surface_spec_from_surface
 from simsopt_jax.geo.optimizers import linear_solve as _linear_solve
 from simsopt_jax.geo.label_constraints import compute_G_from_currents
 from simsopt_jax.geo._surface_stellsym import (
     compute_stellsym_mask_indices_for_grid as _compute_stellsym_mask_indices_for_grid,
 )
 from simsopt.geo.surface import Surface
-
-
-def _surface_spec_from_surface(surface):
-    surface_type = type(surface).__name__
-    if surface_type == "SurfaceRZFourier":
-        return surface_rz_fourier_spec_from_dofs(
-            _as_jax_float64(surface.get_dofs()),
-            quadpoints_phi=_as_jax_float64(surface.quadpoints_phi),
-            quadpoints_theta=_as_jax_float64(surface.quadpoints_theta),
-            mpol=surface.mpol,
-            ntor=surface.ntor,
-            nfp=surface.nfp,
-            stellsym=surface.stellsym,
-        )
-    if surface_type == "SurfaceXYZFourier":
-        return make_surface_xyz_fourier_spec(
-            dofs=_as_jax_float64(surface.get_dofs()),
-            quadpoints_phi=_as_jax_float64(surface.quadpoints_phi),
-            quadpoints_theta=_as_jax_float64(surface.quadpoints_theta),
-            nfp=surface.nfp,
-            stellsym=surface.stellsym,
-            mpol=surface.mpol,
-            ntor=surface.ntor,
-        )
-    if surface_type == "SurfaceXYZTensorFourier":
-        return make_surface_xyz_tensor_fourier_spec(
-            dofs=_as_jax_float64(surface.get_dofs()),
-            quadpoints_phi=_as_jax_float64(surface.quadpoints_phi),
-            quadpoints_theta=_as_jax_float64(surface.quadpoints_theta),
-            nfp=surface.nfp,
-            stellsym=surface.stellsym,
-            mpol=surface.mpol,
-            ntor=surface.ntor,
-            clamped_dims=tuple(getattr(surface, "clamped_dims", (False, False, False))),
-        )
-    raise NotImplementedError(
-        "JAX surface objective adapters require an explicit spec builder for "
-        f"{surface_type}."
-    )
 
 
 def surface_to_surface_distance_pure(gamma1, gamma2, mdist):

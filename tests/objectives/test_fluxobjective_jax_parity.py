@@ -35,7 +35,6 @@ from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
 from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
 from simsopt_jax.core import (
     fixed_surface_flux_integral_from_B,
-    fixed_surface_flux_specs_from_surface,
     make_fixed_surface_flux_spec,
 )
 from simsopt_jax.core.objectives_flux import _fixed_surface_target_array
@@ -43,6 +42,7 @@ from simsopt.objectives.fluxobjective import SquaredFlux
 import simsopt_jax_adapters.objectives.flux as fluxobjective_jax_module
 from simsopt_jax_adapters.objectives.flux import (
     SquaredFluxJAX,
+    fixed_surface_flux_specs_from_surface,
     coil_current_fixed_geometry_flux_jax,
     coil_current_fixed_geometry_value_and_grad_jax,
 )

@@ -36,6 +36,7 @@ from .integral_bdotn import (
 )
 
 __all__ = [
+    "fixed_surface_flux_specs_from_spec",
     "build_fourier_basis",
     "fixed_surface_flux_specs_from_surface",
     "fixed_surface_flux_integral",
@@ -131,7 +132,25 @@ def fixed_surface_flux_specs_from_surface(
     target=None,
     definition: str,
 ) -> tuple[FieldEvalSpec, FixedSurfaceFluxSpec]:
-    gamma, normal = fixed_surface_geometry_from_surface(surface)
+    surface_spec_fn = getattr(surface, "surface_spec", None)
+    if not callable(surface_spec_fn):
+        raise NotImplementedError(
+            "SquaredFluxJAX fixed-surface setup requires a surface exposing surface_spec()."
+        )
+    return fixed_surface_flux_specs_from_spec(
+        surface_spec_fn(),
+        target=target,
+        definition=definition,
+    )
+
+
+def fixed_surface_flux_specs_from_spec(
+    surface_spec,
+    *,
+    target=None,
+    definition: str,
+) -> tuple[FieldEvalSpec, FixedSurfaceFluxSpec]:
+    gamma, normal = fixed_surface_geometry_from_spec(surface_spec)
     target_jax = _fixed_surface_target_array(normal, target)
     field_eval_spec = make_field_eval_spec(gamma.reshape((-1, 3)))
     flux_spec = make_fixed_surface_flux_spec(
