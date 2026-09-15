@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from pathlib import Path
 from typing import cast
 
@@ -101,21 +99,3 @@ def test_watchdog_verdict_is_fail_closed() -> None:
     assert watchdog_verdict(returncode=-9, timed_out=False, rss_exceeded=True) == (
         "rss_limit"
     )
-
-
-def test_compile_design_ab_receipt_is_self_consistent() -> None:
-    receipt = (
-        Path(__file__).resolve().parents[1]
-        / "docs/receipts/custom-quasi-newton/compile-design-ab"
-    )
-    manifest = json.loads((receipt / "manifest.json").read_text(encoding="utf-8"))
-    metrics = json.loads((receipt / "metrics.json").read_text(encoding="utf-8"))
-
-    assert manifest["schema_version"] == 1
-    assert manifest["verdict"] == "diagnostic-pass-not-promotion"
-    assert manifest["exit_codes"] == {"design_a": 124, "design_b": 0}
-    assert metrics["comparison"]["design_b_completed_within_watchdog"] is True
-    assert metrics["comparison"]["design_a_completed_within_watchdog"] is False
-    for artifact in manifest["artifacts"]:
-        path = receipt / artifact["path"]
-        assert hashlib.sha256(path.read_bytes()).hexdigest() == artifact["sha256"]

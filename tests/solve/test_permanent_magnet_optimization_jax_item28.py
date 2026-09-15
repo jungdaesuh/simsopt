@@ -541,8 +541,7 @@ def test_relax_and_split_jax_staging_order_contract_single_shift():
     on the same operands and passes validation; staged after the rescale, the
     validator re-applies the shift and must refuse that same alpha (the
     double-shift false reject adjudicated at P3.5 of the backlog plan and
-    reproduced at qa-64 scale in
-    ``docs/receipts/evidence/qa64_jaxgpu_solve_refusal_20260824.log``).
+    reproduced at qa-64 scale).
     """
     nu = 5.0
     cpu = _synthetic_cpu_grid(seed=2030)

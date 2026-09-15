@@ -39,24 +39,20 @@ built from repository test-file geometry so it runs from a clean clone.
 
 WHERE TO RUN IT, AND WHAT IS ACTUALLY CERTIFIED
 -----------------------------------------------
-The sealed campaign receipt ``docs/receipts/flat675_fused_campaign.md``
-measures this production lane on a GPU against a native CPU denominator and
-reports 1.67x at equal budget 3, 7.70x at the headline equal budget 37, and
-7.36x quality-matched, all on process wall.  That certification is scoped to
-the FROZEN-BUNDLE configuration at the one archived start candidate the
-campaign measured -- reachable here with ``--bundle`` when that host-local
-bundle is present.  The configuration this script ships by default runs the
-same production lane on repository geometry and makes NO timing claim of its
-own.
+On a GPU against a native CPU denominator this production lane measured
+1.67x at equal budget 3, 7.70x at the headline equal budget 37, and
+7.36x quality-matched, all on process wall.  That measurement is scoped to
+the FROZEN-BUNDLE configuration at the one archived start candidate --
+reachable here with ``--bundle`` when that host-local bundle is present.
+The configuration this script ships by default runs the same production
+lane on repository geometry and makes NO timing claim of its own.
 
 Cold start is disclosed, not claimed: the first solve in a process pays the
-full XLA compile of the fused program (~150 s in the receipt's own cold
-measurement, N=1, reported and never claimed).  The win regime is repeated or
-warm work in a process that has already compiled -- which is also why
-``--smoke`` here is dominated by compilation rather than by arithmetic.  That
-cost is not something this script can tune away; what to do about it is
-recorded once, as chartered follow-up, in
-``docs/jax_flat675_promotion_plan.md``.
+full XLA compile of the fused program (~150 s cold, N=1, reported and never
+claimed).  The win regime is repeated or warm work in a process that has
+already compiled -- which is also why ``--smoke`` here is dominated by
+compilation rather than by arithmetic.  That cost is not something this
+script can tune away.
 
 ``--smoke`` runs the same production lane on a deliberately small problem for
 a couple of iterations.  Its ``ok`` status means the fused lane executed and
@@ -105,8 +101,8 @@ BUNDLE_ROOT = (
 BUNDLE_FLAG = "--bundle"
 
 # Iteration budgets.  Both are small: this example demonstrates the fused lane's
-# execution shape, and the sealed receipt -- not this script -- carries the
-# speed claim.
+# execution shape; the GPU-vs-native numbers above are not a claim of this
+# default run.
 BOUNDED_STEPS = 2
 NATIVE_DEFAULT_STEPS = 20
 
@@ -128,8 +124,8 @@ CURVE_ORDER = 2
 
 # The certified campaign's own winding-surface coil shape: a closed saddle loop
 # in ``(phi, theta)``, transcribed from the archived bundle's base curve so the
-# repository-geometry problem starts from the same kind of coil the receipt
-# measured rather than from an arbitrary one.
+# repository-geometry problem starts from the same kind of coil the certified
+# configuration used rather than from an arbitrary one.
 WINDING_COIL_DOFS = (
     0.119251,
     0.012469,

@@ -39,7 +39,6 @@ EXAMPLE = ROOT / "examples" / "jax" / "3_Advanced" / "single_stage_flat675.py"
 MANIFEST = ROOT / "examples" / "jax" / "manifest.json"
 
 EXAMPLE_ID = "flat675-single-stage-coupled-optimization"
-RECEIPT_PATH = "docs/receipts/flat675_fused_campaign.md"
 
 
 def _example_module() -> ModuleType:
@@ -227,17 +226,20 @@ def test_bundle_flag_selects_the_certified_configuration(
     assert captured["solve"] is example.solve
 
 
-# --- the disclosure the receipt requires ------------------------------------
+# --- the disclosure the certified scope requires ----------------------------
 
 
-def test_docstring_scopes_the_receipt_and_discloses_cold_start() -> None:
-    """The example may not inherit the receipt's number past its own scope."""
+def test_docstring_scopes_the_certified_run_and_discloses_cold_start() -> None:
+    """The example may not inherit a timing number past its own scope."""
     docstring = ast.get_docstring(ast.parse(EXAMPLE.read_text(encoding="utf-8")))
     assert docstring is not None
     # The prose is hard-wrapped, so compare against a single-spaced rendering.
     prose = " ".join(docstring.split())
 
-    assert RECEIPT_PATH in prose
+    assert "1.67x" in prose
+    assert "7.70x" in prose
+    assert "7.36x" in prose
+    assert "docs/receipts" not in prose
     # The certification is the bundle configuration's, not the default's.
     assert "--bundle" in prose
     assert "NO timing claim of its own" in prose
