@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from examples.jax._manifest import TIERS
 from examples.jax.manifest_contracts_v3 import (
     ContractVersionError,
     ManifestV3ValidationError,
@@ -19,7 +20,9 @@ from examples.jax.manifest_contracts_v3 import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-EXAMPLES_MANIFEST = REPO_ROOT / "tests" / "fixtures" / "jax_manifests" / "manifest_v2.json"
+EXAMPLES_MANIFEST = (
+    REPO_ROOT / "tests" / "fixtures" / "jax_manifests" / "manifest_v2.json"
+)
 PARITY_MANIFEST = (
     REPO_ROOT / "tests" / "fixtures" / "jax_manifests" / "parity_manifest_v1.json"
 )
@@ -27,6 +30,7 @@ INVENTORY = REPO_ROOT / "examples" / "jax" / "one_to_one_inventory.json"
 CANDIDATE_CLI = REPO_ROOT / "examples" / "jax" / "build_manifest_v3_candidate.py"
 EXAMPLES_V2_SHA256 = "2aeae6a63f631b205955c288e3308ad42c0191bbfcdef78b6cba7b2797db0b05"
 PARITY_V1_SHA256 = "060e55339194c203263da9d5690c2ff31bd6681f5713dc2ead0ce3313e313137"
+PLANNED_ONE_TO_ONE_TARGETS = frozenset({"mirror", "hybrid"})
 
 
 def _document(path: Path) -> dict[str, object]:
@@ -66,6 +70,23 @@ def _record_by(
     return matches[0]
 
 
+def _tracked_native_sources() -> set[str]:
+    examples_root = REPO_ROOT / "examples"
+    return {
+        path.relative_to(examples_root).as_posix()
+        for tier in TIERS
+        for path in (examples_root / tier).glob("*.py")
+    }
+
+
+def _planned_one_to_one_count(inventory: dict[str, object]) -> int:
+    return sum(
+        1
+        for row in _records(inventory, "native_sources")
+        if row["recommended_target_classification"] in PLANNED_ONE_TO_ONE_TARGETS
+    )
+
+
 def test_exact_v2_v1_bytes_map_deterministically_without_writing() -> None:
     before_examples = EXAMPLES_MANIFEST.read_bytes()
     before_parity = PARITY_MANIFEST.read_bytes()
@@ -86,15 +107,26 @@ def test_exact_v2_v1_bytes_map_deterministically_without_writing() -> None:
 
     examples = json.loads(first.examples_bytes)
     parity = json.loads(first.parity_bytes)
+    inventory = _document(INVENTORY)
+    legacy_examples = _document(EXAMPLES_MANIFEST)
+    planned = _planned_one_to_one_count(inventory)
+    tracked = _tracked_native_sources()
     assert isinstance(examples, dict) and examples["schema_version"] == 3
     assert isinstance(parity, dict) and parity["schema_version"] == 2
-    assert len(_records(examples, "source_catalog")) == 52
-    assert len(_records(examples, "jax_examples")) == 38
-    assert len(_records(parity, "relationships")) == 27
+    assert len(_records(examples, "source_catalog")) == len(tracked)
+    assert {
+        str(row["source"]) for row in _records(examples, "source_catalog")
+    } == tracked
+    assert len(_records(examples, "jax_examples")) == (
+        len(_records(legacy_examples, "jax_examples")) + planned
+    )
+    assert len(_records(parity, "relationships")) == planned
     assert first.examples_sha256 == hashlib.sha256(first.examples_bytes).hexdigest()
     assert first.parity_sha256 == hashlib.sha256(first.parity_bytes).hexdigest()
-    assert first.semantic_diff["legacy_tutorial_count"] == 11
-    assert first.semantic_diff["planned_one_to_one_count"] == 27
+    assert first.semantic_diff["legacy_tutorial_count"] == len(
+        _records(legacy_examples, "jax_examples")
+    )
+    assert first.semantic_diff["planned_one_to_one_count"] == planned
 
 
 def test_candidate_has_exact_name_mirrors_and_noncovering_legacy_tutorials() -> None:
@@ -117,14 +149,16 @@ def test_candidate_has_exact_name_mirrors_and_noncovering_legacy_tutorials() -> 
         else:
             assert mirror_id is None
 
-    assert len(owned_ids) == 27
+    assert len(owned_ids) == _planned_one_to_one_count(_document(INVENTORY))
     assert {str(record["jax_example_id"]) for record in relationships} == owned_ids
     tutorial_ids = {
         str(record["id"])
         for record in executable
         if record["classification"] == "tutorial"
     }
-    assert len(tutorial_ids) == 11
+    assert len(tutorial_ids) == len(
+        _records(_document(EXAMPLES_MANIFEST), "jax_examples")
+    )
     assert tutorial_ids.isdisjoint(owned_ids)
     boozer_source = _record_by(
         examples,
@@ -292,11 +326,16 @@ def test_no_write_cli_publishes_exact_candidate_bytes_and_semantic_diff() -> Non
         hashlib.sha256(parity_candidate).hexdigest()
         == envelope["candidate_sha256"]["parity_manifest_v2"]
     )
+    planned = _planned_one_to_one_count(_document(INVENTORY))
     assert envelope["semantic_diff"] == {
-        "canonical_relationship_count": 27,
-        "legacy_relationship_count": 28,
-        "legacy_tutorial_count": 11,
-        "planned_one_to_one_count": 27,
+        "canonical_relationship_count": planned,
+        "legacy_relationship_count": len(
+            _records(_document(PARITY_MANIFEST), "relationships")
+        ),
+        "legacy_tutorial_count": len(
+            _records(_document(EXAMPLES_MANIFEST), "jax_examples")
+        ),
+        "planned_one_to_one_count": planned,
         "promoted_parity_claim_count": 0,
     }
     assert EXAMPLES_MANIFEST.read_bytes() == before_examples

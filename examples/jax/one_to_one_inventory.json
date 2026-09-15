@@ -1595,7 +1595,7 @@
         ]
       },
       "source": "3_Advanced/coil_forces.py",
-      "source_sha256": "99147a218c2b0e915d66418bb9d9120fb85dac27ffbafcd6756a784395cf299c"
+      "source_sha256": "6f9d77ad4a60e5bcbb4ae802bfda5275c27da2edbc9940abf52dce127a69bd3f"
     },
     {
       "capability_probe": {
@@ -1684,6 +1684,56 @@
       },
       "source": "3_Advanced/single_stage_boozer_vacuum_optimization.py",
       "source_sha256": "53d87139097067b0ca3bfed6370b4e10c356872bb7fe55c0e2e5c021e9f84a71"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "3_Advanced/single_stage_flat675.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "single-stage-vacuum-optimization",
+          "jax_surfaces": [
+            "simsopt_jax.geo.optimizers.optimizer.jax_minimize",
+            "simsopt_jax_adapters.geo.surface_objectives_traceable.make_traceable_objective_session"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/3_Advanced/single_stage_flat675.py",
+        "examples/jax/3_Advanced/single_stage_flat675.py",
+        "tests/jax/examples/test_single_stage_flat675_example.py",
+        "tests/jax/examples/test_single_stage_flat675_native_twin.py"
+      ],
+      "reason": "The exact-name flat coupled single-stage workflow uses public JAX kernels for the fused 675-vector objective and bounded host L-BFGS-B solve.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "__future__",
+          "argparse",
+          "json",
+          "numpy",
+          "pathlib",
+          "scipy",
+          "simsopt",
+          "simsopt_jax",
+          "simsopt_jax_adapters",
+          "tempfile"
+        ]
+      },
+      "source": "3_Advanced/single_stage_flat675.py",
+      "source_sha256": "825f84ac8e70756bea51323015a652375f4e1d393b9fce71c079c8d18ab6893a"
     },
     {
       "capability_probe": {
