@@ -50,6 +50,16 @@ _DIRECT_KERNEL_TOLS = parity_ladder_tolerances("direct_kernel")
 _DEFINITIONS = ("quadratic flux", "normalized", "local")
 
 
+def _assert_documented_boundary(value, expected):
+    if isinstance(expected, float) and math.isnan(expected):
+        assert math.isnan(value)
+        return
+    if np.isinf(expected):
+        assert np.isinf(value)
+        return
+    np.testing.assert_allclose(value, expected, atol=0.0)
+
+
 @pytest.fixture(autouse=True)
 def _parity_device_scope(parity_lane):
     with parity_default_device(parity_lane):
@@ -619,20 +629,23 @@ class TestIntegralBdotNCppParity:
             )
         )
 
-        if np.isposinf(J_cpp):
+        # Empty-mesh C++ is IEEE 0/0 nan for every definition. JAX keeps a
+        # defined AD-safe contract: inf for normalized, nan otherwise.
+        assert math.isnan(J_cpp)
+        if definition == "normalized":
             assert np.isposinf(J_jax)
         else:
-            assert math.isnan(J_cpp)
             assert math.isnan(J_jax)
 
     @pytest.mark.parametrize(
-        ("definition", "B", "target", "normal", "expected"),
+        ("definition", "B", "target", "normal", "expected_cpp", "expected_jax"),
         [
             (
                 "quadratic flux",
                 np.zeros((2, 3, 3), dtype=np.float64),
                 np.ones((2, 3), dtype=np.float64),
                 np.zeros((2, 3, 3), dtype=np.float64),
+                math.nan,
                 0.0,
             ),
             (
@@ -640,6 +653,7 @@ class TestIntegralBdotNCppParity:
                 np.zeros((2, 3, 3), dtype=np.float64),
                 np.zeros((2, 3), dtype=np.float64),
                 np.ones((2, 3, 3), dtype=np.float64),
+                math.nan,
                 np.inf,
             ),
             (
@@ -648,18 +662,20 @@ class TestIntegralBdotNCppParity:
                 np.ones((2, 3), dtype=np.float64),
                 np.ones((2, 3, 3), dtype=np.float64),
                 np.inf,
+                np.inf,
             ),
             (
                 "local",
                 np.zeros((2, 3, 3), dtype=np.float64),
                 np.ones((2, 3), dtype=np.float64),
                 np.zeros((2, 3, 3), dtype=np.float64),
+                math.nan,
                 0.0,
             ),
         ],
     )
     def test_cpp_boundary_contract_matches_jax(
-        self, definition, B, target, normal, expected
+        self, definition, B, target, normal, expected_cpp, expected_jax
     ):
         import simsoptpp as sopp
 
@@ -677,12 +693,8 @@ class TestIntegralBdotNCppParity:
             )
         )
 
-        if np.isinf(expected):
-            assert np.isinf(J_cpp)
-            assert np.isinf(J_jax)
-        else:
-            np.testing.assert_allclose(J_cpp, expected, atol=0.0)
-            np.testing.assert_allclose(J_jax, expected, atol=0.0)
+        _assert_documented_boundary(J_cpp, expected_cpp)
+        _assert_documented_boundary(J_jax, expected_jax)
 
 
 class TestIntegralBdotNBoundaryContracts:

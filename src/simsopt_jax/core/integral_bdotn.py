@@ -20,13 +20,16 @@ optimization.  The three supported definitions are:
 * ``"local"``:
   ``J = 0.5 / (nphi·ntheta) · Σ (B·n̂ − B_T)² / |B|² · |n|``
 
-Zero-area quadrature points contribute zero. For ``"normalized"``,
-nonpositive global ``Σ |B|² |n|`` is treated as invalid and returns
-``inf``. For ``"local"``, any positive-area quadrature point with
-``|B|² = 0`` is treated as invalid and also returns ``inf``.
-Empty ``nphi`` or ``ntheta`` meshes return ``inf`` for ``"normalized"`` and
-``nan`` for the other definitions, matching the undefined C++ reduction
-contract.
+Zero-area quadrature points contribute zero so mixed meshes stay
+AD-finite; C++ divides ``n/‖n‖`` and yields IEEE nan on those points.
+For ``"normalized"``, nonpositive global ``Σ |B|² |n|`` returns ``inf``
+(C++ is ``0/0`` nan). For ``"local"``, any positive-area quadrature
+point with ``|B|² = 0`` returns ``inf`` (C++ is inf when
+``B·n̂ − B_T ≠ 0`` and nan when that residual is also 0).
+Empty ``nphi`` or ``ntheta`` meshes return ``inf`` for ``"normalized"``
+and ``nan`` for the other definitions. C++ IEEE ``0/0`` is nan for
+every definition on the same empty mesh; this is a defined JAX
+contract, not C++ parity.
 An empty target array follows the C++ ``Btarget.size() == 0`` contract and is
 interpreted as no target field.
 
