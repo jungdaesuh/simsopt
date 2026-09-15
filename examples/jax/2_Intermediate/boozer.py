@@ -5,6 +5,11 @@ The host constructs the canonical NCSX coils and tensor-Fourier surface.  A
 polishes it with the least-squares solver, and finally relabels the surface by
 toroidal flux and expands it to three times the converged flux.  The numerical
 solves execute on the selected JAX device.
+
+GPU memory: ``jit(solve)`` at mpol=ntor=16 on a 48² quadrature requested
+243.07 GiB and OOM'd on a 32 GB card.  The largest resolution known to fit
+on that card is this example's ``native_default`` scale, mpol=ntor=5 on an
+11² grid; smoke (mpol=ntor=2, 5²) also fits.
 """
 
 from __future__ import annotations
