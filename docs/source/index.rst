@@ -68,6 +68,7 @@ optimization.  Others include `STELLOPT
    overview
    installation
    jax
+   jax_performance
    containers
    optimizable
    geo

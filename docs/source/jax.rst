@@ -476,3 +476,10 @@ Not every mutable SIMSOPT object or third-party callback has a traceable JAX
 equivalent.  Falling back to the native CPU path at a documented host boundary
 is supported; silently mixing host work into a supposedly compiled region is
 not.
+
+JAX GPU performance results
+---------------------------
+
+Measured JAX/GPU speedups against the native CPU backend, with the scope,
+parity check, and crossover guidance for each workload, are reported in
+:doc:`jax_performance`.
