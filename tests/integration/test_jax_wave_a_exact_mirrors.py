@@ -4,13 +4,12 @@ import json
 import os
 import subprocess
 import sys
-import sysconfig
 from dataclasses import dataclass
 from pathlib import Path
 
-import jax
 import pytest
 from examples.jax._lane_environment import build_execution_environment
+from simsopt_jax.runtime.isolated_kernel import pythonpath_with_loaded_kernel
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -138,12 +137,8 @@ def _source_checkout_environment() -> dict[str, str]:
         os.environ,
         repo_root=REPO_ROOT,
     )
-    environment["PYTHONPATH"] = os.pathsep.join(
-        (
-            str(REPO_ROOT / "src"),
-            str(sysconfig.get_paths()["purelib"]),
-            str(Path(jax.__file__).resolve().parents[1]),
-        )
+    environment["PYTHONPATH"] = pythonpath_with_loaded_kernel(
+        *environment["PYTHONPATH"].split(os.pathsep)
     )
     return environment
 
