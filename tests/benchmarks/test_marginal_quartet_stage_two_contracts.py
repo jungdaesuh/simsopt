@@ -26,19 +26,26 @@ from benchmarks.marginal_quartet_probes import (
     ENDPOINT_VECTOR_OBSERVABLES,
     MIRROR_FAMILIES,
     SCIPY_LBFGSB_DEFAULTS,
+    ProbeConventionError,
     _endpoint_root,
     _execution_device_attestation,
     _minimize_region,
     _mirror_binding,
+    _mirror_native_matched_options,
     _mirror_optimizer_options,
+    _module_level_constants,
     _native_optimizer_options,
     _policy_comparison,
     _retain_native_outputs,
+    _smoke_attestation,
     _write_endpoint_archive,
 )
 
-PROBE = Path(__file__).resolve().parents[2] / "benchmarks" / "marginal_quartet_probes.py"
+PROBE = (
+    Path(__file__).resolve().parents[2] / "benchmarks" / "marginal_quartet_probes.py"
+)
 STAGE_TWO = MIRROR_FAMILIES["stage-two"]
+COIL_FORCES = MIRROR_FAMILIES["coil-forces"]
 
 #: What the standard Stage-II mirror's SciPy route builds, one stage's worth.
 #: Kept here as a literal on purpose: the point of the comparison is that two
@@ -90,14 +97,64 @@ def test_native_policy_is_parsed_from_the_native_script(family_name: str) -> Non
     """Every mirror family's native lane stops under one rule, read from its file."""
     family = MIRROR_FAMILIES[family_name]
     options = _native_optimizer_options(family)
+    constants = _module_level_constants(
+        ast.parse(family.native_script.read_text(encoding="utf-8"))
+    )
+    expected_maxls = constants.get("MAXLS", SCIPY_LBFGSB_DEFAULTS["maxls"])
 
     assert options["maxiter"] == family.native_budget
     assert options["maxcor"] == 300
     assert options["ftol"] == 1.0e-15
     assert options["gtol"] == 1.0e-15
     assert options["maxfun"] == SCIPY_LBFGSB_DEFAULTS["maxfun"]
-    assert options["maxls"] == SCIPY_LBFGSB_DEFAULTS["maxls"]
+    assert options["maxls"] == expected_maxls
+    assert not isinstance(options["maxls"], str)
     assert options["tol_argument"] == 1.0e-15
+
+
+def test_coil_forces_native_maxls_is_resolved_from_the_named_constant() -> None:
+    """Commit 2b14e7d02 named MAXLS=32; the receipt must publish 32, not a symbol."""
+    options = _native_optimizer_options(COIL_FORCES)
+    constants = _module_level_constants(
+        ast.parse(COIL_FORCES.native_script.read_text(encoding="utf-8"))
+    )
+
+    assert options["maxls"] == constants["MAXLS"]
+    assert options["maxls"] != SCIPY_LBFGSB_DEFAULTS["maxls"]
+    assert options["maxls_symbol"] == "<symbol MAXLS>"
+    assert not str(options["maxls"]).startswith("<symbol")
+
+
+def test_coil_forces_native_and_jax_native_matched_attestations_agree() -> None:
+    """Native constants and ScipyLBFGSBOptions.native_matched are one stopping rule."""
+    native = _native_optimizer_options(COIL_FORCES)
+    declared = _mirror_native_matched_options(COIL_FORCES)
+
+    assert declared is not None
+    assert declared["type"] == "ScipyLBFGSBOptions"
+    for name in COMPARED_LBFGSB_OPTIONS:
+        assert native[name] == declared[name], name
+    assert native["maxls"] == declared["maxls"] != SCIPY_LBFGSB_DEFAULTS["maxls"]
+
+
+def test_stage_two_mirror_does_not_declare_native_matched_at_the_example() -> None:
+    assert _mirror_native_matched_options(STAGE_TWO) is None
+
+
+def test_smoke_attestation_matches_for_coil_forces() -> None:
+    report = _smoke_attestation(COIL_FORCES)
+
+    assert report["smoke_policy_matched"] is True
+    assert report["policy_differences"] == {}
+    assert (
+        report["native_optimizer_options"]["maxls"]
+        == report["declared_mirror_optimizer_options"]["maxls"]
+    )
+
+
+def test_smoke_attestation_refuses_a_mirror_without_solve_scalar_stage() -> None:
+    with pytest.raises(ProbeConventionError, match="solve_scalar_stage"):
+        _smoke_attestation(STAGE_TWO)
 
 
 def test_policy_matched_is_true_when_both_lanes_carry_the_same_rule() -> None:
@@ -203,9 +260,9 @@ def test_minimize_region_uses_the_mirrors_own_clock() -> None:
 
     assert region["minimize_region_seconds"] == 310.0
     assert region["first_stage_minimize_seconds"] == 200.0
-    assert "inter-stage state evaluation included" in region[
-        "minimize_region_definition"
-    ]
+    assert (
+        "inter-stage state evaluation included" in region["minimize_region_definition"]
+    )
 
 
 def test_minimize_region_is_null_rather_than_substituted() -> None:
@@ -213,13 +270,16 @@ def test_minimize_region_is_null_rather_than_substituted() -> None:
     region = _minimize_region({"solve_call_seconds": 91.0})
 
     assert region["minimize_region_seconds"] is None
-    assert "publishes no two_stage_minimize_seconds" in region[
-        "minimize_region_unavailable_because"
-    ]
+    assert (
+        "publishes no two_stage_minimize_seconds"
+        in region["minimize_region_unavailable_because"]
+    )
 
 
 def test_execution_device_attestation_names_the_result_array_device() -> None:
-    attestation = _execution_device_attestation(_FakeJax, {"execution_device": "cuda:0"})
+    attestation = _execution_device_attestation(
+        _FakeJax, {"execution_device": "cuda:0"}
+    )
 
     assert attestation["result_array_device"] == "cuda:0"
     assert attestation["result_array_device_unavailable_because"] is None
@@ -233,9 +293,10 @@ def test_process_backend_is_never_promoted_into_an_attestation() -> None:
     attestation = _execution_device_attestation(_FakeJax, {})
 
     assert attestation["result_array_device"] is None
-    assert "publishes no execution_device" in attestation[
-        "result_array_device_unavailable_because"
-    ]
+    assert (
+        "publishes no execution_device"
+        in attestation["result_array_device_unavailable_because"]
+    )
     assert attestation["process_default_backend"] == "gpu"
 
 
@@ -297,9 +358,10 @@ def test_native_outputs_are_retained_instead_of_deleted(tmp_path: Path) -> None:
     copied = Path(retained["saved_field_retained"])
     assert copied.name == "leg0-biot_savart_opt.json"
     assert copied.exists()
-    assert "does not promise equals res.x" in retained[
-        "saved_field_is_not_the_optimizer_endpoint"
-    ]
+    assert (
+        "does not promise equals res.x"
+        in retained["saved_field_is_not_the_optimizer_endpoint"]
+    )
 
 
 def test_a_run_that_saved_nothing_says_so(tmp_path: Path) -> None:
@@ -310,7 +372,9 @@ def test_a_run_that_saved_nothing_says_so(tmp_path: Path) -> None:
 
     assert retained["saved_field_retained"] is None
     assert retained["workdir_file_count"] == 0
-    assert "wrote no biot_savart_opt.json" in retained["saved_field_unavailable_because"]
+    assert (
+        "wrote no biot_savart_opt.json" in retained["saved_field_unavailable_because"]
+    )
 
 
 def test_jax_gpu_lane_pins_its_platform_before_the_mirror_imports() -> None:

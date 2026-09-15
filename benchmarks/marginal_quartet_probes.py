@@ -38,7 +38,10 @@ Usage::
         native.json jax.json
 
 ``--dry-run`` resolves and prints the configuration and the problem dimensions
-without running or publishing anything.  ``compare-artifacts`` reads two
+without running or publishing anything.  ``--smoke`` attests
+``native_optimizer_options`` against the mirror's
+``ScipyLBFGSBOptions.native_matched`` reconstruction without running a leg;
+both sides include ``maxls``.  ``compare-artifacts`` reads two
 already-published artifacts and prints the endpoint difference between the two
 lanes; it is report-only and computes no speed ratio.
 
@@ -696,11 +699,13 @@ _MIRROR_DISCLOSURES = (
     (
         "policy_matched is computed, never declared. The native side is parsed "
         "from the native script's own minimize calls (options dict plus the tol "
-        "that scipy.optimize.minimize expands into ftol and gtol), the mirror side "
-        "is the OptimizerResult.options_used the leg actually ran under, and "
-        "options neither side names fall back to SCIPY_LBFGSB_DEFAULTS. A native "
-        "lane artifact carries policy_matched null with its reason, because the "
-        "mirror's options exist only inside a mirror leg."
+        "that scipy.optimize.minimize expands into ftol and gtol); names in that "
+        "dict resolve to the script's module-level constants (MAXITER takes the "
+        "non-CI else arm). The mirror side is the OptimizerResult.options_used "
+        "the leg actually ran under, which ScipyLBFGSBOptions.native_matched "
+        "built. Options neither side names fall back to SCIPY_LBFGSB_DEFAULTS. "
+        "A native lane artifact carries policy_matched null with its reason, "
+        "because the mirror's options exist only inside a mirror leg."
     ),
     (
         "Endpoints are retained, not summarized. The JAX lane writes every "
@@ -1313,9 +1318,7 @@ def _minimize_region(observables: Mapping[str, object]) -> dict[str, object]:
             "stage's minimize call to return of the second's, inter-stage state "
             "evaluation included -- the same shape as the native leg's region"
         ),
-        "first_stage_minimize_seconds": observables.get(
-            "first_stage_minimize_seconds"
-        ),
+        "first_stage_minimize_seconds": observables.get("first_stage_minimize_seconds"),
         "second_stage_minimize_seconds": observables.get(
             "second_stage_minimize_seconds"
         ),
@@ -2239,10 +2242,12 @@ def _validate(arguments: argparse.Namespace) -> None:
                 f"--currents-out {arguments.currents_out} already exists; a probe "
                 "does not overwrite another lane's reference currents"
             )
-    if arguments.dry_run:
+    if arguments.dry_run or arguments.smoke:
         return
     if arguments.output is None:
-        raise ProbeConfigurationError("--output is required unless --dry-run")
+        raise ProbeConfigurationError(
+            "--output is required unless --dry-run or --smoke"
+        )
     resolved = arguments.output.resolve()
     if EVIDENCE_ROOT not in resolved.parents and REPO_ROOT in resolved.parents:
         raise ProbeConfigurationError(
@@ -2307,11 +2312,38 @@ def _mirror_binding(family: MirrorFamily) -> dict[str, object]:
     }
 
 
-def _option_literal(family: MirrorFamily, node: ast.AST) -> object:
-    """One optimizer-option value as written in a native script's call."""
+def _module_level_constants(module: ast.Module) -> dict[str, object]:
+    """Top-level numeric assigns. ``X = a if cond else b`` takes the else arm.
+
+    Native scripts bind ``MAXITER`` to a CI ternary; this probe scrubs CI so the
+    child takes the non-CI branch, which is the else arm of that spelling.
+    Importing the example module is not an option: ``3_Advanced`` is not a
+    Python identifier, and the native scripts execute the solve at import.
+    """
+    constants: dict[str, object] = {}
+    for node in module.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name):
+            continue
+        value = node.value
+        if isinstance(value, ast.Constant):
+            constants[target.id] = value.value
+        elif isinstance(value, ast.IfExp) and isinstance(value.orelse, ast.Constant):
+            constants[target.id] = value.orelse.value
+    return constants
+
+
+def _option_literal(
+    family: MirrorFamily, node: ast.AST, constants: Mapping[str, object]
+) -> object:
+    """One optimizer-option value, resolved from the native script's own names."""
     if isinstance(node, ast.Constant):
         return node.value
     if isinstance(node, ast.Name):
+        if node.id in constants:
+            return constants[node.id]
         return f"<symbol {node.id}>"
     raise ProbeConventionError(
         f"{family.name}: the native minimize call passes an optimizer option this "
@@ -2321,7 +2353,7 @@ def _option_literal(family: MirrorFamily, node: ast.AST) -> object:
 
 
 def _native_minimize_call_options(
-    family: MirrorFamily, call: ast.Call
+    family: MirrorFamily, call: ast.Call, constants: Mapping[str, object]
 ) -> dict[str, object]:
     """The stopping rule of one native ``minimize`` call, read from the call.
 
@@ -2329,7 +2361,8 @@ def _native_minimize_call_options(
     L-BFGS-B -- into ``ftol`` and ``gtol``, each only where the ``options``
     mapping did not already name it -- because the solver reads those two and
     not ``tol``.  Options neither the call nor ``tol`` supplies fall back to
-    :data:`SCIPY_LBFGSB_DEFAULTS`.
+    :data:`SCIPY_LBFGSB_DEFAULTS`.  A ``Name`` in the options dict is the
+    script's own constant (``MAXITER``, ``MAXLS``), not an unresolved symbol.
     """
     keywords = {keyword.arg: keyword.value for keyword in call.keywords}
     method = keywords.get("method")
@@ -2350,8 +2383,14 @@ def _native_minimize_call_options(
             raise ProbeConventionError(
                 f"{family.name}: the native options dict has a non-literal key"
             )
-        named[key.value] = _option_literal(family, value)
-    tolerance = _option_literal(family, keywords["tol"]) if "tol" in keywords else None
+        named[key.value] = _option_literal(family, value, constants)
+        if isinstance(value, ast.Name):
+            named[f"{key.value}_symbol"] = f"<symbol {value.id}>"
+    tolerance = (
+        _option_literal(family, keywords["tol"], constants)
+        if "tol" in keywords
+        else None
+    )
     resolved = dict(SCIPY_LBFGSB_DEFAULTS)
     if tolerance is not None:
         resolved["ftol"] = tolerance
@@ -2368,9 +2407,12 @@ def _native_optimizer_options(family: MirrorFamily) -> dict[str, object]:
     thing that goes stale without anyone noticing, and ``policy_matched`` is only
     worth publishing if both sides of it are read off what runs.  Both stages
     must carry the same rule, because a script whose two stages stop differently
-    has no single policy to compare.
+    has no single policy to compare.  Names in the options dict resolve against
+    the script's module-level constants so ``maxls=MAXLS`` publishes 32, not
+    ``<symbol MAXLS>``.
     """
     module = ast.parse(family.native_script.read_text(encoding="utf-8"))
+    constants = _module_level_constants(module)
     calls = [
         node
         for node in ast.walk(module)
@@ -2384,7 +2426,9 @@ def _native_optimizer_options(family: MirrorFamily) -> dict[str, object]:
             f"minimize calls, but {len(family.minimize_call_sources)} are anchored "
             "in minimize_call_sources; the native policy is not the one recorded"
         )
-    policies = [_native_minimize_call_options(family, call) for call in calls]
+    policies = [
+        _native_minimize_call_options(family, call, constants) for call in calls
+    ]
     if any(policy != policies[0] for policy in policies[1:]):
         raise ProbeConventionError(
             f"{family.name}: the native stages do not share one stopping rule "
@@ -2393,10 +2437,16 @@ def _native_optimizer_options(family: MirrorFamily) -> dict[str, object]:
     resolved = dict(policies[0])
     maxiter = resolved.get("maxiter")
     if isinstance(maxiter, str) and maxiter.startswith("<symbol "):
-        # The budget symbol is resolved by the family's own anchor rather than by
-        # evaluating the native module, whose MAXITER is a CI-dependent ternary.
+        # Unresolved budget symbol: the family's own anchor is the non-CI value.
         resolved["maxiter"] = family.native_budget
         resolved["maxiter_symbol"] = maxiter
+        resolved["maxiter_source"] = family.native_budget_source
+    elif maxiter != family.native_budget:
+        raise ProbeConventionError(
+            f"{family.name}: native maxiter {maxiter!r} does not match the "
+            f"family budget {family.native_budget} at {family.native_budget_source}"
+        )
+    else:
         resolved["maxiter_source"] = family.native_budget_source
     resolved["optimizer"] = "scipy.optimize.minimize(method='L-BFGS-B')"
     resolved["source"] = list(family.minimize_call_sources)
@@ -2405,6 +2455,122 @@ def _native_optimizer_options(family: MirrorFamily) -> dict[str, object]:
         "SCIPY_LBFGSB_DEFAULTS"
     )
     return resolved
+
+
+def _native_matched_solver_options(
+    *,
+    maxiter: object,
+    maxcor: object,
+    tol: object,
+    maxls: object | None = None,
+) -> dict[str, object]:
+    """Publishable form of ``ScipyLBFGSBOptions.native_matched``.
+
+    The classmethod lives under ``simsopt_jax.solve``, which imports JAX, and
+    this module pins the environment before any numerical import.  The mapping
+    is the classmethod body at
+    ``src/simsopt_jax/solve/scipy/contracts.py::ScipyLBFGSBOptions.native_matched``
+    plus the dataclass default for ``maxfun``, which that classmethod does not
+    take.  ``maxls`` omitted is SciPy's default, same as the classmethod.
+    """
+    return {
+        "type": "ScipyLBFGSBOptions",
+        "maxiter": maxiter,
+        "maxfun": SCIPY_LBFGSB_DEFAULTS["maxfun"],
+        "gtol": tol,
+        "ftol": tol,
+        "maxcor": maxcor,
+        "maxls": SCIPY_LBFGSB_DEFAULTS["maxls"] if maxls is None else maxls,
+    }
+
+
+def _mirror_native_matched_options(
+    family: MirrorFamily,
+) -> dict[str, object] | None:
+    """The options ``ScipyLBFGSBOptions.native_matched`` would build from the mirror.
+
+    ``None`` when the mirror does not call ``solve_scalar_stage`` itself (the
+    stage-two pair goes through ``solve_standard_stage_two``, whose policy lives
+    in the library).  Coil-forces names ``maxls`` on that call; a missing
+    ``maxls`` keyword is SciPy's default, matching the classmethod.
+    """
+    module = ast.parse(family.mirror_module.read_text(encoding="utf-8"))
+    constants = _module_level_constants(module)
+    calls = [
+        node
+        for node in ast.walk(module)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "solve_scalar_stage"
+    ]
+    if not calls:
+        return None
+    if len(calls) != 1:
+        raise ProbeConventionError(
+            f"{family.name}: the mirror makes {len(calls)} solve_scalar_stage "
+            "calls; there is no single native_matched policy to attest"
+        )
+    keywords = {keyword.arg: keyword.value for keyword in calls[0].keywords}
+
+    def resolve(name: str, *, optional: bool = False) -> object | None:
+        node = keywords.get(name)
+        if node is None:
+            if optional:
+                return None
+            raise ProbeConventionError(
+                f"{family.name}: solve_scalar_stage does not pass {name}"
+            )
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.Name):
+            if node.id in constants:
+                return constants[node.id]
+            if node.id == "max_steps" and "NATIVE_ITERATIONS" in constants:
+                return constants["NATIVE_ITERATIONS"]
+            raise ProbeConventionError(
+                f"{family.name}: solve_scalar_stage {name}={node.id} is not a "
+                "module-level constant this probe can read"
+            )
+        raise ProbeConventionError(
+            f"{family.name}: solve_scalar_stage {name} is not a name or literal "
+            f"({ast.dump(node)})"
+        )
+
+    return _native_matched_solver_options(
+        maxiter=resolve("max_steps"),
+        maxcor=resolve("maxcor"),
+        tol=resolve("tol"),
+        maxls=resolve("maxls", optional=True),
+    )
+
+
+def _compared_lbfgsb_values(options: Mapping[str, object]) -> dict[str, object]:
+    return {name: options[name] for name in COMPARED_LBFGSB_OPTIONS}
+
+
+def _smoke_attestation(family: MirrorFamily) -> dict[str, object]:
+    """Native constants vs the mirror's ``native_matched`` reconstruction."""
+    native = _native_optimizer_options(family)
+    declared = _mirror_native_matched_options(family)
+    if declared is None:
+        raise ProbeConventionError(
+            f"{family.name}: --smoke attests ScipyLBFGSBOptions.native_matched "
+            "from the mirror's own solve_scalar_stage call; this mirror does not "
+            "make that call"
+        )
+    native_compared = _compared_lbfgsb_values(native)
+    declared_compared = _compared_lbfgsb_values(declared)
+    return {
+        "native_optimizer_options": native,
+        "declared_mirror_optimizer_options": declared,
+        "compared_options": list(COMPARED_LBFGSB_OPTIONS),
+        "smoke_policy_matched": native_compared == declared_compared,
+        "policy_differences": {
+            name: {"native": native_compared[name], "mirror": declared_compared[name]}
+            for name in COMPARED_LBFGSB_OPTIONS
+            if native_compared[name] != declared_compared[name]
+        },
+    }
 
 
 def _mirror_optimizer_options(
@@ -2542,7 +2708,9 @@ def _run_mirror_family(arguments: argparse.Namespace, budget: int) -> dict[str, 
             }
         )
         payload.setdefault("final_objective", None)
-        payload.update(_write_endpoint_archive(endpoint_root, arguments.lane, endpoint_arrays))
+        payload.update(
+            _write_endpoint_archive(endpoint_root, arguments.lane, endpoint_arrays)
+        )
         payload["summary"] = {
             "solve_call": _summarize(
                 legs,
@@ -2753,6 +2921,15 @@ def _parse(argv: Sequence[str] | None) -> argparse.Namespace:
             help="append-only JSONL record of the order the legs actually ran in",
         )
         family_parser.add_argument("--dry-run", action="store_true")
+        family_parser.add_argument(
+            "--smoke",
+            action="store_true",
+            help=(
+                "attest native_optimizer_options against the mirror's "
+                "ScipyLBFGSBOptions.native_matched reconstruction without "
+                "running a leg"
+            ),
+        )
         if name == RCLS_FAMILY:
             family_parser.add_argument("--currents-out", type=Path, default=None)
             family_parser.add_argument("--compare", type=Path, default=None)
@@ -2765,6 +2942,8 @@ def _parse(argv: Sequence[str] | None) -> argparse.Namespace:
     if arguments.family not in (RCLS_FAMILY, COMPARE_COMMAND):
         arguments.currents_out = None
         arguments.compare = None
+    if not hasattr(arguments, "smoke"):
+        arguments.smoke = False
     return arguments
 
 
@@ -2784,6 +2963,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     budget = _resolve_budget(arguments)
     configuration = _configuration(arguments, budget, pinned)
+
+    if arguments.smoke:
+        if arguments.family not in MIRROR_FAMILIES:
+            raise ProbeConfigurationError(
+                f"--smoke is not defined for {arguments.family}"
+            )
+        family = MIRROR_FAMILIES[arguments.family]
+        attestation = _smoke_attestation(family)
+        report = {
+            "smoke": True,
+            "schema": SCHEMA,
+            "grade": PROBE_GRADE,
+            "plan": PLAN,
+            "family": family.name,
+            "configuration": configuration,
+            **attestation,
+        }
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0 if attestation["smoke_policy_matched"] else 1
 
     if arguments.dry_run:
         report: dict[str, object] = {
