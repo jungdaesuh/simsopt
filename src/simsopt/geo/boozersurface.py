@@ -20,6 +20,19 @@ from .surfaceobjectives import (
 __all__ = ["BoozerSurface"]
 
 
+def _levenberg_newton_step(jacobian, residual, damping):
+    """Damped Gauss-Newton step ``argmin ||J dx - r||² + damping·mean(diag(JᵀJ))·||dx||²``.
+
+    Solved as an augmented least-squares problem rather than through the normal
+    equations, so the conditioning is that of ``J`` and not of ``JᵀJ``.
+    """
+    n = jacobian.shape[1]
+    scale = np.sum(jacobian * jacobian) / n
+    augmented = np.vstack((jacobian, np.sqrt(damping * scale) * np.eye(n)))
+    rhs = np.concatenate((residual, np.zeros(n)))
+    return np.linalg.lstsq(augmented, rhs, rcond=None)[0]
+
+
 def _boozer_iterate_is_persistable(success, final_norm, initial_norm):
     """Return True when a solve result is safe to reuse as a warm-start seed."""
     return bool(success) or (
@@ -994,7 +1007,7 @@ class BoozerSurface(Optimizable):
         return r, J
 
     def minimize_boozer_exact_constraints_newton(
-        self, tol=1e-12, maxiter=10, iota=0.0, G=None, lm=[0.0, 0.0]
+        self, tol=1e-12, maxiter=10, iota=0.0, G=None, lm=[0.0, 0.0], damping=0.0
     ):
         r"""
         This function solves the constrained optimization problem
@@ -1021,6 +1034,12 @@ class BoozerSurface(Optimizable):
             iota (float, Optional): The initial guess for the value of the rotational transform on the surface. Defaults to 0.
             G (float, Optional): The initial guess for the value of G on the surface. Defaults to None.
             lm (list, Optional): The initial guesses for the Lagrange multipliers. Defaults to [0., 0.].
+            damping (float, Optional): Initial Levenberg damping. ``0.0`` (the default) is the
+                undamped Newton iteration. A positive value takes damped Gauss-Newton steps that
+                are accepted only when the residual norm decreases; the damping is divided by ten
+                after an accepted step and multiplied by ten after a rejected one. Use it when the
+                KKT Jacobian is near-singular at the root, where the undamped iteration converges
+                or diverges depending on the last bits of the starting point.
 
         Returns:
             dict: A dictionary containing the results of the optimization. The dictionary contains the following keys in addition
@@ -1028,7 +1047,7 @@ class BoozerSurface(Optimizable):
 
                 - 'residual': the value of the residual at the solution
                 - 'jacobian': the value of the jacobian at the solution
-                - 'iter': the number of iterations taken to converge
+                - 'iter': the number of iterations taken (accepted and rejected steps)
                 - 'success': True if the optimization converged, False otherwise
                 - 'G': the value of G on the surface
                 - 'lm': the value of the Lagrange multipliers
@@ -1053,28 +1072,38 @@ class BoozerSurface(Optimizable):
         norm = np.linalg.norm(val)
         initial_norm = norm
         i = 0
+        lam = damping
         while i < maxiter and norm > tol:
             if s.stellsym:
                 A = dval[:-1, :-1]
                 b = val[:-1]
+            else:
+                A = dval
+                b = val
+            if lam > 0.0:
+                dx = _levenberg_newton_step(A, b, lam)
+            else:
                 dx = np.linalg.solve(A, b)
                 if (
                     norm < 1e-9
                 ):  # iterative refinement for higher accuracy. TODO: cache LU factorisation
                     dx += np.linalg.solve(A, b - A @ dx)
-                xl[:-1] = xl[:-1] - dx
+            trial = np.array(xl, copy=True)
+            if s.stellsym:
+                trial[:-1] = trial[:-1] - dx
             else:
-                dx = np.linalg.solve(dval, val)
-                if (
-                    norm < 1e-9
-                ):  # iterative refinement for higher accuracy. TODO: cache LU factorisation
-                    dx += np.linalg.solve(dval, val - dval @ dx)
-                xl = xl - dx
-            val, dval = self.boozer_exact_constraints(
-                xl, derivatives=1, optimize_G=G is not None
+                trial = trial - dx
+            trial_val, trial_dval = self.boozer_exact_constraints(
+                trial, derivatives=1, optimize_G=G is not None
             )
-            norm = np.linalg.norm(val)
+            trial_norm = np.linalg.norm(trial_val)
             i = i + 1
+            if lam > 0.0 and not trial_norm < norm:
+                lam = lam * 10.0
+                continue
+            xl, val, dval, norm = trial, trial_val, trial_dval, trial_norm
+            if lam > 0.0:
+                lam = max(lam * 0.1, 1e-14)
 
         success = norm <= tol
         persist_solved_state = _boozer_iterate_is_persistable(
