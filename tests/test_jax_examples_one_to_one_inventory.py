@@ -8,42 +8,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+from examples.jax._manifest import TIERS
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 INVENTORY_PATH = REPO_ROOT / "examples" / "jax" / "one_to_one_inventory.json"
+MANIFEST_PATH = REPO_ROOT / "examples" / "jax" / "manifest.json"
 PROBE_PATH = REPO_ROOT / "examples" / "jax" / "probe_one_to_one_inventory.py"
-
-MIRRORS = frozenset(
-    {
-        "1_Simple/just_a_quadratic.py",
-        "1_Simple/minimize_curve_length.py",
-        "1_Simple/permanent_magnet_simple.py",
-        "1_Simple/qfm.py",
-        "1_Simple/stage_two_optimization_minimal.py",
-        "1_Simple/surf_vol_area.py",
-        "1_Simple/tracing_fieldlines_NCSX.py",
-        "1_Simple/tracing_fieldlines_QA.py",
-        "1_Simple/tracing_particle.py",
-        "2_Intermediate/boozer.py",
-        "2_Intermediate/boozerQA.py",
-        "2_Intermediate/permanent_magnet_MUSE.py",
-        "2_Intermediate/permanent_magnet_PM4Stell.py",
-        "2_Intermediate/permanent_magnet_QA.py",
-        "2_Intermediate/stage_two_optimization.py",
-        "2_Intermediate/stage_two_optimization_planar_coils.py",
-        "2_Intermediate/stage_two_optimization_stochastic.py",
-        "2_Intermediate/strain_optimization.py",
-        "2_Intermediate/wireframe_gsco_modular.py",
-        "2_Intermediate/wireframe_gsco_sector_saddle.py",
-        "2_Intermediate/wireframe_rcls_basic.py",
-        "2_Intermediate/wireframe_rcls_with_ports.py",
-        "3_Advanced/coil_forces.py",
-        "3_Advanced/single_stage_boozer_vacuum_optimization.py",
-        "3_Advanced/stage_two_optimization_finitebuild.py",
-        "3_Advanced/wireframe_gsco_multistep.py",
-    }
-)
-HYBRIDS = frozenset({"3_Advanced/single_stage_optimization.py"})
-NOT_APPLICABLE = frozenset({"1_Simple/logger_example.py", "2_Intermediate/QSC.py"})
 VMEC_BLOCKED_CANDIDATES = frozenset(
     {
         "2_Intermediate/QH_fixed_resolution_boozer.py",
@@ -98,6 +68,33 @@ def _rows(value: dict[str, object]) -> list[dict[str, object]]:
     return rows
 
 
+def _tracked_native_sources() -> set[str]:
+    examples_root = REPO_ROOT / "examples"
+    return {
+        path.relative_to(examples_root).as_posix()
+        for tier in TIERS
+        for path in (examples_root / tier).glob("*.py")
+    }
+
+
+def _catalog_classification_sets() -> dict[str, frozenset[str]]:
+    document = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    catalog = document["source_catalog"]
+    assert isinstance(catalog, list)
+    buckets: dict[str, set[str]] = {
+        "mirror": set(),
+        "hybrid": set(),
+        "blocked": set(),
+        "not_applicable": set(),
+    }
+    for record in catalog:
+        assert isinstance(record, dict)
+        disposition = record["disposition"]
+        classification = "mirror" if disposition == "eligible" else str(disposition)
+        buckets[classification].add(str(record["source"]))
+    return {key: frozenset(value) for key, value in buckets.items()}
+
+
 def test_inventory_freezes_exact_baseline_and_all_native_sources() -> None:
     inventory = _load_inventory()
     assert frozenset(inventory) == EXPECTED_TOP_LEVEL_FIELDS
@@ -108,51 +105,31 @@ def test_inventory_freezes_exact_baseline_and_all_native_sources() -> None:
         assert baseline[key] == expected
 
     rows = _rows(inventory)
-    assert len(rows) == 52
+    tracked_sources = _tracked_native_sources()
+    assert len(rows) == len(tracked_sources)
     assert all(isinstance(row["source"], str) for row in rows)
     sources = [str(row["source"]) for row in rows]
     assert len(sources) == len(set(sources))
     assert sources == sorted(sources)
-    tracked_sources = {
-        path.relative_to(REPO_ROOT / "examples").as_posix()
-        for tier in (
-            "1_Simple",
-            "2_Intermediate",
-            "3_Advanced",
-            "stellarator_benchmarks",
-        )
-        for path in (REPO_ROOT / "examples" / tier).glob("*.py")
-    }
     assert set(sources) == tracked_sources
 
 
 def test_inventory_classifies_every_source_without_silently_shrinking_scope() -> None:
     rows = _rows(_load_inventory())
     by_source = {str(row["source"]): row for row in rows}
-    assert {
-        source
-        for source, row in by_source.items()
-        if row["recommended_target_classification"] == "mirror"
-    } == MIRRORS
-    assert {
-        source
-        for source, row in by_source.items()
-        if row["recommended_target_classification"] == "hybrid"
-    } == HYBRIDS
-    assert {
-        source
-        for source, row in by_source.items()
-        if row["recommended_target_classification"] == "not_applicable"
-    } == NOT_APPLICABLE
-    blocked = set(by_source) - MIRRORS - HYBRIDS - NOT_APPLICABLE
-    assert {
-        source
-        for source, row in by_source.items()
-        if row["recommended_target_classification"] == "blocked"
-    } == blocked
-    assert VMEC_BLOCKED_CANDIDATES <= blocked
+    expected = _catalog_classification_sets()
+    assert set(by_source) == set().union(*expected.values())
+    for classification, sources in expected.items():
+        assert {
+            source
+            for source, row in by_source.items()
+            if row["recommended_target_classification"] == classification
+        } == sources
+    assert VMEC_BLOCKED_CANDIDATES <= expected["blocked"]
 
-    expected_candidates = MIRRORS | HYBRIDS | VMEC_BLOCKED_CANDIDATES
+    expected_candidates = (
+        expected["mirror"] | expected["hybrid"] | VMEC_BLOCKED_CANDIDATES
+    )
     assert {
         source
         for source, row in by_source.items()
@@ -229,5 +206,5 @@ def test_inventory_capability_probe_revalidates_all_rows() -> None:
     )
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
-    assert payload["source_count"] == 52
+    assert payload["source_count"] == len(_tracked_native_sources())
     assert payload["validated"] is True

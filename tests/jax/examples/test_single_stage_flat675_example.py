@@ -104,9 +104,27 @@ def test_manifest_entry_names_its_host_construction_seam(
     assert manifest_entry["host_boundaries"] == [
         "native boundary, coil, and winding-surface construction"
     ]
-    assert manifest_entry["classification"] == "tutorial"
-    assert manifest_entry["teaching_kind"] == "combined"
+    assert manifest_entry["classification"] == "adapter"
+    assert manifest_entry["teaching_kind"] == "one_to_one"
     assert manifest_entry["compatibility"] is None
+
+
+def test_manifest_source_catalog_owns_the_native_twin(
+    manifest_entry: dict[str, object],
+) -> None:
+    document = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    matches = [
+        row
+        for row in document["source_catalog"]
+        if row["source"] == "3_Advanced/single_stage_flat675.py"
+    ]
+    assert len(matches) == 1
+    source = matches[0]
+    assert source["disposition"] == "eligible"
+    assert source["port_status"] == "ready"
+    assert source["mirror_example_id"] == EXAMPLE_ID
+    assert source["mirror_example_id"] == manifest_entry["id"]
+    assert manifest_entry["path"] == source["source"]
 
 
 def test_manifest_entry_declares_both_device_lanes(
