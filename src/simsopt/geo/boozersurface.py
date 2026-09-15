@@ -42,6 +42,26 @@ def _boozer_iterate_is_persistable(success, final_norm, initial_norm):
     )
 
 
+def _ls_newton_growth_allows_continue(norm, initial_norm, divergence_factor):
+    """True when the LS-Newton blow-up detector still allows another iteration.
+
+    ``None`` or ``0`` disables the guard. Otherwise continue while
+    ``norm <= divergence_factor * initial_norm``. Twin of
+    ``newton_ls_native_dense`` ``continue_iteration``.
+
+    The reference is the residual at Newton entry, not the running best.
+    Undamped Newton on Boozer surfaces is non-monotone: an accepted walk
+    can excursion by 1e2–1e5 relative to a transient best and still
+    converge. Comparing to the best treats those spikes as divergence
+    and aborts a successful solve. Blow-up versus the entry residual is
+    what distinguishes a rejected line-search trial (313 → 1e10 at
+    step 1) from a convergent non-monotone walk.
+    """
+    if divergence_factor is None or divergence_factor == 0:
+        return True
+    return norm <= divergence_factor * initial_norm
+
+
 _ExactNewtonObservationSink = Callable[[Mapping[str, object]], None]
 _exact_newton_observation_sink: ContextVar[_ExactNewtonObservationSink | None] = (
     ContextVar("simsopt_boozer_exact_newton_observation_sink", default=None)
@@ -655,6 +675,7 @@ class BoozerSurface(Optimizable):
         stab=0.0,
         weight_inv_modB=True,
         verbose=False,
+        divergence_factor=1e3,
     ):
         """
         This function does the same as :mod:`minimize_boozer_penalty_constraints_LBFGS`, but instead of LBFGS it uses
@@ -669,6 +690,7 @@ class BoozerSurface(Optimizable):
             stab (float, Optional): The stabilization parameter for the Newton method. Defaults to 0.
             weight_inv_modB (bool, Optional): If True, weight the residual by modB so that it does not scale with coil currents. Defaults to True.
             verbose (bool, Optional): If True, print the optimization progress. Defaults to False.
+            divergence_factor (float, Optional): Stop once ``||grad||`` exceeds this multiple of the residual at Newton entry. Default ``1e3``. ``None`` or ``0`` disables the guard. A guarded stop is a failed solve: ``success`` is false and the persist/rollback rule is unchanged. The reference is the entry residual, not the running best: undamped Newton is non-monotone, and comparing to the best aborts convergent walks whose spikes vs a transient best are 1e2–1e5.
 
         Returns:
             dict: A dictionary containing the results of the optimization. The dictionary contains the following keys in addition
@@ -709,7 +731,11 @@ class BoozerSurface(Optimizable):
 
         norm = np.linalg.norm(dval)
         initial_norm = norm
-        while i < maxiter and norm > tol:
+        while (
+            i < maxiter
+            and norm > tol
+            and _ls_newton_growth_allows_continue(norm, initial_norm, divergence_factor)
+        ):
             d2val += stab * np.identity(d2val.shape[0])
             dx = np.linalg.solve(d2val, dval)
             if norm < 1e-9:

@@ -1,9 +1,22 @@
 from __future__ import annotations
 
+from unittest import mock
+
 import jax
 import jax.numpy as jnp
 import numpy as np
+from simsopt._core import load
+from simsopt.field import BiotSavart
+from simsopt.geo import BoozerSurface, Volume
 from simsopt_jax.geo.optimizers.native_ls_newton import newton_ls_native_dense
+from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
+from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
+from simsopt_jax_adapters.geo.nested_ls_ncsx import (
+    NCSX_EXAMPLE_JSON,
+    upsample_surface_xyz_tensor_fourier,
+)
+
+from .surface_test_helpers import get_boozer_surface
 
 jax.config.update("jax_enable_x64", True)
 
@@ -55,6 +68,7 @@ def _literal_native_numpy_oracle(
     maxiter: int,
     tol: float,
     stab: float,
+    divergence_factor=1e3,
 ):
     initial_x = np.array(initial, copy=True)
     x = np.array(initial, copy=True)
@@ -62,7 +76,15 @@ def _literal_native_numpy_oracle(
     norm = np.linalg.norm(grad)
     initial_norm = norm
     nit = 0
-    while nit < maxiter and norm > tol:
+    while (
+        nit < maxiter
+        and norm > tol
+        and (
+            divergence_factor is None
+            or divergence_factor == 0
+            or norm <= divergence_factor * initial_norm
+        )
+    ):
         stabilized_hessian = hessian + stab * np.identity(hessian.shape[0])
         direction = np.linalg.solve(stabilized_hessian, grad)
         if norm < 1.0e-9:
@@ -79,6 +101,7 @@ def _literal_native_numpy_oracle(
     if not persist_solved_state:
         x = initial_x
         fun, grad, hessian = value_grad_hessian_fn(x)
+        norm = np.linalg.norm(grad)
     return {
         "x": x,
         "fun": fun,
@@ -112,6 +135,7 @@ def test_native_ls_newton_matches_literal_numpy_full_hessian_policy() -> None:
         maxiter=6,
         tol=1.0e-13,
         stab=0.03,
+        divergence_factor=None,
     )
     actual = jax.jit(
         lambda values: newton_ls_native_dense(
@@ -120,6 +144,7 @@ def test_native_ls_newton_matches_literal_numpy_full_hessian_policy() -> None:
             maxiter=6,
             tol=1.0e-13,
             stab=0.03,
+            divergence_factor=None,
         )
     )(jnp.asarray(initial))
 
@@ -285,3 +310,240 @@ def test_native_ls_newton_worsening_failure_rolls_back_and_recomputes() -> None:
         rtol=0.0,
         atol=3.0e-16,
     )
+
+
+def _runaway_ls_numpy(values: np.ndarray):
+    packed = np.asarray(values, dtype=np.float64)
+    hessian = 0.05 * np.eye(packed.size, dtype=packed.dtype)
+    return np.float64(0.5 * packed @ packed), packed, hessian
+
+
+def _runaway_ls_jax(
+    values: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    return (
+        0.5 * values @ values,
+        values,
+        jnp.asarray(0.05, dtype=values.dtype)
+        * jnp.eye(values.shape[0], dtype=values.dtype),
+    )
+
+
+def _ncsx_18_ls_pair():
+    packed = load(str(NCSX_EXAMPLE_JSON))
+    _, _, coils, _, surfaces, boozer_surfaces, ress = packed
+    native_surface = upsample_surface_xyz_tensor_fourier(
+        surfaces[0], mpol=6, ntor=6, nphi=18, ntheta=18
+    )
+    device_surface = upsample_surface_xyz_tensor_fourier(
+        surfaces[0], mpol=6, ntor=6, nphi=18, ntheta=18
+    )
+    constraint_weight = float(boozer_surfaces[0].constraint_weight)
+    native_label = Volume(native_surface)
+    target = float(native_label.J())
+    options = {"verbose": False, "weight_inv_modB": True}
+    native = BoozerSurface(
+        BiotSavart(coils),
+        native_surface,
+        native_label,
+        target,
+        constraint_weight=constraint_weight,
+        options=options,
+    )
+    device = BoozerSurfaceJAX(
+        BiotSavartJAX(coils),
+        device_surface,
+        Volume(device_surface),
+        target,
+        constraint_weight=constraint_weight,
+        options=options,
+    )
+    return (
+        native,
+        device,
+        float(ress[0]["iota"]),
+        float(ress[0]["G"]),
+        constraint_weight,
+    )
+
+
+def test_native_ls_newton_divergence_guard_stops_exploding_walk() -> None:
+    initial = jnp.asarray([1.0], dtype=jnp.float64)
+    guarded = newton_ls_native_dense(
+        _runaway_ls_jax,
+        initial,
+        maxiter=40,
+        tol=1.0e-14,
+    )
+    disabled = newton_ls_native_dense(
+        _runaway_ls_jax,
+        initial,
+        maxiter=40,
+        tol=1.0e-14,
+        divergence_factor=None,
+    )
+    disabled_zero = newton_ls_native_dense(
+        _runaway_ls_jax,
+        initial,
+        maxiter=40,
+        tol=1.0e-14,
+        divergence_factor=0.0,
+    )
+
+    assert not bool(guarded["success"])
+    assert not bool(guarded["persist_solved_state"])
+    assert int(guarded["nit"]) <= 5
+    assert int(guarded["nit"]) > 0
+    assert int(disabled["nit"]) == 40
+    assert int(disabled_zero["nit"]) == 40
+    assert not bool(disabled["success"])
+    np.testing.assert_array_equal(np.asarray(guarded["x"]), np.asarray(initial))
+
+
+def _convex_quadratic_jax(
+    values: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    target = jnp.asarray([1.0, -0.5], dtype=values.dtype)
+    residual = values - target
+    return (
+        0.5 * residual @ residual,
+        residual,
+        jnp.eye(values.shape[0], dtype=values.dtype),
+    )
+
+
+def test_native_ls_newton_accepted_walk_bitwise_identical_with_guard_on_and_off() -> (
+    None
+):
+    initial = np.asarray([0.75, 0.45], dtype=np.float64)
+    guarded = newton_ls_native_dense(
+        _convex_quadratic_jax,
+        jnp.asarray(initial),
+        maxiter=6,
+        tol=1.0e-13,
+    )
+    disabled = newton_ls_native_dense(
+        _convex_quadratic_jax,
+        jnp.asarray(initial),
+        maxiter=6,
+        tol=1.0e-13,
+        divergence_factor=None,
+    )
+    assert bool(guarded["success"])
+    assert int(guarded["nit"]) == int(disabled["nit"])
+    for key in ("x", "fun", "grad", "hessian", "final_norm"):
+        np.testing.assert_array_equal(
+            np.asarray(guarded[key]), np.asarray(disabled[key])
+        )
+
+
+def test_analytic_ls_newton_18_accepted_bitwise_guard_on_and_off() -> None:
+    native, device, iota0, g_value, constraint_weight = _ncsx_18_ls_pair()
+    seed = np.concatenate((native.surface.get_dofs(), [iota0, g_value]))
+    _, derivatives = device._make_analytic_penalty_derivatives(
+        True, True, constraint_weight
+    )
+    jax_guarded = newton_ls_native_dense(
+        derivatives,
+        jnp.asarray(seed),
+        maxiter=40,
+        tol=1e-11,
+        args=(device.coil_set_spec,),
+    )
+    jax_disabled = newton_ls_native_dense(
+        derivatives,
+        jnp.asarray(seed),
+        maxiter=40,
+        tol=1e-11,
+        divergence_factor=None,
+        args=(device.coil_set_spec,),
+    )
+    assert bool(jax_guarded["success"])
+    assert bool(jax_disabled["success"])
+    assert int(jax_guarded["nit"]) == int(jax_disabled["nit"])
+    np.testing.assert_array_equal(
+        np.asarray(jax_guarded["x"]), np.asarray(jax_disabled["x"])
+    )
+    np.testing.assert_array_equal(
+        np.asarray(jax_guarded["fun"]), np.asarray(jax_disabled["fun"])
+    )
+
+
+def _nonmonotone_then_converge_jax(
+    values: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    x = values[0]
+    grad = jnp.where(
+        x < 0.5,
+        jnp.asarray(-1.0, dtype=values.dtype),
+        jnp.where(
+            x < 1.0005,
+            jnp.asarray(-0.001, dtype=values.dtype),
+            jnp.where(
+                x < 1.5,
+                -(jnp.asarray(2.0, dtype=values.dtype) - x),
+                jnp.asarray(0.0, dtype=values.dtype),
+            ),
+        ),
+    )
+    hessian = jnp.ones((1, 1), dtype=values.dtype)
+    return 0.5 * grad * grad, jnp.stack((grad,)), hessian
+
+
+def test_native_ls_newton_nonmonotone_convergent_walk_is_not_aborted() -> None:
+    actual = newton_ls_native_dense(
+        _nonmonotone_then_converge_jax,
+        jnp.asarray([0.0], dtype=jnp.float64),
+        maxiter=10,
+        tol=1.0e-12,
+    )
+    assert bool(actual["success"])
+    assert int(actual["nit"]) == 3
+    np.testing.assert_allclose(np.asarray(actual["x"]), [2.0], atol=1e-12)
+
+
+def test_jax_and_native_ls_newton_stop_at_same_iteration_on_diverging_input() -> None:
+    _, boozer_surface = get_boozer_surface(boozer_type="ls", converge=False)
+    dofs = np.array(boozer_surface.surface.get_dofs(), copy=True)
+    dofs[0] = 0.6
+    boozer_surface.surface.set_dofs(dofs)
+    iota = -0.406
+    g_value = -2.0
+    initial = np.concatenate((dofs, [iota, g_value]))
+
+    def exploding_penalty(
+        state,
+        derivatives=2,
+        constraint_weight=1.0,
+        optimize_G=False,
+        weight_inv_modB=True,
+    ):
+        assert derivatives == 2
+        assert optimize_G
+        return _runaway_ls_numpy(state)
+
+    boozer_surface.need_to_run_code = True
+    with mock.patch.object(
+        boozer_surface,
+        "boozer_penalty_constraints_vectorized",
+        side_effect=exploding_penalty,
+    ):
+        native = boozer_surface.minimize_boozer_penalty_constraints_newton(
+            tol=1e-14,
+            maxiter=40,
+            constraint_weight=1.0,
+            iota=iota,
+            G=g_value,
+            verbose=False,
+        )
+    jax_result = newton_ls_native_dense(
+        _runaway_ls_jax,
+        jnp.asarray(initial),
+        maxiter=40,
+        tol=1e-14,
+    )
+    assert not bool(native["success"])
+    assert not bool(jax_result["success"])
+    assert native["iter"] == int(jax_result["nit"])
+    assert native["iter"] <= 5
+    assert native["iter"] > 0

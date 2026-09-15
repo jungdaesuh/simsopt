@@ -1,12 +1,18 @@
 import unittest
+from unittest import mock
 
 import numpy as np
+from simsopt._core import load
 from simsopt.field.coil import coils_via_symmetries
 from simsopt.geo.boozersurface import BoozerSurface
 from simsopt.field.biotsavart import BiotSavart
 from simsopt.geo import SurfaceXYZTensorFourier, SurfaceRZFourier
-from simsopt.geo.surfaceobjectives import ToroidalFlux, Area
+from simsopt.geo.surfaceobjectives import ToroidalFlux, Area, Volume
 from simsopt.configs.zoo import get_data
+from simsopt_jax_adapters.geo.nested_ls_ncsx import (
+    NCSX_EXAMPLE_JSON,
+    upsample_surface_xyz_tensor_fourier,
+)
 from .surface_test_helpers import get_surface, get_exact_surface, get_boozer_surface
 
 
@@ -736,6 +742,151 @@ class BoozerSurfaceTests(unittest.TestCase):
         )
         self.assertAlmostEqual(res["iota"], trusted_iota)
         self.assertAlmostEqual(res["G"], trusted_G)
+
+    def test_penalty_newton_divergence_guard_stops_exploding_walk(self):
+        """LS-Newton aborts once ||g|| exceeds 1e3× the entry residual and fails."""
+        _, boozer_surface = get_boozer_surface(boozer_type="ls", converge=False)
+        dofs = np.array(boozer_surface.surface.get_dofs(), copy=True)
+        dofs[0] = 0.6
+        boozer_surface.surface.set_dofs(dofs)
+        iota = -0.406
+        g_value = -2.0
+
+        def exploding_penalty(
+            state,
+            derivatives=2,
+            constraint_weight=1.0,
+            optimize_G=False,
+            weight_inv_modB=True,
+        ):
+            assert derivatives == 2
+            packed = np.asarray(state, dtype=np.float64)
+            hessian = 0.05 * np.eye(packed.size, dtype=packed.dtype)
+            return np.float64(0.5 * packed @ packed), packed, hessian
+
+        boozer_surface.need_to_run_code = True
+        with mock.patch.object(
+            boozer_surface,
+            "boozer_penalty_constraints_vectorized",
+            side_effect=exploding_penalty,
+        ):
+            res = boozer_surface.minimize_boozer_penalty_constraints_newton(
+                tol=1e-14,
+                maxiter=40,
+                constraint_weight=1.0,
+                iota=iota,
+                G=g_value,
+                verbose=False,
+            )
+
+        assert not bool(res["success"])
+        assert res["iter"] <= 5
+        assert res["iter"] > 0
+        np.testing.assert_allclose(np.array(boozer_surface.surface.get_dofs()), dofs)
+        self.assertAlmostEqual(res["iota"], iota)
+        self.assertAlmostEqual(res["G"], g_value)
+
+    def test_penalty_newton_nonmonotone_convergent_walk_is_not_aborted(self):
+        """A spike vs a transient best that stays within 1e3 of entry still converges."""
+        _, boozer_surface = get_boozer_surface(boozer_type="ls", converge=False)
+        iota = -0.406
+        g_value = -2.0
+
+        def nonmonotone_penalty(
+            state,
+            derivatives=2,
+            constraint_weight=1.0,
+            optimize_G=False,
+            weight_inv_modB=True,
+        ):
+            assert derivatives == 2
+            packed = np.asarray(state, dtype=np.float64)
+            x0 = packed[0]
+            if x0 < 0.5:
+                g0 = -1.0
+            elif x0 < 1.0005:
+                g0 = -0.001
+            elif x0 < 1.5:
+                g0 = -(2.0 - x0)
+            else:
+                g0 = 0.0
+            gradient = np.zeros_like(packed)
+            gradient[0] = g0
+            hessian = np.eye(packed.size, dtype=packed.dtype)
+            return np.float64(0.5 * g0 * g0), gradient, hessian
+
+        dofs = np.array(boozer_surface.surface.get_dofs(), copy=True)
+        dofs[0] = 0.0
+        boozer_surface.surface.set_dofs(dofs)
+        boozer_surface.need_to_run_code = True
+        with mock.patch.object(
+            boozer_surface,
+            "boozer_penalty_constraints_vectorized",
+            side_effect=nonmonotone_penalty,
+        ):
+            res = boozer_surface.minimize_boozer_penalty_constraints_newton(
+                tol=1e-12,
+                maxiter=10,
+                constraint_weight=1.0,
+                iota=iota,
+                G=g_value,
+                verbose=False,
+            )
+        assert bool(res["success"])
+        assert res["iter"] == 3
+        np.testing.assert_allclose(np.array(boozer_surface.surface.get_dofs())[0], 2.0)
+
+    def test_penalty_newton_18_accepted_bitwise_identical_with_guard_on_and_off(self):
+        """An accepted NCSX 18² LS-Newton is bitwise identical with the guard off."""
+        packed = load(str(NCSX_EXAMPLE_JSON))
+        _, _, coils, _, surfaces, boozer_surfaces, ress = packed
+        surface = upsample_surface_xyz_tensor_fourier(
+            surfaces[0], mpol=6, ntor=6, nphi=18, ntheta=18
+        )
+        constraint_weight = float(boozer_surfaces[0].constraint_weight)
+        label = Volume(surface)
+        boozer_surface = BoozerSurface(
+            BiotSavart(coils),
+            surface,
+            label,
+            float(label.J()),
+            constraint_weight=constraint_weight,
+            options={"verbose": False, "weight_inv_modB": True},
+        )
+        seed_dofs = np.array(boozer_surface.surface.get_dofs(), copy=True)
+        seed_iota = float(ress[0]["iota"])
+        seed_g = float(ress[0]["G"])
+        boozer_surface.need_to_run_code = True
+        guarded = boozer_surface.minimize_boozer_penalty_constraints_newton(
+            iota=seed_iota,
+            G=seed_g,
+            constraint_weight=constraint_weight,
+            tol=1e-11,
+            maxiter=40,
+            weight_inv_modB=True,
+            verbose=False,
+        )
+        guarded_dofs = np.array(boozer_surface.surface.get_dofs(), copy=True)
+        boozer_surface.surface.set_dofs(seed_dofs)
+        boozer_surface.need_to_run_code = True
+        disabled = boozer_surface.minimize_boozer_penalty_constraints_newton(
+            iota=seed_iota,
+            G=seed_g,
+            constraint_weight=constraint_weight,
+            tol=1e-11,
+            maxiter=40,
+            weight_inv_modB=True,
+            verbose=False,
+            divergence_factor=None,
+        )
+        assert bool(guarded["success"])
+        assert bool(disabled["success"])
+        assert guarded["iter"] == disabled["iter"]
+        np.testing.assert_array_equal(
+            guarded_dofs, np.array(boozer_surface.surface.get_dofs())
+        )
+        np.testing.assert_equal(guarded["iota"], disabled["iota"])
+        np.testing.assert_equal(guarded["G"], disabled["G"])
 
     def test_penalty_ls_manual_diverging_solve_does_not_poison_warm_start(self):
         """Manual penalty LS rolls back after a diverging Gauss-Newton step."""
