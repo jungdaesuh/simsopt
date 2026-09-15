@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 import subprocess
 import tempfile
 import time
@@ -16,6 +17,7 @@ from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.receipts import load_lane_observation
 from examples.jax.parity.runtime import ParityLane, build_parity_lane_environment
 from simsopt_jax.examples import ExecutionScale
+from simsopt_jax.runtime.isolated_kernel import pythonpath_with_loaded_kernel
 
 
 class RunnerError(RuntimeError):
@@ -157,6 +159,9 @@ def execute_case_lanes(
         )
         environment = build_parity_lane_environment(
             lane, base_environment, repo_root=repo_root
+        )
+        environment["PYTHONPATH"] = pythonpath_with_loaded_kernel(
+            *environment["PYTHONPATH"].split(os.pathsep)
         )
         started = perf_counter()
         completed = executor(command, result_directory, environment)

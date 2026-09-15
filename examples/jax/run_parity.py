@@ -11,10 +11,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_SOURCE_ROOT = _REPO_ROOT / "src"
-for import_root in (str(_SOURCE_ROOT), str(_REPO_ROOT)):
-    if import_root not in sys.path:
-        sys.path.insert(0, import_root)
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from repo_bootstrap import bootstrap_local_simsopt
+
+bootstrap_local_simsopt(_REPO_ROOT / "src")
 
 from examples.jax.manifest_runtime import load_runtime_contract_pair
 from examples.jax.parity.arbiter import QUALITY_BAND_VERDICT, arbitrate

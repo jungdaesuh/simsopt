@@ -380,12 +380,10 @@ DIAG5_FROZEN_NUMERICAL_PATHS: Final = frozenset(
         "src/simsopt_jax_adapters/geo/single_stage_native_endpoint.py",
     }
 )
-# Refrozen 2026-09-15: 661 -> 674. Fourteen files entered the broad sweep
-# (flat675 native example, simsopt_contracts, exact-analytic / host
-# construction / surface_specs / native LS-Newton, restored ncsx and
-# exact-analytic probes) and ``src/simsopt/optimization_endpoint.py`` left
-# after the move to ``src/simsopt_contracts/``. Admitted and dropped
-# explicitly per ``benchmarks/regenerate_execution_source_manifest.py``.
+# Refrozen 2026-09-15: 674 -> 676. Two files entered the broad sweep
+# (``src/simsopt_jax/runtime/isolated_kernel.py`` and
+# ``isolated_kernel_child.py``) and none left. Admitted explicitly per
+# ``benchmarks/regenerate_execution_source_manifest.py``.
 #
 # Run in a DEDICATED CLEAN WORKTREE, because the regenerator hashes
 # working-tree bytes and the shared tree is not quiescent. One trap that
@@ -394,7 +392,7 @@ DIAG5_FROZEN_NUMERICAL_PATHS: Final = frozenset(
 # freshly-added worktree does not have it and the refreeze silently DROPS it
 # -- removing a gate, which is the exact failure the regenerator's docstring
 # warns about. The worktree must be quiescent AND built.
-DIAG5_EXECUTION_SOURCE_ENTRY_COUNT: Final = 674
+DIAG5_EXECUTION_SOURCE_ENTRY_COUNT: Final = 676
 DIAG5_CPU_QUALIFICATION_SCHEMA_VERSION: Final = (
     "single-stage-neq-gntr3-cpu-trajectory-qualification-v2"
 )

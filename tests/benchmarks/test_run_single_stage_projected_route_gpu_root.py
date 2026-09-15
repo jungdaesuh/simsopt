@@ -42,6 +42,7 @@ from benchmarks.process_gpu_monitor import (
 from benchmarks.single_stage_fullspace_snapshot import canonical_json_bytes
 from simsopt_jax.geo.optimizers.projected_lbfgs import KernelLowering
 from simsopt_jax.runtime.exact_numeric_identity import exact_numeric_tree_sha256
+from simsopt_jax.runtime.isolated_kernel import pythonpath_with_loaded_kernel
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 
@@ -4815,8 +4816,9 @@ def test_the_launcher_entry_path_runs_as_launched_and_refuses_the_cpu(
             **os.environ,
             "JAX_PLATFORMS": "cpu",
             "JAX_ENABLE_X64": "true",
-            "PYTHONPATH": os.pathsep.join(
-                (str(REPOSITORY / "src"), str(REPOSITORY))
+            "PYTHONPATH": pythonpath_with_loaded_kernel(
+                str(REPOSITORY / "src"),
+                str(REPOSITORY),
             ),
             "PYTHONDONTWRITEBYTECODE": "1",
         },
@@ -5169,7 +5171,10 @@ def test_the_launcher_import_closure_binds_in_a_fresh_interpreter(
             **os.environ,
             "JAX_PLATFORMS": "cpu",
             "JAX_ENABLE_X64": "true",
-            "PYTHONPATH": os.pathsep.join((str(REPOSITORY / "src"), str(REPOSITORY))),
+            "PYTHONPATH": pythonpath_with_loaded_kernel(
+                str(REPOSITORY / "src"),
+                str(REPOSITORY),
+            ),
             "PYTHONDONTWRITEBYTECODE": "1",
         },
         text=True,

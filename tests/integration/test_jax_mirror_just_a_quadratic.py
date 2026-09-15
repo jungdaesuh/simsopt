@@ -4,14 +4,13 @@ import json
 import os
 import subprocess
 import sys
-import sysconfig
 from pathlib import Path
 
-import jax
 import numpy as np
 import pytest
 from examples.jax._lane_environment import build_execution_environment
 from simsopt_jax.config import ExecutionIntent
+from simsopt_jax.runtime.isolated_kernel import pythonpath_with_loaded_kernel
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = REPO_ROOT / "examples" / "jax" / "1_Simple" / "just_a_quadratic.py"
@@ -28,12 +27,8 @@ def test_just_a_quadratic_matches_native_scientific_contract(
         os.environ,
         repo_root=REPO_ROOT,
     )
-    environment["PYTHONPATH"] = os.pathsep.join(
-        (
-            str(REPO_ROOT / "src"),
-            str(sysconfig.get_paths()["purelib"]),
-            str(Path(jax.__file__).resolve().parents[1]),
-        )
+    environment["PYTHONPATH"] = pythonpath_with_loaded_kernel(
+        *environment["PYTHONPATH"].split(os.pathsep)
     )
     completed = subprocess.run(
         (sys.executable, "-S", str(EXAMPLE), "--smoke", "--json"),

@@ -31,6 +31,7 @@ from benchmarks.single_stage_fullspace_snapshot import (
     WorktreeIdentity,
 )
 from benchmarks.single_stage_native_equivalent_quality_receipt import SampleName
+from simsopt_jax.runtime.isolated_kernel import isolated_child_command
 
 
 def _claim_test_repository(repository: Path, authority_bytes: bytes) -> Path:
@@ -857,12 +858,12 @@ def test_diag4_preimport_rejects_before_any_repository_or_jax_import(
     isolated_authority.write_bytes(runner.canonical_json_bytes(authority))
 
     completed = subprocess.run(
-        (
-            sys.executable,
-            "-I",
-            str(isolated_entry),
-            "--diagnostic-successor-authority",
-            str(isolated_authority),
+        isolated_child_command(
+            (
+                str(isolated_entry),
+                "--diagnostic-successor-authority",
+                str(isolated_authority),
+            )
         ),
         cwd=tmp_path,
         check=False,
@@ -2232,7 +2233,6 @@ def test_diag2_launch_failure_returns_typed_absence_without_legacy_outcome(
 def test_diag2_parent_import_forces_cpu_before_jax_import() -> None:
     repository = Path(__file__).resolve().parents[2]
     script = (
-        f"import sys; sys.path.insert(0, {str(repository)!r}); "
         "import json, os; "
         "import benchmarks.run_single_stage_native_equivalent_quality_campaign; "
         "from benchmarks import process_gpu_monitor as gm; "
@@ -2265,12 +2265,9 @@ def test_diag2_parent_import_forces_cpu_before_jax_import() -> None:
     )
 
     completed = subprocess.run(
-        (
-            sys.executable,
-            "-I",
-            "-c",
-            script,
-            "--diagnostic-successor-authority=authority.json",
+        isolated_child_command(
+            ("-c", script, "--diagnostic-successor-authority=authority.json"),
+            repo_root=repository,
         ),
         cwd=repository,
         env=environment,
@@ -4153,7 +4150,6 @@ def test_diag4_claim_rejects_same_byte_consumption_marker_replacement(
 def test_diag2_fresh_cpu_parent_real_gpu_query_excludes_exact_pid() -> None:
     repository = Path(__file__).resolve().parents[2]
     script = (
-        f"import sys; sys.path.insert(0, {str(repository)!r}); "
         "import json, os; "
         "import benchmarks.run_single_stage_native_equivalent_quality_campaign as r; "
         "import jax; observation=r._capture_diag2_supervisor_zero("
@@ -4164,12 +4160,9 @@ def test_diag2_fresh_cpu_parent_real_gpu_query_excludes_exact_pid() -> None:
         "'matching_pids':[row.pid for row in observation.matching_rows]}))"
     )
     completed = subprocess.run(
-        (
-            sys.executable,
-            "-I",
-            "-c",
-            script,
-            "--diagnostic-successor-authority=authority.json",
+        isolated_child_command(
+            ("-c", script, "--diagnostic-successor-authority=authority.json"),
+            repo_root=repository,
         ),
         cwd=repository,
         env=dict(os.environ),
@@ -4188,7 +4181,6 @@ def test_diag2_fresh_cpu_parent_real_gpu_query_excludes_exact_pid() -> None:
 def test_legacy_parent_import_preserves_caller_environment() -> None:
     repository = Path(__file__).resolve().parents[2]
     script = (
-        f"import sys; sys.path.insert(0, {str(repository)!r}); "
         "import json, os; "
         "import benchmarks.run_single_stage_native_equivalent_quality_campaign; "
         "print(json.dumps({key: os.environ.get(key) for key in ("
@@ -4205,7 +4197,10 @@ def test_legacy_parent_import_preserves_caller_environment() -> None:
     environment = {**os.environ, **expected}
 
     completed = subprocess.run(
-        (sys.executable, "-I", "-c", script, "--preflight-only"),
+        isolated_child_command(
+            ("-c", script, "--preflight-only"),
+            repo_root=repository,
+        ),
         cwd=repository,
         env=environment,
         check=True,
@@ -9489,11 +9484,9 @@ def test_diag2_snapshot_child_rejects_noncanonical_policy_before_jax(
     environment.update(policy_mutation)
 
     completed = subprocess.run(
-        (
-            sys.executable,
-            "-I",
-            str(Path(runner.__file__).resolve()),
-            "--snapshot-child",
+        isolated_child_command(
+            (str(Path(runner.__file__).resolve()), "--snapshot-child"),
+            repo_root=Path(__file__).resolve().parents[2],
         ),
         cwd=tmp_path,
         env=environment,
@@ -9523,12 +9516,13 @@ def test_diag2_snapshot_child_accepts_frozen_command_buffer_policy_before_jax(
     environment.pop("JAX_COMPILATION_CACHE_DIR", None)
 
     completed = subprocess.run(
-        (
-            sys.executable,
-            "-I",
-            str(Path(runner.__file__).resolve()),
-            "--snapshot-child",
-            "--help",
+        isolated_child_command(
+            (
+                str(Path(runner.__file__).resolve()),
+                "--snapshot-child",
+                "--help",
+            ),
+            repo_root=Path(__file__).resolve().parents[2],
         ),
         cwd=tmp_path,
         env=environment,
@@ -9659,12 +9653,13 @@ def test_snapshot_child_rejects_supervisor_mode_before_jax_import(
     tmp_path: Path,
 ) -> None:
     completed = subprocess.run(
-        (
-            sys.executable,
-            "-I",
-            str(Path(runner.__file__).resolve()),
-            "--snapshot-child",
-            *supervisor_arguments,
+        isolated_child_command(
+            (
+                str(Path(runner.__file__).resolve()),
+                "--snapshot-child",
+                *supervisor_arguments,
+            ),
+            repo_root=Path(__file__).resolve().parents[2],
         ),
         cwd=tmp_path,
         env={**os.environ, "JAX_PLATFORMS": "invalid-if-imported"},
@@ -9681,12 +9676,13 @@ def test_snapshot_child_rejects_equals_successor_mode_before_jax_import(
     tmp_path: Path,
 ) -> None:
     completed = subprocess.run(
-        (
-            sys.executable,
-            "-I",
-            str(Path(runner.__file__).resolve()),
-            "--snapshot-child",
-            "--diagnostic-successor-authority=authority.json",
+        isolated_child_command(
+            (
+                str(Path(runner.__file__).resolve()),
+                "--snapshot-child",
+                "--diagnostic-successor-authority=authority.json",
+            ),
+            repo_root=Path(__file__).resolve().parents[2],
         ),
         cwd=tmp_path,
         env={**os.environ, "JAX_PLATFORMS": "invalid-if-imported"},
@@ -9711,11 +9707,9 @@ def test_protected_option_abbreviation_rejects_before_jax_import(
     tmp_path: Path,
 ) -> None:
     completed = subprocess.run(
-        (
-            sys.executable,
-            "-I",
-            str(Path(runner.__file__).resolve()),
-            abbreviated_option,
+        isolated_child_command(
+            (str(Path(runner.__file__).resolve()), abbreviated_option),
+            repo_root=Path(__file__).resolve().parents[2],
         ),
         cwd=tmp_path,
         env={**os.environ, "JAX_PLATFORMS": "invalid-if-imported"},
@@ -9730,11 +9724,9 @@ def test_protected_option_abbreviation_rejects_before_jax_import(
 
 def test_legacy_diagnostic_rejects_before_jax_import(tmp_path: Path) -> None:
     completed = subprocess.run(
-        (
-            sys.executable,
-            "-I",
-            str(Path(runner.__file__).resolve()),
-            "--diagnostic-only",
+        isolated_child_command(
+            (str(Path(runner.__file__).resolve()), "--diagnostic-only"),
+            repo_root=Path(__file__).resolve().parents[2],
         ),
         cwd=tmp_path,
         env={**os.environ, "JAX_PLATFORMS": "invalid-if-imported"},
