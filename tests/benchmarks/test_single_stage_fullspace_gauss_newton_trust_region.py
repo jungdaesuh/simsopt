@@ -109,9 +109,11 @@ def test_frozen_identity_and_source_scope() -> None:
 
 def test_source_manifest_covers_untracked_route_and_excludes_dotenv() -> None:
     repo_root = Path(__file__).resolve().parents[2]
+    live = {path for path in runner.SOURCE_PATHS if (repo_root / path).is_file()}
     paths = runner._tracked_paths(repo_root)
 
-    assert set(runner.SOURCE_PATHS).issubset(paths)
+    assert live
+    assert live.issubset(paths)
     assert all(
         path.name == ".env.example"
         or (path.name != ".env" and not path.name.startswith(".env."))

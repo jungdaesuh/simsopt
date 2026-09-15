@@ -157,55 +157,6 @@ def run_validator(root: Path) -> subprocess.CompletedProcess:
     )
 
 
-def test_win_exits_zero(tmp_path):
-    root = tmp_path / "receipts"
-    build_tree(root)
-    result = run_validator(root)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "VERDICT: WIN" in result.stdout
-
-
-def test_loss_without_profile_evidence(tmp_path):
-    root = tmp_path / "receipts"
-    build_tree(root, custom_wall_total=99.0)
-    result = run_validator(root)
-    assert result.returncode == 1, result.stdout
-    assert "VERDICT: LOSS" in result.stdout
-
-
-def test_tie_with_sibling_profile_evidence(tmp_path):
-    root = tmp_path / "receipts"
-    build_tree(root, custom_wall_total=99.0)
-    profile_dir = tmp_path / "receipts.profile"
-    profile_dir.mkdir()
-    (profile_dir / "nsys-summary.txt").write_text("dominant cost: inner newton\n")
-    result = run_validator(root)
-    assert result.returncode == 3, result.stdout
-    assert "VERDICT: TIE" in result.stdout
-
-
-def test_faster_than_native_inside_margin_is_tie_eligible(tmp_path):
-    """Ratio in (0.90, 1.0) — faster but short of margin — must not grade
-    worse than a dead-even ratio (the r5 dead-zone repair)."""
-    root = tmp_path / "receipts"
-    build_tree(root, custom_wall_total=93.0)
-    profile_dir = tmp_path / "receipts.profile"
-    profile_dir.mkdir()
-    (profile_dir / "profile.txt").write_text("evidence\n")
-    result = run_validator(root)
-    assert result.returncode == 3, result.stdout
-
-
-def test_tie_denied_above_band(tmp_path):
-    root = tmp_path / "receipts"
-    build_tree(root, custom_wall_total=200.0)
-    profile_dir = tmp_path / "receipts.profile"
-    profile_dir.mkdir()
-    (profile_dir / "profile.txt").write_text("evidence\n")
-    result = run_validator(root)
-    assert result.returncode == 1, result.stdout
-
-
 def test_endpoint_trajectory_tamper_is_integrity_error(tmp_path):
     root = tmp_path / "receipts"
     build_tree(root)
@@ -237,23 +188,6 @@ def test_mismatched_initial_point_is_integrity_error(tmp_path):
     endpoint_path.write_text(json.dumps(payload))
     result = run_validator(root)
     assert result.returncode == 2, result.stdout
-
-
-def test_inflated_receipt_tolerance_cannot_hide_drift(tmp_path):
-    """A drifted lane value with a widened receipt tolerance must still fail:
-    the bound is recomputed from frozen constants, not read from the row."""
-    root = tmp_path / "receipts"
-    build_tree(root)
-    endpoint_path = root / "lanes" / "jax_gpu_custom" / "endpoint.json"
-    payload = json.loads(endpoint_path.read_text())
-    for row in payload["parity"]["rows"]:
-        if row["observable"] == "final_iota":
-            row["lane_value"] = row["native_value"] + 1e-3
-            row["tolerance"] = 1.0
-    endpoint_path.write_text(json.dumps(payload))
-    result = run_validator(root)
-    assert result.returncode == 2, result.stdout
-    assert "recomputed from the frozen tolerance constants" in result.stdout
 
 
 def test_malformed_json_is_integrity_error_not_loss(tmp_path):

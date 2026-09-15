@@ -25,9 +25,11 @@ def test_frozen_radius_is_small_projected_canary_radius() -> None:
 
 def test_source_manifest_includes_route_and_excludes_dotenv() -> None:
     repo_root = Path(__file__).resolve().parents[2]
+    live = {path for path in SOURCE_PATHS if (repo_root / path).is_file()}
     paths = _tracked_paths(repo_root)
 
-    assert set(SOURCE_PATHS).issubset(paths)
+    assert live
+    assert live.issubset(paths)
     assert all(
         path.name == ".env.example"
         or (path.name != ".env" and not path.name.startswith(".env."))

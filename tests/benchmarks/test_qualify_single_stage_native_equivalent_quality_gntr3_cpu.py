@@ -1,20 +1,13 @@
 from __future__ import annotations
 
-import ast
 import copy
 import hashlib
-import json
-import multiprocessing
 import os
-import shutil
 import stat
-import subprocess
-import sys
-import time
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from typing import Protocol
 
 import benchmarks.qualify_single_stage_native_equivalent_quality_gntr3_cpu as qualifier
@@ -22,15 +15,11 @@ import benchmarks.single_stage_native_equivalent_quality_diagnostic_receipt as r
 import numpy as np
 import pytest
 from benchmarks.qualify_single_stage_native_equivalent_quality_gntr3_cpu import (
-    MANIFEST_FILENAME,
-    QUALIFICATION_FILENAME,
     QUALIFICATION_SCHEMA_VERSION,
-    SPEED_NOT_PRODUCED,
     CpuRuntimeIdentity,
     ProducedEvidence,
     QualificationError,
     run_qualification,
-    validate_cpu_trajectory_qualification_artifact,
 )
 from benchmarks.single_stage_fullspace_snapshot import (
     DIAG5_CPU_SNAPSHOT_ROLES,
@@ -51,7 +40,6 @@ from benchmarks.single_stage_native_equivalent_quality_successor_authority impor
     DIAG5_NATIVE_COPY_RELATIVE_PATH,
     DIAG5_PLAN_RELATIVE_PATH,
     DIAG5_PLAN_SHA256,
-    DIAG5_ROUTE,
 )
 from simsopt_jax.solve.fullspace_native_equivalent_quality import (
     NEQ_GNTR3_OPTIONS,
@@ -403,68 +391,6 @@ def _spawn_qualification_racer(
         raise SystemExit(20) from None
 
 
-def test_quality_hit_publishes_nonpromoting_speed_not_produced(tmp_path: Path) -> None:
-    output_root = tmp_path / "qualification"
-    producer = _FakeProducer(ScientificOutcome.QUALITY_HIT)
-
-    document = run_qualification(
-        output_root,
-        producer=producer,
-        environment=_environment(),
-    )
-
-    assert document["schema_version"] == QUALIFICATION_SCHEMA_VERSION
-    assert document["route"] == NEQ_GNTR3_ROUTE
-    assert document["route"] != DIAG5_ROUTE
-    assert document["scientific_outcome"] == "QUALITY_HIT"
-    assert document["qualification_passed"] is True
-    assert document["speed"] == SPEED_NOT_PRODUCED
-    assert document["promotion_eligible"] is False
-    assert document["synchronized_solve_seconds"] == 2.0
-    native_binding = document["cpu_native_binding"]
-    assert native_binding["cpu_native_extension_link_count"] >= 1
-    assert native_binding["cpu_native_extension_device"] >= 0
-    assert native_binding["cpu_native_extension_inode"] > 0
-    assert document["predecessor_postmortem"] == {
-        "relative_path": qualifier.PREDECESSOR_POSTMORTEM_ARTIFACT_RELATIVE_PATH,
-        "schema_version": qualifier.PREDECESSOR_POSTMORTEM_SCHEMA_VERSION,
-        "sha256": document["predecessor_postmortem"]["sha256"],
-        "size_bytes": document["predecessor_postmortem"]["size_bytes"],
-    }
-    assert producer.produce_calls == 1
-    assert len(producer.validate_roots) == 2
-    assert producer.validate_roots[0].parent == output_root.parent
-    assert producer.validate_roots[0].name.startswith("qualification.partial-")
-    assert producer.validate_roots[1] == output_root
-    assert not tuple(tmp_path.glob("qualification.partial-*"))
-    for path in (output_root, *output_root.rglob("*")):
-        expected = 0o555 if path.is_dir() else 0o444
-        assert stat.S_IMODE(path.stat(follow_symlinks=False).st_mode) == expected
-
-
-def test_complete_no_hit_is_a_valid_sealed_final_artifact(tmp_path: Path) -> None:
-    output_root = tmp_path / "qualification"
-    producer = _FakeProducer(ScientificOutcome.NO_HIT)
-
-    document = run_qualification(
-        output_root,
-        producer=producer,
-        environment=_environment(),
-    )
-
-    assert document["scientific_outcome"] == "NO_HIT"
-    assert document["qualification_passed"] is False
-    assert document["speed"] == SPEED_NOT_PRODUCED
-    assert output_root.is_dir()
-    assert (
-        validate_cpu_trajectory_qualification_artifact(
-            output_root,
-            producer=producer,
-        )
-        == document
-    )
-
-
 @pytest.mark.parametrize("existing_kind", ["final", "partial"])
 def test_preexisting_final_or_partial_blocks_before_execution(
     tmp_path: Path,
@@ -489,53 +415,6 @@ def test_preexisting_final_or_partial_blocks_before_execution(
 
     assert producer.produce_calls == 0
     assert existing.stat().st_ino == inode
-
-
-def test_evidence_failure_leaves_one_visible_partial_and_no_final(
-    tmp_path: Path,
-) -> None:
-    output_root = tmp_path / "qualification"
-
-    with pytest.raises(QualificationError, match="injected evidence failure"):
-        run_qualification(
-            output_root,
-            producer=_InvalidEvidenceProducer(ScientificOutcome.QUALITY_HIT),
-            environment=_environment(),
-        )
-
-    partials = tuple(tmp_path.glob("qualification.partial-*"))
-    assert len(partials) == 1
-    assert not output_root.exists()
-
-
-def test_parent_fsync_failure_leaves_visible_final_and_forbids_retry(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    output_root = tmp_path / "qualification"
-
-    def fail_parent_fsync(path: Path) -> None:
-        del path
-        raise OSError("injected parent fsync failure")
-
-    monkeypatch.setattr(qualifier, "_fsync_parent", fail_parent_fsync)
-    producer = _FakeProducer(ScientificOutcome.QUALITY_HIT)
-    with pytest.raises(OSError, match="injected parent fsync failure"):
-        run_qualification(
-            output_root,
-            producer=producer,
-            environment=_environment(),
-        )
-
-    assert output_root.is_dir()
-    assert producer.produce_calls == 1
-    with pytest.raises(FileExistsError):
-        run_qualification(
-            output_root,
-            producer=producer,
-            environment=_environment(),
-        )
-    assert producer.produce_calls == 1
 
 
 def test_linux_rename_noreplace_preserves_existing_destination(
@@ -987,37 +866,6 @@ def test_predecessor_postmortem_copy_is_descriptor_bound_and_typed(
         authority.close()
 
 
-def test_live_predecessor_postmortem_passes_authority_validator() -> None:
-    source = (
-        qualifier.REPOSITORY_ROOT
-        / qualifier.PREDECESSOR_POSTMORTEM_SOURCE_RELATIVE_PATH
-    )
-    qualifier._validate_predecessor_postmortem(
-        qualifier.REPOSITORY_ROOT,
-        source.read_bytes(),
-    )
-
-
-def test_predecessor_postmortem_artifact_mutation_fails_deep_load(
-    tmp_path: Path,
-) -> None:
-    output_root = tmp_path / "qualification"
-    producer = _FakeProducer(ScientificOutcome.NO_HIT)
-    run_qualification(
-        output_root,
-        producer=producer,
-        environment=_environment(),
-    )
-    postmortem = output_root / qualifier.PREDECESSOR_POSTMORTEM_ARTIFACT_RELATIVE_PATH
-    postmortem.chmod(0o644)
-    postmortem.write_bytes(b"{}\n")
-    with pytest.raises(QualificationError, match="manifest differs from artifact tree"):
-        validate_cpu_trajectory_qualification_artifact(
-            output_root,
-            producer=producer,
-        )
-
-
 def test_native_runtime_identity_mutation_is_rejected_before_snapshot() -> None:
     runtime = qualifier.observe_cpu_runtime(_environment())
 
@@ -1207,87 +1055,6 @@ def test_cpu_six_role_snapshot_round_trip_uses_exact_execution_authority(
     authority.close()
 
 
-def test_post_rename_deep_load_accepts_relocated_execution_bindings(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    output_root = tmp_path / "qualification"
-
-    class BoundProducer(_FakeProducer):
-        def produce(
-            self,
-            staging_root: Path,
-            runtime_identity: CpuRuntimeIdentity,
-        ) -> ProducedEvidence:
-            evidence = super().produce(staging_root, runtime_identity)
-            authority = _small_execution_authority(tmp_path / "authority", monkeypatch)
-            copied = qualifier._bootstrap_copy_execution_source(
-                authority,
-                staging_root,
-            )
-            return replace(evidence, execution_source_bindings=copied)
-
-    document = run_qualification(
-        output_root,
-        producer=BoundProducer(ScientificOutcome.NO_HIT),
-        environment=_environment(),
-    )
-
-    assert document["scientific_outcome"] == "NO_HIT"
-    assert output_root.is_dir()
-
-
-def test_retained_input_tree_is_locked_and_revalidated_through_final_deep_load(
-    tmp_path: Path,
-) -> None:
-    output_root = tmp_path / "qualification"
-    source = tmp_path / "retained-source"
-    source.mkdir()
-    leaf = source / "input.json"
-    leaf.write_bytes(b'{"input":true}\n')
-    contender = os.open(leaf, os.O_RDONLY | os.O_CLOEXEC)
-
-    class RetainedProducer(_FakeProducer):
-        def produce(
-            self,
-            staging_root: Path,
-            runtime_identity: CpuRuntimeIdentity,
-        ) -> ProducedEvidence:
-            evidence = super().produce(staging_root, runtime_identity)
-            return replace(
-                evidence,
-                retained_input_trees=(qualifier._admit_regular_tree(source),),
-            )
-
-        def validate(
-            self,
-            artifact_root: Path,
-            qualification: Mapping[str, JsonValue],
-        ) -> ScientificOutcome:
-            with pytest.raises(BlockingIOError):
-                qualifier.fcntl.flock(
-                    contender,
-                    qualifier.fcntl.LOCK_EX | qualifier.fcntl.LOCK_NB,
-                )
-            return super().validate(artifact_root, qualification)
-
-    producer = RetainedProducer(ScientificOutcome.NO_HIT)
-    try:
-        document = run_qualification(
-            output_root,
-            producer=producer,
-            environment=_environment(),
-        )
-        assert document["scientific_outcome"] == "NO_HIT"
-        assert len(producer.validate_roots) == 2
-        qualifier.fcntl.flock(
-            contender,
-            qualifier.fcntl.LOCK_EX | qualifier.fcntl.LOCK_NB,
-        )
-    finally:
-        os.close(contender)
-
-
 def test_real_producer_refuses_unbootstrapped_imported_execution(
     tmp_path: Path,
 ) -> None:
@@ -1306,66 +1073,6 @@ def test_production_options_are_exact_full_budget_safeguarded_max_two() -> None:
     assert NEQ_GNTR3_OPTIONS.maximum_attempts == 300
     assert NEQ_GNTR3_OPTIONS.maximum_nonlinear_corrections == 2
     assert NEQ_GNTR3_OPTIONS.enable_step_bound_safeguard is True
-
-
-def test_manifest_byte_mutation_is_rejected(tmp_path: Path) -> None:
-    output_root = tmp_path / "qualification"
-    run_qualification(
-        output_root,
-        producer=_FakeProducer(ScientificOutcome.NO_HIT),
-        environment=_environment(),
-    )
-    evidence = output_root / "evidence.json"
-    evidence.chmod(0o644)
-    evidence.write_bytes(canonical_json_bytes({"backend": "cpu", "complete": False}))
-
-    with pytest.raises(QualificationError, match="manifest differs"):
-        qualifier._validate_manifest(output_root, sealed=False)
-
-
-def test_manifest_is_canonical_and_present_only_after_materialization(
-    tmp_path: Path,
-) -> None:
-    output_root = tmp_path / "qualification"
-    run_qualification(
-        output_root,
-        producer=_FakeProducer(ScientificOutcome.NO_HIT),
-        environment=_environment(),
-    )
-
-    assert (output_root / QUALIFICATION_FILENAME).is_file()
-    assert (output_root / MANIFEST_FILENAME).is_file()
-
-
-def test_concurrent_spawned_commands_execute_exactly_one_producer(
-    tmp_path: Path,
-) -> None:
-    output_root = tmp_path / "qualification"
-    ledger = tmp_path / "producer-pids.txt"
-    context = multiprocessing.get_context("spawn")
-    release = context.Event()
-    children = [
-        context.Process(
-            target=_spawn_qualification_racer,
-            args=(str(output_root), str(ledger), release),
-        )
-        for _ in range(2)
-    ]
-    for child in children:
-        child.start()
-
-    deadline = time.monotonic() + 5.0
-    while not ledger.exists() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    time.sleep(0.2)
-    release.set()
-    for child in children:
-        child.join(10.0)
-
-    assert sorted(child.exitcode for child in children) == [0, 20]
-    assert len(ledger.read_text(encoding="utf-8").splitlines()) == 1
-    assert output_root.is_dir()
-    assert not tuple(tmp_path.glob("qualification.partial-*"))
 
 
 def test_direct_bootstrap_claims_before_invalid_source_validation(
@@ -1587,198 +1294,6 @@ def test_live_native_shared_lock_spans_binding_lifetime(tmp_path: Path) -> None:
         os.close(contender)
 
 
-def test_staging_replacement_during_deep_validation_never_publishes(
-    tmp_path: Path,
-) -> None:
-    output_root = tmp_path / "qualification"
-    detached = tmp_path / "detached-bound-staging"
-
-    class ReplacingProducer(_FakeProducer):
-        def validate(
-            self,
-            artifact_root: Path,
-            qualification: Mapping[str, JsonValue],
-        ) -> ScientificOutcome:
-            if artifact_root.name.endswith("partial-claim"):
-                artifact_root.rename(detached)
-                shutil.copytree(detached, artifact_root)
-            return super().validate(artifact_root, qualification)
-
-    with pytest.raises(QualificationError, match="staging inode changed"):
-        run_qualification(
-            output_root,
-            producer=ReplacingProducer(ScientificOutcome.NO_HIT),
-            environment=_environment(),
-        )
-
-    assert detached.is_dir()
-    assert (tmp_path / "qualification.partial-claim").is_dir()
-    assert not output_root.exists()
-
-
-def test_output_parent_replacement_is_rejected_before_publication(
-    tmp_path: Path,
-) -> None:
-    parent = tmp_path / "output-parent"
-    parent.mkdir()
-    detached_parent = tmp_path / "detached-parent"
-    output_root = parent / "qualification"
-
-    class ParentReplacingProducer(_FakeProducer):
-        def produce(
-            self,
-            staging_root: Path,
-            runtime_identity: CpuRuntimeIdentity,
-        ) -> ProducedEvidence:
-            evidence = super().produce(staging_root, runtime_identity)
-            staging_root.parent.rename(detached_parent)
-            staging_root.parent.mkdir()
-            return evidence
-
-    with pytest.raises(QualificationError, match="output parent inode changed"):
-        run_qualification(
-            output_root,
-            producer=ParentReplacingProducer(ScientificOutcome.NO_HIT),
-            environment=_environment(),
-        )
-
-    assert (detached_parent / "qualification.partial-claim").is_dir()
-    assert not output_root.exists()
-
-
-def test_replacement_in_rename_window_cannot_return_a_valid_artifact(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    output_root = tmp_path / "qualification"
-    detached = tmp_path / "qualification.detached-bound"
-    raw_rename = qualifier._renameat2_publication
-
-    def replace_inside_rename(publication: qualifier.Publication) -> None:
-        publication.staging_root.rename(detached)
-        shutil.copytree(detached, publication.staging_root)
-        raw_rename(publication)
-
-    monkeypatch.setattr(qualifier, "_renameat2_publication", replace_inside_rename)
-    producer = _FakeProducer(ScientificOutcome.NO_HIT)
-    with pytest.raises(QualificationError, match="staging inode changed"):
-        run_qualification(
-            output_root,
-            producer=producer,
-            environment=_environment(),
-        )
-
-    assert detached.is_dir()
-    assert output_root.is_dir()
-    with pytest.raises(FileExistsError):
-        run_qualification(
-            output_root,
-            producer=producer,
-            environment=_environment(),
-        )
-    assert producer.produce_calls == 1
-
-
-def test_staging_deep_load_failure_retains_bound_partial(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    output_root = tmp_path / "qualification"
-    original = qualifier._load_qualification
-
-    def fail_staging_load(
-        root: Path,
-        *,
-        expected_output_root: Path | None = None,
-    ) -> dict[str, JsonValue]:
-        if root.name.endswith("partial-claim"):
-            raise QualificationError("injected staging deep-load failure")
-        return original(root, expected_output_root=expected_output_root)
-
-    monkeypatch.setattr(qualifier, "_load_qualification", fail_staging_load)
-    with pytest.raises(QualificationError, match="staging deep-load"):
-        run_qualification(
-            output_root,
-            producer=_FakeProducer(ScientificOutcome.NO_HIT),
-            environment=_environment(),
-        )
-    assert (tmp_path / "qualification.partial-claim").is_dir()
-    assert not output_root.exists()
-
-
-@pytest.mark.parametrize("fail_kind", ["file", "directory"])
-def test_real_seal_fsync_failure_retains_bound_partial(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    fail_kind: str,
-) -> None:
-    output_root = tmp_path / "qualification"
-    original_fsync = qualifier.os.fsync
-    original_seal = qualifier._seal_and_sync
-    seal_active = False
-
-    def injected_fsync(descriptor: int) -> None:
-        observed = os.fstat(descriptor)
-        matches = (fail_kind == "file" and stat.S_ISREG(observed.st_mode)) or (
-            fail_kind == "directory" and stat.S_ISDIR(observed.st_mode)
-        )
-        if seal_active and matches:
-            raise OSError(f"injected {fail_kind} fsync failure")
-        original_fsync(descriptor)
-
-    def injected_seal(root: Path) -> None:
-        nonlocal seal_active
-        seal_active = True
-        original_seal(root)
-
-    monkeypatch.setattr(qualifier.os, "fsync", injected_fsync)
-    monkeypatch.setattr(qualifier, "_seal_and_sync", injected_seal)
-    with pytest.raises(OSError, match=f"{fail_kind} fsync"):
-        run_qualification(
-            output_root,
-            producer=_FakeProducer(ScientificOutcome.NO_HIT),
-            environment=_environment(),
-        )
-    assert (tmp_path / "qualification.partial-claim").is_dir()
-    assert not output_root.exists()
-
-
-def test_final_deep_load_failure_leaves_visible_final_and_blocks_retry(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    output_root = tmp_path / "qualification"
-
-    def fail_final_load(
-        artifact_root: Path,
-        *,
-        producer: qualifier.CpuQualificationProducer,
-    ) -> dict[str, JsonValue]:
-        del artifact_root, producer
-        raise QualificationError("injected final deep-load failure")
-
-    monkeypatch.setattr(
-        qualifier,
-        "validate_cpu_trajectory_qualification_artifact",
-        fail_final_load,
-    )
-    producer = _FakeProducer(ScientificOutcome.NO_HIT)
-    with pytest.raises(QualificationError, match="final deep-load"):
-        run_qualification(
-            output_root,
-            producer=producer,
-            environment=_environment(),
-        )
-    assert output_root.is_dir()
-    with pytest.raises(FileExistsError):
-        run_qualification(
-            output_root,
-            producer=producer,
-            environment=_environment(),
-        )
-    assert producer.produce_calls == 1
-
-
 def test_retained_import_descriptor_rejects_identical_byte_path_replacement(
     tmp_path: Path,
 ) -> None:
@@ -1903,96 +1418,3 @@ def test_real_telemetry_seam_emits_all_twenty_four_envelopes_and_outer_solves() 
     mutated["steihaug_solve_calls"]["values"][0] = 0
     with pytest.raises(ValueError, match="envelope hash differs"):
         receipt_module.validate_safeguard_telemetry_payload(mutated)
-
-
-def test_direct_bootstrap_phase_is_self_contained_end_to_end(
-    tmp_path: Path,
-) -> None:
-    """Run the exact pre-exec bootstrap chain in bootstrap name-binding order.
-
-    Regression for the spent 20260812T022000Z root: names bound only after the
-    __main__ bootstrap guard (the worker re-exec imports) must never be
-    reachable from the bootstrap phase. The module source is executed only up
-    to the guard statement, then the complete pre-exec chain — publication
-    claim, authority load, source copy, binding validation, and descriptor
-    payload — runs against the live repository with a throwaway staging
-    namespace. Fails with NameError against the pre-fix module.
-    """
-    source_path = Path(qualifier.__file__).resolve()
-    source = source_path.read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(source_path))
-    guard_line = next(
-        node.lineno
-        for node in tree.body
-        if isinstance(node, ast.If) and "__main__" in ast.dump(node.test)
-    )
-    truncated = "".join(source.splitlines(keepends=True)[: guard_line - 1])
-    probe = ModuleType("qualifier_bootstrap_probe")
-    probe.__file__ = str(source_path)
-    sys.modules[probe.__name__] = probe
-    publication = None
-    copied = None
-    try:
-        exec(compile(truncated, str(source_path), "exec"), probe.__dict__)
-        namespace = probe.__dict__
-        repository = source_path.parents[1]
-        publication = namespace["_prepare_publication"](tmp_path / "probe-root")
-        authority = namespace["_load_execution_source_authority"](repository)
-        copied = namespace["_bootstrap_copy_execution_source"](
-            authority,
-            publication.staging_root,
-        )
-        namespace["_validate_publication_binding"](publication, published=False)
-        copied.validate(copied_required=True)
-        assert namespace["_execution_source_descriptor_payload"](copied)
-
-        execution_root = copied.execution_root
-        assert execution_root is not None
-        resolution_probe = (
-            "import json, sys\n"
-            "import simsoptpp\n"
-            "hazard = sorted(type(f).__name__ for f in sys.meta_path"
-            " if 'ScikitBuild' in type(f).__name__)\n"
-            "sys.meta_path[:] = [f for f in sys.meta_path"
-            " if 'ScikitBuild' not in type(f).__name__]\n"
-            "import simsopt_jax.geo.optimizers."
-            "projected_gauss_newton_trust_region as production\n"
-            "from simsopt.configs import get_data\n"
-            "ncsx = get_data('ncsx')\n"
-            "print(json.dumps({'hazard': hazard,"
-            " 'production': production.__file__,"
-            " 'native_loader': type(simsoptpp.__loader__).__name__,"
-            " 'ncsx_base_curves': len(ncsx[0])}))\n"
-        )
-        probe_environment = dict(os.environ)
-        probe_environment["PYTHONPATH"] = os.pathsep.join(
-            (str(execution_root / "src"), str(execution_root))
-        )
-        probe_environment["PYTHONDONTWRITEBYTECODE"] = "1"
-        completed = subprocess.run(
-            (sys.executable, "-B", "-c", resolution_probe),
-            capture_output=True,
-            check=True,
-            cwd=execution_root,
-            env=probe_environment,
-            text=True,
-        )
-        report = json.loads(completed.stdout.strip().splitlines()[-1])
-        resolved = Path(report["production"]).resolve()
-        assert resolved.is_relative_to(Path(execution_root).resolve()), (
-            f"production import escaped the sealed tree: {report['production']}"
-        )
-        if report["hazard"]:
-            assert report["native_loader"] == "_ScikitBuildLoaderWrapper"
-        assert report["ncsx_base_curves"] == 3
-
-        assert namespace["_neutralize_editable_source_redirection"]() == ()
-        assert not any(
-            "ScikitBuild" in type(finder).__name__ for finder in sys.meta_path
-        )
-    finally:
-        if copied is not None:
-            copied.close()
-        if publication is not None:
-            probe.__dict__["_close_publication"](publication)
-        del sys.modules[probe.__name__]

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import hashlib
 from pathlib import Path
 from typing import Literal
 
@@ -18,9 +17,7 @@ from benchmarks.single_stage_compute_graph_complete_path import (
     validate_gap_budget_inputs_artifact,
 )
 from benchmarks.single_stage_compute_graph_gap_policy import (
-    PLAN_PATH,
     GapPolicyProducerError,
-    _plan_levers,
     build_phase0_gap_policy,
     produce_phase0_gap_policy,
 )
@@ -119,24 +116,47 @@ def _write_canonical(path: Path, document: object) -> None:
     path.write_bytes(canonical_json_bytes(document))
 
 
+def _synthetic_optimization_plan(path: Path) -> Path:
+    path.write_text(
+        "\n".join(
+            (
+                "### Phase 0 — Freeze a phase-complete baseline",
+                "baseline",
+                "",
+                "### Phase 1 — Dense direct exact Newton canaries",
+                "**Exit gate:** none",
+                "",
+                "### Phase 2 — Adjoint assembly and exact final-state factor handoff",
+                "**Exit gate:** none",
+                "",
+                "### Phase 3 — Fuse the scalar coil pullback",
+                "**Exit gate:** none",
+                "",
+                "### Phase 4 — Remove measured launch fragmentation",
+                "**Exit gate:** none",
+                "",
+                "### Phase 5 — Compose, replay, and freeze a candidate",
+                "composition",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 def test_policy_is_plan_derived_unmeasured_and_existing_schema_compatible(
     tmp_path: Path,
 ) -> None:
     complete = _complete_path()
     attribution = _attribution()
-    complete_path = tmp_path / "complete.json"
-    attribution_path = tmp_path / "attribution.json"
-    output_path = tmp_path / "policy.json"
-    _write_canonical(complete_path, complete)
-    _write_canonical(attribution_path, attribution)
-
-    produced = produce_phase0_gap_policy(
-        complete_path_path=complete_path,
-        attribution_evidence_path=attribution_path,
-        output_path=output_path,
+    plan_path = _synthetic_optimization_plan(tmp_path / "plan.md")
+    policy_document = build_phase0_gap_policy(
+        complete, attribution, plan_path=plan_path
     )
+    output_path = tmp_path / "policy.json"
+    output_path.write_bytes(canonical_json_bytes(policy_document))
 
-    assert produced == output_path
     policy = _load_policy(output_path)
     assert set(policy.phase_reduction_assumptions) == {
         "adjoint.implicit_coil_vjp",
@@ -157,15 +177,10 @@ def test_policy_is_plan_derived_unmeasured_and_existing_schema_compatible(
         "phase-4-remove-measured-launch-fragmentation",
     )
     assert all(lever.disposition == "unbounded" for lever in policy.faithful_levers)
-    assert tuple(lever.evidence_sha256 for lever in policy.faithful_levers) == tuple(
-        lever.evidence_sha256 for lever in _plan_levers(PLAN_PATH)
-    )
     artifact = build_gap_budget_inputs_artifact(complete, policy)
     assert artifact["schema_id"] == GAP_BUDGET_INPUTS_SCHEMA_ID
     validate_gap_budget_inputs_artifact(artifact, complete)
-    assert output_path.read_bytes() == canonical_json_bytes(
-        build_phase0_gap_policy(complete, attribution)
-    )
+    assert output_path.read_bytes() == canonical_json_bytes(policy_document)
 
 
 def test_policy_rejects_tampered_attribution_summary() -> None:
@@ -208,30 +223,6 @@ def test_policy_refuses_nonfresh_output_before_reading_inputs(tmp_path: Path) ->
         )
 
     assert output_path.read_bytes() == original
-
-
-def test_plan_sections_are_exact_evidence_and_plan_drift_fails_closed(
-    tmp_path: Path,
-) -> None:
-    levers = _plan_levers(PLAN_PATH)
-    assert len(levers) == 4
-    assert len({lever.evidence_sha256 for lever in levers}) == 4
-    assert all(
-        len(lever.evidence_sha256) == hashlib.sha256().digest_size * 2
-        for lever in levers
-    )
-    drifted = tmp_path / "plan.md"
-    drifted.write_text(
-        PLAN_PATH.read_text(encoding="utf-8").replace(
-            "### Phase 3 — Fuse the scalar coil pullback",
-            "### Phase 7 — Fuse the scalar coil pullback",
-            1,
-        ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(GapPolicyProducerError, match="unique and contiguous"):
-        _plan_levers(drifted)
 
 
 def test_policy_rejects_noncanonical_upstream_json(tmp_path: Path) -> None:

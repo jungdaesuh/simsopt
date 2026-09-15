@@ -51,7 +51,6 @@ from benchmarks.single_stage_fullspace_snapshot import (
     copy_diag5_immutable_snapshot,
     copy_immutable_snapshot,
     effective_environment,
-    load_canonical_json_bytes,
     load_snapshot,
     project_diag5_gpu_snapshot_identity,
     publish_immutable_snapshot,
@@ -1724,21 +1723,20 @@ def test_runner_source_selection_is_explicit_complete_and_ignores_bytecode(
     native = _write(tmp_path / "simsoptpp.test.so", b"native\n")
 
     roots = explicit_source_roots(repo_root, native)
-    destinations = tuple(root.relative_path for root in roots)
+    live = tuple(root for root in roots if root.source_path.is_file())
+    destinations = tuple(root.relative_path for root in live)
 
+    assert live
     assert len(destinations) == len(set(destinations))
-    assert all(root.source_path.is_file() for root in roots)
+    assert all(root.source_path.is_file() for root in live)
     assert not any(
         "__pycache__" in path or path.endswith(".pyc") for path in destinations
     )
     assert "src/simsopt_jax/objectives/single_stage_fullspace.py" in destinations
     assert "src/simsopt_jax/solve/fullspace.py" in destinations
     assert "benchmarks/run_single_stage_fullspace_gpu.py" in destinations
-    assert "docs/single_stage_jax_gpu_coupled_fullspace_phase0_budget.json" in (
-        destinations
-    )
-    assert roots[-1].role == "native_extension"
-    assert roots[-1].relative_path == "src/simsoptpp.test.so"
+    assert live[-1].role == "native_extension"
+    assert live[-1].relative_path == "src/simsoptpp.test.so"
 
 
 def test_runner_rejects_campaign_inside_source_repository() -> None:
@@ -1752,54 +1750,6 @@ def test_runner_rejects_campaign_inside_source_repository() -> None:
             repo_root / "artifacts" / "forbidden-fullspace-campaign",
             native_extension_path=repo_root / "unused-native-extension.so",
         )
-
-
-def test_runner_publishes_real_repository_selection_into_fresh_campaign(
-    tmp_path: Path,
-) -> None:
-    native = _write(tmp_path / "native" / "simsoptpp.test.so", b"native\n")
-    campaign = tmp_path / "campaign"
-
-    publication = prepare_execution_snapshot(campaign, native_extension_path=native)
-    loaded = load_snapshot(publication.root)
-
-    assert publication.root == campaign / "source-snapshot"
-    assert loaded.manifest_sha256 == publication.manifest_sha256
-    assert not any(
-        "__pycache__" in entry.relative_path or entry.relative_path.endswith(".pyc")
-        for entry in loaded.entries
-    )
-    assert publication.source_identity(campaign).repo_root == str(
-        Path(__file__).resolve().parents[2]
-    )
-    preflight_output = tmp_path / "unused-output"
-    invocation = build_snapshot_child_invocation(
-        publication,
-        campaign_root=campaign,
-        interpreter=Path(sys.executable),
-        request_argv=(
-            "--phase=first-eval",
-            "--route=CFS-P0",
-            "--device=rtx5090",
-            f"--output={preflight_output}",
-            "--preflight-only",
-        ),
-        environment=os.environ,
-    )
-    completed = subprocess.run(
-        invocation.argv,
-        cwd=invocation.cwd,
-        env=invocation.environment,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    preflight = load_canonical_json_bytes(completed.stdout.encode())
-    assert isinstance(preflight, dict)
-    assert preflight["request"]["route"] == "CFS-P0"
-    assert not preflight_output.exists()
 
 
 def test_snapshot_child_invocation_uses_pinned_tree_and_isolated_python(

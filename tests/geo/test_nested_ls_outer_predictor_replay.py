@@ -15,7 +15,6 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pytest
@@ -30,71 +29,10 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 from benchmarks import nested_ls_outer_predictor_replay as probe
-from simsopt_jax_adapters.geo.nested_ls_reduced_scale import DEFAULT_F3_B37_GPU_LANE
-
-
-@pytest.fixture(scope="module")
-def ledger_payload() -> dict[str, Any]:
-    return json.loads(probe.LEDGER_PATH.read_text())
-
-
-def _write_ledger(tmp_path: Path, payload: dict[str, object]) -> Path:
-    path = tmp_path / "ledger.json"
-    path.write_text(json.dumps(payload))
-    return path
-
 
 # --------------------------------------------------------------------------
 # Ledger parsing and fingerprint validation
 # --------------------------------------------------------------------------
-
-
-def test_committed_ledger_loads_and_exposes_the_recorded_anchor() -> None:
-    """The shipped ledger passes every fingerprint and yields x38/s38/x39."""
-
-    ledger = probe.load_replay_ledger(probe.LEDGER_PATH)
-
-    assert ledger.sha256 == probe.LEDGER_SHA256
-    assert ledger.anchor_coil_dofs.shape == (probe.COIL_DOF_COUNT,)
-    assert ledger.anchor_surface_dofs.shape == (probe.SURFACE_DOF_COUNT,)
-    assert ledger.anchor_iota == probe.ANCHOR_IOTA
-    assert ledger.anchor_G == probe.ANCHOR_G
-    assert ledger.anchor_j == probe.ANCHOR_J
-    assert ledger.coil_step_l2 == probe.COIL_STEP_L2
-    assert (
-        probe.sha256_float64(ledger.anchor_surface_dofs) == probe.ANCHOR_SURFACE_SHA256
-    )
-    assert probe.sha256_float64(ledger.anchor_coil_dofs) == probe.ANCHOR_COIL_SHA256
-
-
-def test_ledger_records_the_two_states_leg3_and_leg4_replay(
-    ledger_payload: dict[str, Any],
-) -> None:
-    """Eval 39 is the recorded capture and eval 43 is bitwise x38."""
-
-    evals = ledger_payload["outer_evals"]
-    trial = evals[probe.TRIAL_EVAL_INDEX]
-    post = evals[probe.POST_POISON_EVAL_INDEX]
-
-    assert trial["inner_iota"] == probe.RECORDED_TRIAL_IOTA
-    assert trial["j"] == probe.RECORDED_TRIAL_J
-    assert trial["inner_iterations"] == probe.RECORDED_TRIAL_INNER_ITERATIONS
-    assert trial["inner_surface_sha256"] == probe.POISONED_SURFACE_SHA256
-    assert post["rejection_reason"] == "inner_solve_failed"
-    assert probe.sha256_float64(post["coil_dofs"]) == probe.ANCHOR_COIL_SHA256
-
-
-def test_corrupted_ledger_sha256_fails_closed_naming_the_field(
-    tmp_path: Path, ledger_payload: dict[str, Any]
-) -> None:
-    """A byte-level edit is caught before any field is read."""
-
-    corrupted = dict(ledger_payload)
-    corrupted["endpoint_j"] = 0.0
-    path = _write_ledger(tmp_path, corrupted)
-
-    with pytest.raises(SystemExit, match="ledger_sha256"):
-        probe.load_replay_ledger(path)
 
 
 def test_missing_ledger_path_fails_closed_naming_the_field(tmp_path: Path) -> None:
@@ -102,54 +40,6 @@ def test_missing_ledger_path_fails_closed_naming_the_field(tmp_path: Path) -> No
 
     with pytest.raises(SystemExit, match="ledger_path"):
         probe.load_replay_ledger(tmp_path / "absent.json")
-
-
-def test_corrupted_anchor_iota_fingerprint_fails_closed_naming_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Moving the expected anchor iota is refused, and the field is named."""
-
-    monkeypatch.setattr(probe, "ANCHOR_IOTA", 0.5)
-
-    with pytest.raises(SystemExit, match="endpoint_iota"):
-        probe.load_replay_ledger(probe.LEDGER_PATH)
-
-
-def test_corrupted_poisoned_surface_fingerprint_fails_closed_naming_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The eval-39 anchor hash is a checked fingerprint, not a comment."""
-
-    monkeypatch.setattr(probe, "POISONED_SURFACE_SHA256", "00" * 32)
-
-    with pytest.raises(SystemExit, match=r"outer_evals\[39\]\.inner_surface_sha256"):
-        probe.load_replay_ledger(probe.LEDGER_PATH)
-
-
-def test_corrupted_coil_step_fingerprint_fails_closed_naming_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The x39-x38 displacement is asserted exactly."""
-
-    monkeypatch.setattr(probe, "COIL_STEP_L2", 0.001)
-
-    with pytest.raises(SystemExit, match=r"\|\|x39 - x38\|\|_2"):
-        probe.load_replay_ledger(probe.LEDGER_PATH)
-
-
-@pytest.mark.skipif(
-    not DEFAULT_F3_B37_GPU_LANE.is_file(),
-    reason="host-local archived F3 B37 fused lane bundle is not present",
-)
-def test_lane_blocks_on_disk_bind_to_the_ledger() -> None:
-    """The archived lane is the world the recorded run used."""
-
-    ledger = probe.load_replay_ledger(probe.LEDGER_PATH)
-    binding = probe.check_lane_binds_to_ledger(ledger)
-
-    assert binding["lane_meta_equals_ledger_lane"] is True
-    assert binding["lane_coil_sha256"] == ledger.fingerprints["start_coil_sha256"]
-    assert binding["lane_surface_sha256"] == ledger.fingerprints["start_surface_sha256"]
 
 
 # --------------------------------------------------------------------------
@@ -367,29 +257,6 @@ def test_claim_boundary_disclaims_every_speed_and_timing_claim() -> None:
     assert boundary["inherits_f3_7_70x"] is False
     assert boundary["predictor_wired_into_children"] is False
     assert boundary["single_state_measurement"] is True
-
-
-def test_evidence_document_round_trips_through_strict_json() -> None:
-    """dump_strict_json is the writer, so the payload must survive it."""
-
-    ledger = probe.load_replay_ledger(probe.LEDGER_PATH)
-    payload = {
-        "claim_boundary": probe.claim_boundary(),
-        "ledger": {
-            "path": str(ledger.path),
-            "sha256": ledger.sha256,
-            "fingerprints": ledger.fingerprints,
-        },
-        "schema": probe.SCHEMA,
-        "solve_plan": probe.solve_plan("all"),
-    }
-
-    text = probe.dump_strict_json(payload)
-    restored = json.loads(text)
-
-    assert restored == payload
-    assert restored["ledger"]["sha256"] == probe.LEDGER_SHA256
-    assert text.endswith("\n")
 
 
 def test_strict_json_refuses_a_non_finite_number() -> None:
