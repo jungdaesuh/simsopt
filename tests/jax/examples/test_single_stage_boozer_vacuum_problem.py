@@ -10,6 +10,10 @@ pre-evaluation warm start restored).
 
 from __future__ import annotations
 
+import logging
+import re
+from collections import Counter
+
 import jax
 import numpy as np
 import pytest
@@ -20,6 +24,17 @@ from simsopt_jax_adapters.geo.single_stage_boozer_vacuum_problem import (
     SingleStageVacuumProblem,
 )
 from simsopt_jax_adapters.geo.single_stage_exact_analytic import INNER_FAILURE_VALUE
+
+_JIT_NAME = re.compile(r"jit\(([^)]+)\)")
+_ALLOWED_CONSTRUCTION_COMPILES = frozenset(
+    {
+        "solve",
+        "evaluate",
+        "reporting_metrics_from_solution",
+        "reporting_metrics",
+        "run_code_traceable_exact_C2_array_kernel",
+    }
+)
 
 
 @pytest.fixture(params=("cpu", "gpu"), autouse=True)
@@ -123,3 +138,33 @@ def test_persisted_inner_failure_reports_the_sentinel_and_keeps_the_warm_start(
     restored_value, restored_gradient = bounded_problem.value_and_gradient(seed_coils)
     assert restored_value == reference_value
     np.testing.assert_array_equal(restored_gradient, reference_gradient)
+
+
+def test_construction_compiles_only_the_seed_solve_and_not_tiny_primitives() -> None:
+    """Host NumPy bake must not dispatch one-off primitive jits at construction.
+
+    The seed inner Newton still compiles ``solve``. ``evaluate`` and reporting
+    are allowed if they compile here; tiny primitives are not.
+    """
+    jax.config.update("jax_log_compiles", True)
+    names: list[str] = []
+
+    class _Tap(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            message = record.getMessage()
+            if "Compiling jit(" not in message:
+                return
+            match = _JIT_NAME.search(message)
+            if match is not None:
+                names.append(match.group(1))
+
+    tap = _Tap()
+    tap.setLevel(logging.DEBUG)
+    logger = logging.getLogger("jax._src.interpreters.pxla")
+    logger.addHandler(tap)
+    logger.setLevel(logging.INFO)
+    problem = SingleStageVacuumProblem(BOUNDED_SCALE)
+    logger.removeHandler(tap)
+    unexpected = [name for name in names if name not in _ALLOWED_CONSTRUCTION_COMPILES]
+    assert unexpected == [], Counter(names)
+    assert problem.initial_coil_dofs.size > 0

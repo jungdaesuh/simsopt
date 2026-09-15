@@ -21,15 +21,17 @@ from numpy.typing import NDArray
 from simsopt.configs import get_data
 from simsopt.geo import CurveLength, SurfaceXYZTensorFourier, Volume
 from simsopt.geo.curve import Curve
+from simsopt_jax.core._device_scalars import staged_like
+from simsopt_jax.core._math_utils import as_jax_float64
 from simsopt_jax.runtime.host_boundary import host_float
 
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
-from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
 from simsopt_jax_adapters.geo.single_stage_exact_analytic import (
     ExactAnalyticSingleStage,
+    HostConstructionBoozerSurfaceJAX,
 )
-from simsopt_jax_adapters.geo.surface_objectives import (
-    make_traceable_objective_runtime_bundle,
+from simsopt_jax_adapters.geo.surface_objectives_traceable import (
+    _make_traceable_reporting_metrics_from_solution_bundle,
 )
 
 __all__ = [
@@ -109,6 +111,29 @@ class SingleStageVacuumEndpoint:
         return float(np.sqrt(2.0 * self.boozer_residual))
 
 
+def _reporting_metrics_with_explicit_staging(reporting):
+    """Stage host reporting inputs before the compiled program, as the public boundary does."""
+
+    def reporting_metrics_from_solution(
+        coil_dofs,
+        solved_x,
+        solver_success,
+        *,
+        include_distance_metrics=True,
+        outer_raw_terms=None,
+    ):
+        staged_x = as_jax_float64(solved_x)
+        return reporting(
+            as_jax_float64(coil_dofs),
+            staged_x,
+            staged_like(staged_x, solver_success, dtype=np.bool_),
+            include_distance_metrics=include_distance_metrics,
+            outer_raw_terms=outer_raw_terms,
+        )
+
+    return reporting_metrics_from_solution
+
+
 def _outer_objective_config(
     *,
     nfp: int,
@@ -159,8 +184,9 @@ class SingleStageVacuumProblem:
     ``endpoint`` evaluates one coil state and adds the published physics.
 
     Construction is this problem's host boundary: it is where NCSX host data
-    becomes device arrays.  Every crossing there is an explicit
-    ``jax.device_put``, so construction runs under
+    becomes device arrays.  Coil groups and the affine surface basis are baked
+    with NumPy and staged with ``explicit_device_array``; remaining crossings
+    are explicit, so construction runs under
     ``jax.transfer_guard_host_to_device("disallow")`` and the steady-state
     evaluation and reporting paths run under the full
     ``jax.transfer_guard("disallow")``.
@@ -190,7 +216,7 @@ class SingleStageVacuumProblem:
         )
         surface.fit_to_curve(magnetic_axis, _SURFACE_DISTANCE, flip_theta=True)
         volume_label = Volume(surface)
-        boozer_surface = BoozerSurfaceJAX(
+        boozer_surface = HostConstructionBoozerSurfaceJAX(
             field,
             surface,
             volume_label,
@@ -229,12 +255,11 @@ class SingleStageVacuumProblem:
         # second call of the closure above, which is a pure read of the same
         # solved surface, so both the objective and the report share one
         # configuration.
-        self._reporting_metrics = make_traceable_objective_runtime_bundle(
-            boozer_surface,
-            field,
-            evaluator.iota_target,
-            outer_objective_config=outer_objective_config(),
-        )["reporting_metrics_from_solution"]
+        self._reporting_metrics = _reporting_metrics_with_explicit_staging(
+            _make_traceable_reporting_metrics_from_solution_bundle(
+                {"state": evaluator._objective_cache_state}
+            )
+        )
 
     def endpoint(self, coil_dofs: NDArray[np.float64]) -> SingleStageVacuumEndpoint:
         """Evaluate at ``coil_dofs`` and report the physics of the warm-start state.
