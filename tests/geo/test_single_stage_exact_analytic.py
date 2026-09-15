@@ -31,6 +31,9 @@ from simsopt_jax_adapters.geo.single_stage_exact_analytic import (
     ExactAnalyticSingleStage,
     HostConstructionBoozerSurfaceJAX,
 )
+from simsopt_jax_adapters.geo.single_stage_host_construction import (
+    HOST_VS_DEVICE_BAKE_RTOL,
+)
 
 INITIAL_IOTA = -0.406
 RESOLUTION = 1
@@ -181,19 +184,41 @@ def _jax_evaluator_eager_geometry(
     return evaluator, boozer
 
 
-def test_host_construction_seed_and_first_evaluate_match_eager_jax_bake():
-    """NumPy construction bake must not change the seed or the first evaluate."""
+def test_host_construction_seed_and_first_evaluate_match_eager_jax_bake(
+    analytic_backend,
+):
+    """NumPy construction bake must not change the seed or the first evaluate.
+
+    Coil dofs are host copies of the same native coils, so they stay bitwise
+    on every device. The inner seed and first evaluate compare the host-NumPy
+    Fourier bake against the on-device JAX jacfwd bake of the same linear map:
+    CPU matches bitwise; GPU reduction order is not bit-identical, and the
+    guarantee is :data:`HOST_VS_DEVICE_BAKE_RTOL`.
+    """
     reference, _ = _jax_evaluator_eager_geometry()
     host, _ = _jax_evaluator()
     np.testing.assert_array_equal(host.coil_dofs, reference.coil_dofs)
-    np.testing.assert_array_equal(
-        host_array(host.x_inner, dtype=np.float64),
-        host_array(reference.x_inner, dtype=np.float64),
-    )
+    host_inner = host_array(host.x_inner, dtype=np.float64)
+    reference_inner = host_array(reference.x_inner, dtype=np.float64)
     reference_eval = reference.evaluate(reference.coil_dofs)
     host_eval = host.evaluate(host.coil_dofs)
-    assert host_eval.value == reference_eval.value
-    np.testing.assert_array_equal(host_eval.gradient, reference_eval.gradient)
+    if analytic_backend.platform == "cpu":
+        np.testing.assert_array_equal(host_inner, reference_inner)
+        assert host_eval.value == reference_eval.value
+        np.testing.assert_array_equal(host_eval.gradient, reference_eval.gradient)
+        return
+    np.testing.assert_allclose(
+        host_inner, reference_inner, rtol=HOST_VS_DEVICE_BAKE_RTOL, atol=0.0
+    )
+    np.testing.assert_allclose(
+        host_eval.value, reference_eval.value, rtol=HOST_VS_DEVICE_BAKE_RTOL, atol=0.0
+    )
+    np.testing.assert_allclose(
+        host_eval.gradient,
+        reference_eval.gradient,
+        rtol=HOST_VS_DEVICE_BAKE_RTOL,
+        atol=0.0,
+    )
 
 
 def test_construction_and_first_evaluation_are_clean_under_the_strict_transfer_guard():

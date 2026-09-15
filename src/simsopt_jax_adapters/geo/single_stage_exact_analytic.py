@@ -35,6 +35,7 @@ from simsopt_jax.core.field import (
     grouped_field_data_from_spec,
 )
 from simsopt_jax.core.specs import host_resident_spec
+from simsopt_jax.runtime.host_boundary import block_until_ready, host_value
 
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.geo.boozer_surface import (
@@ -205,11 +206,11 @@ class ExactAnalyticSingleStage:
             ),
             dtype=np.float64,
         )
-        initial = jax.jit(solve)(seed_coil_dofs, seed_inner)
-        jax.block_until_ready(initial)
+        initial = block_until_ready(jax.jit(solve)(seed_coil_dofs, seed_inner))
         # ``bool``/``float``/``int`` of a device array is an implicit read back;
-        # the three fields the host keeps cross once, explicitly.
-        initial_success, initial_iota, initial_iterations = jax.device_get(
+        # the three fields the host keeps cross once, explicitly, through the
+        # host-boundary owner.
+        initial_success, initial_iota, initial_iterations = host_value(
             (initial["success"], initial["iota"], initial["nit"])
         )
         if not bool(initial_success):
@@ -270,7 +271,9 @@ class ExactAnalyticSingleStage:
         # Every later inner state is a committed output of that program; the
         # initial one is committed explicitly so the first call compiles the
         # same executable instead of a second, uncommitted-input variant.
-        self._x = jax.device_put(initial["x"], next(iter(initial["x"].devices())))
+        self._x = explicit_device_array(
+            initial["x"], dtype=initial["x"].dtype, reference=initial["x"]
+        )
         self.coil_dofs = np.asarray(field.x, dtype=np.float64)
 
     @property
@@ -289,7 +292,7 @@ class ExactAnalyticSingleStage:
         x_returned, success, iterations, value, gradient = self._evaluate_kernel(
             coil, self._x
         )
-        success_host, iterations_host, value_host, gradient_host = jax.device_get(
+        success_host, iterations_host, value_host, gradient_host = host_value(
             (success, iterations, value, gradient)
         )
         # Value and gradient above are always those of ``x_returned``, the

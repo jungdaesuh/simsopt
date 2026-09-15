@@ -33,7 +33,7 @@ _NON_JAX_BINDING = "non-jax"
 # Each allowlist item names one direct invocation, not merely an owning function.
 # The source coordinate deliberately ratchets additions, removals, and duplicate
 # primitive calls. A JAX import or direct alias must resolve lexically to count.
-# This baseline contains 96 direct invocations, including all 57 nested-LS calls.
+# This baseline contains 90 direct invocations, including all 57 nested-LS calls.
 #
 # Admitted 2026-08-24, both for the Phase-2 predictor and both counted as
 # call SITES rather than executions:
@@ -56,7 +56,10 @@ _NON_JAX_BINDING = "non-jax"
 # * ``src/simsopt_jax/solve/dispatch.py``: 4 new site(s).
 # * ``src/simsopt_jax_adapters/geo/nested_ls_ncsx.py``: 2 new site(s).
 # * ``src/simsopt_jax_adapters/geo/single_stage_exact_analytic.py``: 6 new site(s).
-# Baseline after this admission: 96 direct invocations.
+# Retired 2026-09-15: those six exact-analytic sites now call the SSOT owners
+# ``host_boundary.block_until_ready`` / ``host_value`` and
+# ``dtypes.explicit_device_array``. Direct jax transfers in that adapter are
+# no longer admitted. Baseline: 90.
 _ALLOWED_OWNER_CALLS = frozenset(
     {
         "src/simsopt_jax/backend/dtypes.py::_device_put::device_put::308:19",
@@ -146,12 +149,6 @@ _ALLOWED_OWNER_CALLS = frozenset(
         "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py::nested_ls_outer_value_and_grad::device_get::5429:34",
         "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py::nested_ls_outer_value_and_grad::device_get::5483:23",
         "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py::prepare_f3_b37_outer_state::device_get::4900:24",
-        "src/simsopt_jax_adapters/geo/single_stage_exact_analytic.py::ExactAnalyticSingleStage.__init__::block_until_ready::132:8",
-        "src/simsopt_jax_adapters/geo/single_stage_exact_analytic.py::ExactAnalyticSingleStage.__init__::device_get::135:60",
-        "src/simsopt_jax_adapters/geo/single_stage_exact_analytic.py::ExactAnalyticSingleStage.__init__::device_put::120:12",
-        "src/simsopt_jax_adapters/geo/single_stage_exact_analytic.py::ExactAnalyticSingleStage.__init__::device_put::121:12",
-        "src/simsopt_jax_adapters/geo/single_stage_exact_analytic.py::ExactAnalyticSingleStage.__init__::device_put::195:18",
-        "src/simsopt_jax_adapters/geo/single_stage_exact_analytic.py::ExactAnalyticSingleStage.evaluate::device_get::214:67",
         "src/simsopt_jax_adapters/geo/surface_objectives_traceable.py::_ensure_traceable_runtime_host_wrappers.compute_baseline_value_and_grad::transfer_guard_device_to_host::5087:17",
         "src/simsopt_jax_adapters/geo/surface_objectives_traceable.py::_ensure_traceable_runtime_host_wrappers.compute_baseline_value_and_grad::transfer_guard_host_to_device::5075:17",
         "src/simsopt_jax_adapters/geo/surface_objectives_traceable.py::_make_traceable_lazy_host_reporting_metrics._baseline_reporting_metrics::transfer_guard_device_to_host::5020:17",
