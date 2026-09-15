@@ -52,8 +52,8 @@ Results
      - Native/JAX solve traces compared; identical algorithm on both lanes
      - pass 5 (2026-09-15), code as shipped
    * - Exact-constraint single-stage optimization, 1000 iterations (``tests/geo/test_single_stage_exact_analytic.py``)
-     - 24.8 s
-     - 55.7 s process wall
+     - 24.1 s
+     - 52.1 s process wall
      - 2.17x (pass 5 measured 2.24x)
      - Identical initial state; gradient relative L2 difference 3.9e-13
      - pass 5b (sealed 2026-09-15 13:03 UTC)
