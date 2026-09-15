@@ -30,7 +30,10 @@ _SNAPSHOT_RUNTIME = (
 if _SNAPSHOT_RUNTIME:
     activate_snapshot_source_imports(_SOURCE_ROOT)
 
+from simsopt_jax.backend.runtime import apply_cuda_xla_flag_pins
 from simsopt_jax.config import set_backend as _set_backend
+
+apply_cuda_xla_flag_pins()
 
 if _SNAPSHOT_RUNTIME and "--preflight-only" not in sys.argv[1:]:
     _determinism_flag = "--xla_gpu_exclude_nondeterministic_ops=true"

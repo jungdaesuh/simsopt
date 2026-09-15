@@ -8,6 +8,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+from simsopt_jax.backend.runtime import apply_cuda_xla_flag_pins
+
+apply_cuda_xla_flag_pins()
+
 import jax
 
 print("backend", jax.default_backend(), flush=True)

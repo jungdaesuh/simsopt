@@ -12,6 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Protocol
 
+from simsopt_jax.backend.runtime import apply_cuda_xla_flag_pins
+
+apply_cuda_xla_flag_pins()
+
 import jax
 import jaxlib
 import numpy as np

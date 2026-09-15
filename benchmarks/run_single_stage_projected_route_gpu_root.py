@@ -55,6 +55,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Self
 
+from simsopt_jax.backend.runtime import apply_cuda_xla_flag_pins
+
+apply_cuda_xla_flag_pins()
+
 import jax
 import jax.numpy as jnp
 import jaxlib
@@ -235,9 +239,7 @@ ATTEMPT_STOP_RULE: Final = (
 # refused, timed-out or unparseable lane produced no cold compile number and
 # primed no cache it can account for, which is the same state ``--no-cold-lane``
 # leaves the protocol in.
-COLD_LANE_MEASURED_OUTCOMES: Final = frozenset(
-    {"LATCHED", "COMPLETED_WITHOUT_LATCH"}
-)
+COLD_LANE_MEASURED_OUTCOMES: Final = frozenset({"LATCHED", "COMPLETED_WITHOUT_LATCH"})
 
 # The receipt's own shape, frozen -- ONE listing, walked recursively.
 #
@@ -612,7 +614,9 @@ ROOT_EVIDENCE_REQUIRED_KEYS: Final = frozenset(ROOT_EVIDENCE_SHAPE)
 ATTEMPT_PROTOCOL_REQUIRED_KEYS: Final = frozenset(ATTEMPT_PROTOCOL_SHAPE)
 SUPERVISED_ATTEMPT_REQUIRED_KEYS: Final = frozenset(SUPERVISED_ATTEMPT_SHAPE)
 ATTEMPT_EVIDENCE_REQUIRED_KEYS: Final = frozenset(ATTEMPT_EVIDENCE_SHAPE)
-REFUSED_ATTEMPT_EVIDENCE_REQUIRED_KEYS: Final = frozenset(REFUSED_ATTEMPT_EVIDENCE_SHAPE)
+REFUSED_ATTEMPT_EVIDENCE_REQUIRED_KEYS: Final = frozenset(
+    REFUSED_ATTEMPT_EVIDENCE_SHAPE
+)
 
 # Every document the receipt is built from, by the name its refusals carry.
 RECEIPT_SHAPES: Final = {
@@ -794,7 +798,10 @@ LEAF_BINDINGS: Final = {
     **_prefixed(
         "root",
         {
-            "attempt_protocol.attempts_run": (BINDING_DERIVED, "validate_root_artifact"),
+            "attempt_protocol.attempts_run": (
+                BINDING_DERIVED,
+                "validate_root_artifact",
+            ),
             "attempt_protocol.authorized_attempts": (
                 BINDING_FROZEN,
                 "PREREGISTERED_ATTEMPTS",
@@ -1221,7 +1228,10 @@ LEAF_BINDINGS: Final = {
                 ),
             ),
             "timing_boundary": (BINDING_FROZEN, "_validate_attempt_record"),
-            "timing_seconds.attempt_wall": (BINDING_DERIVED, "_validate_attempt_record"),
+            "timing_seconds.attempt_wall": (
+                BINDING_DERIVED,
+                "_validate_attempt_record",
+            ),
             "timing_seconds.bootstrap": (BINDING_DERIVED, "_validate_attempt_record"),
             "timing_seconds.engine_compile": (
                 BINDING_DERIVED,
@@ -1554,7 +1564,9 @@ class _gate:
     def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, kind: object, value: BaseException | None, traceback: object) -> bool:
+    def __exit__(
+        self, kind: object, value: BaseException | None, traceback: object
+    ) -> bool:
         if value is None or isinstance(value, GateRefusal):
             return False
         raise GateRefusal(self.name, value) from value
@@ -2009,9 +2021,7 @@ def _parse_attempt_stdout(stdout: bytes) -> JsonValue:
         return None
 
 
-def _attempt_outcome(
-    evidence: JsonValue, *, return_code: int, timed_out: bool
-) -> str:
+def _attempt_outcome(evidence: JsonValue, *, return_code: int, timed_out: bool) -> str:
     """Classify one attempt without inventing a fifth protocol outcome.
 
     ``latched`` is required to BE a boolean rather than indexed for.  The
@@ -2399,9 +2409,7 @@ def preflight_external_resources(
 
     executable = shutil.which(SUPERVISOR_GPU_INVENTORY_QUERY[0])
     if executable is None:
-        raise ProjectedRootError(
-            f"{SUPERVISOR_GPU_INVENTORY_QUERY[0]} is not on PATH"
-        )
+        raise ProjectedRootError(f"{SUPERVISOR_GPU_INVENTORY_QUERY[0]} is not on PATH")
     completed = subprocess.run(
         SUPERVISOR_GPU_INVENTORY_QUERY,
         capture_output=True,
@@ -2554,9 +2562,7 @@ def build_root_evidence(
     }
 
 
-def write_root_receipt(
-    staging_root: Path, evidence: Mapping[str, JsonValue]
-) -> None:
+def write_root_receipt(staging_root: Path, evidence: Mapping[str, JsonValue]) -> None:
     """Write the receipt and, last, the manifest that describes the tree."""
 
     (staging_root / EVIDENCE_FILENAME).write_bytes(canonical_json_bytes(evidence))
@@ -2668,8 +2674,7 @@ def _validate_preflight_record(preflight: Mapping[str, JsonValue]) -> None:
     # and still read as an inventory.
     if any(not isinstance(entry, str) for entry in visible):
         raise ProjectedRootError(
-            f"root preflight publishes a device inventory that is not one: "
-            f"{visible!r}"
+            f"root preflight publishes a device inventory that is not one: {visible!r}"
         )
     if GPU_UUID not in visible:
         raise ProjectedRootError(
@@ -2836,8 +2841,7 @@ def _validate_problem_identity(identity: Mapping[str, JsonValue]) -> None:
     )
     if identity != derived:
         raise ProjectedRootError(
-            "attempt problem identity is not the one its measured observables "
-            "derive"
+            "attempt problem identity is not the one its measured observables derive"
         )
     if not identity["bound"]:
         raise ProjectedRootError("attempt claims an unbound problem")
@@ -2913,9 +2917,7 @@ def _validate_lowering_pre_gate(
         )
 
 
-def _validate_certified_route_options(
-    options: JsonValue, delta: JsonValue
-) -> None:
+def _validate_certified_route_options(options: JsonValue, delta: JsonValue) -> None:
     """Bind the configuration the attempt RAN to the certified route's VALUES.
 
     Section 1's claim is a claim about ONE route, and the campaign's whole
@@ -2959,13 +2961,10 @@ def _validate_certified_route_options(
             f"not a budget"
         )
     certified = {
-        field: json_scalar(getattr(CERTIFIED_ROUTE_OPTIONS, field))
-        for field in fields
+        field: json_scalar(getattr(CERTIFIED_ROUTE_OPTIONS, field)) for field in fields
     }
     derived = {
-        field: value
-        for field, value in options.items()
-        if value != certified[field]
+        field: value for field, value in options.items() if value != certified[field]
     }
     if delta != derived:
         raise ProjectedRootError(
@@ -3174,9 +3173,7 @@ def _iterate_column(rows: Sequence[JsonValue], name: str) -> list[float | None]:
         if not isinstance(row, dict):
             raise ProjectedRootError(f"attempt iterate {index} is not a document")
         if name not in row:
-            raise ProjectedRootError(
-                f"attempt iterate {index} publishes no {name}"
-            )
+            raise ProjectedRootError(f"attempt iterate {index} publishes no {name}")
         value = row[name]
         if value is not None and (
             isinstance(value, bool) or not isinstance(value, (int, float))
@@ -3436,7 +3433,9 @@ def validate_root_artifact(
             "state is a float64 array, and with x64 disabled its digest is "
             "re-derived at float32 and disagrees with every honest receipt"
         )
-    manifest = load_canonical_json_bytes((artifact_root / MANIFEST_FILENAME).read_bytes())
+    manifest = load_canonical_json_bytes(
+        (artifact_root / MANIFEST_FILENAME).read_bytes()
+    )
     if manifest != artifact_manifest_payload(
         artifact_root, schema_version=GPU_ROOT_MANIFEST_SCHEMA_VERSION
     ):
@@ -3444,7 +3443,9 @@ def validate_root_artifact(
     if sealed:
         validate_sealed_modes(artifact_root)
 
-    evidence = load_canonical_json_bytes((artifact_root / EVIDENCE_FILENAME).read_bytes())
+    evidence = load_canonical_json_bytes(
+        (artifact_root / EVIDENCE_FILENAME).read_bytes()
+    )
     if (
         not isinstance(evidence, dict)
         or evidence.get("schema_version") != GPU_ROOT_SCHEMA_VERSION
@@ -3462,7 +3463,8 @@ def validate_root_artifact(
     if (
         claim["wall_seconds_bar"] != NATIVE_WALL_SECONDS_BAR
         or claim["target_objective"] != NATIVE_TARGET_OBJECTIVE
-        or claim["feasibility_tolerance"] != CERTIFIED_ROUTE_OPTIONS.feasibility_tolerance
+        or claim["feasibility_tolerance"]
+        != CERTIFIED_ROUTE_OPTIONS.feasibility_tolerance
     ):
         raise ProjectedRootError("root evidence restates the native reference")
     if evidence["timing_boundary"] != "engine_compile_plus_solve":
@@ -3600,10 +3602,11 @@ def validate_root_artifact(
                 f"obey the published stop rule: {ATTEMPT_STOP_RULE}"
             )
     expected_paths = [
-        f"{ATTEMPTS_DIRECTORY}/attempt-{index}"
-        for index in range(1, len(attempts) + 1)
+        f"{ATTEMPTS_DIRECTORY}/attempt-{index}" for index in range(1, len(attempts) + 1)
     ]
-    if [attempt["artifact_relative_path"] for attempt in attempts] != expected_paths or (
+    if [
+        attempt["artifact_relative_path"] for attempt in attempts
+    ] != expected_paths or (
         [int(attempt["attempt_index"]) for attempt in attempts]
         != list(range(1, len(attempts) + 1))
     ):
@@ -3863,8 +3866,10 @@ def _validate_attempt_record(
                 f"attempt publishes {phase} as {timing[phase]!r}, which is not "
                 f"a duration"
             )
-    if not engine_wall <= float(timing["attempt_wall"]) <= float(
-        attempt["supervised_seconds"]
+    if (
+        not engine_wall
+        <= float(timing["attempt_wall"])
+        <= float(attempt["supervised_seconds"])
     ):
         raise ProjectedRootError(
             f"attempt timings do not nest: engine wall {engine_wall!r}, attempt "
@@ -3950,7 +3955,9 @@ def _validate_attempt_record(
     if ledger["pinned_quality_terms"] != list(PINNED_ENDPOINT_QUALITY_TERMS) or (
         ledger["informational_observables"] != list(INFORMATIONAL_ENDPOINT_OBSERVABLES)
     ):
-        raise ProjectedRootError("attempt endpoint ledger scope differs from the campaign's")
+        raise ProjectedRootError(
+            "attempt endpoint ledger scope differs from the campaign's"
+        )
     # Nor may it supply the REFERENCE those terms are judged against.  Both
     # sides of the gate used to come out of the document being judged, so a
     # ledger publishing ``terminal == native == 1.0`` on all ten pinned terms
@@ -4001,7 +4008,9 @@ def _validate_attempt_record(
         endpoint["relative_tolerance"] != DIAG4_ENDPOINT_AGREEMENT_RELATIVE_TOLERANCE
         or endpoint["absolute_floor"] != DIAG4_ENDPOINT_AGREEMENT_ABSOLUTE_FLOOR
     ):
-        raise ProjectedRootError("attempt endpoint tolerances differ from the campaign's")
+        raise ProjectedRootError(
+            "attempt endpoint tolerances differ from the campaign's"
+        )
     # The four tellings of the terminal endpoint, made one fact.  Runs after the
     # ledger's own sides are known to be physics measurements carrying the
     # campaign's terms, because it reads one of them.
@@ -4020,9 +4029,7 @@ def _validate_attempt_record(
         )
     with coordinates_path.open("rb") as stream:
         coordinates = np.load(stream, allow_pickle=False)
-    republished = exact_numeric_tree_sha256(
-        jnp.asarray(coordinates, dtype=jnp.float64)
-    )
+    republished = exact_numeric_tree_sha256(jnp.asarray(coordinates, dtype=jnp.float64))
     if republished != endpoint["terminal_state_sha256"]:
         raise ProjectedRootError("published terminal state differs from its hash")
     return evidence
@@ -4205,9 +4212,7 @@ def run_attempt_protocol(
     # THIS plan the device is frozen, and refusing here costs nothing while
     # refusing at re-validation would cost the root.
     if gpu_uuid != GPU_UUID:
-        raise ProjectedRootError(
-            f"this plan certifies {GPU_UUID}, not {gpu_uuid}"
-        )
+        raise ProjectedRootError(f"this plan certifies {GPU_UUID}, not {gpu_uuid}")
     if output_root.exists():
         raise ProjectedRootError(f"root output already exists: {output_root}")
     if cache_directory.exists() and any(cache_directory.iterdir()):
