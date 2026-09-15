@@ -8,7 +8,7 @@ here are that derivation evaluated at the certified configuration.
 
 "675" names the certified configuration, not a constraint.  Every
 ``FLAT675_*`` name below is :data:`~.layout.CERTIFIED_FLAT_LAYOUT` read out
-under the spelling the sealed receipts, the campaign children, the shipped
+under the spelling the recorded reference runs, the downstream consumers, the shipped
 example and the tests already use, so those consumers see no change while the
 core reads a per-problem record.
 """

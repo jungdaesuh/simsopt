@@ -595,14 +595,14 @@ def _git_output(*args: str) -> str:
 def nested_ls_receipt_provenance(
     identity: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    """Commit, versions, source hashes, and F3 input hashes for a receipt.
+    """Commit, versions, source hashes, and F3 input hashes for a run record.
 
     Pass ``identity`` when the same evidence document also publishes a
     standalone ``runtime`` block, so both come from ONE
     :func:`nested_ls_runtime_identity` sample. Sampling twice can put two
     answers in one document for the binary it ran on, which is the same as
-    having none: this campaign has measured the extension being replaced
-    three times mid-campaign, once ten minutes into a timed leg. It also
+    having none: the extension being replaced has been observed changing
+    three times mid-run, once ten minutes into a timed run. It also
     halves the work, since each sample digests the ~2.9 MB extension.
     """
 
@@ -4549,7 +4549,7 @@ def _optional_finite(value: float | None) -> float | None:
 class NestedLsInnerSolveFailed(RuntimeError):
     """The inner solve ran its budget without reaching the nested branch.
 
-    The native lane answers inner non-convergence with its sealed
+    The native lane answers inner non-convergence with its shared
     rejection sentinel, so the JAX lane raises a signal its lane can
     catch and answer identically instead of crashing. Lane symmetry is
     the point: an evaluation neither lane can complete must cost both
@@ -4569,7 +4569,7 @@ class NestedLsInnerSolveFailed(RuntimeError):
         # after an accepted step). This message used to render it as
         # "N iterations left", which inverts the reading of every rejection
         # it explains: an exhausted budget printed as an untouched one.
-        # Ledgers sealed before this correction carry the old wording; the
+        # Ledgers recorded before this correction carry the old wording; the
         # number in them is iterations spent.
         super().__init__(
             "nested-LS inner solve did not reach the nested branch: "
@@ -4585,11 +4585,11 @@ class NestedLsInnerSolveFailed(RuntimeError):
 class NestedLsBranchJump(RuntimeError):
     """The inner solve landed off the anchor's Boozer branch.
 
-    Charter Amendment 1's typed signal: ``s*(c)`` is only locally
+    Design amendment 1's typed signal: ``s*(c)`` is only locally
     defined, and a converged inner solve on a *different* branch is a
     failed outer evaluation, not a cheaper one. Raised only by the outer
     value-and-gradient path, and only for this reason, so an outer
-    optimizer lane can catch this exact type and apply the sealed
+    optimizer lane can catch this exact type and apply the shared
     rejection sentinel. The anchor is never advanced onto the rejected
     branch.
     """
@@ -4651,7 +4651,7 @@ class NestedLsOuterAnchor:
     It is ``None`` EVERYWHERE today, on purpose. See
     :func:`nested_ls_outer_value_and_grad`: filling it costs a second full
     661x661 factorization per feasible evaluation, inside the timed wall of
-    a sealed speed claim, for a consumer that does not exist yet. Do not
+    a recorded timing run, for a consumer that does not exist yet. Do not
     write code that assumes it is populated; Phase 2 must land the single-
     factorization refactor described there before this field means anything.
     """
@@ -4851,17 +4851,17 @@ def prepare_f3_b37_outer_state(
     already carries, so the caller freezes the outer point (the dense-LU
     walk endpoint for Gate FD-0) before preparing. The vessel block is
     read from the bundle's archived candidate and never moves again: it
-    is not an outer variable in this charter.
+    is not an outer variable in this problem.
 
-    ``inner_substep`` opts this run into the sealed Δc sub-step ladder
+    ``inner_substep`` opts this run into the frozen Δc sub-step ladder
     (``NESTED_LS_INNER_SUBSTEP_LEGS``): a displacement the inner solve
     cannot take whole is retried in 2, then 4, then 8 legs from the
     committed anchor. It defaults to False and must stay a per-run
     decision, because a run with it on and a run with it off are not the
     same optimization -- the first rung is the undivided step, so the
     trajectories agree exactly until the first failure and diverge from
-    there. Receipts measured without it cannot be compared to receipts
-    measured with it, and the flag belongs in the sealed policy of any
+    there. Runs measured without it cannot be compared to runs
+    measured with it, and the flag belongs in the recorded policy of any
     run that sets it.
     """
 
@@ -4923,7 +4923,7 @@ def prepare_f3_b37_outer_state(
         ),
         # Sub-stepping OFF by default. Enabling it changes the inner
         # trajectory, and a trajectory change silently invalidates every
-        # sealed receipt measured without it, so the default reproduces
+        # recorded run measured without it, so the default reproduces
         # today's lane exactly and a caller opts in per run.
         inner_substep_legs=(
             tuple(NESTED_LS_INNER_SUBSTEP_LEGS) if inner_substep else (1,)
@@ -4931,7 +4931,7 @@ def prepare_f3_b37_outer_state(
         # Predictor OFF by default, for the same reason sub-stepping is:
         # it changes the inner trajectory, AND it changes the adjoint's own
         # arithmetic (factor-once instead of jnp.linalg.solve), so a
-        # predictor-ON run is not comparable to any sealed receipt.
+        # predictor-ON run is not comparable to any recorded run.
         inner_predictor=bool(inner_predictor),
         predictor_source=None,
         # Impossible telemetry until a solve sets it, matching the trial
@@ -5133,7 +5133,7 @@ def _walk_nested_inner_ladder(
     With the default single-rung ladder this is exactly the previous
     behaviour, one solve and one decision — sub-stepping is opt-in because
     turning it on changes the trajectory, and a trajectory change silently
-    invalidates every sealed receipt that was measured without it.
+    invalidates every recorded run that was measured without it.
     """
 
     anchor = state.anchor
@@ -5263,7 +5263,7 @@ def _mixed_coil_correction_vjp(
 ) -> NDArray[np.float64]:
     """Production ``−λᵀ Ĥ_sc``: one pullback of the linear mixed map.
 
-    The map is the sealed forward action ``Ĥ_sc v_c``
+    The map is the fixed forward action ``Ĥ_sc v_c``
     (:func:`apply_reduced_mixed_schur_coil_tangent`), transposed exactly
     as :func:`implicit_adjoint_coil_gradient` does it
     (``nested_ls_reduced.py:1505-1520``), at the same nonzero probe so
@@ -5359,7 +5359,7 @@ def nested_ls_outer_value_and_grad(
     nothing, and the warm start has not moved.
 
     Two typed signals, raised only by this path and only for these
-    reasons, mark the evaluations a lane answers with the sealed
+    reasons, mark the evaluations a lane answers with the shared
     rejection sentinel — the same events the native lane sentinels, so
     neither lane is charged for what the other survives:
 
@@ -5404,11 +5404,11 @@ def nested_ls_outer_value_and_grad(
     # and keeps no factor, so a predictor that wanted a cached LU beside it
     # would buy a SECOND full 661x661 factorization per evaluation (measured
     # CPU fp64: solve 83 ms, lu_factor 165 ms) inside the timed wall of a
-    # sealed speed claim. Factoring once and applying it serves both.
+    # recorded timing run. Factoring once and applying it serves both.
     #
     # The OFF branch must stay bitwise what it was. ``lu_factor`` +
     # ``lu_solve`` is not the same arithmetic as ``jnp.linalg.solve``, so
-    # flipping this unconditionally would move every sealed receipt in its
+    # flipping this unconditionally would move every recorded run in its
     # last bits -- which is exactly why ``inner_predictor`` is a per-run
     # policy and not a default.
     if state.inner_predictor:
@@ -5440,8 +5440,8 @@ def nested_ls_outer_value_and_grad(
     # and keeps no factor. Caching here therefore buys a second full
     # 661x661 factorization per feasible outer evaluation (measured on
     # this host, CPU fp64: solve 83 ms, lu_factor 165 ms) that nothing
-    # reads — inside the timed wall of the sealed nested_speed_claim
-    # receipts, which were measured without it.
+    # reads — inside the timed wall of the recorded timing runs,
+    # which were measured without it.
     #
     # Phase 2 must not simply flip this on. The SSOT fix is to factor
     # ONCE: replace the adjoint's ``jnp.linalg.solve`` with
@@ -5502,9 +5502,9 @@ class NestedLsOuterFd0Probe:
     Frozen point is the dense-LU walk endpoint. Each perturbed evaluation
     is a full warm-started inner re-solve whose solution the C++ LS
     Newton judge must accept as a no-op. No timing content: this is a
-    physics gate, not a speed receipt, and it is not F3 7.70×.
+    physics gate, not a timing record, and it is not the 7.70× configuration.
 
-    Charter Amendment 3: a direction starts at the rule step and keeps
+    Design amendment 3: a direction starts at the rule step and keeps
     halving while the halved step improves the relative error, stopping
     at the band, at ``NESTED_LS_OUTER_FD0_MAX_HALVINGS``, or at the
     measured noise floor — whichever comes first. Every rung it took is
@@ -5570,7 +5570,7 @@ def _outer_fd0_evaluation(
     """One perturbed outer evaluation plus its C++ LS Newton rejudge.
 
     Returns the realized coil displacement, the eight-term ``J`` there,
-    and the receipt row. The displacement is read back from the perturbed
+    and the result row. The displacement is read back from the perturbed
     vector rather than assumed: ``c_i + ε`` is not ``c_i`` plus exactly
     ``ε`` in float64, and a 1e-5 gate cannot absorb that.
 
@@ -5697,7 +5697,7 @@ def evaluate_f3_b37_outer_fd0_probe(
     *,
     inner_predictor: bool = False,
 ) -> NestedLsOuterFd0Probe:
-    """Gate FD-0 of the eight-term outer charter, all 11 coil directions.
+    """Gate FD-0 of the eight-term outer acceptance gate, all 11 coil directions.
 
     Freezes the dense-LU walk endpoint, evaluates the outer gradient
     there, then central-differences the eight-term ``J`` along every coil

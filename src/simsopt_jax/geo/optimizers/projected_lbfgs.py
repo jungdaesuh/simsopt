@@ -272,9 +272,8 @@ class ProjectedLbfgsOptions:
     measurement is load-bearing evidence: ``true_tangency_relative_residual`` is
     published on every banked row and is what the collapse-margin reading and
     the staleness analyses are drawn from, so the constraint JVP buys telemetry
-    even at tolerance zero.  Acting on it was measured and refused
-    (``~/simsopt-campaigns/projected-lbfgs-headroom-roadmap-20260813.md`` §7,
-    lever B6): a tolerance of 2.0 would have fired on 16 of Q1's iterations at
+    even at tolerance zero.  Acting on it was measured and refused: a tolerance
+    of 2.0 would have fired on 16 of Q1's iterations at
     511.5 ms per materialization, spending +8.2 s to recover the ~0.55 s of
     line-search trials it avoids -- net -7.6 s.  It also cannot prevent the
     collapse it would be aimed at: the A100 arm that failed did so with

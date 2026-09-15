@@ -3,7 +3,7 @@
 This is the single assembly path for the promoted flat coupled single-stage
 formulation.  Two front doors reach it: :func:`build_flat675_problem`, which
 fits user geometry onto the certified layout, and the frozen-bundle loader in
-:mod:`.bundle`, which reads the archived campaign inputs.  Neither keeps a
+:mod:`.bundle`, which reads the archived frozen inputs.  Neither keeps a
 private construction route — the bundle loader is one caller of
 :func:`assemble_flat675_problem` like any other.  The shipped lesson that
 drives both is ``examples/jax/3_Advanced/single_stage_flat675.py``.
@@ -64,7 +64,7 @@ from .policy import (
 CERTIFIED_MPOL: Final[int] = CERTIFIED_FLAT_LAYOUT.surface_mpol
 CERTIFIED_NTOR: Final[int] = CERTIFIED_FLAT_LAYOUT.surface_ntor
 CERTIFIED_STELLSYM: Final[bool] = CERTIFIED_FLAT_LAYOUT.surface_stellsym
-# The campaign's quadrature: a half field period in phi, a full period in
+# The surface quadrature: a half field period in phi, a full period in
 # theta.  Grid density is not layout — it changes how finely the surface is
 # sampled, not how many coordinates describe it — so these stay literals and
 # the record has nothing to say about them.
@@ -98,7 +98,7 @@ DEFAULT_VESSEL_CLEARANCE_FACTOR: Final[float] = 3.0
 # stellarator-symmetric target is a projection onto a proper subspace, and
 # returning the symmetrized shape would silently change the plasma.  What
 # changed is the remedy the message names — the formulation now carries
-# asymmetry, so the caller asks for it rather than waiting for a charter.
+# asymmetry, so the caller asks for it explicitly.
 _ASYMMETRIC_BOUNDARY_REFUSAL: Final[str] = (
     "this boundary is not stellarator-symmetric, and a stellarator-symmetric "
     "layout was requested (stellsym=True). Its rs/zc content has no "
@@ -135,7 +135,7 @@ class Flat675Problem:
 
 
 # --------------------------------------------------------------------------
-# Frozen campaign defaults (charter: documented defaults, not knobs)
+# Frozen reference defaults (documented defaults, not knobs)
 # --------------------------------------------------------------------------
 
 DEFAULT_FLAT675_BOOZER_POLICY: Final[Flat675BoozerSystemPolicy] = (
@@ -147,12 +147,12 @@ def default_flat675_objective_policy(
     *,
     optimized_coil_index: int,
 ) -> Flat675ObjectivePolicy:
-    """The campaign's frozen weights, targets, and hardware penalties.
+    """The reference frozen weights, targets, and hardware penalties.
 
-    These are the values the sealed F3 receipts were measured under.  They are
+    These are the values the recorded reference runs were measured under.  They are
     defaults rather than constants because a caller may legitimately optimize a
     different problem; a caller who changes them is no longer running the
-    configuration those receipts certify.
+    configuration those records cover.
     """
     return Flat675ObjectivePolicy(
         iota_target=0.15,
@@ -501,8 +501,8 @@ def build_flat675_problem(
 
     The surface layout is REQUESTED, not inferred: ``mpol``, ``ntor`` and
     ``stellsym`` name the target and default to the certified triple
-    ``(10, 10, True)``, which is the 661-DOF boundary block the sealed
-    receipts speak to.  ``boundary`` is then fitted onto that target — see
+    ``(10, 10, True)``, which is the 661-DOF boundary block the recorded
+    reference runs cover.  ``boundary`` is then fitted onto that target — see
     :func:`fit_flat675_boundary` for the two ways a fit can lose information,
     and read them before handing this function a boundary whose shape you have
     not checked at the layout you asked for.
@@ -512,10 +512,10 @@ def build_flat675_problem(
     optional: omitting it synthesizes one whose hinge term is exactly inactive
     at the start, so the coil + 3 + surface layout always holds.
 
-    The default policy is the campaign's frozen one, with its shape penalties
-    pointed at the first free coil.  The sealed receipts speak to that
+    The default policy is the reference frozen one, with its shape penalties
+    pointed at the first free coil.  The recorded reference runs cover that
     configuration at the certified layout; a caller who changes either is
-    running a problem those receipts do not certify.
+    running a problem those records do not cover.
     """
     surface_template = fit_flat675_boundary(
         boundary,

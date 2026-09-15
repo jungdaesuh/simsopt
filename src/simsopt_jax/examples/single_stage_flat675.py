@@ -11,17 +11,17 @@ simsopt objects via
 archived frozen input bundle, which is one caller of that same construction
 path — and hands them here; the fused lane in
 :mod:`simsopt_jax.examples.fused_lane` owns the traceable program construction
-and the solve, and this module owns the campaign's frozen optimizer selection.
+and the solve, and this module owns the frozen optimizer selection.
 
 The flat formulation has no nested Boozer solve, so the whole objective is one
 device program and the solve is the fused on-device L-BFGS-B lane end to end.
-That is also why the workflow drops the source campaign's host-side rejection
+That is also why the workflow drops the source workflow's host-side rejection
 and anchor protocol: those existed to keep a SciPy driver consistent across
 proposals whose inner solve could fail on the host, and no such boundary
 survives here.
 
 The L-BFGS history and line-search cap are read off the archived genuine-675
-campaign whose certificate this workflow reproduces — the ``maxcor`` and
+lane record whose result this workflow reproduces — the ``maxcor`` and
 ``maxls`` of the L-BFGS-B policy published in its lane record.  Neither is a
 configuration knob: ``solve_single_stage_flat675`` accepts no history or
 line-search argument.
@@ -37,11 +37,11 @@ from simsopt_jax.examples.fused_lane import (
 from simsopt_jax.solve.contracts import OptimizerResult
 from simsopt_jax.solve.driver import Driver
 
-# Frozen campaign selection, transcribed from the archived lane record's
+# Frozen reference selection, transcribed from the archived lane record's
 # ``policy.maxcor``.  Not a solve parameter.
 FLAT675_LBFGS_HISTORY = 300
 
-# Frozen campaign selection, transcribed from the archived lane record's
+# Frozen reference selection, transcribed from the archived lane record's
 # ``policy.maxls``.  Not a solve parameter.
 FLAT675_LBFGS_MAXLS = 8
 

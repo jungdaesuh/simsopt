@@ -1,7 +1,7 @@
 """Compare native C++ Boozer LS Newton to ``BoozerSurfaceJAX`` on one state.
 
 The locked execution is JAX (cpu-ordered ``J_LS`` / ``∇J_LS``, SciPy Newton)
-versus C++. It is the nested-LS operator, not a fused GPU campaign.
+versus C++. It is the nested-LS operator, not a fused GPU benchmark.
 
 This is the nested-LS inner problem, not flat-675 QR-in-``J`` and not BoozerExact.
 The decision vector is ``[surface_dofs, iota, G]``. Stationarity is
@@ -9,7 +9,7 @@ The decision vector is ``[surface_dofs, iota, G]``. Stationarity is
 gradient; JAX's ``residual`` is the long LS vector and must not be compared
 to it.
 
-Knobs match the 2026-08-20 reconstruct judge (constraint weight 1, free ``G``,
+Knobs match the reconstruct judge (constraint weight 1, free ``G``,
 ``weight_inv_modB``, ``stab=1e-4``, ``tol=1e-13``), not banana ``run_code``
 defaults (no ``stab``, looser ``tol``, BFGS then Newton).
 """

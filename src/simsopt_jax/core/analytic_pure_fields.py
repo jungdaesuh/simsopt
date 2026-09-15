@@ -3,8 +3,8 @@
 Tier P1 item 12 (partial). Covers ``ToroidalField``, ``PoloidalField``, and
 ``MirrorModel`` as immutable specs plus pure JAX kernels. ``CircularCoil`` is
 explicitly deferred as item 12-sub because ``jax.scipy.special.ellipk`` /
-``ellipe`` are not exposed by ``jaxlib`` 0.10.0; see
-``.artifacts/jax_port_goal/blockers/12-circularcoil-debug.md``.
+``ellipe`` are not exposed by ``jaxlib`` 0.10.0; the Carlson-form
+replacement lives in :mod:`simsopt_jax.core._elliptic`.
 
 Conventions
 -----------
@@ -203,7 +203,8 @@ def _toroidal_d2B_pointwise(
     Replicates the upstream CPU arithmetic literally so the
     ``direct_kernel`` parity gate matches the CPU oracle to machine
     precision. The CPU expression differs from the analytic third-derivative
-    of ``_B_impl`` (see ``.artifacts/jax_port_goal/plans/12-invariants.md``);
+    of ``_B_impl`` (it carries the known upstream typo in the
+    ``ToroidalField`` second derivative noted in this module's docstring);
     this kernel preserves the upstream behaviour by construction.
     """
     x = point[0]

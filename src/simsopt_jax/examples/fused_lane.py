@@ -1,13 +1,13 @@
-"""The fused on-device solve shared by the certified JAX campaign lanes.
+"""The fused on-device solve shared by the certified JAX lanes.
 
 One traceable scaled problem, one frozen L-BFGS-B policy, and a solve whose
-only host boundary crossing is its endpoint.  A campaign module supplies the
+only host boundary crossing is its endpoint.  A caller module supplies the
 physics closures and names its own frozen L-BFGS history; nothing else about
-the lane differs between campaigns, so nothing else is restated per campaign.
+the lane differs between callers, so nothing else is restated per caller.
 
 ``lbfgs_history`` is a required keyword with no default on purpose: the
-history is a measured per-campaign selection, and a default here would be a
-value no campaign chose.
+history is a measured per-workflow selection, and a default here would be a
+value no caller chose.
 """
 
 from __future__ import annotations
@@ -88,7 +88,7 @@ def solve_fused_lane(
     lbfgs_line_search_max_steps: int | None = None,
     line_search_max_steps: int | None = None,
 ) -> OptimizerResult:
-    """Solve from the prepared initial state under the campaign's policy.
+    """Solve from the prepared initial state under the caller's policy.
 
     Every call restarts from ``initial_parameters``, so repeated solves are
     the identical computation (the warm-measurement contract).  Callbacks stay

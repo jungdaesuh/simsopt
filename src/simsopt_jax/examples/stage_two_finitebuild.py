@@ -4,10 +4,10 @@ The internal workflow both finite-build JAX callers route through: the
 Advanced example and the parity case build their physics (objective and
 diagnostics closures) from the adapter layer and hand them here; the fused
 lane in :mod:`simsopt_jax.examples.fused_lane` owns the traceable program
-construction and the solve, and this module owns the campaign's frozen
+construction and the solve, and this module owns the frozen
 optimizer selection.
 
-The L-BFGS history is the frozen selection of the successor speed campaign
+The L-BFGS history is the frozen selection of the successor speed workflow
 (``docs/jax_gpu_finitebuild_native_speed_successor_plan.md``): history 10
 was the only history whose crossing endpoint passed the frozen endpoint
 contract, selected over histories 20 and 40 on qualifying warm solve time.
@@ -25,7 +25,7 @@ from simsopt_jax.examples.fused_lane import (
 from simsopt_jax.solve.contracts import OptimizerResult
 from simsopt_jax.solve.driver import Driver
 
-# Frozen campaign selection, single source of truth for both lanes: the
+# Frozen reference selection, single source of truth for both lanes: the
 # parity case's native twin reads it so the matched workflows share one
 # history.  Not a solve parameter.
 FINITE_BUILD_LBFGS_HISTORY = 10

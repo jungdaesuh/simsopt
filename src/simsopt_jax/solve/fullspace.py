@@ -1,7 +1,7 @@
 """Typed route contract for device-resident single-stage full-space solves.
 
 The numerical state machine is added behind these frozen policies. Keeping the
-policy declarative makes route selection and receipts independently auditable.
+policy declarative makes route selection and run records independently auditable.
 """
 
 from __future__ import annotations

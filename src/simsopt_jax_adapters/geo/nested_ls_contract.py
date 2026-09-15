@@ -1,7 +1,7 @@
 """Canonical nested Boozer-LS bars: reconstruct physics vs banana timing.
 
-Gate 0 of the reduced nested-LS JAX GPU track. These knobs are not F3's
-flat-675 fused L-BFGS-B campaign and do not inherit its 7.70× claim.
+Gate 0 of the reduced nested-LS JAX GPU track. These knobs are not the
+flat-675 fused L-BFGS-B configuration and do not inherit its 7.70× claim.
 
 Physics certification uses reconstruct-only LS Newton
 (``constraint_weight=1``, free ``G``, ``weight_inv_modB``, ``stab=1e-4``,
@@ -24,7 +24,7 @@ NESTED_LS_WEIGHT_INV_MODB: Final[bool] = True
 NESTED_LS_OPTIMIZE_G: Final[bool] = True
 NESTED_LS_LABEL: Final[str] = "Volume"
 
-# Reconstruct / physics bar (C++ LS Newton judge, 2026-08-20).
+# Reconstruct / physics bar (C++ LS Newton judge).
 NESTED_LS_NEWTON_STAB: Final[float] = 1.0e-4
 NESTED_LS_NEWTON_TOL: Final[float] = 1.0e-13
 NESTED_LS_NEWTON_MAXITER: Final[int] = 10
@@ -46,7 +46,7 @@ NESTED_LS_REDUCTION_MODE: Final[str] = "cpu_ordered"
 # Read the published ledgers carefully here: ``NestedLsInnerSolveFailed``
 # rendered that count under the label "iterations left" while passing
 # ``iteration_count``, which ``nested_ls_reduced.py`` defines as iterations
-# COMPLETED. Every rejection string sealed before that label was corrected
+# COMPLETED. Every rejection string recorded before that label was corrected
 # reads inverted, and taking it at face value inverts which lever these
 # failures call for: they are a budget/step-size problem, not an early bail.
 #
@@ -69,17 +69,17 @@ NESTED_LS_NEWTON_EXIT_STATUSES: Final[tuple[str, str, str]] = (
     NESTED_LS_NEWTON_EXIT_FAILED,
 )
 
-# Sealed inner-lane policy (Phase 5 of the upgrade plan).
+# Frozen inner-lane policy (Phase 5 of the upgrade plan).
 #
-# ``OuterOptimizerPolicy`` seals the OUTER scipy knobs -- ftol, gtol, maxls,
+# ``OuterOptimizerPolicy`` pins the OUTER scipy knobs -- ftol, gtol, maxls,
 # maxiter, maxcor, the rejection scale. It says nothing about the inner
 # lane, and that was a real hole: a run with sub-stepping or the predictor
 # enabled published a policy BYTE-IDENTICAL to a run without them. Two
-# different optimizations, one receipt shape, and no way for a consumer to
+# different optimizations, one record shape, and no way for a consumer to
 # tell them apart -- which is the precondition for comparing numbers that
 # must not be compared.
 #
-# Inner receipts name solver families, sequences, and per-stage options rather
+# Inner records name solver families, sequences, and per-stage options rather
 # than a lane-agnostic policy. The JAX and native children use materially
 # different inner solvers, so a shared record that omits that distinction is
 # false provenance.
@@ -160,14 +160,14 @@ NESTED_LS_GATE6_NATIVE_OMP_THREADS: Final[int] = 16
 # Fresh-process child payload schemas. These live in the JAX-free contract
 # module so producers, the claim parent, and the rejudge consumer share one
 # source of truth without importing either process-level child module.
-# v6 -> v7 / v5 -> v6 (2026-08-24): ``inner_policy`` now identifies each
+# v6 -> v7 / v5 -> v6: ``inner_policy`` now identifies each
 # child's actual solver family and sequence. The prior block claimed the JAX
 # reduced-Schur Newton settings for the native banana BFGS-then-Newton lane.
 #
 # The bump is not merely additive bookkeeping. Before the block existed a
 # consumer could not distinguish a stock inner lane from a sub-stepped or
 # predicted one, so it could compare numbers that must not be compared. An
-# old consumer reading a new receipt would still see the fields it knows and
+# old consumer reading a new record would still see the fields it knows and
 # would still draw that wrong conclusion -- so the version has to move, to
 # stop it.
 NESTED_LS_OUTER_JAX_CHILD_SCHEMA: Final[str] = "nested-ls-outer-jax-child.v7"
@@ -175,7 +175,7 @@ NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA: Final[str] = "nested-ls-outer-native-child.
 NESTED_LS_OUTER_REJUDGE_SCHEMA: Final[str] = "nested-ls-outer-rejudge.v1"
 NESTED_LS_OUTER_FD0_SCHEMA: Final[str] = "nested-ls-outer-fd0.v3"
 
-# Gate FD-0 of the eight-term outer charter
+# Gate FD-0 of the eight-term outer acceptance gate
 # (``docs/jax_nested_ls_outer_charter.md``). The outer variable is the
 # coil block only; every coil unit direction is differenced centrally at
 # ``eps`` and ``eps/2``, and both the tolerance and the step rule are
@@ -202,7 +202,7 @@ NESTED_LS_OUTER_FD0_STEP_RULE: Final[str] = (
     "NESTED_LS_OUTER_FD0_STEP_HALVING * eps_i"
 )
 
-# Charter Amendment 3 (2026-08-23): the fixed two-rung ladder was the
+# Design amendment 3: the fixed two-rung ladder was the
 # defect. A step chosen from an absolute floor is a large *relative*
 # perturbation on a small-|c| DOF, which leaves the quadratic FD regime;
 # the first run failed exactly the floor-clamped directions and passed
@@ -236,14 +236,14 @@ NESTED_LS_OUTER_FD0_MIN_STEP_RULE: Final[str] = (
     "infinite when g.d_i is zero"
 )
 
-# Charter Amendment 1 (2026-08-22): the implicit surface ``s*(c)`` is only
+# Design amendment 1: the implicit surface ``s*(c)`` is only
 # locally defined, and the B3 shakedown measured a unit-scale coil step
 # throwing the inner solve onto a different Boozer branch
 # (iota 0.1409 -> -0.0024, J 0.0143 -> 10.43) with every inner solve
 # converging, so convergence alone rejects nothing. An accepted evaluation
 # must stay on the anchor's branch: an inner solve whose iota moves more
 # than this guard from the last accepted anchor is a failed evaluation and
-# takes the sealed rejection sentinel, identically in both lanes.
+# takes the shared rejection sentinel, identically in both lanes.
 NESTED_LS_OUTER_IOTA_BRANCH_GUARD: Final[float] = 0.05
 # Frozen per-host native OMP sweep set for F3 B37 banana-class work, and
 # the outer sweep's interleaved repeat count. Jax-free single source: the
@@ -591,7 +591,7 @@ def _nested_ls_inner_policy_record(
     solver_sequence: tuple[str, ...],
     stages: tuple[tuple[str, dict[str, float | int]], ...],
 ) -> dict[str, object]:
-    """Build the common immutable-shaped receipt portion for an inner lane."""
+    """Build the common immutable-shaped record portion for an inner lane."""
 
     return {
         "policy": policy,
@@ -806,12 +806,12 @@ def nested_ls_outer_restart_reason(
     """Classify one scipy L-BFGS-B stop as restartable, or None if terminal.
 
     Two stop classes may consume less than the iteration budget without the
-    outer problem being finished, both produced by the sealed rejection
-    sentinel's interaction with dcsrch (measured at B37, 2026-08-24):
+    outer problem being finished, both produced by the shared rejection
+    sentinel's interaction with dcsrch (measured at B37):
 
     - ``abnormal_line_search``: scipy status 2 with an ``ABNORMAL`` message —
       the line search abandoned outright.
-    - ``false_ftol_stall``: scipy reports FTOL convergence while the sealed
+    - ``false_ftol_stall``: scipy reports FTOL convergence while the recorded
       policy set ``ftol=0``. That policy permits no relative-reduction stop;
       convergence belongs to the separately declared projected-gradient gate.
 

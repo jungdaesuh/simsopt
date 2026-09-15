@@ -1,6 +1,6 @@
 """Typed objective and Boozer-construction policy for the flat-675 problem.
 
-The policy is the single owner of the mapping from the frozen campaign's
+The policy is the single owner of the mapping from the frozen reference's
 physical weights, targets, and thresholds onto the shared single-stage
 outer-objective configuration keys, so a weight only ever has to be renamed
 here.  Values are host scalars; nothing in this module traces.
