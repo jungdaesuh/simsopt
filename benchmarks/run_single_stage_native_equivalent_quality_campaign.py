@@ -1734,6 +1734,10 @@ if _is_snapshot_child:
 
     activate_snapshot_source_imports(_snapshot_source_root)
 
+from simsopt_jax.backend.runtime import apply_cuda_xla_flag_pins
+
+apply_cuda_xla_flag_pins()
+
 import jax
 import jax.numpy as jnp
 import jaxlib

@@ -34,6 +34,10 @@ for _import_root in (str(_SOURCE_ROOT), str(_REPO_ROOT)):
     if _import_root not in sys.path:
         sys.path.insert(0, _import_root)
 
+from simsopt_jax.backend.runtime import apply_cuda_xla_flag_pins
+
+apply_cuda_xla_flag_pins()
+
 from examples.jax.parity.cases.native_boozerqa import (
     ChangedStateTimelineDisposition,
     ChangedStateTimelineObservation,
@@ -1858,6 +1862,7 @@ def run_timeline_campaign(
     )
     environment[_EXACT_ADJOINT_ENVIRONMENT] = "1"
     environment[TRACE_VIEWER_MAX_EVENTS_ENVIRONMENT] = str(TRACE_VIEWER_MAX_EVENTS)
+    environment["XLA_FLAGS"] = apply_cuda_xla_flag_pins()
     claimed_environment = _claimed_environment(environment)
     environment_sha256 = _sha256_bytes(canonical_json_bytes(claimed_environment))
     runtime_policy_payload = {
