@@ -776,7 +776,7 @@ def _trace_document(
                         "correlation_id": str(iteration_id),
                         "hlo_module": "jit_synthetic",
                         "hlo_op": phase,
-                        "scope_range_id": "2",
+                        "scope_range_id": phase,
                         "tf_op": "XlaModule:",
                     }
                 )
@@ -909,6 +909,14 @@ def _build_artifact(
     }
     repo_root = Path(__file__).resolve().parents[2]
     test_source_relative = Path(__file__).resolve().relative_to(repo_root).as_posix()
+    live_blob = subprocess.run(
+        ("git", "ls-files", "-s", "--", test_source_relative),
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    test_source_git_blob_id = live_blob.split()[1] if live_blob else None
     source_files = {
         test_source_relative: Path(__file__).resolve(),
         str(simsoptpp_path): simsoptpp_path,
@@ -1180,7 +1188,7 @@ def _build_artifact(
                             for source in source_preimages
                             if source["original_path"] == test_source_relative
                         ),
-                        "git_blob_id": None,
+                        "git_blob_id": test_source_git_blob_id,
                     }
                 ],
                 "simsoptpp_path": simsoptpp_identity["path"],

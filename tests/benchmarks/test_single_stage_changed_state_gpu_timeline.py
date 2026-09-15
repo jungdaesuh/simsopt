@@ -83,10 +83,10 @@ class TestBoundedTimelineRunner:
             validate_artifact_root(Path.home() / "single-stage-speed-20260804")
         with pytest.raises(TimelineRunnerError, match="/tmp"):
             validate_artifact_root(Path("/tmp") / ARTIFACT_SCHEMA_ID)
+        repo_root = Path.home() / "changed-state-gpu-timeline-repo"
+        monkeypatch.setattr(timeline_runner, "_REPO_ROOT", repo_root)
         with pytest.raises(TimelineRunnerError, match="outside the repo"):
-            validate_artifact_root(
-                Path(__file__).resolve().parents[2] / ARTIFACT_SCHEMA_ID
-            )
+            validate_artifact_root(repo_root / ARTIFACT_SCHEMA_ID)
         monkeypatch.setattr(Path, "exists", lambda path: path == valid)
         with pytest.raises(FileExistsError, match="already exists"):
             validate_artifact_root(valid)
