@@ -9,6 +9,7 @@ then perturbs one thing and asserts the refusal names it.
 from __future__ import annotations
 
 import hashlib
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -41,9 +42,20 @@ def _write(root: Path, relative: str, payload: bytes) -> None:
     path.write_bytes(payload)
 
 
+def _init_git_repository(root: Path) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ("git", "init", "--quiet"),
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+
+
 def _synthetic_repository(root: Path) -> Path:
     """A repository the membership rule fully determines, plus its manifest."""
 
+    _init_git_repository(root)
     for root_name in ("benchmarks", "examples", "src"):
         (root / root_name).mkdir(parents=True, exist_ok=True)
     named = (
@@ -281,3 +293,13 @@ def test_the_live_repository_membership_matches_its_published_manifest() -> None
     )
     assert isinstance(document, dict)
     assert frozenset(document["entries"]) == execution_source_membership(live)
+
+
+def test_an_ignored_file_under_a_root_is_not_a_member(repository: Path) -> None:
+    """A gitignored file under a sweep root is not an execution-source member."""
+
+    ignored = "src/simsopt/_version.py"
+    (repository / ".gitignore").write_text(f"{ignored}\n", encoding="utf-8")
+    _write(repository, ignored, b"VERSION = 'ignored'\n")
+
+    assert ignored not in execution_source_membership(repository)

@@ -10,6 +10,7 @@ import signal
 import stat
 import subprocess
 import sys
+import sysconfig
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -31,7 +32,7 @@ from benchmarks.single_stage_fullspace_snapshot import (
     WorktreeIdentity,
 )
 from benchmarks.single_stage_native_equivalent_quality_receipt import SampleName
-from simsopt_jax.runtime.isolated_kernel import isolated_child_command
+from simsopt_jax_adapters.isolated_kernel import isolated_child_command
 
 
 def _claim_test_repository(repository: Path, authority_bytes: bytes) -> Path:
@@ -123,6 +124,12 @@ def _diag4_authority_fixture(
     repository = tmp_path / repository_name
     documentation = repository / "docs"
     documentation.mkdir(parents=True)
+    subprocess.run(
+        ("git", "init", "--quiet"),
+        cwd=repository,
+        check=True,
+        capture_output=True,
+    )
     output = output_root or tmp_path / "campaigns" / "diag4-output"
     output.parent.mkdir(parents=True, exist_ok=True)
     cpu20_result = tmp_path / "cpu20-result.json"
@@ -9540,7 +9547,20 @@ def test_symlinked_venv_launcher_survives_policy_and_isolated_jax_import(
     tmp_path: Path,
 ) -> None:
     repository = Path(__file__).resolve().parents[2]
-    launcher = repository / ".venv-qn-gpu/bin/python"
+    venv_root = tmp_path / "venv"
+    launcher = venv_root / "bin" / "python"
+    version = f"{sys.version_info.major}.{sys.version_info.minor}"
+    site_packages = venv_root / "lib" / f"python{version}" / "site-packages"
+    launcher.parent.mkdir(parents=True)
+    site_packages.parent.mkdir(parents=True)
+    launcher.symlink_to(sys.executable)
+    site_packages.symlink_to(sysconfig.get_paths()["purelib"])
+    (venv_root / "pyvenv.cfg").write_text(
+        f"home = {Path(sys.executable).resolve().parent}\n"
+        "include-system-site-packages = false\n"
+        f"version = {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}\n",
+        encoding="utf-8",
+    )
     assert launcher.is_symlink()
     reference = tmp_path / "reference"
     reference.mkdir()
@@ -9567,7 +9587,7 @@ def test_symlinked_venv_launcher_survives_policy_and_isolated_jax_import(
         text=True,
         timeout=30.0,
     )
-    assert str(repository / ".venv-qn-gpu") in completed.stdout
+    assert str(venv_root) in completed.stdout
 
 
 def test_cli_exposes_preflight_only_help() -> None:

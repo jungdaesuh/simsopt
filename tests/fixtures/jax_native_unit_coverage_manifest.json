@@ -3,7 +3,7 @@
     "baseline_commit": "7781d707a51c6e83173a76bf80b2d51646d65fdc",
     "baseline_commit_description": "Fork HEAD on branch pr/jax-port-squashed at which this slice was minted.",
     "native_test_surface_rule": "Every path under tests/ in upstream_authority_commit whose basename matches test_*.py. Enumerated from git, not from a working-tree glob: the fork adds test_*.py files inside the native domain directories that no path pattern can separate from upstream files.",
-    "source_tree_hash": "sha256:2948d500974de0f75bba5c5bdfcc2a4c5b30f21b83b78240143e1901cebfe48f",
+    "source_tree_hash": "sha256:c8da4fbf9a93b3c0989d60bb454f01e094906377c30d7884c20430f2a663e241",
     "source_tree_hash_recipe": "sha256 over, for each enumerated native test file in ascending path order, the utf-8 encoding of '{path}\\n{sha256_hexdigest(working tree file bytes)}\\n'.",
     "upstream_authority_commit": "377cf665158f47a9bed4a8b03a00352457ea27c8",
     "upstream_authority_description": "merge base of this fork's HEAD with hiddenSymmetries/simsopt master; every file it lists is present in the working tree by construction"
@@ -238,45 +238,12 @@
       "tolerance_owner": "local_test_tolerances"
     },
     {
-      "blocker": "",
-      "decision": {
-        "decided_by": "session orchestrator under the user's 2026-08-24 execute-all directive; named-maintainer countersignature pending",
-        "decided_on": "2026-08-24",
-        "proposed_by": "unit 1 slice (performance-measurement-ownership rule: wall-clock timing and plotting sweeps belong to benchmarks/, not parity tests)",
-        "proposed_on": "2026-08-24"
-      },
-      "disposition": "native_only",
-      "domain": "force",
-      "evidence": [
-        "tests/field/test_selffieldforces.py:1154",
-        "tests/field/test_selffieldforces.py:1156"
-      ],
-      "id": "MF-6",
-      "jax_api": [],
-      "native_test_files": [
-        "tests/field/test_selffieldforces.py"
-      ],
-      "native_test_ids": [
-        "tests/field/test_selffieldforces.py::CoilForcesTest::test_objectives_time"
-      ],
-      "observables": [],
-      "reason": "test_objectives_time measures wall-clock time and draws a matplotlib figure. Performance measurement in this repository is owned by benchmarks/ under the measurement contract (matched inputs, warmup policy, synchronization, provenance); mirroring a bare timing loop into a parity test would mint an unprovenanced speed signal.",
-      "required_lanes": {
-        "jax_cpu": "not_applicable",
-        "jax_gpu": "not_applicable",
-        "native_cpu": "passing"
-      },
-      "test_ids": [],
-      "title": "Objective wall-clock timing and error-decay plotting sweep",
-      "tolerance_owner": "not_applicable"
-    },
-    {
       "blocker": "Reproducing the full axis cross product would multiply mirror runtime; the axes are individually covered, the product is not.",
       "disposition": "jax_partial",
       "domain": "force",
       "evidence": [
-        "tests/field/test_selffieldforces.py:1017",
-        "tests/field/test_selffieldforces.py:1033-1044",
+        "tests/field/test_selffieldforces.py:126-207",
+        "tests/field/test_selffieldforces.py:1283-1310",
         {
           "anchor": "LpCurveTorque ds=2 drifts ~9.3e-5 (a tight ~8% margin against its",
           "cite": "tests/jax/native_unit_parity/test_force_parity.py:796"
@@ -290,13 +257,13 @@
         "tests/field/test_selffieldforces.py"
       ],
       "native_test_ids": [
-        "tests/field/test_selffieldforces.py::CoilForcesTest::test_Taylor",
+        "tests/field/test_selffieldforces.py::test_Taylor",
         "tests/field/test_selffieldforces.py::CoilForcesTest::test_lpcurveforces_taylor_test"
       ],
       "observables": [
         "gradient_jacobian_vjp_hessian"
       ],
-      "reason": "The native Taylor test sweeps use_jax_curve (jax_flag_list), nfp, threshold, downsample and both regularization types for every objective. The JAX mirror runs one configuration per objective and covers the remaining axes indirectly through value/gradient parity and the curve-subclass mirror, so the full cross product is not reproduced on the JAX lane. Only test_force_and_torque_objective_gradients_match_native draws its rtol from src/simsopt_jax/parity_tolerances.py (via _OBJECTIVE_GRADIENT_RTOL = parity_ladder_tolerances(\"derivative_heavy\")[\"first_derivative_rtol\"]); test_taylor_test_confirms_jax_objective_gradients and test_downsampled_objectives_track_full_resolution use literal tolerances declared in the test file. Since not all of this row's bound tests draw their tolerances from the central module, the owner is recorded local, not central.",
+      "reason": "The native Taylor test is parametrized per objective_kind \u00d7 use_jax_curve (JaxCurve vs CurveXYZFourier); nfp, regularization, downsample and threshold are fixed to the distinct code paths. The JAX mirror runs one configuration per objective and covers the remaining axes indirectly through value/gradient parity and the curve-subclass mirror, so the full cross product is not reproduced on the JAX lane. Only test_force_and_torque_objective_gradients_match_native draws its rtol from src/simsopt_jax/parity_tolerances.py (via _OBJECTIVE_GRADIENT_RTOL = parity_ladder_tolerances(\"derivative_heavy\")[\"first_derivative_rtol\"]); test_taylor_test_confirms_jax_objective_gradients and test_downsampled_objectives_track_full_resolution use literal tolerances declared in the test file. Since not all of this row's bound tests draw their tolerances from the central module, the owner is recorded local, not central.",
       "required_lanes": {
         "jax_cpu": "passing",
         "jax_gpu": "passing",
@@ -1413,7 +1380,6 @@
         "MF-3",
         "MF-4",
         "MF-5",
-        "MF-6",
         "MF-7",
         "MF-8"
       ],
@@ -1430,7 +1396,7 @@
         }
       ],
       "path": "tests/field/test_selffieldforces.py",
-      "reason": "18 of this file's 23 native test functions were individually cited by native_test_ids under the eight force capabilities MF-1..MF-8 (unit 1 of the 2026-08-23 mirror wave); the remaining five (test_force_objectives, test_force_and_torque_objectives_with_different_quadpoints, test_downsample_must_divide_quadpoints, test_mixed_quadpoints_in_coil_lists_raises, test_source_coils_coarse_and_fine) are covered only by this file-level jax_partial disposition, without an individual native_test_ids citation. The mirror suite covers the reduced model, the objective layer, the guards and the Taylor gradients; the force/torque vector method layer and its subclasses have no JAX API, and no lane ran on GPU this wave (GPU evidence would come from the parity_lane fixture's gpu_parity lane under the default backend mode; strict jax_gpu_parity classifies this mirror file adapter_boundary and skips it)."
+      "reason": "17 of this file's 22 native test functions were individually cited by native_test_ids under the seven force capabilities MF-1..MF-5, MF-7, MF-8 (MF-6 retired: U15b deleted test_objectives_time, which asserted nothing); the remaining five (test_force_objectives, test_force_and_torque_objectives_with_different_quadpoints, test_downsample_must_divide_quadpoints, test_mixed_quadpoints_in_coil_lists_raises, test_source_coils_coarse_and_fine) are covered only by this file-level jax_partial disposition, without an individual native_test_ids citation. The mirror suite covers the reduced model, the objective layer, the guards and the Taylor gradients; the force/torque vector method layer and its subclasses have no JAX API, and no lane ran on GPU this wave (GPU evidence would come from the parity_lane fixture's gpu_parity lane under the default backend mode; strict jax_gpu_parity classifies this mirror file adapter_boundary and skips it)."
     },
     {
       "capabilities": [],

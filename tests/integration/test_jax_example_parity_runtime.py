@@ -7,7 +7,7 @@ from pathlib import Path
 
 import simsoptpp
 from examples.jax.parity.runtime import build_parity_lane_environment
-from simsopt_jax.runtime.isolated_kernel import (
+from simsopt_jax_adapters.isolated_kernel import (
     isolated_child_command,
     loaded_kernel_directory,
     pythonpath_with_loaded_kernel,

@@ -42,7 +42,7 @@ from benchmarks.process_gpu_monitor import (
 from benchmarks.single_stage_fullspace_snapshot import canonical_json_bytes
 from simsopt_jax.geo.optimizers.projected_lbfgs import KernelLowering
 from simsopt_jax.runtime.exact_numeric_identity import exact_numeric_tree_sha256
-from simsopt_jax.runtime.isolated_kernel import pythonpath_with_loaded_kernel
+from simsopt_jax_adapters.isolated_kernel import pythonpath_with_loaded_kernel
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 

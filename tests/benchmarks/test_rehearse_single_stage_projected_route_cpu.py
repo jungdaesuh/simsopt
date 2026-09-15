@@ -408,11 +408,19 @@ def _synthetic_repository(root: Path, probe_source: bytes) -> Path:
 
     The remaining entries are fabricated paths that no module resolves to, so
     the frozen entry count is satisfied without the test asserting a different
-    count than the authority freezes.
+    count than the authority freezes.  Git-init so the binder's membership
+    predicate (the same git listing the ledger uses) can run.
     """
 
-    (root / "src").mkdir(parents=True)
-    (root / "benchmarks").mkdir(parents=True)
+    root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ("git", "init", "--quiet"),
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+    (root / "src").mkdir(parents=True, exist_ok=True)
+    (root / "benchmarks").mkdir(parents=True, exist_ok=True)
     (root / "src/probe_module.py").write_bytes(probe_source)
     entries = {
         "src/probe_module.py": {
@@ -480,12 +488,41 @@ def test_execution_source_binding_rejects_an_unmanifested_broad_root_module(
     """A new execution source that never entered the manifest fails closed."""
 
     root = _synthetic_repository(tmp_path / "repo", b"probe = 1\n")
+    newcomer = root / "benchmarks/newcomer.py"
+    newcomer.write_bytes(b"newcomer = 1\n")
     _register_probe_module(monkeypatch, root / "src/probe_module.py")
-    _register_probe_module(
-        monkeypatch, root / "benchmarks/newcomer.py", name="rehearsal_probe_newcomer"
-    )
+    _register_probe_module(monkeypatch, newcomer, name="rehearsal_probe_newcomer")
     with pytest.raises(rehearsal.RehearsalError, match="which the manifest omits"):
         rehearsal.bind_execution_sources(root)
+
+
+def test_execution_source_binding_skips_a_gitignored_generated_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gitignored generated file under a sweep root is outside the ledger.
+
+    ``refuse_redirected_distribution_modules`` compares against this module's
+    checkout, so the ignored file has to live in that tree.  The live
+    ``.gitignore`` already excludes ``src/simsopt/_version.py``.
+    """
+
+    ignored = "src/simsopt/_version.py"
+    path = REPOSITORY / ignored
+    existed = path.is_file()
+    original = path.read_bytes() if existed else None
+    path.write_bytes(b"__version__ = 'ignored'\n")
+    try:
+        _register_probe_module(monkeypatch, path, name="simsopt._version")
+        binding = rehearsal.bind_execution_sources(REPOSITORY)
+        assert binding["manifest"]["entry_count"] == DIAG5_EXECUTION_SOURCE_ENTRY_COUNT
+        assert all(
+            entry["relative_path"] != ignored for entry in binding["bound_modules"]
+        )
+    finally:
+        if existed:
+            path.write_bytes(original)
+        else:
+            path.unlink()
 
 
 def test_execution_source_binding_refuses_a_distribution_module_outside_the_tree(
