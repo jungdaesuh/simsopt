@@ -771,9 +771,17 @@ def _run_mwpgp(
     nu: float,
     reg_l2: float,
     max_iter: int,
+    epsilon: float = 0.0,
 ) -> tuple[jax.Array, jax.Array]:
     spec = _mwpgp_spec(grid, m_proxy, alpha=alpha, nu=nu, reg_l2=reg_l2)
-    return mwpgp_solve(spec, grid.A_obj, grid.ATb, m0, n_steps=max_iter)
+    return mwpgp_solve(
+        spec,
+        grid.A_obj,
+        grid.ATb,
+        m0,
+        n_steps=max_iter,
+        epsilon=epsilon,
+    )
 
 
 def _run_mwpgp_with_alpha(
@@ -786,6 +794,7 @@ def _run_mwpgp_with_alpha(
     reg_l2: float,
     max_iter: int,
     record_residual: bool = True,
+    epsilon: float = 0.0,
 ) -> tuple[jax.Array, jax.Array]:
     spec = PMOptimizationSpec(
         m_maxima=grid.m_maxima,
@@ -801,6 +810,7 @@ def _run_mwpgp_with_alpha(
         m0,
         n_steps=max_iter,
         record_residual=record_residual,
+        epsilon=epsilon,
     )
 
 
@@ -843,11 +853,12 @@ def _relax_and_split_scan(
     reg_l2: float,
     max_iter: int,
     max_iter_RS: int,
+    epsilon: float,
     epsilon_RS: float,
 ) -> PMRelaxAndSplitResult:
     prox = prox_l1_jax if np.isclose(reg_l0, 0.0, atol=1.0e-16) else prox_l0_jax
     reg_rs = reg_l1 if np.isclose(reg_l0, 0.0, atol=1.0e-16) else reg_l0
-    epsilon = _scalar_like(epsilon_RS, m)
+    epsilon_rs = _scalar_like(epsilon_RS, m)
     zero = jnp.sum(m - m)
     done = zero != zero
 
@@ -866,6 +877,7 @@ def _relax_and_split_scan(
             reg_l2=reg_l2,
             max_iter=max_iter,
             record_residual=False,
+            epsilon=epsilon,
         )
         error = _relax_and_split_cost(
             grid,
@@ -877,7 +889,7 @@ def _relax_and_split_scan(
         m_proxy_next = _moments_as_matrix(
             "m_proxy", prox(m_next, grid.m_maxima, reg_rs, nu), grid.ndipoles
         )
-        done_next = jnp.linalg.norm(m_next - m_proxy_next) < epsilon
+        done_next = jnp.linalg.norm(m_next - m_proxy_next) < epsilon_rs
         return (
             m_next,
             m_proxy_next,
@@ -927,6 +939,7 @@ def relax_and_split_jax(
     reg_l0: float = 0.0,
     reg_l1: float = 0.0,
     reg_l2: float = 0.0,
+    epsilon: float = 0.0,
     epsilon_RS: float = 1.0e-3,
 ) -> PMRelaxAndSplitResult:
     """Run the fixed-step JAX relax-and-split PM solve wrapper.
@@ -934,7 +947,9 @@ def relax_and_split_jax(
     This is the solve-level adapter for the already-ported MwPGP kernel. It
     consumes an immutable ``PermanentMagnetGridJAX`` fixed-state payload and
     returns immutable arrays; it does not mutate a CPU ``PermanentMagnetGrid``.
-    ``GPMO_baseline_jax``, ``GPMO_multi_jax``, ``GPMO_ArbVec_jax``,
+    ``epsilon`` is the native MwPGP L1 ``x_sum`` stop, default ``0`` so existing
+    callers keep a full inner scan; pass ``1e-3`` to match the C++ pybind
+    default. ``GPMO_baseline_jax``, ``GPMO_multi_jax``, ``GPMO_ArbVec_jax``,
     ``GPMO_backtracking_jax``, and ``GPMO_ArbVec_backtracking_jax`` cover the
     baseline, multi-neighbour, arbitrary-vector, baseline backtracking, and
     arbitrary-vector backtracking greedy variants respectively.
@@ -959,6 +974,7 @@ def relax_and_split_jax(
             nu=nu,
             reg_l2=reg_l2,
             max_iter=max_iter,
+            epsilon=epsilon,
         )
         return PMRelaxAndSplitResult(
             errors=jnp.reshape(_last_error(residual_history, max_iter), (1,)),
@@ -992,5 +1008,6 @@ def relax_and_split_jax(
         reg_l2=reg_l2,
         max_iter=max_iter,
         max_iter_RS=max_iter_RS,
+        epsilon=epsilon,
         epsilon_RS=epsilon_RS,
     )
