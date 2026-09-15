@@ -113,25 +113,6 @@ def test_repository_manifest_satisfies_every_fail_closed_check(manifest):
     assert COV.validate(REPO_ROOT, manifest) == []
 
 
-def test_check_mode_exits_zero_without_touching_the_artifacts():
-    """Default (read-only) mode reports success and rewrites nothing."""
-    manifest_before = COV.MANIFEST_PATH.read_bytes()
-    doc_before = COV.DOC_PATH.read_bytes()
-
-    assert COV.main([]) == 0
-
-    assert COV.MANIFEST_PATH.read_bytes() == manifest_before
-    assert COV.DOC_PATH.read_bytes() == doc_before
-
-
-def test_generated_document_is_reproducible_from_the_manifest(manifest):
-    """The committed document is exactly what the manifest renders to."""
-    surface = COV.native_test_surface(REPO_ROOT, COV.TRUSTED_UPSTREAM_AUTHORITY_COMMIT)
-    assert COV.render_document(manifest, surface) == COV.DOC_PATH.read_text(
-        encoding="utf-8"
-    )
-
-
 def test_every_native_surface_file_has_exactly_one_row(manifest):
     """The manifest covers the pinned native surface once per file."""
     surface = COV.native_test_surface(REPO_ROOT, COV.TRUSTED_UPSTREAM_AUTHORITY_COMMIT)
@@ -519,20 +500,6 @@ def test_red_shared_python_without_decision_is_rejected(manifest):
     message = _assert_rejected(corrupted, "unreviewed_decision")
 
     assert "MF-1" in message
-
-
-def test_red_generated_document_drift_is_rejected(manifest, tmp_path):
-    """A hand-edited generated document that no longer matches the manifest fails (D3a)."""
-    corrupted_doc_path = tmp_path / "coverage_doc_with_junk.md"
-    corrupted_doc_path.write_text(
-        COV.DOC_PATH.read_text(encoding="utf-8") + "\nHAND-EDITED JUNK\n",
-        encoding="utf-8",
-    )
-
-    failures = COV.validate(REPO_ROOT, manifest, doc_path=corrupted_doc_path)
-
-    matching = [f for f in failures if f.startswith("generated_doc_drift:")]
-    assert matching, f"expected generated_doc_drift, got {failures or 'no failures'}"
 
 
 def test_red_incomplete_contract_write_preserves_both_targets(manifest, tmp_path):

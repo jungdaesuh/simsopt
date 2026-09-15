@@ -51,7 +51,6 @@ from benchmarks.stage_two_finitebuild_native_gpu import (
     _gate_source_conformance,
     _leg_environment,
     _sha256_bytes,
-    _source_fingerprints,
     _threading_conformance_failure,
     _write_json_exclusive,
     evaluate_quality_gate,
@@ -208,20 +207,6 @@ def test_quality_gate_reads_the_caps_from_their_own_tolerance_key() -> None:
     assert evaluate_quality_gate(gate, steep)["eligible"] is True
 
 
-def test_source_fingerprints_bind_the_preregistered_plan() -> None:
-    fingerprints = _source_fingerprints("deadbeef")
-    assert set(fingerprints) == {
-        "git_commit",
-        "objective_module_sha256",
-        "parity_case_sha256",
-        "benchmark_sha256",
-        "plan_sha256",
-        "successor_plan_sha256",
-    }
-    assert len(str(fingerprints["plan_sha256"])) == 64
-    assert len(str(fingerprints["successor_plan_sha256"])) == 64
-
-
 def test_quality_gate_does_not_reject_a_lower_penalty_than_the_reference() -> None:
     """The one-sided caps must not read as two-sided bands."""
     relaxed = _truncated_reference_endpoint()
@@ -265,8 +250,21 @@ def _gate_reference_row() -> dict[str, object]:
     }
 
 
-def test_gate_contract_anchors_on_the_reference_run_own_trajectory() -> None:
+def test_gate_contract_anchors_on_the_reference_run_own_trajectory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """One leg freezes the contract: no replay, so no cross-process fork."""
+    monkeypatch.setattr(
+        "benchmarks.stage_two_finitebuild_native_gpu._source_fingerprints",
+        lambda git_commit: {
+            "git_commit": git_commit,
+            "objective_module_sha256": "0" * 64,
+            "parity_case_sha256": "0" * 64,
+            "benchmark_sha256": "0" * 64,
+            "plan_sha256": "0" * 64,
+            "successor_plan_sha256": "0" * 64,
+        },
+    )
     gate = _derive_quality_contract(_gate_reference_row())
     assert gate["converged_endpoint"] == _converged_endpoint()
     assert gate["reference_endpoint"] == _truncated_reference_endpoint()

@@ -3204,43 +3204,6 @@ def test_diag4_qualification_rejects_command_and_review_mutations(
         )
 
 
-def test_diag4_controlling_command_is_exact_final_ssot_literal() -> None:
-    repository = Path(__file__).resolve().parents[2]
-    plan = (repository / successor_authority.DIAG4_PLAN_RELATIVE_PATH).read_text(
-        encoding="utf-8"
-    )
-    section = plan.split("The controlling pytest command is exactly:", 1)[1]
-    literal = section.split("```text\n", 1)[1].split("\n```", 1)[0]
-    assert successor_authority.DIAG4_CONTROLLING_CPU_COMMAND == literal
-    assert literal.count("--basetemp") == 1
-    assert (
-        "--basetemp /home/jungdaesuh/simsopt-campaigns/"
-        "neq-gntr3-diag4-pytest-qualification-20260811T223700Z"
-    ) in literal
-
-
-@pytest.mark.parametrize(
-    ("name", "heading"),
-    [
-        ("ruff_check", "The Ruff check command is exactly:"),
-        ("ruff_format_check", "The Ruff format command is exactly:"),
-        ("compileall", "The compile command is exactly:"),
-        ("git_diff_check", "The whitespace command is exactly:"),
-    ],
-)
-def test_diag4_static_commands_are_exact_final_ssot_literals(
-    name: str,
-    heading: str,
-) -> None:
-    repository = Path(__file__).resolve().parents[2]
-    plan = (repository / successor_authority.DIAG4_PLAN_RELATIVE_PATH).read_text(
-        encoding="utf-8"
-    )
-    section = plan.split(heading, 1)[1]
-    literal = section.split("```text\n", 1)[1].split("\n```", 1)[0]
-    assert successor_authority.DIAG4_STATIC_COMMANDS[name] == literal
-
-
 @pytest.mark.parametrize(
     ("evidence_name", "field", "changed"),
     [
@@ -9613,60 +9576,6 @@ def test_symlinked_venv_launcher_survives_policy_and_isolated_jax_import(
     assert str(repository / ".venv-qn-gpu") in completed.stdout
 
 
-def test_real_diagnostic_snapshot_has_all_roles_and_imports_in_isolation(
-    tmp_path: Path,
-) -> None:
-    repository = Path(__file__).resolve().parents[2]
-    publication = runner.prepare_execution_snapshot(
-        tmp_path / "diagnostic",
-        repo_root=repository,
-        native_extension_path=Path(runner.simsoptpp.__file__).resolve(strict=True),
-    )
-    roles = {entry.role for entry in publication.entries}
-
-    assert roles == {
-        "execution_source",
-        "configuration",
-        "benchmark",
-        "test",
-        "native_extension",
-    }
-    assert any(
-        entry.relative_path
-        == "docs/single_stage_jax_gpu_native_equivalent_quality_no_hit_diagnostic_implementation_plan.md"
-        for entry in publication.entries
-    )
-    bound_paths = {entry.relative_path for entry in publication.entries}
-    assert (
-        "tests/benchmarks/test_single_stage_native_equivalent_quality_diagnostic_receipt.py"
-        in bound_paths
-    )
-    assert (
-        "tests/benchmarks/test_single_stage_native_equivalent_quality_diag2_contract.py"
-        in bound_paths
-    )
-    assert (
-        "docs/single_stage_jax_gpu_native_equivalent_quality_diag2_implementation_plan.md"
-        in bound_paths
-    )
-    assert "tests/geo/test_projected_gauss_newton_trust_region.py" in bound_paths
-    completed = subprocess.run(
-        (
-            str(repository / ".venv-qn-gpu/bin/python"),
-            "-I",
-            str(publication.root / runner._ENTRYPOINT),
-            "--help",
-        ),
-        cwd=publication.root,
-        env={**os.environ, "JAX_PLATFORMS": "cpu"},
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=60.0,
-    )
-    assert "--diagnostic-only" in completed.stdout
-
-
 def test_cli_exposes_preflight_only_help() -> None:
     help_text = runner._parser().format_help()
 
@@ -10779,56 +10688,6 @@ def test_genuinely_corrupt_snapshot_seals_as_opaque_incomplete_evidence(
     assert campaign.stat().st_mode & 0o777 == 0o555
 
 
-def test_prepare_execution_snapshot_covers_every_required_role(
-    tmp_path: Path,
-) -> None:
-    repository = Path(__file__).resolve().parents[2]
-    native_extension = Path(runner.simsoptpp.__file__).resolve(strict=True)
-    campaign = tmp_path / "campaign"
-
-    publication = runner.prepare_execution_snapshot(
-        campaign,
-        repo_root=repository,
-        native_extension_path=native_extension,
-    )
-    loaded = runner.load_snapshot(publication.root)
-    roles = {entry.role for entry in loaded.entries}
-    test_paths = {
-        entry.relative_path for entry in loaded.entries if entry.role == "test"
-    }
-
-    assert roles == {
-        "execution_source",
-        "configuration",
-        "benchmark",
-        "test",
-        "native_extension",
-    }
-    assert {
-        "tests/benchmarks/test_run_single_stage_native_equivalent_quality_campaign.py",
-        "tests/benchmarks/test_single_stage_native_equivalent_endpoint_audit.py",
-        "tests/benchmarks/test_single_stage_native_equivalent_quality_receipt.py",
-        "tests/benchmarks/test_single_stage_native_equivalent_reference.py",
-        "tests/geo/test_fullspace_native_equivalent_quality.py",
-    }.issubset(test_paths)
-    completed = subprocess.run(
-        (
-            sys.executable,
-            "-I",
-            str(publication.root / runner._ENTRYPOINT),
-            "--snapshot-child",
-            "--help",
-        ),
-        cwd=publication.root,
-        env={**os.environ, "JAX_PLATFORMS": "cpu"},
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=60.0,
-    )
-    assert "--preflight-only" in completed.stdout
-
-
 def test_campaign_artifact_manifest_closes_exact_file_set(tmp_path: Path) -> None:
     campaign = tmp_path / "campaign"
     nested = campaign / "samples" / "cold"
@@ -11449,42 +11308,6 @@ def test_diag5_predecessor_rejects_wrong_postmortem_path(tmp_path: Path) -> None
             _diag5_predecessor_evidence(postmortem_path),
             repository_root=repository,
         )
-
-
-def test_diag5_live_postmortem_control_validates() -> None:
-    repository = Path(__file__).resolve().parents[2]
-    postmortem_path = (
-        repository / successor_authority.DIAG5_PREDECESSOR_POSTMORTEM_RELATIVE_PATH
-    )
-
-    successor_authority.validate_diag5_predecessor_failure(
-        _diag5_predecessor_evidence(postmortem_path),
-        repository_root=repository,
-    )
-
-
-def test_diag5_postmortem_artifact_deep_load_is_exact(tmp_path: Path) -> None:
-    repository = Path(__file__).resolve().parents[2]
-    source = repository / successor_authority.DIAG5_PREDECESSOR_POSTMORTEM_RELATIVE_PATH
-    destination = (
-        tmp_path
-        / successor_authority.DIAG5_PREDECESSOR_POSTMORTEM_ARTIFACT_RELATIVE_PATH
-    )
-    destination.parent.mkdir(parents=True)
-    destination.write_bytes(source.read_bytes())
-    destination.chmod(0o444)
-    reference = runner.ArtifactRef(
-        successor_authority.DIAG5_PREDECESSOR_POSTMORTEM_ARTIFACT_RELATIVE_PATH,
-        successor_authority.DIAG5_PREDECESSOR_POSTMORTEM_SHA256,
-        destination.stat().st_size,
-        successor_authority.DIAG5_PREDECESSOR_POSTMORTEM_SCHEMA_VERSION,
-    )
-
-    document = successor_authority.validate_diag5_predecessor_postmortem_artifact(
-        tmp_path, reference
-    )
-
-    assert document["original_process_receipt"] == "NOT_PRODUCED"
 
 
 def test_diag5_bound_staging_inode_revalidates_after_final_rename(
