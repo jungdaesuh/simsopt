@@ -4,7 +4,7 @@ Two plain JSON records of the bundle are parsed here: ``manifest.json``, which
 carries the start candidate and the two policies, and ``vessel_material.json``,
 which carries the vessel surface template.  Only the physics is read — the
 bundle's provenance, file-identity, and evidence machinery has no consumer in
-this port and is deliberately left in the campaign tooling that mints it.
+this port and is deliberately left in the external tooling that mints it.
 """
 
 from __future__ import annotations

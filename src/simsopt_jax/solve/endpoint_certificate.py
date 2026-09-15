@@ -2,7 +2,7 @@
 
 The contract itself is owned by :mod:`simsopt_contracts.optimization_endpoint`,
 a package neither lane owns; this module only keeps the historical
-``simsopt_jax.solve`` import path alive for the benchmark receipt writers.
+``simsopt_jax.solve`` import path alive for the benchmark record writers.
 """
 
 from simsopt_contracts.optimization_endpoint import (

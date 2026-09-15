@@ -175,7 +175,7 @@ class NativeEquivalentEndpointEvidence(NamedTuple):
 
 
 class NativeEquivalentQualityResult(NamedTuple):
-    """Timed candidate plus untimed evidence for external campaign audits."""
+    """Timed candidate plus untimed evidence for external audits."""
 
     schema_version: str
     route: str
@@ -258,7 +258,7 @@ class NeqGntr2Identity(NamedTuple):
 
 
 class NeqGntr2Result(NamedTuple):
-    """Audited NEQ-GNTR2 candidate for an external receipt decision."""
+    """Audited NEQ-GNTR2 candidate for an external acceptance decision."""
 
     schema_version: str
     route: str
@@ -287,7 +287,7 @@ class NeqGntr3Identity(NamedTuple):
 
 
 class NeqGntr3Result(NamedTuple):
-    """Audited NEQ-GNTR3 candidate for an external receipt decision."""
+    """Audited NEQ-GNTR3 candidate for an external acceptance decision."""
 
     schema_version: str
     route: str

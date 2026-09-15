@@ -233,7 +233,7 @@ def load_flat675_runtime_spec(
             field_payload.get("num_tf_coils"), "runtime_spec.field.num_tf_coils"
         ),
         # The frozen wire format still spells the optimized coil the way the
-        # source campaign did; the runtime spec renamed the same slot.
+        # original format did; the runtime spec renamed the same slot.
         optimized_coil_index=_integer(
             field_payload.get("banana_curve_index"),
             "runtime_spec.field.banana_curve_index",

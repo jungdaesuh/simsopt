@@ -1,6 +1,6 @@
 """Read a frozen flat-675 input bundle as one caller of the general path.
 
-The bundle is the archived campaign input: a runtime seed spec, a vessel
+The bundle is the archived frozen input: a runtime seed spec, a vessel
 material, and a manifest.  This module turns those files into the specs the
 constructor consumes and then hands them to
 :func:`~.construction.assemble_flat675_problem` — the same assembly every
@@ -24,7 +24,7 @@ from .manifest import (
 from .runtime_spec_loader import load_flat675_runtime_spec
 
 # The frozen-bundle spelling of the constructed record.  Kept because the
-# campaign harness, its tests, and the sealed run directories all name it.
+# benchmark harness, its tests, and the archived run directories all name it.
 Flat675Bundle = Flat675Problem
 
 

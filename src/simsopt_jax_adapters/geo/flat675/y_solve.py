@@ -4,8 +4,8 @@ The flat formulation keeps only ``(iota, G)`` in the inner state and closes
 them in one economy QR against the Boozer system, so the outer objective is a
 function of the 675 outer coordinates alone.  Beside the solution the record
 publishes the singular values, the numerical rank they imply, and whether the
-whole solve stayed finite — the conditioning evidence the archived campaign
-certificate can be checked against.
+whole solve stayed finite — the conditioning evidence a recorded reference
+result can be checked against.
 """
 
 from __future__ import annotations

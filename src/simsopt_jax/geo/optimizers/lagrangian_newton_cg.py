@@ -63,7 +63,7 @@ class LeastSquaresMultipliers(NamedTuple):
     """Multipliers of the linearized stationarity, with their solve evidence.
 
     ``multipliers`` minimize ``||g + A.T lambda||`` at a feasible point, which
-    is the same certified Gram solve the campaign's finalize step performs.
+    is the same certified Gram solve the finalize step performs.
     """
 
     multipliers: jax.Array

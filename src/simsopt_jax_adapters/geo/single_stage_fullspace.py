@@ -209,7 +209,7 @@ def build_single_stage_fullspace_bootstrap() -> SingleStageFullSpaceBootstrap:
 def bootstrap_target_payload(
     bootstrap: SingleStageFullSpaceBootstrap,
 ) -> dict[str, object]:
-    """Return exact float64 target identities for canonical receipt encoding."""
+    """Return exact float64 target identities for canonical record encoding."""
 
     return {
         "schema_version": "single-stage-fullspace-bootstrap-targets-v1",

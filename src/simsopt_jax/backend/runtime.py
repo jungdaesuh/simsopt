@@ -1120,7 +1120,7 @@ def _apply_cuda_autotuner_env(config: BackendConfig) -> None:
 
     The fusion autotuner (``--xla_gpu_experimental_enable_fusion_autotuner``,
     on by default in jaxlib 0.10) runs during compilation. Observed on the
-    RTX 5090 with jax/jaxlib 0.10.0 (2026-09-13): with it enabled, fresh
+    RTX 5090 with jax/jaxlib 0.10.0: with it enabled, fresh
     compiles of ``gpmo_arbvec_backtracking_solve`` at PM4Stell nphi=64 died
     inside the autotuner with ``CUDA_ERROR_ILLEGAL_ADDRESS`` (kernel log: NVRM
     Xid 31 MMU fault) in a drifting fraction of runs -- interleaved 4 of 6
@@ -1136,7 +1136,7 @@ def _apply_cuda_autotuner_env(config: BackendConfig) -> None:
     The GEMM/convolution autotuner (``--xla_gpu_autotune_level``, default 4)
     times cuBLAS algorithm candidates during each fresh compile and keeps the
     fastest, so two compiles of one program can pick algorithms with different
-    reduction orders: on the RTX 5090 (2026-09-14) three fresh compiles of the
+    reduction orders: on the RTX 5090 three fresh compiles of the
     single-stage example gave three initial objectives differing at 3e-15
     relative, and the chunked per-coil Biot-Savart field differed from its
     unchunked reference by one ulp. Level 0 takes the library defaults, which

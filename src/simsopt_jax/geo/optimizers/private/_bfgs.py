@@ -128,7 +128,7 @@ def _bfgs_memory_contract(
     The accounting assumes no buffer donation: old and new inverse Hessians,
     four matrix-shaped update intermediates, and four vector-shaped operands
     may coexist. XLA fusion can reduce physical live bytes; this is an upper
-    bound for receipts, not a routing threshold.
+    bound for published records, not a routing threshold.
     """
 
     n = int(dimension)

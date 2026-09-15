@@ -199,7 +199,7 @@ class CfsSqp1EndpointCertificate(CfsAl1EndpointCertificate):
 
 
 # The evidence schema is formulation-specific but route-independent.  Retain the
-# original public name for callers that already consume published receipts.
+# original public name for callers that already consume published records.
 FullSpaceEndpointCertificate = CfsAl1EndpointCertificate
 
 

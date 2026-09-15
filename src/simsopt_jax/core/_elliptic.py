@@ -1,10 +1,9 @@
 """JAX-native complete elliptic integrals K(m), E(m) via Carlson symmetric forms.
 
 This module exists because ``jax.scipy.special.ellipk`` / ``ellipe`` are not
-exposed by ``jaxlib`` 0.10.0. The blocker
-``.artifacts/jax_port_goal/blockers/12-circularcoil-debug.md`` documents the
-gap; this helper unblocks the JAX port of ``CircularCoil`` (P1 item 12-sub /
-item 15) without taking a host callback.
+exposed by ``jaxlib`` 0.10.0. That gap is why this helper exists: it unblocks
+the JAX port of ``CircularCoil`` (P1 item 12-sub / item 15) without taking
+a host callback.
 
 Implementation
 --------------

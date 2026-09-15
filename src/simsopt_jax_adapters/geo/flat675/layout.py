@@ -8,8 +8,8 @@ and the slices that read them cannot disagree.
 
 "675" names the certified configuration, not a constraint: the distinguished
 :data:`CERTIFIED_FLAT_LAYOUT` is one instance of :class:`FlatSingleStageLayout`
-among many, and it is the instance the sealed receipts, the campaign children
-and the shipped example consume.  The historic ``FLAT675_*`` constants are its
+among many, and it is the instance the recorded reference runs, the downstream
+consumers and the shipped example consume.  The historic ``FLAT675_*`` constants are its
 widths and slices, re-exported unchanged from :mod:`.formulation`.
 
 The surface width is **derived, never supplied**.  It is not a field of the
@@ -127,8 +127,8 @@ class FlatSingleStageLayout:
         )
 
 
-# The distinguished instance: the configuration the sealed receipts, the
-# campaign children, the shipped example and the frozen bundle all speak.
+# The distinguished instance: the configuration the recorded reference runs,
+# the downstream consumers, the shipped example and the frozen bundle all speak.
 # Its triple pins the 661, which is why no width is written here.
 CERTIFIED_FLAT_LAYOUT: Final[FlatSingleStageLayout] = FlatSingleStageLayout(
     coil_dof_count=11,

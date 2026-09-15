@@ -1225,7 +1225,7 @@ def _host_array_signature(array) -> tuple[str, tuple[int, ...], str] | None:
 
 
 def _surface_stellsym_scatter_indices_host(mpol: int, ntor: int) -> np.ndarray:
-    """Return the canonical compact stellsym mapping with sealed scatter promises."""
+    """Return the canonical compact stellsym mapping with pinned scatter-index semantics."""
     indices = np.ascontiguousarray(
         stellsym_scatter_indices(mpol, ntor),
         dtype=np.int32,
