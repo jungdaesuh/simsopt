@@ -26,7 +26,16 @@ NATIVE_TIERS = {
     "3_Advanced",
     "stellarator_benchmarks",
 }
-POST_V2_NATIVE_SOURCE = "3_Advanced/single_stage_boozer_vacuum_optimization.py"
+# Frozen v2 catalog is 51 sources. Post-v2 natives stay off that pin:
+# single_stage_boozer_vacuum_optimization.py, then a7df37227's flat-675 twin.
+# da1565498 registered flat675 on the live v3 catalog; this historical v2
+# contract still subtracts every post-v2 source.
+POST_V2_NATIVE_SOURCES = frozenset(
+    {
+        "3_Advanced/single_stage_boozer_vacuum_optimization.py",
+        "3_Advanced/single_stage_flat675.py",
+    }
+)
 
 
 def _tracked_native_examples() -> set[str]:
@@ -89,7 +98,7 @@ def test_source_catalog_exactly_matches_native_python_examples() -> None:
     manifest = _load_manifest(MANIFEST_PATH)
 
     assert {record.source for record in manifest.source_catalog} == (
-        _tracked_native_examples() - {POST_V2_NATIVE_SOURCE}
+        _tracked_native_examples() - POST_V2_NATIVE_SOURCES
     )
     assert len(manifest.source_catalog) == 51
 
@@ -245,7 +254,7 @@ def test_manifest_derives_coverage_without_storing_inverse_links() -> None:
 
     coverage = derive_source_coverage(manifest)
 
-    assert set(coverage) == _tracked_native_examples() - {POST_V2_NATIVE_SOURCE}
+    assert set(coverage) == _tracked_native_examples() - POST_V2_NATIVE_SOURCES
     assert set(coverage.values()) <= {"planned", "covered", "deferred"}
     assert any(state == "planned" for state in coverage.values())
     assert any(state == "deferred" for state in coverage.values())

@@ -358,6 +358,10 @@ def test_payload_binds_provider_route_fixture_options_and_cpu_unavailability(
         lambda _device: _cpu_device_identity(),
     )
     monkeypatch.setattr(compile_shape, "_git_text", lambda *_args: "")
+    # 6edad18f0's payload calls runtime._validate_intent_environment, which
+    # requires SIMSOPT_BACKEND_MODE to match (device, intent). cpu+parity is
+    # jax_cpu_parity; the parent pytest process does not set the mode.
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_parity")
 
     payload = compile_shape._provider_compile_payload(
         provider=provider,
@@ -428,6 +432,7 @@ def test_dirty_checkout_marks_candidate_sha_unavailable(
         lambda _device: _cpu_device_identity(),
     )
     monkeypatch.setattr(compile_shape, "_git_text", lambda *_args: " M benchmark.py")
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_parity")
 
     payload = compile_shape._provider_compile_payload(
         provider="optax",

@@ -179,6 +179,14 @@ def test_jax_gpu_extra_declares_public_runtime_optimizer_dependencies():
 
 
 def test_pyright_is_pinned_and_reachable_for_the_green_jax_slice():
+    """CI runs ``pyright --warnings`` against ``[tool.pyright].include``.
+
+    That list is the live green-slice SSOT; this test freezes the same list so
+    a silent expansion or shrinkage fails closed. Policy (1cde5dbf1): when
+    pyproject grows the slice, mirror it here — do not shrink pyproject.
+    Commit 96a1e5856 added the three nested-LS adapter modules after Pyright
+    was clean on them.
+    """
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
     workflow = (REPO_ROOT / ".github/workflows/jax_smoke.yml").read_text()
     pyright = pyproject["tool"]["pyright"]
@@ -201,6 +209,9 @@ def test_pyright_is_pinned_and_reachable_for_the_green_jax_slice():
         "src/simsopt_jax/solve/scipy",
         "src/simsopt_jax/solve/shared",
         "src/simsopt_jax/solve/simsopt",
+        "src/simsopt_jax_adapters/geo/nested_ls_contract.py",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py",
         "src/simsopt_jax_adapters/mhd/vmec_host.py",
         "tests/integration/test_jax_execution_scale_contract.py",
         "tests/integration/test_jax_stochastic_configuration_ssot.py",

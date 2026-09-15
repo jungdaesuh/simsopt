@@ -21,7 +21,10 @@ def test_native_to_jax_index_matches_validated_contracts() -> None:
     rendered = render_native_to_jax_index(repo_root=repo_root)
 
     assert INDEX_PATH.read_text(encoding="utf-8") == rendered
-    assert rendered.count("\n| `examples/") == 52
+    # a7df37227 added the native flat-675 twin (53 tracked sources).
+    # da1565498 registered it on the live v3 catalog; regenerate the
+    # committed index with ``python -m examples.jax.native_to_jax_index --write``.
+    assert rendered.count("\n| `examples/") == 53
     assert "20260729T005942Z-5ade9aee" in rendered
     assert "26 cases / 78 lanes / 1,248 comparisons" in rendered
     assert "`bounded`" in rendered

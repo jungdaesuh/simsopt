@@ -212,7 +212,15 @@ def test_the_example_runs_its_bounded_lane_feasibly(tmp_path: Path) -> None:
         "JAX_PLATFORMS": "cpu",
         "JAX_ENABLE_X64": "true",
         "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
-        "PYTHONPATH": os.pathsep.join((str(ROOT / "src"), str(ROOT))),
+        # Keep the incoming PYTHONPATH (build/…/simsoptpp*.so). Replacing it
+        # with only src:ROOT makes src/simsoptpp/ — the C++ source tree, no
+        # __init__.py — a namespace package that hides the extension module.
+        "PYTHONPATH": os.pathsep.join(
+            filter(
+                None,
+                (str(ROOT / "src"), str(ROOT), os.environ.get("PYTHONPATH")),
+            )
+        ),
         "PYTHONDONTWRITEBYTECODE": "1",
     }
     completed = subprocess.run(

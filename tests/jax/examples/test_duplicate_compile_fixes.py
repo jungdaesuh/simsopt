@@ -47,7 +47,15 @@ _BOUNDED_STEPS = 3
 # belonged to the ``serial_solve_jax`` routing this example left in ead83eaef,
 # whose bounded-objective log entered the problem's executable once more.
 _FINITEBUILD_OBJECTIVE_GRAPHS = 2
-_COIL_FORCES_OBJECTIVE_GRAPHS = 3
+# a1356ceb7 switched coil-forces ``STAGE_DRIVER`` to SciPy L-BFGS-B (no
+# fused-solver copy of the objective) and added native's 5-epsilon Taylor
+# vmap.  The unbatched float64[47] graph is still one program reused across
+# both length-weight stages; the float64[5,47] graph is the Taylor check,
+# not a stage-specific objective.  JAX's compile log now includes shapes, so
+# those two signatures are distinct strings.  Manual bisect of this test:
+# only a1356ceb7 and 2b14e7d02 (maxls) touch coil_forces.py after the pin
+# was introduced in 5b50d6390; 2b14e7d02 does not add a graph.
+_COIL_FORCES_OBJECTIVE_GRAPHS = 2
 
 
 def _example(name: str) -> ModuleType:
@@ -374,10 +382,12 @@ def test_finitebuild_example_solve_publishes_one_objective_graph(tmp_path) -> No
 
 
 def test_coil_forces_example_solve_publishes_one_objective_graph(tmp_path) -> None:
-    """Both shipped stages share one objective graph and land where they did.
+    """Both shipped stages share one unbatched objective graph.
 
     ``solve()`` runs the first stage, swaps the device length weight, and runs
-    the second; a stage-specific objective would compile a further graph.
+    the second; a stage-specific objective would compile a further unbatched
+    graph. a1356ceb7's SciPy driver dropped the fused-solver copy, and its
+    native Taylor vmap compiles the same jaxpr at float64[5,47].
     """
     example = _example("coil_forces")
 
@@ -387,8 +397,9 @@ def test_coil_forces_example_solve_publishes_one_objective_graph(tmp_path) -> No
     objective_graphs = _objective_graph_compilations(compilations)
     assert len(objective_graphs) == _COIL_FORCES_OBJECTIVE_GRAPHS, (
         "the shipped solve compiled a different number of objective graphs "
-        f"({len(objective_graphs)}, {len(set(objective_graphs))} distinct); the "
-        "second length-weight stage must reuse the first stage's graph"
+        f"({len(objective_graphs)}, {len(set(objective_graphs))} distinct); "
+        "SciPy L-BFGS-B plus the 5-epsilon Taylor vmap is two signatures, "
+        "and both length-weight stages must share the unbatched one"
     )
     assert result.status == "ok"
     assert result.observables["solver_iterations"] == (_BOUNDED_STEPS, _BOUNDED_STEPS)
