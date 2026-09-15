@@ -2,6 +2,7 @@ import unittest
 import logging
 
 import numpy as np
+import pytest
 from scipy import constants
 from scipy.interpolate import interp1d
 from scipy.special import ellipk, ellipe
@@ -30,6 +31,179 @@ from simsopt.field.selffield import (
 )
 
 logger = logging.getLogger(__name__)
+
+_TAYLOR_OBJECTIVE_KINDS = (
+    "net_fluxes_sum",
+    "b2energy",
+    "lp_torque_batched",
+    "lp_torque_sum",
+    "mean_torque_sum",
+    "mean_torque_batched",
+    "lp_force_sum",
+    "lp_force_batched",
+    "mean_force_sum",
+    "mean_force_batched",
+)
+_TAYLOR_MAX_RETRIES = 3
+
+
+def _build_taylor_objective(kind, coils, coils2, p, threshold, downsample):
+    builders = {
+        "net_fluxes_sum": lambda: sum(
+            [NetFluxes(coils[i], coils2) for i in range(len(coils))]
+        ),
+        "b2energy": lambda: B2Energy(coils + coils2, downsample=downsample),
+        "lp_torque_batched": lambda: LpCurveTorque(
+            coils, coils2, p=p, threshold=threshold, downsample=downsample
+        ),
+        "lp_torque_sum": lambda: sum(
+            [
+                LpCurveTorque(
+                    coils[i], coils2, p=p, threshold=threshold, downsample=downsample
+                )
+                for i in range(len(coils))
+            ]
+        ),
+        "mean_torque_sum": lambda: sum(
+            [
+                SquaredMeanTorque(coils[i], coils2, downsample=downsample)
+                for i in range(len(coils))
+            ]
+        ),
+        "mean_torque_batched": lambda: SquaredMeanTorque(
+            coils, coils2, downsample=downsample
+        ),
+        "lp_force_sum": lambda: sum(
+            [
+                LpCurveForce(
+                    coils[i], coils2, p=p, threshold=threshold, downsample=downsample
+                )
+                for i in range(len(coils))
+            ]
+        ),
+        "lp_force_batched": lambda: LpCurveForce(
+            coils, coils2, p=p, threshold=threshold, downsample=downsample
+        ),
+        "mean_force_sum": lambda: sum(
+            [
+                SquaredMeanForce(coils[i], coils2, downsample=downsample)
+                for i in range(len(coils))
+            ]
+        ),
+        "mean_force_batched": lambda: SquaredMeanForce(
+            coils, coils2, downsample=downsample
+        ),
+    }
+    return builders[kind]()
+
+
+def _run_taylor_test_for_objective(J, dofs, h):
+    J.x = dofs
+    dJ = J.dJ()
+    deriv = np.sum(dJ * h)
+    errors = []
+    for i in range(10, 16):
+        eps = 0.5**i
+        J.x = dofs + eps * h
+        Jp = J.J()
+        J.x = dofs - eps * h
+        Jm = J.J()
+        deriv_est = (Jp - Jm) / (2 * eps)
+        if np.abs(deriv) < 1e-8:
+            err_new = np.abs(deriv_est - deriv)
+        else:
+            err_new = np.abs(deriv_est - deriv) / np.abs(deriv)
+        if len(errors) > 0 and err_new > 1e-10:
+            if err_new > 0.5 * errors[-1] and err_new >= 1e-8:
+                return False, (
+                    f"Error did not decrease by factor 0.5: prev={errors[-1]}, "
+                    f"curr={err_new}, eps={eps:.2e}"
+                )
+        errors.append(err_new)
+    return True, None
+
+
+@pytest.mark.parametrize("objective_kind", _TAYLOR_OBJECTIVE_KINDS)
+@pytest.mark.parametrize("use_jax_curve", [False, True])
+def test_Taylor(objective_kind, use_jax_curve):
+    """Centered-FD Taylor test of dJ for each force/torque objective graph.
+
+    Kept combinations (distinct code paths):
+    - every objective kind, including per-coil sum vs batched list
+    - jax=True and jax=False (JaxCurve vs CurveXYZFourier geometry)
+    - nfp=3, stellsym=True (rotational + stellarator copies)
+    - circular regularization (same B_regularized_pure as rect, different scalar)
+    - downsample=1 (full quadrature; stride is the same ``[::d]`` path)
+    - threshold=1e-3 (Lp hinge ``max(|F|-F0, 0)`` is active)
+
+    Dropped cartesian axes, same kernels:
+    - nfp=1: fewer rotational copies of the same RotatedCurve mapping
+    - rectangular regularization: same kernel, different scalar; circ vs
+      rect self-field values are asserted in test_circular_coil
+    - downsample=2: same static stride, not a separate implementation
+    - threshold=0: same ``max(|F|-F0, 0)`` with F0=0
+    """
+    ncoils = 2
+    nfp = 3
+    stellsym = True
+    p = 2.5
+    threshold = 1e-3
+    downsample = 1
+    numquadpoints = 10
+    I = 1.7e5
+    regularization = regularization_circ(0.05)
+
+    base_curves = create_equally_spaced_curves(
+        ncoils,
+        nfp,
+        stellsym,
+        numquadpoints=numquadpoints,
+        use_jax_curve=use_jax_curve,
+    )
+    base_curves2 = create_equally_spaced_curves(
+        ncoils,
+        nfp,
+        stellsym,
+        numquadpoints=numquadpoints,
+        use_jax_curve=use_jax_curve,
+    )
+    base_currents = [Current(I) for _ in range(ncoils)]
+    coils = coils_via_symmetries(
+        base_curves,
+        base_currents,
+        nfp,
+        stellsym,
+        regularizations=[regularization] * ncoils,
+    )
+    for ii in range(ncoils):
+        base_curves2[ii].x = (
+            base_curves2[ii].x + np.ones(len(base_curves2[ii].x)) * 0.1
+        )
+    coils2 = coils_via_symmetries(
+        base_curves2,
+        base_currents,
+        nfp,
+        stellsym,
+        regularizations=[regularization] * ncoils,
+    )
+    J = _build_taylor_objective(
+        objective_kind, coils, coils2, p, threshold, downsample
+    )
+    dofs = np.copy(
+        LpCurveTorque(
+            coils, coils2, p=p, threshold=threshold, downsample=downsample
+        ).x
+    )
+    h = np.ones_like(dofs)
+    last_error_msg = None
+    success = False
+    for _ in range(_TAYLOR_MAX_RETRIES):
+        success, last_error_msg = _run_taylor_test_for_objective(J, dofs, h)
+        if success:
+            break
+    assert success, (
+        f"Taylor test failed after {_TAYLOR_MAX_RETRIES} retries: {last_error_msg}"
+    )
 
 
 class SpecialFunctionsTests(unittest.TestCase):
@@ -1013,242 +1187,6 @@ class CoilForcesTest(unittest.TestCase):
             LpCurveTorque(coil_a1, [coil_a2, coil_b1], p=2.5, threshold=threshold)
         with self.assertRaises(ValueError):
             SquaredMeanTorque(coil_a1, [coil_a2, coil_b1])
-
-    def test_Taylor(self):
-        """
-        Perform Taylor tests for a variety of coil force and torque objectives to verify the correctness of their derivatives.
-
-        This test numerically checks the accuracy of the analytic derivatives (gradients) of several objective functions
-        (e.g., net flux, B^2 energy, L^p force/torque, squared mean force/torque) used in coil optimization. It does so by:
-
-        - Sweeping over different numbers of coils, field periods (nfp), stellarator symmetry options, regularization types, and downsampling factors.
-        - For each configuration, constructing two sets of coils and computing the objective and its derivative.
-        - Performing a finite-difference Taylor test: perturbing the parameters in a random direction, evaluating the objective at small steps, and comparing the finite-difference estimate of the derivative to the analytic value.
-        - Asserting that the relative error decreases by at least a factor of 0.5 as the step size decreases, indicating correct derivative implementation.
-        - Plotting the error decay for all objectives and parameter sweeps.
-
-        A test passes if the Taylor error decreases rapidly (ideally quadratically) as the step size shrinks, confirming the correctness of the gradient implementation for all tested objectives and configurations.
-        """
-        import matplotlib.pyplot as plt
-        ncoils_list = [2]
-        nfp_list = [1, 3]
-        stellsym_list = [True]
-        p_list = [2.5]
-        threshold_list = [0.0, 1e-3]
-        downsample_list = [1, 2]
-        jax_flag_list = [False, True]
-        numquadpoints_list = [10]
-        I = 1.7e5
-        a = 0.05
-        b = 0.05
-        regularization_types = [
-            ("circular", lambda: regularization_circ(a)),
-            ("rectangular", lambda: regularization_rect(a, b)),
-        ]
-        all_errors = []
-        all_labels = []
-        all_eps = []
-        max_retries = 3  # Number of retries for intermittent failures
-
-        def run_taylor_test_for_objective(J, dofs, h):
-            """
-            Run Taylor test for a single objective. Returns (errors, epsilons, success, error_msg).
-            """
-            J.x = dofs  # Reset DOFs
-            dJ = J.dJ()
-            deriv = np.sum(dJ * h)
-            errors = []
-            epsilons = []
-            
-            for i in range(10, 16):
-                eps = 0.5**i
-                J.x = dofs + eps * h
-                Jp = J.J()
-                J.x = dofs - eps * h
-                Jm = J.J()
-                deriv_est = (Jp - Jm) / (2 * eps)
-                if np.abs(deriv) < 1e-8:
-                    err_new = np.abs(deriv_est - deriv)  # compute absolute error instead
-                else:
-                    err_new = np.abs(deriv_est - deriv) / np.abs(deriv)
-                # Check error decrease by at least a factor of 0.5, or pass if error is already below 1e-8
-                if len(errors) > 0 and err_new > 1e-10:
-                    if err_new > 0.5 * errors[-1] and err_new >= 1e-8:
-                        error_msg = f"Error did not decrease by factor 0.5: prev={errors[-1]}, curr={err_new}, eps={eps:.2e}"
-                        return errors, epsilons, False, error_msg
-                errors.append(err_new)
-                epsilons.append(eps)
-            return errors, epsilons, True, None
-
-        for ncoils in ncoils_list:
-            for nfp in nfp_list:
-                for stellsym in stellsym_list:
-                    for p in p_list:
-                        for threshold in threshold_list:
-                            for reg_name, reg_func in regularization_types:
-                                regularization = reg_func()
-                                for downsample in downsample_list:
-                                    for use_jax_curve in jax_flag_list:
-                                        for numquadpoints in numquadpoints_list:
-                                            base_curves = create_equally_spaced_curves(ncoils, nfp, stellsym, numquadpoints=numquadpoints, use_jax_curve=use_jax_curve)
-                                            base_curves2 = create_equally_spaced_curves(ncoils, nfp, stellsym, numquadpoints=numquadpoints, use_jax_curve=use_jax_curve)
-                                            base_currents = [Current(I) for _ in range(ncoils)]
-                                            coils = coils_via_symmetries(base_curves, base_currents, nfp, stellsym, regularizations=[regularization] * ncoils)
-                                            for ii in range(ncoils):
-                                                base_curves2[ii].x = base_curves2[ii].x + np.ones(len(base_curves2[ii].x)) * 0.1
-                                            coils2 = coils_via_symmetries(base_curves2, base_currents, nfp, stellsym, regularizations=[regularization] * ncoils)
-                                            objectives = [
-                                                sum([NetFluxes(coils[i], coils2) for i in range(len(coils))]),
-                                                B2Energy(coils + coils2, downsample=downsample),
-                                                LpCurveTorque(coils, coils2, p=p, threshold=threshold, downsample=downsample),
-                                                sum([LpCurveTorque(coils[i], coils2, p=p, threshold=threshold, downsample=downsample) for i in range(len(coils))]),
-                                                sum([SquaredMeanTorque(coils[i], coils2, downsample=downsample) for i in range(len(coils))]),
-                                                SquaredMeanTorque(coils, coils2, downsample=downsample),
-                                                sum([LpCurveForce(coils[i], coils2, p=p, threshold=threshold, downsample=downsample) for i in range(len(coils))]),
-                                                LpCurveForce(coils, coils2, p=p, threshold=threshold, downsample=downsample),
-                                                sum([SquaredMeanForce(coils[i], coils2, downsample=downsample) for i in range(len(coils))]),
-                                                SquaredMeanForce(coils, coils2, downsample=downsample),
-                                            ]
-                                            dofs = np.copy(LpCurveTorque(coils, coils2, p=p, threshold=threshold, downsample=downsample).x)
-                                            h = np.ones_like(dofs)
-                                            for J in objectives:
-                                                label = f"{type(J).__name__}, ncoils={ncoils}, nfp={nfp}, stellsym={stellsym}, p={getattr(J, 'p', p)}, threshold={getattr(J, 'threshold', threshold)}, reg={reg_name}, downsample={downsample}"
-                                                config_str = f"ncoils={ncoils}, nfp={nfp}, stellsym={stellsym}, p={p}, threshold={threshold}, reg={reg_name}, downsample={downsample}, use_jax_curve={use_jax_curve}, numquadpoints={numquadpoints}, objective={type(J).__name__}"
-                                                
-                                                # Run Taylor test with retry logic
-                                                success = False
-                                                last_error_msg = None
-                                                for attempt in range(max_retries):
-                                                    errors, epsilons, success, error_msg = run_taylor_test_for_objective(J, dofs, h)
-                                                    if success:
-                                                        if attempt > 0:
-                                                            print(f"{config_str} - PASSED on retry {attempt + 1}")
-                                                        else:
-                                                            print(f"{config_str}")
-                                                        break
-                                                    else:
-                                                        last_error_msg = error_msg
-                                                        if attempt < max_retries - 1:
-                                                            print(f"{config_str} - Attempt {attempt + 1} failed, retrying... ({error_msg})")
-                                                
-                                                if not success:
-                                                    # All retries failed
-                                                    print(f"{config_str} - FAILED after {max_retries} attempts")
-                                                    assert False, f"Taylor test failed after {max_retries} retries: {last_error_msg}"
-                                                
-                                                all_errors.append(errors)
-                                                all_labels.append(label)
-                                                all_eps.append(epsilons)
-        # Plot all errors
-        plt.figure(figsize=(14, 8))
-        for errors, label, epsilons in zip(all_errors, all_labels, all_eps):
-            plt.loglog(epsilons, errors, marker='o', label=label)
-        plt.xlabel('eps')
-        plt.ylabel('Relative Taylor error')
-        plt.title('Taylor test errors for all objectives and parameter sweeps')
-        plt.legend(fontsize=6, loc='upper left', bbox_to_anchor=(1, 1))
-        plt.grid(True)
-        plt.tight_layout()
-        plt.savefig('taylor_errors.png')
-
-    def test_objectives_time(self):
-        import time
-        import matplotlib.pyplot as plt
-        import numpy as np
-
-        nfp = 3
-        I = 1.7e4
-
-        p = 2.5
-        threshold = 1e-3  # Threshold in MN/m or MN (equivalent to 1.0e3 N/m or N)
-        regularization = regularization_circ(0.05)
-
-        # List of objective classes to test
-        objective_classes = [
-            "LpCurveForce",
-            "LpCurveForce (one sum)",
-            "LpCurveTorque",
-            "LpCurveTorque (one sum)",
-            "SquaredMeanForce",
-            "SquaredMeanForce (one sum)",
-            "SquaredMeanTorque",
-            "SquaredMeanTorque (one sum)",
-        ]
-
-        ncoils_list = [2, 4]
-        runtimes_J = np.zeros((len(objective_classes), len(ncoils_list)))
-        runtimes_dJ = np.zeros((len(objective_classes), len(ncoils_list)))
-        compile_times_J = np.zeros((len(objective_classes), len(ncoils_list)))
-        compile_times_dJ = np.zeros((len(objective_classes), len(ncoils_list)))
-
-        for idx_n, ncoils in enumerate(ncoils_list):
-            print(f"\n--- Timing tests for ncoils = {ncoils} ---")
-            base_curves = create_equally_spaced_curves(ncoils, nfp, True)
-            base_currents = [Current(I) for j in range(ncoils)]
-            coils = coils_via_symmetries(base_curves, base_currents, nfp, True, regularizations=[regularization] * ncoils)
-            base_curves2 = create_equally_spaced_curves(ncoils, nfp, True)
-            for i in range(ncoils):
-                base_curves2[i].x = base_curves2[i].x + np.ones(len(base_curves2[i].x)) * 0.01
-            coils2 = coils_via_symmetries(base_curves2, base_currents, nfp, True)
-            for c in coils:
-                c.regularization = regularization
-
-            # Prepare objectives for each class
-            # LpCurveForce, LpCurveTorque, SquaredMeanForce, SquaredMeanTorque: sum over all coils
-            # Mixed objectives are faster if coils are split evenly into two groups
-            objectives = [
-                sum([LpCurveForce(coils[i], coils2, p=p, threshold=threshold, downsample=2) for i in range(len(coils))]),
-                LpCurveForce(coils, coils2, p=p, threshold=threshold, downsample=2),
-                sum([LpCurveTorque(coils[i], coils2, p=p, threshold=threshold, downsample=2) for i in range(len(coils))]),
-                LpCurveTorque(coils, coils2, p=p, threshold=threshold, downsample=2),
-                sum([SquaredMeanForce(coils[i], coils2, downsample=2) for i in range(len(coils))]),
-                SquaredMeanForce(coils, coils2, downsample=2),
-                sum([SquaredMeanTorque(coils[i], coils2, downsample=2) for i in range(len(coils))]),
-                SquaredMeanTorque(coils, coils2, downsample=2),
-            ]
-
-            # Compilation time (first call)
-            print("Timing compilation (first call):")
-            for i, (obj, obj_label) in enumerate(zip(objectives, objective_classes)):
-                t1 = time.time()
-                obj.J()
-                t2 = time.time()
-                compile_times_J[i, idx_n] = t2 - t1
-                print(f'{obj_label}: Compilation (J) took {t2 - t1:.6f} seconds')
-                t1 = time.time()
-                obj.dJ()
-                t2 = time.time()
-                compile_times_dJ[i, idx_n] = t2 - t1
-                print(f'{obj_label}: Compilation (dJ) took {t2 - t1:.6f} seconds')
-
-                # Run time (second call)
-                print("Timing run (second call):")
-                t1 = time.time()
-                obj.J()
-                t2 = time.time()
-                runtimes_J[i, idx_n] = t2 - t1
-                print(f'{obj_label}: Run (J) took {t2 - t1:.6f} seconds')
-                t1 = time.time()
-                obj.dJ()
-                t2 = time.time()
-                runtimes_dJ[i, idx_n] = t2 - t1
-                print(f'{obj_label}: Run (dJ) took {t2 - t1:.6f} seconds')
-
-        # Optionally, plot the results
-        plt.figure(figsize=(10, 7))
-        markers = ['o', 's', 'D', '^', 'v', '<', '>', 'x', '+']
-        colors = plt.cm.tab10.colors
-        for i, label in enumerate(objective_classes):
-            plt.semilogy(ncoils_list, runtimes_J[i], marker=markers[i % len(markers)], color=colors[i % len(colors)], label=f"{label} J()")
-            plt.semilogy(ncoils_list, runtimes_dJ[i], marker=markers[i % len(markers)], linestyle='--', color=colors[i % len(colors)], label=f"{label} dJ()")
-        plt.xlabel("Number of coils")
-        plt.ylabel("Run time (s)")
-        plt.title("Objective run times as a function of number of coils")
-        plt.legend(fontsize=8)
-        plt.grid(True, which='both', ls='--')
-        plt.tight_layout()
-        plt.savefig("objective_runtimes_semilogy.png")
-        print("Run times saved to objective_runtimes_semilogy.png")
 
     def test_regularized_coil_requirement(self):
         """Test that force, torque, and energy objectives require RegularizedCoil objects."""

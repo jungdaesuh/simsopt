@@ -215,7 +215,8 @@ def test_qfm_bfgs_curvature_floor_rejects_float32_boundary() -> None:
     y = jnp.asarray([1.0e-5, 1.0], dtype=jnp.float32)
 
     qfm_valid = qfm_solver_module._bfgs_has_valid_curvature(s, y)
-    _, _, private_valid, _ = _private_bfgs._bfgs_curvature_terms(
+    # Private helper returns (rho_inv, rho, valid); never a 4-tuple.
+    _, _, private_valid = _private_bfgs._bfgs_curvature_terms(
         s,
         y,
         x_dtype=s.dtype,
@@ -699,7 +700,9 @@ def test_qfm_penalty_fixed_state_gradient_matches_centered_fd() -> None:
         targetlabel=target,
         constraint_weight=1.0,
     )
-    step = 2.0**-18
+    # h=2^-18 is still in O(h^2) FD truncation (rel 1.19e-8 > rtol 1e-8 on
+    # dof 6). h=2^-20 is inside the same rtol/atol without loosening.
+    step = 2.0**-20
     finite_difference_gradient = []
     for idx in range(dofs.size):
         basis = np.zeros(dofs.size, dtype=np.float64)
