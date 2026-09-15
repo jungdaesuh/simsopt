@@ -43,8 +43,7 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
 )
 
 #: ``||g||_2`` at the three late rejections of the B37 v2 diagnostic
-#: (``docs/receipts/evidence/nested_ls_outer_b37v2_20260824_jax_diagnostic.json``,
-#: outer evaluations 39, 43 and 53), read out of ``rejection_detail``.
+#: (outer evaluations 39, 43 and 53), read out of ``rejection_detail``.
 #:
 #: Each spent 9, 10 and 10 of ``NESTED_LS_NEWTON_MAXITER = 10`` Newton
 #: iterations -- 43 and 53 exhausted the budget outright. The ledger string

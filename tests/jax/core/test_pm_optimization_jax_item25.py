@@ -1750,8 +1750,7 @@ class TestGPMOArbVecBacktracking:
         3. a pair one ULP away from antiparallel is KEPT — its rounded dot,
            -(1 + 2**-52), is <= -1.0, so the pre-repair FP predicate removed
            it on every build; C++ oracle compared since 2026-08-24, when the
-           shipped prebuilt kernel was rebuilt from the repaired source
-           (re-cert: docs/receipts/evidence/pm4stell64_*_predicate_20260824.*);
+           shipped prebuilt kernel was rebuilt from the repaired source;
         4. a general threshold (0.9 pi) keeps the FP-dot path: the exact pair
            is still removed there, C++ oracle compared;
         5. ``pi - 1e-8`` remains a general threshold even though its host cosine

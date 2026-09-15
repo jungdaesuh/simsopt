@@ -29,10 +29,9 @@ test:
   fake HEAD, and every artifact in these tests is built against that same
   value so the git_head interlocks stay real.
 * ``EVIDENCE`` -- output location only. It must stay under the repo root
-  because the receipt publishes ``execution_log`` as a repo-relative
+  because the claim JSON publishes ``execution_log`` as a repo-relative
   path, so it is repointed into the git-ignored ``.artifacts`` tree and
-  deleted afterwards, rather than writing receipts into
-  ``docs/receipts/evidence/`` beside real ones.
+  deleted afterwards.
 * ``CACHE_OUTER`` -- the XLA persistent-cache directory the JAX child env
   points at, and another path the receipt publishes repo-relative. No JAX
   runs here; repointing it beside the test's evidence directory keeps the
@@ -603,7 +602,7 @@ def _install(
 
 @pytest.fixture(scope="session", autouse=True)
 def _artifact_root() -> object:
-    """Keep receipts out of ``docs/receipts/evidence`` and off the tree."""
+    """Keep claim JSON out of the source tree."""
 
     _ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
     yield _ARTIFACT_ROOT

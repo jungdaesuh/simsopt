@@ -954,35 +954,6 @@ def test_provider_child_opt_in_writes_and_attaches_boozer_trial_trace(
     )
 
 
-@pytest.mark.parametrize(
-    "receipt_name",
-    (
-        "rosenbrock-pre-refactor-trajectory",
-        "bfgs-pre-refactor-trajectory",
-    ),
-)
-def test_tracked_pre_refactor_trajectory_receipt_is_self_consistent(
-    receipt_name: str,
-) -> None:
-    receipt = (
-        Path(__file__).resolve().parents[2]
-        / "docs/receipts/custom-quasi-newton"
-        / receipt_name
-    )
-    manifest = json.loads((receipt / "manifest.json").read_text(encoding="utf-8"))
-
-    assert manifest["schema_version"] == 1
-    assert manifest["verdict"] == "diagnostic-pass-not-promotion"
-    for artifact in manifest["artifacts"]:
-        path = receipt / artifact["path"]
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        assert digest == artifact["sha256"]
-
-    pre_refactor = (receipt / "raw/pre_refactor.json").read_bytes()
-    candidate = (receipt / "raw/candidate_worktree.json").read_bytes()
-    assert pre_refactor == candidate
-
-
 def test_provider_child_timeout_override_wins_and_validates() -> None:
     assert runtime._provider_child_timeout_seconds("rosenbrock", None) == 120
     assert runtime._provider_child_timeout_seconds("boozer", None) == 1800

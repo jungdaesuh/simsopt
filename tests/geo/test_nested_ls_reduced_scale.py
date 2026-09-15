@@ -7,10 +7,7 @@ because the LS residual is 3*255*64+2 = 48962 rows. Not an F3 timing claim.
 from __future__ import annotations
 
 import ast
-import hashlib
 import inspect
-import json
-import statistics
 import sys
 from pathlib import Path
 
@@ -18,15 +15,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from benchmarks.nested_ls_outer_claim import CLAIM_SCHEMA
 from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_NEWTON_STAB,
     NESTED_LS_NEWTON_TOL,
-    NESTED_LS_OUTER_FD0_DIRECTIONS,
-    NESTED_LS_OUTER_FD0_REL_TOL,
-    NESTED_LS_OUTER_JAX_CHILD_SCHEMA,
-    NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA,
     nested_ls_physics_newton_kwargs,
 )
 from simsopt_jax_adapters.geo.nested_ls_reduced import (
@@ -84,7 +76,6 @@ from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     evaluate_f3_b37_volume_outer_probe,
     float64_ulps,
     gmres_doubling_cycle_budget,
-    kib_to_gib,
     last_step_meets_forcing,
     load_archived_nested_ls_pair,
     load_flat675_lane_blocks,
@@ -95,156 +86,15 @@ from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     unpreconditioned_gmres_is_insufficient,
 )
 
-_EVIDENCE_DIR = Path(__file__).resolve().parents[2] / "docs" / "receipts" / "evidence"
-_F3_B37_BOUNDED_EVIDENCE = (
-    _EVIDENCE_DIR / "nested_ls_reduced_gate1_f3_b37_bounded_20260820.json"
-)
-_F3_B37_SCHUR_ONE_STEP_EVIDENCE = (
-    _EVIDENCE_DIR / "nested_ls_reduced_gate1_f3_b37_schur_one_step_20260820.json"
-)
-_F3_B37_GPU_WALK_EVIDENCE = _EVIDENCE_DIR / "nested_ls_reduced_gpu_walk_20260821.json"
-_F3_B37_GPU_STEP2_EVIDENCE = (
-    _EVIDENCE_DIR / "nested_ls_reduced_gpu_step2_forcing_20260821.json"
-)
-_F3_B37_GPU_WALK_CAP64_EVIDENCE = (
-    _EVIDENCE_DIR / "nested_ls_reduced_gpu_walk_20260821.cap64.incomplete.json"
-)
-_F3_B37_GPU_STEP4_EVIDENCE = (
-    _EVIDENCE_DIR / "nested_ls_reduced_gpu_step4_forcing_20260821.json"
-)
-_F3_B37_GPU_STEP4_INCOMPLETE = (
-    _EVIDENCE_DIR / "nested_ls_reduced_gpu_step4_forcing_20260821.incomplete.json"
-)
-_GPU_STEP4_PUBLICATION = (
-    "GPU step-4 forcing probe. Not a walk, not a timing claim, and not F3 7.70x."
-)
-_F3_B37_GPU_WALK_CAP512_EVIDENCE = (
-    _EVIDENCE_DIR / "nested_ls_reduced_gpu_walk_20260821.cap512.incomplete.json"
-)
-_F3_B37_GPU_STEP6_EVIDENCE = (
-    _EVIDENCE_DIR / "nested_ls_reduced_gpu_step6_forcing_20260821.json"
-)
-_F3_B37_GPU_STEP6_ARCH_EVIDENCE = (
-    _EVIDENCE_DIR / "nested_ls_reduced_gpu_step6_architecture_20260821.json"
-)
-_GPU_STEP6_PUBLICATION = (
-    "GPU step-6 forcing probe. Not a walk, not a timing claim, and not F3 7.70x."
-)
-_GPU_STEP6_ARCH_PUBLICATION = (
-    "GPU step-6 solver-architecture canary. Not a walk, not cap-2048, "
-    "not a timing claim, and not F3 7.70x."
-)
-_F3_B37_GPU_WALK_DENSE_LU_EVIDENCE = (
-    _EVIDENCE_DIR / "nested_ls_reduced_gpu_walk_20260821.dense_lu.json"
-)
-_GPU_WALK_DENSE_LU_PUBLICATION = (
-    "GPU dense-LU Schur walk canary. Opt-in linear_solver=dense_lu, "
-    "not a default switch. Not a timing claim and not F3 7.70x."
-)
-_F3_B37_GPU_ENDPOINT_ADJOINT_EVIDENCE = (
-    _EVIDENCE_DIR / "nested_ls_reduced_gpu_endpoint_adjoint_20260821.json"
-)
-_GPU_ENDPOINT_ADJOINT_PUBLICATION = (
-    "GPU unregularized IFT adjoint canary at the dense-LU walk endpoint. "
-    "Opt-in past the 1 MiB stored-matrix cap. Not a walk, not cap-2048, "
-    "not a default switch, not a timing claim, and not F3 7.70x."
-)
-_F3_B37_GPU_CHUNK_BANANA_EVIDENCE = (
-    _EVIDENCE_DIR / "nested_ls_reduced_gpu_chunk_banana_20260821.json"
-)
-_GPU_CHUNK_BANANA_PUBLICATION = (
-    "GPU native banana run_code bar plus dense-assemble chunk sweep. "
-    "Operators are not comparable. Not a nested speed claim and not F3 7.70x."
-)
-_F3_B37_GPU_VOLUME_OUTER_EVIDENCE = (
-    _EVIDENCE_DIR / "nested_ls_reduced_gpu_volume_outer_20260821.json"
-)
-_GPU_VOLUME_OUTER_PUBLICATION = (
-    "GPU F3-B37 Volume directional-gradient canary at the dense-LU endpoint. "
-    "Unregularized IFT, one coil-direction FD. Not a B3 outer optimization, "
-    "not an outer optimizer loop, not a nested speed claim, and not F3 7.70x."
-)
-_F3_B37_GPU_BANANA_OMP_EVIDENCE = (
-    _EVIDENCE_DIR / "nested_ls_reduced_gpu_banana_omp_20260821.json"
-)
-_GPU_BANANA_OMP_PUBLICATION = (
-    "OMP-pinned interleaved native banana run_code sweep. "
-    "Not a nested speed claim and not F3 7.70x."
-)
-_F3_B37_GPU_BANANA_OMP_GAP_EVIDENCE = (
-    _EVIDENCE_DIR / "nested_ls_reduced_gpu_banana_omp_gap_20260821.json"
-)
-_GPU_BANANA_OMP_GAP_PUBLICATION = (
-    "OMP-pinned banana gap fill at 20 and 24 threads. Fills the "
-    "16-to-32 hole on a 32-core box. Not a nested speed claim."
-)
-_F3_B37_GPU_BANANA_OMP_MIN_BRACKET_EVIDENCE = (
-    _EVIDENCE_DIR / "nested_ls_reduced_gpu_banana_omp_min_bracket_20260821.json"
-)
-_GPU_BANANA_OMP_MIN_BRACKET_PUBLICATION = (
-    "OMP-pinned banana min-bracket fill at 12 and 14 threads. Brackets "
-    "the OMP=16 native peak on a 32-core box. Records process wall and "
-    "inner solver time. Not a nested speed claim."
-)
-_F3_B37_GPU_SHAMANSKII_ATTR_EVIDENCE = (
-    _EVIDENCE_DIR / "nested_ls_reduced_gpu_shamanskii_attr_20260822.json"
-)
-_GPU_SHAMANSKII_ATTR_PUBLICATION = (
-    "Shamanskii and compile-cache attribution: cache-only, lag-only, and both. "
-    "Not a nested speed claim and not F3 7.70x."
-)
-_F3_B37_GPU_JAX_FLOOR_EVIDENCE = (
-    _EVIDENCE_DIR / "nested_ls_reduced_gpu_jax_floor_20260822.json"
-)
-_F3_B37_GPU_GATE6_EVIDENCE = _EVIDENCE_DIR / "nested_ls_reduced_gpu_gate6_20260822.json"
-_GPU_GATE6_PUBLICATION = (
-    "Gate-6 process-wall vs process-wall claim run. Native banana at "
-    "best-of-contract OMP=16, JAX Shamanskii with persistent compile "
-    "cache. Not F3 7.70x."
-)
-_A100_BANANA_OMP_EVIDENCE = (
-    _EVIDENCE_DIR / "nested_ls_reduced_a100_banana_omp_20260822.json"
-)
-_A100_GATE6_EVIDENCE = _EVIDENCE_DIR / "nested_ls_reduced_gpu_gate6_20260822.a100.json"
-_GATE6_5090_EVIDENCE = _EVIDENCE_DIR / "nested_ls_reduced_gpu_gate6_20260822.5090.json"
-_OUTER_FD0_EVIDENCE = _EVIDENCE_DIR / "nested_ls_outer_fd0_20260823.json"
-_OUTER_B3_EVIDENCE = _EVIDENCE_DIR / "nested_ls_outer_b3_20260823.json"
-_OUTER_B37_EVIDENCE = _EVIDENCE_DIR / "nested_ls_outer_b37_20260823.json"
-_OUTER_B3_TRANSACTION_EVIDENCE = _EVIDENCE_DIR / "nested_ls_outer_b3_20260824.json"
-_OUTER_B37_TRANSACTION_EVIDENCE = _EVIDENCE_DIR / "nested_ls_outer_b37_20260824.json"
-_F3_B37_GPU_CHUNK_WARM_EVIDENCE = (
-    _EVIDENCE_DIR / "nested_ls_reduced_gpu_chunk_warm_20260821.json"
-)
-_GPU_CHUNK_WARM_PUBLICATION = (
-    "Warm in-process dense-assemble repeats at the LU endpoint. "
-    "Cold first-touch discarded. Not a default switch and not a nested speed claim."
-)
-_GPU_STEP2_PUBLICATION = (
-    "GPU step-2 forcing probe. Not a walk, not a timing claim, and not F3 7.70x."
-)
-_GPU_WALK_GMRES_MATVECS_NOTE = (
-    "JAX incremental GMRES does not report operator applications; "
-    "gmres_matvecs stays 0 as unavailable telemetry, not zero work. "
-    "Default maxiter=1 with restart=8 is one restart cycle of up to "
-    "eight Krylov iterations."
-)
 _RECONSTRUCT_IOTA = 0.14085710955307942
-_SCHUR_PUBLICATION = (
-    "The Schur operator and one accepted inexact CPU correction are "
-    "validated. Independent C++ rejudging confirms the reconstruct "
-    "branch. Scientific feasibility passes; receipt provenance and "
-    "GPU-performance qualification remain open."
-)
 _PAIR2_L1_SHA256 = "bde32ab9987d4f2116cf7c7410753c83a9d74ca7836031c25db0e12603155d64"
 _NATIVE_BIOT_SHA256 = "0415ae937c78b9f2d68e8463a9176e8f330a9aa172eece160341afccdc29429d"
-_SCIENTIFIC_COMMIT = "063b4fe83cb46a5537908a88e233c33030f6f107"
-_PUBLICATION = (
-    "The bounded F3 B37 feasibility probe is complete: QR elimination, an "
-    "off-manifold reduced gradient, a finite synchronized HVP, and the native "
-    "reconstruction reference were produced. AD-through-QR GMRES did not "
-    "produce a Newton step within the attempted bound. No JAX nested-LS walk, "
-    "endpoint parity, or speed claim exists yet."
-)
+# Frozen F3 B37 probe numbers used as live-test oracles.
+_F3_B37_Y_STAR_IOTA = 0.15164961478467412
+_F3_B37_NATIVE_REF_DELTA_IOTA = -0.010792505231594696
+_F3_B37_SCHUR_REJUDGE_IOTA = 0.1408571095660965
+_F3_B37_SCHUR_REJUDGE_SURFACE_INF = 4.157e-12
+
 _REQUIRES_BUNDLE = pytest.mark.skipif(
     not archived_flat675_bundle_available(),
     reason="the frozen genuine-675 input bundle is host-local",
@@ -363,42 +213,22 @@ def test_scale_tests_do_not_write_tracked_evidence():
     )
 
 
-def test_f3_b37_bounded_evidence_is_strict_authored_json():
-    raw = _F3_B37_BOUNDED_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    assert "nan" not in raw.lower()
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-reduced-gate1-f3-b37-bounded.v2"
-    assert payload["publication"] == _PUBLICATION
-    assert payload["driver"] == (
-        "simsopt_jax_adapters.geo.nested_ls_reduced_scale.evaluate_f3_b37_bounded_probe"
-    )
-    assert payload["written_by_pytest"] is False
-    probe = payload["probe"]
-    assert probe["native_rejudge_iota"] is None
-    assert probe["native_rejudge_g"] is None
-    assert probe["one_step_attempted"] is False
-    assert probe["full_walk_attempted"] is False
-    memory = payload["memory"]
-    assert memory["rss_kib_after_hvp"] == 1970732
-    assert memory["rss_after_hvp_gib"] == pytest.approx(1.879, abs=5.0e-4)
-    assert memory["rss_after_hvp_kind"] == "VmRSS_current"
-    assert memory["peak_rss_kib_after_hvp"] == 32321968
-    assert memory["peak_rss_kind"] == "ru_maxrss_process_lifetime"
-    ulp = payload["y_star_versus_lane_inner"]
-    assert ulp["iota_ulp"] == pytest.approx(19.0, abs=0.5)
-    assert ulp["g_ulp"] == pytest.approx(7.0, abs=0.5)
-    assert "8-ULP slogan" in ulp["note"]
-    runtime = payload["runtime"]
-    assert runtime["jax_default_backend"] == "cpu"
-    assert runtime["input_lane_is_not_hvp_hardware"] is True
-    assert payload["ad_through_qr_gmres"]["auditable"] is False
-    assert kib_to_gib(1970732) == pytest.approx(1.879, abs=5.0e-4)
-    assert float64_ulps(
-        probe["y_star_iota"],
-        ulp["lane_inner_iota"],
-    ) == pytest.approx(19.0, abs=0.5)
+def test_last_step_meets_forcing_uses_the_recorded_last_step():
+    """Rejected last steps count; accepted-only filtering would hide a miss."""
+    accepted = {
+        "step_accepted": True,
+        "gmres_forcing_eta": 0.05,
+        "gmres_rtol": 0.10,
+    }
+    rejected_miss = {
+        "step_accepted": False,
+        "gmres_forcing_eta": 0.09,
+        "gmres_rtol": 0.03,
+    }
+    assert last_step_meets_forcing([]) is False
+    assert last_step_meets_forcing([accepted]) is True
+    assert last_step_meets_forcing([accepted, rejected_miss]) is False
+    assert last_step_meets_forcing([rejected_miss]) is False
 
 
 def test_receipt_provenance_is_strict_json():
@@ -408,305 +238,6 @@ def test_receipt_provenance_is_strict_json():
     source = payload["source_sha256"]
     assert isinstance(source, dict)
     assert "nested_ls_reduced.py" in source
-
-
-def test_f3_b37_schur_one_step_evidence_is_strict_authored_json():
-    raw = _F3_B37_SCHUR_ONE_STEP_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-reduced-gate1-f3-b37-schur-one-step.v2"
-    assert payload["written_by_pytest"] is False
-    assert payload["full_walk_attempted"] is False
-    assert payload["publication"] == _SCHUR_PUBLICATION
-    boundary = payload["claim_boundary"]
-    assert boundary["nested_speed_claim"] is False
-    assert boundary["newton_quality_linear_solve"] is False
-    assert boundary["device_resident_krylov"] is False
-    assert boundary["endpoint_parity"] is False
-    assert boundary["f3_sealed"] is True
-    assert boundary["full_walk_attempted"] is False
-    assert boundary["provenance_gpu_performance_open"] is True
-    assert payload["driver"] == (
-        "simsopt_jax_adapters.geo.nested_ls_reduced_scale."
-        "evaluate_f3_b37_schur_newton_step"
-    )
-    assert payload["scientific_run"]["git_commit"] == _SCIENTIFIC_COMMIT
-    assert payload["scientific_run"]["git_dirty"] is False
-    assert payload["inputs"]["pair2-l1_lane.json"] == _PAIR2_L1_SHA256
-    assert payload["inputs"]["native_biot_savart.json"] == _NATIVE_BIOT_SHA256
-    sources = payload["scientific_run"]["source_sha256_at_scientific_run"]
-    assert sources["nested_ls_reduced.py"] == (
-        "132da0338415aa0d907a2096460464039f38708a0dd473a70bbca53ceb448159"
-    )
-    assert payload["runtime"]["jax_version"] == "0.10.0"
-    assert payload["runtime"]["scipy_version"] == "1.17.1"
-    assert payload["runtime"]["simsoptpp_sha256"] == (
-        "41b2ca791a720f325ffa9b382b31d29bade73f6516693805d41adc0de6f6ed4b"
-    )
-    schur = payload["independent_replay"]["schur_vs_ad_through_qr"]
-    assert schur["rel_l2"] == pytest.approx(8.2859e-16, rel=0, abs=1.0e-20)
-    assert schur["max_abs"] == pytest.approx(1.4210854715202004e-13, rel=0, abs=1.0e-20)
-    branch = payload["independent_replay"]["cpp_rejudge_branch"]
-    assert branch["grad_l2"] == pytest.approx(2.239e-14, rel=0, abs=1.0e-17)
-    assert branch["surface_inf_vs_reconstruct"] == pytest.approx(
-        4.157e-12, rel=0, abs=1.0e-15
-    )
-    assert branch["iota"] == pytest.approx(0.1408571095660965, rel=0, abs=1.0e-16)
-    sweep = payload["krylov_restart_sweep"]["rows"]
-    assert sweep == [
-        {"matvecs": 9, "residual_l2": 0.00379309, "restart": 8},
-        {"matvecs": 17, "residual_l2": 0.00177416, "restart": 16},
-        {"matvecs": 33, "residual_l2": 0.000834828, "restart": 32},
-    ]
-    assert payload["gmres"]["info"] == 1
-    assert payload["gmres"]["restart"] == 8
-    assert payload["gmres"]["maxiter"] == 1
-    assert payload["krylov_backend"] == "scipy.sparse.linalg.gmres"
-    assert payload["hvp_transport"] == "jax.device_get"
-    assert payload["probe"]["step_accepted"] is True
-    assert payload["probe"]["step_iter"] == 1
-    assert payload["probe"]["step_success"] is False
-    assert payload["probe"]["native_rejudge_success"] is True
-    assert payload["probe"]["native_rejudge_iter"] == 10
-    np.testing.assert_allclose(
-        payload["probe"]["native_rejudge_iota"],
-        _RECONSTRUCT_IOTA,
-        rtol=1.0e-10,
-        atol=1.0e-12,
-    )
-    assert payload["runtime"]["jax_default_backend"] == "cpu"
-    assert payload["execution_log"] is None
-
-
-# There is deliberately no authored test for the claim-grade walk JSON: the
-# reduced-track NO-GO list forbids ever minting it, and the active
-# assert-not-exists guards below are the enforcement.
-
-
-@pytest.mark.skipif(
-    not _F3_B37_GPU_STEP2_EVIDENCE.is_file(),
-    reason="authored GPU step-2 forcing JSON not yet produced",
-)
-def test_authored_gpu_step2_forcing_json_is_strict_and_not_a_walk():
-    raw = _F3_B37_GPU_STEP2_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-reduced-gpu-step2-forcing.v1"
-    assert payload["written_by_pytest"] is False
-    assert payload["publication"] == _GPU_STEP2_PUBLICATION
-    assert payload["driver"] == (
-        "simsopt_jax_adapters.geo.nested_ls_reduced_scale."
-        "evaluate_f3_b37_step2_forcing_probe"
-    )
-    boundary = payload["claim_boundary"]
-    assert boundary["nested_speed_claim"] is False
-    assert boundary["inherits_f3_7_70x"] is False
-    assert boundary["f3_sealed"] is True
-    assert boundary["full_walk_attempted"] is False
-    assert boundary["ten_step_walk"] is False
-    probe = payload["probe"]
-    assert probe["step1_accepted"] is True
-    assert float(probe["step2_eta_requested"]) < 0.24
-    assert int(probe["gmres_restart"]) == 8
-    assert float(probe["coil_delta_inf"]) == 0.0
-    assert probe["rows"]
-    assert all(int(row["gmres_restart"]) == 8 for row in probe["rows"])
-    assert all(not bool(row["meets_forcing"]) for row in probe["rows"])
-    follow_up = payload["follow_up_cap64"]
-    assert follow_up["preconditioner"] == "none"
-    assert int(follow_up["gmres_restart"]) == 8
-    assert int(follow_up["gmres_maxiter_used"]) == 64
-    assert float(follow_up["eta_achieved"]) <= float(probe["step2_eta_requested"])
-    assert follow_up["meets_forcing"] is True
-    runtime = probe["runtime"]
-    assert runtime["jax_default_backend"] == "gpu"
-    assert payload["gmres_matvecs_note"] == _GPU_WALK_GMRES_MATVECS_NOTE
-
-
-def test_cap64_incomplete_walk_json_points_at_its_own_log():
-    raw = _F3_B37_GPU_WALK_CAP64_EVIDENCE.read_text(encoding="utf-8")
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["execution_log"] == (
-        "docs/receipts/evidence/nested_ls_reduced_gpu_walk_20260821.cap64.log"
-    )
-    probe = payload["probe"]
-    assert probe["jax_surface_sha256"] == (
-        "286e3dabf3c9113d25aa691e1abe36a109057738e67536d9e46e6d56faa17e24"
-    )
-    step4 = probe["steps"][3]
-    assert float(step4["gmres_rtol"]) == pytest.approx(
-        0.04071795165373735, rel=0.0, abs=0.0
-    )
-    assert float(step4["gmres_forcing_eta"]) == pytest.approx(
-        0.1203881060498997, rel=0.0, abs=0.0
-    )
-    assert float(step4["gmres_forcing_eta"]) != pytest.approx(
-        float(step4["gmres_rtol"]), rel=0.0, abs=1.0e-6
-    )
-    assert payload["claim_boundary"]["nested_speed_claim"] is False
-    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
-
-
-def test_cap512_walk_last_step_forcing_is_false():
-    payload = json.loads(_F3_B37_GPU_WALK_CAP512_EVIDENCE.read_text(encoding="utf-8"))
-    dump_strict_json(payload)
-    steps = payload["probe"]["steps"]
-    last = steps[-1]
-    assert last["step_accepted"] is False
-    assert float(last["gmres_forcing_eta"]) == pytest.approx(
-        0.09404256261986046, rel=0.0, abs=0.0
-    )
-    assert float(last["gmres_rtol"]) == pytest.approx(
-        0.027034810094191494, rel=0.0, abs=0.0
-    )
-    assert last_step_meets_forcing(steps) is False
-    accepted = [step for step in steps if bool(step["step_accepted"])]
-    assert all(
-        float(step["gmres_forcing_eta"]) <= float(step["gmres_rtol"])
-        for step in accepted
-    )
-
-
-def test_step4_forcing_json_is_dirty_source_replay_not_promotion():
-    payload = json.loads(_F3_B37_GPU_STEP4_EVIDENCE.read_text(encoding="utf-8"))
-    dump_strict_json(payload)
-    assert payload["probe"]["provenance"]["git_dirty"] is True
-    assert payload["claim_boundary"]["nested_speed_claim"] is False
-    assert payload["claim_boundary"]["full_walk_attempted"] is False
-    assert payload["probe"]["meets_forcing"] is True
-
-
-@pytest.mark.skipif(
-    not _F3_B37_GPU_STEP4_INCOMPLETE.is_file(),
-    reason="fail-closed step-4 forcing JSON was moved out of the upstream diff "
-    "(b9405eb54); the guard matches every other evidence-backed test here",
-)
-def test_step4_incomplete_json_fail_closed_on_surface_sha_mismatch():
-    raw = _F3_B37_GPU_STEP4_INCOMPLETE.read_text(encoding="utf-8")
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-reduced-gpu-step4-forcing.v1"
-    assert payload["written_by_pytest"] is False
-    assert payload["claim_boundary"]["nested_speed_claim"] is False
-    assert payload["claim_boundary"]["full_walk_attempted"] is False
-    probe = payload["probe"]
-    assert probe["surface_sha_match"] is False
-    assert probe["fail_closed_reason"] == "surface_sha_mismatch"
-    assert probe["rows"] == []
-    assert probe["expected_surface_sha256"] == (
-        "286e3dabf3c9113d25aa691e1abe36a109057738e67536d9e46e6d56faa17e24"
-    )
-    assert float(probe["cap64_eta_achieved"]) == pytest.approx(
-        0.1203881060498997, rel=0.0, abs=0.0
-    )
-    assert float(probe["eta_requested"]) != pytest.approx(
-        float(probe["cap64_eta_achieved"]), rel=0.0, abs=1.0e-6
-    )
-
-
-@pytest.mark.skipif(
-    not _F3_B37_GPU_STEP4_EVIDENCE.is_file(),
-    reason="authored GPU step-4 forcing JSON not yet produced",
-)
-def test_authored_gpu_step4_forcing_json_is_strict_and_not_a_walk():
-    raw = _F3_B37_GPU_STEP4_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-reduced-gpu-step4-forcing.v1"
-    assert payload["written_by_pytest"] is False
-    assert payload["publication"] == _GPU_STEP4_PUBLICATION
-    assert payload["driver"] == (
-        "simsopt_jax_adapters.geo.nested_ls_reduced_scale."
-        "evaluate_f3_b37_step4_forcing_probe"
-    )
-    boundary = payload["claim_boundary"]
-    assert boundary["nested_speed_claim"] is False
-    assert boundary["inherits_f3_7_70x"] is False
-    assert boundary["f3_sealed"] is True
-    assert boundary["full_walk_attempted"] is False
-    assert boundary["ten_step_walk"] is False
-    probe = payload["probe"]
-    assert probe["reload_sha_match"] is True
-    assert probe["surface_sha256"] == probe["reloaded_surface_sha256"]
-    assert probe["historical_surface_sha256"] == (
-        "286e3dabf3c9113d25aa691e1abe36a109057738e67536d9e46e6d56faa17e24"
-    )
-    assert len(probe["jax_surface_dofs"]) == 661
-    assert float(probe["historical_eta_requested"]) == pytest.approx(
-        0.04071795165373735, rel=0.0, abs=0.0
-    )
-    assert float(probe["cap64_eta_achieved"]) == pytest.approx(
-        0.1203881060498997, rel=0.0, abs=0.0
-    )
-    assert float(probe["eta_requested"]) != pytest.approx(
-        float(probe["cap64_eta_achieved"]), rel=0.0, abs=1.0e-6
-    )
-    assert int(probe["gmres_restart"]) == 8
-    assert float(probe["coil_delta_inf"]) == 0.0
-    assert probe["meets_forcing"] is True
-    assert probe["rows"]
-    assert all(row.get("preconditioner") == "none" for row in probe["rows"])
-    assert all(int(row["gmres_restart"]) == 8 for row in probe["rows"])
-    assert any(bool(row["meets_forcing"]) for row in probe["rows"])
-    runtime = probe["runtime"]
-    assert runtime["jax_default_backend"] == "gpu"
-    assert payload["gmres_matvecs_note"] == _GPU_WALK_GMRES_MATVECS_NOTE
-
-
-@pytest.mark.skipif(
-    not _F3_B37_GPU_STEP6_EVIDENCE.is_file(),
-    reason="authored GPU step-6 forcing JSON not yet produced",
-)
-def test_authored_gpu_step6_forcing_json_is_strict_and_not_a_walk():
-    raw = _F3_B37_GPU_STEP6_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-reduced-gpu-step6-forcing.v1"
-    assert payload["written_by_pytest"] is False
-    assert payload["publication"] == _GPU_STEP6_PUBLICATION
-    boundary = payload["claim_boundary"]
-    assert boundary["nested_speed_claim"] is False
-    assert boundary["inherits_f3_7_70x"] is False
-    assert boundary["full_walk_attempted"] is False
-    probe = payload["probe"]
-    assert probe["reload_sha_match"] is True
-    assert probe["surface_sha256"] == (
-        "a0493560d7ebe3455b68bb834830ad59fb1fb510f79a447c61267547cdc0effe"
-    )
-    assert probe["surface_sha256"] == probe["reloaded_surface_sha256"]
-    assert float(probe["iota"]) == pytest.approx(0.1484103489869863, rel=0.0, abs=0.0)
-    assert float(probe["G"]) == pytest.approx(2.0106193052280394, rel=0.0, abs=0.0)
-    assert float(probe["eta_requested"]) == pytest.approx(
-        0.027034810094191494, rel=0.0, abs=0.0
-    )
-    assert float(probe["cap512_eta_achieved"]) == pytest.approx(
-        0.09404256261986046, rel=0.0, abs=0.0
-    )
-    assert float(probe["eta_requested"]) != pytest.approx(
-        float(probe["cap512_eta_achieved"]), rel=0.0, abs=1.0e-6
-    )
-    assert int(probe["gmres_restart"]) == 8
-    assert all(row.get("preconditioner") == "none" for row in probe["rows"])
-    assert payload["gmres_matvecs_note"] == _GPU_WALK_GMRES_MATVECS_NOTE
-    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
-
-
-def test_step6_forcing_json_is_dirty_source_replay_not_promotion():
-    payload = json.loads(_F3_B37_GPU_STEP6_EVIDENCE.read_text(encoding="utf-8"))
-    dump_strict_json(payload)
-    assert payload["probe"]["provenance"]["git_dirty"] is True
-    assert payload["probe"]["provenance"]["source_sha256"][
-        "nested_ls_reduced_scale.py"
-    ].startswith("1f4d66ac")
-    assert payload["claim_boundary"]["nested_speed_claim"] is False
-    assert payload["claim_boundary"]["full_walk_attempted"] is False
-    assert payload["probe"]["unpreconditioned_gmres_insufficient"] is False
-    assert payload["probe"]["fail_closed_reason"] == "wall_time_cap"
 
 
 def test_unpreconditioned_gmres_insufficient_semantics():
@@ -837,93 +368,6 @@ def test_counted_matvec_increments_through_jax_gmres():
     assert counter.count >= 8
 
 
-@pytest.mark.skipif(
-    not _F3_B37_GPU_STEP6_ARCH_EVIDENCE.is_file(),
-    reason="authored GPU step-6 architecture JSON not yet produced",
-)
-def test_authored_gpu_step6_architecture_json_is_strict_and_not_a_walk():
-    raw = _F3_B37_GPU_STEP6_ARCH_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-reduced-gpu-step6-architecture.v1"
-    assert payload["written_by_pytest"] is False
-    assert payload["publication"] == _GPU_STEP6_ARCH_PUBLICATION
-    boundary = payload["claim_boundary"]
-    assert boundary["newton_quality_linear_solve"] is True
-    assert boundary["explicit_inverse_m_production"] is False
-    assert boundary["nested_speed_claim"] is False
-    assert boundary["inherits_f3_7_70x"] is False
-    assert boundary["full_walk_attempted"] is False
-    assert boundary["cap_2048_attempted"] is False
-    probe = payload["probe"]
-    assert probe["reload_sha_match"] is True
-    assert probe["surface_sha256"] == (
-        "a0493560d7ebe3455b68bb834830ad59fb1fb510f79a447c61267547cdc0effe"
-    )
-    assert int(probe["hvp_budget"]) == 128
-    assert any(row.get("row") == "dense_lu" for row in probe["rows"])
-    assert probe["dense_meets_forcing"] is True
-    dense_row = next(row for row in probe["rows"] if row.get("row") == "dense_lu")
-    assert dense_row["eta_achieved"] is not None
-    assert float(dense_row["eta_achieved"]) <= float(probe["eta_requested"])
-    assert dense_row.get("eta_achieved_dense_materialization") is not None
-    dense_chunk_batch_size = probe.get("dense_chunk_batch_size")
-    if dense_chunk_batch_size is not None:
-        assert isinstance(dense_chunk_batch_size, int)
-        assert dense_chunk_batch_size >= 1
-    option_b = next(
-        (row for row in probe["rows"] if row.get("row") == "option_b_dense_inverse_m"),
-        None,
-    )
-    if option_b is not None and "shared_dense_assembly" in option_b:
-        assert option_b["shared_dense_assembly"] is True
-        assert option_b["excludes_assembly_seconds"] is True
-        assert option_b["excludes_inversion_seconds"] is True
-    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
-
-
-@pytest.mark.skipif(
-    not _F3_B37_GPU_WALK_DENSE_LU_EVIDENCE.is_file(),
-    reason="authored GPU dense-LU walk JSON not yet produced",
-)
-def test_authored_gpu_dense_lu_walk_json_is_strict_and_not_a_speed_claim():
-    raw = _F3_B37_GPU_WALK_DENSE_LU_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-reduced-gpu-walk.v1"
-    assert payload["written_by_pytest"] is False
-    assert payload["publication"] == _GPU_WALK_DENSE_LU_PUBLICATION
-    assert payload["linear_solver"] == "dense_lu"
-    boundary = payload["claim_boundary"]
-    assert boundary["nested_speed_claim"] is False
-    assert boundary["inherits_f3_7_70x"] is False
-    assert boundary["explicit_inverse_m_production"] is False
-    assert boundary["cap_2048_attempted"] is False
-    assert boundary["full_walk_attempted"] is True
-    assert boundary["jax_success_1e13"] is True
-    probe = payload["probe"]
-    assert probe["linear_solver"] == "dense_lu"
-    assert probe["success"] is True
-    assert probe["provenance"]["git_dirty"] is False
-    assert float(probe["grad_l2"]) <= NESTED_LS_NEWTON_TOL
-    assert int(probe["native_rejudge_iter"]) == 0
-    assert float(probe["rejudge_vs_jax_iota"]) == 0.0
-    assert float(probe["rejudge_vs_jax_g"]) == 0.0
-    assert float(probe["rejudge_vs_jax_surface_inf"]) == 0.0
-    assert float(probe["coil_delta_inf"]) == 0.0
-    assert last_step_meets_forcing(probe["steps"]) is True
-    assert all(bool(step["step_accepted"]) for step in probe["steps"])
-    assert all(
-        float(step["gmres_forcing_eta"]) <= float(step["gmres_rtol"])
-        for step in probe["steps"]
-    )
-    assert probe["runtime"]["jax_default_backend"] == "gpu"
-    assert int(payload["dense_chunk_batch_size"]) >= 1
-    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
-
-
 def test_endpoint_adjoint_probe_is_not_a_walk_or_cap2048_or_newton_stab_ift():
     assert F3_B37_IFT_STAB == 0.0
     assert F3_B37_IFT_STAB != NESTED_LS_NEWTON_STAB
@@ -1041,46 +485,6 @@ def test_endpoint_adjoint_probe_is_not_a_walk_or_cap2048_or_newton_stab_ift():
     assert newton_default.default == "gmres"
 
 
-@pytest.mark.skipif(
-    not _F3_B37_GPU_ENDPOINT_ADJOINT_EVIDENCE.is_file(),
-    reason="authored GPU endpoint adjoint JSON not yet produced",
-)
-def test_authored_gpu_endpoint_adjoint_json_is_strict_and_not_a_walk():
-    raw = _F3_B37_GPU_ENDPOINT_ADJOINT_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-reduced-gpu-endpoint-adjoint.v1"
-    assert payload["written_by_pytest"] is False
-    assert payload["publication"] == _GPU_ENDPOINT_ADJOINT_PUBLICATION
-    boundary = payload["claim_boundary"]
-    assert boundary["nested_speed_claim"] is False
-    assert boundary["inherits_f3_7_70x"] is False
-    assert boundary["explicit_inverse_m_production"] is False
-    assert boundary["full_walk_attempted"] is False
-    assert boundary["cap_2048_attempted"] is False
-    assert boundary["moving_coil_b3_outer"] is False
-    assert boundary["ift_used_newton_stab"] is False
-    probe = payload["probe"]
-    assert probe["reload_sha_match"] is True
-    assert probe["surface_sha256"] == F3_B37_DENSE_LU_ENDPOINT_SURFACE_SHA256
-    assert probe["ift_stab"] == 0.0
-    assert probe["ift_used_newton_stab"] is False
-    assert probe["default_cap_refuses_661"] is True
-    assert int(probe["default_adjoint_cap_bytes"]) == 1_048_576
-    assert int(probe["dense_bytes"]) == schur_dense_operator_bytes(661)
-    assert probe["fail_closed_reason"] is None
-    assert probe["unregularized_positive_definite"] is True
-    assert probe["adjoint_live_eta"] is not None
-    assert float(probe["adjoint_live_eta"]) <= 1.0e-10
-    assert probe["vjp_match"] is True
-    assert probe["fd_match"] is True
-    assert float(probe["coil_delta_inf"]) == 0.0
-    assert float(probe["coil_delta_inf_after"]) == 0.0
-    assert probe["runtime"]["jax_default_backend"] == "gpu"
-    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
-
-
 def test_chunk_banana_and_volume_outer_are_not_walks_or_default_switches():
     assert F3_B37_CHUNK_WIDTHS == (8, 16, 32, 64)
     assert (
@@ -1148,63 +552,6 @@ def test_chunk_banana_and_volume_outer_are_not_walks_or_default_switches():
         assert isinstance(solver, ast.Constant) and solver.value == "dense_lu"
 
 
-@pytest.mark.skipif(
-    not _F3_B37_GPU_CHUNK_BANANA_EVIDENCE.is_file(),
-    reason="authored GPU chunk/banana JSON not yet produced",
-)
-def test_authored_gpu_chunk_banana_json_is_strict_and_not_a_speed_claim():
-    raw = _F3_B37_GPU_CHUNK_BANANA_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-reduced-gpu-chunk-banana.v1"
-    assert payload["written_by_pytest"] is False
-    assert payload["publication"] == _GPU_CHUNK_BANANA_PUBLICATION
-    boundary = payload["claim_boundary"]
-    assert boundary["nested_speed_claim"] is False
-    assert boundary["inherits_f3_7_70x"] is False
-    assert boundary["comparable_operators"] is False
-    assert boundary["cap_2048_attempted"] is False
-    probe = payload["probe"]
-    assert probe["banana_success"] is True
-    assert float(probe["banana_coil_delta_inf"]) == 0.0
-    widths = [int(row["chunk_batch_size"]) for row in probe["rows"]]
-    assert widths == list(F3_B37_CHUNK_WIDTHS)
-    assert probe["fail_closed_reason"] is None
-    assert probe.get("banana_omp_pinned") is not True
-    assert probe["runtime"]["jax_default_backend"] == "gpu"
-    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
-
-
-@pytest.mark.skipif(
-    not _F3_B37_GPU_VOLUME_OUTER_EVIDENCE.is_file(),
-    reason="authored GPU Volume outer JSON not yet produced",
-)
-def test_authored_gpu_volume_outer_json_is_strict_and_not_a_walk():
-    raw = _F3_B37_GPU_VOLUME_OUTER_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-reduced-gpu-volume-outer.v1"
-    assert payload["written_by_pytest"] is False
-    assert payload["publication"] == _GPU_VOLUME_OUTER_PUBLICATION
-    boundary = payload["claim_boundary"]
-    assert boundary["nested_speed_claim"] is False
-    assert boundary["inherits_f3_7_70x"] is False
-    assert boundary["moving_coil_b3_outer"] is False
-    assert boundary["outer_optimizer_loop"] is False
-    assert boundary.get("volume_directional_gradient") is True
-    assert boundary["cap_2048_attempted"] is False
-    probe = payload["probe"]
-    assert probe["surface_sha256"] == F3_B37_DENSE_LU_ENDPOINT_SURFACE_SHA256
-    assert probe["fail_closed_reason"] is None
-    assert probe["vjp_match"] is True
-    assert probe["fd_match"] is True
-    assert float(probe["coil_delta_inf_after"]) == 0.0
-    assert probe["runtime"]["jax_default_backend"] == "gpu"
-    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
-
-
 def test_omp_pin_requires_positive_integer_env():
     assert nested_ls_omp_threads_pinned({"OMP_NUM_THREADS": None}) is False
     assert nested_ls_omp_threads_pinned({"OMP_NUM_THREADS": ""}) is False
@@ -1239,23 +586,6 @@ def test_omp_pin_requires_positive_integer_env():
         "max_dense_linearization_bytes"
     ]
     assert newton_cap.default is None
-    if _F3_B37_GPU_WALK_DENSE_LU_EVIDENCE.is_file():
-        walk_seconds = float(
-            json.loads(_F3_B37_GPU_WALK_DENSE_LU_EVIDENCE.read_text(encoding="utf-8"))[
-                "probe"
-            ]["walk_seconds"]
-        )
-        assert walk_seconds == NESTED_LS_GATE6_PRE_LEVER_JAX_WALK_SECONDS
-    if _F3_B37_GPU_BANANA_OMP_EVIDENCE.is_file():
-        omp_rows = json.loads(
-            _F3_B37_GPU_BANANA_OMP_EVIDENCE.read_text(encoding="utf-8")
-        )["probe"]["rows"]
-        best16 = min(
-            float(row["seconds"])
-            for row in omp_rows
-            if int(row["omp_num_threads"]) == 16
-        )
-        assert best16 == NESTED_LS_GATE6_PRE_LEVER_NATIVE_OMP16_SECONDS
     source = Path(evaluate_f3_b37_banana_omp_sweep.__code__.co_filename).read_text(
         encoding="utf-8"
     )
@@ -1268,7 +598,6 @@ def test_omp_pin_requires_positive_integer_env():
         / "nested_ls_f3_b37_gpu_canaries.py"
     )
     text = driver.read_text(encoding="utf-8")
-    assert "docs/receipts/evidence" in text
     assert "/tmp/" not in text
     attr = (
         Path(__file__).resolve().parents[2]
@@ -1308,7 +637,6 @@ def test_omp_pin_requires_positive_integer_env():
     assert "jax_claim_wall_seconds" in attr_text
     assert "--allow-dirty" in attr_text
     assert "git_implementation_dirty" in attr_text
-    assert "docs/receipts/evidence/" in attr_text
     child = (
         Path(__file__).resolve().parents[2]
         / "benchmarks"
@@ -1337,678 +665,6 @@ def test_omp_pin_requires_positive_integer_env():
     assert "observed_omp_num_threads" in gate6_text
 
 
-@pytest.mark.skipif(
-    not _F3_B37_GPU_BANANA_OMP_EVIDENCE.is_file(),
-    reason="authored OMP banana sweep JSON not yet produced",
-)
-def test_authored_gpu_banana_omp_json_is_pinned_and_not_a_speed_claim():
-    raw = _F3_B37_GPU_BANANA_OMP_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-reduced-gpu-banana-omp.v1"
-    assert payload["written_by_pytest"] is False
-    assert payload["publication"] == _GPU_BANANA_OMP_PUBLICATION
-    boundary = payload["claim_boundary"]
-    assert boundary["nested_speed_claim"] is False
-    assert boundary["omp_pinned"] is True
-    assert boundary["interleaved_repeats"] is True
-    probe = payload["probe"]
-    assert probe["fail_closed_reason"] is None
-    assert probe["any_unpinned"] is False
-    assert {int(row["omp_num_threads"]) for row in probe["rows"]} == set(
-        F3_B37_BANANA_OMP_THREADS
-    )
-    assert all(bool(row["omp_pinned"]) for row in probe["rows"])
-    assert all(float(row["coil_delta_inf"]) == 0.0 for row in probe["rows"])
-    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
-
-
-@pytest.mark.skipif(
-    not _F3_B37_GPU_BANANA_OMP_GAP_EVIDENCE.is_file(),
-    reason="authored OMP banana 20/24 gap JSON not yet produced",
-)
-def test_authored_gpu_banana_omp_gap_json_fills_16_to_32():
-    raw = _F3_B37_GPU_BANANA_OMP_GAP_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-reduced-gpu-banana-omp-gap.v1"
-    assert payload["written_by_pytest"] is False
-    assert payload["publication"] == _GPU_BANANA_OMP_GAP_PUBLICATION
-    boundary = payload["claim_boundary"]
-    assert boundary["nested_speed_claim"] is False
-    assert boundary["omp_pinned"] is True
-    assert boundary["gap_fill_20_24"] is True
-    assert boundary["interleaved_repeats"] is True
-    probe = payload["probe"]
-    assert probe["fail_closed_reason"] is None
-    assert probe["repeats"] == 2
-    assert payload["threads"] == list(F3_B37_BANANA_OMP_GAP_THREADS)
-    assert {int(row["omp_num_threads"]) for row in probe["rows"]} == set(
-        F3_B37_BANANA_OMP_GAP_THREADS
-    )
-    assert all(bool(row["omp_pinned"]) for row in probe["rows"])
-    assert all(bool(row["success"]) for row in probe["rows"])
-    assert all(float(row["coil_delta_inf"]) == 0.0 for row in probe["rows"])
-    assert all(
-        abs(float(row["iota"]) - F3_B37_DENSE_LU_ENDPOINT_IOTA)
-        <= NESTED_LS_GATE6_IOTA_G_TOL
-        for row in probe["rows"]
-    )
-    assert all(
-        abs(float(row["G"]) - F3_B37_DENSE_LU_ENDPOINT_G) <= NESTED_LS_GATE6_IOTA_G_TOL
-        for row in probe["rows"]
-    )
-    gap_best = min(float(row["seconds"]) for row in probe["rows"])
-    assert gap_best > NESTED_LS_GATE6_PRE_LEVER_NATIVE_OMP16_SECONDS
-    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
-
-
-@pytest.mark.skipif(
-    not _F3_B37_GPU_BANANA_OMP_MIN_BRACKET_EVIDENCE.is_file(),
-    reason="authored OMP banana 12/14 min-bracket JSON not yet produced",
-)
-def test_authored_gpu_banana_omp_min_bracket_json_brackets_16():
-    raw = _F3_B37_GPU_BANANA_OMP_MIN_BRACKET_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-reduced-gpu-banana-omp-min-bracket.v1"
-    assert payload["written_by_pytest"] is False
-    assert payload["publication"] == _GPU_BANANA_OMP_MIN_BRACKET_PUBLICATION
-    boundary = payload["claim_boundary"]
-    assert boundary["nested_speed_claim"] is False
-    assert boundary["omp_pinned"] is True
-    assert boundary["gap_fill_12_14"] is True
-    assert boundary["inner_and_process_wall"] is True
-    assert boundary["interleaved_repeats"] is True
-    probe = payload["probe"]
-    assert probe["fail_closed_reason"] is None
-    assert probe["repeats"] == 2
-    assert payload["threads"] == list(F3_B37_BANANA_OMP_MIN_BRACKET_THREADS)
-    assert {int(row["omp_num_threads"]) for row in probe["rows"]} == set(
-        F3_B37_BANANA_OMP_MIN_BRACKET_THREADS
-    )
-    assert all(bool(row["omp_pinned"]) for row in probe["rows"])
-    assert all(bool(row["success"]) for row in probe["rows"])
-    assert all(float(row["coil_delta_inf"]) == 0.0 for row in probe["rows"])
-    assert all("process_wall_seconds" in row for row in probe["rows"])
-    assert all("inner_solver_seconds" in row for row in probe["rows"])
-    assert all("omp_proc_bind" in row for row in probe["rows"])
-    assert all("omp_places" in row for row in probe["rows"])
-    assert all(
-        float(row["inner_solver_seconds"]) == float(row["seconds"])
-        for row in probe["rows"]
-    )
-    assert all(
-        float(row["process_wall_seconds"]) >= float(row["inner_solver_seconds"])
-        for row in probe["rows"]
-    )
-    assert all(
-        abs(float(row["iota"]) - F3_B37_DENSE_LU_ENDPOINT_IOTA)
-        <= NESTED_LS_GATE6_IOTA_G_TOL
-        for row in probe["rows"]
-    )
-    assert all(
-        abs(float(row["G"]) - F3_B37_DENSE_LU_ENDPOINT_G) <= NESTED_LS_GATE6_IOTA_G_TOL
-        for row in probe["rows"]
-    )
-    bracket_best = min(float(row["inner_solver_seconds"]) for row in probe["rows"])
-    assert NESTED_LS_GATE6_PRE_LEVER_NATIVE_SECONDS == min(
-        NESTED_LS_GATE6_PRE_LEVER_NATIVE_OMP16_SECONDS, bracket_best
-    )
-    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
-
-
-@pytest.mark.skipif(
-    not _F3_B37_GPU_CHUNK_WARM_EVIDENCE.is_file(),
-    reason="authored warm chunk JSON not yet produced",
-)
-def test_authored_gpu_chunk_warm_json_is_not_a_default_switch():
-    raw = _F3_B37_GPU_CHUNK_WARM_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-reduced-gpu-chunk-warm.v1"
-    assert payload["written_by_pytest"] is False
-    assert payload["publication"] == _GPU_CHUNK_WARM_PUBLICATION
-    boundary = payload["claim_boundary"]
-    assert boundary["nested_speed_claim"] is False
-    assert boundary["production_chunk_default_unchanged"] is True
-    assert boundary["warm_repeated"] is True
-    probe = payload["probe"]
-    assert probe["fail_closed_reason"] is None
-    assert all(bool(row["discarded_warmup"]) for row in probe["rows"])
-    assert [int(row["chunk_batch_size"]) for row in probe["rows"]] == list(
-        F3_B37_CHUNK_WIDTHS
-    )
-    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
-
-
-@pytest.mark.skipif(
-    not _F3_B37_GPU_SHAMANSKII_ATTR_EVIDENCE.is_file(),
-    reason="authored Shamanskii attribution JSON not yet produced",
-)
-def test_authored_gpu_shamanskii_attr_json_is_not_a_speed_claim():
-    raw = _F3_B37_GPU_SHAMANSKII_ATTR_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-reduced-gpu-shamanskii-attr.v1"
-    assert payload["written_by_pytest"] is False
-    assert payload["publication"] == _GPU_SHAMANSKII_ATTR_PUBLICATION
-    boundary = payload["claim_boundary"]
-    assert boundary["nested_speed_claim"] is False
-    assert boundary["inherits_f3_7_70x"] is False
-    assert boundary["shamanskii_attribution"] is True
-    assert boundary["inner_and_process_wall"] is True
-    lanes = {
-        str(row["lane"])
-        for row in payload["rows"]
-        if row["role"] in {"prime", "measure"}
-    }
-    assert lanes == {"cache_only", "lag_only", "both"}
-    measures = [row for row in payload["rows"] if row["role"] == "measure"]
-    assert measures
-    assert {str(row["lane"]) for row in measures} == {"cache_only", "lag_only", "both"}
-    measure_counts = {
-        lane: sum(1 for row in measures if row["lane"] == lane)
-        for lane in ("cache_only", "lag_only", "both")
-    }
-    assert all(count >= 3 for count in measure_counts.values())
-    assert all(bool(row["success"]) for row in measures)
-    assert all(int(row["native_rejudge_iter"]) == 0 for row in measures)
-    assert all(float(row["coil_delta_inf"]) == 0.0 for row in measures)
-    assert all("process_wall_seconds" in row for row in measures)
-    assert all("process_elapsed_seconds" in row for row in measures)
-    assert all("jax_process_wall_seconds" in row for row in measures)
-    assert all("jax_floor_seconds" in row for row in measures)
-    assert all("reconstruct_seconds" in row for row in measures)
-    assert all("shamanskii_refine_passes" in row for row in measures)
-    assert all(
-        float(row["process_wall_seconds"]) >= float(row["walk_seconds"])
-        for row in measures
-    )
-    assert all(
-        float(row["jax_process_wall_seconds"]) >= float(row["walk_seconds"])
-        for row in measures
-    )
-    assert all(
-        float(row["jax_process_wall_seconds"])
-        == pytest.approx(
-            float(row["process_elapsed_seconds"])
-            - float(row["reconstruct_seconds"])
-            - float(row["native_rejudge_seconds"]),
-            abs=1.0e-6,
-        )
-        for row in measures
-    )
-    assert all(
-        float(row["jax_floor_seconds"])
-        == pytest.approx(
-            float(row["jax_process_wall_seconds"]) - float(row["walk_seconds"]),
-            abs=1.0e-6,
-        )
-        for row in measures
-    )
-    assert payload["claim_boundary"]["one_lane_per_process"] is True
-    assert payload["claim_boundary"]["repeats"] == NESTED_LS_GATE6_CLAIM_REPEATS
-    assert (
-        payload["claim_boundary"]["jax_claim_clock"]
-        == "parent_wait_minus_reconstruct_rejudge"
-    )
-    cache_only = [row for row in measures if row["lane"] == "cache_only"]
-    lag_only = [row for row in measures if row["lane"] == "lag_only"]
-    both = [row for row in measures if row["lane"] == "both"]
-    assert cache_only and lag_only and both
-    primes = [row for row in payload["rows"] if row["role"] == "prime"]
-    assert {str(row["lane"]) for row in primes} == {"cache_only", "both"}
-    assert all(row["linear_solver"] == "dense_lu" for row in cache_only)
-    assert all(row["linear_solver"] == "shamanskii" for row in lag_only)
-    assert all(row["linear_solver"] == "shamanskii" for row in both)
-    assert all(row["disable_cache"] is False for row in cache_only)
-    assert all(row["disable_cache"] is True for row in lag_only)
-    assert all(row["disable_cache"] is False for row in both)
-    assert all(row["cache_dir"] is not None for row in cache_only)
-    assert all(row["cache_dir"] is None for row in lag_only)
-    assert all(row["cache_dir"] is not None for row in both)
-    assert all(row["shamanskii_reused_steps"] == [] for row in cache_only)
-    assert all(
-        row["shamanskii_reused_steps"] or row["shamanskii_reassembled_steps"]
-        for row in lag_only
-    )
-    assert all(
-        row["shamanskii_reused_steps"] or row["shamanskii_reassembled_steps"]
-        for row in both
-    )
-    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
-
-
-@pytest.mark.skipif(
-    not _F3_B37_GPU_JAX_FLOOR_EVIDENCE.is_file(),
-    reason="authored JAX process-wall floor JSON not yet produced",
-)
-def test_authored_gpu_jax_floor_json_is_not_a_speed_claim():
-    raw = _F3_B37_GPU_JAX_FLOOR_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["written_by_pytest"] is False
-    floors = [row for row in payload["rows"] if row["role"] == "floor"]
-    assert {str(row["lane"]) for row in floors} == {
-        "floor_cache_on",
-        "floor_cache_off",
-    }
-    assert all(row["linear_solver"] == "floor" for row in floors)
-    assert all(bool(row["success"]) for row in floors)
-    assert all(float(row["walk_seconds"]) == 0.0 for row in floors)
-    assert all(float(row["reconstruct_seconds"]) == 0.0 for row in floors)
-    assert all("jax_floor_seconds" in row for row in floors)
-    assert all(float(row["jax_floor_seconds"]) > 0.0 for row in floors)
-    assert all(
-        float(row["jax_floor_seconds"])
-        == pytest.approx(float(row["process_elapsed_seconds"]), abs=1.0e-6)
-        for row in floors
-    )
-    cache_on = [row for row in floors if row["lane"] == "floor_cache_on"]
-    cache_off = [row for row in floors if row["lane"] == "floor_cache_off"]
-    assert cache_on and cache_off
-    assert all(row["disable_cache"] is False for row in cache_on)
-    assert all(row["disable_cache"] is True for row in cache_off)
-    assert payload["claim_boundary"]["nested_speed_claim"] is False
-    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
-
-
-@pytest.mark.skipif(
-    not _F3_B37_GPU_GATE6_EVIDENCE.is_file(),
-    reason="authored Gate-6 claim JSON not yet produced",
-)
-def test_authored_gpu_gate6_json_matches_frozen_contract():
-    raw = _F3_B37_GPU_GATE6_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-reduced-gpu-gate6.v1"
-    assert payload["written_by_pytest"] is False
-    assert payload["publication"] == _GPU_GATE6_PUBLICATION
-    boundary = payload["claim_boundary"]
-    assert boundary["inherits_f3_7_70x"] is False
-    assert boundary["comparable_operators"] is False
-    assert boundary["aggregation"] == NESTED_LS_GATE6_AGGREGATION
-    assert boundary["repeats"] == NESTED_LS_GATE6_CLAIM_REPEATS
-    assert boundary["native_omp_num_threads"] == NESTED_LS_GATE6_NATIVE_OMP_THREADS
-    assert boundary["jax_linear_solver"] == "shamanskii"
-    assert boundary["jax_persistent_cache"] is True
-    assert boundary["interleaved_repeats"] is True
-    assert boundary["jax_claim_clock"] == "parent_wait_minus_reconstruct_rejudge"
-    assert boundary["native_claim_clock"] == "parent_wait"
-    pairs = payload["pairs"]
-    assert len(pairs) >= NESTED_LS_GATE6_CLAIM_REPEATS
-    assert {int(pair["repeat"]) for pair in pairs} >= set(
-        range(NESTED_LS_GATE6_CLAIM_REPEATS)
-    )
-    assert all(pair["physics_ok"] for pair in pairs)
-    assert payload["fail_closed_reason"] is None
-    jax_claim_walls: list[float] = []
-    native_claim_walls: list[float] = []
-    for pair in pairs:
-        native = pair["native"]
-        jax_row = pair["jax"]
-        assert (
-            int(native["observed_omp_num_threads"])
-            == NESTED_LS_GATE6_NATIVE_OMP_THREADS
-        )
-        assert bool(native["omp_pinned"]) is True
-        assert float(native["coil_delta_inf"]) == 0.0
-        assert float(jax_row["coil_delta_inf"]) == 0.0
-        assert int(jax_row["native_rejudge_iter"]) == 0
-        assert float(jax_row["grad_l2"]) <= NESTED_LS_NEWTON_TOL
-        assert (
-            abs(float(jax_row["iota"]) - float(native["iota"]))
-            <= NESTED_LS_GATE6_IOTA_G_TOL
-        )
-        assert (
-            abs(float(jax_row["G"]) - float(native["G"])) <= NESTED_LS_GATE6_IOTA_G_TOL
-        )
-        native_claim = float(native["claim_wall_seconds"])
-        jax_claim = float(jax_row["claim_wall_seconds"])
-        native_claim_walls.append(native_claim)
-        jax_claim_walls.append(jax_claim)
-        assert native_claim == pytest.approx(
-            float(native["process_wall_seconds"]), abs=1.0e-9
-        )
-        assert jax_claim == pytest.approx(
-            float(jax_row["process_wall_seconds"])
-            - float(jax_row["reconstruct_seconds"])
-            - float(jax_row["native_rejudge_seconds"]),
-            abs=1.0e-6,
-        )
-    assert payload["native_min_process_wall_seconds"] == min(native_claim_walls)
-    assert payload["jax_min_process_wall_seconds"] == min(jax_claim_walls)
-    expected_claim = payload["fail_closed_reason"] is None and min(
-        jax_claim_walls
-    ) < min(native_claim_walls)
-    assert boundary["nested_speed_claim"] is expected_claim
-    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
-
-
-@pytest.mark.skipif(
-    not _A100_BANANA_OMP_EVIDENCE.is_file(),
-    reason="authored A100 banana OMP JSON not yet produced",
-)
-def test_authored_a100_banana_omp_json_is_host_best_of_contract():
-    raw = _A100_BANANA_OMP_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-reduced-a100-banana-omp.v1"
-    assert payload["written_by_pytest"] is False
-    boundary = payload["claim_boundary"]
-    assert boundary["nested_speed_claim"] is False
-    assert boundary["inherits_f3_7_70x"] is False
-    assert boundary["host"] == "landau"
-    assert boundary["omp_pinned"] is True
-    assert payload["threads"] == list(F3_B37_BANANA_OMP_CONTRACT_THREADS)
-    rows = payload["probe"]["rows"]
-    assert {int(row["omp_num_threads"]) for row in rows} == set(
-        F3_B37_BANANA_OMP_CONTRACT_THREADS
-    )
-    assert all(bool(row["omp_pinned"]) for row in rows)
-    assert all(bool(row["success"]) for row in rows)
-    best = int(payload["best_omp_num_threads"])
-    assert best in F3_B37_BANANA_OMP_CONTRACT_THREADS
-    best_inner = min(float(row["inner_solver_seconds"]) for row in rows)
-    assert float(payload["best_inner_solver_seconds"]) == pytest.approx(best_inner)
-    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
-
-
-@pytest.mark.skipif(
-    not _A100_GATE6_EVIDENCE.is_file(),
-    reason="authored A100 Gate-6 JSON not yet produced",
-)
-def test_authored_a100_gate6_json_uses_host_best_omp():
-    raw = _A100_GATE6_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-reduced-gpu-gate6.v1"
-    assert payload["written_by_pytest"] is False
-    boundary = payload["claim_boundary"]
-    assert boundary["inherits_f3_7_70x"] is False
-    assert boundary["tag"] == "a100"
-    assert boundary["repeats"] == NESTED_LS_GATE6_CLAIM_REPEATS
-    omp = int(boundary["native_omp_num_threads"])
-    if _A100_BANANA_OMP_EVIDENCE.is_file():
-        omp_payload = json.loads(_A100_BANANA_OMP_EVIDENCE.read_text(encoding="utf-8"))
-        assert omp == int(omp_payload["best_omp_num_threads"])
-    pairs = payload["pairs"]
-    assert len(pairs) >= NESTED_LS_GATE6_CLAIM_REPEATS
-    assert all(pair["physics_ok"] for pair in pairs)
-    assert payload["fail_closed_reason"] is None
-    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
-
-
-@pytest.mark.skipif(
-    not _GATE6_5090_EVIDENCE.is_file(),
-    reason="authored 5090 Gate-6 claim JSON not yet produced",
-)
-def test_authored_gpu_gate6_5090_json_matches_frozen_contract():
-    raw = _GATE6_5090_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-reduced-gpu-gate6.v1"
-    assert payload["written_by_pytest"] is False
-    assert payload["publication"] == _GPU_GATE6_PUBLICATION
-    boundary = payload["claim_boundary"]
-    assert boundary["inherits_f3_7_70x"] is False
-    assert boundary["comparable_operators"] is False
-    assert boundary["tag"] == "5090"
-    assert boundary["aggregation"] == NESTED_LS_GATE6_AGGREGATION
-    assert boundary["repeats"] == NESTED_LS_GATE6_CLAIM_REPEATS
-    assert boundary["native_omp_num_threads"] == NESTED_LS_GATE6_NATIVE_OMP_THREADS
-    assert boundary["jax_linear_solver"] == "shamanskii"
-    assert boundary["jax_persistent_cache"] is True
-    assert boundary["interleaved_repeats"] is True
-    assert boundary["jax_claim_clock"] == "parent_wait_minus_reconstruct_rejudge"
-    assert boundary["native_claim_clock"] == "parent_wait"
-    pairs = payload["pairs"]
-    assert len(pairs) >= NESTED_LS_GATE6_CLAIM_REPEATS
-    assert {int(pair["repeat"]) for pair in pairs} >= set(
-        range(NESTED_LS_GATE6_CLAIM_REPEATS)
-    )
-    assert all(pair["physics_ok"] for pair in pairs)
-    assert payload["fail_closed_reason"] is None
-    jax_claim_walls: list[float] = []
-    native_claim_walls: list[float] = []
-    for pair in pairs:
-        native = pair["native"]
-        jax_row = pair["jax"]
-        assert (
-            int(native["observed_omp_num_threads"])
-            == NESTED_LS_GATE6_NATIVE_OMP_THREADS
-        )
-        assert bool(native["omp_pinned"]) is True
-        assert float(native["coil_delta_inf"]) == 0.0
-        assert float(jax_row["coil_delta_inf"]) == 0.0
-        assert int(jax_row["native_rejudge_iter"]) == 0
-        assert float(jax_row["grad_l2"]) <= NESTED_LS_NEWTON_TOL
-        assert (
-            abs(float(jax_row["iota"]) - float(native["iota"]))
-            <= NESTED_LS_GATE6_IOTA_G_TOL
-        )
-        assert (
-            abs(float(jax_row["G"]) - float(native["G"])) <= NESTED_LS_GATE6_IOTA_G_TOL
-        )
-        native_claim = float(native["claim_wall_seconds"])
-        jax_claim = float(jax_row["claim_wall_seconds"])
-        native_claim_walls.append(native_claim)
-        jax_claim_walls.append(jax_claim)
-        assert native_claim == pytest.approx(
-            float(native["process_wall_seconds"]), abs=1.0e-9
-        )
-        assert jax_claim == pytest.approx(
-            float(jax_row["process_wall_seconds"])
-            - float(jax_row["reconstruct_seconds"])
-            - float(jax_row["native_rejudge_seconds"]),
-            abs=1.0e-6,
-        )
-    assert payload["native_min_process_wall_seconds"] == min(native_claim_walls)
-    assert payload["jax_min_process_wall_seconds"] == min(jax_claim_walls)
-    expected_claim = payload["fail_closed_reason"] is None and min(
-        jax_claim_walls
-    ) < min(native_claim_walls)
-    assert boundary["nested_speed_claim"] is expected_claim
-    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
-
-
-@pytest.mark.skipif(
-    not _OUTER_FD0_EVIDENCE.is_file(),
-    reason="authored outer FD-0 JSON not yet produced",
-)
-def test_authored_outer_fd0_json_passes_all_directions():
-    raw = _OUTER_FD0_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-outer-fd0.v2"
-    assert payload["written_by_pytest"] is False
-    assert payload["fail_closed_reason"] is None
-    rows = payload["probe"]["rows"]
-    assert len(rows) == NESTED_LS_OUTER_FD0_DIRECTIONS
-    for row in rows:
-        assert float(row["better_rel_error"]) <= NESTED_LS_OUTER_FD0_REL_TOL
-        assert row["halving_reduced_error"] is True
-        assert row["direction_pass"] is True
-    mixed_form_max_abs = payload["probe"]["mixed_form_max_abs_difference"]
-    assert mixed_form_max_abs is not None
-    assert np.isfinite(float(mixed_form_max_abs))
-    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
-
-
-def _assert_outer_claim_boundary(boundary: dict[str, object]) -> None:
-    assert boundary["jax_claim_clock"] == "parent_wait"
-    assert boundary["native_claim_clock"] == "parent_wait"
-    assert boundary["subtractions"] == "none"
-    assert boundary["lane_start_work_symmetric"] is True
-    assert boundary["moving_coil"] is True
-    assert boundary["outer_optimizer_loop"] is True
-    assert boundary["rejudged_lanes"] == ["native", "jax"]
-
-
-def _assert_outer_claim_walls(payload: dict[str, object]) -> None:
-    pairs = payload["pairs"]
-    assert pairs
-    assert all(pair["physics_ok"] for pair in pairs)
-    native_walls = [float(pair["native"]["claim_wall_seconds"]) for pair in pairs]
-    jax_walls = [float(pair["jax"]["claim_wall_seconds"]) for pair in pairs]
-    assert float(payload["native_min_process_wall_seconds"]) == min(native_walls)
-    assert float(payload["native_median_process_wall_seconds"]) == statistics.median(
-        native_walls
-    )
-    assert float(payload["jax_min_process_wall_seconds"]) == min(jax_walls)
-    assert float(payload["jax_median_process_wall_seconds"]) == statistics.median(
-        jax_walls
-    )
-
-
-@pytest.mark.skipif(
-    not _OUTER_B3_EVIDENCE.is_file(),
-    reason="authored outer B3 claim JSON not yet produced",
-)
-def test_authored_outer_b3_json_is_swept_omp_claim():
-    raw = _OUTER_B3_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-outer-claim.v1"
-    assert payload["written_by_pytest"] is False
-    assert payload["fail_closed_reason"] is None
-    boundary = payload["claim_boundary"]
-    _assert_outer_claim_boundary(boundary)
-    assert boundary["budget"] == 3
-    assert boundary["omp_provenance"] == "swept_artifact"
-    assert boundary["j_parity_mode"] == "observational_b3"
-    assert boundary["j_parity_rtol"] is None
-    assert boundary["b3_measured_j_rel_gap_max"] is None
-    assert boundary["b3_receipt"] is None
-    omp_evidence = boundary["omp_evidence"]
-    assert isinstance(omp_evidence, dict)
-    assert omp_evidence["path"]
-    assert omp_evidence["sha256"]
-    measured_j_rel_gap_max = float(boundary["measured_j_rel_gap_max"])
-    assert measured_j_rel_gap_max >= 0.0
-    for pair in payload["pairs"]:
-        assert pair["endpoint_j_within_frozen_band"] is None
-    _assert_outer_claim_walls(payload)
-    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
-
-
-@pytest.mark.skipif(
-    not _OUTER_B37_EVIDENCE.is_file(),
-    reason="authored outer B37 claim JSON not yet produced",
-)
-def test_authored_outer_b37_json_uses_b3_receipt_omp():
-    raw = _OUTER_B37_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    assert payload["schema"] == "nested-ls-outer-claim.v1"
-    assert payload["written_by_pytest"] is False
-    assert payload["fail_closed_reason"] is None
-    boundary = payload["claim_boundary"]
-    _assert_outer_claim_boundary(boundary)
-    assert boundary["budget"] == 37
-    assert boundary["omp_provenance"] == "swept_artifact"
-    assert boundary["j_parity_mode"] == "frozen_from_b3"
-    assert isinstance(boundary["j_parity_rtol"], float)
-    assert isinstance(boundary["b3_measured_j_rel_gap_max"], float)
-    assert boundary["omp_evidence"] is None
-    b3_receipt = boundary["b3_receipt"]
-    assert isinstance(b3_receipt, dict)
-    assert b3_receipt["path"]
-    assert b3_receipt["sha256"]
-    for pair in payload["pairs"]:
-        assert isinstance(pair["endpoint_j_within_frozen_band"], bool)
-    _assert_outer_claim_walls(payload)
-    assert not _F3_B37_GPU_WALK_EVIDENCE.is_file()
-
-
-def _assert_outer_transaction_claim(payload: dict[str, object], *, budget: int) -> None:
-    assert payload["schema"] == CLAIM_SCHEMA
-    assert payload["written_by_pytest"] is False
-    assert payload["fail_closed_reason"] is None
-    boundary = payload["claim_boundary"]
-    _assert_outer_claim_boundary(boundary)
-    assert boundary["budget"] == budget
-    expected_policy = {
-        "accepted_state_policy": "commit_on_scipy_accept",
-        "rejection_gradient_policy": "quadratic_barrier_derivative_v2",
-        "rejection_rollback_policy": "restore_committed_anchor",
-        "rejection_value_policy": "anchor_plus_half_scaled_distance_squared_v2",
-    }
-    for pair in payload["pairs"]:
-        assert pair["physics_ok"] is True
-        native_payload = pair["native"]["child_payload"]
-        jax_payload = pair["jax"]["child_payload"]
-        for row in (pair["native"], pair["jax"]):
-            child_raw = row["child_payload_raw"]
-            assert (
-                hashlib.sha256(child_raw.encode("utf-8")).hexdigest()
-                == row["child_payload_sha256"]
-            )
-            assert json.loads(child_raw) == row["child_payload"]
-        assert native_payload["schema"] == NESTED_LS_OUTER_NATIVE_CHILD_SCHEMA
-        assert jax_payload["schema"] == NESTED_LS_OUTER_JAX_CHILD_SCHEMA
-        assert native_payload["outer_policy"] == jax_payload["outer_policy"]
-        assert (
-            native_payload["outer_policy"]["transaction_policy_names"]
-            == expected_policy
-        )
-        assert "feasible_evaluations" in native_payload
-        assert "feasible_evaluations" in jax_payload
-        assert native_payload["ftol_zero_stop"] is False
-        assert jax_payload["ftol_zero_stop"] is False
-        for lane, row, envelope in (
-            ("native", pair["native"], pair["native_rejudge"]),
-            ("jax", pair["jax"], pair["jax_rejudge"]),
-        ):
-            rejudge = envelope["payload"]
-            assert rejudge["schema"] == "nested-ls-outer-rejudge.v1"
-            assert rejudge["judged_lane"] == lane
-            assert rejudge["source_child_payload_sha256"] == row["child_payload_sha256"]
-            assert rejudge["endpoint_coil_sha256"] == row["endpoint_coil_sha256"]
-            assert rejudge["endpoint_surface_sha256"] == row["endpoint_surface_sha256"]
-            assert len(envelope["payload_sha256"]) == 64
-            assert "endpoint_json" not in rejudge
-    _assert_outer_claim_walls(payload)
-
-
-@pytest.mark.skipif(
-    not _OUTER_B3_TRANSACTION_EVIDENCE.is_file(),
-    reason="authored transactional outer B3 claim JSON not yet produced",
-)
-def test_authored_outer_b3_transaction_json_is_claim_grade():
-    raw = _OUTER_B3_TRANSACTION_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    _assert_outer_transaction_claim(payload, budget=3)
-
-
-@pytest.mark.skipif(
-    not _OUTER_B37_TRANSACTION_EVIDENCE.is_file(),
-    reason="authored transactional outer B37 claim JSON not yet produced",
-)
-def test_authored_outer_b37_transaction_json_is_claim_grade():
-    raw = _OUTER_B37_TRANSACTION_EVIDENCE.read_text(encoding="utf-8")
-    assert "NaN" not in raw
-    payload = json.loads(raw)
-    dump_strict_json(payload)
-    _assert_outer_transaction_claim(payload, budget=37)
-
-
 @_REQUIRES_BUNDLE
 @_REQUIRES_F3_B37
 @pytest.mark.slow
@@ -2030,8 +686,6 @@ def test_f3_gpu_b37_bounded_hvp_and_native_reference():
         compare_schur_hvp=True,
     )
     dump_strict_json({"probe": probe.as_payload()})
-    frozen = json.loads(_F3_B37_BOUNDED_EVIDENCE.read_text(encoding="utf-8"))
-    frozen_probe = frozen["probe"]
     value_tol = parity_ladder_tolerances("direct_kernel")
     assert probe.residual_rows == 3 * 255 * 64 + 2
     assert probe.y_rank == 2
@@ -2055,13 +709,13 @@ def test_f3_gpu_b37_bounded_hvp_and_native_reference():
     assert jax.default_backend() == "cpu"
     np.testing.assert_allclose(
         probe.y_star_iota,
-        frozen_probe["y_star_iota"],
+        _F3_B37_Y_STAR_IOTA,
         rtol=float(value_tol["rtol"]),
         atol=float(value_tol["atol"]),
     )
     np.testing.assert_allclose(
         probe.native_ref_delta_iota,
-        frozen_probe["native_ref_delta_iota"],
+        _F3_B37_NATIVE_REF_DELTA_IOTA,
         rtol=float(value_tol["rtol"]),
         atol=float(value_tol["atol"]),
     )
@@ -2091,9 +745,6 @@ def test_f3_b37_one_schur_newton_step_and_cpp_rejudge():
     _assert_grid(native)
     probe = evaluate_f3_b37_schur_newton_step(native, jax_boozer)
     dump_strict_json(probe.as_payload())
-    frozen = json.loads(_F3_B37_SCHUR_ONE_STEP_EVIDENCE.read_text(encoding="utf-8"))
-    frozen_probe = frozen["probe"]
-    replay = frozen["independent_replay"]
     assert probe.gmres_info in (0, -1)
     assert probe.gmres_restart == 8
     assert probe.gmres_maxiter >= 1
@@ -2110,13 +761,13 @@ def test_f3_b37_one_schur_newton_step_and_cpp_rejudge():
     value_tol = parity_ladder_tolerances("direct_kernel")
     np.testing.assert_allclose(
         probe.y_star_iota,
-        frozen_probe["y_star_iota"],
+        _F3_B37_Y_STAR_IOTA,
         rtol=float(value_tol["rtol"]),
         atol=float(value_tol["atol"]),
     )
     np.testing.assert_allclose(
         probe.native_rejudge_iota,
-        frozen_probe["native_rejudge_iota"],
+        _F3_B37_SCHUR_REJUDGE_IOTA,
         rtol=float(value_tol["rtol"]),
         atol=float(value_tol["atol"]),
         err_msg="C++ rejudge of the Schur step left the reconstruct iota branch",
@@ -2133,7 +784,7 @@ def test_f3_b37_one_schur_newton_step_and_cpp_rejudge():
     assert probe.rejudge_vs_reconstruct_surface_inf < 1.0e-9
     np.testing.assert_allclose(
         probe.rejudge_vs_reconstruct_surface_inf,
-        replay["cpp_rejudge_branch"]["surface_inf_vs_reconstruct"],
+        _F3_B37_SCHUR_REJUDGE_SURFACE_INF,
         rtol=1.0e-2,
         atol=1.0e-11,
     )
