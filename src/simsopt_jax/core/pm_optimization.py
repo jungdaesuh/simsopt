@@ -26,10 +26,11 @@ Algorithm contract
 
 The C++ kernel exposes a dynamic-stopping API
 (``epsilon`` / ``max_iter``) plus an internal history buffer. JAX
-``jax.lax.scan`` requires a static iteration count and rejects host-side
-break logic. The port therefore exposes the **fixed-step** kernel
-``mwpgp_solve(spec, A, b, m0, n_steps=...)`` that mirrors the C++ algebra
-exactly for the first ``n_steps`` iterations and never short-circuits.
+``jax.lax.scan`` requires a static iteration count, so ``mwpgp_solve``
+runs a fixed ``n_steps`` scan and implements the C++ ``x_sum < epsilon``
+test (L1 of ``|x_{k}-x_{k-1}|``, ``permanent_magnet_optimization.cpp:310-320``)
+by freezing the remaining scan steps on the last accepted iterate.
+``epsilon=0`` never fires: the comparison is strict ``<`` and ``x_sum >= 0``.
 ``mwpgp_step`` exposes the single-iteration transition for testing and
 manual unrolling.
 
@@ -3332,6 +3333,54 @@ def _hessian_action(
 # ── Single iteration (mirrors the C++ main loop body, lines 203-322) ───
 
 
+def _mwpgp_inner_set_predicate(g_alpha_p: jax.Array, phi_g: jax.Array) -> jax.Array:
+    """Return the C++ inner-set predicate as a scalar boolean.
+
+    Native ``permanent_magnet_optimization.cpp:221-234`` takes CG when
+    ``norm_g_alpha_p <= norm_phi_temp``. Independent ``sum(x**2)``
+    reductions match that algebra, but XLA can fuse them in a GPU scan
+    so a bitwise tie rounds apart. Stacking the squared fields into one
+    reduction of identical structure, then ``lax.optimization_barrier``,
+    keeps a tie a tie; separate barriers on the two sums do not.
+    """
+    squares = jnp.stack((g_alpha_p * g_alpha_p, phi_g * phi_g), axis=0)
+    norms = jnp.sum(squares, axis=(1, 2))
+    norm_g_alpha_p, norm_phi = jax.lax.optimization_barrier((norms[0], norms[1]))
+    return norm_g_alpha_p <= norm_phi
+
+
+def _residual_sq_proxy(x: jax.Array, A: jax.Array, ATb: jax.Array) -> jax.Array:
+    x_flat = _flatten_moments(x)
+    Ax = A @ x_flat
+    return jnp.sum(Ax * Ax) - _scalar_like(Ax, 2.0) * jnp.sum(x_flat * ATb.reshape(-1))
+
+
+def _mwpgp_advance(
+    state: tuple[jax.Array, jax.Array, jax.Array],
+    stopped: jax.Array,
+    A: jax.Array,
+    ATb_rs: jax.Array,
+    m_maxima: jax.Array,
+    alpha: jax.Array,
+    reg_l2: jax.Array,
+    nu: jax.Array,
+    epsilon: float,
+) -> tuple[tuple[jax.Array, jax.Array, jax.Array], jax.Array]:
+    """One MwPGP step, or a freeze of ``state`` after the C++ x_sum stop."""
+
+    x, g, p = state
+
+    def _active(_operand):
+        x_new, g_new, p_new = _step_body(state, A, ATb_rs, m_maxima, alpha, reg_l2, nu)
+        x_sum = jnp.sum(jnp.abs(x_new - x))
+        return (x_new, g_new, p_new), x_sum < epsilon
+
+    def _frozen(_operand):
+        return state, True
+
+    return jax.lax.cond(stopped, _frozen, _active, None)
+
+
 def _step_body(
     state: tuple[jax.Array, jax.Array, jax.Array],
     A: jax.Array,
@@ -3352,9 +3401,7 @@ def _step_body(
 
     g_alpha_p = g_reduced_projected_gradient(x, g, alpha, m_maxima)
     phi_g = phi_mwpgp(x, g, m_maxima)
-    norm_g_alpha_p = jnp.sum(g_alpha_p * g_alpha_p)
-    norm_phi = jnp.sum(phi_g * phi_g)
-    inner = norm_g_alpha_p <= norm_phi
+    inner = _mwpgp_inner_set_predicate(g_alpha_p, phi_g)
 
     # This branch is per-geometry scalar control flow. If a future caller vmaps
     # whole geometries through this step, both arms will execute under batching
@@ -3468,7 +3515,7 @@ def mwpgp_initial_state(
     return _initial_state(m0_arr, A_arr, ATb_rs, m_maxima, reg_l2, nu)
 
 
-@partial(jax.jit, static_argnames=("n_steps", "record_residual"))
+@partial(jax.jit, static_argnames=("n_steps", "record_residual", "epsilon"))
 def mwpgp_solve(
     spec: PMOptimizationSpec,
     A: jax.Array,
@@ -3477,6 +3524,7 @@ def mwpgp_solve(
     *,
     n_steps: int,
     record_residual: bool = True,
+    epsilon: float = 0.0,
 ) -> tuple[jax.Array, jax.Array]:
     """Run ``n_steps`` MwPGP iterations under ``jax.lax.scan``.
 
@@ -3491,11 +3539,16 @@ def mwpgp_solve(
     m0
         Initial guess, shape ``(N, 3)``. Must lie in the L2 ball.
     n_steps
-        Static iteration count. The solver never short-circuits.
+        Static iteration count. After the C++ ``x_sum < epsilon`` test
+        fires, remaining scan steps freeze the last accepted iterate.
     record_residual
         When true, return the per-step residual proxy history used by the
         direct MwPGP path. When false, skip that diagnostic matvec and return a
         zero history with the same static shape.
+    epsilon
+        Native MwPGP L1 step tolerance (``permanent_magnet_optimization.cpp:310-320``).
+        Compile-time scalar so it is not a jitted input. Default ``0`` never
+        stops (``x_sum < 0`` is false) and compiles the original full scan.
 
     Returns
     -------
@@ -3505,8 +3558,8 @@ def mwpgp_solve(
         Per-iteration ``||A m - b||^2`` traced under the scan, shape
         ``(n_steps,)``. Useful for diagnostic monotonicity checks. This is
         a fixed-length JAX trace, not the upstream C++ ``objective_history``
-        / ``m_history`` buffer, and callers that need C++ early-stop history
-        must use the CPU implementation.
+        / ``m_history`` buffer. Frozen steps repeat the residual of the
+        accepted iterate.
 
     Notes
     -----
@@ -3533,34 +3586,55 @@ def mwpgp_solve(
     ATb_rs = ATb_arr + m_proxy / nu
     init_state = _initial_state(m0_arr, A_arr, ATb_rs, m_maxima, reg_l2, nu)
 
+    if n_steps == 0:
+        return m0_arr, _zeros_like_shape(m0_arr, (0,), dtype=m0_arr.dtype)
+
+    zero_history = _zeros_like_shape(m0_arr, (n_steps,), dtype=m0_arr.dtype)
+
+    if epsilon > 0.0:
+
+        def _scan_body_freeze(carry, _):
+            state, stopped = carry
+            new_state, done = _mwpgp_advance(
+                state,
+                stopped,
+                A_arr,
+                ATb_rs,
+                m_maxima,
+                alpha,
+                reg_l2,
+                nu,
+                epsilon,
+            )
+            residual_sq_proxy = (
+                _residual_sq_proxy(new_state[0], A_arr, ATb_arr)
+                if record_residual
+                else None
+            )
+            return (new_state, done), residual_sq_proxy
+
+        final_carry, residual_history = jax.lax.scan(
+            _scan_body_freeze,
+            (init_state, _false_like_shape(m0_arr, ())),
+            xs=None,
+            length=n_steps,
+        )
+        if record_residual:
+            return final_carry[0][0], residual_history
+        return final_carry[0][0], zero_history
+
     def _scan_body(state, _):
         x_new, g_new, p_new = _step_body(
             state, A_arr, ATb_rs, m_maxima, alpha, reg_l2, nu
         )
-        # Diagnostic: residual-squared minus the constant ||b||^2 term.
-        x_flat = _flatten_moments(x_new)
-        Ax = A_arr @ x_flat
-        residual_sq_proxy = jnp.sum(Ax * Ax) - _scalar_like(Ax, 2.0) * jnp.sum(
-            x_flat * ATb_arr.reshape(-1)
+        residual_sq_proxy = (
+            _residual_sq_proxy(x_new, A_arr, ATb_arr) if record_residual else None
         )
         return (x_new, g_new, p_new), residual_sq_proxy
 
-    if n_steps == 0:
-        return m0_arr, _zeros_like_shape(m0_arr, (0,), dtype=m0_arr.dtype)
-
-    if record_residual:
-        final_state, residual_history = jax.lax.scan(
-            _scan_body, init_state, xs=None, length=n_steps
-        )
-        return final_state[0], residual_history
-
-    def _scan_body_without_residual(state, _):
-        x_new, g_new, p_new = _step_body(
-            state, A_arr, ATb_rs, m_maxima, alpha, reg_l2, nu
-        )
-        return (x_new, g_new, p_new), None
-
-    final_state, _ = jax.lax.scan(
-        _scan_body_without_residual, init_state, xs=None, length=n_steps
+    final_state, residual_history = jax.lax.scan(
+        _scan_body, init_state, xs=None, length=n_steps
     )
-    return final_state[0], _zeros_like_shape(m0_arr, (n_steps,), dtype=m0_arr.dtype)
+    if record_residual:
+        return final_state[0], residual_history
+    return final_state[0], zero_history

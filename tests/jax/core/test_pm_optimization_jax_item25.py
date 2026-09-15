@@ -14,9 +14,13 @@ Validates the MwPGP solver port against:
    minimiser to within an O(geometric-decay) tolerance.
 4. C++ oracle parity: ``mwpgp_solve`` matches ``simsoptpp.MwPGP_algorithm``
    iterate-by-iterate up to floating-point rounding for a 5-iteration
-   trace (``epsilon=0`` is not exposed on the C++ side so we use a
-   medium-sized problem and a step count that fits before the C++ kernel
-   triggers its history snapshot path).
+   trace (``epsilon=0`` disables the native ``x_sum`` stop because the
+   test is strict ``<``).
+5. The inner-set predicate takes the conjugate-gradient path on an exact
+   ``||g_alpha_p||^2 == ||phi||^2`` tie, matching
+   ``permanent_magnet_optimization.cpp:234``.
+6. ``epsilon > 0`` freezes remaining scan steps on the last accepted
+   iterate, matching C++ ``permanent_magnet_optimization.cpp:310-320``.
 """
 
 from __future__ import annotations
@@ -58,6 +62,7 @@ from simsopt_jax.core.pm_optimization import (
     mwpgp_step,
     phi_mwpgp,
     projection_l2_balls,
+    _mwpgp_inner_set_predicate,
 )
 from jaxpr_utils import count_jaxpr_primitives
 
@@ -2215,6 +2220,70 @@ class TestMwPGPSolver:
         np.testing.assert_array_equal(np.asarray(m_final), m0)
         assert history.shape == (0,)
 
+    def test_epsilon_x_sum_freezes_remaining_scan_steps(self):
+        """Native ``x_sum < epsilon`` freeze: leftover scan steps keep x.
+
+        C++ ``permanent_magnet_optimization.cpp:310-320`` applies the step
+        that triggered the test, then breaks. A huge epsilon therefore
+        equals a one-step run, including under ``jit``.
+        """
+        rng = np.random.default_rng(2026)
+        n_dipoles = 4
+        n_quad = 12
+        A = rng.standard_normal(size=(n_quad, 3 * n_dipoles))
+        b = rng.standard_normal(size=(n_quad,))
+        m_maxima = np.full(n_dipoles, 0.4)
+        m_proxy = np.zeros((n_dipoles, 3))
+        m0 = np.zeros((n_dipoles, 3))
+        ATb = (A.T @ b).reshape(n_dipoles, 3)
+        s = np.linalg.svd(A, compute_uv=False)
+        alpha = 1.0 / (s[0] ** 2)
+        spec = _make_spec(m_maxima, m_proxy, alpha=alpha, reg_l2=0.0, nu=1.0e100)
+        A_jax = jnp.asarray(A)
+        ATb_jax = jnp.asarray(ATb)
+        m0_jax = jnp.asarray(m0)
+        m_one, _ = mwpgp_solve(
+            spec, A_jax, ATb_jax, m0_jax, n_steps=1, record_residual=False
+        )
+        m_frozen, history = mwpgp_solve(
+            spec,
+            A_jax,
+            ATb_jax,
+            m0_jax,
+            n_steps=8,
+            epsilon=1.0e100,
+        )
+        np.testing.assert_allclose(
+            np.asarray(m_frozen),
+            np.asarray(m_one),
+            rtol=_STATE_TRACE_RTOL,
+            atol=_STATE_TRACE_ATOL,
+        )
+        assert history.shape == (8,)
+        _, _, _, x_cpp = simsoptpp.MwPGP_algorithm(
+            A,
+            b,
+            ATb,
+            m_proxy,
+            np.array(m0, copy=True, order="C"),
+            m_maxima,
+            alpha,
+            1.0e100,
+            1.0e100,
+            0.0,
+            0.0,
+            0.0,
+            8,
+            0.0,
+            False,
+        )
+        np.testing.assert_allclose(
+            np.asarray(m_frozen),
+            np.asarray(x_cpp),
+            rtol=_STATE_TRACE_RTOL,
+            atol=_STATE_TRACE_ATOL,
+        )
+
 
 # ---------------------------------------------------------------------
 # Single-iteration parity (the building block).
@@ -2345,6 +2414,81 @@ class TestMwPGPSingleStep:
         np.testing.assert_allclose(
             np.asarray(p_new),
             np.zeros((1, 3)),
+            rtol=_SINGLE_STEP_RTOL,
+            atol=_SINGLE_STEP_ATOL,
+        )
+
+    def test_exact_tie_takes_conjugate_gradient_path(self):
+        """Interior start => ``||g_alpha_p||^2 == ||phi||^2``; C++ ``<=`` is CG.
+
+        Native ``permanent_magnet_optimization.cpp:234-243``. The fields are
+        bitwise equal, so the stacked inner-set predicate must stay true
+        under ``jit`` and the step must match the CG update.
+        """
+        rng = np.random.default_rng(234)
+        n_dipoles = 3
+        n_quad = 9
+        A = rng.standard_normal(size=(n_quad, 3 * n_dipoles))
+        b = rng.standard_normal(size=(n_quad,))
+        m_maxima = np.full(n_dipoles, 10.0)
+        m_proxy = np.zeros((n_dipoles, 3))
+        m0 = np.zeros((n_dipoles, 3))
+        ATb = (A.T @ b).reshape(n_dipoles, 3)
+        s = np.linalg.svd(A, compute_uv=False)
+        alpha = 1.0 / (s[0] ** 2)
+        nu = 1.0e100
+        spec = _make_spec(m_maxima, m_proxy, alpha=alpha, reg_l2=0.0, nu=nu)
+        A_jax = jnp.asarray(A, dtype=jnp.float64)
+        ATb_jax = jnp.asarray(ATb, dtype=jnp.float64)
+        state = mwpgp_initial_state(
+            spec,
+            A_jax,
+            ATb_jax,
+            jnp.asarray(m0, dtype=jnp.float64),
+        )
+        x, g, p = (np.asarray(leaf) for leaf in state)
+        g_alpha_p = np.asarray(
+            g_reduced_projected_gradient(
+                jnp.asarray(x),
+                jnp.asarray(g),
+                jnp.asarray(alpha),
+                jnp.asarray(m_maxima),
+            )
+        )
+        phi = np.asarray(
+            phi_mwpgp(jnp.asarray(x), jnp.asarray(g), jnp.asarray(m_maxima))
+        )
+        np.testing.assert_array_equal(g_alpha_p, phi)
+        inner = jax.jit(_mwpgp_inner_set_predicate)(
+            jnp.asarray(g_alpha_p), jnp.asarray(phi)
+        )
+        assert bool(inner)
+        v_flat = p.reshape(-1)
+        atap = (A.T @ (A @ v_flat) + (1.0 / nu) * v_flat).reshape(n_dipoles, 3)
+        alpha_cg = float(np.sum(g * p) / np.sum(p * atap))
+        alpha_f = float(
+            np.min(np.asarray(find_max_alphaf(state[0], state[2], spec.m_maxima)))
+        )
+        assert alpha_cg < alpha_f
+        x_cg = x - alpha_cg * p
+        x_new, _, _ = jax.jit(lambda st: mwpgp_step(spec, st, A_jax, ATb_jax))(state)
+        np.testing.assert_allclose(
+            np.asarray(x_new),
+            x_cg,
+            rtol=_SINGLE_STEP_RTOL,
+            atol=_SINGLE_STEP_ATOL,
+        )
+        m_solve, _ = mwpgp_solve(
+            spec,
+            A_jax,
+            ATb_jax,
+            jnp.asarray(m0, dtype=jnp.float64),
+            n_steps=1,
+            record_residual=False,
+        )
+        np.testing.assert_allclose(
+            np.asarray(m_solve),
+            x_cg,
             rtol=_SINGLE_STEP_RTOL,
             atol=_SINGLE_STEP_ATOL,
         )
