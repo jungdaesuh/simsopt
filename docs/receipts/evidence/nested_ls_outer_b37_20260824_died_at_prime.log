@@ -1,2 +1,0 @@
-outer prime jax cache budget 37 maxcor 10 omp 20 omp_provenance swept_artifact git_head e75865e0af2aee27924ef48f3e355c716def0dbc
-outer b3 interlock path /home/jungdaesuh/code/columbia/.wt-cert-sweep/docs/receipts/evidence/nested_ls_outer_b3_20260824.json sha256 4ff4e5c72a27263843a8e18ce1453d34029c4f2310c267c64ee07b27a6e9fd18 pairs 3 native_omp 20 measured_j_rel_gap_max 2.7966064071508394e-13 frozen j_parity_rtol 2.7966064071508394e-13
