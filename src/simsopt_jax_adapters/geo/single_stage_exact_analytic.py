@@ -28,12 +28,25 @@ import jax.numpy as jnp
 import numpy as np
 from jax.scipy.linalg import lu_factor, lu_solve
 from numpy.typing import NDArray
+from simsopt_jax.backend.dtypes import explicit_device_array
 from simsopt_jax.core._math_utils import as_jax_float64
-from simsopt_jax.core.field import coil_set_spec_from_dof_extraction_spec
+from simsopt_jax.core.field import (
+    coil_set_spec_from_dof_extraction_spec,
+    grouped_field_data_from_spec,
+)
 from simsopt_jax.core.specs import host_resident_spec
 
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
-from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
+from simsopt_jax_adapters.geo.boozer_surface import (
+    BoozerSurfaceJAX,
+    _grouped_coil_set_static_signature,
+    _label_value_from_surface_dofs,
+)
+from simsopt_jax_adapters.geo.single_stage_host_construction import (
+    host_analytic_geometry_origin_and_basis,
+    host_coil_currents,
+    host_grouped_coil_set_spec,
+)
 from simsopt_jax_adapters.geo.surface_objectives_traceable import (
     _build_traceable_objective_cache_state,
     _evaluate_traceable_total_objective,
@@ -43,11 +56,75 @@ __all__ = [
     "INNER_FAILURE_VALUE",
     "ExactAnalyticEvaluation",
     "ExactAnalyticSingleStage",
+    "HostConstructionBoozerSurfaceJAX",
 ]
 
 # The native example returns this objective value when the inner exact Newton
 # solve does not converge, so the outer line search backs off.
 INNER_FAILURE_VALUE = 1.0e3
+
+
+class HostConstructionBoozerSurfaceJAX(BoozerSurfaceJAX):
+    """Exact Boozer adapter whose construction-time constants stay on the host.
+
+    Coil groups and the affine surface basis are baked with NumPy. The compiled
+    evaluate program still captures the same host constants as the JAX bake.
+    """
+
+    def _refresh_coil_data(self):
+        coil_set_spec = host_grouped_coil_set_spec(self.biotsavart)
+        coil_set_static_signature = _grouped_coil_set_static_signature(coil_set_spec)
+        previous_coil_set_static_signature = self._coil_set_static_signature
+        self.coil_set_spec = coil_set_spec
+        self.coil_groups = list(grouped_field_data_from_spec(self.coil_set_spec))
+        self.coil_currents = host_coil_currents(self.coil_set_spec)
+        self._coil_set_static_signature = coil_set_static_signature
+        self._reference_penalty_objective_cache.clear()
+        self._reference_penalty_value_and_grad_cache.clear()
+        self._reference_penalty_residual_cache.clear()
+        self._reference_exact_residual_cache.clear()
+        if (
+            previous_coil_set_static_signature is not None
+            and previous_coil_set_static_signature != coil_set_static_signature
+        ):
+            self._kernel_bundle_cache.clear()
+
+    def _make_analytic_geometry_terms(self):
+        surface_args = self._traceable_surface_runtime_args()
+        origin, basis = host_analytic_geometry_origin_and_basis(
+            n_dofs=int(np.asarray(self.surface.get_dofs()).size),
+            quadpoints_phi=surface_args["quadpoints_phi"],
+            quadpoints_theta=surface_args["quadpoints_theta"],
+            mpol=surface_args["mpol"],
+            ntor=surface_args["ntor"],
+            nfp=surface_args["nfp"],
+            stellsym=surface_args["stellsym"],
+            scatter_indices=surface_args["scatter_indices"],
+            surface_kind=surface_args["surface_kind"],
+            clamped_dims=surface_args["clamped_dims"],
+        )
+
+        def geometry_from_dofs(sdofs):
+            return jax.tree.map(
+                lambda offset, coefficients: (
+                    offset + jnp.einsum("...s,s->...", coefficients, sdofs)
+                ),
+                origin,
+                basis,
+            )
+
+        label_args = {
+            key: value
+            for key, value in surface_args.items()
+            if key.startswith("label_") or key == "phi_idx"
+        }
+
+        def label_value(sdofs, coil_set_spec):
+            return _label_value_from_surface_dofs(
+                sdofs, coil_set_spec=coil_set_spec, **label_args
+            )
+
+        return geometry_from_dofs, basis, label_value
 
 
 @dataclass(frozen=True)
@@ -116,19 +193,19 @@ class ExactAnalyticSingleStage:
         # them with NumPy and cross to the device once, explicitly, so the
         # construction path stays clean under ``jax.transfer_guard("disallow")``
         # -- an eager ``jnp`` constructor over host values crosses implicitly.
-        initial = jax.jit(solve)(
-            jax.device_put(np.asarray(field.x, dtype=np.float64)),
-            jax.device_put(
-                np.concatenate(
-                    (
-                        np.asarray(
-                            boozer_surface.surface.get_dofs(), dtype=np.float64
-                        ),
-                        np.asarray((iota, G), dtype=np.float64),
-                    )
+        seed_coil_dofs = explicit_device_array(
+            np.asarray(field.x, dtype=np.float64), dtype=np.float64
+        )
+        seed_inner = explicit_device_array(
+            np.concatenate(
+                (
+                    np.asarray(boozer_surface.surface.get_dofs(), dtype=np.float64),
+                    np.asarray((iota, G), dtype=np.float64),
                 )
             ),
+            dtype=np.float64,
         )
+        initial = jax.jit(solve)(seed_coil_dofs, seed_inner)
         jax.block_until_ready(initial)
         # ``bool``/``float``/``int`` of a device array is an implicit read back;
         # the three fields the host keeps cross once, explicitly.
@@ -149,6 +226,7 @@ class ExactAnalyticSingleStage:
             outer_objective_config=outer_objective_config(),
             require_ondevice_inner=False,
         )
+        self._objective_cache_state = cache_state
         objective_kwargs = cache_state["objective_kwargs"]
         value_jacobian = boozer_surface._make_analytic_exact_value_jacobian(
             boozer_surface.options["weight_inv_modB"]

@@ -386,7 +386,7 @@ _NATIVE_EXAMPLE = SourceRef(
 )
 _JAX_EXAMPLE = SourceRef(
     path="src/simsopt_jax_adapters/geo/single_stage_boozer_vacuum_problem.py",
-    sha256="1cce177f46aa55be3cc7814b6d946f1878a1d71802bdb8d965aa45acbfe47102",
+    sha256="2c95a42c3bc7729c1f67eeaa5df3a85f4e620068253e815eaea4c9967e68b4ff",
     symbol="_outer_objective_config()",
 )
 _SURFACE_TERMS = SourceRef(

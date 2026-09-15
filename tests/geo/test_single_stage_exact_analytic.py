@@ -23,11 +23,13 @@ from simsopt.geo import (
     Volume,
 )
 from simsopt.objectives import QuadraticPenalty
+from simsopt_jax.runtime.host_boundary import host_array
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
 from simsopt_jax_adapters.geo.single_stage_exact_analytic import (
     INNER_FAILURE_VALUE,
     ExactAnalyticSingleStage,
+    HostConstructionBoozerSurfaceJAX,
 )
 
 INITIAL_IOTA = -0.406
@@ -77,8 +79,12 @@ def _config(nfp, surface, length_target):
         "curve_curve_weight": 0.0,
         "curve_surface_weight": 0.0,
         "surface_vessel_weight": 0.0,
-        "non_qs_quadpoints_phi": np.linspace(0.0, 1.0 / nfp, 2 * QS_RESOLUTION, endpoint=False),
-        "non_qs_quadpoints_theta": np.linspace(0.0, 1.0, 2 * QS_RESOLUTION, endpoint=False),
+        "non_qs_quadpoints_phi": np.linspace(
+            0.0, 1.0 / nfp, 2 * QS_RESOLUTION, endpoint=False
+        ),
+        "non_qs_quadpoints_theta": np.linspace(
+            0.0, 1.0, 2 * QS_RESOLUTION, endpoint=False
+        ),
         "non_qs_axis": 0,
         "optimized_coil_index": 0,
         "length_coil_indices": (0, 1, 2),
@@ -94,10 +100,15 @@ def _config(nfp, surface, length_target):
 
 
 def _native_objective(resolution: int = RESOLUTION, *, example_coils: bool = False):
-    base_curves, base_currents, nfp, field, surface, G0 = _problem(resolution, example_coils=example_coils)
+    base_curves, base_currents, nfp, field, surface, G0 = _problem(
+        resolution, example_coils=example_coils
+    )
     volume = Volume(surface)
     boozer = BoozerSurface(
-        field, surface, volume, volume.J(),
+        field,
+        surface,
+        volume,
+        volume.J(),
         options={"newton_maxiter": 20, "newton_tol": 1.0e-13, "verbose": False},
     )
     initial = boozer.solve_residual_equation_exactly_newton(
@@ -118,20 +129,71 @@ def _native_objective(resolution: int = RESOLUTION, *, example_coils: bool = Fal
 
 
 def _jax_evaluator(resolution: int = RESOLUTION, *, example_coils: bool = False):
-    base_curves, base_currents, nfp, native_field, surface, G0 = _problem(resolution, example_coils=example_coils)
+    base_curves, base_currents, nfp, native_field, surface, G0 = _problem(
+        resolution, example_coils=example_coils
+    )
     base_currents[0].fix_all()
     field = BiotSavartJAX(native_field.coils)
     volume = Volume(surface)
-    boozer = BoozerSurfaceJAX(
-        field, surface, volume, float(volume.J()),
+    boozer = HostConstructionBoozerSurfaceJAX(
+        field,
+        surface,
+        volume,
+        float(volume.J()),
         options={"newton_maxiter": 20, "newton_tol": 1.0e-13, "verbose": False},
     )
     length_target = float(sum(CurveLength(curve).J() for curve in base_curves))
     evaluator = ExactAnalyticSingleStage(
-        boozer, field, iota=INITIAL_IOTA, G=G0,
+        boozer,
+        field,
+        iota=INITIAL_IOTA,
+        G=G0,
         outer_objective_config=lambda: _config(nfp, surface, length_target),
     )
     return evaluator, boozer
+
+
+def _jax_evaluator_eager_geometry(
+    resolution: int = RESOLUTION, *, example_coils: bool = False
+):
+    """Pre-patch construction: eager JAX geometry bake on stock BoozerSurfaceJAX."""
+    base_curves, base_currents, nfp, native_field, surface, G0 = _problem(
+        resolution, example_coils=example_coils
+    )
+    base_currents[0].fix_all()
+    field = BiotSavartJAX(native_field.coils)
+    volume = Volume(surface)
+    boozer = BoozerSurfaceJAX(
+        field,
+        surface,
+        volume,
+        float(volume.J()),
+        options={"newton_maxiter": 20, "newton_tol": 1.0e-13, "verbose": False},
+    )
+    length_target = float(sum(CurveLength(curve).J() for curve in base_curves))
+    evaluator = ExactAnalyticSingleStage(
+        boozer,
+        field,
+        iota=INITIAL_IOTA,
+        G=G0,
+        outer_objective_config=lambda: _config(nfp, surface, length_target),
+    )
+    return evaluator, boozer
+
+
+def test_host_construction_seed_and_first_evaluate_match_eager_jax_bake():
+    """NumPy construction bake must not change the seed or the first evaluate."""
+    reference, _ = _jax_evaluator_eager_geometry()
+    host, _ = _jax_evaluator()
+    np.testing.assert_array_equal(host.coil_dofs, reference.coil_dofs)
+    np.testing.assert_array_equal(
+        host_array(host.x_inner, dtype=np.float64),
+        host_array(reference.x_inner, dtype=np.float64),
+    )
+    reference_eval = reference.evaluate(reference.coil_dofs)
+    host_eval = host.evaluate(host.coil_dofs)
+    assert host_eval.value == reference_eval.value
+    np.testing.assert_array_equal(host_eval.gradient, reference_eval.gradient)
 
 
 def test_construction_and_first_evaluation_are_clean_under_the_strict_transfer_guard():
@@ -198,7 +260,9 @@ def test_gradient_matches_central_finite_differences_of_own_value():
     # Away from the initial coils: there the length penalty sits exactly on its
     # ``max(L - L0, 0)`` kink, where one-sided finite differences are not
     # second-order and the comparison would measure the kink, not the gradient.
-    x0 = evaluator.coil_dofs * (1.0 + 2.0e-3 * rng.standard_normal(evaluator.coil_dofs.size))
+    x0 = evaluator.coil_dofs * (
+        1.0 + 2.0e-3 * rng.standard_normal(evaluator.coil_dofs.size)
+    )
     base = evaluator.evaluate(x0)
     assert base.inner_success
     direction = rng.standard_normal(x0.size)
@@ -227,7 +291,9 @@ def test_failed_inner_solve_reports_sentinel_and_rolls_back_like_native():
     assert not evaluation.inner_success
     assert evaluation.value == INNER_FAILURE_VALUE
     # Rolled back to the warm start, exactly as native restores its surface.
-    np.testing.assert_allclose(np.asarray(evaluator.x_inner), warm_start, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(
+        np.asarray(evaluator.x_inner), warm_start, rtol=0, atol=1e-12
+    )
     np.testing.assert_allclose(
         evaluation.gradient, native_gradient, rtol=1e-8, atol=1e-12
     )
@@ -243,7 +309,9 @@ def _native_example_failure(objective, native, coils):
     objective.J()
     gradient = np.asarray(objective.dJ(), dtype=np.float64)
     assert not bool(native.res["success"])
-    persisted_shift = float(np.max(np.abs(np.asarray(native.surface.x) - previous_surface)))
+    persisted_shift = float(
+        np.max(np.abs(np.asarray(native.surface.x) - previous_surface))
+    )
     native.surface.x = previous_surface
     native.res["iota"] = previous_iota
     native.res["G"] = previous_G
@@ -265,7 +333,9 @@ def test_persisted_failure_restores_pre_evaluation_warm_start():
     assert not evaluation.inner_success
     assert evaluation.value == INNER_FAILURE_VALUE
     assert np.all(np.isfinite(evaluation.gradient))
-    np.testing.assert_allclose(np.asarray(evaluator.x_inner), warm_start, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(
+        np.asarray(evaluator.x_inner), warm_start, rtol=0, atol=1e-12
+    )
 
 
 def test_persisted_failure_gradient_matches_native_at_example_scale():
@@ -288,5 +358,9 @@ def test_persisted_failure_gradient_matches_native_at_example_scale():
         # failure to compare and the case reduces to the parity tests above.
         pytest.skip("cap-exhaustion is a tolerance-floor rounding tie on this device")
     assert evaluation.value == INNER_FAILURE_VALUE
-    np.testing.assert_allclose(evaluation.gradient, native_gradient, rtol=1e-8, atol=1e-12)
-    np.testing.assert_allclose(np.asarray(evaluator.x_inner), warm_start, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(
+        evaluation.gradient, native_gradient, rtol=1e-8, atol=1e-12
+    )
+    np.testing.assert_allclose(
+        np.asarray(evaluator.x_inner), warm_start, rtol=0, atol=1e-12
+    )
