@@ -349,7 +349,8 @@ def test_complete_path_speed_run_uses_snapshot_isolation_bootstrap(
     definitions = (
         ("execution_source", "src/simsopt/__init__.py", "\n"),
         ("configuration", "config/input.json", "{}\n"),
-        ("benchmark", "examples/jax/parity/child.py", "\n"),
+        ("execution_source", "examples/jax/parity/child.py", "\n"),
+        ("benchmark", "benchmarks/probe.py", "\n"),
         ("test", "tests/test_child.py", "\n"),
         ("native_extension", "src/simsoptpp.py", "\n"),
     )
@@ -631,6 +632,11 @@ def test_campaign_rejects_noncanonical_singleton_scalar_shape() -> None:
         )
 
 
+def _accepted_campaign_artifact_root(tmp_path: Path, suffix: str) -> Path:
+    # Claim roots are forbidden under /tmp; cwd is the checkout and worktrees live in /tmp.
+    return Path.home() / f".{tmp_path.parent.name}-{tmp_path.name}-{suffix}"
+
+
 def test_public_campaign_uses_four_lane_plan_and_rejects_forged_provider(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -681,7 +687,7 @@ def test_public_campaign_uses_four_lane_plan_and_rejects_forged_provider(
         measurements, "_gpu_concurrent_use_preflight", lambda gpu_index: "pass"
     )
 
-    artifact_root = Path.cwd() / f".{tmp_path.name}-campaign"
+    artifact_root = _accepted_campaign_artifact_root(tmp_path, "campaign")
     try:
         with pytest.raises(MeasurementRunnerError, match="jax_gpu_fast driver must be"):
             collect_single_stage_speed_campaign(
@@ -769,7 +775,7 @@ def test_public_campaign_publishes_optimizer_window_not_process_duration(
         lambda gpu_index: ("synthetic-gpu", "uuid", "driver", "cuda"),
     )
 
-    artifact_root = Path.cwd() / f".{tmp_path.name}-valid-campaign"
+    artifact_root = _accepted_campaign_artifact_root(tmp_path, "valid-campaign")
     try:
         published_root = collect_single_stage_speed_campaign(
             artifact_root=artifact_root,

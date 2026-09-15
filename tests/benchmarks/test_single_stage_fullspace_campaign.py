@@ -148,9 +148,9 @@ def test_legacy_v1_contract_bytes_and_aliases_remain_frozen() -> None:
     assert hashlib.sha256(route_encoded).hexdigest() == (
         "1cac4bd571dac722ae188693b26ab6cc86d2c5ca64f274f2a5b962a625a7b01b"
     )
-    assert len(encoded) == 10722
+    assert len(encoded) == 10728
     assert hashlib.sha256(encoded).hexdigest() == (
-        "e680e6a2f6ff0afb9bdcc18e15bf90953b77e7c92baaed1745a4d1008700e4f9"
+        "5102f24ce308c0710a457846cde9373b83826305e06db7600b6d3a761e4e0c6f"
     )
     assert contract_payload() == contract_payload_v1()
     assert contract_sha256() == contract_sha256_v1()

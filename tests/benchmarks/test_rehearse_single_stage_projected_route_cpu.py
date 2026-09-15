@@ -60,7 +60,13 @@ def published_rehearsal(tmp_path_factory: pytest.TempPathFactory) -> Path:
     environment = {
         **os.environ,
         **rehearsal.REQUIRED_ENVIRONMENT,
-        "PYTHONPATH": os.pathsep.join((str(REPOSITORY / "src"), str(REPOSITORY))),
+        "PYTHONPATH": os.pathsep.join(
+            (
+                str(REPOSITORY / "src"),
+                str(REPOSITORY / "build/cp311-cp311-linux_x86_64"),
+                str(REPOSITORY),
+            )
+        ),
         "PYTHONDONTWRITEBYTECODE": "1",
     }
     completed = subprocess.run(
@@ -147,9 +153,7 @@ def test_the_lowering_pre_gate_record_is_the_one_its_producer_writes(
 
     lowering = _evidence(published_rehearsal)["lowering_pre_gate"]
     assert frozenset(lowering) == frozenset(launcher.LOWERING_PRE_GATE_SHAPE)
-    assert frozenset(lowering["kernels"][0]) == frozenset(
-        launcher.LOWERED_KERNEL_SHAPE
-    )
+    assert frozenset(lowering["kernels"][0]) == frozenset(launcher.LOWERED_KERNEL_SHAPE)
     assert sorted(kernel["name"] for kernel in lowering["kernels"]) == sorted(
         rehearsal.CERTIFIED_LOWERED_KERNEL_NAMES
     )
@@ -175,15 +179,15 @@ def test_rehearsal_binds_the_route_module_it_certifies(
     }
     engine = "src/simsopt_jax/geo/optimizers/projected_lbfgs.py"
     assert engine in bound
-    assert bound[engine]["sha256"] == hashlib.sha256(
-        (REPOSITORY / engine).read_bytes()
-    ).hexdigest()
-    # The virtualenv lives inside this checkout, so thousands of its modules
-    # resolve under the repository root.  They are counted, not listed: an
-    # evidence section where the engine hides among two thousand site-packages
-    # files is not evidence a reviewer can read.
+    assert (
+        bound[engine]["sha256"]
+        == hashlib.sha256((REPOSITORY / engine).read_bytes()).hexdigest()
+    )
+    # A venv that lives under the checkout contributes thousands of modules;
+    # those are counted, not listed, so the engine stays readable. A venv
+    # outside the tree (orchestration worktrees) contributes count 0.
     installation = evidence["execution_sources"]["interpreter_installation_modules"]
-    assert installation["count"] > len(bound)
+    assert installation["count"] == 0 or installation["count"] > len(bound)
     assert all(root.startswith(".") for root in installation["roots"])
 
 
@@ -235,9 +239,10 @@ def test_rehearsal_claims_no_science(published_rehearsal: Path) -> None:
 
     evidence = _evidence(published_rehearsal)
     assert evidence["quality_claim"] == "NOT_CLAIMED_AT_REHEARSAL_BUDGET"
-    assert evidence["solve"]["terminal_objective"] > evidence["native_reference"][
-        "target_objective"
-    ]
+    assert (
+        evidence["solve"]["terminal_objective"]
+        > evidence["native_reference"]["target_objective"]
+    )
     assert evidence["timing_boundary"] == "engine_compile_plus_solve"
 
 
@@ -422,7 +427,10 @@ def _synthetic_repository(root: Path, probe_source: bytes) -> Path:
         "entries_sha256": hashlib.sha256(canonical_json_bytes(entries)).hexdigest(),
         "schema_version": "single-stage-neq-gntr3-execution-source-authority-v1",
     }
-    manifest = root / "benchmarks/single_stage_native_equivalent_quality_gntr3_execution_sources.json"
+    manifest = (
+        root
+        / "benchmarks/single_stage_native_equivalent_quality_gntr3_execution_sources.json"
+    )
     manifest.write_bytes(canonical_json_bytes(document))
     return root
 
@@ -639,9 +647,9 @@ def test_the_predecessor_1e_6_bands_refused_the_banked_latches(
     """
 
     ledger = _banked_ledger(arm)
-    relative = abs(
-        ledger["terminal"][term] - ledger["native"][term]
-    ) / abs(ledger["native"][term])
+    relative = abs(ledger["terminal"][term] - ledger["native"][term]) / abs(
+        ledger["native"][term]
+    )
     assert relative == pytest.approx(measured, rel=1.0e-3)
     assert relative > 1.0e-6
     comparison, band = rehearsal.PINNED_ENDPOINT_QUALITY_GATES[term]
@@ -787,13 +795,16 @@ def test_the_gated_ledger_branch_executes_on_real_physics() -> None:
     assert json.loads(canonical_json_bytes(ledger)) == ledger
     # The rows the bands were derived from, reproduced by the live objective.
     for term, expected in BANKED_ENDPOINT_LEDGER["native"].items():
-        assert ledger["native"][term] == pytest.approx(expected, rel=1.0e-9, abs=1.0e-30)
+        assert ledger["native"][term] == pytest.approx(
+            expected, rel=1.0e-9, abs=1.0e-30
+        )
     # And the FROZEN native side re-validation judges a receipt against, bound
     # to the producer BITWISE rather than to a transcription.  These literals
     # are what stops an artifact supplying its own reference, so a term that
     # drifts from the objective must fail here rather than at a root.
-    assert ledger["native"] | dict(rehearsal.NATIVE_ENDPOINT_PINNED_TERMS) == (
-        ledger["native"]
+    assert (
+        ledger["native"] | dict(rehearsal.NATIVE_ENDPOINT_PINNED_TERMS)
+        == (ledger["native"])
     )
     # The reference's own evaluation is admissible against itself, through the
     # gate re-validation actually runs.
@@ -893,7 +904,9 @@ def test_problem_identity_admits_the_measured_backend_spread() -> None:
 
     reference = dict(rehearsal.CPU_BOOTSTRAP_OBSERVABLES)
     evidence = rehearsal.bind_problem_identity(
-        _stub_case(**{**reference, "gradient_norm": reference["gradient_norm"] * (1 + 1e-15)})
+        _stub_case(
+            **{**reference, "gradient_norm": reference["gradient_norm"] * (1 + 1e-15)}
+        )
     )
     assert evidence["bound"] is True
     assert evidence["sha_is_binding"] is False

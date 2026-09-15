@@ -204,6 +204,41 @@ def test_regeneration_refuses_a_member_that_vanished_from_the_tree(
         )
 
 
+def test_regeneration_drops_a_member_that_vanished_from_the_tree(
+    repository: Path,
+) -> None:
+    """A declared removal rewrites the manifest without the vanished path."""
+
+    vanished = "benchmarks/probe_benchmark.py"
+    (repository / vanished).unlink()
+    expected = _member_count(repository)
+
+    body, changed = regenerate_execution_source_manifest(
+        expected_count=expected,
+        dropped=(vanished,),
+        repository=repository,
+    )
+
+    document = load_canonical_json_bytes(body)
+    assert isinstance(document, dict)
+    assert vanished not in document["entries"]
+    assert len(document["entries"]) == expected
+    assert vanished not in changed
+
+
+def test_regeneration_refuses_to_drop_a_path_the_rule_still_selects(
+    repository: Path,
+) -> None:
+    """Dropping a live member would hide bytes that still execute."""
+
+    with pytest.raises(ManifestRegenerationError, match="still selects"):
+        regenerate_execution_source_manifest(
+            expected_count=_member_count(repository),
+            dropped=("src/simsopt_jax/probe_module.py",),
+            repository=repository,
+        )
+
+
 def test_regeneration_refuses_a_count_the_refreeze_did_not_bump(
     repository: Path,
 ) -> None:

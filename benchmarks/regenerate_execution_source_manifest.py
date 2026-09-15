@@ -67,6 +67,7 @@ def regenerate_execution_source_manifest(
     *,
     expected_count: int,
     admitted: Sequence[str] = (),
+    dropped: Sequence[str] = (),
     repository: Path = REPOSITORY_ROOT,
 ) -> tuple[bytes, tuple[str, ...]]:
     """Build the manifest bytes this repository's membership rule describes.
@@ -84,18 +85,32 @@ def regenerate_execution_source_manifest(
     previous: dict[str, JsonValue] = document["entries"]
 
     admitted_paths = frozenset(admitted)
+    dropped_paths = frozenset(dropped)
+    overlap = sorted(admitted_paths & dropped_paths)
+    if overlap:
+        raise ManifestRegenerationError(
+            f"paths cannot be both admitted and dropped: {overlap}"
+        )
     already_member = sorted(admitted_paths & frozenset(previous))
     if already_member:
         raise ManifestRegenerationError(
             f"admitted paths are already members: {already_member}"
         )
+    not_member = sorted(dropped_paths - frozenset(previous))
+    if not_member:
+        raise ManifestRegenerationError(f"dropped paths are not members: {not_member}")
     membership = execution_source_membership(repository)
     unselected = sorted(admitted_paths - membership)
     if unselected:
         raise ManifestRegenerationError(
             f"admitted paths the membership rule does not select: {unselected}"
         )
-    declared = frozenset(previous) | admitted_paths
+    still_selected = sorted(dropped_paths & membership)
+    if still_selected:
+        raise ManifestRegenerationError(
+            f"dropped paths the membership rule still selects: {still_selected}"
+        )
+    declared = (frozenset(previous) | admitted_paths) - dropped_paths
     entering = sorted(membership - declared)
     leaving = sorted(declared - membership)
     if entering or leaving:
@@ -113,15 +128,21 @@ def regenerate_execution_source_manifest(
     changed: list[str] = []
     for relative in sorted(membership):
         source = repository / relative
+        previous_entry = previous.get(relative)
         if not source.is_file():
-            raise ManifestRegenerationError(f"member is not a file on disk: {relative}")
+            if not isinstance(previous_entry, dict):
+                raise ManifestRegenerationError(
+                    f"member is not a file on disk: {relative}"
+                )
+            entries[relative] = previous_entry
+            continue
         payload = source.read_bytes()
-        entry = {
+        entry: JsonValue = {
             "sha256": hashlib.sha256(payload).hexdigest(),
             "size_bytes": len(payload),
         }
         entries[relative] = entry
-        if entry != previous.get(relative):
+        if entry != previous_entry:
             changed.append(relative)
     return (
         canonical_json_bytes(
@@ -147,6 +168,13 @@ def _parser() -> argparse.ArgumentParser:
         help="repository-relative path deliberately entering the manifest",
     )
     parser.add_argument(
+        "--drop",
+        action="append",
+        default=[],
+        metavar="RELATIVE_PATH",
+        help="repository-relative path deliberately leaving the manifest",
+    )
+    parser.add_argument(
         "--expect-count",
         type=int,
         required=True,
@@ -158,7 +186,9 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     body, changed = regenerate_execution_source_manifest(
-        expected_count=arguments.expect_count, admitted=arguments.admit
+        expected_count=arguments.expect_count,
+        admitted=arguments.admit,
+        dropped=arguments.drop,
     )
     (REPOSITORY_ROOT / DIAG4_EXECUTION_SOURCE_MANIFEST_PATH).write_bytes(body)
     document = load_canonical_json_bytes(body)
