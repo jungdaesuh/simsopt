@@ -29,60 +29,85 @@ Results
 
 .. list-table::
    :header-rows: 1
-   :widths: 30 12 12 12 32
+   :widths: 26 12 12 12 22 14
 
    * - Workload (scope)
      - JAX warm
      - Native best
      - Speedup
      - Parity
-   * - Nested least-squares Boozer solve, NCSX 48x48 (``tests/geo/test_nested_ls_ncsx.py``)
+     - Packet (date)
+   * - Nested least-squares Boozer solve, NCSX 48x48, unguarded algorithm
+       (``tests/geo/test_nested_ls_ncsx.py``)
      - 57.0 s (97.4 s cold)
-     - 830 s OpenMP (1833 s single-threaded upstream kernel)
-     - 14.6x
-     - Native/JAX solve traces compared
+     - 830.4 s OpenMP (1832.7 s single-threaded upstream kernel)
+     - 14.6x (32x vs single-threaded upstream)
+     - Native/JAX solve traces compared; identical algorithm on both lanes
+     - pass 4 (2026-09-14)
+   * - Nested least-squares Boozer solve, NCSX 48x48, divergence guard on
+       both lanes (``tests/geo/test_nested_ls_ncsx.py``)
+     - 35.04 s (80.74 s cold)
+     - 286.28 s OpenMP (530.21 s single-threaded upstream kernel)
+     - 8.2x warm, 3.5x cold (15.1x warm, 6.6x cold vs single-threaded upstream)
+     - Native/JAX solve traces compared; identical algorithm on both lanes
+     - pass 5 (2026-09-15), code as shipped
    * - Exact-constraint single-stage optimization, 1000 iterations (``tests/geo/test_single_stage_exact_analytic.py``)
-     - 24.13 s (34.25 s cold)
-     - 50.13 s
-     - 2.07x
+     - 24.8 s
+     - 55.7 s process wall
+     - 2.17x (pass 5 measured 2.24x)
      - Identical initial state; gradient relative L2 difference 3.9e-13
+     - pass 5b (sealed 2026-09-15 13:03 UTC)
    * - Shipped single-stage vacuum example (``examples/3_Advanced/single_stage_boozer_vacuum_optimization.py``)
-     - 25.08 s (39.35 s cold prime)
-     - 49.73 s
-     - 1.98x
+     - n/a
+     - n/a
+     - 2.20x (pass 5 measured 2.30x)
      - Initial-gradient absolute difference 8.8e-16; final objectives 4.3058761e-08 (native) vs 4.3821759e-08 (JAX)
+     - pass 5b (sealed 2026-09-15 13:03 UTC)
    * - PM4Stell permanent magnets, nphi=64 (``examples/2_Intermediate/permanent_magnet_PM4Stell.py``)
      - 7.98 s (9.66 s cold)
      - 16.12 s (32 threads)
      - 2.02x
      - Magnet placements bitwise identical (maximum ULP 0 over 20 comparisons)
+     - pass 5 (2026-09-15)
    * - Stage-two coil optimization (``examples/2_Intermediate/stage_two_optimization.py``)
      - 3.18 s
      - 10.99 s (8 threads)
      - 3.46x
      - Compared over a matched minimize region
+     - pass 5b (2026-09-15), inherited
    * - Planar-coil stage-two optimization (``examples/2_Intermediate/stage_two_optimization_planar_coils.py``)
      - 3.21 s
      - 10.70 s (16 threads)
      - 3.33x
      - Compared over a matched minimize region
+     - pass 5b (2026-09-15), inherited
    * - Stochastic stage-two optimization, mc10 / mc400 (``examples/2_Intermediate/stage_two_optimization_stochastic.py``)
      - 23.60 s / 24.18 s
      - 27.25 s / 28.80 s (16 threads)
      - 1.15x / 1.19x
      - Matched-state evaluator parity: objective absolute difference <= 4.8e-20, gradient maximum absolute difference <= 1.6e-16
-   * - GPU regression suite (12 test files)
-     - --
-     - --
-     - --
-     - 98 passed, 23 skipped, 0 failed
+     - pass 5 (2026-09-15)
+   * - GPU strict regression collection
+     - n/a
+     - n/a
+     - n/a
+     - 177 passed, 0 failed
+     - pass 5b (sealed 2026-09-15 13:03 UTC)
+
+Commit 28b30477d adds the same divergence guard to both lanes: the LS-Newton
+inner solve stops once the gradient norm exceeds 1e3 times its entry value on
+rejected line-search trial points instead of running to the 40-step cap. The
+guard removes wasted Hessian assemblies that cost the single-threaded native
+kernel about 10 s each and the GPU about 0.1 s, so both lanes get faster and
+the ratio drops. The headline number for the shipped code is 8.2x warm (3.5x
+cold) against the OpenMP kernel; the unguarded row is kept so readers can
+compare with the upstream algorithm as released.
 
 All times are medians of repeated runs. The coil-forces example
-(``examples/3_Advanced/coil_forces.py``) measured a 16.6x native-over-JAX
-ratio (4.60 s JAX warm) but did not meet its iteration contract: JAX legs
-returned [245, 400] and [400, 0] solver iterations against an expected
-[400, 400], and one native leg aborted. Its timing is therefore diagnostic
-only and is not a usable speedup claim.
+(``examples/3_Advanced/coil_forces.py``) at matched policy (L-BFGS-B maxls 32
+on both lanes, 400+400 stage iterations) measures 11.1x on the minimize-region
+clock against native at its best OpenMP count (8) (pass 5b, sealed 2026-09-15
+13:03 UTC).
 
 When to use the GPU backend
 ---------------------------
@@ -107,7 +132,10 @@ and dispatch overhead, and loses below that point:
   the GPU (about 2.4x at matched work, projected). The QA variant
   (``examples/2_Intermediate/permanent_magnet_QA.py``) is not a GPU
   candidate: its dipole moments differ by 9.3% relative at nphi 64 under the
-  same algorithm and stopping rule, which is a parity failure.
+  same algorithm and stopping rule, which is a parity failure. A relax-and-split
+  protocol for the QA variant reaches GPU-vs-native parity of maximum absolute
+  difference 1.05e-12 after the stacked-predicate fix (4c75551ab) (pass 5b,
+  sealed 2026-09-15 13:03 UTC).
 * Boozer-surface value-and-gradient examples
   (``examples/2_Intermediate/boozerQA.py``,
   ``examples/2_Intermediate/boozer.py``) are not GPU candidates. The shipped
