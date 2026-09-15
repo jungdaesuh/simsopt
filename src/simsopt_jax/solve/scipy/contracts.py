@@ -18,16 +18,17 @@ class ScipyLBFGSBOptions(OptionsBase):
 
     @classmethod
     def native_matched(
-        cls, *, maxiter: int, maxcor: int, tol: float
+        cls, *, maxiter: int, maxcor: int, tol: float, maxls: int = 20
     ) -> "ScipyLBFGSBOptions":
-        """Equal to ``minimize(..., options={maxiter, maxcor}, tol=tol)``.
+        """Equal to ``minimize(..., options={maxiter, maxcor[, maxls]}, tol=tol)``.
 
         ``scipy.optimize.minimize`` expands ``tol`` into both ``ftol`` and
-        ``gtol`` for L-BFGS-B and leaves ``maxfun``/``maxls`` at SciPy's
-        defaults, which are this class's defaults -- so a caller matching a
-        native script that names nothing else names nothing else here either.
+        ``gtol`` for L-BFGS-B and leaves ``maxfun`` at SciPy's default, which
+        is this class's default. ``maxls`` is named when the native call names
+        it; omitted, it stays at SciPy's default of 20, so a caller matching a
+        native script that names nothing else still names nothing else here.
         """
-        return cls(maxiter=maxiter, maxcor=maxcor, ftol=tol, gtol=tol)
+        return cls(maxiter=maxiter, maxcor=maxcor, ftol=tol, gtol=tol, maxls=maxls)
 
 
 @dataclass(frozen=True)

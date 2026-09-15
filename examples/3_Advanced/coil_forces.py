@@ -85,6 +85,10 @@ B2Energy_WEIGHT = Weight(1e-4)
 
 # Number of iterations to perform:
 MAXITER = 50 if in_github_actions else 400
+# L-BFGS-B line-search cap. SciPy's default of 20 aborts the cold stage-two
+# restart: the length penalty is exactly 0 at the stage-one endpoint, so the
+# first trial step 1/|g| needs 17 halvings and maxls=20 returns ABNORMAL at nit 0.
+MAXLS = 32
 
 # File for the desired boundary magnetic surface:
 TEST_DIR = (Path(__file__).parent / ".." / ".." / "tests" / "test_files").resolve()
@@ -217,7 +221,7 @@ for eps in [1e-3, 1e-4, 1e-5, 1e-6, 1e-7]:
 dofs = JF.x
 print(f"Optimization with FORCE_WEIGHT={FORCE_WEIGHT.value} and LENGTH_WEIGHT={LENGTH_WEIGHT.value}")
 # print("INITIAL OPTIMIZATION")
-res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor': 300}, tol=1e-15)
+res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor': 300, 'maxls': MAXLS}, tol=1e-15)
 coils_to_vtk(coils, OUT_DIR + "coils_opt_short", close=True)
 
 pointData_surf = {"B_N": np.sum(bs.B().reshape((nphi, ntheta, 3)) * s.unitnormal(), axis=2)[:, :, None]}
@@ -229,7 +233,7 @@ s.to_vtk(OUT_DIR + "surf_opt_short", extra_data=pointData_surf)
 dofs = res.x
 LENGTH_WEIGHT *= 0.1
 # print("OPTIMIZATION WITH REDUCED LENGTH PENALTY\n")
-res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor': 300}, tol=1e-15)
+res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor': 300, 'maxls': MAXLS}, tol=1e-15)
 coils_to_vtk(coils, OUT_DIR + "coils_opt_force", close=True)
 pointData_surf = {"B_N": np.sum(bs.B().reshape((nphi, ntheta, 3)) * s.unitnormal(), axis=2)[:, :, None]}
 s.to_vtk(OUT_DIR + f"surf_opt_force_WEIGHT={FORCE_WEIGHT.value:e}_LWEIGHT={LENGTH_WEIGHT.value*10:e}", extra_data=pointData_surf)
