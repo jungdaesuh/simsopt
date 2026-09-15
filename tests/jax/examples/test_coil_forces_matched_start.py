@@ -76,9 +76,7 @@ def _native_objective():
         + 10 * CurveSurfaceDistance(curves, surface, 0.3)
         + 1e-6 * sum(LpCurveCurvature(c, 2, 5.0) for c in base_curves)
         + 1e-6
-        * sum(
-            QuadraticPenalty(MeanSquaredCurvature(c), 5, "max") for c in base_curves
-        )
+        * sum(QuadraticPenalty(MeanSquaredCurvature(c), 5, "max") for c in base_curves)
         + Weight(1e-2) * LpCurveForce(coils[:3], coils, p=4)
         + Weight(1e-4) * B2Energy(coils)
     )
@@ -213,3 +211,21 @@ def test_mirror_publishes_the_minimize_region_clocks_and_device_attestation(
         "so it contains them both plus the inter-stage length-weight swap"
     )
     assert two_stage <= whole_solve
+
+
+@pytest.mark.slow
+@pytest.mark.integration
+@pytest.mark.native_cpu_reference
+def test_mirror_solver_options_name_the_native_maxls(
+    mirror_observables: dict[str, object],
+) -> None:
+    """The live SciPy route ran under native's maxls=32, not SciPy's default 20."""
+    first, second = mirror_observables["solver_options"]
+    assert first["maxls"] == 32
+    assert second["maxls"] == 32
+    assert first["maxcor"] == 300
+    assert second["maxcor"] == 300
+    assert first["ftol"] == 1.0e-15
+    assert first["gtol"] == 1.0e-15
+    assert second["ftol"] == first["ftol"]
+    assert second["gtol"] == first["gtol"]

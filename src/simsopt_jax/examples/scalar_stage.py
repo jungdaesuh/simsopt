@@ -31,15 +31,17 @@ def solve_scalar_stage(
     max_steps: int,
     maxcor: int,
     tol: float,
+    maxls: int = ScipyLBFGSBOptions.maxls,
 ) -> OptimizerResult:
     """One L-BFGS-B stage from ``problem.x``; the endpoint becomes ``problem.x``.
 
     ``Driver.SCIPY_LBFGSB`` is the routine the native scripts use, driven over
     the device objective and named on exactly what a native call names --
-    ``maxiter``, ``maxcor``, and the single ``tol`` SciPy expands into ``ftol``
-    and ``gtol`` -- so the two lanes stop under one rule.
-    ``Driver.SIMSOPT_LBFGSB`` selects the fused device port instead, which
-    carries its own ``maxfun = 20 * maxiter`` evaluation cap.
+    ``maxiter``, ``maxcor``, the single ``tol`` SciPy expands into ``ftol``
+    and ``gtol``, and ``maxls`` when the native call names it -- so the two
+    lanes stop under one rule.  ``Driver.SIMSOPT_LBFGSB`` selects the fused
+    device port instead, which carries its own ``maxfun = 20 * maxiter``
+    evaluation cap.
     """
     if driver == Driver.SIMSOPT_LBFGSB:
         return serial_solve_jax(
@@ -70,6 +72,7 @@ def solve_scalar_stage(
             maxiter=max_steps,
             maxcor=maxcor,
             tol=tol,
+            maxls=maxls,
         ),
     )
     problem.x = explicit_device_array(result.x, dtype=initial.dtype, reference=initial)
