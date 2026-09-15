@@ -3,7 +3,7 @@
     "baseline_commit": "7781d707a51c6e83173a76bf80b2d51646d65fdc",
     "baseline_commit_description": "Fork HEAD on branch pr/jax-port-squashed at which this slice was minted.",
     "native_test_surface_rule": "Every path under tests/ in upstream_authority_commit whose basename matches test_*.py. Enumerated from git, not from a working-tree glob: the fork adds test_*.py files inside the native domain directories that no path pattern can separate from upstream files.",
-    "source_tree_hash": "sha256:25f057c4fc97465ff59a758e88b8d2ec3b0a39f73e49f21e1ca628f023beedfb",
+    "source_tree_hash": "sha256:2948d500974de0f75bba5c5bdfcc2a4c5b30f21b83b78240143e1901cebfe48f",
     "source_tree_hash_recipe": "sha256 over, for each enumerated native test file in ascending path order, the utf-8 encoding of '{path}\\n{sha256_hexdigest(working tree file bytes)}\\n'.",
     "upstream_authority_commit": "377cf665158f47a9bed4a8b03a00352457ea27c8",
     "upstream_authority_description": "merge base of this fork's HEAD with hiddenSymmetries/simsopt master; every file it lists is present in the working tree by construction"
@@ -325,11 +325,11 @@
         },
         {
           "anchor": "ids=(\"cpu_parity\", \"gpu_parity\")",
-          "cite": "tests/conftest.py:512-514"
+          "cite": "tests/conftest.py:519"
         },
         {
           "anchor": "\"jax/native_unit_parity/test_force_parity.py\",",
-          "cite": "tests/conftest.py:596-598"
+          "cite": "tests/conftest.py:604"
         }
       ],
       "id": "MF-8",
@@ -580,7 +580,7 @@
       "evidence": [
         {
           "anchor": "rotation/reflection placement is a wrapper transform with no owned DOFs.",
-          "cite": "src/simsopt_jax/core/curve_geometry.py:196-214"
+          "cite": "src/simsopt_jax/core/curve_geometry.py:188"
         }
       ],
       "id": "CV-3",
@@ -834,11 +834,11 @@
         },
         {
           "anchor": "return non_quasi_symmetric_ratio(",
-          "cite": "src/simsopt_jax_adapters/geo/surface_objectives.py:2574"
+          "cite": "src/simsopt_jax_adapters/geo/surface_objectives.py:2528"
         },
         {
           "anchor": "class NonQuasiSymmetricRatioJAX(_BoozerObjectiveBase):",
-          "cite": "src/simsopt_jax_adapters/geo/surface_objectives.py:3071"
+          "cite": "src/simsopt_jax_adapters/geo/surface_objectives.py:3025"
         },
         {
           "anchor": "return non_quasi_symmetric_residual_primitives(",
@@ -1604,7 +1604,7 @@
       "evidence": [
         {
           "anchor": "class NonQuasiSymmetricRatioJAX(_BoozerObjectiveBase):",
-          "cite": "src/simsopt_jax_adapters/geo/surface_objectives.py:3071"
+          "cite": "src/simsopt_jax_adapters/geo/surface_objectives.py:3025"
         },
         {
           "anchor": "Exact parity for the ``2_Intermediate/boozerQA.py`` mirror.",

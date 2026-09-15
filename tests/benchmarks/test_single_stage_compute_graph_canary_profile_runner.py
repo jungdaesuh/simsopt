@@ -111,9 +111,9 @@ def _profile() -> ComputeGraphProfile:
 
 
 def _nsys() -> SqliteLaneEvidence:
-    zero = ApiActivity(0, 0)
-    total = ApiActivity(4, 10)
-    return SqliteLaneEvidence(1, 101, zero, zero, zero, zero, total, total)
+    zero = ApiActivity(0, 0, "api_calls")
+    total = ApiActivity(4, 10, "device_activity_records")
+    return SqliteLaneEvidence(1, 101, zero, zero, zero, zero, total, total, 0)
 
 
 def _files(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path]:

@@ -755,24 +755,22 @@ def validate(
                     f"{expected}); re-mint with --write after classifying the "
                     "change"
                 )
-    if check_doc and not failures:
+    if check_doc and not failures and doc_path.is_file():
         # render_document dereferences several capability fields
         # unconditionally (title, evidence, required_lanes, ...); only
         # attempt it once every other check above has already passed, so a
         # manifest with an earlier schema violation is reported through that
         # violation, never through an uncaught KeyError here.
+        # 72e7a72b0 deleted the generated coverage document; absence is not
+        # drift. A present document must still match render_document().
         rendered = render_document(manifest, surface)
-        try:
-            recorded_doc = doc_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            failures.append(f"generated_doc_drift: {doc_path} does not exist")
-        else:
-            if recorded_doc != rendered:
-                failures.append(
-                    "generated_doc_drift: the generated document does not "
-                    f"match render_document(manifest); re-mint with --write "
-                    f"({doc_path})"
-                )
+        recorded_doc = doc_path.read_text(encoding="utf-8")
+        if recorded_doc != rendered:
+            failures.append(
+                "generated_doc_drift: the generated document does not "
+                f"match render_document(manifest); re-mint with --write "
+                f"({doc_path})"
+            )
     return failures
 
 
