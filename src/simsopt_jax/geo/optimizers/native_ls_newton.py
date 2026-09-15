@@ -29,9 +29,26 @@ def newton_ls_native_dense(
     maxiter: int,
     tol: float,
     stab: float = 0.0,
+    divergence_factor: float | None = 1e3,
     args: tuple[object, ...] = (),
 ) -> dict[str, jax.Array]:
-    """Run native-order full-Hessian LS Newton and return its reusable endpoint."""
+    """Run native-order full-Hessian LS Newton and return its reusable endpoint.
+
+    ``divergence_factor`` is a blow-up detector: stop once ``||grad||``
+    exceeds that multiple of the residual at Newton entry. Default
+    ``1e3``. ``None`` or ``0`` disables the guard. A guarded stop is a
+    failed solve: ``success`` is false and the persist/rollback rule is
+    unchanged. Twin of the native LS-Newton loop in
+    ``simsopt.geo.boozersurface``.
+
+    The reference is the entry residual, not the running best. Undamped
+    Newton on Boozer surfaces is non-monotone: an accepted walk can
+    excursion by 1e2–1e5 relative to a transient best and still
+    converge. Comparing to the best treats those spikes as divergence
+    and aborts a successful solve. Blow-up versus the entry residual is
+    what distinguishes a rejected line-search trial (313 → 1e10 at
+    step 1) from a convergent non-monotone walk.
+    """
 
     initial_x = jnp.asarray(x0)
     initial_fun, initial_grad, initial_hessian = value_grad_hessian_fn(initial_x, *args)
@@ -48,11 +65,21 @@ def newton_ls_native_dense(
     tolerance = jnp.asarray(tol, dtype=initial_norm.dtype)
     stabilization = jnp.asarray(stab, dtype=initial_hessian.dtype)
     identity = jnp.eye(initial_x.shape[0], dtype=initial_hessian.dtype)
+    growth_limit = jnp.asarray(
+        0.0 if divergence_factor is None else divergence_factor,
+        dtype=initial_norm.dtype,
+    )
 
     def continue_iteration(state: _NativeLsNewtonState) -> jax.Array:
-        return jnp.logical_and(
+        keep_going = jnp.logical_and(
             state.nit < maximum_iterations,
             state.grad_norm > tolerance,
+        )
+        if divergence_factor is None or divergence_factor == 0:
+            return keep_going
+        return jnp.logical_and(
+            keep_going,
+            state.grad_norm <= growth_limit * initial_norm,
         )
 
     def take_newton_step(state: _NativeLsNewtonState) -> _NativeLsNewtonState:
