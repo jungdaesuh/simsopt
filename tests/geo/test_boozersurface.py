@@ -1027,9 +1027,18 @@ class BoozerSurfaceTests(unittest.TestCase):
 
         boozer_surface.recompute_bell()
 
-        # Now run exact constraints Newton with stellsym=False
+        # Now run exact constraints Newton with stellsym=False. The KKT Jacobian of
+        # this configuration is near-singular at the root (smallest singular value
+        # ~7e-4 against a next of ~1), so the undamped iteration converges or
+        # diverges depending on the last bits of the L-BFGS warm start, which
+        # differ with the OpenMP thread count; the damped steps converge from
+        # every warm start measured.
         res = boozer_surface.minimize_boozer_exact_constraints_newton(
-            tol=1e-6, maxiter=100, iota=res_lbfgs["iota"], G=res_lbfgs["G"]
+            tol=1e-6,
+            maxiter=100,
+            iota=res_lbfgs["iota"],
+            G=res_lbfgs["G"],
+            damping=1e-6,
         )
 
         assert "iota" in res

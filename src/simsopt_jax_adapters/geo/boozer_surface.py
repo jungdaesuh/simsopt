@@ -4627,6 +4627,17 @@ class _AnalyticPenaltyBundle(NamedTuple):
         return runner
 
 
+def _levenberg_newton_step_jax(jacobian, residual, damping):
+    """Damped Gauss-Newton step as an augmented least-squares solve (see the CPU twin)."""
+    n = jacobian.shape[1]
+    scale = jnp.sum(jacobian * jacobian) / n
+    augmented = jnp.vstack(
+        (jacobian, jnp.sqrt(damping * scale) * jnp.eye(n, dtype=jacobian.dtype))
+    )
+    rhs = jnp.concatenate((residual, jnp.zeros((n,), dtype=residual.dtype)))
+    return jnp.linalg.lstsq(augmented, rhs, rcond=None)[0]
+
+
 class BoozerSurfaceJAX(Optimizable):
     """JAX-native Boozer surface solver.
 
@@ -9046,8 +9057,13 @@ class BoozerSurfaceJAX(Optimizable):
         iota=0.0,
         G=None,
         lm=(0.0, 0.0),
+        damping=0.0,
     ):
         """CPU-parity exact-constraints Newton solver matching the CPU API.
+
+        ``damping`` follows ``BoozerSurface.minimize_boozer_exact_constraints_newton``:
+        ``0.0`` is the undamped iteration; a positive value takes Levenberg-damped
+        steps accepted only when the residual norm decreases.
 
         Non-production path: this compatibility solver materializes dense
         Jacobians and uses ``jnp.linalg.solve`` inside the loop. The production
@@ -9080,6 +9096,7 @@ class BoozerSurfaceJAX(Optimizable):
         norm = jnp.linalg.norm(residual)
         norm_value = float(_host_scalar(norm))
         nit = 0
+        lam = damping
         while nit < maxiter and norm_value > tol:
             if self.stellsym:
                 solve_matrix = jacobian[:-1, :-1]
@@ -9088,21 +9105,31 @@ class BoozerSurfaceJAX(Optimizable):
                 solve_matrix = jacobian
                 solve_rhs = residual
 
-            dx = jnp.linalg.solve(solve_matrix, solve_rhs)
-            if norm_value < 1e-9:
-                dx = dx + jnp.linalg.solve(
-                    solve_matrix,
-                    solve_rhs - solve_matrix @ dx,
-                )
+            if lam > 0.0:
+                dx = _levenberg_newton_step_jax(solve_matrix, solve_rhs, lam)
+            else:
+                dx = jnp.linalg.solve(solve_matrix, solve_rhs)
+                if norm_value < 1e-9:
+                    dx = dx + jnp.linalg.solve(
+                        solve_matrix,
+                        solve_rhs - solve_matrix @ dx,
+                    )
 
             if self.stellsym:
-                xl = _concat_boozer_state(xl[:-1] - dx, xl[-1])
+                trial = _concat_boozer_state(xl[:-1] - dx, xl[-1])
             else:
-                xl = xl - dx
-            residual, jacobian = residual_and_jacobian(xl)
-            norm = jnp.linalg.norm(residual)
-            norm_value = float(_host_scalar(norm))
+                trial = xl - dx
+            trial_residual, trial_jacobian = residual_and_jacobian(trial)
+            trial_norm = jnp.linalg.norm(trial_residual)
+            trial_norm_value = float(_host_scalar(trial_norm))
             nit += 1
+            if lam > 0.0 and not trial_norm_value < norm_value:
+                lam = lam * 10.0
+                continue
+            xl, residual, jacobian = trial, trial_residual, trial_jacobian
+            norm, norm_value = trial_norm, trial_norm_value
+            if lam > 0.0:
+                lam = max(lam * 0.1, 1e-14)
 
         if optimize_G:
             sdofs_final = xl[:-4]
