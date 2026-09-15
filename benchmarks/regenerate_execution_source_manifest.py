@@ -54,7 +54,12 @@ class ManifestRegenerationError(RuntimeError):
 
 
 def execution_source_membership(repository: Path) -> frozenset[str]:
-    """Every path the manifest's membership rule selects in this repository."""
+    """Every path the manifest's membership rule selects in this repository.
+
+    Membership comes from git (tracked plus untracked-but-not-ignored files
+    under the sweep roots), never from whatever files happen to exist, so a
+    gitignored generated file is not a member.
+    """
 
     return _diag4_execution_source_membership(
         repository,

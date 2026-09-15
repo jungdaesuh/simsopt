@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from examples.jax.parity.runtime import build_parity_lane_environment
-from simsopt_jax.runtime.isolated_kernel import pythonpath_with_loaded_kernel
+from simsopt_jax_adapters.isolated_kernel import pythonpath_with_loaded_kernel
 
 
 def run_native_cpu_child(

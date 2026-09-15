@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 from examples.jax._lane_environment import build_execution_environment
-from simsopt_jax.runtime.isolated_kernel import pythonpath_with_loaded_kernel
+from simsopt_jax_adapters.isolated_kernel import pythonpath_with_loaded_kernel
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 

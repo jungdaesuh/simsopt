@@ -9,6 +9,7 @@ import hashlib
 import math
 import os
 import stat
+import subprocess
 from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -380,19 +381,19 @@ DIAG5_FROZEN_NUMERICAL_PATHS: Final = frozenset(
         "src/simsopt_jax_adapters/geo/single_stage_native_endpoint.py",
     }
 )
-# Refrozen 2026-09-15: 674 -> 676. Two files entered the broad sweep
-# (``src/simsopt_jax/runtime/isolated_kernel.py`` and
-# ``isolated_kernel_child.py``) and none left. Admitted explicitly per
-# ``benchmarks/regenerate_execution_source_manifest.py``.
+# Refrozen 2026-09-15: 676 -> 675. ``src/simsopt/_version.py`` left: it is a
+# gitignored setuptools_scm artifact, so git-derived membership never selects
+# it. Dropped explicitly per ``benchmarks/regenerate_execution_source_manifest.py``.
 #
-# Run in a DEDICATED CLEAN WORKTREE, because the regenerator hashes
-# working-tree bytes and the shared tree is not quiescent. One trap that
-# cost a false answer first time round: ``src/simsopt/_version.py`` is a
-# gitignored setuptools_scm artifact that the membership rule includes, so a
-# freshly-added worktree does not have it and the refreeze silently DROPS it
-# -- removing a gate, which is the exact failure the regenerator's docstring
-# warns about. The worktree must be quiescent AND built.
-DIAG5_EXECUTION_SOURCE_ENTRY_COUNT: Final = 676
+# Refrozen 2026-09-15: ``src/simsopt_jax/runtime/isolated_kernel.py`` and
+# ``isolated_kernel_child.py`` moved to ``src/simsopt_jax_adapters/`` (the
+# ``simsopt_jax`` package contract forbids ``import simsoptpp``). Count stays
+# 675: two dropped, two admitted.
+#
+# Membership is tracked files plus untracked-but-not-ignored files under the
+# sweep roots. Run in a DEDICATED CLEAN WORKTREE, because the regenerator
+# hashes working-tree bytes and the shared tree is not quiescent.
+DIAG5_EXECUTION_SOURCE_ENTRY_COUNT: Final = 675
 DIAG5_CPU_QUALIFICATION_SCHEMA_VERSION: Final = (
     "single-stage-neq-gntr3-cpu-trajectory-qualification-v2"
 )
@@ -4837,19 +4838,56 @@ def _diag4_frozen_numerical_entries(value: JsonValue) -> dict[str, str]:
     return frozen
 
 
+def _git_ls_files(repository: Path, extra: tuple[str, ...]) -> frozenset[str]:
+    completed = subprocess.run(
+        (
+            "git",
+            "-C",
+            os.fspath(repository),
+            "ls-files",
+            "-z",
+            *extra,
+            "--",
+            *DIAG4_EXECUTION_SOURCE_BROAD_ROOTS,
+        ),
+        check=True,
+        capture_output=True,
+    )
+    return frozenset(
+        relative.decode() for relative in completed.stdout.split(b"\0") if relative
+    )
+
+
+def _git_listed_relative_paths(repository: Path) -> frozenset[str]:
+    """Tracked files plus untracked-but-not-ignored files under the sweep roots."""
+
+    return _git_ls_files(repository, ()) | _git_ls_files(
+        repository, ("--others", "--exclude-standard")
+    )
+
+
 def _diag4_execution_source_membership(
     repository: Path,
     *,
     qualified: Mapping[str, str],
     frozen: Mapping[str, str],
 ) -> frozenset[str]:
+    """Select execution-source members from git, never from a filesystem walk.
+
+    A gitignored generated file such as ``src/simsopt/_version.py`` is not a
+    member even when it exists on disk. A genuinely new unignored file under a
+    sweep root is a member and still needs ``--admit``.
+    """
+
     broad: set[str] = set()
-    for root_name in DIAG4_EXECUTION_SOURCE_BROAD_ROOTS:
-        root = repository / root_name
-        for path in root.rglob("*.py"):
-            metadata = path.lstat()
-            if stat.S_ISREG(metadata.st_mode):
-                broad.add(path.relative_to(repository).as_posix())
+    for relative in _git_listed_relative_paths(repository):
+        if not relative.endswith(".py"):
+            continue
+        path = repository / relative
+        if not path.exists() and not path.is_symlink():
+            continue
+        if stat.S_ISREG(path.lstat().st_mode):
+            broad.add(relative)
     return frozenset(
         broad | (set(qualified) - {DIAG4_EXECUTION_SOURCE_MANIFEST_PATH}) | set(frozen)
     )

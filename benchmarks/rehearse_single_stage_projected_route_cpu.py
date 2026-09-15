@@ -95,6 +95,9 @@ from benchmarks.single_stage_native_equivalent_quality_successor_authority impor
     DIAG4_EXECUTION_SOURCE_MANIFEST_PATH,
     DIAG4_EXECUTION_SOURCE_SCHEMA_VERSION,
     DIAG5_EXECUTION_SOURCE_ENTRY_COUNT,
+    DIAG5_FROZEN_NUMERICAL_PATHS,
+    DIAG5_QUALIFIED_FILE_PATHS,
+    _diag4_execution_source_membership,
 )
 
 REHEARSAL_SCHEMA_VERSION: Final = "single-stage-projected-route-cpu-rehearsal-v1"
@@ -260,6 +263,7 @@ def equal_minima_raw_term_ceiling(native_value: float) -> float:
     """
 
     return (NATIVE_TARGET_OBJECTIVE - native_value) / abs(native_value)
+
 
 # How each pinned term is judged, on the attempt that discharges the claim.  The
 # comparison class is per term because the terms are not the same KIND of
@@ -466,7 +470,9 @@ def validate_environment(
     for name, expected in sorted(required.items()):
         observed = environment.get(name)
         if observed != expected:
-            raise RehearsalError(f"{name} must equal {expected!r}, observed {observed!r}")
+            raise RehearsalError(
+                f"{name} must equal {expected!r}, observed {observed!r}"
+            )
     return {name: environment[name] for name in sorted(required)}
 
 
@@ -559,8 +565,7 @@ def refuse_redirected_distribution_modules() -> None:
             continue
         if name.split(".")[0] in DISTRIBUTION_PACKAGE_ROOTS:
             raise RehearsalError(
-                f"module {name} executes {path}, which is outside "
-                f"{REPOSITORY_ROOT}"
+                f"module {name} executes {path}, which is outside {REPOSITORY_ROOT}"
             )
 
 
@@ -587,10 +592,20 @@ def bind_execution_sources(repository: Path) -> dict[str, JsonValue]:
     (``.venv-qn-cpu``): they are counted and their roots named, but a
     virtualenv that happens to sit in the tree is not repository source and
     listing two thousand of its files would bury the evidence that matters.
+
+    Gitignored generated files under those roots -- ``src/simsopt/_version.py``
+    from an editable install -- are outside the ledger's membership predicate
+    and are skipped, not fail-closed.  Every other omitted module under a
+    sweep root still refuses.
     """
 
     refuse_redirected_distribution_modules()
     manifest_evidence, entries = load_execution_source_manifest(repository)
+    membership = _diag4_execution_source_membership(
+        repository,
+        qualified=dict.fromkeys(DIAG5_QUALIFIED_FILE_PATHS, ""),
+        frozen=dict.fromkeys(DIAG5_FROZEN_NUMERICAL_PATHS, ""),
+    )
     bound: list[JsonValue] = []
     unmanifested: list[JsonValue] = []
     environment_roots: set[str] = set()
@@ -609,6 +624,8 @@ def bind_execution_sources(repository: Path) -> dict[str, JsonValue]:
             continue
         entry = entries.get(relative)
         if entry is None:
+            if relative not in membership:
+                continue
             raise RehearsalError(
                 f"module {name} executes {relative}, which the manifest omits"
             )
@@ -998,9 +1015,7 @@ def gate_endpoint_ledger(ledger: Mapping[str, JsonValue]) -> dict[str, JsonValue
     ):
         raise RehearsalError("an informational observable is being gated")
     verdicts = {
-        name: _pinned_term_verdict(
-            name, float(terminal[name]), float(native[name])
-        )
+        name: _pinned_term_verdict(name, float(terminal[name]), float(native[name]))
         for name in sorted(PINNED_ENDPOINT_QUALITY_TERMS)
     }
     if frozenset(PINNED_ENDPOINT_QUALITY_GATES) != frozenset(
@@ -1308,7 +1323,9 @@ def seal_and_sync(root: Path) -> None:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
-    for directory in sorted(directories, key=lambda item: len(item.parts), reverse=True):
+    for directory in sorted(
+        directories, key=lambda item: len(item.parts), reverse=True
+    ):
         directory.chmod(0o555)
         descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
@@ -1457,16 +1474,22 @@ def validate_rehearsal_artifact(artifact_root: Path) -> dict[str, JsonValue]:
     # pinned set and the informational set are the campaign's, not the run's.
     ledger = evidence["endpoint_ledger"]
     if ledger["pinned_quality_terms"] != list(PINNED_ENDPOINT_QUALITY_TERMS) or (
-        ledger["informational_observables"]
-        != list(INFORMATIONAL_ENDPOINT_OBSERVABLES)
+        ledger["informational_observables"] != list(INFORMATIONAL_ENDPOINT_OBSERVABLES)
     ):
-        raise RehearsalError("rehearsal endpoint ledger scope differs from the campaign's")
+        raise RehearsalError(
+            "rehearsal endpoint ledger scope differs from the campaign's"
+        )
     # Nor may it supply the REFERENCE it is judged against.  Both lanes ask one
     # owner, so a rehearsal artifact carrying an invented native side is refused
     # here for the same reason the GPU root's is.
-    if ledger["native_state_sha256"] != NATIVE_ENDPOINT_STATE_FILE_SHA256 or (
-        ledger["native_state_content_sha256"] != NATIVE_ENDPOINT_STATE_CONTENT_SHA256
-    ) or ledger["native_state_relative_path"] != NATIVE_ENDPOINT_STATE_PATH.name:
+    if (
+        ledger["native_state_sha256"] != NATIVE_ENDPOINT_STATE_FILE_SHA256
+        or (
+            ledger["native_state_content_sha256"]
+            != NATIVE_ENDPOINT_STATE_CONTENT_SHA256
+        )
+        or ledger["native_state_relative_path"] != NATIVE_ENDPOINT_STATE_PATH.name
+    ):
         raise RehearsalError("rehearsal endpoint ledger names another native reference")
     certify_native_reference(ledger["native"])
 
@@ -1539,9 +1562,7 @@ def run_bounded_rehearsal(
     endpoint_ledger = build_endpoint_ledger(
         case,
         run,
-        gated=endpoint_ledger_is_gated(
-            iterations=iterations, latched=run_latched(run)
-        ),
+        gated=endpoint_ledger_is_gated(iterations=iterations, latched=run_latched(run)),
     )
     evidence = build_rehearsal_evidence(
         environment=environment_evidence,
