@@ -29,7 +29,8 @@ tree — so the production root comes first and the instrument's ``src`` supplie
 
     PYTHONPATH=<production-root>:<instrument-root>:<instrument-root>/src \\
         <runtime-env>/bin/python \\
-        <production-root>/benchmarks/flat675_fused_campaign.py <subcommand>
+        <production-root>/benchmarks/flat675_fused_campaign.py <subcommand> \\
+        --source-root <instrument-root>
 
 The L1 children are launched with a production-only ``PYTHONPATH`` of their
 own, so the instrument tree never follows the harness into the lane under test.
@@ -103,8 +104,11 @@ from benchmarks.genuine_675_fair_bar import (
     CHARTER_SHA256 as FAIR_BAR_CHARTER_SHA256,
 )
 from benchmarks.genuine_675_fair_bar import (
+    DEFAULT_SOURCE_ROOT,
     INSTRUMENT_COMMIT,
+    SOURCE_ROOT_ENVIRONMENT,
     NativeConfig,
+    configure_runtime_paths,
     enforce_child_conformance,
     gpu_environment,
     load_campaign_manifest,
@@ -115,12 +119,10 @@ from benchmarks.genuine_675_fair_bar import (
     run_oracle,
     write_provenance_shim,
 )
-from benchmarks.genuine_675_fair_bar import (
-    SOURCE_ROOT as INSTRUMENT_ROOT,
-)
 
 PRODUCTION_ROOT = Path(__file__).resolve().parents[1]
-OUTPUT_ROOT = Path("/home/jungdaesuh/simsopt_mixed_artifacts/flat675_fused_campaign")
+OUTPUT_ROOT = PRODUCTION_ROOT / ".artifacts" / "flat675_fused_campaign"
+INSTRUMENT_ROOT: Path
 L1_CHILD = PRODUCTION_ROOT / "benchmarks" / "flat675_fused_lane_child.py"
 
 # The charter's B3 native denominator is the fair-bar B3 matrix's own
@@ -1134,6 +1136,17 @@ def _parser() -> argparse.ArgumentParser:
 
     def _with_common(sub: argparse.ArgumentParser) -> argparse.ArgumentParser:
         sub.add_argument("--input-manifest", required=True, type=Path)
+        sub.add_argument(
+            "--source-root",
+            type=Path,
+            default=DEFAULT_SOURCE_ROOT,
+            required=DEFAULT_SOURCE_ROOT is None,
+            help=(
+                "pinned external instrument tree; may default from "
+                f"{SOURCE_ROOT_ENVIRONMENT}"
+            ),
+        )
+        sub.add_argument("--output-root", type=Path, default=OUTPUT_ROOT)
         sub.add_argument("--omp-threads", type=int, default=16)
         return sub
 
@@ -1171,6 +1184,15 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
+    if hasattr(arguments, "source_root"):
+        global INSTRUMENT_ROOT, OUTPUT_ROOT, CAMPAIGN_STATE_PATH
+        INSTRUMENT_ROOT = arguments.source_root.resolve()
+        OUTPUT_ROOT = arguments.output_root.resolve()
+        CAMPAIGN_STATE_PATH = OUTPUT_ROOT / "campaign_state.json"
+        configure_runtime_paths(
+            source_root=INSTRUMENT_ROOT,
+            output_root=OUTPUT_ROOT,
+        )
     arguments.handler(arguments)
     return 0
 

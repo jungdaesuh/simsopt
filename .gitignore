@@ -76,3 +76,8 @@ src/simsopt/_version.py
 # tests/benchmarks/test_jax_example_execution_mode_contract.py.
 .artifacts/jax-example-parity/
 .artifacts/jax-example-execution-modes/
+
+# Portable flat-675 campaign output roots.
+/.artifacts/flat675_fused_campaign/
+/.artifacts/flat675_promotion/
+/.artifacts/genuine675_fair_bar/

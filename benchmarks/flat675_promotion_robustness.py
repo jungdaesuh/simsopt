@@ -23,7 +23,8 @@ invocation contract is therefore F3's::
 
     PYTHONPATH=<production-root>:<instrument-root>:<instrument-root>/src \\
         <runtime-env>/bin/python \\
-        <production-root>/benchmarks/flat675_promotion_robustness.py run
+        <production-root>/benchmarks/flat675_promotion_robustness.py run \\
+        --source-root <instrument-root>
 
 Gates, exactly as chartered and applied per run:
 
@@ -54,23 +55,21 @@ from typing import Final, Mapping, Sequence
 
 from benchmarks.flat675_fused_campaign_contract import production_child_environment
 from benchmarks.genuine_675_fair_bar import (
+    DEFAULT_SOURCE_ROOT,
     ENDPOINT_OBJECTIVE_RTOL,
     INSTRUMENT_COMMIT,
+    SOURCE_ROOT_ENVIRONMENT,
+    configure_runtime_paths,
     gpu_environment,
     run_oracle,
     write_provenance_shim,
-)
-from benchmarks.genuine_675_fair_bar import (
-    SOURCE_ROOT as INSTRUMENT_ROOT,
 )
 
 PRODUCTION_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 CHILD: Final[Path] = (
     PRODUCTION_ROOT / "benchmarks" / "flat675_promotion_robustness_child.py"
 )
-OUTPUT_ROOT: Final[Path] = Path(
-    "/home/jungdaesuh/simsopt_mixed_artifacts/flat675_promotion"
-)
+OUTPUT_ROOT: Final[Path] = PRODUCTION_ROOT / ".artifacts" / "flat675_promotion"
 
 RECORD_SCHEMA: Final[str] = "flat675-promotion-robustness.v1"
 
@@ -247,12 +246,24 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("run",))
     parser.add_argument("--input-manifest", type=Path, required=True)
+    parser.add_argument(
+        "--source-root",
+        type=Path,
+        default=DEFAULT_SOURCE_ROOT,
+        required=DEFAULT_SOURCE_ROOT is None,
+        help=(
+            "pinned external instrument tree; may default from "
+            f"{SOURCE_ROOT_ENVIRONMENT}"
+        ),
+    )
     parser.add_argument("--run-root", type=Path, required=True)
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
+    instrument_root: Path = args.source_root.resolve()
+    configure_runtime_paths(source_root=instrument_root, output_root=OUTPUT_ROOT)
     run_root: Path = args.run_root
     run_root.mkdir(parents=True, exist_ok=False)
 
@@ -311,7 +322,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "no timing claim; every seconds field is incidental and non-verdict"
         ),
         "instrument_commit": INSTRUMENT_COMMIT,
-        "instrument_root": str(INSTRUMENT_ROOT),
+        "instrument_root": str(instrument_root),
         "input_manifest": str(args.input_manifest),
         "maxiter": MAXITER,
         "seed": SEED,

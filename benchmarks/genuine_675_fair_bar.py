@@ -19,6 +19,9 @@ docs/receipts/genuine675_fair_bar.md; the ``Harness:`` line pins this
 file's own commit chain): its ``simsopt_jax.runtime.*`` imports resolve
 from that instrument and deliberately do not resolve at this branch's
 tip, where the file is retained as the sealed campaign's cited source.
+Campaign execution also takes that tree through ``--source-root`` (or
+``SIMSOPT_GENUINE675_SOURCE_ROOT``) and takes the external bundle through
+``--source-manifest``; neither input has an in-repository default.
 Subcommands: mint-manifest, selftest-loader, phase1, probe, native-matrix,
 pairs, validate.
 """
@@ -43,10 +46,13 @@ from typing import Mapping, Sequence
 # lives on pr/jax-port-squashed and must always run with
 # PYTHONPATH=<source-root>:<source-root>/src so every simsopt_jax import
 # below resolves from the pinned instrument tree, never from this tree.
-DEFAULT_SOURCE_ROOT = Path("/home/jungdaesuh/code/columbia/simsopt-genuine675-fairbar")
-DEFAULT_OUTPUT_ROOT = Path(
-    "/home/jungdaesuh/simsopt_mixed_artifacts/genuine675_fair_bar"
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+SOURCE_ROOT_ENVIRONMENT = "SIMSOPT_GENUINE675_SOURCE_ROOT"
+_source_root_environment = os.environ.get(SOURCE_ROOT_ENVIRONMENT)
+DEFAULT_SOURCE_ROOT = (
+    Path(_source_root_environment) if _source_root_environment else None
 )
+DEFAULT_OUTPUT_ROOT = REPOSITORY_ROOT / ".artifacts" / "genuine675_fair_bar"
 INSTRUMENT_COMMIT = "1c23f6c5f8964c74cc60f63d81b7f93f2db852f3"
 
 from simsopt_jax.runtime.genuine_675_dynamic import Genuine675LbfgsbPolicy
@@ -143,12 +149,19 @@ PARTITION_SAMPLE_SECONDS = 3.0
 FOREIGN_CPU_MIN_CORES = 0.5
 NARROWING_FACTOR = 2.0
 
-SOURCE_ROOT = DEFAULT_SOURCE_ROOT
+SOURCE_ROOT: Path
 OUTPUT_ROOT = DEFAULT_OUTPUT_ROOT
 
 NATIVE_LANE = "native_cpp_cpu"
 GPU_LANE = "jax_gpu_fp64"
 FIXED_BUDGET_MODE = "fixed_budget_diagnostic"
+
+
+def configure_runtime_paths(*, source_root: Path, output_root: Path) -> None:
+    """Bind the external instrument and local artifact roots before execution."""
+    global SOURCE_ROOT, OUTPUT_ROOT
+    SOURCE_ROOT = source_root.resolve()
+    OUTPUT_ROOT = output_root.resolve()
 
 
 def _canonical_bytes(payload: object) -> bytes:
@@ -1625,12 +1638,17 @@ def main() -> int:
     parser.add_argument(
         "--source-manifest",
         type=Path,
-        default=Path(
-            "/home/jungdaesuh/simsopt_mixed_artifacts/"
-            "genuine675-r3-input-1c23f6c5-20260721-r1/manifest.json"
+        default=None,
+    )
+    parser.add_argument(
+        "--source-root",
+        type=Path,
+        default=DEFAULT_SOURCE_ROOT,
+        help=(
+            "pinned external instrument tree; may default from "
+            f"{SOURCE_ROOT_ENVIRONMENT}"
         ),
     )
-    parser.add_argument("--source-root", type=Path, default=DEFAULT_SOURCE_ROOT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1673,10 +1691,16 @@ def main() -> int:
     validate.set_defaults(func=cmd_validate)
 
     args = parser.parse_args()
-    global SOURCE_ROOT, OUTPUT_ROOT
-    SOURCE_ROOT = args.source_root.resolve()
-    OUTPUT_ROOT = args.output_root.resolve()
-    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    if args.source_root is None:
+        parser.error(
+            f"--source-root is required when {SOURCE_ROOT_ENVIRONMENT} is unset"
+        )
+    if args.func is not cmd_validate and args.source_manifest is None:
+        parser.error("--source-manifest is required for campaign execution")
+    configure_runtime_paths(
+        source_root=args.source_root,
+        output_root=args.output_root,
+    )
     import simsopt_jax.runtime.single_stage_fullspace_675 as _formulation_module
 
     formulation_file = Path(_formulation_module.__file__).resolve()
@@ -1686,6 +1710,8 @@ def main() -> int:
             f"{formulation_file} (expected under {SOURCE_ROOT}); launch with "
             "PYTHONPATH=<source-root>:<source-root>/src."
         )
+    if args.func is not cmd_validate:
+        OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     args.func(args)
     return 0
 
