@@ -1134,27 +1134,146 @@ class CurveCWSFourierCPP(Curve, sopp.Curve):
         return Derivative({self: vjp_contraction_1d(self.drfactor_by_dcoeff(), v)})
 
 
+_LEGACY_ARTIFACT_KEYS = ("idofs", "mpol", "nfp", "ntor", "stellsym")
+
+
+def legacy_cws_dofs_to_modes(legacy_dofs, legacy_free, order):
+    """Convert a pre-2024 ``CurveCWSFourier`` dof vector to this class' encoding.
+
+    The upstream class that wrote those artifacts (simsopt ``20265c3fa``,
+    ``src/simsoptpp/curvecwsfourier.h``) carried ``2 * (2 * order + 1) + 2`` dofs
+    laid out as ``[theta_l, theta_c[0..order], theta_s[1..order], phi_l,
+    phi_c[0..order], phi_s[1..order]]`` and evaluated, with angles in radians,
+    ``theta = sum_m theta_c[m] cos(2 pi m t) + ... + theta_l * (2 pi t)``.
+    This class carries ``2 * (2 * order + 1)`` dofs laid out as
+    ``[phi_c, phi_s, theta_c, theta_s]``, holds the secular coefficients as the
+    constructor arguments ``G`` (theta) and ``H`` (phi), and works in turns --
+    the winding surface multiplies ``(phi, theta)`` by ``2 pi``
+    (``simsopt_jax.core.curve_kernels._surface_rz_fourier_gamma_pointwise``).
+    The two encodings are therefore the same curve under a reordering, a
+    ``1 / (2 pi)`` rescaling of the harmonics, and the exact identifications
+    ``G = theta_l`` and ``H = phi_l``.
+
+    The free/fixed mask travels with the values under the same reordering, with
+    one exception that this function rejects rather than silently drops: the
+    secular pair becomes ``G``/``H``, which are constructor arguments and not
+    dofs, so a legacy artifact that left ``theta_l`` or ``phi_l`` free is asking
+    for an optimization this class cannot perform. Non-integral secular values
+    are rejected for the same reason: ``G`` and ``H`` are whole winding numbers
+    (``gamma_2d`` adds ``G * t`` with ``G`` taken as an integer), so a fractional
+    ``theta_l`` would be silently truncated.
+
+    Args:
+        legacy_dofs: The legacy dof vector, of size ``2 * (2 * order + 1) + 2``.
+        legacy_free: The legacy free/fixed mask, of the same size.
+        order: Maximum Fourier order of the curve.
+
+    Returns:
+        ``(modes, free, G, H)`` for :class:`CurveCWSFourierCPP`, where ``modes``
+        and ``free`` are the ``2 * (2 * order + 1)`` harmonic values and their
+        free flags in this class' order.
+    """
+    theta_block, phi_block = np.asarray(legacy_dofs, dtype=np.float64).reshape(
+        2, 2 * order + 2
+    )
+    theta_free, phi_free = np.asarray(legacy_free, dtype=bool).reshape(2, 2 * order + 2)
+    secular_theta = theta_block[0]
+    secular_phi = phi_block[0]
+    if not np.isfinite(secular_theta) or not np.isfinite(secular_phi):
+        raise ValueError(
+            "Legacy CurveCWSFourier secular coefficients (theta_l="
+            f"{secular_theta}, phi_l={secular_phi}) are not finite; "
+            "CurveCWSFourier represents them as the integer winding numbers "
+            "G and H."
+        )
+    if secular_theta != int(secular_theta) or secular_phi != int(secular_phi):
+        raise ValueError(
+            "Legacy CurveCWSFourier secular coefficients (theta_l="
+            f"{secular_theta}, phi_l={secular_phi}) are not whole turns; "
+            "CurveCWSFourier represents them as the integer winding numbers "
+            "G and H."
+        )
+    if theta_free[0] or phi_free[0]:
+        raise ValueError(
+            "Legacy CurveCWSFourier secular coefficients (theta_l free="
+            f"{bool(theta_free[0])}, phi_l free={bool(phi_free[0])}) are free "
+            "dofs; CurveCWSFourier carries them as the constructor arguments G "
+            "and H, which are not dofs and cannot be optimized."
+        )
+    modes = np.concatenate((phi_block[1:], theta_block[1:])) / (2.0 * np.pi)
+    free = np.concatenate((phi_free[1:], theta_free[1:]))
+    return modes, free, int(secular_theta), int(secular_phi)
+
+
 class CurveCWSFourier(CurveCWSFourierCPP):
+    """A curve on a winding surface that reads both serialized shapes.
+
+    Modern artifacts are written by the inherited ``GSONable.as_dict`` (via
+    :class:`~simsopt._core.optimizable.Optimizable`), which emits this class'
+    constructor arguments -- ``quadpoints``, ``order``, ``surf``, ``G``, ``H`` --
+    plus the ``dofs`` block; :meth:`from_dict` hands that dict straight back to
+    the inherited ``GSONable.from_dict``, so the ``surf`` entry round-trips by
+    reference and a loaded curve gets the saved winding surface itself (its
+    quadpoints, DOFs and identity with any object that shares it).
+
+    Legacy artifacts (upstream simsopt ``20265c3fa`` and earlier, e.g.
+    ``examples/3_Advanced/optimization_cws_singlestage_nfp2_QA_ncoils3_axiTorus``)
+    instead carry ``idofs``, ``mpol``, ``nfp``, ``ntor`` and ``stellsym``, the
+    arguments of the constructor that class had. That shape is recognised by the
+    presence of those keys and rebuilt by :meth:`_from_legacy_dict`:
+    the winding surface from ``nfp``/``stellsym``/``mpol``/``ntor``/``idofs``,
+    the curve modes and the ``G``/``H`` winding numbers from the legacy dof
+    vector (see :func:`legacy_cws_dofs_to_modes`), and the saved ``quadpoints``
+    array verbatim -- the legacy constructor kept only its length.
+
+    The legacy free/fixed mask is carried over with the values, reordered the
+    same way; a legacy artifact whose secular dofs are free, or whose secular
+    values are non-integral or non-finite, is rejected with a ``ValueError``
+    rather than silently reinterpreted (see :func:`legacy_cws_dofs_to_modes`).
+
+    Three things a legacy dict cannot express, and which are therefore
+    reconstructed at their defaults: the winding surface's ``quadpoints_phi`` /
+    ``quadpoints_theta`` (legacy artifacts store no surface grid) and its
+    identity with other objects (they store surface dofs inline, not a
+    reference); a non-``SurfaceRZFourier`` winding surface (the legacy class
+    only implemented that one); and the per-dof names and bounds (legacy names
+    are positional ``x0..xN`` over a different layout, so this class' own
+    ``phic``/``phis``/``thetac``/``thetas`` names and default bounds are used).
+    """
+
     @classmethod
     def from_dict(cls, d, serial_objs_dict, recon_objs):
+        if all(key in d for key in _LEGACY_ARTIFACT_KEYS):
+            return cls._from_legacy_dict(d, serial_objs_dict, recon_objs)
+        return super().from_dict(d, serial_objs_dict, recon_objs)
+
+    @classmethod
+    def _from_legacy_dict(cls, d, serial_objs_dict, recon_objs):
         decoder = GSONDecoder()
-        quadpoints = decoder.process_decoded(
-            d["quadpoints"], serial_objs_dict=serial_objs_dict, recon_objs=recon_objs
+        quadpoints = np.asarray(
+            decoder.process_decoded(d["quadpoints"], serial_objs_dict, recon_objs),
+            dtype=np.float64,
         )
-        dofs = decoder.process_decoded(
-            d["dofs"], serial_objs_dict=serial_objs_dict, recon_objs=recon_objs
-        )
-        surface = SurfaceRZFourier(
+        dofs = decoder.process_decoded(d["dofs"], serial_objs_dict, recon_objs)
+        order = int(d["order"])
+        surf = SurfaceRZFourier(
             nfp=int(d["nfp"]),
             stellsym=bool(d["stellsym"]),
             mpol=int(d["mpol"]),
             ntor=int(d["ntor"]),
         )
-        surface.set_dofs(np.asarray(d["idofs"], dtype=np.float64))
-        curve = cls(
-            quadpoints=np.asarray(quadpoints, dtype=np.float64),
-            order=int(d["order"]),
-            surf=surface,
+        surf.set_dofs(np.asarray(d["idofs"], dtype=np.float64))
+        modes, free, secular_theta, secular_phi = legacy_cws_dofs_to_modes(
+            dofs.full_x, dofs.free_status, order
         )
-        curve.full_x = np.asarray(dofs.full_x, dtype=np.float64)
+        curve = cls(
+            quadpoints=quadpoints,
+            order=order,
+            surf=surf,
+            G=secular_theta,
+            H=secular_phi,
+        )
+        curve.local_full_x = modes
+        for index in np.flatnonzero(~free):
+            curve.fix(int(index))
         return curve
