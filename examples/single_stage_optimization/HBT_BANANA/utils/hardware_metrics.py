@@ -5,12 +5,6 @@ from pathlib import Path
 import numpy as np
 
 
-_BOOZER_SURFACE_MODULE = "simsopt.geo.boozersurface"
-_FINITE_CURRENT_MODULE = "banana_opt.boozer_finite_current"
-_BOOZER_SURFACE_CLASS = "BoozerSurface"
-_FINITE_CURRENT_CLASS = "BoozerSurfaceFiniteI"
-
-
 def curve_poloidal_half_extent(curve, winding_major_radius, winding_z=0.0):
     """Return max inboard poloidal angle magnitude for one banana curve."""
     gamma = np.asarray(curve.gamma())
@@ -45,31 +39,23 @@ def boozer_json_vacuum_lineage(path):
     """Validate saved Boozer JSON lineage for the vacuum-current campaign."""
     json_path = Path(path)
     data = json.loads(json_path.read_text())
-    objects = list(_walk_mappings(data))
-    plain_boozer_surfaces = [
-        node for node in objects
-        if node.get("@module") == _BOOZER_SURFACE_MODULE
-        and node.get("@class") == _BOOZER_SURFACE_CLASS
+    boozer_objects = [
+        node for node in _walk_mappings(data)
+        if node.get("@class") == "BoozerSurface"
     ]
-    finite_current_surfaces = [
-        node for node in objects
-        if node.get("@class") == _FINITE_CURRENT_CLASS
-        or node.get("@module") == _FINITE_CURRENT_MODULE
-    ]
-    i_fields = [
-        node["I"] for node in objects
-        if _is_boozer_surface_object(node) and "I" in node
-    ]
-    plain_boozer_surface = bool(plain_boozer_surfaces)
-    references_finite_i = bool(finite_current_surfaces)
-    has_i_field = bool(i_fields)
+    plain_boozer_surface = any(
+        node.get("@module") == "simsopt.geo.boozersurface"
+        for node in boozer_objects
+    )
+    references_finite_i = _contains_string(data, "BoozerSurfaceFiniteI")
+    has_i_field = _contains_key(data, "I")
     return {
         "vacuum_lineage_ok": bool(
             plain_boozer_surface and not references_finite_i and not has_i_field
         ),
         "boozer_surface_class": "BoozerSurface" if plain_boozer_surface else None,
         "boozer_surface_module": (
-            _BOOZER_SURFACE_MODULE if plain_boozer_surface else None
+            "simsopt.geo.boozersurface" if plain_boozer_surface else None
         ),
         "boozer_json_has_I_field": bool(has_i_field),
         "boozer_json_references_finite_i": bool(references_finite_i),
@@ -86,9 +72,24 @@ def _walk_mappings(node) -> Iterator[Mapping[str, object]]:
             yield from _walk_mappings(value)
 
 
-def _is_boozer_surface_object(node: Mapping[str, object]) -> bool:
-    """Return whether a serialized mapping is a Boozer-surface record."""
-    return (
-        node.get("@class") in {_BOOZER_SURFACE_CLASS, _FINITE_CURRENT_CLASS}
-        or node.get("@module") in {_BOOZER_SURFACE_MODULE, _FINITE_CURRENT_MODULE}
-    )
+def _contains_key(node, key):
+    if isinstance(node, Mapping):
+        if key in node:
+            return True
+        return any(_contains_key(value, key) for value in node.values())
+    if isinstance(node, Sequence) and not isinstance(node, (str, bytes, bytearray)):
+        return any(_contains_key(value, key) for value in node)
+    return False
+
+
+def _contains_string(node, needle):
+    if isinstance(node, str):
+        return needle in node
+    if isinstance(node, Mapping):
+        return any(
+            _contains_string(key, needle) or _contains_string(value, needle)
+            for key, value in node.items()
+        )
+    if isinstance(node, Sequence) and not isinstance(node, (str, bytes, bytearray)):
+        return any(_contains_string(value, needle) for value in node)
+    return False

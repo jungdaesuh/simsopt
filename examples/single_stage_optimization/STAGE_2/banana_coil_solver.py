@@ -21,6 +21,30 @@ import shutil
 from numba import njit
 from itertools import combinations
 
+# The 2026-04-15 seed_penalty_002084_tight run's own results.json, shipped verbatim
+# (sha256 655c7f3e...). It is the single source of truth for this replay's configuration;
+# see REPLAY_002084.md.
+ROOT_RESULTS_FILE = "replay_002084_root_results.json"
+
+
+def assert_root_contract(constants):
+    """Abort unless every constant equals the value the April 2026 root run recorded."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ROOT_RESULTS_FILE)
+    with open(path) as handle:
+        recorded = json.load(handle)
+    drift = {key: (value, recorded[key]) for key, value in constants.items() if value != recorded[key]}
+    if drift:
+        detail = "\n".join(f"  {key}: this driver {got!r}, April root {want!r}"
+                           for key, (got, want) in sorted(drift.items()))
+        raise SystemExit(
+            f"replay contract violated - {len(drift)} constant(s) differ from {ROOT_RESULTS_FILE}:\n"
+            f"{detail}\n"
+            "This run would NOT reproduce seed_penalty_002084_tight. Restore the constants, or "
+            "remove this check if a different configuration is intended."
+        )
+    print(f"replay contract OK: {len(constants)} constants match the 2026-04-15 root run")
+
+
 def initSurface(R0, s):
     # Initialize the boundary magnetic surface and scale it to the target major radius
     surf = SurfaceRZFourier.from_wout(file_loc, range="full torus", nphi=nphi, ntheta=ntheta, s=s)
@@ -364,6 +388,31 @@ _scaled_bound = BANANA_CURRENT_MAX_A / abs(new_banana_coils[0].current.scale)
 _banana_unit_current.local_lower_bounds = np.array([-_scaled_bound])
 _banana_unit_current.local_upper_bounds = np.array([_scaled_bound])
 bounds = list(zip(np.asarray(JF.lower_bounds, dtype=float), np.asarray(JF.upper_bounds, dtype=float)))
+# This driver takes no arguments: every weight, threshold and geometry constant above is a
+# literal. Check them against the artifact the 2026-04-15 root run wrote for itself, so a
+# stray edit fails here instead of silently producing a coil that is not the root.
+assert_root_contract({
+    "LENGTH_WEIGHT": LENGTH_WEIGHT,
+    "LENGTH_TARGET": LENGTH_TARGET,
+    "CC_THRESHOLD": CC_THRESHOLD,
+    "CC_WEIGHT": CC_WEIGHT,
+    "CURVATURE_WEIGHT": CURVATURE_WEIGHT,
+    "CURVATURE_THRESHOLD": CURVATURE_THRESHOLD,
+    "COIL_PLASMA_MIN_DIST_M": CS_THRESHOLD,
+    "BANANA_CURRENT_MAX_A": BANANA_CURRENT_MAX_A,
+    "MAJOR_RADIUS": R0,
+    "TOROIDAL_FLUX": s,
+    "banana_surf_radius": banana_surf_radius,
+    "NFP": banana_surf_nfp,
+    "order": order,
+    "max_iterations": MAXITER,
+    "theta_center": theta_center,
+    "phi_center": phi_center,
+    "theta_width": theta_width,
+    "phi_width": phi_width,
+    "PLASMA_SURF_FILENAME": plasma_surf_filename,
+})
+
 res = minimize(fun, dofs, jac=True, method='L-BFGS-B', bounds=bounds, options={'maxiter': MAXITER, 'maxcor': 300, 'ftol': 1e-15, 'gtol': 1e-15})
 print(res.message)
 # L-BFGS-B's last function evaluation is not guaranteed to be at res.x; restore the returned optimum
