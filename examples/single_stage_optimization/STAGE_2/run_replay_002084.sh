@@ -13,14 +13,13 @@ WOUT="$HERE/../equilibria/wout_nfp5ginsburg_000_002084_iota20.nc"
 
 [ -f "$WOUT" ] || { echo "missing equilibrium: $WOUT (it is gitignored; obtain it separately)" >&2; exit 1; }
 
-# jax/jaxlib are PINNED, and the pin is load-bearing. LpCurveCurvature is jit-compiled
-# (src/simsopt/geo/curveobjectives.py), and XLA codegen for the Lp(4) curvature penalty differs
-# between jax releases by ~1.6e-10 relative. That penalty reaches 1e13 on L-BFGS-B trial steps, so
-# the line search is chaotic and the jax version alone decides the endpoint. Measured here on
-# macOS arm64, 2026-09-16:
-#   jax 0.10.0 -> 300 iterations (cap), length 1.846 m, current on the 16 kA bound  [reproduces]
-#   jax 0.10.2 ->  49 iterations (ftol), length 0.503 m, current 9980 A             [does not]
-# numpy (2.4.2 vs 2.4.6), scipy and OMP_NUM_THREADS were verified to have no effect.
+# jax/jaxlib are pinned for reproducibility of the environment, NOT because the version decides
+# the outcome. The Lp(4) curvature penalty reaches 1e13 on L-BFGS-B trial steps around evaluation
+# 16-26, and whether the line search recovers from that spike (300 iterations, ~1.85 m coil) or
+# collapses (8-50 iterations, ~0.5-0.6 m coil) is decided by last-bit floating-point noise.
+# Measured 2026-09-16: macOS arm64 0.10.0 long / 0.10.2 stall (one run each); Linux x86_64
+# 0.10.0 stall at 1 and 4 threads, long at 8 threads; 0.10.2 long at 1 and 4 threads. Hence the
+# outcome check + thread-count retry below.
 DEPS=("numpy>=2.4,<3" scipy "jax[cpu]==0.10.0" "jaxlib==0.10.0" Deprecated monty ruamel.yaml sympy f90nml pyevtk matplotlib shapely numba)
 if command -v uv >/dev/null 2>&1; then
     [ -x "$VENV/bin/python" ] || uv venv -p 3.11 "$VENV"
@@ -68,8 +67,35 @@ fi
 "$PY" -c 'import simsoptpp, simsopt; print("simsoptpp:", simsoptpp.__file__); print("simsopt:", simsopt.__file__)'
 
 cd "$HERE"
-# NOTE: the shipped macOS arm64 simsoptpp is a serial build (no libomp linkage, no omp symbols), so
-# OMP_NUM_THREADS is a no-op for it and the replay is bit-identical at 1, 4 and 8 threads. It is
-# still exported for OpenMP-enabled builds such as the Linux x86_64 one.
-export OMP_NUM_THREADS="$THREADS" JAX_PLATFORMS=cpu MPLBACKEND=Agg
-exec "$PY" banana_coil_solver.py
+export JAX_PLATFORMS=cpu MPLBACKEND=Agg
+OUT_DIR="outputs-wout_nfp5ginsburg_000_002084_iota20.nc/R0=0.915-s=0.24-LW=0.0005-CCW=100-CW=0.0001-SR=0.210-Order=2"
+
+# Outcome check against the April root's own results.json: the root ran to the 300-iteration cap at
+# 1.844 m. A stalled replay ends in <100 iterations at ~0.5-0.6 m. Anything else is a genuinely
+# different result and is reported as such.
+check_outcome() {
+    "$PY" - "$HERE/$OUT_DIR/results.json" "$HERE/replay_002084_root_results.json" <<'PYEOF'
+import json, sys
+got, root = (json.load(open(p)) for p in sys.argv[1:3])
+it, L = got["iterations"], got["COIL_LENGTH"]
+L0 = root["COIL_LENGTH"]
+if it >= 250 and abs(L - L0) / L0 < 0.05:
+    print(f"outcome: reproduces the root basin ({it} iterations, {L:.4f} m vs root {L0:.4f} m)"); sys.exit(0)
+if it < 100 and L < 1.0:
+    print(f"outcome: STALLED ({it} iterations, {L:.4f} m) - line-search knife edge, retrying"); sys.exit(2)
+print(f"outcome: DIFFERENT ({it} iterations, {L:.4f} m vs root {L0:.4f} m) - not a stall, not the root basin"); sys.exit(3)
+PYEOF
+}
+
+# Thread count perturbs the last bits (OpenMP reduction order); on a serial build every attempt is
+# bit-identical, so a stall there is reported rather than retried.
+ATTEMPT_THREADS=("$THREADS" 8 1 2 3)
+for t in "${ATTEMPT_THREADS[@]}"; do
+    echo "=== replay attempt with OMP_NUM_THREADS=$t" >&2
+    OMP_NUM_THREADS="$t" "$PY" banana_coil_solver.py
+    check_outcome && exit 0
+    rc=$?
+    [ "$rc" -eq 2 ] || exit "$rc"
+done
+echo "all attempts stalled; on a serial (non-OpenMP) build the attempts are identical - see REPLAY_002084.md" >&2
+exit 2
