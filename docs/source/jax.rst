@@ -516,13 +516,24 @@ The original and corrected objective terms, displacement, iota/G changes,
 and polish time are reported separately. The example's top-level
 ``final_objective`` remains the fused endpoint's value; the polish result's
 ``objective_after`` is the corrected value at the original weights.
-Existing fused-solve speedups do
-not include this correction. In the saved 37-step frozen-input comparison,
+Existing fused-solve speedups do not include this correction. In the saved
+37-step frozen-input comparison measured on 2026-09-16,
 the stationarity norm fell from ``0.0161`` to about ``1e-15``, while maximum
 surface movement was 9.35 mm and the original objective increased by 2.70%.
 The incoming norm was about ``1.61e9`` times the timing threshold and
 ``1.61e11`` times the stricter threshold. These are observations from one
 input, not general acceptance limits or a performance guarantee.
+
+Reproduce the comparison from the repository root in a JAX CUDA environment
+with the native extension installed and the host-local frozen input bundle
+available (the same bundle required by the example's ``--bundle`` option)::
+
+    JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \
+    XLA_FLAGS=--xla_gpu_autotune_level=0 XLA_PYTHON_CLIENT_PREALLOCATE=false \
+    MPI4PY_RC_INITIALIZE=false MPLBACKEND=Agg OMP_NUM_THREADS=8 \
+    PYTHONPATH=src python benchmarks/flat675_nested_endpoint_comparison.py \
+      --configuration bundle --max-steps 37 --jax-platform gpu \
+      --out-json /tmp/flat675-b37-comparison.json
 
 Correction can fail: at three steps the frozen-input JAX correction failed,
 although the native correction succeeded; for the repository-input case,

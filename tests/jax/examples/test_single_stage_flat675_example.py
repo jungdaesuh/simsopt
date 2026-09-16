@@ -24,12 +24,14 @@ from types import ModuleType
 
 import numpy as np
 import pytest
+from simsopt_jax.examples import ExampleResult, ExecutionScale
 from simsopt_jax_adapters.geo.flat675 import (
     FLAT675_COIL_DOF_COUNT,
     FLAT675_OBJECTIVE_TERM_KEYS,
     FLAT675_OUTER_DOF_COUNT,
     FLAT675_SURFACE_DOF_COUNT,
     FLAT675_VESSEL_DOF_COUNT,
+    Flat675AcceptanceLimits,
     Flat675ContractError,
     flat675_weighted_terms,
 )
@@ -242,6 +244,33 @@ def test_bundle_flag_selects_the_certified_configuration(
     assert example.main(["--json"]) == 0
     assert captured["arguments"] == ["--json"]
     assert captured["solve"] is example.solve
+
+
+@pytest.mark.parametrize("flag", ["--max-s", "--max", "--max-steps"])
+def test_common_step_options_reach_the_solver(
+    example: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    flag: str,
+) -> None:
+    """Both real parsers preserve the existing common CLI abbreviations."""
+    calls: list[tuple[int, ExecutionScale]] = []
+
+    def solve(
+        output_dir: Path,
+        max_steps: int,
+        scale: ExecutionScale,
+        *,
+        polish: bool = False,
+        acceptance_limits: Flat675AcceptanceLimits | None = None,
+    ) -> ExampleResult:
+        assert output_dir.is_dir()
+        assert polish is False and acceptance_limits is None
+        calls.append((max_steps, scale))
+        return ExampleResult("cli-contract", {}, "ok")
+
+    monkeypatch.setattr(example, "solve", solve)
+    assert example.main([flag, "1", "--smoke"]) == 0
+    assert calls == [(1, "bounded")]
 
 
 # --- the disclosure the certified scope requires ----------------------------

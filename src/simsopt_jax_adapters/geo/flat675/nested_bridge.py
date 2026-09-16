@@ -59,6 +59,7 @@ from simsopt_jax.core.specs import (
     SurfaceXYZTensorFourierSpec,
 )
 from simsopt_jax.core.surface_rzfourier import surface_rz_fourier_dofs_from_spec
+from simsopt_jax.runtime.host_boundary import host_float64
 
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
@@ -110,7 +111,7 @@ class Flat675NestedBridgeError(ValueError):
 
 
 def _host_float64(values: object) -> NDArray[np.float64]:
-    return np.array(jax.device_get(values), dtype=np.float64, copy=True)
+    return np.array(host_float64(values), dtype=np.float64, copy=True)
 
 
 def _mapped_dofs(

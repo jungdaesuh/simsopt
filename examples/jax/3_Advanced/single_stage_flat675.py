@@ -367,7 +367,7 @@ def solve_bundle(
 
 def main(arguments: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if arguments is None else arguments)
-    parser = argparse.ArgumentParser(add_help=False)
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     parser.add_argument(
         BUNDLE_FLAG, action="store_true", help="use the frozen local bundle"
     )

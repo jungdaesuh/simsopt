@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from numpy.typing import NDArray
+from simsopt_jax.runtime.host_boundary import host_float64
 
 from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_BANANA_NEWTON_MAXITER,
@@ -124,7 +125,7 @@ def _json_finite(value: object) -> object:
 
 
 def _owned_readonly(values: object) -> NDArray[np.float64]:
-    owned = np.array(jax.device_get(values), dtype=np.float64, copy=True)
+    owned = np.array(host_float64(values), dtype=np.float64, copy=True)
     owned.setflags(write=False)
     return owned
 
@@ -168,7 +169,8 @@ def polish_flat675(
 ) -> Flat675PolishResult:
     """Correct only the surface and assess explicit limits against the same point.
 
-    The Schur dense-LU Newton solve uses the established 1e-13 physics bar.
+    The JAX Schur dense-LU Newton policy uses zero stabilization and at most
+    40 iterations, stopped at the established 1e-13 physics threshold.
     Missing design limits leave acceptance unassessed after a valid solve.
     """
     started = perf_counter()

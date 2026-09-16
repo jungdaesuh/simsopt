@@ -19,7 +19,11 @@ from simsopt_jax_adapters.geo.flat675 import (
 )
 from simsopt_jax_adapters.geo.flat675.nested_bridge import nested_view_from_flat675
 from simsopt_jax_adapters.geo.nested_ls_contract import (
+    NESTED_LS_BANANA_NEWTON_MAXITER,
     NESTED_LS_CONSTRAINT_WEIGHT,
+    NESTED_LS_JAX_INNER_STAB,
+    NESTED_LS_NEWTON_TOL,
+    NESTED_LS_WEIGHT_INV_MODB,
     nested_ls_banana_run_code_options,
 )
 
@@ -85,6 +89,8 @@ def real_polish():
     retained = incoming.copy()
     polished = polish_flat675(problem, incoming)
     assert np.array_equal(incoming, retained), "polish changed its caller's vector"
+    assert incoming.flags.writeable, "polish froze its caller's vector"
+    assert not np.shares_memory(incoming, polished.outer_vector)
     assert polished.solver_success, polished.rejection_reasons
     assert polished.acceptance_status == "not_assessed", polished.rejection_reasons
     return problem, incoming, polished
@@ -189,6 +195,39 @@ def test_strict_design_limit_rejects_real_correction(real_polish) -> None:
     assert "boozer_weighted_rms" in judged.rejection_reasons
 
 
+def _policy_checked_solver(result: SimpleNamespace):
+    """Constrain the production call's keyword-only Newton policy seam."""
+
+    def solve(
+        jax_boozer,
+        *,
+        iota,
+        G,
+        constraint_weight,
+        weight_inv_modB,
+        stab,
+        tol,
+        maxiter,
+        linear_solver,
+        max_dense_linearization_bytes,
+        residual_fn,
+        objective_fn,
+    ) -> SimpleNamespace:
+        assert jax_boozer is not None
+        assert np.isfinite(iota) and np.isfinite(G)
+        assert constraint_weight == NESTED_LS_CONSTRAINT_WEIGHT
+        assert weight_inv_modB is NESTED_LS_WEIGHT_INV_MODB
+        assert stab == NESTED_LS_JAX_INNER_STAB
+        assert tol == NESTED_LS_NEWTON_TOL
+        assert maxiter == NESTED_LS_BANANA_NEWTON_MAXITER
+        assert linear_solver == "dense_lu"
+        assert max_dense_linearization_bytes is None
+        assert callable(residual_fn) and callable(objective_fn)
+        return result
+
+    return solve
+
+
 @pytest.mark.parametrize(
     ("limited_field", "reason"),
     [
@@ -207,14 +246,17 @@ def test_each_design_limit_rejects_its_measured_quantity(
     monkeypatch.setattr(
         polish_module,
         "run_reduced_nested_ls_schur_newton",
-        lambda *args, **kwargs: SimpleNamespace(
-            surface_dofs=surface,
-            iota=baseline.iota_after,
-            G=baseline.G_after,
-            reduced_gradient=np.zeros_like(surface),
-            success=True,
-            persisted=True,
-            iteration_count=1,
+        _policy_checked_solver(
+            SimpleNamespace(
+                surface_dofs=surface,
+                iota=baseline.iota_after,
+                G=baseline.G_after,
+                reduced_gradient=np.zeros_like(surface),
+                success=True,
+                exit_status="converged",
+                persisted=True,
+                iteration_count=1,
+            )
         ),
     )
     if limited_field == "max_objective_increase":
@@ -265,6 +307,7 @@ def test_failed_solver_outputs_cannot_be_accepted(
         "G": baseline.G_after,
         "reduced_gradient": np.zeros_like(surface),
         "success": True,
+        "exit_status": "converged",
         "persisted": True,
         "iteration_count": 1,
     }
@@ -272,7 +315,7 @@ def test_failed_solver_outputs_cannot_be_accepted(
     monkeypatch.setattr(
         polish_module,
         "run_reduced_nested_ls_schur_newton",
-        lambda *args, **kwargs: SimpleNamespace(**values),
+        _policy_checked_solver(SimpleNamespace(**values)),
     )
     permissive = Flat675AcceptanceLimits(1e9, 1e9, 1e9, 1e9)
     judged = polish_flat675(problem, incoming, limits=permissive)
