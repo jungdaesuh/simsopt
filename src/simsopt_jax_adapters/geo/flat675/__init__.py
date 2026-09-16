@@ -80,6 +80,7 @@ from .policy import (
     Flat675HardwareSoftPenaltyPolicy,
     Flat675ObjectivePolicy,
 )
+from .polish import Flat675AcceptanceLimits, Flat675PolishResult, polish_flat675
 from .runtime_spec_loader import load_flat675_runtime_spec
 from .y_solve import Flat675YSolution, solve_flat675_y_qr
 
@@ -105,6 +106,7 @@ __all__ = [
     "FLAT_VESSEL_DOF_COUNT",
     "STELLSYM_SURFACE_RANGE",
     "CoilDofExtractionProvider",
+    "Flat675AcceptanceLimits",
     "Flat675BoozerLabelType",
     "Flat675BoozerMaterial",
     "Flat675BoozerSystem",
@@ -117,6 +119,7 @@ __all__ = [
     "Flat675InputManifest",
     "Flat675Material",
     "Flat675ObjectivePolicy",
+    "Flat675PolishResult",
     "Flat675Problem",
     "Flat675Programs",
     "Flat675YSolution",
@@ -137,6 +140,7 @@ __all__ = [
     "load_flat675_input_manifest",
     "load_flat675_runtime_spec",
     "load_flat675_vessel_template",
+    "polish_flat675",
     "solve_flat675_y_qr",
     "surface_block_dof_count",
     "surface_quadrature_range",

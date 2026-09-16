@@ -381,6 +381,9 @@ DIAG5_FROZEN_NUMERICAL_PATHS: Final = frozenset(
         "src/simsopt_jax_adapters/geo/single_stage_native_endpoint.py",
     }
 )
+# Refrozen 2026-09-16: 678 -> 679. Admitted the user-facing flat675 final
+# surface polish through the execution-source generator.
+#
 # Refrozen 2026-09-16: 675 -> 678. Admitted the flat675 nested-endpoint
 # comparison members (``src/simsopt_jax_adapters/geo/flat675/nested_bridge.py``,
 # ``benchmarks/flat675_nested_endpoint.py``,
@@ -398,7 +401,7 @@ DIAG5_FROZEN_NUMERICAL_PATHS: Final = frozenset(
 # Membership is tracked files plus untracked-but-not-ignored files under the
 # sweep roots. Run in a DEDICATED CLEAN WORKTREE, because the regenerator
 # hashes working-tree bytes and the shared tree is not quiescent.
-DIAG5_EXECUTION_SOURCE_ENTRY_COUNT: Final = 678
+DIAG5_EXECUTION_SOURCE_ENTRY_COUNT: Final = 679
 DIAG5_CPU_QUALIFICATION_SCHEMA_VERSION: Final = (
     "single-stage-neq-gntr3-cpu-trajectory-qualification-v2"
 )

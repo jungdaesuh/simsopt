@@ -57,10 +57,28 @@ script can tune away.
 ``--smoke`` runs the same production lane on a deliberately small problem for
 a couple of iterations.  Its ``ok`` status means the fused lane executed and
 stayed finite, never that anything converged.
+
+FINAL SURFACE CHECK
+-------------------
+``--polish`` freezes the coils and vessel, then runs reduced Schur Newton
+after the fused optimization.  Its stationarity check uses the nested
+contract's 1e-13 physics threshold; this is a numerical condition, not a
+complete physical-validity certificate.  Boozer equation RMS, surface-label
+error, surface movement, and objective increase require explicit acceptance
+limits.  Without them acceptance is not assessed.  Failed corrections are
+reported as rejected.  The polish time is separate from the fused solve,
+and the historical speedups above do not include it.
+
+Polish is a single final correction, with no automatic retry.  A higher-weight
+flat restart would change the objective and could leave stationarity again;
+it would need another final check and has no established cost advantage.
 """
 
 from __future__ import annotations
 
+import argparse
+import sys
+from functools import partial
 from pathlib import Path
 
 import jax
@@ -81,11 +99,13 @@ from simsopt_jax_adapters.geo import CurveCWSFourier
 from simsopt_jax_adapters.geo.flat675 import (
     FLAT675_OBJECTIVE_TERM_KEYS,
     FLAT675_OUTER_DOF_COUNT,
+    Flat675AcceptanceLimits,
     Flat675ContractError,
     Flat675Problem,
     bind_flat675_programs,
     build_flat675_problem,
     load_flat675_bundle,
+    polish_flat675,
 )
 
 EXAMPLE_ID = "flat675-single-stage-coupled-optimization"
@@ -219,6 +239,8 @@ def _solve(
     max_steps: int,
     scale: ExecutionScale,
     configuration: str,
+    polish: bool = False,
+    acceptance_limits: Flat675AcceptanceLimits | None = None,
 ) -> ExampleResult:
     """Run the production fused lane once and publish what it did."""
     programs = bind_flat675_programs(
@@ -253,6 +275,11 @@ def _solve(
     terms = host_array(prepared.diagnostics(start), dtype=np.float64)
     objective = float(result.fun)
     finite = bool(np.all(np.isfinite(solution)) and np.isfinite(objective))
+    correction = (
+        polish_flat675(problem, solution, limits=acceptance_limits)
+        if polish and finite
+        else None
+    )
 
     return ExampleResult(
         example_id=EXAMPLE_ID,
@@ -268,6 +295,15 @@ def _solve(
             "objective_evaluations": int(result.nfev),
             "final_objective": objective,
             "endpoint_finite": finite,
+            "flat_solver_success": bool(result.success),
+            "polish": correction.as_dict()
+            if correction is not None
+            else {
+                "acceptance_status": "rejected" if polish else "not_assessed",
+                "reason": "nonfinite_flat_endpoint"
+                if polish
+                else "polish_not_requested",
+            },
             "host_step_transfers": int(ledger.get("advance", 0)),
             "host_callback_transfers": int(ledger.get("callback", 0)),
             "host_unclassified_transfers": int(ledger.get("unclassified", 0)),
@@ -285,23 +321,38 @@ def _solve(
             and ledger.get("callback", 0) == 0
             and ledger.get("unclassified", 0) == 0
             and ledger.get("final_result", 0) > 0
+            and (correction is None or correction.acceptance_status != "rejected")
         )
         else "failed",
     )
 
 
-def solve(_output_dir: Path, max_steps: int, scale: ExecutionScale) -> ExampleResult:
+def solve(
+    _output_dir: Path,
+    max_steps: int,
+    scale: ExecutionScale,
+    *,
+    polish: bool = False,
+    acceptance_limits: Flat675AcceptanceLimits | None = None,
+) -> ExampleResult:
     """Repository-geometry entry point used when ``--bundle`` is absent."""
     return _solve(
         _repository_problem(scale),
         max_steps=max_steps,
         scale=scale,
         configuration="repository-geometry",
+        polish=polish,
+        acceptance_limits=acceptance_limits,
     )
 
 
 def solve_bundle(
-    _output_dir: Path, max_steps: int, scale: ExecutionScale
+    _output_dir: Path,
+    max_steps: int,
+    scale: ExecutionScale,
+    *,
+    polish: bool = False,
+    acceptance_limits: Flat675AcceptanceLimits | None = None,
 ) -> ExampleResult:
     """Certified frozen-bundle entry point used when ``--bundle`` is given."""
     return _solve(
@@ -309,21 +360,68 @@ def solve_bundle(
         max_steps=max_steps,
         scale=scale,
         configuration="certified-frozen-bundle",
+        polish=polish,
+        acceptance_limits=acceptance_limits,
     )
 
 
 def main(arguments: list[str] | None = None) -> int:
-    import sys
-
     argv = list(sys.argv[1:] if arguments is None else arguments)
-    selected = solve_bundle if BUNDLE_FLAG in argv else solve
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        BUNDLE_FLAG, action="store_true", help="use the frozen local bundle"
+    )
+    parser.add_argument(
+        "--polish", action="store_true", help="check and correct the final surface"
+    )
+    parser.add_argument(
+        "--max-boozer-rms",
+        type=float,
+        help="cap on per-component |B|-weighted Boozer RMS",
+    )
+    parser.add_argument(
+        "--max-label-error", type=float, help="absolute volume-label error cap (m^3)"
+    )
+    parser.add_argument(
+        "--max-surface-movement", type=float, help="maximum correction displacement (m)"
+    )
+    parser.add_argument(
+        "--max-objective-increase",
+        type=float,
+        help="absolute increase cap in the original weighted objective",
+    )
+    options, remaining = parser.parse_known_args(argv)
+    values = (
+        options.max_boozer_rms,
+        options.max_label_error,
+        options.max_surface_movement,
+        options.max_objective_increase,
+    )
+    limits = None
+    if any(value is not None for value in values):
+        if not options.polish or any(value is None for value in values):
+            parser.error("acceptance requires --polish and all four --max-* limits")
+        if any(not np.isfinite(value) or value < 0.0 for value in values):
+            parser.error("acceptance limits must be finite and nonnegative")
+        limits = Flat675AcceptanceLimits(
+            max_boozer_weighted_rms=options.max_boozer_rms,
+            max_absolute_label_error=options.max_label_error,
+            max_surface_displacement_m=options.max_surface_movement,
+            max_objective_increase=options.max_objective_increase,
+        )
+    selected = solve_bundle if options.bundle else solve
+    if "--help" in remaining or "-h" in remaining:
+        print("Optional final surface check:")
+        print(parser.format_help())
     return run_example(
-        [argument for argument in argv if argument != BUNDLE_FLAG],
+        remaining,
         description=__doc__,
         temporary_prefix="simsopt-jax-flat675-single-stage-",
         bounded_steps=BOUNDED_STEPS,
         native_default_steps=NATIVE_DEFAULT_STEPS,
-        solve=selected,
+        solve=partial(selected, polish=True, acceptance_limits=limits)
+        if options.polish
+        else selected,
     )
 
 

@@ -477,6 +477,60 @@ equivalent.  Falling back to the native CPU path at a documented host boundary
 is supported; silently mixing host work into a supposedly compiled region is
 not.
 
+Flat coupled optimization: final surface checks
+-----------------------------------------------
+
+``examples/jax/3_Advanced/single_stage_flat675.py`` optimizes coils, vessel,
+and surface together. Its Boozer penalty permits a tradeoff with the other
+objective terms. A finite endpoint, or convergence of the flat objective,
+does not establish stationarity of the surface's least-squares problem.
+
+Add ``--polish`` to freeze the final coils and vessel and apply one reduced
+Schur Newton correction to the surface. The adapter entry point is
+``simsopt_jax_adapters.geo.flat675.polish_flat675``. It returns the corrected
+vector and diagnostics without changing the input vector. The example's
+``--json`` output includes that result under ``observables.polish``.
+
+The check distinguishes three quantities:
+
+* Full least-squares gradient L2 norm, over surface coordinates, iota, and G.
+  Acceptance requires the existing rejudge threshold of ``1e-13``. Both
+  this threshold and the timing threshold of ``1e-11`` are reported.
+* Boozer equation RMS: the residual vector is divided pointwise by ``|B|``
+  before taking the per-component RMS. This excludes the outer penalty
+  weight and the surface-label penalty; it is not a dimensionless relative
+  error.
+* Absolute surface-label error, reported separately from equation error.
+
+Design acceptance requires all four explicit limits: ``--max-boozer-rms``,
+``--max-label-error`` (volume in cubic metres), ``--max-surface-movement``
+(metres), and ``--max-objective-increase`` (absolute original-objective
+units). Limits must be finite and nonnegative. Without these limits, a
+successful correction reports ``acceptance_status=not_assessed``. A failed,
+non-persisted, non-finite, or branch-rejected correction reports ``rejected``;
+the iota branch guard alone never establishes acceptance. ``accepted`` means
+these numerical and supplied design limits passed, not that all physical or
+engineering requirements were verified.
+
+The original and corrected objective terms, displacement, iota/G changes,
+and polish time are reported separately. The example's top-level
+``final_objective`` remains the fused endpoint's value; the polish result's
+``objective_after`` is the corrected value at the original weights.
+Existing fused-solve speedups do
+not include this correction. In the saved 37-step frozen-input comparison,
+the stationarity norm fell from ``0.0161`` to about ``1e-15``, while maximum
+surface movement was 9.35 mm and the original objective increased by 2.70%.
+The incoming norm was about ``1.61e9`` times the timing threshold and
+``1.61e11`` times the stricter threshold. These are observations from one
+input, not general acceptance limits or a performance guarantee.
+
+Correction can fail: at three steps the frozen-input JAX correction failed,
+although the native correction succeeded; for the repository-input case,
+both failed. No automatic retry is performed. A proposed higher-penalty
+warm restart changes the objective and can leave stationarity again, so its
+final state would need another check and potentially another correction.
+No cost advantage for that recovery strategy has been established.
+
 JAX GPU performance results
 ---------------------------
 
