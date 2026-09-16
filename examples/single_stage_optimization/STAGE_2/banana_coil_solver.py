@@ -7,6 +7,7 @@ from simsopt.field import BiotSavart, Current, Coil, coils_via_symmetries
 from simsopt.field.coil import ScaledCurrent
 from simsopt.geo import (SurfaceRZFourier, curves_to_vtk, create_equally_spaced_curves, \
                          CurveLength, CurveCurveDistance, LpCurveCurvature)
+from simsopt.geo.curveobjectives import CurveSurfaceDistance
 from simsopt.objectives import SquaredFlux, QuadraticPenalty
 from simsopt.geo import CurveCWSFourierCPP
 from simsopt.field import InterpolatedField
@@ -32,7 +33,7 @@ def initSurface(R0, s):
 
 def initializeCoils(surf):
     # Initialize banana coils on the provided surface
-    banana_curve = CurveCWSFourierCPP(np.linspace(0, 1, num_quadpoints), order=order, surf=surf_coils)
+    banana_curve = CurveCWSFourierCPP(np.linspace(0, 1, num_quadpoints, endpoint=False), order=order, surf=surf_coils)
     banana_curve.set('phic(0)', phi_center)
     banana_curve.set('thetac(0)', theta_center)
     banana_curve.set('phic(1)', phi_width)
@@ -244,7 +245,7 @@ def fun(dofs):
 # PRE-INITIALIZATION
 # ---------------------------------------------------------------------------------------
 # File for the desired boundary magnetic surface:
-plasma_surf_filename = 'wout_nfp22ginsburg_000_014417_iota15.nc'
+plasma_surf_filename = 'wout_nfp5ginsburg_000_002084_iota20.nc'
 file_loc = f"../equilibria/{plasma_surf_filename}"
 
 # Make Directory for output
@@ -262,10 +263,10 @@ ntheta = 64
 surf = None
 
 # The banana coil winding surface is concentric with the HBT vessel.
-banana_surf_radius = 0.142
+banana_surf_radius = 0.21
 banana_surf_nfp = 5
 surf_coils = SurfaceRZFourier(nfp=banana_surf_nfp, stellsym=True)
-surf_coils.set_rc(0, 0, 0.903)
+surf_coils.set_rc(0, 0, 0.976)
 surf_coils.set_rc(1, 0, banana_surf_radius)
 surf_coils.set_zs(1, 0, banana_surf_radius)
 
@@ -278,7 +279,7 @@ VV.set_zs(1, 0, 0.222)
 
 # Create the TF coils in HBT - these will be fixed but create background toroidal field:
 tf_curves = create_equally_spaced_curves(20, 1, stellsym=False, R0=0.976, R1=0.4, order=1)
-tf_currents = [Current(1.0) * -80e3 for i in range(20)]   # HBT TF current
+tf_currents = [Current(1.0) * 80e3 for i in range(20)]   # HBT TF current
 
 # All the TF degrees of freedom are fixed
 for tf_curve in tf_curves:
@@ -300,7 +301,7 @@ phi_width = 0.03
 num_quadpoints = 128 # number of quadature points for coils
 order = 2 # number of Fourier modes for coils
 
-R0 = 0.925 # major radius
+R0 = 0.915 # major radius
 s = 0.24 # minor radius
 
 new_surf = initSurface(R0, s)
@@ -322,20 +323,22 @@ intersecting = False
 # Weight on the curve lengths in the objective function
 # We'll penalize the coil if it becomes longer than the 1.9 m buffered target.
 LENGTH_WEIGHT = 5e-4
-LENGTH_TARGET = 1.9
+LENGTH_TARGET = 1.7
 
 # Threshold and weight for the coil-to-coil distance penalty
-CC_THRESHOLD = 0.0462
+CC_THRESHOLD = 0.05
 CC_WEIGHT = 100
 
 # Threshold and weight for the coil curvature penalty
 CURVATURE_WEIGHT = 1e-4
-CURVATURE_THRESHOLD = 100
+CURVATURE_THRESHOLD = 60
 
 # Define the individual terms objective function:
 Jf = SquaredFlux(new_surf, new_bs) # penalty on B dot n
 Jls = CurveLength(new_banana_curve) # penalty on curve length
 Jccdist = CurveCurveDistance(new_curves, CC_THRESHOLD) #penalty on coil-to-coil distance
+CS_THRESHOLD = 0.015 # coil-to-plasma minimum distance [m]
+Jcsdist = CurveSurfaceDistance(new_curves, new_surf, CS_THRESHOLD) #penalty on coil-to-plasma distance
 
 # Changed p-norm of curvature penalty from 2 to 4 to prevent kinks/dents in the coils
 Jc = LpCurveCurvature(new_banana_curve, 4, CURVATURE_THRESHOLD)
@@ -346,6 +349,7 @@ print(f"Initial coil length: {Jls.J():.2f} [m]")
 JF = Jf \
     + LENGTH_WEIGHT * QuadraticPenalty(Jls, LENGTH_TARGET, "max") \
     + CC_WEIGHT * Jccdist \
+    + CC_WEIGHT * Jcsdist \
     + CURVATURE_WEIGHT * Jc
 
 OUT_DIR_ITER = f"{OUT_DIR}R0={R0}-s={s}-LW={LENGTH_WEIGHT}-CCW={CC_WEIGHT}-CW={CURVATURE_WEIGHT}-SR={banana_surf_radius:0.3f}-Order={order}/"
@@ -353,8 +357,18 @@ os.makedirs(OUT_DIR_ITER, exist_ok=True)
 
 # minimize gets called, optimizes based on degrees of freedom from objective function
 dofs = JF.x
-res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor': 300}, tol=1e-15)
+# Box bound on the banana coil current: |I| <= BANANA_CURRENT_MAX_A (scale 1e4 on the unit Current dof)
+BANANA_CURRENT_MAX_A = 16000.0
+_banana_unit_current = new_banana_coils[0].current.current_to_scale
+_scaled_bound = BANANA_CURRENT_MAX_A / abs(new_banana_coils[0].current.scale)
+_banana_unit_current.local_lower_bounds = np.array([-_scaled_bound])
+_banana_unit_current.local_upper_bounds = np.array([_scaled_bound])
+bounds = list(zip(np.asarray(JF.lower_bounds, dtype=float), np.asarray(JF.upper_bounds, dtype=float)))
+res = minimize(fun, dofs, jac=True, method='L-BFGS-B', bounds=bounds, options={'maxiter': MAXITER, 'maxcor': 300, 'ftol': 1e-15, 'gtol': 1e-15})
 print(res.message)
+# L-BFGS-B's last function evaluation is not guaranteed to be at res.x; restore the returned optimum
+# before any artifact is written (matches the reference driver's capture of the result state).
+JF.x = res.x
 
 
 # POST-OPTIMIZATION PROCESSING AND OUTPUTS
@@ -391,6 +405,17 @@ results = {
     "order": order,
     "max_iterations": MAXITER,
     "iterations": res.nit,
+    "TERMINATION_MESSAGE": str(res.message),
+    "OPTIMIZER_SUCCESS": bool(res.success),
+    "BANANA_CURRENT_A": float(new_banana_coils[0].current.get_value()),
+    "BANANA_CURRENT_MAX_A": BANANA_CURRENT_MAX_A,
+    "TF_CURRENT_A": float(new_tf_coils[0].current.get_value()),
+    "COIL_LENGTH": float(Jls.J()),
+    "LENGTH_TARGET": LENGTH_TARGET,
+    "CURVE_CURVE_MIN_DIST": float(Jccdist.shortest_distance()),
+    "CURVE_SURFACE_MIN_DIST": float(Jcsdist.shortest_distance()),
+    "CS_THRESHOLD": CS_THRESHOLD,
+    "CURVATURE_THRESHOLD": CURVATURE_THRESHOLD,
     "FINAL_VOLUME": float(new_surf.volume()),
     "FIELD_ERROR": float(fieldError),
     "SELF_INTERSECTING": intersecting,
