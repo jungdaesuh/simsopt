@@ -381,6 +381,11 @@ DIAG5_FROZEN_NUMERICAL_PATHS: Final = frozenset(
         "src/simsopt_jax_adapters/geo/single_stage_native_endpoint.py",
     }
 )
+# Refrozen 2026-09-16: 675 -> 678. Admitted the flat675 nested-endpoint
+# comparison members (``src/simsopt_jax_adapters/geo/flat675/nested_bridge.py``,
+# ``benchmarks/flat675_nested_endpoint.py``,
+# ``benchmarks/flat675_nested_endpoint_comparison.py``) through the generator.
+#
 # Refrozen 2026-09-15: 676 -> 675. ``src/simsopt/_version.py`` left: it is a
 # gitignored setuptools_scm artifact, so git-derived membership never selects
 # it. Dropped explicitly per ``benchmarks/regenerate_execution_source_manifest.py``.
@@ -393,7 +398,7 @@ DIAG5_FROZEN_NUMERICAL_PATHS: Final = frozenset(
 # Membership is tracked files plus untracked-but-not-ignored files under the
 # sweep roots. Run in a DEDICATED CLEAN WORKTREE, because the regenerator
 # hashes working-tree bytes and the shared tree is not quiescent.
-DIAG5_EXECUTION_SOURCE_ENTRY_COUNT: Final = 675
+DIAG5_EXECUTION_SOURCE_ENTRY_COUNT: Final = 678
 DIAG5_CPU_QUALIFICATION_SCHEMA_VERSION: Final = (
     "single-stage-neq-gntr3-cpu-trajectory-qualification-v2"
 )
