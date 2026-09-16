@@ -189,7 +189,7 @@ def _provenance(cache: Path) -> dict[str, object]:
             "resolved_cuda_libraries": ["libcuda.so.1"],
         },
         "allocation": {
-            "hostname": "playstation",
+            "hostname": "fixture-host-beta",
             "scheduler": "local",
             "allocation_id": "local",
             "job_id": "local",

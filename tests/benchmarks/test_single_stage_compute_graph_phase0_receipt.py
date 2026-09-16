@@ -109,7 +109,7 @@ def _qualification(lane_id: str, *, blocked: bool = False) -> dict[str, object]:
     return {
         "outcome": "blocked" if blocked else "qualified",
         "attempted_identity": {
-            "hostname": "landau" if lane_id == A100_LANE_ID else "playstation",
+            "hostname": "fixture-host-alpha" if lane_id == A100_LANE_ID else "fixture-host-beta",
             "requested_device": lane_id,
             "allocation_id": "123" if lane_id == A100_LANE_ID else "local",
         },
@@ -152,7 +152,7 @@ def _provenance(lane_id: str) -> dict[str, object]:
             "resolved_cuda_libraries": ["libcuda.so.1", "libcudart.so.12"],
         },
         "allocation": {
-            "hostname": "landau" if is_a100 else "playstation",
+            "hostname": "fixture-host-alpha" if is_a100 else "fixture-host-beta",
             "scheduler": "slurm" if is_a100 else "local",
             "allocation_id": "allocation-123" if is_a100 else "local",
             "job_id": "job-456" if is_a100 else "local",
