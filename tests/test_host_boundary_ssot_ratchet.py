@@ -33,7 +33,7 @@ _NON_JAX_BINDING = "non-jax"
 # Each allowlist item names one direct invocation, not merely an owning function.
 # The source coordinate deliberately ratchets additions, removals, and duplicate
 # primitive calls. A JAX import or direct alias must resolve lexically to count.
-# This baseline contains 90 direct invocations, including all 57 nested-LS calls.
+# This baseline contains 88 direct invocations, including all 57 nested-LS calls.
 #
 # Admitted 2026-08-24, both for the Phase-2 predictor and both counted as
 # call SITES rather than executions:
@@ -51,15 +51,14 @@ _NON_JAX_BINDING = "non-jax"
 #   goes up while the work does not.
 # Admitted 2026-09-14 (analytic nested-Boozer / exact single-stage arc), counted as call
 # SITES: 23 previously admitted site(s) re-pinned after line drift (same file, scope and
-# primitive; the coordinate moved), plus 12 NEW crossing(s), each a deliberate host read or
+# primitive; the coordinate moved), plus 10 NEW crossing(s), each a deliberate host read or
 # write the design requires:
 # * ``src/simsopt_jax/solve/dispatch.py``: 4 new site(s).
-# * ``src/simsopt_jax_adapters/geo/nested_ls_ncsx.py``: 2 new site(s).
 # * ``src/simsopt_jax_adapters/geo/single_stage_exact_analytic.py``: 6 new site(s).
 # Retired 2026-09-15: those six exact-analytic sites now call the SSOT owners
 # ``host_boundary.block_until_ready`` / ``host_value`` and
 # ``dtypes.explicit_device_array``. Direct jax transfers in that adapter are
-# no longer admitted. Baseline: 90.
+# no longer admitted. Baseline: 88.
 _ALLOWED_OWNER_CALLS = frozenset(
     {
         "src/simsopt_jax/backend/dtypes.py::_device_put::device_put::308:19",
@@ -90,24 +89,22 @@ _ALLOWED_OWNER_CALLS = frozenset(
         "src/simsopt_jax/solve/serial.py::_write_bounded_objective_log::transfer_guard::455:9",
         "src/simsopt_jax_adapters/geo/boozer_surface.py::_with_host_bridge_transfer_guard.wrapped::transfer_guard_device_to_host::208:13",
         "src/simsopt_jax_adapters/geo/boozer_surface.py::_with_host_bridge_transfer_guard.wrapped::transfer_guard_host_to_device::209:17",
-        "src/simsopt_jax_adapters/geo/nested_ls_ncsx.py::_host_float64::device_get::269:22",
-        "src/simsopt_jax_adapters/geo/nested_ls_ncsx.py::_ncsx_bound_inner_functions.envelope_value_and_grad::device_get::398:29",
         "src/simsopt_jax_adapters/geo/nested_ls_newton_parity.py::_jax_cpu_ordered_value_and_grad::device_get::160:24",
         "src/simsopt_jax_adapters/geo/nested_ls_newton_parity.py::_jax_cpu_ordered_value_and_grad::device_get::162:12",
-        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::_envelope_value_and_grad::device_get::824:25",
-        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::_host_vector::device_get::604:20",
-        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::_require_full_phi_yy::device_get::398:24",
-        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::factor_reduced_nested_ls_schur::device_get::452:30",
-        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::factor_schur_fourier_block_preconditioner::device_get::956:45",
-        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::require_full_y_rank::device_get::331:29",
-        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::require_full_y_rank::device_get::332:26",
-        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::require_full_y_rank::device_get::335:12",
-        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::run_reduced_nested_ls_newton::device_get::785:37",
-        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::run_reduced_nested_ls_newton::device_get::790:32",
-        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::run_reduced_nested_ls_newton::device_get::795:37",
-        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::run_reduced_nested_ls_newton::device_get::798:32",
-        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::run_reduced_nested_ls_newton::device_get::806:39",
-        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::run_reduced_nested_ls_schur_newton::device_get::1396:28",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::_envelope_value_and_grad::device_get::946:25",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::_host_vector::device_get::728:20",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::_require_full_phi_yy::device_get::499:24",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::factor_reduced_nested_ls_schur::device_get::576:30",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::factor_schur_fourier_block_preconditioner::device_get::1078:45",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::require_full_y_rank::device_get::432:29",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::require_full_y_rank::device_get::433:26",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::require_full_y_rank::device_get::436:12",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::run_reduced_nested_ls_newton::device_get::907:37",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::run_reduced_nested_ls_newton::device_get::912:32",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::run_reduced_nested_ls_newton::device_get::917:37",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::run_reduced_nested_ls_newton::device_get::920:32",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::run_reduced_nested_ls_newton::device_get::928:39",
+        "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::run_reduced_nested_ls_schur_newton::device_get::1539:28",
         "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py::_flat675_value_and_grad_at::device_get::5237:14",
         "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py::_flat675_value_and_grad_at::device_get::5238:19",
         "src/simsopt_jax_adapters/geo/nested_ls_reduced_scale.py::_live_unpreconditioned_eta::block_until_ready::2194:15",

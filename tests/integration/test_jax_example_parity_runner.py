@@ -19,6 +19,7 @@ from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 from examples.jax.manifest_runtime import load_runtime_contract_pair
 from examples.jax.parity._manifest import ComparisonRoute
 from examples.jax.parity.arbiter import (
+    SHIPPED_SINGLE_STAGE_SCIPY_DRIVER_ID,
     ArbitrationError,
     LaneObservation,
     arbitrate,
@@ -608,6 +609,39 @@ def test_arbiter_rejects_workflow_stage_mismatch() -> None:
         )
 
 
+def test_self_reported_shipped_driver_does_not_waive_scipy_policy() -> None:
+    stages = (
+        "construct_ncsx_coils_and_volume_labelled_surface",
+        "solve_initial_boozer_surface",
+        "assemble_nonqs_residual_iota_radius_and_length_objective",
+        "evaluate_initial_objective_and_gradient",
+        "optimize_coils_and_currents_with_bfgs",
+        "record_final_objective_gradient_and_implicit_physics_state",
+    )
+    observations = _observations()
+    observations = {
+        lane: dataclasses.replace(
+            observation,
+            completed_workflow_stages=stages,
+            driver=(
+                SHIPPED_SINGLE_STAGE_SCIPY_DRIVER_ID
+                if lane.startswith("jax-")
+                else observation.driver
+            ),
+        )
+        for lane, observation in observations.items()
+    }
+
+    with pytest.raises(ArbitrationError, match="forbidden parity driver"):
+        arbitrate(_routes(), observations, expected_workflow_stages=stages)
+    with pytest.raises(ArbitrationError, match="forbidden parity driver"):
+        arbitrate(
+            _routes(),
+            observations,
+            expected_workflow_stages=stages[:-1] + ("different_final_stage",),
+        )
+
+
 @pytest.mark.parametrize(
     ("mutation", "expected_message"),
     [
@@ -1050,12 +1084,13 @@ def _publish_quality_band_run(
     verdict: str = "quality-band",
     fork: bool = True,
     tamper_band: bool = False,
+    receipt_mutation: str | None = None,
 ) -> tuple[Path, dict[str, object]]:
     """Publish one synthetic native_default quality-band run for the auditor."""
     repo_root = Path(__file__).resolve().parents[2]
     contract_pair = load_runtime_contract_pair(
-        repo_root / "examples" / "jax" / "manifest.json",
-        repo_root / "examples" / "jax" / "parity_manifest.json",
+        repo_root / "examples/jax/manifest.json",
+        repo_root / "examples/jax/parity_manifest.json",
         repo_root=repo_root,
     )
     relationship = next(
@@ -1089,7 +1124,7 @@ def _publish_quality_band_run(
             driver=(
                 "simsopt_scipy_bfgs_with_boozer_newton"
                 if lane == "native-cpu"
-                else JAX_PARITY_DRIVER_ID
+                else SHIPPED_SINGLE_STAGE_SCIPY_DRIVER_ID
             ),
             normalized_status="budget_exhausted",
             raw_status="stopping_reason=iteration-limit",
@@ -1110,13 +1145,48 @@ def _publish_quality_band_run(
             ),
             applicability={},
         )
-        write_lane_observation(paths.partial / _BAND_CASE_ID / lane, observation)
+        published_observation = observation
+        if lane == "jax-gpu":
+            if receipt_mutation == "lane":
+                published_observation = dataclasses.replace(
+                    observation, lane="native-cpu"
+                )
+            elif receipt_mutation == "scale":
+                published_observation = dataclasses.replace(
+                    observation, scale="bounded"
+                )
+            elif receipt_mutation == "workflow":
+                published_observation = dataclasses.replace(
+                    observation, completed_workflow_stages=("unrelated",)
+                )
+            elif receipt_mutation == "outcome":
+                published_observation = dataclasses.replace(
+                    observation, normalized_status="failed", success=False
+                )
+            elif receipt_mutation == "objective":
+                published_observation = dataclasses.replace(
+                    observation,
+                    values={
+                        **observation.values,
+                        "final:objective": np.asarray([1.0], dtype=np.float64),
+                    },
+                )
+        write_lane_observation(
+            paths.partial / _BAND_CASE_ID / lane, published_observation
+        )
         observations[lane] = observation
     arbitration = arbitrate(
         relationship.comparison_routes,
         observations,
         required_lanes=frozenset(lanes),
         expected_workflow_stages=relationship.workflow_stages,
+        case_id=_BAND_CASE_ID,
+        example_id=relationship.jax_example_id,
+        outer_optimizer_policy=next(
+            example.outer_optimizer_policy
+            for example in contract_pair.examples
+            if example.id == relationship.jax_example_id
+        ),
         quality_band=get_case(_BAND_CASE_ID).native_default_quality_band,
     )
     quality_band_payload = [
@@ -1481,7 +1551,18 @@ def test_run_parity_cli_publishes_complete_wave_a_cpu_artifact(
     assert summary["used_legacy_manifest_adapter"] is False
     assert summary["scale"] == "bounded"
     assert summary["lanes"] == ["native-cpu", "jax-cpu"]
-    assert summary["authoritative"] is False
+    assert isinstance(summary["authoritative"], bool)
+    if initial_repository_state.repository_dirty:
+        assert summary["authoritative"] is False
+    # A clean checkout with a verified native build may establish provenance.
+    # Independently replay that claim before exercising receipt tampering below.
+    audited = audit_published_run(
+        published[0],
+        repo_root=repo_root,
+        require_authoritative=summary["authoritative"],
+    )
+    assert audited.verdict == "pass"
+    assert audited.authoritative is summary["authoritative"]
     assert len(summary["repository_commit"]) == 40
     assert summary["repository_dirty"] is initial_repository_state.repository_dirty
     assert len(summary["tracked_diff_sha256"]) == 64
@@ -1984,3 +2065,135 @@ def test_qfm_case_matches_native_and_jax_cpu_original_residuals(
             for counter in (observation.nit, observation.nfev, observation.njev)
         )
     assert native.success and jax_cpu.success
+
+
+@pytest.mark.parametrize(
+    "mutation", ("lane", "scale", "workflow", "outcome", "objective")
+)
+def test_canonical_audit_rejects_lane_evidence_that_disagrees_with_quality_summary(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    published, _summary = _publish_quality_band_run(tmp_path, receipt_mutation=mutation)
+    with pytest.raises(ValueError):
+        audit_published_run(published, repo_root=repo_root)
+
+
+def test_quality_band_endpoint_evidence_has_complete_route_matrices() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    runtime = load_runtime_contract_pair(
+        repo_root / "examples/jax/manifest.json",
+        repo_root / "examples/jax/parity_manifest.json",
+        repo_root=repo_root,
+    )
+    relationship = next(
+        item for item in runtime.parity.relationships if item.case_id == _BAND_CASE_ID
+    )
+    endpoint_observables = {
+        "endpoint_certificate_success",
+        "endpoint_initial_stationary",
+        "endpoint_terminal_stationary",
+        "endpoint_constraints_satisfied",
+        "outer_solver_status",
+    }
+    required_pairs = {
+        "native-cpu:jax-cpu",
+        "native-cpu:jax-gpu",
+        "jax-cpu:jax-gpu",
+    }
+
+    for observable in endpoint_observables:
+        routes = tuple(
+            route
+            for route in relationship.comparison_routes
+            if route.phase == "final" and route.observable == observable
+        )
+        assert {route.lane_pair for route in routes} == required_pairs
+        assert len(routes) == len(required_pairs)
+    status_routes = tuple(
+        route
+        for route in relationship.comparison_routes
+        if route.phase == "final" and route.observable == "outer_solver_status"
+    )
+    assert not any(route.applicable for route in status_routes)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "none",
+        "absent",
+        "wrong_case",
+        "wrong_example",
+        "serial_policy",
+        "forged_policy",
+        "wrong_driver",
+        "optax",
+        "optimistix",
+        "host_callback",
+    ),
+)
+def test_approved_scipy_policy_is_bound_to_real_case_example_and_driver(
+    mutation: str,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    pair = load_runtime_contract_pair(
+        repo_root / "examples/jax/manifest.json",
+        repo_root / "examples/jax/parity_manifest.json",
+        repo_root=repo_root,
+    )
+    example = next(example for example in pair.examples if example.id == _BAND_CASE_ID)
+    policy = example.outer_optimizer_policy
+    assert policy is not None
+    case_id = _BAND_CASE_ID
+    example_id = example.id
+    driver = policy.expected_driver
+    if mutation == "absent":
+        policy = None
+    elif mutation == "wrong_case":
+        case_id = "native-just-a-quadratic"
+    elif mutation == "wrong_example":
+        example_id = "native-just-a-quadratic"
+    elif mutation == "serial_policy":
+        policy = next(
+            example.outer_optimizer_policy
+            for example in pair.examples
+            if example.id == "native-boozerqa-ls"
+        )
+        example_id = "native-boozerqa-ls"
+    elif mutation == "forged_policy":
+        policy = dataclasses.replace(policy, expected_driver="scipy_arbitrary")
+        driver = "scipy_arbitrary"
+    elif mutation == "wrong_driver":
+        driver = "simsopt_lm_gmres"
+    elif mutation in {"optax", "optimistix", "host_callback"}:
+        driver = mutation + "_scipy"
+    observations = {
+        lane: dataclasses.replace(observation, driver=driver)
+        if lane.startswith("jax-")
+        else observation
+        for lane, observation in _observations().items()
+    }
+    if mutation == "none":
+        assert (
+            arbitrate(
+                _routes(),
+                observations,
+                case_id=case_id,
+                example_id=example_id,
+                outer_optimizer_policy=policy,
+            ).verdict
+            == "pass"
+        )
+    else:
+        with pytest.raises(
+            ArbitrationError, match="(outer optimizer policy|forbidden parity driver)"
+        ):
+            arbitrate(
+                _routes(),
+                observations,
+                case_id=case_id,
+                example_id=example_id,
+                outer_optimizer_policy=policy,
+            )

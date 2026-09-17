@@ -15,8 +15,8 @@ here come in three layers:
    signatures, so a gate can be driven to both of its outcomes without a
    minutes-long physics run.
 3. **One tiny end-to-end.**  ``--configuration repository-geometry
-   --max-steps 1`` on CPU, through ``main``, proving the real wiring runs and
-   writes a strict-JSON payload and a Markdown table.
+   --max-steps 1`` on CPU, through ``main``, proving the underresolved fixture
+   fails closed and writes a strict-JSON payload and a Markdown table.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ import dataclasses
 import inspect
 import json
 import math
+import pickle
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,7 +40,36 @@ REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import benchmarks.flat675_nested_endpoint as endpoint_module
 import pytest
+from benchmarks.flat675_nested_endpoint import (
+    EXIT_STATUS_FROM_FULL_DECISION_GRADIENT,
+    EXIT_STATUS_FROM_REDUCED_GRADIENT,
+    NestedCorrection,
+    correct_with_nested_ls_jax,
+    correct_with_nested_ls_native,
+    flat675_boozer_term,
+    stays_on_incoming_branch,
+)
+from benchmarks.flat675_nested_endpoint_comparison import (
+    EVALUATION_CORRECTION,
+    EVALUATION_FAILED_SOLVE,
+    EVALUATION_REJECTED_BRANCH_CHANGE,
+    OBJECTIVE_RTOL,
+    SCHEMA,
+    NestedLanes,
+    ObjectiveLane,
+    SolveOutcome,
+    build_problem,
+    compare,
+    corrected_vector,
+    correction_evaluation_status,
+    main,
+    nested_correction_is_noop,
+    parse_args,
+    render_markdown,
+    require_platform,
+)
 from simsopt_jax_adapters.geo.flat675 import (
     FLAT675_COIL_DOF_COUNT,
     FLAT675_COIL_SLICE,
@@ -65,33 +95,6 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_OUTER_IOTA_BRANCH_GUARD,
 )
 from simsopt_jax_adapters.geo.nested_ls_reduced_scale import dump_strict_json
-
-from benchmarks.flat675_nested_endpoint import (
-    EXIT_STATUS_FROM_FULL_DECISION_GRADIENT,
-    EXIT_STATUS_FROM_REDUCED_GRADIENT,
-    NestedCorrection,
-    correct_with_nested_ls_jax,
-    correct_with_nested_ls_native,
-    flat675_boozer_term,
-    stays_on_incoming_branch,
-)
-from benchmarks.flat675_nested_endpoint_comparison import (
-    EVALUATION_CORRECTION,
-    EVALUATION_FAILED_SOLVE,
-    EVALUATION_REJECTED_BRANCH_CHANGE,
-    OBJECTIVE_RTOL,
-    SCHEMA,
-    NestedLanes,
-    ObjectiveLane,
-    SolveOutcome,
-    compare,
-    corrected_vector,
-    main,
-    nested_correction_is_noop,
-    parse_args,
-    render_markdown,
-    require_platform,
-)
 
 NATIVE_TWIN_TEST: Final[Path] = (
     REPO_ROOT
@@ -133,6 +136,7 @@ NESTED_CORRECTION_FIELDS: Final[frozenset[str]] = frozenset(
         "exit_status",
         "exit_status_quantity",
         "persisted",
+        "failure_reason",
         "reduced_gradient_l2",
         "coil_delta_inf",
         "omp_num_threads",
@@ -299,6 +303,7 @@ def _correction(
             else EXIT_STATUS_FROM_FULL_DECISION_GRADIENT
         ),
         persisted=persisted,
+        failure_reason=None,
         reduced_gradient_l2=reduced_gradient_l2,
         coil_delta_inf=coil_delta_inf,
         surface_dofs_after=surface_after,
@@ -540,7 +545,7 @@ def test_payload_carries_the_schema_id_and_every_documented_block() -> None:
         jax_correction=_moving_correction("jax"),
         native_correction=_moving_correction("native"),
     )
-    assert payload["schema"] == "flat675-nested-endpoint-comparison-v3"
+    assert payload["schema"] == "flat675-nested-endpoint-comparison-v4"
     assert frozenset(payload) >= frozenset(
         {
             "schema",
@@ -562,7 +567,7 @@ def test_payload_carries_the_schema_id_and_every_documented_block() -> None:
             "runtime",
         }
     )
-    assert payload["schema"] == "flat675-nested-endpoint-comparison-v3", (
+    assert payload["schema"] == "flat675-nested-endpoint-comparison-v4", (
         "the schema id must move with the fields"
     )
     nested = payload["nested_contract"]
@@ -819,9 +824,9 @@ def test_a_diverged_solve_is_not_reported_as_a_correction() -> None:
     assert endpoint["jax"]["evaluation_status"] == EVALUATION_FAILED_SOLVE
     assert endpoint["jax"]["evaluation_status"] != EVALUATION_CORRECTION
     assert endpoint["native"]["evaluation_status"] == EVALUATION_CORRECTION
-    # The branch verdict still reports what the guard saw; it is simply not
-    # what decides whether this row corrected anything.
-    assert payload["verdict"]["endpoint_jax_correction_stayed_on_branch"] is True
+    # A failed correction has no branch claim, even if its raw iota happens
+    # to sit inside the guard.
+    assert payload["verdict"]["endpoint_jax_correction_stayed_on_branch"] is None
     assert render_markdown(payload).count(EVALUATION_FAILED_SOLVE) >= 1
 
 
@@ -847,6 +852,194 @@ def test_each_failed_solve_clause_is_enough_on_its_own(
     endpoint = payload["points"]["endpoint"]["corrections"]
     assert endpoint["jax"]["evaluation_status"] == EVALUATION_FAILED_SOLVE
     assert endpoint["native"]["evaluation_status"] == EVALUATION_CORRECTION
+
+
+def test_mocked_native_linalg_error_writes_a_typed_failed_solve_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mocked child ``LinAlgError`` writes the native failure protocol.
+
+    This is branch coverage for the record and payload protocol only.  It
+    deliberately replaces the native solver with an exception, so it is not
+    numerical evidence or native-solver recertification.
+    """
+
+    class ProtocolSurface:
+        def __init__(self, dofs: NDArray[np.float64]) -> None:
+            self._dofs = np.array(dofs, dtype=np.float64, copy=True)
+
+        def set_dofs(self, dofs: NDArray[np.float64]) -> None:
+            self._dofs = np.array(dofs, dtype=np.float64, copy=True)
+
+        def gamma(self) -> NDArray[np.float64]:
+            return self._dofs.reshape(-1, 1)
+
+        def minor_radius(self) -> float:
+            return 1.0
+
+    surface_before = np.array([0.1, -0.2, 0.3], dtype=np.float64)
+    native_surface = ProtocolSurface(surface_before)
+    geometry_surface = ProtocolSurface(surface_before)
+    scalars = {
+        "surface_dofs": surface_before,
+        "iota": 0.17,
+        "G": 2.3,
+        "label_target": 1.0,
+        "constraint_weight": 1.0,
+    }
+    (tmp_path / endpoint_module._SCALARS_FILE).write_bytes(pickle.dumps(scalars))
+
+    def raise_native_linalg_error(*_args: object, **_kwargs: object) -> None:
+        raise np.linalg.LinAlgError("forced native failure protocol")
+
+    monkeypatch.setattr(
+        endpoint_module.simsopt,
+        "load",
+        lambda _path: (object(), native_surface),
+    )
+    monkeypatch.setattr(
+        endpoint_module,
+        "native_boozer_at",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        endpoint_module,
+        "native_penalty_evaluation",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            gradient=np.array([3.0, 4.0], dtype=np.float64)
+        ),
+    )
+    monkeypatch.setattr(
+        endpoint_module,
+        "clone_surface_xyz_tensor_fourier",
+        lambda _surface: geometry_surface,
+    )
+    monkeypatch.setattr(
+        endpoint_module,
+        "_run_native_banana_bfgs_then_newton",
+        raise_native_linalg_error,
+    )
+    monkeypatch.setattr(
+        endpoint_module,
+        "nested_ls_threading_env",
+        lambda: {"OMP_NUM_THREADS": "1"},
+    )
+
+    endpoint_module.run_native_correction_child(str(tmp_path))
+
+    record = pickle.loads((tmp_path / endpoint_module._CORRECTION_FILE).read_bytes())
+    assert isinstance(record, NestedCorrection)
+    assert record.lane == "native"
+    assert record.converged is False
+    assert record.persisted is False
+    assert record.exit_status == NESTED_LS_NEWTON_EXIT_FAILED
+    assert record.failure_reason == "numpy.linalg.LinAlgError"
+    assert record.bfgs_iterations is None
+    assert record.newton_iterations is None
+    assert record.reduced_gradient_l2 is None
+    assert record.coil_delta_inf is None
+    assert record.surface_dofs_after is None
+    assert record.residual_norm_after is None
+    assert record.iota_after is None
+    assert record.G_after is None
+    assert record.same_branch_as_incoming is None
+    assert record.dof_displacement_l2 is None
+    assert record.dof_displacement_max is None
+    assert record.point_displacement_max_m is None
+    assert record.point_displacement_rms_m is None
+    assert record.minor_radius_m is None
+    assert record.omp_num_threads == "1"
+    assert record.residual_norm_before == pytest.approx(5.0)
+    assert correction_evaluation_status(record) == EVALUATION_FAILED_SOLVE
+
+
+def test_failed_correction_nulls_post_state_and_gated_claims() -> None:
+    """A contained child failure cannot mint a finite corrected-point claim."""
+    failed = dataclasses.replace(
+        _diverged_correction("native"),
+        residual_norm_after=None,
+        coil_delta_inf=None,
+        surface_dofs_after=None,
+        iota_after=None,
+        G_after=None,
+        same_branch_as_incoming=None,
+        dof_displacement_l2=None,
+        dof_displacement_max=None,
+        point_displacement_max_m=None,
+        point_displacement_rms_m=None,
+        minor_radius_m=None,
+        failure_reason="numpy.linalg.LinAlgError",
+    )
+    payload = _payload(
+        jax_correction=_moving_correction("jax"), native_correction=failed
+    )
+    record = payload["points"]["endpoint"]["corrections"]["native"]
+    assert record["evaluation_status"] == EVALUATION_FAILED_SOLVE
+    assert record["failure_reason"] == "numpy.linalg.LinAlgError"
+    for key in (
+        "coil_delta_inf",
+        "surface_dofs_after_sha256",
+        "residual_norm_after",
+        "residual_after_over_timing_bar",
+        "residual_after_over_physics_bar",
+        "iota_after",
+        "iota_delta",
+        "same_branch_as_incoming",
+        "G_after",
+        "dof_displacement_l2",
+        "dof_displacement_max",
+        "point_displacement_max_m",
+        "point_displacement_rms_m",
+        "minor_radius_m",
+        "point_displacement_max_over_minor_radius",
+        "point_displacement_rms_over_minor_radius",
+        "y_solve_iota_at_corrected",
+        "y_solve_G_at_corrected",
+        "y_solve_minus_lane_iota",
+        "y_solve_minus_lane_G",
+        "flat675_boozer_term_at_corrected",
+        "objective",
+        "objective_minus_base",
+        "weighted_terms",
+        "weighted_term_deltas_vs_base",
+        "native_twin_objective",
+        "native_twin_relative_gap",
+        "native_twin_within_objective_rtol",
+    ):
+        assert record[key] is None
+    assert all(
+        value is None
+        for value in payload["points"]["endpoint"]["lane_agreement"].values()
+    )
+    verdict = payload["verdict"]
+    assert verdict["endpoint_native_correction_stayed_on_branch"] is None
+    assert verdict["every_correction_stayed_on_branch"] is None
+    assert verdict["shared_residual_definition_ok"] is None
+    assert "n/a" in render_markdown(payload)
+    assert json.loads(dump_strict_json(payload))["schema"] == SCHEMA
+
+
+def test_native_unsuccessful_return_is_failed_even_with_finite_post_state() -> None:
+    """A returned iterate is not convergence, as the old tiny fixture showed."""
+    unsuccessful = dataclasses.replace(
+        _moving_correction("native"),
+        converged=False,
+        persisted=True,
+        exit_status=NESTED_LS_NEWTON_EXIT_FAILED,
+        residual_norm_after=2.0 * NESTED_LS_BANANA_NEWTON_TOL,
+        failure_reason=None,
+    )
+    payload = _payload(
+        jax_correction=_moving_correction("jax"), native_correction=unsuccessful
+    )
+    record = payload["points"]["endpoint"]["corrections"]["native"]
+    assert record["evaluation_status"] == EVALUATION_FAILED_SOLVE
+    assert record["persisted"] is True
+    assert record["converged"] is False
+    assert record["failure_reason"] is None
+    assert record["residual_norm_after"] > record["tolerance"]
+    assert record["objective"] is None
+    assert payload["verdict"]["endpoint_native_correction_stayed_on_branch"] is None
 
 
 def test_a_branch_change_outranks_nothing_but_still_outranks_a_correction() -> None:
@@ -1099,9 +1292,44 @@ def test_non_positive_budget_is_refused() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_tiny_cpu_end_to_end_writes_a_strict_payload_and_a_table(
+def test_repository_geometry_has_unobservable_surface_directions() -> None:
+    """The tiny sampling cannot determine the 661 surface coefficients.
+
+    Boozer's sampled residual and Volume depend on position and two tangents.
+    A common null direction of those three maps is therefore a structural
+    degeneracy, independent of the QR seed or Newton's stopping tolerance.
+    """
+    problem = build_problem("repository-geometry")
+    view = nested_view_from_flat675(problem, problem.start_candidate.outer_vector())
+    surface = view.surface_native
+    geometry_map = np.concatenate(
+        [
+            derivative.reshape(-1, FLAT675_SURFACE_DOF_COUNT)
+            for derivative in (
+                surface.dgamma_by_dcoeff(),
+                surface.dgammadash1_by_dcoeff(),
+                surface.dgammadash2_by_dcoeff(),
+            )
+        ]
+    )
+    assert geometry_map.shape == (324, FLAT675_SURFACE_DOF_COUNT)
+    assert geometry_map.shape[0] < geometry_map.shape[1]
+    _, singular_values, right_vectors = np.linalg.svd(geometry_map, full_matrices=True)
+    null_direction = right_vectors[-1]
+    roundoff = np.finfo(np.float64).eps * max(geometry_map.shape) * singular_values[0]
+    assert np.linalg.norm(geometry_map @ null_direction) <= roundoff
+
+
+def test_underresolved_cpu_end_to_end_records_native_linalg_failure_and_fails_closed(
     tmp_path: Path,
 ) -> None:
+    """The underresolved repository native child hits ``LinAlgError``.
+
+    The geometry-map test above proves a structural nullspace. Controlled
+    old/new source runs also show the old seed returned success=False; an
+    older green serialization test never established native convergence.
+    The real CLI must publish failure with null post-state and return nonzero.
+    """
     out_json = tmp_path / "repository_geometry_b1_cpu.json"
     assert (
         main(
@@ -1116,10 +1344,10 @@ def test_tiny_cpu_end_to_end_writes_a_strict_payload_and_a_table(
                 "cpu",
             ]
         )
-        == 0
+        == 1
     )
     payload = json.loads(out_json.read_text())
-    assert payload["schema"] == "flat675-nested-endpoint-comparison-v3"
+    assert payload["schema"] == "flat675-nested-endpoint-comparison-v4"
     assert payload["configuration"] == "repository-geometry"
     assert payload["max_steps"] == 1
     assert payload["outer_dof_count"] == FLAT675_OUTER_DOF_COUNT
@@ -1131,11 +1359,27 @@ def test_tiny_cpu_end_to_end_writes_a_strict_payload_and_a_table(
         assert record["lane"] == lane
         assert record["tolerance"] == float(NESTED_LS_BANANA_NEWTON_TOL)
         assert np.isfinite(record["residual_norm_before"])
-        assert np.isfinite(record["residual_norm_after"])
-        assert len(record["weighted_terms"]) == len(FLAT675_OBJECTIVE_TERM_KEYS)
-    assert endpoint["lane_agreement"]["shared_residual_definition_ok"] is True
+    native = endpoint["corrections"]["native"]
+    assert native["evaluation_status"] == EVALUATION_FAILED_SOLVE
+    assert native["exit_status"] == NESTED_LS_NEWTON_EXIT_FAILED
+    assert native["persisted"] is False
+    assert native["converged"] is False
+    assert native["failure_reason"] == "numpy.linalg.LinAlgError"
+    for key in (
+        "surface_dofs_after_sha256",
+        "residual_norm_after",
+        "iota_after",
+        "G_after",
+        "same_branch_as_incoming",
+        "objective",
+        "weighted_terms",
+    ):
+        assert native[key] is None
+    assert endpoint["lane_agreement"]["shared_residual_definition_ok"] is None
+    assert payload["verdict"]["endpoint_native_correction_stayed_on_branch"] is None
     markdown = out_json.with_suffix(".md").read_text()
-    assert "Eight-term objective at the four points" in markdown
+    assert EVALUATION_FAILED_SOLVE in markdown
+    assert "n/a" in markdown
 
 
 def test_shared_residual_gate_has_the_solver_tolerance_as_its_floor() -> None:

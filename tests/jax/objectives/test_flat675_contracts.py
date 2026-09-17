@@ -18,9 +18,11 @@ import json
 from pathlib import Path
 from typing import Any
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from simsopt_jax.backend.dtypes import runtime_device_put
 from simsopt_jax.core.specs import (
     CoilDofExtractionSpec,
     CoilSetDofExtractionSpec,
@@ -580,6 +582,33 @@ def test_y_solve_closes_a_small_overdetermined_system() -> None:
     )
     assert int(solved.numerical_rank) == 2
     assert bool(solved.numerics_finite) is True
+
+
+def test_y_solve_places_rank_threshold_scalars_under_strict_transfer_guard() -> None:
+    """QR rank evidence must not materialize either host scalar implicitly."""
+
+    matrix = runtime_device_put(
+        np.asarray(((1.0, 0.0), (0.0, 1.0), (1.0, 1.0)), dtype=np.float64),
+        dtype=jnp.float64,
+    )
+    rhs = runtime_device_put(
+        np.asarray((1.0, 2.0, 3.0), dtype=np.float64),
+        dtype=jnp.float64,
+    )
+
+    @jax.jit
+    def solve_in_graph(design_matrix, right_hand_side):
+        return solve_flat675_y_qr(design_matrix, right_hand_side).solution
+
+    with jax.transfer_guard("disallow"):
+        solved = solve_in_graph(matrix, rhs)
+
+    np.testing.assert_allclose(
+        np.asarray(solved),
+        np.asarray((1.0, 2.0), dtype=np.float64),
+        rtol=1.0e-14,
+        atol=0.0,
+    )
 
 
 def test_y_solve_reports_a_rank_deficient_system() -> None:

@@ -18,6 +18,7 @@ import pytest
 from simsopt.configs.zoo import get_data
 from simsopt.geo import BoozerSurface, Volume
 from simsopt_jax.parity_tolerances import parity_ladder_tolerances
+from simsopt_jax.backend.dtypes import runtime_device_put
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
 from simsopt_jax_adapters.geo.nested_ls_contract import (
@@ -83,6 +84,7 @@ from simsopt_jax_adapters.geo.nested_ls_reduced import (
     solve_stabilized_schur_dense_lu,
     split_surface_and_y,
     tensor_fourier_mode_blocks,
+    _zeros_like,
 )
 from simsopt_jax_adapters.geo.nested_ls_reduced_scale import NestedLsCountedMatvec
 
@@ -90,6 +92,21 @@ from .boozersurface_jax_test_helpers import _clone_upstream_surface
 from .surface_test_helpers import get_surface
 
 _IOTA0 = -0.406
+
+
+def test_zero_initial_guess_is_finite_under_a_strict_transfer_guard() -> None:
+    """A non-finite right-hand side does not poison the device zero guess."""
+
+    right_hand_side = runtime_device_put(
+        np.asarray((np.nan, np.inf, -np.inf), dtype=np.float64),
+        dtype=jnp.float64,
+    )
+    with jax.transfer_guard("disallow"):
+        initial_guess = _zeros_like(right_hand_side)
+
+    initial_guess_host = np.asarray(jax.device_get(initial_guess))
+    assert np.all(np.isfinite(initial_guess_host))
+    np.testing.assert_array_equal(initial_guess_host, np.zeros((3,), dtype=np.float64))
 
 
 def _g_from_currents(base_currents, nfp: int) -> float:
@@ -160,6 +177,40 @@ def _seed_both_lanes_from_native_lbfgs(native, jax_boozer, iota, g0):
         raise AssertionError("native LBFGS seed for reduced nested-LS failed.")
     jax_boozer.surface.set_dofs(native.surface.get_dofs())
     return float(polished["iota"]), float(polished["G"])
+
+
+def test_projected_y_system_stages_jacfwd_under_strict_transfer_guard():
+    """The projected derivative must not create jacfwd's basis on the host."""
+
+    surface = runtime_device_put(np.asarray([0.3, -0.2], dtype=np.float64))
+    probe = runtime_device_put(np.asarray([0.4, -0.1], dtype=np.float64))
+    residual_matrix = runtime_device_put(
+        np.asarray(((1.0, 0.0, 2.0, -1.0), (0.0, -1.0, 1.0, 3.0))),
+        dtype=jnp.float64,
+    )
+
+    def affine_residual(decision):
+        return residual_matrix @ decision
+
+    with jax.transfer_guard("disallow"):
+        matrix, right_hand_side = projected_y_system(
+            affine_residual,
+            surface,
+            probe,
+        )
+
+    np.testing.assert_allclose(
+        np.asarray(matrix),
+        np.asarray(((2.0, -1.0), (1.0, 3.0)), dtype=np.float64),
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(
+        np.asarray(right_hand_side),
+        np.asarray((-0.3, -0.2), dtype=np.float64),
+        rtol=1.0e-14,
+        atol=1.0e-14,
+    )
 
 
 def test_nested_ls_contract_keeps_banana_off_the_physics_bar():

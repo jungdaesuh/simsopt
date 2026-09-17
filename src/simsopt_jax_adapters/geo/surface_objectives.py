@@ -633,8 +633,10 @@ def surface_dminor_radius_jax_from_dofs(spec, dofs):
 
 
 def surface_dmajor_radius_jax_from_dofs(spec, dofs):
-    return jax.grad(lambda x: surface_major_radius_jax_from_dofs(spec, x))(
-        _as_jax_float64(dofs)
+    return _surface_scalar_grad_jax_from_dofs(
+        surface_major_radius_jax_from_dofs,
+        spec,
+        dofs,
     )
 
 

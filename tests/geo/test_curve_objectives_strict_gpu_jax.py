@@ -16,9 +16,12 @@ from simsopt_jax_adapters.field.biotsavart_backend import (
     SpecBackedBiotSavartJAX,
 )
 from simsopt_jax_adapters.geo.curve_objectives import (
+    ArclengthVariationJAX,
     CurveCurveDistanceJAX,
+    CurveLengthJAX,
     CurveSurfaceDistanceJAX,
     LpCurveCurvatureJAX,
+    MeanSquaredCurvatureJAX,
 )
 
 
@@ -57,7 +60,10 @@ def test_public_curve_geometry_values_and_derivatives_obey_strict_gpu_guard(
     surface.set("rc(1,0)", 0.2)
     surface.set("zs(1,0)", 0.2)
     objectives_and_owners = (
+        (ArclengthVariationJAX(curve1), (curve1,)),
+        (CurveLengthJAX(curve1), (curve1,)),
         (LpCurveCurvatureJAX(curve1, p=2, threshold=0.0), (curve1,)),
+        (MeanSquaredCurvatureJAX(curve1), (curve1,)),
         (
             CurveCurveDistanceJAX(
                 [curve1, curve2],

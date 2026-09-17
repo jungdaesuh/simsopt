@@ -63,6 +63,7 @@ from simsopt_jax_adapters.geo.surface_objectives import (
 from simsopt.geo.curveobjectives import cs_distance_pure
 from simsopt.geo.qfmsurface import QfmSurface
 from simsopt_jax.backend import invalidate_backend_cache
+from simsopt_jax.backend.dtypes import runtime_device_put
 from simsopt_jax.core import _pairwise_reductions as pairwise_reductions_module
 from simsopt_jax.geo._pairwise_reductions import (
     pairwise_min_distance_batched_pure,
@@ -8868,6 +8869,25 @@ class TestAreaVolumeJAXObjectParity:
 
 
 class TestSurfaceScalarMetricJAXHelpers:
+    def test_major_radius_gradient_stages_ad_under_strict_transfer_guard(self):
+        """Major-radius AD must create its cotangent basis inside the JIT."""
+
+        surface = _make_aspect_ratio_surface("SurfaceXYZTensorFourier", False)
+        spec = _surface_spec(surface)
+        dofs = runtime_device_put(
+            np.asarray(surface.get_dofs(), dtype=np.float64),
+            dtype=jnp.float64,
+        )
+
+        with jax.transfer_guard("disallow"):
+            gradient = surfaceobjectives_jax_module.surface_dmajor_radius_jax_from_dofs(
+                spec,
+                dofs,
+            )
+
+        assert gradient.shape == dofs.shape
+        assert bool(np.all(np.isfinite(np.asarray(gradient))))
+
     @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
     @pytest.mark.parametrize(
         (

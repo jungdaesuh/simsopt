@@ -60,6 +60,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="",
         help="Receipt suffix, e.g. a100 → nested_ls_reduced_gpu_gate6_20260822.a100.json",
     )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=EVIDENCE,
+        help="Directory for the run receipt and execution-log pointer.",
+    )
     return parser.parse_args(argv)
 
 
@@ -158,8 +164,9 @@ def main(argv: list[str] | None = None) -> None:
     omp_num_threads = int(args.omp)
     tag = str(args.tag).strip()
     suffix = f".{tag}" if tag else ""
-    out_json = EVIDENCE / f"nested_ls_reduced_gpu_gate6_20260822{suffix}.json"
-    out_log = EVIDENCE / f"nested_ls_reduced_gpu_gate6_20260822{suffix}.log"
+    output_dir = args.output_dir.resolve()
+    out_json = output_dir / f"nested_ls_reduced_gpu_gate6_20260822{suffix}.json"
+    out_log = output_dir / f"nested_ls_reduced_gpu_gate6_20260822{suffix}.log"
     publication = (
         "Gate-6 process-wall vs process-wall claim run. Native banana at "
         f"best-of-contract OMP={omp_num_threads}, JAX Shamanskii with "
@@ -246,10 +253,11 @@ def main(argv: list[str] | None = None) -> None:
             "python benchmarks/nested_ls_gate6_claim.py"
             + (f" --omp {omp_num_threads}" if omp_num_threads else "")
             + (f" --tag {tag}" if tag else "")
+            + f" --output-dir {output_dir}"
         ),
         "date": datetime.now(timezone.utc).date().isoformat(),
         "driver": "benchmarks.nested_ls_gate6_claim",
-        "execution_log": str(out_log.relative_to(REPO)),
+        "execution_log": str(out_log),
         "fail_closed_reason": fail_reason,
         "git_head": sha,
         "native_min_process_wall_seconds": native_min,

@@ -69,9 +69,7 @@ def _curve_length_grad(l):
 
 @jit
 def _arclength_variation_grad(incremental_arclength, interval_matrix):
-    return grad(curve_arclengthvariation_pure)(
-        incremental_arclength, interval_matrix
-    )
+    return grad(curve_arclengthvariation_pure)(incremental_arclength, interval_matrix)
 
 
 def _curve_jax_position_and_tangent(curve):
@@ -298,7 +296,9 @@ class CurveLengthJAX(Optimizable):
         super().__init__(depends_on=[curve])
 
     def J(self):
-        return curve_length_pure(_as_jax_float64(self.curve.incremental_arclength()))
+        return _host_float(
+            curve_length_pure(_as_jax_float64(self.curve.incremental_arclength()))
+        )
 
     @derivative_dec
     def dJ(self):
@@ -385,9 +385,11 @@ class MeanSquaredCurvatureJAX(Optimizable):
         super().__init__(depends_on=[curve])
 
     def J(self):
-        return curve_msc_pure(
-            _as_jax_float64(self.curve.kappa()),
-            _as_jax_float64(self.curve.gammadash()),
+        return _host_float(
+            curve_msc_pure(
+                _as_jax_float64(self.curve.kappa()),
+                _as_jax_float64(self.curve.gammadash()),
+            )
         )
 
     @derivative_dec
@@ -438,7 +440,7 @@ class ArclengthVariationJAX(Optimizable):
         self.mat = mat
 
     def J(self):
-        return float(
+        return _host_float(
             curve_arclengthvariation_pure(
                 _as_jax_float64(self.curve.incremental_arclength()),
                 _as_jax_float64(self.mat),

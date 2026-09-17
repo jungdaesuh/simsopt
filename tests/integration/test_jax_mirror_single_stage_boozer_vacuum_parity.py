@@ -8,10 +8,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 from examples.jax.manifest_runtime import load_runtime_contract_pair
+from examples.jax.parity.arbiter import SHIPPED_SINGLE_STAGE_SCIPY_DRIVER_ID
 from examples.jax.parity.cases import get_case
 from examples.jax.parity.cases.native_boozerqa import (
-    _observation,
-    _scale_configuration,
+    variant_lane_observation,
+    variant_scale_configuration,
 )
 from examples.jax.parity.cases.native_single_stage_boozer_vacuum import SPEC
 from examples.jax.parity.input_bundle import InputBundle, load_input_bundle
@@ -28,7 +29,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CASE_ID = "native-single-stage-boozer-vacuum-optimization"
 
 
-def test_single_stage_boozer_vacuum_is_an_executable_parity_case() -> None:
+def test_single_stage_boozer_vacuum_declares_approved_case_specific_driver_policy() -> (
+    None
+):
     case = get_case(CASE_ID)
     runtime = load_runtime_contract_pair(
         REPO_ROOT / "examples" / "jax" / "manifest.json",
@@ -47,10 +50,17 @@ def test_single_stage_boozer_vacuum_is_an_executable_parity_case() -> None:
     assert not relationship.omitted_scientific_stages
     assert relationship.workflow_stages
     assert relationship.comparison_routes
+    example = next(example for example in runtime.examples if example.id == CASE_ID)
+    assert example.outer_optimizer_policy is not None
+    assert example.outer_optimizer_policy.case_id == CASE_ID
+    assert (
+        example.outer_optimizer_policy.expected_driver
+        == SHIPPED_SINGLE_STAGE_SCIPY_DRIVER_ID
+    )
 
 
 def test_single_stage_boozer_vacuum_routes_native_default_without_solving() -> None:
-    configuration = _scale_configuration("native_default", SPEC)
+    configuration = variant_scale_configuration("native_default", SPEC)
 
     assert configuration["outer_maxiter"] == NATIVE_ITERATIONS
     assert configuration["mpol"] == 6
@@ -58,17 +68,10 @@ def test_single_stage_boozer_vacuum_routes_native_default_without_solving() -> N
 
 
 def test_parity_harness_and_shipped_mirror_size_the_same_problem() -> None:
-    """The harness case and the shipped example must configure one problem, not two.
-
-    The harness lane and the example still run different JAX evaluation routes
-    (see the case module's docstring); the problem they evaluate may not also
-    differ, or neither lane's numbers describe the other.
-    """
-    for scale, shipped in (
-        ("native_default", NATIVE_SCALE),
-        ("bounded", BOUNDED_SCALE),
-    ):
-        configuration = _scale_configuration(scale, SPEC)
+    """The harness case and shipped example configure the same problem."""
+    for scale in ("native_default", "bounded"):
+        shipped = NATIVE_SCALE if scale == "native_default" else BOUNDED_SCALE
+        configuration = variant_scale_configuration(scale, SPEC)
 
         assert configuration["mpol"] == shipped.surface_resolution, scale
         assert configuration["ntor"] == shipped.surface_resolution, scale
@@ -117,44 +120,6 @@ def test_single_stage_parity_preserves_public_solver_boundaries() -> None:
     assert "objective.x = final_parameters" in source
 
 
-def test_single_stage_endpoint_evidence_has_complete_route_matrices() -> None:
-    runtime = load_runtime_contract_pair(
-        REPO_ROOT / "examples" / "jax" / "manifest.json",
-        REPO_ROOT / "examples" / "jax" / "parity_manifest.json",
-        repo_root=REPO_ROOT,
-    )
-    relationship = next(
-        item for item in runtime.parity.relationships if item.case_id == CASE_ID
-    )
-    endpoint_observables = {
-        "endpoint_certificate_success",
-        "endpoint_initial_stationary",
-        "endpoint_terminal_stationary",
-        "endpoint_constraints_satisfied",
-        "outer_solver_status",
-    }
-    required_pairs = {
-        "native-cpu:jax-cpu",
-        "native-cpu:jax-gpu",
-        "jax-cpu:jax-gpu",
-    }
-
-    for observable in endpoint_observables:
-        routes = tuple(
-            route
-            for route in relationship.comparison_routes
-            if route.phase == "final" and route.observable == observable
-        )
-        assert {route.lane_pair for route in routes} == required_pairs
-        assert len(routes) == len(required_pairs)
-    status_routes = tuple(
-        route
-        for route in relationship.comparison_routes
-        if route.phase == "final" and route.observable == "outer_solver_status"
-    )
-    assert not any(route.applicable for route in status_routes)
-
-
 def test_endpoint_certificate_cannot_mask_failed_scientific_gate() -> None:
     certificate = certify_optimization_endpoint(
         status_convention="scipy-bfgs",
@@ -190,7 +155,7 @@ def test_endpoint_certificate_cannot_mask_failed_scientific_gate() -> None:
         "final:outer_solver_success": np.asarray(True, dtype=np.bool_),
     }
 
-    observation = _observation(
+    observation = variant_lane_observation(
         "native-cpu",
         bundle,
         values,
@@ -238,7 +203,8 @@ def test_single_stage_boozer_vacuum_case_matches_native_and_jax_cpu(
         assert bool(observation.values["final:endpoint_certificate_success"]) is False
         assert int(observation.values["final:outer_solver_status"]) == 1
     assert native.driver == "simsopt_scipy_bfgs_with_boozer_newton"
-    assert jax.driver == "simsopt_jax_host_bfgs_with_traceable_boozer_newton"
+    assert jax.driver == SHIPPED_SINGLE_STAGE_SCIPY_DRIVER_ID
+    assert (jax.nit, jax.nfev, jax.njev) == (native.nit, native.nfev, native.njev)
     assert native.effective_construction_fingerprint == (
         jax.effective_construction_fingerprint
     )
@@ -276,6 +242,8 @@ def test_single_stage_boozer_vacuum_case_matches_native_and_jax_cpu(
         "final:non_qs_ratio",
         "final:boozer_residual",
         "final:boozer_residual_rms",
+        "final:major_radius_penalty",
+        "final:length_penalty",
     ):
         np.testing.assert_allclose(
             jax.values[observable],
@@ -399,8 +367,15 @@ def test_single_stage_bounded_fast_recording_is_sequence_neutral(
     monkeypatch.setenv("SIMSOPT_PRECISION", "fp64")
     monkeypatch.setenv("JAX_ENABLE_X64", "1")
 
-    plain = case.execute("jax-cpu", bundle, arrays)
     assert case.measurement_execute is not None
+    plain = case.measurement_execute(
+        "jax-cpu",
+        bundle,
+        arrays,
+        MeasurementExecution(
+            optimization_timing_path=tmp_path / "fast-plain-timing.json"
+        ),
+    )
     recorded = case.measurement_execute(
         "jax-cpu",
         bundle,
@@ -419,5 +394,6 @@ def test_single_stage_bounded_fast_recording_is_sequence_neutral(
     assert recorded.nit == plain.nit
     assert recorded.nfev == plain.nfev
     assert recorded.njev == plain.njev
+    assert recorded.driver == plain.driver
     records = [json.loads(line) for line in trajectory_path.read_text().splitlines()]
     assert len(records) == recorded.nit

@@ -14,6 +14,7 @@ from examples.jax.manifest_contracts_v3 import (
     ManifestContractPair,
     load_manifest_contract_pair_documents,
 )
+from examples.jax.outer_optimizer_policy import OuterOptimizerPolicy
 from examples.jax.parity._manifest import ParityManifest
 
 RuntimeStatus = Literal["planned", "ready"]
@@ -39,6 +40,7 @@ class RuntimeExample:
     teaching_kind: RuntimeTeachingKind
     source: str | None
     compatibility: CompatibilityAlias | None
+    outer_optimizer_policy: OuterOptimizerPolicy | None = None
 
 
 @dataclass(frozen=True)
@@ -104,6 +106,7 @@ def _canonical_examples(
             teaching_kind=example.teaching_kind,
             source=source_by_example_id.get(example.id),
             compatibility=example.compatibility,
+            outer_optimizer_policy=example.outer_optimizer_policy,
         )
         for example in manifest.jax_examples
     )

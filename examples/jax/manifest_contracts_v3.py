@@ -14,6 +14,11 @@ from examples.jax._manifest import (
     JaxExamplesManifest,
     parse_manifest_document,
 )
+from examples.jax.outer_optimizer_policy import (
+    OuterOptimizerPolicy,
+    parse_outer_optimizer_policy,
+    policy_owns_parity_case,
+)
 from examples.jax.parity._manifest import (
     ParityManifest,
     ParityRelationship,
@@ -120,6 +125,7 @@ class JaxExampleRecordV3:
     correctness_tests: tuple[str, ...]
     supported_device_scopes: tuple[tuple[str, DeviceScope], ...]
     compatibility: CompatibilityAlias | None
+    outer_optimizer_policy: OuterOptimizerPolicy | None = None
 
     @property
     def device_scopes(self) -> Mapping[str, DeviceScope]:
@@ -353,7 +359,12 @@ def _compatibility_alias(value: object, context: str) -> CompatibilityAlias | No
 def _example_record(value: object, index: int) -> JaxExampleRecordV3:
     context = f"jax_examples[{index}]"
     record = _mapping(value, context)
-    _exact_fields(record, _EXAMPLE_FIELDS, "executable")
+    _exact_fields(
+        record,
+        _EXAMPLE_FIELDS
+        | ({"outer_optimizer_policy"} if "outer_optimizer_policy" in record else set()),
+        "executable",
+    )
     path = _string(record["path"], f"{context}.path")
     tier = _enum(record["tier"], _TIERS, f"{context}.tier")
     relative = PurePosixPath(path)
@@ -431,6 +442,12 @@ def _example_record(value: object, index: int) -> JaxExampleRecordV3:
         ),
         supported_device_scopes=scopes,
         compatibility=compatibility,
+        outer_optimizer_policy=parse_outer_optimizer_policy(
+            record.get("outer_optimizer_policy"),
+            example_id=_string(record["id"], f"{context}.id"),
+            example_path=path,
+            ready=status_value == "ready",
+        ),
     )
 
 
@@ -608,6 +625,18 @@ def _parse_parity_v2_document(
         example = examples_by_id[relationship.jax_example_id]
         if example.classification == "tutorial":
             raise ManifestV3ValidationError("tutorial cannot be parity coverage")
+        if (
+            example.outer_optimizer_policy is not None
+            and relationship.case_id is not None
+            and not policy_owns_parity_case(
+                example.outer_optimizer_policy,
+                case_id=relationship.case_id,
+                example_id=example.id,
+            )
+        ):
+            raise ManifestV3ValidationError(
+                "outer optimizer policy does not own this parity case"
+            )
         if relationship.classification != "unsupported" and example.status != "ready":
             raise ManifestV3ValidationError(
                 f"planned executable cannot claim parity: {example.id}"

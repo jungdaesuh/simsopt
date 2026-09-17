@@ -1,37 +1,53 @@
 """Matched VMEC-free implicit-Boozer single-stage workflow.
 
-Route note (2026-09-13).  The shipped mirror
-``examples/jax/3_Advanced/single_stage_boozer_vacuum_optimization.py`` now runs
-native's own SciPy BFGS over the exact analytic evaluator
-(``simsopt_jax_adapters.geo.single_stage_boozer_vacuum_problem``), which
-reproduces native's iterate trajectory -- at bounded scale the two examples
-spend the same iterations and evaluations and agree to 1.4e-15 in the initial
-objective and 5.2e-13 in the relative L2 of the initial gradient.  This harness
-case's JAX lane is unchanged: it still executes the traceable-session route
-shared with ``native_boozerqa``, whose outer optimizer and rejection sentinel
-differ from native.  Everything below -- in particular the quality band -- is
-evidence about THAT lane, not about the shipped example.  Rerouting this case
-onto the shipped evaluator requires changes in ``native_boozerqa._jax``, which
-also owns the Boozer-QA case.
+The parity JAX lane uses the shipped example's exact analytic evaluator and
+SciPy BFGS policy.  The separate measurement entry point retains the historical
+traceable-session optimizer for trajectory and Optax instrumentation; its
+observations are not the authority receipts published by ``run_parity.py``.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import numpy as np
-from examples.jax.parity.arbiter import LaneObservation
+from examples.jax.parity.arbiter import (
+    SHIPPED_SINGLE_STAGE_SCIPY_DRIVER_ID,
+    LaneObservation,
+)
 from examples.jax.parity.cases.native_boozerqa import (
     BoozerSingleStageSpec,
+    build_variant_problem,
     create_variant_input,
     execute_variant,
+    validate_variant_bundle_arrays,
+    variant_lane_observation,
+    variant_observable_values,
+    variant_scale_configuration,
 )
 from examples.jax.parity.contracts import QualityBand
 from examples.jax.parity.input_bundle import InputBundle
 from examples.jax.parity.measurement import MeasurementExecution
 from examples.jax.parity.runtime import ParityLane
-from simsopt.single_stage_boozer_vacuum import NATIVE_ITERATIONS
+from simsopt.geo import Volume
+from simsopt.geo.curve import Curve
+from simsopt.single_stage_boozer_vacuum import (
+    NATIVE_ITERATIONS,
+    OUTER_GRADIENT_TOLERANCE,
+)
+from simsopt_contracts.optimization_endpoint import certify_optimization_endpoint
+from simsopt_jax.backend.runtime import get_runtime_jax_device
 from simsopt_jax.examples import ExecutionScale
+from simsopt_jax.solve import Driver, ScipyBFGSOptions
+from simsopt_jax.solve.dispatch import minimize
+from simsopt_jax_adapters.geo.single_stage_boozer_vacuum_problem import (
+    BOUNDED_SCALE,
+    NATIVE_SCALE,
+    SingleStageVacuumProblem,
+)
+
+import jax
 
 WORKFLOW_STAGES = (
     "construct_ncsx_coils_and_volume_labelled_surface",
@@ -57,32 +73,23 @@ SPEC = BoozerSingleStageSpec(
     enforce_endpoint_certificate=True,
 )
 
-# Rule 3 of the 2026-08-15 native_default certification-gate ruling: this
-# continuous optimizer forks by rejection sentinel and line search, so at
-# native_default it is certifiable only as an endpoint quality band, never as
-# final-value equivalence. Bounded scale is untouched -- no band applies there.
+# Rule 3 of the 2026-08-15 native_default certification-gate ruling: a
+# budget-exhausted continuous optimizer supports endpoint quality only, not
+# optimizer convergence or final-value equivalence. Bounded scale has no band.
 #
-# Derivation (2026-08-14 three-lane native_default run, durable archive
-# ~/simsopt-campaigns/ndparity-boozer-vacuum-20260814/, copied from
-# .artifacts/jax-example-parity/20260814T010929Z-10f0606d.partial/): every lane
-# ended budget_exhausted at the matched 1000-iteration budget, reducing
-# final:objective from 8.4442e-05 to 4.3972e-08 (native-cpu), 4.5074e-08
-# (jax-cpu), and 4.5614e-08 (jax-gpu) -- lane forks of 2.5e-2 and 3.7e-2
-# relative, far outside the mirror_single_stage_final_value equality bucket but
-# indistinguishable in delivered endpoint quality. The band is the next decade
-# above the worst measured endpoint: 4.5614e-08 -> 1.0e-07, a 2.19x margin over
-# the worst lane and a 2.27x margin over the native reference. A lane that
-# lands one decade worse than measured (>= 4.6e-07) therefore fails closed,
-# while ordinary run-to-run fork of the measured size passes.
+# The 1e-7 ceiling was set above the worst 2026-08-14 three-lane endpoint
+# (4.5614e-8) on the former traceable-session route. Pass-5b's shipped-example
+# native/GPU pairs also ended below that ceiling at the same 1000-step budget.
+# Neither packet establishes the new three-lane harness verdict; the ceiling
+# remains an endpoint-quality limit until that run is audited.
 NATIVE_DEFAULT_QUALITY_BAND = QualityBand(
     observable="final:objective",
     max_value=1.0e-07,
     derivation=(
-        "2026-08-14 native_default three-lane run "
-        "(ndparity-boozer-vacuum-20260814): all lanes budget_exhausted at 1000 "
-        "iterations with final:objective 4.3972e-08 (native-cpu), 4.5074e-08 "
-        "(jax-cpu), 4.5614e-08 (jax-gpu) from 8.4442e-05; band set one decade "
-        "above the worst measured endpoint"
+        "2026-08-14 traceable-session three-lane native_default packet: "
+        "worst 1000-step endpoint 4.5614e-08; ceiling set at 1e-07. "
+        "2026-09-15 pass-5b shipped-example native/GPU pairs also met this "
+        "ceiling; new three-lane shipped-route authority remains to be audited"
     ),
 )
 
@@ -98,7 +105,127 @@ def execute(
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
     """Execute the VMEC-free single-stage workflow in one isolated lane."""
-    return execute_variant(lane, bundle, arrays, SPEC)
+    if lane == "native-cpu":
+        return execute_variant(lane, bundle, arrays, SPEC)
+    return _execute_shipped_jax(lane, bundle, arrays)
+
+
+def _execute_shipped_jax(
+    lane: ParityLane,
+    bundle: InputBundle,
+    arrays: dict[str, np.ndarray],
+) -> LaneObservation:
+    configuration = variant_scale_configuration(bundle.scale, SPEC)
+    for key, expected in configuration.items():
+        if bundle.configuration[key] != expected:
+            raise ValueError(f"frozen single-stage {key} differs from shipped scale")
+    (
+        _base_curves,
+        _base_currents,
+        magnetic_axis,
+        nfp,
+        native_field,
+        surface,
+        initial_G,
+    ) = build_variant_problem(bundle.configuration, bundle.scale)
+    if (
+        bundle.configuration["nfp"] != nfp
+        or bundle.configuration["initial_G"] != initial_G
+    ):
+        raise ValueError("frozen single-stage NCSX construction differs")
+    validate_variant_bundle_arrays(
+        arrays,
+        axis_dofs=np.asarray(cast(Curve, magnetic_axis).local_full_x, dtype=np.float64),
+        coil_dofs=np.asarray(native_field.x, dtype=np.float64),
+        surface_dofs=np.asarray(surface.get_dofs(), dtype=np.float64),
+    )
+    scale = NATIVE_SCALE if bundle.scale == "native_default" else BOUNDED_SCALE
+    problem = SingleStageVacuumProblem(scale)
+    initial_parameters = problem.initial_coil_dofs
+    if not np.array_equal(initial_parameters, arrays["coil_dofs"]):
+        raise ValueError("shipped JAX parameters do not match frozen coil dofs")
+    initial_volume = float(Volume(surface).J())
+    initial_objective, initial_gradient = problem.value_and_gradient(initial_parameters)
+    max_steps = (
+        SPEC.native_outer_maxiter
+        if bundle.scale == "native_default"
+        else SPEC.bounded_outer_maxiter
+    )
+    optimizer_result = minimize(
+        problem.value_and_gradient,
+        initial_parameters,
+        driver=Driver.SCIPY_BFGS,
+        options=ScipyBFGSOptions(
+            maxiter=max_steps,
+            gtol=OUTER_GRADIENT_TOLERANCE,
+        ),
+    )
+    final_parameters = np.asarray(optimizer_result.x, dtype=np.float64)
+    endpoint = problem.endpoint(final_parameters)
+    final_gradient = endpoint.gradient
+    parameters_finite = bool(
+        np.all(np.isfinite(final_parameters)) and np.all(np.isfinite(final_gradient))
+    )
+    observables_finite = bool(
+        np.isfinite(endpoint.value)
+        and np.isfinite(endpoint.iota)
+        and np.isfinite(endpoint.volume)
+        and np.isfinite(endpoint.non_qs_ratio)
+        and np.isfinite(endpoint.boozer_residual)
+        and np.isfinite(endpoint.boozer_residual_rms)
+    )
+    certificate = certify_optimization_endpoint(
+        status_convention="scipy-bfgs",
+        provider_success=bool(optimizer_result.success),
+        provider_status=int(optimizer_result.status),
+        iterations=int(optimizer_result.nit),
+        max_iterations=max_steps,
+        initial_gradient_inf_norm=float(np.max(np.abs(initial_gradient))),
+        final_gradient_inf_norm=float(np.max(np.abs(final_gradient))),
+        parameters_finite=parameters_finite,
+        observables_finite=observables_finite,
+        inner_success=endpoint.inner_success,
+    )
+    values = variant_observable_values(
+        surface_dofs=arrays["surface_dofs"],
+        coil_dofs=arrays["coil_dofs"],
+        initial_parameters=initial_parameters,
+        initial_objective=float(initial_objective),
+        initial_gradient=np.asarray(initial_gradient, dtype=np.float64),
+        initial_iota=problem.iota_target,
+        initial_volume=initial_volume,
+        final_parameters=final_parameters,
+        final_objective=endpoint.value,
+        final_gradient=final_gradient,
+        final_non_qs_ratio=endpoint.non_qs_ratio,
+        final_iota=endpoint.iota,
+        final_volume=endpoint.volume,
+        final_major_radius_penalty=endpoint.major_radius_penalty,
+        final_length_penalty=endpoint.length_penalty,
+        final_boozer_residual=endpoint.boozer_residual,
+        inner_solver_success=endpoint.inner_success,
+        outer_solver_success=bool(optimizer_result.success),
+        outer_solver_status=int(optimizer_result.status),
+        report_residual=True,
+        endpoint_certificate=certificate,
+    )
+    device = get_runtime_jax_device()
+    platform = "cpu" if device is None else device.platform
+    return variant_lane_observation(
+        lane,
+        bundle,
+        values,
+        platform="gpu" if platform in {"cuda", "gpu"} else platform,
+        precision="fp64" if bool(jax.config.jax_enable_x64) else "fp32",
+        driver=SHIPPED_SINGLE_STAGE_SCIPY_DRIVER_ID,
+        workflow_stages=WORKFLOW_STAGES,
+        solver_counts=(
+            int(optimizer_result.nit),
+            int(optimizer_result.nfev),
+            int(optimizer_result.njev),
+        ),
+        endpoint_certificate=certificate,
+    )
 
 
 def execute_measurement(

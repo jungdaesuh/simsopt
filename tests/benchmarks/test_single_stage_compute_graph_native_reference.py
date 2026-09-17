@@ -27,7 +27,7 @@ from examples.jax.parity.cases import native_boozerqa
 from examples.jax.parity.cases.native_boozerqa import (
     NativeBaselineAnchor,
     NativeCandidateEvaluation,
-    _validate_reconstructed_bundle_arrays,
+    validate_variant_bundle_arrays,
 )
 
 
@@ -310,7 +310,7 @@ def test_reconstructed_bundle_validation_rejects_each_drifted_array() -> None:
         "coil_dofs": np.arange(4, dtype=np.float64),
         "surface_dofs": np.arange(5, dtype=np.float64),
     }
-    _validate_reconstructed_bundle_arrays(
+    validate_variant_bundle_arrays(
         arrays,
         axis_dofs=arrays["axis_dofs"],
         coil_dofs=arrays["coil_dofs"],
@@ -321,7 +321,7 @@ def test_reconstructed_bundle_validation_rejects_each_drifted_array() -> None:
         drifted = {key: value.copy() for key, value in arrays.items()}
         drifted[name][0] += 1.0
         with pytest.raises(ValueError, match=f"reconstructed {name}"):
-            _validate_reconstructed_bundle_arrays(
+            validate_variant_bundle_arrays(
                 drifted,
                 axis_dofs=arrays["axis_dofs"],
                 coil_dofs=arrays["coil_dofs"],
@@ -338,7 +338,7 @@ def test_reconstructed_bundle_validation_allows_surface_fit_roundoff_only() -> N
     reconstructed_surface = arrays["surface_dofs"].copy()
     reconstructed_surface[1::2] += np.finfo(np.float64).eps
 
-    _validate_reconstructed_bundle_arrays(
+    validate_variant_bundle_arrays(
         arrays,
         axis_dofs=arrays["axis_dofs"],
         coil_dofs=arrays["coil_dofs"],
@@ -348,7 +348,7 @@ def test_reconstructed_bundle_validation_allows_surface_fit_roundoff_only() -> N
     reconstructed_axis = arrays["axis_dofs"].copy()
     reconstructed_axis[0] += np.finfo(np.float64).eps
     with pytest.raises(ValueError, match="reconstructed axis_dofs"):
-        _validate_reconstructed_bundle_arrays(
+        validate_variant_bundle_arrays(
             arrays,
             axis_dofs=reconstructed_axis,
             coil_dofs=arrays["coil_dofs"],

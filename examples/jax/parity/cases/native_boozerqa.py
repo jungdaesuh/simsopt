@@ -20,6 +20,8 @@ from examples.jax.parity.input_bundle import (
 )
 from examples.jax.parity.measurement import MeasurementExecution
 from examples.jax.parity.runtime import ParityLane
+from simsopt.configs import get_data
+from simsopt.geo import SurfaceXYZTensorFourier
 from simsopt.optimization_trajectory import (
     OptimizationMeasurementWindow,
     OptimizationTrajectoryRecorder,
@@ -428,10 +430,11 @@ def _measurement_optimization_window(
         yield evaluate_initial(), trajectory
 
 
-def _scale_configuration(
+def variant_scale_configuration(
     scale: ExecutionScale,
     spec: BoozerSingleStageSpec,
 ) -> dict[str, object]:
+    """Resolve the frozen scientific inputs for one Boozer workflow variant."""
     native_scale = scale == "native_default"
     resolution = spec.native_resolution if native_scale else spec.bounded_resolution
     return {
@@ -471,9 +474,8 @@ def _configuration_float(configuration: Mapping[str, object], name: str) -> floa
     return float(value)
 
 
-def _problem(configuration: Mapping[str, object], scale: ExecutionScale):
-    from simsopt.configs import get_data
-    from simsopt.geo import SurfaceXYZTensorFourier
+def build_variant_problem(configuration: Mapping[str, object], scale: ExecutionScale):
+    """Construct the shared NCSX coil, axis, field, and initial surface state."""
 
     options = (
         {}
@@ -537,7 +539,7 @@ def create_variant_input(
     spec: BoozerSingleStageSpec,
 ) -> InputBundle:
     """Freeze one configured Boozer single-stage problem for every lane."""
-    configuration = _scale_configuration(scale, spec)
+    configuration = variant_scale_configuration(scale, spec)
     (
         _base_curves,
         _base_currents,
@@ -546,7 +548,7 @@ def create_variant_input(
         native_field,
         surface,
         G0,
-    ) = _problem(configuration, scale)
+    ) = build_variant_problem(configuration, scale)
     return create_input_bundle(
         root,
         case_id=spec.case_id,
@@ -583,7 +585,7 @@ def _canonical_fp64_digest(array: np.ndarray) -> str:
     return hashlib.sha256(canonical.tobytes(order="C")).hexdigest()
 
 
-def _validate_reconstructed_bundle_arrays(
+def validate_variant_bundle_arrays(
     arrays: Mapping[str, np.ndarray],
     *,
     axis_dofs: np.ndarray,
@@ -661,8 +663,8 @@ def _prepare_native_variant_runtime(
         native_field,
         surface,
         G0,
-    ) = _problem(bundle.configuration, bundle.scale)
-    _validate_reconstructed_bundle_arrays(
+    ) = build_variant_problem(bundle.configuration, bundle.scale)
+    validate_variant_bundle_arrays(
         arrays,
         axis_dofs=np.asarray(magnetic_axis.local_full_x, dtype=np.float64),
         coil_dofs=np.asarray(native_field.x, dtype=np.float64),
@@ -846,7 +848,7 @@ def _native(
         if spec.enforce_endpoint_certificate
         else None
     )
-    values = _values(
+    values = variant_observable_values(
         surface_dofs=arrays["surface_dofs"],
         coil_dofs=arrays["coil_dofs"],
         initial_parameters=initial_parameters,
@@ -869,7 +871,7 @@ def _native(
         report_residual=spec.report_residual,
         endpoint_certificate=endpoint_certificate,
     )
-    return _observation(
+    return variant_lane_observation(
         "native-cpu",
         bundle,
         values,
@@ -1033,8 +1035,8 @@ def _prepare_jax_variant_runtime(
         native_field,
         surface,
         G0,
-    ) = _problem(bundle.configuration, bundle.scale)
-    _validate_reconstructed_bundle_arrays(
+    ) = build_variant_problem(bundle.configuration, bundle.scale)
+    validate_variant_bundle_arrays(
         arrays,
         axis_dofs=np.asarray(magnetic_axis.local_full_x, dtype=np.float64),
         coil_dofs=np.asarray(native_field.x, dtype=np.float64),
@@ -1777,7 +1779,7 @@ def _jax(
         if spec.enforce_endpoint_certificate
         else None
     )
-    values = _values(
+    values = variant_observable_values(
         surface_dofs=arrays["surface_dofs"],
         coil_dofs=arrays["coil_dofs"],
         initial_parameters=initial_parameters,
@@ -1802,7 +1804,7 @@ def _jax(
     )
     device = get_runtime_jax_device()
     platform = "cpu" if device is None else device.platform
-    return _observation(
+    return variant_lane_observation(
         lane,
         bundle,
         values,
@@ -1825,7 +1827,7 @@ def _jax(
     )
 
 
-def _values(
+def variant_observable_values(
     *,
     surface_dofs: np.ndarray,
     coil_dofs: np.ndarray,
@@ -1849,6 +1851,7 @@ def _values(
     report_residual: bool,
     endpoint_certificate: OptimizationEndpointCertificate | None,
 ) -> dict[str, np.ndarray]:
+    """Encode construction and endpoint quantities in the parity observable schema."""
     values = {
         "construction:surface_dofs": surface_dofs,
         "construction:coil_dofs": coil_dofs,
@@ -1917,7 +1920,7 @@ def _values(
     return values
 
 
-def _observation(
+def variant_lane_observation(
     lane: ParityLane,
     bundle: InputBundle,
     values: dict[str, np.ndarray],
@@ -1929,6 +1932,7 @@ def _observation(
     solver_counts: tuple[int, int, int],
     endpoint_certificate: OptimizationEndpointCertificate | None = None,
 ) -> LaneObservation:
+    """Apply common endpoint status semantics to a completed Boozer variant."""
     nit, nfev, njev = solver_counts
     objective_decreased = bool(
         np.all(np.isfinite(values["initial:gradient"]))

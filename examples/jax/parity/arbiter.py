@@ -7,6 +7,11 @@ from types import MappingProxyType
 from typing import Mapping
 
 import numpy as np
+from examples.jax.outer_optimizer_policy import (
+    SHIPPED_SINGLE_STAGE_SCIPY_DRIVER_ID as SHIPPED_SINGLE_STAGE_SCIPY_DRIVER_ID,
+    OuterOptimizerPolicy,
+    policy_owns_parity_case,
+)
 from examples.jax.parity._manifest import ComparisonRoute
 from examples.jax.parity.contracts import (
     ComparisonResult,
@@ -87,7 +92,16 @@ def _validate_lanes(
     expected_workflow_stages: tuple[str, ...] | None,
     execution_intent: ExecutionIntent = "parity",
     quality_band: QualityBand | None = None,
+    case_id: str | None = None,
+    example_id: str | None = None,
+    outer_optimizer_policy: OuterOptimizerPolicy | None = None,
 ) -> None:
+    if outer_optimizer_policy is not None and not policy_owns_parity_case(
+        outer_optimizer_policy, case_id=case_id, example_id=example_id
+    ):
+        raise ArbitrationError(
+            "outer optimizer policy does not own this parity case/example"
+        )
     if execution_intent not in ("fast", "parity"):
         raise ArbitrationError(f"invalid execution intent: {execution_intent}")
     if not required_lanes or not required_lanes <= _REQUIRED_LANES:
@@ -124,9 +138,21 @@ def _validate_lanes(
             raise ArbitrationError(f"{lane} platform must be {platform}")
         if observation.precision != precision:
             raise ArbitrationError(f"{lane} precision must be {precision}")
-        if lane.startswith("jax-") and any(
-            forbidden in observation.driver.lower()
-            for forbidden in ("scipy", "optimistix", "optax", "host_callback")
+        if (
+            lane.startswith("jax-")
+            and outer_optimizer_policy is not None
+            and observation.driver != outer_optimizer_policy.expected_driver
+        ):
+            raise ArbitrationError(
+                f"{lane} driver differs from its declared outer optimizer policy"
+            )
+        if (
+            lane.startswith("jax-")
+            and outer_optimizer_policy is None
+            and any(
+                forbidden in observation.driver.lower()
+                for forbidden in ("scipy", "optimistix", "optax", "host_callback")
+            )
         ):
             raise ArbitrationError(
                 f"{lane} uses forbidden parity driver {observation.driver}"
@@ -362,6 +388,9 @@ def arbitrate(
     expected_workflow_stages: tuple[str, ...] | None = None,
     execution_intent: ExecutionIntent = "parity",
     quality_band: QualityBand | None = None,
+    case_id: str | None = None,
+    example_id: str | None = None,
+    outer_optimizer_policy: OuterOptimizerPolicy | None = None,
 ) -> ArbitrationResult:
     """Compare every direct pair under the declared JAX execution policy.
 
@@ -381,6 +410,9 @@ def arbitrate(
         expected_workflow_stages,
         execution_intent,
         quality_band,
+        case_id,
+        example_id,
+        outer_optimizer_policy,
     )
     selected_routes = tuple(
         route

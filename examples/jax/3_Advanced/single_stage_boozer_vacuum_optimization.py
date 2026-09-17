@@ -1,7 +1,8 @@
 """VMEC-free JAX single-stage optimization on an implicit Boozer surface.
 
 The host builds the native NCSX coil graph and a volume-labelled Boozer surface.
-Every outer evaluation is then ONE compiled JAX program on the selected CPU or
+The SciPy BFGS outer optimizer runs on the CPU. Each physics and derivative
+evaluation is ONE compiled JAX program on the selected CPU or
 GPU: the exact Boozer Newton solve followed by the implicit-function gradient of
 the objective at the state that solve returned.
 

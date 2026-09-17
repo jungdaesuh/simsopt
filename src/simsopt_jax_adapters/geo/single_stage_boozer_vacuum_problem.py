@@ -100,6 +100,8 @@ class SingleStageVacuumEndpoint:
     volume: float
     non_qs_ratio: float
     boozer_residual: float
+    major_radius_penalty: float
+    length_penalty: float
 
     @property
     def boozer_residual_rms(self) -> float:
@@ -286,4 +288,6 @@ class SingleStageVacuumProblem:
             volume=host_float(metrics["final_volume"]),
             non_qs_ratio=host_float(metrics["final_non_qs"]),
             boozer_residual=host_float(metrics["final_boozer_residual"]),
+            major_radius_penalty=host_float(metrics["final_major_radius_penalty"]),
+            length_penalty=host_float(metrics["final_length_penalty"]),
         )

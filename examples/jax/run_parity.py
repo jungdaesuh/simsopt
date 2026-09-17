@@ -18,6 +18,10 @@ from repo_bootstrap import bootstrap_local_simsopt
 bootstrap_local_simsopt(_REPO_ROOT / "src")
 
 from examples.jax.manifest_runtime import load_runtime_contract_pair
+from examples.jax.outer_optimizer_policy import (
+    policy_owns_parity_case,
+    validate_ready_example_policy,
+)
 from examples.jax.parity.arbiter import QUALITY_BAND_VERDICT, arbitrate
 from examples.jax.parity.artifacts import canonical_json_bytes, write_bytes_exclusive
 from examples.jax.parity.cases import get_case, implemented_case_ids
@@ -101,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
         repo_root / "examples" / "jax" / "parity_manifest.json",
         repo_root=repo_root,
     )
+    examples_by_id = {example.id: example for example in contract_pair.examples}
     parity_manifest = contract_pair.parity
     repository_state = collect_repository_state(repo_root)
     explicit_sources = collect_explicit_sources(
@@ -131,6 +136,23 @@ def main(argv: list[str] | None = None) -> int:
                     f"case {case_id} must own exactly one executable relationship"
                 )
             relationship = relationships[0]
+            example = examples_by_id[relationship.jax_example_id]
+            validate_ready_example_policy(
+                example.outer_optimizer_policy,
+                example_id=example.id,
+                example_path=example.path,
+            )
+            if (
+                example.outer_optimizer_policy is not None
+                and not policy_owns_parity_case(
+                    example.outer_optimizer_policy,
+                    case_id=case_id,
+                    example_id=example.id,
+                )
+            ):
+                raise RunnerError(
+                    "outer optimizer policy belongs to a different parity case"
+                )
             if relationship.scale_tier != scale:
                 raise RunnerError(
                     f"case {case_id} declares scale_tier "
@@ -154,6 +176,9 @@ def main(argv: list[str] | None = None) -> int:
                 observations,
                 required_lanes=frozenset(args.lanes),
                 expected_workflow_stages=relationship.workflow_stages,
+                case_id=case_id,
+                example_id=relationship.jax_example_id,
+                outer_optimizer_policy=example.outer_optimizer_policy,
                 quality_band=(
                     case.native_default_quality_band
                     if scale == "native_default"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import hashlib
 import importlib.metadata
@@ -73,8 +74,16 @@ class LaneProvenance:
     simsoptpp_build_commit: str | None
     simsoptpp_checkout_compatible: bool | None
     authoritative: bool
+    generated_source_bindings: Mapping[str, str] = dataclasses.field(
+        default_factory=dict
+    )
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "generated_source_bindings",
+            MappingProxyType(dict(self.generated_source_bindings)),
+        )
         object.__setattr__(
             self,
             "lane_environment_policy",
@@ -199,6 +208,262 @@ def _canonical_json_bytes(value: object) -> bytes:
         )
         + "\n"
     ).encode("utf-8")
+
+
+_NATIVE_BUILD_INPUT_PATHS = (
+    "CMakeLists.txt",
+    "config.h.in",
+    "pyproject.toml",
+    "setup.py",
+    ".gitmodules",
+    "cmake",
+    "src/simsoptpp",
+    "thirdparty",
+)
+
+
+def _native_build_inputs(repo_root: Path, source_commit: str) -> dict[str, str]:
+    """Bind all tracked native/configuration inputs, including submodule files."""
+    _git(repo_root, "merge-base", "--is-ancestor", source_commit, "HEAD")
+    if _git(
+        repo_root,
+        "diff",
+        "--submodule=short",
+        source_commit,
+        "--",
+        *_NATIVE_BUILD_INPUT_PATHS,
+    ):
+        raise ValueError("native build inputs differ from the recorded source commit")
+    paths = _git(
+        repo_root,
+        "ls-files",
+        "--recurse-submodules",
+        "-z",
+        "--",
+        *_NATIVE_BUILD_INPUT_PATHS,
+    )
+    return {
+        path: _sha256_file(repo_root / path)
+        for path in sorted(paths.decode().split("\0"))
+        if path
+    }
+
+
+def write_native_build_receipt(
+    repo_root: Path,
+    binary_path: Path,
+    *,
+    build_command: tuple[str, ...],
+    toolchain: Mapping[str, str],
+) -> Path:
+    """Record a completed clean build beside its binary for local verification.
+
+    The caller owns executing the recorded build. This binds local build inputs
+    and outputs; it is not a signed build attestation or a reproducible-build proof.
+    """
+    repository = collect_repository_state(repo_root)
+    if repository.repository_dirty:
+        raise ValueError("native build receipt requires a clean source checkout")
+    if not build_command or not toolchain:
+        raise ValueError("native build receipt requires command and toolchain identity")
+    receipt = {
+        "schema_id": "simsopt-native-local-build-v1",
+        "source_commit": repository.repository_commit,
+        "binary_sha256": _sha256_file(binary_path),
+        "build_inputs": _native_build_inputs(repo_root, repository.repository_commit),
+        "build_command": list(build_command),
+        "toolchain": dict(toolchain),
+    }
+    path = binary_path.with_name(binary_path.name + ".build-receipt.json")
+    path.write_bytes(_canonical_json_bytes(receipt))
+    return path
+
+
+def verify_native_build_receipt(
+    repo_root: Path, binary_path: Path
+) -> tuple[str, str] | None:
+    """Verify a local build's binary and source bindings; absence grants no authority."""
+    path = binary_path.with_name(binary_path.name + ".build-receipt.json")
+    if not path.is_file():
+        return None
+    receipt = _json_object(path, "native build receipt")
+    if (
+        set(receipt)
+        != {
+            "schema_id",
+            "source_commit",
+            "binary_sha256",
+            "build_inputs",
+            "build_command",
+            "toolchain",
+        }
+        or receipt["schema_id"] != "simsopt-native-local-build-v1"
+    ):
+        raise ValueError("native build receipt schema is invalid")
+    commit = receipt["source_commit"]
+    command = receipt["build_command"]
+    toolchain = receipt["toolchain"]
+    if (
+        not isinstance(commit, str)
+        or len(commit) != 40
+        or any(character not in "0123456789abcdef" for character in commit)
+        or not isinstance(command, list)
+        or not command
+        or not all(isinstance(argument, str) and argument for argument in command)
+        or not isinstance(toolchain, dict)
+        or not toolchain
+        or not all(
+            isinstance(key, str) and isinstance(value, str) and value
+            for key, value in toolchain.items()
+        )
+    ):
+        raise ValueError("native build receipt identity is invalid")
+    if receipt["binary_sha256"] != _sha256_file(binary_path):
+        raise ValueError("native build receipt binary bytes changed")
+    if receipt["build_inputs"] != _native_build_inputs(repo_root, commit):
+        raise ValueError("native build receipt input bindings changed")
+    return commit, _sha256_file(path)
+
+
+def _validate_generated_version_module(path: Path, provenance: LaneProvenance) -> None:
+    """Accept only literal vcs-versioning metadata; never executable additions."""
+    annotations = {
+        "version": "str",
+        "__version__": "str",
+        "version_tuple": "tuple[int | str, ...]",
+        "__version_tuple__": "tuple[int | str, ...]",
+        "commit_id": "str | None",
+        "__commit_id__": "str | None",
+    }
+    values: dict[str, object] = {}
+    annotated: set[str] = set()
+    future_seen = False
+    for statement in ast.parse(path.read_text(encoding="utf-8")).body:
+        if isinstance(statement, ast.ImportFrom) and (
+            statement.module == "__future__"
+            and statement.level == 0
+            and len(statement.names) == 1
+            and statement.names[0].name == "annotations"
+            and statement.names[0].asname is None
+            and not future_seen
+        ):
+            future_seen = True
+        elif isinstance(statement, ast.AnnAssign) and (
+            isinstance(statement.target, ast.Name)
+            and statement.target.id in annotations
+            and statement.target.id not in annotated
+            and statement.value is None
+            and statement.simple == 1
+            and ast.dump(statement.annotation)
+            == ast.dump(ast.parse(annotations[statement.target.id], mode="eval").body)
+        ):
+            annotated.add(statement.target.id)
+        elif isinstance(statement, ast.Assign) and all(
+            isinstance(target, ast.Name)
+            and target.id in {*annotations, "__all__"}
+            and target.id not in values
+            for target in statement.targets
+        ):
+            literal = ast.literal_eval(statement.value)
+            for target in statement.targets:
+                assert isinstance(target, ast.Name)
+                values[target.id] = literal
+        else:
+            raise ValueError(
+                "generated version module contains non-metadata statements"
+            )
+    if (
+        set(values) != {*annotations, "__all__"}
+        or values["version"] != provenance.simsopt_version
+        or values["__version__"] != values["version"]
+        or values["commit_id"] != provenance.simsopt_version_commit
+        or values["__commit_id__"] != values["commit_id"]
+        or not isinstance(values["version_tuple"], tuple)
+        or not values["version_tuple"]
+        or not all(type(item) in (str, int) for item in values["version_tuple"])
+        or values["__version_tuple__"] != values["version_tuple"]
+        or not isinstance(values["__all__"], list)
+        or sorted(values["__all__"]) != sorted(annotations)
+    ):
+        raise ValueError("generated version module metadata differs from its receipt")
+
+
+def validate_authoritative_provenance(
+    repo_root: Path, provenance: LaneProvenance
+) -> None:
+    """Validate clean source authority and the two permitted generated inputs.
+
+    A native extension must be present in executed_sources and match its local
+    build receipt by path, binary digest, build commit, and receipt digest.
+    """
+    if (
+        not provenance.authoritative
+        or provenance.repository_dirty
+        or provenance.untracked_files
+        or provenance.tracked_diff_sha256 != _sha256_bytes(b"")
+    ):
+        raise ValueError("authoritative provenance requires clean source state")
+    sources = {source.path: source for source in provenance.executed_sources}
+    if len(sources) != len(provenance.executed_sources):
+        raise ValueError("authoritative provenance has duplicate executed sources")
+    expected_bindings: dict[str, str] = {}
+    generated_version = sources.get("src/simsopt/_version.py")
+    if (
+        generated_version is not None
+        and provenance.simsopt_version_checkout_compatible is True
+    ):
+        version_path = repo_root / generated_version.path
+        _validate_generated_version_module(version_path, provenance)
+        if (
+            not generated_version_matches_checkout(
+                provenance.repository_commit, provenance.simsopt_version_commit
+            )
+            or _sha256_file(version_path) != generated_version.sha256
+        ):
+            raise ValueError(
+                "generated version source does not bind the recorded commit"
+            )
+        expected_bindings[generated_version.path] = "setuptools-scm checkout commit"
+    if provenance.simsoptpp_path is not None:
+        binary = Path(provenance.simsoptpp_path).resolve()
+        if not binary.is_relative_to(repo_root.resolve()):
+            raise ValueError(
+                "authoritative native extension is outside its source checkout"
+            )
+        relative = binary.relative_to(repo_root.resolve()).as_posix()
+        source = sources.get(relative)
+        binding = verify_native_build_receipt(repo_root, binary)
+        digest = _sha256_file(binary)
+        if (
+            source is None
+            or source.sha256 != digest
+            or provenance.simsoptpp_sha256 != digest
+            or provenance.simsoptpp_checkout_compatible is not True
+            or binding is None
+            or provenance.simsoptpp_build_commit != binding[0]
+        ):
+            raise ValueError(
+                "authoritative native extension identity or build binding differs"
+            )
+        expected_bindings[relative] = f"local-build-receipt-sha256:{binding[1]}"
+    elif any(
+        value is not None
+        for value in (
+            provenance.simsoptpp_sha256,
+            provenance.simsoptpp_build_commit,
+            provenance.simsoptpp_checkout_compatible,
+        )
+    ):
+        raise ValueError("native extension metadata has no executed binary")
+    if dict(provenance.generated_source_bindings) != expected_bindings:
+        raise ValueError(
+            "authoritative generated source bindings differ from verified inputs"
+        )
+    if any(
+        source.git_blob_id is None and source.path not in expected_bindings
+        for source in sources.values()
+    ):
+        raise ValueError("authoritative provenance has an unbound generated source")
 
 
 def _lower_sha256(value: object, context: str) -> str:
@@ -697,25 +962,42 @@ def collect_lane_provenance(
         else None
     )
     simsoptpp_module = sys.modules.get("simsoptpp")
+    binary_path: Path | None = None
     simsoptpp_path = None
     simsoptpp_sha256 = None
     simsoptpp_version = None
     build_commit = None
+    build_receipt_sha256 = None
     compatible = None
     if simsoptpp_module is not None:
         binary_path = Path(str(simsoptpp_module.__file__)).resolve()
         simsoptpp_path = str(binary_path)
         simsoptpp_sha256 = _sha256_file(binary_path)
         simsoptpp_version = str(getattr(simsoptpp_module, "__version__", "unknown"))
-        build_commit = os.environ.get("SIMSOPT_PARITY_SIMSOPTPP_BUILD_COMMIT")
-        compatible = build_commit == repository.repository_commit
+        build_binding = verify_native_build_receipt(repo_root, binary_path)
+        compatible = build_binding is not None and binary_path.is_relative_to(
+            repo_root.resolve()
+        )
+        if build_binding is not None:
+            build_commit, build_receipt_sha256 = build_binding
     executed_sources = _merge_sources(
         collect_executed_sources(repo_root),
         collect_explicit_sources(repo_root, REQUIRED_PROVENANCE_SOURCE_PATHS),
     )
+    resolved_root = repo_root.resolve()
+    loaded_extension_relative = (
+        binary_path.relative_to(resolved_root).as_posix()
+        if binary_path is not None and binary_path.is_relative_to(resolved_root)
+        else None
+    )
     sources_authoritative = all(
         source.git_blob_id is not None
         or (source.path == "src/simsopt/_version.py" and version_compatible is True)
+        or (
+            compatible is True
+            and source.path == loaded_extension_relative
+            and source.sha256 == simsoptpp_sha256
+        )
         for source in executed_sources
     )
     authoritative = (
@@ -725,7 +1007,7 @@ def collect_lane_provenance(
     )
     peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     host_peak_rss_bytes = int(peak_rss) * 1024
-    return LaneProvenance(
+    provenance = LaneProvenance(
         repository_commit=repository.repository_commit,
         repository_dirty=repository.repository_dirty,
         tracked_diff_sha256=repository.tracked_diff_sha256,
@@ -756,14 +1038,37 @@ def collect_lane_provenance(
         simsoptpp_build_commit=build_commit,
         simsoptpp_checkout_compatible=compatible,
         authoritative=authoritative,
+        generated_source_bindings={
+            **(
+                {"src/simsopt/_version.py": "setuptools-scm checkout commit"}
+                if version_compatible
+                and any(
+                    source.path == "src/simsopt/_version.py"
+                    for source in executed_sources
+                )
+                else {}
+            ),
+            **(
+                {
+                    str(
+                        loaded_extension_relative
+                    ): f"local-build-receipt-sha256:{build_receipt_sha256}"
+                }
+                if compatible
+                else {}
+            ),
+        },
     )
+    if authoritative:
+        validate_authoritative_provenance(repo_root, provenance)
+    return provenance
 
 
 def _snapshot_executed_sources(
     identity: SnapshotLaneIdentity,
 ) -> tuple[ExecutedSource, ...]:
     resolved_root = identity.snapshot_root.resolve()
-    relative_paths = set(REQUIRED_PROVENANCE_SOURCE_PATHS)
+    relative_paths: set[str] = set(REQUIRED_PROVENANCE_SOURCE_PATHS)
     for module_name, module in tuple(sys.modules.items()):
         module_file = getattr(module, "__file__", None)
         if not isinstance(module_file, str):
@@ -839,16 +1144,22 @@ def collect_snapshot_lane_provenance(
     simsoptpp_sha256 = None
     simsoptpp_version = None
     build_commit = None
+    build_receipt_sha256 = None
     compatible = None
     if simsoptpp_module is None:
         raise ValueError("snapshot lane did not load the bound native extension")
     if simsoptpp_module is not None:
         binary_path = Path(str(simsoptpp_module.__file__)).resolve()
+        binary_relative = binary_path.relative_to(
+            identity.snapshot_root.resolve()
+        ).as_posix()
         simsoptpp_path = str(binary_path)
         simsoptpp_sha256 = _sha256_file(binary_path)
         simsoptpp_version = str(getattr(simsoptpp_module, "__version__", "unknown"))
-        build_commit = os.environ.get("SIMSOPT_PARITY_SIMSOPTPP_BUILD_COMMIT")
-        compatible = build_commit == identity.repository_commit
+        build_binding = verify_native_build_receipt(identity.snapshot_root, binary_path)
+        compatible = build_binding is not None
+        if build_binding is not None:
+            build_commit, build_receipt_sha256 = build_binding
         if (
             binary_path != identity.native_extension_path
             or simsoptpp_sha256 != identity.native_extension_sha256
@@ -886,6 +1197,11 @@ def collect_snapshot_lane_provenance(
         simsoptpp_version=simsoptpp_version,
         simsoptpp_build_commit=build_commit,
         simsoptpp_checkout_compatible=compatible,
+        generated_source_bindings={
+            binary_relative: f"local-build-receipt-sha256:{build_receipt_sha256}"
+        }
+        if compatible
+        else {},
         authoritative=(
             not identity.repository_dirty
             and (simsoptpp_module is None or compatible is True)
@@ -926,6 +1242,7 @@ def lane_provenance_payload(provenance: LaneProvenance) -> dict[str, object]:
         "simsoptpp_build_commit": provenance.simsoptpp_build_commit,
         "simsoptpp_checkout_compatible": provenance.simsoptpp_checkout_compatible,
         "authoritative": provenance.authoritative,
+        "generated_source_bindings": dict(provenance.generated_source_bindings),
     }
 
 
@@ -992,8 +1309,28 @@ def lane_provenance_from_payload(value: object) -> LaneProvenance:
             "authoritative",
         }
     )
-    if set(value) != required_fields:
+    if set(value) not in (
+        required_fields,
+        required_fields | {"generated_source_bindings"},
+    ):
         raise ValueError("provenance has invalid fields")
+    generated_bindings = value.get("generated_source_bindings", {})
+    if not isinstance(generated_bindings, dict) or not all(
+        isinstance(key, str) and isinstance(binding, str)
+        for key, binding in generated_bindings.items()
+    ):
+        raise ValueError(
+            "provenance generated source bindings must be a string mapping"
+        )
+    if (
+        value["authoritative"] is True
+        and value["simsoptpp_path"] is not None
+        and not any(
+            binding.startswith("local-build-receipt-sha256:")
+            for binding in generated_bindings.values()
+        )
+    ):
+        raise ValueError("authoritative native extension lacks a local build binding")
     untracked = value["untracked_files"]
     if not isinstance(untracked, list) or not all(
         isinstance(item, str) and item for item in untracked
@@ -1125,4 +1462,5 @@ def lane_provenance_from_payload(value: object) -> LaneProvenance:
             "simsoptpp_checkout_compatible",
         ),
         authoritative=authoritative,
+        generated_source_bindings=generated_bindings,
     )

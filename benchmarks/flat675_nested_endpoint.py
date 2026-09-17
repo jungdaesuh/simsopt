@@ -113,6 +113,7 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_NATIVE_INNER_POLICY_NAME,
     NESTED_LS_NEWTON_EXIT_COARSE_CONVERGED,
     NESTED_LS_NEWTON_EXIT_CONVERGED,
+    NESTED_LS_NEWTON_EXIT_FAILED,
     NESTED_LS_NEWTON_TOL,
     NESTED_LS_OUTER_IOTA_BRANCH_GUARD,
     NESTED_LS_PHYSICS_BAR,
@@ -237,7 +238,9 @@ class NestedCorrection:
     ``bfgs_iterations`` / ``newton_iterations``
         Per stage, not summed.  ``None`` for ``bfgs_iterations`` on the JAX
         lane means the stage does not exist there, not that it took zero
-        steps.  ``wall_s`` on the native lane pays for BOTH stages.
+        steps.  ``None`` on either native-stage count means the child failed
+        before that count was returned, not that the stage took zero steps.
+        ``wall_s`` on the native lane pays for BOTH stages.
     ``converged`` / ``exit_status`` / ``exit_status_quantity`` / ``persisted``
         ``converged`` is the two-valued bit (the solver's own ``success`` AND
         the residual under ``tolerance``); ``exit_status`` is the contract's
@@ -264,10 +267,16 @@ class NestedCorrection:
         walk refused to leave, so publishing it would describe the incoming
         point as a solve outcome.
     ``same_branch_as_incoming``
-        ``|iota_after - iota_before| <= iota_branch_guard``
-        (``NESTED_LS_OUTER_IOTA_BRANCH_GUARD``).  False means the inner solve
-        landed on a different Boozer branch; per the contract that is a failed
-        evaluation, not a correction, however well it converged.
+    ``|iota_after - iota_before| <= iota_branch_guard``
+    (``NESTED_LS_OUTER_IOTA_BRANCH_GUARD``).  False means the inner solve
+    landed on a different Boozer branch; per the contract that is a failed
+    evaluation, not a correction, however well it converged.  ``None`` means
+    no converged, persisted post-state exists to classify.
+
+    Native ``LinAlgError`` before the solver returns has no post-state.  Its
+    ``*_after`` values, surface identity, displacements and branch result are
+    therefore ``None`` rather than copies of the incoming state.  The failure
+    reason names that mechanism without presenting it as a solver outcome.
     ``omp_num_threads``
         The ``OMP_NUM_THREADS`` environment variable exactly as seen by the
         process that ran THIS lane's solve (the parent for the JAX lane, the
@@ -290,26 +299,27 @@ class NestedCorrection:
     inner_policy: str
     tolerance: float
     residual_norm_before: float
-    residual_norm_after: float
+    residual_norm_after: float | None
     bfgs_iterations: int | None
-    newton_iterations: int
+    newton_iterations: int | None
     converged: bool
     exit_status: str
     exit_status_quantity: str
     persisted: bool
+    failure_reason: str | None
     reduced_gradient_l2: float | None
-    coil_delta_inf: float
-    surface_dofs_after: NDArray[np.float64]
+    coil_delta_inf: float | None
+    surface_dofs_after: NDArray[np.float64] | None
     iota_before: float
-    iota_after: float
-    G_after: float
-    same_branch_as_incoming: bool
+    iota_after: float | None
+    G_after: float | None
+    same_branch_as_incoming: bool | None
     iota_branch_guard: float
-    dof_displacement_l2: float
-    dof_displacement_max: float
-    point_displacement_max_m: float
-    point_displacement_rms_m: float
-    minor_radius_m: float
+    dof_displacement_l2: float | None
+    dof_displacement_max: float | None
+    point_displacement_max_m: float | None
+    point_displacement_rms_m: float | None
+    minor_radius_m: float | None
     omp_num_threads: str | None
     wall_s: float
 
@@ -441,22 +451,23 @@ def _correction_record(
     *,
     lane: Literal["jax", "native"],
     inner_policy: str,
-    geometry_surface: SurfaceXYZTensorFourier,
+    geometry_surface: SurfaceXYZTensorFourier | None,
     surface_before: NDArray[np.float64],
-    surface_after: NDArray[np.float64],
+    surface_after: NDArray[np.float64] | None,
     residual_norm_before: float,
-    residual_norm_after: float,
+    residual_norm_after: float | None,
     iota_before: float,
-    iota_after: float,
-    G_after: float,
+    iota_after: float | None,
+    G_after: float | None,
     bfgs_iterations: int | None,
-    newton_iterations: int,
+    newton_iterations: int | None,
     solver_success: bool,
     exit_status: str,
     exit_status_quantity: str,
     persisted: bool,
+    failure_reason: str | None,
     reduced_gradient_l2: float | None,
-    coil_delta_inf: float,
+    coil_delta_inf: float | None,
     omp_num_threads: str | None,
     wall_s: float,
 ) -> NestedCorrection:
@@ -477,47 +488,77 @@ def _correction_record(
     input rather than a solve outcome.
     """
     before = np.asarray(surface_before, dtype=np.float64).reshape(-1)
-    after = np.asarray(surface_after, dtype=np.float64).reshape(-1)
-    geometry_surface.set_dofs(before)
-    gamma_before = np.array(geometry_surface.gamma(), dtype=np.float64, copy=True)
-    minor_radius = float(geometry_surface.minor_radius())
-    geometry_surface.set_dofs(after)
-    gamma_after = np.array(geometry_surface.gamma(), dtype=np.float64, copy=True)
-    point_delta = np.linalg.norm(gamma_after - gamma_before, axis=-1).reshape(-1)
-    dof_delta = after - before
+    has_post_state = surface_after is not None
+    if has_post_state:
+        if geometry_surface is None:
+            raise ValueError("a post-state requires geometry for its displacement")
+        after = np.asarray(surface_after, dtype=np.float64).reshape(-1)
+        geometry_surface.set_dofs(before)
+        gamma_before = np.array(geometry_surface.gamma(), dtype=np.float64, copy=True)
+        minor_radius: float | None = float(geometry_surface.minor_radius())
+        geometry_surface.set_dofs(after)
+        gamma_after = np.array(geometry_surface.gamma(), dtype=np.float64, copy=True)
+        point_delta = np.linalg.norm(gamma_after - gamma_before, axis=-1).reshape(-1)
+        dof_delta = after - before
+        dof_displacement_l2: float | None = float(np.linalg.norm(dof_delta))
+        dof_displacement_max: float | None = float(np.max(np.abs(dof_delta)))
+        point_displacement_max_m: float | None = float(np.max(point_delta))
+        point_displacement_rms_m: float | None = float(
+            np.sqrt(np.mean(point_delta * point_delta))
+        )
+    else:
+        after = None
+        minor_radius = None
+        dof_displacement_l2 = None
+        dof_displacement_max = None
+        point_displacement_max_m = None
+        point_displacement_rms_m = None
+    converged = bool(solver_success) and (
+        residual_norm_after is not None
+        and float(residual_norm_after) <= NESTED_CORRECTION_TOLERANCE
+    )
+    has_branch_claim = converged and bool(persisted) and iota_after is not None
     return NestedCorrection(
         lane=lane,
         inner_policy=str(inner_policy),
         tolerance=NESTED_CORRECTION_TOLERANCE,
         residual_norm_before=float(residual_norm_before),
-        residual_norm_after=float(residual_norm_after),
+        residual_norm_after=(
+            None if residual_norm_after is None else float(residual_norm_after)
+        ),
         bfgs_iterations=None if bfgs_iterations is None else int(bfgs_iterations),
-        newton_iterations=int(newton_iterations),
-        converged=bool(solver_success)
-        and float(residual_norm_after) <= NESTED_CORRECTION_TOLERANCE,
+        newton_iterations=(
+            None if newton_iterations is None else int(newton_iterations)
+        ),
+        converged=converged,
         exit_status=exit_status_with_solver_success(
             str(exit_status), solver_success=bool(solver_success)
         ),
         exit_status_quantity=str(exit_status_quantity),
         persisted=bool(persisted),
+        failure_reason=failure_reason,
         reduced_gradient_l2=(
             None
             if reduced_gradient_l2 is None or not persisted
             else float(reduced_gradient_l2)
         ),
-        coil_delta_inf=float(coil_delta_inf),
-        surface_dofs_after=np.array(after, dtype=np.float64, copy=True),
+        coil_delta_inf=(None if coil_delta_inf is None else float(coil_delta_inf)),
+        surface_dofs_after=(
+            None if after is None else np.array(after, dtype=np.float64, copy=True)
+        ),
         iota_before=float(iota_before),
-        iota_after=float(iota_after),
-        G_after=float(G_after),
-        same_branch_as_incoming=stays_on_incoming_branch(
-            iota_before=iota_before, iota_after=iota_after
+        iota_after=None if iota_after is None else float(iota_after),
+        G_after=None if G_after is None else float(G_after),
+        same_branch_as_incoming=(
+            stays_on_incoming_branch(iota_before=iota_before, iota_after=iota_after)
+            if has_branch_claim
+            else None
         ),
         iota_branch_guard=float(NESTED_LS_OUTER_IOTA_BRANCH_GUARD),
-        dof_displacement_l2=float(np.linalg.norm(dof_delta)),
-        dof_displacement_max=float(np.max(np.abs(dof_delta))),
-        point_displacement_max_m=float(np.max(point_delta)),
-        point_displacement_rms_m=float(np.sqrt(np.mean(point_delta * point_delta))),
+        dof_displacement_l2=dof_displacement_l2,
+        dof_displacement_max=dof_displacement_max,
+        point_displacement_max_m=point_displacement_max_m,
+        point_displacement_rms_m=point_displacement_rms_m,
         minor_radius_m=minor_radius,
         omp_num_threads=omp_num_threads,
         wall_s=float(wall_s),
@@ -610,6 +651,7 @@ def correct_with_nested_ls_jax(view: NestedView) -> NestedCorrection:
         # is classified from that norm; the native lane's is not.
         exit_status_quantity=EXIT_STATUS_FROM_REDUCED_GRADIENT,
         persisted=result.persisted,
+        failure_reason=None,
         reduced_gradient_l2=float(np.linalg.norm(result.reduced_gradient)),
         coil_delta_inf=result.coil_delta_inf,
         omp_num_threads=nested_ls_threading_env()["OMP_NUM_THREADS"],
@@ -653,11 +695,39 @@ def run_native_correction_child(payload_root: str) -> None:
     # identical options (the overlay it applies is the banana option set this
     # ``BoozerSurface`` was already constructed with), publishing both counts,
     # the coil displacement and the process's observed threading.
-    result = _run_native_banana_bfgs_then_newton(
-        native_boozer,
-        iota=float(scalars["iota"]),
-        G=float(scalars["G"]),
-    )
+    try:
+        result = _run_native_banana_bfgs_then_newton(
+            native_boozer,
+            iota=float(scalars["iota"]),
+            G=float(scalars["G"]),
+        )
+    except np.linalg.LinAlgError:
+        wall_s = perf_counter() - started
+        correction = _correction_record(
+            lane="native",
+            inner_policy=NESTED_LS_NATIVE_INNER_POLICY_NAME,
+            geometry_surface=None,
+            surface_before=surface_before,
+            surface_after=None,
+            residual_norm_before=residual_before,
+            residual_norm_after=None,
+            iota_before=float(scalars["iota"]),
+            iota_after=None,
+            G_after=None,
+            bfgs_iterations=None,
+            newton_iterations=None,
+            solver_success=False,
+            exit_status=NESTED_LS_NEWTON_EXIT_FAILED,
+            exit_status_quantity=EXIT_STATUS_FROM_FULL_DECISION_GRADIENT,
+            persisted=False,
+            failure_reason="numpy.linalg.LinAlgError",
+            reduced_gradient_l2=None,
+            coil_delta_inf=None,
+            omp_num_threads=nested_ls_threading_env()["OMP_NUM_THREADS"],
+            wall_s=wall_s,
+        )
+        (root / _CORRECTION_FILE).write_bytes(pickle.dumps(correction))
+        return
     wall_s = perf_counter() - started
     surface_after = np.array(surface.get_dofs(), dtype=np.float64, copy=True)
     residual_after = nested_ls_residual_norm(
@@ -704,6 +774,7 @@ def run_native_correction_child(payload_root: str) -> None:
         ),
         exit_status_quantity=EXIT_STATUS_FROM_FULL_DECISION_GRADIENT,
         persisted=True,
+        failure_reason=None,
         reduced_gradient_l2=None,
         coil_delta_inf=float(result["coil_delta_inf"]),
         omp_num_threads=result["omp_num_threads"],

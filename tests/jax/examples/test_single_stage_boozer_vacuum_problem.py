@@ -63,6 +63,8 @@ def test_seed_targets_are_frozen_at_the_solved_surface(bounded_problem) -> None:
     assert endpoint.value == pytest.approx(endpoint.non_qs_ratio, rel=1.0e-12)
     assert endpoint.volume < 0.0
     assert endpoint.boozer_residual_rms < 1.0e-13
+    assert endpoint.major_radius_penalty == pytest.approx(0.0, abs=1.0e-24)
+    assert endpoint.length_penalty == pytest.approx(0.0, abs=1.0e-24)
 
 
 def test_evaluation_and_reporting_are_clean_under_the_strict_transfer_guard(

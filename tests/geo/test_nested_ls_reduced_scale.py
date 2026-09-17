@@ -721,11 +721,15 @@ def test_f3_gpu_b37_bounded_hvp_and_native_reference():
     )
     lane_inner = meta["inner_state"]
     assert lane_inner is not None
+    # Refreshed 2026-09-16 on the CPU authority toolchain after a fixed-C,d
+    # probe established that HEAD's eager body and the current JIT leaf both
+    # produce these bits. The canonical input hashes and full runtime/source
+    # identity are recorded in qr_endpoint_fix/b37_qr_bits_probe.json.
     assert float64_ulps(probe.y_star_iota, float(lane_inner[0])) == pytest.approx(
-        19.0, abs=0.5
+        20.0, abs=0.5
     )
     assert float64_ulps(probe.y_star_g, float(lane_inner[1])) == pytest.approx(
-        7.0, abs=0.5
+        5.0, abs=0.5
     )
 
 

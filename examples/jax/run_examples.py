@@ -30,6 +30,7 @@ from examples.jax._lane_environment import (
     build_execution_environment,
 )
 from examples.jax._manifest import JaxExampleRecord, JaxExamplesManifest
+from examples.jax.outer_optimizer_policy import validate_ready_example_policy
 from examples.jax.manifest_runtime import (
     RuntimeContractPair,
     RuntimeExample,
@@ -77,6 +78,15 @@ def build_child_command(
     scale: ExecutionScale = "bounded",
 ) -> tuple[str, ...]:
     """Return one example child command derived from its typed execution scale."""
+
+    if example.status == "ready":
+        validate_ready_example_policy(
+            example.outer_optimizer_policy
+            if isinstance(example, RuntimeExample)
+            else None,
+            example_id=example.id,
+            example_path=example.path,
+        )
 
     prefix = (
         sys.executable,

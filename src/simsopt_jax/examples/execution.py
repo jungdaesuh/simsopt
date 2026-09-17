@@ -2,22 +2,21 @@
 
 from __future__ import annotations
 
-import argparse
-import json
 from dataclasses import dataclass
 from pathlib import Path
-from tempfile import TemporaryDirectory
-from typing import Callable, Final, Literal, Mapping
+from typing import Callable, Final
+
+from simsopt.examples import execution as _execution
 
 from simsopt_jax.backend.runtime import (
     get_backend_mode,
     get_resolved_precision,
     get_runtime_jax_device,
 )
-from simsopt_jax.runtime.execution_scale import ExecutionScale
 from simsopt_jax.solve.driver import Driver
 
-EXECUTION_SCALES: Final = ("bounded", "native_default")
+EXECUTION_SCALES: Final = _execution.EXECUTION_SCALES
+ExecutionScale = _execution.ExecutionScale
 
 
 def example_runtime_metadata(scale: ExecutionScale) -> dict[str, str]:
@@ -32,20 +31,17 @@ def example_runtime_metadata(scale: ExecutionScale) -> dict[str, str]:
 
 
 @dataclass(frozen=True)
-class ExampleResult:
+class ExampleResult(_execution.ExampleResult):
     """Immutable scientific result published by an executable example."""
 
-    example_id: str
-    observables: Mapping[str, object]
-    status: Literal["ok", "failed"]
-
     def json_object(self, scale: ExecutionScale) -> dict[str, object]:
-        return {
-            "example_id": self.example_id,
-            **example_runtime_metadata(scale),
-            "status": self.status,
-            "observables": dict(self.observables),
-        }
+        """Preserve the JAX example result API with JAX runtime metadata."""
+
+        return _execution.serialize_example_result(
+            self,
+            scale,
+            example_runtime_metadata(scale),
+        )
 
 
 ExampleSolve = Callable[[Path, int, ExecutionScale], ExampleResult]
@@ -66,32 +62,17 @@ def run_example(
     bounded_steps: int,
     native_default_steps: int,
     solve: ExampleSolve,
+    result_filename: str | None = None,
 ) -> int:
     """Parse the common CLI, execute one example, and publish its result."""
 
-    parser = argparse.ArgumentParser(description=description)
-    parser.add_argument("--smoke", action="store_true")
-    parser.add_argument("--json", action="store_true")
-    parser.add_argument("--max-steps", type=int)
-    parser.add_argument("--output-dir", type=Path)
-    options = parser.parse_args(arguments)
-    scale: ExecutionScale = "bounded" if options.smoke else "native_default"
-    max_steps = options.max_steps or (
-        bounded_steps if options.smoke else native_default_steps
+    return _execution.run_example(
+        arguments,
+        description=description,
+        temporary_prefix=temporary_prefix,
+        bounded_steps=bounded_steps,
+        native_default_steps=native_default_steps,
+        solve=solve,
+        runtime_metadata=example_runtime_metadata,
+        result_filename=result_filename,
     )
-    if options.output_dir is not None:
-        options.output_dir.mkdir(parents=True, exist_ok=True)
-        result = solve(options.output_dir, max_steps, scale)
-    elif options.smoke:
-        with TemporaryDirectory(prefix=temporary_prefix) as temporary:
-            result = solve(Path(temporary), max_steps, scale)
-    else:
-        result = solve(Path.cwd(), max_steps, scale)
-    if options.json:
-        print(json.dumps(result.json_object(scale), sort_keys=True))
-    else:
-        print(f"example={result.example_id}")
-        print(f"status={result.status}")
-        for name, value in result.observables.items():
-            print(f"{name}={value}")
-    return 0 if result.status == "ok" else 1

@@ -381,6 +381,9 @@ DIAG5_FROZEN_NUMERICAL_PATHS: Final = frozenset(
         "src/simsopt_jax_adapters/geo/single_stage_native_endpoint.py",
     }
 )
+# Refrozen 2026-09-16: 679 -> 685. Added the serial example pair,
+# shared example execution owner, and leaf QR module through the generator.
+#
 # Refrozen 2026-09-16: 678 -> 679. Admitted the user-facing flat675 final
 # surface polish through the execution-source generator.
 #
@@ -401,7 +404,8 @@ DIAG5_FROZEN_NUMERICAL_PATHS: Final = frozenset(
 # Membership is tracked files plus untracked-but-not-ignored files under the
 # sweep roots. Run in a DEDICATED CLEAN WORKTREE, because the regenerator
 # hashes working-tree bytes and the shared tree is not quiescent.
-DIAG5_EXECUTION_SOURCE_ENTRY_COUNT: Final = 679
+# Admit the declared, case-specific host SciPy optimizer policy owner.
+DIAG5_EXECUTION_SOURCE_ENTRY_COUNT: Final = 686
 DIAG5_CPU_QUALIFICATION_SCHEMA_VERSION: Final = (
     "single-stage-neq-gntr3-cpu-trajectory-qualification-v2"
 )

@@ -19,6 +19,7 @@ from examples.jax.parity.input_bundle import read_input_bundle
 from examples.jax.parity.provenance import (
     ExecutedSource,
     collect_repository_state,
+    validate_authoritative_provenance,
     validate_sources_current,
 )
 from examples.jax.parity.publication import require_published_run
@@ -144,6 +145,7 @@ def audit_published_run(
     )
     if scale_value not in ("bounded", "native_default"):
         raise ValueError("aggregate execution scale is invalid")
+    examples_by_id = {example.id: example for example in contract_pair.examples}
     parity_manifest = contract_pair.parity
     relationships_by_case = {
         relationship.case_id: relationship
@@ -243,6 +245,8 @@ def audit_published_run(
             if provenance.repository_commit != repository_commit:
                 raise ValueError(f"repository commit mismatch: {case_id}:{lane}")
             validate_sources_current(repo_root, provenance.executed_sources)
+            if authoritative:
+                validate_authoritative_provenance(repo_root, provenance)
             if authoritative and not provenance.authoritative:
                 raise ValueError(
                     f"non-authoritative lane in authoritative run: {case_id}:{lane}"
@@ -296,6 +300,11 @@ def audit_published_run(
             observations,
             required_lanes=frozenset(lanes),
             expected_workflow_stages=relationship.workflow_stages,
+            case_id=case_id,
+            example_id=relationship.jax_example_id,
+            outer_optimizer_policy=examples_by_id[
+                relationship.jax_example_id
+            ].outer_optimizer_policy,
             quality_band=(
                 get_case(case_id).native_default_quality_band
                 if scale_value == "native_default"

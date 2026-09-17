@@ -13,7 +13,7 @@ one-to-one mirror coverage. The manifest validator enforces that: a tutorial
 record cannot own a catalog source.
 
 The generated
-[`NATIVE_TO_JAX_INDEX.md`](NATIVE_TO_JAX_INDEX.md) lists all 52 native sources,
+[`NATIVE_TO_JAX_INDEX.md`](NATIVE_TO_JAX_INDEX.md) lists the native sources,
 their exact JAX mirrors or blockers, device scope, execution scale, and latest
 authority status. Regenerate it from the validated manifests and compact
 authority record with
@@ -83,11 +83,27 @@ use `--device`, `--intent`, and `--scale`.
 Device capability and bounded arguments remain in
 [`manifest.json`](manifest.json); execution intent is a suite-wide runtime
 policy and is not copied into every example record. Device selection changes
-placement, not the algorithm or the public result contract. Native SciPy solves
-may be used only by correctness tests as CPU reference oracles; a ready example
-must not use `scipy.optimize` as its JAX lane implementation. Optimistix and
-Optax remain explicit optional driver choices and are never selected implicitly
-by the serial example APIs. The serial wrappers publish `problem.x` and their
+placement, not the algorithm or the public result contract. Ready JAX examples
+normally use a JAX optimizer. Two explicitly declared Boozer workflows permit a
+**CPU SciPy outer optimizer over JAX physics and derivatives**:
+
+| Example | CPU controller | JAX numerical region |
+| --- | --- | --- |
+| `native-single-stage-boozer-vacuum-optimization` | SciPy BFGS | Exact Boozer Newton solve and implicit objective gradient |
+| `native-boozerqa-ls` | SciPy L-BFGS-B | Reduced-Schur nested-LS solve and implicit objective gradient |
+
+The optional `outer_optimizer_policy` manifest field declares
+`scipy-bfgs-over-jax-exact-boozer` or `scipy-lbfgsb-over-jax-reduced-boozer` for
+these respective examples. The declaration is bound to the registered example
+and, for parity, the exact case and driver. A driver name alone grants no exception, and another
+example cannot borrow this policy. Missing declarations retain the default ban.
+This permission does not relax transfer guards, source provenance, scientific
+acceptance, or parity comparisons. CPU control is not a GPU-resident optimizer;
+performance claims must state whether they time the JAX region or the complete
+workflow. Other native SciPy solves remain CPU reference oracles.
+
+Optimistix and Optax remain explicit optional driver choices and are never
+selected implicitly by the serial example APIs. The serial wrappers publish `problem.x` and their
 bounded log only after a successful solve; a failed result raises and leaves
 caller-owned state unchanged. The deprecated least-squares `optimizer="lm"`
 alias still selects explicit Optimistix LM; the legacy `gauss_newton` and
@@ -118,7 +134,7 @@ bounded case on CPU with:
 python examples/jax/run_parity.py \
   --case all-applicable \
   --lanes native-cpu,jax-cpu \
-  --scale bounded \
+  --scale native_default \
   --artifact-root .artifacts/jax-example-parity
 ```
 
@@ -128,7 +144,7 @@ In a CUDA environment, use the full matched lane set:
 python examples/jax/run_parity.py \
   --case all-applicable \
   --lanes native-cpu,jax-cpu,jax-gpu \
-  --scale bounded \
+  --scale native_default \
   --artifact-root .artifacts/jax-example-parity
 ```
 
@@ -198,19 +214,18 @@ defines coverage.
 
 `manifest.json` holds two tables:
 
-- `source_catalog` — 52 rows, one per tracked native example under
-  `examples/1_Simple`, `examples/2_Intermediate`, and `examples/3_Advanced`.
-  The validator requires the catalog to match that tracked set exactly. The
-  rows are 26 `eligible`, 1 `hybrid`, 23 `blocked`, and 2 `not_applicable`.
-- `jax_examples` — 38 executable records, 36 `ready` and 2 `planned`.
-  Twenty-seven of them own a catalog source (the 26 eligible rows plus the
-  hybrid); the remaining 11 are tutorials and own nothing.
+- `source_catalog` — 53 rows, one per tracked native example in the native
+  tiers. The validator checks that set exactly: 27 `eligible`, 1 `hybrid`,
+  23 `blocked`, and 2 `not_applicable`.
+- `jax_examples` — 41 executable records, 39 `ready` and 2 `planned`.
+  Twenty-eight own a catalog source; the other 13 combined or compatibility
+  programs own no native source.
 
 An owned record must sit at the identical tier and filename as its source, must
 be typed `one_to_one`, and cannot be a tutorial. Each mirror is owned by at
-most one source. `parity_manifest.json` holds 27 relationships: 26 `full`
-bounded relationships that each carry a case ID, plus 1 `unsupported`
-relationship with no case ID for the VMEC hybrid.
+most one source. `parity_manifest.json` holds 28 relationships: 26 `full`
+relationships with a case ID and 2 `unsupported` relationships. Execution scale
+and verified evidence are separate from source coverage.
 
 List the pairs from the manifest rather than from a hand-maintained table:
 
@@ -267,7 +282,7 @@ scientific stage, `reduced` explicitly omits at least one scientific stage, and
 `unsupported` names a concrete blocker. `bounded`, `native_default`, and
 `not_applicable` describe scale independently of workflow coverage. Live oracle
 kinds are `native_source_owned_simsopt` for the 26 executable relationships and
-`pending_native_oracle` for the unsupported one.
+`pending_native_oracle` for the two unsupported relationships.
 
 ## Pairs that need their own command
 
@@ -283,7 +298,7 @@ python examples/jax/3_Advanced/single_stage_boozer_vacuum_optimization.py \
   --smoke --json
 ```
 
-Its parity relationship is `full` and bounded, but its cost tier is
+Its parity relationship covers the `full` workflow at `native_default` scale, and its cost tier is
 `scheduled`, so run it on its own rather than expecting it inside a quick loop
 (drop `jax-gpu` from `--lanes` outside a CUDA environment):
 
@@ -291,9 +306,33 @@ Its parity relationship is `full` and bounded, but its cost tier is
 python examples/jax/run_parity.py \
   --case native-single-stage-boozer-vacuum-optimization \
   --lanes native-cpu,jax-cpu,jax-gpu \
-  --scale bounded \
+  --scale native_default \
   --artifact-root .artifacts/jax-example-parity
 ```
+
+A `ready` executable and a `full` workflow relationship do not certify parity.
+The fresh full-default run `20260917T025023Z-8c8a5461` passed the source/build
+audit at commit `9764474ab161767098a56c9655fc442c6dc94a51`. All three endpoint
+objectives meet the declared `1e-7` quality bound, but 12 of 57 strict comparisons
+failed and all three lanes exhausted 1000 iterations. This establishes endpoint
+quality only, not strict parity or optimizer convergence. The superseded run
+`20260916T194954Z-e3bd7376` used invalid provenance and remains historical; its
+raw receipts are preserved locally and it no longer supplies the index record.
+
+The native build receipt binds the extension binary to recorded source and
+build inputs. It is a local, unsigned, operator-writable record, not a signed
+or hermetic build attestation. A tracked evidence pointer alone cannot verify
+the run: auditing requires the retained lane receipts and their clean recorded
+checkout. Neither provenance nor an endpoint quality band proves convergence.
+
+### Serial nested-LS Boozer
+
+`2_Intermediate/boozerQA_ls.py` uses the approved CPU SciPy L-BFGS-B controller
+with JAX reduced-Schur physics. Its native CPU reference is
+`native_reference/boozerQA_ls.py`; both support `--smoke --json`. This is a
+combined tutorial, not a one-to-one replacement for the MPI example. The
+validated three-step default run establishes improving feasible steps, not
+outer convergence or a whole-workflow speedup.
 
 ### VMEC hybrid single-stage
 
@@ -347,7 +386,7 @@ records the approved candidate SHA-256 pair, the byte-identical candidate files
 checked in under `docs/`, and the rollback gate: activation must prove an
 atomic rollback of both contracts, their activation readers and tests, artifact
 observability, and compatibility behavior. That document describes the
-pre-activation candidate, and its prose row counts trail the tracked 52-row
+pre-activation candidate, and its prose row counts trail the tracked 53-row
 catalog; read the counts from the manifests, not from the migration note.
 
 Compatibility tutorials carry their own removal gate. Each declares a successor
@@ -383,3 +422,44 @@ RED → GREEN → REFACTOR commands in
 Then mark the manifest record `ready`; the validator rejects a ready record
 without an executable script, CPU device, correctness owner, or public JAX
 import.
+
+## Serial nested-LS coil optimization
+
+The [JAX example](2_Intermediate/boozerQA_ls.py) and its
+[native CPU reference](native_reference/boozerQA_ls.py) optimize moving coils
+around one NCSX Boozer least-squares surface without MPI. The JAX example uses the
+reduced-Schur Newton inner solve and its implicit coil gradient. The native
+example uses SIMSOPT's BFGS-then-Newton inner policy. Both use host SciPy
+L-BFGS-B for the outer optimization; native setup and composition of objective
+terms also have explicit host boundaries. These are different inner solver
+policies, so matching physics or gradients does not establish identical optimizer
+trajectories.
+
+From the repository root with the native extension and JAX dependencies installed:
+
+```bash
+# Small 7x7 example, one outer iteration.
+JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=src \
+  python examples/jax/native_reference/boozerQA_ls.py --smoke --json
+SIMSOPT_BACKEND_MODE=jax_gpu_fast SIMSOPT_PRECISION=fp64 \
+  JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 PYTHONPATH=src \
+  python examples/jax/2_Intermediate/boozerQA_ls.py --smoke --json
+
+# The full example uses mpol=ntor=6 and 48x48 quadrature.
+SIMSOPT_BACKEND_MODE=jax_gpu_fast SIMSOPT_PRECISION=fp64 \
+  JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 PYTHONPATH=src \
+  python examples/jax/2_Intermediate/boozerQA_ls.py --max-steps 3 --json
+```
+
+Read the reported inner-solve result, accepted coil movement, and outer optimizer
+status separately. `status=ok` means the bounded workflow completed an accepted,
+feasible step that lowered the objective; `optimizer_success` separately reports
+convergence. A result after an iteration budget is not a converged coil optimum.
+No end-to-end speedup is claimed for this new example;
+the historical inner-solve measurements do not measure this complete workflow.
+The serial JAX program is registered as a combined tutorial, with direct example
+and gradient tests listed in the manifest. It does not count as a one-to-one MPI
+port or as authority-harness parity evidence. The original MPI example remains a
+separate, MPI-dependent workflow. The native reference uses native field and
+BFGS/Newton solvers, but its standard SIMSOPT coil objectives require CPU JAX;
+it therefore lives alongside the JAX examples and requires the JAX extra.

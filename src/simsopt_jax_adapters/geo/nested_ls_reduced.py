@@ -17,26 +17,30 @@ import re
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from functools import partial
 from typing import Final
 
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg as jsp_linalg
 import numpy as np
+from jax import lax
+from jax.tree_util import Partial
 from numpy.typing import NDArray
 from simsopt.geo.boozersurface import BoozerSurface, _boozer_iterate_is_persistable
+from simsopt_jax.backend.dtypes import runtime_device_put
 from simsopt_jax.core._math_utils import as_jax_float64
 from simsopt_jax.core.field import coil_set_spec_from_dof_extraction_spec
 from simsopt_jax.core.specs import host_resident_spec
 from simsopt_jax.geo.optimizers.linear_solve import (
     _hessian_vector_product_fn,
-    _materialize_dense_linear_operator,
+    _resolve_dense_operator_batch_width,
     _run_operator_gmres,
 )
 from simsopt_jax.numerical_policy import NEWTON_ARMIJO_C1
 
 from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
-from simsopt_jax_adapters.geo.flat675.y_solve import (
+from simsopt_jax_adapters.geo.flat675_qr import (
     FLAT675_Y_COLUMN_COUNT,
     solve_flat675_y_qr,
 )
@@ -72,6 +76,13 @@ NESTED_LS_EW_ALPHA: Final[float] = 2.0
 NESTED_LS_EW_SAFEGUARD: Final[float] = 0.1
 NESTED_LS_DENSE_FLOAT64_BYTES: Final[int] = 8
 _TENSOR_FOURIER_DOF_NAME = re.compile(r"^([xyz])\((\d+),(\d+)\)$")
+
+
+@jax.jit
+def _zeros_like(array: jax.Array) -> jax.Array:
+    """Create an on-device zero initial guess without inheriting NaNs."""
+
+    return jnp.zeros_like(array)
 
 
 class NestedLsReducedRankError(ValueError):
@@ -122,6 +133,9 @@ class NestedLsReducedSchurOperator:
     phi_sy: jax.Array
     phi_yy: jax.Array
     y_star: jax.Array
+    packed_y_zeros: jax.Array
+    surface_indices: jax.Array
+    y_indices: jax.Array
     y_rank: int
     phi_yy_condition: float
     _packed_hvp: PackedPenaltyHvp
@@ -136,14 +150,74 @@ class NestedLsReducedSchurOperator:
                 f"{vector.shape} does not match surface shape "
                 f"({self.surface_size},)."
             )
-        packed_tangent = jnp.concatenate(
-            (vector, jnp.zeros((_Y_SIZE,), dtype=jnp.float64))
+        packed_hvp = (
+            self._packed_hvp
+            if isinstance(self._packed_hvp, Partial)
+            else Partial(self._packed_hvp)
         )
-        packed_hvp = self._packed_hvp(self.packed, packed_tangent)
-        phi_ss_v = packed_hvp[: self.surface_size]
-        phi_ys_v = packed_hvp[self.surface_size :]
-        correction = jnp.linalg.solve(self.phi_yy, phi_ys_v)
-        return phi_ss_v - self.phi_sy @ correction
+        return _apply_reduced_schur(
+            packed_hvp,
+            self.packed,
+            self.phi_sy,
+            self.phi_yy,
+            self.packed_y_zeros,
+            self.surface_indices,
+            self.y_indices,
+            vector,
+        )
+
+
+def _apply_reduced_schur(
+    packed_hvp: Partial,
+    packed: jax.Array,
+    phi_sy: jax.Array,
+    phi_yy: jax.Array,
+    packed_y_zeros: jax.Array,
+    surface_indices: jax.Array,
+    y_indices: jax.Array,
+    tangent: jax.Array,
+) -> jax.Array:
+    """Apply the cached reduced Schur complement using explicitly placed slices."""
+
+    packed_tangent = jnp.concatenate((tangent, packed_y_zeros))
+    packed_hvp_column = packed_hvp(packed, packed_tangent)
+    phi_ss_v = jnp.take(packed_hvp_column, surface_indices)
+    phi_ys_v = jnp.take(packed_hvp_column, y_indices)
+    return phi_ss_v - phi_sy @ jnp.linalg.solve(phi_yy, phi_ys_v)
+
+
+@partial(jax.jit, static_argnums=(9,))
+def _materialize_stabilized_schur_dense_device(
+    packed_hvp: Partial,
+    packed: jax.Array,
+    phi_sy: jax.Array,
+    phi_yy: jax.Array,
+    stab: jax.Array,
+    basis: jax.Array,
+    packed_y_zeros: jax.Array,
+    surface_indices: jax.Array,
+    y_indices: jax.Array,
+    batch_width: int,
+) -> jax.Array:
+    """Chunked Schur assembly with all operator state kept as JIT arguments."""
+
+    def matvec(tangent: jax.Array) -> jax.Array:
+        return (
+            _apply_reduced_schur(
+                packed_hvp,
+                packed,
+                phi_sy,
+                phi_yy,
+                packed_y_zeros,
+                surface_indices,
+                y_indices,
+                tangent,
+            )
+            + stab * tangent
+        )
+
+    columns = lax.map(matvec, basis, batch_size=batch_width)
+    return jnp.swapaxes(columns, 0, 1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,6 +356,25 @@ def pack_surface_and_y(surface_dofs: object, y: object) -> jax.Array:
     return jnp.concatenate((surface, y_vec))
 
 
+@jax.jit
+def _projected_y_residual_jacobian(
+    residual_fn: Partial,
+    surface: jax.Array,
+    y: jax.Array,
+) -> jax.Array:
+    """Differentiate the frozen-surface residual with a staged tangent basis.
+
+    ``residual_fn`` is a JAX ``Partial``: runtime state such as coil DOFs is a
+    dynamic pytree leaf while the residual kernel remains static. This stages
+    ``jacfwd``'s standard basis without capturing a device coil as a constant.
+    """
+
+    def residual_of_y(candidate_y: jax.Array) -> jax.Array:
+        return jnp.asarray(residual_fn(pack_surface_and_y(surface, candidate_y)))
+
+    return jax.jacfwd(residual_of_y)(y)
+
+
 def projected_y_system(
     residual_fn,
     surface_dofs: object,
@@ -294,11 +387,15 @@ def projected_y_system(
     if probe.shape != (_Y_SIZE,):
         raise ValueError("y probe must be (iota, G) with shape (2,).")
 
-    def residual_of_y(y: jax.Array) -> jax.Array:
-        return jnp.asarray(residual_fn(pack_surface_and_y(surface, y)))
-
-    residual = residual_of_y(probe)
-    design_matrix = jax.jacfwd(residual_of_y)(probe)
+    partial_residual = (
+        residual_fn if isinstance(residual_fn, Partial) else Partial(residual_fn)
+    )
+    residual = jnp.asarray(partial_residual(pack_surface_and_y(surface, probe)))
+    design_matrix = _projected_y_residual_jacobian(
+        partial_residual,
+        surface,
+        probe,
+    )
     right_hand_side = design_matrix @ probe - residual
     return design_matrix, right_hand_side
 
@@ -310,7 +407,11 @@ def solve_projected_y(
 ) -> NestedLsYSolution:
     """Solve ``y*(s)`` by economy QR of the two residual columns."""
 
-    probe = jnp.zeros((_Y_SIZE,), dtype=jnp.float64) if y_probe is None else y_probe
+    probe = (
+        runtime_device_put(np.zeros((_Y_SIZE,), dtype=np.float64), dtype=jnp.float64)
+        if y_probe is None
+        else y_probe
+    )
     design_matrix, right_hand_side = projected_y_system(
         residual_fn, surface_dofs, probe
     )
@@ -433,12 +534,29 @@ def factor_reduced_nested_ls_schur(
     surface_size = int(surface.size)
     sy_columns = []
     yy_columns = []
-    zeros_surface = jnp.zeros((surface_size,), dtype=jnp.float64)
-    for index in range(_Y_SIZE):
-        e_y = jnp.zeros((_Y_SIZE,), dtype=jnp.float64).at[index].set(1.0)
+    zeros_surface = runtime_device_put(
+        np.zeros((surface_size,), dtype=np.float64),
+        dtype=jnp.float64,
+    )
+    y_basis = tuple(
+        runtime_device_put(
+            np.eye(_Y_SIZE, dtype=np.float64)[index],
+            dtype=jnp.float64,
+        )
+        for index in range(_Y_SIZE)
+    )
+    surface_indices = runtime_device_put(
+        np.arange(surface_size, dtype=np.int32),
+        dtype=jnp.int32,
+    )
+    y_indices = runtime_device_put(
+        np.arange(surface_size, surface_size + _Y_SIZE, dtype=np.int32),
+        dtype=jnp.int32,
+    )
+    for e_y in y_basis:
         packed_hvp_column = packed_hvp(packed, jnp.concatenate((zeros_surface, e_y)))
-        sy_columns.append(packed_hvp_column[:surface_size])
-        yy_columns.append(packed_hvp_column[surface_size:])
+        sy_columns.append(jnp.take(packed_hvp_column, surface_indices))
+        yy_columns.append(jnp.take(packed_hvp_column, y_indices))
     phi_sy = jnp.stack(sy_columns, axis=1)
     phi_yy = jnp.stack(yy_columns, axis=1)
     _singular, condition = _require_full_phi_yy(phi_yy)
@@ -449,6 +567,12 @@ def factor_reduced_nested_ls_schur(
         phi_sy=phi_sy,
         phi_yy=phi_yy,
         y_star=solution.solution,
+        packed_y_zeros=runtime_device_put(
+            np.zeros((_Y_SIZE,), dtype=np.float64),
+            dtype=jnp.float64,
+        ),
+        surface_indices=surface_indices,
+        y_indices=y_indices,
         y_rank=int(np.asarray(jax.device_get(solution.numerical_rank))),
         phi_yy_condition=condition,
         _packed_hvp=packed_hvp,
@@ -689,9 +813,7 @@ def solve_operator_gmres_with_forcing(
     used = max(1, int(maxiter))
     cap = max(int(maxiter_cap), used)
     jax_tol = float(eta_requested)
-    newton_jax = (
-        jnp.zeros_like(rhs) if x0 is None else jnp.asarray(x0, dtype=jnp.float64)
-    )
+    newton_jax = _zeros_like(rhs) if x0 is None else jnp.asarray(x0, dtype=jnp.float64)
     residual = -rhs
     info: object = jnp.asarray(-1, dtype=jnp.int32)
     residual_l2 = rhs_norm
@@ -994,14 +1116,30 @@ def materialize_stabilized_schur_dense(
             f"{stored_bytes} bytes for dimension {dimension}; "
             f"max_dense_linearization_bytes={int(max_dense_linearization_bytes)}."
         )
-    matvec = _stabilized_schur_matvec(operator, jnp.asarray(stab, dtype=jnp.float64))
-    dummy = jnp.zeros((dimension,), dtype=jnp.float64)
-
-    def linear_operator_fn(_linearization: jax.Array, tangent: jax.Array) -> jax.Array:
-        return matvec(tangent)
-
-    return _materialize_dense_linear_operator(
-        linear_operator_fn, dummy, batch_width=chunk_batch_size
+    width = _resolve_dense_operator_batch_width(
+        chunk_batch_size,
+        dimension=dimension,
+    )
+    width = min(int(width), dimension) if dimension > 0 else int(width)
+    packed_hvp = (
+        operator._packed_hvp
+        if isinstance(operator._packed_hvp, Partial)
+        else Partial(operator._packed_hvp)
+    )
+    return _materialize_stabilized_schur_dense_device(
+        packed_hvp,
+        operator.packed,
+        operator.phi_sy,
+        operator.phi_yy,
+        runtime_device_put(np.asarray(stab, dtype=np.float64), dtype=jnp.float64),
+        runtime_device_put(np.eye(dimension, dtype=np.float64), dtype=jnp.float64),
+        runtime_device_put(np.zeros((_Y_SIZE,), dtype=np.float64), dtype=jnp.float64),
+        runtime_device_put(np.arange(dimension, dtype=np.int32), dtype=jnp.int32),
+        runtime_device_put(
+            np.arange(dimension, dimension + _Y_SIZE, dtype=np.int32),
+            dtype=jnp.int32,
+        ),
+        width,
     )
 
 
@@ -1174,6 +1312,10 @@ def run_reduced_nested_ls_schur_newton(
     factor_seconds = 0.0
     gmres_seconds = 0.0
     phi_yy_condition = 0.0
+    staged_stab = runtime_device_put(
+        np.asarray(stab, dtype=np.float64),
+        dtype=jnp.float64,
+    )
     working_surface = surface
     working_value = value
     working_grad = gradient
@@ -1203,10 +1345,11 @@ def run_reduced_nested_ls_schur_newton(
         step_factor_seconds = time.perf_counter() - factor_started
         factor_seconds += step_factor_seconds
         phi_yy_condition = float(operator.phi_yy_condition)
-        matvec = _stabilized_schur_matvec(
-            operator, jnp.asarray(stab, dtype=jnp.float64)
+        matvec = _stabilized_schur_matvec(operator, staged_stab)
+        rhs = runtime_device_put(
+            np.asarray(working_grad, dtype=np.float64),
+            dtype=jnp.float64,
         )
-        rhs = jnp.asarray(working_grad, dtype=jnp.float64)
         gmres_started = time.perf_counter()
         assembled = False
         shamanskii_reused = False
@@ -1214,9 +1357,9 @@ def run_reduced_nested_ls_schur_newton(
         shamanskii_attempt_eta: float | None = None
         shamanskii_attempt_eta_reason: str | None = None
         shamanskii_refine_passes = 0
-        newton_jax = jnp.zeros_like(rhs)
+        newton_jax = _zeros_like(rhs)
         residual = -rhs
-        info = jnp.asarray(-1, dtype=jnp.int32)
+        info = runtime_device_put(np.int32(-1), dtype=jnp.int32)
         gmres_residual_l2 = float(grad_norm)
         gmres_forcing_eta = 1.0 if grad_norm > 0.0 else 0.0
         used_gmres_maxiter = int(gmres_maxiter)
@@ -1251,7 +1394,7 @@ def run_reduced_nested_ls_schur_newton(
                     gmres_forcing_eta
                 )
                 gmres_residual_l2 = float(np.linalg.norm(_host_vector(residual)))
-                info = jnp.asarray(0, dtype=jnp.int32)
+                info = runtime_device_put(np.int32(0), dtype=jnp.int32)
                 used_gmres_maxiter = 0
             if not shamanskii_reused:
                 shamanskii_reassembled = (
@@ -1263,7 +1406,7 @@ def run_reduced_nested_ls_schur_newton(
                     max_dense_linearization_bytes=max_dense_linearization_bytes,
                 )
                 newton_jax = solve_stabilized_schur_dense_lu(dense, rhs)
-                info = jnp.asarray(0, dtype=jnp.int32)
+                info = runtime_device_put(np.int32(0), dtype=jnp.int32)
                 residual = matvec(newton_jax) - rhs
                 gmres_residual_l2 = float(np.linalg.norm(_host_vector(residual)))
                 gmres_forcing_eta = (

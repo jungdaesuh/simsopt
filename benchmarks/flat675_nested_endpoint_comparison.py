@@ -33,6 +33,15 @@ rows in ``benchmarks/nested_ls_outer_claim.py`` are rejudged at the PHYSICS
 bar.  Every residual here is therefore reported as a ratio against BOTH, and
 every gate names the bar it uses.
 
+**The bounded repository fixture is underresolved.** Its 661 surface
+coefficients are sampled on a 6-by-6 grid. Position and both tangents provide
+at most 324 independent linear measurements, so the native Newton Hessian
+has a structural nullspace. This configuration exercises failure reporting;
+it cannot certify a unique nested correction. Last-bit changes in the QR
+seed can change a failed Newton return into a singular-matrix exception.
+Both outcomes must remain failed solves, with unavailable post-state left
+null. Use a resolved fixture for numerical certification.
+
 ``nested_ls_outer_claim.py``'s "endpoint C++ LS Newton rejudge no-op"
 (``benchmarks/nested_ls_outer_jax_child.py``) is: the endpoint Newton at
 ``nested_ls_physics_newton_kwargs()`` succeeds, takes ``iter == 0``, moves
@@ -155,8 +164,10 @@ from benchmarks.flat675_nested_endpoint import (
 # physics-bar verdict as a timing-bar one -- so the id has to move.  v3:
 # ``evaluation_status`` is decided by convergence and persistence BEFORE the
 # branch guard (``failed_solve`` is never a ``correction``) and every record
-# names the gradient its ``exit_status`` was classified on.
-SCHEMA: Final[str] = "flat675-nested-endpoint-comparison-v3"
+# names the gradient its ``exit_status`` was classified on.  v4 makes absent
+# native failure post-state values null and makes the CLI nonzero on any
+# ``failed_solve`` record.
+SCHEMA: Final[str] = "flat675-nested-endpoint-comparison-v4"
 
 # The shipped lessons this program runs.  The tier directories are not
 # importable packages, so the two scripts are loaded by file location -- the
@@ -413,6 +424,10 @@ def corrected_vector(
 ) -> NDArray[np.float64]:
     """The same coil and vessel blocks with the nested lane's surface block."""
     updated = np.array(vector, dtype=np.float64, copy=True)
+    if correction.surface_dofs_after is None:
+        raise SystemExit(
+            f"{correction.lane} correction has no persisted post-state surface."
+        )
     surface_after = np.asarray(correction.surface_dofs_after, dtype=np.float64)
     if surface_after.shape != updated[FLAT675_SURFACE_SLICE].shape:
         raise SystemExit(
@@ -446,18 +461,20 @@ def _relative_difference(left: float, right: float) -> float:
     return abs(left - right) / scale
 
 
-def _finite_or_none(value: float) -> float | None:
+def _finite_or_none(value: float | None) -> float | None:
     """A displacement as written, or ``None`` when the walk diverged.
 
     Same reason as ``_bar_ratio``: ``dump_strict_json(allow_nan=False)`` would
     otherwise abort the run at write time on exactly the ``failed_solve``
     record the evaluation status exists to publish.
     """
+    if value is None:
+        return None
     number = float(value)
     return number if math.isfinite(number) else None
 
 
-def _bar_ratio(residual: float, bar: float) -> float | None:
+def _bar_ratio(residual: float | None, bar: float | None) -> float | None:
     """One residual against one contract bar, or ``None`` when it has none.
 
     The payload is written by ``dump_strict_json(allow_nan=False)``, so an
@@ -470,6 +487,8 @@ def _bar_ratio(residual: float, bar: float) -> float | None:
     bar multiplies by 1e13, so a residual that is finite but large overflows
     to infinity here while passing any test applied to the input.
     """
+    if residual is None or bar is None:
+        return None
     value = float(residual)
     if not math.isfinite(value):
         return None
@@ -500,12 +519,25 @@ def correction_evaluation_status(correction: NestedCorrection) -> str:
     about which bar it clears, which is what ``nested_correction_is_noop``
     and the ``residual_before_under_*_bar`` flags are for.
     """
+    if not (correction.converged and correction.persisted):
+        return EVALUATION_FAILED_SOLVE
+    if (
+        correction.dof_displacement_max is None
+        or correction.point_displacement_max_m is None
+        or correction.same_branch_as_incoming is None
+        or correction.surface_dofs_after is None
+        or correction.residual_norm_after is None
+        or correction.iota_after is None
+        or correction.G_after is None
+        or correction.coil_delta_inf is None
+    ):
+        return EVALUATION_FAILED_SOLVE
     finite_displacement = math.isfinite(
         float(correction.dof_displacement_max)
     ) and math.isfinite(float(correction.point_displacement_max_m))
-    if not (correction.converged and correction.persisted and finite_displacement):
+    if not finite_displacement:
         return EVALUATION_FAILED_SOLVE
-    if not correction.same_branch_as_incoming:
+    if correction.same_branch_as_incoming is False:
         return EVALUATION_REJECTED_BRANCH_CHANGE
     return EVALUATION_CORRECTION
 
@@ -549,13 +581,19 @@ def nested_correction_is_noop(correction: NestedCorrection) -> bool:
     every verdict so a reader can tell which of the two statements they are
     looking at.
     """
+    if not (
+        correction.converged
+        and correction.persisted
+        and correction.same_branch_as_incoming is True
+        and correction.newton_iterations is not None
+        and correction.coil_delta_inf is not None
+        and correction.dof_displacement_max is not None
+    ):
+        return False
     residual_before = float(correction.residual_norm_before)
     reduced = correction.reduced_gradient_l2
     return bool(
-        correction.converged
-        and correction.persisted
-        and correction.same_branch_as_incoming
-        and int(correction.newton_iterations) == 0
+        int(correction.newton_iterations) == 0
         and int(correction.bfgs_iterations or 0) == 0
         and float(correction.coil_delta_inf) == 0.0
         and float(correction.dof_displacement_max) == 0.0
@@ -583,12 +621,52 @@ def _correction_record(
     twin_value: Callable[[NDArray[np.float64]], float],
 ) -> dict[str, object]:
     """One lane's correction, and the objective at the point it corrected to."""
-    point = corrected_vector(base_vector, correction)
-    view = lanes.view_fn(problem, point)
-    corrected_objective = objective.value(point)
-    corrected_terms = objective.weighted_terms(point)
-    twin_objective = twin_value(point)
-    minor_radius = float(correction.minor_radius_m)
+    evaluation_status = correction_evaluation_status(correction)
+    has_reportable_post_state = evaluation_status != EVALUATION_FAILED_SOLVE
+    if has_reportable_post_state:
+        point = corrected_vector(base_vector, correction)
+        view = lanes.view_fn(problem, point)
+        corrected_objective: float | None = objective.value(point)
+        corrected_terms: dict[str, float] | None = objective.weighted_terms(point)
+        twin_objective: float | None = twin_value(point)
+        surface_dofs_after_sha256: str | None = sha256_float64(
+            correction.surface_dofs_after
+        )
+        iota_after = float(correction.iota_after)
+        G_after = float(correction.G_after)
+        iota_delta: float | None = iota_after - float(correction.iota_before)
+        y_solve_iota: float | None = float(view.iota)
+        y_solve_G: float | None = float(view.G)
+        y_solve_minus_lane_iota: float | None = y_solve_iota - iota_after
+        y_solve_minus_lane_G: float | None = y_solve_G - G_after
+        flat675_boozer_term: float | None = float(lanes.boozer_term_fn(problem, point))
+        objective_minus_base: float | None = corrected_objective - base_objective
+        weighted_term_deltas: dict[str, float] | None = _term_deltas(
+            corrected_terms, base_terms
+        )
+        native_twin_relative_gap: float | None = _relative_gap(
+            corrected_objective, twin_objective
+        )
+        native_twin_within_objective_rtol: bool | None = (
+            native_twin_relative_gap <= OBJECTIVE_RTOL
+        )
+    else:
+        corrected_objective = None
+        corrected_terms = None
+        twin_objective = None
+        surface_dofs_after_sha256 = None
+        iota_after = None
+        G_after = None
+        iota_delta = None
+        y_solve_iota = None
+        y_solve_G = None
+        y_solve_minus_lane_iota = None
+        y_solve_minus_lane_G = None
+        flat675_boozer_term = None
+        objective_minus_base = None
+        weighted_term_deltas = None
+        native_twin_relative_gap = None
+        native_twin_within_objective_rtol = None
     reduced_gradient_l2 = correction.reduced_gradient_l2
     return {
         "lane": str(correction.lane),
@@ -601,26 +679,31 @@ def _correction_record(
             if correction.bfgs_iterations is None
             else int(correction.bfgs_iterations)
         ),
-        "newton_iterations": int(correction.newton_iterations),
+        "newton_iterations": (
+            None
+            if correction.newton_iterations is None
+            else int(correction.newton_iterations)
+        ),
         "exit_status": str(correction.exit_status),
         # WHICH norm that status was classified from.  The two lanes do not
         # classify the same one, so the column is only readable next to this.
         "exit_status_quantity": str(correction.exit_status_quantity),
         "persisted": bool(correction.persisted),
+        "failure_reason": correction.failure_reason,
         "reduced_gradient_l2": (
             None if reduced_gradient_l2 is None else float(reduced_gradient_l2)
         ),
         "reduced_gradient_clause_available": bool(reduced_gradient_l2 is not None),
-        "coil_delta_inf": float(correction.coil_delta_inf),
+        "coil_delta_inf": _finite_or_none(correction.coil_delta_inf),
         "omp_num_threads": correction.omp_num_threads,
         "tolerance": float(correction.tolerance),
         "tolerance_bar": NESTED_CORRECTION_TOLERANCE_BAR,
         # The corrected surface itself is identified by its sha rather than
         # inlined four times over; the point it defines is what the numbers
         # below are measured at.
-        "surface_dofs_after_sha256": sha256_float64(correction.surface_dofs_after),
+        "surface_dofs_after_sha256": surface_dofs_after_sha256,
         "residual_norm_before": float(correction.residual_norm_before),
-        "residual_norm_after": float(correction.residual_norm_after),
+        "residual_norm_after": _finite_or_none(correction.residual_norm_after),
         # The same residual against both contract bars, so no reader has to
         # guess which one a ratio was taken against.
         "residual_before_over_timing_bar": _bar_ratio(
@@ -638,12 +721,14 @@ def _correction_record(
         # ``converged`` is the timing bar (both lanes stop there).
         "converged": bool(correction.converged),
         "iota_before": float(correction.iota_before),
-        "iota_after": float(correction.iota_after),
-        "iota_delta": float(correction.iota_after) - float(correction.iota_before),
-        "same_branch_as_incoming": bool(correction.same_branch_as_incoming),
+        "iota_after": iota_after,
+        "iota_delta": iota_delta,
+        "same_branch_as_incoming": (
+            correction.same_branch_as_incoming if has_reportable_post_state else None
+        ),
         "iota_branch_guard": float(correction.iota_branch_guard),
-        "evaluation_status": correction_evaluation_status(correction),
-        "G_after": float(correction.G_after),
+        "evaluation_status": evaluation_status,
+        "G_after": G_after,
         "dof_displacement_l2": _finite_or_none(correction.dof_displacement_l2),
         "dof_displacement_max": _finite_or_none(correction.dof_displacement_max),
         "point_displacement_max_m": _finite_or_none(
@@ -652,31 +737,29 @@ def _correction_record(
         "point_displacement_rms_m": _finite_or_none(
             correction.point_displacement_rms_m
         ),
-        "minor_radius_m": minor_radius,
+        "minor_radius_m": _finite_or_none(correction.minor_radius_m),
         "point_displacement_max_over_minor_radius": _bar_ratio(
-            float(correction.point_displacement_max_m), minor_radius
+            correction.point_displacement_max_m, correction.minor_radius_m
         ),
         "point_displacement_rms_over_minor_radius": _bar_ratio(
-            float(correction.point_displacement_rms_m), minor_radius
+            correction.point_displacement_rms_m, correction.minor_radius_m
         ),
         "wall_s": float(correction.wall_s),
         # The nested lane reports its own (iota, G); the flat formulation
         # closes them from the surface by a y-solve.  Both are recorded, and
         # their difference is a statement about the corrected surface.
-        "y_solve_iota_at_corrected": float(view.iota),
-        "y_solve_G_at_corrected": float(view.G),
-        "y_solve_minus_lane_iota": float(view.iota) - float(correction.iota_after),
-        "y_solve_minus_lane_G": float(view.G) - float(correction.G_after),
-        "flat675_boozer_term_at_corrected": float(lanes.boozer_term_fn(problem, point)),
+        "y_solve_iota_at_corrected": y_solve_iota,
+        "y_solve_G_at_corrected": y_solve_G,
+        "y_solve_minus_lane_iota": y_solve_minus_lane_iota,
+        "y_solve_minus_lane_G": y_solve_minus_lane_G,
+        "flat675_boozer_term_at_corrected": flat675_boozer_term,
         "objective": corrected_objective,
-        "objective_minus_base": corrected_objective - base_objective,
+        "objective_minus_base": objective_minus_base,
         "weighted_terms": corrected_terms,
-        "weighted_term_deltas_vs_base": _term_deltas(corrected_terms, base_terms),
+        "weighted_term_deltas_vs_base": weighted_term_deltas,
         "native_twin_objective": twin_objective,
-        "native_twin_relative_gap": _relative_gap(corrected_objective, twin_objective),
-        "native_twin_within_objective_rtol": (
-            _relative_gap(corrected_objective, twin_objective) <= OBJECTIVE_RTOL
-        ),
+        "native_twin_relative_gap": native_twin_relative_gap,
+        "native_twin_within_objective_rtol": native_twin_within_objective_rtol,
         # The comparable statement to nested_ls_outer_claim.py's "endpoint C++
         # LS Newton rejudge no-op", at that gate's own PHYSICS bar and with
         # its reduced-gradient clause where the lane can supply one.
@@ -700,6 +783,20 @@ def _lane_agreement(
     native_correction: NestedCorrection,
 ) -> dict[str, object]:
     """Do the two independent nested corrections land on the same surface?"""
+    if (
+        correction_evaluation_status(jax_correction) == EVALUATION_FAILED_SOLVE
+        or correction_evaluation_status(native_correction) == EVALUATION_FAILED_SOLVE
+    ):
+        return {
+            "surface_dofs_l2": None,
+            "surface_dofs_max": None,
+            "iota_after_delta": None,
+            "G_after_delta": None,
+            "residual_before_relative_gap": None,
+            "residual_before_absolute_gap": None,
+            "shared_residual_definition_ok": None,
+            "residual_after_jax_minus_native": None,
+        }
     jax_surface = np.asarray(jax_correction.surface_dofs_after, dtype=np.float64)
     native_surface = np.asarray(native_correction.surface_dofs_after, dtype=np.float64)
     difference = jax_surface - native_surface
@@ -862,6 +959,27 @@ def compare(
     endpoint = points["endpoint"]
     endpoint_corrections = endpoint["corrections"]
     start_point = points["start"]
+    branch_claims = [
+        points[name]["corrections"][lane]["same_branch_as_incoming"]
+        for name in POINT_NAMES
+        for lane in LANE_NAMES
+    ]
+    every_correction_stayed_on_branch: bool | None
+    if any(claim is None for claim in branch_claims):
+        every_correction_stayed_on_branch = None
+    else:
+        every_correction_stayed_on_branch = all(bool(claim) for claim in branch_claims)
+    shared_residual_definition_ok: bool | None
+    if (
+        endpoint["lane_agreement"]["shared_residual_definition_ok"] is None
+        or start_point["lane_agreement"]["shared_residual_definition_ok"] is None
+    ):
+        shared_residual_definition_ok = None
+    else:
+        shared_residual_definition_ok = bool(
+            endpoint["lane_agreement"]["shared_residual_definition_ok"]
+            and start_point["lane_agreement"]["shared_residual_definition_ok"]
+        )
     payload: dict[str, object] = {
         "schema": SCHEMA,
         "question": (
@@ -956,29 +1074,20 @@ def compare(
             # correction, and none of its displacement numbers describe a
             # correction of THIS point.
             "iota_branch_guard": float(NESTED_LS_OUTER_IOTA_BRANCH_GUARD),
-            "endpoint_jax_correction_stayed_on_branch": bool(
-                endpoint_corrections["jax"]["same_branch_as_incoming"]
-            ),
-            "endpoint_native_correction_stayed_on_branch": bool(
-                endpoint_corrections["native"]["same_branch_as_incoming"]
-            ),
-            "start_jax_correction_stayed_on_branch": bool(
-                start_point["corrections"]["jax"]["same_branch_as_incoming"]
-            ),
-            "start_native_correction_stayed_on_branch": bool(
-                start_point["corrections"]["native"]["same_branch_as_incoming"]
-            ),
-            "every_correction_stayed_on_branch": bool(
-                all(
-                    points[name]["corrections"][lane]["same_branch_as_incoming"]
-                    for name in POINT_NAMES
-                    for lane in LANE_NAMES
-                )
-            ),
-            "shared_residual_definition_ok": bool(
-                endpoint["lane_agreement"]["shared_residual_definition_ok"]
-                and start_point["lane_agreement"]["shared_residual_definition_ok"]
-            ),
+            "endpoint_jax_correction_stayed_on_branch": endpoint_corrections["jax"][
+                "same_branch_as_incoming"
+            ],
+            "endpoint_native_correction_stayed_on_branch": endpoint_corrections[
+                "native"
+            ]["same_branch_as_incoming"],
+            "start_jax_correction_stayed_on_branch": start_point["corrections"]["jax"][
+                "same_branch_as_incoming"
+            ],
+            "start_native_correction_stayed_on_branch": start_point["corrections"][
+                "native"
+            ]["same_branch_as_incoming"],
+            "every_correction_stayed_on_branch": every_correction_stayed_on_branch,
+            "shared_residual_definition_ok": shared_residual_definition_ok,
             # Control: if the twin disagrees at the START point the twin is a
             # different problem, and every twin number below is uninterpretable.
             "native_twin_control_ok": bool(
@@ -1049,6 +1158,13 @@ def _optional(value: object) -> str:
     return "n/a" if value is None else _number(value)
 
 
+def _difference_or_none(left: object, right: object) -> float | None:
+    """Difference only where both post-state values exist."""
+    if left is None or right is None:
+        return None
+    return float(left) - float(right)
+
+
 def render_markdown(payload: Mapping[str, object]) -> str:
     """One Markdown section per run: the numbers, with no adjectives."""
     points = payload["points"]
@@ -1108,16 +1224,16 @@ def render_markdown(payload: Mapping[str, object]) -> str:
                         str(name),
                         lane,
                         _number(record["residual_norm_before"]),
-                        _number(record["residual_norm_after"]),
+                        _optional(record["residual_norm_after"]),
                         _optional(record["residual_before_over_timing_bar"]),
                         _optional(record["residual_before_over_physics_bar"]),
-                        _number(record["dof_displacement_l2"]),
-                        _number(record["dof_displacement_max"]),
-                        _number(record["point_displacement_max_m"]),
-                        _number(record["point_displacement_rms_m"]),
-                        _number(record["point_displacement_max_over_minor_radius"]),
-                        _number(record["iota_delta"]),
-                        _number(float(record["G_after"]) - float(point["G"])),
+                        _optional(record["dof_displacement_l2"]),
+                        _optional(record["dof_displacement_max"]),
+                        _optional(record["point_displacement_max_m"]),
+                        _optional(record["point_displacement_rms_m"]),
+                        _optional(record["point_displacement_max_over_minor_radius"]),
+                        _optional(record["iota_delta"]),
+                        _optional(_difference_or_none(record["G_after"], point["G"])),
                         _number(record["wall_s"]),
                     )
                 )
@@ -1163,9 +1279,9 @@ def render_markdown(payload: Mapping[str, object]) -> str:
                         _number(record["persisted"]),
                         _number(record["converged"]),
                         _optional(record["reduced_gradient_l2"]),
-                        _number(record["coil_delta_inf"]),
-                        _number(record["iota_delta"]),
-                        _number(record["same_branch_as_incoming"]),
+                        _optional(record["coil_delta_inf"]),
+                        _optional(record["iota_delta"]),
+                        _optional(record["same_branch_as_incoming"]),
                         str(record["evaluation_status"]),
                         _number(record["nested_correction_is_noop"]),
                         _omp_cell(record["omp_num_threads"]),
@@ -1205,14 +1321,28 @@ def render_markdown(payload: Mapping[str, object]) -> str:
             _row(
                 (
                     key,
-                    *(_number(terms[key]) for _name, terms, _total in columns),
-                    _number(
-                        float(endpoint["corrections"]["jax"]["weighted_terms"][key])
-                        - endpoint_term
+                    *(
+                        _optional(None if terms is None else terms[key])
+                        for _name, terms, _total in columns
                     ),
-                    _number(
-                        float(endpoint["corrections"]["native"]["weighted_terms"][key])
-                        - endpoint_term
+                    _optional(
+                        _difference_or_none(
+                            None
+                            if endpoint["corrections"]["jax"]["weighted_terms"] is None
+                            else endpoint["corrections"]["jax"]["weighted_terms"][key],
+                            endpoint_term,
+                        )
+                    ),
+                    _optional(
+                        _difference_or_none(
+                            None
+                            if endpoint["corrections"]["native"]["weighted_terms"]
+                            is None
+                            else endpoint["corrections"]["native"]["weighted_terms"][
+                                key
+                            ],
+                            endpoint_term,
+                        )
                     ),
                 )
             )
@@ -1222,13 +1352,16 @@ def render_markdown(payload: Mapping[str, object]) -> str:
         _row(
             (
                 "**J (sum)**",
-                *(_number(total) for _name, _terms, total in columns),
-                _number(
-                    float(endpoint["corrections"]["jax"]["objective"]) - endpoint_total
+                *(_optional(total) for _name, _terms, total in columns),
+                _optional(
+                    _difference_or_none(
+                        endpoint["corrections"]["jax"]["objective"], endpoint_total
+                    )
                 ),
-                _number(
-                    float(endpoint["corrections"]["native"]["objective"])
-                    - endpoint_total
+                _optional(
+                    _difference_or_none(
+                        endpoint["corrections"]["native"]["objective"], endpoint_total
+                    )
                 ),
             )
         )
@@ -1239,8 +1372,8 @@ def render_markdown(payload: Mapping[str, object]) -> str:
                 "native twin J",
                 _number(points["start"]["native_twin_objective"]),
                 _number(endpoint["native_twin_objective"]),
-                _number(endpoint["corrections"]["jax"]["native_twin_objective"]),
-                _number(endpoint["corrections"]["native"]["native_twin_objective"]),
+                _optional(endpoint["corrections"]["jax"]["native_twin_objective"]),
+                _optional(endpoint["corrections"]["native"]["native_twin_objective"]),
                 "",
                 "",
             )
@@ -1252,8 +1385,10 @@ def render_markdown(payload: Mapping[str, object]) -> str:
                 "native twin rel. gap",
                 _number(points["start"]["native_twin_relative_gap"]),
                 _number(endpoint["native_twin_relative_gap"]),
-                _number(endpoint["corrections"]["jax"]["native_twin_relative_gap"]),
-                _number(endpoint["corrections"]["native"]["native_twin_relative_gap"]),
+                _optional(endpoint["corrections"]["jax"]["native_twin_relative_gap"]),
+                _optional(
+                    endpoint["corrections"]["native"]["native_twin_relative_gap"]
+                ),
                 "",
                 "",
             )
@@ -1286,13 +1421,13 @@ def render_markdown(payload: Mapping[str, object]) -> str:
                     str(name),
                     _number(point["iota"]),
                     _number(point["G"]),
-                    _number(point["corrections"]["jax"]["iota_after"]),
-                    _number(point["corrections"]["native"]["iota_after"]),
-                    _number(point["corrections"]["jax"]["G_after"]),
-                    _number(point["corrections"]["native"]["G_after"]),
-                    _number(agreement["surface_dofs_l2"]),
-                    _number(agreement["surface_dofs_max"]),
-                    _number(agreement["shared_residual_definition_ok"]),
+                    _optional(point["corrections"]["jax"]["iota_after"]),
+                    _optional(point["corrections"]["native"]["iota_after"]),
+                    _optional(point["corrections"]["jax"]["G_after"]),
+                    _optional(point["corrections"]["native"]["G_after"]),
+                    _optional(agreement["surface_dofs_l2"]),
+                    _optional(agreement["surface_dofs_max"]),
+                    _optional(agreement["shared_residual_definition_ok"]),
                 )
             )
         )
@@ -1337,19 +1472,19 @@ def render_markdown(payload: Mapping[str, object]) -> str:
         ),
         (
             "endpoint jax correction stayed on the incoming branch",
-            _number(verdict["endpoint_jax_correction_stayed_on_branch"]),
+            _optional(verdict["endpoint_jax_correction_stayed_on_branch"]),
         ),
         (
             "endpoint native correction stayed on the incoming branch",
-            _number(verdict["endpoint_native_correction_stayed_on_branch"]),
+            _optional(verdict["endpoint_native_correction_stayed_on_branch"]),
         ),
         (
             "every correction stayed on the incoming branch",
-            _number(verdict["every_correction_stayed_on_branch"]),
+            _optional(verdict["every_correction_stayed_on_branch"]),
         ),
         (
             "shared residual definition ok",
-            _number(verdict["shared_residual_definition_ok"]),
+            _optional(verdict["shared_residual_definition_ok"]),
         ),
         (
             "native twin control ok (start point)",
@@ -1421,6 +1556,20 @@ def main(argv: list[str] | None = None) -> int:
         ),
         flush=True,
     )
+    failed_corrections = [
+        f"{name}/{lane}"
+        for name in POINT_NAMES
+        for lane in LANE_NAMES
+        if payload["points"][name]["corrections"][lane]["evaluation_status"]
+        == EVALUATION_FAILED_SOLVE
+    ]
+    if failed_corrections:
+        print(
+            "nested endpoint correction failed: " + ", ".join(failed_corrections),
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
     return 0
 
 
