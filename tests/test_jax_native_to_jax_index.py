@@ -35,7 +35,7 @@ def test_native_to_jax_index_matches_validated_contracts() -> None:
     assert version == 2
     runs_by_id = {run.run_id: run for run in runs}
     bounded = runs_by_id["20260729T005942Z-5ade9aee"]
-    exact = runs_by_id["20260917T025023Z-8c8a5461"]
+    exact = runs_by_id["20260917T035857Z-6a1f0ea9"]
     assert bounded.scale == "bounded"
     assert bounded.case_count == 26
     assert exact.scale == "native_default"
@@ -66,7 +66,7 @@ def test_native_to_jax_index_matches_validated_contracts() -> None:
     assert "historical quality-band, unverified" in exact_row
     assert "12/57 comparisons failed" in exact_row
     assert "3/3 lanes budget-exhausted" in exact_row
-    assert "20260917T025023Z-8c8a5461" in exact_row
+    assert "20260917T035857Z-6a1f0ea9" in exact_row
     assert "`native_default`: not run" not in rendered
 
 

@@ -311,8 +311,8 @@ python examples/jax/run_parity.py \
 ```
 
 A `ready` executable and a `full` workflow relationship do not certify parity.
-The fresh full-default run `20260917T025023Z-8c8a5461` passed the source/build
-audit at commit `9764474ab161767098a56c9655fc442c6dc94a51`. All three endpoint
+The fresh full-default run `20260917T035857Z-6a1f0ea9` passed the source/build
+audit at commit `1311e9247ca882b327b046b0c5b2cb43b4404360`. All three endpoint
 objectives meet the declared `1e-7` quality bound, but 12 of 57 strict comparisons
 failed and all three lanes exhausted 1000 iterations. This establishes endpoint
 quality only, not strict parity or optimizer convergence. The superseded run
@@ -324,6 +324,10 @@ build inputs. It is a local, unsigned, operator-writable record, not a signed
 or hermetic build attestation. A tracked evidence pointer alone cannot verify
 the run: auditing requires the retained lane receipts and their clean recorded
 checkout. Neither provenance nor an endpoint quality band proves convergence.
+
+The [retained numerical review package](parity/evidence/20260917T035857Z-6a1f0ea9/README.md)
+includes the input and endpoint values, all comparisons, statuses and original
+receipt hashes. It is a derived inspection record, not a portable authority bundle.
 
 ### Serial nested-LS Boozer
 

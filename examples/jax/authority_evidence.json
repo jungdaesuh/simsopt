@@ -48,10 +48,10 @@
       "evidence_scope": "local_only",
       "lane_receipt_count": 3,
       "qualification": "12/57 comparisons failed; 3/3 lanes budget-exhausted; jax-cpu final:objective 4.3261270728412792e-08 <= 9.9999999999999995e-08; jax-gpu final:objective 4.3077269937092123e-08 <= 9.9999999999999995e-08; native-cpu final:objective 4.3972015892540963e-08 <= 9.9999999999999995e-08; endpoint quality only, no convergence or final-value equivalence",
-      "repository_commit": "9764474ab161767098a56c9655fc442c6dc94a51",
-      "run_id": "20260917T025023Z-8c8a5461",
+      "repository_commit": "1311e9247ca882b327b046b0c5b2cb43b4404360",
+      "run_id": "20260917T035857Z-6a1f0ea9",
       "scale": "native_default",
-      "summary_sha256": "7a94b4d2b5650516cfb4eb8af71e711a7c98cbda163675a1999305acded3afae",
+      "summary_sha256": "8ee90b2fdff5cc324cc6d35c0088086e893fc790f396a86f7310352ea19bc565",
       "verdict": "quality-band"
     }
   ],
