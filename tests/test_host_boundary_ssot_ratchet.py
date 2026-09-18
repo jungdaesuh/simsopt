@@ -33,7 +33,7 @@ _NON_JAX_BINDING = "non-jax"
 # Each allowlist item names one direct invocation, not merely an owning function.
 # The source coordinate deliberately ratchets additions, removals, and duplicate
 # primitive calls. A JAX import or direct alias must resolve lexically to count.
-# This baseline contains 88 direct invocations, including all 57 nested-LS calls.
+# This baseline contains 89 direct invocations, including all 57 nested-LS calls.
 #
 # Admitted 2026-08-24, both for the Phase-2 predictor and both counted as
 # call SITES rather than executions:
@@ -59,6 +59,15 @@ _NON_JAX_BINDING = "non-jax"
 # ``host_boundary.block_until_ready`` / ``host_value`` and
 # ``dtypes.explicit_device_array``. Direct jax transfers in that adapter are
 # no longer admitted. Baseline: 88.
+# Admitted 2026-09-17, ONE new owner-internal site: the shipped flat-675
+# single-stage example moved out of ``examples/`` (not swept) into
+# ``src/simsopt_jax_adapters/examples/``, and its two ``device_put`` calls plus
+# its ``transfer_guard`` now route through owners instead of being admitted as
+# adapter call sites: placement reuses ``dtypes.explicit_device_array`` (no new
+# site at all) and the strict guard became
+# ``host_boundary.disallow_host_transfers``, whose single internal
+# ``transfer_guard`` is the one addition. The two other ``host_boundary.py``
+# entries are re-pins after that insertion moved their lines. Baseline: 89.
 _ALLOWED_OWNER_CALLS = frozenset(
     {
         "src/simsopt_jax/backend/dtypes.py::_device_put::device_put::308:19",
@@ -78,8 +87,9 @@ _ALLOWED_OWNER_CALLS = frozenset(
         "src/simsopt_jax/geo/optimizers/reference.py::_target_array_from_scipy_host::transfer_guard_host_to_device::248:9",
         "src/simsopt_jax/geo/optimizers/reference.py::_target_scipy_host_extension_scope::transfer_guard_device_to_host::122:13",
         "src/simsopt_jax/geo/optimizers/reference.py::_target_scipy_host_extension_scope::transfer_guard_host_to_device::121:9",
-        "src/simsopt_jax/runtime/host_boundary.py::block_until_ready::block_until_ready::209:11",
-        "src/simsopt_jax/runtime/host_boundary.py::host_value::device_get::174:11",
+        "src/simsopt_jax/runtime/host_boundary.py::block_until_ready::block_until_ready::225:11",
+        "src/simsopt_jax/runtime/host_boundary.py::disallow_host_transfers::transfer_guard::134:9",
+        "src/simsopt_jax/runtime/host_boundary.py::host_value::device_get::190:11",
         "src/simsopt_jax/solve/dispatch.py::_run_optimistix_lm::transfer_guard_host_to_device::578:9",
         "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize.value_and_gradient_at::device_get::331:15",
         "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize.value_and_gradient_at::device_get::331:38",

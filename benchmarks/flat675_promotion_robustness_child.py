@@ -29,15 +29,15 @@ Two modes:
 
 ``constructor``
     The start the shipped example builds from repository geometry.  It is
-    loaded from the example file itself rather than rebuilt here: a copy of
-    the geometry would be a twin, and the point is to exercise the start
-    users actually get.
+    taken from the example's own module
+    (``simsopt_jax_adapters.examples.single_stage_flat675``) rather than
+    rebuilt here: a copy of the geometry would be a twin, and the point is to
+    exercise the start users actually get.
 """
 
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 from pathlib import Path
 from time import perf_counter
@@ -46,10 +46,6 @@ from typing import Final
 PRODUCTION_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 
 CHILD_JSON_SCHEMA: Final[str] = "flat675-promotion-robustness-child.v1"
-
-EXAMPLE_PATH: Final[Path] = (
-    PRODUCTION_ROOT / "examples" / "jax" / "3_Advanced" / "single_stage_flat675.py"
-)
 
 # The perturbation grid the charter names: three relative amplitudes across
 # three blocks of the outer vector.
@@ -84,24 +80,6 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     if args.mode == "bundle" and args.input_manifest is None:
         parser.error("--input-manifest is required in bundle mode")
     return args
-
-
-def _example_module():
-    """Load the shipped example so its own start is what gets solved.
-
-    The tier directories are not packages, so a file-location import is the
-    only route to the script.  Rebuilding its geometry here instead would put
-    a second copy of the configuration in the tree, which is precisely the
-    twin this program has paid for before.
-    """
-    specification = importlib.util.spec_from_file_location(
-        "flat675_single_stage_example", EXAMPLE_PATH
-    )
-    if specification is None or specification.loader is None:
-        raise RuntimeError(f"cannot load the shipped example at {EXAMPLE_PATH}")
-    module = importlib.util.module_from_spec(specification)
-    specification.loader.exec_module(module)
-    return module
 
 
 def _perturbed_starts(start, seed: int) -> list[dict[str, object]]:
@@ -179,6 +157,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     from simsopt_jax.runtime.host_boundary import host_transfer_audit
     from simsopt_jax.solve.driver import Driver
+    from simsopt_jax_adapters.examples.single_stage_flat675 import repository_problem
     from simsopt_jax_adapters.geo.flat675 import (
         FLAT675_COIL_SLICE,
         FLAT675_SURFACE_SLICE,
@@ -194,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
         problem = load_flat675_bundle(args.input_manifest.parent)
         configuration = "certified-frozen-bundle"
     else:
-        problem = _example_module()._repository_problem("native_default")
+        problem = repository_problem("native_default")
         configuration = "repository-geometry"
 
     programs = bind_flat675_programs(

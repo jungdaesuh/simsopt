@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from simsopt.examples import ExampleResult, run_example
+from simsopt._examples_runtime import ExampleResult, run_example
 from simsopt.geo import SurfaceXYZTensorFourier
 from simsopt_jax_adapters.geo import nested_ls_example as example
 from simsopt_jax_adapters.geo.nested_ls_ncsx import NcsxNestedLsProblem

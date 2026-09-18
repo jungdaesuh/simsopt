@@ -4,7 +4,9 @@ Ownership split (do not reimplement these patterns in adapters):
 
 * ``simsopt_jax.runtime.host_boundary`` — **host materialization** (D2H):
   ``host_array``, ``host_scalar``, ``host_float``, ``host_tree``, and the
-  ready variants that ``block_until_ready`` before materializing.
+  ready variants that ``block_until_ready`` before materializing; plus the
+  boundary's measurement and refusal contexts, ``host_transfer_audit`` and
+  ``disallow_host_transfers``.
 * ``simsopt_jax.backend.dtypes`` — **device placement** (H2D / on-device cast):
   policy ``runtime_device_put`` / ``as_runtime_array`` / ``as_compute_array``,
   and exact-dtype ``explicit_device_array`` (preserves requested float dtype).
@@ -117,6 +119,20 @@ def host_transfer_audit() -> Iterator[HostTransferAudit]:
         yield audit
     finally:
         _ACTIVE_TRANSFER_AUDIT.reset(token)
+
+
+@contextmanager
+def disallow_host_transfers() -> Iterator[None]:
+    """Refuse every host/device transfer for the duration of the block.
+
+    This is ``jax.transfer_guard("disallow")``.  It lives here so a lane that
+    wants to PROVE it crosses no host boundary declares that through the
+    boundary SSOT instead of reaching for the JAX primitive itself, and so the
+    refusal and the measurement (:func:`host_transfer_audit`) have one owner.
+    """
+
+    with jax.transfer_guard("disallow"):
+        yield
 
 
 @contextmanager

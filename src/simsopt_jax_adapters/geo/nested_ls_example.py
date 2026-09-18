@@ -19,7 +19,7 @@ from numpy.typing import NDArray
 from scipy.optimize import OptimizeResult, minimize
 from simsopt._core import load
 from simsopt.configs.zoo import get_data
-from simsopt.examples import ExampleResult
+from simsopt._examples_runtime import ExampleResult
 from simsopt.field import BiotSavart
 from simsopt.geo import SurfaceXYZTensorFourier, Volume
 from simsopt.geo.boozersurface import BoozerSurface

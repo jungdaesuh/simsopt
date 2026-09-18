@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Final
 
-from simsopt.examples import execution as _execution
+from simsopt._examples_runtime import execution as _execution
 
 from simsopt_jax.backend.runtime import (
     get_backend_mode,

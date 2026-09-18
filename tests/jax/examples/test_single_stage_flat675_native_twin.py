@@ -1,8 +1,9 @@
 """Native C++ twin of the flat-675 example: smoke, CLI, and objective parity.
 
-The example is a script, not a package, so the in-process checks load it the
-same way the JAX sibling contract does — by file location, under a name that
-cannot collide with ``examples/jax/3_Advanced/single_stage_flat675.py``.
+The shipped script is an entry point over
+``simsopt_jax_adapters.examples.single_stage_flat675_native_twin``; the
+in-process checks import that module and the subprocess checks run the script,
+so both the implementation and the published command line are covered.
 """
 
 from __future__ import annotations
@@ -11,12 +12,14 @@ import json
 import os
 import subprocess
 import sys
-from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
-from types import ModuleType
 
 import numpy as np
 import pytest
+from simsopt_jax_adapters.examples import single_stage_flat675 as jax_example
+from simsopt_jax_adapters.examples import (
+    single_stage_flat675_native_twin as native_example,
+)
 from simsopt_jax_adapters.geo.flat675 import (
     FLAT675_OBJECTIVE_TERM_KEYS,
     FLAT675_OUTER_DOF_COUNT,
@@ -25,7 +28,6 @@ from simsopt_jax_adapters.geo.flat675 import (
 
 ROOT = Path(__file__).resolve().parents[3]
 NATIVE = ROOT / "examples" / "3_Advanced" / "single_stage_flat675.py"
-JAX = ROOT / "examples" / "jax" / "3_Advanced" / "single_stage_flat675.py"
 BUILD = ROOT / "build" / "cp311-cp311-linux_x86_64"
 
 ARCHIVED_NATIVE_B3_OBJECTIVE = 1.8133486877704454
@@ -62,24 +64,6 @@ JSON_OBSERVABLE_KEYS = frozenset(
         "initial_weighted_terms",
     }
 )
-
-
-def _load_script(path: Path, module_name: str) -> ModuleType:
-    specification = spec_from_file_location(module_name, path)
-    assert specification is not None and specification.loader is not None
-    module = module_from_spec(specification)
-    specification.loader.exec_module(module)
-    return module
-
-
-@pytest.fixture(scope="module")
-def native_example() -> ModuleType:
-    return _load_script(NATIVE, "native_single_stage_flat675")
-
-
-@pytest.fixture(scope="module")
-def jax_example() -> ModuleType:
-    return _load_script(JAX, "jax_single_stage_flat675")
 
 
 def _cpu_env() -> dict[str, str]:
@@ -138,23 +122,19 @@ def test_smoke_json_is_ok_on_cpu() -> None:
     assert frozenset(terms) == frozenset(FLAT675_OBJECTIVE_TERM_KEYS)
 
 
-def test_cli_matches_the_jax_example_flags(
-    native_example: ModuleType, jax_example: ModuleType
-) -> None:
+def test_cli_matches_the_jax_example_flags() -> None:
     assert native_example.BOUNDED_STEPS == jax_example.BOUNDED_STEPS
     assert native_example.NATIVE_DEFAULT_STEPS == jax_example.NATIVE_DEFAULT_STEPS
     assert native_example.EXAMPLE_ID == jax_example.EXAMPLE_ID
-    native_help = native_example._parser().format_help()
+    native_help = native_example.build_parser().format_help()
     for flag in ("--smoke", "--json", "--max-steps", "--output-dir", "--bundle"):
         assert flag in native_help
 
 
-def test_same_point_objective_agrees_with_jax_at_budget_three(
-    native_example: ModuleType, jax_example: ModuleType
-) -> None:
+def test_same_point_objective_agrees_with_jax_at_budget_three() -> None:
     """Both lanes evaluate the same 675-vector at the start and after budget 3."""
-    native_problem = native_example._repository_problem(native_scale=False)
-    jax_problem = jax_example._repository_problem("bounded")
+    native_problem = native_example.repository_problem(native_scale=False)
+    jax_problem = jax_example.repository_problem("bounded")
     start = np.array(native_problem.pack(), dtype=np.float64, copy=True)
     jax_start = np.array(
         jax_problem.start_candidate.outer_vector(), dtype=np.float64, copy=True
@@ -188,7 +168,7 @@ def test_same_point_objective_agrees_with_jax_at_budget_three(
     assert native_gradient.shape == (FLAT675_OUTER_DOF_COUNT,)
     assert np.all(np.isfinite(native_gradient))
 
-    payload = native_example._solve(
+    payload = native_example.solve_problem(
         native_problem,
         max_steps=3,
         scale="bounded",
@@ -203,9 +183,7 @@ def test_same_point_objective_agrees_with_jax_at_budget_three(
     )
 
 
-def test_bundle_budget_three_matches_archived_native_b3(
-    native_example: ModuleType,
-) -> None:
+def test_bundle_budget_three_matches_archived_native_b3() -> None:
     if not native_example.BUNDLE_ROOT.is_dir():
         pytest.skip("the frozen genuine-675 input bundle is host-local")
     payload = _json_payload(_run_native(["--bundle", "--json", "--max-steps", "3"]))

@@ -101,10 +101,8 @@ import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from time import perf_counter
-from types import ModuleType
 from typing import Final, Literal
 
 import jax
@@ -123,6 +121,10 @@ from simsopt_jax.examples.single_stage_flat675 import (
 )
 from simsopt_jax.runtime.host_boundary import host_transfer_audit
 from simsopt_jax.solve.driver import Driver
+from simsopt_jax_adapters.examples import single_stage_flat675 as jax_example
+from simsopt_jax_adapters.examples import (
+    single_stage_flat675_native_twin as native_example,
+)
 from simsopt_jax_adapters.geo.flat675 import (
     FLAT675_OBJECTIVE_TERM_KEYS,
     FLAT675_OUTER_DOF_COUNT,
@@ -185,18 +187,10 @@ from benchmarks.flat675_nested_endpoint import (
 # widened, and null still means "nothing to compare".
 SCHEMA: Final[str] = "flat675-nested-endpoint-comparison-v4"
 
-# The shipped lessons this program runs.  The tier directories are not
-# importable packages, so the two scripts are loaded by file location -- the
-# same route ``_load_script`` in ``tests/jax/examples/test_single_stage_flat675_native_twin.py``
-# and ``benchmarks/flat675_promotion_robustness_child.py`` take, and for the
-# same reason: rebuilding either configuration here would put a second copy of
-# the certified geometry in the tree.
-JAX_EXAMPLE_PATH: Final[Path] = (
-    REPO_ROOT / "examples" / "jax" / "3_Advanced" / "single_stage_flat675.py"
-)
-NATIVE_EXAMPLE_PATH: Final[Path] = (
-    REPO_ROOT / "examples" / "3_Advanced" / "single_stage_flat675.py"
-)
+# The shipped lessons this program runs are the two modules imported above:
+# the example scripts under ``examples/`` are entry points over exactly these
+# configurations.  Rebuilding either configuration here would put a second
+# copy of the certified geometry in the tree.
 
 # Transcribed from ``OBJECTIVE_RTOL`` in ``tests/jax/examples/test_single_stage_flat675_native_twin.py``
 # (``OBJECTIVE_RTOL``), which is the file that owns the JAX-vs-native
@@ -290,21 +284,6 @@ PRODUCTION_LANES: Final[NestedLanes] = NestedLanes(
 )
 
 
-def _load_script(path: Path, module_name: str) -> ModuleType:
-    """Load a shipped example script by file location.
-
-    The example tiers (``3_Advanced``) are directories, not packages, and their
-    names are not identifiers, so there is no import path to them.  This is the
-    in-tree route to the shipped configuration and the native twin.
-    """
-    specification = spec_from_file_location(module_name, path)
-    if specification is None or specification.loader is None:
-        raise SystemExit(f"cannot load the shipped example at {path}")
-    module = module_from_spec(specification)
-    specification.loader.exec_module(module)
-    return module
-
-
 @dataclass(frozen=True, slots=True)
 class ObjectiveLane:
     """One lane's eight-term objective over the 675-vector."""
@@ -346,13 +325,10 @@ def native_twin_value(
     real simsopt objects, so it is an independent evaluation of the same
     objective, not a second call into the JAX program.
     """
-    twin_module = _load_script(
-        NATIVE_EXAMPLE_PATH, "native_flat675_twin_for_comparison"
-    )
     twin = (
-        twin_module._bundle_problem()
+        native_example.bundle_problem()
         if configuration == "bundle"
-        else twin_module._repository_problem(native_scale=False)
+        else native_example.repository_problem(native_scale=False)
     )
 
     def value(vector: NDArray[np.float64]) -> float:
@@ -366,10 +342,9 @@ def native_twin_value(
 
 def build_problem(configuration: Configuration) -> Flat675Problem:
     """The flat-675 problem for one configuration, from the shipped lesson."""
-    jax_example = _load_script(JAX_EXAMPLE_PATH, "jax_flat675_for_comparison")
     if configuration == "bundle":
         return load_flat675_bundle(jax_example.BUNDLE_ROOT)
-    return jax_example._repository_problem(REPOSITORY_EXECUTION_SCALE)
+    return jax_example.repository_problem(REPOSITORY_EXECUTION_SCALE)
 
 
 # --------------------------------------------------------------------------

@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
-from simsopt.examples import ExampleResult, ExecutionScale, run_example
+from simsopt._examples_runtime import ExampleResult, ExecutionScale, run_example
 from simsopt_jax.backend.runtime import get_resolved_precision, get_runtime_jax_device
 from simsopt_jax_adapters.geo.nested_ls_example import (
     nested_ls_example_result,

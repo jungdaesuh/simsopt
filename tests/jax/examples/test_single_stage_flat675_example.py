@@ -17,14 +17,13 @@ does not already have.
 from __future__ import annotations
 
 import ast
-import importlib.util
 import json
 from pathlib import Path
-from types import ModuleType
 
 import numpy as np
 import pytest
 from simsopt_jax.examples import ExampleResult, ExecutionScale
+from simsopt_jax_adapters.examples import single_stage_flat675 as example
 from simsopt_jax_adapters.geo.flat675 import (
     FLAT675_COIL_DOF_COUNT,
     FLAT675_OBJECTIVE_TERM_KEYS,
@@ -38,30 +37,10 @@ from simsopt_jax_adapters.geo.flat675 import (
 
 ROOT = Path(__file__).resolve().parents[3]
 EXAMPLE = ROOT / "examples" / "jax" / "3_Advanced" / "single_stage_flat675.py"
+EXAMPLE_SOURCE = Path(example.__file__)
 MANIFEST = ROOT / "examples" / "jax" / "manifest.json"
 
 EXAMPLE_ID = "flat675-single-stage-coupled-optimization"
-
-
-def _example_module() -> ModuleType:
-    """Import the shipped example the way a reader would run it.
-
-    The tier directories are not packages, so a file-location import is the
-    only way to reach the script; this is the convention the sibling example
-    contracts already use.
-    """
-    specification = importlib.util.spec_from_file_location(
-        "flat675_single_stage_example", EXAMPLE
-    )
-    assert specification is not None and specification.loader is not None
-    module = importlib.util.module_from_spec(specification)
-    specification.loader.exec_module(module)
-    return module
-
-
-@pytest.fixture(scope="module")
-def example() -> ModuleType:
-    return _example_module()
 
 
 @pytest.fixture(scope="module")
@@ -73,9 +52,9 @@ def manifest_entry() -> dict[str, object]:
 
 
 @pytest.fixture(scope="module")
-def bounded_problem(example: ModuleType) -> object:
+def bounded_problem() -> object:
     """One repository-geometry build, shared by the tests that read it."""
-    return example._repository_problem("bounded")
+    return example.repository_problem("bounded")
 
 
 # --- registration -----------------------------------------------------------
@@ -139,13 +118,17 @@ def test_manifest_entry_declares_both_device_lanes(
     }
 
 
-def test_example_id_matches_the_manifest(example: ModuleType) -> None:
+def test_example_id_matches_the_manifest() -> None:
     assert example.EXAMPLE_ID == EXAMPLE_ID
 
 
 def test_script_imports_no_host_scipy_optimizer() -> None:
-    """A gpu-strict example may not hide a host optimizer behind JAX metrics."""
-    tree = ast.parse(EXAMPLE.read_text(encoding="utf-8"))
+    """A gpu-strict example may not hide a host optimizer behind JAX metrics.
+
+    The shipped script only re-exports ``main``, so the surface that could
+    carry a host optimizer is the implementation module it delegates to.
+    """
+    tree = ast.parse(EXAMPLE_SOURCE.read_text(encoding="utf-8"))
     imported: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -188,7 +171,6 @@ def test_repository_geometry_objective_is_finite(bounded_problem: object) -> Non
 
 def test_repository_geometry_optimizes_a_free_winding_surface_coil(
     bounded_problem: object,
-    example: ModuleType,
 ) -> None:
     """The shape penalties point at a free coil, never at a fixed TF coil."""
     index = bounded_problem.objective_policy.optimized_coil_index  # type: ignore[attr-defined]
@@ -204,14 +186,13 @@ def test_repository_geometry_optimizes_a_free_winding_surface_coil(
 
 
 def test_bundle_mode_refuses_by_name_when_the_bundle_is_absent(
-    example: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An input-boundary refusal that says where it looked and what to do."""
     monkeypatch.setattr(example, "BUNDLE_ROOT", Path("/nonexistent/flat675-bundle"))
 
     with pytest.raises(Flat675ContractError) as excinfo:
-        example._bundle_problem()
+        example.bundle_problem()
 
     message = str(excinfo.value)
     assert "--bundle" in message
@@ -219,7 +200,6 @@ def test_bundle_mode_refuses_by_name_when_the_bundle_is_absent(
 
 
 def test_bundle_flag_selects_the_certified_configuration(
-    example: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``--bundle`` routes to the bundle solve and is not forwarded onward.
@@ -248,7 +228,6 @@ def test_bundle_flag_selects_the_certified_configuration(
 
 @pytest.mark.parametrize("flag", ["--max-s", "--max", "--max-steps"])
 def test_common_step_options_reach_the_solver(
-    example: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
     flag: str,
 ) -> None:
