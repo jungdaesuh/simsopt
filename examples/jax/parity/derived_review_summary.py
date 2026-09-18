@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import numpy as np
 
@@ -45,11 +45,24 @@ _LIMITATIONS = (
 )
 
 
+def _contained_path(directory: Path, value: object, context: str) -> Path:
+    """Join one untrusted relative path without letting it leave ``directory``.
+
+    Every path in a retained run is evidence: one that escapes its own directory
+    cannot be what the enclosing receipt hashed, so this is a refusal, not a
+    normalisation.
+    """
+    relative = PurePosixPath(str(value))
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"{context} leaves its directory: {relative}")
+    return directory / str(relative)
+
+
 def _read_bound_array(
     directory: Path, descriptor: dict[str, object]
 ) -> dict[str, object]:
     """Read one hash-bound .npy descriptor into a JSON-serialisable record."""
-    array_path = directory / str(descriptor["path"])
+    array_path = _contained_path(directory, descriptor["path"], "retained array path")
     payload = array_path.read_bytes()
     if hashlib.sha256(payload).hexdigest() != descriptor["sha256"]:
         raise ValueError(f"retained array does not match its receipt: {array_path}")
@@ -108,11 +121,21 @@ def build_derived_review_summary(run_directory: Path) -> dict[str, object]:
         raise ValueError("derived review summary requires a single-case run")
     case = summary["cases"][0]
     lanes = [
-        _lane_record(run_directory / execution["result_directory"])
+        _lane_record(
+            _contained_path(
+                run_directory,
+                execution["result_directory"],
+                "retained lane result directory",
+            )
+        )
         for execution in case["executions"]
     ]
-    input_directory = run_directory / case["case_id"] / "inputs"
-    input_bundle = json.loads((input_directory / "input_bundle.json").read_text())
+    input_directory = (
+        _contained_path(run_directory, case["case_id"], "retained case id") / "inputs"
+    )
+    input_bundle = json.loads(
+        (input_directory / "input_bundle.json").read_text(encoding="utf-8")
+    )
     input_values = {
         name: _read_bound_array(input_directory, descriptor)
         for name, descriptor in input_bundle["arrays"].items()

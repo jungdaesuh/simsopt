@@ -30,7 +30,10 @@ from examples.jax._lane_environment import (
     build_execution_environment,
 )
 from examples.jax._manifest import JaxExampleRecord, JaxExamplesManifest
-from examples.jax.outer_optimizer_policy import validate_ready_example_policy
+from examples.jax.outer_optimizer_policy import (
+    OuterOptimizerPolicyError,
+    validate_ready_example_policy,
+)
 from examples.jax.manifest_runtime import (
     RuntimeContractPair,
     RuntimeExample,
@@ -271,7 +274,7 @@ def run_profile(
     for example in selected:
         try:
             command = build_child_command(example, repo_root=repo_root, scale=scale)
-        except ValueError as error:
+        except OuterOptimizerPolicyError as error:
             _write_child_failure(
                 example=example,
                 command=(),

@@ -13,7 +13,8 @@ from types import SimpleNamespace
 import jax  # noqa: F401
 import numpy as np
 import pytest
-from examples.jax.manifest_runtime import RuntimeExample
+from examples.jax._manifest import resolve_example_implementation
+from examples.jax.manifest_runtime import RuntimeExample, load_runtime_contract_pair
 from examples.jax.parity import child as parity_child
 from examples.jax.parity import provenance as parity_provenance
 from examples.jax.parity.cases import get_case
@@ -177,24 +178,69 @@ def test_shared_example_runner_passes_scale_independently_of_step_budget(
 
 
 def test_shared_examples_never_infer_scale_from_step_thresholds() -> None:
-    examples_root = Path(__file__).resolve().parents[2] / "examples" / "jax"
+    """No example decides its scale by comparing steps against a native budget.
+
+    The sweep reads each tier script AND every module it reaches in
+    ``simsopt_jax_adapters.examples``, the sanctioned home of example
+    implementations, so relocating an example's code out of ``examples/jax``
+    cannot shrink the gate.  Measured at this commit: 40 scripts on disk under
+    ``examples/jax/[123]_*``, of which 39 define ``main`` themselves and one
+    forwards into that package; the manifest declares 41 examples (39 ready and
+    2 planned, one planned row having no file yet).  The scanned set is bound to
+    DISK, every on-disk script must be a declared example, and the manifest's
+    ready rows are a second bound -- so neither a glob change, a manifest row
+    deletion, nor a relocation can shrink coverage silently.
+    """
+
+    repo_root = Path(__file__).resolve().parents[2]
+    examples_root = repo_root / "examples" / "jax"
+    on_disk = {
+        f"{tier}/{path.name}"
+        for tier in ("1_Simple", "2_Intermediate", "3_Advanced")
+        for path in (examples_root / tier).iterdir()
+        if path.is_file() and path.suffix == ".py"
+    }
+    examples = load_runtime_contract_pair(
+        examples_root / "manifest.json",
+        examples_root / "parity_manifest.json",
+        repo_root=repo_root,
+    ).examples
+    declared_paths = {example.path for example in examples}
+    ready_paths = {example.path for example in examples if example.status == "ready"}
+
+    scanned: set[str] = set()
     offenders: list[str] = []
     for path in sorted(examples_root.glob("[123]_*/*.py")):
-        source = path.read_text(encoding="utf-8")
-        if "run_example(" not in source:
-            continue
-        module = ast.parse(source)
-        for node in ast.walk(module):
-            if not isinstance(node, ast.Compare):
-                continue
-            names = {
-                child.id for child in ast.walk(node) if isinstance(child, ast.Name)
-            }
-            if "max_steps" in names and any(
-                name.startswith("NATIVE_") for name in names
-            ):
-                offenders.append(str(path.relative_to(examples_root)))
+        implementation = resolve_example_implementation(path, repo_root=repo_root)
+        example_path = path.relative_to(examples_root).as_posix()
+        scanned.add(example_path)
+        for source in implementation.sources:
+            for node in ast.walk(ast.parse(source.text)):
+                if not isinstance(node, ast.Compare):
+                    continue
+                names = {
+                    child.id for child in ast.walk(node) if isinstance(child, ast.Name)
+                }
+                if "max_steps" in names and any(
+                    name.startswith("NATIVE_") for name in names
+                ):
+                    offenders.append(
+                        f"{example_path} -> "
+                        f"{source.path.relative_to(repo_root)}:{node.lineno}"
+                    )
 
+    assert scanned == on_disk, (
+        "the scale-inference sweep does not cover every tier script on disk: "
+        f"unscanned={sorted(on_disk - scanned)}, unexpected={sorted(scanned - on_disk)}"
+    )
+    undeclared = sorted(on_disk - declared_paths)
+    assert not undeclared, (
+        f"tier scripts on disk that no manifest row declares: {undeclared}"
+    )
+    uncovered = sorted(ready_paths - scanned)
+    assert not uncovered, (
+        f"ready manifest examples left the scale-inference sweep: {uncovered}"
+    )
     assert offenders == []
 
 

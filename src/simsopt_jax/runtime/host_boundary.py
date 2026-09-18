@@ -123,12 +123,12 @@ def host_transfer_audit() -> Iterator[HostTransferAudit]:
 
 @contextmanager
 def disallow_host_transfers() -> Iterator[None]:
-    """Refuse every host/device transfer for the duration of the block.
+    """Refuse IMPLICIT host-to-device transfers for the duration of the block.
 
-    This is ``jax.transfer_guard("disallow")``.  It lives here so a lane that
-    wants to PROVE it crosses no host boundary declares that through the
-    boundary SSOT instead of reaching for the JAX primitive itself, and so the
-    refusal and the measurement (:func:`host_transfer_audit`) have one owner.
+    That refusal holds on every backend.  Explicit ``device_put``/``device_get``
+    always pass, and on CPU -- verified on jax 0.10.0, where no copy actually
+    happens -- implicit device-to-host (``np.sum(x)``, ``x.tolist()``) passes
+    too.  Measurement is :func:`host_transfer_audit`, this owner's other half.
     """
 
     with jax.transfer_guard("disallow"):

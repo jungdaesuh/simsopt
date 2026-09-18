@@ -24,6 +24,7 @@ from examples.jax.manifest_runtime import (
     RuntimeExample,
     load_runtime_contract_pair,
 )
+from examples.jax.outer_optimizer_policy import OuterOptimizerPolicyError
 from examples.jax.parity._manifest import ParityManifest
 from examples.jax.run_examples import (
     _parse_arguments,
@@ -373,6 +374,32 @@ def test_runner_fails_the_example_whose_legacy_record_lacks_its_host_policy(
     assert exit_code == 1
     assert "FAIL native-boozerqa-ls: no child command:" in stderr.getvalue()
     assert "requires its outer optimizer policy declaration" in stderr.getvalue()
+    with pytest.raises(
+        OuterOptimizerPolicyError, match="requires its outer optimizer policy"
+    ):
+        build_child_command(legacy_record, repo_root=tmp_path)
+
+
+def test_runner_never_relabels_an_unrelated_value_error_as_a_missing_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the policy rejection is a per-example FAIL; other defects surface."""
+
+    def _raise_unrelated(*_arguments: object, **_keywords: object) -> tuple[str, ...]:
+        raise ValueError("unrelated runner defect")
+
+    monkeypatch.setattr(example_runner, "build_child_command", _raise_unrelated)
+
+    with pytest.raises(ValueError, match="unrelated runner defect"):
+        run_profile(
+            _manifest(_record("1_Simple/just_a_quadratic.py")),
+            "cpu",
+            "fast",
+            repo_root=tmp_path,
+            base_environment={},
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+        )
 
 
 @pytest.mark.parametrize(

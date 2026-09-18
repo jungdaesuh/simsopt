@@ -381,8 +381,27 @@ DIAG5_FROZEN_NUMERICAL_PATHS: Final = frozenset(
         "src/simsopt_jax_adapters/geo/single_stage_native_endpoint.py",
     }
 )
-# Refrozen 2026-09-16: 679 -> 685. Added the serial example pair,
+# Refrozen 2026-09-17: 687 -> 690. ``src/simsopt/examples/{__init__,execution}.py``
+# became the private ``src/simsopt/_examples_runtime/{__init__,execution}.py``
+# (two dropped, two admitted) and the flat675 example implementation moved out
+# of the tier directory into ``src/simsopt_jax_adapters/examples/``
+# (``__init__.py``, ``single_stage_flat675.py`` and
+# ``single_stage_flat675_native_twin.py``, three admitted). Landed by 2f7d21b75.
+#
+# Refrozen 2026-09-17: 686 -> 687. Admitted
+# ``examples/jax/parity/derived_review_summary.py``, the derived-evidence
+# exporter bound by ``authority_evidence.json``. Landed by f3eb2396a.
+#
+# Refrozen 2026-09-16: 679 -> 686. Added the serial example pair,
 # shared example execution owner, and leaf QR module through the generator.
+# (This line read ``679 -> 685`` until 2026-09-17; the constant this commit,
+# 1311e9247, wrote was 686 and the seven admitted members are
+# ``examples/jax/2_Intermediate/boozerQA_ls.py``,
+# ``examples/jax/native_reference/boozerQA_ls.py``,
+# ``examples/jax/outer_optimizer_policy.py``,
+# ``src/simsopt/examples/{__init__,execution}.py``,
+# ``src/simsopt_jax_adapters/geo/flat675_qr.py`` and
+# ``src/simsopt_jax_adapters/geo/nested_ls_example.py``.)
 #
 # Refrozen 2026-09-16: 678 -> 679. Admitted the user-facing flat675 final
 # surface polish through the execution-source generator.

@@ -15,6 +15,16 @@ SHIPPED_SINGLE_STAGE_SCIPY_DRIVER_ID = (
 )
 
 
+class OuterOptimizerPolicyError(ValueError):
+    """An example record does not carry its approved outer optimizer policy.
+
+    A ``ValueError`` so the manifest readers that already treat validation
+    failures as one class keep working, and its own type so a caller that
+    must react to exactly this rejection -- a legacy manifest that declares no
+    policy for a ready host SciPy example -- never catches an unrelated one.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class OuterOptimizerPolicy:
     """An approved owner and exact driver, independent of scientific authority."""
@@ -53,18 +63,18 @@ def parse_outer_optimizer_policy(
             policy.example_id == example_id or policy.example_path == example_path
             for policy in _APPROVED_POLICIES
         ):
-            raise ValueError(
+            raise OuterOptimizerPolicyError(
                 "ready host SciPy example requires its outer optimizer policy declaration"
             )
         return None
     for policy in _APPROVED_POLICIES:
         if value == policy.policy_id:
             if (example_id, example_path) != (policy.example_id, policy.example_path):
-                raise ValueError(
+                raise OuterOptimizerPolicyError(
                     "outer optimizer policy belongs to a different example"
                 )
             return policy
-    raise ValueError("unknown outer optimizer policy")
+    raise OuterOptimizerPolicyError("unknown outer optimizer policy")
 
 
 def policy_owns_parity_case(
@@ -89,4 +99,6 @@ def validate_ready_example_policy(
         ready=True,
     )
     if policy != canonical:
-        raise ValueError("outer optimizer policy differs from the approved declaration")
+        raise OuterOptimizerPolicyError(
+            "outer optimizer policy differs from the approved declaration"
+        )

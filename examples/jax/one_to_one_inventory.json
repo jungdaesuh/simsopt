@@ -1710,30 +1710,24 @@
       ],
       "evidence": [
         "examples/3_Advanced/single_stage_flat675.py",
+        "src/simsopt_jax_adapters/examples/single_stage_flat675_native_twin.py",
         "examples/jax/3_Advanced/single_stage_flat675.py",
+        "src/simsopt_jax_adapters/examples/single_stage_flat675.py",
         "tests/jax/examples/test_single_stage_flat675_example.py",
         "tests/jax/examples/test_single_stage_flat675_native_twin.py"
       ],
-      "reason": "The exact-name flat coupled single-stage workflow uses public JAX kernels for the fused 675-vector objective and bounded host L-BFGS-B solve.",
+      "reason": "The exact-name flat coupled single-stage workflow uses public JAX kernels for the fused 675-vector objective and bounded host L-BFGS-B solve. Since 2f7d21b75 both scripts are thin CLIs: the native twin's implementation is src/simsopt_jax_adapters/examples/single_stage_flat675_native_twin.py and the JAX example's is src/simsopt_jax_adapters/examples/single_stage_flat675.py.",
       "recommended_target_classification": "mirror",
       "reconsideration_condition": null,
       "runtime_dependencies": {
         "external_runtimes": [],
         "python_import_roots": [
           "__future__",
-          "argparse",
-          "json",
-          "numpy",
-          "pathlib",
-          "scipy",
-          "simsopt",
-          "simsopt_jax",
-          "simsopt_jax_adapters",
-          "tempfile"
+          "simsopt_jax_adapters"
         ]
       },
       "source": "3_Advanced/single_stage_flat675.py",
-      "source_sha256": "825f84ac8e70756bea51323015a652375f4e1d393b9fce71c079c8d18ab6893a"
+      "source_sha256": "8a28b0c8873e571bef8383ea8a0ce5edf7d08ee3ad091cd190447a62b4fea9ea"
     },
     {
       "capability_probe": {

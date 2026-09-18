@@ -179,12 +179,12 @@ from benchmarks.flat675_nested_endpoint import (
 # ``rejected_branch_change`` alike, since the branch guard makes the second a
 # failed EVALUATION.  That rule is about the exit code, not the payload, so it
 # does not move the id.  The id also stays at v4 for the lane-agreement
-# pre-state fill-in: ``residual_before_*`` and
-# ``shared_residual_definition_ok`` are published on a failed solve too,
-# because they are measured before either inner solve runs.  No field changed
-# meaning -- a value a v4 consumer would have read as null now carries the
-# number that field has always been defined to hold -- so only availability
-# widened, and null still means "nothing to compare".
+# pre-state fill-in of 2026-09-17: ``residual_before_*`` and
+# ``shared_residual_definition_ok`` are ALWAYS reported -- on a failed solve
+# too, because they are measured before either inner solve runs -- so they are
+# never null and never render ``n/a``.  No field changed meaning: a value a v4
+# consumer would have read as null now carries the number that field has always
+# been defined to hold, so only availability widened and the id stays at v4.
 SCHEMA: Final[str] = "flat675-nested-endpoint-comparison-v4"
 
 # The shipped lessons this program runs are the two modules imported above:
@@ -979,17 +979,12 @@ def compare(
         every_correction_stayed_on_branch = None
     else:
         every_correction_stayed_on_branch = all(bool(claim) for claim in branch_claims)
-    shared_residual_definition_ok: bool | None
-    if (
-        endpoint["lane_agreement"]["shared_residual_definition_ok"] is None
-        or start_point["lane_agreement"]["shared_residual_definition_ok"] is None
-    ):
-        shared_residual_definition_ok = None
-    else:
-        shared_residual_definition_ok = bool(
-            endpoint["lane_agreement"]["shared_residual_definition_ok"]
-            and start_point["lane_agreement"]["shared_residual_definition_ok"]
-        )
+    # Both operands are measured before either inner solve runs, so this is a
+    # bool on every record, including a failed solve.
+    shared_residual_definition_ok = bool(
+        endpoint["lane_agreement"]["shared_residual_definition_ok"]
+        and start_point["lane_agreement"]["shared_residual_definition_ok"]
+    )
     payload: dict[str, object] = {
         "schema": SCHEMA,
         "question": (
@@ -1437,7 +1432,7 @@ def render_markdown(payload: Mapping[str, object]) -> str:
                     _optional(point["corrections"]["native"]["G_after"]),
                     _optional(agreement["surface_dofs_l2"]),
                     _optional(agreement["surface_dofs_max"]),
-                    _optional(agreement["shared_residual_definition_ok"]),
+                    _number(agreement["shared_residual_definition_ok"]),
                 )
             )
         )
@@ -1494,7 +1489,7 @@ def render_markdown(payload: Mapping[str, object]) -> str:
         ),
         (
             "shared residual definition ok",
-            _optional(verdict["shared_residual_definition_ok"]),
+            _number(verdict["shared_residual_definition_ok"]),
         ),
         (
             "native twin control ok (start point)",

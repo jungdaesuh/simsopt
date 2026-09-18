@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +17,10 @@ from examples.jax.parity.derived_review_summary import (
     render_derived_review_summary,
 )
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_EXPORTER_PATH = (
+    _REPO_ROOT / "examples" / "jax" / "parity" / "derived_review_summary.py"
+)
 _CASE_ID = "synthetic-case"
 _LANE_RECEIPT = {
     "lane": "native-cpu",
@@ -194,3 +201,86 @@ def test_export_rejects_an_array_that_lost_its_recorded_hash(
 
     with pytest.raises(ValueError, match="does not match its receipt"):
         build_derived_review_summary(run_directory)
+
+
+def test_export_rejects_a_descriptor_path_that_leaves_its_input_directory(
+    run_directory: Path,
+) -> None:
+    """A path is evidence too: one that escapes the lane cannot be hash-bound."""
+
+    bundle_path = run_directory / _CASE_ID / "inputs" / "input_bundle.json"
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    bundle["arrays"]["coil_dofs"]["path"] = "../native-cpu/values/final_objective.npy"
+    bundle_path.write_text(
+        json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="leaves its directory"):
+        build_derived_review_summary(run_directory)
+
+
+@pytest.mark.parametrize(
+    ("field", "escaping_value", "expected_message"),
+    (
+        ("result_directory", "../../elsewhere/native-cpu", "retained lane result"),
+        ("case_id", "/absolute/case", "retained case id"),
+    ),
+)
+def test_export_rejects_a_summary_path_that_leaves_the_run_directory(
+    run_directory: Path, field: str, escaping_value: str, expected_message: str
+) -> None:
+    """Every untrusted join in the retained run is refused, not normalised."""
+
+    summary_path = run_directory / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    case = summary["cases"][0]
+    if field == "case_id":
+        case["case_id"] = escaping_value
+    else:
+        case["executions"][0][field] = escaping_value
+    summary_path.write_text(
+        json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match=f"{expected_message}.*leaves its directory"):
+        build_derived_review_summary(run_directory)
+
+
+def test_export_decodes_evidence_as_utf8_under_an_ascii_process_locale(
+    run_directory: Path, tmp_path: Path
+) -> None:
+    """The exporter's declared encoding decodes evidence, not the locale's."""
+
+    bundle_path = run_directory / _CASE_ID / "inputs" / "input_bundle.json"
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    bundle["configuration"]["note"] = "Δ boundary"
+    bundle_path.write_text(
+        json.dumps(bundle, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    output = tmp_path / "ascii-locale" / "review-summary.json"
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(_REPO_ROOT)
+    environment["PYTHONUTF8"] = "0"
+    environment["PYTHONCOERCECLOCALE"] = "0"
+    environment["LC_ALL"] = "C"
+    environment["LANG"] = "C"
+
+    completed = subprocess.run(
+        (
+            sys.executable,
+            str(_EXPORTER_PATH),
+            "--run",
+            str(run_directory),
+            "--output",
+            str(output),
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    exported = json.loads(output.read_text(encoding="utf-8"))
+    assert exported["input_bundle"]["configuration"]["note"] == "Δ boundary"

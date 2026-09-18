@@ -10,9 +10,12 @@ from pathlib import Path
 import examples.jax._manifest as manifest_contract
 import pytest
 from examples.jax._manifest import (
+    EXAMPLE_IMPLEMENTATION_PACKAGE,
+    ExampleImplementationError,
     ManifestValidationError,
     derive_source_coverage,
     parse_manifest_document,
+    resolve_example_implementation,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -389,3 +392,323 @@ def test_jax_workflow_reaches_examples_from_both_events_and_existing_jobs() -> N
     )
     assert "run_examples.py --lane" not in public_integration
     assert "run_examples.py --lane" not in gpu_strict
+
+
+def _example_script(tmp_path: Path, name: str, source: str) -> Path:
+    path = tmp_path / name
+    path.write_text(source, encoding="utf-8")
+    return path
+
+
+def _implementation_module(tmp_path: Path, name: str, source: str) -> Path:
+    path = tmp_path / "src" / Path(*EXAMPLE_IMPLEMENTATION_PACKAGE.split(".")) / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    (path.parent / "__init__.py").touch()
+    path.write_text(source, encoding="utf-8")
+    return path
+
+
+def _modules(implementation) -> list[str | None]:
+    return [source.module for source in implementation.sources]
+
+
+def test_a_script_that_imports_no_implementation_module_is_its_own_source(
+    tmp_path: Path,
+) -> None:
+    script = _example_script(tmp_path, "self.py", "def main() -> int:\n    return 0\n")
+
+    implementation = resolve_example_implementation(script, repo_root=tmp_path)
+
+    assert _modules(implementation) == [None]
+    assert implementation.sources[0].path == script
+
+
+def test_a_stub_main_does_not_hide_the_module_it_delegates_to(tmp_path: Path) -> None:
+    """A script that defines a stub ``main`` is not its own implementation."""
+
+    _implementation_module(tmp_path, "_probe.py", "def main() -> int:\n    return 1\n")
+    script = _example_script(
+        tmp_path,
+        "stub.py",
+        f"from {EXAMPLE_IMPLEMENTATION_PACKAGE} import _probe\n\n\n"
+        "def main() -> int:\n    return _probe.main()\n",
+    )
+
+    implementation = resolve_example_implementation(script, repo_root=tmp_path)
+
+    assert _modules(implementation) == [
+        None,
+        EXAMPLE_IMPLEMENTATION_PACKAGE,
+        f"{EXAMPLE_IMPLEMENTATION_PACKAGE}._probe",
+    ]
+
+
+@pytest.mark.parametrize(
+    "statement",
+    (
+        "from {package}._probe import main",
+        "from {package}._probe import main as entry",
+        "from {package} import _probe",
+        "from {package} import _probe as probe",
+        "import {package}._probe",
+        "import {package}._probe as probe",
+    ),
+)
+def test_every_import_form_of_an_implementation_module_is_resolved(
+    tmp_path: Path, statement: str
+) -> None:
+    """The bound name is irrelevant; the imported module is what gets scanned."""
+
+    module_path = _implementation_module(
+        tmp_path, "_probe.py", "def main() -> int:\n    return 1\n"
+    )
+    script = _example_script(
+        tmp_path,
+        "thin.py",
+        statement.format(package=EXAMPLE_IMPLEMENTATION_PACKAGE) + "\n",
+    )
+
+    implementation = resolve_example_implementation(script, repo_root=tmp_path)
+
+    assert module_path in {source.path for source in implementation.sources}
+
+
+def test_resolution_follows_the_implementation_package_transitively(
+    tmp_path: Path,
+) -> None:
+    _implementation_module(tmp_path, "_second.py", "VALUE = 2\n")
+    _implementation_module(
+        tmp_path,
+        "_first.py",
+        f"from {EXAMPLE_IMPLEMENTATION_PACKAGE}._second import VALUE\n\n\n"
+        "def main() -> int:\n    return VALUE\n",
+    )
+    script = _example_script(
+        tmp_path,
+        "thin.py",
+        f"from {EXAMPLE_IMPLEMENTATION_PACKAGE}._first import main\n",
+    )
+
+    implementation = resolve_example_implementation(script, repo_root=tmp_path)
+
+    assert f"{EXAMPLE_IMPLEMENTATION_PACKAGE}._second" in _modules(implementation)
+
+
+@pytest.mark.parametrize(
+    "first_body",
+    (
+        "from ._second import VALUE\n\n\ndef main() -> int:\n    return VALUE\n",
+        "from . import _second\n\n\ndef main() -> int:\n    return _second.VALUE\n",
+    ),
+)
+def test_resolution_follows_relative_imports_inside_the_package(
+    tmp_path: Path, first_body: str
+) -> None:
+    """A module reachable only through a relative import is still scanned."""
+
+    second = _implementation_module(tmp_path, "_second.py", "VALUE = 2\n")
+    _implementation_module(tmp_path, "_first.py", first_body)
+    script = _example_script(
+        tmp_path,
+        "thin.py",
+        f"from {EXAMPLE_IMPLEMENTATION_PACKAGE}._first import main\n",
+    )
+
+    implementation = resolve_example_implementation(script, repo_root=tmp_path)
+
+    assert f"{EXAMPLE_IMPLEMENTATION_PACKAGE}._second" in _modules(implementation)
+    assert second in {source.path for source in implementation.sources}
+
+
+@pytest.mark.parametrize(
+    "library_import",
+    ("from ..geo import VALUE", "from simsopt_jax_adapters.geo import VALUE"),
+)
+def test_a_library_import_is_ignored_however_it_is_spelled(
+    tmp_path: Path, library_import: str
+) -> None:
+    """One filter runs on absolute names: relative and absolute agree exactly."""
+
+    library = tmp_path / "src" / "simsopt_jax_adapters" / "geo.py"
+    library.parent.mkdir(parents=True, exist_ok=True)
+    library.write_text("VALUE = 3\n", encoding="utf-8")
+    _implementation_module(
+        tmp_path,
+        "_first.py",
+        f"{library_import}\n\n\ndef main() -> int:\n    return VALUE\n",
+    )
+    script = _example_script(
+        tmp_path,
+        "thin.py",
+        f"from {EXAMPLE_IMPLEMENTATION_PACKAGE}._first import main\n",
+    )
+
+    implementation = resolve_example_implementation(script, repo_root=tmp_path)
+
+    assert _modules(implementation) == [
+        None,
+        EXAMPLE_IMPLEMENTATION_PACKAGE,
+        f"{EXAMPLE_IMPLEMENTATION_PACKAGE}._first",
+    ]
+    # The library file EXISTS and is still not read: the rule ignores a sibling
+    # package because of where it is, not because the target was missing.
+    assert library.is_file()
+    assert library not in {source.path for source in implementation.sources}
+
+
+def test_every_ancestor_package_init_enters_the_closure(tmp_path: Path) -> None:
+    """CPython runs each ``__init__.py`` on the way in, so the gate reads them."""
+
+    package_root = tmp_path / "src" / Path(*EXAMPLE_IMPLEMENTATION_PACKAGE.split("."))
+    subpackage = package_root / "_sub"
+    subpackage.mkdir(parents=True)
+    (package_root / "__init__.py").write_text("ROOT = 1\n", encoding="utf-8")
+    (subpackage / "__init__.py").write_text("SUB = 2\n", encoding="utf-8")
+    (subpackage / "_leaf.py").write_text(
+        "def main() -> int:\n    return 0\n", encoding="utf-8"
+    )
+    script = _example_script(
+        tmp_path,
+        "thin.py",
+        f"import {EXAMPLE_IMPLEMENTATION_PACKAGE}._sub._leaf\n",
+    )
+
+    implementation = resolve_example_implementation(script, repo_root=tmp_path)
+
+    assert _modules(implementation) == [
+        None,
+        EXAMPLE_IMPLEMENTATION_PACKAGE,
+        f"{EXAMPLE_IMPLEMENTATION_PACKAGE}._sub",
+        f"{EXAMPLE_IMPLEMENTATION_PACKAGE}._sub._leaf",
+    ]
+    assert "ROOT = 1" in implementation.sources[1].text
+    assert "SUB = 2" in implementation.sources[2].text
+
+
+def test_a_package_shadows_a_module_of_the_same_name(tmp_path: Path) -> None:
+    """When both exist, the ``__init__.py`` CPython executes is what gets read."""
+
+    package_root = tmp_path / "src" / Path(*EXAMPLE_IMPLEMENTATION_PACKAGE.split("."))
+    (package_root / "_a").mkdir(parents=True)
+    (package_root / "__init__.py").touch()
+    (package_root / "_a.py").write_text("SHADOWED = True\n", encoding="utf-8")
+    (package_root / "_a" / "__init__.py").write_text(
+        "EXECUTED = True\n\n\ndef main() -> int:\n    return 0\n", encoding="utf-8"
+    )
+    script = _example_script(
+        tmp_path,
+        "thin.py",
+        f"from {EXAMPLE_IMPLEMENTATION_PACKAGE}._a import main\n",
+    )
+
+    implementation = resolve_example_implementation(script, repo_root=tmp_path)
+
+    resolved = next(
+        source
+        for source in implementation.sources
+        if source.module == f"{EXAMPLE_IMPLEMENTATION_PACKAGE}._a"
+    )
+    assert resolved.path == package_root / "_a" / "__init__.py"
+    assert "EXECUTED = True" in resolved.text
+    assert "SHADOWED" not in resolved.text
+
+
+def test_resolution_refuses_a_namespace_subpackage(tmp_path: Path) -> None:
+    """A directory with no ``__init__.py`` is refused, not silently dropped."""
+
+    package_root = tmp_path / "src" / Path(*EXAMPLE_IMPLEMENTATION_PACKAGE.split("."))
+    (package_root / "_namespace").mkdir(parents=True)
+    (package_root / "__init__.py").touch()
+    script = _example_script(
+        tmp_path,
+        "thin.py",
+        f"import {EXAMPLE_IMPLEMENTATION_PACKAGE}._namespace\n\n\n"
+        "def main() -> int:\n    return 0\n",
+    )
+
+    with pytest.raises(ExampleImplementationError, match="namespace package"):
+        resolve_example_implementation(script, repo_root=tmp_path)
+
+
+def test_resolution_does_not_follow_other_first_party_packages(
+    tmp_path: Path,
+) -> None:
+    """A library import is a dependency, not a relocated example implementation."""
+
+    library = tmp_path / "src" / "simsopt_jax_adapters" / "geo" / "flat675.py"
+    library.parent.mkdir(parents=True)
+    (library.parent / "__init__.py").touch()
+    library.write_text("VALUE = 3\n", encoding="utf-8")
+    script = _example_script(
+        tmp_path,
+        "self.py",
+        "from simsopt_jax_adapters.geo.flat675 import VALUE\n\n\n"
+        "def main() -> int:\n    return VALUE\n",
+    )
+
+    implementation = resolve_example_implementation(script, repo_root=tmp_path)
+
+    assert _modules(implementation) == [None]
+    assert library.is_file()
+    assert library not in {source.path for source in implementation.sources}
+
+
+def test_resolution_refuses_a_script_with_no_main_anywhere(tmp_path: Path) -> None:
+    """A non-empty closure does not waive the entry-point requirement."""
+
+    _implementation_module(tmp_path, "_probe.py", "VALUE = 1\n")
+    script = _example_script(
+        tmp_path,
+        "no_main.py",
+        f"from {EXAMPLE_IMPLEMENTATION_PACKAGE}._probe import VALUE\n",
+    )
+
+    with pytest.raises(ExampleImplementationError, match="defines main"):
+        resolve_example_implementation(script, repo_root=tmp_path)
+
+
+def test_a_dynamically_loading_script_is_resolved_and_reported_to_the_ban(
+    tmp_path: Path,
+) -> None:
+    """The other half: a script WITH ``main`` that also loads code dynamically.
+
+    Resolution succeeds -- there is an entry point -- and ``runpy`` reaches the
+    forwarding-wrapper ban through ``imports``, which is what actually rejects it.
+    """
+
+    script = _example_script(
+        tmp_path,
+        "opaque.py",
+        "import runpy\n\n\ndef main() -> int:\n"
+        "    return int(bool(runpy.run_path('other.py')))\n",
+    )
+
+    implementation = resolve_example_implementation(script, repo_root=tmp_path)
+
+    assert _modules(implementation) == [None]
+    assert "runpy" in implementation.sources[0].imports
+
+
+def test_resolution_refuses_a_script_with_neither_main_nor_a_closure(
+    tmp_path: Path,
+) -> None:
+    script = _example_script(
+        tmp_path, "opaque.py", "import runpy\n\nrunpy.run_path('other.py')\n"
+    )
+
+    with pytest.raises(ExampleImplementationError, match="defines main"):
+        resolve_example_implementation(script, repo_root=tmp_path)
+
+
+def test_resolution_refuses_an_implementation_module_with_no_source(
+    tmp_path: Path,
+) -> None:
+    script = _example_script(
+        tmp_path,
+        "thin.py",
+        f"import {EXAMPLE_IMPLEMENTATION_PACKAGE}._absent\n\n\n"
+        "def main() -> int:\n    return 0\n",
+    )
+
+    with pytest.raises(ExampleImplementationError, match="no source under"):
+        resolve_example_implementation(script, repo_root=tmp_path)
