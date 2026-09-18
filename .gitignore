@@ -82,3 +82,6 @@ src/simsopt/_version.py
 /.artifacts/flat675_promotion/
 /.artifacts/genuine675_fair_bar/
 /.artifacts/nested-ls-gate6/
+
+# Local nested-LS benchmark receipts.
+/.artifacts/nested-ls-evidence/

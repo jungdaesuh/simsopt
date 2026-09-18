@@ -40,6 +40,7 @@ from benchmarks.single_stage_native_equivalent_quality_successor_authority impor
     DIAG5_NATIVE_COPY_RELATIVE_PATH,
     DIAG5_PLAN_RELATIVE_PATH,
     DIAG5_PLAN_SHA256,
+    Diag5PredecessorPostmortemUnavailableError,
 )
 from simsopt_jax.solve.fullspace_native_equivalent_quality import (
     NEQ_GNTR3_OPTIONS,
@@ -48,6 +49,12 @@ from simsopt_jax.solve.fullspace_native_equivalent_quality import (
 )
 
 _HASH = "a" * 64
+_POSTMORTEM_PAYLOAD = canonical_json_bytes(
+    {
+        "reconstruction": {},
+        "schema_version": qualifier.PREDECESSOR_POSTMORTEM_SCHEMA_VERSION,
+    }
+)
 
 
 def _environment() -> dict[str, str]:
@@ -111,12 +118,6 @@ def _small_execution_authority(
         ),
         "src/pkg/module.py": b"VALUE = 1\n",
         "tests/test_module.py": b"def test_value():\n    assert True\n",
-        qualifier.PREDECESSOR_POSTMORTEM_SOURCE_RELATIVE_PATH: canonical_json_bytes(
-            {
-                "reconstruction": {},
-                "schema_version": qualifier.PREDECESSOR_POSTMORTEM_SCHEMA_VERSION,
-            }
-        ),
     }
     for relative, payload in payloads.items():
         path = worktree / relative
@@ -239,13 +240,7 @@ class _FakeProducer:
         predecessor_path = (
             staging_root / qualifier.PREDECESSOR_POSTMORTEM_ARTIFACT_RELATIVE_PATH
         )
-        qualifier._publish_bytes(
-            predecessor_path,
-            (
-                qualifier.REPOSITORY_ROOT
-                / qualifier.PREDECESSOR_POSTMORTEM_SOURCE_RELATIVE_PATH
-            ).read_bytes(),
-        )
+        qualifier._publish_bytes(predecessor_path, _POSTMORTEM_PAYLOAD)
         return ProducedEvidence(
             scientific_outcome=self.outcome,
             numerical_identity=_identity(),
@@ -485,11 +480,20 @@ def test_cli_rejects_every_nonexact_output_root_before_delegation(
 
     monkeypatch.setattr(qualifier, "run_qualification", unexpected_run)
     with pytest.raises(QualificationError, match="output root must be exactly"):
-        qualifier.main(["--output-root", str(tmp_path / "wrong")])
+        qualifier.main(
+            [
+                "--output-root",
+                str(tmp_path / "wrong"),
+                "--predecessor-postmortem-archive",
+                str(tmp_path / "archive.json"),
+            ]
+        )
     assert not called
 
 
-def test_cli_exact_root_delegates_once(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_exact_root_delegates_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     observed: list[Path] = []
 
     def fake_run(
@@ -506,7 +510,18 @@ def test_cli_exact_root_delegates_once(monkeypatch: pytest.MonkeyPatch) -> None:
         }
 
     monkeypatch.setattr(qualifier, "run_qualification", fake_run)
-    assert qualifier.main(["--output-root", str(qualifier.EXPECTED_OUTPUT_ROOT)]) == 0
+    archive = tmp_path / "archive.json"
+    assert (
+        qualifier.main(
+            [
+                "--output-root",
+                str(qualifier.EXPECTED_OUTPUT_ROOT),
+                "--predecessor-postmortem-archive",
+                str(archive),
+            ]
+        )
+        == 0
+    )
     assert observed == [qualifier.EXPECTED_OUTPUT_ROOT]
 
 
@@ -539,14 +554,16 @@ def test_source_snapshot_membership_uses_typed_execution_authority() -> None:
     assert len([root for root in roots if root.role == "native_extension"]) == 1
 
 
-def test_only_predecessor_postmortem_document_maps_to_execution_source() -> None:
-    assert (
-        qualifier._execution_source_role(
-            qualifier.PREDECESSOR_POSTMORTEM_SOURCE_RELATIVE_PATH
-        )
-        == "execution_source"
-    )
+def test_no_document_under_docs_maps_to_an_execution_source_role() -> None:
+    """``docs/`` holds configuration, never bytes a certified lane executes.
+
+    The archived DIAG4 postmortem used to be special-cased into
+    ``execution_source`` here so that it could be a ledger member; it is an
+    external digest-bound artifact now, and the special case is gone.
+    """
+
     assert qualifier._execution_source_role("docs/other.json") == "configuration"
+    assert qualifier._execution_source_role("src/pkg/module.py") == "execution_source"
 
 
 def test_execution_source_authority_parser_is_strict_and_canonical(
@@ -825,45 +842,57 @@ def test_retained_plan_mutation_invalidates_copied_authority(
         copied.close()
 
 
-def test_predecessor_postmortem_copy_is_descriptor_bound_and_typed(
+def test_predecessor_postmortem_copy_comes_from_the_operator_archive(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The published copy is the archive the operator named, bound by digest."""
+
+    archive = tmp_path / "archive" / "predecessor-postmortem.json"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(_POSTMORTEM_PAYLOAD)
+    archive.chmod(0o444)
     monkeypatch.setattr(
         qualifier,
-        "validate_diag5_predecessor_failure",
-        lambda evidence, *, repository_root: None,
+        "load_diag5_predecessor_failure",
+        lambda archive_path: (object(), archive_path.read_bytes()),
     )
     monkeypatch.setattr(
         qualifier,
         "validate_diag5_predecessor_postmortem_artifact",
         lambda artifact_root, reference: {},
     )
-    authority = _small_execution_authority(tmp_path, monkeypatch)
     staging = tmp_path / "qualification.partial-claim"
     staging.mkdir()
-    try:
-        reference = qualifier._publish_predecessor_postmortem(authority, staging)
-        assert reference.relative_path == (
-            qualifier.PREDECESSOR_POSTMORTEM_ARTIFACT_RELATIVE_PATH
-        )
-        assert (
-            reference.schema_version == qualifier.PREDECESSOR_POSTMORTEM_SCHEMA_VERSION
-        )
-        assert qualifier._load_json_artifact(staging, reference) == {
-            "reconstruction": {},
-            "schema_version": qualifier.PREDECESSOR_POSTMORTEM_SCHEMA_VERSION,
-        }
-        source = authority.worktree_root / (
-            qualifier.PREDECESSOR_POSTMORTEM_SOURCE_RELATIVE_PATH
-        )
-        source.write_bytes(b"changed")
-        with pytest.raises(
-            QualificationError, match="retained execution-source changed"
-        ):
-            authority.validate(copied_required=False)
-    finally:
-        authority.close()
+
+    reference = qualifier._publish_predecessor_postmortem(archive, staging)
+
+    assert reference.relative_path == (
+        qualifier.PREDECESSOR_POSTMORTEM_ARTIFACT_RELATIVE_PATH
+    )
+    assert reference.schema_version == qualifier.PREDECESSOR_POSTMORTEM_SCHEMA_VERSION
+    assert qualifier._load_json_artifact(staging, reference) == {
+        "reconstruction": {},
+        "schema_version": qualifier.PREDECESSOR_POSTMORTEM_SCHEMA_VERSION,
+    }
+
+
+def test_predecessor_postmortem_publication_refuses_an_unnamed_archive(
+    tmp_path: Path,
+) -> None:
+    """No archive named means no qualification, not a silently skipped artifact."""
+
+    staging = tmp_path / "qualification.partial-claim"
+    staging.mkdir()
+
+    with pytest.raises(
+        Diag5PredecessorPostmortemUnavailableError, match="was not supplied"
+    ):
+        qualifier._publish_predecessor_postmortem(None, staging)
+
+    assert not (
+        staging / qualifier.PREDECESSOR_POSTMORTEM_ARTIFACT_RELATIVE_PATH
+    ).exists()
 
 
 def test_native_runtime_identity_mutation_is_rejected_before_snapshot() -> None:
@@ -1084,7 +1113,13 @@ def test_direct_bootstrap_claims_before_invalid_source_validation(
     monkeypatch.setattr(
         qualifier.sys,
         "argv",
-        ["qualifier.py", "--output-root", str(output_root)],
+        [
+            "qualifier.py",
+            "--output-root",
+            str(output_root),
+            "--predecessor-postmortem-archive",
+            str(tmp_path / "archive.json"),
+        ],
     )
     for name, value in qualifier._REQUIRED_ENVIRONMENT.items():
         monkeypatch.setenv(name, value)

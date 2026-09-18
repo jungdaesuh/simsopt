@@ -25,6 +25,7 @@ from benchmarks.single_stage_fullspace_snapshot import (
 from benchmarks.single_stage_native_equivalent_quality_successor_authority import (
     DIAG4_EXECUTION_SOURCE_MANIFEST_PATH,
     DIAG4_EXECUTION_SOURCE_SCHEMA_VERSION,
+    DIAG5_EXECUTION_SOURCE_ENTRY_COUNT,
     DIAG5_FROZEN_NUMERICAL_PATHS,
     DIAG5_QUALIFIED_FILE_PATHS,
 )
@@ -238,6 +239,31 @@ def test_regeneration_drops_a_member_that_vanished_from_the_tree(
     assert vanished not in changed
 
 
+def test_regeneration_refuses_every_member_whose_bytes_are_absent_from_disk(
+    repository: Path,
+) -> None:
+    """A named member with no bytes is refused by name, not carried forward.
+
+    This is the defect that let the published ledger declare an execution
+    source which had not existed in the tree for days: the previous record was
+    copied forward and the regeneration still reported success.  The refusal
+    names every absent member, because an operator fixes them in one pass.
+    """
+
+    absent = sorted(DIAG5_QUALIFIED_FILE_PATHS)[:2]
+    for relative in absent:
+        (repository / relative).unlink()
+
+    with pytest.raises(ManifestRegenerationError) as refusal:
+        regenerate_execution_source_manifest(
+            expected_count=_member_count(repository), repository=repository
+        )
+
+    message = str(refusal.value)
+    assert "absent from disk" in message
+    assert all(relative in message for relative in absent), message
+
+
 def test_regeneration_refuses_to_drop_a_path_the_rule_still_selects(
     repository: Path,
 ) -> None:
@@ -293,6 +319,17 @@ def test_the_live_repository_membership_matches_its_published_manifest() -> None
     )
     assert isinstance(document, dict)
     assert frozenset(document["entries"]) == execution_source_membership(live)
+
+
+def test_the_frozen_entry_count_twin_matches_the_published_manifest() -> None:
+    """The count the gates read and the manifest they read it about agree."""
+
+    live = Path(__file__).resolve().parents[2]
+    document = load_canonical_json_bytes(
+        (live / DIAG4_EXECUTION_SOURCE_MANIFEST_PATH).read_bytes()
+    )
+    assert isinstance(document, dict)
+    assert len(document["entries"]) == DIAG5_EXECUTION_SOURCE_ENTRY_COUNT
 
 
 def test_an_ignored_file_under_a_root_is_not_a_member(repository: Path) -> None:

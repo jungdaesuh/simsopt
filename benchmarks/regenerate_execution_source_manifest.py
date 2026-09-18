@@ -81,6 +81,11 @@ def regenerate_execution_source_manifest(
     regeneration changes, so a caller can show the operator what moved.  Every
     refusal names the paths responsible: a manifest is reviewed by reading the
     difference, not by rerunning the tool.
+
+    A member the rule selects but whose bytes are absent from disk is such a
+    refusal.  Carrying its previous record forward would let the manifest
+    assert bytes no lane can open, which is how an absent execution source
+    survived a regeneration PASS once already.
     """
 
     manifest_path = repository / DIAG4_EXECUTION_SOURCE_MANIFEST_PATH
@@ -131,15 +136,11 @@ def regenerate_execution_source_manifest(
 
     entries: dict[str, JsonValue] = {}
     changed: list[str] = []
+    absent: list[str] = []
     for relative in sorted(membership):
         source = repository / relative
-        previous_entry = previous.get(relative)
         if not source.is_file():
-            if not isinstance(previous_entry, dict):
-                raise ManifestRegenerationError(
-                    f"member is not a file on disk: {relative}"
-                )
-            entries[relative] = previous_entry
+            absent.append(relative)
             continue
         payload = source.read_bytes()
         entry: JsonValue = {
@@ -147,8 +148,10 @@ def regenerate_execution_source_manifest(
             "size_bytes": len(payload),
         }
         entries[relative] = entry
-        if entry != previous_entry:
+        if entry != previous.get(relative):
             changed.append(relative)
+    if absent:
+        raise ManifestRegenerationError(f"members are absent from disk: {absent}")
     return (
         canonical_json_bytes(
             {

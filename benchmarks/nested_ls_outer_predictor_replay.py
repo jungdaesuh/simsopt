@@ -149,9 +149,23 @@ _IMPORT_SECONDS = float(time.perf_counter() - _T0)
 # production wiring, which must go through exported API.
 # ---------------------------------------------------------------------------
 
-EVIDENCE = REPO / "docs" / "receipts" / "evidence"
-LEDGER_PATH = EVIDENCE / "nested_ls_outer_b37_20260823_recovered_jax.json"
-REPLAY_LOG_PATH = EVIDENCE / "nested_ls_outer_b37_20260824_transaction_replay.log"
+from benchmarks.nested_ls_evidence import EVIDENCE
+
+#: The recovered B37 v1 ledger is a historical campaign artefact with no
+#: generator: 72e7a72b0 removed it from the tree with the rest of
+#: ``docs/receipts/``, and its bytes are not reproducible on the current
+#: binary (see ``trajectory_drift_finding``). No location in this repository
+#: is therefore the ledger, so the operator names the file on the command
+#: line and ``LEDGER_SHA256`` decides whether those bytes are this ledger.
+LEDGER_NAME = "nested_ls_outer_b37_20260823_recovered_jax.json"
+
+#: Repo-relative citation of the committed transaction replay log every
+#: ``COMMITTED_REPLAY_*`` constant below was read from. A citation of where
+#: that log was when it was read, not a live path -- 72e7a72b0 removed it too,
+#: so it is deliberately not spelled against the receipt directory.
+COMMITTED_REPLAY_LOG = (
+    "docs/receipts/evidence/nested_ls_outer_b37_20260824_transaction_replay.log"
+)
 
 SCHEMA = "nested-ls-outer-predictor-replay.v1"
 PUBLICATION = (
@@ -560,9 +574,9 @@ def trajectory_drift_finding(
             "ledger must disclose the binary boundary."
         ),
         "sources": {
-            "ledger": str(LEDGER_PATH),
+            "ledger": LEDGER_NAME,
             "ledger_sha256": LEDGER_SHA256,
-            "committed_replay_log": str(REPLAY_LOG_PATH.relative_to(REPO)),
+            "committed_replay_log": COMMITTED_REPLAY_LOG,
             "ledger_simsoptpp_sha256": (
                 "not recorded: nested_ls_runtime_identity gained "
                 "simsoptpp_sha256 in Phase 0, after this ledger was written"
@@ -692,6 +706,24 @@ class ReplayLedger:
     trial_coil_dofs: NDArray[np.float64]
     coil_step_l2: float
     fingerprints: dict[str, object]
+
+
+def resolve_ledger_path(supplied: Path | None) -> Path:
+    """The operator's ``--ledger`` path, or an owned refusal naming what is missing.
+
+    There is no default: the ledger is a historical artefact this repository
+    does not carry, and guessing a location for it would be inventing evidence.
+    """
+
+    if supplied is None:
+        raise SystemExit(
+            "nested-LS predictor replay requires --ledger: the recovered B37 "
+            f"v1 ledger {LEDGER_NAME} (sha256 {LEDGER_SHA256}) is a historical "
+            "artefact that is not in this repository, so this driver has no "
+            "path to default to. Pass the file to replay; its bytes are "
+            "checked against that sha256 before anything is read from them."
+        )
+    return Path(supplied)
 
 
 def load_replay_ledger(path: Path) -> ReplayLedger:
@@ -1460,8 +1492,12 @@ def run_predictor_leg(
     )
     # The legs run PRODUCTION's assembly. The harness's own is kept only as
     # the mirror below, which is what localizes a gap to assembly order.
-    predicted_surface, production_arm, production_raw_l2, production_applied_l2, (
-        production_scaled
+    (
+        predicted_surface,
+        production_arm,
+        production_raw_l2,
+        production_applied_l2,
+        (production_scaled),
     ) = production_predicted_start(
         world,
         anchor_coils=anchor_coils,
@@ -2203,7 +2239,7 @@ def run_predictor_mode(
             "committed_replay_prefix": (
                 COMMITTED_REPLAY_REGENERATED_SURFACE_SHA256_PREFIX
             ),
-            "committed_replay_log": str(REPLAY_LOG_PATH.relative_to(REPO)),
+            "committed_replay_log": COMMITTED_REPLAY_LOG,
             "bitwise_not_gated_because": (
                 "a bitwise match is not attainable across the simsoptpp "
                 "binary boundary between the recorded run and this one -- see "
@@ -2487,7 +2523,7 @@ def print_plan(
     print(f"mode                  : {mode}")
     print(f"repo                  : {REPO}")
     print(f"ledger                : {ledger.path}")
-    print(f"replay log (cited)    : {REPLAY_LOG_PATH}")
+    print(f"replay log (cited)    : {COMMITTED_REPLAY_LOG}")
     print(f"lane                  : {lane_binding['lane_path']}")
     print(f"out                   : {out_path}")
     print(f"jax default backend   : {identity['jax_default_backend']}")
@@ -2605,14 +2641,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--ledger",
         type=Path,
-        default=LEDGER_PATH,
-        help="Recovered B37 v1 JAX child ledger to replay.",
+        default=None,
+        help=(
+            f"Recovered B37 v1 JAX child ledger to replay ({LEDGER_NAME}, "
+            f"sha256 {LEDGER_SHA256}). Required: the file is not in the tree."
+        ),
     )
     parser.add_argument(
         "--out",
         type=Path,
         default=None,
-        help="Evidence JSON path (default: under docs/receipts/evidence/).",
+        help=f"Evidence JSON path (default: under {EVIDENCE}/).",
     )
     parser.add_argument(
         "--dry-run",
@@ -2635,7 +2674,7 @@ def main(argv: list[str] | None = None) -> int:
     mode = str(args.mode)
     out_path = Path(args.out) if args.out is not None else default_out_path(mode)
 
-    ledger = load_replay_ledger(Path(args.ledger))
+    ledger = load_replay_ledger(resolve_ledger_path(args.ledger))
     lane_binding = check_lane_binds_to_ledger(ledger)
     identity = nested_ls_runtime_identity()
 

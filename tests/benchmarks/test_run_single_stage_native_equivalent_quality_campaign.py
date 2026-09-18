@@ -11226,13 +11226,118 @@ def test_diag5_sealed_native_copy_requires_read_only_unique_inode(
         successor_authority.validate_diag5_sealed_native_copy(sealed, binding)
 
 
+def _diag5_launcher_argv(tmp_path: Path, archive: Path | None) -> list[str]:
+    authority = tmp_path / runner._DIAG5_BOOTSTRAP_AUTHORITY_RELATIVE_PATH
+    argv = [
+        "--output",
+        str(tmp_path / "campaign-output"),
+        "--reference",
+        str(tmp_path / "reference"),
+        "--input-root",
+        str(tmp_path / "inputs"),
+        "--diagnostic-successor-authority",
+        str(authority),
+    ]
+    if archive is not None:
+        argv += ["--predecessor-postmortem-archive", str(archive)]
+    return argv
+
+
+def test_launcher_forwards_the_operator_archive_to_the_diag5_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The DIAG5 launcher hands the claim the archive the operator named.
+
+    Without this the new required input has no route into a real campaign
+    launch, which is exactly how the missing postmortem went unnoticed.
+    """
+
+    class _Forwarded(RuntimeError):
+        pass
+
+    captured: dict[str, object] = {}
+
+    def fake_claim(
+        authority_path: Path,
+        *,
+        repository_root: Path,
+        output_root: Path,
+        predecessor_postmortem_archive: Path | None,
+    ) -> object:
+        captured["authority_path"] = authority_path
+        captured["repository_root"] = repository_root
+        captured["output_root"] = output_root
+        captured["archive"] = predecessor_postmortem_archive
+        raise _Forwarded
+
+    monkeypatch.setattr(runner, "claim_diag5_successor_authority", fake_claim)
+    archive = tmp_path / "archive" / "predecessor-postmortem.json"
+
+    with pytest.raises(_Forwarded):
+        runner.main(_diag5_launcher_argv(tmp_path, archive))
+
+    assert captured["archive"] == archive
+
+
+def test_launcher_without_the_archive_option_hits_the_owned_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No hidden default: an unnamed archive refuses by name at the claim."""
+
+    def claim_with_real_refusal(
+        authority_path: Path,
+        *,
+        repository_root: Path,
+        output_root: Path,
+        predecessor_postmortem_archive: Path | None,
+    ) -> object:
+        successor_authority.load_diag5_predecessor_failure(
+            predecessor_postmortem_archive
+        )
+        raise AssertionError("the unnamed archive must have been refused")
+
+    monkeypatch.setattr(
+        runner, "claim_diag5_successor_authority", claim_with_real_refusal
+    )
+
+    with pytest.raises(
+        successor_authority.Diag5PredecessorPostmortemUnavailableError
+    ) as refusal:
+        runner.main(_diag5_launcher_argv(tmp_path, None))
+
+    message = str(refusal.value)
+    assert "was not supplied" in message
+    assert successor_authority.DIAG5_PREDECESSOR_POSTMORTEM_RELATIVE_PATH in message
+    assert successor_authority.DIAG5_PREDECESSOR_POSTMORTEM_SHA256 in message
+
+
+def test_every_qualified_execution_source_exists_in_this_repository() -> None:
+    """A qualified path names bytes a certified lane can open, or it is not one.
+
+    The archived DIAG4 postmortem failed this for days: it was named here, so
+    it was a ledger member, while the file itself had left the tree.  It is now
+    an external artifact bound by digest instead, and must not come back.
+    """
+
+    repository = Path(__file__).resolve().parents[2]
+    absent = sorted(
+        relative
+        for relative in successor_authority.DIAG5_QUALIFIED_FILE_PATHS
+        if not (repository / relative).is_file()
+    )
+
+    assert absent == []
+    assert (
+        successor_authority.DIAG5_PREDECESSOR_POSTMORTEM_RELATIVE_PATH
+        not in successor_authority.DIAG5_QUALIFIED_FILE_PATHS
+    )
+    assert len(successor_authority.DIAG5_PREDECESSOR_POSTMORTEM_SHA256) == 64
+
+
 def test_diag5_predecessor_partial_and_postmortem_are_bound(
     tmp_path: Path,
 ) -> None:
-    repository = tmp_path / "repository"
-    receipt_path = (
-        repository / successor_authority.DIAG5_PREDECESSOR_POSTMORTEM_RELATIVE_PATH
-    )
+    receipt_path = tmp_path / "archive" / "predecessor-postmortem.json"
     receipt_path.parent.mkdir(parents=True)
     receipt_path.write_bytes(
         runner.canonical_json_bytes(_diag5_predecessor_postmortem())
@@ -11240,8 +11345,16 @@ def test_diag5_predecessor_partial_and_postmortem_are_bound(
     receipt_path.chmod(0o444)
 
     successor_authority.validate_diag5_predecessor_failure(
-        _diag5_predecessor_evidence(receipt_path), repository_root=repository
+        _diag5_predecessor_evidence(receipt_path)
     )
+
+    with pytest.raises(ValueError, match="reconstruction differs"):
+        successor_authority.validate_diag5_predecessor_failure(
+            replace(
+                _diag5_predecessor_evidence(receipt_path),
+                predecessor_full_tree_sha256="f" * 64,
+            )
+        )
 
     changed = _diag5_predecessor_postmortem()
     reconstruction = changed["reconstruction"]
@@ -11250,10 +11363,13 @@ def test_diag5_predecessor_partial_and_postmortem_are_bound(
     receipt_path.chmod(0o644)
     receipt_path.write_bytes(runner.canonical_json_bytes(changed))
     receipt_path.chmod(0o444)
-    with pytest.raises(ValueError, match="reconstruction differs"):
+    with pytest.raises(
+        successor_authority.Diag5PredecessorPostmortemUnavailableError
+    ) as refusal:
         successor_authority.validate_diag5_predecessor_failure(
-            _diag5_predecessor_evidence(receipt_path), repository_root=repository
+            _diag5_predecessor_evidence(receipt_path)
         )
+    assert successor_authority.DIAG5_PREDECESSOR_POSTMORTEM_SHA256 in str(refusal.value)
 
 
 def test_diag5_native_claim_retains_and_revalidates_hardlink_topology(
@@ -11282,10 +11398,7 @@ def test_diag5_native_claim_rejects_same_byte_path_replacement(tmp_path: Path) -
 
 
 def test_diag5_predecessor_rejects_arbitrary_review_ledger(tmp_path: Path) -> None:
-    repository = tmp_path / "repository"
-    postmortem_path = (
-        repository / successor_authority.DIAG5_PREDECESSOR_POSTMORTEM_RELATIVE_PATH
-    )
+    postmortem_path = tmp_path / "archive" / "predecessor-postmortem.json"
     postmortem_path.parent.mkdir(parents=True)
     postmortem = _diag5_predecessor_postmortem()
     reconstruction = postmortem["reconstruction"]
@@ -11299,26 +11412,296 @@ def test_diag5_predecessor_rejects_arbitrary_review_ledger(tmp_path: Path) -> No
     postmortem_path.write_bytes(runner.canonical_json_bytes(postmortem))
     postmortem_path.chmod(0o444)
 
-    with pytest.raises(ValueError, match="review retraction differs"):
+    with pytest.raises(
+        successor_authority.Diag5PredecessorPostmortemUnavailableError
+    ) as refusal:
         successor_authority.validate_diag5_predecessor_failure(
-            _diag5_predecessor_evidence(postmortem_path),
-            repository_root=repository,
+            _diag5_predecessor_evidence(postmortem_path)
         )
 
+    assert successor_authority.DIAG5_PREDECESSOR_POSTMORTEM_SHA256 in str(refusal.value)
+    assert reviews != successor_authority._diag5_expected_retracted_reviews()
+    assert (
+        _diag5_predecessor_postmortem()["reconstruction"]["prior_reviews_retracted"]
+        == successor_authority._diag5_expected_retracted_reviews()
+    )
 
-def test_diag5_predecessor_rejects_wrong_postmortem_path(tmp_path: Path) -> None:
-    repository = tmp_path / "repository"
-    postmortem_path = repository / "docs" / "wrong.json"
+
+def test_diag5_predecessor_rejects_a_non_canonical_archive_path(
+    tmp_path: Path,
+) -> None:
+    """The archive is named by absolute canonical path, never resolved for us."""
+
+    postmortem_path = tmp_path / "archive" / "predecessor-postmortem.json"
     postmortem_path.parent.mkdir(parents=True)
     postmortem_path.write_bytes(
         runner.canonical_json_bytes(_diag5_predecessor_postmortem())
     )
     postmortem_path.chmod(0o444)
+    evidence = _diag5_predecessor_evidence(postmortem_path)
+    indirect = tmp_path / "archive" / ".." / "archive" / "predecessor-postmortem.json"
 
-    with pytest.raises(ValueError, match="postmortem path differs"):
+    with pytest.raises(
+        successor_authority.Diag5PredecessorPostmortemUnavailableError,
+        match="canonical absolute path",
+    ):
         successor_authority.validate_diag5_predecessor_failure(
-            _diag5_predecessor_evidence(postmortem_path),
-            repository_root=repository,
+            replace(evidence, postmortem_path=indirect)
+        )
+
+
+def test_diag5_predecessor_names_the_expected_digest_when_the_archive_is_absent(
+    tmp_path: Path,
+) -> None:
+    """An absent archive is an owned, actionable refusal, never FileNotFoundError."""
+
+    postmortem_path = tmp_path / "archive" / "predecessor-postmortem.json"
+    postmortem_path.parent.mkdir(parents=True)
+    postmortem_path.write_bytes(
+        runner.canonical_json_bytes(_diag5_predecessor_postmortem())
+    )
+    postmortem_path.chmod(0o444)
+    evidence = _diag5_predecessor_evidence(postmortem_path)
+    postmortem_path.unlink()
+
+    with pytest.raises(
+        successor_authority.Diag5PredecessorPostmortemUnavailableError
+    ) as refusal:
+        successor_authority.validate_diag5_predecessor_failure(evidence)
+
+    message = str(refusal.value)
+    assert str(postmortem_path) in message
+    assert successor_authority.DIAG5_PREDECESSOR_POSTMORTEM_SHA256 in message
+
+
+def test_diag5_predecessor_archive_reader_binds_seal_and_pinned_digest(
+    tmp_path: Path,
+) -> None:
+    """The archived artifact is bound by seal and by the repository's own digest."""
+
+    archive = tmp_path / "archive" / "predecessor-postmortem.json"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(runner.canonical_json_bytes(_diag5_predecessor_postmortem()))
+
+    archive.chmod(0o644)
+    with pytest.raises(
+        successor_authority.Diag5PredecessorPostmortemUnavailableError,
+        match="is not sealed",
+    ):
+        successor_authority.read_diag5_predecessor_postmortem(archive)
+
+    alias = tmp_path / "archive" / "alias.json"
+    os.link(archive, alias)
+    archive.chmod(0o444)
+    with pytest.raises(
+        successor_authority.Diag5PredecessorPostmortemUnavailableError,
+        match="is not sealed",
+    ):
+        successor_authority.read_diag5_predecessor_postmortem(archive)
+    alias.unlink()
+
+    tampered = _diag5_predecessor_postmortem()
+    tampered["session_reference"] = "invented"
+    archive.chmod(0o644)
+    archive.write_bytes(runner.canonical_json_bytes(tampered))
+    archive.chmod(0o444)
+    with pytest.raises(
+        successor_authority.Diag5PredecessorPostmortemUnavailableError
+    ) as refusal:
+        successor_authority.read_diag5_predecessor_postmortem(archive)
+    assert str(archive) in str(refusal.value)
+    assert successor_authority.DIAG5_PREDECESSOR_POSTMORTEM_SHA256 in str(refusal.value)
+
+    archive.unlink()
+    with pytest.raises(
+        successor_authority.Diag5PredecessorPostmortemUnavailableError
+    ) as missing:
+        successor_authority.read_diag5_predecessor_postmortem(archive)
+    assert successor_authority.DIAG5_PREDECESSOR_POSTMORTEM_SHA256 in str(missing.value)
+
+
+_ARCHIVE_KIND_PROBE = """
+import sys
+from pathlib import Path
+
+from benchmarks.single_stage_native_equivalent_quality_successor_authority import (
+    Diag5PredecessorPostmortemUnavailableError,
+    read_diag5_predecessor_postmortem,
+)
+
+try:
+    read_diag5_predecessor_postmortem(Path(sys.argv[1]))
+except Diag5PredecessorPostmortemUnavailableError:
+    print("OWNED", end="")
+else:
+    print("NO REFUSAL", end="")
+"""
+
+
+def _run_archive_kind_probe(archive: Path) -> str:
+    """Read one archive path in a child that is not allowed to block."""
+
+    repository = Path(__file__).resolve().parents[2]
+    completed = subprocess.run(
+        [sys.executable, "-c", _ARCHIVE_KIND_PROBE, str(archive)],
+        capture_output=True,
+        check=False,
+        cwd=repository,
+        env={
+            **os.environ,
+            "JAX_PLATFORMS": "cpu",
+            "PYTHONPATH": os.pathsep.join(
+                (
+                    str(repository),
+                    str(repository / "src"),
+                    str(repository / "build/cp311-cp311-linux_x86_64"),
+                )
+            ),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        text=True,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return completed.stdout
+
+
+def test_diag5_predecessor_archive_refuses_a_directory(tmp_path: Path) -> None:
+    """A directory is refused by the owned error, not by a raw IsADirectoryError.
+
+    The reader used to hash the descriptor before proving it regular, so this
+    escaped as ``IsADirectoryError`` and broke the owned-error contract.
+    """
+
+    archive = tmp_path / "archive-directory"
+    archive.mkdir()
+
+    with pytest.raises(successor_authority.Diag5PredecessorPostmortemUnavailableError):
+        successor_authority.read_diag5_predecessor_postmortem(archive)
+
+
+def test_diag5_predecessor_archive_refuses_a_fifo_without_blocking(
+    tmp_path: Path,
+) -> None:
+    """A FIFO is refused promptly; a blocking open would hang every lane.
+
+    The refusal is proven in a child process under an explicit timeout, with no
+    writer open on the FIFO, so a regression to a blocking open fails this test
+    instead of hanging the suite.
+    """
+
+    archive = tmp_path / "archive-fifo"
+    os.mkfifo(archive)
+    try:
+        assert _run_archive_kind_probe(archive) == "OWNED"
+    finally:
+        archive.unlink()
+
+
+def test_diag5_predecessor_archive_still_accepts_the_sealed_artifact(
+    tmp_path: Path,
+) -> None:
+    """The positive path is unchanged: the sealed archive reads byte-for-byte."""
+
+    archive = tmp_path / "archive" / "predecessor-postmortem.json"
+    archive.parent.mkdir(parents=True)
+    payload = runner.canonical_json_bytes(_diag5_predecessor_postmortem())
+    archive.write_bytes(payload)
+    archive.chmod(0o444)
+
+    assert successor_authority.read_diag5_predecessor_postmortem(archive) == payload
+    assert (
+        hashlib.sha256(payload).hexdigest()
+        == successor_authority.DIAG5_PREDECESSOR_POSTMORTEM_SHA256
+    )
+
+
+def test_diag5_predecessor_evidence_cannot_certify_itself_with_its_own_digest(
+    tmp_path: Path,
+) -> None:
+    """The module pin is the only digest authority; a caller cannot supply one.
+
+    A hand-built evidence used to be able to name the digest of whatever bytes
+    it had just read, so a tampered archive validated against its own hash.
+    """
+
+    archive = tmp_path / "archive" / "predecessor-postmortem.json"
+    archive.parent.mkdir(parents=True)
+    tampered = _diag5_predecessor_postmortem()
+    tampered["session_reference"] = "invented"
+    payload = runner.canonical_json_bytes(tampered)
+    archive.write_bytes(payload)
+    archive.chmod(0o444)
+    evidence = replace(
+        _diag5_predecessor_evidence(archive),
+        postmortem_sha256=hashlib.sha256(payload).hexdigest(),
+    )
+
+    with pytest.raises(
+        successor_authority.Diag5PredecessorPostmortemUnavailableError
+    ) as refusal:
+        successor_authority.validate_diag5_predecessor_failure(evidence)
+
+    assert successor_authority.DIAG5_PREDECESSOR_POSTMORTEM_SHA256 in str(refusal.value)
+
+
+def test_diag5_predecessor_archive_must_be_supplied_by_the_operator() -> None:
+    """No default archive location exists; an unnamed archive is refused."""
+
+    with pytest.raises(
+        successor_authority.Diag5PredecessorPostmortemUnavailableError
+    ) as refusal:
+        successor_authority.load_diag5_predecessor_failure(None)
+
+    message = str(refusal.value)
+    assert "was not supplied" in message
+    assert successor_authority.DIAG5_PREDECESSOR_POSTMORTEM_RELATIVE_PATH in message
+    assert successor_authority.DIAG5_PREDECESSOR_POSTMORTEM_SHA256 in message
+
+
+def test_diag5_declared_predecessor_identity_is_taken_from_the_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The authority may only declare the predecessor identity the archive shows.
+
+    This is the branch that used to raise ``TypeError`` before it reached any
+    file, so it had never run: it called the validator with a ``Path`` and a
+    ``postmortem_path`` keyword the validator does not accept, then read a
+    field off its ``None`` return.
+    """
+
+    postmortem_path = tmp_path / "archive" / "predecessor-postmortem.json"
+    postmortem_path.parent.mkdir(parents=True)
+    postmortem_path.write_bytes(
+        runner.canonical_json_bytes(_diag5_predecessor_postmortem())
+    )
+    postmortem_path.chmod(0o444)
+    evidence = _diag5_predecessor_evidence(postmortem_path)
+    monkeypatch.setattr(
+        successor_authority,
+        "load_diag5_predecessor_failure",
+        lambda _archive: (evidence, b"{}\n"),
+    )
+
+    successor_authority._validate_diag5_declared_predecessor_identity(
+        evidence.predecessor_full_tree_sha256, postmortem_path
+    )
+
+    with pytest.raises(ValueError, match="full-tree identity differs"):
+        successor_authority._validate_diag5_declared_predecessor_identity(
+            "f" * 64, postmortem_path
+        )
+
+
+def test_diag5_declared_predecessor_identity_refuses_an_unnamed_archive() -> None:
+    """The repaired branch reaches the archive input instead of raising TypeError."""
+
+    with pytest.raises(
+        successor_authority.Diag5PredecessorPostmortemUnavailableError,
+        match="was not supplied",
+    ):
+        successor_authority._validate_diag5_declared_predecessor_identity(
+            "f" * 64, None
         )
 
 

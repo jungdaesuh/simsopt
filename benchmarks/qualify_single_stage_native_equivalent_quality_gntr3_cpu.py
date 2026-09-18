@@ -1551,9 +1551,7 @@ def _neutralize_editable_source_redirection() -> tuple[str, ...]:
         if "ScikitBuild" in type(finder).__name__
     )
     sys.meta_path[:] = [
-        finder
-        for finder in sys.meta_path
-        if "ScikitBuild" not in type(finder).__name__
+        finder for finder in sys.meta_path if "ScikitBuild" not in type(finder).__name__
     ]
     return removed
 
@@ -1561,6 +1559,17 @@ def _neutralize_editable_source_redirection() -> tuple[str, ...]:
 def _direct_bootstrap() -> None:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument(
+        "--predecessor-postmortem-archive",
+        type=Path,
+        required=True,
+        metavar="ABSOLUTE_PATH",
+        help=(
+            "absolute path to this operator's archived copy of the DIAG4 "
+            "independent postmortem; its bytes must match the digest the "
+            "successor authority pins"
+        ),
+    )
     arguments = parser.parse_args()
     expected = Path(_EXPECTED_OUTPUT_ROOT_TEXT)
     if arguments.output_root != expected:
@@ -1696,15 +1705,11 @@ from benchmarks.single_stage_native_equivalent_quality_successor_authority impor
     DIAG5_PLAN_RELATIVE_PATH,
     DIAG5_PLAN_SHA256,
     DIAG5_QUALIFIED_FILE_PATHS,
-    Diag5PredecessorFailureEvidence,
-    validate_diag5_predecessor_failure,
+    load_diag5_predecessor_failure,
     validate_diag5_predecessor_postmortem_artifact,
 )
 from benchmarks.single_stage_native_equivalent_quality_successor_authority import (
     DIAG5_PREDECESSOR_POSTMORTEM_ARTIFACT_RELATIVE_PATH as PREDECESSOR_POSTMORTEM_ARTIFACT_RELATIVE_PATH,
-)
-from benchmarks.single_stage_native_equivalent_quality_successor_authority import (
-    DIAG5_PREDECESSOR_POSTMORTEM_RELATIVE_PATH as PREDECESSOR_POSTMORTEM_SOURCE_RELATIVE_PATH,
 )
 from benchmarks.single_stage_native_equivalent_quality_successor_authority import (
     DIAG5_PREDECESSOR_POSTMORTEM_SCHEMA_VERSION as PREDECESSOR_POSTMORTEM_SCHEMA_VERSION,
@@ -1718,9 +1723,7 @@ from benchmarks.single_stage_native_equivalent_reference import (
 )
 
 if _PREQUALIFICATION_PLAN_SOURCE_RELATIVE_PATH != DIAG5_PLAN_RELATIVE_PATH:
-    raise QualificationError(
-        "prequalification plan source path differs from authority"
-    )
+    raise QualificationError("prequalification plan source path differs from authority")
 from benchmarks.single_stage_native_equivalent_reference import (
     load_canonical_json_bytes as load_reference_json_bytes,
 )
@@ -2395,8 +2398,6 @@ def _load_json_artifact(root: Path, reference: ArtifactRef) -> JsonValue:
 
 
 def _execution_source_role(relative: str) -> str:
-    if relative == PREDECESSOR_POSTMORTEM_SOURCE_RELATIVE_PATH:
-        return "execution_source"
     if relative.startswith("docs/"):
         return "configuration"
     if relative.startswith("tests/"):
@@ -2420,24 +2421,17 @@ def _prequalification_plan_control(
 
 
 def _publish_predecessor_postmortem(
-    execution_sources: ExecutionSourceBindings,
+    archive_path: Path | None,
     staging_root: Path,
 ) -> ArtifactRef:
-    binding = next(
-        (
-            candidate
-            for candidate in execution_sources.entries
-            if candidate.entry.relative_path
-            == PREDECESSOR_POSTMORTEM_SOURCE_RELATIVE_PATH
-        ),
-        None,
-    )
-    if binding is None:
-        raise QualificationError(
-            "predecessor postmortem is absent from source authority"
-        )
-    payload = _descriptor_bytes(binding.live_descriptor, binding.entry.size_bytes)
-    _validate_predecessor_postmortem(execution_sources.worktree_root, payload)
+    """Copy the operator's archived DIAG4 postmortem into this qualification.
+
+    The postmortem is an archived campaign artifact rather than an execution
+    source, so its bytes come from the absolute archive path the operator named
+    and are bound by the successor authority's pinned digest before publication.
+    """
+
+    _evidence, payload = load_diag5_predecessor_failure(archive_path)
     destination = staging_root.joinpath(
         *_safe_relative_path(PREDECESSOR_POSTMORTEM_ARTIFACT_RELATIVE_PATH).parts
     )
@@ -2447,46 +2441,6 @@ def _publish_predecessor_postmortem(
     )
     validate_diag5_predecessor_postmortem_artifact(staging_root, reference)
     return reference
-
-
-def _validate_predecessor_postmortem(repository: Path, payload: bytes) -> None:
-    if not payload:
-        raise QualificationError("predecessor postmortem source bytes are absent")
-    document = load_canonical_json_bytes(payload)
-    if (
-        not isinstance(document, dict)
-        or document.get("schema_version") != PREDECESSOR_POSTMORTEM_SCHEMA_VERSION
-    ):
-        raise QualificationError("predecessor postmortem schema differs")
-    reconstruction = document.get("reconstruction")
-    if not isinstance(reconstruction, dict):
-        raise QualificationError("predecessor postmortem reconstruction differs")
-    postmortem_path = repository / PREDECESSOR_POSTMORTEM_SOURCE_RELATIVE_PATH
-    validate_diag5_predecessor_failure(
-        Diag5PredecessorFailureEvidence(
-            partial_root=Path(str(reconstruction.get("partial_root"))),
-            failed_stage=str(reconstruction.get("failed_stage")),
-            exception_class=str(reconstruction.get("exception_class")),
-            exception_message=str(reconstruction.get("exception_message")),
-            qualifier_sha256=str(reconstruction.get("qualifier_sha256")),
-            execution_manifest_sha256=str(
-                reconstruction.get("execution_manifest_sha256")
-            ),
-            execution_entries_sha256=str(
-                reconstruction.get("execution_entries_sha256")
-            ),
-            execution_source_entry_count=reconstruction.get(
-                "execution_source_entry_count"
-            ),
-            copied_tree_entry_count=reconstruction.get("copied_tree_entry_count"),
-            predecessor_full_tree_sha256=str(
-                reconstruction.get("predecessor_full_tree_sha256")
-            ),
-            postmortem_path=postmortem_path,
-            postmortem_sha256=_sha256(payload),
-        ),
-        repository_root=repository,
-    )
 
 
 def _validate_public_source_membership(
@@ -3215,6 +3169,10 @@ class ProductionCpuQualificationProducer:
     worktree_root: Path = WORKTREE_ROOT
     reference_root: Path = NATIVE_REFERENCE_ROOT
     input_root: Path = INPUT_ROOT
+    # Absolute path to the operator's archive of the DIAG4 postmortem. This
+    # repository keeps only the artifact's digest, so there is no default: an
+    # unsupplied archive is refused by name, never guessed at.
+    predecessor_postmortem_archive: Path | None = None
 
     def produce(
         self,
@@ -3253,7 +3211,7 @@ class ProductionCpuQualificationProducer:
                 native_binding,
             )
             predecessor_postmortem = _publish_predecessor_postmortem(
-                execution_source_bindings,
+                self.predecessor_postmortem_archive,
                 staging_root,
             )
             ImportedSourceBindings((native_binding,)).validate()
@@ -4309,6 +4267,17 @@ def run_qualification(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument(
+        "--predecessor-postmortem-archive",
+        type=Path,
+        required=True,
+        metavar="ABSOLUTE_PATH",
+        help=(
+            "absolute path to this operator's archived copy of the DIAG4 "
+            "independent postmortem; its bytes must match the digest the "
+            "successor authority pins"
+        ),
+    )
     return parser
 
 
@@ -4335,7 +4304,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     if arguments.output_root != EXPECTED_OUTPUT_ROOT:
         raise QualificationError(f"output root must be exactly {EXPECTED_OUTPUT_ROOT}")
-    producer = ProductionCpuQualificationProducer()
+    producer = ProductionCpuQualificationProducer(
+        predecessor_postmortem_archive=arguments.predecessor_postmortem_archive,
+    )
     if os.environ.get(_WORKER_ENVIRONMENT) == "1":
         runtime = observe_cpu_runtime(os.environ)
         publication = _inherited_publication(arguments.output_root)

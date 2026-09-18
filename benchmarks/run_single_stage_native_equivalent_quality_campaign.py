@@ -11543,6 +11543,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--reference", type=Path, required=True)
     parser.add_argument("--input-root", type=Path, required=True)
     parser.add_argument("--interpreter", type=Path, default=Path(sys.executable))
+    parser.add_argument(
+        "--predecessor-postmortem-archive",
+        type=Path,
+        metavar="ABSOLUTE_PATH",
+        help=(
+            "absolute path to this operator's archived copy of the DIAG4 "
+            "independent postmortem; its bytes must match the digest the "
+            "successor authority pins. Required by "
+            "--diagnostic-successor-authority, which refuses without it"
+        ),
+    )
     parser.add_argument("--sample", choices=[sample.value for sample in SAMPLE_ORDER])
     parser.add_argument("--snapshot-child", action="store_true")
     parser.add_argument(
@@ -11644,6 +11655,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 authority_path,
                 repository_root=repository,
                 output_root=arguments.output,
+                predecessor_postmortem_archive=(
+                    arguments.predecessor_postmortem_archive
+                ),
             ) as successor_claim:
                 revalidate_diag5_successor_authority(successor_claim)
                 _release_diag5_bootstrap_bindings()

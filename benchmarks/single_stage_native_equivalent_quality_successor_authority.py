@@ -350,7 +350,6 @@ DIAG5_QUALIFIED_FILE_PATHS: Final = frozenset(
         "benchmarks/single_stage_native_equivalent_quality_receipt.py",
         "benchmarks/single_stage_native_equivalent_quality_successor_authority.py",
         "benchmarks/single_stage_native_equivalent_reference.py",
-        "docs/single_stage_jax_gpu_native_equivalent_quality_diag4_independent_postmortem.json",
         "src/simsopt/configs/NCSX.dat",
         "tests/benchmarks/_diag2_fixture.py",
         "tests/benchmarks/test_process_gpu_monitor.py",
@@ -381,6 +380,18 @@ DIAG5_FROZEN_NUMERICAL_PATHS: Final = frozenset(
         "src/simsopt_jax_adapters/geo/single_stage_native_endpoint.py",
     }
 )
+# Refrozen 2026-09-18: one member dropped,
+# ``docs/single_stage_jax_gpu_native_equivalent_quality_diag4_independent_postmortem.json``.
+# It is an archived DIAG4 campaign artifact, not an execution source: it never
+# executes, it was a member only because this constant named it, and the file
+# has not existed in the tree since the campaign ``docs/`` curation, so the
+# manifest asserted bytes no lane could open.  Its byte binding did not move:
+# ``DIAG5_PREDECESSOR_POSTMORTEM_SHA256`` remains the authoritative digest and
+# the artifact is now resolved from an operator-supplied archive path.  The
+# count below is NOT bumped by this drop on its own: the same synchronisation
+# admits ``benchmarks/nested_ls_evidence.py``, so the regenerated manifest
+# holds 690 entries again.  Verify with the regenerator before trusting it.
+#
 # Refrozen 2026-09-17: 687 -> 690. ``src/simsopt/examples/{__init__,execution}.py``
 # became the private ``src/simsopt/_examples_runtime/{__init__,execution}.py``
 # (two dropped, two admitted) and the flat675 example implementation moved out
@@ -911,14 +922,87 @@ def validate_diag5_sealed_native_copy(
         os.close(descriptor)
 
 
+class Diag5PredecessorPostmortemUnavailableError(ValueError):
+    """The archived DIAG4 postmortem an operator named is absent or altered."""
+
+
+def _diag5_predecessor_postmortem_expectation() -> str:
+    return (
+        f"an archived copy of {DIAG5_PREDECESSOR_POSTMORTEM_RELATIVE_PATH} whose "
+        f"sha256 is {DIAG5_PREDECESSOR_POSTMORTEM_SHA256}"
+    )
+
+
+def read_diag5_predecessor_postmortem(archive_path: Path) -> bytes:
+    """Read the archived DIAG4 postmortem from the absolute path an operator named.
+
+    The postmortem is a frozen campaign artifact, not an execution source: this
+    repository keeps only its digest, ``DIAG5_PREDECESSOR_POSTMORTEM_SHA256``,
+    and the operator says where their archive of it lives.  The archive must be
+    a canonical absolute path to a sealed file (regular, mode 0444, one link)
+    whose bytes hash to that digest.  Every other outcome raises
+    ``Diag5PredecessorPostmortemUnavailableError`` naming both the path asked
+    for and the digest expected, so an absent archive can never read as a pass.
+
+    The descriptor is opened non-blocking and proven regular and sealed BEFORE
+    a single byte is read: an operator can name a directory or a FIFO, and
+    reading one of those first would raise a raw ``IsADirectoryError`` or block
+    the whole qualification until a writer appeared.  ``O_NONBLOCK`` is a no-op
+    for reads once the descriptor is known to be a regular file.
+    """
+
+    if not archive_path.is_absolute() or archive_path.resolve() != archive_path:
+        raise Diag5PredecessorPostmortemUnavailableError(
+            "DIAG5 predecessor postmortem archive must be a canonical absolute "
+            f"path, not {archive_path}"
+        )
+    try:
+        descriptor = os.open(
+            archive_path,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+        )
+    except OSError as error:
+        raise Diag5PredecessorPostmortemUnavailableError(
+            f"DIAG5 predecessor postmortem archive is unreadable at {archive_path}; "
+            f"supply {_diag5_predecessor_postmortem_expectation()}"
+        ) from error
+    try:
+        metadata = os.fstat(descriptor)
+        bound = archive_path.stat(follow_symlinks=False)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != 0o444
+            or metadata.st_nlink != 1
+            or (metadata.st_dev, metadata.st_ino) != (bound.st_dev, bound.st_ino)
+        ):
+            raise Diag5PredecessorPostmortemUnavailableError(
+                "DIAG5 predecessor postmortem archive is not sealed at "
+                f"{archive_path}; supply "
+                f"{_diag5_predecessor_postmortem_expectation()}"
+            )
+        payload = _diag5_descriptor_bytes(descriptor)
+    finally:
+        os.close(descriptor)
+    if hashlib.sha256(payload).hexdigest() != DIAG5_PREDECESSOR_POSTMORTEM_SHA256:
+        raise Diag5PredecessorPostmortemUnavailableError(
+            f"DIAG5 predecessor postmortem archive at {archive_path} is not "
+            f"{_diag5_predecessor_postmortem_expectation()}"
+        )
+    return payload
+
+
 def validate_diag5_predecessor_failure(
     evidence: Diag5PredecessorFailureEvidence,
-    *,
-    repository_root: Path,
 ) -> None:
-    """Validate the preserved DIAG4 partial without treating it as science."""
+    """Validate the preserved DIAG4 partial without treating it as science.
 
-    repository = repository_root.resolve(strict=True)
+    ``evidence.postmortem_path`` is the archive the operator named; the seal and
+    digest of that archive are enforced in exactly one place,
+    ``read_diag5_predecessor_postmortem``, which this delegates to.  The only
+    digest authority is ``DIAG5_PREDECESSOR_POSTMORTEM_SHA256``: an evidence
+    naming any other digest is refused before the archive is opened at all.
+    """
+
     root = evidence.partial_root
     root_metadata = root.lstat()
     if (
@@ -945,28 +1029,13 @@ def validate_diag5_predecessor_failure(
         != DIAG5_FAILED_DIAG4_EXECUTION_SOURCE_ENTRY_COUNT + 1
     ):
         raise ValueError("DIAG5 predecessor failure evidence differs")
-    expected_postmortem = repository / DIAG5_PREDECESSOR_POSTMORTEM_RELATIVE_PATH
-    if evidence.postmortem_path != expected_postmortem:
-        raise ValueError("DIAG5 predecessor postmortem path differs")
-    postmortem_descriptor = os.open(
-        expected_postmortem, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
-    )
-    try:
-        postmortem_metadata = os.fstat(postmortem_descriptor)
-        postmortem_bound = expected_postmortem.stat(follow_symlinks=False)
-        postmortem_bytes = _diag5_descriptor_bytes(postmortem_descriptor)
-        if (
-            not stat.S_ISREG(postmortem_metadata.st_mode)
-            or stat.S_IMODE(postmortem_metadata.st_mode) != 0o444
-            or postmortem_metadata.st_nlink != 1
-            or (postmortem_metadata.st_dev, postmortem_metadata.st_ino)
-            != (postmortem_bound.st_dev, postmortem_bound.st_ino)
-        ):
-            raise ValueError("DIAG5 predecessor postmortem is not sealed")
-    finally:
-        os.close(postmortem_descriptor)
-    if hashlib.sha256(postmortem_bytes).hexdigest() != evidence.postmortem_sha256:
-        raise ValueError("DIAG5 predecessor postmortem bytes differ")
+    if evidence.postmortem_sha256 != DIAG5_PREDECESSOR_POSTMORTEM_SHA256:
+        raise Diag5PredecessorPostmortemUnavailableError(
+            "DIAG5 predecessor failure evidence names digest "
+            f"{evidence.postmortem_sha256}; the only authority is "
+            f"{_diag5_predecessor_postmortem_expectation()}"
+        )
+    postmortem_bytes = read_diag5_predecessor_postmortem(evidence.postmortem_path)
     postmortem = _mapping(
         load_canonical_json_bytes(postmortem_bytes), "DIAG5 predecessor postmortem"
     )
@@ -1140,6 +1209,89 @@ def validate_diag5_predecessor_failure(
         evidence.predecessor_full_tree_sha256
     ):
         raise ValueError("DIAG5 predecessor full-tree aggregate differs")
+
+
+def load_diag5_predecessor_failure(
+    archive_path: Path | None,
+) -> tuple[Diag5PredecessorFailureEvidence, bytes]:
+    """Bind the archived DIAG4 postmortem and the failure it reconstructs.
+
+    ``archive_path`` is operator-owned input; ``None`` means the operator did
+    not name one, which is a refusal, not a default.  Returns the evidence the
+    archive records together with the exact bytes that were validated, so a
+    caller republishing the artifact republishes those same bytes.
+    """
+
+    if archive_path is None:
+        raise Diag5PredecessorPostmortemUnavailableError(
+            "DIAG5 predecessor postmortem archive was not supplied; name "
+            f"{_diag5_predecessor_postmortem_expectation()}"
+        )
+    payload = read_diag5_predecessor_postmortem(archive_path)
+    document = _mapping(
+        load_canonical_json_bytes(payload), "DIAG5 predecessor postmortem"
+    )
+    reconstruction = _mapping(
+        document.get("reconstruction"), "DIAG5 predecessor reconstruction"
+    )
+    evidence = Diag5PredecessorFailureEvidence(
+        partial_root=Path(
+            _string(reconstruction.get("partial_root"), "DIAG5 predecessor root")
+        ),
+        failed_stage=_string(
+            reconstruction.get("failed_stage"), "DIAG5 predecessor stage"
+        ),
+        exception_class=_string(
+            reconstruction.get("exception_class"), "DIAG5 predecessor exception class"
+        ),
+        exception_message=_string(
+            reconstruction.get("exception_message"),
+            "DIAG5 predecessor exception message",
+        ),
+        qualifier_sha256=_string(
+            reconstruction.get("qualifier_sha256"), "DIAG5 predecessor qualifier SHA"
+        ),
+        execution_manifest_sha256=_string(
+            reconstruction.get("execution_manifest_sha256"),
+            "DIAG5 predecessor manifest SHA",
+        ),
+        execution_entries_sha256=_string(
+            reconstruction.get("execution_entries_sha256"),
+            "DIAG5 predecessor entries SHA",
+        ),
+        execution_source_entry_count=_integer(
+            reconstruction.get("execution_source_entry_count"),
+            "DIAG5 predecessor entry count",
+        ),
+        copied_tree_entry_count=_integer(
+            reconstruction.get("copied_tree_entry_count"),
+            "DIAG5 predecessor copied entry count",
+        ),
+        predecessor_full_tree_sha256=_string(
+            reconstruction.get("predecessor_full_tree_sha256"),
+            "DIAG5 predecessor full-tree SHA",
+        ),
+        postmortem_path=archive_path,
+        postmortem_sha256=DIAG5_PREDECESSOR_POSTMORTEM_SHA256,
+    )
+    validate_diag5_predecessor_failure(evidence)
+    return evidence, payload
+
+
+def _validate_diag5_declared_predecessor_identity(
+    declared_full_tree_sha256: JsonValue,
+    archive_path: Path | None,
+) -> None:
+    """Require the authority's declared predecessor identity to be the archive's.
+
+    An authority may only claim the DIAG4 failure it can still show, so the
+    declared aggregate is compared against the one the operator's archived
+    postmortem reconstructs and validates.
+    """
+
+    predecessor, _archived = load_diag5_predecessor_failure(archive_path)
+    if declared_full_tree_sha256 != predecessor.predecessor_full_tree_sha256:
+        raise ValueError("DIAG5 predecessor full-tree identity differs")
 
 
 class Diag5AuthorityLifecycle(str, Enum):
@@ -2018,6 +2170,7 @@ def _validate_diag5_authority_payload(
     *,
     repository: Path,
     output_root: Path,
+    predecessor_postmortem_archive: Path | None,
     locked_leaves: Mapping[Path, _Diag4LockedLeaf] | None = None,
 ) -> tuple[
     Diag5NativeExtensionBinding,
@@ -2195,16 +2348,9 @@ def _validate_diag5_authority_payload(
     if postmortem.sha256 != DIAG5_PREDECESSOR_POSTMORTEM_SHA256:
         raise ValueError("DIAG5 predecessor postmortem differs")
     if locked_leaves is None:
-        predecessor = validate_diag5_predecessor_failure(
-            DIAG5_FAILED_DIAG4_PARTIAL_ROOT,
-            repository_root=repository,
-            postmortem_path=repository / DIAG5_PREDECESSOR_POSTMORTEM_RELATIVE_PATH,
+        _validate_diag5_declared_predecessor_identity(
+            payload["predecessor_full_tree_sha256"], predecessor_postmortem_archive
         )
-        if (
-            payload["predecessor_full_tree_sha256"]
-            != predecessor.predecessor_full_tree_sha256
-        ):
-            raise ValueError("DIAG5 predecessor full-tree identity differs")
     else:
         predecessor_execution = DIAG5_FAILED_DIAG4_PARTIAL_ROOT / "execution-source"
         predecessor_manifest_path = (
@@ -2438,8 +2584,19 @@ def _validate_diag5_authority_payload(
 
 
 def validate_diag5_successor_authority(
-    authority_path: Path, *, repository_root: Path, output_root: Path
+    authority_path: Path,
+    *,
+    repository_root: Path,
+    output_root: Path,
+    predecessor_postmortem_archive: Path | None,
 ) -> Mapping[str, JsonValue]:
+    """Validate the DIAG5 authority document against this repository.
+
+    ``predecessor_postmortem_archive`` is the operator's absolute path to the
+    archived DIAG4 postmortem; the repository no longer carries that artifact
+    and refuses rather than guessing where a copy lives.
+    """
+
     repository = repository_root.resolve(strict=True)
     expected = repository / DIAG5_AUTHORITY_RELATIVE_PATH
     if (
@@ -2451,7 +2608,10 @@ def validate_diag5_successor_authority(
         load_canonical_json_bytes(expected.read_bytes()), "DIAG5 authority"
     )
     _validate_diag5_authority_payload(
-        payload, repository=repository, output_root=output_root.absolute()
+        payload,
+        repository=repository,
+        output_root=output_root.absolute(),
+        predecessor_postmortem_archive=predecessor_postmortem_archive,
     )
     return MappingProxyType(dict(payload))
 
@@ -2624,8 +2784,20 @@ def _open_diag5_shared_locked_leaf(
 
 @contextmanager
 def claim_diag5_successor_authority(
-    authority_path: Path, *, repository_root: Path, output_root: Path
+    authority_path: Path,
+    *,
+    repository_root: Path,
+    output_root: Path,
+    predecessor_postmortem_archive: Path | None,
 ) -> Iterator[Diag5SuccessorAuthorityClaim]:
+    """Claim the DIAG5 authority for one output root.
+
+    ``predecessor_postmortem_archive`` is the operator's absolute path to the
+    archived DIAG4 postmortem, required because the repository keeps only that
+    artifact's digest.  The held revalidation reads the already-locked
+    predecessor tree instead, so only this first pass consumes it.
+    """
+
     repository = repository_root.resolve(strict=True)
     output = output_root.absolute()
     expected_authority = repository / DIAG5_AUTHORITY_RELATIVE_PATH
@@ -2644,7 +2816,10 @@ def claim_diag5_successor_authority(
         _cpu_source_snapshot,
         _gpu_source_snapshot_identity,
     ) = _validate_diag5_authority_payload(
-        payload, repository=repository, output_root=output
+        payload,
+        repository=repository,
+        output_root=output,
+        predecessor_postmortem_archive=predecessor_postmortem_archive,
     )
     qualified = _diag4_qualified_files(payload["qualified_files"])
     frozen = _diag4_frozen_numerical_entries(payload["frozen_numerical_entries"])
@@ -2697,6 +2872,9 @@ def claim_diag5_successor_authority(
                 held_payload,
                 repository=repository,
                 output_root=output,
+                # The held pass re-reads the locked predecessor tree, so it
+                # never consults the operator's archive.
+                predecessor_postmortem_archive=None,
                 locked_leaves=locked,
             )
             if (
@@ -3685,6 +3863,8 @@ def revalidate_diag5_successor_authority(
             ),
             repository=lease.repository,
             output_root=lease.output_root,
+            # Revalidation reads the locked predecessor tree, never the archive.
+            predecessor_postmortem_archive=None,
             locked_leaves=lease.locked_leaves,
         )
     )
@@ -7172,6 +7352,7 @@ __all__ = (
     "Diag5PhysicalEvidenceReservation",
     "Diag5PhysicalPathState",
     "Diag5PredecessorFailureEvidence",
+    "Diag5PredecessorPostmortemUnavailableError",
     "Diag5PublishedOutputKind",
     "Diag5RollbackCause",
     "Diag5RollbackObservation",
@@ -7197,10 +7378,12 @@ __all__ = (
     "finalize_diag4_prelaunch_failure",
     "finalize_diag5_physical_evidence_success",
     "fsync_diag5_output_parent",
+    "load_diag5_predecessor_failure",
     "observe_diag5_native_extension_binding",
     "prepare_diag5_physical_failure_evidence",
     "publish_diag5_bound_staging",
     "publish_diag5_physical_failure_evidence",
+    "read_diag5_predecessor_postmortem",
     "revalidate_diag4_successor_authority",
     "revalidate_diag5_native_extension_binding",
     "revalidate_diag5_published_output",

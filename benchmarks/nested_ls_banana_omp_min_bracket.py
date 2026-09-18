@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,7 +13,10 @@ from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
 )
 
 REPO = Path(__file__).resolve().parents[1]
-EVIDENCE = REPO / "docs" / "receipts" / "evidence"
+sys.path.insert(0, str(REPO))
+
+from benchmarks.nested_ls_evidence import EVIDENCE
+
 PUBLICATION = (
     "OMP-pinned banana min-bracket fill at 12 and 14 threads. Brackets "
     "the OMP=16 native peak on a 32-core box. Records process wall and "
@@ -58,6 +62,7 @@ payload = {
     "threads": list(F3_B37_BANANA_OMP_MIN_BRACKET_THREADS),
     "written_by_pytest": False,
 }
+OUT_JSON.parent.mkdir(parents=True, exist_ok=True)
 write_strict_json(OUT_JSON, payload)
 print("wrote", OUT_JSON, flush=True)
 ok = probe.fail_closed_reason is None

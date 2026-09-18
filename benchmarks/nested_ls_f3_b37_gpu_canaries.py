@@ -1,10 +1,11 @@
 """Repo-path GPU canaries for nested-LS banana OMP and warm chunk sweeps.
 
-Writes JSON under docs/receipts/evidence/. Not a nested speed claim.
+Writes JSON under the nested-LS evidence directory. Not a nested speed claim.
 """
 
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,7 +31,10 @@ from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
 )
 
 REPO = Path(__file__).resolve().parents[1]
-EVIDENCE = REPO / "docs" / "receipts" / "evidence"
+sys.path.insert(0, str(REPO))
+
+from benchmarks.nested_ls_evidence import EVIDENCE
+
 BANANA_PUBLICATION = (
     "OMP-pinned interleaved native banana run_code sweep. "
     "Not a nested speed claim and not F3 7.70x."
@@ -84,6 +88,7 @@ banana_payload = {
     "threads": list(F3_B37_BANANA_OMP_THREADS),
     "written_by_pytest": False,
 }
+BANANA_JSON.parent.mkdir(parents=True, exist_ok=True)
 write_strict_json(BANANA_JSON, banana_payload)
 print("wrote", BANANA_JSON, flush=True)
 
@@ -112,6 +117,7 @@ warm_payload = {
     "schema": "nested-ls-reduced-gpu-chunk-warm.v1",
     "written_by_pytest": False,
 }
+WARM_JSON.parent.mkdir(parents=True, exist_ok=True)
 write_strict_json(WARM_JSON, warm_payload)
 print("wrote", WARM_JSON, flush=True)
 print(

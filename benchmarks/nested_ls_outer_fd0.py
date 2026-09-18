@@ -35,12 +35,12 @@ from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
     load_flat675_lane_blocks,
 )
 
+from benchmarks.nested_ls_evidence import EVIDENCE
 from benchmarks.nested_ls_shamanskii_attribution import (
     git_implementation_dirty,
     write_strict_json,
 )
 
-EVIDENCE = REPO / "docs" / "receipts" / "evidence"
 PUBLICATION = (
     "Gate FD-0: all 11 coil-direction central differences of the eight-term "
     "outer J against the Schur adjoint gradient at the dense-LU walk "
@@ -206,6 +206,7 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(
             f"HEAD changed during Gate FD-0: started at {sha}, ended at {final_sha}"
         )
+    out_json.parent.mkdir(parents=True, exist_ok=True)
     write_strict_json(out_json, payload)
     out_log.write_text("\n".join(_log_lines(probe, sha)) + "\n", encoding="utf-8")
     print("wrote", out_json, flush=True)

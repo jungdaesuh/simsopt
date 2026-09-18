@@ -53,6 +53,7 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     nested_ls_native_inner_policy,
 )
 
+from benchmarks.nested_ls_evidence import EVIDENCE
 from benchmarks.nested_ls_shamanskii_attribution import (
     PYTHON,
     REPEATS,
@@ -60,7 +61,6 @@ from benchmarks.nested_ls_shamanskii_attribution import (
     write_strict_json,
 )
 
-EVIDENCE = REPO / "docs" / "receipts" / "evidence"
 NATIVE_CHILD = REPO / "benchmarks" / "nested_ls_outer_native_child.py"
 JAX_CHILD = REPO / "benchmarks" / "nested_ls_outer_jax_child.py"
 CACHE_OUTER = REPO / ".artifacts" / "nested-ls-outer-xla"

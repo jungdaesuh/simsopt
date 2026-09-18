@@ -28,6 +28,7 @@ if str(REPO) not in sys.path:
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
+from benchmarks import nested_ls_evidence
 from benchmarks import nested_ls_outer_predictor_replay as probe
 
 # --------------------------------------------------------------------------
@@ -40,6 +41,41 @@ def test_missing_ledger_path_fails_closed_naming_the_field(tmp_path: Path) -> No
 
     with pytest.raises(SystemExit, match="ledger_path"):
         probe.load_replay_ledger(tmp_path / "absent.json")
+
+
+def test_an_unsupplied_ledger_names_the_file_the_operator_must_pass() -> None:
+    """The recorded ledger is not in this repository, so there is no default.
+
+    ``72e7a72b0`` removed it with the rest of ``docs/receipts/``. Guessing a
+    location would be inventing evidence, so the driver refuses by name.
+    """
+
+    with pytest.raises(SystemExit) as refusal:
+        probe.resolve_ledger_path(None)
+
+    message = str(refusal.value)
+    assert "--ledger" in message
+    assert probe.LEDGER_NAME in message
+    assert probe.LEDGER_SHA256 in message
+
+
+def test_the_cli_carries_no_default_ledger_path() -> None:
+    """The operator's path is the only way in, and it is passed through."""
+
+    assert probe.parse_args([]).ledger is None
+    supplied = probe.parse_args(["--ledger", "/tmp/ledger.json"]).ledger
+    assert probe.resolve_ledger_path(supplied) == Path("/tmp/ledger.json")
+
+
+def test_the_committed_replay_log_is_cited_where_it_was_read() -> None:
+    """A citation of a deleted blob, never re-spelled against the live output."""
+
+    assert probe.COMMITTED_REPLAY_LOG == (
+        "docs/receipts/evidence/nested_ls_outer_b37_20260824_transaction_replay.log"
+    )
+    finding = probe.trajectory_drift_finding(None)
+    assert finding["sources"]["committed_replay_log"] == probe.COMMITTED_REPLAY_LOG
+    assert finding["sources"]["ledger"] == probe.LEDGER_NAME
 
 
 # --------------------------------------------------------------------------
@@ -296,6 +332,7 @@ def test_solve_plan_counts_match_the_declared_budget() -> None:
 
 def test_default_out_path_lands_under_the_evidence_directory() -> None:
     assert probe.default_out_path("all").parent == probe.EVIDENCE
+    assert probe.EVIDENCE is nested_ls_evidence.EVIDENCE
     assert probe.default_out_path("predictor").name.endswith(".predictor.json")
     assert probe.default_out_path("all").name.endswith(
         f"{datetime.now(timezone.utc).strftime('%Y%m%d')}.json"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,7 +13,10 @@ from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
 )
 
 REPO = Path(__file__).resolve().parents[1]
-EVIDENCE = REPO / "docs" / "receipts" / "evidence"
+sys.path.insert(0, str(REPO))
+
+from benchmarks.nested_ls_evidence import EVIDENCE
+
 PUBLICATION = (
     "OMP-pinned banana gap fill at 20 and 24 threads. Fills the "
     "16-to-32 hole on a 32-core box. Not a nested speed claim."
@@ -56,6 +60,7 @@ payload = {
     "threads": list(F3_B37_BANANA_OMP_GAP_THREADS),
     "written_by_pytest": False,
 }
+OUT_JSON.parent.mkdir(parents=True, exist_ok=True)
 write_strict_json(OUT_JSON, payload)
 print("wrote", OUT_JSON, flush=True)
 ok = probe.fail_closed_reason is None

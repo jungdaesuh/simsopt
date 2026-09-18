@@ -6,6 +6,7 @@ not the 5090 OMP=16 result.
 
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,7 +17,10 @@ from simsopt_jax_adapters.geo.nested_ls_reduced_scale import (
 )
 
 REPO = Path(__file__).resolve().parents[1]
-EVIDENCE = REPO / "docs" / "receipts" / "evidence"
+sys.path.insert(0, str(REPO))
+
+from benchmarks.nested_ls_evidence import EVIDENCE
+
 PUBLICATION = (
     "A100 Landau OMP-pinned banana contract sweep "
     "{4,8,12,14,16,20,24,32}. Best-of-contract is this host's native "
@@ -77,6 +81,7 @@ payload = {
     "threads": list(F3_B37_BANANA_OMP_CONTRACT_THREADS),
     "written_by_pytest": False,
 }
+OUT_JSON.parent.mkdir(parents=True, exist_ok=True)
 write_strict_json(OUT_JSON, payload)
 print("wrote", OUT_JSON, flush=True)
 print("best_omp", best_threads, "best_inner", best_inner, flush=True)

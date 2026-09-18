@@ -27,10 +27,18 @@ def write_strict_json(path: Path, payload: dict[str, object]) -> None:
 
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "src"))
 from simsopt_jax_adapters.geo.nested_ls_contract import NESTED_LS_GATE6_CLAIM_REPEATS
 
-EVIDENCE = REPO / "docs" / "receipts" / "evidence"
+from benchmarks.nested_ls_evidence import EVIDENCE
+
+#: ``git status --porcelain`` prefix of the one directory whose untracked
+#: entries are generated receipts rather than implementation. Derived from
+#: ``EVIDENCE`` so it follows the destination instead of drifting away from
+#: it, as the ``docs/receipts/evidence/`` spelling did when 72e7a72b0 deleted
+#: that tree.
+EVIDENCE_STATUS_PREFIX = f"{EVIDENCE.relative_to(REPO).as_posix()}/"
 CHILD = REPO / "benchmarks" / "nested_ls_shamanskii_child.py"
 PUBLICATION = (
     "Shamanskii and compile-cache attribution: cache-only, lag-only, and both. "
@@ -106,18 +114,33 @@ def lane_json_path(lane: str) -> Path:
 
 
 def git_status_short() -> str:
+    """Porcelain status, one line per untracked file rather than per directory.
+
+    ``--untracked-files=all`` is load-bearing: the default collapses an
+    untracked tree to a single directory line, which would both hide
+    non-receipt files behind a receipt-shaped path and stop the receipt
+    directory's own entries from ever matching a full-path exemption.
+    """
+
     return subprocess.check_output(
-        ["git", "status", "--porcelain"], cwd=str(REPO), text=True
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=str(REPO),
+        text=True,
     )
 
 
 def git_implementation_dirty() -> str:
-    """Tracked/untracked paths outside the evidence directory."""
+    """Every status entry except untracked receipts in the output directory.
+
+    A tracked change is implementation wherever it lives -- including under
+    the receipt directory itself -- so only ``??`` entries are ever dropped.
+    """
 
     lines: list[str] = []
     for line in git_status_short().splitlines():
+        status = line[:2]
         path = line[3:].strip().split(" -> ", 1)[-1]
-        if path.startswith("docs/receipts/evidence/"):
+        if status == "??" and path.startswith(EVIDENCE_STATUS_PREFIX):
             continue
         lines.append(line)
     return "\n".join(lines)
@@ -344,6 +367,7 @@ def payload_for_rows(
 
 def write_lane_json(lane: str, rows: list[dict[str, object]]) -> Path:
     path = lane_json_path(lane) if lane != "floor" else FLOOR_JSON
+    path.parent.mkdir(parents=True, exist_ok=True)
     write_strict_json(
         path,
         payload_for_rows(
@@ -386,6 +410,7 @@ def merge_lane_files(*, allow_dirty: bool) -> dict[str, object]:
     merged = payload_for_rows(
         rows, driver="benchmarks.nested_ls_shamanskii_attribution"
     )
+    OUT_JSON.parent.mkdir(parents=True, exist_ok=True)
     write_strict_json(OUT_JSON, merged)
     print("wrote", OUT_JSON, flush=True)
     print("ok", True, flush=True)

@@ -43,6 +43,30 @@ from pathlib import Path
 from time import perf_counter
 from typing import Final
 
+import jax
+import numpy as np
+import simsopt_jax
+import simsopt_jax_adapters
+from simsopt_jax.examples.single_stage_flat675 import (
+    FLAT675_LBFGS_HISTORY,
+    FLAT675_LBFGS_MAXLS,
+    prepare_single_stage_flat675,
+    solve_single_stage_flat675,
+)
+from simsopt_jax.runtime.host_boundary import host_transfer_audit
+from simsopt_jax.solve.driver import Driver
+from simsopt_jax_adapters.examples.single_stage_flat675 import repository_problem
+from simsopt_jax_adapters.geo.flat675 import (
+    FLAT675_COIL_SLICE,
+    FLAT675_SURFACE_SLICE,
+    FLAT675_VESSEL_SLICE,
+    bind_flat675_programs,
+    build_flat675_boozer_system,
+    flat675_candidate_geometry,
+    load_flat675_bundle,
+    solve_flat675_y_qr,
+)
+
 PRODUCTION_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 
 CHILD_JSON_SCHEMA: Final[str] = "flat675-promotion-robustness-child.v1"
@@ -54,9 +78,10 @@ PERTURBATION_BLOCKS: Final[tuple[str, ...]] = ("surface", "coil", "full")
 
 
 def _require_production_import_origin() -> dict[str, str]:
-    """Fail closed unless the flat-675 program came from this tree."""
-    import simsopt_jax
-    import simsopt_jax_adapters
+    """Reject already-imported foreign packages before constructing or solving.
+
+    This checks package origins, not execution of their module-level code.
+    """
 
     origins: dict[str, str] = {}
     for module in (simsopt_jax, simsopt_jax_adapters):
@@ -89,12 +114,6 @@ def _perturbed_starts(start, seed: int) -> list[dict[str, object]]:
     order the runs happen to execute in, so a single re-run reproduces any
     one row without reproducing the whole grid.
     """
-    import numpy as np
-    from simsopt_jax_adapters.geo.flat675 import (
-        FLAT675_COIL_SLICE,
-        FLAT675_SURFACE_SLICE,
-    )
-
     baseline = np.asarray(start, dtype=np.float64)
     slices = {
         "surface": FLAT675_SURFACE_SLICE,
@@ -146,28 +165,6 @@ def main(argv: list[str] | None = None) -> int:
     process_start = perf_counter()
     args = _parse_args(argv)
     origins = _require_production_import_origin()
-
-    import jax
-    import numpy as np
-    from simsopt_jax.examples.single_stage_flat675 import (
-        FLAT675_LBFGS_HISTORY,
-        FLAT675_LBFGS_MAXLS,
-        prepare_single_stage_flat675,
-        solve_single_stage_flat675,
-    )
-    from simsopt_jax.runtime.host_boundary import host_transfer_audit
-    from simsopt_jax.solve.driver import Driver
-    from simsopt_jax_adapters.examples.single_stage_flat675 import repository_problem
-    from simsopt_jax_adapters.geo.flat675 import (
-        FLAT675_COIL_SLICE,
-        FLAT675_SURFACE_SLICE,
-        FLAT675_VESSEL_SLICE,
-        bind_flat675_programs,
-        build_flat675_boozer_system,
-        flat675_candidate_geometry,
-        load_flat675_bundle,
-        solve_flat675_y_qr,
-    )
 
     if args.mode == "bundle":
         problem = load_flat675_bundle(args.input_manifest.parent)
