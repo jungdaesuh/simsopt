@@ -269,7 +269,19 @@ def run_profile(
     )
     failed = False
     for example in selected:
-        command = build_child_command(example, repo_root=repo_root, scale=scale)
+        try:
+            command = build_child_command(example, repo_root=repo_root, scale=scale)
+        except ValueError as error:
+            _write_child_failure(
+                example=example,
+                command=(),
+                child_stdout="",
+                child_stderr="",
+                reason=f"no child command: {error}",
+                stderr=stderr,
+            )
+            failed = True
+            continue
         completed = subprocess.run(
             command,
             cwd=repo_root,

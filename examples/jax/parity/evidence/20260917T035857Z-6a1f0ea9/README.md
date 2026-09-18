@@ -19,6 +19,22 @@ It is not the original canonical publication bundle. Its embedded original
 authority flags report the local audit; they do not independently establish
 portable authority for this derivative.
 
+Its bytes are bound by `derived_summary_sha256` in
+`examples/jax/authority_evidence.json`, and
+`python -m examples.jax.native_to_jax_index --check` fails when the file is
+missing, unbound, or altered by one byte. Supplying it to
+`--check --authority-summary` reports it as the derived summary of this run,
+never as an authority summary.
+
+`examples/jax/parity/derived_review_summary.py` generates this file from the
+retained local run directory (which is not tracked in the repository):
+
+```sh
+python -m examples.jax.parity.derived_review_summary \
+  --run PATH/TO/20260917T035857Z-6a1f0ea9 \
+  --output examples/jax/parity/evidence/20260917T035857Z-6a1f0ea9/review-summary.json
+```
+
 The unchanged canonical bundle passed the repository's source/build and
 publication audit in its clean recorded checkout. Repeating that audit requires
 the original bundle, recorded checkout, native binary and adjacent local build

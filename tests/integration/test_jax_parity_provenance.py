@@ -225,7 +225,9 @@ def test_snapshot_native_binding_uses_contained_source_identity(
     )
     monkeypatch.setattr(provenance, "_snapshot_executed_sources", lambda _id: (source,))
     if outside_checkout:
-        with pytest.raises(ValueError, match="not in the subpath"):
+        with pytest.raises(
+            ValueError, match="snapshot native extension is outside its snapshot root"
+        ):
             provenance.collect_snapshot_lane_provenance(
                 identity, measurement_synchronization="native synchronous execution"
             )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import dataclasses
 import io
 import json
 import os
@@ -347,6 +348,31 @@ def test_runner_rejects_child_result_for_different_scale(tmp_path: Path) -> None
 
     assert exit_code == 1
     assert "scale must be bounded, got native_default" in stderr.getvalue()
+
+
+def test_runner_fails_the_example_whose_legacy_record_lacks_its_host_policy(
+    tmp_path: Path,
+) -> None:
+    """A legacy record of an approved host-SciPy example fails through the runner."""
+    legacy_record = dataclasses.replace(
+        _record("2_Intermediate/boozerQA_ls.py"),
+        id="native-boozerqa-ls",
+    )
+    stderr = io.StringIO()
+
+    exit_code = run_profile(
+        _manifest(legacy_record),
+        "cpu",
+        "fast",
+        repo_root=tmp_path,
+        base_environment={},
+        stdout=io.StringIO(),
+        stderr=stderr,
+    )
+
+    assert exit_code == 1
+    assert "FAIL native-boozerqa-ls: no child command:" in stderr.getvalue()
+    assert "requires its outer optimizer policy declaration" in stderr.getvalue()
 
 
 @pytest.mark.parametrize(

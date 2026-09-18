@@ -33,6 +33,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Final, Literal
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 from numpy.typing import NDArray
 
@@ -66,6 +68,7 @@ from benchmarks.flat675_nested_endpoint_comparison import (
     correction_evaluation_status,
     main,
     nested_correction_is_noop,
+    non_correction_evaluations,
     parse_args,
     render_markdown,
     require_platform,
@@ -93,6 +96,10 @@ from simsopt_jax_adapters.geo.nested_ls_contract import (
     NESTED_LS_NEWTON_EXIT_FAILED,
     NESTED_LS_NEWTON_TOL,
     NESTED_LS_OUTER_IOTA_BRANCH_GUARD,
+)
+from simsopt_jax_adapters.geo.nested_ls_reduced import (
+    nested_ls_reduced_closures,
+    pack_surface_and_y,
 )
 from simsopt_jax_adapters.geo.nested_ls_reduced_scale import dump_strict_json
 
@@ -1007,14 +1014,29 @@ def test_failed_correction_nulls_post_state_and_gated_claims() -> None:
         "native_twin_within_objective_rtol",
     ):
         assert record[key] is None
-    assert all(
-        value is None
-        for value in payload["points"]["endpoint"]["lane_agreement"].values()
+    agreement = payload["points"]["endpoint"]["lane_agreement"]
+    for key in (
+        "surface_dofs_l2",
+        "surface_dofs_max",
+        "iota_after_delta",
+        "G_after_delta",
+        "residual_after_jax_minus_native",
+    ):
+        assert agreement[key] is None
+    # The two lanes were handed the same view, so the incoming residuals are
+    # still comparable -- and here they disagree by 7.15, which is what the
+    # gate is for. A failed correction does not erase that statement.
+    assert agreement["residual_before_absolute_gap"] == pytest.approx(
+        abs(1.0e-6 - 7.1513)
     )
+    assert agreement["residual_before_relative_gap"] == pytest.approx(
+        abs(1.0e-6 - 7.1513) / 7.1513
+    )
+    assert agreement["shared_residual_definition_ok"] is False
     verdict = payload["verdict"]
     assert verdict["endpoint_native_correction_stayed_on_branch"] is None
     assert verdict["every_correction_stayed_on_branch"] is None
-    assert verdict["shared_residual_definition_ok"] is None
+    assert verdict["shared_residual_definition_ok"] is False
     assert "n/a" in render_markdown(payload)
     assert json.loads(dump_strict_json(payload))["schema"] == SCHEMA
 
@@ -1040,6 +1062,30 @@ def test_native_unsuccessful_return_is_failed_even_with_finite_post_state() -> N
     assert record["residual_norm_after"] > record["tolerance"]
     assert record["objective"] is None
     assert payload["verdict"]["endpoint_native_correction_stayed_on_branch"] is None
+
+
+def test_a_branch_change_is_a_nonzero_exit_not_a_clean_comparison() -> None:
+    """The CLI's failure set is every non-correction, not ``failed_solve``.
+
+    A converged inner solve that left the Boozer branch is a failed evaluation
+    by the branch guard, so a run whose lanes are all branch changes carries
+    no correction at all and must not exit 0.
+    """
+    all_branch_changes = _payload(
+        jax_correction=_branch_changing_correction("jax"),
+        native_correction=_branch_changing_correction("native"),
+    )
+    assert non_correction_evaluations(all_branch_changes) == (
+        f"start/jax={EVALUATION_REJECTED_BRANCH_CHANGE}",
+        f"start/native={EVALUATION_REJECTED_BRANCH_CHANGE}",
+        f"endpoint/jax={EVALUATION_REJECTED_BRANCH_CHANGE}",
+        f"endpoint/native={EVALUATION_REJECTED_BRANCH_CHANGE}",
+    )
+    every_lane_corrected = _payload(
+        jax_correction=_moving_correction("jax"),
+        native_correction=_moving_correction("native"),
+    )
+    assert non_correction_evaluations(every_lane_corrected) == ()
 
 
 def test_a_branch_change_outranks_nothing_but_still_outranks_a_correction() -> None:
@@ -1292,43 +1338,69 @@ def test_non_positive_budget_is_refused() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_repository_geometry_has_unobservable_surface_directions() -> None:
-    """The tiny sampling cannot determine the 661 surface coefficients.
+def test_repository_geometry_residual_has_fewer_equations_than_unknowns() -> None:
+    """The fixture's own nested-LS residual is underdetermined at its decision.
 
-    Boozer's sampled residual and Volume depend on position and two tangents.
-    A common null direction of those three maps is therefore a structural
-    degeneracy, independent of the QR seed or Newton's stopping tolerance.
+    The count is read off the residual closure the inner solve differentiates
+    (``nested_ls_reduced_closures``, the same one
+    ``correct_with_nested_ls_jax`` hands the Schur Newton), at the decision
+    the solve starts from: the sampled Boozer residual plus the volume
+    constraint against ``[surface_dofs, iota, G]``. Fewer equations than
+    unknowns is a property of THIS fixture -- the certified 48x48 layout has
+    more -- and it is what makes the Gauss-Newton normal matrix singular at
+    every iterate, independently of the QR seed or the stopping tolerance.
+    The consequence is recorded by the end-to-end test below, which asserts
+    the statuses both lanes actually reach.
     """
     problem = build_problem("repository-geometry")
     view = nested_view_from_flat675(problem, problem.start_candidate.outer_vector())
-    surface = view.surface_native
-    geometry_map = np.concatenate(
-        [
-            derivative.reshape(-1, FLAT675_SURFACE_DOF_COUNT)
-            for derivative in (
-                surface.dgamma_by_dcoeff(),
-                surface.dgammadash1_by_dcoeff(),
-                surface.dgammadash2_by_dcoeff(),
-            )
-        ]
+    residual_fn, _objective_fn, _phi_hat = nested_ls_reduced_closures(
+        view.jax_inputs.new_boozer_surface_jax(),
+        constraint_weight=view.jax_inputs.constraint_weight,
+        weight_inv_modB=view.jax_inputs.weight_inv_modB,
     )
-    assert geometry_map.shape == (324, FLAT675_SURFACE_DOF_COUNT)
-    assert geometry_map.shape[0] < geometry_map.shape[1]
-    _, singular_values, right_vectors = np.linalg.svd(geometry_map, full_matrices=True)
-    null_direction = right_vectors[-1]
-    roundoff = np.finfo(np.float64).eps * max(geometry_map.shape) * singular_values[0]
-    assert np.linalg.norm(geometry_map @ null_direction) <= roundoff
+    decision = pack_surface_and_y(
+        view.surface_dofs, jnp.asarray([view.iota, view.G], dtype=jnp.float64)
+    )
+    unknowns = int(decision.size)
+    assert unknowns == FLAT675_SURFACE_DOF_COUNT + 2
+    equations = int(jnp.asarray(residual_fn(decision)).size)
+    jacobian_shape = jax.eval_shape(jax.jacfwd(residual_fn), decision).shape
+    assert jacobian_shape == (equations, unknowns)
+    assert equations < unknowns, (
+        f"the nested-LS residual Jacobian at repository-geometry is "
+        f"{equations}x{unknowns}: {unknowns - equations} of the {unknowns} "
+        f"unknowns are left unconstrained by the sampled Boozer residual and "
+        f"the volume constraint, so no iterate has a unique Newton step."
+    )
 
 
-def test_underresolved_cpu_end_to_end_records_native_linalg_failure_and_fails_closed(
+#: The evaluation statuses the underresolved fixture is allowed to end in.
+#: Its residual Jacobian is 110x663 (the test above), so the inner Newton is
+#: singular at every iterate and the termination MODE is decided by the last
+#: bits of the incoming endpoint: the native child has been recorded both
+#: raising ``numpy.linalg.LinAlgError`` with no post-state and converging
+#: (272 BFGS + 2 Newton steps) onto a DIFFERENT Boozer branch
+#: (|Delta iota| = 5.21e-2 against the 5e-2 guard), and the JAX Schur Newton
+#: both at 1 and at 14 steps. Pinning one of those modes pins a coin flip.
+#: What may never happen is an ACCEPTED correction, and that is the assertion
+#: with content: a singular system cannot produce one.
+NON_CORRECTION_STATUSES: Final[frozenset[str]] = frozenset(
+    {EVALUATION_FAILED_SOLVE, EVALUATION_REJECTED_BRANCH_CHANGE}
+)
+
+
+def test_underresolved_cpu_end_to_end_publishes_no_correction_and_fails_closed(
     tmp_path: Path,
 ) -> None:
-    """The underresolved repository native child hits ``LinAlgError``.
+    """No lane yields a correction on the underresolved fixture, and exit is 1.
 
-    The geometry-map test above proves a structural nullspace. Controlled
-    old/new source runs also show the old seed returned success=False; an
-    older green serialization test never established native convergence.
-    The real CLI must publish failure with null post-state and return nonzero.
+    Every lane is checked -- a lane left unasserted is a lane whose failure
+    reporting is untested -- but each is checked against the protocol its OWN
+    recorded status carries, because which non-correction the fixture reaches
+    is last-bit sensitive (see :data:`NON_CORRECTION_STATUSES`). The CLI must
+    return nonzero for either of them: a branch change is a failed evaluation,
+    not a clean comparison.
     """
     out_json = tmp_path / "repository_geometry_b1_cpu.json"
     assert (
@@ -1354,31 +1426,68 @@ def test_underresolved_cpu_end_to_end_records_native_linalg_failure_and_fails_cl
     assert payload["runtime"]["simsoptpp_sha256"]
     endpoint = payload["points"]["endpoint"]
     assert np.isfinite(endpoint["objective"])
+    statuses = {}
     for lane in ("jax", "native"):
         record = endpoint["corrections"][lane]
         assert record["lane"] == lane
         assert record["tolerance"] == float(NESTED_LS_BANANA_NEWTON_TOL)
         assert np.isfinite(record["residual_norm_before"])
-    native = endpoint["corrections"]["native"]
-    assert native["evaluation_status"] == EVALUATION_FAILED_SOLVE
-    assert native["exit_status"] == NESTED_LS_NEWTON_EXIT_FAILED
-    assert native["persisted"] is False
-    assert native["converged"] is False
-    assert native["failure_reason"] == "numpy.linalg.LinAlgError"
-    for key in (
-        "surface_dofs_after_sha256",
-        "residual_norm_after",
-        "iota_after",
-        "G_after",
-        "same_branch_as_incoming",
-        "objective",
-        "weighted_terms",
-    ):
-        assert native[key] is None
-    assert endpoint["lane_agreement"]["shared_residual_definition_ok"] is None
-    assert payload["verdict"]["endpoint_native_correction_stayed_on_branch"] is None
+        status = record["evaluation_status"]
+        assert status in NON_CORRECTION_STATUSES, (lane, status)
+        statuses[lane] = status
+        if status == EVALUATION_FAILED_SOLVE:
+            # A failed solve has no post-state to publish and no branch to be
+            # on, whether it died before returning or returned above the bar.
+            for key in (
+                "surface_dofs_after_sha256",
+                "iota_after",
+                "G_after",
+                "same_branch_as_incoming",
+                "objective",
+                "weighted_terms",
+            ):
+                assert record[key] is None, (lane, key)
+            if record["residual_norm_after"] is None:
+                # No iterate came back at all; the reason names the mechanism.
+                assert record["persisted"] is False
+                assert record["failure_reason"]
+            else:
+                # An iterate came back and simply never reached the bar.
+                assert record["persisted"] is True
+                assert record["failure_reason"] is None
+                assert record["residual_norm_after"] > float(
+                    NESTED_LS_BANANA_NEWTON_TOL
+                )
+        else:
+            # Converged, committed -- and rejected anyway, by the branch guard.
+            assert record["converged"] is True
+            assert record["persisted"] is True
+            assert record["same_branch_as_incoming"] is False
+            assert (
+                abs(record["iota_after"] - record["iota_before"])
+                > record["iota_branch_guard"]
+            )
+    agreement = endpoint["lane_agreement"]
+    # The two lanes were handed the same view whatever their solves then did,
+    # and the incoming residual is the check that says so.
+    assert agreement["shared_residual_definition_ok"] is True
+    assert agreement["residual_before_absolute_gap"] == pytest.approx(
+        abs(
+            endpoint["corrections"]["jax"]["residual_norm_before"]
+            - endpoint["corrections"]["native"]["residual_norm_before"]
+        )
+    )
+    assert payload["verdict"]["shared_residual_definition_ok"] is True
+    if EVALUATION_FAILED_SOLVE in statuses.values():
+        assert agreement["surface_dofs_l2"] is None
+        assert agreement["residual_after_jax_minus_native"] is None
+    else:
+        assert np.isfinite(agreement["surface_dofs_l2"])
+    # Never "yes": no lane on this fixture is entitled to claim the branch.
+    assert payload["verdict"]["endpoint_native_correction_stayed_on_branch"] is not True
     markdown = out_json.with_suffix(".md").read_text()
-    assert EVALUATION_FAILED_SOLVE in markdown
+    for lane, status in statuses.items():
+        assert status in markdown, lane
     assert "n/a" in markdown
 
 

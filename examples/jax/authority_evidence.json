@@ -45,6 +45,7 @@
         "native-single-stage-boozer-vacuum-optimization"
       ],
       "comparison_count": 57,
+      "derived_summary_sha256": "d36c8562326d34838250a66ccc8551decdde8f8b329247ecb8d95e923d07025d",
       "evidence_scope": "local_only",
       "lane_receipt_count": 3,
       "qualification": "12/57 comparisons failed; 3/3 lanes budget-exhausted; jax-cpu final:objective 4.3261270728412792e-08 <= 9.9999999999999995e-08; jax-gpu final:objective 4.3077269937092123e-08 <= 9.9999999999999995e-08; native-cpu final:objective 4.3972015892540963e-08 <= 9.9999999999999995e-08; endpoint quality only, no convergence or final-value equivalence",

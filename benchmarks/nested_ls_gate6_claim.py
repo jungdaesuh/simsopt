@@ -41,7 +41,11 @@ from benchmarks.nested_ls_shamanskii_attribution import (
     write_strict_json,
 )
 
-EVIDENCE = REPO / "docs" / "receipts" / "evidence"
+#: Run receipts are campaign evidence, not library content: since 72e7a72b0
+#: removed ``docs/receipts/`` from the tree they default under the ignored
+#: ``.artifacts/`` root every other live benchmark writes to, which also keeps
+#: ``_require_clean_tree`` true for the next run.
+EVIDENCE = REPO / ".artifacts" / "nested-ls-gate6"
 BANANA_CHILD = REPO / "benchmarks" / "nested_ls_banana_omp_child.py"
 IOTA_G_TOL = NESTED_LS_GATE6_IOTA_G_TOL
 GRAD_TOL = NESTED_LS_NEWTON_TOL
@@ -67,6 +71,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Directory for the run receipt and execution-log pointer.",
     )
     return parser.parse_args(argv)
+
+
+def _receipt_pointer(path: Path) -> str:
+    """Receipt-facing spelling: repo-relative inside REPO, absolute outside it."""
+
+    return str(path.relative_to(REPO)) if path.is_relative_to(REPO) else str(path)
 
 
 def _require_clean_tree() -> str:
@@ -165,6 +175,7 @@ def main(argv: list[str] | None = None) -> None:
     tag = str(args.tag).strip()
     suffix = f".{tag}" if tag else ""
     output_dir = args.output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
     out_json = output_dir / f"nested_ls_reduced_gpu_gate6_20260822{suffix}.json"
     out_log = output_dir / f"nested_ls_reduced_gpu_gate6_20260822{suffix}.log"
     publication = (
@@ -253,11 +264,11 @@ def main(argv: list[str] | None = None) -> None:
             "python benchmarks/nested_ls_gate6_claim.py"
             + (f" --omp {omp_num_threads}" if omp_num_threads else "")
             + (f" --tag {tag}" if tag else "")
-            + f" --output-dir {output_dir}"
+            + f" --output-dir {_receipt_pointer(output_dir)}"
         ),
         "date": datetime.now(timezone.utc).date().isoformat(),
         "driver": "benchmarks.nested_ls_gate6_claim",
-        "execution_log": str(out_log),
+        "execution_log": _receipt_pointer(out_log),
         "fail_closed_reason": fail_reason,
         "git_head": sha,
         "native_min_process_wall_seconds": native_min,

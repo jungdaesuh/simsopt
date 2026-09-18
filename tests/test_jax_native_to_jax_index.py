@@ -19,6 +19,7 @@ from examples.jax.native_to_jax_index import (
     main,
     render_native_to_jax_index,
     verify_authority_summary,
+    verify_derived_summaries,
 )
 
 
@@ -416,3 +417,112 @@ def test_check_explicitly_reports_unverified_evidence_without_summary(
     )
     assert main(["--check"]) == 0
     assert "UNVERIFIED (no authority summary supplied)" in capsys.readouterr().out
+
+
+def _stub_rendered_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate derived-evidence assertions from full manifest rendering."""
+    index = tmp_path / "index.md"
+    index.write_text("historical evidence: unverified")
+    monkeypatch.setattr(index_module, "INDEX_PATH", index)
+    monkeypatch.setattr(
+        index_module, "render_native_to_jax_index", lambda: index.read_text()
+    )
+
+
+def test_shipped_derived_review_summary_is_bound_and_reported_as_derived(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    _, runs = _load_authority_evidence_runs(
+        repo_root / "examples/jax/authority_evidence.json"
+    )
+    exact = next(run for run in runs if run.run_id == "20260917T035857Z-6a1f0ea9")
+    derived = index_module.derived_summary_path(exact.run_id)
+
+    assert exact.derived_summary_sha256 is not None
+    assert (
+        hashlib.sha256(derived.read_bytes()).hexdigest() == exact.derived_summary_sha256
+    )
+    verify_derived_summaries(runs)
+
+    _stub_rendered_index(tmp_path, monkeypatch)
+    assert main(["--check", "--authority-summary", str(derived)]) == 0
+    reported = capsys.readouterr().out
+    assert "DERIVED numerical review only" in reported
+    assert exact.run_id in reported
+    assert "never authority" in reported
+
+
+def test_check_rejects_a_tampered_derived_review_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    _, runs = _load_authority_evidence_runs(
+        repo_root / "examples/jax/authority_evidence.json"
+    )
+    exact = next(run for run in runs if run.run_id == "20260917T035857Z-6a1f0ea9")
+    shipped = index_module.derived_summary_path(exact.run_id).read_bytes()
+    tampered_directory = tmp_path / "evidence" / exact.run_id
+    tampered_directory.mkdir(parents=True)
+    (tampered_directory / "review-summary.json").write_bytes(
+        shipped[:-2] + b" " + shipped[-1:]
+    )
+    monkeypatch.setattr(
+        index_module, "DERIVED_EVIDENCE_DIRECTORY", tmp_path / "evidence"
+    )
+    _stub_rendered_index(tmp_path, monkeypatch)
+
+    with pytest.raises(RuntimeError, match="do not match their bound digest"):
+        main(["--check"])
+
+
+def test_check_rejects_a_missing_or_unbound_derived_review_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    _, runs = _load_authority_evidence_runs(
+        repo_root / "examples/jax/authority_evidence.json"
+    )
+    exact = next(run for run in runs if run.run_id == "20260917T035857Z-6a1f0ea9")
+    shipped = index_module.derived_summary_path(exact.run_id).read_bytes()
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setattr(index_module, "DERIVED_EVIDENCE_DIRECTORY", empty)
+    _stub_rendered_index(tmp_path, monkeypatch)
+
+    with pytest.raises(RuntimeError, match="bound derived review summary is missing"):
+        main(["--check"])
+
+    unbound_directory = empty / exact.run_id
+    unbound_directory.mkdir()
+    (unbound_directory / "review-summary.json").write_bytes(shipped)
+    unbound_runs = tuple(
+        AuthorityEvidence(
+            **{
+                field: getattr(run, field)
+                for field in AuthorityEvidence.__dataclass_fields__
+                if field != "derived_summary_sha256"
+            }
+        )
+        for run in runs
+    )
+    monkeypatch.setattr(
+        index_module, "_load_authority_evidence_runs", lambda _path: (2, unbound_runs)
+    )
+    with pytest.raises(RuntimeError, match="has no derived_summary_sha256 binding"):
+        main(["--check"])
+
+
+def test_authority_record_rejects_a_malformed_derived_digest(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    document = json.loads(
+        (repo_root / "examples/jax/authority_evidence.json").read_text(encoding="utf-8")
+    )
+    document["runs"][1]["derived_summary_sha256"] = "NOT-A-DIGEST"
+    path = tmp_path / "authority_evidence.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must be a lowercase SHA-256"):
+        _load_authority_evidence_runs(path)

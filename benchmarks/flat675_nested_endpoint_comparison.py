@@ -34,12 +34,19 @@ bar.  Every residual here is therefore reported as a ratio against BOTH, and
 every gate names the bar it uses.
 
 **The bounded repository fixture is underresolved.** Its 661 surface
-coefficients are sampled on a 6-by-6 grid. Position and both tangents provide
-at most 324 independent linear measurements, so the native Newton Hessian
-has a structural nullspace. This configuration exercises failure reporting;
-it cannot certify a unique nested correction. Last-bit changes in the QR
-seed can change a failed Newton return into a singular-matrix exception.
-Both outcomes must remain failed solves, with unavailable post-state left
+coefficients are sampled on a 6-by-6 grid, so the nested-LS residual the
+inner solve differentiates has a 110-by-663 Jacobian against the decision
+``[surface_dofs, iota, G]``: 553 unknowns more than equations, and therefore
+a Gauss-Newton normal matrix that is singular at every iterate (counted from
+the solver's own residual closure in
+``tests/benchmarks/test_flat675_nested_endpoint_comparison.py``). This
+configuration exercises failure reporting; it cannot certify a unique nested
+correction. Which way the singular inner solve terminates is decided by the
+last bits of the incoming endpoint, and THREE outcomes have been recorded at
+the same fixture: a failed Newton return, a ``numpy.linalg.LinAlgError``
+before the solver returns, and a converged solve that landed on a different
+Boozer branch (``|Delta iota| = 5.21e-2`` against the ``5e-2`` guard). None of
+them is a correction, all three exit nonzero, and unavailable post-state stays
 null. Use a resolved fixture for numerical certification.
 
 ``nested_ls_outer_claim.py``'s "endpoint C++ LS Newton rejudge no-op"
@@ -166,7 +173,16 @@ from benchmarks.flat675_nested_endpoint import (
 # branch guard (``failed_solve`` is never a ``correction``) and every record
 # names the gradient its ``exit_status`` was classified on.  v4 makes absent
 # native failure post-state values null and makes the CLI nonzero on any
-# ``failed_solve`` record.
+# record the contract does not call a ``correction`` -- ``failed_solve`` and
+# ``rejected_branch_change`` alike, since the branch guard makes the second a
+# failed EVALUATION.  That rule is about the exit code, not the payload, so it
+# does not move the id.  The id also stays at v4 for the lane-agreement
+# pre-state fill-in: ``residual_before_*`` and
+# ``shared_residual_definition_ok`` are published on a failed solve too,
+# because they are measured before either inner solve runs.  No field changed
+# meaning -- a value a v4 consumer would have read as null now carries the
+# number that field has always been defined to hold -- so only availability
+# widened, and null still means "nothing to compare".
 SCHEMA: Final[str] = "flat675-nested-endpoint-comparison-v4"
 
 # The shipped lessons this program runs.  The tier directories are not
@@ -274,14 +290,6 @@ PRODUCTION_LANES: Final[NestedLanes] = NestedLanes(
 )
 
 
-@dataclass(frozen=True, slots=True)
-class ObjectiveLane:
-    """One lane's eight-term objective over the 675-vector."""
-
-    value: Callable[[NDArray[np.float64]], float]
-    weighted_terms: Callable[[NDArray[np.float64]], dict[str, float]]
-
-
 def _load_script(path: Path, module_name: str) -> ModuleType:
     """Load a shipped example script by file location.
 
@@ -295,6 +303,14 @@ def _load_script(path: Path, module_name: str) -> ModuleType:
     module = module_from_spec(specification)
     specification.loader.exec_module(module)
     return module
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectiveLane:
+    """One lane's eight-term objective over the 675-vector."""
+
+    value: Callable[[NDArray[np.float64]], float]
+    weighted_terms: Callable[[NDArray[np.float64]], dict[str, float]]
 
 
 def jax_objective_lane(problem: Flat675Problem) -> ObjectiveLane:
@@ -782,49 +798,68 @@ def _lane_agreement(
     jax_correction: NestedCorrection,
     native_correction: NestedCorrection,
 ) -> dict[str, object]:
-    """Do the two independent nested corrections land on the same surface?"""
-    if (
-        correction_evaluation_status(jax_correction) == EVALUATION_FAILED_SOLVE
-        or correction_evaluation_status(native_correction) == EVALUATION_FAILED_SOLVE
-    ):
-        return {
-            "surface_dofs_l2": None,
-            "surface_dofs_max": None,
-            "iota_after_delta": None,
-            "G_after_delta": None,
-            "residual_before_relative_gap": None,
-            "residual_before_absolute_gap": None,
-            "shared_residual_definition_ok": None,
-            "residual_after_jax_minus_native": None,
-        }
-    jax_surface = np.asarray(jax_correction.surface_dofs_after, dtype=np.float64)
-    native_surface = np.asarray(native_correction.surface_dofs_after, dtype=np.float64)
-    difference = jax_surface - native_surface
+    """Do the two independent nested corrections land on the same surface?
+
+    The pre-state block (``residual_before_*``,
+    ``shared_residual_definition_ok``) compares the two lanes' INCOMING
+    residuals.  Both lanes evaluate that number on the same view before either
+    inner solve starts, so it exists on every record and is published whatever
+    the corrections do afterwards -- it is the check that the two lanes were
+    handed the same problem, which is exactly the thing worth knowing when one
+    of them then fails.  Only the post-state block is null for a failed solve,
+    which has no post-state to compare.
+    """
     jax_before = float(jax_correction.residual_norm_before)
     native_before = float(native_correction.residual_norm_before)
-    before_gap = _relative_difference(jax_before, native_before)
     before_absolute_gap = abs(jax_before - native_before)
     definition_bound = (
         SHARED_RESIDUAL_RTOL * max(abs(jax_before), abs(native_before))
         + SHARED_RESIDUAL_ATOL
     )
+    post_state: dict[str, float | None] = dict.fromkeys(
+        (
+            "surface_dofs_l2",
+            "surface_dofs_max",
+            "iota_after_delta",
+            "G_after_delta",
+            "residual_after_jax_minus_native",
+        )
+    )
+    if (
+        correction_evaluation_status(jax_correction) != EVALUATION_FAILED_SOLVE
+        and correction_evaluation_status(native_correction) != EVALUATION_FAILED_SOLVE
+    ):
+        jax_surface = np.asarray(jax_correction.surface_dofs_after, dtype=np.float64)
+        native_surface = np.asarray(
+            native_correction.surface_dofs_after, dtype=np.float64
+        )
+        difference = jax_surface - native_surface
+        post_state = {
+            "surface_dofs_l2": float(np.linalg.norm(difference)),
+            "surface_dofs_max": float(np.max(np.abs(difference)))
+            if difference.size
+            else 0.0,
+            "iota_after_delta": float(jax_correction.iota_after)
+            - float(native_correction.iota_after),
+            "G_after_delta": float(jax_correction.G_after)
+            - float(native_correction.G_after),
+            "residual_after_jax_minus_native": float(jax_correction.residual_norm_after)
+            - float(native_correction.residual_norm_after),
+        }
     return {
-        "surface_dofs_l2": float(np.linalg.norm(difference)),
-        "surface_dofs_max": float(np.max(np.abs(difference)))
-        if difference.size
-        else 0.0,
-        "iota_after_delta": float(jax_correction.iota_after)
-        - float(native_correction.iota_after),
-        "G_after_delta": float(jax_correction.G_after)
-        - float(native_correction.G_after),
-        "residual_before_relative_gap": before_gap,
+        "surface_dofs_l2": post_state["surface_dofs_l2"],
+        "surface_dofs_max": post_state["surface_dofs_max"],
+        "iota_after_delta": post_state["iota_after_delta"],
+        "G_after_delta": post_state["G_after_delta"],
+        "residual_before_relative_gap": _relative_difference(jax_before, native_before),
         "residual_before_absolute_gap": before_absolute_gap,
         # Both lanes must evaluate the SAME residual at the SAME view, so this
         # is a definition gate, not a physics band; the absolute floor is the
         # solver tolerance, below which two norms cannot be told apart.
         "shared_residual_definition_ok": bool(before_absolute_gap <= definition_bound),
-        "residual_after_jax_minus_native": float(jax_correction.residual_norm_after)
-        - float(native_correction.residual_norm_after),
+        "residual_after_jax_minus_native": post_state[
+            "residual_after_jax_minus_native"
+        ],
     }
 
 
@@ -1524,6 +1559,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def non_correction_evaluations(payload: Mapping[str, object]) -> tuple[str, ...]:
+    """Every ``point/lane=status`` the contract does not accept as a correction.
+
+    Both non-correction statuses land here, not ``failed_solve`` alone: the
+    branch guard makes a converged inner solve on a DIFFERENT Boozer branch a
+    failed EVALUATION, so a run carrying one must not exit 0 and read as a
+    clean comparison.  Empty means every lane published a correction.
+    """
+    return tuple(
+        f"{name}/{lane}="
+        f"{payload['points'][name]['corrections'][lane]['evaluation_status']}"
+        for name in POINT_NAMES
+        for lane in LANE_NAMES
+        if payload["points"][name]["corrections"][lane]["evaluation_status"]
+        != EVALUATION_CORRECTION
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.max_steps < 1:
@@ -1556,16 +1609,10 @@ def main(argv: list[str] | None = None) -> int:
         ),
         flush=True,
     )
-    failed_corrections = [
-        f"{name}/{lane}"
-        for name in POINT_NAMES
-        for lane in LANE_NAMES
-        if payload["points"][name]["corrections"][lane]["evaluation_status"]
-        == EVALUATION_FAILED_SOLVE
-    ]
-    if failed_corrections:
+    non_corrections = non_correction_evaluations(payload)
+    if non_corrections:
         print(
-            "nested endpoint correction failed: " + ", ".join(failed_corrections),
+            "nested endpoint correction not accepted: " + ", ".join(non_corrections),
             file=sys.stderr,
             flush=True,
         )

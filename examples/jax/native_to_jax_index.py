@@ -25,6 +25,8 @@ INDEX_PATH = JAX_EXAMPLES_DIRECTORY / "NATIVE_TO_JAX_INDEX.md"
 MANIFEST_PATH = JAX_EXAMPLES_DIRECTORY / "manifest.json"
 PARITY_MANIFEST_PATH = JAX_EXAMPLES_DIRECTORY / "parity_manifest.json"
 AUTHORITY_EVIDENCE_PATH = JAX_EXAMPLES_DIRECTORY / "authority_evidence.json"
+DERIVED_EVIDENCE_DIRECTORY = JAX_EXAMPLES_DIRECTORY / "parity" / "evidence"
+DERIVED_SUMMARY_NAME = "review-summary.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +45,10 @@ class AuthorityEvidence:
     native_default_status: str | None
     evidence_scope: str
     qualification: str = "raw summary and lane receipts require local verification"
+    # SHA-256 of the tracked derived review package for this run, when one is
+    # retained at parity/evidence/<run_id>/review-summary.json. Derived bytes
+    # are inspectable evidence only; they never carry authority.
+    derived_summary_sha256: str | None = None
 
 
 def _load_json(path: Path) -> object:
@@ -62,6 +68,7 @@ _RUN_FIELDS = {
     "case_ids",
     "evidence_scope",
 }
+_OPTIONAL_RUN_FIELDS = {"qualification", "derived_summary_sha256"}
 
 
 def _parse_authority_run(document: object, *, legacy: bool) -> AuthorityEvidence:
@@ -70,8 +77,12 @@ def _parse_authority_run(document: object, *, legacy: bool) -> AuthorityEvidence
     expected_fields = _RUN_FIELDS | (
         {"schema_version", "native_default_status"} if legacy else set()
     )
-    if set(document) not in (expected_fields, expected_fields | {"qualification"}) or (
-        legacy and document["schema_version"] != 1
+    optional_fields = {"qualification"} if legacy else _OPTIONAL_RUN_FIELDS
+    present_fields = set(document)
+    if (
+        not expected_fields <= present_fields
+        or not present_fields - expected_fields <= optional_fields
+        or (legacy and document["schema_version"] != 1)
     ):
         raise ValueError("authority evidence run has invalid fields")
     string_fields = (
@@ -125,6 +136,17 @@ def _parse_authority_run(document: object, *, legacy: bool) -> AuthorityEvidence
     )
     if not isinstance(qualification, str) or not qualification:
         raise ValueError("authority evidence qualification must be a non-empty string")
+    derived_summary_sha256 = document.get("derived_summary_sha256")
+    if derived_summary_sha256 is not None and (
+        not isinstance(derived_summary_sha256, str)
+        or len(derived_summary_sha256) != 64
+        or not all(
+            character in "0123456789abcdef" for character in derived_summary_sha256
+        )
+    ):
+        raise ValueError(
+            "authority evidence derived_summary_sha256 must be a lowercase SHA-256"
+        )
     return AuthorityEvidence(
         run_id=document["run_id"],
         repository_commit=document["repository_commit"],
@@ -138,6 +160,7 @@ def _parse_authority_run(document: object, *, legacy: bool) -> AuthorityEvidence
         native_default_status=document["native_default_status"] if legacy else None,
         evidence_scope=document["evidence_scope"],
         qualification=qualification,
+        derived_summary_sha256=derived_summary_sha256,
     )
 
 
@@ -164,6 +187,40 @@ def _load_authority_evidence_runs(
     if len({run.run_id for run in runs}) != len(runs):
         raise ValueError("authority evidence run IDs must be unique")
     return 2, runs
+
+
+def derived_summary_path(run_id: str) -> Path:
+    """Locate the tracked derived review package retained for one run."""
+    return DERIVED_EVIDENCE_DIRECTORY / run_id / DERIVED_SUMMARY_NAME
+
+
+def verify_derived_summaries(runs: tuple[AuthorityEvidence, ...]) -> None:
+    """Fail closed unless every tracked derived package matches its bound digest."""
+    bound = {
+        run.run_id: run.derived_summary_sha256
+        for run in runs
+        if run.derived_summary_sha256 is not None
+    }
+    retained = {
+        directory.name
+        for directory in DERIVED_EVIDENCE_DIRECTORY.glob("*")
+        if (directory / DERIVED_SUMMARY_NAME).is_file()
+    }
+    unbound = retained - set(bound)
+    if unbound:
+        raise RuntimeError(
+            "retained derived review summary has no derived_summary_sha256 binding: "
+            + ", ".join(sorted(unbound))
+        )
+    for run_id, digest in sorted(bound.items()):
+        path = derived_summary_path(run_id)
+        if not path.is_file():
+            raise RuntimeError(f"bound derived review summary is missing: {run_id}")
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise RuntimeError(
+                "derived review summary bytes do not match their bound digest: "
+                f"{run_id}"
+            )
 
 
 def verify_authority_summary(
@@ -605,20 +662,35 @@ def main(arguments: list[str] | None = None) -> int:
         )
         return 0
     rendered = render_native_to_jax_index()
+    _, runs = _load_authority_evidence_runs(AUTHORITY_EVIDENCE_PATH)
+    verify_derived_summaries(runs)
     if options.authority_summary is not None:
-        _, runs = _load_authority_evidence_runs(AUTHORITY_EVIDENCE_PATH)
         summary_sha256 = hashlib.sha256(
             options.authority_summary.read_bytes()
         ).hexdigest()
-        matches = tuple(run for run in runs if run.summary_sha256 == summary_sha256)
-        if len(matches) != 1:
-            raise RuntimeError(
-                "authority summary does not match exactly one recorded run"
-            )
-        verify_authority_summary(
-            matches[0],
-            options.authority_summary,
+        derived = tuple(
+            run for run in runs if run.derived_summary_sha256 == summary_sha256
         )
+        if derived:
+            if len(derived) != 1:
+                raise RuntimeError(
+                    "derived review summary does not match exactly one recorded run"
+                )
+            print(
+                f"Derived review summary of run `{derived[0].run_id}`: bytes match "
+                "its recorded derived_summary_sha256; DERIVED numerical review "
+                f"only, scope `{derived[0].evidence_scope}`, never authority."
+            )
+        else:
+            matches = tuple(run for run in runs if run.summary_sha256 == summary_sha256)
+            if len(matches) != 1:
+                raise RuntimeError(
+                    "authority summary does not match exactly one recorded run"
+                )
+            verify_authority_summary(
+                matches[0],
+                options.authority_summary,
+            )
     if options.write:
         INDEX_PATH.write_text(rendered, encoding="utf-8")
         return 0

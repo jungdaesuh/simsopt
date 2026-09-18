@@ -405,7 +405,7 @@ DIAG5_FROZEN_NUMERICAL_PATHS: Final = frozenset(
 # sweep roots. Run in a DEDICATED CLEAN WORKTREE, because the regenerator
 # hashes working-tree bytes and the shared tree is not quiescent.
 # Admit the declared, case-specific host SciPy optimizer policy owner.
-DIAG5_EXECUTION_SOURCE_ENTRY_COUNT: Final = 686
+DIAG5_EXECUTION_SOURCE_ENTRY_COUNT: Final = 687
 DIAG5_CPU_QUALIFICATION_SCHEMA_VERSION: Final = (
     "single-stage-neq-gntr3-cpu-trajectory-qualification-v2"
 )

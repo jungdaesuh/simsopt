@@ -1140,31 +1140,27 @@ def collect_snapshot_lane_provenance(
         else None
     )
     simsoptpp_module = sys.modules.get("simsoptpp")
-    simsoptpp_path = None
-    simsoptpp_sha256 = None
-    simsoptpp_version = None
-    build_commit = None
-    build_receipt_sha256 = None
-    compatible = None
     if simsoptpp_module is None:
         raise ValueError("snapshot lane did not load the bound native extension")
-    if simsoptpp_module is not None:
-        binary_path = Path(str(simsoptpp_module.__file__)).resolve()
-        binary_relative = binary_path.relative_to(
-            identity.snapshot_root.resolve()
-        ).as_posix()
-        simsoptpp_path = str(binary_path)
-        simsoptpp_sha256 = _sha256_file(binary_path)
-        simsoptpp_version = str(getattr(simsoptpp_module, "__version__", "unknown"))
-        build_binding = verify_native_build_receipt(identity.snapshot_root, binary_path)
-        compatible = build_binding is not None
-        if build_binding is not None:
-            build_commit, build_receipt_sha256 = build_binding
-        if (
-            binary_path != identity.native_extension_path
-            or simsoptpp_sha256 != identity.native_extension_sha256
-        ):
-            raise ValueError("snapshot native extension identity changed")
+    build_commit = None
+    build_receipt_sha256 = None
+    binary_path = Path(str(simsoptpp_module.__file__)).resolve()
+    snapshot_root = identity.snapshot_root.resolve()
+    if not binary_path.is_relative_to(snapshot_root):
+        raise ValueError("snapshot native extension is outside its snapshot root")
+    binary_relative = binary_path.relative_to(snapshot_root).as_posix()
+    simsoptpp_path = str(binary_path)
+    simsoptpp_sha256 = _sha256_file(binary_path)
+    simsoptpp_version = str(getattr(simsoptpp_module, "__version__", "unknown"))
+    build_binding = verify_native_build_receipt(identity.snapshot_root, binary_path)
+    compatible = build_binding is not None
+    if build_binding is not None:
+        build_commit, build_receipt_sha256 = build_binding
+    if (
+        binary_path != identity.native_extension_path
+        or simsoptpp_sha256 != identity.native_extension_sha256
+    ):
+        raise ValueError("snapshot native extension identity changed")
     executed_sources = _snapshot_executed_sources(identity)
     peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return LaneProvenance(
@@ -1202,10 +1198,7 @@ def collect_snapshot_lane_provenance(
         }
         if compatible
         else {},
-        authoritative=(
-            not identity.repository_dirty
-            and (simsoptpp_module is None or compatible is True)
-        ),
+        authoritative=not identity.repository_dirty and compatible is True,
     )
 
 
