@@ -5,7 +5,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import simsoptpp
+from examples.jax.parity.provenance import normalize_snapshot_lane_environment
 from examples.jax.parity.runtime import build_parity_lane_environment
 from simsopt_jax_adapters.isolated_kernel import (
     isolated_child_command,
@@ -51,6 +53,58 @@ def test_parity_runtime_uses_fail_closed_preimport_lane_policy() -> None:
         pythonpath = environment["PYTHONPATH"].split(os.pathsep)
         assert pythonpath[0] == kernel
         assert str(repo_root / "src") in pythonpath
+
+
+HOST_THREAD_NAMES = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
+
+
+@pytest.mark.parametrize(
+    "inherited",
+    (
+        pytest.param(
+            {name: "64" for name in HOST_THREAD_NAMES}, id="poisoned-parent-values"
+        ),
+        pytest.param({}, id="absent-parent-values"),
+    ),
+)
+def test_every_parity_lane_pins_the_same_host_threading_policy(
+    inherited: dict[str, str],
+) -> None:
+    """Every compared lane pins host OpenMP/BLAS parallelism to the same value.
+
+    The three lanes are compared against each other numerically.  If one lane
+    runs single-threaded and the others inherit the parent shell's thread count,
+    the comparison varies with how the run was launched.  Pinning bounds that
+    launch-dependent variability; it does not by itself fix every backend's
+    reduction order.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    original = dict(inherited)
+    lanes = ("native-cpu", "jax-cpu", "jax-gpu")
+    environments = {
+        lane: build_parity_lane_environment(lane, inherited, repo_root=repo_root)
+        for lane in lanes
+    }
+    for lane in lanes:
+        environment = environments[lane]
+        for name in HOST_THREAD_NAMES:
+            assert environment.get(name) == "1", (
+                f"{lane} does not pin {name}: {environment.get(name)!r}"
+            )
+    assert inherited == original, "the caller's environment mapping was mutated"
+
+
+def test_lane_environment_policy_retains_host_threading() -> None:
+    """A retained receipt must say what host threading the lane actually ran under."""
+    observed = {
+        "JAX_PLATFORMS": "cpu",
+        "OMP_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+    }
+    retained = normalize_snapshot_lane_environment(observed)
+    for name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        assert retained.get(name) == "1", f"{name} is not retained in lane provenance"
 
 
 def test_loaded_kernel_directory_is_the_parent_of_the_extension() -> None:

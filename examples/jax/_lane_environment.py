@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sysconfig
 from pathlib import Path
+from types import MappingProxyType
 from typing import Literal, Mapping
 
 from simsopt_jax.config import (
@@ -17,6 +18,25 @@ from simsopt_jax.config import (
 JaxLane = Literal["cpu-smoke", "gpu-strict"]
 
 LEGACY_JAX_LANES: tuple[JaxLane, ...] = ("cpu-smoke", "gpu-strict")
+
+# These control host OpenMP/BLAS parallelism, which is both a performance and a
+# numerical parameter: the thread count a host reduction runs under can change
+# its summation order.  Pinning them does not by itself fix reduction order
+# everywhere -- a device backend and XLA's own thread pools are not governed by
+# these variables -- but it removes the part of the variability that depends on
+# how the run was launched, which is what a lane comparison needs.  Lanes that
+# are compared against each other therefore agree on it, and a receipt that omits
+# it cannot say what was actually compared.  This tuple is the one place those
+# variable names are written down; ``examples/jax/parity/runtime.py`` pins them
+# and ``examples/jax/parity/provenance.py`` retains them.
+HOST_THREAD_VARIABLES: tuple[str, ...] = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+)
+HOST_THREAD_POLICY: Mapping[str, str] = MappingProxyType(
+    dict.fromkeys(HOST_THREAD_VARIABLES, "1")
+)
 
 _RUNTIME_SELECTOR_ENVIRONMENT = frozenset(
     {

@@ -17,6 +17,8 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Final, Literal, Mapping
 
+from examples.jax._lane_environment import HOST_THREAD_VARIABLES
+
 SNAPSHOT_LANE_IDENTITY_SCHEMA_ID: Final = (
     "single-stage-compute-graph-lane-snapshot-identity-v2"
 )
@@ -135,6 +137,7 @@ _LANE_ENVIRONMENT_KEYS = (
     "JAX_ENABLE_X64",
     "CUDA_VISIBLE_DEVICES",
     "XLA_PYTHON_CLIENT_PREALLOCATE",
+    *HOST_THREAD_VARIABLES,
 )
 
 
