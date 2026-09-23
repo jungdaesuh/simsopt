@@ -192,11 +192,14 @@ from examples.jax.parity.cases.traceable_least_squares import (
 )
 from examples.jax.parity.cases.wireframe import create_input as create_wireframe_input
 from examples.jax.parity.cases.wireframe import execute as execute_wireframe
-from examples.jax.parity.contracts import QualityBand
+from examples.jax.parity.contracts import AdmittedTerminalOutcome, QualityBand
 from examples.jax.parity.input_bundle import InputBundle
 from examples.jax.parity.measurement import MeasurementExecution
+from examples.jax.parity.official_quality_bands import official_quality_band
 from examples.jax.parity.runtime import ParityLane
+from examples.jax.parity.work_budget import WorkBudgetContract
 from simsopt_jax.examples import ExecutionScale
+from simsopt_jax.examples.solver_terminal_status import GSCO_REDUCED_BUDGET_SCALES
 
 
 @dataclass(frozen=True)
@@ -222,6 +225,36 @@ class CaseDefinition:
     ``None`` -- the default for every case -- keeps the certification-gate
     behaviour unchanged at every scale.
     """
+    work_budget_contract: WorkBudgetContract | None = None
+    native_default_admitted_terminal_outcomes: tuple[AdmittedTerminalOutcome, ...] = ()
+    """Provider failures admitted for band judgment at ``native_default`` only (user decision C14).
+
+    Each entry is an explicitly authorized case-specific composite ``raw_status`` whose stage-one provider
+    failure mode upstream's own one-ulp samples document (later stages may differ and are disclosed in the
+    evidence text); the lane keeps its raw and normalized status and its ``success=False``, every finite and
+    physical check stays in force, and the verdict can only be ``quality-band`` (an engineering endpoint
+    acceptance, not an equivalence proof).
+    """
+
+    def __post_init__(self) -> None:
+        if (
+            self.native_default_quality_band is not None
+            and self.work_budget_contract is not None
+            and "native_default" in self.work_budget_contract.scales
+        ):
+            raise ValueError(
+                "case cannot combine native_default quality band and work budget"
+            )
+        if (
+            self.native_default_admitted_terminal_outcomes
+            and self.native_default_quality_band is None
+        ):
+            raise ValueError(
+                "admitted terminal outcomes require a native_default quality band"
+            )
+
+
+_FIXED_BUDGET_SCALES: tuple[ExecutionScale, ...] = ("bounded", "native_default")
 
 
 _CASES = {
@@ -234,11 +267,54 @@ _CASES = {
         case_id="native-boozerqa",
         create_input=create_native_boozerqa_input,
         execute=execute_native_boozerqa,
+        # Declared POST HOC on the user's decision C18 (2026-09-20 23:48 EDT), after the
+        # lane-against-lane end-point routes had failed at native_default with the old and
+        # the new inner route alike: upstream never converges here (BFGS at its 1000-
+        # iteration cap), and its own end objective scatters by 12 % under one-ulp start
+        # perturbations (tracked sensitivity record). Same rule v2 as the three pre-
+        # registered band cases; the campaign record says so where the values were seen.
+        native_default_quality_band=official_quality_band("native-boozerqa"),
+        work_budget_contract=WorkBudgetContract(
+            # At native_default the band admits the cap (a band and a work budget cannot
+            # both cover that scale); the reduced scales keep the fixed-budget contract.
+            scales=("bounded",),
+            derivation="Upstream BoozerQA fixes outer BFGS work by MAXITER; an accepted endpoint may stop at that cap.",
+        ),
     ),
     "native-coil-forces": CaseDefinition(
         case_id="native-coil-forces",
         create_input=create_native_coil_forces_input,
         execute=execute_native_coil_forces,
+        # Declared POST HOC on the user's decision C14 (2026-09-20 23:48 EDT, implemented under the
+        # 2026-09-21 reconciliation consensus): at native_default the JAX GPU lane ends stage one with
+        # SciPy status 2 (ABNORMAL line search at nit 381) where the other lanes reach the 400-iteration
+        # cap; upstream's own official script stops stage one the same way under a one-ulp start
+        # perturbation (tracked sensitivity record, k = 5: status 2 at nit 273; its stage two then ran to the
+        # cap, status 1, where the lane's stage two is an inert restart, status 2). Same rule v2 as the
+        # other band cases; the band is an engineering endpoint acceptance, not an equivalence proof.
+        native_default_quality_band=official_quality_band("native-coil-forces"),
+        work_budget_contract=WorkBudgetContract(
+            # At native_default the band admits the cap (a band and a work budget cannot both cover
+            # that scale); the reduced scale keeps the fixed-budget contract.
+            scales=("bounded",),
+            derivation="Upstream coil-forces stages use fixed L-BFGS-B iteration caps; accepted endpoints may exhaust the stage budgets.",
+        ),
+        native_default_admitted_terminal_outcomes=(
+            AdmittedTerminalOutcome(
+                case_id="native-coil-forces",
+                lane="jax-gpu",
+                # Stage one SciPy status 2 (ABNORMAL_TERMINATION_IN_LNSRCH); stage two is the inert cold
+                # restart at the same point (status 2 at nit 0: the length penalty is exactly zero there).
+                raw_status="2,2",
+                normalized_status="failed",
+                upstream_evidence=(
+                    "official coil_forces.py, one-ulp protocol, sensitivity record k = 5: "
+                    "stage one status 2 (ABNORMAL) at nit 273, stage two status 1 at the cap; the "
+                    "lane's stage two is an inert restart at that point (status 2), a disclosed "
+                    "difference (investigations/coil-forces-gpu/REPORT.md:93,205-214)"
+                ),
+            ),
+        ),
     ),
     "native-just-a-quadratic": CaseDefinition(
         case_id="native-just-a-quadratic",
@@ -274,6 +350,7 @@ _CASES = {
         case_id="native-qfm",
         create_input=create_native_qfm_input,
         execute=execute_native_qfm,
+        native_default_quality_band=official_quality_band("native-qfm"),
     ),
     "native-surf-vol-area": CaseDefinition(
         case_id="native-surf-vol-area",
@@ -299,31 +376,59 @@ _CASES = {
         case_id="native-stage-two-optimization-minimal",
         create_input=create_native_stage_two_optimization_minimal_input,
         execute=execute_native_stage_two_optimization_minimal,
+        # Upstream's run ends at its 300-iteration L-BFGS-B limit (status 1); the band admits that outcome at
+        # native_default. The reduced scale converges inside the same cap, so no work budget is declared.
+        native_default_quality_band=official_quality_band(
+            "native-stage-two-optimization-minimal"
+        ),
     ),
     "native-stage-two-optimization": CaseDefinition(
         case_id="native-stage-two-optimization",
         create_input=create_native_stage_two_optimization_input,
         execute=execute_native_stage_two_optimization,
+        work_budget_contract=WorkBudgetContract(
+            scales=_FIXED_BUDGET_SCALES,
+            derivation="Upstream standard stage-two optimization fixes L-BFGS-B MAXITER per stage; accepted endpoints may reach the cap.",
+        ),
     ),
     "native-stage-two-optimization-finitebuild": CaseDefinition(
         case_id="native-stage-two-optimization-finitebuild",
         create_input=create_native_stage_two_finitebuild_input,
         execute=execute_native_stage_two_finitebuild,
+        native_default_quality_band=official_quality_band(
+            "native-stage-two-optimization-finitebuild"
+        ),
+        work_budget_contract=WorkBudgetContract(
+            scales=("bounded",),
+            derivation="Upstream finite-build optimization uses a fixed SciPy iteration cap; accepted endpoints may exhaust it. At native_default the endpoint quality band admits the same outcome.",
+        ),
     ),
     "native-stage-two-optimization-planar-coils": CaseDefinition(
         case_id="native-stage-two-optimization-planar-coils",
         create_input=create_native_stage_two_optimization_planar_coils_input,
         execute=execute_native_stage_two_optimization_planar_coils,
+        work_budget_contract=WorkBudgetContract(
+            scales=_FIXED_BUDGET_SCALES,
+            derivation="Upstream's own planar-coil run does NOT end at the cap: 9e027eac3 keeps the four CurvePlanarFourier Jacobians in the persistent cache (src/simsoptpp/curveplanarfourier.h:94-105), which is only sound for a curve linear in its dofs, so upstream's gradient is stale after the first evaluated state and L-BFGS-B stagnates at nit 135 and 69 (status 0, RELATIVE REDUCTION OF F <= FACTR*EPSMCH, nfev 604 and 844). A lane whose CurvePlanarFourier Jacobian follows the dofs instead runs the script's own MAXITER per stage, so a budget exit is this case's expected honest terminal status. The end point is therefore NOT compared with upstream's; what is compared with upstream is the objective VALUE at upstream's own states (bitwise at x0 and at both official end states) and the gradient at x0 (2.56e-16 relative), in tests/integration/test_jax_mirror_planar_coils_official_states.py.",
+        ),
     ),
     "native-stage-two-optimization-stochastic": CaseDefinition(
         case_id="native-stage-two-optimization-stochastic",
         create_input=create_native_stage_two_optimization_stochastic_input,
         execute=execute_native_stage_two_optimization_stochastic,
+        work_budget_contract=WorkBudgetContract(
+            scales=_FIXED_BUDGET_SCALES,
+            derivation="Upstream stochastic stage-two optimization uses a fixed outer iteration cap; accepted endpoints may exhaust it.",
+        ),
     ),
     "native-strain-optimization": CaseDefinition(
         case_id="native-strain-optimization",
         create_input=create_native_strain_optimization_input,
         execute=execute_native_strain_optimization,
+        work_budget_contract=WorkBudgetContract(
+            scales=_FIXED_BUDGET_SCALES,
+            derivation="Upstream strain optimization fixes L-BFGS-B MAXITER; an accepted endpoint may stop at that cap.",
+        ),
     ),
     "native-single-stage-boozer-vacuum-optimization": CaseDefinition(
         case_id="native-single-stage-boozer-vacuum-optimization",
@@ -341,6 +446,10 @@ _CASES = {
         case_id="native-wireframe-gsco-modular",
         create_input=create_native_wireframe_gsco_modular_input,
         execute=execute_native_wireframe_gsco_modular,
+        work_budget_contract=WorkBudgetContract(
+            scales=GSCO_REDUCED_BUDGET_SCALES,
+            derivation="Upstream GSCO accepts an explicit max_iter cap (wireframe_optimization.cpp:281 stop_last_iter); the official native_default and CI runs stop earlier on their own rule, so only the reduced bounded cap is ever reached.",
+        ),
     ),
     "native-wireframe-gsco-multistep": CaseDefinition(
         case_id="native-wireframe-gsco-multistep",
@@ -351,6 +460,10 @@ _CASES = {
         case_id="native-wireframe-gsco-sector-saddle",
         create_input=create_native_wireframe_gsco_sector_saddle_input,
         execute=execute_native_wireframe_gsco_sector_saddle,
+        work_budget_contract=WorkBudgetContract(
+            scales=GSCO_REDUCED_BUDGET_SCALES,
+            derivation="Upstream GSCO accepts an explicit max_iter cap (wireframe_optimization.cpp:281 stop_last_iter); the official native_default and CI runs stop earlier on their own rule, so only the reduced bounded cap is ever reached.",
+        ),
     ),
     "native-wireframe-rcls-with-ports": CaseDefinition(
         case_id="native-wireframe-rcls-with-ports",

@@ -780,7 +780,9 @@ std::tuple<Array, Array, Array, Array, Array> GPMO_ArbVec_backtracking(
     Array Connect = connectivity_matrix(dipole_grid_xyz, Nadjacent);
 
     int num_nonzero = 0;
-    Array num_nonzeros = xt::zeros<int>({nhistory + 2});
+    // One element more than the history holds: the stop test reads num_nonzeros(print_iter)
+    // on the last printed iteration, one past the record it wrote (upstream reads past the end).
+    Array num_nonzeros = xt::zeros<int>({nhistory + 3});
 
     // Initialize the solution according to user input
     initialize_GPMO_ArbVec(x_init, pol_vectors, x, x_vec, x_sign, 

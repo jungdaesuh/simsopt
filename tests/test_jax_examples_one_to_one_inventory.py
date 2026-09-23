@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from examples.jax._manifest import TIERS
+from examples.jax.official_source_catalog import OFFICIAL_NATIVE_EXAMPLE_SOURCE_SET
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 INVENTORY_PATH = REPO_ROOT / "examples" / "jax" / "one_to_one_inventory.json"
@@ -19,6 +20,17 @@ VMEC_BLOCKED_CANDIDATES = frozenset(
         "2_Intermediate/QH_fixed_resolution_boozer.py",
         "2_Intermediate/resolution_increase_boozer.py",
         "2_Intermediate/tracing_boozer.py",
+    }
+)
+
+# Native example sources this branch added on top of the pinned official
+# upstream inventory. They exist in the tree and are inventoried, but they are
+# not upstream sources, so the manifest registers them under
+# ``experimental_sources`` rather than in the official ``source_catalog``.
+BRANCH_ADDED_NATIVE_SOURCES = frozenset(
+    {
+        "3_Advanced/single_stage_boozer_vacuum_optimization.py",
+        "3_Advanced/single_stage_flat675.py",
     }
 )
 
@@ -37,6 +49,10 @@ EXPECTED_ROW_FIELDS = frozenset(
         "reconsideration_condition",
     }
 )
+# The inventory's ``baseline`` block is a dated provenance record of the HEAD at
+# which the ledger was first frozen (2026-07-27, 03d8da68b), not a description of
+# today's tree: its counts and manifest hashes stay pinned to that snapshot. The
+# live tree is pinned by the row assertions below instead.
 EXPECTED_BASELINE = {
     "head": "03d8da68b053815db537cd44e66887225c751c0e",
     "manifest_schema_version": 2,
@@ -80,14 +96,24 @@ def _tracked_native_sources() -> set[str]:
 def _catalog_classification_sets() -> dict[str, frozenset[str]]:
     document = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     catalog = document["source_catalog"]
+    experimental = document["experimental_sources"]
     assert isinstance(catalog, list)
+    assert isinstance(experimental, list)
+    # The official catalog is exactly upstream's inventory; everything the
+    # branch added lives in the experimental registry and nowhere else.
+    assert {
+        str(record["source"]) for record in catalog
+    } == OFFICIAL_NATIVE_EXAMPLE_SOURCE_SET
+    assert {str(record["source"]) for record in experimental}.isdisjoint(
+        OFFICIAL_NATIVE_EXAMPLE_SOURCE_SET
+    )
     buckets: dict[str, set[str]] = {
         "mirror": set(),
         "hybrid": set(),
         "blocked": set(),
         "not_applicable": set(),
     }
-    for record in catalog:
+    for record in (*catalog, *experimental):
         assert isinstance(record, dict)
         disposition = record["disposition"]
         classification = "mirror" if disposition == "eligible" else str(disposition)
@@ -112,6 +138,12 @@ def test_inventory_freezes_exact_baseline_and_all_native_sources() -> None:
     assert len(sources) == len(set(sources))
     assert sources == sorted(sources)
     assert set(sources) == tracked_sources
+    # The tree is exactly upstream's official inventory plus the branch's own
+    # native sources: neither side may quietly gain or lose a file.
+    assert OFFICIAL_NATIVE_EXAMPLE_SOURCE_SET <= tracked_sources
+    assert tracked_sources - OFFICIAL_NATIVE_EXAMPLE_SOURCE_SET == (
+        BRANCH_ADDED_NATIVE_SOURCES
+    )
 
 
 def test_inventory_classifies_every_source_without_silently_shrinking_scope() -> None:

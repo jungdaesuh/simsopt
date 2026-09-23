@@ -1243,9 +1243,11 @@ def collect_case_measurements(
         repo_root / "examples" / "jax" / "parity_manifest.json",
         repo_root=repo_root,
     )
+    # An explicitly named case may be an experimental registration; only batch
+    # selection is limited to the official relationships.
     relationships = tuple(
         relationship
-        for relationship in contract_pair.parity.relationships
+        for relationship in contract_pair.parity.all_relationships
         if relationship.case_id == case_id
     )
     if len(relationships) != 1:

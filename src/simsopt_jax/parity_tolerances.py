@@ -19,6 +19,13 @@ from simsopt_contracts.optimization_endpoint import (
 ParityToleranceValue = Union[float, bool, None]
 
 PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
+    "rcls_constraint_roundoff": {
+        # The observable is already divided by a two-evaluation FP64 rounding
+        # bound, using identical frozen C, x, b and their operation count.
+        "rtol": 0.0,
+        "atol": 1.0,
+        "requires_same_state": True,
+    },
     "native_workflow": {
         "same_state_value_rtol": 1e-10,
         "same_state_value_atol": 1e-12,

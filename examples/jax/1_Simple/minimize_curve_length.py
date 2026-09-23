@@ -2,8 +2,8 @@
 
 Host construction creates the native ``CurveRZFourier`` and fixes its major
 radius.  An immutable RZ-Fourier specification and free-DOF expansion then
-enter the JAX numerical region.  Only the accepted final free state is
-published back to the native curve for reporting.
+enter the JAX numerical region, which owns every published number: the native
+curve is a construction input and is never written back to.
 """
 
 from __future__ import annotations
@@ -16,20 +16,26 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
 
-import jax
 import numpy as np
+from examples.jax.official_tiny_least_squares import (
+    CONTROLLED_CURVE_INITIAL_FULL,
+    DRIVER_CURVE,
+    curve_length_residual,
+    guard_finite_endpoint,
+    solve_jax_residual,
+    trf_outcome,
+    value_and_jacobian,
+)
 from simsopt.geo import CurveRZFourier
 from simsopt_jax.examples import (
     ExecutionScale,
     example_runtime_metadata,
-    solve_rz_curve_length,
 )
 
 EXAMPLE_ID = "native-minimize-curve-length"
 NQUADRATURE = 100
 NFOURIER = 4
 NFP = 5
-RANDOM_SEED = 0
 MAJOR_RADIUS = 3.0
 
 
@@ -46,7 +52,7 @@ class ExampleResult:
     optimizer_success: bool
     optimizer_status: int
     solver_driver: str
-    iterations: int
+    iterations: int | None
     function_evaluations: int
     gradient_evaluations: int
     status: Literal["ok", "failed"]
@@ -77,55 +83,41 @@ class ExampleResult:
 
 def _build_curve() -> CurveRZFourier:
     curve = CurveRZFourier(NQUADRATURE, NFOURIER, NFP, True)
-    random_state = np.random.RandomState(RANDOM_SEED)
-    initial_full = random_state.rand(curve.dof_size) - 0.5
-    initial_full[0] = MAJOR_RADIUS
-    curve.x = initial_full
+    curve.x = np.asarray(CONTROLLED_CURVE_INITIAL_FULL, dtype=np.float64)
     curve.fix(0)
     return curve
 
 
-def solve(output_directory: Path, max_steps: int) -> ExampleResult:
+def solve(output_directory: Path, max_steps: int | None) -> ExampleResult:
     curve = _build_curve()
     full_dofs = np.asarray(curve.local_full_x, dtype=np.float64)
     free_positions = np.flatnonzero(curve.local_dofs_free_status)
+    residual = curve_length_residual(
+        full_dofs,
+        np.asarray(curve.quadpoints, dtype=np.float64),
+        free_positions,
+        order=curve.order,
+        nfp=curve.nfp,
+        stellsym=curve.stellsym,
+    )
+    initial = full_dofs[free_positions]
+    initial_value, initial_jacobian = value_and_jacobian(residual, initial)
     with chdir(output_directory):
-        device_result = solve_rz_curve_length(
-            full_dofs=jax.device_put(full_dofs),
-            quadpoints=jax.device_put(np.asarray(curve.quadpoints, dtype=np.float64)),
-            free_positions=jax.device_put(free_positions),
-            order=curve.order,
-            nfp=curve.nfp,
-            stellsym=curve.stellsym,
-            max_steps=max_steps,
-            rtol=1.0e-10,
-            atol=1.0e-8,
-        )
-
-    initial = np.asarray(
-        jax.device_get(device_result.initial_parameters),
-        dtype=np.float64,
-    )
-    initial_gradient = np.asarray(
-        jax.device_get(device_result.initial_residual_jacobian),
-        dtype=np.float64,
-    )
-    solution = np.asarray(
-        jax.device_get(device_result.final_parameters),
-        dtype=np.float64,
-    )
-    final_gradient = np.asarray(
-        jax.device_get(device_result.final_residual_jacobian),
-        dtype=np.float64,
-    )
-    initial_length = float(jax.device_get(device_result.initial_length))
-    final_length = float(jax.device_get(device_result.final_length))
-    curve.x = solution
+        optimizer = solve_jax_residual(residual, initial, max_nfev=max_steps)
+    solution = np.asarray(optimizer.x, dtype=np.float64)
+    final_value, final_jacobian = value_and_jacobian(residual, solution)
+    initial_length = float(initial_value[0])
+    final_length = float(final_value[0])
+    initial_gradient = initial_jacobian[0]
+    final_gradient = final_jacobian[0]
+    # ``circle_oracle`` is a published diagnostic, not a gate: the official run
+    # stops on ftol 3.25e-07 away from it
+    # (A/reference-simple/runs/native-minimize-curve-length/captured-controlled-omp1:
+    # status 2 `ftol`, nfev 62, njev 55, fun = 18.849556246039942).
     circle_oracle = 2.0 * np.pi * MAJOR_RADIUS
-    final_objective_gradient = 2.0 * final_length * final_gradient
-    scientific_success = bool(
-        np.isclose(final_length, circle_oracle, rtol=1.0e-9, atol=1.0e-9)
-        and np.linalg.norm(final_objective_gradient, ord=np.inf) <= 2.0e-5
+    outcome = guard_finite_endpoint(
+        trf_outcome(optimizer),
+        (np.asarray(final_length, dtype=np.float64), solution, final_gradient),
     )
     return ExampleResult(
         initial_parameters=tuple(float(value) for value in initial),
@@ -135,14 +127,14 @@ def solve(output_directory: Path, max_steps: int) -> ExampleResult:
         final_length=final_length,
         final_gradient=tuple(float(value) for value in final_gradient),
         circle_oracle=circle_oracle,
-        solver_success=scientific_success,
-        optimizer_success=device_result.optimizer.success,
-        optimizer_status=device_result.optimizer.status,
-        solver_driver=device_result.optimizer.driver.value,
-        iterations=device_result.optimizer.nit,
-        function_evaluations=device_result.optimizer.nfev,
-        gradient_evaluations=device_result.optimizer.njev,
-        status="ok" if scientific_success else "failed",
+        solver_success=outcome.success,
+        optimizer_success=bool(optimizer.success),
+        optimizer_status=int(optimizer.status),
+        solver_driver=DRIVER_CURVE,
+        iterations=None,
+        function_evaluations=outcome.nfev,
+        gradient_evaluations=outcome.njev,
+        status="ok" if outcome.success else "failed",
     )
 
 
@@ -157,7 +149,11 @@ def argument_parser() -> argparse.ArgumentParser:
 
 def main(arguments: list[str] | None = None) -> int:
     options = argument_parser().parse_args(arguments)
-    max_steps = options.max_steps or (32 if options.smoke else 128)
+    # No scale caps the official workflow: without an explicit --max-steps the
+    # solve runs SciPy's own default budget (100 * n), the official policy. The
+    # official run needs 62 evaluations, which the previous smoke cap of 32 cut
+    # short, so the mirror reported a truncated solve as its own outcome.
+    max_steps = options.max_steps
     if options.output_dir is not None:
         options.output_dir.mkdir(parents=True, exist_ok=True)
         result = solve(options.output_dir, max_steps)

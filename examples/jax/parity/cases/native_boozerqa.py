@@ -20,6 +20,7 @@ from examples.jax.parity.input_bundle import (
 )
 from examples.jax.parity.measurement import MeasurementExecution
 from examples.jax.parity.runtime import ParityLane
+from examples.jax.parity.terminal_status import normalized_terminal_status
 from simsopt.configs import get_data
 from simsopt.geo import SurfaceXYZTensorFourier
 from simsopt.optimization_trajectory import (
@@ -34,10 +35,32 @@ from simsopt.single_stage_boozer_vacuum import (
 )
 from simsopt_contracts.optimization_endpoint import (
     OptimizationEndpointCertificate,
+    StoppingReason,
     certify_optimization_endpoint,
 )
+from simsopt_jax.backend.runtime import get_runtime_jax_device
 from simsopt_jax.examples import ExecutionScale, scalar_example_driver
+from simsopt_jax.examples.boozer_official import (
+    OFFICIAL_QA_INITIAL_IOTA,
+    OFFICIAL_QA_LINE_SEARCH_MAXITER,
+    OFFICIAL_QA_NEWTON_MAXITER,
+    OFFICIAL_QA_NEWTON_TOLERANCE,
+    OFFICIAL_QA_NON_QS_RESOLUTION,
+    OFFICIAL_QA_OUTER_DRIVER,
+    OFFICIAL_QA_OUTER_MAXITER,
+    OFFICIAL_QA_RESIDUAL_WEIGHT,
+    OFFICIAL_QA_SURFACE_DISTANCE,
+    OFFICIAL_QA_SURFACE_RESOLUTION,
+    boozer_qa_outer_objective_config,
+)
+from simsopt_jax.geo.optimizer_host_lbfgs import (
+    line_search_value_and_grad_more_thuente_host,
+    minimize_bfgs_host_core,
+)
 from simsopt_jax.solve.driver import Driver
+from simsopt_jax_adapters.geo.boozer_qa_problem import BoozerQAProblem
+
+import jax
 
 WORKFLOW_STAGES = (
     "construct_ncsx_coils_and_volume_labelled_surface",
@@ -62,7 +85,7 @@ _TIMELINE_UNAVAILABLE_PHYSICS_OBSERVABLES = tuple(
 
 @dataclass(frozen=True, slots=True)
 class BoozerSingleStageSpec:
-    """Immutable scientific differences between Boozer single-stage examples."""
+    """Immutable Boozer inputs; absent native tolerance reuses the base value."""
 
     case_id: str
     workflow_stages: tuple[str, ...]
@@ -76,21 +99,36 @@ class BoozerSingleStageSpec:
     residual_weight: float
     report_residual: bool
     enforce_endpoint_certificate: bool = False
+    native_inner_tolerance: float | None = None
 
 
+#: The official values come from ``simsopt_jax.examples.boozer_official``, the
+#: single owner the shipped ``examples/jax/2_Intermediate/boozerQA.py`` reads;
+#: the ``bounded_*`` fields are this branch's reduced scale and have no upstream
+#: counterpart.
 BOOZER_QA_SPEC = BoozerSingleStageSpec(
     case_id="native-boozerqa",
     workflow_stages=WORKFLOW_STAGES,
     bounded_resolution=2,
-    native_resolution=6,
+    native_resolution=OFFICIAL_QA_SURFACE_RESOLUTION,
     inner_tolerance=1.0e-10,
     bounded_outer_maxiter=5,
-    native_outer_maxiter=1_000,
-    bounded_non_qs_sdim=20,
-    native_non_qs_sdim=20,
-    residual_weight=0.0,
+    native_outer_maxiter=OFFICIAL_QA_OUTER_MAXITER,
+    bounded_non_qs_sdim=OFFICIAL_QA_NON_QS_RESOLUTION,
+    native_non_qs_sdim=OFFICIAL_QA_NON_QS_RESOLUTION,
+    residual_weight=OFFICIAL_QA_RESIDUAL_WEIGHT,
     report_residual=False,
+    native_inner_tolerance=OFFICIAL_QA_NEWTON_TOLERANCE,
 )
+
+
+def _outer_driver(spec: BoozerSingleStageSpec) -> Driver:
+    """Keep the official BoozerQA BFGS method independent of device mode."""
+    return (
+        OFFICIAL_QA_OUTER_DRIVER
+        if spec.case_id == BOOZER_QA_SPEC.case_id
+        else scalar_example_driver()
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -440,15 +478,21 @@ def variant_scale_configuration(
     return {
         "mpol": resolution,
         "ntor": resolution,
-        "inner_maxiter": 20,
-        "inner_tolerance": spec.inner_tolerance,
+        # Shared by both Boozer single-stage variants: the official BoozerQA
+        # inner Newton budget, start iota and extrusion distance.
+        "inner_maxiter": OFFICIAL_QA_NEWTON_MAXITER,
+        "inner_tolerance": (
+            spec.native_inner_tolerance
+            if native_scale and spec.native_inner_tolerance is not None
+            else spec.inner_tolerance
+        ),
         "outer_maxiter": (
             spec.native_outer_maxiter if native_scale else spec.bounded_outer_maxiter
         ),
         "outer_rtol": 0.0,
         "outer_atol": OUTER_GRADIENT_TOLERANCE,
-        "initial_iota": -0.406,
-        "surface_distance": 0.10,
+        "initial_iota": OFFICIAL_QA_INITIAL_IOTA,
+        "surface_distance": OFFICIAL_QA_SURFACE_DISTANCE,
         "non_qs_sdim": (
             spec.native_non_qs_sdim if native_scale else spec.bounded_non_qs_sdim
         ),
@@ -818,35 +862,32 @@ def _native(
     final_boozer_residual = float(residual.J())
     inner_solver_success = bool(solver.res["success"])
     outer_solver_success = bool(optimizer_result.success)
+    outer_certificate = certify_optimization_endpoint(
+        status_convention="scipy-bfgs",
+        provider_success=outer_solver_success,
+        provider_status=int(optimizer_result.status),
+        iterations=int(optimizer_result.nit),
+        max_iterations=_configuration_int(
+            bundle.configuration,
+            "outer_maxiter",
+        ),
+        initial_gradient_inf_norm=float(np.max(np.abs(initial_gradient))),
+        final_gradient_inf_norm=float(np.max(np.abs(final_gradient))),
+        parameters_finite=bool(np.all(np.isfinite(final_parameters))),
+        observables_finite=bool(
+            np.isfinite(final_objective)
+            and np.all(np.isfinite(final_gradient))
+            and np.isfinite(final_non_qs_ratio)
+            and np.isfinite(final_iota)
+            and np.isfinite(final_volume)
+            and np.isfinite(final_major_radius_penalty)
+            and np.isfinite(final_length_penalty)
+            and np.isfinite(final_boozer_residual)
+        ),
+        inner_success=bool(prepared.initial_solution_success and inner_solver_success),
+    )
     endpoint_certificate = (
-        certify_optimization_endpoint(
-            status_convention="scipy-bfgs",
-            provider_success=outer_solver_success,
-            provider_status=int(optimizer_result.status),
-            iterations=int(optimizer_result.nit),
-            max_iterations=_configuration_int(
-                bundle.configuration,
-                "outer_maxiter",
-            ),
-            initial_gradient_inf_norm=float(np.max(np.abs(initial_gradient))),
-            final_gradient_inf_norm=float(np.max(np.abs(final_gradient))),
-            parameters_finite=bool(np.all(np.isfinite(final_parameters))),
-            observables_finite=bool(
-                np.isfinite(final_objective)
-                and np.all(np.isfinite(final_gradient))
-                and np.isfinite(final_non_qs_ratio)
-                and np.isfinite(final_iota)
-                and np.isfinite(final_volume)
-                and np.isfinite(final_major_radius_penalty)
-                and np.isfinite(final_length_penalty)
-                and np.isfinite(final_boozer_residual)
-            ),
-            inner_success=bool(
-                prepared.initial_solution_success and inner_solver_success
-            ),
-        )
-        if spec.enforce_endpoint_certificate
-        else None
+        outer_certificate if spec.enforce_endpoint_certificate else None
     )
     values = variant_observable_values(
         surface_dofs=arrays["surface_dofs"],
@@ -885,6 +926,7 @@ def _native(
             int(optimizer_result.njev),
         ),
         endpoint_certificate=endpoint_certificate,
+        outer_stopping_reason=outer_certificate.stopping_reason,
     )
 
 
@@ -1119,49 +1161,17 @@ def _prepare_jax_variant_runtime(
     initial_volume = float(volume.J())
     major_radius_target = float(surface.major_radius())
     total_length_target = float(sum(CurveLength(curve).J() for curve in base_curves))
-    objective_configuration: dict[str, object] = {
-        "non_qs_weight": 1.0,
-        "residual_weight": _configuration_float(
+    objective_configuration: dict[str, object] = boozer_qa_outer_objective_config(
+        nfp=nfp,
+        non_qs_resolution=_configuration_int(bundle.configuration, "non_qs_sdim"),
+        length_target=total_length_target,
+        major_radius_target=major_radius_target,
+        vessel_gamma=surface.gamma(),
+        residual_weight=_configuration_float(
             bundle.configuration,
             "residual_weight",
         ),
-        "iota_weight": 1.0,
-        "major_radius_weight": 1.0,
-        "length_weight": 1.0,
-        "curvature_weight": 0.0,
-        "curve_curve_weight": 0.0,
-        "curve_surface_weight": 0.0,
-        "surface_vessel_weight": 0.0,
-        "non_qs_quadpoints_phi": np.asarray(
-            np.linspace(
-                0.0,
-                1.0 / nfp,
-                2 * _configuration_int(bundle.configuration, "non_qs_sdim"),
-                endpoint=False,
-            ),
-            dtype=np.float64,
-        ),
-        "non_qs_quadpoints_theta": np.asarray(
-            np.linspace(
-                0.0,
-                1.0,
-                2 * _configuration_int(bundle.configuration, "non_qs_sdim"),
-                endpoint=False,
-            ),
-            dtype=np.float64,
-        ),
-        "non_qs_axis": 0,
-        "optimized_coil_index": 0,
-        "length_coil_indices": (0, 1, 2),
-        "length_target": total_length_target,
-        "curvature_threshold": 0.0,
-        "curvature_p_norm": 2.0,
-        "major_radius_target": major_radius_target,
-        "curve_curve_threshold": 0.0,
-        "curve_surface_threshold": 0.0,
-        "vessel_gamma": np.asarray(surface.gamma(), dtype=np.float64),
-        "surface_vessel_threshold": 0.0,
-    }
+    )
     session = make_traceable_objective_session(
         solver,
         field,
@@ -1607,7 +1617,7 @@ def _jax(
             outer_solver_success = bool(optimizer_result.success)
             status_convention = "optax-lbfgs"
         else:
-            driver = scalar_example_driver()
+            driver = _outer_driver(spec)
             if driver == Driver.SIMSOPT_LBFGSB:
                 optimizer_result = minimize_lbfgs_host_core(
                     evaluate_optimizer_trial,
@@ -1751,33 +1761,32 @@ def _jax(
     final_length_penalty = _host_float(final_metrics["final_length_penalty"])
     final_boozer_residual = _host_float(final_metrics["final_boozer_residual"])
     inner_solver_success = _host_bool(final_metrics["solver_success"])
+    outer_certificate = certify_optimization_endpoint(
+        status_convention=status_convention,
+        provider_success=outer_solver_success,
+        provider_status=optimizer_status,
+        iterations=optimizer_iterations,
+        max_iterations=_configuration_int(
+            bundle.configuration,
+            "outer_maxiter",
+        ),
+        initial_gradient_inf_norm=float(np.max(np.abs(initial_gradient))),
+        final_gradient_inf_norm=float(np.max(np.abs(final_gradient))),
+        parameters_finite=bool(np.all(np.isfinite(final_parameters))),
+        observables_finite=bool(
+            np.isfinite(final_objective)
+            and np.all(np.isfinite(final_gradient))
+            and np.isfinite(final_non_qs_ratio)
+            and np.isfinite(final_iota)
+            and np.isfinite(final_volume)
+            and np.isfinite(final_major_radius_penalty)
+            and np.isfinite(final_length_penalty)
+            and np.isfinite(final_boozer_residual)
+        ),
+        inner_success=bool(initial_inner_success and inner_solver_success),
+    )
     endpoint_certificate = (
-        certify_optimization_endpoint(
-            status_convention=status_convention,
-            provider_success=outer_solver_success,
-            provider_status=optimizer_status,
-            iterations=optimizer_iterations,
-            max_iterations=_configuration_int(
-                bundle.configuration,
-                "outer_maxiter",
-            ),
-            initial_gradient_inf_norm=float(np.max(np.abs(initial_gradient))),
-            final_gradient_inf_norm=float(np.max(np.abs(final_gradient))),
-            parameters_finite=bool(np.all(np.isfinite(final_parameters))),
-            observables_finite=bool(
-                np.isfinite(final_objective)
-                and np.all(np.isfinite(final_gradient))
-                and np.isfinite(final_non_qs_ratio)
-                and np.isfinite(final_iota)
-                and np.isfinite(final_volume)
-                and np.isfinite(final_major_radius_penalty)
-                and np.isfinite(final_length_penalty)
-                and np.isfinite(final_boozer_residual)
-            ),
-            inner_success=bool(initial_inner_success and inner_solver_success),
-        )
-        if spec.enforce_endpoint_certificate
-        else None
+        outer_certificate if spec.enforce_endpoint_certificate else None
     )
     values = variant_observable_values(
         surface_dofs=arrays["surface_dofs"],
@@ -1824,6 +1833,7 @@ def _jax(
             optimizer_gradient_evaluations,
         ),
         endpoint_certificate=endpoint_certificate,
+        outer_stopping_reason=outer_certificate.stopping_reason,
     )
 
 
@@ -1931,8 +1941,14 @@ def variant_lane_observation(
     workflow_stages: tuple[str, ...],
     solver_counts: tuple[int, int, int],
     endpoint_certificate: OptimizationEndpointCertificate | None = None,
+    outer_stopping_reason: StoppingReason | None = None,
 ) -> LaneObservation:
-    """Apply common endpoint status semantics to a completed Boozer variant."""
+    """Apply common endpoint status semantics to a completed Boozer variant.
+
+    A variant that enforces an endpoint certificate is labelled by it. Every
+    other variant is labelled by its outer optimizer's own stopping reason: a
+    decreased objective never turns an iteration-limit stop into convergence.
+    """
     nit, nfev, njev = solver_counts
     objective_decreased = bool(
         np.all(np.isfinite(values["initial:gradient"]))
@@ -1947,7 +1963,17 @@ def variant_lane_observation(
         and (endpoint_certificate is None or endpoint_certificate.success)
     )
     if endpoint_certificate is None:
-        normalized_status = "converged" if success else "failed"
+        if outer_stopping_reason is None:
+            raise ValueError(
+                "a variant without an endpoint certificate reports its outer "
+                "stopping reason"
+            )
+        terminal = normalized_terminal_status(
+            scientific_predicate=objective_decreased,
+            stage_stopping_reasons=(outer_stopping_reason,),
+        )
+        normalized_status = terminal.normalized_status
+        success = terminal.success
         raw_status = (
             f"inner={bool(values['final:inner_solver_success'])};"
             f"outer={bool(values['final:outer_solver_success'])}"
@@ -1998,13 +2024,155 @@ def variant_lane_observation(
     )
 
 
+def _execute_official_jax(
+    lane: ParityLane,
+    bundle: InputBundle,
+    arrays: dict[str, np.ndarray],
+) -> LaneObservation:
+    """Run the official BoozerQA workflow on the analytic exact Boozer route.
+
+    Upstream's ``solve_residual_equation_exactly_newton`` assembles the dense
+    analytic Jacobian, solves it directly, takes the undamped Newton step and, in
+    the example's objective, returns ``J = 1e3`` with the previous surface
+    restored when the solve fails (upstream boozerQA.py:102-109).  That is what
+    :class:`~simsopt_jax_adapters.geo.boozer_qa_problem.BoozerQAProblem` runs, and
+    it is the same evaluator the shipped ``examples/jax/2_Intermediate/boozerQA.py``
+    drives, so the script and this matched workflow cannot diverge.
+
+    The traceable-session route (``_prepare_jax_variant_runtime`` / ``_jax``) is
+    untouched and still serves the instrumented measurement entry point of
+    ``native_single_stage_boozer_vacuum`` and the compute-graph benchmarks.
+    """
+    configuration = bundle.configuration
+    (
+        base_curves,
+        _base_currents,
+        magnetic_axis,
+        nfp,
+        native_field,
+        surface,
+        G0,
+    ) = build_variant_problem(configuration, bundle.scale)
+    validate_variant_bundle_arrays(
+        arrays,
+        axis_dofs=np.asarray(magnetic_axis.local_full_x, dtype=np.float64),
+        coil_dofs=np.asarray(native_field.x, dtype=np.float64),
+        surface_dofs=np.asarray(surface.get_dofs(), dtype=np.float64),
+    )
+    surface.set_dofs(arrays["surface_dofs"])
+    problem = BoozerQAProblem(
+        base_curves=base_curves,
+        native_field=native_field,
+        surface=surface,
+        nfp=nfp,
+        initial_G=G0,
+        initial_iota=_configuration_float(configuration, "initial_iota"),
+        boozer_options={
+            "newton_maxiter": _configuration_int(configuration, "inner_maxiter"),
+            "newton_tol": _configuration_float(configuration, "inner_tolerance"),
+            "verbose": False,
+        },
+        non_qs_resolution=_configuration_int(configuration, "non_qs_sdim"),
+        residual_weight=_configuration_float(configuration, "residual_weight"),
+    )
+    initial_parameters = problem.initial_coil_dofs
+    if not np.array_equal(initial_parameters, arrays["coil_dofs"]):
+        raise ValueError("official JAX parameters do not match the frozen coil dofs")
+    initial_objective, initial_gradient = problem.value_and_gradient(initial_parameters)
+    outer_maxiter = _configuration_int(configuration, "outer_maxiter")
+    optimizer_result = minimize_bfgs_host_core(
+        problem.value_and_gradient,
+        initial_parameters,
+        maxiter=outer_maxiter,
+        gtol=OUTER_GRADIENT_TOLERANCE,
+        maxls=OFFICIAL_QA_LINE_SEARCH_MAXITER,
+        initial_value_and_grad=(initial_objective, initial_gradient),
+        line_search_value_and_grad=line_search_value_and_grad_more_thuente_host,
+    )
+    final_parameters = np.asarray(optimizer_result.x_k, dtype=np.float64)
+    endpoint = problem.endpoint(final_parameters)
+    final_gradient = endpoint.gradient
+    outer_solver_success = bool(optimizer_result.converged)
+    optimizer_status = int(optimizer_result.status)
+    outer_certificate = certify_optimization_endpoint(
+        # ``minimize_bfgs_host_core`` is the host core of the official outer
+        # method, so its termination integers follow the same ``host-bfgs``
+        # convention the session route applies to this spec.
+        status_convention="host-bfgs",
+        provider_success=outer_solver_success,
+        provider_status=optimizer_status,
+        iterations=int(optimizer_result.k),
+        max_iterations=outer_maxiter,
+        initial_gradient_inf_norm=float(np.max(np.abs(initial_gradient))),
+        final_gradient_inf_norm=float(np.max(np.abs(final_gradient))),
+        parameters_finite=bool(np.all(np.isfinite(final_parameters))),
+        observables_finite=bool(
+            np.isfinite(endpoint.value)
+            and np.all(np.isfinite(final_gradient))
+            and np.isfinite(endpoint.non_qs_ratio)
+            and np.isfinite(endpoint.iota)
+            and np.isfinite(endpoint.volume)
+            and np.isfinite(endpoint.major_radius_penalty)
+            and np.isfinite(endpoint.length_penalty)
+            and np.isfinite(endpoint.boozer_residual)
+        ),
+        inner_success=bool(problem.initial_inner_success and endpoint.inner_success),
+    )
+    endpoint_certificate = (
+        outer_certificate if BOOZER_QA_SPEC.enforce_endpoint_certificate else None
+    )
+    values = variant_observable_values(
+        surface_dofs=arrays["surface_dofs"],
+        coil_dofs=arrays["coil_dofs"],
+        initial_parameters=initial_parameters,
+        initial_objective=float(initial_objective),
+        initial_gradient=np.asarray(initial_gradient, dtype=np.float64),
+        initial_iota=problem.iota_target,
+        initial_volume=problem.initial_volume,
+        final_parameters=final_parameters,
+        final_objective=endpoint.value,
+        final_gradient=final_gradient,
+        final_non_qs_ratio=endpoint.non_qs_ratio,
+        final_iota=endpoint.iota,
+        final_volume=endpoint.volume,
+        final_major_radius_penalty=endpoint.major_radius_penalty,
+        final_length_penalty=endpoint.length_penalty,
+        final_boozer_residual=endpoint.boozer_residual,
+        inner_solver_success=endpoint.inner_success,
+        outer_solver_success=outer_solver_success,
+        outer_solver_status=optimizer_status,
+        report_residual=BOOZER_QA_SPEC.report_residual,
+        endpoint_certificate=endpoint_certificate,
+    )
+    device = get_runtime_jax_device()
+    platform = "cpu" if device is None else device.platform
+    return variant_lane_observation(
+        lane,
+        bundle,
+        values,
+        platform="gpu" if platform in {"cuda", "gpu"} else platform,
+        precision="fp64" if bool(jax.config.read("jax_enable_x64")) else "fp32",
+        driver=JAX_PARITY_DRIVER_ID,
+        workflow_stages=BOOZER_QA_SPEC.workflow_stages,
+        solver_counts=(
+            int(optimizer_result.k),
+            int(optimizer_result.nfev),
+            int(optimizer_result.ngev),
+        ),
+        endpoint_certificate=endpoint_certificate,
+        outer_stopping_reason=outer_certificate.stopping_reason,
+    )
+
+
 def execute(
     lane: ParityLane,
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
     """Execute the matched Boozer-QA coil optimization."""
-    return execute_variant(lane, bundle, arrays, BOOZER_QA_SPEC)
+    if lane == "native-cpu":
+        return execute_variant(lane, bundle, arrays, BOOZER_QA_SPEC)
+    return _execute_official_jax(lane, bundle, arrays)
 
 
 def execute_variant(

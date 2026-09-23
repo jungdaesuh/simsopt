@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 from examples.jax._manifest import TIERS
+from examples.jax.official_source_catalog import OFFICIAL_NATIVE_EXAMPLE_SOURCE_SET
 from examples.jax.manifest_contracts_v3 import (
     ContractVersionError,
     ManifestV3ValidationError,
@@ -113,14 +114,26 @@ def test_exact_v2_v1_bytes_map_deterministically_without_writing() -> None:
     tracked = _tracked_native_sources()
     assert isinstance(examples, dict) and examples["schema_version"] == 3
     assert isinstance(parity, dict) and parity["schema_version"] == 2
-    assert len(_records(examples, "source_catalog")) == len(tracked)
+    # The candidate registers every tracked native source exactly once, and it
+    # splits them the way the active manifest does: the official catalog is
+    # upstream's pinned inventory, branch-added sources are experimental.
+    official_sources = _records(examples, "source_catalog")
+    experimental_sources = _records(examples, "experimental_sources")
     assert {
-        str(row["source"]) for row in _records(examples, "source_catalog")
-    } == tracked
+        str(row["source"]) for row in official_sources
+    } == OFFICIAL_NATIVE_EXAMPLE_SOURCE_SET
+    assert {str(row["source"]) for row in experimental_sources} == (
+        tracked - OFFICIAL_NATIVE_EXAMPLE_SOURCE_SET
+    )
+    assert len(official_sources) + len(experimental_sources) == len(tracked)
     assert len(_records(examples, "jax_examples")) == (
         len(_records(legacy_examples, "jax_examples")) + planned
     )
-    assert len(_records(parity, "relationships")) == planned
+    assert (
+        len(_records(parity, "relationships"))
+        + len(_records(parity, "experimental_relationships"))
+        == planned
+    )
     assert first.examples_sha256 == hashlib.sha256(first.examples_bytes).hexdigest()
     assert first.parity_sha256 == hashlib.sha256(first.parity_bytes).hexdigest()
     assert first.semantic_diff["legacy_tutorial_count"] == len(
@@ -131,26 +144,39 @@ def test_exact_v2_v1_bytes_map_deterministically_without_writing() -> None:
 
 def test_candidate_has_exact_name_mirrors_and_noncovering_legacy_tutorials() -> None:
     examples, parity = _candidates()
-    sources = _records(examples, "source_catalog")
     executable = _records(examples, "jax_examples")
-    relationships = _records(parity, "relationships")
     by_id = {str(record["id"]): record for record in executable}
 
-    owned_ids: set[str] = set()
-    for source in sources:
-        disposition = source["disposition"]
-        mirror_id = source["mirror_example_id"]
-        if disposition in {"eligible", "hybrid"}:
-            assert isinstance(mirror_id, str)
-            mirror = by_id[mirror_id]
-            assert mirror["path"] == source["source"]
-            assert mirror["teaching_kind"] == "one_to_one"
-            owned_ids.add(mirror_id)
-        else:
-            assert mirror_id is None
+    # Each registry owns its own mirrors and its own parity group; a mirror may
+    # never be claimed across the official/experimental boundary.
+    owned_by_scope: dict[str, set[str]] = {}
+    for source_key, relationship_key in (
+        ("source_catalog", "relationships"),
+        ("experimental_sources", "experimental_relationships"),
+    ):
+        owned_ids: set[str] = set()
+        for source in _records(examples, source_key):
+            disposition = source["disposition"]
+            mirror_id = source["mirror_example_id"]
+            if disposition in {"eligible", "hybrid"}:
+                assert isinstance(mirror_id, str)
+                mirror = by_id[mirror_id]
+                assert mirror["path"] == source["source"]
+                assert mirror["teaching_kind"] == "one_to_one"
+                owned_ids.add(mirror_id)
+            else:
+                assert mirror_id is None
+        assert {
+            str(record["jax_example_id"])
+            for record in _records(parity, relationship_key)
+        } == owned_ids
+        owned_by_scope[source_key] = owned_ids
 
+    official_owned = owned_by_scope["source_catalog"]
+    experimental_owned = owned_by_scope["experimental_sources"]
+    assert official_owned.isdisjoint(experimental_owned)
+    owned_ids = official_owned | experimental_owned
     assert len(owned_ids) == _planned_one_to_one_count(_document(INVENTORY))
-    assert {str(record["jax_example_id"]) for record in relationships} == owned_ids
     tutorial_ids = {
         str(record["id"])
         for record in executable
@@ -160,9 +186,11 @@ def test_candidate_has_exact_name_mirrors_and_noncovering_legacy_tutorials() -> 
         _records(_document(EXAMPLES_MANIFEST), "jax_examples")
     )
     assert tutorial_ids.isdisjoint(owned_ids)
+    # A branch-added native source is registered experimentally, never in the
+    # official catalog, and still owns its exact-name mirror.
     boozer_source = _record_by(
         examples,
-        "source_catalog",
+        "experimental_sources",
         "source",
         "3_Advanced/single_stage_boozer_vacuum_optimization.py",
     )

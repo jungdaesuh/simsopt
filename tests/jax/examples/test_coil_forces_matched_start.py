@@ -9,6 +9,7 @@ pin the clock and device observables an artifact driver reads off the run.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import subprocess
@@ -17,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from scipy.optimize import fmin_l_bfgs_b
 from simsopt.field import BiotSavart, Current, coils_via_symmetries
 from simsopt.field.force import B2Energy, LpCurveForce
 from simsopt.field.selffield import regularization_circ
@@ -219,10 +221,14 @@ def test_mirror_publishes_the_minimize_region_clocks_and_device_attestation(
 def test_mirror_solver_options_name_the_native_maxls(
     mirror_observables: dict[str, object],
 ) -> None:
-    """The live SciPy route ran under native's maxls=32, not SciPy's default 20."""
+    """The live SciPy route ran under native's line-search cap.
+
+    The official script names no ``maxls``, so that cap is SciPy's own default.
+    """
+    scipy_default = inspect.signature(fmin_l_bfgs_b).parameters["maxls"].default
     first, second = mirror_observables["solver_options"]
-    assert first["maxls"] == 32
-    assert second["maxls"] == 32
+    assert first["maxls"] == scipy_default
+    assert second["maxls"] == scipy_default
     assert first["maxcor"] == 300
     assert second["maxcor"] == 300
     assert first["ftol"] == 1.0e-15

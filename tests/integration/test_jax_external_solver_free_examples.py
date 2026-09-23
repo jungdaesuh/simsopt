@@ -12,8 +12,42 @@ import jax
 import pytest
 import simsoptpp
 from examples.jax._lane_environment import build_execution_environment
+from simsopt_jax.examples.solver_terminal_status import GSCO_MAXIMUM_ITERATION_REACHED
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+#: Observables the two single-stage GSCO examples publish beyond the pre-wave
+#: set, now that their completion comes from the solver's own stop condition
+#: (``simsopt_jax.examples.solver_terminal_status``) instead of the scientific
+#: predicate "final normal error below initial".
+GSCO_SINGLE_STAGE_OBSERVABLES = frozenset(
+    {
+        "initial_normal_error",
+        "final_normal_error",
+        "maximum_current",
+        "iterations",
+        "allocated_iteration_budget",
+        "constraints_satisfied",
+        "terminal_status",
+        "terminal_reason",
+        "normal_error_decreased",
+        "solver_success",
+    }
+)
+
+#: What those two examples must report at the scale this test runs them
+#: (``--smoke``): the measured count reaches the campaign's reduced cap, which
+#: is upstream's ``stop_last_iter`` -- a budget stop, never a converged solve --
+#: while the DEMOTED diagnostic ``normal_error_decreased`` is true. Pinning the
+#: two together is what fails if ``final_error < initial_error`` becomes the
+#: success gate again: it would publish ``solver_success`` true here.
+GSCO_SINGLE_STAGE_COMPLETION = (
+    ("terminal_status", "budget_exhausted"),
+    ("terminal_reason", GSCO_MAXIMUM_ITERATION_REACHED),
+    ("solver_success", False),
+    ("normal_error_decreased", True),
+    ("constraints_satisfied", True),
+)
 
 
 @dataclass(frozen=True)
@@ -21,6 +55,14 @@ class ExampleContract:
     path: str
     example_id: str
     observables: frozenset[str]
+    #: Observable values the example must publish, exactly. A derived policy
+    #: whose only witness is the example's own source can be reverted without
+    #: any test noticing, so the value is pinned here (fix wave 4).
+    required_values: tuple[tuple[str, str | bool], ...] = ()
+    #: True when the example publishes both a MEASURED iteration count and the
+    #: budget it was given, so ``terminal_status == "budget_exhausted"`` has to
+    #: be that count reaching that budget and not a label chosen some other way.
+    budget_stop_follows_the_measured_count: bool = False
 
 
 EXTERNAL_SOLVER_FREE_CONTRACTS = (
@@ -174,28 +216,16 @@ EXTERNAL_SOLVER_FREE_CONTRACTS = (
     ExampleContract(
         "2_Intermediate/wireframe_gsco_modular.py",
         "native-wireframe-gsco-modular",
-        frozenset(
-            {
-                "initial_normal_error",
-                "final_normal_error",
-                "maximum_current",
-                "iterations",
-                "solver_success",
-            }
-        ),
+        GSCO_SINGLE_STAGE_OBSERVABLES,
+        GSCO_SINGLE_STAGE_COMPLETION,
+        True,
     ),
     ExampleContract(
         "2_Intermediate/wireframe_gsco_sector_saddle.py",
         "native-wireframe-gsco-sector-saddle",
-        frozenset(
-            {
-                "initial_normal_error",
-                "final_normal_error",
-                "maximum_current",
-                "iterations",
-                "solver_success",
-            }
-        ),
+        GSCO_SINGLE_STAGE_OBSERVABLES,
+        GSCO_SINGLE_STAGE_COMPLETION,
+        True,
     ),
     ExampleContract(
         "2_Intermediate/wireframe_rcls_with_ports.py",
@@ -271,6 +301,35 @@ def _source_checkout_environment() -> dict[str, str]:
     return environment
 
 
+def assert_published_observables(
+    contract: ExampleContract, observables: dict[str, object]
+) -> None:
+    """Check one published payload against its contract.
+
+    Separate from the subprocess run so the same check can be replayed on a
+    recorded payload (the old-behaviour proof of fix wave 4).
+    """
+
+    missing = contract.observables - observables.keys()
+    assert missing == frozenset(), (
+        f"{contract.example_id} publishes no {sorted(missing)}"
+    )
+    for key, expected in contract.required_values:
+        published = observables[key]
+        assert type(published) is type(expected), (
+            f"{contract.example_id}:{key} is a {type(published).__name__}, "
+            f"not a {type(expected).__name__}"
+        )
+        assert published == expected, (
+            f"{contract.example_id}:{key} = {published!r}, expected {expected!r}"
+        )
+    if contract.budget_stop_follows_the_measured_count:
+        reached_the_cap = (
+            observables["iterations"] == observables["allocated_iteration_budget"]
+        )
+        assert (observables["terminal_status"] == "budget_exhausted") is reached_the_cap
+
+
 @pytest.mark.parametrize(
     "contract",
     EXTERNAL_SOLVER_FREE_CONTRACTS,
@@ -298,4 +357,4 @@ def test_external_solver_free_example_executes_its_scientific_contract(
     assert payload["platform"] == "cpu"
     assert payload["precision"] == "fp64"
     assert payload["status"] == "ok"
-    assert contract.observables <= payload["observables"].keys()
+    assert_published_observables(contract, payload["observables"])

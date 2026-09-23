@@ -8,14 +8,30 @@ from pathlib import Path
 from typing import cast
 
 import numpy as np
+from examples.jax.official_tiny_least_squares import (
+    DRIVER_QUADRATIC,
+    guard_finite_endpoint,
+    quadratic_residual,
+    solve_jax_residual,
+    trf_outcome,
+)
 from examples.jax.parity.arbiter import LaneObservation
+from examples.jax.parity.cases._official_least_squares import (
+    declared_work_budget,
+    official_stopping_keywords,
+    solve_official_least_squares,
+)
 from examples.jax.parity.input_bundle import (
     InputBundle,
     create_input_bundle,
     effective_construction_fingerprint,
 )
 from examples.jax.parity.runtime import ParityLane
+from simsopt.objectives import LeastSquaresProblem
+from simsopt.objectives.functions import Identity
 from simsopt_jax.examples import ExecutionScale
+
+import jax
 
 WORKFLOW_STAGES = (
     "construct_three_identity_optimizable_objects",
@@ -37,11 +53,7 @@ def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
             "targets": np.asarray((1.0, 2.0, 3.0), dtype=np.float64),
             "weights": np.asarray((1.0, 2.0, 3.0), dtype=np.float64),
         },
-        configuration={
-            "rtol": 1.0e-12,
-            "atol": 1.0e-12,
-            "max_steps": 32 if scale == "bounded" else 128,
-        },
+        configuration={"max_steps": 32 if scale == "bounded" else 128},
         scale=scale,
     )
 
@@ -54,18 +66,9 @@ def _effective_fingerprint(bundle: InputBundle, arrays: dict[str, np.ndarray]) -
             "targets": arrays["targets"].tolist(),
             "weights": arrays["weights"].tolist(),
             "dtype": "float64",
-            "rtol": bundle.configuration["rtol"],
-            "atol": bundle.configuration["atol"],
             "max_steps": bundle.configuration["max_steps"],
         },
     )
-
-
-def _configuration_float(bundle: InputBundle, name: str) -> float:
-    value = bundle.configuration[name]
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TypeError(f"configuration {name} must be numeric")
-    return float(value)
 
 
 def _configuration_int(bundle: InputBundle, name: str) -> int:
@@ -103,10 +106,6 @@ def _values(
 
 
 def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservation:
-    from simsopt.objectives import LeastSquaresProblem
-    from simsopt.objectives.functions import Identity
-    from simsopt.solve import least_squares_serial_solve
-
     initial = arrays["initial_parameters"]
     targets = arrays["targets"]
     weights = arrays["weights"]
@@ -123,22 +122,15 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
             )
         ]
     )
-    least_squares_serial_solve(
-        problem,
-        ftol=_configuration_float(bundle, "rtol"),
-        xtol=_configuration_float(bundle, "atol"),
-        gtol=min(
-            _configuration_float(bundle, "rtol"),
-            _configuration_float(bundle, "atol"),
-        ),
-        max_nfev=_configuration_int(bundle, "max_steps"),
-    )
+    budget = declared_work_budget(bundle.scale, _configuration_int(bundle, "max_steps"))
+    result = solve_official_least_squares(problem, **official_stopping_keywords(budget))
     final = np.asarray(problem.x, dtype=np.float64)
-    final_residual = np.sqrt(weights) * (final - targets)
-    success = bool(
-        np.linalg.norm(final_residual) <= 1.0e-8
-        and np.allclose(final, targets, rtol=1.0e-10, atol=1.0e-12)
-    )
+    values = _values(initial, final, targets, weights)
+    # The official wrapper discards SciPy's result; the recorder keeps it, so this
+    # lane publishes the provider's own outcome. Official capture
+    # A/reference-simple/runs/native-just-a-quadratic/captured-natural-omp1:
+    # status 1 `gtol`, nfev 4, njev 4, x[1] = 1.9999999992096138.
+    outcome = guard_finite_endpoint(trf_outcome(result), values.values())
     return LaneObservation(
         lane="native-cpu",
         backend_mode="native_cpu",
@@ -149,15 +141,15 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=_effective_fingerprint(bundle, arrays),
         driver="simsopt_least_squares_serial_solve",
-        normalized_status="converged" if success else "failed",
-        raw_status="objective_threshold",
-        success=success,
+        normalized_status=outcome.normalized_status,
+        raw_status=outcome.raw_status,
+        success=outcome.success,
         nit=None,
-        nfev=None,
-        njev=None,
+        nfev=outcome.nfev,
+        njev=outcome.njev,
         completed_workflow_stages=WORKFLOW_STAGES,
         provenance=None,
-        values=_values(initial, final, targets, weights),
+        values=values,
     )
 
 
@@ -166,26 +158,15 @@ def _jax(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
-    from simsopt_jax.examples import solve_weighted_quadratic
-
-    import jax
-    import jax.numpy as jnp
-
     initial = arrays["initial_parameters"]
     targets = arrays["targets"]
     weights = arrays["weights"]
-    device_result = solve_weighted_quadratic(
-        initial_parameters=jnp.asarray(initial, dtype=jnp.float64),
-        targets=jnp.asarray(targets, dtype=jnp.float64),
-        weights=jnp.asarray(weights, dtype=jnp.float64),
-        rtol=_configuration_float(bundle, "rtol"),
-        atol=_configuration_float(bundle, "atol"),
-        max_steps=_configuration_int(bundle, "max_steps"),
-    )
-    final = np.asarray(
-        jax.device_get(device_result.final_parameters),
-        dtype=np.float64,
-    )
+    residual = quadratic_residual(targets, weights)
+    budget = declared_work_budget(bundle.scale, _configuration_int(bundle, "max_steps"))
+    optimizer = solve_jax_residual(residual, initial, max_nfev=budget)
+    final = np.asarray(optimizer.x, dtype=np.float64)
+    values = _values(initial, final, targets, weights)
+    outcome = guard_finite_endpoint(trf_outcome(optimizer), values.values())
     platform = jax.devices()[0].platform
     return LaneObservation(
         lane=lane,
@@ -196,18 +177,16 @@ def _jax(
         input_fingerprint=bundle.input_fingerprint,
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=_effective_fingerprint(bundle, arrays),
-        driver=device_result.optimizer.driver.value,
-        normalized_status=(
-            "converged" if device_result.optimizer.success else "failed"
-        ),
-        raw_status=str(device_result.optimizer.status),
-        success=device_result.optimizer.success,
-        nit=device_result.optimizer.nit,
-        nfev=device_result.optimizer.nfev,
-        njev=device_result.optimizer.njev,
+        driver=DRIVER_QUADRATIC,
+        normalized_status=outcome.normalized_status,
+        raw_status=outcome.raw_status,
+        success=outcome.success,
+        nit=None,
+        nfev=outcome.nfev,
+        njev=outcome.njev,
         completed_workflow_stages=WORKFLOW_STAGES,
         provenance=None,
-        values=_values(initial, final, targets, weights),
+        values=values,
     )
 
 

@@ -1,4 +1,39 @@
-"""Exact matched workflow for ``3_Advanced/wireframe_gsco_multistep.py``."""
+"""Exact matched workflow for ``3_Advanced/wireframe_gsco_multistep.py``.
+
+Correspondence of this case's published endpoint state to the official capture
+``A/claude/runs/native-wireframe-gsco-multistep/captured-omp1`` of upstream
+``9e027eac38028d57aa23777be52a781aa860e347``:
+
+* ``final:loop_count`` is the loop count the LAST solve returned, i.e. the
+  official ``step7:loop_count``. It is not the capture's
+  ``final:loop_count_after_sweeps``, which is the step-6 post-sweep array handed
+  to the final call as ``loop_count_init`` (128 of 9600 cells differ).
+* ``final:enclosed_segment_mask`` is the enclosed set AFTER the final
+  adjustment. Upstream frees those segments for that solve
+  (``examples/3_Advanced/wireframe_gsco_multistep.py:259``) and never rebuilds
+  the set, so this mask is empty; the capture has no counterpart for it.
+* ``final:enclosed_segment_mask_before_final_adjustment`` is the set the final
+  adjustment freed, i.e. the step-6 enclosed set, and is the counterpart of the
+  capture array ``final:enclosed_segments`` (3869 indices, the value upstream's
+  ``encl_segs`` still holds at the end of the script).
+* ``history:stage_normal_objective`` is the AFTER-sweep series
+  ``0.5*||A x_post - b||^2`` the official script prints as ``f_B``, and is the
+  counterpart of the capture's ``history:stage_normal_objective`` (not of
+  ``history:stage_normal_objective_before_sweep``, which is ``res['f_B']`` as
+  the C++ returned it, before the small coils were removed).
+* ``history:stage_iterations`` entry k is the accepted-update count of stage
+  k's GSCO solve, the same quantity as the capture's per-call
+  ``step<k>:iterations`` (``int(iter_hist[-1])``; the C++ writes
+  ``iter_hist[hist_ind] = hist_ind`` only on an accepted update,
+  ``src/simsoptpp/wireframe_optimization.cpp:356``), and
+  ``history:stage_allocated_iteration_budget`` entry k is the budget that stage
+  was really given (the capture's ``step<k>:allocated_iteration_budget``). Both
+  are one array in the ``history`` phase for any stage count, like the
+  objective series; a differing stage count is a shape mismatch, and
+  ``final:nonfinal_steps`` pins the count itself. Fact F19 applies: the branch
+  C++ uses a different GSCO stop test from upstream, so these counts are
+  comparable across lanes but are not expected to equal the official ones.
+"""
 
 from __future__ import annotations
 
@@ -9,13 +44,30 @@ from pathlib import Path
 
 import numpy as np
 from examples.jax.parity.arbiter import LaneObservation
+from examples.jax.parity.cases._fixed_work_status import (
+    gsco_multistep_terminal_label,
+)
 from examples.jax.parity.cases.native_wireframe_rcls_basic import (
     _effective_fingerprint,
 )
 from examples.jax.parity.input_bundle import InputBundle, create_input_bundle
 from examples.jax.parity.runtime import ParityLane
-from simsopt.geo import SurfaceRZFourier, ToroidalWireframe
+from simsopt.field import BiotSavart, Current, coils_via_symmetries
+from simsopt.geo import (
+    SurfaceRZFourier,
+    ToroidalWireframe,
+    create_equally_spaced_curves,
+)
+from simsopt.solve.wireframe_optimization import bnorm_obj_matrices, gsco_wireframe
+from simsopt_jax.backend.runtime import get_runtime_jax_device
+from simsopt_jax.core.wireframe_workflow import (
+    WIREFRAME_GSCO_MULTISTEP_STAGE_CAPACITY,
+    WireframeGSCOLiveParams,
+    wireframe_gsco_multistep_loop_jax,
+)
 from simsopt_jax.examples import ExecutionScale
+
+import jax
 
 TEST_DATA = Path(__file__).resolve().parents[4] / "tests" / "test_files"
 SURFACE_INPUT = TEST_DATA / "input.LandremanPaul2021_QA"
@@ -25,7 +77,7 @@ WORKFLOW_STAGES = (
     "construct_qa_plasma_sector_wireframe_and_external_tf_coils",
     "construct_area_weighted_combined_normal_field_response",
     "initialize_multistep_gsco_state",
-    "run_fixed_budget_gsco_stages",
+    "run_gsco_stages_until_currents_stabilize",
     "prune_small_coils_and_constrain_enclosed_segments",
     "evaluate_final_currents_objective_and_constraints",
 )
@@ -38,7 +90,13 @@ def _configuration(scale: ExecutionScale) -> dict[str, object]:
         "wireframe_nphi": 96 if native else 24,
         "wireframe_ntheta": 100 if native else 8,
         "max_iterations_per_step": 2_500 if native else 40,
-        "max_outer_steps": 12 if native else 4,
+        # The source has no outer-step limit. Only the bounded smoke execution
+        # carries an explicit guard; successful execution needs the final
+        # stable-current adjustment in either scale.
+        "max_outer_steps": None if native else 4,
+        # Fixed capacity of the per-stage carries. Reaching it is a failure with
+        # its own raw status, never a silent truncation of the history.
+        "stage_history_capacity": WIREFRAME_GSCO_MULTISTEP_STAGE_CAPACITY,
         "number_of_tf_coils": 3,
         "break_width": 4,
         "initial_current_fraction": 0.2,
@@ -56,6 +114,15 @@ def _configuration_int(bundle: InputBundle, name: str) -> int:
     value = bundle.configuration[name]
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"configuration {name} must be an integer")
+    return value
+
+
+def _optional_configuration_int(bundle: InputBundle, name: str) -> int | None:
+    value = bundle.configuration[name]
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"configuration {name} must be an integer or None")
     return value
 
 
@@ -108,9 +175,6 @@ def _native_external_field(
     poloidal_current: float,
     number_of_tf_coils: int,
 ):
-    from simsopt.field import BiotSavart, Current, coils_via_symmetries
-    from simsopt.geo import create_equally_spaced_curves
-
     curves = create_equally_spaced_curves(
         number_of_tf_coils,
         plasma.nfp,
@@ -134,8 +198,6 @@ def _native_external_field(
 
 def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
     """Freeze the exact multistep response, topology, and initial state."""
-    from simsopt.solve.wireframe_optimization import bnorm_obj_matrices
-
     configuration = _configuration(scale)
     wireframe, plasma, poloidal_current = _build_wireframe(configuration)
     number_of_tf_coils = configuration["number_of_tf_coils"]
@@ -253,12 +315,16 @@ def _enclosed_segment_mask(
 
 
 def _values(
+    bundle: InputBundle,
     arrays: dict[str, np.ndarray],
     *,
     x: np.ndarray,
     loop_count: np.ndarray,
     enclosed: np.ndarray,
+    enclosed_before_final_adjustment: np.ndarray,
     stage_objectives: np.ndarray,
+    stage_iterations: np.ndarray,
+    final_objective: float,
     nonfinal_steps: int,
     final_adjustment_run: bool,
     max_iterations_per_step: int,
@@ -267,8 +333,10 @@ def _values(
     final_residual = (
         arrays["response_matrix"] @ x.reshape((-1, 1)) - arrays["target"]
     ).reshape(-1)
-    base_constrained = arrays["base_constrained_segments"]
-    constraints_satisfied = np.all(x[base_constrained] == 0.0)
+    final_wireframe, _, _ = _build_wireframe(bundle.configuration)
+    constraints_satisfied = final_wireframe.check_constraints(currents=x)
+    if stage_iterations.shape != stage_objectives.shape:
+        raise ValueError("every recorded stage publishes one iteration count")
     return {
         **{
             f"construction:{name}": value
@@ -284,9 +352,12 @@ def _values(
         "final:currents": x,
         "final:loop_count": loop_count,
         "final:enclosed_segment_mask": enclosed,
+        "final:enclosed_segment_mask_before_final_adjustment": (
+            enclosed_before_final_adjustment
+        ),
         "final:normal_field_residual": final_residual,
         "final:normal_objective": np.asarray(
-            stage_objectives[-1],
+            final_objective,
             dtype=np.float64,
         ),
         "final:maximum_current": np.asarray(
@@ -297,14 +368,24 @@ def _values(
             np.count_nonzero(x),
             dtype=np.int64,
         ),
-        "final:iterations": np.asarray(
-            nonfinal_steps * max_iterations_per_step,
+        "final:allocated_iteration_budget": np.asarray(
+            len(stage_objectives) * max_iterations_per_step,
             dtype=np.int64,
         ),
         "final:nonfinal_steps": np.asarray(nonfinal_steps, dtype=np.int64),
         "final:adjustment_run": np.asarray(final_adjustment_run),
         "final:constraints_satisfied": np.asarray(constraints_satisfied),
         "history:stage_normal_objective": stage_objectives,
+        # One entry per stage that ran, in the same order as the objective
+        # series. The official capture keeps the same quantities as per-call
+        # scalars (step<k>:iterations, step<k>:allocated_iteration_budget); the
+        # comparator joins them to these arrays.
+        "history:stage_iterations": np.asarray(stage_iterations, dtype=np.int64),
+        "history:stage_allocated_iteration_budget": np.full(
+            stage_iterations.shape,
+            max_iterations_per_step,
+            dtype=np.int64,
+        ),
     }
 
 
@@ -318,11 +399,35 @@ def _observation(
     driver: str,
     values: dict[str, np.ndarray],
 ) -> LaneObservation:
-    success = bool(
-        np.all(np.isfinite(values["final:currents"]))
-        and np.all(np.isfinite(values["history:stage_normal_objective"]))
-        and values["final:normal_objective"] < values["initial:normal_objective"]
-        and bool(values["final:constraints_satisfied"])
+    final_adjustment_run = bool(values["final:adjustment_run"])
+    # Without a configured guard the only stop other than stable currents is the
+    # declared stage capacity, which is a distinct failure from a smoke run that
+    # deliberately stops early.
+    limit_status = (
+        "stage_history_capacity_exhausted_without_final_adjustment"
+        if _optional_configuration_int(bundle, "max_outer_steps") is None
+        else "outer_step_guard_exhausted_without_final_adjustment"
+    )
+    # The label comes from the per-stage arrays this case publishes, not from a
+    # scientific predicate: each stage is one ``gsco_wireframe`` call, so a
+    # stage whose accepted updates reached its allocated ``max_iter`` is
+    # upstream's ``stop_last_iter`` -- a budget stop -- and a lane that contains
+    # one is never ``converged``. "final objective < initial objective" is now a
+    # published diagnostic: it is exactly ``final:normal_objective`` against
+    # ``initial:normal_objective``, both published and both routed, so it needs
+    # no key of its own. The official capture's seven stages stop at
+    # 2167/763/539/379/155/2/136 of a 2500 budget, i.e. the official run is
+    # ``converged`` under this rule.
+    label = gsco_multistep_terminal_label(
+        stage_iterations=values["history:stage_iterations"],
+        stage_budget=values["history:stage_allocated_iteration_budget"],
+        final_adjustment_run=final_adjustment_run,
+        endpoint_usable=bool(
+            np.all(np.isfinite(values["final:currents"]))
+            and np.all(np.isfinite(values["history:stage_normal_objective"]))
+            and bool(values["final:constraints_satisfied"])
+        ),
+        limit_raw_status=limit_status,
     )
     return LaneObservation(
         lane=lane,
@@ -334,11 +439,11 @@ def _observation(
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=_effective_fingerprint(bundle, arrays),
         driver=driver,
-        normalized_status="converged" if success else "failed",
-        raw_status="bounded_multistep_gsco_complete",
-        success=success,
-        nit=int(values["final:iterations"]),
-        nfev=int(values["final:iterations"]),
+        normalized_status=label.normalized_status,
+        raw_status=label.raw_status,
+        success=label.success,
+        nit=None,
+        nfev=None,
         njev=None,
         completed_workflow_stages=WORKFLOW_STAGES,
         provenance=None,
@@ -350,10 +455,8 @@ def _native(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
-    from simsopt.solve.wireframe_optimization import gsco_wireframe
-
     max_iterations = _configuration_int(bundle, "max_iterations_per_step")
-    maximum_outer_steps = _configuration_int(bundle, "max_outer_steps")
+    maximum_outer_steps = _optional_configuration_int(bundle, "max_outer_steps")
     minimum_coil_size = _configuration_int(bundle, "minimum_coil_size")
     current_scale = abs(_configuration_float(bundle, "poloidal_current"))
     fraction = _configuration_float(bundle, "initial_current_fraction")
@@ -361,12 +464,15 @@ def _native(
     previous_x = np.zeros_like(x)
     loop_count = arrays["initial_loop_count"].copy()
     enclosed = np.zeros_like(arrays["base_constrained_segments"])
+    enclosed_before_final_adjustment = np.zeros_like(enclosed)
     has_previous = False
     final_adjustment_run = False
     nonfinal_steps = 0
     stage_objectives: list[float] = []
+    stage_iterations: list[int] = []
+    stage_capacity = _configuration_int(bundle, "stage_history_capacity")
 
-    for _ in range(maximum_outer_steps):
+    while True:
         final_step = has_previous and np.array_equal(previous_x, x)
         wireframe, _, _ = _build_wireframe(bundle.configuration)
         if not final_step:
@@ -394,9 +500,13 @@ def _native(
         )
         next_x = np.asarray(result[0], dtype=np.float64).reshape(-1)
         next_loop_count = np.asarray(result[1], dtype=np.int64)
+        # The C++ records one history entry per accepted update and writes the
+        # entry's own index, so the last entry is the accepted-update count.
+        stage_iterations.append(int(np.asarray(result[2]).reshape(-1)[-1]))
         if final_step:
             x = next_x
             loop_count = next_loop_count
+            enclosed_before_final_adjustment = enclosed
             enclosed = np.zeros_like(enclosed)
             final_adjustment_run = True
         else:
@@ -422,13 +532,22 @@ def _native(
         stage_objectives.append(float(0.5 * np.vdot(residual, residual)))
         if final_step:
             break
+        stage_limit = (
+            stage_capacity if maximum_outer_steps is None else maximum_outer_steps
+        )
+        if len(stage_objectives) >= stage_limit:
+            break
 
     values = _values(
+        bundle,
         arrays,
         x=x,
         loop_count=loop_count,
         enclosed=enclosed,
+        enclosed_before_final_adjustment=enclosed_before_final_adjustment,
         stage_objectives=np.asarray(stage_objectives, dtype=np.float64),
+        stage_iterations=np.asarray(stage_iterations, dtype=np.int64),
+        final_objective=stage_objectives[-1],
         nonfinal_steps=nonfinal_steps,
         final_adjustment_run=final_adjustment_run,
         max_iterations_per_step=max_iterations,
@@ -449,14 +568,6 @@ def _jax(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
-    from simsopt_jax.backend.runtime import get_runtime_jax_device
-    from simsopt_jax.core.wireframe_workflow import (
-        WireframeGSCOLiveParams,
-        wireframe_gsco_multistep_loop_jax,
-    )
-
-    import jax
-
     device = get_runtime_jax_device()
 
     def put(name: str):
@@ -496,7 +607,7 @@ def _jax(
                 bundle,
                 "max_iterations_per_step",
             ),
-            max_outer_steps=_configuration_int(bundle, "max_outer_steps"),
+            max_outer_steps=_optional_configuration_int(bundle, "max_outer_steps"),
             initial_current_fraction=_configuration_float(
                 bundle,
                 "initial_current_fraction",
@@ -504,18 +615,32 @@ def _jax(
             current_scale=abs(_configuration_float(bundle, "poloidal_current")),
             min_coil_size=_configuration_int(bundle, "minimum_coil_size"),
             final_max_current=_configuration_float(bundle, "final_max_current"),
+            stage_history_capacity=_configuration_int(
+                bundle,
+                "stage_history_capacity",
+            ),
         )
     )
     stage_count = int(result.stage_count)
     values = _values(
+        bundle,
         arrays,
         x=np.asarray(result.x, dtype=np.float64).reshape(-1),
         loop_count=np.asarray(result.loop_count, dtype=np.int64),
         enclosed=np.asarray(result.enclosed_segment_mask, dtype=np.bool_),
+        enclosed_before_final_adjustment=np.asarray(
+            result.enclosed_segment_mask_before_final_adjustment,
+            dtype=np.bool_,
+        ),
         stage_objectives=np.asarray(
             result.stage_objectives[:stage_count],
             dtype=np.float64,
         ),
+        stage_iterations=np.asarray(
+            result.stage_iterations[:stage_count],
+            dtype=np.int64,
+        ),
+        final_objective=float(result.final_objective),
         nonfinal_steps=int(result.nonfinal_steps),
         final_adjustment_run=bool(result.final_adjustment_run),
         max_iterations_per_step=_configuration_int(

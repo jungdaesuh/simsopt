@@ -14,6 +14,10 @@ from examples.jax.parity.input_bundle import (
     effective_construction_fingerprint,
 )
 from examples.jax.parity.runtime import ParityLane
+from examples.jax.parity.terminal_status import (
+    lane_terminal_status,
+    stage_termination_from_values,
+)
 from simsopt_jax.examples import ExecutionScale
 
 WORKFLOW_STAGES = (
@@ -251,7 +255,21 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         objective=objective,
         strain=strain,
     )
-    success = _scientific_success(initial_state, final_state)
+    terminal = lane_terminal_status(
+        scientific_predicate=_scientific_success(initial_state, final_state),
+        stages=(
+            stage_termination_from_values(
+                status_convention="scipy-lbfgsb",
+                provider_success=bool(result.success),
+                provider_status=int(result.status),
+                iterations=int(result.nit),
+                max_iterations=_configuration_int(bundle, "maxiter"),
+                start=("initial", initial_state),
+                end=("final", final_state),
+                gradient_observable="gradient",
+            ),
+        ),
+    )
     return LaneObservation(
         lane="native-cpu",
         backend_mode="native_cpu",
@@ -262,9 +280,9 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=_effective_fingerprint(bundle, arrays),
         driver="scipy_lbfgsb_native_strain_objective",
-        normalized_status="converged" if success else "failed",
+        normalized_status=terminal.normalized_status,
         raw_status=str(result.message),
-        success=success,
+        success=terminal.success,
         nit=int(result.nit),
         nfev=int(result.nfev),
         njev=int(result.njev),
@@ -341,9 +359,33 @@ def _jax(
         **state_values("initial", result.initial),
         **state_values("final", result.final),
     }
-    success = _scientific_success(
-        {name: value for name, value in values.items() if name.startswith("initial:")},
-        {name: value for name, value in values.items() if name.startswith("final:")},
+    terminal = lane_terminal_status(
+        scientific_predicate=_scientific_success(
+            {
+                name: value
+                for name, value in values.items()
+                if name.startswith("initial:")
+            },
+            {
+                name: value
+                for name, value in values.items()
+                if name.startswith("final:")
+            },
+        ),
+        stages=(
+            stage_termination_from_values(
+                # target_minimize(method="lbfgs-ondevice") publishes the private
+                # on-device L-BFGS-B status vocabulary.
+                status_convention="private-lbfgsb",
+                provider_success=bool(result.success),
+                provider_status=int(result.status),
+                iterations=int(result.iterations),
+                max_iterations=_configuration_int(bundle, "maxiter"),
+                start=("initial", values),
+                end=("final", values),
+                gradient_observable="gradient",
+            ),
+        ),
     )
     platform = "cpu" if device is None else device.platform
     return LaneObservation(
@@ -356,9 +398,9 @@ def _jax(
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=_effective_fingerprint(bundle, arrays),
         driver="simsopt_jax_lbfgsb_strain_objective",
-        normalized_status="converged" if success else "failed",
+        normalized_status=terminal.normalized_status,
         raw_status=f"status_{int(result.status)}",
-        success=success,
+        success=terminal.success,
         nit=int(result.iterations),
         nfev=int(result.function_evaluations),
         njev=int(result.gradient_evaluations),

@@ -57,8 +57,19 @@ def test_exact_planar_stage_two_matches_native_and_jax_cpu(
     monkeypatch.setenv("JAX_ENABLE_X64", "1")
     jax = case.execute("jax-cpu", bundle, arrays)
 
-    assert native.success is True
-    assert jax.success is True
+    # The bounded budget ends every stage on its iteration cap. The label says
+    # so; it is neither convergence nor failure, and it still implies the case's
+    # scientific predicate, because a false predicate is labelled ``failed``.
+    # It is also not upstream's terminal status: upstream 9e027eac3 stops by
+    # line-search stagnation at 135 and 69 iterations because its four
+    # CurvePlanarFourier Jacobians sit in the persistent cache, so its end point
+    # is not reachable by a gradient that describes the objective. Every
+    # endpoint comparison below is therefore lane-versus-lane; the comparison
+    # with upstream is value-at-upstream's-states and gradient-at-the-start-
+    # state, in tests/integration/test_jax_mirror_planar_coils_official_states.py.
+    for observation in (native, jax):
+        assert observation.normalized_status == "budget_exhausted"
+        assert observation.success is False
     assert native.input_fingerprint == jax.input_fingerprint
     assert native.configuration_fingerprint == jax.configuration_fingerprint
     assert native.effective_construction_fingerprint == (

@@ -7,6 +7,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 from examples.jax.parity.cases import get_case
+from examples.jax.parity.cases.native_wireframe_rcls_basic import (
+    _constraint_feasibility_limit,
+)
 from examples.jax.parity.input_bundle import load_input_bundle
 
 
@@ -111,4 +114,38 @@ def test_exact_wireframe_rcls_with_ports_matches_native_and_jax_cpu(
     assert bool(jax.values["final:port_constraints_satisfied"])
     assert float(jax.values["final:normal_objective"]) < float(
         jax.values["initial:normal_objective"]
+    )
+
+
+def test_common_initial_infeasibility_fails_both_lanes_with_ports(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The port case shares the basic case's gate, so it must reject too."""
+    case = get_case("native-wireframe-rcls-with-ports")
+    input_root = tmp_path / "inputs"
+    bundle = case.create_input(input_root, "bounded")
+    _, arrays = load_input_bundle(input_root, bundle)
+
+    limit = _constraint_feasibility_limit(arrays["constraint_target"])
+    column = int(np.argmax(np.abs(arrays["constraint_matrix"]).sum(axis=0)))
+    segment = int(arrays["free_segments"][column])
+    arrays["initial_currents"] = arrays["initial_currents"].copy()
+    arrays["initial_currents"][segment, 0] += 1.0e3 * limit
+
+    native = case.execute("native-cpu", bundle, arrays)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_parity")
+    monkeypatch.setenv("SIMSOPT_PRECISION", "fp64")
+    monkeypatch.setenv("JAX_ENABLE_X64", "1")
+    jax = case.execute("jax-cpu", bundle, arrays)
+
+    for observation in (native, jax):
+        assert not bool(observation.values["initial:constraint_satisfied"])
+        assert observation.success is False
+        assert observation.normalized_status == "failed"
+    assert np.allclose(
+        native.values["initial:constraint_roundoff_units"],
+        jax.values["initial:constraint_roundoff_units"],
+        rtol=0.0,
+        atol=1.0,
     )

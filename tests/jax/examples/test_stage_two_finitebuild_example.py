@@ -8,6 +8,12 @@ the solve lowered the objective it decomposes, and the filament packs still
 clear one another.  A source-shape test cannot see any of that -- an example
 that imported the right names and published the right dictionary keys while
 returning an unusable coil set would pass it.
+
+That shared run is the example's DEFAULT mode, the host SciPy provider
+upstream calls.  A second bounded run drives the opt-in device solver through
+``--device-solver``'s driver argument, and the last test states what must hold
+of both: same schema, same budget spent, an improved objective, and a
+published ``solver_driver`` that names which optimizer actually ran.
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ from types import ModuleType
 import numpy as np
 import pytest
 from simsopt_jax.examples import ExampleResult
+from simsopt_jax.solve.driver import Driver
 
 EXAMPLE = (
     Path(__file__).resolve().parents[3]
@@ -44,6 +51,7 @@ PUBLISHED_OBSERVABLES = frozenset(
         "minimum_clearance",
         "coil_lengths",
         "gradient",
+        "solver_driver",
         "solver_success",
         "solver_status",
         "solver_iterations",
@@ -84,9 +92,21 @@ def example() -> ModuleType:
 
 @pytest.fixture(scope="module")
 def bounded_result(example: ModuleType, tmp_path_factory) -> ExampleResult:
-    """One bounded solve, shared by every contract in this file."""
+    """One bounded solve in the shipped default mode, shared below."""
     output_directory = tmp_path_factory.mktemp("finitebuild-bounded")
     return example.solve(output_directory, BOUNDED_STEPS, "bounded")
+
+
+@pytest.fixture(scope="module")
+def bounded_device_result(example: ModuleType, tmp_path_factory) -> ExampleResult:
+    """The same bounded problem solved in the opt-in performance mode."""
+    output_directory = tmp_path_factory.mktemp("finitebuild-bounded-device")
+    return example.solve(
+        output_directory,
+        BOUNDED_STEPS,
+        "bounded",
+        driver=example.FINITE_BUILD_DEVICE_DRIVER,
+    )
 
 
 def test_bounded_solve_publishes_exactly_the_agreed_observable_schema(
@@ -109,6 +129,7 @@ def test_bounded_solve_reports_a_sound_result_that_spent_its_whole_budget(
     assert bounded_result.status == "ok"
     assert observables["solver_iterations"] == BOUNDED_STEPS
     assert observables["solver_success"] is False
+    assert observables["solver_driver"] == Driver.SCIPY_LBFGSB.value
 
 
 def test_bounded_solve_publishes_finite_numbers_everywhere(
@@ -168,3 +189,28 @@ def test_bounded_solve_publishes_one_gradient_entry_per_solved_coordinate(
 
     assert len(observables["solution"]) > 0
     assert len(observables["gradient"]) == len(observables["solution"])
+
+
+def test_both_solver_modes_publish_the_same_contract_and_name_themselves(
+    bounded_result: ExampleResult,
+    bounded_device_result: ExampleResult,
+) -> None:
+    """The opt-in mode is a solver choice, not a different example.
+
+    Everything the example promises must hold in both modes, and the run must
+    say which optimizer produced it -- otherwise a reader cannot tell the
+    mirror from the performance mode by reading the published result.
+    """
+    default = bounded_result.observables
+    device = bounded_device_result.observables
+
+    assert set(device) == set(default) == PUBLISHED_OBSERVABLES
+    assert bounded_device_result.status == "ok"
+    assert device["solver_iterations"] == BOUNDED_STEPS
+    assert default["solver_driver"] == Driver.SCIPY_LBFGSB.value
+    assert device["solver_driver"] == Driver.SIMSOPT_LBFGSB.value
+    assert device["final_objective"] < device["initial_objective"]
+    assert device["minimum_clearance"] > 0.0
+    # The two modes start from the same state, so their initial objective is
+    # one number; only what the optimizer did with it may differ.
+    assert device["initial_objective"] == default["initial_objective"]

@@ -72,7 +72,18 @@ def solve_rz_curve_length(
     rtol: float,
     atol: float,
 ) -> RZCurveLengthDeviceResult:
-    """Minimize squared curve length without dense free-DOF expansion arrays."""
+    """Minimize squared curve length without dense free-DOF expansion arrays.
+
+    NOT the official mirror route for ``1_Simple/minimize_curve_length.py``.
+    The official example solves with ``least_squares_serial_solve`` (host
+    ``scipy.optimize.least_squares``, TRF, 2-point Jacobian) and the mirror
+    reproduces that in ``examples/jax/1_Simple/minimize_curve_length.py``
+    through ``examples/jax/official_tiny_least_squares.solve_jax_residual``.
+    This device solver is a different algorithm over the same physics and has
+    no caller outside ``tests/integration/``
+    ``test_jax_rz_curve_length_strict_transfer.py``, which it exists to keep
+    exercising; it may not be used to publish an official observable.
+    """
     full_dofs_device = jnp.asarray(full_dofs, dtype=jnp.float64)
     free_positions_device = jnp.asarray(free_positions, dtype=jnp.int32)
     fixed_dofs, initial_parameters = _partition_curve_dofs(

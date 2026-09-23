@@ -9,6 +9,7 @@ from examples.jax._manifest import parse_manifest_document
 from examples.jax.parity._manifest import (
     ParityManifestValidationError,
     load_parity_manifest,
+    parse_parity_relationships_document,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +23,14 @@ PARITY_MANIFEST_PATH = (
 
 def _document() -> dict[str, object]:
     document = json.loads(PARITY_MANIFEST_PATH.read_text(encoding="utf-8"))
+    assert isinstance(document, dict)
+    return document
+
+
+def _active_document() -> dict[str, object]:
+    document = json.loads(
+        (REPO_ROOT / "examples/jax/parity_manifest.json").read_text(encoding="utf-8")
+    )
     assert isinstance(document, dict)
     return document
 
@@ -100,6 +109,198 @@ def test_coil_flux_relationship_routes_each_scientific_observable() -> None:
         for phase in ("initial", "final")
         for observable in ("parameters", "flux", "flux_gradient", "coil_length")
     }
+
+
+def test_additional_scale_resolves_full_routes_without_changing_base() -> None:
+    document = _active_document()
+    relationship = next(
+        item
+        for item in _relationships(document)
+        if item["case_id"] == "native-just-a-quadratic"
+    )
+    original_routes = deepcopy(relationship["comparison_routes"])
+    shipped_routes = deepcopy(original_routes)
+    assert isinstance(shipped_routes, list)
+    shipped_routes[0]["observable"] = "shipped_value"
+    for route in shipped_routes:
+        if route["observable"] == original_routes[0]["observable"]:
+            route["observable"] = "shipped_value"
+    relationship["scale_contracts"] = {
+        "native_default": {
+            "comparison_routes": shipped_routes,
+            "cost_tier": "scheduled",
+        }
+    }
+
+    parsed = parse_parity_relationships_document(
+        document, repo_root=REPO_ROOT, schema_version=2
+    )
+    selected = next(
+        item for item in parsed if item.case_id == "native-just-a-quadratic"
+    )
+    assert selected.supported_scales == ("bounded", "native_default")
+    assert selected.resolve_scale("bounded") is selected
+    shipped = selected.resolve_scale("native_default")
+    assert shipped.case_id == selected.case_id
+    assert shipped.scale_tier == "native_default"
+    assert selected.cost_tier == "smoke"
+    assert shipped.cost_tier == "scheduled"
+    assert shipped.comparison_routes != selected.comparison_routes
+    assert selected.comparison_routes[0].observable != "shipped_value"
+    assert shipped.comparison_routes[0].observable == "shipped_value"
+    with pytest.raises(ParityManifestValidationError, match="does not declare"):
+        selected.resolve_scale("not_applicable")
+
+
+def test_existing_native_default_relationship_keeps_single_scale_contract() -> None:
+    parsed = parse_parity_relationships_document(
+        _active_document(), repo_root=REPO_ROOT, schema_version=2
+    )
+    exact = next(
+        item
+        for item in parsed
+        if item.case_id == "native-single-stage-boozer-vacuum-optimization"
+    )
+    assert exact.supported_scales == ("native_default",)
+    assert exact.resolve_scale("native_default") is exact
+    with pytest.raises(ParityManifestValidationError, match="does not declare"):
+        exact.resolve_scale("bounded")
+
+
+@pytest.mark.parametrize(
+    ("contract", "message"),
+    (
+        (
+            {
+                "native_default": {
+                    "comparison_routes": [],
+                    "cost_tier": "scheduled",
+                    "termination_policy": "pass",
+                }
+            },
+            "invalid scale contract fields",
+        ),
+        (
+            {"native_default": {"comparison_routes": [], "cost_tier": "scheduled"}},
+            "additional scale requires comparison routes",
+        ),
+        (
+            {"native_default": {"comparison_routes": []}},
+            "invalid scale contract fields",
+        ),
+        ({"bounded": {"comparison_routes": []}}, "invalid additional scale"),
+        ({"unknown": {"comparison_routes": []}}, "invalid additional scale"),
+        ({}, "additional scale"),
+    ),
+)
+def test_additional_scale_rejects_undeclared_policy_and_invalid_routes(
+    contract: dict[str, object], message: str
+) -> None:
+    document = _active_document()
+    relationship = next(
+        item
+        for item in _relationships(document)
+        if item["case_id"] == "native-just-a-quadratic"
+    )
+    relationship["scale_contracts"] = contract
+    with pytest.raises(ParityManifestValidationError, match=message):
+        parse_parity_relationships_document(
+            document, repo_root=REPO_ROOT, schema_version=2
+        )
+
+
+@pytest.mark.parametrize(
+    ("location", "cost_tier"),
+    (
+        ("base", "unreviewed"),
+        ("base", "not_applicable"),
+        ("additional", "unreviewed"),
+        ("unsupported", "smoke"),
+    ),
+)
+def test_parity_manifest_rejects_unknown_cost_tier_at_each_scale(
+    location: str,
+    cost_tier: str,
+) -> None:
+    document = _active_document()
+    relationship = next(
+        item
+        for item in _relationships(document)
+        if (
+            item["classification"] == "unsupported"
+            if location == "unsupported"
+            else item["case_id"] == "native-wireframe-gsco-multistep"
+        )
+    )
+    if location != "additional":
+        relationship["cost_tier"] = cost_tier
+    else:
+        contracts = relationship["scale_contracts"]
+        assert isinstance(contracts, dict)
+        additional = contracts["native_default"]
+        assert isinstance(additional, dict)
+        additional["cost_tier"] = cost_tier
+
+    with pytest.raises(ParityManifestValidationError, match="invalid cost tier"):
+        parse_parity_relationships_document(
+            document, repo_root=REPO_ROOT, schema_version=2
+        )
+
+
+def test_legacy_manifest_rejects_scale_contract_extension() -> None:
+    document = _document()
+    relationship = next(
+        item
+        for item in _relationships(document)
+        if item["classification"] != "unsupported"
+    )
+    relationship["scale_contracts"] = {"native_default": {"comparison_routes": []}}
+    with pytest.raises(ParityManifestValidationError, match="unexpected"):
+        parse_parity_relationships_document(
+            document, repo_root=REPO_ROOT, schema_version=1
+        )
+
+
+@pytest.mark.parametrize("mutation", ("missing_pair", "duplicate_pair"))
+def test_additional_scale_validates_its_own_direct_route_matrix(
+    mutation: str,
+) -> None:
+    document = _active_document()
+    relationship = next(
+        item
+        for item in _relationships(document)
+        if item["case_id"] == "native-just-a-quadratic"
+    )
+    routes = deepcopy(relationship["comparison_routes"])
+    assert isinstance(routes, list)
+    if mutation == "missing_pair":
+        routes.pop(0)
+    else:
+        routes.append(deepcopy(routes[0]))
+    relationship["scale_contracts"] = {
+        "native_default": {"comparison_routes": routes, "cost_tier": "scheduled"}
+    }
+    with pytest.raises(
+        ParityManifestValidationError,
+        match="complete direct lane-pair matrix|duplicate comparison route",
+    ):
+        parse_parity_relationships_document(
+            document, repo_root=REPO_ROOT, schema_version=2
+        )
+
+
+def test_unsupported_relationship_cannot_gain_executable_scale() -> None:
+    document = _active_document()
+    relationship = next(
+        item
+        for item in _relationships(document)
+        if item["classification"] == "unsupported"
+    )
+    relationship["scale_contracts"] = {"bounded": {"comparison_routes": []}}
+    with pytest.raises(ParityManifestValidationError, match="executable base"):
+        parse_parity_relationships_document(
+            document, repo_root=REPO_ROOT, schema_version=2
+        )
 
 
 @pytest.mark.parametrize(

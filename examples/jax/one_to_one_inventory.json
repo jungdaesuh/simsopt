@@ -166,6 +166,74 @@
           "--inventory",
           "examples/jax/one_to_one_inventory.json",
           "--source",
+          "1_Simple/periodicfieldline_QA.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "deferred",
+      "current_public_jax_surface_coverage": [],
+      "evidence": [
+        "examples/1_Simple/periodicfieldline_QA.py",
+        "examples/jax/manifest.json@source_catalog",
+        "examples/jax/official_source_catalog.py@9e027eac38028d57aa23777be52a781aa860e347"
+      ],
+      "reason": "Official upstream source that reached the native layer after this inventory's baseline and has no JAX mirror: the PeriodicFieldLine residual, its derivative and its Newton solve do not exist as public JAX surfaces, so no one-to-one mirror can be claimed.",
+      "recommended_target_classification": "blocked",
+      "reconsideration_condition": "Implement and validate the JAX workflow against the official native inputs and field-line observables before marking it ready.",
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "numpy",
+          "simsopt"
+        ]
+      },
+      "source": "1_Simple/periodicfieldline_QA.py",
+      "source_sha256": "b47a8402bffeab2c4d67355c7d816a4f826fb2564543c538116deb0902ee154a"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "1_Simple/periodicfieldline_QH.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "deferred",
+      "current_public_jax_surface_coverage": [],
+      "evidence": [
+        "examples/1_Simple/periodicfieldline_QH.py",
+        "examples/jax/manifest.json@source_catalog",
+        "examples/jax/official_source_catalog.py@9e027eac38028d57aa23777be52a781aa860e347"
+      ],
+      "reason": "Official upstream source that reached the native layer after this inventory's baseline and has no JAX mirror: the PeriodicFieldLine residual, its derivative and its Newton solve do not exist as public JAX surfaces, so no one-to-one mirror can be claimed.",
+      "recommended_target_classification": "blocked",
+      "reconsideration_condition": "Implement and validate the JAX workflow against the official native inputs and field-line observables before marking it ready.",
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "json",
+          "numpy",
+          "os",
+          "simsopt"
+        ]
+      },
+      "source": "1_Simple/periodicfieldline_QH.py",
+      "source_sha256": "052fd95d75beef035520f6a7d7e6a4c26428dd0f798236b45c7f0f5ea9df4df6"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
           "1_Simple/permanent_magnet_simple.py"
         ],
         "contract": "syntax-source-hash-and-dependency-inventory",
@@ -986,7 +1054,7 @@
         ]
       },
       "source": "2_Intermediate/permanent_magnet_QA.py",
-      "source_sha256": "f438dd9f2635d91965a50d8ff6074c7f250e68d9bcdb2625d8c52cf15d4d9bba"
+      "source_sha256": "f9985484b40a7c13294b9da31a40af427b08d76b7a2fd6fd37523ac7b1e8428d"
     },
     {
       "capability_probe": {
@@ -1595,7 +1663,7 @@
         ]
       },
       "source": "3_Advanced/coil_forces.py",
-      "source_sha256": "6f9d77ad4a60e5bcbb4ae802bfda5275c27da2edbc9940abf52dce127a69bd3f"
+      "source_sha256": "99147a218c2b0e915d66418bb9d9120fb85dac27ffbafcd6756a784395cf299c"
     },
     {
       "capability_probe": {

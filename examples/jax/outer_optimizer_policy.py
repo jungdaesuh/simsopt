@@ -1,4 +1,4 @@
-"""The two approved host SciPy outer optimizers over JAX Boozer physics."""
+"""Case-bound host SciPy outer optimizers over JAX physics."""
 
 from __future__ import annotations
 
@@ -8,7 +8,18 @@ from typing import Literal
 OuterOptimizerPolicyId = Literal[
     "scipy-bfgs-over-jax-exact-boozer",
     "scipy-lbfgsb-over-jax-reduced-boozer",
+    "scipy-lbfgsb-over-jax-standard-stage-two",
+    "scipy-lbfgsb-over-jax-planar-stage-two",
+    "scipy-lbfgsb-over-jax-stochastic-stage-two",
+    "scipy-lbfgsb-over-jax-minimal-stage-two",
+    "scipy-lbfgsb-over-jax-finite-build-stage-two",
+    "scipy-lbfgsb-over-jax-coil-forces",
+    "scipy-lbfgsb-slsqp-over-jax-qfm",
+    "scipy-trf-over-jax-quadratic",
+    "scipy-trf-over-jax-curve-length",
+    "scipy-trf-over-jax-surf-vol-area",
 ]
+PolicyRegistryScope = Literal["official", "experimental"]
 
 SHIPPED_SINGLE_STAGE_SCIPY_DRIVER_ID = (
     "simsopt_jax_scipy_bfgs_with_exact_analytic_boozer_newton"
@@ -27,22 +38,56 @@ class OuterOptimizerPolicyError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class OuterOptimizerPolicy:
-    """An approved owner and exact driver, independent of scientific authority."""
+    """An approved owner, source-registration scope, and exact driver."""
 
     policy_id: OuterOptimizerPolicyId
     example_id: str
     example_path: str
     case_id: str | None
     expected_driver: str
+    registry_scope: PolicyRegistryScope
 
 
 _APPROVED_POLICIES = (
+    OuterOptimizerPolicy(
+        "scipy-trf-over-jax-quadratic",
+        "native-just-a-quadratic",
+        "1_Simple/just_a_quadratic.py",
+        "native-just-a-quadratic",
+        "scipy_least_squares_trf_jax_quadratic",
+        "official",
+    ),
+    OuterOptimizerPolicy(
+        "scipy-trf-over-jax-curve-length",
+        "native-minimize-curve-length",
+        "1_Simple/minimize_curve_length.py",
+        "native-minimize-curve-length",
+        "scipy_least_squares_trf_jax_curve_length",
+        "official",
+    ),
+    OuterOptimizerPolicy(
+        "scipy-trf-over-jax-surf-vol-area",
+        "native-surf-vol-area",
+        "1_Simple/surf_vol_area.py",
+        "native-surf-vol-area",
+        "scipy_least_squares_trf_jax_surf_vol_area",
+        "official",
+    ),
+    OuterOptimizerPolicy(
+        "scipy-lbfgsb-slsqp-over-jax-qfm",
+        "native-qfm",
+        "1_Simple/qfm.py",
+        "native-qfm",
+        "scipy_lbfgsb_slsqp_qfm_sequence",
+        "official",
+    ),
     OuterOptimizerPolicy(
         "scipy-bfgs-over-jax-exact-boozer",
         "native-single-stage-boozer-vacuum-optimization",
         "3_Advanced/single_stage_boozer_vacuum_optimization.py",
         "native-single-stage-boozer-vacuum-optimization",
         SHIPPED_SINGLE_STAGE_SCIPY_DRIVER_ID,
+        "experimental",
     ),
     OuterOptimizerPolicy(
         "scipy-lbfgsb-over-jax-reduced-boozer",
@@ -50,6 +95,60 @@ _APPROVED_POLICIES = (
         "2_Intermediate/boozerQA_ls.py",
         None,
         "scipy.optimize.minimize:L-BFGS-B",
+        "experimental",
+    ),
+    # The official native scripts of standard, planar and stochastic stage two,
+    # minimal stage two, finite-build stage two and coil forces call
+    # scipy.optimize.minimize with method='L-BFGS-B'; their shipped JAX mirrors
+    # select Driver.SCIPY_LBFGSB. The rows are named rather than counted: the
+    # count said "five" over six rows after two were inserted here.
+    OuterOptimizerPolicy(
+        "scipy-lbfgsb-over-jax-standard-stage-two",
+        "native-stage-two-optimization",
+        "2_Intermediate/stage_two_optimization.py",
+        "native-stage-two-optimization",
+        "scipy_lbfgsb",
+        "official",
+    ),
+    OuterOptimizerPolicy(
+        "scipy-lbfgsb-over-jax-planar-stage-two",
+        "native-stage-two-optimization-planar-coils",
+        "2_Intermediate/stage_two_optimization_planar_coils.py",
+        "native-stage-two-optimization-planar-coils",
+        "scipy_lbfgsb",
+        "official",
+    ),
+    OuterOptimizerPolicy(
+        "scipy-lbfgsb-over-jax-stochastic-stage-two",
+        "native-stage-two-optimization-stochastic",
+        "2_Intermediate/stage_two_optimization_stochastic.py",
+        "native-stage-two-optimization-stochastic",
+        "scipy_lbfgsb",
+        "official",
+    ),
+    OuterOptimizerPolicy(
+        "scipy-lbfgsb-over-jax-minimal-stage-two",
+        "native-stage-two-optimization-minimal",
+        "1_Simple/stage_two_optimization_minimal.py",
+        "native-stage-two-optimization-minimal",
+        "scipy_lbfgsb",
+        "official",
+    ),
+    OuterOptimizerPolicy(
+        "scipy-lbfgsb-over-jax-finite-build-stage-two",
+        "native-stage-two-optimization-finitebuild",
+        "3_Advanced/stage_two_optimization_finitebuild.py",
+        "native-stage-two-optimization-finitebuild",
+        "scipy_lbfgsb",
+        "official",
+    ),
+    OuterOptimizerPolicy(
+        "scipy-lbfgsb-over-jax-coil-forces",
+        "native-coil-forces",
+        "3_Advanced/coil_forces.py",
+        "native-coil-forces",
+        "scipy_lbfgsb",
+        "official",
     ),
 )
 

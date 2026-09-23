@@ -153,7 +153,7 @@ def test_bracketed_localizer_finds_phi_to_event_time_tolerance():
         f_left,
         f_right,
         max_iters=60,
-        atol=jnp.asarray(0.0, dtype=jnp.float64),
+        eps=jnp.asarray(0.0, dtype=jnp.float64),
     )
     assert bool(bracketed)
     assert abs(float(t_root) - target_root) < event_time_atol

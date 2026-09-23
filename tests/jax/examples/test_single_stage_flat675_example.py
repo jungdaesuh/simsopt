@@ -90,13 +90,13 @@ def test_manifest_entry_names_its_host_construction_seam(
     assert manifest_entry["compatibility"] is None
 
 
-def test_manifest_source_catalog_owns_the_native_twin(
+def test_manifest_experimental_source_catalog_owns_the_native_twin(
     manifest_entry: dict[str, object],
 ) -> None:
     document = json.loads(MANIFEST.read_text(encoding="utf-8"))
     matches = [
         row
-        for row in document["source_catalog"]
+        for row in document["experimental_sources"]
         if row["source"] == "3_Advanced/single_stage_flat675.py"
     ]
     assert len(matches) == 1

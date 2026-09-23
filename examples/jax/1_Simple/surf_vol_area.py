@@ -11,15 +11,23 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import jax
 import numpy as np
+from examples.jax.official_tiny_least_squares import (
+    DRIVER_SURFACE,
+    combine_trf_outcomes,
+    guard_finite_endpoint,
+    official_default_max_nfev,
+    solve_jax_residual,
+    surface_area_volume_residual,
+    trf_outcome,
+    value_and_jacobian,
+)
 from simsopt import load
 from simsopt.geo import SurfaceRZFourier
 from simsopt_jax.examples import (
     ExampleResult,
     ExecutionScale,
     run_example,
-    solve_rz_surface_area_volume_sequence,
 )
 
 EXAMPLE_ID = "native-surf-vol-area"
@@ -28,21 +36,8 @@ SECOND_TARGETS = (9.0, 0.8)
 
 
 def _build_surface() -> SurfaceRZFourier:
-    quadrature = np.linspace(0.0, 1.0, 32, endpoint=False)
-    surface = SurfaceRZFourier(
-        mpol=1,
-        ntor=0,
-        nfp=1,
-        stellsym=True,
-        quadpoints_phi=quadrature,
-        quadpoints_theta=quadrature,
-    )
-    surface.set_rc(0, 0, 1.0)
-    surface.set_rc(1, 0, 0.1)
-    surface.set_zs(1, 0, 0.1)
-    surface.fix_all()
-    surface.unfix("rc(1,0)")
-    surface.unfix("zs(1,0)")
+    surface = SurfaceRZFourier()
+    surface.fix("rc(0,0)")
     return surface
 
 
@@ -50,62 +45,51 @@ def solve(
     output_directory: Path, max_steps: int, _scale: ExecutionScale
 ) -> ExampleResult:
     surface = _build_surface()
-    full_dofs = np.asarray(surface.local_full_x, dtype=np.float64)
-    free_positions = np.flatnonzero(surface.local_dofs_free_status)
-    device_result = solve_rz_surface_area_volume_sequence(
-        full_dofs=jax.device_put(full_dofs),
-        quadpoints_phi=jax.device_put(
-            np.asarray(surface.quadpoints_phi, dtype=np.float64)
-        ),
-        quadpoints_theta=jax.device_put(
-            np.asarray(surface.quadpoints_theta, dtype=np.float64)
-        ),
-        free_positions=jax.device_put(free_positions),
-        first_targets=jax.device_put(np.asarray(FIRST_TARGETS, dtype=np.float64)),
-        second_targets=jax.device_put(np.asarray(SECOND_TARGETS, dtype=np.float64)),
-        mpol=surface.mpol,
-        ntor=surface.ntor,
-        nfp=surface.nfp,
-        stellsym=surface.stellsym,
-        max_steps=max_steps,
-        rtol=1.0e-12,
-        atol=1.0e-12,
-    )
-    host_values = jax.device_get(
-        (
-            device_result.first.initial_residuals,
-            device_result.first.final_parameters,
-            device_result.first.final_residuals,
-            device_result.second.initial_residuals,
-            device_result.second.final_parameters,
-            device_result.second.final_residuals,
-        )
-    )
-    (
-        first_initial,
-        first_solution,
-        first_final,
-        second_initial,
-        second_solution,
-        second_final,
-    ) = (np.asarray(value, dtype=np.float64) for value in host_values)
 
-    surface.x = first_solution
+    def stage(current: SurfaceRZFourier, targets: tuple[float, float]):
+        residual = surface_area_volume_residual(
+            np.asarray(current.local_full_x, dtype=np.float64),
+            np.asarray(current.quadpoints_phi, dtype=np.float64),
+            np.asarray(current.quadpoints_theta, dtype=np.float64),
+            np.flatnonzero(current.local_dofs_free_status),
+            np.asarray(targets, dtype=np.float64),
+            mpol=current.mpol,
+            ntor=current.ntor,
+            nfp=current.nfp,
+            stellsym=current.stellsym,
+        )
+        initial = np.asarray(current.x, dtype=np.float64)
+        initial_residual, _ = value_and_jacobian(residual, initial)
+        optimizer = solve_jax_residual(residual, initial, max_nfev=max_steps)
+        final_residual, _ = value_and_jacobian(residual, np.asarray(optimizer.x))
+        current.x = optimizer.x
+        outcome = guard_finite_endpoint(
+            trf_outcome(optimizer), (np.asarray(optimizer.x), final_residual)
+        )
+        return initial_residual, final_residual, optimizer, outcome
+
+    first_initial, first_final, first_optimizer, first_outcome = stage(
+        surface, FIRST_TARGETS
+    )
+    first_solution = np.asarray(surface.x, dtype=np.float64)
+
     first_state_path = output_directory / "surf_fw.json"
     surface.save(str(first_state_path), indent=2)
     second_surface = load(str(first_state_path))
-    second_surface.x = second_solution
+    second_initial, second_final, second_optimizer, second_outcome = stage(
+        second_surface, SECOND_TARGETS
+    )
+    second_solution = np.asarray(second_surface.x, dtype=np.float64)
     second_surface.save(
         str(output_directory / "surf_centered.json"),
         indent=2,
     )
 
-    scientific_success = bool(
-        device_result.first.optimizer.success
-        and device_result.second.optimizer.success
-        and np.linalg.norm(first_final) <= 1.0e-8
-        and np.linalg.norm(second_final) <= 1.0e-8
-    )
+    # Both official solves must report convergence. The residual norms are
+    # published diagnostics, not a gate of our own. Official capture
+    # A/reference-simple/runs/native-surf-vol-area/captured-natural-omp1:
+    # status 1 `gtol` nfev 9 njev 8, then status 1 `gtol` nfev 5 njev 5.
+    outcome = combine_trf_outcomes(first_outcome, second_outcome)
     return ExampleResult(
         example_id=EXAMPLE_ID,
         observables={
@@ -115,20 +99,32 @@ def solve(
             "second_initial_residuals": tuple(float(value) for value in second_initial),
             "second_solution": tuple(float(value) for value in second_solution),
             "second_final_residuals": tuple(float(value) for value in second_final),
-            "first_solver_success": device_result.first.optimizer.success,
-            "second_solver_success": device_result.second.optimizer.success,
+            "first_solver_success": bool(first_optimizer.success),
+            "second_solver_success": bool(second_optimizer.success),
+            "first_solver_status": int(first_optimizer.status),
+            "second_solver_status": int(second_optimizer.status),
+            "solver_driver": DRIVER_SURFACE,
+            "first_function_evaluations": first_outcome.nfev,
+            "second_function_evaluations": second_outcome.nfev,
+            "first_jacobian_evaluations": first_outcome.njev,
+            "second_jacobian_evaluations": second_outcome.njev,
+            "first_residual_norm": float(np.linalg.norm(first_final)),
+            "second_residual_norm": float(np.linalg.norm(second_final)),
         },
-        status="ok" if scientific_success else "failed",
+        status="ok" if outcome.success else "failed",
     )
 
 
 def main(arguments: list[str] | None = None) -> int:
+    # Neither scale caps the official workflow: the declared budget is SciPy's
+    # own default for this problem size, so only --max-steps can bind.
+    official_budget = official_default_max_nfev(_build_surface().x.size)
     return run_example(
         arguments,
         description=__doc__,
         temporary_prefix="simsopt-jax-surf-vol-area-",
-        bounded_steps=32,
-        native_default_steps=128,
+        bounded_steps=official_budget,
+        native_default_steps=official_budget,
         solve=solve,
     )
 

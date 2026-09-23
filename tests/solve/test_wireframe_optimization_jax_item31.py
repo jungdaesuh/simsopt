@@ -1106,8 +1106,13 @@ def test_gsco_jax_topology_with_more_than_int16_segments_matches_cpp() -> None:
     _compare_gsco_result(actual, expected)
 
 
-def test_gsco_opposite_candidate_index_wraps_negative_to_positive() -> None:
-    """Undo detection maps both current directions to the opposite candidate."""
+def test_gsco_opposite_candidate_index_is_upstreams_unwrapped_sum() -> None:
+    """Undo detection is upstream's ``opt_ind + nLoops`` without a wrap.
+
+    Upstream's ``(opt_ind + nLoops % (twoNLoops))`` reduces to ``opt_ind + nLoops``
+    by C precedence, so a candidate of the second half maps past the candidate
+    range and can never match the previous index (user decision C2, 2026-09-21).
+    """
 
     n_loops = 3
     candidates = jnp.arange(2 * n_loops, dtype=jnp.int32)
@@ -1117,7 +1122,7 @@ def test_gsco_opposite_candidate_index_wraps_negative_to_positive() -> None:
 
     np.testing.assert_array_equal(
         np.asarray(jax.device_get(actual)),
-        np.array([3, 4, 5, 0, 1, 2], dtype=np.int32),
+        np.array([3, 4, 5, 6, 7, 8], dtype=np.int32),
     )
 
 

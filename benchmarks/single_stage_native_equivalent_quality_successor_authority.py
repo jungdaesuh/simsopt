@@ -380,6 +380,13 @@ DIAG5_FROZEN_NUMERICAL_PATHS: Final = frozenset(
         "src/simsopt_jax_adapters/geo/single_stage_native_endpoint.py",
     }
 )
+# Refrozen 2026-09-19: 693 -> 695. Admitted parity terminal-status
+# normalization and explicit fixed-budget comparison contracts. This refreeze
+# binds current execution sources; it does not recertify historical campaigns.
+#
+# Refrozen 2026-09-19: 690 -> 693. Admitted official upstream
+# periodicfieldline.py plus its QA and QH example scripts.
+#
 # Refrozen 2026-09-18: one member dropped,
 # ``docs/single_stage_jax_gpu_native_equivalent_quality_diag4_independent_postmortem.json``.
 # It is an archived DIAG4 campaign artifact, not an execution source: it never
@@ -435,7 +442,12 @@ DIAG5_FROZEN_NUMERICAL_PATHS: Final = frozenset(
 # sweep roots. Run in a DEDICATED CLEAN WORKTREE, because the regenerator
 # hashes working-tree bytes and the shared tree is not quiescent.
 # Admit the declared, case-specific host SciPy optimizer policy owner.
-DIAG5_EXECUTION_SOURCE_ENTRY_COUNT: Final = 690
+# Refrozen 2026-09-19: 695 -> 696. Admit the pinned official example
+# catalog used to distinguish upstream coverage from branch-only experiments.
+# Refrozen 2026-09-21: 696 -> 711. Admit the official mirror solver/status
+# owners, upstream reference/band builders, and shared examples runtime through
+# the membership generator. Historical receipt bindings remain unchanged.
+DIAG5_EXECUTION_SOURCE_ENTRY_COUNT: Final = 711
 DIAG5_CPU_QUALIFICATION_SCHEMA_VERSION: Final = (
     "single-stage-neq-gntr3-cpu-trajectory-qualification-v2"
 )

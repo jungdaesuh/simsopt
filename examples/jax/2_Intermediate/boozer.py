@@ -6,6 +6,11 @@ polishes it with the least-squares solver, and finally relabels the surface by
 toroidal flux and expands it to three times the converged flux.  The numerical
 solves execute on the selected JAX device.
 
+Every official setting and every stage comes from
+``simsopt_jax.examples.boozer_official``, which the parity case
+``examples/jax/parity/cases/native_boozer.py`` also drives, so this script and
+the matched workflow cannot drift apart.
+
 GPU memory: ``jit(solve)`` at mpol=ntor=16 on a 48² quadrature requested
 243.07 GiB and OOM'd on a 32 GB card.  The largest resolution known to fit
 on that card is this example's ``native_default`` scale, mpol=ntor=5 on an
@@ -14,11 +19,9 @@ on that card is this example's ``native_default`` scale, mpol=ntor=5 on an
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
 
-import jax
 import numpy as np
 from simsopt.configs import get_data
 from simsopt.geo import (
@@ -30,15 +33,24 @@ from simsopt.geo import (
 )
 from simsopt.geo.curve import Curve
 from simsopt_jax.examples import ExampleResult, ExecutionScale, run_example
+from simsopt_jax.examples.boozer_official import (
+    OFFICIAL_CONSTRAINT_WEIGHT,
+    OFFICIAL_FLUX_MULTIPLIER,
+    OFFICIAL_INITIAL_IOTA,
+    OFFICIAL_LS_MAXITER,
+    OFFICIAL_SOLVER_TOLERANCE,
+    OFFICIAL_SURFACE_DISTANCE,
+    OFFICIAL_SURFACE_RESOLUTION,
+    BoozerStageState,
+    boozer_first_stage_budget,
+    boozer_official_options,
+    run_boozer_lbfgs_stage,
+    run_boozer_manual_stage,
+)
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
 
 EXAMPLE_ID = "native-boozer"
-NATIVE_LS_ITERATIONS = 100
-
-
-def _host_float(value: object) -> float:
-    return float(np.asarray(jax.device_get(value), dtype=np.float64))
 
 
 def _residual_norm(
@@ -57,16 +69,6 @@ def _residual_norm(
     return float(np.linalg.norm(np.asarray(residual, dtype=np.float64)))
 
 
-def _options(max_steps: int) -> dict[str, object]:
-    return {
-        "bfgs_maxiter": 3 * max_steps,
-        "bfgs_tol": 1.0e-10,
-        "newton_maxiter": NATIVE_LS_ITERATIONS,
-        "newton_tol": 1.0e-10,
-        "verbose": False,
-    }
-
-
 def solve(
     _output_directory: Path, max_steps: int, scale: ExecutionScale
 ) -> ExampleResult:
@@ -78,8 +80,8 @@ def solve(
     G0 = 2.0 * np.pi * current_sum * (4.0 * np.pi * 1.0e-7 / (2.0 * np.pi))
 
     native_scale = scale == "native_default"
-    mpol = 5 if native_scale else 2
-    ntor = 5 if native_scale else 2
+    mpol = OFFICIAL_SURFACE_RESOLUTION if native_scale else 2
+    ntor = OFFICIAL_SURFACE_RESOLUTION if native_scale else 2
     surface = SurfaceXYZTensorFourier(
         mpol=mpol,
         ntor=ntor,
@@ -88,71 +90,77 @@ def solve(
         quadpoints_phi=np.linspace(0.0, 1.0 / nfp, 2 * ntor + 1, endpoint=False),
         quadpoints_theta=np.linspace(0.0, 1.0, 2 * mpol + 1, endpoint=False),
     )
-    surface.fit_to_curve(magnetic_axis, 0.10, flip_theta=True)
-    initial_iota = -0.4
-    initial_residual = _residual_norm(surface, initial_iota, G0, native_field)
+    surface.fit_to_curve(magnetic_axis, OFFICIAL_SURFACE_DISTANCE, flip_theta=True)
+    start = BoozerStageState(
+        surface_dofs=np.asarray(surface.get_dofs(), dtype=np.float64),
+        iota=OFFICIAL_INITIAL_IOTA,
+        G=G0,
+    )
+    initial_residual = _residual_norm(surface, start.iota, start.G, native_field)
 
+    # The first stage's budget is read from its owner, never rebuilt here:
+    # upstream's own ``OFFICIAL_LBFGS_MAXITER`` at ``native_default`` (where
+    # stages two and three already run ``OFFICIAL_LS_MAXITER`` whatever
+    # ``max_steps`` says), and the official ratio of the two official budgets
+    # applied to ``max_steps`` at a reduced scale.
+    rough_maxiter = boozer_first_stage_budget(
+        least_squares_steps=max_steps,
+        native_default=native_scale,
+    )
+    options = boozer_official_options(
+        rough_maxiter=rough_maxiter,
+        ls_maxiter=OFFICIAL_LS_MAXITER,
+        tolerance=OFFICIAL_SOLVER_TOLERANCE,
+    )
     area = Area(surface)
     area_solver = BoozerSurfaceJAX(
         field,
         surface,
         area,
         float(area.J()),
-        constraint_weight=100.0,
-        options=_options(max_steps),
+        constraint_weight=OFFICIAL_CONSTRAINT_WEIGHT,
+        options=options,
     )
-    rough = cast(
-        Mapping[str, object],
-        area_solver.minimize_boozer_penalty_constraints_LBFGS(
-            tol=1.0e-10,
-            maxiter=3 * max_steps,
-            constraint_weight=100.0,
-            iota=initial_iota,
-            G=G0,
-        ),
+    rough = run_boozer_lbfgs_stage(
+        area_solver,
+        start,
+        tol=OFFICIAL_SOLVER_TOLERANCE,
+        maxiter=rough_maxiter,
+        constraint_weight=OFFICIAL_CONSTRAINT_WEIGHT,
     )
-    area_solver.need_to_run_code = True
-    polished = cast(
-        Mapping[str, object],
-        area_solver.minimize_boozer_penalty_constraints_ls(
-            tol=1.0e-10,
-            maxiter=NATIVE_LS_ITERATIONS,
-            constraint_weight=100.0,
-            iota=_host_float(rough["iota"]),
-            G=_host_float(rough["G"]),
-            method="manual",
-        ),
+    polished = run_boozer_manual_stage(
+        area_solver,
+        rough.state,
+        tol=OFFICIAL_SOLVER_TOLERANCE,
+        maxiter=OFFICIAL_LS_MAXITER,
+        constraint_weight=OFFICIAL_CONSTRAINT_WEIGHT,
     )
 
     toroidal_flux = ToroidalFlux(surface, native_field)
-    target_flux = 3.0 * float(toroidal_flux.J())
+    target_flux = OFFICIAL_FLUX_MULTIPLIER * float(toroidal_flux.J())
     flux_field = BiotSavartJAX(native_field.coils)
     flux_solver = BoozerSurfaceJAX(
         flux_field,
         surface,
         toroidal_flux,
         target_flux,
-        constraint_weight=100.0,
-        options=_options(max_steps),
+        constraint_weight=OFFICIAL_CONSTRAINT_WEIGHT,
+        options=options,
         surface_runtime_state=area_solver.surface_runtime_state,
     )
-    expanded = cast(
-        Mapping[str, object],
-        flux_solver.minimize_boozer_penalty_constraints_ls(
-            tol=1.0e-10,
-            maxiter=NATIVE_LS_ITERATIONS,
-            constraint_weight=100.0,
-            iota=_host_float(polished["iota"]),
-            G=_host_float(polished["G"]),
-            method="manual",
-        ),
+    expanded = run_boozer_manual_stage(
+        flux_solver,
+        polished.state,
+        tol=OFFICIAL_SOLVER_TOLERANCE,
+        maxiter=OFFICIAL_LS_MAXITER,
+        constraint_weight=OFFICIAL_CONSTRAINT_WEIGHT,
     )
 
-    final_iota = _host_float(expanded["iota"])
-    final_G = _host_float(expanded["G"])
+    final_iota = expanded.state.iota
+    final_G = expanded.state.G
     final_residual = _residual_norm(surface, final_iota, final_G, native_field)
     volume = float(Volume(surface).J())
-    solver_success = bool(polished["success"]) and bool(expanded["success"])
+    solver_success = polished.success and expanded.success
     scientific_success = bool(
         solver_success
         and np.isfinite(final_residual)
@@ -180,7 +188,7 @@ def main(arguments: list[str] | None = None) -> int:
         description=__doc__,
         temporary_prefix="simsopt-jax-boozer-",
         bounded_steps=20,
-        native_default_steps=NATIVE_LS_ITERATIONS,
+        native_default_steps=OFFICIAL_LS_MAXITER,
         solve=solve,
     )
 

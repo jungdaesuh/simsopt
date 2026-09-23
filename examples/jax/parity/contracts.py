@@ -99,6 +99,10 @@ class QualityBand:
     reaches ``observable`` <= ``max_value`` at the matched budget" -- and never
     as final-value equivalence. ``derivation`` records the measured evidence
     the band was read off, so the floor can never become a free parameter.
+    When a case also declares an ``AdmittedTerminalOutcome``, that one lane is
+    exempt from the matched budget (it stopped early by definition); the
+    matched-budget clause then binds the remaining ``budget_exhausted`` lanes,
+    of which at least one must exist.
     """
 
     observable: str
@@ -113,6 +117,50 @@ class QualityBand:
             raise ValueError("quality band max_value must be a finite float")
         if not self.derivation:
             raise ValueError("quality band requires a recorded derivation")
+
+
+@dataclass(frozen=True)
+class AdmittedTerminalOutcome:
+    """One case-owned terminal lane outcome authorized at ``native_default``.
+
+    A case declares this where a DOCUMENTED upstream failure mode -- the
+    stage-one provider termination -- motivates authorizing one case-specific
+    composite outcome. It is not a claim that upstream reaches the same
+    composite outcome: ``upstream_evidence`` records the measurement AND
+    discloses how the later stages differ from it. The admission is then bound
+    by four properties. It never relabels the lane: ``raw_status`` and
+    ``normalized_status`` are the receipt's published strings, matched exactly
+    and never parsed, and the lane keeps ``success`` false. Every finite, FP64
+    and physical check and the upstream-only endpoint band stay in force, so
+    the band still decides the verdict -- an engineering endpoint acceptance
+    rule, never an equivalence or convergence proof. The verdict can therefore
+    only ever be ``quality-band``, never ``pass``. And the admission is
+    published in the arbitration result and in the receipt, so it can never be
+    a silent pass. ``case_id`` and ``lane`` bind the authorization to ONE case
+    and ONE lane (the lane the evidence was measured on): the arbiter refuses an
+    admission whose ``case_id`` is not the case it arbitrates, and any other lane
+    publishing the same raw status stays a rejected failure.
+    """
+
+    case_id: str
+    lane: str
+    raw_status: str
+    normalized_status: str
+    upstream_evidence: str
+
+    def __post_init__(self) -> None:
+        if self.normalized_status != "failed":
+            raise ValueError(
+                "admitted terminal outcome normalized status must be 'failed'"
+            )
+        if not self.case_id:
+            raise ValueError("admitted terminal outcome requires an owning case_id")
+        if not self.lane:
+            raise ValueError("admitted terminal outcome requires the admitted lane")
+        if not self.raw_status:
+            raise ValueError("admitted terminal outcome requires a raw status")
+        if not self.upstream_evidence:
+            raise ValueError("admitted terminal outcome requires upstream evidence")
 
 
 @dataclass(frozen=True)

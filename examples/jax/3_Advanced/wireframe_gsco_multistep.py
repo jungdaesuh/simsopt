@@ -21,10 +21,15 @@ from simsopt.geo import (
     create_equally_spaced_curves,
 )
 from simsopt_jax.core.wireframe_workflow import (
+    WIREFRAME_GSCO_MULTISTEP_STAGE_CAPACITY,
     WireframeGSCOLiveParams,
     wireframe_gsco_multistep_loop_jax,
 )
 from simsopt_jax.examples import ExampleResult, ExecutionScale, run_example
+from simsopt_jax.examples.solver_terminal_status import (
+    gsco_example_status,
+    gsco_multistep_terminal_label,
+)
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.solve.wireframe import bnorm_obj_matrices_jax
 
@@ -146,11 +151,14 @@ def solve(
         neighbors_device,
         jax.device_put(base_constrained),
         max_iter_per_step=max_steps,
-        max_outer_steps=12 if scale == "native_default" else 4,
+        # The source workflow terminates after stable currents and its final
+        # adjustment. Only the reduced smoke run carries an explicit guard.
+        max_outer_steps=None if scale == "native_default" else 4,
         initial_current_fraction=initial_fraction,
         current_scale=current_scale,
         min_coil_size=20 if scale == "native_default" else 2,
         final_max_current=1.1 * initial_default_current,
+        stage_history_capacity=WIREFRAME_GSCO_MULTISTEP_STAGE_CAPACITY,
     )
     stage_count = int(jax.device_get(result.stage_count))
     all_stage_objectives = np.asarray(
@@ -158,19 +166,44 @@ def solve(
         dtype=np.float64,
     )
     stage_objectives = all_stage_objectives[:stage_count]
+    stage_iterations = np.asarray(
+        jax.device_get(result.stage_iterations),
+        dtype=np.int64,
+    )[:stage_count]
     solution = np.asarray(jax.device_get(result.x), dtype=np.float64).ravel()
     initial_normal_error = float(jax.device_get(jnp.linalg.norm(target_device)))
-    final_normal_error = float(np.sqrt(2.0 * stage_objectives[-1]))
+    final_objective = float(jax.device_get(result.final_objective))
+    final_normal_error = float(np.sqrt(2.0 * final_objective))
     maximum_current = float(np.max(np.abs(solution)))
-    nonfinal_steps = int(jax.device_get(result.nonfinal_steps))
+    final_adjustment_run = bool(jax.device_get(result.final_adjustment_run))
     wireframe.currents[:] = solution
-    solver_success = bool(
-        np.all(np.isfinite(solution))
-        and np.all(np.isfinite(stage_objectives))
-        and stage_count > 0
-        and final_normal_error < initial_normal_error
-        and maximum_current > 0.0
-        and wireframe.check_constraints()
+    constraints_satisfied = bool(wireframe.check_constraints())
+    stage_budget = np.full(stage_count, max_steps, dtype=np.int64)
+    # The completion policy is the one the parity case applies to the same
+    # per-stage arrays: each stage is one GSCO solve, so a stage that reached
+    # its allocated ``max_iter`` is upstream's ``stop_last_iter`` -- a budget
+    # stop, never a converged workflow -- and a staged run that never reached
+    # its final adjustment stopped on the limit named below (the stage history
+    # capacity when the workflow terminates naturally, the smoke guard
+    # otherwise). "final normal error below initial" is a published diagnostic:
+    # upstream's own run is not required to satisfy it, so it gates nothing.
+    limit_raw_status = (
+        "stage_history_capacity_exhausted_without_final_adjustment"
+        if scale == "native_default"
+        else "outer_step_guard_exhausted_without_final_adjustment"
+    )
+    label = gsco_multistep_terminal_label(
+        stage_iterations=stage_iterations,
+        stage_budget=stage_budget,
+        final_adjustment_run=final_adjustment_run,
+        endpoint_usable=bool(
+            np.all(np.isfinite(solution))
+            and np.isfinite(final_objective)
+            and np.all(np.isfinite(stage_objectives))
+            and maximum_current > 0.0
+            and constraints_satisfied
+        ),
+        limit_raw_status=limit_raw_status,
     )
     return ExampleResult(
         example_id=EXAMPLE_ID,
@@ -178,10 +211,23 @@ def solve(
             "stage_objectives": tuple(float(value) for value in stage_objectives),
             "final_normal_error": final_normal_error,
             "maximum_current": maximum_current,
-            "iterations": nonfinal_steps * max_steps,
-            "solver_success": solver_success,
+            # The workflow runs one GSCO solve per stage, so a single iteration
+            # count would name no solve; the per-stage accepted-update counts
+            # are the source's own per-call totals.
+            "iterations": None,
+            "stage_iterations": tuple(int(value) for value in stage_iterations),
+            "stage_allocated_iteration_budget": tuple(
+                int(value) for value in stage_budget
+            ),
+            "allocated_iteration_budget": stage_count * max_steps,
+            "final_adjustment_run": final_adjustment_run,
+            "constraints_satisfied": constraints_satisfied,
+            "terminal_status": label.normalized_status,
+            "terminal_reason": label.raw_status,
+            "normal_error_decreased": bool(final_normal_error < initial_normal_error),
+            "solver_success": label.success,
         },
-        status="ok" if solver_success else "failed",
+        status=gsco_example_status(label, scale),
     )
 
 

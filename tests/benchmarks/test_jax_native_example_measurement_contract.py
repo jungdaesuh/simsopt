@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import os
 import statistics
 import sys
 from copy import deepcopy
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NoReturn
 
+import benchmarks.run_jax_native_example_measurements as measurement_runner
 import pytest
 import simsopt_jax.examples.execution as example_execution
 from benchmarks.jax_native_example_measurement_contract import (
@@ -32,10 +34,13 @@ from benchmarks.run_jax_native_example_measurements import (
     parse_nvidia_smi_compute_apps,
     publish_artifact_exclusive,
 )
+from examples.jax.manifest_runtime import load_runtime_contract_pair
 from examples.jax.parity.cases import get_case, native_boozerqa
 from simsopt_jax.backend import get_backend_mode, invalidate_backend_cache
 from simsopt_jax.solve.driver import Driver
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_EXPERIMENTAL_SINGLE_STAGE_CASE_ID = "native-single-stage-boozer-vacuum-optimization"
 _SHA_A = "a" * 64
 _SHA_B = "b" * 64
 _PROFILE_IDS = (
@@ -555,7 +560,19 @@ def test_registered_single_stage_case_consumes_profile_solver_selector() -> None
     assert "return execute_variant(lane, bundle, arrays, SPEC)" in (
         registered_execute_source
     )
-    assert "driver = scalar_example_driver()" in jax_execute_source
+    # The lane asks one owner for its outer driver: the official BoozerQA method is
+    # pinned, and every other spec (this registered case included) consumes the
+    # profile solver selector.
+    assert "driver = _outer_driver(spec)" in jax_execute_source
+    single_stage_spec = dataclasses.replace(
+        native_boozerqa.BOOZER_QA_SPEC, case_id=case.case_id
+    )
+    assert native_boozerqa._outer_driver(single_stage_spec) == (
+        example_execution.scalar_example_driver()
+    )
+    assert native_boozerqa._outer_driver(native_boozerqa.BOOZER_QA_SPEC) == (
+        native_boozerqa.OFFICIAL_QA_OUTER_DRIVER
+    )
     assert "if driver == Driver.SIMSOPT_LBFGSB:" in jax_execute_source
     assert "minimize_lbfgs_host_core(" in jax_execute_source
     assert "minimize_bfgs_host_core(" in jax_execute_source
@@ -708,3 +725,55 @@ def test_gpu_preflight_rejects_material_concurrent_use(
             utilization_samples=samples,
             total_memory_bytes=32 * 1024**3,
         )
+
+
+class _StoppedBeforeCaseInput(Exception):
+    """Stand-in registry signal: the lookup finished; no input bundle or solver ran."""
+
+
+def test_explicit_experimental_case_measurement_resolves_outside_official_batch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime = load_runtime_contract_pair(
+        _REPO_ROOT / "examples" / "jax" / "manifest.json",
+        _REPO_ROOT / "examples" / "jax" / "parity_manifest.json",
+        repo_root=_REPO_ROOT,
+    )
+    official_case_ids = {
+        relationship.case_id for relationship in runtime.parity.relationships
+    }
+    experimental_case_ids = {
+        relationship.case_id
+        for relationship in runtime.parity.experimental_relationships
+    }
+    assert _EXPERIMENTAL_SINGLE_STAGE_CASE_ID not in official_case_ids, (
+        "the branch-only single-stage case must stay out of the official batch"
+    )
+    assert _EXPERIMENTAL_SINGLE_STAGE_CASE_ID in experimental_case_ids
+
+    cases_reached_after_lookup: list[str] = []
+
+    def mocked_gpu_preflight(gpu_index: int) -> str:
+        return f"pass: mocked preflight for gpu {gpu_index}"
+
+    def stop_before_case_input(case_id: str) -> NoReturn:
+        cases_reached_after_lookup.append(case_id)
+        raise _StoppedBeforeCaseInput(case_id)
+
+    monkeypatch.setattr(
+        measurement_runner, "_gpu_concurrent_use_preflight", mocked_gpu_preflight
+    )
+    monkeypatch.setattr(measurement_runner, "get_case", stop_before_case_input)
+
+    with pytest.raises(_StoppedBeforeCaseInput):
+        measurement_runner.collect_case_measurements(
+            case_id=_EXPERIMENTAL_SINGLE_STAGE_CASE_ID,
+            scale="bounded",
+            artifact_root=tmp_path / "measurements",
+            python_executable=sys.executable,
+        )
+
+    assert cases_reached_after_lookup == [_EXPERIMENTAL_SINGLE_STAGE_CASE_ID], (
+        "the explicit experimental case must resolve exactly one parity relationship "
+        "and one JAX example record before any input or solver work starts"
+    )

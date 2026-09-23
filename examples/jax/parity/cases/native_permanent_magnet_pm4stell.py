@@ -4,16 +4,25 @@ from __future__ import annotations
 
 import hashlib
 import io
+from collections.abc import Mapping
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import MappingProxyType
+from typing import Final
 
 import numpy as np
 from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.cases._permanent_magnet_arbvec import (
+    ArbVecLaneResult,
     execute_arbvec_case,
     frozen_grid_arrays,
 )
 from examples.jax.parity.input_bundle import InputBundle, create_input_bundle
+from examples.jax.parity.official_reference import (
+    CANONICAL_VARIANT,
+    JsonValue,
+    load_official_reference,
+)
 from examples.jax.parity.runtime import ParityLane
 from simsopt_jax.examples import ExecutionScale
 
@@ -22,6 +31,13 @@ PLASMA_INPUT = TEST_DATA / "c09r00_B_axis_half_tesla_PM4Stell.plasma"
 COIL_INPUT = TEST_DATA / "tf_only_half_tesla_symmetry_baxis_PM4Stell.focus"
 FAMUS_INPUT = TEST_DATA / "magpie_trial104b_PM4Stell.focus"
 CORNER_INPUT = TEST_DATA / "magpie_trial104b_corners_PM4Stell.csv"
+CASE_ID = "native-permanent-magnet-pm4stell"
+#: Which captured run of the official script each scale mirrors: the canonical
+#: record is upstream's shipped run, the ``ci`` record upstream's own
+#: ``in_github_actions`` run of the SAME script at ``9e027eac3``.
+OFFICIAL_VARIANT_BY_SCALE: Final[Mapping[str, str]] = MappingProxyType(
+    {"native_default": CANONICAL_VARIANT, "bounded": "ci"}
+)
 
 WORKFLOW_STAGES = (
     "construct_ncsx_boundary_plasma_field_and_tf_coil_field",
@@ -32,18 +48,64 @@ WORKFLOW_STAGES = (
 )
 
 
+def _official_configuration(scale: ExecutionScale) -> Mapping[str, JsonValue]:
+    """Upstream's own configuration of this script at ``scale``."""
+    record = load_official_reference(
+        CASE_ID, variant=OFFICIAL_VARIANT_BY_SCALE[scale]
+    ).structure("configuration")
+    if not isinstance(record, Mapping):
+        raise TypeError("the official configuration record is not a JSON object")
+    return record
+
+
+#: Read once per process; the loader imports nothing but the standard library
+#: and numpy.
+OFFICIAL_CONFIGURATION_BY_SCALE: Final[Mapping[str, Mapping[str, JsonValue]]] = (
+    MappingProxyType(
+        {scale: _official_configuration(scale) for scale in OFFICIAL_VARIANT_BY_SCALE}
+    )
+)
+
+
+def _official_int(configuration: Mapping[str, JsonValue], name: str) -> int:
+    value = configuration[name]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"official configuration {name} must be an integer")
+    return value
+
+
+def _official_float(configuration: Mapping[str, JsonValue], name: str) -> float:
+    value = configuration[name]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"official configuration {name} must be numeric")
+    return float(value)
+
+
 def _scale_configuration(scale: ExecutionScale) -> dict[str, object]:
-    native_scale = scale == "native_default"
+    """Upstream's own GPMO configuration, from the tracked official record.
+
+    Both scales are upstream's: ``native_default`` is the shipped run and
+    ``bounded`` is upstream's ``in_github_actions`` configuration
+    (``permanent_magnet_PM4Stell.py:36-50``). Neither is pasted here -- the
+    numbers live in ONE tracked place, ``examples/jax/parity/official_reference``,
+    and the names below are this case's spelling of upstream's own keywords.
+    ``ndipoles`` is deliberately NOT read from the record: it is what the
+    branch's own grid build produces from the FAMUS inventory, and the tests
+    compare it with upstream's rather than adopt it.
+    """
+    official = OFFICIAL_CONFIGURATION_BY_SCALE[scale]
     return {
-        "nphi": 16 if native_scale else 2,
-        "ntheta": 16 if native_scale else 2,
-        "downsample": 10 if native_scale else 100,
-        "iterations": 2_000 if native_scale else 20,
-        "backtracking": 200 if native_scale else 20,
-        "max_magnets": 1_000 if native_scale else 20,
-        "history_count": 10,
-        "adjacent_count": 10,
-        "threshold_angle": float(np.pi),
+        "nphi": _official_int(official, "nphi"),
+        "ntheta": _official_int(official, "ntheta"),
+        "downsample": _official_int(official, "downsample"),
+        "iterations": _official_int(official, "K"),
+        "backtracking": _official_int(official, "backtracking"),
+        "max_magnets": _official_int(official, "max_nMagnets"),
+        "history_count": _official_int(official, "nhistory"),
+        "adjacent_count": _official_int(official, "Nadjacent"),
+        "threshold_angle": _official_float(official, "thresh_angle"),
+        # Upstream passes ``reg_l2=0`` (its ``gpmo_keyword_names`` carries the
+        # keyword; the record stores no value for it).
         "regularization_l2": 0.0,
         "coordinate_flag": "cartesian",
         "magnetization_maximum": 5.0 / (4.0 * np.pi * 1.0e-7),
@@ -151,10 +213,33 @@ def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
     )
 
 
+def observe(
+    _lane: ParityLane,
+    _bundle: InputBundle,
+    _arrays: dict[str, np.ndarray],
+    result: ArbVecLaneResult,
+) -> LaneObservation:
+    """Derive this case's published observation from ONE GPMO solve.
+
+    Upstream PM4Stell keeps the GPMO endpoint (``pm_ncsx.m``); only the MUSE
+    script selects the minimum-objective snapshot, so the recorded history is
+    not consumed here -- but the caller that compares that history with the
+    official record needs it to come from the same solve as the endpoint, which
+    is why this case's ``execute`` is the solve followed by this derivation
+    (``tests/parity_gpmo_native_child.py``).
+    """
+    return result.observation
+
+
 def execute(
     lane: ParityLane,
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
     """Execute the exact PM4Stell permanent-magnet workflow in one lane."""
-    return execute_arbvec_case(lane, bundle, arrays, WORKFLOW_STAGES)
+    return observe(
+        lane,
+        bundle,
+        arrays,
+        execute_arbvec_case(lane, bundle, arrays, WORKFLOW_STAGES),
+    )

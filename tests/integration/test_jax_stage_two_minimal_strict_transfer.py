@@ -1,4 +1,12 @@
-"""Strict-transfer coverage for the exact minimal Stage-II workflow."""
+"""Strict-transfer coverage for the minimal Stage-II workflow's device mode.
+
+The device-resident L-BFGS-B is this mirror's opt-in performance mode, not its
+default: the default is the host SciPy provider upstream calls, which crosses
+the host boundary once per evaluation by construction.  This file names the
+device driver explicitly and asserts the solve that ran was that one, so the
+mode keeps the coverage its GPU claim rests on.  The ``disallow`` transfer
+guard is its teeth: under the default driver this test cannot pass.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +17,10 @@ import numpy as np
 from simsopt.field import Current, coils_via_symmetries
 from simsopt.geo import SurfaceRZFourier, create_equally_spaced_curves
 from simsopt_jax.examples import solve_minimal_stage_two
+from simsopt_jax.examples.stage_two_minimal import (
+    MINIMAL_STAGE_TWO_DEVICE_DRIVER,
+)
+from simsopt_jax.solve.driver import Driver
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
 
@@ -41,9 +53,7 @@ def test_minimal_stage_two_keeps_complete_numerical_workflow_on_device() -> None
     )
     field = BiotSavartJAX(coils)
     flux = SquaredFluxJAX(surface, field)
-    initial_parameters = jax.device_put(
-        np.asarray(field.x, dtype=np.float64)
-    )
+    initial_parameters = jax.device_put(np.asarray(field.x, dtype=np.float64))
     taylor_direction = jax.device_put(
         np.random.RandomState(1).uniform(size=initial_parameters.shape)
     )
@@ -65,6 +75,7 @@ def test_minimal_stage_two_keeps_complete_numerical_workflow_on_device() -> None
             num_base_curves=4,
             length_weight=1.0,
             length_target=18.0,
+            driver=MINIMAL_STAGE_TWO_DEVICE_DRIVER,
             max_steps=80,
             rtol=1.0e-12,
             atol=1.0e-10,
@@ -78,6 +89,7 @@ def test_minimal_stage_two_keeps_complete_numerical_workflow_on_device() -> None
             result.final.total_curve_length,
         )
     )
+    assert result.optimizer.driver is Driver.SIMSOPT_LBFGSB
     assert result.optimizer.success is True
     assert float(final_values[1]) < float(final_values[0])
     assert np.linalg.norm(final_values[2], ord=np.inf) <= 1.0e-4

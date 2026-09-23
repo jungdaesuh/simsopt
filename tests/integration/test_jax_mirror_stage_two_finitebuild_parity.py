@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 from examples.jax.parity.cases import get_case
 from examples.jax.parity.input_bundle import load_input_bundle
+from simsopt_jax.solve.driver import Driver
 
 
 def test_exact_finitebuild_matches_native_and_jax_cpu(
@@ -26,8 +27,19 @@ def test_exact_finitebuild_matches_native_and_jax_cpu(
     monkeypatch.setenv("JAX_ENABLE_X64", "1")
     jax = case.execute("jax-cpu", bundle, arrays)
 
-    assert native.success is True
-    assert jax.success is True
+    # The mirror solves with the provider upstream calls. The device L-BFGS-B
+    # remains available as the example's ``--device-solver`` performance mode,
+    # but a parity lane that ran it would not be mirroring upstream's workflow,
+    # so the published driver is asserted on both lanes.
+    assert native.driver == "scipy_lbfgsb_finite_build"
+    assert jax.driver == Driver.SCIPY_LBFGSB.value
+
+    # The bounded budget ends every stage on its iteration cap. The label says
+    # so; it is neither convergence nor failure, and it still implies the case's
+    # scientific predicate, because a false predicate is labelled ``failed``.
+    for observation in (native, jax):
+        assert observation.normalized_status == "budget_exhausted"
+        assert observation.success is False
     assert native.input_fingerprint == jax.input_fingerprint
     assert native.configuration_fingerprint == jax.configuration_fingerprint
     assert native.effective_construction_fingerprint == (

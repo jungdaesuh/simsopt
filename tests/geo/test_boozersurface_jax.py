@@ -4105,8 +4105,8 @@ class TestBoozerSurfaceJAXClass:
             atol=1e-6,
         )
 
-    def test_public_manual_ls_api_increases_damping_after_worsening_trial(self):
-        """The manual LS compatibility loop must not shrink damping on rejected steps."""
+    def test_public_manual_ls_api_converges_on_nonlinear_scalar_residual(self):
+        """The manual LS compatibility loop converges on a scalar residual."""
         booz = _make_mock_boozer_surface()
         result = booz._run_manual_penalty_least_squares(
             lambda x: jnp.asarray([x[0] ** 2 - 1.0], dtype=x.dtype),

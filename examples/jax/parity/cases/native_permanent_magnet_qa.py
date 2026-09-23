@@ -11,6 +11,10 @@ from typing import Mapping
 
 import numpy as np
 from examples.jax.parity.arbiter import LaneObservation
+from examples.jax.parity.cases._fixed_work_status import (
+    RELAX_AND_SPLIT_CONTINUATION_COMPLETED,
+    fixed_work_label,
+)
 from examples.jax.parity.input_bundle import (
     InputBundle,
     create_input_bundle,
@@ -94,6 +98,13 @@ def _build_source_grid(configuration: Mapping[str, object], output_root: Path):
     )
     inner_surface.extend_via_projected_normal(0.05)
     outer_surface.extend_via_projected_normal(0.15)
+    # The boundary is this problem's prescribed target, never a variable. The
+    # branch gave ``CurveSurfaceDistance`` ownership of the surface, so without
+    # this the helper hands ``scipy.optimize.minimize`` the boundary's 121 free
+    # dofs on top of the 7 coil parameters upstream optimizes -- the same
+    # adaptation ``examples/2_Intermediate/permanent_magnet_QA.py`` and the
+    # three stage-two native examples carry.
+    surface.fix_all()
     with redirect_stdout(io.StringIO()):
         base_curves, curves, coils = initialize_coils_for_pm_optimization(
             "qa",
@@ -220,11 +231,33 @@ def _values(
     final_moments: np.ndarray,
     final_proxy: np.ndarray,
 ) -> dict[str, np.ndarray]:
+    """Publish the endpoint, naming which set of moments each observable uses.
+
+    Upstream ``permanent_magnet_QA.py`` carries two moment vectors: ``pm_opt.m``
+    (the MwPGP iterate) and ``pm_opt.m_proxy`` (its sparse prox-l0 companion).
+    This case's ``final:residual``, ``final:objective_sum_squares``,
+    ``final:residual_norm`` and ``final:nonzero_mask``/``final:nonzero_count``
+    are all computed from ``m_proxy`` (``final_proxy``), matching
+    ``final:proxy_objective_half_sum_squares`` /
+    ``final:proxy_residual`` / ``final:nonzero_count`` in the official capture
+    epilogue ``A/claude/capture/epilogues/native-permanent-magnet-qa.py:15,17,22``,
+    NOT its ``final:objective_half_sum_squares`` (finding PM-QA-1).
+    ``final:moment_residual`` and ``final:moment_objective_sum_squares`` are the
+    same quantities on ``m``, added so both official numbers have a lane-side
+    counterpart; no existing observable changes value.
+
+    Upstream prints "% of dipoles that are nonzero" from ``m``
+    (``permanent_magnet_QA.py:214-215,249-250``; 100.0 % in the official run)
+    while this case counts on ``m_proxy`` (2973 of 7512, the same choice the
+    capture makes); the printed percentage therefore has no counterpart in
+    ``final:nonzero_count`` and must be read off ``final:moments`` (PM-QA-2).
+    """
     response = arrays["response_matrix"]
     target = arrays["target"]
     initial = arrays["initial_moments"]
     initial_residual = response @ initial.reshape(-1) - target
     final_residual = response @ final_proxy.reshape(-1) - target
+    moment_residual = response @ final_moments.reshape(-1) - target
     nonzero_mask = np.linalg.norm(final_proxy, axis=1) != 0.0
     return {
         "construction:response_matrix": response,
@@ -240,6 +273,11 @@ def _values(
         ),
         "final:moments": final_moments,
         "final:proxy_moments": final_proxy,
+        "final:moment_residual": moment_residual,
+        "final:moment_objective_sum_squares": np.asarray(
+            np.vdot(moment_residual, moment_residual),
+            dtype=np.float64,
+        ),
         "final:residual": final_residual,
         "final:objective_sum_squares": np.asarray(
             np.vdot(final_residual, final_residual),
@@ -275,16 +313,20 @@ def _observation(
     precision: str,
     driver: str,
 ) -> LaneObservation:
-    success = bool(
-        np.all(np.isfinite(values["final:moments"]))
-        and np.all(np.isfinite(values["final:proxy_moments"]))
-        and np.count_nonzero(values["final:nonzero_mask"]) > 0
-        and values["final:objective_sum_squares"]
-        < values["initial:objective_sum_squares"]
+    # The continuation is a fixed amount of work: ``continuation_stages`` outer
+    # sweeps of ``outer_iterations`` MwPGP calls, each with ``epsilon = 0`` and
+    # ``verbose = False``, so no stage can stop early and no provider reports
+    # convergence. The configured product is not a measured ``nit``/``nfev``,
+    # so the counters are null and the category is ``not_applicable``. The
+    # objective comparison stays a published diagnostic.
+    label = fixed_work_label(
+        raw_status=RELAX_AND_SPLIT_CONTINUATION_COMPLETED,
+        outputs_usable=bool(
+            np.all(np.isfinite(values["final:moments"]))
+            and np.all(np.isfinite(values["final:proxy_moments"]))
+            and np.count_nonzero(values["final:nonzero_mask"]) > 0
+        ),
     )
-    iterations = _configuration_int(
-        bundle.configuration, "continuation_stages"
-    ) * _configuration_int(bundle.configuration, "outer_iterations")
     return LaneObservation(
         lane=lane,
         backend_mode=(
@@ -297,11 +339,11 @@ def _observation(
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=_effective_fingerprint(bundle, arrays),
         driver=driver,
-        normalized_status="converged" if success else "failed",
-        raw_status="fixed_iteration_budget_complete",
-        success=success,
-        nit=iterations,
-        nfev=iterations * _configuration_int(bundle.configuration, "inner_iterations"),
+        normalized_status=label.normalized_status,
+        raw_status=label.raw_status,
+        success=label.success,
+        nit=None,
+        nfev=None,
         njev=None,
         completed_workflow_stages=WORKFLOW_STAGES,
         provenance=None,

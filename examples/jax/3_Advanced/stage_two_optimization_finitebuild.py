@@ -2,17 +2,26 @@
 
 The host constructs the native Landreman-Paul surface and immutable
 multifilament coil topology.  Pack-frame geometry, all filament copies,
-Biot-Savart field evaluation, quadratic flux, engineering penalties,
-gradients, and optimization then execute on the selected JAX CPU or GPU.
-Each shared pack frame is evaluated once per objective call.  The objective
-scale is an explicit device parameter, so one compiled graph serves both the
-scaled solve and the published unscaled gradient.  Fast mode uses
-bounded-memory SIMSOPT L-BFGS; parity mode uses SIMSOPT BFGS.
+Biot-Savart field evaluation, quadratic flux, engineering penalties and
+gradients then execute on the selected JAX CPU or GPU.  Each shared pack
+frame is evaluated once per objective call.  The objective scale is an
+explicit device parameter, so one compiled graph serves both the scaled solve
+and the published unscaled gradient.
+
+Outer optimizer.  By default this mirror solves with the provider the
+official script calls, ``scipy.optimize.minimize(..., method="L-BFGS-B")``,
+driven over the JAX objective with the official script's own options
+(maxiter 400, maxcor 400, tol 1e-20, SciPy's own evaluation and line-search
+limits).  Pass ``--device-solver`` to solve with the in-tree device-resident
+L-BFGS-B instead: that is a performance mode, not the mirror, and it reaches
+a different point of the same objective.
 """
 
 from __future__ import annotations
 
+import argparse
 import itertools
+from functools import partial
 from pathlib import Path
 
 import jax
@@ -35,9 +44,12 @@ from simsopt_jax.examples import (
     ExampleResult,
     ExecutionScale,
     run_example,
-    scalar_example_driver,
 )
 from simsopt_jax.examples.stage_two_finitebuild import (
+    FINITE_BUILD_DEVICE_DRIVER,
+    FINITE_BUILD_NATIVE_ITERATIONS,
+    FINITE_BUILD_OFFICIAL_DRIVER,
+    FINITE_BUILD_TOLERANCE,
     prepare_finite_build_stage_two,
     solve_finite_build_stage_two,
 )
@@ -51,7 +63,6 @@ from simsopt_jax_adapters.objectives import (
 from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
 
 EXAMPLE_ID = "native-stage-two-optimization-finitebuild"
-NATIVE_ITERATIONS = 400
 SOLVE_OBJECTIVE_SCALE = 1.0e-4
 PUBLISHED_OBJECTIVE_SCALE = 1.0
 NUM_BASE_CURVES = 4
@@ -147,7 +158,11 @@ def _build_problem(
 
 
 def solve(
-    _output_directory: Path, max_steps: int, scale: ExecutionScale
+    _output_directory: Path,
+    max_steps: int,
+    scale: ExecutionScale,
+    *,
+    driver: Driver = FINITE_BUILD_OFFICIAL_DRIVER,
 ) -> ExampleResult:
     field, flux, config = _build_problem(scale)
     objective = make_finite_build_stage_two_objective(
@@ -170,14 +185,12 @@ def solve(
         ),
     )
     initial_values_device = prepared.diagnostics(initial_device)
-    driver = scalar_example_driver()
     result = solve_finite_build_stage_two(
         prepared,
         driver=driver,
         max_steps=max_steps,
-        rtol=1.0e-15,
-        atol=1.0e-12,
-        line_search_max_steps=None if driver == Driver.SIMSOPT_LBFGSB else 40,
+        rtol=FINITE_BUILD_TOLERANCE,
+        atol=FINITE_BUILD_TOLERANCE,
     )
     solution_device = jax.block_until_ready(prepared.problem.x)
     prepared.problem.set_objective_parameter(
@@ -227,6 +240,7 @@ def solve(
             "minimum_clearance": minimum_clearance,
             "coil_lengths": coil_lengths,
             "gradient": tuple(float(value) for value in gradient),
+            "solver_driver": result.driver.value,
             "solver_success": bool(result.success),
             "solver_status": result.status,
             "solver_iterations": result.nit,
@@ -235,14 +249,29 @@ def solve(
     )
 
 
+def _selected_driver(arguments: list[str] | None) -> tuple[Driver, list[str]]:
+    """Read the one option this example adds to the shared example CLI.
+
+    ``allow_abbrev=False`` is required: an abbreviating pre-parser would
+    capture prefixes of the shared CLI's own options.
+    """
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--device-solver", action="store_true")
+    selected, remaining = parser.parse_known_args(arguments)
+    if selected.device_solver:
+        return FINITE_BUILD_DEVICE_DRIVER, remaining
+    return FINITE_BUILD_OFFICIAL_DRIVER, remaining
+
+
 def main(arguments: list[str] | None = None) -> int:
+    driver, remaining = _selected_driver(arguments)
     return run_example(
-        arguments,
+        remaining,
         description=__doc__,
         temporary_prefix="simsopt-jax-stage-two-finitebuild-",
         bounded_steps=3,
-        native_default_steps=NATIVE_ITERATIONS,
-        solve=solve,
+        native_default_steps=FINITE_BUILD_NATIVE_ITERATIONS,
+        solve=partial(solve, driver=driver),
     )
 
 

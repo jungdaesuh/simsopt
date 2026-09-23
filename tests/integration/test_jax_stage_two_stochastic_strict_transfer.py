@@ -26,4 +26,8 @@ def test_stochastic_stage_two_has_explicit_device_transfer_boundaries(
     with jax.transfer_guard("disallow"):
         observation = case.execute("jax-cpu", bundle, arrays)
 
-    assert observation.success is True
+    # The whole lane ran under the guard. Its bounded budget ends on the iteration
+    # cap, which the label reports; ``failed`` would mean the run or its scientific
+    # predicate broke.
+    assert observation.normalized_status == "budget_exhausted"
+    assert observation.success is False

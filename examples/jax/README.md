@@ -1,6 +1,10 @@
 # JAX-first examples
 
-Every eligible native example owns exactly one JAX mirror at the same tier and
+Official upstream coverage is pinned to `hiddenSymmetries/simsopt`, branch
+`master`, commit `9e027eac38028d57aa23777be52a781aa860e347`. Only examples
+present in that official catalog count toward coverage.
+
+Every eligible official native example owns exactly one JAX mirror at the same tier and
 the same filename: `examples/<tier>/<name>.py` is mirrored by
 `examples/jax/<tier>/<name>.py`. The mirror teaches the public JAX interfaces
 directly — immutable state, compiled computations, batching, and explicit
@@ -15,10 +19,40 @@ record cannot own a catalog source.
 The generated
 [`NATIVE_TO_JAX_INDEX.md`](NATIVE_TO_JAX_INDEX.md) lists the native sources,
 their exact JAX mirrors or blockers, device scope, execution scale, and latest
-authority status. Regenerate it from the validated manifests and compact
+evidence status. A separate section retains branch-only experiments; they do
+not count toward official coverage. Regenerate it from the validated manifests and compact
 authority record with
 `python -m examples.jax.native_to_jax_index --write`; use `--check` in
 validation.
+
+## Retained shipped-workload validation
+
+The 2026-09-22 UTC verification ran all 25 eligible official mappings at
+`native_default` on local validation snapshot
+`998148365e8db55577b4372c4c791ef6bc20cc35`. Each JAX lane was compared with
+native CPU separately:
+
+| Comparison | Case-contract pass | Qualified quality-band | Failed |
+| --- | ---: | ---: | ---: |
+| Native CPU / JAX CPU | 20 | 5 | 0 |
+| Native CPU / JAX GPU | 19 | 4 | 2 |
+
+The four qualified GPU cases are BoozerQA, coil forces, finite-build stage two,
+and minimal stage two. A quality-band result does not establish convergence;
+coil forces retains its raw GPU solver failure. QFM's GPU endpoint-quality
+failure and the NCSX GPU long-trajectory comparison failure remain unresolved.
+
+The independent official reference checks selected construction, input and count
+quantities. Endpoint acceptance uses the individual native/JAX case contracts;
+this does not establish equivalence of every official trajectory or setting.
+PM4Stell's backtracking deviation and the planar-coil upstream-gradient
+limitation remain disclosed in the case contracts. These are two native-referenced
+comparisons, not a complete three-lane comparison matrix.
+
+The source-bound reports and raw packets are retained locally under
+`.artifacts/reconciliation-execution-20260921/`, which is not distributed in
+Git. These counts describe that snapshot, not a new run on the current checkout.
+Verification jobs overlapped, so their elapsed times do not establish speedups.
 
 Install the CPU runtime from the repository root with:
 
@@ -32,8 +66,9 @@ Use `.[JAX_GPU]` in a supported CUDA environment.
 
 Runtime selection is process-wide and must happen before importing JAX-heavy
 modules, so use the isolated runner rather than executing several examples in
-one Python process. Every ready record runs on both devices under both
-intents:
+one Python process. The ordinary runner includes every ready registered record,
+including tutorials and branch-only experiments; it is not the official mirror
+verification batch. Every ready record supports both devices and both intents:
 
 ```console
 python examples/jax/run_examples.py --device cpu --scale bounded
@@ -84,23 +119,31 @@ Device capability and bounded arguments remain in
 [`manifest.json`](manifest.json); execution intent is a suite-wide runtime
 policy and is not copied into every example record. Device selection changes
 placement, not the algorithm or the public result contract. Ready JAX examples
-normally use a JAX optimizer. Two explicitly declared Boozer workflows permit a
-**CPU SciPy outer optimizer over JAX physics and derivatives**:
+normally use a JAX optimizer. Case-bound policies also permit a **CPU SciPy
+outer optimizer over JAX physics and derivatives** where explicitly declared:
 
-| Example | CPU controller | JAX numerical region |
-| --- | --- | --- |
-| `native-single-stage-boozer-vacuum-optimization` | SciPy BFGS | Exact Boozer Newton solve and implicit objective gradient |
-| `native-boozerqa-ls` | SciPy L-BFGS-B | Reduced-Schur nested-LS solve and implicit objective gradient |
+| Scope | Example | CPU controller | JAX numerical region |
+| --- | --- | --- | --- |
+| Official upstream mirror | Standard, minimal, planar, stochastic and finite-build stage-two; coil forces | SciPy L-BFGS-B | Coil physics, objective and derivatives |
+| Official upstream mirror | QFM surface (`1_Simple/qfm.py`) | SciPy L-BFGS-B, then SciPy SLSQP | QFM residual, labels and their derivatives |
+| Official upstream mirror | `just_a_quadratic`, `minimize_curve_length`, `surf_vol_area` | SciPy `least_squares` (TRF) | Residuals and Jacobians |
+| Branch-only experiment | `native-single-stage-boozer-vacuum-optimization` | SciPy BFGS | Exact Boozer Newton solve and implicit objective gradient |
+| Serial adaptation; outside official one-to-one coverage | `native-boozerqa-ls` | SciPy L-BFGS-B | Reduced-Schur nested-LS solve and implicit objective gradient |
 
-The optional `outer_optimizer_policy` manifest field declares
-`scipy-bfgs-over-jax-exact-boozer` or `scipy-lbfgsb-over-jax-reduced-boozer` for
-these respective examples. The declaration is bound to the registered example
-and, for parity, the exact case and driver. A driver name alone grants no exception, and another
+These are the providers the upstream scripts call, with upstream's own options. The minimal and finite-build
+stage-two mirrors additionally accept `--device-solver`, an opt-in performance mode that replaces the host
+provider by the in-tree device-resident L-BFGS-B (a JAX reimplementation of SciPy's algorithm); that mode is not
+the upstream mirror and is never what the parity cases run.
+
+The `outer_optimizer_policy` manifest field declares the policy owned by that
+example. The declaration is bound to the registered example and, for parity,
+the exact case and driver. A driver name alone grants no exception, and another
 example cannot borrow this policy. Missing declarations retain the default ban.
 This permission does not relax transfer guards, source provenance, scientific
 acceptance, or parity comparisons. CPU control is not a GPU-resident optimizer;
 performance claims must state whether they time the JAX region or the complete
-workflow. Other native SciPy solves remain CPU reference oracles.
+workflow. Experimental policies authorize explicit experimental execution;
+they do not contribute official upstream coverage.
 
 Optimistix and Optax remain explicit optional driver choices and are never
 selected implicitly by the serial example APIs. The serial wrappers publish `problem.x` and their
@@ -127,8 +170,8 @@ fails; it never falls back to CPU.
 ## Native/JAX parity evidence
 
 The paired parity runner reconstructs matched native SIMSOPT CPU and JAX
-workflows from one serialized input bundle. Run every currently applicable
-bounded case on CPU with:
+workflows from one serialized input bundle. Run the applicable official
+upstream cases at their native-default scale on CPU with:
 
 ```console
 python examples/jax/run_parity.py \
@@ -212,20 +255,28 @@ The authoritative inventory is [`manifest.json`](manifest.json) and
 [`parity_manifest.json`](parity_manifest.json). Nothing else in this directory
 defines coverage.
 
-`manifest.json` holds two tables:
+`manifest.json` separates official coverage from branch-only registrations:
 
-- `source_catalog` — 53 rows, one per tracked native example in the native
-  tiers. The validator checks that set exactly: 27 `eligible`, 1 `hybrid`,
-  23 `blocked`, and 2 `not_applicable`.
+- `source_catalog` — 53 official upstream source rows: 25 `eligible`, 1 `hybrid`,
+  25 `blocked`, and 2 `not_applicable`. Membership is checked against the pinned
+  official catalog, not whatever Python files happen to be in the local tiers.
+- `experimental_sources` — two branch-only source rows: exact vacuum
+  single-stage and flat675. They contribute zero official upstream coverage.
 - `jax_examples` — 41 executable records, 39 `ready` and 2 `planned`.
-  Twenty-eight own a catalog source; the other 13 combined or compatibility
-  programs own no native source.
+  Twenty-six own official sources, two own experimental sources, and the other
+  13 combined or compatibility programs own no one-to-one source.
 
 An owned record must sit at the identical tier and filename as its source, must
 be typed `one_to_one`, and cannot be a tutorial. Each mirror is owned by at
-most one source. `parity_manifest.json` holds 28 relationships: 26 `full`
-relationships with a case ID and 2 `unsupported` relationships. Execution scale
-and verified evidence are separate from source coverage.
+most one source. `parity_manifest.json` separates 26 official relationships
+(25 `full`, 1 `unsupported`) from two experimental relationships (1 `full`,
+1 `unsupported`). Execution scale and verified evidence are separate from
+source coverage.
+
+`run_parity.py --case all-applicable` selects the 25 executable official
+relationships. Experimental cases remain available by explicit case ID;
+registration and safety checks still apply, but their results do not count
+toward official coverage. flat675 still has no supported parity case.
 
 List the pairs from the manifest rather than from a hand-maintained table:
 
@@ -281,15 +332,21 @@ Parity relationships use their own vocabulary. `full` covers every declared
 scientific stage, `reduced` explicitly omits at least one scientific stage, and
 `unsupported` names a concrete blocker. `bounded`, `native_default`, and
 `not_applicable` describe scale independently of workflow coverage. Live oracle
-kinds are `native_source_owned_simsopt` for the 26 executable relationships and
-`pending_native_oracle` for the two unsupported relationships.
+kinds are `native_source_owned_simsopt` for executable relationships and
+`pending_native_oracle` for unsupported relationships. An oracle kind describes
+the comparator, not membership in official upstream; that comes from the
+pinned source catalog.
 
-## Pairs that need their own command
+## Branch-only experiments and serial adaptations
+
+These commands remain available for development. They are outside official
+upstream mirror coverage and are not evidence that an official example passes.
 
 ### Boozer/vacuum single-stage
 
-The native source and its mirror take the same arguments and can be run
-side by side:
+This pair was added on this branch; neither script exists in the pinned
+official upstream catalog. The native reference and JAX implementation take
+the same arguments and can be run side by side:
 
 ```console
 python examples/3_Advanced/single_stage_boozer_vacuum_optimization.py \
@@ -311,7 +368,7 @@ python examples/jax/run_parity.py \
 ```
 
 A `ready` executable and a `full` workflow relationship do not certify parity.
-The fresh full-default run `20260917T035857Z-6a1f0ea9` passed the source/build
+The historical full-default run `20260917T035857Z-6a1f0ea9` passed the source/build
 audit at commit `1311e9247ca882b327b046b0c5b2cb43b4404360`. All three endpoint
 objectives meet the declared `1e-7` quality bound, but 12 of 57 strict comparisons
 failed and all three lanes exhausted 1000 iterations. This establishes endpoint
@@ -329,6 +386,13 @@ The [retained numerical review package](parity/evidence/20260917T035857Z-6a1f0ea
 includes the input and endpoint values, all comparisons, statuses and original
 receipt hashes. It is a derived inspection record, not a portable authority bundle.
 
+### flat675
+
+The branch-only `3_Advanced/single_stage_flat675.py` native and JAX programs
+remain available. Their registration is experimental, and the parity harness
+still marks the relationship unsupported. Keeping the implementation does not
+establish an official upstream counterpart or a parity result.
+
 ### Serial nested-LS Boozer
 
 `2_Intermediate/boozerQA_ls.py` uses the approved CPU SciPy L-BFGS-B controller
@@ -338,7 +402,7 @@ combined tutorial, not a one-to-one replacement for the MPI example. The
 validated three-step default run establishes improving feasible steps, not
 outer convergence or a whole-workflow speedup.
 
-### VMEC hybrid single-stage
+## Official VMEC hybrid single-stage
 
 `examples/jax/3_Advanced/single_stage_optimization.py` mirrors
 `examples/3_Advanced/single_stage_optimization.py`. VMEC and its
@@ -373,25 +437,18 @@ atomically: mixed `v2/v2` and `v3/v1` combinations are rejected. Every parity
 `parity_manifest_schema_version`, and `used_legacy_manifest_adapter`, so an
 audited bundle states which contract produced it.
 
-Regenerate and inspect the migration candidate without writing either active
-manifest (`--dry-run` is required, so the generator cannot activate anything):
+The active v3/v2 documents separate `experimental_sources` and
+`experimental_relationships` from official coverage. Those arrays may be omitted
+when empty. Historical v3 documents that mixed local extensions into
+`source_catalog` must be split before use with the current validator; historical
+receipts retain their original files and must be audited at their recorded
+source revision.
 
-```console
-python examples/jax/build_manifest_v3_candidate.py \
-  --examples examples/jax/manifest.json \
-  --parity examples/jax/parity_manifest.json \
-  --inventory examples/jax/one_to_one_inventory.json \
-  --dry-run
-```
-
-The [manifest v3 migration
-note](../../docs/jax_manifest_v3_migration_candidate.md)
-records the approved candidate SHA-256 pair, the byte-identical candidate files
-checked in under `docs/`, and the rollback gate: activation must prove an
-atomic rollback of both contracts, their activation readers and tests, artifact
-observability, and compatibility behavior. That document describes the
-pre-activation candidate, and its prose row counts trail the tracked 53-row
-catalog; read the counts from the manifests, not from the migration note.
+The old v2-to-v3 candidate generator and activation gate describe the earlier
+52-source migration. Their retained inventory is not the current official
+catalog. They are historical tooling, not commands for regenerating the active
+manifests. The current index is regenerated with
+`python -m examples.jax.native_to_jax_index --write`.
 
 Compatibility tutorials carry their own removal gate. Each declares a successor
 mirror ID, a warning naming both itself and that successor, and
@@ -427,7 +484,7 @@ Then mark the manifest record `ready`; the validator rejects a ready record
 without an executable script, CPU device, correctness owner, or public JAX
 import.
 
-## Serial nested-LS coil optimization
+## Serial nested-LS adaptation (outside official one-to-one coverage)
 
 The [JAX example](2_Intermediate/boozerQA_ls.py) and its
 [native CPU reference](native_reference/boozerQA_ls.py) optimize moving coils

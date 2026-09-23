@@ -7,6 +7,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 from examples.jax.parity.cases import get_case
+from examples.jax.parity.cases.native_boozerqa import (
+    BOOZER_QA_SPEC,
+    variant_scale_configuration,
+)
+from examples.jax.parity.cases.native_single_stage_boozer_vacuum import (
+    SPEC as EXACT_SINGLE_STAGE_SPEC,
+)
 from examples.jax.parity.input_bundle import load_input_bundle
 
 
@@ -26,6 +33,29 @@ def test_boozerqa_parity_uses_bounded_host_outer_optimization() -> None:
     assert "jax.value_and_grad(objective)" not in source
 
 
+def test_boozerqa_input_declares_upstream_newton_tolerance_at_native_default(
+    tmp_path: Path,
+) -> None:
+    case = get_case("native-boozerqa")
+    bounded = case.create_input(tmp_path / "bounded", "bounded")
+    shipped = case.create_input(tmp_path / "native_default", "native_default")
+
+    assert bounded.configuration["inner_tolerance"] == 1.0e-10
+    assert shipped.configuration["inner_tolerance"] == 1.0e-13
+    assert bounded.configuration_fingerprint != shipped.configuration_fingerprint
+    assert (
+        variant_scale_configuration("bounded", BOOZER_QA_SPEC)["inner_tolerance"]
+        == 1.0e-10
+    )
+    for scale in ("bounded", "native_default"):
+        assert (
+            variant_scale_configuration(scale, EXACT_SINGLE_STAGE_SPEC)[
+                "inner_tolerance"
+            ]
+            == 1.0e-13
+        )
+
+
 def test_exact_boozerqa_workflow_matches_native_and_jax_cpu(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -42,8 +72,12 @@ def test_exact_boozerqa_workflow_matches_native_and_jax_cpu(
     monkeypatch.setenv("JAX_ENABLE_X64", "1")
     jax = case.execute("jax-cpu", bundle, arrays)
 
-    assert native.success is True
-    assert jax.success is True
+    # The bounded budget ends every stage on its iteration cap. The label says
+    # so; it is neither convergence nor failure, and it still implies the case's
+    # scientific predicate, because a false predicate is labelled ``failed``.
+    for observation in (native, jax):
+        assert observation.normalized_status == "budget_exhausted"
+        assert observation.success is False
     assert native.input_fingerprint == jax.input_fingerprint
     assert native.configuration_fingerprint == jax.configuration_fingerprint
     assert native.effective_construction_fingerprint == (

@@ -210,7 +210,19 @@ def solve_rz_surface_area_volume_sequence(
     rtol: float,
     atol: float,
 ) -> SurfaceAreaVolumeSequenceDeviceResult:
-    """Run both area-volume stages without dense free-DOF expansion arrays."""
+    """Run both area-volume stages without dense free-DOF expansion arrays.
+
+    NOT the official mirror route for ``1_Simple/surf_vol_area.py``. The
+    official example runs two ``least_squares_serial_solve`` calls (host
+    ``scipy.optimize.least_squares``, TRF, 2-point Jacobian) around a
+    save/load of the surface, and the mirror reproduces that in
+    ``examples/jax/1_Simple/surf_vol_area.py`` through
+    ``examples/jax/official_tiny_least_squares.solve_jax_residual``. This
+    device solver is a different algorithm over the same physics and has no
+    caller outside ``tests/integration/``
+    ``test_jax_rz_surface_area_volume_strict_transfer.py``, which it exists to
+    keep exercising; it may not be used to publish an official observable.
+    """
     full_dofs_device = jnp.asarray(full_dofs, dtype=jnp.float64)
     free_positions_device = jnp.asarray(free_positions, dtype=jnp.int32)
     fixed_dofs, initial_parameters = _partition_surface_dofs(

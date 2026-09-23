@@ -28,10 +28,11 @@ sampling step is the documented CPU<->JAX boundary for this wrapper.
 
 from __future__ import annotations
 
-import numpy as np
 import jax.numpy as jnp
-
+import numpy as np
 from simsopt._core.json import GSONDecoder
+from simsopt.field.magneticfield import MagneticField
+from simsopt_jax.backend import get_point_chunk_size
 from simsopt_jax.core.interpolated_field import (
     interpolated_field_B,
     interpolated_field_B_cyl_with_initial,
@@ -48,10 +49,11 @@ from simsopt_jax.core.regular_grid_interp import (
 )
 from simsopt_jax.field.common import host_cache_array as _host_cache_array
 from simsopt_jax.field.common import points_device as _points_device
-from simsopt.field.magneticfield import MagneticField
-
 
 __all__ = ["InterpolatedFieldJAX"]
+
+
+_INTERPOLATED_FIELD_SAMPLE_FALLBACK_BATCH_SIZE = 256
 
 
 def _cyl_vectors_to_cart(field_cyl: np.ndarray, points_cart: np.ndarray) -> np.ndarray:
@@ -98,26 +100,35 @@ def _build_sampler(source_field, value_kind: str):
     Lagrange DOFs, sets the source field's points via
     ``set_points_cyl``, fetches the corresponding cylindrical field
     tensor, and returns it as a flat ``(N*3,)`` row-major buffer matching
-    the rectangular-kernel callback contract.
+    the rectangular-kernel callback contract. Consecutive point batches
+    keep source-field evaluation bounded while preserving callback order.
     """
 
     def _sample(rs, phis, zs):
-        cyl_points = np.ascontiguousarray(
-            np.stack([rs, phis, zs], axis=1), dtype=np.float64
-        )
         old_points = source_field.get_points_cart()
-        source_field.set_points_cyl(cyl_points)
-        if value_kind == "B":
-            field_cyl = _host_cache_array(source_field.B_cyl(), dtype=np.float64)
-        else:
-            field_cyl = _host_cache_array(
-                source_field.GradAbsB_cyl(),
+        batch_size = int(get_point_chunk_size())
+        if batch_size <= 0:
+            batch_size = _INTERPOLATED_FIELD_SAMPLE_FALLBACK_BATCH_SIZE
+        sampled = np.empty((rs.shape[0], 3), dtype=np.float64)
+        for start in range(0, rs.shape[0], batch_size):
+            stop = min(start + batch_size, rs.shape[0])
+            cyl_points = np.ascontiguousarray(
+                np.stack([rs[start:stop], phis[start:stop], zs[start:stop]], axis=1),
                 dtype=np.float64,
             )
+            source_field.set_points_cyl(cyl_points)
+            if value_kind == "B":
+                field_cyl = _host_cache_array(source_field.B_cyl(), dtype=np.float64)
+            else:
+                field_cyl = _host_cache_array(
+                    source_field.GradAbsB_cyl(),
+                    dtype=np.float64,
+                )
+            sampled[start:stop] = field_cyl.reshape(-1, 3)
         # Restore the source field's points so this construction step
         # does not leak state into the caller's cache.
         source_field.set_points_cart(np.ascontiguousarray(old_points))
-        return field_cyl.reshape(-1)
+        return sampled.reshape(-1)
 
     return _sample
 

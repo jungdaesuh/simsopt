@@ -20,7 +20,7 @@ from simsopt.geo.curve import Curve
 from simsopt_jax.examples import ExampleResult, ExecutionScale, run_example
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.field.interpolated import InterpolatedFieldJAX
-from simsopt_jax_adapters.field.tracing import compute_fieldlines
+from simsopt_jax_adapters.field.tracing import compute_fieldlines_with_status
 
 EXAMPLE_ID = "native-tracing-fieldlines-ncsx"
 NATIVE_TMAX = 40_000
@@ -93,7 +93,7 @@ def solve(
     )
     vertical_initial = np.full(nfieldlines, axis_points[0, 2], dtype=np.float64)
     phis = tuple(index * 0.5 * np.pi / nfp for index in range(4))
-    trajectories, phi_hits = compute_fieldlines(
+    trajectories, phi_hits, core_statuses = compute_fieldlines_with_status(
         interpolated,
         radial_initial,
         vertical_initial,
@@ -106,14 +106,7 @@ def solve(
         (radial_initial, np.zeros(nfieldlines), vertical_initial)
     )
     final_states = np.stack([trajectory[-1, 1:4] for trajectory in trajectories])
-    final_times = np.asarray(
-        [trajectory[-1, 0] for trajectory in trajectories],
-        dtype=np.float64,
-    )
-    statuses = tuple(
-        0 if np.isclose(time, max_steps, rtol=0.0, atol=1.0e-10) else -1
-        for time in final_times
-    )
+    statuses = tuple(int(status) for status in core_statuses)
     scientific_success = bool(
         len(trajectories) == nfieldlines
         and np.all(np.isfinite(final_states))

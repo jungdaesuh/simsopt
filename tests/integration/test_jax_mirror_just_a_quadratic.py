@@ -14,6 +14,12 @@ from simsopt_jax_adapters.isolated_kernel import pythonpath_with_loaded_kernel
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = REPO_ROOT / "examples" / "jax" / "1_Simple" / "just_a_quadratic.py"
+# A/reference-simple/runs/native-just-a-quadratic/captured-natural-omp1/capture.json
+# measured on an independent official build of upstream 9e027eac3.
+OFFICIAL_SOLUTION = (1.0, 1.9999999992096138, 2.9999999998773283)
+OFFICIAL_SOLVER_STATUS = 1
+OFFICIAL_FUNCTION_EVALUATIONS = 4
+OFFICIAL_JACOBIAN_EVALUATIONS = 4
 
 
 @pytest.mark.parametrize("intent", ("fast", "parity"))
@@ -57,12 +63,19 @@ def test_just_a_quadratic_matches_native_scientific_contract(
         atol=1.0e-14,
     )
     assert observables["initial_objective"] == pytest.approx(36.0)
+    # The official run stops on `gtol` 7.90e-10 away from the exact minimizer
+    # (1, 2, 3), so an endpoint accuracy gate of our own would reject upstream
+    # itself. The mirror is asserted against the official end point instead; the
+    # distance to the exact minimizer stays a published diagnostic.
     np.testing.assert_allclose(
         observables["solution"],
-        (1.0, 2.0, 3.0),
-        rtol=1.0e-10,
-        atol=1.0e-10,
+        OFFICIAL_SOLUTION,
+        rtol=1.0e-12,
+        atol=0.0,
     )
+    assert observables["solver_status"] == OFFICIAL_SOLVER_STATUS
+    assert observables["function_evaluations"] == OFFICIAL_FUNCTION_EVALUATIONS
+    assert observables["jacobian_evaluations"] == OFFICIAL_JACOBIAN_EVALUATIONS
     assert observables["objective"] <= 1.0e-16
     assert observables["residual_norm"] <= 1.0e-8
     assert observables["gradient_inf_norm"] <= 1.0e-8

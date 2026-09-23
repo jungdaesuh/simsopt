@@ -29,14 +29,15 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
+import simsopt_jax.core.interpolated_field as interpolated_field_core
+import simsopt_jax_adapters.field.interpolated as interpolated_field_adapter
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
-from simsopt_jax_adapters.field.interpolated import InterpolatedFieldJAX
+from simsopt.field.coil import Coil, Current
 from simsopt.field.magneticfieldclasses import (
     InterpolatedField,
     ToroidalField,
 )
-import simsopt_jax.core.interpolated_field as interpolated_field_core
+from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt_jax.core.interpolated_field import (
     interpolated_field_B,
     interpolated_field_B_cyl_with_initial,
@@ -48,7 +49,8 @@ from simsopt_jax.core.regular_grid_interp import (
     UniformInterpolationRule,
     build_regular_grid_interpolant_3d,
 )
-
+from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
+from simsopt_jax_adapters.field.interpolated import InterpolatedFieldJAX
 
 _DIRECT_KERNEL = parity_ladder_tolerances("direct_kernel")
 _RTOL = _DIRECT_KERNEL["rtol"]
@@ -352,6 +354,214 @@ class TestInterpolatedFieldJAXParity:
             rtol=_RTOL,
             atol=_ATOL,
         )
+
+
+class _RecordingToroidalField(ToroidalField):
+    def __init__(self):
+        super().__init__(R0=1.2, B0=0.9)
+        self.point_batch_sizes = []
+
+    def set_points_cyl(self, points_cyl):
+        self.point_batch_sizes.append(int(np.asarray(points_cyl).shape[0]))
+        return super().set_points_cyl(points_cyl)
+
+
+def _build_sampling_adapter(source, monkeypatch, batch_size):
+    monkeypatch.setattr(
+        interpolated_field_adapter,
+        "get_point_chunk_size",
+        lambda: batch_size,
+    )
+    return InterpolatedFieldJAX(
+        source,
+        degree=2,
+        rrange=(1.0, 1.5, 4),
+        phirange=(0.0, 2.0 * np.pi, 5),
+        zrange=(-0.3, 0.3, 3),
+        extrapolate=True,
+        nfp=1,
+        stellsym=False,
+    )
+
+
+def test_sampler_forced_batches_preserve_specs_outputs_and_source_points(monkeypatch):
+    initial_points = np.asarray(
+        [[1.1, 0.0, 0.1], [1.2, 0.1, -0.1]],
+        dtype=np.float64,
+    )
+    source_chunked = _RecordingToroidalField()
+    source_unchunked = _RecordingToroidalField()
+    source_fallback = _RecordingToroidalField()
+    for source in (source_chunked, source_unchunked, source_fallback):
+        source.set_points_cart(initial_points)
+
+    field_chunked = _build_sampling_adapter(source_chunked, monkeypatch, 3)
+    field_unchunked = _build_sampling_adapter(source_unchunked, monkeypatch, 10_000)
+    field_fallback = _build_sampling_adapter(source_fallback, monkeypatch, 0)
+
+    assert len(source_chunked.point_batch_sizes) > 2
+    assert max(source_chunked.point_batch_sizes) <= 3
+    assert max(source_unchunked.point_batch_sizes) <= 10_000
+    assert len(source_fallback.point_batch_sizes) > 2
+    assert max(source_fallback.point_batch_sizes) <= 256
+    for source in (source_chunked, source_unchunked, source_fallback):
+        np.testing.assert_array_equal(source.get_points_cart(), initial_points)
+
+    for component in ("B_spec", "GradAbsB_spec"):
+        chunked_spec = getattr(field_chunked._spec, component)
+        unchunked_spec = getattr(field_unchunked._spec, component)
+        fallback_spec = getattr(field_fallback._spec, component)
+        np.testing.assert_array_equal(
+            chunked_spec.cell_to_row,
+            unchunked_spec.cell_to_row,
+        )
+        np.testing.assert_array_equal(
+            chunked_spec.cell_table,
+            unchunked_spec.cell_table,
+        )
+        np.testing.assert_array_equal(
+            unchunked_spec.cell_table,
+            fallback_spec.cell_table,
+        )
+
+    query_points = np.asarray(
+        [
+            [1.1 * np.cos(0.2), 1.1 * np.sin(0.2), 0.1],
+            [1.35 * np.cos(5.5), 1.35 * np.sin(5.5), -0.1],
+        ],
+        dtype=np.float64,
+    )
+    for field in (field_chunked, field_unchunked, field_fallback):
+        field.set_points_cart(query_points)
+    np.testing.assert_array_equal(
+        np.asarray(field_chunked.B()),
+        np.asarray(field_unchunked.B()),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(field_chunked.GradAbsB()),
+        np.asarray(field_unchunked.GradAbsB()),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(field_unchunked.B()),
+        np.asarray(field_fallback.B()),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(field_unchunked.GradAbsB()),
+        np.asarray(field_fallback.GradAbsB()),
+    )
+
+    reference_B_at, reference_grad_abs_at = field_unchunked.jax_B_GradAbsB_at(
+        jnp.asarray(query_points[0])
+    )
+    for field in (field_chunked, field_unchunked, field_fallback):
+        B_at, grad_abs_at = field.jax_B_GradAbsB_at(jnp.asarray(query_points[0]))
+        np.testing.assert_array_equal(
+            np.asarray(B_at),
+            np.asarray(reference_B_at),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(grad_abs_at),
+            np.asarray(reference_grad_abs_at),
+        )
+        np.testing.assert_allclose(
+            np.asarray(grad_abs_at),
+            np.asarray(field.GradAbsB())[0],
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+
+
+def _small_biot_savart_jax_source():
+    curve = CurveXYZFourier(quadpoints=16, order=1)
+    curve.x = np.asarray(
+        [0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        dtype=np.float64,
+    )
+    return BiotSavartJAX([Coil(curve, Current(1.0e6))])
+
+
+def test_sampler_real_biotsavart_source_is_strict_guard_clean(monkeypatch):
+    initial_points = np.asarray(
+        [[1.1, 0.0, 0.1], [1.2, 0.1, -0.1]],
+        dtype=np.float64,
+    )
+    source_chunked = _small_biot_savart_jax_source()
+    source_unchunked = _small_biot_savart_jax_source()
+    for source in (source_chunked, source_unchunked):
+        source.set_points_cart(initial_points)
+
+    field_chunked = _build_sampling_adapter(source_chunked, monkeypatch, 64)
+    field_unchunked = _build_sampling_adapter(source_unchunked, monkeypatch, 10_000)
+
+    for source in (source_chunked, source_unchunked):
+        np.testing.assert_array_equal(source.get_points_cart(), initial_points)
+
+    for component in ("B_spec", "GradAbsB_spec"):
+        chunked_spec = getattr(field_chunked._spec, component)
+        unchunked_spec = getattr(field_unchunked._spec, component)
+        np.testing.assert_array_equal(
+            chunked_spec.cell_to_row,
+            unchunked_spec.cell_to_row,
+        )
+        np.testing.assert_allclose(
+            chunked_spec.cell_table,
+            unchunked_spec.cell_table,
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+
+    query_points = np.asarray(
+        [
+            [1.1 * np.cos(0.2), 1.1 * np.sin(0.2), 0.1],
+            [1.35 * np.cos(5.5), 1.35 * np.sin(5.5), -0.1],
+        ],
+        dtype=np.float64,
+    )
+    for field in (field_chunked, field_unchunked):
+        field.set_points_cart(query_points)
+    np.testing.assert_allclose(
+        np.asarray(field_chunked.B()),
+        np.asarray(field_unchunked.B()),
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+    np.testing.assert_allclose(
+        np.asarray(field_chunked.GradAbsB()),
+        np.asarray(field_unchunked.GradAbsB()),
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+
+    query_device = jax.device_put(query_points)
+    query_device.block_until_ready()
+    for source in (source_chunked, source_unchunked):
+        source.set_points_cart(query_device)
+        source.B_cyl().block_until_ready()
+        source.GradAbsB_cyl().block_until_ready()
+    with jax.transfer_guard("disallow"):
+        B_chunked_device = source_chunked.B_cyl()
+        GradAbsB_chunked_device = source_chunked.GradAbsB_cyl()
+        B_unchunked_device = source_unchunked.B_cyl()
+        GradAbsB_unchunked_device = source_unchunked.GradAbsB_cyl()
+        B_chunked_device.block_until_ready()
+        GradAbsB_chunked_device.block_until_ready()
+        B_unchunked_device.block_until_ready()
+        GradAbsB_unchunked_device.block_until_ready()
+    B_chunked = np.asarray(jax.device_get(B_chunked_device), dtype=np.float64)
+    GradAbsB_chunked = np.asarray(
+        jax.device_get(GradAbsB_chunked_device), dtype=np.float64
+    )
+    B_unchunked = np.asarray(jax.device_get(B_unchunked_device), dtype=np.float64)
+    GradAbsB_unchunked = np.asarray(
+        jax.device_get(GradAbsB_unchunked_device), dtype=np.float64
+    )
+    np.testing.assert_allclose(B_chunked, B_unchunked, rtol=_RTOL, atol=_ATOL)
+    np.testing.assert_allclose(
+        GradAbsB_chunked,
+        GradAbsB_unchunked,
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
 
 
 # ── Skip mask ────────────────────────────────────────────────────────

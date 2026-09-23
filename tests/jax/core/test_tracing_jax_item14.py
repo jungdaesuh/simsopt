@@ -1393,7 +1393,7 @@ def test_bracket_root_finds_zero_crossing_within_tolerance(event_time_lane):
         fl,
         fr,
         max_iters=60,
-        atol=jnp.asarray(0.0, dtype=jnp.float64),
+        eps=jnp.asarray(0.0, dtype=jnp.float64),
     )
 
     assert bool(bracketed), "bracket_root_jax failed to recognise the sign change"
@@ -1424,7 +1424,7 @@ def test_bracket_root_uses_false_position_candidate_for_linear_residual():
         f(t_left),
         f(t_right),
         max_iters=1,
-        atol=jnp.asarray(0.0, dtype=jnp.float64),
+        eps=jnp.asarray(0.0, dtype=jnp.float64),
     )
 
     assert bool(bracketed)
@@ -1448,7 +1448,7 @@ def test_bracket_root_uses_false_position_for_tiny_endpoint_residuals():
         jnp.asarray(-1.0e-301, dtype=jnp.float64),
         jnp.asarray(8.0e-301, dtype=jnp.float64),
         max_iters=1,
-        atol=jnp.asarray(0.0, dtype=jnp.float64),
+        eps=jnp.asarray(0.0, dtype=jnp.float64),
     )
 
     assert bool(bracketed)
@@ -1492,7 +1492,7 @@ def test_bracket_root_sorts_descending_input_bracket():
         f(t_left),
         f(t_right),
         max_iters=60,
-        atol=jnp.asarray(0.0, dtype=jnp.float64),
+        eps=jnp.asarray(0.0, dtype=jnp.float64),
     )
 
     assert bool(bracketed)
@@ -1524,7 +1524,7 @@ def test_bracket_root_returns_false_when_no_sign_change(event_time_lane):
         fl,
         fr,
         max_iters=10,
-        atol=jnp.asarray(0.0, dtype=jnp.float64),
+        eps=jnp.asarray(0.0, dtype=jnp.float64),
     )
 
     assert not bool(bracketed), (
@@ -1548,7 +1548,7 @@ def test_bracket_root_keeps_equal_residual_no_bracket_result_finite():
         one,
         one,
         max_iters=10,
-        atol=zero,
+        eps=zero,
     )
 
     assert not bool(bracketed)

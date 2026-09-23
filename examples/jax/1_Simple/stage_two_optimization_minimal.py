@@ -3,12 +3,22 @@
 Native SIMSOPT constructs the Landreman-Paul QA surface, four base Fourier
 coils, currents, and stellarator symmetry ownership. ``BiotSavartJAX`` freezes
 that graph once. Quadratic flux, the one-sided total-length penalty, Taylor
-test, diagnostics, gradients, and optimization then execute on the selected
-JAX device. The accepted DOFs are published back only for reporting.
+test, diagnostics and gradients then execute on the selected JAX device. The
+accepted DOFs are published back only for reporting.
+
+Outer optimizer.  By default this mirror solves with the provider the official
+script calls, ``scipy.optimize.minimize(..., method="L-BFGS-B")``, driven over
+the JAX objective with the official script's own options (maxiter 300,
+maxcor 300, tol 1e-15, SciPy's own evaluation and line-search limits).  Pass
+``--device-solver`` to solve with the in-tree device-resident L-BFGS-B
+instead: that is a performance mode, not the mirror, and it reaches a
+different point of the same objective.
 """
 
 from __future__ import annotations
 
+import argparse
+from functools import partial
 from pathlib import Path
 
 import jax
@@ -21,13 +31,19 @@ from simsopt_jax.examples import (
     run_example,
     solve_minimal_stage_two,
 )
+from simsopt_jax.examples.stage_two_minimal import (
+    MINIMAL_STAGE_TWO_DEVICE_DRIVER,
+    MINIMAL_STAGE_TWO_NATIVE_ITERATIONS,
+    MINIMAL_STAGE_TWO_OFFICIAL_DRIVER,
+    MINIMAL_STAGE_TWO_TOLERANCE,
+)
+from simsopt_jax.solve.driver import Driver
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
 
 EXAMPLE_ID = "native-stage-two-optimization-minimal"
 LENGTH_WEIGHT = 1.0
 LENGTH_TARGET = 18.0
-NATIVE_ITERATIONS = 300
 TEST_DATA = Path(__file__).resolve().parents[3] / "tests" / "test_files"
 
 
@@ -73,7 +89,11 @@ def _build_problem(
 
 
 def solve(
-    output_directory: Path, max_steps: int, scale: ExecutionScale
+    output_directory: Path,
+    max_steps: int,
+    scale: ExecutionScale,
+    *,
+    driver: Driver = MINIMAL_STAGE_TWO_OFFICIAL_DRIVER,
 ) -> ExampleResult:
     field, flux, surface_gamma, surface_normal = _build_problem(scale)
     initial_device = jax.device_put(np.asarray(field.x, dtype=np.float64))
@@ -90,9 +110,10 @@ def solve(
         num_base_curves=4,
         length_weight=LENGTH_WEIGHT,
         length_target=LENGTH_TARGET,
+        driver=driver,
         max_steps=max_steps,
-        rtol=1.0e-15,
-        atol=1.0e-15,
+        rtol=MINIMAL_STAGE_TWO_TOLERANCE,
+        atol=MINIMAL_STAGE_TWO_TOLERANCE,
     )
     initial, final, taylor_errors = jax.device_get(
         (
@@ -133,19 +154,40 @@ def solve(
             "taylor_errors": tuple(float(value) for value in taylor_errors),
             "solver_success": device_result.optimizer.success,
             "solver_driver": device_result.optimizer.driver.value,
+            # The optimizer's own verdict, published beside the scientific
+            # gate so the two solver modes are comparable on what each
+            # provider actually did.
+            "solver_status": int(device_result.optimizer.status),
+            "solver_iterations": int(device_result.optimizer.nit),
+            "solver_evaluations": int(device_result.optimizer.nfev),
         },
         status="ok" if scientific_success else "failed",
     )
 
 
+def _selected_driver(arguments: list[str] | None) -> tuple[Driver, list[str]]:
+    """Read the one option this example adds to the shared example CLI.
+
+    ``allow_abbrev=False`` is required: an abbreviating pre-parser would
+    capture prefixes of the shared CLI's own options.
+    """
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--device-solver", action="store_true")
+    selected, remaining = parser.parse_known_args(arguments)
+    if selected.device_solver:
+        return MINIMAL_STAGE_TWO_DEVICE_DRIVER, remaining
+    return MINIMAL_STAGE_TWO_OFFICIAL_DRIVER, remaining
+
+
 def main(arguments: list[str] | None = None) -> int:
+    driver, remaining = _selected_driver(arguments)
     return run_example(
-        arguments,
+        remaining,
         description=__doc__,
         temporary_prefix="simsopt-jax-stage-two-minimal-",
         bounded_steps=80,
-        native_default_steps=NATIVE_ITERATIONS,
-        solve=solve,
+        native_default_steps=MINIMAL_STAGE_TWO_NATIVE_ITERATIONS,
+        solve=partial(solve, driver=driver),
     )
 
 

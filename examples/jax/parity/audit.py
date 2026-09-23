@@ -149,7 +149,7 @@ def audit_published_run(
     parity_manifest = contract_pair.parity
     relationships_by_case = {
         relationship.case_id: relationship
-        for relationship in parity_manifest.relationships
+        for relationship in parity_manifest.all_relationships
         if relationship.case_id is not None
     }
     lanes_value = summary.get("lanes")
@@ -295,6 +295,10 @@ def audit_published_run(
         relationship = relationships_by_case.get(case_id)
         if relationship is None:
             raise ValueError(f"summary names unknown executable case: {case_id}")
+        relationship = relationship.resolve_scale(scale_value)
+        if case.get("cost_tier") != relationship.cost_tier:
+            raise ValueError(f"summary cost tier does not match contract: {case_id}")
+        case_definition = get_case(case_id)
         recomputed = arbitrate(
             relationship.comparison_routes,
             observations,
@@ -306,11 +310,26 @@ def audit_published_run(
                 relationship.jax_example_id
             ].outer_optimizer_policy,
             quality_band=(
-                get_case(case_id).native_default_quality_band
+                case_definition.native_default_quality_band
                 if scale_value == "native_default"
                 else None
             ),
+            work_budget_contract=case_definition.work_budget_contract,
+            admitted_terminal_outcomes=(
+                case_definition.native_default_admitted_terminal_outcomes
+                if scale_value == "native_default"
+                else ()
+            ),
         )
+        if recomputed.work_budget_admitted:
+            if case.get("terminal_contract") != "work-budget":
+                raise ValueError(
+                    f"stored work-budget admission differs from recomputation: {case_id}"
+                )
+        elif "terminal_contract" in case:
+            raise ValueError(
+                f"stored work-budget admission differs from recomputation: {case_id}"
+            )
         if recomputed.verdict != case_verdict:
             raise ValueError(
                 f"recomputed comparison verdict is not {case_verdict}: {case_id}"
@@ -328,6 +347,15 @@ def audit_published_run(
         if case.get("quality_band", []) != recomputed_band_payload:
             raise ValueError(
                 f"stored quality band differs from recomputation: {case_id}"
+            )
+        recomputed_admitted_payload = [
+            {"lane": lane, "raw_status": raw_status}
+            for lane, raw_status in recomputed.admitted_terminal_lanes
+        ]
+        if case.get("admitted_terminal_lanes", []) != recomputed_admitted_payload:
+            raise ValueError(
+                f"stored admitted terminal outcome differs from recomputation: "
+                f"{case_id}"
             )
         recomputed_payload = [
             {

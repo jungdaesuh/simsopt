@@ -1,4 +1,27 @@
-"""Shared exact native/JAX GSCO parity execution."""
+"""Shared exact native/JAX GSCO parity execution.
+
+Undo test: upstream's line on both lanes
+---------------------------------------
+Until 2026-09-21 both lanes of every GSCO case ran a solver whose undo test
+differed from the authority (branch commit ``c20277ccd``, "fix: make GSCO undo
+detection symmetric", ``((opt_ind + nLoops) % twoNLoops) == opt_ind_prev``).
+Official ``9e027eac3`` writes ``src/simsoptpp/wireframe_optimization.cpp:271`` as
+
+    else if (i > 0 && (opt_ind + nLoops % (twoNLoops)) == opt_ind_prev)
+
+where C's precedence makes ``nLoops % twoNLoops == nLoops``, so upstream's test
+only fires when the previous accepted loop was the negative-sign half and the
+current candidate is its positive half. On the user's decision C2 the branch
+line was reverted to upstream's spelling in the C++ and the JAX kernel
+(``simsopt_jax.core.wireframe_workflow._gsco_opposite_candidate_index``) and the
+terminal-status helper follow the same one-directional test, so the relationship's
+``oracle_kind: native_source_owned_simsopt`` (the native lane is the oracle for
+the JAX lane) again rests on a native binary that matches upstream, and the
+official fixture's end state (``examples/jax/parity/official_reference/9e027eac3/``)
+is reproduced by the native lane (official comparator: no failing check).
+``tests/jax/examples/test_gsco_scoped_deviation.py`` fails if the C++ or the
+JAX kernel goes back to the symmetric form, or if this note stops saying so.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +36,7 @@ from examples.jax.parity.cases.native_wireframe_rcls_basic import (
 )
 from examples.jax.parity.input_bundle import InputBundle, create_input_bundle
 from examples.jax.parity.runtime import ParityLane
+from simsopt_jax.examples.solver_terminal_status import gsco_terminal_label
 from simsopt.geo import SurfaceRZFourier, ToroidalWireframe
 from simsopt_jax.examples import ExecutionScale
 
@@ -192,12 +216,26 @@ def _observation(
     driver: str,
     values: dict[str, np.ndarray],
 ) -> LaneObservation:
-    success = bool(
-        np.all(np.isfinite(values["final:currents"]))
-        and values["final:normal_objective"] < values["initial:normal_objective"]
-        and bool(values["final:constraints_satisfied"])
-    )
+    # GSCO stops for one of three reasons: no eligible loop, the best loop
+    # would undo the previous one, or the last allowed iteration. The first two
+    # are the solver deciding it is done; only the third is a budget stop. The
+    # label mirrors the C++ the lanes really run -- this branch's symmetric undo
+    # test, whose scope is recorded in this module's docstring -- and it is
+    # derived from the returned history in every lane, never from a scientific
+    # predicate: "final objective < initial objective" stays a published
+    # diagnostic (``initial:normal_objective`` vs ``final:normal_objective``).
+    # ``final:iterations`` remains the number of accepted updates.
     iterations = int(values["final:iterations"])
+    label = gsco_terminal_label(
+        accepted_updates=iterations,
+        max_iterations=_configuration_int(bundle, "max_iterations"),
+        loop_history=values["history:loops"],
+        current_history=values["history:currents"],
+        endpoint_usable=bool(
+            np.all(np.isfinite(values["final:currents"]))
+            and bool(values["final:constraints_satisfied"])
+        ),
+    )
     return LaneObservation(
         lane=lane,
         backend_mode=backend_mode,
@@ -208,9 +246,9 @@ def _observation(
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=_effective_fingerprint(bundle, arrays),
         driver=driver,
-        normalized_status="converged" if success else "failed",
-        raw_status="fixed_iteration_gsco_complete",
-        success=success,
+        normalized_status=label.normalized_status,
+        raw_status=label.raw_status,
+        success=label.success,
         nit=iterations,
         nfev=iterations,
         njev=None,

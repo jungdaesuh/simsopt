@@ -1,8 +1,8 @@
 """JAX port of ``legacy native extension/tracing.cpp`` (Tier P1 item 14).
 
 This module implements an in-repo JAX Dormand-Prince RK4(5) integrator
-with a PI step controller and a bracketed Illinois false-position event
-localizer.
+with boost.odeint's step-size controller and a bracketed Illinois
+false-position event localizer over the DOPRI5 dense-output polynomial.
 The implemented scope covers:
 
 - the fieldline RHS ``dx/dt = B(x)`` used in the upstream C++
@@ -31,12 +31,22 @@ Carve-outs (NOT implemented here):
   exposed by the upstream public surface today and not required by
   the active JAX-native consumers.
 
-The bracketed event localizer uses an Illinois false-position update
-with a fixed iteration ceiling (``max_root_iters``). This keeps the
-same static ``jax.lax.while_loop`` carry shape required by JAX while
-using one RHS-style event residual evaluation per active iteration and
-avoiding the linear convergence of bisection. The accepted accuracy
-contract is the ``event_time_tracing`` lane in
+The bracketed event localizer mirrors what upstream localizes and how.
+``legacy native extension/tracing.cpp`` root-finds an angle-plane crossing only
+when the plane was actually crossed, brackets it in absolute time over
+the accepted step, and evaluates the residual on the DOPRI5 *dense
+output* polynomial (``dense.calc_state``), which costs no extra RHS
+evaluation. :func:`_dense_output_state` is that polynomial, ported term
+for term from ``boost/numeric/odeint/stepper/runge_kutta_dopri5.hpp``
+(``calc_state``). The bracketing iteration itself is an Illinois
+false-position update rather than upstream's ``toms748_solve``, whose
+branchy interpolation ladder has no fixed-shape JAX form; the settings
+that decide *where* the root lands are upstream's, namely the residual,
+the bracket, ``rootmaxit = 200`` (``max_root_iters``) and the
+``boost::math::tools::eps_tolerance`` termination
+``|a - b| <= eps * min(|a|, |b|)`` (see :data:`_ROOT_BRACKET_EPS` for which
+``eps`` and why). The accepted accuracy contract is the
+``event_time_tracing`` lane in
 ``simsopt_jax.parity_tolerances.PARITY_LADDER_TOLERANCES``.
 
 Architecture
@@ -58,10 +68,43 @@ Architecture
   bracketed root and a bool indicating whether the bracket actually
   contained a sign change.
 
-The PI step controller, error norm, and step-size update follow the
-Hairer reference driver used in
-``simsopt_jax.core.magnetic_axis_helpers`` so the two integrators are
-consistent and easy to validate against the same SciPy oracle.
+The step controller, error norm and step-size update are boost.odeint's
+``controlled_runge_kutta`` with ``default_error_checker`` and
+``default_step_adjuster``, which is what
+``make_dense_output(tol, tol, dtmax, runge_kutta_dopri5<State>())``
+instantiates in ``legacy native extension/tracing.cpp``. They are NOT shared with
+``simsopt_jax.core.magnetic_axis_helpers``, which deliberately keeps
+Hairer's RMS controller: the axis helper integrates a field line
+together with its tangent map to find a fixed point of the return map
+and mirrors no upstream boost driver, so aligning it with this module
+would move its accepted steps for no upstream reason. That module says
+the same thing at its own controller constants; the two policies are
+divergent on purpose and neither is a copy of the other.
+
+Terminal statuses reported by every driver here:
+
+- ``0`` — the lane reached ``tmax``;
+- ``-1 - i`` — ``stopping_criteria[i]`` fired;
+- ``1`` — the call's ``max_steps`` ran out with neither of the above
+  (for the chunked Cartesian routes this is "continue in the next
+  chunk", not a failure);
+- ``2`` (:data:`TRACING_STATUS_STEP_CONTROL_FAILED`) — the step
+  controller stopped making progress (see
+  :data:`_MAX_CONSECUTIVE_NO_PROGRESS_TRIALS`), or a trial upstream would
+  have accepted landed on a NON-FINITE state, which this port refuses to
+  take (:func:`_dopri5_adaptive_step`), or an accepted step crossed an angle
+  plane while its own dense output — the continuous extension upstream
+  localizes the crossing on — was non-finite, so the row upstream would push
+  cannot be published (:func:`_scan_angle_plane_events`). So ``0`` and
+  ``-1 - i`` imply a finite final state, and no trajectory row, event row or
+  final state is ever taken from a non-finite one;
+- ``-2`` (:data:`TRACING_STATUS_BOOZER_AXIS`) — BRANCH-ADDED and emitted by
+  the two Boozer drivers only: the lane left the magnetic axis (``s <= 0``),
+  where the Boozer right-hand side is undefined. Upstream has no such status.
+  It COLLIDES with the ``-1 - i`` rule at ``i = 1``, and the axis test wins
+  (``status = where(axis_invalid, -2, status_event)``), so on a Boozer route
+  ``-2`` means "left the axis, or ``stopping_criteria[1]`` fired". Consumers
+  that decode negative statuses must special-case it for those two routes.
 """
 
 from __future__ import annotations
@@ -185,6 +228,9 @@ from .interpolated_boozer_field import (
     _INTERP_EVALUATORS,
     InterpolatedBoozerFieldFrozenState,
 )
+from .interpolated_field import (
+    InterpolatedFieldCylCache,
+)
 from .sharding import (
     maybe_shard_trajectory_batch_inputs,
     replicate_tree_on_mesh,
@@ -208,6 +254,9 @@ __all__ = [
     "MinRStoppingCriterion",
     "MinToroidalFluxStoppingCriterion",
     "MinZStoppingCriterion",
+    "TRACING_STATUS_BOOZER_AXIS",
+    "TRACING_STATUS_INCOMPLETE",
+    "TRACING_STATUS_STEP_CONTROL_FAILED",
     "ToroidalTransitStoppingCriterion",
     "TracingStateInput",
     "bracket_root_jax",
@@ -230,16 +279,82 @@ __all__ = [
 ]
 
 
-# Standard PI(0.2) controller constants. ``_DOPRI5_EXP = 1/order`` for the
-# adaptive RK4(5) embedded pair; the safety / clip factors match Hairer's
-# canonical driver and the values reused in ``magnetic_axis_helpers``.
-_DOPRI5_EXP = 0.2
+# Step-size control constants of boost.odeint's ``controlled_runge_kutta`` with
+# ``default_error_checker`` / ``default_step_adjuster``, which is what
+# ``make_dense_output(tol, tol, dtmax, runge_kutta_dopri5)`` instantiates in the
+# upstream ``legacy native extension/tracing.cpp``. ``runge_kutta_dopri5``
+# declares ``stepper_order() == 5`` and ``error_order() == 4``, so the rejected
+# branch uses ``1/(error_order - 1)`` and the accepted branch ``1/stepper_order``.
+# The accepted branch only grows the step when the error is below
+# ``_INCREASE_ERROR_THRESHOLD``, and ``_MIN_INCREASE_ERROR = 5**-stepper_order``
+# caps the growth factor at ``_SAFETY * 5``.
 _SAFETY = 0.9
+_DECREASE_EXP = 1.0 / 3.0
+_INCREASE_EXP = 0.2
 _MIN_FACTOR = 0.2
-_MAX_FACTOR = 5.0
+_INCREASE_ERROR_THRESHOLD = 0.5
+_MIN_INCREASE_ERROR = 5.0**-5
+# Each branch's error is clipped to the interval on which that branch is the one
+# boost selects, so neither power ever sees 0 or inf. Both bounds are exact, not
+# tolerances: the decrease branch runs only for ``error > 1`` and saturates at
+# ``_MIN_FACTOR`` once ``0.9 * error**(-1/3) <= 0.2``, i.e. at
+# ``(0.9 / 0.2)**3``; the increase branch runs only for
+# ``error < _INCREASE_ERROR_THRESHOLD``.
+_MAX_DECREASE_ERROR = (_SAFETY / _MIN_FACTOR) ** 3
+
+# Terminal statuses. ``0`` = reached ``tmax``; ``-1 - i`` = criterion ``i``
+# fired; ``1`` = this call's ``max_steps`` ran out; ``2`` = the step controller
+# stopped making progress; ``-2`` = a Boozer lane left the axis (branch-added,
+# and colliding with ``-1 - i`` at ``i = 1``). The module docstring states the
+# whole vocabulary, including that collision.
+TRACING_STATUS_INCOMPLETE = 1
+TRACING_STATUS_STEP_CONTROL_FAILED = 2
+
+# boost.odeint bounds one accepted step to 500 trials:
+# ``dense_output_runge_kutta::do_step`` builds a fresh ``failed_step_checker``
+# per accepted step and calls it after EVERY ``try_step``, so the 501st trial
+# throws whatever its outcome
+# (``boost/numeric/odeint/stepper/dense_output_runge_kutta.hpp`` ``do_step``;
+# ``boost/numeric/odeint/integrate/max_step_checker.hpp`` ``failed_step_checker``,
+# default ``max_steps = 500``). The JAX loop counts trials that do not ADVANCE
+# ``t`` rather than only rejected ones: a rejected trial never advances ``t``, so
+# the port's rule is upstream's, STRICTER BY ONE TRIAL -- boost runs a 501st
+# ``try_step`` and throws in the ``fail_checker()`` after it, while the lane here
+# stops at the 500th; the outcome of that extra trial is discarded either way, so
+# no result moves. The superset also catches the one
+# way a finite right-hand side can spin forever -- once ``h`` underflows to
+# ``0.0`` the embedded error is ``0`` and the trial is *accepted* while ``t``
+# stands still. boost names that failure too: ``max_step_checker`` raises
+# ``no_progress_error`` (same header). Upstream throws; a JAX lane cannot, so it
+# stops with ``TRACING_STATUS_STEP_CONTROL_FAILED``.
+_MAX_CONSECUTIVE_NO_PROGRESS_TRIALS = 500
+
+# Bracket tolerance of the event localizer, in
+# ``boost::math::tools::eps_tolerance``'s sense: stop once
+# ``|a - b| <= eps * min(|a|, |b|)``. This is ``eps_tolerance()``'s
+# DEFAULT-CONSTRUCTED value, ``4 * tools::epsilon<double>()``
+# (``boost/math/tools/toms748_solve.hpp``), i.e. the FLOOR of the value upstream
+# builds from the integrator tolerance as
+# ``eps_tolerance<double> roottol(-int(std::log2(tol)))``
+# (``legacy native extension/tracing.cpp``).
+#
+# Why the floor and not the literal bits-derived value: upstream's number is a
+# speed knob for TOMS-748, whose secant/quadratic/cubic ladder lands on a smooth
+# root long before its bracket test fires, so what upstream ACHIEVES is machine
+# precision whatever ``tol`` says. The port's Illinois iteration converges more
+# slowly, so adopting the literal value would stop it while the residual is still
+# large and put the hit somewhere upstream never puts it. Measured on the bounded
+# NCSX case (``tol = 1e-7``, where upstream's construction gives
+# ``eps = 2.38e-7``): median ``|atan2(y, x) - phi_plane|`` is 2.33e-15 for the
+# native lane, 1.16e-6 for the port with the literal value and 4.55e-15 with this
+# floor (maximum 1.60e-14, against the native lane's 9.91e-08). The iteration ceiling IS upstream's (``rootmaxit = 200``, the
+# ``max_root_iters`` default on every spec), and with the dense-output polynomial
+# the extra iterations cost no right-hand-side evaluation.
+_ROOT_BRACKET_EPS = 4.0 * float(np.finfo(np.float64).eps)
+
 _FIELDLINE_INITIAL_STEP_FRACTION = 1.0e-5
 _PARTICLE_INITIAL_STEP_FRACTION = 1.0e-3
-_BOOZER_AXIS_STATUS = -2
+TRACING_STATUS_BOOZER_AXIS = -2
 _QUARTER_TURN = 0.5 * np.pi
 
 
@@ -340,7 +455,23 @@ def _event_carry_with_lane_axis(
 
 
 def _lane_axis_zero(lane_value: jax.Array) -> jax.Array:
-    return jnp.sum(lane_value - lane_value)
+    """A zero that still carries ``lane_value``'s ``vmap`` lane axis.
+
+    The carry has to depend on the per-lane value so that ``vmap`` keeps the
+    lane axis on the event buffer. It must NOT be arithmetic on the value:
+    ``lane_value - lane_value`` is ``nan`` for a non-finite row, and adding that
+    to the carried ``phi_hits`` rewrites every row already recorded as ``nan``.
+    That is how a shipped-scale particle lane published an all-``nan``
+    ``poincare:positions`` while its first rows had been recorded finite
+    (``.artifacts/official-mirror-closure-20260919/fix-wave-3/tracing/``
+    ``logs/probe_particle_nan_54_sweep.log``). ``nan_to_num`` keeps the data
+    dependency, and the device or host placement of ``lane_value`` (a fresh
+    ``zeros_like`` constant would be a host-to-device transfer under the strict
+    transfer guard), while being ``0`` for every input: ``x - x`` is ``0`` for a
+    finite ``x`` and ``nan`` otherwise, and ``nan_to_num`` maps that to ``0``.
+    """
+
+    return jnp.sum(jnp.nan_to_num(lane_value - lane_value))
 
 
 def _lane_axis_carry_zeroes(
@@ -503,8 +634,13 @@ class FieldlineTracingSpec:
         Maximum absolute step size. ``inf`` leaves the adaptive controller
         unconstrained except for the final ``tmax - t`` clamp.
     max_root_iters
-        Static iteration ceiling for the Illinois false-position event
-        localizer.
+        Iteration ceiling for the event localizer. The default is upstream's
+        ``rootmaxit = 200`` (``legacy native extension/tracing.cpp``); the loop
+        exits earlier, per lane, once the bracket meets
+        ``boost::math::tools::eps_tolerance``. That tolerance does NOT follow
+        ``rtol``: it is the fixed ``4 * eps`` floor of upstream's bits-derived
+        value, the same number at every tolerance -- see
+        :data:`_ROOT_BRACKET_EPS` for which ``eps`` and why.
     max_phi_hits
         Static upper bound on the number of phi-plane and stopping-
         criterion event rows recorded. The ``phi_hits`` buffer has
@@ -519,7 +655,7 @@ class FieldlineTracingSpec:
     atol: float
     max_steps: int
     dtmax: float = np.inf
-    max_root_iters: int = 60
+    max_root_iters: int = 200
     max_phi_hits: int = 128
     adaptive_loop: AdaptiveLoop = "scan"
 
@@ -903,6 +1039,139 @@ def fieldline_rhs(
 # ── Dormand-Prince single-step ────────────────────────────────────────
 
 
+class _Dopri5Stages(NamedTuple):
+    """One Dormand-Prince step with every stage the dense output needs.
+
+    ``k2`` is not carried: boost's ``runge_kutta_dopri5::calc_state`` combines
+    ``x_old``, ``k1``, ``k3``, ``k4``, ``k5``, ``k6`` and ``k7`` only.
+    """
+
+    y_new: jax.Array
+    y_err: jax.Array
+    k1: jax.Array
+    k3: jax.Array
+    k4: jax.Array
+    k5: jax.Array
+    k6: jax.Array
+    k7: jax.Array
+    field_cache: InterpolatedFieldCylCache | None = None
+
+
+def _dopri5_stage_step(
+    rhs: Callable[..., jax.Array],
+    t: jax.Array,
+    y: jax.Array,
+    h: jax.Array,
+    k_first: jax.Array,
+    field_cache: InterpolatedFieldCylCache | None = None,
+) -> _Dopri5Stages:
+    """Single Dormand-Prince RK4(5) step, keeping the dense-output stages.
+
+    Body of :func:`dopri5_step`; that function is the published 3-value view of
+    this one so the Butcher tableau exists exactly once.
+
+    ``field_cache`` selects the right-hand-side protocol, and both protocols
+    are faithful mirrors of a C++ right-hand side; which one applies is a
+    property of the FIELD, not of this stepper.
+
+    * ``None`` (the default): ``rhs(t, y) -> dy/dt``. This is upstream's
+      behaviour for every field whose ``_B_impl`` writes every output row --
+      an analytic field has no stale output buffer to reproduce.
+    * an :class:`InterpolatedFieldCylCache`: ``rhs(t, y, cache) ->
+      (dy/dt, cache)``. An interpolated field leaves its output buffer
+      untouched outside its domain, so the buffer travels from one
+      right-hand-side evaluation to the next (see
+      :class:`~simsopt_jax.core.interpolated_field.InterpolatedFieldCylCache`).
+      The six evaluations below thread it in upstream's own evaluation order --
+      ``k2, k3, k4, k5, k6, k7`` -- because that order is what decides which
+      value an out-of-domain stage reads. ``k1`` is the FSAL stage and costs no
+      evaluation, so it does not touch the buffer.
+    """
+
+    dtype = y.dtype
+    c = lambda value: _device_array(value, dtype)
+    # One Butcher tableau for both protocols: the stage calls below are written
+    # once and ``stage`` decides how the right-hand side is invoked. The cache
+    # travels in a trace-time cell because the stage calls happen in Python
+    # source order (each stage's argument list reads the previous stages), so
+    # the cell sees upstream's evaluation order, and each traced value is used
+    # exactly once.
+    cache_cell = [field_cache]
+
+    if field_cache is None:
+
+        def stage(t_stage: jax.Array, y_stage: jax.Array) -> jax.Array:
+            return rhs(t_stage, y_stage)
+
+    else:
+
+        def stage(t_stage: jax.Array, y_stage: jax.Array) -> jax.Array:
+            dydt, cache_next = rhs(t_stage, y_stage, cache_cell[0])
+            cache_cell[0] = cache_next
+            return dydt
+
+    k1 = k_first
+    k2 = stage(t + c(1.0 / 5.0) * h, y + h * (c(1.0 / 5.0) * k1))
+    k3 = stage(
+        t + c(3.0 / 10.0) * h,
+        y + h * (c(3.0 / 40.0) * k1 + c(9.0 / 40.0) * k2),
+    )
+    k4 = stage(
+        t + c(4.0 / 5.0) * h,
+        y + h * (c(44.0 / 45.0) * k1 - c(56.0 / 15.0) * k2 + c(32.0 / 9.0) * k3),
+    )
+    k5 = stage(
+        t + c(8.0 / 9.0) * h,
+        y
+        + h
+        * (
+            c(19372.0 / 6561.0) * k1
+            - c(25360.0 / 2187.0) * k2
+            + c(64448.0 / 6561.0) * k3
+            - c(212.0 / 729.0) * k4
+        ),
+    )
+    k6 = stage(
+        t + h,
+        y
+        + h
+        * (
+            c(9017.0 / 3168.0) * k1
+            - c(355.0 / 33.0) * k2
+            + c(46732.0 / 5247.0) * k3
+            + c(49.0 / 176.0) * k4
+            - c(5103.0 / 18656.0) * k5
+        ),
+    )
+    y_new = y + h * (
+        c(35.0 / 384.0) * k1
+        + c(500.0 / 1113.0) * k3
+        + c(125.0 / 192.0) * k4
+        - c(2187.0 / 6784.0) * k5
+        + c(11.0 / 84.0) * k6
+    )
+    k7 = stage(t + h, y_new)
+    y_err = h * (
+        c(71.0 / 57600.0) * k1
+        - c(71.0 / 16695.0) * k3
+        + c(71.0 / 1920.0) * k4
+        - c(17253.0 / 339200.0) * k5
+        + c(22.0 / 525.0) * k6
+        - c(1.0 / 40.0) * k7
+    )
+    return _Dopri5Stages(
+        y_new=y_new,
+        y_err=y_err,
+        k1=k1,
+        k3=k3,
+        k4=k4,
+        k5=k5,
+        k6=k6,
+        k7=k7,
+        field_cache=cache_cell[0],
+    )
+
+
 def dopri5_step(
     rhs: Callable[[jax.Array, jax.Array], jax.Array],
     t: jax.Array,
@@ -934,71 +1203,143 @@ def dopri5_step(
         ``rhs(t + h, y_new)``; FSAL reuse for the next step.
     """
 
+    stages = _dopri5_stage_step(rhs, t, y, h, k_first)
+    return stages.y_new, stages.y_err, stages.k7
+
+
+def _dense_output_state(
+    stages: _Dopri5Stages,
+    y: jax.Array,
+    h: jax.Array,
+    theta: jax.Array,
+) -> jax.Array:
+    """DOPRI5 dense output of the step ``(y, h)`` at fraction ``theta``.
+
+    Term-for-term port of ``runge_kutta_dopri5::calc_state`` in
+    ``boost/numeric/odeint/stepper/runge_kutta_dopri5.hpp``, which is the root
+    function upstream's ``legacy native extension/tracing.cpp`` hands to
+    ``toms748_solve``. Costs no right-hand-side evaluation: every stage it needs
+    was produced by the step itself.
+
+    Exact at both ends WHILE EVERY STAGE IS FINITE -- ``theta = 0`` returns ``y``
+    and ``theta = 1`` returns ``stages.y_new``. That exactness comes from the
+    weights (every ``b_i_theta`` is ``0`` at ``theta = 0``; at ``theta = 1`` they
+    are the step's own ``b_i``), not from short-circuiting the stages, and
+    ``0 * nan`` is ``nan``. So once ANY stage is non-finite the result is
+    non-finite at EVERY ``theta``, the two ends included -- in particular the
+    FSAL stage ``k7``, which ``b7_theta`` multiplies and which is ``nan`` exactly
+    on the step boost accepts with a finite ``y_new`` and a ``nan`` error.
+    Upstream's ``calc_state`` has the same property (it weights ``deriv_new``
+    with ``dt * b7_theta`` inside one ``scale_sum7``), so this is a mirror, not a
+    port defect: a caller localizing an event on such a step is handed
+    non-finite residuals and gets a bracket END back rather than a root.
+    :func:`_scan_angle_plane_events` therefore records no row from such a step
+    and ends the lane instead.
+    """
+
     dtype = y.dtype
     c = lambda value: _device_array(value, dtype)
-    k1 = k_first
-    k2 = rhs(t + c(1.0 / 5.0) * h, y + h * (c(1.0 / 5.0) * k1))
-    k3 = rhs(
-        t + c(3.0 / 10.0) * h,
-        y + h * (c(3.0 / 40.0) * k1 + c(9.0 / 40.0) * k2),
+    b1 = c(35.0 / 384.0)
+    b3 = c(500.0 / 1113.0)
+    b4 = c(125.0 / 192.0)
+    b5 = c(-2187.0 / 6784.0)
+    b6 = c(11.0 / 84.0)
+    X1 = c(5.0) * (c(2558722523.0) - c(31403016.0) * theta) / c(11282082432.0)
+    X3 = c(100.0) * (c(882725551.0) - c(15701508.0) * theta) / c(32700410799.0)
+    X4 = c(25.0) * (c(443332067.0) - c(31403016.0) * theta) / c(1880347072.0)
+    X5 = c(32805.0) * (c(23143187.0) - c(3489224.0) * theta) / c(199316789632.0)
+    X6 = c(55.0) * (c(29972135.0) - c(7076736.0) * theta) / c(822651844.0)
+    X7 = c(10.0) * (c(7414447.0) - c(829305.0) * theta) / c(29380423.0)
+    theta_m_1 = theta - c(1.0)
+    theta_sq = theta * theta
+    A = theta_sq * (c(3.0) - c(2.0) * theta)
+    B = theta_sq * theta_m_1
+    C = theta_sq * theta_m_1 * theta_m_1
+    D = theta * theta_m_1 * theta_m_1
+    b1_theta = A * b1 - C * X1 + D
+    b3_theta = A * b3 + C * X3
+    b4_theta = A * b4 - C * X4
+    b5_theta = A * b5 + C * X5
+    b6_theta = A * b6 - C * X6
+    b7_theta = B + C * X7
+    return y + h * (
+        b1_theta * stages.k1
+        + b3_theta * stages.k3
+        + b4_theta * stages.k4
+        + b5_theta * stages.k5
+        + b6_theta * stages.k6
+        + b7_theta * stages.k7
     )
-    k4 = rhs(
-        t + c(4.0 / 5.0) * h,
-        y + h * (c(44.0 / 45.0) * k1 - c(56.0 / 15.0) * k2 + c(32.0 / 9.0) * k3),
-    )
-    k5 = rhs(
-        t + c(8.0 / 9.0) * h,
-        y
-        + h
-        * (
-            c(19372.0 / 6561.0) * k1
-            - c(25360.0 / 2187.0) * k2
-            + c(64448.0 / 6561.0) * k3
-            - c(212.0 / 729.0) * k4
-        ),
-    )
-    k6 = rhs(
-        t + h,
-        y
-        + h
-        * (
-            c(9017.0 / 3168.0) * k1
-            - c(355.0 / 33.0) * k2
-            + c(46732.0 / 5247.0) * k3
-            + c(49.0 / 176.0) * k4
-            - c(5103.0 / 18656.0) * k5
-        ),
-    )
-    y_new = y + h * (
-        c(35.0 / 384.0) * k1
-        + c(500.0 / 1113.0) * k3
-        + c(125.0 / 192.0) * k4
-        - c(2187.0 / 6784.0) * k5
-        + c(11.0 / 84.0) * k6
-    )
-    k7 = rhs(t + h, y_new)
-    y_err = h * (
-        c(71.0 / 57600.0) * k1
-        - c(71.0 / 16695.0) * k3
-        + c(71.0 / 1920.0) * k4
-        - c(17253.0 / 339200.0) * k5
-        + c(22.0 / 525.0) * k6
-        - c(1.0 / 40.0) * k7
-    )
-    return y_new, y_err, k7
+
+
+def _dense_output_query(
+    stages: _Dopri5Stages,
+    y: jax.Array,
+    t: jax.Array,
+    h_clamped: jax.Array,
+) -> Callable[[jax.Array], jax.Array]:
+    """This step's DOPRI5 dense output as a function of ABSOLUTE time.
+
+    ``dense.calc_state`` in ``legacy native extension/tracing.cpp``: the
+    continuous extension of the step just taken, costing no extra
+    right-hand-side evaluation, exact at ``t`` and at ``t + h_clamped``.
+
+    The event scan runs on every trial, so this closure is also built for the
+    h-underflow stall of :data:`_MAX_CONSECUTIVE_NO_PROGRESS_TRIALS`, where
+    ``h_clamped`` is exactly ``0.0``. A zero-length step has a single query
+    time, ``t``, and its dense output there is ``y``, so the fraction is taken
+    against ``1.0``: ``theta`` is then ``0`` and ``_dense_output_state`` returns
+    ``y`` because it scales every stage by ``h``. Dividing by the zero step
+    instead makes ``theta`` ``0/0``, turns the whole scan ``nan``, and aborts the
+    run under ``jax_debug_nans`` before the stall guard can report
+    :data:`TRACING_STATUS_STEP_CONTROL_FAILED`.
+    """
+
+    zero = _device_array(0.0, h_clamped.dtype)
+    one = _device_array(1.0, h_clamped.dtype)
+    h_fraction = jnp.where(h_clamped == zero, one, h_clamped)
+
+    def state_at_time(t_query: jax.Array) -> jax.Array:
+        return _dense_output_state(stages, y, h_clamped, (t_query - t) / h_fraction)
+
+    return state_at_time
 
 
 def _error_norm(
     y_err: jax.Array,
     y: jax.Array,
-    y_new: jax.Array,
+    dydt: jax.Array,
+    h: jax.Array,
     rtol: jax.Array,
     atol: jax.Array,
 ) -> jax.Array:
-    sc = atol + rtol * jnp.maximum(jnp.abs(y), jnp.abs(y_new))
-    norm_sq = jnp.mean(jnp.square(y_err / sc))
-    tiny = _device_array(jnp.finfo(norm_sq.dtype).tiny, norm_sq.dtype)
-    return jnp.sqrt(jnp.maximum(norm_sq, tiny))
+    """Relative error of a trial step, exactly as upstream measures it.
+
+    Mirrors boost.odeint ``default_error_checker::error``: componentwise
+    ``|y_err| / (atol + rtol * (|y_old| + |h| * |dydt_old|))`` reduced with the
+    infinity norm. ``y`` and ``dydt`` are the state and derivative at the start
+    of the trial (the FSAL leading stage), and ``h`` is the trial step.
+
+    The reduction is boost's ``norm_inf``, and its floating-point behaviour is
+    load-bearing, not an implementation detail. ``array_algebra::norm_inf``
+    (``boost/numeric/odeint/algebra/array_algebra.hpp``, the algebra
+    ``algebra_dispatcher`` selects for the ``std::array`` states upstream uses)
+    is ``init = 0; for each i: init = max(init, abs(s[i]))``, and ``std::max(a,
+    b)`` is ``(a < b) ? b : a``. A ``nan`` component therefore NEVER replaces
+    the running maximum and contributes nothing, while an ``inf`` component
+    does replace it. So an all-``nan`` error vector reduces to ``0`` and the
+    trial is ACCEPTED, whereas any ``inf`` rejects. ``jnp.max`` propagates
+    ``nan`` instead, which would reject a step upstream accepts; the ``where``
+    below restores upstream's rule. This is reachable: the DOPRI5 error
+    estimate contains the FSAL stage ``k7 = f(t + h, y_new)``
+    (``runge_kutta_dopri5.hpp`` ``do_step_impl`` with ``xerr``), so a right-hand
+    side that is ``nan`` at the step END poisons every error component while
+    ``y_new`` itself, built from ``k1, k3..k6`` only, stays finite.
+    """
+    sc = atol + rtol * (jnp.abs(y) + jnp.abs(h) * jnp.abs(dydt))
+    componentwise = jnp.abs(y_err) / sc
+    zero = _device_array(0.0, componentwise.dtype)
+    return jnp.max(jnp.where(jnp.isnan(componentwise), zero, componentwise))
 
 
 def _initial_step_size(
@@ -1031,7 +1372,9 @@ def bracket_root_jax(
     f_left: jax.Array,
     f_right: jax.Array,
     max_iters: int,
-    atol: jax.Array,
+    eps: jax.Array,
+    *,
+    active: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Find ``t*`` with ``f(t*) = 0`` inside ``[t_left, t_right]``.
 
@@ -1048,13 +1391,23 @@ def bracket_root_jax(
         caller can reuse function values already computed during the
         sign-crossing detection scan.
     max_iters
-        Static iteration ceiling for the Illinois false-position loop.
-    atol
-        Absolute width tolerance for early exit. When
-        ``t_right - t_left <= atol`` the controller stops shrinking the
-        bracket; the loop still executes ``max_iters`` iterations for
-        fixed-shape compile but the bracket remains stationary on noop
-        iterations.
+        Iteration ceiling for the Illinois false-position loop. Upstream's
+        ``rootmaxit`` (``legacy native extension/tracing.cpp``) is the value to
+        pass.
+    eps
+        Relative bracket tolerance with
+        ``boost::math::tools::eps_tolerance``'s meaning: the loop stops for a
+        lane once ``|b - a| <= eps * min(|a|, |b|)``. The tracing drivers pass
+        :data:`_ROOT_BRACKET_EPS`; see the note at that constant for why it is
+        ``eps_tolerance()``'s default rather than upstream's bits-derived value.
+        ``eps = 0`` never terminates early, so the lane runs the full
+        ``max_iters``.
+    active
+        Optional per-lane gate. A lane whose ``active`` is ``False`` performs no
+        iteration and returns the better of its two input endpoints; under
+        ``vmap`` the batched loop then runs only as long as some lane is still
+        iterating, so a step that crossed no plane costs nothing. ``None`` means
+        "every lane iterates".
 
     Returns
     -------
@@ -1072,7 +1425,7 @@ def bracket_root_jax(
     dtype = f_left.dtype
     zero = _device_array(0.0, dtype)
     half = _device_array(0.5, dtype)
-    atol_arr = _as_device_array(atol, dtype)
+    eps_arr = _as_device_array(eps, dtype)
     left_first = t_left <= t_right
     t_left_ordered = jnp.where(left_first, t_left, t_right)
     t_right_ordered = jnp.where(left_first, t_right, t_left)
@@ -1081,6 +1434,10 @@ def bracket_root_jax(
     t_left_ordered = t_left_ordered + f_left_ordered * zero
     t_right_ordered = t_right_ordered + f_right_ordered * zero
     bracketed_in = jnp.sign(f_left_ordered) * jnp.sign(f_right_ordered) < zero
+    if active is None:
+        iterating_in = bracketed_in
+    else:
+        iterating_in = jnp.logical_and(bracketed_in, active)
     left_better = jnp.abs(f_left_ordered) <= jnp.abs(f_right_ordered)
     init = (
         _device_index(0),
@@ -1092,15 +1449,22 @@ def bracket_root_jax(
         jnp.where(left_better, f_left_ordered, f_right_ordered),
     )
 
+    def _converged(a, b):
+        # ``boost::math::tools::eps_tolerance::operator()``.
+        return jnp.abs(b - a) <= eps_arr * jnp.minimum(jnp.abs(a), jnp.abs(b))
+
     def cond(carry):
-        i, _a, _b, _fa, _fb, _best_t, _best_f = carry
-        return i < _device_index(int(max_iters))
+        i, a, b, _fa, _fb, _best_t, _best_f = carry
+        budget_left = i < _device_index(int(max_iters))
+        lane_active = jnp.logical_and(
+            iterating_in, jnp.logical_not(_converged(a, b))
+        )
+        return jnp.logical_and(budget_left, lane_active)
 
     def body(carry):
         i, a, b, fa, fb, best_t, best_f = carry
         width = b - a
-        converged = width <= atol_arr
-        active = jnp.logical_and(bracketed_in, jnp.logical_not(converged))
+        active = jnp.logical_and(iterating_in, jnp.logical_not(_converged(a, b)))
         midpoint = a + half * width
         denominator = fb - fa
         midpoint = midpoint + denominator * zero
@@ -1146,17 +1510,28 @@ def bracket_root_jax(
 
 
 class _Dopri5AdaptiveStep(NamedTuple):
+    """One adaptive DOPRI5 trial and the carry update it licenses.
+
+    ``accepted`` is the step the lane may TAKE: boost accepted it AND its new
+    state is finite. ``nonfinite_state`` is the one case where the two differ --
+    boost accepted the trial but ``y_new`` is not finite -- and it is terminal
+    here; :func:`_dopri5_adaptive_step` documents why the port does not follow
+    upstream's integrator on it.
+    """
+
     h_clamped: jax.Array
     y_new: jax.Array
     accepted: jax.Array
+    nonfinite_state: jax.Array
     h_next: jax.Array
     t_next: jax.Array
     y_next: jax.Array
     k_next: jax.Array
+    stages: _Dopri5Stages
 
 
 def _dopri5_adaptive_step(
-    rhs: Callable[[jax.Array, jax.Array], jax.Array],
+    rhs: Callable[..., jax.Array],
     t: jax.Array,
     y: jax.Array,
     h: jax.Array,
@@ -1166,26 +1541,84 @@ def _dopri5_adaptive_step(
     rtol: jax.Array,
     atol: jax.Array,
     dtype,
+    field_cache: InterpolatedFieldCylCache | None = None,
 ) -> _Dopri5AdaptiveStep:
-    """Run one adaptive DOPRI5 trial and return the accepted-state update."""
+    """Run one adaptive DOPRI5 trial and return the accepted-state update.
+
+    ``field_cache`` is the right-hand side's field output buffer and selects
+    the right-hand-side protocol; :func:`_dopri5_stage_step` documents both.
+    Its update is returned in ``stages.field_cache`` and is NOT conditioned on
+    acceptance: the C++ buffer is written by every right-hand-side evaluation,
+    a rejected trial's evaluations included.
+    """
 
     h_clamped = _clamp_step_to_domain(h, t, tmax, dtmax)
-    y_new, y_err, k7 = dopri5_step(rhs, t, y, h_clamped, k_first)
-    err = _error_norm(y_err, y, y_new, rtol, atol)
-    err_safe = jnp.where(jnp.isfinite(err), err, _device_array(jnp.inf, dtype))
-    accepted = err_safe <= _device_array(1.0, dtype)
-    factor = jnp.where(
-        err_safe > _device_array(0.0, dtype),
+    stages = _dopri5_stage_step(rhs, t, y, h_clamped, k_first, field_cache)
+    y_new = stages.y_new
+    k7 = stages.k7
+    err = _error_norm(stages.y_err, y, k_first, h_clamped, rtol, atol)
+    # ``controlled_runge_kutta::try_step`` (FSAL overload) rejects on
+    # ``if (max_rel_err > 1.0)`` and otherwise accepts, so the accept test is
+    # the NEGATION of a greater-than, not a less-or-equal: that is what decides
+    # a ``nan`` error the same way upstream does. ``_error_norm`` already
+    # reproduces boost's ``norm_inf``, so the value reaching here is finite or
+    # ``+inf``; writing the predicate upstream's way keeps the two agreeing even
+    # if that ever stops being true.
+    upstream_accepted = jnp.logical_not(err > _device_array(1.0, dtype))
+    # Upstream's integrator decides acceptance from the ERROR ALONE, so it also
+    # accepts a trial whose new STATE is non-finite, and carries that state on:
+    # with an all-``nan`` error ``array_algebra::norm_inf``
+    # (``boost/numeric/odeint/algebra/array_algebra.hpp``) is ``0``,
+    # ``controlled_runge_kutta::try_step``
+    # (``boost/numeric/odeint/stepper/controlled_runge_kutta.hpp``) takes the
+    # accept branch, and the ``nan`` becomes ``x_old`` of the next step, so the
+    # run reaches ``tmax`` or fires a stopping criterion on a ``nan`` state.
+    # This port does NOT follow it there: a lane here never reports success on,
+    # nor publishes, non-finite values, so such a trial is not taken and
+    # ``nonfinite_state`` ends the lane at the last finite state with
+    # ``TRACING_STATUS_STEP_CONTROL_FAILED`` (``_step_control_progress``).
+    # Measured on the shipped particle case before this gate existed: one
+    # criterion row ``[1.7869731e-04, -1, nan, nan, nan, nan]`` published into
+    # ``poincare:positions`` with the lane reporting the criterion status ``-1``.
+    # Upstream's acceptance is untouched where it decides the mirror: a ``nan``
+    # error with a FINITE new state -- the reachable case, since the error
+    # carries the FSAL stage ``k7 = f(t + h, y_new)`` while ``y_new``, built
+    # from ``k1, k3..k6``, does not -- is accepted exactly as boost accepts it,
+    # so the lane lands where upstream lands and upstream's stopping criterion
+    # fires there.
+    state_finite = jnp.all(jnp.isfinite(y_new))
+    accepted = jnp.logical_and(upstream_accepted, state_finite)
+    nonfinite_state = jnp.logical_and(upstream_accepted, jnp.logical_not(state_finite))
+    # ``default_step_adjuster::decrease_step`` / ``increase_step``.
+    decrease = jnp.maximum(
         _device_array(_SAFETY, dtype)
-        * jnp.power(err_safe, _device_array(-_DOPRI5_EXP, dtype)),
-        _device_array(_MAX_FACTOR, dtype),
-    )
-    factor = jnp.clip(
-        factor,
+        * jnp.power(
+            jnp.clip(
+                err,
+                _device_array(1.0, dtype),
+                _device_array(_MAX_DECREASE_ERROR, dtype),
+            ),
+            _device_array(-_DECREASE_EXP, dtype),
+        ),
         _device_array(_MIN_FACTOR, dtype),
-        _device_array(_MAX_FACTOR, dtype),
     )
-    h_next = h_clamped * factor
+    increase = jnp.where(
+        err < _device_array(_INCREASE_ERROR_THRESHOLD, dtype),
+        _device_array(_SAFETY, dtype)
+        * jnp.power(
+            jnp.clip(
+                err,
+                _device_array(_MIN_INCREASE_ERROR, dtype),
+                _device_array(_INCREASE_ERROR_THRESHOLD, dtype),
+            ),
+            _device_array(-_INCREASE_EXP, dtype),
+        ),
+        _device_array(1.0, dtype),
+    )
+    # The step-size adjuster stays boost's, on boost's own accept flag; the
+    # state, the time and the FSAL derivative advance only on a step the lane
+    # may take.
+    h_next = h_clamped * jnp.where(upstream_accepted, increase, decrease)
     t_next = jnp.where(accepted, _accepted_step_time(t, h_clamped, tmax), t)
     y_next = jnp.where(accepted, y_new, y)
     k_next = jnp.where(accepted, k7, k_first)
@@ -1193,10 +1626,12 @@ def _dopri5_adaptive_step(
         h_clamped=h_clamped,
         y_new=y_new,
         accepted=accepted,
+        nonfinite_state=nonfinite_state,
         h_next=h_next,
         t_next=t_next,
         y_next=y_next,
         k_next=k_next,
+        stages=stages,
     )
 
 
@@ -1219,6 +1654,8 @@ def _scan_angle_plane_events(
     *,
     hits: jax.Array,
     count: jax.Array,
+    status: jax.Array,
+    stop: jax.Array,
     angle_last: jax.Array,
     angle_current: jax.Array,
     targets: jax.Array,
@@ -1228,60 +1665,127 @@ def _scan_angle_plane_events(
     t: jax.Array,
     h_clamped: jax.Array,
     max_root_iters: int,
+    enabled: jax.Array,
     max_hits_i32: jax.Array,
-    state_at_fraction: Callable[[jax.Array], jax.Array],
+    state_at_time: Callable[[jax.Array], jax.Array],
     angle_at_state: Callable[[jax.Array, jax.Array], jax.Array],
-) -> tuple[jax.Array, jax.Array]:
-    """Record angle-plane crossings for fieldline, GC, Boozer, and full-orbit drivers."""
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Record angle-plane crossings for fieldline, GC, Boozer, and full-orbit drivers.
+
+    Mirrors ``legacy native extension/tracing.cpp``: the crossing test is the
+    ``floor((angle - target) / 2*pi)`` comparison on the accepted step, the root
+    is bracketed in ABSOLUTE time over ``[t, t + h_clamped]`` with upstream's own
+    two end residuals ``angle_last - shifted_target`` and
+    ``angle_current - shifted_target``, and the residual is evaluated on the
+    step's dense output, never by re-integrating. ``enabled``
+    carries "this trial was accepted"; a target that was not crossed, or a trial
+    that was not accepted, performs no root iteration at all, which is upstream's
+    ``if(crossed)`` gate expressed as the loop predicate so that ``vmap`` -- which
+    turns ``lax.cond`` into a ``select`` -- really skips the work.
+
+    A crossing is recorded only when the ROW it would publish is finite, and a crossing whose row is NOT finite
+    stops the lane with :data:`TRACING_STATUS_STEP_CONTROL_FAILED` instead. Upstream's dense output carries the
+    FSAL stage ``k7`` with weight ``dt * b7_theta``
+    (``boost/numeric/odeint/stepper/runge_kutta_dopri5.hpp`` ``calc_state``:
+    ``for_each8(x, x_old, deriv_old, m_k3, m_k4, m_k5, m_k6, deriv_new, scale_sum7(...))``), and ``0 * nan`` is
+    ``nan`` in C++ too. So on a step whose ``k7`` is non-finite -- the step boost ACCEPTS, because it judges the
+    error alone, which this port mirrors exactly (:func:`_dopri5_adaptive_step`) -- upstream's ``dense.calc_state``
+    is non-finite at EVERY query time, its ``toms748_solve`` is handed non-finite residuals, and it pushes that row
+    (``legacy native extension/tracing.cpp``,
+    ``res_phi_hits.push_back(join<2, RHS::Size>({troot, double(i)}, temp))``) and carries the ``nan`` on. This port
+    may not publish it. Dropping the row alone would LOSE a crossing upstream records without saying so -- the same
+    step can be the one that reaches ``tmax`` (status ``0``), that exhausts ``max_steps`` (status ``1``) or that a
+    criterion stops (status ``-1 - i``) -- so the lane's status reports it, with the status that already means "this
+    port refused a step upstream would have taken". The scan runs BEFORE the stopping criteria in every driver,
+    which is upstream's own order (``tracing.cpp``: the phi loop, then the criterion loop), so a criterion cannot
+    fire on a step whose continuous extension is unusable either.
+    """
 
     if num_targets == 0:
-        return hits, count
+        return hits, count, status, stop
+
+    t_end = t + h_clamped
 
     def scan_one_target(i, carry):
-        hits_carry, count_carry = carry
+        hits_carry, count_carry, status_carry, stop_carry = carry
         target = targets[i]
         fl_last = jnp.floor((angle_last - target) / two_pi)
         fl_curr = jnp.floor((angle_current - target) / two_pi)
-        crossed = fl_last != fl_curr
+        # ``nan != nan`` is TRUE, so a lane that has gone non-finite would pass
+        # the floor test on every plane on every remaining trial and record an
+        # all-``nan`` row. Upstream never meets that case: boost throws through
+        # ``max_step_checker`` before a non-finite state is integrated, which
+        # this port reports as ``TRACING_STATUS_STEP_CONTROL_FAILED``.
+        angles_finite = jnp.logical_and(
+            jnp.isfinite(angle_last), jnp.isfinite(angle_current)
+        )
+        crossed = jnp.logical_and(
+            jnp.logical_and(fl_last != fl_curr, enabled), angles_finite
+        )
         offset = jnp.round(
             ((angle_last + angle_current) / _device_array(2.0, dtype) - target) / two_pi
         )
         shifted_target = offset * two_pi + target
 
-        def diff_at(s):
-            state = state_at_fraction(s)
+        def diff_at(t_query):
+            state = state_at_time(t_query)
             return angle_at_state(state, angle_last) - shifted_target
 
-        f_left = diff_at(_device_array(0.0, dtype))
-        f_right = diff_at(_device_array(1.0, dtype))
-        s_root, _f_root, _bracketed = bracket_root_jax(
+        # Upstream hands the root finder the two residuals the crossing test
+        # just compared and never evaluates the root function at the bracket
+        # ends: ``toms748_solve(rootfun, tlast, tcurrent, phi_last - phi_shift,
+        # phi_current - phi_shift, roottol, rootmaxit)``
+        # (``legacy native extension/tracing.cpp``), whose preceding assertion is
+        # that the shifted target lies between exactly these two values.
+        # Re-evaluating the ends through the dense output does not reproduce
+        # them: ``((t + h) - t) / h`` is not exactly ``1`` once ``t >> h``, so the
+        # right end would differ from ``angle_current`` by up to an ulp of ``t``
+        # in angle (1.2e-12 at the official QA ``tmax = 20000``, ~270x the
+        # localizer's own residual) and can take the OPPOSITE sign, leaving the
+        # bracket inconsistent with the ``crossed`` gate that records the row.
+        f_left = angle_last - shifted_target
+        f_right = angle_current - shifted_target
+        t_root, _f_root, _bracketed = bracket_root_jax(
             diff_at,
-            _device_array(0.0, dtype),
-            _device_array(1.0, dtype),
+            t,
+            t_end,
             f_left,
             f_right,
             max_root_iters,
-            _device_array(1.0e-15, dtype),
+            _device_array(_ROOT_BRACKET_EPS, dtype),
+            active=crossed,
         )
-        state_root = state_at_fraction(s_root)
+        state_root = state_at_time(t_root)
         hit_row = _event_row_from_state(
-            t + s_root * h_clamped,
+            t_root,
             _as_device_array(i, dtype),
             state_root,
         )
-        return _append_event_row(
+        row_finite = jnp.all(jnp.isfinite(hit_row))
+        unusable = jnp.logical_and(crossed, jnp.logical_not(row_finite))
+        hits_next, count_next = _append_event_row(
             hits_carry,
             count_carry,
-            crossed,
+            jnp.logical_and(crossed, row_finite),
             hit_row,
             max_hits_i32,
+        )
+        return (
+            hits_next,
+            count_next,
+            jnp.where(
+                unusable,
+                _device_index(TRACING_STATUS_STEP_CONTROL_FAILED),
+                status_carry,
+            ),
+            jnp.logical_or(stop_carry, unusable),
         )
 
     return jax.lax.fori_loop(
         0,
         num_targets,
         scan_one_target,
-        (hits, count),
+        (hits, count, status, stop),
     )
 
 
@@ -1301,8 +1805,22 @@ def _apply_stopping_criteria_events(
     max_hits_i32: jax.Array,
     is_boozer_state: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Append first-firing stopping-criterion events while preserving row layout."""
+    """Append first-firing stopping-criterion events while preserving row layout.
 
+    Upstream evaluates each criterion on the accepted POST-step state and pushes
+    ``{t, -1 - i, y}`` built from it (``legacy native extension/tracing.cpp``,
+    the criterion loop that follows the step). Its state there is finite,
+    because boost's acceptance looks only at the error norm and would have
+    carried a non-finite state on; this port ends such a lane at the last finite
+    state instead (:func:`_dopri5_adaptive_step`), so a criterion must not fire
+    on a non-finite state, must not set a status from one and must not push a
+    row from one -- the same rule ``_scan_angle_plane_events`` applies to its
+    own angles. ``IterStoppingCriterion`` makes the case reachable inside this
+    helper even when the caller does gate the step: its predicate does not read
+    the state at all.
+    """
+
+    state_finite = jnp.all(jnp.isfinite(state))
     for i, criterion in enumerate(stopping_criteria):
         pred = _stopping_criterion_should_stop(
             criterion,
@@ -1315,7 +1833,9 @@ def _apply_stopping_criteria_events(
             dtype,
             is_boozer_state=is_boozer_state,
         )
-        fires = jnp.logical_and(jnp.logical_not(stop), pred)
+        fires = jnp.logical_and(
+            jnp.logical_and(jnp.logical_not(stop), pred), state_finite
+        )
         idx_val = _device_index(-1 - i)
         hit_row = _event_row_from_state(
             t_event,
@@ -1337,13 +1857,98 @@ def _apply_stopping_criteria_events(
 # ── Adaptive driver ───────────────────────────────────────────────────
 
 
-def trace_fieldline(
+@dataclass(frozen=True)
+class CartesianTracingContinuationState:
+    """Accepted state and controller history needed to resume a Cartesian trace."""
+
+    trial_count: jax.Array
+    accepted_count: jax.Array
+    t: jax.Array
+    y: jax.Array
+    h: jax.Array
+    k_first: jax.Array
+    phi_last: jax.Array
+    phi_initial: jax.Array
+    status_event: jax.Array
+    stopped: jax.Array
+    no_progress: jax.Array
+    # The field's output buffer, for a field that has one (see
+    # :class:`~simsopt_jax.core.interpolated_field.InterpolatedFieldCylCache`).
+    # Upstream runs one uninterrupted ``solve``, so the buffer must survive a
+    # chunk boundary exactly as it survives a step. ``None`` for a field that
+    # writes every output row.
+    field_cache: InterpolatedFieldCylCache | None = None
+
+
+jax.tree_util.register_dataclass(
+    CartesianTracingContinuationState,
+    data_fields=[
+        "trial_count", "accepted_count", "t", "y", "h", "k_first",
+        "phi_last", "phi_initial", "status_event", "stopped", "no_progress",
+        "field_cache",
+    ],
+    meta_fields=[],
+)
+
+
+def _step_control_progress(
+    *,
+    no_progress: jax.Array,
+    accepted: jax.Array,
+    nonfinite_state: jax.Array,
+    t: jax.Array,
+    t_next: jax.Array,
+    y: jax.Array,
+    k_first: jax.Array,
+    status: jax.Array,
+    stop: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """boost's step-progress checks, ported into the JAX loop carry.
+
+    Returns the updated consecutive-no-progress counter, ``status`` and ``stop``.
+    A lane stops with :data:`TRACING_STATUS_STEP_CONTROL_FAILED` when the counter
+    reaches :data:`_MAX_CONSECUTIVE_NO_PROGRESS_TRIALS`, when the state it
+    carries -- not a speculative trial -- is already non-finite, or when
+    ``nonfinite_state`` says the trial boost would have accepted lands on a
+    non-finite state (:func:`_dopri5_adaptive_step`: upstream carries that state
+    on, this port ends the lane at the last finite state instead). A non-finite
+    *rejected* trial state or a non-finite error is NOT terminal: upstream
+    rejects exactly that and recovers by shrinking the step
+    (``boost/numeric/odeint/stepper/controlled_runge_kutta.hpp`` ``try_step``),
+    and a trial error that stays non-finite still ends the lane through the
+    counter.
+    """
+
+    progressed = jnp.logical_and(accepted, t_next > t)
+    no_progress_next = jnp.where(
+        progressed, _device_index(0), no_progress + _device_index(1)
+    )
+    carried_finite = jnp.logical_and(
+        jnp.all(jnp.isfinite(y)), jnp.all(jnp.isfinite(k_first))
+    )
+    failed = jnp.logical_or(
+        jnp.logical_or(
+            no_progress_next >= _device_index(_MAX_CONSECUTIVE_NO_PROGRESS_TRIALS),
+            jnp.logical_not(carried_finite),
+        ),
+        nonfinite_state,
+    )
+    fires = jnp.logical_and(jnp.logical_not(stop), failed)
+    return (
+        no_progress_next,
+        jnp.where(fires, _device_index(TRACING_STATUS_STEP_CONTROL_FAILED), status),
+        jnp.logical_or(stop, fires),
+    )
+
+
+def _trace_fieldline_chunk(
     spec: FieldlineTracingSpec,
     y0: TracingStateInput,
     magnetic_field_fn: Callable[[jax.Array], jax.Array],
     phis: jax.Array | None = None,
     stopping_criteria: tuple = (),
-) -> FieldlineTracingResult:
+    continuation: CartesianTracingContinuationState | None = None,
+) -> tuple[FieldlineTracingResult, CartesianTracingContinuationState]:
     """Trace a single fieldline from ``y0`` for ``spec.tmax`` upstream-time units.
 
     Parameters
@@ -1373,13 +1978,8 @@ def trace_fieldline(
         criterion in iteration order wins; ``status`` then equals
         ``-1 - i`` reflecting that index.
 
-    Returns
-    -------
-    result
-        :class:`FieldlineTracingResult` with a padded
-        ``(max_steps + 1, 4)`` trajectory, a mask, an accepted-step
-        count, an exit status, ``t_final``, and the phi-crossing
-        buffer.
+    Returns a chunk-local result and immutable state for an exact next chunk.
+    ``spec.max_steps`` bounds this call's trials; it is not the total horizon.
     """
 
     dtype = jnp.float64
@@ -1398,17 +1998,34 @@ def trace_fieldline(
     max_root_iters = int(spec.max_root_iters)
 
     rhs = fieldline_rhs(magnetic_field_fn)
-    h0 = _initial_step_size(t0, tmax, dtmax, _FIELDLINE_INITIAL_STEP_FRACTION)
-    k0 = rhs(t0, y0_arr)
+    if continuation is None:
+        h0 = _initial_step_size(t0, tmax, dtmax, _FIELDLINE_INITIAL_STEP_FRACTION)
+        k0 = rhs(t0, y0_arr)
+        start_t = t0
+        start_y = y0_arr
+        global_trials = _device_index(0)
+        global_accepted = _device_index(0)
+        status_initial = _device_index(0)
+        stopped_initial = _device_false()
+        no_progress_initial = _device_index(0)
+    else:
+        h0 = continuation.h
+        k0 = continuation.k_first
+        start_t = continuation.t
+        start_y = continuation.y
+        global_trials = continuation.trial_count
+        global_accepted = continuation.accepted_count
+        status_initial = continuation.status_event
+        stopped_initial = continuation.stopped
+        no_progress_initial = continuation.no_progress
     one = _device_array(1.0, dtype)
     lane_zero, lane_zero_i32, lane_false = _lane_axis_carry_zeroes(y0_arr)
     accepted_count_init = _device_array(0, jnp.int32) + lane_zero_i32
-    t0_init = t0 + lane_zero
 
     # Pre-allocate the trajectory carry. Row 0 holds the initial state;
     # rows 1..max_steps fill in as accepted steps occur. Padding rows
     # at the end of the run get the final accepted state.
-    traj_init_row = jnp.concatenate((jnp.reshape(t0, (1,)), y0_arr), axis=0)
+    traj_init_row = jnp.concatenate((jnp.reshape(start_t, (1,)), start_y), axis=0)
     traj = jnp.concatenate(
         (
             jnp.reshape(traj_init_row, (1, 4)),
@@ -1437,28 +2054,34 @@ def trace_fieldline(
     num_phis = int(phis_arr.shape[0])
 
     # Initial unwrapped phi seed (C++ tracing.cpp uses pi).
-    phi_init = _continuous_phi(
-        _take_entry(y0_arr, 0),
-        _take_entry(y0_arr, 1),
-        _device_array(np.pi, dtype),
-        dtype,
-    )
+    if continuation is None:
+        phi_init = _continuous_phi(
+            _take_entry(y0_arr, 0),
+            _take_entry(y0_arr, 1),
+            _device_array(np.pi, dtype),
+            dtype,
+        )
+        phi_last = phi_init
+    else:
+        phi_init = continuation.phi_initial
+        phi_last = continuation.phi_last
 
     init_carry = (
         _device_array(0, jnp.int32),  # step_count
         accepted_count_init,
-        t0_init,
-        y0_arr,
+        start_t + lane_zero,
+        start_y,
         h0,
         k0,
         traj,
         mask,
         phi_hits_buf,
         phi_hits_count_init,
-        phi_init,  # running phi_last
+        phi_last,  # running phi_last
         phi_init,  # transit criterion baseline, set on first accepted step
-        _device_array(0, jnp.int32) + lane_zero_i32,  # status_event
-        lane_false,  # stop flag
+        status_initial + lane_zero_i32,  # status_event
+        stopped_initial | lane_false,  # stop flag
+        no_progress_initial + lane_zero_i32,  # consecutive non-advancing trials
     )
 
     max_steps_i32 = _device_array(max_steps, jnp.int32)
@@ -1481,6 +2104,7 @@ def trace_fieldline(
             _phi_init,
             _status_event,
             stop,
+            _no_progress,
         ) = carry
         not_done = t < tmax
         budget_ok = step_count < max_steps_i32
@@ -1507,6 +2131,7 @@ def trace_fieldline(
             phi_init,
             status_event,
             _stop,
+            no_progress,
         ) = carry
         step = _dopri5_adaptive_step(
             rhs,
@@ -1531,48 +2156,37 @@ def trace_fieldline(
         # ── Phi-plane crossing detection on accepted steps ──
         phi_current = _continuous_phi(y_new[0], y_new[1], phi_last, dtype)
 
-        def state_at_fraction(s):
-            """Sub-step DOPRI5 from ``(t, y)`` with step ``s * h_clamped``.
+        state_at_time = _dense_output_query(step.stages, y, t, h_clamped)
 
-            Re-runs a fresh DOPRI5 step from the prior accepted state
-            so the returned state has 5th-order RK accuracy rather than
-            the O(h) error of a linear interpolant. The FSAL value
-            ``k_first`` is reused as the leading-stage derivative.
-            """
-            h_sub = s * h_clamped
-            y_sub, _err, _k7 = dopri5_step(rhs, t, y, h_sub, k_first)
-            return y_sub
-
-        def scan_phis(args):
-            hits_in, count_in, phi_last_in, phi_curr_in = args
-            return _scan_angle_plane_events(
-                hits=hits_in,
-                count=count_in,
-                angle_last=phi_last_in,
-                angle_current=phi_curr_in,
-                targets=phis_arr,
-                num_targets=num_phis,
-                two_pi=two_pi,
-                dtype=dtype,
-                t=t,
-                h_clamped=h_clamped,
-                max_root_iters=max_root_iters,
-                max_hits_i32=max_phi_hits_i32,
-                state_at_fraction=state_at_fraction,
-                angle_at_state=lambda state, angle_near: _continuous_phi_from_state(
-                    state, angle_near, dtype
-                ),
-            )
-
-        phi_hits_after, phi_count_after = jax.lax.cond(
-            accepted,
-            scan_phis,
-            lambda args: (args[0], args[1]),
-            operand=(phi_hits_in, phi_hits_count_in, phi_last, phi_current),
+        (
+            phi_hits_after,
+            phi_count_after,
+            status_scan,
+            stop_scan,
+        ) = _scan_angle_plane_events(
+            hits=phi_hits_in,
+            count=phi_hits_count_in,
+            status=status_event,
+            stop=lane_false,
+            angle_last=phi_last,
+            angle_current=phi_current,
+            targets=phis_arr,
+            num_targets=num_phis,
+            two_pi=two_pi,
+            dtype=dtype,
+            t=t,
+            h_clamped=h_clamped,
+            max_root_iters=max_root_iters,
+            enabled=accepted,
+            max_hits_i32=max_phi_hits_i32,
+            state_at_time=state_at_time,
+            angle_at_state=lambda state, angle_near: _continuous_phi_from_state(
+                state, angle_near, dtype
+            ),
         )
 
         # ── Stopping criteria check on accepted state ──
-        first_accepted_step = accepted_count == _device_index(0)
+        first_accepted_step = (global_accepted + accepted_count) == _device_index(0)
         phi_init_for_criteria = jnp.where(
             first_accepted_step,
             phi_current,
@@ -1604,7 +2218,7 @@ def trace_fieldline(
                 max_hits_i32=max_phi_hits_i32,
             )
 
-        iter_count_post = step_count + _device_index(1)
+        iter_count_post = global_trials + step_count + _device_index(1)
 
         (
             phi_hits_after,
@@ -1618,8 +2232,8 @@ def trace_fieldline(
             operand=(
                 phi_hits_after,
                 phi_count_after,
-                status_event,
-                _device_false(),
+                status_scan,
+                stop_scan,
                 iter_count_post,
                 phi_current,
                 phi_init_for_criteria,
@@ -1635,6 +2249,19 @@ def trace_fieldline(
             jnp.logical_and(accepted, first_accepted_step),
             phi_current,
             phi_init,
+        )
+        # boost's failed-step / no-progress checks; see
+        # ``_MAX_CONSECUTIVE_NO_PROGRESS_TRIALS``.
+        no_progress_next, status_after, stop_after = _step_control_progress(
+            no_progress=no_progress,
+            accepted=accepted,
+            nonfinite_state=step.nonfinite_state,
+            t=t,
+            t_next=t_next,
+            y=y,
+            k_first=k_first,
+            status=status_after,
+            stop=stop_after,
         )
         traj_next, mask_next, accepted_next = _record_trajectory_row(
             traj,
@@ -1660,23 +2287,25 @@ def trace_fieldline(
             phi_init_next,
             status_after,
             stop_after,
+            no_progress_next,
         )
 
     (
-        _step_count,
+        step_count_final,
         accepted_count,
         t_final,
         y_final,
-        _h_final,
-        _k_final,
+        h_final,
+        k_final,
         traj_final,
         mask_final,
         phi_hits_final,
         phi_hits_count_final,
-        _phi_last_final,
-        _phi_init_final,
+        phi_last_final,
+        phi_init_final,
         status_event_final,
         stop_at_exit,
+        no_progress_final,
     ) = _run_adaptive_steps(
         cond,
         body,
@@ -1709,7 +2338,7 @@ def trace_fieldline(
     )
     status = jnp.where(stop_at_exit, status_event_final, status_normal)
 
-    return FieldlineTracingResult(
+    result = FieldlineTracingResult(
         trajectory=traj_padded,
         mask=mask_final,
         steps_taken=accepted_count,
@@ -1718,6 +2347,34 @@ def trace_fieldline(
         phi_hits=phi_hits_final,
         phi_hits_count=phi_hits_count_final,
     )
+    next_state = CartesianTracingContinuationState(
+        trial_count=global_trials + step_count_final,
+        accepted_count=global_accepted + accepted_count,
+        t=t_final,
+        y=y_final,
+        h=h_final,
+        k_first=k_final,
+        phi_last=phi_last_final,
+        phi_initial=phi_init_final,
+        status_event=status_event_final,
+        stopped=stop_at_exit,
+        no_progress=no_progress_final,
+    )
+    return result, next_state
+
+
+def trace_fieldline(
+    spec: FieldlineTracingSpec,
+    y0: TracingStateInput,
+    magnetic_field_fn: Callable[[jax.Array], jax.Array],
+    phis: jax.Array | None = None,
+    stopping_criteria: tuple = (),
+) -> FieldlineTracingResult:
+    """Trace one fieldline and return the original fixed-shape result contract."""
+    result, _state = _trace_fieldline_chunk(
+        spec, y0, magnetic_field_fn, phis, stopping_criteria
+    )
+    return result
 
 
 def _make_fieldline_trace_one(spec, magnetic_field_fn, phis, stopping_criteria):
@@ -1878,7 +2535,7 @@ class GuidingCenterTracingSpec:
     atol: float
     max_steps: int
     dtmax: float = np.inf
-    max_root_iters: int = 60
+    max_root_iters: int = 200
     max_phi_hits: int = 128
     adaptive_loop: AdaptiveLoop = "scan"
 
@@ -1984,39 +2641,115 @@ def guiding_center_vacuum_rhs(
     def rhs(_t: jax.Array, y: jax.Array) -> jax.Array:
         del _t  # Field is autonomous; signature kept for ODE-driver shape.
         position, v_par_tail = jnp.split(y, [3])
-        v_par = jnp.reshape(v_par_tail, ())
         B_raw, dB_by_dX_raw = magnetic_field_fn(position)
         B = jnp.asarray(B_raw, dtype=y.dtype).reshape((3,))
         dB_by_dX = jnp.asarray(dB_by_dX_raw, dtype=y.dtype).reshape((3, 3))
-        abs_B = jnp.linalg.norm(B)
         # GradAbsB_j = B_l * dB_l/dx_j / |B|   (upstream GradAbsB_ref).
-        grad_abs_B = jnp.einsum("l,jl->j", B, dB_by_dX) / abs_B
-        # B x grad|B|
-        B_cross_grad_abs_B = jnp.cross(B, grad_abs_B)
-        v_perp2 = _device_array(2.0, y.dtype) * mu_arr * abs_B
-        fak1 = v_par / abs_B
-        fak2 = (
-            m_arr
-            / (q_arr * abs_B**3)
-            * (_device_array(0.5, y.dtype) * v_perp2 + v_par * v_par)
+        grad_abs_B = jnp.einsum("l,jl->j", B, dB_by_dX) / jnp.linalg.norm(B)
+        return _guiding_center_vacuum_dydt(
+            y, jnp.reshape(v_par_tail, ()), B, grad_abs_B, m_arr, q_arr, mu_arr
         )
-        dposition = fak1 * B + fak2 * B_cross_grad_abs_B
-        dv_par = -mu_arr * jnp.dot(B, grad_abs_B) / abs_B
-        return jnp.concatenate([dposition, jnp.reshape(dv_par, (1,))])
 
     return rhs
 
 
-def trace_guiding_center(
+def _guiding_center_vacuum_dydt(
+    y: jax.Array,
+    v_par: jax.Array,
+    B: jax.Array,
+    grad_abs_B: jax.Array,
+    m_arr: jax.Array,
+    q_arr: jax.Array,
+    mu_arr: jax.Array,
+) -> jax.Array:
+    """``GuidingCenterVacuumRHS::operator()`` once ``B`` and ``grad|B|`` are known.
+
+    The one copy of the drift-kinetic arithmetic; the two right-hand-side
+    builders above and below differ only in where ``grad|B|`` comes from, and
+    the operation order here is upstream's (``simsoptpp/tracing.cpp``:
+    ``BcrossGradAbsB``, ``v_perp2``, ``fak1``, ``fak2``), because that order is
+    what decides the ``inf``/``nan`` pattern where ``|B|`` vanishes.
+    """
+
+    abs_B = jnp.linalg.norm(B)
+    # B x grad|B|
+    B_cross_grad_abs_B = jnp.cross(B, grad_abs_B)
+    v_perp2 = _device_array(2.0, y.dtype) * mu_arr * abs_B
+    fak1 = v_par / abs_B
+    fak2 = (
+        m_arr
+        / (q_arr * abs_B**3)
+        * (_device_array(0.5, y.dtype) * v_perp2 + v_par * v_par)
+    )
+    dposition = fak1 * B + fak2 * B_cross_grad_abs_B
+    dv_par = -mu_arr * jnp.dot(B, grad_abs_B) / abs_B
+    return jnp.concatenate([dposition, jnp.reshape(dv_par, (1,))])
+
+
+def guiding_center_vacuum_rhs_cached(
+    magnetic_field_fn: Callable[
+        [jax.Array, InterpolatedFieldCylCache],
+        tuple[jax.Array, jax.Array, InterpolatedFieldCylCache],
+    ],
+    m: float,
+    q: float,
+    mu: float,
+) -> Callable[
+    [jax.Array, jax.Array, InterpolatedFieldCylCache],
+    tuple[jax.Array, InterpolatedFieldCylCache],
+]:
+    r"""``rhs(t, y, cache) -> (dy/dt, cache)`` for a field with an output buffer.
+
+    Same equations and the same arithmetic as
+    :func:`guiding_center_vacuum_rhs` (both call
+    :func:`_guiding_center_vacuum_dydt`), with two differences, both of which
+    bring the port CLOSER to ``GuidingCenterVacuumRHS::operator()``
+    (``legacy native extension/tracing.cpp``):
+
+    1. ``magnetic_field_fn`` returns ``grad|B|`` itself, as
+       ``field->GradAbsB_ref()`` does, so ``|B|`` divides the gradient once
+       here instead of twice through a ``dB_by_dX`` round trip.
+    2. The field's output buffer is threaded through the call, so a query
+       outside the interpolation domain returns what upstream returns there --
+       the previous query's value -- instead of zero. See
+       :class:`~simsopt_jax.core.interpolated_field.InterpolatedFieldCylCache`
+       for the C++ contract and
+       :func:`~simsopt_jax.core.interpolated_field.interpolated_field_state_B_GradAbsB_cached`
+       for the evaluation.
+    """
+
+    m_arr = _as_device_array(m, jnp.float64)
+    q_arr = _as_device_array(q, jnp.float64)
+    mu_arr = _as_device_array(mu, jnp.float64)
+
+    def rhs(
+        _t: jax.Array, y: jax.Array, cache: InterpolatedFieldCylCache
+    ) -> tuple[jax.Array, InterpolatedFieldCylCache]:
+        del _t  # Field is autonomous; signature kept for ODE-driver shape.
+        position, v_par_tail = jnp.split(y, [3])
+        B_raw, grad_abs_B_raw, cache_next = magnetic_field_fn(position, cache)
+        B = jnp.asarray(B_raw, dtype=y.dtype).reshape((3,))
+        grad_abs_B = jnp.asarray(grad_abs_B_raw, dtype=y.dtype).reshape((3,))
+        dydt = _guiding_center_vacuum_dydt(
+            y, jnp.reshape(v_par_tail, ()), B, grad_abs_B, m_arr, q_arr, mu_arr
+        )
+        return dydt, cache_next
+
+    return rhs
+
+
+def _trace_guiding_center_chunk(
     spec: GuidingCenterTracingSpec,
     y0: TracingStateInput,
-    magnetic_field_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array]],
+    magnetic_field_fn: Callable[..., tuple[jax.Array, ...]],
     m: float,
     q: float,
     mu: float,
     phis: jax.Array | None = None,
     stopping_criteria: tuple = (),
-) -> GuidingCenterTracingResult:
+    continuation: CartesianTracingContinuationState | None = None,
+    field_cache_init: InterpolatedFieldCylCache | None = None,
+) -> tuple[GuidingCenterTracingResult, CartesianTracingContinuationState]:
     """Trace a guiding-centre orbit from ``y0`` for ``spec.tmax`` seconds.
 
     Parameters
@@ -2040,13 +2773,8 @@ def trace_guiding_center(
         Tuple of JAX-side stopping criterion dataclasses. See
         :func:`trace_fieldline` for the contract.
 
-    Returns
-    -------
-    result
-        :class:`GuidingCenterTracingResult` with a padded
-        ``(max_steps + 1, 5)`` trajectory, a mask, an accepted-step
-        count, an exit status, ``t_final``, and the phi-crossing
-        buffer.
+    Returns a chunk-local result and immutable state for an exact next chunk.
+    ``spec.max_steps`` bounds this call's trials; it is not the total horizon.
     """
 
     dtype = jnp.float64
@@ -2064,19 +2792,51 @@ def trace_guiding_center(
         raise ValueError(f"max_phi_hits must be positive, got {max_phi_hits}")
     max_root_iters = int(spec.max_root_iters)
 
-    rhs = guiding_center_vacuum_rhs(magnetic_field_fn, m, q, mu)
-    h0 = _initial_step_size(t0, tmax, dtmax, _PARTICLE_INITIAL_STEP_FRACTION)
-    k0 = rhs(t0, y0_arr)
+    # ``field_cache_init`` decides the field contract this chunk mirrors; see
+    # :func:`_dopri5_stage_step`. ``None`` is a field that writes every output
+    # row (analytic fields); an :class:`InterpolatedFieldCylCache` is a field
+    # that leaves its output buffer untouched outside its domain.
+    if field_cache_init is None:
+        rhs = guiding_center_vacuum_rhs(magnetic_field_fn, m, q, mu)
+    else:
+        rhs = guiding_center_vacuum_rhs_cached(magnetic_field_fn, m, q, mu)
+    if continuation is None:
+        h0 = _initial_step_size(t0, tmax, dtmax, _PARTICLE_INITIAL_STEP_FRACTION)
+        if field_cache_init is None:
+            k0 = rhs(t0, y0_arr)
+            field_cache_start = None
+        else:
+            # boost's ``dense_output_runge_kutta`` evaluates the leading FSAL
+            # derivative once at the initial state before the first trial, and
+            # that evaluation writes the field's output buffer.
+            k0, field_cache_start = rhs(t0, y0_arr, field_cache_init)
+        start_t = t0
+        start_y = y0_arr
+        global_trials = _device_index(0)
+        global_accepted = _device_index(0)
+        status_initial = _device_index(0)
+        stopped_initial = _device_false()
+        no_progress_initial = _device_index(0)
+    else:
+        h0 = continuation.h
+        k0 = continuation.k_first
+        field_cache_start = continuation.field_cache
+        start_t = continuation.t
+        start_y = continuation.y
+        global_trials = continuation.trial_count
+        global_accepted = continuation.accepted_count
+        status_initial = continuation.status_event
+        stopped_initial = continuation.stopped
+        no_progress_initial = continuation.no_progress
     one = _device_array(1.0, dtype)
     lane_zero, lane_zero_i32, lane_false = _lane_axis_carry_zeroes(y0_arr)
     accepted_count_init = _device_index(0) + lane_zero_i32
-    t0_init = t0 + lane_zero
 
     # Pre-allocate the trajectory carry with columns (t, x, y, z, v_par).
     # Row 0 holds the initial state; rows 1..max_steps fill in as
     # accepted steps occur. Padding rows at the end of the run get the
     # final accepted state.
-    traj_init_row = jnp.concatenate((jnp.reshape(t0, (1,)), y0_arr), axis=0)
+    traj_init_row = jnp.concatenate((jnp.reshape(start_t, (1,)), start_y), axis=0)
     traj = jnp.concatenate(
         (
             jnp.reshape(traj_init_row, (1, 5)),
@@ -2104,23 +2864,30 @@ def trace_guiding_center(
     num_phis = int(phis_arr.shape[0])
 
     y0_x, y0_y, _y0_z = _split_xyz(y0_arr)
-    phi_init = _continuous_phi(y0_x, y0_y, _device_array(np.pi, dtype), dtype)
+    if continuation is None:
+        phi_init = _continuous_phi(y0_x, y0_y, _device_array(np.pi, dtype), dtype)
+        phi_last = phi_init
+    else:
+        phi_init = continuation.phi_initial
+        phi_last = continuation.phi_last
 
     init_carry = (
         _device_index(0),  # step_count
         accepted_count_init,
-        t0_init,
-        y0_arr,
+        start_t + lane_zero,
+        start_y,
         h0,
         k0,
         traj,
         mask,
         phi_hits_buf,
         phi_hits_count_init,
+        phi_last,
         phi_init,
-        phi_init,
-        _device_index(0) + lane_zero_i32,  # status_event
-        lane_false,
+        status_initial + lane_zero_i32,  # status_event
+        stopped_initial | lane_false,
+        no_progress_initial + lane_zero_i32,  # consecutive non-advancing trials
+        field_cache_start,  # the field's output buffer; None for analytic fields
     )
 
     max_steps_i32 = _device_index(max_steps)
@@ -2143,6 +2910,8 @@ def trace_guiding_center(
             _phi_init,
             _status_event,
             stop,
+            _no_progress,
+            _field_cache,
         ) = carry
         not_done = t < tmax
         budget_ok = step_count < max_steps_i32
@@ -2169,6 +2938,8 @@ def trace_guiding_center(
             phi_init,
             status_event,
             _stop,
+            no_progress,
+            field_cache,
         ) = carry
         step = _dopri5_adaptive_step(
             rhs,
@@ -2181,6 +2952,7 @@ def trace_guiding_center(
             rtol,
             atol,
             dtype,
+            field_cache,
         )
         h_clamped = step.h_clamped
         y_new = step.y_new
@@ -2194,47 +2966,36 @@ def trace_guiding_center(
         y_new_x, y_new_y, _y_new_z = _split_xyz(y_new)
         phi_current = _continuous_phi(y_new_x, y_new_y, phi_last, dtype)
 
-        def state_at_fraction(s):
-            """Sub-step DOPRI5 from ``(t, y)`` with step ``s * h_clamped``.
+        state_at_time = _dense_output_query(step.stages, y, t, h_clamped)
 
-            Re-runs a fresh DOPRI5 step from the prior accepted state
-            so the returned state has 5th-order RK accuracy rather than
-            the O(h) error of a linear interpolant. The FSAL value
-            ``k_first`` is reused as the leading-stage derivative.
-            """
-            h_sub = s * h_clamped
-            y_sub, _err, _k7 = dopri5_step(rhs, t, y, h_sub, k_first)
-            return y_sub
-
-        def scan_phis(args):
-            hits_in, count_in, phi_last_in, phi_curr_in = args
-            return _scan_angle_plane_events(
-                hits=hits_in,
-                count=count_in,
-                angle_last=phi_last_in,
-                angle_current=phi_curr_in,
-                targets=phis_arr,
-                num_targets=num_phis,
-                two_pi=two_pi,
-                dtype=dtype,
-                t=t,
-                h_clamped=h_clamped,
-                max_root_iters=max_root_iters,
-                max_hits_i32=max_phi_hits_i32,
-                state_at_fraction=state_at_fraction,
-                angle_at_state=lambda state, angle_near: _continuous_phi_from_state(
-                    state, angle_near, dtype
-                ),
-            )
-
-        phi_hits_after, phi_count_after = jax.lax.cond(
-            accepted,
-            scan_phis,
-            lambda args: (args[0], args[1]),
-            operand=(phi_hits_in, phi_hits_count_in, phi_last, phi_current),
+        (
+            phi_hits_after,
+            phi_count_after,
+            status_scan,
+            stop_scan,
+        ) = _scan_angle_plane_events(
+            hits=phi_hits_in,
+            count=phi_hits_count_in,
+            status=status_event,
+            stop=lane_false,
+            angle_last=phi_last,
+            angle_current=phi_current,
+            targets=phis_arr,
+            num_targets=num_phis,
+            two_pi=two_pi,
+            dtype=dtype,
+            t=t,
+            h_clamped=h_clamped,
+            max_root_iters=max_root_iters,
+            enabled=accepted,
+            max_hits_i32=max_phi_hits_i32,
+            state_at_time=state_at_time,
+            angle_at_state=lambda state, angle_near: _continuous_phi_from_state(
+                state, angle_near, dtype
+            ),
         )
 
-        first_accepted_step = accepted_count == _device_index(0)
+        first_accepted_step = (global_accepted + accepted_count) == _device_index(0)
         phi_init_for_criteria = jnp.where(
             first_accepted_step,
             phi_current,
@@ -2266,7 +3027,7 @@ def trace_guiding_center(
                 max_hits_i32=max_phi_hits_i32,
             )
 
-        iter_count_post = step_count + _device_index(1)
+        iter_count_post = global_trials + step_count + _device_index(1)
 
         (
             phi_hits_after,
@@ -2280,8 +3041,8 @@ def trace_guiding_center(
             operand=(
                 phi_hits_after,
                 phi_count_after,
-                status_event,
-                _device_false(),
+                status_scan,
+                stop_scan,
                 iter_count_post,
                 phi_current,
                 phi_init_for_criteria,
@@ -2296,6 +3057,19 @@ def trace_guiding_center(
             jnp.logical_and(accepted, first_accepted_step),
             phi_current,
             phi_init,
+        )
+        # boost's failed-step / no-progress checks; see
+        # ``_MAX_CONSECUTIVE_NO_PROGRESS_TRIALS``.
+        no_progress_next, status_after, stop_after = _step_control_progress(
+            no_progress=no_progress,
+            accepted=accepted,
+            nonfinite_state=step.nonfinite_state,
+            t=t,
+            t_next=t_next,
+            y=y,
+            k_first=k_first,
+            status=status_after,
+            stop=stop_after,
         )
         traj_next, mask_next, accepted_next = _record_trajectory_row(
             traj,
@@ -2321,23 +3095,29 @@ def trace_guiding_center(
             phi_init_next,
             status_after,
             stop_after,
+            no_progress_next,
+            # The C++ buffer is written by every right-hand-side evaluation,
+            # so it advances on a rejected trial too.
+            step.stages.field_cache,
         )
 
     (
-        _step_count,
+        step_count_final,
         accepted_count,
         t_final,
         y_final,
-        _h_final,
-        _k_final,
+        h_final,
+        k_final,
         traj_final,
         mask_final,
         phi_hits_final,
         phi_hits_count_final,
-        _phi_last_final,
-        _phi_init_final,
+        phi_last_final,
+        phi_init_final,
         status_event_final,
         stop_at_exit,
+        no_progress_final,
+        field_cache_final,
     ) = _run_adaptive_steps(
         cond,
         body,
@@ -2364,7 +3144,7 @@ def trace_guiding_center(
     )
     status = jnp.where(stop_at_exit, status_event_final, status_normal)
 
-    return GuidingCenterTracingResult(
+    result = GuidingCenterTracingResult(
         trajectory=traj_padded,
         mask=mask_final,
         steps_taken=accepted_count,
@@ -2373,6 +3153,38 @@ def trace_guiding_center(
         phi_hits=phi_hits_final,
         phi_hits_count=phi_hits_count_final,
     )
+    next_state = CartesianTracingContinuationState(
+        trial_count=global_trials + step_count_final,
+        accepted_count=global_accepted + accepted_count,
+        t=t_final,
+        y=y_final,
+        h=h_final,
+        k_first=k_final,
+        phi_last=phi_last_final,
+        phi_initial=phi_init_final,
+        status_event=status_event_final,
+        stopped=stop_at_exit,
+        no_progress=no_progress_final,
+        field_cache=field_cache_final,
+    )
+    return result, next_state
+
+
+def trace_guiding_center(
+    spec: GuidingCenterTracingSpec,
+    y0: TracingStateInput,
+    magnetic_field_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array]],
+    m: float,
+    q: float,
+    mu: float,
+    phis: jax.Array | None = None,
+    stopping_criteria: tuple = (),
+) -> GuidingCenterTracingResult:
+    """Trace one guiding center and return the original fixed-shape result."""
+    result, _state = _trace_guiding_center_chunk(
+        spec, y0, magnetic_field_fn, m, q, mu, phis, stopping_criteria
+    )
+    return result
 
 
 def _make_guiding_center_trace_one(
@@ -2599,11 +3411,12 @@ def _run_dopri5_4state(
         mask,
         jnp.where(
             initial_axis_invalid,
-            jnp.asarray(_BOOZER_AXIS_STATUS, dtype=jnp.int32),
+            jnp.asarray(TRACING_STATUS_BOOZER_AXIS, dtype=jnp.int32),
             jnp.asarray(0, dtype=jnp.int32),
         )
         + lane_zero_i32,
         initial_axis_invalid | lane_false,
+        _device_index(0) + lane_zero_i32,  # consecutive non-advancing trials
     )
 
     max_steps_i32 = jnp.asarray(max_steps, dtype=jnp.int32)
@@ -2620,6 +3433,7 @@ def _run_dopri5_4state(
             _mask,
             _status_event,
             stop,
+            _no_progress,
         ) = carry
         not_done = t < tmax
         budget_ok = step_count < max_steps_i32
@@ -2642,6 +3456,7 @@ def _run_dopri5_4state(
             mask,
             status_event,
             _stop,
+            no_progress,
         ) = carry
         step = _dopri5_adaptive_step(
             rhs,
@@ -2662,18 +3477,31 @@ def _run_dopri5_4state(
         t_next = step.t_next
         y_next = step.y_next
         k_next = step.k_next
+        status_axis = jnp.where(
+            axis_invalid,
+            jnp.asarray(TRACING_STATUS_BOOZER_AXIS, dtype=jnp.int32),
+            status_event,
+        )
+        # boost's failed-step / no-progress checks; see
+        # ``_MAX_CONSECUTIVE_NO_PROGRESS_TRIALS``.
+        no_progress_next, status_next, stop_next = _step_control_progress(
+            no_progress=no_progress,
+            accepted=accepted,
+            nonfinite_state=step.nonfinite_state,
+            t=t,
+            t_next=t_next,
+            y=y,
+            k_first=k_first,
+            status=status_axis,
+            stop=axis_invalid,
+        )
         traj_next, mask_next, accepted_next = _record_trajectory_row(
             traj,
             mask,
             accepted_count,
             t_next,
             y_next,
-            _should_record_accepted_step(accepted, axis_invalid),
-        )
-        status_next = jnp.where(
-            axis_invalid,
-            jnp.asarray(_BOOZER_AXIS_STATUS, dtype=jnp.int32),
-            status_event,
+            _should_record_accepted_step(accepted, stop_next),
         )
         return (
             step_count + jnp.asarray(1, dtype=jnp.int32),
@@ -2685,7 +3513,8 @@ def _run_dopri5_4state(
             traj_next,
             mask_next,
             status_next,
-            axis_invalid,
+            stop_next,
+            no_progress_next,
         )
 
     (
@@ -2699,6 +3528,7 @@ def _run_dopri5_4state(
         mask_final,
         status_event_final,
         stop_at_exit,
+        no_progress_final,
     ) = _run_adaptive_steps(
         cond,
         body,
@@ -3360,11 +4190,12 @@ def trace_guiding_center_boozer(
         zeta_init,  # transit criterion baseline, set on first accepted step
         jnp.where(
             initial_axis_invalid,
-            jnp.asarray(_BOOZER_AXIS_STATUS, dtype=jnp.int32),
+            jnp.asarray(TRACING_STATUS_BOOZER_AXIS, dtype=jnp.int32),
             jnp.asarray(0, dtype=jnp.int32),
         )
         + lane_zero_i32,  # status_event
         initial_axis_invalid | lane_false,  # stop flag
+        _device_index(0) + lane_zero_i32,  # consecutive non-advancing trials
     )
 
     max_steps_i32 = jnp.asarray(max_steps, dtype=jnp.int32)
@@ -3387,6 +4218,7 @@ def trace_guiding_center_boozer(
             _zeta_init,
             _status_event,
             stop,
+            _no_progress,
         ) = carry
         not_done = t < tmax
         budget_ok = step_count < max_steps_i32
@@ -3413,6 +4245,7 @@ def trace_guiding_center_boozer(
             zeta_init,
             status_event,
             _stop,
+            no_progress,
         ) = carry
         step = _dopri5_adaptive_step(
             rhs,
@@ -3442,37 +4275,33 @@ def trace_guiding_center_boozer(
         # near ``zeta_last``.
         zeta_current = _continuous_angle(y_new[2], zeta_last, dtype)
 
-        def state_at_fraction(s):
-            h_sub = s * h_clamped
-            y_sub, _err, _k7 = dopri5_step(rhs, t, y, h_sub, k_first)
-            return y_sub
+        state_at_time = _dense_output_query(step.stages, y, t, h_clamped)
 
-        def scan_zetas(args):
-            hits_in, count_in, zeta_last_in, zeta_curr_in = args
-            return _scan_angle_plane_events(
-                hits=hits_in,
-                count=count_in,
-                angle_last=zeta_last_in,
-                angle_current=zeta_curr_in,
-                targets=zetas_arr,
-                num_targets=num_zetas,
-                two_pi=two_pi,
-                dtype=dtype,
-                t=t,
-                h_clamped=h_clamped,
-                max_root_iters=max_root_iters,
-                max_hits_i32=max_phi_hits_i32,
-                state_at_fraction=state_at_fraction,
-                angle_at_state=lambda state, angle_near: _continuous_angle(
-                    state[2], angle_near, dtype
-                ),
-            )
-
-        phi_hits_after, phi_count_after = jax.lax.cond(
-            accepted_valid,
-            scan_zetas,
-            lambda args: (args[0], args[1]),
-            operand=(phi_hits_in, phi_hits_count_in, zeta_last, zeta_current),
+        (
+            phi_hits_after,
+            phi_count_after,
+            status_scan,
+            stop_scan,
+        ) = _scan_angle_plane_events(
+            hits=phi_hits_in,
+            count=phi_hits_count_in,
+            status=status_event,
+            stop=jnp.asarray(False),
+            angle_last=zeta_last,
+            angle_current=zeta_current,
+            targets=zetas_arr,
+            num_targets=num_zetas,
+            two_pi=two_pi,
+            dtype=dtype,
+            t=t,
+            h_clamped=h_clamped,
+            max_root_iters=max_root_iters,
+            enabled=accepted_valid,
+            max_hits_i32=max_phi_hits_i32,
+            state_at_time=state_at_time,
+            angle_at_state=lambda state, angle_near: _continuous_angle(
+                state[2], angle_near, dtype
+            ),
         )
 
         # ── Stopping criteria check on accepted state ──
@@ -3523,8 +4352,8 @@ def trace_guiding_center_boozer(
             operand=(
                 phi_hits_after,
                 phi_count_after,
-                status_event,
-                jnp.asarray(False),
+                status_scan,
+                stop_scan,
                 iter_count_post,
                 zeta_current,
                 zeta_init_for_criteria,
@@ -3532,7 +4361,7 @@ def trace_guiding_center_boozer(
         )
         status_after = jnp.where(
             axis_invalid,
-            jnp.asarray(_BOOZER_AXIS_STATUS, dtype=jnp.int32),
+            jnp.asarray(TRACING_STATUS_BOOZER_AXIS, dtype=jnp.int32),
             status_after,
         )
         stop_after = jnp.logical_or(stop_after, axis_invalid)
@@ -3545,6 +4374,19 @@ def trace_guiding_center_boozer(
             jnp.logical_and(accepted_valid, first_valid_accepted_step),
             zeta_current,
             zeta_init,
+        )
+        # boost's failed-step / no-progress checks; see
+        # ``_MAX_CONSECUTIVE_NO_PROGRESS_TRIALS``.
+        no_progress_next, status_after, stop_after = _step_control_progress(
+            no_progress=no_progress,
+            accepted=accepted,
+            nonfinite_state=step.nonfinite_state,
+            t=t,
+            t_next=t_next,
+            y=y,
+            k_first=k_first,
+            status=status_after,
+            stop=stop_after,
         )
         traj_next, mask_next, accepted_next = _record_trajectory_row(
             traj,
@@ -3570,6 +4412,7 @@ def trace_guiding_center_boozer(
             zeta_init_next,
             status_after,
             stop_after,
+            no_progress_next,
         )
 
     (
@@ -3587,6 +4430,7 @@ def trace_guiding_center_boozer(
         _zeta_init_final,
         status_event_final,
         stop_at_exit,
+        no_progress_final,
     ) = _run_adaptive_steps(
         cond,
         body,
@@ -3894,7 +4738,7 @@ class FullorbitTracingSpec:
     atol: float
     max_steps: int
     dtmax: float = np.inf
-    max_root_iters: int = 60
+    max_root_iters: int = 200
     max_phi_hits: int = 128
     adaptive_loop: AdaptiveLoop = "scan"
 
@@ -4137,6 +4981,7 @@ def trace_fullorbit(
         phi_init,  # transit criterion baseline, set on first accepted step
         _device_index(0) + lane_zero_i32,  # status_event
         lane_false,  # stop flag
+        _device_index(0) + lane_zero_i32,  # consecutive non-advancing trials
     )
 
     max_steps_i32 = _device_index(max_steps)
@@ -4159,6 +5004,7 @@ def trace_fullorbit(
             _phi_init,
             _status_event,
             stop,
+            _no_progress,
         ) = carry
         not_done = t < tmax
         budget_ok = step_count < max_steps_i32
@@ -4185,6 +5031,7 @@ def trace_fullorbit(
             phi_init,
             status_event,
             _stop,
+            no_progress,
         ) = carry
         step = _dopri5_adaptive_step(
             rhs,
@@ -4209,43 +5056,33 @@ def trace_fullorbit(
         # ── Phi-plane crossing detection on accepted steps ──
         phi_current = _continuous_phi(y_new[0], y_new[1], phi_last, dtype)
 
-        def state_at_fraction(s):
-            """Sub-step DOPRI5 from ``(t, y)`` with step ``s * h_clamped``.
+        state_at_time = _dense_output_query(step.stages, y, t, h_clamped)
 
-            Re-runs a fresh DOPRI5 step from the prior accepted state
-            so the returned 6-state has 5th-order RK accuracy. FSAL
-            value ``k_first`` is reused as the leading-stage derivative.
-            """
-            h_sub = s * h_clamped
-            y_sub, _err, _k7 = dopri5_step(rhs, t, y, h_sub, k_first)
-            return y_sub
-
-        def scan_phis(args):
-            hits_in, count_in, phi_last_in, phi_curr_in = args
-            return _scan_angle_plane_events(
-                hits=hits_in,
-                count=count_in,
-                angle_last=phi_last_in,
-                angle_current=phi_curr_in,
-                targets=phis_arr,
-                num_targets=num_phis,
-                two_pi=two_pi,
-                dtype=dtype,
-                t=t,
-                h_clamped=h_clamped,
-                max_root_iters=max_root_iters,
-                max_hits_i32=max_phi_hits_i32,
-                state_at_fraction=state_at_fraction,
-                angle_at_state=lambda state, angle_near: _continuous_phi_from_state(
-                    state, angle_near, dtype
-                ),
-            )
-
-        phi_hits_after, phi_count_after = jax.lax.cond(
-            accepted,
-            scan_phis,
-            lambda args: (args[0], args[1]),
-            operand=(phi_hits_in, phi_hits_count_in, phi_last, phi_current),
+        (
+            phi_hits_after,
+            phi_count_after,
+            status_scan,
+            stop_scan,
+        ) = _scan_angle_plane_events(
+            hits=phi_hits_in,
+            count=phi_hits_count_in,
+            status=status_event,
+            stop=_device_false(),
+            angle_last=phi_last,
+            angle_current=phi_current,
+            targets=phis_arr,
+            num_targets=num_phis,
+            two_pi=two_pi,
+            dtype=dtype,
+            t=t,
+            h_clamped=h_clamped,
+            max_root_iters=max_root_iters,
+            enabled=accepted,
+            max_hits_i32=max_phi_hits_i32,
+            state_at_time=state_at_time,
+            angle_at_state=lambda state, angle_near: _continuous_phi_from_state(
+                state, angle_near, dtype
+            ),
         )
 
         # ── Stopping criteria check on accepted state ──
@@ -4295,8 +5132,8 @@ def trace_fullorbit(
             operand=(
                 phi_hits_after,
                 phi_count_after,
-                status_event,
-                _device_false(),
+                status_scan,
+                stop_scan,
                 iter_count_post,
                 phi_current,
                 phi_init_for_criteria,
@@ -4311,6 +5148,19 @@ def trace_fullorbit(
             jnp.logical_and(accepted, first_accepted_step),
             phi_current,
             phi_init,
+        )
+        # boost's failed-step / no-progress checks; see
+        # ``_MAX_CONSECUTIVE_NO_PROGRESS_TRIALS``.
+        no_progress_next, status_after, stop_after = _step_control_progress(
+            no_progress=no_progress,
+            accepted=accepted,
+            nonfinite_state=step.nonfinite_state,
+            t=t,
+            t_next=t_next,
+            y=y,
+            k_first=k_first,
+            status=status_after,
+            stop=stop_after,
         )
         traj_next, mask_next, accepted_next = _record_trajectory_row(
             traj,
@@ -4336,6 +5186,7 @@ def trace_fullorbit(
             phi_init_next,
             status_after,
             stop_after,
+            no_progress_next,
         )
 
     (
@@ -4353,6 +5204,7 @@ def trace_fullorbit(
         _phi_init_final,
         status_event_final,
         stop_at_exit,
+        no_progress_final,
     ) = _run_adaptive_steps(
         cond,
         body,

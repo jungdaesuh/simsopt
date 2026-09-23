@@ -61,7 +61,18 @@ def solve_weighted_quadratic(
     rtol: float,
     atol: float,
 ) -> WeightedQuadraticDeviceResult:
-    """Solve a small diagonal weighted least-squares problem on one device."""
+    """Solve a small diagonal weighted least-squares problem on one device.
+
+    NOT the official mirror route for ``1_Simple/just_a_quadratic.py``. The
+    official example hands the problem to ``least_squares_serial_solve``, which
+    is host ``scipy.optimize.least_squares`` (TRF, 2-point Jacobian); the
+    mirror reproduces that in ``examples/jax/1_Simple/just_a_quadratic.py``
+    through ``examples/jax/official_tiny_least_squares.solve_jax_residual``.
+    This device solver is a different algorithm over the same physics and has
+    no caller outside ``tests/integration/``
+    ``test_jax_weighted_quadratic_strict_transfer.py``, which it exists to keep
+    exercising; it may not be used to publish an official observable.
+    """
     initial_device = jnp.asarray(initial_parameters, dtype=jnp.float64)
     targets_device = jnp.asarray(targets, dtype=jnp.float64)
     weights_device = jnp.asarray(weights, dtype=jnp.float64)

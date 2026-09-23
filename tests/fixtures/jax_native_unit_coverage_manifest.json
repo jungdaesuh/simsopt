@@ -292,11 +292,11 @@
         },
         {
           "anchor": "ids=(\"cpu_parity\", \"gpu_parity\")",
-          "cite": "tests/conftest.py:519"
+          "cite": "tests/conftest.py:520"
         },
         {
           "anchor": "\"jax/native_unit_parity/test_force_parity.py\",",
-          "cite": "tests/conftest.py:604"
+          "cite": "tests/conftest.py:605"
         }
       ],
       "id": "MF-8",
@@ -801,11 +801,11 @@
         },
         {
           "anchor": "return non_quasi_symmetric_ratio(",
-          "cite": "src/simsopt_jax_adapters/geo/surface_objectives.py:2528"
+          "cite": "src/simsopt_jax_adapters/geo/surface_objectives.py:2530"
         },
         {
           "anchor": "class NonQuasiSymmetricRatioJAX(_BoozerObjectiveBase):",
-          "cite": "src/simsopt_jax_adapters/geo/surface_objectives.py:3025"
+          "cite": "src/simsopt_jax_adapters/geo/surface_objectives.py:3027"
         },
         {
           "anchor": "return non_quasi_symmetric_residual_primitives(",
@@ -1570,7 +1570,7 @@
       "evidence": [
         {
           "anchor": "class NonQuasiSymmetricRatioJAX(_BoozerObjectiveBase):",
-          "cite": "src/simsopt_jax_adapters/geo/surface_objectives.py:3025"
+          "cite": "src/simsopt_jax_adapters/geo/surface_objectives.py:3027"
         },
         {
           "anchor": "Exact parity for the ``2_Intermediate/boozerQA.py`` mirror.",

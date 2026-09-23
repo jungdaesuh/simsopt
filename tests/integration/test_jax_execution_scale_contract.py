@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 from examples.jax._manifest import resolve_example_implementation
 from examples.jax.manifest_runtime import RuntimeExample, load_runtime_contract_pair
+from examples.jax.outer_optimizer_policy import parse_outer_optimizer_policy
 from examples.jax.parity import child as parity_child
 from examples.jax.parity import provenance as parity_provenance
 from examples.jax.parity.cases import get_case
@@ -33,6 +34,8 @@ from examples.jax.run_examples import (
     build_child_command as build_example_command,
 )
 from examples.jax.run_parity import _parse_arguments as parse_parity_arguments
+from simsopt import _examples_runtime as native_example_runtime
+from simsopt_contracts import examples_runtime as shared_example_runtime
 from simsopt_jax.examples import ExampleResult, ExecutionScale, run_example
 
 
@@ -90,10 +93,16 @@ def _example() -> RuntimeExample:
         status="ready",
         lanes=("cpu-smoke", "gpu-strict"),
         smoke_args=("--max-steps", "2"),
-        classification="mirror",
+        classification="adapter",
         teaching_kind="one_to_one",
         source="1_Simple/just_a_quadratic.py",
         compatibility=None,
+        outer_optimizer_policy=parse_outer_optimizer_policy(
+            "scipy-trf-over-jax-quadratic",
+            example_id="native-just-a-quadratic",
+            example_path="1_Simple/just_a_quadratic.py",
+            ready=True,
+        ),
     )
 
 
@@ -470,3 +479,27 @@ def test_native_child_records_native_synchronization_when_jax_is_loaded(
     assert (
         receipt.provenance.measurement_synchronization == "native synchronous execution"
     )
+
+
+def test_native_example_runtime_reexports_one_shared_implementation() -> None:
+    assert native_example_runtime.ExampleResult is shared_example_runtime.ExampleResult
+    assert native_example_runtime.run_example is shared_example_runtime.run_example
+    assert issubclass(ExampleResult, shared_example_runtime.ExampleResult)
+
+
+def test_shared_example_runtime_imports_without_native_or_jax() -> None:
+    completed = subprocess.run(
+        (
+            sys.executable,
+            "-S",
+            "-c",
+            "import sys; from simsopt_contracts import examples_runtime; "
+            "assert examples_runtime.EXECUTION_SCALES == ('bounded', 'native_default'); "
+            "assert not {'simsopt', 'simsoptpp', 'jax', 'jaxlib'} & sys.modules.keys()",
+        ),
+        cwd=Path(__file__).resolve().parents[2],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr

@@ -3,146 +3,244 @@
 JAX GPU performance
 ===================
 
-This page reports measured performance of the JAX GPU backend against the
-native CPU backend on an NVIDIA RTX 5090 accelerator in FP64. Each row below
-names the workload it covers and the parity check that was applied. The
-numbers do not transfer to other resolutions, grid sizes, or problems; see
-`When to use the GPU backend`_ for the measured crossover points.
+These measurements use an NVIDIA RTX 5090 in FP64. The official-example scope
+on this page means Python examples present in ``hiddenSymmetries/simsopt``
+``master`` at commit ``9e027eac38028d57aa23777be52a781aa860e347``.
+That source identity does not make a locally built native extension an official
+upstream binary. Workload, source, solver policy, timing boundary, and native
+comparator matter for every ratio below. Results from local-only workloads are
+kept separately under `Historical branch-only experiments`_.
 
-What was measured and how
--------------------------
+Official upstream example coverage
+----------------------------------
 
-JAX timings are reported two ways. *Warm* timings reuse a persistent
-compilation cache and represent steady-state execution after the compiled
-executables are cached. *Cold* timings use a fresh compilation cache and
-include compilation time. The first call to a compiled function is the slow
-one; later synchronized calls are timed separately.
-
-Native timings are the best result of an OpenMP thread-count sweep (4, 8, 16,
-and 32 threads, best value kept per workload). Comparisons run native and JAX
-lanes back to back at matched solver policy and matched work. Speedups are
-native-seconds-over-JAX-seconds ratios: the median of paired per-run ratios
-for the single-stage rows, and ratios of lane medians elsewhere.
-
-Results
--------
+The 2026-09-22 UTC verification ran all 25 eligible examples mapped to that
+upstream commit at their shipped/default work budgets on validation snapshot
+``998148365e8db55577b4372c4c791ef6bc20cc35``. These are separate native/JAX
+CPU and native/JAX GPU comparisons, not the full upstream example catalog or
+a complete three-lane comparison matrix.
 
 .. list-table::
    :header-rows: 1
-   :widths: 26 12 12 12 22 14
 
-   * - Workload (scope)
-     - JAX warm
-     - Native best
-     - Speedup
-     - Parity
-     - Packet (date)
-   * - Nested least-squares Boozer solve, NCSX 48x48, unguarded algorithm
+   * - Comparison
+     - Case-contract pass
+     - Qualified quality-band
+     - Failed
+   * - Native / JAX CPU
+     - 20
+     - 5
+     - 0
+   * - Native / JAX GPU
+     - 19
+     - 4
+     - 2
+
+The four qualified GPU cases are BoozerQA, coil forces, finite-build stage two,
+and minimal stage two. Coil forces retains its raw GPU solver failure. QFM's
+GPU endpoint-quality failure and the NCSX GPU long-trajectory comparison
+failure remain unresolved. Passing a case contract or an engineering band
+does not by itself prove convergence.
+
+The native/JAX pairs use a source-bound branch-native build. A separate,
+independently built official reference checks selected construction, input
+and count quantities; it reports endpoints without adjudicating them. The
+individual case contracts judge branch-lane endpoints. This does not prove
+equivalence of every official trajectory or shipped setting. PM4Stell's
+backtracking deviation and the planar-coil upstream-gradient limitation remain
+disclosed. The NCSX contract admits small hit-count differences separately
+from its endpoint check.
+
+The branch-native build still differs from official upstream: 33 C++ source
+files differ, although the current GSCO kernel differs only in an include and
+the Biot--Savart kernel retains the older SIMD lane-storage interface. Four
+native scripts explicitly fix the surface degrees of freedom: standard stage
+two, planar stage two, coil forces, and permanent-magnet QA. The timing rows
+below identify their earlier comparators separately; a source-bound local
+build is not an official upstream binary.
+
+Reports and raw packets are retained locally in
+``.artifacts/reconciliation-execution-20260921/`` and are not distributed in
+Git. The counts describe that frozen snapshot. Verification jobs overlapped,
+so their elapsed times provide no performance result. The measurements below
+retain their own earlier source revisions and timing boundaries.
+
+Measured official-example computational workflows
+-------------------------------------------------
+
+The following measurements use mirror workloads mapped to official examples,
+with the branch-built native comparator described above. They are not timings
+of the public example command from import through report output. Warm means
+repeated execution in one process after compilation; cold means the first
+execution with an empty compilation cache. The ratios divide native wall time
+by synchronized GPU wall time. Each timing campaign has three warm samples;
+these numbers do not establish performance on other hardware or a newer
+source revision.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 19 20 39
+
+   * - Example/workload
+     - Warm native/GPU
+     - First-run native/GPU
+     - Scope and comparator
+   * - GSCO multistep (``wireframe_gsco_multistep.py``)
+     - About 4.0x
+     - About 3.2x, empty cache
+     - Common host assembly, response setup, solve, and synchronized
+       extraction; branch source ``58a9d103f``. Native used eight host
+       threads, selected from one- and eight-thread pilots. Native GSCO has
+       the branch undo-index fix.
+   * - Standard stage two (``stage_two_optimization.py``)
+     - About 1.5x
+     - 1.20x with populated cache; 0.52x with empty cache
+     - Matched computational workflow at ``674bafd2b``; branch native at
+       eight OpenMP threads versus GPU at one host thread.
+   * - Planar stage two (``stage_two_optimization_planar_coils.py``)
+     - About 1.4x
+     - 1.00x with populated cache; 0.41x with empty cache
+     - Same timing boundary and comparator as standard stage two; the
+       branch native planar derivative cache differs from upstream.
+
+The GSCO protocol includes construction and response setup through solve and
+synchronized extraction, but excludes imports, provenance, and report
+serialization. It verified 30 native/GPU pairings and 69 comparisons per
+pairing. The public fresh-process GSCO outputs differed in work, so they do
+not supply a matched public-command speedup.
+
+The stage-two protocol includes input construction, initial evaluation,
+Taylor check, both host SciPy L-BFGS-B stages, final evaluation, and readback.
+It excludes imports, JAX startup, provenance, and report serialization.
+Its native eight-thread setting was the better of one- and eight-thread pilots,
+not an exhaustive native-thread optimum. The same optimizer policy and nominal
+800-iteration budget were used, but evaluations differed: 981--1268 native
+versus 1102 GPU for standard stage two, and 839--874 native versus 867 GPU for
+planar stage two. One native planar warm repetition stopped after 776 total
+iterations; the other planar repetitions reached the cap. These are wall-time
+measurements of the bounded solves, not time-to-convergence measurements.
+The 30 comparison pairings for each stage-two case passed their declared
+checks. The retained timing authority is ``674bafd2b``, not the later
+precision head. See ``.artifacts/upstream-mirror-execution-20260919/``
+``ALL-MIRROR-RESULTS.md`` and ``FINAL-TIMING-CLAUDE-REVIEW.md`` for receipts
+and timing boundaries.
+
+Historical branch-only experiments
+----------------------------------
+
+The following 2026-09-14/15 measurements came from branch-only benchmarks.
+They are retained as historical observations, not added
+to the 25 eligible official-example cases or used to qualify the current
+shipped/default policy. In particular, the local NCSX nested least-squares
+inner solve is not the official ``boozerQA_ls_mpi.py`` MPI outer optimization;
+its 8.2x and 14.6x ratios do not establish that outer workflow's parity or
+speed. The exact-constraint single-stage test and the local
+``single_stage_boozer_vacuum_optimization.py`` example are not examples in
+the pinned upstream catalog. The flat675 benchmarks described on the JAX
+backend page are also local-only.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 21 21 23
+
+   * - Historical workload and timed boundary
+     - GPU
+     - Branch native
+     - Reported ratio / qualification
+   * - NCSX 48x48 nested LS inner solve, unguarded
        (``tests/geo/test_nested_ls_ncsx.py``)
-     - 57.0 s (97.4 s cold)
-     - 830.4 s OpenMP (1832.7 s single-threaded upstream kernel)
-     - 14.6x (32x vs single-threaded upstream)
-     - Native/JAX solve traces compared; identical algorithm on both lanes
-     - Measured 2026-09-14
-   * - Nested least-squares Boozer solve, NCSX 48x48, divergence guard on
-       both lanes (``tests/geo/test_nested_ls_ncsx.py``)
-     - 35.04 s (80.74 s cold)
-     - 286.28 s OpenMP (530.21 s single-threaded upstream kernel)
-     - 8.2x warm, 3.5x cold (15.1x warm, 6.6x cold vs single-threaded upstream)
-     - Native/JAX solve traces compared; identical algorithm on both lanes
-     - Measured 2026-09-15 on the shipped code
-   * - Exact-constraint single-stage optimization, 1000 iterations (``tests/geo/test_single_stage_exact_analytic.py``)
+     - 57.0 s warm; 97.4 s cold
+     - 830.4 s OpenMP; 1832.7 s single-threaded upstream kernel
+     - 14.6x warm versus the OpenMP kernel; local inner solve only
+   * - NCSX 48x48 nested LS inner solve, divergence guard on both lanes
+     - 35.04 s warm; 80.74 s cold
+     - 286.28 s OpenMP; 530.21 s single-threaded upstream kernel
+     - 8.2x warm, 3.5x cold versus OpenMP; local inner solve only
+   * - Exact-constraint single-stage optimization, 1000 iterations
+       (``tests/geo/test_single_stage_exact_analytic.py``)
      - 24.1 s
      - 52.1 s process wall
-     - 2.17x (earlier measurement: 2.24x)
-     - Identical initial state; gradient relative L2 difference 3.9e-13
-     - Measurement recorded 2026-09-15 13:03 UTC
-   * - Shipped single-stage vacuum example (``examples/3_Advanced/single_stage_boozer_vacuum_optimization.py``)
-     - n/a
-     - n/a
-     - 2.20x (earlier measurement: 2.30x)
-     - Initial-gradient absolute difference 8.8e-16; final objectives 4.3058761e-08 (native) vs 4.3821759e-08 (JAX)
-     - Measurement recorded 2026-09-15 13:03 UTC
-   * - PM4Stell permanent magnets, nphi=64 (``examples/2_Intermediate/permanent_magnet_PM4Stell.py``)
-     - 7.98 s (9.66 s cold)
-     - 16.12 s (32 threads)
-     - 2.02x
-     - Magnet placements bitwise identical (maximum ULP 0 over 20 comparisons)
-     - Measured 2026-09-15
-   * - Stage-two coil optimization (``examples/2_Intermediate/stage_two_optimization.py``)
-     - 3.18 s
-     - 10.99 s (8 threads)
-     - 3.46x
-     - Compared over a matched minimize region
-     - Measured 2026-09-15, inherited
-   * - Planar-coil stage-two optimization (``examples/2_Intermediate/stage_two_optimization_planar_coils.py``)
-     - 3.21 s
-     - 10.70 s (16 threads)
-     - 3.33x
-     - Compared over a matched minimize region
-     - Measured 2026-09-15, inherited
-   * - Stochastic stage-two optimization, mc10 / mc400 (``examples/2_Intermediate/stage_two_optimization_stochastic.py``)
+     - 2.17x reported; gradient relative L2 difference 3.9e-13
+   * - Local single-stage vacuum example
+       (``single_stage_boozer_vacuum_optimization.py``)
+     - Not retained as an absolute time here
+     - Not retained as an absolute time here
+     - 2.20x reported; initial-gradient absolute difference 8.8e-16
+
+Historical official-example measurements
+----------------------------------------
+
+These workloads have official upstream counterparts, but the measurements use
+older branch harnesses, sizes or solver policies. They do not qualify the
+current shipped/default workflow. The two newer stage-two rows above use a
+broader timing boundary than the minimize-region rows here.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 21 21 23
+
+   * - Historical workload and timed boundary
+     - GPU
+     - Branch native
+     - Reported ratio / qualification
+   * - PM4Stell, nphi=64 (``permanent_magnet_PM4Stell.py``)
+     - 7.98 s warm; 9.66 s cold
+     - 16.12 s at 32 threads
+     - 2.02x reported; placements bitwise identical in 20 comparisons
+   * - Standard / planar stage-two matched minimize regions
+     - 3.18 s / 3.21 s
+     - 10.99 s at 8 threads / 10.70 s at 16 threads
+     - 3.46x / 3.33x inherited measurements; different timing protocol
+       from the newer stage-two rows above
+   * - Stochastic stage two, mc10 / mc400
      - 23.60 s / 24.18 s
-     - 27.25 s / 28.80 s (16 threads)
-     - 1.15x / 1.19x
-     - Matched-state evaluator parity: objective absolute difference <= 4.8e-20, gradient maximum absolute difference <= 1.6e-16
-     - Measured 2026-09-15
-   * - GPU strict regression collection
-     - n/a
-     - n/a
-     - n/a
-     - 177 passed, 0 failed
-     - Measurement recorded 2026-09-15 13:03 UTC
+     - 27.25 s / 28.80 s at 16 threads
+     - 1.15x / 1.19x reported for the historical matched-state evaluator
+   * - Coil forces, matched minimize region, 400+400 iterations
+     - Not retained as an absolute time here
+     - Eight OpenMP threads
+     - 11.1x reported on 2026-09-15 with L-BFGS-B ``maxls=32``
 
-Commit 28b30477d adds the same divergence guard to both lanes: the LS-Newton
-inner solve stops once the gradient norm exceeds 1e3 times its entry value on
-rejected line-search trial points instead of running to the 40-step cap. The
-guard removes wasted Hessian assemblies that cost the single-threaded native
-kernel about 10 s each and the GPU about 0.1 s, so both lanes get faster and
-the ratio drops. The headline number for the shipped code is 8.2x warm (3.5x
-cold) against the OpenMP kernel; the unguarded row is kept so readers can
-compare with the upstream algorithm as released.
+The unguarded nested-LS row preceded the shared divergence guard in commit
+``28b30477d``. That guard stops an inner Newton solve when the gradient norm
+on rejected line-search trials exceeds 1000 times its entry value. It reduced
+wasted Hessian assemblies in both lanes and changed the measured ratio. The
+historical coil-forces run used ``maxls=32`` on both lanes; the current example
+uses upstream ``maxls=20``. Its ratio is neither current-policy performance
+nor whole-workflow acceleration. The September 19 shipped/default packet
+failed the GPU work-budget admission for coil forces and a shared
+objective-quality gate for PM4Stell. The later verification above classifies
+coil forces as quality-band on both pairs, retaining its raw GPU failure,
+and PM4Stell as a case-contract pass on both pairs with its disclosed
+backtracking deviation. Neither
+update recertifies these historical timings. A historical GPU strict
+regression collection recorded 177 passes and zero failures on 2026-09-15;
+it does not qualify the present tree.
 
-All times are medians of repeated runs. The coil-forces example
-(``examples/3_Advanced/coil_forces.py``) at matched policy (L-BFGS-B maxls 32
-on both lanes, 400+400 stage iterations) measures 11.1x on the minimize-region
-clock against native at its best OpenMP count (8) (measurement recorded 2026-09-15
-13:03 UTC).
+Historical workload-size observations
+-------------------------------------
 
-When to use the GPU backend
----------------------------
+Earlier local sweeps found a nested-LS crossover around 32x32 / mpol 10
+(14.2 s GPU versus 68.5 s native for the outer-solve scope); at 18x18 /
+mpol 6, native was faster (5.8 s versus 8.8 s). A GSCO 48x50 wireframe
+roughly tied within 30%, while a 96x100 case measured 5.1x and 4.2x at
+bitwise-identical currents. RCLS dense solves through n=1040 measured
+0.25x--0.58x of native speed on the GPU. These size-dependent observations
+are historical and do not establish a current crossover or a public-command
+speedup.
 
-The GPU backend wins once a workload is large enough to amortize compilation
-and dispatch overhead, and loses below that point:
+Other older example observations include a full-K MUSE GPU ratio of 1.8x
+(about 2.4x projected at matched work), while the QA permanent-magnet
+variant differed by 9.3% in dipole moments at nphi=64 under the same
+algorithm and stopping rule. A later relax-and-split QA protocol measured
+maximum absolute difference 1.05e-12 after the stacked-predicate fix
+``4c75551ab``. The older ``boozerQA.py`` value-plus-gradient evaluation
+measured 2.6 s GPU versus 22 ms native, and ``boozer.py`` requested 243 GiB
+of device memory at mpol 16 / 48x48. These observations use different
+workloads and policies from the retained 25-case mirror and are not present
+performance recommendations. The retained shipped/default checks for Boozer,
+BoozerQA, QFM and the tracing cases fail; older measurements cannot override
+those outcomes.
 
-* Nested least-squares Boozer solves: use the GPU from 32x32 / mpol 10
-  upward (14.2 s vs 68.5 s outer-solve scope at 32x32). At 18x18 / mpol 6
-  and below the native CPU backend is faster (5.8 s vs 8.8 s), so stay on
-  the CPU.
-* GSCO wireframes (``examples/2_Intermediate/wireframe_gsco_modular.py``):
-  the shipped 48x50 problem ties within +/-30%, so either backend is fine.
-  At 96x100 the GPU wins with speedups of 5.1x and 4.2x at bitwise-identical
-  currents.
-* RCLS dense wireframe solves
-  (``examples/2_Intermediate/wireframe_rcls_basic.py``): stay on the CPU
-  through problem size n=1040, where the GPU reaches only 0.25x--0.58x of
-  native speed.
-* Permanent magnets: the shipped full-K MUSE problem
-  (``examples/2_Intermediate/permanent_magnet_MUSE.py``) runs 1.8x faster on
-  the GPU (about 2.4x at matched work, projected). The QA variant
-  (``examples/2_Intermediate/permanent_magnet_QA.py``) is not a GPU
-  candidate: its dipole moments differ by 9.3% relative at nphi 64 under the
-  same algorithm and stopping rule, which is a parity failure. A relax-and-split
-  protocol for the QA variant reaches GPU-vs-native parity of maximum absolute
-  difference 1.05e-12 after the stacked-predicate fix (4c75551ab) (measurement
-  recorded 2026-09-15 13:03 UTC).
-* Boozer-surface value-and-gradient examples
-  (``examples/2_Intermediate/boozerQA.py``,
-  ``examples/2_Intermediate/boozer.py``) are not GPU candidates. The shipped
-  ``boozerQA`` value-plus-gradient evaluation runs about 118x slower on the
-  GPU than on native CPU (2.6 s vs 22 ms) because an exact-Newton inner solve
-  sits inside the compiled region, and ``boozer.py`` exceeds device memory
-  (243 GiB requested) at mpol 16 / 48x48.
-
-The JAX backend setup, runtime modes, and migration path are described on
-the ``jax`` backend page.
+The JAX backend setup and runtime modes are described on the ``jax`` backend
+page.

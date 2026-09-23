@@ -90,15 +90,20 @@ def test_fullorbit_jax_records_phi_plane_hits_on_helical_motion(event_time_lane)
     """The 6-state driver records a phi-plane crossing on a helix.
 
     In a uniform ``B = B0 ẑ`` field with initial state
-    ``(0, 0, 0, v_perp, 0, v_par)`` the Lorentz equation
+    ``(x0, 0, 0, v_perp, 0, v_par)`` the Lorentz equation
     ``dv/dt = (q/m) v × B`` integrates to ``vx(t) = v_perp cos(omega_c t)``
     and ``vy(t) = -v_perp sin(omega_c t)`` (with positive ``q B0``).
-    Hence ``x(t) = r_g sin(omega_c t)`` and
+    Hence ``x(t) = x0 + r_g sin(omega_c t)`` and
     ``y(t) = -r_g (1 - cos(omega_c t))`` where ``r_g = v_perp / omega_c``.
-    The gyrocircle is centred at ``(0, -r_g, 0)`` and the orbit passes
-    through every phi angle in the lower half-plane plus the origin
-    (entry point). We pick a phi target in ``(-pi, 0)`` so the orbit
-    crosses it twice per period.
+    The gyrocircle is centred at ``(x0, -r_g, 0)``. ``x0`` is chosen so the
+    circle stays clear of the ``z`` axis: ``phi = atan2(y, x)`` has no value
+    there, so a gyrocircle through the origin makes the recorded crossing
+    position a round-off artefact rather than an observable (with ``x0 = 0``
+    the orbit returns to the origin once per period, the unwrapped ``phi``
+    jumps by ``pi`` across that point, and the localizer's bracket straddles a
+    genuine discontinuity). With the axis excluded, every recorded crossing is
+    a real crossing of ``phi_target``. The target is inside the angular span of
+    the circle, so the orbit crosses it twice per period.
     """
 
     state_rtol = float(event_time_lane["state_vector_rtol"])
@@ -111,8 +116,12 @@ def test_fullorbit_jax_records_phi_plane_hits_on_helical_motion(event_time_lane)
     v_perp = 0.4
     v_par = 0.2
 
+    # Gyrocentre at (x_start, -r_g): |(x_start, -r_g)| = 0.567 > r_g = 0.267,
+    # so the z axis (where phi is undefined) is outside the gyrocircle, and the
+    # circle's angular span [-0.980, 0.0] contains phi_target = -pi/4.
+    x_start = 0.5
     y0_state = jnp.asarray(
-        [0.0, 0.0, 0.0, v_perp, 0.0, v_par],
+        [x_start, 0.0, 0.0, v_perp, 0.0, v_par],
         dtype=jnp.float64,
     )
 
@@ -153,7 +162,11 @@ def test_fullorbit_jax_records_phi_plane_hits_on_helical_motion(event_time_lane)
     )
     # All crossings must record idx = 0 (the only requested phi target).
     r_g = v_perp / omega_c
-    cx, cy = 0.0, -r_g
+    cx, cy = x_start, -r_g
+    assert np.hypot(cx, cy) > r_g, "fixture must keep the z axis off the gyrocircle"
+    assert count == 3, (
+        f"1.5 periods cross phi_target twice per period; got {count}"
+    )
     for row in phi_hits[:count]:
         assert int(row[1]) == 0, (
             f"expected phi index 0; got idx={int(row[1])} row={row}"
@@ -165,7 +178,7 @@ def test_fullorbit_jax_records_phi_plane_hits_on_helical_motion(event_time_lane)
         target_wrapped = phi_target
         diff = abs(phi_hit - target_wrapped)
         diff = min(diff, abs(2.0 * np.pi - diff))
-        # The bracketed localizer on a sub-step DOPRI5 interpolant
+        # The bracketed localizer on the step's DOPRI5 dense output
         # localises the crossing to roughly the lane state-vector rtol
         # in the (x, y) plane → atan2 residual is comparable.
         assert diff < 1.0e-4, (
@@ -173,7 +186,7 @@ def test_fullorbit_jax_records_phi_plane_hits_on_helical_motion(event_time_lane)
             f"got phi_hit={phi_hit}, target={target_wrapped}"
         )
         # The recorded points must lie on the gyrocircle within RK
-        # accuracy (gyrocircle of radius r_g centred at (0, -r_g, 0)).
+        # accuracy (gyrocircle of radius r_g centred at (x_start, -r_g, 0)).
         radius_sq = (x_hit - cx) ** 2 + (y_hit - cy) ** 2
         assert abs(radius_sq - r_g * r_g) <= state_atol + state_rtol * r_g * r_g, (
             f"recorded crossing not on the gyrocircle: r^2={radius_sq}, "

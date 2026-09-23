@@ -100,7 +100,7 @@ def test_finite_build_binder_keeps_the_default_line_search(
     prepared: PreparedFusedLaneSolve,
     constructed_options: list[Any],
 ) -> None:
-    """The certified finite-build lane must not inherit the flat-675 pin."""
+    """The official finite-build policy must not inherit the flat-675 pin."""
     solve_finite_build_stage_two(
         prepared,
         driver=Driver.SIMSOPT_LBFGSB,
@@ -110,7 +110,8 @@ def test_finite_build_binder_keeps_the_default_line_search(
     )
 
     (options,) = constructed_options
-    assert options.maxcor == FINITE_BUILD_LBFGS_HISTORY == 10
+    assert options.maxcor == FINITE_BUILD_LBFGS_HISTORY == 400
+    assert options.maxfun == 15000
     assert options.maxls == SimsoptLBFGSBOptions().maxls == 20
 
 

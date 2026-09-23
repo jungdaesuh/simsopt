@@ -10,18 +10,18 @@ import jax.numpy as jnp
 from jax.experimental import io_callback
 
 from ._bounded_scan import bounded_scan_until_done as _bounded_scan_until_done
-from ._math_utils import as_runtime_array as _as_runtime_array
 from ._math_utils import as_jax_int32 as _as_jax_int32
+from ._math_utils import as_runtime_array as _as_runtime_array
 from ._math_utils import has_tracer_leaf as _has_tracer_leaf
-from ._math_utils import runtime_init_array as _runtime_init_array
 from ._math_utils import runtime_init_scalar as _runtime_init_scalar
 
 __all__ = [
-    "WireframeGSCOResult",
+    "WIREFRAME_GSCO_MULTISTEP_STAGE_CAPACITY",
     "WireframeGSCOLiveParams",
     "WireframeGSCOLiveState",
     "WireframeGSCOMultistepResult",
     "WireframeGSCOMultistepState",
+    "WireframeGSCOResult",
     "find_wireframe_coil_sizes_jax",
     "greedy_stellarator_coil_optimization_jax",
     "gsco_live_loop_jax",
@@ -29,6 +29,15 @@ __all__ = [
     "wireframe_gsco_multistep_loop_jax",
     "wireframe_gsco_never_stop",
 ]
+
+# Stages the multistep orchestration can record when it runs to its natural
+# stable-current termination. The official run at the shipped scale takes 7
+# (6 steps plus the final adjustment; capture.json "calls": 7 of
+# examples/3_Advanced/wireframe_gsco_multistep.py at upstream 9e027eac3), so
+# this is 9x the observed need. It is a capacity, never a truncation: the loop
+# refuses to run a stage it cannot record, and stopping there leaves
+# ``final_adjustment_run`` false, which every caller reports as a failure.
+WIREFRAME_GSCO_MULTISTEP_STAGE_CAPACITY = 64
 
 
 @dataclass(frozen=True)
@@ -147,17 +156,27 @@ jax.tree_util.register_dataclass(
 
 @dataclass(frozen=True)
 class WireframeGSCOMultistepState:
-    """Fixed-shape state for the GSCO multistep orchestration loop."""
+    """Fixed-shape state for the GSCO multistep orchestration loop.
+
+    ``stage_objectives`` and ``stage_iterations`` are fixed-capacity carries
+    written at index ``nonfinal_steps`` by the stage that runs there; entries
+    beyond ``nonfinal_steps + final_adjustment_run`` were never written.
+    ``enclosed_segment_mask_before_final`` keeps the enclosed set that the final
+    adjustment frees, which the active mask no longer holds afterwards.
+    """
 
     x: jax.Array
     previous_x: jax.Array
     loop_count: jax.Array
     enclosed_segment_mask: jax.Array
+    enclosed_segment_mask_before_final: jax.Array
     current_fraction: jax.Array
     has_previous: jax.Array
     done: jax.Array
     nonfinal_steps: jax.Array
     final_adjustment_run: jax.Array
+    stage_objectives: jax.Array
+    stage_iterations: jax.Array
 
 
 jax.tree_util.register_dataclass(
@@ -167,11 +186,14 @@ jax.tree_util.register_dataclass(
         "previous_x",
         "loop_count",
         "enclosed_segment_mask",
+        "enclosed_segment_mask_before_final",
         "current_fraction",
         "has_previous",
         "done",
         "nonfinal_steps",
         "final_adjustment_run",
+        "stage_objectives",
+        "stage_iterations",
     ],
     meta_fields=[],
 )
@@ -179,14 +201,21 @@ jax.tree_util.register_dataclass(
 
 @dataclass(frozen=True)
 class WireframeGSCOMultistepResult:
-    """Final fixed-shape result from GSCO multistep orchestration."""
+    """Final fixed-shape result from GSCO multistep orchestration.
+
+    ``stage_objectives`` and ``stage_iterations`` have the declared stage
+    capacity; only their first ``stage_count`` entries were written.
+    """
 
     x: jax.Array
     loop_count: jax.Array
     enclosed_segment_mask: jax.Array
+    enclosed_segment_mask_before_final_adjustment: jax.Array
     nonfinal_steps: jax.Array
     final_adjustment_run: jax.Array
+    final_objective: jax.Array
     stage_objectives: jax.Array
+    stage_iterations: jax.Array
     stage_count: jax.Array
 
 
@@ -196,9 +225,12 @@ jax.tree_util.register_dataclass(
         "x",
         "loop_count",
         "enclosed_segment_mask",
+        "enclosed_segment_mask_before_final_adjustment",
         "nonfinal_steps",
         "final_adjustment_run",
+        "final_objective",
         "stage_objectives",
+        "stage_iterations",
         "stage_count",
     ],
     meta_fields=[],
@@ -212,6 +244,23 @@ def wireframe_gsco_never_stop(state: WireframeGSCOLiveState) -> jax.Array:
     """Keep scanning until the static ``max_steps`` budget is consumed."""
 
     return _runtime_init_scalar(False, jnp.bool_)
+
+
+def _device_zero_buffer(shape: tuple[int, ...], dtype) -> jax.Array:
+    """A zero buffer built ON the device that holds the policy's zero scalar.
+
+    ``runtime_init_array`` fills a HOST array and places it with
+    ``jax.device_put``. Evaluated inside a traced region -- the multistep
+    workflow builds one single-stage state per outer iteration, inside
+    ``jax.lax.while_loop`` -- that placement is staged into the computation and
+    becomes an implicit host-to-device copy when it runs, which the parity
+    lanes' ``jax_transfer_guard_host_to_device = disallow`` rejects (a 0-d value
+    is exempt from the guard, an array is not). Broadcasting the policy's own
+    device scalar performs no transfer, inherits the runtime placement, and
+    yields the same buffer: all zeros in the requested dtype.
+    """
+
+    return jnp.broadcast_to(_runtime_init_scalar(0, dtype), shape)
 
 
 def _gsco_active_entries(x: jax.Array, tol: jax.Array) -> jax.Array:
@@ -249,8 +298,14 @@ def _gsco_two_f_s(x: jax.Array, tol: jax.Array) -> jax.Array:
 
 
 def _gsco_opposite_candidate_index(opt_ind: jax.Array, n_loops: int) -> jax.Array:
-    n_loops_arr = _runtime_init_scalar(n_loops, opt_ind.dtype)
-    return (opt_ind + n_loops_arr) % _runtime_init_scalar(2 * n_loops, opt_ind.dtype)
+    # Upstream's undo test (``wireframe_optimization.cpp:270``,
+    # ``opt_ind + nLoops % (twoNLoops)``) has C precedence: ``nLoops % twoNLoops``
+    # is ``nLoops``, so the previous index is compared with ``opt_ind + nLoops``
+    # WITHOUT wrapping. It fires only when the previous accepted loop was the
+    # negative half and this candidate is its positive half. The branch's
+    # symmetric form (commit c20277ccd) was reverted on both lanes on 2026-09-21
+    # (user decision C2): the mirror follows upstream's line.
+    return opt_ind + _runtime_init_scalar(n_loops, opt_ind.dtype)
 
 
 def _gsco_candidate_currents(
@@ -302,7 +357,7 @@ def _gsco_candidate_currents(
             jnp.where(
                 nonzero_currents,
                 abs_loop_x != matched_abs_current[:, None],
-                nonzero_currents != nonzero_currents,
+                jnp.not_equal(nonzero_currents, nonzero_currents),
             ),
             axis=1,
         )
@@ -411,10 +466,13 @@ def _validate_gsco_history_capacity(
         )
     history_dtype = state.history_length.dtype
     if _has_tracer_leaf(state.history_length):
-        max_steps_value = jnp.asarray(max_steps, dtype=history_dtype)
-        history_capacity_value = jnp.asarray(
+        # `jnp.asarray` of a host value is an IMPLICIT host-to-device transfer
+        # and aborts under the parity lanes' `disallow` guard; the policy's
+        # placement is explicit and is allowed.
+        max_steps_value = _runtime_init_scalar(max_steps, history_dtype)
+        history_capacity_value = _runtime_init_scalar(
             history_capacity,
-            dtype=history_dtype,
+            history_dtype,
         )
         history_is_valid = (state.history_length >= 1) & (
             state.history_length + max_steps_value <= history_capacity_value
@@ -431,8 +489,8 @@ def _validate_gsco_history_capacity(
         )
     history_length = _validate_gsco_history_length_runtime(
         state.history_length,
-        jnp.asarray(max_steps, dtype=history_dtype),
-        jnp.asarray(history_capacity, dtype=history_dtype),
+        _runtime_init_scalar(max_steps, history_dtype),
+        _runtime_init_scalar(history_capacity, history_dtype),
     )
     return replace(state, history_length=history_length)
 
@@ -621,10 +679,10 @@ def wireframe_gsco_initial_state(
     two_f0 = two_f_b0 + params.lambda_s * two_f_s0
     half = _runtime_init_scalar(0.5, params.A.dtype)
 
-    iter_history = _runtime_init_array((history_capacity,), 0, jnp.int32)
-    curr_history = _runtime_init_array((history_capacity,), 0, params.A.dtype)
-    loop_history = _runtime_init_array((history_capacity,), 0, jnp.int32)
-    history_tail = _runtime_init_array((history_capacity - 1,), 0, params.A.dtype)
+    iter_history = _device_zero_buffer((history_capacity,), jnp.int32)
+    curr_history = _device_zero_buffer((history_capacity,), params.A.dtype)
+    loop_history = _device_zero_buffer((history_capacity,), jnp.int32)
+    history_tail = _device_zero_buffer((history_capacity - 1,), params.A.dtype)
     f_b_history = jnp.concatenate((jnp.reshape(half * two_f_b0, (1,)), history_tail))
     f_s_history = jnp.concatenate((jnp.reshape(half * two_f_s0, (1,)), history_tail))
     f_history = jnp.concatenate((jnp.reshape(half * two_f0, (1,)), history_tail))
@@ -830,10 +888,10 @@ def _greedy_stellarator_coil_optimization_sampled_jax(
     two_f0 = two_f_b0 + params.lambda_s * two_f_s0
     record_capacity = _gsco_record_capacity(max_iter, record_every)
     half = _runtime_init_scalar(0.5, params.A.dtype)
-    iter_history0 = _runtime_init_array((record_capacity,), 0, jnp.int32)
-    curr_history0 = _runtime_init_array((record_capacity,), 0, params.A.dtype)
-    loop_history0 = _runtime_init_array((record_capacity,), 0, jnp.int32)
-    history_tail = _runtime_init_array((record_capacity - 1,), 0, params.A.dtype)
+    iter_history0 = _device_zero_buffer((record_capacity,), jnp.int32)
+    curr_history0 = _device_zero_buffer((record_capacity,), params.A.dtype)
+    loop_history0 = _device_zero_buffer((record_capacity,), jnp.int32)
+    history_tail = _device_zero_buffer((record_capacity - 1,), params.A.dtype)
     f_b_history0 = jnp.concatenate((jnp.reshape(half * two_f_b0, (1,)), history_tail))
     f_s_history0 = jnp.concatenate((jnp.reshape(half * two_f_s0, (1,)), history_tail))
     f_history0 = jnp.concatenate((jnp.reshape(half * two_f0, (1,)), history_tail))
@@ -1156,6 +1214,7 @@ def _wireframe_gsco_multistep_initial_state(
     loop_count_init: object,
     *,
     current_fraction: float,
+    stage_capacity: int,
 ) -> WireframeGSCOMultistepState:
     x0 = jnp.reshape(_as_runtime_array(x_init), (-1,))
     loop_count0 = jnp.reshape(_as_jax_int32(loop_count_init), (-1,))
@@ -1163,12 +1222,15 @@ def _wireframe_gsco_multistep_initial_state(
         x=x0,
         previous_x=x0 - x0,
         loop_count=loop_count0,
-        enclosed_segment_mask=x0 != x0,
+        enclosed_segment_mask=jnp.not_equal(x0, x0),
+        enclosed_segment_mask_before_final=jnp.not_equal(x0, x0),
         current_fraction=_runtime_init_scalar(current_fraction, x0.dtype),
         has_previous=_runtime_init_scalar(False, jnp.bool_),
         done=_runtime_init_scalar(False, jnp.bool_),
         nonfinal_steps=_runtime_init_scalar(0, jnp.int32),
         final_adjustment_run=_runtime_init_scalar(False, jnp.bool_),
+        stage_objectives=_device_zero_buffer((stage_capacity,), x0.dtype),
+        stage_iterations=_device_zero_buffer((stage_capacity,), jnp.int32),
     )
 
 
@@ -1182,13 +1244,22 @@ def wireframe_gsco_multistep_loop_jax(
     base_constrained_segment_mask: object,
     *,
     max_iter_per_step: int,
-    max_outer_steps: int,
+    max_outer_steps: int | None,
     initial_current_fraction: float,
     current_scale: float,
     min_coil_size: int,
     final_max_current: float,
+    stage_history_capacity: int = WIREFRAME_GSCO_MULTISTEP_STAGE_CAPACITY,
 ) -> WireframeGSCOMultistepResult:
-    """Run the wireframe GSCO multistep numerical state machine in JAX."""
+    """Run GSCO until stable current or through an explicit bounded smoke cap.
+
+    ``max_outer_steps=None`` follows the source workflow's natural stable-current
+    termination; a positive cap is the bounded smoke run's explicit guard. Either
+    way the loop runs at most ``stage_history_capacity`` stages and records every
+    stage it ran: its post-stage objective and its accepted-update count. Stopping
+    on the cap or on the capacity leaves ``final_adjustment_run`` false, which the
+    callers report as a failed workflow; the history is never truncated.
+    """
 
     b_arr = jnp.reshape(_as_runtime_array(b_obj), (-1,))
     cell_key_arr = _as_jax_int32(cell_key)
@@ -1198,11 +1269,21 @@ def wireframe_gsco_multistep_loop_jax(
         (-1,),
     )
     n_iter = int(max_iter_per_step)
-    outer_steps = int(max_outer_steps)
+    outer_steps = None if max_outer_steps is None else int(max_outer_steps)
+    stage_capacity = int(stage_history_capacity)
     if n_iter < 0:
         raise ValueError(f"max_iter_per_step must be nonnegative; got {n_iter}.")
-    if outer_steps < 1:
+    if outer_steps is not None and outer_steps < 1:
         raise ValueError(f"max_outer_steps must be positive; got {outer_steps}.")
+    if stage_capacity < 1:
+        raise ValueError(
+            f"stage_history_capacity must be positive; got {stage_capacity}."
+        )
+    if outer_steps is not None and outer_steps > stage_capacity:
+        raise ValueError(
+            f"max_outer_steps {outer_steps} exceeds the stage history capacity "
+            f"{stage_capacity}; a stage that cannot be recorded is not run."
+        )
     if min_coil_size < 1:
         raise ValueError(f"min_coil_size must be positive; got {min_coil_size}.")
 
@@ -1222,6 +1303,7 @@ def wireframe_gsco_multistep_loop_jax(
         x_init,
         loop_count_init,
         current_fraction=initial_current_fraction,
+        stage_capacity=stage_capacity,
     )
     current_scale_arr = _runtime_init_scalar(current_scale, base_params.A.dtype)
     final_max_current_arr = _runtime_init_scalar(final_max_current, base_params.A.dtype)
@@ -1256,6 +1338,37 @@ def wireframe_gsco_multistep_loop_jax(
         )
         return _gsco_live_loop_unchecked(initial, max_steps=n_iter, params=params)
 
+    def _record_stage(
+        state: WireframeGSCOMultistepState,
+        next_state: WireframeGSCOMultistepState,
+        gsco_state: WireframeGSCOLiveState,
+    ) -> WireframeGSCOMultistepState:
+        """Write the stage that just ran at its own index in the carries.
+
+        The index is the entry ``nonfinal_steps``: the final adjustment is the
+        one stage that does not raise it, so it lands after the nonfinal ones.
+        The recorded objective is the post-stage (and, for a nonfinal stage,
+        post-sweep) ``0.5*||A x - b||^2`` the source prints, and the recorded
+        iteration count is the solve's accepted-update count, the same quantity
+        as the C++ ``iter_hist[-1]``.
+        """
+        index = state.nonfinal_steps
+        residual = base_params.A @ next_state.x - b_arr
+        objective = _runtime_init_scalar(0.5, residual.dtype) * jnp.sum(
+            residual * residual
+        )
+        return replace(
+            next_state,
+            stage_objectives=_update_vector_entry(
+                state.stage_objectives, index, objective
+            ),
+            stage_iterations=_update_vector_entry(
+                state.stage_iterations,
+                index,
+                gsco_state.history_length - _runtime_init_scalar(1, jnp.int32),
+            ),
+        )
+
     def _nonfinal_update(
         state: WireframeGSCOMultistepState,
     ) -> WireframeGSCOMultistepState:
@@ -1282,17 +1395,21 @@ def wireframe_gsco_multistep_loop_jax(
             pruned_loop_count,
             cell_key_arr,
         )
-        return WireframeGSCOMultistepState(
-            x=pruned_x,
-            previous_x=state.x,
-            loop_count=pruned_loop_count,
-            enclosed_segment_mask=enclosed,
-            current_fraction=_runtime_init_scalar(0.5, base_params.A.dtype)
-            * state.current_fraction,
-            has_previous=_runtime_init_scalar(True, jnp.bool_),
-            done=_runtime_init_scalar(False, jnp.bool_),
-            nonfinal_steps=state.nonfinal_steps + _runtime_init_scalar(1, jnp.int32),
-            final_adjustment_run=_runtime_init_scalar(False, jnp.bool_),
+        return _record_stage(
+            state,
+            replace(
+                state,
+                x=pruned_x,
+                previous_x=state.x,
+                loop_count=pruned_loop_count,
+                enclosed_segment_mask=enclosed,
+                current_fraction=_runtime_init_scalar(0.5, base_params.A.dtype)
+                * state.current_fraction,
+                has_previous=_runtime_init_scalar(True, jnp.bool_),
+                nonfinal_steps=state.nonfinal_steps
+                + _runtime_init_scalar(1, jnp.int32),
+            ),
+            gsco_state,
         )
 
     def _final_update(
@@ -1307,13 +1424,21 @@ def wireframe_gsco_multistep_loop_jax(
             no_new_coils=True,
             match_current=True,
         )
-        return replace(
+        return _record_stage(
             state,
-            x=gsco_state.x,
-            loop_count=gsco_state.loop_count,
-            enclosed_segment_mask=jnp.zeros_like(state.enclosed_segment_mask),
-            done=_runtime_init_scalar(True, jnp.bool_),
-            final_adjustment_run=_runtime_init_scalar(True, jnp.bool_),
+            replace(
+                state,
+                x=gsco_state.x,
+                loop_count=gsco_state.loop_count,
+                # The source frees the enclosed segments for this stage
+                # (upstream wireframe_gsco_multistep.py:259) and never rebuilds
+                # the set, so the mask it was holding is kept separately.
+                enclosed_segment_mask=jnp.zeros_like(state.enclosed_segment_mask),
+                enclosed_segment_mask_before_final=state.enclosed_segment_mask,
+                done=_runtime_init_scalar(True, jnp.bool_),
+                final_adjustment_run=_runtime_init_scalar(True, jnp.bool_),
+            ),
+            gsco_state,
         )
 
     def _active_outer_step(
@@ -1322,36 +1447,33 @@ def wireframe_gsco_multistep_loop_jax(
         final_step = state.has_previous & jnp.all(state.previous_x == state.x)
         return jax.lax.cond(final_step, _final_update, _nonfinal_update, state)
 
-    def _outer_scan_body(state: WireframeGSCOMultistepState, _iteration: jax.Array):
-        stage_is_active = ~state.done
-        next_state = jax.lax.cond(
-            state.done,
-            lambda done_state: done_state,
-            _active_outer_step,
-            state,
-        )
-        residual = base_params.A @ next_state.x - b_arr
-        objective = _runtime_init_scalar(0.5, residual.dtype) * jnp.sum(
-            residual * residual
-        )
-        stage_objective = jnp.where(
-            stage_is_active,
-            objective,
-            _runtime_init_scalar(jnp.nan, objective.dtype),
-        )
-        return next_state, (stage_objective, stage_is_active)
-
-    final_state, (stage_objectives, stage_is_active) = jax.lax.scan(
-        _outer_scan_body,
+    stage_limit = _runtime_init_scalar(
+        stage_capacity if outer_steps is None else outer_steps,
+        jnp.int32,
+    )
+    final_state = jax.lax.while_loop(
+        lambda state: ~state.done & (state.nonfinal_steps < stage_limit),
+        _active_outer_step,
         state0,
-        jnp.arange(outer_steps, dtype=jnp.int32),
+    )
+    stage_count = final_state.nonfinal_steps + final_state.final_adjustment_run.astype(
+        jnp.int32
+    )
+    final_residual = base_params.A @ final_state.x - b_arr
+    final_objective = _runtime_init_scalar(0.5, final_residual.dtype) * jnp.sum(
+        final_residual * final_residual
     )
     return WireframeGSCOMultistepResult(
         x=jnp.reshape(final_state.x, (-1, 1)),
         loop_count=final_state.loop_count,
         enclosed_segment_mask=final_state.enclosed_segment_mask,
+        enclosed_segment_mask_before_final_adjustment=(
+            final_state.enclosed_segment_mask_before_final
+        ),
         nonfinal_steps=final_state.nonfinal_steps,
         final_adjustment_run=final_state.final_adjustment_run,
-        stage_objectives=stage_objectives,
-        stage_count=jnp.sum(stage_is_active.astype(jnp.int32)),
+        final_objective=final_objective,
+        stage_objectives=final_state.stage_objectives,
+        stage_iterations=final_state.stage_iterations,
+        stage_count=stage_count,
     )

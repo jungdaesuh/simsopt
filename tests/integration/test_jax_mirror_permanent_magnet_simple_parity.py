@@ -66,7 +66,12 @@ def test_exact_permanent_magnet_simple_matches_native_and_jax_cpu(
         jax.effective_construction_fingerprint
     )
     assert native.completed_workflow_stages == jax.completed_workflow_stages
-    assert native.nit == jax.nit == 40
+    # GPMO_baseline has no early exit at all, so the derived reason is the
+    # completed iteration count; the configured K is not published as nit/nfev.
+    assert native.normalized_status == jax.normalized_status == "not_applicable"
+    assert native.raw_status == jax.raw_status == "iteration_count_completed"
+    assert native.nit is jax.nit is None
+    assert native.nfev is jax.nfev is None
     assert set(native.values) == set(jax.values)
 
     for observable in (
@@ -109,9 +114,10 @@ def test_exact_permanent_magnet_simple_matches_native_and_jax_cpu(
     ndipoles = int(native.values["construction:dipole_grid_xyz"].shape[0])
 
     assert observables["ndipoles"] == ndipoles
-    assert observables["selected_moment_count"] == native.nit
-    assert indices.shape == (native.nit,)
-    assert selected_moments.shape == (native.nit, 3)
+    selected_count = int(np.count_nonzero(native.values["final:nonzero_mask"]))
+    assert observables["selected_moment_count"] == selected_count
+    assert indices.shape == (selected_count,)
+    assert selected_moments.shape == (selected_count, 3)
     np.testing.assert_allclose(
         selected_moments,
         native.values["final:moments"][indices],

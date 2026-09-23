@@ -7,12 +7,18 @@ from pathlib import Path
 
 import numpy as np
 from examples.jax.parity.arbiter import LaneObservation
+from examples.jax.parity.cases._fixed_work_status import (
+    LaneTerminalLabel,
+    fixed_work_label,
+    gpmo_stop_reason,
+)
 from examples.jax.parity.input_bundle import (
     InputBundle,
     create_input_bundle,
     effective_construction_fingerprint,
 )
 from examples.jax.parity.runtime import ParityLane
+from simsopt_jax_adapters.examples.gpmo_rules import gpmo_baseline_outputs_usable
 from simsopt_jax.examples import ExecutionScale
 
 WORKFLOW_STAGES = (
@@ -81,6 +87,37 @@ def _state(
     }
 
 
+def _label(
+    bundle: InputBundle,
+    final_moments: np.ndarray,
+    selected: np.ndarray,
+) -> LaneTerminalLabel:
+    """Label one GPMO_baseline lane from the magnets it actually returned.
+
+    ``GPMO_baseline`` (``permanent_magnet_optimization.cpp:1280-1325``) has no
+    cap and no early exit: it always runs its ``K`` iterations, so the stop
+    reason is ``iteration_count_completed`` unless every dipole in the grid is
+    populated. A selected site is blanked in ``R2s`` and in
+    ``Gamma_complement`` immediately, so the ``K`` sites are distinct and
+    exactly ``K`` rows are nonzero at the end -- the equality is the invariant,
+    and a short count means the lane did not run this algorithm. It reports no
+    convergence status, so the category is ``not_applicable`` and the optimizer
+    counters are null.
+    """
+    return fixed_work_label(
+        raw_status=gpmo_stop_reason(
+            nonzero_count=int(selected.size),
+            grid_size=None,
+            magnet_cap=None,
+        ),
+        outputs_usable=gpmo_baseline_outputs_usable(
+            moments=final_moments,
+            nonzero_count=int(selected.size),
+            iterations=int(bundle.configuration["iterations"]),
+        ),
+    )
+
+
 def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservation:
     import simsoptpp
 
@@ -105,11 +142,7 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
     selected = np.flatnonzero(np.linalg.norm(final, axis=1)).astype(np.int64)
     initial_state = _state("initial", response, target, initial)
     final_state = _state("final", response, target, final)
-    success = bool(
-        selected.size == int(bundle.configuration["iterations"])
-        and final_state["final:objective_sum_squares"]
-        < initial_state["initial:objective_sum_squares"]
-    )
+    label = _label(bundle, final, selected)
     return LaneObservation(
         lane="native-cpu",
         backend_mode="native_cpu",
@@ -120,11 +153,11 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=_effective_fingerprint(bundle, arrays),
         driver="simsoptpp_gpmo_baseline",
-        normalized_status="converged" if success else "failed",
-        raw_status="fixed_iteration_budget_complete",
-        success=success,
-        nit=int(bundle.configuration["iterations"]),
-        nfev=int(bundle.configuration["iterations"]),
+        normalized_status=label.normalized_status,
+        raw_status=label.raw_status,
+        success=label.success,
+        nit=None,
+        nfev=None,
         njev=None,
         completed_workflow_stages=WORKFLOW_STAGES,
         provenance=None,
@@ -184,11 +217,7 @@ def _jax(
         "initial", arrays["response"], arrays["target"], arrays["initial_moments"]
     )
     final_state = _state("final", arrays["response"], arrays["target"], final)
-    success = bool(
-        selected.size == int(bundle.configuration["iterations"])
-        and final_state["final:objective_sum_squares"]
-        < initial_state["initial:objective_sum_squares"]
-    )
+    label = _label(bundle, final, selected)
     platform = jax.devices()[0].platform
     return LaneObservation(
         lane=lane,
@@ -200,11 +229,11 @@ def _jax(
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=_effective_fingerprint(bundle, arrays),
         driver="simsopt_jax_gpmo_baseline",
-        normalized_status="converged" if success else "failed",
-        raw_status="fixed_iteration_budget_complete",
-        success=success,
-        nit=int(bundle.configuration["iterations"]),
-        nfev=int(bundle.configuration["iterations"]),
+        normalized_status=label.normalized_status,
+        raw_status=label.raw_status,
+        success=label.success,
+        nit=None,
+        nfev=None,
         njev=None,
         completed_workflow_stages=WORKFLOW_STAGES,
         provenance=None,

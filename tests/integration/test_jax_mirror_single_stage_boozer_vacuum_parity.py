@@ -39,9 +39,12 @@ def test_single_stage_boozer_vacuum_declares_approved_case_specific_driver_polic
         repo_root=REPO_ROOT,
     )
     relationship = next(
-        item for item in runtime.parity.relationships if item.jax_example_id == CASE_ID
+        item
+        for item in runtime.parity.all_relationships
+        if item.jax_example_id == CASE_ID
     )
 
+    assert relationship in runtime.parity.experimental_relationships
     assert case.case_id == CASE_ID
     assert relationship.case_id == CASE_ID
     assert relationship.classification == "full"

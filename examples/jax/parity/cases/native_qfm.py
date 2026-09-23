@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
+from typing import Final, Mapping
 
 import numpy as np
 from examples.jax.parity.arbiter import LaneObservation
@@ -12,8 +16,32 @@ from examples.jax.parity.input_bundle import (
     create_input_bundle,
     effective_construction_fingerprint,
 )
+from examples.jax.parity.official_reference import (
+    OfficialReference,
+    load_official_reference,
+)
 from examples.jax.parity.runtime import ParityLane
+from examples.jax.parity.terminal_status import normalized_terminal_status
+from simsopt_contracts.optimization_endpoint import (
+    StoppingReason,
+    scipy_minimize_stopping_reason,
+)
+from simsopt.configs.zoo import get_data
+from simsopt.field import BiotSavart
+from simsopt.geo import Area, QfmSurface, SurfaceRZFourier, ToroidalFlux, Volume
+from simsopt_jax.backend.dtypes import explicit_device_array
+from simsopt_jax.backend.runtime import get_runtime_jax_device
 from simsopt_jax.examples import ExecutionScale
+from simsopt_jax.examples.qfm_host_scipy import (
+    QFM_EXACT_METHOD,
+    QFM_HOST_SCIPY_DRIVER,
+    QFM_SURFACE_RESOLUTION,
+    build_qfm_host_kernels,
+    solve_qfm_host_scipy_sequence,
+)
+from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
+
+import jax
 
 WORKFLOW_STAGES = (
     "construct_fitted_ncsx_qfm_surface",
@@ -34,6 +62,111 @@ WORKFLOW_STAGES = (
 
 _LABELS = ("volume", "toroidal_flux", "area")
 
+#: The official shipped run of ``examples/1_Simple/qfm.py`` at upstream
+#: ``9e027eac3``, from the one tracked home for official numbers.
+OFFICIAL_REFERENCE: Final[OfficialReference] = load_official_reference("native-qfm")
+#: Exact-stage label residuals the official run leaves behind, per label
+#: (``<label>:exact:label_residual_abs``). Upstream states no feasibility gate;
+#: these are what its own three SLSQP calls actually leave.
+OFFICIAL_EXACT_LABEL_RESIDUALS: Final[Mapping[str, float]] = MappingProxyType(
+    {
+        label: float(OFFICIAL_REFERENCE.scalar(f"{label}:exact:label_residual_abs"))
+        for label in _LABELS
+    }
+)
+#: Gross-failure ceiling on an exact stage's ``|label - target|`` -- for the
+#: ``native_default`` scale and ONLY there. Upstream's ``1_Simple/qfm.py`` has
+#: no reduced CI configuration (no ``in_github_actions``; ``mpol = ntor = 5``
+#: and 25 quadrature nodes are unconditional, and the official-reference
+#: fixture has no ``ci`` variant for this case), so the branch's ``bounded``
+#: scale has no official run and therefore no official residual: a number
+#: derived from the shipped run cannot gate a problem the shipped run never
+#: solved. Ten times the largest residual the official run leaves is not
+#: upstream's feasibility gate -- upstream states none, and the branch's
+#: demoted 1e-8 gate rejects the official run itself -- it is the line an
+#: order of magnitude above where the official solve lands, so a lane that
+#: reaches it has failed grossly.
+NATIVE_DEFAULT_LABEL_RESIDUAL_GROSS_FAILURE_CEILING: Final[float] = 10.0 * max(
+    OFFICIAL_EXACT_LABEL_RESIDUALS.values()
+)
+#: The two SciPy methods ``1_Simple/qfm.py`` alternates, once per stage. The
+#: exact stage's method is the solver module's own constant; the penalty stage
+#: runs SciPy L-BFGS-B (``QFM_PENALTY_DRIVER = Driver.SCIPY_LBFGSB``, dispatched
+#: at ``src/simsopt_jax/solve/dispatch.py:362``). Which status vocabulary each
+#: method speaks is the contract's
+#: (``SCIPY_MINIMIZE_STATUS_CONVENTION_BY_METHOD``), not this module's.
+QFM_PENALTY_METHOD: Final[str] = "L-BFGS-B"
+
+
+@dataclass(frozen=True)
+class QfmProviderCall:
+    """One of the six SciPy calls of the official QFM sequence.
+
+    The fields are exactly what a provider reports about itself, so one record
+    is built the same way from a lane's own results and from the official
+    capture's ``provider_calls``.
+    """
+
+    method: str
+    provider_success: bool
+    provider_status: int
+    iterations: int
+    max_iterations: int
+    endpoint_finite: bool
+
+
+def qfm_stage_stopping_reason(call: QfmProviderCall) -> StoppingReason:
+    """Classify one QFM SciPy call into the contract's stopping vocabulary.
+
+    Both emitters are owned by the contract: ``scipy-lbfgsb`` knows that
+    L-BFGS-B's status 1 merges the iteration and the evaluation budget, and
+    ``scipy-slsqp`` knows that SLSQP's iteration limit is mode 9 while its
+    status 1 is the transient "function evaluation required". The routing from
+    a ``scipy.optimize.minimize`` method to its emitter, and what a stopping
+    reason does and does not read, are the contract's too
+    (:func:`scipy_minimize_stopping_reason`) -- so the shipped mirror
+    ``examples/jax/1_Simple/qfm.py``, which cannot import this module, reaches
+    the SAME classification through the same owner.
+    """
+    return scipy_minimize_stopping_reason(
+        method=call.method,
+        provider_success=call.provider_success,
+        provider_status=call.provider_status,
+        iterations=call.iterations,
+        max_iterations=call.max_iterations,
+        endpoint_finite=call.endpoint_finite,
+    )
+
+
+def qfm_stopping_reasons(
+    calls: Sequence[QfmProviderCall],
+) -> tuple[StoppingReason, ...]:
+    """Classify the six calls of one QFM sequence, in call order."""
+    return tuple(qfm_stage_stopping_reason(call) for call in calls)
+
+
+def official_qfm_stopping_reasons() -> tuple[StoppingReason, ...]:
+    """The official run's own six stopping reasons, from the tracked fixture.
+
+    Read as a classification and never as SciPy's message text: the spelling is
+    a SciPy version detail (``pyproject.toml`` allows ``scipy>=1.13``, whose
+    L-BFGS-B spells the same task with underscores), while the classification
+    is the fact upstream established.
+    """
+    return qfm_stopping_reasons(
+        tuple(
+            QfmProviderCall(
+                method=str(call.method),
+                provider_success=bool(call.result["success"]),
+                provider_status=int(call.result["status"]),
+                iterations=int(call.result["nit"]),
+                max_iterations=int(call.options["maxiter"]),
+                endpoint_finite=bool(np.isfinite(float(call.result["fun"]))),
+            )
+            for call in OFFICIAL_REFERENCE.provider_calls
+        )
+    )
+
 
 def _ragged_snapshot(values: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
     flattened = [np.asarray(value, dtype=np.float64).reshape(-1) for value in values]
@@ -42,16 +175,17 @@ def _ragged_snapshot(values: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
 
 
 def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
-    """Snapshot the fitted bounded NCSX surface and fixed coil construction."""
-    from simsopt.configs.zoo import get_data
-    from simsopt.geo import SurfaceRZFourier
+    """Snapshot NCSX at bounded or official-example surface resolution."""
 
     _, _, magnetic_axis, nfp, biotsavart = get_data("ncsx")
-    quadrature_phi = np.linspace(0.0, 1.0 / nfp, 6, endpoint=False)
-    quadrature_theta = np.linspace(0.0, 1.0, 6, endpoint=False)
+    resolution = QFM_SURFACE_RESOLUTION[scale]
+    order = resolution.order
+    quadrature_size = resolution.quadrature_size
+    quadrature_phi = np.linspace(0.0, 1.0 / nfp, quadrature_size, endpoint=False)
+    quadrature_theta = np.linspace(0.0, 1.0, quadrature_size, endpoint=False)
     surface = SurfaceRZFourier(
-        mpol=1,
-        ntor=1,
+        mpol=order,
+        ntor=order,
         stellsym=True,
         nfp=nfp,
         quadpoints_phi=quadrature_phi,
@@ -79,13 +213,11 @@ def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
         },
         configuration={
             "nfp": nfp,
-            "mpol": 1,
-            "ntor": 1,
+            "mpol": order,
+            "ntor": order,
             "stellsym": True,
             "constraint_weight": 1.0,
-            "penalty_tolerance": 1.0e-12,
-            "native_exact_tolerance": 1.0e-14,
-            "jax_exact_tolerance": 1.0e-8,
+            "tolerance": 1.0e-12,
             "max_steps": 80 if scale == "bounded" else 1000,
         },
         scale=scale,
@@ -107,7 +239,6 @@ def _configuration_int(bundle: InputBundle, name: str) -> int:
 
 
 def _surface_from_state(bundle: InputBundle, arrays: dict[str, np.ndarray]):
-    from simsopt.geo import SurfaceRZFourier
 
     surface = SurfaceRZFourier(
         mpol=_configuration_int(bundle, "mpol"),
@@ -122,7 +253,6 @@ def _surface_from_state(bundle: InputBundle, arrays: dict[str, np.ndarray]):
 
 
 def _problem_components(bundle: InputBundle, arrays: dict[str, np.ndarray]):
-    from simsopt.configs.zoo import get_data
 
     _, _, _, _, biotsavart = get_data("ncsx")
     surface = _surface_from_state(bundle, arrays)
@@ -178,6 +308,46 @@ def _native_state(qfm_surface, label, target: float) -> dict[str, np.ndarray]:
     }
 
 
+def qfm_scientific_predicate(
+    values: dict[str, np.ndarray],
+    scale: ExecutionScale,
+) -> bool:
+    """Whether the lane produced a finite, non-degenerate, feasible QFM solve.
+
+    Three conditions hold at every scale, none of them invented here.
+
+    * Every published quantity is finite, checked on the FULL arrays before
+      anything selects from them.
+    * The QFM value decreased, which upstream's own run does: ``initial``
+      ``qfm_value`` down to ``area:exact:qfm_value``, four orders.
+    * The run moved off its start. Without this a lane that never took a step
+      satisfies the two conditions above.
+
+    At ``native_default`` -- and ONLY there, because upstream's script has no
+    reduced configuration and the branch's ``bounded`` scale therefore has no
+    official run to be measured against -- each exact stage must also leave a
+    label residual below
+    :data:`NATIVE_DEFAULT_LABEL_RESIDUAL_GROSS_FAILURE_CEILING`. The branch's
+    per-stage ``label_residual_abs <= 1e-8`` gate stays demoted to a published
+    observable: the official run ends at 4.076e-07 and would fail it.
+    """
+    finite = all(bool(np.all(np.isfinite(value))) for value in values.values())
+    decreased = float(values["area:exact:qfm_value"]) < float(
+        values["initial:qfm_value"]
+    )
+    moved = bool(
+        np.any(values["area:exact:parameters"] != values["initial:parameters"])
+    )
+    if scale != "native_default":
+        return finite and decreased and moved
+    feasible = all(
+        float(values[f"{stage}:exact:label_residual_abs"])
+        < NATIVE_DEFAULT_LABEL_RESIDUAL_GROSS_FAILURE_CEILING
+        for stage in _LABELS
+    )
+    return finite and decreased and moved and feasible
+
+
 def _prefixed(
     stage: str,
     phase: str,
@@ -186,15 +356,38 @@ def _prefixed(
     return {f"{stage}:{phase}:{name}": value for name, value in state.items()}
 
 
+def _provider_call(
+    method: str,
+    *,
+    success: bool,
+    status: int,
+    iterations: int,
+    max_iterations: int,
+    state: dict[str, np.ndarray],
+    phase: str,
+) -> QfmProviderCall:
+    """One SciPy call, with the finiteness of the endpoint it actually left."""
+    return QfmProviderCall(
+        method=method,
+        provider_success=success,
+        provider_status=status,
+        iterations=iterations,
+        max_iterations=max_iterations,
+        endpoint_finite=bool(
+            np.all(np.isfinite(state[f"{phase}:parameters"]))
+            and np.all(np.isfinite(state[f"{phase}:qfm_value"]))
+        ),
+    )
+
+
 def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservation:
-    from simsopt.field import BiotSavart
-    from simsopt.geo import Area, QfmSurface, ToroidalFlux, Volume
 
     biotsavart, surface, fingerprint = _problem_components(bundle, arrays)
     toroidal_field = BiotSavart(biotsavart.coils)
     initial_volume = float(Volume(surface).J())
+    max_steps = _configuration_int(bundle, "max_steps")
     values: dict[str, np.ndarray] = {}
-    success = True
+    provider_calls: list[QfmProviderCall] = []
     total_nit = 0
     total_nfev = 0
     total_njev = 0
@@ -222,7 +415,7 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         values.update(_prefixed(stage_name, "initial", initial))
 
         penalty = qfm_surface.minimize_qfm_penalty_constraints_LBFGS(
-            tol=_configuration_float(bundle, "penalty_tolerance"),
+            tol=_configuration_float(bundle, "tolerance"),
             maxiter=_configuration_int(bundle, "max_steps"),
             constraint_weight=_configuration_float(bundle, "constraint_weight"),
         )
@@ -234,7 +427,7 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
             )
         )
         exact = qfm_surface.minimize_qfm_exact_constraints_SLSQP(
-            tol=_configuration_float(bundle, "native_exact_tolerance"),
+            tol=_configuration_float(bundle, "tolerance"),
             maxiter=_configuration_int(bundle, "max_steps"),
         )
         exact_state = _native_state(qfm_surface, label, target)
@@ -251,17 +444,36 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         total_nfev += int(penalty_info.nfev) + int(exact_info.nfev)
         total_njev += int(penalty_info.njev) + int(exact_info.njev)
         raw_statuses.extend((str(penalty_info.message), str(exact_info.message)))
-        success = bool(
-            success
-            and penalty["success"]
-            and exact["success"]
-            and float(exact_state["label_residual_abs"]) <= 1.0e-8
+        # ``minimize_qfm_*`` hand back SciPy's own ``OptimizeResult`` under
+        # ``info``, so this is the provider's real report, not a relabelling.
+        provider_calls.extend(
+            (
+                _provider_call(
+                    QFM_PENALTY_METHOD,
+                    success=bool(penalty["success"]),
+                    status=int(penalty_info.status),
+                    iterations=int(penalty["iter"]),
+                    max_iterations=max_steps,
+                    state=values,
+                    phase=f"{stage_name}:penalty",
+                ),
+                _provider_call(
+                    QFM_EXACT_METHOD,
+                    success=bool(exact["success"]),
+                    status=int(exact_info.status),
+                    iterations=int(exact["iter"]),
+                    max_iterations=max_steps,
+                    state=values,
+                    phase=f"{stage_name}:exact",
+                ),
+            )
         )
 
-    success = bool(
-        success
-        and float(values["area:exact:qfm_value"]) < float(values["initial:qfm_value"])
+    terminal = normalized_terminal_status(
+        scientific_predicate=qfm_scientific_predicate(values, bundle.scale),
+        stage_stopping_reasons=qfm_stopping_reasons(provider_calls),
     )
+
     return LaneObservation(
         lane="native-cpu",
         backend_mode="native_cpu",
@@ -272,9 +484,9 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=fingerprint,
         driver="simsopt_lbfgsb_then_slsqp_qfm_sequence",
-        normalized_status="converged" if success else "failed",
+        normalized_status=terminal.normalized_status,
         raw_status="; ".join(raw_statuses),
-        success=success,
+        success=terminal.success,
         nit=total_nit,
         nfev=total_nfev,
         njev=total_njev,
@@ -303,33 +515,31 @@ def _jax(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
-    from simsopt_jax.backend.runtime import get_runtime_jax_device
-    from simsopt_jax.examples import solve_qfm_sequence
-    from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
-
-    import jax
 
     biotsavart, surface, fingerprint = _problem_components(bundle, arrays)
     device = get_runtime_jax_device()
     field = BiotSavartJAX(biotsavart.coils)
     coil_set_spec = field.coil_set_spec_from_dofs(
-        jax.device_put(np.asarray(field.x, dtype=np.float64), device)
+        explicit_device_array(field.x, dtype=np.float64, device=device)
     )
-    device_result = solve_qfm_sequence(
-        initial_parameters=jax.device_put(arrays["initial_parameters"], device),
-        quadpoints_phi=jax.device_put(arrays["quadrature_phi"], device),
-        quadpoints_theta=jax.device_put(arrays["quadrature_theta"], device),
+    kernels = build_qfm_host_kernels(
+        initial_parameters=arrays["initial_parameters"],
+        quadpoints_phi=arrays["quadrature_phi"],
+        quadpoints_theta=arrays["quadrature_theta"],
         coil_set_spec=coil_set_spec,
         mpol=surface.mpol,
         ntor=surface.ntor,
         nfp=surface.nfp,
         stellsym=surface.stellsym,
-        max_steps=_configuration_int(bundle, "max_steps"),
-        tolerance=_configuration_float(bundle, "jax_exact_tolerance"),
+    )
+    max_steps = _configuration_int(bundle, "max_steps")
+    result = solve_qfm_host_scipy_sequence(
+        arrays["initial_parameters"],
+        kernels=kernels,
+        max_steps=max_steps,
+        tolerance=_configuration_float(bundle, "tolerance"),
         constraint_weight=_configuration_float(bundle, "constraint_weight"),
     )
-    result = jax.device_get(device_result)
-
     values: dict[str, np.ndarray] = {
         "initial:parameters": np.asarray(
             result.volume.initial.parameters,
@@ -344,7 +554,7 @@ def _jax(
             dtype=np.float64,
         ),
     }
-    success = True
+    provider_calls: list[QfmProviderCall] = []
     total_nit = 0
     total_nfev = 0
     total_njev = 0
@@ -368,19 +578,36 @@ def _jax(
         )
         raw_statuses.extend(
             (
-                str(int(stage.penalty_optimizer.status)),
-                str(int(stage.exact_optimizer.status)),
+                f"{stage.penalty_optimizer.status}:{stage.penalty_optimizer.message}",
+                f"{stage.exact_optimizer.status}:{stage.exact_optimizer.message}",
             )
         )
-        success = bool(
-            success
-            and stage.penalty_optimizer.success
-            and stage.exact_optimizer.success
-            and float(stage.exact.label_residual_abs) <= 1.0e-8
+        provider_calls.extend(
+            (
+                _provider_call(
+                    QFM_PENALTY_METHOD,
+                    success=bool(stage.penalty_optimizer.success),
+                    status=int(stage.penalty_optimizer.status),
+                    iterations=int(stage.penalty_optimizer.nit),
+                    max_iterations=max_steps,
+                    state=values,
+                    phase=f"{stage_name}:penalty",
+                ),
+                _provider_call(
+                    QFM_EXACT_METHOD,
+                    success=bool(stage.exact_optimizer.success),
+                    status=int(stage.exact_optimizer.status),
+                    iterations=int(stage.exact_optimizer.nit),
+                    max_iterations=max_steps,
+                    state=values,
+                    phase=f"{stage_name}:exact",
+                ),
+            )
         )
-    success = bool(
-        success
-        and float(values["area:exact:qfm_value"]) < float(values["initial:qfm_value"])
+
+    terminal = normalized_terminal_status(
+        scientific_predicate=qfm_scientific_predicate(values, bundle.scale),
+        stage_stopping_reasons=qfm_stopping_reasons(provider_calls),
     )
     platform = jax.devices()[0].platform
     return LaneObservation(
@@ -392,10 +619,10 @@ def _jax(
         input_fingerprint=bundle.input_fingerprint,
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=fingerprint,
-        driver="simsopt_bfgs_augmented_lagrangian_qfm_sequence",
-        normalized_status="converged" if success else "failed",
+        driver=QFM_HOST_SCIPY_DRIVER,
+        normalized_status=terminal.normalized_status,
         raw_status=",".join(raw_statuses),
-        success=success,
+        success=terminal.success,
         nit=total_nit,
         nfev=total_nfev,
         njev=total_njev,

@@ -1,7 +1,7 @@
-"""Dependency-neutral execution helpers for the SIMSOPT example scripts.
+"""Internal native import location for shared example execution helpers.
 
-This package is internal: the example scripts and the JAX example contract are
-its only callers, and it is deliberately not part of the public SIMSOPT API.
+The implementation lives in ``simsopt_contracts.examples_runtime`` so JAX
+callers can use it without importing the native package.
 """
 
 from .execution import (

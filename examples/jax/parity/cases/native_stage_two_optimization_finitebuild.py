@@ -17,6 +17,11 @@ from examples.jax.parity.input_bundle import (
     effective_construction_fingerprint,
 )
 from examples.jax.parity.runtime import ParityLane
+from examples.jax.parity.terminal_status import (
+    lane_terminal_status,
+    stage_termination_from_values,
+    status_convention_for_driver,
+)
 from scipy.optimize import minimize
 from simsopt._core.optimizable import Optimizable
 from simsopt.field import (
@@ -39,10 +44,14 @@ from simsopt_jax.core import compute_filament_offsets
 from simsopt_jax.examples import ExecutionScale
 from simsopt_jax.examples.stage_two_finitebuild import (
     FINITE_BUILD_LBFGS_HISTORY,
+    FINITE_BUILD_MAX_FUNCTION_EVALUATIONS,
+    FINITE_BUILD_NATIVE_ITERATIONS,
+    FINITE_BUILD_OFFICIAL_DRIVER,
+    FINITE_BUILD_TOLERANCE,
+    PreparedFiniteBuildStageTwo,
     prepare_finite_build_stage_two,
     solve_finite_build_stage_two,
 )
-from simsopt_jax.solve.driver import Driver
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.objectives import (
     FiniteBuildStageTwoConfig,
@@ -98,9 +107,9 @@ def _configuration(scale: ExecutionScale) -> dict[str, object]:
         "curve_curve_threshold": 0.1,
         "curve_curve_weight": 10.0,
         "objective_scale": 1.0e-4,
-        "max_steps": 400 if native else 3,
-        "rtol": 1.0e-15,
-        "atol": 1.0e-12,
+        "max_steps": FINITE_BUILD_NATIVE_ITERATIONS if native else 3,
+        "rtol": FINITE_BUILD_TOLERANCE,
+        "atol": FINITE_BUILD_TOLERANCE,
         "surface_input_sha256": hashlib.sha256(SURFACE_INPUT.read_bytes()).hexdigest(),
     }
 
@@ -325,6 +334,7 @@ class NativeFiniteBuildEvaluator:
 
     surface: SurfaceRZFourier
     base_curves: tuple[Optimizable, ...]
+    coils: tuple[Coil, ...]
     flux: SquaredFlux
     lengths: tuple[CurveLength, ...]
     distance: CurveCurveDistance
@@ -362,6 +372,7 @@ def build_native_evaluator(bundle: InputBundle) -> NativeFiniteBuildEvaluator:
     return NativeFiniteBuildEvaluator(
         surface=surface,
         base_curves=tuple(base_curves),
+        coils=tuple(coils),
         flux=flux,
         lengths=tuple(lengths),
         distance=distance,
@@ -431,24 +442,36 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         method="L-BFGS-B",
         options={
             "maxiter": _configuration_int(bundle, "max_steps"),
-            # The matched workflows share the production module's frozen
-            # history: the JAX lane routes through
-            # ``solve_finite_build_stage_two`` and cannot configure it, so
-            # the native twin pins the same value.
             "maxcor": FINITE_BUILD_LBFGS_HISTORY,
-            "gtol": 1.0e-20,
-            "ftol": 1.0e-20,
+            "maxfun": FINITE_BUILD_MAX_FUNCTION_EVALUATIONS,
+            "gtol": FINITE_BUILD_TOLERANCE,
+            "ftol": FINITE_BUILD_TOLERANCE,
         },
-        tol=1.0e-20,
+        tol=FINITE_BUILD_TOLERANCE,
     )
     final_values = state(
         "final",
         np.asarray(result.x, dtype=np.float64),
     )
-    success = bool(
+    scientific_predicate = bool(
         np.isfinite(final_values["final:objective"])
         and final_values["final:objective"] < initial_values["initial:objective"]
         and np.all(np.isfinite(final_values["final:objective_gradient"]))
+    )
+    terminal = lane_terminal_status(
+        scientific_predicate=scientific_predicate,
+        stages=(
+            stage_termination_from_values(
+                status_convention="scipy-lbfgsb",
+                provider_success=bool(result.success),
+                provider_status=int(result.status),
+                iterations=int(result.nit),
+                max_iterations=_configuration_int(bundle, "max_steps"),
+                start=("initial", initial_values),
+                end=("final", final_values),
+                gradient_observable="objective_gradient",
+            ),
+        ),
     )
     return LaneObservation(
         lane="native-cpu",
@@ -460,9 +483,9 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=fingerprint,
         driver="scipy_lbfgsb_finite_build",
-        normalized_status="converged" if success else "failed",
+        normalized_status=terminal.normalized_status,
         raw_status=str(result.status),
-        success=success,
+        success=terminal.success,
         nit=int(result.nit),
         nfev=int(result.nfev),
         njev=int(result.njev),
@@ -476,25 +499,96 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
     )
 
 
+@dataclass(frozen=True)
+class FiniteBuildDiagnostics:
+    """The diagnostics vector this case's ``jax`` lane publishes, named.
+
+    The adapter packs it in ``FINITE_BUILD_DIAGNOSTIC_FIELDS`` order with the
+    per-coil lengths appended; unpacking it here rather than at each consumer
+    keeps one spelling of that layout.
+    """
+
+    squared_flux: float
+    length_penalty: float
+    distance_penalty: float
+    minimum_clearance: float
+    coil_lengths: np.ndarray
+
+
+def finite_build_diagnostics(
+    values: np.ndarray | jax.Array,
+) -> FiniteBuildDiagnostics:
+    """Name the entries of one published diagnostics vector."""
+
+    packed = np.asarray(values, dtype=np.float64)
+    return FiniteBuildDiagnostics(
+        squared_flux=float(packed[_DIAGNOSTIC_INDEX["squared_flux"]]),
+        length_penalty=float(packed[_DIAGNOSTIC_INDEX["length_penalty"]]),
+        distance_penalty=float(packed[_DIAGNOSTIC_INDEX["distance_penalty"]]),
+        minimum_clearance=float(packed[_DIAGNOSTIC_INDEX["minimum_clearance"]]),
+        coil_lengths=packed[len(FINITE_BUILD_DIAGNOSTIC_FIELDS) :],
+    )
+
+
+@dataclass(frozen=True)
+class JaxFiniteBuildConstruction:
+    """This case's ``jax`` lane construction: the geometry and the problem.
+
+    The geometry is built ONCE per execution and carried here, so the lane
+    fingerprints the construction its physics runs on instead of a second,
+    unused one.
+    """
+
+    surface: SurfaceRZFourier
+    base_curves: tuple[Optimizable, ...]
+    coils: tuple[Coil, ...]
+    prepared: PreparedFiniteBuildStageTwo
+
+
+def build_jax_construction(
+    bundle: InputBundle,
+    *,
+    initial_parameters: jax.Array,
+    device: jax.Device | None,
+) -> JaxFiniteBuildConstruction:
+    """Build the JAX finite-build problem this case's ``jax`` lane solves.
+
+    The single JAX physics specification for this case: the parity lane and
+    the official-state replay test both consume this, at the published
+    objective scale, instead of re-spelling the adapter composition.
+    """
+
+    surface, base_curves, _, coils, config = _build_geometry(bundle.configuration)
+    field = BiotSavartJAX(coils)
+    flux = SquaredFluxJAX(surface, field)
+    return JaxFiniteBuildConstruction(
+        surface=surface,
+        base_curves=tuple(base_curves),
+        coils=tuple(coils),
+        prepared=prepare_finite_build_stage_two(
+            objective_fn=make_finite_build_stage_two_objective(
+                field,
+                flux.fixed_surface_flux_spec(),
+                config,
+            ),
+            diagnostics_fn=finite_build_stage_two_diagnostics(
+                field,
+                flux.fixed_surface_flux_spec(),
+                config,
+            ),
+            initial_parameters=initial_parameters,
+            objective_scale=jax.device_put(
+                np.asarray(_PUBLISHED_OBJECTIVE_SCALE, dtype=np.float64), device
+            ),
+        ),
+    )
+
+
 def _jax(
     lane: ParityLane,
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
-    surface, base_curves, _, coils, config = _build_geometry(bundle.configuration)
-    fingerprint = _fingerprint(bundle, arrays, surface, base_curves)
-    field = BiotSavartJAX(coils)
-    flux = SquaredFluxJAX(surface, field)
-    objective = make_finite_build_stage_two_objective(
-        field,
-        flux.fixed_surface_flux_spec(),
-        config,
-    )
-    diagnostics = finite_build_stage_two_diagnostics(
-        field,
-        flux.fixed_surface_flux_spec(),
-        config,
-    )
     device = get_runtime_jax_device()
     scale = _configuration_float(bundle, "objective_scale")
 
@@ -502,12 +596,16 @@ def _jax(
         return jax.device_put(np.asarray(value, dtype=np.float64), device)
 
     initial_parameters = jax.device_put(arrays["initial_parameters"], device)
-    prepared = prepare_finite_build_stage_two(
-        objective_fn=objective,
-        diagnostics_fn=diagnostics,
+    construction = build_jax_construction(
+        bundle,
         initial_parameters=initial_parameters,
-        objective_scale=objective_scale_parameter(_PUBLISHED_OBJECTIVE_SCALE),
+        device=device,
     )
+    # The geometry this lane fingerprints is the geometry it evaluates.
+    fingerprint = _fingerprint(
+        bundle, arrays, construction.surface, construction.base_curves
+    )
+    prepared = construction.prepared
     problem = prepared.problem
 
     def state(prefix: str, parameters: jax.Array) -> dict[str, np.ndarray]:
@@ -516,17 +614,17 @@ def _jax(
         published = jax.device_get(
             (parameters, objective_value, gradient, diagnostic_values)
         )
-        values = np.asarray(published[3], dtype=np.float64)
+        diagnostics = finite_build_diagnostics(published[3])
         return _state_values(
             prefix,
             parameters=np.asarray(published[0], dtype=np.float64),
             objective=float(published[1]),
             gradient=np.asarray(published[2], dtype=np.float64),
-            squared_flux=float(values[_DIAGNOSTIC_INDEX["squared_flux"]]),
-            length_penalty=float(values[_DIAGNOSTIC_INDEX["length_penalty"]]),
-            distance_penalty=float(values[_DIAGNOSTIC_INDEX["distance_penalty"]]),
-            minimum_clearance=float(values[_DIAGNOSTIC_INDEX["minimum_clearance"]]),
-            coil_lengths=values[len(FINITE_BUILD_DIAGNOSTIC_FIELDS) :],
+            squared_flux=diagnostics.squared_flux,
+            length_penalty=diagnostics.length_penalty,
+            distance_penalty=diagnostics.distance_penalty,
+            minimum_clearance=diagnostics.minimum_clearance,
+            coil_lengths=diagnostics.coil_lengths,
         )
 
     initial_values = state("initial", initial_parameters)
@@ -549,7 +647,7 @@ def _jax(
     taylor_errors_device = jax.vmap(taylor_error)(epsilons)
     result = solve_finite_build_stage_two(
         prepared,
-        driver=Driver.SIMSOPT_LBFGSB,
+        driver=FINITE_BUILD_OFFICIAL_DRIVER,
         max_steps=_configuration_int(bundle, "max_steps"),
         rtol=_configuration_float(bundle, "rtol"),
         atol=_configuration_float(bundle, "atol"),
@@ -562,12 +660,27 @@ def _jax(
         jax.device_get(taylor_errors_device),
         dtype=np.float64,
     )
-    success = bool(
+    scientific_predicate = bool(
         np.isfinite(final_values["final:objective"])
         and final_values["final:objective"] < initial_values["initial:objective"]
         and np.all(np.isfinite(final_values["final:objective_gradient"]))
     )
     platform = "cpu" if device is None else device.platform
+    terminal = lane_terminal_status(
+        scientific_predicate=scientific_predicate,
+        stages=(
+            stage_termination_from_values(
+                status_convention=status_convention_for_driver(result.driver.value),
+                provider_success=bool(result.success),
+                provider_status=int(result.status),
+                iterations=int(result.nit),
+                max_iterations=_configuration_int(bundle, "max_steps"),
+                start=("initial", initial_values),
+                end=("final", final_values),
+                gradient_observable="objective_gradient",
+            ),
+        ),
+    )
     return LaneObservation(
         lane=lane,
         backend_mode=os.environ["SIMSOPT_BACKEND_MODE"],
@@ -577,10 +690,10 @@ def _jax(
         input_fingerprint=bundle.input_fingerprint,
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=fingerprint,
-        driver=Driver.SIMSOPT_LBFGSB.value,
-        normalized_status="converged" if success else "failed",
+        driver=result.driver.value,
+        normalized_status=terminal.normalized_status,
         raw_status=str(result.status),
-        success=success,
+        success=terminal.success,
         nit=result.nit,
         nfev=result.nfev,
         njev=result.njev,

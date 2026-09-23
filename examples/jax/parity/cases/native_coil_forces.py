@@ -15,7 +15,12 @@ from examples.jax.parity.input_bundle import (
     effective_construction_fingerprint,
 )
 from examples.jax.parity.runtime import ParityLane
-from simsopt_jax.examples import ExecutionScale
+from examples.jax.parity.terminal_status import (
+    lane_terminal_status,
+    stage_termination_from_values,
+    status_convention_for_driver,
+)
+from simsopt_jax.examples import ExecutionScale, solve_scalar_stage
 
 TEST_DATA = Path(__file__).resolve().parents[4] / "tests" / "test_files"
 SURFACE_INPUT = TEST_DATA / "input.LandremanPaul2021_QA"
@@ -29,6 +34,20 @@ WORKFLOW_STAGES = (
     "evaluate_final_force_energy_flux_geometry_and_gradient",
 )
 _TAYLOR_EPSILONS = (1.0e-3, 1.0e-4, 1.0e-5, 1.0e-6, 1.0e-7)
+
+
+def _optimizer_start(arrays: Mapping[str, np.ndarray]) -> np.ndarray:
+    """The state the official script minimizes from: its last Taylor evaluation.
+
+    ``examples/3_Advanced/coil_forces.py`` runs its Taylor test through the same
+    ``JF`` it optimizes and then re-reads ``dofs = JF.x``, so stage one starts
+    from ``dofs0 - 1e-7 * h`` and never from the unperturbed coil set. The initial
+    observables and the Taylor test stay at ``dofs0``. Both lanes take the start
+    from this one host expression, so they begin at the same bits.
+    """
+    return (
+        arrays["initial_parameters"] - _TAYLOR_EPSILONS[-1] * arrays["taylor_direction"]
+    )
 
 
 def _configuration(scale: ExecutionScale) -> dict[str, object]:
@@ -59,7 +78,6 @@ def _configuration(scale: ExecutionScale) -> dict[str, object]:
         "regularization": 0.05**2 / np.sqrt(np.e),
         "max_steps": 400 if native else 3,
         "rtol": 1.0e-15,
-        "atol": 1.0e-8,
         "surface_input_sha256": hashlib.sha256(SURFACE_INPUT.read_bytes()).hexdigest(),
     }
 
@@ -332,23 +350,48 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         np.vdot(initial_values["initial:objective_gradient"], direction)
     )
     taylor_errors = []
-    for epsilon in (1.0e-3, 1.0e-4, 1.0e-5, 1.0e-6, 1.0e-7):
+    for epsilon in _TAYLOR_EPSILONS:
         first_objective.x = initial_parameters + epsilon * direction
         plus = float(first_objective.J())
         first_objective.x = initial_parameters - epsilon * direction
         minus = float(first_objective.J())
         taylor_errors.append((plus - minus) / (2 * epsilon) - directional_derivative)
-    first_result = minimize_objective(first_objective, initial_parameters)
+    first_result = minimize_objective(first_objective, _optimizer_start(arrays))
     first_parameters = np.asarray(first_result.x, dtype=np.float64)
     first_values = state("first", first_parameters, first_objective)
     second_objective = objective(_configuration_float(bundle, "second_length_weight"))
     second_result = minimize_objective(second_objective, first_parameters)
     final_parameters = np.asarray(second_result.x, dtype=np.float64)
     final_values = state("final", final_parameters, second_objective)
-    success = bool(
+    scientific_predicate = bool(
         np.isfinite(final_values["final:objective"])
         and final_values["final:objective"] < initial_values["initial:objective"]
         and np.all(np.isfinite(final_values["final:objective_gradient"]))
+    )
+    terminal = lane_terminal_status(
+        scientific_predicate=scientific_predicate,
+        stages=(
+            stage_termination_from_values(
+                status_convention="scipy-lbfgsb",
+                provider_success=bool(first_result.success),
+                provider_status=int(first_result.status),
+                iterations=int(first_result.nit),
+                max_iterations=_configuration_int(bundle, "max_steps"),
+                start=("initial", initial_values),
+                end=("first", first_values),
+                gradient_observable="objective_gradient",
+            ),
+            stage_termination_from_values(
+                status_convention="scipy-lbfgsb",
+                provider_success=bool(second_result.success),
+                provider_status=int(second_result.status),
+                iterations=int(second_result.nit),
+                max_iterations=_configuration_int(bundle, "max_steps"),
+                start=("first", first_values),
+                end=("final", final_values),
+                gradient_observable="objective_gradient",
+            ),
+        ),
     )
     return LaneObservation(
         lane="native-cpu",
@@ -360,9 +403,9 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=fingerprint,
         driver="scipy_lbfgsb_two_stage_force",
-        normalized_status="converged" if success else "failed",
+        normalized_status=terminal.normalized_status,
         raw_status=f"{first_result.status},{second_result.status}",
-        success=success,
+        success=terminal.success,
         nit=int(first_result.nit + second_result.nit),
         nfev=int(first_result.nfev + second_result.nfev),
         njev=int(first_result.njev + second_result.njev),
@@ -391,7 +434,6 @@ def _jax(
     from simsopt_jax.solve.serial import (
         TraceableArrayFunction,
         TraceableParametricScalarProblem,
-        serial_solve_jax,
     )
     from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
     from simsopt_jax_adapters.objectives import (
@@ -570,14 +612,16 @@ def _jax(
         )
 
     def solve(problem: TraceableParametricScalarProblem):
-        result = serial_solve_jax(
+        # The delivered mirror's route (``examples/jax/3_Advanced/coil_forces.py``,
+        # ``STAGE_DRIVER``): SciPy's own L-BFGS-B over the device objective, named
+        # on what the official call names. It names no ``maxls``, so SciPy's
+        # default applies on both lanes.
+        result = solve_scalar_stage(
             problem,
-            driver=Driver.SIMSOPT_LBFGSB,
+            driver=Driver.SCIPY_LBFGSB,
             max_steps=_configuration_int(bundle, "max_steps"),
             maxcor=min(_configuration_int(bundle, "max_steps"), 300),
-            rtol=_configuration_float(bundle, "rtol"),
-            atol=_configuration_float(bundle, "atol"),
-            require_success=False,
+            tol=_configuration_float(bundle, "rtol"),
         )
         return result, problem.x
 
@@ -586,7 +630,7 @@ def _jax(
     problem = TraceableParametricScalarProblem(
         objective_fn=weighted_objective,
         objective_parameter=length_weight_parameter("first_length_weight"),
-        x=initial_parameters,
+        x=jax.device_put(_optimizer_start(arrays), device),
     )
     state_program = TraceableArrayFunction(
         state_diagnostics,
@@ -625,12 +669,41 @@ def _jax(
         jax.device_get(taylor_errors_device),
         dtype=np.float64,
     )
-    success = bool(
+    scientific_predicate = bool(
         np.isfinite(final_values["final:objective"])
         and final_values["final:objective"] < initial_values["initial:objective"]
         and np.all(np.isfinite(final_values["final:objective_gradient"]))
     )
     platform = "cpu" if device is None else device.platform
+    terminal = lane_terminal_status(
+        scientific_predicate=scientific_predicate,
+        stages=(
+            stage_termination_from_values(
+                status_convention=status_convention_for_driver(
+                    first_result.driver.value
+                ),
+                provider_success=bool(first_result.success),
+                provider_status=int(first_result.status),
+                iterations=int(first_result.nit),
+                max_iterations=_configuration_int(bundle, "max_steps"),
+                start=("initial", initial_values),
+                end=("first", first_values),
+                gradient_observable="objective_gradient",
+            ),
+            stage_termination_from_values(
+                status_convention=status_convention_for_driver(
+                    second_result.driver.value
+                ),
+                provider_success=bool(second_result.success),
+                provider_status=int(second_result.status),
+                iterations=int(second_result.nit),
+                max_iterations=_configuration_int(bundle, "max_steps"),
+                start=("first", first_values),
+                end=("final", final_values),
+                gradient_observable="objective_gradient",
+            ),
+        ),
+    )
     return LaneObservation(
         lane=lane,
         backend_mode=os.environ["SIMSOPT_BACKEND_MODE"],
@@ -640,10 +713,10 @@ def _jax(
         input_fingerprint=bundle.input_fingerprint,
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=fingerprint,
-        driver=Driver.SIMSOPT_LBFGSB.value,
-        normalized_status="converged" if success else "failed",
+        driver=first_result.driver.value,
+        normalized_status=terminal.normalized_status,
         raw_status=f"{first_result.status},{second_result.status}",
-        success=success,
+        success=terminal.success,
         nit=first_result.nit + second_result.nit,
         nfev=first_result.nfev + second_result.nfev,
         njev=first_result.njev + second_result.njev,

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import dataclasses
+import json
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -33,6 +33,8 @@ def test_approved_policies_are_available_through_the_real_runtime_registry() -> 
     assert serial.outer_optimizer_policy is not None
     assert exact.outer_optimizer_policy.case_id == EXACT_ID
     assert serial.outer_optimizer_policy.case_id is None
+    assert exact.outer_optimizer_policy.registry_scope == "experimental"
+    assert serial.outer_optimizer_policy.registry_scope == "experimental"
     assert serial.teaching_kind == "combined"
     assert not any(
         relationship.jax_example_id == SERIAL_ID
@@ -42,7 +44,7 @@ def test_approved_policies_are_available_through_the_real_runtime_registry() -> 
         next(
             example
             for example in pair.examples
-            if example.id == "native-just-a-quadratic"
+            if example.id == "native-wireframe-rcls-basic"
         ).outer_optimizer_policy
         is None
     )
@@ -75,7 +77,7 @@ def test_manifest_rejects_missing_or_borrowed_host_outer_declarations(
     else:
         relationship = next(
             relationship
-            for relationship in parity["relationships"]
+            for relationship in parity["experimental_relationships"]
             if relationship["jax_example_id"] == EXACT_ID
         )
         relationship["case_id"] = "unregistered-borrower"
@@ -100,7 +102,17 @@ def test_planned_serial_record_without_declaration_keeps_legacy_default() -> Non
     )
 
 
-@pytest.mark.parametrize("example_id", (EXACT_ID, SERIAL_ID))
+@pytest.mark.parametrize(
+    "example_id",
+    (
+        EXACT_ID,
+        SERIAL_ID,
+        "native-qfm",
+        "native-just-a-quadratic",
+        "native-minimize-curve-length",
+        "native-surf-vol-area",
+    ),
+)
 def test_example_child_command_rejects_a_missing_ready_host_declaration(
     example_id: str,
 ) -> None:
@@ -116,6 +128,30 @@ def test_example_child_command_rejects_a_missing_ready_host_declaration(
         ValueError, match="requires its outer optimizer policy declaration"
     ):
         build_child_command(without_declaration, repo_root=REPO_ROOT)
+
+
+def test_qfm_host_policy_is_bound_to_its_official_example_and_case() -> None:
+    manifest = json.loads((REPO_ROOT / "examples/jax/manifest.json").read_text())
+    parity = json.loads((REPO_ROOT / "examples/jax/parity_manifest.json").read_text())
+    pair = load_manifest_contract_pair_documents(manifest, parity, repo_root=REPO_ROOT)
+    qfm = next(
+        example for example in pair.examples.jax_examples if example.id == "native-qfm"
+    )
+    assert qfm.outer_optimizer_policy is not None
+    assert (
+        qfm.outer_optimizer_policy.expected_driver == "scipy_lbfgsb_slsqp_qfm_sequence"
+    )
+    assert qfm.outer_optimizer_policy.registry_scope == "official"
+    assert qfm.outer_optimizer_policy.case_id == "native-qfm"
+
+    borrower = next(
+        example
+        for example in manifest["jax_examples"]
+        if example["id"] == "native-just-a-quadratic"
+    )
+    borrower["outer_optimizer_policy"] = qfm.outer_optimizer_policy.policy_id
+    with pytest.raises(ValueError, match="different example"):
+        load_manifest_contract_pair_documents(manifest, parity, repo_root=REPO_ROOT)
 
 
 def test_parity_runner_rejects_legacy_missing_policy_before_inputs_or_children(

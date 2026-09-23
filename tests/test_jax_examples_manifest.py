@@ -32,9 +32,15 @@ NATIVE_TIERS = {
 # Frozen v2 catalog is 51 sources. Post-v2 natives stay off that pin:
 # single_stage_boozer_vacuum_optimization.py, then a7df37227's flat-675 twin.
 # da1565498 registered flat675 on the live v3 catalog; this historical v2
-# contract still subtracts every post-v2 source.
+# contract still subtracts every post-v2 source. The two periodic-field-line
+# scripts are official upstream sources (they are in the pinned upstream
+# inventory at 9e027eac3 and in the live v3 catalog, as blocked without a
+# mirror) that reached this branch with an upstream merge, i.e. after the v2
+# snapshot was frozen, so they are post-v2 natives here too.
 POST_V2_NATIVE_SOURCES = frozenset(
     {
+        "1_Simple/periodicfieldline_QA.py",
+        "1_Simple/periodicfieldline_QH.py",
         "3_Advanced/single_stage_boozer_vacuum_optimization.py",
         "3_Advanced/single_stage_flat675.py",
     }
@@ -100,8 +106,12 @@ def _jax_records(document: dict[str, object]) -> list[dict[str, object]]:
 def test_source_catalog_exactly_matches_native_python_examples() -> None:
     manifest = _load_manifest(MANIFEST_PATH)
 
+    tracked = _tracked_native_examples()
+    # Every subtracted source must still be a file in the tree, so the
+    # exclusion list cannot quietly keep hiding a source that is gone.
+    assert POST_V2_NATIVE_SOURCES <= tracked
     assert {record.source for record in manifest.source_catalog} == (
-        _tracked_native_examples() - POST_V2_NATIVE_SOURCES
+        tracked - POST_V2_NATIVE_SOURCES
     )
     assert len(manifest.source_catalog) == 51
 

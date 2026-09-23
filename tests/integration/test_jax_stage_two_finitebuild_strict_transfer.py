@@ -1,4 +1,10 @@
-"""Strict-transfer coverage for the production finite-build Stage-II workflow.
+"""Strict-transfer coverage for the finite-build Stage-II workflow's device mode.
+
+The device-resident L-BFGS-B is this mirror's opt-in performance mode, not
+its default: the default is the host SciPy provider upstream calls, which
+crosses the host boundary once per evaluation by construction.  This file
+names the device driver explicitly, so the mode keeps the coverage its GPU
+claim rests on; under the default driver none of it could pass.
 
 Inputs are staged on the device first; the prepared workflow is then solved
 inside ``jax.transfer_guard("disallow")`` with ``host_transfer_audit()`` open,
@@ -36,6 +42,7 @@ from simsopt.geo import (
 )
 from simsopt_jax.core import compute_filament_offsets
 from simsopt_jax.examples.stage_two_finitebuild import (
+    FINITE_BUILD_DEVICE_DRIVER,
     PreparedFiniteBuildStageTwo,
     prepare_finite_build_stage_two,
     solve_finite_build_stage_two,
@@ -168,11 +175,12 @@ def _audited_solve(
     with host_transfer_audit() as audit, jax.transfer_guard("disallow"):
         result = solve_finite_build_stage_two(
             prepared,
-            driver=Driver.SIMSOPT_LBFGSB,
+            driver=FINITE_BUILD_DEVICE_DRIVER,
             max_steps=max_steps,
             rtol=1.0e-15,
             atol=1.0e-12,
         )
+    assert result.driver is Driver.SIMSOPT_LBFGSB
     return result, {entry.phase: entry.calls for entry in audit.summary()}
 
 

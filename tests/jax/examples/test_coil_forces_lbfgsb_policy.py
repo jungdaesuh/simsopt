@@ -25,7 +25,8 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 NATIVE_SCRIPT = REPOSITORY_ROOT / "examples" / "3_Advanced" / "coil_forces.py"
 JAX_SCRIPT = REPOSITORY_ROOT / "examples" / "jax" / "3_Advanced" / "coil_forces.py"
 NATIVE_BUDGET = 400
-NATIVE_MAXLS = 32
+#: The official script names no ``maxls``; it inherits SciPy's own default.
+SCIPY_DEFAULT_MAXLS = inspect.signature(fmin_l_bfgs_b).parameters["maxls"].default
 
 
 def _module_constants(module: ast.Module) -> dict[str, object]:
@@ -54,7 +55,10 @@ def _option_value(node: ast.expr, constants: dict[str, object]) -> object:
 
 
 def _native_minimize_policies() -> list[dict[str, object]]:
-    """The L-BFGS-B option dicts both native ``minimize`` calls name, plus ``tol``."""
+    """The L-BFGS-B policy of both native ``minimize`` calls, plus ``tol``.
+
+    An option the script does not name is SciPy's default, which is what runs.
+    """
     source = NATIVE_SCRIPT.read_text(encoding="utf-8")
     module = ast.parse(source)
     constants = _module_constants(module)
@@ -84,7 +88,8 @@ def _native_minimize_policies() -> list[dict[str, object]]:
                 "method": keywords["method"].value,
                 "maxiter": options["maxiter"],
                 "maxcor": options["maxcor"],
-                "maxls": options["maxls"],
+                "maxls": options.get("maxls", SCIPY_DEFAULT_MAXLS),
+                "names_maxls": "maxls" in options,
                 "tol": keywords["tol"].value,
             }
         )
@@ -143,7 +148,14 @@ def test_coil_forces_lanes_share_one_lbfgsb_option_dict_including_maxls() -> Non
     assert native["method"] == "L-BFGS-B"
     assert native["maxiter"] == jax_constants["NATIVE_ITERATIONS"] == NATIVE_BUDGET
     assert native["maxcor"] == jax_constants["NATIVE_HISTORY_SIZE"] == 300
-    assert native["maxls"] == jax_constants["NATIVE_LINE_SEARCH_MAX"] == NATIVE_MAXLS
+    assert native["names_maxls"] is False, (
+        "the official script names no maxls; naming one is a policy deviation"
+    )
+    assert (
+        native["maxls"]
+        == jax_constants["NATIVE_LINE_SEARCH_MAX"]
+        == SCIPY_DEFAULT_MAXLS
+    )
     assert native["tol"] == jax_constants["NATIVE_TOLERANCE"] == 1.0e-15
     assert handed["maxls"] == "NATIVE_LINE_SEARCH_MAX"
     assert handed["maxcor"] == "NATIVE_HISTORY_SIZE"

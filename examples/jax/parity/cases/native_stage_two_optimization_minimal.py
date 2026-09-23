@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -14,7 +16,34 @@ from examples.jax.parity.input_bundle import (
     effective_construction_fingerprint,
 )
 from examples.jax.parity.runtime import ParityLane
-from simsopt_jax.examples import ExecutionScale
+from examples.jax.parity.terminal_status import (
+    TerminalStatus,
+    lane_terminal_status,
+    stage_termination_from_values,
+    status_convention_for_driver,
+)
+from scipy.optimize import minimize
+from simsopt._core.optimizable import Optimizable
+from simsopt.field import BiotSavart, Coil, Current, coils_via_symmetries
+from simsopt.geo import (
+    CurveLength,
+    SurfaceRZFourier,
+    create_equally_spaced_curves,
+)
+from simsopt.objectives import QuadraticPenalty, SquaredFlux
+from simsopt_contracts.optimization_endpoint import StatusConvention
+from simsopt_jax.core.specs import FixedSurfaceFluxSpec
+from simsopt_jax.examples import ExecutionScale, solve_minimal_stage_two
+from simsopt_jax.examples.stage_two_minimal import (
+    MINIMAL_STAGE_TWO_LBFGS_HISTORY,
+    MINIMAL_STAGE_TWO_NATIVE_ITERATIONS,
+    MINIMAL_STAGE_TWO_OFFICIAL_DRIVER,
+    MINIMAL_STAGE_TWO_TOLERANCE,
+)
+from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
+from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
+
+import jax
 
 TEST_DATA = Path(__file__).resolve().parents[4] / "tests" / "test_files"
 SURFACE_INPUT = TEST_DATA / "input.LandremanPaul2021_QA"
@@ -27,6 +56,7 @@ WORKFLOW_STAGES = (
     "optimize_flux_plus_one_sided_total_length_penalty",
     "evaluate_final_flux_length_normal_field_and_gradient",
 )
+_TAYLOR_EPSILONS = (1.0e-3, 1.0e-4, 1.0e-5, 1.0e-6, 1.0e-7)
 
 
 def _scale_configuration(scale: ExecutionScale) -> dict[str, object]:
@@ -38,12 +68,30 @@ def _scale_configuration(scale: ExecutionScale) -> dict[str, object]:
         "num_base_curves": 4,
         "major_radius": 1.0,
         "minor_radius": 0.5,
-        "initial_current": 1.0e5,
+        # Official: ``base_currents = [Current(1.0) * 1e5 for i in range(ncoils)]``
+        # (upstream examples/1_Simple/stage_two_optimization_minimal.py:77), so
+        # every free current degree of freedom is 1.0 behind a fixed 1e5 scale.
+        # L-BFGS-B is not scale invariant, so this parametrization is part of
+        # the problem, not a presentation choice.
+        "initial_current_degree_of_freedom": 1.0,
+        "current_scale": 1.0e5,
         "length_weight": 1.0,
         "length_target": 18.0,
-        "max_steps": 300 if native_scale else 80,
-        "rtol": 1.0e-12,
-        "atol": 1.0e-10,
+        # Official: ``MAXITER = 50 if in_github_actions else 300`` and
+        # ``options={'maxiter': MAXITER, 'maxcor': 300, 'iprint': 5}, tol=1e-15``
+        # (upstream examples/1_Simple/stage_two_optimization_minimal.py:56,137).
+        # The reduced scale shrinks the geometry, not the optimizer policy, so
+        # it carries the same cap; the 50-iteration value belongs to upstream's
+        # CI switch, which this scale is not.  Every one of these numbers is
+        # owned by ``simsopt_jax.examples.stage_two_minimal``, which both lanes
+        # read, so neither lane can drift from upstream on its own.
+        "max_steps": MINIMAL_STAGE_TWO_NATIVE_ITERATIONS,
+        # Official minimal uses ``minimize(..., tol=1e-15)``, which SciPy
+        # expands into both stopping quantities; both lanes apply it even for
+        # the reduced smoke geometry.
+        "rtol": MINIMAL_STAGE_TWO_TOLERANCE,
+        "atol": MINIMAL_STAGE_TWO_TOLERANCE,
+        "lbfgs_history_size": MINIMAL_STAGE_TWO_LBFGS_HISTORY,
         "surface_input_sha256": hashlib.sha256(SURFACE_INPUT.read_bytes()).hexdigest(),
     }
 
@@ -62,10 +110,43 @@ def _configuration_int(bundle: InputBundle, name: str) -> int:
     return value
 
 
-def _build_geometry(configuration: dict[str, object]):
-    from simsopt.field import Current, coils_via_symmetries
-    from simsopt.geo import SurfaceRZFourier, create_equally_spaced_curves
+def _mapping_float(configuration: Mapping[str, object], name: str) -> float:
+    value = configuration[name]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"configuration {name} must be numeric")
+    return float(value)
 
+
+def _terminal_status(
+    *,
+    scientific_predicate: bool,
+    status_convention: StatusConvention,
+    provider_success: bool,
+    provider_status: int,
+    iterations: int,
+    max_iterations: int,
+    initial_values: dict[str, np.ndarray],
+    final_values: dict[str, np.ndarray],
+) -> TerminalStatus:
+    """Classify the single stage from provider state and published endpoints."""
+    return lane_terminal_status(
+        scientific_predicate=scientific_predicate,
+        stages=(
+            stage_termination_from_values(
+                status_convention=status_convention,
+                provider_success=provider_success,
+                provider_status=provider_status,
+                iterations=iterations,
+                max_iterations=max_iterations,
+                start=("initial", initial_values),
+                end=("final", final_values),
+                gradient_observable="objective_gradient",
+            ),
+        ),
+    )
+
+
+def _build_geometry(configuration: Mapping[str, object]):
     surface_resolution = configuration["surface_resolution"]
     curve_order = configuration["curve_order"]
     curve_quadrature = configuration["curve_quadrature"]
@@ -84,13 +165,15 @@ def _build_geometry(configuration: dict[str, object]):
         num_base_curves,
         surface.nfp,
         stellsym=True,
-        R0=float(configuration["major_radius"]),
-        R1=float(configuration["minor_radius"]),
+        R0=_mapping_float(configuration, "major_radius"),
+        R1=_mapping_float(configuration, "minor_radius"),
         order=curve_order,
         numquadpoints=curve_quadrature,
     )
     base_currents = [
-        Current(float(configuration["initial_current"])) for _ in base_curves
+        Current(_mapping_float(configuration, "initial_current_degree_of_freedom"))
+        * _mapping_float(configuration, "current_scale")
+        for _ in base_curves
     ]
     base_currents[0].fix_all()
     coils = coils_via_symmetries(
@@ -102,23 +185,105 @@ def _build_geometry(configuration: dict[str, object]):
     return surface, base_curves, coils
 
 
-def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
-    """Materialize the exact initial DOFs and Taylor direction once."""
-    from simsopt.field import BiotSavart
-    from simsopt.geo import CurveLength
-    from simsopt.objectives import QuadraticPenalty, SquaredFlux
+@dataclass(frozen=True)
+class NativeMinimalEvaluator:
+    """Assembled native SIMSOPT/simsoptpp minimal Stage-II evaluator.
 
-    configuration = _scale_configuration(scale)
+    The single native physics specification for this case: ``create_input``,
+    the parity lane and the official-state replay test all consume this
+    instead of re-deriving the objective composition.  The record freezes its
+    references only; evaluating any term mutates the shared simsopt graph
+    through ``objective.x``, so one evaluator serves one consumer at a time.
+    """
+
+    surface: SurfaceRZFourier
+    base_curves: tuple[Optimizable, ...]
+    coils: tuple[Coil, ...]
+    field: BiotSavart
+    flux: SquaredFlux
+    total_length: Optimizable
+    length_penalty: Optimizable
+    objective: Optimizable
+
+
+def build_native_evaluator_for_configuration(
+    configuration: Mapping[str, object],
+) -> NativeMinimalEvaluator:
+    """Assemble the native minimal objective from a scale configuration."""
+
     surface, base_curves, coils = _build_geometry(configuration)
     field = BiotSavart(coils)
+    field.set_points(surface.gamma().reshape((-1, 3)))
     flux = SquaredFlux(surface, field)
     total_length = sum(CurveLength(curve) for curve in base_curves)
-    objective = flux + float(configuration["length_weight"]) * QuadraticPenalty(
+    length_penalty = QuadraticPenalty(
         total_length,
-        float(configuration["length_target"]),
+        _mapping_float(configuration, "length_target"),
         "max",
     )
-    initial_parameters = np.asarray(objective.x, dtype=np.float64)
+    objective = flux + _mapping_float(configuration, "length_weight") * length_penalty
+    return NativeMinimalEvaluator(
+        surface=surface,
+        base_curves=tuple(base_curves),
+        coils=tuple(coils),
+        field=field,
+        flux=flux,
+        total_length=total_length,
+        length_penalty=length_penalty,
+        objective=objective,
+    )
+
+
+def build_native_evaluator(bundle: InputBundle) -> NativeMinimalEvaluator:
+    """Assemble the native minimal objective and its published terms."""
+
+    return build_native_evaluator_for_configuration(bundle.configuration)
+
+
+@dataclass(frozen=True)
+class JaxMinimalGeometry:
+    """The device-side inputs this case's ``jax`` lane hands the workflow.
+
+    The single JAX physics specification for this case: the parity lane and
+    the official-state replay test both consume it, so neither re-spells the
+    adapter construction or the surface staging.
+    """
+
+    surface: SurfaceRZFourier
+    base_curves: tuple[Optimizable, ...]
+    coils: tuple[Coil, ...]
+    field: BiotSavartJAX
+    flux_spec: FixedSurfaceFluxSpec
+    surface_gamma: jax.Array
+    surface_normal: jax.Array
+
+
+def build_jax_geometry(bundle: InputBundle) -> JaxMinimalGeometry:
+    """Stage the case's surface and coils for the device programs."""
+
+    surface, base_curves, coils = _build_geometry(bundle.configuration)
+    field = BiotSavartJAX(coils)
+    flux = SquaredFluxJAX(surface, field)
+    return JaxMinimalGeometry(
+        surface=surface,
+        base_curves=tuple(base_curves),
+        coils=tuple(coils),
+        field=field,
+        flux_spec=flux.fixed_surface_flux_spec(),
+        surface_gamma=jax.device_put(
+            np.asarray(surface.gamma(), dtype=np.float64).reshape((-1, 3))
+        ),
+        surface_normal=jax.device_put(
+            np.asarray(surface.normal(), dtype=np.float64).reshape((-1, 3))
+        ),
+    )
+
+
+def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
+    """Materialize the exact initial DOFs and Taylor direction once."""
+    configuration = _scale_configuration(scale)
+    evaluator = build_native_evaluator_for_configuration(configuration)
+    initial_parameters = np.asarray(evaluator.objective.x, dtype=np.float64)
     return create_input_bundle(
         root,
         case_id="native-stage-two-optimization-minimal",
@@ -192,35 +357,20 @@ def _values(
 
 
 def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservation:
-    from scipy.optimize import minimize
-    from simsopt.field import BiotSavart
-    from simsopt.geo import CurveLength
-    from simsopt.objectives import QuadraticPenalty, SquaredFlux
-
-    surface, base_curves, coils = _build_geometry(dict(bundle.configuration))
+    evaluator = build_native_evaluator(bundle)
+    surface = evaluator.surface
+    base_curves = evaluator.base_curves
     construction_fingerprint = _effective_fingerprint(
         bundle,
         arrays,
         surface,
         base_curves,
     )
-    field = BiotSavart(coils)
-    field.set_points(surface.gamma().reshape((-1, 3)))
-    flux = SquaredFlux(surface, field)
-    total_length = sum(CurveLength(curve) for curve in base_curves)
-    length_penalty = QuadraticPenalty(
-        total_length,
-        _configuration_float(bundle, "length_target"),
-        "max",
-    )
-    objective = (
-        flux
-        + _configuration_float(
-            bundle,
-            "length_weight",
-        )
-        * length_penalty
-    )
+    field = evaluator.field
+    flux = evaluator.flux
+    total_length = evaluator.total_length
+    length_penalty = evaluator.length_penalty
+    objective = evaluator.objective
     initial_parameters = arrays["initial_parameters"]
     taylor_direction = arrays["taylor_direction"]
     unit_normal = surface.unitnormal().reshape((-1, 3))
@@ -248,7 +398,7 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
     initial_gradient = initial_values["initial:objective_gradient"]
     directional_derivative = float(np.vdot(initial_gradient, taylor_direction))
     taylor_errors = []
-    for epsilon in (1.0e-3, 1.0e-4, 1.0e-5, 1.0e-6, 1.0e-7):
+    for epsilon in _TAYLOR_EPSILONS:
         plus = initial_parameters + epsilon * taylor_direction
         minus = initial_parameters - epsilon * taylor_direction
         objective.x = plus
@@ -270,13 +420,13 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         method="L-BFGS-B",
         options={
             "maxiter": _configuration_int(bundle, "max_steps"),
-            "maxcor": 300,
+            "maxcor": _configuration_int(bundle, "lbfgs_history_size"),
         },
-        tol=1.0e-15,
+        tol=_configuration_float(bundle, "rtol"),
     )
     final_parameters = np.asarray(result.x, dtype=np.float64)
     final_values = state("final", final_parameters)
-    success = bool(
+    scientific_predicate = bool(
         np.isfinite(final_values["final:objective"]).all()
         and float(final_values["final:objective"])
         < float(initial_values["initial:objective"])
@@ -288,6 +438,16 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         and float(final_values["final:total_curve_length"])
         <= 1.1 * _configuration_float(bundle, "length_target")
     )
+    terminal = _terminal_status(
+        scientific_predicate=scientific_predicate,
+        status_convention="scipy-lbfgsb",
+        provider_success=bool(result.success),
+        provider_status=int(result.status),
+        iterations=int(result.nit),
+        max_iterations=_configuration_int(bundle, "max_steps"),
+        initial_values=initial_values,
+        final_values=final_values,
+    )
     return LaneObservation(
         lane="native-cpu",
         backend_mode="native_cpu",
@@ -298,9 +458,9 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=construction_fingerprint,
         driver="scipy_lbfgsb",
-        normalized_status="converged" if success else "failed",
+        normalized_status=terminal.normalized_status,
         raw_status=str(result.status),
-        success=success,
+        success=terminal.success,
         nit=int(result.nit),
         nfev=int(result.nfev),
         njev=int(result.njev),
@@ -319,35 +479,24 @@ def _jax(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
-    from simsopt_jax.examples import solve_minimal_stage_two
-    from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
-    from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
-
-    import jax
-
-    surface, base_curves, coils = _build_geometry(dict(bundle.configuration))
+    geometry = build_jax_geometry(bundle)
     construction_fingerprint = _effective_fingerprint(
         bundle,
         arrays,
-        surface,
-        base_curves,
+        geometry.surface,
+        geometry.base_curves,
     )
-    field = BiotSavartJAX(coils)
-    flux = SquaredFluxJAX(surface, field)
     device_result = solve_minimal_stage_two(
-        field=field,
-        flux_spec=flux.fixed_surface_flux_spec(),
-        surface_gamma=jax.device_put(
-            np.asarray(surface.gamma(), dtype=np.float64).reshape((-1, 3))
-        ),
-        surface_normal=jax.device_put(
-            np.asarray(surface.normal(), dtype=np.float64).reshape((-1, 3))
-        ),
+        field=geometry.field,
+        flux_spec=geometry.flux_spec,
+        surface_gamma=geometry.surface_gamma,
+        surface_normal=geometry.surface_normal,
         initial_parameters=jax.device_put(arrays["initial_parameters"]),
         taylor_direction=jax.device_put(arrays["taylor_direction"]),
         num_base_curves=_configuration_int(bundle, "num_base_curves"),
         length_weight=_configuration_float(bundle, "length_weight"),
         length_target=_configuration_float(bundle, "length_target"),
+        driver=MINIMAL_STAGE_TWO_OFFICIAL_DRIVER,
         max_steps=_configuration_int(bundle, "max_steps"),
         rtol=_configuration_float(bundle, "rtol"),
         atol=_configuration_float(bundle, "atol"),
@@ -391,9 +540,8 @@ def _jax(
         maximum_normal_field=float(host_values[12]),
         total_curve_length=float(host_values[13]),
     )
-    success = bool(
-        device_result.optimizer.success
-        and float(final_values["final:objective"])
+    scientific_predicate = bool(
+        float(final_values["final:objective"])
         < float(initial_values["initial:objective"])
         and np.linalg.norm(
             final_values["final:objective_gradient"],
@@ -402,6 +550,18 @@ def _jax(
         <= 1.0e-4
         and float(final_values["final:total_curve_length"])
         <= 1.1 * _configuration_float(bundle, "length_target")
+    )
+    terminal = _terminal_status(
+        scientific_predicate=scientific_predicate,
+        status_convention=status_convention_for_driver(
+            device_result.optimizer.driver.value
+        ),
+        provider_success=bool(device_result.optimizer.success),
+        provider_status=int(device_result.optimizer.status),
+        iterations=int(device_result.optimizer.nit),
+        max_iterations=_configuration_int(bundle, "max_steps"),
+        initial_values=initial_values,
+        final_values=final_values,
     )
     platform = jax.devices()[0].platform
     return LaneObservation(
@@ -414,9 +574,9 @@ def _jax(
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=construction_fingerprint,
         driver=device_result.optimizer.driver.value,
-        normalized_status="converged" if success else "failed",
+        normalized_status=terminal.normalized_status,
         raw_status=str(device_result.optimizer.status),
-        success=success,
+        success=terminal.success,
         nit=device_result.optimizer.nit,
         nfev=device_result.optimizer.nfev,
         njev=device_result.optimizer.njev,

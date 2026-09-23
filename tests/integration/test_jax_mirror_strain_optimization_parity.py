@@ -26,8 +26,12 @@ def test_exact_strain_optimization_matches_native_and_jax_cpu(
     monkeypatch.setenv("JAX_ENABLE_X64", "1")
     jax = case.execute("jax-cpu", bundle, arrays)
 
-    assert native.success is True
-    assert jax.success is True
+    # The bounded budget ends every stage on its iteration cap. The label says
+    # so; it is neither convergence nor failure, and it still implies the case's
+    # scientific predicate, because a false predicate is labelled ``failed``.
+    for observation in (native, jax):
+        assert observation.normalized_status == "budget_exhausted"
+        assert observation.success is False
     assert native.scale == jax.scale == "bounded"
     assert native.input_fingerprint == jax.input_fingerprint
     assert native.configuration_fingerprint == jax.configuration_fingerprint
@@ -97,6 +101,4 @@ def test_exact_strain_optimization_matches_native_and_jax_cpu(
     assert float(native.values["final:objective"]) < float(
         native.values["initial:objective"]
     )
-    assert float(jax.values["final:objective"]) < float(
-        jax.values["initial:objective"]
-    )
+    assert float(jax.values["final:objective"]) < float(jax.values["initial:objective"])

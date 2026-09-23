@@ -13,11 +13,23 @@ from examples.jax.parity.input_bundle import (
     create_input_bundle,
     effective_construction_fingerprint,
 )
+from examples.jax.parity.official_tracing_contract import (
+    FINAL_PARALLEL_SPEED_FRACTION_KEY,
+    LaneDistances,
+    contract_violations,
+    lane_distances,
+    lane_status_reasons,
+    non_finite_observables,
+)
 from examples.jax.parity.runtime import ParityLane
 from simsopt.util.constants import ELEMENTARY_CHARGE, ONE_EV, PROTON_MASS
 from simsopt_jax.examples import ExecutionScale
+from simsopt_jax_adapters.field.tracing import trace_particles_with_status
 
 KINETIC_ENERGY = 5_000.0 * ONE_EV
+#: Parity case id; the tracing contract is keyed by it.
+CASE_ID = "native-tracing-particle"
+
 WORKFLOW_STAGES = (
     "construct_ncsx_coils_axis_and_particle_boundary",
     "sample_cylindrical_interpolated_field",
@@ -36,7 +48,10 @@ def _scale_configuration(scale: ExecutionScale) -> dict[str, object]:
         "interpolation_degree": 3 if native_scale else 2,
         "particle_count": 100 if native_scale else 3,
         "tmax": 1.0e-2 if native_scale else 1.0e-5,
-        "jax_max_steps": 4_000 if native_scale else 512,
+        # ``None`` = the upstream horizon: the run ends at ``tmax`` or on the
+        # level-set criterion, never on a trial budget. The bounded scale keeps
+        # an explicit budget so the fixture stays short.
+        "jax_max_steps": None if native_scale else 512,
         "integrator_tolerance": 1.0e-9,
         "surface_distance": 0.20,
         "classifier_h": 0.1,
@@ -52,6 +67,13 @@ def _configuration_int(bundle: InputBundle, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"configuration {name} must be an integer")
     return value
+
+
+def _configuration_optional_int(bundle: InputBundle, name: str) -> int | None:
+    value = bundle.configuration[name]
+    if value is None:
+        return None
+    return _configuration_int(bundle, name)
 
 
 def _configuration_float(bundle: InputBundle, name: str) -> float:
@@ -133,7 +155,7 @@ def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
     )
     return create_input_bundle(
         root,
-        case_id="native-tracing-particle",
+        case_id=CASE_ID,
         random_seed=1,
         arrays={
             "axis_dofs": np.asarray(magnetic_axis.local_full_x, dtype=np.float64),
@@ -181,12 +203,24 @@ def _values(
     phi_hits: list[np.ndarray],
     tmax: float,
     speed_total: float,
+    statuses: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     final_rows = np.stack([trajectory[-1] for trajectory in trajectories])
     final_times = final_rows[:, 0]
     final_positions = final_rows[:, 1:4]
     final_parallel_speeds = final_rows[:, 4]
-    statuses = np.where(np.isclose(final_times, tmax, rtol=0.0, atol=1.0e-12), 0, -1)
+    if statuses is None:
+        statuses = np.asarray(
+            [
+                0
+                if np.isclose(time, tmax, rtol=0.0, atol=1.0e-12)
+                else int(hits[hits[:, 1] < 0][-1, 1])
+                if hits.ndim == 2 and np.any(hits[:, 1] < 0)
+                else 1
+                for time, hits in zip(final_times, phi_hits, strict=True)
+            ],
+            dtype=np.int64,
+        )
     hit_counts = np.asarray([hits.shape[0] for hits in phi_hits], dtype=np.int64)
     hit_positions = np.concatenate(
         [np.asarray(hits[:, 2:5], dtype=np.float64) for hits in phi_hits],
@@ -200,7 +234,7 @@ def _values(
         "initial:states": np.column_stack((initial_points, parallel_speeds)),
         "interpolation:initial_field": initial_field,
         "final:positions": final_positions,
-        "final:parallel_speed_fraction": final_parallel_speeds / speed_total,
+        FINAL_PARALLEL_SPEED_FRACTION_KEY: final_parallel_speeds / speed_total,
         "final:times": final_times,
         "final:status": statuses,
         "poincare:counts": hit_counts,
@@ -214,7 +248,7 @@ def _with_energy_error(
     final_field: np.ndarray,
     speed_total: float,
 ) -> dict[str, np.ndarray]:
-    final_parallel_fraction = values["final:parallel_speed_fraction"]
+    final_parallel_fraction = values[FINAL_PARALLEL_SPEED_FRACTION_KEY]
     final_parallel_speeds = final_parallel_fraction * speed_total
     final_abs_field = np.linalg.norm(final_field, axis=1)
     final_energy_per_mass = (
@@ -235,6 +269,24 @@ def _with_energy_error(
     }
 
 
+def _upstream_distances(
+    bundle: InputBundle,
+    values: dict[str, np.ndarray],
+) -> LaneDistances | None:
+    """The lane's distance to UPSTREAM's canonical record, line by line; only the shipped scale has one."""
+    if bundle.scale != "native_default":
+        return None
+    return lane_distances(
+        CASE_ID,
+        initial_states=values["initial:states"],
+        final_positions=values["final:positions"],
+        final_times=values["final:times"],
+        final_statuses=values["final:status"],
+        poincare_counts=values["poincare:counts"],
+        parallel_speed_fractions=values[FINAL_PARALLEL_SPEED_FRACTION_KEY],
+    )
+
+
 def _observation(
     lane: ParityLane,
     bundle: InputBundle,
@@ -244,12 +296,22 @@ def _observation(
     precision: str,
     driver: str,
 ) -> LaneObservation:
-    success = bool(
-        np.all(np.isfinite(values["final:positions"]))
-        and np.all(np.isfinite(values["final:parallel_speed_fraction"]))
+    non_finite = non_finite_observables(values)
+    distances = _upstream_distances(bundle, values)
+    violations = () if distances is None else contract_violations(distances)
+    published = (
+        dict(values)
+        if distances is None
+        else {**values, **distances.published_values()}
+    )
+    # ``non_finite_observables`` is the finiteness rule for EVERY published array of this lane, so the health
+    # predicate below adds only what is specific to this case; there is one finiteness check, not one per key.
+    healthy = bool(
+        not non_finite
         and np.all(values["final:status"] <= 0)
         and float(values["conservation:energy_relative_error"]) < 1.0e-3
     )
+    success = healthy and not violations
     return LaneObservation(
         lane=lane,
         backend_mode=(
@@ -267,14 +329,18 @@ def _observation(
         ),
         driver=driver,
         normalized_status="converged" if success else "failed",
-        raw_status="integration_complete_or_levelset_stop",
+        raw_status=lane_status_reasons(
+            non_finite,
+            violations,
+            values["final:status"],
+        ),
         success=success,
         nit=None,
         nfev=None,
         njev=None,
         completed_workflow_stages=WORKFLOW_STAGES,
         provenance=None,
-        values=values,
+        values=published,
     )
 
 
@@ -345,7 +411,7 @@ def _native(
         values,
         platform="cpu",
         precision="fp64",
-        driver="simsoptpp_lsoda_guiding_center",
+        driver="simsoptpp_dopri5_guiding_center",
     )
 
 
@@ -358,7 +424,6 @@ def _jax(
     from simsopt_jax.backend.runtime import get_runtime_jax_device
     from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
     from simsopt_jax_adapters.field.interpolated import InterpolatedFieldJAX
-    from simsopt_jax_adapters.field.tracing import trace_particles
 
     import jax
 
@@ -379,7 +444,7 @@ def _jax(
     initial_points = arrays["initial_points"]
     interpolated.set_points(initial_points)
     initial_field = np.asarray(jax.device_get(interpolated.B()), dtype=np.float64)
-    trajectories, phi_hits = trace_particles(
+    trajectories, phi_hits, statuses = trace_particles_with_status(
         interpolated,
         initial_points,
         arrays["parallel_speeds"],
@@ -391,8 +456,9 @@ def _jax(
         phis=tuple(arrays["phi_planes"]),
         stopping_criteria=[LevelsetStoppingCriterion(classifier)],
         mode="gc_vac",
+        comm=None,
         forget_exact_path=True,
-        max_steps=_configuration_int(bundle, "jax_max_steps"),
+        max_steps=_configuration_optional_int(bundle, "jax_max_steps"),
     )
     speed_total = np.sqrt(
         2.0
@@ -409,6 +475,7 @@ def _jax(
         phi_hits=phi_hits,
         tmax=_configuration_float(bundle, "tmax"),
         speed_total=speed_total,
+        statuses=statuses,
     )
     interpolated.set_points(
         np.ascontiguousarray(values["final:positions"], dtype=np.float64)

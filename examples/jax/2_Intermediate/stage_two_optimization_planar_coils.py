@@ -13,11 +13,33 @@ plus the three free currents, ordered exactly as ``BiotSavart(coils).x``.  The
 admissible native reference is therefore the fixed-surface twin built by
 ``examples/jax/parity/cases/native_stage_two_optimization_planar_coils.py``,
 the same construction ``examples/2_Intermediate/stage_two_optimization.py``
-uses.  The shipped planar script instead leaves the 121 ``SurfaceRZFourier``
-coordinates free, which ``CurveSurfaceDistance`` pulls into ``JF.x``; that is a
-defect of the script, not a narrowing here -- ``SquaredFlux`` owns no surface
+uses.  Upstream ``9e027eac3`` leaves the 121 ``SurfaceRZFourier`` coordinates
+free, which ``CurveSurfaceDistance`` pulls into ``JF.x``; that is a defect of
+the upstream script, not a narrowing here -- ``SquaredFlux`` owns no surface
 partial and never re-sets the Biot-Savart evaluation points, so the extra
-coordinates carry a gradient that fails its own Taylor test.
+coordinates carry a gradient that fails its own Taylor test.  The branch's
+native copy of the script neutralizes it with an added ``s.fix_all()``
+(``examples/2_Intermediate/stage_two_optimization_planar_coils.py``), as it does
+for standard stage two and coil forces.
+
+**Documented deviation from upstream (C10).** Upstream keeps the four
+``CurvePlanarFourier`` Jacobians in the PERSISTENT cache
+(``src/simsoptpp/curveplanarfourier.h:94-105``), which ``invalidate_cache()``
+never clears and which is sound only for a curve linear in its dofs.  This curve
+rotates by a normalized quaternion, so upstream's gradient is the first
+evaluated state's for the whole run, and upstream's L-BFGS-B stops by
+line-search stagnation -- status 0, ``RELATIVE REDUCTION OF F <= FACTR*EPSMCH``,
+at 135 and 69 iterations of its own 400-iteration cap.  Upstream's END POINT is
+therefore not reachable by a gradient that describes the objective, and this
+mirror does not claim it: it runs the script's own ``MAXITER`` per stage
+(``NATIVE_ITERATIONS`` below) and a budget exit is the expected honest terminal
+status.  What is mirrored, and proven against upstream's own capture in
+``tests/integration/test_jax_mirror_planar_coils_official_states.py``, is the
+objective VALUE at upstream's three recorded states and the GRADIENT at the
+start state -- the one state at which upstream's gradient is right.  The JAX
+curve differentiates through the quaternion normalization
+(``simsopt_jax/core/curve_planar_fourier.py``) and so has no analogue of the
+frozen Jacobian.
 """
 
 from __future__ import annotations

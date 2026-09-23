@@ -12,8 +12,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import simsoptpp as sopp
-
 from simsopt_jax.core.wireframe_workflow import (
+    WIREFRAME_GSCO_MULTISTEP_STAGE_CAPACITY,
     WireframeGSCOLiveParams,
     _wireframe_gsco_multistep_initial_state,
     find_wireframe_coil_sizes_jax,
@@ -145,9 +145,12 @@ def test_wireframe_initial_states_allow_strict_host_to_device_transfer_guard():
             x_init,
             loop_count_init,
             current_fraction=0.5,
+            stage_capacity=3,
         )
         assert state.iter_history.shape == (4,)
         assert multistep_state.current_fraction.shape == ()
+        assert multistep_state.stage_objectives.shape == (3,)
+        assert multistep_state.stage_iterations.shape == (3,)
         result = greedy_stellarator_coil_optimization_jax(
             False,
             False,
@@ -302,6 +305,14 @@ def _host_multistep_reference(
     base_constrained = np.zeros((x.size,), dtype=bool)
     current_fraction = initial_current_fraction
     nonfinal_steps = 0
+    stage_objectives: list[float] = []
+    stage_iterations: list[int] = []
+    enclosed_before_final = np.zeros((x.size,), dtype=bool)
+
+    def _record(current_x):
+        residual = A @ np.asarray(current_x).reshape(-1) - np.asarray(b).reshape(-1)
+        stage_objectives.append(0.5 * float(np.sum(residual * residual)))
+
     for _outer in range(max_outer_steps):
         final_step = previous_x is not None and np.array_equal(previous_x, x)
         x_start = x.copy()
@@ -334,26 +345,45 @@ def _host_multistep_reference(
         )
         x = np.asarray(x_next, dtype=np.float64).reshape((-1, 1))
         loop_count = np.asarray(loop_count_next, dtype=np.int64)
+        stage_iterations.append(int(np.asarray(_history[0]).reshape(-1)[-1]))
         if final_step:
-            return x, loop_count, np.zeros_like(enclosed), nonfinal_steps, True
+            _record(x)
+            return (
+                x,
+                loop_count,
+                np.zeros_like(enclosed),
+                enclosed,
+                nonfinal_steps,
+                True,
+                stage_objectives,
+                stage_iterations,
+            )
 
         coil_sizes = _host_coil_sizes(loop_count, neighbors)
         small_cells = np.logical_and(coil_sizes > 0, coil_sizes < min_coil_size)
         segment_prune_mask = np.zeros((x.size,), dtype=bool)
-        segment_prune_mask[np.unique(np.asarray(loops)[small_cells].reshape((-1)))] = (
-            True
-        )
+        segment_prune_mask[np.unique(np.asarray(loops)[small_cells].reshape(-1))] = True
         x[segment_prune_mask, :] = 0.0
         loop_count[small_cells] = 0
 
         active_cells = loop_count != 0
         enclosed = np.zeros((x.size,), dtype=bool)
-        enclosed[np.unique(np.asarray(loops)[active_cells].reshape((-1)))] = True
-        enclosed[x.reshape((-1)) != 0.0] = False
+        enclosed[np.unique(np.asarray(loops)[active_cells].reshape(-1))] = True
+        enclosed[x.reshape(-1) != 0.0] = False
         previous_x = x_start
         nonfinal_steps += 1
         current_fraction *= 0.5
-    return x, loop_count, enclosed, nonfinal_steps, False
+        _record(x)
+    return (
+        x,
+        loop_count,
+        enclosed,
+        enclosed_before_final,
+        nonfinal_steps,
+        False,
+        stage_objectives,
+        stage_iterations,
+    )
 
 
 def _assert_live_state_matches_cpp(state, expected) -> None:
@@ -581,6 +611,7 @@ def test_gsco_multistep_loop_matches_cpp_host_orchestration_with_final_adjustmen
         current_scale=1.0,
         min_coil_size=3,
         final_max_current=0.22,
+        stage_history_capacity=4,
     )
     expected = _host_multistep_reference(
         A,
@@ -603,8 +634,11 @@ def test_gsco_multistep_loop_matches_cpp_host_orchestration_with_final_adjustmen
         expected_x,
         expected_loop_count,
         expected_enclosed,
+        expected_enclosed_before_final,
         expected_nonfinal_steps,
         expected_final_adjustment_run,
+        expected_stage_objectives,
+        expected_stage_iterations,
     ) = expected
 
     np.testing.assert_allclose(np.asarray(actual.x), expected_x)
@@ -612,15 +646,28 @@ def test_gsco_multistep_loop_matches_cpp_host_orchestration_with_final_adjustmen
     np.testing.assert_array_equal(
         np.asarray(actual.enclosed_segment_mask), expected_enclosed
     )
+    np.testing.assert_array_equal(
+        np.asarray(actual.enclosed_segment_mask_before_final_adjustment),
+        expected_enclosed_before_final,
+    )
     assert int(np.asarray(actual.nonfinal_steps)) == expected_nonfinal_steps
     assert (
         bool(np.asarray(actual.final_adjustment_run)) is expected_final_adjustment_run
     )
-    expected_stage_count = expected_nonfinal_steps + int(
-        expected_final_adjustment_run
-    )
+    expected_stage_count = expected_nonfinal_steps + int(expected_final_adjustment_run)
     assert int(np.asarray(actual.stage_count)) == expected_stage_count
     assert actual.stage_objectives.shape == (4,)
+    assert actual.stage_iterations.shape == (4,)
+    np.testing.assert_allclose(
+        np.asarray(actual.stage_objectives)[:expected_stage_count],
+        np.asarray(expected_stage_objectives),
+    )
+    # The C++ history index is the accepted-update counter, which is exactly
+    # what the JAX live state carries as history_length - 1.
+    np.testing.assert_array_equal(
+        np.asarray(actual.stage_iterations)[:expected_stage_count],
+        np.asarray(expected_stage_iterations, dtype=np.int32),
+    )
     expected_final_objective = 0.5 * np.sum(
         (A @ np.asarray(actual.x).ravel() - np.asarray(b).reshape((-1,))) ** 2
     )
@@ -644,10 +691,15 @@ def test_gsco_multistep_loop_matches_cpp_host_orchestration_with_final_adjustmen
             current_scale=1.0,
             min_coil_size=3,
             final_max_current=0.22,
+            stage_history_capacity=4,
         )
 
     A_device = jnp.asarray(A, dtype=jnp.float64)
-    assert "scan[" in str(jax.make_jaxpr(_run_impl)(A_device))
+    # One outer while loop (stable currents or the declared limit) around the
+    # fixed-length inner GSCO scan, at both scales.
+    jaxpr = str(jax.make_jaxpr(_run_impl)(A_device))
+    assert "while[" in jaxpr
+    assert "scan[" in jaxpr
     _run = jax.jit(_run_impl)
     compiled = _run(A_device)
     compiled.x.block_until_ready()
@@ -655,6 +707,187 @@ def test_gsco_multistep_loop_matches_cpp_host_orchestration_with_final_adjustmen
     with jax.transfer_guard("disallow"):
         guarded = _run(A_device)
         guarded.x.block_until_ready()
+
+
+def test_gsco_multistep_loop_natural_termination_has_no_outer_cap() -> None:
+    A, b, loops, free_loops, segments, connections, x_init, loop_count_init = (
+        _gsco_problem()
+    )
+    neighbors = np.ascontiguousarray(
+        np.array([[1, 1, 1, 1], [0, 0, 0, 0]], dtype=np.int64)
+    )
+    params = _params(
+        A,
+        loops,
+        free_loops,
+        segments,
+        connections,
+        default_current=0.2,
+        max_current=1.0,
+        max_loop_count=1,
+        lambda_s=0.15,
+    )
+
+    natural = wireframe_gsco_multistep_loop_jax(
+        params,
+        jnp.asarray(b),
+        jnp.asarray(x_init),
+        jnp.asarray(loop_count_init),
+        jnp.asarray(loops),
+        jnp.asarray(neighbors),
+        jnp.zeros((x_init.size,), dtype=bool),
+        max_iter_per_step=5,
+        max_outer_steps=None,
+        initial_current_fraction=0.2,
+        current_scale=1.0,
+        min_coil_size=3,
+        final_max_current=0.22,
+    )
+
+    expected = _host_multistep_reference(
+        A,
+        b,
+        loops,
+        segments,
+        connections,
+        neighbors,
+        x_init,
+        loop_count_init,
+        max_iter_per_step=5,
+        max_outer_steps=WIREFRAME_GSCO_MULTISTEP_STAGE_CAPACITY,
+        initial_current_fraction=0.2,
+        current_scale=1.0,
+        min_coil_size=3,
+        final_max_current=0.22,
+        lambda_s=0.15,
+    )
+    (
+        expected_x,
+        _expected_loop_count,
+        _expected_enclosed,
+        expected_enclosed_before_final,
+        expected_nonfinal_steps,
+        expected_final_adjustment_run,
+        expected_stage_objectives,
+        expected_stage_iterations,
+    ) = expected
+    stage_count = int(np.asarray(natural.stage_count))
+
+    assert bool(np.asarray(natural.final_adjustment_run)) is True
+    assert expected_final_adjustment_run is True
+    assert stage_count == int(np.asarray(natural.nonfinal_steps)) + 1
+    assert int(np.asarray(natural.nonfinal_steps)) == expected_nonfinal_steps
+    # The natural path records every stage it ran: a real history, not an
+    # empty array, at the declared capacity.
+    assert natural.stage_objectives.shape == (WIREFRAME_GSCO_MULTISTEP_STAGE_CAPACITY,)
+    assert natural.stage_iterations.shape == (WIREFRAME_GSCO_MULTISTEP_STAGE_CAPACITY,)
+    assert stage_count == len(expected_stage_objectives)
+    np.testing.assert_allclose(
+        np.asarray(natural.stage_objectives)[:stage_count],
+        np.asarray(expected_stage_objectives),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(natural.stage_iterations)[:stage_count],
+        np.asarray(expected_stage_iterations, dtype=np.int32),
+    )
+    np.testing.assert_allclose(np.asarray(natural.x), expected_x)
+    np.testing.assert_array_equal(
+        np.asarray(natural.enclosed_segment_mask_before_final_adjustment),
+        expected_enclosed_before_final,
+    )
+    expected_final_objective = 0.5 * np.sum(
+        (A @ np.asarray(natural.x).ravel() - np.asarray(b).reshape((-1,))) ** 2
+    )
+    np.testing.assert_allclose(
+        np.asarray(natural.final_objective),
+        expected_final_objective,
+    )
+    np.testing.assert_allclose(
+        np.asarray(natural.stage_objectives)[stage_count - 1],
+        expected_final_objective,
+    )
+
+    def run_natural(A_data):
+        return wireframe_gsco_multistep_loop_jax(
+            replace(params, A=A_data),
+            jnp.asarray(b),
+            jnp.asarray(x_init),
+            jnp.asarray(loop_count_init),
+            jnp.asarray(loops),
+            jnp.asarray(neighbors),
+            jnp.zeros((x_init.size,), dtype=bool),
+            max_iter_per_step=5,
+            max_outer_steps=None,
+            initial_current_fraction=0.2,
+            current_scale=1.0,
+            min_coil_size=3,
+            final_max_current=0.22,
+        )
+
+    assert "while[" in str(jax.make_jaxpr(run_natural)(jnp.asarray(A)))
+
+
+def test_gsco_multistep_stage_capacity_is_a_failure_not_a_truncation() -> None:
+    """A run that cannot record another stage stops without the final adjustment."""
+    A, b, loops, free_loops, segments, connections, x_init, loop_count_init = (
+        _gsco_problem()
+    )
+    neighbors = np.ascontiguousarray(
+        np.array([[1, 1, 1, 1], [0, 0, 0, 0]], dtype=np.int64)
+    )
+    params = _params(
+        A,
+        loops,
+        free_loops,
+        segments,
+        connections,
+        default_current=0.2,
+        max_current=1.0,
+        max_loop_count=1,
+        lambda_s=0.15,
+    )
+
+    starved = wireframe_gsco_multistep_loop_jax(
+        params,
+        jnp.asarray(b),
+        jnp.asarray(x_init),
+        jnp.asarray(loop_count_init),
+        jnp.asarray(loops),
+        jnp.asarray(neighbors),
+        jnp.zeros((x_init.size,), dtype=bool),
+        max_iter_per_step=5,
+        max_outer_steps=None,
+        initial_current_fraction=0.2,
+        current_scale=1.0,
+        min_coil_size=3,
+        final_max_current=0.22,
+        stage_history_capacity=1,
+    )
+
+    assert bool(np.asarray(starved.final_adjustment_run)) is False
+    assert int(np.asarray(starved.stage_count)) == 1
+    assert starved.stage_objectives.shape == (1,)
+    assert bool(
+        np.all(~np.asarray(starved.enclosed_segment_mask_before_final_adjustment))
+    )
+
+    with pytest.raises(ValueError, match="stage history capacity"):
+        wireframe_gsco_multistep_loop_jax(
+            params,
+            jnp.asarray(b),
+            jnp.asarray(x_init),
+            jnp.asarray(loop_count_init),
+            jnp.asarray(loops),
+            jnp.asarray(neighbors),
+            jnp.zeros((x_init.size,), dtype=bool),
+            max_iter_per_step=5,
+            max_outer_steps=4,
+            initial_current_fraction=0.2,
+            current_scale=1.0,
+            min_coil_size=3,
+            final_max_current=0.22,
+            stage_history_capacity=3,
+        )
 
 
 def test_gsco_final_adjustment_oracle_flags_change_cpp_result() -> None:

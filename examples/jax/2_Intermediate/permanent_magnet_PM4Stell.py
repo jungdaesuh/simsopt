@@ -30,9 +30,29 @@ from simsopt.util import (
 from simsopt_jax.examples import ExampleResult, ExecutionScale, run_example
 from simsopt_jax.geo.permanent_magnet_grid import PermanentMagnetGridJAX
 from simsopt_jax.solve.permanent_magnet import GPMO_ArbVec_backtracking_jax
+from simsopt_jax_adapters.examples.gpmo_rules import gpmo_history_period
 
 EXAMPLE_ID = "native-permanent-magnet-pm4stell"
 NATIVE_ITERATIONS = 2_000
+#: Bounded scale is upstream's own ``in_github_actions`` configuration of
+#: ``examples/2_Intermediate/permanent_magnet_PM4Stell.py`` (K=100,
+#: max_nMagnets=20, nBacktracking=200, nAdjacent=10, nHistory=10,
+#: downsample=100, N=2) -- the configuration the parity case freezes and the
+#: official CI run measured. Every constant below is bound to
+#: ``examples/jax/parity/cases/native_permanent_magnet_pm4stell._scale_configuration``
+#: by ``tests/integration/test_jax_mirror_permanent_magnet_pm4stell_parity.py``.
+BOUNDED_ITERATIONS = 100
+#: Upstream's ``nBacktracking``, ``nHistory`` and ``nAdjacent`` do not depend on
+#: the scale; ``int(K / nHistory)`` is the record period.
+BACKTRACKING = 200
+HISTORY_COUNT = 10
+ADJACENT_COUNT = 10
+NATIVE_MAGNET_CAP = 1_000
+BOUNDED_MAGNET_CAP = 20
+NATIVE_NPHI = 16
+BOUNDED_NPHI = 2
+NATIVE_DOWNSAMPLE = 10
+BOUNDED_DOWNSAMPLE = 100
 TEST_DATA = Path(__file__).resolve().parents[3] / "tests" / "test_files"
 
 
@@ -75,8 +95,8 @@ def _build_grid(
     scale: ExecutionScale,
 ) -> tuple[PermanentMagnetGridJAX, dict[str, str]]:
     native_scale = scale == "native_default"
-    resolution = 16 if native_scale else 2
-    downsample = 10 if native_scale else 100
+    resolution = NATIVE_NPHI if native_scale else BOUNDED_NPHI
+    downsample = NATIVE_DOWNSAMPLE if native_scale else BOUNDED_DOWNSAMPLE
     plasma_path = TEST_DATA / "c09r00_B_axis_half_tesla_PM4Stell.plasma"
     coil_path = TEST_DATA / "tf_only_half_tesla_symmetry_baxis_PM4Stell.focus"
     magnet_path = TEST_DATA / "magpie_trial104b_PM4Stell.focus"
@@ -123,16 +143,26 @@ def _build_grid(
 def solve(
     _output_directory: Path, max_steps: int, scale: ExecutionScale
 ) -> ExampleResult:
+    native_scale = scale == "native_default"
     grid, input_sha256 = _build_grid(scale)
     initial_error_device = jnp.linalg.norm(grid.b_obj)
     result = GPMO_ArbVec_backtracking_jax(
         grid,
         K=max_steps,
-        Nadjacent=10,
-        backtracking=200 if scale == "native_default" else 20,
+        Nadjacent=ADJACENT_COUNT,
+        backtracking=BACKTRACKING,
         thresh_angle=np.pi,
-        max_nMagnets=1000 if scale == "native_default" else 20,
-        record_every=max_steps,
+        max_nMagnets=NATIVE_MAGNET_CAP if native_scale else BOUNDED_MAGNET_CAP,
+        # Official kwargs record the history every ``int(K / nHistory)``
+        # iterations (``initialize_default_kwargs`` sets ``verbose=True``), the
+        # same period the parity case gives the native provider. Upstream
+        # refuses ``nhistory > K``, so a budget below ``nHistory`` records one
+        # row per iteration instead of aborting the run; the clamp is inert at
+        # both official budgets (100 and 2000).
+        record_every=gpmo_history_period(
+            iterations=max_steps,
+            history_count=min(HISTORY_COUNT, max_steps),
+        ),
     )
     final_error_device = jnp.linalg.norm(result.residual)
     moments = np.asarray(jax.device_get(result.m), dtype=np.float64)
@@ -170,7 +200,7 @@ def main(arguments: list[str] | None = None) -> int:
         arguments,
         description=__doc__,
         temporary_prefix="simsopt-jax-permanent-magnet-pm4stell-",
-        bounded_steps=20,
+        bounded_steps=BOUNDED_ITERATIONS,
         native_default_steps=NATIVE_ITERATIONS,
         solve=solve,
     )

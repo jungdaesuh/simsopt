@@ -66,9 +66,9 @@ TEST_DATA = Path(__file__).resolve().parents[3] / "tests" / "test_files"
 NATIVE_TOLERANCE = 1.0e-15
 #: Native's ``options={'maxcor': 300}``.
 NATIVE_HISTORY_SIZE = 300
-#: Native's ``options={'maxls': 32}``. SciPy's default of 20 aborts the cold
-#: stage-two restart at a length-penalty-inert point.
-NATIVE_LINE_SEARCH_MAX = 32
+#: Native names no ``maxls``, so it runs SciPy's L-BFGS-B default of 20. The
+#: fused device ports take the cap as a number, so it is spelled out here.
+NATIVE_LINE_SEARCH_MAX = 20
 #: Native's Taylor-test step sizes, in the order it evaluates them.
 TAYLOR_EPSILONS = (1.0e-3, 1.0e-4, 1.0e-5, 1.0e-6, 1.0e-7)
 #: L-BFGS-B implementation both stages use. ``Driver.SCIPY_LBFGSB`` is native's

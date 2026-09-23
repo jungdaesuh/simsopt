@@ -1,4 +1,14 @@
-"""Device-resident three-label QFM surface optimization workflow."""
+"""Device-resident three-label QFM workflow. NOT the official ``1_Simple/qfm.py`` mirror.
+
+This route substitutes a device BFGS for upstream's host ``L-BFGS-B`` penalty
+call and an augmented Lagrangian for upstream's host ``SLSQP`` equality call
+(``simsopt/geo/qfmsurface.py:117-181``), so it minimizes the same three labels
+under a different algorithm with different stopping rules and cannot report
+upstream's six SciPy provider statuses. The official mirror is
+``simsopt_jax.examples.qfm_host_scipy.solve_qfm_host_scipy_sequence``, which
+``examples/jax/1_Simple/qfm.py`` and the ``native-qfm`` parity case both use.
+This module is kept as the fully device-resident variant and has no caller.
+"""
 
 from __future__ import annotations
 
@@ -234,7 +244,11 @@ def solve_qfm_sequence(
     tolerance: float,
     constraint_weight: float = 1.0,
 ) -> QfmSequenceDeviceResult:
-    """Run the native example's three QFM stages with one final host boundary."""
+    """Three device-resident QFM label stages; NOT the official SciPy sequence.
+
+    See this module's docstring: the official mirror is
+    ``qfm_host_scipy.solve_qfm_host_scipy_sequence``.
+    """
     parameters = jnp.asarray(initial_parameters, dtype=jnp.float64)
     surface_spec = surface_rz_fourier_spec_from_dofs(
         parameters,

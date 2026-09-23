@@ -20,7 +20,7 @@ from simsopt.util.constants import ELEMENTARY_CHARGE, ONE_EV, PROTON_MASS
 from simsopt_jax.examples import ExampleResult, ExecutionScale, run_example
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.field.interpolated import InterpolatedFieldJAX
-from simsopt_jax_adapters.field.tracing import trace_particles
+from simsopt_jax_adapters.field.tracing import trace_particles_with_status
 
 EXAMPLE_ID = "native-tracing-particle"
 NATIVE_PARTICLE_COUNT = 100
@@ -73,7 +73,7 @@ def solve(
     particle_count = int(max_steps)
     magnetic_axis, surface, interpolated, nfp = _problem(scale)
     trace_time = NATIVE_TRACE_TIME if scale == "native_default" else BOUNDED_TRACE_TIME
-    trace_max_steps = 4_000 if scale == "native_default" else BOUNDED_MAX_STEPS
+    trace_max_steps = None if scale == "native_default" else BOUNDED_MAX_STEPS
 
     speed_total = np.sqrt(2.0 * KINETIC_ENERGY / PROTON_MASS)
     random_generator = np.random.RandomState(1)
@@ -97,7 +97,7 @@ def solve(
         p=2,
     )
     phis = tuple(index * 0.5 * np.pi / nfp for index in range(4))
-    trajectories, _phi_hits = trace_particles(
+    trajectories, _phi_hits, core_statuses = trace_particles_with_status(
         interpolated,
         initial_points,
         parallel_speeds,
@@ -106,6 +106,7 @@ def solve(
         charge=ELEMENTARY_CHARGE,
         Ekin=KINETIC_ENERGY,
         tol=1.0e-9,
+        comm=None,
         phis=phis,
         stopping_criteria=[LevelsetStoppingCriterion(classifier)],
         mode="gc_vac",
@@ -127,11 +128,7 @@ def solve(
             / initial_energy_per_mass
         )
     )
-    final_times = final_rows[:, 0]
-    statuses = tuple(
-        0 if np.isclose(time, trace_time, rtol=0.0, atol=1.0e-14) else -1
-        for time in final_times
-    )
+    statuses = tuple(int(status) for status in core_statuses)
     scientific_success = bool(
         len(trajectories) == particle_count
         and np.all(np.isfinite(final_rows))

@@ -11,6 +11,7 @@ from .curveplanarfourier import *
 from .framedcurve import *
 from .finitebuild import *
 from .plotting import *
+from .periodicfieldline import *
 
 from .periodicfieldline import *
 

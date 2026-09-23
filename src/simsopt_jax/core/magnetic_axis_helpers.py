@@ -430,6 +430,27 @@ def _dopri5_step(
 
 
 # Reference: Hairer et al. eq. (4.13). Order=5, exponent = 1/5.
+#
+# These constants and :func:`_error_norm` below are DELIBERATELY not the ones in
+# ``simsopt_jax.core.tracing``, and the two modules must not be merged. They
+# mirror different upstream code:
+#
+# * ``simsopt_jax.core.tracing`` mirrors ``legacy native extension/tracing.cpp``,
+#   whose integrator is boost.odeint's ``controlled_runge_kutta`` with
+#   ``default_error_checker`` / ``default_step_adjuster``: an INFINITY norm of
+#   ``|y_err| / (atol + rtol * (|y_old| + |h| * |dydt_old|))``, a
+#   ``1 / (error_order - 1)`` exponent on rejection and a ``1 / stepper_order``
+#   exponent on acceptance that only grows the step when the error is below 0.5.
+# * this module mirrors ``simsopt.field.magnetic_axis_helpers``, which is pure
+#   Python and integrates Greene's tangent map with SciPy
+#   ``solve_ivp(method='RK45', rtol=1e-12, atol=1e-12)``. SciPy's RK45 is
+#   Hairer's canonical PI(0.2) driver with an RMS error norm over
+#   ``atol + rtol * max(|y|, |y_new|)``, which is what is written here.
+#
+# An older comment in ``tracing.py`` claimed the two shared one controller
+# policy. That was true only while the tracer had not yet been aligned with
+# boost; aligning THIS module with the tracer would move the accepted steps of a
+# solver whose own upstream is SciPy, for no upstream reason.
 _DOPRI5_EXP = 0.2
 _SAFETY = 0.9
 _MIN_FACTOR = 0.2

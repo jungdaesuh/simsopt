@@ -32,17 +32,65 @@ from simsopt_jax.solve.simsopt.contracts import (
 
 
 @dataclass(frozen=True)
-class PreparedFusedLaneSolve:
-    """Prepared device programs with stable identity across repeated solves.
+class PreparedFusedLaneObjective:
+    """Prepared solve programs with stable identity across repeated solves.
 
     The record freezes its references only; solving mutates ``problem.x``.
     Reusing one prepared record across repeated solves reuses the compiled
     fused executable — constructing a fresh record per solve retraces.
+
+    This is what :func:`solve_fused_lane` needs. A lane that also publishes
+    on-device diagnostics prepares :class:`PreparedFusedLaneSolve` instead; a
+    lane that does not must not build a diagnostics program it never calls,
+    because ``TraceableArrayFunction`` closure-converts and traces its function
+    eagerly on construction.
     """
 
     problem: TraceableParametricScalarProblem
-    diagnostics: TraceableArrayFunction
     initial_parameters: jax.Array
+
+
+@dataclass(frozen=True)
+class PreparedFusedLaneSolve(PreparedFusedLaneObjective):
+    """A prepared lane that also publishes an on-device diagnostics program."""
+
+    diagnostics: TraceableArrayFunction
+
+
+def _prepared_problem(
+    objective_fn: Callable[[jax.Array], jax.Array],
+    initial_parameters: jax.Array,
+    objective_scale: jax.Array,
+) -> TraceableParametricScalarProblem:
+    def scaled_objective(
+        parameters: jax.Array,
+        scale_parameter: jax.Array,
+    ) -> jax.Array:
+        return scale_parameter * objective_fn(parameters)
+
+    return TraceableParametricScalarProblem(
+        objective_fn=scaled_objective,
+        objective_parameter=objective_scale,
+        x=initial_parameters,
+    )
+
+
+def prepare_fused_lane_objective(
+    *,
+    objective_fn: Callable[[jax.Array], jax.Array],
+    initial_parameters: jax.Array,
+    objective_scale: jax.Array,
+) -> PreparedFusedLaneObjective:
+    """Build only the traceable scaled problem, for lanes with no diagnostics.
+
+    ``objective_scale`` is the parametric solve scale; callers republish at a
+    different scale through ``problem.set_objective_parameter`` without
+    retracing.
+    """
+    return PreparedFusedLaneObjective(
+        problem=_prepared_problem(objective_fn, initial_parameters, objective_scale),
+        initial_parameters=initial_parameters,
+    )
 
 
 def prepare_fused_lane_solve(
@@ -58,33 +106,22 @@ def prepare_fused_lane_solve(
     different scale through ``problem.set_objective_parameter`` without
     retracing.
     """
-
-    def scaled_objective(
-        parameters: jax.Array,
-        scale_parameter: jax.Array,
-    ) -> jax.Array:
-        return scale_parameter * objective_fn(parameters)
-
-    problem = TraceableParametricScalarProblem(
-        objective_fn=scaled_objective,
-        objective_parameter=objective_scale,
-        x=initial_parameters,
-    )
     return PreparedFusedLaneSolve(
-        problem=problem,
-        diagnostics=TraceableArrayFunction(diagnostics_fn, initial_parameters),
+        problem=_prepared_problem(objective_fn, initial_parameters, objective_scale),
         initial_parameters=initial_parameters,
+        diagnostics=TraceableArrayFunction(diagnostics_fn, initial_parameters),
     )
 
 
 def solve_fused_lane(
-    prepared: PreparedFusedLaneSolve,
+    prepared: PreparedFusedLaneObjective,
     *,
     driver: Driver,
     max_steps: int,
     rtol: float,
     atol: float,
     lbfgs_history: int,
+    max_function_evaluations: int | None = None,
     lbfgs_line_search_max_steps: int | None = None,
     line_search_max_steps: int | None = None,
 ) -> OptimizerResult:
@@ -102,6 +139,9 @@ def solve_fused_lane(
     ``maxls``, ``line_search_max_steps`` is the BFGS zoom's step cap.  Either
     left ``None`` takes its optimizer's own default, so a caller that names
     neither gets exactly the behavior it got before the knobs existed.
+
+    ``max_function_evaluations`` supplies a workflow's external evaluation
+    budget. Omitting it preserves the existing twenty-evaluations-per-step cap.
     """
     if driver == Driver.SIMSOPT_LBFGSB:
         if line_search_max_steps is not None:
@@ -111,7 +151,11 @@ def solve_fused_lane(
             )
         options: SimsoptLBFGSBOptions | SimsoptBFGSOptions = SimsoptLBFGSBOptions(
             maxiter=max_steps,
-            maxfun=max_steps * 20,
+            maxfun=(
+                max_steps * 20
+                if max_function_evaluations is None
+                else max_function_evaluations
+            ),
             gtol=atol,
             ftol=rtol,
             maxcor=lbfgs_history,
@@ -154,7 +198,9 @@ def solve_fused_lane(
 
 
 __all__ = [
+    "PreparedFusedLaneObjective",
     "PreparedFusedLaneSolve",
+    "prepare_fused_lane_objective",
     "prepare_fused_lane_solve",
     "solve_fused_lane",
 ]

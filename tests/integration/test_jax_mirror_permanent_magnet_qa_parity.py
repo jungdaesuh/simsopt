@@ -1,90 +1,171 @@
-"""Exact parity for the ``2_Intermediate/permanent_magnet_QA.py`` mirror."""
+"""Exact parity for the ``2_Intermediate/permanent_magnet_QA.py`` mirror.
+
+Every comparison against an official number reads the tracked fixture
+``examples/jax/parity/official_reference`` and runs its native lane -- and the
+construction that feeds it -- in a child process at ``OMP_NUM_THREADS=1``.
+Native MwPGP OpenMP reductions at this scale are not unique under OMP>1 and
+``OMP_NUM_THREADS`` is read when libgomp starts, so an in-process pin cannot
+undo the pytest process team (``tests/conftest.py`` pins nothing).  Measured
+2026-09-20 at ``OMP_NUM_THREADS=4``: the SAME bounded input solved twice in ONE
+process moves ``final:objective_sum_squares`` by 2.672e-04 relative with no
+perturbation at all -- 0.53 x the ``mirror_pmqa_final`` rtol the endpoint
+routes declare.
+
+Which solves run where.  Every NATIVE solve this file judges runs in the
+one-thread child: the bounded and the ``native_default`` reference lanes
+(``run_permanent_magnet_native_lane``, one solve each) and all nine solves of
+the conditioning probe below -- its unperturbed reference and its eight draws,
+in ONE child, which is what makes their difference the perturbation alone.  The
+JAX lane's four solves run in the pytest process itself, where nothing in this
+file pins OpenMP; they do not need the pin, because ``native_permanent_magnet_qa
+._jax`` runs the relax-and-split continuation in JAX and never enters the
+``simsoptpp.MwPGP_algorithm`` OpenMP reductions this pin exists for.
+"""
 
 from __future__ import annotations
 
-import pickle
 import sys
+from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
+from typing import Final
 
 import numpy as np
 import pytest
-from benchmarks.validation_ladder_contract import OPTIMIZER_DRIFT_TOLERANCES
-from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.cases import get_case
-from examples.jax.parity.input_bundle import load_input_bundle
+from examples.jax.parity.input_bundle import read_input_bundle
+from examples.jax.parity.official_reference import load_official_reference
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 
-# venv site-packages/tests shadows the repo tests package, so the helper
-# is imported as a top-level module from the tests/ directory.
+# venv site-packages/tests shadows the repo tests package, so the helper is
+# imported as a top-level module from the tests/ directory.
 _TESTS_ROOT = str(Path(__file__).resolve().parents[1])
 if _TESTS_ROOT not in sys.path:
     sys.path.append(_TESTS_ROOT)
-from parity_native_cpu import run_native_cpu_child
-
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-
-# Child source is a string so OpenMP is in the environment before the
-# extension is imported. ``run_native_cpu_child`` applies
-# ``build_parity_lane_environment``, the SSOT that sets
-# ``OMP_NUM_THREADS=1`` for native-cpu. Receipts cannot carry the
-# observation: ``ascontiguousarray`` turns 0-d scalars into shape
-# ``(1,)`` and the in-process ``int(...)`` assertions would fail.
-_NATIVE_CHILD = """\
-import pickle
-import sys
-from dataclasses import fields
-from pathlib import Path
-
-from examples.jax.parity.cases import get_case
-from examples.jax.parity.input_bundle import read_input_bundle
-
-bundle_root = Path(sys.argv[1])
-out_path = Path(sys.argv[2])
-observation = get_case("native-permanent-magnet-qa").execute(
-    "native-cpu", *read_input_bundle(bundle_root)
+from parity_gpmo_native_child import (  # noqa: E402
+    ConditioningProbeResult,
+    NativeChildResult,
+    run_permanent_magnet_conditioning_probe,
+    run_permanent_magnet_native_lane,
 )
-payload = {field.name: getattr(observation, field.name) for field in fields(observation)}
-payload["values"] = dict(observation.values)
-payload["applicability"] = dict(observation.applicability)
-out_path.write_bytes(pickle.dumps(payload))
-"""
+
+CASE_ID = "native-permanent-magnet-qa"
+NATIVE_EXAMPLE_SOURCE = (
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "2_Intermediate"
+    / "permanent_magnet_QA.py"
+)
+#: The official run at this case's ``native_default`` scale (nphi=ntheta=16).
+OFFICIAL = load_official_reference(CASE_ID)
+
+#: The four bounded ``final`` VALUE observables the coordinator made
+#: inapplicable on every lane pair on 2026-09-20
+#: (``A/fix-wave-3/integration/apply_pm_requests.py``), each with the ``rtol``
+#: bucket its routes declare (all four declare ``mirror_pmqa_final``).
+DISABLED_BOUNDED_FINAL_VALUES: Final[tuple[str, ...]] = (
+    "final:objective_sum_squares",
+    "final:residual_norm",
+    "final:moment_l2_norm",
+    "final:proxy_moment_l2_norm",
+)
+#: The measurement that ruling rests on, per observable: is the bounded end
+#: point DETERMINED to the bucket its route declares by its own input?
+#:
+#: Only ``final:objective_sum_squares`` was ever measured (one seeded draw of an
+#: ``ATb`` perturbation); the other three were switched off by extrapolation
+#: from it.  Measured here, at one thread, over the campaign's pre-registered
+#: eight one-ulp draws (worst draw against rtol 5e-4): objective_sum_squares
+#: 6.638e-04 (1.33 x), residual_norm 3.319e-04 (0.66 x), moment_l2_norm
+#: 4.476e-04 (0.90 x), proxy_moment_l2_norm 2.598e-04 (0.52 x).  This table is
+#: the record of that measurement, and a change to it in either direction is a
+#: route adjudication (the manifest's), not a test update.
+DETERMINED_TO_ITS_BUCKET: Final[Mapping[str, bool]] = MappingProxyType(
+    {
+        "final:objective_sum_squares": False,
+        "final:residual_norm": True,
+        "final:moment_l2_norm": True,
+        "final:proxy_moment_l2_norm": True,
+    }
+)
+#: The pre-registered one-ulp protocol (``A/d1-diagnostic/NOTES.md``, rule v2):
+#: signs drawn from ``RandomState(20260920 + k)`` for k = 1..8.
+CONDITIONING_DRAWS: Final[int] = 8
+CONDITIONING_SEED_BASE: Final[int] = 20260920
+#: The solve input the probe perturbs: ``ATb`` is what the MwPGP continuation
+#: consumes, and the case freezes it in the bundle.
+CONDITIONING_PERTURBED_ARRAY: Final[str] = "atb"
 
 
-def _native_observation(input_root: Path, out_path: Path) -> LaneObservation:
-    completed = run_native_cpu_child(
-        _NATIVE_CHILD,
-        str(input_root),
-        str(out_path),
-        repo_root=_REPO_ROOT,
+def _native_lane(
+    tmp_path_factory: pytest.TempPathFactory,
+    scale: str,
+) -> tuple[NativeChildResult, Path]:
+    root = tmp_path_factory.mktemp(f"permanent-magnet-qa-{scale}")
+    input_root = root / "inputs"
+    result = run_permanent_magnet_native_lane(
+        CASE_ID,
+        scale,
+        input_root,
+        root / "native-observation.pkl",
     )
-    assert completed.returncode == 0, completed.stderr
-    return LaneObservation(**pickle.loads(out_path.read_bytes()))
+    assert result.omp_num_threads == "1", (
+        "the native reference lane must run with OpenMP pinned before libgomp "
+        f"starts; the child saw OMP_NUM_THREADS={result.omp_num_threads!r}"
+    )
+    return result, input_root
+
+
+@pytest.fixture(scope="module")
+def bounded_native(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[NativeChildResult, Path]:
+    return _native_lane(tmp_path_factory, "bounded")
+
+
+@pytest.fixture(scope="module")
+def shipped_scale_native(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[NativeChildResult, Path]:
+    """The official scale; the whole case costs about half a minute at one thread."""
+    return _native_lane(tmp_path_factory, "native_default")
+
+
+@pytest.fixture(scope="module")
+def bounded_conditioning(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> ConditioningProbeResult:
+    """Nine bounded solves -- one reference, eight one ulp away -- in ONE child.
+
+    The reference and every draw are executed by the same one-thread
+    interpreter, so the difference between them is the perturbation and nothing
+    else.  About 12 s.
+    """
+    root = tmp_path_factory.mktemp("permanent-magnet-qa-conditioning")
+    return run_permanent_magnet_conditioning_probe(
+        CASE_ID,
+        "bounded",
+        root / "inputs",
+        root / "conditioning.pkl",
+        perturbed_array=CONDITIONING_PERTURBED_ARRAY,
+        observables=DISABLED_BOUNDED_FINAL_VALUES,
+        draws=CONDITIONING_DRAWS,
+        seed_base=CONDITIONING_SEED_BASE,
+    )
 
 
 def test_exact_permanent_magnet_qa_matches_native_and_jax_cpu(
-    tmp_path: Path,
+    bounded_native: tuple[NativeChildResult, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Native lane is a one-thread child; OpenMP scatter is rel ~2e-2.
-
-    Native MwPGP OpenMP reductions at nphi=4 are not unique under OMP>1
-    (relative scatter ~2e-2 on this geometry). ``OMP_NUM_THREADS`` is read
-    when libgomp starts, so an in-process env pin cannot undo the pytest
-    process team. The native lane therefore runs in a subprocess whose
-    environment comes from ``run_native_cpu_child`` /
-    ``build_parity_lane_environment`` (the SSOT that sets
-    ``OMP_NUM_THREADS=1`` before the child imports the extension).
-    """
-    case = get_case("native-permanent-magnet-qa")
-    input_root = tmp_path / "inputs"
-    bundle = case.create_input(input_root, "bounded")
-    _, arrays = load_input_bundle(input_root, bundle)
-
-    native = _native_observation(input_root, tmp_path / "native-observation.pkl")
+    child, input_root = bounded_native
+    native = child.observation
+    bundle, arrays = read_input_bundle(input_root)
 
     monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_parity")
     monkeypatch.setenv("SIMSOPT_PRECISION", "fp64")
     monkeypatch.setenv("JAX_ENABLE_X64", "1")
-    jax = case.execute("jax-cpu", bundle, arrays)
+    jax = get_case(CASE_ID).execute("jax-cpu", bundle, arrays)
 
     assert native.success is True
     assert jax.success is True
@@ -94,7 +175,14 @@ def test_exact_permanent_magnet_qa_matches_native_and_jax_cpu(
         jax.effective_construction_fingerprint
     )
     assert native.completed_workflow_stages == jax.completed_workflow_stages
-    assert native.nit == jax.nit == 2
+    # The relax-and-split continuation is a fixed amount of work with no
+    # provider status; the configured stage product is not a measured nit.
+    assert native.normalized_status == jax.normalized_status == "not_applicable"
+    assert (
+        native.raw_status == jax.raw_status == "relax_and_split_continuation_completed"
+    )
+    assert native.nit is jax.nit is None
+    assert native.nfev is jax.nfev is None
     assert set(native.values) == set(jax.values)
 
     for observable in (
@@ -115,25 +203,295 @@ def test_exact_permanent_magnet_qa_matches_native_and_jax_cpu(
 
     assert int(native.values["final:nonzero_count"]) > 0
     assert int(jax.values["final:nonzero_count"]) > 0
-    final_relative_tolerance = OPTIMIZER_DRIFT_TOLERANCES["tier2_stage2_e2e"][
-        "final_objective_rel_tol_20_iter"
-    ]
-    assert final_relative_tolerance is not None
-    for observable in (
-        "final:objective_sum_squares",
-        "final:residual_norm",
-        "final:moment_l2_norm",
-        "final:proxy_moment_l2_norm",
-    ):
-        np.testing.assert_allclose(
-            jax.values[observable],
-            native.values[observable],
-            rtol=final_relative_tolerance,
-            atol=0.0,
-        )
+    # What the two lanes must agree on at this scale is the SET of magnets the
+    # relax-and-split continuation kept; the endpoint VALUES are not a
+    # cross-lane comparable here, and
+    # ``test_the_bounded_endpoint_is_not_determined_to_the_declared_bucket``
+    # measures why. The values are compared at ``native_default``, against the
+    # official record, by
+    # ``test_permanent_magnet_qa_m_objective_matches_the_official_capture``.
+    assert int(native.values["final:nonzero_count"]) == int(
+        jax.values["final:nonzero_count"]
+    )
+    assert np.array_equal(
+        np.asarray(native.values["final:nonzero_mask"]),
+        np.asarray(jax.values["final:nonzero_mask"]),
+    )
 
+    assert np.all(np.isfinite(native.values["final:moments"]))
+    assert np.all(np.isfinite(native.values["final:proxy_moments"]))
     assert np.all(np.isfinite(jax.values["final:moments"]))
     assert np.all(np.isfinite(jax.values["final:proxy_moments"]))
     assert float(native.values["final:objective_sum_squares"]) < float(
         native.values["initial:objective_sum_squares"]
     )
+
+
+def test_permanent_magnet_qa_publishes_the_m_based_objective_as_a_diagnostic(
+    bounded_native: tuple[NativeChildResult, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``final:moment_objective_sum_squares`` is the official ``m`` objective.
+
+    The compared endpoint is the sparsified ``m_proxy`` one; the raw MwPGP
+    iterate ``m`` is published so the official
+    ``final:objective_half_sum_squares`` has a lane-side counterpart at all
+    (PM-QA-1). At BOUNDED scale the two lanes' ``m`` iterates drift further
+    apart than the proxy endpoint does, so the bounded routes are inapplicable
+    (the ``native_default`` routes are applicable: measured 1.7e-10). This pins
+    both facts: the observable is internally consistent, and the bounded drift
+    is outside the case's own final bucket -- as a ceiling, not as a required
+    disagreement.
+    """
+
+    child, input_root = bounded_native
+    native = child.observation
+    bundle, arrays = read_input_bundle(input_root)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_parity")
+    monkeypatch.setenv("SIMSOPT_PRECISION", "fp64")
+    monkeypatch.setenv("JAX_ENABLE_X64", "1")
+    jax = get_case(CASE_ID).execute("jax-cpu", bundle, arrays)
+
+    for observation in (native, jax):
+        residual = np.asarray(observation.values["final:moment_residual"])
+        np.testing.assert_allclose(
+            float(observation.values["final:moment_objective_sum_squares"]),
+            float(np.vdot(residual, residual)),
+            rtol=0.0,
+            atol=0.0,
+        )
+    # No hand-entered ceiling on the cross-lane drift: the bounded endpoint is
+    # not determined to that precision by the input (see the conditioning test
+    # below), so any such number would be a measurement of one run, not a
+    # property of the two implementations. What is a property, and is asserted
+    # above, is that each lane's published objective is exactly the squared
+    # norm of the residual it published with it.
+    assert np.all(np.isfinite(native.values["final:moment_residual"]))
+    assert np.all(np.isfinite(jax.values["final:moment_residual"]))
+
+
+def test_each_disabled_bounded_value_route_has_its_own_measured_condition(
+    bounded_conditioning: ConditioningProbeResult,
+) -> None:
+    """One lane, nine inputs one ulp apart: is each endpoint value determined?
+
+    A cross-lane comparison at ``rtol`` decides between two implementations
+    only if the observable does not move past ``rtol`` when its own input moves
+    by a single ulp.  That is measured here, per observable, and it is what the
+    four inapplicable ``final`` value routes rest on.
+
+    Both halves run in the SAME one-thread child: the old probe ran both solves
+    in the pytest process with no pin, where the unperturbed repeat alone moves
+    ``final:objective_sum_squares`` by 2.7e-04 at four threads (file docstring),
+    so what it measured was a sum of conditioning and reduction scatter.  The
+    statistic is the worst of the eight pre-registered draws, not one draw, and
+    it is read the conservative way round in both directions: an observable is
+    called DETERMINED only when EVERY draw stays inside the bucket, and called
+    not determined when at least one draw leaves it -- which is exactly the
+    claim "a machine-epsilon change of the input can flip this comparison".
+
+    Reading of a failure: the named observable changed conditioning class, and
+    its route must be adjudicated the other way.
+    """
+    assert bounded_conditioning.omp_num_threads == "1", (
+        "the conditioning solves must run with OpenMP pinned before libgomp "
+        f"starts; the child saw {bounded_conditioning.omp_num_threads!r}"
+    )
+    assert len(bounded_conditioning.draws) == CONDITIONING_DRAWS
+    rtol = float(parity_ladder_tolerances("mirror_pmqa_final")["rtol"])
+
+    for draw in bounded_conditioning.draws:
+        # A perturbation that grew would turn this into a different experiment.
+        assert draw.entries_moved_more_than_one_ulp == 0, draw.seed
+        # A moved endpoint VALUE, not a different set of magnets: a support
+        # flip would be a threshold effect and would need its own reading.
+        assert np.array_equal(
+            draw.nonzero_mask, bounded_conditioning.reference_nonzero_mask
+        ), draw.seed
+    assert int(np.count_nonzero(bounded_conditioning.reference_nonzero_mask)) > 0
+
+    for observable, determined in DETERMINED_TO_ITS_BUCKET.items():
+        drifts = bounded_conditioning.relative_drifts(observable)
+        worst = max(drifts)
+        assert (worst <= rtol) is determined, (
+            f"{observable}: the worst of {len(drifts)} one-ulp draws moves it by "
+            f"{worst:.3e} against the rtol {rtol:.1e} its routes declare, so it "
+            f"is {'determined' if worst <= rtol else 'NOT determined'} to that "
+            f"bucket; the recorded verdict says "
+            f"{'determined' if determined else 'NOT determined'}. Its route's "
+            "applicability has to be adjudicated again."
+        )
+    assert set(DETERMINED_TO_ITS_BUCKET) == set(DISABLED_BOUNDED_FINAL_VALUES)
+
+
+def test_the_root_observable_drifts_by_half_of_its_argument(
+    bounded_conditioning: ConditioningProbeResult,
+) -> None:
+    """``final:residual_norm`` is the square root of ``final:objective_sum_squares``.
+
+    Both are published from the same residual
+    (``native_permanent_magnet_qa.py``: ``vdot(r, r)`` and ``norm(r)``), so
+    ``sqrt(1 + e) = 1 + e/2 - e**2/8`` makes the root's relative drift HALF its
+    argument's, up to the second-order term.  That factor two is exactly what
+    puts these two observables on opposite sides of the one ``rtol`` their
+    routes share, which is why a single bucket applied to a quantity and to its
+    square cannot judge both.
+
+    The bound below is that second-order term itself, not a fitted number:
+    measured, the worst draw sits at 0.125 = 1/8 of it.
+    """
+    squares = bounded_conditioning.relative_drifts("final:objective_sum_squares")
+    roots = bounded_conditioning.relative_drifts("final:residual_norm")
+
+    for square, root in zip(squares, roots, strict=True):
+        assert abs(root - 0.5 * square) <= square**2, (
+            f"the root moved by {root:.6e} where half of its argument's "
+            f"{square:.6e} is {0.5 * square:.6e}"
+        )
+
+
+def test_the_extrapolated_bounded_routes_compare_inside_their_bucket(
+    bounded_native: tuple[NativeChildResult, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What the three unmeasured comparisons actually are, at their bucket.
+
+    Three of the four disabled ``final`` value routes were switched off by
+    extrapolation from the fourth.  This is the comparison those routes would
+    make: the native lane from the one-thread child against the JAX lane, at
+    the ``rtol`` the routes declare.  Only agreement is asserted -- a required
+    disagreement would fail the day two lanes agree better -- so
+    ``final:objective_sum_squares``, whose conditioning test above carries the
+    verdict, is deliberately not asserted here.
+    """
+    child, input_root = bounded_native
+    bundle, arrays = read_input_bundle(input_root)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_parity")
+    monkeypatch.setenv("SIMSOPT_PRECISION", "fp64")
+    monkeypatch.setenv("JAX_ENABLE_X64", "1")
+    jax = get_case(CASE_ID).execute("jax-cpu", bundle, arrays)
+    bucket = parity_ladder_tolerances("mirror_pmqa_final")
+
+    for observable, determined in DETERMINED_TO_ITS_BUCKET.items():
+        if not determined:
+            continue
+        np.testing.assert_allclose(
+            float(np.asarray(jax.values[observable])),
+            float(np.asarray(child.observation.values[observable])),
+            rtol=bucket["rtol"],
+            atol=bucket["atol"],
+            err_msg=observable,
+        )
+
+
+def test_permanent_magnet_qa_m_objective_matches_the_official_capture(
+    shipped_scale_native: tuple[NativeChildResult, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ``m``-based observables against the official shipped-scale record.
+
+    Agreement between the two lanes is not evidence of correctness; agreement
+    with the official run is. The canonical record was produced by the official
+    script on an independent official build at ``nphi=ntheta=16``, which is this
+    case's ``native_default`` scale, and its
+    ``final:objective_half_sum_squares`` is ``0.5 * ||A m - b||^2`` on the raw
+    MwPGP iterate ``m`` -- exactly half of the published
+    ``final:moment_objective_sum_squares``.
+    """
+
+    child, input_root = shipped_scale_native
+    native = child.observation
+    bundle, arrays = read_input_bundle(input_root)
+    official_configuration = OFFICIAL.structure("configuration")
+    assert isinstance(official_configuration, dict)
+
+    assert child.configuration["nphi"] == official_configuration["nphi"]
+    assert child.configuration["ndipoles"] == official_configuration["ndipoles"]
+
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_parity")
+    monkeypatch.setenv("SIMSOPT_PRECISION", "fp64")
+    monkeypatch.setenv("JAX_ENABLE_X64", "1")
+    jax = get_case(CASE_ID).execute("jax-cpu", bundle, arrays)
+
+    for observation in (native, jax):
+        np.testing.assert_allclose(
+            0.5 * float(observation.values["final:moment_objective_sum_squares"]),
+            OFFICIAL.scalar("final:objective_half_sum_squares"),
+            rtol=1.0e-8,
+            atol=0.0,
+        )
+        np.testing.assert_allclose(
+            0.5 * float(observation.values["final:objective_sum_squares"]),
+            OFFICIAL.scalar("final:proxy_objective_half_sum_squares"),
+            rtol=1.0e-8,
+            atol=0.0,
+        )
+        np.testing.assert_allclose(
+            float(observation.values["final:moment_l2_norm"]),
+            OFFICIAL.scalar("final:moment_l2_norm"),
+            rtol=1.0e-8,
+            atol=0.0,
+        )
+        assert int(observation.values["final:nonzero_count"]) == (
+            OFFICIAL.scalar("final:nonzero_count")
+        )
+    # The two ``m``-based routes are applicable at this scale; the residual is
+    # the array they compare, at the tolerance bucket those routes declare.
+    native_workflow = parity_ladder_tolerances("native_workflow")
+    np.testing.assert_allclose(
+        np.asarray(jax.values["final:moment_residual"], dtype=np.float64),
+        np.asarray(native.values["final:moment_residual"], dtype=np.float64),
+        rtol=native_workflow["whole_solve_value_rtol"],
+        atol=native_workflow["whole_solve_value_atol"],
+    )
+
+
+def test_the_coil_pre_optimization_solves_upstreams_seven_parameter_problem(
+    bounded_native: tuple[NativeChildResult, Path],
+    shipped_scale_native: tuple[NativeChildResult, Path],
+) -> None:
+    """The provider must receive upstream's parameters, not the boundary too.
+
+    Branch commit ``28e470f43`` gave ``CurveSurfaceDistance`` ownership of the
+    surface, so the plasma boundary's 121 free ``SurfaceRZFourier`` dofs enter
+    ``coil_optimization``'s ``JF.x`` unless the caller fixes the boundary --
+    which is why ``stage_two_optimization.py``, ``coil_forces.py`` and
+    ``stage_two_optimization_planar_coils.py`` all call ``s.fix_all()``. The
+    boundary is this problem's prescribed target, never a variable: with it
+    free the case handed the provider 128 parameters against the official run's
+    7, and the shipped-scale coil currents drifted 7.4e-13 away from upstream's.
+    The count and the currents both come from the official record.
+    """
+
+    expected_parameters = OFFICIAL.digest("construction:optimized_coil_dofs").count
+    for child, _input_root in (bounded_native, shipped_scale_native):
+        assert child.provider_parameter_counts == (expected_parameters,), (
+            "the coil pre-optimization received "
+            f"{child.provider_parameter_counts} parameters; upstream's problem "
+            f"has {expected_parameters}"
+        )
+    shipped, _input_root = shipped_scale_native
+    # At ``native_default`` the case runs upstream's own MAXITER=500, so the
+    # accepted coil currents are upstream's -- measured bitwise equal.
+    assert np.array_equal(
+        np.asarray(
+            shipped.observation.values["construction:optimized_coil_dofs"],
+            dtype=np.float64,
+        ),
+        OFFICIAL.array("construction:optimized_coil_dofs"),
+    )
+
+
+def test_the_native_example_fixes_the_boundary_before_the_coil_optimization() -> None:
+    """The shipped native script carries the same adaptation as its siblings.
+
+    ``examples/2_Intermediate/permanent_magnet_QA.py`` is a module-level
+    program, so the order of the two statements is read from its bytes;
+    ``importlib``/``exec`` are forbidden here. The parity case's own
+    construction is checked functionally by the test above.
+    """
+
+    source = NATIVE_EXAMPLE_SOURCE.read_text(encoding="utf-8")
+    fix_index = source.index("s.fix_all()")
+    call_index = source.index("coil_optimization(s, bs, base_curves, curves)")
+    assert fix_index < call_index

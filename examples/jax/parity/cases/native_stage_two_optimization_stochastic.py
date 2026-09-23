@@ -16,6 +16,11 @@ from examples.jax.parity.input_bundle import (
     effective_construction_fingerprint,
 )
 from examples.jax.parity.runtime import ParityLane
+from examples.jax.parity.terminal_status import (
+    lane_terminal_status,
+    stage_termination_from_values,
+    status_convention_for_driver,
+)
 from simsopt_jax.examples import ExecutionScale, stochastic_stage_two_configuration
 
 TEST_DATA = Path(__file__).resolve().parents[4] / "tests" / "test_files"
@@ -420,10 +425,25 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
     )
     final_parameters = np.asarray(optimizer.x, dtype=np.float64)
     final_values = state("final", final_parameters)
-    success = bool(
+    scientific_predicate = bool(
         np.isfinite(final_values["final:objective"])
         and final_values["final:objective"] < initial_values["initial:objective"]
         and np.all(np.isfinite(final_values["final:objective_gradient"]))
+    )
+    terminal = lane_terminal_status(
+        scientific_predicate=scientific_predicate,
+        stages=(
+            stage_termination_from_values(
+                status_convention="scipy-lbfgsb",
+                provider_success=bool(optimizer.success),
+                provider_status=int(optimizer.status),
+                iterations=int(optimizer.nit),
+                max_iterations=_configuration_int(bundle, "max_steps"),
+                start=("initial", initial_values),
+                end=("final", final_values),
+                gradient_observable="objective_gradient",
+            ),
+        ),
     )
     return LaneObservation(
         lane="native-cpu",
@@ -435,9 +455,9 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=construction_fingerprint,
         driver="scipy_lbfgsb",
-        normalized_status="converged" if success else "failed",
+        normalized_status=terminal.normalized_status,
         raw_status=str(optimizer.status),
-        success=success,
+        success=terminal.success,
         nit=int(optimizer.nit),
         nfev=int(optimizer.nfev),
         njev=int(optimizer.njev),
@@ -460,6 +480,7 @@ def _jax(
     from simsopt_jax.core.biotsavart import biot_savart_B
     from simsopt_jax.core.curve_kernels import kappa_pure
     from simsopt_jax.core.objectives_flux import fixed_surface_flux_integral_from_B
+    from simsopt_jax.examples.stochastic_stage_two import solve_stochastic_stage_two
     from simsopt_jax.objectives import (
         StageTwoObjectiveConfig,
         StochasticCoilPerturbations,
@@ -468,7 +489,6 @@ def _jax(
         stage_two_geometric_penalty,
         stochastic_flux_mean_from_geometry,
     )
-    from simsopt_jax.examples.stochastic_stage_two import solve_stochastic_stage_two
     from simsopt_jax.solve.driver import Driver
     from simsopt_jax.solve.serial import TraceableScalarProblem
     from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
@@ -807,10 +827,25 @@ def _jax(
         final_gradient_host,
         diagnostic_states_host[1],
     )
-    success = bool(
+    scientific_predicate = bool(
         np.isfinite(final_values["final:objective"])
         and final_values["final:objective"] < initial_values["initial:objective"]
         and np.all(np.isfinite(final_values["final:objective_gradient"]))
+    )
+    terminal = lane_terminal_status(
+        scientific_predicate=scientific_predicate,
+        stages=(
+            stage_termination_from_values(
+                status_convention=status_convention_for_driver(optimizer.driver.value),
+                provider_success=bool(optimizer.success),
+                provider_status=int(optimizer.status),
+                iterations=int(optimizer.nit),
+                max_iterations=_configuration_int(bundle, "max_steps"),
+                start=("initial", initial_values),
+                end=("final", final_values),
+                gradient_observable="objective_gradient",
+            ),
+        ),
     )
     return LaneObservation(
         lane=lane,
@@ -822,9 +857,9 @@ def _jax(
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=construction_fingerprint,
         driver=optimizer.driver.value,
-        normalized_status="converged" if success else "failed",
+        normalized_status=terminal.normalized_status,
         raw_status=str(optimizer.status),
-        success=success,
+        success=terminal.success,
         nit=optimizer.nit,
         nfev=optimizer.nfev,
         njev=optimizer.njev,

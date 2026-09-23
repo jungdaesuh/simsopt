@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, cast
 
@@ -11,6 +11,7 @@ from examples.jax._manifest import JaxExamplesManifest
 
 Classification = Literal["full", "reduced", "unsupported"]
 ScaleTier = Literal["bounded", "native_default", "not_applicable"]
+CostTier = Literal["smoke", "scheduled", "not_applicable"]
 Phase = Literal[
     "area",
     "conservation",
@@ -35,6 +36,7 @@ LanePair = Literal[
 
 CLASSIFICATIONS = frozenset({"full", "reduced", "unsupported"})
 SCALE_TIERS = frozenset({"bounded", "native_default", "not_applicable"})
+COST_TIERS = frozenset({"smoke", "scheduled"})
 PHASES = frozenset(
     {
         "area",
@@ -56,6 +58,8 @@ PHASES = frozenset(
 LANE_PAIRS = frozenset({"native-cpu:jax-cpu", "native-cpu:jax-gpu", "jax-cpu:jax-gpu"})
 COMPARATORS = frozenset({"allclose", "exact", "equivalent", "not_worse"})
 ROOT_FIELDS = frozenset({"schema_version", "relationships"})
+V2_ROOT_FIELDS = frozenset({"schema_version", "relationships"})
+V2_OPTIONAL_ROOT_FIELDS = frozenset({"experimental_relationships"})
 RELATIONSHIP_FIELDS = frozenset(
     {
         "case_id",
@@ -74,6 +78,7 @@ RELATIONSHIP_FIELDS = frozenset(
         "blocker",
     }
 )
+SCALE_CONTRACT_FIELDS = frozenset({"comparison_routes", "cost_tier"})
 ROUTE_FIELDS = frozenset(
     {"phase", "observable", "lane_pair", "applicable", "comparator", "tolerance_bucket"}
 )
@@ -94,6 +99,15 @@ class ComparisonRoute:
 
 
 @dataclass(frozen=True)
+class ScaleContract:
+    """Complete comparison policy and declared cost for one additional scale."""
+
+    scale_tier: ScaleTier
+    comparison_routes: tuple[ComparisonRoute, ...]
+    cost_tier: CostTier
+
+
+@dataclass(frozen=True)
 class ParityRelationship:
     case_id: str | None
     jax_example_id: str
@@ -102,19 +116,52 @@ class ParityRelationship:
     classification_reason: str
     scale_tier: ScaleTier
     oracle_kind: str
-    cost_tier: str
+    cost_tier: CostTier
     workflow_stages: tuple[str, ...]
     omitted_scientific_stages: tuple[str, ...]
     excluded_teaching_stages: tuple[str, ...]
     comparison_routes: tuple[ComparisonRoute, ...]
     correctness_tests: tuple[str, ...]
     blocker: str | None
+    scale_contracts: tuple[ScaleContract, ...] = ()
+
+    @property
+    def supported_scales(self) -> tuple[ScaleTier, ...]:
+        """List only scales explicitly declared by this relationship."""
+        return (self.scale_tier,) + tuple(
+            contract.scale_tier for contract in self.scale_contracts
+        )
+
+    def resolve_scale(self, scale: ScaleTier) -> ParityRelationship:
+        """Return the complete policy for a declared scale; reject all others."""
+        if scale == self.scale_tier:
+            return self
+        for contract in self.scale_contracts:
+            if contract.scale_tier == scale:
+                return replace(
+                    self,
+                    scale_tier=scale,
+                    comparison_routes=contract.comparison_routes,
+                    cost_tier=contract.cost_tier,
+                    scale_contracts=(),
+                )
+        raise ParityManifestValidationError(
+            f"case {self.case_id} does not declare execution scale {scale!r}"
+        )
 
 
 @dataclass(frozen=True)
 class ParityManifest:
+    """Official relationships plus separately registered local experiments."""
+
     schema_version: int
     relationships: tuple[ParityRelationship, ...]
+    experimental_relationships: tuple[ParityRelationship, ...] = ()
+
+    @property
+    def all_relationships(self) -> tuple[ParityRelationship, ...]:
+        """Return registered relationships for explicit execution and evidence audit."""
+        return self.relationships + self.experimental_relationships
 
 
 def _mapping(value: object, context: str) -> dict[str, object]:
@@ -139,6 +186,13 @@ def _optional_string(value: object, context: str) -> str | None:
     if value is None:
         return None
     return _string(value, context)
+
+
+def _cost_tier(value: object, context: str, *, unsupported: bool = False) -> CostTier:
+    cost = _string(value, context)
+    if cost not in ({"scheduled", "not_applicable"} if unsupported else COST_TIERS):
+        raise ParityManifestValidationError(f"invalid cost tier: {cost}")
+    return cast(CostTier, cost)
 
 
 def _strings(value: object, context: str) -> tuple[str, ...]:
@@ -223,10 +277,28 @@ def _validate_source_owned_tolerance_matrix(
             )
 
 
-def _relationship(value: object, index: int, repo_root: Path) -> ParityRelationship:
+def _comparison_routes(value: object, context: str) -> tuple[ComparisonRoute, ...]:
+    routes = tuple(
+        _route(route, f"{context}[{route_index}]")
+        for route_index, route in enumerate(_sequence(value, context))
+    )
+    route_keys = tuple(
+        (route.phase, route.observable, route.lane_pair) for route in routes
+    )
+    if len(route_keys) != len(set(route_keys)):
+        raise ParityManifestValidationError("duplicate comparison route")
+    _validate_complete_route_matrix(routes)
+    _validate_source_owned_tolerance_matrix(routes)
+    return routes
+
+
+def _relationship(
+    value: object, index: int, repo_root: Path, schema_version: Literal[1, 2]
+) -> ParityRelationship:
     context = f"relationships[{index}]"
     record = _mapping(value, context)
-    unexpected = set(record) - RELATIONSHIP_FIELDS
+    optional_fields = {"scale_contracts"} if schema_version == 2 else set()
+    unexpected = set(record) - RELATIONSHIP_FIELDS - optional_fields
     missing = RELATIONSHIP_FIELDS - set(record)
     if unexpected or missing:
         raise ParityManifestValidationError(
@@ -254,19 +326,49 @@ def _relationship(value: object, index: int, repo_root: Path) -> ParityRelations
         record["excluded_teaching_stages"],
         f"{context}.excluded_teaching_stages",
     )
-    routes = tuple(
-        _route(route, f"{context}.comparison_routes[{route_index}]")
-        for route_index, route in enumerate(
-            _sequence(record["comparison_routes"], f"{context}.comparison_routes")
-        )
+    routes = _comparison_routes(
+        record["comparison_routes"], f"{context}.comparison_routes"
     )
-    route_keys = tuple(
-        (route.phase, route.observable, route.lane_pair) for route in routes
-    )
-    if len(route_keys) != len(set(route_keys)):
-        raise ParityManifestValidationError("duplicate comparison route")
-    _validate_complete_route_matrix(routes)
-    _validate_source_owned_tolerance_matrix(routes)
+    scale_contracts: list[ScaleContract] = []
+    if "scale_contracts" in record:
+        contracts = _mapping(record["scale_contracts"], f"{context}.scale_contracts")
+        if scale_value == "not_applicable" or not contracts:
+            raise ParityManifestValidationError(
+                "scale contracts require an executable base and additional scale"
+            )
+        for additional_scale, contract_value in contracts.items():
+            if (
+                additional_scale not in {"bounded", "native_default"}
+                or additional_scale == scale_value
+            ):
+                raise ParityManifestValidationError(
+                    f"invalid additional scale contract: {additional_scale}"
+                )
+            contract = _mapping(
+                contract_value, f"{context}.scale_contracts.{additional_scale}"
+            )
+            if set(contract) != SCALE_CONTRACT_FIELDS:
+                raise ParityManifestValidationError(
+                    f"invalid scale contract fields: {sorted(set(contract))}"
+                )
+            additional_routes = _comparison_routes(
+                contract["comparison_routes"],
+                f"{context}.scale_contracts.{additional_scale}.comparison_routes",
+            )
+            if not additional_routes:
+                raise ParityManifestValidationError(
+                    "additional scale requires comparison routes"
+                )
+            scale_contracts.append(
+                ScaleContract(
+                    cast(ScaleTier, additional_scale),
+                    additional_routes,
+                    _cost_tier(
+                        contract["cost_tier"],
+                        f"{context}.scale_contracts.{additional_scale}.cost_tier",
+                    ),
+                )
+            )
     if classification_value == "unsupported":
         if case_id is not None:
             raise ParityManifestValidationError(
@@ -343,13 +445,18 @@ def _relationship(value: object, index: int, repo_root: Path) -> ParityRelations
             else "not_applicable"
         ),
         oracle_kind=_string(record["oracle_kind"], f"{context}.oracle_kind"),
-        cost_tier=_string(record["cost_tier"], f"{context}.cost_tier"),
+        cost_tier=_cost_tier(
+            record["cost_tier"],
+            f"{context}.cost_tier",
+            unsupported=classification_value == "unsupported",
+        ),
         workflow_stages=workflow_stages,
         omitted_scientific_stages=omitted_scientific_stages,
         excluded_teaching_stages=excluded_teaching_stages,
         comparison_routes=routes,
         correctness_tests=correctness_tests,
         blocker=blocker,
+        scale_contracts=tuple(scale_contracts),
     )
 
 
@@ -360,6 +467,11 @@ def parse_parity_relationships_document(
     schema_version: Literal[1, 2],
 ) -> tuple[ParityRelationship, ...]:
     """Parse versioned relationship records before ownership validation."""
+    if schema_version == 2:
+        official, experimental = parse_v2_parity_relationship_groups_document(
+            value, repo_root=repo_root
+        )
+        return official + experimental
     document = _mapping(value, "root")
     unexpected = set(document) - ROOT_FIELDS
     missing = ROOT_FIELDS - set(document)
@@ -374,7 +486,7 @@ def parse_parity_relationships_document(
             f"unsupported parity schema version: {observed_schema!r}"
         )
     relationships = tuple(
-        _relationship(value, index, repo_root)
+        _relationship(value, index, repo_root, schema_version)
         for index, value in enumerate(
             _sequence(document["relationships"], "relationships")
         )
@@ -393,6 +505,51 @@ def parse_parity_relationships_document(
     if len(case_ids) != len(set(case_ids)):
         raise ParityManifestValidationError("duplicate parity case_id")
     return relationships
+
+
+def parse_v2_parity_relationship_groups_document(
+    value: object, *, repo_root: Path
+) -> tuple[tuple[ParityRelationship, ...], tuple[ParityRelationship, ...]]:
+    """Parse official and local-extension v2 groups without mixing their scope."""
+    document = _mapping(value, "root")
+    unexpected = set(document) - V2_ROOT_FIELDS - V2_OPTIONAL_ROOT_FIELDS
+    missing = V2_ROOT_FIELDS - set(document)
+    if unexpected or missing:
+        raise ParityManifestValidationError(
+            f"invalid parity manifest root fields: "
+            f"missing={sorted(missing)}, unexpected={sorted(unexpected)}"
+        )
+    if document["schema_version"] != 2:
+        raise ParityManifestValidationError(
+            f"unsupported parity schema version: {document['schema_version']!r}"
+        )
+
+    def parse_group(
+        relationships: object, context: str
+    ) -> tuple[ParityRelationship, ...]:
+        return tuple(
+            _relationship(record, index, repo_root, 2)
+            for index, record in enumerate(_sequence(relationships, context))
+        )
+
+    official = parse_group(document["relationships"], "relationships")
+    experimental = parse_group(
+        document.get("experimental_relationships", []), "experimental_relationships"
+    )
+    keys = tuple(
+        (relationship.jax_example_id, relationship.native_source)
+        for relationship in (*official, *experimental)
+    )
+    if len(keys) != len(set(keys)):
+        raise ParityManifestValidationError("duplicate parity relationship")
+    case_ids = tuple(
+        relationship.case_id
+        for relationship in (*official, *experimental)
+        if relationship.case_id is not None
+    )
+    if len(case_ids) != len(set(case_ids)):
+        raise ParityManifestValidationError("duplicate parity case_id")
+    return official, experimental
 
 
 def parse_parity_manifest_document(

@@ -56,6 +56,12 @@ _PRECISION_RUNTIME_CASES_PATH = (
 _IMPORT_SMOKE_CASES_PATH = (
     Path(_REPO_ROOT) / "tests" / "subprocess" / "import_smoke_cases.py"
 )
+_NATIVE_PRECISION_GEO_FIRST_PATH = (
+    Path(_REPO_ROOT) / "tests" / "subprocess" / "native_precision_geo_first.py"
+)
+_NATIVE_PRECISION_BACKEND_FIRST_PATH = (
+    Path(_REPO_ROOT) / "tests" / "subprocess" / "native_precision_backend_first.py"
+)
 _ONDEVICE_COLD_SMOKE_TIMEOUT = 300
 _ENTRYPOINT_RUNTIME_AUDIT_PATHS = (
     Path(_REPO_ROOT) / "benchmarks" / "biot_savart_kernel_scaling.py",
@@ -677,6 +683,37 @@ def test_legacy_geo_jit_preserves_cpu_default_without_platform_env(monkeypatch):
     )
 
     assert ("jax_platform_name", "cpu") in updates
+
+
+@pytest.mark.parametrize(
+    ("case", "extra_env"),
+    [
+        ("no_selector", None),
+        ("native_cpu", {"SIMSOPT_BACKEND_MODE": "native_cpu"}),
+        ("explicit_x64_off", {"JAX_ENABLE_X64": "0"}),
+        ("geo_before_smoke", None),
+    ],
+)
+def test_native_precision_geo_first(
+    case: str, extra_env: dict[str, str] | None
+) -> None:
+    _assert_python_script_passes(
+        _NATIVE_PRECISION_GEO_FIRST_PATH,
+        args=(case,),
+        failure_message=f"native precision geo-first case {case} failed",
+        timeout=_ONDEVICE_COLD_SMOKE_TIMEOUT,
+        extra_env=extra_env,
+    )
+
+
+@pytest.mark.parametrize("case", ["smoke_before_geo", "mixed_before_geo"])
+def test_native_precision_backend_first(case: str) -> None:
+    _assert_python_script_passes(
+        _NATIVE_PRECISION_BACKEND_FIRST_PATH,
+        args=(case,),
+        failure_message=f"native precision backend-first case {case} failed",
+        timeout=_ONDEVICE_COLD_SMOKE_TIMEOUT,
+    )
 
 
 def test_run_code_benchmark_common_import_is_jax_cold():

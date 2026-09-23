@@ -6187,7 +6187,14 @@ class BoozerSurfaceJAX(Optimizable):
         maxiter,
         args=(),
     ):
-        """Compatibility damped Gauss-Newton loop for ``method='manual'``."""
+        """Compatibility damped Gauss-Newton loop for ``method='manual'``.
+
+        Upstream's loop is ``simsopt/geo/boozersurface.py:594-618`` at
+        9e027eac3: one damped normal-equation step per iteration, every
+        candidate accepted, and ``lam *= 1/3`` after each step.  The returned
+        ``damping`` is ``lam`` after the loop, so the emitted sequence is
+        observable without reading the loop's internal state.
+        """
         x_initial = _as_jax_float64(x0)
         runtime_args = tuple(args)
 
@@ -6201,14 +6208,17 @@ class BoozerSurfaceJAX(Optimizable):
 
             always_true = jnp.all(jnp.equal(initial_x, initial_x))
             scalar_one = always_true.astype(initial_x.dtype)
-            half = scalar_one / (scalar_one + scalar_one)
             damping_factor = scalar_one + scalar_one + scalar_one
+            # Upstream writes ``lam *= 1/3`` (boozersurface.py:603): the
+            # rounded constant one third, MULTIPLIED in.  ``lam / 3`` is a
+            # different double-precision sequence (95 of the first 100 values
+            # differ), so the ratio is formed once and multiplied.
+            damping_ratio = scalar_one / damping_factor
             lam_initial = scalar_one
             residual, jacobian = residual_and_jacobian(initial_x)
             gradient = jacobian.T @ residual
             normal_matrix = jacobian.T @ jacobian
             norm = jnp.linalg.norm(gradient)
-            cost = half * jnp.sum(jnp.square(residual))
             int_one = always_true.astype(jnp.int32)
             nit = int_one - int_one
             all_finite = (
@@ -6228,7 +6238,6 @@ class BoozerSurfaceJAX(Optimizable):
                     _gradient,
                     _normal_matrix,
                     state_norm,
-                    _cost,
                     _lam,
                     state_nit,
                     _all_finite,
@@ -6243,7 +6252,6 @@ class BoozerSurfaceJAX(Optimizable):
                     gradient,
                     normal_matrix,
                     norm,
-                    cost,
                     lam,
                     nit,
                     all_finite,
@@ -6257,23 +6265,20 @@ class BoozerSurfaceJAX(Optimizable):
                 candidate_gradient = candidate_jacobian.T @ candidate_residual
                 candidate_normal_matrix = candidate_jacobian.T @ candidate_jacobian
                 candidate_norm = jnp.linalg.norm(candidate_gradient)
-                candidate_cost = half * jnp.sum(jnp.square(candidate_residual))
                 candidate_is_finite = (
                     jnp.all(jnp.isfinite(candidate_x))
                     & jnp.all(jnp.isfinite(candidate_residual))
                     & jnp.all(jnp.isfinite(candidate_gradient))
                     & jnp.all(jnp.isfinite(candidate_normal_matrix))
                 )
-                accepted = candidate_is_finite & (candidate_cost < cost)
                 return (
-                    jnp.where(accepted, candidate_x, x),
-                    jnp.where(accepted, candidate_residual, residual),
-                    jnp.where(accepted, candidate_jacobian, jacobian),
-                    jnp.where(accepted, candidate_gradient, gradient),
-                    jnp.where(accepted, candidate_normal_matrix, normal_matrix),
-                    jnp.where(accepted, candidate_norm, norm),
-                    jnp.where(accepted, candidate_cost, cost),
-                    jnp.where(accepted, lam / damping_factor, lam * damping_factor),
+                    candidate_x,
+                    candidate_residual,
+                    candidate_jacobian,
+                    candidate_gradient,
+                    candidate_normal_matrix,
+                    candidate_norm,
+                    lam * damping_ratio,
                     nit + int_one,
                     all_finite & candidate_is_finite,
                 )
@@ -6289,7 +6294,6 @@ class BoozerSurfaceJAX(Optimizable):
                         gradient,
                         normal_matrix,
                         norm,
-                        cost,
                         lam_initial,
                         nit,
                         all_finite,
@@ -6305,8 +6309,7 @@ class BoozerSurfaceJAX(Optimizable):
             gradient,
             normal_matrix,
             norm,
-            _cost,
-            _lam,
+            lam,
             nit,
             all_finite,
             tol_value,
@@ -6317,6 +6320,7 @@ class BoozerSurfaceJAX(Optimizable):
             "residual": residual,
             "gradient": gradient,
             "jacobian": normal_matrix,
+            "damping": float(_host_scalar(lam, dtype=np.float64)),
             "nit": int(_host_scalar(nit, dtype=np.int64)),
             "success": bool(_host_scalar((norm <= tol_value) & all_finite)),
         }

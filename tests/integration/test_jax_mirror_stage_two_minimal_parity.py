@@ -7,9 +7,257 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-
+import scipy.optimize
 from examples.jax.parity.cases import get_case
+from examples.jax.parity.cases import native_stage_two_optimization_minimal
+from examples.jax.parity.cases.native_stage_two_optimization_minimal import (
+    _scale_configuration,
+    _terminal_status,
+    build_native_evaluator_for_configuration,
+)
 from examples.jax.parity.input_bundle import load_input_bundle
+from examples.jax.parity.official_reference import load_official_reference
+from simsopt_contracts.optimization_endpoint import StatusConvention
+from simsopt_jax.examples import ExecutionScale
+from simsopt_jax.examples.stage_two_minimal import MINIMAL_STAGE_TWO_NATIVE_ITERATIONS
+from simsopt_jax.solve.driver import Driver
+
+# Every official number below comes from the tracked fixture of the official
+# run of examples/1_Simple/stage_two_optimization_minimal.py at upstream
+# 9e027eac38028d57aa23777be52a781aa860e347; none is pasted here as a literal.
+OFFICIAL = load_official_reference("native-stage-two-optimization-minimal")
+OFFICIAL_CALL = OFFICIAL.provider_calls[0]
+OFFICIAL_INITIAL_OBJECTIVE = OFFICIAL.scalar("taylor:objective")
+OFFICIAL_FINAL_OBJECTIVE = OFFICIAL.scalar("final:objective")
+OFFICIAL_ITERATION_LIMIT = OFFICIAL_CALL.options["maxiter"]
+OFFICIAL_ITERATIONS = OFFICIAL_CALL.result["nit"]
+OFFICIAL_FUNCTION_EVALUATIONS = OFFICIAL_CALL.result["nfev"]
+OFFICIAL_FINAL_GRADIENT_INFINITY_NORM = float(
+    np.max(np.abs(OFFICIAL.array("final:objective_gradient")))
+)
+
+
+def _official_objective(scale: ExecutionScale):
+    return build_native_evaluator_for_configuration(
+        _scale_configuration(scale)
+    ).objective
+
+
+def test_minimal_currents_carry_the_official_scaled_parametrization() -> None:
+    """Upstream builds ``Current(1.0) * 1e5``: the free dof is 1.0, not 1e5.
+
+    L-BFGS-B is not scale invariant, so a lane whose current degree of freedom
+    is 1e5 optimizes a differently scaled problem than upstream.
+    """
+    configuration = _scale_configuration("native_default")
+
+    assert configuration["initial_current_degree_of_freedom"] == 1.0
+    assert configuration["current_scale"] == 1.0e5
+
+    objective = _official_objective("native_default")
+    current_indices = [
+        index
+        for index, name in enumerate(objective.dof_names)
+        if name.startswith("Current")
+    ]
+
+    assert len(current_indices) == 3
+    np.testing.assert_array_equal(
+        np.asarray(objective.x, dtype=np.float64)[current_indices],
+        np.ones(3),
+    )
+    assert float(objective.J()) == OFFICIAL_INITIAL_OBJECTIVE
+
+
+def test_minimal_official_endpoint_is_admitted_as_a_budget_exit() -> None:
+    """The official run stops at its iteration cap and is never ``converged``."""
+    terminal = _terminal_status(
+        scientific_predicate=True,
+        status_convention="scipy-lbfgsb",
+        provider_success=False,
+        provider_status=1,
+        iterations=OFFICIAL_ITERATIONS,
+        max_iterations=OFFICIAL_ITERATION_LIMIT,
+        initial_values={
+            "initial:objective": np.asarray(OFFICIAL_INITIAL_OBJECTIVE),
+            "initial:objective_gradient": np.asarray([1.0]),
+            "initial:parameters": np.asarray([1.0]),
+        },
+        final_values={
+            "final:objective": np.asarray(OFFICIAL_FINAL_OBJECTIVE),
+            "final:objective_gradient": np.asarray(
+                [OFFICIAL_FINAL_GRADIENT_INFINITY_NORM]
+            ),
+            "final:parameters": np.asarray([1.0]),
+        },
+    )
+
+    assert terminal.normalized_status == "budget_exhausted"
+    assert terminal.success is False
+    assert OFFICIAL_FUNCTION_EVALUATIONS > OFFICIAL_ITERATIONS
+
+
+def test_minimal_case_declares_the_official_endpoint_quality_band() -> None:
+    """At ``native_default`` the verdict is the band, on a published observable.
+
+    Upstream's own run ends at its 300-iteration cap, and so does every
+    one-ulp perturbation of it, so the end point is a point in upstream's own
+    scatter rather than a converged minimum.  The band states that, and it
+    states it about ``final:objective``, which both lanes publish; a band
+    whose observable no lane published would be unenforceable.
+    """
+    case = get_case("native-stage-two-optimization-minimal")
+    band = case.native_default_quality_band
+
+    assert band is not None
+    assert band.observable == "final:objective"
+    assert band.max_value > OFFICIAL_FINAL_OBJECTIVE
+    assert case.work_budget_contract is None
+
+
+@pytest.mark.parametrize("scale", ("native_default", "bounded"))
+def test_minimal_solver_policy_keeps_official_tolerance_in_each_scale(
+    scale: ExecutionScale,
+) -> None:
+    configuration = _scale_configuration(scale)
+
+    assert configuration["rtol"] == 1.0e-15
+    assert configuration["atol"] == 1.0e-15
+    assert configuration["lbfgs_history_size"] == 300
+    # The reduced scale shrinks the geometry, not the optimizer policy: the
+    # official call is options={'maxiter': 300, 'maxcor': 300}, tol=1e-15
+    # (upstream examples/1_Simple/stage_two_optimization_minimal.py:56,137),
+    # and its 50-iteration value belongs to the CI switch, not to this scale.
+    assert configuration["max_steps"] == OFFICIAL_ITERATION_LIMIT
+
+
+def test_minimal_native_default_keeps_official_iteration_budget() -> None:
+    configuration = _scale_configuration("native_default")
+
+    assert (
+        configuration["max_steps"]
+        == MINIMAL_STAGE_TWO_NATIVE_ITERATIONS
+        == OFFICIAL_ITERATION_LIMIT
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "status_convention",
+        "provider_success",
+        "provider_status",
+        "iterations",
+        "expected_status",
+    ),
+    [
+        ("scipy-lbfgsb", True, 0, 76, "converged"),
+        ("scipy-lbfgsb", False, 1, 300, "budget_exhausted"),
+        ("scipy-lbfgsb", False, 2, 76, "failed"),
+        ("private-lbfgsb", True, 0, 76, "converged"),
+        ("private-lbfgsb", False, 1, 300, "budget_exhausted"),
+        ("private-lbfgsb", False, 2, 76, "failed"),
+    ],
+)
+def test_minimal_terminal_status_respects_provider_result(
+    status_convention: StatusConvention,
+    provider_success: bool,
+    provider_status: int,
+    iterations: int,
+    expected_status: str,
+) -> None:
+    initial_values = {
+        "initial:objective": np.asarray(1.0),
+        "initial:objective_gradient": np.asarray([1.0]),
+        "initial:parameters": np.asarray([0.0]),
+    }
+    final_values = {
+        "final:objective": np.asarray(0.5),
+        "final:objective_gradient": np.asarray([1.0e-6]),
+        "final:parameters": np.asarray([1.0]),
+    }
+    terminal = _terminal_status(
+        scientific_predicate=True,
+        status_convention=status_convention,
+        provider_success=provider_success,
+        provider_status=provider_status,
+        iterations=iterations,
+        max_iterations=300,
+        initial_values=initial_values,
+        final_values=final_values,
+    )
+
+    assert terminal.normalized_status == expected_status
+    assert terminal.success is (expected_status == "converged")
+
+
+def test_native_minimal_producer_does_not_promote_provider_stops(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = get_case("native-stage-two-optimization-minimal")
+    input_root = tmp_path / "inputs"
+    bundle = case.create_input(input_root, "bounded")
+    _, arrays = load_input_bundle(input_root, bundle)
+
+    native_directory = tmp_path / "native"
+    native_directory.mkdir()
+    with chdir(native_directory):
+        baseline = case.execute("native-cpu", bundle, arrays)
+    # With the official parametrization and the official 300-iteration cap the
+    # reduced geometry converges on its own; the promotions below must not be
+    # able to turn a provider stop into that verdict.
+    assert baseline.normalized_status == "converged"
+    assert baseline.success is True
+    assert baseline.nit is not None and baseline.nit < bundle.configuration["max_steps"]
+
+    max_steps = bundle.configuration["max_steps"]
+    length_target = bundle.configuration["length_target"]
+    assert isinstance(max_steps, int)
+    assert isinstance(length_target, (int, float))
+    for provider_status, iterations, expected_status in (
+        (1, max_steps, "budget_exhausted"),
+        (2, baseline.nit, "failed"),
+    ):
+        result = scipy.optimize.OptimizeResult(
+            x=baseline.values["final:parameters"],
+            success=False,
+            status=provider_status,
+            nit=iterations,
+            nfev=baseline.nfev,
+            njev=baseline.njev,
+        )
+
+        def return_result(
+            *_args: object,
+            _result: scipy.optimize.OptimizeResult = result,
+            **_kwargs: object,
+        ) -> scipy.optimize.OptimizeResult:
+            return _result
+
+        monkeypatch.setattr(
+            native_stage_two_optimization_minimal,
+            "minimize",
+            return_result,
+        )
+        with chdir(native_directory):
+            observation = case.execute("native-cpu", bundle, arrays)
+
+        np.testing.assert_array_equal(
+            observation.values["final:parameters"],
+            baseline.values["final:parameters"],
+        )
+        assert (
+            observation.values["final:objective"]
+            < observation.values["initial:objective"]
+        )
+        assert (
+            np.linalg.norm(observation.values["final:objective_gradient"], ord=np.inf)
+            <= 1.0e-4
+        )
+        assert observation.values["final:total_curve_length"] <= (1.1 * length_target)
+        assert observation.normalized_status == expected_status
+        assert observation.success is False
+        assert observation.raw_status == str(provider_status)
 
 
 def test_exact_stage_two_minimal_matches_native_and_jax_cpu(
@@ -31,8 +279,20 @@ def test_exact_stage_two_minimal_matches_native_and_jax_cpu(
     monkeypatch.setenv("JAX_ENABLE_X64", "1")
     jax = case.execute("jax-cpu", bundle, arrays)
 
+    # The mirror solves with the provider upstream calls. The device L-BFGS-B
+    # remains available as the example's ``--device-solver`` performance mode,
+    # but a parity lane that ran it would not be mirroring upstream's workflow,
+    # so the published driver is asserted on both lanes.
+    assert native.driver == jax.driver == Driver.SCIPY_LBFGSB.value
+
+    # Both lanes satisfy the shared official 1e-15 stopping tolerance inside the
+    # official 300-iteration cap, so both report their own convergence rather
+    # than a stop imposed by a branch-chosen budget.
     assert native.success is True
     assert jax.success is True
+    assert native.normalized_status == jax.normalized_status == "converged"
+    assert native.nit is not None and native.nit < bundle.configuration["max_steps"]
+    assert jax.nit is not None and jax.nit < bundle.configuration["max_steps"]
     assert native.scale == jax.scale == "bounded"
     assert native.input_fingerprint == jax.input_fingerprint
     assert native.configuration_fingerprint == jax.configuration_fingerprint
@@ -65,13 +325,14 @@ def test_exact_stage_two_minimal_matches_native_and_jax_cpu(
             observation.values["final:objective"]
             < observation.values["initial:objective"]
         )
-        assert np.linalg.norm(
-            observation.values["final:objective_gradient"],
-            ord=np.inf,
-        ) <= 1.0e-4
-        assert observation.values["final:total_curve_length"] <= (
-            1.1 * length_target
+        assert (
+            np.linalg.norm(
+                observation.values["final:objective_gradient"],
+                ord=np.inf,
+            )
+            <= 1.0e-4
         )
+        assert observation.values["final:total_curve_length"] <= (1.1 * length_target)
 
     np.testing.assert_allclose(
         jax.values["final:objective"],

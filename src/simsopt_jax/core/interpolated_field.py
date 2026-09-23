@@ -30,9 +30,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from .regular_grid_interp import (
     RegularGridInterpolant3DDeviceSpec,
@@ -637,6 +639,121 @@ def interpolated_field_state_B_GradAbsB(
     return B, grad_abs_B
 
 
+class InterpolatedFieldCylCache(NamedTuple):
+    """The cylindrical output buffers a native ``InterpolatedField`` keeps.
+
+    ``InterpolatedField::_B_cyl_impl`` and ``_GradAbsB_cyl_impl``
+    (``legacy native C++ source magneticfield_interpolated.h``) write into
+    ``CachedTensor`` slots (``data_Bcyl`` / ``data_GradAbsBcyl``,
+    ``magneticfield.h``), and ``CachedTensor::get_or_create_and_fill``
+    (``cachedtensor.h``) reuses the same buffer for as long as the point count
+    is unchanged. ``RegularGridInterpolant3D::evaluate_local``
+    (``regular_grid_interpolant_3d_impl.h``) returns WITHOUT writing its output
+    slot for a skipped or out-of-bounds cell when ``extrapolate`` is set, so
+    such a row keeps the previous query's value, which is then re-flipped by
+    the current query's symmetry and re-rotated by the current query's
+    ``phi``. A right-hand side that queries one point at a time -- every
+    tracing right-hand side in ``simsoptpp/tracing.cpp`` -- therefore carries
+    this buffer from one evaluation to the next, and reproducing upstream's
+    arithmetic outside the interpolation domain means carrying it too.
+
+    Both entries are ``(1, 3)``: the one-row point buffer the C++ right-hand
+    sides use.
+
+    The two entries are annotated ``jax.Array | np.ndarray`` because the INITIAL
+    content, built by :func:`interpolated_field_cyl_cache_zeros`, is a READ-ONLY
+    HOST numpy array BY DESIGN, and only the values the compiled program
+    produces are device arrays. That is not an oversight to tidy away: an eager
+    ``jnp.zeros`` here stages its fill value through an implicit host-to-device
+    transfer, and a device array captured in a compiled program's closure is
+    copied back to the host at every lowering; the strict GPU lane
+    (``jax_transfer_guard=disallow``) refuses BOTH, and both were measured on
+    the JAX GPU lane of ``native-tracing-particle``.
+    """
+
+    B_cyl: jax.Array | np.ndarray
+    GradAbsB_cyl: jax.Array | np.ndarray
+
+
+def interpolated_field_cyl_cache_zeros(dtype=jnp.float64) -> InterpolatedFieldCylCache:
+    """The C++ buffer state before the first evaluation (``xt::zeros``), HOST-resident.
+
+    The tracing route captures this value in the CLOSURE of its compiled chunk
+    program: it selects the right-hand-side protocol and is the first carry. It
+    therefore follows the rule of :func:`simsopt_jax.core.specs.host_resident_spec`:
+    host leaves lower to literals with no copy, while a captured device leaf is
+    copied back to the host at every lowering, which the strict GPU lane
+    (``jax_transfer_guard=disallow``) refuses -- and an eager ``jnp.zeros`` stages
+    its scalar fill value through an implicit host-to-device transfer, which that
+    lane refuses as well. Both were measured on the JAX GPU lane of
+    ``native-tracing-particle``. Inside the compiled program the buffer is an
+    ordinary device value; only this initial content lives on the host.
+    """
+
+    def host_zeros() -> np.ndarray:
+        zeros = np.zeros((1, 3), dtype=np.dtype(dtype))
+        zeros.setflags(write=False)
+        return zeros
+
+    return InterpolatedFieldCylCache(B_cyl=host_zeros(), GradAbsB_cyl=host_zeros())
+
+
+def interpolated_field_state_B_GradAbsB_cached(
+    state: InterpolatedFieldDeviceState,
+    point: jax.Array,
+    cache: InterpolatedFieldCylCache,
+) -> tuple[jax.Array, jax.Array, InterpolatedFieldCylCache]:
+    """Cartesian ``B`` and ``grad|B|`` with the native caller-buffer contract.
+
+    Same pipeline as :func:`interpolated_field_state_B_GradAbsB`, except that
+    an out-of-domain query returns the values carried in ``cache`` instead of
+    zeros, which is what the C++ object does (see
+    :class:`InterpolatedFieldCylCache`). The returned cache is the new buffer
+    content: cylindrical and post-symmetry, exactly what the C++ tensors hold
+    after the call.
+
+    ``GradAbsB`` is evaluated first, as in ``GuidingCenterVacuumRHS::
+    operator()`` (``simsoptpp/tracing.cpp``); the two buffers are independent,
+    so the order is documentation rather than behaviour.
+
+    Caller contract: this function is meant to be called from INSIDE a compiled
+    program, where the initial host buffer of
+    :func:`interpolated_field_cyl_cache_zeros` is a closure constant and every
+    later cache is a device value. An EAGER call that hands it that host buffer
+    under ``jax_transfer_guard=disallow`` makes the numpy leaf an argument of
+    the jitted evaluator below and trips the host-to-device half of the guard.
+    The production tracing route never does this; a caller that wants an eager
+    evaluation under the strict guard must place the buffer on the device
+    itself first.
+    """
+
+    points = jnp.reshape(point, (1, 3))
+    _r, phi, _z = _cart_to_cyl(points)
+    GradAbsB_cyl = _evaluate_cyl_field(
+        points,
+        initial_cyl=cache.GradAbsB_cyl,
+        device_spec=state.GradAbsB,
+        nfp=int(state.nfp),
+        stellsym=bool(state.stellsym),
+        unfold_kind=1,
+    )
+    B_cyl = _evaluate_cyl_field(
+        points,
+        initial_cyl=cache.B_cyl,
+        device_spec=state.B,
+        nfp=int(state.nfp),
+        stellsym=bool(state.stellsym),
+        unfold_kind=0,
+    )
+    B = _cyl_vector_to_cart(B_cyl, phi)[0]
+    GradAbsB = _cyl_vector_to_cart(GradAbsB_cyl, phi)[0]
+    return (
+        B,
+        GradAbsB,
+        InterpolatedFieldCylCache(B_cyl=B_cyl, GradAbsB_cyl=GradAbsB_cyl),
+    )
+
+
 def interpolated_field_B_cyl_with_initial(
     spec: InterpolatedFieldSpec, points_cart: jax.Array, initial_cyl: jax.Array
 ) -> jax.Array:
@@ -674,12 +791,15 @@ def interpolated_field_GradAbsB_cyl_with_initial(
 
 
 __all__ = [
+    "InterpolatedFieldCylCache",
     "InterpolatedFieldDeviceState",
     "InterpolatedFieldSpec",
     "interpolated_field_B",
     "interpolated_field_B_cyl_with_initial",
+    "interpolated_field_cyl_cache_zeros",
     "interpolated_field_state_B",
     "interpolated_field_state_B_GradAbsB",
+    "interpolated_field_state_B_GradAbsB_cached",
     "interpolated_field_GradAbsB",
     "interpolated_field_GradAbsB_cyl_with_initial",
     "make_interpolated_field_device_state",

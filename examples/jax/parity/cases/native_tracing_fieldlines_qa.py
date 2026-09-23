@@ -14,12 +14,23 @@ from examples.jax.parity.input_bundle import (
     create_input_bundle,
     effective_construction_fingerprint,
 )
+from examples.jax.parity.official_tracing_contract import (
+    LaneDistances,
+    contract_violations,
+    lane_distances,
+    lane_status_reasons,
+    non_finite_observables,
+)
 from examples.jax.parity.runtime import ParityLane
 from simsopt_jax.examples import ExecutionScale
+from simsopt_jax_adapters.field.tracing import compute_fieldlines_with_status
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 SURFACE_INPUT = REPO_ROOT / "tests/test_files/input.LandremanPaul2021_QA"
 FIELD_INPUT = REPO_ROOT / "examples/1_Simple/inputs/biot_savart_opt.json"
+
+#: Parity case id; the tracing contract is keyed by it.
+CASE_ID = "native-tracing-fieldlines-qa"
 
 WORKFLOW_STAGES = (
     "load_qa_boundary_and_optimized_stage_two_coils",
@@ -44,8 +55,7 @@ def _scale_configuration(scale: ExecutionScale) -> dict[str, object]:
         "interpolation_degree": 4 if native_scale else 2,
         "fieldline_count": 10 if native_scale else 3,
         "tmax": 20_000.0 if native_scale else 50.0,
-        "native_integrator_tolerance": 1.0e-16,
-        "jax_integrator_tolerance": 1.0e-13,
+        "integrator_tolerance": 1.0e-16,
         "classifier_h": 0.03 if native_scale else 0.08,
         "classifier_order": 2,
         "skip_distance": -0.05,
@@ -105,7 +115,7 @@ def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
     )
     return create_input_bundle(
         root,
-        case_id="native-tracing-fieldlines-qa",
+        case_id=CASE_ID,
         random_seed=0,
         arrays={
             "surface_dofs": np.asarray(surface.local_full_x, dtype=np.float64),
@@ -197,13 +207,25 @@ def _values(
     phi_hits: list[np.ndarray],
     tmax: float,
     classifier: _LevelsetClassifier,
+    statuses: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     final_times = np.asarray(
         [trajectory[-1, 0] for trajectory in trajectories],
         dtype=np.float64,
     )
     final_states = np.stack([trajectory[-1, 1:4] for trajectory in trajectories])
-    statuses = np.where(np.isclose(final_times, tmax, rtol=0.0, atol=1.0e-10), 0, -1)
+    if statuses is None:
+        statuses = np.asarray(
+            [
+                0
+                if np.isclose(time, tmax, rtol=0.0, atol=1.0e-10)
+                else int(hits[hits[:, 1] < 0][-1, 1])
+                if hits.ndim == 2 and np.any(hits[:, 1] < 0)
+                else 1
+                for time, hits in zip(final_times, phi_hits, strict=True)
+            ],
+            dtype=np.int64,
+        )
     hit_counts = np.asarray([hits.shape[0] for hits in phi_hits], dtype=np.int64)
     hit_positions = np.concatenate(
         [np.asarray(hits[:, 2:5], dtype=np.float64) for hits in phi_hits],
@@ -230,6 +252,23 @@ def _values(
     }
 
 
+def _upstream_distances(
+    bundle: InputBundle,
+    values: dict[str, np.ndarray],
+) -> LaneDistances | None:
+    """The lane's distance to UPSTREAM's canonical record, line by line; only the shipped scale has one."""
+    if bundle.scale != "native_default":
+        return None
+    return lane_distances(
+        CASE_ID,
+        initial_states=values["initial:states"],
+        final_positions=values["final:states"],
+        final_times=values["final:times"],
+        final_statuses=values["final:status"],
+        poincare_counts=values["poincare:counts"],
+    )
+
+
 def _observation(
     lane: ParityLane,
     bundle: InputBundle,
@@ -239,12 +278,22 @@ def _observation(
     precision: str,
     driver: str,
 ) -> LaneObservation:
-    success = bool(
-        np.all(np.isfinite(values["final:states"]))
-        and np.all(np.isfinite(values["poincare:positions"]))
+    non_finite = non_finite_observables(values)
+    distances = _upstream_distances(bundle, values)
+    violations = () if distances is None else contract_violations(distances)
+    published = (
+        dict(values)
+        if distances is None
+        else {**values, **distances.published_values()}
+    )
+    # ``non_finite_observables`` is the finiteness rule for EVERY published array of this lane, so the health
+    # predicate below adds only what is specific to this case; there is one finiteness check, not one per key.
+    healthy = bool(
+        not non_finite
         and float(values["interpolation:relative_error"]) < 0.5
         and np.all(values["final:status"] <= 0)
     )
+    success = healthy and not violations
     return LaneObservation(
         lane=lane,
         backend_mode=(
@@ -262,14 +311,18 @@ def _observation(
         ),
         driver=driver,
         normalized_status="converged" if success else "failed",
-        raw_status="integration_complete_or_levelset_stop",
+        raw_status=lane_status_reasons(
+            non_finite,
+            violations,
+            values["final:status"],
+        ),
         success=success,
         nit=None,
         nfev=None,
         njev=None,
         completed_workflow_stages=WORKFLOW_STAGES,
         provenance=None,
-        values=values,
+        values=published,
     )
 
 
@@ -298,7 +351,7 @@ def _native(
         arrays["initial_states"][:, 0],
         arrays["initial_states"][:, 2],
         tmax=_configuration_float(bundle, "tmax"),
-        tol=_configuration_float(bundle, "native_integrator_tolerance"),
+        tol=_configuration_float(bundle, "integrator_tolerance"),
         phis=tuple(arrays["phi_planes"]),
         stopping_criteria=[LevelsetStoppingCriterion(classifier.dist)],
     )
@@ -322,7 +375,7 @@ def _native(
         values,
         platform="cpu",
         precision="fp64",
-        driver="simsoptpp_lsoda_fieldline",
+        driver="simsoptpp_dopri5_fieldline",
     )
 
 
@@ -335,7 +388,6 @@ def _jax(
     from simsopt_jax.backend.runtime import get_runtime_jax_device
     from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
     from simsopt_jax_adapters.field.interpolated import InterpolatedFieldJAX
-    from simsopt_jax_adapters.field.tracing import compute_fieldlines
 
     import jax
 
@@ -356,12 +408,12 @@ def _jax(
     )
     direct_surface_field = np.asarray(direct_surface_field, dtype=np.float64)
     surface_field = np.asarray(surface_field, dtype=np.float64)
-    trajectories, phi_hits = compute_fieldlines(
+    trajectories, phi_hits, statuses = compute_fieldlines_with_status(
         interpolated,
         arrays["initial_states"][:, 0],
         arrays["initial_states"][:, 2],
         tmax=_configuration_float(bundle, "tmax"),
-        tol=_configuration_float(bundle, "jax_integrator_tolerance"),
+        tol=_configuration_float(bundle, "integrator_tolerance"),
         phis=tuple(arrays["phi_planes"]),
         stopping_criteria=[LevelsetStoppingCriterion(classifier)],
     )
@@ -378,6 +430,7 @@ def _jax(
         phi_hits=phi_hits,
         tmax=_configuration_float(bundle, "tmax"),
         classifier=classifier,
+        statuses=statuses,
     )
     device = get_runtime_jax_device()
     platform = "cpu" if device is None else device.platform

@@ -1,4 +1,81 @@
-"""Exact matched workflow for ``2_Intermediate/boozer.py``."""
+"""Exact matched workflow for ``2_Intermediate/boozer.py``.
+
+Two residual definitions are published at the initial state and they are not
+the same quantity:
+
+* ``initial:residual`` / ``initial:jacobian`` are the SOLVER'S penalty residual
+  and its Jacobian -- ``(3*nphi*ntheta + 2,)`` entries, divided by
+  ``sqrt(3*nphi*ntheta)``, ``weight_inv_modB=True``, with the label and
+  ``z(0,0)`` constraint rows appended.  They are the cross-lane parity keys.
+* ``initial:boozer_residual`` / ``initial:boozer_jacobian`` are the plain
+  Boozer residual ``boozer_surface_residual(surface, iota, G, field,
+  derivatives=1)`` -- ``(3*nphi*ntheta,)`` entries, unscaled,
+  ``weight_inv_modB=False``, no constraint rows.  That is the definition the
+  official capture records, so these keys compare exactly with upstream.  Both
+  lanes evaluate them through the native library, so they say nothing about
+  JAX-versus-native agreement.
+
+``first:*`` publishes the end state and the provider outcome of the official
+first stage (the L-BFGS-B reduction), next to ``area:*`` and ``flux:*``.  Three
+of those keys are exactly comparable and ARE compared lane against lane at
+``native_default``: ``first:stopping_reason_code``, ``first:nit`` and
+``first:solver_success``.  There both lanes get ``OFFICIAL_LBFGS_MAXITER`` from
+``_scale_configuration``, and the stage is a budget exit on upstream itself, so
+both lanes stop at the cap and the three keys agree with each other and with
+the official record (``iteration-limit`` / ``nit 300`` / ``success false``;
+upstream's own ``status 1``, ``nit 300``, ``success false``).  At the bounded
+scale the JAX lane runs a reduced budget for the measured reason in
+``_scale_configuration``, so the same three routes are ``applicable: false``
+there.  Neither the manifest nor
+``tests/integration/test_jax_mirror_boozer_parity.py`` restates that split:
+both derive it from the declared budgets.
+
+The compared first-stage outcome is the NORMALIZED stopping reason, never the
+raw provider status, because the two lanes' first stages are two different
+emitters: the native lane's is ``scipy.optimize.minimize(method='L-BFGS-B')``
+(convention ``scipy-lbfgsb``) and the JAX lane's is the private on-device
+L-BFGS-B port reached through ``Driver.SIMSOPT_LBFGSB`` (convention
+``private-lbfgsb``, public status from
+``simsopt_jax.geo.optimizers.private._lbfgsb_scipy.lbfgsb_public_status_from_state``).
+``simsopt_contracts.optimization_endpoint`` owns both vocabularies and says why
+no table is shared: the same integer means different things in different
+solvers.  The two agree on 1 and 2, but the private port adds ``6`` (non-finite
+endpoint) and ``99`` (callback stop), which SciPy never emits -- so a raw
+comparison both fails on a status 1 / status 6 pair that means the same stop
+and passes on a status 99 / status 99 pair that means two different stops.
+``FIRST_STAGE_STATUS_CONVENTION_BY_DRIVER`` names one emitter per lane driver
+and ``first_stage_stopping_reason`` classifies through the contract, exactly as
+``native_qfm.py`` does for its six SciPy calls.
+
+The other ``first:*`` keys are published diagnostics with no comparator, and
+their routes stay ``applicable: false``:
+
+* ``first:status`` is each provider's own raw integer; it is recorded so the
+  classification can be audited from the receipt, and it is never judged;
+* ``first:nfev`` and ``first:njev`` count line-search trials at the same
+  budget, which two implementations of the same algorithm need not match --
+  measured 373 (native) versus 363 (JAX) versus 365 (official) at
+  ``native_default``, and the native lane alone moved 370 -> 373 between two
+  revisions of this branch;
+* the six floats are that budget exit's path-dependent end point -- measured
+  iota -0.53067 (native) versus -0.53012 (JAX) versus -0.52258 (official).
+
+No official number above is a literal here: they come from the tracked record
+``examples/jax/parity/official_reference/9e027eac3/native-boozer.json`` and are
+compared against this case's declared configuration in
+``tests/integration/test_jax_mirror_boozer_parity.py``; the lane measurements
+are in ``A/fix-wave-3/boozer/probe/RESULTS.md``.
+
+``first:``/``area:``/``flux:provider_persisted_iterate`` report whether each
+stage left the provider's own iterate behind or restored the stage start, and
+they are compared exactly.  Upstream always persists; this repository's native
+library reverts a stage that failed without reducing the norm
+(``src/simsopt/geo/boozersurface.py:624`` on the L-BFGS route, ``:897`` on the
+manual route) while ``BoozerSurfaceJAX`` commits as upstream does
+(``src/simsopt_jax_adapters/geo/boozer_surface.py:8162,8619``).  Without this
+key the two lanes could chain the next stage from different end states and the
+divergence would surface only as an unexplained ``area:``/``flux:`` mismatch.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +83,8 @@ import hashlib
 import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import cast
+from types import MappingProxyType
+from typing import Final, get_args
 
 import numpy as np
 from examples.jax.parity.arbiter import LaneObservation
@@ -16,7 +94,27 @@ from examples.jax.parity.input_bundle import (
     effective_construction_fingerprint,
 )
 from examples.jax.parity.runtime import ParityLane
+from simsopt_contracts.optimization_endpoint import (
+    StatusConvention,
+    StoppingReason,
+    certify_optimization_endpoint,
+)
 from simsopt_jax.examples import ExecutionScale
+from simsopt_jax.examples.boozer_official import (
+    OFFICIAL_CONSTRAINT_WEIGHT,
+    OFFICIAL_FLUX_MULTIPLIER,
+    OFFICIAL_INITIAL_IOTA,
+    OFFICIAL_LBFGS_MAXITER,
+    OFFICIAL_LS_MAXITER,
+    OFFICIAL_SOLVER_TOLERANCE,
+    OFFICIAL_SURFACE_DISTANCE,
+    OFFICIAL_SURFACE_RESOLUTION,
+    BoozerStageOutcome,
+    BoozerStageState,
+    boozer_official_options,
+    run_boozer_lbfgs_stage,
+    run_boozer_manual_stage,
+)
 
 WORKFLOW_STAGES = (
     "construct_ncsx_coils_and_tensor_fourier_surface",
@@ -26,21 +124,100 @@ WORKFLOW_STAGES = (
     "triple_toroidal_flux_label_and_resolve_surface",
 )
 
+#: The solver driver each lane runs, end to end.  The first stage's emitter is
+#: read from this one name per lane, so the published convention cannot drift
+#: from the driver the receipt records.
+NATIVE_DRIVER = "simsopt_scipy_lbfgsb_manual_lm"
+JAX_DRIVER = "simsopt_jax_lbfgsb_manual_ls"
+#: Which status vocabulary each lane's FIRST stage emits.  The native lane
+#: reaches ``scipy.optimize.minimize(method='L-BFGS-B')``
+#: (``simsopt/geo/boozersurface.py:622``); the JAX lane runs the private
+#: on-device L-BFGS-B port, because ``boozer_official_options`` selects
+#: ``Driver.SIMSOPT_LBFGSB`` -> ``optimizer_backend='ondevice'`` -> method
+#: ``lbfgs-ondevice``, whose public status is
+#: ``lbfgsb_public_status_from_state``.  The vocabularies themselves are owned
+#: by :mod:`simsopt_contracts.optimization_endpoint`.
+FIRST_STAGE_STATUS_CONVENTION_BY_DRIVER: Final[Mapping[str, StatusConvention]] = (
+    MappingProxyType(
+        {
+            NATIVE_DRIVER: "scipy-lbfgsb",
+            JAX_DRIVER: "private-lbfgsb",
+        }
+    )
+)
+#: Integer code of each normalized stopping reason, for publication as a parity
+#: observable: the arbiter compares numeric arrays only (it calls
+#: ``np.isfinite`` on every required value), so the classification travels as
+#: its index in the contract's own ``StoppingReason`` literal.  The vocabulary
+#: is not restated here -- it is read from the contract.
+STOPPING_REASON_CODES: Final[Mapping[StoppingReason, int]] = MappingProxyType(
+    {reason: index for index, reason in enumerate(get_args(StoppingReason))}
+)
+
+
+def first_stage_stopping_reason(
+    outcome: BoozerStageOutcome,
+    *,
+    max_iterations: int,
+    status_convention: StatusConvention,
+) -> StoppingReason:
+    """Classify one lane's first stage into the contract's shared vocabulary.
+
+    The raw status integers of the two lanes are drawn from two different
+    alphabets, so only this classification is comparable across them.  The
+    gradient norms :func:`certify_optimization_endpoint` takes feed its
+    stationarity fields, which a stopping reason does not read; the endpoint's
+    finiteness is passed explicitly, as ``native_qfm.py`` does for the same
+    reason.
+
+    ``outcome`` is an L-BFGS stage outcome, the only route that reports a
+    status and an iteration count; the manual Levenberg-Marquardt stages report
+    neither and are not classified here.
+    """
+    endpoint_finite = bool(
+        np.all(np.isfinite(outcome.state.surface_dofs))
+        and np.isfinite(outcome.state.iota)
+        and np.isfinite(outcome.state.G)
+        and np.isfinite(float(outcome.objective))
+        and np.isfinite(outcome.gradient_norm)
+    )
+    return certify_optimization_endpoint(
+        status_convention=status_convention,
+        provider_success=outcome.success,
+        provider_status=outcome.status,
+        iterations=int(outcome.nit),
+        max_iterations=max_iterations,
+        initial_gradient_inf_norm=0.0,
+        final_gradient_inf_norm=0.0,
+        parameters_finite=endpoint_finite,
+        observables_finite=endpoint_finite,
+        inner_success=True,
+    ).stopping_reason
+
 
 def _scale_configuration(scale: ExecutionScale) -> dict[str, object]:
     native_scale = scale == "native_default"
     return {
-        "mpol": 5 if native_scale else 2,
-        "ntor": 5 if native_scale else 2,
-        "native_bfgs_maxiter": 300,
-        "native_ls_maxiter": 100,
-        "jax_bfgs_maxiter": 300 if native_scale else 60,
-        "jax_ls_maxiter": 100,
-        "solver_tolerance": 1.0e-10,
-        "constraint_weight": 100.0,
-        "initial_iota": -0.4,
-        "surface_distance": 0.10,
-        "flux_multiplier": 3.0,
+        "mpol": OFFICIAL_SURFACE_RESOLUTION if native_scale else 2,
+        "ntor": OFFICIAL_SURFACE_RESOLUTION if native_scale else 2,
+        "native_bfgs_maxiter": OFFICIAL_LBFGS_MAXITER,
+        "native_ls_maxiter": OFFICIAL_LS_MAXITER,
+        # The JAX lane runs upstream's own first-stage budget at
+        # ``native_default``, where the exactly comparable first-stage facts
+        # (status, nit, solver_success) are therefore compared lane against
+        # lane.  The bounded scale keeps a reduced JAX budget, and that is a
+        # measured constraint, not a saving: with a shared 300-iteration first
+        # stage at mpol=ntor=2 the JAX lane ends at iota -0.2109 and stage two
+        # then converges onto a DIFFERENT Boozer branch than the native lane
+        # (area:iota -0.1938 versus -0.41398), i.e. the cheap scale cannot
+        # carry the official budget without changing which surface it solves.
+        "jax_bfgs_maxiter": OFFICIAL_LBFGS_MAXITER if native_scale else 60,
+        "jax_ls_maxiter": OFFICIAL_LS_MAXITER,
+        "solver_tolerance": OFFICIAL_SOLVER_TOLERANCE,
+        "constraint_weight": OFFICIAL_CONSTRAINT_WEIGHT,
+        "initial_iota": OFFICIAL_INITIAL_IOTA,
+        "surface_distance": OFFICIAL_SURFACE_DISTANCE,
+        "flux_multiplier": OFFICIAL_FLUX_MULTIPLIER,
     }
 
 
@@ -138,16 +315,21 @@ def _effective_fingerprint(
     )
 
 
-def _residual_norm(surface, iota: float, G: float, field) -> float:
+def _plain_boozer_residual(surface, iota: float, G: float, field, *, derivatives: int):
+    """Official plain Boozer residual: unscaled, unweighted, no constraint rows."""
     from simsopt.geo import boozer_surface_residual
 
-    residual = boozer_surface_residual(
+    return boozer_surface_residual(
         surface,
         iota,
         G,
         field,
-        derivatives=0,
-    )[0]
+        derivatives=derivatives,
+    )
+
+
+def _residual_norm(surface, iota: float, G: float, field) -> float:
+    residual = _plain_boozer_residual(surface, iota, G, field, derivatives=0)[0]
     return float(np.linalg.norm(np.asarray(residual, dtype=np.float64)))
 
 
@@ -159,6 +341,13 @@ def _native(
 
     magnetic_axis, native_field, field, surface, G0 = _problem(bundle.configuration)
     initial_iota = _configuration_float(bundle.configuration, "initial_iota")
+    tolerance = _configuration_float(bundle.configuration, "solver_tolerance")
+    constraint_weight = _configuration_float(bundle.configuration, "constraint_weight")
+    start = BoozerStageState(
+        surface_dofs=np.asarray(arrays["surface_dofs"], dtype=np.float64),
+        iota=initial_iota,
+        G=G0,
+    )
     area = Area(surface)
     solver = BoozerSurface(
         native_field,
@@ -171,9 +360,16 @@ def _native(
     )
     initial_residual, initial_jacobian = solver._get_residual_vector_and_jacobian(
         initial_x,
-        _configuration_float(bundle.configuration, "constraint_weight"),
+        constraint_weight,
         True,
         True,
+    )
+    initial_boozer_residual, initial_boozer_jacobian = _plain_boozer_residual(
+        surface,
+        initial_iota,
+        G0,
+        native_field,
+        derivatives=1,
     )
     initial_residual_norm = _residual_norm(
         surface,
@@ -181,33 +377,32 @@ def _native(
         G0,
         native_field,
     )
-    rough = solver.minimize_boozer_penalty_constraints_LBFGS(
-        tol=_configuration_float(bundle.configuration, "solver_tolerance"),
+    rough = run_boozer_lbfgs_stage(
+        solver,
+        start,
+        tol=tolerance,
         maxiter=_configuration_int(bundle.configuration, "native_bfgs_maxiter"),
-        constraint_weight=_configuration_float(
-            bundle.configuration, "constraint_weight"
-        ),
-        iota=initial_iota,
-        G=G0,
+        constraint_weight=constraint_weight,
     )
-    solver.need_to_run_code = True
-    polished = solver.minimize_boozer_penalty_constraints_ls(
-        tol=_configuration_float(bundle.configuration, "solver_tolerance"),
+    rough_label = float(area.J())
+    rough_residual_norm = _residual_norm(
+        surface,
+        rough.state.iota,
+        rough.state.G,
+        native_field,
+    )
+    polished = run_boozer_manual_stage(
+        solver,
+        rough.state,
+        tol=tolerance,
         maxiter=_configuration_int(bundle.configuration, "native_ls_maxiter"),
-        constraint_weight=_configuration_float(
-            bundle.configuration, "constraint_weight"
-        ),
-        iota=float(rough["iota"]),
-        G=float(rough["G"]),
-        method="manual",
+        constraint_weight=constraint_weight,
     )
-    area_iota = float(polished["iota"])
-    area_G = float(polished["G"])
     area_label = float(area.J())
     area_residual_norm = _residual_norm(
         surface,
-        area_iota,
-        area_G,
+        polished.state.iota,
+        polished.state.G,
         native_field,
     )
 
@@ -221,15 +416,12 @@ def _native(
         toroidal_flux,
         flux_target,
     )
-    expanded = flux_solver.minimize_boozer_penalty_constraints_ls(
-        tol=_configuration_float(bundle.configuration, "solver_tolerance"),
+    expanded = run_boozer_manual_stage(
+        flux_solver,
+        polished.state,
+        tol=tolerance,
         maxiter=_configuration_int(bundle.configuration, "native_ls_maxiter"),
-        constraint_weight=_configuration_float(
-            bundle.configuration, "constraint_weight"
-        ),
-        iota=area_iota,
-        G=area_G,
-        method="manual",
+        constraint_weight=constraint_weight,
     )
     values = _values(
         axis_dofs=np.asarray(magnetic_axis.local_full_x, dtype=np.float64),
@@ -237,24 +429,29 @@ def _native(
         initial_surface_dofs=arrays["surface_dofs"],
         initial_residual=np.asarray(initial_residual, dtype=np.float64),
         initial_jacobian=np.asarray(initial_jacobian, dtype=np.float64),
+        initial_boozer_residual=np.asarray(initial_boozer_residual, dtype=np.float64),
+        initial_boozer_jacobian=np.asarray(initial_boozer_jacobian, dtype=np.float64),
         initial_residual_norm=initial_residual_norm,
-        area_iota=area_iota,
-        area_G=area_G,
+        driver=NATIVE_DRIVER,
+        first_stage_max_iterations=_configuration_int(
+            bundle.configuration, "native_bfgs_maxiter"
+        ),
+        rough=rough,
+        rough_label=rough_label,
+        rough_residual_norm=rough_residual_norm,
+        area=polished,
         area_label=area_label,
         area_residual_norm=area_residual_norm,
+        flux=expanded,
         flux_target=flux_target,
-        flux_iota=float(expanded["iota"]),
-        flux_G=float(expanded["G"]),
         flux_label=float(toroidal_flux.J()),
         flux_residual_norm=_residual_norm(
             surface,
-            float(expanded["iota"]),
-            float(expanded["G"]),
+            expanded.state.iota,
+            expanded.state.G,
             native_field,
         ),
         flux_surface_dofs=np.asarray(surface.get_dofs(), dtype=np.float64),
-        area_solver_success=bool(polished["success"]),
-        flux_solver_success=bool(expanded["success"]),
     )
     return _observation(
         "native-cpu",
@@ -262,20 +459,8 @@ def _native(
         values,
         platform="cpu",
         precision="fp64",
-        driver="simsopt_scipy_lbfgsb_manual_lm",
+        driver=NATIVE_DRIVER,
     )
-
-
-def _host_float(value: object) -> float:
-    import jax
-
-    return float(np.asarray(jax.device_get(value), dtype=np.float64))
-
-
-def _host_bool(value: object) -> bool:
-    import jax
-
-    return bool(np.asarray(jax.device_get(value), dtype=np.bool_))
 
 
 def _jax(
@@ -293,23 +478,26 @@ def _jax(
 
     magnetic_axis, native_field, field, surface, G0 = _problem(bundle.configuration)
     initial_iota = _configuration_float(bundle.configuration, "initial_iota")
+    tolerance = _configuration_float(bundle.configuration, "solver_tolerance")
+    constraint_weight = _configuration_float(bundle.configuration, "constraint_weight")
+    start = BoozerStageState(
+        surface_dofs=np.asarray(arrays["surface_dofs"], dtype=np.float64),
+        iota=initial_iota,
+        G=G0,
+    )
     jax_field = BiotSavartJAX(native_field.coils)
-    options = {
-        "bfgs_maxiter": _configuration_int(bundle.configuration, "jax_bfgs_maxiter"),
-        "bfgs_tol": _configuration_float(bundle.configuration, "solver_tolerance"),
-        "newton_maxiter": _configuration_int(bundle.configuration, "jax_ls_maxiter"),
-        "newton_tol": _configuration_float(bundle.configuration, "solver_tolerance"),
-        "verbose": False,
-    }
+    options = boozer_official_options(
+        rough_maxiter=_configuration_int(bundle.configuration, "jax_bfgs_maxiter"),
+        ls_maxiter=_configuration_int(bundle.configuration, "jax_ls_maxiter"),
+        tolerance=tolerance,
+    )
     area = Area(surface)
     solver = BoozerSurfaceJAX(
         jax_field,
         surface,
         area,
         float(area.J()),
-        constraint_weight=_configuration_float(
-            bundle.configuration, "constraint_weight"
-        ),
+        constraint_weight=constraint_weight,
         options=options,
     )
     initial_x = jnp.concatenate(
@@ -321,9 +509,7 @@ def _jax(
     kernels = solver._get_penalty_kernel_bundle(
         optimize_G=True,
         weight_inv_modB=True,
-        constraint_weight=_configuration_float(
-            bundle.configuration, "constraint_weight"
-        ),
+        constraint_weight=constraint_weight,
     )
     coil_spec = jax_field.coil_set_spec()
     initial_residual_device, initial_jacobian_device = (
@@ -333,6 +519,13 @@ def _jax(
     initial_residual, initial_jacobian = jax.device_get(
         (initial_residual_device, initial_jacobian_device)
     )
+    initial_boozer_residual, initial_boozer_jacobian = _plain_boozer_residual(
+        surface,
+        initial_iota,
+        G0,
+        native_field,
+        derivatives=1,
+    )
     initial_residual_norm = _residual_norm(
         surface,
         initial_iota,
@@ -340,39 +533,32 @@ def _jax(
         native_field,
     )
 
-    rough = cast(
-        Mapping[str, object],
-        solver.minimize_boozer_penalty_constraints_LBFGS(
-            tol=_configuration_float(bundle.configuration, "solver_tolerance"),
-            maxiter=_configuration_int(bundle.configuration, "jax_bfgs_maxiter"),
-            constraint_weight=_configuration_float(
-                bundle.configuration, "constraint_weight"
-            ),
-            iota=initial_iota,
-            G=G0,
-        ),
+    rough = run_boozer_lbfgs_stage(
+        solver,
+        start,
+        tol=tolerance,
+        maxiter=_configuration_int(bundle.configuration, "jax_bfgs_maxiter"),
+        constraint_weight=constraint_weight,
     )
-    solver.need_to_run_code = True
-    polished = cast(
-        Mapping[str, object],
-        solver.minimize_boozer_penalty_constraints_ls(
-            tol=_configuration_float(bundle.configuration, "solver_tolerance"),
-            maxiter=_configuration_int(bundle.configuration, "jax_ls_maxiter"),
-            constraint_weight=_configuration_float(
-                bundle.configuration, "constraint_weight"
-            ),
-            iota=_host_float(rough["iota"]),
-            G=_host_float(rough["G"]),
-            method="manual",
-        ),
+    rough_label = float(area.J())
+    rough_residual_norm = _residual_norm(
+        surface,
+        rough.state.iota,
+        rough.state.G,
+        native_field,
     )
-    area_iota = _host_float(polished["iota"])
-    area_G = _host_float(polished["G"])
+    polished = run_boozer_manual_stage(
+        solver,
+        rough.state,
+        tol=tolerance,
+        maxiter=_configuration_int(bundle.configuration, "jax_ls_maxiter"),
+        constraint_weight=constraint_weight,
+    )
     area_label = float(area.J())
     area_residual_norm = _residual_norm(
         surface,
-        area_iota,
-        area_G,
+        polished.state.iota,
+        polished.state.G,
         native_field,
     )
 
@@ -386,24 +572,16 @@ def _jax(
         surface,
         toroidal_flux,
         flux_target,
-        constraint_weight=_configuration_float(
-            bundle.configuration, "constraint_weight"
-        ),
+        constraint_weight=constraint_weight,
         options=options,
         surface_runtime_state=solver.surface_runtime_state,
     )
-    expanded = cast(
-        Mapping[str, object],
-        flux_solver.minimize_boozer_penalty_constraints_ls(
-            tol=_configuration_float(bundle.configuration, "solver_tolerance"),
-            maxiter=_configuration_int(bundle.configuration, "jax_ls_maxiter"),
-            constraint_weight=_configuration_float(
-                bundle.configuration, "constraint_weight"
-            ),
-            iota=area_iota,
-            G=area_G,
-            method="manual",
-        ),
+    expanded = run_boozer_manual_stage(
+        flux_solver,
+        polished.state,
+        tol=tolerance,
+        maxiter=_configuration_int(bundle.configuration, "jax_ls_maxiter"),
+        constraint_weight=constraint_weight,
     )
     values = _values(
         axis_dofs=np.asarray(magnetic_axis.local_full_x, dtype=np.float64),
@@ -411,24 +589,29 @@ def _jax(
         initial_surface_dofs=arrays["surface_dofs"],
         initial_residual=np.asarray(initial_residual, dtype=np.float64),
         initial_jacobian=np.asarray(initial_jacobian, dtype=np.float64),
+        initial_boozer_residual=np.asarray(initial_boozer_residual, dtype=np.float64),
+        initial_boozer_jacobian=np.asarray(initial_boozer_jacobian, dtype=np.float64),
         initial_residual_norm=initial_residual_norm,
-        area_iota=area_iota,
-        area_G=area_G,
+        driver=JAX_DRIVER,
+        first_stage_max_iterations=_configuration_int(
+            bundle.configuration, "jax_bfgs_maxiter"
+        ),
+        rough=rough,
+        rough_label=rough_label,
+        rough_residual_norm=rough_residual_norm,
+        area=polished,
         area_label=area_label,
         area_residual_norm=area_residual_norm,
+        flux=expanded,
         flux_target=flux_target,
-        flux_iota=_host_float(expanded["iota"]),
-        flux_G=_host_float(expanded["G"]),
         flux_label=float(toroidal_flux.J()),
         flux_residual_norm=_residual_norm(
             surface,
-            _host_float(expanded["iota"]),
-            _host_float(expanded["G"]),
+            expanded.state.iota,
+            expanded.state.G,
             native_field,
         ),
         flux_surface_dofs=np.asarray(surface.get_dofs(), dtype=np.float64),
-        area_solver_success=_host_bool(polished["success"]),
-        flux_solver_success=_host_bool(expanded["success"]),
     )
     device = get_runtime_jax_device()
     platform = "cpu" if device is None else device.platform
@@ -438,7 +621,7 @@ def _jax(
         values,
         platform="gpu" if platform in {"cuda", "gpu"} else platform,
         precision="fp64" if bool(jax.config.read("jax_enable_x64")) else "fp32",
-        driver="simsopt_jax_bfgs_lm",
+        driver=JAX_DRIVER,
     )
 
 
@@ -449,39 +632,77 @@ def _values(
     initial_surface_dofs: np.ndarray,
     initial_residual: np.ndarray,
     initial_jacobian: np.ndarray,
+    initial_boozer_residual: np.ndarray,
+    initial_boozer_jacobian: np.ndarray,
     initial_residual_norm: float,
-    area_iota: float,
-    area_G: float,
+    driver: str,
+    first_stage_max_iterations: int,
+    rough: BoozerStageOutcome,
+    rough_label: float,
+    rough_residual_norm: float,
+    area: BoozerStageOutcome,
     area_label: float,
     area_residual_norm: float,
+    flux: BoozerStageOutcome,
     flux_target: float,
-    flux_iota: float,
-    flux_G: float,
     flux_label: float,
     flux_residual_norm: float,
     flux_surface_dofs: np.ndarray,
-    area_solver_success: bool,
-    flux_solver_success: bool,
 ) -> dict[str, np.ndarray]:
+    first_stopping_reason = first_stage_stopping_reason(
+        rough,
+        max_iterations=first_stage_max_iterations,
+        status_convention=FIRST_STAGE_STATUS_CONVENTION_BY_DRIVER[driver],
+    )
     return {
         "construction:axis_dofs": axis_dofs,
         "construction:field_dofs": field_dofs,
         "initial:surface_dofs": initial_surface_dofs,
         "initial:residual": initial_residual,
         "initial:jacobian": initial_jacobian,
+        "initial:boozer_residual": initial_boozer_residual,
+        "initial:boozer_jacobian": initial_boozer_jacobian,
         "initial:residual_norm": np.asarray(initial_residual_norm, dtype=np.float64),
-        "area:iota": np.asarray(area_iota, dtype=np.float64),
-        "area:G": np.asarray(area_G, dtype=np.float64),
+        "first:surface_dofs": rough.state.surface_dofs,
+        "first:iota": np.asarray(rough.state.iota, dtype=np.float64),
+        "first:G": np.asarray(rough.state.G, dtype=np.float64),
+        "first:label": np.asarray(rough_label, dtype=np.float64),
+        "first:residual_norm": np.asarray(rough_residual_norm, dtype=np.float64),
+        "first:objective": np.asarray(rough.objective, dtype=np.float64),
+        "first:gradient_norm": np.asarray(rough.gradient_norm, dtype=np.float64),
+        "first:stopping_reason_code": np.asarray(
+            STOPPING_REASON_CODES[first_stopping_reason],
+            dtype=np.int64,
+        ),
+        "first:status": np.asarray(rough.status, dtype=np.int64),
+        "first:nit": np.asarray(rough.nit, dtype=np.int64),
+        "first:nfev": np.asarray(rough.nfev, dtype=np.int64),
+        "first:njev": np.asarray(rough.njev, dtype=np.int64),
+        "first:solver_success": np.asarray(rough.success, dtype=np.bool_),
+        "first:provider_persisted_iterate": np.asarray(
+            rough.provider_persisted_iterate,
+            dtype=np.bool_,
+        ),
+        "area:iota": np.asarray(area.state.iota, dtype=np.float64),
+        "area:G": np.asarray(area.state.G, dtype=np.float64),
         "area:label": np.asarray(area_label, dtype=np.float64),
         "area:residual_norm": np.asarray(area_residual_norm, dtype=np.float64),
-        "area:solver_success": np.asarray(area_solver_success, dtype=np.bool_),
+        "area:solver_success": np.asarray(area.success, dtype=np.bool_),
+        "area:provider_persisted_iterate": np.asarray(
+            area.provider_persisted_iterate,
+            dtype=np.bool_,
+        ),
         "flux:target": np.asarray(flux_target, dtype=np.float64),
-        "flux:iota": np.asarray(flux_iota, dtype=np.float64),
-        "flux:G": np.asarray(flux_G, dtype=np.float64),
+        "flux:iota": np.asarray(flux.state.iota, dtype=np.float64),
+        "flux:G": np.asarray(flux.state.G, dtype=np.float64),
         "flux:label": np.asarray(flux_label, dtype=np.float64),
         "flux:residual_norm": np.asarray(flux_residual_norm, dtype=np.float64),
         "flux:surface_dofs": flux_surface_dofs,
-        "flux:solver_success": np.asarray(flux_solver_success, dtype=np.bool_),
+        "flux:solver_success": np.asarray(flux.success, dtype=np.bool_),
+        "flux:provider_persisted_iterate": np.asarray(
+            flux.provider_persisted_iterate,
+            dtype=np.bool_,
+        ),
     }
 
 
@@ -495,7 +716,9 @@ def _observation(
     driver: str,
 ) -> LaneObservation:
     success = bool(
-        np.all(np.isfinite(values["flux:surface_dofs"]))
+        bool(values["area:solver_success"])
+        and bool(values["flux:solver_success"])
+        and np.all(np.isfinite(values["flux:surface_dofs"]))
         and np.isfinite(float(values["flux:residual_norm"]))
         and float(values["flux:residual_norm"]) < float(values["initial:residual_norm"])
         and np.isfinite(float(values["flux:iota"]))

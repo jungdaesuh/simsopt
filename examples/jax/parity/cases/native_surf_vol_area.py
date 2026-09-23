@@ -4,9 +4,25 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
+from examples.jax.official_tiny_least_squares import (
+    DRIVER_SURFACE,
+    TrfOutcome,
+    combine_trf_outcomes,
+    guard_finite_endpoint,
+    solve_jax_residual,
+    surface_area_volume_residual,
+    trf_outcome,
+    value_and_jacobian,
+)
 from examples.jax.parity.arbiter import LaneObservation
+from examples.jax.parity.cases._official_least_squares import (
+    declared_work_budget,
+    official_stopping_keywords,
+    solve_official_least_squares,
+)
 from examples.jax.parity.input_bundle import (
     InputBundle,
     create_input_bundle,
@@ -17,7 +33,12 @@ from examples.jax.parity.symmetry import (
     global_column_swap_jacobian_invariants,
     parameter_invariants,
 )
+from simsopt import load
+from simsopt.geo import SurfaceRZFourier
+from simsopt.objectives import LeastSquaresProblem
 from simsopt_jax.examples import ExecutionScale
+
+import jax
 
 WORKFLOW_STAGES = (
     "construct_first_area_volume_problem",
@@ -33,13 +54,27 @@ WORKFLOW_STAGES = (
 
 def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
     """Materialize the native surface constants for every execution lane."""
+    native_surface = (
+        SurfaceRZFourier(mpol=1, ntor=0) if scale == "native_default" else None
+    )
+    quadrature = (
+        np.asarray(native_surface.quadpoints_phi)
+        if native_surface is not None
+        else np.linspace(0.0, 1.0, 32, endpoint=False)
+    )
+    native_quadrature = (
+        {"quadrature_theta": np.asarray(native_surface.quadpoints_theta)}
+        if native_surface is not None
+        else {}
+    )
     return create_input_bundle(
         root,
         case_id="native-surf-vol-area",
         random_seed=0,
         arrays={
             "initial_parameters": np.asarray((0.1, 0.1), dtype=np.float64),
-            "quadrature": np.linspace(0.0, 1.0, 32, endpoint=False),
+            "quadrature": quadrature,
+            **native_quadrature,
             "stage_targets": np.asarray(
                 ((8.0, 0.6), (9.0, 0.8)),
                 dtype=np.float64,
@@ -51,8 +86,6 @@ def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
             "ntor": 0,
             "nfp": 1,
             "stellsym": True,
-            "rtol": 1.0e-12,
-            "atol": 1.0e-12,
             "max_steps": 64 if scale == "bounded" else 256,
         },
         scale=scale,
@@ -74,8 +107,6 @@ def _configuration_int(bundle: InputBundle, name: str) -> int:
 
 
 def _build_surface(bundle: InputBundle, arrays: dict[str, np.ndarray]):
-    from simsopt.geo import SurfaceRZFourier
-
     quadrature = arrays["quadrature"]
     surface = SurfaceRZFourier(
         mpol=_configuration_int(bundle, "mpol"),
@@ -83,14 +114,16 @@ def _build_surface(bundle: InputBundle, arrays: dict[str, np.ndarray]):
         nfp=_configuration_int(bundle, "nfp"),
         stellsym=bool(bundle.configuration["stellsym"]),
         quadpoints_phi=quadrature,
-        quadpoints_theta=quadrature,
+        quadpoints_theta=(
+            arrays["quadrature_theta"]
+            if bundle.scale == "native_default"
+            else quadrature
+        ),
     )
     surface.set_rc(0, 0, _configuration_float(bundle, "major_radius"))
     surface.set_rc(1, 0, float(arrays["initial_parameters"][0]))
     surface.set_zs(1, 0, float(arrays["initial_parameters"][1]))
-    surface.fix_all()
-    surface.unfix("rc(1,0)")
-    surface.unfix("zs(1,0)")
+    surface.fix("rc(0,0)")
     return surface
 
 
@@ -111,11 +144,17 @@ def _effective_fingerprint(
             "ntor": surface.ntor,
             "nfp": surface.nfp,
             "stellsym": surface.stellsym,
-            "rtol": bundle.configuration["rtol"],
-            "atol": bundle.configuration["atol"],
             "max_steps": bundle.configuration["max_steps"],
         },
     )
+
+
+def _roundtrip_surface(surface: SurfaceRZFourier) -> SurfaceRZFourier:
+    """Save/load through an isolated directory preserving upstream roundtrip."""
+    with TemporaryDirectory() as tmpdir:
+        path = str(Path(tmpdir) / "surf_fw.json")
+        surface.save(path, indent=2)
+        return load(path)
 
 
 def _state(
@@ -161,9 +200,8 @@ def _native_stage(
     targets: np.ndarray,
     bundle: InputBundle,
     prefix: str,
-) -> tuple[dict[str, np.ndarray], bool]:
-    from simsopt.objectives import LeastSquaresProblem
-    from simsopt.solve import least_squares_serial_solve
+    centered: bool,
+) -> tuple[dict[str, np.ndarray], TrfOutcome]:
 
     free_positions = np.flatnonzero(surface.local_dofs_free_status)
     problem = LeastSquaresProblem.from_tuples(
@@ -194,39 +232,42 @@ def _native_stage(
         )
 
     initial = state("initial")
-    least_squares_serial_solve(
-        problem,
-        ftol=_configuration_float(bundle, "rtol"),
-        xtol=_configuration_float(bundle, "atol"),
-        gtol=_configuration_float(bundle, "atol"),
-        max_nfev=_configuration_int(bundle, "max_steps"),
+    budget = declared_work_budget(bundle.scale, _configuration_int(bundle, "max_steps"))
+    # The official second solve passes the inert ``diff_method="centered"``; the
+    # keyword is only read in the wrapper's ``grad`` branch (serial.py:159-164).
+    method = {"diff_method": "centered"} if centered else {}
+    result = solve_official_least_squares(
+        problem, **method, **official_stopping_keywords(budget)
     )
     final = state("final")
-    return {**initial, **final}, bool(
-        np.linalg.norm(final[f"{prefix}:final:residual"]) <= 1.0e-8
-    )
+    values = {**initial, **final}
+    return values, guard_finite_endpoint(trf_outcome(result), values.values())
 
 
 def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservation:
-    from simsopt import load
 
     surface = _build_surface(bundle, arrays)
     fingerprint = _effective_fingerprint(bundle, arrays, surface)
-    first_values, first_success = _native_stage(
+    first_values, first_outcome = _native_stage(
         surface=surface,
         targets=arrays["stage_targets"][0],
         bundle=bundle,
         prefix="first",
+        centered=False,
     )
-    surface.save("surf_fw.json", indent=2)
-    second_surface = load("surf_fw.json")
-    second_values, second_success = _native_stage(
+    second_surface = _roundtrip_surface(surface)
+    second_values, second_outcome = _native_stage(
         surface=second_surface,
         targets=arrays["stage_targets"][1],
         bundle=bundle,
         prefix="second",
+        centered=True,
     )
-    success = first_success and second_success
+    # The official wrapper discards SciPy's result; the recorder keeps it, so this
+    # lane publishes the provider's own outcome for both solves. Official capture
+    # A/reference-simple/runs/native-surf-vol-area/captured-natural-omp1:
+    # status 1 `gtol` nfev 9 njev 8, then status 1 `gtol` nfev 5 njev 5.
+    outcome = combine_trf_outcomes(first_outcome, second_outcome)
     return LaneObservation(
         lane="native-cpu",
         backend_mode="native_cpu",
@@ -237,12 +278,12 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=fingerprint,
         driver="simsopt_least_squares_serial_solve",
-        normalized_status="converged" if success else "failed",
-        raw_status="two_stage_residual_threshold",
-        success=success,
+        normalized_status=outcome.normalized_status,
+        raw_status=outcome.raw_status,
+        success=outcome.success,
         nit=None,
-        nfev=None,
-        njev=None,
+        nfev=outcome.nfev,
+        njev=outcome.njev,
         completed_workflow_stages=WORKFLOW_STAGES,
         provenance=None,
         values={**first_values, **second_values},
@@ -265,57 +306,63 @@ def _jax(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
-    from simsopt_jax.examples import solve_rz_surface_area_volume_sequence
-
-    import jax
 
     surface = _build_surface(bundle, arrays)
     fingerprint = _effective_fingerprint(bundle, arrays, surface)
-    free_positions = np.flatnonzero(surface.local_dofs_free_status)
-    result = solve_rz_surface_area_volume_sequence(
-        full_dofs=jax.device_put(np.asarray(surface.local_full_x, dtype=np.float64)),
-        quadpoints_phi=jax.device_put(
-            np.asarray(surface.quadpoints_phi, dtype=np.float64)
-        ),
-        quadpoints_theta=jax.device_put(
-            np.asarray(surface.quadpoints_theta, dtype=np.float64)
-        ),
-        free_positions=jax.device_put(free_positions),
-        first_targets=jax.device_put(arrays["stage_targets"][0]),
-        second_targets=jax.device_put(arrays["stage_targets"][1]),
-        mpol=surface.mpol,
-        ntor=surface.ntor,
-        nfp=surface.nfp,
-        stellsym=surface.stellsym,
-        max_steps=_configuration_int(bundle, "max_steps"),
-        rtol=_configuration_float(bundle, "rtol"),
-        atol=_configuration_float(bundle, "atol"),
+
+    def stage_values(prefix: str, current, targets: np.ndarray):
+        residual = surface_area_volume_residual(
+            np.asarray(current.local_full_x, dtype=np.float64),
+            np.asarray(current.quadpoints_phi, dtype=np.float64),
+            np.asarray(current.quadpoints_theta, dtype=np.float64),
+            np.flatnonzero(current.local_dofs_free_status),
+            targets,
+            mpol=current.mpol,
+            ntor=current.ntor,
+            nfp=current.nfp,
+            stellsym=current.stellsym,
+        )
+        initial_parameters = np.asarray(current.x, dtype=np.float64)
+        initial_residual, initial_jacobian = value_and_jacobian(
+            residual, initial_parameters
+        )
+        optimizer = solve_jax_residual(
+            residual,
+            initial_parameters,
+            max_nfev=declared_work_budget(
+                bundle.scale, _configuration_int(bundle, "max_steps")
+            ),
+        )
+        final_parameters = np.asarray(optimizer.x, dtype=np.float64)
+        final_residual, final_jacobian = value_and_jacobian(residual, final_parameters)
+        current.x = final_parameters
+        initial_state = _state(
+            f"{prefix}:initial",
+            initial_parameters,
+            float(initial_residual[0] + targets[0]),
+            float(initial_residual[1] + targets[1]),
+            initial_residual,
+            initial_jacobian,
+        )
+        final_state = _state(
+            f"{prefix}:final",
+            final_parameters,
+            float(final_residual[0] + targets[0]),
+            float(final_residual[1] + targets[1]),
+            final_residual,
+            final_jacobian,
+        )
+        values = {**initial_state, **final_state}
+        return values, guard_finite_endpoint(trf_outcome(optimizer), values.values())
+
+    first_values, first_outcome = stage_values(
+        "first", surface, arrays["stage_targets"][0]
     )
-
-    def host(value: jax.Array) -> np.ndarray:
-        return np.asarray(jax.device_get(value), dtype=np.float64)
-
-    def stage_values(prefix: str, stage) -> dict[str, np.ndarray]:
-        return {
-            **_state(
-                f"{prefix}:initial",
-                host(stage.initial_parameters),
-                float(host(stage.initial_area)),
-                float(host(stage.initial_volume)),
-                host(stage.initial_residuals),
-                host(stage.initial_jacobian),
-            ),
-            **_state(
-                f"{prefix}:final",
-                host(stage.final_parameters),
-                float(host(stage.final_area)),
-                float(host(stage.final_volume)),
-                host(stage.final_residuals),
-                host(stage.final_jacobian),
-            ),
-        }
-
-    success = result.first.optimizer.success and result.second.optimizer.success
+    second_surface = _roundtrip_surface(surface)
+    second_values, second_outcome = stage_values(
+        "second", second_surface, arrays["stage_targets"][1]
+    )
+    outcome = combine_trf_outcomes(first_outcome, second_outcome)
     platform = jax.devices()[0].platform
     return LaneObservation(
         lane=lane,
@@ -326,20 +373,18 @@ def _jax(
         input_fingerprint=bundle.input_fingerprint,
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=fingerprint,
-        driver=result.first.optimizer.driver.value,
-        normalized_status="converged" if success else "failed",
-        raw_status=(
-            f"{result.first.optimizer.status},{result.second.optimizer.status}"
-        ),
-        success=success,
-        nit=result.first.optimizer.nit + result.second.optimizer.nit,
-        nfev=result.first.optimizer.nfev + result.second.optimizer.nfev,
-        njev=result.first.optimizer.njev + result.second.optimizer.njev,
+        driver=DRIVER_SURFACE,
+        normalized_status=outcome.normalized_status,
+        raw_status=outcome.raw_status,
+        success=outcome.success,
+        nit=None,
+        nfev=outcome.nfev,
+        njev=outcome.njev,
         completed_workflow_stages=WORKFLOW_STAGES,
         provenance=None,
         values={
-            **stage_values("first", result.first),
-            **stage_values("second", result.second),
+            **first_values,
+            **second_values,
         },
         applicability={
             "first:final:parameters": False,

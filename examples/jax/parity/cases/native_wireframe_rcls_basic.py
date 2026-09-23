@@ -29,6 +29,62 @@ WORKFLOW_STAGES = (
     "evaluate_final_field_objectives_constraints_and_current",
 )
 
+#: Relative floor for physical feasibility of ``C x - b`` in either phase.
+#: One definition: ``_initial_constraint_comparison`` applies it to the initial
+#: state and both lanes apply it to the final state through
+#: ``_constraint_feasible``.
+CONSTRAINT_FEASIBILITY_RELATIVE_LIMIT = 1.0e-11
+
+
+def _constraint_feasibility_limit(target: np.ndarray) -> float:
+    """Absolute feasibility limit for a constraint target of this magnitude."""
+    return CONSTRAINT_FEASIBILITY_RELATIVE_LIMIT * max(
+        1.0,
+        float(np.linalg.norm(target, ord=np.inf)),
+    )
+
+
+def _constraint_feasible(residual: np.ndarray, target: np.ndarray) -> bool:
+    """Physical feasibility of one lane's own constraint residual.
+
+    This is a per-lane physical gate, deliberately independent of any
+    lane-versus-lane comparison: two lanes that agree on a physically
+    infeasible current vector must both fail, and only this gate can say so.
+    """
+    return bool(
+        np.all(np.isfinite(residual))
+        and np.linalg.norm(residual, ord=np.inf)
+        <= _constraint_feasibility_limit(target)
+    )
+
+
+def _reduction_operation_count(constraint: np.ndarray) -> np.ndarray:
+    """Operations that can ROUND in one residual row, per row.
+
+    Both lanes evaluate ``C @ x - b`` as a dense matrix-vector product followed
+    by one subtraction: the native lane through NumPy ``@`` in :func:`_state`,
+    the JAX lane through ``jnp`` ``@`` in
+    ``simsopt_jax.examples.wireframe_rcls._wireframe_rcls_diagnostics``. The
+    bound ``|fl(c^T x) - c^T x| <= gamma_k |c|^T |x|`` counts the operations
+    that can round, not the operations that are issued, and in IEEE-754 an
+    exact zero entry of ``c`` rounds nothing: ``0.0 * x`` is exact and
+    ``s + 0.0`` is exact, for every summation order and every blocking a dense
+    product may choose. A row therefore carries at most ``nnz(row)`` inexact
+    products and additions however wide the array is padded, plus the one
+    subtraction of ``b``: ``k = nnz(row) + 1``.
+
+    Measured in exact rational arithmetic on sparse rows of this shape
+    (``tests/jax/examples/test_rcls_constraint_roundoff.py``), the dense
+    product of a padded row and the product of the same row with its zero
+    columns deleted evaluate the same exact value and stay within one
+    ``gamma_(nnz+1)`` pair bound of each other, while a single evaluation's
+    error reaches 0.49 of that bound -- so this count is neither too small nor
+    slack. Counting the padded width instead (192 columns against 4..16
+    nonzeros at ``native_default``) would admit up to 38.6x the lane difference
+    the arithmetic can produce.
+    """
+    return np.count_nonzero(constraint, axis=1).reshape((-1, 1)) + 1
+
 
 def _scale_configuration(scale: ExecutionScale) -> dict[str, object]:
     native_scale = scale == "native_default"
@@ -239,6 +295,82 @@ def _state(
     }
 
 
+def _initial_constraint_comparison(
+    arrays: dict[str, np.ndarray], residual: np.ndarray
+) -> dict[str, np.ndarray]:
+    """Measure initial reduction roundoff separately from physical feasibility.
+
+    What is proved, and therefore what is compared
+    ----------------------------------------------
+    Each lane computes ``r = fl(C x0 - b)`` from the same frozen operands. The
+    standard dot-product bound gives, per row,
+    ``|fl(c^T x) - c^T x| <= gamma_k |c|^T |x|`` with
+    ``gamma_k = k u / (1 - k u)``, ``u = eps/2`` and ``k`` the number of
+    operations that can round -- ``nnz(row)`` products and additions (exact
+    zeros round nothing) plus the subtraction of ``b``, i.e.
+    :func:`_reduction_operation_count`. Applying it to two lanes gives the only
+    inequality this module may assert::
+
+        |r_A - r_B| <= 2 gamma_(nnz+1) (|C| |x0| + |b|) =: pair_bound
+
+    That is a bound on the DIFFERENCE between two lanes, not on either lane's
+    residual. The published observable is ``r / pair_bound``; ``pair_bound`` is
+    computed on every lane from the same frozen arrays, so comparing the two
+    published arrays with ``rtol = 0`` and ``atol = 1`` (bucket
+    ``rcls_constraint_roundoff``) is exactly the inequality above. ``atol 1.0``
+    means "within the a-priori bound" -- it is a derived quantity and must
+    never be retuned toward an observed drift.
+
+    Why the per-lane value is not itself bounded by 1
+    -------------------------------------------------
+    ``x0`` comes from a normal-equations minimum-norm solve
+    (:func:`_minimum_norm_feasible_currents`), so the TRUE residual is not
+    zero. Evaluated in exact rational arithmetic on the retained
+    ``native_default`` operands, ``C x0 - b`` has inf-norm
+    ``2.9103830456733704e-09`` and is nonzero on 84 of its 95 rows, against an
+    fp64 value of ``2.7939677238464355e-09``: the magnitude of ``r`` is the
+    infeasibility of ``x0``, not rounding. Hence no rounding bound applies to a
+    single lane, the per-lane units value carries no ``<= 1`` claim (3.36 on
+    that data), and the physical size of ``r`` is judged only by
+    ``initial:constraint_satisfied``. The lane's actual ROUNDING, the distance
+    between its fp64 residual and the exact one, is ``1.1642e-10`` -- 0.0376 of
+    this bound -- so those 3.36 units refute nothing about the count.
+
+    Why ``initial:constraint_residual`` is not routed directly
+    ----------------------------------------------------------
+    Its bucket ``native_workflow`` compares same-state values at
+    ``rtol 1e-10 / atol 1e-12``. On the retained ``native_default`` receipt
+    (``20260919T144313Z-90f76d76``) native-cpu and jax-cpu agree BITWISE (a
+    difference of exactly 0.0) but jax-gpu differs by ``2.9104e-11``, about 29
+    atol units -- and 0.0839 of the bound above, i.e. provably nothing but a
+    different summation order of the same reduction. A parity gate must not
+    fail on that, so the lane-versus-lane comparison of the initial constraint
+    residual is carried by this observable at the a-priori bound (worst row
+    ``1.887e-08`` at ``native_default``) rather than by a literal tolerance,
+    and the direct route stays ``applicable: false`` in the manifest. The
+    remaining slack is the rounding bound itself; there is no smaller one.
+    """
+    constraint = arrays["constraint_matrix"]
+    target = arrays["constraint_target"]
+    initial = arrays["initial_currents"][arrays["free_segments"]]
+    operation_count = _reduction_operation_count(constraint)
+    unit_roundoff = np.finfo(np.float64).eps / 2.0
+    gamma = operation_count * unit_roundoff / (1.0 - operation_count * unit_roundoff)
+    scale = np.abs(constraint) @ np.abs(initial) + np.abs(target)
+    # The 1/(1-gamma) factor covers the rounding of `scale` itself downwards.
+    pair_bound = 2.0 * gamma * scale / (1.0 - gamma)
+    units = np.divide(
+        residual, pair_bound, out=np.zeros_like(residual), where=pair_bound != 0
+    )
+    units = np.where((pair_bound == 0) & (residual != 0), np.inf, units)
+    return {
+        "initial:constraint_roundoff_units": units,
+        "initial:constraint_satisfied": np.asarray(
+            _constraint_feasible(residual, target)
+        ),
+    }
+
+
 def _construction_values(arrays: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     return {
         f"construction:{name}": arrays[name]
@@ -330,14 +462,17 @@ def _native(
         ),
         **_field_values(bundle, arrays, final_currents, magnetic_field),
     }
-    constraint_scale = max(
-        1.0,
-        float(np.linalg.norm(arrays["constraint_target"], ord=np.inf)),
+    values.update(
+        _initial_constraint_comparison(arrays, values["initial:constraint_residual"])
     )
     success = bool(
         np.all(np.isfinite(final_currents))
-        and np.linalg.norm(values["final:constraint_residual"], ord=np.inf)
-        <= 1.0e-11 * constraint_scale
+        and values["initial:constraint_satisfied"]
+        and np.all(np.isfinite(values["initial:constraint_roundoff_units"]))
+        and _constraint_feasible(
+            values["final:constraint_residual"],
+            arrays["constraint_target"],
+        )
         and values["final:normal_objective"] < values["initial:normal_objective"]
         and wireframe.check_constraints()
     )
@@ -444,14 +579,17 @@ def _jax(
             dtype=np.int64,
         ),
     }
-    constraint_scale = max(
-        1.0,
-        float(np.linalg.norm(arrays["constraint_target"], ord=np.inf)),
+    values.update(
+        _initial_constraint_comparison(arrays, values["initial:constraint_residual"])
     )
     success = bool(
         result.finite_currents
-        and np.linalg.norm(values["final:constraint_residual"], ord=np.inf)
-        <= 1.0e-11 * constraint_scale
+        and values["initial:constraint_satisfied"]
+        and np.all(np.isfinite(values["initial:constraint_roundoff_units"]))
+        and _constraint_feasible(
+            values["final:constraint_residual"],
+            arrays["constraint_target"],
+        )
         and values["final:normal_objective"] < values["initial:normal_objective"]
     )
     platform = "cpu" if device is None else device.platform

@@ -1,17 +1,69 @@
-"""Shared exact-lane execution for fixed-grid arbitrary-vector GPMO mirrors."""
+"""Shared exact-lane execution for fixed-grid arbitrary-vector GPMO mirrors.
+
+Every lane runs with the official keyword arguments. ``initialize_default_kwargs``
+sets ``verbose=True`` (``simsopt/util/permanent_magnet_helper_functions.py:250``)
+and every official permanent-magnet script uses it, so the lanes record the same
+history upstream records and the reachable stop set is upstream's, including the
+fourth exit at ``permanent_magnet_optimization.cpp:948-959``.
+
+The two providers record on different iteration grids, which is a property of
+their kernels and is stated here rather than papered over:
+
+* native, ``GPMO_ArbVec_backtracking``: one unconditional row for the initial
+  state (``:790-792``), then ``k in {0, P, 2P, ...}`` and ``k == K - 1`` under
+  ``verbose`` with ``P = int(K / nhistory)`` (``:942``), then one unconditional
+  row at the magnet-limit break (``:965-985``);
+* JAX, ``gpmo_arbvec_backtracking_solve(record_every=P)``: rows
+  ``k in {P - 1, 2P - 1, ...} + {K - 1}``
+  (``simsopt_jax/core/pm_optimization.py:564-568``), with the post-``done``
+  carry repeating the endpoint.
+
+Both grids therefore always contain the run endpoint, and they coincide when
+``P == 1``. For ``P > 1`` they are offset by one iteration, so a non-monotone
+objective history could select different snapshots; the selection objective is
+published so that such a divergence is a failing comparison, not a silent one.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import os
+from dataclasses import dataclass
 
 import numpy as np
 from examples.jax.parity.arbiter import LaneObservation
+from examples.jax.parity.cases._fixed_work_status import (
+    fixed_work_label,
+    gpmo_stop_reason,
+)
 from examples.jax.parity.input_bundle import (
     InputBundle,
     effective_construction_fingerprint,
 )
 from examples.jax.parity.runtime import ParityLane
+from simsopt_jax_adapters.examples.gpmo_rules import (
+    gpmo_backtracking_outputs_usable,
+    gpmo_history_period,
+    recorded_history_length,
+)
+
+
+@dataclass(frozen=True)
+class ArbVecLaneResult:
+    """One lane's observation plus the history its provider recorded.
+
+    The history is not published: the two kernels record on different iteration
+    grids, so the rows are not a cross-lane comparable. It is returned so that
+    the case which mirrors upstream's snapshot selection
+    (``permanent_magnet_MUSE.py:184-185``) can apply it, and so that a test can
+    compare the native rows with the official capture's ``history:R2``.
+    """
+
+    observation: LaneObservation
+    #: Upstream's ``R2`` per recorded row, trimmed to the filled prefix.
+    objective_history: np.ndarray
+    #: ``(ndipoles, 3, rows)`` physical moments, the C++ ``m_history`` layout.
+    moment_history: np.ndarray
 
 
 def configuration_int(bundle: InputBundle, name: str) -> int:
@@ -143,13 +195,43 @@ def _observation(
     driver: str,
     platform: str,
     precision: str,
+    recorded_nonzero_counts: np.ndarray,
 ) -> LaneObservation:
-    success = bool(
-        np.count_nonzero(values["final:nonzero_mask"])
-        == configuration_int(bundle, "max_magnets")
-        and np.all(np.isfinite(values["final:moments"]))
-        and values["final:objective_sum_squares"]
-        < values["initial:objective_sum_squares"]
+    # Upstream stops GPMO by the stalled nonzero count, by the magnet cap, by a
+    # full grid, or by exhausting K (permanent_magnet_optimization.cpp:942-985);
+    # none of the four is convergence, and the configured K is not a measured
+    # nit/nfev, so the counters are null. "final objective < initial objective"
+    # is NOT part of success: upstream PM4Stell itself rises from 0.16177 to
+    # 0.83456 (official capture history:R2), so the branch gate would fail the
+    # official run. Both objectives stay published as a compared diagnostic.
+    # A run that placed NO magnet is degenerate whatever the stop reason was:
+    # it returned the moments it was given, so it is never a success.
+    # Upstream's fourth exit is a branch of the native kernel only: the JAX
+    # kernel (``simsopt_jax/core/pm_optimization.py``) has no "nonzero count
+    # unchanged" test and runs to ``K`` where the native solver breaks out, so
+    # each lane is labelled from the exits its own provider can take. The two
+    # kernels also record on different grids (6 rows against 20 at bounded
+    # MUSE), which is why a shared derivation would make upstream's exit
+    # unreachable on the lane that has it and reachable on the lane that does
+    # not.
+    nonzero_count = int(np.count_nonzero(values["final:nonzero_mask"]))
+    grid_size = configuration_int(bundle, "ndipoles")
+    magnet_cap = configuration_int(bundle, "max_magnets")
+    label = fixed_work_label(
+        raw_status=gpmo_stop_reason(
+            nonzero_count=nonzero_count,
+            grid_size=grid_size,
+            magnet_cap=magnet_cap,
+            recorded_nonzero_counts=(
+                recorded_nonzero_counts if lane == "native-cpu" else None
+            ),
+        ),
+        outputs_usable=gpmo_backtracking_outputs_usable(
+            moments=values["final:moments"],
+            nonzero_count=nonzero_count,
+            grid_size=grid_size,
+            magnet_cap=magnet_cap,
+        ),
     )
     return LaneObservation(
         lane=lane,
@@ -166,11 +248,11 @@ def _observation(
             arrays,
         ),
         driver=driver,
-        normalized_status="converged" if success else "failed",
-        raw_status="fixed_iteration_budget_complete",
-        success=success,
-        nit=configuration_int(bundle, "iterations"),
-        nfev=configuration_int(bundle, "iterations"),
+        normalized_status=label.normalized_status,
+        raw_status=label.raw_status,
+        success=label.success,
+        nit=None,
+        nfev=None,
         njev=None,
         completed_workflow_stages=workflow_stages,
         provenance=None,
@@ -182,20 +264,27 @@ def _execute_native(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
     workflow_stages: tuple[str, ...],
-) -> LaneObservation:
+) -> ArbVecLaneResult:
     import simsoptpp
 
     maxima = arrays["moment_maxima"]
     maxima_vector = np.repeat(maxima, 3)
     scaled_response = arrays["response_matrix"] * maxima_vector[None, :]
-    _, _, _, _, normalized_moments = simsoptpp.GPMO_ArbVec_backtracking(
+    (
+        objective_history,
+        _,
+        normalized_moment_history,
+        recorded_nonzero_counts,
+        normalized_moments,
+    ) = simsoptpp.GPMO_ArbVec_backtracking(
         np.ascontiguousarray(scaled_response.T),
         np.ascontiguousarray(arrays["target"]),
         np.sqrt(configuration_float(bundle, "regularization_l2")) * maxima_vector,
         np.ascontiguousarray(arrays["normal_norms"]),
         np.ascontiguousarray(arrays["polarization_vectors"]),
         K=configuration_int(bundle, "iterations"),
-        verbose=False,
+        # Official kwargs: initialize_default_kwargs('GPMO') sets verbose=True.
+        verbose=True,
         nhistory=configuration_int(bundle, "history_count"),
         backtracking=configuration_int(bundle, "backtracking"),
         dipole_grid_xyz=np.ascontiguousarray(arrays["dipole_grid_xyz"]),
@@ -211,15 +300,32 @@ def _execute_native(
     final_residual = (
         arrays["response_matrix"] @ final_moments.reshape(-1) - arrays["target"]
     )
-    return _observation(
-        "native-cpu",
-        bundle,
-        arrays,
-        _values(arrays, final_moments, final_residual),
-        workflow_stages,
-        driver="simsoptpp_gpmo_arbvec_backtracking",
-        platform="cpu",
-        precision="fp64",
+    # ``GPMO`` rescales every recorded row by ``mmax`` before returning it
+    # (solve/permanent_magnet_optimization.py:471-472); the lane calls the
+    # extension directly, so it applies the same rescale.
+    recorded = recorded_history_length(np.asarray(objective_history))
+    moment_history = (
+        np.asarray(normalized_moment_history, dtype=np.float64)[:, :, :recorded]
+        * maxima[:, None, None]
+    )
+    return ArbVecLaneResult(
+        observation=_observation(
+            "native-cpu",
+            bundle,
+            arrays,
+            _values(arrays, final_moments, final_residual),
+            workflow_stages,
+            driver="simsoptpp_gpmo_arbvec_backtracking",
+            platform="cpu",
+            precision="fp64",
+            recorded_nonzero_counts=np.asarray(
+                recorded_nonzero_counts, dtype=np.int64
+            ).reshape(-1)[:recorded],
+        ),
+        objective_history=np.asarray(objective_history, dtype=np.float64).reshape(-1)[
+            :recorded
+        ],
+        moment_history=np.ascontiguousarray(moment_history),
     )
 
 
@@ -228,7 +334,7 @@ def _execute_jax(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
     workflow_stages: tuple[str, ...],
-) -> LaneObservation:
+) -> ArbVecLaneResult:
     from simsopt_jax.backend.runtime import get_runtime_jax_device
     from simsopt_jax.geo.permanent_magnet_grid import PermanentMagnetGridJAX
     from simsopt_jax.solve.permanent_magnet import GPMO_ArbVec_backtracking_jax
@@ -267,7 +373,12 @@ def _execute_jax(
         backtracking=configuration_int(bundle, "backtracking"),
         thresh_angle=configuration_float(bundle, "threshold_angle"),
         max_nMagnets=configuration_int(bundle, "max_magnets"),
-        record_every=configuration_int(bundle, "iterations"),
+        # Mirror of upstream's print period int(K / nhistory): the JAX kernel
+        # records every ``record_every``-th iteration plus the last one.
+        record_every=gpmo_history_period(
+            iterations=configuration_int(bundle, "iterations"),
+            history_count=configuration_int(bundle, "history_count"),
+        ),
     )
     host_result, construction_arrays = jax.device_get(
         (
@@ -299,15 +410,36 @@ def _execute_jax(
         np.asarray(host_result.residual, dtype=np.float64),
     )
     platform = "cpu" if device is None else device.platform
-    return _observation(
-        lane,
-        bundle,
-        host_arrays,
-        values,
-        workflow_stages,
-        driver="simsopt_jax_gpmo_arbvec_backtracking",
-        platform="gpu" if platform in {"cuda", "gpu"} else platform,
-        precision="fp64" if bool(jax.config.read("jax_enable_x64")) else "fp32",
+    # ``residual_history`` is ``sum(r * r)`` per recorded row
+    # (core/pm_optimization.py:2047); upstream records ``R2 = 0.5 * sum(r * r)``
+    # (``print_GPMO``), so the halving makes the two histories the same
+    # quantity. ``m_history`` arrives as ``(rows, ndipoles, 3)`` and is
+    # transposed into the C++ ``(ndipoles, 3, rows)`` layout.
+    jax_objective_history = 0.5 * np.asarray(
+        host_result.residual_history, dtype=np.float64
+    ).reshape(-1)
+    jax_recorded = recorded_history_length(jax_objective_history)
+    return ArbVecLaneResult(
+        observation=_observation(
+            lane,
+            bundle,
+            host_arrays,
+            values,
+            workflow_stages,
+            driver="simsopt_jax_gpmo_arbvec_backtracking",
+            platform="gpu" if platform in {"cuda", "gpu"} else platform,
+            precision="fp64" if bool(jax.config.read("jax_enable_x64")) else "fp32",
+            # Trimmed to the rows this kernel recorded, exactly as the native
+            # lane trims its own; the label derivation then sees each
+            # provider's filled prefix rather than one lane's padding.
+            recorded_nonzero_counts=np.asarray(
+                host_result.num_nonzeros_history, dtype=np.int64
+            ).reshape(-1)[:jax_recorded],
+        ),
+        objective_history=jax_objective_history,
+        moment_history=np.ascontiguousarray(
+            np.transpose(np.asarray(host_result.m_history, dtype=np.float64), (1, 2, 0))
+        ),
     )
 
 
@@ -316,7 +448,7 @@ def execute_arbvec_case(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
     workflow_stages: tuple[str, ...],
-) -> LaneObservation:
+) -> ArbVecLaneResult:
     """Run one frozen arbitrary-vector GPMO case in its requested lane."""
     if lane == "native-cpu":
         return _execute_native(bundle, arrays, workflow_stages)

@@ -16,6 +16,11 @@ import jax.numpy as jnp
 import numpy as np
 from simsopt.geo import SurfaceRZFourier, ToroidalWireframe
 from simsopt_jax.examples import ExampleResult, ExecutionScale, run_example
+from simsopt_jax.examples.solver_terminal_status import (
+    GSCO_REDUCED_BUDGET_SCALES,
+    gsco_example_status,
+    gsco_terminal_label,
+)
 from simsopt_jax_adapters.solve.wireframe import (
     bnorm_obj_matrices_jax,
     gsco_wireframe_jax,
@@ -79,7 +84,10 @@ def solve(
         max_current=1.1 * abs(poloidal_current / (2 * wireframe.nfp * 6)),
         max_iter=max_steps,
         print_interval=max_steps,
-        record_every=max_steps,
+        # Upstream's C++ records every iteration (``record_iter`` in
+        # ``wireframe_optimization.cpp``). The dense history is what the stop
+        # rule reads to tell an accepted undo from an exhausted budget.
+        record_every=1,
         verbose=False,
     )
     response_device = jnp.asarray(response, dtype=jnp.float64)
@@ -103,20 +111,36 @@ def solve(
     )
     solution = np.asarray(jax.device_get(result.x), dtype=np.float64).ravel()
     wireframe.currents[:] = solution
+    constraints_satisfied = bool(wireframe.check_constraints())
     history_length = int(jax.device_get(result.history_length))
-    iterations = int(
-        np.asarray(jax.device_get(result.iter_history), dtype=np.int64)[
-            history_length - 1
-        ]
-    )
+    recorded = slice(0, history_length)
+    iteration_history = np.asarray(jax.device_get(result.iter_history), dtype=np.int64)[
+        recorded
+    ]
+    loop_history = np.asarray(jax.device_get(result.loop_history), dtype=np.int64)[
+        recorded
+    ]
+    current_history = np.asarray(jax.device_get(result.curr_history), dtype=np.float64)[
+        recorded
+    ]
+    iterations = int(iteration_history[-1])
     initial_error, final_error, maximum_current = (
         float(value) for value in diagnostics
     )
-    solver_success = bool(
-        np.all(np.isfinite(solution))
-        and final_error < initial_error
-        and maximum_current > 0.0
-        and wireframe.check_constraints()
+    # The completion policy is the one the parity case applies to the same
+    # returned arrays: the solver's own stop condition decides, never the
+    # scientific predicate "final normal error below initial" -- upstream's own
+    # run is not required to satisfy it, so it is published as a diagnostic and
+    # gates nothing. A run that reached its iteration cap is upstream's
+    # ``stop_last_iter`` and is not a converged solve; at the campaign's reduced
+    # scales that cap is the campaign's own, which is the one case where the
+    # example still executed its workflow.
+    label = gsco_terminal_label(
+        accepted_updates=iterations,
+        max_iterations=max_steps,
+        loop_history=loop_history,
+        current_history=current_history,
+        endpoint_usable=bool(np.all(np.isfinite(solution)) and constraints_satisfied),
     )
     return ExampleResult(
         example_id=EXAMPLE_ID,
@@ -125,9 +149,18 @@ def solve(
             "final_normal_error": final_error,
             "maximum_current": maximum_current,
             "iterations": iterations,
-            "solver_success": solver_success,
+            "allocated_iteration_budget": max_steps,
+            "constraints_satisfied": constraints_satisfied,
+            "terminal_status": label.normalized_status,
+            "terminal_reason": label.raw_status,
+            "normal_error_decreased": bool(final_error < initial_error),
+            "solver_success": label.success,
         },
-        status="ok" if solver_success else "failed",
+        status=gsco_example_status(
+            label,
+            scale,
+            budget_admitted_scales=GSCO_REDUCED_BUDGET_SCALES,
+        ),
     )
 
 

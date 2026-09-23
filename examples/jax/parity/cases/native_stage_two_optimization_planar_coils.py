@@ -1,10 +1,35 @@
-"""Matched workflow for ``stage_two_optimization_planar_coils.py``."""
+"""Matched workflow for ``stage_two_optimization_planar_coils.py``.
+
+**Documented deviation from upstream (C10).** Upstream ``9e027eac3`` keeps the
+four ``CurvePlanarFourier`` Jacobians in the PERSISTENT cache
+(``src/simsoptpp/curveplanarfourier.h:94-105``), which ``invalidate_cache()``
+never clears.  That cache is sound only for a curve whose position is linear in
+its dofs, and this curve rotates by a normalized quaternion, so upstream reuses
+the Jacobian of the first evaluated state for the whole run.  Upstream's
+L-BFGS-B therefore stops by line-search stagnation -- status 0, ``RELATIVE
+REDUCTION OF F <= FACTR*EPSMCH``, at 135 and 69 iterations of its own 400
+iteration cap, after 604 and 844 evaluations -- and its end point is not
+reachable by a gradient that describes the objective.  A lane whose Jacobians
+follow the dofs instead runs the script's own ``MAXITER`` per stage.
+
+Consequently this case does NOT compare its end point or its terminal status
+with upstream's, and no text here should imply that it does.  What is compared
+with upstream, and proven in
+``tests/integration/test_jax_mirror_planar_coils_official_states.py``, is the
+objective VALUE at upstream's own three recorded states (bitwise equal at the
+start state and at both official end states) and the GRADIENT at the start state
+(2.6e-16 relative) -- the one state at which upstream's gradient is right.
+``tests/geo/test_curveplanarfourier_objective_slopes_at_official_state.py``
+carries the matching regression for the branch fix ``92ba74788``.  The endpoint
+comparisons that DO run here are lane-versus-lane.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import os
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +40,26 @@ from examples.jax.parity.input_bundle import (
     effective_construction_fingerprint,
 )
 from examples.jax.parity.runtime import ParityLane
+from examples.jax.parity.terminal_status import (
+    lane_terminal_status,
+    stage_termination_from_values,
+    status_convention_for_driver,
+)
+from scipy.optimize import minimize
+from simsopt._core.optimizable import Optimizable
+from simsopt.field import BiotSavart, Coil, Current, coils_via_symmetries
+from simsopt.geo import (
+    CurveCurveDistance,
+    CurveLength,
+    CurvePlanarFourier,
+    CurveSurfaceDistance,
+    LinkingNumber,
+    LpCurveCurvature,
+    MeanSquaredCurvature,
+    SurfaceRZFourier,
+    create_equally_spaced_planar_curves,
+)
+from simsopt.objectives import QuadraticPenalty, SquaredFlux
 from simsopt_jax.examples import ExecutionScale
 
 TEST_DATA = Path(__file__).resolve().parents[4] / "tests" / "test_files"
@@ -90,10 +135,9 @@ def _mapping_int(configuration: Mapping[str, object], name: str) -> int:
     return value
 
 
-def _build_geometry(configuration: Mapping[str, object]):
-    from simsopt.field import Current, coils_via_symmetries
-    from simsopt.geo import SurfaceRZFourier, create_equally_spaced_planar_curves
-
+def _build_geometry(
+    configuration: Mapping[str, object],
+) -> tuple[SurfaceRZFourier, list[CurvePlanarFourier], list[Coil]]:
     surface = SurfaceRZFourier.from_vmec_input(
         str(SURFACE_INPUT),
         range="half period",
@@ -118,10 +162,139 @@ def _build_geometry(configuration: Mapping[str, object]):
     return surface, base_curves, coils
 
 
+@dataclass(frozen=True)
+class NativePlanarEvaluator:
+    """The one native assembly of this case's Stage-II objective.
+
+    The parity lane and the tracked official-state tests consume this record
+    instead of re-deriving the objective composition, so there is a single
+    source for the term set, the weights and the summation order.  The record
+    freezes its references only: evaluating any term mutates the shared simsopt
+    graph through ``objective.x``, so one evaluator serves one consumer at a
+    time.
+    """
+
+    configuration: Mapping[str, object]
+    surface: SurfaceRZFourier
+    base_curves: tuple[CurvePlanarFourier, ...]
+    coils: tuple[Coil, ...]
+    field: BiotSavart
+    flux: SquaredFlux
+    lengths: tuple[CurveLength, ...]
+    length_penalty: Optimizable
+    curve_curve: CurveCurveDistance
+    curve_surface: CurveSurfaceDistance
+    curvature: Optimizable
+    mean_squared_curvature: Optimizable
+    linking_number: LinkingNumber
+
+    def weighted(self, length_weight: float) -> Optimizable:
+        """The script's objective at one stage's length weight.
+
+        The term order is the upstream script's; it is also the order
+        ``curve_dependent_terms`` reports, and the two must be changed together.
+        """
+        return (
+            self.flux
+            + length_weight * self.length_penalty
+            + _mapping_float(self.configuration, "curve_curve_weight")
+            * self.curve_curve
+            + _mapping_float(self.configuration, "curve_surface_weight")
+            * self.curve_surface
+            + _mapping_float(self.configuration, "curvature_weight") * self.curvature
+            + _mapping_float(self.configuration, "mean_squared_curvature_weight")
+            * self.mean_squared_curvature
+            + _mapping_float(self.configuration, "linking_number_weight")
+            * self.linking_number
+        )
+
+    def first_stage_objective(self) -> Optimizable:
+        return self.weighted(_mapping_float(self.configuration, "first_length_weight"))
+
+    def second_stage_objective(self) -> Optimizable:
+        return self.weighted(_mapping_float(self.configuration, "second_length_weight"))
+
+    def curve_dependent_terms(self) -> dict[str, Optimizable]:
+        """Every term of ``weighted`` that depends on the coil geometry."""
+        return {
+            "squared_flux": self.flux,
+            "length_penalty": self.length_penalty,
+            "curve_curve_distance": self.curve_curve,
+            "curve_surface_distance": self.curve_surface,
+            "lp_curvature": self.curvature,
+            "mean_squared_curvature_penalty": self.mean_squared_curvature,
+            "linking_number": self.linking_number,
+        }
+
+    @property
+    def quadrature_summand_count(self) -> int:
+        """Float64 accumulations this objective's quadratures perform.
+
+        Surface quadrature points plus every coil's quadrature points, three
+        Cartesian components each: the length of the longest sum any published
+        quantity forms, and therefore the factor in the rounding bound a
+        finite-difference or agreement check derives.
+        """
+        return int(
+            np.asarray(self.surface.gamma()).size
+            + sum(np.asarray(coil.curve.gamma()).size for coil in self.coils)
+        )
+
+
+def build_native_evaluator(
+    configuration: Mapping[str, object],
+) -> NativePlanarEvaluator:
+    """Assemble the native planar Stage-II objective and its published terms."""
+    surface, base_curves, coils = _build_geometry(configuration)
+    field = BiotSavart(coils)
+    field.set_points(surface.gamma().reshape((-1, 3)))
+    curves = [coil.curve for coil in coils]
+    lengths = [CurveLength(curve) for curve in base_curves]
+    curvatures = [
+        LpCurveCurvature(
+            curve,
+            2,
+            _mapping_float(configuration, "curvature_threshold"),
+        )
+        for curve in base_curves
+    ]
+    mean_squared_curvatures = [MeanSquaredCurvature(curve) for curve in base_curves]
+    return NativePlanarEvaluator(
+        configuration=configuration,
+        surface=surface,
+        base_curves=tuple(base_curves),
+        coils=tuple(coils),
+        field=field,
+        flux=SquaredFlux(surface, field),
+        lengths=tuple(lengths),
+        length_penalty=QuadraticPenalty(
+            sum(lengths),
+            _mapping_float(configuration, "length_target"),
+        ),
+        curve_curve=CurveCurveDistance(
+            curves,
+            _mapping_float(configuration, "curve_curve_threshold"),
+            num_basecurves=_mapping_int(configuration, "num_base_curves"),
+        ),
+        curve_surface=CurveSurfaceDistance(
+            curves,
+            surface,
+            _mapping_float(configuration, "curve_surface_threshold"),
+        ),
+        curvature=sum(curvatures),
+        mean_squared_curvature=sum(
+            QuadraticPenalty(
+                value,
+                _mapping_float(configuration, "mean_squared_curvature_threshold"),
+            )
+            for value in mean_squared_curvatures
+        ),
+        linking_number=LinkingNumber(curves),
+    )
+
+
 def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
     """Materialize source-equivalent planar coil DOFs and Taylor direction."""
-    from simsopt.field import BiotSavart
-
     configuration = _scale_configuration(scale)
     _surface, _base_curves, coils = _build_geometry(configuration)
     initial_parameters = np.asarray(BiotSavart(coils).x, dtype=np.float64)
@@ -222,72 +395,17 @@ def _native_topology(base_curves, linking_number) -> tuple[float, float, np.ndar
 
 
 def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservation:
-    from scipy.optimize import minimize
-    from simsopt.field import BiotSavart
-    from simsopt.geo import (
-        CurveCurveDistance,
-        CurveLength,
-        CurveSurfaceDistance,
-        LinkingNumber,
-        LpCurveCurvature,
-        MeanSquaredCurvature,
-    )
-    from simsopt.objectives import QuadraticPenalty, SquaredFlux
-
-    surface, base_curves, coils = _build_geometry(dict(bundle.configuration))
+    evaluator = build_native_evaluator(dict(bundle.configuration))
+    surface = evaluator.surface
+    base_curves = evaluator.base_curves
     construction_fingerprint = _effective_fingerprint(
         bundle,
         arrays,
         surface,
         base_curves,
     )
-    field = BiotSavart(coils)
-    field.set_points(surface.gamma().reshape((-1, 3)))
-    flux = SquaredFlux(surface, field)
-    lengths = [CurveLength(curve) for curve in base_curves]
-    length_penalty = QuadraticPenalty(
-        sum(lengths),
-        _configuration_float(bundle, "length_target"),
-    )
-    curve_curve = CurveCurveDistance(
-        [coil.curve for coil in coils],
-        _configuration_float(bundle, "curve_curve_threshold"),
-        num_basecurves=_configuration_int(bundle, "num_base_curves"),
-    )
-    curve_surface = CurveSurfaceDistance(
-        [coil.curve for coil in coils],
-        surface,
-        _configuration_float(bundle, "curve_surface_threshold"),
-    )
-    curvatures = [
-        LpCurveCurvature(
-            curve,
-            2,
-            _configuration_float(bundle, "curvature_threshold"),
-        )
-        for curve in base_curves
-    ]
-    mean_squared_curvatures = [MeanSquaredCurvature(curve) for curve in base_curves]
-    mean_squared_penalties = [
-        QuadraticPenalty(
-            value,
-            _configuration_float(bundle, "mean_squared_curvature_threshold"),
-        )
-        for value in mean_squared_curvatures
-    ]
-    linking_number = LinkingNumber([coil.curve for coil in coils])
-
-    def objective(length_weight: float):
-        return (
-            flux
-            + length_weight * length_penalty
-            + _configuration_float(bundle, "curve_curve_weight") * curve_curve
-            + _configuration_float(bundle, "curve_surface_weight") * curve_surface
-            + _configuration_float(bundle, "curvature_weight") * sum(curvatures)
-            + _configuration_float(bundle, "mean_squared_curvature_weight")
-            * sum(mean_squared_penalties)
-            + _configuration_float(bundle, "linking_number_weight") * linking_number
-        )
+    flux = evaluator.flux
+    linking_number = evaluator.linking_number
 
     def state(
         prefix: str,
@@ -315,7 +433,7 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
 
     initial_parameters = arrays["initial_parameters"]
     direction = arrays["taylor_direction"]
-    first_objective = objective(_configuration_float(bundle, "first_length_weight"))
+    first_objective = evaluator.first_stage_objective()
     initial_values = state("initial", initial_parameters, first_objective)
     directional_derivative = float(
         np.vdot(initial_values["initial:objective_gradient"], direction)
@@ -356,16 +474,41 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
     first_result = minimize_objective(first_objective, initial_parameters)
     first_parameters = np.asarray(first_result.x, dtype=np.float64)
     first_values = state("first", first_parameters, first_objective)
-    second_objective = objective(_configuration_float(bundle, "second_length_weight"))
+    second_objective = evaluator.second_stage_objective()
     second_result = minimize_objective(second_objective, first_parameters)
     final_parameters = np.asarray(second_result.x, dtype=np.float64)
     final_values = state("final", final_parameters, second_objective)
-    success = bool(
+    scientific_predicate = bool(
         np.isfinite(final_values["final:objective"])
         and final_values["final:objective"] < initial_values["initial:objective"]
         and np.all(np.isfinite(final_values["final:objective_gradient"]))
         and final_values["final:planarity_penalty"] <= 1.0e-24
         and final_values["final:linking_number"] == 0.0
+    )
+    terminal = lane_terminal_status(
+        scientific_predicate=scientific_predicate,
+        stages=(
+            stage_termination_from_values(
+                status_convention="scipy-lbfgsb",
+                provider_success=bool(first_result.success),
+                provider_status=int(first_result.status),
+                iterations=int(first_result.nit),
+                max_iterations=_configuration_int(bundle, "max_steps"),
+                start=("initial", initial_values),
+                end=("first", first_values),
+                gradient_observable="objective_gradient",
+            ),
+            stage_termination_from_values(
+                status_convention="scipy-lbfgsb",
+                provider_success=bool(second_result.success),
+                provider_status=int(second_result.status),
+                iterations=int(second_result.nit),
+                max_iterations=_configuration_int(bundle, "max_steps"),
+                start=("first", first_values),
+                end=("final", final_values),
+                gradient_observable="objective_gradient",
+            ),
+        ),
     )
     return LaneObservation(
         lane="native-cpu",
@@ -377,9 +520,9 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=construction_fingerprint,
         driver="scipy_lbfgsb_two_stage",
-        normalized_status="converged" if success else "failed",
+        normalized_status=terminal.normalized_status,
         raw_status=f"{first_result.status},{second_result.status}",
-        success=success,
+        success=terminal.success,
         nit=int(first_result.nit + second_result.nit),
         nfev=int(first_result.nfev + second_result.nfev),
         njev=int(first_result.njev + second_result.njev),
@@ -555,12 +698,41 @@ def _jax(
         final,
         tuple(topology[2] for topology in topology_states),
     )
-    success = bool(
+    scientific_predicate = bool(
         np.isfinite(final_values["final:objective"])
         and final_values["final:objective"] < initial_values["initial:objective"]
         and np.all(np.isfinite(final_values["final:objective_gradient"]))
         and final_values["final:planarity_penalty"] <= 1.0e-24
         and final_values["final:linking_number"] == 0.0
+    )
+    terminal = lane_terminal_status(
+        scientific_predicate=scientific_predicate,
+        stages=(
+            stage_termination_from_values(
+                status_convention=status_convention_for_driver(
+                    device_result.first_optimizer.driver.value
+                ),
+                provider_success=bool(device_result.first_optimizer.success),
+                provider_status=int(device_result.first_optimizer.status),
+                iterations=int(device_result.first_optimizer.nit),
+                max_iterations=_configuration_int(bundle, "max_steps"),
+                start=("initial", initial_values),
+                end=("first", first_values),
+                gradient_observable="objective_gradient",
+            ),
+            stage_termination_from_values(
+                status_convention=status_convention_for_driver(
+                    device_result.second_optimizer.driver.value
+                ),
+                provider_success=bool(device_result.second_optimizer.success),
+                provider_status=int(device_result.second_optimizer.status),
+                iterations=int(device_result.second_optimizer.nit),
+                max_iterations=_configuration_int(bundle, "max_steps"),
+                start=("first", first_values),
+                end=("final", final_values),
+                gradient_observable="objective_gradient",
+            ),
+        ),
     )
     return LaneObservation(
         lane=lane,
@@ -572,12 +744,12 @@ def _jax(
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=construction_fingerprint,
         driver=device_result.first_optimizer.driver.value,
-        normalized_status="converged" if success else "failed",
+        normalized_status=terminal.normalized_status,
         raw_status=(
             f"{device_result.first_optimizer.status},"
             f"{device_result.second_optimizer.status}"
         ),
-        success=success,
+        success=terminal.success,
         nit=(device_result.first_optimizer.nit + device_result.second_optimizer.nit),
         nfev=(device_result.first_optimizer.nfev + device_result.second_optimizer.nfev),
         njev=(device_result.first_optimizer.njev + device_result.second_optimizer.njev),

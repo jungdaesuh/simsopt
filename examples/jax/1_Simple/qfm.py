@@ -1,10 +1,8 @@
 """JAX mirror of ``examples/1_Simple/qfm.py``.
 
-Host construction loads the canonical NCSX coils and fitted surface. Immutable
-surface and coil specifications then enter one device-resident volume,
-toroidal-flux, and area sequence. Each stage runs SIMSOPT's JAX penalty solve
-followed by its augmented-Lagrangian equality solve. The completed result tree
-crosses to the host once for reporting.
+Host construction loads the canonical NCSX coils and fitted surface. Host SciPy
+controls the reference L-BFGS-B/SLSQP sequence while compiled JAX kernels
+evaluate every QFM value and derivative on the selected JAX device.
 """
 
 from __future__ import annotations
@@ -13,39 +11,78 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-import jax
 import numpy as np
 from simsopt.configs.zoo import get_data
 from simsopt.geo import SurfaceRZFourier
+from simsopt_jax.backend.dtypes import explicit_device_array
 from simsopt_jax.backend.runtime import get_runtime_jax_device
+from simsopt_contracts.optimization_endpoint import (
+    StoppingReason,
+    scipy_minimize_stopping_reason,
+)
 from simsopt_jax.examples import (
     ExampleResult,
     ExecutionScale,
-    QfmStageDeviceResult,
     run_example,
-    solve_qfm_sequence,
+)
+from simsopt_jax.examples.qfm_host_scipy import (
+    QFM_EXACT_METHOD,
+    QFM_HOST_SCIPY_DRIVER,
+    QFM_SURFACE_RESOLUTION,
+    QfmHostState,
+    QfmHostStageResult,
+    build_qfm_host_kernels,
+    solve_qfm_host_scipy_sequence,
 )
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 
 EXAMPLE_ID = "native-qfm"
+#: The penalty stage runs SciPy L-BFGS-B (``QFM_PENALTY_DRIVER =
+#: Driver.SCIPY_LBFGSB``, dispatched at
+#: ``src/simsopt_jax/solve/dispatch.py:362``); the exact stage's method is the
+#: solver module's own ``QFM_EXACT_METHOD``. Both are bound to the parity
+#: case's by ``tests/integration/test_jax_mirror_qfm_parity.py``, so the script
+#: and its case cannot classify the same run under different vocabularies.
+PENALTY_METHOD = "L-BFGS-B"
+#: Upstream's own budget (``maxiter=1000`` in ``examples/1_Simple/qfm.py``) and
+#: the branch's bounded budget; both are bound to the parity case's
+#: ``max_steps`` by the same test.
+NATIVE_DEFAULT_STEPS = 1000
+BOUNDED_STEPS = 80
 
 
 @dataclass(frozen=True)
 class StageResult:
     label: Literal["volume", "toroidal_flux", "area"]
     penalty_success: bool
+    penalty_status: int
+    penalty_message: str
+    penalty_nit: int
+    penalty_nfev: int
+    penalty_njev: int
     exact_success: bool
+    exact_status: int
+    exact_message: str
+    exact_nit: int
+    exact_nfev: int
+    exact_njev: int
     qfm_value: float
     constraint_objective: float
+    #: What each of the two SciPy calls stopped for, in the shared contract's
+    #: vocabulary.
+    penalty_stopping_reason: StoppingReason
+    exact_stopping_reason: StoppingReason
 
 
-def _build_surface() -> tuple[SurfaceRZFourier, BiotSavartJAX]:
+def _build_surface(scale: ExecutionScale) -> tuple[SurfaceRZFourier, BiotSavartJAX]:
     _curves, _currents, magnetic_axis, nfp, native_field = get_data("ncsx")
-    phis = np.linspace(0.0, 1.0 / nfp, 6, endpoint=False)
-    thetas = np.linspace(0.0, 1.0, 6, endpoint=False)
+    resolution = QFM_SURFACE_RESOLUTION[scale]
+    quadrature_size = resolution.quadrature_size
+    phis = np.linspace(0.0, 1.0 / nfp, quadrature_size, endpoint=False)
+    thetas = np.linspace(0.0, 1.0, quadrature_size, endpoint=False)
     surface = SurfaceRZFourier(
-        mpol=1,
-        ntor=1,
+        mpol=resolution.order,
+        ntor=resolution.order,
         stellsym=True,
         nfp=nfp,
         quadpoints_phi=phis,
@@ -55,51 +92,104 @@ def _build_surface() -> tuple[SurfaceRZFourier, BiotSavartJAX]:
     return surface, BiotSavartJAX(native_field.coils)
 
 
+def _endpoint_finite(state: QfmHostState) -> bool:
+    """Whether the endpoint one provider call left is finite.
+
+    The same two quantities the parity case checks per call
+    (``native_qfm._provider_call``): the parameters it returned and the
+    objective value at them.
+    """
+    return bool(np.all(np.isfinite(state.parameters)) and np.isfinite(state.qfm_value))
+
+
 def _stage_result(
-    stage: QfmStageDeviceResult,
+    stage: QfmHostStageResult,
     label: Literal["volume", "toroidal_flux", "area"],
+    *,
+    max_steps: int,
 ) -> StageResult:
-    label_residual = float(stage.exact.label_residual_abs)
+    label_residual = stage.exact.label_residual_abs
     return StageResult(
         label=label,
         penalty_success=bool(stage.penalty_optimizer.success),
+        penalty_status=int(stage.penalty_optimizer.status),
+        penalty_message=str(stage.penalty_optimizer.message),
+        penalty_nit=int(stage.penalty_optimizer.nit),
+        penalty_nfev=int(stage.penalty_optimizer.nfev),
+        penalty_njev=int(stage.penalty_optimizer.njev),
         exact_success=bool(stage.exact_optimizer.success),
-        qfm_value=float(stage.exact.qfm_value),
+        exact_status=int(stage.exact_optimizer.status),
+        exact_message=str(stage.exact_optimizer.message),
+        exact_nit=int(stage.exact_optimizer.nit),
+        exact_nfev=int(stage.exact_optimizer.nfev),
+        exact_njev=int(stage.exact_optimizer.njev),
+        qfm_value=stage.exact.qfm_value,
         constraint_objective=0.5 * label_residual * label_residual,
+        # One owner for "what did this provider call stop for": the contract
+        # routes each ``scipy.optimize.minimize`` method to its own status
+        # vocabulary, and the parity case classifies the same fields through
+        # the same function.
+        penalty_stopping_reason=scipy_minimize_stopping_reason(
+            method=PENALTY_METHOD,
+            provider_success=bool(stage.penalty_optimizer.success),
+            provider_status=int(stage.penalty_optimizer.status),
+            iterations=int(stage.penalty_optimizer.nit),
+            max_iterations=max_steps,
+            endpoint_finite=_endpoint_finite(stage.penalty),
+        ),
+        exact_stopping_reason=scipy_minimize_stopping_reason(
+            method=QFM_EXACT_METHOD,
+            provider_success=bool(stage.exact_optimizer.success),
+            provider_status=int(stage.exact_optimizer.status),
+            iterations=int(stage.exact_optimizer.nit),
+            max_iterations=max_steps,
+            endpoint_finite=_endpoint_finite(stage.exact),
+        ),
+    )
+
+
+def _stage_states_finite(stage: QfmHostStageResult) -> bool:
+    """Whether every quantity this stage publishes is finite, on full arrays."""
+    return all(
+        bool(np.all(np.isfinite(value)))
+        for state in (stage.initial, stage.penalty, stage.exact)
+        for value in (
+            state.parameters,
+            state.qfm_value,
+            state.qfm_gradient,
+            state.label_value,
+            state.label_gradient,
+            state.label_residual_abs,
+        )
     )
 
 
 def solve(
-    _output_directory: Path, max_steps: int, _scale: ExecutionScale
+    _output_directory: Path, max_steps: int, scale: ExecutionScale
 ) -> ExampleResult:
-    surface, field = _build_surface()
+    surface, field = _build_surface(scale)
     device = get_runtime_jax_device()
     coil_set_spec = field.coil_set_spec_from_dofs(
-        jax.device_put(np.asarray(field.x, dtype=np.float64), device)
+        explicit_device_array(field.x, dtype=np.float64, device=device)
     )
-    device_result = solve_qfm_sequence(
-        initial_parameters=jax.device_put(
-            np.asarray(surface.get_dofs(), dtype=np.float64),
-            device,
-        ),
-        quadpoints_phi=jax.device_put(
-            np.asarray(surface.quadpoints_phi, dtype=np.float64),
-            device,
-        ),
-        quadpoints_theta=jax.device_put(
-            np.asarray(surface.quadpoints_theta, dtype=np.float64),
-            device,
-        ),
+    initial_parameters = np.asarray(surface.get_dofs(), dtype=np.float64)
+    kernels = build_qfm_host_kernels(
+        initial_parameters=initial_parameters,
+        quadpoints_phi=np.asarray(surface.quadpoints_phi, dtype=np.float64),
+        quadpoints_theta=np.asarray(surface.quadpoints_theta, dtype=np.float64),
         coil_set_spec=coil_set_spec,
         mpol=surface.mpol,
         ntor=surface.ntor,
         nfp=surface.nfp,
         stellsym=surface.stellsym,
+    )
+    result = solve_qfm_host_scipy_sequence(
+        initial_parameters,
+        kernels=kernels,
         max_steps=max_steps,
-        tolerance=1.0e-8,
+        tolerance=1.0e-12,
         constraint_weight=1.0,
     )
-    result = jax.device_get(device_result)
     initial = result.volume.initial
     final = result.area.exact
     initial_label_residual = float(initial.label_value - result.volume.target)
@@ -127,15 +217,35 @@ def solve(
         )
     )
     stages = (
-        _stage_result(result.volume, "volume"),
-        _stage_result(result.toroidal_flux, "toroidal_flux"),
-        _stage_result(result.area, "area"),
+        _stage_result(result.volume, "volume", max_steps=max_steps),
+        _stage_result(result.toroidal_flux, "toroidal_flux", max_steps=max_steps),
+        _stage_result(result.area, "area", max_steps=max_steps),
     )
-    scientific_success = bool(
-        all(stage.penalty_success and stage.exact_success for stage in stages)
-        and np.all(np.isfinite(final.parameters))
+    # Three conditions, none of them a threshold of our own. Every one of the
+    # six SciPy calls must have stopped for the reason ``converged`` in the
+    # shared contract's vocabulary -- which is stricter than the raw
+    # ``success`` flags this used to read, because a flag that contradicts the
+    # reported status fails closed there; every quantity every stage publishes
+    # must be finite (checked on the full arrays, before anything selects from
+    # them); and the QFM value must have decreased, which is what the official
+    # run does, four orders of magnitude (tracked fixture
+    # ``examples/jax/parity/official_reference/9e027eac3/native-qfm.json``,
+    # ``initial:qfm_value`` down to ``area:exact:qfm_value``).
+    # The branch-added constraint gate (``final_constraint <= 1e-10``) stays
+    # demoted to the published ``constraint_residual``: the official run itself
+    # ends with exact-stage label residuals (``<label>:exact:label_residual_abs``
+    # in the same fixture) that would fail it.
+    solver_success = bool(
+        all(
+            stage.penalty_stopping_reason == "converged"
+            and stage.exact_stopping_reason == "converged"
+            for stage in stages
+        )
+        and all(
+            _stage_states_finite(stage)
+            for stage in (result.volume, result.toroidal_flux, result.area)
+        )
         and final.qfm_value < initial.qfm_value
-        and final_constraint <= 1.0e-10
     )
     return ExampleResult(
         example_id=EXAMPLE_ID,
@@ -151,19 +261,35 @@ def solve(
                 tuple(float(value) for value in row) for row in final_jacobian
             ),
             "constraint_residual": final_constraint,
-            "solver_success": scientific_success,
+            "solver_success": solver_success,
+            "driver": QFM_HOST_SCIPY_DRIVER,
+            "optimizer_execution": "host_scipy",
+            "physics_execution": "jax_device",
+            "physics_platform": device.platform,
             "stages": tuple(
                 {
                     "label": stage.label,
                     "penalty_success": stage.penalty_success,
+                    "penalty_status": stage.penalty_status,
+                    "penalty_message": stage.penalty_message,
+                    "penalty_nit": stage.penalty_nit,
+                    "penalty_nfev": stage.penalty_nfev,
+                    "penalty_njev": stage.penalty_njev,
                     "exact_success": stage.exact_success,
+                    "exact_status": stage.exact_status,
+                    "exact_message": stage.exact_message,
+                    "exact_nit": stage.exact_nit,
+                    "exact_nfev": stage.exact_nfev,
+                    "exact_njev": stage.exact_njev,
                     "qfm_value": stage.qfm_value,
                     "constraint_objective": stage.constraint_objective,
+                    "penalty_stopping_reason": stage.penalty_stopping_reason,
+                    "exact_stopping_reason": stage.exact_stopping_reason,
                 }
                 for stage in stages
             ),
         },
-        status="ok" if scientific_success else "failed",
+        status="ok" if solver_success else "failed",
     )
 
 
@@ -172,8 +298,8 @@ def main(arguments: list[str] | None = None) -> int:
         arguments,
         description=__doc__,
         temporary_prefix="simsopt-jax-qfm-",
-        bounded_steps=80,
-        native_default_steps=1000,
+        bounded_steps=BOUNDED_STEPS,
+        native_default_steps=NATIVE_DEFAULT_STEPS,
         solve=solve,
     )
 

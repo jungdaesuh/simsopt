@@ -112,17 +112,16 @@ def test_native_policy_is_parsed_from_the_native_script(family_name: str) -> Non
     assert options["tol_argument"] == 1.0e-15
 
 
-def test_coil_forces_native_maxls_is_resolved_from_the_named_constant() -> None:
-    """Commit 2b14e7d02 named MAXLS=32; the receipt must publish 32, not a symbol."""
+def test_coil_forces_native_names_no_maxls_and_publishes_scipys_default() -> None:
+    """The official script names no ``maxls``; the receipt publishes SciPy's own."""
     options = _native_optimizer_options(COIL_FORCES)
     constants = _module_level_constants(
         ast.parse(COIL_FORCES.native_script.read_text(encoding="utf-8"))
     )
 
-    assert options["maxls"] == constants["MAXLS"]
-    assert options["maxls"] != SCIPY_LBFGSB_DEFAULTS["maxls"]
-    assert options["maxls_symbol"] == "<symbol MAXLS>"
-    assert not str(options["maxls"]).startswith("<symbol")
+    assert "MAXLS" not in constants
+    assert "maxls_symbol" not in options
+    assert options["maxls"] == SCIPY_LBFGSB_DEFAULTS["maxls"]
 
 
 def test_coil_forces_native_and_jax_native_matched_attestations_agree() -> None:
@@ -134,7 +133,7 @@ def test_coil_forces_native_and_jax_native_matched_attestations_agree() -> None:
     assert declared["type"] == "ScipyLBFGSBOptions"
     for name in COMPARED_LBFGSB_OPTIONS:
         assert native[name] == declared[name], name
-    assert native["maxls"] == declared["maxls"] != SCIPY_LBFGSB_DEFAULTS["maxls"]
+    assert native["maxls"] == declared["maxls"] == SCIPY_LBFGSB_DEFAULTS["maxls"]
 
 
 def test_stage_two_mirror_does_not_declare_native_matched_at_the_example() -> None:

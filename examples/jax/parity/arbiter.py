@@ -8,17 +8,19 @@ from typing import Mapping
 
 import numpy as np
 from examples.jax.outer_optimizer_policy import (
-    SHIPPED_SINGLE_STAGE_SCIPY_DRIVER_ID as SHIPPED_SINGLE_STAGE_SCIPY_DRIVER_ID,
+    SHIPPED_SINGLE_STAGE_SCIPY_DRIVER_ID,  # noqa: F401 - compatibility re-export
     OuterOptimizerPolicy,
     policy_owns_parity_case,
 )
 from examples.jax.parity._manifest import ComparisonRoute
 from examples.jax.parity.contracts import (
+    AdmittedTerminalOutcome,
     ComparisonResult,
     QualityBand,
     QualityBandResult,
 )
 from examples.jax.parity.provenance import LaneProvenance
+from examples.jax.parity.work_budget import WorkBudgetContract
 from simsopt_jax.config import ExecutionIntent
 from simsopt_jax.examples import ExecutionScale
 from simsopt_jax.parity_tolerances import parity_ladder_tolerances
@@ -34,6 +36,16 @@ _INFORMATIONAL_DIAGNOSTIC_PREFIX = "informational (quality-band, non-certifying)
 
 class ArbitrationError(ValueError):
     """Lane evidence is structurally incapable of supporting parity."""
+
+
+class LaneOutcomeRejection(ArbitrationError):
+    """A compared lane reported no scientific success of its own.
+
+    Raised only where the arbiter reads a lane's OWN terminal outcome, never
+    for a harness, contract or integrity violation. A caller may record this
+    as the scientific result of an attempt; every other ``ArbitrationError``
+    says the evidence is unusable and must abort the run.
+    """
 
 
 @dataclass(frozen=True)
@@ -84,6 +96,16 @@ class ArbitrationResult:
     verdict: str
     comparisons: tuple[ComparisonResult, ...]
     quality_band_results: tuple[QualityBandResult, ...] = ()
+    work_budget_admitted: bool = False
+    admitted_terminal_lanes: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
+class _TerminalAdmission:
+    """Which non-success terminal outcomes a case's contracts let stand."""
+
+    work_budget_admitted: bool
+    admitted_terminal_lanes: tuple[tuple[str, str], ...]
 
 
 def _validate_lanes(
@@ -95,7 +117,9 @@ def _validate_lanes(
     case_id: str | None = None,
     example_id: str | None = None,
     outer_optimizer_policy: OuterOptimizerPolicy | None = None,
-) -> None:
+    work_budget_contract: WorkBudgetContract | None = None,
+    admitted_terminal_outcomes: tuple[AdmittedTerminalOutcome, ...] = (),
+) -> _TerminalAdmission:
     if outer_optimizer_policy is not None and not policy_owns_parity_case(
         outer_optimizer_policy, case_id=case_id, example_id=example_id
     ):
@@ -115,9 +139,55 @@ def _validate_lanes(
         raise ArbitrationError(
             f"quality-band certification requires the {QUALITY_BAND_SCALE} scale"
         )
-    budget_exhausted_admissible = quality_band is not None and {
-        observations[lane].normalized_status for lane in required_lanes
-    } == {"budget_exhausted"}
+    if admitted_terminal_outcomes and quality_band is None:
+        raise ArbitrationError("admitted terminal outcomes require a quality band")
+    # Ownership is checked at this seam, not only in the registry: an admission
+    # authorized for one case can never be handed to another.
+    if admitted_terminal_outcomes and case_id is None:
+        raise ArbitrationError(
+            "admitted terminal outcomes require the arbitrated case_id"
+        )
+    foreign = sorted(
+        outcome.case_id
+        for outcome in admitted_terminal_outcomes
+        if outcome.case_id != case_id
+    )
+    if foreign:
+        raise ArbitrationError(
+            f"admitted terminal outcome belongs to another case: {foreign} != {case_id!r}"
+        )
+    admitted_outcomes = frozenset(
+        (outcome.lane, outcome.raw_status) for outcome in admitted_terminal_outcomes
+    )
+    # An admission matches the receipt's published strings exactly; the lane's
+    # own ``failed``/``success`` verdict is carried through untouched.
+    admitted_terminal_lanes = tuple(
+        sorted(
+            (lane, observations[lane].raw_status)
+            for lane in required_lanes
+            if observations[lane].normalized_status == "failed"
+            and observations[lane].success is False
+            and (lane, observations[lane].raw_status) in admitted_outcomes
+        )
+    )
+    admitted_lanes = {lane for lane, _ in admitted_terminal_lanes}
+    budget_exhausted_lanes = {
+        lane
+        for lane in required_lanes
+        if observations[lane].normalized_status == "budget_exhausted"
+    }
+    all_budget_exhausted = budget_exhausted_lanes == set(required_lanes)
+    quality_band_budget_admitted = quality_band is not None and (
+        budget_exhausted_lanes | admitted_lanes == set(required_lanes)
+    )
+    observed_scales = {observations[lane].scale for lane in required_lanes}
+    work_budget_admitted = (
+        quality_band is None
+        and work_budget_contract is not None
+        and all_budget_exhausted
+        and len(observed_scales) == 1
+        and next(iter(observed_scales)) in work_budget_contract.scales
+    )
     expected_runtime = {
         "native-cpu": ("native_cpu", "cpu", "fp64"),
         "jax-cpu": (f"jax_cpu_{execution_intent}", "cpu", "fp64"),
@@ -188,8 +258,14 @@ def _validate_lanes(
             raise ArbitrationError(
                 f"{lane} has invalid normalized status {observation.normalized_status}"
             )
-        if not observation.success and not budget_exhausted_admissible:
-            raise ArbitrationError(f"{lane} did not report scientific success")
+        if observation.normalized_status == "budget_exhausted" and observation.success:
+            raise LaneOutcomeRejection(f"{lane} budget_exhausted cannot report success")
+        if observation.normalized_status == "failed" and observation.success:
+            raise LaneOutcomeRejection(f"{lane} provider reported failure")
+        if not observation.success and not (
+            quality_band_budget_admitted or work_budget_admitted
+        ):
+            raise LaneOutcomeRejection(f"{lane} did not report scientific success")
         if observation.normalized_status == "not_applicable" and (
             observation.nit is not None
             or observation.nfev is not None
@@ -202,8 +278,8 @@ def _validate_lanes(
             counter = getattr(observation, counter_name)
             if counter is not None and counter < 0:
                 raise ArbitrationError(f"{lane} has invalid {counter_name}: {counter}")
-    if budget_exhausted_admissible:
-        budgets = {observations[lane].nit for lane in required_lanes}
+    if quality_band_budget_admitted:
+        budgets = {observations[lane].nit for lane in budget_exhausted_lanes}
         if len(budgets) != 1 or None in budgets:
             raise ArbitrationError(
                 "quality-band budget_exhausted lanes must share one matched "
@@ -220,7 +296,9 @@ def _validate_lanes(
         if observations[lane].completed_workflow_stages != stage_contract:
             raise ArbitrationError(f"{lane} workflow stage mismatch")
     normalized_statuses = {
-        observations[lane].normalized_status for lane in sorted(required_lanes)
+        observations[lane].normalized_status
+        for lane in sorted(required_lanes)
+        if lane not in admitted_lanes
     }
     if len(normalized_statuses) != 1:
         raise ArbitrationError("normalized convergence category mismatch")
@@ -266,6 +344,10 @@ def _validate_lanes(
                     raise ArbitrationError(
                         f"executed source mismatch: {path} ({left_lane}:{right_lane})"
                     )
+    return _TerminalAdmission(
+        work_budget_admitted=work_budget_admitted,
+        admitted_terminal_lanes=admitted_terminal_lanes,
+    )
 
 
 def _required_lane_pairs(required_lanes: frozenset[str]) -> frozenset[str]:
@@ -391,6 +473,8 @@ def arbitrate(
     case_id: str | None = None,
     example_id: str | None = None,
     outer_optimizer_policy: OuterOptimizerPolicy | None = None,
+    work_budget_contract: WorkBudgetContract | None = None,
+    admitted_terminal_outcomes: tuple[AdmittedTerminalOutcome, ...] = (),
 ) -> ArbitrationResult:
     """Compare every direct pair under the declared JAX execution policy.
 
@@ -403,8 +487,22 @@ def arbitrate(
     final-value equality, and the verdict is labelled ``quality-band`` so it can
     never be read as equivalence. Pairwise comparisons are still computed and
     recorded, marked informational, and do not decide the verdict.
+
+    A case-owned ``work_budget_contract`` admits all required lanes' honest
+    budget exits at its declared scales; numerical comparisons still decide.
+
+    A case-owned ``admitted_terminal_outcomes`` widens the band path's
+    admissible terminal states from ``budget_exhausted`` alone to those exact
+    published outcomes, for the one declared lane whose receipt matches the
+    declared raw status string for string. The admitted lane is exempt from
+    the matched-budget clause (it stopped early by definition) and from the
+    single-category rule; every other required lane must still be
+    ``budget_exhausted`` at one shared budget, so at least one such lane must
+    exist. The admitted lane keeps its own ``failed`` status and ``success``
+    false, the band still decides, the ceiling is still ``quality-band``, and
+    every admitted lane is named in ``admitted_terminal_lanes``.
     """
-    _validate_lanes(
+    admission = _validate_lanes(
         observations,
         required_lanes,
         expected_workflow_stages,
@@ -413,6 +511,8 @@ def arbitrate(
         case_id,
         example_id,
         outer_optimizer_policy,
+        work_budget_contract,
+        admitted_terminal_outcomes,
     )
     selected_routes = tuple(
         route
@@ -488,6 +588,7 @@ def arbitrate(
         return ArbitrationResult(
             verdict="pass" if all(item.passed for item in comparisons) else "fail",
             comparisons=tuple(comparisons),
+            work_budget_admitted=admission.work_budget_admitted,
         )
     band_results = _quality_band_results(quality_band, observations, required_lanes)
     return ArbitrationResult(
@@ -506,4 +607,5 @@ def arbitrate(
             for comparison in comparisons
         ),
         quality_band_results=band_results,
+        admitted_terminal_lanes=admission.admitted_terminal_lanes,
     )

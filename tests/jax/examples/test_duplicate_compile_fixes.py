@@ -33,20 +33,50 @@ _COMPILED_PROGRAM = re.compile(r"^Compiling jit\(([^)]*)\)")
 _OBJECTIVE_PROGRAM = "value_and_grad_from_jaxpr"
 # ``main()`` runs both examples with this budget in bounded mode.
 _BOUNDED_STEPS = 3
-# Objective value/gradient executables one shipped bounded solve is allowed.
-# Both examples reuse a single traced objective across their second stage or
-# republication, so neither budget includes a stage-specific graph.  What a
-# budget does count is one executable per ``jax.jit`` wrapper that runs the
-# objective: the private BFGS solver closure-converts the problem's callable
-# and jits its own copy for the entry evaluation it makes before its fused
-# loop, which compiles the same jaxpr at the same signature a second time.
+# The finite-build claim is ONE DISTINCT objective program, asserted below as
+# ``len(set(objective_graphs)) == 1``: the shipped solve republishes at
+# ``PUBLISHED_OBJECTIVE_SCALE`` through the solve's own graph, with the scale as
+# a device operand, rather than tracing a second graph with the scale baked in.
 #
-# Re-anchored 2026-09-13 for the finite-build example: the budget is the
-# solver's own copy plus the prepared problem's executable, which the shipped
-# solve first invokes at the post-solve republication.  The retired value 3
-# belonged to the ``serial_solve_jax`` routing this example left in ead83eaef,
-# whose bounded-objective log entered the problem's executable once more.
-_FINITEBUILD_OBJECTIVE_GRAPHS = 2
+# Re-anchored 2026-09-20 for the finite-build example, from 2 to 1.  What was
+# measured, on this machine (CPU, fp64, OMP_NUM_THREADS=4), one bounded solve
+# per process:
+#   * the shipped solve compiles exactly ONE ``value_and_grad_from_jaxpr``,
+#     and it compiles AFTER the fused programs -- the ordered log ends
+#     ... lbfgs_private_initial_state_solver, lbfgsb_fused_stepwise,
+#     value_and_grad_from_jaxpr, function_from_jaxpr (the diagnostics
+#     republication);
+#   * the same is true of the PRE-WAVE example source driven through the
+#     pre-wave call site, both alone and with the whole file running
+#     (1 failed, 8 passed, same ``assert 1 == 2``), and
+#     ``src/simsopt_jax/solve`` and ``src/simsopt_jax/geo/optimizers`` are
+#     byte-identical to 85051efe9.  So the retired value 2 was already stale
+#     at that commit; it is not a change of this example or of its solver.
+#
+# RETIRED 2026-09-20: a second pin, ``_FINITEBUILD_OBJECTIVE_GRAPHS = 1`` on the
+# EXECUTABLE count ``len(objective_graphs)``, carried an in-file admission that
+# no mutation could make it fail.  It was measured twice, by injecting one extra
+# ``jax.jit`` wrapper over the solve's own computation -- once before the solve,
+# once after it over a fresh copy of the initial parameters.  Both injections
+# logged executables=2 AND distinct=2: JAX's compile line carries the
+# per-argument sharding annotation, which differs between the first and any
+# later compile of the same program, so a second executable always moves the
+# distinct-signature assertion as well.  The count assertion could therefore
+# only fail where the assertion above it had already failed -- a duplicate, not
+# a guard -- and is gone.  The distinct-signature assertion IS falsifiable, and
+# those same two injections are what falsify it.  Measurements:
+# .artifacts/official-mirror-closure-20260919/fix-wave-4/index-bands/proofs/
+# old_behaviour_objective_graph_count.py and ..._v2.py.
+#
+# The retired executable counts 2 (the private BFGS solver's own jitted copy for
+# its entry evaluation) and, before it, 3 (the ``serial_solve_jax`` routing this
+# example left in ead83eaef) belonged to call paths the example no longer takes.
+#
+# What carries the fused-device-lane evidence, with a demonstrated failure mode,
+# is tests/integration/test_jax_stage_two_finitebuild_strict_transfer.py: zero
+# ``advance`` and zero ``callback`` host observations against a positive
+# ``final_result`` control, and a ledger that does not move when the step budget
+# doubles.
 # a1356ceb7 switched coil-forces ``STAGE_DRIVER`` to SciPy L-BFGS-B (no
 # fused-solver copy of the objective) and added native's 5-epsilon Taylor
 # vmap.  The unbatched float64[47] graph is still one program reused across
@@ -328,6 +358,24 @@ def test_coil_forces_second_stage_compiles_no_second_graph() -> None:
 # The published values below are regression pins taken from one live bounded
 # run on this branch, not independent oracles: they fail when the example's
 # numbers move, and say nothing about whether the physics is right.
+#
+# Re-anchored 2026-09-20 from one bounded device-mode solve on this machine
+# (CPU, fp64, OMP_NUM_THREADS=4).  The retired triple
+# (0.021277039189432682, 0.018102344118240837, 0.08248454829861396) was
+# already unreachable at 85051efe9 -- the compile assertion above fails first,
+# so no run had compared them for some time.
+#
+# "No behaviour change" HOLDS ONLY AGAINST THE PRE-WAVE-3 SOURCE: the values
+# below are bitwise equal to what that source publishes on this machine.
+# Against the campaign baseline the device endpoint DID move, and the campaign
+# change that moved it is FINITE_BUILD_LBFGS_HISTORY 10 -> 400 in
+# src/simsopt_jax/examples/stage_two_finitebuild.py, still passed as
+# ``lbfgs_history`` to the fused device solve this test drives (and as
+# ``maxcor`` to the official SciPy route).  400 is upstream's own number
+# (official 3_Advanced/stage_two_optimization_finitebuild.py line 173,
+# ``'maxcor': 400``), so the change is a fidelity correction -- but it IS a
+# device-lane behaviour change, and the certified finite-build device speed-up
+# was measured at history 10.
 
 
 def test_finitebuild_example_solve_publishes_one_objective_graph(tmp_path) -> None:
@@ -338,13 +386,21 @@ def test_finitebuild_example_solve_publishes_one_objective_graph(tmp_path) -> No
     graph, so every objective executable the solve compiles carries the same
     signature; baking the scale in would need a second problem, whose graph
     carries one operand fewer and so shows up as a second distinct signature.
-    That distinct-signature count is the claim.  The executable count is the
-    separate budget: one per ``jax.jit`` wrapper that runs the objective.
+    That distinct-signature count is the claim.  The executable-count pin that
+    used to sit beside it was retired as a duplicate of it; see the note above.
     """
     example = _example("stage_two_optimization_finitebuild")
 
     with _recorded_compilations() as compilations:
-        result = example.solve(tmp_path, _BOUNDED_STEPS, "bounded")
+        # The claim below -- and the executable budget and the endpoint pins --
+        # are about the fused device solver, which is now the example's opt-in
+        # performance mode rather than its default.
+        result = example.solve(
+            tmp_path,
+            _BOUNDED_STEPS,
+            "bounded",
+            driver=example.FINITE_BUILD_DEVICE_DRIVER,
+        )
 
     objective_graphs = _objective_graph_compilations(compilations)
     assert len(set(objective_graphs)) == 1, (
@@ -353,29 +409,23 @@ def test_finitebuild_example_solve_publishes_one_objective_graph(tmp_path) -> No
         "republication must re-enter the solve's graph with the scale as a "
         "device operand rather than trace one with the scale baked in"
     )
-    assert len(objective_graphs) == _FINITEBUILD_OBJECTIVE_GRAPHS, (
-        "the shipped solve compiled a different number of objective "
-        f"executables ({len(objective_graphs)}) of its one objective graph; "
-        "the budget is the private solver's own closure-converted copy plus "
-        "the prepared problem's executable"
-    )
     assert result.status == "ok"
     assert result.observables["solver_iterations"] == _BOUNDED_STEPS
     np.testing.assert_allclose(
         result.observables["final_objective"],
-        0.021277039189432682,
+        0.005313081455109647,
         rtol=1.0e-12,
         atol=0.0,
     )
     np.testing.assert_allclose(
         result.observables["squared_flux"],
-        0.018102344118240837,
+        0.0030583480386876167,
         rtol=1.0e-12,
         atol=0.0,
     )
     np.testing.assert_allclose(
         result.observables["minimum_clearance"],
-        0.08248454829861396,
+        0.09467123488113693,
         rtol=1.0e-12,
         atol=0.0,
     )

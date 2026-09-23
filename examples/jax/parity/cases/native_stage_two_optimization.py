@@ -15,6 +15,11 @@ from examples.jax.parity.input_bundle import (
     effective_construction_fingerprint,
 )
 from examples.jax.parity.runtime import ParityLane
+from examples.jax.parity.terminal_status import (
+    lane_terminal_status,
+    stage_termination_from_values,
+    status_convention_for_driver,
+)
 from simsopt_jax.examples import ExecutionScale
 
 TEST_DATA = Path(__file__).resolve().parents[4] / "tests" / "test_files"
@@ -369,10 +374,35 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         final_parameters,
         second_objective,
     )
-    success = bool(
+    scientific_predicate = bool(
         np.isfinite(final_values["final:objective"])
         and final_values["final:objective"] < initial_values["initial:objective"]
         and np.all(np.isfinite(final_values["final:objective_gradient"]))
+    )
+    terminal = lane_terminal_status(
+        scientific_predicate=scientific_predicate,
+        stages=(
+            stage_termination_from_values(
+                status_convention="scipy-lbfgsb",
+                provider_success=bool(first_result.success),
+                provider_status=int(first_result.status),
+                iterations=int(first_result.nit),
+                max_iterations=_configuration_int(bundle, "max_steps"),
+                start=("initial", initial_values),
+                end=("first", first_values),
+                gradient_observable="objective_gradient",
+            ),
+            stage_termination_from_values(
+                status_convention="scipy-lbfgsb",
+                provider_success=bool(second_result.success),
+                provider_status=int(second_result.status),
+                iterations=int(second_result.nit),
+                max_iterations=_configuration_int(bundle, "max_steps"),
+                start=("first", first_values),
+                end=("final", final_values),
+                gradient_observable="objective_gradient",
+            ),
+        ),
     )
     return LaneObservation(
         lane="native-cpu",
@@ -384,9 +414,9 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=construction_fingerprint,
         driver="scipy_lbfgsb_two_stage",
-        normalized_status="converged" if success else "failed",
+        normalized_status=terminal.normalized_status,
         raw_status=f"{first_result.status},{second_result.status}",
-        success=success,
+        success=terminal.success,
         nit=int(first_result.nit + second_result.nit),
         nfev=int(first_result.nfev + second_result.nfev),
         njev=int(first_result.njev + second_result.njev),
@@ -519,10 +549,39 @@ def _jax(
     initial_values = state_values("initial", initial)
     first_values = state_values("first", first)
     final_values = state_values("final", final)
-    success = bool(
+    scientific_predicate = bool(
         np.isfinite(final_values["final:objective"])
         and final_values["final:objective"] < initial_values["initial:objective"]
         and np.all(np.isfinite(final_values["final:objective_gradient"]))
+    )
+    terminal = lane_terminal_status(
+        scientific_predicate=scientific_predicate,
+        stages=(
+            stage_termination_from_values(
+                status_convention=status_convention_for_driver(
+                    device_result.first_optimizer.driver.value
+                ),
+                provider_success=bool(device_result.first_optimizer.success),
+                provider_status=int(device_result.first_optimizer.status),
+                iterations=int(device_result.first_optimizer.nit),
+                max_iterations=_configuration_int(bundle, "max_steps"),
+                start=("initial", initial_values),
+                end=("first", first_values),
+                gradient_observable="objective_gradient",
+            ),
+            stage_termination_from_values(
+                status_convention=status_convention_for_driver(
+                    device_result.second_optimizer.driver.value
+                ),
+                provider_success=bool(device_result.second_optimizer.success),
+                provider_status=int(device_result.second_optimizer.status),
+                iterations=int(device_result.second_optimizer.nit),
+                max_iterations=_configuration_int(bundle, "max_steps"),
+                start=("first", first_values),
+                end=("final", final_values),
+                gradient_observable="objective_gradient",
+            ),
+        ),
     )
     return LaneObservation(
         lane=lane,
@@ -534,12 +593,12 @@ def _jax(
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=construction_fingerprint,
         driver=device_result.first_optimizer.driver.value,
-        normalized_status="converged" if success else "failed",
+        normalized_status=terminal.normalized_status,
         raw_status=(
             f"{device_result.first_optimizer.status},"
             f"{device_result.second_optimizer.status}"
         ),
-        success=success,
+        success=terminal.success,
         nit=(device_result.first_optimizer.nit + device_result.second_optimizer.nit),
         nfev=(device_result.first_optimizer.nfev + device_result.second_optimizer.nfev),
         njev=(device_result.first_optimizer.njev + device_result.second_optimizer.njev),
@@ -584,7 +643,9 @@ def _jax_evaluate_at(
         standard_stage_two_state(
             field=field,
             flux_spec=flux.fixed_surface_flux_spec(),
-            surface_gamma=np.asarray(surface.gamma(), dtype=np.float64).reshape((-1, 3)),
+            surface_gamma=np.asarray(surface.gamma(), dtype=np.float64).reshape(
+                (-1, 3)
+            ),
             surface_normal=np.asarray(surface.normal(), dtype=np.float64).reshape(
                 (-1, 3)
             ),
