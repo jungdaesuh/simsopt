@@ -96,13 +96,13 @@ class ALMRunState:
     cap_binding_indices: Set[int]
     penalty_cap_reached: bool
     penalty_cap_requested: Optional[float]
-    # M4: non-sticky predicate carrying the most recent dual update's
+    # Non-sticky predicate carrying the most recent dual update's
     # ``multiplier_cap_binding``. Resets to False on each non-binding dual
     # update; sticks True until the next dual update that isn't capped.
     # Used to gate both ``converged`` and ``constraints_inactive_converged``
     # so a result that satisfies KKT-on-paper but holds at the multiplier
     # cap (broken Lagrangian interpretation) does not get labeled converged.
-    # The historical sticky ``cap_binding_detected`` remains as a diagnostic.
+    # The sticky ``cap_binding_detected`` remains as a diagnostic.
     last_cap_binding_active: bool = False
     # Previous accepted iterate's sufficient-decrease measure, carried across
     # continuation/outer boundaries for the ALGENCAN penalty safeguard. A
@@ -224,9 +224,8 @@ def _normalize_alm_run_inputs(
         raise ValueError(
             "snapshot_accepted_state_fn and restore_incumbent_state_fn must be provided together"
         )
-    # ALMSettings.__post_init__ now owns penalty_max / history_max_entries
-    # validation (SSOT post L5 fix); only runtime-supplied values are
-    # validated here.
+    # ALMSettings.__post_init__ owns penalty_max / history_max_entries
+    # validation; only runtime-supplied values are validated here.
     constraint_names_tuple, constraint_blocks_tuple = _build_constraint_metadata_tuples(
         constraint_names, constraint_blocks
     )
@@ -812,8 +811,8 @@ def _exhausted_termination(
     action: str,
 ) -> str:
     """The run's termination reason if the outer range runs out after a step
-    that did not return: the decision's label on the final outer (M2), else
-    the action it published."""
+    that did not return: the decision's label on the final outer, else the
+    action it published."""
     return max_outer_termination if context.is_final_outer else action
 
 def _emit_alm_stall_failure_step(
@@ -910,10 +909,10 @@ def _execute_step_decision(
             ),
             subproblem_limit_reason=decision.subproblem_limit_reason,
         )
-    # M2: a step that ends the final outer without returning publishes
+    # A step that ends the final outer without returning publishes
     # ``max_outer``, so the exhausted-outer reason is a ``max_outer*`` label.
     if isinstance(decision, ALMContinue):
-        # T3: the radius is set before the event publishes it.
+        # The radius is set before the event publishes it.
         run_state.trust_radius = decision.trust_radius
         state.update_stationarity_tol = decision.update_stationarity_tol
         run_state.exhausted_termination = _exhausted_termination(
@@ -965,7 +964,7 @@ def _execute_step_decision(
         state.update_stationarity_tol = dual_update.update_stationarity_tol
         state.final_multipliers = state.multipliers.copy()
         state.final_penalty = state.penalty
-        # M4: non-sticky current predicate updates every dual_update
+        # The non-sticky current predicate updates on every dual update
         # (True or False). Sticky `cap_binding_detected` remains
         # diagnostic-only.
         run_state.last_cap_binding_active = bool(
@@ -1036,7 +1035,7 @@ def _execute_step_decision(
     run_state.exhausted_termination = _exhausted_termination(
         context, max_outer_termination=decision.max_outer_termination, action=action
     )
-    # T4: a capped raise keeps the dual-update reason on its event.
+    # A capped raise keeps the dual-update reason on its event.
     _publish_outer_step(
         context,
         state=state,
@@ -1286,9 +1285,9 @@ def _run_alm_continuation_step(
             accepted_callback(run_state.x.copy())
         except ALMProcessBudgetExhausted:
             process_budget_exhausted = True
-    # M5: post-inner routing must use the same clamped feasibility gate as the
-    # pre-inner routing above; the previous unclamped pass let the
-    # active masks diverge within one outer iteration on early ALM steps.
+    # Post-inner routing must use the same clamped feasibility gate as the
+    # pre-inner routing above; an unclamped pass would let the active masks
+    # diverge within one outer iteration on early ALM steps.
     measured = _measure_iterate(
         state.final_eval,
         multipliers=state.multipliers,
@@ -1363,7 +1362,7 @@ def _run_alm_continuation_step(
                 ),
             )
 
-    # M3.b: keep ``state.inner_options`` as the user's untouched anchor. Each
+    # Keep ``state.inner_options`` as the user's untouched anchor. Each
     # inner plan built from ``state.inner_options`` re-derives
     # the staged values (gtol, profile caps) from the user's original base;
     # writing ``inner_attempt.last_inner_options`` back would ratchet ``gtol``

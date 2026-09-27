@@ -101,7 +101,7 @@ class ALMSettings:
     history_max_entries: Optional[int] = 512
     # Opt-in: when True, a hard-feasible/surrogate-active signal mismatch with
     # a live surrogate positive shift stays on the bounded inner-continuation
-    # path instead of taking the legacy penalty-increase arm. This does not
+    # path instead of taking the penalty-increase arm. This does not
     # bypass the dual-update stationarity gate.
     continue_on_signal_mismatch: bool = False
     # ALGENCAN sufficient-decrease safeguard (Birgin & Martinez 2014,
@@ -110,14 +110,14 @@ class ALMSettings:
     # ||max(g, -lambda/rho)||_inf shrank to <= tau x the previous accepted
     # iterate's measure. Without this the penalty ramps unconditionally every
     # outer iteration and a late-activating constraint meets an
-    # already-inflated penalty (measured: 300x step jump that broke a stateful
-    # inner solve). Appended LAST so no pre-existing positional field shifts.
+    # already-inflated penalty (the resulting jump in step size can break a
+    # stateful inner solve).
     penalty_sufficient_decrease_tau: float = 0.5
 
     def __post_init__(self) -> None:
-        # Mirrors the driver ``--alm-*`` flag checks so direct construction
-        # cannot bypass those guards (L5: programmatic
-        # `ALMSettings(trust_radius_grow=0.5)` previously silently shrank).
+        # Every construction path is validated here, so a value such as
+        # `ALMSettings(trust_radius_grow=0.5)` is rejected rather than
+        # silently shrinking the trust radius.
         parsed = {
             name: parse(f"ALMSettings.{name}", getattr(self, name))
             for name, parse, _bound in _ALM_SETTINGS_BOUNDS
@@ -311,7 +311,7 @@ def _build_augmented_evaluation(
     feasibility_array = np.asarray(feasibility_values, dtype=float)
     stationarity_norm = float(np.linalg.norm(np.asarray(total_grad, dtype=float)))
     max_feasibility_violation = _max_value(feasibility_array)
-    # L4: stored ndarrays are copied, except constraint_grads. A float
+    # Stored ndarrays are copied, except constraint_grads. A float
     # ndarray there aliases the caller; the inner cache copies that list.
     # `np.asarray` keeps the alias when the dtype already matches.
     result = {
@@ -331,7 +331,7 @@ def _build_augmented_evaluation(
         "stationarity_norm": stationarity_norm,
     }
     if positive_shift_values is not None:
-        # L4: copy to avoid aliasing caller-owned mutable buffers, matching
+        # Copy to avoid aliasing caller-owned mutable buffers, matching
         # the ownership contract of the principal evaluation arrays above.
         result["positive_shift_values"] = np.asarray(
             positive_shift_values,
@@ -452,7 +452,7 @@ def _conditioning_metrics(evaluation: dict) -> Dict[str, Optional[float]]:
 def _kkt_base_grad(evaluation: dict) -> np.ndarray:
     """Gradient of the bare objective for the KKT residual.
 
-    M9: KKT stationarity is `‖∇f + Σλ_i∇c_i‖`, NOT `‖∇L_A + Σλ_i∇c_i‖`. The
+    KKT stationarity is `‖∇f + Σλ_i∇c_i‖`, NOT `‖∇L_A + Σλ_i∇c_i‖`. The
     augmented gradient `∇L_A` already contains the active-constraint term, so
     nnls would collapse the residual to ~0 once the inner solve converges and
     hide multiplier-quality defects. Order: `base_grad`, `metric_grad`, `grad`.
@@ -503,8 +503,8 @@ def _project_nonnegative_multipliers_with_diagnostics(
         dual_update_values,
         penalty,
     )
-    # H3: defense-in-depth after the H2 whitelist closes the upstream NaN
-    # path. `updated > cap` is False for NaN and `np.minimum(NaN, cap)` is
+    # Defense in depth after _require_finite_evaluation rejects non-finite
+    # evaluation fields. `updated > cap` is False for NaN and `np.minimum(NaN, cap)` is
     # NaN, so a non-finite multiplier would otherwise propagate silently
     # with `cap_binding=False`. Surface the contract violation loudly.
     if not np.all(np.isfinite(updated)):
@@ -802,7 +802,7 @@ def _kkt_stationarity_norm(
         return None
 
     active_matrix = np.column_stack(active_constraint_grads)
-    # M6: nnls can raise RuntimeError("too many iterations") on pathological
+    # nnls can raise RuntimeError("too many iterations") on pathological
     # active-Jacobians; bound iterations and surface the failure as None
     # (the caller already treats None as "diagnostic unavailable") rather
     # than aborting the ALM run through a diagnostic helper. Shape errors

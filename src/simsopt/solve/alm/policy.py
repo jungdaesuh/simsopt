@@ -94,7 +94,7 @@ class DefaultContinuationPolicy:
             and start.stationarity_norm <= settings.stationarity_tol
             and not _constraints_inactive_candidate(start, settings.feasibility_tol)
             and not start.signal_mismatch_active
-            # M4: cap-binding multipliers mean the prior dual update was
+            # Cap-binding multipliers mean the prior dual update was
             # clamped; the KKT residual is held small by the cap, not by
             # convergence. Same guard as both post-inner converged arms; the
             # outer loop continues (a later dual update may unclamp).
@@ -132,7 +132,7 @@ class DefaultContinuationPolicy:
             and measured.stationarity_norm <= settings.stationarity_tol
             and not constraints_inactive
             and not measured.signal_mismatch_active
-            # M4: a clamped dual update holds the KKT residual small.
+            # A clamped dual update holds the KKT residual small.
             and not view.last_cap_binding_active
         ):
             return ALMConverge(
@@ -146,7 +146,7 @@ class DefaultContinuationPolicy:
                 feasible_stall_count=view.feasible_stall_count,
             )
         if constraints_inactive:
-            # M4: the same cap guard applies to the constraints-inactive arm.
+            # The same cap guard applies to the constraints-inactive arm.
             if (
                 _strict_feasibility_satisfied(
                     measured.max_feasibility_violation,
@@ -246,7 +246,7 @@ class DefaultContinuationPolicy:
 
 DEFAULT_CONTINUATION_POLICY = DefaultContinuationPolicy()
 
-# After two consecutive feasible-but-no-progress outer updates, treat the lane as
+# After two consecutive feasible-but-no-progress outer updates, treat the run as
 # plateaued and stop burning boxed continuation cycles.
 _PLATEAU_STALL_LIMIT = 2
 
@@ -278,7 +278,7 @@ def _feasible_step(view: ALMPostInnerView) -> Union[ALMStop, ALMRaisePenalty, AL
             marks_max_outer=True,
         )
     if view.continuation_iteration == settings.max_subproblem_continuations:
-        # M3.a: an exhausted continuation range raises the penalty so the
+        # An exhausted continuation range raises the penalty so the
         # next outer does not re-solve an identical subproblem.
         return ALMRaisePenalty(
             action="subproblem_limit_penalty_increase",

@@ -275,7 +275,7 @@ class AlmEvaluationSchemaCompletenessTests(unittest.TestCase):
 
 
     def test_list_valued_constraint_scales_match_the_declared_type(self):
-        # Campaign metadata passes constraint_scales as a list through
+        # Callers may pass constraint_scales as a list through
         # ALMPhysics extras, and the solver accepts it via np.asarray; the
         # schema must admit that representation, not only ndarray.
         physics = alm.ALMPhysics(

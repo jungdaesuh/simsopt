@@ -156,7 +156,7 @@ def _nonfinite_evaluation_fields(evaluation: dict) -> Tuple[str, ...]:
         "metric_grad",
         "base_grad",
         "constraint_activity_tolerances",
-        # H2: explicit hybrid signal arrays participate in routing and
+        # Explicit hybrid signal arrays participate in routing and
         # the dual update; a NaN here flows directly into multiplier
         # projection. The hybrid surrogate-vs-hard contract depends on
         # these being finite at every evaluation boundary.
@@ -227,9 +227,8 @@ def _attach_alm_constraint_metadata(
     constraint_names_tuple: Tuple[str, ...],
     constraint_blocks_tuple: Optional[Tuple[str, ...]],
 ) -> dict:
-    # L1: always shallow-copy. Previously the no-blocks lane returned the
-    # caller's dict (alias) while the blocks lane shallow-copied. Uniform
-    # ownership: this function returns a dict the caller owns.
+    # Always shallow-copy, with or without constraint blocks, so this
+    # function returns a dict the caller owns and never aliases its input.
     annotated = dict(evaluation)
     if constraint_blocks_tuple is None:
         return annotated

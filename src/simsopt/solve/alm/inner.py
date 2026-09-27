@@ -233,7 +233,7 @@ def _sanitize_nonfinite_inner_evaluation(
 ) -> dict:
     invalid_fields = _nonfinite_evaluation_fields(evaluation)
     if not invalid_fields:
-        # L4: shallow-copy + per-array clone so the no-invalid-field fast
+        # Shallow-copy + per-array clone so the no-invalid-field fast
         # path matches the contract of the sanitized branch (callers always
         # get an owned dict).
         return _clone_evaluation_dict(

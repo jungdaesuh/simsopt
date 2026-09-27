@@ -318,7 +318,7 @@ class AlmDefaultBeforeInnerTests(unittest.TestCase):
         )
 
     def test_cap_binding_blocks_the_start_shortcut(self):
-        # Golden gap: the cap-only M4 block before the inner solve.
+        # Golden gap: the cap-only block before the inner solve.
         view = _view(
             _measure(CONVERGED), after_inner=False, last_cap_binding_active=True
         )
@@ -347,7 +347,7 @@ class AlmDefaultAfterInnerTests(unittest.TestCase):
         )
 
     def test_cap_binding_turns_convergence_into_a_dual_update(self):
-        # Golden gap: the cap-only M4 block after the inner solve.
+        # Golden gap: the cap-only block after the inner solve.
         decision = self.after_inner(
             _view(_measure(CONVERGED), last_cap_binding_active=True)
         )
@@ -372,7 +372,7 @@ class AlmDefaultAfterInnerTests(unittest.TestCase):
         )
 
     def test_cap_binding_turns_constraints_inactive_convergence_into_a_stall(self):
-        # Golden gap: the cap-only M4 block on the constraints-inactive arm.
+        # Golden gap: the cap-only block on the constraints-inactive arm.
         decision = self.after_inner(
             _view(
                 _measure(CONSTRAINTS_INACTIVE),
@@ -426,7 +426,7 @@ class AlmDefaultAfterInnerTests(unittest.TestCase):
         )
 
     def test_infeasible_stall_raises_the_penalty(self):
-        # Golden gap: the cap return of this arm (row 42) is the loop's.
+        # Golden gap: the cap return of this arm is the loop's.
         decision = self.after_inner(
             _view(
                 _measure(INFEASIBLE),
@@ -440,8 +440,8 @@ class AlmDefaultAfterInnerTests(unittest.TestCase):
         self.assertFalse(decision.signal_mismatch_repair)
 
     def test_stalled_signal_mismatch_with_a_live_shift_raises_the_penalty(self):
-        # Golden gap: the cap return of this arm (row 45) is the loop's. The
-        # raise keeps the stall count it came with (trap T1).
+        # Golden gap: the cap return of this arm is the loop's. The
+        # raise keeps the stall count it came with.
         measured = _measure(MISMATCH_LIVE_SHIFT, update_stationarity_tol=1.0e-6)
         self.assertTrue(measured.signal_mismatch_active)
         self.assertFalse(measured.routing_state.surrogate_positive_shift_zero)
@@ -591,7 +591,7 @@ class AlmDefaultAfterInnerTests(unittest.TestCase):
         )
 
     def test_insufficient_decrease_raises_the_penalty(self):
-        # Golden gap: the cap return of this arm (row 56) is the loop's.
+        # Golden gap: the cap return of this arm is the loop's.
         decision = self.after_inner(_view(_measure(INFEASIBLE)))
         self.assertIsInstance(decision, ALMRaisePenalty)
         self.assertEqual(decision.action, "penalty_increase")
