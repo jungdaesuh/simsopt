@@ -57,26 +57,40 @@ Each entry: the symptom, the cause, the fix.
     drops out of L and its gradient goes unchecked; `gradient_check.py` tests
     f and each row separately.
 12. **Taylor steps and smoothing.** The smooth rows select points near the
-    extremum; a step that changes the selection breaks the ratio test. Use
-    steps far below the smoothing temperature (the templates use 1e-5 to
-    2.5e-6).
+    extremum; a step that changes the selection breaks the ratio test, so
+    only steps far below the smoothing temperature judge the gradient.
+    `gradient_check.py` sweeps relative steps from 1 down to 1e-10 and lets
+    the steps nearest the smallest decide; larger steps that plateau at the
+    slope of the selected extremum are overruled by the steps below them.
 13. **Reading the gradient check.** `gradient_check.py` sweeps relative
-    steps from 1 to 1e-10 (each dof moves relative to its own size) and
-    applies three rules per direction: `PASS` when two consecutive steps
-    agree with the claim to 1e-6 (relative to the quantity's gradient
-    scale); `FAIL` when the differences nearest the smallest steps converge
-    (three consecutive steps agree to 1e-4) to a value more than 5e-4 from
-    the claim, unless a smaller step comes back to the claim; `NOT TESTED`
-    otherwise. Steps whose two values are identical or differ by a couple of
-    units in the last place are skipped: there the change is below the
-    precision of the value (a big offset, or a cancellation inside the
-    evaluation). Known limits: a kink exactly at x0 (e.g. `max` at a tie)
-    FAILs, because the central difference converges to the average of the
-    one-sided slopes; a quantity whose values are identical at every step
-    (a constant, or a cancellation of a value far beyond double precision)
-    is judged as flat; and a steep quantity on a large offset (say
-    `1e4 + sin(1e3 x)/1e3`) can be NOT TESTED, because round-off and
-    truncation leave no pair of steps accurate to 1e-6.
+    steps from 1 to 1e-10 (each dof moves relative to its own size). Per
+    direction it finds windows: three or more consecutive steps whose
+    differences agree to 1e-4 (each resolved: the change exceeds both the
+    last-place units of its values and the noise of the evaluation, seen at
+    the smallest steps and grown as 1/step), or whose differences are zero
+    to the round-off floor (1e3 machine epsilons of the objective's
+    gradient, or of the quantity's own value over a unit step). The window
+    nearest the smallest steps judges; `FAIL` comes first: that window
+    misses the claim by more than 5e-4 of its value (or, for a zero window,
+    the claim is not zero to the floor), unless two consecutive smaller
+    steps come back to the claim. `PASS` needs two consecutive steps
+    agreeing with the claim to 1e-6 (relative to the quantity's gradient
+    scale), or a zero window and a zero claim; noise at small steps can pass
+    nothing. `NOT TESTED` otherwise. Identical values at small steps along a
+    direction that changes at larger steps can agree with a zero claim but
+    cannot fail a nonzero one: they are a clipped row near its bound or a
+    change hidden by a cancellation, and the two look alike. Known limits: a
+    kink exactly at x0 (e.g. `max` at a tie) FAILs, because the central
+    difference converges to the average of the one-sided slopes; a quantity
+    whose values are identical at every step (a constant, or a cancellation
+    of a value far beyond double precision) is judged as flat; a steep
+    quantity on a large offset (say `1e4 + sin(1e3 x)/1e3`) can be NOT
+    TESTED, because round-off and truncation leave no pair of steps accurate
+    to 1e-6; relative noise of 1e-4 or more (an inner solve with a loose
+    tolerance) seldom leaves three steps converged to 1e-4, so a wrong
+    gradient there is mostly NOT TESTED rather than FAIL; and a quantity
+    with value 0 in a problem whose objective gradient is 0 at x0 has no
+    scale for zero, so a zero claim is NOT TESTED.
 14. **Unique row names.** The runner reports multipliers and values keyed by
     name, so a repeated name hides a row.
 15. **Conflicting constraints.** Thresholds no design can meet (e.g. a coil

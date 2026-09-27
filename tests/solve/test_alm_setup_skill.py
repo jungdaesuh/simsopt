@@ -103,6 +103,45 @@ def build_problem(smoke=False):
 """
 
 
+# Crucible round 6: noisy quantities, like an iterative inner solve. Each has
+# the value (1 + sum x + sum x^2) (1 + NOISE u), u uniform in [-1, 1] drawn
+# from Python's hash of the point (so PYTHONHASHSEED picks the noise), and
+# claims (1 + DELTA) times the true gradient. The objective is the round-6
+# repro itself (``hash(x.tobytes())``, x0 = (0, 0)); each row salts its hash
+# with its index. Rows are (NOISE, DELTA).
+NOISY_PROBE_PROBLEM = """\
+from types import SimpleNamespace
+
+import numpy as np
+
+from simsopt.solve.alm import ALMPhysics
+
+OBJECTIVE, ROWS = OBJECTIVE_VALUE, ROWS_VALUE
+
+
+def noisy(x, salt, noise, delta):
+    key = x.tobytes() if salt is None else (x.tobytes(), salt)
+    draw = np.random.RandomState(abs(hash(key)) % (2 ** 32)).uniform(-1.0, 1.0)
+    return (1.0 + x.sum() + (x ** 2).sum()) * (1.0 + noise * draw), (1.0 + delta) * (1.0 + 2.0 * x)
+
+
+def physics(x):
+    x = np.asarray(x, dtype=float)
+    value, grad = noisy(x, None, *OBJECTIVE)
+    rows = [noisy(x, index, *row) for index, row in enumerate(ROWS)]
+    return ALMPhysics(base_value=float(value), base_grad=grad,
+                      constraint_values=np.array([float(value) for value, _grad in rows]),
+                      constraint_grads=tuple(grad for _value, grad in rows))
+
+
+def build_problem(smoke=False):
+    return SimpleNamespace(name="noisy", x0=np.zeros(2), physics=physics,
+                           constraint_names=tuple(f"noise_{noise:g}_delta_{delta:g}" for noise, delta in ROWS))
+"""
+# Round-6 seeds of the noise.
+NOISY_HASH_SEEDS = tuple(range(8))
+
+
 # f alone, for the round-off cases of Crucible round 2: a huge value with a
 # small derivative (claimed 0 or right), and a derivative A near the Taylor
 # test's absolute 1e-10 floor (claimed 0 or right).
@@ -313,16 +352,16 @@ def documented_imports(source: str) -> List[tuple]:
             for alias in node.names]
 
 
-def child_env(problem_dir: Optional[Path] = None) -> dict:
+def child_env(problem_dir: Optional[Path] = None, overrides: Optional[Dict[str, str]] = None) -> dict:
     python_path = ([] if problem_dir is None else [str(problem_dir)]) + [str(SRC_DIR)]
     if os.environ.get("PYTHONPATH"):
         python_path.append(os.environ["PYTHONPATH"])
-    return {**os.environ, "PYTHONPATH": os.pathsep.join(python_path)}
+    return {**os.environ, "PYTHONPATH": os.pathsep.join(python_path), **(overrides or {})}
 
 
-def run_python(arguments: List[str], cwd: Path, problem_dir: Optional[Path] = None,
-               timeout: int = 900) -> subprocess.CompletedProcess:
-    return subprocess.run([sys.executable, *arguments], cwd=cwd, env=child_env(problem_dir),
+def run_python(arguments: List[str], cwd: Path, problem_dir: Optional[Path] = None, timeout: int = 900,
+               overrides: Optional[Dict[str, str]] = None) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, *arguments], cwd=cwd, env=child_env(problem_dir, overrides),
                           capture_output=True, text=True, timeout=timeout, check=False)
 
 
@@ -652,7 +691,7 @@ class SkillScriptsRunTests(unittest.TestCase):
         (self.scratch / "alm_problem.py").write_text(GRADIENT_PROBE_PROBLEM.replace("MODE_VALUE", repr("exact")))
         for arguments in (("--directions", "0"), ("--max-step", "0"), ("--max-step", "-1"), ("--max-step", "inf"),
                           ("--min-step", "x"), ("--max-step", "1e-6", "--min-step", "1e-3"),
-                          ("--steps-per-decade", "0")):
+                          ("--steps-per-decade", "0"), ("--seed", "-1"), ("--seed", str(2 ** 32))):
             with self.subTest(arguments=arguments):
                 completed = run_python([str(SCRIPTS_DIR / "gradient_check.py"), *arguments],
                                        cwd=self.scratch, problem_dir=self.scratch)
@@ -703,17 +742,20 @@ class SkillScriptsRunTests(unittest.TestCase):
                          {name: quantity["note"] for name, quantity in quantities.items()})
 
     def test_gradient_check_passes_flat_and_zero_rows(self):
-        """A constant, a zero-derivative and an inactive clipped row pass with a
-        zero claim under the PASS rule; a clearly nonzero claim fails; an exactly
-        zero row passes a round-off-size claim (R5-7: its floor comes from the
-        objective's gradient, not 0) and fails a real one."""
+        """A constant, a zero-derivative and an inactive clipped row pass a zero
+        claim through a near-zero window; a clearly nonzero claim fails; an
+        exactly zero row passes a round-off-size claim (R5-7: its floor comes
+        from the objective's gradient, not 0) and fails a real one; a constant
+        of 1e4 passes a claim at its own round-off (R6-F5) and fails 1e-6."""
         rows = [("const", 1.0, 0.0, 0.0), ("quadratic", 3.0, 0.0, 0.0), ("hinge", 1e-4, 0.0, 0.0),
                 ("const", 1.0, 0.0, 1e-6), ("quadratic", 3.0, 0.0, 1e-6),
-                ("zero", 0.0, 0.0, 1e-17), ("zero", 0.0, 0.0, 1e-6)]
+                ("zero", 0.0, 0.0, 1e-17), ("zero", 0.0, 0.0, 1e-6),
+                ("const", 1e4, 0.0, 1e-12), ("const", 1e4, 0.0, 1e-6)]
         self.assert_verdicts(self.run_shape(rows), {
             "const_1_0_0": "passed", "quadratic_3_0_0": "passed", "hinge_0.0001_0_0": "passed",
             "const_1_0_1e-06": "failed", "quadratic_3_0_1e-06": "failed",
-            "zero_0_0_1e-17": "passed", "zero_0_0_1e-06": "failed"})
+            "zero_0_0_1e-17": "passed", "zero_0_0_1e-06": "failed",
+            "const_10000_0_1e-12": "passed", "const_10000_0_1e-06": "failed"})
 
     def test_gradient_check_passes_steep_smooth_rows(self):
         """R5-1: tanh(1e5 x0 - 0.3) and sin(K x)/K up to K = 1e5 with correct
@@ -770,6 +812,46 @@ class SkillScriptsRunTests(unittest.TestCase):
         self.assertIn("null", line)
         self.assert_verdicts(quantities, {"scaled_1e+220_0_0": "passed", "scaled_1e+220_1_0": "failed",
                                           "overflow_1e+300_0_0": "passed"})
+
+    def run_noisy(self, objective: tuple, rows: list, hash_seed: int) -> Dict[str, dict]:
+        source = (NOISY_PROBE_PROBLEM.replace("OBJECTIVE_VALUE", repr(objective))
+                  .replace("ROWS_VALUE", repr(rows)))
+        (self.scratch / "alm_problem.py").write_text(source)
+        completed = run_python([str(SCRIPTS_DIR / "gradient_check.py")], cwd=self.scratch,
+                               problem_dir=self.scratch, overrides={"PYTHONHASHSEED": str(hash_seed)})
+        summary = result_line(completed, "GRADIENT_CHECK ")
+        return {quantity["quantity"]: quantity for quantity in summary["quantities"]}
+
+    def test_gradient_check_fails_wrong_gradients_on_noisy_quantities(self):
+        """R6-1: relative noise 1e-8 to 1e-5 (an iterative inner solve) with a
+        gradient 5%, 50% or 500% wrong, or zero, fails at every round-6 seed:
+        the large steps converge away from the claim, and the noise at small
+        steps can pass nothing. The round-6 repro (objective, noise 1e-6, 500%
+        wrong, PYTHONHASHSEED=1) passed before. At noise 1e-4 to 1e-3 three
+        steps seldom agree to 1e-4, so these may be NOT TESTED: never passed."""
+        failing = [(noise, delta) for noise in (1e-8, 1e-7, 1e-6, 1e-5) for delta in (0.05, 0.5, 5.0, -1.0)]
+        unresolved = [(noise, delta) for noise in (1e-4, 1e-3) for delta in (0.05, 0.5, 5.0)]
+        for hash_seed in NOISY_HASH_SEEDS:
+            quantities = self.run_noisy((1e-6, 5.0), failing + unresolved, hash_seed)
+            for name, quantity in quantities.items():
+                with self.subTest(hash_seed=hash_seed, quantity=name):
+                    if name == "f" or any(name == f"noise_{noise:g}_delta_{delta:g}" for noise, delta in failing):
+                        self.assertEqual(quantity["verdict"], "failed", quantity["note"])
+                    else:
+                        self.assertNotEqual(quantity["verdict"], "passed", quantity["note"])
+
+    def test_gradient_check_never_fails_a_right_gradient_on_noisy_quantities(self):
+        """R6-2: the same noisy quantities with the right gradient are never
+        failed (NOT TESTED is allowed where the noise hides the 1e-6 agreement)
+        and pass at noise 1e-8."""
+        rows = [(noise, 0.0) for noise in (1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3)]
+        for hash_seed in NOISY_HASH_SEEDS:
+            quantities = self.run_noisy((1e-6, 0.0), rows, hash_seed)
+            for name, quantity in quantities.items():
+                with self.subTest(hash_seed=hash_seed, quantity=name):
+                    self.assertNotEqual(quantity["verdict"], "failed", quantity["note"])
+            self.assertEqual(quantities["noise_1e-08_delta_0"]["verdict"], "passed",
+                             quantities["noise_1e-08_delta_0"]["note"])
 
     def test_gradient_check_kinks(self):
         """A kink 3e-6 away passes (the sweep reaches steps below it); a kink

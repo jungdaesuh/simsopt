@@ -122,13 +122,17 @@ Run each from any directory; all three must pass before the real run.
    must exit 0. It compares each claimed directional derivative with central
    differences over a sweep of relative steps (1 down to 1e-10), and each
    quantity ends in one of:
-   - `PASS`: two consecutive steps agree with the claim to 1e-6. Nothing to do.
-   - `FAIL`: the differences converge (three consecutive steps agree to
-     1e-4) to a value that misses the claim by more than 5e-4: the gradient
-     of the named quantity in `alm_problem.py` is wrong; fix it.
-   - `NOT TESTED`: neither happened (a kink, noise, oscillation, or a value
-     too large for its change to be resolved). Check the quantity at a
-     nearby point, or inspect it; there is no step to retry with.
+   - `FAIL` (decided first): the differences converge (three consecutive
+     steps agree to 1e-4) to a value that misses the claim by more than 5e-4
+     of that value, or they converge to zero and the claim is not zero to
+     round-off: the gradient of the named quantity in `alm_problem.py` is
+     wrong; fix it.
+   - `PASS`: no FAIL, and two consecutive steps agree with the claim to
+     1e-6, or the differences converge to zero and so does the claim.
+     Nothing to do.
+   - `NOT TESTED`: neither (a kink, noise, oscillation, or a value too large
+     for its change to be resolved). Check the quantity at a nearby point,
+     or inspect it; there is no step to retry with.
    - `NONFINITE`: the value or the claimed gradient at x0 is not finite.
 2. `PYTHONPATH=<dir> <python> $SKILL_DIR/scripts/sign_check.py --smoke` must
    exit 0. On a failure, fix the named row's sign or its probe expectation.

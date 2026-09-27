@@ -21,48 +21,58 @@ derivative ``d = grad q . v / |v|``. Every quantity visits the same points,
 so each point's physics is evaluated once. A step whose difference is not
 finite (e.g. a failed inner solve) is skipped.
 
-Resolution: a difference can only be trusted to its resolution ``r``, one
-unit in the last place of its two values over the step: a change below it is
-invisible to the evaluation. A step judges to a tolerance only when ``r`` is
-at most that tolerance times the direction's derivative scale
-``S = max(|d|, median |c|)``; with ``S = 0`` (a direction that never changes)
-every step judges. Three rules decide each direction:
+Resolution: a difference is known only to its resolution ``r``: the larger
+of one unit in the last place of its two values over the step, and the noise
+of the evaluation (round-off inside it, an inner solve's tolerance), which
+is the spread of the differences at the ``NOISE_STEPS`` smallest steps,
+where it dominates, carried to every step as 1 / step. A change below ``r``
+is invisible, so a noisy step can neither pass nor fail a claim. The absolute floor ``B`` of a derivative is
+``ABSOLUTE_FLOOR_ULPS`` times the largest of: machine epsilon times the
+objective's largest claimed directional derivative (one huge row cannot
+raise it for the others), machine epsilon times the quantity's own value
+over a unit relative step (a constant of 1e4 is flat to its own round-off),
+and the smallest normal number.
 
-- PASS: two consecutive steps that resolve ``PASS_TOLERANCE`` both agree
-  with the claim: ``|c - d| <= PASS_TOLERANCE * max(|d|, |c|, G)``, with ``G``
-  the largest claimed directional derivative of the quantity (a direction
-  nearly orthogonal to the gradient is judged at the gradient's scale), or
-  both ``|c|`` and ``|d|`` are within the round-off floor of that step. The
-  floor is the spread (max - min) of the differences at the ``FLOOR_STEPS``
-  smallest judging steps, where round-off dominates, carried to each step as
-  1 / step, and at least ``ABSOLUTE_FLOOR_ULPS`` machine epsilons times the
-  objective's largest claimed directional derivative (so an exactly zero
-  row passes a round-off-size claim; the objective, not the largest row,
-  sets it, so one huge row cannot hide errors in the others). Two
-  consecutive steps rule out a coincidental crossing.
-- FAIL: among the steps that resolve ``FAIL_TOLERANCE``, runs of at least
-  ``CONVERGED_RUN`` consecutive steps whose neighbours agree to
-  ``CONVERGED_TOLERANCE`` (up to their resolution) have converged; the run
-  nearest the smallest steps judges (the derivative is the small-step limit;
-  a plateau at larger steps is the slope of a nearby kink or saturation). A
-  run of exact zeros judges only along a direction that never changes;
-  elsewhere identical values are the precision of the evaluation (e.g. a
-  large intermediate that cancels). With ``v`` the run's median, the
-  direction fails when ``|v - d|`` exceeds ``FAIL_TOLERANCE * max(|v|, |d|)``
-  (or, when ``|v|`` is within the run's floor, that floor) plus the run's
-  resolution, and no smaller judging step comes back within
-  ``FAIL_TOLERANCE`` of the claim.
+Windows: a window is at least ``CONVERGED_RUN`` consecutive steps. In a
+nonzero window every difference is above ``B``, resolved to
+``FAIL_TOLERANCE`` of itself, and agrees with its neighbours to
+``CONVERGED_TOLERANCE`` (up to their resolution); a claim within
+``FAIL_TOLERANCE`` of its median ``v``, relative to ``v`` (plus the
+resolution), agrees with it. In a near-zero window every difference and its
+resolution are within ``B`` of zero; a claim within ``B`` of its median
+agrees. No scale is taken from the differences at large, so noise cannot
+make a step look resolved.
+
+The derivative is the small-step limit, so the window nearest the smallest
+steps judges: a nonzero window at larger steps that disagrees with it is a
+plateau (the slope of a nearby kink or saturation), and so is one followed
+by two consecutive smaller steps within ``FAIL_TOLERANCE`` of the claim.
+Identical values (a window of exact zeros) along a direction that changes
+elsewhere are either a flat stretch (a clipped row near its bound) or a
+change hidden below the precision of an intermediate (a cancellation), and
+the two look alike: such a window judges only below every other window, and
+only in the claim's favour. Rules, FAIL first:
+
+- FAIL: the judging window disagrees with the claim, and neither identical
+  values below it nor two smaller steps come back to the claim.
+- PASS: no FAIL, and either the judging window is a near-zero window that
+  agrees (or there is none, and identical values agree); or two
+  consecutive steps agree with the claim,
+  ``|c - d| <= PASS_TOLERANCE * max(|d|, |c|, G)``, each resolved to that
+  tolerance (``G`` is the quantity's largest claimed directional
+  derivative, so a direction nearly orthogonal to the gradient is judged at
+  the gradient's scale), and the judging window, if any, agrees. A zero
+  claim passes only through a zero window.
 - NOT TESTED otherwise: nothing converged (a kink, noise, oscillation), the
-  steps cannot resolve the derivative, or the result is in between.
+  steps cannot resolve the derivative, or the windows contradict each other.
 
-PASS takes precedence over FAIL. A quantity
-passes when every direction passes, fails when any direction fails, is
-``not_tested`` otherwise, and ``nonfinite`` when its value or claimed
-gradient at x0 is not finite. The note says what was seen; a NOT TESTED one
-asks to check at a nearby point or to inspect the quantity. The last line
-printed is ``GRADIENT_CHECK {json}`` (finite numbers only; ``null`` where
-undefined); the exit status is 0 when every quantity passes, 1 otherwise,
-and 2 for invalid arguments.
+A quantity passes when every direction passes, fails when any direction
+fails, is ``not_tested`` otherwise, and ``nonfinite`` when its value or
+claimed gradient at x0 is not finite. The note says what was seen; a NOT
+TESTED one asks to check at a nearby point or to inspect the quantity. The
+last line printed is ``GRADIENT_CHECK {json}`` (finite numbers only;
+``null`` where undefined); the exit status is 0 when every quantity passes,
+1 otherwise, and 2 for invalid arguments.
 """
 
 from __future__ import annotations
@@ -72,7 +82,7 @@ import inspect
 import json
 import math
 import sys
-from typing import List, NamedTuple, Optional
+from typing import List, NamedTuple, Optional, Tuple
 
 import numpy as np
 
@@ -82,24 +92,27 @@ from simsopt.solve.alm import ALMPhysics, run_directional_taylor_test
 RESULT_PREFIX = "GRADIENT_CHECK "
 OBJECTIVE_LABEL = "f"
 DEFAULT_DIRECTIONS = inspect.signature(run_directional_taylor_test).parameters["direction_count"].default
-# The sweep of relative steps e (the step is e * max(max|x0|, 1)).
+# The sweep of relative steps e: dof i moves by e * max(|x0_i|, 1) * g_i, g standard normal.
 MAX_STEP = 1.0
 MIN_STEP = 1e-10
 STEPS_PER_DECADE = 2
-# PASS: agreement of two consecutive steps with the claim, relative to max(|d|, |c|).
+# PASS: agreement of two consecutive steps with the claim, relative to max(|d|, |c|, G).
 PASS_TOLERANCE = 1e-6
-# FAIL: this many consecutive steps agreeing with each other to CONVERGED_TOLERANCE ...
+# A converged window: this many consecutive steps agreeing with each other to CONVERGED_TOLERANCE ...
 CONVERGED_RUN = 3
 CONVERGED_TOLERANCE = 1e-4
-# ... at a value this far from the claim, relative to max(|v|, |d|): 5 x the
-# convergence tolerance, so a converged value's own spread cannot fail a
-# right claim, and below 1e-3, so a 0.1% wrong gradient fails.
+# ... disagrees with a claim this far from its value, relative to the value:
+# 5 x the convergence tolerance, so a window's own spread cannot fail a right
+# claim, and below 1e-3, so a 0.1% wrong gradient fails.
 FAIL_TOLERANCE = 5e-4
-# The round-off floor is the spread of the differences at this many smallest steps.
-FLOOR_STEPS = 3
 # A derivative within this many machine epsilons of the objective's gradient
-# scale is round-off (the absolute floor of every quantity).
+# scale, or of the quantity's value over a unit relative step, is round-off.
 ABSOLUTE_FLOOR_ULPS = 1e3
+# The noise of an evaluation is the spread of the differences at this many
+# smallest finite steps, where it dominates.
+NOISE_STEPS = 3
+# numpy.random.RandomState seeds.
+SEED_LIMIT = 2 ** 32
 
 
 class PhysicsMemo:
@@ -139,13 +152,13 @@ def quantity_evaluator(memo: PhysicsMemo, row_index: Optional[int]):
 
 class Sweep(NamedTuple):
     """One direction, steps largest first: the claimed derivative, the
-    differences, and their resolution (one unit in the last place of the two
-    values, over the step: a difference this small is a value that did not
-    change)."""
+    differences, their resolution (a change of the difference this small is
+    invisible), and the length of the direction (a unit relative step)."""
 
     claimed: float
     differences: np.ndarray
     resolution: np.ndarray
+    norm: float
 
 
 def sweep_direction(memo: PhysicsMemo, row_index: Optional[int], x0: np.ndarray,
@@ -159,105 +172,127 @@ def sweep_direction(memo: PhysicsMemo, row_index: Optional[int], x0: np.ndarray,
     unit = np.asarray(taylor["direction"], dtype=float)
     plus = np.array([quantity_value(memo(x0 + float(step) * unit), row_index) for step in steps * norm])
     minus = np.array([quantity_value(memo(x0 - float(step) * unit), row_index) for step in steps * norm])
-    resolution = (np.spacing(np.abs(plus)) + np.spacing(np.abs(minus))) / (2.0 * steps * norm)
-    return Sweep(float(taylor["directional_derivative"]),
-                 np.asarray(taylor["central_estimates"], dtype=float), resolution)
+    differences = np.asarray(taylor["central_estimates"], dtype=float)
+    # One unit in the last place of the two values, over the step ...
+    last_place = (np.spacing(np.abs(plus)) + np.spacing(np.abs(minus))) / (2.0 * steps * norm)
+    # ... or the noise of the evaluation (round-off inside it, an inner solve's
+    # tolerance): the spread of the differences at the smallest steps, where
+    # it dominates, carried to every step as 1 / step.
+    smallest = np.flatnonzero(np.isfinite(differences))[-NOISE_STEPS:]
+    noise = (float(np.ptp(differences[smallest])) * steps[smallest[-1]] / steps if smallest.size
+             else np.zeros_like(steps))
+    return Sweep(float(taylor["directional_derivative"]), differences, np.maximum(last_place, noise), norm)
 
 
-def round_off_floor(differences: np.ndarray, usable: np.ndarray, steps: np.ndarray) -> np.ndarray:
-    """The round-off of each difference: the spread (max - min) of the
-    differences at the FLOOR_STEPS smallest usable steps, where round-off
-    dominates, carried to every step as 1 / step (round-off of a difference
-    grows as the step shrinks); 0 where the differences are exact."""
-    chosen = np.flatnonzero(usable)[-FLOOR_STEPS:]
-    if chosen.size == 0:
-        return np.zeros_like(steps)
-    spread = float(differences[chosen].max() - differences[chosen].min())
-    return spread * steps[chosen[-1]] / steps
+class Window(NamedTuple):
+    """Steps ``start`` to ``stop`` (inclusive; larger steps first) whose
+    differences converged to ``value``; a claim within ``band`` of it agrees.
+    ``near_zero``: the differences are zero to the absolute floor;
+    ``identical``: they are exactly 0 (identical values at x0 +- e v)."""
+
+    start: int
+    stop: int
+    value: float
+    band: float
+    near_zero: bool
+    identical: bool
+
+    def agrees(self, claimed: float) -> bool:
+        return abs(claimed - self.value) <= self.band
 
 
-def within(a: float, b: float, tolerance: float, scale: float, floor: float, allowance: float = 0.0) -> bool:
-    """``|a - b| <= tolerance * max(|a|, |b|, scale) + allowance``, or ``a`` and
-    ``b`` both within ``floor`` (round-off)."""
-    return (abs(a - b) <= tolerance * max(abs(a), abs(b), scale) + allowance
-            or (abs(a) <= floor and abs(b) <= floor))
-
-
-def converged_runs(c: np.ndarray, usable: np.ndarray, floor: np.ndarray, resolution: np.ndarray) -> List[tuple]:
+def runs(member: np.ndarray, linked: np.ndarray) -> List[Tuple[int, int]]:
     """The maximal runs ``(start, stop)`` of at least CONVERGED_RUN consecutive
-    usable steps whose neighbours agree to CONVERGED_TOLERANCE, up to their
-    resolution (or are both within the round-off floor), largest steps first."""
-    runs, start = [], 0
-    while start < len(c):
+    member steps, each linked to the next (``linked[k]``: steps k and k + 1)."""
+    found, start = [], 0
+    while start < len(member):
         stop = start
-        while stop + 1 < len(c) and usable[stop] and usable[stop + 1] and \
-                within(c[stop], c[stop + 1], CONVERGED_TOLERANCE, 0.0, max(floor[stop], floor[stop + 1]),
-                       resolution[stop] + resolution[stop + 1]):
+        while member[stop] and stop + 1 < len(member) and member[stop + 1] and linked[stop]:
             stop += 1
-        if stop - start + 1 >= CONVERGED_RUN:
-            runs.append((start, stop))
+        if member[start] and stop - start + 1 >= CONVERGED_RUN:
+            found.append((start, stop))
         start = stop + 1
-    return runs
+    return found
 
 
-def judge_direction(sweep: Sweep, steps: np.ndarray, gradient_scale: float, absolute_floor: float) -> dict:
-    """The three rules of the module docstring for one direction."""
-    c, d, resolution = sweep.differences, sweep.claimed, sweep.resolution
-    finite = np.isfinite(c)
-    # A step can judge the derivative to a tolerance only when its resolution
-    # (one unit in the last place of its values, over the step) is below the
-    # tolerance times the direction's derivative scale: otherwise a zero or a
-    # few-ulp difference is the precision of the value, not the derivative.
-    # A direction that never changes (scale 0) is fully resolved: it is flat.
-    scale = max(abs(d), float(np.median(np.abs(c[finite]))) if finite.any() else 0.0)
-    passing = finite & ((scale == 0.0) | (resolution <= PASS_TOLERANCE * scale))
-    judging = finite & ((scale == 0.0) | (resolution <= FAIL_TOLERANCE * scale))
-    floor = np.maximum(round_off_floor(c, judging, steps), absolute_floor)
-    for k in range(len(c) - 1):
-        if passing[k] and passing[k + 1] and within(c[k], d, PASS_TOLERANCE, gradient_scale, floor[k]) \
-                and within(c[k + 1], d, PASS_TOLERANCE, gradient_scale, floor[k + 1]):
-            error = max(abs(c[k] - d), abs(c[k + 1] - d)) / max(abs(d), abs(c[k]), abs(c[k + 1]),
-                                                                  gradient_scale, 1e-300)
-            return {"verdict": "passed", "claimed": d, "steps": [steps[k], steps[k + 1]],
-                    "note": f"agrees to {error:.1e} at steps {steps[k]:.1e} and {steps[k + 1]:.1e}"}
-    runs = converged_runs(c, judging, floor, resolution)
-    # Exactly zero differences (identical values at x0 + e v and x0 - e v) are
-    # a derivative only along a direction that never changes; where other steps
-    # do change, they are the precision of the evaluation (e.g. a large
-    # intermediate that cancels), so they cannot fail a claim.
-    if np.any(c[finite] != 0.0):
-        runs = [(start, stop) for start, stop in runs if np.any(c[start:stop + 1] != 0.0)]
-    if runs:
-        # The derivative is the small-step limit: the run nearest it judges,
-        # and not when a smaller judging step comes back to the claim (then the
-        # run is a plateau at large steps: the slope of a nearby kink or of a
-        # saturation, not the derivative at x0).
-        start, stop = runs[-1]
+def windows(sweep: Sweep, floor: float) -> List[Window]:
+    """The converged windows of one direction (module docstring), larger
+    steps first."""
+    finite = np.isfinite(sweep.differences) & np.isfinite(sweep.resolution)
+    c = np.where(finite, sweep.differences, 0.0)
+    resolution = np.where(finite, sweep.resolution, 0.0)
+    size = np.abs(c)
+    resolved = finite & (size > floor) & (resolution <= FAIL_TOLERANCE * size)
+    agreeing = np.abs(np.diff(c)) <= (CONVERGED_TOLERANCE * np.maximum(size[:-1], size[1:])
+                                      + resolution[:-1] + resolution[1:])
+    near_zero = finite & (size + resolution <= floor)
+    found = []
+    for start, stop in runs(resolved, agreeing):
         value = float(np.median(c[start:stop + 1]))
-        run_floor = float(floor[start:stop + 1].max())
-        allowance = float(resolution[start:stop + 1].max())
-        near_zero = abs(value) <= run_floor
-        miss = abs(value - d)
-        margin = run_floor if near_zero else FAIL_TOLERANCE * max(abs(value), abs(d))
-        returns = any(judging[k] and within(c[k], d, FAIL_TOLERANCE, 0.0, 0.0, resolution[k])
-                      for k in range(stop + 1, len(c)))
-        if miss > margin + allowance and not returns:
-            relative = f"relative {miss / max(abs(value), abs(d)):.1e}" if not near_zero else \
-                f"absolute {miss:.2e}, round-off {run_floor:.1e}"
-            return {"verdict": "failed", "claimed": d, "converged": value,
-                    "steps": [steps[start], steps[stop]],
-                    "note": (f"the differences converge to {value:.6e} over steps {steps[start]:.1e} to "
-                             f"{steps[stop]:.1e}, but the claim is {d:.6e} ({relative})")}
-    seen = c[judging]
-    seen_range = (f"[{seen.min():.3e}, {seen.max():.3e}]" if seen.size else "no resolved difference")
+        band = FAIL_TOLERANCE * abs(value) + float(resolution[start:stop + 1].max())
+        found.append(Window(start, stop, value, band, False, False))
+    for start, stop in runs(near_zero, np.ones(len(c) - 1, dtype=bool)):
+        found.append(Window(start, stop, float(np.median(c[start:stop + 1])), floor, True,
+                            not np.any(c[start:stop + 1])))
+    return sorted(found)
+
+
+def describe(window: Window, steps: np.ndarray) -> str:
+    span = f"over steps {steps[window.start]:.1e} to {steps[window.stop]:.1e}"
+    if window.near_zero:
+        return f"the differences are zero to {window.band:.1e} {span}"
+    return f"the differences converge to {window.value:.6e} {span}"
+
+
+def judge_direction(sweep: Sweep, steps: np.ndarray, gradient_scale: float, floor: float) -> dict:
+    """The rules of the module docstring for one direction, FAIL first."""
+    c, d, resolution = sweep.differences, sweep.claimed, sweep.resolution
+    found = windows(sweep, floor)
+    changes = bool(np.any(c[np.isfinite(c)] != 0.0))
+    # Identical values along a direction that changes elsewhere may hide a
+    # change below the precision of an intermediate: they judge only after
+    # (below) the last other window, and only in the claim's favour.
+    judging = [window for window in found if not (changes and window.identical)]
+    last = judging[-1] if judging else None
+    identical = [window for window in found if changes and window.identical
+                 and (last is None or window.start > last.stop)]
+    supported = bool(identical) and identical[-1].agrees(d)
+    # Two consecutive steps below the last window that come back to the claim
+    # show that window is a plateau (the slope of a nearby kink or saturation).
+    near = np.maximum(abs(d), np.abs(np.where(np.isfinite(c), c, 0.0)))
+    back = np.isfinite(c) & (np.abs(c - d) <= FAIL_TOLERANCE * near) & (resolution <= FAIL_TOLERANCE * near)
+    returns = last is not None and bool(np.any(back[last.stop + 1:-1] & back[last.stop + 2:]))
+    if last is not None and not last.agrees(d) and not supported and not returns:
+        miss = abs(d - last.value)
+        relative = f"absolute {miss:.2e}" if last.near_zero else f"relative {miss / abs(last.value):.1e}"
+        return {"verdict": "failed", "claimed": d, "converged": last.value,
+                "steps": [steps[last.start], steps[last.stop]],
+                "note": f"{describe(last, steps)}, but the claim is {d:.6e} ({relative})"}
+    zero = last if last is not None and last.near_zero and last.agrees(d) else \
+        identical[-1] if last is None and supported else None
+    if zero is not None:
+        return {"verdict": "passed", "claimed": d, "steps": [steps[zero.start], steps[zero.stop]],
+                "note": f"{describe(zero, steps)}, as claimed ({d:.1e})"}
+    scale = np.maximum(np.maximum(abs(d), np.abs(c)), gradient_scale)
+    agreeing = (np.isfinite(c) & (np.abs(c - d) <= PASS_TOLERANCE * scale)
+                & (resolution <= PASS_TOLERANCE * scale))
+    pairs = np.flatnonzero(agreeing[:-1] & agreeing[1:])
+    if pairs.size and (last is None or last.agrees(d)):
+        k = int(pairs[0])
+        error = float(np.max(np.abs(c[k:k + 2] - d) / scale[k:k + 2]))
+        return {"verdict": "passed", "claimed": d, "steps": [steps[k], steps[k + 1]],
+                "note": f"agrees to {error:.1e} at steps {steps[k]:.1e} and {steps[k + 1]:.1e}"}
+    seen = c[np.isfinite(c)]
+    seen_range = f"[{seen.min():.3e}, {seen.max():.3e}]" if seen.size else "no finite value"
     return {"verdict": "not_tested", "claimed": d,
-            "note": (f"the differences ranged over {seen_range} against a claim of {d:.3e} without settling "
-                     "on it; check at a nearby point or inspect the quantity (a kink, noise or oscillation)")}
+            "note": (f"the differences ranged over {seen_range} against a claim of {d:.3e}, neither agreeing "
+                     "with it at two steps nor converging away from it; check at a nearby point or inspect "
+                     "the quantity (a kink, noise or oscillation)")}
 
 
-def judge(label: str, value: float, steps: np.ndarray, sweeps: List[Sweep], absolute_floor: float) -> dict:
-    """The quantity's verdict from its directions; ``absolute_floor`` is the
-    problem-wide round-off floor of a derivative (see ``main``)."""
+def judge(label: str, value: float, steps: np.ndarray, sweeps: List[Sweep], objective_floor: float) -> dict:
+    """The quantity's verdict from its directions; ``objective_floor`` is the
+    objective's part of the absolute floor (see ``main``)."""
     report = {"quantity": label, "value": value,
               "directional_derivatives": [sweep.claimed for sweep in sweeps],
               "finite_differences": [sweep.differences.tolist() for sweep in sweeps]}
@@ -267,7 +302,11 @@ def judge(label: str, value: float, steps: np.ndarray, sweeps: List[Sweep], abso
     # The quantity's own gradient scale: a direction nearly orthogonal to the
     # gradient is judged against it, not against its own tiny derivative.
     gradient_scale = max(abs(sweep.claimed) for sweep in sweeps)
-    directions = [judge_direction(sweep, steps, gradient_scale, absolute_floor) for sweep in sweeps]
+    epsilon, tiny = float(np.finfo(float).eps), float(np.finfo(float).tiny)
+    directions = [judge_direction(sweep, steps, gradient_scale,
+                                  max(objective_floor, ABSOLUTE_FLOOR_ULPS * epsilon * abs(value) / sweep.norm,
+                                      ABSOLUTE_FLOOR_ULPS * tiny))
+                  for sweep in sweeps]
     verdicts = [direction["verdict"] for direction in directions]
     count = len(verdicts)
     if "failed" in verdicts:
@@ -310,6 +349,13 @@ def positive_int(text: str) -> int:
     return value
 
 
+def seed(text: str) -> int:
+    value = int(text)
+    if not 0 <= value < SEED_LIMIT:
+        raise argparse.ArgumentTypeError(f"must be in [0, {SEED_LIMIT}), got {text}")
+    return value
+
+
 def step_sweep(max_step: float, min_step: float, per_decade: int) -> np.ndarray:
     """``e`` from ``max_step`` down to ``min_step``, ``per_decade`` per decade."""
     count = int(round(math.log10(max_step / min_step) * per_decade)) + 1
@@ -321,7 +367,7 @@ def main(argv=None) -> int:
     parser.add_argument("--smoke", action="store_true", help="build the problem at its smoke size")
     parser.add_argument("--directions", type=positive_int, default=DEFAULT_DIRECTIONS,
                         help="random directions per quantity")
-    parser.add_argument("--seed", type=int, default=1, help="seed of the random directions")
+    parser.add_argument("--seed", type=seed, default=1, help="seed of the random directions")
     parser.add_argument("--max-step", type=positive_float, default=MAX_STEP, help="largest relative step")
     parser.add_argument("--min-step", type=positive_float, default=MIN_STEP, help="smallest relative step")
     parser.add_argument("--steps-per-decade", type=positive_int, default=STEPS_PER_DECADE,
@@ -331,10 +377,9 @@ def main(argv=None) -> int:
             len(step_sweep(args.max_step, args.min_step, args.steps_per_decade)) < CONVERGED_RUN + 1:
         parser.error(f"the sweep from --max-step {args.max_step:g} down to --min-step {args.min_step:g} "
                      f"must hold at least {CONVERGED_RUN + 1} steps")
-    relative = step_sweep(args.max_step, args.min_step, args.steps_per_decade)
+    steps = step_sweep(args.max_step, args.min_step, args.steps_per_decade)
     problem = build_problem(smoke=args.smoke)
     x0 = np.asarray(problem.x0, dtype=float)
-    steps = relative
 
     # Directions drawn once, each dof scaled to its own size; every quantity
     # visits the same points.
@@ -346,14 +391,14 @@ def main(argv=None) -> int:
     indices = (None,) + tuple(range(len(problem.constraint_names)))
     sweeps = [[sweep_direction(memo, index, x0, direction, steps) for direction in directions]
               for index in indices]
-    # The objective's gradient scale sets the absolute floor of a derivative: a
-    # claim within ABSOLUTE_FLOOR_ULPS machine epsilons of it is round-off, so an
-    # exactly zero row passes a round-off-size claim and fails a real one. (The
-    # objective, not the largest row, anchors it: one huge row must not hide
-    # errors in the others.)
+    # The objective's gradient scale anchors the absolute floor of a derivative:
+    # a claim within ABSOLUTE_FLOOR_ULPS machine epsilons of it is round-off, so
+    # an exactly zero row passes a round-off-size claim and fails a real one.
+    # (The objective, not the largest row, anchors it: one huge row must not
+    # hide errors in the others.)
     objective_claims = [abs(sweep.claimed) for sweep in sweeps[0] if np.isfinite(sweep.claimed)]
-    absolute_floor = ABSOLUTE_FLOOR_ULPS * np.finfo(float).eps * max(objective_claims, default=0.0)
-    outcomes = [judge(label, quantity_value(memo(x0), index), steps, row, absolute_floor)
+    objective_floor = ABSOLUTE_FLOOR_ULPS * np.finfo(float).eps * max(objective_claims, default=0.0)
+    outcomes = [judge(label, quantity_value(memo(x0), index), steps, row, objective_floor)
                 for label, index, row in zip(labels, indices, sweeps)]
     passed = all(outcome["passed"] for outcome in outcomes)
     status_names = {"passed": "PASS", "failed": "FAIL", "not_tested": "NOT TESTED", "nonfinite": "NONFINITE"}

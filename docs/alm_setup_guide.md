@@ -135,13 +135,17 @@ Run each from any directory; all three must pass before the real run.
    must exit 0. It compares each claimed directional derivative with central
    differences over a sweep of relative steps (1 down to 1e-10), and each
    quantity ends in one of:
-   - `PASS`: two consecutive steps agree with the claim to 1e-6. Nothing to do.
-   - `FAIL`: the differences converge (three consecutive steps agree to
-     1e-4) to a value that misses the claim by more than 5e-4: the gradient
-     of the named quantity in `alm_problem.py` is wrong; fix it.
-   - `NOT TESTED`: neither happened (a kink, noise, oscillation, or a value
-     too large for its change to be resolved). Check the quantity at a
-     nearby point, or inspect it; there is no step to retry with.
+   - `FAIL` (decided first): the differences converge (three consecutive
+     steps agree to 1e-4) to a value that misses the claim by more than 5e-4
+     of that value, or they converge to zero and the claim is not zero to
+     round-off: the gradient of the named quantity in `alm_problem.py` is
+     wrong; fix it.
+   - `PASS`: no FAIL, and two consecutive steps agree with the claim to
+     1e-6, or the differences converge to zero and so does the claim.
+     Nothing to do.
+   - `NOT TESTED`: neither (a kink, noise, oscillation, or a value too large
+     for its change to be resolved). Check the quantity at a nearby point,
+     or inspect it; there is no step to retry with.
    - `NONFINITE`: the value or the claimed gradient at x0 is not finite.
 2. `PYTHONPATH=<dir> <python> $SKILL_DIR/scripts/sign_check.py --smoke` must
    exit 0. On a failure, fix the named row's sign or its probe expectation.
@@ -818,26 +822,40 @@ Each entry: the symptom, the cause, the fix.
     drops out of L and its gradient goes unchecked; `gradient_check.py` tests
     f and each row separately.
 12. **Taylor steps and smoothing.** The smooth rows select points near the
-    extremum; a step that changes the selection breaks the ratio test. Use
-    steps far below the smoothing temperature (the templates use 1e-5 to
-    2.5e-6).
+    extremum; a step that changes the selection breaks the ratio test, so
+    only steps far below the smoothing temperature judge the gradient.
+    `gradient_check.py` sweeps relative steps from 1 down to 1e-10 and lets
+    the steps nearest the smallest decide; larger steps that plateau at the
+    slope of the selected extremum are overruled by the steps below them.
 13. **Reading the gradient check.** `gradient_check.py` sweeps relative
-    steps from 1 to 1e-10 (each dof moves relative to its own size) and
-    applies three rules per direction: `PASS` when two consecutive steps
-    agree with the claim to 1e-6 (relative to the quantity's gradient
-    scale); `FAIL` when the differences nearest the smallest steps converge
-    (three consecutive steps agree to 1e-4) to a value more than 5e-4 from
-    the claim, unless a smaller step comes back to the claim; `NOT TESTED`
-    otherwise. Steps whose two values are identical or differ by a couple of
-    units in the last place are skipped: there the change is below the
-    precision of the value (a big offset, or a cancellation inside the
-    evaluation). Known limits: a kink exactly at x0 (e.g. `max` at a tie)
-    FAILs, because the central difference converges to the average of the
-    one-sided slopes; a quantity whose values are identical at every step
-    (a constant, or a cancellation of a value far beyond double precision)
-    is judged as flat; and a steep quantity on a large offset (say
-    `1e4 + sin(1e3 x)/1e3`) can be NOT TESTED, because round-off and
-    truncation leave no pair of steps accurate to 1e-6.
+    steps from 1 to 1e-10 (each dof moves relative to its own size). Per
+    direction it finds windows: three or more consecutive steps whose
+    differences agree to 1e-4 (each resolved: the change exceeds both the
+    last-place units of its values and the noise of the evaluation, seen at
+    the smallest steps and grown as 1/step), or whose differences are zero
+    to the round-off floor (1e3 machine epsilons of the objective's
+    gradient, or of the quantity's own value over a unit step). The window
+    nearest the smallest steps judges; `FAIL` comes first: that window
+    misses the claim by more than 5e-4 of its value (or, for a zero window,
+    the claim is not zero to the floor), unless two consecutive smaller
+    steps come back to the claim. `PASS` needs two consecutive steps
+    agreeing with the claim to 1e-6 (relative to the quantity's gradient
+    scale), or a zero window and a zero claim; noise at small steps can pass
+    nothing. `NOT TESTED` otherwise. Identical values at small steps along a
+    direction that changes at larger steps can agree with a zero claim but
+    cannot fail a nonzero one: they are a clipped row near its bound or a
+    change hidden by a cancellation, and the two look alike. Known limits: a
+    kink exactly at x0 (e.g. `max` at a tie) FAILs, because the central
+    difference converges to the average of the one-sided slopes; a quantity
+    whose values are identical at every step (a constant, or a cancellation
+    of a value far beyond double precision) is judged as flat; a steep
+    quantity on a large offset (say `1e4 + sin(1e3 x)/1e3`) can be NOT
+    TESTED, because round-off and truncation leave no pair of steps accurate
+    to 1e-6; relative noise of 1e-4 or more (an inner solve with a loose
+    tolerance) seldom leaves three steps converged to 1e-4, so a wrong
+    gradient there is mostly NOT TESTED rather than FAIL; and a quantity
+    with value 0 in a problem whose objective gradient is 0 at x0 has no
+    scale for zero, so a zero claim is NOT TESTED.
 14. **Unique row names.** The runner reports multipliers and values keyed by
     name, so a repeated name hides a row.
 15. **Conflicting constraints.** Thresholds no design can meet (e.g. a coil
@@ -1029,48 +1047,58 @@ derivative ``d = grad q . v / |v|``. Every quantity visits the same points,
 so each point's physics is evaluated once. A step whose difference is not
 finite (e.g. a failed inner solve) is skipped.
 
-Resolution: a difference can only be trusted to its resolution ``r``, one
-unit in the last place of its two values over the step: a change below it is
-invisible to the evaluation. A step judges to a tolerance only when ``r`` is
-at most that tolerance times the direction's derivative scale
-``S = max(|d|, median |c|)``; with ``S = 0`` (a direction that never changes)
-every step judges. Three rules decide each direction:
+Resolution: a difference is known only to its resolution ``r``: the larger
+of one unit in the last place of its two values over the step, and the noise
+of the evaluation (round-off inside it, an inner solve's tolerance), which
+is the spread of the differences at the ``NOISE_STEPS`` smallest steps,
+where it dominates, carried to every step as 1 / step. A change below ``r``
+is invisible, so a noisy step can neither pass nor fail a claim. The absolute floor ``B`` of a derivative is
+``ABSOLUTE_FLOOR_ULPS`` times the largest of: machine epsilon times the
+objective's largest claimed directional derivative (one huge row cannot
+raise it for the others), machine epsilon times the quantity's own value
+over a unit relative step (a constant of 1e4 is flat to its own round-off),
+and the smallest normal number.
 
-- PASS: two consecutive steps that resolve ``PASS_TOLERANCE`` both agree
-  with the claim: ``|c - d| <= PASS_TOLERANCE * max(|d|, |c|, G)``, with ``G``
-  the largest claimed directional derivative of the quantity (a direction
-  nearly orthogonal to the gradient is judged at the gradient's scale), or
-  both ``|c|`` and ``|d|`` are within the round-off floor of that step. The
-  floor is the spread (max - min) of the differences at the ``FLOOR_STEPS``
-  smallest judging steps, where round-off dominates, carried to each step as
-  1 / step, and at least ``ABSOLUTE_FLOOR_ULPS`` machine epsilons times the
-  objective's largest claimed directional derivative (so an exactly zero
-  row passes a round-off-size claim; the objective, not the largest row,
-  sets it, so one huge row cannot hide errors in the others). Two
-  consecutive steps rule out a coincidental crossing.
-- FAIL: among the steps that resolve ``FAIL_TOLERANCE``, runs of at least
-  ``CONVERGED_RUN`` consecutive steps whose neighbours agree to
-  ``CONVERGED_TOLERANCE`` (up to their resolution) have converged; the run
-  nearest the smallest steps judges (the derivative is the small-step limit;
-  a plateau at larger steps is the slope of a nearby kink or saturation). A
-  run of exact zeros judges only along a direction that never changes;
-  elsewhere identical values are the precision of the evaluation (e.g. a
-  large intermediate that cancels). With ``v`` the run's median, the
-  direction fails when ``|v - d|`` exceeds ``FAIL_TOLERANCE * max(|v|, |d|)``
-  (or, when ``|v|`` is within the run's floor, that floor) plus the run's
-  resolution, and no smaller judging step comes back within
-  ``FAIL_TOLERANCE`` of the claim.
+Windows: a window is at least ``CONVERGED_RUN`` consecutive steps. In a
+nonzero window every difference is above ``B``, resolved to
+``FAIL_TOLERANCE`` of itself, and agrees with its neighbours to
+``CONVERGED_TOLERANCE`` (up to their resolution); a claim within
+``FAIL_TOLERANCE`` of its median ``v``, relative to ``v`` (plus the
+resolution), agrees with it. In a near-zero window every difference and its
+resolution are within ``B`` of zero; a claim within ``B`` of its median
+agrees. No scale is taken from the differences at large, so noise cannot
+make a step look resolved.
+
+The derivative is the small-step limit, so the window nearest the smallest
+steps judges: a nonzero window at larger steps that disagrees with it is a
+plateau (the slope of a nearby kink or saturation), and so is one followed
+by two consecutive smaller steps within ``FAIL_TOLERANCE`` of the claim.
+Identical values (a window of exact zeros) along a direction that changes
+elsewhere are either a flat stretch (a clipped row near its bound) or a
+change hidden below the precision of an intermediate (a cancellation), and
+the two look alike: such a window judges only below every other window, and
+only in the claim's favour. Rules, FAIL first:
+
+- FAIL: the judging window disagrees with the claim, and neither identical
+  values below it nor two smaller steps come back to the claim.
+- PASS: no FAIL, and either the judging window is a near-zero window that
+  agrees (or there is none, and identical values agree); or two
+  consecutive steps agree with the claim,
+  ``|c - d| <= PASS_TOLERANCE * max(|d|, |c|, G)``, each resolved to that
+  tolerance (``G`` is the quantity's largest claimed directional
+  derivative, so a direction nearly orthogonal to the gradient is judged at
+  the gradient's scale), and the judging window, if any, agrees. A zero
+  claim passes only through a zero window.
 - NOT TESTED otherwise: nothing converged (a kink, noise, oscillation), the
-  steps cannot resolve the derivative, or the result is in between.
+  steps cannot resolve the derivative, or the windows contradict each other.
 
-PASS takes precedence over FAIL. A quantity
-passes when every direction passes, fails when any direction fails, is
-``not_tested`` otherwise, and ``nonfinite`` when its value or claimed
-gradient at x0 is not finite. The note says what was seen; a NOT TESTED one
-asks to check at a nearby point or to inspect the quantity. The last line
-printed is ``GRADIENT_CHECK {json}`` (finite numbers only; ``null`` where
-undefined); the exit status is 0 when every quantity passes, 1 otherwise,
-and 2 for invalid arguments.
+A quantity passes when every direction passes, fails when any direction
+fails, is ``not_tested`` otherwise, and ``nonfinite`` when its value or
+claimed gradient at x0 is not finite. The note says what was seen; a NOT
+TESTED one asks to check at a nearby point or to inspect the quantity. The
+last line printed is ``GRADIENT_CHECK {json}`` (finite numbers only;
+``null`` where undefined); the exit status is 0 when every quantity passes,
+1 otherwise, and 2 for invalid arguments.
 
 ### [scripts/sign_check.py](../.claude/skills/simsopt-alm-setup/scripts/sign_check.py)
 
