@@ -37,11 +37,15 @@
   "simsopt/solve/alm/policy.py": "76b8da88e67c0ededa6ac8fe9497b1d5724f255f",
   "simsopt/solve/alm/problem.py": "3dae69d828aff8402c5e4bc7de19c6af4eeb7824",
   "simsopt/solve/alm/taylor.py": "0145e7432911ae1ee77ed408c54ced10e03d5124",
-  "alm_golden_scenarios.py": "548420a21a88df301c545c0338dc8a6497405a36"
+  "alm_golden_scenarios.py": "cd67f25e11be56f7eced16dc4dc1278ab4b1bad2"
  },
  "scenarios": {
   "toy_convex": {
    "label_only": null,
+   "observed_outcomes": [
+    "callback:evaluate_problem",
+    "termination:converged"
+   ],
    "spread": {
     "x": 4.440892098500626e-15,
     "objective": 6.994405055138486e-15,
@@ -52,6 +56,26 @@
   },
   "penalty_ramp_to_cap": {
    "label_only": "outcomes change under 2 ulp, seed 5: ['callback:restore_incumbent_state', 'restored:final_iterate_worse_than_best_feasible', 'termination:penalty_cap_reached', 'termination:penalty_cap_reached_restored_best_feasible']",
+   "observed_outcomes": [
+    "action:dual_update",
+    "action:infeasible_stall_penalty_increase",
+    "action:penalty_cap_reached",
+    "action:penalty_increase",
+    "action:sufficient_decrease_hold",
+    "callback:accepted_callback",
+    "callback:evaluate_problem",
+    "callback:inner_callback",
+    "callback:on_outer_boundary",
+    "callback:on_outer_step",
+    "callback:outer_state_callback",
+    "callback:restore_incumbent_state",
+    "callback:snapshot_accepted_state",
+    "flag:infeasible_stall",
+    "flag:inner_false_success",
+    "restored:final_iterate_worse_than_best_feasible",
+    "termination:penalty_cap_reached",
+    "termination:penalty_cap_reached_restored_best_feasible"
+   ],
    "spread": {
     "x": 7.815970093361103e-15,
     "objective": 4.9264296346033615e-15,
@@ -62,6 +86,27 @@
   },
   "resume_penalty_ramp_mid_run": {
    "label_only": "outcomes change under 2 ulp, seed 5: ['restored:final_iterate_worse_than_best_feasible', 'termination:penalty_cap_reached', 'termination:penalty_cap_reached_restored_best_feasible']",
+   "observed_outcomes": [
+    "action:dual_update",
+    "action:infeasible_stall_penalty_increase",
+    "action:penalty_cap_reached",
+    "action:penalty_increase",
+    "action:sufficient_decrease_hold",
+    "callback:accepted_callback",
+    "callback:evaluate_problem",
+    "callback:inner_callback",
+    "callback:on_outer_boundary",
+    "callback:on_outer_step",
+    "callback:outer_state_callback",
+    "callback:restore_incumbent_state",
+    "callback:snapshot_accepted_state",
+    "flag:infeasible_stall",
+    "flag:inner_false_success",
+    "restored:final_iterate_worse_than_best_feasible",
+    "resumed",
+    "termination:penalty_cap_reached",
+    "termination:penalty_cap_reached_restored_best_feasible"
+   ],
    "spread": {
     "x": 7.815970093361103e-15,
     "objective": 4.9264296346033615e-15,
@@ -72,6 +117,22 @@
   },
   "hybrid_mismatch_repair": {
    "label_only": null,
+   "observed_outcomes": [
+    "action:penalty_increase",
+    "action:signal_mismatch_subproblem_limit_penalty_increase",
+    "action:subproblem_continue",
+    "callback:accepted_callback",
+    "callback:evaluate_problem",
+    "callback:inner_callback",
+    "callback:on_outer_boundary",
+    "callback:on_outer_step",
+    "callback:outer_state_callback",
+    "callback:restore_incumbent_state",
+    "callback:snapshot_accepted_state",
+    "flag:signal_mismatch_active",
+    "restored:final_iterate_infeasible",
+    "termination:max_outer_restored_best_feasible"
+   ],
    "spread": {
     "x": 0.0,
     "objective": 8.877079297089645e-16,
@@ -82,6 +143,22 @@
   },
   "hybrid_mismatch_penalty_increase": {
    "label_only": "outcomes change under 2 ulp, seed 2: ['callback:restore_incumbent_state', 'restored:final_iterate_worse_than_best_feasible', 'termination:max_outer_after_signal_mismatch_penalty_increase', 'termination:max_outer_restored_best_feasible']",
+   "observed_outcomes": [
+    "action:signal_mismatch_penalty_increase",
+    "action:subproblem_continue",
+    "callback:accepted_callback",
+    "callback:evaluate_problem",
+    "callback:inner_callback",
+    "callback:on_outer_boundary",
+    "callback:on_outer_step",
+    "callback:outer_state_callback",
+    "callback:restore_incumbent_state",
+    "callback:snapshot_accepted_state",
+    "flag:signal_mismatch_active",
+    "restored:final_iterate_worse_than_best_feasible",
+    "termination:max_outer_after_signal_mismatch_penalty_increase",
+    "termination:max_outer_restored_best_feasible"
+   ],
    "spread": {
     "x": 0.0,
     "objective": 7.002930640068652e-16,
@@ -92,6 +169,19 @@
   },
   "hybrid_mismatch_stall": {
    "label_only": null,
+   "observed_outcomes": [
+    "action:signal_mismatch_stall",
+    "action:subproblem_continue",
+    "callback:accepted_callback",
+    "callback:evaluate_problem",
+    "callback:inner_callback",
+    "callback:on_outer_boundary",
+    "callback:on_outer_step",
+    "callback:outer_state_callback",
+    "callback:snapshot_accepted_state",
+    "flag:signal_mismatch_active",
+    "termination:signal_mismatch_stall"
+   ],
    "spread": {
     "x": 0.0,
     "objective": 7.003072867423512e-16,
@@ -102,6 +192,17 @@
   },
   "constraints_inactive_stall": {
    "label_only": null,
+   "observed_outcomes": [
+    "action:constraints_inactive_stall",
+    "action:subproblem_continue",
+    "callback:evaluate_problem",
+    "callback:inner_callback",
+    "callback:on_outer_boundary",
+    "callback:on_outer_step",
+    "callback:outer_state_callback",
+    "callback:snapshot_accepted_state",
+    "termination:constraints_inactive_stall"
+   ],
    "spread": {
     "x": 0.0,
     "objective": 8.526512829121202e-16,
@@ -112,6 +213,21 @@
   },
   "plateau_restore_best_feasible": {
    "label_only": null,
+   "observed_outcomes": [
+    "action:subproblem_continue",
+    "action:subproblem_limit",
+    "action:subproblem_limit_penalty_increase",
+    "callback:accepted_callback",
+    "callback:evaluate_problem",
+    "callback:inner_callback",
+    "callback:on_outer_boundary",
+    "callback:on_outer_step",
+    "callback:outer_state_callback",
+    "callback:restore_incumbent_state",
+    "callback:snapshot_accepted_state",
+    "restored:final_iterate_worse_than_best_feasible",
+    "termination:plateau_stall"
+   ],
    "spread": {
     "x": 0.0,
     "objective": 9.491402917597322e-16,
@@ -122,6 +238,22 @@
   },
   "resume_plateau_best_feasible": {
    "label_only": null,
+   "observed_outcomes": [
+    "action:subproblem_continue",
+    "action:subproblem_limit",
+    "action:subproblem_limit_penalty_increase",
+    "callback:accepted_callback",
+    "callback:evaluate_problem",
+    "callback:inner_callback",
+    "callback:on_outer_boundary",
+    "callback:on_outer_step",
+    "callback:outer_state_callback",
+    "callback:restore_incumbent_state",
+    "callback:snapshot_accepted_state",
+    "restored:final_iterate_worse_than_best_feasible",
+    "resumed",
+    "termination:plateau_stall"
+   ],
    "spread": {
     "x": 0.0,
     "objective": 9.491402917597322e-16,
@@ -132,6 +264,22 @@
   },
   "trust_radius_retries": {
    "label_only": "outcomes change under 2 ulp, seed 2: ['dual_update_penalty_raise', 'flag:dual_update_penalty_increase']",
+   "observed_outcomes": [
+    "action:dual_update",
+    "action:penalty_increase",
+    "callback:accepted_callback",
+    "callback:evaluate_problem",
+    "callback:inner_callback",
+    "callback:on_outer_boundary",
+    "callback:on_outer_step",
+    "callback:outer_state_callback",
+    "callback:snapshot_accepted_state",
+    "dual_update_penalty_raise",
+    "flag:dual_update_penalty_increase",
+    "inner_attempts_retried",
+    "nonfinite_evaluation",
+    "termination:max_outer_after_dual_update"
+   ],
    "spread": {
     "x": 2.2132133259628528e-16,
     "objective": 8.778506478305111e-16,
@@ -142,6 +290,26 @@
   },
   "frozen_warm_start_restore": {
    "label_only": null,
+   "observed_outcomes": [
+    "action:dual_update",
+    "action:infeasible_stall_penalty_increase",
+    "action:penalty_cap_reached",
+    "action:subproblem_continue",
+    "callback:accepted_callback",
+    "callback:evaluate_problem",
+    "callback:inner_callback",
+    "callback:on_outer_boundary",
+    "callback:on_outer_step",
+    "callback:outer_state_callback",
+    "callback:restore_incumbent_state",
+    "callback:snapshot_accepted_state",
+    "dual_update_penalty_raise",
+    "flag:dual_update_penalty_increase",
+    "flag:infeasible_stall",
+    "inner_attempts_retried",
+    "restored:final_iterate_infeasible",
+    "termination:penalty_cap_reached_restored_best_feasible"
+   ],
    "spread": {
     "x": 2.1058579913151568e-14,
     "objective": 5.929945559375664e-15,
@@ -152,6 +320,18 @@
   },
   "cached_physics_smoothing": {
    "label_only": "path changes under 2 ulp, seed 1: objective: boundaries 5 != golden 6",
+   "observed_outcomes": [
+    "action:constraints_inactive_converged",
+    "action:dual_update",
+    "callback:accepted_callback",
+    "callback:evaluate_problem",
+    "callback:inner_callback",
+    "callback:on_outer_step",
+    "callback:outer_state_callback",
+    "flag:signal_mismatch_active",
+    "smoothing_changed",
+    "termination:constraints_inactive_converged"
+   ],
    "spread": {
     "x": 1.635813484668347e-09,
     "objective": 0.0005946331679266724,
@@ -162,6 +342,22 @@
   },
   "multiplier_cap_process_budget": {
    "label_only": null,
+   "observed_outcomes": [
+    "action:dual_update",
+    "action:infeasible_stall_penalty_increase",
+    "action:process_budget_exhausted",
+    "callback:accepted_callback",
+    "callback:evaluate_problem",
+    "callback:inner_callback",
+    "callback:on_outer_boundary",
+    "callback:on_outer_step",
+    "callback:outer_state_callback",
+    "dual_update_penalty_raise",
+    "flag:infeasible_stall",
+    "flag:inner_false_success",
+    "flag:multiplier_cap_binding",
+    "termination:process_budget_exhausted"
+   ],
    "spread": {
     "x": 1.887379141862766e-15,
     "objective": 2.1649348980190553e-15,
@@ -172,6 +368,19 @@
   },
   "inner_iteration_budget": {
    "label_only": null,
+   "observed_outcomes": [
+    "action:dual_update",
+    "callback:accepted_callback",
+    "callback:evaluate_problem",
+    "callback:inner_callback",
+    "callback:on_outer_boundary",
+    "callback:on_outer_step",
+    "callback:outer_state_callback",
+    "dual_update_penalty_raise",
+    "flag:dual_update_penalty_increase",
+    "inner_maxiter_budget_spent",
+    "termination:dual_update"
+   ],
    "spread": {
     "x": 1.887379141862766e-15,
     "objective": 2.0539125955565396e-15,
@@ -182,6 +391,17 @@
   },
   "dual_update_penalty_cap": {
    "label_only": null,
+   "observed_outcomes": [
+    "action:penalty_cap_reached",
+    "callback:accepted_callback",
+    "callback:evaluate_problem",
+    "callback:inner_callback",
+    "callback:on_outer_boundary",
+    "callback:on_outer_step",
+    "callback:outer_state_callback",
+    "dual_update_penalty_raise",
+    "termination:penalty_cap_reached"
+   ],
    "spread": {
     "x": 1.887379141862766e-15,
     "objective": 2.4980018054066022e-15,
@@ -192,6 +412,15 @@
   },
   "preinner_converged": {
    "label_only": null,
+   "observed_outcomes": [
+    "action:converged",
+    "callback:evaluate_problem",
+    "callback:on_outer_boundary",
+    "callback:on_outer_step",
+    "callback:outer_state_callback",
+    "callback:snapshot_accepted_state",
+    "termination:converged"
+   ],
    "spread": {
     "x": 0.0,
     "objective": 3.3306690738754696e-16,
@@ -202,6 +431,15 @@
   },
   "zero_inner_budget": {
    "label_only": null,
+   "observed_outcomes": [
+    "action:subproblem_continue",
+    "action:subproblem_limit",
+    "callback:evaluate_problem",
+    "callback:on_outer_boundary",
+    "callback:on_outer_step",
+    "callback:outer_state_callback",
+    "termination:plateau_stall"
+   ],
    "spread": {
     "x": 0.0,
     "objective": 5.329070518200751e-16,

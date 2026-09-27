@@ -16,6 +16,10 @@ another CPU could not produce. For every scenario it records:
   perturbed run reaches other outcomes, takes another path (other boundaries),
   or moves a boundary value by more than ``NUMERIC_REPLAY_CEILING / 10``, so
   that its tolerance could not catch a regression of the ceiling's size;
+* ``observed_outcomes``: the golden's outcomes and every outcome a perturbed
+  run reached; off the recording environment a label-only scenario may reach
+  any of them (the perturbed runs must also keep
+  ``alm_golden_scenarios.result_invariant_violations`` empty);
 * ``spread``: per boundary quantity, the largest deviation from the golden
   (``alm_golden_scenarios.boundary_deviations``) over all perturbed runs.
 
@@ -95,12 +99,17 @@ def measure_scenario(scenario) -> dict:
     recorded = golden.load_golden(scenario.name)
     expected = golden.scenario_boundary_values(recorded["trajectory"])
     spread = {quantity: 0.0 for quantity in golden.BOUNDARY_QUANTITIES}
+    observed = set(recorded["outcomes"])
     label_only = None
     for ulps in ULPS:
         for seed in SEEDS:
             trajectory = _perturbed_run(scenario, ulps, seed)
             where = f"{ulps} ulp, seed {seed}"
+            violations = golden.result_invariant_violations(trajectory)
+            if violations:
+                raise SystemExit(f"{scenario.name} under {where}: {violations}")
             outcomes = sorted(golden.scenario_outcomes(trajectory))
+            observed.update(outcomes)
             if outcomes != recorded["outcomes"]:
                 changed = sorted(set(outcomes) ^ set(recorded["outcomes"]))
                 label_only = label_only or f"outcomes change under {where}: {changed}"
@@ -122,7 +131,7 @@ def measure_scenario(scenario) -> dict:
                 f"{ceiling:.0e} under {ULPS[0]}-{ULPS[-1]} ulp noise: "
                 + ", ".join(f"{q} {d:.1e}" for q, d in sensitive.items())
             )
-    return {"label_only": label_only, "spread": spread}
+    return {"label_only": label_only, "observed_outcomes": sorted(observed), "spread": spread}
 
 
 def main() -> None:

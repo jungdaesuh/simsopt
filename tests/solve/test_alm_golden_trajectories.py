@@ -12,13 +12,17 @@ supported numpy and SciPy each scenario replays its coarse outcomes (actions,
 termination and restore reasons, flags) and its numeric boundary values (x,
 objective, max violation, multipliers, penalty at every outer step, outer
 boundary and result) within tolerances set by its measured sensitivity to
-last-bit noise (``sensitivity.json``); a scenario whose outcomes or path change
-under that noise replays its outcomes only. Regenerate only for a
+last-bit noise (``sensitivity.json``). A scenario whose outcomes or path change
+under that noise is label-only: it replays its exact outcomes only in the
+recording environment, and elsewhere must finish with every outcome in the set
+observed under noise and a result that keeps ``result_invariant_violations``
+empty. Regenerate only for a
 reviewed, intended behavior change (command in ``manifest.json``); a change that
 leaves every fixture byte-identical refreshes the manifest's provenance with
 ``--provenance-only``.
 """
 
+import copy
 import functools
 import hashlib
 import sys
@@ -123,18 +127,78 @@ class AlmGoldenFixtureSetTests(unittest.TestCase):
                 self.assertEqual(sorted(missed), [])
 
 
+def outcome_replay_failure(name: str, outcomes, *, exact: bool):
+    """Why ``outcomes`` of a fresh run of scenario ``name`` fail its outcome
+    replay, or ``None``. Exact replay requires the golden's outcomes; otherwise
+    a label-only scenario may reach any outcome observed under last-bit noise
+    and every other scenario must reach exactly the golden's."""
+    recorded = _golden(name)["outcomes"]
+    if exact or name not in LABEL_ONLY_SCENARIOS:
+        if sorted(outcomes) != recorded:
+            return f"outcomes {sorted(outcomes)} != golden {recorded}"
+        return None
+    unobserved = sorted(set(outcomes) - set(SENSITIVITY["scenarios"][name]["observed_outcomes"]))
+    if unobserved:
+        return f"outcomes {unobserved} were never observed under last-bit noise"
+    return None
+
+
 class AlmGoldenOutcomeReplayTests(unittest.TestCase):
-    """Any numpy and SciPy: each scenario reaches its recorded outcomes."""
+    """Each scenario reaches its recorded outcomes: exactly in the recording
+    environment; elsewhere exactly too, except that a label-only scenario may
+    reach any outcome observed under last-bit noise. Every fresh run keeps the
+    result invariants."""
 
     def test_every_scenario_replays_its_outcomes(self):
+        exact = golden.bitwise_environment()
         for scenario in golden.SCENARIOS:
             with self.subTest(scenario=scenario.name):
-                outcomes = golden.scenario_outcomes(_fresh_run(scenario.name))
-                self.assertEqual(
-                    sorted(outcomes),
-                    _golden(scenario.name)["outcomes"],
-                    f"ALM golden '{scenario.name}' reached other outcomes",
+                failure = outcome_replay_failure(
+                    scenario.name,
+                    golden.scenario_outcomes(_fresh_run(scenario.name)),
+                    exact=exact,
                 )
+                self.assertIsNone(failure, f"ALM golden '{scenario.name}': {failure}")
+
+    def test_every_run_keeps_the_result_invariants(self):
+        for scenario in golden.SCENARIOS:
+            with self.subTest(scenario=scenario.name):
+                self.assertEqual(
+                    golden.result_invariant_violations(_fresh_run(scenario.name)), []
+                )
+
+    def test_observed_outcomes_contain_the_golden_outcomes(self):
+        for name, measured in SENSITIVITY["scenarios"].items():
+            with self.subTest(scenario=name):
+                self.assertLessEqual(
+                    set(_golden(name)["outcomes"]), set(measured["observed_outcomes"])
+                )
+                if name not in LABEL_ONLY_SCENARIOS:
+                    self.assertEqual(measured["observed_outcomes"], _golden(name)["outcomes"])
+
+    def test_an_unobserved_label_fails_a_label_only_replay(self):
+        for name in LABEL_ONLY_SCENARIOS:
+            with self.subTest(scenario=name):
+                observed = SENSITIVITY["scenarios"][name]["observed_outcomes"]
+                self.assertIsNone(outcome_replay_failure(name, observed, exact=False))
+                for extra in ("termination:converged", "action:signal_mismatch_stall"):
+                    if extra in observed:
+                        continue
+                    self.assertIn(
+                        extra,
+                        outcome_replay_failure(name, [*observed, extra], exact=False),
+                    )
+                if observed != _golden(name)["outcomes"]:
+                    # The recording environment still demands the golden's outcomes.
+                    self.assertIsNotNone(outcome_replay_failure(name, observed, exact=True))
+
+    def test_a_broken_invariant_is_reported(self):
+        trajectory = _fresh_run("toy_convex")
+        broken = golden.RecordedTrajectory(copy.deepcopy(dict(trajectory)), trajectory.settings)
+        broken["result"]["fields"]["restored_best_feasible"] = True
+        broken["result"]["fields"]["multipliers"]["data"][0] = golden.float_token(-1.0)
+        violations = golden.result_invariant_violations(broken)
+        self.assertEqual(len(violations), 2, violations)
 
 
 class AlmGoldenNumericReplayTests(unittest.TestCase):

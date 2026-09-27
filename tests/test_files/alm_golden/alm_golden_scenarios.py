@@ -444,6 +444,51 @@ def boundary_deviations(expected: dict, actual: dict) -> tuple[Optional[str], di
     return None, deviations
 
 
+RESTORE_REASONS = frozenset(
+    ("final_iterate_infeasible", "final_iterate_worse_than_best_feasible")
+)
+
+
+def result_invariant_violations(trajectory: RecordedTrajectory) -> list[str]:
+    """What a fresh scenario run's final result breaks of the properties every
+    ``ALMResult`` must keep, whatever path the run took: finite values,
+    nonnegative multipliers, a penalty in (0, penalty_max], a restore flag
+    that agrees with its reason, a ``*_restored_best_feasible`` termination
+    only after a restore, and ``success`` or a restore only at a feasible
+    point (``max_violation <= feasibility_tol``)."""
+    if "resumed" in trajectory:
+        trajectory = trajectory["resumed"]
+    settings = trajectory.settings
+    result = trajectory["result"]
+    if result is None:
+        return ["the run returned no result"]
+    fields = {name: _decoded_field(result, name) for name in result["fields"]}
+    violations = []
+    for name in ("x", "objective", "max_violation", "multipliers", "penalty", "constraint_values"):
+        floats = _encoded_floats(result["fields"][name])
+        if floats is None or not all(math.isfinite(value) for value in floats):
+            violations.append(f"{name} is not finite: {floats}")
+    if any(value < 0.0 for value in _encoded_floats(result["fields"]["multipliers"])):
+        violations.append("a multiplier is negative")
+    penalty_max = math.inf if settings.penalty_max is None else settings.penalty_max
+    if not 0.0 < fields["penalty"] <= penalty_max:
+        violations.append(f"penalty {fields['penalty']} outside (0, {penalty_max}]")
+    reason = fields["restored_best_feasible_reason"]
+    restored = fields["restored_best_feasible"]
+    if restored != (reason is not None):
+        violations.append(f"restored_best_feasible={restored} with reason {reason!r}")
+    if reason is not None and not set(reason.split(",")) <= RESTORE_REASONS:
+        violations.append(f"unknown restore reason {reason!r}")
+    if fields["termination_reason"].endswith("_restored_best_feasible") and not restored:
+        violations.append(f"{fields['termination_reason']} without a restore")
+    feasible = fields["max_violation"] <= settings.feasibility_tol
+    if fields["success"] and not feasible:
+        violations.append(f"success at max_violation {fields['max_violation']}")
+    if restored and not feasible:
+        violations.append(f"restored an infeasible point, max_violation {fields['max_violation']}")
+    return violations
+
+
 # --------------------------------------------------------------------------
 # Synthetic physics
 # --------------------------------------------------------------------------
@@ -687,6 +732,16 @@ class PauseAfterBoundary(Exception):
     """Raised from the boundary callback to interrupt a run at a boundary."""
 
 
+class RecordedTrajectory(dict):
+    """A fresh run's trajectory (the dict a golden stores) that also carries
+    the run's ``ALMSettings``, which the fixture does not store, for the result
+    invariants (:func:`result_invariant_violations`)."""
+
+    def __init__(self, trajectory: dict, settings: ALMSettings) -> None:
+        super().__init__(trajectory)
+        self.settings = settings
+
+
 @dataclass(frozen=True)
 class RunRecord:
     trajectory: dict
@@ -774,7 +829,11 @@ def execute(run: ScenarioRun) -> RunRecord:
         trajectory["history"] = encode(history.history())
     trajectory["events"] = recorder.events
     trajectory["checkpoints"] = recorder.checkpoints
-    return RunRecord(trajectory=trajectory, result=result, snapshots=tuple(snapshots))
+    return RunRecord(
+        trajectory=RecordedTrajectory(trajectory, run.settings),
+        result=result,
+        snapshots=tuple(snapshots),
+    )
 
 
 def interrupted_then_resumed(make_run, pause_after_outer: int) -> dict:
