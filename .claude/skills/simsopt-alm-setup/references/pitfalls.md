@@ -62,15 +62,20 @@ Each entry: the symptom, the cause, the fix.
     2.5e-6).
 13. **Reading the gradient check.** `gradient_check.py` judges every
     direction by the finite differences (the measured change), never by the
-    claimed gradient alone, and needs at least two steps. A quantity passes as
-    `ratio_test` (the error falls with the step), `no_ratio` (the error sits
-    at the ratio test's floor at every step, as for a linear or quadratic
-    quantity) or `accuracy` (the ratio test stops at round-off); the last two
-    also need the smallest error within 1e-6 of the measured change, or
-    within the round-off floor of 100 machine epsilons of the value per step.
-    `not_tested` (no change above round-off along any direction: use larger
-    steps, or the quantity does not depend on x) and `failed` exit nonzero;
-    a zeroed or forgotten gradient on a quantity that changes is `failed`.
+    claimed gradient alone, and needs at least two steps and one direction.
+    Only informative steps count: those whose round-off floor (100 machine
+    epsilons of the value, divided by the step) is at most 1% of the measured
+    change. At the smallest informative step the claimed derivative must
+    match the change to 1e-6 relative (or to the floor), or else the error
+    must fall by the ratio threshold (0.35) between every two informative
+    steps, as truncation does. The library's ratio test only labels the
+    pass: `ratio_test` (the error falls with the step), `no_ratio`
+    (the error sits at the ratio test's floor at every step, as for a linear
+    or quadratic quantity) or `accuracy` (the ratio test stops at
+    round-off). `not_tested` (no informative step along any direction: use
+    larger steps, or the quantity does not depend on x) and `failed` exit
+    nonzero; a zeroed or forgotten gradient on a quantity that changes is
+    `failed` wherever it can be measured.
 14. **Unique row names.** The runner reports multipliers and values keyed by
     name, so a repeated name hides a row.
 15. **Conflicting constraints.** Thresholds no design can meet (e.g. a coil

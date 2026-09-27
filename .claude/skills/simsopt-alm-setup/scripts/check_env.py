@@ -15,8 +15,9 @@ install's directory, else the ``src`` layout around the imported package), its
 git state. It reads local git refs only and changes nothing.
 
 ``route`` is the first that applies: ``blocked`` (Python below the floor, no
-importable simsopt, or a ``simsopt.solve.alm`` that exists but fails to
-import: the report quotes the error), ``ready`` (the solver imports),
+importable simsopt, a simsopt without the ``simsopt.solve`` package, or a
+``simsopt.solve.alm`` that exists but fails to import: the report quotes the
+error), ``ready`` (the solver imports),
 ``reinstall`` (the checkout has the ALM sources but the interpreter finds no
 such module), ``upstream`` (a hiddenSymmetries remote's master has them),
 ``merge-fork`` (a git checkout: merge the ``alm-library`` branch), ``copy``
@@ -44,6 +45,7 @@ ALM_UPSTREAM_BASE = "9e027eac38028d57aa23777be52a781aa860e347"
 ALM_BRANCH = "alm-library"
 FORK_URL_PLACEHOLDER = "https://github.com/<owner>/simsopt"
 UPSTREAM_REPOSITORY = "github.com/hiddensymmetries/simsopt"
+ALM_MODULE = "simsopt.solve.alm"
 ALM_INIT = Path("src") / "simsopt" / "solve" / "alm" / "__init__.py"
 RESULT_PREFIX = "CHECK_ENV "
 
@@ -78,21 +80,44 @@ def imports(python: str, module: str) -> dict:
             "error": None if completed.returncode == 0 else last_line(completed.stderr)}
 
 
-def missing_module(error: str, module: str) -> bool:
-    """Whether an import's last error line says ``module`` itself is absent
-    (not that it exists and fails, or that something it imports is absent)."""
-    return error == f"ModuleNotFoundError: No module named '{module}'"
+def missing_import(error: str, module: str) -> Optional[str]:
+    """The module an import's last error line reports as absent, when that is
+    ``module`` itself or one of its parent packages; None for any other
+    failure (``module`` exists but fails, or something it imports is absent)."""
+    match = re.fullmatch(r"ModuleNotFoundError: No module named '([\w.]+)'", error)
+    if match and (module == match.group(1) or module.startswith(match.group(1) + ".")):
+        return match.group(1)
+    return None
+
+
+def alm_import_blocker(alm_import: dict) -> Optional[str]:
+    """What stops every route when ``simsopt.solve.alm`` does not import for a
+    reason other than being absent; None when it imports or is simply absent."""
+    if alm_import["importable"]:
+        return None
+    missing = missing_import(alm_import["error"], ALM_MODULE)
+    if missing == ALM_MODULE:
+        return None
+    if missing is not None:
+        return (f"the imported simsopt has no {missing} ({alm_import['error']}): it is incomplete or "
+                "older than the ALM package supports; reinstall or upgrade simsopt first")
+    return f"{ALM_MODULE} exists but fails to import ({alm_import['error']}); fix that error first"
+
+
+# ``git remote -v``: ``name<TAB>url (fetch|push)``, then annotations such as a
+# partial clone's `` [blob:none]``; a URL may contain spaces.
+REMOTE_LINE = re.compile(r"^([^\t]+)\t(.*) \((fetch|push)\)(?: .*)?$")
 
 
 def parse_remotes(remote_listing: str) -> dict:
-    """``name -> fetch URL`` from ``git remote -v`` (``name<TAB>url (fetch)``;
-    a URL may contain spaces)."""
+    """``name -> fetch URL`` from ``git remote -v``; an unrecognized line raises."""
     remotes = {}
     for line in remote_listing.splitlines():
-        name, url_and_kind = line.split("\t", 1)
-        url, kind = url_and_kind.rsplit(" ", 1)
-        if kind == "(fetch)":
-            remotes[name] = url
+        match = REMOTE_LINE.match(line)
+        if match is None:
+            raise ValueError(f"unrecognized `git remote -v` line: {line!r}")
+        if match.group(3) == "fetch":
+            remotes[match.group(1)] = match.group(2)
     return remotes
 
 
@@ -209,11 +234,13 @@ def build_report(python: str, checkout_argument: Optional[Path], fork_url: str) 
                         f"{'.'.join(map(str, MIN_PYTHON))}; use a newer interpreter")
     if not simsopt_import["importable"]:
         blockers.append(f"simsopt does not import ({simsopt_import['error']}); install simsopt first")
-    alm_import = imports(python, "simsopt.solve.alm") if simsopt_import["importable"] else not_imported
-    if simsopt_import["importable"] and not alm_import["importable"] and not missing_module(
-            alm_import["error"], "simsopt.solve.alm"):
-        blockers.append(f"simsopt.solve.alm exists but fails to import ({alm_import['error']}); "
-                        "fix that error first")
+    if simsopt_import["importable"]:
+        alm_import = imports(python, ALM_MODULE)
+        alm_blocker = alm_import_blocker(alm_import)
+        if alm_blocker is not None:
+            blockers.append(alm_blocker)
+    else:
+        alm_import = not_imported
     report = {
         "python": {"executable": python, "version": ".".join(map(str, version)),
                    "floor": ".".join(map(str, MIN_PYTHON)), "meets_floor": tuple(version) >= MIN_PYTHON},

@@ -133,10 +133,12 @@ Run each from any directory; all three must pass before the real run.
 
 1. `PYTHONPATH=<dir> <python> $SKILL_DIR/scripts/gradient_check.py --smoke`
    must exit 0. On `FAIL`, fix the gradient of the named quantity in
-   `alm_problem.py`; for a smooth row, first retry with smaller steps
-   (`--epsilons 1e-6,5e-7,2.5e-7`). On `NOT TESTED`, the quantity did not
-   change above round-off: retry with larger steps, or find why it does not
-   depend on x.
+   `alm_problem.py`. Only when the failing quantity is a smooth (log-sum-exp)
+   row, first retry with smaller steps (`--epsilons 1e-6,5e-7,2.5e-7`): a
+   step that crosses the row's selection window breaks it. Smaller steps
+   raise the round-off floor; a quantity whose change drops below it is
+   reported `NOT TESTED`, never passed. On `NOT TESTED`, retry with larger
+   steps, or find why the quantity does not depend on x.
 2. `PYTHONPATH=<dir> <python> $SKILL_DIR/scripts/sign_check.py --smoke` must
    exit 0. On a failure, fix the named row's sign or its probe expectation.
    Fix scale warnings by rescaling rows or f. For coverage warnings, add a
@@ -818,15 +820,20 @@ Each entry: the symptom, the cause, the fix.
     2.5e-6).
 13. **Reading the gradient check.** `gradient_check.py` judges every
     direction by the finite differences (the measured change), never by the
-    claimed gradient alone, and needs at least two steps. A quantity passes as
-    `ratio_test` (the error falls with the step), `no_ratio` (the error sits
-    at the ratio test's floor at every step, as for a linear or quadratic
-    quantity) or `accuracy` (the ratio test stops at round-off); the last two
-    also need the smallest error within 1e-6 of the measured change, or
-    within the round-off floor of 100 machine epsilons of the value per step.
-    `not_tested` (no change above round-off along any direction: use larger
-    steps, or the quantity does not depend on x) and `failed` exit nonzero;
-    a zeroed or forgotten gradient on a quantity that changes is `failed`.
+    claimed gradient alone, and needs at least two steps and one direction.
+    Only informative steps count: those whose round-off floor (100 machine
+    epsilons of the value, divided by the step) is at most 1% of the measured
+    change. At the smallest informative step the claimed derivative must
+    match the change to 1e-6 relative (or to the floor), or else the error
+    must fall by the ratio threshold (0.35) between every two informative
+    steps, as truncation does. The library's ratio test only labels the
+    pass: `ratio_test` (the error falls with the step), `no_ratio`
+    (the error sits at the ratio test's floor at every step, as for a linear
+    or quadratic quantity) or `accuracy` (the ratio test stops at
+    round-off). `not_tested` (no informative step along any direction: use
+    larger steps, or the quantity does not depend on x) and `failed` exit
+    nonzero; a zeroed or forgotten gradient on a quantity that changes is
+    `failed` wherever it can be measured.
 14. **Unique row names.** The runner reports multipliers and values keyed by
     name, so a repeated name hides a row.
 15. **Conflicting constraints.** Thresholds no design can meet (e.g. a coil
@@ -965,8 +972,9 @@ install's directory, else the ``src`` layout around the imported package), its
 git state. It reads local git refs only and changes nothing.
 
 ``route`` is the first that applies: ``blocked`` (Python below the floor, no
-importable simsopt, or a ``simsopt.solve.alm`` that exists but fails to
-import: the report quotes the error), ``ready`` (the solver imports),
+importable simsopt, a simsopt without the ``simsopt.solve`` package, or a
+``simsopt.solve.alm`` that exists but fails to import: the report quotes the
+error), ``ready`` (the solver imports),
 ``reinstall`` (the checkout has the ALM sources but the interpreter finds no
 such module), ``upstream`` (a hiddenSymmetries remote's master has them),
 ``merge-fork`` (a git checkout: merge the ``alm-library`` branch), ``copy``
@@ -1009,34 +1017,38 @@ drops out, and its gradient would go unchecked. Every quantity's test visits
 the same points, so each point's physics is evaluated once and shared.
 
 The steps are ``--epsilons``, else the problem's ``taylor_epsilons``, else the
-library default; at least two are required (one step gives no ratio). Each
-random direction is judged on its own, from the finite differences
-``c_k`` (the true change per step) against the claimed derivative ``d``:
+library default; at least two steps and one direction are required (else
+exit 2). Each random direction is judged on its own, from the finite
+differences ``c_k`` (the measured change per step) against the claimed
+derivative ``d``, never from ``d`` alone:
 
 - The round-off floor at step ``e_k`` is ``ROUNDOFF_FACTOR * eps *
   (|f(x0)| + |c_k| e_k) / e_k``, with ``eps`` the float64 machine epsilon: the
   noise of a central difference of values accurate to ``ROUNDOFF_FACTOR``
-  machine epsilons of their size.
-- ``no_change``: every ``|c_k|`` and ``|d|`` is within that floor, so the
-  direction tests nothing. A direction where the quantity changes but the
-  claimed derivative is zero (a forgotten gradient) is not ``no_change``.
-- Otherwise the direction passes by ``ratio_test`` (the library's test: the
-  error ``|c_k - d|`` falls at least as fast as the step), or, when that test
-  has no ratio or fails at round-off, by the error magnitude: the smallest
-  error is at most max(``RELATIVE_TOLERANCE * max_k |c_k|``, the floor at
-  that step), i.e. relative to the measured change. Else it fails.
+  machine epsilons of their size. It grows as the step shrinks.
+- A step is informative when its floor is at most
+  ``INFORMATIVE_NOISE_FRACTION`` of ``|c_k|``. Only informative steps judge,
+  and the library's ratio test (whose floor is absolute, so it cannot see a
+  wrong derivative below it) only labels the outcome. The direction passes
+  when the error ``|c_k - d|`` at its smallest informative step is at most
+  max(``RELATIVE_TOLERANCE`` |c_k|, floor), or, failing that, when the error
+  falls by the library's ratio threshold between every two consecutive
+  informative steps (at least two): truncation shrinking as it should, as
+  for a derivative far smaller than the higher ones. It fails otherwise.
+- A direction with no informative step is ``no_change`` (nothing tested),
+  unless ``|d|`` exceeds every floor: a claimed derivative where the
+  quantity does not change fails.
 
 A quantity's ``verdict``: ``nonfinite`` if any value or difference is not
-finite; ``not_tested`` if every direction is ``no_change`` (the quantity does
-not move above round-off at these steps: use larger steps, or it does not
-depend on x); ``failed`` if any tested direction fails; else ``accuracy`` if
-some direction passed by magnitude after a failed ratio test, ``no_ratio`` if
-some direction had no ratio (the error at the ratio test's floor at every
-step, as for a linear or quadratic quantity) and passed by magnitude, and
-``ratio_test`` otherwise. Only ``ratio_test``, ``no_ratio`` and ``accuracy``
-pass. The last line printed is ``GRADIENT_CHECK {json}``; the exit status is
-0 when every quantity passes, 1 otherwise (``not_tested`` included), and 2
-for invalid arguments.
+finite; ``not_tested`` if every direction is ``no_change`` (round-off swamps
+the change at these steps: use larger steps, or the quantity does not depend
+on x); ``failed`` if any direction fails; else ``accuracy`` if some
+direction's ratio test failed (round-off), ``no_ratio`` if some direction had
+no ratio (the error at the ratio test's floor at every step, as for a linear
+or quadratic quantity), and ``ratio_test`` otherwise. Only ``ratio_test``,
+``no_ratio`` and ``accuracy`` pass. The last line printed is
+``GRADIENT_CHECK {json}``; the exit status is 0 when every quantity passes, 1
+otherwise (``not_tested`` included), and 2 for invalid arguments.
 
 ### [scripts/sign_check.py](../.claude/skills/simsopt-alm-setup/scripts/sign_check.py)
 

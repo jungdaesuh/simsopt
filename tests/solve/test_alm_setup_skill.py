@@ -103,6 +103,37 @@ def build_problem(smoke=False):
 """
 
 
+# f alone, for the round-off cases of Crucible round 2: a huge value with a
+# small derivative (claimed 0 or right), and a derivative A near the Taylor
+# test's absolute 1e-10 floor (claimed 0 or right).
+ROUNDOFF_PROBE_PROBLEM = """\
+from types import SimpleNamespace
+
+import numpy as np
+
+from simsopt.solve.alm import ALMPhysics
+
+CASE, N, A = CASE_VALUE, N_VALUE, A_VALUE
+
+
+def physics(x):
+    x = np.asarray(x, dtype=float)
+    value, grad = {
+        "big_value_zero_grad": (1e8 + 1e-3 * x.sum(), np.zeros_like(x)),
+        "big_value_right_grad": (1e8 + 1e-3 * x.sum(), 1e-3 * np.ones_like(x)),
+        "straddle_zero_grad": (A * x.sum() + 2e-5 * (x ** 3).sum(), np.zeros_like(x)),
+        "straddle_right_grad": (A * x.sum() + 2e-5 * (x ** 3).sum(), A + 6e-5 * x ** 2),
+    }[CASE]
+    return ALMPhysics(base_value=float(value), base_grad=grad, constraint_values=np.zeros(0),
+                      constraint_grads=())
+
+
+def build_problem(smoke=False):
+    return SimpleNamespace(name=CASE, x0=np.zeros(N), physics=physics, constraint_names=(),
+                           taylor_epsilons=None)
+"""
+
+
 def skill_markdown() -> Dict[str, str]:
     paths = [SKILL_DIR / "SKILL.md", *sorted(REFERENCES_DIR.glob("*.md"))]
     return {path.relative_to(SKILL_DIR).as_posix(): path.read_text() for path in paths}
@@ -368,17 +399,39 @@ class CheckEnvRouteTests(unittest.TestCase):
             "origin\thttps://github.com/o/simsopt (fetch)\n"
             "origin\thttps://github.com/o/simsopt (push)\n"
             "local\t/data/my repos/simsopt (fetch)\n"
-            "local\t/data/my repos/simsopt (push)\n")
-        self.assertEqual(remotes, {"origin": "https://github.com/o/simsopt", "local": "/data/my repos/simsopt"})
+            "local\t/data/my repos/simsopt (push)\n"
+            # git 2.53 annotates a partial clone's filter.
+            "upstream\thttps://github.com/hiddenSymmetries/simsopt.git (fetch) [blob:none]\n"
+            "upstream\thttps://github.com/hiddenSymmetries/simsopt.git (push)\n")
+        self.assertEqual(remotes, {"origin": "https://github.com/o/simsopt", "local": "/data/my repos/simsopt",
+                                   "upstream": "https://github.com/hiddenSymmetries/simsopt.git"})
 
-    def test_only_a_missing_alm_module_means_the_sources_are_not_installed(self):
+    def test_an_import_failure_names_the_missing_module_or_parent(self):
+        """Absent ALM package, absent parent package, and a broken import differ."""
         module = "simsopt.solve.alm"
-        self.assertTrue(check_env.missing_module("ModuleNotFoundError: No module named 'simsopt.solve.alm'", module))
-        for error in ("ModuleNotFoundError: No module named 'scipy'",
-                      "ImportError: cannot import name 'nnls' from 'scipy.optimize'",
-                      "SyntaxError: invalid syntax"):
+        cases = {
+            "ModuleNotFoundError: No module named 'simsopt.solve.alm'": "simsopt.solve.alm",
+            "ModuleNotFoundError: No module named 'simsopt.solve'": "simsopt.solve",
+            "ModuleNotFoundError: No module named 'simsopt'": "simsopt",
+            "ModuleNotFoundError: No module named 'scipy'": None,
+            "ModuleNotFoundError: No module named 'simsopt.solve.almanac'": None,
+            "ImportError: cannot import name 'nnls' from 'scipy.optimize'": None,
+            "SyntaxError: invalid syntax": None,
+        }
+        for error, missing in cases.items():
             with self.subTest(error=error):
-                self.assertFalse(check_env.missing_module(error, module))
+                self.assertEqual(check_env.missing_import(error, module), missing)
+
+    def test_an_absent_parent_package_is_not_reported_as_a_broken_alm(self):
+        blocker = check_env.alm_import_blocker(
+            {"importable": False, "error": "ModuleNotFoundError: No module named 'simsopt.solve'"})
+        self.assertIn("simsopt.solve", blocker)
+        self.assertNotIn("fails to import", blocker)
+        self.assertIn("fails to import", check_env.alm_import_blocker(
+            {"importable": False, "error": "ImportError: cannot import name 'nnls' from 'scipy.optimize'"}))
+        self.assertIsNone(check_env.alm_import_blocker(
+            {"importable": False, "error": "ModuleNotFoundError: No module named 'simsopt.solve.alm'"}))
+        self.assertIsNone(check_env.alm_import_blocker({"importable": True, "error": None}))
 
     def test_merging_routes_need_a_clean_tree(self):
         dirty = {"git": {"dirty": True}}
@@ -492,6 +545,45 @@ class SkillScriptsRunTests(unittest.TestCase):
         completed = self.run_gradient_probe("small")
         self.assertEqual(self.verdicts(completed), {"f": "ratio_test", "row": "failed"})
         self.assertEqual(completed.returncode, 1)
+
+    def run_roundoff_probe(self, case: str, *arguments: str, n: int = 3,
+                           a: float = 0.0) -> subprocess.CompletedProcess:
+        source = (ROUNDOFF_PROBE_PROBLEM.replace("CASE_VALUE", repr(case)).replace("N_VALUE", repr(n))
+                  .replace("A_VALUE", repr(a)))
+        (self.scratch / "alm_problem.py").write_text(source)
+        return run_python([str(SCRIPTS_DIR / "gradient_check.py"), *arguments], cwd=self.scratch,
+                          problem_dir=self.scratch)
+
+    def test_gradient_check_never_passes_by_the_floor_of_a_small_step(self):
+        """Value 1e8, derivative 1e-3, claimed 0: at the default steps round-off
+        swamps the change (not tested); at steps where it does not, it fails."""
+        completed = self.run_roundoff_probe("big_value_zero_grad")
+        self.assertEqual(self.verdicts(completed), {"f": "not_tested"})
+        self.assertEqual(completed.returncode, 1)
+        completed = self.run_roundoff_probe("big_value_zero_grad", "--epsilons", "1,0.5,0.25")
+        self.assertEqual(self.verdicts(completed), {"f": "failed"})
+        self.assertEqual(completed.returncode, 1)
+
+    def test_gradient_check_passes_a_right_gradient_on_a_big_value_at_informative_steps(self):
+        completed = self.run_roundoff_probe("big_value_right_grad", "--epsilons", "1,0.5,0.25")
+        self.assertIn(self.verdicts(completed)["f"], ("ratio_test", "no_ratio", "accuracy"))
+        self.assertEqual(completed.returncode, 0)
+
+    def test_gradient_check_does_not_trust_a_ratio_below_the_absolute_floor(self):
+        """True derivative 3e-11, claimed 0: the library's ratio test cannot see
+        it (its floor is 1e-10); the relative error can."""
+        completed = self.run_roundoff_probe("straddle_zero_grad", n=1, a=0.3e-10)
+        self.assertEqual(self.verdicts(completed), {"f": "failed"})
+        self.assertEqual(completed.returncode, 1)
+        completed = self.run_roundoff_probe("straddle_right_grad", n=1, a=0.3e-10)
+        self.assertIn(self.verdicts(completed)["f"], ("ratio_test", "no_ratio", "accuracy"))
+        self.assertEqual(completed.returncode, 0)
+
+    def test_gradient_check_rejects_zero_directions(self):
+        completed = self.run_gradient_probe("exact", "--directions", "0")
+        self.assertEqual(completed.returncode, 2, completed.stderr[-2000:])
+        self.assertIn("--directions", completed.stderr)
+        self.assertNotIn("Traceback", completed.stderr)
 
     def test_gradient_check_passes_the_stage2_rows_at_small_steps(self):
         """The curvature rows at 1e-5 to 2.5e-6, where round-off can stop the

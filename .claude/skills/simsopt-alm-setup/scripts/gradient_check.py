@@ -13,34 +13,38 @@ drops out, and its gradient would go unchecked. Every quantity's test visits
 the same points, so each point's physics is evaluated once and shared.
 
 The steps are ``--epsilons``, else the problem's ``taylor_epsilons``, else the
-library default; at least two are required (one step gives no ratio). Each
-random direction is judged on its own, from the finite differences
-``c_k`` (the true change per step) against the claimed derivative ``d``:
+library default; at least two steps and one direction are required (else
+exit 2). Each random direction is judged on its own, from the finite
+differences ``c_k`` (the measured change per step) against the claimed
+derivative ``d``, never from ``d`` alone:
 
 - The round-off floor at step ``e_k`` is ``ROUNDOFF_FACTOR * eps *
   (|f(x0)| + |c_k| e_k) / e_k``, with ``eps`` the float64 machine epsilon: the
   noise of a central difference of values accurate to ``ROUNDOFF_FACTOR``
-  machine epsilons of their size.
-- ``no_change``: every ``|c_k|`` and ``|d|`` is within that floor, so the
-  direction tests nothing. A direction where the quantity changes but the
-  claimed derivative is zero (a forgotten gradient) is not ``no_change``.
-- Otherwise the direction passes by ``ratio_test`` (the library's test: the
-  error ``|c_k - d|`` falls at least as fast as the step), or, when that test
-  has no ratio or fails at round-off, by the error magnitude: the smallest
-  error is at most max(``RELATIVE_TOLERANCE * max_k |c_k|``, the floor at
-  that step), i.e. relative to the measured change. Else it fails.
+  machine epsilons of their size. It grows as the step shrinks.
+- A step is informative when its floor is at most
+  ``INFORMATIVE_NOISE_FRACTION`` of ``|c_k|``. Only informative steps judge,
+  and the library's ratio test (whose floor is absolute, so it cannot see a
+  wrong derivative below it) only labels the outcome. The direction passes
+  when the error ``|c_k - d|`` at its smallest informative step is at most
+  max(``RELATIVE_TOLERANCE`` |c_k|, floor), or, failing that, when the error
+  falls by the library's ratio threshold between every two consecutive
+  informative steps (at least two): truncation shrinking as it should, as
+  for a derivative far smaller than the higher ones. It fails otherwise.
+- A direction with no informative step is ``no_change`` (nothing tested),
+  unless ``|d|`` exceeds every floor: a claimed derivative where the
+  quantity does not change fails.
 
 A quantity's ``verdict``: ``nonfinite`` if any value or difference is not
-finite; ``not_tested`` if every direction is ``no_change`` (the quantity does
-not move above round-off at these steps: use larger steps, or it does not
-depend on x); ``failed`` if any tested direction fails; else ``accuracy`` if
-some direction passed by magnitude after a failed ratio test, ``no_ratio`` if
-some direction had no ratio (the error at the ratio test's floor at every
-step, as for a linear or quadratic quantity) and passed by magnitude, and
-``ratio_test`` otherwise. Only ``ratio_test``, ``no_ratio`` and ``accuracy``
-pass. The last line printed is ``GRADIENT_CHECK {json}``; the exit status is
-0 when every quantity passes, 1 otherwise (``not_tested`` included), and 2
-for invalid arguments.
+finite; ``not_tested`` if every direction is ``no_change`` (round-off swamps
+the change at these steps: use larger steps, or the quantity does not depend
+on x); ``failed`` if any direction fails; else ``accuracy`` if some
+direction's ratio test failed (round-off), ``no_ratio`` if some direction had
+no ratio (the error at the ratio test's floor at every step, as for a linear
+or quadratic quantity), and ``ratio_test`` otherwise. Only ``ratio_test``,
+``no_ratio`` and ``accuracy`` pass. The last line printed is
+``GRADIENT_CHECK {json}``; the exit status is 0 when every quantity passes, 1
+otherwise (``not_tested`` included), and 2 for invalid arguments.
 """
 
 from __future__ import annotations
@@ -60,8 +64,10 @@ RESULT_PREFIX = "GRADIENT_CHECK "
 OBJECTIVE_LABEL = "f"
 # Values are trusted to this many machine epsilons of their magnitude.
 ROUNDOFF_FACTOR = 100.0
-# Accepted error, relative to the measured change, when the ratio test cannot decide.
+# Accepted error, relative to the measured change, at an informative step.
 RELATIVE_TOLERANCE = 1e-6
+# A step informs when its round-off floor is at most this fraction of the change.
+INFORMATIVE_NOISE_FRACTION = 1e-2
 MACHINE_EPSILON = float(np.finfo(float).eps)
 DEFAULT_DIRECTIONS = inspect.signature(run_directional_taylor_test).parameters["direction_count"].default
 PASSING_VERDICTS = ("ratio_test", "no_ratio", "accuracy")
@@ -101,7 +107,8 @@ def quantity_evaluator(memo: PhysicsMemo, row_index: Optional[int]):
 
 
 def judge_direction(taylor: dict) -> dict:
-    """The verdict of one direction's ``run_directional_taylor_test`` result."""
+    """The verdict of one direction's ``run_directional_taylor_test`` result
+    (the rules are in the module docstring)."""
     result = taylor["direction_results"][0]
     steps = np.asarray(taylor["epsilons"], dtype=float)
     changes = np.abs(np.asarray(result["central_estimates"], dtype=float))
@@ -111,15 +118,22 @@ def judge_direction(taylor: dict) -> dict:
     if not (np.isfinite(value) and np.isfinite(claimed) and np.all(np.isfinite(changes))):
         return {"verdict": "nonfinite", "relative_error": None}
     floors = ROUNDOFF_FACTOR * MACHINE_EPSILON * (abs(value) + changes * steps) / steps
-    change = float(changes.max())
-    if np.all(changes <= floors) and abs(claimed) <= float(floors.max()):
-        return {"verdict": "no_change", "relative_error": None}
-    relative_error = float(errors.min()) / change if change > 0.0 else float("inf")
-    accurate = bool(np.any(errors <= np.maximum(RELATIVE_TOLERANCE * change, floors)))
-    if taylor["passed"] and taylor["max_ratio"] is not None:
+    informative = floors <= INFORMATIVE_NOISE_FRACTION * changes
+    if not np.any(informative):
+        verdict = "failed" if abs(claimed) > float(floors.max()) else "no_change"
+        return {"verdict": verdict, "relative_error": None}
+    informative_errors = errors[informative]
+    last = int(np.flatnonzero(informative)[-1])
+    relative_error = float(errors[last] / changes[last])
+    converged = errors[last] <= max(RELATIVE_TOLERANCE * changes[last], floors[last])
+    falling = informative_errors.size >= 2 and bool(np.all(
+        informative_errors[1:] <= taylor["ratio_threshold"] * informative_errors[:-1]))
+    if converged and taylor["max_ratio"] is None:
+        verdict = "no_ratio"
+    elif converged and not taylor["passed"]:
+        verdict = "accuracy"
+    elif converged or falling:
         verdict = "ratio_test"
-    elif accurate:
-        verdict = "no_ratio" if taylor["max_ratio"] is None else "accuracy"
     else:
         verdict = "failed"
     return {"verdict": verdict, "relative_error": relative_error}
@@ -136,11 +150,14 @@ def judge(label: str, taylors: list) -> dict:
     if "nonfinite" in verdicts:
         verdict, note = "nonfinite", "a value or difference is not finite"
     elif not tested:
-        verdict, note = "not_tested", ("no change above the round-off floor along any direction: "
-                                       "use larger steps, or the quantity does not depend on x")
+        verdict, note = "not_tested", ("round-off swamps the change at every step along every "
+                                       "direction: use larger steps, or the quantity does not "
+                                       "depend on x")
     elif "failed" in verdicts:
-        verdict, note = "failed", (f"relative error {worst_error:.1e}: the gradient does not match "
-                                   "the finite differences")
+        verdict, note = "failed", (
+            "the gradient does not match the finite differences" if worst_error is None else
+            f"relative error {worst_error:.1e} at the smallest informative step, and the error does "
+            "not fall with the step: the gradient does not match the finite differences")
     elif "accuracy" in verdicts:
         verdict, note = "accuracy", (f"ratio test stopped at round-off along {verdicts.count('accuracy')} "
                                      f"of {len(verdicts)} directions; relative error {worst_error:.1e}, "
@@ -153,7 +170,8 @@ def judge(label: str, taylors: list) -> dict:
     else:
         verdict, note = "ratio_test", ""
     if untested and tested:
-        note = (note + "; " if note else "") + f"{untested} of {len(directions)} directions did not move"
+        note = (note + "; " if note else "") + (f"{untested} of {len(directions)} directions had no "
+                                                "informative step")
     ratios = [taylor["max_ratio"] for taylor in taylors if taylor["max_ratio"] is not None]
     return {
         "quantity": label,
@@ -178,6 +196,8 @@ def main(argv=None) -> int:
     parser.add_argument("--seed", type=int, default=1, help="seed of the random directions")
     args = parser.parse_args(argv)
 
+    if args.directions < 1:
+        parser.error(f"--directions must be at least 1, got {args.directions}")
     if args.epsilons is not None and len(args.epsilons.split(",")) < 2:
         parser.error("--epsilons needs at least two steps: one step gives no ratio to test")
     problem = build_problem(smoke=args.smoke)
