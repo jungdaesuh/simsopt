@@ -22,8 +22,10 @@ so each point's physics is evaluated once. A step whose difference is not
 finite (e.g. a failed inner solve) is skipped.
 
 Round-off band: a difference is known only to the round-off of its two
-evaluated values over the step, ``b = eps * max|q| over the stencil / (e |v|)``;
-a difference within ``b`` of zero is zero at that step.
+evaluated values over the step, ``b = eps * max|q| over the stencil / (e |v|)``,
+with ``eps`` float32's when every value along the direction is a float32
+number (a quantity evaluated in float32), float64's otherwise; a difference
+within ``b`` of zero is zero at that step.
 
 Converged ranges: a window is at least ``CONVERGED_RUN`` consecutive steps
 whose differences are all zero (value 0, known to the smallest band in it),
@@ -42,10 +44,12 @@ converge to different values, so then it does not decide. Per direction:
 
 1. No window: NOT TESTED (no step range converges: noise, a kink, or a
    step range that misses the derivative).
-2. Ranges that disagree (windows with different values, or windows that
-   miss the claim while a range converges to it): NOT TESTED, listing the
-   ranges (the differences depend on the step size: a float32 or quantized
-   term, a warm-started inner solve with a loose tolerance, or a kink).
+2. Ranges that disagree: windows with different values; windows that miss
+   the claim while a range converges to it; a range at larger steps whose
+   steps agree only to ``FAIL_TOLERANCE`` (not a window) off the consensus; or,
+   for a zero consensus, any step that resolves a nonzero difference. NOT TESTED, listing the ranges (the differences depend on the
+   step size: a float32 or quantized term, a warm-started inner solve with a
+   loose tolerance, or a kink).
 3. One consensus value across the windows:
    - FAIL if the claim misses a nonzero ``v`` by more than
      ``FAIL_TOLERANCE * |v|`` plus its band plus the scatter of the smaller
@@ -55,11 +59,14 @@ converge to different values, so then it does not decide. Per direction:
      more than the round-off of a derivative at the problem's scale
      (``ABSOLUTE_FLOOR_ULPS`` machine epsilons of the objective's largest
      claimed directional derivative);
-   - PASS if a range converged to the claim lies inside a window; for a
+   - PASS if a range converged to the claim lies inside a window, or, for a
      zero consensus, if the claim lies inside its band and that band is
      within ``PASS_TOLERANCE`` of the larger of ``G`` and the objective's
      largest claimed directional derivative (a problem with no derivative
-     scale cannot tell zero from round-off);
+     scale cannot tell zero from round-off); and every range whose steps
+     agree to ``PASS_TOLERANCE`` has a step within ``PASS_TOLERANCE`` of the
+     claim (plus its band): a window that holds two regimes a few 1e-6 apart
+     passes neither;
    - NOT TESTED otherwise.
 
 A nonzero claim never passes through a floor: the round-off floor and the
@@ -148,6 +155,18 @@ class Sweep(NamedTuple):
     band: np.ndarray
 
 
+def precision(values: np.ndarray) -> float:
+    """The relative round-off of the evaluated values: float32's epsilon when
+    every finite one is a float32 number and at least CONVERGED_RUN differ
+    (a quantity the evaluator computes in float32),
+    float64's otherwise."""
+    finite = values[np.isfinite(values)]
+    in_range = finite[np.abs(finite) <= np.finfo(np.float32).max]
+    single = (in_range.size == finite.size and np.unique(finite).size >= CONVERGED_RUN
+              and bool(np.all(in_range.astype(np.float32) == in_range)))
+    return float(np.finfo(np.float32 if single else np.float64).eps)
+
+
 def sweep_direction(memo: PhysicsMemo, row_index: Optional[int], x0: np.ndarray,
                     direction: np.ndarray, steps: np.ndarray) -> Sweep:
     """The differences along ``direction`` (not normalized) at x0 +- e * direction
@@ -159,7 +178,7 @@ def sweep_direction(memo: PhysicsMemo, row_index: Optional[int], x0: np.ndarray,
     unit = np.asarray(taylor["direction"], dtype=float)
     plus = np.array([quantity_value(memo(x0 + float(step) * unit), row_index) for step in steps * norm])
     minus = np.array([quantity_value(memo(x0 - float(step) * unit), row_index) for step in steps * norm])
-    band = np.finfo(float).eps * np.maximum(np.abs(plus), np.abs(minus)) / (steps * norm)
+    band = precision(np.concatenate([plus, minus])) * np.maximum(np.abs(plus), np.abs(minus)) / (steps * norm)
     return Sweep(float(taylor["directional_derivative"]), np.asarray(taylor["central_estimates"], dtype=float),
                  band)
 
@@ -191,16 +210,16 @@ def runs(member: np.ndarray, linked: np.ndarray) -> List[Tuple[int, int]]:
     return found
 
 
-def windows(sweep: Sweep) -> List[Window]:
-    """The windows of one direction (module docstring), larger steps first."""
+def windows(sweep: Sweep, tolerance: float) -> List[Window]:
+    """The windows of one direction whose neighbours agree to ``tolerance``
+    (module docstring), larger steps first."""
     finite = np.isfinite(sweep.differences) & np.isfinite(sweep.band)
     c = np.where(finite, sweep.differences, 0.0)
     band = np.where(finite, sweep.band, 0.0)
     size = np.abs(c)
     zero = finite & (size <= band)
-    # Neighbours agree to CONVERGED_TOLERANCE up to their round-off.
-    agreeing = (np.abs(np.diff(c)) <= CONVERGED_TOLERANCE * np.maximum(size[:-1], size[1:])
-                + band[:-1] + band[1:])
+    # Neighbours agree to ``tolerance`` up to their round-off.
+    agreeing = np.abs(np.diff(c)) <= tolerance * np.maximum(size[:-1], size[1:]) + band[:-1] + band[1:]
     found = [Window(start, stop, float(np.median(c[start:stop + 1])), float(np.median(band[start:stop + 1])),
                     False)
              for start, stop in runs(finite & ~zero, agreeing)]
@@ -218,6 +237,14 @@ def consistent(first: Window, second: Window) -> bool:
     return abs(first.value - second.value) <= FAIL_TOLERANCE * value + first.band + second.band
 
 
+def reaches(window: Window, c: np.ndarray, band: np.ndarray, claimed: float, scale: np.ndarray) -> bool:
+    """Whether a difference in the window agrees with the claim within
+    PASS_TOLERANCE of ``scale`` plus its band."""
+    span = slice(window.start, window.stop + 1)
+    return bool(np.any(np.abs(np.where(np.abs(c[span]) <= band[span], 0.0, c[span]) - claimed)
+                       <= PASS_TOLERANCE * scale[span] + band[span]))
+
+
 def describe(window: Window, steps: np.ndarray) -> str:
     span = f"steps {steps[window.start]:.1e} to {steps[window.stop]:.1e}"
     if window.zero:
@@ -229,7 +256,7 @@ def judge_direction(sweep: Sweep, steps: np.ndarray, gradient_scale: float, obje
     """The rules of the module docstring for one direction; the scales are the
     quantity's and the objective's largest claimed directional derivatives."""
     c, d, band = sweep.differences, sweep.claimed, sweep.band
-    found = windows(sweep)
+    found = windows(sweep, CONVERGED_TOLERANCE)
     seen = c[np.isfinite(c)]
     seen_range = f"[{seen.min():.3e}, {seen.max():.3e}]" if seen.size else "no finite value"
     if not found:
@@ -256,8 +283,22 @@ def judge_direction(sweep: Sweep, steps: np.ndarray, gradient_scale: float, obje
     else:
         consensus = min(found, key=lambda window: window.band)
         misses = abs(d) > consensus.band + ABSOLUTE_FLOOR_ULPS * np.finfo(float).eps * objective_scale
-    if not all(consistent(first, second) for first in found for second in found) or (misses and pairs.size):
-        ranges = [describe(window, steps) for window in found]
+    # Larger steps that converge only to FAIL_TOLERANCE still show what the
+    # differences are there; one such range off the consensus is step-size
+    # dependence too, whether or not it is a window. (Below the consensus the
+    # scatter is noise; it only widens the FAIL margin.)
+    loose = [window for window in windows(sweep, FAIL_TOLERANCE)
+             if not window.zero and window.start < consensus.start and not consistent(window, consensus)]
+    # A zero consensus cannot judge while any step resolves a nonzero
+    # difference: the function changes at those steps, whether or not they
+    # converge (a float32 value flat at small steps, a clipped row near its
+    # bound, a cancellation).
+    changing = np.flatnonzero(np.isfinite(c) & (np.abs(c) > band)) if consensus.zero else np.zeros(0, dtype=int)
+    if loose or changing.size or not all(consistent(first, second) for first in found for second in found) or \
+            (misses and pairs.size):
+        ranges = [describe(window, steps) for window in sorted(found + loose)]
+        ranges += [f"nonzero differences at steps {steps[changing[0]]:.1e} to {steps[changing[-1]]:.1e}"
+                   for _ in changing[:1]]
         ranges += [f"the claim over steps {steps[k]:.1e} to {steps[k + 1]:.1e}" for k in pairs[:1]]
         return {"verdict": "not_tested", "claimed": d,
                 "note": (f"the finite differences depend on the step size ({'; '.join(ranges)}; claim {d:.6e}): "
@@ -271,11 +312,15 @@ def judge_direction(sweep: Sweep, steps: np.ndarray, gradient_scale: float, obje
                 "steps": [steps[consensus.start], steps[consensus.stop]],
                 "note": f"the differences converge to {describe(consensus, steps)}, but the claim is {d:.6e} "
                         f"({relative})"}
-    if consensus.zero and abs(d) <= consensus.band <= PASS_TOLERANCE * max(gradient_scale, objective_scale):
+    # PASS needs every range that converges to PASS_TOLERANCE to agree with
+    # the claim to it: one between that and the FAIL margin (two regimes a
+    # few 1e-6 apart inside one window) leaves the claim NOT TESTED.
+    every = all(reaches(window, c, band, d, scale) for window in windows(sweep, PASS_TOLERANCE))
+    if every and consensus.zero and abs(d) <= consensus.band <= PASS_TOLERANCE * max(gradient_scale, objective_scale):
         return {"verdict": "passed", "claimed": d, "steps": [steps[consensus.start], steps[consensus.stop]],
                 "note": f"the differences are {describe(consensus, steps)}, and so is the claim ({d:.1e})"}
     inside = [int(k) for k in pairs if any(window.start <= k and k + 1 <= window.stop for window in nonzero)]
-    if inside:
+    if every and inside:
         k = inside[0]
         error = float(np.max(np.abs(c[k:k + 2] - d) / scale[k:k + 2]))
         return {"verdict": "passed", "claimed": d, "steps": [steps[k], steps[k + 1]],

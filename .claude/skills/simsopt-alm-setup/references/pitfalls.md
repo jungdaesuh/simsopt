@@ -67,35 +67,48 @@ Each entry: the symptom, the cause, the fix.
     steps from 1 to 1e-10 (each dof moves relative to its own size). Per
     direction it finds the step ranges that converge: three or more
     consecutive steps agreeing to 1e-4, or all zero to the round-off of the
-    evaluated values (eps times the largest value over the stencil, over the
-    step). An FD check cannot know which range holds the derivative when
+    evaluated values (their machine epsilon times the largest value over the
+    stencil, over the step; float32's epsilon when every value is a float32
+    number). An FD check cannot know which range holds the derivative when
     ranges converge to different values, so then the verdict is `NOT
     TESTED`, listing the ranges: a float32 or quantized term, a warm-started
     inner solve that returns its start below its tolerance, or a kink makes
-    small steps see a different function than large ones. Two consecutive
-    steps agreeing with the claim to 1e-6 count as a range at the claim.
-    When the ranges agree on one value, the claim `FAIL`s if it misses that
-    value by more than 5e-4 plus the scatter of the smaller steps (noise of
-    the evaluation can bias a range that much), `PASS`es if two consecutive
-    steps inside a range agree with it to 1e-6, and is `NOT TESTED`
-    otherwise. A zero value passes a claim inside its round-off only when
-    that round-off is within 1e-6 of the problem's derivative scale (the
-    quantity's or the objective's largest claim); a nonzero claim never
-    passes through a floor. The check judges the computed function: on `(F +
-    x) - F` with F large enough that the computed quantity is flat at float
-    resolution over every converged range, a claim of 0 passes and the
-    analytic one fails, because the computed function is flat and the
-    optimizer sees it the same way (C3); with a range at the slope as well,
-    both are NOT TESTED. Known limits: a kink exactly at x0 (e.g. `max` at a
-    tie) FAILs, because the central difference converges to the average of
-    the one-sided slopes; a steep quantity on a large offset (say `1e4 +
-    sin(1e3 x)/1e3`) can be NOT TESTED, because round-off and truncation
-    leave no pair of steps accurate to 1e-6; relative noise of 1e-4 or more
-    (an inner solve with a loose tolerance) seldom leaves three steps
-    converged to 1e-4, so a wrong gradient there is mostly NOT TESTED rather
-    than FAIL; an exactly zero row cannot pass a round-off-size claim such
-    as 1e-17 (NOT TESTED); and a problem whose objective has no gradient at
-    x0 (a constant) has no scale for zero, so zero claims are NOT TESTED.
+    small steps see a different function than large ones. Larger steps
+    agreeing only to 5e-4 count as a range too, and so do two consecutive
+    steps agreeing with the claim to 1e-6; a range of zeros cannot judge
+    while any step resolves a nonzero difference. When the ranges agree on
+    one value, the claim `FAIL`s if it misses that value by more than 5e-4
+    plus the scatter of the smaller steps (noise of the evaluation can bias
+    a range that much), `PASS`es if two consecutive steps inside a range
+    agree with it to 1e-6 and every range converged to 1e-6 agrees with it
+    to 1e-6, and is `NOT TESTED` otherwise. A zero value passes a claim
+    inside its round-off only when that round-off is within 1e-6 of the
+    problem's derivative scale; a nonzero claim never passes through a
+    floor. So these are NOT TESTED whatever the claim: a clipped row whose
+    bound the sweep reaches (larger steps see the active slope); `(F + x) -
+    F` with F large enough that the computed quantity is flat at float
+    resolution at small steps; and a quantity evaluated in float32 whose
+    small steps are flat (its values are float32 numbers, so the check uses
+    float32's round-off). Known limits: a kink exactly at x0 (e.g. `max` at
+    a tie) FAILs, because the central difference converges to the average of
+    the one-sided slopes. simsopt runs JAX in float64 (importing simsopt.geo
+    enables x64), but your own evaluator may compute terms in float32 (your
+    own JAX code without x64, float32 NumPy arrays, a GPU or ML-surrogate
+    term): a float32 term inside a float64 quantity is not recognised: when
+    the float32 term has a large value-to-slope ratio (a value of 1e3 or
+    more at slope 1, or an O(1) value at slope 1e-2 or less) its computed
+    contribution is flat at float32 resolution at small steps, so the right
+    gradient can FAIL and one that leaves the float32 term out can PASS.
+    Check gradients with that evaluator in float64 (in your own JAX code,
+    `jax.config.update("jax_enable_x64", True)`). A steep quantity on a
+    large offset (say `1e4 + sin(1e3 x)/1e3`) can be NOT TESTED, because
+    round-off and truncation leave no pair of steps accurate to 1e-6;
+    relative noise of 1e-4 or more (an inner solve with a loose tolerance)
+    seldom leaves three steps converged to 1e-4, so a wrong gradient there
+    is mostly NOT TESTED rather than FAIL; an exactly zero row cannot pass a
+    round-off-size claim such as 1e-17 (NOT TESTED); and a problem whose
+    objective has no gradient at x0 (a constant) has no scale for zero, so
+    zero claims are NOT TESTED.
 14. **Unique row names.** The runner reports multipliers and values keyed by
     name, so a repeated name hides a row.
 15. **Conflicting constraints.** Thresholds no design can meet (e.g. a coil

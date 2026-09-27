@@ -149,8 +149,13 @@ def build_problem(smoke=False):
 # float32; "quant" adds sum(x^2) rounded to parameter; "stale" adds y from an
 # inner solve warm-started at y(x0) and stopped at tolerance parameter;
 # "hinge_active" is max(0, x0 - parameter), active just past its kink;
-# "bigval" is parameter + 1e-3 sum(x). The claim is "full" (right),
-# "partial" (the flat term's derivative left out), "zero" or "double".
+# "bigval" is parameter + 1e-3 sum(x). Round 8: "fp32row" is
+# float32(1 + parameter sum(sin x)) (a quantity evaluated in float32);
+# "fp32value" is float32(parameter + sum(x)); "ripple" and "ripple_fine" add
+# A sum(sin(parameter x)) with A * parameter = 3e-4 and 1e-5; "tanh_step" adds
+# A sum(tanh(parameter (x - x0))) with A * parameter = 1e-5. The claim is
+# "full" (right), "partial" (the flat, rippling or stepping term's derivative
+# left out), "zero" or "double".
 STEP_PROBE_PROBLEM = """\
 from types import SimpleNamespace
 
@@ -176,6 +181,20 @@ def row(x, case, parameter, claim):
         value, full, partial = x.sum() + inner, 2.0 + 0.2 * x, np.ones_like(x)
     elif case == "hinge_active":
         value, full, partial = max(0.0, x[0] - parameter), np.eye(len(x))[0], np.zeros_like(x)
+    elif case == "fp32row":
+        value = float(np.float32(1.0 + parameter * np.sin(x).sum()))
+        full, partial = parameter * np.cos(x), np.zeros_like(x)
+    elif case == "fp32value":
+        value, full, partial = float(np.float32(parameter + x.sum())), np.ones_like(x), np.zeros_like(x)
+    elif case in ("ripple", "ripple_fine"):
+        amplitude = (3e-4 if case == "ripple" else 1e-5) / parameter
+        value = x.sum() + amplitude * np.sin(parameter * x).sum()
+        full, partial = 1.0 + amplitude * parameter * np.cos(parameter * x), np.ones_like(x)
+    elif case == "tanh_step":
+        amplitude, start = 1e-5 / parameter, np.full_like(x, X0)
+        value = np.sin(x).sum() + amplitude * np.tanh(parameter * (x - start)).sum()
+        full = np.cos(x) + amplitude * parameter / np.cosh(parameter * (x - start)) ** 2
+        partial = np.cos(x)
     else:  # "bigval"
         value, full, partial = parameter + 1e-3 * x.sum(), 1e-3 * np.ones_like(x), np.zeros_like(x)
     return float(value), {"full": full, "partial": partial, "zero": np.zeros_like(x), "double": 2.0 * full}[claim]
@@ -830,19 +849,24 @@ class SkillScriptsRunTests(unittest.TestCase):
                          {name: quantity["note"] for name, quantity in quantities.items()})
 
     def test_gradient_check_passes_flat_and_zero_rows(self):
-        """A constant, a zero-derivative and an inactive clipped row pass a zero
-        claim through a zero window; a clearly nonzero claim fails. A constant
+        """A constant, a zero-derivative and a clipped row inactive over the whole
+        sweep pass a zero claim through a zero window; a clearly nonzero claim
+        fails. A clipped row whose bound the sweep reaches (1 or 1e-4 away) is
+        NOT TESTED (round 8): its larger steps resolve the active slope, as a
+        float32 row's resolve the slope its small steps cannot. A constant
         of 1e4 passes a claim inside the round-off band of its values (R6-F5).
         An exactly zero row has a band of 0, so a round-off-size claim of 1e-17
         cannot pass (round 7: a nonzero claim never passes through a floor);
         the round-off floor of the objective's gradient only keeps it from
         failing: NOT TESTED."""
-        rows = [("const", 1.0, 0.0, 0.0), ("quadratic", 3.0, 0.0, 0.0), ("hinge", 1e-4, 0.0, 0.0),
+        rows = [("const", 1.0, 0.0, 0.0), ("quadratic", 3.0, 0.0, 0.0), ("hinge", 100.0, 0.0, 0.0),
+                ("hinge", 1.0, 0.0, 0.0), ("hinge", 1e-4, 0.0, 0.0),
                 ("const", 1.0, 0.0, 1e-6), ("quadratic", 3.0, 0.0, 1e-6),
                 ("zero", 0.0, 0.0, 1e-17), ("zero", 0.0, 0.0, 1e-6),
                 ("const", 1e4, 0.0, 1e-12), ("const", 1e4, 0.0, 1e-6)]
         self.assert_verdicts(self.run_shape(rows), {
-            "const_1_0_0": "passed", "quadratic_3_0_0": "passed", "hinge_0.0001_0_0": "passed",
+            "const_1_0_0": "passed", "quadratic_3_0_0": "passed", "hinge_100_0_0": "passed",
+            "hinge_1_0_0": "not_tested", "hinge_0.0001_0_0": "not_tested",
             "const_1_0_1e-06": "failed", "quadratic_3_0_1e-06": "failed",
             "zero_0_0_1e-17": "not_tested", "zero_0_0_1e-06": "failed",
             "const_10000_0_1e-12": "passed", "const_10000_0_1e-06": "failed"})
@@ -867,19 +891,17 @@ class SkillScriptsRunTests(unittest.TestCase):
             with self.subTest(row=name):
                 self.assertEqual(quantity["verdict"], "failed" if "_0.001_" in name else "passed", quantity["note"])
 
-    def test_gradient_check_judges_the_computed_function_behind_a_cancellation(self):
+    def test_gradient_check_does_not_decide_behind_a_cancellation(self):
         """(F + sum x) - F has value 0 and the round-off of F: identical values
-        below some step (the computed function is flat there). Round 7: for
-        F = 1e8 and 1e11, larger steps converge to the slope and smaller ones
-        to zero, so the right claim and a 1% wrong one are NOT TESTED; for
-        F = 1e13 only the flat range converges, so a claim of 0 passes (the
-        optimizer sees the same flat function, C3) and the analytic claim
-        fails."""
+        below some step (the computed function is flat there), the slope
+        above it. The step ranges disagree, so the right claim, a 1% wrong
+        one and a claim of 0 are all NOT TESTED (round 8: a zero range cannot
+        judge while other steps resolve a change)."""
         rows = [("cancel", 1e8, 0.0, 0.0), ("cancel", 1e8, 0.01, 0.0), ("cancel", 1e11, 0.0, 0.0),
                 ("cancel", 1e13, -1.0, 0.0), ("cancel", 1e13, 0.0, 0.0)]
         self.assert_verdicts(self.run_shape(rows), {
             "cancel_1e+08_0_0": "not_tested", "cancel_1e+08_0.01_0": "not_tested", "cancel_1e+11_0_0": "not_tested",
-            "cancel_1e+13_-1_0": "passed", "cancel_1e+13_0_0": "failed"})
+            "cancel_1e+13_-1_0": "not_tested", "cancel_1e+13_0_0": "not_tested"})
 
     def test_gradient_check_not_tested_note_is_one_fixed_message(self):
         """R5-5: an undecidable row (steep on a large offset) is NOT TESTED with
@@ -993,6 +1015,36 @@ class SkillScriptsRunTests(unittest.TestCase):
         one never fails."""
         rows = [("bigval", value, claim) for value in (1e10, 1e11, 1e12) for claim in ("full", "zero", "double")]
         for name, quantity in self.run_step(0.5, rows).items():
+            with self.subTest(row=name):
+                if name.endswith("_full"):
+                    self.assertNotEqual(quantity["verdict"], "failed", quantity["note"])
+                else:
+                    self.assertNotEqual(quantity["verdict"], "passed", quantity["note"])
+
+    def test_gradient_check_on_float32_quantities(self):
+        """R8-1: float32(1 + S sum(sin x)) is flat at small steps; its round-off
+        band is float32's, so a claim of 0 or twice the truth never passes and
+        the right one is NOT TESTED, not failed. The same for float32(V +
+        sum(x)) with V = 1e4."""
+        rows = [("fp32row", value, claim) for value in (1e-1, 1e-2, 1e-3) for claim in ("full", "zero", "double")]
+        rows += [("fp32value", 1e4, claim) for claim in ("full", "zero")]
+        for name, quantity in self.run_step(0.3, rows).items():
+            with self.subTest(row=name):
+                if name.endswith("_full"):
+                    self.assertEqual(quantity["verdict"], "not_tested", quantity["note"])
+                else:
+                    self.assertNotEqual(quantity["verdict"], "passed", quantity["note"])
+
+    def test_gradient_check_needs_every_converged_range_at_the_claim(self):
+        """R8-2: at x0 = 0 a ripple or a sharp step of relative size 1e-5 to 3e-4
+        moves the small-step differences off the smooth slope; a claim leaving that term
+        out agrees with the large steps but never passes, and the right claim
+        never fails."""
+        rows = [(case, frequency, claim) for case, frequencies in (("ripple", (1e3, 3e4, 1e6)),
+                                                                   ("ripple_fine", (1e3, 3e4)),
+                                                                   ("tanh_step", (1e5,)))
+                for frequency in frequencies for claim in ("full", "partial")]
+        for name, quantity in self.run_step(0.0, rows).items():
             with self.subTest(row=name):
                 if name.endswith("_full"):
                     self.assertNotEqual(quantity["verdict"], "failed", quantity["note"])
