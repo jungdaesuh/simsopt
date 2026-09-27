@@ -14,6 +14,9 @@ non-final snapshot with the rest of the ``maxiter`` budget (load only
 checkpoints you wrote: unpickling runs code). The last line printed is
 ``ALM_RESULT {json}``: the termination reason, feasibility, multipliers by
 row, and the problem's own ``finish`` summary.
+
+An existing script calls ``run(build_problem())`` instead (the skill's
+``references/existing-script.md``).
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ import argparse
 import json
 import pickle
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -63,10 +67,17 @@ def load_checkpoint(path: Path) -> ALMTransitionSnapshot:
         return pickle.load(handle)
 
 
-def main(argv=None) -> dict:
-    args = parse_args(argv)
-    problem = build_problem(smoke=args.smoke)
-    resume_state = None if args.resume is None else load_checkpoint(args.resume)
+def run(problem, history: Optional[Path] = None, checkpoints: Optional[Path] = None,
+        resume: Optional[Path] = None) -> dict:
+    """Solve ``problem`` (from ``build_problem``) with ``minimize_alm``.
+
+    ``history`` (a JSON file), ``checkpoints`` (a directory) and ``resume`` (a
+    non-final checkpoint pickle) are the opt-ins of the command line. Returns
+    the summary: termination reason, success, message, objective, feasibility,
+    signed values and multipliers by row, iteration counts, the restore flag,
+    and ``problem.finish(result)`` under ``finish``.
+    """
+    resume_state = None if resume is None else load_checkpoint(resume)
     x0 = problem.x0
     inner_options = dict(problem.inner_options)
     if resume_state is not None:
@@ -80,10 +91,10 @@ def main(argv=None) -> dict:
         inner_options,
         resume_state=resume_state,
         completed_outer_callback=(
-            None if args.checkpoints is None else checkpoint_writer(args.checkpoints)
+            None if checkpoints is None else checkpoint_writer(checkpoints)
         ),
     )
-    recorder = None if args.history is None else ALMHistoryRecorder.from_settings(problem.settings)
+    recorder = None if history is None else ALMHistoryRecorder.from_settings(problem.settings)
 
     result = minimize_alm(
         x0,
@@ -98,8 +109,8 @@ def main(argv=None) -> dict:
     )
 
     if recorder is not None:
-        args.history.write_text(json.dumps(recorder.history(), indent=1))
-    summary = {
+        history.write_text(json.dumps(recorder.history(), indent=1))
+    return {
         "problem": problem.name,
         "termination_reason": result.termination_reason,
         "success": bool(result.success),
@@ -117,7 +128,13 @@ def main(argv=None) -> dict:
         "restored_best_feasible_reason": result.restored_best_feasible_reason,
         "finish": problem.finish(result),
     }
-    print(result.message)
+
+
+def main(argv=None) -> dict:
+    args = parse_args(argv)
+    summary = run(build_problem(smoke=args.smoke), history=args.history,
+                  checkpoints=args.checkpoints, resume=args.resume)
+    print(summary["message"])
     print(RESULT_PREFIX + json.dumps(summary))
     return summary
 

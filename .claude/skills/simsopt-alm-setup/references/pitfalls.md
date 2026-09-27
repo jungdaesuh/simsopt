@@ -59,11 +59,20 @@ Each entry: the symptom, the cause, the fix.
 12. **Taylor steps and smoothing.** The smooth rows select points near the
     extremum; a step that changes the selection breaks the ratio test. Use
     steps far below the smoothing temperature (the templates use 1e-5 to
-    2.5e-6); at those steps a smooth row's error can sit at round-off, which
-    `gradient_check.py` accepts as `passed_by_accuracy`.
-13. **Unique row names.** The runner reports multipliers and values keyed by
+    2.5e-6).
+13. **Three ways to pass the gradient check.** `gradient_check.py` reports a
+    `verdict` per quantity: `ratio_test` (the error falls with the step),
+    `no_ratio` (the error is at the round-off floor at every step, so no
+    ratio exists: the difference is exact for a linear or quadratic
+    quantity such as a linear row, or the truncation error at these small
+    steps is already below the floor, as for a coil-length row) and
+    `accuracy` (the ratio test fails at round-off
+    but the smallest error is within 1e-6 relative). All three mean the
+    gradient matches; `vacuous` (zero derivative) means nothing was tested,
+    and `failed` means the gradient is wrong.
+14. **Unique row names.** The runner reports multipliers and values keyed by
     name, so a repeated name hides a row.
-14. **Conflicting constraints.** Thresholds no design can meet (e.g. a coil
+15. **Conflicting constraints.** Thresholds no design can meet (e.g. a coil
     spacing and a coil-surface distance that exclude each other) show as a
     penalty that keeps rising, `penalty_cap_reached`, or `max_outer_after_penalty_increase`
     with one row's violation flat. Relax a threshold; a larger penalty does

@@ -176,9 +176,24 @@ def generate_problem(directory: Path, template: str, source: Optional[str] = Non
 
 def replaced_once(text: str, old: str, new: str) -> str:
     if text.count(old) != 1:
-        raise AssertionError(f"the generic template no longer contains {old!r} exactly once; "
+        raise AssertionError(f"the template no longer contains {old!r} exactly once; "
                              "update this test's edit")
     return text.replace(old, new)
+
+
+def diff_sides(diff: str) -> tuple:
+    """The old and new file of a unified diff that carries full context."""
+    body = [line for line in diff.splitlines()
+            if not line.startswith(("--- ", "+++ ", "@@"))]
+    old = "\n".join(line[1:] for line in body if line[:1] in (" ", "-")) + "\n"
+    new = "\n".join(line[1:] for line in body if line[:1] in (" ", "+")) + "\n"
+    return old, new
+
+
+def module_assignments(source: str) -> Set[str]:
+    return {target.id for node in ast.parse(source).body if isinstance(node, (ast.Assign, ast.AnnAssign))
+            for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+            if isinstance(target, ast.Name)}
 
 
 class SkillDocumentsThePackageTests(unittest.TestCase):
@@ -352,6 +367,9 @@ class SkillScriptsRunTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0)
         self.assertEqual([quantity["quantity"] for quantity in summary["quantities"]],
                          ["f", "sum_at_most_max", "x0_at_least_min"])
+        # A quadratic f and linear rows are differenced exactly: no ratio, with the reason.
+        self.assertEqual({quantity["verdict"] for quantity in summary["quantities"]}, {"no_ratio"})
+        self.assertTrue(all(quantity["note"].startswith("no ratio:") for quantity in summary["quantities"]))
 
     def test_gradient_check_fails_on_a_wrong_gradient(self):
         source = replaced_once((TEMPLATES_DIR / "generic.py").read_text(),
@@ -362,8 +380,8 @@ class SkillScriptsRunTests(unittest.TestCase):
                                problem_dir=self.scratch)
         summary = result_line(completed, "GRADIENT_CHECK ")
         self.assertEqual(completed.returncode, 1)
-        self.assertEqual({quantity["quantity"]: quantity["passed"] for quantity in summary["quantities"]},
-                         {"f": True, "sum_at_most_max": False, "x0_at_least_min": True})
+        self.assertEqual({quantity["quantity"]: quantity["verdict"] for quantity in summary["quantities"]},
+                         {"f": "no_ratio", "sum_at_most_max": "failed", "x0_at_least_min": "no_ratio"})
 
     def test_sign_check_passes_on_the_generic_template(self):
         generate_problem(self.scratch, "generic")
@@ -421,6 +439,58 @@ class TemplateSmokeTests(unittest.TestCase):
         summary = self.run_template("boozer_single_stage", "--smoke")
         self.assertEqual(len(summary["constraint_values"]), 12)
         self.assertTrue(summary["finish"]["surface_solved"])
+
+    def test_stage2_length_scopes_count_the_right_coils(self):
+        """The all-coils row is 2 x nfp = 4 times the base-coil sum (16 circles of
+        length pi at x0); the per-coil rows bound each base coil; the sign probes
+        (circles of minor radius 0.9 and 0.15 m) check both sides of each row
+        against lengths measured over the physical curves."""
+        cases = {
+            "SUM_OF_ALL_COILS": (60.0, {"length_of_all_coils": (16 * np.pi - 60.0) / 60.0}),
+            "PER_BASE_COIL": (4.0, {f"length_of_base_coil_{i}": (np.pi - 4.0) / 4.0 for i in range(4)}),
+        }
+        template = (TEMPLATES_DIR / "stage2.py").read_text()
+        for scope, (bound, expected) in cases.items():
+            with self.subTest(scope=scope):
+                source = replaced_once(template, "MAX_LENGTH = None\n", f"MAX_LENGTH = {bound}\n")
+                source = replaced_once(source, "LENGTH_SCOPE = SUM_OF_BASE_COILS\n", f"LENGTH_SCOPE = {scope}\n")
+                generate_problem(self.scratch, "stage2", source)
+                completed = run_python([str(SCRIPTS_DIR / "sign_check.py"), "--smoke"], cwd=self.scratch,
+                                       problem_dir=self.scratch)
+                summary = result_line(completed, "SIGN_CHECK ")
+                self.assertEqual(completed.returncode, 0, summary["probes"])
+                rows = summary["scales"]["rows"]
+                for name, value in expected.items():
+                    self.assertAlmostEqual(rows[name]["value"], value, places=6)
+                self.assertEqual([warning for warning in summary["coverage_warnings"] if "length" in warning], [])
+
+    def test_existing_script_example_runs(self):
+        """references/existing-script.md: its diff turns the penalty script into
+        one that calls the generated files; the adapted script runs (CI size),
+        and the constants its table names exist in the Stage-2 template."""
+        text = (REFERENCES_DIR / "existing-script.md").read_text()
+        diffs = re.findall(r"^```diff\n(.*?)^```", text, re.MULTILINE | re.DOTALL)
+        self.assertEqual(len(diffs), 1)
+        before, after = diff_sides(diffs[0])
+        penalty_names = module_assignments(before)
+        self.assertLessEqual({"CC_WEIGHT", "CS_WEIGHT", "CURVATURE_WEIGHT", "MSC_WEIGHT", "JF"}, penalty_names)
+        template_names = module_assignments((TEMPLATES_DIR / "stage2.py").read_text())
+        table = [line for line in text.splitlines() if line.startswith("| `")]
+        named = {name for line in table for span in re.findall(r"`([^`]+)`", line)
+                 for name in re.findall(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*\b", span)}
+        self.assertEqual(sorted(named - penalty_names - template_names), [],
+                         "existing-script.md names constants the Stage-2 template does not define")
+
+        (self.scratch / "alm_stage2").mkdir()
+        generate_problem(self.scratch / "alm_stage2", "stage2")
+        (self.scratch / "my_stage2.py").write_text(after)
+        completed = subprocess.run([sys.executable, "my_stage2.py"], cwd=self.scratch,
+                                   env={**child_env(), "CI": "true"}, capture_output=True, text=True,
+                                   timeout=900, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr[-4000:])
+        # The script prints the termination reason first on its last line.
+        self.assertIn(completed.stdout.strip().splitlines()[-1].split()[0], package_termination_reasons())
+        self.assertTrue((self.scratch / "output" / "biot_savart_opt.json").exists())
 
     def test_runner_history_checkpoints_and_resume(self):
         generate_problem(self.scratch, "generic")

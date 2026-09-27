@@ -177,6 +177,10 @@ template is standalone: it repeats the few helpers it needs.
 | `taylor_epsilons` | tuple of steps (largest first) or None (library default) | `gradient_check.py` |
 | `finish(result)` | JSON-serializable `dict`; sets the objects to `result.x` and writes outputs | runner |
 
+`run_alm.py` itself exposes `run(problem, history=None, checkpoints=None,
+resume=None) -> dict`, the summary its command line prints; an existing
+script calls it directly ([existing-script.md](existing-script.md)).
+
 `SignProbe.violated` / `.satisfied` name rows known to be violated (g > 0) or
 satisfied (g <= 0) at `x` from the physics, not from the row code: a bound
 you can check by hand (generic), or an independent measurement compared with

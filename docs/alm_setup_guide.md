@@ -14,6 +14,7 @@ the templates yourself; where the steps say "the user", that is you.
 - [Set up simsopt's ALM solver](#set-up-simsopts-alm-solver)
 - [Install routes](#install-routes)
 - [API](#api)
+- [Adapting an existing script](#adapting-an-existing-script)
 - [Settings](#settings)
 - [Termination reasons](#termination-reasons)
 - [Pitfalls](#pitfalls)
@@ -72,8 +73,15 @@ Ask these multiple-choice questions in one message and wait for the answers.
 3. Constraints: for each, the quantity, the bound type (upper, lower, or
    band), and the threshold with units. Offer the template's rows (Stage 2:
    coil-coil distance, coil-surface distance, maximum curvature, mean squared
-   curvature, total length; Boozer: iota band, major-radius band, total
-   length, coil-coil distance, maximum curvature, mean squared curvature).
+   curvature, coil length; Boozer: iota band, major-radius band, coil length,
+   coil-coil distance, maximum curvature, mean squared curvature).
+   For a coil-length bound, also ask what it bounds: (a) each base coil
+   (`PER_BASE_COIL`, one row per base coil); (b) the sum over the base coils
+   (`SUM_OF_BASE_COILS`, one row); (c) the sum over all physical coils after
+   the symmetry (`SUM_OF_ALL_COILS`, one row). With stellarator symmetry each
+   base coil has 2 x nfp physical copies (16 coils from the Stage-2
+   template's 4, 18 from NCSX's 3), so the same coils have a (c) length
+   2 x nfp times their (b) length: state that multiplicity with the question.
 4. Does an evaluation re-solve something warm-started from an earlier
    evaluation (Boozer Newton, a VMEC restart, any inner solve)? (a) no:
    stateless; (b) yes: stateful.
@@ -98,6 +106,7 @@ physics, that a row is violated or satisfied: they become the sign probes.
 | 1(c) | [generic.py](../.claude/skills/simsopt-alm-setup/templates/generic.py) |
 | 4(a) | Keep `cached_alm_evaluator(self.physics)`. |
 | 4(b) with 1(c) | Evaluate without a cache and warm-start only from accepted solutions: copy the state pattern of the Boozer template (`solve`, `accept_inner_iterate`, `accept_outer_iterate`, `snapshot_accepted`, `restore_incumbent`, and `solver_callbacks` returning all four callbacks). |
+| 3, coil length | Set `MAX_LENGTH` (Stage 2) or `LENGTH_MAX` (Boozer) and `LENGTH_SCOPE` to the answer. |
 | 5(b) with 1(a) | Set `HYBRID_QUARTET = True`. |
 | 5(b) with 1(b) or 1(c) | Add the quartet to `physics` as in [API](#api) (Hybrid quartet), exact values from each kernel's third item. |
 | 6 | Nothing to generate: `run_alm.py --history FILE` and `--checkpoints DIR`. |
@@ -112,8 +121,11 @@ physics, that a row is violated or satisfied: they become the sign probes.
    one-line comment giving the reason ([Settings](#settings)).
 4. Keep the problem-module contract of [API](#api) (the
    checks and the runner read it).
-5. If an existing script should use the new files, show the unified diff of
-   that script and apply it only after the user approves.
+5. If an existing script should use the new files, change it by the
+   pattern of [Adapting an existing script](#adapting-an-existing-script) (import
+   `build_problem` and `run`, move its setup values into the `SETUP`
+   constants, delete its penalty terms and optimizer call), show the unified
+   diff of that script, and apply it only after the user approves.
 
 ### 4. Verify
 
@@ -149,7 +161,8 @@ Then give the user the full-run command,
 
 - `references/`: [Install routes](#install-routes) (route commands),
   [API](#api) (names, evaluator and problem-module
-  contracts), [Settings](#settings) (every `ALMSettings`
+  contracts), [Adapting an existing script](#adapting-an-existing-script) (adapting
+  a penalty script), [Settings](#settings) (every `ALMSettings`
   field, inner options), [Termination reasons](#termination-reasons) (every
   termination reason), [Pitfalls](#pitfalls).
 - `templates/`: `generic.py`, `stage2.py`, `boozer_single_stage.py` (problem
@@ -166,7 +179,9 @@ Then give the user the full-run command,
 `<python>` the interpreter the optimization runs with, `<fork-url>` the
 repository that publishes the `alm-library` branch
 (`https://github.com/<owner>/simsopt` until the owner is known) and
-`<fork-remote>` its remote name in the checkout.
+`<fork-remote>` its remote name in the checkout, and `<scratch>` an empty
+directory outside the checkout for a temporary clone (the copy route; delete
+it afterwards).
 
 What gets installed: the self-contained package `src/simsopt/solve/alm/`
 (numpy, scipy and the standard library only) and, for the coil rows, the
@@ -430,10 +445,170 @@ template is standalone: it repeats the few helpers it needs.
 | `taylor_epsilons` | tuple of steps (largest first) or None (library default) | `gradient_check.py` |
 | `finish(result)` | JSON-serializable `dict`; sets the objects to `result.x` and writes outputs | runner |
 
+`run_alm.py` itself exposes `run(problem, history=None, checkpoints=None,
+resume=None) -> dict`, the summary its command line prints; an existing
+script calls it directly ([Adapting an existing script](#adapting-an-existing-script)).
+
 `SignProbe.violated` / `.satisfied` name rows known to be violated (g > 0) or
 satisfied (g <= 0) at `x` from the physics, not from the row code: a bound
 you can check by hand (generic), or an independent measurement compared with
 the bound (Stage-2 and Boozer templates, via each row's `measure`).
+
+## Adapting an existing script
+
+When the user's current optimization script should use the generated files
+(step 3.5 of `SKILL.md`), change it by this pattern, show the unified diff,
+and apply it only after the user approves.
+
+### Pattern
+
+1. Put `<dir>` first on `sys.path` and import `build_problem` from the
+   generated `alm_problem.py` and `run` from the generated `run_alm.py`. Call
+   `run(build_problem())` directly; do not start `run_alm.py` as a
+   subprocess. `run(problem, history=None, checkpoints=None, resume=None)`
+   returns the summary dict (`termination_reason`, `max_violation`,
+   `multipliers`, ..., `finish`) and leaves the problem's objects at the
+   returned x.
+2. Move the script's setup values into the `SETUP` constants of
+   `alm_problem.py` (the table below), then delete what the constraints
+   replace: the penalty weights, the penalty objects, the objective sum, the
+   `fun` wrapper, the hand-written Taylor test (`gradient_check.py` replaces
+   it) and the optimizer calls. The setup code that built the surface, coils
+   and field goes too: `alm_problem.py` builds them.
+3. Output code that used the script's objects reads them from the problem:
+   `problem.surface`, `problem.base_curves`, `problem.curves`,
+   `problem.biot_savart` (Stage 2; the Boozer template has
+   `problem.boozer_surface`).
+4. Keep the rest of the script (its output directory, its plots, its saves).
+
+### Stage 2: from upstream's stage_two_optimization.py
+
+The penalty script below is simsopt's
+`examples/2_Intermediate/stage_two_optimization.py` shortened (its Taylor
+test, its second run with a smaller length weight and its progress printout
+removed). Its values go to these `alm_problem.py` constants of the Stage-2
+template, and each penalty term becomes these rows:
+
+| Penalty script | alm_problem.py | Row, and what changes |
+|---|---|---|
+| `ncoils` | `NCOILS` | |
+| `R0` | `R0` | |
+| `R1` | `R1` | |
+| `order` | `ORDER` | |
+| `nphi`, `ntheta` | `QUADRATURE_POINTS` | One number for both directions. |
+| `filename` | `SURFACE_FILE` | |
+| `LENGTH_WEIGHT * sum(Jls)` | `LENGTH_WEIGHT` | Stays a term of f: it has no threshold, so it is not a constraint. For a length limit set `MAX_LENGTH` with `LENGTH_SCOPE = SUM_OF_BASE_COILS`, the same sum over the base coils. |
+| `CC_WEIGHT * CurveCurveDistance(curves, CC_THRESHOLD)` | `CC_MIN_DISTANCE` | Row `coil_coil_distance` (= `CC_THRESHOLD`): a smooth minimum over every pair of physical coils. |
+| `CS_WEIGHT * CurveSurfaceDistance(curves, s, CS_THRESHOLD)` | `CS_MIN_DISTANCE` | Row `coil_surface_distance` (= `CS_THRESHOLD`). |
+| `CURVATURE_WEIGHT * sum(LpCurveCurvature(c, 2, CURVATURE_THRESHOLD))` | `MAX_CURVATURE` | Rows `max_curvature_<i>`, one per base coil (= `CURVATURE_THRESHOLD`): the row bounds the pointwise maximum, where the penalty weighed the L2 norm of the excess. |
+| `MSC_WEIGHT * QuadraticPenalty(MeanSquaredCurvature(c), MSC_THRESHOLD, "max")` | `MAX_MEAN_SQUARED_CURVATURE` | Rows `mean_squared_curvature_<i>`, one per base coil (= `MSC_THRESHOLD`). |
+| `MAXITER` | `inner_options["maxiter"]` | The budget of the whole ALM run (all subproblems), not of one `minimize` call: give it several times the penalty run's value. |
+
+Deleted without a counterpart: the weights `CC_WEIGHT`, `CS_WEIGHT`,
+`CURVATURE_WEIGHT`, `MSC_WEIGHT`; the objects `Jf`, `Jls`, `Jccdist`,
+`Jcsdist`, `Jcs`, `Jmscs`, `JF`; `fun` and the `minimize` call; the setup
+objects `s`, `base_curves`, `base_currents`, `coils`, `bs`, `curves`. A
+weight continuation (upstream reruns with `LENGTH_WEIGHT *= 0.1`) is not
+needed: to trade coil length for B.n, change `LENGTH_WEIGHT` or `MAX_LENGTH`
+and rerun.
+
+The change, with `<dir>` = `alm_stage2/` next to the script (the generated
+`alm_problem.py` has the constants above; in CI, `in_github_actions` selects
+the smoke size as upstream's `MAXITER` did):
+
+```diff
+--- a/my_stage2.py
++++ b/my_stage2.py
+@@ -1,67 +1,23 @@
+ #!/usr/bin/env python
+-"""Stage-II coils with penalty weights (simsopt's
+-examples/2_Intermediate/stage_two_optimization.py, shortened)."""
++"""Stage-II coils with the ALM solver: the coil-regularity terms are the
++constraint rows of alm_stage2/alm_problem.py instead of penalty weights."""
+ 
+ import os
++import sys
+ from pathlib import Path
+-from scipy.optimize import minimize
+-from simsopt.field import BiotSavart, Current, coils_via_symmetries
+-from simsopt.geo import (SurfaceRZFourier, curves_to_vtk, create_equally_spaced_curves,
+-                         CurveLength, CurveCurveDistance, MeanSquaredCurvature,
+-                         LpCurveCurvature, CurveSurfaceDistance)
+-from simsopt.objectives import SquaredFlux, QuadraticPenalty
++from simsopt.geo import curves_to_vtk
+ from simsopt.util import in_github_actions
+ 
+-ncoils = 4
+-R0 = 1.0
+-R1 = 0.5
+-order = 5
+-LENGTH_WEIGHT = 1e-6
+-CC_THRESHOLD = 0.1
+-CC_WEIGHT = 1000
+-CS_THRESHOLD = 0.3
+-CS_WEIGHT = 10
+-CURVATURE_THRESHOLD = 5.
+-CURVATURE_WEIGHT = 1e-6
+-MSC_THRESHOLD = 5
+-MSC_WEIGHT = 1e-6
+-MAXITER = 50 if in_github_actions else 400
+-TEST_DIR = (Path(__file__).parent / ".." / ".." / "tests" / "test_files").resolve()
+-filename = TEST_DIR / 'input.LandremanPaul2021_QA'
++# The generated files, alm_stage2/alm_problem.py and alm_stage2/run_alm.py:
++sys.path.insert(0, str(Path(__file__).resolve().parent / "alm_stage2"))
++from alm_problem import build_problem  # noqa: E402
++from run_alm import run  # noqa: E402
++
+ OUT_DIR = "./output/"
+ os.makedirs(OUT_DIR, exist_ok=True)
+ 
+-nphi = 32
+-ntheta = 32
+-s = SurfaceRZFourier.from_vmec_input(filename, range="half period", nphi=nphi, ntheta=ntheta)
+-base_curves = create_equally_spaced_curves(ncoils, s.nfp, stellsym=True, R0=R0, R1=R1, order=order)
+-base_currents = [Current(1e5) for i in range(ncoils)]
+-base_currents[0].fix_all()
+-coils = coils_via_symmetries(base_curves, base_currents, s.nfp, True)
+-bs = BiotSavart(coils)
+-bs.set_points(s.gamma().reshape((-1, 3)))
+-curves = [c.curve for c in coils]
+-
+-Jf = SquaredFlux(s, bs)
+-Jls = [CurveLength(c) for c in base_curves]
+-Jccdist = CurveCurveDistance(curves, CC_THRESHOLD, num_basecurves=ncoils)
+-Jcsdist = CurveSurfaceDistance(curves, s, CS_THRESHOLD)
+-Jcs = [LpCurveCurvature(c, 2, CURVATURE_THRESHOLD) for c in base_curves]
+-Jmscs = [MeanSquaredCurvature(c) for c in base_curves]
+-JF = Jf \
+-    + LENGTH_WEIGHT * sum(Jls) \
+-    + CC_WEIGHT * Jccdist \
+-    + CS_WEIGHT * Jcsdist \
+-    + CURVATURE_WEIGHT * sum(Jcs) \
+-    + MSC_WEIGHT * sum(QuadraticPenalty(J, MSC_THRESHOLD, "max") for J in Jmscs)
+-
+-
+-def fun(dofs):
+-    JF.x = dofs
+-    return JF.J(), JF.dJ()
+-
+-
+-res = minimize(fun, JF.x, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor': 300}, tol=1e-15)
+-print(res.message)
+-curves_to_vtk(curves, OUT_DIR + "curves_opt")
+-bs.save(OUT_DIR + "biot_savart_opt.json")
++problem = build_problem(smoke=in_github_actions)
++summary = run(problem)
++print(summary["termination_reason"], summary["message"])
++curves_to_vtk(problem.curves, OUT_DIR + "curves_opt")
++problem.biot_savart.save(OUT_DIR + "biot_savart_opt.json")
+```
+
+### Other scripts
+
+The same four steps apply to any script: its thresholds become `SETUP`
+constants, its penalty terms rows, and its optimizer call `run(problem)`.
+For a stateful problem (the Boozer template) `run` passes the warm-start
+callbacks from `problem.solver_callbacks()` itself; the script adds nothing.
 
 ## Settings
 
@@ -633,11 +808,20 @@ Each entry: the symptom, the cause, the fix.
 12. **Taylor steps and smoothing.** The smooth rows select points near the
     extremum; a step that changes the selection breaks the ratio test. Use
     steps far below the smoothing temperature (the templates use 1e-5 to
-    2.5e-6); at those steps a smooth row's error can sit at round-off, which
-    `gradient_check.py` accepts as `passed_by_accuracy`.
-13. **Unique row names.** The runner reports multipliers and values keyed by
+    2.5e-6).
+13. **Three ways to pass the gradient check.** `gradient_check.py` reports a
+    `verdict` per quantity: `ratio_test` (the error falls with the step),
+    `no_ratio` (the error is at the round-off floor at every step, so no
+    ratio exists: the difference is exact for a linear or quadratic
+    quantity such as a linear row, or the truncation error at these small
+    steps is already below the floor, as for a coil-length row) and
+    `accuracy` (the ratio test fails at round-off
+    but the smallest error is within 1e-6 relative). All three mean the
+    gradient matches; `vacuous` (zero derivative) means nothing was tested,
+    and `failed` means the gradient is wrong.
+14. **Unique row names.** The runner reports multipliers and values keyed by
     name, so a repeated name hides a row.
-14. **Conflicting constraints.** Thresholds no design can meet (e.g. a coil
+15. **Conflicting constraints.** Thresholds no design can meet (e.g. a coil
     spacing and a coil-surface distance that exclude each other) show as a
     penalty that keeps rising, `penalty_cap_reached`, or `max_outer_after_penalty_increase`
     with one row's violation flat. Relax a threshold; a larger penalty does
@@ -682,7 +866,11 @@ every row divided by its threshold, so that all of them are O(1):
                 (max curvature_i - MAX_CURVATURE) / MAX_CURVATURE                <= 0  (each base coil)
                 (MeanSquaredCurvature_i - MAX_MEAN_SQUARED_CURVATURE)
                     / MAX_MEAN_SQUARED_CURVATURE                                 <= 0  (each base coil)
-                (sum_i CurveLength_i - MAX_TOTAL_LENGTH) / MAX_TOTAL_LENGTH      <= 0  (if set)
+                (coil length - MAX_LENGTH) / MAX_LENGTH                          <= 0  (if set)
+
+where the coil length is, by ``LENGTH_SCOPE``, each base coil's length, the
+sum over the NCOILS base coils, or the sum over all 2 * nfp * NCOILS physical
+coils after the stellarator symmetry (2 * nfp times the base-coil sum).
 
 The distance and maximum-curvature rows are the smooth signed constraints of
 ``simsopt.geo.signed_constraints``: log-sum-exp values never looser than the
@@ -706,7 +894,8 @@ its initial value and every row divided by the size of its bound:
     minimize    J(x) / J(x0),  J = (\int_S B_nonQA^2 dS) / (\int_S B_QA dS)
     subject to  iota within IOTA_TARGET +- IOTA_HALF_WIDTH                  (two rows)
                 major radius within MAJOR_RADIUS_TARGET +- its half width   (two rows)
-                sum_i CurveLength_i <= LENGTH_MAX
+                coil length <= LENGTH_MAX   (by LENGTH_SCOPE: each base coil, the sum
+                                             over the base coils, or over all physical coils)
                 min coil-coil distance >= CC_MIN_DISTANCE                     (smooth row)
                 max curvature_i <= MAX_CURVATURE                              (smooth row, each base coil)
                 MeanSquaredCurvature_i <= MAX_MEAN_SQUARED_CURVATURE          (each base coil)
@@ -741,6 +930,9 @@ non-final snapshot with the rest of the ``maxiter`` budget (load only
 checkpoints you wrote: unpickling runs code). The last line printed is
 ``ALM_RESULT {json}``: the termination reason, feasibility, multipliers by
 row, and the problem's own ``finish`` summary.
+
+An existing script calls ``run(build_problem())`` instead (the skill's
+``references/existing-script.md``).
 
 ### [scripts/check_env.py](../.claude/skills/simsopt-alm-setup/scripts/check_env.py)
 
@@ -801,14 +993,24 @@ drops out, and its gradient would go unchecked. Every quantity's test visits
 the same points, so each point's physics is evaluated once and shared.
 
 The steps are ``--epsilons``, else the problem's ``taylor_epsilons``, else the
-library default. A quantity passes when every value and difference is finite
-and either the ratio test passes or, along every direction, the smallest
-error is at most ``ACCURACY_TOLERANCE`` times max(1, |derivative|): at steps
-where round-off dominates, the errors stop falling although the gradient is
-right to that accuracy (reported as ``passed_by_accuracy``). One whose
-derivative is zero along every direction passes vacuously and is flagged. The
-last line printed is ``GRADIENT_CHECK {json}``; the exit status is 0 when
-every quantity passes.
+library default. Every value and difference must be finite (else
+``nonfinite``); then a quantity passes in one of three ways, reported as its
+``verdict`` and printed with the reason:
+
+- ``ratio_test``: the error falls at least as fast as the step.
+- ``no_ratio``: no ratio exists because the error is at the test's round-off
+  floor at every step: the central difference is exact (a linear or
+  quadratic quantity, such as a linear row) or the errors sit at round-off
+  (or only one step was given). The gradient agrees with the differences.
+- ``accuracy``: the ratio test fails but, along every direction, the smallest
+  error is at most ``ACCURACY_TOLERANCE`` times max(1, |derivative|): at
+  steps where round-off dominates the errors stop falling although the
+  gradient is right to that accuracy.
+
+A quantity whose derivative is zero along every direction passes as
+``vacuous`` (nothing was tested); any other outcome is ``failed``. The last
+line printed is ``GRADIENT_CHECK {json}``; the exit status is 0 when every
+quantity passes.
 
 ### [scripts/sign_check.py](../.claude/skills/simsopt-alm-setup/scripts/sign_check.py)
 

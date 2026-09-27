@@ -60,8 +60,15 @@ before the answers arrive.
 3. Constraints: for each, the quantity, the bound type (upper, lower, or
    band), and the threshold with units. Offer the template's rows (Stage 2:
    coil-coil distance, coil-surface distance, maximum curvature, mean squared
-   curvature, total length; Boozer: iota band, major-radius band, total
-   length, coil-coil distance, maximum curvature, mean squared curvature).
+   curvature, coil length; Boozer: iota band, major-radius band, coil length,
+   coil-coil distance, maximum curvature, mean squared curvature).
+   For a coil-length bound, also ask what it bounds: (a) each base coil
+   (`PER_BASE_COIL`, one row per base coil); (b) the sum over the base coils
+   (`SUM_OF_BASE_COILS`, one row); (c) the sum over all physical coils after
+   the symmetry (`SUM_OF_ALL_COILS`, one row). With stellarator symmetry each
+   base coil has 2 x nfp physical copies (16 coils from the Stage-2
+   template's 4, 18 from NCSX's 3), so the same coils have a (c) length
+   2 x nfp times their (b) length: state that multiplicity with the question.
 4. Does an evaluation re-solve something warm-started from an earlier
    evaluation (Boozer Newton, a VMEC restart, any inner solve)? (a) no:
    stateless; (b) yes: stateful.
@@ -86,6 +93,7 @@ physics, that a row is violated or satisfied: they become the sign probes.
 | 1(c) | [generic.py](templates/generic.py) |
 | 4(a) | Keep `cached_alm_evaluator(self.physics)`. |
 | 4(b) with 1(c) | Evaluate without a cache and warm-start only from accepted solutions: copy the state pattern of the Boozer template (`solve`, `accept_inner_iterate`, `accept_outer_iterate`, `snapshot_accepted`, `restore_incumbent`, and `solver_callbacks` returning all four callbacks). |
+| 3, coil length | Set `MAX_LENGTH` (Stage 2) or `LENGTH_MAX` (Boozer) and `LENGTH_SCOPE` to the answer. |
 | 5(b) with 1(a) | Set `HYBRID_QUARTET = True`. |
 | 5(b) with 1(b) or 1(c) | Add the quartet to `physics` as in [api.md](references/api.md) (Hybrid quartet), exact values from each kernel's third item. |
 | 6 | Nothing to generate: `run_alm.py --history FILE` and `--checkpoints DIR`. |
@@ -100,8 +108,11 @@ physics, that a row is violated or satisfied: they become the sign probes.
    one-line comment giving the reason ([settings.md](references/settings.md)).
 4. Keep the problem-module contract of [api.md](references/api.md) (the
    checks and the runner read it).
-5. If an existing script should use the new files, show the unified diff of
-   that script and apply it only after the user approves.
+5. If an existing script should use the new files, change it by the
+   pattern of [existing-script.md](references/existing-script.md) (import
+   `build_problem` and `run`, move its setup values into the `SETUP`
+   constants, delete its penalty terms and optimizer call), show the unified
+   diff of that script, and apply it only after the user approves.
 
 ## 4. Verify
 
@@ -137,7 +148,8 @@ Then give the user the full-run command,
 
 - `references/`: [install.md](references/install.md) (route commands),
   [api.md](references/api.md) (names, evaluator and problem-module
-  contracts), [settings.md](references/settings.md) (every `ALMSettings`
+  contracts), [existing-script.md](references/existing-script.md) (adapting
+  a penalty script), [settings.md](references/settings.md) (every `ALMSettings`
   field, inner options), [termination.md](references/termination.md) (every
   termination reason), [pitfalls.md](references/pitfalls.md).
 - `templates/`: `generic.py`, `stage2.py`, `boozer_single_stage.py` (problem

@@ -14,7 +14,11 @@ every row divided by its threshold, so that all of them are O(1):
                 (max curvature_i - MAX_CURVATURE) / MAX_CURVATURE                <= 0  (each base coil)
                 (MeanSquaredCurvature_i - MAX_MEAN_SQUARED_CURVATURE)
                     / MAX_MEAN_SQUARED_CURVATURE                                 <= 0  (each base coil)
-                (sum_i CurveLength_i - MAX_TOTAL_LENGTH) / MAX_TOTAL_LENGTH      <= 0  (if set)
+                (coil length - MAX_LENGTH) / MAX_LENGTH                          <= 0  (if set)
+
+where the coil length is, by ``LENGTH_SCOPE``, each base coil's length, the
+sum over the NCOILS base coils, or the sum over all 2 * nfp * NCOILS physical
+coils after the stellarator symmetry (2 * nfp times the base-coil sum).
 
 The distance and maximum-curvature rows are the smooth signed constraints of
 ``simsopt.geo.signed_constraints``: log-sum-exp values never looser than the
@@ -51,19 +55,33 @@ from simsopt.solve.alm import (ALMPhysics, ALMResult, ALMSettings, alm_problem_p
 SURFACE_FILE = (Path(simsopt.__file__).resolve().parents[2] / "tests" / "test_files"
                 / "input.LandremanPaul2021_QA")
 
-# SETUP: the initial coils and the objective.
-NCOILS = 4             # base coils per half field period
-R0 = 1.0               # m, major radius of the initial circular coils
-R1 = 0.5               # m, minor radius of the initial circular coils
-CURRENT = 1e5          # A, initial current of every base coil (the first stays fixed)
-LENGTH_WEIGHT = 1e-6   # weight of the total coil length in f
+# SETUP: the surface sampling, the initial coils and the objective.
+QUADRATURE_POINTS = 32  # surface quadrature points in each direction (nphi = ntheta)
+ORDER = 5               # Fourier order of each coil
+NCOILS = 4              # base coils per half field period
+R0 = 1.0                # m, major radius of the initial circular coils
+R1 = 0.5                # m, minor radius of the initial circular coils
+CURRENT = 1e5           # A, initial current of every base coil (the first stays fixed)
+LENGTH_WEIGHT = 1e-6    # weight of the base-coil length sum in f (a regularizer, not a constraint)
+
+# What the coil-length bound applies to:
+PER_BASE_COIL = "per_base_coil"
+SUM_OF_BASE_COILS = "sum_of_base_coils"
+SUM_OF_ALL_COILS = "sum_of_all_coils"
 
 # SETUP: the constraint thresholds; None drops that row.
 CC_MIN_DISTANCE = 0.1              # m, coil to coil
 CS_MIN_DISTANCE = 0.3              # m, coil to surface
 MAX_CURVATURE = 5.0                # 1/m, each base coil
 MAX_MEAN_SQUARED_CURVATURE = 5.0   # 1/m^2, each base coil
-MAX_TOTAL_LENGTH = None            # m, sum over the base coils
+# SETUP: the coil-length bound in m (None drops it) and its scope:
+#   PER_BASE_COIL      each of the NCOILS base coils: NCOILS rows "length_of_base_coil_<i>";
+#   SUM_OF_BASE_COILS  the sum over the NCOILS base coils: one row "length_of_base_coils";
+#   SUM_OF_ALL_COILS   the sum over all physical coils after the symmetry, 2 * nfp * NCOILS
+#                      of them (16 for the shipped QA target), so 2 * nfp times the base-coil
+#                      sum: one row "length_of_all_coils".
+MAX_LENGTH = None
+LENGTH_SCOPE = SUM_OF_BASE_COILS
 
 # SETUP: smoothing temperatures of the smooth rows, in the constrained
 # quantity's units. Smaller is closer to the exact value but less smooth.
@@ -140,9 +158,9 @@ class Stage2Problem:
     taylor_epsilons = (1e-5, 5e-6, 2.5e-6)
 
     def __init__(self, smoke: bool):
-        # SETUP: smoke runs a coarse surface and low-order coils.
-        quadrature_points = 12 if smoke else 32
-        self.order = 2 if smoke else 5
+        # Smoke runs a coarse surface and low-order coils.
+        quadrature_points = 12 if smoke else QUADRATURE_POINTS
+        self.order = 2 if smoke else ORDER
         self.surface = SurfaceRZFourier.from_vmec_input(
             SURFACE_FILE, range="half period", nphi=quadrature_points, ntheta=quadrature_points)
         self.base_curves = create_equally_spaced_curves(
@@ -213,14 +231,30 @@ class Stage2Problem:
                                                     MAX_MEAN_SQUARED_CURVATURE), MAX_MEAN_SQUARED_CURVATURE),
                     measure=partial(mean_squared_curvature, curve),
                     sense=UPPER_BOUND, bound=MAX_MEAN_SQUARED_CURVATURE, margin=1e-6))
-        if MAX_TOTAL_LENGTH is not None:
-            specs.append(RowSpec(
-                name="total_coil_length",
-                row=partial(scaled_row, partial(signed_upper_bound, sum(self.coil_lengths), MAX_TOTAL_LENGTH),
-                            MAX_TOTAL_LENGTH),
-                measure=partial(total_length, self.base_curves),
-                sense=UPPER_BOUND, bound=MAX_TOTAL_LENGTH, margin=1e-6))
+        if MAX_LENGTH is not None:
+            specs.extend(self._length_specs(MAX_LENGTH))
         return tuple(specs)
+
+    def _length_specs(self, max_length: float) -> list:
+        """The coil-length rows of ``LENGTH_SCOPE``: length <= ``max_length``
+        (m) for each base coil, for the sum over the base coils, or for the
+        sum over all physical coils (the base-coil sum times the number of
+        symmetry copies per base coil, 2 * nfp with stellarator symmetry).
+        Each ``measure`` sums the lengths of the physical curves the row
+        covers, independently of that multiplicity."""
+        copies_per_base_coil = len(self.curves) // len(self.base_curves)
+        scoped = {
+            PER_BASE_COIL: [(f"length_of_base_coil_{i}", length, [curve])
+                            for i, (curve, length) in enumerate(zip(self.base_curves, self.coil_lengths))],
+            SUM_OF_BASE_COILS: [("length_of_base_coils", sum(self.coil_lengths), self.base_curves)],
+            SUM_OF_ALL_COILS: [("length_of_all_coils", copies_per_base_coil * sum(self.coil_lengths),
+                                self.curves)],
+        }[LENGTH_SCOPE]
+        return [RowSpec(name=name,
+                        row=partial(scaled_row, partial(signed_upper_bound, length, max_length), max_length),
+                        measure=partial(total_length, curves),
+                        sense=UPPER_BOUND, bound=max_length, margin=1e-6)
+                for name, length, curves in scoped]
 
     def physics(self, x) -> ALMPhysics:
         if not HYBRID_QUARTET:

@@ -13,14 +13,24 @@ drops out, and its gradient would go unchecked. Every quantity's test visits
 the same points, so each point's physics is evaluated once and shared.
 
 The steps are ``--epsilons``, else the problem's ``taylor_epsilons``, else the
-library default. A quantity passes when every value and difference is finite
-and either the ratio test passes or, along every direction, the smallest
-error is at most ``ACCURACY_TOLERANCE`` times max(1, |derivative|): at steps
-where round-off dominates, the errors stop falling although the gradient is
-right to that accuracy (reported as ``passed_by_accuracy``). One whose
-derivative is zero along every direction passes vacuously and is flagged. The
-last line printed is ``GRADIENT_CHECK {json}``; the exit status is 0 when
-every quantity passes.
+library default. Every value and difference must be finite (else
+``nonfinite``); then a quantity passes in one of three ways, reported as its
+``verdict`` and printed with the reason:
+
+- ``ratio_test``: the error falls at least as fast as the step.
+- ``no_ratio``: no ratio exists because the error is at the test's round-off
+  floor at every step: the central difference is exact (a linear or
+  quadratic quantity, such as a linear row) or the errors sit at round-off
+  (or only one step was given). The gradient agrees with the differences.
+- ``accuracy``: the ratio test fails but, along every direction, the smallest
+  error is at most ``ACCURACY_TOLERANCE`` times max(1, |derivative|): at
+  steps where round-off dominates the errors stop falling although the
+  gradient is right to that accuracy.
+
+A quantity whose derivative is zero along every direction passes as
+``vacuous`` (nothing was tested); any other outcome is ``failed``. The last
+line printed is ``GRADIENT_CHECK {json}``; the exit status is 0 when every
+quantity passes.
 """
 
 from __future__ import annotations
@@ -88,12 +98,27 @@ def judge(label: str, taylor: dict) -> dict:
         min(result["errors"]) <= ACCURACY_TOLERANCE * max(1.0, abs(result["directional_derivative"]))
         for result in directions
     )
+    if not finite:
+        verdict, note = "nonfinite", "a value or difference is not finite"
+    elif vacuous:
+        verdict, note = "vacuous", "zero derivative along every direction: nothing tested"
+    elif taylor["max_ratio"] is None:
+        verdict, note = "no_ratio", (
+            "no ratio: only one step" if len(taylor["epsilons"]) < 2 else
+            "no ratio: error at the round-off floor at every step (exact for a linear "
+            "or quadratic quantity, else round-off)")
+    elif taylor["passed"]:
+        verdict, note = "ratio_test", ""
+    elif accurate:
+        verdict, note = "accuracy", "ratio test at round-off; smallest error within tolerance"
+    else:
+        verdict, note = "failed", "error does not fall with the step: the gradient is wrong"
     return {
         "quantity": label,
-        "passed": bool(finite and (taylor["passed"] or accurate)),
-        "passed_by_accuracy": bool(finite and accurate and not taylor["passed"]),
+        "passed": verdict in ("ratio_test", "no_ratio", "accuracy", "vacuous"),
+        "verdict": verdict,
+        "note": note,
         "finite": bool(finite),
-        "vacuous": bool(vacuous),
         "value": taylor["base_total"],
         "max_ratio": taylor["max_ratio"],
         "ratio_threshold": taylor["ratio_threshold"],
@@ -127,9 +152,7 @@ def main(argv=None) -> int:
     passed = all(outcome["passed"] for outcome in outcomes)
     for outcome in outcomes:
         status = "PASS" if outcome["passed"] else ("NONFINITE" if not outcome["finite"] else "FAIL")
-        flag = ("  (zero derivative: vacuous)" if outcome["vacuous"]
-                else "  (ratio test at round-off; passed by accuracy)" if outcome["passed_by_accuracy"]
-                else "")
+        flag = f"  ({outcome['note']})" if outcome["note"] else ""
         max_ratio = "n/a" if outcome["max_ratio"] is None else f"{outcome['max_ratio']:.3f}"
         print(f"{outcome['quantity']:<32} {status:<9} value={outcome['value']:+.4e} "
               f"max_ratio={max_ratio}{flag}")

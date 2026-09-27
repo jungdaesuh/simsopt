@@ -27,7 +27,7 @@ from typing import Dict, List
 SKILL_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = SKILL_DIR.parents[2]
 GUIDE_PATH = REPO_ROOT / "docs" / "alm_setup_guide.md"
-REFERENCES = ("install", "api", "settings", "termination", "pitfalls")
+REFERENCES = ("install", "api", "existing-script", "settings", "termination", "pitfalls")
 TEMPLATES = ("generic", "stage2", "boozer_single_stage", "run_alm")
 SCRIPTS = ("check_env", "smoke_toy", "gradient_check", "sign_check", "build_guide")
 

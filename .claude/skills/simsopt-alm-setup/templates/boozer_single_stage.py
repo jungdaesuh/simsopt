@@ -10,7 +10,8 @@ its initial value and every row divided by the size of its bound:
     minimize    J(x) / J(x0),  J = (\int_S B_nonQA^2 dS) / (\int_S B_QA dS)
     subject to  iota within IOTA_TARGET +- IOTA_HALF_WIDTH                  (two rows)
                 major radius within MAJOR_RADIUS_TARGET +- its half width   (two rows)
-                sum_i CurveLength_i <= LENGTH_MAX
+                coil length <= LENGTH_MAX   (by LENGTH_SCOPE: each base coil, the sum
+                                             over the base coils, or over all physical coils)
                 min coil-coil distance >= CC_MIN_DISTANCE                     (smooth row)
                 max curvature_i <= MAX_CURVATURE                              (smooth row, each base coil)
                 MeanSquaredCurvature_i <= MAX_MEAN_SQUARED_CURVATURE          (each base coil)
@@ -52,12 +53,24 @@ COIL_CONFIG = "ncsx"
 INITIAL_IOTA = -0.406          # Newton's starting iota
 SURFACE_MINOR_RADIUS = 0.1     # m, the initial surface is fitted around the magnetic axis
 
+# What the coil-length bound applies to:
+PER_BASE_COIL = "per_base_coil"
+SUM_OF_BASE_COILS = "sum_of_base_coils"
+SUM_OF_ALL_COILS = "sum_of_all_coils"
+
 # SETUP: targets and bounds; None takes the initial configuration's value.
 IOTA_TARGET: Optional[float] = None
 IOTA_HALF_WIDTH = 0.0                          # 0: iota is held at the target
 MAJOR_RADIUS_TARGET: Optional[float] = None    # m
 MAJOR_RADIUS_HALF_WIDTH = 0.0                  # m
-LENGTH_MAX: Optional[float] = None             # m, sum over the base coils
+# SETUP: the coil-length bound in m (None: each row's initial value) and its scope:
+#   PER_BASE_COIL      each base coil: one row "length_of_base_coil_<i>" per base coil;
+#   SUM_OF_BASE_COILS  the sum over the base coils: one row "length_of_base_coils";
+#   SUM_OF_ALL_COILS   the sum over all physical coils after the symmetry, 2 * nfp per base
+#                      coil (18 coils from NCSX's 3), so 2 * nfp times the base-coil sum:
+#                      one row "length_of_all_coils".
+LENGTH_MAX: Optional[float] = None
+LENGTH_SCOPE = SUM_OF_BASE_COILS
 CC_MIN_DISTANCE = 0.15                         # m, coil to coil
 MAX_CURVATURE = 15.0                           # 1/m, each base coil
 MAX_MEAN_SQUARED_CURVATURE = 15.0              # 1/m^2, each base coil
@@ -176,7 +189,7 @@ class BoozerSingleStageProblem:
             iota_target=float(res["iota"]) if IOTA_TARGET is None else IOTA_TARGET,
             major_radius_target=(float(self.major_radius.J()) if MAJOR_RADIUS_TARGET is None
                                  else MAJOR_RADIUS_TARGET),
-            length_max=float(sum(self.coil_lengths).J()) if LENGTH_MAX is None else LENGTH_MAX,
+            length_max=LENGTH_MAX,
         )
         self.constraint_names = tuple(spec.name for spec in self.row_specs)
         self.rows = tuple(spec.row for spec in self.row_specs)
@@ -200,7 +213,6 @@ class BoozerSingleStageProblem:
         # SETUP: one RowSpec per row; a new row needs a scaled row callable
         # and an independent measure of the same quantity for the sign probes.
         surface = self.boozer_surface.surface
-        total_coil_length = sum(self.coil_lengths)
         band_rows = (
             ("iota", self.iotas, lambda: float(self.boozer_surface.res["iota"]),
              iota_target, IOTA_HALF_WIDTH, abs(iota_target), 1e-6),
@@ -217,11 +229,7 @@ class BoozerSingleStageProblem:
                 name=f"{name}_max",
                 row=partial(scaled_row, partial(signed_upper_bound, quantity, target + half_width), scale),
                 measure=measure, sense=UPPER_BOUND, bound=target + half_width, margin=margin))
-        specs.append(RowSpec(
-            name="total_coil_length",
-            row=partial(scaled_row, partial(signed_upper_bound, total_coil_length, length_max), length_max),
-            measure=partial(total_length, self.base_curves),
-            sense=UPPER_BOUND, bound=length_max, margin=1e-6))
+        specs.extend(self._length_specs(length_max))
         specs.append(RowSpec(
             name="coil_coil_distance",
             row=partial(scaled_row, partial(smooth_min_curve_curve_signed_constraint, self.curves,
@@ -243,6 +251,32 @@ class BoozerSingleStageProblem:
                 measure=partial(mean_squared_curvature, curve),
                 sense=UPPER_BOUND, bound=MAX_MEAN_SQUARED_CURVATURE, margin=1e-6))
         return tuple(specs)
+
+    def _length_specs(self, length_max: Optional[float]) -> list:
+        """The coil-length rows of ``LENGTH_SCOPE``: length <= ``length_max``
+        (m; None: the row's initial value) for each base coil, for the sum
+        over the base coils, or for the sum over all physical coils (the
+        base-coil sum times the number of symmetry copies per base coil,
+        2 * nfp with stellarator symmetry). Each ``measure`` sums the lengths
+        of the physical curves the row covers, independently of that
+        multiplicity."""
+        copies_per_base_coil = len(self.curves) // len(self.base_curves)
+        scoped = {
+            PER_BASE_COIL: [(f"length_of_base_coil_{i}", length, [curve])
+                            for i, (curve, length) in enumerate(zip(self.base_curves, self.coil_lengths))],
+            SUM_OF_BASE_COILS: [("length_of_base_coils", sum(self.coil_lengths), self.base_curves)],
+            SUM_OF_ALL_COILS: [("length_of_all_coils", copies_per_base_coil * sum(self.coil_lengths),
+                                self.curves)],
+        }[LENGTH_SCOPE]
+        specs = []
+        for name, length, curves in scoped:
+            bound = float(length.J()) if length_max is None else length_max
+            specs.append(RowSpec(
+                name=name,
+                row=partial(scaled_row, partial(signed_upper_bound, length, bound), bound),
+                measure=partial(total_length, curves),
+                sense=UPPER_BOUND, bound=bound, margin=1e-6))
+        return specs
 
     def _solution_at(self, coil_dofs) -> BoozerSolution:
         return BoozerSolution(
@@ -364,7 +398,8 @@ class BoozerSingleStageProblem:
             "nonqs_ratio": float(result.objective) * self.objective_scale,
             "iota": float(self.boozer_surface.res["iota"]),
             "major_radius": float(self.boozer_surface.surface.major_radius()),
-            "total_coil_length": total_length(self.base_curves),
+            "base_coils_length": total_length(self.base_curves),
+            "all_coils_length": total_length(self.curves),
             "min_coil_coil_distance": min_curve_curve_distance(self.curves),
         }
 
