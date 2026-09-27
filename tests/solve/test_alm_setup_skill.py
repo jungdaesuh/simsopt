@@ -103,12 +103,13 @@ def build_problem(smoke=False):
 """
 
 
-# Crucible round 6: noisy quantities, like an iterative inner solve. Each has
-# the value (1 + sum x + sum x^2) (1 + NOISE u), u uniform in [-1, 1] drawn
-# from Python's hash of the point (so PYTHONHASHSEED picks the noise), and
-# claims (1 + DELTA) times the true gradient. The objective is the round-6
-# repro itself (``hash(x.tobytes())``, x0 = (0, 0)); each row salts its hash
-# with its index. Rows are (NOISE, DELTA).
+# Crucible rounds 6 and 7: noisy quantities, like an iterative inner solve.
+# Each has the value (1 + sum x + sum x^2) (1 + NOISE u), u drawn from
+# Python's hash of the point (so PYTHONHASHSEED picks the noise): uniform in
+# [-1, 1], or (round 7) "tri" in {-1, 0, 1} or "cauchy" (Student t, 1 dof);
+# it claims (1 + DELTA) times the true gradient. The objective is the
+# round-6 repro itself (``hash(x.tobytes())``, x0 = (0, 0)); each row salts
+# its hash with its index. Rows are (NOISE, DELTA) or (NOISE, DELTA, KIND).
 NOISY_PROBE_PROBLEM = """\
 from types import SimpleNamespace
 
@@ -119,9 +120,11 @@ from simsopt.solve.alm import ALMPhysics
 OBJECTIVE, ROWS = OBJECTIVE_VALUE, ROWS_VALUE
 
 
-def noisy(x, salt, noise, delta):
+def noisy(x, salt, noise, delta, kind="uniform"):
     key = x.tobytes() if salt is None else (x.tobytes(), salt)
-    draw = np.random.RandomState(abs(hash(key)) % (2 ** 32)).uniform(-1.0, 1.0)
+    random = np.random.RandomState(abs(hash(key)) % (2 ** 32))
+    draw = {"uniform": random.uniform(-1.0, 1.0), "tri": float(random.randint(-1, 2)),
+            "cauchy": random.standard_t(1)}[kind]
     return (1.0 + x.sum() + (x ** 2).sum()) * (1.0 + noise * draw), (1.0 + delta) * (1.0 + 2.0 * x)
 
 
@@ -136,8 +139,91 @@ def physics(x):
 
 def build_problem(smoke=False):
     return SimpleNamespace(name="noisy", x0=np.zeros(2), physics=physics,
-                           constraint_names=tuple(f"noise_{noise:g}_delta_{delta:g}" for noise, delta in ROWS))
+                           constraint_names=tuple("_".join(f"{item:g}" if not isinstance(item, str) else item
+                                                           for item in ("noise",) + row[:1] + ("delta",) + row[1:])
+                                                  for row in ROWS))
 """
+# Crucible round 7: quantities whose finite differences depend on the step
+# size, at x0 = X0_VALUE (every dof), with f = sum(x). Rows are
+# (case, parameter, claim): "fp32term" adds parameter sum(x^2) evaluated in
+# float32; "quant" adds sum(x^2) rounded to parameter; "stale" adds y from an
+# inner solve warm-started at y(x0) and stopped at tolerance parameter;
+# "hinge_active" is max(0, x0 - parameter), active just past its kink;
+# "bigval" is parameter + 1e-3 sum(x). The claim is "full" (right),
+# "partial" (the flat term's derivative left out), "zero" or "double".
+STEP_PROBE_PROBLEM = """\
+from types import SimpleNamespace
+
+import numpy as np
+
+from simsopt.solve.alm import ALMPhysics
+
+X0, ROWS = X0_VALUE, ROWS_VALUE
+
+
+def row(x, case, parameter, claim):
+    if case == "fp32term":
+        term = np.float32(parameter) * np.sum(np.asarray(x, np.float32) ** 2, dtype=np.float32)
+        value, full, partial = x.sum() + float(term), 1.0 + 2.0 * parameter * x, np.ones_like(x)
+    elif case == "quant":
+        value = x.sum() + parameter * np.round((x ** 2).sum() / parameter)
+        full, partial = 1.0 + 2.0 * x, np.ones_like(x)
+    elif case == "stale":
+        start = np.full_like(x, X0)
+        target, inner = x.sum() + 0.1 * (x ** 2).sum(), start.sum() + 0.1 * (start ** 2).sum()
+        while abs(target - inner) >= parameter:
+            inner += 0.5 * (target - inner)
+        value, full, partial = x.sum() + inner, 2.0 + 0.2 * x, np.ones_like(x)
+    elif case == "hinge_active":
+        value, full, partial = max(0.0, x[0] - parameter), np.eye(len(x))[0], np.zeros_like(x)
+    else:  # "bigval"
+        value, full, partial = parameter + 1e-3 * x.sum(), 1e-3 * np.ones_like(x), np.zeros_like(x)
+    return float(value), {"full": full, "partial": partial, "zero": np.zeros_like(x), "double": 2.0 * full}[claim]
+
+
+def physics(x):
+    x = np.asarray(x, dtype=float)
+    rows = [row(x, *spec) for spec in ROWS]
+    return ALMPhysics(base_value=float(x.sum()), base_grad=np.ones_like(x),
+                      constraint_values=np.array([value for value, _grad in rows]),
+                      constraint_grads=tuple(grad for _value, grad in rows))
+
+
+def build_problem(smoke=False):
+    return SimpleNamespace(name="step", x0=np.full(2, X0), physics=physics,
+                           constraint_names=tuple(f"{case}_{parameter:g}_{claim}" for case, parameter, claim in ROWS))
+"""
+# Crucible round 7 (C4): the round's own noisy objective, (1 + sum x + sum x^2
+# + sum sin x) (1 + LEVEL u) with u from sha256 of the point and TRIAL
+# ("tri" in {-1, 0, 1}, "cauchy" Student t with 1 dof), at x0 drawn from
+# TRIAL, with the right gradient; checked with --seed TRIAL + 1.
+NOISE_TRIAL_PROBLEM = """\
+import hashlib
+from types import SimpleNamespace
+
+import numpy as np
+
+from simsopt.solve.alm import ALMPhysics
+
+KIND, LEVEL, TRIAL = KIND_VALUE, LEVEL_VALUE, TRIAL_VALUE
+
+
+def physics(x):
+    x = np.asarray(x, dtype=float)
+    digest = hashlib.sha256(x.tobytes() + bytes([TRIAL])).digest()[:4]
+    random = np.random.RandomState(int.from_bytes(digest, "little"))
+    draw = random.standard_t(1) if KIND == "cauchy" else float(random.randint(-1, 2))
+    value = 1.0 + x.sum() + (x ** 2).sum() + np.sin(x).sum()
+    return ALMPhysics(base_value=float(value * (1.0 + LEVEL * draw)), base_grad=1.0 + 2.0 * x + np.cos(x),
+                      constraint_values=np.zeros(0), constraint_grads=())
+
+
+def build_problem(smoke=False):
+    return SimpleNamespace(name="noise_trial", x0=np.random.RandomState(TRIAL).uniform(-1.0, 1.0, 3),
+                           physics=physics, constraint_names=())
+"""
+# Round-7 trials whose right claims the round-6 checker failed.
+NOISE_TRIALS = (("tri", 1e-3, 13), ("cauchy", 1e-4, 33))
 # Round-6 seeds of the noise.
 NOISY_HASH_SEEDS = tuple(range(8))
 
@@ -651,9 +737,11 @@ class SkillScriptsRunTests(unittest.TestCase):
         return {quantity["quantity"]: quantity["verdict"] for quantity in summary["quantities"]}
 
     def test_gradient_check_on_exact_zeroed_constant_and_wrong_gradients(self):
-        """Exact gradients and a constant with zero gradients pass; zeroed or
-        scaled gradients on changing quantities fail (Crucible round 1)."""
-        cases = {"exact": {"f": "passed", "row": "passed"}, "constant": {"f": "passed", "row": "passed"},
+        """Exact gradients pass; zeroed or scaled gradients on changing
+        quantities fail (Crucible round 1). A problem whose objective and row
+        are constant has no derivative scale to resolve zero against: NOT
+        TESTED (round 7)."""
+        cases = {"exact": {"f": "passed", "row": "passed"}, "constant": {"f": "not_tested", "row": "not_tested"},
                  "zero": {"f": "failed", "row": "failed"}, "factor": {"f": "failed", "row": "failed"},
                  "small": {"f": "passed", "row": "failed"}}
         for mode, expected in cases.items():
@@ -743,10 +831,12 @@ class SkillScriptsRunTests(unittest.TestCase):
 
     def test_gradient_check_passes_flat_and_zero_rows(self):
         """A constant, a zero-derivative and an inactive clipped row pass a zero
-        claim through a near-zero window; a clearly nonzero claim fails; an
-        exactly zero row passes a round-off-size claim (R5-7: its floor comes
-        from the objective's gradient, not 0) and fails a real one; a constant
-        of 1e4 passes a claim at its own round-off (R6-F5) and fails 1e-6."""
+        claim through a zero window; a clearly nonzero claim fails. A constant
+        of 1e4 passes a claim inside the round-off band of its values (R6-F5).
+        An exactly zero row has a band of 0, so a round-off-size claim of 1e-17
+        cannot pass (round 7: a nonzero claim never passes through a floor);
+        the round-off floor of the objective's gradient only keeps it from
+        failing: NOT TESTED."""
         rows = [("const", 1.0, 0.0, 0.0), ("quadratic", 3.0, 0.0, 0.0), ("hinge", 1e-4, 0.0, 0.0),
                 ("const", 1.0, 0.0, 1e-6), ("quadratic", 3.0, 0.0, 1e-6),
                 ("zero", 0.0, 0.0, 1e-17), ("zero", 0.0, 0.0, 1e-6),
@@ -754,7 +844,7 @@ class SkillScriptsRunTests(unittest.TestCase):
         self.assert_verdicts(self.run_shape(rows), {
             "const_1_0_0": "passed", "quadratic_3_0_0": "passed", "hinge_0.0001_0_0": "passed",
             "const_1_0_1e-06": "failed", "quadratic_3_0_1e-06": "failed",
-            "zero_0_0_1e-17": "passed", "zero_0_0_1e-06": "failed",
+            "zero_0_0_1e-17": "not_tested", "zero_0_0_1e-06": "failed",
             "const_10000_0_1e-12": "passed", "const_10000_0_1e-06": "failed"})
 
     def test_gradient_check_passes_steep_smooth_rows(self):
@@ -777,18 +867,19 @@ class SkillScriptsRunTests(unittest.TestCase):
             with self.subTest(row=name):
                 self.assertEqual(quantity["verdict"], "failed" if "_0.001_" in name else "passed", quantity["note"])
 
-    def test_gradient_check_never_fails_a_right_gradient_behind_a_cancellation(self):
-        """R5-3: (F + sum x) - F has value 0 but the round-off of F; right
-        gradients are never failed (identical values at small steps are the
-        precision of F, not a derivative) and pass for F = 1e8; a 1% wrong one
+    def test_gradient_check_judges_the_computed_function_behind_a_cancellation(self):
+        """(F + sum x) - F has value 0 and the round-off of F: identical values
+        below some step (the computed function is flat there). Round 7: for
+        F = 1e8 and 1e11, larger steps converge to the slope and smaller ones
+        to zero, so the right claim and a 1% wrong one are NOT TESTED; for
+        F = 1e13 only the flat range converges, so a claim of 0 passes (the
+        optimizer sees the same flat function, C3) and the analytic claim
         fails."""
-        rows = [("cancel", f, 0.0, 0.0) for f in (1e8, 1e11, 1e12, 1e13)] + [("cancel", 1e8, 0.01, 0.0)]
-        quantities = self.run_shape(rows)
-        self.assertEqual(quantities["cancel_1e+08_0_0"]["verdict"], "passed")
-        self.assertEqual(quantities["cancel_1e+08_0.01_0"]["verdict"], "failed")
-        for f in ("1e+11", "1e+12", "1e+13"):
-            with self.subTest(offset=f):
-                self.assertNotEqual(quantities[f"cancel_{f}_0_0"]["verdict"], "failed")
+        rows = [("cancel", 1e8, 0.0, 0.0), ("cancel", 1e8, 0.01, 0.0), ("cancel", 1e11, 0.0, 0.0),
+                ("cancel", 1e13, -1.0, 0.0), ("cancel", 1e13, 0.0, 0.0)]
+        self.assert_verdicts(self.run_shape(rows), {
+            "cancel_1e+08_0_0": "not_tested", "cancel_1e+08_0.01_0": "not_tested", "cancel_1e+11_0_0": "not_tested",
+            "cancel_1e+13_-1_0": "passed", "cancel_1e+13_0_0": "failed"})
 
     def test_gradient_check_not_tested_note_is_one_fixed_message(self):
         """R5-5: an undecidable row (steep on a large offset) is NOT TESTED with
@@ -854,12 +945,84 @@ class SkillScriptsRunTests(unittest.TestCase):
                              quantities["noise_1e-08_delta_0"]["note"])
 
     def test_gradient_check_kinks(self):
-        """A kink 3e-6 away passes (the sweep reaches steps below it); a kink
+        """A kink 3e-6 away: steps above it converge to the average slope and
+        steps below it to the derivative, so NOT TESTED (round 7). A kink
         exactly at x0 (max at a tie) is not passed: the central differences
         converge to the average of the one-sided slopes."""
         quantities = self.run_shape([("abs", 3e-6, 0.0, 0.0), ("max_tie", 0.0, 0.0, 0.0)])
-        self.assertEqual(quantities["abs_3e-06_0_0"]["verdict"], "passed")
+        self.assertEqual(quantities["abs_3e-06_0_0"]["verdict"], "not_tested")
         self.assertNotEqual(quantities["max_tie_0_0_0"]["verdict"], "passed")
+
+    def run_step(self, x0: float, rows: list) -> Dict[str, dict]:
+        source = STEP_PROBE_PROBLEM.replace("X0_VALUE", repr(x0)).replace("ROWS_VALUE", repr(rows))
+        (self.scratch / "alm_problem.py").write_text(source)
+        completed = run_python([str(SCRIPTS_DIR / "gradient_check.py")], cwd=self.scratch,
+                               problem_dir=self.scratch)
+        summary = result_line(completed, "GRADIENT_CHECK ")
+        return {quantity["quantity"]: quantity for quantity in summary["quantities"] if quantity["quantity"] != "f"}
+
+    def test_gradient_check_does_not_decide_step_dependent_differences(self):
+        """R7-1 (C1): a float32 term, a quantized term and a warm-started inner
+        solve go flat at small steps, so large steps converge to the full
+        derivative and small ones to the rest: the right claim is NOT TESTED
+        (not FAIL) and one missing the flat term's derivative never passes."""
+        rows = [(case, parameter, claim) for case, parameter in (("fp32term", 1.0), ("fp32term", 0.01),
+                                                                 ("quant", 1e-7), ("stale", 1e-8))
+                for claim in ("full", "partial")]
+        for name, quantity in self.run_step(0.5, rows).items():
+            with self.subTest(row=name):
+                if name.endswith("_full"):
+                    self.assertEqual(quantity["verdict"], "not_tested", quantity["note"])
+                    self.assertIn("depend on the step size", quantity["note"])
+                else:
+                    self.assertNotEqual(quantity["verdict"], "passed", quantity["note"])
+
+    def test_gradient_check_does_not_fail_a_kink_just_past_x0(self):
+        """R7-2 (C2): max(0, x0 - 1e-4) at x0 = 1e-4 + 1e-9: steps above the kink
+        converge to half the slope, the two below it to the slope; the right
+        claim is NOT TESTED, a zero or doubled one never passes."""
+        quantities = self.run_step(0.000100001, [("hinge_active", 1e-4, claim) for claim in ("full", "zero", "double")])
+        self.assertEqual(quantities["hinge_active_0.0001_full"]["verdict"], "not_tested",
+                         quantities["hinge_active_0.0001_full"]["note"])
+        for claim in ("zero", "double"):
+            self.assertNotEqual(quantities[f"hinge_active_0.0001_{claim}"]["verdict"], "passed")
+
+    def test_gradient_check_on_big_values_with_small_derivatives(self):
+        """R7-4 (C5): F + 1e-3 sum(x) for F = 1e10 to 1e12 hides the change at
+        small steps; claims of 0 and twice the truth never pass, and the right
+        one never fails."""
+        rows = [("bigval", value, claim) for value in (1e10, 1e11, 1e12) for claim in ("full", "zero", "double")]
+        for name, quantity in self.run_step(0.5, rows).items():
+            with self.subTest(row=name):
+                if name.endswith("_full"):
+                    self.assertNotEqual(quantity["verdict"], "failed", quantity["note"])
+                else:
+                    self.assertNotEqual(quantity["verdict"], "passed", quantity["note"])
+
+    def test_gradient_check_never_fails_right_gradients_under_biased_noise(self):
+        """R7-3 (C4): noise that takes a few values ("tri", {-1, 0, 1}) or has
+        heavy tails ("cauchy") can bias three steps alike; a right claim is
+        never failed (the scatter of the smaller steps bounds the bias), and a
+        wrong one never passes. The round-7 trials the round-6 checker failed
+        come first."""
+        for kind, level, trial in NOISE_TRIALS:
+            source = (NOISE_TRIAL_PROBLEM.replace("KIND_VALUE", repr(kind)).replace("LEVEL_VALUE", repr(level))
+                      .replace("TRIAL_VALUE", repr(trial)))
+            (self.scratch / "alm_problem.py").write_text(source)
+            completed = run_python([str(SCRIPTS_DIR / "gradient_check.py"), "--seed", str(trial + 1)],
+                                   cwd=self.scratch, problem_dir=self.scratch)
+            with self.subTest(kind=kind, level=level, trial=trial):
+                self.assertNotEqual(self.verdicts(completed)["f"], "failed", completed.stdout[-2000:])
+        rows = [(1e-3, 0.0, "tri"), (1e-4, 0.0, "cauchy"), (1e-4, 0.0, "uniform"),
+                (1e-3, 0.5, "tri"), (1e-4, 0.5, "cauchy")]
+        for hash_seed in NOISY_HASH_SEEDS:
+            quantities = self.run_noisy((1e-8, 0.0), rows, hash_seed)
+            for name, quantity in quantities.items():
+                with self.subTest(hash_seed=hash_seed, quantity=name):
+                    if "_delta_0_" in name:
+                        self.assertNotEqual(quantity["verdict"], "failed", quantity["note"])
+                    elif name != "f":
+                        self.assertNotEqual(quantity["verdict"], "passed", quantity["note"])
 
     def test_sign_check_passes_on_the_generic_template(self):
         generate_problem(self.scratch, "generic")

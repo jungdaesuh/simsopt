@@ -122,17 +122,19 @@ Run each from any directory; all three must pass before the real run.
    must exit 0. It compares each claimed directional derivative with central
    differences over a sweep of relative steps (1 down to 1e-10), and each
    quantity ends in one of:
-   - `FAIL` (decided first): the differences converge (three consecutive
-     steps agree to 1e-4) to a value that misses the claim by more than 5e-4
-     of that value, or they converge to zero and the claim is not zero to
-     round-off: the gradient of the named quantity in `alm_problem.py` is
-     wrong; fix it.
-   - `PASS`: no FAIL, and two consecutive steps agree with the claim to
-     1e-6, or the differences converge to zero and so does the claim.
-     Nothing to do.
-   - `NOT TESTED`: neither (a kink, noise, oscillation, or a value too large
-     for its change to be resolved). Check the quantity at a nearby point,
-     or inspect it; there is no step to retry with.
+   - `FAIL`: the step ranges that converge (three steps agreeing to 1e-4)
+     agree on one value, and the claim misses it by more than 5e-4 (for a
+     zero value, the claim is clearly outside its round-off): the gradient
+     of the named quantity in `alm_problem.py` is wrong; fix it.
+   - `PASS`: the ranges agree on one value, and two consecutive steps inside
+     one of them agree with the claim to 1e-6 (for a zero value, the claim
+     is zero to its round-off). Nothing to do.
+   - `NOT TESTED`: nothing converges (noise, a kink, or a step range that
+     misses the derivative), or ranges converge to different values (a
+     float32 or quantized term, a warm-started inner solve with a loose
+     tolerance, or a kink: check the evaluator), or the claim is within 5e-4
+     but not resolved to 1e-6. Check the quantity at a nearby point, or
+     inspect it; there is no step to retry with.
    - `NONFINITE`: the value or the claimed gradient at x0 is not finite.
 2. `PYTHONPATH=<dir> <python> $SKILL_DIR/scripts/sign_check.py --smoke` must
    exit 0. On a failure, fix the named row's sign or its probe expectation.
