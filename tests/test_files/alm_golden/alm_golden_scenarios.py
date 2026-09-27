@@ -1398,6 +1398,15 @@ def load_manifest() -> dict:
     return json.loads((FIXTURE_DIR / "manifest.json").read_text(encoding="utf-8"))
 
 
+EPS = float(np.finfo(float).eps)
+
+
+def load_sensitivity() -> dict:
+    """``sensitivity.json``: each scenario's measured spread under last-bit
+    noise (``measure_alm_golden_sensitivity.py``)."""
+    return json.loads((FIXTURE_DIR / "sensitivity.json").read_text(encoding="utf-8"))
+
+
 def recorded_environment() -> tuple[str, str, str]:
     """The numpy and SciPy versions and the machine the goldens were recorded with."""
     environment = load_manifest()["environment"]

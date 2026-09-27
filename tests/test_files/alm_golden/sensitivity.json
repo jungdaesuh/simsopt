@@ -1,0 +1,214 @@
+{
+ "measure": "OMP_NUM_THREADS=1 python tests/test_files/alm_golden/measure_alm_golden_sensitivity.py",
+ "noise": {
+  "ulps": [
+   2,
+   4
+  ],
+  "seeds": [
+   1,
+   2,
+   3,
+   4,
+   5,
+   6
+  ],
+  "tolerance_factor": 10.0,
+  "numeric_replay_ceiling": 1e-10
+ },
+ "environment": {
+  "python": "3.11.15",
+  "numpy": "2.4.6",
+  "scipy": "1.17.1",
+  "machine": "x86_64"
+ },
+ "source_blob_ids": {
+  "simsopt/solve/alm/__init__.py": "62c2dba05f9179a246579b4f1b44a4fa81d98d7a",
+  "simsopt/solve/alm/boundary.py": "db9146d9081b35713b0af84209e020703920ba5a",
+  "simsopt/solve/alm/checkpoint.py": "30187f3d29bc7bd619e731a88b88782c49bdb8d4",
+  "simsopt/solve/alm/continuation.py": "544c57bea397e916f78a600beead3be2711a5238",
+  "simsopt/solve/alm/control.py": "2d7a5fcbb000fb64e9e2cc6ecf84f1f91ca34416",
+  "simsopt/solve/alm/core.py": "0d566588114d3094111b478760beadd4996d5d8e",
+  "simsopt/solve/alm/evaluation.py": "bf059e5b7eba3a9379d2f09a62590356f4028f57",
+  "simsopt/solve/alm/events.py": "2ce64055d724f7fc2d380f579018ea7d06ae0151",
+  "simsopt/solve/alm/history.py": "407f029e4955ad7bb122dd414361b7c7c05eea37",
+  "simsopt/solve/alm/hybrid.py": "d1574700bcaee83d36ffbe243ec462c0eba66049",
+  "simsopt/solve/alm/inner.py": "d1b424e2e9f55027b337e38f0788ceef06b59f57",
+  "simsopt/solve/alm/policy.py": "76b8da88e67c0ededa6ac8fe9497b1d5724f255f",
+  "simsopt/solve/alm/problem.py": "3dae69d828aff8402c5e4bc7de19c6af4eeb7824",
+  "simsopt/solve/alm/taylor.py": "0145e7432911ae1ee77ed408c54ced10e03d5124",
+  "alm_golden_scenarios.py": "548420a21a88df301c545c0338dc8a6497405a36"
+ },
+ "scenarios": {
+  "toy_convex": {
+   "label_only": null,
+   "spread": {
+    "x": 4.440892098500626e-15,
+    "objective": 6.994405055138486e-15,
+    "max_violation": 7.10542743701034e-15,
+    "multipliers": 7.105427357601002e-14,
+    "penalty": 0.0
+   }
+  },
+  "penalty_ramp_to_cap": {
+   "label_only": "outcomes change under 2 ulp, seed 5: ['callback:restore_incumbent_state', 'restored:final_iterate_worse_than_best_feasible', 'termination:penalty_cap_reached', 'termination:penalty_cap_reached_restored_best_feasible']",
+   "spread": {
+    "x": 7.815970093361103e-15,
+    "objective": 4.9264296346033615e-15,
+    "max_violation": 1.258252761241844e-14,
+    "multipliers": 3.0198066269804293e-15,
+    "penalty": 0.0
+   }
+  },
+  "resume_penalty_ramp_mid_run": {
+   "label_only": "outcomes change under 2 ulp, seed 5: ['restored:final_iterate_worse_than_best_feasible', 'termination:penalty_cap_reached', 'termination:penalty_cap_reached_restored_best_feasible']",
+   "spread": {
+    "x": 7.815970093361103e-15,
+    "objective": 4.9264296346033615e-15,
+    "max_violation": 1.258252761241844e-14,
+    "multipliers": 3.0198066269804293e-15,
+    "penalty": 0.0
+   }
+  },
+  "hybrid_mismatch_repair": {
+   "label_only": null,
+   "spread": {
+    "x": 0.0,
+    "objective": 8.877079297089645e-16,
+    "max_violation": 8.673617379884035e-18,
+    "multipliers": 0.0,
+    "penalty": 0.0
+   }
+  },
+  "hybrid_mismatch_penalty_increase": {
+   "label_only": "outcomes change under 2 ulp, seed 2: ['callback:restore_incumbent_state', 'restored:final_iterate_worse_than_best_feasible', 'termination:max_outer_after_signal_mismatch_penalty_increase', 'termination:max_outer_restored_best_feasible']",
+   "spread": {
+    "x": 0.0,
+    "objective": 7.002930640068652e-16,
+    "max_violation": 0.0,
+    "multipliers": 0.0,
+    "penalty": 0.0
+   }
+  },
+  "hybrid_mismatch_stall": {
+   "label_only": null,
+   "spread": {
+    "x": 0.0,
+    "objective": 7.003072867423512e-16,
+    "max_violation": 0.0,
+    "multipliers": 0.0,
+    "penalty": 0.0
+   }
+  },
+  "constraints_inactive_stall": {
+   "label_only": null,
+   "spread": {
+    "x": 0.0,
+    "objective": 8.526512829121202e-16,
+    "max_violation": 0.0,
+    "multipliers": 0.0,
+    "penalty": 0.0
+   }
+  },
+  "plateau_restore_best_feasible": {
+   "label_only": null,
+   "spread": {
+    "x": 0.0,
+    "objective": 9.491402917597322e-16,
+    "max_violation": 0.0,
+    "multipliers": 0.0,
+    "penalty": 0.0
+   }
+  },
+  "resume_plateau_best_feasible": {
+   "label_only": null,
+   "spread": {
+    "x": 0.0,
+    "objective": 9.491402917597322e-16,
+    "max_violation": 0.0,
+    "multipliers": 0.0,
+    "penalty": 0.0
+   }
+  },
+  "trust_radius_retries": {
+   "label_only": "outcomes change under 2 ulp, seed 2: ['dual_update_penalty_raise', 'flag:dual_update_penalty_increase']",
+   "spread": {
+    "x": 2.2132133259628528e-16,
+    "objective": 8.778506478305111e-16,
+    "max_violation": 8.881784197001252e-16,
+    "multipliers": 8.881784197001252e-16,
+    "penalty": 0.0
+   }
+  },
+  "frozen_warm_start_restore": {
+   "label_only": null,
+   "spread": {
+    "x": 2.1058579913151568e-14,
+    "objective": 5.929945559375664e-15,
+    "max_violation": 2.3342439092743916e-14,
+    "multipliers": 2.1721943341495962e-13,
+    "penalty": 0.0
+   }
+  },
+  "cached_physics_smoothing": {
+   "label_only": "path changes under 2 ulp, seed 1: objective: boundaries 5 != golden 6",
+   "spread": {
+    "x": 1.635813484668347e-09,
+    "objective": 0.0005946331679266724,
+    "max_violation": 0.0,
+    "multipliers": 0.0,
+    "penalty": 0.0
+   }
+  },
+  "multiplier_cap_process_budget": {
+   "label_only": null,
+   "spread": {
+    "x": 1.887379141862766e-15,
+    "objective": 2.1649348980190553e-15,
+    "max_violation": 2.6647520995348728e-15,
+    "multipliers": 0.0,
+    "penalty": 0.0
+   }
+  },
+  "inner_iteration_budget": {
+   "label_only": null,
+   "spread": {
+    "x": 1.887379141862766e-15,
+    "objective": 2.0539125955565396e-15,
+    "max_violation": 2.6645352591003757e-15,
+    "multipliers": 2.6645352591003757e-14,
+    "penalty": 0.0
+   }
+  },
+  "dual_update_penalty_cap": {
+   "label_only": null,
+   "spread": {
+    "x": 1.887379141862766e-15,
+    "objective": 2.4980018054066022e-15,
+    "max_violation": 2.67841304690819e-15,
+    "multipliers": 2.6645352591003757e-14,
+    "penalty": 0.0
+   }
+  },
+  "preinner_converged": {
+   "label_only": null,
+   "spread": {
+    "x": 0.0,
+    "objective": 3.3306690738754696e-16,
+    "max_violation": 0.0,
+    "multipliers": 0.0,
+    "penalty": 0.0
+   }
+  },
+  "zero_inner_budget": {
+   "label_only": null,
+   "spread": {
+    "x": 0.0,
+    "objective": 5.329070518200751e-16,
+    "max_violation": 0.0,
+    "multipliers": 0.0,
+    "penalty": 0.0
+   }
+  }
+ }
+}

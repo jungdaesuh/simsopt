@@ -22,7 +22,7 @@
   "simsopt/solve/alm/policy.py": "76b8da88e67c0ededa6ac8fe9497b1d5724f255f",
   "simsopt/solve/alm/problem.py": "3dae69d828aff8402c5e4bc7de19c6af4eeb7824",
   "simsopt/solve/alm/taylor.py": "0145e7432911ae1ee77ed408c54ced10e03d5124",
-  "alm_golden_scenarios.py": "7b433832e0e26afaa162c46598a8394d3f716ca6"
+  "alm_golden_scenarios.py": "548420a21a88df301c545c0338dc8a6497405a36"
  },
  "outcome_union": [
   "action:constraints_inactive_converged",

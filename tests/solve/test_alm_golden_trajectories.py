@@ -11,7 +11,9 @@ the goldens were recorded with, so the bitwise replay runs only there. Under any
 supported numpy and SciPy each scenario replays its coarse outcomes (actions,
 termination and restore reasons, flags) and its numeric boundary values (x,
 objective, max violation, multipliers, penalty at every outer step, outer
-boundary and result) within measured tolerances. Regenerate only for a
+boundary and result) within tolerances set by its measured sensitivity to
+last-bit noise (``sensitivity.json``); a scenario whose outcomes or path change
+under that noise replays its outcomes only. Regenerate only for a
 reviewed, intended behavior change (command in ``manifest.json``); a change that
 leaves every fixture byte-identical refreshes the manifest's provenance with
 ``--provenance-only``.
@@ -34,32 +36,39 @@ MANIFEST = golden.load_manifest()
 RECORDED_ENVIRONMENT = golden.recorded_environment()
 _golden = golden.load_golden
 
-# Largest boundary-value deviation, |value - golden| / max(1, |golden|), that
-# the numeric replay accepts. Measured on x86_64 across Python 3.11 (numpy
-# 2.4.6, SciPy 1.17.1; the recording environment, deviation 0), Python 3.9
-# (numpy 2.0.2, SciPy 1.13.1) and Python 3.8 (numpy 1.24.4, SciPy 1.10.1),
-# single-threaded, over every scenario; the two non-recording environments
-# gave identical maxima. Tolerance = 10 x max(observed, machine epsilon); the
-# epsilon floor keeps an exactly reproduced quantity (penalty) from demanding
-# bit equality.
+# Per-scenario sensitivity to last-bit noise, written by
+# measure_alm_golden_sensitivity.py: every evaluation perturbed by 2-4 ulp
+# (deterministic in the evaluation's inputs, as another CPU or BLAS build
+# would), six seeds per level. A scenario whose outcomes or path changed under
+# that noise, or whose values moved too far for a tolerance to catch a
+# NUMERIC_REPLAY_CEILING regression, is label-only (its reason is recorded);
+# the others get, per quantity, tolerance = tolerance_factor x max(spread, eps).
 #
-#   quantity        max observed   (scenario)                      tolerance
-#   x               7.8e-16        toy_convex                      7.8e-15
-#   objective       1.4e-15        multiplier_cap_process_budget   1.4e-14
-#   max_violation   1.3e-15        multiplier_cap_process_budget   1.3e-14
-#   multipliers     4.4e-15        toy_convex, inner_iteration_... 4.4e-14
-#   penalty         0              (all)                           2.2e-15
-BOUNDARY_TOLERANCES = MappingProxyType({
-    "x": 7.8e-15,
-    "objective": 1.4e-14,
-    "max_violation": 1.3e-14,
-    "multipliers": 4.4e-14,
-    "penalty": 2.2e-15,
+#   scenario (label-only reason, measured on x86_64, numpy 2.4.6, SciPy 1.17.1)
+#   penalty_ramp_to_cap, resume_penalty_ramp_mid_run: 2 ulp flips the
+#       final-versus-best-feasible comparison (restored best feasible)
+#   hybrid_mismatch_penalty_increase: the same restore flip
+#   trust_radius_retries: 2 ulp adds a dual-update penalty raise
+#   cached_physics_smoothing: 2 ulp changes the number of outer steps
+#
+#   numeric replay, largest tolerance over scenarios:
+#   x 2.1e-13, objective 7.0e-14, max_violation 2.3e-13,
+#   multipliers 2.2e-12 (frozen_warm_start_restore), penalty 2.2e-15
+SENSITIVITY = golden.load_sensitivity()
+NUMERIC_REPLAY_CEILING = SENSITIVITY["noise"]["numeric_replay_ceiling"]
+LABEL_ONLY_SCENARIOS = MappingProxyType({
+    name: measured["label_only"]
+    for name, measured in SENSITIVITY["scenarios"].items()
+    if measured["label_only"] is not None
 })
-# Scenarios whose trajectory legitimately branches across supported numpy and
-# SciPy versions, with the reason; they replay their outcomes only. None
-# branched in the measurement above.
-OUTCOME_ONLY_SCENARIOS = MappingProxyType({})
+BOUNDARY_TOLERANCES = MappingProxyType({
+    name: MappingProxyType({
+        quantity: SENSITIVITY["noise"]["tolerance_factor"] * max(spread, golden.EPS)
+        for quantity, spread in measured["spread"].items()
+    })
+    for name, measured in SENSITIVITY["scenarios"].items()
+    if measured["label_only"] is None
+})
 
 
 @functools.lru_cache(maxsize=None)
@@ -85,6 +94,15 @@ class AlmGoldenFixtureSetTests(unittest.TestCase):
                 f"{entry['fixture']} differs from the recorded golden; goldens "
                 "are written only by generate_alm_golden.py",
             )
+
+    def test_the_sensitivity_was_measured_on_these_sources_and_scenarios(self):
+        self.assertEqual(list(SENSITIVITY["scenarios"]), [s.name for s in golden.SCENARIOS])
+        self.assertEqual(
+            SENSITIVITY["source_blob_ids"],
+            alm_source_blob_ids(),
+            "the ALM sources changed since the sensitivity was measured; rerun "
+            + SENSITIVITY["measure"],
+        )
 
     def test_the_manifest_names_the_sources_that_produced_the_goldens(self):
         self.assertEqual(
@@ -120,37 +138,33 @@ class AlmGoldenOutcomeReplayTests(unittest.TestCase):
 
 
 class AlmGoldenNumericReplayTests(unittest.TestCase):
-    """Any numpy and SciPy: each scenario's boundary values stay within
-    ``BOUNDARY_TOLERANCES`` of its golden."""
+    """Any numpy and SciPy: each scenario's boundary values stay within its
+    ``BOUNDARY_TOLERANCES`` of its golden; label-only scenarios are skipped."""
 
     def test_every_scenario_replays_its_boundary_values(self):
-        for scenario in golden.SCENARIOS:
-            if scenario.name in OUTCOME_ONLY_SCENARIOS:
-                continue
-            with self.subTest(scenario=scenario.name):
+        for name, tolerances in BOUNDARY_TOLERANCES.items():
+            with self.subTest(scenario=name):
                 structural, deviations = golden.boundary_deviations(
-                    golden.scenario_boundary_values(_golden(scenario.name)["trajectory"]),
-                    golden.scenario_boundary_values(_fresh_run(scenario.name)),
+                    golden.scenario_boundary_values(_golden(name)["trajectory"]),
+                    golden.scenario_boundary_values(_fresh_run(name)),
                 )
-                self.assertIsNone(
-                    structural,
-                    f"ALM golden '{scenario.name}' took another path; name it in "
-                    "OUTCOME_ONLY_SCENARIOS with the reason only if that is legitimate",
-                )
-                for quantity, tolerance in BOUNDARY_TOLERANCES.items():
+                self.assertIsNone(structural, f"ALM golden '{name}' took another path")
+                for quantity, tolerance in tolerances.items():
                     self.assertLessEqual(
                         deviations[quantity],
                         tolerance,
-                        f"ALM golden '{scenario.name}' {quantity} drifted",
+                        f"ALM golden '{name}' {quantity} drifted",
                     )
 
-    def test_the_tolerances_cover_every_quantity(self):
-        self.assertEqual(tuple(BOUNDARY_TOLERANCES), golden.BOUNDARY_QUANTITIES)
-
-    def test_outcome_only_scenarios_exist_and_give_a_reason(self):
-        for name, reason in OUTCOME_ONLY_SCENARIOS.items():
-            self.assertIn(name, golden.SCENARIOS_BY_NAME)
+    def test_every_scenario_is_numeric_or_label_only_with_a_reason(self):
+        self.assertEqual(
+            set(BOUNDARY_TOLERANCES) | set(LABEL_ONLY_SCENARIOS), set(golden.SCENARIOS_BY_NAME)
+        )
+        self.assertFalse(set(BOUNDARY_TOLERANCES) & set(LABEL_ONLY_SCENARIOS))
+        for reason in LABEL_ONLY_SCENARIOS.values():
             self.assertTrue(reason.strip())
+        for tolerances in BOUNDARY_TOLERANCES.values():
+            self.assertEqual(tuple(tolerances), golden.BOUNDARY_QUANTITIES)
 
     def test_every_scenario_records_boundary_values(self):
         for scenario in golden.SCENARIOS:
@@ -158,15 +172,27 @@ class AlmGoldenNumericReplayTests(unittest.TestCase):
                 values = golden.scenario_boundary_values(_golden(scenario.name)["trajectory"])
                 self.assertTrue(all(values[quantity] for quantity in golden.BOUNDARY_QUANTITIES))
 
-    def test_a_drift_beyond_tolerance_is_detected(self):
-        expected = golden.scenario_boundary_values(_golden("penalty_ramp_to_cap")["trajectory"])
-        location, floats = expected["x"][-1]
-        drifted = dict(expected)
-        drifted["x"] = expected["x"][:-1] + [(location, tuple(value + 1e-6 for value in floats))]
-        structural, deviations = golden.boundary_deviations(expected, drifted)
-        self.assertIsNone(structural)
-        self.assertGreater(deviations["x"], BOUNDARY_TOLERANCES["x"])
-        self.assertEqual(deviations["penalty"], 0.0)
+    def test_a_ceiling_sized_regression_is_caught_in_every_quantity(self):
+        # A relative drift of NUMERIC_REPLAY_CEILING in the last recorded value
+        # of any quantity of any numeric scenario exceeds its tolerance.
+        for name, tolerances in BOUNDARY_TOLERANCES.items():
+            expected = golden.scenario_boundary_values(_golden(name)["trajectory"])
+            for quantity in golden.BOUNDARY_QUANTITIES:
+                with self.subTest(scenario=name, quantity=quantity):
+                    index = max(
+                        i for i, (_, floats) in enumerate(expected[quantity]) if floats
+                    )
+                    location, floats = expected[quantity][index]
+                    shifted = (floats[0] + NUMERIC_REPLAY_CEILING * max(1.0, abs(floats[0])),)
+                    drifted = dict(expected)
+                    drifted[quantity] = (
+                        expected[quantity][:index]
+                        + [(location, shifted + floats[1:])]
+                        + expected[quantity][index + 1:]
+                    )
+                    structural, deviations = golden.boundary_deviations(expected, drifted)
+                    self.assertIsNone(structural)
+                    self.assertGreater(deviations[quantity], tolerances[quantity])
 
 
 @unittest.skipUnless(
