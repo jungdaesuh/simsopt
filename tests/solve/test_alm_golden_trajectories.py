@@ -41,23 +41,37 @@ RECORDED_ENVIRONMENT = golden.recorded_environment()
 _golden = golden.load_golden
 
 # Per-scenario sensitivity to last-bit noise, written by
-# measure_alm_golden_sensitivity.py: every evaluation perturbed by 2-4 ulp
-# (deterministic in the evaluation's inputs, as another CPU or BLAS build
-# would), six seeds per level. A scenario whose outcomes or path changed under
-# that noise, or whose values moved too far for a tolerance to catch a
-# NUMERIC_REPLAY_CEILING regression, is label-only (its reason is recorded);
-# the others get, per quantity, tolerance = tolerance_factor x max(spread, eps).
+# measure_alm_golden_sensitivity.py (its docstring states the noise model: the
+# evaluator's x moved by 1-4 ulp of max(||x||_inf, 1), every returned float
+# scaled by 1 + 1-4 ulp, x0 moved by 1 ulp; deterministic in the evaluation's
+# inputs, as another CPU or BLAS build would be). 48 calibration samples per
+# scenario set the observed outcomes and spreads; 96 held-out samples must stay
+# within the numeric tolerances and show whether an outcome set still grows.
+# A scenario whose outcomes or path changed under that noise, or whose values
+# moved too far for a tolerance to catch a NUMERIC_REPLAY_CEILING regression,
+# is label-only (reason recorded); the others get, per quantity,
+# tolerance = tolerance_factor x max(spread, eps). Measured on x86_64, numpy
+# 2.4.6, SciPy 1.17.1.
 #
-#   scenario (label-only reason, measured on x86_64, numpy 2.4.6, SciPy 1.17.1)
-#   penalty_ramp_to_cap, resume_penalty_ramp_mid_run: 2 ulp flips the
-#       final-versus-best-feasible comparison (restored best feasible)
-#   hybrid_mismatch_penalty_increase: the same restore flip
-#   trust_radius_retries: 2 ulp adds a dual-update penalty raise
-#   cached_physics_smoothing: 2 ulp changes the number of outer steps
+#   label-only scenario (first change seen)          intended outcome not
+#                                                    reached in every sample
+#   penalty_ramp_to_cap, resume_penalty_ramp_mid_run termination:penalty_cap_reached
+#       (1 ulp flips the final-vs-best-feasible restore)
+#   hybrid_mismatch_penalty_increase (same flip)    termination:max_outer_after_
+#                                                    signal_mismatch_penalty_increase
+#   plateau_restore_best_feasible,
+#   resume_plateau_best_feasible (an inner retry)    -
+#   trust_radius_retries (a dual-update penalty raise) -
+#   frozen_warm_start_restore (a plain penalty raise; OPEN: held-out samples
+#       add flag:inner_false_success)               action:infeasible_stall_penalty_increase
+#   cached_physics_smoothing (outer-step count)      -
 #
 #   numeric replay, largest tolerance over scenarios:
-#   x 2.1e-13, objective 7.0e-14, max_violation 2.3e-13,
-#   multipliers 2.2e-12 (frozen_warm_start_restore), penalty 2.2e-15
+#   x              1.2e-13  (multiplier_cap_process_budget)
+#   objective      1.7e-13  (inner_iteration_budget)
+#   max_violation  1.8e-13  (inner_iteration_budget)
+#   multipliers    3.5e-12  (toy_convex)
+#   penalty        2.2e-15  (toy_convex)
 SENSITIVITY = golden.load_sensitivity()
 NUMERIC_REPLAY_CEILING = SENSITIVITY["noise"]["numeric_replay_ceiling"]
 LABEL_ONLY_SCENARIOS = MappingProxyType({
@@ -65,6 +79,23 @@ LABEL_ONLY_SCENARIOS = MappingProxyType({
     for name, measured in SENSITIVITY["scenarios"].items()
     if measured["label_only"] is not None
 })
+# Label-only scenarios whose outcome set still grew on held-out samples: off
+# the recording environment their outcomes are not bounded by the observed set.
+OPEN_OUTCOME_SETS = MappingProxyType({
+    name: measured["open_outcome_set"]
+    for name, measured in SENSITIVITY["scenarios"].items()
+    if measured["open_outcome_set"] is not None
+})
+
+
+def required_outcomes(name: str) -> frozenset:
+    """The intended outcomes a run of ``name`` reached under every perturbation;
+    every replay must reach them."""
+    return frozenset(INTENDED_OUTCOMES[name]) & frozenset(
+        SENSITIVITY["scenarios"][name]["always_observed"]
+    )
+
+
 BOUNDARY_TOLERANCES = MappingProxyType({
     name: MappingProxyType({
         quantity: SENSITIVITY["noise"]["tolerance_factor"] * max(spread, golden.EPS)
@@ -130,12 +161,18 @@ class AlmGoldenFixtureSetTests(unittest.TestCase):
 def outcome_replay_failure(name: str, outcomes, *, exact: bool):
     """Why ``outcomes`` of a fresh run of scenario ``name`` fail its outcome
     replay, or ``None``. Exact replay requires the golden's outcomes; otherwise
-    a label-only scenario may reach any outcome observed under last-bit noise
-    and every other scenario must reach exactly the golden's."""
+    a label-only scenario must reach its ``required_outcomes`` and, unless its
+    outcome set is open, nothing outside the outcomes observed under last-bit
+    noise, and every other scenario must reach exactly the golden's."""
     recorded = _golden(name)["outcomes"]
     if exact or name not in LABEL_ONLY_SCENARIOS:
         if sorted(outcomes) != recorded:
             return f"outcomes {sorted(outcomes)} != golden {recorded}"
+        return None
+    missing = sorted(required_outcomes(name) - set(outcomes))
+    if missing:
+        return f"intended outcomes {missing} were not reached"
+    if name in OPEN_OUTCOME_SETS:
         return None
     unobserved = sorted(set(outcomes) - set(SENSITIVITY["scenarios"][name]["observed_outcomes"]))
     if unobserved:
@@ -182,7 +219,7 @@ class AlmGoldenOutcomeReplayTests(unittest.TestCase):
                 observed = SENSITIVITY["scenarios"][name]["observed_outcomes"]
                 self.assertIsNone(outcome_replay_failure(name, observed, exact=False))
                 for extra in ("termination:converged", "action:signal_mismatch_stall"):
-                    if extra in observed:
+                    if extra in observed or name in OPEN_OUTCOME_SETS:
                         continue
                     self.assertIn(
                         extra,
@@ -191,6 +228,24 @@ class AlmGoldenOutcomeReplayTests(unittest.TestCase):
                 if observed != _golden(name)["outcomes"]:
                     # The recording environment still demands the golden's outcomes.
                     self.assertIsNotNone(outcome_replay_failure(name, observed, exact=True))
+
+    def test_a_missing_intended_outcome_fails_a_label_only_replay(self):
+        for name in LABEL_ONLY_SCENARIOS:
+            with self.subTest(scenario=name):
+                required = required_outcomes(name)
+                self.assertTrue(required, "a label-only replay must require something")
+                observed = SENSITIVITY["scenarios"][name]["observed_outcomes"]
+                for outcome in sorted(required):
+                    dropped = [o for o in observed if o != outcome]
+                    self.assertIn(outcome, outcome_replay_failure(name, dropped, exact=False))
+                self.assertIsNotNone(
+                    outcome_replay_failure(
+                        name, set(observed) - set(INTENDED_OUTCOMES[name]), exact=False
+                    )
+                )
+
+    def test_open_outcome_sets_are_label_only(self):
+        self.assertLessEqual(set(OPEN_OUTCOME_SETS), set(LABEL_ONLY_SCENARIOS))
 
     def test_a_broken_invariant_is_reported(self):
         trajectory = _fresh_run("toy_convex")
