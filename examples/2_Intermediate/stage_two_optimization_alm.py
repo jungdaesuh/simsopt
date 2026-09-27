@@ -64,7 +64,8 @@ MSC_THRESHOLD = 5
 DISTANCE_TEMPERATURE = 0.005
 CURVATURE_TEMPERATURE = 0.05
 
-# L-BFGS-B iterations per ALM subproblem, and number of multiplier updates:
+# L-BFGS-B iterations for the whole minimize_alm call (one budget shared by all
+# subproblems), and the number of outer iterations (multiplier updates):
 MAXITER = 50 if in_github_actions else 400
 MAX_OUTER_ITERATIONS = 3 if in_github_actions else 10
 
