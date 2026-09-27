@@ -11,6 +11,11 @@ has changed behavior)::
 to compare the trajectories two environments or two trees produce
 (``diff -r``; only ``manifest.json``'s environment and source ids may differ).
 
+``--provenance-only`` rewrites only ``manifest.json`` (environment and source
+blob ids) after a change that must not alter ALM behavior, e.g. comments or
+annotations: it re-runs every scenario and refuses to write unless each fixture
+it would write is byte-identical to the one on disk.
+
 For each scenario in ``alm_golden_scenarios.SCENARIOS`` this script:
 
 1. runs it and derives its observable outcomes: the outer-step actions, the
@@ -22,8 +27,9 @@ For each scenario in ``alm_golden_scenarios.SCENARIOS`` this script:
    (``INTENDED_OUTCOMES``);
 3. writes ``<scenario>.json`` (the encoded trajectory plus its outcomes) and
    ``manifest.json`` (fixture digests, the Python, numpy and SciPy versions
-   the replay needs for bitwise equality, the git blob ids of the
-   ``simsopt.solve.alm`` sources that produced them, and the outcome union).
+   and the machine the replay needs for bitwise equality, the git blob ids of
+   the ``simsopt.solve.alm`` sources that produced them, and the outcome
+   union).
 """
 
 from __future__ import annotations
@@ -140,17 +146,20 @@ def alm_source_blob_ids() -> dict[str, str]:
     }
 
 
-def _write_json(path: Path, payload: dict) -> bytes:
-    text = json.dumps(payload, indent=1) + "\n"
-    data = text.encode("utf-8")
-    path.write_bytes(data)
-    return data
+def _json_bytes(payload: dict) -> bytes:
+    return (json.dumps(payload, indent=1) + "\n").encode("utf-8")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--output-dir", type=Path, default=golden.FIXTURE_DIR)
-    output_dir = parser.parse_args().output_dir
+    parser.add_argument(
+        "--provenance-only",
+        action="store_true",
+        help="rewrite only manifest.json; refuse unless every fixture is unchanged",
+    )
+    arguments = parser.parse_args()
+    output_dir = arguments.output_dir
     if set(INTENDED_OUTCOMES) != set(golden.SCENARIOS_BY_NAME):
         raise SystemExit("INTENDED_OUTCOMES and the scenario catalog disagree")
 
@@ -163,14 +172,13 @@ def main() -> None:
             raise SystemExit(f"{scenario.name} missed its intended outcomes {missed}")
         recorded.append((scenario, trajectory, outcomes))
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    fixtures = {}
     entries = []
     union = set()
     for scenario, trajectory, outcomes in recorded:
         union |= outcomes
         fixture = golden.fixture_path(scenario.name).name
-        data = _write_json(
-            output_dir / fixture,
+        data = _json_bytes(
             {
                 "format": golden.FIXTURE_FORMAT,
                 "scenario": scenario.name,
@@ -179,6 +187,7 @@ def main() -> None:
                 "trajectory": trajectory,
             },
         )
+        fixtures[fixture] = data
         entries.append(
             {
                 "scenario": scenario.name,
@@ -187,8 +196,22 @@ def main() -> None:
                 "bytes": len(data),
             }
         )
-    _write_json(
-        output_dir / "manifest.json",
+    if arguments.provenance_only:
+        changed = sorted(
+            fixture for fixture, data in fixtures.items()
+            if not (output_dir / fixture).is_file()
+            or (output_dir / fixture).read_bytes() != data
+        )
+        if changed:
+            raise SystemExit(
+                f"--provenance-only: {changed} would change; regenerate the "
+                "goldens instead (a behavior change needs review)"
+            )
+    else:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for fixture, data in fixtures.items():
+            (output_dir / fixture).write_bytes(data)
+    manifest = _json_bytes(
         {
             "format": golden.FIXTURE_FORMAT,
             "regenerate": (
@@ -199,13 +222,18 @@ def main() -> None:
                 "python": platform.python_version(),
                 "numpy": np.__version__,
                 "scipy": scipy.__version__,
+                "machine": platform.machine(),
             },
             "source_blob_ids": alm_source_blob_ids(),
             "outcome_union": sorted(union),
             "scenarios": entries,
         },
     )
-    print(f"wrote {len(entries)} goldens and manifest.json to {output_dir}")
+    (output_dir / "manifest.json").write_bytes(manifest)
+    if arguments.provenance_only:
+        print(f"{len(entries)} goldens unchanged; wrote manifest.json to {output_dir}")
+    else:
+        print(f"wrote {len(entries)} goldens and manifest.json to {output_dir}")
 
 
 if __name__ == "__main__":

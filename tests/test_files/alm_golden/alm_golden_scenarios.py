@@ -21,11 +21,12 @@ replay test re-runs each scenario and compares the encodings for equality, key
 order included.
 
 The inner solver is SciPy's L-BFGS-B, so a replay is bitwise only with the
-numpy and SciPy builds the goldens were recorded with (``manifest.json``);
-run single-threaded (``OMP_NUM_THREADS=1``). Each golden also stores its
-coarse outcomes (:func:`scenario_outcomes`: actions, termination and restore
-reasons, flags), which should not depend on the last bits of the iterates;
-the replay test checks them under any numpy and SciPy.
+numpy and SciPy builds and the machine the goldens were recorded with
+(``manifest.json``); run single-threaded (``OMP_NUM_THREADS=1``). Each golden
+also stores its coarse outcomes (:func:`scenario_outcomes`: actions,
+termination and restore reasons, flags), which should not depend on the last
+bits of the iterates, and :func:`scenario_boundary_values` reads its numeric
+boundary values; the replay test checks both under any numpy and SciPy.
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ import hashlib
 import json
 import math
 import pickle
+import platform
 import struct
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -335,6 +337,111 @@ def scenario_outcomes(trajectory: dict) -> set[str]:
     if trajectory.get("smoothing_changes"):
         outcomes.add("smoothing_changed")
     return outcomes
+
+
+# --------------------------------------------------------------------------
+# Numeric boundary values
+# --------------------------------------------------------------------------
+
+BOUNDARY_QUANTITIES = ("x", "objective", "max_violation", "multipliers", "penalty")
+
+
+def _encoded_floats(value: object) -> Optional[tuple[float, ...]]:
+    """The floats of an encoded scalar, tuple, list or ndarray; ``None`` stays."""
+    if value is None:
+        return None
+    if is_float_token(value):
+        return (token_to_float(value),)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return (float(value),)
+    if isinstance(value, dict) and "$tuple" in value:
+        value = value["$tuple"]
+    elif isinstance(value, dict) and "$ndarray" in value:
+        value = value["data"]
+    if isinstance(value, list):
+        return tuple(item for element in value for item in _encoded_floats(element))
+    raise TypeError(f"no float view of {_describe(value)}")
+
+
+def run_boundary_values(trajectory: dict, run: str = "run") -> dict[str, list]:
+    """``{quantity: [(location, floats), ...]}`` of one recorded run, for each
+    of ``BOUNDARY_QUANTITIES`` at every outer step (history entry), every outer
+    boundary (checkpoint) and the result. ``floats`` is ``None`` where the run
+    recorded none (a history entry without a base objective)."""
+    values = {quantity: [] for quantity in BOUNDARY_QUANTITIES}
+
+    def add(location, **quantities):
+        for quantity, value in quantities.items():
+            values[quantity].append((location, _encoded_floats(value)))
+
+    for index, entry in enumerate(trajectory.get("history", [])):
+        add(
+            f"{run}.history[{index}]",
+            objective=entry["conditioning_base_objective"],
+            max_violation=entry["max_violation"],
+            multipliers=entry["post_update_multipliers"],
+            penalty=entry["penalty"],
+        )
+    for index, checkpoint in enumerate(trajectory["checkpoints"]):
+        fields = checkpoint["fields"]
+        add(
+            f"{run}.checkpoints[{index}]",
+            x=fields["x"],
+            multipliers=fields["multipliers"],
+            penalty=fields["penalty"],
+        )
+    result = trajectory["result"]
+    if result is not None:
+        fields = result["fields"]
+        add(
+            f"{run}.result",
+            **{quantity: fields[quantity] for quantity in BOUNDARY_QUANTITIES},
+        )
+    return values
+
+
+def scenario_boundary_values(trajectory: dict) -> dict[str, list]:
+    """``run_boundary_values`` of every run of a scenario, in run order."""
+    if "resumed" not in trajectory:
+        return run_boundary_values(trajectory)
+    interrupted = run_boundary_values(trajectory["interrupted"], "interrupted")
+    resumed = run_boundary_values(trajectory["resumed"], "resumed")
+    return {quantity: interrupted[quantity] + resumed[quantity] for quantity in BOUNDARY_QUANTITIES}
+
+
+def boundary_deviations(expected: dict, actual: dict) -> tuple[Optional[str], dict]:
+    """``(structural_difference, {quantity: max deviation})`` of two
+    ``scenario_boundary_values``.
+
+    The deviation of a value is ``|actual - expected| / max(1, |expected|)``:
+    relative for large values, absolute below 1 (multipliers and violations
+    that are exactly 0 at the recorded point). A structural difference (other
+    boundaries, other lengths, ``None`` versus a value, non-finite values that
+    differ) means the trajectory branched and deviations are not comparable.
+    """
+    deviations = {}
+    for quantity in BOUNDARY_QUANTITIES:
+        left, right = expected[quantity], actual[quantity]
+        if [location for location, _ in left] != [location for location, _ in right]:
+            return f"{quantity}: boundaries {len(right)} != golden {len(left)}", {}
+        worst = 0.0
+        for (location, golden_floats), (_, floats) in zip(left, right):
+            if golden_floats is None or floats is None:
+                if golden_floats is not floats:
+                    return f"{location}.{quantity}: {floats} != golden {golden_floats}", {}
+                continue
+            if len(golden_floats) != len(floats):
+                return f"{location}.{quantity}: length {len(floats)} != golden {len(golden_floats)}", {}
+            for golden_value, value in zip(golden_floats, floats):
+                if not (math.isfinite(golden_value) and math.isfinite(value)):
+                    if struct.pack(">d", golden_value) != struct.pack(">d", value) and not (
+                        math.isnan(golden_value) and math.isnan(value)
+                    ):
+                        return f"{location}.{quantity}: {value} != golden {golden_value}", {}
+                    continue
+                worst = max(worst, abs(value - golden_value) / max(1.0, abs(golden_value)))
+        deviations[quantity] = worst
+    return None, deviations
 
 
 # --------------------------------------------------------------------------
@@ -1291,15 +1398,21 @@ def load_manifest() -> dict:
     return json.loads((FIXTURE_DIR / "manifest.json").read_text(encoding="utf-8"))
 
 
-def recorded_environment() -> tuple[str, str]:
-    """The numpy and SciPy versions the goldens were recorded with."""
+def recorded_environment() -> tuple[str, str, str]:
+    """The numpy and SciPy versions and the machine the goldens were recorded with."""
     environment = load_manifest()["environment"]
-    return environment["numpy"], environment["scipy"]
+    return environment["numpy"], environment["scipy"], environment["machine"]
+
+
+def current_environment() -> tuple[str, str, str]:
+    return np.__version__, scipy.__version__, platform.machine()
 
 
 def bitwise_environment() -> bool:
-    """Whether this numpy and SciPy are the ones the goldens were recorded with."""
-    return (np.__version__, scipy.__version__) == recorded_environment()
+    """Whether this numpy, SciPy and machine are the ones the goldens were
+    recorded with (floating-point results also depend on the architecture's
+    vector paths, not only on the library versions)."""
+    return current_environment() == recorded_environment()
 
 
 def golden_difference(name: str, trajectory: dict) -> Optional[str]:

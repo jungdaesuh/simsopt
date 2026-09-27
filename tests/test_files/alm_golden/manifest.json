@@ -4,24 +4,25 @@
  "environment": {
   "python": "3.11.15",
   "numpy": "2.4.6",
-  "scipy": "1.17.1"
+  "scipy": "1.17.1",
+  "machine": "x86_64"
  },
  "source_blob_ids": {
   "simsopt/solve/alm/__init__.py": "62c2dba05f9179a246579b4f1b44a4fa81d98d7a",
-  "simsopt/solve/alm/boundary.py": "c37ac5aa0802154079d9b0ccacfe99d6be54a57c",
-  "simsopt/solve/alm/checkpoint.py": "8470398e15c278805a8366f9e695c5d9d3a343fc",
-  "simsopt/solve/alm/continuation.py": "e458c8e91bc4082b0cf34fc5c20f7a01ab7caf2d",
-  "simsopt/solve/alm/control.py": "9f43dd5784d7432460f23fcd3f904e890d07a189",
-  "simsopt/solve/alm/core.py": "38dd770c485e28b05ea443f48d464572d9f80e22",
-  "simsopt/solve/alm/evaluation.py": "e57b545bbac65865ce46bb82af9758942a190e63",
-  "simsopt/solve/alm/events.py": "f3a521cabfc03802bb33758be23dada83feb08db",
-  "simsopt/solve/alm/history.py": "e47c9c8ee81f403bf03392525062cba40baa66d1",
+  "simsopt/solve/alm/boundary.py": "db9146d9081b35713b0af84209e020703920ba5a",
+  "simsopt/solve/alm/checkpoint.py": "30187f3d29bc7bd619e731a88b88782c49bdb8d4",
+  "simsopt/solve/alm/continuation.py": "544c57bea397e916f78a600beead3be2711a5238",
+  "simsopt/solve/alm/control.py": "2d7a5fcbb000fb64e9e2cc6ecf84f1f91ca34416",
+  "simsopt/solve/alm/core.py": "0d566588114d3094111b478760beadd4996d5d8e",
+  "simsopt/solve/alm/evaluation.py": "bf059e5b7eba3a9379d2f09a62590356f4028f57",
+  "simsopt/solve/alm/events.py": "2ce64055d724f7fc2d380f579018ea7d06ae0151",
+  "simsopt/solve/alm/history.py": "407f029e4955ad7bb122dd414361b7c7c05eea37",
   "simsopt/solve/alm/hybrid.py": "d1574700bcaee83d36ffbe243ec462c0eba66049",
-  "simsopt/solve/alm/inner.py": "ba63046a8e086e0adb35b8069680c36c88916277",
-  "simsopt/solve/alm/policy.py": "c4eb83aed12632f495537c69322fd377edd94ed7",
-  "simsopt/solve/alm/problem.py": "7b91935f0870777bc9e485c0851d7a833c4e851e",
-  "simsopt/solve/alm/taylor.py": "9fc6818b9e7f5df112b345713f0c3df31da7a875",
-  "alm_golden_scenarios.py": "87b38c9f5eca7a3e0820848faa0dcbc7830f33e1"
+  "simsopt/solve/alm/inner.py": "d1b424e2e9f55027b337e38f0788ceef06b59f57",
+  "simsopt/solve/alm/policy.py": "76b8da88e67c0ededa6ac8fe9497b1d5724f255f",
+  "simsopt/solve/alm/problem.py": "3dae69d828aff8402c5e4bc7de19c6af4eeb7824",
+  "simsopt/solve/alm/taylor.py": "0145e7432911ae1ee77ed408c54ced10e03d5124",
+  "alm_golden_scenarios.py": "7b433832e0e26afaa162c46598a8394d3f716ca6"
  },
  "outcome_union": [
   "action:constraints_inactive_converged",
