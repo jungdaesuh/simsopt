@@ -119,14 +119,19 @@ physics, that a row is violated or satisfied: they become the sign probes.
 Run each from any directory; all three must pass before the real run.
 
 1. `PYTHONPATH=<dir> <python> $SKILL_DIR/scripts/gradient_check.py --smoke`
-   must exit 0. On `FAIL`, fix the gradient of the named quantity in
-   `alm_problem.py`: the check fits the differences' truncation and
-   round-off, so a `FAIL` means the claimed derivative misses the
-   extrapolated one by a clear margin. On `NOT TESTED`, rerun with the steps
-   its note suggests (larger when round-off limits them, smaller when the
-   differences do not follow e^2, e.g. a smooth row whose steps cross its
-   selection window); if it stays undecided, find why the quantity barely
-   depends on x there.
+   must exit 0. Each quantity ends in one of:
+   - `PASS`: the claimed derivative matches the measured one (or the
+     quantity is flat and the claim is zero). Nothing to do.
+   - `FAIL`: only a wrong gradient, under a model of the differences that
+     fits them: fix the gradient of the named quantity in `alm_problem.py`.
+   - `NOT SMOOTH`: the differences are not those of a smooth quantity at
+     these steps (a kink or branch, or structure finer than the steps); the
+     gradient is not judged. Move x0 slightly off the kink, or check the
+     row for a `max`/`abs`/clipping (a smooth row that varies faster than
+     the steps resolve shows this way too).
+   - `NOT TESTED`: round-off hides the answer. Rerun with the one step set
+     its note suggests (always larger); when the note says no steps
+     decide it, report that the quantity cannot be checked there.
 2. `PYTHONPATH=<dir> <python> $SKILL_DIR/scripts/sign_check.py --smoke` must
    exit 0. On a failure, fix the named row's sign or its probe expectation.
    Fix scale warnings by rescaling rows or f. For coverage warnings, add a

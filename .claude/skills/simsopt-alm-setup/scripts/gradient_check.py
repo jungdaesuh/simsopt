@@ -4,48 +4,73 @@
 
     PYTHONPATH=<problem dir> python gradient_check.py [--smoke] [--directions N] [--epsilons E1,E2,...] [--seed S]
 
-For f and for each row g_i, ``run_directional_taylor_test`` compares the
-gradient ``problem.physics(x)`` returns with central differences of the value
-along random unit directions at ``problem.x0``: the error must fall at least as
-fast as the step. Testing each row on its own matters, because in the
-augmented Lagrangian an inactive row (``max(0, multiplier + penalty * g) = 0``)
-drops out, and its gradient would go unchecked. Every quantity's test visits
-the same points, so each point's physics is evaluated once and shared.
+For f and for each row q, ``run_directional_taylor_test`` evaluates q at
+``x0 +- e u`` along random unit directions ``u`` and forms the central
+differences ``c(e) = (q(x0 + e u) - q(x0 - e u)) / (2 e)``. Testing each row on
+its own matters, because in the augmented Lagrangian an inactive row
+(``max(0, multiplier + penalty * g) = 0``) drops out, and its gradient would go
+unchecked. Every quantity visits the same points, so each point's physics is
+evaluated once and shared. The steps are ``--epsilons``, else the problem's
+``taylor_epsilons``, else the library default: at least three distinct,
+positive, finite steps, and at least one direction (else exit 2).
 
-The steps are ``--epsilons``, else the problem's ``taylor_epsilons``, else the
-library default; at least three steps and one direction are required (else
-exit 2). The verdict comes from an explicit error model of the central
-differences the library computes, ``c(e) = (q(x0 + e u) - q(x0 - e u)) / (2 e)``
-along a unit direction ``u``:
+The verdict comes from an explicit model of the differences:
 
-    c(e) = d_true + a e^2 + noise(e),  noise(e) ~ ROUNDOFF_FACTOR * eps * |q| / e
+    c(e) = d_true + a e^2 + noise(e),    noise(e) ~ s * eps * Q / e
 
-with ``eps`` the float64 machine epsilon and ``|q| = |q(x0)| + |c(e)| e``. For
-each direction, a least-squares fit of ``c = d + a e^2`` over a window of at
-least three consecutive steps (weights from the noise model) extrapolates
-``d_hat``, the derivative the differences imply, with its standard error.
-The noise model is a floor: the fit residuals of all directions of the
-quantity, pooled, scale it up when the data scatter more (noise beyond the
-model, or truncation beyond ``e^2``). The window with the smallest pooled
-uncertainty is used, and ``z`` is the two-sided ``CONFIDENCE`` quantile of
-Student's t at the pooled residual degrees of freedom. With the claimed
-derivative ``d`` and ``delta = |d - d_hat|``,
-``tolerance = max(RELATIVE_TOLERANCE |d_hat|, z sigma)``:
+``eps`` is the float64 machine epsilon, ``Q`` the largest ``|q|`` sampled at
+that step (``q(x0)``, ``q(x0 +- e u)``), and ``s >= 1`` the noise scale: 1 is
+round-off of the values alone; the largest per-direction residual variance
+of the fit raises it when the values are noisier (a cancellation, an inner
+solve). In order, for each quantity:
 
-- ``failed``: ``delta > FAIL_FACTOR * tolerance`` (a clear margin).
-- ``not_tested``: otherwise, when ``|d_hat| <= z sigma`` (no measurable
-  change), when ``z sigma > DECISION_LIMIT |d_hat|`` (too uncertain to
-  confirm the gradient to that accuracy), or when ``delta`` is between the
-  tolerance and the fail margin. The note says which steps to try: larger
-  when round-off dominates, smaller when the data do not follow ``e^2``.
-- ``passed``: ``delta <= tolerance``.
+1. Flat directions: when every ``|c(e)|`` is within ``FLAT_FACTOR`` times the
+   round-off of the values (``eps * Q / e``, s = 1; exactly 0 when every
+   sampled value is 0), the quantity does not change measurably along that
+   direction. With the bound at the largest step, the claimed derivative
+   ``d`` agrees when ``|d| <= DECISION_LIMIT * bound`` (zero at this
+   resolution), fails when ``|d| > FAIL_FACTOR * bound``, and is undecided
+   in between (it predicts a change below the resolution). A quantity flat
+   along every direction with every claim agreeing passes ("flat along the
+   sampled directions"); flat directions never pass a quantity that changes
+   along others, since they carry no scale for its gradient.
+2. The fit: for every other direction, a weighted least-squares fit of
+   ``c = d_hat + a e^2`` over all the steps (weights from the noise model)
+   gives the residuals that set ``s`` (pooled over directions) and ``z``,
+   Student's t at ``CONFIDENCE`` (two-sided) for the pooled residual degrees
+   of freedom. When ``|a| > z`` times its standard error the extrapolated
+   ``d_hat`` is used; otherwise the ``e^2`` term is not measurable and
+   extrapolating it would only amplify the small steps' noise, so ``d_hat``
+   is the weighted mean of ``c``, with ``sigma`` the noise of its best single
+   step (rounding can repeat across steps, so averaging is not credited).
+3. Smoothness, two goodness-of-fit tests; either rejecting makes the
+   quantity ``not_smooth``, never ``failed``:
+   - kink: the second differences ``(q(x0 + e u) - 2 q(x0) + q(x0 - e u)) / e``
+     are fitted to ``J + b e`` (a smooth quantity has ``J = 0``: the one-sided
+     slopes agree as ``e -> 0``); the test rejects when ``|J| > z sigma_J``
+     and ``|J| > KINK_FRACTION`` of the largest ``|c|`` (a slope jump, not a
+     higher-order term);
+   - resolution: ``s * eps``, the value noise the residuals imply relative to
+     the values, exceeds ``NOISE_LIMIT``: no plausible noise explains the
+     misfit, so ``c = d + a e^2`` does not describe the data at these steps.
+4. Otherwise the model fits, and with ``delta = |d - d_hat|`` and
+   ``tolerance = max(RELATIVE_TOLERANCE |d_hat|, z sigma)``: ``failed`` when
+   ``delta > FAIL_FACTOR * tolerance``; ``passed`` when ``delta <= tolerance``
+   and ``z sigma <= DECISION_LIMIT |d_hat|``; undecided otherwise (including
+   a change within the noise, ``|d_hat| <= z sigma``).
 
-A quantity is ``nonfinite`` if any value or difference is not finite,
-``failed`` if any direction fails, ``not_tested`` if no direction passes,
-and ``passed`` otherwise (untested directions are counted in the note). The
-library's ratio test is reported (``max_ratio``) but does not decide. The
-last line printed is ``GRADIENT_CHECK {json}``; the exit status is 0 when
-every quantity passes, 1 otherwise, and 2 for invalid arguments.
+A quantity is ``nonfinite`` if any value or difference is not finite;
+``failed`` if any direction fails (a flat one included); else ``not_smooth``
+if a smoothness test rejects; else ``passed`` if it is flat and agreeing
+along every direction, or some fitted direction passed; else ``not_tested``. A ``not_tested`` note gives at most one
+suggestion, derived from the model and never towards smaller steps: steps
+larger by the power of ten the round-off needs, or, when a fitted
+truncation ``a e^2`` that differs from 0 beyond the noise would exceed
+``TRUNCATION_LIMIT |d_hat|`` at those, that no step decides. A ``not_smooth`` note gives no
+step advice. The library's ratio test is reported (``max_ratio``) but does
+not decide. The last line printed is ``GRADIENT_CHECK {json}``; the exit
+status is 0 when every quantity passes, 1 otherwise, and 2 for invalid
+arguments.
 """
 
 from __future__ import annotations
@@ -53,8 +78,9 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+import math
 import sys
-from typing import NamedTuple, Optional
+from typing import List, NamedTuple, Optional
 
 import numpy as np
 from scipy.stats import t as student_t
@@ -64,19 +90,28 @@ from simsopt.solve.alm import ALMPhysics, run_directional_taylor_test
 
 RESULT_PREFIX = "GRADIENT_CHECK "
 OBJECTIVE_LABEL = "f"
-# The noise floor: values are trusted to this many machine epsilons of their magnitude.
-ROUNDOFF_FACTOR = 1.0
+MACHINE_EPSILON = float(np.finfo(float).eps)
+MINIMUM_STEPS = 3
+DEFAULT_DIRECTIONS = inspect.signature(run_directional_taylor_test).parameters["direction_count"].default
+# A difference within this many times the values' round-off is no measurable change.
+FLAT_FACTOR = 3.0
 # A claimed derivative within this fraction of d_hat always passes (a relative floor).
 RELATIVE_TOLERANCE = 1e-6
-# Two-sided confidence of the z sigma bound (Student's t at the pooled residual dof).
+# Two-sided confidence of the z sigma bounds (Student's t at the pooled residual dof).
 CONFIDENCE = 0.99
 # How far beyond the tolerance a difference must be to fail, not merely be undecided.
 FAIL_FACTOR = 2.0
-# A pass must confirm the gradient to this relative accuracy; a larger z sigma is not tested.
+# A pass must confirm the gradient to this relative accuracy.
 DECISION_LIMIT = 1e-3
-MINIMUM_STEPS = 3
-MACHINE_EPSILON = float(np.finfo(float).eps)
-DEFAULT_DIRECTIONS = inspect.signature(run_directional_taylor_test).parameters["direction_count"].default
+# Kink test: a slope jump this small relative to the largest |c| is a higher-order term.
+KINK_FRACTION = 1e-3
+# Resolution test: value noise above this fraction of the values is not noise.
+NOISE_LIMIT = 1e-2
+# Residual scales above this are reported as noise beyond round-off of the value.
+NOISY_SCALE = 100.0
+# Larger steps are suggested only while the fitted truncation a e^2 stays below
+# this fraction of |d_hat|.
+TRUNCATION_LIMIT = 0.1
 
 
 class PhysicsMemo:
@@ -98,138 +133,258 @@ class PhysicsMemo:
         return len(self._by_x)
 
 
+def quantity_value(physics: ALMPhysics, row_index: Optional[int]) -> float:
+    return float(physics.base_value if row_index is None else physics.constraint_values[row_index])
+
+
 def quantity_evaluator(memo: PhysicsMemo, row_index: Optional[int]):
     """An ``evaluate_problem`` whose ``total`` is f (``row_index`` None) or
     row ``row_index``, for ``run_directional_taylor_test``."""
 
     def evaluate(x, multipliers, penalty) -> dict:
         physics = memo(x)
-        if row_index is None:
-            return {"total": physics.base_value, "grad": physics.base_grad}
-        return {"total": float(physics.constraint_values[row_index]),
-                "grad": physics.constraint_grads[row_index]}
+        grad = physics.base_grad if row_index is None else physics.constraint_grads[row_index]
+        return {"total": quantity_value(physics, row_index), "grad": grad}
 
     return evaluate
 
 
-class WindowFit(NamedTuple):
-    """The ``c = d + a e^2`` fit of one direction over one window of steps."""
+class DirectionSamples(NamedTuple):
+    """One direction's data, steps largest first."""
 
-    d_hat: float
-    unit_sigma: float  # standard error of d_hat for the noise model alone
-    chi2: float        # weighted residual sum of squares, in noise-model units
-    weighted: bool     # False when the noise model is zero (all values and changes 0)
+    claimed: float        # the claimed directional derivative, grad . u
+    differences: np.ndarray  # c(e)
+    plus: np.ndarray      # q(x0 + e u)
+    minus: np.ndarray     # q(x0 - e u)
+    max_ratio: Optional[float]
 
 
-def fit_window(steps: np.ndarray, estimates: np.ndarray, value: float) -> WindowFit:
-    noise = ROUNDOFF_FACTOR * MACHINE_EPSILON * (abs(value) + np.abs(estimates) * steps) / steps
-    weighted = bool(np.all(noise > 0.0))
-    weights = 1.0 / noise if weighted else np.ones_like(noise)
-    # e^2 relative to the window's largest step keeps the system well scaled.
-    design = np.column_stack([np.ones_like(steps), (steps / steps[0]) ** 2]) * weights[:, None]
-    target = estimates * weights
-    coefficients = np.linalg.lstsq(design, target, rcond=None)[0]
+def sample_direction(memo: PhysicsMemo, row_index: Optional[int], x0: np.ndarray,
+                     direction: np.ndarray, steps: np.ndarray) -> DirectionSamples:
+    """Run the library's Taylor test along ``direction`` and read back the
+    values it evaluated (the memo holds them: the same points, bit for bit)."""
+    taylor = run_directional_taylor_test(quantity_evaluator(memo, row_index), x0, np.zeros(0), 1.0,
+                                         direction=direction, epsilons=tuple(steps))
+    unit = np.asarray(taylor["direction"], dtype=float)
+    x = np.asarray(x0, dtype=float)
+    plus = [quantity_value(memo(x + float(step) * unit), row_index) for step in steps]
+    minus = [quantity_value(memo(x - float(step) * unit), row_index) for step in steps]
+    return DirectionSamples(float(taylor["directional_derivative"]),
+                            np.asarray(taylor["central_estimates"], dtype=float),
+                            np.asarray(plus), np.asarray(minus), taylor["max_ratio"])
+
+
+def roundoff(steps: np.ndarray, value: float, sample: DirectionSamples) -> np.ndarray:
+    """The round-off of each central difference: ``eps * Q / e``, with ``Q`` the
+    largest |q| sampled at that step. ``Q`` is at least ``sqrt(eps)`` times the
+    direction's largest |q|: an exact zero (a clipped or inactive branch)
+    carries no special precision, and the weights stay comparable."""
+    magnitude = np.maximum(np.maximum(np.abs(sample.plus), np.abs(sample.minus)), abs(value))
+    floor = np.sqrt(MACHINE_EPSILON) * float(magnitude.max())
+    return MACHINE_EPSILON * np.maximum(magnitude, floor) / steps
+
+
+class LinearFit(NamedTuple):
+    """Weighted least squares of ``y = p0 + p1 * t`` with unit-noise weights."""
+
+    intercept: float
+    slope: float
+    intercept_sigma: float  # for the given noise, before any scale
+    slope_sigma: float
+    chi2: float             # residual sum of squares in noise units
+
+
+def weighted_line(t: np.ndarray, y: np.ndarray, noise: np.ndarray) -> LinearFit:
+    """By QR of the weighted design, so the covariance is not squared-conditioned."""
+    design = np.column_stack([np.ones_like(t), t]) / noise[:, None]
+    target = y / noise
+    orthogonal, triangular = np.linalg.qr(design)
+    coefficients = np.linalg.solve(triangular, orthogonal.T @ target)
     residual = target - design @ coefficients
-    covariance = np.linalg.inv(design.T @ design)
-    return WindowFit(float(coefficients[0]), float(np.sqrt(covariance[0, 0])),
-                     float(residual @ residual), weighted)
+    inverse = np.linalg.inv(triangular)
+    covariance = inverse @ inverse.T
+    return LinearFit(float(coefficients[0]), float(coefficients[1]), float(np.sqrt(covariance[0, 0])),
+                     float(np.sqrt(covariance[1, 1])), float(residual @ residual))
 
 
-def pooled_fits(steps: np.ndarray, estimates: list, value: float) -> dict:
-    """The window (at least MINIMUM_STEPS consecutive steps, the same for every
-    direction) whose pooled uncertainty is smallest, with its fits, the
-    residual scale of the noise model, the pooled dof and each sigma."""
-    best = None
-    for start in range(len(steps)):
-        for stop in range(start + MINIMUM_STEPS, len(steps) + 1):
-            fits = [fit_window(steps[start:stop], row[start:stop], value) for row in estimates]
-            dof = len(fits) * (stop - start - 2)
-            ratio = sum(fit.chi2 for fit in fits) / dof
-            weighted = all(fit.weighted for fit in fits)
-            # The noise model is a floor; larger residuals scale it up.
-            scale = float(np.sqrt(max(1.0, ratio) if weighted else ratio))
-            sigmas = [fit.unit_sigma * scale for fit in fits]
-            score = sum(sigma * sigma for sigma in sigmas)
-            if best is None or score < best["score"]:
-                best = {"score": score, "fits": fits, "sigmas": sigmas, "dof": dof, "scale": scale,
-                        "window": (start, stop)}
-    return best
-
-
-def judge_direction(claimed: float, fit: WindowFit, sigma: float, z: float) -> dict:
-    """The verdict of one direction (the rules are in the module docstring)."""
-    delta = abs(claimed - fit.d_hat)
-    bound = z * sigma
-    tolerance = max(RELATIVE_TOLERANCE * abs(fit.d_hat), bound)
-    if delta > FAIL_FACTOR * tolerance:
-        verdict = "failed"
-    elif abs(fit.d_hat) <= bound:
-        verdict = "no_change"
-    elif bound > DECISION_LIMIT * abs(fit.d_hat):
-        verdict = "uncertain"
-    elif delta <= tolerance:
-        verdict = "passed"
+def flat_verdict(sample: DirectionSamples, noise: np.ndarray) -> Optional[dict]:
+    """The verdict of a direction whose differences are all within the round-off
+    of the values (step 1 of the module docstring); None when it changes."""
+    if not np.all(np.abs(sample.differences) <= FLAT_FACTOR * noise):
+        return None
+    bound = FLAT_FACTOR * float(noise.min())
+    claimed = abs(sample.claimed)
+    if claimed <= DECISION_LIMIT * bound:
+        verdict = "flat"            # the claim is zero at this resolution, as the data are
+    elif claimed > FAIL_FACTOR * bound:
+        verdict = "flat_failed"     # the claim predicts a change the data would show
     else:
-        verdict = "borderline"
-    magnitude = abs(fit.d_hat)
-    return {"verdict": verdict, "d_hat": fit.d_hat, "claimed": claimed, "delta": delta,
-            "bound": bound, "relative_error": delta / magnitude if magnitude > 0.0 else None,
-            "relative_bound": bound / magnitude if magnitude > 0.0 else None}
+        verdict = "flat_undecided"  # the claim predicts a change below the resolution
+    return {"verdict": verdict, "claimed": sample.claimed, "d_hat": 0.0, "delta": claimed, "bound": bound,
+            "truncation": 0.0}
 
 
-def steps_to_try(steps: np.ndarray, scale: float) -> str:
-    """Advice for an undecided quantity: residuals near the noise model mean
-    round-off limits the steps (try larger ones); far above it, the data do not
-    follow e^2 (try smaller ones, or the quantity is not smooth there)."""
-    if scale <= 10.0:
-        larger = ",".join(f"{step:.3g}" for step in 10.0 * steps[:MINIMUM_STEPS])
-        return f"round-off limits these steps: try larger ones, e.g. --epsilons {larger}"
-    smaller = ",".join(f"{step:.3g}" for step in steps[-MINIMUM_STEPS:] / 10.0)
-    return (f"the differences do not follow d + a e^2 (residuals {scale:.1e} x round-off): try "
-            f"smaller steps, e.g. --epsilons {smaller}, or check the quantity is smooth at x0")
+def advice(steps: np.ndarray, needed_factor: float, truncation_cap: Optional[float]) -> str:
+    """One suggestion: steps larger by a power of ten covering ``needed_factor``,
+    unless that passes ``truncation_cap`` (the largest step before the fitted
+    truncation dominates); then no step decides."""
+    factor = 10.0 ** max(1, math.ceil(math.log10(max(needed_factor, 1.0))))
+    if truncation_cap is not None and steps[0] * factor > truncation_cap:
+        return (f"no steps decide it under the model: round-off needs steps about {factor:g} x larger, "
+                f"truncation needs steps below {truncation_cap:.2g}")
+    larger = ",".join(f"{step:.3g}" for step in steps[:MINIMUM_STEPS] * factor)
+    return f"round-off limits these steps: try --epsilons {larger}"
 
 
-def judge(label: str, taylors: list) -> dict:
-    """The quantity's verdict from its directions (see the module docstring)."""
-    steps = np.asarray(taylors[0]["epsilons"], dtype=float)
-    value = float(taylors[0]["base_total"])
-    claims = [float(taylor["directional_derivative"]) for taylor in taylors]
-    estimates = [np.asarray(taylor["central_estimates"], dtype=float) for taylor in taylors]
-    ratios = [taylor["max_ratio"] for taylor in taylors if taylor["max_ratio"] is not None]
+def largest_miss(directions: List[dict]) -> str:
+    """The largest ``|claimed - d_hat|`` among ``directions``: relative to
+    ``|d_hat|``, or absolute when ``d_hat`` is 0 (a flat direction)."""
+    worst = max(directions, key=lambda direction: direction["delta"])
+    if worst["d_hat"] != 0.0:
+        return f"relative {worst['delta'] / abs(worst['d_hat']):.1e}"
+    return f"absolute {worst['delta']:.2e}"
+
+
+def judge(label: str, value: float, steps: np.ndarray, samples: List[DirectionSamples]) -> dict:
+    """The quantity's verdict (the rules are in the module docstring)."""
+    ratios = [sample.max_ratio for sample in samples if sample.max_ratio is not None]
     report = {"quantity": label, "value": value, "max_ratio": max(ratios) if ratios else None,
-              "directional_derivatives": claims,
-              "finite_differences": [row.tolist() for row in estimates]}
-    if not (np.isfinite(value) and np.all(np.isfinite(claims))
-            and all(np.all(np.isfinite(row)) for row in estimates)):
+              "directional_derivatives": [sample.claimed for sample in samples],
+              "finite_differences": [sample.differences.tolist() for sample in samples]}
+    finite = np.isfinite(value) and all(
+        np.isfinite(sample.claimed) and np.all(np.isfinite(sample.differences))
+        and np.all(np.isfinite(sample.plus)) and np.all(np.isfinite(sample.minus)) for sample in samples)
+    if not finite:
         return {**report, "passed": False, "verdict": "nonfinite",
                 "note": "a value or difference is not finite", "directions": []}
-    pooled = pooled_fits(steps, estimates, value)
-    z = float(student_t.ppf(0.5 + CONFIDENCE / 2.0, pooled["dof"]))
-    directions = [judge_direction(claimed, fit, sigma, z)
-                  for claimed, fit, sigma in zip(claims, pooled["fits"], pooled["sigmas"])]
+
+    # Every changing direction has a positive round-off, so all fits are weighted
+    # in the same (noise) units; a direction with q = 0 at every sample is flat.
+    noises = [roundoff(steps, value, sample) for sample in samples]
+    directions = [flat_verdict(sample, noise) for sample, noise in zip(samples, noises)]
+    changing = [index for index, direction in enumerate(directions) if direction is None]
+
+    scale, z, smooth_rejection, fits = 1.0, None, None, {}
+    if changing:
+        # 2. The fit c = d_hat + a e^2, in e^2 relative to the largest step.
+        t = (steps / steps[0]) ** 2
+        fits = {index: weighted_line(t, samples[index].differences, noises[index]) for index in changing}
+        dof = len(changing) * (len(steps) - 2)
+        # The noise is common to the quantity; the largest per-direction residual
+        # variance estimates it, since rounding can repeat across one direction's
+        # steps and leave its residuals near zero.
+        scale = float(np.sqrt(max(1.0, max(fit.chi2 for fit in fits.values()) / (len(steps) - 2))))
+        z = float(student_t.ppf(0.5 + CONFIDENCE / 2.0, dof))
+        # 3. Smoothness: a slope jump in the second differences, then the noise the misfit implies.
+        for index in changing:
+            sample = samples[index]
+            second = (sample.plus - 2.0 * value + sample.minus) / steps
+            kink = weighted_line(steps / steps[0], second, scale * np.sqrt(12.0) * noises[index])
+            largest_change = float(np.max(np.abs(sample.differences)))
+            if abs(kink.intercept) > z * kink.intercept_sigma and \
+                    abs(kink.intercept) > KINK_FRACTION * largest_change:
+                smooth_rejection = (f"the one-sided slopes differ by {abs(kink.intercept):.2e} as the step "
+                                    f"shrinks (kink test, z={z:.2f})")
+                break
+        if smooth_rejection is None and scale * MACHINE_EPSILON > NOISE_LIMIT:
+            smooth_rejection = (f"the misfit to d + a e^2 would be value noise of {scale * MACHINE_EPSILON:.1e} "
+                                f"of the values, above {NOISE_LIMIT:g} (resolution test)")
+        # 4. Decisions under the model. The e^2 term is used only when it differs
+        # from 0 beyond the noise; otherwise extrapolating it would only amplify
+        # the noise of the small steps, and d_hat is the weighted mean of c.
+        for index in changing:
+            fit, sample = fits[index], samples[index]
+            significant = abs(fit.slope) > z * scale * fit.slope_sigma
+            if significant:
+                d_hat, sigma = fit.intercept, scale * fit.intercept_sigma
+            else:
+                weights = 1.0 / noises[index] ** 2
+                d_hat = float(np.sum(weights * sample.differences) / np.sum(weights))
+                # No better than the best single step: rounding errors of one
+                # direction's steps can be correlated, so averaging gains nothing.
+                sigma = scale * float(noises[index].min())
+            delta = abs(sample.claimed - d_hat)
+            bound = z * sigma
+            tolerance = max(RELATIVE_TOLERANCE * abs(d_hat), bound)
+            if smooth_rejection is not None:
+                verdict = "not_smooth"
+            elif delta > FAIL_FACTOR * tolerance:
+                verdict = "failed"
+            elif delta <= tolerance and bound <= DECISION_LIMIT * abs(d_hat):
+                verdict = "passed"
+            else:
+                verdict = "undecided"
+            directions[index] = {"verdict": verdict, "claimed": sample.claimed, "d_hat": d_hat,
+                                 "delta": delta, "bound": bound,
+                                 # The fitted truncation a e_max^2 when significant.
+                                 "truncation": fit.slope if significant else 0.0}
+
     verdicts = [direction["verdict"] for direction in directions]
-    relative = [direction["relative_error"] for direction in directions
-                if direction["relative_error"] is not None]
-    worst = f"{max(relative):.1e}" if relative else "n/a"
-    window = steps[pooled["window"][0]:pooled["window"][1]]
-    model = (f"fit over steps {window[0]:.3g}..{window[-1]:.3g}, residual scale {pooled['scale']:.1e}, "
-             f"z={z:.2f}")
-    if "failed" in verdicts:
+    count = len(verdicts)
+    noisy = (f"; the differences scatter {scale:.1e} x more than round-off of the values: noisier than "
+             "the value suggests (a cancellation or an inner solve), or truncation beyond e^2"
+             ) if scale > NOISY_SCALE else ""
+    if "flat_failed" in verdicts or "failed" in verdicts:
+        failed = [direction for direction in directions if direction["verdict"] in ("failed", "flat_failed")]
         verdict = "failed"
-        note = (f"{verdicts.count('failed')} of {len(verdicts)} directions: the claimed derivative misses "
-                f"the extrapolated one by relative {worst}, beyond {FAIL_FACTOR:g} x the bound ({model})")
-    elif "passed" not in verdicts:
-        verdict = "not_tested"
-        note = f"no direction decides ({', '.join(sorted(set(verdicts)))}); {steps_to_try(steps, pooled['scale'])}"
-    else:
+        note = (f"{len(failed)} of {count} directions: the claimed derivative misses the measured one by "
+                f"{largest_miss(failed)}, beyond {FAIL_FACTOR:g} x the bound, under a model that fits")
+    elif smooth_rejection is not None:
+        verdict = "not_smooth"
+        note = (f"the quantity is not smooth at this point along these steps: {smooth_rejection}. Move x "
+                "slightly or check a kink/branch (structure finer than the smallest step also shows this way)")
+    elif verdicts.count("flat") == count:
         verdict = "passed"
-        undecided = len(verdicts) - verdicts.count("passed")
-        note = f"relative error {worst} ({model})" + (
-            f"; {undecided} of {len(verdicts)} directions undecided" if undecided else "")
+        bound = max(direction["bound"] for direction in directions)
+        note = (f"flat along the sampled directions: every difference and claimed derivative is within "
+                f"the round-off bound {bound:.1e} (errors below it are not detected)")
+    elif "passed" in verdicts:
+        # Flat directions carry no scale for the gradient, so only fitted ones pass it.
+        verdict = "passed"
+        passing = [direction for direction in directions if direction["verdict"] == "passed"]
+        undecided = count - len(passing)
+        note = f"within {largest_miss(passing)} of the measured derivative" + (
+            f"; {undecided} of {count} directions not deciding" if undecided else "") + noisy
+    else:
+        verdict = "not_tested"
+        # Round-off shrinks as 1/e: the factor that brings every bound below
+        # DECISION_LIMIT of the derivative, capped where fitted truncation grows.
+        needed, cap = 1.0, None
+        for direction in directions:
+            magnitude_hat = max(abs(direction["d_hat"]), abs(direction["claimed"]))
+            needed = max(needed, direction["bound"] / (DECISION_LIMIT * magnitude_hat)
+                         if magnitude_hat > 0.0 else 10.0)
+            if direction["truncation"] != 0.0 and magnitude_hat > 0.0:
+                limit = steps[0] * math.sqrt(TRUNCATION_LIMIT * magnitude_hat / abs(direction["truncation"]))
+                cap = limit if cap is None else min(cap, limit)
+        note = (f"no direction decides ({', '.join(sorted(set(verdicts)))}); {advice(steps, needed, cap)}"
+                + noisy)
+    fitted = [direction for direction in directions if direction["d_hat"] != 0.0]
     return {**report, "passed": verdict == "passed", "verdict": verdict, "note": note,
-            "relative_error": max(relative) if relative else None, "residual_scale": pooled["scale"],
-            "dof": pooled["dof"], "z": z, "window": [float(window[0]), float(window[-1])],
-            "directions": directions}
+            "relative_error": max((direction["delta"] / abs(direction["d_hat"]) for direction in fitted),
+                                  default=None),
+            "residual_scale": scale, "z": z, "directions": directions}
+
+
+def steps_problem(steps) -> Optional[str]:
+    """Why ``steps`` cannot be used (None when they can): the model needs at
+    least MINIMUM_STEPS distinct, positive, finite steps."""
+    array = np.asarray(steps, dtype=float)
+    if not np.all(np.isfinite(array)) or np.any(array <= 0.0):
+        return f"steps must be positive and finite, got {list(steps)}"
+    if len(np.unique(array)) != len(array) or len(array) < MINIMUM_STEPS:
+        return (f"at least {MINIMUM_STEPS} distinct steps are needed (the model fits d + a e^2 and "
+                f"needs residuals), got {list(steps)}")
+    return None
+
+
+def epsilons_argument(text: str) -> tuple:
+    """``--epsilons``: comma-separated steps (argparse reports a bad value, exit 2)."""
+    steps = tuple(float(value) for value in text.split(","))
+    problem = steps_problem(steps)
+    if problem is not None:
+        raise argparse.ArgumentTypeError(problem)
+    return steps
 
 
 def main(argv=None) -> int:
@@ -237,45 +392,44 @@ def main(argv=None) -> int:
     parser.add_argument("--smoke", action="store_true", help="build the problem at its smoke size")
     parser.add_argument("--directions", type=int, default=DEFAULT_DIRECTIONS,
                         help="random directions per quantity")
-    parser.add_argument("--epsilons", help="comma-separated steps, largest first")
+    parser.add_argument("--epsilons", type=epsilons_argument, help="comma-separated steps (at least 3)")
     parser.add_argument("--seed", type=int, default=1, help="seed of the random directions")
     args = parser.parse_args(argv)
-
     if args.directions < 1:
         parser.error(f"--directions must be at least 1, got {args.directions}")
-    if args.epsilons is not None and len(args.epsilons.split(",")) < MINIMUM_STEPS:
-        parser.error(f"--epsilons needs at least {MINIMUM_STEPS} steps: the error model fits "
-                     "d + a e^2 and needs residuals to estimate its uncertainty")
     problem = build_problem(smoke=args.smoke)
-    epsilons = (tuple(float(value) for value in args.epsilons.split(","))
-                if args.epsilons else problem.taylor_epsilons)
-    if epsilons is not None and len(epsilons) < MINIMUM_STEPS:
-        parser.error(f"the problem's taylor_epsilons need at least {MINIMUM_STEPS} steps")
-    # The library's directions, drawn once and tested one at a time, so each
-    # is judged on its own; every quantity visits the same points.
+    chosen = args.epsilons if args.epsilons is not None else problem.taylor_epsilons
+    if chosen is not None and steps_problem(chosen) is not None:
+        parser.error(f"the problem's taylor_epsilons: {steps_problem(chosen)}")
+
+    # The library's directions, drawn once; every quantity visits the same points.
     random = np.random.RandomState(args.seed)
     directions = [random.standard_normal(size=np.shape(problem.x0)) for _ in range(args.directions)]
     memo = PhysicsMemo(problem.physics)
+    x0 = np.asarray(problem.x0, dtype=float)
+    if chosen is None:
+        # The library's default steps, read back from one test (its points stay in the memo).
+        chosen = run_directional_taylor_test(quantity_evaluator(memo, None), x0, np.zeros(0), 1.0,
+                                             direction=directions[0])["epsilons"]
+    steps = np.sort(np.asarray(chosen, dtype=float))[::-1]
     labels = (OBJECTIVE_LABEL,) + tuple(problem.constraint_names)
     indices = (None,) + tuple(range(len(problem.constraint_names)))
     outcomes = [
-        judge(label, [run_directional_taylor_test(quantity_evaluator(memo, index), problem.x0, np.zeros(0),
-                                                  1.0, direction=direction, epsilons=epsilons)
-                      for direction in directions])
+        judge(label, quantity_value(memo(x0), index), steps,
+              [sample_direction(memo, index, x0, direction, steps) for direction in directions])
         for label, index in zip(labels, indices)
     ]
     passed = all(outcome["passed"] for outcome in outcomes)
-    status_names = {"nonfinite": "NONFINITE", "not_tested": "NOT TESTED", "failed": "FAIL"}
+    status_names = {"passed": "PASS", "nonfinite": "NONFINITE", "not_tested": "NOT TESTED",
+                    "not_smooth": "NOT SMOOTH", "failed": "FAIL"}
     for outcome in outcomes:
-        status = "PASS" if outcome["passed"] else status_names[outcome["verdict"]]
-        flag = f"  ({outcome['note']})"
         max_ratio = "n/a" if outcome["max_ratio"] is None else f"{outcome['max_ratio']:.3f}"
-        print(f"{outcome['quantity']:<32} {status:<10} value={outcome['value']:+.4e} "
-              f"max_ratio={max_ratio}{flag}")
+        print(f"{outcome['quantity']:<32} {status_names[outcome['verdict']]:<10} "
+              f"value={outcome['value']:+.4e} max_ratio={max_ratio}  ({outcome['note']})")
     print(RESULT_PREFIX + json.dumps({
         "passed": passed,
         "problem": problem.name,
-        "epsilons": None if epsilons is None else list(epsilons),
+        "epsilons": steps.tolist(),
         "directions": args.directions,
         "physics_evaluations": memo.evaluations,
         "quantities": outcomes,

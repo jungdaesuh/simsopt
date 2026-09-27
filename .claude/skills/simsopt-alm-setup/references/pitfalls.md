@@ -60,20 +60,22 @@ Each entry: the symptom, the cause, the fix.
     extremum; a step that changes the selection breaks the ratio test. Use
     steps far below the smoothing temperature (the templates use 1e-5 to
     2.5e-6).
-13. **Reading the gradient check.** `gradient_check.py` fits the central
-    differences of each direction to `c(e) = d + a e^2` (at least three
-    steps), weighting each step by its round-off (`eps |q| / e`) and scaling
-    that noise up by the pooled fit residuals when the data scatter more. The
-    extrapolated `d_hat` and its uncertainty `sigma` decide:
-    `passed` when the claimed derivative is within
-    max(1e-6 |d_hat|, z sigma) of `d_hat` and z sigma is below 1e-3 |d_hat|
-    (z: Student's t, 99%, at the residual degrees of freedom); `failed` when
-    it misses by more than twice that; `not_tested` otherwise (no measurable
-    change, too much uncertainty, or borderline), with the steps to try:
-    larger when round-off limits them, smaller when the differences do not
-    follow `e^2`. Truncation (`a e^2`) is fitted, not tolerated, so a wrong
-    gradient cannot hide behind it, and a small step's round-off cannot
-    hide it either.
+13. **Reading the gradient check.** `gradient_check.py` models the central
+    differences of each direction as `c(e) = d + a e^2 + noise`, with noise
+    `s eps Q / e` (`Q` the sampled |q|, `s` from the fit residuals), and
+    needs at least three distinct steps and one direction. Flat directions
+    (every difference within 3 x round-off) pass only with a zero claimed
+    derivative and only when every direction is flat; a clearly nonzero
+    claim there fails. Two goodness-of-fit tests guard `FAIL`: a kink test
+    (second differences `J + b e` with `|J| > z sigma_J` and above 1e-3 of the
+    change) and a resolution test (residuals implying value noise above 1%
+    of the values); either gives `NOT SMOOTH`, never `FAIL`. Under a model
+    that fits, `PASS` needs the claim within max(1e-6 |d_hat|, z sigma) of
+    `d_hat` with z sigma below 1e-3 |d_hat|, and `FAIL` a miss beyond twice
+    that; anything else is `NOT TESTED`, with one suggestion, always larger
+    steps (or that no steps decide it). The `e^2` term is extrapolated only
+    when it is measurable, and a cancellation or inner-solve noise is
+    reported as such ("noisier than the value suggests").
 14. **Unique row names.** The runner reports multipliers and values keyed by
     name, so a repeated name hides a row.
 15. **Conflicting constraints.** Thresholds no design can meet (e.g. a coil
