@@ -133,12 +133,13 @@ Run each from any directory; all three must pass before the real run.
 
 1. `PYTHONPATH=<dir> <python> $SKILL_DIR/scripts/gradient_check.py --smoke`
    must exit 0. On `FAIL`, fix the gradient of the named quantity in
-   `alm_problem.py`. Only when the failing quantity is a smooth (log-sum-exp)
-   row, first retry with smaller steps (`--epsilons 1e-6,5e-7,2.5e-7`): a
-   step that crosses the row's selection window breaks it. Smaller steps
-   raise the round-off floor; a quantity whose change drops below it is
-   reported `NOT TESTED`, never passed. On `NOT TESTED`, retry with larger
-   steps, or find why the quantity does not depend on x.
+   `alm_problem.py`: the check fits the differences' truncation and
+   round-off, so a `FAIL` means the claimed derivative misses the
+   extrapolated one by a clear margin. On `NOT TESTED`, rerun with the steps
+   its note suggests (larger when round-off limits them, smaller when the
+   differences do not follow e^2, e.g. a smooth row whose steps cross its
+   selection window); if it stays undecided, find why the quantity barely
+   depends on x there.
 2. `PYTHONPATH=<dir> <python> $SKILL_DIR/scripts/sign_check.py --smoke` must
    exit 0. On a failure, fix the named row's sign or its probe expectation.
    Fix scale warnings by rescaling rows or f. For coverage warnings, add a
@@ -446,7 +447,7 @@ template is standalone: it repeats the few helpers it needs.
 | `inner_options` | L-BFGS-B options with `maxiter` | runner |
 | `solver_callbacks()` | `dict` of extra `minimize_alm` keywords (`{}` when stateless) | runner |
 | `sign_probes()` | tuple of `SignProbe(label, x, violated, satisfied)` | `sign_check.py` |
-| `taylor_epsilons` | tuple of at least two steps (largest first) or None (library default) | `gradient_check.py` |
+| `taylor_epsilons` | tuple of at least three steps (largest first) or None (library default) | `gradient_check.py` |
 | `shared_source_rows` | tuple of row names whose probe expectation reads the row's own source | `sign_check.py` |
 | `finish(result)` | JSON-serializable `dict`; sets the objects to `result.x` and writes outputs | runner |
 
@@ -818,22 +819,20 @@ Each entry: the symptom, the cause, the fix.
     extremum; a step that changes the selection breaks the ratio test. Use
     steps far below the smoothing temperature (the templates use 1e-5 to
     2.5e-6).
-13. **Reading the gradient check.** `gradient_check.py` judges every
-    direction by the finite differences (the measured change), never by the
-    claimed gradient alone, and needs at least two steps and one direction.
-    Only informative steps count: those whose round-off floor (100 machine
-    epsilons of the value, divided by the step) is at most 1% of the measured
-    change. At the smallest informative step the claimed derivative must
-    match the change to 1e-6 relative (or to the floor), or else the error
-    must fall by the ratio threshold (0.35) between every two informative
-    steps, as truncation does. The library's ratio test only labels the
-    pass: `ratio_test` (the error falls with the step), `no_ratio`
-    (the error sits at the ratio test's floor at every step, as for a linear
-    or quadratic quantity) or `accuracy` (the ratio test stops at
-    round-off). `not_tested` (no informative step along any direction: use
-    larger steps, or the quantity does not depend on x) and `failed` exit
-    nonzero; a zeroed or forgotten gradient on a quantity that changes is
-    `failed` wherever it can be measured.
+13. **Reading the gradient check.** `gradient_check.py` fits the central
+    differences of each direction to `c(e) = d + a e^2` (at least three
+    steps), weighting each step by its round-off (`eps |q| / e`) and scaling
+    that noise up by the pooled fit residuals when the data scatter more. The
+    extrapolated `d_hat` and its uncertainty `sigma` decide:
+    `passed` when the claimed derivative is within
+    max(1e-6 |d_hat|, z sigma) of `d_hat` and z sigma is below 1e-3 |d_hat|
+    (z: Student's t, 99%, at the residual degrees of freedom); `failed` when
+    it misses by more than twice that; `not_tested` otherwise (no measurable
+    change, too much uncertainty, or borderline), with the steps to try:
+    larger when round-off limits them, smaller when the differences do not
+    follow `e^2`. Truncation (`a e^2`) is fitted, not tolerated, so a wrong
+    gradient cannot hide behind it, and a small step's round-off cannot
+    hide it either.
 14. **Unique row names.** The runner reports multipliers and values keyed by
     name, so a repeated name hides a row.
 15. **Conflicting constraints.** Thresholds no design can meet (e.g. a coil
@@ -1017,38 +1016,39 @@ drops out, and its gradient would go unchecked. Every quantity's test visits
 the same points, so each point's physics is evaluated once and shared.
 
 The steps are ``--epsilons``, else the problem's ``taylor_epsilons``, else the
-library default; at least two steps and one direction are required (else
-exit 2). Each random direction is judged on its own, from the finite
-differences ``c_k`` (the measured change per step) against the claimed
-derivative ``d``, never from ``d`` alone:
+library default; at least three steps and one direction are required (else
+exit 2). The verdict comes from an explicit error model of the central
+differences the library computes, ``c(e) = (q(x0 + e u) - q(x0 - e u)) / (2 e)``
+along a unit direction ``u``:
 
-- The round-off floor at step ``e_k`` is ``ROUNDOFF_FACTOR * eps *
-  (|f(x0)| + |c_k| e_k) / e_k``, with ``eps`` the float64 machine epsilon: the
-  noise of a central difference of values accurate to ``ROUNDOFF_FACTOR``
-  machine epsilons of their size. It grows as the step shrinks.
-- A step is informative when its floor is at most
-  ``INFORMATIVE_NOISE_FRACTION`` of ``|c_k|``. Only informative steps judge,
-  and the library's ratio test (whose floor is absolute, so it cannot see a
-  wrong derivative below it) only labels the outcome. The direction passes
-  when the error ``|c_k - d|`` at its smallest informative step is at most
-  max(``RELATIVE_TOLERANCE`` |c_k|, floor), or, failing that, when the error
-  falls by the library's ratio threshold between every two consecutive
-  informative steps (at least two): truncation shrinking as it should, as
-  for a derivative far smaller than the higher ones. It fails otherwise.
-- A direction with no informative step is ``no_change`` (nothing tested),
-  unless ``|d|`` exceeds every floor: a claimed derivative where the
-  quantity does not change fails.
+    c(e) = d_true + a e^2 + noise(e),  noise(e) ~ ROUNDOFF_FACTOR * eps * |q| / e
 
-A quantity's ``verdict``: ``nonfinite`` if any value or difference is not
-finite; ``not_tested`` if every direction is ``no_change`` (round-off swamps
-the change at these steps: use larger steps, or the quantity does not depend
-on x); ``failed`` if any direction fails; else ``accuracy`` if some
-direction's ratio test failed (round-off), ``no_ratio`` if some direction had
-no ratio (the error at the ratio test's floor at every step, as for a linear
-or quadratic quantity), and ``ratio_test`` otherwise. Only ``ratio_test``,
-``no_ratio`` and ``accuracy`` pass. The last line printed is
-``GRADIENT_CHECK {json}``; the exit status is 0 when every quantity passes, 1
-otherwise (``not_tested`` included), and 2 for invalid arguments.
+with ``eps`` the float64 machine epsilon and ``|q| = |q(x0)| + |c(e)| e``. For
+each direction, a least-squares fit of ``c = d + a e^2`` over a window of at
+least three consecutive steps (weights from the noise model) extrapolates
+``d_hat``, the derivative the differences imply, with its standard error.
+The noise model is a floor: the fit residuals of all directions of the
+quantity, pooled, scale it up when the data scatter more (noise beyond the
+model, or truncation beyond ``e^2``). The window with the smallest pooled
+uncertainty is used, and ``z`` is the two-sided ``CONFIDENCE`` quantile of
+Student's t at the pooled residual degrees of freedom. With the claimed
+derivative ``d`` and ``delta = |d - d_hat|``,
+``tolerance = max(RELATIVE_TOLERANCE |d_hat|, z sigma)``:
+
+- ``failed``: ``delta > FAIL_FACTOR * tolerance`` (a clear margin).
+- ``not_tested``: otherwise, when ``|d_hat| <= z sigma`` (no measurable
+  change), when ``z sigma > DECISION_LIMIT |d_hat|`` (too uncertain to
+  confirm the gradient to that accuracy), or when ``delta`` is between the
+  tolerance and the fail margin. The note says which steps to try: larger
+  when round-off dominates, smaller when the data do not follow ``e^2``.
+- ``passed``: ``delta <= tolerance``.
+
+A quantity is ``nonfinite`` if any value or difference is not finite,
+``failed`` if any direction fails, ``not_tested`` if no direction passes,
+and ``passed`` otherwise (untested directions are counted in the note). The
+library's ratio test is reported (``max_ratio``) but does not decide. The
+last line printed is ``GRADIENT_CHECK {json}``; the exit status is 0 when
+every quantity passes, 1 otherwise, and 2 for invalid arguments.
 
 ### [scripts/sign_check.py](../.claude/skills/simsopt-alm-setup/scripts/sign_check.py)
 

@@ -60,22 +60,20 @@ Each entry: the symptom, the cause, the fix.
     extremum; a step that changes the selection breaks the ratio test. Use
     steps far below the smoothing temperature (the templates use 1e-5 to
     2.5e-6).
-13. **Reading the gradient check.** `gradient_check.py` judges every
-    direction by the finite differences (the measured change), never by the
-    claimed gradient alone, and needs at least two steps and one direction.
-    Only informative steps count: those whose round-off floor (100 machine
-    epsilons of the value, divided by the step) is at most 1% of the measured
-    change. At the smallest informative step the claimed derivative must
-    match the change to 1e-6 relative (or to the floor), or else the error
-    must fall by the ratio threshold (0.35) between every two informative
-    steps, as truncation does. The library's ratio test only labels the
-    pass: `ratio_test` (the error falls with the step), `no_ratio`
-    (the error sits at the ratio test's floor at every step, as for a linear
-    or quadratic quantity) or `accuracy` (the ratio test stops at
-    round-off). `not_tested` (no informative step along any direction: use
-    larger steps, or the quantity does not depend on x) and `failed` exit
-    nonzero; a zeroed or forgotten gradient on a quantity that changes is
-    `failed` wherever it can be measured.
+13. **Reading the gradient check.** `gradient_check.py` fits the central
+    differences of each direction to `c(e) = d + a e^2` (at least three
+    steps), weighting each step by its round-off (`eps |q| / e`) and scaling
+    that noise up by the pooled fit residuals when the data scatter more. The
+    extrapolated `d_hat` and its uncertainty `sigma` decide:
+    `passed` when the claimed derivative is within
+    max(1e-6 |d_hat|, z sigma) of `d_hat` and z sigma is below 1e-3 |d_hat|
+    (z: Student's t, 99%, at the residual degrees of freedom); `failed` when
+    it misses by more than twice that; `not_tested` otherwise (no measurable
+    change, too much uncertainty, or borderline), with the steps to try:
+    larger when round-off limits them, smaller when the differences do not
+    follow `e^2`. Truncation (`a e^2`) is fitted, not tolerated, so a wrong
+    gradient cannot hide behind it, and a small step's round-off cannot
+    hide it either.
 14. **Unique row names.** The runner reports multipliers and values keyed by
     name, so a repeated name hides a row.
 15. **Conflicting constraints.** Thresholds no design can meet (e.g. a coil

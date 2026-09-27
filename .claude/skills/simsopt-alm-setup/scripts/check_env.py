@@ -35,7 +35,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 from urllib.parse import unquote, urlparse
 
 # The ALM package's Python floor: upstream simsopt's requires-python.
@@ -104,20 +104,23 @@ def alm_import_blocker(alm_import: dict) -> Optional[str]:
     return f"{ALM_MODULE} exists but fails to import ({alm_import['error']}); fix that error first"
 
 
-# ``git remote -v``: ``name<TAB>url (fetch|push)``, then annotations such as a
-# partial clone's `` [blob:none]``; a URL may contain spaces.
-REMOTE_LINE = re.compile(r"^([^\t]+)\t(.*) \((fetch|push)\)(?: .*)?$")
+# ``git remote -v`` prints ``name<TAB>url (fetch|push)``, possibly followed by
+# annotations such as a partial clone's `` [blob:none]``; a URL may contain
+# spaces. A remote without a URL prints ``name<TAB>`` alone.
+URL_AND_KIND = re.compile(r"^(.*) \((fetch|push)\)(?: .*)?$")
 
 
-def parse_remotes(remote_listing: str) -> dict:
-    """``name -> fetch URL`` from ``git remote -v``; an unrecognized line raises."""
-    remotes = {}
+def parse_remotes(remote_listing: str) -> Dict[str, Optional[str]]:
+    """``name -> fetch URL`` from ``git remote -v``, with None for a remote that
+    has no fetch URL (none at all, a push URL only, or a line this parser does
+    not recognize)."""
+    remotes: Dict[str, Optional[str]] = {}
     for line in remote_listing.splitlines():
-        match = REMOTE_LINE.match(line)
-        if match is None:
-            raise ValueError(f"unrecognized `git remote -v` line: {line!r}")
-        if match.group(3) == "fetch":
-            remotes[match.group(1)] = match.group(2)
+        name, _tab, url_and_kind = line.partition("\t")
+        remotes.setdefault(name, None)
+        match = URL_AND_KIND.match(url_and_kind)
+        if match is not None and match.group(2) == "fetch":
+            remotes[name] = match.group(1)
     return remotes
 
 
@@ -156,7 +159,7 @@ def git_state(checkout: Path, fork_url: str) -> dict:
     base_check = git(root, "merge-base", "--is-ancestor", ALM_UPSTREAM_BASE, "HEAD").returncode
     upstream_with_alm = [
         name for name, url in remotes.items()
-        if normalized_repository(url) == UPSTREAM_REPOSITORY
+        if url is not None and normalized_repository(url) == UPSTREAM_REPOSITORY
         and git(root, "cat-file", "-e", f"{name}/master:{ALM_INIT.as_posix()}").returncode == 0
     ]
     return {
@@ -166,7 +169,7 @@ def git_state(checkout: Path, fork_url: str) -> dict:
         "dirty": bool(git(root, "status", "--porcelain", "--untracked-files=no").stdout.strip()),
         "remotes": remotes,
         "fork_remote": next((name for name, url in remotes.items()
-                             if normalized_repository(url) == fork_repository), None),
+                             if url is not None and normalized_repository(url) == fork_repository), None),
         "alm_branch_refs": git(root, "branch", "-r", "--list", f"*/{ALM_BRANCH}").stdout.split(),
         "upstream_remotes_with_alm": upstream_with_alm,
         # True/False, or None when the base commit is not in this clone yet.

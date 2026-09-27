@@ -120,12 +120,13 @@ Run each from any directory; all three must pass before the real run.
 
 1. `PYTHONPATH=<dir> <python> $SKILL_DIR/scripts/gradient_check.py --smoke`
    must exit 0. On `FAIL`, fix the gradient of the named quantity in
-   `alm_problem.py`. Only when the failing quantity is a smooth (log-sum-exp)
-   row, first retry with smaller steps (`--epsilons 1e-6,5e-7,2.5e-7`): a
-   step that crosses the row's selection window breaks it. Smaller steps
-   raise the round-off floor; a quantity whose change drops below it is
-   reported `NOT TESTED`, never passed. On `NOT TESTED`, retry with larger
-   steps, or find why the quantity does not depend on x.
+   `alm_problem.py`: the check fits the differences' truncation and
+   round-off, so a `FAIL` means the claimed derivative misses the
+   extrapolated one by a clear margin. On `NOT TESTED`, rerun with the steps
+   its note suggests (larger when round-off limits them, smaller when the
+   differences do not follow e^2, e.g. a smooth row whose steps cross its
+   selection window); if it stays undecided, find why the quantity barely
+   depends on x there.
 2. `PYTHONPATH=<dir> <python> $SKILL_DIR/scripts/sign_check.py --smoke` must
    exit 0. On a failure, fix the named row's sign or its probe expectation.
    Fix scale warnings by rescaling rows or f. For coverage warnings, add a
