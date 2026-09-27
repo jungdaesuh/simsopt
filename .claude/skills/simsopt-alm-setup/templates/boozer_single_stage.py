@@ -28,6 +28,11 @@ hands ``minimize_alm`` the accepted solution through
 best-feasible iterate or a resumed run re-solves from the solution it had.
 A failed Newton solve returns a non-finite evaluation, and the line search
 backtracks.
+
+The sign probes of the iota and major-radius rows compare against the
+solve's own iota and ``surface.major_radius()``, the values ``Iotas`` and
+``MajorRadius`` return: they check those rows' sign and bounds, not their
+values (``shared_source_rows``).
 """
 
 from __future__ import annotations
@@ -61,6 +66,7 @@ SUM_OF_ALL_COILS = "sum_of_all_coils"
 # SETUP: targets and bounds; None takes the initial configuration's value.
 IOTA_TARGET: Optional[float] = None
 IOTA_HALF_WIDTH = 0.0                          # 0: iota is held at the target
+IOTA_SCALE: Optional[float] = None             # divides the iota rows; None: |IOTA_TARGET| (set it for a 0 target)
 MAJOR_RADIUS_TARGET: Optional[float] = None    # m
 MAJOR_RADIUS_HALF_WIDTH = 0.0                  # m
 # SETUP: the coil-length bound in m (None: each row's initial value) and its scope:
@@ -97,9 +103,11 @@ class SignProbe(NamedTuple):
 class RowSpec(NamedTuple):
     """One constraint row. ``row(base_objective)`` returns the scaled
     ``(signed value, gradient[, hard signed value])``; ``measure()`` is the
-    constrained quantity from an independent computation at the current
-    solve, which the sign probes compare with ``bound`` from the side
-    ``sense``, ignoring points within ``margin`` of it."""
+    constrained quantity at the current solve, which the sign probes compare
+    with ``bound`` from the side ``sense``, ignoring points within ``margin``
+    of it. ``independent`` says whether ``measure`` is computed apart from the
+    row's own code (False: it reads the same source, so the probes check the
+    row's sign and bound, not its value)."""
 
     name: str
     row: Callable
@@ -107,6 +115,7 @@ class RowSpec(NamedTuple):
     sense: float
     bound: float
     margin: float
+    independent: bool = True
 
 
 @dataclass(frozen=True, eq=False)
@@ -119,8 +128,17 @@ class BoozerSolution:
     G: float
 
 
+def require_positive(name: str, value) -> float:
+    """``value`` if it is a finite positive number (a threshold, scale or
+    temperature: each divides or smooths a row); else ``ValueError``."""
+    if not (np.isfinite(value) and value > 0.0):
+        raise ValueError(f"{name} must be a finite positive number, got {value!r}")
+    return float(value)
+
+
 def scaled_row(row, scale, base_objective):
-    """``row(base_objective)`` with every item divided by ``scale`` > 0."""
+    """``row(base_objective)`` with every item divided by ``scale`` (checked
+    positive when the row is built)."""
     return tuple(item / scale for item in row(base_objective))
 
 
@@ -153,6 +171,20 @@ class BoozerSingleStageProblem:
     taylor_epsilons = (1e-5, 5e-6, 2.5e-6)
 
     def __init__(self, smoke: bool):
+        # Every threshold, scale and temperature divides or smooths a row.
+        for name, value in (("CC_MIN_DISTANCE", CC_MIN_DISTANCE), ("MAX_CURVATURE", MAX_CURVATURE),
+                            ("MAX_MEAN_SQUARED_CURVATURE", MAX_MEAN_SQUARED_CURVATURE),
+                            ("DISTANCE_TEMPERATURE", DISTANCE_TEMPERATURE),
+                            ("CURVATURE_TEMPERATURE", CURVATURE_TEMPERATURE), ("LENGTH_MAX", LENGTH_MAX),
+                            ("MAJOR_RADIUS_TARGET", MAJOR_RADIUS_TARGET), ("IOTA_SCALE", IOTA_SCALE)):
+            if value is not None:
+                require_positive(name, value)
+        for name, value in (("IOTA_HALF_WIDTH", IOTA_HALF_WIDTH),
+                            ("MAJOR_RADIUS_HALF_WIDTH", MAJOR_RADIUS_HALF_WIDTH)):
+            if not (np.isfinite(value) and value >= 0.0):
+                raise ValueError(f"{name} must be a finite nonnegative number, got {value!r}")
+        if IOTA_TARGET is not None and not np.isfinite(IOTA_TARGET):
+            raise ValueError(f"IOTA_TARGET must be finite, got {IOTA_TARGET!r}")
         base_curves, base_currents, magnetic_axis, nfp, biot_savart = get_data(COIL_CONFIG)
         self.base_curves = base_curves
         self.curves = [coil.curve for coil in biot_savart.coils]
@@ -185,14 +217,22 @@ class BoozerSingleStageProblem:
         self.objective_scale = float(unscaled.J())
         self.objective = (1.0 / self.objective_scale) * unscaled
         self.x0 = self.objective.x.copy()
+        iota_target = float(res["iota"]) if IOTA_TARGET is None else IOTA_TARGET
+        iota_scale = abs(iota_target) if IOTA_SCALE is None else IOTA_SCALE
+        if not iota_scale > 0.0:
+            raise ValueError(f"the iota rows are divided by |IOTA_TARGET| = {abs(iota_target)!r} when "
+                             "IOTA_SCALE is None: set IOTA_SCALE to an absolute iota scale, e.g. the "
+                             f"initial |iota| = {abs(float(res['iota'])):.4g}, or your own")
         self.row_specs = self._row_specs(
-            iota_target=float(res["iota"]) if IOTA_TARGET is None else IOTA_TARGET,
+            iota_target=iota_target,
+            iota_scale=iota_scale,
             major_radius_target=(float(self.major_radius.J()) if MAJOR_RADIUS_TARGET is None
                                  else MAJOR_RADIUS_TARGET),
             length_max=LENGTH_MAX,
         )
         self.constraint_names = tuple(spec.name for spec in self.row_specs)
         self.rows = tuple(spec.row for spec in self.row_specs)
+        self.shared_source_rows = tuple(spec.name for spec in self.row_specs if not spec.independent)
         # Accepted by minimize_alm, the current L-BFGS-B iterate, and the last successful solve.
         self.accepted = self.iterate = self.solved = self._solution_at(self.x0)
         # Not a cached_alm_evaluator: a warm-started re-solve at the same coils can differ.
@@ -209,26 +249,33 @@ class BoozerSingleStageProblem:
         # subproblems), not a per-subproblem limit.
         self.inner_options = {"maxiter": 10 if smoke else 5000}
 
-    def _row_specs(self, *, iota_target, major_radius_target, length_max) -> Tuple[RowSpec, ...]:
+    def _row_specs(self, *, iota_target, iota_scale, major_radius_target,
+                   length_max) -> Tuple[RowSpec, ...]:
         # SETUP: one RowSpec per row; a new row needs a scaled row callable
         # and an independent measure of the same quantity for the sign probes.
         surface = self.boozer_surface.surface
+        # The iota and major-radius measures read the solve's iota and
+        # surface.major_radius(), the sources of Iotas and MajorRadius
+        # themselves: not independent (see RowSpec).
         band_rows = (
             ("iota", self.iotas, lambda: float(self.boozer_surface.res["iota"]),
-             iota_target, IOTA_HALF_WIDTH, abs(iota_target), 1e-6),
+             iota_target, IOTA_HALF_WIDTH, iota_scale, 1e-6),
             ("major_radius", self.major_radius, lambda: float(surface.major_radius()),
-             major_radius_target, MAJOR_RADIUS_HALF_WIDTH, major_radius_target, 1e-6),
+             major_radius_target, MAJOR_RADIUS_HALF_WIDTH, require_positive("the major-radius target",
+                                                                            major_radius_target), 1e-6),
         )
         specs = []
         for name, quantity, measure, target, half_width, scale, margin in band_rows:
             specs.append(RowSpec(
                 name=f"{name}_min",
                 row=partial(scaled_row, partial(signed_lower_bound, quantity, target - half_width), scale),
-                measure=measure, sense=LOWER_BOUND, bound=target - half_width, margin=margin))
+                measure=measure, sense=LOWER_BOUND, bound=target - half_width, margin=margin,
+                independent=False))
             specs.append(RowSpec(
                 name=f"{name}_max",
                 row=partial(scaled_row, partial(signed_upper_bound, quantity, target + half_width), scale),
-                measure=measure, sense=UPPER_BOUND, bound=target + half_width, margin=margin))
+                measure=measure, sense=UPPER_BOUND, bound=target + half_width, margin=margin,
+                independent=False))
         specs.extend(self._length_specs(length_max))
         specs.append(RowSpec(
             name="coil_coil_distance",
@@ -270,7 +317,7 @@ class BoozerSingleStageProblem:
         }[LENGTH_SCOPE]
         specs = []
         for name, length, curves in scoped:
-            bound = float(length.J()) if length_max is None else length_max
+            bound = require_positive(f"the bound of {name}", length.J() if length_max is None else length_max)
             specs.append(RowSpec(
                 name=name,
                 row=partial(scaled_row, partial(signed_upper_bound, length, bound), bound),

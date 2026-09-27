@@ -76,6 +76,17 @@ def quantities(x: np.ndarray) -> dict:
     }
 
 
+def validate_rows(rows) -> None:
+    """Raise ``ValueError`` for a row whose bound is not finite or whose scale
+    (it divides the row) is not finite and positive."""
+    for row in rows:
+        if not (np.isfinite(row.scale) and row.scale > 0.0):
+            raise ValueError(f"row {row.name!r}: scale must be a finite positive number in the "
+                             f"quantity's units, got {row.scale!r}")
+        if not np.isfinite(row.bound):
+            raise ValueError(f"row {row.name!r}: bound must be finite, got {row.bound!r}")
+
+
 def signed_row(row: Row, value: float, grad: np.ndarray) -> Tuple[float, np.ndarray]:
     """The row's scaled signed value and gradient (``g <= 0`` is feasible)."""
     return row.sense * (value - row.bound) / row.scale, row.sense * grad / row.scale
@@ -87,10 +98,13 @@ class GenericProblem:
 
     name = "generic"
     constraint_names = tuple(row.name for row in ROWS)
+    # The sign probes are facts derived by hand, independent of every row.
+    shared_source_rows: Tuple[str, ...] = ()
     # None keeps run_directional_taylor_test's default steps.
     taylor_epsilons: Optional[Tuple[float, ...]] = None
 
     def __init__(self, smoke: bool):
+        validate_rows(ROWS)
         # SETUP: the starting point.
         self.x0 = np.array([3.0, 2.0])
         self.evaluator = cached_alm_evaluator(self.physics)

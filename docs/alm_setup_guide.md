@@ -132,9 +132,11 @@ physics, that a row is violated or satisfied: they become the sign probes.
 Run each from any directory; all three must pass before the real run.
 
 1. `PYTHONPATH=<dir> <python> $SKILL_DIR/scripts/gradient_check.py --smoke`
-   must exit 0. On a failure, fix the gradient of the named quantity in
+   must exit 0. On `FAIL`, fix the gradient of the named quantity in
    `alm_problem.py`; for a smooth row, first retry with smaller steps
-   (`--epsilons 1e-6,5e-7,2.5e-7`).
+   (`--epsilons 1e-6,5e-7,2.5e-7`). On `NOT TESTED`, the quantity did not
+   change above round-off: retry with larger steps, or find why it does not
+   depend on x.
 2. `PYTHONPATH=<dir> <python> $SKILL_DIR/scripts/sign_check.py --smoke` must
    exit 0. On a failure, fix the named row's sign or its probe expectation.
    Fix scale warnings by rescaling rows or f. For coverage warnings, add a
@@ -442,7 +444,8 @@ template is standalone: it repeats the few helpers it needs.
 | `inner_options` | L-BFGS-B options with `maxiter` | runner |
 | `solver_callbacks()` | `dict` of extra `minimize_alm` keywords (`{}` when stateless) | runner |
 | `sign_probes()` | tuple of `SignProbe(label, x, violated, satisfied)` | `sign_check.py` |
-| `taylor_epsilons` | tuple of steps (largest first) or None (library default) | `gradient_check.py` |
+| `taylor_epsilons` | tuple of at least two steps (largest first) or None (library default) | `gradient_check.py` |
+| `shared_source_rows` | tuple of row names whose probe expectation reads the row's own source | `sign_check.py` |
 | `finish(result)` | JSON-serializable `dict`; sets the objects to `result.x` and writes outputs | runner |
 
 `run_alm.py` itself exposes `run(problem, history=None, checkpoints=None,
@@ -451,8 +454,12 @@ script calls it directly ([Adapting an existing script](#adapting-an-existing-sc
 
 `SignProbe.violated` / `.satisfied` name rows known to be violated (g > 0) or
 satisfied (g <= 0) at `x` from the physics, not from the row code: a bound
-you can check by hand (generic), or an independent measurement compared with
-the bound (Stage-2 and Boozer templates, via each row's `measure`).
+you can check by hand (generic), or a measurement compared with the bound
+(Stage-2 and Boozer templates, via each row's `measure`). A measurement that
+reads the row's own source (the Boozer template's iota and major radius, the
+values `Iotas` and `MajorRadius` return) checks only the row's sign and
+bound; those rows are listed in `shared_source_rows`, and `sign_check.py`
+says so.
 
 ## Adapting an existing script
 
@@ -497,7 +504,7 @@ template, and each penalty term becomes these rows:
 | `order` | `ORDER` | |
 | `nphi`, `ntheta` | `QUADRATURE_POINTS` | One number for both directions. |
 | `filename` | `SURFACE_FILE` | |
-| `LENGTH_WEIGHT * sum(Jls)` | `LENGTH_WEIGHT` | Stays a term of f: it has no threshold, so it is not a constraint. For a length limit set `MAX_LENGTH` with `LENGTH_SCOPE = SUM_OF_BASE_COILS`, the same sum over the base coils. |
+| `LENGTH_WEIGHT * sum(Jls)`, with `LENGTH_WEIGHT = Weight(1e-6)` | `LENGTH_WEIGHT` | Stays a term of f: it has no threshold, so it is not a constraint. The template's is the plain float `1e-6` (upstream's `Weight` only lets a script change it between runs). For a length limit set `MAX_LENGTH` with `LENGTH_SCOPE = SUM_OF_BASE_COILS`, the same sum over the base coils. |
 | `CC_WEIGHT * CurveCurveDistance(curves, CC_THRESHOLD)` | `CC_MIN_DISTANCE` | Row `coil_coil_distance` (= `CC_THRESHOLD`): a smooth minimum over every pair of physical coils. |
 | `CS_WEIGHT * CurveSurfaceDistance(curves, s, CS_THRESHOLD)` | `CS_MIN_DISTANCE` | Row `coil_surface_distance` (= `CS_THRESHOLD`). |
 | `CURVATURE_WEIGHT * sum(LpCurveCurvature(c, 2, CURVATURE_THRESHOLD))` | `MAX_CURVATURE` | Rows `max_curvature_<i>`, one per base coil (= `CURVATURE_THRESHOLD`): the row bounds the pointwise maximum, where the penalty weighed the L2 norm of the excess. |
@@ -534,7 +541,7 @@ the smoke size as upstream's `MAXITER` did):
 -from simsopt.geo import (SurfaceRZFourier, curves_to_vtk, create_equally_spaced_curves,
 -                         CurveLength, CurveCurveDistance, MeanSquaredCurvature,
 -                         LpCurveCurvature, CurveSurfaceDistance)
--from simsopt.objectives import SquaredFlux, QuadraticPenalty
+-from simsopt.objectives import Weight, SquaredFlux, QuadraticPenalty
 +from simsopt.geo import curves_to_vtk
  from simsopt.util import in_github_actions
  
@@ -542,7 +549,7 @@ the smoke size as upstream's `MAXITER` did):
 -R0 = 1.0
 -R1 = 0.5
 -order = 5
--LENGTH_WEIGHT = 1e-6
+-LENGTH_WEIGHT = Weight(1e-6)
 -CC_THRESHOLD = 0.1
 -CC_WEIGHT = 1000
 -CS_THRESHOLD = 0.3
@@ -809,16 +816,17 @@ Each entry: the symptom, the cause, the fix.
     extremum; a step that changes the selection breaks the ratio test. Use
     steps far below the smoothing temperature (the templates use 1e-5 to
     2.5e-6).
-13. **Three ways to pass the gradient check.** `gradient_check.py` reports a
-    `verdict` per quantity: `ratio_test` (the error falls with the step),
-    `no_ratio` (the error is at the round-off floor at every step, so no
-    ratio exists: the difference is exact for a linear or quadratic
-    quantity such as a linear row, or the truncation error at these small
-    steps is already below the floor, as for a coil-length row) and
-    `accuracy` (the ratio test fails at round-off
-    but the smallest error is within 1e-6 relative). All three mean the
-    gradient matches; `vacuous` (zero derivative) means nothing was tested,
-    and `failed` means the gradient is wrong.
+13. **Reading the gradient check.** `gradient_check.py` judges every
+    direction by the finite differences (the measured change), never by the
+    claimed gradient alone, and needs at least two steps. A quantity passes as
+    `ratio_test` (the error falls with the step), `no_ratio` (the error sits
+    at the ratio test's floor at every step, as for a linear or quadratic
+    quantity) or `accuracy` (the ratio test stops at round-off); the last two
+    also need the smallest error within 1e-6 of the measured change, or
+    within the round-off floor of 100 machine epsilons of the value per step.
+    `not_tested` (no change above round-off along any direction: use larger
+    steps, or the quantity does not depend on x) and `failed` exit nonzero;
+    a zeroed or forgotten gradient on a quantity that changes is `failed`.
 14. **Unique row names.** The runner reports multipliers and values keyed by
     name, so a repeated name hides a row.
 15. **Conflicting constraints.** Thresholds no design can meet (e.g. a coil
@@ -913,6 +921,11 @@ best-feasible iterate or a resumed run re-solves from the solution it had.
 A failed Newton solve returns a non-finite evaluation, and the line search
 backtracks.
 
+The sign probes of the iota and major-radius rows compare against the
+solve's own iota and ``surface.major_radius()``, the values ``Iotas`` and
+``MajorRadius`` return: they check those rows' sign and bounds, not their
+values (``shared_source_rows``).
+
 ### [templates/run_alm.py](../.claude/skills/simsopt-alm-setup/templates/run_alm.py)
 
 Run the ALM problem of ``alm_problem.py`` (this directory) with
@@ -941,23 +954,26 @@ Report whether a Python environment can run simsopt's ALM solver
 
     python check_env.py [--python INTERPRETER] [--checkout DIR] [--fork-url URL]
 
-It inspects the interpreter the optimization runs with (default: the one
-running this script) in child processes, so it never imports simsopt itself
-and runs on any Python: the Python version against the ALM floor, whether
+It runs on Python 3.7 or newer and inspects the interpreter the optimization
+runs with (default: the one running this script; any Python that runs
+``python -c``) in child processes, so it never imports simsopt itself: the
+Python version against the ALM floor, whether
 ``simsopt``, ``simsopt.solve.alm`` and ``simsopt.geo.signed_constraints``
 import, how simsopt is installed (editable or not, from its PEP 610 metadata),
 and, for the simsopt source checkout (``--checkout``, else the editable
 install's directory, else the ``src`` layout around the imported package), its
 git state. It reads local git refs only and changes nothing.
 
-``route`` is the first that applies: ``blocked`` (Python below the floor or
-no importable simsopt), ``ready`` (the solver imports), ``reinstall`` (the
-checkout has the ALM sources but the interpreter does not import them),
-``upstream`` (a hiddenSymmetries remote's master has them), ``merge-fork`` (a
-git checkout: merge the ``alm-library`` branch), ``copy`` (no git checkout).
-``blockers`` lists what must be fixed before the route can run (for
-``merge-fork`` also uncommitted changes). The last line printed is
-``CHECK_ENV {json}``; the exit status is 0 when the route is ``ready``.
+``route`` is the first that applies: ``blocked`` (Python below the floor, no
+importable simsopt, or a ``simsopt.solve.alm`` that exists but fails to
+import: the report quotes the error), ``ready`` (the solver imports),
+``reinstall`` (the checkout has the ALM sources but the interpreter finds no
+such module), ``upstream`` (a hiddenSymmetries remote's master has them),
+``merge-fork`` (a git checkout: merge the ``alm-library`` branch), ``copy``
+(no git checkout). ``blockers`` lists what must be fixed before the route can
+run (for ``upstream`` and ``merge-fork`` also uncommitted changes). The last
+line printed is ``CHECK_ENV {json}``; the exit status is 0 when the route is
+``ready``.
 
 ### [scripts/smoke_toy.py](../.claude/skills/simsopt-alm-setup/scripts/smoke_toy.py)
 
@@ -993,24 +1009,34 @@ drops out, and its gradient would go unchecked. Every quantity's test visits
 the same points, so each point's physics is evaluated once and shared.
 
 The steps are ``--epsilons``, else the problem's ``taylor_epsilons``, else the
-library default. Every value and difference must be finite (else
-``nonfinite``); then a quantity passes in one of three ways, reported as its
-``verdict`` and printed with the reason:
+library default; at least two are required (one step gives no ratio). Each
+random direction is judged on its own, from the finite differences
+``c_k`` (the true change per step) against the claimed derivative ``d``:
 
-- ``ratio_test``: the error falls at least as fast as the step.
-- ``no_ratio``: no ratio exists because the error is at the test's round-off
-  floor at every step: the central difference is exact (a linear or
-  quadratic quantity, such as a linear row) or the errors sit at round-off
-  (or only one step was given). The gradient agrees with the differences.
-- ``accuracy``: the ratio test fails but, along every direction, the smallest
-  error is at most ``ACCURACY_TOLERANCE`` times max(1, |derivative|): at
-  steps where round-off dominates the errors stop falling although the
-  gradient is right to that accuracy.
+- The round-off floor at step ``e_k`` is ``ROUNDOFF_FACTOR * eps *
+  (|f(x0)| + |c_k| e_k) / e_k``, with ``eps`` the float64 machine epsilon: the
+  noise of a central difference of values accurate to ``ROUNDOFF_FACTOR``
+  machine epsilons of their size.
+- ``no_change``: every ``|c_k|`` and ``|d|`` is within that floor, so the
+  direction tests nothing. A direction where the quantity changes but the
+  claimed derivative is zero (a forgotten gradient) is not ``no_change``.
+- Otherwise the direction passes by ``ratio_test`` (the library's test: the
+  error ``|c_k - d|`` falls at least as fast as the step), or, when that test
+  has no ratio or fails at round-off, by the error magnitude: the smallest
+  error is at most max(``RELATIVE_TOLERANCE * max_k |c_k|``, the floor at
+  that step), i.e. relative to the measured change. Else it fails.
 
-A quantity whose derivative is zero along every direction passes as
-``vacuous`` (nothing was tested); any other outcome is ``failed``. The last
-line printed is ``GRADIENT_CHECK {json}``; the exit status is 0 when every
-quantity passes.
+A quantity's ``verdict``: ``nonfinite`` if any value or difference is not
+finite; ``not_tested`` if every direction is ``no_change`` (the quantity does
+not move above round-off at these steps: use larger steps, or it does not
+depend on x); ``failed`` if any tested direction fails; else ``accuracy`` if
+some direction passed by magnitude after a failed ratio test, ``no_ratio`` if
+some direction had no ratio (the error at the ratio test's floor at every
+step, as for a linear or quadratic quantity) and passed by magnitude, and
+``ratio_test`` otherwise. Only ``ratio_test``, ``no_ratio`` and ``accuracy``
+pass. The last line printed is ``GRADIENT_CHECK {json}``; the exit status is
+0 when every quantity passes, 1 otherwise (``not_tested`` included), and 2
+for invalid arguments.
 
 ### [scripts/sign_check.py](../.claude/skills/simsopt-alm-setup/scripts/sign_check.py)
 
@@ -1024,7 +1050,10 @@ Signs: ``problem.sign_probes()`` gives points where rows are known, from the
 physics and independently of the row code, to be violated or satisfied. Each
 listed row must have ``g > 0`` (violated) or ``g <= 0`` (satisfied) there; a
 mismatch, a non-finite value or a probe naming an unknown row fails. A row
-never probed on one side is reported as a coverage warning.
+never probed on one side is reported as a coverage warning. A row in
+``problem.shared_source_rows`` has probe expectations that read the same
+source as the row (e.g. the Boozer template's iota from the solve itself):
+its probes check the sign and the bound, not the value, and a note says so.
 
 Scales, at ``problem.x0`` (warnings, not failures): the constraint gradient
 norms must not spread over more than ``SPREAD_LIMIT`` (the penalty is shared

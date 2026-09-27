@@ -4,23 +4,26 @@
 
     python check_env.py [--python INTERPRETER] [--checkout DIR] [--fork-url URL]
 
-It inspects the interpreter the optimization runs with (default: the one
-running this script) in child processes, so it never imports simsopt itself
-and runs on any Python: the Python version against the ALM floor, whether
+It runs on Python 3.7 or newer and inspects the interpreter the optimization
+runs with (default: the one running this script; any Python that runs
+``python -c``) in child processes, so it never imports simsopt itself: the
+Python version against the ALM floor, whether
 ``simsopt``, ``simsopt.solve.alm`` and ``simsopt.geo.signed_constraints``
 import, how simsopt is installed (editable or not, from its PEP 610 metadata),
 and, for the simsopt source checkout (``--checkout``, else the editable
 install's directory, else the ``src`` layout around the imported package), its
 git state. It reads local git refs only and changes nothing.
 
-``route`` is the first that applies: ``blocked`` (Python below the floor or
-no importable simsopt), ``ready`` (the solver imports), ``reinstall`` (the
-checkout has the ALM sources but the interpreter does not import them),
-``upstream`` (a hiddenSymmetries remote's master has them), ``merge-fork`` (a
-git checkout: merge the ``alm-library`` branch), ``copy`` (no git checkout).
-``blockers`` lists what must be fixed before the route can run (for
-``merge-fork`` also uncommitted changes). The last line printed is
-``CHECK_ENV {json}``; the exit status is 0 when the route is ``ready``.
+``route`` is the first that applies: ``blocked`` (Python below the floor, no
+importable simsopt, or a ``simsopt.solve.alm`` that exists but fails to
+import: the report quotes the error), ``ready`` (the solver imports),
+``reinstall`` (the checkout has the ALM sources but the interpreter finds no
+such module), ``upstream`` (a hiddenSymmetries remote's master has them),
+``merge-fork`` (a git checkout: merge the ``alm-library`` branch), ``copy``
+(no git checkout). ``blockers`` lists what must be fixed before the route can
+run (for ``upstream`` and ``merge-fork`` also uncommitted changes). The last
+line printed is ``CHECK_ENV {json}``; the exit status is 0 when the route is
+``ready``.
 """
 
 from __future__ import annotations
@@ -75,6 +78,32 @@ def imports(python: str, module: str) -> dict:
             "error": None if completed.returncode == 0 else last_line(completed.stderr)}
 
 
+def missing_module(error: str, module: str) -> bool:
+    """Whether an import's last error line says ``module`` itself is absent
+    (not that it exists and fails, or that something it imports is absent)."""
+    return error == f"ModuleNotFoundError: No module named '{module}'"
+
+
+def parse_remotes(remote_listing: str) -> dict:
+    """``name -> fetch URL`` from ``git remote -v`` (``name<TAB>url (fetch)``;
+    a URL may contain spaces)."""
+    remotes = {}
+    for line in remote_listing.splitlines():
+        name, url_and_kind = line.split("\t", 1)
+        url, kind = url_and_kind.rsplit(" ", 1)
+        if kind == "(fetch)":
+            remotes[name] = url
+    return remotes
+
+
+def route_blockers(route: str, checkout: Optional[dict]) -> List[str]:
+    """What stops ``route`` itself: the routes that merge need a clean tree."""
+    if route in ("upstream", "merge-fork") and checkout["git"]["dirty"]:
+        return ["the checkout has uncommitted changes to tracked files; commit or stash them "
+                "before merging"]
+    return []
+
+
 def normalized_repository(url: str) -> str:
     """``host/owner/repo`` in lower case, from an https or scp-style git URL."""
     url = url.strip().lower()
@@ -97,11 +126,7 @@ def git_state(checkout: Path, fork_url: str) -> dict:
     if toplevel.returncode != 0:
         return {"is_git": False}
     root = Path(toplevel.stdout.strip())
-    remotes = {}
-    for line in git(root, "remote", "-v").stdout.splitlines():
-        name, url, kind = line.split()
-        if kind == "(fetch)":
-            remotes[name] = url
+    remotes = parse_remotes(git(root, "remote", "-v").stdout)
     fork_repository = normalized_repository(fork_url)
     base_check = git(root, "merge-base", "--is-ancestor", ALM_UPSTREAM_BASE, "HEAD").returncode
     upstream_with_alm = [
@@ -184,11 +209,16 @@ def build_report(python: str, checkout_argument: Optional[Path], fork_url: str) 
                         f"{'.'.join(map(str, MIN_PYTHON))}; use a newer interpreter")
     if not simsopt_import["importable"]:
         blockers.append(f"simsopt does not import ({simsopt_import['error']}); install simsopt first")
+    alm_import = imports(python, "simsopt.solve.alm") if simsopt_import["importable"] else not_imported
+    if simsopt_import["importable"] and not alm_import["importable"] and not missing_module(
+            alm_import["error"], "simsopt.solve.alm"):
+        blockers.append(f"simsopt.solve.alm exists but fails to import ({alm_import['error']}); "
+                        "fix that error first")
     report = {
         "python": {"executable": python, "version": ".".join(map(str, version)),
                    "floor": ".".join(map(str, MIN_PYTHON)), "meets_floor": tuple(version) >= MIN_PYTHON},
         "simsopt": {**simsopt_import, "install": install, "info": simsopt_info},
-        "alm": imports(python, "simsopt.solve.alm") if simsopt_import["importable"] else not_imported,
+        "alm": alm_import,
         "signed_constraints": (imports(python, "simsopt.geo.signed_constraints")
                                if simsopt_import["importable"] else not_imported),
         "checkout": checkout,
@@ -203,9 +233,7 @@ def build_report(python: str, checkout_argument: Optional[Path], fork_url: str) 
             and checkout_path not in Path(simsopt_info["file"]).parents):
         report["notes"].append(f"the interpreter imports simsopt from {simsopt_info['file']}, "
                                f"not from the checkout {checkout_path}")
-    if route == "merge-fork" and checkout["git"]["dirty"]:
-        blockers.append("the checkout has uncommitted changes to tracked files; commit or stash "
-                        "them before merging")
+    blockers.extend(route_blockers(route, checkout))
     if route == "merge-fork" and checkout["git"]["contains_alm_upstream_base"] is False:
         report["notes"].append(f"HEAD does not contain the branch's upstream base "
                                f"{ALM_UPSTREAM_BASE[:9]}: merging also brings in the upstream "

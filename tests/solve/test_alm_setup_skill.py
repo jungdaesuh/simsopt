@@ -65,6 +65,44 @@ TERMINATION_CARRIERS = {"max_outer_termination", "exhausted_termination"}
 BUDGET_ACTION_CALLS = {"_exhausted_termination", "ALMRaisePenalty"}
 
 
+# A problem module whose claimed gradients are exact or wrong by MODE_VALUE:
+# f = sum(x^3) and one row sum(sin x) (scaled by 1e-7 for "small"), or
+# constants for "constant". The must-fail modes are the Crucible repros.
+GRADIENT_PROBE_PROBLEM = """\
+from types import SimpleNamespace
+
+import numpy as np
+
+from simsopt.solve.alm import ALMPhysics
+
+MODE = MODE_VALUE
+
+
+def physics(x):
+    x = np.asarray(x, dtype=float)
+    f, grad_f = float(np.sum(x ** 3)), 3.0 * x ** 2
+    row, grad_row = float(np.sum(np.sin(x))), np.cos(x)
+    if MODE == "small":
+        row, grad_row = 1e-7 * row, 1e-7 * grad_row
+    if MODE == "constant":
+        f, grad_f, row, grad_row = 1.5, np.zeros_like(x), 0.25, np.zeros_like(x)
+    claimed = {
+        "exact": (grad_f, grad_row),
+        "constant": (grad_f, grad_row),
+        "zero": (np.zeros_like(x), np.zeros_like(x)),
+        "factor": (1.5 * grad_f, 2.0 * grad_row),
+        "small": (grad_f, 2.0 * grad_row),
+    }[MODE]
+    return ALMPhysics(base_value=f, base_grad=claimed[0], constraint_values=np.array([row]),
+                      constraint_grads=(claimed[1],))
+
+
+def build_problem(smoke=False):
+    return SimpleNamespace(name="probe", x0=np.array([0.3, 0.7, 1.1]), physics=physics,
+                           constraint_names=("row",), taylor_epsilons=None)
+"""
+
+
 def skill_markdown() -> Dict[str, str]:
     paths = [SKILL_DIR / "SKILL.md", *sorted(REFERENCES_DIR.glob("*.md"))]
     return {path.relative_to(SKILL_DIR).as_posix(): path.read_text() for path in paths}
@@ -325,6 +363,32 @@ class CheckEnvRouteTests(unittest.TestCase):
                 self.assertEqual(check_env.choose_route(report), route)
         self.assertEqual(check_env.choose_route(self.report(checkout=self.checkout(is_git=False))), "copy")
 
+    def test_remote_urls_with_spaces_parse(self):
+        remotes = check_env.parse_remotes(
+            "origin\thttps://github.com/o/simsopt (fetch)\n"
+            "origin\thttps://github.com/o/simsopt (push)\n"
+            "local\t/data/my repos/simsopt (fetch)\n"
+            "local\t/data/my repos/simsopt (push)\n")
+        self.assertEqual(remotes, {"origin": "https://github.com/o/simsopt", "local": "/data/my repos/simsopt"})
+
+    def test_only_a_missing_alm_module_means_the_sources_are_not_installed(self):
+        module = "simsopt.solve.alm"
+        self.assertTrue(check_env.missing_module("ModuleNotFoundError: No module named 'simsopt.solve.alm'", module))
+        for error in ("ModuleNotFoundError: No module named 'scipy'",
+                      "ImportError: cannot import name 'nnls' from 'scipy.optimize'",
+                      "SyntaxError: invalid syntax"):
+            with self.subTest(error=error):
+                self.assertFalse(check_env.missing_module(error, module))
+
+    def test_merging_routes_need_a_clean_tree(self):
+        dirty = {"git": {"dirty": True}}
+        clean = {"git": {"dirty": False}}
+        for route in ("upstream", "merge-fork"):
+            with self.subTest(route=route):
+                self.assertEqual(len(check_env.route_blockers(route, dirty)), 1)
+                self.assertEqual(check_env.route_blockers(route, clean), [])
+        self.assertEqual(check_env.route_blockers("copy", None), [])
+
     def test_repository_urls_compare_by_host_owner_and_name(self):
         for url in ("git@github.com:hiddenSymmetries/simsopt.git",
                     "https://github.com/hiddenSymmetries/simsopt",
@@ -369,7 +433,7 @@ class SkillScriptsRunTests(unittest.TestCase):
                          ["f", "sum_at_most_max", "x0_at_least_min"])
         # A quadratic f and linear rows are differenced exactly: no ratio, with the reason.
         self.assertEqual({quantity["verdict"] for quantity in summary["quantities"]}, {"no_ratio"})
-        self.assertTrue(all(quantity["note"].startswith("no ratio:") for quantity in summary["quantities"]))
+        self.assertTrue(all(quantity["note"].startswith("no ratio along") for quantity in summary["quantities"]))
 
     def test_gradient_check_fails_on_a_wrong_gradient(self):
         source = replaced_once((TEMPLATES_DIR / "generic.py").read_text(),
@@ -383,6 +447,63 @@ class SkillScriptsRunTests(unittest.TestCase):
         self.assertEqual({quantity["quantity"]: quantity["verdict"] for quantity in summary["quantities"]},
                          {"f": "no_ratio", "sum_at_most_max": "failed", "x0_at_least_min": "no_ratio"})
 
+    def run_gradient_probe(self, mode: str, *arguments: str) -> subprocess.CompletedProcess:
+        (self.scratch / "alm_problem.py").write_text(GRADIENT_PROBE_PROBLEM.replace("MODE_VALUE", repr(mode)))
+        return run_python([str(SCRIPTS_DIR / "gradient_check.py"), *arguments], cwd=self.scratch,
+                          problem_dir=self.scratch)
+
+    @staticmethod
+    def verdicts(completed: subprocess.CompletedProcess) -> Dict[str, str]:
+        summary = result_line(completed, "GRADIENT_CHECK ")
+        return {quantity["quantity"]: quantity["verdict"] for quantity in summary["quantities"]}
+
+    def test_gradient_check_passes_exact_gradients(self):
+        completed = self.run_gradient_probe("exact")
+        self.assertEqual(self.verdicts(completed), {"f": "ratio_test", "row": "ratio_test"})
+        self.assertEqual(completed.returncode, 0)
+
+    def test_gradient_check_fails_zeroed_gradients(self):
+        """A forgotten gradient on a quantity that does change is wrong, not vacuous."""
+        completed = self.run_gradient_probe("zero")
+        self.assertEqual(self.verdicts(completed), {"f": "failed", "row": "failed"})
+        self.assertEqual(completed.returncode, 1)
+
+    def test_gradient_check_does_not_pass_a_constant_quantity(self):
+        completed = self.run_gradient_probe("constant")
+        self.assertEqual(self.verdicts(completed), {"f": "not_tested", "row": "not_tested"})
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn("NOT TESTED", completed.stdout)
+
+    def test_gradient_check_fails_wrong_gradients(self):
+        completed = self.run_gradient_probe("factor")
+        self.assertEqual(self.verdicts(completed), {"f": "failed", "row": "failed"})
+        self.assertEqual(completed.returncode, 1)
+
+    def test_gradient_check_rejects_a_single_step(self):
+        """One step gives no ratio, and it passed a gradient off by x1.5 and x2."""
+        completed = self.run_gradient_probe("factor", "--epsilons", "1e-3")
+        self.assertEqual(completed.returncode, 2, completed.stdout)
+        self.assertIn("at least two steps", completed.stderr)
+        self.assertNotIn("GRADIENT_CHECK", completed.stdout)
+
+    def test_gradient_check_fails_a_wrong_gradient_on_a_tiny_row(self):
+        """A row of size 1e-7 whose gradient is twice the truth fails; the
+        tolerance is relative to the finite difference, not absolute."""
+        completed = self.run_gradient_probe("small")
+        self.assertEqual(self.verdicts(completed), {"f": "ratio_test", "row": "failed"})
+        self.assertEqual(completed.returncode, 1)
+
+    def test_gradient_check_passes_the_stage2_rows_at_small_steps(self):
+        """The curvature rows at 1e-5 to 2.5e-6, where round-off can stop the
+        errors from falling, still pass (the case the accuracy verdict is for)."""
+        generate_problem(self.scratch, "stage2")
+        completed = run_python([str(SCRIPTS_DIR / "gradient_check.py"), "--smoke"], cwd=self.scratch,
+                               problem_dir=self.scratch)
+        verdicts = self.verdicts(completed)
+        self.assertEqual(completed.returncode, 0, verdicts)
+        self.assertLessEqual(set(verdicts.values()), {"ratio_test", "accuracy", "no_ratio"})
+        self.assertEqual(len(verdicts), 11)
+
     def test_sign_check_passes_on_the_generic_template(self):
         generate_problem(self.scratch, "generic")
         completed = run_python([str(SCRIPTS_DIR / "sign_check.py")], cwd=self.scratch,
@@ -392,6 +513,7 @@ class SkillScriptsRunTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0)
         self.assertEqual(summary["coverage_warnings"], [])
         self.assertEqual(summary["scales"]["warnings"], [])
+        self.assertEqual(summary["shared_source_rows"], [])
 
     def test_sign_check_fails_on_a_flipped_row(self):
         source = replaced_once((TEMPLATES_DIR / "generic.py").read_text(),
@@ -433,12 +555,49 @@ class TemplateSmokeTests(unittest.TestCase):
         summary = self.run_template("stage2", "--smoke")
         self.assertEqual(len(summary["constraint_values"]), 10)
         self.assertTrue((self.scratch / "output_alm" / "biot_savart_opt_alm.json").exists())
+        # f is the squared flux plus the length regularizer; both are reported by name.
+        self.assertLessEqual({"objective", "squared_flux"}, set(summary["finish"]))
+        self.assertLess(summary["finish"]["squared_flux"], summary["finish"]["objective"])
 
     def test_boozer_template_smoke_run_ends_with_a_reason(self):
         generate_problem(self.scratch, "boozer_single_stage")
         summary = self.run_template("boozer_single_stage", "--smoke")
         self.assertEqual(len(summary["constraint_values"]), 12)
         self.assertTrue(summary["finish"]["surface_solved"])
+
+    def test_boozer_sign_check_names_the_rows_it_cannot_check_independently(self):
+        """The iota and major-radius probes read the same source as the rows."""
+        generate_problem(self.scratch, "boozer_single_stage")
+        completed = run_python([str(SCRIPTS_DIR / "sign_check.py"), "--smoke"], cwd=self.scratch,
+                               problem_dir=self.scratch)
+        summary = result_line(completed, "SIGN_CHECK ")
+        self.assertEqual(completed.returncode, 0, summary["probes"])
+        self.assertEqual(summary["shared_source_rows"],
+                         ["iota_min", "iota_max", "major_radius_min", "major_radius_max"])
+        self.assertIn("same source", completed.stdout)
+
+    def build_fails(self, template: str, old: str, new: str) -> str:
+        """Build the edited template; it must raise; return the error line."""
+        generate_problem(self.scratch, template, replaced_once((TEMPLATES_DIR / f"{template}.py").read_text(),
+                                                               old, new))
+        completed = run_python(["-c", "from alm_problem import build_problem; build_problem(smoke=True)"],
+                               cwd=self.scratch, problem_dir=self.scratch)
+        self.assertNotEqual(completed.returncode, 0, "the build accepted an invalid scale")
+        return completed.stderr.strip().splitlines()[-1]
+
+    def test_templates_reject_invalid_scales(self):
+        for scale in ("0.0", "-1.0", "float('nan')"):
+            with self.subTest(template="generic", scale=scale):
+                error = self.build_fails("generic", "sense=LOWER_BOUND, bound=0.25, scale=1.0)",
+                                         f"sense=LOWER_BOUND, bound=0.25, scale={scale})")
+                self.assertRegex(error, r"^ValueError: .*x0_at_least_min.*scale")
+        with self.subTest(template="stage2"):
+            error = self.build_fails("stage2", "CC_MIN_DISTANCE = 0.1 ", "CC_MIN_DISTANCE = 0.0 ")
+            self.assertRegex(error, r"^ValueError: CC_MIN_DISTANCE")
+        with self.subTest(template="boozer_single_stage"):
+            error = self.build_fails("boozer_single_stage", "IOTA_TARGET: Optional[float] = None",
+                                     "IOTA_TARGET: Optional[float] = 0.0")
+            self.assertRegex(error, r"^ValueError: .*IOTA_SCALE")
 
     def test_stage2_length_scopes_count_the_right_coils(self):
         """The all-coils row is 2 x nfp = 4 times the base-coil sum (16 circles of
@@ -474,6 +633,8 @@ class TemplateSmokeTests(unittest.TestCase):
         before, after = diff_sides(diffs[0])
         penalty_names = module_assignments(before)
         self.assertLessEqual({"CC_WEIGHT", "CS_WEIGHT", "CURVATURE_WEIGHT", "MSC_WEIGHT", "JF"}, penalty_names)
+        # Quoted as upstream writes it.
+        self.assertIn("LENGTH_WEIGHT = Weight(1e-6)\n", before)
         template_names = module_assignments((TEMPLATES_DIR / "stage2.py").read_text())
         table = [line for line in text.splitlines() if line.startswith("| `")]
         named = {name for line in table for span in re.findall(r"`([^`]+)`", line)

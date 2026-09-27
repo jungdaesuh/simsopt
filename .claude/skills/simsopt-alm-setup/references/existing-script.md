@@ -41,7 +41,7 @@ template, and each penalty term becomes these rows:
 | `order` | `ORDER` | |
 | `nphi`, `ntheta` | `QUADRATURE_POINTS` | One number for both directions. |
 | `filename` | `SURFACE_FILE` | |
-| `LENGTH_WEIGHT * sum(Jls)` | `LENGTH_WEIGHT` | Stays a term of f: it has no threshold, so it is not a constraint. For a length limit set `MAX_LENGTH` with `LENGTH_SCOPE = SUM_OF_BASE_COILS`, the same sum over the base coils. |
+| `LENGTH_WEIGHT * sum(Jls)`, with `LENGTH_WEIGHT = Weight(1e-6)` | `LENGTH_WEIGHT` | Stays a term of f: it has no threshold, so it is not a constraint. The template's is the plain float `1e-6` (upstream's `Weight` only lets a script change it between runs). For a length limit set `MAX_LENGTH` with `LENGTH_SCOPE = SUM_OF_BASE_COILS`, the same sum over the base coils. |
 | `CC_WEIGHT * CurveCurveDistance(curves, CC_THRESHOLD)` | `CC_MIN_DISTANCE` | Row `coil_coil_distance` (= `CC_THRESHOLD`): a smooth minimum over every pair of physical coils. |
 | `CS_WEIGHT * CurveSurfaceDistance(curves, s, CS_THRESHOLD)` | `CS_MIN_DISTANCE` | Row `coil_surface_distance` (= `CS_THRESHOLD`). |
 | `CURVATURE_WEIGHT * sum(LpCurveCurvature(c, 2, CURVATURE_THRESHOLD))` | `MAX_CURVATURE` | Rows `max_curvature_<i>`, one per base coil (= `CURVATURE_THRESHOLD`): the row bounds the pointwise maximum, where the penalty weighed the L2 norm of the excess. |
@@ -78,7 +78,7 @@ the smoke size as upstream's `MAXITER` did):
 -from simsopt.geo import (SurfaceRZFourier, curves_to_vtk, create_equally_spaced_curves,
 -                         CurveLength, CurveCurveDistance, MeanSquaredCurvature,
 -                         LpCurveCurvature, CurveSurfaceDistance)
--from simsopt.objectives import SquaredFlux, QuadraticPenalty
+-from simsopt.objectives import Weight, SquaredFlux, QuadraticPenalty
 +from simsopt.geo import curves_to_vtk
  from simsopt.util import in_github_actions
  
@@ -86,7 +86,7 @@ the smoke size as upstream's `MAXITER` did):
 -R0 = 1.0
 -R1 = 0.5
 -order = 5
--LENGTH_WEIGHT = 1e-6
+-LENGTH_WEIGHT = Weight(1e-6)
 -CC_THRESHOLD = 0.1
 -CC_WEIGHT = 1000
 -CS_THRESHOLD = 0.3

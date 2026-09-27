@@ -174,7 +174,8 @@ template is standalone: it repeats the few helpers it needs.
 | `inner_options` | L-BFGS-B options with `maxiter` | runner |
 | `solver_callbacks()` | `dict` of extra `minimize_alm` keywords (`{}` when stateless) | runner |
 | `sign_probes()` | tuple of `SignProbe(label, x, violated, satisfied)` | `sign_check.py` |
-| `taylor_epsilons` | tuple of steps (largest first) or None (library default) | `gradient_check.py` |
+| `taylor_epsilons` | tuple of at least two steps (largest first) or None (library default) | `gradient_check.py` |
+| `shared_source_rows` | tuple of row names whose probe expectation reads the row's own source | `sign_check.py` |
 | `finish(result)` | JSON-serializable `dict`; sets the objects to `result.x` and writes outputs | runner |
 
 `run_alm.py` itself exposes `run(problem, history=None, checkpoints=None,
@@ -183,5 +184,9 @@ script calls it directly ([existing-script.md](existing-script.md)).
 
 `SignProbe.violated` / `.satisfied` name rows known to be violated (g > 0) or
 satisfied (g <= 0) at `x` from the physics, not from the row code: a bound
-you can check by hand (generic), or an independent measurement compared with
-the bound (Stage-2 and Boozer templates, via each row's `measure`).
+you can check by hand (generic), or a measurement compared with the bound
+(Stage-2 and Boozer templates, via each row's `measure`). A measurement that
+reads the row's own source (the Boozer template's iota and major radius, the
+values `Iotas` and `MajorRadius` return) checks only the row's sign and
+bound; those rows are listed in `shared_source_rows`, and `sign_check.py`
+says so.

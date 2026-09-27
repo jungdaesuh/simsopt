@@ -9,7 +9,10 @@ Signs: ``problem.sign_probes()`` gives points where rows are known, from the
 physics and independently of the row code, to be violated or satisfied. Each
 listed row must have ``g > 0`` (violated) or ``g <= 0`` (satisfied) there; a
 mismatch, a non-finite value or a probe naming an unknown row fails. A row
-never probed on one side is reported as a coverage warning.
+never probed on one side is reported as a coverage warning. A row in
+``problem.shared_source_rows`` has probe expectations that read the same
+source as the row (e.g. the Boozer template's iota from the solve itself):
+its probes check the sign and the bound, not the value, and a note says so.
 
 Scales, at ``problem.x0`` (warnings, not failures): the constraint gradient
 norms must not spread over more than ``SPREAD_LIMIT`` (the penalty is shared
@@ -97,6 +100,10 @@ def main(argv=None) -> int:
     )
     scales = check_scales(problem.physics(problem.x0), names)
     passed = all(probe["passed"] for probe in probes)
+    shared_source_notes = [
+        f"{name}: its probe expectations read the same source as the row, so they check its sign "
+        "and bound, not its value" for name in problem.shared_source_rows
+    ]
 
     for probe in probes:
         print(f"probe {probe['label']!r}: {'PASS' if probe['passed'] else 'FAIL'}")
@@ -104,11 +111,14 @@ def main(argv=None) -> int:
             print(f"    {failure}")
     for warning in coverage_warnings + scales["warnings"]:
         print(f"warning: {warning}")
+    for note in shared_source_notes:
+        print(f"note: {note}")
     print(RESULT_PREFIX + json.dumps({
         "passed": passed,
         "problem": problem.name,
         "probes": probes,
         "coverage_warnings": coverage_warnings,
+        "shared_source_rows": list(problem.shared_source_rows),
         "scales": scales,
     }))
     return 0 if passed else 1

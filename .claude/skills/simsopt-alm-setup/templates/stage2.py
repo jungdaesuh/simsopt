@@ -112,9 +112,11 @@ class SignProbe(NamedTuple):
 class RowSpec(NamedTuple):
     """One constraint row. ``row(base_objective)`` returns the scaled
     ``(signed value, gradient[, hard signed value])``; ``measure()`` is the
-    constrained quantity from an independent computation at the current dofs,
-    which the sign probes compare with ``bound`` from the side ``sense``,
-    ignoring points within ``margin`` of it."""
+    constrained quantity at the current dofs, which the sign probes compare
+    with ``bound`` from the side ``sense``, ignoring points within ``margin``
+    of it. ``independent`` says whether ``measure`` is computed apart from the
+    row's own code (False: it reads the same source, so the probes check the
+    row's sign and bound, not its value)."""
 
     name: str
     row: Callable
@@ -122,10 +124,20 @@ class RowSpec(NamedTuple):
     sense: float
     bound: float
     margin: float
+    independent: bool = True
+
+
+def require_positive(name: str, value) -> float:
+    """``value`` if it is a finite positive number (a threshold, scale or
+    temperature: each divides or smooths a row); else ``ValueError``."""
+    if not (np.isfinite(value) and value > 0.0):
+        raise ValueError(f"{name} must be a finite positive number, got {value!r}")
+    return float(value)
 
 
 def scaled_row(row, scale, base_objective):
-    """``row(base_objective)`` with every item divided by ``scale`` > 0."""
+    """``row(base_objective)`` with every item divided by ``scale`` (checked
+    positive when the row is built)."""
     return tuple(item / scale for item in row(base_objective))
 
 
@@ -158,6 +170,14 @@ class Stage2Problem:
     taylor_epsilons = (1e-5, 5e-6, 2.5e-6)
 
     def __init__(self, smoke: bool):
+        # Every threshold and temperature divides or smooths a row.
+        for name, value in (("CC_MIN_DISTANCE", CC_MIN_DISTANCE), ("CS_MIN_DISTANCE", CS_MIN_DISTANCE),
+                            ("MAX_CURVATURE", MAX_CURVATURE),
+                            ("MAX_MEAN_SQUARED_CURVATURE", MAX_MEAN_SQUARED_CURVATURE),
+                            ("MAX_LENGTH", MAX_LENGTH), ("DISTANCE_TEMPERATURE", DISTANCE_TEMPERATURE),
+                            ("CURVATURE_TEMPERATURE", CURVATURE_TEMPERATURE)):
+            if value is not None:
+                require_positive(name, value)
         # Smoke runs a coarse surface and low-order coils.
         quadrature_points = 12 if smoke else QUADRATURE_POINTS
         self.order = 2 if smoke else ORDER
@@ -173,8 +193,9 @@ class Stage2Problem:
         self.biot_savart.set_points(self.surface.gamma().reshape((-1, 3)))
         self.curves = [coil.curve for coil in coils]
         self.coil_lengths = [CurveLength(curve) for curve in self.base_curves]
+        self.squared_flux = SquaredFlux(self.surface, self.biot_savart)
         # SETUP: the objective f, any simsopt Optimizable of the coil dofs.
-        unscaled = SquaredFlux(self.surface, self.biot_savart) + LENGTH_WEIGHT * sum(self.coil_lengths)
+        unscaled = self.squared_flux + LENGTH_WEIGHT * sum(self.coil_lengths)
         # f / f(x0): the stationarity tolerance becomes relative to the start.
         self.objective_scale = float(unscaled.J())
         self.objective = (1.0 / self.objective_scale) * unscaled
@@ -182,6 +203,8 @@ class Stage2Problem:
         self.row_specs = self._row_specs()
         self.constraint_names = tuple(spec.name for spec in self.row_specs)
         self.rows = tuple(spec.row for spec in self.row_specs)
+        # Every measure here is computed apart from its row's code.
+        self.shared_source_rows = tuple(spec.name for spec in self.row_specs if not spec.independent)
         self.evaluator = cached_alm_evaluator(self.physics)
         self.settings = ALMSettings(
             max_outer_iterations=3 if smoke else 10,  # each outer iteration is one multiplier update
@@ -323,7 +346,9 @@ class Stage2Problem:
         curves_to_vtk(self.curves, str(OUT_DIR / "curves_opt_alm"))
         self.biot_savart.save(str(OUT_DIR / "biot_savart_opt_alm.json"))
         return {
-            "flux_objective": float(result.objective) * self.objective_scale,
+            # f without the 1 / f(x0) scale: the squared flux plus LENGTH_WEIGHT x the base-coil lengths.
+            "objective": float(result.objective) * self.objective_scale,
+            "squared_flux": float(self.squared_flux.J()),
             "min_coil_coil_distance": min_curve_curve_distance(self.curves),
             "min_coil_surface_distance": min_curve_surface_distance(self.curves, self.surface),
             "max_curvature": float(max(np.max(curve.kappa()) for curve in self.base_curves)),

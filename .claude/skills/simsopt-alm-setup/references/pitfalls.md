@@ -60,16 +60,17 @@ Each entry: the symptom, the cause, the fix.
     extremum; a step that changes the selection breaks the ratio test. Use
     steps far below the smoothing temperature (the templates use 1e-5 to
     2.5e-6).
-13. **Three ways to pass the gradient check.** `gradient_check.py` reports a
-    `verdict` per quantity: `ratio_test` (the error falls with the step),
-    `no_ratio` (the error is at the round-off floor at every step, so no
-    ratio exists: the difference is exact for a linear or quadratic
-    quantity such as a linear row, or the truncation error at these small
-    steps is already below the floor, as for a coil-length row) and
-    `accuracy` (the ratio test fails at round-off
-    but the smallest error is within 1e-6 relative). All three mean the
-    gradient matches; `vacuous` (zero derivative) means nothing was tested,
-    and `failed` means the gradient is wrong.
+13. **Reading the gradient check.** `gradient_check.py` judges every
+    direction by the finite differences (the measured change), never by the
+    claimed gradient alone, and needs at least two steps. A quantity passes as
+    `ratio_test` (the error falls with the step), `no_ratio` (the error sits
+    at the ratio test's floor at every step, as for a linear or quadratic
+    quantity) or `accuracy` (the ratio test stops at round-off); the last two
+    also need the smallest error within 1e-6 of the measured change, or
+    within the round-off floor of 100 machine epsilons of the value per step.
+    `not_tested` (no change above round-off along any direction: use larger
+    steps, or the quantity does not depend on x) and `failed` exit nonzero;
+    a zeroed or forgotten gradient on a quantity that changes is `failed`.
 14. **Unique row names.** The runner reports multipliers and values keyed by
     name, so a repeated name hides a row.
 15. **Conflicting constraints.** Thresholds no design can meet (e.g. a coil
