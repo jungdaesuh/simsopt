@@ -58,7 +58,16 @@ def _halfspace_evaluation(x, multipliers, penalty):
     )
 
 
+# ``typing.TypedDict`` records ``__required_keys__`` / ``__optional_keys__``
+# from Python 3.9; on 3.8 only the declared keys (the type hints) are visible.
+requires_typed_dict_key_split = unittest.skipIf(
+    sys.version_info < (3, 9),
+    "typing.TypedDict records required and optional keys from Python 3.9",
+)
+
+
 class AlmEvaluationSchemaTests(unittest.TestCase):
+    @requires_typed_dict_key_split
     def test_the_schema_separates_required_from_optional_keys(self):
         schema = alm.ALMEvaluation
         self.assertEqual(set(schema.__required_keys__), REQUIRED_KEYS)
@@ -92,8 +101,7 @@ class AlmEvaluationSchemaTests(unittest.TestCase):
 
 
 def _declared_evaluation_keys():
-    schema = alm.ALMEvaluation
-    return set(schema.__required_keys__) | set(schema.__optional_keys__)
+    return set(typing.get_type_hints(alm.ALMEvaluation))
 
 
 # A dict the solver reads as an evaluation: ``evaluation``, ``candidate_eval``,
@@ -102,7 +110,13 @@ _EVALUATION_NAME = re.compile(r"(?:\w+_)?eval(?:uation)?")
 
 
 def _is_evaluation(node: ast.expr) -> bool:
-    return _EVALUATION_NAME.fullmatch(ast.unparse(node).rsplit(".", 1)[-1]) is not None
+    if isinstance(node, ast.Name):
+        name = node.id
+    elif isinstance(node, ast.Attribute):
+        name = node.attr
+    else:
+        return False
+    return _EVALUATION_NAME.fullmatch(name) is not None
 
 
 def _string_members(node, module, function):
@@ -135,7 +149,10 @@ def _key_reads(tree):
     """``(dict_node, key_node)`` for each dict read inside ``tree``."""
     for node in ast.walk(tree):
         if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load):
-            yield node.value, node.slice
+            key = node.slice
+            if sys.version_info < (3, 9) and isinstance(key, ast.Index):
+                key = key.value  # Python 3.8 wraps a subscript key in ast.Index
+            yield node.value, key
         elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
               and node.func.attr in ("get", "pop") and node.args):
             yield node.func.value, node.args[0]
@@ -295,10 +312,15 @@ class AlmTypedEvaluatorExampleTests(unittest.TestCase):
 
     def test_the_subclass_extends_the_schema(self):
         subclass = typed_example.HalfspaceEvaluation
-        self.assertLessEqual(_declared_evaluation_keys(),
-                             set(subclass.__required_keys__) | set(subclass.__optional_keys__))
-        self.assertEqual(set(subclass.__required_keys__), REQUIRED_KEYS)
+        self.assertLess(_declared_evaluation_keys(), set(typing.get_type_hints(subclass)))
         self.assertIs(typing.get_type_hints(typed_example.evaluate_halfspace)["return"], subclass)
+
+    @requires_typed_dict_key_split
+    def test_the_subclass_keeps_the_required_keys(self):
+        subclass = typed_example.HalfspaceEvaluation
+        self.assertEqual(set(subclass.__required_keys__), REQUIRED_KEYS)
+        self.assertEqual(set(subclass.__required_keys__) | set(subclass.__optional_keys__),
+                         set(typing.get_type_hints(subclass)))
 
     def test_the_evaluator_returns_exactly_the_declared_keys_with_their_types(self):
         # What a type checker verifies statically, checked at run time.

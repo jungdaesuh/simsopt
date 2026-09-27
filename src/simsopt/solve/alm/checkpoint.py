@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
-from typing import Callable, Generic, Mapping, Optional, Sequence, Union
+from typing import Callable, Dict, Generic, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
 import numpy as np
 
@@ -38,19 +38,19 @@ ALMTransitionValue = Union[
     float,
     bool,
     None,
-    tuple["ALMTransitionValue", ...],
-    tuple[tuple[str, "ALMTransitionValue"], ...],
+    Tuple["ALMTransitionValue", ...],
+    Tuple[Tuple[str, "ALMTransitionValue"], ...],
 ]
 
-ALMTransitionEvaluation = tuple[tuple[str, ALMTransitionValue], ...]
+ALMTransitionEvaluation = Tuple[Tuple[str, ALMTransitionValue], ...]
 
 @dataclass(frozen=True)
 class ALMFeasibleIncumbentSnapshot(Generic[AcceptedStateT]):
     """Immutable core best-feasible carrier at an outer boundary."""
 
-    x: tuple[float, ...]
+    x: Tuple[float, ...]
     evaluation: ALMTransitionEvaluation
-    multipliers: tuple[float, ...]
+    multipliers: Tuple[float, ...]
     penalty: float
     accepted_state: Optional[AcceptedStateT]
     geometry_identity: Optional[str] = None
@@ -94,20 +94,20 @@ class ALMFeasibleIncumbentSnapshot(Generic[AcceptedStateT]):
 class ALMTransitionSnapshot(Generic[AcceptedStateT]):
     """Immutable state committed after one completed ALM outer iteration."""
 
-    x: tuple[float, ...]
+    x: Tuple[float, ...]
     accepted_state: Optional[AcceptedStateT]
     geometry_identity: Optional[str]
-    constraint_names: tuple[str, ...]
-    constraint_blocks: Optional[tuple[str, ...]]
+    constraint_names: Tuple[str, ...]
+    constraint_blocks: Optional[Tuple[str, ...]]
     completed_outer_iterations: int
-    multipliers: tuple[float, ...]
+    multipliers: Tuple[float, ...]
     penalty: float
     update_feasibility_tol: float
     update_stationarity_tol: float
     trust_radius: Optional[float]
     last_cap_binding_active: bool
     sufficient_decrease_measure: Optional[float]
-    sufficient_decrease_multipliers: Optional[tuple[float, ...]]
+    sufficient_decrease_multipliers: Optional[Tuple[float, ...]]
     sufficient_decrease_penalty: Optional[float]
     best_feasible: Optional[ALMFeasibleIncumbentSnapshot[AcceptedStateT]]
     completed_action: str
@@ -115,10 +115,10 @@ class ALMTransitionSnapshot(Generic[AcceptedStateT]):
     resume_eligible: bool
     total_inner_iterations: int = 0
     cap_binding_detected: bool = False
-    cap_binding_indices: tuple[int, ...] = ()
+    cap_binding_indices: Tuple[int, ...] = ()
     penalty_cap_reached: bool = False
     penalty_cap_requested: Optional[float] = None
-    inner_options: Optional[tuple[tuple[str, ALMTransitionValue], ...]] = None
+    inner_options: Optional[Tuple[Tuple[str, ALMTransitionValue], ...]] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -240,7 +240,7 @@ def _transition_json_value(value: object, path: str = "value") -> ALMTransitionV
     return _encoded_transition_value(value, path, {})
 
 def _encoded_transition_value(
-    value: object, path: str, open_paths: dict[int, str]
+    value: object, path: str, open_paths: Dict[int, str]
 ) -> ALMTransitionValue:
     """:func:`_transition_json_value` below ``path``; ``open_paths`` holds the
     containers being encoded around it (a hit is a cycle)."""
@@ -262,7 +262,7 @@ def _encoded_transition_value(
             )
         open_paths[id(value)] = path
         if isinstance(value, Mapping):
-            entries: list[tuple[str, ALMTransitionValue]] = []
+            entries: List[Tuple[str, ALMTransitionValue]] = []
             for key, item in sorted(value.items(), key=lambda pair: str(pair[0])):
                 if not isinstance(key, str):
                     raise TypeError(
@@ -296,9 +296,9 @@ def _encoded_transition_value(
     )
 
 def _canonical_transition_evaluation(
-    evaluation: Sequence[tuple[str, object]],
+    evaluation: Sequence[Tuple[str, object]],
 ) -> ALMTransitionEvaluation:
-    entries: list[tuple[str, ALMTransitionValue]] = []
+    entries: List[Tuple[str, ALMTransitionValue]] = []
     for item in evaluation:
         if not isinstance(item, (tuple, list)) or len(item) != 2:
             raise ValueError("ALM transition evaluation must contain key/value pairs")
@@ -364,7 +364,7 @@ def _validate_frozen_transition_evaluation(
 ) -> None:
     if not isinstance(evaluation, tuple):
         raise TypeError("ALM transition evaluation must be an immutable tuple")
-    seen_keys: set[str] = set()
+    seen_keys: Set[str] = set()
     for item in evaluation:
         if not isinstance(item, tuple) or len(item) != 2:
             raise TypeError("ALM transition evaluation entries must be immutable pairs")

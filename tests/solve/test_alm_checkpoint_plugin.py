@@ -18,6 +18,7 @@ import unittest
 from contextlib import contextmanager
 from pathlib import Path
 from types import MappingProxyType
+from typing import List
 from unittest.mock import patch
 
 import numpy as np
@@ -34,7 +35,7 @@ import alm_golden_scenarios as golden  # noqa: E402
 PACKAGE_ROOT = Path(__file__).resolve().parents[2] / "src" / "simsopt" / "solve" / "alm"
 
 
-def _runs(trajectory: dict) -> list[dict]:
+def _runs(trajectory: dict) -> List[dict]:
     if "resumed" in trajectory:
         return [trajectory["interrupted"], trajectory["resumed"]]
     return [trajectory]

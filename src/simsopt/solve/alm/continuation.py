@@ -13,7 +13,7 @@ decision carries the ``feasible_stall_count`` the loop keeps after it.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar, Mapping, Optional, Sequence, Union
+from typing import ClassVar, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -61,7 +61,7 @@ class ALMInnerSolveOutcome:
     attempts: int
     optimizer_success: bool
     optimizer_message: str
-    bounds: Optional[Sequence[tuple[float, float]]]
+    bounds: Optional[Sequence[Tuple[float, float]]]
     inner_options: Optional[Mapping[str, object]]
     inner_profile: Optional[str]
     infeasible_stall: bool

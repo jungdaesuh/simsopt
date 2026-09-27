@@ -13,6 +13,7 @@ import unittest
 from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
+from typing import List
 from unittest.mock import patch
 
 import numpy as np
@@ -45,7 +46,7 @@ def captured_outer_step_events():
         yield events
 
 
-def _mutable_parts(value, path: str, seen: set) -> list[str]:
+def _mutable_parts(value, path: str, seen: set) -> List[str]:
     """Paths of everything an event reaches that could be written: writable
     or object-dtype arrays, dicts, lists and sets. The caller's accepted
     states (``incumbent_state``) are the caller's own objects."""
@@ -85,7 +86,7 @@ def _mutable_parts(value, path: str, seen: set) -> list[str]:
     return []
 
 
-def _golden_runs(trajectory: dict) -> list[dict]:
+def _golden_runs(trajectory: dict) -> List[dict]:
     """The library runs of one golden trajectory, in execution order."""
     if "resumed" in trajectory:
         return [trajectory["interrupted"], trajectory["resumed"]]

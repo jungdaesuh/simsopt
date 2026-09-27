@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Callable, Generic, Mapping, Optional, Sequence
+from typing import Callable, Dict, Generic, List, Mapping, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
@@ -93,7 +93,7 @@ class ALMRunState:
     total_inner_iterations: int
     trust_radius: Optional[float]
     cap_binding_detected: bool
-    cap_binding_indices: set[int]
+    cap_binding_indices: Set[int]
     penalty_cap_reached: bool
     penalty_cap_requested: Optional[float]
     # M4: non-sticky predicate carrying the most recent dual update's
@@ -190,7 +190,7 @@ def _effective_feasibility_gate(
 def _build_constraint_metadata_tuples(
     constraint_names: Sequence[str],
     constraint_blocks: Optional[Sequence[str]],
-) -> tuple[tuple[str, ...], Optional[tuple[str, ...]]]:
+) -> Tuple[Tuple[str, ...], Optional[Tuple[str, ...]]]:
     names_tuple = tuple(str(name) for name in constraint_names)
     if constraint_blocks is None:
         return names_tuple, None
@@ -204,8 +204,8 @@ class _ALMNormalizedRunInputs:
     x: np.ndarray
     multipliers: np.ndarray
     penalty: float
-    constraint_names_tuple: tuple[str, ...]
-    constraint_blocks_tuple: Optional[tuple[str, ...]]
+    constraint_names_tuple: Tuple[str, ...]
+    constraint_blocks_tuple: Optional[Tuple[str, ...]]
     trust_radius: Optional[float]
     update_feasibility_tol: float
     update_stationarity_tol: float
@@ -265,8 +265,8 @@ def _apply_alm_penalty_increase(
     x: np.ndarray,
     multipliers: np.ndarray,
     penalty: float,
-    constraint_names_tuple: tuple[str, ...],
-    constraint_blocks_tuple: Optional[tuple[str, ...]],
+    constraint_names_tuple: Tuple[str, ...],
+    constraint_blocks_tuple: Optional[Tuple[str, ...]],
 ) -> ALMPenaltyIncreaseResult:
     next_penalty, cap_hit, requested_penalty = _next_penalty(
         penalty,
@@ -346,7 +346,7 @@ class ALMResult:
     termination_reason: str
     message: str
     objective: float
-    constraint_names: tuple[str, ...]
+    constraint_names: Tuple[str, ...]
     constraint_values: np.ndarray
     max_violation: float
     multipliers: np.ndarray
@@ -368,7 +368,7 @@ def _read_only_float_array(values) -> np.ndarray:
 def _build_alm_result(
     *,
     run_state: ALMRunState,
-    constraint_names_tuple: tuple[str, ...],
+    constraint_names_tuple: Tuple[str, ...],
     success: bool,
     message: str,
     termination_reason: str,
@@ -448,7 +448,7 @@ def _restore_alm_best_feasible_on_failure(
     restored_penalty_state = float(penalty_state)
     restored_inner_result = inner_result
 
-    restore_reasons: list[str] = []
+    restore_reasons: List[str] = []
     if best_feasible is not None:
         final_hard_max_violation = _constraint_routing_state(
             evaluation,
@@ -495,7 +495,7 @@ def _restore_alm_best_feasible_on_failure(
 def _build_alm_failure_result_with_optional_restore(
     *,
     settings: ALMSettings,
-    constraint_names_tuple: tuple[str, ...],
+    constraint_names_tuple: Tuple[str, ...],
     run_state: ALMRunState,
     last_outer_iteration: int,
     best_feasible: Optional[ALMFeasibleIncumbent[AcceptedStateT]],
@@ -605,7 +605,7 @@ def _handle_alm_dual_update_transition(
 def _handle_alm_penalty_cap_termination(
     *,
     settings: ALMSettings,
-    constraint_names_tuple: tuple[str, ...],
+    constraint_names_tuple: Tuple[str, ...],
     run_state: ALMRunState,
     last_outer_iteration: int,
     best_feasible,
@@ -693,8 +693,8 @@ class _ContinuationContext(Generic[AcceptedStateT]):
     evaluate_problem: Callable[[np.ndarray, np.ndarray, object], dict]
     on_outer_step: Optional[Callable[[ALMOuterStepEvent[AcceptedStateT]], None]]
     restore_incumbent_state_fn: Optional[Callable[[AcceptedStateT], None]]
-    constraint_names_tuple: tuple[str, ...]
-    constraint_blocks_tuple: Optional[tuple[str, ...]]
+    constraint_names_tuple: Tuple[str, ...]
+    constraint_blocks_tuple: Optional[Tuple[str, ...]]
     outer_iteration: int
     continuation_iteration: int
     is_final_outer: bool
@@ -770,7 +770,7 @@ def _publish_outer_step(
     run_state.last_action = action
     if context.on_outer_step is None:
         return
-    memo: dict[int, object] = {}
+    memo: Dict[int, object] = {}
     event = ALMOuterStepEvent(
         outer_iteration=context.outer_iteration,
         continuation_iteration=context.continuation_iteration,
@@ -1144,8 +1144,8 @@ def _run_alm_continuation_step(
     on_outer_step: Optional[Callable[[ALMOuterStepEvent[AcceptedStateT]], None]],
     snapshot_accepted_state_fn: Optional[Callable[[], AcceptedStateT]],
     restore_incumbent_state_fn: Optional[Callable[[AcceptedStateT], None]],
-    constraint_names_tuple: tuple[str, ...],
-    constraint_blocks_tuple: Optional[tuple[str, ...]],
+    constraint_names_tuple: Tuple[str, ...],
+    constraint_blocks_tuple: Optional[Tuple[str, ...]],
     base_bounds=None,
     continuation_policy: ALMContinuationPolicy = DEFAULT_CONTINUATION_POLICY,
 ) -> _ALMContinuationStepResult[AcceptedStateT]:
@@ -1200,7 +1200,7 @@ def _run_alm_continuation_step(
 
     # The policy's read-only views of this step, built once per object; the
     # memo's keys (the start and inner measurements) live through the step.
-    policy_memo: dict[int, object] = {}
+    policy_memo: Dict[int, object] = {}
     pre_inner_view = ALMPreInnerView(
         settings=settings,
         outer_iteration=outer_iteration,
@@ -1460,8 +1460,8 @@ def _run_alm_outer_iteration(
     on_outer_step: Optional[Callable[[ALMOuterStepEvent[AcceptedStateT]], None]],
     snapshot_accepted_state_fn: Optional[Callable[[], AcceptedStateT]],
     restore_incumbent_state_fn: Optional[Callable[[AcceptedStateT], None]],
-    constraint_names_tuple: tuple[str, ...],
-    constraint_blocks_tuple: Optional[tuple[str, ...]],
+    constraint_names_tuple: Tuple[str, ...],
+    constraint_blocks_tuple: Optional[Tuple[str, ...]],
     base_bounds=None,
     continuation_policy: ALMContinuationPolicy = DEFAULT_CONTINUATION_POLICY,
 ) -> _ALMOuterIterationResult[AcceptedStateT]:
@@ -1533,8 +1533,8 @@ def _publish_outer_boundary(
     update_feasibility_tol: float,
     update_stationarity_tol: float,
     best_feasible: Optional[ALMFeasibleIncumbent[AcceptedStateT]],
-    constraint_names_tuple: tuple[str, ...],
-    constraint_blocks_tuple: Optional[tuple[str, ...]],
+    constraint_names_tuple: Tuple[str, ...],
+    constraint_blocks_tuple: Optional[Tuple[str, ...]],
     snapshot_accepted_state_fn: Optional[Callable[[], AcceptedStateT]],
     result: Optional[ALMResult] = None,
 ) -> None:

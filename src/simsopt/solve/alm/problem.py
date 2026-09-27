@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Callable, Mapping, Protocol
+from typing import Callable, Mapping, Protocol, Tuple
 
 import numpy as np
 
@@ -71,7 +71,7 @@ class ALMPhysics:
     base_value: float
     base_grad: np.ndarray
     constraint_values: np.ndarray
-    constraint_grads: tuple[np.ndarray, ...]
+    constraint_grads: Tuple[np.ndarray, ...]
     extras: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self):

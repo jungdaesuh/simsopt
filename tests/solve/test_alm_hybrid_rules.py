@@ -15,6 +15,7 @@ import sys
 import unittest
 from contextlib import ExitStack
 from pathlib import Path
+from typing import List, Set
 from unittest.mock import patch
 
 from simsopt.solve.alm import hybrid
@@ -47,7 +48,7 @@ class HybridRuleReached(AssertionError):
     pass
 
 
-def _hybrid_functions() -> list[str]:
+def _hybrid_functions() -> List[str]:
     return sorted(
         name
         for name, value in vars(hybrid).items()
@@ -84,9 +85,9 @@ class AlmHybridInertnessTests(unittest.TestCase):
                 golden.SCENARIOS_BY_NAME["hybrid_mismatch_stall"].run()
 
 
-def _imported_modules(path: Path) -> set[str]:
+def _imported_modules(path: Path) -> Set[str]:
     """Package-relative and absolute module names ``path`` imports."""
-    names: set[str] = set()
+    names: Set[str] = set()
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
         if isinstance(node, ast.Import):
             names.update(alias.name for alias in node.names)

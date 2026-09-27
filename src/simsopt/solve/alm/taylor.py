@@ -9,7 +9,7 @@ of one.
 
 from __future__ import annotations
 
-from typing import Callable, Optional, Sequence
+from typing import Callable, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -23,7 +23,7 @@ def _normalized_taylor_directions(
     direction,
     seed: int,
     direction_count: int,
-) -> tuple[np.ndarray, ...]:
+) -> Tuple[np.ndarray, ...]:
     if direction is None:
         if int(direction_count) < 1:
             raise ValueError("direction_count must be positive")
@@ -53,7 +53,7 @@ def _directional_taylor_result(
     unit_direction: np.ndarray,
     taylor_epsilons: Sequence[float],
     ratio_threshold: float,
-) -> tuple[dict, bool]:
+) -> Tuple[dict, bool]:
     directional_derivative = float(
         np.dot(base_grad.reshape(-1), unit_direction.reshape(-1))
     )

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from numbers import Integral, Real
-from typing import Generic, Mapping, Optional, Sequence
+from typing import Generic, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -45,8 +45,8 @@ class ALMOuterBoundary(Generic[AcceptedStateT]):
     completed_outer_iterations: int
     completed_action: str
     termination_reason: Optional[str]
-    constraint_names: tuple[str, ...]
-    constraint_blocks: Optional[tuple[str, ...]]
+    constraint_names: Tuple[str, ...]
+    constraint_blocks: Optional[Tuple[str, ...]]
     accepted_state: Optional[AcceptedStateT]
     geometry_identity: Optional[str]
     state: ALMLoopState[AcceptedStateT]
@@ -75,7 +75,7 @@ def _nonnegative_transition_float(value: object, name: str) -> float:
 def _strict_transition_float_tuple(
     values: Sequence[float],
     context: str,
-) -> tuple[float, ...]:
+) -> Tuple[float, ...]:
     """Validate a transition vector without coercing numeric strings."""
     if isinstance(values, (str, bytes, bytearray, Mapping)) or not isinstance(
         values, Sequence
@@ -126,7 +126,7 @@ def _validate_alm_boundary_fields(
     penalty_cap_requested: Optional[float],
     accepted_state: Optional[object],
     geometry_identity: Optional[str],
-    best_feasible_dimensions: Optional[tuple[int, int]],
+    best_feasible_dimensions: Optional[Tuple[int, int]],
 ) -> None:
     """The rules a loop boundary obeys, for a checkpoint snapshot and for
     ``minimize_alm(resume_from=...)`` alike. Vectors are sequences of reals

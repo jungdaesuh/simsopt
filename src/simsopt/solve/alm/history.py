@@ -12,7 +12,7 @@ Importing :mod:`simsopt.solve.alm` does not load this module.
 from __future__ import annotations
 
 import pickle
-from typing import Callable, Optional, Sequence, Union
+from typing import Callable, List, Optional, Sequence, Union
 
 import numpy as np
 
@@ -38,7 +38,7 @@ __all__ = ["ALMHistoryRecorder"]
 _HISTORY_DIAGNOSTICS_SOURCE_KEY = "_constraint_history_diagnostics_source"
 
 
-def _optional_array_to_float_list(values) -> Optional[list[float]]:
+def _optional_array_to_float_list(values) -> Optional[List[float]]:
     return None if values is None else _as_float_list(values)
 
 
@@ -64,7 +64,7 @@ def _explicit_raw_signed_constraint_values(evaluation: dict) -> Optional[np.ndar
     )
 
 
-def _optional_string_list(evaluation: dict, key: str) -> Optional[list[str]]:
+def _optional_string_list(evaluation: dict, key: str) -> Optional[List[str]]:
     values = evaluation.get(key)
     if values is None:
         return None
@@ -97,7 +97,7 @@ class ALMHistoryRecorder:
         self,
         max_entries: Optional[int],
         history_callback: Optional[
-            Callable[[list[dict], dict, np.ndarray, float], None]
+            Callable[[List[dict], dict, np.ndarray, float], None]
         ] = None,
     ) -> None:
         max_entries = _finite_alm_integer_or_none(
@@ -110,7 +110,7 @@ class ALMHistoryRecorder:
         self._history_callback = history_callback
         # A pending dict (diagnostics source not yet materialized) or, once a
         # callback or history() needed it, its snapshot (_history_entry_snapshot).
-        self._entries: list[Union[dict, bytes]] = []
+        self._entries: List[Union[dict, bytes]] = []
         self._truncated_count = 0
 
     @classmethod
@@ -118,7 +118,7 @@ class ALMHistoryRecorder:
         cls,
         settings: ALMSettings,
         history_callback: Optional[
-            Callable[[list[dict], dict, np.ndarray, float], None]
+            Callable[[List[dict], dict, np.ndarray, float], None]
         ] = None,
     ) -> ALMHistoryRecorder:
         """A recorder keeping ``settings.history_max_entries`` entries: that
@@ -143,7 +143,7 @@ class ALMHistoryRecorder:
             float(event.after.penalty),
         )
 
-    def history(self) -> list[dict]:
+    def history(self) -> List[dict]:
         """This run's surviving entries so far, per-constraint diagnostics
         materialized, as the caller's own copies (nested lists and dicts too):
         later records and writes to a returned entry change nothing else."""
@@ -154,7 +154,7 @@ class ALMHistoryRecorder:
         """How many of the oldest entries ``max_entries`` has dropped."""
         return self._truncated_count
 
-    def _snapshots(self) -> list[bytes]:
+    def _snapshots(self) -> List[bytes]:
         """The surviving entries' snapshots, each entry materialized once, in place."""
         self._entries[:] = [_history_entry_snapshot(entry) for entry in self._entries]
         return self._entries
@@ -427,7 +427,7 @@ def _build_alm_history_entry(
     active_violation_index: Optional[int],
     active_constraint_name: Optional[str],
     nonfinite_candidate_evaluation: bool,
-    nonfinite_candidate_fields: Optional[list[str]],
+    nonfinite_candidate_fields: Optional[List[str]],
 ) -> dict:
     signal_state = routing_state.signal_state
     return {
@@ -746,9 +746,9 @@ def _constraint_history_diagnostics(
 
 def _constraint_label_history_diagnostics(
     constraint_names: Sequence[str],
-    constraint_blocks: Optional[list[str]],
+    constraint_blocks: Optional[List[str]],
     feasibility_values: np.ndarray,
-    raw_hard_violation_values: Optional[list[float]],
+    raw_hard_violation_values: Optional[List[float]],
     positive_shift: np.ndarray,
     augmented_terms: np.ndarray,
 ) -> dict:
@@ -862,7 +862,7 @@ def _objective_to_augmented_term_ratio(
 def _surrogate_hard_sign_mismatch(
     surrogate_signed_values: np.ndarray,
     hard_signed_values: np.ndarray,
-) -> list[bool]:
+) -> List[bool]:
     surrogate_values = np.asarray(surrogate_signed_values, dtype=float)
     hard_values = np.asarray(hard_signed_values, dtype=float)
     return (surrogate_values * hard_values < 0.0).tolist()

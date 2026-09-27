@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields, replace
 from types import MappingProxyType
-from typing import Callable, Generic, Mapping, Optional, Protocol, Sequence, TypeVar, runtime_checkable
+from typing import Callable, Dict, Generic, Mapping, Optional, Protocol, Sequence, Set, Tuple, TypeVar, runtime_checkable
 
 import numpy as np
 
@@ -129,7 +129,7 @@ class ALMLoopState(Generic[AcceptedStateT]):
     total_inner_iterations: int
     last_cap_binding_active: bool
     cap_binding_detected: bool
-    cap_binding_indices: tuple[int, ...]
+    cap_binding_indices: Tuple[int, ...]
     penalty_cap_reached: bool
     penalty_cap_requested: Optional[float]
     sufficient_decrease_measure: Optional[float]
@@ -151,7 +151,7 @@ class ALMOuterStepEvent(Generic[AcceptedStateT]):
 
     outer_iteration: int
     continuation_iteration: int
-    constraint_names: tuple[str, ...]
+    constraint_names: Tuple[str, ...]
     action: str
     outer_termination: Optional[str]
     subproblem_limit_reason: Optional[str]
@@ -205,8 +205,8 @@ def _require_acyclic_containers(value: object, *, context: str, path: str) -> No
 def _visit_containers(
     container: object,
     path: str,
-    open_paths: dict[int, str],
-    closed: set[int],
+    open_paths: Dict[int, str],
+    closed: Set[int],
     context: str,
 ) -> None:
     """Depth-first walk: ``open_paths`` holds the containers on the current
@@ -223,7 +223,7 @@ def _visit_containers(
     del open_paths[id(container)]
     closed.add(id(container))
 
-def _frozen_event_value(value: object, memo: dict[int, object]) -> object:
+def _frozen_event_value(value: object, memo: Dict[int, object]) -> object:
     """An owned, read-only copy of ``value`` for an outer-step event.
 
     Arrays become read-only copies, mappings read-only views of frozen
@@ -236,7 +236,7 @@ def _frozen_event_value(value: object, memo: dict[int, object]) -> object:
     """
     return _read_only_value(value, memo, _read_only_array_copy)
 
-def _borrowed_read_only_value(value: object, memo: dict[int, object]) -> object:
+def _borrowed_read_only_value(value: object, memo: Dict[int, object]) -> object:
     """:func:`_frozen_event_value` without the copies: arrays become
     non-writable views, so the owner's arrays keep their flags and the
     owner's later writes show through. For one synchronous call."""
@@ -254,7 +254,7 @@ def _read_only_array_view(array: np.ndarray) -> np.ndarray:
 
 def _read_only_value(
     value: object,
-    memo: dict[int, object],
+    memo: Dict[int, object],
     read_only_array: Callable[[np.ndarray], np.ndarray],
 ) -> object:
     """The read-only rule of :func:`_frozen_event_value`, with each array
@@ -307,7 +307,7 @@ def _writable_copy(value: object) -> object:
 
 def _frozen_event_incumbent(
     incumbent: Optional[ALMFeasibleIncumbent[AcceptedStateT]],
-    memo: dict[int, object],
+    memo: Dict[int, object],
 ) -> Optional[ALMFeasibleIncumbent[AcceptedStateT]]:
     """The incumbent's solver data, frozen; the caller's state passes through."""
     if incumbent is None:
@@ -324,7 +324,7 @@ def _frozen_event_incumbent(
 
 def _frozen_loop_state(
     state: ALMLoopState[AcceptedStateT],
-    memo: dict[int, object],
+    memo: Dict[int, object],
 ) -> ALMLoopState[AcceptedStateT]:
     """``state`` with owned read-only arrays and a frozen incumbent (its inner
     result dropped, the caller's accepted state passed through)."""

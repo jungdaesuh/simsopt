@@ -12,6 +12,7 @@ import sys
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
+from typing import List
 from unittest.mock import patch
 
 import numpy as np
@@ -53,7 +54,7 @@ def captured_library_runs():
         yield runs
 
 
-def _runs(trajectory: dict) -> list[dict]:
+def _runs(trajectory: dict) -> List[dict]:
     if "resumed" in trajectory:
         return [trajectory["interrupted"], trajectory["resumed"]]
     return [trajectory]

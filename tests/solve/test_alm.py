@@ -6,6 +6,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from typing import List
 
 import numpy as np
 
@@ -37,7 +38,7 @@ def _parse_library_module(filename: str) -> ast.Module:
     return ast.parse((PACKAGE_ROOT / filename).read_text(encoding="utf-8"))
 
 
-def _top_level_import_bindings(tree: ast.Module) -> list[str]:
+def _top_level_import_bindings(tree: ast.Module) -> List[str]:
     """Names the module's imports bind (``from __future__`` binds none)."""
     return [
         (alias.asname or alias.name).split(".")[0]

@@ -12,9 +12,9 @@ evaluated iterate that the loop and the continuation policy read
 (:func:`_measure_iterate`).
 """
 
-from __future__ import annotations
-
-from typing import Callable, Optional, Protocol, Sequence, TypedDict, Union
+# Eager annotations: on Python 3.8 a TypedDict subclass defined in another
+# module resolves inherited string annotations in that module's namespace.
+from typing import Callable, FrozenSet, List, Optional, Protocol, Sequence, Tuple, TypedDict, Union
 
 import numpy as np
 
@@ -126,8 +126,8 @@ _OWNED_EVALUATION_ARRAY_FIELDS = (
     "augmented_term_by_constraint",
 )
 
-def _nonfinite_evaluation_fields(evaluation: dict) -> tuple[str, ...]:
-    invalid_fields: list[str] = []
+def _nonfinite_evaluation_fields(evaluation: dict) -> Tuple[str, ...]:
+    invalid_fields: List[str] = []
 
     if not np.isfinite(float(evaluation["total"])):
         invalid_fields.append("total")
@@ -186,7 +186,7 @@ def _require_finite_evaluation(evaluation: dict, *, context: str) -> None:
 def _clone_evaluation_dict(
     evaluation: dict,
     *,
-    owned_keys: Optional[frozenset[str]] = None,
+    owned_keys: Optional[FrozenSet[str]] = None,
 ) -> dict:
     """Copy evaluation arrays.
 
@@ -224,8 +224,8 @@ def _incumbent_objective_value(evaluation: dict) -> float:
 
 def _attach_alm_constraint_metadata(
     evaluation: dict,
-    constraint_names_tuple: tuple[str, ...],
-    constraint_blocks_tuple: Optional[tuple[str, ...]],
+    constraint_names_tuple: Tuple[str, ...],
+    constraint_blocks_tuple: Optional[Tuple[str, ...]],
 ) -> dict:
     # L1: always shallow-copy. Previously the no-blocks lane returned the
     # caller's dict (alias) while the blocks lane shallow-copied. Uniform
@@ -243,8 +243,8 @@ def _checked_evaluation(
     multipliers: np.ndarray,
     penalty_argument: object,
     *,
-    constraint_names_tuple: tuple[str, ...],
-    constraint_blocks_tuple: Optional[tuple[str, ...]],
+    constraint_names_tuple: Tuple[str, ...],
+    constraint_blocks_tuple: Optional[Tuple[str, ...]],
     context: str,
 ) -> dict:
     """The evaluation at ``(x, multipliers, penalty_argument)`` with the

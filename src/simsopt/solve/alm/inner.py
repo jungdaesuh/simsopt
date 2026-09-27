@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Callable, Optional
+from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 from scipy.optimize import minimize
@@ -87,8 +87,8 @@ class ALMInnerAttemptRequest:
     update_stationarity_tol: float
     effective_feasibility_tol: float
     inner_callback: Optional[Callable[[np.ndarray], None]]
-    constraint_names_tuple: tuple[str, ...]
-    constraint_blocks_tuple: Optional[tuple[str, ...]]
+    constraint_names_tuple: Tuple[str, ...]
+    constraint_blocks_tuple: Optional[Tuple[str, ...]]
     base_bounds: Optional[object] = None
     continuation_policy: ALMContinuationPolicy = DEFAULT_CONTINUATION_POLICY
 
@@ -107,7 +107,7 @@ class ALMInnerAttemptResult:
     forced_infeasible_penalty_reason: Optional[str]
     forced_inner_false_success: bool
     nonfinite_candidate_evaluation: bool
-    nonfinite_candidate_fields: Optional[list[str]]
+    nonfinite_candidate_fields: Optional[List[str]]
 
 @dataclass
 class _ALMInnerAttemptEvaluator:
@@ -346,7 +346,7 @@ def _candidate_is_acceptable(
 
 def _improvement_and_floor(
     before, after, atol: float, rtol: float
-) -> tuple[float, float]:
+) -> Tuple[float, float]:
     """Return ``(before - after, max(atol, rtol * max(|before|, |after|, 1)))``.
 
     The drop counts as progress only when it exceeds the floor.
@@ -362,7 +362,7 @@ def _improved_beyond_floor(before, after, atol: float, rtol: float) -> bool:
 
 def _feasibility_improvement_and_floor(
     before_violation, after_violation
-) -> tuple[float, float]:
+) -> Tuple[float, float]:
     """The max-violation drop over an inner solve and the floor it must beat
     to count as a feasibility gain (the infeasible-stall tolerances)."""
     return _improvement_and_floor(
@@ -379,7 +379,7 @@ def _classify_infeasible_inner_stall(
     moved_norm: float,
     move_tolerance: float,
     feasibility_gate: float,
-) -> tuple[bool, bool, Optional[str]]:
+) -> Tuple[bool, bool, Optional[str]]:
     # A failed search step is a rejected candidate, not an infeasible stall.
     if candidate_eval.get("search_step_success") is False:
         return False, False, None
@@ -502,7 +502,7 @@ def _run_alm_inner_attempts(request: ALMInnerAttemptRequest) -> ALMInnerAttemptR
     forced_infeasible_penalty_reason = None
     forced_inner_false_success = False
     nonfinite_candidate_evaluation = False
-    nonfinite_candidate_fields: Optional[list[str]] = None
+    nonfinite_candidate_fields: Optional[List[str]] = None
     trust_radius = request.trust_radius
 
     process_inner_maxiter = None

@@ -9,7 +9,7 @@ from __future__ import annotations
 import warnings
 from dataclasses import dataclass
 from numbers import Integral
-from typing import Optional, Sequence, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from scipy.optimize import nnls
@@ -286,7 +286,7 @@ def normalize_alm_constraint_grads(constraint_grads, scales):
         for grad, scale in zip(constraint_grads, scale_array)
     ]
 
-def _constraint_grad_list(constraint_grads) -> list[np.ndarray]:
+def _constraint_grad_list(constraint_grads) -> List[np.ndarray]:
     return [
         np.asarray(constraint_grad, dtype=float) for constraint_grad in constraint_grads
     ]
@@ -361,7 +361,7 @@ def _positive_shift_and_augmented_terms(
     multiplier_array: np.ndarray,
     penalty_values: np.ndarray,
     solver_constraint_values: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray]:
     positive_shift = evaluation.get("positive_shift_values")
     augmented_terms = evaluation.get("augmented_term_by_constraint")
     if positive_shift is not None and augmented_terms is not None:
@@ -383,13 +383,13 @@ def _positive_shift_and_augmented_terms(
 def _as_float_array(values) -> np.ndarray:
     return np.asarray(values, dtype=float)
 
-def _as_float_list(values) -> list[float]:
+def _as_float_list(values) -> List[float]:
     return np.asarray(values, dtype=float).reshape(-1).tolist()
 
 def _max_value(values: np.ndarray) -> float:
     return float(np.max(values)) if values.size > 0 else 0.0
 
-def alm_raw_dual_estimates(multipliers, evaluation: dict) -> Optional[list[float]]:
+def alm_raw_dual_estimates(multipliers, evaluation: dict) -> Optional[List[float]]:
     constraint_scales = evaluation.get("constraint_scales")
     if constraint_scales is None:
         return None
@@ -399,7 +399,7 @@ def alm_raw_dual_estimates(multipliers, evaluation: dict) -> Optional[list[float
         raise ValueError("constraint_scales shape must match multipliers")
     return _as_float_list(multiplier_array / scales)
 
-def _conditioning_metrics(evaluation: dict) -> dict[str, Optional[float]]:
+def _conditioning_metrics(evaluation: dict) -> Dict[str, Optional[float]]:
     total_value = float(evaluation["total"])
     base_objective = float(
         evaluation.get(
@@ -497,7 +497,7 @@ def _project_nonnegative_multipliers_with_diagnostics(
     dual_update_values: np.ndarray,
     penalty,
     multiplier_max: Optional[float],
-) -> tuple[np.ndarray, bool, list[int]]:
+) -> Tuple[np.ndarray, bool, List[int]]:
     updated = _updated_nonnegative_multipliers(
         multipliers,
         dual_update_values,
@@ -551,7 +551,7 @@ def _penalty_feasibility_schedule_tolerance(tolerance: float, penalty) -> float:
 def alm_penalty_schedule_tolerances(
     settings: ALMSettings,
     penalty: Union[float, Sequence[float], np.ndarray],
-) -> tuple[float, float]:
+) -> Tuple[float, float]:
     """Return the feasibility and stationarity tolerances for one ALM penalty."""
     return (
         _penalty_feasibility_schedule_tolerance(settings.feasibility_tol, penalty),
@@ -563,7 +563,7 @@ def _next_penalty(
     *,
     penalty_scale: float,
     penalty_max: Optional[float],
-) -> tuple[float, bool, float]:
+) -> Tuple[float, bool, float]:
     requested_penalty = penalty * penalty_scale
     if penalty_max is None:
         if not np.isfinite(requested_penalty):
@@ -828,7 +828,7 @@ def _stationarity_metrics(
     evaluation: dict,
     routing_state: ALMConstraintRoutingState,
     feasibility_gate: float,
-) -> tuple[float, Optional[float], bool]:
+) -> Tuple[float, Optional[float], bool]:
     """Return ``(stationarity_norm, kkt_stationarity_norm, signal_mismatch_active)``.
 
     ``stationarity_norm`` is the raw augmented-Lagrangian gradient norm used as

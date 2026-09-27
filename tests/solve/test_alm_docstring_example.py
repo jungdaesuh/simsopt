@@ -54,7 +54,9 @@ def _docstring_example_block() -> str:
 class AlmPackageDocstringExampleTests(unittest.TestCase):
     def test_docstring_shows_exactly_this_code(self):
         body_lines = inspect.getsource(_package_docstring_example).splitlines(True)[1:]
-        body = textwrap.dedent("".join(body_lines)).removesuffix("return result\n")
+        text = textwrap.dedent("".join(body_lines))
+        suffix = "return result\n"
+        body = text[:-len(suffix)] if text.endswith(suffix) else text
 
         self.assertIn(
             EXAMPLE_IMPORTS,

@@ -30,6 +30,7 @@ if str(EXAMPLES_DIR) not in sys.path:
 
 import boozerQA_alm  # noqa: E402  (module scope builds no problem)
 
+PROBE_PREFIX = "ALM_DEMO_PROBE "
 _PROBE = (
     "import json, os\n"
     "import simsopt\n"
@@ -42,7 +43,7 @@ _PROBE = (
     "    return result\n"
     "{module}.minimize_alm = recording_minimize_alm\n"
     "summary = {module}.main()\n"
-    "print('ALM_DEMO_PROBE ' + json.dumps({{\n"
+    "print({prefix!r} + json.dumps({{\n"
     "    **summary,\n"
     "    'result_types': result_types,\n"
     "    'simsopt_file': os.path.realpath(simsopt.__file__),\n"
@@ -62,7 +63,7 @@ def _run_demo(module, timeout_seconds):
     with tempfile.TemporaryDirectory() as scratch_dir:
         started = time.perf_counter()
         completed = subprocess.run(
-            [sys.executable, "-c", _PROBE.format(module=module)],
+            [sys.executable, "-c", _PROBE.format(module=module, prefix=PROBE_PREFIX)],
             cwd=scratch_dir,
             env=_child_env(),
             capture_output=True,
@@ -73,7 +74,7 @@ def _run_demo(module, timeout_seconds):
         elapsed_seconds = time.perf_counter() - started
     probe_lines = [
         line for line in completed.stdout.splitlines()
-        if line.startswith("ALM_DEMO_PROBE ")
+        if line.startswith(PROBE_PREFIX)
     ]
     return completed, probe_lines, elapsed_seconds
 
@@ -89,10 +90,10 @@ class AlmDemoSmokeTests(unittest.TestCase):
             f"{completed.stdout[-4000:]}\n{completed.stderr[-4000:]}",
         )
         self.assertEqual(len(probe_lines), 1, completed.stdout[-4000:])
-        summary = json.loads(probe_lines[0].removeprefix("ALM_DEMO_PROBE "))
+        summary = json.loads(probe_lines[0][len(PROBE_PREFIX):])
         print(f"{module}: {summary}, {elapsed_seconds:.1f} s")
         self.assertTrue(
-            Path(summary["simsopt_file"]).is_relative_to(SRC_DIR.resolve()),
+            SRC_DIR.resolve() in Path(summary["simsopt_file"]).parents,
             f"{module} imported simsopt from {summary['simsopt_file']}, "
             f"not from this tree's {SRC_DIR.resolve()}",
         )
