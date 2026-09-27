@@ -99,7 +99,7 @@ def physics(x):
 
 def build_problem(smoke=False):
     return SimpleNamespace(name="probe", x0=np.array([0.3, 0.7, 1.1]), physics=physics,
-                           constraint_names=("row",), taylor_epsilons=None)
+                           constraint_names=("row",))
 """
 
 
@@ -129,8 +129,7 @@ def physics(x):
 
 
 def build_problem(smoke=False):
-    return SimpleNamespace(name=CASE, x0=np.zeros(N), physics=physics, constraint_names=(),
-                           taylor_epsilons=None)
+    return SimpleNamespace(name=CASE, x0=np.zeros(N), physics=physics, constraint_names=())
 """
 
 
@@ -167,14 +166,14 @@ def physics(x):
 
 def build_problem(smoke=False):
     return SimpleNamespace(name="sweep", x0=np.zeros(2), physics=physics,
-                           constraint_names=tuple(f"{case}_{parameter:g}_{delta:g}" for case, parameter, delta in ROWS),
-                           taylor_epsilons=None)
+                           constraint_names=tuple(f"{case}_{parameter:g}_{delta:g}" for case, parameter, delta in ROWS))
 """
 
 
-# Crucible round 4: rows whose verdicts must be attributed correctly. Each
-# row is (case, parameter, relative error of the claimed gradient, absolute
-# error added to it); x0 = (0, 0).
+# Crucible rounds 4 and 5: rows whose verdicts must be attributed correctly.
+# Each row is (case, parameter, relative error of the claimed gradient,
+# absolute error added to it); x0 = (0, 0) and f = x0 + x1 (an O(1) gradient,
+# which sets the absolute floor of a derivative).
 SHAPE_PROBE_PROBLEM = """\
 from types import SimpleNamespace
 
@@ -188,6 +187,8 @@ ROWS = ROWS_VALUE
 def row(x, case, parameter, relative, absolute):
     if case == "const":          # identically parameter
         value, grad = parameter + 0.0 * x.sum(), np.zeros_like(x)
+    elif case == "zero":         # identically 0
+        value, grad = 0.0 * x.sum(), np.zeros_like(x)
     elif case == "quadratic":    # parameter + sum(x^2): zero derivative at 0
         value, grad = parameter + (x ** 2).sum(), 2.0 * x
     elif case == "hinge":        # inactive clipped row max(0, x0 - parameter)
@@ -198,6 +199,17 @@ def row(x, case, parameter, relative, absolute):
         value, grad = max(x[0], x[1]), np.array([1.0, 0.0])
     elif case == "sin":          # sum(sin(parameter x)) / parameter
         value, grad = np.sin(parameter * x).sum() / parameter, np.cos(parameter * x)
+    elif case == "offset_sin":   # 1e4 + sum(sin(parameter x)) / parameter: steep on a large offset
+        value, grad = 1e4 + np.sin(parameter * x).sum() / parameter, np.cos(parameter * x)
+    elif case == "tanh":         # sum(x) + tanh(parameter (x0 - 0.3 / parameter)): a steep smooth step
+        value = x.sum() + np.tanh(parameter * x[0] - 0.3)
+        grad = np.array([1.0 + parameter / np.cosh(parameter * x[0] - 0.3) ** 2, 1.0])
+    elif case == "exp":          # parameter + sum(exp(x))
+        value, grad = parameter + np.exp(x).sum(), np.exp(x)
+    elif case == "scaled":       # parameter (1 + sum(x)): a huge value with a derivative of its size
+        value, grad = parameter * (1.0 + x.sum()), parameter * np.ones_like(x)
+    elif case == "overflow":     # 1e300 exp(50 sum(x)): infinite at the largest steps
+        value, grad = parameter * np.exp(50.0 * x.sum()), 50.0 * parameter * np.exp(50.0 * x.sum()) * np.ones_like(x)
     elif case == "cancel":       # (parameter + sum x) - parameter: value 0, round-off of parameter
         value, grad = (parameter + x.sum()) - parameter, np.ones_like(x)
     else:                        # "offset": parameter + sum(x)
@@ -208,7 +220,7 @@ def row(x, case, parameter, relative, absolute):
 def physics(x):
     x = np.asarray(x, dtype=float)
     rows = [row(x, *spec) for spec in ROWS]
-    return ALMPhysics(base_value=float(x @ x), base_grad=2.0 * x,
+    return ALMPhysics(base_value=float(x.sum()), base_grad=np.ones_like(x),
                       constraint_values=np.array([value for value, _grad in rows]),
                       constraint_grads=tuple(grad for _value, grad in rows))
 
@@ -216,11 +228,8 @@ def physics(x):
 def build_problem(smoke=False):
     return SimpleNamespace(name="shape", x0=np.zeros(2), physics=physics,
                            constraint_names=tuple("_".join(f"{item:g}" if not isinstance(item, str) else item
-                                                           for item in spec) for spec in ROWS),
-                           taylor_epsilons=None)
+                                                           for item in spec) for spec in ROWS))
 """
-TEMPLATE_STEPS = ("--epsilons", "1e-5,5e-6,2.5e-6")
-TINY_STEPS = ("--epsilons", "1e-7,5e-8,2.5e-8")
 
 
 def skill_markdown() -> Dict[str, str]:
@@ -579,8 +588,6 @@ class SkillScriptsRunTests(unittest.TestCase):
         self.assertEqual([quantity["quantity"] for quantity in summary["quantities"]],
                          ["f", "sum_at_most_max", "x0_at_least_min"])
         self.assertEqual({quantity["verdict"] for quantity in summary["quantities"]}, {"passed"})
-        # A quadratic f and linear rows are differenced exactly.
-        self.assertTrue(all(quantity["relative_error"] < 1e-10 for quantity in summary["quantities"]))
 
     def test_gradient_check_fails_on_a_wrong_gradient(self):
         source = replaced_once((TEMPLATES_DIR / "generic.py").read_text(),
@@ -604,47 +611,17 @@ class SkillScriptsRunTests(unittest.TestCase):
         summary = result_line(completed, "GRADIENT_CHECK ")
         return {quantity["quantity"]: quantity["verdict"] for quantity in summary["quantities"]}
 
-    def test_gradient_check_passes_exact_gradients(self):
-        completed = self.run_gradient_probe("exact")
-        self.assertEqual(self.verdicts(completed), {"f": "passed", "row": "passed"})
-        self.assertEqual(completed.returncode, 0)
-
-    def test_gradient_check_fails_zeroed_gradients(self):
-        """A forgotten gradient on a quantity that does change is wrong, not vacuous."""
-        completed = self.run_gradient_probe("zero")
-        self.assertEqual(self.verdicts(completed), {"f": "failed", "row": "failed"})
-        self.assertEqual(completed.returncode, 1)
-
-    def test_gradient_check_passes_a_constant_quantity_as_flat(self):
-        """No change at any step and a zero claimed gradient: flat, a pass that
-        states its round-off bound (a changing quantity with a zero gradient fails)."""
-        completed = self.run_gradient_probe("constant")
-        self.assertEqual(self.verdicts(completed), {"f": "passed", "row": "passed"})
-        self.assertEqual(completed.returncode, 0)
-        for quantity in result_line(completed, "GRADIENT_CHECK ")["quantities"]:
-            self.assertIn("flat along the sampled directions", quantity["note"])
-
-    def test_gradient_check_fails_wrong_gradients(self):
-        completed = self.run_gradient_probe("factor")
-        self.assertEqual(self.verdicts(completed), {"f": "failed", "row": "failed"})
-        self.assertEqual(completed.returncode, 1)
-
-    def test_gradient_check_rejects_fewer_than_three_steps(self):
-        """One step passed a gradient off by x1.5 and x2; the error model needs
-        residuals, so fewer than three steps is an argument error."""
-        for epsilons in ("1e-3", "1e-3,5e-4"):
-            with self.subTest(epsilons=epsilons):
-                completed = self.run_gradient_probe("factor", "--epsilons", epsilons)
-                self.assertEqual(completed.returncode, 2, completed.stdout)
-                self.assertIn("at least 3 distinct steps", completed.stderr)
-                self.assertNotIn("GRADIENT_CHECK", completed.stdout)
-
-    def test_gradient_check_fails_a_wrong_gradient_on_a_tiny_row(self):
-        """A row of size 1e-7 whose gradient is twice the truth fails; the
-        tolerance is relative to the finite difference, not absolute."""
-        completed = self.run_gradient_probe("small")
-        self.assertEqual(self.verdicts(completed), {"f": "passed", "row": "failed"})
-        self.assertEqual(completed.returncode, 1)
+    def test_gradient_check_on_exact_zeroed_constant_and_wrong_gradients(self):
+        """Exact gradients and a constant with zero gradients pass; zeroed or
+        scaled gradients on changing quantities fail (Crucible round 1)."""
+        cases = {"exact": {"f": "passed", "row": "passed"}, "constant": {"f": "passed", "row": "passed"},
+                 "zero": {"f": "failed", "row": "failed"}, "factor": {"f": "failed", "row": "failed"},
+                 "small": {"f": "passed", "row": "failed"}}
+        for mode, expected in cases.items():
+            with self.subTest(mode=mode):
+                completed = self.run_gradient_probe(mode)
+                self.assertEqual(self.verdicts(completed), expected)
+                self.assertEqual(completed.returncode, 0 if set(expected.values()) == {"passed"} else 1)
 
     def run_roundoff_probe(self, case: str, *arguments: str, n: int = 3,
                            a: float = 0.0) -> subprocess.CompletedProcess:
@@ -654,39 +631,35 @@ class SkillScriptsRunTests(unittest.TestCase):
         return run_python([str(SCRIPTS_DIR / "gradient_check.py"), *arguments], cwd=self.scratch,
                           problem_dir=self.scratch)
 
-    def test_gradient_check_never_passes_by_the_floor_of_a_small_step(self):
-        """Value 1e8, derivative 1e-3, claimed 0: the fit weighs each step by its
-        round-off, so the small steps' large floors cannot hide the miss."""
-        for arguments in ((), ("--epsilons", "1,0.5,0.25")):
-            with self.subTest(arguments=arguments):
-                completed = self.run_roundoff_probe("big_value_zero_grad", *arguments)
-                self.assertEqual(self.verdicts(completed), {"f": "failed"})
-                self.assertEqual(completed.returncode, 1)
-
-    def test_gradient_check_passes_a_right_gradient_on_a_big_value_at_informative_steps(self):
-        completed = self.run_roundoff_probe("big_value_right_grad", "--epsilons", "1,0.5,0.25")
-        self.assertEqual(self.verdicts(completed), {"f": "passed"})
-        self.assertEqual(completed.returncode, 0)
-
-    def test_gradient_check_does_not_trust_a_ratio_below_the_absolute_floor(self):
-        """True derivative 3e-11, claimed 0: the library's ratio test cannot see
-        it (its floor is 1e-10); the relative error can."""
-        completed = self.run_roundoff_probe("straddle_zero_grad", n=1, a=0.3e-10)
+    def test_gradient_check_on_a_big_value_with_a_small_derivative(self):
+        """Value 1e8, derivative 1e-3: a zero claim fails (the small steps, where
+        1e8 hides the change, cannot pass it); a right claim is never failed,
+        and passes with steps large enough to resolve it to 1e-6."""
+        completed = self.run_roundoff_probe("big_value_zero_grad")
         self.assertEqual(self.verdicts(completed), {"f": "failed"})
-        self.assertEqual(completed.returncode, 1)
-        completed = self.run_roundoff_probe("straddle_right_grad", n=1, a=0.3e-10)
+        self.assertNotEqual(self.verdicts(self.run_roundoff_probe("big_value_right_grad"))["f"], "failed")
+        completed = self.run_roundoff_probe("big_value_right_grad", "--max-step", "1000")
         self.assertEqual(self.verdicts(completed), {"f": "passed"})
-        self.assertEqual(completed.returncode, 0)
 
-    def test_gradient_check_rejects_zero_directions(self):
-        completed = self.run_gradient_probe("exact", "--directions", "0")
-        self.assertEqual(completed.returncode, 2, completed.stderr[-2000:])
-        self.assertIn("--directions", completed.stderr)
-        self.assertNotIn("Traceback", completed.stderr)
+    def test_gradient_check_sees_a_derivative_below_the_libraries_floor(self):
+        """True derivative 3e-11, claimed 0: fails; claimed right: passes."""
+        self.assertEqual(self.verdicts(self.run_roundoff_probe("straddle_zero_grad", n=1, a=0.3e-10)),
+                         {"f": "failed"})
+        self.assertEqual(self.verdicts(self.run_roundoff_probe("straddle_right_grad", n=1, a=0.3e-10)),
+                         {"f": "passed"})
 
-    def test_gradient_check_passes_the_stage2_rows_at_small_steps(self):
-        """The curvature rows at 1e-5 to 2.5e-6, where round-off can stop the
-        errors from falling, still pass (the case the accuracy verdict is for)."""
+    def test_gradient_check_rejects_invalid_arguments(self):
+        (self.scratch / "alm_problem.py").write_text(GRADIENT_PROBE_PROBLEM.replace("MODE_VALUE", repr("exact")))
+        for arguments in (("--directions", "0"), ("--max-step", "0"), ("--max-step", "-1"), ("--max-step", "inf"),
+                          ("--min-step", "x"), ("--max-step", "1e-6", "--min-step", "1e-3"),
+                          ("--steps-per-decade", "0")):
+            with self.subTest(arguments=arguments):
+                completed = run_python([str(SCRIPTS_DIR / "gradient_check.py"), *arguments],
+                                       cwd=self.scratch, problem_dir=self.scratch)
+                self.assertEqual(completed.returncode, 2, completed.stderr[-2000:])
+                self.assertNotIn("Traceback", completed.stderr)
+
+    def test_gradient_check_passes_the_stage2_rows(self):
         generate_problem(self.scratch, "stage2")
         completed = run_python([str(SCRIPTS_DIR / "gradient_check.py"), "--smoke"], cwd=self.scratch,
                                problem_dir=self.scratch)
@@ -704,104 +677,107 @@ class SkillScriptsRunTests(unittest.TestCase):
         return verdicts
 
     def test_gradient_check_fails_wrong_gradients_dominated_by_truncation(self):
-        """F-A: q = sum(x) + K sum(x^3), truncation K e^2 up to 1e10 x the step
-        squared; every wrong gradient fails and every right one passes, at the
-        library's steps and at the templates' smaller ones."""
+        """q = sum(x) + K sum(x^3), K up to 1e10: every gradient 0.1% to 5% wrong
+        fails and every right one passes (Crucible round 3)."""
         rows = [("cubic", k, delta) for k in SWEEP_CUBIC_K for delta in (0.0,) + SWEEP_DELTAS]
-        for arguments in ((), ("--epsilons", "1e-5,5e-6,2.5e-6")):
-            with self.subTest(arguments=arguments):
-                verdicts = self.run_sweep(rows, *arguments)
-                for name, verdict in verdicts.items():
-                    right = name.endswith("_0")
-                    self.assertEqual(verdict, "passed" if right else "failed", name)
+        for name, verdict in self.run_sweep(rows).items():
+            self.assertEqual(verdict, "passed" if name.endswith("_0") else "failed", name)
 
     def test_gradient_check_fails_wrong_gradients_on_offset_values(self):
-        """F-B: q = F + sum(x), round-off of F up to 1e8: every gradient 0.1% to 5%
-        wrong fails where the steps can measure it and is never passed; right
-        ones pass there."""
+        """q = F + sum(x), F up to 1e8: every gradient 0.1% to 5% wrong fails and
+        every right one passes (Crucible round 3)."""
         rows = [("offset", f, delta) for f in SWEEP_OFFSET_F for delta in (0.0,) + SWEEP_DELTAS]
-        verdicts = self.run_sweep(rows)
-        for name, verdict in verdicts.items():
+        for name, verdict in self.run_sweep(rows).items():
             self.assertEqual(verdict, "passed" if name.endswith("_0") else "failed", name)
-        # At the templates' tiny steps round-off of 1e8 is about 1e-3 of the change:
-        # a wrong gradient fails or is undecided, never passed; a right one is not failed.
-        verdicts = self.run_sweep(rows, "--epsilons", "1e-5,5e-6,2.5e-6")
-        for name, verdict in verdicts.items():
-            if name.startswith("offset_1e+08"):
-                allowed = ("passed", "not_tested") if name.endswith("_0") else ("failed", "not_tested")
-                self.assertIn(verdict, allowed, name)
-            else:
-                self.assertEqual(verdict, "passed" if name.endswith("_0") else "failed", name)
 
     def run_shape(self, rows: list, *arguments: str) -> Dict[str, dict]:
         (self.scratch / "alm_problem.py").write_text(SHAPE_PROBE_PROBLEM.replace("ROWS_VALUE", repr(rows)))
         completed = run_python([str(SCRIPTS_DIR / "gradient_check.py"), *arguments], cwd=self.scratch,
                                problem_dir=self.scratch)
+        self.last_completed = completed
         summary = result_line(completed, "GRADIENT_CHECK ")
         return {quantity["quantity"]: quantity for quantity in summary["quantities"] if quantity["quantity"] != "f"}
 
-    def test_gradient_check_passes_flat_rows_with_zero_gradients(self):
-        """F1: a constant row, a zero-derivative row and an inactive clipped row
-        pass as flat; a clearly nonzero claimed derivative on them fails."""
+    def assert_verdicts(self, quantities: Dict[str, dict], expected: Dict[str, str]) -> None:
+        self.assertEqual({name: quantity["verdict"] for name, quantity in quantities.items()}, expected,
+                         {name: quantity["note"] for name, quantity in quantities.items()})
+
+    def test_gradient_check_passes_flat_and_zero_rows(self):
+        """A constant, a zero-derivative and an inactive clipped row pass with a
+        zero claim under the PASS rule; a clearly nonzero claim fails; an exactly
+        zero row passes a round-off-size claim (R5-7: its floor comes from the
+        objective's gradient, not 0) and fails a real one."""
         rows = [("const", 1.0, 0.0, 0.0), ("quadratic", 3.0, 0.0, 0.0), ("hinge", 1e-4, 0.0, 0.0),
-                ("const", 1.0, 0.0, 1e-6), ("quadratic", 3.0, 0.0, 1e-6)]
-        quantities = self.run_shape(rows, *TINY_STEPS)
-        for name, quantity in quantities.items():
-            with self.subTest(row=name):
-                if name.endswith("_1e-06"):
-                    self.assertEqual(quantity["verdict"], "failed")
-                else:
-                    self.assertEqual(quantity["verdict"], "passed")
-                    self.assertIn("flat along the sampled directions", quantity["note"])
+                ("const", 1.0, 0.0, 1e-6), ("quadratic", 3.0, 0.0, 1e-6),
+                ("zero", 0.0, 0.0, 1e-17), ("zero", 0.0, 0.0, 1e-6)]
+        self.assert_verdicts(self.run_shape(rows), {
+            "const_1_0_0": "passed", "quadratic_3_0_0": "passed", "hinge_0.0001_0_0": "passed",
+            "const_1_0_1e-06": "failed", "quadratic_3_0_1e-06": "failed",
+            "zero_0_0_1e-17": "passed", "zero_0_0_1e-06": "failed"})
 
-    def test_gradient_check_advice_is_one_deterministic_step_up(self):
-        """F1/F2: an undecided row gets one suggestion, always towards larger
-        steps (round-off), the same on a rerun; following it decides."""
-        rows = [("cancel", 1e8, 0.0, 0.0), ("offset", 1e10, 0.0, 0.0)]
-        first = self.run_shape(rows, *TEMPLATE_STEPS)
-        again = self.run_shape(rows, *TEMPLATE_STEPS)
-        for name, quantity in first.items():
-            with self.subTest(row=name):
-                self.assertEqual(quantity["verdict"], "not_tested")
-                self.assertEqual(quantity["note"], again[name]["note"])
-                self.assertEqual(quantity["note"].count("--epsilons"), 1)
-                self.assertNotIn("smaller", quantity["note"])
-                suggested = re.search(r"--epsilons ([0-9.e,+-]+)", quantity["note"]).group(1)
-                decided = self.run_shape([rows[list(first).index(name)]], "--epsilons", suggested)
-                self.assertEqual([entry["verdict"] for entry in decided.values()], ["passed"])
-        self.assertIn("noisier than the value suggests", first["cancel_1e+08_0_0"]["note"])
-
-    def test_gradient_check_attributes_noise_from_a_cancellation(self):
-        """F2: (1e8 + sum x) - 1e8 has value 0 but the round-off of 1e8: a right
-        gradient passes at the library's steps, a 1% wrong one fails."""
-        quantities = self.run_shape([("cancel", 1e8, 0.0, 0.0), ("cancel", 1e8, 0.01, 0.0)])
-        self.assertEqual({name: quantity["verdict"] for name, quantity in quantities.items()},
-                         {"cancel_1e+08_0_0": "passed", "cancel_1e+08_0.01_0": "failed"})
-
-    def test_gradient_check_reports_kinks_and_unresolved_rows_as_not_smooth(self):
-        """F3: a kink 3e-6 away, max() at a tie, sin(1e4 x)/1e4 and a clipped row
-        whose kink is inside the steps, all with correct (sub)gradients, are
-        not smooth at the library's steps, never failed; the kink 3e-6 away
-        and the clipped row pass at steps below their kink."""
-        rows = [("abs", 3e-6, 0.0, 0.0), ("max_tie", 0.0, 0.0, 0.0), ("sin", 1e4, 0.0, 0.0),
-                ("hinge", 1e-4, 0.0, 0.0)]
+    def test_gradient_check_passes_steep_smooth_rows(self):
+        """R5-1: tanh(1e5 x0 - 0.3) and sin(K x)/K up to K = 1e5 with correct
+        gradients pass (the sweep reaches steps below their feature size); 0.1%
+        wrong ones fail."""
+        rows = [("tanh", k, 0.0, 0.0) for k in (1e3, 1e5)] + [("sin", k, 0.0, 0.0) for k in (1e3, 1e4, 1e5)]
+        rows += [(case, k, 1e-3, 0.0) for case, k, _relative, _absolute in rows]
         quantities = self.run_shape(rows)
         for name, quantity in quantities.items():
             with self.subTest(row=name):
-                self.assertEqual(quantity["verdict"], "not_smooth", quantity["note"])
-                self.assertIn("not smooth at this point along these steps", quantity["note"])
-        quantities = self.run_shape([("abs", 3e-6, 0.0, 0.0), ("hinge", 1e-4, 0.0, 0.0)], *TINY_STEPS)
-        self.assertEqual({quantity["verdict"] for quantity in quantities.values()}, {"passed"})
+                self.assertEqual(quantity["verdict"], "failed" if "_0.001_" in name else "passed", quantity["note"])
 
-    def test_gradient_check_rejects_unusable_steps(self):
-        """F4: repeated, zero, negative, infinite or non-numeric steps exit 2."""
-        (self.scratch / "alm_problem.py").write_text(GRADIENT_PROBE_PROBLEM.replace("MODE_VALUE", repr("exact")))
-        for epsilons in ("1e-3,1e-3,1e-3", "1e-3,0,1e-4", "1e-3,-1e-4,1e-5", "1e-3,inf,1e-4", "1e-3,x,1e-4"):
-            with self.subTest(epsilons=epsilons):
-                completed = run_python([str(SCRIPTS_DIR / "gradient_check.py"), "--epsilons", epsilons],
-                                       cwd=self.scratch, problem_dir=self.scratch)
-                self.assertEqual(completed.returncode, 2, completed.stderr[-2000:])
-                self.assertNotIn("Traceback", completed.stderr)
+    def test_gradient_check_verdict_does_not_depend_on_an_added_constant(self):
+        """R5-2: c + sum(exp(x)) for c = 0, 1, 100: the same verdicts, right
+        gradients passing and 0.1% wrong ones failing."""
+        rows = [("exp", c, relative, 0.0) for c in (0.0, 1.0, 100.0) for relative in (0.0, 1e-3)]
+        quantities = self.run_shape(rows)
+        for name, quantity in quantities.items():
+            with self.subTest(row=name):
+                self.assertEqual(quantity["verdict"], "failed" if "_0.001_" in name else "passed", quantity["note"])
+
+    def test_gradient_check_never_fails_a_right_gradient_behind_a_cancellation(self):
+        """R5-3: (F + sum x) - F has value 0 but the round-off of F; right
+        gradients are never failed (identical values at small steps are the
+        precision of F, not a derivative) and pass for F = 1e8; a 1% wrong one
+        fails."""
+        rows = [("cancel", f, 0.0, 0.0) for f in (1e8, 1e11, 1e12, 1e13)] + [("cancel", 1e8, 0.01, 0.0)]
+        quantities = self.run_shape(rows)
+        self.assertEqual(quantities["cancel_1e+08_0_0"]["verdict"], "passed")
+        self.assertEqual(quantities["cancel_1e+08_0.01_0"]["verdict"], "failed")
+        for f in ("1e+11", "1e+12", "1e+13"):
+            with self.subTest(offset=f):
+                self.assertNotEqual(quantities[f"cancel_{f}_0_0"]["verdict"], "failed")
+
+    def test_gradient_check_not_tested_note_is_one_fixed_message(self):
+        """R5-5: an undecidable row (steep on a large offset) is NOT TESTED with
+        what was seen and one fixed piece of advice, never a step to retry."""
+        quantities = self.run_shape([("offset_sin", 1e3, 0.0, 0.0)])
+        quantity = quantities["offset_sin_1000_0_0"]
+        self.assertEqual(quantity["verdict"], "not_tested")
+        self.assertIn("check at a nearby point or inspect the quantity", quantity["note"])
+        for step_advice in ("--max-step", "--min-step", "--epsilons", "larger", "smaller"):
+            self.assertNotIn(step_advice, quantity["note"])
+        self.assertEqual(self.last_completed.returncode, 1)
+
+    def test_gradient_check_json_is_finite_for_huge_values(self):
+        """R5-6: values of 1e220 and ones that overflow to inf at the largest
+        steps keep the JSON finite (null, not NaN), and are still judged."""
+        rows = [("scaled", 1e220, 0.0, 0.0), ("scaled", 1e220, 1.0, 0.0), ("overflow", 1e300, 0.0, 0.0)]
+        quantities = self.run_shape(rows)
+        line = [line for line in self.last_completed.stdout.splitlines() if line.startswith("GRADIENT_CHECK ")][0]
+        self.assertNotIn("NaN", line)
+        self.assertNotIn("Infinity", line)
+        self.assertIn("null", line)
+        self.assert_verdicts(quantities, {"scaled_1e+220_0_0": "passed", "scaled_1e+220_1_0": "failed",
+                                          "overflow_1e+300_0_0": "passed"})
+
+    def test_gradient_check_kinks(self):
+        """A kink 3e-6 away passes (the sweep reaches steps below it); a kink
+        exactly at x0 (max at a tie) is not passed: the central differences
+        converge to the average of the one-sided slopes."""
+        quantities = self.run_shape([("abs", 3e-6, 0.0, 0.0), ("max_tie", 0.0, 0.0, 0.0)])
+        self.assertEqual(quantities["abs_3e-06_0_0"]["verdict"], "passed")
+        self.assertNotEqual(quantities["max_tie_0_0_0"]["verdict"], "passed")
 
     def test_sign_check_passes_on_the_generic_template(self):
         generate_problem(self.scratch, "generic")
@@ -863,6 +839,16 @@ class TemplateSmokeTests(unittest.TestCase):
         summary = self.run_template("boozer_single_stage", "--smoke")
         self.assertEqual(len(summary["constraint_values"]), 12)
         self.assertTrue(summary["finish"]["surface_solved"])
+
+    def test_boozer_template_gradients_pass_at_seed_3(self):
+        """R5-4: the Boozer template's gradient check exited 1 at seed 3."""
+        generate_problem(self.scratch, "boozer_single_stage")
+        completed = run_python([str(SCRIPTS_DIR / "gradient_check.py"), "--smoke", "--seed", "3"],
+                               cwd=self.scratch, problem_dir=self.scratch)
+        summary = result_line(completed, "GRADIENT_CHECK ")
+        self.assertEqual(completed.returncode, 0,
+                         {quantity["quantity"]: quantity["note"] for quantity in summary["quantities"]
+                          if not quantity["passed"]})
 
     def test_boozer_sign_check_names_the_rows_it_cannot_check_independently(self):
         """The iota and major-radius probes read the same source as the rows."""

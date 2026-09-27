@@ -167,8 +167,6 @@ class BoozerSingleStageProblem:
     ``references/api.md``) for a stateful, Boozer-surface physics."""
 
     name = "boozer_single_stage"
-    # Steps small enough for the smooth rows and for Newton's warm start.
-    taylor_epsilons = (1e-5, 5e-6, 2.5e-6)
 
     def __init__(self, smoke: bool):
         # Every threshold, scale and temperature divides or smooths a row.

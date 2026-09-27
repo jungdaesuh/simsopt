@@ -60,22 +60,23 @@ Each entry: the symptom, the cause, the fix.
     extremum; a step that changes the selection breaks the ratio test. Use
     steps far below the smoothing temperature (the templates use 1e-5 to
     2.5e-6).
-13. **Reading the gradient check.** `gradient_check.py` models the central
-    differences of each direction as `c(e) = d + a e^2 + noise`, with noise
-    `s eps Q / e` (`Q` the sampled |q|, `s` from the fit residuals), and
-    needs at least three distinct steps and one direction. Flat directions
-    (every difference within 3 x round-off) pass only with a zero claimed
-    derivative and only when every direction is flat; a clearly nonzero
-    claim there fails. Two goodness-of-fit tests guard `FAIL`: a kink test
-    (second differences `J + b e` with `|J| > z sigma_J` and above 1e-3 of the
-    change) and a resolution test (residuals implying value noise above 1%
-    of the values); either gives `NOT SMOOTH`, never `FAIL`. Under a model
-    that fits, `PASS` needs the claim within max(1e-6 |d_hat|, z sigma) of
-    `d_hat` with z sigma below 1e-3 |d_hat|, and `FAIL` a miss beyond twice
-    that; anything else is `NOT TESTED`, with one suggestion, always larger
-    steps (or that no steps decide it). The `e^2` term is extrapolated only
-    when it is measurable, and a cancellation or inner-solve noise is
-    reported as such ("noisier than the value suggests").
+13. **Reading the gradient check.** `gradient_check.py` sweeps relative
+    steps from 1 to 1e-10 (each dof moves relative to its own size) and
+    applies three rules per direction: `PASS` when two consecutive steps
+    agree with the claim to 1e-6 (relative to the quantity's gradient
+    scale); `FAIL` when the differences nearest the smallest steps converge
+    (three consecutive steps agree to 1e-4) to a value more than 5e-4 from
+    the claim, unless a smaller step comes back to the claim; `NOT TESTED`
+    otherwise. Steps whose two values are identical or differ by a couple of
+    units in the last place are skipped: there the change is below the
+    precision of the value (a big offset, or a cancellation inside the
+    evaluation). Known limits: a kink exactly at x0 (e.g. `max` at a tie)
+    FAILs, because the central difference converges to the average of the
+    one-sided slopes; a quantity whose values are identical at every step
+    (a constant, or a cancellation of a value far beyond double precision)
+    is judged as flat; and a steep quantity on a large offset (say
+    `1e4 + sin(1e3 x)/1e3`) can be NOT TESTED, because round-off and
+    truncation leave no pair of steps accurate to 1e-6.
 14. **Unique row names.** The runner reports multipliers and values keyed by
     name, so a repeated name hides a row.
 15. **Conflicting constraints.** Thresholds no design can meet (e.g. a coil

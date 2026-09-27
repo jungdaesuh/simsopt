@@ -19,7 +19,7 @@ and `docs/source/simsopt.solve.alm.rst`.
 | `signed_upper_bound` | `simsopt.solve.alm` | Row `objective.J() - bound` (with its gradient over the base objective's free dofs). |
 | `signed_lower_bound` | `simsopt.solve.alm` | Row `bound - objective.J()`. |
 | `augmented_inequality_objective` | `simsopt.solve.alm` | Builds the evaluator dict from f, grad f, g, grad g, multipliers, penalty (what `ALMPhysics.evaluation` calls). |
-| `run_directional_taylor_test` | `simsopt.solve.alm` | Central-difference ratio test of an evaluator's `total`/`grad` (used per quantity by `gradient_check.py`). |
+| `run_directional_taylor_test` | `simsopt.solve.alm` | Central differences of an evaluator's `total` along a direction, with the claimed directional derivative (`gradient_check.py` sweeps its steps per quantity). |
 | `ALMEvaluation` | `simsopt.solve.alm` | TypedDict of the evaluator dict (required and optional keys). |
 | `ALMEvaluator` | `simsopt.solve.alm` | Protocol `(x, multipliers, penalty) -> ALMEvaluation`. |
 | `ALMOuterStepEvent` | `simsopt.solve.alm` | What `on_outer_step` receives once per continuation step. |
@@ -174,7 +174,6 @@ template is standalone: it repeats the few helpers it needs.
 | `inner_options` | L-BFGS-B options with `maxiter` | runner |
 | `solver_callbacks()` | `dict` of extra `minimize_alm` keywords (`{}` when stateless) | runner |
 | `sign_probes()` | tuple of `SignProbe(label, x, violated, satisfied)` | `sign_check.py` |
-| `taylor_epsilons` | tuple of at least three steps (largest first) or None (library default) | `gradient_check.py` |
 | `shared_source_rows` | tuple of row names whose probe expectation reads the row's own source | `sign_check.py` |
 | `finish(result)` | JSON-serializable `dict`; sets the objects to `result.x` and writes outputs | runner |
 

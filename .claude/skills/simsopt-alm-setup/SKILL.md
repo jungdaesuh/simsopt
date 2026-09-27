@@ -119,19 +119,17 @@ physics, that a row is violated or satisfied: they become the sign probes.
 Run each from any directory; all three must pass before the real run.
 
 1. `PYTHONPATH=<dir> <python> $SKILL_DIR/scripts/gradient_check.py --smoke`
-   must exit 0. Each quantity ends in one of:
-   - `PASS`: the claimed derivative matches the measured one (or the
-     quantity is flat and the claim is zero). Nothing to do.
-   - `FAIL`: only a wrong gradient, under a model of the differences that
-     fits them: fix the gradient of the named quantity in `alm_problem.py`.
-   - `NOT SMOOTH`: the differences are not those of a smooth quantity at
-     these steps (a kink or branch, or structure finer than the steps); the
-     gradient is not judged. Move x0 slightly off the kink, or check the
-     row for a `max`/`abs`/clipping (a smooth row that varies faster than
-     the steps resolve shows this way too).
-   - `NOT TESTED`: round-off hides the answer. Rerun with the one step set
-     its note suggests (always larger); when the note says no steps
-     decide it, report that the quantity cannot be checked there.
+   must exit 0. It compares each claimed directional derivative with central
+   differences over a sweep of relative steps (1 down to 1e-10), and each
+   quantity ends in one of:
+   - `PASS`: two consecutive steps agree with the claim to 1e-6. Nothing to do.
+   - `FAIL`: the differences converge (three consecutive steps agree to
+     1e-4) to a value that misses the claim by more than 5e-4: the gradient
+     of the named quantity in `alm_problem.py` is wrong; fix it.
+   - `NOT TESTED`: neither happened (a kink, noise, oscillation, or a value
+     too large for its change to be resolved). Check the quantity at a
+     nearby point, or inspect it; there is no step to retry with.
+   - `NONFINITE`: the value or the claimed gradient at x0 is not finite.
 2. `PYTHONPATH=<dir> <python> $SKILL_DIR/scripts/sign_check.py --smoke` must
    exit 0. On a failure, fix the named row's sign or its probe expectation.
    Fix scale warnings by rescaling rows or f. For coverage warnings, add a

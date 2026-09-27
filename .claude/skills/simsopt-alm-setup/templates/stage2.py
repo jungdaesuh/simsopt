@@ -165,9 +165,6 @@ class Stage2Problem:
     ``references/api.md``) for Stage-2 coils."""
 
     name = "stage2"
-    # Steps far below the smoothing temperatures keep the smooth rows in
-    # their smooth regime (see stage_two_optimization_alm.py's Taylor test).
-    taylor_epsilons = (1e-5, 5e-6, 2.5e-6)
 
     def __init__(self, smoke: bool):
         # Every threshold and temperature divides or smooths a row.

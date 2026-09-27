@@ -132,19 +132,17 @@ physics, that a row is violated or satisfied: they become the sign probes.
 Run each from any directory; all three must pass before the real run.
 
 1. `PYTHONPATH=<dir> <python> $SKILL_DIR/scripts/gradient_check.py --smoke`
-   must exit 0. Each quantity ends in one of:
-   - `PASS`: the claimed derivative matches the measured one (or the
-     quantity is flat and the claim is zero). Nothing to do.
-   - `FAIL`: only a wrong gradient, under a model of the differences that
-     fits them: fix the gradient of the named quantity in `alm_problem.py`.
-   - `NOT SMOOTH`: the differences are not those of a smooth quantity at
-     these steps (a kink or branch, or structure finer than the steps); the
-     gradient is not judged. Move x0 slightly off the kink, or check the
-     row for a `max`/`abs`/clipping (a smooth row that varies faster than
-     the steps resolve shows this way too).
-   - `NOT TESTED`: round-off hides the answer. Rerun with the one step set
-     its note suggests (always larger); when the note says no steps
-     decide it, report that the quantity cannot be checked there.
+   must exit 0. It compares each claimed directional derivative with central
+   differences over a sweep of relative steps (1 down to 1e-10), and each
+   quantity ends in one of:
+   - `PASS`: two consecutive steps agree with the claim to 1e-6. Nothing to do.
+   - `FAIL`: the differences converge (three consecutive steps agree to
+     1e-4) to a value that misses the claim by more than 5e-4: the gradient
+     of the named quantity in `alm_problem.py` is wrong; fix it.
+   - `NOT TESTED`: neither happened (a kink, noise, oscillation, or a value
+     too large for its change to be resolved). Check the quantity at a
+     nearby point, or inspect it; there is no step to retry with.
+   - `NONFINITE`: the value or the claimed gradient at x0 is not finite.
 2. `PYTHONPATH=<dir> <python> $SKILL_DIR/scripts/sign_check.py --smoke` must
    exit 0. On a failure, fix the named row's sign or its probe expectation.
    Fix scale warnings by rescaling rows or f. For coverage warnings, add a
@@ -297,7 +295,7 @@ and `docs/source/simsopt.solve.alm.rst`.
 | `signed_upper_bound` | `simsopt.solve.alm` | Row `objective.J() - bound` (with its gradient over the base objective's free dofs). |
 | `signed_lower_bound` | `simsopt.solve.alm` | Row `bound - objective.J()`. |
 | `augmented_inequality_objective` | `simsopt.solve.alm` | Builds the evaluator dict from f, grad f, g, grad g, multipliers, penalty (what `ALMPhysics.evaluation` calls). |
-| `run_directional_taylor_test` | `simsopt.solve.alm` | Central-difference ratio test of an evaluator's `total`/`grad` (used per quantity by `gradient_check.py`). |
+| `run_directional_taylor_test` | `simsopt.solve.alm` | Central differences of an evaluator's `total` along a direction, with the claimed directional derivative (`gradient_check.py` sweeps its steps per quantity). |
 | `ALMEvaluation` | `simsopt.solve.alm` | TypedDict of the evaluator dict (required and optional keys). |
 | `ALMEvaluator` | `simsopt.solve.alm` | Protocol `(x, multipliers, penalty) -> ALMEvaluation`. |
 | `ALMOuterStepEvent` | `simsopt.solve.alm` | What `on_outer_step` receives once per continuation step. |
@@ -452,7 +450,6 @@ template is standalone: it repeats the few helpers it needs.
 | `inner_options` | L-BFGS-B options with `maxiter` | runner |
 | `solver_callbacks()` | `dict` of extra `minimize_alm` keywords (`{}` when stateless) | runner |
 | `sign_probes()` | tuple of `SignProbe(label, x, violated, satisfied)` | `sign_check.py` |
-| `taylor_epsilons` | tuple of at least three steps (largest first) or None (library default) | `gradient_check.py` |
 | `shared_source_rows` | tuple of row names whose probe expectation reads the row's own source | `sign_check.py` |
 | `finish(result)` | JSON-serializable `dict`; sets the objects to `result.x` and writes outputs | runner |
 
@@ -824,22 +821,23 @@ Each entry: the symptom, the cause, the fix.
     extremum; a step that changes the selection breaks the ratio test. Use
     steps far below the smoothing temperature (the templates use 1e-5 to
     2.5e-6).
-13. **Reading the gradient check.** `gradient_check.py` models the central
-    differences of each direction as `c(e) = d + a e^2 + noise`, with noise
-    `s eps Q / e` (`Q` the sampled |q|, `s` from the fit residuals), and
-    needs at least three distinct steps and one direction. Flat directions
-    (every difference within 3 x round-off) pass only with a zero claimed
-    derivative and only when every direction is flat; a clearly nonzero
-    claim there fails. Two goodness-of-fit tests guard `FAIL`: a kink test
-    (second differences `J + b e` with `|J| > z sigma_J` and above 1e-3 of the
-    change) and a resolution test (residuals implying value noise above 1%
-    of the values); either gives `NOT SMOOTH`, never `FAIL`. Under a model
-    that fits, `PASS` needs the claim within max(1e-6 |d_hat|, z sigma) of
-    `d_hat` with z sigma below 1e-3 |d_hat|, and `FAIL` a miss beyond twice
-    that; anything else is `NOT TESTED`, with one suggestion, always larger
-    steps (or that no steps decide it). The `e^2` term is extrapolated only
-    when it is measurable, and a cancellation or inner-solve noise is
-    reported as such ("noisier than the value suggests").
+13. **Reading the gradient check.** `gradient_check.py` sweeps relative
+    steps from 1 to 1e-10 (each dof moves relative to its own size) and
+    applies three rules per direction: `PASS` when two consecutive steps
+    agree with the claim to 1e-6 (relative to the quantity's gradient
+    scale); `FAIL` when the differences nearest the smallest steps converge
+    (three consecutive steps agree to 1e-4) to a value more than 5e-4 from
+    the claim, unless a smaller step comes back to the claim; `NOT TESTED`
+    otherwise. Steps whose two values are identical or differ by a couple of
+    units in the last place are skipped: there the change is below the
+    precision of the value (a big offset, or a cancellation inside the
+    evaluation). Known limits: a kink exactly at x0 (e.g. `max` at a tie)
+    FAILs, because the central difference converges to the average of the
+    one-sided slopes; a quantity whose values are identical at every step
+    (a constant, or a cancellation of a value far beyond double precision)
+    is judged as flat; and a steep quantity on a large offset (say
+    `1e4 + sin(1e3 x)/1e3`) can be NOT TESTED, because round-off and
+    truncation leave no pair of steps accurate to 1e-6.
 14. **Unique row names.** The runner reports multipliers and values keyed by
     name, so a repeated name hides a row.
 15. **Conflicting constraints.** Thresholds no design can meet (e.g. a coil
@@ -1009,78 +1007,70 @@ simsopt ran, and each problem's outcome); the exit status is 0 when both pass.
 
 ### [scripts/gradient_check.py](../.claude/skills/simsopt-alm-setup/scripts/gradient_check.py)
 
-Taylor-test the objective and every constraint row of the problem in
-``alm_problem.py`` separately.
+Check the gradient of the objective and of every constraint row of the
+problem in ``alm_problem.py`` against finite differences over a wide sweep of
+step sizes.
 
-    PYTHONPATH=<problem dir> python gradient_check.py [--smoke] [--directions N] [--epsilons E1,E2,...] [--seed S]
+    PYTHONPATH=<problem dir> python gradient_check.py [--smoke] [--directions N] [--seed S]
+                                                     [--max-step E] [--min-step E] [--steps-per-decade N]
 
-For f and for each row q, ``run_directional_taylor_test`` evaluates q at
-``x0 +- e u`` along random unit directions ``u`` and forms the central
-differences ``c(e) = (q(x0 + e u) - q(x0 - e u)) / (2 e)``. Testing each row on
-its own matters, because in the augmented Lagrangian an inactive row
-(``max(0, multiplier + penalty * g) = 0``) drops out, and its gradient would go
-unchecked. Every quantity visits the same points, so each point's physics is
-evaluated once and shared. The steps are ``--epsilons``, else the problem's
-``taylor_epsilons``, else the library default: at least three distinct,
-positive, finite steps, and at least one direction (else exit 2).
+For f and for each row q separately (an inactive row drops out of the
+augmented Lagrangian, so its gradient must be checked on its own), along each
+of ``--directions`` random directions, ``run_directional_taylor_test``
+evaluates the central differences
 
-The verdict comes from an explicit model of the differences:
+    c(e) = (q(x0 + e v) - q(x0 - e v)) / (2 e |v|),    v = s * g,  s_i = max(|x0_i|, 1)
 
-    c(e) = d_true + a e^2 + noise(e),    noise(e) ~ s * eps * Q / e
+with ``g`` standard normal, so each dof moves relative to its own size (a
+current of 1e5 A and a coil coefficient of 1 m alike), at every relative step
+``e`` of a geometric sweep from ``--max-step`` down to ``--min-step``
+(``--steps-per-decade`` per decade), together with the claimed directional
+derivative ``d = grad q . v / |v|``. Every quantity visits the same points,
+so each point's physics is evaluated once. A step whose difference is not
+finite (e.g. a failed inner solve) is skipped.
 
-``eps`` is the float64 machine epsilon, ``Q`` the largest ``|q|`` sampled at
-that step (``q(x0)``, ``q(x0 +- e u)``), and ``s >= 1`` the noise scale: 1 is
-round-off of the values alone; the largest per-direction residual variance
-of the fit raises it when the values are noisier (a cancellation, an inner
-solve). In order, for each quantity:
+Resolution: a difference can only be trusted to its resolution ``r``, one
+unit in the last place of its two values over the step: a change below it is
+invisible to the evaluation. A step judges to a tolerance only when ``r`` is
+at most that tolerance times the direction's derivative scale
+``S = max(|d|, median |c|)``; with ``S = 0`` (a direction that never changes)
+every step judges. Three rules decide each direction:
 
-1. Flat directions: when every ``|c(e)|`` is within ``FLAT_FACTOR`` times the
-   round-off of the values (``eps * Q / e``, s = 1; exactly 0 when every
-   sampled value is 0), the quantity does not change measurably along that
-   direction. With the bound at the largest step, the claimed derivative
-   ``d`` agrees when ``|d| <= DECISION_LIMIT * bound`` (zero at this
-   resolution), fails when ``|d| > FAIL_FACTOR * bound``, and is undecided
-   in between (it predicts a change below the resolution). A quantity flat
-   along every direction with every claim agreeing passes ("flat along the
-   sampled directions"); flat directions never pass a quantity that changes
-   along others, since they carry no scale for its gradient.
-2. The fit: for every other direction, a weighted least-squares fit of
-   ``c = d_hat + a e^2`` over all the steps (weights from the noise model)
-   gives the residuals that set ``s`` (pooled over directions) and ``z``,
-   Student's t at ``CONFIDENCE`` (two-sided) for the pooled residual degrees
-   of freedom. When ``|a| > z`` times its standard error the extrapolated
-   ``d_hat`` is used; otherwise the ``e^2`` term is not measurable and
-   extrapolating it would only amplify the small steps' noise, so ``d_hat``
-   is the weighted mean of ``c``, with ``sigma`` the noise of its best single
-   step (rounding can repeat across steps, so averaging is not credited).
-3. Smoothness, two goodness-of-fit tests; either rejecting makes the
-   quantity ``not_smooth``, never ``failed``:
-   - kink: the second differences ``(q(x0 + e u) - 2 q(x0) + q(x0 - e u)) / e``
-     are fitted to ``J + b e`` (a smooth quantity has ``J = 0``: the one-sided
-     slopes agree as ``e -> 0``); the test rejects when ``|J| > z sigma_J``
-     and ``|J| > KINK_FRACTION`` of the largest ``|c|`` (a slope jump, not a
-     higher-order term);
-   - resolution: ``s * eps``, the value noise the residuals imply relative to
-     the values, exceeds ``NOISE_LIMIT``: no plausible noise explains the
-     misfit, so ``c = d + a e^2`` does not describe the data at these steps.
-4. Otherwise the model fits, and with ``delta = |d - d_hat|`` and
-   ``tolerance = max(RELATIVE_TOLERANCE |d_hat|, z sigma)``: ``failed`` when
-   ``delta > FAIL_FACTOR * tolerance``; ``passed`` when ``delta <= tolerance``
-   and ``z sigma <= DECISION_LIMIT |d_hat|``; undecided otherwise (including
-   a change within the noise, ``|d_hat| <= z sigma``).
+- PASS: two consecutive steps that resolve ``PASS_TOLERANCE`` both agree
+  with the claim: ``|c - d| <= PASS_TOLERANCE * max(|d|, |c|, G)``, with ``G``
+  the largest claimed directional derivative of the quantity (a direction
+  nearly orthogonal to the gradient is judged at the gradient's scale), or
+  both ``|c|`` and ``|d|`` are within the round-off floor of that step. The
+  floor is the spread (max - min) of the differences at the ``FLOOR_STEPS``
+  smallest judging steps, where round-off dominates, carried to each step as
+  1 / step, and at least ``ABSOLUTE_FLOOR_ULPS`` machine epsilons times the
+  objective's largest claimed directional derivative (so an exactly zero
+  row passes a round-off-size claim; the objective, not the largest row,
+  sets it, so one huge row cannot hide errors in the others). Two
+  consecutive steps rule out a coincidental crossing.
+- FAIL: among the steps that resolve ``FAIL_TOLERANCE``, runs of at least
+  ``CONVERGED_RUN`` consecutive steps whose neighbours agree to
+  ``CONVERGED_TOLERANCE`` (up to their resolution) have converged; the run
+  nearest the smallest steps judges (the derivative is the small-step limit;
+  a plateau at larger steps is the slope of a nearby kink or saturation). A
+  run of exact zeros judges only along a direction that never changes;
+  elsewhere identical values are the precision of the evaluation (e.g. a
+  large intermediate that cancels). With ``v`` the run's median, the
+  direction fails when ``|v - d|`` exceeds ``FAIL_TOLERANCE * max(|v|, |d|)``
+  (or, when ``|v|`` is within the run's floor, that floor) plus the run's
+  resolution, and no smaller judging step comes back within
+  ``FAIL_TOLERANCE`` of the claim.
+- NOT TESTED otherwise: nothing converged (a kink, noise, oscillation), the
+  steps cannot resolve the derivative, or the result is in between.
 
-A quantity is ``nonfinite`` if any value or difference is not finite;
-``failed`` if any direction fails (a flat one included); else ``not_smooth``
-if a smoothness test rejects; else ``passed`` if it is flat and agreeing
-along every direction, or some fitted direction passed; else ``not_tested``. A ``not_tested`` note gives at most one
-suggestion, derived from the model and never towards smaller steps: steps
-larger by the power of ten the round-off needs, or, when a fitted
-truncation ``a e^2`` that differs from 0 beyond the noise would exceed
-``TRUNCATION_LIMIT |d_hat|`` at those, that no step decides. A ``not_smooth`` note gives no
-step advice. The library's ratio test is reported (``max_ratio``) but does
-not decide. The last line printed is ``GRADIENT_CHECK {json}``; the exit
-status is 0 when every quantity passes, 1 otherwise, and 2 for invalid
-arguments.
+PASS takes precedence over FAIL. A quantity
+passes when every direction passes, fails when any direction fails, is
+``not_tested`` otherwise, and ``nonfinite`` when its value or claimed
+gradient at x0 is not finite. The note says what was seen; a NOT TESTED one
+asks to check at a nearby point or to inspect the quantity. The last line
+printed is ``GRADIENT_CHECK {json}`` (finite numbers only; ``null`` where
+undefined); the exit status is 0 when every quantity passes, 1 otherwise,
+and 2 for invalid arguments.
 
 ### [scripts/sign_check.py](../.claude/skills/simsopt-alm-setup/scripts/sign_check.py)
 

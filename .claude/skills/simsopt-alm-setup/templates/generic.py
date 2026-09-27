@@ -20,7 +20,7 @@ makes every row O(1). The physics depends on x alone, so the solver gets
 
 from __future__ import annotations
 
-from typing import NamedTuple, Optional, Tuple
+from typing import NamedTuple, Tuple
 
 import numpy as np
 
@@ -100,8 +100,6 @@ class GenericProblem:
     constraint_names = tuple(row.name for row in ROWS)
     # The sign probes are facts derived by hand, independent of every row.
     shared_source_rows: Tuple[str, ...] = ()
-    # None keeps run_directional_taylor_test's default steps.
-    taylor_epsilons: Optional[Tuple[float, ...]] = None
 
     def __init__(self, smoke: bool):
         validate_rows(ROWS)
