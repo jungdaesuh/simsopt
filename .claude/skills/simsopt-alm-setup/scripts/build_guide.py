@@ -1,0 +1,140 @@
+#!/usr/bin/env python
+"""Generate the human guide ``docs/alm_setup_guide.md`` from this skill's
+sources, so the guide and the skill cannot drift apart.
+
+    python build_guide.py           # write the guide
+    python build_guide.py --check   # exit 1, printing a diff, if the guide is stale
+
+The guide is ``SKILL.md`` without its frontmatter and its
+``<!-- skill-only -->`` ... ``<!-- /skill-only -->`` blocks (instructions for
+the agent alone), then every file of ``references/`` in ``REFERENCES`` order,
+then the docstring of every template and script. Headings move down one
+level under the guide's title; links between the sources become links to the
+guide's sections, and links to templates and scripts become repository paths.
+Nothing is written by hand in the guide: edit the sources and rerun this.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import difflib
+import re
+import sys
+from pathlib import Path
+from typing import Dict, List
+
+SKILL_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = SKILL_DIR.parents[2]
+GUIDE_PATH = REPO_ROOT / "docs" / "alm_setup_guide.md"
+REFERENCES = ("install", "api", "settings", "termination", "pitfalls")
+TEMPLATES = ("generic", "stage2", "boozer_single_stage", "run_alm")
+SCRIPTS = ("check_env", "smoke_toy", "gradient_check", "sign_check", "build_guide")
+
+TITLE = "# Setting up simsopt's ALM solver"
+INTRO = """\
+This guide covers installing the augmented-Lagrangian solver
+`simsopt.solve.alm` and setting up a constrained optimization with it. It is
+generated from the Claude Code skill in
+`.claude/skills/simsopt-alm-setup/` (`SKILL.md` and its `references/`), so it
+matches what the skill does. To follow it by hand, run the scripts and copy
+the templates yourself; where the steps say "the user", that is you."""
+
+SKILL_ONLY_BLOCK = re.compile(r"<!-- skill-only -->\n.*?<!-- /skill-only -->\n", re.DOTALL)
+FRONTMATTER = re.compile(r"\A---\n.*?\n---\n+", re.DOTALL)
+HEADING = re.compile(r"^(#+) ", re.MULTILINE)
+LINK = re.compile(r"\[([^\]]+)\]\(([^)#\s]+)(#[^)\s]*)?\)")
+FENCE = re.compile(r"^```.*?^```", re.MULTILINE | re.DOTALL)
+
+
+def anchor(title: str) -> str:
+    """GitHub's anchor of a heading: lower case, punctuation dropped, spaces to hyphens."""
+    kept = re.sub(r"[^\w\- ]", "", title.strip().lower())
+    return "#" + kept.replace(" ", "-")
+
+
+def first_heading(text: str) -> str:
+    return re.search(r"^# (.+)$", text, re.MULTILINE).group(1)
+
+
+def demote(text: str) -> str:
+    """Every heading one level down, outside code fences."""
+    pieces = []
+    position = 0
+    for fence in FENCE.finditer(text):
+        pieces.append(HEADING.sub(r"#\1 ", text[position:fence.start()]))
+        pieces.append(fence.group(0))
+        position = fence.end()
+    pieces.append(HEADING.sub(r"#\1 ", text[position:]))
+    return "".join(pieces)
+
+
+def rewrite_links(text: str, source_dir: Path, reference_titles: Dict[str, str]) -> str:
+    """Links to reference files become section links (a link named after the
+    file takes the section's title); links to other skill files become paths
+    from ``docs/``."""
+
+    def replace(match: re.Match) -> str:
+        label, target, fragment = match.group(1), match.group(2), match.group(3)
+        path = (source_dir / target).resolve()
+        if path.parent == SKILL_DIR / "references" and path.stem in reference_titles:
+            title = reference_titles[path.stem]
+            shown = title if label == path.name else label
+            return f"[{shown}]({fragment or anchor(title)})"
+        return f"[{label}](../{path.relative_to(REPO_ROOT).as_posix()}{fragment or ''})"
+
+    return LINK.sub(replace, text)
+
+
+def docstring_section(kind: str, name: str) -> str:
+    path = SKILL_DIR / kind / f"{name}.py"
+    docstring = ast.get_docstring(ast.parse(path.read_text()))
+    relative = path.relative_to(REPO_ROOT).as_posix()
+    return f"### [{kind}/{name}.py](../{relative})\n\n{docstring}\n"
+
+
+def render_guide() -> str:
+    reference_texts = {name: (SKILL_DIR / "references" / f"{name}.md").read_text() for name in REFERENCES}
+    reference_titles = {name: first_heading(text) for name, text in reference_texts.items()}
+    skill = SKILL_ONLY_BLOCK.sub("", FRONTMATTER.sub("", (SKILL_DIR / "SKILL.md").read_text()))
+    parts: List[str] = [demote(rewrite_links(skill, SKILL_DIR, reference_titles))]
+    parts.extend(
+        demote(rewrite_links(text, SKILL_DIR / "references", reference_titles))
+        for text in reference_texts.values()
+    )
+    files = ["## Templates and scripts\n"]
+    files.extend(docstring_section("templates", name) for name in TEMPLATES)
+    files.extend(docstring_section("scripts", name) for name in SCRIPTS)
+    parts.append("\n".join(files))
+    body = "\n".join(part.strip() + "\n" for part in parts)
+    contents = "\n".join(
+        f"- [{title}]({anchor(title)})" for title in re.findall(r"^## (.+)$", body, re.MULTILINE)
+    )
+    banner = ("<!-- Generated by .claude/skills/simsopt-alm-setup/scripts/build_guide.py "
+              "from the skill's sources. Do not edit; edit the skill and rerun it. -->")
+    return f"{banner}\n\n{TITLE}\n\n{INTRO}\n\n## Contents\n\n{contents}\n\n{body}"
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--check", action="store_true",
+                        help="compare with the committed guide instead of writing it")
+    args = parser.parse_args(argv)
+    guide = render_guide()
+    if not args.check:
+        GUIDE_PATH.write_text(guide)
+        print(f"wrote {GUIDE_PATH}")
+        return 0
+    current = GUIDE_PATH.read_text() if GUIDE_PATH.exists() else ""
+    if current == guide:
+        print(f"{GUIDE_PATH} is up to date")
+        return 0
+    sys.stdout.writelines(difflib.unified_diff(
+        current.splitlines(keepends=True), guide.splitlines(keepends=True),
+        fromfile=str(GUIDE_PATH), tofile="generated"))
+    print(f"{GUIDE_PATH} is stale: run {Path(__file__).relative_to(REPO_ROOT)}")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

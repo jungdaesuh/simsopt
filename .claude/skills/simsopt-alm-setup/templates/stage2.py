@@ -1,0 +1,301 @@
+#!/usr/bin/env python
+r"""Stage-2 coil optimization with the ALM solver: coils for a fixed target
+surface, with coil-regularity requirements as constraints instead of weights.
+
+Copy this file to ``alm_problem.py`` next to ``run_alm.py`` and edit the parts
+marked ``SETUP``. As shipped it is the problem of simsopt's
+``examples/2_Intermediate/stage_two_optimization_alm.py`` (the QA target of
+arXiv:2108.03711, four base coils), with f divided by its initial value and
+every row divided by its threshold, so that all of them are O(1):
+
+    minimize    f(x) / f(x0),  f = (1/2) \int |B.n|^2 ds + LENGTH_WEIGHT * sum_i CurveLength_i
+    subject to  (CC_MIN_DISTANCE - min coil-coil distance) / CC_MIN_DISTANCE    <= 0
+                (CS_MIN_DISTANCE - min coil-surface distance) / CS_MIN_DISTANCE <= 0
+                (max curvature_i - MAX_CURVATURE) / MAX_CURVATURE                <= 0  (each base coil)
+                (MeanSquaredCurvature_i - MAX_MEAN_SQUARED_CURVATURE)
+                    / MAX_MEAN_SQUARED_CURVATURE                                 <= 0  (each base coil)
+                (sum_i CurveLength_i - MAX_TOTAL_LENGTH) / MAX_TOTAL_LENGTH      <= 0  (if set)
+
+The distance and maximum-curvature rows are the smooth signed constraints of
+``simsopt.geo.signed_constraints``: log-sum-exp values never looser than the
+exact extremum, so a point feasible for the smooth row is feasible for the
+exact one. The physics depends on the coil dofs alone, so the solver gets
+``cached_alm_evaluator(physics)``. With ``HYBRID_QUARTET = True`` the evaluator
+also returns the exact ("hard") row values: the smooth values still define the
+augmented Lagrangian, while the hard ones decide feasibility and drive the
+multiplier update (read the skill's ``references/pitfalls.md`` first).
+"""
+
+from __future__ import annotations
+
+from functools import partial
+from pathlib import Path
+from typing import Callable, NamedTuple, Tuple
+
+import numpy as np
+from scipy.spatial.distance import cdist
+
+import simsopt
+from simsopt.field import BiotSavart, Current, coils_via_symmetries
+from simsopt.geo import (CurveLength, MeanSquaredCurvature, SurfaceRZFourier,
+                         create_equally_spaced_curves, curves_to_vtk)
+from simsopt.geo.signed_constraints import (smooth_max_curvature_signed_constraint,
+                                            smooth_min_curve_curve_signed_constraint,
+                                            smooth_min_curve_surface_signed_constraint)
+from simsopt.objectives import SquaredFlux
+from simsopt.solve.alm import (ALMPhysics, ALMResult, ALMSettings, alm_problem_physics,
+                               cached_alm_evaluator, signed_upper_bound)
+
+# SETUP: the target surface (a VMEC input file). The default is the QA target
+# shipped in a simsopt source checkout's tests/test_files.
+SURFACE_FILE = (Path(simsopt.__file__).resolve().parents[2] / "tests" / "test_files"
+                / "input.LandremanPaul2021_QA")
+
+# SETUP: the initial coils and the objective.
+NCOILS = 4             # base coils per half field period
+R0 = 1.0               # m, major radius of the initial circular coils
+R1 = 0.5               # m, minor radius of the initial circular coils
+CURRENT = 1e5          # A, initial current of every base coil (the first stays fixed)
+LENGTH_WEIGHT = 1e-6   # weight of the total coil length in f
+
+# SETUP: the constraint thresholds; None drops that row.
+CC_MIN_DISTANCE = 0.1              # m, coil to coil
+CS_MIN_DISTANCE = 0.3              # m, coil to surface
+MAX_CURVATURE = 5.0                # 1/m, each base coil
+MAX_MEAN_SQUARED_CURVATURE = 5.0   # 1/m^2, each base coil
+MAX_TOTAL_LENGTH = None            # m, sum over the base coils
+
+# SETUP: smoothing temperatures of the smooth rows, in the constrained
+# quantity's units. Smaller is closer to the exact value but less smooth.
+DISTANCE_TEMPERATURE = 0.005   # m
+CURVATURE_TEMPERATURE = 0.05   # 1/m
+
+# SETUP: True returns the hybrid quartet (exact values for feasibility and
+# the multiplier update); False uses the smooth values for everything.
+HYBRID_QUARTET = False
+
+OUT_DIR = Path("output_alm")
+
+# Row senses: quantity <= bound (UPPER_BOUND) or quantity >= bound (LOWER_BOUND).
+UPPER_BOUND = 1.0
+LOWER_BOUND = -1.0
+
+
+class SignProbe(NamedTuple):
+    """A point where the listed rows are known to be violated (g > 0) or
+    satisfied (g <= 0), independently of the row code."""
+
+    label: str
+    x: np.ndarray
+    violated: Tuple[str, ...]
+    satisfied: Tuple[str, ...]
+
+
+class RowSpec(NamedTuple):
+    """One constraint row. ``row(base_objective)`` returns the scaled
+    ``(signed value, gradient[, hard signed value])``; ``measure()`` is the
+    constrained quantity from an independent computation at the current dofs,
+    which the sign probes compare with ``bound`` from the side ``sense``,
+    ignoring points within ``margin`` of it."""
+
+    name: str
+    row: Callable
+    measure: Callable[[], float]
+    sense: float
+    bound: float
+    margin: float
+
+
+def scaled_row(row, scale, base_objective):
+    """``row(base_objective)`` with every item divided by ``scale`` > 0."""
+    return tuple(item / scale for item in row(base_objective))
+
+
+def min_curve_curve_distance(curves) -> float:
+    return float(min(np.min(cdist(curves[i].gamma(), curves[j].gamma()))
+                     for i in range(len(curves)) for j in range(i)))
+
+
+def min_curve_surface_distance(curves, surface) -> float:
+    points = surface.gamma().reshape((-1, 3))
+    return float(min(np.min(cdist(curve.gamma(), points)) for curve in curves))
+
+
+def mean_squared_curvature(curve) -> float:
+    arclength = np.linalg.norm(curve.gammadash(), axis=1)
+    return float(np.mean(curve.kappa() ** 2 * arclength) / np.mean(arclength))
+
+
+def total_length(curves) -> float:
+    return float(sum(np.mean(np.linalg.norm(curve.gammadash(), axis=1)) for curve in curves))
+
+
+class Stage2Problem:
+    """The problem-module contract of the simsopt-alm-setup skill (see its
+    ``references/api.md``) for Stage-2 coils."""
+
+    name = "stage2"
+    # Steps far below the smoothing temperatures keep the smooth rows in
+    # their smooth regime (see stage_two_optimization_alm.py's Taylor test).
+    taylor_epsilons = (1e-5, 5e-6, 2.5e-6)
+
+    def __init__(self, smoke: bool):
+        # SETUP: smoke runs a coarse surface and low-order coils.
+        quadrature_points = 12 if smoke else 32
+        self.order = 2 if smoke else 5
+        self.surface = SurfaceRZFourier.from_vmec_input(
+            SURFACE_FILE, range="half period", nphi=quadrature_points, ntheta=quadrature_points)
+        self.base_curves = create_equally_spaced_curves(
+            NCOILS, self.surface.nfp, stellsym=True, R0=R0, R1=R1, order=self.order)
+        base_currents = [Current(CURRENT) for _ in range(NCOILS)]
+        # The target field is zero, so fix one current to rule out zero currents.
+        base_currents[0].fix_all()
+        coils = coils_via_symmetries(self.base_curves, base_currents, self.surface.nfp, True)
+        self.biot_savart = BiotSavart(coils)
+        self.biot_savart.set_points(self.surface.gamma().reshape((-1, 3)))
+        self.curves = [coil.curve for coil in coils]
+        self.coil_lengths = [CurveLength(curve) for curve in self.base_curves]
+        # SETUP: the objective f, any simsopt Optimizable of the coil dofs.
+        unscaled = SquaredFlux(self.surface, self.biot_savart) + LENGTH_WEIGHT * sum(self.coil_lengths)
+        # f / f(x0): the stationarity tolerance becomes relative to the start.
+        self.objective_scale = float(unscaled.J())
+        self.objective = (1.0 / self.objective_scale) * unscaled
+        self.x0 = self.objective.x.copy()
+        self.row_specs = self._row_specs()
+        self.constraint_names = tuple(spec.name for spec in self.row_specs)
+        self.rows = tuple(spec.row for spec in self.row_specs)
+        self.evaluator = cached_alm_evaluator(self.physics)
+        self.settings = ALMSettings(
+            max_outer_iterations=3 if smoke else 10,  # each outer iteration is one multiplier update
+            # Rows are divided by their thresholds: 1e-4 is a violation of
+            # 0.01% of a threshold, below any engineering tolerance.
+            feasibility_tol=1e-4,
+            # f is divided by f(x0): 1e-4 asks for a 1e-4 relative gradient.
+            stationarity_tol=1e-4,
+        )
+        # maxiter is the L-BFGS-B budget of the whole minimize_alm call (all
+        # subproblems), not a per-subproblem limit; maxcor as in stage_two_optimization.py.
+        self.inner_options = {"maxiter": 40 if smoke else 4000, "maxcor": 300}
+
+    def _row_specs(self) -> Tuple[RowSpec, ...]:
+        # SETUP: one RowSpec per row; a new row needs a scaled row callable
+        # (e.g. partial(scaled_row, partial(signed_upper_bound, objective, bound), bound))
+        # and an independent measure of the same quantity for the sign probes.
+        specs = []
+        if CC_MIN_DISTANCE is not None:
+            specs.append(RowSpec(
+                name="coil_coil_distance",
+                row=partial(scaled_row, partial(smooth_min_curve_curve_signed_constraint, self.curves,
+                                                CC_MIN_DISTANCE, DISTANCE_TEMPERATURE), CC_MIN_DISTANCE),
+                measure=partial(min_curve_curve_distance, self.curves),
+                sense=LOWER_BOUND, bound=CC_MIN_DISTANCE, margin=10 * DISTANCE_TEMPERATURE))
+        if CS_MIN_DISTANCE is not None:
+            specs.append(RowSpec(
+                name="coil_surface_distance",
+                row=partial(scaled_row, partial(smooth_min_curve_surface_signed_constraint, self.curves,
+                                                self.surface, CS_MIN_DISTANCE, DISTANCE_TEMPERATURE),
+                            CS_MIN_DISTANCE),
+                measure=partial(min_curve_surface_distance, self.curves, self.surface),
+                sense=LOWER_BOUND, bound=CS_MIN_DISTANCE, margin=10 * DISTANCE_TEMPERATURE))
+        for i, curve in enumerate(self.base_curves):
+            if MAX_CURVATURE is not None:
+                specs.append(RowSpec(
+                    name=f"max_curvature_{i}",
+                    row=partial(scaled_row, partial(smooth_max_curvature_signed_constraint, curve,
+                                                    MAX_CURVATURE, CURVATURE_TEMPERATURE), MAX_CURVATURE),
+                    measure=lambda curve=curve: float(np.max(curve.kappa())),
+                    sense=UPPER_BOUND, bound=MAX_CURVATURE, margin=10 * CURVATURE_TEMPERATURE))
+        for i, curve in enumerate(self.base_curves):
+            if MAX_MEAN_SQUARED_CURVATURE is not None:
+                specs.append(RowSpec(
+                    name=f"mean_squared_curvature_{i}",
+                    row=partial(scaled_row, partial(signed_upper_bound, MeanSquaredCurvature(curve),
+                                                    MAX_MEAN_SQUARED_CURVATURE), MAX_MEAN_SQUARED_CURVATURE),
+                    measure=partial(mean_squared_curvature, curve),
+                    sense=UPPER_BOUND, bound=MAX_MEAN_SQUARED_CURVATURE, margin=1e-6))
+        if MAX_TOTAL_LENGTH is not None:
+            specs.append(RowSpec(
+                name="total_coil_length",
+                row=partial(scaled_row, partial(signed_upper_bound, sum(self.coil_lengths), MAX_TOTAL_LENGTH),
+                            MAX_TOTAL_LENGTH),
+                measure=partial(total_length, self.base_curves),
+                sense=UPPER_BOUND, bound=MAX_TOTAL_LENGTH, margin=1e-6))
+        return tuple(specs)
+
+    def physics(self, x) -> ALMPhysics:
+        if not HYBRID_QUARTET:
+            return alm_problem_physics(x, base_objective=self.objective, inequalities=self.rows)
+        self.objective.x = x
+        values = [row(self.objective) for row in self.rows]
+        surrogate = np.array([value[0] for value in values])
+        # A row without a hard value (signed_upper_bound) is exact already.
+        hard = np.array([value[2] if len(value) > 2 else value[0] for value in values])
+        hard_violation = np.maximum(hard, 0.0)
+        return ALMPhysics(
+            base_value=float(self.objective.J()),
+            base_grad=np.asarray(self.objective.dJ(), dtype=float),
+            constraint_values=surrogate,
+            constraint_grads=tuple(value[1] for value in values),
+            extras={
+                # Feasibility and the multiplier update read the hard values.
+                "dual_update_values": hard,
+                "feasibility_values": hard_violation,
+                "max_feasibility_violation": float(np.max(hard_violation)),
+                # The hybrid quartet: all four keys or none.
+                "hard_signed_constraint_values": hard,
+                "hard_violation_values": hard_violation,
+                "surrogate_signed_constraint_values": surrogate,
+                "hard_dual_update_values": hard,
+            },
+        )
+
+    def solver_callbacks(self) -> dict:
+        """Extra ``minimize_alm`` arguments; a stateless physics needs none."""
+        return {}
+
+    def _circular_coils_x(self, minor_radius: float) -> np.ndarray:
+        """x0 with every base coil a circle of ``minor_radius`` (currents kept)."""
+        circles = create_equally_spaced_curves(
+            NCOILS, self.surface.nfp, stellsym=True, R0=R0, R1=minor_radius, order=self.order)
+        for curve, circle in zip(self.base_curves, circles):
+            curve.x = circle.x
+        x = self.objective.x.copy()
+        self.objective.x = self.x0
+        return x
+
+    def sign_probes(self) -> Tuple[SignProbe, ...]:
+        """Circular coils of three minor radii; each row's status comes from its
+        independent ``measure``, and rows within ``margin`` of the bound are
+        not asserted."""
+        probes = []
+        for minor_radius in (R1, 0.9, 0.15):
+            x = self._circular_coils_x(minor_radius)
+            self.objective.x = x
+            expected = [spec.sense * (spec.measure() - spec.bound) / spec.margin for spec in self.row_specs]
+            probes.append(SignProbe(
+                label=f"circular coils of minor radius {minor_radius} m",
+                x=x,
+                violated=tuple(spec.name for spec, e in zip(self.row_specs, expected) if e > 1.0),
+                satisfied=tuple(spec.name for spec, e in zip(self.row_specs, expected) if e < -1.0),
+            ))
+        self.objective.x = self.x0
+        return tuple(probes)
+
+    def finish(self, result: ALMResult) -> dict:
+        """Set the coils to the returned x (possibly a restored best-feasible
+        iterate) and write them out."""
+        self.objective.x = result.x
+        OUT_DIR.mkdir(exist_ok=True)
+        curves_to_vtk(self.curves, str(OUT_DIR / "curves_opt_alm"))
+        self.biot_savart.save(str(OUT_DIR / "biot_savart_opt_alm.json"))
+        return {
+            "flux_objective": float(result.objective) * self.objective_scale,
+            "min_coil_coil_distance": min_curve_curve_distance(self.curves),
+            "min_coil_surface_distance": min_curve_surface_distance(self.curves, self.surface),
+            "max_curvature": float(max(np.max(curve.kappa()) for curve in self.base_curves)),
+            "output_dir": str(OUT_DIR.resolve()),
+        }
+
+
+def build_problem(smoke: bool = False) -> Stage2Problem:
+    return Stage2Problem(smoke)
