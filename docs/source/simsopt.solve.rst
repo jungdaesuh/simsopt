@@ -1,6 +1,14 @@
 simsopt.solve package
 =====================
 
+Subpackages
+-----------
+
+.. toctree::
+   :maxdepth: 4
+
+   simsopt.solve.alm
+
 Submodules
 ----------
 
