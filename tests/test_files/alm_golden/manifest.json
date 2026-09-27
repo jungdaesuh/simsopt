@@ -1,0 +1,180 @@
+{
+ "format": "alm_library_golden_trajectory_v1",
+ "regenerate": "OMP_NUM_THREADS=1 python tests/test_files/alm_golden/generate_alm_golden.py",
+ "environment": {
+  "python": "3.11.15",
+  "numpy": "2.4.6",
+  "scipy": "1.17.1"
+ },
+ "source_blob_ids": {
+  "simsopt/solve/alm/__init__.py": "62c2dba05f9179a246579b4f1b44a4fa81d98d7a",
+  "simsopt/solve/alm/boundary.py": "c37ac5aa0802154079d9b0ccacfe99d6be54a57c",
+  "simsopt/solve/alm/checkpoint.py": "8470398e15c278805a8366f9e695c5d9d3a343fc",
+  "simsopt/solve/alm/continuation.py": "e458c8e91bc4082b0cf34fc5c20f7a01ab7caf2d",
+  "simsopt/solve/alm/control.py": "9f43dd5784d7432460f23fcd3f904e890d07a189",
+  "simsopt/solve/alm/core.py": "38dd770c485e28b05ea443f48d464572d9f80e22",
+  "simsopt/solve/alm/evaluation.py": "e57b545bbac65865ce46bb82af9758942a190e63",
+  "simsopt/solve/alm/events.py": "f3a521cabfc03802bb33758be23dada83feb08db",
+  "simsopt/solve/alm/history.py": "e47c9c8ee81f403bf03392525062cba40baa66d1",
+  "simsopt/solve/alm/hybrid.py": "d1574700bcaee83d36ffbe243ec462c0eba66049",
+  "simsopt/solve/alm/inner.py": "ba63046a8e086e0adb35b8069680c36c88916277",
+  "simsopt/solve/alm/policy.py": "c4eb83aed12632f495537c69322fd377edd94ed7",
+  "simsopt/solve/alm/problem.py": "7b91935f0870777bc9e485c0851d7a833c4e851e",
+  "simsopt/solve/alm/taylor.py": "9fc6818b9e7f5df112b345713f0c3df31da7a875",
+  "alm_golden_scenarios.py": "87b38c9f5eca7a3e0820848faa0dcbc7830f33e1"
+ },
+ "outcome_union": [
+  "action:constraints_inactive_converged",
+  "action:constraints_inactive_stall",
+  "action:converged",
+  "action:dual_update",
+  "action:infeasible_stall_penalty_increase",
+  "action:penalty_cap_reached",
+  "action:penalty_increase",
+  "action:process_budget_exhausted",
+  "action:signal_mismatch_penalty_increase",
+  "action:signal_mismatch_stall",
+  "action:signal_mismatch_subproblem_limit_penalty_increase",
+  "action:subproblem_continue",
+  "action:subproblem_limit",
+  "action:subproblem_limit_penalty_increase",
+  "action:sufficient_decrease_hold",
+  "callback:accepted_callback",
+  "callback:evaluate_problem",
+  "callback:inner_callback",
+  "callback:on_outer_boundary",
+  "callback:on_outer_step",
+  "callback:outer_state_callback",
+  "callback:restore_incumbent_state",
+  "callback:snapshot_accepted_state",
+  "dual_update_penalty_raise",
+  "flag:dual_update_penalty_increase",
+  "flag:infeasible_stall",
+  "flag:inner_false_success",
+  "flag:multiplier_cap_binding",
+  "flag:signal_mismatch_active",
+  "inner_attempts_retried",
+  "inner_maxiter_budget_spent",
+  "nonfinite_evaluation",
+  "restored:final_iterate_infeasible",
+  "restored:final_iterate_worse_than_best_feasible",
+  "resumed",
+  "smoothing_changed",
+  "termination:constraints_inactive_converged",
+  "termination:constraints_inactive_stall",
+  "termination:converged",
+  "termination:dual_update",
+  "termination:max_outer_after_dual_update",
+  "termination:max_outer_after_signal_mismatch_penalty_increase",
+  "termination:max_outer_restored_best_feasible",
+  "termination:penalty_cap_reached",
+  "termination:penalty_cap_reached_restored_best_feasible",
+  "termination:plateau_stall",
+  "termination:process_budget_exhausted",
+  "termination:signal_mismatch_stall"
+ ],
+ "scenarios": [
+  {
+   "scenario": "toy_convex",
+   "fixture": "toy_convex.json",
+   "sha256": "b26b3256997f044a87fa9ea7d0e2fcd3920faeaeec63a466d45a14a30c666c38",
+   "bytes": 21526
+  },
+  {
+   "scenario": "penalty_ramp_to_cap",
+   "fixture": "penalty_ramp_to_cap.json",
+   "sha256": "e3e600afec080fd6c2a7af8409e397eae6676d204b9eecf10783daf8c8c00efc",
+   "bytes": 85292
+  },
+  {
+   "scenario": "resume_penalty_ramp_mid_run",
+   "fixture": "resume_penalty_ramp_mid_run.json",
+   "sha256": "1ab38f3b23994eed708d86b1358953322f255f185087741335ccb0d9607c2e8c",
+   "bytes": 89371
+  },
+  {
+   "scenario": "hybrid_mismatch_repair",
+   "fixture": "hybrid_mismatch_repair.json",
+   "sha256": "82760cca4b8cd328409c1825008473c5d0ef15c3bb0ee143b836c652fc1326d6",
+   "bytes": 67233
+  },
+  {
+   "scenario": "hybrid_mismatch_penalty_increase",
+   "fixture": "hybrid_mismatch_penalty_increase.json",
+   "sha256": "e989458b4946447f26dd5bffa1ae059de489b906976f535d488640cc5c1dbc88",
+   "bytes": 46317
+  },
+  {
+   "scenario": "hybrid_mismatch_stall",
+   "fixture": "hybrid_mismatch_stall.json",
+   "sha256": "97ed02f3843e6f58968292657cf6c0d25ca00f9a0e7eab02e0a483f892c73c97",
+   "bytes": 30792
+  },
+  {
+   "scenario": "constraints_inactive_stall",
+   "fixture": "constraints_inactive_stall.json",
+   "sha256": "2c6c8f8fb7d92a6fc1d0312877f258c32f7ef6eef5aad7c7e5d543dbac68fdd7",
+   "bytes": 28052
+  },
+  {
+   "scenario": "plateau_restore_best_feasible",
+   "fixture": "plateau_restore_best_feasible.json",
+   "sha256": "92349eba92295735a28a0c2124e8772d8402f6afdf4188ca52c52befd0044540",
+   "bytes": 50661
+  },
+  {
+   "scenario": "resume_plateau_best_feasible",
+   "fixture": "resume_plateau_best_feasible.json",
+   "sha256": "61a9acae2c35267394753736e9c5bfc1f83de05c42935d86cd39d5f1e59cc2a8",
+   "bytes": 51547
+  },
+  {
+   "scenario": "trust_radius_retries",
+   "fixture": "trust_radius_retries.json",
+   "sha256": "13094063a3704c240a46bed4ad56a4b8d6eadc22dc4cf5ce5159a28bf2a60fc7",
+   "bytes": 70326
+  },
+  {
+   "scenario": "frozen_warm_start_restore",
+   "fixture": "frozen_warm_start_restore.json",
+   "sha256": "85b4337333cdea2dac0d5150fb27fe639483a9b5d44e4759be84f7c51cace70d",
+   "bytes": 147620
+  },
+  {
+   "scenario": "cached_physics_smoothing",
+   "fixture": "cached_physics_smoothing.json",
+   "sha256": "82c88029742206643ed034a92b27d9057f5b7033a48bc88c41c5f5aae3350d64",
+   "bytes": 49198
+  },
+  {
+   "scenario": "multiplier_cap_process_budget",
+   "fixture": "multiplier_cap_process_budget.json",
+   "sha256": "fd926c5ac88e937f35fa5714b307770979a0e8ee10b5c0033254543a3b9bbde2",
+   "bytes": 55711
+  },
+  {
+   "scenario": "inner_iteration_budget",
+   "fixture": "inner_iteration_budget.json",
+   "sha256": "3203a0162925cd2d16a642298158440f6ce0b941041396551401b3d22f630169",
+   "bytes": 20196
+  },
+  {
+   "scenario": "dual_update_penalty_cap",
+   "fixture": "dual_update_penalty_cap.json",
+   "sha256": "6de8a3f91274acf3a23fd55e81d8fcb554f831c8e784f757b4be05d1b67f16f3",
+   "bytes": 18464
+  },
+  {
+   "scenario": "preinner_converged",
+   "fixture": "preinner_converged.json",
+   "sha256": "cab1f4e7bb623f1d84e72c09324cf7ea6a394244f4e09ebcbe6680b1a6e8c721",
+   "bytes": 14686
+  },
+  {
+   "scenario": "zero_inner_budget",
+   "fixture": "zero_inner_budget.json",
+   "sha256": "602ab252e6ccd290785d38ff21f7a17c1696c7c75cf8944e9fd972beab500116",
+   "bytes": 18922
+  }
+ ]
+}
