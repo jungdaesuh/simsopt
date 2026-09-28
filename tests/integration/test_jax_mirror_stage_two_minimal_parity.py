@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from contextlib import chdir
 from pathlib import Path
 
@@ -22,6 +23,15 @@ from simsopt_jax.examples import ExecutionScale
 from simsopt_jax.examples.stage_two_minimal import MINIMAL_STAGE_TWO_NATIVE_ITERATIONS
 from simsopt_jax.solve.driver import Driver
 
+# venv site-packages/tests shadows the repo tests package, so the helper
+# is imported as a top-level module from the tests/ directory.
+_TESTS_ROOT = str(Path(__file__).resolve().parents[1])
+if _TESTS_ROOT not in sys.path:
+    sys.path.append(_TESTS_ROOT)
+from parity_native_cpu import run_native_cpu_child
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
 # Every official number below comes from the tracked fixture of the official
 # run of examples/1_Simple/stage_two_optimization_minimal.py at upstream
 # 9e027eac38028d57aa23777be52a781aa860e347; none is pasted here as a literal.
@@ -41,6 +51,24 @@ def _official_objective(scale: ExecutionScale):
     return build_native_evaluator_for_configuration(
         _scale_configuration(scale)
     ).objective
+
+
+# The official objective was captured at OMP_NUM_THREADS=1 (the fixture's
+# ``capture.threads``). SquaredFlux sums its quadrature terms in an OpenMP
+# reduction (src/simsoptpp/integral_BdotN.cpp, as upstream), whose bits depend
+# on the thread team, so the value is reproduced bit for bit only in a child
+# whose OpenMP is pinned before the extension loads.
+_NATIVE_DEFAULT_INITIAL_OBJECTIVE_CHILD = """\
+from examples.jax.parity.cases.native_stage_two_optimization_minimal import (
+    _scale_configuration,
+    build_native_evaluator_for_configuration,
+)
+
+objective = build_native_evaluator_for_configuration(
+    _scale_configuration("native_default")
+).objective
+print(repr(float(objective.J())))
+"""
 
 
 def test_minimal_currents_carry_the_official_scaled_parametrization() -> None:
@@ -66,7 +94,11 @@ def test_minimal_currents_carry_the_official_scaled_parametrization() -> None:
         np.asarray(objective.x, dtype=np.float64)[current_indices],
         np.ones(3),
     )
-    assert float(objective.J()) == OFFICIAL_INITIAL_OBJECTIVE
+    completed = run_native_cpu_child(
+        _NATIVE_DEFAULT_INITIAL_OBJECTIVE_CHILD, repo_root=_REPO_ROOT
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert float(completed.stdout) == OFFICIAL_INITIAL_OBJECTIVE
 
 
 def test_minimal_official_endpoint_is_admitted_as_a_budget_exit() -> None:
