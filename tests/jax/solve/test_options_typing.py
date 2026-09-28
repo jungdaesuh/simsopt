@@ -4,7 +4,6 @@ import pytest
 from simsopt_jax.solve.dispatch import least_squares, minimize
 from simsopt_jax.solve import (
     Driver,
-    OptaxAdamOptions,
     ScipyLBFGSBOptions,
     SimsoptAdamOptions,
     SimsoptLMGMRESOptions,
@@ -25,7 +24,7 @@ def test_minimize_rejects_options_for_the_wrong_driver():
             _value_and_grad,
             np.zeros(2),
             driver=Driver.SCIPY_LBFGSB,
-            options=OptaxAdamOptions(maxiter=1),
+            options=SimsoptAdamOptions(maxiter=1),
         )
 
 

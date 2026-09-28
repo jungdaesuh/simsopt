@@ -22,7 +22,7 @@ from examples.jax._lane_environment import HOST_THREAD_VARIABLES
 SNAPSHOT_LANE_IDENTITY_SCHEMA_ID: Final = (
     "single-stage-compute-graph-lane-snapshot-identity-v2"
 )
-SnapshotProfileId = Literal["native_cpu", "jax_gpu_fast", "jax_gpu_optax"]
+SnapshotProfileId = Literal["native_cpu", "jax_gpu_fast"]
 
 
 @dataclass(frozen=True)
@@ -552,7 +552,7 @@ def load_snapshot_lane_identity(path: Path) -> SnapshotLaneIdentity:
     ):
         raise ValueError("snapshot lane identity schema is invalid")
     profile_value = document.get("profile_id")
-    if profile_value not in ("native_cpu", "jax_gpu_fast", "jax_gpu_optax"):
+    if profile_value not in ("native_cpu", "jax_gpu_fast"):
         raise ValueError("snapshot lane identity profile is invalid")
     profile_id: SnapshotProfileId = profile_value
     expected_lane = "native-cpu" if profile_id == "native_cpu" else "jax-gpu"

@@ -5314,7 +5314,7 @@ def test_public_alm_factory_reuses_bundle_from_an_explicit_session():
 
 @pytest.mark.parametrize(
     "objective_method",
-    ["lm-minpack-ondevice", "optimistix-lm-ondevice"],
+    ["lm-minpack-ondevice"],
 )
 def test_traceable_cache_state_accepts_ondevice_least_squares_methods(
     monkeypatch,

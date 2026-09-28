@@ -8,7 +8,6 @@ from simsopt_jax.geo.optimizers.optimizer import jax_least_squares, jax_minimize
 from simsopt_jax.solve.dispatch import least_squares, minimize
 from simsopt_jax.solve import (
     Driver,
-    OptimistixLMOptions,
     ScipyBFGSOptions,
     ScipyLBFGSBOptions,
     SimsoptAdamHostOptions,
@@ -326,31 +325,6 @@ def test_old_lm_minpack_ondevice_call_matches_new_qr_bridge_driver():
         jnp.array([0.0, 0.0]),
         driver=Driver.SIMSOPT_LM_QR,
         options=SimsoptLMQROptions(maxiter=20),
-    )
-
-    _assert_same_core_result(old, new)
-
-
-def test_old_optimistix_lm_ondevice_call_matches_new_optimistix_driver():
-    def residual(x):
-        return x - jnp.array([1.0, -2.0])
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        old = jax_least_squares(
-            residual,
-            jnp.array([0.0, 0.0]),
-            method="optimistix-lm-ondevice",
-            maxiter=20,
-        )
-    new = least_squares(
-        residual,
-        jnp.array([0.0, 0.0]),
-        driver=Driver.OPTIMISTIX_LM,
-        options=OptimistixLMOptions(
-            maxiter=20,
-            materialize_dense_linearization=True,
-        ),
     )
 
     _assert_same_core_result(old, new)

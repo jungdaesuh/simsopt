@@ -22,12 +22,12 @@ class _OptimizeIntermediateResult(Protocol):
     fun: float
 
 
-_LaneTimingStrategy = Literal["native_cpu", "jax_gpu_custom", "jax_gpu_optax"]
+_LaneTimingStrategy = Literal["native_cpu", "jax_gpu_custom"]
 
 
 @pytest.mark.parametrize(
     "lane_strategy",
-    ("native_cpu", "jax_gpu_custom", "jax_gpu_optax"),
+    ("native_cpu", "jax_gpu_custom"),
 )
 def test_single_stage_lane_strategies_share_the_recorded_timing_window(
     tmp_path: Path,
@@ -82,7 +82,7 @@ def test_single_stage_lane_strategies_share_the_recorded_timing_window(
                 options={"gtol": 1.0e-12, "maxiter": 4},
             )
             endpoint_parameters = np.asarray(optimizer_result.x, dtype=np.float64)
-        elif lane_strategy == "jax_gpu_custom":
+        else:
             from simsopt_jax.geo.optimizer_host_lbfgs import (
                 minimize_lbfgs_host_core,
             )
@@ -103,30 +103,6 @@ def test_single_stage_lane_strategies_share_the_recorded_timing_window(
                 optimizer_result.x_k,
                 dtype=np.float64,
             )
-        else:
-            jnp = pytest.importorskip("jax.numpy")
-            pytest.importorskip("optax")
-            from simsopt_jax.geo.optimizers.optimizer import target_minimize
-
-            target_device = jnp.asarray(target)
-
-            def jax_value_and_grad(x):
-                residual = x - target_device
-                return jnp.vdot(residual, residual), 2.0 * residual
-
-            optimizer_result = target_minimize(
-                jax_value_and_grad,
-                jnp.asarray(x0),
-                method="optax-lbfgs-ondevice",
-                tol=1.0e-12,
-                maxiter=4,
-                options={"maxcor": 4, "maxls": 10},
-                value_and_grad=True,
-                progress_callback=lambda iteration, objective, gradient_norm: (
-                    recorder.record(iteration, objective)
-                ),
-            )
-            endpoint_parameters = np.asarray(optimizer_result.x, dtype=np.float64)
         phase_events.append("optimizer_finished")
 
     clock[0] += endpoint_reporting_seconds
@@ -154,12 +130,8 @@ def test_single_stage_lane_strategies_share_the_recorded_timing_window(
     assert np.isfinite(endpoint_objective)
 
 
-def test_measurement_execution_allows_backend_selection_without_recording() -> None:
-    request = MeasurementExecution(optimizer_backend="optax-lbfgs")
-
-    assert request.trajectory_path is None
-    assert request.optimizer_backend == "optax-lbfgs"
-    with pytest.raises(ValueError, match="instrumentation path or optimizer backend"):
+def test_measurement_execution_requires_an_instrumentation_path() -> None:
+    with pytest.raises(ValueError, match="requires an instrumentation path"):
         MeasurementExecution()
 
 
@@ -525,60 +497,3 @@ def test_jax_host_lbfgs_recording_does_not_change_solver_result(
     assert len(records) == recorded.k
     assert [record["iteration"] for record in records] == list(range(1, recorded.k + 1))
     assert records[-1]["objective"] == recorded.f_k
-
-
-def test_optax_lbfgs_recording_does_not_change_solver_result(
-    tmp_path: Path,
-) -> None:
-    pytest.importorskip("jax")
-    pytest.importorskip("optax")
-    jnp = pytest.importorskip("jax.numpy")
-    from simsopt_jax.geo.optimizers.optimizer import target_minimize
-
-    x0 = jnp.asarray([4.0, -5.0], dtype=jnp.float64)
-    target = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
-
-    def value_and_grad(x):
-        residual = x - target
-        return jnp.vdot(residual, residual), 2.0 * residual
-
-    options = {"maxcor": 4, "maxls": 10}
-    plain = target_minimize(
-        value_and_grad,
-        x0,
-        method="optax-lbfgs-ondevice",
-        tol=1.0e-12,
-        maxiter=4,
-        options=options,
-        value_and_grad=True,
-    )
-
-    path = tmp_path / "trajectory.jsonl"
-    with OptimizationTrajectoryRecorder(path) as recorder:
-        recorded = target_minimize(
-            value_and_grad,
-            x0,
-            method="optax-lbfgs-ondevice",
-            tol=1.0e-12,
-            maxiter=4,
-            options=options,
-            value_and_grad=True,
-            progress_callback=lambda iteration, objective, gradient_norm: (
-                recorder.record(
-                    iteration,
-                    objective,
-                )
-            ),
-        )
-
-    np.testing.assert_array_equal(recorded.x, plain.x)
-    assert recorded.fun == plain.fun
-    assert recorded.nfev == plain.nfev
-    assert recorded.njev == plain.njev
-
-    records = [json.loads(line) for line in path.read_text().splitlines()]
-    assert len(records) == recorded.nit
-    assert [record["iteration"] for record in records] == list(
-        range(1, recorded.nit + 1)
-    )
-    assert records[-1]["objective"] == recorded.fun

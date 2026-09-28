@@ -6,7 +6,6 @@ from scipy.optimize import OptimizeResult
 from simsopt_jax.solve import (
     Driver,
     InverseHessianOperator,
-    OptaxLBFGSOptions,
     SimsoptBFGSCallbackEvent,
     SimsoptBFGSOptions,
     SimsoptLBFGSBOptions,
@@ -47,14 +46,6 @@ def test_every_minimize_driver_reaches_documented_dispatch_path(monkeypatch):
         calls.append(("scipy", driver.value, type(options).__name__, callback))
         return _fake_result()
 
-    def optax_minimize(_fn, _x0, *, driver, options, callback):
-        calls.append(("optax", driver.value, type(options).__name__, callback))
-        return _fake_result()
-
-    def optimistix_minimize(_fn, _x0, *, options, callback):
-        calls.append(("optimistix", type(options).__name__, callback))
-        return _fake_result()
-
     def reference_minimize(*_args, **kwargs):
         calls.append(("legacy_reference", kwargs["method"]))
         return _fake_result()
@@ -64,17 +55,12 @@ def test_every_minimize_driver_reaches_documented_dispatch_path(monkeypatch):
         return _fake_result()
 
     monkeypatch.setattr(dispatch, "_run_scipy_minimize", scipy_minimize)
-    monkeypatch.setattr(dispatch, "_run_optax_minimize", optax_minimize)
-    monkeypatch.setattr(dispatch, "_run_optimistix_minimize", optimistix_minimize)
     monkeypatch.setattr(legacy_optimizer, "reference_minimize", reference_minimize)
     monkeypatch.setattr(legacy_optimizer, "target_minimize", target_minimize)
 
     for driver in [
         Driver.SCIPY_LBFGSB,
         Driver.SCIPY_BFGS,
-        Driver.OPTAX_LBFGS,
-        Driver.OPTAX_ADAM,
-        Driver.OPTIMISTIX_LBFGS,
         Driver.SIMSOPT_LBFGSB,
         Driver.SIMSOPT_BFGS,
         Driver.SIMSOPT_TRACE_LBFGS,
@@ -87,9 +73,6 @@ def test_every_minimize_driver_reaches_documented_dispatch_path(monkeypatch):
     assert calls == [
         ("scipy", "scipy_lbfgsb", "ScipyLBFGSBOptions", None),
         ("scipy", "scipy_bfgs", "ScipyBFGSOptions", None),
-        ("optax", "optax_lbfgs", "OptaxLBFGSOptions", None),
-        ("optax", "optax_adam", "OptaxAdamOptions", None),
-        ("optimistix", "OptimistixLBFGSOptions", None),
         ("legacy_target", "lbfgs-ondevice"),
         ("legacy_target", "bfgs-ondevice"),
         ("legacy_reference", "lbfgs-trace"),
@@ -105,10 +88,6 @@ def test_every_least_squares_driver_reaches_documented_dispatch_path(monkeypatch
         calls.append(("scipy_lm", type(options).__name__))
         return _fake_result()
 
-    def optimistix_lm(_fn, _x0, *, options):
-        calls.append(("optimistix_lm", type(options).__name__))
-        return _fake_result()
-
     def reference_least_squares(*_args, **kwargs):
         calls.append(("legacy_reference", kwargs["method"]))
         return _fake_result()
@@ -118,7 +97,6 @@ def test_every_least_squares_driver_reaches_documented_dispatch_path(monkeypatch
         return _fake_result()
 
     monkeypatch.setattr(dispatch, "_scipy_lm_result", scipy_lm)
-    monkeypatch.setattr(dispatch, "_run_optimistix_lm", optimistix_lm)
     monkeypatch.setattr(
         legacy_optimizer, "reference_least_squares", reference_least_squares
     )
@@ -126,7 +104,6 @@ def test_every_least_squares_driver_reaches_documented_dispatch_path(monkeypatch
 
     for driver in [
         Driver.SCIPY_LM,
-        Driver.OPTIMISTIX_LM,
         Driver.SIMSOPT_LM_GMRES_HOST,
         Driver.SIMSOPT_LM_GMRES,
         Driver.SIMSOPT_LM_QR,
@@ -136,7 +113,6 @@ def test_every_least_squares_driver_reaches_documented_dispatch_path(monkeypatch
 
     assert calls == [
         ("scipy_lm", "ScipyLMOptions"),
-        ("optimistix_lm", "OptimistixLMOptions"),
         ("legacy_reference", "lm"),
         ("legacy_target", "lm-ondevice"),
         ("legacy_target", "lm-minpack-ondevice"),
@@ -250,24 +226,6 @@ def test_simsopt_lbfgsb_public_result_preserves_inverse_hessian_operator(monkeyp
         public_inverse_hessian(np.asarray([1.0, 0.0], dtype=np.float64)),
         inverse_hessian(np.asarray([1.0, 0.0], dtype=np.float64)),
     )
-
-
-def test_optax_lbfgs_default_memory_size_matches_upstream_optax(monkeypatch):
-    captured = {}
-
-    def optax_minimize(_fn, _x0, *, driver, options, callback):
-        captured["driver"] = driver
-        captured["options"] = options
-        captured["callback"] = callback
-        return _fake_result()
-
-    monkeypatch.setattr(dispatch, "_run_optax_minimize", optax_minimize)
-
-    minimize(_value_and_grad, np.zeros(2), driver=Driver.OPTAX_LBFGS)
-
-    assert captured["driver"] is Driver.OPTAX_LBFGS
-    assert isinstance(captured["options"], OptaxLBFGSOptions)
-    assert captured["options"].memory_size == 10
 
 
 def test_simsopt_minimize_callback_adapter_emits_typed_event(monkeypatch):

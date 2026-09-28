@@ -13,8 +13,6 @@ Least-squares methods:
     residual-vector objectives on the target lane.
   - ``method="lm-minpack-ondevice"``: trace-safe dense-QR
     Levenberg-Marquardt for residual-vector objectives on the target lane.
-  - ``method="optimistix-lm-ondevice"``: Optimistix Levenberg-Marquardt lane
-    with a Lineax LSMR inner solve.
 
 LM family note:
   Neither ``"lm"`` nor ``"lm-ondevice"`` is a port of MINPACK ``lmder``
@@ -46,12 +44,6 @@ LM family note:
   augmented-system step, so it matches MINPACK's QR conditioning model at
   tolerance level without claiming MINPACK's packed-QR byte identity.
 
-  The opt-in ``"optimistix-lm-ondevice"`` lane delegates the nonlinear
-  least-squares loop to Optimistix and the inner linear solves to Lineax LSMR.
-  It is tolerance-equivalent to the in-tree JAX LM family, not a MINPACK
-  parity lane, and requires the Optimistix/Lineax runtime dependencies from
-  the ``JAX`` or ``JAX_GPU`` extra.
-
   Consequence: the JAX LM lanes are **tolerance-equivalent** to MINPACK
   ``lmder`` on well-conditioned fixtures but **not byte-equivalent**;
   ``"lm"`` (reference, host-driven) and ``"lm-ondevice"`` (target,
@@ -61,10 +53,7 @@ LM family note:
   ``optimizer_backend="ondevice"`` + ``least_squares_algorithm="lm"``
   to engage the matrix-free on-device LM lane, or
   ``optimizer_backend="ondevice"`` + ``least_squares_algorithm="lm-minpack"``
-  to engage the dense pivoted-QR LM lane, or
-  ``optimizer_backend="ondevice"`` +
-  ``least_squares_algorithm="optimistix-lm"`` to engage the optional
-  Optimistix/Lineax LSMR lane.
+  to engage the dense pivoted-QR LM lane.
 
 Target private methods (maintained for the pinned JAX 0.10.0 runtime after the
 initial port from the upstream JAX optimizer sources):
@@ -72,7 +61,7 @@ initial port from the upstream JAX optimizer sources):
   - ``method="lbfgs-ondevice"``: in-tree SciPy-compatible L-BFGS-B state
     machine on the target lane. It uses a host stepwise loop over explicit
     macro-step observables rather than reverse-communication task reads,
-    specializes the public no-bounds lane to an Optax-style two-loop L-BFGS
+    specializes the public no-bounds lane to a two-loop L-BFGS
     direction, and preserves SciPy-style counters, statuses, callbacks, and
     inverse-Hessian history. The full L-BFGS-B compact subspace path remains
     available for bounded states and generic private kernels.
@@ -86,12 +75,6 @@ Target SciPy-control method:
 Target public stochastic method:
   - ``method="adam-ondevice"``: trace-safe Adam for noisy/stochastic scalar
     objectives on the target lane.
-
-Target public quasi-Newton methods:
-  - ``method="optax-lbfgs-ondevice"``: Optax gradient-transformation L-BFGS on
-    the target lane. It is not a SciPy L-BFGS-B parity lane.
-  - ``method="optimistix-lbfgs-ondevice"``: Optimistix L-BFGS on the target
-    lane.
 
 The private methods live in ``optimizer_jax_private/`` and are derived from the
 upstream JAX optimizer implementation pinned by this port, so line-search and
@@ -134,7 +117,6 @@ import jax
 import jax.numpy as jnp
 import jax.scipy.linalg as jsp_linalg
 import numpy as np
-import optimistix as optx
 from jax import lax
 from jax.flatten_util import ravel_pytree
 from jax.scipy.sparse.linalg import gmres
@@ -155,7 +137,6 @@ from simsopt_jax.geo._optimizer_backend_choices import (
     OUTER_OPTIMIZER_BACKEND_MESSAGE,
     RESOLVABLE_OPTIMIZER_BACKEND_MESSAGE,
     TARGET_OUTER_OPTIMIZER_BACKENDS,
-    TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS,
     TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS,
     VALID_OPTIMIZER_BACKENDS,
     VALID_OUTER_OPTIMIZER_BACKENDS,
@@ -305,7 +286,6 @@ from simsopt_jax.geo.optimizers.adjoint_linear_solve import (
     _AdjointHessianLinearSolver as _AdjointHessianLinearSolver,
     _EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS as _EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS,
     _hessian_linear_operator as _hessian_linear_operator,
-    _lineax_lsmr_solver as _lineax_lsmr_solver,
     _require_tree_first_leaf as _require_tree_first_leaf,
     _solve_hessian_least_squares_system_with_status as _solve_hessian_least_squares_system_with_status,
     _solve_hessian_system as _solve_hessian_system,
@@ -355,12 +335,6 @@ from simsopt_jax.solve.driver import (
     legacy_target_method,
     legacy_target_scipy_control_method,
 )
-from simsopt_jax.solve.minimize_runtime import (
-    run_optax_minimize,
-    run_optimistix_minimize,
-)
-from simsopt_jax.solve.optax import OptaxLBFGSOptions
-from simsopt_jax.solve.optimistix import OptimistixLBFGSOptions
 
 # ---------------------------------------------------------------------------
 # Linear-solve, dense-IR, and adjoint-solve implementations live in their
@@ -430,14 +404,12 @@ __all__ = [
     "BOOZER_INNER_OPTIMIZER_BACKENDS",
     "VALID_BOOZER_INNER_OPTIMIZER_BACKENDS",
     "TARGET_OUTER_OPTIMIZER_BACKENDS",
-    "TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS",
     "TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS",
     "TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS",
     "BOOZER_INNER_X64_REQUIRED_OPTIMIZER_BACKENDS",
     "render_invalid_optimizer_backend_message",
     "render_invalid_boozer_inner_optimizer_backend_message",
     "jax_least_squares",
-    "jax_least_squares_optimistix",
     "jax_minimize",
     "levenberg_marquardt",
     "levenberg_marquardt_minpack_traceable",
@@ -493,15 +465,11 @@ OPTIMIZER_BACKEND_ROLE = {
     "scipy-jax-decomposed": "target-scipy-control",
     HOST_JAX_OUTER_OPTIMIZER_BACKEND: "target-host-control",
     "scipy-jax-fullgraph": "target-scipy-control-fullgraph",
-    "optax-lbfgs": "target-optax-lbfgs",
-    "optimistix-lbfgs": "target-optimistix-lbfgs",
 }
 TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS = TARGET_OUTER_OPTIMIZER_BACKENDS | frozenset(
     {HOST_JAX_OUTER_OPTIMIZER_BACKEND}
 )
-VALID_LEAST_SQUARES_ALGORITHMS = frozenset(
-    {"quasi-newton", "lm", "lm-minpack", "optimistix-lm"}
-)
+VALID_LEAST_SQUARES_ALGORITHMS = frozenset({"quasi-newton", "lm", "lm-minpack"})
 _SUPPORTED_METHODS = {
     "adam",
     "adam-ondevice",
@@ -510,22 +478,15 @@ _SUPPORTED_METHODS = {
     "lbfgs-scipy-jax",
     "lbfgs-scipy-jax-decomposed",
     "lbfgs-scipy-jax-fullgraph",
-    "optax-lbfgs-ondevice",
-    "optimistix-lbfgs-ondevice",
     "lbfgs-trace",
     "bfgs-ondevice",
     "lbfgs-ondevice",
 }
-_TARGET_LEAST_SQUARES_METHODS = frozenset(
-    {"lm-ondevice", "lm-minpack-ondevice", "optimistix-lm-ondevice"}
-)
+_TARGET_LEAST_SQUARES_METHODS = frozenset({"lm-ondevice", "lm-minpack-ondevice"})
 _SUPPORTED_LEAST_SQUARES_METHODS = frozenset({"lm"}) | _TARGET_LEAST_SQUARES_METHODS
-_RESIDUAL_LEAST_SQUARES_ALGORITHMS = frozenset({"lm", "lm-minpack", "optimistix-lm"})
+_RESIDUAL_LEAST_SQUARES_ALGORITHMS = frozenset({"lm", "lm-minpack"})
 _DEFAULT_LM_FTOL = 1e-8
 _DEFAULT_LM_XTOL = 1e-8
-_OPTIMISTIX_LM_DEFAULT_FTOL = _DEFAULT_LM_FTOL
-_OPTIMISTIX_LM_DEFAULT_XTOL = _DEFAULT_LM_XTOL
-_OPTIMISTIX_LM_DEFAULT_GTOL = None
 _REFERENCE_METHODS = frozenset({"bfgs", "lbfgs"})
 _REFERENCE_TRACE_METHODS = frozenset({"lbfgs-trace"})
 _REFERENCE_JAX_METHODS = frozenset({"adam"})
@@ -533,18 +494,11 @@ _TARGET_PRIVATE_METHODS = frozenset({"bfgs-ondevice", "lbfgs-ondevice"})
 _TARGET_SCIPY_CONTROL_METHODS = frozenset(
     {"lbfgs-scipy-jax", "lbfgs-scipy-jax-decomposed", "lbfgs-scipy-jax-fullgraph"}
 )
-_TARGET_PUBLIC_LBFGS_METHODS = frozenset(
-    {"optax-lbfgs-ondevice", "optimistix-lbfgs-ondevice"}
-)
-_TARGET_PUBLIC_METHODS = frozenset({"adam-ondevice"}) | _TARGET_PUBLIC_LBFGS_METHODS
+_TARGET_PUBLIC_METHODS = frozenset({"adam-ondevice"})
 _TARGET_METHODS = (
     _TARGET_PRIVATE_METHODS | _TARGET_PUBLIC_METHODS | _TARGET_SCIPY_CONTROL_METHODS
 )
 _TARGET_LBFGSB_METHODS = frozenset({"lbfgs-ondevice"}) | _TARGET_SCIPY_CONTROL_METHODS
-_TARGET_PUBLIC_LBFGS_BACKEND_BY_METHOD = {
-    "optax-lbfgs-ondevice": "optax-lbfgs",
-    "optimistix-lbfgs-ondevice": "optimistix-lbfgs",
-}
 _UNSUPPORTED_TARGET_LBFGSB_OPTIONS = frozenset({"initial_step_size", "maxgrad"})
 _STRICT_REFERENCE_OPTIMIZER_DETAIL = "the host-side SciPy reference optimizer lane"
 _STRICT_REFERENCE_JAX_OPTIMIZER_DETAIL = "the host-side JAX reference optimizer lane"
@@ -640,15 +594,12 @@ _DEPRECATED_MINIMIZE_METHOD_TO_DRIVER = {
     "lbfgs-scipy-jax": "scipy_lbfgsb",
     "lbfgs-scipy-jax-decomposed": "scipy_lbfgsb",
     "lbfgs-scipy-jax-fullgraph": "scipy_lbfgsb",
-    "optax-lbfgs-ondevice": "optax_lbfgs",
-    "optimistix-lbfgs-ondevice": "optimistix_lbfgs",
     "lbfgs-trace": "simsopt_trace_lbfgs",
 }
 _DEPRECATED_LEAST_SQUARES_METHOD_TO_DRIVER = {
     "lm": "simsopt_lm_gmres_host",
     "lm-minpack-ondevice": "simsopt_lm_qr",
     "lm-ondevice": "simsopt_lm_gmres",
-    "optimistix-lm-ondevice": "optimistix_lm",
 }
 
 
@@ -1284,7 +1235,7 @@ class BoozerInnerDriverOptions:
 
 
 _TARGET_LEAST_SQUARES_DRIVERS = frozenset(
-    {Driver.SIMSOPT_LM_GMRES, Driver.SIMSOPT_LM_QR, Driver.OPTIMISTIX_LM}
+    {Driver.SIMSOPT_LM_GMRES, Driver.SIMSOPT_LM_QR}
 )
 _BOOZER_INNER_DRIVER_OPTIONS = {
     Driver.SCIPY_BFGS: BoozerInnerDriverOptions(
@@ -1321,11 +1272,6 @@ _BOOZER_INNER_DRIVER_OPTIONS = {
         optimizer_backend="ondevice",
         limited_memory=False,
         least_squares_algorithm="lm-minpack",
-    ),
-    Driver.OPTIMISTIX_LM: BoozerInnerDriverOptions(
-        optimizer_backend="ondevice",
-        limited_memory=False,
-        least_squares_algorithm="optimistix-lm",
     ),
 }
 # Inverse of ``_BOOZER_INNER_DRIVER_OPTIONS`` keyed on the option triple. Derived
@@ -1671,10 +1617,6 @@ def resolve_optimizer_backend_driver(optimizer_backend, *, limited_memory):
         return resolve_reference_optimizer_driver(limited_memory=limited_memory)
     if optimizer_backend in TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS:
         return Driver.SCIPY_LBFGSB
-    if optimizer_backend == "optax-lbfgs":
-        return Driver.OPTAX_LBFGS
-    if optimizer_backend == "optimistix-lbfgs":
-        return Driver.OPTIMISTIX_LBFGS
     return resolve_target_optimizer_driver(limited_memory=limited_memory)
 
 
@@ -1818,10 +1760,7 @@ def resolve_least_squares_optimizer_driver(
             optimizer_backend,
             limited_memory=limited_memory,
         )
-    if (
-        optimizer_backend in TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS
-        or optimizer_backend in TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS
-    ):
+    if optimizer_backend in TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS:
         raise ValueError(
             _scipy_control_least_squares_algorithm_message(optimizer_backend)
         )
@@ -1960,10 +1899,8 @@ def resolve_reference_optimizer_contract(
             f"{component_label} with backend='jax' requires "
             "optimizer_backend='ondevice', optimizer_backend='scipy-jax', "
             "optimizer_backend='scipy-jax-decomposed', "
-            "optimizer_backend='host-jax', "
-            "optimizer_backend='scipy-jax-fullgraph', "
-            "optimizer_backend='optax-lbfgs', or "
-            "optimizer_backend='optimistix-lbfgs'. "
+            "optimizer_backend='host-jax', or "
+            "optimizer_backend='scipy-jax-fullgraph'. "
             "The SciPy/reference optimizer lane is CPU/reference-only."
         )
     if field_backend != "jax" and optimizer_backend != "scipy":
@@ -1997,10 +1934,8 @@ def resolve_target_optimizer_contract(
             f"{component_label} with backend='jax' requires "
             "optimizer_backend='ondevice', optimizer_backend='scipy-jax', "
             "optimizer_backend='scipy-jax-decomposed', "
-            "optimizer_backend='host-jax', "
-            "optimizer_backend='scipy-jax-fullgraph', "
-            "optimizer_backend='optax-lbfgs', or "
-            "optimizer_backend='optimistix-lbfgs'. "
+            "optimizer_backend='host-jax', or "
+            "optimizer_backend='scipy-jax-fullgraph'. "
             "The SciPy/reference optimizer lane is CPU/reference-only."
         )
     require_target_backend_x64(optimizer_backend)
@@ -2012,18 +1947,6 @@ def resolve_target_optimizer_contract(
         return _target_optimizer_contract_for_backend_driver(
             optimizer_backend,
             Driver.SCIPY_LBFGSB,
-        )
-    if optimizer_backend in TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS:
-        if least_squares_algorithm != "quasi-newton":
-            raise ValueError(
-                _scipy_control_least_squares_algorithm_message(optimizer_backend)
-            )
-        return _target_optimizer_contract_for_backend_driver(
-            optimizer_backend,
-            resolve_optimizer_backend_driver(
-                optimizer_backend,
-                limited_memory=limited_memory,
-            ),
         )
     driver = resolve_target_least_squares_optimizer_driver(
         limited_memory=limited_memory,
@@ -2794,40 +2717,6 @@ def _lm_gradient_tol(tol, gtol, *, dtype):
     if gtol is None:
         return _optimizer_scalar(tol, dtype=dtype)
     return _optimizer_scalar(gtol, dtype=dtype)
-
-
-def _optimistix_lm_nondefault_tuning_options(ftol, xtol, gtol):
-    unsupported = []
-    if ftol is None or float(ftol) != _OPTIMISTIX_LM_DEFAULT_FTOL:
-        unsupported.append("ftol")
-    if xtol is None or float(xtol) != _OPTIMISTIX_LM_DEFAULT_XTOL:
-        unsupported.append("xtol")
-    if gtol is not None:
-        unsupported.append("gtol")
-    return tuple(unsupported)
-
-
-def _require_optimistix_lm_contract_options(
-    *,
-    ftol,
-    xtol,
-    gtol,
-    callback,
-    progress_callback,
-):
-    if callback is not None or progress_callback is not None:
-        raise ValueError(
-            "optimistix-lm-ondevice does not support solver callbacks. "
-            "Use method='lm-ondevice' for callback-instrumented LM runs."
-        )
-    unsupported = _optimistix_lm_nondefault_tuning_options(ftol, xtol, gtol)
-    if unsupported:
-        unsupported_options = ", ".join(unsupported)
-        raise ValueError(
-            "optimistix-lm-ondevice uses a single tol value for Optimistix "
-            "and Lineax convergence. Non-default LM tuning option(s) are not "
-            f"supported: {unsupported_options}."
-        )
 
 
 def _matrix_free_lm_info(
@@ -4155,166 +4044,6 @@ def levenberg_marquardt_minpack_traceable(
         "success": state["success"],
         "dense_linearization_materialized": True,
         "dense_linearization_kind": "in_loop",
-        **dense_report,
-    }
-
-
-def jax_least_squares_optimistix(
-    residual_fn,
-    x0,
-    *,
-    maxiter=1500,
-    tol=1e-10,
-    ftol=_OPTIMISTIX_LM_DEFAULT_FTOL,
-    xtol=_OPTIMISTIX_LM_DEFAULT_XTOL,
-    gtol=_OPTIMISTIX_LM_DEFAULT_GTOL,
-    materialize_dense_linearization=True,
-    max_dense_linearization_bytes=None,
-    callback=None,
-    progress_callback=None,
-    args=(),
-):
-    """Optional Optimistix/Lineax LSMR least-squares target lane.
-
-    Uses ``lineax.LSMR`` rather than the Optimistix default ``lineax.QR()`` so
-    the inner solve stays matrix-free on oversampled fixtures rather than
-    materializing a dense Jacobian factorization per LM step.
-
-    ``tol`` drives both the outer LM and inner LSMR (``rtol=atol=tol``).
-    ``ftol``/``xtol``/``gtol``, ``callback``, and ``progress_callback`` raise
-    ``ValueError``; use ``method="lm-ondevice"`` for MINPACK-style
-    three-criterion termination or callback-instrumented runs.
-
-    ``max_dense_linearization_bytes`` gates only the post-hoc Jacobian/Hessian
-    materialization at the converged ``x``; LSMR is matrix-free, so it does
-    not affect inner-solve memory. ``materialize_dense_linearization=False``
-    skips the post-hoc step and returns ``residual_jacobian`` and ``hessian``
-    as ``None``.
-
-    Requires the Optimistix/Lineax runtime dependencies from the ``JAX`` or
-    ``JAX_GPU`` extra.
-    """
-    _require_optimistix_lm_contract_options(
-        ftol=ftol,
-        xtol=xtol,
-        gtol=gtol,
-        callback=callback,
-        progress_callback=progress_callback,
-    )
-
-    x = jax.tree.map(jnp.asarray, x0)
-    normalized_args = _normalize_solver_args(args)
-    dtype = _require_tree_first_leaf(
-        x,
-        detail="Least-squares initial state must contain at least one leaf.",
-    ).dtype
-    tol_value = float(tol)
-
-    def residual_eval(x_current):
-        return jnp.ravel(jnp.asarray(residual_fn(x_current, *normalized_args)))
-
-    def optx_residual(x_current, fn_args):
-        return jnp.ravel(jnp.asarray(residual_fn(x_current, *fn_args)))
-
-    solver = optx.LevenbergMarquardt(
-        rtol=tol_value,
-        atol=tol_value,
-        linear_solver=_lineax_lsmr_solver(rtol=tol_value, atol=tol_value),
-    )
-    solution = optx.least_squares(
-        optx_residual,
-        solver,
-        x,
-        args=normalized_args,
-        max_steps=int(maxiter),
-        throw=False,
-    )
-
-    residual, cost, grad, grad_norm_inf, _ = _least_squares_gradient_state(
-        residual_eval,
-        solution.value,
-    )
-    linearization_rows = int(np.asarray(jnp.asarray(residual).size))
-    linearization_cols = sum(
-        int(np.asarray(jnp.asarray(leaf).size))
-        for leaf in jax.tree.leaves(solution.value)
-    )
-    residual_jacobian = None
-    hessian = None
-    dense_linearization_materialized = bool(materialize_dense_linearization)
-    if dense_linearization_materialized:
-        dense_linearization_materialized, dense_report = (
-            _least_squares_dense_linearization_policy(
-                linearization_rows,
-                linearization_cols,
-                dtype,
-                max_dense_linearization_bytes,
-            )
-        )
-        if dense_linearization_materialized:
-            residual, residual_jacobian, _flat_grad, hessian = (
-                _materialize_dense_least_squares_linearization(
-                    residual_eval,
-                    solution.value,
-                )
-            )
-    else:
-        dense_report = _least_squares_dense_linearization_report(
-            linearization_rows,
-            linearization_cols,
-            dtype,
-            max_dense_linearization_bytes,
-        )
-        dense_report["failure_category"] = None
-        dense_report["failure_stage"] = None
-        dense_report["message"] = None
-
-    finite = (
-        _tree_all_finite(solution.value)
-        & jnp.all(jnp.isfinite(residual))
-        & _tree_all_finite(grad)
-        & jnp.isfinite(cost)
-    )
-    if hessian is not None:
-        finite = finite & jnp.all(jnp.isfinite(hessian))
-    solution_success = jnp.asarray(solution.result == optx.RESULTS.successful)
-    max_steps_reached = jnp.asarray(
-        (solution.result == optx.RESULTS.nonlinear_max_steps_reached)
-        | (solution.result == optx.RESULTS.max_steps_reached)
-    )
-    status = jnp.where(
-        solution_success & finite,
-        jnp.asarray(0, dtype=jnp.int32),
-        jnp.where(
-            finite,
-            jnp.asarray(1, dtype=jnp.int32),
-            jnp.asarray(2, dtype=jnp.int32),
-        ),
-    )
-    info = jnp.where(
-        max_steps_reached,
-        jnp.asarray(5, dtype=jnp.int32),
-        jnp.asarray(0, dtype=jnp.int32),
-    )
-    return {
-        "x": solution.value,
-        "residual": residual,
-        "residual_jacobian": residual_jacobian,
-        "fun": cost,
-        "grad": grad,
-        "grad_norm_inf": grad_norm_inf,
-        "hessian": hessian,
-        "damping": None,
-        "nit": jnp.asarray(solution.stats["num_steps"], dtype=jnp.int32),
-        "status": status,
-        "info": info,
-        "success": solution_success & finite,
-        "dense_linearization_materialized": dense_linearization_materialized,
-        "dense_linearization_kind": (
-            "post_hoc" if dense_linearization_materialized else None
-        ),
-        "optimistix_result": str(solution.result),
-        "optimistix_result_message": str(optx.RESULTS[solution.result]),
         **dense_report,
     }
 
@@ -9568,8 +9297,6 @@ def _least_squares_state_to_optimize_result(result):
         max_dense_linearization_bytes=result.get("max_dense_linearization_bytes"),
         failure_category=result.get("failure_category"),
         failure_stage=result.get("failure_stage"),
-        optimistix_result=result.get("optimistix_result"),
-        optimistix_result_message=result.get("optimistix_result_message"),
     )
 
 
@@ -9677,8 +9404,8 @@ def target_least_squares(
     """Explicit JAX target least-squares entrypoint."""
     if method not in _TARGET_LEAST_SQUARES_METHODS:
         raise ValueError(
-            "target_least_squares() only supports method='lm-ondevice', "
-            "method='lm-minpack-ondevice', or method='optimistix-lm-ondevice'. "
+            "target_least_squares() only supports method='lm-ondevice' or "
+            "method='lm-minpack-ondevice'. "
             f"Got {method!r}."
         )
 
@@ -9697,23 +9424,6 @@ def target_least_squares(
     max_dense_linearization_bytes = options.get("max_dense_linearization_bytes")
     callback = options.get("callback")
     progress_callback = options.get("progress_callback")
-    if method == "optimistix-lm-ondevice":
-        result = jax_least_squares_optimistix(
-            residual_fn,
-            x0,
-            maxiter=maxiter,
-            tol=tol,
-            ftol=ftol,
-            xtol=xtol,
-            gtol=options.get("gtol"),
-            materialize_dense_linearization=materialize_dense_linearization,
-            max_dense_linearization_bytes=max_dense_linearization_bytes,
-            callback=callback,
-            progress_callback=progress_callback,
-            args=args,
-        )
-        return _least_squares_state_to_optimize_result(result)
-
     solver = (
         levenberg_marquardt_minpack_traceable
         if method == "lm-minpack-ondevice"
@@ -9967,95 +9677,19 @@ def target_minimize(
             options=options,
         )
         return _finalize_optimizer_result(result, pytree_adapter)
-    if method in _TARGET_PUBLIC_METHODS:
-        if method == "adam-ondevice":
-            require_target_backend_x64("ondevice")
-            result = adam_optimize_traceable(
-                fun,
-                x0,
-                value_and_grad=value_and_grad,
-                maxiter=maxiter,
-                tol=tol,
-                options=options,
-                callback=callback,
-                progress_callback=progress_callback,
-            )
-            return _adam_result_to_optimize_result(result)
-
-        required_backend = _TARGET_PUBLIC_LBFGS_BACKEND_BY_METHOD[method]
-        require_target_backend_x64(required_backend)
-        fun, x0, _unused_callback, pytree_adapter = _prepare_optimizer_callable_inputs(
+    if method == "adam-ondevice":
+        require_target_backend_x64("ondevice")
+        result = adam_optimize_traceable(
             fun,
             x0,
             value_and_grad=value_and_grad,
-            callback=None,
+            maxiter=maxiter,
+            tol=tol,
+            options=options,
+            callback=callback,
+            progress_callback=progress_callback,
         )
-        if value_and_grad:
-            value_and_grad_fun = wrap_strict_target_lane_value_and_grad(fun)
-        else:
-            scalar_value_and_grad = jax.value_and_grad(fun)
-
-            def value_and_grad_fun(flat_x):
-                return scalar_value_and_grad(flat_x)
-
-            value_and_grad_fun = wrap_strict_target_lane_value_and_grad(
-                value_and_grad_fun
-            )
-
-        if callback is None and progress_callback is None:
-            public_callback = None
-        else:
-
-            def public_callback(event):
-                if callback is not None:
-                    callback(
-                        event.x
-                        if pytree_adapter is None
-                        else pytree_adapter._hostify_flat(
-                            event.x,
-                            dtype=pytree_adapter.flat_dtype,
-                        )
-                    )
-                if progress_callback is not None:
-                    progress_callback(
-                        event.iteration,
-                        event.fun,
-                        event.grad_norm_inf,
-                    )
-
-        if method == "optax-lbfgs-ondevice":
-            public_options = OptaxLBFGSOptions(
-                maxiter=maxiter,
-                gtol=tol,
-                memory_size=int(options.get("maxcor", OptaxLBFGSOptions().memory_size)),
-                scale_init_precond=bool(options.get("scale_init_precond", True)),
-                max_linesearch_steps=int(options.get("maxls", 20)),
-            )
-            driver = Driver.OPTAX_LBFGS
-        else:
-            public_options = OptimistixLBFGSOptions(
-                maxiter=maxiter,
-                tol=tol,
-                history_length=int(options.get("maxcor", 200)),
-            )
-            driver = Driver.OPTIMISTIX_LBFGS
-        result = (
-            run_optax_minimize(
-                value_and_grad_fun,
-                x0,
-                driver=driver,
-                options=public_options,
-                callback=public_callback,
-            )
-            if method == "optax-lbfgs-ondevice"
-            else run_optimistix_minimize(
-                value_and_grad_fun,
-                x0,
-                options=public_options,
-                callback=public_callback,
-            )
-        )
-        return _finalize_optimizer_result(result, pytree_adapter)
+        return _adam_result_to_optimize_result(result)
 
     if method not in _TARGET_PRIVATE_METHODS:
         raise ValueError(

@@ -13,9 +13,6 @@ from .contracts import (
     OptionsBase,
     SCIPY_LBFGSB_UNRESOLVED_STALL_STATUS,
     STATUS_CODES,
-    OptaxAdamCallbackEvent,
-    OptaxLBFGSCallbackEvent,
-    OptimistixLBFGSCallbackEvent,
     ScipyBFGSCallbackEvent,
     ScipyLBFGSBCallbackEvent,
     SimsoptAdamCallbackEvent,
@@ -28,8 +25,6 @@ from .contracts import (
     SimsoptTraceLBFGSCallbackEvent,
     fingerprint_optimizer_result,
 )
-from .optimistix import LinearSolver, OptimistixLBFGSOptions, OptimistixLMOptions
-from .optax import OptaxAdamOptions, OptaxLBFGSOptions, OptaxLineSearch
 from .scipy import ScipyBFGSOptions, ScipyBounds, ScipyLBFGSBOptions, ScipyLMOptions
 from .simsopt import (
     SimsoptAdamHostOptions,
@@ -48,19 +43,10 @@ __all__ = [
     "InverseHessianOperator",
     "LbfgsbRestartEvent",
     "LbfgsbRestartReason",
-    "LinearSolver",
     "NONFINITE_RESULT_STATUS",
-    "OptaxAdamOptions",
-    "OptaxAdamCallbackEvent",
-    "OptaxLBFGSOptions",
-    "OptaxLBFGSCallbackEvent",
-    "OptaxLineSearch",
-    "OptimistixLBFGSOptions",
-    "OptimistixLBFGSCallbackEvent",
     "OptimizerCallbackEvent",
     "OptimizerResult",
     "OptimizerResultFingerprint",
-    "OptimistixLMOptions",
     "OptionsBase",
     "SCIPY_LBFGSB_UNRESOLVED_STALL_STATUS",
     "STATUS_CODES",

@@ -28,9 +28,6 @@ from simsopt.solve.serial import (
 from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt_jax.solve.contracts import OptimizerResult
 from simsopt_jax.solve.driver import Driver
-from simsopt_jax.solve.optimistix.contracts import (
-    OptimistixLMOptions,
-)
 from simsopt_jax.solve.serial import (
     TraceableArrayFunction,
     TraceableEqualityConstrainedProblem,
@@ -420,56 +417,6 @@ def test_least_squares_serial_solve_jax_honors_requested_gradient_tolerance(
     assert result.options_used.gtol == requested_tolerance
     assert result.nit > 0
     assert abs(float(problem.x[0])) < requested_tolerance
-
-
-def test_deprecated_lm_keyword_preserves_explicit_optimistix_selection():
-    least_squares_problem = TraceableLeastSquaresProblem(
-        residual_fn=lambda x: x - 1.0,
-        x=jnp.asarray([0.0], dtype=jnp.float64),
-    )
-    with ScratchDir("."), pytest.warns(DeprecationWarning, match="OPTIMISTIX_LM"):
-        least_squares_result = least_squares_serial_solve_jax(
-            least_squares_problem,
-            optimizer="lm",
-            max_steps=32,
-        )
-    assert least_squares_result.driver == Driver.OPTIMISTIX_LM
-    assert isinstance(least_squares_result.options_used, OptimistixLMOptions)
-
-
-@pytest.mark.parametrize(
-    ("solve", "problem", "optimizer", "message"),
-    [
-        (
-            least_squares_serial_solve_jax,
-            TraceableLeastSquaresProblem(
-                residual_fn=lambda x: x - 1.0,
-                x=jnp.asarray([0.0], dtype=jnp.float64),
-            ),
-            "gauss_newton",
-            "no typed backend-neutral driver",
-        ),
-        (
-            serial_solve_jax,
-            TraceableScalarProblem(
-                objective_fn=lambda x: jnp.sum((x - 1.0) ** 2),
-                x=jnp.asarray([0.0], dtype=jnp.float64),
-            ),
-            "bfgs",
-            "no behavior-equivalent typed driver",
-        ),
-    ],
-)
-def test_legacy_optimizer_keywords_without_equivalent_typed_drivers_fail_closed(
-    solve,
-    problem,
-    optimizer,
-    message,
-):
-    initial_x = np.asarray(problem.x).copy()
-    with pytest.raises(NotImplementedError, match=message):
-        solve(problem, optimizer=optimizer)
-    np.testing.assert_array_equal(np.asarray(problem.x), initial_x)
 
 
 @pytest.mark.parametrize(

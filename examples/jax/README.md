@@ -138,13 +138,9 @@ performance claims must state whether they time the JAX region or the complete
 workflow. Experimental policies authorize explicit experimental execution;
 they do not contribute official upstream coverage.
 
-Optimistix and Optax remain explicit optional driver choices and are never
-selected implicitly by the serial example APIs. The serial wrappers publish `problem.x` and their
-bounded log only after a successful solve; a failed result raises and leaves
-caller-owned state unchanged. The deprecated least-squares `optimizer="lm"`
-alias still selects explicit Optimistix LM; the legacy `gauss_newton` and
-scalar `bfgs` spellings are rejected because the typed API exposes no
-behavior-equivalent Optimistix driver for them.
+The serial wrappers publish `problem.x` and their bounded log only after a
+successful solve; a failed result raises and leaves caller-owned state
+unchanged.
 
 Applications can use the same typed selection before importing JAX-heavy
 modules:

@@ -10,20 +10,15 @@ from threading import Lock
 from typing import Callable, TypeAlias, TypeVar, cast
 
 import jax
-import jax.numpy as jnp
-import lineax
 import numpy as np
-import optimistix as optx
 from scipy.optimize import OptimizeResult
 from scipy.optimize import least_squares as scipy_least_squares
 from scipy.optimize import minimize as scipy_minimize
 
-from simsopt_jax.backend.dtypes import explicit_device_array, runtime_device_put_tree
 from simsopt_jax.geo.optimizers import optimizer as legacy
 from simsopt_jax.runtime.host_boundary import (
-    block_until_ready,
     host_array_after_ready,
-    host_int,
+    host_float_after_ready,
 )
 
 from .contracts import (
@@ -58,30 +53,6 @@ from .driver import (
     legacy_target_least_squares_method,
     legacy_target_minimize_method,
 )
-from .minimize_runtime import (
-    block_jax_leaves as _block_jax_leaves,
-)
-from .minimize_runtime import (
-    host_array as _host_array,
-)
-from .minimize_runtime import (
-    host_float as _host_float,
-)
-from .minimize_runtime import (
-    optimistix_result_metadata as _optimistix_result_metadata,
-)
-from .minimize_runtime import (
-    run_optax_minimize as _run_optax_minimize,
-)
-from .minimize_runtime import (
-    run_optimistix_minimize as _run_optimistix_minimize,
-)
-from .optax.contracts import OptaxAdamOptions, OptaxLBFGSOptions
-from .optimistix.contracts import (
-    LinearSolver,
-    OptimistixLBFGSOptions,
-    OptimistixLMOptions,
-)
 from .scipy.contracts import (
     ScipyBFGSOptions,
     ScipyBounds,
@@ -112,9 +83,6 @@ _LegacyEventFactory: TypeAlias = Callable[
 _MINIMIZE_OPTIONS: dict[Driver, type[OptionsBase]] = {
     Driver.SCIPY_LBFGSB: ScipyLBFGSBOptions,
     Driver.SCIPY_BFGS: ScipyBFGSOptions,
-    Driver.OPTAX_LBFGS: OptaxLBFGSOptions,
-    Driver.OPTAX_ADAM: OptaxAdamOptions,
-    Driver.OPTIMISTIX_LBFGS: OptimistixLBFGSOptions,
     Driver.SIMSOPT_LBFGSB: SimsoptLBFGSBOptions,
     Driver.SIMSOPT_BFGS: SimsoptBFGSOptions,
     Driver.SIMSOPT_TRACE_LBFGS: SimsoptTraceLBFGSOptions,
@@ -124,7 +92,6 @@ _MINIMIZE_OPTIONS: dict[Driver, type[OptionsBase]] = {
 
 _LEAST_SQUARES_OPTIONS: dict[Driver, type[OptionsBase]] = {
     Driver.SCIPY_LM: ScipyLMOptions,
-    Driver.OPTIMISTIX_LM: OptimistixLMOptions,
     Driver.SIMSOPT_LM_GMRES_HOST: SimsoptLMGMRESHostOptions,
     Driver.SIMSOPT_LM_GMRES: SimsoptLMGMRESOptions,
     Driver.SIMSOPT_LM_QR: SimsoptLMQROptions,
@@ -155,11 +122,7 @@ def _resolve_options(
 def _host_optional_array(value) -> np.ndarray | None:
     if value is None:
         return None
-    return _host_array(value)
-
-
-def _device_scalar(value: float, dtype) -> jax.Array:
-    return explicit_device_array(value, dtype=dtype)
+    return host_array_after_ready(value)
 
 
 def _legacy_minimize_options(options: OptionsBase) -> dict[str, object]:
@@ -279,8 +242,8 @@ def _public_result(
     the backend's unchanged.
     """
     hess_inv = cast(HessianInverse | None, getattr(result, "hess_inv", None))
-    x = _host_array(result.x)
-    fun = _host_float(result.fun)
+    x = host_array_after_ready(result.x)
+    fun = host_float_after_ready(result.fun)
     jac = _host_optional_array(getattr(result, "jac", None))
     residual = _host_optional_array(getattr(result, "residual", None))
     status = int(getattr(result, "status", 0))
@@ -317,8 +280,6 @@ def _public_result(
         hess_inv=hess_inv,
         invalid_step_log=_invalid_step_events(result),
         optimizer_state_trace=_optimizer_state_trace(result),
-        optimistix_result=getattr(result, "optimistix_result", None),
-        optimistix_result_message=getattr(result, "optimistix_result_message", None),
         restart_log=tuple(getattr(result, "restart_log", ())),
         nonfinite_fields=nonfinite_fields,
         raw_status=raw_status,
@@ -1014,126 +975,6 @@ def _legacy_least_squares_callbacks(
     return _legacy_callback_pair(callback, make_event)
 
 
-def _run_optimistix_lm(
-    residual_fn: ResidualFn,
-    x0,
-    *,
-    options: OptimistixLMOptions,
-    residual_args: tuple[object, ...] = (),
-) -> OptimizeResult:
-    params = jnp.asarray(runtime_device_put_tree(x0))
-    solver_tol = float(options.tol)
-
-    def residual_value(current, function_args):
-        return jnp.ravel(jnp.asarray(residual_fn(current, *function_args)))
-
-    if options.linear_solver == LinearSolver.LSMR:
-        linear_solver = lineax.LSMR(rtol=solver_tol, atol=solver_tol)
-    else:
-        linear_solver = lineax.QR()
-    solver = optx.LevenbergMarquardt(
-        rtol=solver_tol,
-        atol=solver_tol,
-        linear_solver=linear_solver,
-    )
-    with jax.transfer_guard_host_to_device("allow"):
-        solution = optx.least_squares(
-            residual_value,
-            solver,
-            params,
-            args=residual_args,
-            max_steps=options.maxiter,
-            throw=False,
-        )
-    block_until_ready(solution.value)
-    residual = jnp.ravel(jnp.asarray(residual_fn(solution.value, *residual_args)))
-    half = _device_scalar(0.5, residual.dtype)
-    cost = half * jnp.vdot(residual, residual)
-    if options.materialize_dense_linearization:
-        residual_size = int(residual.size)
-        parameter_size = int(solution.value.size)
-        dtype_size = np.dtype(residual.dtype).itemsize
-        dense_linearization_bytes = residual_size * parameter_size * dtype_size
-        dense_hessian_bytes = parameter_size * parameter_size * dtype_size
-        dense_bytes = dense_linearization_bytes + dense_hessian_bytes
-        if (
-            options.max_dense_linearization_bytes is not None
-            and dense_bytes > options.max_dense_linearization_bytes
-        ):
-            raise ValueError(
-                "Optimistix dense linearization requires "
-                f"{dense_bytes} bytes, exceeding "
-                f"max_dense_linearization_bytes={options.max_dense_linearization_bytes}."
-            )
-
-        def dense_residual(x, function_args):
-            return jnp.ravel(jnp.asarray(residual_fn(x, *function_args)))
-
-        jacobian = jax.jacrev(dense_residual, argnums=0)(
-            solution.value,
-            residual_args,
-        )
-        jacobian = jnp.reshape(jacobian, (residual_size, parameter_size))
-        hessian = jacobian.T @ jacobian
-        gradient = jnp.reshape(jacobian.T @ residual, solution.value.shape)
-        _block_jax_leaves((residual, jacobian, hessian, gradient, cost))
-        residual_jacobian = _host_array(jacobian)
-        hessian_host = _host_array(hessian)
-    else:
-
-        def residual_cost(x, function_args):
-            current_residual = jnp.ravel(jnp.asarray(residual_fn(x, *function_args)))
-            return half * jnp.vdot(current_residual, current_residual)
-
-        _cost_value, pullback = jax.vjp(
-            residual_cost,
-            solution.value,
-            residual_args,
-        )
-        gradient = pullback(
-            _device_scalar(1.0, residual.dtype),
-        )[0]
-        _block_jax_leaves((residual, gradient, cost))
-        residual_jacobian = None
-        hessian_host = None
-    x_host = _host_array(solution.value)
-    fun_host = _host_float(cost)
-    jac_host = _host_array(gradient)
-    residual_host = _host_array(residual)
-    finite = (
-        np.all(np.isfinite(x_host))
-        and np.isfinite(fun_host)
-        and np.all(np.isfinite(jac_host))
-        and np.all(np.isfinite(residual_host))
-    )
-    if hessian_host is not None:
-        finite = finite and np.all(np.isfinite(hessian_host))
-    (
-        optimistix_success,
-        optimistix_result,
-        optimistix_result_message,
-    ) = _optimistix_result_metadata(solution.result)
-    success = optimistix_success and bool(finite)
-    status = 0 if success else 1 if finite else 2
-    num_steps = host_int(solution.stats["num_steps"])
-    return OptimizeResult(
-        x=x_host,
-        fun=fun_host,
-        jac=jac_host,
-        nit=num_steps,
-        nfev=num_steps + 1,
-        njev=num_steps + 1,
-        status=status,
-        success=success,
-        message=optimistix_result,
-        residual=residual_host,
-        residual_jacobian=residual_jacobian,
-        hessian=hessian_host,
-        optimistix_result=optimistix_result,
-        optimistix_result_message=optimistix_result_message,
-    )
-
-
 def minimize(
     value_and_grad_fn: ValueAndGradFn,
     x0,
@@ -1164,21 +1005,6 @@ def minimize(
             options=options_used,
             callback=callback,
             bounds=bounds,
-        )
-    elif isinstance(options_used, OptaxLBFGSOptions | OptaxAdamOptions):
-        result = _run_optax_minimize(
-            value_and_grad_fn,
-            x0,
-            driver=driver,
-            options=options_used,
-            callback=callback,
-        )
-    elif isinstance(options_used, OptimistixLBFGSOptions):
-        result = _run_optimistix_minimize(
-            value_and_grad_fn,
-            x0,
-            options=options_used,
-            callback=callback,
         )
     elif isinstance(options_used, SimsoptLBFGSBOptions):
         legacy_callback, legacy_progress_callback = _legacy_minimize_callbacks(
@@ -1293,7 +1119,7 @@ def least_squares(
 ) -> OptimizerResult:
     """Solve a residual least-squares problem with a typed JAX-lane driver."""
     options_used = _resolve_options(driver, options, _LEAST_SQUARES_OPTIONS)
-    if callback is not None and driver in {Driver.SCIPY_LM, Driver.OPTIMISTIX_LM}:
+    if callback is not None and driver == Driver.SCIPY_LM:
         raise ValueError(f"driver={driver.value!r} does not support callbacks.")
     start = time.perf_counter()
 
@@ -1307,16 +1133,6 @@ def least_squares(
             )
         else:
             result = _scipy_lm_result(residual_fn, x0, options=options_used)
-    elif isinstance(options_used, OptimistixLMOptions):
-        if residual_args:
-            result = _run_optimistix_lm(
-                residual_fn,
-                x0,
-                options=options_used,
-                residual_args=residual_args,
-            )
-        else:
-            result = _run_optimistix_lm(residual_fn, x0, options=options_used)
     elif isinstance(options_used, SimsoptLMGMRESHostOptions) and not isinstance(
         options_used, SimsoptLMGMRESOptions
     ):

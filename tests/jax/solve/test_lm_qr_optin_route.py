@@ -318,7 +318,7 @@ def test_qr_lane_budget_is_the_shared_dense_materialization_convention():
 
     assert "max_dense_linearization_bytes" in fields
     # Unset by default: callers declare the budget they are willing to spend,
-    # matching SimsoptLMGMRESOptions and OptimistixLMOptions.
+    # matching SimsoptLMGMRESOptions.
     assert SimsoptLMQROptions().max_dense_linearization_bytes is None
     assert SimsoptLMGMRESOptions().max_dense_linearization_bytes is None
 

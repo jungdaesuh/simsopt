@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import math
 
-import jax.numpy as jnp
 import numpy as np
 import pytest
 from scipy.optimize import OptimizeResult
@@ -23,7 +22,6 @@ from simsopt_jax.solve import (
     NONFINITE_RESULT_STATUS,
     STATUS_CODES,
     Driver,
-    OptimistixLMOptions,
     OptimizerResult,
     ScipyBFGSOptions,
     ScipyBounds,
@@ -33,7 +31,6 @@ from simsopt_jax.solve.dispatch import (
     _LEAST_SQUARES_OPTIONS,
     _MINIMIZE_OPTIONS,
     _public_result,
-    least_squares,
     minimize,
 )
 from simsopt_jax.solve.termination import (
@@ -325,28 +322,6 @@ def test_scipy_bfgs_nan_result_is_reported_nonfinite() -> None:
     )
     assert _same_array(result.x, np.ones(2))
     assert result.fun == 2.0
-
-
-def test_optimistix_lm_nan_residual_is_reported_nonfinite() -> None:
-    def nan_residual(x):
-        return jnp.full((3,), jnp.nan) + 0.0 * jnp.sum(x)
-
-    result = least_squares(
-        nan_residual,
-        jnp.zeros(2),
-        driver=Driver.OPTIMISTIX_LM,
-        options=OptimistixLMOptions(maxiter=5),
-    )
-
-    assert result.optimistix_result is not None
-    _assert_nonfinite(
-        result,
-        ("fun", "jac", "residual"),
-        raw_status=2,
-        raw_success=False,
-        raw_message=result.optimistix_result,
-    )
-    assert _same_array(result.x, np.zeros(2))
 
 
 def test_a_recovered_finite_endpoint_is_judged_on_its_own_state() -> None:

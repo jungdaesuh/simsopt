@@ -616,7 +616,6 @@ _NATIVE_CPU_REFERENCE_TEST_FILES = frozenset(
 
 _NATIVE_CPU_REFERENCE_NODE_PREFIXES = frozenset(
     {
-        "jax/solve/test_value_grad_contract.py::test_optax_lbfgs_uses_explicit_vjp_for_io_callback_value_grad",
         "jax/solve/test_value_grad_contract.py::test_simsopt_bfgs_uses_explicit_value_grad_under_strict_transfer_guard",
         "jax/objectives/test_force_stage_two.py::test_force_stage_two_diagnostics_match_native_force_objectives",
         "geo/test_boozer_derivatives_jax.py::TestBoozerDirectCppOracles::",

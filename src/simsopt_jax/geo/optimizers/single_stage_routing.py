@@ -7,17 +7,9 @@ optimizer runtime.
 
 from __future__ import annotations
 
-from simsopt_jax.geo._optimizer_backend_choices import (
-    TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS,
-)
-
-JAX_TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS = TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS
-JAX_TARGET_LBFGS_OUTER_OPTIMIZER_BACKENDS = (
-    frozenset({"ondevice"}) | JAX_TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS
-)
-JAX_TARGET_OUTER_OPTIMIZER_BACKENDS = (
-    frozenset({"ondevice", "scipy-jax", "scipy-jax-decomposed"})
-    | JAX_TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS
+JAX_TARGET_LBFGS_OUTER_OPTIMIZER_BACKENDS = frozenset({"ondevice"})
+JAX_TARGET_OUTER_OPTIMIZER_BACKENDS = frozenset(
+    {"ondevice", "scipy-jax", "scipy-jax-decomposed"}
 )
 JAX_SCIPY_OUTER_OPTIMIZER_METHOD = "lbfgs-scipy-jax"
 JAX_DECOMPOSED_SCIPY_OUTER_OPTIMIZER_METHOD = "lbfgs-scipy-jax-decomposed"
@@ -41,7 +33,6 @@ __all__ = (
     "JAX_BOOZER_INNER_OPTIMIZER_BACKENDS",
     "JAX_TARGET_OUTER_MAXLS_BACKENDS",
     "JAX_TARGET_OUTER_OPTIMIZER_BACKENDS",
-    "JAX_TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS",
     "resolve_boozer_least_squares_algorithm",
     "resolve_boozer_limited_memory",
     "resolve_boozer_optimizer_backend",
@@ -63,10 +54,8 @@ def resolve_single_stage_jax_boozer_optimizer_backend(
             "Single-stage JAX backend with optimizer_backend='scipy' is "
             "CPU/reference-only; use optimizer_backend='ondevice', "
             "optimizer_backend='scipy-jax', "
-            "optimizer_backend='host-jax', "
-            "optimizer_backend='scipy-jax-fullgraph', "
-            "optimizer_backend='optax-lbfgs', or "
-            "optimizer_backend='optimistix-lbfgs'. For the JAX target lane, "
+            "optimizer_backend='host-jax', or "
+            "optimizer_backend='scipy-jax-fullgraph'. For the JAX target lane, "
             "select boozer_optimizer_backend='ondevice'. For the host-control "
             "kernelized lane, select optimizer_backend='host-jax' or "
             "boozer_optimizer_backend='host-jax'."

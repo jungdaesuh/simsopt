@@ -1997,120 +1997,6 @@ class TestOptimizerAdapter:
                 method=method,
             )
 
-    @pytest.mark.parametrize(
-        (
-            "method",
-            "expected_backend",
-            "expected_driver",
-            "expected_options_type",
-            "expected_maxls",
-        ),
-        [
-            (
-                "optax-lbfgs-ondevice",
-                "optax-lbfgs",
-                _opt.Driver.OPTAX_LBFGS,
-                "OptaxLBFGSOptions",
-                9,
-            ),
-            (
-                "optimistix-lbfgs-ondevice",
-                "optimistix-lbfgs",
-                _opt.Driver.OPTIMISTIX_LBFGS,
-                "OptimistixLBFGSOptions",
-                None,
-            ),
-        ],
-    )
-    def test_target_public_lbfgs_routes_through_typed_jax_minimize(
-        self,
-        monkeypatch,
-        method,
-        expected_backend,
-        expected_driver,
-        expected_options_type,
-        expected_maxls,
-    ):
-        captured = {}
-
-        def fake_require_target_backend_x64(optimizer_backend):
-            captured["x64_backend"] = optimizer_backend
-
-        def fake_optax_minimize(value_and_grad, x0, *, driver, options, callback):
-            value, grad = value_and_grad(x0)
-            captured["driver"] = driver
-            captured["options"] = options
-            captured["callback"] = callback
-            return types.SimpleNamespace(
-                x=np.asarray(x0, dtype=float),
-                fun=float(np.asarray(value)),
-                jac=np.asarray(grad, dtype=float),
-                nit=0,
-                nfev=1,
-                njev=1,
-                status=0,
-                success=True,
-                message="ok",
-                driver=driver,
-                options_used=options,
-                optimistix_result=None,
-                optimistix_result_message=None,
-            )
-
-        def fake_optimistix_minimize(value_and_grad, x0, *, options, callback):
-            value, grad = value_and_grad(x0)
-            captured["driver"] = _opt.Driver.OPTIMISTIX_LBFGS
-            captured["options"] = options
-            captured["callback"] = callback
-            return types.SimpleNamespace(
-                x=np.asarray(x0, dtype=float),
-                fun=float(np.asarray(value)),
-                jac=np.asarray(grad, dtype=float),
-                nit=0,
-                nfev=1,
-                njev=1,
-                status=0,
-                success=True,
-                message="ok",
-                driver=_opt.Driver.OPTIMISTIX_LBFGS,
-                options_used=options,
-                optimistix_result=None,
-                optimistix_result_message=None,
-            )
-
-        monkeypatch.setattr(
-            _opt,
-            "require_target_backend_x64",
-            fake_require_target_backend_x64,
-        )
-        monkeypatch.setattr(_opt, "run_optax_minimize", fake_optax_minimize)
-        monkeypatch.setattr(_opt, "run_optimistix_minimize", fake_optimistix_minimize)
-
-        def value_and_grad(x):
-            return jnp.sum((x - 1.0) ** 2), 2.0 * (x - 1.0)
-
-        result = _opt.target_minimize(
-            value_and_grad,
-            jnp.array([0.0, 2.0], dtype=jnp.float64),
-            method=method,
-            tol=1e-8,
-            maxiter=3,
-            options={"maxcor": 7, "ftol": 1e-12, "maxls": 9},
-            value_and_grad=True,
-        )
-
-        assert captured["x64_backend"] == expected_backend
-        assert captured["driver"] is expected_driver
-        assert type(captured["options"]).__name__ == expected_options_type
-        assert captured["options"].maxiter == 3
-        if method == "optax-lbfgs-ondevice":
-            assert captured["options"].memory_size == 7
-        if method == "optimistix-lbfgs-ondevice":
-            assert captured["options"].history_length == 7
-        if expected_maxls is not None:
-            assert captured["options"].max_linesearch_steps == expected_maxls
-        assert result.message == "ok"
-
     def test_target_scipy_jax_fullstate_method_is_unsupported(self):
         with pytest.raises(ValueError, match="only supports target-lane methods"):
             _opt.target_minimize(
@@ -3294,7 +3180,6 @@ class TestBoozerSurfaceJAXClass:
             (Driver.SIMSOPT_LM_GMRES_HOST, "scipy", False, "lm"),
             (Driver.SIMSOPT_LM_GMRES, "ondevice", False, "lm"),
             (Driver.SIMSOPT_LM_QR, "ondevice", False, "lm-minpack"),
-            (Driver.OPTIMISTIX_LM, "ondevice", False, "optimistix-lm"),
         ],
     )
     def test_instantiation_accepts_typed_inner_driver_option(
@@ -3623,53 +3508,6 @@ class TestBoozerSurfaceJAXClass:
 
         with pytest.raises(ValueError, match="fixed coil currents when G=None"):
             booz.run_code(iota=0.2, G=None)
-
-    @pytest.mark.parametrize("callback_option", ["stage_callback", "progress_callback"])
-    def test_optimistix_lm_rejects_callbacks_at_option_normalization(
-        self,
-        callback_option,
-    ):
-        bs = _MockBiotSavart(_make_mock_coils())
-        surf, label = _make_basic_mock_surface_and_label()
-
-        with pytest.raises(ValueError, match="incompatible"):
-            BoozerSurfaceJAX(
-                bs,
-                surf,
-                label,
-                1.0,
-                constraint_weight=1.0,
-                options={
-                    "optimizer_backend": "ondevice",
-                    "least_squares_algorithm": "optimistix-lm",
-                    callback_option: lambda *_args, **_kwargs: None,
-                },
-            )
-
-    @pytest.mark.parametrize(
-        "tuning_option",
-        [{"ftol": 1e-6}, {"xtol": 1e-6}, {"gtol": 1e-8}],
-    )
-    def test_optimistix_lm_rejects_nondefault_tuning_at_option_normalization(
-        self,
-        tuning_option,
-    ):
-        bs = _MockBiotSavart(_make_mock_coils())
-        surf, label = _make_basic_mock_surface_and_label()
-
-        with pytest.raises(ValueError, match="single Optimistix/Lineax"):
-            BoozerSurfaceJAX(
-                bs,
-                surf,
-                label,
-                1.0,
-                constraint_weight=1.0,
-                options={
-                    "optimizer_backend": "ondevice",
-                    "least_squares_algorithm": "optimistix-lm",
-                    **tuning_option,
-                },
-            )
 
     def test_none_G_coil_gradient_callback_rejects_free_currents(self):
         callback = lambda *_args, **_kwargs: None
@@ -4727,10 +4565,6 @@ class TestBoozerSurfaceJAXClass:
             ("scipy-jax", True, "lbfgs-scipy-jax"),
             ("scipy-jax-fullgraph", False, "lbfgs-scipy-jax-fullgraph"),
             ("scipy-jax-fullgraph", True, "lbfgs-scipy-jax-fullgraph"),
-            ("optax-lbfgs", False, "optax-lbfgs-ondevice"),
-            ("optax-lbfgs", True, "optax-lbfgs-ondevice"),
-            ("optimistix-lbfgs", False, "optimistix-lbfgs-ondevice"),
-            ("optimistix-lbfgs", True, "optimistix-lbfgs-ondevice"),
         ],
     )
     def test_resolve_ls_optimizer_method_contract(
@@ -4828,7 +4662,6 @@ class TestBoozerSurfaceJAXClass:
             ("ondevice", False, "quasi-newton", "bfgs-ondevice"),
             ("ondevice", False, "lm", "lm-ondevice"),
             ("ondevice", False, "lm-minpack", "lm-minpack-ondevice"),
-            ("ondevice", False, "optimistix-lm", "optimistix-lm-ondevice"),
             ("scipy-jax", False, "quasi-newton", "lbfgs-scipy-jax"),
             (
                 "scipy-jax-fullgraph",
@@ -4836,16 +4669,8 @@ class TestBoozerSurfaceJAXClass:
                 "quasi-newton",
                 "lbfgs-scipy-jax-fullgraph",
             ),
-            ("optax-lbfgs", False, "quasi-newton", "optax-lbfgs-ondevice"),
-            (
-                "optimistix-lbfgs",
-                False,
-                "quasi-newton",
-                "optimistix-lbfgs-ondevice",
-            ),
             ("scipy", False, "lm", "lm"),
             ("scipy", False, "lm-minpack", "lm"),
-            ("scipy", False, "optimistix-lm", "lm"),
         ],
     )
     def test_resolve_least_squares_optimizer_method_contract(
@@ -4891,16 +4716,8 @@ class TestBoozerSurfaceJAXClass:
         [
             ("scipy-jax", "lm"),
             ("scipy-jax", "lm-minpack"),
-            ("scipy-jax", "optimistix-lm"),
             ("scipy-jax-fullgraph", "lm"),
             ("scipy-jax-fullgraph", "lm-minpack"),
-            ("scipy-jax-fullgraph", "optimistix-lm"),
-            ("optax-lbfgs", "lm"),
-            ("optax-lbfgs", "lm-minpack"),
-            ("optax-lbfgs", "optimistix-lm"),
-            ("optimistix-lbfgs", "lm"),
-            ("optimistix-lbfgs", "lm-minpack"),
-            ("optimistix-lbfgs", "optimistix-lm"),
         ],
     )
     def test_resolve_least_squares_optimizer_method_rejects_scipy_control_lm(
@@ -4925,8 +4742,6 @@ class TestBoozerSurfaceJAXClass:
             "ondevice",
             "scipy-jax",
             "scipy-jax-fullgraph",
-            "optax-lbfgs",
-            "optimistix-lbfgs",
         ],
     )
     def test_require_target_backend_x64_rejects_disabled_float64(
@@ -5600,7 +5415,6 @@ class TestBoozerSurfaceJAXClass:
         [
             ("lm", "lm-ondevice"),
             ("lm-minpack", "lm-minpack-ondevice"),
-            ("optimistix-lm", "optimistix-lm-ondevice"),
         ],
     )
     def test_run_code_routes_lm_least_squares_contract(
@@ -5614,9 +5428,7 @@ class TestBoozerSurfaceJAXClass:
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
         booz.options["least_squares_algorithm"] = least_squares_algorithm
-        explicit_lm_options = least_squares_algorithm != "optimistix-lm"
-        if explicit_lm_options:
-            _set_explicit_lm_options(booz)
+        _set_explicit_lm_options(booz)
         if explicit_materialize is not None:
             booz.options["materialize_dense_linearization"] = explicit_materialize
 
@@ -5671,11 +5483,7 @@ class TestBoozerSurfaceJAXClass:
         res = booz.run_code(iota=0.3, G=0.05)
 
         assert captured["method"] == expected_method
-        if explicit_lm_options:
-            _assert_explicit_lm_options_forwarded(captured["options"], booz)
-        else:
-            for key, _value in _EXPLICIT_LM_OPTION_VALUES:
-                assert key not in captured["options"]
+        _assert_explicit_lm_options_forwarded(captured["options"], booz)
         assert (
             captured["options"]["materialize_dense_linearization"]
             is expected_materialize
@@ -9656,11 +9464,6 @@ class TestBoozerSurfaceJAXExactPath:
                 "lm-minpack-ondevice",
                 "levenberg_marquardt_minpack_traceable",
             ),
-            (
-                "optimistix-lm",
-                "optimistix-lm-ondevice",
-                "jax_least_squares_optimistix",
-            ),
         ],
     )
     def test_run_code_traceable_ls_routes_lm_ondevice(
@@ -9675,9 +9478,7 @@ class TestBoozerSurfaceJAXExactPath:
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
         booz.options["least_squares_algorithm"] = least_squares_algorithm
-        explicit_lm_options = least_squares_algorithm != "optimistix-lm"
-        if explicit_lm_options:
-            _set_explicit_lm_options(booz)
+        _set_explicit_lm_options(booz)
         if explicit_materialize is not None:
             booz.options["materialize_dense_linearization"] = explicit_materialize
         coil_set_spec = booz.coil_set_spec
@@ -9752,12 +9553,7 @@ class TestBoozerSurfaceJAXExactPath:
         assert float(
             np.asarray(result["ls_residual_jacobian_condition_estimate"])
         ) == pytest.approx(1.0)
-        if explicit_lm_options:
-            _assert_explicit_lm_options_forwarded(captured, booz)
-        else:
-            assert captured["ftol"] == pytest.approx(1e-8)
-            assert captured["xtol"] == pytest.approx(1e-8)
-            assert captured["gtol"] is None
+        _assert_explicit_lm_options_forwarded(captured, booz)
         assert captured["materialize_dense_linearization"] is expected_materialize
         assert (
             captured["max_dense_linearization_bytes"]

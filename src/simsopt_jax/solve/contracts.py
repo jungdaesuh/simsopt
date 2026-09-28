@@ -124,8 +124,6 @@ class OptimizerResult:
     hess_inv: HessianInverse | None = None
     invalid_step_log: list[InvalidStepEvent] | None = None
     optimizer_state_trace: list[OptimizerStateTraceEntry] | None = None
-    optimistix_result: str | None = None
-    optimistix_result_message: str | None = None
     # The SciPy L-BFGS-B route's non-Wolfe stops, in order; empty when there
     # was none or the driver has no such policy.
     restart_log: tuple[LbfgsbRestartEvent, ...] = ()
@@ -184,28 +182,6 @@ class ScipyLBFGSBCallbackEvent(_OptimizerCallbackEventBase):
 @dataclass(frozen=True, kw_only=True, slots=True)
 class ScipyBFGSCallbackEvent(_OptimizerCallbackEventBase):
     driver: Literal[Driver.SCIPY_BFGS] = Driver.SCIPY_BFGS
-
-
-@dataclass(frozen=True, kw_only=True, slots=True)
-class OptaxLBFGSCallbackEvent(_OptimizerCallbackEventBase):
-    learning_rate: float
-    num_linesearch_steps: int
-    decrease_error: float
-    curvature_error: float
-    driver: Literal[Driver.OPTAX_LBFGS] = Driver.OPTAX_LBFGS
-
-
-@dataclass(frozen=True, kw_only=True, slots=True)
-class OptaxAdamCallbackEvent(_OptimizerCallbackEventBase):
-    learning_rate: float
-    driver: Literal[Driver.OPTAX_ADAM] = Driver.OPTAX_ADAM
-
-
-@dataclass(frozen=True, kw_only=True, slots=True)
-class OptimistixLBFGSCallbackEvent(_OptimizerCallbackEventBase):
-    history_length: int
-    optimistix_result: str
-    driver: Literal[Driver.OPTIMISTIX_LBFGS] = Driver.OPTIMISTIX_LBFGS
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -270,9 +246,6 @@ class SimsoptLMQRCallbackEvent(_OptimizerCallbackEventBase):
 OptimizerCallbackEvent: TypeAlias = (
     ScipyLBFGSBCallbackEvent
     | ScipyBFGSCallbackEvent
-    | OptaxLBFGSCallbackEvent
-    | OptaxAdamCallbackEvent
-    | OptimistixLBFGSCallbackEvent
     | SimsoptLBFGSBCallbackEvent
     | SimsoptBFGSCallbackEvent
     | SimsoptTraceLBFGSCallbackEvent
@@ -293,10 +266,6 @@ STATUS_CODES: dict[Driver, tuple[int, ...]] = {
         Driver.SCIPY_LBFGSB: (0, 1, 2, 6, SCIPY_LBFGSB_UNRESOLVED_STALL_STATUS),
         Driver.SCIPY_LM: (-1, 0, 1, 2, 3, 4),
         Driver.SCIPY_BFGS: (0, 1, 2, 3, 6),
-        Driver.OPTAX_LBFGS: (0, 1, 2),
-        Driver.OPTAX_ADAM: (0, 1, 2),
-        Driver.OPTIMISTIX_LBFGS: (0, 1, 2),
-        Driver.OPTIMISTIX_LM: (0, 1, 2),
         Driver.SIMSOPT_LBFGSB: (0, 1, 2, 3, 4, 5, 6),
         Driver.SIMSOPT_BFGS: (-1, 0, 1, 2, 3, 5, 99),
         Driver.SIMSOPT_TRACE_LBFGS: (0, 1, 2, 3, 4, 5, 6),

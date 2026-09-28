@@ -601,10 +601,7 @@ def _scalar_from_vector(reference: jax.Array, value: float) -> jax.Array:
 
 def _require_bfgs_optimizer(optimizer: str) -> None:
     if optimizer != "bfgs":
-        raise NotImplementedError(
-            "QFM JAX solves currently support optimizer='bfgs' only; optional "
-            "Optimistix QFM methods are not wired in this milestone."
-        )
+        raise NotImplementedError("QFM JAX solves support optimizer='bfgs' only.")
 
 
 def _penalty_info(

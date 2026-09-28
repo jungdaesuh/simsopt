@@ -8,7 +8,7 @@ import tomllib
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SRC_ROOT = REPO_ROOT / "src"
-RUNTIME_OPTIMIZER_MODULES = ("optax", "optimistix", "lineax")
+RUNTIME_OPTIMIZER_MODULES = ("optax", "lineax")
 
 
 def _run_python_import_probe(source: str) -> subprocess.CompletedProcess[str]:
@@ -186,9 +186,6 @@ def test_pyright_is_pinned_and_reachable_for_the_green_jax_slice():
         "src/simsopt_jax/objectives",
         "src/simsopt_jax/parity_tolerances.py",
         "src/simsopt_jax/solve/dispatch.py",
-        "src/simsopt_jax/solve/minimize_runtime.py",
-        "src/simsopt_jax/solve/optax",
-        "src/simsopt_jax/solve/optimistix",
         "src/simsopt_jax/solve/scipy",
         "src/simsopt_jax/solve/shared",
         "src/simsopt_jax/solve/simsopt",

@@ -171,7 +171,6 @@ _OPTIMIZER_COMPAT_REEXPORT_ALLOWLIST = {
             "_AdjointHessianLinearSolver",
             "_EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS",
             "_hessian_linear_operator",
-            "_lineax_lsmr_solver",
             "_require_tree_first_leaf",
             "_solve_hessian_least_squares_system_with_status",
             "_solve_hessian_system",

@@ -114,7 +114,6 @@ def test_item19_target_outer_loop_contract_defaults_to_ondevice_lbfgs():
         ("host-jax", False, "lm", _opt.Driver.SIMSOPT_LM_GMRES_HOST),
         ("ondevice", False, "lm", _opt.Driver.SIMSOPT_LM_GMRES),
         ("ondevice", False, "lm-minpack", _opt.Driver.SIMSOPT_LM_QR),
-        ("ondevice", False, "optimistix-lm", _opt.Driver.OPTIMISTIX_LM),
     ],
 )
 def test_item19_boozer_inner_driver_contract_stays_typed(

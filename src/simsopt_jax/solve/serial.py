@@ -8,7 +8,6 @@ between solves.
 
 from __future__ import annotations
 
-import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -34,11 +33,6 @@ from simsopt_jax.runtime.jaxpr_closure import (
 from simsopt_jax.solve.contracts import OptimizerResult, ValueAndGradFn
 from simsopt_jax.solve.dispatch import least_squares, minimize
 from simsopt_jax.solve.driver import Driver
-from simsopt_jax.solve.optax.contracts import OptaxLBFGSOptions
-from simsopt_jax.solve.optimistix.contracts import (
-    OptimistixLBFGSOptions,
-    OptimistixLMOptions,
-)
 from simsopt_jax.solve.simsopt.contracts import (
     SimsoptBFGSOptions,
     SimsoptLBFGSBOptions,
@@ -375,7 +369,7 @@ def _least_squares_options(
     rtol: float,
     atol: float,
     max_steps: int,
-) -> SimsoptLMGMRESOptions | SimsoptLMQROptions | OptimistixLMOptions:
+) -> SimsoptLMGMRESOptions | SimsoptLMQROptions:
     if driver == Driver.SIMSOPT_LM_GMRES:
         return SimsoptLMGMRESOptions(
             maxiter=max_steps,
@@ -391,11 +385,9 @@ def _least_squares_options(
             xtol=atol,
             gtol=min(rtol, atol),
         )
-    if driver == Driver.OPTIMISTIX_LM:
-        return OptimistixLMOptions(maxiter=max_steps, tol=min(rtol, atol))
     raise ValueError(
-        "least_squares_serial_solve_jax driver must be simsopt_lm_gmres, "
-        "simsopt_lm_qr, or the explicit optional optimistix_lm driver."
+        "least_squares_serial_solve_jax driver must be simsopt_lm_gmres or "
+        "simsopt_lm_qr."
     )
 
 
@@ -407,12 +399,7 @@ def _scalar_options(
     max_steps: int,
     maxcor: int | None,
     line_search_max_steps: int | None,
-) -> (
-    SimsoptBFGSOptions
-    | SimsoptLBFGSBOptions
-    | OptaxLBFGSOptions
-    | OptimistixLBFGSOptions
-):
+) -> SimsoptBFGSOptions | SimsoptLBFGSBOptions:
     if driver == Driver.SIMSOPT_BFGS:
         return SimsoptBFGSOptions(
             maxiter=max_steps,
@@ -432,14 +419,7 @@ def _scalar_options(
             ftol=rtol,
             maxcor=10 if maxcor is None else maxcor,
         )
-    if driver == Driver.OPTAX_LBFGS:
-        return OptaxLBFGSOptions(maxiter=max_steps, gtol=atol)
-    if driver == Driver.OPTIMISTIX_LBFGS:
-        return OptimistixLBFGSOptions(maxiter=max_steps, tol=min(rtol, atol))
-    raise ValueError(
-        "serial_solve_jax driver must be simsopt_bfgs, simsopt_lbfgsb, or an "
-        "explicitly selected optional optax_lbfgs or optimistix_lbfgs driver."
-    )
+    raise ValueError("serial_solve_jax driver must be simsopt_bfgs or simsopt_lbfgsb.")
 
 
 def _write_bounded_objective_log(
@@ -488,7 +468,6 @@ def least_squares_serial_solve_jax(
     prob: TraceableLeastSquaresProblem,
     *,
     driver: Driver = Driver.SIMSOPT_LM_GMRES,
-    optimizer: str | None = None,
     rtol: float = 1.0e-8,
     atol: float = 1.0e-8,
     max_steps: int = 256,
@@ -502,22 +481,6 @@ def least_squares_serial_solve_jax(
     if kwargs:
         unsupported = ", ".join(sorted(kwargs))
         raise TypeError(f"Unsupported JAX least-squares options: {unsupported}")
-    if optimizer is not None:
-        if driver != Driver.SIMSOPT_LM_GMRES:
-            raise TypeError("Specify only driver or the deprecated optimizer keyword.")
-        if optimizer == "gauss_newton":
-            raise NotImplementedError(
-                "optimizer='gauss_newton' has no typed backend-neutral driver; "
-                "use driver=Driver.OPTIMISTIX_LM for the explicit optional LM path."
-            )
-        if optimizer != "lm":
-            raise ValueError(f"Unsupported JAX least-squares optimizer {optimizer!r}.")
-        warnings.warn(
-            "optimizer='lm' is deprecated; use driver=Driver.OPTIMISTIX_LM.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        driver = Driver.OPTIMISTIX_LM
 
     initial_x = jnp.asarray(prob.x)
     initial_objective = prob.objective(initial_x)
@@ -558,7 +521,6 @@ def serial_solve_jax(
     prob: TraceableScalarProblem | TraceableParametricScalarProblem,
     *,
     driver: Driver = Driver.SIMSOPT_BFGS,
-    optimizer: str | None = None,
     rtol: float = 1.0e-8,
     atol: float = 1.0e-8,
     max_steps: int = 256,
@@ -591,17 +553,6 @@ def serial_solve_jax(
             )
         if line_search_max_steps < 1:
             raise ValueError("line_search_max_steps must be positive")
-    if optimizer is not None:
-        if driver != Driver.SIMSOPT_BFGS:
-            raise TypeError("Specify only driver or the deprecated optimizer keyword.")
-        if optimizer != "bfgs":
-            raise ValueError(f"Unsupported JAX scalar optimizer {optimizer!r}.")
-        raise NotImplementedError(
-            "optimizer='bfgs' selected Optimistix BFGS and has no "
-            "behavior-equivalent typed driver. Choose driver=Driver.SIMSOPT_BFGS "
-            "for the backend-neutral default or explicitly opt into the distinct "
-            "driver=Driver.OPTIMISTIX_LBFGS algorithm."
-        )
 
     initial_x = jnp.asarray(prob.x)
     initial_objective = prob.objective(initial_x)

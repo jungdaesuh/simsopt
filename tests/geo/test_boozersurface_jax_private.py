@@ -214,59 +214,6 @@ def test_lbfgs_ondevice_fast_path_selection_is_bounds_derived():
     assert "_lbfgsb_unconstrained_fast_path_enabled" in impl_source
 
 
-def test_optax_lbfgs_ondevice_default_maxcor_uses_optax_memory_default(monkeypatch):
-    captured = {}
-
-    def fake_require_target_backend_x64(optimizer_backend):
-        captured["x64_backend"] = optimizer_backend
-
-    def fake_optax_minimize(value_and_grad, x0, *, driver, options, callback):
-        value, grad = value_and_grad(x0)
-        captured["driver"] = driver
-        captured["options"] = options
-        captured["callback"] = callback
-        return types.SimpleNamespace(
-            x=np.asarray(x0, dtype=float),
-            fun=float(np.asarray(value)),
-            jac=np.asarray(grad, dtype=float),
-            nit=0,
-            nfev=1,
-            njev=1,
-            status=0,
-            success=True,
-            message="ok",
-            driver=driver,
-            options_used=options,
-            optimistix_result=None,
-            optimistix_result_message=None,
-        )
-
-    monkeypatch.setattr(
-        _opt,
-        "require_target_backend_x64",
-        fake_require_target_backend_x64,
-    )
-    monkeypatch.setattr(_opt, "run_optax_minimize", fake_optax_minimize)
-
-    def value_and_grad(x):
-        return jnp.sum((x - 1.0) ** 2), 2.0 * (x - 1.0)
-
-    result = _opt.target_minimize(
-        value_and_grad,
-        jnp.array([0.0, 2.0], dtype=jnp.float64),
-        method="optax-lbfgs-ondevice",
-        tol=1e-8,
-        maxiter=3,
-        options={},
-        value_and_grad=True,
-    )
-
-    assert captured["x64_backend"] == "optax-lbfgs"
-    assert captured["driver"] is _opt.Driver.OPTAX_LBFGS
-    assert captured["options"].memory_size == 10
-    assert result.message == "ok"
-
-
 def test_matrix_rhs_linear_operators_apply_columns():
     x = jnp.asarray([0.2, -0.1, 0.3], dtype=jnp.float64)
     rhs = jnp.asarray(
@@ -3080,70 +3027,6 @@ class TestLBFGSMethodPrivate:
         assert len(scipy_calls) == len(callback_calls)
         assert progress_calls == []
         np.testing.assert_allclose(result.x, scipy_result.x, rtol=1e-12, atol=1e-12)
-
-    @PRIVATE_OPTIMIZER_RUNTIME
-    @REQUIRES_PRIVATE_LBFGS_RUNTIME
-    def test_lbfgs_ondevice_and_optax_lbfgs_are_distinct_contracts(self):
-        """Optax L-BFGS is not a SciPy L-BFGS-B parity oracle."""
-
-        def rosenbrock(x):
-            return 100.0 * (x[1] - x[0] ** 2) ** 2 + (1.0 - x[0]) ** 2
-
-        def record_callback(events):
-            def callback(x):
-                events.append(np.asarray(x, dtype=float))
-
-            return callback
-
-        def record_progress(events):
-            def progress(iteration, fun, grad_norm):
-                events.append((int(iteration), float(fun), float(grad_norm)))
-
-            return progress
-
-        x0 = jnp.asarray([-1.2, 1.0], dtype=jnp.float64)
-        options = {"maxcor": 3, "maxls": 5, "ftol": 0.0, "gtol": 1e-8}
-        scipy_callback_events = []
-        scipy_progress_events = []
-        scipy_style = _opt.target_minimize(
-            rosenbrock,
-            x0,
-            method="lbfgs-ondevice",
-            maxiter=2,
-            options=options,
-            callback=record_callback(scipy_callback_events),
-            progress_callback=record_progress(scipy_progress_events),
-        )
-        optax_callback_events = []
-        optax_progress_events = []
-        optax_style = _opt.target_minimize(
-            rosenbrock,
-            x0,
-            method="optax-lbfgs-ondevice",
-            maxiter=2,
-            options=options,
-            callback=record_callback(optax_callback_events),
-            progress_callback=record_progress(optax_progress_events),
-        )
-
-        assert hasattr(scipy_style, "hess_inv")
-        assert not hasattr(optax_style, "hess_inv")
-        assert scipy_style.status == optax_style.status == 1
-        assert scipy_style.nit == optax_style.nit == 2
-        assert scipy_style.nfev == scipy_style.njev
-        assert optax_style.nfev == optax_style.njev
-        assert scipy_style.nfev != optax_style.nfev
-        assert float(scipy_style.fun) != pytest.approx(float(optax_style.fun))
-        assert not np.allclose(np.asarray(scipy_style.x), np.asarray(optax_style.x))
-        assert len(scipy_callback_events) == scipy_style.nit
-        assert len(optax_callback_events) == optax_style.nit
-        assert len(scipy_progress_events) == scipy_style.nit
-        assert len(optax_progress_events) == optax_style.nit
-        assert not np.allclose(
-            np.asarray(scipy_callback_events),
-            np.asarray(optax_callback_events),
-        )
-        assert scipy_progress_events != pytest.approx(optax_progress_events)
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_LBFGS_RUNTIME

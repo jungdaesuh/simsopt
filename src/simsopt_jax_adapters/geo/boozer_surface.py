@@ -169,17 +169,13 @@ from simsopt_jax.geo.optimizers._shared import (
 )
 from simsopt_jax.geo.optimizers.optimizer import (
     _BOUNDED_MIXED_NEWTON_ATTEMPT_LIMIT,
-    _OPTIMISTIX_LM_DEFAULT_FTOL,
-    _OPTIMISTIX_LM_DEFAULT_XTOL,
     _TARGET_LEAST_SQUARES_METHODS,
     _dense_lm_state_from_residual_jacobian,
     _mark_cacheable_jit_linear_operator,
     _mark_traceable_runner_cacheable,
     _newton_candidate_status,
-    _optimistix_lm_nondefault_tuning_options,
     _resolve_traceable_newton_linear_solver,
     VALID_LEAST_SQUARES_ALGORITHMS,
-    jax_least_squares_optimistix,
     host_jax_least_squares,
     host_jax_minimize_value_and_grad,
     levenberg_marquardt_minpack_traceable,
@@ -4278,35 +4274,6 @@ def _private_optimizer_option_names(options):
     return _present_option_names(options, _PRIVATE_OPTIMIZER_OPTIONS)
 
 
-def _is_optimistix_lm_lane(options):
-    return (
-        options.get("optimizer_backend") == "ondevice"
-        and options.get("least_squares_algorithm") == "optimistix-lm"
-    )
-
-
-def _optimistix_callback_option_names(options):
-    if not _is_optimistix_lm_lane(options):
-        return ()
-    return _present_option_names(options, _CALLBACK_OPTIONS)
-
-
-def _optimistix_tuning_option_names(options):
-    if not _is_optimistix_lm_lane(options):
-        return ()
-    return _optimistix_lm_nondefault_tuning_options(
-        options.get(
-            "ftol",
-            _OPTIMISTIX_LM_DEFAULT_FTOL,
-        ),
-        options.get(
-            "xtol",
-            _OPTIMISTIX_LM_DEFAULT_XTOL,
-        ),
-        options.get("gtol"),
-    )
-
-
 def _private_optimizer_options_message(option_names):
     keys_str = ", ".join(repr(k) for k in option_names)
     return (
@@ -4314,38 +4281,10 @@ def _private_optimizer_options_message(option_names):
     )
 
 
-def _optimistix_callbacks_message(option_names):
-    keys_str = ", ".join(repr(k) for k in option_names)
-    return (
-        f"BoozerSurfaceJAX option(s) {keys_str} are incompatible "
-        "with least_squares_algorithm='optimistix-lm'. Use "
-        "least_squares_algorithm='lm' for callback-instrumented "
-        "on-device LM runs."
-    )
-
-
-def _optimistix_tuning_message(option_names):
-    keys_str = ", ".join(repr(k) for k in option_names)
-    return (
-        f"BoozerSurfaceJAX option(s) {keys_str} are incompatible "
-        "with least_squares_algorithm='optimistix-lm'. "
-        "optimistix-lm uses the solver 'tol' as the single "
-        "Optimistix/Lineax convergence tolerance."
-    )
-
-
 _LS_SOLVER_OPTION_INCOMPATIBILITIES = (
     _SolverOptionIncompatibility(
         _private_optimizer_option_names,
         _private_optimizer_options_message,
-    ),
-    _SolverOptionIncompatibility(
-        _optimistix_callback_option_names,
-        _optimistix_callbacks_message,
-    ),
-    _SolverOptionIncompatibility(
-        _optimistix_tuning_option_names,
-        _optimistix_tuning_message,
     ),
 )
 
@@ -7049,12 +6988,11 @@ class BoozerSurfaceJAX(Optimizable):
                 weight_inv_modB,
             )
             least_squares_options = self._collect_least_squares_options()
-            if method == "lm-minpack-ondevice":
-                solver = levenberg_marquardt_minpack_traceable
-            elif method == "optimistix-lm-ondevice":
-                solver = jax_least_squares_optimistix
-            else:
-                solver = levenberg_marquardt_traceable
+            solver = (
+                levenberg_marquardt_minpack_traceable
+                if method == "lm-minpack-ondevice"
+                else levenberg_marquardt_traceable
+            )
             gtol = least_squares_options.get("gtol")
             if method == "lm-minpack-ondevice" and gtol is None:
                 gtol = 1e-8

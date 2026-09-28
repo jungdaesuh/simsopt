@@ -349,10 +349,6 @@ machine-readable source of truth is ``VALID_OUTER_OPTIMIZER_BACKENDS`` in
    * - ``ondevice``
      - The supported optimization loop executes through JAX control flow on
        the target device.
-   * - ``optax-lbfgs``
-     - Optional Optax L-BFGS target lane.
-   * - ``optimistix-lbfgs``
-     - Optional Optimistix L-BFGS target lane.
 
 ``optimizer_backend="auto"`` (or ``None``) is a resolvable request rather than
 an outer control model: ``resolve_optimizer_backend`` returns the active

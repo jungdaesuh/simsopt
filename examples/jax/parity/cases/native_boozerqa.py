@@ -28,7 +28,6 @@ from simsopt.optimization_trajectory import (
 )
 from simsopt.single_stage_boozer_vacuum import (
     JAX_FAST_DRIVER_ID,
-    JAX_OPTAX_DRIVER_ID,
     JAX_PARITY_DRIVER_ID,
     OUTER_GRADIENT_TOLERANCE,
 )
@@ -197,7 +196,6 @@ class _PreparedJaxRuntime:
     initial_inner_success: bool
     iota_target: float
     initial_volume: float
-    optimizer_backend: str | None
     incumbent_evaluator: Callable[..., object]
     incumbent_factory: Callable[[], object]
 
@@ -325,8 +323,6 @@ class _PreparedJaxVariantExecution:
     def execute(self, measurement: MeasurementExecution) -> LaneObservation:
         """Run from a fresh incumbent controller on the prepared runtime."""
 
-        if measurement.optimizer_backend != self._runtime.optimizer_backend:
-            raise ValueError("prepared execution optimizer backend cannot change")
         return _jax(
             self.lane,
             self.bundle,
@@ -1048,9 +1044,6 @@ def _prepare_jax_variant_runtime(
     """Construct the single session whose compiled callables warm and measure."""
 
     from simsopt.geo import CurveLength, Volume
-    from simsopt_jax.geo.optimizers.single_stage_routing import (
-        resolve_single_stage_jax_boozer_optimizer_backend,
-    )
     from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
     from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
     from simsopt_jax_adapters.geo.surface_objectives import (
@@ -1081,21 +1074,11 @@ def _prepare_jax_variant_runtime(
     surface.set_dofs(arrays["surface_dofs"])
     field = BiotSavartJAX(native_field.coils)
     volume = Volume(surface)
-    optimizer_backend = (
-        measurement.optimizer_backend if measurement is not None else None
-    )
     solver_options: dict[str, object] = {
         "newton_maxiter": _configuration_int(bundle.configuration, "inner_maxiter"),
         "newton_tol": _configuration_float(bundle.configuration, "inner_tolerance"),
         "verbose": False,
     }
-    if optimizer_backend is not None:
-        solver_options["optimizer_backend"] = (
-            resolve_single_stage_jax_boozer_optimizer_backend(
-                "jax",
-                optimizer_backend,
-            )
-        )
     solver = BoozerSurfaceJAX(
         field,
         surface,
@@ -1174,7 +1157,6 @@ def _prepare_jax_variant_runtime(
         initial_inner_success=initial_inner_success,
         iota_target=iota_target,
         initial_volume=initial_volume,
-        optimizer_backend=optimizer_backend,
         incumbent_evaluator=incumbent_evaluator,
         incumbent_factory=mint_incumbent_controller,
     )
@@ -1216,10 +1198,6 @@ def _jax(
         minimize_bfgs_host_core,
         minimize_lbfgs_host_core,
     )
-    from simsopt_jax.geo.optimizers.optimizer import (
-        resolve_optimizer_backend_method,
-        target_minimize,
-    )
     from simsopt_jax.runtime.trace_annotations import (
         EvaluationDisposition,
         EvaluationKind,
@@ -1241,9 +1219,6 @@ def _jax(
 
     import jax
 
-    optimizer_backend = (
-        measurement.optimizer_backend if measurement is not None else None
-    )
     if measurement is None:
         prepared = _prepare_jax_variant_runtime(
             bundle,
@@ -1260,7 +1235,6 @@ def _jax(
     iota_target = prepared.iota_target
     initial_volume = prepared.initial_volume
     incumbent_controller = prepared.fresh_incumbent_controller()
-    value_and_grad = cast(Callable, prepared.value_and_grad)
     timeline_evaluation_count = 0
     timeline_accepted_iterations = 0
     timeline_pending_trials: list[EvaluationTraceContext] = []
@@ -1521,15 +1495,6 @@ def _jax(
         timeline_pending_values.clear()
 
     def evaluate_initial() -> tuple[float, np.ndarray]:
-        if optimizer_backend == "optax-lbfgs":
-            initial_objective_device, initial_gradient_device = value_and_grad(
-                jax.device_put(initial_parameters)
-            )
-            jax.block_until_ready((initial_objective_device, initial_gradient_device))
-            return (
-                _host_float(initial_objective_device),
-                _host_array(initial_gradient_device),
-            )
         return timeline_value_and_grad(initial_parameters, EvaluationKind.INITIAL)
 
     with _measurement_optimization_window(
@@ -1548,88 +1513,58 @@ def _jax(
                 trajectory.record(iteration, objective)
 
             progress_callback = record_iteration
-        if optimizer_backend == "optax-lbfgs":
-            optimizer_result = target_minimize(
-                value_and_grad,
-                jax.device_put(initial_parameters),
-                method=resolve_optimizer_backend_method(
-                    optimizer_backend,
-                    limited_memory=True,
+        driver = _outer_driver(spec)
+        if driver == Driver.SIMSOPT_LBFGSB:
+            optimizer_result = minimize_lbfgs_host_core(
+                evaluate_optimizer_trial,
+                initial_parameters,
+                maxiter=_configuration_int(
+                    bundle.configuration,
+                    "outer_maxiter",
                 ),
-                tol=OUTER_GRADIENT_TOLERANCE,
-                maxiter=_configuration_int(bundle.configuration, "outer_maxiter"),
-                options={
-                    "maxcor": min(
-                        _configuration_int(bundle.configuration, "outer_maxiter"),
-                        200,
-                    ),
-                    "maxls": 20,
-                },
-                value_and_grad=True,
+                maxcor=min(
+                    _configuration_int(bundle.configuration, "outer_maxiter"),
+                    200,
+                ),
+                ftol=0.0,
+                gtol=OUTER_GRADIENT_TOLERANCE,
+                maxls=20,
+                initial_value_and_grad=(initial_objective, initial_gradient),
+                final_eval_value_and_grad_host=evaluate_optimizer_final,
+                callback=accept_optimizer_trial,
                 progress_callback=progress_callback,
             )
-            jax.block_until_ready(optimizer_result.x)
-            driver = Driver.OPTAX_LBFGS
-            final_parameters = np.asarray(optimizer_result.x, dtype=np.float64)
-            optimizer_iterations = int(optimizer_result.nit)
-            optimizer_evaluations = int(optimizer_result.nfev)
-            optimizer_gradient_evaluations = int(optimizer_result.njev)
-            optimizer_status = int(optimizer_result.status)
-            outer_solver_success = bool(optimizer_result.success)
-            status_convention = "optax-lbfgs"
         else:
-            driver = _outer_driver(spec)
-            if driver == Driver.SIMSOPT_LBFGSB:
-                optimizer_result = minimize_lbfgs_host_core(
-                    evaluate_optimizer_trial,
-                    initial_parameters,
-                    maxiter=_configuration_int(
-                        bundle.configuration,
-                        "outer_maxiter",
-                    ),
-                    maxcor=min(
-                        _configuration_int(bundle.configuration, "outer_maxiter"),
-                        200,
-                    ),
-                    ftol=0.0,
-                    gtol=OUTER_GRADIENT_TOLERANCE,
-                    maxls=20,
-                    initial_value_and_grad=(initial_objective, initial_gradient),
-                    final_eval_value_and_grad_host=evaluate_optimizer_final,
-                    callback=accept_optimizer_trial,
-                    progress_callback=progress_callback,
-                )
-            else:
-                optimizer_result = minimize_bfgs_host_core(
-                    evaluate_optimizer_trial,
-                    initial_parameters,
-                    maxiter=_configuration_int(
-                        bundle.configuration,
-                        "outer_maxiter",
-                    ),
-                    gtol=OUTER_GRADIENT_TOLERANCE,
-                    maxls=20,
-                    initial_value_and_grad=(initial_objective, initial_gradient),
-                    line_search_value_and_grad=(
-                        line_search_value_and_grad_more_thuente_host
-                    ),
-                    callback=accept_optimizer_trial,
-                    progress_callback=progress_callback,
-                )
-            reject_unresolved_optimizer_trials()
-            final_parameters = np.asarray(optimizer_result.x_k, dtype=np.float64)
-            optimizer_iterations = int(optimizer_result.k)
-            optimizer_evaluations = int(optimizer_result.nfev)
-            optimizer_gradient_evaluations = int(optimizer_result.ngev)
-            optimizer_status = int(optimizer_result.status)
-            outer_solver_success = bool(
-                lbfgs_status_is_success(optimizer_result.status, False)
-                if driver == Driver.SIMSOPT_LBFGSB
-                else optimizer_result.converged
+            optimizer_result = minimize_bfgs_host_core(
+                evaluate_optimizer_trial,
+                initial_parameters,
+                maxiter=_configuration_int(
+                    bundle.configuration,
+                    "outer_maxiter",
+                ),
+                gtol=OUTER_GRADIENT_TOLERANCE,
+                maxls=20,
+                initial_value_and_grad=(initial_objective, initial_gradient),
+                line_search_value_and_grad=(
+                    line_search_value_and_grad_more_thuente_host
+                ),
+                callback=accept_optimizer_trial,
+                progress_callback=progress_callback,
             )
-            status_convention = (
-                "host-lbfgsb" if driver == Driver.SIMSOPT_LBFGSB else "host-bfgs"
-            )
+        reject_unresolved_optimizer_trials()
+        final_parameters = np.asarray(optimizer_result.x_k, dtype=np.float64)
+        optimizer_iterations = int(optimizer_result.k)
+        optimizer_evaluations = int(optimizer_result.nfev)
+        optimizer_gradient_evaluations = int(optimizer_result.ngev)
+        optimizer_status = int(optimizer_result.status)
+        outer_solver_success = bool(
+            lbfgs_status_is_success(optimizer_result.status, False)
+            if driver == Driver.SIMSOPT_LBFGSB
+            else optimizer_result.converged
+        )
+        status_convention = (
+            "host-lbfgsb" if driver == Driver.SIMSOPT_LBFGSB else "host-bfgs"
+        )
 
     timeline_final_lifecycle = (
         annotations_enabled() or _TIMELINE_OBSERVATION_SINK.get() is not None
@@ -1663,15 +1598,14 @@ def _jax(
         final_objective = _host_float(final_forward["value"])
         final_gradient = _host_array(final_evaluation.gradient)
     final_forward = final_evaluation.forward_result
-    if optimizer_backend != "optax-lbfgs":
-        provider_state_invalid = bool(
-            not np.isfinite(final_objective) or not np.all(np.isfinite(final_gradient))
-        )
-        outer_solver_success = bool(
-            lbfgs_status_is_success(optimizer_status, provider_state_invalid)
-            if driver == Driver.SIMSOPT_LBFGSB
-            else optimizer_result.converged
-        )
+    provider_state_invalid = bool(
+        not np.isfinite(final_objective) or not np.all(np.isfinite(final_gradient))
+    )
+    outer_solver_success = bool(
+        lbfgs_status_is_success(optimizer_status, provider_state_invalid)
+        if driver == Driver.SIMSOPT_LBFGSB
+        else optimizer_result.converged
+    )
     final_metrics = reporting(
         final_evaluation.candidate_inner_state.coil_dofs,
         final_forward["x"],
@@ -1781,9 +1715,7 @@ def _jax(
         platform="gpu" if platform in {"cuda", "gpu"} else platform,
         precision="fp64" if bool(jax.config.read("jax_enable_x64")) else "fp32",
         driver=(
-            JAX_OPTAX_DRIVER_ID
-            if driver == Driver.OPTAX_LBFGS
-            else JAX_FAST_DRIVER_ID
+            JAX_FAST_DRIVER_ID
             if driver == Driver.SIMSOPT_LBFGSB
             else JAX_PARITY_DRIVER_ID
         ),
