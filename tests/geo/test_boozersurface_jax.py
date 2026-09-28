@@ -27,7 +27,6 @@ import scipy.linalg
 import simsopt_jax.core.biotsavart as _biotsavart_jax_core
 import simsopt_jax.geo.optimizers.reference as _opt_ref
 import simsopt_jax.solve.dispatch as _solve_jax_dispatch
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 from conftest import (
     assert_array_on_device,
     assert_arrays_on_device,
@@ -59,6 +58,7 @@ from simsopt_jax.geo.optimizers.single_stage_routing import (
     resolve_boozer_optimizer_backend,
     resolve_boozer_optimizer_method,
 )
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt_jax.solve import (
     Driver,
     ScipyBFGSOptions,
@@ -13873,10 +13873,6 @@ class TestBoozerCoilVJPCpuOracle:
         prior solver state. Constructing JAX at the synced state lets
         ``BoozerSurfaceJAX.__init__`` populate the cache correctly.
         """
-        from benchmarks.benchmark_problem import (
-            build_ls_parity_problem,
-            clone_tensor_surface,
-        )
         from simsopt.field.biotsavart import BiotSavart
         from simsopt.geo import Volume
         from simsopt.geo.boozersurface import BoozerSurface
@@ -13885,6 +13881,11 @@ class TestBoozerCoilVJPCpuOracle:
         from simsopt_jax_adapters.geo.boozer_surface import (
             BoozerSurfaceJAX,
             _boozer_ls_coil_vjp,
+        )
+
+        from .boozer_ls_parity_fixture import (
+            build_ls_parity_problem,
+            clone_tensor_surface,
         )
 
         problem = build_ls_parity_problem(ncoils=4, nphi=16, ntheta=8)

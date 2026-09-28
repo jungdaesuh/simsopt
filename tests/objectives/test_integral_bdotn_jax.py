@@ -25,7 +25,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 
 _TESTS_ROOT = Path(__file__).resolve().parents[1]
 if str(_TESTS_ROOT) not in sys.path:

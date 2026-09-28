@@ -5,7 +5,7 @@ import pytest
 
 import jax
 import jax.numpy as jnp
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 
 from simsopt_jax.runtime.host_boundary import scalar_pullback_seed
 from simsopt_jax.core.reductions import (

@@ -3,7 +3,7 @@
 The tests exercise the new JAX kernels for ``ToroidalField``,
 ``PoloidalField``, and ``MirrorModel`` against the upstream CPU classes at
 the ``direct_kernel`` parity-ladder lane. All tolerances are imported from
-``benchmarks.validation_ladder_contract.parity_ladder_tolerances`` -- no
+``simsopt_jax.parity_tolerances.parity_ladder_tolerances`` -- no
 ``rtol`` / ``atol`` literals are inlined in the test body.
 
 The same fixtures are then replayed under
@@ -23,7 +23,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt.field import MirrorModel, PoloidalField, ToroidalField
 from simsopt_jax.core.analytic_pure_fields import (
     MirrorModelSpec,

@@ -1,7 +1,7 @@
 """Parity tests for the JAX ``regular_grid_interp`` port (item 13).
 
 Each test imports tolerances from
-``benchmarks.validation_ladder_contract.parity_ladder_tolerances`` so the
+``simsopt_jax.parity_tolerances.parity_ladder_tolerances`` so the
 lane contract is preserved end-to-end.
 
 The cross-oracle test compares the JAX kernel against the C++
@@ -23,10 +23,7 @@ import pytest
 
 import simsoptpp as sopp
 
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
-from benchmarks.regular_grid_skip_cell_map_benchmark import (
-    run_skip_cell_map_benchmark,
-)
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 
 from simsopt_jax.core.regular_grid_interp import (
     ChebyshevInterpolationRule,
@@ -346,32 +343,6 @@ def test_skip_region_yields_zero_inside_skipped_cells() -> None:
         rtol=_DIRECT_KERNEL["rtol"],
         atol=_DIRECT_KERNEL["atol"],
     )
-
-
-def test_skip_cell_map_benchmark_smoke() -> None:
-    """The sparse-vs-dense skip-cell benchmark runs and reports its contract."""
-
-    result = run_skip_cell_map_benchmark(
-        n_cells=8,
-        degree=2,
-        value_size=2,
-        n_samples=64,
-        repeats=1,
-        seed=1317,
-    )
-
-    assert result["benchmark"] == "regular_grid_skip_cell_map"
-    assert result["total_cells"] == 8**3
-    assert 0 < result["kept_cells"] < result["total_cells"]
-    assert result["skipped_cells"] == result["total_cells"] - result["kept_cells"]
-    assert (
-        result["jax_sentinel_cell_to_row_bytes"]
-        == 8**3 * np.dtype(np.int64).itemsize
-    )
-    assert result["jax_cell_table_bytes"] > 0
-    assert result["jax_median_seconds"] >= 0.0
-    assert result["cpp_unordered_map_median_seconds"] >= 0.0
-    assert result["max_abs_error"] <= _DIRECT_KERNEL["atol"]
 
 
 def test_build_spec_returns_deep_readonly_snapshot() -> None:

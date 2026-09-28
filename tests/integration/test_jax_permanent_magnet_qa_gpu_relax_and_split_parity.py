@@ -9,8 +9,8 @@ import jax
 import numpy as np
 import pytest
 
-from benchmarks.pm_gpmo_probes import GridSpec, _build_qa_grid
 from conftest import enable_strict_parity_backend, host_array, parity_default_device
+from pm_qa_grid_fixture import GridSpec, _build_qa_grid
 from simsopt.solve.permanent_magnet_optimization import relax_and_split
 from simsopt_jax.geo.permanent_magnet_grid import PermanentMagnetGridJAX
 from simsopt_jax.solve.permanent_magnet import relax_and_split_jax

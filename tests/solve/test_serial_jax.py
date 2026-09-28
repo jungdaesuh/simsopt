@@ -15,7 +15,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 from jax.sharding import Mesh
 from monty.tempfile import ScratchDir
 from simsopt._core.optimizable import Optimizable
@@ -26,6 +25,7 @@ from simsopt.solve.serial import (
     least_squares_serial_solve,
     serial_solve,
 )
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt_jax.solve.contracts import OptimizerResult
 from simsopt_jax.solve.driver import Driver
 from simsopt_jax.solve.optimistix.contracts import (

@@ -20,7 +20,7 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.special
 
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt_jax.core._elliptic import ellipe, ellipk
 
 _DIRECT_KERNEL = parity_ladder_tolerances("direct_kernel")

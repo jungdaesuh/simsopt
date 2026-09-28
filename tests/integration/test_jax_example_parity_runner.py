@@ -7,17 +7,12 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 from typing import cast
 
 import examples.jax.run_parity as parity_cli
 import numpy as np
 import pytest
-from benchmarks.run_jax_native_example_measurements import (
-    MeasurementRunnerError,
-    _scientific_comparison_document,
-)
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from examples.jax.manifest_runtime import load_runtime_contract_pair
 from examples.jax.outer_optimizer_policy import (
     OuterOptimizerPolicyError,
@@ -65,10 +60,7 @@ from examples.jax.parity.runner import (
     execute_child_process,
 )
 from examples.jax.parity.work_budget import WorkBudgetContract
-from simsopt.single_stage_boozer_vacuum import (
-    JAX_FAST_DRIVER_ID,
-    JAX_PARITY_DRIVER_ID,
-)
+from simsopt.single_stage_boozer_vacuum import JAX_FAST_DRIVER_ID
 from simsopt_jax.config import ExecutionIntent
 from simsopt_jax.examples import ExecutionScale
 
@@ -567,69 +559,6 @@ def test_integrity_violations_are_never_a_lane_outcome_rejection(
     with pytest.raises(ArbitrationError, match=expected_message) as raised:
         arbitrate(routes, observations)
     assert not isinstance(raised.value, LaneOutcomeRejection)
-
-
-def test_measurement_scientific_comparison_arbitrates_fast_and_parity_receipts() -> (
-    None
-):
-    parity_observations = _observations()
-    for lane in ("jax-cpu", "jax-gpu"):
-        parity_observations[lane] = dataclasses.replace(
-            parity_observations[lane],
-            driver=JAX_PARITY_DRIVER_ID,
-        )
-    fast_observations = _fast_observations()
-    document = _scientific_comparison_document(
-        relationship=SimpleNamespace(
-            case_id="native-single-stage-boozer-vacuum-optimization",
-            comparison_routes=_routes(),
-            workflow_stages=("construct", "evaluate"),
-        ),
-        observations={
-            "native_cpu": parity_observations["native-cpu"],
-            "jax_cpu_fast": fast_observations["jax-cpu"],
-            "jax_gpu_fast": fast_observations["jax-gpu"],
-            "jax_cpu_parity": parity_observations["jax-cpu"],
-            "jax_gpu_parity": parity_observations["jax-gpu"],
-        },
-    )
-    fast_document = document["fast"]
-    parity_document = document["parity"]
-    assert isinstance(fast_document, dict)
-    assert isinstance(parity_document, dict)
-
-    assert fast_document["verdict"] == "pass"
-    assert parity_document["verdict"] == "pass"
-
-
-def test_measurement_scientific_comparison_rejects_forged_fast_driver() -> None:
-    parity_observations = _observations()
-    for lane in ("jax-cpu", "jax-gpu"):
-        parity_observations[lane] = dataclasses.replace(
-            parity_observations[lane],
-            driver=JAX_PARITY_DRIVER_ID,
-        )
-    fast_observations = _fast_observations()
-    fast_observations["jax-cpu"] = dataclasses.replace(
-        fast_observations["jax-cpu"],
-        driver=JAX_PARITY_DRIVER_ID,
-    )
-
-    with pytest.raises(MeasurementRunnerError, match="jax_cpu_fast driver must be"):
-        _scientific_comparison_document(
-            relationship=SimpleNamespace(
-                case_id="native-single-stage-boozer-vacuum-optimization",
-                comparison_routes=_routes(),
-                workflow_stages=("construct", "evaluate"),
-            ),
-            observations={
-                "native_cpu": parity_observations["native-cpu"],
-                "jax_cpu_fast": fast_observations["jax-cpu"],
-                "jax_gpu_fast": fast_observations["jax-gpu"],
-                "jax_cpu_parity": parity_observations["jax-cpu"],
-                "jax_gpu_parity": parity_observations["jax-gpu"],
-            },
-        )
 
 
 def test_arbiter_rejects_applicable_observable_without_routes() -> None:

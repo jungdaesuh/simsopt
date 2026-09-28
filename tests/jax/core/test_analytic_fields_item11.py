@@ -1,7 +1,7 @@
 """Parity tests for the JAX ``analytic_fields`` port (item 11).
 
 Each test imports tolerances from
-``benchmarks.validation_ladder_contract.parity_ladder_tolerances`` so the
+``simsopt_jax.parity_tolerances.parity_ladder_tolerances`` so the
 lane contract is preserved end-to-end. Two oracles cover the new port:
 
 * ``test_dommaschk_paper_fixtures`` -- closed-form oracle from
@@ -28,7 +28,7 @@ import jax
 import jax.numpy as jnp
 import simsoptpp as sopp
 
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 
 from simsopt.field.magneticfieldclasses import ToroidalField
 from simsopt_jax.core.analytic_fields import (

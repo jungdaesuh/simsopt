@@ -4,7 +4,7 @@ These tests close the architectural blocker recorded in
 ``.artifacts/jax_port_goal/blockers/15-interpolatedfield-debug.md``.
 The CPU :class:`simsopt.field.InterpolatedField` is the parity oracle.
 Tolerances come from
-:func:`benchmarks.validation_ladder_contract.parity_ladder_tolerances`
+:func:`simsopt_jax.parity_tolerances.parity_ladder_tolerances`
 on the ``direct_kernel`` lane — no ``rtol`` / ``atol`` numeric literals
 appear inline in the test body.
 
@@ -31,7 +31,6 @@ import numpy as np
 import pytest
 import simsopt_jax.core.interpolated_field as interpolated_field_core
 import simsopt_jax_adapters.field.interpolated as interpolated_field_adapter
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 from simsopt.field.coil import Coil, Current
 from simsopt.field.magneticfieldclasses import (
     InterpolatedField,
@@ -49,6 +48,7 @@ from simsopt_jax.core.regular_grid_interp import (
     UniformInterpolationRule,
     build_regular_grid_interpolant_3d,
 )
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.field.interpolated import InterpolatedFieldJAX
 

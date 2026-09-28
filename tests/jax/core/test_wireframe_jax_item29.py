@@ -3,7 +3,7 @@
 Exercises the new pure-JAX wireframe magnetic-field kernels against the
 upstream C++ oracle ``simsoptpp.WireframeField`` at the
 ``direct_kernel`` parity-ladder lane. All tolerances are imported from
-``benchmarks.validation_ladder_contract.parity_ladder_tolerances`` -- no
+``simsopt_jax.parity_tolerances.parity_ladder_tolerances`` -- no
 ``rtol`` / ``atol`` literals are inlined.
 
 Coverage
@@ -37,7 +37,7 @@ import pytest
 
 import simsoptpp as sopp
 
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt_jax.core.wireframe import (
     wireframe_B,
     wireframe_B_and_dB_by_dX,

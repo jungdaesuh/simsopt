@@ -53,7 +53,7 @@ Statistical tolerances
 
 There is no dedicated parity-ladder lane for stochastic moment
 matching in
-``benchmarks.validation_ladder_contract.PARITY_LADDER_TOLERANCES``;
+``simsopt_jax.parity_tolerances.PARITY_LADDER_TOLERANCES``;
 that ladder exclusively covers deterministic CPU/C++ oracles. The
 statistical thresholds in this file are derived inline from the
 multinomial / binomial concentration bound.

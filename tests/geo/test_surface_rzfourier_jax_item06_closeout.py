@@ -15,7 +15,7 @@ at ``stellsym=False``, ``nphi=32``, ``ntheta=16`` (above the
 ``gammadash1``, ``gammadash2``, ``normal``, ``area``, and ``volume``
 against the simsoptpp-backed CPU oracle. Tolerances come from the
 ``direct_kernel`` parity-ladder lane
-(``benchmarks.validation_ladder_contract.PARITY_LADDER_TOLERANCES``).
+(``simsopt_jax.parity_tolerances.PARITY_LADDER_TOLERANCES``).
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ import pytest
 
 from conftest import host_array, host_scalar, parity_default_device, parity_rng
 
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 from simsopt_jax.core import (
     surface_rz_fourier_area_from_dofs,

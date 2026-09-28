@@ -44,9 +44,6 @@ _OPTIMIZER_PRIVATE_DIR = (
 )
 _RUNTIME_BACKEND_PATH = Path(_SRC_DIR) / "simsopt_jax" / "backend" / "runtime.py"
 _LEGACY_GEO_JIT_PATH = Path(_SRC_DIR) / "simsopt" / "geo" / "jit.py"
-_CPU_RUN_CODE_BENCHMARK_PATH = (
-    Path(_REPO_ROOT) / "benchmarks" / "cpu_run_code_benchmark.py"
-)
 _JAX_SUBPROCESS_CASES_PATH = (
     Path(_REPO_ROOT) / "tests" / "subprocess" / "jax_runtime_cases.py"
 )
@@ -63,14 +60,6 @@ _NATIVE_PRECISION_BACKEND_FIRST_PATH = (
     Path(_REPO_ROOT) / "tests" / "subprocess" / "native_precision_backend_first.py"
 )
 _ONDEVICE_COLD_SMOKE_TIMEOUT = 300
-_ENTRYPOINT_RUNTIME_AUDIT_PATHS = (
-    Path(_REPO_ROOT) / "benchmarks" / "biot_savart_kernel_scaling.py",
-    Path(_REPO_ROOT) / "benchmarks" / "cpu_run_code_benchmark.py",
-    Path(_REPO_ROOT) / "benchmarks" / "gpu_run_code_benchmark.py",
-    Path(_REPO_ROOT) / "benchmarks" / "jax_derivative_benchmark.py",
-    Path(_REPO_ROOT) / "benchmarks" / "jax_feasibility_spike.py",
-    Path(_REPO_ROOT) / "benchmarks" / "optimistix_eval.py",
-)
 _BACKEND_SELECTOR_ENV_VARS = (
     "SIMSOPT_BACKEND_MODE",
     "SIMSOPT_PRECISION",
@@ -348,19 +337,6 @@ def _visible_python_source_files(package_dir: Path) -> list[Path]:
     )
 
 
-def _find_import_line(path: Path, module_name: str) -> int | None:
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    import_lines = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            if any(alias.name == module_name for alias in node.names):
-                import_lines.append(node.lineno)
-        elif isinstance(node, ast.ImportFrom):
-            if node.module == module_name:
-                import_lines.append(node.lineno)
-    return min(import_lines) if import_lines else None
-
-
 def _find_absolute_legacy_import_lines(path: Path) -> list[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     legacy_imports: list[str] = []
@@ -382,16 +358,6 @@ def _find_absolute_legacy_import_lines(path: Path) -> list[str]:
             ):
                 legacy_imports.append(f"L{node.lineno}: from {module} import ...")
     return legacy_imports
-
-
-def _find_named_call_lines(path: Path, function_name: str) -> list[int]:
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    call_lines = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            if node.func.id == function_name:
-                call_lines.append(node.lineno)
-    return sorted(call_lines)
 
 
 def test_find_private_jax_src_usages_detects_alias_attribute_access(tmp_path):
@@ -714,38 +680,6 @@ def test_native_precision_backend_first(case: str) -> None:
         failure_message=f"native precision backend-first case {case} failed",
         timeout=_ONDEVICE_COLD_SMOKE_TIMEOUT,
     )
-
-
-def test_run_code_benchmark_common_import_is_jax_cold():
-    _assert_python_script_passes(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_run_code_benchmark_common_import_is_jax_cold",),
-        failure_message="run_code_benchmark_common import should not initialize jax",
-    )
-
-
-def test_cpu_run_code_benchmark_pins_cpu_before_import():
-    _assert_python_script_passes(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_cpu_run_code_benchmark_pins_cpu_before_import",),
-        failure_message="cpu_run_code_benchmark should request CPU before importing jax",
-    )
-
-
-def test_audited_entrypoints_configure_runtime_before_importing_jax():
-    for path in _ENTRYPOINT_RUNTIME_AUDIT_PATHS:
-        configure_lines = _find_named_call_lines(
-            path, "configure_entrypoint_jax_runtime"
-        )
-        first_jax_import = _find_import_line(path, "jax")
-
-        assert configure_lines, (
-            f"{path.name} must call configure_entrypoint_jax_runtime"
-        )
-        assert first_jax_import is not None, f"{path.name} must import jax explicitly"
-        assert min(configure_lines) < first_jax_import, (
-            f"{path.name} must configure the JAX runtime before importing jax"
-        )
 
 
 def test_programmatic_backend_selection_configures_jax_runtime():

@@ -1,10 +1,8 @@
 """Owned production contract for parity-validation tolerance lanes.
 
 This module is the canonical owner of the parity tolerance ladder shared by
-user-facing examples, the example parity harness, and benchmark orchestration.
-``benchmarks.validation_ladder_contract`` re-exports these names for its
-existing consumers; production and example code must import them from here so
-the ``src`` and ``examples`` trees never depend on benchmark modules.
+user-facing examples, the example parity harness and the tests; they import
+these names from here.
 """
 
 from __future__ import annotations

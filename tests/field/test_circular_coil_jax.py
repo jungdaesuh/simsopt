@@ -10,7 +10,7 @@ payload) and the
 
 The CPU :class:`simsopt.field.CircularCoil` is the parity oracle. All
 tolerances come from
-:func:`benchmarks.validation_ladder_contract.parity_ladder_tolerances`
+:func:`simsopt_jax.parity_tolerances.parity_ladder_tolerances`
 at the ``direct_kernel`` lane (``rtol=1e-10``, ``atol=1e-12``), except
 the toroidal-arrangement legacy-reference mirror which keeps the
 upstream scalar magnitude tolerance. Fixtures
@@ -37,7 +37,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt.field import CircularCoil
 from simsopt.field.magneticfield import MagneticFieldSum
 from simsopt_jax_adapters.field.circular_coil import CircularCoilJAX

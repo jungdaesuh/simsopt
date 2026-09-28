@@ -22,7 +22,6 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC_DIR = _REPO_ROOT / "src"
-_CPU_RUN_CODE_BENCHMARK_PATH = _REPO_ROOT / "benchmarks" / "cpu_run_code_benchmark.py"
 _LOCAL_SIMSOPT_IMPORT_PATHS = (_REPO_ROOT, _SRC_DIR)
 
 
@@ -748,27 +747,6 @@ def case_entrypoint_runtime_helper_promotes_cuda_to_cuda_cpu_for_callback_flags(
     assert os.environ["SIMSOPT_JAX_PLATFORM"] == "cuda"
     assert os.environ["SIMSOPT_JAX_BACKEND"] == "cuda"
     assert os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] == "false"
-
-
-def case_run_code_benchmark_common_import_is_jax_cold() -> None:
-    block_jax_imports(message="blocked jax import for benchmark helper smoke")
-
-    sys.path.insert(0, str(_REPO_ROOT))
-
-    import benchmarks.run_code_benchmark_common as benchmark_common
-
-    assert callable(benchmark_common.resolve_benchmark_backends)
-
-
-def case_cpu_run_code_benchmark_pins_cpu_before_import() -> None:
-    import runpy
-
-    sys.argv = [str(_CPU_RUN_CODE_BENCHMARK_PATH)]
-    runpy.run_path(str(_CPU_RUN_CODE_BENCHMARK_PATH), run_name="benchmark_smoke")
-
-    import jax
-
-    assert jax.default_backend() == "cpu"
 
 
 def case_programmatic_backend_selection_configures_jax_runtime() -> None:

@@ -32,7 +32,7 @@ from repo_bootstrap import bootstrap_local_simsopt
 bootstrap_local_simsopt(Path(__file__).resolve().parents[2] / "src")
 
 from conftest import parity_acceptance_modes, parity_mode_case
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 
 from simsopt_jax import core
 from simsopt_jax.backend import invalidate_backend_cache
@@ -788,7 +788,7 @@ class TestBiotSavartJaxCppParity:
         through ``simsopt.field.biotsavart.BiotSavart.B`` (acceptable
         oracle type 1, see ``tests/REVIEWER_ORACLE_LINT.md``). Lane:
         ``direct-kernel`` value tolerances from the validation-ladder
-        SSOT (``benchmarks/validation_ladder_contract.py::
+        SSOT (``src/simsopt_jax/parity_tolerances.py::
         PARITY_LADDER_TOLERANCES``).
         """
         bs, points_np, gammas_np, gds_np, currents_np = (
@@ -1158,7 +1158,7 @@ class TestBiotSavartJaxCppCoilCurrentParity:
     methods (acceptable oracle type 1, see
     ``tests/REVIEWER_ORACLE_LINT.md``). Each test compares the JAX list
     against the C++ list element-by-element on the NCSX parity fixture,
-    using tolerances from ``benchmarks/validation_ladder_contract.py::
+    using tolerances from ``src/simsopt_jax/parity_tolerances.py::
     PARITY_LADDER_TOLERANCES``.
     """
 

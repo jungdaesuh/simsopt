@@ -27,7 +27,7 @@ import jax
 import numpy as np
 import pytest
 
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt_jax.backend import (
     get_backend_config,
     invalidate_backend_cache,

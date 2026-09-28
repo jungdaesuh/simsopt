@@ -42,7 +42,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt_jax.core.framedcurve import (
     centroid_frame,

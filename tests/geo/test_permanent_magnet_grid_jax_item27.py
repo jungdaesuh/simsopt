@@ -10,7 +10,7 @@ import pytest
 
 import simsoptpp as sopp
 
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt_jax.geo.permanent_magnet_grid import (
     MWPGP_ALPHA_SAFETY_FACTOR,
     PermanentMagnetGridJAX,

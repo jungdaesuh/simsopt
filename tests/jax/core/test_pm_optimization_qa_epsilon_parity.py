@@ -11,23 +11,24 @@ from pathlib import Path
 import jax
 import numpy as np
 
-from benchmarks.pm_gpmo_probes import GridSpec, _build_qa_grid
 from simsopt_jax.geo.permanent_magnet_grid import PermanentMagnetGridJAX
 from simsopt_jax.solve.permanent_magnet import relax_and_split_jax
 
-# venv site-packages/tests shadows the repo tests package, so the helper
-# is imported as a top-level module from the tests/ directory.
+# venv site-packages/tests shadows the repo tests package, so the helpers
+# are imported as top-level modules from the tests/ directory.
 _TESTS_ROOT = str(Path(__file__).resolve().parents[2])
 if _TESTS_ROOT not in sys.path:
     sys.path.append(_TESTS_ROOT)
 from parity_native_cpu import run_native_cpu_child
+from pm_qa_grid_fixture import GridSpec, _build_qa_grid
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # Child source is a string so OpenMP is in the environment before the
 # extension is imported. ``run_native_cpu_child`` is the SSOT that
 # applies ``build_parity_lane_environment`` (``OMP_NUM_THREADS=1``)
-# for native-cpu.
+# for native-cpu. The child runs in tests/ so it imports the grid fixture
+# (and unpickles its ``GridSpec``) as the same top-level module.
 _NATIVE_CHILD = """\
 import io
 import pickle
@@ -37,7 +38,7 @@ from pathlib import Path
 
 import numpy as np
 
-from benchmarks.pm_gpmo_probes import _build_qa_grid
+from pm_qa_grid_fixture import _build_qa_grid
 from simsopt.solve.permanent_magnet_optimization import relax_and_split
 from simsopt.util.permanent_magnet_helper_functions import initialize_default_kwargs
 
@@ -111,6 +112,7 @@ def test_qa_nphi4_epsilon_1e_3_matches_native(tmp_path: Path) -> None:
         str(spec_path),
         str(out_path),
         repo_root=_REPO_ROOT,
+        cwd=_REPO_ROOT / "tests",
     )
     assert completed.returncode == 0, completed.stderr
     native_m = pickle.loads(out_path.read_bytes())

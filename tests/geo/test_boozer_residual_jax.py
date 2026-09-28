@@ -41,7 +41,7 @@ from conftest import (
     parity_default_device,
     parity_rng,
 )
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 
 import simsopt_jax.geo.boozer_residual as _brj
 from simsopt_jax.backend import invalidate_backend_cache

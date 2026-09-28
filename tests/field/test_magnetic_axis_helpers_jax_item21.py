@@ -24,7 +24,7 @@ These tests assert that:
    :func:`jax.jit` produces the same scalar.
 
 All tolerances are imported from
-``benchmarks.validation_ladder_contract.parity_ladder_tolerances``; no
+``simsopt_jax.parity_tolerances.parity_ladder_tolerances``; no
 ``rtol`` / ``atol`` literals appear inline in the test body.
 """
 
@@ -35,7 +35,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt.configs.zoo import get_data
 from simsopt.geo.curverzfourier import CurveRZFourier
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX

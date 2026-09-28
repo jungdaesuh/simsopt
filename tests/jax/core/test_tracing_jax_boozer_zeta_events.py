@@ -38,7 +38,7 @@ import pytest
 
 import simsoptpp as sopp
 
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 
 from simsopt.field.boozermagneticfield import BoozerRadialInterpolant
 from simsopt.field.tracing import MaxToroidalFluxStoppingCriterion

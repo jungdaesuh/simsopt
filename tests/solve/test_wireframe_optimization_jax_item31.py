@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 import simsoptpp as sopp
 
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt.field import BiotSavart, Current, ToroidalField, coils_via_symmetries
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.field.toroidal_field import ToroidalFieldJAX

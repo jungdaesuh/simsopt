@@ -13,7 +13,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from benchmarks.fixtures.custom_quasi_newton import fixture
 from jax.flatten_util import ravel_pytree
 from simsopt_jax.geo.optimizers._shared import (
     _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR,
@@ -1095,34 +1094,3 @@ def test_lbfgs_stepwise_observer_uses_one_packed_host_boundary(monkeypatch) -> N
     assert observation.accepted_new_x is True
     assert observation.n_iterations == 1
     assert observation.x is not None
-
-
-@pytest.mark.slow
-def test_boozer_fixture_exercises_traceable_route() -> None:
-    fixture_case = fixture("boozer")
-    assert fixture_case.source == "source_owned_boozer_vacuum"
-    assert fixture_case.expected_dimension == 65
-    metadata = dict(fixture_case.metadata)
-    assert metadata["traceable_run_code_success"] is True
-    assert fixture_case.value_and_grad is not None
-    value, gradient = fixture_case.value_and_grad(
-        jnp.asarray(fixture_case.initial, dtype=jax.numpy.float64)
-    )
-    jax.block_until_ready((value, gradient))
-    assert bool(jnp.isfinite(value))
-    assert bool(jnp.all(jnp.isfinite(gradient)))
-    assert gradient.shape == (65,)
-
-
-@pytest.mark.slow
-def test_coil47_fixture_is_source_owned_and_has_47_dofs() -> None:
-    fixture_case = fixture("coil47")
-    assert fixture_case.source == "source_owned_fixed_surface_coil_flux"
-    assert fixture_case.expected_dimension == 47
-    value, gradient = jax.value_and_grad(fixture_case.objective)(
-        jnp.asarray(fixture_case.initial, dtype=jax.numpy.float64)
-    )
-    jax.block_until_ready((value, gradient))
-    assert bool(jnp.isfinite(value))
-    assert bool(jnp.all(jnp.isfinite(gradient)))
-    assert gradient.shape == (47,)

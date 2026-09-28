@@ -11,7 +11,7 @@ import pytest
 
 pytest.importorskip("sympy")
 
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt._core.json import GSONDecoder, GSONEncoder, SIMSON
 from simsopt.field import ScalarPotentialRZMagneticField
 from simsopt_jax_adapters.field.scalar_potential_rz import ScalarPotentialRZMagneticFieldJAX

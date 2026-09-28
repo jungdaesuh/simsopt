@@ -13,7 +13,7 @@ exercised end-to-end. The symmetry-expansion path is exercised by
 parametrising over ``(stellsym, nfp, coordinate_flag)``.
 
 All tolerances are imported from
-:func:`benchmarks.validation_ladder_contract.parity_ladder_tolerances`;
+:func:`simsopt_jax.parity_tolerances.parity_ladder_tolerances`;
 no ``rtol`` / ``atol`` numeric literals appear inline in the test body.
 """
 
@@ -24,7 +24,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt.field import DipoleField
 from simsopt_jax_adapters.field.dipole import DipoleFieldJAX
 

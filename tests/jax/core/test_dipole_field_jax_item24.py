@@ -3,7 +3,7 @@
 The tests exercise the JAX dipole-field kernels (``B``, ``A``, ``dB``, ``dA``)
 against the upstream C++ oracle ``simsoptpp.dipole_field_{B,A,dB,dA}`` at the
 ``direct_kernel`` parity-ladder lane. All tolerances are imported from
-``benchmarks.validation_ladder_contract.parity_ladder_tolerances`` -- no
+``simsopt_jax.parity_tolerances.parity_ladder_tolerances`` -- no
 ``rtol`` / ``atol`` literals are inlined in the test body.
 
 The same fixtures are then replayed under ``jax.transfer_guard("disallow")``
@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 import simsoptpp as sopp
 
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt_jax.core.dipole_field import (
     DipoleFieldSpec,
     dipole_field_A_from_spec as dipole_field_A,

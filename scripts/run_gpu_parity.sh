@@ -182,21 +182,14 @@ echo ""
 echo "=== Phase 5: Boozer Surface Solver ==="
 "$PYTHON_BIN" -m pytest tests/geo/test_boozersurface_jax.py -m "not private_optimizer_runtime" -v --tb=short 2>&1 || record_failure
 
-# --- Phase 6: GPU reproducibility contract (GPU only) ---
-if [ "$PLATFORM" = "cuda" ]; then
-  echo ""
-  echo "=== Phase 6: GPU Reproducibility Contract ==="
-  "$PYTHON_BIN" scripts/jax_ci_contract.py --platform cuda 2>&1 || record_failure
-fi
-
-# --- Phase 7: JAX native path integration ---
+# --- Phase 6: JAX native path integration ---
 echo ""
-echo "=== Phase 7: JAX Native Path Integration ==="
+echo "=== Phase 6: JAX Native Path Integration ==="
 "$PYTHON_BIN" -m pytest tests/integration/test_jax_native_path.py -v --tb=short 2>&1 || record_failure
 
-# --- Phase 8: Quick device sanity ---
+# --- Phase 7: Quick device sanity ---
 echo ""
-echo "=== Phase 8: Device Sanity Check ==="
+echo "=== Phase 7: Device Sanity Check ==="
 "$PYTHON_BIN" -c "
 import jax
 jax.config.update('jax_enable_x64', True)

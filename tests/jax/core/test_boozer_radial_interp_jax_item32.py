@@ -6,7 +6,7 @@ The cross-oracle tests compare the JAX kernels against the C++
 ``simsoptpp.inverse_fourier_transform_{odd,even}`` bindings.
 
 Tolerances come from
-``benchmarks.validation_ladder_contract.parity_ladder_tolerances`` so the
+``simsopt_jax.parity_tolerances.parity_ladder_tolerances`` so the
 parity-ladder contract is preserved end-to-end. All kernels are
 closed-form same-state evaluations and route through the
 ``direct_kernel`` lane (``rtol=1e-10``, ``atol=1e-12``).
@@ -21,7 +21,7 @@ import pytest
 
 import simsoptpp as sopp
 
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 
 from simsopt_jax.core.boozer_radial_interp import (
     _build_angle_basis,

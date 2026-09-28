@@ -17,7 +17,7 @@ import jax
 
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt_jax.backend import invalidate_backend_cache
 from simsopt_jax.core import (
     make_surface_xyz_fourier_spec,

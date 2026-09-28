@@ -411,7 +411,6 @@ jobs:
           bash scripts/lint.sh check \
             src/simsopt_jax \
             src/simsopt_jax_adapters \
-            scripts/jax_ci_contract.py \
             scripts/jax_where_division_lint.py \
             tests/jax \
             tests/test_jax_import_smoke.py \

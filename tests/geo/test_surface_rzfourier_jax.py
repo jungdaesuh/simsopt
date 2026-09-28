@@ -1,8 +1,5 @@
-import json
 from pathlib import Path
 import re
-import subprocess
-import sys
 
 import numpy as np
 import jax
@@ -972,43 +969,6 @@ def test_surface_rzfourier_scalar_gamma_hlo_stays_single_output():
     assert gamma_stats["cosine"] <= geometry_stats["cosine"]
     assert gamma_stats["sine"] <= geometry_stats["sine"]
     assert gamma_jacfwd_stats["line_count"] < geometry_jacfwd_stats["line_count"]
-
-
-def test_surface_rz_geometry_hlo_probe_entrypoint_uses_local_package(tmp_path):
-    repo_root = Path(__file__).resolve().parents[2]
-    output_json = tmp_path / "surface_rz_geometry_hlo_probe.json"
-
-    subprocess.run(
-        [
-            sys.executable,
-            str(repo_root / "benchmarks" / "surface_rz_geometry_hlo_probe.py"),
-            "--platform",
-            "cpu",
-            "--mpol",
-            "1",
-            "--ntor",
-            "1",
-            "--nphi",
-            "5",
-            "--ntheta",
-            "6",
-            "--repeat",
-            "1",
-            "--warmup",
-            "0",
-            "--output-json",
-            str(output_json),
-        ],
-        cwd=repo_root,
-        check=True,
-    )
-
-    payload = json.loads(output_json.read_text(encoding="utf-8"))
-    assert payload["runtime"]["backend"] == "cpu"
-    assert payload["shape"]["mpol"] == 1
-    assert payload["comparison"]["hlo_gate_passed"] is True
-    assert payload["comparison"]["scalar_api_hlo_guard_passed"] is True
-    assert payload["comparison"]["fused_lowered_trig_reduce_counts_lower"] is True
 
 
 def test_surface_rzfourier_geometry_avoids_jnp_arange(monkeypatch):

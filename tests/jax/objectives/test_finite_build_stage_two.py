@@ -78,10 +78,8 @@ def _build_case(curve_curve_threshold: float) -> _FiniteBuildCase:
     The axisymmetric circular-torus surface makes B·n symmetry-zero, so the
     squared-flux and length branches contribute only ~1e-34 here and their
     parity assertions are carried by ``atol``; non-vacuous flux/length parity
-    lives in the campaign baseline phase
-    (``benchmarks/stage_two_finitebuild_native_gpu.py`` baseline legs), not
-    in this fixture.  The active-threshold case exercises the distance
-    branch at genuine magnitude.
+    is not asserted in this fixture.  The active-threshold case exercises the
+    distance branch at genuine magnitude.
     """
     surface = SurfaceRZFourier(
         mpol=1,

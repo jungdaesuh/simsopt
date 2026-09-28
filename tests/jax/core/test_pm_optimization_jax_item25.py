@@ -32,7 +32,7 @@ import pytest
 
 import simsoptpp
 
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt_jax.core.pm_optimization import (
     GPMOArbVecBacktrackingSpec,
     GPMOArbVecSpec,

@@ -9,9 +9,8 @@ objective cloned from
 the JAX mirror's ``make_stochastic_stage_two_objective`` must return the same
 value and the same gradient to fp64 round-off.
 
-Both lanes are built through ``benchmarks/stochastic_stage_two_probe.py`` so the
-tested construction is the published one rather than a second copy of it.  The
-scale is ``bounded`` (2 samples, 4x4 surface, order-2 curves) and every solve is
+Both lanes are built by ``_stochastic_matched_lanes.py`` from one shared sample
+bundle and starting state.  The scale is ``bounded`` (2 samples, 4x4 surface, order-2 curves) and every solve is
 one iteration: this is an evaluator test, not a trajectory test.
 
 Run one file per process (JAX x64 is process-global)::
@@ -28,7 +27,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from benchmarks.stochastic_stage_two_probe import (
+from _stochastic_matched_lanes import (
     build_shared_inputs,
     run_jax_leg,
     run_native_leg,
