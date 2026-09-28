@@ -13,9 +13,15 @@ returns, with ``cache_clear()``).
 
 Optional keys: ``base_value`` / ``base_total`` / ``physics_total`` (objective
 without penalty terms, used to rank incumbents), ``base_grad`` / ``metric_grad``
-(its gradient, for stationarity), ``constraint_scales``,
-``constraint_activity_tolerances``, ``nonfinite_evaluation`` (the point is
-unusable), and ``search_step_success=False`` (reject the trial step).
+(its gradient, for stationarity), ``stationarity_norm`` (otherwise the solver
+measures ``||grad||``, without the components pointing out of the box at an
+active ``base_bounds`` bound; a value that is not ``||grad||`` is the
+evaluator's own measure, used as given, so it must account for the bounds),
+``constraint_scales``, ``constraint_activity_tolerances``,
+``nonfinite_evaluation`` (the point is unusable), and
+``search_step_success=False`` (reject the trial step). With ``base_bounds``,
+x0 is projected onto the box (as L-BFGS-B does), and a ``resume_from`` whose
+x lies outside it raises ``ValueError``.
 :class:`ALMEvaluation` declares these and the other keys the solver owns (the
 builder's summaries, raw and normalized rows); an application types its own
 keys by subclassing it. Any other key is kept as a diagnostic. The solver copies the mappings, lists and

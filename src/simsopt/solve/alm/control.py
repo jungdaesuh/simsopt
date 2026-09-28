@@ -216,6 +216,15 @@ class _ALMNormalizedRunInputs:
     update_stationarity_tol: float
     base_bounds: Optional[List[Tuple[float, float]]]
 
+def _project_onto_bounds(
+    x: np.ndarray, base_bounds: Optional[List[Tuple[float, float]]]
+) -> np.ndarray:
+    """An owned copy of ``x`` clipped to the ``(lower, upper)`` pairs."""
+    if base_bounds is None:
+        return x.copy()
+    lower, upper = np.asarray(base_bounds, dtype=float).T
+    return np.clip(x, lower.reshape(x.shape), upper.reshape(x.shape))
+
 def _normalize_alm_run_inputs(
     x0,
     constraint_names: Sequence[str],
@@ -236,7 +245,9 @@ def _normalize_alm_run_inputs(
     constraint_names_tuple, constraint_blocks_tuple = _build_constraint_metadata_tuples(
         constraint_names, constraint_blocks
     )
-    x = np.asarray(x0, dtype=float).copy()
+    base_bounds = _normalize_base_bounds(base_bounds, np.size(x0))
+    # Like L-BFGS-B, start from x0 projected onto the box.
+    x = _project_onto_bounds(np.asarray(x0, dtype=float), base_bounds)
     multipliers = (
         validate_initial_multipliers(initial_multipliers, len(constraint_names))
         if initial_multipliers is not None
@@ -262,7 +273,7 @@ def _normalize_alm_run_inputs(
         trust_radius=_normalize_trust_radius(settings.trust_radius_init),
         update_feasibility_tol=update_feasibility_tol,
         update_stationarity_tol=update_stationarity_tol,
-        base_bounds=_normalize_base_bounds(base_bounds, x.size),
+        base_bounds=base_bounds,
     )
 
 def _apply_alm_penalty_increase(
@@ -551,10 +562,7 @@ def _build_alm_failure_result_with_optional_restore(
         settings.feasibility_tol,
     )
     restored_stationarity_norm = _bound_reduced_stationarity_norm(
-        restored_stationarity_norm,
-        restored_state.evaluation["grad"],
-        run_state.x,
-        run_state.base_bounds,
+        restored_state.evaluation, run_state.x, run_state.base_bounds
     )
     restored_max_feasibility_violation = _extract_constraint_state(
         restored_state.evaluation
@@ -1660,6 +1668,11 @@ def minimize_alm(
         _validate_resume_boundary(resume_from)
         resumed = resume_from.state
         resume_x = np.asarray(resumed.x, dtype=float)
+        # A checkpoint of a run with these bounds lies inside them; one
+        # outside came from other bounds, and projecting it would not
+        # continue the run that wrote it.
+        if not np.array_equal(_project_onto_bounds(resume_x, normalized.base_bounds), resume_x):
+            raise ValueError("resume_from.state.x lies outside base_bounds")
         if not np.array_equal(normalized.x, resume_x):
             raise ValueError("x0 does not match resume_from.state.x")
         if resume_from.constraint_names != constraint_names_tuple:

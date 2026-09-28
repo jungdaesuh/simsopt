@@ -46,7 +46,9 @@ class ALMEvaluation(_ALMEvaluationRequired, total=False):
     container cycle).
     """
 
-    # The objective without penalty terms, its gradient and stationarity.
+    # The objective without penalty terms, its gradient and stationarity. A
+    # stationarity_norm that is not ||grad|| is used as given (no bound
+    # reduction), so it must account for base_bounds itself.
     base_value: float
     base_total: float
     physics_total: float
@@ -364,9 +366,7 @@ def _measure_iterate(
         kkt_stationarity_norm,
         signal_mismatch_active,
     ) = _stationarity_metrics(evaluation, routing_state, effective_feasibility_tol)
-    stationarity_norm = _bound_reduced_stationarity_norm(
-        stationarity_norm, evaluation["grad"], x, base_bounds
-    )
+    stationarity_norm = _bound_reduced_stationarity_norm(evaluation, x, base_bounds)
     return ALMIterateMeasurement(
         evaluation=evaluation,
         multipliers=multipliers,

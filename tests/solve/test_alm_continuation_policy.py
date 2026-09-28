@@ -695,7 +695,10 @@ def _solve_from(evaluate, x0, multiplier, penalty, *, rows=("c",), settings=None
     return alm.minimize_alm(
         np.array([x0]), list(rows), evaluate,
         settings or alm.ALMSettings(max_outer_iterations=2), {"maxiter": 10},
-        initial_multipliers=np.atleast_1d(np.asarray(multiplier, dtype=float)),
+        initial_multipliers=(
+            None if multiplier is None
+            else np.atleast_1d(np.asarray(multiplier, dtype=float))
+        ),
         initial_penalty=penalty, **kwargs,
     )
 
@@ -955,12 +958,74 @@ class AlmBoundStationarityTests(unittest.TestCase):
             (np.array([-3.0, -4.0, 12.0]), np.hypot(4.0, 12.0)),
         ):
             with self.subTest(grad=grad):
+                evaluation = {"grad": grad, "stationarity_norm": float(np.linalg.norm(grad))}
                 self.assertEqual(
-                    alm_core._bound_reduced_stationarity_norm(
-                        float(np.linalg.norm(grad)), grad, x, bounds
-                    ),
+                    alm_core._bound_reduced_stationarity_norm(evaluation, x, bounds),
                     expected,
                 )
+
+    def test_a_point_outside_the_box_is_not_on_its_bound(self):
+        bounds = [(0.0, 1.0)]
+        for x, grad in ((2.0, -1.0), (-1.0, 1.0)):
+            with self.subTest(x=x):
+                evaluation = {"grad": np.array([grad])}
+                self.assertEqual(
+                    alm_core._bound_reduced_stationarity_norm(
+                        evaluation, np.array([x]), bounds
+                    ),
+                    1.0,
+                )
+
+    def test_an_evaluator_stationarity_norm_is_kept(self):
+        # Its own measure (not ||grad||): the evaluator accounts for the bounds.
+        evaluation = {"grad": np.array([-1.0]), "stationarity_norm": 100.0}
+        self.assertEqual(
+            alm_core._bound_reduced_stationarity_norm(evaluation, np.array([1.0]), [(0.0, 1.0)]),
+            100.0,
+        )
+
+    def test_an_x0_outside_the_box_is_projected_onto_it(self):
+        # L-BFGS-B clips x0 the same way; the run ends at the bound optimum.
+        for slope, x0, optimum in ((-1.0, 2.0, 1.0), (1.0, -1.0, 0.0)):
+            with self.subTest(x0=x0):
+                result = self.solve(slope, x0)
+                self.assertTrue(result.success, result.message)
+                np.testing.assert_array_equal(result.x, [optimum])
+
+    def test_a_mixed_out_of_box_x0_ends_at_the_bound_optimum(self):
+        def evaluate(x, multipliers, penalty):
+            return alm.augmented_inequality_objective(
+                float(x[1] - x[0]), np.array([-1.0, 1.0]), np.array([-1.0]),
+                [np.zeros(2)], multipliers, penalty,
+            )
+
+        result = alm.minimize_alm(
+            np.array([2.0, -1.0]), ["inert"], evaluate,
+            alm.ALMSettings(max_outer_iterations=2), {"maxiter": 10},
+            base_bounds=[(0.0, 1.0), (0.0, 1.0)],
+        )
+        self.assertTrue(result.success, result.message)
+        np.testing.assert_array_equal(result.x, [1.0, 0.0])
+
+    def test_a_resumed_x_outside_the_box_is_rejected(self):
+        # A checkpoint of a run with these bounds lies inside them: an x
+        # outside means other bounds, and projecting it would not continue
+        # the run that wrote it.
+        boundaries = []
+        _solve_from(
+            _row_scaled(), 0.0, 1.1, 1.0, base_bounds=[(-1.0, 1.0)],
+            on_outer_boundary=boundaries.append,
+        )
+        boundary = boundaries[0]
+        self.assertIsNone(boundary.termination_reason)
+        np.testing.assert_array_equal(boundary.state.x, [0.0])
+        for bounds in ([(0.5, 1.0)], [(-1.0, -0.5)]):
+            with self.subTest(bounds=bounds):
+                with self.assertRaisesRegex(ValueError, "base_bounds"):
+                    _solve_from(
+                        _row_scaled(), 0.0, None, None, base_bounds=bounds,
+                        resume_from=boundary,
+                    )
 
 
 class AlmSignalMismatchTests(unittest.TestCase):

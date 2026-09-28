@@ -186,10 +186,7 @@ class _ALMInnerAttemptEvaluator:
             self.request.effective_feasibility_tol,
         )
         callback_stationarity_norm = _bound_reduced_stationarity_norm(
-            callback_stationarity_norm,
-            evaluation["grad"],
-            inner_x_arr,
-            self.base_bounds,
+            evaluation, inner_x_arr, self.base_bounds
         )
         if callback_routing_state.signal_state.explicit_hybrid_signals:
             if _dual_update_gate_satisfied(

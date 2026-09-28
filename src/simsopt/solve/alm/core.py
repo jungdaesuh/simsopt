@@ -847,26 +847,35 @@ def _augmented_stationarity_norm(evaluation: dict) -> float:
     return float(evaluation.get("stationarity_norm", np.linalg.norm(evaluation["grad"])))
 
 def _bound_reduced_stationarity_norm(
-    stationarity_norm: float,
-    grad,
+    evaluation: dict,
     x,
     base_bounds: Optional[Sequence[Tuple[float, float]]],
 ) -> float:
-    """Bound-constrained stationarity: ``stationarity_norm``, or, where a
-    component of ``x`` sits on a base bound (``(lower, upper)`` pairs, ±inf
-    for none) with ``grad`` pointing out of the box, the norm of ``grad`` with
-    those components zeroed: the bound's multiplier holds them."""
+    """The loop's stationarity at ``x``: an evaluator's own
+    ``stationarity_norm`` (one that is not ``||grad||``) as given; otherwise
+    ``||grad||`` without the components pointing out of the box where ``x``
+    lies on a finite base bound (``(lower, upper)`` pairs), from inside it to
+    4 ulp: the bound's multiplier holds them. A coordinate outside the box
+    is on no bound."""
+    stationarity_norm = _augmented_stationarity_norm(evaluation)
     if base_bounds is None:
-        return float(stationarity_norm)
+        return stationarity_norm
     lower, upper = np.asarray(base_bounds, dtype=float).T
-    grad_array = np.asarray(grad, dtype=float).reshape(-1)
+    grad = np.asarray(evaluation["grad"], dtype=float).reshape(-1)
     x_array = np.asarray(x, dtype=float).reshape(-1)
-    blocked = ((x_array >= upper) & (grad_array < 0.0)) | (
-        (x_array <= lower) & (grad_array > 0.0)
-    )
-    if not np.any(blocked):
-        return float(stationarity_norm)
-    return float(np.linalg.norm(np.where(blocked, 0.0, grad_array)))
+    ulp = 4.0 * np.finfo(float).eps
+    with np.errstate(invalid="ignore"):
+        on_upper = np.isfinite(upper) & (x_array <= upper) & (
+            upper - x_array <= ulp * np.maximum(1.0, np.abs(upper))
+        )
+        on_lower = np.isfinite(lower) & (x_array >= lower) & (
+            x_array - lower <= ulp * np.maximum(1.0, np.abs(lower))
+        )
+    blocked = (on_upper & (grad < 0.0)) | (on_lower & (grad > 0.0))
+    grad_norm = float(np.linalg.norm(grad))
+    if not np.any(blocked) or stationarity_norm != grad_norm:
+        return stationarity_norm
+    return float(np.linalg.norm(np.where(blocked, 0.0, grad)))
 
 def _stationarity_metrics(
     evaluation: dict,
