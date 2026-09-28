@@ -68,7 +68,10 @@ re-evaluates the same x with new multipliers or a new penalty. The dict needs
 `dual_update_values`, `constraint_grads`; `ALMPhysics.evaluation` and
 `augmented_inequality_objective` return all of them, plus `base_value` and
 `base_grad` (f without penalty terms, used to rank incumbents and for the KKT
-residual). The solver checks every dict where it enters (outer iterate and
+residual). An optional `stationarity_norm` that is not `||grad||` is the
+evaluator's own stationarity measure, used as given (so it must account for
+`base_bounds`); otherwise the solver measures `||grad||` without the
+components pointing out of the box at an active bound. The solver checks every dict where it enters (outer iterate and
 each inner trial): a required key absent or None raises `KeyError`
 (`constraint_grads` included, even with every row inactive); `grad` and each
 of the one-per-row `constraint_grads` must have x's shape, and
@@ -151,7 +154,9 @@ def hybrid_physics(base_value, base_grad, surrogate, hard, constraint_grads):
   start from an earlier result; not with `resume_from`.
 - `constraint_blocks`: one group label per row (reports only).
 - `base_bounds`: box bounds on x, a sequence of `(lower, upper)` pairs or an
-  object with `lb`/`ub`.
+  object with `lb`/`ub`. x0 is projected onto the box (as L-BFGS-B does); a
+  `resume_from` whose x lies outside it raises `ValueError` (it came from
+  other bounds).
 - `resume_from`, `on_outer_boundary`: checkpoint/resume (use
   `alm_checkpointing`); resuming needs the same x0 (the checkpoint's x), names
   and blocks.
