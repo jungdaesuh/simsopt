@@ -5,7 +5,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-import simsopt_jax.config as simsopt_config
 import simsopt_jax.solve.dispatch as dispatch
 import simsopt_jax.solve.minimize_runtime as minimize_runtime
 from simsopt_jax.solve.dispatch import least_squares, minimize
@@ -18,6 +17,8 @@ from simsopt_jax.solve import (
     ScipyBFGSOptions,
     SimsoptBFGSOptions,
 )
+
+from conftest import enable_strict_parity_backend
 
 
 _OPTIMISTIX_GPU_FULL_TRANSFER_GUARD_XFAIL_VERSION = "0.1.0"
@@ -572,42 +573,31 @@ def test_optax_callback_event_matches_updated_parameter_state():
     assert np.isclose(event.grad_norm_inf, float(np.max(np.abs(2.0 * event.x))))
 
 
-def test_simsopt_bfgs_uses_explicit_value_grad_under_strict_transfer_guard():
-    previous_backend = simsopt_config.get_backend_config()
-    previous_transfer_guard = jax.config.jax_transfer_guard
-    try:
-        simsopt_config.set_backend(
-            "jax_cpu_parity",
-            strict=True,
-            transfer_guard="disallow",
-        )
-        half = jax.device_put(np.asarray(0.5, dtype=np.float64))
+def test_simsopt_bfgs_uses_explicit_value_grad_under_strict_transfer_guard(
+    monkeypatch, request
+):
+    # Strict parity on this process's own JAX platform, with the guard carried
+    # by the backend config: a CPU parity mode is refused in a GPU-default
+    # process, and the conftest helper pins the GPU determinism flag the
+    # strict GPU mode requires.
+    monkeypatch.setenv("SIMSOPT_JAX_TRANSFER_GUARD", "disallow")
+    enable_strict_parity_backend(
+        monkeypatch,
+        request,
+        "gpu" if jax.default_backend() == "gpu" else "cpu",
+    )
+    half = jax.device_put(np.asarray(0.5, dtype=np.float64))
 
-        def value_and_grad(x):
-            x = jnp.asarray(x, dtype=jnp.float64)
-            return half * jnp.dot(x, x), x
+    def value_and_grad(x):
+        x = jnp.asarray(x, dtype=jnp.float64)
+        return half * jnp.dot(x, x), x
 
-        result = minimize(
-            value_and_grad,
-            jnp.asarray(np.array([1.0, -2.0], dtype=np.float64)),
-            driver=Driver.SIMSOPT_BFGS,
-            options=SimsoptBFGSOptions(maxiter=5),
-        )
+    result = minimize(
+        value_and_grad,
+        jax.device_put(np.array([1.0, -2.0], dtype=np.float64)),
+        driver=Driver.SIMSOPT_BFGS,
+        options=SimsoptBFGSOptions(maxiter=5),
+    )
 
-        assert result.success is True
-        assert result.fun < 1e-24
-    finally:
-        simsopt_config.set_backend(
-            previous_backend.mode,
-            strict=previous_backend.strict,
-            debug_nans=previous_backend.debug_nans,
-            disable_jit=previous_backend.disable_jit,
-            transfer_guard=previous_backend.transfer_guard,
-            compilation_cache_dir=previous_backend.compilation_cache_dir,
-            xla_gpu_preallocate=previous_backend.xla_gpu_preallocate,
-            xla_gpu_mem_fraction=previous_backend.xla_gpu_mem_fraction,
-            xla_gpu_allocator=previous_backend.xla_gpu_allocator,
-            tf_gpu_allocator=previous_backend.tf_gpu_allocator,
-            configure_runtime=False,
-        )
-        jax.config.update("jax_transfer_guard", previous_transfer_guard)
+    assert result.success is True
+    assert result.fun < 1e-24

@@ -103,8 +103,13 @@ def test_mixed_bundle_lowering_uses_matrix_free_surface_scatter(
     iota_target = jnp.asarray(booz_jax.res["iota"], dtype=jnp.float64)
     coil_dofs = jnp.asarray(np.asarray(bs_jax.x).copy(), dtype=jnp.float64)
 
+    # The fast mode of this process's own JAX platform, where the fixture
+    # above placed the solved Boozer state.
     enable_non_strict_jax_backend(
-        monkeypatch, request, mode="jax_cpu_fast", precision="mixed"
+        monkeypatch,
+        request,
+        mode="jax_gpu_fast" if jax.default_backend() == "gpu" else "jax_cpu_fast",
+        precision="mixed",
     )
     state = traceable_module._build_traceable_objective_state(
         booz_jax,

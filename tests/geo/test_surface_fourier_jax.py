@@ -127,7 +127,13 @@ _DIRECT_KERNEL_TOLS = parity_ladder_tolerances("direct_kernel")
 
 
 def test_surface_from_dofs_helpers_preserve_compute_dtype_in_mixed_mode(monkeypatch):
-    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_fast")
+    # The fast mode of this process's own JAX platform: a CPU mode in a
+    # GPU-default process would place the helpers' constants on the CPU and
+    # this test's default-placed inputs on the GPU.
+    monkeypatch.setenv(
+        "SIMSOPT_BACKEND_MODE",
+        "jax_gpu_fast" if jax.default_backend() == "gpu" else "jax_cpu_fast",
+    )
     monkeypatch.setenv("SIMSOPT_PRECISION", "mixed")
     invalidate_backend_cache()
     quadpoints = jnp.asarray([0.0, 0.5], dtype=jnp.float64)
