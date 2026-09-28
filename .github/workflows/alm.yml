@@ -20,6 +20,9 @@ name: ALM
 
 on:
   push:
+    # A tags filter alone makes GitHub skip every branch push; tests.yml
+    # pairs its tag filter with a branch filter the same way.
+    branches: ['**']
     tags-ignore: [v*]
   pull_request:
   workflow_dispatch:
