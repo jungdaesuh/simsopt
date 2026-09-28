@@ -75,6 +75,10 @@ def test_traceable_cache_state_accepts_device_quadrature_under_transfer_guard():
         def _linear_solve_tolerance(self):
             return 1.0e-10
 
+        def traceable_newton_trace_capacity(self, method):
+            del method
+            return 8
+
         def get_solved_runtime_state(self):
             return types.SimpleNamespace(
                 sdofs=device_array([1.0, 0.1]),

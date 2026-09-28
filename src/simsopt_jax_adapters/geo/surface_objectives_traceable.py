@@ -3450,11 +3450,14 @@ def _build_traceable_objective_cache_state(
     predictor_kind = booz_jax.boozer_type
     # The solve and label grids are frozen: they stay host arrays so the
     # objective program embeds them as literals instead of reading a captured
-    # device array back at lowering. See ``_BoozerSurfaceRuntimeState``.
-    solve_quadpoints_phi = np.asarray(booz_jax.quadpoints_phi, dtype=np.float64)
-    solve_quadpoints_theta = np.asarray(booz_jax.quadpoints_theta, dtype=np.float64)
-    label_quadpoints_phi = np.asarray(booz_jax.label_quadpoints_phi, dtype=np.float64)
-    label_quadpoints_theta = np.asarray(
+    # device array back at lowering. See ``_BoozerSurfaceRuntimeState``. A
+    # grid that arrives on a device is fetched once, here, through the
+    # explicit host boundary; ``np.asarray`` would be an implicit
+    # device-to-host transfer, which ``transfer_guard("disallow")`` rejects.
+    solve_quadpoints_phi = _host_array(booz_jax.quadpoints_phi, dtype=np.float64)
+    solve_quadpoints_theta = _host_array(booz_jax.quadpoints_theta, dtype=np.float64)
+    label_quadpoints_phi = _host_array(booz_jax.label_quadpoints_phi, dtype=np.float64)
+    label_quadpoints_theta = _host_array(
         booz_jax.label_quadpoints_theta, dtype=np.float64
     )
     exact_quadpoints_phi, exact_quadpoints_theta, mask_indices = (
@@ -3486,13 +3489,13 @@ def _build_traceable_objective_cache_state(
         # Frozen scalars and grids stay on the host: every traced consumer
         # places them as part of its program, while a captured device array
         # would be read back to the host once per lowering.
-        "iota_target": np.asarray(iota_target, dtype=np.float64),
+        "iota_target": _host_array(iota_target, dtype=np.float64),
         "exact_quadpoints_phi": exact_quadpoints_phi,
         "exact_quadpoints_theta": exact_quadpoints_theta,
-        "surface_quadpoints_phi": np.asarray(
+        "surface_quadpoints_phi": _host_array(
             booz_jax.surface.quadpoints_phi, dtype=np.float64
         ),
-        "surface_quadpoints_theta": np.asarray(
+        "surface_quadpoints_theta": _host_array(
             booz_jax.surface.quadpoints_theta, dtype=np.float64
         ),
         "coil_dof_extraction_spec": coil_dof_extraction_spec,
