@@ -18,8 +18,7 @@ from examples.jax.outer_optimizer_policy import (
 from examples.jax.run_examples import build_child_command
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-EXACT_ID = "native-single-stage-boozer-vacuum-optimization"
-PLANNED_PROBE_ID = "native-qfm"
+HOST_POLICY_ID = "native-qfm"
 
 
 def test_approved_policies_are_available_through_the_real_runtime_registry() -> None:
@@ -28,11 +27,11 @@ def test_approved_policies_are_available_through_the_real_runtime_registry() -> 
         REPO_ROOT / "examples/jax/parity_manifest.json",
         repo_root=REPO_ROOT,
     )
-    exact = next(example for example in pair.examples if example.id == EXACT_ID)
-    assert exact.status == "ready"
-    assert exact.outer_optimizer_policy is not None
-    assert exact.outer_optimizer_policy.case_id == EXACT_ID
-    assert exact.outer_optimizer_policy.registry_scope == "experimental"
+    host = next(example for example in pair.examples if example.id == HOST_POLICY_ID)
+    assert host.status == "ready"
+    assert host.outer_optimizer_policy is not None
+    assert host.outer_optimizer_policy.case_id == HOST_POLICY_ID
+    assert host.outer_optimizer_policy.registry_scope == "official"
     assert (
         next(
             example
@@ -45,7 +44,7 @@ def test_approved_policies_are_available_through_the_real_runtime_registry() -> 
 
 @pytest.mark.parametrize(
     "mutation",
-    ("missing_exact", "copied", "unknown", "wrong_case"),
+    ("missing", "copied", "unknown", "wrong_case"),
 )
 def test_manifest_rejects_missing_or_borrowed_host_outer_declarations(
     mutation: str,
@@ -53,19 +52,19 @@ def test_manifest_rejects_missing_or_borrowed_host_outer_declarations(
     manifest = json.loads((REPO_ROOT / "examples/jax/manifest.json").read_text())
     parity = json.loads((REPO_ROOT / "examples/jax/parity_manifest.json").read_text())
     examples = {example["id"]: example for example in manifest["jax_examples"]}
-    if mutation == "missing_exact":
-        del examples[EXACT_ID]["outer_optimizer_policy"]
+    if mutation == "missing":
+        del examples[HOST_POLICY_ID]["outer_optimizer_policy"]
     elif mutation == "copied":
         examples["native-just-a-quadratic"]["outer_optimizer_policy"] = examples[
-            EXACT_ID
+            HOST_POLICY_ID
         ]["outer_optimizer_policy"]
     elif mutation == "unknown":
-        examples[EXACT_ID]["outer_optimizer_policy"] = "allow-all-scipy"
+        examples[HOST_POLICY_ID]["outer_optimizer_policy"] = "allow-all-scipy"
     else:
         relationship = next(
             relationship
-            for relationship in parity["experimental_relationships"]
-            if relationship["jax_example_id"] == EXACT_ID
+            for relationship in parity["relationships"]
+            if relationship["jax_example_id"] == HOST_POLICY_ID
         )
         relationship["case_id"] = "unregistered-borrower"
     with pytest.raises(ValueError, match="outer optimizer policy"):
@@ -79,7 +78,7 @@ def test_planned_record_without_declaration_keeps_legacy_default() -> None:
     the manifest binds to its source, so the exemption is exercised at the
     policy parser rather than through a planned manifest record.
     """
-    identity = {"example_id": PLANNED_PROBE_ID, "example_path": "1_Simple/qfm.py"}
+    identity = {"example_id": HOST_POLICY_ID, "example_path": "1_Simple/qfm.py"}
     assert parse_outer_optimizer_policy(None, **identity, ready=False) is None
     with pytest.raises(
         OuterOptimizerPolicyError,
@@ -91,7 +90,6 @@ def test_planned_record_without_declaration_keeps_legacy_default() -> None:
 @pytest.mark.parametrize(
     "example_id",
     (
-        EXACT_ID,
         "native-qfm",
         "native-just-a-quadratic",
         "native-minimize-curve-length",
@@ -168,7 +166,7 @@ def test_parity_runner_rejects_legacy_missing_policy_before_inputs_or_children(
         run_parity.main(
             [
                 "--case",
-                EXACT_ID,
+                HOST_POLICY_ID,
                 "--lanes",
                 "jax-cpu",
                 "--scale",

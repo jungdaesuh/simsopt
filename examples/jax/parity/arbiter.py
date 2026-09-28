@@ -8,7 +8,6 @@ from typing import Mapping
 
 import numpy as np
 from examples.jax.outer_optimizer_policy import (
-    SHIPPED_SINGLE_STAGE_SCIPY_DRIVER_ID,  # noqa: F401 - compatibility re-export
     OuterOptimizerPolicy,
     policy_owns_parity_case,
 )

@@ -19,8 +19,8 @@ record cannot own a catalog source.
 The generated
 [`NATIVE_TO_JAX_INDEX.md`](NATIVE_TO_JAX_INDEX.md) lists the native sources,
 their exact JAX mirrors or blockers, device scope, execution scale, and latest
-evidence status. A separate section retains branch-only experiments; they do
-not count toward official coverage. Regenerate it from the validated manifests and compact
+evidence status. Registered branch-only experiments would appear in a separate
+section and not count toward official coverage. Regenerate it from the validated manifests and compact
 authority record with
 `python -m examples.jax.native_to_jax_index --write`; use `--check` in
 validation.
@@ -67,7 +67,7 @@ Use `.[JAX_GPU]` in a supported CUDA environment.
 Runtime selection is process-wide and must happen before importing JAX-heavy
 modules, so use the isolated runner rather than executing several examples in
 one Python process. The ordinary runner includes every ready registered record,
-including tutorials and branch-only experiments; it is not the official mirror
+including tutorials; it is not the official mirror
 verification batch. Every ready record supports both devices and both intents:
 
 ```console
@@ -127,7 +127,6 @@ outer optimizer over JAX physics and derivatives** where explicitly declared:
 | Official upstream mirror | Standard, minimal, planar, stochastic and finite-build stage-two; coil forces | SciPy L-BFGS-B | Coil physics, objective and derivatives |
 | Official upstream mirror | QFM surface (`1_Simple/qfm.py`) | SciPy L-BFGS-B, then SciPy SLSQP | QFM residual, labels and their derivatives |
 | Official upstream mirror | `just_a_quadratic`, `minimize_curve_length`, `surf_vol_area` | SciPy `least_squares` (TRF) | Residuals and Jacobians |
-| Branch-only experiment | `native-single-stage-boozer-vacuum-optimization` | SciPy BFGS | Exact Boozer Newton solve and implicit objective gradient |
 
 These are the providers the upstream scripts call, with upstream's own options. The minimal and finite-build
 stage-two mirrors additionally accept `--device-solver`, an opt-in performance mode that replaces the host
@@ -259,17 +258,18 @@ defines coverage.
 - `source_catalog` — 53 official upstream source rows: 25 `eligible`, 1 `hybrid`,
   25 `blocked`, and 2 `not_applicable`. Membership is checked against the pinned
   official catalog, not whatever Python files happen to be in the local tiers.
-- `experimental_sources` — one branch-only source row: exact vacuum
-  single-stage. It contributes zero official upstream coverage.
-- `jax_examples` — 39 executable records, 37 `ready` and 2 `planned`.
-  Twenty-six own official sources, one owns the experimental source, and the
-  other 12 combined or compatibility programs own no one-to-one source.
+- `experimental_sources` — branch-only source rows, which contribute zero
+  official upstream coverage. There are none.
+- `jax_examples` — 37 executable records, 35 `ready` and 2 `planned`.
+  Twenty-six own official sources, and the other 11 combined or compatibility
+  programs own no one-to-one source.
 
 An owned record must sit at the identical tier and filename as its source, must
 be typed `one_to_one`, and cannot be a tutorial. Each mirror is owned by at
 most one source. `parity_manifest.json` separates 26 official relationships
-(25 `full`, 1 `unsupported`) from one experimental relationship (`full`).
-Execution scale and verified evidence are separate from source coverage.
+(25 `full`, 1 `unsupported`) from experimental relationships, of which there
+are none. Execution scale and verified evidence are separate from source
+coverage.
 
 `run_parity.py --case all-applicable` selects the 25 executable official
 relationships. Experimental cases remain available by explicit case ID;
@@ -334,55 +334,6 @@ kinds are `native_source_owned_simsopt` for executable relationships and
 `pending_native_oracle` for unsupported relationships. An oracle kind describes
 the comparator, not membership in official upstream; that comes from the
 pinned source catalog.
-
-## Branch-only experiments
-
-These commands remain available for development. They are outside official
-upstream mirror coverage and are not evidence that an official example passes.
-
-### Boozer/vacuum single-stage
-
-This pair was added on this branch; neither script exists in the pinned
-official upstream catalog. The native reference and JAX implementation take
-the same arguments and can be run side by side:
-
-```console
-python examples/3_Advanced/single_stage_boozer_vacuum_optimization.py \
-  --smoke --json
-python examples/jax/3_Advanced/single_stage_boozer_vacuum_optimization.py \
-  --smoke --json
-```
-
-Its parity relationship covers the `full` workflow at `native_default` scale, and its cost tier is
-`scheduled`, so run it on its own rather than expecting it inside a quick loop
-(drop `jax-gpu` from `--lanes` outside a CUDA environment):
-
-```console
-python examples/jax/run_parity.py \
-  --case native-single-stage-boozer-vacuum-optimization \
-  --lanes native-cpu,jax-cpu,jax-gpu \
-  --scale native_default \
-  --artifact-root .artifacts/jax-example-parity
-```
-
-A `ready` executable and a `full` workflow relationship do not certify parity.
-The historical full-default run `20260917T035857Z-6a1f0ea9` passed the source/build
-audit at commit `1311e9247ca882b327b046b0c5b2cb43b4404360`. All three endpoint
-objectives meet the declared `1e-7` quality bound, but 12 of 57 strict comparisons
-failed and all three lanes exhausted 1000 iterations. This establishes endpoint
-quality only, not strict parity or optimizer convergence. The superseded run
-`20260916T194954Z-e3bd7376` used invalid provenance and remains historical; its
-raw receipts are preserved locally and it no longer supplies the index record.
-
-The native build receipt binds the extension binary to recorded source and
-build inputs. It is a local, unsigned, operator-writable record, not a signed
-or hermetic build attestation. A tracked evidence pointer alone cannot verify
-the run: auditing requires the retained lane receipts and their clean recorded
-checkout. Neither provenance nor an endpoint quality band proves convergence.
-
-The [retained numerical review package](parity/evidence/20260917T035857Z-6a1f0ea9/README.md)
-includes the input and endpoint values, all comparisons, statuses and original
-receipt hashes. It is a derived inspection record, not a portable authority bundle.
 
 ## Official VMEC hybrid single-stage
 

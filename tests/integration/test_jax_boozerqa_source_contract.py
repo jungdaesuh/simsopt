@@ -10,9 +10,6 @@ import pytest
 from conftest import ast_names_used, enable_non_strict_jax_backend
 from examples.jax.parity.cases import get_case, native_boozerqa
 from examples.jax.parity.cases.native_boozerqa import BoozerSingleStageSpec
-from examples.jax.parity.cases.native_single_stage_boozer_vacuum import (
-    SPEC as EXACT_SINGLE_STAGE_SPEC,
-)
 from examples.jax.parity.input_bundle import load_input_bundle
 from simsopt_jax_adapters.geo import boozer_qa_problem
 from simsopt_jax.examples.boozer_official import (
@@ -140,9 +137,8 @@ def test_sealed_and_measurement_entry_points_still_reach_the_session_route(
 ) -> None:
     """Every caller other than the official lane keeps the session route.
 
-    ``execute_variant`` (the single-stage measurement entry point) and
-    ``_PreparedJaxVariantExecution.execute`` (the changed-state GPU timeline)
-    must still dispatch to ``_jax``, which the compute-graph campaigns execute.
+    ``execute_variant`` and ``_PreparedJaxVariantExecution.execute`` must still
+    dispatch JAX lanes to ``_jax``.
     """
     calls: list[tuple[str, str]] = []
 
@@ -161,14 +157,16 @@ def test_sealed_and_measurement_entry_points_still_reach_the_session_route(
     monkeypatch.setattr(native_boozerqa, "_jax", recording_jax)
 
     assert (
-        native_boozerqa.execute_variant("jax-cpu", None, {}, EXACT_SINGLE_STAGE_SPEC)
+        native_boozerqa.execute_variant(
+            "jax-cpu", None, {}, native_boozerqa.BOOZER_QA_SPEC
+        )
         == "session-observation"
     )
     execution = native_boozerqa._PreparedJaxVariantExecution(
         lane="jax-gpu",
         bundle=None,
         arrays={},
-        spec=EXACT_SINGLE_STAGE_SPEC,
+        spec=native_boozerqa.BOOZER_QA_SPEC,
         _runtime=SimpleNamespace(optimizer_backend=None),
     )
     assert (
@@ -176,8 +174,8 @@ def test_sealed_and_measurement_entry_points_still_reach_the_session_route(
         == "session-observation"
     )
     assert calls == [
-        ("jax-cpu", EXACT_SINGLE_STAGE_SPEC.case_id),
-        ("jax-gpu", EXACT_SINGLE_STAGE_SPEC.case_id),
+        ("jax-cpu", native_boozerqa.BOOZER_QA_SPEC.case_id),
+        ("jax-gpu", native_boozerqa.BOOZER_QA_SPEC.case_id),
     ]
 
 

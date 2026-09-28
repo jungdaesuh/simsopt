@@ -2,13 +2,12 @@
 
 Generated from `manifest.json`, `parity_manifest.json`, and `authority_evidence.json`. Do not edit this table by hand.
 Official upstream scope: `https://github.com/hiddenSymmetries/simsopt` `master` at `9e027eac38028d57aa23777be52a781aa860e347` (53 source files).
-Local experimental registrations: 1 source files.
+Local experimental registrations: 0 source files.
 Historical local evidence may describe an older roster and does not establish current official coverage.
 
 Historical local evidence pointers (unverified):
 
 - `bounded`: historical pass (unverified); run `20260729T005942Z-5ade9aee`; 26 cases / 78 lanes / 1,248 comparisons; revision `11340c829690fdc0652e47588f5da549829c056a`; summary SHA-256 `fa235cacb0f3e4fa7abc6e8ff4b2f888b2e20c7392bd1531eeb983abad67d66a`; scope `local_only`. raw summary and lane receipts require local verification.
-- `native_default`: historical quality-band (unverified); run `20260917T035857Z-6a1f0ea9`; 1 cases / 3 lanes / 57 comparisons; revision `1311e9247ca882b327b046b0c5b2cb43b4404360`; summary SHA-256 `8ee90b2fdff5cc324cc6d35c0088086e893fc790f396a86f7310352ea19bc565`; scope `local_only`. 12/57 comparisons failed; 3/3 lanes budget-exhausted; jax-cpu final:objective 4.3261270728412792e-08 <= 9.9999999999999995e-08; jax-gpu final:objective 4.3077269937092123e-08 <= 9.9999999999999995e-08; native-cpu final:objective 4.3972015892540963e-08 <= 9.9999999999999995e-08; endpoint quality only, no convergence or final-value equivalence.
 
 ## Official upstream catalog
 
@@ -67,12 +66,6 @@ Historical local evidence pointers (unverified):
 | `examples/stellarator_benchmarks/2DOF_vmecAndSpec.py` | — | blocked | SPEC, VMEC | — | — | not run |
 | `examples/stellarator_benchmarks/2DOF_vmecOnly_targetIotaAndVolume.py` | — | blocked | VMEC | — | — | not run |
 | `examples/stellarator_benchmarks/7dof.py` | — | blocked | VMEC | — | — | not run |
-
-## Experimental local registrations
-
-| Native example | JAX mirror | Classification | Runtime dependencies | Device scope | Scale | Evidence |
-| --- | --- | --- | --- | --- | --- | --- |
-| `examples/3_Advanced/single_stage_boozer_vacuum_optimization.py` | `examples/jax/3_Advanced/single_stage_boozer_vacuum_optimization.py` | eligible / adapter | none | outer: CPU SciPy; cpu: jax_region, gpu: jax_region | native_default | native_default: historical quality-band, unverified (`20260917T035857Z-6a1f0ea9`, local_only); 12/57 comparisons failed; 3/3 lanes budget-exhausted; jax-cpu final:objective 4.3261270728412792e-08 <= 9.9999999999999995e-08; jax-gpu final:objective 4.3077269937092123e-08 <= 9.9999999999999995e-08; native-cpu final:objective 4.3972015892540963e-08 <= 9.9999999999999995e-08; endpoint quality only, no convergence or final-value equivalence |
 
 Regenerate with:
 

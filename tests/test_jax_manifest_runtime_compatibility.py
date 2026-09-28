@@ -108,11 +108,7 @@ def test_active_pair_is_the_canonical_exact_mirror_contract() -> None:
     assert {str(row["source"]) for row in _records(catalog, "source_catalog")} == set(
         OFFICIAL_NATIVE_EXAMPLE_SOURCES
     )
-    assert {
-        str(row["source"]) for row in _records(catalog, "experimental_sources")
-    } == {
-        "3_Advanced/single_stage_boozer_vacuum_optimization.py",
-    }
+    assert not _records(catalog, "experimental_sources")
     assert len(runtime.examples) == len(jax_examples)
     assert sum(example.status == "ready" for example in runtime.examples) == sum(
         example["status"] == "ready" for example in jax_examples

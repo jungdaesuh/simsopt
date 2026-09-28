@@ -8,9 +8,6 @@ from pathlib import Path
 import pytest
 from conftest import ast_names_used
 from examples.jax.parity.cases import native_boozerqa
-from examples.jax.parity.cases.native_single_stage_boozer_vacuum import (
-    SPEC as EXACT_SPEC,
-)
 from simsopt.single_stage_boozer_vacuum import OUTER_GRADIENT_TOLERANCE
 from simsopt_contracts.optimization_endpoint import (
     OptimizationEndpointCertificate,
@@ -36,7 +33,6 @@ def test_official_method_does_not_follow_fast_mode(
     assert native_boozerqa._outer_driver(native_boozerqa.BOOZER_QA_SPEC) == (
         Driver.SIMSOPT_BFGS
     )
-    assert native_boozerqa._outer_driver(EXACT_SPEC) == mode_driver
 
 
 def test_public_script_uses_official_bfgs_and_scale_specific_newton_tolerance() -> None:

@@ -26,7 +26,6 @@ from examples.jax.outer_optimizer_policy import (
 )
 from examples.jax.parity._manifest import ComparisonRoute
 from examples.jax.parity.arbiter import (
-    SHIPPED_SINGLE_STAGE_SCIPY_DRIVER_ID,
     ArbitrationError,
     LaneObservation,
     LaneOutcomeRejection,
@@ -39,7 +38,6 @@ from examples.jax.parity.artifacts import (
 )
 from examples.jax.parity.audit import audit_published_run
 from examples.jax.parity.cases import (
-    SINGLE_STAGE_BOOZER_VACUUM_QUALITY_BAND,
     get_case,
     implemented_case_ids,
 )
@@ -796,7 +794,7 @@ def test_arbiter_rejects_workflow_stage_mismatch() -> None:
         )
 
 
-def test_self_reported_shipped_driver_does_not_waive_scipy_policy() -> None:
+def test_self_reported_scipy_driver_does_not_waive_scipy_policy() -> None:
     stages = (
         "construct_ncsx_coils_and_volume_labelled_surface",
         "solve_initial_boozer_surface",
@@ -811,7 +809,7 @@ def test_self_reported_shipped_driver_does_not_waive_scipy_policy() -> None:
             observation,
             completed_workflow_stages=stages,
             driver=(
-                SHIPPED_SINGLE_STAGE_SCIPY_DRIVER_ID
+                "simsopt_jax_scipy_bfgs_outer_driver"
                 if lane.startswith("jax-")
                 else observation.driver
             ),
@@ -1370,23 +1368,14 @@ def test_quality_band_refuses_an_unmeasurable_observable(
 
 
 def test_quality_band_declaration_is_opt_in_per_case() -> None:
-    band = get_case(
-        "native-single-stage-boozer-vacuum-optimization"
-    ).native_default_quality_band
-
-    assert band == SINGLE_STAGE_BOOZER_VACUUM_QUALITY_BAND
-    assert band is not None
-    assert band.observable == "final:objective"
-    assert band.max_value == 1.0e-07
-    assert max(_ARCHIVED_FINAL_OBJECTIVE.values()) < band.max_value
-    assert "2026-08-14" in band.derivation
-    # Opt-in stays per case: besides the branch-added single-stage case, only the official mirrors whose band is
-    # derived from upstream's own end-point scatter (official_quality_bands, rule v2 of 2026-09-20) declare one.
+    # Opt-in stays per case: only the official mirrors whose band is derived from
+    # upstream's own end-point scatter (official_quality_bands, rule v2 of
+    # 2026-09-20) declare one.
     assert {
         case_id
         for case_id in implemented_case_ids()
         if get_case(case_id).native_default_quality_band is not None
-    } == {"native-single-stage-boozer-vacuum-optimization", *OFFICIAL_BAND_CASE_IDS}
+    } == set(OFFICIAL_BAND_CASE_IDS)
     # Re-derived here from the tracked upstream record, never by calling the
     # function that built the entry: comparing an entry with a second call of
     # its own factory cannot fail. S is upstream's end values under one-ulp
@@ -1422,10 +1411,11 @@ def test_quality_band_declaration_rejects_an_unusable_floor(
 #
 # audit_published_run's quality-band branches are only reachable from a
 # published native_default run, which costs hours to produce for real. These
-# tests synthesize one from the archived endpoint evidence -- real input bundle,
-# real lane receipts, real publication marker -- and drive the production
-# auditor over it.
-_BAND_CASE_ID = "native-single-stage-boozer-vacuum-optimization"
+# tests synthesize one for an official banded case -- real input bundle, real
+# lane receipts, real publication marker -- and drive the production auditor
+# over it. The per-lane end points are the archived fixture values above: they
+# sit below this case's band and fork beyond its equality bucket.
+_BAND_CASE_ID = "native-stage-two-optimization-minimal"
 
 
 def _band_case_receipt_values(
@@ -1481,7 +1471,13 @@ def _publish_quality_band_run(
         item
         for item in contract_pair.parity.all_relationships
         if item.case_id == _BAND_CASE_ID
+    ).resolve_scale("native_default")
+    outer_optimizer_policy = next(
+        example.outer_optimizer_policy
+        for example in contract_pair.examples
+        if example.id == relationship.jax_example_id
     )
+    assert outer_optimizer_policy is not None
     repository_state = collect_repository_state(repo_root)
     explicit_sources = collect_explicit_sources(
         repo_root, ("examples/jax/parity/publication.py",)
@@ -1506,9 +1502,9 @@ def _publish_quality_band_run(
             input_fingerprint=bundle.input_fingerprint,
             configuration_fingerprint=bundle.configuration_fingerprint,
             driver=(
-                "simsopt_scipy_bfgs_with_boozer_newton"
+                "scipy_lbfgsb"
                 if lane == "native-cpu"
-                else SHIPPED_SINGLE_STAGE_SCIPY_DRIVER_ID
+                else outer_optimizer_policy.expected_driver
             ),
             normalized_status="budget_exhausted",
             raw_status="stopping_reason=iteration-limit",
@@ -1566,11 +1562,7 @@ def _publish_quality_band_run(
         expected_workflow_stages=relationship.workflow_stages,
         case_id=_BAND_CASE_ID,
         example_id=relationship.jax_example_id,
-        outer_optimizer_policy=next(
-            example.outer_optimizer_policy
-            for example in contract_pair.examples
-            if example.id == relationship.jax_example_id
-        ),
+        outer_optimizer_policy=outer_optimizer_policy,
         quality_band=get_case(_BAND_CASE_ID).native_default_quality_band,
     )
     quality_band_payload = [
@@ -2550,47 +2542,6 @@ def test_canonical_audit_rejects_lane_evidence_that_disagrees_with_quality_summa
     published, _summary = _publish_quality_band_run(tmp_path, receipt_mutation=mutation)
     with pytest.raises(ValueError):
         audit_published_run(published, repo_root=repo_root)
-
-
-def test_quality_band_endpoint_evidence_has_complete_route_matrices() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    runtime = load_runtime_contract_pair(
-        repo_root / "examples/jax/manifest.json",
-        repo_root / "examples/jax/parity_manifest.json",
-        repo_root=repo_root,
-    )
-    relationship = next(
-        item
-        for item in runtime.parity.all_relationships
-        if item.case_id == _BAND_CASE_ID
-    )
-    endpoint_observables = {
-        "endpoint_certificate_success",
-        "endpoint_initial_stationary",
-        "endpoint_terminal_stationary",
-        "endpoint_constraints_satisfied",
-        "outer_solver_status",
-    }
-    required_pairs = {
-        "native-cpu:jax-cpu",
-        "native-cpu:jax-gpu",
-        "jax-cpu:jax-gpu",
-    }
-
-    for observable in endpoint_observables:
-        routes = tuple(
-            route
-            for route in relationship.comparison_routes
-            if route.phase == "final" and route.observable == observable
-        )
-        assert {route.lane_pair for route in routes} == required_pairs
-        assert len(routes) == len(required_pairs)
-    status_routes = tuple(
-        route
-        for route in relationship.comparison_routes
-        if route.phase == "final" and route.observable == "outer_solver_status"
-    )
-    assert not any(route.applicable for route in status_routes)
 
 
 @pytest.mark.parametrize(

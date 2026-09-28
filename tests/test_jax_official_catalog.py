@@ -10,6 +10,7 @@ from pathlib import Path
 
 import examples.jax.outer_optimizer_policy as outer_optimizer_policy
 import pytest
+from examples.jax import manifest_contracts_v3
 from examples.jax.manifest_contracts_v3 import (
     ManifestV3ValidationError,
     load_manifest_contract_pair_documents,
@@ -21,12 +22,13 @@ from examples.jax.official_source_catalog import (
 from examples.jax.run_parity import _selected_cases
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-EXPERIMENTAL_CASE = "native-single-stage-boozer-vacuum-optimization"
-EXPERIMENTAL_SOURCE = "3_Advanced/single_stage_boozer_vacuum_optimization.py"
-EXPERIMENTAL_SOURCES = {EXPERIMENTAL_SOURCE}
-MISSING_EXPERIMENTAL_SOURCE = (
-    "3_Advanced/single_stage_boozer_vacuum_optimization_missing.py"
-)
+# No branch-only source remains registered, so the experimental-registration
+# rules are exercised by demoting one official source with a full parity case
+# and no host outer policy: the pinned catalog loses it and the manifests carry
+# its source row and relationship in the experimental groups.
+EXPERIMENTAL_CASE = "native-tracing-particle"
+EXPERIMENTAL_SOURCE = "1_Simple/tracing_particle.py"
+MISSING_EXPERIMENTAL_SOURCE = "1_Simple/tracing_particle_missing.py"
 OFFICIAL_EXECUTABLE_BATCH_SIZE = 25
 
 
@@ -53,6 +55,40 @@ def _mapping_rows(document: dict[str, object], key: str) -> list[dict[str, objec
     return rows
 
 
+@pytest.fixture
+def demoted_documents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """The active documents with ``EXPERIMENTAL_SOURCE`` registered as branch-only."""
+    pinned = tuple(
+        source
+        for source in OFFICIAL_NATIVE_EXAMPLE_SOURCES
+        if source != EXPERIMENTAL_SOURCE
+    )
+    monkeypatch.setattr(
+        manifest_contracts_v3, "OFFICIAL_NATIVE_EXAMPLE_SOURCES", pinned
+    )
+    monkeypatch.setattr(
+        manifest_contracts_v3, "OFFICIAL_NATIVE_EXAMPLE_SOURCE_SET", frozenset(pinned)
+    )
+    manifest, parity = _mutated_active_documents()
+    sources = _mapping_rows(manifest, "source_catalog")
+    manifest["source_catalog"] = [
+        row for row in sources if row["source"] != EXPERIMENTAL_SOURCE
+    ]
+    manifest["experimental_sources"] = [
+        row for row in sources if row["source"] == EXPERIMENTAL_SOURCE
+    ]
+    relationships = _mapping_rows(parity, "relationships")
+    parity["relationships"] = [
+        row for row in relationships if row["native_source"] != EXPERIMENTAL_SOURCE
+    ]
+    parity["experimental_relationships"] = [
+        row for row in relationships if row["native_source"] == EXPERIMENTAL_SOURCE
+    ]
+    return manifest, parity
+
+
 def test_official_catalog_is_pinned_and_excludes_local_extensions() -> None:
     manifest = _document("examples/jax/manifest.json")
     official_records = manifest["source_catalog"]
@@ -62,13 +98,14 @@ def test_official_catalog_is_pinned_and_excludes_local_extensions() -> None:
     assert tuple(record["source"] for record in official_records) == (
         OFFICIAL_NATIVE_EXAMPLE_SOURCES
     )
-    assert {record["source"] for record in experimental_records} == EXPERIMENTAL_SOURCES
+    assert experimental_records == []
     assert OFFICIAL_UPSTREAM_COMMIT == "9e027eac38028d57aa23777be52a781aa860e347"
 
 
-def test_branch_only_local_sources_cannot_enter_official_catalog() -> None:
-    manifest = copy.deepcopy(_document("examples/jax/manifest.json"))
-    parity = copy.deepcopy(_document("examples/jax/parity_manifest.json"))
+def test_branch_only_local_sources_cannot_enter_official_catalog(
+    demoted_documents: tuple[dict[str, object], dict[str, object]],
+) -> None:
+    manifest, parity = demoted_documents
     official_records = manifest["source_catalog"]
     experimental_records = manifest["experimental_sources"]
     official_relationships = parity["relationships"]
@@ -90,9 +127,27 @@ def test_branch_only_local_sources_cannot_enter_official_catalog() -> None:
         load_manifest_contract_pair_documents(manifest, parity, repo_root=REPO_ROOT)
 
 
-def test_experimental_cases_remain_explicit_but_leave_official_default_batch() -> None:
-    manifest = _document("examples/jax/manifest.json")
-    parity = _document("examples/jax/parity_manifest.json")
+def test_official_default_batch_is_every_executable_official_relationship() -> None:
+    pair = load_manifest_contract_pair_documents(
+        _document("examples/jax/manifest.json"),
+        _document("examples/jax/parity_manifest.json"),
+        repo_root=REPO_ROOT,
+    )
+    official_case_ids = tuple(
+        relationship.case_id
+        for relationship in pair.parity.relationships
+        if relationship.case_id is not None
+    )
+
+    assert pair.parity.experimental_relationships == ()
+    assert len(official_case_ids) == OFFICIAL_EXECUTABLE_BATCH_SIZE
+    assert _selected_cases(["all-applicable"], official_case_ids) == official_case_ids
+
+
+def test_experimental_cases_remain_explicit_but_leave_official_default_batch(
+    demoted_documents: tuple[dict[str, object], dict[str, object]],
+) -> None:
+    manifest, parity = demoted_documents
     pair = load_manifest_contract_pair_documents(manifest, parity, repo_root=REPO_ROOT)
     official_case_ids = tuple(
         relationship.case_id
@@ -107,7 +162,7 @@ def test_experimental_cases_remain_explicit_but_leave_official_default_batch() -
 
     assert EXPERIMENTAL_CASE not in official_case_ids
     assert experimental_case_ids == (EXPERIMENTAL_CASE,)
-    assert len(official_case_ids) == OFFICIAL_EXECUTABLE_BATCH_SIZE
+    assert len(official_case_ids) == OFFICIAL_EXECUTABLE_BATCH_SIZE - 1
     assert _selected_cases(["all-applicable"], official_case_ids) == official_case_ids
     assert _selected_cases([EXPERIMENTAL_CASE], official_case_ids) == (
         EXPERIMENTAL_CASE,
@@ -123,9 +178,12 @@ def test_experimental_cases_remain_explicit_but_leave_official_default_batch() -
     ids=("official-to-experimental", "experimental-to-official"),
 )
 def test_loader_rejects_relationship_moved_between_official_and_experimental_groups(
-    origin: str, destination: str, case_id: str
+    demoted_documents: tuple[dict[str, object], dict[str, object]],
+    origin: str,
+    destination: str,
+    case_id: str,
 ) -> None:
-    manifest, parity = _mutated_active_documents()
+    manifest, parity = demoted_documents
     origin_rows = _mapping_rows(parity, origin)
     moved = next(row for row in origin_rows if row.get("case_id") == case_id)
     parity[origin] = [row for row in origin_rows if row is not moved]
@@ -141,8 +199,10 @@ def test_loader_rejects_relationship_moved_between_official_and_experimental_gro
         load_manifest_contract_pair_documents(manifest, parity, repo_root=REPO_ROOT)
 
 
-def test_loader_rejects_experimental_relationship_omission() -> None:
-    manifest, parity = _mutated_active_documents()
+def test_loader_rejects_experimental_relationship_omission(
+    demoted_documents: tuple[dict[str, object], dict[str, object]],
+) -> None:
+    manifest, parity = demoted_documents
     official_relationships = copy.deepcopy(parity["relationships"])
     experimental_rows = _mapping_rows(parity, "experimental_relationships")
     parity["experimental_relationships"] = [
@@ -162,8 +222,10 @@ def test_loader_rejects_experimental_relationship_omission() -> None:
         load_manifest_contract_pair_documents(manifest, parity, repo_root=REPO_ROOT)
 
 
-def test_loader_rejects_missing_experimental_source_file() -> None:
-    manifest, parity = _mutated_active_documents()
+def test_loader_rejects_missing_experimental_source_file(
+    demoted_documents: tuple[dict[str, object], dict[str, object]],
+) -> None:
+    manifest, parity = demoted_documents
     sources = _mapping_rows(manifest, "experimental_sources")
     source = next(row for row in sources if row["source"] == EXPERIMENTAL_SOURCE)
     source["source"] = MISSING_EXPERIMENTAL_SOURCE
@@ -183,11 +245,11 @@ def test_loader_rejects_missing_experimental_source_file() -> None:
 def test_loader_rejects_policy_scope_mismatch_with_source_registration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # registry_scope is not a JSON field; flip the resolved experimental policy
+    # registry_scope is not a JSON field; flip the resolved official QFM policy
     # so the public loader's first error is the source-registration mismatch.
     flipped = tuple(
-        replace(policy, registry_scope="official")
-        if policy.example_id == EXPERIMENTAL_CASE
+        replace(policy, registry_scope="experimental")
+        if policy.example_id == "native-qfm"
         else policy
         for policy in outer_optimizer_policy._APPROVED_POLICIES
     )
@@ -197,7 +259,7 @@ def test_loader_rejects_policy_scope_mismatch_with_source_registration(
         ManifestV3ValidationError,
         match=(
             "outer optimizer policy scope does not match source registration: "
-            f"{EXPERIMENTAL_CASE}"
+            "native-qfm"
         ),
     ):
         load_manifest_contract_pair_documents(manifest, parity, repo_root=REPO_ROOT)

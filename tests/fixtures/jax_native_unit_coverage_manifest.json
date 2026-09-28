@@ -806,10 +806,6 @@
         {
           "anchor": "class NonQuasiSymmetricRatioJAX(_BoozerObjectiveBase):",
           "cite": "src/simsopt_jax_adapters/geo/surface_objectives.py:3027"
-        },
-        {
-          "anchor": "return non_quasi_symmetric_residual_primitives(",
-          "cite": "src/simsopt_jax/objectives/single_stage_fullspace.py:594"
         }
       ],
       "id": "QS-1",
@@ -827,7 +823,7 @@
         "value_or_residual",
         "gradient_jacobian_vjp_hessian"
       ],
-      "reason": "The JAX kernel exists and is consumed in production by NonQuasiSymmetricRatioJAX and by the single-stage fullspace objective, but it owns no dedicated unit test. The only tests that name NonQuasiSymmetricRatioJAX build it with object.__new__ and patched attributes to check gradient plumbing, which the coverage contract explicitly refuses as scientific parity evidence, and no test file contains both the native and the JAX class. Scientific reach is therefore example-level only, through the BoozerQA and single-stage Boozer-vacuum parity mirrors. test_exact_boozerqa_workflow_matches_native_and_jax_cpu's tolerances (rtol=1e-10/atol=1e-12, rtol=1e-3/atol=1e-8, rtol=0.0/atol=2e-3) are numerically identical to entries in src/simsopt_jax/parity_tolerances.py, but the test hardcodes them as literals and never imports or calls parity_ladder_tolerances, so the owner is recorded local, not central: a future change to the central ladder would not automatically flow into this test.",
+      "reason": "The JAX kernel exists and is consumed in production by NonQuasiSymmetricRatioJAX, but it owns no dedicated unit test. The only tests that name NonQuasiSymmetricRatioJAX build it with object.__new__ and patched attributes to check gradient plumbing, which the coverage contract explicitly refuses as scientific parity evidence, and no test file contains both the native and the JAX class. Scientific reach is therefore example-level only, through the BoozerQA parity mirror. test_exact_boozerqa_workflow_matches_native_and_jax_cpu's tolerances (rtol=1e-10/atol=1e-12, rtol=1e-3/atol=1e-8, rtol=0.0/atol=2e-3) are numerically identical to entries in src/simsopt_jax/parity_tolerances.py, but the test hardcodes them as literals and never imports or calls parity_ladder_tolerances, so the owner is recorded local, not central: a future change to the central ladder would not automatically flow into this test.",
       "required_lanes": {
         "jax_cpu": "passing",
         "jax_gpu": "pending",

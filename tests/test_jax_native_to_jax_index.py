@@ -14,6 +14,7 @@ import examples.jax.manifest_contracts_v3 as manifest_contracts
 import examples.jax.native_to_jax_index as index_module
 import pytest
 from examples.jax.parity.arbiter import LaneObservation
+from examples.jax.parity.cases import get_case
 from examples.jax.parity.provenance import (
     REQUIRED_PROVENANCE_SOURCE_PATHS,
     DeviceMetadata,
@@ -47,45 +48,23 @@ def test_native_to_jax_index_matches_validated_contracts() -> None:
     )
 
     assert INDEX_PATH.read_text(encoding="utf-8") == rendered
-    # One row per official source (53) and per experimental registration (1).
-    assert rendered.count("\n| `examples/") == 54
+    # One row per official source; no experimental source is registered.
+    assert rendered.count("\n| `examples/") == 53
     assert "## Official upstream catalog" in rendered
-    assert "## Experimental local registrations" in rendered
+    assert "## Experimental local registrations" not in rendered
     assert "examples/1_Simple/periodicfieldline_QA.py" in rendered
     assert "examples/1_Simple/periodicfieldline_QH.py" in rendered
     assert version == 2
-    runs_by_id = {run.run_id: run for run in runs}
-    bounded = runs_by_id["20260729T005942Z-5ade9aee"]
-    exact = runs_by_id["20260917T035857Z-6a1f0ea9"]
+    (bounded,) = runs
+    assert bounded.run_id == "20260729T005942Z-5ade9aee"
     assert bounded.scale == "bounded"
     assert bounded.case_count == 26
-    assert exact.scale == "native_default"
-    assert exact.verdict == "quality-band"
-    assert exact.case_ids == frozenset(
-        {"native-single-stage-boozer-vacuum-optimization"}
-    )
-    assert (exact.lane_receipt_count, exact.comparison_count) == (3, 57)
-    assert bounded.evidence_scope == exact.evidence_scope == "local_only"
-    assert "12/57 comparisons failed" in rendered
-    assert "3/3 lanes budget-exhausted" in rendered
-    assert "final:objective" in rendered
-    assert "<= 9.9999999999999995e-08" in rendered
+    assert bounded.evidence_scope == "local_only"
     assert "Superseded provenance" not in rendered
     assert "23fa387a1" not in rendered
     assert "20260729T005942Z-5ade9aee" in rendered
     assert "26 cases / 78 lanes / 1,248 comparisons" in rendered
     assert "`bounded`" in rendered
-    exact_row = next(
-        line
-        for line in rendered.splitlines()
-        if "`examples/3_Advanced/single_stage_boozer_vacuum_optimization.py`" in line
-    )
-    assert "20260729T005942Z-5ade9aee" not in exact_row
-    assert "outer: CPU SciPy" in exact_row
-    assert "historical quality-band, unverified" in exact_row
-    assert "12/57 comparisons failed" in exact_row
-    assert "3/3 lanes budget-exhausted" in exact_row
-    assert "20260917T035857Z-6a1f0ea9" in exact_row
     assert "`native_default`: not run" not in rendered
 
 
@@ -129,7 +108,6 @@ def test_dual_scale_index_keeps_historical_evidence_at_its_recorded_scale(
     assert "| bounded, native_default |" in row
     assert "bounded: historical pass" in row
     assert "20260729T005942Z-5ade9aee" in row
-    assert "20260917T035857Z-6a1f0ea9" not in row
     assert "native_default: historical" not in row
 
 
@@ -251,23 +229,23 @@ def test_historical_v1_registry_keeps_legacy_rendering(
     assert "quality-band" not in rendered
 
 
-def test_v2_registry_keeps_bounded_history_and_scopes_exact_case(
+def test_v2_registry_keeps_bounded_history_and_scopes_band_case(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     baseline = _v2_record_from_v1()
-    exact = {
+    band = {
         **baseline,
-        "run_id": "exact-one-case",
+        "run_id": "band-one-case",
         "scale": "native_default",
         "verdict": "quality-band",
         "case_count": 1,
-        "case_ids": ["native-single-stage-boozer-vacuum-optimization"],
+        "case_ids": ["native-stage-two-optimization-minimal"],
         "lane_receipt_count": 3,
         "comparison_count": 2,
     }
     record_path = tmp_path / "authority_evidence.json"
     record_path.write_text(
-        json.dumps({"schema_version": 2, "runs": [baseline, exact]}), encoding="utf-8"
+        json.dumps({"schema_version": 2, "runs": [baseline, band]}), encoding="utf-8"
     )
     version, runs = _load_authority_evidence_runs(record_path)
     assert version == 2
@@ -276,10 +254,10 @@ def test_v2_registry_keeps_bounded_history_and_scopes_exact_case(
     )
 
     rendered = render_native_to_jax_index()
-    exact_row = next(
+    band_row = next(
         line
         for line in rendered.splitlines()
-        if "`examples/3_Advanced/single_stage_boozer_vacuum_optimization.py`" in line
+        if "`examples/1_Simple/stage_two_optimization_minimal.py`" in line
     )
     other_row = next(
         line
@@ -288,11 +266,10 @@ def test_v2_registry_keeps_bounded_history_and_scopes_exact_case(
     )
     assert "26 cases / 78 lanes / 1,248 comparisons" in rendered
     assert "scope `local_only`" in rendered
-    assert "outer: CPU SciPy" in exact_row
-    assert "historical quality-band, unverified" in exact_row
-    assert "exact-one-case" in exact_row
-    assert "20260729T005942Z-5ade9aee" not in exact_row
-    assert "exact-one-case" not in other_row
+    assert "outer: CPU SciPy" in band_row
+    assert "historical quality-band, unverified" in band_row
+    assert "band-one-case" in band_row
+    assert "band-one-case" not in other_row
     assert "`native_default`: not run" not in rendered
 
 
@@ -351,10 +328,16 @@ class _QualityBandSummary(TypedDict):
     cases: list[_QualityBandCase]
 
 
+def _band_ceiling(case_id: str) -> float:
+    band = get_case(case_id).native_default_quality_band
+    assert band is not None
+    return band.max_value
+
+
 def _quality_band_summary() -> _QualityBandSummary:
     lanes = ["native-cpu", "jax-cpu", "jax-gpu"]
     return {
-        "run_id": "exact-one-case",
+        "run_id": "band-one-case",
         "repository_commit": "a" * 40,
         "scale": "native_default",
         "verdict": "quality-band",
@@ -362,7 +345,7 @@ def _quality_band_summary() -> _QualityBandSummary:
         "lanes": lanes,
         "cases": [
             {
-                "case_id": "native-single-stage-boozer-vacuum-optimization",
+                "case_id": "native-stage-two-optimization-minimal",
                 "authoritative": True,
                 "verdict": "quality-band",
                 "scale_tier": "native_default",
@@ -371,7 +354,9 @@ def _quality_band_summary() -> _QualityBandSummary:
                     {
                         "lane": lane,
                         "observable": "final:objective",
-                        "max_value": 1.0e-7,
+                        "max_value": _band_ceiling(
+                            "native-stage-two-optimization-minimal"
+                        ),
                         "observed_value": 4.0e-8,
                         "passed": True,
                     }
@@ -455,12 +440,13 @@ def test_authority_record_rejects_incomplete_quality_band(
 ) -> None:
     summary = _quality_band_summary()
     band = summary["cases"][0]["quality_band"]
+    beyond_ceiling = 2.0 * _band_ceiling("native-stage-two-optimization-minimal")
     if defect == "missing_lane":
         band.pop()
     elif defect == "duplicate_lane":
         band[1]["lane"] = "native-cpu"
     elif defect == "over_limit":
-        band[2]["observed_value"] = 2.0e-7
+        band[2]["observed_value"] = beyond_ceiling
     elif defect == "two_summary_lanes":
         summary["lanes"] = ["native-cpu", "jax-cpu"]
         summary["cases"][0]["executions"].pop()
@@ -474,9 +460,9 @@ def test_authority_record_rejects_incomplete_quality_band(
             result["observable"] = "final:other"
     elif defect == "common_looser_limit":
         for result in band:
-            result["max_value"] = 2.0e-7
+            result["max_value"] = beyond_ceiling
     else:
-        band[0]["max_value"] = 2.0e-7
+        band[0]["max_value"] = beyond_ceiling
     path = tmp_path / "summary.json"
     path.write_text(json.dumps(summary, sort_keys=True) + "\n", encoding="utf-8")
     with pytest.raises(RuntimeError, match="quality band is incomplete"):
@@ -521,88 +507,108 @@ def _stub_rendered_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     )
 
 
-def test_shipped_derived_review_summary_is_bound_and_reported_as_derived(
+_DERIVED_RUN_ID = "band-derived-review"
+
+
+def _bind_derived_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, bind: bool = True
+) -> tuple[tuple[AuthorityEvidence, ...], bytes]:
+    """Record one derived review package next to the tracked bounded run.
+
+    The tree retains no derived package, so the binding rules run against a
+    synthetic one: a ``native_default`` quality-band record whose
+    ``derived_summary_sha256`` names the package bytes. The record and the
+    evidence directory replace the tracked ones; the package itself is left to
+    each test to write.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    registry = json.loads(
+        (repo_root / "examples/jax/authority_evidence.json").read_text(encoding="utf-8")
+    )
+    derived = (
+        json.dumps(
+            {"case_id": "native-stage-two-optimization-minimal", "verdict": "band"},
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+    band = {
+        **_v2_record_from_v1(),
+        "run_id": _DERIVED_RUN_ID,
+        "scale": "native_default",
+        "verdict": "quality-band",
+        "case_count": 1,
+        "case_ids": ["native-stage-two-optimization-minimal"],
+        "lane_receipt_count": 3,
+        "comparison_count": 45,
+    }
+    if bind:
+        band["derived_summary_sha256"] = hashlib.sha256(derived).hexdigest()
+    registry["runs"] = [*registry["runs"], band]
+    record_path = tmp_path / "authority_evidence.json"
+    record_path.write_text(json.dumps(registry), encoding="utf-8")
+    monkeypatch.setattr(index_module, "AUTHORITY_EVIDENCE_PATH", record_path)
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    monkeypatch.setattr(index_module, "DERIVED_EVIDENCE_DIRECTORY", evidence)
+    _, runs = _load_authority_evidence_runs(record_path)
+    return runs, derived
+
+
+def _write_derived_review(tmp_path: Path, payload: bytes) -> Path:
+    directory = tmp_path / "evidence" / _DERIVED_RUN_ID
+    directory.mkdir()
+    path = directory / "review-summary.json"
+    path.write_bytes(payload)
+    return path
+
+
+def test_bound_derived_review_summary_is_reported_as_derived(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    _, runs = _load_authority_evidence_runs(
-        repo_root / "examples/jax/authority_evidence.json"
-    )
-    exact = next(run for run in runs if run.run_id == "20260917T035857Z-6a1f0ea9")
-    derived = index_module.derived_summary_path(exact.run_id)
-
-    assert exact.derived_summary_sha256 is not None
-    assert (
-        hashlib.sha256(derived.read_bytes()).hexdigest() == exact.derived_summary_sha256
-    )
+    runs, derived = _bind_derived_review(tmp_path, monkeypatch)
+    path = _write_derived_review(tmp_path, derived)
+    assert index_module.derived_summary_path(_DERIVED_RUN_ID) == path
     verify_derived_summaries(runs)
 
     _stub_rendered_index(tmp_path, monkeypatch)
-    assert main(["--check", "--authority-summary", str(derived)]) == 0
+    assert main(["--check", "--authority-summary", str(path)]) == 0
     reported = capsys.readouterr().out
     assert "DERIVED numerical review only" in reported
-    assert exact.run_id in reported
+    assert _DERIVED_RUN_ID in reported
     assert "never authority" in reported
 
 
 def test_check_rejects_a_tampered_derived_review_summary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    _, runs = _load_authority_evidence_runs(
-        repo_root / "examples/jax/authority_evidence.json"
-    )
-    exact = next(run for run in runs if run.run_id == "20260917T035857Z-6a1f0ea9")
-    shipped = index_module.derived_summary_path(exact.run_id).read_bytes()
-    tampered_directory = tmp_path / "evidence" / exact.run_id
-    tampered_directory.mkdir(parents=True)
-    (tampered_directory / "review-summary.json").write_bytes(
-        shipped[:-2] + b" " + shipped[-1:]
-    )
-    monkeypatch.setattr(
-        index_module, "DERIVED_EVIDENCE_DIRECTORY", tmp_path / "evidence"
-    )
+    _runs, derived = _bind_derived_review(tmp_path, monkeypatch)
+    _write_derived_review(tmp_path, derived[:-2] + b" " + derived[-1:])
     _stub_rendered_index(tmp_path, monkeypatch)
 
     with pytest.raises(RuntimeError, match="do not match their bound digest"):
         main(["--check"])
 
 
-def test_check_rejects_a_missing_or_unbound_derived_review_summary(
+def test_check_rejects_a_missing_derived_review_summary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    _, runs = _load_authority_evidence_runs(
-        repo_root / "examples/jax/authority_evidence.json"
-    )
-    exact = next(run for run in runs if run.run_id == "20260917T035857Z-6a1f0ea9")
-    shipped = index_module.derived_summary_path(exact.run_id).read_bytes()
-    empty = tmp_path / "empty"
-    empty.mkdir()
-    monkeypatch.setattr(index_module, "DERIVED_EVIDENCE_DIRECTORY", empty)
+    _bind_derived_review(tmp_path, monkeypatch)
     _stub_rendered_index(tmp_path, monkeypatch)
 
     with pytest.raises(RuntimeError, match="bound derived review summary is missing"):
         main(["--check"])
 
-    unbound_directory = empty / exact.run_id
-    unbound_directory.mkdir()
-    (unbound_directory / "review-summary.json").write_bytes(shipped)
-    unbound_runs = tuple(
-        AuthorityEvidence(
-            **{
-                field: getattr(run, field)
-                for field in AuthorityEvidence.__dataclass_fields__
-                if field != "derived_summary_sha256"
-            }
-        )
-        for run in runs
-    )
-    monkeypatch.setattr(
-        index_module, "_load_authority_evidence_runs", lambda _path: (2, unbound_runs)
-    )
+
+def test_check_rejects_an_unbound_derived_review_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _runs, derived = _bind_derived_review(tmp_path, monkeypatch, bind=False)
+    _write_derived_review(tmp_path, derived)
+    _stub_rendered_index(tmp_path, monkeypatch)
+
     with pytest.raises(RuntimeError, match="has no derived_summary_sha256 binding"):
         main(["--check"])
 
@@ -958,7 +964,7 @@ def test_fail_aggregate_may_include_a_quality_band_case(tmp_path: Path) -> None:
         "lanes": lanes,
         "cases": [
             {
-                "case_id": "native-single-stage-boozer-vacuum-optimization",
+                "case_id": "native-stage-two-optimization-minimal",
                 "authoritative": False,
                 "verdict": "quality-band",
                 "scale_tier": "native_default",
@@ -967,7 +973,9 @@ def test_fail_aggregate_may_include_a_quality_band_case(tmp_path: Path) -> None:
                     {
                         "lane": lane,
                         "observable": "final:objective",
-                        "max_value": 1.0e-7,
+                        "max_value": _band_ceiling(
+                            "native-stage-two-optimization-minimal"
+                        ),
                         "observed_value": 4.0e-8,
                         "passed": True,
                     }
@@ -1017,7 +1025,7 @@ def test_authority_record_rejects_a_malformed_derived_digest(tmp_path: Path) -> 
     document = json.loads(
         (repo_root / "examples/jax/authority_evidence.json").read_text(encoding="utf-8")
     )
-    document["runs"][1]["derived_summary_sha256"] = "NOT-A-DIGEST"
+    document["runs"][0]["derived_summary_sha256"] = "NOT-A-DIGEST"
     path = tmp_path / "authority_evidence.json"
     path.write_text(json.dumps(document), encoding="utf-8")
 
@@ -1025,11 +1033,13 @@ def test_authority_record_rejects_a_malformed_derived_digest(tmp_path: Path) -> 
         _load_authority_evidence_runs(path)
 
 
-_BOOZER_CASE_ID = "native-single-stage-boozer-vacuum-optimization"
-#: The driver `native-single-stage-boozer-vacuum-optimization` declares through
-#: its outer optimizer policy. It contains "scipy", so a replay that forgets to
-#: pass the policy rejects it as a forbidden parity driver instead.
-_BOOZER_POLICY_DRIVER = "simsopt_jax_scipy_bfgs_with_exact_analytic_boozer_newton"
+#: An official case with a declared host outer optimizer policy and a
+#: ``native_default`` quality band.
+_POLICY_CASE_ID = "native-stage-two-optimization-minimal"
+#: The driver `native-stage-two-optimization-minimal` declares through its outer
+#: optimizer policy. It contains "scipy", so a replay that forgets to pass the
+#: policy rejects it as a forbidden parity driver instead.
+_POLICY_DRIVER = "scipy_lbfgsb"
 #: The one case-package module an arbitration depends on: it declares every
 #: case's quality band and work budget contract.
 _CASE_CONTRACT_SOURCE = index_module._CASE_REGISTRY_SOURCE
@@ -1077,21 +1087,24 @@ def _simulate_clean_checkout(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str,
     return requested
 
 
-def _boozer_contract(lanes: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Read the published keys and workflow stages the case's routes declare."""
+def _policy_case_contract(
+    lanes: tuple[str, ...],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Read the published keys and workflow stages the case's native_default routes declare."""
     repo_root = Path(__file__).resolve().parents[1]
     parity = json.loads(
         (repo_root / "examples/jax/parity_manifest.json").read_text(encoding="utf-8")
     )
     relationship = next(
         item
-        for item in parity["relationships"] + parity["experimental_relationships"]
-        if item.get("case_id") == _BOOZER_CASE_ID
+        for item in parity["relationships"]
+        if item.get("case_id") == _POLICY_CASE_ID
     )
+    routes = relationship["scale_contracts"]["native_default"]["comparison_routes"]
     value_keys = sorted(
         {
             f"{route['phase']}:{route['observable']}"
-            for route in relationship["comparison_routes"]
+            for route in routes
             if set(route["lane_pair"].split(":")) <= set(lanes)
         }
     )
@@ -1142,15 +1155,15 @@ def _zero_comparison_fail_summary(
         )
         generated_bindings = {forge_generated_source: "generated"}
     lanes = ("native-cpu", "jax-cpu")
-    value_keys, workflow_stages = _boozer_contract(lanes)
+    value_keys, workflow_stages = _policy_case_contract(lanes)
     values = {key: np.asarray([1.0], dtype=np.float64) for key in value_keys}
     values["final:objective"] = np.asarray([final_objective], dtype=np.float64)
     if route_break:
         values[_UNROUTED_OBSERVABLE] = np.asarray([1.0], dtype=np.float64)
     executions: list[dict[str, object]] = []
     for lane, backend, driver in (
-        ("native-cpu", "native_cpu", "simsopt_scipy_bfgs_exact_boozer"),
-        ("jax-cpu", "jax_cpu_parity", _BOOZER_POLICY_DRIVER),
+        ("native-cpu", "native_cpu", "scipy_lbfgsb"),
+        ("jax-cpu", "jax_cpu_parity", _POLICY_DRIVER),
     ):
         success = jax_cpu_success or lane != "jax-cpu"
         relative = f"lanes/{lane}"
@@ -1223,7 +1236,7 @@ def _zero_comparison_fail_summary(
         "lanes": list(lanes),
         "cases": [
             {
-                "case_id": _BOOZER_CASE_ID,
+                "case_id": _POLICY_CASE_ID,
                 "authoritative": False,
                 "verdict": "fail",
                 "scale_tier": "native_default",
@@ -1277,15 +1290,17 @@ def _temporary_authority_checkout(tmp_path: Path) -> Path:
     )
     relationship = next(
         item
-        for item in parity["relationships"] + parity["experimental_relationships"]
-        if item.get("case_id") == _BOOZER_CASE_ID
+        for item in parity["relationships"]
+        if item.get("case_id") == _POLICY_CASE_ID
     )
     example = next(
         item
         for item in examples["jax_examples"]
         if item["id"] == relationship["jax_example_id"]
     )
-    assert example["outer_optimizer_policy"] == "scipy-bfgs-over-jax-exact-boozer"
+    assert (
+        example["outer_optimizer_policy"] == "scipy-lbfgsb-over-jax-minimal-stage-two"
+    )
     documents = (
         (
             "examples/jax/parity_manifest.json",
@@ -1511,7 +1526,7 @@ def test_rejection_matching_the_policy_less_replay_over_certifying_receipts(
     path = _zero_comparison_fail_summary(
         tmp_path,
         jax_cpu_success=True,
-        rejection=(f"jax-cpu uses forbidden parity driver {_BOOZER_POLICY_DRIVER}"),
+        rejection=(f"jax-cpu uses forbidden parity driver {_POLICY_DRIVER}"),
     )
 
     with pytest.raises(
@@ -1543,7 +1558,9 @@ def test_legacy_integrity_rejection_is_refused_as_a_diagnosed_error(
         authority_record_from_summary(path)
 
 
-def _boozer_lane_observation(sources: tuple[ExecutedSource, ...]) -> LaneObservation:
+def _policy_case_lane_observation(
+    sources: tuple[ExecutedSource, ...],
+) -> LaneObservation:
     """One jax-cpu receipt carrying exactly the executed sources given."""
     repository_state = collect_repository_state(Path(__file__).resolve().parents[1])
     return LaneObservation(
@@ -1555,7 +1572,7 @@ def _boozer_lane_observation(sources: tuple[ExecutedSource, ...]) -> LaneObserva
         input_fingerprint="a" * 64,
         configuration_fingerprint="b" * 64,
         effective_construction_fingerprint="c" * 64,
-        driver=_BOOZER_POLICY_DRIVER,
+        driver=_POLICY_DRIVER,
         normalized_status="failed",
         raw_status="0",
         success=False,
@@ -1595,12 +1612,12 @@ def _boozer_lane_observation(sources: tuple[ExecutedSource, ...]) -> LaneObserva
     )
 
 
-def _confirm_boozer_rejection(observation: LaneObservation) -> None:
+def _confirm_policy_case_rejection(observation: LaneObservation) -> None:
     provenance = observation.provenance
     assert provenance is not None
     index_module._confirm_zero_comparison_fail(
         {
-            "case_id": _BOOZER_CASE_ID,
+            "case_id": _POLICY_CASE_ID,
             "arbitration_rejection": "jax-cpu did not report scientific success",
         },
         {"jax-cpu": observation},
@@ -1627,7 +1644,7 @@ def test_replay_refuses_a_case_contract_this_checkout_no_longer_holds(
     )
 
     with pytest.raises(RuntimeError, match="is not the source lane jax-cpu executed"):
-        _confirm_boozer_rejection(_boozer_lane_observation(stale))
+        _confirm_policy_case_rejection(_policy_case_lane_observation(stale))
 
 
 def test_replay_refuses_receipts_that_record_no_case_contract(
@@ -1650,7 +1667,7 @@ def test_replay_refuses_receipts_that_record_no_case_contract(
 
     assert all(source.path != _CASE_CONTRACT_SOURCE for source in sources)
     with pytest.raises(RuntimeError, match="is not the source lane jax-cpu executed"):
-        _confirm_boozer_rejection(_boozer_lane_observation(sources))
+        _confirm_policy_case_rejection(_policy_case_lane_observation(sources))
 
 
 def test_replay_is_not_blocked_by_an_unrelated_case_module_edit(
@@ -1680,7 +1697,7 @@ def test_replay_is_not_blocked_by_an_unrelated_case_module_edit(
     assert any(source.path == _UNRELATED_CASE_SOURCE for source in edited)
     # The pre-wave guard bound every recorded source under the case package,
     # so this edit refused the replay; the recorded rejection is confirmed.
-    _confirm_boozer_rejection(_boozer_lane_observation(edited))
+    _confirm_policy_case_rejection(_policy_case_lane_observation(edited))
 
 
 def test_replay_contract_sources_bind_the_band_module_its_loader_and_its_data() -> None:

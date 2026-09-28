@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from typing import Literal
 
 OuterOptimizerPolicyId = Literal[
-    "scipy-bfgs-over-jax-exact-boozer",
     "scipy-lbfgsb-over-jax-standard-stage-two",
     "scipy-lbfgsb-over-jax-planar-stage-two",
     "scipy-lbfgsb-over-jax-stochastic-stage-two",
@@ -19,10 +18,6 @@ OuterOptimizerPolicyId = Literal[
     "scipy-trf-over-jax-surf-vol-area",
 ]
 PolicyRegistryScope = Literal["official", "experimental"]
-
-SHIPPED_SINGLE_STAGE_SCIPY_DRIVER_ID = (
-    "simsopt_jax_scipy_bfgs_with_exact_analytic_boozer_newton"
-)
 
 
 class OuterOptimizerPolicyError(ValueError):
@@ -79,14 +74,6 @@ _APPROVED_POLICIES = (
         "native-qfm",
         "scipy_lbfgsb_slsqp_qfm_sequence",
         "official",
-    ),
-    OuterOptimizerPolicy(
-        "scipy-bfgs-over-jax-exact-boozer",
-        "native-single-stage-boozer-vacuum-optimization",
-        "3_Advanced/single_stage_boozer_vacuum_optimization.py",
-        "native-single-stage-boozer-vacuum-optimization",
-        SHIPPED_SINGLE_STAGE_SCIPY_DRIVER_ID,
-        "experimental",
     ),
     # The official native scripts of standard, planar and stochastic stage two,
     # minimal stage two, finite-build stage two and coil forces call

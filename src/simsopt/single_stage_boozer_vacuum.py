@@ -1,4 +1,4 @@
-"""Shared contract for the VMEC-free Boozer single-stage example pair."""
+"""Shared outer-optimization contract of the VMEC-free Boozer single-stage workflow."""
 
 from __future__ import annotations
 
@@ -13,16 +13,12 @@ JAX_OPTAX_DRIVER_ID: Final[str] = "simsopt_jax_optax_lbfgs_with_traceable_boozer
 JAX_PARITY_DRIVER_ID: Final[str] = "simsopt_jax_host_bfgs_with_traceable_boozer_newton"
 
 
-# Terminal states a SOUND bounded run can carry.  This follows the scale-aware
-# convention of ``_SOUND_TERMINAL_STATES`` in the projected-route lesson
-# (examples/jax/3_Advanced/single_stage_boozer_vacuum_projected_route.py); the
-# members differ because the status vocabularies differ.  The bounded lane
-# accepts exactly the draws
-# its truncated budget produces by construction -- ``converged`` and
-# ``iteration-limit``.  Everything else stays failed: ``evaluation-limit`` at
-# this budget indicates line-search churn rather than a spent outer budget,
-# and a nonfinite state, a collapsed line search, or a provider error is never
-# sound at any scale.
+# Terminal states a SOUND bounded run can carry.  The bounded lane accepts
+# exactly the draws its truncated budget produces by construction --
+# ``converged`` and ``iteration-limit``.  Everything else stays failed:
+# ``evaluation-limit`` at this budget indicates line-search churn rather than a
+# spent outer budget, and a nonfinite state, a collapsed line search, or a
+# provider error is never sound at any scale.
 SOUND_BOUNDED_STOPPING_REASONS: Final = ("converged", "iteration-limit")
 
 

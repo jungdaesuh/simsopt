@@ -152,19 +152,24 @@ def test_additional_scale_resolves_full_routes_without_changing_base() -> None:
         selected.resolve_scale("not_applicable")
 
 
-def test_existing_native_default_relationship_keeps_single_scale_contract() -> None:
+def test_native_default_only_relationship_keeps_single_scale_contract() -> None:
+    document = _active_document()
+    relationships = document["relationships"]
+    assert isinstance(relationships, list)
+    single_scale = next(
+        item for item in relationships if item["case_id"] == "native-boozerqa"
+    )
+    single_scale["scale_tier"] = "native_default"
+    single_scale["cost_tier"] = "scheduled"
+    del single_scale["scale_contracts"]
     parsed = parse_parity_relationships_document(
-        _active_document(), repo_root=REPO_ROOT, schema_version=2
+        document, repo_root=REPO_ROOT, schema_version=2
     )
-    exact = next(
-        item
-        for item in parsed
-        if item.case_id == "native-single-stage-boozer-vacuum-optimization"
-    )
-    assert exact.supported_scales == ("native_default",)
-    assert exact.resolve_scale("native_default") is exact
+    relationship = next(item for item in parsed if item.case_id == "native-boozerqa")
+    assert relationship.supported_scales == ("native_default",)
+    assert relationship.resolve_scale("native_default") is relationship
     with pytest.raises(ParityManifestValidationError, match="does not declare"):
-        exact.resolve_scale("bounded")
+        relationship.resolve_scale("bounded")
 
 
 @pytest.mark.parametrize(

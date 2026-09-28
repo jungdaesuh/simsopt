@@ -2040,8 +2040,7 @@ def _execute_official_jax(
     drives, so the script and this matched workflow cannot diverge.
 
     The traceable-session route (``_prepare_jax_variant_runtime`` / ``_jax``) is
-    untouched and still serves the instrumented measurement entry point of
-    ``native_single_stage_boozer_vacuum`` and the compute-graph benchmarks.
+    separate; ``execute_variant`` still dispatches JAX lanes to it.
     """
     configuration = bundle.configuration
     (

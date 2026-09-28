@@ -12,13 +12,6 @@ from simsopt_contracts.optimization_endpoint import (
     status_convention_for,
 )
 from simsopt_jax.parity_tolerances import PARITY_LADDER_TOLERANCES
-from simsopt_jax.solve.endpoint_certificate import (
-    certify_optimization_endpoint as compatibility_certificate,
-)
-
-
-def test_jax_endpoint_certificate_import_remains_compatible() -> None:
-    assert compatibility_certificate is certify_optimization_endpoint
 
 
 def test_parity_tolerances_source_terminal_certificate_thresholds() -> None:

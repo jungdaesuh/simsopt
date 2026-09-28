@@ -29,9 +29,8 @@ NATIVE_TIERS = {
     "3_Advanced",
     "stellarator_benchmarks",
 }
-# Frozen v2 catalog is 51 sources. Post-v2 natives stay off that pin:
-# single_stage_boozer_vacuum_optimization.py; this historical v2 contract
-# still subtracts every post-v2 source. The two periodic-field-line
+# Frozen v2 catalog is 51 sources. This historical v2 contract still subtracts
+# every post-v2 native source. The two periodic-field-line
 # scripts are official upstream sources (they are in the pinned upstream
 # inventory at 9e027eac3 and in the live v3 catalog, as blocked without a
 # mirror) that reached this branch with an upstream merge, i.e. after the v2
@@ -40,7 +39,6 @@ POST_V2_NATIVE_SOURCES = frozenset(
     {
         "1_Simple/periodicfieldline_QA.py",
         "1_Simple/periodicfieldline_QH.py",
-        "3_Advanced/single_stage_boozer_vacuum_optimization.py",
     }
 )
 

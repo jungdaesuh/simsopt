@@ -70,18 +70,6 @@ from examples.jax.parity.cases.native_qfm import (
     create_input as create_native_qfm_input,
 )
 from examples.jax.parity.cases.native_qfm import execute as execute_native_qfm
-from examples.jax.parity.cases.native_single_stage_boozer_vacuum import (
-    NATIVE_DEFAULT_QUALITY_BAND as SINGLE_STAGE_BOOZER_VACUUM_QUALITY_BAND,
-)
-from examples.jax.parity.cases.native_single_stage_boozer_vacuum import (
-    create_input as create_native_single_stage_boozer_vacuum_input,
-)
-from examples.jax.parity.cases.native_single_stage_boozer_vacuum import (
-    execute as execute_native_single_stage_boozer_vacuum,
-)
-from examples.jax.parity.cases.native_single_stage_boozer_vacuum import (
-    execute_measurement as measure_native_single_stage_boozer_vacuum,
-)
 from examples.jax.parity.cases.native_stage_two_optimization import (
     create_input as create_native_stage_two_optimization_input,
 )
@@ -429,13 +417,6 @@ _CASES = {
             scales=_FIXED_BUDGET_SCALES,
             derivation="Upstream strain optimization fixes L-BFGS-B MAXITER; an accepted endpoint may stop at that cap.",
         ),
-    ),
-    "native-single-stage-boozer-vacuum-optimization": CaseDefinition(
-        case_id="native-single-stage-boozer-vacuum-optimization",
-        create_input=create_native_single_stage_boozer_vacuum_input,
-        execute=execute_native_single_stage_boozer_vacuum,
-        measurement_execute=measure_native_single_stage_boozer_vacuum,
-        native_default_quality_band=SINGLE_STAGE_BOOZER_VACUUM_QUALITY_BAND,
     ),
     "native-wireframe-rcls-basic": CaseDefinition(
         case_id="native-wireframe-rcls-basic",

@@ -212,7 +212,6 @@ jobs:
             tests/geo/test_surface_objectives.py \
             tests/integration/test_single_stage_jax.py \
             tests/integration/test_remaining_jax_surfaces_mode_matrix.py \
-            tests/jax/examples/test_single_stage_boozer_vacuum_example.py \
             -m "not private_optimizer_runtime" \
             -v --tb=short
 

@@ -131,9 +131,8 @@ Historical branch-only experiments
 The following 2026-09-14/15 measurements came from branch-only benchmarks.
 They are retained as historical observations, not added
 to the 25 eligible official-example cases or used to qualify the current
-shipped/default policy. The exact-constraint single-stage test and the local
-``single_stage_boozer_vacuum_optimization.py`` example are not examples in
-the pinned upstream catalog.
+shipped/default policy. The exact-constraint single-stage test is not an
+example in the pinned upstream catalog.
 
 .. list-table::
    :header-rows: 1
@@ -148,11 +147,6 @@ the pinned upstream catalog.
      - 24.1 s
      - 52.1 s process wall
      - 2.17x reported; gradient relative L2 difference 3.9e-13
-   * - Local single-stage vacuum example
-       (``single_stage_boozer_vacuum_optimization.py``)
-     - Not retained as an absolute time here
-     - Not retained as an absolute time here
-     - 2.20x reported; initial-gradient absolute difference 8.8e-16
 
 Historical official-example measurements
 ----------------------------------------

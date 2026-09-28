@@ -1,9 +1,8 @@
 """Host bootstrap for the NCSX VMEC-free single-stage Boozer vacuum problem.
 
-``examples/3_Advanced/single_stage_boozer_vacuum_optimization.py`` fits a
-volume-labelled exact Boozer surface to the NCSX magnetic axis and minimizes
-non-quasisymmetry + Boozer residual + iota, major-radius and coil-length
-penalties over the coil degrees of freedom.  This module owns that construction
+The problem fits a volume-labelled exact Boozer surface to the NCSX magnetic
+axis and minimizes non-quasisymmetry + Boozer residual + iota, major-radius and
+coil-length penalties over the coil degrees of freedom.  This module owns that construction
 and one outer evaluation of it on the exact analytic route
 (:mod:`simsopt_jax_adapters.geo.single_stage_exact_analytic`); the outer
 optimizer belongs to the caller.

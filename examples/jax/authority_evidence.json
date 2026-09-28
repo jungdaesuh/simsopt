@@ -38,22 +38,6 @@
       "scale": "bounded",
       "summary_sha256": "fa235cacb0f3e4fa7abc6e8ff4b2f888b2e20c7392bd1531eeb983abad67d66a",
       "verdict": "pass"
-    },
-    {
-      "case_count": 1,
-      "case_ids": [
-        "native-single-stage-boozer-vacuum-optimization"
-      ],
-      "comparison_count": 57,
-      "derived_summary_sha256": "d36c8562326d34838250a66ccc8551decdde8f8b329247ecb8d95e923d07025d",
-      "evidence_scope": "local_only",
-      "lane_receipt_count": 3,
-      "qualification": "12/57 comparisons failed; 3/3 lanes budget-exhausted; jax-cpu final:objective 4.3261270728412792e-08 <= 9.9999999999999995e-08; jax-gpu final:objective 4.3077269937092123e-08 <= 9.9999999999999995e-08; native-cpu final:objective 4.3972015892540963e-08 <= 9.9999999999999995e-08; endpoint quality only, no convergence or final-value equivalence",
-      "repository_commit": "1311e9247ca882b327b046b0c5b2cb43b4404360",
-      "run_id": "20260917T035857Z-6a1f0ea9",
-      "scale": "native_default",
-      "summary_sha256": "8ee90b2fdff5cc324cc6d35c0088086e893fc790f396a86f7310352ea19bc565",
-      "verdict": "quality-band"
     }
   ],
   "schema_version": 2

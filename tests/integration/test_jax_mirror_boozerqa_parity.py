@@ -11,9 +11,6 @@ from examples.jax.parity.cases.native_boozerqa import (
     BOOZER_QA_SPEC,
     variant_scale_configuration,
 )
-from examples.jax.parity.cases.native_single_stage_boozer_vacuum import (
-    SPEC as EXACT_SINGLE_STAGE_SPEC,
-)
 from examples.jax.parity.input_bundle import load_input_bundle
 
 
@@ -47,13 +44,6 @@ def test_boozerqa_input_declares_upstream_newton_tolerance_at_native_default(
         variant_scale_configuration("bounded", BOOZER_QA_SPEC)["inner_tolerance"]
         == 1.0e-10
     )
-    for scale in ("bounded", "native_default"):
-        assert (
-            variant_scale_configuration(scale, EXACT_SINGLE_STAGE_SPEC)[
-                "inner_tolerance"
-            ]
-            == 1.0e-13
-        )
 
 
 def test_exact_boozerqa_workflow_matches_native_and_jax_cpu(

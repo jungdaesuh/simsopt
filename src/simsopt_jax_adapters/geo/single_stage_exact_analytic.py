@@ -1,7 +1,6 @@
 """Exact-Boozer single-stage outer evaluation with the analytic dense inner Newton.
 
-One outer evaluation mirrors the native reference
-(``examples/3_Advanced/single_stage_boozer_vacuum_optimization.py``): the inner
+One outer evaluation mirrors the native exact-Boozer outer evaluation: the inner
 exact Newton warm-starts from the last *successful* surface state, keeps
 native's tolerance, iteration cap and rollback rule, and an unsuccessful inner
 solve reports the native sentinel value with the gradient evaluated at the
