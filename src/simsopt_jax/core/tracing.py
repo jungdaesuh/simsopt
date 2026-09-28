@@ -301,6 +301,13 @@ _MIN_INCREASE_ERROR = 5.0**-5
 # ``(0.9 / 0.2)**3``; the increase branch runs only for
 # ``error < _INCREASE_ERROR_THRESHOLD``.
 _MAX_DECREASE_ERROR = (_SAFETY / _MIN_FACTOR) ** 3
+# Upstream's capped growth factor ``0.9 * pow(5**-5, -1/5)`` is a constant of
+# boost's arithmetic, evaluated by the C library's ``pow``; Python's float power
+# is that same ``pow``. It is formed here, on the host, because a device power
+# is not correctly rounded everywhere: CUDA gives ``pow(5**-5, -0.2) =
+# 5.000000000000001`` where the C library gives ``5.0``, which alone moved every
+# capped step of the GPU lane off upstream's by one ulp.
+_MAX_INCREASE_FACTOR = _SAFETY * _MIN_INCREASE_ERROR**-_INCREASE_EXP
 
 # Terminal statuses. ``0`` = reached ``tmax``; ``-1 - i`` = criterion ``i``
 # fired; ``1`` = this call's ``max_steps`` ran out; ``2`` = the step controller
@@ -1604,14 +1611,18 @@ def _dopri5_adaptive_step(
     )
     increase = jnp.where(
         err < _device_array(_INCREASE_ERROR_THRESHOLD, dtype),
-        _device_array(_SAFETY, dtype)
-        * jnp.power(
-            jnp.clip(
-                err,
-                _device_array(_MIN_INCREASE_ERROR, dtype),
-                _device_array(_INCREASE_ERROR_THRESHOLD, dtype),
+        jnp.where(
+            err > _device_array(_MIN_INCREASE_ERROR, dtype),
+            _device_array(_SAFETY, dtype)
+            * jnp.power(
+                jnp.clip(
+                    err,
+                    _device_array(_MIN_INCREASE_ERROR, dtype),
+                    _device_array(_INCREASE_ERROR_THRESHOLD, dtype),
+                ),
+                _device_array(-_INCREASE_EXP, dtype),
             ),
-            _device_array(-_INCREASE_EXP, dtype),
+            _device_array(_MAX_INCREASE_FACTOR, dtype),
         ),
         _device_array(1.0, dtype),
     )
