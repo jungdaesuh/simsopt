@@ -683,19 +683,19 @@ def test_coil_current_fixed_geometry_value_and_grad_matches_cpu_squaredflux_curr
 def test_coil_current_fixed_geometry_value_and_grad_jits_under_strict_transfer_guard():
     """The current-only Stage-II QA kernel stays usable under JIT."""
     case = _fixed_geometry_current_flux_case()
+    # The fixed geometry enters as operands, not closure constants: a captured
+    # device array is read back to the host when the program is lowered, which
+    # the guard rejects on an accelerator independently of the kernel.
+    compiled = jax.jit(coil_current_fixed_geometry_value_and_grad_jax)
 
-    @jax.jit
-    def compiled(current_values):
-        return coil_current_fixed_geometry_value_and_grad_jax(
+    with jax.transfer_guard("disallow"):
+        value, grad = compiled(
             case.points,
             case.gammas,
             case.gammadashs,
-            current_values,
+            case.currents,
             case.flux_spec,
         )
-
-    with jax.transfer_guard("disallow"):
-        value, grad = compiled(case.currents)
 
     assert np.isfinite(np.asarray(value))
     assert np.asarray(grad).shape == tuple(case.currents.shape)

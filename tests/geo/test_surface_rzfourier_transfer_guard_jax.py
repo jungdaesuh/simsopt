@@ -64,13 +64,14 @@ def test_surface_rzfourier_scalar_gradients_allow_strict_transfer_guard():
         surface_rz_fourier_daspect_ratio_from_dofs,
     )
 
-    compiled_fns = tuple(
-        jax.jit(lambda x, fn=gradient_fn: fn(spec, x)) for gradient_fn in gradient_fns
-    )
+    # The spec's device arrays are operands, not closure constants: a captured
+    # device array is read back to the host when the program is lowered, which
+    # the guard rejects on an accelerator independently of the kernels.
+    compiled_fns = tuple(jax.jit(gradient_fn) for gradient_fn in gradient_fns)
 
     with jax.transfer_guard("disallow"):
         for compiled_fn in compiled_fns:
-            compiled_fn(dofs).block_until_ready()
+            compiled_fn(spec, dofs).block_until_ready()
 
 
 def test_surface_rzfourier_eager_linear_derivatives_allow_strict_transfer_guard():
