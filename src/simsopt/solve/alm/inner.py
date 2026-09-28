@@ -141,6 +141,21 @@ class _ALMInnerAttemptEvaluator:
             return self.cached_evaluation
         return self._fresh_evaluation(x)
 
+    def placed_on_bounds(self, x: np.ndarray, evaluation: dict):
+        """``(x, evaluation)`` of an attempt's result: ``x`` clipped into the
+        base box, and snapped onto the bounds it lies within rounding of
+        (:func:`_snap_onto_bounds`) unless the snap raises the total
+        (:func:`_snap_keeps_total`); a moved x is evaluated there."""
+        clipped = _project_onto_bounds(x, self.base_bounds)
+        snapped = _snap_onto_bounds(x, evaluation["grad"], self.base_bounds)
+        if not np.array_equal(snapped, clipped):
+            snapped_evaluation = self.evaluation_at(snapped)
+            if _snap_keeps_total(evaluation, snapped_evaluation):
+                return snapped, snapped_evaluation
+        if np.array_equal(clipped, x):
+            return x, evaluation
+        return clipped, self.evaluation_at(clipped)
+
     def fun(self, inner_x):
         evaluation = self._fresh_evaluation(inner_x)
         self.cached_x = np.asarray(inner_x, dtype=float).copy()
@@ -491,6 +506,16 @@ def _snap_onto_bounds(
     )
     return np.where(near_upper, upper, np.where(near_lower, lower, projected))
 
+def _snap_keeps_total(unsnapped: dict, snapped: dict) -> bool:
+    """Whether a snap onto the bounds keeps its candidate: its total may rise
+    over the unsnapped one by the two evaluations' round-off,
+    ``4 eps |total|`` each, and no more. The snap moves x along the outward
+    gradient, so to first order it lowers the total; a larger rise means the
+    objective is not smooth on the snap's scale. No term depends on an
+    offset added to f beyond that round-off."""
+    before, after = float(unsnapped["total"]), float(snapped["total"])
+    return bool(after - before <= 4.0 * np.finfo(float).eps * (abs(before) + abs(after)))
+
 def _intersect_bounds(trust_bounds, base_bounds):
     if trust_bounds is None:
         return base_bounds
@@ -615,10 +640,7 @@ def _run_alm_inner_attempts(request: ALMInnerAttemptRequest) -> ALMInnerAttemptR
             )
             candidate_x = early_stop.x
             candidate_eval = early_stop.evaluation
-        snapped_x = _snap_onto_bounds(candidate_x, candidate_eval["grad"], evaluator.base_bounds)
-        if not np.array_equal(snapped_x, candidate_x):
-            candidate_x = snapped_x
-            candidate_eval = evaluator.evaluation_at(snapped_x)
+        candidate_x, candidate_eval = evaluator.placed_on_bounds(candidate_x, candidate_eval)
         last_attempt_result = result
         attempt_iterations += int(getattr(result, "nit", 0))
         moved_norm = float(np.linalg.norm(candidate_x - request.x))

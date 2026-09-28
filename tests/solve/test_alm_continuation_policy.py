@@ -1044,6 +1044,41 @@ class AlmBoundStationarityTests(unittest.TestCase):
         )
         np.testing.assert_array_equal(alm_inner._snap_onto_bounds(x, grad, None), x)
 
+    def test_a_snap_that_raises_the_objective_is_not_kept(self):
+        # f = C - t + sin(2 pi t), t = (1 - x) / h, h = 64 ulp: the gradient
+        # points out of the box at x0 = 1 - h and at 1, but f(1) = f(x0) + 1.
+        # L-BFGS-B stays at x0; a snap to 1 would be a worse point that passes
+        # the bound test. The decision must not depend on the offset C.
+        h = 64.0 * np.spacing(1.0)
+
+        def make_evaluate(offset):
+            def evaluate(x, multipliers, penalty):
+                t = (1.0 - x[0]) / h
+                return alm.augmented_inequality_objective(
+                    offset - t + np.sin(2.0 * np.pi * t),
+                    np.array([(1.0 - 2.0 * np.pi * np.cos(2.0 * np.pi * t)) / h]),
+                    np.array([-1.0]), [np.zeros(1)], multipliers, penalty,
+                )
+            return evaluate
+
+        decisions = {}
+        for offset in (0.0, 1.0e6):
+            result = _solve_from(make_evaluate(offset), 1.0 - h, 0.0, 1.0, base_bounds=[(0.0, 1.0)])
+            decisions[offset] = (result.success, result.termination_reason, float(result.x[0]))
+        self.assertEqual(decisions[0.0], decisions[1.0e6], decisions)
+        self.assertNotEqual(decisions[0.0][2], 1.0, decisions)
+
+    def test_a_snap_is_kept_unless_the_total_rises_beyond_round_off(self):
+        eps = np.finfo(float).eps
+        for before, after, kept in (
+            (1.0, 0.5, True), (1.0, 1.0 + 4.0 * eps, True), (1.0, 1.0 + 1.0e-12, False),
+            (1.0e6, 1.0e6 + 1.0, False), (-1.0, 0.0, False),
+        ):
+            with self.subTest(before=before, after=after):
+                self.assertIs(
+                    alm_inner._snap_keeps_total({"total": before}, {"total": after}), kept
+                )
+
     def test_an_evaluator_stationarity_norm_is_kept(self):
         # Its own measure (not ||grad||): the evaluator accounts for the bounds.
         evaluation = {"grad": np.array([-1.0]), "stationarity_norm": 100.0}
