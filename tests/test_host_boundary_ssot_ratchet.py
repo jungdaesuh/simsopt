@@ -86,6 +86,9 @@ _NON_JAX_BINDING = "non-jax"
 # Re-pinned 2026-09-24 a fourth time, no new site: the SciPy result-shape reader
 # (``_scipy_termination``, host-side, no transfer) moved the same five
 # coordinates. Baseline: 89.
+# Re-pinned 2026-09-27, no new site: the ``bfgs-ondevice`` runner's two imports
+# in ``boozer_surface.py`` moved its two host-bridge guard coordinates.
+# Baseline: 89.
 _ALLOWED_OWNER_CALLS = frozenset(
     {
         "src/simsopt_jax/backend/dtypes.py::_device_put::device_put::308:19",
@@ -115,8 +118,8 @@ _ALLOWED_OWNER_CALLS = frozenset(
         "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize::device_get::819:25",
         "src/simsopt_jax/solve/minimize_runtime.py::run_optimistix_minimize::transfer_guard_host_to_device::301:9",
         "src/simsopt_jax/solve/serial.py::_write_bounded_objective_log::transfer_guard::455:9",
-        "src/simsopt_jax_adapters/geo/boozer_surface.py::_with_host_bridge_transfer_guard.wrapped::transfer_guard_device_to_host::208:13",
-        "src/simsopt_jax_adapters/geo/boozer_surface.py::_with_host_bridge_transfer_guard.wrapped::transfer_guard_host_to_device::209:17",
+        "src/simsopt_jax_adapters/geo/boozer_surface.py::_with_host_bridge_transfer_guard.wrapped::transfer_guard_device_to_host::210:13",
+        "src/simsopt_jax_adapters/geo/boozer_surface.py::_with_host_bridge_transfer_guard.wrapped::transfer_guard_host_to_device::211:17",
         "src/simsopt_jax_adapters/geo/nested_ls_newton_parity.py::_jax_cpu_ordered_value_and_grad::device_get::160:24",
         "src/simsopt_jax_adapters/geo/nested_ls_newton_parity.py::_jax_cpu_ordered_value_and_grad::device_get::162:12",
         "src/simsopt_jax_adapters/geo/nested_ls_reduced.py::_envelope_value_and_grad::device_get::946:25",

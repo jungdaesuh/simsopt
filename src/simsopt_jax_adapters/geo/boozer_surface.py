@@ -44,6 +44,7 @@ import jax
 import jax.numpy as jnp
 import jax.scipy.linalg
 import scipy.linalg
+from scipy.optimize import OptimizeResult
 
 from simsopt_jax.backend import (
     get_backend_config,
@@ -186,7 +187,7 @@ from simsopt_jax.geo.optimizers.optimizer import (
     reference_least_squares,
     reference_minimize,
     require_boozer_inner_backend_x64,
-    require_target_backend_x64,  # noqa: F401 - preserved for test monkeypatch compatibility
+    require_target_backend_x64,
     resolve_reference_least_squares_optimizer_method,
     resolve_target_least_squares_optimizer_method,
     target_least_squares,
@@ -195,6 +196,7 @@ from simsopt_jax.geo.optimizers.optimizer import (
 from simsopt_jax.geo.optimizers.private import (
     _minimize_bfgs_private,
     _minimize_lbfgs_private,
+    _private_bfgs_result_to_optimize_result,
 )
 
 _new_traceable_solve_state_token = make_state_token_factory()
@@ -4057,10 +4059,16 @@ def _nan_tree_like(tree):
     return jax.tree.map(lambda leaf: jnp.full_like(leaf, jnp.nan), tree)
 
 
+def _identity_tree(tree):
+    return tree
+
+
 def _solve_with_nan_on_failure(solution, success):
+    # Module-level branches: an eager ``lax.cond`` keys its trace cache on the
+    # branch callables, so a per-call lambda would re-trace every solve.
     return jax.lax.cond(
         jnp.asarray(success, dtype=jnp.bool_),
-        lambda value: value,
+        _identity_tree,
         _nan_tree_like,
         solution,
     )
@@ -4696,6 +4704,27 @@ class _AnalyticPenaltyBundle(NamedTuple):
         return runner
 
 
+@dataclass(frozen=True)
+class _DeviceBfgsRunner:
+    """One compiled on-device BFGS solve of the LS penalty; coils are a traced argument.
+
+    ``solve(x0, coil_set_spec)`` is a single ``jax.jit`` program (the private
+    ``lax.while_loop`` BFGS), compiled once per penalty configuration and
+    shape, so a new coil state reuses it.  :meth:`minimize` returns the
+    ``bfgs-ondevice`` ``OptimizeResult``; the solve reports no per-iteration
+    progress.
+    """
+
+    solve: Callable
+    maxiter: int
+    gtol: float
+    line_search_maxiter: int
+
+    def minimize(self, x0, coil_set_spec) -> OptimizeResult:
+        require_target_backend_x64("ondevice")
+        return _private_bfgs_result_to_optimize_result(self.solve(x0, coil_set_spec))
+
+
 def _levenberg_newton_step_jax(jacobian, residual, damping):
     """Damped Gauss-Newton step as an augmented least-squares solve (see the CPU twin)."""
     n = jacobian.shape[1]
@@ -4908,6 +4937,7 @@ class BoozerSurfaceJAX(Optimizable):
         self._traceable_penalty_objective_cache = {}
         self._traceable_penalty_residual_cache = {}
         self._kernel_bundle_cache = {}
+        self._device_bfgs_runner_cache = {}
         self._analytic_penalty_bundle_cache = {}
         self._coil_set_static_signature = None
 
@@ -5628,6 +5658,7 @@ class BoozerSurfaceJAX(Optimizable):
             and previous_coil_set_static_signature != coil_set_static_signature
         ):
             self._kernel_bundle_cache.clear()
+            self._device_bfgs_runner_cache.clear()
 
     def _emit_stage_callback(
         self,
@@ -6595,6 +6626,58 @@ class BoozerSurfaceJAX(Optimizable):
         )
         self._traceable_penalty_residual_cache[key] = residual_fn
         return residual_fn
+
+    def _get_device_bfgs_runner(
+        self,
+        optimize_G,
+        weight_inv_modB,
+        constraint_weight,
+        *,
+        maxiter,
+        gtol,
+        line_search_maxiter,
+    ) -> _DeviceBfgsRunner:
+        """The ``bfgs-ondevice`` solve over the coil-parametric traceable penalty.
+
+        Keyed on the traceable penalty configuration and the solver settings,
+        never on coil values: coils enter the compiled program as an argument.
+        """
+        resolved_constraint_weight = self._resolve_constraint_weight(constraint_weight)
+        key = (
+            self._traceable_penalty_cache_key(
+                optimize_G,
+                weight_inv_modB,
+                resolved_constraint_weight,
+            ),
+            int(maxiter),
+            float(gtol),
+            int(line_search_maxiter),
+        )
+        runner = self._device_bfgs_runner_cache.get(key)
+        if runner is None:
+            objective_fn = self._get_traceable_penalty_objective(
+                optimize_G,
+                weight_inv_modB,
+                resolved_constraint_weight,
+            )
+
+            def solve(x0, coil_set_spec):
+                return _minimize_bfgs_private(
+                    lambda x: objective_fn(x, coil_set_spec),
+                    x0,
+                    maxiter=int(maxiter),
+                    gtol=float(gtol),
+                    line_search_maxiter=int(line_search_maxiter),
+                )
+
+            runner = _DeviceBfgsRunner(
+                solve=jax.jit(solve),
+                maxiter=int(maxiter),
+                gtol=float(gtol),
+                line_search_maxiter=int(line_search_maxiter),
+            )
+            self._device_bfgs_runner_cache[key] = runner
+        return runner
 
     def _get_penalty_kernel_bundle(
         self,
@@ -8213,6 +8296,19 @@ class BoozerSurfaceJAX(Optimizable):
                     value_and_grad=True,
                     progress_callback=progress_callback,
                 )
+            elif method == "bfgs-ondevice":
+                # One compiled program for every coil state; the solve emits
+                # the run_code stage events but no per-iteration progress.
+                result = self._get_device_bfgs_runner(
+                    optimize_G,
+                    weight_inv_modB,
+                    constraint_weight,
+                    maxiter=maxiter,
+                    gtol=tol,
+                    line_search_maxiter=int(
+                        optimizer_options.get("line_search_maxiter", 10)
+                    ),
+                ).minimize(x0, self.coil_set_spec)
             else:
                 obj_fn = self._make_penalty_objective_with(
                     optimize_G,

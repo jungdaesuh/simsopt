@@ -99,6 +99,7 @@ from .boozersurface_jax_test_helpers import (
     _MockSurface,
     _opt,
     _patch_newton_polish_runner,
+    _patch_ondevice_bfgs_minimize,
     _PlumbingVolumeLabel,
     _simple_torus_geometry_values,
     _successful_minimize_result,
@@ -5167,6 +5168,7 @@ class TestBoozerSurfaceJAXClass:
             _bsj, "host_jax_minimize_value_and_grad", fake_minimize_runner
         )
         monkeypatch.setattr(_bsj, "target_minimize", fake_minimize_runner)
+        _patch_ondevice_bfgs_minimize(monkeypatch, fake_minimize_runner)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
         if optimizer_backend == "scipy":
@@ -5561,6 +5563,7 @@ class TestBoozerSurfaceJAXClass:
             }
 
         monkeypatch.setattr(_bsj, "target_minimize", fake_target_minimize)
+        _patch_ondevice_bfgs_minimize(monkeypatch, fake_target_minimize)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
         res = booz.run_code(iota=0.3, G=0.05)
@@ -5879,6 +5882,7 @@ class TestBoozerSurfaceJAXClass:
             _bsj, "target_least_squares", forbidden_target_least_squares
         )
         monkeypatch.setattr(_bsj, "target_minimize", fake_target_minimize)
+        _patch_ondevice_bfgs_minimize(monkeypatch, fake_target_minimize)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
         res = booz.run_code(iota=0.3, G=None)
@@ -7702,7 +7706,8 @@ class TestBoozerSurfaceJAXClass:
         ):
             del fun, tol, maxiter, options
             assert method == "bfgs-ondevice"
-            assert progress_callback is not None
+            # The compiled on-device BFGS reports stage events only.
+            assert progress_callback is None
             return _successful_minimize_result(x0)
 
         def fake_newton_polish_traceable(
@@ -7724,6 +7729,7 @@ class TestBoozerSurfaceJAXClass:
             return _successful_newton_polish_result(x0, nit=2)
 
         monkeypatch.setattr(_bsj, "target_minimize", fake_target_minimize)
+        _patch_ondevice_bfgs_minimize(monkeypatch, fake_target_minimize)
         monkeypatch.setattr(
             _bsj,
             "newton_polish_traceable",
@@ -7799,6 +7805,7 @@ class TestBoozerSurfaceJAXClass:
             return _successful_newton_polish_result(x0, nit=1)
 
         monkeypatch.setattr(_bsj, "target_minimize", fake_target_minimize)
+        _patch_ondevice_bfgs_minimize(monkeypatch, fake_target_minimize)
         monkeypatch.setattr(
             _bsj,
             "newton_polish_traceable",
@@ -7841,6 +7848,7 @@ class TestBoozerSurfaceJAXClass:
             raise AssertionError("newton polish should be skipped by policy")
 
         monkeypatch.setattr(_bsj, "target_minimize", fake_target_minimize)
+        _patch_ondevice_bfgs_minimize(monkeypatch, fake_target_minimize)
         monkeypatch.setattr(_bsj, "newton_polish_traceable", forbidden_newton_polish)
 
         res = booz.run_code(iota=0.3, G=0.05)
@@ -7889,6 +7897,7 @@ class TestBoozerSurfaceJAXClass:
             raise AssertionError("newton polish should be skipped by policy")
 
         monkeypatch.setattr(_bsj, "target_minimize", fake_target_minimize)
+        _patch_ondevice_bfgs_minimize(monkeypatch, fake_target_minimize)
         monkeypatch.setattr(_bsj, "newton_polish_traceable", forbidden_newton_polish)
 
         res = booz.run_code(iota=0.3, G=None)
@@ -7956,6 +7965,7 @@ class TestBoozerSurfaceJAXClass:
             raise AssertionError("newton polish should be skipped by policy")
 
         monkeypatch.setattr(_bsj, "target_minimize", fake_target_minimize)
+        _patch_ondevice_bfgs_minimize(monkeypatch, fake_target_minimize)
         monkeypatch.setattr(_bsj, "newton_polish_traceable", forbidden_newton_polish)
 
         res = booz.run_code(iota=0.3, G=0.05)

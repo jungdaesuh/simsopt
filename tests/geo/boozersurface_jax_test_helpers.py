@@ -800,6 +800,28 @@ def _patch_newton_polish_runner(monkeypatch, fake_newton_polish):
     )
 
 
+def _patch_ondevice_bfgs_minimize(monkeypatch, fake_minimize):
+    """Route the ``bfgs-ondevice`` runner through a ``target_minimize``-shaped fake.
+
+    The runner reports no per-iteration progress, so the fake receives
+    ``progress_callback=None`` and no objective (``fun=None``).
+    """
+
+    def minimize(self, x0, coil_set_spec):
+        del coil_set_spec
+        return fake_minimize(
+            None,
+            x0,
+            method="bfgs-ondevice",
+            tol=self.gtol,
+            maxiter=self.maxiter,
+            options={"line_search_maxiter": self.line_search_maxiter},
+            progress_callback=None,
+        )
+
+    monkeypatch.setattr(_bsj._DeviceBfgsRunner, "minimize", minimize)
+
+
 class _MockCurrent:
     """Minimal mock for coil current."""
 

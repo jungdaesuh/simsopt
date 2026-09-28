@@ -656,8 +656,9 @@ def ncsx_banana_run_code(
 ) -> dict[str, object]:
     """Banana inner with coil geometry as kernel arguments.
 
-    Public ondevice ``BoozerSurfaceJAX.run_code`` closure-converts the
-    penalty objective and hashes coil bytes into the BFGS compile key.
+    Public ondevice ``BoozerSurfaceJAX.run_code`` compiles ``bfgs-ondevice``
+    once with the coils as an argument; only ``lbfgs-ondevice`` still
+    closure-converts the penalty and hashes coil bytes into its compile key.
     Land uses host BFGS then dense-LU Newton. Outer evals may pass
     ``polish_only=True`` and an explicit ``newton_maxiter_cap``; those
     are harness knobs, not BoozerLS defaults. ``derivative_assembly``

@@ -1347,6 +1347,32 @@ def _hager_higham_inverse_1_norm_estimate(
     return estimate
 
 
+@partial(jax.jit, static_argnames=("dtype", "transpose_operator"))
+def _inverse_1_norm_estimate_from_factors(lu, piv, *, dtype, transpose_operator):
+    """Hager-Higham ``||A^-1||_1`` (``||A^-T||_1``) from packed LU factors of ``A``.
+
+    Returns ``(estimate, solve_count)`` on the factors' device.  Jitted so the
+    estimate's loop, which closes over solves built per call, compiles once
+    per shape instead of re-tracing on every call.
+    """
+    forward_trans, transpose_trans = (1, 0) if transpose_operator else (0, 1)
+
+    def solve(rhs):
+        return jsp_linalg.lu_solve((lu, piv), rhs, trans=forward_trans)
+
+    def transpose_solve(rhs):
+        return jsp_linalg.lu_solve((lu, piv), rhs, trans=transpose_trans)
+
+    return _hager_higham_inverse_1_norm_estimate(
+        solve,
+        transpose_solve,
+        size=int(lu.shape[0]),
+        dtype=dtype,
+        placement_reference=lu,
+        return_solve_count=True,
+    )
+
+
 def _dense_matrix_condition_estimate_with_telemetry(
     matrix,
     *,
@@ -1356,7 +1382,6 @@ def _dense_matrix_condition_estimate_with_telemetry(
     """Estimate ``cond_1(J)`` or ``cond_1(J^T)`` from factors of ``J``."""
 
     matrix = jnp.asarray(matrix)
-    size = int(matrix.shape[0])
     factorization_count = _device_int32(0, like=matrix)
 
     if lu_piv is None:
@@ -1365,30 +1390,14 @@ def _dense_matrix_condition_estimate_with_telemetry(
     lu, piv = lu_piv
 
     if transpose_operator:
-
-        def solve(rhs):
-            return jsp_linalg.lu_solve((lu, piv), rhs, trans=1)
-
-        def transpose_solve(rhs):
-            return jsp_linalg.lu_solve((lu, piv), rhs, trans=0)
-
         matrix_norm = jnp.max(jnp.sum(jnp.abs(matrix), axis=1))
     else:
-
-        def solve(rhs):
-            return jsp_linalg.lu_solve((lu, piv), rhs, trans=0)
-
-        def transpose_solve(rhs):
-            return jsp_linalg.lu_solve((lu, piv), rhs, trans=1)
-
         matrix_norm = _matrix_one_norm(matrix)
-    inverse_norm, solve_count = _hager_higham_inverse_1_norm_estimate(
-        solve,
-        transpose_solve,
-        size=size,
-        dtype=matrix.dtype,
-        placement_reference=lu,
-        return_solve_count=True,
+    inverse_norm, solve_count = _inverse_1_norm_estimate_from_factors(
+        lu,
+        piv,
+        dtype=np.dtype(matrix.dtype),
+        transpose_operator=bool(transpose_operator),
     )
     inverse_norm = _place_like_concrete_scalar(inverse_norm, matrix_norm)
     return matrix_norm * inverse_norm, factorization_count, solve_count

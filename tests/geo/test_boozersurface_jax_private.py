@@ -4266,11 +4266,14 @@ class TestBoozerSurfaceJAXClassPrivate:
         assert np.isfinite(res["fun"])
 
     @PRIVATE_OPTIMIZER_RUNTIME
-    def test_run_code_ondevice_emits_sparse_progress_updates(self, monkeypatch):
-        """On-device BFGS progress should surface iteration/fun/grad snapshots sparsely."""
+    def test_run_code_ondevice_bfgs_reports_stage_events_without_progress(
+        self, monkeypatch
+    ):
+        """The compiled on-device BFGS reports its stage, not per-iteration snapshots."""
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
         booz.options["limited_memory"] = False
+        booz.options["bfgs_maxiter"] = 25
 
         observed = []
 
@@ -4279,41 +4282,24 @@ class TestBoozerSurfaceJAXClassPrivate:
 
         booz.options["stage_callback"] = record_stage
 
-        def fake_target_minimize(
-            fun,
-            x0,
-            *,
-            method,
-            tol,
-            maxiter,
-            options,
-            progress_callback=None,
-        ):
-            del fun, tol, maxiter, options
-            assert method == "bfgs-ondevice"
-            assert progress_callback is not None
-            _emit_sparse_progress(progress_callback)
-            return _successful_minimize_result(x0, nit=25, nfev=30, njev=30)
-
         def fake_newton_polish(
             _objective_fn, x0, *, maxiter, tol, stab, progress_callback=None
         ):
             del maxiter, tol, stab, progress_callback
             return _successful_newton_polish_result(x0)
 
-        monkeypatch.setattr(_bsj, "target_minimize", fake_target_minimize)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
         res = booz.run_code(iota=0.3, G=0.05)
 
-        progress_events = [
-            payload for label, payload in observed if label == "boozer_ls_progress"
-        ]
+        labels = [label for label, _payload in observed]
+        after_bfgs = dict(observed)["after_boozer_lbfgs"]
         assert res is not None
-        assert res["success"] is True
         assert res["optimizer_method"] == "bfgs-ondevice"
-        assert [int(payload["iteration"]) for payload in progress_events] == [1, 25]
-        assert all(payload["method"] == "bfgs-ondevice" for payload in progress_events)
+        assert "boozer_ls_progress" not in labels
+        assert labels.index("before_boozer_lbfgs") < labels.index("after_boozer_lbfgs")
+        assert after_bfgs["method"] == "bfgs-ondevice"
+        assert int(after_bfgs["iterations"]) == res["pre_newton"]["iter"] > 0
 
     @PRIVATE_OPTIMIZER_RUNTIME
     def test_run_code_ondevice_limited_memory_emits_sparse_progress_updates(
