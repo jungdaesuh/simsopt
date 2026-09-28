@@ -33,7 +33,8 @@ Each entry: the symptom, the cause, the fix.
    `hard_dual_update_values` come together (a missing one raises `KeyError`)
    with the shape of `constraint_values`. Expect `signal_mismatch_*` reasons
    near the boundary, where the conservative smooth value reads active while
-   the hard one is feasible: smooth rows alone (no quartet) are the default.
+   the hard one is feasible by more than the feasibility gate (channels that
+   agree do not mismatch): smooth rows alone (no quartet) are the default.
 7. **Cyclic metadata is rejected.** An evaluator dict, or `ALMPhysics`
    extras, that contains itself (a dict holding itself, a list inside itself)
    raises `ValueError` naming the path. A subtree shared by two keys is fine.
@@ -43,7 +44,8 @@ Each entry: the symptom, the cause, the fix.
    with it None) raises `KeyError`, even when no row is active; one with the
    wrong number of rows or shapes raises `ValueError`. A
    `search_step_success` that is not a `bool` or `numpy.bool_` (0, None, a
-   string) raises `ValueError`. Build the dict with `ALMPhysics.evaluation`
+   string) raises `ValueError`, and so does a negative
+   `constraint_activity_tolerances` entry. Build the dict with `ALMPhysics.evaluation`
    or `augmented_inequality_objective`, as the templates do, and pass any
    step flag as `bool(...)`.
 9. **Non-finite values.** A NaN or inf at a trial point is rejected (the
@@ -63,7 +65,9 @@ Each entry: the symptom, the cause, the fix.
     multipliers an inactive row (`max(0, multiplier + penalty * g) = 0`)
     drops out of L and its gradient goes unchecked; `gradient_check.py` tests
     f and each row separately.
-13. **Taylor steps and smoothing.** The smooth rows select points near the
+13. **Taylor steps and smoothing.** A kernel's smoothing temperature must be
+    finite and > 0 (0 raises `ValueError`; the exact value is the kernel's
+    third item). The smooth rows select points near the
     extremum; a step that changes the selection breaks the ratio test, so
     only steps far below the smoothing temperature see the gradient.
     `gradient_check.py` sweeps relative steps from 1 down to 1e-10; when

@@ -53,7 +53,8 @@ ignored by `alm_problem_physics`. Rows:
   (curves, minimum distance in m, smoothing temperature in m). The smooth
   value is never looser than the exact one (third item), so smooth-feasible
   implies exactly feasible; the temperature is in the constrained quantity's
-  units.
+  units and must be finite and > 0 (`ValueError` otherwise; 0 is rejected:
+  use the third item for the exact value).
 
 Divide every row by a positive scale in its units (its bound, or a typical
 size) so all rows are O(1): the penalty is shared, and the tolerances are
@@ -71,7 +72,10 @@ residual). The solver checks every dict where it enters (outer iterate and
 each inner trial): a required key absent or None raises `KeyError`
 (`constraint_grads` included, even with every row inactive); `grad` and each
 of the one-per-row `constraint_grads` must have x's shape, and
-`constraint_values` one entry per row (`ValueError`). The optional
+`constraint_values` one entry per row (`ValueError`), and the optional
+`constraint_activity_tolerances` (activity bands) nonnegative (`ValueError`).
+Bands route rows and feed diagnostics only; the convergence test uses each
+row's actual slack ([termination.md](termination.md)). The optional
 `search_step_success` (False rejects the trial step; absent means accepted)
 must be a `bool` or `numpy.bool_`: 0, None or any other type raises
 `ValueError`. A non-finite value at a trial point rejects the trial (the line
@@ -99,7 +103,10 @@ drive the multiplier update, return the four keys
 `surrogate_signed_constraint_values`, `hard_dual_update_values`, all or none
 (a missing member raises `KeyError`). The augmented Lagrangian uses the
 surrogate (smooth) values; a disagreement between the channels blocks
-`success` and can end in `signal_mismatch_*` reasons. As `ALMPhysics` extras
+`success` and can end in `signal_mismatch_*` reasons. At an active boundary
+a disagreement means a row with a live surrogate shift whose surrogate
+value is more than the feasibility gate away from its hard value; identical
+channels never disagree, so a hybrid run can converge with rows active. As `ALMPhysics` extras
 (the Stage-2 template's `HYBRID_QUARTET = True` path):
 
 ```python

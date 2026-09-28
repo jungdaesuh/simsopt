@@ -373,7 +373,8 @@ ignored by `alm_problem_physics`. Rows:
   (curves, minimum distance in m, smoothing temperature in m). The smooth
   value is never looser than the exact one (third item), so smooth-feasible
   implies exactly feasible; the temperature is in the constrained quantity's
-  units.
+  units and must be finite and > 0 (`ValueError` otherwise; 0 is rejected:
+  use the third item for the exact value).
 
 Divide every row by a positive scale in its units (its bound, or a typical
 size) so all rows are O(1): the penalty is shared, and the tolerances are
@@ -391,7 +392,10 @@ residual). The solver checks every dict where it enters (outer iterate and
 each inner trial): a required key absent or None raises `KeyError`
 (`constraint_grads` included, even with every row inactive); `grad` and each
 of the one-per-row `constraint_grads` must have x's shape, and
-`constraint_values` one entry per row (`ValueError`). The optional
+`constraint_values` one entry per row (`ValueError`), and the optional
+`constraint_activity_tolerances` (activity bands) nonnegative (`ValueError`).
+Bands route rows and feed diagnostics only; the convergence test uses each
+row's actual slack ([Termination reasons](#termination-reasons)). The optional
 `search_step_success` (False rejects the trial step; absent means accepted)
 must be a `bool` or `numpy.bool_`: 0, None or any other type raises
 `ValueError`. A non-finite value at a trial point rejects the trial (the line
@@ -419,7 +423,10 @@ drive the multiplier update, return the four keys
 `surrogate_signed_constraint_values`, `hard_dual_update_values`, all or none
 (a missing member raises `KeyError`). The augmented Lagrangian uses the
 surrogate (smooth) values; a disagreement between the channels blocks
-`success` and can end in `signal_mismatch_*` reasons. As `ALMPhysics` extras
+`success` and can end in `signal_mismatch_*` reasons. At an active boundary
+a disagreement means a row with a live surrogate shift whose surrogate
+value is more than the feasibility gate away from its hard value; identical
+channels never disagree, so a hybrid run can converge with rows active. As `ALMPhysics` extras
 (the Stage-2 template's `HYBRID_QUARTET = True` path):
 
 ```python
@@ -694,8 +701,8 @@ tolerances.
 | `penalty_init` | 1.0 | Initial penalty, shared by every row. | Rows stay violated while f improves (raise to 10 to 100); the first subproblem overshoots into infeasibility of a stateful solve (lower). |
 | `penalty_scale` | 10.0 | Factor of each penalty raise (> 1). | Raises make the iterate jump and a warm-started inner solve fails (use 2 to 5). |
 | `penalty_max` | 1e8 | Largest penalty; a raise past it ends the run (`penalty_cap_reached`). None removes the cap. | Rarely: a run that needs a larger penalty usually has badly scaled or conflicting rows. |
-| `feasibility_tol` | 1e-6 | Largest row violation that counts as feasible, in the rows' units. | Scaled rows: 1e-4 is a violation of 0.01% of a bound; anything below the accuracy of the row's physics is unreachable. |
-| `stationarity_tol` | 1e-6 | Largest augmented-gradient norm that counts as stationary, in f's units per dof. | Set it to what f's gradient accuracy allows (a noisy or discretized f cannot reach 1e-6); scale f first. |
+| `feasibility_tol` | 1e-6 | Largest row violation that counts as feasible, in the rows' units. Also the distance in x beyond which a row is off its boundary for the complementarity test (slack > `feasibility_tol` x ‖∇g_i‖). | Scaled rows: 1e-4 is a violation of 0.01% of a bound; anything below the accuracy of the row's physics is unreachable. |
+| `stationarity_tol` | 1e-6 | Largest augmented-gradient norm that counts as stationary, in f's units per dof; also the bound on ‖Σ λ⁺_i ∇g_i‖ over rows off their boundary (complementarity). | Set it to what f's gradient accuracy allows (a noisy or discretized f cannot reach 1e-6); scale f first. |
 | `trust_radius_init` | None | Initial trust radius of each inner L-BFGS-B attempt: a box of half-width radius x max(1, abs(x_i)) around the iterate. None: no box. | A stateful inner solve (Newton warm start) fails on long trial steps: a box keeps the trials near the accepted point. |
 | `trust_radius_min` | 1e-4 | Smallest radius; a rejected attempt at it keeps the start iterate. | Rarely. |
 | `trust_radius_shrink` | 0.5 | Radius factor after a rejected attempt, in (0, 1). | Rarely. |
@@ -756,16 +763,16 @@ templates does).
 
 | Reason | Success | Meaning | Action |
 |---|---|---|---|
-| `converged` | yes | A KKT point at the shifted multipliers λ⁺ = max(0, λ + ρg): max violation <= `feasibility_tol` (solver and hard channels), augmented-gradient norm <= `stationarity_tol`, and complementarity max_i min(λ⁺_i, max(0, -g_i - a_i)) <= `feasibility_tol` (a_i the row's activity band: no multiplier left on a row with slack); no hybrid signal mismatch, no binding multiplier cap. | Accept. Check the physics at `result.x` (the runner's `finish` summary). |
+| `converged` | yes | A KKT point at the shifted multipliers λ⁺ = max(0, λ + ρg): max violation <= `feasibility_tol` (solver and hard channels); augmented-gradient norm <= `stationarity_tol`; and complementarity: the rows off their boundary (slack s_i = max(0, -g_i) > `feasibility_tol` x ‖∇g_i‖, a distance in x) contribute R = ‖Σ_off λ⁺_i ∇g_i‖ <= `stationarity_tol`. The test uses the actual slack (activity bands only route rows and feed diagnostics) and does not change when a row is rescaled (g -> Mg, λ -> λ/M, ρ -> ρ/M²). No hybrid signal mismatch, no binding multiplier cap. | Accept. Check the physics at `result.x` (the runner's `finish` summary). |
 | `constraints_inactive_converged` | yes | Hybrid quartet only: every hard row is strictly inactive (no surrogate activity, zero shift) and the same KKT test holds. | Accept. The constraints did not bind; check whether the thresholds are the ones you meant. |
 
 ### Stopped early
 
 | Reason | Success | Meaning | Action |
 |---|---|---|---|
-| `plateau_stall` | no | Two consecutive hard-feasible subproblems made no meaningful progress while the multiplier-update test stayed unmet. This includes a feasible, stationary point that fails complementarity (a positive λ⁺ on a row with slack, so a multiplier on an inactive row cancels f's gradient), which is not a KKT point and is no longer reported `converged`. | The iterate is feasible: usable, but not certified optimal. Compare `result.multipliers` with `result.constraint_values`: a positive multiplier on a row well below its bound is the complementarity failure; rerun from `result.x` with `initial_multipliers` zero on those rows and `initial_penalty=result.penalty`. Otherwise, for a tighter optimum, run `gradient_check.py` (a wrong or noisy gradient stalls L-BFGS-B), loosen `stationarity_tol` to what f's accuracy allows, or raise `inner_options["maxiter"]`. |
+| `plateau_stall` | no | Two consecutive hard-feasible subproblems made no meaningful progress while the multiplier-update test stayed unmet. This includes a feasible, stationary point that fails complementarity: rows off their boundary (slack > `feasibility_tol` x ‖∇g_i‖) whose multipliers still contribute more than `stationarity_tol` to the gradient (a multiplier on an inactive row cancels f's gradient). That is not a KKT point and is no longer reported `converged`. | The iterate is feasible: usable, but not certified optimal. Compare `result.multipliers` with `result.constraint_values`: a positive multiplier on a row clearly below its bound is the complementarity failure; rerun from `result.x` with `initial_multipliers` zero on those rows and `initial_penalty=result.penalty`. Widening an activity band does not help (bands are not part of the test). Otherwise, for a tighter optimum, run `gradient_check.py` (a wrong or noisy gradient stalls L-BFGS-B), loosen `stationarity_tol` to what f's accuracy allows, or raise `inner_options["maxiter"]`. |
 | `constraints_inactive_stall` | no | Hybrid quartet only: the hard rows are inactive but stationarity stopped improving. | Feasible: usually usable. Same remedies as `plateau_stall`. |
-| `signal_mismatch_stall` | no | Hybrid quartet only: hard-feasible while the smooth (surrogate) rows read active, repeated without corrective progress and with a zero surrogate shift. | Lower the smoothing temperature (surrogate closer to the hard value), or set `continue_on_signal_mismatch=True`, or drop the quartet (smooth rows only). |
+| `signal_mismatch_stall` | no | Hybrid quartet only: hard-feasible while the smooth (surrogate) rows read active, repeated without corrective progress and with a zero surrogate shift. At an active boundary a mismatch needs real disagreement: a row with a live surrogate shift whose surrogate value is more than the feasibility gate away from its hard value (identical channels never mismatch). | Lower the smoothing temperature (surrogate closer to the hard value), or set `continue_on_signal_mismatch=True`, or drop the quartet (smooth rows only). |
 | `process_budget_exhausted` | no | Your `accepted_callback` raised `ALMProcessBudgetExhausted` (a budget you enforce, e.g. wall clock). | Resume from the last checkpoint: `run_alm.py --resume <dir>/outer_NNN.pkl`. |
 | `penalty_cap_reached` | no | The next penalty raise would exceed `penalty_max`; no better feasible iterate to restore. | Usually an infeasible or badly scaled problem: run `sign_check.py`, check the scale warnings, relax thresholds that may conflict. Raise `penalty_max` only when the rows are O(1). |
 | `penalty_cap_reached_restored_best_feasible` | no | As `penalty_cap_reached`, and `result.x` is the restored best hard-feasible iterate. | `result.x` is feasible and usable; for a better objective treat it as `penalty_cap_reached`. |
@@ -848,7 +855,8 @@ Each entry: the symptom, the cause, the fix.
    `hard_dual_update_values` come together (a missing one raises `KeyError`)
    with the shape of `constraint_values`. Expect `signal_mismatch_*` reasons
    near the boundary, where the conservative smooth value reads active while
-   the hard one is feasible: smooth rows alone (no quartet) are the default.
+   the hard one is feasible by more than the feasibility gate (channels that
+   agree do not mismatch): smooth rows alone (no quartet) are the default.
 7. **Cyclic metadata is rejected.** An evaluator dict, or `ALMPhysics`
    extras, that contains itself (a dict holding itself, a list inside itself)
    raises `ValueError` naming the path. A subtree shared by two keys is fine.
@@ -858,7 +866,8 @@ Each entry: the symptom, the cause, the fix.
    with it None) raises `KeyError`, even when no row is active; one with the
    wrong number of rows or shapes raises `ValueError`. A
    `search_step_success` that is not a `bool` or `numpy.bool_` (0, None, a
-   string) raises `ValueError`. Build the dict with `ALMPhysics.evaluation`
+   string) raises `ValueError`, and so does a negative
+   `constraint_activity_tolerances` entry. Build the dict with `ALMPhysics.evaluation`
    or `augmented_inequality_objective`, as the templates do, and pass any
    step flag as `bool(...)`.
 9. **Non-finite values.** A NaN or inf at a trial point is rejected (the
@@ -878,7 +887,9 @@ Each entry: the symptom, the cause, the fix.
     multipliers an inactive row (`max(0, multiplier + penalty * g) = 0`)
     drops out of L and its gradient goes unchecked; `gradient_check.py` tests
     f and each row separately.
-13. **Taylor steps and smoothing.** The smooth rows select points near the
+13. **Taylor steps and smoothing.** A kernel's smoothing temperature must be
+    finite and > 0 (0 raises `ValueError`; the exact value is the kernel's
+    third item). The smooth rows select points near the
     extremum; a step that changes the selection breaks the ratio test, so
     only steps far below the smoothing temperature see the gradient.
     `gradient_check.py` sweeps relative steps from 1 down to 1e-10; when
