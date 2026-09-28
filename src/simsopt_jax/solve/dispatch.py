@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import math
 import time
 from collections import deque
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from threading import Lock
 from typing import Callable, TypeAlias, TypeVar, cast
 
@@ -30,11 +31,14 @@ from .contracts import (
     Driver,
     HessianInverse,
     InvalidStepEvent,
+    LbfgsbRestartEvent,
+    LbfgsbRestartReason,
     OptimizerCallbackEvent,
     OptimizerResult,
     OptimizerStateTraceEntry,
     OptionsBase,
     ResidualFn,
+    SCIPY_LBFGSB_UNRESOLVED_STALL_STATUS,
     ScipyBFGSCallbackEvent,
     ScipyLBFGSBCallbackEvent,
     SimsoptAdamCallbackEvent,
@@ -264,6 +268,7 @@ def _public_result(
         optimizer_state_trace=_optimizer_state_trace(result),
         optimistix_result=getattr(result, "optimistix_result", None),
         optimistix_result_message=getattr(result, "optimistix_result_message", None),
+        restart_log=tuple(getattr(result, "restart_log", ())),
     )
 
 
@@ -307,6 +312,316 @@ def _scipy_lm_result(
         residual=residual,
         residual_jacobian=jacobian,
         hessian=hessian,
+    )
+
+
+# The two SciPy-internal facts ``restart_after_nonwolfe_stop`` relies on (scipy
+# 1.17.1, git 527eb7fd).  L-BFGS-B's line search ``lnsrlb`` hands dcsrch
+# ``gtol = 0.9`` (``scipy/optimize/__lbfgsb.c:2578``), so a step dcsrch accepts
+# on convergence satisfies ``|g_new.d| <= 0.9 |g_old.d|``; ``lnsrlb`` accepts a
+# dcsrch WARNING exactly like convergence (``:2655-2679``), and such a step may
+# fail it.
+_LBFGSB_CURVATURE_GTOL = 0.9
+# ``mainlb``'s relative-reduction test ``(fold - f) <= factr*epsmch*max(|fold|,
+# |f|, 1)`` (``__lbfgsb.c:975-984``, CONVERGENCE / CONV_F), as
+# ``_lbfgsb_py.py:487-505`` reports it: ``status`` 0 and this ``message``.
+_LBFGSB_RELATIVE_REDUCTION_STOP = (
+    0,
+    "CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH",
+)
+# A trial of one search is ``x = stp * d + t`` rounded (at most two roundings,
+# then a clamp that only undoes rounding past a bound, ``__lbfgsb.c:2662-2675``),
+# so its offset from ``t`` is off the ray through the first trial by at most a
+# few ``eps`` times the magnitudes involved; this factor is that "few", with room.
+_RAY_ROUNDING_FACTOR = 8.0
+
+
+def _lbfgsb_scipy_options(
+    options: ScipyLBFGSBOptions, *, maxiter: int, maxfun: int
+) -> dict[str, object]:
+    return {
+        "maxiter": maxiter,
+        "maxfun": maxfun,
+        "gtol": options.gtol,
+        "ftol": options.ftol,
+        "maxcor": options.maxcor,
+        "maxls": options.maxls,
+    }
+
+
+def _owned_snapshot(array) -> np.ndarray:
+    """A read-only float64 copy no caller buffer can alias."""
+    snapshot = np.array(array, dtype=float, copy=True)
+    snapshot.setflags(write=False)
+    return snapshot
+
+
+@dataclass(frozen=True)
+class _HostEvaluation:
+    """One objective evaluation handed to SciPy: owned, read-only host arrays."""
+
+    x: np.ndarray
+    fun: float
+    gradient: np.ndarray
+
+
+@dataclass(frozen=True)
+class _LineSearch:
+    """One L-BFGS-B iteration: its start and every trial it evaluated, in order.
+
+    The last trial is the accepted point.  A single search's trials all lie on
+    ``base.x + stp * d``, so ``first_trial.x - base.x`` is ``d`` up to the
+    positive first ``stp``, a factor the curvature test cancels.  An iteration
+    can hold two searches -- L-BFGS-B retries a failed one from the same base
+    along a new direction before the iteration ends (``__lbfgsb.c:918-951``)
+    -- and then the first trial's ray is not the accepted search's:
+    ``on_one_ray`` is False unless every trial lies on the first trial's ray
+    to within rounding, and nothing else here may be read when it is False.
+    """
+
+    base: _HostEvaluation
+    trials: tuple[_HostEvaluation, ...]
+
+    @property
+    def first_trial(self) -> _HostEvaluation:
+        return self.trials[0]
+
+    @property
+    def accepted(self) -> _HostEvaluation:
+        return self.trials[-1]
+
+    @property
+    def on_one_ray(self) -> bool:
+        eps = float(np.finfo(float).eps)
+        base = self.base.x
+        direction = self.first_trial.x - base
+        direction_rounding = np.abs(self.first_trial.x) + np.abs(base)
+        for trial in self.trials[1:]:
+            offset = trial.x - base
+            # Trials sit at ``stp >= 0``; a negative projection is off the ray.
+            scale = max(float(offset @ direction) / float(direction @ direction), 0.0)
+            rounding = (
+                _RAY_ROUNDING_FACTOR
+                * eps
+                * np.linalg.norm(
+                    np.abs(trial.x)
+                    + np.abs(base)
+                    + scale * (np.abs(direction) + direction_rounding)
+                )
+            )
+            if np.linalg.norm(offset - scale * direction) > rounding:
+                return False
+        return True
+
+    def _slopes(self) -> tuple[float, float]:
+        """``(g_base.d, g_accepted.d)``."""
+        direction = self.first_trial.x - self.base.x
+        return (
+            float(self.base.gradient @ direction),
+            float(self.accepted.gradient @ direction),
+        )
+
+    @property
+    def curvature_ratio(self) -> float:
+        base_slope, accepted_slope = self._slopes()
+        return accepted_slope / abs(base_slope)
+
+    @property
+    def fails_curvature_condition(self) -> bool:
+        base_slope, accepted_slope = self._slopes()
+        return abs(accepted_slope) > _LBFGSB_CURVATURE_GTOL * abs(base_slope)
+
+    @property
+    def accepted_step_fraction(self) -> float:
+        return float(
+            np.linalg.norm(self.accepted.x - self.base.x)
+            / np.linalg.norm(self.first_trial.x - self.base.x)
+        )
+
+    @property
+    def first_trial_fun_ratio(self) -> float:
+        base_fun, trial_fun = self.base.fun, self.first_trial.fun
+        if base_fun != 0.0:
+            return trial_fun / base_fun
+        return 1.0 if trial_fun == 0.0 else math.copysign(math.inf, trial_fun)
+
+
+class _LbfgsbCallRecorder:
+    """The evaluations one SciPy L-BFGS-B call needs kept to judge its last search.
+
+    ``fun`` is the objective handed to SciPy; it keeps owned read-only
+    snapshots, so a callable that reuses one output buffer cannot rewrite the
+    record.  It answers the first request at ``served_start.x`` (bitwise) from
+    ``served_start`` instead of evaluating, so a restarted call starts from the
+    logged value and gradient; ``served_evaluations`` is what SciPy's
+    ``nfev``/``njev`` count but nothing evaluated.  ``end_iteration`` is
+    SciPy's per-iteration callback and then calls ``callback``.  Only the
+    running iteration's evaluations are kept.
+    """
+
+    def __init__(
+        self,
+        scipy_fun: Callable[[np.ndarray], tuple[float, np.ndarray]],
+        served_start: _HostEvaluation | None,
+        callback: Callable[[np.ndarray], None] | None,
+    ) -> None:
+        self._scipy_fun = scipy_fun
+        self._served_start = served_start
+        self._callback = callback
+        self._iteration_evaluations: list[_HostEvaluation] = []
+        self.served_evaluations = 0
+        self.last_search: _LineSearch | None = None
+
+    def fun(self, x_host: np.ndarray) -> tuple[float, np.ndarray]:
+        served = self._served_start
+        if served is not None and np.array_equal(x_host, served.x):
+            self._served_start = None
+            self.served_evaluations += 1
+            evaluation = served
+        else:
+            value, gradient = self._scipy_fun(x_host)
+            evaluation = _HostEvaluation(
+                x=_owned_snapshot(x_host),
+                fun=value,
+                gradient=_owned_snapshot(gradient),
+            )
+        self._iteration_evaluations.append(evaluation)
+        return evaluation.fun, evaluation.gradient
+
+    def end_iteration(self, x_host: np.ndarray) -> None:
+        evaluations = self._iteration_evaluations
+        # A search whose every trial rounded to its base bitwise never reached
+        # the objective (SciPy's memo served them all): there is no direction
+        # to judge it by, and ``last_search`` is None.
+        self.last_search = (
+            _LineSearch(base=evaluations[0], trials=tuple(evaluations[1:]))
+            if len(evaluations) > 1
+            else None
+        )
+        self._iteration_evaluations = [evaluations[-1]]
+        if self._callback is not None:
+            self._callback(x_host)
+
+
+def _projected_grad_norm_inf(
+    evaluation: _HostEvaluation, bounds: list[tuple[float, float]] | None
+) -> float:
+    """SciPy L-BFGS-B's ``projgr`` (``__lbfgsb.c``): the stopping test's norm."""
+    gradient = evaluation.gradient
+    if bounds is None:
+        return float(np.max(np.abs(gradient)))
+    lower, upper = (np.asarray(side, dtype=float) for side in zip(*bounds))
+    projected = np.where(
+        gradient < 0.0,
+        np.maximum(evaluation.x - upper, gradient),
+        np.minimum(evaluation.x - lower, gradient),
+    )
+    return float(np.max(np.abs(projected)))
+
+
+def _minimize_lbfgsb_with_restarts(
+    scipy_fun: Callable[[np.ndarray], tuple[float, np.ndarray]],
+    x_start: np.ndarray,
+    *,
+    options: ScipyLBFGSBOptions,
+    bounds: list[tuple[float, float]] | None,
+    callback: Callable[[np.ndarray], None] | None,
+) -> tuple[OptimizeResult, tuple[LbfgsbRestartEvent, ...]]:
+    """SciPy L-BFGS-B under ``restart_after_nonwolfe_stop``, as one or more SciPy calls.
+
+    ``nit``/``nfev``/``njev`` are summed over the calls and count true
+    evaluations.  Each call gets exactly what is left of ``maxiter`` and
+    ``maxfun``; SciPy tests both only at iteration ends, so like one call the
+    chain can end past ``maxfun`` by at most its last iteration's evaluations.
+    ``x``, ``fun`` and ``jac`` are the last call's; so are ``status``,
+    ``success`` and ``message`` unless the chain ends on a recognized stall it
+    could not resume, which is ``SCIPY_LBFGSB_UNRESOLVED_STALL_STATUS``,
+    unsuccessful, with that call's own termination kept in the message and in
+    the last ``restart_log`` event.
+    """
+    restart_log: list[LbfgsbRestartEvent] = []
+    nit = nfev = njev = 0
+    x = x_start
+    served_start: _HostEvaluation | None = None
+    while True:
+        recorder = _LbfgsbCallRecorder(scipy_fun, served_start, callback)
+        call = scipy_minimize(
+            recorder.fun,
+            x,
+            jac=True,
+            method="L-BFGS-B",
+            bounds=bounds,
+            options=_lbfgsb_scipy_options(
+                options, maxiter=options.maxiter - nit, maxfun=options.maxfun - nfev
+            ),
+            callback=recorder.end_iteration,
+        )
+        nit += int(call.nit)
+        nfev += int(call.nfev) - recorder.served_evaluations
+        njev += int(call.njev) - recorder.served_evaluations
+        search = recorder.last_search
+        if (
+            search is None
+            or (int(call.status), str(call.message)) != _LBFGSB_RELATIVE_REDUCTION_STOP
+        ):
+            break
+        classified = search.on_one_ray
+        if not classified:
+            reason = LbfgsbRestartReason.UNCLASSIFIED_SEARCH
+        elif not search.fails_curvature_condition:
+            break
+        # A call's first iteration already ran with an empty memory, which is
+        # where L-BFGS-B itself aborts instead of restarting (``col == 0``,
+        # ``__lbfgsb.c:924-938``).
+        elif int(call.nit) == 1:
+            reason = LbfgsbRestartReason.FRESH_MEMORY_STALL
+        # SciPy completes at least one iteration whatever its budget says.
+        elif nit >= options.maxiter or nfev >= options.maxfun:
+            reason = LbfgsbRestartReason.BUDGET_EXHAUSTED
+        else:
+            reason = LbfgsbRestartReason.RESTARTED
+        restart_log.append(
+            LbfgsbRestartEvent(
+                iteration=nit,
+                reason=reason,
+                curvature_ratio=search.curvature_ratio if classified else math.nan,
+                fun=search.accepted.fun,
+                projected_grad_norm_inf=_projected_grad_norm_inf(
+                    search.accepted, bounds
+                ),
+                first_trial_fun=search.first_trial.fun,
+                first_trial_fun_ratio=search.first_trial_fun_ratio,
+                accepted_step_fraction=search.accepted_step_fraction
+                if classified
+                else math.nan,
+                scipy_status=int(call.status),
+                scipy_message=str(call.message),
+            )
+        )
+        if reason is not LbfgsbRestartReason.RESTARTED:
+            break
+        served_start = search.accepted
+        x = np.array(search.accepted.x)
+    unresolved = bool(restart_log) and restart_log[-1].reason in (
+        LbfgsbRestartReason.FRESH_MEMORY_STALL,
+        LbfgsbRestartReason.BUDGET_EXHAUSTED,
+    )
+    return (
+        OptimizeResult(
+            x=call.x,
+            fun=call.fun,
+            jac=call.jac,
+            nit=nit,
+            nfev=nfev,
+            njev=njev,
+            status=SCIPY_LBFGSB_UNRESOLVED_STALL_STATUS if unresolved else call.status,
+            success=False if unresolved else call.success,
+            message=f"UNRESOLVED NON-WOLFE STALL ({restart_log[-1].reason}): "
+            f"{call.message}"
+            if unresolved
+            else call.message,
+        ),
+        tuple(restart_log),
     )
 
 
@@ -366,14 +681,9 @@ def _run_scipy_minimize(
 
     if isinstance(options, ScipyLBFGSBOptions):
         scipy_method = "L-BFGS-B"
-        scipy_options = {
-            "maxiter": options.maxiter,
-            "maxfun": options.maxfun,
-            "gtol": options.gtol,
-            "ftol": options.ftol,
-            "maxcor": options.maxcor,
-            "maxls": options.maxls,
-        }
+        scipy_options = _lbfgsb_scipy_options(
+            options, maxiter=options.maxiter, maxfun=options.maxfun
+        )
     else:
         scipy_method = "BFGS"
         scipy_options = {
@@ -382,15 +692,28 @@ def _run_scipy_minimize(
             "xrtol": options.xrtol,
             "norm": options.norm,
         }
-    result = scipy_minimize(
-        scipy_fun,
-        np.asarray(jax.device_get(x0), dtype=float),
-        jac=True,
-        method=scipy_method,
-        bounds=None if bounds is None else bounds.scipy_bounds(),
-        options=scipy_options,
-        callback=scipy_callback if callback is not None else None,
-    )
+    x_start = np.asarray(jax.device_get(x0), dtype=float)
+    scipy_bounds = None if bounds is None else bounds.scipy_bounds()
+    observer = scipy_callback if callback is not None else None
+    restart_log: tuple[LbfgsbRestartEvent, ...] = ()
+    if isinstance(options, ScipyLBFGSBOptions) and options.restart_after_nonwolfe_stop:
+        result, restart_log = _minimize_lbfgsb_with_restarts(
+            scipy_fun,
+            x_start,
+            options=options,
+            bounds=scipy_bounds,
+            callback=observer,
+        )
+    else:
+        result = scipy_minimize(
+            scipy_fun,
+            x_start,
+            jac=True,
+            method=scipy_method,
+            bounds=scipy_bounds,
+            options=scipy_options,
+            callback=observer,
+        )
     return OptimizeResult(
         x=np.asarray(result.x, dtype=float),
         fun=float(np.asarray(result.fun).reshape(())),
@@ -404,6 +727,7 @@ def _run_scipy_minimize(
         hessian=getattr(result, "hess_inv", None)
         if driver == Driver.SCIPY_BFGS
         else None,
+        restart_log=restart_log,
     )
 
 

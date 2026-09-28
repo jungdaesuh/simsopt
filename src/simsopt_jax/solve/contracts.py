@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Callable, Literal, Protocol, TypeAlias
 
 import jax
@@ -44,6 +45,58 @@ class InverseHessianOperator(Protocol):
 HessianInverse: TypeAlias = np.ndarray | InverseHessianOperator
 
 
+class LbfgsbRestartReason(StrEnum):
+    """What ``restart_after_nonwolfe_stop`` did at one relative-reduction stop."""
+
+    # Non-Wolfe final step; a new call continues from the accepted point.
+    RESTARTED = "restarted"
+    # Non-Wolfe final step in a call's first iteration, whose memory was
+    # already empty: not restarted, the solve ends unresolved.
+    FRESH_MEMORY_STALL = "fresh_memory_stall_not_restarted"
+    # Non-Wolfe final step with no iteration or evaluation left: not
+    # restarted, the solve ends unresolved.
+    BUDGET_EXHAUSTED = "budget_exhausted_not_restarted"
+    # The final iteration's trials do not lie on one ray (L-BFGS-B retried the
+    # search internally), so the step cannot be judged: not restarted, and
+    # SciPy's result stands as returned.
+    UNCLASSIFIED_SEARCH = "unclassified_search_not_restarted"
+
+
+# ``OptimizerResult.status`` of a SciPy L-BFGS-B solve that ended on a
+# recognized non-Wolfe stall it could not resume (``FRESH_MEMORY_STALL`` or
+# ``BUDGET_EXHAUSTED``); ``success`` is False.  SciPy itself returns 0..2.
+SCIPY_LBFGSB_UNRESOLVED_STALL_STATUS = 7
+
+
+@dataclass(frozen=True, slots=True)
+class LbfgsbRestartEvent:
+    """One SciPy L-BFGS-B relative-reduction stop judged for a restart.
+
+    See ``ScipyLBFGSBOptions.restart_after_nonwolfe_stop``.  With ``d`` the
+    search direction, ``curvature_ratio`` is ``g_accepted.d / |g_base.d|``
+    (the step fails the curvature condition when its magnitude exceeds 0.9);
+    ``accepted_step_fraction`` is the accepted step over the first trial step
+    (0 when the search accepted its base).  Both are NaN for
+    ``UNCLASSIFIED_SEARCH``.  ``iteration`` counts every call's iterations so
+    far.  ``fun`` and ``projected_grad_norm_inf`` (SciPy's ``projgr``) are at
+    the accepted point, where a restart starts; ``first_trial_fun_ratio`` is
+    ``first_trial_fun / base_fun``, with a zero base giving +-inf by the sign
+    of ``first_trial_fun``, or 1.0 when that is zero too.  ``scipy_status``
+    and ``scipy_message`` are that SciPy call's own termination.
+    """
+
+    iteration: int
+    reason: LbfgsbRestartReason
+    curvature_ratio: float
+    fun: float
+    projected_grad_norm_inf: float
+    first_trial_fun: float
+    first_trial_fun_ratio: float
+    accepted_step_fraction: float
+    scipy_status: int
+    scipy_message: str
+
+
 @dataclass(frozen=True)
 class OptimizerResult:
     x: np.ndarray
@@ -66,6 +119,9 @@ class OptimizerResult:
     optimizer_state_trace: list[OptimizerStateTraceEntry] | None = None
     optimistix_result: str | None = None
     optimistix_result_message: str | None = None
+    # The SciPy L-BFGS-B route's non-Wolfe stops, in order; empty when there
+    # was none or the driver has no such policy.
+    restart_log: tuple[LbfgsbRestartEvent, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,7 +266,7 @@ Callback: TypeAlias = Callable[[OptimizerCallbackEvent], None]
 
 
 STATUS_CODES: dict[Driver, tuple[int, ...]] = {
-    Driver.SCIPY_LBFGSB: (0, 1, 2, 6),
+    Driver.SCIPY_LBFGSB: (0, 1, 2, 6, SCIPY_LBFGSB_UNRESOLVED_STALL_STATUS),
     Driver.SCIPY_LM: (-1, 0, 1, 2, 3, 4),
     Driver.SCIPY_BFGS: (0, 1, 2, 3, 6),
     Driver.OPTAX_LBFGS: (0, 1, 2),
@@ -229,6 +285,7 @@ STATUS_CODES: dict[Driver, tuple[int, ...]] = {
 
 
 __all__ = [
+    "SCIPY_LBFGSB_UNRESOLVED_STALL_STATUS",
     "STATUS_CODES",
     "ArrayResult",
     "Callback",
@@ -237,6 +294,8 @@ __all__ = [
     "InvalidStepEvent",
     "InvalidStepReason",
     "InverseHessianOperator",
+    "LbfgsbRestartEvent",
+    "LbfgsbRestartReason",
     "LineSearchStatus",
     "OptimizerCallbackEvent",
     "OptimizerInput",

@@ -58,12 +58,28 @@ class ScipyBounds:
 
 @dataclass(frozen=True)
 class ScipyLBFGSBOptions(OptionsBase):
+    """SciPy L-BFGS-B's options, plus one policy of this route.
+
+    ``restart_after_nonwolfe_stop``: if SciPy stops on its relative-reduction
+    (ftol) test right after a line search whose accepted step fails the
+    curvature condition ``|g_new.d| <= 0.9 |g_old.d|`` (a dcsrch WARNING
+    accepted like convergence), start a new L-BFGS-B call from the accepted
+    point with an empty memory and exactly the ``maxiter``/``maxfun`` left.
+    Such a stop in a call's first iteration, or with no budget left, is not
+    restarted and ends the solve unsuccessful
+    (``SCIPY_LBFGSB_UNRESOLVED_STALL_STATUS``); a final iteration that holds
+    an internal L-BFGS-B retry is not judged.  Every judged stop is in
+    ``OptimizerResult.restart_log``.  Off, the route is SciPy unchanged;
+    :meth:`native_matched` leaves it off.
+    """
+
     maxiter: int = 15000
     maxfun: int = 15000
     gtol: float = 1e-10
     ftol: float = 1e-10
     maxcor: int = 200
     maxls: int = 20
+    restart_after_nonwolfe_stop: bool = False
 
     @classmethod
     def native_matched(
@@ -76,6 +92,7 @@ class ScipyLBFGSBOptions(OptionsBase):
         is this class's default. ``maxls`` is named when the native call names
         it; omitted, it stays at SciPy's default of 20, so a caller matching a
         native script that names nothing else still names nothing else here.
+        No restart policy: the native call is one SciPy call.
         """
         return cls(maxiter=maxiter, maxcor=maxcor, ftol=tol, gtol=tol, maxls=maxls)
 

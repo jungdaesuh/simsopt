@@ -167,6 +167,8 @@ def test_coil_forces_lanes_share_one_lbfgsb_option_dict_including_maxls() -> Non
         "ftol": native["tol"],
         "maxcor": native["maxcor"],
         "maxls": native["maxls"],
+        # One SciPy call, as the native script makes: no restart policy.
+        "restart_after_nonwolfe_stop": False,
     }
 
 

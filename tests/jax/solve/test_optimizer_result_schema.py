@@ -35,6 +35,7 @@ def test_optimizer_result_is_not_hashable_but_has_stable_fingerprint():
 
     with pytest.raises(TypeError):
         hash(result)
+    assert result.restart_log == (), "no restart unless a driver records one"
     fingerprint = fingerprint_optimizer_result(result)
     assert fingerprint.driver is Driver.SCIPY_LBFGSB
     assert fingerprint.x_shape == (2,)
