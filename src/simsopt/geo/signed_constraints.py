@@ -4,7 +4,10 @@ Every kernel returns ``(signed_value, grad, hard_signed_value)``. ``signed_value
 is a log-sum-exp surrogate of ``hard_signed_value`` at ``temperature`` (never
 looser than it), and ``grad`` is ``d(signed_value)/dx`` over the free dofs of
 ``objective_optimizable``. Unlike the stock hinge objectives, the value keeps the
-slack when the constraint is inactive.
+slack when the constraint is inactive. ``temperature`` must be finite and
+positive (in the constrained quantity's units); every kernel raises
+``ValueError`` otherwise. Zero is rejected, not read as the hard limit: that
+limit is ``hard_signed_value``.
 """
 
 from threading import RLock
@@ -26,6 +29,16 @@ _SMOOTHING_EPS = float(np.finfo(float).eps)
 _SURFACE_TREE_CACHE = WeakKeyDictionary()
 _SURFACE_TREE_CACHE_LOCK = RLock()
 _SOFTMIN_SELECTION_WINDOW_TEMPERATURES = 4.0
+
+
+def require_smoothing_temperature(temperature) -> float:
+    """``temperature`` as a float; ``ValueError`` unless finite and positive."""
+    value = float(temperature)
+    if not np.isfinite(value) or value <= 0.0:
+        raise ValueError(
+            f"smoothing temperature must be finite and positive; got {temperature!r}"
+        )
+    return value
 
 
 def stable_softmax(values, smoothing_eps: float):
@@ -166,6 +179,7 @@ def smooth_max_curvature_signed_constraint(
     ``kappa`` optionally passes ``curve.kappa()`` already evaluated at the
     current dofs, so a caller that also reports the hard maximum evaluates it once.
     """
+    temperature = require_smoothing_temperature(temperature)
     kappa = np.asarray(curve.kappa() if kappa is None else kappa, dtype=float)
     hard_max = float(np.max(kappa))
     active_mask = kappa >= (hard_max - 4.0 * float(temperature))
@@ -198,6 +212,7 @@ def smooth_min_curve_curve_signed_constraint(
     Fewer than two curves has no pair, so it returns ``-minimum_distance`` and a
     zero gradient.
     """
+    temperature = require_smoothing_temperature(temperature)
     curve_points = [np.asarray(curve.gamma(), dtype=float) for curve in curves]
     curve_trees = [point_tree(points) for points in curve_points]
     pair_blocks = []
@@ -273,6 +288,7 @@ def smooth_min_curve_surface_signed_constraint(
     The gradient includes the surface dofs when ``objective_optimizable`` owns
     them. No curves returns ``-minimum_distance`` and a zero gradient.
     """
+    temperature = require_smoothing_temperature(temperature)
     if not curves:
         return _no_pair_result(minimum_distance, objective_optimizable)
 

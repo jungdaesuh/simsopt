@@ -214,6 +214,45 @@ class MaxCurvatureSignedConstraintTests(unittest.TestCase):
         np.testing.assert_array_equal(reused[1], reference[1])
 
 
+class SignedConstraintTemperatureTests(unittest.TestCase):
+    """Every kernel takes a finite positive temperature and rejects any other
+    with a ValueError naming it (zero is not the hard limit: the hard signal
+    is the third return value)."""
+
+    INVALID = (-0.01, 0.0, float("nan"), float("inf"), -float("inf"))
+
+    def _kernels(self):
+        curves = [_circle(1.0, 0.0), _circle(1.0, 0.5)]
+        surface = _torus(1.0, 0.3)
+        curve = _circle_with_bump()
+        return {
+            "curve_curve": lambda t: smooth_min_curve_curve_signed_constraint(
+                curves, 0.1, t, _JointDofs(curves)
+            ),
+            "curve_surface": lambda t: smooth_min_curve_surface_signed_constraint(
+                [_circle(0.1, 0.0)], surface, 0.4, t, _JointDofs([surface])
+            ),
+            "curvature": lambda t: smooth_max_curvature_signed_constraint(
+                curve, 1.5, t, _JointDofs([curve])
+            ),
+        }
+
+    def test_an_invalid_temperature_is_rejected_by_name(self):
+        for name, kernel in self._kernels().items():
+            for temperature in self.INVALID:
+                with self.subTest(kernel=name, temperature=temperature):
+                    with self.assertRaisesRegex(ValueError, "temperature"):
+                        kernel(temperature)
+
+    def test_a_finite_positive_temperature_is_accepted(self):
+        for name, kernel in self._kernels().items():
+            with self.subTest(kernel=name):
+                signed_value, grad, hard_signed_value = kernel(1.0e-3)
+                self.assertTrue(np.isfinite(signed_value))
+                self.assertTrue(np.all(np.isfinite(grad)))
+                self.assertGreaterEqual(signed_value, hard_signed_value)
+
+
 class SelectionHelperTests(unittest.TestCase):
     def test_kdtree_pairwise_selection_matches_bruteforce_threshold(self):
         left = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [3.0, 0.0, 0.0]])
