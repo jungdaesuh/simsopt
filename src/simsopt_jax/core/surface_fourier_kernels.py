@@ -30,7 +30,6 @@ import jax
 import jax.numpy as jnp
 from jax import lax
 
-from simsopt_jax.backend.dtypes import explicit_device_array
 from simsopt_jax.core._device_scalars import (
     staged_like as _staged_like,
     two_pi as _device_two_pi,
@@ -148,9 +147,11 @@ def _half(reference):
     return _staged_like(reference, _HALF_HOST)
 
 
-def _mode_range(start, stop, *, dtype=jnp.float64):
-    # Explicit unplaced put: guard-safe eagerly, constant-folded under jit.
-    return explicit_device_array(np.arange(start, stop), dtype=dtype)
+def _mode_range(reference, start, stop):
+    # Placed with its reference, like the other basis constants, so a basis
+    # built from arrays on one device never meets mode numbers on another;
+    # guard-safe eagerly, a literal under jit.
+    return _staged_like(reference, np.arange(start, stop))
 
 
 def _selector_matrix(size, positions):
@@ -193,8 +194,8 @@ def build_theta_basis(quadpoints_theta, mpol):
     two_pi = _two_pi(quadpoints_theta)
     theta = two_pi * quadpoints_theta  # (ntheta,)
 
-    m_cos = _mode_range(0, mpol + 1, dtype=quadpoints_theta.dtype)  # [0 .. mpol]
-    m_sin = _mode_range(1, mpol + 1, dtype=quadpoints_theta.dtype)  # [1 .. mpol]
+    m_cos = _mode_range(quadpoints_theta, 0, mpol + 1)  # [0 .. mpol]
+    m_sin = _mode_range(quadpoints_theta, 1, mpol + 1)  # [1 .. mpol]
 
     arg_cos = m_cos[None, :] * theta[:, None]  # (ntheta, mpol+1)
     arg_sin = m_sin[None, :] * theta[:, None]  # (ntheta, mpol)
@@ -218,8 +219,8 @@ def _build_theta_basis_with_second(quadpoints_theta, mpol):
     two_pi = _two_pi(quadpoints_theta)
     theta = two_pi * quadpoints_theta
 
-    m_cos = _mode_range(0, mpol + 1, dtype=quadpoints_theta.dtype)
-    m_sin = _mode_range(1, mpol + 1, dtype=quadpoints_theta.dtype)
+    m_cos = _mode_range(quadpoints_theta, 0, mpol + 1)
+    m_sin = _mode_range(quadpoints_theta, 1, mpol + 1)
 
     arg_cos = m_cos[None, :] * theta[:, None]
     arg_sin = m_sin[None, :] * theta[:, None]
@@ -263,8 +264,8 @@ def build_phi_basis(quadpoints_phi, ntor, nfp):
 
     # frequencies: [0, nfp, 2*nfp, …, ntor*nfp]
     nfp_scale = _staged_like(quadpoints_phi, nfp)
-    n_cos = _mode_range(0, ntor + 1, dtype=quadpoints_phi.dtype) * nfp_scale
-    n_sin = _mode_range(1, ntor + 1, dtype=quadpoints_phi.dtype) * nfp_scale
+    n_cos = _mode_range(quadpoints_phi, 0, ntor + 1) * nfp_scale
+    n_sin = _mode_range(quadpoints_phi, 1, ntor + 1) * nfp_scale
 
     arg_cos = n_cos[None, :] * phi[:, None]  # (nphi, ntor+1)
     arg_sin = n_sin[None, :] * phi[:, None]  # (nphi, ntor)
@@ -287,9 +288,9 @@ def _build_phi_basis_with_second(quadpoints_phi, ntor, nfp):
     two_pi = _two_pi(quadpoints_phi)
     phi = two_pi * quadpoints_phi
 
-    nfp_scale = jnp.asarray(nfp, dtype=quadpoints_phi.dtype)
-    n_cos = _mode_range(0, ntor + 1, dtype=quadpoints_phi.dtype) * nfp_scale
-    n_sin = _mode_range(1, ntor + 1, dtype=quadpoints_phi.dtype) * nfp_scale
+    nfp_scale = _staged_like(quadpoints_phi, nfp)
+    n_cos = _mode_range(quadpoints_phi, 0, ntor + 1) * nfp_scale
+    n_sin = _mode_range(quadpoints_phi, 1, ntor + 1) * nfp_scale
 
     arg_cos = n_cos[None, :] * phi[:, None]
     arg_sin = n_sin[None, :] * phi[:, None]
@@ -1381,12 +1382,9 @@ def _surface_xyzfourier_separable_basis(
     theta_order,
 ):
     """Return separable ``SurfaceXYZFourier`` phase bases."""
-    basis_dtype = jnp.asarray(quadpoints_phi).dtype
-    m = _mode_range(0, mpol + 1, dtype=basis_dtype)
-    n = _mode_range(-ntor, ntor + 1, dtype=basis_dtype) * jnp.asarray(
-        nfp,
-        dtype=basis_dtype,
-    )
+    reference = jnp.asarray(quadpoints_phi)
+    m = _mode_range(reference, 0, mpol + 1)
+    n = _mode_range(reference, -ntor, ntor + 1) * _staged_like(reference, nfp)
     phi_cos, phi_sin = _harmonic_derivative_basis(quadpoints_phi, n, phi_order)
     theta_cos, theta_sin = _harmonic_derivative_basis(
         quadpoints_theta,
@@ -1411,10 +1409,9 @@ def _surface_xyzfourier_basis_paired(
     ).reshape(-1)
     theta = _two_pi(quadpoints_theta_jax) * quadpoints_theta_jax
     phi = _two_pi(quadpoints_phi_jax) * quadpoints_phi_jax
-    m = _mode_range(0, mpol + 1, dtype=quadpoints_phi_jax.dtype)
-    n = _mode_range(-ntor, ntor + 1, dtype=quadpoints_phi_jax.dtype) * jnp.asarray(
-        nfp,
-        dtype=quadpoints_phi_jax.dtype,
+    m = _mode_range(quadpoints_phi_jax, 0, mpol + 1)
+    n = _mode_range(quadpoints_phi_jax, -ntor, ntor + 1) * _staged_like(
+        quadpoints_phi_jax, nfp
     )
 
     angle = theta[:, None, None] * m[None, :, None]
