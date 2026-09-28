@@ -100,7 +100,7 @@ from simsopt_jax.backend._runtime_policy import (  # noqa: F401
     _optional_nonneg_int_env,
     _parse_bool_value,
     _policy_from_config,
-    _primary_jax_platforms_env_platform,
+    _primary_jax_platform,
     _reject_obsolete_precision_environment,
     _resolve_kwarg,
     _resolve_legacy_platform,
@@ -684,12 +684,25 @@ def get_pairwise_penalty_chunk_size(mode: str | None = None) -> int:
 
 
 def get_runtime_jax_device(mode: str | None = None):
-    """Return the first local JAX device for the active runtime policy."""
+    """Return the first local JAX device for the active runtime policy.
+
+    A JAX policy names its platform. Otherwise the device follows the platforms
+    this process's JAX was configured with (``jax.config.jax_platforms``), not
+    the current ``JAX_PLATFORMS`` environment: ``set_backend`` rewrites that
+    variable for child processes, and an initialized JAX never reads it again.
+    Before JAX is imported the variable is still what it will read, so a
+    native process that never touched JAX does not import it here.
+    """
     policy = get_backend_policy(mode)
     if policy.backend == "jax":
         platform = policy.jax_platform
     else:
-        platform = _primary_jax_platforms_env_platform()
+        imported_jax = sys.modules.get("jax")
+        platform = _primary_jax_platform(
+            _optional_env_value(_JAX_PLATFORMS_ENV)
+            if imported_jax is None
+            else imported_jax.config.jax_platforms
+        )
     if platform is None:
         return None
 

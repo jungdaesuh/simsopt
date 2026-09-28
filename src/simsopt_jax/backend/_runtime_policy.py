@@ -631,8 +631,8 @@ def _runtime_jax_backend_name(platform: str) -> str:
     return _runtime_jax_platform_value(platform)
 
 
-def _primary_jax_platforms_env_platform() -> str | None:
-    platforms = _optional_env_value(_JAX_PLATFORMS_ENV)
+def _primary_jax_platform(platforms: str | None) -> str | None:
+    """First entry of a ``JAX_PLATFORMS``-style list, if it is a valid platform."""
     if platforms is None:
         return None
     parts = tuple(part.strip().lower() for part in platforms.split(",") if part.strip())

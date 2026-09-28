@@ -593,10 +593,17 @@ def test_query_active_gpu_memory_uses_detected_cuda_selector_without_cuda_policy
     assert metric_calls == [("memory.used", 0)]
 
 
-def test_runtime_jax_device_uses_primary_jax_platforms_env_before_policy(
+def _fake_jax(jax_platforms, local_devices):
+    return types.SimpleNamespace(
+        config=types.SimpleNamespace(jax_platforms=jax_platforms),
+        local_devices=local_devices,
+    )
+
+
+def test_runtime_jax_device_uses_primary_configured_jax_platform_before_policy(
     monkeypatch,
 ):
-    """Startup placement can follow ``JAX_PLATFORMS`` before Simsopt policy exists."""
+    """Without a JAX policy, placement follows the platforms JAX was configured with."""
     runtime_device = object()
     backend_calls: list[str | None] = []
 
@@ -604,17 +611,40 @@ def test_runtime_jax_device_uses_primary_jax_platforms_env_before_policy(
         backend_calls.append(backend)
         return [runtime_device]
 
-    monkeypatch.setenv("JAX_PLATFORMS", "cuda")
     monkeypatch.setattr(
         runtime_module,
         "get_backend_policy",
         lambda mode=None: _policy_for_mode("native_cpu"),
     )
-    monkeypatch.setitem(
-        sys.modules,
-        "jax",
-        types.SimpleNamespace(local_devices=_local_devices),
+    monkeypatch.setitem(sys.modules, "jax", _fake_jax("cuda", _local_devices))
+
+    assert get_runtime_jax_device() is runtime_device
+    assert backend_calls == ["gpu"]
+
+
+def test_runtime_jax_device_ignores_jax_platforms_env_rewritten_after_jax_import(
+    monkeypatch,
+):
+    """``set_backend("native_cpu")`` writes ``JAX_PLATFORMS=cpu`` for children.
+
+    The running JAX keeps the platforms it was configured with, so the runtime
+    device must too; following the rewritten variable placed arrays on the CPU
+    while every default-placed array stayed on the GPU.
+    """
+    runtime_device = object()
+    backend_calls: list[str | None] = []
+
+    def _local_devices(*, backend=None):
+        backend_calls.append(backend)
+        return [runtime_device]
+
+    monkeypatch.setenv("JAX_PLATFORMS", "cpu")
+    monkeypatch.setattr(
+        runtime_module,
+        "get_backend_policy",
+        lambda mode=None: _policy_for_mode("native_cpu"),
     )
+    monkeypatch.setitem(sys.modules, "jax", _fake_jax("cuda,cpu", _local_devices))
 
     assert get_runtime_jax_device() is runtime_device
     assert backend_calls == ["gpu"]
@@ -629,31 +659,30 @@ def test_runtime_jax_device_prefers_policy_over_jax_platforms_env(monkeypatch):
         backend_calls.append(backend)
         return [runtime_device]
 
-    monkeypatch.setenv("JAX_PLATFORMS", "cpu,cuda")
     monkeypatch.setattr(
         runtime_module,
         "get_backend_policy",
         lambda mode=None: _policy_for_mode("jax_gpu_parity"),
     )
-    monkeypatch.setitem(
-        sys.modules,
-        "jax",
-        types.SimpleNamespace(local_devices=_local_devices),
-    )
+    monkeypatch.setitem(sys.modules, "jax", _fake_jax("cpu,cuda", _local_devices))
 
     assert get_runtime_jax_device() is runtime_device
     assert backend_calls == ["gpu"]
 
 
-def test_runtime_jax_device_returns_none_without_policy_or_jax_platforms_env(
+def test_runtime_jax_device_returns_none_without_policy_or_configured_jax_platforms(
     monkeypatch,
 ):
     """Native startup with no JAX platform request keeps the default placement path."""
-    monkeypatch.delenv("JAX_PLATFORMS", raising=False)
+
+    def _local_devices(*, backend=None):
+        raise AssertionError(f"no device lookup expected, got backend={backend!r}")
+
     monkeypatch.setattr(
         runtime_module,
         "get_backend_policy",
         lambda mode=None: _policy_for_mode("native_cpu"),
     )
+    monkeypatch.setitem(sys.modules, "jax", _fake_jax(None, _local_devices))
 
     assert get_runtime_jax_device() is None
