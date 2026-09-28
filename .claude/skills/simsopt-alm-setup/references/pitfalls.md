@@ -123,7 +123,19 @@ Each entry: the symptom, the cause, the fix.
 15. **Unique row names.** The runner reports multipliers and values keyed by
     name, so a repeated name hides a row; `gradient_check.py` and
     `sign_check.py` refuse one.
-16. **Conflicting constraints.** Thresholds no design can meet (e.g. a coil
+16. **`converged` is an approximate KKT point.** Success means feasibility
+    within `feasibility_tol`, an augmented-gradient norm within
+    `stationarity_tol`, and a complementarity gap Σ λ⁺_i max(0, -g_i)
+    within `feasibility_tol` x max(1, abs(f)), not an exact KKT point. With
+    f far below 1 in magnitude the gap tolerance is absolute and strict:
+    scale f to O(1). A large multiplier on a row just inside its bound
+    blocks success until dual updates shrink it (`plateau_stall` or a
+    `max_outer_*` reason; see [termination.md](termination.md)). Known
+    limit: a nonconvex row steep enough that its multiplier times its slack
+    stays under the tolerance while its multiplier times its gradient
+    cancels f's gradient can still pass; check `result.multipliers`
+    against the physics.
+17. **Conflicting constraints.** Thresholds no design can meet (e.g. a coil
     spacing and a coil-surface distance that exclude each other) show as a
     penalty that keeps rising, `penalty_cap_reached`, or `max_outer_after_penalty_increase`
     with one row's violation flat. Relax a threshold; a larger penalty does

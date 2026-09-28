@@ -74,8 +74,9 @@ each inner trial): a required key absent or None raises `KeyError`
 of the one-per-row `constraint_grads` must have x's shape, and
 `constraint_values` one entry per row (`ValueError`), and the optional
 `constraint_activity_tolerances` (activity bands) nonnegative (`ValueError`).
-Bands route rows and feed diagnostics only; the convergence test uses each
-row's actual slack ([termination.md](termination.md)). The optional
+Bands route rows and feed diagnostics only; the convergence test's
+complementarity gap uses each row's actual slack
+([termination.md](termination.md)). The optional
 `search_step_success` (False rejects the trial step; absent means accepted)
 must be a `bool` or `numpy.bool_`: 0, None or any other type raises
 `ValueError`. A non-finite value at a trial point rejects the trial (the line
