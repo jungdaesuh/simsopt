@@ -457,6 +457,40 @@ def _normalize_base_bounds(base_bounds, size: int):
         normalized_pairs.append((lower_value, upper_value))
     return normalized_pairs
 
+def _project_onto_bounds(
+    x: np.ndarray, base_bounds: Optional[List[Tuple[float, float]]]
+) -> np.ndarray:
+    """An owned copy of ``x`` clipped to the ``(lower, upper)`` pairs."""
+    if base_bounds is None:
+        return x.copy()
+    lower, upper = np.asarray(base_bounds, dtype=float).T
+    return np.clip(x, lower.reshape(x.shape), upper.reshape(x.shape))
+
+# L-BFGS-B ends a step at x + stp * d without re-projecting, so a coordinate
+# it drives onto a bound can stop a few ulps off it, inside or out (up to 47
+# ulps in a 4000-problem probe).
+_BOUND_SNAP_ULPS = 64
+
+def _snap_onto_bounds(
+    x: np.ndarray, grad, base_bounds: Optional[List[Tuple[float, float]]]
+) -> np.ndarray:
+    """``x`` in the box, and on a finite bound where it lies within
+    ``_BOUND_SNAP_ULPS`` of it and ``grad`` pushes out of the box there: the
+    rounding of a step that reached the bound. Other coordinates keep their
+    value (the stationarity test treats only x == bound as on it)."""
+    projected = _project_onto_bounds(x, base_bounds)
+    if base_bounds is None:
+        return projected
+    lower, upper = np.asarray(base_bounds, dtype=float).T
+    grad_array = np.asarray(grad, dtype=float).reshape(projected.shape)
+    near_upper = (grad_array < 0.0) & (
+        upper - projected <= _BOUND_SNAP_ULPS * np.spacing(np.abs(upper))
+    )
+    near_lower = (grad_array > 0.0) & (
+        projected - lower <= _BOUND_SNAP_ULPS * np.spacing(np.abs(lower))
+    )
+    return np.where(near_upper, upper, np.where(near_lower, lower, projected))
+
 def _intersect_bounds(trust_bounds, base_bounds):
     if trust_bounds is None:
         return base_bounds
@@ -581,6 +615,10 @@ def _run_alm_inner_attempts(request: ALMInnerAttemptRequest) -> ALMInnerAttemptR
             )
             candidate_x = early_stop.x
             candidate_eval = early_stop.evaluation
+        snapped_x = _snap_onto_bounds(candidate_x, candidate_eval["grad"], evaluator.base_bounds)
+        if not np.array_equal(snapped_x, candidate_x):
+            candidate_x = snapped_x
+            candidate_eval = evaluator.evaluation_at(snapped_x)
         last_attempt_result = result
         attempt_iterations += int(getattr(result, "nit", 0))
         moved_norm = float(np.linalg.norm(candidate_x - request.x))

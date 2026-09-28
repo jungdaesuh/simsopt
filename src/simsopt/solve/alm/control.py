@@ -69,6 +69,7 @@ from .inner import (
     _made_meaningful_inner_progress,
     _normalize_base_bounds,
     _normalize_trust_radius,
+    _project_onto_bounds,
     _run_alm_inner_attempts,
 )
 from .policy import DEFAULT_CONTINUATION_POLICY, ALMContinuationPolicy
@@ -215,15 +216,6 @@ class _ALMNormalizedRunInputs:
     update_feasibility_tol: float
     update_stationarity_tol: float
     base_bounds: Optional[List[Tuple[float, float]]]
-
-def _project_onto_bounds(
-    x: np.ndarray, base_bounds: Optional[List[Tuple[float, float]]]
-) -> np.ndarray:
-    """An owned copy of ``x`` clipped to the ``(lower, upper)`` pairs."""
-    if base_bounds is None:
-        return x.copy()
-    lower, upper = np.asarray(base_bounds, dtype=float).T
-    return np.clip(x, lower.reshape(x.shape), upper.reshape(x.shape))
 
 def _normalize_alm_run_inputs(
     x0,

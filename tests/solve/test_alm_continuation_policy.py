@@ -976,6 +976,74 @@ class AlmBoundStationarityTests(unittest.TestCase):
                     1.0,
                 )
 
+    def test_a_point_just_inside_the_box_is_not_on_its_bound(self):
+        # Only x equal to the bound is on it: the x0 clip and L-BFGS-B's
+        # projection put coordinates exactly on the bound values.
+        for bound in (1.0, 1.0e12):
+            inside = np.nextafter(bound, -np.inf)
+            with self.subTest(bound=bound):
+                self.assertEqual(
+                    alm_core._bound_reduced_stationarity_norm(
+                        {"grad": np.array([-1.0])}, np.array([inside]), [(-np.inf, bound)]
+                    ),
+                    1.0,
+                )
+
+    def test_a_steep_objective_just_inside_the_upper_bound_reaches_it(self):
+        # f = 1000 (U - x) with x0 = U - 5e-4 (stored 2^-11 below U = 1e12):
+        # the point is interior, f = 0.49, and the optimum is U.
+        upper = 1.0e12
+        result = _solve_from(
+            lambda x, m, p: alm.augmented_inequality_objective(
+                1000.0 * float(upper - x[0]), np.array([-1000.0]), np.array([-1.0]),
+                [np.zeros(1)], m, p,
+            ),
+            upper - 5.0e-4, 0.0, 1.0, base_bounds=[(-np.inf, upper)],
+        )
+        self.assertTrue(result.success, result.message)
+        np.testing.assert_array_equal(result.x, [upper])
+
+    def test_a_smooth_objective_two_ulp_inside_the_bound_reaches_it(self):
+        # f = tanh(1e16 (1 - x)) at x0 = 1 - 2 eps: f = 0.9997, optimum f(1) = 0.
+        scale = 1.0e16
+
+        def evaluate(x, multipliers, penalty):
+            phase = scale * (1.0 - x[0])
+            return alm.augmented_inequality_objective(
+                float(np.tanh(phase)), np.array([-scale / np.cosh(phase) ** 2]),
+                np.array([-1.0]), [np.zeros(1)], multipliers, penalty,
+            )
+
+        result = _solve_from(
+            evaluate, 1.0 - 2.0 * np.finfo(float).eps, 0.0, 1.0, base_bounds=[(0.0, 1.0)],
+        )
+        self.assertTrue(result.success, result.message)
+        np.testing.assert_array_equal(result.x, [1.0])
+
+    def test_an_optimum_on_a_fixed_coordinate_converges(self):
+        for slope in (-1.0, 1.0):
+            with self.subTest(slope=slope):
+                result = _solve_from(
+                    _bounded(slope), 0.5, 0.0, 1.0, base_bounds=[(0.5, 0.5)],
+                )
+                self.assertTrue(result.success, result.message)
+                np.testing.assert_array_equal(result.x, [0.5])
+                self.assertEqual(result.stationarity_norm, 0.0)
+
+    def test_an_inner_result_within_rounding_of_a_bound_is_placed_on_it(self):
+        # L-BFGS-B's last step x + stp * d can stop a few ulps off a bound it
+        # reached; the loop snaps such a coordinate onto the bound only where
+        # the gradient pushes out, and clips any coordinate outside the box.
+        bounds = [(0.0, 1.0), (0.0, 1.0), (-2.0e9, 2.0e9), (0.0, 1.0)]
+        few_ulps_below_1 = 1.0 - 4.0 * np.spacing(1.0)
+        x = np.array([few_ulps_below_1, 1.0e-3, -2.0e9 - 19 * np.spacing(2.0e9), few_ulps_below_1])
+        grad = np.array([-1.0, 1.0, -1.0, 1.0])
+        np.testing.assert_array_equal(
+            alm_inner._snap_onto_bounds(x, grad, bounds),
+            [1.0, 1.0e-3, -2.0e9, few_ulps_below_1],
+        )
+        np.testing.assert_array_equal(alm_inner._snap_onto_bounds(x, grad, None), x)
+
     def test_an_evaluator_stationarity_norm_is_kept(self):
         # Its own measure (not ||grad||): the evaluator accounts for the bounds.
         evaluation = {"grad": np.array([-1.0]), "stationarity_norm": 100.0}
