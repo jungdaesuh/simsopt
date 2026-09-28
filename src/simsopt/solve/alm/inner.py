@@ -219,8 +219,11 @@ class _ALMInnerAttemptEvaluator:
         ):
             raise _EarlyStopInnerSolve(inner_x, evaluation)
 
+# Feasibility slack of an accepted candidate, in the rows' units.
 _ACCEPTANCE_TOTAL_ATOL = 1e-10
 
+# A candidate's total may exceed its start's by this fraction of the step's
+# first-order scale (see _total_tolerance).
 _ACCEPTANCE_TOTAL_RTOL = 1e-3
 
 _ACCEPTANCE_MOVE_TOL = 1e-12
@@ -231,10 +234,12 @@ _INFEASIBLE_STALL_FEASIBILITY_ATOL = 1e-12
 
 _INFEASIBLE_STALL_FEASIBILITY_RTOL = 1e-6
 
+# Floors of a stationarity-norm drop that counts as progress.
 _INFEASIBLE_STALL_OBJECTIVE_ATOL = 1e-10
 
-# This rejects roundoff-scale objective movement only; material objective drops
-# with fixed feasibility remain progress and must not fall back to the old 5% gate.
+# An objective drop counts as progress (not a stall) when it beats this
+# fraction of the step's first-order scale plus round-off (_total_tolerance),
+# and a stationarity drop when it beats this fraction of the norm.
 _INFEASIBLE_STALL_OBJECTIVE_RTOL = 1e-6
 
 class _EarlyStopInnerSolve(RuntimeError):
@@ -243,7 +248,20 @@ class _EarlyStopInnerSolve(RuntimeError):
         self.x = np.asarray(x, dtype=float).copy()
         self.evaluation = evaluation
 
+def _total_tolerance(gradient_norm: float, step_norm: float, rtol: float, *totals) -> float:
+    """``rtol`` of a step's first-order scale ``||grad L|| ||dx||`` (the
+    largest change its linear model can make, from the start's gradient) plus
+    the round-off of comparing ``totals``, ``4 eps |total|`` each: a tolerance
+    on a change of the total that an offset added to f leaves unchanged
+    beyond round-off and that scales by c when f does."""
+    round_off = 4.0 * np.finfo(float).eps * sum(abs(float(total)) for total in totals)
+    return float(rtol) * float(gradient_norm) * float(step_norm) + round_off
+
 def _elevated_rejection_total(reference_total: float) -> float:
+    """The total a nonfinite trial shows L-BFGS-B, above the reference so its
+    line search backs off. Its size scales with |f|, so an offset added to f
+    changes that backtracking path; it decides nothing, as the candidate is
+    rejected by its ``nonfinite_evaluation`` flag."""
     return (
         float(reference_total)
         + max(abs(float(reference_total)), 1.0)
@@ -310,11 +328,12 @@ def _made_meaningful_inner_progress(
     move_scale = max(1.0, float(np.linalg.norm(np.asarray(start_x, dtype=float))))
     moved = move_norm > 1e-8 * move_scale
 
-    improved_objective = _improved_beyond_floor(
+    improved_objective = float(current_total) - float(final_total) > _total_tolerance(
+        current_stationarity_norm,
+        move_norm,
+        _INFEASIBLE_STALL_OBJECTIVE_RTOL,
         current_total,
         final_total,
-        _INFEASIBLE_STALL_OBJECTIVE_ATOL,
-        _INFEASIBLE_STALL_OBJECTIVE_RTOL,
     )
     improved_stationarity = _improved_beyond_floor(
         current_stationarity_norm,
@@ -331,12 +350,14 @@ def _made_meaningful_inner_progress(
 
     return moved or improved_objective or improved_stationarity or improved_feasibility
 
-def _acceptable_total_upper_bound(current_total: float) -> float:
-    total_scale = max(np.finfo(float).eps, abs(float(current_total)))
-    return (
-        float(current_total)
-        + _ACCEPTANCE_TOTAL_ATOL
-        + (_ACCEPTANCE_TOTAL_RTOL * total_scale)
+def _acceptable_total_upper_bound(
+    current_total: float, candidate_total: float, gradient_norm: float, step_norm: float
+) -> float:
+    """The largest total a candidate ``step_norm`` from a start with this
+    gradient norm may have: the start's plus ``_ACCEPTANCE_TOTAL_RTOL`` of the
+    step's first-order scale and round-off (:func:`_total_tolerance`)."""
+    return float(current_total) + _total_tolerance(
+        gradient_norm, step_norm, _ACCEPTANCE_TOTAL_RTOL, current_total, candidate_total
     )
 
 def _candidate_is_acceptable(
@@ -346,7 +367,7 @@ def _candidate_is_acceptable(
     moved_norm: float,
     update_feasibility_tol: float,
 ) -> bool:
-    if _search_step_rejected(candidate_eval):
+    if _search_step_rejected(candidate_eval) or candidate_eval.get("nonfinite_evaluation"):
         return False
     if not (
         bool(getattr(result, "success", False))
@@ -369,7 +390,10 @@ def _candidate_is_acceptable(
 
     candidate_total = float(candidate_eval["total"])
     return candidate_total <= _acceptable_total_upper_bound(
-        float(current_eval["total"])
+        float(current_eval["total"]),
+        candidate_total,
+        float(np.linalg.norm(current_eval["grad"])),
+        moved_norm,
     )
 
 def _improvement_and_floor(
@@ -426,11 +450,13 @@ def _classify_infeasible_inner_stall(
         _INFEASIBLE_STALL_FEASIBILITY_RTOL,
     ):
         return False, False, None
-    if _improved_beyond_floor(
-        current_eval["total"],
-        candidate_eval["total"],
-        _INFEASIBLE_STALL_OBJECTIVE_ATOL,
+    current_total, candidate_total = float(current_eval["total"]), float(candidate_eval["total"])
+    if current_total - candidate_total > _total_tolerance(
+        float(np.linalg.norm(current_eval["grad"])),
+        moved_norm,
         _INFEASIBLE_STALL_OBJECTIVE_RTOL,
+        current_total,
+        candidate_total,
     ):
         return False, False, None
 

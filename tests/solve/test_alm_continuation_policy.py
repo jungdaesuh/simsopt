@@ -908,6 +908,68 @@ class AlmObjectiveOffsetTests(unittest.TestCase):
         self.assertFalse(decisions[0.0][0] and decisions[0.0][2] != 1.0, decisions)
 
 
+class AlmInnerStepOffsetTests(unittest.TestCase):
+    """Inner-step decisions (acceptance, progress, the value a nonfinite trial
+    shows L-BFGS-B) do not depend on an offset added to f: f and f + C take
+    the same steps and end the same way."""
+
+    OFFSETS = (0.0, 1.0e3, -1.0e3, 1.0e7, -1.0e7)
+
+    def runs(self, make_evaluate, x0, settings, inner_options):
+        runs = {}
+        for offset in self.OFFSETS:
+            trace = []
+            result = alm.minimize_alm(
+                np.array([x0]), ["c"], make_evaluate(offset, trace), settings, inner_options,
+            )
+            runs[offset] = (result, trace)
+        return runs
+
+    def assert_same_runs(self, runs):
+        reference, reference_trace = runs[0.0]
+        for offset, (result, trace) in runs.items():
+            with self.subTest(offset=offset):
+                self.assertEqual(
+                    (result.success, result.termination_reason, result.outer_iterations, result.nit),
+                    (reference.success, reference.termination_reason,
+                     reference.outer_iterations, reference.nit),
+                )
+                self.assertEqual(len(trace), len(reference_trace))
+                np.testing.assert_allclose(trace, reference_trace, rtol=0.0, atol=1.0e-6)
+                np.testing.assert_allclose(result.x, reference.x, rtol=0.0, atol=1.0e-6)
+
+    def test_a_worse_re_evaluated_step_is_judged_without_the_offset(self):
+        # A warm-started evaluator whose every call leaves it 0.3 worse: the
+        # inner solve's result re-evaluates 0.1 above its start. 1e-3 |C|
+        # used to admit that for |C| >= 100.
+        def make_evaluate(offset, trace):
+            def evaluate(x, multipliers, penalty):
+                trace.append(float(x[0]))
+                value = offset + 0.5 * float((x[0] - 1.0) ** 2) + 0.3 * len(trace)
+                return alm.augmented_inequality_objective(
+                    value, np.array([x[0] - 1.0]), np.array([-1.0]), [np.zeros(1)],
+                    multipliers, penalty,
+                )
+            return evaluate
+
+        self.assert_same_runs(
+            self.runs(make_evaluate, 0.0, alm.ALMSettings(max_outer_iterations=3), {"maxiter": 20})
+        )
+
+    def test_a_nonfinite_trial_is_rejected_whatever_its_total(self):
+        # The acceptance slack now scales with the step; a sanitized
+        # nonfinite trial is rejected by its flag, not by its elevated total.
+        start = {"total": 1.0, "grad": np.array([1.0e6]), "constraint_values": np.array([-1.0]),
+                 "feasibility_values": np.zeros(1), "dual_update_values": np.array([-1.0])}
+        trial = dict(start, total=1.5, nonfinite_evaluation=True)
+        result = SimpleNamespace(success=True, nit=1, message="ok")
+        self.assertFalse(alm_inner._candidate_is_acceptable(start, trial, result, 10.0, 1.0e-6))
+        self.assertTrue(
+            alm_inner._candidate_is_acceptable(start, dict(trial, nonfinite_evaluation=False),
+                                               result, 10.0, 1.0e-6)
+        )
+
+
 def _bounded(objective_slope):
     """min slope * x on 0 <= x <= 1 with an inert row g = -1 (zero gradient)."""
 
