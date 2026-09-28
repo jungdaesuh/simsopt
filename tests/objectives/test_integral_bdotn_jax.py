@@ -521,12 +521,14 @@ class TestIntegralBdotN:
                 reduction_mode="strict_oracle",
             )
         )
-        amplitudes = host_array(B)[0, :, 0]
-        reference = (
-            0.5
-            * math.fsum(float(value * value) for value in amplitudes)
-            / amplitudes.size
-        )
+        # The exact sum of the terms the reduction adds: J is 0.5 times the sum
+        # of squared residuals, and each residual carries its rounded
+        # sqrt(|n| / N) weight. Summing the squared amplitudes and dividing by N
+        # instead differs from that by term rounding (6.1e-5 here), not by
+        # reduction error, and a device whose default reduction happens to land
+        # within that rounding (the GPU's does) then ties the oracle.
+        residual = host_array(residual_BdotN(B, target, normal, "quadratic flux"))
+        reference = 0.5 * math.fsum(float(value * value) for value in residual)
 
         np.testing.assert_allclose(
             strict_oracle_value,
