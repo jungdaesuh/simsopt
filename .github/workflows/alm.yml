@@ -1,0 +1,191 @@
+# ALM solver gates for this fork's alm-library branch (simsopt.solve.alm and
+# the simsopt-alm-setup skill). Two jobs:
+#
+# python38: the declared Python floor (requires-python = ">=3.8"), which the
+#   other workflows' matrices do not reach. Upstream's isolated build needs
+#   numpy >= 2, which has no Python 3.8 release, so the build dependencies are
+#   installed first (numpy 1.24.4, SciPy 1.10.1, jax/jaxlib 0.4.13 from
+#   Google's jax-releases page) and simsopt builds without isolation.
+#
+# golden-exact-replay: the bitwise replay of tests/test_files/alm_golden,
+#   which runs only under the numpy, SciPy and machine the goldens were
+#   recorded with and otherwise skips. This job installs exactly the versions
+#   manifest.json records, on x86_64 with one thread per library, and fails
+#   (not skips) when the replay does not run.
+#   The manifest does not record the OpenBLAS kernel, and the replay depends
+#   on it: on the recording host (AVX-512) OpenBLAS picks its SkylakeX
+#   kernels, with which all bitwise tests pass; forcing its Haswell or Zen
+#   (AVX2) kernels there fails 9 of 18, while numpy's own AVX-512 dispatch
+#   makes no difference. The job pins OPENBLAS_CORETYPE=SkylakeX and fails
+#   on a runner without AVX-512 (GitHub's AMD EPYC runners have none).
+
+name: ALM
+
+on:
+  push:
+    tags-ignore: [v*]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  python38:
+    name: ALM on Python 3.8
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      OMP_NUM_THREADS: 4
+      PYTHON: .venv-alm/bin/python
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        # setuptools_scm derives the version from the tags.
+        fetch-depth: 0
+        submodules: recursive
+
+    - uses: astral-sh/setup-uv@v6
+
+    - name: Install Boost headers
+      run: sudo apt-get update && sudo apt-get install -y libboost-dev
+
+    - name: Create a Python 3.8 environment
+      run: uv venv --python 3.8 .venv-alm
+
+    - name: Install the build dependencies
+      run: |
+        uv pip install --python "$PYTHON" numpy==1.24.4 scipy==1.10.1 scikit-build-core "pybind11<3.0.0" \
+          "setuptools_scm>=8.0" tomli cmake ninja setuptools pytest
+        uv pip install --python "$PYTHON" jax==0.4.13 jaxlib==0.4.13 \
+          -f https://storage.googleapis.com/jax-releases/jax_releases.html
+
+    - name: Build and install simsopt without build isolation
+      run: uv pip install --python "$PYTHON" --no-build-isolation -e .
+
+    - name: Import the ALM package on Python 3.8
+      run: |
+        "$PYTHON" - <<'EOF'
+        import sys
+        import numpy, scipy, jax
+        import simsopt
+        import simsopt.solve.alm as alm
+        import simsopt.geo.signed_constraints as signed_constraints
+        assert sys.version_info[:2] == (3, 8), sys.version
+        print(sys.version.split()[0], "numpy", numpy.__version__, "scipy", scipy.__version__, "jax", jax.__version__)
+        print("simsopt", simsopt.__file__)
+        print("alm", alm.__file__, len(alm.__all__), "names")
+        print("signed_constraints", signed_constraints.__file__)
+        EOF
+
+    - name: Run the focused ALM tests (examples excluded)
+      run: |
+        "$PYTHON" -m pytest -q -rs tests/solve/test_alm*.py \
+          --ignore=tests/solve/test_alm_examples.py \
+          --ignore=tests/solve/test_alm_composition_example.py
+
+  golden-exact-replay:
+    name: ALM golden exact replay
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      OMP_NUM_THREADS: 1
+      OPENBLAS_NUM_THREADS: 1
+      MKL_NUM_THREADS: 1
+      OPENBLAS_CORETYPE: SkylakeX
+      PYTHON: .venv-golden/bin/python
+      MANIFEST: tests/test_files/alm_golden/manifest.json
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        submodules: recursive
+
+    - uses: astral-sh/setup-uv@v6
+
+    - name: Read the recording environment from the manifest
+      id: recorded
+      run: |
+        python3 - <<'EOF' >> "$GITHUB_OUTPUT"
+        import json, os
+        environment = json.load(open(os.environ["MANIFEST"]))["environment"]
+        print("python=" + ".".join(environment["python"].split(".")[:2]))
+        print("numpy=" + environment["numpy"])
+        print("scipy=" + environment["scipy"])
+        print("machine=" + environment["machine"])
+        EOF
+        cat "$GITHUB_OUTPUT"
+
+    - name: Require the recorded machine
+      run: |
+        if [ "$(uname -m)" != "${{ steps.recorded.outputs.machine }}" ]; then
+          echo "runner machine $(uname -m) is not the recorded ${{ steps.recorded.outputs.machine }}"
+          exit 1
+        fi
+
+    - name: Require the AVX-512 the pinned OpenBLAS kernels need
+      run: |
+        grep -m1 "model name" /proc/cpuinfo
+        for flag in avx512f avx512dq avx512bw avx512vl; do
+          if ! grep -qw "$flag" /proc/cpuinfo; then
+            echo "this runner has no $flag: the goldens replay bitwise only with OpenBLAS's SkylakeX kernels"
+            exit 1
+          fi
+        done
+
+    - name: Install Boost headers
+      run: sudo apt-get update && sudo apt-get install -y libboost-dev
+
+    - name: Create the environment with the recorded numpy and SciPy
+      run: |
+        uv venv --python "${{ steps.recorded.outputs.python }}" .venv-golden
+        printf 'numpy==%s\nscipy==%s\n' "${{ steps.recorded.outputs.numpy }}" \
+          "${{ steps.recorded.outputs.scipy }}" > golden-constraints.txt
+        uv pip install --python "$PYTHON" -c golden-constraints.txt numpy scipy scikit-build-core \
+          "pybind11<3.0.0" "setuptools_scm>=8.0" cmake ninja setuptools pytest
+        uv pip install --python "$PYTHON" -c golden-constraints.txt --no-build-isolation -e .
+
+    - name: Require the bitwise environment
+      run: |
+        "$PYTHON" - <<'EOF'
+        import sys
+        sys.path.insert(0, "tests/test_files/alm_golden")
+        import alm_golden_scenarios as golden
+        print("current ", golden.current_environment())
+        print("recorded", golden.recorded_environment())
+        sys.exit(0 if golden.bitwise_environment() else "not the recorded environment: the replay would skip")
+        EOF
+        # numpy and SciPy each load OpenBLAS; both must run the pinned kernels.
+        cores=$(OPENBLAS_VERBOSE=2 "$PYTHON" -c "import numpy.linalg, scipy.linalg" 2>&1 | grep '^Core: ' | sort -u)
+        echo "$cores"
+        [ "$cores" = "Core: $OPENBLAS_CORETYPE" ]
+
+    - name: Run the golden tests
+      run: |
+        "$PYTHON" -m pytest -q -rs tests/solve/test_alm_golden_trajectories.py --junitxml=golden-junit.xml
+
+    - name: Fail unless every bitwise replay ran and passed
+      run: |
+        "$PYTHON" - <<'EOF'
+        import sys
+        import xml.etree.ElementTree as ElementTree
+        sys.path.insert(0, "tests/test_files/alm_golden")
+        import alm_golden_scenarios as golden
+        # One bitwise test per scenario, test_<scenario name>; each must pass,
+        # not skip.
+        cases = [case for case in ElementTree.parse("golden-junit.xml").iter("testcase")
+                 if case.get("classname", "").endswith(".AlmGoldenReplayTests")]
+        passed = {case.get("name") for case in cases
+                  if not any(case.find(tag) is not None for tag in ("skipped", "failure", "error"))}
+        missing = sorted(f"test_{scenario.name}" for scenario in golden.SCENARIOS
+                         if f"test_{scenario.name}" not in passed)
+        print(f"{len(passed)} of {len(cases)} bitwise replay tests passed; "
+              f"scenarios without a passed bitwise replay: {missing}")
+        sys.exit("the bitwise replay did not run and pass for every scenario" if missing else 0)
+        EOF
