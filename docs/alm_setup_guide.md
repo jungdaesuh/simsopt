@@ -842,11 +842,14 @@ Each entry: the symptom, the cause, the fix.
    its bound or typical size, and f by a reference value such as f(x0);
    `sign_check.py` warns when gradient norms spread over more than 1e3 or a
    value is far from O(1). The solver's own step tests (accepting an inner
-   result, counting progress, a stall) compare changes of the total with the
-   step's first-order size, so an offset added to f changes none of them,
-   but L-BFGS-B's `ftol` stop is relative to max(1, |f|): with f + C and a
-   large C, inner solves stop earlier. Keep f's value, not only its
-   variation, near O(1).
+   result, counting progress, a stall, placing a point on a bound) compare
+   the reported totals with no round-off allowance: a change must beat a
+   fraction of the step's first-order size, so an offset added to f changes
+   none of them. A change the totals cannot resolve (evaluation noise, or a
+   large constant in f that rounds it away) counts as no change: expect a
+   `plateau_stall` or `max_outer_*` stop, not a false success. L-BFGS-B's own
+   `ftol` stop is relative to max(1, |f|). So remove large constant offsets
+   from f and keep its value, not only its variation, near O(1).
 3. **`maxiter` is a whole-run budget.** `inner_options["maxiter"]` counts
    L-BFGS-B iterations over every subproblem of one `minimize_alm` call, not
    per subproblem. A small value ends the run early with the last step's
