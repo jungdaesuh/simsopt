@@ -77,7 +77,12 @@ from .optimistix.contracts import (
     OptimistixLBFGSOptions,
     OptimistixLMOptions,
 )
-from .scipy.contracts import ScipyBFGSOptions, ScipyLBFGSBOptions, ScipyLMOptions
+from .scipy.contracts import (
+    ScipyBFGSOptions,
+    ScipyBounds,
+    ScipyLBFGSBOptions,
+    ScipyLMOptions,
+)
 from .shared import LineSearchStatus
 from .simsopt.contracts import (
     SimsoptAdamHostOptions,
@@ -312,6 +317,7 @@ def _run_scipy_minimize(
     driver: Driver,
     options: ScipyLBFGSBOptions | ScipyBFGSOptions,
     callback: Callback | None,
+    bounds: ScipyBounds | None,
 ) -> OptimizeResult:
     iteration = 0
     start = time.perf_counter()
@@ -381,6 +387,7 @@ def _run_scipy_minimize(
         np.asarray(jax.device_get(x0), dtype=float),
         jac=True,
         method=scipy_method,
+        bounds=None if bounds is None else bounds.scipy_bounds(),
         options=scipy_options,
         callback=scipy_callback if callback is not None else None,
     )
@@ -680,8 +687,19 @@ def minimize(
     driver: Driver,
     options: OptionsBase | None = None,
     callback: Callback | None = None,
+    bounds: ScipyBounds | None = None,
 ) -> OptimizerResult:
-    """Minimize a scalar objective with a typed JAX-lane driver."""
+    """Minimize a scalar objective with a typed JAX-lane driver.
+
+    ``bounds`` boxes the parameters and is accepted only by
+    ``Driver.SCIPY_LBFGSB``, which hands it to SciPy unchanged; no other driver
+    enforces bounds, so passing them to one is an error, not a silent no-op.
+    """
+    if bounds is not None and driver != Driver.SCIPY_LBFGSB:
+        raise ValueError(
+            f"bounds are enforced only by {Driver.SCIPY_LBFGSB.value!r}; "
+            f"driver {driver.value!r} would ignore them."
+        )
     options_used = _resolve_options(driver, options, _MINIMIZE_OPTIONS)
     start = time.perf_counter()
     if isinstance(options_used, ScipyLBFGSBOptions | ScipyBFGSOptions):
@@ -691,6 +709,7 @@ def minimize(
             driver=driver,
             options=options_used,
             callback=callback,
+            bounds=bounds,
         )
     elif isinstance(options_used, OptaxLBFGSOptions | OptaxAdamOptions):
         result = _run_optax_minimize(

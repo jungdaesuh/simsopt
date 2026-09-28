@@ -1607,8 +1607,9 @@ class TestOptimizerAdapter:
         """SciPy L-BFGS-B must receive its valid tuning knobs."""
         captured = {}
 
-        def fake_scipy_minimize(fun, x0, jac, method, options, callback=None):
+        def fake_scipy_minimize(fun, x0, jac, method, bounds, options, callback=None):
             del jac
+            assert bounds is None
             captured["method"] = method
             captured["options"] = dict(options)
             captured["callback"] = callback

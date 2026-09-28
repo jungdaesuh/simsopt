@@ -26,7 +26,7 @@ from .contracts import (
 )
 from .optimistix import LinearSolver, OptimistixLBFGSOptions, OptimistixLMOptions
 from .optax import OptaxAdamOptions, OptaxLBFGSOptions, OptaxLineSearch
-from .scipy import ScipyBFGSOptions, ScipyLBFGSBOptions, ScipyLMOptions
+from .scipy import ScipyBFGSOptions, ScipyBounds, ScipyLBFGSBOptions, ScipyLMOptions
 from .simsopt import (
     SimsoptAdamHostOptions,
     SimsoptAdamOptions,
@@ -58,6 +58,7 @@ __all__ = [
     "STATUS_CODES",
     "ScipyBFGSOptions",
     "ScipyBFGSCallbackEvent",
+    "ScipyBounds",
     "ScipyLBFGSBOptions",
     "ScipyLBFGSBCallbackEvent",
     "ScipyLMOptions",

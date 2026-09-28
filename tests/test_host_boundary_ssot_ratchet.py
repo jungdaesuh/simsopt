@@ -68,6 +68,9 @@ _NON_JAX_BINDING = "non-jax"
 # ``host_boundary.disallow_host_transfers``, whose single internal
 # ``transfer_guard`` is the one addition. The two other ``host_boundary.py``
 # entries are re-pins after that insertion moved their lines. Baseline: 89.
+# Re-pinned 2026-09-23, no new site: the SciPy route's typed ``bounds`` (the
+# ``ScipyBounds`` import and one argument) moved the five ``dispatch.py``
+# coordinates below; file, scope and primitive are unchanged. Baseline: 89.
 _ALLOWED_OWNER_CALLS = frozenset(
     {
         "src/simsopt_jax/backend/dtypes.py::_device_put::device_put::308:19",
@@ -90,11 +93,11 @@ _ALLOWED_OWNER_CALLS = frozenset(
         "src/simsopt_jax/runtime/host_boundary.py::block_until_ready::block_until_ready::225:11",
         "src/simsopt_jax/runtime/host_boundary.py::disallow_host_transfers::transfer_guard::134:9",
         "src/simsopt_jax/runtime/host_boundary.py::host_value::device_get::190:11",
-        "src/simsopt_jax/solve/dispatch.py::_run_optimistix_lm::transfer_guard_host_to_device::578:9",
-        "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize.value_and_gradient_at::device_get::331:15",
-        "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize.value_and_gradient_at::device_get::331:38",
-        "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize.value_and_gradient_at::device_put::329:54",
-        "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize::device_get::381:19",
+        "src/simsopt_jax/solve/dispatch.py::_run_optimistix_lm::transfer_guard_host_to_device::585:9",
+        "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize.value_and_gradient_at::device_get::337:15",
+        "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize.value_and_gradient_at::device_get::337:38",
+        "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize.value_and_gradient_at::device_put::335:54",
+        "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize::device_get::387:19",
         "src/simsopt_jax/solve/minimize_runtime.py::run_optimistix_minimize::transfer_guard_host_to_device::301:9",
         "src/simsopt_jax/solve/serial.py::_write_bounded_objective_log::transfer_guard::455:9",
         "src/simsopt_jax_adapters/geo/boozer_surface.py::_with_host_bridge_transfer_guard.wrapped::transfer_guard_device_to_host::208:13",

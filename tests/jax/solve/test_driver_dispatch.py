@@ -42,7 +42,8 @@ def _residual(x):
 def test_every_minimize_driver_reaches_documented_dispatch_path(monkeypatch):
     calls = []
 
-    def scipy_minimize(_fn, _x0, *, driver, options, callback):
+    def scipy_minimize(_fn, _x0, *, driver, options, callback, bounds):
+        assert bounds is None, "an unbounded minimize must not reach SciPy with bounds"
         calls.append(("scipy", driver.value, type(options).__name__, callback))
         return _fake_result()
 
