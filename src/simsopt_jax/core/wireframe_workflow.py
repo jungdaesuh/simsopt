@@ -500,13 +500,17 @@ def _raise_traced_gsco_history_capacity(
     max_steps: jax.Array,
     history_capacity: jax.Array,
 ) -> WireframeGSCOLiveState:
+    # Unordered: the returned length is what orders the check before its uses.
+    # An ordered callback threads a runtime effect token, and the error this
+    # callback raises stays on that token, so on GPU every later ordered
+    # computation in the process re-raised it.
     checked_length = io_callback(
         _raise_invalid_gsco_history_length,
         jax.ShapeDtypeStruct((), state.history_length.dtype),
         state.history_length,
         max_steps,
         history_capacity,
-        ordered=True,
+        ordered=False,
     )
     return replace(state, history_length=checked_length)
 
