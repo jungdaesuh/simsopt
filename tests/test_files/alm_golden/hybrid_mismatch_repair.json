@@ -262,7 +262,7 @@
     "max_violation": "0x0.0p+0",
     "stationarity_norm": "0x1.219999999999ap+4",
     "raw_stationarity_norm": "0x1.219999999999ap+4",
-    "kkt_stationarity_norm": "0x1.0306af70d5c22p+3",
+    "kkt_stationarity_norm": "0x1.0306af70d5c23p+3",
     "constraint_values": [
      "0x0.0p+0"
     ],
@@ -358,7 +358,7 @@
     ],
     "objective_to_augmented_term_ratio": "0x1.4f78feef5ec82p+111",
     "augmented_gradient_norm": "0x1.219999999999ap+4",
-    "surrogate_kkt_stationarity_norm": "0x1.0306af70d5c22p+3",
+    "surrogate_kkt_stationarity_norm": "0x1.0306af70d5c23p+3",
     "multiplier_interpretation": "differentiable_alm_multipliers",
     "max_raw_hard_violation": null,
     "block_max_raw_hard_violation": null,
@@ -546,8 +546,8 @@
     "inner_lbfgsb_projected_gradient_norm": "0x0.0p+0",
     "inner_attempts": 1,
     "accepted_move_norm": "0x1.d8b95a19aa5c0p-6",
-    "accepted_move_norm_scaled": "0x1.56d5490dde863p-6",
-    "infeasible_stall_move_tolerance": "0x1.d9c71f2a4e6adp-27",
+    "accepted_move_norm_scaled": "0x1.56d5490dde862p-6",
+    "infeasible_stall_move_tolerance": "0x1.d9c71f2a4e6aep-27",
     "objective_delta": "0x1.7602b05921900p-2",
     "feasibility_delta": "0x0.0p+0",
     "feasibility_delta_tolerance": "0x1.0c6f7a0b5ed8dp-20",
@@ -793,7 +793,7 @@
     "inner_profile": "boxed",
     "inner_lbfgsb_projected_gradient_norm": "0x0.0p+0",
     "inner_attempts": 1,
-    "accepted_move_norm": "0x1.e4ef8ad3d2190p-6",
+    "accepted_move_norm": "0x1.e4ef8ad3d2191p-6",
     "accepted_move_norm_scaled": "0x1.5f738f9954122p-6",
     "infeasible_stall_move_tolerance": "0x1.da1941ad636c6p-27",
     "objective_delta": "0x1.58c7faa22b000p-2",
@@ -1004,8 +1004,8 @@
     ],
     "block_penalties": null,
     "max_violation": "0x1.d10b1e7a29480p-7",
-    "stationarity_norm": "0x1.c1dc0aa5b5a98p+5",
-    "raw_stationarity_norm": "0x1.c1dc0aa5b5a98p+5",
+    "stationarity_norm": "0x1.c1dc0aa5b5a97p+5",
+    "raw_stationarity_norm": "0x1.c1dc0aa5b5a97p+5",
     "kkt_stationarity_norm": "0x1.f097eee64687bp+2",
     "constraint_values": [
      "0x1.d10b1e7a29480p-7"
@@ -1063,7 +1063,7 @@
     "conditioning_base_objective": "0x1.3e96e9ee0e54dp+6",
     "conditioning_penalty_objective": "0x1.07b81ea72cee0p+1",
     "conditioning_penalty_objective_ratio": "0x1.a7d1a05c2a189p-6",
-    "conditioning_total_grad_norm": "0x1.c1dc0aa5b5a98p+5",
+    "conditioning_total_grad_norm": "0x1.c1dc0aa5b5a97p+5",
     "conditioning_base_grad_norm": "0x1.1d95d08219a08p+4",
     "conditioning_penalty_grad_norm": "0x1.1f134a04e8037p+6",
     "conditioning_penalty_grad_ratio": "0x1.0155f4ad40a47p+2",
@@ -1101,7 +1101,7 @@
      false
     ],
     "objective_to_augmented_term_ratio": "0x1.3543a2d54d6b8p+5",
-    "augmented_gradient_norm": "0x1.c1dc0aa5b5a98p+5",
+    "augmented_gradient_norm": "0x1.c1dc0aa5b5a97p+5",
     "surrogate_kkt_stationarity_norm": "0x1.f097eee64687bp+2",
     "multiplier_interpretation": "differentiable_alm_multipliers",
     "max_raw_hard_violation": null,
@@ -1246,7 +1246,7 @@
     "action": "subproblem_continue",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "30fb7d33c9195c2924ecd821b9a4d0d18e42e7bf6f625c07d19af781f6da0af1"
+    "event_sha256": "2e2cd6839b8572099dd87461d359a32117096b7a291ed5c8956ffe5545675b13"
    },
    {
     "event": "evaluate_problem",
@@ -1440,7 +1440,7 @@
     "action": "subproblem_continue",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "e78c6fe056bc0a119676402ea4f5d425303c7caaa272a65e5e2ae849a40f4f62"
+    "event_sha256": "27bcd4beb1a154272eb3fe55c84c5f4190dc474728053ba9c5a8f9309f1a4489"
    },
    {
     "event": "evaluate_problem",
@@ -2207,7 +2207,7 @@
     "action": "penalty_increase",
     "dual_update_penalty_reason": null,
     "outer_termination": "max_outer",
-    "event_sha256": "d4162e97da42f2387aa23c22a2d6e69ba6b6fec9be92b5baa48b30ecabd2e267"
+    "event_sha256": "940de01b5839eff290b6f430edcacedb3e0e64de66dd894964efd198b793c4d0"
    },
    {
     "event": "restore_incumbent_state",

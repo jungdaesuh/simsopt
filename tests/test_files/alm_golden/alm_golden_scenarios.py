@@ -21,8 +21,10 @@ replay test re-runs each scenario and compares the encodings for equality, key
 order included.
 
 The inner solver is SciPy's L-BFGS-B, so a replay is bitwise only with the
-numpy and SciPy builds and the machine the goldens were recorded with
-(``manifest.json``); run single-threaded (``OMP_NUM_THREADS=1``). Each golden
+numpy and SciPy builds, the machine and the OpenBLAS kernels the goldens were
+recorded with (``manifest.json``); run single-threaded with those kernels
+pinned before numpy loads (``OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+OPENBLAS_CORETYPE=<manifest openblas_coretype>``). Each golden
 also stores its coarse outcomes (:func:`scenario_outcomes`: actions,
 termination and restore reasons, flags), which should not depend on the last
 bits of the iterates, and :func:`scenario_boundary_values` reads its numeric
@@ -31,7 +33,9 @@ boundary values; the replay test checks both under any numpy and SciPy.
 
 from __future__ import annotations
 
+import ctypes
 import dataclasses
+import functools
 import hashlib
 import json
 import math
@@ -46,6 +50,7 @@ from typing import Optional
 
 import numpy as np
 import scipy
+import scipy.linalg  # noqa: F401  (loads SciPy's OpenBLAS)
 from scipy.optimize import LbfgsInvHessProduct, OptimizeResult
 
 from simsopt.solve.alm import (
@@ -1466,20 +1471,61 @@ def load_sensitivity() -> dict:
     return json.loads((FIXTURE_DIR / "sensitivity.json").read_text(encoding="utf-8"))
 
 
-def recorded_environment() -> tuple[str, str, str]:
-    """The numpy and SciPy versions and the machine the goldens were recorded with."""
+_OPENBLAS_CORENAME_SYMBOLS = (
+    "openblas_get_corename",
+    "openblas_get_corename64_",
+    "scipy_openblas_get_corename",
+    "scipy_openblas_get_corename64_",
+)
+
+
+@functools.lru_cache(maxsize=None)
+def openblas_coretype() -> Optional[str]:
+    """The OpenBLAS kernel family this process runs: the core name every
+    OpenBLAS loaded by numpy and SciPy reports (``OPENBLAS_CORETYPE``, set
+    before they load, pins it). None without ``/proc/self/maps`` or an
+    OpenBLAS, or when the loaded libraries disagree."""
+    maps = Path("/proc/self/maps")
+    if not maps.is_file():
+        return None
+    paths = sorted({
+        fields[-1]
+        for fields in (line.split() for line in maps.read_text().splitlines())
+        if fields[-1].startswith("/") and "openblas" in Path(fields[-1]).name.lower()
+    })
+    names = set()
+    for path in paths:
+        library = ctypes.CDLL(path)
+        for symbol in _OPENBLAS_CORENAME_SYMBOLS:
+            corename = getattr(library, symbol, None)
+            if corename is not None:
+                corename.restype = ctypes.c_char_p
+                names.add(corename().decode())
+                break
+    return names.pop() if len(names) == 1 else None
+
+
+def recorded_environment() -> tuple[str, str, str, str]:
+    """The numpy and SciPy versions, the machine and the OpenBLAS kernel
+    family the goldens were recorded with."""
     environment = load_manifest()["environment"]
-    return environment["numpy"], environment["scipy"], environment["machine"]
+    return (
+        environment["numpy"],
+        environment["scipy"],
+        environment["machine"],
+        environment["openblas_coretype"],
+    )
 
 
-def current_environment() -> tuple[str, str, str]:
-    return np.__version__, scipy.__version__, platform.machine()
+def current_environment() -> tuple[str, str, str, Optional[str]]:
+    return np.__version__, scipy.__version__, platform.machine(), openblas_coretype()
 
 
 def bitwise_environment() -> bool:
-    """Whether this numpy, SciPy and machine are the ones the goldens were
-    recorded with (floating-point results also depend on the architecture's
-    vector paths, not only on the library versions)."""
+    """Whether this numpy, SciPy, machine and OpenBLAS kernel family are the
+    ones the goldens were recorded with (floating-point results also depend on
+    the vector paths the BLAS kernels take, not only on the library
+    versions)."""
     return current_environment() == recorded_environment()
 
 

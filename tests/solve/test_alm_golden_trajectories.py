@@ -6,8 +6,11 @@ every ``ALMResult`` field, the history entries, every call the solver makes into
 caller code in order, and every outer-boundary checkpoint.
 
 These are characterization tests: they fail on any drift in values, order, keys
-or types. L-BFGS-B iterates are bitwise only for the numpy, SciPy and machine
-the goldens were recorded with, so the bitwise replay runs only there. Under any
+or types. L-BFGS-B iterates are bitwise only for the numpy, SciPy, machine and
+OpenBLAS kernels the goldens were recorded with, so the bitwise replay runs only
+there: with the recorded numpy and SciPy on x86_64, set the manifest's
+recording environment (``OPENBLAS_CORETYPE=Haswell``, one thread per library)
+before the test process starts. Under any
 supported numpy and SciPy each scenario replays its coarse outcomes (actions,
 termination and restore reasons, flags) and its numeric boundary values (x,
 objective, max violation, multipliers, penalty at every outer step, outer
@@ -25,10 +28,13 @@ leaves every fixture byte-identical refreshes the manifest's provenance with
 import copy
 import functools
 import hashlib
+import os
+import subprocess
 import sys
 import unittest
 from pathlib import Path
 from types import MappingProxyType
+from unittest.mock import patch
 
 GOLDEN_DIR = Path(__file__).resolve().parents[1] / "test_files" / "alm_golden"
 if str(GOLDEN_DIR) not in sys.path:
@@ -52,7 +58,7 @@ _golden = golden.load_golden
 # moved too far for a tolerance to catch a NUMERIC_REPLAY_CEILING regression,
 # is label-only (reason recorded); the others get, per quantity,
 # tolerance = tolerance_factor x max(spread, eps). Measured on x86_64, numpy
-# 2.4.6, SciPy 1.17.1.
+# 2.4.6, SciPy 1.17.1, OpenBLAS Haswell kernels.
 #
 #   label-only scenario (first change seen)          intended outcome not
 #                                                    reached in every sample
@@ -67,10 +73,10 @@ _golden = golden.load_golden
 #   cached_physics_smoothing (outer-step count)      -
 #
 #   numeric replay, largest tolerance over scenarios:
-#   x              1.4e-13  (multiplier_cap_process_budget)
-#   objective      1.9e-13  (dual_update_penalty_cap)
-#   max_violation  2.1e-13  (inner_iteration_budget)
-#   multipliers    3.5e-12  (toy_convex)
+#   x              1.5e-13  (multiplier_cap_process_budget)
+#   objective      2.2e-13  (inner_iteration_budget)
+#   max_violation  2.5e-13  (dual_update_penalty_cap)
+#   multipliers    3.1e-12  (toy_convex)
 #   penalty        2.2e-15  (every scenario: eps)
 SENSITIVITY = golden.load_sensitivity()
 NUMERIC_REPLAY_CEILING = SENSITIVITY["noise"]["numeric_replay_ceiling"]
@@ -138,8 +144,7 @@ class AlmGoldenFixtureSetTests(unittest.TestCase):
             alm_source_blob_ids(),
             "the ALM sources changed since the goldens were recorded; if every "
             "fixture still replays byte-identically, refresh the provenance: "
-            "OMP_NUM_THREADS=1 python tests/test_files/alm_golden/"
-            "generate_alm_golden.py --provenance-only",
+            + MANIFEST["regenerate"] + " --provenance-only",
         )
 
     def test_the_recorded_source_ids_cover_the_rules_that_judge_a_replay(self):
@@ -165,6 +170,43 @@ class AlmGoldenFixtureSetTests(unittest.TestCase):
                     _golden(scenario.name)["outcomes"]
                 )
                 self.assertEqual(sorted(missed), [])
+
+
+class AlmGoldenEnvironmentTests(unittest.TestCase):
+    """The bitwise replay runs only in the recorded environment, OpenBLAS
+    kernels included: the kernel family decides the last bits of the BLAS
+    calls inside L-BFGS-B and the evaluators."""
+
+    def test_the_manifest_records_the_openblas_kernels(self):
+        self.assertTrue(MANIFEST["environment"].get("openblas_coretype"))
+
+    def test_the_sensitivity_was_measured_in_the_recording_environment(self):
+        self.assertEqual(SENSITIVITY["environment"], MANIFEST["environment"])
+
+    def test_the_kernels_are_read_from_the_loaded_openblas(self):
+        if sys.platform != "linux":
+            self.skipTest("the loaded libraries are read from /proc/self/maps")
+        # numpy's and SciPy's OpenBLAS may detect a host differently (None);
+        # pinned before they load, both run and report the pinned kernels.
+        pinned = subprocess.run(
+            [sys.executable, "-c",
+             "import alm_golden_scenarios as g; print(g.openblas_coretype())"],
+            cwd=GOLDEN_DIR, env={**os.environ, "OPENBLAS_CORETYPE": "Haswell"},
+            capture_output=True, text=True, check=True,
+        )
+        self.assertEqual(pinned.stdout.strip(), "Haswell")
+        self.assertEqual(golden.current_environment()[-1], golden.openblas_coretype())
+
+    def test_the_bitwise_gate_requires_the_recorded_kernels(self):
+        numpy_version, scipy_version, machine, coretype = golden.recorded_environment()
+        with patch.object(golden.np, "__version__", numpy_version), \
+                patch.object(golden.scipy, "__version__", scipy_version), \
+                patch.object(golden.platform, "machine", return_value=machine):
+            with patch.object(golden, "openblas_coretype", return_value=coretype):
+                self.assertTrue(golden.bitwise_environment())
+            for other in (None, f"not {coretype}"):
+                with patch.object(golden, "openblas_coretype", return_value=other):
+                    self.assertFalse(golden.bitwise_environment())
 
 
 def outcome_replay_failure(name: str, outcomes, *, exact: bool):
@@ -331,8 +373,9 @@ class AlmGoldenNumericReplayTests(unittest.TestCase):
 @unittest.skipUnless(
     golden.bitwise_environment(),
     f"the goldens were recorded with numpy {RECORDED_ENVIRONMENT[0]} and SciPy "
-    f"{RECORDED_ENVIRONMENT[1]} on {RECORDED_ENVIRONMENT[2]}; L-BFGS-B iterates "
-    "are bitwise only there",
+    f"{RECORDED_ENVIRONMENT[1]} on {RECORDED_ENVIRONMENT[2]} with OpenBLAS's "
+    f"{RECORDED_ENVIRONMENT[3]} kernels (this process: {golden.current_environment()}); "
+    "L-BFGS-B iterates are bitwise only there",
 )
 class AlmGoldenReplayTests(unittest.TestCase):
     """One test per scenario; the scenario descriptions say what each covers."""

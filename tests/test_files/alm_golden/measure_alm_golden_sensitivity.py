@@ -49,10 +49,13 @@ scenario reaches an outcome outside ``observed_outcomes``: each recorded
 outcome set is closed under the held-out samples.
 
 The replay test sets each numeric tolerance to ``10 x max(spread, eps)``.
-Rerun from the repository root, single-threaded, whenever the goldens or the
-ALM sources change (the test pins the source blob ids)::
+Rerun from the repository root whenever the goldens or the ALM sources change
+(the test pins the source blob ids), in the environment the goldens were
+recorded in (the generator's ``RECORDING_ENVIRONMENT_VARIABLES``; the script
+exits otherwise)::
 
-    OMP_NUM_THREADS=1 python tests/test_files/alm_golden/measure_alm_golden_sensitivity.py
+    OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 OPENBLAS_CORETYPE=Haswell \
+        python tests/test_files/alm_golden/measure_alm_golden_sensitivity.py
 """
 
 from __future__ import annotations
@@ -60,15 +63,19 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
-import platform
 import sys
 from pathlib import Path
 
 import numpy as np
-import scipy
 
 import alm_golden_scenarios as golden
-from generate_alm_golden import INTENDED_OUTCOMES, alm_source_blob_ids
+from generate_alm_golden import (
+    INTENDED_OUTCOMES,
+    RECORDING_COMMAND_PREFIX,
+    alm_source_blob_ids,
+    recording_environment,
+    require_recording_environment,
+)
 
 ULPS = (1, 2, 3, 4)
 SEEDS = tuple(range(1, 37))
@@ -218,12 +225,18 @@ def measure_scenario(scenario) -> dict:
 
 
 def main() -> None:
+    require_recording_environment(Path(__file__).name)
+    if not golden.bitwise_environment():
+        raise SystemExit(
+            f"the goldens were recorded in {golden.recorded_environment()}, this "
+            f"process runs {golden.current_environment()}; regenerate them first"
+        )
     scenarios = {}
     for scenario in golden.SCENARIOS:
         scenarios[scenario.name] = measure_scenario(scenario)
         print(scenario.name, json.dumps(scenarios[scenario.name]), file=sys.stderr)
     payload = {
-        "measure": "OMP_NUM_THREADS=1 python "
+        "measure": f"{RECORDING_COMMAND_PREFIX} python "
                    "tests/test_files/alm_golden/measure_alm_golden_sensitivity.py",
         "noise": {
             "ulps": list(ULPS),
@@ -232,12 +245,7 @@ def main() -> None:
             "tolerance_factor": TOLERANCE_FACTOR,
             "numeric_replay_ceiling": NUMERIC_REPLAY_CEILING,
         },
-        "environment": {
-            "python": platform.python_version(),
-            "numpy": np.__version__,
-            "scipy": scipy.__version__,
-            "machine": platform.machine(),
-        },
+        "environment": recording_environment(),
         "source_blob_ids": alm_source_blob_ids(),
         "scenarios": scenarios,
     }

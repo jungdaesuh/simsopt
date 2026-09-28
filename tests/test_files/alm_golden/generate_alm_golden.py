@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """Record the ALM golden trajectories of ``alm_golden_scenarios.py``.
 
-Regenerate from the repository root, single-threaded, and only for a reviewed
-change that is meant to alter ALM behavior (a refactor that needs new goldens
-has changed behavior)::
+Regenerate from the repository root, and only for a reviewed change that is
+meant to alter ALM behavior (a refactor that needs new goldens has changed
+behavior), in the recording environment (``RECORDING_ENVIRONMENT_VARIABLES``:
+one thread per library and OpenBLAS's Haswell kernels)::
 
-    OMP_NUM_THREADS=1 python tests/test_files/alm_golden/generate_alm_golden.py
+    OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 OPENBLAS_CORETYPE=Haswell \
+        python tests/test_files/alm_golden/generate_alm_golden.py
 
-``--output-dir DIR`` writes the fixtures and manifest to ``DIR`` instead, e.g.
-to compare the trajectories two environments or two trees produce
-(``diff -r``; only ``manifest.json``'s environment and source ids may differ).
+``--output-dir DIR`` writes the fixtures and manifest to ``DIR`` instead, in
+any environment, e.g. to compare the trajectories two environments or two
+trees produce (``diff -r``; only ``manifest.json``'s environment and source
+ids may differ). Writing to this directory requires the recording
+environment.
 
 ``--provenance-only`` rewrites only ``manifest.json`` (environment and source
 blob ids) after a change that must not alter ALM behavior, e.g. comments or
@@ -37,14 +41,60 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import platform
 from pathlib import Path
+from types import MappingProxyType
 
 import numpy as np
 import scipy
 
 import alm_golden_scenarios as golden
 import simsopt.solve.alm as alm
+
+# The environment the goldens and their sensitivity are recorded in: one
+# thread per library and OpenBLAS's Haswell (AVX2) kernels, which every x86_64
+# CI runner has; OpenBLAS would otherwise pick the host's own (SkylakeX on an
+# AVX-512 host, absent on GitHub's AMD runners), and the kernels decide the
+# last bits of every replay.
+RECORDING_ENVIRONMENT_VARIABLES = MappingProxyType({
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "OPENBLAS_CORETYPE": "Haswell",
+})
+RECORDING_COMMAND_PREFIX = " ".join(
+    f"{name}={value}" for name, value in RECORDING_ENVIRONMENT_VARIABLES.items()
+)
+
+
+def recording_environment() -> dict:
+    """This process's environment fingerprint, as ``manifest.json`` and
+    ``sensitivity.json`` record it."""
+    return {
+        "python": platform.python_version(),
+        "numpy": np.__version__,
+        "scipy": scipy.__version__,
+        "machine": platform.machine(),
+        "openblas_coretype": golden.openblas_coretype(),
+    }
+
+
+def require_recording_environment(script: str) -> None:
+    """Exit unless this process has ``RECORDING_ENVIRONMENT_VARIABLES`` and
+    runs the OpenBLAS kernels they pin."""
+    differing = {
+        name: os.environ.get(name)
+        for name, value in RECORDING_ENVIRONMENT_VARIABLES.items()
+        if os.environ.get(name) != value
+    }
+    kernels = golden.openblas_coretype()
+    if differing or kernels != RECORDING_ENVIRONMENT_VARIABLES["OPENBLAS_CORETYPE"]:
+        raise SystemExit(
+            f"run in the recording environment: {RECORDING_COMMAND_PREFIX} python "
+            f"tests/test_files/alm_golden/{script} (this process: {differing or 'variables set'}, "
+            f"OpenBLAS kernels {kernels!r})"
+        )
+
 
 # What each scenario exists to exercise; generation fails if one is missed.
 INTENDED_OUTCOMES = {
@@ -175,6 +225,8 @@ def main() -> None:
     )
     arguments = parser.parse_args()
     output_dir = arguments.output_dir
+    if output_dir.resolve() == golden.FIXTURE_DIR:
+        require_recording_environment(Path(__file__).name)
     if set(INTENDED_OUTCOMES) != set(golden.SCENARIOS_BY_NAME):
         raise SystemExit("INTENDED_OUTCOMES and the scenario catalog disagree")
 
@@ -230,15 +282,10 @@ def main() -> None:
         {
             "format": golden.FIXTURE_FORMAT,
             "regenerate": (
-                "OMP_NUM_THREADS=1 python "
+                f"{RECORDING_COMMAND_PREFIX} python "
                 "tests/test_files/alm_golden/generate_alm_golden.py"
             ),
-            "environment": {
-                "python": platform.python_version(),
-                "numpy": np.__version__,
-                "scipy": scipy.__version__,
-                "machine": platform.machine(),
-            },
+            "environment": recording_environment(),
             "source_blob_ids": alm_source_blob_ids(),
             "outcome_union": sorted(union),
             "scenarios": entries,

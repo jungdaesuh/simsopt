@@ -1,11 +1,12 @@
 {
  "format": "alm_library_golden_trajectory_v1",
- "regenerate": "OMP_NUM_THREADS=1 python tests/test_files/alm_golden/generate_alm_golden.py",
+ "regenerate": "OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 OPENBLAS_CORETYPE=Haswell python tests/test_files/alm_golden/generate_alm_golden.py",
  "environment": {
   "python": "3.11.15",
   "numpy": "2.4.6",
   "scipy": "1.17.1",
-  "machine": "x86_64"
+  "machine": "x86_64",
+  "openblas_coretype": "Haswell"
  },
  "source_blob_ids": {
   "simsopt/solve/alm/__init__.py": "cb366d99a3ec2367331e0eef54c81bcae54c3590",
@@ -22,9 +23,9 @@
   "simsopt/solve/alm/policy.py": "2a4b40573a4bff86aa8099c0f58a793b86818073",
   "simsopt/solve/alm/problem.py": "3dae69d828aff8402c5e4bc7de19c6af4eeb7824",
   "simsopt/solve/alm/taylor.py": "0145e7432911ae1ee77ed408c54ced10e03d5124",
-  "alm_golden_scenarios.py": "cd67f25e11be56f7eced16dc4dc1278ab4b1bad2",
-  "generate_alm_golden.py": "58110c26da53408dfa7d56b7bbf1e63c42b5bd69",
-  "measure_alm_golden_sensitivity.py": "572a15e9c25a9d600298f17ff8c3df40475dfca6"
+  "alm_golden_scenarios.py": "e0417069c06900f37c00ee6475cc51a508ef5239",
+  "generate_alm_golden.py": "0fd2c142cfaa3600fff7b4f97f06f65d3656820c",
+  "measure_alm_golden_sensitivity.py": "68180b67ba1552716771db13112252d96b5924a6"
  },
  "outcome_union": [
   "action:constraints_inactive_converged",
@@ -80,8 +81,8 @@
   {
    "scenario": "toy_convex",
    "fixture": "toy_convex.json",
-   "sha256": "b26b3256997f044a87fa9ea7d0e2fcd3920faeaeec63a466d45a14a30c666c38",
-   "bytes": 21526
+   "sha256": "bdd8defb3407023d49daa1fca6c25de5590c12d11737b0e3b8b05d8c0af8e76e",
+   "bytes": 21524
   },
   {
    "scenario": "penalty_ramp_to_cap",
@@ -98,13 +99,13 @@
   {
    "scenario": "hybrid_mismatch_repair",
    "fixture": "hybrid_mismatch_repair.json",
-   "sha256": "82760cca4b8cd328409c1825008473c5d0ef15c3bb0ee143b836c652fc1326d6",
+   "sha256": "7199bdc85f7f581dadec904fc4469ef87433e70c966bf4ff067dbc718d0922f1",
    "bytes": 67233
   },
   {
    "scenario": "hybrid_mismatch_penalty_increase",
    "fixture": "hybrid_mismatch_penalty_increase.json",
-   "sha256": "e989458b4946447f26dd5bffa1ae059de489b906976f535d488640cc5c1dbc88",
+   "sha256": "003a44f3aa125efab4b9becff563e7e7015c30de92547fd2ebec7324edc5d9a3",
    "bytes": 46317
   },
   {
@@ -116,7 +117,7 @@
   {
    "scenario": "constraints_inactive_stall",
    "fixture": "constraints_inactive_stall.json",
-   "sha256": "2c6c8f8fb7d92a6fc1d0312877f258c32f7ef6eef5aad7c7e5d543dbac68fdd7",
+   "sha256": "e6e74abc54d798b1bf767c892d91589163b78cfa3d3c83fae905998b81b0c7c7",
    "bytes": 28052
   },
   {
@@ -134,7 +135,7 @@
   {
    "scenario": "trust_radius_retries",
    "fixture": "trust_radius_retries.json",
-   "sha256": "13094063a3704c240a46bed4ad56a4b8d6eadc22dc4cf5ce5159a28bf2a60fc7",
+   "sha256": "d998d7ebc9ca5683ed7aa55667ceb4e81a6caec2e47c2d0b2d171046e9d3d2e8",
    "bytes": 70326
   },
   {
@@ -146,26 +147,26 @@
   {
    "scenario": "cached_physics_smoothing",
    "fixture": "cached_physics_smoothing.json",
-   "sha256": "82c88029742206643ed034a92b27d9057f5b7033a48bc88c41c5f5aae3350d64",
+   "sha256": "bd1187a98e8bc656fbf5bf3cb1e5831ee31cacd6557e7b249aaae811e5eb347c",
    "bytes": 49198
   },
   {
    "scenario": "multiplier_cap_process_budget",
    "fixture": "multiplier_cap_process_budget.json",
-   "sha256": "fd926c5ac88e937f35fa5714b307770979a0e8ee10b5c0033254543a3b9bbde2",
+   "sha256": "a8a20b5f6b01059d631339e1b3fe16a12a0ef686ffb72ac2ffb7dcc320323e62",
    "bytes": 55711
   },
   {
    "scenario": "inner_iteration_budget",
    "fixture": "inner_iteration_budget.json",
-   "sha256": "3203a0162925cd2d16a642298158440f6ce0b941041396551401b3d22f630169",
-   "bytes": 20196
+   "sha256": "818ab4adc1cbab8588bcfab62bf2b776d3f1fb2056d094b7338cb2d3fcbc8bb8",
+   "bytes": 20194
   },
   {
    "scenario": "dual_update_penalty_cap",
    "fixture": "dual_update_penalty_cap.json",
-   "sha256": "6de8a3f91274acf3a23fd55e81d8fcb554f831c8e784f757b4be05d1b67f16f3",
-   "bytes": 18464
+   "sha256": "f23965286785c5abf25a1adb0e210792b9f10d8f29c75dbfcde8c831508164e8",
+   "bytes": 18462
   },
   {
    "scenario": "preinner_converged",

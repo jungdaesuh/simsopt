@@ -259,7 +259,7 @@
     "max_violation": "0x0.0p+0",
     "stationarity_norm": "0x1.219999999999ap+4",
     "raw_stationarity_norm": "0x1.219999999999ap+4",
-    "kkt_stationarity_norm": "0x1.0306af70d5c22p+3",
+    "kkt_stationarity_norm": "0x1.0306af70d5c23p+3",
     "constraint_values": [
      "0x0.0p+0"
     ],
@@ -355,7 +355,7 @@
     ],
     "objective_to_augmented_term_ratio": "0x1.4f78feef5ec82p+111",
     "augmented_gradient_norm": "0x1.219999999999ap+4",
-    "surrogate_kkt_stationarity_norm": "0x1.0306af70d5c22p+3",
+    "surrogate_kkt_stationarity_norm": "0x1.0306af70d5c23p+3",
     "multiplier_interpretation": "differentiable_alm_multipliers",
     "max_raw_hard_violation": null,
     "block_max_raw_hard_violation": null,
@@ -541,8 +541,8 @@
     "inner_lbfgsb_projected_gradient_norm": "0x0.0p+0",
     "inner_attempts": 1,
     "accepted_move_norm": "0x1.d8b95a19aa5c0p-6",
-    "accepted_move_norm_scaled": "0x1.56d5490dde863p-6",
-    "infeasible_stall_move_tolerance": "0x1.d9c71f2a4e6adp-27",
+    "accepted_move_norm_scaled": "0x1.56d5490dde862p-6",
+    "infeasible_stall_move_tolerance": "0x1.d9c71f2a4e6aep-27",
     "objective_delta": "0x1.67b85b7e17500p-2",
     "feasibility_delta": "0x0.0p+0",
     "feasibility_delta_tolerance": "0x1.0c6f7a0b5ed8dp-20",
@@ -868,7 +868,7 @@
     "action": "subproblem_continue",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "30fb7d33c9195c2924ecd821b9a4d0d18e42e7bf6f625c07d19af781f6da0af1"
+    "event_sha256": "2e2cd6839b8572099dd87461d359a32117096b7a291ed5c8956ffe5545675b13"
    },
    {
     "event": "evaluate_problem",
@@ -1086,7 +1086,7 @@
     "action": "signal_mismatch_penalty_increase",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "40c08ca1f9b3b2e6efe242bf00c8febd5c5b8980a3e35d5ec7e57f5248d7d288"
+    "event_sha256": "0d56e4117f5feff40a515870a385cbae0311631003540a57289cf826110bab7b"
    },
    {
     "event": "snapshot_accepted_state",
