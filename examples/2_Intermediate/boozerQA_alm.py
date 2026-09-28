@@ -77,10 +77,22 @@ MSC_THRESHOLD = 15.
 DISTANCE_TEMPERATURE = 0.005
 CURVATURE_TEMPERATURE = 0.05
 
-# L-BFGS-B iterations for the whole minimize_alm call (one budget shared by all
-# subproblems), and the number of outer iterations (multiplier updates):
-MAXITER = 50 if in_github_actions else 1000
-MAX_OUTER_ITERATIONS = 3 if in_github_actions else 10
+# Surface resolution: Fourier modes, which also set the quadrature grid
+# (2*mpol+1 by 2*ntor+1 points per field period).
+MPOL = NTOR = 4 if in_github_actions else 6
+
+# The inner L-BFGS-B options (maxiter: iterations for the whole minimize_alm
+# call, one budget shared by all subproblems) and the outer settings. In CI the
+# run's cost is bounded by counting evaluations, not only iterations: a path
+# whose line-search trials fail Newton spends up to maxls + 1 evaluations per
+# iteration and can re-solve a subproblem max_subproblem_continuations times,
+# so maxfun, maxls and the continuations cap every subproblem call.
+if in_github_actions:
+    INNER_OPTIONS = {"maxiter": 10, "maxfun": 15, "maxls": 5}
+    SETTINGS = ALMSettings(max_outer_iterations=2, max_subproblem_continuations=2)
+else:
+    INNER_OPTIONS = {"maxiter": 1000}
+    SETTINGS = ALMSettings(max_outer_iterations=10)
 
 # Directory for output
 OUT_DIR = "./output/"
@@ -213,8 +225,8 @@ def build_problem():
     G0 = 2. * np.pi * current_sum * (4 * np.pi * 10**(-7) / (2 * np.pi))
 
     ## COMPUTE THE INITIAL SURFACE ON WHICH WE WANT TO OPTIMIZE FOR QA ##
-    mpol = 6
-    ntor = 6
+    mpol = MPOL
+    ntor = NTOR
     stellsym = True
 
     phis = np.linspace(0, 1/nfp, 2*ntor+1, endpoint=False)
@@ -298,8 +310,8 @@ def main():
         dofs,
         problem.constraint_names,
         problem.evaluate,
-        ALMSettings(max_outer_iterations=MAX_OUTER_ITERATIONS),
-        {"maxiter": MAXITER},
+        SETTINGS,
+        INNER_OPTIONS,
         inner_callback=problem.accept_inner_iterate,
         accepted_callback=problem.accept_outer_iterate,
         snapshot_accepted_state_fn=problem.snapshot_accepted,
