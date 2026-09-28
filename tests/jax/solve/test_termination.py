@@ -474,14 +474,6 @@ _TABLE_CASES = [
     (Emitter.SCIPY_TRUST_EXACT, 1, None, _STATIONARY, _L.BUDGET_EXHAUSTED),
     (Emitter.SCIPY_TRUST_EXACT, 2, None, _STATIONARY, _L.FAILED),
     (Emitter.SCIPY_TRUST_EXACT, 3, None, _STATIONARY, _L.FAILED),
-    (Emitter.BOX_TRUST_REGION, 0, None, _STATIONARY, _L.CONVERGED),
-    (Emitter.BOX_TRUST_REGION, 1, None, _STATIONARY, _L.BUDGET_EXHAUSTED),
-    (Emitter.BOX_TRUST_REGION, 2, None, _NOT_STATIONARY, _L.BUDGET_EXHAUSTED),
-    (Emitter.BOX_TRUST_REGION, 3, None, _NOT_STATIONARY, _L.RADIUS_COLLAPSE),
-    (Emitter.BOX_TRUST_REGION, 4, None, _NOT_STATIONARY, _L.STAGNATED),
-    (Emitter.BOX_TRUST_REGION, 5, None, _NOT_STATIONARY, _L.NONFINITE),
-    (Emitter.BOX_TRUST_REGION, 6, None, _NOT_STATIONARY, _L.SUBPROBLEM_FAILED),
-    (Emitter.BOX_TRUST_REGION, 7, None, _STATIONARY, _L.SECOND_ORDER_INCONCLUSIVE),
 ]
 
 
@@ -586,8 +578,6 @@ _CAPS = [
     (Emitter.SCIPY_LBFGSB, 7, LbfgsbRestartReason.BUDGET_EXHAUSTED),
     (Emitter.SCIPY_TRUST_CONSTR, 0, None),
     (Emitter.SCIPY_TRUST_EXACT, 1, None),
-    (Emitter.BOX_TRUST_REGION, 1, None),
-    (Emitter.BOX_TRUST_REGION, 2, None),
 ]
 
 
@@ -763,7 +753,7 @@ def test_report_is_immutable() -> None:
 
 @pytest.mark.parametrize(
     "emitter",
-    [Emitter.SCIPY_TRUST_CONSTR, Emitter.SCIPY_TRUST_EXACT, Emitter.BOX_TRUST_REGION],
+    [Emitter.SCIPY_TRUST_CONSTR, Emitter.SCIPY_TRUST_EXACT],
 )
 def test_restart_metadata_from_another_emitter_is_rejected(emitter) -> None:
     with pytest.raises(ValueError, match="restart"):

@@ -96,12 +96,9 @@ class TerminationLabel(StrEnum):
     SADDLE = "SADDLE"
     SECOND_ORDER_INCONCLUSIVE = "SECOND_ORDER_INCONCLUSIVE"
     OWN_STOP_NOT_STATIONARY = "OWN_STOP_NOT_STATIONARY"
-    STAGNATED = "STAGNATED"
     UNRESOLVED_STALL = "UNRESOLVED_STALL"
     BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
     LINE_SEARCH_FAILED = "LINE_SEARCH_FAILED"
-    RADIUS_COLLAPSE = "RADIUS_COLLAPSE"
-    SUBPROBLEM_FAILED = "SUBPROBLEM_FAILED"
     INFEASIBLE = "INFEASIBLE"
     NONFINITE = "NONFINITE"
     FAILED = "FAILED"
@@ -115,9 +112,6 @@ class Emitter(StrEnum):
     SCIPY_LBFGSB = "scipy-lbfgsb"
     SCIPY_TRUST_CONSTR = "scipy-trust-constr"
     SCIPY_TRUST_EXACT = "scipy-trust-exact"
-    # A box-constrained trust-region Newton driver: its status table is defined here;
-    # the driver itself is not implemented.
-    BOX_TRUST_REGION = "box-trust-region"
 
 
 _OwnStop = Literal["own_stop"]
@@ -160,19 +154,6 @@ _STATUS_OUTCOMES: Final[Mapping[Emitter, Mapping[int, _Outcome]]] = MappingProxy
         # reduction <= 0, 3 LinAlgError.
         Emitter.SCIPY_TRUST_EXACT: MappingProxyType(
             {0: _OWN_STOP, 1: _L.BUDGET_EXHAUSTED, 2: _L.FAILED, 3: _L.FAILED}
-        ),
-        # The box trust-region Newton driver (``Emitter.BOX_TRUST_REGION``).
-        Emitter.BOX_TRUST_REGION: MappingProxyType(
-            {
-                0: _OWN_STOP,
-                1: _L.BUDGET_EXHAUSTED,
-                2: _L.BUDGET_EXHAUSTED,
-                3: _L.RADIUS_COLLAPSE,
-                4: _L.STAGNATED,
-                5: _L.NONFINITE,
-                6: _L.SUBPROBLEM_FAILED,
-                7: _L.SECOND_ORDER_INCONCLUSIVE,
-            }
         ),
     }
 )
