@@ -1085,6 +1085,48 @@ def test_gsco_live_loop_rejects_staged_capacity_overrun_under_jit() -> None:
         jax.block_until_ready(_run(over_capacity))
 
 
+def test_gsco_capacity_error_surfaces_through_x_alone_with_zero_steps() -> None:
+    """The traced capacity check fails the program even when nothing reads it.
+
+    The check is an unordered ``io_callback`` whose result becomes
+    ``history_length``. With zero steps no loop consumes that length and the
+    caller selects and waits on ``.x`` only, so this pins that the callback is
+    still executed and its error still reaches the caller.
+    """
+    A, b, loops, free_loops, segments, connections, x_init, loop_count_init = (
+        _gsco_problem()
+    )
+    params = _params(
+        A,
+        loops,
+        free_loops,
+        segments,
+        connections,
+        default_current=0.2,
+        max_current=np.inf,
+        max_loop_count=0,
+        lambda_s=0.15,
+    )
+    initial = wireframe_gsco_initial_state(
+        params,
+        jnp.asarray(b),
+        jnp.asarray(x_init),
+        jnp.asarray(loop_count_init),
+        history_capacity=3,
+    )
+    over_capacity = replace(
+        initial,
+        history_length=jnp.asarray(4, dtype=initial.history_length.dtype),
+    )
+
+    @jax.jit
+    def _run_x(state):
+        return gsco_live_loop_jax(state, max_steps=0, params=params).x
+
+    with pytest.raises(jax.errors.JaxRuntimeError, match="history capacity"):
+        _run_x(over_capacity).block_until_ready()
+
+
 def test_gsco_live_loop_jits_under_transfer_guard() -> None:
     A, b, loops, free_loops, segments, connections, x_init, loop_count_init = (
         _gsco_problem()
