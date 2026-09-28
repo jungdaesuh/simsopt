@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import Enum
 from functools import partial
 
@@ -67,7 +67,6 @@ from .specs import (
     apply_coil_symmetry,
     make_grouped_coil_set_spec,
 )
-from .surface_rzfourier import surface_rz_fourier_spec_from_dofs
 
 __all__ = [
     "GroupedBiotSavartBDispatchEvidence",
@@ -624,7 +623,7 @@ def _coil_curve_spec_from_dofs(
     *,
     use_compute_dtype: bool = False,
 ) -> object:
-    curve = curve_spec_with_dofs(
+    return curve_spec_with_dofs(
         extraction_spec.curve,
         optimizable_input_dofs_from_map_spec(
             extraction_spec.curve_map,
@@ -632,25 +631,6 @@ def _coil_curve_spec_from_dofs(
             use_compute_dtype=use_compute_dtype,
         ),
     )
-    if extraction_spec.surface_map is None:
-        return curve
-
-    surface_dofs = optimizable_input_dofs_from_map_spec(
-        extraction_spec.surface_map,
-        owner_dofs,
-        use_compute_dtype=use_compute_dtype,
-    )
-    surface = surface_rz_fourier_spec_from_dofs(
-        surface_dofs,
-        quadpoints_phi=curve.surface.quadpoints_phi,
-        quadpoints_theta=curve.surface.quadpoints_theta,
-        mpol=curve.surface.mpol,
-        ntor=curve.surface.ntor,
-        nfp=curve.surface.nfp,
-        stellsym=curve.surface.stellsym,
-        use_compute_dtype=use_compute_dtype,
-    )
-    return replace(curve, surface=surface)
 
 
 def coil_specs_from_dof_extraction_spec(

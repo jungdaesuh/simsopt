@@ -28,7 +28,6 @@ from simsopt_jax_adapters.geo.curve_contract import (
     _optimizable_dof_map_spec,
 )
 from simsopt.geo.jit import jit
-from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 from simsopt._core.optimizable import Optimizable
 from simsopt._core.derivative import derivative_dec
 from simsopt_jax.core import (
@@ -45,7 +44,6 @@ from simsopt_jax.core._math_utils import (
     zeros as _jax_zeros,
 )
 from simsopt_jax.core.curve_geometry import optimizable_input_dofs_from_map_spec
-from simsopt_jax.core.surface_rzfourier import surface_rz_fourier_spec_from_dofs
 from simsopt_jax.runtime.host_boundary import host_array as _host_array
 from simsopt_jax_adapters.geo.curve_specs import (
     curve_spec_from_adapter_curve,
@@ -426,16 +424,9 @@ def _curve_spec_dof_map_spec(owner, curve, *, curve_spec_template):
 
 
 @dataclass(frozen=True)
-class _SurfaceSpecBinding:
-    spec_template: object
-    dof_map: object
-
-
-@dataclass(frozen=True)
 class _CurveSpecBinding:
     spec_template: object
     base_curve_binding: object = None
-    surface_binding: object = None
 
 
 @dataclass(frozen=True)
@@ -448,69 +439,23 @@ class _CurrentStateBinding:
     scale: float = 1.0
 
 
-def _build_surface_spec_binding(owner, surface):
-    if surface.dof_size == 0:
-        return None
-    if not isinstance(surface, SurfaceRZFourier):
-        raise NotImplementedError(
-            "Shared selffield state only supports immutable RZ Fourier surface specs, "
-            f"got {type(surface).__name__}."
-        )
-    return _SurfaceSpecBinding(
-        spec_template=surface_rz_fourier_spec_from_dofs(
-            surface.get_dofs(),
-            quadpoints_phi=surface.quadpoints_phi,
-            quadpoints_theta=surface.quadpoints_theta,
-            mpol=surface.mpol,
-            ntor=surface.ntor,
-            nfp=surface.nfp,
-            stellsym=surface.stellsym,
-        ),
-        dof_map=_optimizable_local_full_dof_map_spec(owner, surface),
-    )
-
-
 def _build_curve_spec_binding(owner, curve):
     base_curve = getattr(curve, "curve", None)
-    surface = getattr(curve, "surf", None)
     return _CurveSpecBinding(
         spec_template=curve_spec_from_adapter_curve(curve),
         base_curve_binding=(
             None if base_curve is None else _build_curve_spec_binding(owner, base_curve)
         ),
-        surface_binding=(
-            None if surface is None else _build_surface_spec_binding(owner, surface)
-        ),
-    )
-
-
-def _surface_spec_from_binding(binding, owner_dofs):
-    surface_dofs = optimizable_input_dofs_from_map_spec(binding.dof_map, owner_dofs)
-    spec = binding.spec_template
-    return surface_rz_fourier_spec_from_dofs(
-        surface_dofs,
-        quadpoints_phi=spec.quadpoints_phi,
-        quadpoints_theta=spec.quadpoints_theta,
-        mpol=spec.mpol,
-        ntor=spec.ntor,
-        nfp=spec.nfp,
-        stellsym=spec.stellsym,
     )
 
 
 def _curve_spec_from_binding(binding, owner_dofs):
-    updates = {}
-    if binding.base_curve_binding is not None:
-        updates["base_curve"] = _curve_spec_from_binding(
-            binding.base_curve_binding, owner_dofs
-        )
-    if binding.surface_binding is not None:
-        updates["surface"] = _surface_spec_from_binding(
-            binding.surface_binding, owner_dofs
-        )
-    if not updates:
+    if binding.base_curve_binding is None:
         return binding.spec_template
-    return replace(binding.spec_template, **updates)
+    return replace(
+        binding.spec_template,
+        base_curve=_curve_spec_from_binding(binding.base_curve_binding, owner_dofs),
+    )
 
 
 def _build_current_state_binding(owner, current):

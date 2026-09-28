@@ -359,7 +359,7 @@ def test_spec_higher_derivatives_match_curve(stellsym: bool) -> None:
     "stellsym", [True, False], ids=["stellsym=True", "stellsym=False"]
 )
 def test_curve_pullback_shape(stellsym: bool) -> None:
-    """VJP cotangent has the shape of ``spec.dofs`` and no surface cotangent."""
+    """VJP cotangent has the shape of ``spec.dofs``."""
     rng = np.random.default_rng(_RNG_SEED + 4)
     curve = _build_curve(
         order=_ORDER,
@@ -374,10 +374,9 @@ def test_curve_pullback_shape(stellsym: bool) -> None:
     cotangent_g = jnp.ones_like(gamma_jax)
     cotangent_gd = jnp.ones_like(gammadash_jax)
 
-    coeff_cotangent, surface_cotangent = curve_pullback_from_dofs(
+    coeff_cotangent = curve_pullback_from_dofs(
         spec, spec.dofs, cotangent_g, cotangent_gd
     )
-    assert surface_cotangent is None
     assert coeff_cotangent.shape == spec.dofs.shape
     # The all-ones cotangent must produce a finite, non-zero result for a
     # non-degenerate curve. Zero would mean the pullback misrouted.

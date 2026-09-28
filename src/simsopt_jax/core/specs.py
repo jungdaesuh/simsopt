@@ -37,7 +37,6 @@ __all__ = [
     "CoilSetDofExtractionSpec",
     "CoilSymmetrySpec",
     "apply_coil_symmetry",
-    "CurveCWSFourierRZSpec",
     "CurveFilamentSpec",
     "CurveHelicalSpec",
     "OrientedCurveXYZFourierSpec",
@@ -75,7 +74,6 @@ __all__ = [
     "make_coil_group_spec",
     "make_coil_set_dof_extraction_spec",
     "make_current_value_spec",
-    "make_curve_cwsfourier_rz_spec",
     "make_curve_filament_spec",
     "make_curve_helical_spec",
     "make_curve_planarfourier_spec",
@@ -441,11 +439,9 @@ class CoilSpec:
         "curve_map",
         "current_map",
         "symmetry",
-        "surface_map",
         "current_term_maps",
     ),
     meta_fields=(
-        "surface_output_index",
         "current_term_scales",
         "curve_source_index",
     ),
@@ -463,8 +459,6 @@ class CoilDofExtractionSpec:
     curve_map: OptimizableDofMapSpec
     current_map: OptimizableDofMapSpec
     symmetry: CoilSymmetrySpec
-    surface_map: OptimizableDofMapSpec | None = None
-    surface_output_index: int | None = None
     current_term_maps: tuple[OptimizableDofMapSpec, ...] = ()
     current_term_scales: tuple[float, ...] = ()
     curve_source_index: int | None = None
@@ -693,24 +687,6 @@ class SingleStageRuntimeSpec:
     ntheta: int
 
 
-@_register_jax_spec(
-    data_fields=("dofs", "quadpoints", "surface"),
-    meta_fields=("order", "G", "H"),
-)
-class CurveCWSFourierRZSpec:
-    """Immutable curve-on-RZ-surface payload for pure JAX geometry."""
-
-    dofs: jax.Array
-    quadpoints: jax.Array
-    surface: SurfaceRZFourierSpec
-    order: int
-    G: float
-    H: float
-
-    def surface_dofs(self) -> jax.Array:
-        return surface_rz_fourier_dofs_from_spec(self.surface)
-
-
 RotationSpec = Union[FrameRotationSpec, ZeroRotationSpec]
 
 
@@ -772,7 +748,6 @@ CurveSpec = Union[
     CurvePlanarFourierSpec,
     CurveHelicalSpec,
     CurveXYZFourierSymmetriesSpec,
-    CurveCWSFourierRZSpec,
     CurvePerturbedSpec,
     CurveFilamentSpec,
 ]
@@ -784,7 +759,6 @@ CurveSpecKind = Literal[
     "planar_fourier",
     "helical",
     "xyz_fourier_symmetries",
-    "cws_fourier_rz",
     "perturbed",
     "filament",
 ]
@@ -804,8 +778,6 @@ def curve_spec_kind(spec: CurveSpec) -> CurveSpecKind:
         return "helical"
     if isinstance(spec, CurveXYZFourierSymmetriesSpec):
         return "xyz_fourier_symmetries"
-    if isinstance(spec, CurveCWSFourierRZSpec):
-        return "cws_fourier_rz"
     if isinstance(spec, CurvePerturbedSpec):
         return "perturbed"
     if isinstance(spec, CurveFilamentSpec):
@@ -1230,25 +1202,6 @@ def make_zero_rotation_spec(*, quadpoints: object) -> ZeroRotationSpec:
     return ZeroRotationSpec(quadpoints=_as_float64_array(quadpoints))
 
 
-def make_curve_cwsfourier_rz_spec(
-    *,
-    dofs: object,
-    quadpoints: object,
-    surface: SurfaceRZFourierSpec,
-    order: int,
-    G: float = 0.0,
-    H: float = 0.0,
-) -> CurveCWSFourierRZSpec:
-    return CurveCWSFourierRZSpec(
-        dofs=_as_float64_array(dofs),
-        quadpoints=_as_float64_array(quadpoints),
-        surface=surface,
-        order=int(order),
-        G=float(G),
-        H=float(H),
-    )
-
-
 def make_curve_perturbed_spec(
     *,
     dofs: object,
@@ -1339,8 +1292,6 @@ def make_coil_dof_extraction_spec(
     curve: CurveSpec,
     curve_map: OptimizableDofMapSpec,
     current_map: OptimizableDofMapSpec,
-    surface_map: OptimizableDofMapSpec | None = None,
-    surface_output_index: int | None = None,
     current_term_maps: tuple[OptimizableDofMapSpec, ...] = (),
     current_term_scales: tuple[float, ...] = (),
     curve_source_index: int | None = None,
@@ -1354,8 +1305,6 @@ def make_coil_dof_extraction_spec(
         curve_map=curve_map,
         current_map=current_map,
         symmetry=make_coil_symmetry_spec(rotmat=rotmat, scale=scale),
-        surface_map=surface_map,
-        surface_output_index=surface_output_index,
         current_term_maps=current_term_maps,
         current_term_scales=tuple(float(value) for value in current_term_scales),
         curve_source_index=(

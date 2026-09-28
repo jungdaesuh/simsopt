@@ -53,16 +53,6 @@ def _optimizable_dof_map_spec(owner, opt):
     )
 
 
-def _curve_jax_eval_from_arg(curve, method_name, curve_dofs, surf_dofs=None):
+def _curve_jax_eval_from_arg(curve, method_name, curve_dofs):
     curve_dofs = jnp.asarray(curve_dofs, dtype=jnp.float64)
-    method = getattr(curve, method_name)
-    if _curve_uses_full_dofs(curve):
-        return method(curve_dofs)
-
-    surf = getattr(curve, "surf", None)
-    if surf is not None and surf.dof_size > 0:
-        if surf_dofs is None:
-            surf_dofs = surf.get_dofs()
-        surf_dofs = jnp.asarray(surf_dofs, dtype=jnp.float64)
-        return method(curve_dofs, surf_dofs)
-    return method(curve_dofs)
+    return getattr(curve, method_name)(curve_dofs)

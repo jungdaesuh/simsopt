@@ -330,12 +330,11 @@ def test_curvefilament_spec_pullback_matches_central_fd(
     dg_j = jnp.asarray(dg, dtype=jnp.float64)
     dgd_j = jnp.asarray(dgd, dtype=jnp.float64)
 
-    spec_cotangent, surface_cotangent = curve_pullback_from_spec(
+    spec_cotangent = curve_pullback_from_spec(
         spec,
         dg_j,
         dgd_j,
     )
-    assert surface_cotangent is None
     jax_grad = np.asarray(spec_cotangent)
 
     dofs0 = np.asarray(spec.dofs, dtype=np.float64)

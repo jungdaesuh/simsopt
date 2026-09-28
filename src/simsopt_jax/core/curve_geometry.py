@@ -14,7 +14,6 @@ from simsopt_jax.backend.dtypes import explicit_device_array
 
 from .curve_kernels import (
     curve_length_from_incremental_arclength_pure as _curve_length_from_incremental_arclength_pure,
-    curve_cws_rz_gamma_from_dofs,
     incremental_arclength_pure as _incremental_arclength_pure,
     kappa_pure as _kappa_pure,
     torsion_pure as _torsion_pure,
@@ -42,7 +41,6 @@ from .framedcurve import (
 )
 from .oriented_curve import centercurve_pure
 from .specs import (
-    CurveCWSFourierRZSpec,
     CurveFilamentSpec,
     CurveHelicalSpec,
     OrientedCurveXYZFourierSpec,
@@ -56,9 +54,7 @@ from .specs import (
     RotationSpec,
     ZeroRotationSpec,
     curve_spec_kind,
-    make_curve_cwsfourier_rz_spec,
 )
-from .surface_rzfourier import surface_rz_fourier_spec_from_dofs
 
 __all__ = [
     "closed_curve_self_intersection_min_distance",
@@ -94,8 +90,6 @@ __all__ = [
     "pair_linking_number_pure",
     "segment_segment_distance_pure",
 ]
-
-_SURF_TYPE_RZ_FOURIER = "RZ_Fourier"
 
 
 def _as_explicit_runtime_array(value, *, reference=None) -> jax.Array:
@@ -200,39 +194,8 @@ def curve_spec_from_curve(curve):
             "standalone RotatedCurve geometry through the CPU wrapper."
         )
 
-    surface = getattr(curve, "surf", None)
-    if surface is None:
-        raise NotImplementedError(
-            f"Curve type {type(curve).__name__} does not expose an immutable JAX spec."
-        )
-
-    if getattr(curve, "surf_type", None) != _SURF_TYPE_RZ_FOURIER:
-        raise NotImplementedError(
-            "CWS spec generation requires surf_type='RZ_Fourier', "
-            f"got {getattr(curve, 'surf_type', None)!r}."
-        )
-
-    if type(surface).__name__ != "SurfaceRZFourier":
-        raise NotImplementedError(
-            "CWS spec generation with surf_type='RZ_Fourier' requires "
-            f"SurfaceRZFourier, got {type(surface).__name__}."
-        )
-
-    return make_curve_cwsfourier_rz_spec(
-        dofs=curve.get_dofs(),
-        quadpoints=curve.quadpoints,
-        surface=surface_rz_fourier_spec_from_dofs(
-            surface.get_dofs(),
-            quadpoints_phi=surface.quadpoints_phi,
-            quadpoints_theta=surface.quadpoints_theta,
-            mpol=surface.mpol,
-            ntor=surface.ntor,
-            nfp=surface.nfp,
-            stellsym=surface.stellsym,
-        ),
-        order=curve.order,
-        G=getattr(curve, "G", 0.0),
-        H=getattr(curve, "H", 0.0),
+    raise NotImplementedError(
+        f"Curve type {type(curve).__name__} does not expose an immutable JAX spec."
     )
 
 
@@ -302,22 +265,6 @@ def _curve_gamma_kernel(
             spec.nfp,
             spec.stellsym,
             spec.ntor,
-        )
-    if spec_kind == "cws_fourier_rz":
-        spec = cast(CurveCWSFourierRZSpec, spec)
-        surface_dofs = spec.surface_dofs()
-        return lambda quadpoints: curve_cws_rz_gamma_from_dofs(
-            curve_dofs,
-            quadpoints,
-            spec.order,
-            spec.G,
-            spec.H,
-            surface_dofs,
-            spec.surface.mpol,
-            spec.surface.ntor,
-            spec.surface.nfp,
-            spec.surface.stellsym,
-            use_compute_dtype=use_compute_dtype,
         )
     raise TypeError(
         "curve_gamma_kernel only supports direct curve specs, "
@@ -1186,62 +1133,19 @@ def curve_gammadashdashdash_vjp_from_dofs(spec: CurveSpec, dofs, cotangent):
     )
 
 
-def _curve_cws_gamma_and_dash_from_parts(
-    spec: CurveCWSFourierRZSpec,
-    curve_dofs,
-    surface_dofs,
-    *,
-    use_custom_vjp: bool = False,
-):
-    quadpoints, tangents = _curve_quadpoints(spec, reference=curve_dofs)
-
-    def gamma_kernel(qp):
-        return curve_cws_rz_gamma_from_dofs(
-            curve_dofs,
-            qp,
-            spec.order,
-            spec.G,
-            spec.H,
-            surface_dofs,
-            spec.surface.mpol,
-            spec.surface.ntor,
-            spec.surface.nfp,
-            spec.surface.stellsym,
-            use_custom_vjp=use_custom_vjp,
-        )
-
-    return jax.jvp(gamma_kernel, (quadpoints,), (tangents,))
-
-
 def curve_pullback_from_spec(spec: CurveSpec, dg, dgd):
     return curve_pullback_from_dofs(spec, spec.dofs, dg, dgd)
 
 
 def curve_pullback_from_dofs(spec: CurveSpec, dofs, dg, dgd):
-    """Return coefficient and optional surface cotangents for one curve spec."""
+    """Return the coefficient cotangent of ``(gamma, gammadash)`` for one curve spec."""
     curve_dofs = _as_runtime_float64(dofs, reference=spec.dofs)
     dg_jax = _as_runtime_float64(dg, reference=curve_dofs)
     dgd_jax = _as_runtime_float64(dgd, reference=curve_dofs)
-
-    if curve_spec_kind(spec) == "cws_fourier_rz":
-        spec = cast(CurveCWSFourierRZSpec, spec)
-        surface_dofs = spec.surface_dofs()
-
-        def outputs(curve_x, surface_x):
-            return _curve_cws_gamma_and_dash_from_parts(
-                spec,
-                curve_x,
-                surface_x,
-                use_custom_vjp=True,
-            )
-
-        _, pullback = jax.vjp(outputs, curve_dofs, surface_dofs)
-        coeff_cotangent, surface_cotangent = pullback((dg_jax, dgd_jax))
-        return coeff_cotangent, surface_cotangent
 
     def outputs(curve_x):
         return curve_gamma_and_dash_from_dofs(spec, curve_x)
 
     _, pullback = jax.vjp(outputs, curve_dofs)
     (coeff_cotangent,) = pullback((dg_jax, dgd_jax))
-    return coeff_cotangent, None
+    return coeff_cotangent

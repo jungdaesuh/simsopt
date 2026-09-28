@@ -1813,7 +1813,6 @@ def case_import_jax_core_specs() -> None:
         CoilSpec,
         CoilGroupSpec,
         CoilSymmetrySpec,
-        CurveCWSFourierRZSpec,
         CurveFilamentSpec,
         CurveHelicalSpec,
         CurvePlanarFourierSpec,
@@ -1841,7 +1840,6 @@ def case_import_jax_core_specs() -> None:
     assert CoilSpec is not None
     assert CoilGroupSpec is not None
     assert CoilSymmetrySpec is not None
-    assert CurveCWSFourierRZSpec is not None
     assert CurveFilamentSpec is not None
     assert CurveHelicalSpec is not None
     assert CurvePlanarFourierSpec is not None
@@ -1875,7 +1873,7 @@ centroid_frame_dash compute_filament_offsets frenet_frame frenet_frame_dash
 rotated_centroid_frame rotated_centroid_frame_dash rotated_frenet_frame rotated_frenet_frame_dash
 rotation_alpha rotation_alphadash rotation_dcoeff rotationdash_dcoeff
 CoilSpec CoilGroupSpec CoilDofExtractionSpec CoilSetDofExtractionSpec
-CoilSymmetrySpec apply_coil_symmetry CurveCWSFourierRZSpec CurveFilamentSpec
+CoilSymmetrySpec apply_coil_symmetry CurveFilamentSpec
 CurveHelicalSpec OrientedCurveXYZFourierSpec make_oriented_curve_xyzfourier_spec CurvePlanarFourierSpec
 CurveSpec CurveSpecKind CurvePerturbedSpec CurrentValueSpec
 CurveRZFourierSpec CurveXYZFourierSpec CurveXYZFourierSymmetriesSpec FieldEvalSpec
@@ -1907,7 +1905,7 @@ grouped_biot_savart_dA_by_dX_from_spec grouped_biot_savart_dB_by_dX_from_inputs 
 grouped_coil_currents_from_spec grouped_coil_index_lists_from_spec grouped_coil_set_spec_from_grouped_data grouped_coil_set_spec_from_inputs
 grouped_coil_set_spec_from_lists grouped_coil_set_spec_from_source grouped_field_data_from_spec grouped_field_inputs_from_spec
 make_biot_savart_spec make_coil_spec make_coil_dof_extraction_spec make_coil_symmetry_spec
-make_coil_group_spec make_coil_set_dof_extraction_spec make_current_value_spec make_curve_cwsfourier_rz_spec
+make_coil_group_spec make_coil_set_dof_extraction_spec make_current_value_spec
 make_curve_filament_spec make_curve_helical_spec make_curve_planarfourier_spec make_curve_perturbed_spec
 make_curve_rzfourier_spec make_curve_xyzfourier_spec make_curve_xyzfouriersymmetries_spec make_field_eval_spec
 make_frame_rotation_spec make_fixed_surface_flux_spec make_grouped_coil_set_spec make_optimizable_dof_map_spec
@@ -2007,7 +2005,6 @@ def case_jax_core_specs_are_pytrees() -> None:
     from simsopt_jax.core import (
         CoilSpec,
         CoilSymmetrySpec,
-        CurveCWSFourierRZSpec,
         CurveFilamentSpec,
         CurveHelicalSpec,
         CurvePlanarFourierSpec,
@@ -2024,10 +2021,7 @@ def case_jax_core_specs_are_pytrees() -> None:
         SurfaceXYZFourierSpec,
         SurfaceXYZTensorFourierSpec,
         ZeroRotationSpec,
-        curve_gamma_and_dash_from_dofs,
         curve_gamma_and_dash_from_spec,
-        curve_geometry_from_dofs,
-        curve_geometry_from_spec,
         fixed_surface_flux_integral_from_B,
         grouped_biot_savart_B_from_spec,
         grouped_coil_currents_from_spec,
@@ -2041,7 +2035,6 @@ def case_jax_core_specs_are_pytrees() -> None:
         make_coil_symmetry_spec,
         make_fixed_surface_flux_spec,
         make_current_value_spec,
-        make_curve_cwsfourier_rz_spec,
         make_curve_filament_spec,
         make_curve_helical_spec,
         make_curve_planarfourier_spec,
@@ -2197,38 +2190,10 @@ def case_jax_core_specs_are_pytrees() -> None:
         mpol=1,
         ntor=0,
     )
-    curve_cws_spec = make_curve_cwsfourier_rz_spec(
-        dofs=jnp.asarray([0.1, 0.0, 0.2, 0.0, 0.0, 0.0]),
-        quadpoints=jnp.asarray([0.0, 0.5]),
-        surface=surface_spec,
-        order=1,
-    )
-    surface_spec_nonstellsym = make_surface_rzfourier_spec(
-        rc=jnp.asarray([[1.0], [0.25]]),
-        zs=jnp.asarray([[0.0], [0.2]]),
-        rs=jnp.asarray([[0.0], [0.15]]),
-        zc=jnp.asarray([[0.05], [0.0]]),
-        quadpoints_phi=jnp.asarray([0.0, 0.5]),
-        quadpoints_theta=jnp.asarray([0.0, 0.5]),
-        nfp=1,
-        stellsym=False,
-    )
-    curve_cws_nonstellsym_spec = make_curve_cwsfourier_rz_spec(
-        dofs=jnp.asarray([0.1, 0.0, 0.2, 0.0, 0.0, 0.0]),
-        quadpoints=jnp.asarray([0.0, 0.5]),
-        surface=surface_spec_nonstellsym,
-        order=1,
-    )
     coil_symmetry_spec = make_coil_symmetry_spec(scale=2.5)
-
-    def assert_surface_dofs_derivable(cs, expected_ndofs):
-        derived = cs.surface_dofs()
-        assert derived.shape == (expected_ndofs,)
-        assert np.all(np.isfinite(np.asarray(derived)))
 
     assert isinstance(coil_value_spec, CoilSpec)
     assert isinstance(coil_symmetry_spec, CoilSymmetrySpec)
-    assert isinstance(curve_cws_spec, CurveCWSFourierRZSpec)
     assert isinstance(curve_filament_spec, CurveFilamentSpec)
     assert isinstance(curve_helical_spec, CurveHelicalSpec)
     assert isinstance(curve_planar_spec, CurvePlanarFourierSpec)
@@ -2253,7 +2218,6 @@ def case_jax_core_specs_are_pytrees() -> None:
     curve_rz_leaves, _ = jax.tree.flatten(curve_rz_spec)
     curve_planar_leaves, _ = jax.tree.flatten(curve_planar_spec)
     curve_helical_leaves, _ = jax.tree.flatten(curve_helical_spec)
-    curve_cws_leaves, _ = jax.tree.flatten(curve_cws_spec)
     curve_perturbed_leaves, _ = jax.tree.flatten(curve_perturbed_spec)
     curve_filament_leaves, _ = jax.tree.flatten(curve_filament_spec)
     coil_symmetry_leaves, _ = jax.tree.flatten(coil_symmetry_spec)
@@ -2282,7 +2246,6 @@ def case_jax_core_specs_are_pytrees() -> None:
     assert len(curve_rz_leaves) == 2
     assert len(curve_planar_leaves) == 2
     assert len(curve_helical_leaves) == 2
-    assert len(curve_cws_leaves) == 8
     assert len(curve_perturbed_leaves) == 9
     assert len(curve_filament_leaves) == 8
     assert len(coil_symmetry_leaves) == 1
@@ -2306,8 +2269,6 @@ def case_jax_core_specs_are_pytrees() -> None:
     ].coil_indices == (0,)
     assert grouped_coil_set_spec_from_source(coil_spec) is coil_spec
     assert callable(invalidate_kernel_cache)
-    assert_surface_dofs_derivable(curve_cws_spec, 3)  # stellsym: 2 rc + 1 zs
-    assert_surface_dofs_derivable(curve_cws_nonstellsym_spec, 6)  # 2rc+1rs+2zc+1zs
     assert_round_trip(curve_perturbed_spec)
     assert_round_trip(curve_filament_spec)
     assert_round_trip(surface_xyz_spec)
@@ -2318,26 +2279,12 @@ def case_jax_core_specs_are_pytrees() -> None:
         curve_xyz_spec
     )
     curve_rz_gamma, _ = jax.jit(curve_gamma_and_dash_from_spec)(curve_rz_spec)
-    curve_cws_gamma, curve_cws_gammadash = jax.jit(curve_gamma_and_dash_from_spec)(
-        curve_cws_spec
-    )
     curve_perturbed_gamma, curve_perturbed_gammadash = jax.jit(
         curve_gamma_and_dash_from_spec
     )(curve_perturbed_spec)
     curve_filament_gamma, curve_filament_gammadash = jax.jit(
         curve_gamma_and_dash_from_spec
     )(curve_filament_spec)
-    curve_cws_gamma_from_dofs, curve_cws_gammadash_from_dofs = jax.jit(
-        curve_gamma_and_dash_from_dofs
-    )(
-        curve_cws_spec,
-        curve_cws_spec.dofs,
-    )
-    _, _, curve_cws_gammadashdash = jax.jit(curve_geometry_from_spec)(curve_cws_spec)
-    _, _, curve_cws_gammadashdash_from_dofs = jax.jit(curve_geometry_from_dofs)(
-        curve_cws_spec,
-        curve_cws_spec.dofs,
-    )
     B = jax.jit(grouped_biot_savart_B_from_spec)(jnp.zeros((4, 3)), coil_spec)
     value = jax.jit(fixed_surface_flux_integral_from_B)(B, flux_spec)
     gamma = jax.jit(surface_rz_fourier_gamma_from_spec)(surface_spec)
@@ -2350,16 +2297,10 @@ def case_jax_core_specs_are_pytrees() -> None:
     assert curve_xyz_gamma.shape == (2, 3)
     assert curve_xyz_gammadash.shape == (2, 3)
     assert curve_rz_gamma.shape == (2, 3)
-    assert curve_cws_gamma.shape == (2, 3)
-    assert curve_cws_gamma_from_dofs.shape == (2, 3)
-    assert curve_cws_gammadash.shape == (2, 3)
-    assert curve_cws_gammadash_from_dofs.shape == (2, 3)
     assert curve_perturbed_gamma.shape == (2, 3)
     assert curve_perturbed_gammadash.shape == (2, 3)
     assert curve_filament_gamma.shape == (2, 3)
     assert curve_filament_gammadash.shape == (2, 3)
-    assert curve_cws_gammadashdash.shape == (2, 3)
-    assert curve_cws_gammadashdash_from_dofs.shape == (2, 3)
     assert gamma.shape == (2, 2, 3)
     assert xyz_gamma.shape == (2, 2, 3)
     assert xyztensor_gamma.shape == (2, 2, 3)

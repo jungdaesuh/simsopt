@@ -1141,15 +1141,6 @@ def test_transfer_guard_disallow_preserves_shifted_grid_axis_sample():
     )
 
 
-def test_transfer_guard_disallow_allows_gamma_2d_eager_host_constants():
-    """Eager curve geometry helpers must keep host literals explicit under strict guard."""
-    _assert_python_script_passes(
-        _JAX_SUBPROCESS_CASES_PATH,
-        args=("gamma-2d-eager-host-constants",),
-        failure_message="gamma_2d strict transfer-guard smoke failed",
-    )
-
-
 def test_transfer_guard_disallow_allows_closed_curve_self_intersection_summary():
     """Strict GPU geometry probes must not materialize shape scalars on the host."""
     _assert_python_script_passes(

@@ -69,7 +69,6 @@ from simsopt_jax_adapters.geo.boozer_surface import (  # type: ignore[import-unt
     _boozer_penalty_objective,
     _surface_sample_z,
 )
-from simsopt_jax.core.curve_kernels import gamma_2d  # type: ignore[import-untyped]
 from simsopt_jax.geo._pairwise_reductions import (  # type: ignore[import-untyped]
     pairwise_min_distance_pure,
 )
@@ -1671,19 +1670,6 @@ def _run_shifted_grid_axis_sample_case() -> None:
     assert np.isclose(xyz_sample, float(xyz_gamma[0, 0, 2]))
 
 
-def _run_gamma_2d_eager_host_constants_case() -> None:
-    if _configure_strict_gpu_fast_backend() is None:
-        _skip_case(_STRICT_GPU_FAST_SKIP_REASON)
-        return
-
-    modes = np.zeros(10, dtype=np.float64)
-    qpts = np.linspace(0.0, 1.0, 8, endpoint=False)
-    phi, theta = gamma_2d(modes, qpts, 2, G=1, H=0)
-
-    assert phi.shape == (8,)
-    assert theta.shape == (8,)
-
-
 def _run_closed_curve_self_intersection_summary_case() -> None:
     gpu = _configure_strict_gpu_fast_backend()
     if gpu is None:
@@ -2089,9 +2075,6 @@ def _dispatch_case(args: argparse.Namespace) -> None:
     if args.case == "shifted-grid-axis-sample":
         _run_shifted_grid_axis_sample_case()
         return
-    if args.case == "gamma-2d-eager-host-constants":
-        _run_gamma_2d_eager_host_constants_case()
-        return
     if args.case == "closed-curve-self-intersection-summary":
         _run_closed_curve_self_intersection_summary_case()
         return
@@ -2160,7 +2143,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     subparsers.add_parser("target-minimize-replicated-sharding-vjp")
     subparsers.add_parser("boozer-penalty-replicated-sharding-vjp")
     subparsers.add_parser("shifted-grid-axis-sample")
-    subparsers.add_parser("gamma-2d-eager-host-constants")
     subparsers.add_parser("closed-curve-self-intersection-summary")
     subparsers.add_parser("surface-xyztensorfourier-gamma-from-dofs")
     subparsers.add_parser("coil-symmetry-spec-identity-default")

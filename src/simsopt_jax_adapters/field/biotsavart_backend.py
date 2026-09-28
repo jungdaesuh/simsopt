@@ -37,7 +37,6 @@ from simsopt_jax.core import (
     curve_gamma_and_dash_from_spec,
     curve_geometry_from_spec,
     curve_pullback_from_dofs,
-    curve_spec_kind,
     curve_spec_with_dofs,
     make_coil_dof_extraction_spec,
     make_coil_set_dof_extraction_spec,
@@ -553,7 +552,7 @@ class SpecBackedCurve(Optimizable):
             self._current_curve_spec(),
             dg.device,
         )
-        coeff_cotangent, _surface_cotangent = curve_pullback_from_dofs(
+        coeff_cotangent = curve_pullback_from_dofs(
             curve_spec,
             curve_spec.dofs,
             dg,
@@ -885,8 +884,6 @@ class SpecBackedBiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
             curve_key = (
                 _spec_cache_key(extraction_spec.curve),
                 _spec_cache_key(extraction_spec.curve_map),
-                _spec_cache_key(extraction_spec.surface_map),
-                extraction_spec.surface_output_index,
             )
             if curve_key not in curve_views:
                 curve_views[curve_key] = SpecBackedCurve(
@@ -1216,7 +1213,7 @@ def _add_extraction_cotangent_to_dofs_gradient(
         dg = _as_jax_float64(dg) @ rotmat_t
         dgd = _as_jax_float64(dgd) @ rotmat_t
 
-    coeff_cotangent, surface_cotangent = curve_pullback_from_dofs(
+    coeff_cotangent = curve_pullback_from_dofs(
         coil_spec.curve,
         coil_spec.curve.dofs,
         dg,
@@ -1230,48 +1227,11 @@ def _add_extraction_cotangent_to_dofs_gradient(
         coeff_cotangent,
         coil_dofs,
     )
-    if extraction_spec.surface_map is not None and surface_cotangent is not None:
-        dofs_gradient = dofs_gradient + _dof_map_cotangent_to_owner_gradient(
-            extraction_spec.surface_map,
-            surface_cotangent,
-            coil_dofs,
-        )
     return dofs_gradient + _dof_map_cotangent_to_owner_gradient(
         extraction_spec.current_map,
         current_cotangent,
         coil_dofs,
     )
-
-
-def _empty_external_surface_cotangents(coil_dof_extraction_spec):
-    output_count = 1 + max(
-        (
-            extraction_spec.surface_output_index
-            for extraction_spec in coil_dof_extraction_spec.coils
-            if extraction_spec.surface_output_index is not None
-        ),
-        default=-1,
-    )
-    surface_cotangents = [None] * output_count
-    for extraction_spec in coil_dof_extraction_spec.coils:
-        output_index = extraction_spec.surface_output_index
-        if output_index is None or surface_cotangents[output_index] is not None:
-            continue
-        surface_dofs = extraction_spec.curve.surface_dofs()
-        surface_cotangents[output_index] = surface_dofs - surface_dofs
-    return tuple(surface_cotangents)
-
-
-def _add_external_surface_cotangent(
-    surface_cotangents,
-    output_index,
-    surface_cotangent,
-):
-    if output_index is None or surface_cotangent is None:
-        return surface_cotangents
-    updated = list(surface_cotangents)
-    updated[output_index] = updated[output_index] + surface_cotangent
-    return tuple(updated)
 
 
 def _coil_cotangents_to_dofs_gradient_from_extraction_spec(
@@ -1301,48 +1261,6 @@ def _coil_cotangents_to_dofs_gradient_from_extraction_spec(
     return dofs_gradient
 
 
-def _external_surface_cotangents_from_extraction_spec(
-    coil_dof_extraction_spec,
-    d_coil_arrays,
-    coil_indices,
-    coil_dofs,
-):
-    coil_dofs = _as_jax_float64(coil_dofs)
-    surface_cotangents = _empty_external_surface_cotangents(coil_dof_extraction_spec)
-    if not surface_cotangents:
-        return surface_cotangents
-
-    coil_specs = coil_specs_from_dof_extraction_spec(
-        coil_dof_extraction_spec,
-        coil_dofs,
-    )
-    extraction_specs = coil_dof_extraction_spec.coils
-    for (d_g, d_gd, _d_c), indices in zip(d_coil_arrays, coil_indices):
-        for local_i, global_i in enumerate(indices):
-            extraction_spec = extraction_specs[global_i]
-            if extraction_spec.surface_output_index is None:
-                continue
-            dg = jax.lax.index_in_dim(d_g, local_i, axis=0, keepdims=False)
-            dgd = jax.lax.index_in_dim(d_gd, local_i, axis=0, keepdims=False)
-            if extraction_spec.symmetry.has_rotation:
-                rotmat_t = _as_jax_float64(extraction_spec.symmetry.rotmat).T
-                dg = _as_jax_float64(dg) @ rotmat_t
-                dgd = _as_jax_float64(dgd) @ rotmat_t
-
-            _coeff_cotangent, surface_cotangent = curve_pullback_from_dofs(
-                coil_specs[global_i].curve,
-                coil_specs[global_i].curve.dofs,
-                dg,
-                dgd,
-            )
-            surface_cotangents = _add_external_surface_cotangent(
-                surface_cotangents,
-                extraction_spec.surface_output_index,
-                surface_cotangent,
-            )
-    return surface_cotangents
-
-
 @partial(jax.jit, static_argnames=("coil_indices",))
 def _jitted_coil_cotangents_to_dofs_gradient(
     coil_dof_extraction_spec,
@@ -1351,21 +1269,6 @@ def _jitted_coil_cotangents_to_dofs_gradient(
     coil_dofs,
 ):
     return _coil_cotangents_to_dofs_gradient_from_extraction_spec(
-        coil_dof_extraction_spec,
-        d_coil_arrays,
-        coil_indices,
-        coil_dofs,
-    )
-
-
-@partial(jax.jit, static_argnames=("coil_indices",))
-def _jitted_external_surface_cotangents(
-    coil_dof_extraction_spec,
-    d_coil_arrays,
-    coil_indices,
-    coil_dofs,
-):
-    return _external_surface_cotangents_from_extraction_spec(
         coil_dof_extraction_spec,
         d_coil_arrays,
         coil_indices,
@@ -1422,7 +1325,7 @@ def _add_full_curve_cotangent_to_dofs_gradient(
 
 def _curve_pullback_data_from_spec(curve, dg, dgd):
     spec = curve_spec_from_adapter_curve(curve)
-    coeff_cotangent, surface_cotangent = curve_pullback_from_dofs(
+    coeff_cotangent = curve_pullback_from_dofs(
         spec,
         _curve_live_dofs(curve),
         dg,
@@ -1430,10 +1333,7 @@ def _curve_pullback_data_from_spec(curve, dg, dgd):
     )
     if _curve_dof_mode(curve) == "full":
         return _full_curve_cotangent_to_derivative(curve, coeff_cotangent)
-    deriv_data = {curve: coeff_cotangent}
-    if surface_cotangent is not None:
-        deriv_data[curve.surf] = surface_cotangent
-    return deriv_data
+    return {curve: coeff_cotangent}
 
 
 def _merge_curve_pullback_data(deriv_data, curve, dg, dgd):
@@ -1739,8 +1639,6 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         self._curve_quadpoints_jax = _curve_quadpoints_jax(base_curves[0])
 
     def _build_coil_dof_extraction_spec(self):
-        external_surface_ids = {}
-        external_surfaces = []
         curve_source_ids = {}
 
         def affine_current_terms(current, coefficient=1.0):
@@ -1772,24 +1670,8 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
             current_terms = (
                 () if isinstance(current, Current) else affine_current_terms(current)
             )
-            curve_spec = curve_spec_from_adapter_curve(curve)
-            surface = getattr(curve, "surf", None)
-            is_cws_curve = curve_spec_kind(curve_spec) == "cws_fourier_rz"
-            surface_map = (
-                self._free_vector_dof_map_spec(surface, full_graph=False)
-                if surface is not None and is_cws_curve and surface in self.dof_indices
-                else None
-            )
-            surface_output_index = None
-            if surface is not None and is_cws_curve and surface_map is None:
-                surface_id = id(surface)
-                if surface_id not in external_surface_ids:
-                    external_surface_ids[surface_id] = len(external_surfaces)
-                    external_surfaces.append(surface)
-                surface_output_index = external_surface_ids[surface_id]
-
             return make_coil_dof_extraction_spec(
-                curve=curve_spec,
+                curve=curve_spec_from_adapter_curve(curve),
                 curve_map=self._free_vector_dof_map_spec(
                     curve,
                     full_graph=_curve_dof_mode(curve) == "full",
@@ -1806,17 +1688,13 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
                     coefficient for _term, coefficient in current_terms
                 ),
                 curve_source_index=curve_source_ids[curve_id],
-                surface_map=surface_map,
-                surface_output_index=surface_output_index,
                 rotmat=rotmat,
                 scale=scale,
             )
 
-        extraction_spec = make_coil_set_dof_extraction_spec(
+        return make_coil_set_dof_extraction_spec(
             coil_extraction_spec(coil) for coil in self._coils
         )
-        self._external_cotangent_surfaces = tuple(external_surfaces)
-        return extraction_spec
 
     def coil_dof_extraction_spec(self):
         """Return the cached immutable owner-DOF reconstruction contract."""
@@ -2371,7 +2249,7 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
             dg = _as_jax_float64(dg) @ rotmat_t
             dgd = _as_jax_float64(dgd) @ rotmat_t
 
-        coeff_cotangent, surface_cotangent = curve_pullback_from_dofs(
+        coeff_cotangent = curve_pullback_from_dofs(
             curve_spec_from_adapter_curve(curve),
             self._curve_dofs_from_free_vector(curve, coil_dofs),
             dg,
@@ -2393,14 +2271,6 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
                 self.dof_indices,
                 free_positions=self._local_free_positions(curve),
             )
-            if surface_cotangent is not None and curve.surf in self.dof_indices:
-                dofs_gradient = _add_local_cotangent_to_dofs_gradient(
-                    dofs_gradient,
-                    curve.surf,
-                    surface_cotangent,
-                    self.dof_indices,
-                    free_positions=self._local_free_positions(curve.surf),
-                )
 
         if current.dof_size > 0:
             dofs_gradient = _add_local_cotangent_to_dofs_gradient(
@@ -2472,33 +2342,11 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
                 coil_indices,
             )
 
-        canonical_indices = _canonical_coil_indices(coil_indices)
         dofs_gradient = self.coil_cotangents_to_dofs_gradient(
             d_coil_arrays,
-            canonical_indices,
+            _canonical_coil_indices(coil_indices),
         )
-        derivative = self.dofs_gradient_to_derivative(dofs_gradient)
-        external_surfaces = getattr(self, "_external_cotangent_surfaces", ())
-        if not external_surfaces:
-            return derivative
-
-        surface_cotangents = _jitted_external_surface_cotangents(
-            self._coil_dof_extraction_spec,
-            d_coil_arrays,
-            canonical_indices,
-            self._normalize_explicit_coil_dofs(self.x.copy()),
-        )
-        derivative_data = dict(derivative.data)
-        for surface, surface_cotangent in zip(
-            external_surfaces,
-            surface_cotangents,
-            strict=True,
-        ):
-            if surface in derivative_data:
-                derivative_data[surface] = derivative_data[surface] + surface_cotangent
-            else:
-                derivative_data[surface] = surface_cotangent
-        return Derivative(derivative_data)
+        return self.dofs_gradient_to_derivative(dofs_gradient)
 
     def dofs_gradient_to_derivative(self, dofs_gradient):
         return dofs_gradient_to_derivative(self.unique_dof_lineage, dofs_gradient)

@@ -15,7 +15,6 @@ from simsopt_jax.core import (
     make_coil_symmetry_spec,
     make_coil_set_dof_extraction_spec,
     make_current_value_spec,
-    make_curve_cwsfourier_rz_spec,
     make_curve_filament_spec,
     make_curve_helical_spec,
     make_oriented_curve_xyzfourier_spec,
@@ -150,14 +149,6 @@ def _make_curve_spec_kind_samples():
             ell=3,
             R0=1.5,
             r=0.2,
-        ),
-        "cws_fourier_rz": make_curve_cwsfourier_rz_spec(
-            dofs=np.arange(8, dtype=np.float64),
-            quadpoints=quadpoints,
-            surface=_make_surface_spec(),
-            order=1,
-            G=0.1,
-            H=-0.2,
         ),
         "perturbed": make_curve_perturbed_spec(
             dofs=np.array(base_curve.dofs),

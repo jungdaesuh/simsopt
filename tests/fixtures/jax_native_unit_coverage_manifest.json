@@ -125,11 +125,11 @@
         },
         {
           "anchor": "self.regularizations = _as_jax_float64(",
-          "cite": "src/simsopt_jax_adapters/field/force.py:1379-1380"
+          "cite": "src/simsopt_jax_adapters/field/force.py:1324-1325"
         },
         {
           "anchor": "self.regularizations = _as_jax_float64([c.regularization for c in target_coils])",
-          "cite": "src/simsopt_jax_adapters/field/force.py:2290"
+          "cite": "src/simsopt_jax_adapters/field/force.py:2235"
         }
       ],
       "id": "MF-3",
@@ -168,11 +168,11 @@
         },
         {
           "anchor": "raise ValueError(\"B2Energy can only be used with RegularizedCoil objects\")",
-          "cite": "src/simsopt_jax_adapters/field/force.py:1375-1376"
+          "cite": "src/simsopt_jax_adapters/field/force.py:1320-1321"
         },
         {
           "anchor": "\"LpCurveForce can only be used with RegularizedCoil objects\"",
-          "cite": "src/simsopt_jax_adapters/field/force.py:2286-2289"
+          "cite": "src/simsopt_jax_adapters/field/force.py:2231-2234"
         }
       ],
       "id": "MF-4",
@@ -209,7 +209,7 @@
         "tests/field/test_selffieldforces.py:482-510",
         {
           "anchor": "def curve_force_norms_pure(",
-          "cite": "src/simsopt_jax_adapters/field/force.py:2006"
+          "cite": "src/simsopt_jax_adapters/field/force.py:1951"
         }
       ],
       "id": "MF-5",
@@ -284,11 +284,11 @@
       "evidence": [
         {
           "anchor": "def curve_force_norms_pure(",
-          "cite": "src/simsopt_jax_adapters/field/force.py:2006"
+          "cite": "src/simsopt_jax_adapters/field/force.py:1951"
         },
         {
           "anchor": "\"curve_force_norms_pure\",",
-          "cite": "src/simsopt_jax_adapters/field/force.py:62"
+          "cite": "src/simsopt_jax_adapters/field/force.py:60"
         },
         {
           "anchor": "ids=(\"cpu_parity\", \"gpu_parity\")",
@@ -547,7 +547,7 @@
       "evidence": [
         {
           "anchor": "rotation/reflection placement is a wrapper transform with no owned DOFs.",
-          "cite": "src/simsopt_jax/core/curve_geometry.py:188"
+          "cite": "src/simsopt_jax/core/curve_geometry.py:182"
         }
       ],
       "id": "CV-3",
@@ -698,7 +698,7 @@
         },
         {
           "anchor": "def curve_curve_distance_penalty_pure(",
-          "cite": "src/simsopt_jax/core/curve_kernels.py:65"
+          "cite": "src/simsopt_jax/core/curve_kernels.py:57"
         }
       ],
       "id": "CP-4",

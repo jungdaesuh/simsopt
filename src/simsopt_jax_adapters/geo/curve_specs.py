@@ -11,10 +11,8 @@ from simsopt.geo.curverzfourier import CurveRZFourier
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt.geo.finitebuild import CurveFilament
 from simsopt.geo.framedcurve import FrameRotation, FramedCurveFrenet, ZeroRotation
-from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 from simsopt_jax.core import (
     curve_spec_from_curve as _pure_curve_spec_from_curve,
-    make_curve_cwsfourier_rz_spec,
     make_curve_filament_spec,
     make_curve_helical_spec,
     make_curve_perturbed_spec,
@@ -24,7 +22,6 @@ from simsopt_jax.core import (
     make_frame_rotation_spec,
     make_zero_rotation_spec,
 )
-from simsopt_jax.core.surface_rzfourier import surface_rz_fourier_spec_from_dofs
 from simsopt_jax_adapters.geo.curve_contract import _optimizable_dof_map_spec
 
 __all__ = [
@@ -33,25 +30,19 @@ __all__ = [
     "supports_adapter_curve_spec",
 ]
 
-_SURF_TYPE_RZ_FOURIER = "RZ_Fourier"
-
 
 def supports_adapter_curve_spec(curve: object) -> bool:
-    return (
-        isinstance(
-            curve,
-            (
-                CurveXYZFourier,
-                CurveHelical,
-                CurvePlanarFourier,
-                CurveRZFourier,
-                CurvePerturbed,
-                CurveFilament,
-            ),
-        )
-        or _is_cws_rz_fourier_curve(curve)
-        or callable(getattr(curve, "to_spec", None))
-    )
+    return isinstance(
+        curve,
+        (
+            CurveXYZFourier,
+            CurveHelical,
+            CurvePlanarFourier,
+            CurveRZFourier,
+            CurvePerturbed,
+            CurveFilament,
+        ),
+    ) or callable(getattr(curve, "to_spec", None))
 
 
 def adapter_curve_dof_mode(curve: object) -> str:
@@ -95,8 +86,6 @@ def curve_spec_from_adapter_curve(curve):
         return _curve_perturbed_spec_from_curve(curve)
     if isinstance(curve, CurveFilament):
         return _curve_filament_spec_from_curve(curve)
-    if _is_cws_rz_fourier_curve(curve):
-        return _curve_cws_rz_fourier_spec_from_curve(curve)
 
     to_spec = getattr(curve, "to_spec", None)
     if callable(to_spec):
@@ -160,33 +149,4 @@ def _rotation_spec_from_curve(rotation, quadpoints):
     raise NotImplementedError(
         "CurveFilament JAX spec conversion supports FrameRotation and "
         f"ZeroRotation, got {type(rotation).__name__}."
-    )
-
-
-def _is_cws_rz_fourier_curve(curve: object) -> bool:
-    surface = getattr(curve, "surf", None)
-    return (
-        surface is not None
-        and getattr(curve, "surf_type", None) == _SURF_TYPE_RZ_FOURIER
-        and isinstance(surface, SurfaceRZFourier)
-    )
-
-
-def _curve_cws_rz_fourier_spec_from_curve(curve):
-    surface = curve.surf
-    return make_curve_cwsfourier_rz_spec(
-        dofs=curve.get_dofs(),
-        quadpoints=curve.quadpoints,
-        surface=surface_rz_fourier_spec_from_dofs(
-            surface.get_dofs(),
-            quadpoints_phi=surface.quadpoints_phi,
-            quadpoints_theta=surface.quadpoints_theta,
-            mpol=surface.mpol,
-            ntor=surface.ntor,
-            nfp=surface.nfp,
-            stellsym=surface.stellsym,
-        ),
-        order=curve.order,
-        G=getattr(curve, "G", 0.0),
-        H=getattr(curve, "H", 0.0),
     )
