@@ -45,7 +45,13 @@ def test_old_api_warns_once_per_callsite_but_logs_every_call(monkeypatch, caplog
 
     assert len(caught) == 1
     warning = caught[0]
-    assert warning.filename == __file__
+    # The warning names the caller's frame: its code object's file and the line
+    # of the call. ``__file__`` is the import path, which differs from the
+    # code's ``co_filename`` when the cached bytecode was compiled through
+    # another path to the same checkout (a symlink).
+    callsite = call_same_line_twice.__code__
+    assert warning.filename == callsite.co_filename
+    assert warning.lineno == callsite.co_firstlineno + 2
     assert "method='lbfgs' -> driver='scipy_lbfgsb'" in str(warning.message)
     assert len(caplog.records) == 2
     assert {record.translated_driver for record in caplog.records} == {"scipy_lbfgsb"}
