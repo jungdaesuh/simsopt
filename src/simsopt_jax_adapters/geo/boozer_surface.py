@@ -245,6 +245,7 @@ EXACT_FACTORIZATION_BACKEND: str = "operator-gmres"
 
 
 __all__ = [
+    "BOOZER_LS_DERIVATIVE_ASSEMBLIES",
     "BoozerHostSolveResult",
     "BoozerSurfaceJAX",
     "EXACT_FACTORIZATION_BACKEND",
@@ -4010,6 +4011,14 @@ _DEFAULT_MAX_DENSE_JACOBIAN_BYTES = 512 * 1024 * 1024
 # system at NCSX 48×48 (1633 DOFs). Callers that want the matrix-free
 # path still pass newton_linear_solver="operator_gmres" explicitly.
 _DEFAULT_LS_NEWTON_LINEAR_SOLVER = "dense_lu"
+# Entry-residual blow-up guard of the analytic native-order Newton: stop as
+# failed once ||grad|| exceeds this multiple of its entry value.  1e3 is the
+# default of the native BoozerSurface LS Newton and of ``newton_ls_native_dense``;
+# ``None`` disables it, for an unguarded Newton walk.  Like
+# ``newton_linear_solver`` for the host AD polish, the AD polish ignores it.
+_DEFAULT_LS_NEWTON_DIVERGENCE_FACTOR = 1e3
+# The analytic Newton always factors its materialized Hessian with dense LU.
+_ANALYTIC_NEWTON_LINEAR_SOLVER = "dense_lu"
 
 _DEFAULT_OPTIONS_LS = {
     "verbose": True,
@@ -4020,6 +4029,8 @@ _DEFAULT_OPTIONS_LS = {
     "newton_tol": 1e-11,
     "newton_maxiter": 40,
     "newton_polish_policy": "run",
+    "newton_assembly": "ad",
+    "newton_divergence_factor": _DEFAULT_LS_NEWTON_DIVERGENCE_FACTOR,
     "newton_linear_solver": _DEFAULT_LS_NEWTON_LINEAR_SOLVER,
     "newton_stab": 0.0,
     "weight_inv_modB": True,
@@ -4117,6 +4128,9 @@ _ONDEVICE_OPTIMIZER_METHODS = (
     frozenset({"bfgs-ondevice", "lbfgs-ondevice"}) | _ONDEVICE_LEAST_SQUARES_METHODS
 )
 _NEWTON_POLISH_POLICIES = frozenset({"run", "skip"})
+# Derivative assemblies of the LS Newton polish (option ``newton_assembly``):
+# basis HVPs of the AD penalty, or the analytic field-jet operators.
+BOOZER_LS_DERIVATIVE_ASSEMBLIES = ("ad", "analytic")
 _LS_DYNAMIC_OPTION_KEYS = frozenset(
     {"least_squares_algorithm", "materialize_dense_linearization"}
 )
@@ -4560,6 +4574,22 @@ def _normalize_solver_options(raw_options, boozer_type):
         if newton_polish_policy not in _NEWTON_POLISH_POLICIES:
             allowed = ", ".join(sorted(_NEWTON_POLISH_POLICIES))
             raise ValueError(f"newton_polish_policy must be one of: {allowed}.")
+        newton_assembly = normalized_options.get("newton_assembly", "ad")
+        if newton_assembly not in BOOZER_LS_DERIVATIVE_ASSEMBLIES:
+            allowed = ", ".join(BOOZER_LS_DERIVATIVE_ASSEMBLIES)
+            raise ValueError(f"newton_assembly must be one of: {allowed}.")
+        divergence_factor = normalized_options.get(
+            "newton_divergence_factor", _DEFAULT_LS_NEWTON_DIVERGENCE_FACTOR
+        )
+        if divergence_factor is not None and (
+            isinstance(divergence_factor, bool)
+            or not isinstance(divergence_factor, (int, float))
+            or not np.isfinite(divergence_factor)
+            or divergence_factor <= 0
+        ):
+            raise ValueError(
+                "newton_divergence_factor must be None or a positive finite number."
+            )
         normalized_options["newton_linear_solver"] = (
             _resolve_traceable_newton_linear_solver(
                 normalized_options.get(
@@ -4587,11 +4617,42 @@ def _normalize_solver_options(raw_options, boozer_type):
                     normalized_options["optimizer_backend"]
                 )
             )
+        if normalized_options.get("newton_assembly") == "analytic":
+            _require_analytic_newton_honours(normalized_options)
         _reject_solver_option_incompatibilities(normalized_options)
     if boozer_type == "exact":
         normalized_options.pop("optimizer_backend", None)
     normalized_options.setdefault("linearization_residency", linearization_residency)
     return normalized_options
+
+
+def _require_analytic_newton_honours(options, *, decision_size=None) -> None:
+    """Fail on settings the analytic Newton polish cannot honour.
+
+    It always factors the materialized analytic Hessian with dense LU: it needs
+    ``newton_linear_solver="dense_lu"``, a materialized linearization and, once
+    the decision size is known, a dense Hessian within
+    ``max_dense_linearization_bytes``.
+    """
+    unhonoured = []
+    if options["newton_linear_solver"] != _ANALYTIC_NEWTON_LINEAR_SOLVER:
+        unhonoured.append(f"newton_linear_solver={options['newton_linear_solver']!r}")
+    if not options["materialize_dense_linearization"]:
+        unhonoured.append("materialize_dense_linearization=False")
+    budget = options.get("max_dense_linearization_bytes")
+    if (
+        decision_size is not None
+        and budget is not None
+        and decision_size * decision_size * np.dtype(np.float64).itemsize > int(budget)
+    ):
+        unhonoured.append(
+            f"max_dense_linearization_bytes={budget} (the {decision_size}x"
+            f"{decision_size} Hessian does not fit)"
+        )
+    if unhonoured:
+        raise ValueError(
+            "newton_assembly='analytic' cannot honour " + ", ".join(unhonoured) + "."
+        )
 
 
 class _AnalyticPenaltyBundle(NamedTuple):
@@ -4600,15 +4661,22 @@ class _AnalyticPenaltyBundle(NamedTuple):
     ``value_grad(x, coil_set_spec) -> (value, gradient)`` and
     ``value_grad_hessian(x, coil_set_spec) -> (value, gradient, hessian)``
     follow the native normalization; ``newton_runners`` memoizes jitted
-    native-order Newton walks by ``(maxiter, tol, stab)``.
+    native-order Newton walks by ``(maxiter, tol, stab, divergence_factor)``.
     """
 
     value_grad: Callable
     value_grad_hessian: Callable
     newton_runners: dict
 
-    def newton_runner(self, *, maxiter: int, tol: float, stab: float) -> Callable:
-        key = (maxiter, tol, stab)
+    def newton_runner(
+        self,
+        *,
+        maxiter: int,
+        tol: float,
+        stab: float,
+        divergence_factor: "float | None",
+    ) -> Callable:
+        key = (maxiter, tol, stab, divergence_factor)
         runner = self.newton_runners.get(key)
         if runner is None:
 
@@ -4619,6 +4687,7 @@ class _AnalyticPenaltyBundle(NamedTuple):
                     maxiter=maxiter,
                     tol=tol,
                     stab=stab,
+                    divergence_factor=divergence_factor,
                     args=(coil_set_spec,),
                 )
 
@@ -4682,6 +4751,17 @@ class BoozerSurfaceJAX(Optimizable):
             native C++ LS Newton (``np.linalg.solve``). Pass
             ``"operator_gmres"`` to keep the matrix-free polish. Legacy
             environment aliases are not interpreted.
+            ``newton_assembly`` selects the LS Newton polish of
+            :meth:`run_code`: ``"ad"`` (default) is the backtracking polish
+            over basis HVPs of the AD penalty; ``"analytic"`` is native-order
+            undamped Newton (dense LU) over the analytic field-jet Hessian.
+            Tolerance, cap, rollback and result envelope are shared; the BFGS
+            stage and :meth:`run_code_traceable` do not read it.  The analytic
+            polish requires ``newton_linear_solver="dense_lu"`` and a
+            materialized linearization, and stops as failed once ``||grad||``
+            exceeds ``newton_divergence_factor`` (default 1e3; ``None``: no
+            guard) times its entry value; the AD polish has no such guard and
+            ignores the option.
         surface_runtime_state: optional immutable surface-metadata snapshot.
             When provided, traceable and exact JAX solver paths use this cached
             state instead of querying the live surface object for quadrature,
@@ -8295,11 +8375,14 @@ class BoozerSurfaceJAX(Optimizable):
     ):
         """Newton polish with the analytic full LS Hessian and native-order dense LU.
 
-        Same policy, tolerances, rollback rule and result envelope as
-        :meth:`minimize_boozer_penalty_constraints_newton`; only the derivative
-        assembly differs (one field jet per iterate instead of basis HVPs).
-        Compiled once per (optimize_G, weight, tol, maxiter, stab); coils enter
-        as kernel arguments, so moving coils never recompile.
+        Undamped native-order Newton (one field jet per iterate) with the
+        tolerances, rollback rule and result envelope of
+        :meth:`minimize_boozer_penalty_constraints_newton`, and the
+        ``newton_divergence_factor`` guard the AD polish lacks.  Raises
+        ``ValueError`` on options it cannot honour (see the class options).
+        Compiled once per (optimize_G, weight, tol, maxiter, stab, divergence
+        factor); coils enter as kernel arguments, so moving coils never
+        recompile.
         """
         if not self.need_to_run_code:
             return self.res
@@ -8313,11 +8396,17 @@ class BoozerSurfaceJAX(Optimizable):
         )
         optimize_G = G is not None
         x0 = self._pack_decision_vector(iota, G)
+        _require_analytic_newton_honours(
+            self.options, decision_size=int(jnp.shape(x0)[0])
+        )
         bundle = self._get_analytic_penalty_bundle(
             optimize_G, weight_inv_modB, constraint_weight
         )
         runner = bundle.newton_runner(
-            maxiter=int(maxiter), tol=float(tol), stab=float(stab)
+            maxiter=int(maxiter),
+            tol=float(tol),
+            stab=float(stab),
+            divergence_factor=self.options["newton_divergence_factor"],
         )
         result = runner(x0, self.coil_set_spec)
         return self._finalize_ls_newton_result(
@@ -9298,7 +9387,12 @@ class BoozerSurfaceJAX(Optimizable):
                 ),
             )
             return res
-        res = self.minimize_boozer_penalty_constraints_newton(
+        newton_polish = (
+            self._minimize_boozer_penalty_constraints_newton_analytic
+            if self.options["newton_assembly"] == "analytic"
+            else self.minimize_boozer_penalty_constraints_newton
+        )
+        res = newton_polish(
             constraint_weight=self.constraint_weight,
             iota=iota_out,
             G=G_out,

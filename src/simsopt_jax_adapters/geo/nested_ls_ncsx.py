@@ -44,7 +44,10 @@ from simsopt.geo.boozersurface import BoozerSurface, _boozer_iterate_is_persista
 from simsopt.objectives import MPIObjective, QuadraticPenalty
 
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
-from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
+from simsopt_jax_adapters.geo.boozer_surface import (
+    BOOZER_LS_DERIVATIVE_ASSEMBLIES,
+    BoozerSurfaceJAX,
+)
 from simsopt_jax_adapters.geo.curve_objectives import (
     ArclengthVariationJAX,
     CurveCurveDistanceJAX,
@@ -119,7 +122,8 @@ NCSX_NATIVE_BFGS_MAXITER: Final[int] = 20
 # Feasible 18² evals finish in 4–5 steps; infeasible coil trials otherwise
 # grind the lander's 40-step budget at GPU-negative cost.
 NCSX_OUTER_NEWTON_MAXITER: Final[int] = 8
-NCSX_DERIVATIVE_ASSEMBLIES: Final[tuple[str, ...]] = ("ad", "analytic")
+# Public name kept for benchmarks/ncsx_boozerqa_inner_compare.py.
+NCSX_DERIVATIVE_ASSEMBLIES: Final[tuple[str, ...]] = BOOZER_LS_DERIVATIVE_ASSEMBLIES
 _NCSX_RUNTIME_KERNELS: WeakKeyDictionary = WeakKeyDictionary()
 
 
@@ -631,9 +635,9 @@ def _ncsx_penalty_value_and_grad(
 
 
 def _require_derivative_assembly(derivative_assembly: str) -> str:
-    if derivative_assembly not in NCSX_DERIVATIVE_ASSEMBLIES:
+    if derivative_assembly not in BOOZER_LS_DERIVATIVE_ASSEMBLIES:
         raise ValueError(
-            f"derivative_assembly must be one of {NCSX_DERIVATIVE_ASSEMBLIES}, "
+            f"derivative_assembly must be one of {BOOZER_LS_DERIVATIVE_ASSEMBLIES}, "
             f"got {derivative_assembly!r}."
         )
     return derivative_assembly
