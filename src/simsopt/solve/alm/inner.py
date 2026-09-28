@@ -238,8 +238,8 @@ _INFEASIBLE_STALL_FEASIBILITY_RTOL = 1e-6
 _INFEASIBLE_STALL_OBJECTIVE_ATOL = 1e-10
 
 # An objective drop counts as progress (not a stall) when it beats this
-# fraction of the step's first-order scale plus round-off (_total_tolerance),
-# and a stationarity drop when it beats this fraction of the norm.
+# fraction of the step's first-order scale (_total_tolerance), and a
+# stationarity drop when it beats this fraction of the norm.
 _INFEASIBLE_STALL_OBJECTIVE_RTOL = 1e-6
 
 class _EarlyStopInnerSolve(RuntimeError):
@@ -248,14 +248,14 @@ class _EarlyStopInnerSolve(RuntimeError):
         self.x = np.asarray(x, dtype=float).copy()
         self.evaluation = evaluation
 
-def _total_tolerance(gradient_norm: float, step_norm: float, rtol: float, *totals) -> float:
+def _total_tolerance(gradient_norm: float, step_norm: float, rtol: float) -> float:
     """``rtol`` of a step's first-order scale ``||grad L|| ||dx||`` (the
-    largest change its linear model can make, from the start's gradient) plus
-    the round-off of comparing ``totals``, ``4 eps |total|`` each: a tolerance
-    on a change of the total that an offset added to f leaves unchanged
-    beyond round-off and that scales by c when f does."""
-    round_off = 4.0 * np.finfo(float).eps * sum(abs(float(total)) for total in totals)
-    return float(rtol) * float(gradient_norm) * float(step_norm) + round_off
+    largest change its linear model can make, from the start's gradient): a
+    tolerance on a change of the total that an offset added to f leaves
+    unchanged and that scales by c when f does. There is no round-off
+    allowance: the reported totals decide, and evaluation noise that hides a
+    change stalls the run rather than passing it."""
+    return float(rtol) * float(gradient_norm) * float(step_norm)
 
 def _elevated_rejection_total(reference_total: float) -> float:
     """The total a nonfinite trial shows L-BFGS-B, above the reference so its
@@ -329,11 +329,7 @@ def _made_meaningful_inner_progress(
     moved = move_norm > 1e-8 * move_scale
 
     improved_objective = float(current_total) - float(final_total) > _total_tolerance(
-        current_stationarity_norm,
-        move_norm,
-        _INFEASIBLE_STALL_OBJECTIVE_RTOL,
-        current_total,
-        final_total,
+        current_stationarity_norm, move_norm, _INFEASIBLE_STALL_OBJECTIVE_RTOL
     )
     improved_stationarity = _improved_beyond_floor(
         current_stationarity_norm,
@@ -351,13 +347,13 @@ def _made_meaningful_inner_progress(
     return moved or improved_objective or improved_stationarity or improved_feasibility
 
 def _acceptable_total_upper_bound(
-    current_total: float, candidate_total: float, gradient_norm: float, step_norm: float
+    current_total: float, gradient_norm: float, step_norm: float
 ) -> float:
     """The largest total a candidate ``step_norm`` from a start with this
     gradient norm may have: the start's plus ``_ACCEPTANCE_TOTAL_RTOL`` of the
-    step's first-order scale and round-off (:func:`_total_tolerance`)."""
+    step's first-order scale (:func:`_total_tolerance`)."""
     return float(current_total) + _total_tolerance(
-        gradient_norm, step_norm, _ACCEPTANCE_TOTAL_RTOL, current_total, candidate_total
+        gradient_norm, step_norm, _ACCEPTANCE_TOTAL_RTOL
     )
 
 def _candidate_is_acceptable(
@@ -391,7 +387,6 @@ def _candidate_is_acceptable(
     candidate_total = float(candidate_eval["total"])
     return candidate_total <= _acceptable_total_upper_bound(
         float(current_eval["total"]),
-        candidate_total,
         float(np.linalg.norm(current_eval["grad"])),
         moved_norm,
     )
@@ -455,8 +450,6 @@ def _classify_infeasible_inner_stall(
         float(np.linalg.norm(current_eval["grad"])),
         moved_norm,
         _INFEASIBLE_STALL_OBJECTIVE_RTOL,
-        current_total,
-        candidate_total,
     ):
         return False, False, None
 
@@ -533,14 +526,14 @@ def _snap_onto_bounds(
     return np.where(near_upper, upper, np.where(near_lower, lower, projected))
 
 def _snap_keeps_total(unsnapped: dict, snapped: dict) -> bool:
-    """Whether a snap onto the bounds keeps its candidate: its total may rise
-    over the unsnapped one by the two evaluations' round-off,
-    ``4 eps |total|`` each, and no more. The snap moves x along the outward
-    gradient, so to first order it lowers the total; a larger rise means the
-    objective is not smooth on the snap's scale. No term depends on an
-    offset added to f beyond that round-off."""
-    before, after = float(unsnapped["total"]), float(snapped["total"])
-    return bool(after - before <= 4.0 * np.finfo(float).eps * (abs(before) + abs(after)))
+    """Whether a snap onto the bounds keeps its candidate: only if its
+    reported total is below the unsnapped one. The snap moves x along the
+    outward gradient, so to first order it lowers the total; a reported rise
+    means the objective is not smooth on the snap's scale, and a tie means
+    the totals cannot tell (e.g. an offset of f past the change's
+    resolution), so the unsnapped candidate stays and the run stalls rather
+    than certifying the bound. There is no round-off allowance."""
+    return float(snapped["total"]) < float(unsnapped["total"])
 
 def _intersect_bounds(trust_bounds, base_bounds):
     if trust_bounds is None:

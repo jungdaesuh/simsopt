@@ -956,6 +956,29 @@ class AlmInnerStepOffsetTests(unittest.TestCase):
             self.runs(make_evaluate, 0.0, alm.ALMSettings(max_outer_iterations=3), {"maxiter": 20})
         )
 
+    def test_a_worse_candidate_at_a_large_offset_is_not_accepted(self):
+        # The same drifting evaluator at C = 6e13 (spacing 1/128): its result
+        # is 0.1 worse than its start, far beyond 1e-3 of the step's
+        # first-order scale, and must be rejected as at C = 0.
+        def make_evaluate(offset, trace):
+            def evaluate(x, multipliers, penalty):
+                trace.append(float(x[0]))
+                value = offset + 0.5 * float((x[0] - 1.0) ** 2) + 0.3 * len(trace)
+                return alm.augmented_inequality_objective(
+                    value, np.array([x[0] - 1.0]), np.array([-1.0]), [np.zeros(1)],
+                    multipliers, penalty,
+                )
+            return evaluate
+
+        for offset in (0.0, 6.0e13):
+            with self.subTest(offset=offset):
+                result = alm.minimize_alm(
+                    np.array([0.0]), ["c"], make_evaluate(offset, []),
+                    alm.ALMSettings(max_outer_iterations=3), {"maxiter": 20},
+                )
+                self.assertFalse(result.success, result.message)
+                np.testing.assert_array_equal(result.x, [0.0])
+
     def test_a_nonfinite_trial_is_rejected_whatever_its_total(self):
         # The acceptance slack now scales with the step; a sanitized
         # nonfinite trial is rejected by its flag, not by its elevated total.
@@ -1124,17 +1147,20 @@ class AlmBoundStationarityTests(unittest.TestCase):
             return evaluate
 
         decisions = {}
-        for offset in (0.0, 1.0e6):
+        # At C = 2e15 the spacing is 0.25: the rise of 1 is four exact ulps.
+        # At C = 1e16 (spacing 2) f(x0) = C - 1 rounds to C: the totals tie.
+        for offset in (0.0, 1.0e6, 2.0e15, 1.0e16):
             result = _solve_from(make_evaluate(offset), 1.0 - h, 0.0, 1.0, base_bounds=[(0.0, 1.0)])
             decisions[offset] = (result.success, result.termination_reason, float(result.x[0]))
-        self.assertEqual(decisions[0.0], decisions[1.0e6], decisions)
+        self.assertEqual(len(set(decisions.values())), 1, decisions)
         self.assertNotEqual(decisions[0.0][2], 1.0, decisions)
 
-    def test_a_snap_is_kept_unless_the_total_rises_beyond_round_off(self):
-        eps = np.finfo(float).eps
+    def test_a_snap_is_kept_only_if_its_reported_total_falls(self):
+        # No round-off allowance: the reported totals decide, and a tie
+        # (a change the totals cannot resolve) keeps the unsnapped point.
         for before, after, kept in (
-            (1.0, 0.5, True), (1.0, 1.0 + 4.0 * eps, True), (1.0, 1.0 + 1.0e-12, False),
-            (1.0e6, 1.0e6 + 1.0, False), (-1.0, 0.0, False),
+            (1.0, 0.5, True), (1.0, 1.0, False), (1.0, float(np.nextafter(1.0, 2.0)), False),
+            (2.0e15 - 1.0, 2.0e15, False), (1.0e6, 1.0e6 + 1.0, False), (-1.0, 0.0, False),
         ):
             with self.subTest(before=before, after=after):
                 self.assertIs(
