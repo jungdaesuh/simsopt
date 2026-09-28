@@ -1015,7 +1015,10 @@ def test_transfer_guard_disallow_allows_gpu_ondevice_loops_with_host_constants()
         ),
         failure_message="GPU ondevice optimizer transfer-guard smoke failed",
         timeout=_ONDEVICE_COLD_SMOKE_TIMEOUT,
-        extra_env={"XLA_PYTHON_CLIENT_PREALLOCATE": "false"},
+        extra_env={
+            "XLA_FLAGS": "--xla_gpu_exclude_nondeterministic_ops=true",
+            "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+        },
     )
 
 
