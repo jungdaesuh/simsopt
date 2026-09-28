@@ -35,7 +35,9 @@ from .evaluation import (
     _OWNED_EVALUATION_ARRAY_FIELDS,
     _attach_alm_constraint_metadata,
     _clone_evaluation_dict,
+    _contract_checked_evaluation,
     _nonfinite_evaluation_fields,
+    _search_step_rejected,
 )
 from .events import _borrowed_read_only_value, _require_acyclic_containers
 from .policy import (
@@ -117,10 +119,15 @@ class _ALMInnerAttemptEvaluator:
 
     def _fresh_evaluation(self, x) -> dict:
         return _sanitize_nonfinite_inner_evaluation(
-            self.request.evaluate_problem(
-                x,
-                self.request.multipliers,
-                self.request.penalty_argument,
+            _contract_checked_evaluation(
+                self.request.evaluate_problem(
+                    x,
+                    self.request.multipliers,
+                    self.request.penalty_argument,
+                ),
+                x=x,
+                constraint_count=len(self.request.constraint_names_tuple),
+                context="ALM inner trial evaluation",
             ),
             fallback_evaluation=self.request.current_eval,
         )
@@ -152,7 +159,7 @@ class _ALMInnerAttemptEvaluator:
             # alter the candidate subsequently evaluated by ALM.
             self.request.inner_callback(inner_x_arr.copy())
         evaluation = self.evaluation_at(inner_x_arr)
-        if evaluation.get("search_step_success") is False:
+        if _search_step_rejected(evaluation):
             return
         (
             _solver_constraint_values,
@@ -318,7 +325,7 @@ def _candidate_is_acceptable(
     moved_norm: float,
     update_feasibility_tol: float,
 ) -> bool:
-    if candidate_eval.get("search_step_success") is False:
+    if _search_step_rejected(candidate_eval):
         return False
     if not (
         bool(getattr(result, "success", False))
@@ -381,7 +388,7 @@ def _classify_infeasible_inner_stall(
     feasibility_gate: float,
 ) -> Tuple[bool, bool, Optional[str]]:
     # A failed search step is a rejected candidate, not an infeasible stall.
-    if candidate_eval.get("search_step_success") is False:
+    if _search_step_rejected(candidate_eval):
         return False, False, None
     if float(moved_norm) > float(move_tolerance):
         return False, False, None

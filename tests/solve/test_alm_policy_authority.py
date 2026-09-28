@@ -1,8 +1,9 @@
 """Who owns ``success``: the continuation policy, not the loop.
 
 The loop executes a policy's ``ALMConverge`` as given; it adds no core
-convergence veto. The success guarantees (hard feasibility, no hybrid
-signal mismatch, no binding multiplier cap) are those of
+convergence veto. The success guarantees (a KKT point at the shifted
+multipliers, complementarity included; no hybrid signal mismatch, no binding
+multiplier cap) are those of
 ``DefaultContinuationPolicy`` and of policies that keep its vetoes. The first
 test pins that contract as behavior; the second checks the protocol and the
 package docstring say so.

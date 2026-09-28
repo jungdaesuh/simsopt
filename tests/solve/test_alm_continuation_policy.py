@@ -597,6 +597,76 @@ class AlmDefaultAfterInnerTests(unittest.TestCase):
         self.assertEqual(decision.action, "penalty_increase")
 
 
+def _slack_row(x0, multiplier, penalty=1.0):
+    """min -0.9 x0 s.t. x0 - 0.1 <= 0 (KKT point x0 = 0.1, lambda = 0.9),
+    evaluated at ``x0`` with ``multiplier`` and ``penalty``."""
+    evaluation = alm.augmented_inequality_objective(
+        -0.9 * x0,
+        np.array([-0.9]),
+        np.array([x0 - 0.1]),
+        [np.array([1.0])],
+        np.array([multiplier]),
+        penalty,
+    )
+    return _measure(evaluation, multipliers=(multiplier,), penalty=penalty)
+
+
+# At x0 = 0 with lambda = rho = 1 the row is inactive (g = -0.1), yet its
+# shifted multiplier max(0, lambda + rho g) = 0.9 cancels grad f = -0.9: the
+# augmented gradient is 0 and no row is active, so the KKT diagnostic is None.
+# Complementarity fails by min(0.9, 0.1) = 0.1.
+SLACK_ROW_CANCELS_GRADIENT = _slack_row(0.0, 1.0)
+
+
+class AlmDefaultComplementarityTests(unittest.TestCase):
+    """Default convergence certifies the KKT conditions at the shifted
+    multipliers the augmented gradient carries, complementarity included."""
+
+    def test_the_cancelled_gradient_has_no_active_row_to_certify(self):
+        measured = SLACK_ROW_CANCELS_GRADIENT
+        self.assertEqual(measured.stationarity_norm, 0.0)
+        self.assertEqual(measured.max_feasibility_violation, 0.0)
+        self.assertIsNone(measured.kkt_stationarity_norm)
+
+    def test_a_multiplier_on_an_inactive_row_blocks_the_start_shortcut(self):
+        view = _view(SLACK_ROW_CANCELS_GRADIENT, after_inner=False)
+        self.assertIsNone(DefaultContinuationPolicy().before_inner(view))
+
+    def test_a_multiplier_on_an_inactive_row_is_updated_instead_of_converging(self):
+        self.assertEqual(
+            DefaultContinuationPolicy().after_inner(_view(SLACK_ROW_CANCELS_GRADIENT)),
+            ALMDualUpdateStep(penalty_reason=None, feasible_stall_count=0),
+        )
+
+    def test_the_multiplier_of_an_active_row_converges(self):
+        measured = _slack_row(0.1, 0.9)
+        self.assertEqual(measured.stationarity_norm, 0.0)
+        for view in (_view(measured, after_inner=False), _view(measured)):
+            with self.subTest(view=type(view).__name__):
+                decision = (
+                    DefaultContinuationPolicy().before_inner(view)
+                    if isinstance(view, ALMPreInnerView)
+                    else DefaultContinuationPolicy().after_inner(view)
+                )
+                self.assertIsInstance(decision, ALMConverge)
+
+    def test_a_run_started_at_the_cancelled_gradient_ends_at_the_kkt_point(self):
+        def evaluate(x, multipliers, penalty):
+            return alm.augmented_inequality_objective(
+                float(-0.9 * x[0]), np.array([-0.9]), np.array([x[0] - 0.1]),
+                [np.array([1.0])], multipliers, penalty,
+            )
+
+        result = alm.minimize_alm(
+            np.array([0.0]), ["x0_le_0p1"], evaluate,
+            alm.ALMSettings(max_outer_iterations=5), {"maxiter": 10},
+            initial_multipliers=np.array([1.0]), initial_penalty=1.0,
+        )
+        self.assertTrue(result.success, result.message)
+        np.testing.assert_allclose(result.x, [0.1], atol=1.0e-6)
+        np.testing.assert_allclose(result.multipliers, [0.9], atol=1.0e-6)
+
+
 class AlmExhaustedOuterLabelTests(unittest.TestCase):
     """Each decision that can end the final outer carries its termination
     reason; most of them are golden gaps."""

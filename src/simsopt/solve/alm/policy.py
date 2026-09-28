@@ -32,7 +32,12 @@ from .continuation import (
     ALMStepDecision,
     ALMStop,
 )
-from .core import _finite_alm_integer, _finite_alm_value
+from .core import (
+    ALMSettings,
+    _complementarity_residual,
+    _finite_alm_integer,
+    _finite_alm_value,
+)
 
 
 class ALMContinuationPolicy(Protocol):
@@ -40,10 +45,11 @@ class ALMContinuationPolicy(Protocol):
 
     A policy has the last word on convergence: the loop executes its
     ``ALMConverge`` as given and adds no veto of its own. The success
-    guarantees (hard feasibility at ``feasibility_tol``, no hybrid signal
-    mismatch, no binding multiplier cap) hold for
-    :class:`DefaultContinuationPolicy` and for policies that keep its vetoes,
-    e.g. by delegating their convergence decisions to it.
+    guarantees (a KKT point at the shifted multipliers ``max(0, λ + ρg)``:
+    hard feasibility and complementarity at ``feasibility_tol``, stationarity
+    at ``stationarity_tol``; no hybrid signal mismatch, no binding multiplier
+    cap) hold for :class:`DefaultContinuationPolicy` and for policies that
+    keep its vetoes, e.g. by delegating their convergence decisions to it.
     """
 
     def inner_plan(self, view: ALMInnerPlanView) -> ALMInnerPlan:
@@ -86,12 +92,7 @@ class DefaultContinuationPolicy:
         start = view.start
         settings = view.settings
         if (
-            _strict_feasibility_satisfied(
-                start.max_feasibility_violation,
-                start.routing_state.hard_max_violation,
-                settings.feasibility_tol,
-            )
-            and start.stationarity_norm <= settings.stationarity_tol
+            _kkt_point(start, settings)
             and not _constraints_inactive_candidate(start, settings.feasibility_tol)
             and not start.signal_mismatch_active
             # Cap-binding multipliers mean the prior dual update was
@@ -124,12 +125,7 @@ class DefaultContinuationPolicy:
             measured, settings.feasibility_tol
         )
         if (
-            _strict_feasibility_satisfied(
-                measured.max_feasibility_violation,
-                measured.routing_state.hard_max_violation,
-                settings.feasibility_tol,
-            )
-            and measured.stationarity_norm <= settings.stationarity_tol
+            _kkt_point(measured, settings)
             and not constraints_inactive
             and not measured.signal_mismatch_active
             # A clamped dual update holds the KKT residual small.
@@ -147,15 +143,7 @@ class DefaultContinuationPolicy:
             )
         if constraints_inactive:
             # The same cap guard applies to the constraints-inactive arm.
-            if (
-                _strict_feasibility_satisfied(
-                    measured.max_feasibility_violation,
-                    measured.routing_state.hard_max_violation,
-                    settings.feasibility_tol,
-                )
-                and measured.stationarity_norm <= settings.stationarity_tol
-                and not view.last_cap_binding_active
-            ):
+            if _kkt_point(measured, settings) and not view.last_cap_binding_active:
                 return ALMConverge(
                     action="constraints_inactive_converged",
                     termination_reason="constraints_inactive_converged",
@@ -296,6 +284,25 @@ def _feasible_step(view: ALMPostInnerView) -> Union[ALMStop, ALMRaisePenalty, AL
         trust_radius=view.trust_radius,
         update_stationarity_tol=update_stationarity_tol,
         feasible_stall_count=feasible_stall_count,
+    )
+
+
+def _kkt_point(measured: ALMIterateMeasurement, settings: ALMSettings) -> bool:
+    """Whether ``measured`` passes the KKT stopping test at the shifted
+    multipliers ``max(0, λ + ρg)`` its augmented gradient carries: generic and
+    hard violations and the complementarity residual within
+    ``feasibility_tol``, the augmented-gradient norm within
+    ``stationarity_tol``. Without the complementarity test, a multiplier on
+    an inactive row could cancel the objective gradient and pass."""
+    return (
+        _strict_feasibility_satisfied(
+            measured.max_feasibility_violation,
+            measured.routing_state.hard_max_violation,
+            settings.feasibility_tol,
+        )
+        and measured.stationarity_norm <= settings.stationarity_tol
+        and _complementarity_residual(measured.evaluation, measured.routing_state)
+        <= settings.feasibility_tol
     )
 
 

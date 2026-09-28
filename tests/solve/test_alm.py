@@ -316,13 +316,13 @@ class AlmLibrarySizeBudgetTests(unittest.TestCase):
             "checkpoint.py": 623,
             "continuation.py": 225,
             "control.py": 1853,
-            "core.py": 890,
-            "evaluation.py": 307,
+            "core.py": 908,
+            "evaluation.py": 371,
             "events.py": 339,
             "history.py": 893,
             "hybrid.py": 69,
-            "inner.py": 688,
-            "policy.py": 401,
+            "inner.py": 695,
+            "policy.py": 408,
             "taylor.py": 164,
         }
         for filename, budget in budgets.items():
@@ -361,7 +361,7 @@ class AlmLibrarySizeBudgetTests(unittest.TestCase):
             )
         )
         self.assertLessEqual(
-            line_count, 5442, f"the core package has {line_count} lines; budget is 5442"
+            line_count, 5537, f"the core package has {line_count} lines; budget is 5537"
         )
 
 

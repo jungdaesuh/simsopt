@@ -3,9 +3,10 @@
 ``evaluate_problem(x, multipliers, penalty) -> dict`` (an :class:`ALMEvaluator`
 returning an :class:`ALMEvaluation`; keys in the package docstring) is the
 loop's only view of the problem. This module owns what the loop assumes about
-that dict: its schema, which of its arrays the solver copies to own
-(:data:`_OWNED_EVALUATION_ARRAY_FIELDS`, :func:`_clone_evaluation_dict`),
-which fields must be finite (:func:`_nonfinite_evaluation_fields`), the
+that dict: its schema and the check of it where each evaluation enters
+(:func:`_contract_checked_evaluation`), which of its arrays the solver copies
+to own (:data:`_OWNED_EVALUATION_ARRAY_FIELDS`,
+:func:`_clone_evaluation_dict`), which fields must be finite (:func:`_nonfinite_evaluation_fields`), the
 constraint metadata it attaches, the objective that ranks best-feasible
 incumbents (:func:`_incumbent_objective_value`), and the measurement of an
 evaluated iterate that the loop and the continuation policy read
@@ -236,6 +237,64 @@ def _attach_alm_constraint_metadata(
     annotated["constraint_blocks"] = constraint_blocks_tuple
     return annotated
 
+_REQUIRED_EVALUATION_KEYS = tuple(_ALMEvaluationRequired.__annotations__)
+
+def _contract_checked_evaluation(
+    evaluation: dict,
+    *,
+    x: np.ndarray,
+    constraint_count: int,
+    context: str,
+) -> dict:
+    """An owned shallow copy of the evaluator's dict at ``x``, checked where
+    it enters the solver: every required key present and not None, ``grad``
+    and each ``constraint_grads`` row of shape ``(x.size,)``, one row and one
+    ``constraint_values`` entry per constraint, and ``search_step_success``
+    (optional) a bool or ``numpy.bool_``, stored as a Python bool. Raises
+    ``KeyError`` for a missing key and ``ValueError`` otherwise, naming
+    ``context``."""
+    missing = [key for key in _REQUIRED_EVALUATION_KEYS if evaluation.get(key) is None]
+    if missing:
+        raise KeyError(
+            f"{context}: the evaluation lacks required keys (absent or None): "
+            + ", ".join(missing)
+        )
+    constraint_grads = evaluation["constraint_grads"]
+    if len(constraint_grads) != constraint_count:
+        raise ValueError(
+            f"{context}: constraint_grads has {len(constraint_grads)} rows for "
+            f"{constraint_count} constraints"
+        )
+    dof_shape = (int(np.size(x)),)
+    expected_shapes = (
+        ("grad", evaluation["grad"], dof_shape),
+        ("constraint_values", evaluation["constraint_values"], (constraint_count,)),
+        *(
+            (f"constraint_grads[{index}]", row, dof_shape)
+            for index, row in enumerate(constraint_grads)
+        ),
+    )
+    for field_name, value, expected in expected_shapes:
+        if np.shape(value) != expected:
+            raise ValueError(
+                f"{context}: {field_name} has shape {np.shape(value)}, expected {expected}"
+            )
+    checked = dict(evaluation)
+    if "search_step_success" in checked:
+        flag = checked["search_step_success"]
+        if not isinstance(flag, (bool, np.bool_)):
+            raise ValueError(
+                f"{context}: search_step_success must be a bool, got "
+                f"{type(flag).__name__} {flag!r}"
+            )
+        checked["search_step_success"] = bool(flag)
+    return checked
+
+def _search_step_rejected(evaluation: dict) -> bool:
+    """Whether the evaluator rejected this trial step
+    (``search_step_success`` False; absent means accepted)."""
+    return not evaluation.get("search_step_success", True)
+
 def _checked_evaluation(
     evaluate_problem: Callable[[np.ndarray, np.ndarray, object], dict],
     x: np.ndarray,
@@ -247,11 +306,17 @@ def _checked_evaluation(
     context: str,
 ) -> dict:
     """The evaluation at ``(x, multipliers, penalty_argument)`` with the
-    constraint metadata attached (an owned dict). Raises ``ValueError``
-    naming ``context`` when a field the loop reads is not finite or a
-    container in it contains itself."""
+    constraint metadata attached (an owned dict). Raises as
+    :func:`_contract_checked_evaluation` does, and ``ValueError`` naming
+    ``context`` when a field the loop reads is not finite or a container in
+    it contains itself."""
     evaluation = _attach_alm_constraint_metadata(
-        evaluate_problem(x, multipliers, penalty_argument),
+        _contract_checked_evaluation(
+            evaluate_problem(x, multipliers, penalty_argument),
+            x=x,
+            constraint_count=len(constraint_names_tuple),
+            context=context,
+        ),
         constraint_names_tuple,
         constraint_blocks_tuple,
     )

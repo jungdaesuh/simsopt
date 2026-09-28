@@ -758,6 +758,24 @@ def _constraint_routing_state(
         surrogate_max_value=_max_value(signal_state.surrogate_signed_constraint_values),
     )
 
+def _complementarity_residual(
+    evaluation: dict,
+    routing_state: ALMConstraintRoutingState,
+) -> float:
+    """``max_i min(λ⁺_i, s_i)`` on the signal the augmented Lagrangian uses:
+    how far its shifted multipliers ``λ⁺ = max(0, λ + ρg)`` are from
+    complementarity. ``s_i = max(0, -g_i - a_i)`` is row i's slack below its
+    activity band ``a_i``: a row inside the band counts as active, and a
+    violated row as well (its violation is the feasibility test's)."""
+    signed_values = routing_state.signal_state.surrogate_signed_constraint_values
+    if signed_values.size == 0:
+        return 0.0
+    slack = np.maximum(
+        0.0,
+        -signed_values - _constraint_activity_tolerances(evaluation, signed_values),
+    )
+    return float(np.max(np.minimum(routing_state.surrogate_positive_shift, slack)))
+
 def _kkt_stationarity_norm(
     total_grad,
     constraint_grads,

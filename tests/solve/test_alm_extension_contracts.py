@@ -100,6 +100,96 @@ class AlmEvaluationSchemaTests(unittest.TestCase):
             )
 
 
+def _solve(evaluate_problem, *, maxiter=50):
+    return alm.minimize_alm(
+        np.array([3.0, 2.0]), ["x0_at_least_one"], evaluate_problem,
+        alm.ALMSettings(max_outer_iterations=3), {"maxiter": maxiter},
+    )
+
+
+def _edited(**edits):
+    """The half-space evaluator with ``edits`` applied to every evaluation
+    (a value of ``...`` deletes the key)."""
+
+    def evaluate(x, multipliers, penalty):
+        evaluation = _halfspace_evaluation(x, multipliers, penalty)
+        for key, value in edits.items():
+            if value is ...:
+                del evaluation[key]
+            else:
+                evaluation[key] = value
+        return evaluation
+
+    return evaluate
+
+
+def _trial_steps_flagged(flag):
+    """The half-space evaluator whose every trial point away from the start
+    reports ``search_step_success=flag`` (its evaluation is otherwise exact)."""
+    start = np.array([3.0, 2.0])
+
+    def evaluate(x, multipliers, penalty):
+        evaluation = _halfspace_evaluation(x, multipliers, penalty)
+        if not np.array_equal(x, start):
+            evaluation["search_step_success"] = flag
+        return evaluation
+
+    return evaluate
+
+
+class AlmEvaluationBoundaryTests(unittest.TestCase):
+    """The evaluator's dict is checked where it enters the solver, at the
+    outer iterate and at every inner trial point."""
+
+    def test_a_missing_or_null_required_key_is_named(self):
+        for key in sorted(REQUIRED_KEYS):
+            for value in (..., None):
+                with self.subTest(key=key, value=value):
+                    with self.assertRaisesRegex(KeyError, key):
+                        _solve(_edited(**{key: value}))
+
+    def test_constraint_gradients_need_one_row_per_constraint(self):
+        for rows in ([], [np.array([-1.0, 0.0])] * 2):
+            with self.subTest(rows=len(rows)):
+                with self.assertRaisesRegex(ValueError, "constraint_grads"):
+                    _solve(_edited(constraint_grads=rows))
+
+    def test_constraint_gradient_rows_are_shaped_like_x(self):
+        for row in (np.array([-1.0]), np.array([-1.0, 0.0, 0.0]), np.array([[-1.0, 0.0]])):
+            with self.subTest(shape=row.shape):
+                with self.assertRaisesRegex(ValueError, "constraint_grads"):
+                    _solve(_edited(constraint_grads=[row]))
+
+    def test_a_trial_point_evaluation_is_checked_too(self):
+        def missing_rows_away_from_start(x, multipliers, penalty):
+            evaluation = _halfspace_evaluation(x, multipliers, penalty)
+            if not np.array_equal(x, [3.0, 2.0]):
+                del evaluation["constraint_grads"]
+            return evaluation
+
+        with self.assertRaisesRegex(KeyError, "constraint_grads"):
+            _solve(missing_rows_away_from_start)
+
+    def test_a_numpy_false_search_flag_rejects_the_trial_step(self):
+        rejected = _solve(_trial_steps_flagged(False))
+        np.testing.assert_array_equal(rejected.x, [3.0, 2.0])
+        numpy_rejected = _solve(_trial_steps_flagged(np.bool_(False)))
+        np.testing.assert_array_equal(numpy_rejected.x, rejected.x)
+        self.assertEqual(numpy_rejected.termination_reason, rejected.termination_reason)
+
+    def test_a_numpy_true_search_flag_accepts_the_trial_step(self):
+        accepted = _solve(_trial_steps_flagged(True))
+        numpy_accepted = _solve(_trial_steps_flagged(np.bool_(True)))
+        self.assertFalse(np.array_equal(accepted.x, [3.0, 2.0]))
+        np.testing.assert_array_equal(numpy_accepted.x, accepted.x)
+
+    def test_a_search_flag_that_is_not_a_bool_is_rejected(self):
+        for flag in (0, 1, None, "False", 0.0):
+            with self.subTest(flag=flag):
+                with self.assertRaisesRegex(ValueError, "search_step_success"):
+                    _solve(_trial_steps_flagged(flag))
+
+
 def _declared_evaluation_keys():
     return set(typing.get_type_hints(alm.ALMEvaluation))
 
