@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import jax.numpy as jnp
 import numpy as np
 from simsopt.configs import get_data
@@ -28,6 +33,73 @@ def test_manual_step_takes_finite_cost_increase() -> None:
     np.testing.assert_allclose(np.asarray(result["x"]), [2.575], rtol=1.0e-14)
     assert result["nit"] == 1
     assert result["success"] is False
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Two host devices exist only if XLA is told so before it initializes, so the
+# check runs in a child process (with the repository's kernel bootstrap).
+_CONTROLS_ON_ANOTHER_DEVICE_CHILD = """
+import sys
+from pathlib import Path
+
+repo_root = sys.argv[1]
+sys.path.insert(0, repo_root)
+from repo_bootstrap import bootstrap_local_simsopt
+
+bootstrap_local_simsopt(Path(repo_root) / "src")
+
+import jax
+import numpy as np
+
+jax.config.update("jax_enable_x64", True)
+from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
+
+first, second = jax.devices("cpu")[:2]
+matrix = jax.device_put(np.asarray([[2.0, -1.0], [0.5, 3.0]]), first)
+rhs = jax.device_put(np.asarray([0.25, -0.75]), first)
+x0 = jax.device_put(np.zeros(2), first)
+tol = jax.device_put(np.asarray(1.0e-12), second)
+maxiter = jax.device_put(np.asarray(40, dtype=np.int32), second)
+solver = object.__new__(BoozerSurfaceJAX)
+with jax.transfer_guard("disallow"):
+    result = solver._run_manual_penalty_least_squares(
+        lambda x: matrix @ x - rhs, x0, tol=tol, maxiter=maxiter
+    )
+assert result["success"] is True, result
+assert result["x"].devices() == {first}, result["x"].devices()
+np.testing.assert_allclose(
+    np.asarray(result["x"]),
+    np.linalg.solve(np.asarray(matrix), np.asarray(rhs)),
+    rtol=1.0e-10,
+    atol=1.0e-10,
+)
+"""
+
+
+def test_manual_controls_on_another_device_are_placed_with_the_state() -> None:
+    """``tol``/``maxiter`` held on another device join the solve on ``x``'s.
+
+    The loop stages both controls next to ``x`` (``staged_like``); a control
+    left on its own device made the jitted solve mix devices and fail.
+    """
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "JAX_PLATFORMS": "cpu",
+            "JAX_ENABLE_X64": "1",
+            "XLA_FLAGS": "--xla_force_host_platform_device_count=2",
+        }
+    )
+    completed = subprocess.run(
+        (sys.executable, "-c", _CONTROLS_ON_ANOTHER_DEVICE_CHILD, str(_REPO_ROOT)),
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def test_manual_nonfinite_candidate_ends_the_loop_before_its_budget() -> None:

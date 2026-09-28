@@ -13,6 +13,10 @@ values, so behavior is unchanged.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+from pathlib import Path
 from unittest import mock
 
 import jax
@@ -105,6 +109,73 @@ def test_staged_like_tracer_preserves_explicit_integer_dtype():
 
     assert result.dtype == jnp.int32
     assert int(np.asarray(result)) == 1
+
+
+# Two host devices exist only if XLA is told so before it initializes, so the
+# check runs in a child process, bootstrapped onto this checkout's sources the
+# way tests/conftest.py is (an installed editable finder would otherwise win
+# over PYTHONPATH).
+_STAGED_DEVICE_ARRAY_CHILD = """
+import sys
+from pathlib import Path
+
+repo_root = sys.argv[1]
+sys.path.insert(0, repo_root)
+from repo_bootstrap import bootstrap_local_simsopt
+
+bootstrap_local_simsopt(Path(repo_root) / "src")
+
+import jax
+import numpy as np
+
+jax.config.update("jax_enable_x64", True)
+from simsopt_jax.core._device_scalars import staged_like
+
+first, second = jax.devices("cpu")[:2]
+reference = jax.device_put(np.zeros(2), first)
+tolerance = jax.device_put(np.asarray(1.0e-12), second)
+budget = jax.device_put(np.asarray(40, dtype=np.int32), second)
+with jax.transfer_guard("disallow"):
+    staged_tolerance = staged_like(reference, tolerance)
+    staged_budget = staged_like(reference, budget, dtype=np.int32)
+    total = reference + staged_tolerance
+assert staged_tolerance.devices() == {first}, staged_tolerance.devices()
+assert staged_budget.devices() == {first}, staged_budget.devices()
+assert staged_budget.dtype == np.int32
+assert float(staged_tolerance) == 1.0e-12 and int(staged_budget) == 40
+assert total.devices() == {first}
+"""
+
+
+def test_staged_like_places_a_device_array_held_elsewhere_with_the_reference():
+    """A concrete device array is moved onto the reference's device, explicitly.
+
+    Keeping it where it was (``jnp.asarray``) left, e.g., a solver's tolerance
+    on another device than the state it is compared with, so the program that
+    combines them was rejected.
+    """
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "JAX_PLATFORMS": "cpu",
+            "JAX_ENABLE_X64": "1",
+            "XLA_FLAGS": "--xla_force_host_platform_device_count=2",
+        }
+    )
+    completed = subprocess.run(
+        (
+            sys.executable,
+            "-c",
+            _STAGED_DEVICE_ARRAY_CHILD,
+            str(Path(__file__).resolve().parents[1]),
+        ),
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def test_reference_sharding_handles_tracer_leaf_in_sequence():

@@ -38,11 +38,24 @@ def float_scalar(value: int, reference: jax.Array) -> jax.Array:
 
 
 def staged_like(reference: jax.Array, host_value, *, dtype=None) -> jax.Array:
-    """Explicitly stage a host literal with reference-compatible placement."""
+    """Explicitly stage a value with reference-compatible placement.
+
+    A host value is placed with the reference; so is a concrete device array
+    held elsewhere (an explicit transfer), so the result always joins the
+    reference in one program. Under a trace the value is converted in place.
+    """
     reference = jnp.asarray(reference)
     resolved_dtype = reference.dtype if dtype is None else np.dtype(dtype)
     if isinstance(host_value, jax.Array):
-        return jnp.asarray(host_value, dtype=resolved_dtype)
+        if isinstance(host_value, jax.core.Tracer) or isinstance(
+            reference, jax.core.Tracer
+        ):
+            return jnp.asarray(host_value, dtype=resolved_dtype)
+        return explicit_device_array(
+            host_value,
+            dtype=resolved_dtype,
+            reference=reference,
+        )
     if isinstance(reference, jax.core.Tracer) and np.ndim(host_value) == 0:
         typed_host_value = np.asarray(host_value, dtype=resolved_dtype)[()]
         return _staged_scalar_builder(
