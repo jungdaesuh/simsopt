@@ -690,18 +690,19 @@ def get_runtime_jax_device(mode: str | None = None):
     this process's JAX was configured with (``jax.config.jax_platforms``), not
     the current ``JAX_PLATFORMS`` environment: ``set_backend`` rewrites that
     variable for child processes, and an initialized JAX never reads it again.
-    Before JAX is imported the variable is still what it will read, so a
-    native process that never touched JAX does not import it here.
+    Before JAX has its configuration (not imported yet, or its first import
+    still running in another thread) the variable is still what it will
+    read, so a native process that never touched JAX does not import it here.
     """
     policy = get_backend_policy(mode)
     if policy.backend == "jax":
         platform = policy.jax_platform
     else:
-        imported_jax = sys.modules.get("jax")
+        jax_config = getattr(sys.modules.get("jax"), "config", None)
         platform = _primary_jax_platform(
             _optional_env_value(_JAX_PLATFORMS_ENV)
-            if imported_jax is None
-            else imported_jax.config.jax_platforms
+            if jax_config is None
+            else jax_config.jax_platforms
         )
     if platform is None:
         return None

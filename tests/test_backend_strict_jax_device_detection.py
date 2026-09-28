@@ -650,6 +650,33 @@ def test_runtime_jax_device_ignores_jax_platforms_env_rewritten_after_jax_import
     assert backend_calls == ["gpu"]
 
 
+def test_runtime_jax_device_reads_the_env_while_jax_is_still_importing(monkeypatch):
+    """A ``jax`` module without ``config`` yet is a first import in progress.
+
+    JAX has not read its platforms at that point either, so ``JAX_PLATFORMS``
+    decides, exactly as before any import; touching ``config`` would raise.
+    """
+    runtime_device = object()
+    backend_calls: list[str | None] = []
+
+    def _local_devices(*, backend=None):
+        backend_calls.append(backend)
+        return [runtime_device]
+
+    monkeypatch.setenv("JAX_PLATFORMS", "cuda")
+    monkeypatch.setattr(
+        runtime_module,
+        "get_backend_policy",
+        lambda mode=None: _policy_for_mode("native_cpu"),
+    )
+    monkeypatch.setitem(
+        sys.modules, "jax", types.SimpleNamespace(local_devices=_local_devices)
+    )
+
+    assert get_runtime_jax_device() is runtime_device
+    assert backend_calls == ["gpu"]
+
+
 def test_runtime_jax_device_prefers_policy_over_jax_platforms_env(monkeypatch):
     """Once policy is installed, the policy platform remains authoritative."""
     runtime_device = object()
