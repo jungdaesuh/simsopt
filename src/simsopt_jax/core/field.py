@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import Enum
 from functools import partial
 
 import jax
@@ -12,12 +10,6 @@ import numpy as np
 from jax import lax
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
-
-from simsopt_jax.backend import (
-    get_field_kernel_tuning,
-    get_sharding_tuning,
-    is_mixed_precision_enabled,
-)
 
 from ._math_utils import (
     as_compute_array as _as_compute_array,
@@ -43,16 +35,12 @@ from .biotsavart import (
     biot_savart_dB_by_dX,
     group_coil_data,
 )
-from .biotsavart_online import (
-    mixed_grouped_biot_savart_B_online,
-)
 from .curve_geometry import (
     curve_gamma_and_dash_from_spec,
     curve_spec_with_dofs,
     optimizable_input_dofs_from_map_spec,
 )
 from .sharding import (
-    _should_shard_points,
     coil_group_collective_config,
     collective_field_sharding_summary,
     maybe_shard_grouped_field_inputs,
@@ -69,9 +57,6 @@ from .specs import (
 )
 
 __all__ = [
-    "GroupedBiotSavartBDispatchEvidence",
-    "GroupedBiotSavartBDispatchResult",
-    "GroupedBiotSavartBDispatchRole",
     "coil_set_spec_from_dof_extraction_spec",
     "coil_specs_from_dof_extraction_spec",
     "grouped_coil_set_spec_from_coil_specs",
@@ -82,7 +67,6 @@ __all__ = [
     "grouped_biot_savart_B_and_dB_from_spec",
     "grouped_biot_savart_B_from_inputs",
     "grouped_biot_savart_B_from_spec",
-    "grouped_biot_savart_B_from_spec_with_evidence",
     "grouped_biot_savart_d2A_by_dXdX_from_inputs",
     "grouped_biot_savart_d2A_by_dXdX_from_spec",
     "grouped_biot_savart_d2B_by_dXdX_from_inputs",
@@ -101,58 +85,6 @@ __all__ = [
     "grouped_field_data_from_spec",
     "grouped_field_inputs_from_spec",
 ]
-
-
-class GroupedBiotSavartBDispatchRole(str, Enum):
-    """Production implementation selected for one grouped B evaluation."""
-
-    MIXED_ONLINE = "mixed_online"
-    GROUPED_ACCUMULATION = "grouped_accumulation"
-
-    @property
-    def artifact_code(self) -> int:
-        """Return the stable integer carried through compiled result payloads."""
-        return 1 if self is GroupedBiotSavartBDispatchRole.MIXED_ONLINE else 2
-
-
-@dataclass(frozen=True, slots=True)
-class GroupedBiotSavartBDispatchEvidence:
-    """Typed count evidence minted by the production dispatch owner."""
-
-    role: GroupedBiotSavartBDispatchRole
-    mixed_online_dispatch_count: int
-    grouped_accumulation_dispatch_count: int
-
-    def __post_init__(self) -> None:
-        expected_counts = (
-            (1, 0)
-            if self.role is GroupedBiotSavartBDispatchRole.MIXED_ONLINE
-            else (0, 1)
-        )
-        if (
-            self.mixed_online_dispatch_count,
-            self.grouped_accumulation_dispatch_count,
-        ) != expected_counts:
-            raise ValueError("Grouped Biot-Savart dispatch counts contradict the role.")
-
-
-@dataclass(frozen=True, slots=True)
-class GroupedBiotSavartBDispatchResult:
-    """One production field result paired with its owner-minted route."""
-
-    value: jax.Array
-    evidence: GroupedBiotSavartBDispatchEvidence
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.evidence, GroupedBiotSavartBDispatchEvidence):
-            raise TypeError("evidence must be GroupedBiotSavartBDispatchEvidence.")
-
-
-jax.tree_util.register_dataclass(
-    GroupedBiotSavartBDispatchResult,
-    data_fields=["value"],
-    meta_fields=["evidence"],
-)
 
 
 def _zeros_float64(shape):
@@ -394,87 +326,8 @@ def _accumulate_grouped_field(points: object, coil_spec: GroupedCoilSetSpec, ker
     return result
 
 
-def _mixed_online_group_inputs(
-    points: object,
-    coil_spec: GroupedCoilSetSpec,
-) -> tuple[tuple[object, object, object], ...] | None:
-    if not is_mixed_precision_enabled() or jnp.asarray(points).dtype != jnp.float32:
-        return None
-    coil_arrays = grouped_field_inputs_from_spec(coil_spec)
-    if not coil_arrays:
-        return None
-    if _should_shard_points(points, get_sharding_tuning()):
-        return None
-    compute_groups = []
-    for gammas, gammadashs, currents in coil_arrays:
-        if coil_group_collective_config(currents) is not None:
-            return None
-        compute_groups.append(
-            _compute_group_inputs(
-                points,
-                gammas,
-                gammadashs,
-                currents,
-            )
-        )
-    return tuple(compute_groups)
-
-
-def _resolve_grouped_biot_savart_B_dispatch(
-    points: object,
-    coil_spec: GroupedCoilSetSpec,
-) -> tuple[
-    tuple[tuple[object, object, object], ...] | None,
-    GroupedBiotSavartBDispatchEvidence,
-]:
-    mixed_online_inputs = _mixed_online_group_inputs(points, coil_spec)
-    if mixed_online_inputs is not None:
-        return mixed_online_inputs, GroupedBiotSavartBDispatchEvidence(
-            role=GroupedBiotSavartBDispatchRole.MIXED_ONLINE,
-            mixed_online_dispatch_count=1,
-            grouped_accumulation_dispatch_count=0,
-        )
-    return None, GroupedBiotSavartBDispatchEvidence(
-        role=GroupedBiotSavartBDispatchRole.GROUPED_ACCUMULATION,
-        mixed_online_dispatch_count=0,
-        grouped_accumulation_dispatch_count=1,
-    )
-
-
-def _mixed_online_grouped_biot_savart_B(
-    points: object,
-    coil_arrays: tuple[tuple[object, object, object], ...],
-):
-    return mixed_grouped_biot_savart_B_online(
-        points,
-        coil_arrays,
-        source_tile_size=(get_field_kernel_tuning().mixed_biot_savart_source_tile_size),
-    )
-
-
-def grouped_biot_savart_B_from_spec_with_evidence(
-    points: object,
-    coil_spec: GroupedCoilSetSpec,
-) -> GroupedBiotSavartBDispatchResult:
-    """Execute grouped B and return evidence minted by that same dispatch."""
-    mixed_online_inputs, evidence = _resolve_grouped_biot_savart_B_dispatch(
-        points,
-        coil_spec,
-    )
-    value = (
-        _mixed_online_grouped_biot_savart_B(points, mixed_online_inputs)
-        if mixed_online_inputs is not None
-        else _accumulate_grouped_field(points, coil_spec, biot_savart_B)
-    )
-    return GroupedBiotSavartBDispatchResult(value=value, evidence=evidence)
-
-
 def grouped_field_sharding_summary(points: object, coil_spec: GroupedCoilSetSpec):
     """Return grouped-field output sharding plus collective-route metadata."""
-    mixed_online_inputs = _mixed_online_group_inputs(points, coil_spec)
-    if mixed_online_inputs is not None:
-        result = _mixed_online_grouped_biot_savart_B(points, mixed_online_inputs)
-        return collective_field_sharding_summary(result, config=None)
     result, config = _accumulate_grouped_field_with_config(
         points,
         coil_spec,
@@ -778,7 +631,7 @@ def grouped_coil_currents_from_inputs(coil_arrays: object):
 
 
 def grouped_biot_savart_B_from_spec(points: object, coil_spec: GroupedCoilSetSpec):
-    return grouped_biot_savart_B_from_spec_with_evidence(points, coil_spec).value
+    return _accumulate_grouped_field(points, coil_spec, biot_savart_B)
 
 
 def grouped_biot_savart_B_from_inputs(points: object, coil_arrays: object):

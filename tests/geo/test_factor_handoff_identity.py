@@ -29,7 +29,7 @@ def _sample_state():
     }
     return {
         "objective_kwargs": objective_kwargs,
-        "certificate_coil_set_spec_from_dofs": (
+        "coil_set_spec_from_dofs": (
             lambda coil_dofs: {"currents": np.asarray(coil_dofs)}
         ),
         "linear_solve_stab": 1.0e-4,

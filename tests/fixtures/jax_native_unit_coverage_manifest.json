@@ -801,11 +801,11 @@
         },
         {
           "anchor": "return non_quasi_symmetric_ratio(",
-          "cite": "src/simsopt_jax_adapters/geo/surface_objectives.py:2530"
+          "cite": "src/simsopt_jax_adapters/geo/surface_objectives.py:2528"
         },
         {
           "anchor": "class NonQuasiSymmetricRatioJAX(_BoozerObjectiveBase):",
-          "cite": "src/simsopt_jax_adapters/geo/surface_objectives.py:3027"
+          "cite": "src/simsopt_jax_adapters/geo/surface_objectives.py:3025"
         }
       ],
       "id": "QS-1",
@@ -1574,7 +1574,7 @@
       "evidence": [
         {
           "anchor": "class NonQuasiSymmetricRatioJAX(_BoozerObjectiveBase):",
-          "cite": "src/simsopt_jax_adapters/geo/surface_objectives.py:3027"
+          "cite": "src/simsopt_jax_adapters/geo/surface_objectives.py:3025"
         },
         {
           "anchor": "Exact parity for the ``2_Intermediate/boozerQA.py`` mirror.",

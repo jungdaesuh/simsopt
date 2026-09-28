@@ -62,9 +62,6 @@ _FIELD_KERNEL_DEFAULTS = {
     "jax_gpu_parity": {"coil_chunk_size": 16, "quadrature_block_size": 0},
     "jax_gpu_fast": {"coil_chunk_size": 64, "quadrature_block_size": 64},
 }
-# This is the bounded mixed reduction itself, not a dense-audit chunk override;
-# strict transfer-guard runs must retain the production-shape tile.
-_MIXED_BIOT_SAVART_SOURCE_TILE_SIZE = 128
 _POINT_CHUNK_SIZE_BY_POLICY = {
     "host_reference": 0,
     "stable_default": 256,
@@ -189,7 +186,6 @@ class FieldKernelTuning:
     coil_chunk_size: int
     quadrature_block_size: int
     point_chunk_size: int
-    mixed_biot_savart_source_tile_size: int
 
 
 @dataclass(frozen=True)

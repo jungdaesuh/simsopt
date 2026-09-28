@@ -103,13 +103,6 @@ from simsopt_jax_adapters.geo._boozersurface_current_guard import (
     guard_none_G_coil_gradient_callback as _guard_none_G_coil_gradient_callback,
     require_fixed_currents_for_none_G as _require_fixed_currents_for_none_G,
 )
-from simsopt_jax_adapters.geo.pre_newton_seed_policy import (
-    combine_mixed_seed_gate,
-    mixed_bounded_result_flags,
-    mixed_canonical_fallback_flags,
-    route_after_bounded_attempt,
-    route_after_seed_gate,
-)
 from simsopt_jax.core.field import (
     _evaluate_grouped_field_group,
     grouped_biot_savart_A_from_inputs,
@@ -168,12 +161,10 @@ from simsopt_jax.geo.optimizers._shared import (
     mark_cacheable_jit_value_and_grad as _mark_cacheable_jit_value_and_grad,
 )
 from simsopt_jax.geo.optimizers.optimizer import (
-    _BOUNDED_MIXED_NEWTON_ATTEMPT_LIMIT,
     _TARGET_LEAST_SQUARES_METHODS,
     _dense_lm_state_from_residual_jacobian,
     _mark_cacheable_jit_linear_operator,
     _mark_traceable_runner_cacheable,
-    _newton_candidate_status,
     _resolve_traceable_newton_linear_solver,
     VALID_LEAST_SQUARES_ALGORITHMS,
     host_jax_least_squares,
@@ -7063,10 +7054,6 @@ class BoozerSurfaceJAX(Optimizable):
             "residual_jacobian_condition_estimate": (
                 residual_jacobian_condition_estimate
             ),
-            "compute_dtype_bits": jnp.asarray(
-                np.dtype(jnp.asarray(x).dtype).itemsize * 8,
-                dtype=jnp.int32,
-            ),
         }
 
     def _run_traceable_newton_polish_stage(
@@ -7100,266 +7087,10 @@ class BoozerSurfaceJAX(Optimizable):
             objective_args=(coil_set_spec,),
         )
 
-    def _run_traceable_bounded_mixed_newton_stage(
-        self,
-        coil_set_spec,
-        x0,
-        method,
-        *,
-        optimize_G,
-        weight_inv_modB,
-        materialize_dense_linearization=True,
-    ):
-        """Run the bounded mixed proposal/certificate Newton composition."""
-        if method not in _ONDEVICE_OPTIMIZER_METHODS:
-            raise RuntimeError("bounded mixed Newton requires an on-device optimizer")
-        objective = self._get_traceable_penalty_objective(
-            optimize_G,
-            weight_inv_modB,
-        )
-        materialize_hessian = bool(
-            self.options["materialize_dense_linearization"]
-            and materialize_dense_linearization
-        )
-        return _optimizer_jax.bounded_mixed_newton_polish_traceable(
-            objective,
-            x0,
-            tol=self.options["newton_tol"],
-            stab=self.options["newton_stab"],
-            args=(coil_set_spec,),
-            materialize_hessian=materialize_hessian,
-            max_dense_hessian_bytes=self.options["max_dense_linearization_bytes"],
-        )
-
     def traceable_newton_trace_capacity(self, method: str | None) -> int:
-        """Return capacity for both general and bounded Newton trace shapes."""
+        """Return the static Newton trace capacity for this solve's options."""
         del method
-        return max(
-            int(self.options["newton_maxiter"]),
-            _BOUNDED_MIXED_NEWTON_ATTEMPT_LIMIT,
-        )
-
-    def _run_traceable_mixed_pipeline(
-        self,
-        proposal_coil_set_spec,
-        certificate_coil_set_spec,
-        x0,
-        method,
-        *,
-        optimize_G,
-        weight_inv_modB,
-        materialize_dense_linearization=True,
-    ):
-        """Run speculative FP32 BFGS with live-FP64 gates and full fallback."""
-        policy = get_backend_policy()
-        compute_dtype = np.dtype(policy.compute_dtype)
-        runtime_dtype = np.dtype(policy.runtime_dtype)
-        proposal_pre_newton = self._run_traceable_pre_newton_stage(
-            proposal_coil_set_spec,
-            x0,
-            method,
-            optimize_G=optimize_G,
-            weight_inv_modB=weight_inv_modB,
-            materialize_dense_linearization=materialize_dense_linearization,
-            optimizer_state_dtype=compute_dtype,
-        )
-        proposal_seed = jnp.asarray(proposal_pre_newton["x"], dtype=runtime_dtype)
-        original_seed = jnp.asarray(x0, dtype=runtime_dtype)
-        certificate_objective = self._get_traceable_penalty_objective(
-            optimize_G,
-            weight_inv_modB,
-        )
-
-        def certificate_value_and_grad(x):
-            return jax.value_and_grad(certificate_objective, argnums=0)(
-                x,
-                certificate_coil_set_spec,
-            )
-
-        original_value, original_gradient = certificate_value_and_grad(original_seed)
-        proposal_value, proposal_gradient = certificate_value_and_grad(proposal_seed)
-        original_gradient_norm = jnp.linalg.norm(original_gradient)
-        newton_trace_capacity = self.traceable_newton_trace_capacity(method)
-        seed_candidate_accepted, _proposal_gradient_norm = _newton_candidate_status(
-            proposal_seed,
-            proposal_value,
-            proposal_gradient,
-            alpha=jnp.asarray(1.0, dtype=runtime_dtype),
-            current_val=original_value,
-            current_grad=original_gradient,
-            current_norm=original_gradient_norm,
-            dx=original_seed - proposal_seed,
-        )
-        # SSOT: merit gate + proposal pre-Newton success (see pre_newton_seed_policy).
-        seed_gate_accepted = combine_mixed_seed_gate(
-            proposal_success=proposal_pre_newton["success"],
-            seed_candidate_accepted=seed_candidate_accepted,
-        )
-
-        def normalize_trace_fields(
-            result: Mapping[str, object],
-            reference: jax.Array,
-        ) -> dict[str, jax.Array]:
-            normalized: dict[str, jax.Array] = {}
-            trace_specs = (
-                (
-                    _BOOZER_NEWTON_BOOL_TRACE_RESULT_KEYS,
-                    jnp.dtype(jnp.bool_),
-                    False,
-                ),
-                (
-                    _BOOZER_NEWTON_FLOAT_TRACE_RESULT_KEYS,
-                    jnp.dtype(jnp.float64),
-                    np.nan,
-                ),
-                (
-                    _BOOZER_NEWTON_INT_TRACE_RESULT_KEYS,
-                    jnp.dtype(jnp.int32),
-                    np.iinfo(np.int32).min,
-                ),
-            )
-            for keys, dtype, missing_value in trace_specs:
-                staged_missing = _staged_like(
-                    reference,
-                    missing_value,
-                    dtype=dtype,
-                )
-                for key in keys:
-                    trace_value = result.get(key)
-                    presence_value = result.get(f"{key}_present")
-                    if trace_value is None:
-                        trace = jnp.broadcast_to(
-                            staged_missing,
-                            (newton_trace_capacity,),
-                        )
-                    else:
-                        trace = jnp.asarray(trace_value, dtype=dtype)
-                        if trace.ndim != 1 or trace.shape[0] > newton_trace_capacity:
-                            raise ValueError(
-                                "Newton trace must be one-dimensional and fit its "
-                                "static capacity."
-                            )
-                        trace = jnp.pad(
-                            trace,
-                            (0, newton_trace_capacity - trace.shape[0]),
-                            constant_values=staged_missing,
-                        )
-                    normalized[key] = trace
-                    normalized[f"{key}_present"] = _staged_like(
-                        reference,
-                        trace_value is not None
-                        if presence_value is None
-                        else presence_value,
-                        dtype=jnp.bool_,
-                    )
-            return normalized
-
-        def normalize_result(
-            pre_newton,
-            result,
-            *,
-            canonical_fallback_used,
-            mixed_seed_accepted,
-            mixed_bounded_certificate_accepted,
-        ):
-            hessian = result["hessian"]
-            if hessian is not None:
-                hessian = jnp.asarray(hessian, dtype=runtime_dtype)
-            gradient = jnp.asarray(result["grad"], dtype=runtime_dtype)
-            trace_fields = normalize_trace_fields(result, gradient)
-            return {
-                "x": jnp.asarray(result["x"], dtype=runtime_dtype),
-                "fun": jnp.asarray(result["fun"], dtype=runtime_dtype),
-                "grad": gradient,
-                "hessian": hessian,
-                "nit": jnp.asarray(result["nit"], dtype=jnp.int32),
-                "success": jnp.asarray(result["success"], dtype=jnp.bool_),
-                "hessian_materialized": jnp.asarray(
-                    hessian is not None,
-                    dtype=jnp.bool_,
-                ),
-                "newton_iter": jnp.asarray(
-                    result.get("newton_iter", result["nit"]),
-                    dtype=jnp.int32,
-                ),
-                "final_gradient_norm": jnp.linalg.norm(gradient),
-                "final_gradient_inf_norm": jnp.linalg.norm(gradient, ord=jnp.inf),
-                "pre_newton_iter": jnp.asarray(pre_newton["nit"], dtype=jnp.int32),
-                "pre_newton_nfev": jnp.asarray(pre_newton["nfev"], dtype=jnp.int32),
-                "pre_newton_ngev": jnp.asarray(pre_newton["ngev"], dtype=jnp.int32),
-                "pre_newton_line_search_status": jnp.asarray(
-                    pre_newton["line_search_status"], dtype=jnp.int32
-                ),
-                "pre_newton_compute_dtype_bits": jnp.asarray(
-                    pre_newton["compute_dtype_bits"], dtype=jnp.int32
-                ),
-                "mixed_seed_accepted": jnp.asarray(
-                    mixed_seed_accepted, dtype=jnp.bool_
-                ),
-                "mixed_bounded_certificate_accepted": jnp.asarray(
-                    mixed_bounded_certificate_accepted, dtype=jnp.bool_
-                ),
-                "canonical_fallback_used": jnp.asarray(
-                    canonical_fallback_used, dtype=jnp.bool_
-                ),
-                **trace_fields,
-            }
-
-        def run_canonical_pipeline(_):
-            canonical_pre_newton = self._run_traceable_pre_newton_stage(
-                certificate_coil_set_spec,
-                original_seed,
-                method,
-                optimize_G=optimize_G,
-                weight_inv_modB=weight_inv_modB,
-                materialize_dense_linearization=materialize_dense_linearization,
-                optimizer_state_dtype=runtime_dtype,
-            )
-            canonical_newton = self._run_traceable_newton_polish_stage(
-                certificate_coil_set_spec,
-                canonical_pre_newton["x"],
-                method,
-                optimize_G=optimize_G,
-                weight_inv_modB=weight_inv_modB,
-                materialize_dense_linearization=materialize_dense_linearization,
-            )
-            return normalize_result(
-                canonical_pre_newton,
-                canonical_newton,
-                **mixed_canonical_fallback_flags(
-                    seed_gate_accepted=seed_gate_accepted,
-                ),
-            )
-
-        def run_bounded_or_canonical(_):
-            bounded_newton = self._run_traceable_bounded_mixed_newton_stage(
-                certificate_coil_set_spec,
-                proposal_seed,
-                method,
-                optimize_G=optimize_G,
-                weight_inv_modB=weight_inv_modB,
-                materialize_dense_linearization=materialize_dense_linearization,
-            )
-            bounded_result = normalize_result(
-                proposal_pre_newton,
-                bounded_newton,
-                **mixed_bounded_result_flags(
-                    bounded_certificate_success=bounded_newton["success"],
-                ),
-            )
-            # SSOT step 3: keep bounded certificate or one canonical fallback.
-            return route_after_bounded_attempt(
-                bounded_newton["success"],
-                keep_bounded=lambda _: bounded_result,
-                run_canonical=run_canonical_pipeline,
-            )
-
-        # SSOT step 2: seed-gate accepted → bounded attempt; else canonical.
-        return route_after_seed_gate(
-            seed_gate_accepted,
-            when_accepted=run_bounded_or_canonical,
-            when_rejected=run_canonical_pipeline,
-        )
+        return int(self.options["newton_maxiter"])
 
     def _run_code_traceable_exact_array_kernel(
         self,
@@ -7658,29 +7389,19 @@ class BoozerSurfaceJAX(Optimizable):
         optimize_G = G is not None
         method = self._resolve_optimizer_method(optimize_G=optimize_G)
         x0 = self._pack_decision_vector(iota, G, sdofs=_as_jax_float64(sdofs))
-        mixed_pipeline_enabled = (
-            get_backend_policy().resolved_precision == "mixed"
-            and method == "bfgs-ondevice"
-            and self.options["newton_polish_policy"] != "skip"
+        pre_newton = self._run_traceable_pre_newton_stage(
+            certificate_coil_set_spec,
+            x0,
+            method,
+            optimize_G=optimize_G,
+            weight_inv_modB=weight_inv_modB,
+            materialize_dense_linearization=materialize_dense_linearization,
+            optimizer_state_dtype=np.dtype(get_backend_policy().runtime_dtype),
         )
-        if mixed_pipeline_enabled:
-            pre_newton = None
-            x_ls = None
-            ls_residual_jacobian_condition_estimate = None
-        else:
-            pre_newton = self._run_traceable_pre_newton_stage(
-                certificate_coil_set_spec,
-                x0,
-                method,
-                optimize_G=optimize_G,
-                weight_inv_modB=weight_inv_modB,
-                materialize_dense_linearization=materialize_dense_linearization,
-                optimizer_state_dtype=np.dtype(get_backend_policy().runtime_dtype),
-            )
-            x_ls = pre_newton["x"]
-            ls_residual_jacobian_condition_estimate = pre_newton[
-                "residual_jacobian_condition_estimate"
-            ]
+        x_ls = pre_newton["x"]
+        ls_residual_jacobian_condition_estimate = pre_newton[
+            "residual_jacobian_condition_estimate"
+        ]
 
         obj_fn = self._get_traceable_penalty_objective(
             optimize_G,
@@ -7741,25 +7462,14 @@ class BoozerSurfaceJAX(Optimizable):
                 ),
             }
 
-        if mixed_pipeline_enabled:
-            newton_result = self._run_traceable_mixed_pipeline(
-                coil_set_spec,
-                certificate_coil_set_spec,
-                x0,
-                method,
-                optimize_G=optimize_G,
-                weight_inv_modB=weight_inv_modB,
-                materialize_dense_linearization=materialize_dense_linearization,
-            )
-        else:
-            newton_result = self._run_traceable_newton_polish_stage(
-                certificate_coil_set_spec,
-                x_ls,
-                method,
-                optimize_G=optimize_G,
-                weight_inv_modB=weight_inv_modB,
-                materialize_dense_linearization=materialize_dense_linearization,
-            )
+        newton_result = self._run_traceable_newton_polish_stage(
+            certificate_coil_set_spec,
+            x_ls,
+            method,
+            optimize_G=optimize_G,
+            weight_inv_modB=weight_inv_modB,
+            materialize_dense_linearization=materialize_dense_linearization,
+        )
         sdofs_out, iota_out, G_out = self._unpack_decision_vector_jax(
             newton_result["x"],
             optimize_G,
@@ -7826,36 +7536,10 @@ class BoozerSurfaceJAX(Optimizable):
             "optimizer_method": method,
             **_ls_newton_reporting_fields(newton_result),
             **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
-            "pre_newton_iter": (
-                newton_result["pre_newton_iter"]
-                if mixed_pipeline_enabled
-                else pre_newton["nit"]
-            ),
-            "pre_newton_nfev": (
-                newton_result["pre_newton_nfev"]
-                if mixed_pipeline_enabled
-                else pre_newton["nfev"]
-            ),
-            "pre_newton_ngev": (
-                newton_result["pre_newton_ngev"]
-                if mixed_pipeline_enabled
-                else pre_newton["ngev"]
-            ),
-            "pre_newton_line_search_status": (
-                newton_result["pre_newton_line_search_status"]
-                if mixed_pipeline_enabled
-                else pre_newton["line_search_status"]
-            ),
-            "pre_newton_compute_dtype_bits": (
-                newton_result["pre_newton_compute_dtype_bits"]
-                if mixed_pipeline_enabled
-                else pre_newton["compute_dtype_bits"]
-            ),
-            "mixed_seed_accepted": newton_result.get("mixed_seed_accepted"),
-            "mixed_bounded_certificate_accepted": newton_result.get(
-                "mixed_bounded_certificate_accepted"
-            ),
-            "canonical_fallback_used": newton_result.get("canonical_fallback_used"),
+            "pre_newton_iter": pre_newton["nit"],
+            "pre_newton_nfev": pre_newton["nfev"],
+            "pre_newton_ngev": pre_newton["ngev"],
+            "pre_newton_line_search_status": pre_newton["line_search_status"],
             "ls_condition_estimate": ls_condition_estimate,
             "ls_residual_jacobian_condition_estimate": (
                 ls_residual_jacobian_condition_estimate

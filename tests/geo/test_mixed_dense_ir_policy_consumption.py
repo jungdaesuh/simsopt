@@ -1,4 +1,4 @@
-"""Behavioral coverage for live mixed dense-IR accuracy-policy consumers."""
+"""Behavioral coverage for live dense-IR accuracy-policy consumers."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from simsopt_jax import numerical_policy
-from simsopt_jax.geo.optimizers import dense_ir, linear_solve, optimizer
+from simsopt_jax.geo.optimizers import linear_solve, optimizer
 
 
 def _install_accuracy_policy(monkeypatch, **changes) -> None:
@@ -22,18 +22,6 @@ def _install_accuracy_policy(monkeypatch, **changes) -> None:
         "MIXED_DENSE_IR_ACCURACY_POLICY",
         policy,
     )
-
-
-def test_certificate_dtype_controls_live_dense_ir_requirement() -> None:
-    assert dense_ir._require_policy_certificate_dtype(
-        np.dtype(np.float64),
-        detail="test",
-    ) == np.dtype(np.float64)
-    with pytest.raises(ValueError, match="requires policy certificate dtype float64"):
-        dense_ir._require_policy_certificate_dtype(
-            np.dtype(np.float32),
-            detail="test",
-        )
 
 
 def test_tolerance_floor_controls_live_newton_gate(monkeypatch) -> None:

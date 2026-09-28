@@ -23,7 +23,6 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -34,7 +33,6 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 from jax.extend import core as jax_core
 from simsopt_jax.geo.optimizers import adjoint_linear_solve as _adjoint_linear_solve
-from simsopt_jax.geo.optimizers import dense_ir as _dense_ir
 from simsopt_jax.geo.optimizers import linear_solve as _linear_solve
 from simsopt_jax.geo.optimizers import optimizer as _optimizer
 from simsopt_jax.runtime.trace_annotations import PhaseId, trace_session
@@ -288,86 +286,6 @@ def test_dense_operator_chunk_batch_size_tracks_byte_budget():
         _linear_solve._dense_operator_chunk_batch_size_from_budget(192 * 1024 * mib)
         == 64
     )
-
-
-def test_hessian_dense_dispatch_uses_mixed_proposal_with_runtime_key(monkeypatch):
-    certificate_matrix = jnp.asarray(
-        ((4.00000003, 0.25000007), (0.25000007, 2.50000011)),
-        dtype=jnp.float64,
-    )
-    proposal_matrix = jnp.asarray(certificate_matrix, dtype=jnp.float32)
-    rhs = jnp.asarray((1.25, -0.75), dtype=jnp.float64)
-    certificate_probe_key = jax.random.wrap_key_data(
-        jnp.asarray((11, 17), dtype=jnp.uint32),
-        impl="threefry2x32",
-    )
-    monkeypatch.setattr(
-        _adjoint_linear_solve,
-        "get_backend_policy",
-        lambda: SimpleNamespace(
-            compute_dtype=np.dtype(np.float32),
-            runtime_dtype=np.dtype(np.float64),
-            max_dense_jacobian_bytes=1 << 20,
-            linear_solve_tolerance_floor=1.0e-14,
-            linear_solve_tolerance_cap=1.0e-10,
-        ),
-    )
-
-    def certificate_objective(state):
-        return 0.5 * jnp.vdot(state, certificate_matrix @ state).real
-
-    def proposal_objective(state):
-        return 0.5 * jnp.vdot(state, proposal_matrix @ state).real
-
-    solution, status = (
-        _adjoint_linear_solve._solve_hessian_least_squares_system_with_status(
-            certificate_objective,
-            jnp.zeros_like(rhs),
-            rhs,
-            stab=0.0,
-            tol=1.0e-12,
-            proposal_objective_fn=proposal_objective,
-            certificate_probe_key=certificate_probe_key,
-            solver="dense",
-        )
-    )
-
-    assert isinstance(status, _dense_ir._MixedDenseIrSolveStatus)
-    assert bool(status.success)
-    np.testing.assert_array_equal(
-        np.asarray(status.trust.certificate_probe_key_data),
-        np.asarray((11, 17), dtype=np.uint32),
-    )
-    np.testing.assert_allclose(
-        np.asarray(solution),
-        np.linalg.solve(np.asarray(certificate_matrix), np.asarray(rhs)),
-        rtol=1.0e-11,
-        atol=1.0e-12,
-    )
-
-
-def test_hessian_dense_mixed_proposal_requires_runtime_key(monkeypatch):
-    monkeypatch.setattr(
-        _adjoint_linear_solve,
-        "get_backend_policy",
-        lambda: SimpleNamespace(
-            compute_dtype=np.dtype(np.float32),
-            runtime_dtype=np.dtype(np.float64),
-            max_dense_jacobian_bytes=1 << 20,
-        ),
-    )
-    objective = lambda state: 0.5 * jnp.vdot(state, state).real
-
-    with pytest.raises(ValueError, match="runtime certificate key"):
-        _adjoint_linear_solve._solve_hessian_least_squares_system_with_status(
-            objective,
-            jnp.zeros((2,), dtype=jnp.float64),
-            jnp.ones((2,), dtype=jnp.float64),
-            stab=0.0,
-            tol=1.0e-12,
-            proposal_objective_fn=objective,
-            solver="dense",
-        )
 
 
 # --- Opt-in dense-LU exact-Boozer adjoint solver (SIMSOPT_EXACT_ADJOINT_DENSE_LU) ---

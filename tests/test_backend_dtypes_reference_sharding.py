@@ -309,28 +309,3 @@ def test_explicit_device_array_preserves_single_device_reference(monkeypatch):
     assert isinstance(array, np.ndarray)
     assert placement is reference_device
     assert placements == [reference_device]
-
-
-def test_mixed_compute_dtype_does_not_change_runtime_dtype(monkeypatch):
-    monkeypatch.delenv("SIMSOPT_MIXED_PRECISION", raising=False)
-    invalidate_backend_cache()
-    set_backend("jax_cpu_parity", precision="mixed", configure_runtime=False)
-
-    assert dtypes.compute_np_dtype() == np.dtype(np.float32)
-    assert dtypes.compute_dtype() == jnp.float32
-    assert dtypes.runtime_np_dtype() == np.dtype(np.float64)
-
-
-def test_as_compute_array_uses_mixed_dtype_without_rewriting_runtime(monkeypatch):
-    runtime_device = jax.devices()[0]
-    monkeypatch.setattr(dtypes, "maybe_initialize_distributed_jax", lambda: None)
-    monkeypatch.setattr(dtypes, "get_runtime_jax_device", lambda: runtime_device)
-    invalidate_backend_cache()
-    set_backend("jax_cpu_parity", precision="mixed", configure_runtime=False)
-
-    proposal = dtypes.as_compute_array([1.0, 2.0])
-    certificate = dtypes.as_compute_array([1.0, 2.0], dtype=jnp.float64)
-
-    assert proposal.dtype == jnp.float32
-    assert certificate.dtype == jnp.float64
-    assert dtypes.runtime_np_dtype() == np.dtype(np.float64)

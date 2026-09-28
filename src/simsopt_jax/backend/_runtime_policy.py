@@ -15,13 +15,11 @@ from typing import Callable, Literal, TypeVar, cast
 
 import numpy as np
 
-from simsopt_jax.numerical_policy import CertificateDType
-
 _ExplicitT = TypeVar("_ExplicitT")
 _ResolvedT = TypeVar("_ResolvedT")
 
-PrecisionSelection = Literal["mode_default", "fp64", "mixed"]
-ResolvedPrecision = Literal["fp32_smoke", "fp64", "mixed"]
+PrecisionSelection = Literal["mode_default", "fp64"]
+ResolvedPrecision = Literal["fp32_smoke", "fp64"]
 BackendMode = Literal[
     "native_cpu",
     "jax_cpu_fast",
@@ -36,7 +34,7 @@ ExecutionIntent = Literal["fast", "parity"]
 _VALID_BACKENDS = ("cpu", "jax")
 _VALID_PLATFORMS = ("cpu", "cuda")
 _VALID_POLICY_DTYPES = ("float32", "float64")
-_VALID_PRECISION_SELECTIONS = ("mode_default", "fp64", "mixed")
+_VALID_PRECISION_SELECTIONS = ("mode_default", "fp64")
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 
 _BACKEND_ENV = "SIMSOPT_BACKEND"
@@ -45,7 +43,6 @@ _PLATFORM_ENV = "SIMSOPT_JAX_PLATFORM"
 _PLATFORM_LEGACY_ENV = "SIMSOPT_JAX_BACKEND"
 _MODE_ENV = "SIMSOPT_BACKEND_MODE"
 _PRECISION_ENV = "SIMSOPT_PRECISION"
-_OBSOLETE_MIXED_PRECISION_ENV = "SIMSOPT_MIXED_PRECISION"
 _STRICT_ENV = "SIMSOPT_BACKEND_STRICT"
 _TARGET_LANE_STRICT_ENV = "SIMSOPT_TARGET_LANE_STRICT"
 _DEBUG_ENV = "SIMSOPT_DEBUG"
@@ -350,7 +347,6 @@ class BackendPolicy:
     runtime_dtype: str
     host_dtype: str
     compute_dtype: str
-    certificate_dtype: CertificateDType | None
     default_residency: str
     default_optimizer_backend: str
     supports_host_callback: bool
@@ -497,14 +493,6 @@ def _validate_precision_selection(
     return cast(PrecisionSelection, value)
 
 
-def _reject_obsolete_precision_environment() -> None:
-    if _OBSOLETE_MIXED_PRECISION_ENV in os.environ:
-        raise ValueError(
-            f"{_OBSOLETE_MIXED_PRECISION_ENV} is not supported; "
-            f"use {_PRECISION_ENV}=mixed instead."
-        )
-
-
 def _validate_precision_for_mode(
     mode: str,
     precision: PrecisionSelection,
@@ -514,22 +502,12 @@ def _validate_precision_for_mode(
             "jax_cpu_float32_smoke only supports precision='mode_default'; "
             "its full-FP32 contract cannot be overridden."
         )
-    if mode == "native_cpu" and precision == "mixed":
-        raise ValueError(
-            "native_cpu does not support mixed precision; use precision='fp64' "
-            "or precision='mode_default'."
-        )
     return precision
 
 
-def _resolved_precision_for_mode(
-    mode: str,
-    precision: PrecisionSelection,
-) -> ResolvedPrecision:
+def _resolved_precision_for_mode(mode: str) -> ResolvedPrecision:
     if mode == "jax_cpu_float32_smoke":
         return "fp32_smoke"
-    if precision == "mixed":
-        return "mixed"
     return "fp64"
 
 
@@ -692,7 +670,6 @@ def _config_from_mode(
     xla_gpu_allocator: Literal["platform", "vmm"] | None = None,
     tf_gpu_allocator: Literal["cuda_malloc_async"] | None = None,
 ) -> BackendConfig:
-    _reject_obsolete_precision_environment()
     mode = _validate_mode(mode)
     backend, jax_platform = _MODE_TO_RUNTIME[mode]
     debug_overlay = _debug_overlay_enabled()
@@ -863,16 +840,8 @@ def _optional_float_policy_default(value: object) -> float | None:
 
 def _policy_from_config(config: BackendConfig) -> BackendPolicy:
     defaults = _get_mode_policy_defaults(config.mode)
-    resolved_precision = _resolved_precision_for_mode(
-        config.mode,
-        config.precision,
-    )
-    compute_dtype = (
-        "float32" if resolved_precision in ("fp32_smoke", "mixed") else "float64"
-    )
-    certificate_dtype: CertificateDType | None = (
-        "float64" if resolved_precision == "mixed" else None
-    )
+    resolved_precision = _resolved_precision_for_mode(config.mode)
+    compute_dtype = "float32" if resolved_precision == "fp32_smoke" else "float64"
     return BackendPolicy(
         mode=config.mode,
         backend=config.backend,
@@ -893,7 +862,6 @@ def _policy_from_config(config: BackendConfig) -> BackendPolicy:
             field="host_dtype",
         ),
         compute_dtype=compute_dtype,
-        certificate_dtype=certificate_dtype,
         default_residency=_validate_default_residency(
             defaults["default_residency"],
             mode=config.mode,
@@ -907,11 +875,7 @@ def _policy_from_config(config: BackendConfig) -> BackendPolicy:
         chunk_policy=str(defaults["chunk_policy"]),
         tolerance_tier=str(defaults["tolerance_tier"]),
         compilation_cache_policy=str(defaults["compilation_cache_policy"]),
-        matmul_precision=(
-            "highest"
-            if resolved_precision == "mixed"
-            else str(defaults["matmul_precision"])
-        ),
+        matmul_precision=str(defaults["matmul_precision"]),
         max_dense_jacobian_bytes=_resolve_policy_max_dense_jacobian_bytes(
             config,
             defaults,

@@ -322,7 +322,7 @@ def _activate_backend_mode(monkeypatch, request, *, mode, strict, precision=None
     ``precision`` must travel with ``mode`` instead of being exported into
     ``SIMSOPT_PRECISION`` beforehand: the previous-config snapshot below
     resolves the *outgoing* mode against the already-exported precision, and
-    invalid pairs (``native_cpu`` + ``mixed``) fail closed there.
+    invalid pairs (``jax_cpu_float32_smoke`` + ``fp64``) fail closed there.
     """
     _require_jax()
     lane = _PARITY_MODE_TO_LANE.get(mode)
@@ -395,7 +395,7 @@ def enable_strict_jax_backend(
 
     Sets the backend mode and strict env vars, invalidates the config cache,
     and registers a finalizer to restore the env and re-invalidate after
-    test-local backend mode changes.  ``precision`` (``"mixed"``, ``"fp64"``,
+    test-local backend mode changes.  ``precision`` (``"fp64"``,
     ``"mode_default"``) is applied together with ``mode``; ``None`` keeps the
     env-resolved policy.
     """

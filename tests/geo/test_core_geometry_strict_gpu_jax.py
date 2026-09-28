@@ -1,4 +1,4 @@
-"""Strict-CUDA coverage for mixed-precision core geometry staging."""
+"""Strict-CUDA coverage for core geometry dtype and literal staging."""
 
 from __future__ import annotations
 
@@ -13,14 +13,13 @@ from simsopt_jax.core.surface_rzfourier import (
     _surface_rz_fourier_derivative_lin_from_spec,
     surface_rz_fourier_spec_from_dofs,
 )
-from simsopt_jax.geo.surface_fourier import surface_gamma_from_dofs
 
 
-def test_static_curve_dof_mapping_preserves_mixed_dtype_on_gpu(
+def test_static_curve_dof_mapping_preserves_input_dtype_on_gpu(
     monkeypatch,
     request,
 ) -> None:
-    enable_strict_parity_backend(monkeypatch, request, "gpu", precision="mixed")
+    enable_strict_parity_backend(monkeypatch, request, "gpu")
 
     with parity_default_device("gpu"):
         array = jax.device_put(np.linspace(-2.0, 3.0, num=6, dtype=np.float32))
@@ -31,36 +30,6 @@ def test_static_curve_dof_mapping_preserves_mixed_dtype_on_gpu(
 
     assert segment.dtype == jnp.float32
     assert updated.dtype == jnp.float32
-
-
-def test_surface_geometry_preserves_mixed_dtype_on_gpu(
-    monkeypatch,
-    request,
-) -> None:
-    enable_strict_parity_backend(monkeypatch, request, "gpu", precision="mixed")
-
-    with parity_default_device("gpu"):
-        dofs = jax.device_put(
-            np.asarray(
-                [1.0, 0.1, 0.2, 0.3, 0.4, 0.5, -0.2, 0.7, -0.4],
-                dtype=np.float64,
-            )
-        )
-        quadpoints = jax.device_put(np.asarray([0.0, 0.5], dtype=np.float64))
-        with jax.transfer_guard("disallow"):
-            gamma = surface_gamma_from_dofs(
-                dofs,
-                quadpoints,
-                quadpoints,
-                1,
-                0,
-                1,
-                False,
-                None,
-                use_compute_dtype=True,
-            )
-
-    assert gamma.dtype == jnp.float32
 
 
 def test_eager_surface_rz_derivative_stages_literals_on_gpu(

@@ -14,15 +14,15 @@ case = sys.argv[1]
 if case == "smoke_before_geo":
     set_backend("jax_cpu_float32_smoke")
 else:
-    assert case == "mixed_before_geo"
-    set_backend("jax_cpu_parity", precision="mixed")
+    assert case == "fp64_before_geo"
+    set_backend("jax_cpu_parity", precision="fp64")
 
 from simsopt.geo.curveobjectives import curve_length_pure
 
 import jax
 import jax.numpy as jnp
 
-expected_x64 = case == "mixed_before_geo"
+expected_x64 = case == "fp64_before_geo"
 assert jax.config.jax_enable_x64 is expected_x64
 assert jnp.zeros(1).dtype == (jnp.float64 if expected_x64 else jnp.float32)
 assert curve_length_pure(jnp.ones(8)).dtype == (

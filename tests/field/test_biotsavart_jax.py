@@ -2321,29 +2321,20 @@ class TestBiotSavartJaxChunkedSelfConsistency:
         assert jnp.all(jnp.isfinite(result))
 
     @pytest.mark.parametrize(
-        ("mixed_precision", "point_dtype", "expected_dtype"),
-        (
-            (False, jnp.float64, jnp.float64),
-            (True, jnp.float64, jnp.float64),
-            (True, jnp.float32, jnp.float32),
-        ),
+        ("point_dtype", "expected_dtype"),
+        ((jnp.float64, jnp.float64),),
     )
     def test_grouped_biot_savart_kernel_boundary_uses_point_dtype(
         self,
         monkeypatch,
-        mixed_precision,
         point_dtype,
         expected_dtype,
     ):
         monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_parity")
-        if mixed_precision:
-            monkeypatch.setenv("SIMSOPT_PRECISION", "mixed")
-        else:
-            monkeypatch.delenv("SIMSOPT_PRECISION", raising=False)
+        monkeypatch.delenv("SIMSOPT_PRECISION", raising=False)
         invalidate_backend_cache()
 
         grouped_accumulation_seen = []
-        mixed_online_seen = []
 
         def kernel(kernel_points, gammas, gammadashs, currents):
             grouped_accumulation_seen.append(
@@ -2356,25 +2347,7 @@ class TestBiotSavartJaxChunkedSelfConsistency:
             )
             return jnp.ones((kernel_points.shape[0], 3), dtype=jnp.float64)
 
-        def mixed_online_kernel(kernel_points, coil_arrays, *, source_tile_size):
-            del source_tile_size
-            mixed_online_seen.append(
-                (
-                    kernel_points.dtype,
-                    tuple(
-                        (gammas.dtype, gammadashs.dtype, currents.dtype)
-                        for gammas, gammadashs, currents in coil_arrays
-                    ),
-                )
-            )
-            return jnp.ones((kernel_points.shape[0], 3), dtype=jnp.float64)
-
         monkeypatch.setattr(core_field, "biot_savart_B", kernel)
-        monkeypatch.setattr(
-            core_field,
-            "mixed_grouped_biot_savart_B_online",
-            mixed_online_kernel,
-        )
 
         try:
             points = jnp.asarray(
@@ -2401,14 +2374,7 @@ class TestBiotSavartJaxChunkedSelfConsistency:
             invalidate_backend_cache()
 
         expected_leaf_dtypes = (expected_dtype, expected_dtype, expected_dtype)
-        if mixed_precision and point_dtype == jnp.float32:
-            assert grouped_accumulation_seen == []
-            assert mixed_online_seen == [(expected_dtype, (expected_leaf_dtypes,))]
-        else:
-            assert grouped_accumulation_seen == [
-                (expected_dtype, *expected_leaf_dtypes)
-            ]
-            assert mixed_online_seen == []
+        assert grouped_accumulation_seen == [(expected_dtype, *expected_leaf_dtypes)]
         assert result.dtype == jnp.float64
         assert result.shape == (2, 3)
 
@@ -2416,7 +2382,6 @@ class TestBiotSavartJaxChunkedSelfConsistency:
         from simsopt_jax.core import field as core_field
 
         monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_parity")
-        monkeypatch.setenv("SIMSOPT_PRECISION", "mixed")
         invalidate_backend_cache()
         seen = []
 

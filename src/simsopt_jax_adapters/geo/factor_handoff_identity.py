@@ -143,26 +143,6 @@ def runtime_policy_identity() -> dict[str, object]:
     }
 
 
-def _certificate_coil_set_spec_from_dofs(
-    state: Mapping[str, object],
-) -> Callable[[object], object]:
-    """Resolve the certificate coil-set mapper from production or test state.
-
-    Production compiled-bundle state stores ``coil_set_spec_from_dofs`` and may
-    omit a separate certificate mapper. Prefer an explicit certificate mapper
-    when present; otherwise fall back to the production coil-set mapper.
-    """
-    certificate_spec_from_dofs = state.get("certificate_coil_set_spec_from_dofs")
-    if certificate_spec_from_dofs is None:
-        certificate_spec_from_dofs = state.get("coil_set_spec_from_dofs")
-    if certificate_spec_from_dofs is None:
-        raise KeyError(
-            "Factor handoff identity requires certificate_coil_set_spec_from_dofs "
-            "or coil_set_spec_from_dofs on state."
-        )
-    return cast(Callable[[object], object], certificate_spec_from_dofs)
-
-
 def build_exact_handoff_identity(
     state: Mapping[str, object],
     *,
@@ -173,7 +153,11 @@ def build_exact_handoff_identity(
 ) -> ExactHandoffProducerSeal:
     """Bind the live state and configuration consumed by one exact handoff."""
     objective_kwargs = cast(Mapping[str, object], state["objective_kwargs"])
-    certificate_spec = _certificate_coil_set_spec_from_dofs(state)(coil_dofs)
+    coil_set_spec_from_dofs = cast(
+        Callable[[object], object],
+        state["coil_set_spec_from_dofs"],
+    )
+    coil_set_spec = coil_set_spec_from_dofs(coil_dofs)
     grid_modes = {
         name: objective_kwargs.get(name)
         for name in (
@@ -213,9 +197,7 @@ def build_exact_handoff_identity(
             ),
         },
         "grid_modes": grid_modes,
-        "coil_current_configuration_sha256": exact_numeric_tree_sha256(
-            certificate_spec
-        ),
+        "coil_current_configuration_sha256": exact_numeric_tree_sha256(coil_set_spec),
         "dtype_reduction_policy": runtime_policy,
         "dtype_reduction_policy_sha256": canonical_json_sha256(runtime_policy),
         "producer_graph_sha256": producer_graph_sha256,

@@ -52,7 +52,6 @@ from simsopt_jax.backend._runtime_policy import (  # noqa: F401
     _MODE_ENV,
     _MODE_POLICY_DEFAULTS,
     _MODE_TO_RUNTIME,
-    _OBSOLETE_MIXED_PRECISION_ENV,
     _PLATFORM_ENV,
     _PLATFORM_LEGACY_ENV,
     _PRECISION_ENV,
@@ -101,7 +100,6 @@ from simsopt_jax.backend._runtime_policy import (  # noqa: F401
     _parse_bool_value,
     _policy_from_config,
     _primary_jax_platform,
-    _reject_obsolete_precision_environment,
     _resolve_kwarg,
     _resolve_legacy_platform,
     _resolve_legacy_value,
@@ -136,7 +134,6 @@ from simsopt_jax.backend._runtime_tuning import (  # noqa: F401
     _MIN_COILS_TO_SHARD_BY_POLICY,
     _MIN_PAIRWISE_ROWS_TO_SHARD_BY_POLICY,
     _MIN_POINTS_TO_SHARD_BY_POLICY,
-    _MIXED_BIOT_SAVART_SOURCE_TILE_SIZE,
     _MODE_SHARDING_DEFAULTS,
     _PAIRWISE_PENALTY_CHUNK_SIZE_BY_POLICY,
     _PAIRWISE_ROW_SHARDING_STRATEGIES,
@@ -182,7 +179,6 @@ from simsopt_jax.backend._runtime_tuning import (  # noqa: F401
     _visible_cuda_device_selector,
     _with_distributed_initialized,
 )
-from simsopt_jax.numerical_policy import CertificateDType
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -207,7 +203,6 @@ __all__ = [
     "get_backend_config",
     "get_backend_mode",
     "get_backend_policy",
-    "get_certificate_dtype",
     "get_chunk_policy",
     "get_chunk_tuning",
     "get_coil_chunk_size",
@@ -234,7 +229,6 @@ __all__ = [
     "is_backend_strict",
     "is_float32_smoke_policy",
     "is_jax_backend",
-    "is_mixed_precision_enabled",
     "is_parity_mode",
     "maybe_initialize_distributed_jax",
     "query_active_gpu_memory_mb",
@@ -503,16 +497,6 @@ def get_compute_dtype(mode: str | None = None) -> str:
     return get_backend_policy(mode).compute_dtype
 
 
-def is_mixed_precision_enabled(mode: str | None = None) -> bool:
-    """Return whether compute arrays intentionally differ from certificates."""
-    return get_backend_policy(mode).resolved_precision == "mixed"
-
-
-def get_certificate_dtype(mode: str | None = None) -> CertificateDType | None:
-    """Return the optional FP64 certificate dtype for a backend mode."""
-    return get_backend_policy(mode).certificate_dtype
-
-
 def get_backend() -> str:
     """Return the active compute backend: ``'cpu'`` or ``'jax'``."""
     return get_backend_config().backend
@@ -656,7 +640,6 @@ def get_field_kernel_tuning(mode: str | None = None) -> FieldKernelTuning:
             coil_chunk_size=chunk_tuning.coil_chunk_size,
             quadrature_block_size=chunk_tuning.quadrature_block_size,
             point_chunk_size=chunk_tuning.point_chunk_size,
-            mixed_biot_savart_source_tile_size=(_MIXED_BIOT_SAVART_SOURCE_TILE_SIZE),
         )
         if mode is None:
             _cached_field_kernel_tuning = tuning

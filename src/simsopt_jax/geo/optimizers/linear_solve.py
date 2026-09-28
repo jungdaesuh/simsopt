@@ -401,11 +401,6 @@ def _materialize_dense_hessian(hvp_fn, x, *, symmetrize=True):
     return upper + jnp.triu(dense, 1).T
 
 
-def _symmetrize_dense_hessian(dense: jax.Array) -> jax.Array:
-    upper = jnp.triu(dense)
-    return upper + jnp.triu(dense, 1).T
-
-
 def _materialize_dense_hessian_host(hvp_fn, x, *, symmetrize=True):
     x_array = jnp.asarray(x)
     dtype = np.dtype(x_array.dtype)

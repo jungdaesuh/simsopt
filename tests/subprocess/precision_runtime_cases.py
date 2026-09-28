@@ -21,27 +21,25 @@ import simsopt_jax.config as simsopt_config
 
 PrecisionCase = Literal[
     "precision-env-inherited",
-    "precision-explicit-mixed",
+    "precision-explicit-fp64",
     "precision-explicit-mode-default",
     "precision-smoke-mode-default",
     "precision-invalid-environment",
-    "precision-mixed-runtime-config",
+    "precision-parity-runtime-config",
     "precision-fp64-runtime-default",
 ]
 _CASES: tuple[PrecisionCase, ...] = (
     "precision-env-inherited",
-    "precision-explicit-mixed",
+    "precision-explicit-fp64",
     "precision-explicit-mode-default",
     "precision-smoke-mode-default",
     "precision-invalid-environment",
-    "precision-mixed-runtime-config",
+    "precision-parity-runtime-config",
     "precision-fp64-runtime-default",
 )
 
 
 def _run_case(case: PrecisionCase) -> None:
-    os.environ.pop("SIMSOPT_MIXED_PRECISION", None)
-
     if case == "precision-env-inherited":
         os.environ["SIMSOPT_PRECISION"] = "fp64"
         config = simsopt_config.set_backend(
@@ -50,17 +48,17 @@ def _run_case(case: PrecisionCase) -> None:
         )
         assert config.precision == "fp64"
         assert simsopt_config.get_resolved_precision() == "fp64"
-    elif case == "precision-explicit-mixed":
-        os.environ["SIMSOPT_PRECISION"] = "fp64"
+    elif case == "precision-explicit-fp64":
+        os.environ["SIMSOPT_PRECISION"] = "mode_default"
         config = simsopt_config.set_backend(
             "jax_cpu_parity",
-            precision="mixed",
+            precision="fp64",
             configure_runtime=False,
         )
-        assert config.precision == "mixed"
-        assert simsopt_config.get_resolved_precision() == "mixed"
+        assert config.precision == "fp64"
+        assert simsopt_config.get_resolved_precision() == "fp64"
     elif case == "precision-explicit-mode-default":
-        os.environ["SIMSOPT_PRECISION"] = "mixed"
+        os.environ["SIMSOPT_PRECISION"] = "fp64"
         config = simsopt_config.set_backend(
             "jax_cpu_parity",
             precision="mode_default",
@@ -89,14 +87,14 @@ def _run_case(case: PrecisionCase) -> None:
             return
         raise AssertionError("invalid precision environment was accepted")
 
-    elif case == "precision-mixed-runtime-config":
+    elif case == "precision-parity-runtime-config":
         config = simsopt_config.set_backend(
             "jax_cpu_parity",
-            precision="mixed",
+            precision="fp64",
         )
         import jax
 
-        assert config.precision == "mixed"
+        assert config.precision == "fp64"
         assert jax.config.jax_default_matmul_precision == "highest"
         return
     else:

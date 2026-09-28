@@ -7,7 +7,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from conftest import enable_strict_parity_backend, parity_default_device
-from simsopt_jax.backend import invalidate_backend_cache
 from simsopt_jax.geo.optimizers import (
     adjoint_linear_solve as _adjoint_linear_solve,
     optimizer as _optimizer,
@@ -166,8 +165,6 @@ def test_private_quasi_newton_compute_state_stays_fp32_on_gpu(
     request,
 ) -> None:
     enable_strict_parity_backend(monkeypatch, request, "gpu")
-    monkeypatch.setenv("SIMSOPT_PRECISION", "mixed")
-    invalidate_backend_cache()
     gpu = _gpu_device()
     x0 = jax.device_put(np.asarray([1.0, -2.0], dtype=np.float64), gpu)
 

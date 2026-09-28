@@ -128,41 +128,17 @@ _OPTIMIZER_COMPAT_REEXPORT_ALLOWLIST = {
             "_solve_square_array_system_operator_only",
             "_solve_square_vector_system_operator_only",
             "_solve_square_vector_system_operator_only_nonzero_rhs",
-            "_symmetrize_dense_hessian",
             "_terminal_linear_solve_status",
         }
     ),
     DENSE_IR_MODULE: frozenset(
         {
-            "DENSE_IR_HISTORY_MAX_CORRECTIONS",
             "_DENSE_IR_NEWTON_MATVEC_BUDGET",
             "_DENSE_IR_NEWTON_REFINEMENT_STEPS",
             "_DenseIrContractionTelemetry",
-            "_DenseIrHistory",
             "_DenseIrRefinementState",
-            "_MIXED_DENSE_IR_CONTRACTION_IDEAL_GAUSSIAN_FAILURE_PROBABILITY_BOUND",
-            "_MIXED_DENSE_IR_CONTRACTION_NORM_UPPER_LIMIT",
-            "_MIXED_DENSE_IR_CONTRACTION_PROBE_ALPHA",
-            "_MIXED_DENSE_IR_CONTRACTION_PROBE_COUNT",
-            "_MixedDenseIrFallbackTelemetry",
-            "_MixedDenseIrResolvedPolicy",
-            "_MixedDenseIrSolveStatus",
-            "_MixedDenseIrTrustTelemetry",
-            "_certify_mixed_dense_ir_factors_with_telemetry",
-            "_fixed_dense_ir_history",
-            "_inactive_dense_ir_history",
-            "_inactive_mixed_dense_ir_fallback_telemetry",
-            "_inactive_mixed_dense_ir_trust_telemetry",
-            "_materialize_dense_ir_proposal_matrix",
-            "_mixed_dense_ir_contraction_operator_norm_upper",
-            "_mixed_dense_ir_correction_tail_relative_bound",
             "_run_dense_ir_refinement",
-            "_solve_dense_ir_system_with_contraction_telemetry",
             "_solve_dense_ir_system_with_status",
-            "_solve_fp64_dense_ir_rebuild_with_telemetry",
-            "_solve_mixed_dense_ir_operator_with_status",
-            "_solve_mixed_dense_ir_operator_with_telemetry",
-            "resolve_mixed_dense_ir_policy",
         }
     ),
     ADJOINT_LINEAR_SOLVE_MODULE: frozenset(
@@ -340,9 +316,8 @@ def test_linear_solve_owners_contain_their_actual_definitions() -> None:
             "_solve_dense_square_operator_lu_system_with_status",
         },
         DENSE_IR: {
-            "_MixedDenseIrSolveStatus",
             "_run_dense_ir_refinement",
-            "_solve_mixed_dense_ir_operator_with_status",
+            "_solve_dense_ir_system_with_status",
         },
         ADJOINT_LINEAR_SOLVE: {
             "_ADJOINT_LINEAR_SOLVER",
@@ -350,7 +325,6 @@ def test_linear_solve_owners_contain_their_actual_definitions() -> None:
             "_solve_hessian_least_squares_system_with_status",
         },
         SHARED: {
-            "cast_floating_tree",
             "mark_cacheable_jit_value_and_grad",
         },
     }

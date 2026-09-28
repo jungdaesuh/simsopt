@@ -142,35 +142,8 @@ from simsopt_jax.geo.surface_fourier import (  # type: ignore[import-untyped]
     stellsym_scatter_indices,
     surface_gamma_from_dofs,
 )
-from simsopt_jax.numerical_policy import (  # type: ignore[import-untyped]
-    MIXED_DENSE_IR_CERTIFICATE_KEY_WORD_MAX,
-    CertificateProbeAuthority,
-    CertificateProbeKeyData,
-)
-from simsopt_jax.runtime.host_boundary import (  # type: ignore[import-untyped]
-    runtime_certificate_probe_key,
-)
 
 OptimizerMethod = Literal["lbfgs-ondevice", "bfgs-ondevice"]
-
-
-def _run_certificate_probe_key_x64_disabled_case() -> None:
-    assert jax.config.jax_enable_x64 is False
-    authority = CertificateProbeAuthority(
-        source="supplied_replay",
-        key_data=CertificateProbeKeyData(
-            MIXED_DENSE_IR_CERTIFICATE_KEY_WORD_MAX,
-            MIXED_DENSE_IR_CERTIFICATE_KEY_WORD_MAX - 1,
-        ),
-    )
-    restored = CertificateProbeAuthority.from_json(authority.as_json())
-    key = runtime_certificate_probe_key(restored.key_data)
-    key_data = jax.random.key_data(key)
-    assert key_data.dtype == jnp.dtype(jnp.uint32)
-    np.testing.assert_array_equal(
-        np.asarray(jax.device_get(key_data)),
-        np.asarray(restored.key_data.words, dtype=np.uint32),
-    )
 
 
 def _solve_jax_driver_for_optimizer_method(method: OptimizerMethod) -> Driver:
@@ -2111,9 +2084,6 @@ def _dispatch_case(args: argparse.Namespace) -> None:
     if args.case == "dense-condition-threshold-nondefault-device":
         _run_dense_condition_threshold_nondefault_device_case()
         return
-    if args.case == "certificate-probe-key-x64-disabled":
-        _run_certificate_probe_key_x64_disabled_case()
-        return
     raise ValueError(f"unsupported subprocess case {args.case!r}")
 
 
@@ -2155,7 +2125,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     subparsers.add_parser("grouped-host-spec-vjp")
     subparsers.add_parser("dense-condition-estimate-cross-device-factors")
     subparsers.add_parser("dense-condition-threshold-nondefault-device")
-    subparsers.add_parser("certificate-probe-key-x64-disabled")
 
     args = parser.parse_args(argv)
 

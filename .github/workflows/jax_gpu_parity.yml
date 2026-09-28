@@ -106,7 +106,7 @@ jobs:
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
             python -m pytest tests/geo/test_surface_fourier_jax.py -v --tb=short
 
-      - name: Mixed precision and public derivative authority
+      - name: Precision and public derivative authority
         id: precision_authority
         continue-on-error: true
         run: |
@@ -115,7 +115,7 @@ jobs:
               tests/jax/core/test_surface_objective_fused_gradients.py \
               tests/geo/test_curve_objectives_strict_gpu_jax.py \
               tests/geo/test_surface_objectives_strict_gpu_jax.py \
-              tests/geo/test_mixed_compute_strict_gpu_jax.py \
+              tests/geo/test_core_geometry_strict_gpu_jax.py \
               -v --tb=short
 
       - name: Dense optimizer cross-device placement

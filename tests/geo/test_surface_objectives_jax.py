@@ -34,10 +34,6 @@ if _REPO_SRC_ROOT not in sys.path:
 
 from simsopt_jax.core.biotsavart import biot_savart_A
 from simsopt_jax.runtime.host_boundary import scalar_pullback_seed
-from simsopt_jax.numerical_policy import (
-    CertificateProbeAuthority,
-    CertificateProbeKeyData,
-)
 from simsopt.field.biotsavart import BiotSavart
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt.field.coil import Current, coils_via_symmetries
@@ -46,7 +42,6 @@ from simsopt.geo.curve import create_equally_spaced_curves
 from simsopt_jax.geo.optimizers import (
     adjoint_linear_solve as adjoint_linear_solve_module,
 )
-from simsopt_jax.geo.optimizers import dense_ir as dense_ir_module
 from simsopt_jax.geo.optimizers import linear_solve as linear_solve_module
 from simsopt_jax.geo.optimizers import _shared as optimizer_shared_module
 from simsopt.geo import surfaceobjectives as surfaceobjectives_module
@@ -195,23 +190,12 @@ def _donating_sum_value_and_grad():
 
 def test_traceable_runtime_old_import_path_reexports_public_and_private_helpers():
     assert (
-        surfaceobjectives_jax_module.TraceableObjectiveCertifiedSeededValueAndGrad
-        is surfaceobjectives_traceable_jax_module.TraceableObjectiveCertifiedSeededValueAndGrad
-    )
-    assert "TraceableObjectiveCertifiedSeededValueAndGrad" in (
-        surfaceobjectives_jax_module.__all__
-    )
-    assert (
         surfaceobjectives_jax_module.make_traceable_objective
         is surfaceobjectives_traceable_jax_module.make_traceable_objective
     )
     assert (
         surfaceobjectives_jax_module.make_traceable_solved_state_value_and_grad
         is surfaceobjectives_traceable_jax_module.make_traceable_solved_state_value_and_grad
-    )
-    assert (
-        surfaceobjectives_jax_module.make_traceable_objective_certified_seeded_value_and_grad
-        is surfaceobjectives_traceable_jax_module.make_traceable_objective_certified_seeded_value_and_grad
     )
     assert (
         surfaceobjectives_jax_module._get_cached_traceable_runtime_entry
@@ -1733,13 +1717,11 @@ def test_traceable_forward_result_uses_one_static_full_newton_trace_capacity(
     )
 
     @jax.jit
-    def forward_result(objective_coil_dofs):
+    def forward_result(coil_dofs):
         return surfaceobjectives_traceable_jax_module._traceable_forward_result(
             object(),
             lambda dofs: dofs,
-            coil_dofs=objective_coil_dofs,
-            objective_coil_dofs=objective_coil_dofs,
-            certificate_coil_set_spec=objective_coil_dofs,
+            coil_dofs=coil_dofs,
             baseline_x=jnp.asarray([0.0, 0.2], dtype=jnp.float64),
             baseline_value=jnp.asarray(3.0, dtype=jnp.float64),
             baseline_linear_solve_factors=None,
@@ -1748,7 +1730,6 @@ def test_traceable_forward_result_uses_one_static_full_newton_trace_capacity(
             linear_solve_stab=0.0,
             optimize_G=False,
             baseline_coil_dofs=baseline_coil_dofs,
-            baseline_objective_coil_dofs=baseline_coil_dofs,
             predictor_kind="ls",
             objective_kwargs={},
             success_filter=None,
@@ -2345,114 +2326,6 @@ def test_traceable_hessian_solve_uses_configured_stabilization_once(monkeypatch)
     np.testing.assert_allclose(np.asarray(solution), np.asarray(2.0 * rhs))
 
 
-def test_traceable_hessian_no_factor_uses_mixed_proposal_and_fp64_certificate(
-    monkeypatch,
-):
-    solved_x = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
-    rhs = jnp.asarray([0.25, -0.5], dtype=jnp.float64)
-    stabilization = 1.0e-4
-    certificate_matrix = jnp.asarray(
-        ((3.125000119, 0.375000077), (0.375000077, 2.250000131)),
-        dtype=jnp.float64,
-    )
-    certificate_probe_key = jax.random.wrap_key_data(
-        jnp.asarray((17, 23), dtype=jnp.uint32),
-        impl="threefry2x32",
-    )
-    policy = types.SimpleNamespace(
-        compute_dtype=np.dtype(np.float32),
-        runtime_dtype=np.dtype(np.float64),
-        max_dense_jacobian_bytes=1 << 20,
-        linear_solve_tolerance_floor=1.0e-14,
-        linear_solve_tolerance_cap=1.0e-10,
-    )
-    constructed_objective_dtypes = []
-
-    def make_quadratic_objective(
-        *,
-        coil_set_spec,
-        decision_split_mode,
-        infer_optimizer_state_dtype=False,
-    ):
-        del decision_split_mode, infer_optimizer_state_dtype
-        matrix = jnp.asarray(coil_set_spec["matrix"])
-        constructed_objective_dtypes.append(np.dtype(matrix.dtype))
-
-        def objective(state):
-            working_state = jnp.asarray(state, dtype=matrix.dtype)
-            return (
-                jnp.asarray(0.5, dtype=matrix.dtype)
-                * jnp.vdot(
-                    working_state,
-                    matrix @ working_state,
-                ).real
-            )
-
-        return objective
-
-    monkeypatch.setattr(
-        surfaceobjectives_traceable_jax_module,
-        "get_backend_policy",
-        lambda: policy,
-    )
-    monkeypatch.setattr(
-        adjoint_linear_solve_module,
-        "get_backend_policy",
-        lambda: policy,
-    )
-    monkeypatch.setattr(
-        surfaceobjectives_traceable_jax_module,
-        "_make_boozer_penalty_objective_closure",
-        make_quadratic_objective,
-    )
-    monkeypatch.setattr(
-        surfaceobjectives_traceable_jax_module,
-        "_traceable_inner_objective_kwargs",
-        lambda objective_kwargs: objective_kwargs,
-    )
-
-    compiled_solve = jax.jit(
-        lambda current_rhs, current_certificate_probe_key: (
-            surfaceobjectives_traceable_jax_module._traceable_solve_linearization(
-                _make_test_hessian_booz(),
-                solved_x,
-                current_rhs,
-                coil_set_spec={"matrix": certificate_matrix},
-                objective_kwargs={},
-                linear_solve_factors=None,
-                linearization_kind="hessian",
-                linear_solve_tol=1.0e-10,
-                linear_solve_stab=stabilization,
-                transpose=True,
-                certificate_probe_key=current_certificate_probe_key,
-            )
-        )
-    )
-    solution, status = compiled_solve(rhs, certificate_probe_key)
-
-    expected_solution = np.linalg.solve(
-        np.asarray(certificate_matrix) + stabilization * np.eye(2),
-        np.asarray(rhs),
-    )
-    assert isinstance(status, dense_ir_module._MixedDenseIrSolveStatus)
-    assert bool(status.success)
-    assert bool(status.trust.active)
-    assert constructed_objective_dtypes == [
-        np.dtype(np.float64),
-        np.dtype(np.float32),
-    ]
-    np.testing.assert_array_equal(
-        np.asarray(status.trust.certificate_probe_key_data),
-        np.asarray((17, 23), dtype=np.uint32),
-    )
-    np.testing.assert_allclose(
-        np.asarray(solution),
-        expected_solution,
-        rtol=1.0e-10,
-        atol=1.0e-12,
-    )
-
-
 def test_traceable_hessian_solve_uses_configured_stabilization_under_jit(
     monkeypatch,
 ):
@@ -2853,92 +2726,6 @@ def test_traceable_exact_warmstart_failure_retries_from_incumbent_state(
     assert bool(result["adjoint_linear_solve_available"]) is True
     np.testing.assert_allclose(np.asarray(result["value"]), np.asarray(1.25))
     np.testing.assert_allclose(np.asarray(result["x"]), np.asarray(baseline_x))
-
-
-def test_traceable_general_forward_passes_distinct_certificate_coil_source(
-    monkeypatch,
-):
-    baseline_x = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
-    proposal_coils = jnp.asarray([1.0, -2.0], dtype=jnp.float32)
-    objective_coils = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
-    certificate_spec = jnp.asarray([3.0, 4.0], dtype=jnp.float64)
-    captured = {}
-
-    monkeypatch.setattr(
-        surfaceobjectives_traceable_jax_module,
-        "_traceable_predict_warmstart_x",
-        lambda *_args, **_kwargs: (baseline_x, jnp.asarray(True)),
-    )
-
-    def evaluate_objective(x, coil_dofs, coil_set_spec, _objective_kwargs):
-        captured["objective_x"] = x
-        captured["objective_coils"] = coil_dofs
-        captured["objective_spec"] = coil_set_spec
-        return jnp.asarray(2.0, dtype=jnp.float64)
-
-    monkeypatch.setattr(
-        surfaceobjectives_traceable_jax_module,
-        "_evaluate_traceable_total_objective",
-        evaluate_objective,
-    )
-
-    def run_code_traceable(coil_source, sdofs, iota, G, **kwargs):
-        del sdofs, iota, G
-        captured["proposal_spec"] = coil_source
-        captured["certificate_spec"] = kwargs["certificate_coil_source"]
-        return {
-            "x": baseline_x,
-            "sdofs": baseline_x[:-1],
-            "iota": baseline_x[-1],
-            "G": None,
-            "primal_success": jnp.asarray(True),
-            "adjoint_linear_solve_available": jnp.asarray(True),
-            "newton_trace_active": jnp.asarray([True, False]),
-            "newton_trace_active_present": jnp.asarray(True),
-            "newton_trace_step_accepted": jnp.asarray([False, False]),
-            "newton_trace_step_accepted_present": jnp.asarray(False),
-        }
-
-    booz = types.SimpleNamespace(
-        _unpack_decision_vector_jax=lambda x, optimize_G, coil_set_spec: (
-            x[:-1],
-            x[-1],
-            None,
-        ),
-        run_code_traceable=run_code_traceable,
-    )
-
-    result = surfaceobjectives_traceable_jax_module._traceable_general_forward_result(
-        booz,
-        lambda coil_dofs: coil_dofs,
-        coil_dofs=proposal_coils,
-        objective_coil_dofs=objective_coils,
-        certificate_coil_set_spec=certificate_spec,
-        baseline_x=baseline_x,
-        baseline_value=jnp.asarray(1.0, dtype=jnp.float64),
-        baseline_linear_solve_factors=None,
-        linearization_kind="hessian",
-        linear_solve_tol=1.0e-10,
-        linear_solve_stab=0.0,
-        optimize_G=False,
-        baseline_coil_dofs=jnp.zeros_like(proposal_coils),
-        predictor_kind="ls",
-        objective_kwargs={},
-        success_filter=None,
-        newton_trace_capacity=_TEST_NEWTON_TRACE_CAPACITY,
-    )
-
-    assert np.dtype(captured["proposal_spec"].dtype) == np.dtype(np.float32)
-    assert captured["certificate_spec"] is certificate_spec
-    assert captured["objective_coils"] is objective_coils
-    assert captured["objective_spec"] is certificate_spec
-    assert bool(result["success"])
-    assert bool(result["newton_trace_active_present"])
-    np.testing.assert_array_equal(
-        np.asarray(result["newton_trace_active"][:2]),
-        np.asarray([True, False]),
-    )
-    assert not bool(result["newton_trace_step_accepted_present"])
 
 
 def test_traceable_profile_suite_warmstart_predict_surfaces_exact_failure(
@@ -5729,7 +5516,7 @@ def test_traceable_seeded_initial_value_surfaces_failed_solve_gradient(monkeypat
         object(),
     )
 
-    value, grad = seeded.seeded_value_and_grad.optimizer_initial_value_and_grad
+    value, grad = seeded.optimizer_initial_value_and_grad
     _assert_primal_value_with_nonfinite_gradient(value, grad, 1.25)
 
 
@@ -5875,7 +5662,7 @@ def test_traceable_seeded_value_and_grad_builds_general_only_bundle(monkeypatch)
     ]
 
 
-def test_traceable_legacy_seed_remains_deterministic_under_mixed_policy(monkeypatch):
+def test_traceable_seed_uses_the_compiled_baseline_gradient(monkeypatch):
     state = {
         "baseline_coil_dofs": np.asarray([0.5, -0.25], dtype=np.float64),
         "baseline_value": np.asarray(1.25, dtype=np.float64),
@@ -5883,30 +5670,17 @@ def test_traceable_legacy_seed_remains_deterministic_under_mixed_policy(monkeypa
         "baseline_linear_solve_factors": None,
     }
     baseline_gradient = jnp.asarray([0.125, -0.5], dtype=jnp.float64)
-
-    def randomized_gradient_must_not_run(*_args):
-        raise AssertionError("legacy seed must not invoke randomized certification")
-
     seeded_compiled_bundle = {
         "compiled_total_gradient_for": lambda *_args: (
             baseline_gradient,
             jnp.asarray(True),
         ),
-        "compiled_total_gradient_for_with_certificate_key": randomized_gradient_must_not_run,
         "compiled_value_and_grad_for": lambda coil_dofs: (
             jnp.asarray(1.25, dtype=jnp.float64),
             jnp.zeros_like(coil_dofs),
         ),
     }
     runtime_entry = {"compiled_bundle": {"state": state}, "success_filter": None}
-    monkeypatch.setattr(
-        surfaceobjectives_traceable_jax_module,
-        "get_backend_policy",
-        lambda: types.SimpleNamespace(
-            compute_dtype=np.dtype(np.float32),
-            runtime_dtype=np.dtype(np.float64),
-        ),
-    )
     monkeypatch.setattr(
         surfaceobjectives_traceable_jax_module,
         "_build_traceable_objective_compiled_bundle_from_state",
@@ -5917,9 +5691,8 @@ def test_traceable_legacy_seed_remains_deterministic_under_mixed_policy(monkeypa
         runtime_entry, object()
     )
 
-    assert seeded.certificate_probe_authority is None
     np.testing.assert_array_equal(
-        np.asarray(seeded.seeded_value_and_grad.optimizer_initial_value_and_grad[1]),
+        np.asarray(seeded.optimizer_initial_value_and_grad[1]),
         np.asarray(baseline_gradient),
     )
 
@@ -5936,172 +5709,6 @@ def test_traceable_seeded_public_contract_remains_two_fields():
     )
 
     assert len(seeded) == 2
-
-
-def test_traceable_seeded_mixed_key_is_post_freeze_and_replayable(monkeypatch):
-    baseline_x = np.asarray([0.0, 1.0], dtype=np.float64)
-    state = {
-        "baseline_coil_dofs": np.asarray([0.5, -0.25], dtype=np.float64),
-        "baseline_value": np.asarray(1.25, dtype=np.float64),
-        "baseline_x": baseline_x,
-        "baseline_linear_solve_factors": None,
-    }
-    access_order = []
-
-    class FrozenCompiledBundle(dict):
-        def __getitem__(self, key):
-            if key == "state":
-                access_order.append("state")
-            return super().__getitem__(key)
-
-    observed_key_words = []
-
-    def compiled_total_gradient_for_with_certificate_key(
-        _coil_dofs,
-        solved_x,
-        _linear_solve_factors,
-        certificate_probe_key,
-    ):
-        key_words = jax.random.key_data(certificate_probe_key)
-        observed_key_words.append(tuple(int(word) for word in np.asarray(key_words)))
-        trust = dense_ir_module._inactive_mixed_dense_ir_trust_telemetry(
-            solved_x
-        )._replace(
-            active=jnp.asarray(True),
-            certificate_probe_key_data=key_words,
-            proposal_trusted=jnp.asarray(True),
-        )
-        return jnp.asarray([0.125, -0.5]), jnp.asarray(True), trust
-
-    seeded_compiled_bundle = {
-        "compiled_total_gradient_for_with_certificate_key": (
-            compiled_total_gradient_for_with_certificate_key
-        ),
-        "compiled_value_and_grad_for": lambda coil_dofs: (
-            jnp.asarray(1.25, dtype=jnp.float64),
-            jnp.zeros_like(coil_dofs),
-        ),
-    }
-    runtime_entry = {
-        "compiled_bundle": FrozenCompiledBundle(state=state),
-        "success_filter": None,
-    }
-    fresh_authority = CertificateProbeAuthority(
-        source="fresh_runtime",
-        key_data=CertificateProbeKeyData(11, 23),
-    )
-
-    def resolve_authority(replay_key_data):
-        assert access_order == ["state"]
-        if replay_key_data is None:
-            return fresh_authority
-        return CertificateProbeAuthority(
-            source="supplied_replay",
-            key_data=replay_key_data,
-        )
-
-    monkeypatch.setattr(
-        surfaceobjectives_traceable_jax_module,
-        "get_backend_policy",
-        lambda: types.SimpleNamespace(
-            compute_dtype=np.dtype(np.float32),
-            runtime_dtype=np.dtype(np.float64),
-        ),
-    )
-    monkeypatch.setattr(
-        surfaceobjectives_traceable_jax_module,
-        "resolve_certificate_probe_authority",
-        resolve_authority,
-    )
-    monkeypatch.setattr(
-        surfaceobjectives_traceable_jax_module,
-        "_build_traceable_objective_compiled_bundle_from_state",
-        lambda *_args, **_kwargs: seeded_compiled_bundle,
-    )
-
-    fresh = surfaceobjectives_traceable_jax_module._make_traceable_runtime_certified_seeded_value_and_grad(
-        runtime_entry,
-        object(),
-    )
-    access_order.clear()
-    replay_key_data = CertificateProbeKeyData(29, 31)
-    replay = surfaceobjectives_traceable_jax_module._make_traceable_runtime_certified_seeded_value_and_grad(
-        runtime_entry,
-        object(),
-        certificate_probe_key_data=replay_key_data,
-    )
-    access_order.clear()
-    replay_again = surfaceobjectives_traceable_jax_module._make_traceable_runtime_certified_seeded_value_and_grad(
-        runtime_entry,
-        object(),
-        certificate_probe_key_data=replay_key_data,
-    )
-
-    assert fresh.certificate_probe_authority == fresh_authority
-    assert replay.certificate_probe_authority == CertificateProbeAuthority(
-        source="supplied_replay",
-        key_data=replay_key_data,
-    )
-    assert fresh.certificate_probe_evidence is not None
-    assert (
-        fresh.certificate_probe_evidence.observed_key_data == fresh_authority.key_data
-    )
-    assert replay.certificate_probe_evidence is not None
-    assert replay.certificate_probe_evidence.observed_key_data == replay_key_data
-    assert replay_again is not replay
-    assert observed_key_words == [(11, 23), (29, 31), (29, 31)]
-
-
-def test_traceable_certified_seed_rejects_mismatched_observed_key(monkeypatch):
-    state = {
-        "baseline_coil_dofs": np.asarray([0.5], dtype=np.float64),
-        "baseline_value": np.asarray(1.25, dtype=np.float64),
-        "baseline_x": np.asarray([0.0], dtype=np.float64),
-        "baseline_linear_solve_factors": None,
-    }
-
-    def compiled_total_gradient_for_with_certificate_key(
-        _coil_dofs, solved_x, _linear_solve_factors, _certificate_probe_key
-    ):
-        trust = dense_ir_module._inactive_mixed_dense_ir_trust_telemetry(
-            solved_x
-        )._replace(
-            active=jnp.asarray(True),
-            certificate_probe_key_data=jnp.asarray([41, 43], dtype=jnp.uint32),
-            proposal_trusted=jnp.asarray(True),
-        )
-        return jnp.asarray([0.125]), jnp.asarray(True), trust
-
-    seeded_compiled_bundle = {
-        "compiled_total_gradient_for_with_certificate_key": (
-            compiled_total_gradient_for_with_certificate_key
-        ),
-        "compiled_value_and_grad_for": lambda coil_dofs: (
-            jnp.asarray(1.25, dtype=jnp.float64),
-            jnp.zeros_like(coil_dofs),
-        ),
-    }
-    runtime_entry = {"compiled_bundle": {"state": state}, "success_filter": None}
-    monkeypatch.setattr(
-        surfaceobjectives_traceable_jax_module,
-        "get_backend_policy",
-        lambda: types.SimpleNamespace(
-            compute_dtype=np.dtype(np.float32),
-            runtime_dtype=np.dtype(np.float64),
-        ),
-    )
-    monkeypatch.setattr(
-        surfaceobjectives_traceable_jax_module,
-        "_build_traceable_objective_compiled_bundle_from_state",
-        lambda *_args, **_kwargs: seeded_compiled_bundle,
-    )
-
-    with pytest.raises(ValueError, match="observed key differs"):
-        surfaceobjectives_traceable_jax_module._make_traceable_runtime_certified_seeded_value_and_grad(
-            runtime_entry,
-            object(),
-            certificate_probe_key_data=CertificateProbeKeyData(11, 23),
-        )
 
 
 def test_traceable_general_only_bundle_defers_gradient_jits(monkeypatch):
@@ -6341,80 +5948,6 @@ def test_traceable_compiled_bundle_general_only_forward_avoids_public_same_coils
     assert calls["general_forward"] == 1
     np.testing.assert_allclose(np.asarray(value), 0.25)
     np.testing.assert_allclose(np.asarray(grad), np.ones(2, dtype=np.float64))
-
-
-def test_traceable_compiled_bundle_separates_proposal_and_certificate_coils(
-    monkeypatch,
-):
-    baseline_coil_dofs = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
-    state = {
-        "objective_kwargs": {},
-        "baseline_x": jnp.asarray([1.0, -1.0], dtype=jnp.float64),
-        "baseline_value": jnp.asarray(2.0, dtype=jnp.float64),
-        "baseline_linear_solve_factors": None,
-        "baseline_coil_dofs": baseline_coil_dofs,
-        "coil_set_spec_from_dofs": lambda coil_dofs: coil_dofs,
-        "optimize_G": False,
-        "predictor_kind": "none",
-        "linearization_kind": "hessian",
-        "linear_solve_tol": 1.0e-10,
-        "linear_solve_stab": 0.0,
-        "newton_trace_capacity": _TEST_NEWTON_TRACE_CAPACITY,
-    }
-    captured = {}
-
-    monkeypatch.setattr(
-        surfaceobjectives_traceable_jax_module,
-        "_as_compute_array",
-        lambda value: jnp.asarray(value, dtype=jnp.float32),
-    )
-
-    def fake_general_forward_result(_booz_jax, _coil_set_spec_from_dofs, **kwargs):
-        captured["proposal_dtype"] = kwargs["coil_dofs"].dtype
-        captured["objective_dtype"] = kwargs["objective_coil_dofs"].dtype
-        captured["certificate_dtype"] = kwargs["certificate_coil_set_spec"].dtype
-        captured["baseline_proposal_dtype"] = kwargs["baseline_coil_dofs"].dtype
-        return {
-            "value": jnp.sum(kwargs["objective_coil_dofs"]),
-            "x": jnp.asarray([1.0, -1.0], dtype=jnp.float64),
-            "sdofs": jnp.asarray([1.0], dtype=jnp.float64),
-            "iota": jnp.asarray(-1.0, dtype=jnp.float64),
-            "G": None,
-            "linear_solve_factors": None,
-            "success": jnp.asarray(True),
-            "primal_success": jnp.asarray(True),
-            "adjoint_linear_solve_available": jnp.asarray(True),
-        }
-
-    monkeypatch.setattr(
-        surfaceobjectives_traceable_jax_module,
-        "_traceable_general_forward_result",
-        fake_general_forward_result,
-    )
-    monkeypatch.setattr(
-        surfaceobjectives_traceable_jax_module,
-        "_traceable_total_gradient_with_status",
-        lambda _booz_jax, _coil_set_spec_from_dofs, **kwargs: (
-            jnp.ones_like(kwargs["coil_dofs"]),
-            jnp.asarray(True),
-        ),
-    )
-
-    bundle = surfaceobjectives_traceable_jax_module._build_traceable_objective_compiled_bundle_from_state(
-        object(),
-        state,
-        general_only_forward=True,
-    )
-    value, gradient = bundle["compiled_value_and_grad_for"](
-        jnp.asarray([0.75, -0.125], dtype=jnp.float64)
-    )
-
-    assert np.dtype(captured["proposal_dtype"]) == np.dtype(np.float32)
-    assert np.dtype(captured["baseline_proposal_dtype"]) == np.dtype(np.float32)
-    assert np.dtype(captured["objective_dtype"]) == np.dtype(np.float64)
-    assert np.dtype(captured["certificate_dtype"]) == np.dtype(np.float64)
-    np.testing.assert_allclose(np.asarray(value), 0.625)
-    np.testing.assert_allclose(np.asarray(gradient), np.ones(2))
 
 
 @pytest.mark.parametrize(
@@ -6980,7 +6513,6 @@ def test_traceable_objective_gradient_parts_use_strict_vjp_helpers(monkeypatch):
             implicit_grad,
             total_grad,
             linear_solve_success,
-            _trust,
             _execution_counts,
             _adjoint_evidence,
         ) = surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
@@ -7056,7 +6588,7 @@ def test_traceable_fused_total_gradient_isolates_rhs_from_coil_pullbacks(
 
     solved_x = jnp.asarray([1.0, 2.0, -3.0], dtype=jnp.float64)
     coil_dofs = jnp.asarray([3.0, 4.0], dtype=jnp.float64)
-    total_grad, success, _trust, execution_counts, _adjoint_evidence = (
+    total_grad, success, execution_counts, _adjoint_evidence = (
         surfaceobjectives_traceable_jax_module._traceable_fused_total_gradient_canary(
             object(),
             lambda current_coil_dofs: current_coil_dofs,
@@ -7124,7 +6656,6 @@ def test_traceable_exact_objective_gradient_uses_exact_residual_equation(
         implicit_grad,
         total_grad,
         success,
-        _trust,
         _execution_counts,
         _adjoint_evidence,
     ) = surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
@@ -7144,7 +6675,7 @@ def test_traceable_exact_objective_gradient_uses_exact_residual_equation(
     np.testing.assert_allclose(total_grad, solved_x - coil_dofs)
     assert bool(np.asarray(success))
 
-    fused_total_grad, fused_success, _trust, execution_counts, _evidence = (
+    fused_total_grad, fused_success, execution_counts, _evidence = (
         surfaceobjectives_traceable_jax_module._traceable_fused_total_gradient_canary(
             object(),
             lambda current_coil_dofs: current_coil_dofs,
@@ -7218,7 +6749,6 @@ def test_traceable_objective_gradient_parts_skips_direct_vjp_for_iota_term(
             implicit_grad,
             total_grad,
             linear_solve_success,
-            _trust,
             _execution_counts,
             _adjoint_evidence,
         ) = surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
@@ -7439,7 +6969,6 @@ def test_traceable_objective_gradient_parts_term_diagnostics_use_strict_vjp_dire
             implicit_grad,
             total_grad,
             linear_solve_success,
-            _trust,
             _execution_counts,
             _adjoint_evidence,
         ) = surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
@@ -7504,7 +7033,6 @@ def test_traceable_objective_gradient_parts_skip_all_autodiff_for_zero_weight_te
             implicit_grad,
             total_grad,
             linear_solve_success,
-            _trust,
             _execution_counts,
             _adjoint_evidence,
         ) = surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
@@ -7598,7 +7126,6 @@ def test_traceable_total_gradient_skips_direct_vjp_when_active_weights_are_inner
             implicit_grad,
             total_grad,
             linear_solve_success,
-            _trust,
             _execution_counts,
             _adjoint_evidence,
         ) = surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
@@ -7707,7 +7234,6 @@ def test_traceable_objective_gradient_parts_skips_direct_jvp_for_surface_vessel_
             implicit_grad,
             total_grad,
             linear_solve_success,
-            _trust,
             _execution_counts,
             _adjoint_evidence,
         ) = surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
@@ -7826,16 +7352,15 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
         )
         assert term_name is not None
         grad = jnp.asarray([0.5, -0.75], dtype=jnp.float64)
-        # ``_traceable_objective_gradient_parts`` returns seven members:
+        # ``_traceable_objective_gradient_parts`` returns six members:
         # direct/implicit/total gradients, the linear-solve success flag, and the
-        # mixed-dense-IR trust, execution-count and adjoint-evidence telemetry
-        # that ``diagnose_traceable_objective_runtime`` discards.
+        # execution-count and adjoint-evidence telemetry that
+        # ``diagnose_traceable_objective_runtime`` discards.
         return (
             grad,
             grad,
             grad,
             jnp.asarray(True, dtype=bool),
-            None,
             None,
             None,
         )

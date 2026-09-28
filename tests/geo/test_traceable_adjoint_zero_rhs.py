@@ -85,7 +85,6 @@ def test_traceable_gradient_skips_only_exact_zero_adjoint_rhs(
         implicit_grad,
         total_grad,
         linear_solve_success,
-        _trust,
         _execution_counts,
         _adjoint_evidence,
     ) = _traceable._traceable_objective_gradient_parts(
@@ -114,7 +113,6 @@ def test_traceable_gradient_skips_only_exact_zero_adjoint_rhs(
     (
         fused_total_grad,
         fused_linear_solve_success,
-        _fused_trust,
         fused_execution_counts,
         _fused_adjoint_evidence,
     ) = _traceable._traceable_fused_total_gradient_canary(
@@ -183,7 +181,7 @@ def test_traceable_fused_total_gradient_masks_failed_adjoint(monkeypatch):
         ),
     )
 
-    total_grad, success, _trust, execution_counts, evidence = (
+    total_grad, success, execution_counts, evidence = (
         _traceable._traceable_fused_total_gradient_canary(
             object(),
             lambda current_coil_dofs: current_coil_dofs,

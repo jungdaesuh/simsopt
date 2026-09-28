@@ -504,7 +504,7 @@ def _surface_xyz_tensor_fourier_from_spec(
 
     The spec is the sole owner of compact scatter indices and clamping flags.
     ``use_compute_dtype`` changes arithmetic dtype only; representation and
-    boundary-condition metadata remain identical across proposal/certificate lanes.
+    boundary-condition metadata remain identical across compute dtypes.
     """
     return kernel(
         spec.dofs,

@@ -147,7 +147,6 @@ def surface_to_surface_distance_pure(gamma1, gamma2, mdist):
 
 
 __all__ = [
-    "TraceableObjectiveCertifiedSeededValueAndGrad",
     "TraceableObjectiveSession",
     "AreaJAX",
     "AspectRatioJAX",
@@ -163,7 +162,6 @@ __all__ = [
     "coil_dofs_gradient_to_derivative",
     "compute_standard_surface_objective_gradients",
     "make_traceable_single_stage_alm_runtime_bundle",
-    "make_traceable_objective_certified_seeded_value_and_grad",
     "make_traceable_objective",
     "make_traceable_objective_runtime_bundle",
     "make_traceable_objective_seeded_value_and_grad",
@@ -3290,7 +3288,6 @@ def compute_standard_surface_objective_gradients(
 # the historical ``simsopt_jax_adapters.geo.surface_objectives`` import path stable for
 # public builders and direct private helper imports used by downstream tests.
 from .surface_objectives_traceable import (
-    TraceableObjectiveCertifiedSeededValueAndGrad as TraceableObjectiveCertifiedSeededValueAndGrad,
     TraceableObjectiveSeededValueAndGrad as TraceableObjectiveSeededValueAndGrad,
     TraceableObjectiveSession as TraceableObjectiveSession,
     TraceableObjectiveSolvedPair as TraceableObjectiveSolvedPair,
@@ -3377,7 +3374,6 @@ from .surface_objectives_traceable import (
     _traceable_total_objective_kwargs as _traceable_total_objective_kwargs,
     diagnose_traceable_objective_runtime as diagnose_traceable_objective_runtime,
     make_traceable_objective as make_traceable_objective,
-    make_traceable_objective_certified_seeded_value_and_grad as make_traceable_objective_certified_seeded_value_and_grad,
     make_traceable_objective_profile_suite as make_traceable_objective_profile_suite,
     make_traceable_objective_runtime_bundle as make_traceable_objective_runtime_bundle,
     make_traceable_objective_seeded_value_and_grad as make_traceable_objective_seeded_value_and_grad,

@@ -512,17 +512,16 @@ def test_static_slice_and_update_grad_run_under_strict_transfer_guard() -> None:
     )
 
 
-def test_static_slice_and_update_preserve_compute_dtype_in_mixed_mode(
+def test_static_slice_and_update_preserve_input_dtype_under_fp64_runtime(
     monkeypatch,
 ) -> None:
-    """Regression: every staged operand must follow ``use_compute_dtype``.
+    """Regression: every staged operand must follow the operand dtype.
 
     A runtime-dtype (fp64) scalar inside ``_update_1d_static`` promoted the
     whole masked update — and via ``_mapped_full_dofs`` the mapped coil dofs
-    and the downstream Biot-Savart chain — back to fp64 in mixed mode.
+    and the downstream Biot-Savart chain — to fp64 for fp32 operands.
     """
     monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_fast")
-    monkeypatch.setenv("SIMSOPT_PRECISION", "mixed")
     invalidate_backend_cache()
     try:
         array_host = np.linspace(-2.0, 3.0, num=6, dtype=np.float32)

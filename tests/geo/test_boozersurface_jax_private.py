@@ -1517,7 +1517,7 @@ class TestOptimizerAdapterPrivate:
         np.testing.assert_allclose(grad, np.asarray([1.0, -2.0]))
 
     @PRIVATE_OPTIMIZER_RUNTIME
-    def test_private_bfgs_honors_explicit_compute_dtype_under_mixed_policy(
+    def test_private_bfgs_honors_explicit_compute_dtype(
         self,
         monkeypatch,
         request,
@@ -1526,7 +1526,6 @@ class TestOptimizerAdapterPrivate:
             monkeypatch,
             request,
             mode="jax_cpu_fast",
-            precision="mixed",
         )
 
         def quad(x):
@@ -1546,7 +1545,7 @@ class TestOptimizerAdapterPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_LBFGS_RUNTIME
-    def test_private_lbfgs_honors_explicit_compute_dtype_under_mixed_policy(
+    def test_private_lbfgs_honors_explicit_compute_dtype(
         self,
         monkeypatch,
         request,
@@ -1555,7 +1554,6 @@ class TestOptimizerAdapterPrivate:
             monkeypatch,
             request,
             mode="jax_cpu_fast",
-            precision="mixed",
         )
 
         def quad(x):

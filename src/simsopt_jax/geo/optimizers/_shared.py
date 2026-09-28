@@ -52,19 +52,6 @@ def _x64_enabled():
     return bool(jax.config.jax_enable_x64)
 
 
-def cast_floating_tree(tree, dtype):
-    """Cast floating array leaves while preserving discrete metadata."""
-    resolved_dtype = np.dtype(dtype)
-
-    def cast_leaf(leaf):
-        leaf_dtype = getattr(leaf, "dtype", None)
-        if leaf_dtype is not None and np.issubdtype(np.dtype(leaf_dtype), np.floating):
-            return jnp.asarray(leaf, dtype=resolved_dtype)
-        return leaf
-
-    return jax.tree.map(cast_leaf, tree)
-
-
 def mark_cacheable_jit_value_and_grad(fun):
     """Mark a mutable callable for shared value/gradient and operator JIT caches."""
     setattr(fun, _CACHEABLE_VALUE_AND_GRAD_ATTR, True)

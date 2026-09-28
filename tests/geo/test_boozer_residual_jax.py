@@ -44,7 +44,6 @@ from conftest import (
 from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 
 import simsopt_jax.geo.boozer_residual as _brj
-from simsopt_jax.backend import invalidate_backend_cache
 from simsopt_jax.geo.boozer_residual import (
     _split_decision_vector,
     _split_decision_vector_jvp_safe,
@@ -1053,35 +1052,6 @@ class TestBoozerResidualDevicePlacement:
 
         assert scalar_value.dtype == jnp.float32
         assert grad.dtype == jnp.float32
-
-    def test_surface_geometry_from_dofs_uses_compute_dtype_in_mixed_mode(
-        self,
-        monkeypatch,
-    ):
-        monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_fast")
-        monkeypatch.setenv("SIMSOPT_PRECISION", "mixed")
-        invalidate_backend_cache()
-        try:
-            gamma, xphi, xtheta = _brj._surface_geometry_from_dofs(
-                jnp.asarray([1.0, 0.1, 0.2], dtype=jnp.float64),
-                jnp.asarray([0.0, 0.5], dtype=jnp.float64),
-                jnp.asarray([0.0, 0.5], dtype=jnp.float64),
-                1,
-                0,
-                1,
-                True,
-                None,
-                surface_kind="rzfourier",
-                use_compute_dtype=True,
-            )
-        finally:
-            monkeypatch.delenv("SIMSOPT_PRECISION", raising=False)
-            monkeypatch.delenv("SIMSOPT_BACKEND_MODE", raising=False)
-            invalidate_backend_cache()
-
-        assert gamma.dtype == jnp.float32
-        assert xphi.dtype == jnp.float32
-        assert xtheta.dtype == jnp.float32
 
 
 class TestBoozerResidualM1Limitations:

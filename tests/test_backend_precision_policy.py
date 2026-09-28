@@ -9,18 +9,12 @@ from simsopt_jax.backend import runtime
 from simsopt_jax.backend.runtime import BackendConfig
 
 _MODE_DEFAULTS = {
-    "native_cpu": ("fp64", "float64", "float64", None, "highest"),
-    "jax_cpu_fast": ("fp64", "float64", "float64", None, "default"),
-    "jax_cpu_parity": ("fp64", "float64", "float64", None, "highest"),
-    "jax_cpu_float32_smoke": (
-        "fp32_smoke",
-        "float32",
-        "float32",
-        None,
-        "default",
-    ),
-    "jax_gpu_fast": ("fp64", "float64", "float64", None, "default"),
-    "jax_gpu_parity": ("fp64", "float64", "float64", None, "highest"),
+    "native_cpu": ("fp64", "float64", "float64", "highest"),
+    "jax_cpu_fast": ("fp64", "float64", "float64", "default"),
+    "jax_cpu_parity": ("fp64", "float64", "float64", "highest"),
+    "jax_cpu_float32_smoke": ("fp32_smoke", "float32", "float32", "default"),
+    "jax_gpu_fast": ("fp64", "float64", "float64", "default"),
+    "jax_gpu_parity": ("fp64", "float64", "float64", "highest"),
 }
 
 
@@ -42,7 +36,6 @@ def _clear_precision_environment(monkeypatch: pytest.MonkeyPatch):
         "SIMSOPT_JAX_PLATFORM",
         "SIMSOPT_JAX_BACKEND",
         "SIMSOPT_PRECISION",
-        "SIMSOPT_MIXED_PRECISION",
     ):
         monkeypatch.delenv(name, raising=False)
     runtime.invalidate_backend_cache()
@@ -62,24 +55,8 @@ def test_omitted_precision_preserves_mode_defaults(mode: str, expected: tuple):
         policy.resolved_precision,
         policy.runtime_dtype,
         policy.compute_dtype,
-        policy.certificate_dtype,
         policy.matmul_precision,
     ) == expected
-
-
-@pytest.mark.parametrize(
-    "mode", ("jax_cpu_fast", "jax_cpu_parity", "jax_gpu_fast", "jax_gpu_parity")
-)
-def test_mixed_precision_preserves_fp64_results_and_certificates(mode: str):
-    policy = _policy(mode, precision="mixed")
-
-    assert policy.precision == "mixed"
-    assert policy.resolved_precision == "mixed"
-    assert policy.runtime_dtype == "float64"
-    assert policy.host_dtype == "float64"
-    assert policy.compute_dtype == "float32"
-    assert policy.certificate_dtype == "float64"
-    assert policy.matmul_precision == "highest"
 
 
 def test_explicit_fp64_preserves_the_selected_mode_matmul_contract():
@@ -88,19 +65,12 @@ def test_explicit_fp64_preserves_the_selected_mode_matmul_contract():
     assert policy.precision == "fp64"
     assert policy.resolved_precision == "fp64"
     assert policy.compute_dtype == "float64"
-    assert policy.certificate_dtype is None
     assert policy.matmul_precision == "default"
 
 
 @pytest.mark.parametrize(
     ("mode", "precision", "message"),
     (
-        ("native_cpu", "mixed", "native_cpu does not support mixed precision"),
-        (
-            "jax_cpu_float32_smoke",
-            "mixed",
-            "only supports precision='mode_default'",
-        ),
         (
             "jax_cpu_float32_smoke",
             "fp64",
@@ -126,11 +96,11 @@ def test_public_precision_precedence_and_normalized_environment(monkeypatch):
 
     explicit = runtime.set_backend(
         "jax_cpu_parity",
-        precision="mixed",
+        precision="mode_default",
         configure_runtime=False,
     )
-    assert explicit.precision == "mixed"
-    assert os.environ["SIMSOPT_PRECISION"] == "mixed"
+    assert explicit.precision == "mode_default"
+    assert os.environ["SIMSOPT_PRECISION"] == "mode_default"
 
     cleared = runtime.set_backend(
         "jax_cpu_float32_smoke",
@@ -142,7 +112,7 @@ def test_public_precision_precedence_and_normalized_environment(monkeypatch):
     assert runtime.get_resolved_precision() == "fp32_smoke"
 
 
-@pytest.mark.parametrize("invalid", ("", "fp32", "true", "MIXED", "auto"))
+@pytest.mark.parametrize("invalid", ("", "fp32", "true", "mixed", "MIXED", "auto"))
 def test_invalid_explicit_precision_fails_before_runtime_configuration(
     monkeypatch: pytest.MonkeyPatch,
     invalid: str,
@@ -167,13 +137,6 @@ def test_invalid_environment_precision_fails_before_runtime_configuration(monkey
         runtime.set_backend("jax_cpu_parity", configure_runtime=False)
 
 
-def test_obsolete_mixed_precision_environment_is_rejected(monkeypatch):
-    monkeypatch.setenv("SIMSOPT_MIXED_PRECISION", "1")
-
-    with pytest.raises(ValueError, match="use SIMSOPT_PRECISION=mixed"):
-        runtime.set_backend("jax_cpu_parity", configure_runtime=False)
-
-
 def test_backend_config_defaulted_precision_is_constructor_compatible():
     config = BackendConfig(
         mode="jax_cpu_parity",
@@ -187,12 +150,12 @@ def test_backend_config_defaulted_precision_is_constructor_compatible():
 def test_use_runtime_threads_the_typed_precision_selection():
     config = runtime.use_runtime(
         "jax_cpu_parity",
-        precision="mixed",
+        precision="fp64",
         configure_runtime=False,
     )
 
-    assert config.precision == "mixed"
-    assert runtime.get_resolved_precision() == "mixed"
+    assert config.precision == "fp64"
+    assert runtime.get_resolved_precision() == "fp64"
 
 
 @pytest.mark.parametrize(

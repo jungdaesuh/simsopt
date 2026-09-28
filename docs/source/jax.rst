@@ -131,25 +131,16 @@ explicitly.  Use the typed ``precision`` argument to ``set_backend``::
 
     simsopt_config.set_backend(
         "jax_gpu_fast",
-        precision="mixed",
+        precision="fp64",
         strict=True,
     )
 
-The accepted selections are ``"mode_default"``, ``"fp64"``, and ``"mixed"``.
+The accepted selections are ``"mode_default"`` and ``"fp64"``.
 ``"mode_default"`` preserves the historical dtype policy for the selected
-runtime mode.  ``"fp64"`` requests FP64 explicitly.  ``"mixed"`` uses FP32
-only for supported proposal computations while retaining FP64 result and
-certificate dtypes.  The equivalent process setting is
-``SIMSOPT_PRECISION=mode_default|fp64|mixed``; an explicit non-``None``
-``precision`` argument takes precedence.
-
-Mixed precision never promotes widened FP32 proposal values into accepted
-evidence.  Supported mixed solvers validate candidates with the live FP64
-operator, refine against that operator, and use the canonical FP64 fallback
-when a proposal, refinement, condition, contraction, or tolerance gate fails.
-Accepted public results and certificate-side gradients therefore retain FP64
-authority.  The native CPU default and every omitted-precision JAX route remain
-unchanged.
+runtime mode.  ``"fp64"`` requests FP64 explicitly.  The equivalent process
+setting is ``SIMSOPT_PRECISION=mode_default|fp64``; an explicit non-``None``
+``precision`` argument takes precedence.  The native CPU default and every
+omitted-precision JAX route remain unchanged.
 
 Quick smoke run
 ~~~~~~~~~~~~~~~
@@ -388,32 +379,22 @@ scientific gates.  Fast output is never certification evidence.  Use the
 dedicated ``examples/jax/run_parity.py`` workflow for hash-bound native/JAX
 certification artifacts.
 
-Precision and certificate authority
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Precision selection
+~~~~~~~~~~~~~~~~~~~
 
 Precision is an independent, typed runtime selection.  Existing applications
 that omit it retain their current mode-owned defaults.  New applications can
-select FP64 or mixed proposal compute programmatically::
+select FP64 programmatically::
 
     import simsopt_jax.config as simsopt_config
 
     simsopt_config.set_backend("jax_gpu_fast", precision="fp64")
-    # Or, for supported proposal paths:
-    simsopt_config.set_backend("jax_gpu_fast", precision="mixed")
 
-For subprocesses, use ``SIMSOPT_PRECISION=fp64`` or
-``SIMSOPT_PRECISION=mixed``.  An explicit ``precision=`` value takes
-precedence over the environment.  The compatibility value
+For subprocesses, use ``SIMSOPT_PRECISION=fp64``.  An explicit ``precision=``
+value takes precedence over the environment.  The compatibility value
 ``precision="mode_default"`` restores the selected mode's established policy.
-The obsolete ``SIMSOPT_MIXED_PRECISION`` spelling is rejected with a
-``ValueError`` rather than silently ignored.  The Newton linear solver has no
-environment selector; set it through the typed ``newton_linear_solver`` option
-described below.
-
-Mixed precision changes proposal computation, not acceptance authority.  A
-mixed candidate must pass live FP64 residual, refinement, condition, and final
-accuracy gates.  A failed gate routes to the canonical FP64 fallback or fails
-closed; cast-up FP32 values are never treated as an FP64 certificate.
+The Newton linear solver has no environment selector; set it through the typed
+``newton_linear_solver`` option described below.
 
 Dense iterative refinement is opt-in through the typed Newton policy.
 ``BoozerSurfaceJAX`` least-squares Newton defaults to ``"dense_lu"``, matching
@@ -455,8 +436,6 @@ Migration checklist
 #. Select precision explicitly only when departing from the mode default.
 #. Replace one native object with its adapter and compare values and
    derivatives in FP64.
-#. For mixed compute, verify the live FP64 certificate and fallback path rather
-   than comparing proposal values alone.
 #. Move immutable numerical state into ``simsopt_jax.core`` only when the
    workflow benefits from a larger compiled region.
 #. Measure first-call compilation, steady-state time, device transfers, and

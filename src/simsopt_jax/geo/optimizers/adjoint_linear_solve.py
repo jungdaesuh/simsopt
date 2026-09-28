@@ -1,8 +1,8 @@
 """Adjoint linear-solver selection and Hessian least-squares routing.
 
 This layer selects between the dense and CG formulations while
-consuming generic kernels from :mod:`linear_solve` and dense-IR policy from
-:mod:`dense_ir`. It never imports the optimizer facade.
+consuming generic kernels from :mod:`linear_solve`. It never imports the
+optimizer facade.
 """
 
 from __future__ import annotations
@@ -15,12 +15,7 @@ import jax.numpy as jnp
 import lineax
 import numpy as np
 
-from simsopt_jax.backend import get_backend_policy
 from simsopt_jax.core._device_scalars import staged_like as _staged_like
-from simsopt_jax.geo.optimizers.dense_ir import (
-    _solve_mixed_dense_ir_operator_with_status,
-    resolve_mixed_dense_ir_policy,
-)
 from simsopt_jax.geo.optimizers.linear_solve import (
     _LinearSolveStatus,
     _apply_column_batched_operator,
@@ -182,8 +177,6 @@ def _solve_hessian_least_squares_system_with_status(
     *,
     stab,
     tol,
-    proposal_objective_fn=None,
-    certificate_probe_key=None,
     solver: _AdjointHessianLinearSolver | None = None,
 ):
     """Solve a Hessian adjoint system without forming normal equations."""
@@ -198,39 +191,6 @@ def _solve_hessian_least_squares_system_with_status(
             tol=tol,
         )
     if _dense_square_operator_materialization_allowed(rhs):
-        if proposal_objective_fn is not None:
-            if certificate_probe_key is None:
-                raise ValueError(
-                    "Mixed dense IR requires a fresh or replay-authorized "
-                    "runtime certificate key."
-                )
-            policy = get_backend_policy()
-            dense_ir_policy = resolve_mixed_dense_ir_policy()
-            proposal_dtype = np.dtype(policy.compute_dtype)
-            certificate_dtype = np.dtype(policy.runtime_dtype)
-            if (
-                proposal_dtype != np.dtype(np.float32)
-                or certificate_dtype != dense_ir_policy.certificate_dtype
-            ):
-                raise ValueError(
-                    "A proposal objective requires the FP32-factor/"
-                    f"{dense_ir_policy.certificate_dtype_name}-certificate "
-                    "mixed-precision policy."
-                )
-            proposal_operator = _hessian_linear_operator(
-                proposal_objective_fn,
-                jnp.asarray(x, dtype=proposal_dtype),
-                stab=stab,
-            )
-            return _solve_mixed_dense_ir_operator_with_status(
-                proposal_operator["matvec"],
-                operator["matvec"],
-                rhs,
-                tol=tol,
-                proposal_dtype=proposal_dtype,
-                certificate_sweep_dtype=operator["dtype"],
-                certificate_probe_key=certificate_probe_key,
-            )
         return _solve_dense_square_operator_least_squares_system_with_status(
             operator["matvec"],
             rhs,
