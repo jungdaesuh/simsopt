@@ -74,6 +74,18 @@ _NON_JAX_BINDING = "non-jax"
 # Re-pinned 2026-09-23 again, no new site: the L-BFGS-B non-Wolfe restart
 # helpers (all host-side, no transfer) moved the same five coordinates.
 # Baseline: 89.
+# Re-pinned 2026-09-24, no new site: the restart route's accepted-iterate
+# trace (host-side counts) and the move of ``projgr`` to ``solve/termination.py``
+# (host numpy, no transfer) moved the same five coordinates. Baseline: 89.
+# Re-pinned 2026-09-24 again, no new site: the restart route's callback re-uses
+# the accepted evaluation (host-side, no transfer) and moved the same five
+# coordinates. Baseline: 89.
+# Re-pinned 2026-09-24 a third time, no new site: the shared result boundary's
+# finiteness check (``_public_result``, host numpy on already-host arrays, no
+# transfer) moved the same five coordinates. Baseline: 89.
+# Re-pinned 2026-09-24 a fourth time, no new site: the SciPy result-shape reader
+# (``_scipy_termination``, host-side, no transfer) moved the same five
+# coordinates. Baseline: 89.
 _ALLOWED_OWNER_CALLS = frozenset(
     {
         "src/simsopt_jax/backend/dtypes.py::_device_put::device_put::308:19",
@@ -96,11 +108,11 @@ _ALLOWED_OWNER_CALLS = frozenset(
         "src/simsopt_jax/runtime/host_boundary.py::block_until_ready::block_until_ready::225:11",
         "src/simsopt_jax/runtime/host_boundary.py::disallow_host_transfers::transfer_guard::134:9",
         "src/simsopt_jax/runtime/host_boundary.py::host_value::device_get::190:11",
-        "src/simsopt_jax/solve/dispatch.py::_run_optimistix_lm::transfer_guard_host_to_device::909:9",
-        "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize.value_and_gradient_at::device_get::652:15",
-        "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize.value_and_gradient_at::device_get::652:38",
-        "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize.value_and_gradient_at::device_put::650:54",
-        "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize::device_get::695:25",
+        "src/simsopt_jax/solve/dispatch.py::_run_optimistix_lm::transfer_guard_host_to_device::1039:9",
+        "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize.value_and_gradient_at::device_get::768:15",
+        "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize.value_and_gradient_at::device_get::768:38",
+        "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize.value_and_gradient_at::device_put::766:54",
+        "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize::device_get::819:25",
         "src/simsopt_jax/solve/minimize_runtime.py::run_optimistix_minimize::transfer_guard_host_to_device::301:9",
         "src/simsopt_jax/solve/serial.py::_write_bounded_objective_log::transfer_guard::455:9",
         "src/simsopt_jax_adapters/geo/boozer_surface.py::_with_host_bridge_transfer_guard.wrapped::transfer_guard_device_to_host::208:13",

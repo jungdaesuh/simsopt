@@ -36,6 +36,7 @@ from conftest import (
     parity_device,
 )
 from jax.flatten_util import ravel_pytree
+from scipy.optimize import OptimizeResult
 from simsopt.field.coil import Coil, Current
 from simsopt.geo.boozersurface import BoozerSurface as LegacyBoozerSurface
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
@@ -1614,7 +1615,8 @@ class TestOptimizerAdapter:
             captured["options"] = dict(options)
             captured["callback"] = callback
             fun(x0)
-            return types.SimpleNamespace(
+            # SciPy's own return type: the route reads it as a mapping.
+            return OptimizeResult(
                 x=np.asarray(x0),
                 jac=np.asarray(x0),
                 fun=0.0,

@@ -96,6 +96,33 @@ class ScipyLBFGSBOptions(OptionsBase):
         """
         return cls(maxiter=maxiter, maxcor=maxcor, ftol=tol, gtol=tol, maxls=maxls)
 
+    @classmethod
+    def evaluation_budgeted(
+        cls, *, maxfun: int, maxcor: int, tol: float, maxls: int = 20
+    ) -> "ScipyLBFGSBOptions":
+        """The fallback policy: a budget of ``maxfun`` true evaluations, with the
+        non-Wolfe restart on.
+
+        ``maxiter = maxfun``. x0 costs one evaluation and an iteration normally at
+        least one, so the evaluation limit fires at or before the iteration limit;
+        they coincide when every iteration used exactly one, and SciPy then reports
+        its ITERATIONS message. An iteration whose trials SciPy's memo served entirely
+        costs none, so the iteration limit can also fire first. Either way SciPy's
+        status is 1. The wrapper tests the budgets only at iteration ends, so the solve
+        can pass ``maxfun`` within its final iteration, by at most ``2 * maxls``
+        evaluations (``solve.lbfgsb_accounting``). Restarted calls get the literal
+        remainders.
+        """
+        return cls(
+            maxiter=maxfun,
+            maxfun=maxfun,
+            maxcor=maxcor,
+            ftol=tol,
+            gtol=tol,
+            maxls=maxls,
+            restart_after_nonwolfe_stop=True,
+        )
+
 
 @dataclass(frozen=True)
 class ScipyLMOptions(OptionsBase):

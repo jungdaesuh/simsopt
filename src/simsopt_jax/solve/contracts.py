@@ -66,6 +66,13 @@ class LbfgsbRestartReason(StrEnum):
 # recognized non-Wolfe stall it could not resume (``FRESH_MEMORY_STALL`` or
 # ``BUDGET_EXHAUSTED``); ``success`` is False.  SciPy itself returns 0..2.
 SCIPY_LBFGSB_UNRESOLVED_STALL_STATUS = 7
+# ``OptimizerResult.status`` of any driver whose returned state is non-finite:
+# ``x``, ``fun``, or the derivative/residual data the driver returned (``jac``,
+# ``residual``) holds a NaN or an infinity.  ``success`` is then False whatever
+# the backend reported, and the backend's own termination is kept in
+# ``raw_status`` / ``raw_success`` / ``raw_message``.  No driver's own
+# vocabulary uses 8 (``STATUS_CODES``).
+NONFINITE_RESULT_STATUS = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +129,19 @@ class OptimizerResult:
     # The SciPy L-BFGS-B route's non-Wolfe stops, in order; empty when there
     # was none or the driver has no such policy.
     restart_log: tuple[LbfgsbRestartEvent, ...] = ()
+    # The returned fields ("x", "fun", "jac", "residual") that are non-finite;
+    # empty for a finite result.  Non-empty exactly when ``status`` is
+    # ``NONFINITE_RESULT_STATUS``: ``success`` is then False and the raw
+    # fields hold the backend's own ``status``, ``success`` and ``message``
+    # (for SciPy's all-fixed early return, which states no status, the SciPy
+    # route's defined status 0; ``dispatch._scipy_termination``).
+    # For a finite result the raw fields are None and ``status``, ``success``
+    # and ``message`` are the route's unchanged.  ``x``, ``fun`` and ``jac``
+    # are always the backend's returned state, never a substitute.
+    nonfinite_fields: tuple[str, ...] = ()
+    raw_status: int | None = None
+    raw_success: bool | None = None
+    raw_message: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,26 +285,32 @@ OptimizerCallbackEvent: TypeAlias = (
 Callback: TypeAlias = Callable[[OptimizerCallbackEvent], None]
 
 
+# Each driver's own vocabulary, then the shared result boundary's
+# ``NONFINITE_RESULT_STATUS``, which any driver's result can carry.
 STATUS_CODES: dict[Driver, tuple[int, ...]] = {
-    Driver.SCIPY_LBFGSB: (0, 1, 2, 6, SCIPY_LBFGSB_UNRESOLVED_STALL_STATUS),
-    Driver.SCIPY_LM: (-1, 0, 1, 2, 3, 4),
-    Driver.SCIPY_BFGS: (0, 1, 2, 3, 6),
-    Driver.OPTAX_LBFGS: (0, 1, 2),
-    Driver.OPTAX_ADAM: (0, 1, 2),
-    Driver.OPTIMISTIX_LBFGS: (0, 1, 2),
-    Driver.OPTIMISTIX_LM: (0, 1, 2),
-    Driver.SIMSOPT_LBFGSB: (0, 1, 2, 3, 4, 5, 6),
-    Driver.SIMSOPT_BFGS: (-1, 0, 1, 2, 3, 5, 99),
-    Driver.SIMSOPT_TRACE_LBFGS: (0, 1, 2, 3, 4, 5, 6),
-    Driver.SIMSOPT_ADAM_HOST: (0, 1, 2),
-    Driver.SIMSOPT_ADAM: (0, 1, 2),
-    Driver.SIMSOPT_LM_GMRES_HOST: (0, 1, 2),
-    Driver.SIMSOPT_LM_GMRES: (0, 1, 2),
-    Driver.SIMSOPT_LM_QR: (0, 1, 2),
+    driver: (*codes, NONFINITE_RESULT_STATUS)
+    for driver, codes in {
+        Driver.SCIPY_LBFGSB: (0, 1, 2, 6, SCIPY_LBFGSB_UNRESOLVED_STALL_STATUS),
+        Driver.SCIPY_LM: (-1, 0, 1, 2, 3, 4),
+        Driver.SCIPY_BFGS: (0, 1, 2, 3, 6),
+        Driver.OPTAX_LBFGS: (0, 1, 2),
+        Driver.OPTAX_ADAM: (0, 1, 2),
+        Driver.OPTIMISTIX_LBFGS: (0, 1, 2),
+        Driver.OPTIMISTIX_LM: (0, 1, 2),
+        Driver.SIMSOPT_LBFGSB: (0, 1, 2, 3, 4, 5, 6),
+        Driver.SIMSOPT_BFGS: (-1, 0, 1, 2, 3, 5, 99),
+        Driver.SIMSOPT_TRACE_LBFGS: (0, 1, 2, 3, 4, 5, 6),
+        Driver.SIMSOPT_ADAM_HOST: (0, 1, 2),
+        Driver.SIMSOPT_ADAM: (0, 1, 2),
+        Driver.SIMSOPT_LM_GMRES_HOST: (0, 1, 2),
+        Driver.SIMSOPT_LM_GMRES: (0, 1, 2),
+        Driver.SIMSOPT_LM_QR: (0, 1, 2),
+    }.items()
 }
 
 
 __all__ = [
+    "NONFINITE_RESULT_STATUS",
     "SCIPY_LBFGSB_UNRESOLVED_STALL_STATUS",
     "STATUS_CODES",
     "ArrayResult",

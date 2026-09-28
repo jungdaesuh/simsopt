@@ -17,3 +17,7 @@ class OptimizerStateTraceEntry:
     iteration: int
     fun: float
     grad_norm_inf: float
+    # True objective evaluations of the whole solve up to this accepted iterate, x0's
+    # included; recorded by the SciPy L-BFGS-B restart route only, None on every other
+    # route.
+    nfev: int | None = None

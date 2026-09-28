@@ -33,6 +33,7 @@ from .contracts import (
     InvalidStepEvent,
     LbfgsbRestartEvent,
     LbfgsbRestartReason,
+    NONFINITE_RESULT_STATUS,
     OptimizerCallbackEvent,
     OptimizerResult,
     OptimizerStateTraceEntry,
@@ -98,6 +99,7 @@ from .simsopt.contracts import (
     SimsoptLMQROptions,
     SimsoptTraceLBFGSOptions,
 )
+from .termination import projected_gradient_inf_norm
 
 _OptionsT = TypeVar("_OptionsT", bound=OptionsBase)
 _LegacyProgress: TypeAlias = tuple[int, float, float]
@@ -232,9 +234,33 @@ def _optimizer_state_trace(
             iteration=int(entry["iteration"]),
             fun=float(entry["fun"]),
             grad_norm_inf=float(entry["jac_inf_norm"]),
+            # Only the SciPy L-BFGS-B restart route records it.
+            nfev=entry.get("nfev"),
         )
         for entry in raw_trace
     ]
+
+
+def _nonfinite_result_fields(
+    *,
+    x: np.ndarray,
+    fun: float,
+    jac: np.ndarray | None,
+    residual: np.ndarray | None,
+) -> tuple[str, ...]:
+    """The returned-state fields holding a NaN or an infinity, in field order.
+
+    ``jac`` and ``residual`` are judged when the driver returned them; an absent
+    one is not an error.  Only the returned state is judged, never the trials a
+    solver evaluated on its way there.
+    """
+    finite = (
+        ("x", bool(np.all(np.isfinite(x)))),
+        ("fun", math.isfinite(fun)),
+        ("jac", jac is None or bool(np.all(np.isfinite(jac)))),
+        ("residual", residual is None or bool(np.all(np.isfinite(residual)))),
+    )
+    return tuple(name for name, ok in finite if not ok)
 
 
 def _public_result(
@@ -244,21 +270,46 @@ def _public_result(
     options_used: OptionsBase,
     wallclock_s: float,
 ) -> OptimizerResult:
+    """The one conversion every ``minimize`` / ``least_squares`` driver returns through.
+
+    A non-finite returned state is never a success, whatever the backend
+    reported: ``status`` is ``NONFINITE_RESULT_STATUS``, ``success`` False, and
+    the backend's own termination moves to the raw fields.  The returned state
+    itself is kept as diagnostic evidence, never replaced.  A finite result is
+    the backend's unchanged.
+    """
     hess_inv = cast(HessianInverse | None, getattr(result, "hess_inv", None))
+    x = _host_array(result.x)
+    fun = _host_float(result.fun)
+    jac = _host_optional_array(getattr(result, "jac", None))
+    residual = _host_optional_array(getattr(result, "residual", None))
+    status = int(getattr(result, "status", 0))
+    success = bool(getattr(result, "success", False))
+    message = str(getattr(result, "message", ""))
+    nonfinite_fields = _nonfinite_result_fields(
+        x=x, fun=fun, jac=jac, residual=residual
+    )
+    raw_status: int | None = None
+    raw_success: bool | None = None
+    raw_message: str | None = None
+    if nonfinite_fields:
+        raw_status, raw_success, raw_message = status, success, message
+        status, success = NONFINITE_RESULT_STATUS, False
+        message = f"NONFINITE RESULT ({', '.join(nonfinite_fields)}): {raw_message}"
     return OptimizerResult(
-        x=_host_array(result.x),
-        fun=_host_float(result.fun),
-        jac=_host_optional_array(getattr(result, "jac", None)),
+        x=x,
+        fun=fun,
+        jac=jac,
         nit=int(getattr(result, "nit", 0)),
         nfev=int(getattr(result, "nfev", 0)),
         njev=int(getattr(result, "njev", 0)),
-        status=int(getattr(result, "status", 0)),
-        success=bool(getattr(result, "success", False)),
-        message=str(getattr(result, "message", "")),
+        status=status,
+        success=success,
+        message=message,
         driver=driver,
         options_used=options_used,
         wallclock_s=wallclock_s,
-        residual=_host_optional_array(getattr(result, "residual", None)),
+        residual=residual,
         residual_jacobian=_host_optional_array(
             getattr(result, "residual_jacobian", None)
         ),
@@ -269,6 +320,10 @@ def _public_result(
         optimistix_result=getattr(result, "optimistix_result", None),
         optimistix_result_message=getattr(result, "optimistix_result_message", None),
         restart_log=tuple(getattr(result, "restart_log", ())),
+        nonfinite_fields=nonfinite_fields,
+        raw_status=raw_status,
+        raw_success=raw_success,
+        raw_message=raw_message,
     )
 
 
@@ -334,6 +389,45 @@ _LBFGSB_RELATIVE_REDUCTION_STOP = (
 # so its offset from ``t`` is off the ray through the first trial by at most a
 # few ``eps`` times the magnitudes involved; this factor is that "few", with room.
 _RAY_ROUNDING_FACTOR = 8.0
+# ``scipy.optimize.minimize`` returns early, before any method runs, when the
+# bounds fix every variable (``_minimize.py:721`` ->
+# ``_optimize_result_for_equal_bounds``, ``:1160-1198``, scipy 1.17.1): that
+# result holds x, fun (one evaluation), success, message, nfev, njev and nhev
+# only -- no status, nit or jac.  Without constraints (this route passes none)
+# it is always this message, with success True.
+_SCIPY_ALL_FIXED_MESSAGE = "All independent variables were fixed by bounds."
+# The status this route defines for that early return, which carries none:
+# SciPy's success status for L-BFGS-B, the success its result states.
+_SCIPY_ALL_FIXED_STATUS = 0
+
+
+@dataclass(frozen=True)
+class _ScipyTermination:
+    """A SciPy result's status, iteration count and gradient, as this route reads them."""
+
+    status: int
+    nit: int
+    jac: np.ndarray | None
+
+
+def _scipy_termination(result: OptimizeResult) -> _ScipyTermination:
+    """The fields SciPy returned; for its all-fixed early return, the defined ones.
+
+    That early return ran no iteration (``nit`` 0) and computed no gradient
+    (``jac`` None: nothing is evaluated to supply one); its status is
+    ``_SCIPY_ALL_FIXED_STATUS``.  Any other result without a status is not a
+    shape this route knows, and is refused.
+    """
+    if "status" in result:
+        return _ScipyTermination(
+            status=int(result.status), nit=int(result.nit), jac=result.jac
+        )
+    if str(result.message) != _SCIPY_ALL_FIXED_MESSAGE:
+        raise ValueError(
+            f"SciPy returned no status, with message {result.message!r}; only its "
+            "all-fixed early return may"
+        )
+    return _ScipyTermination(status=_SCIPY_ALL_FIXED_STATUS, nit=0, jac=None)
 
 
 def _lbfgsb_scipy_options(
@@ -455,22 +549,34 @@ class _LbfgsbCallRecorder:
     ``served_start`` instead of evaluating, so a restarted call starts from the
     logged value and gradient; ``served_evaluations`` is what SciPy's
     ``nfev``/``njev`` count but nothing evaluated.  ``end_iteration`` is
-    SciPy's per-iteration callback and then calls ``callback``.  Only the
-    running iteration's evaluations are kept.
+    SciPy's per-iteration callback and then hands ``callback`` the accepted
+    evaluation it already holds, so observing the solve evaluates nothing.  Only the
+    running iteration's evaluations are kept.  ``state_trace`` holds one raw
+    accepted-iterate entry per iteration end, numbered and counted from the
+    chain's totals before this call: ``nfev`` is the chain's true evaluations
+    up to that NEW_X, so an ABNORMAL tail after the last one is ``nfev`` of
+    the result minus the last entry's.
     """
 
     def __init__(
         self,
         scipy_fun: Callable[[np.ndarray], tuple[float, np.ndarray]],
         served_start: _HostEvaluation | None,
-        callback: Callable[[np.ndarray], None] | None,
+        callback: Callable[[_HostEvaluation], None] | None,
+        *,
+        iteration_offset: int = 0,
+        evaluation_offset: int = 0,
     ) -> None:
         self._scipy_fun = scipy_fun
         self._served_start = served_start
         self._callback = callback
+        self._iteration_offset = iteration_offset
+        self._evaluation_offset = evaluation_offset
         self._iteration_evaluations: list[_HostEvaluation] = []
+        self._true_evaluations = 0
         self.served_evaluations = 0
         self.last_search: _LineSearch | None = None
+        self.state_trace: list[dict[str, float | int]] = []
 
     def fun(self, x_host: np.ndarray) -> tuple[float, np.ndarray]:
         served = self._served_start
@@ -480,6 +586,7 @@ class _LbfgsbCallRecorder:
             evaluation = served
         else:
             value, gradient = self._scipy_fun(x_host)
+            self._true_evaluations += 1
             evaluation = _HostEvaluation(
                 x=_owned_snapshot(x_host),
                 fun=value,
@@ -499,24 +606,18 @@ class _LbfgsbCallRecorder:
             else None
         )
         self._iteration_evaluations = [evaluations[-1]]
+        # SciPy's iterate at NEW_X is the last point it had evaluated.
+        accepted = evaluations[-1]
+        self.state_trace.append(
+            {
+                "iteration": self._iteration_offset + len(self.state_trace) + 1,
+                "fun": accepted.fun,
+                "jac_inf_norm": float(np.max(np.abs(accepted.gradient))),
+                "nfev": self._evaluation_offset + self._true_evaluations,
+            }
+        )
         if self._callback is not None:
-            self._callback(x_host)
-
-
-def _projected_grad_norm_inf(
-    evaluation: _HostEvaluation, bounds: list[tuple[float, float]] | None
-) -> float:
-    """SciPy L-BFGS-B's ``projgr`` (``__lbfgsb.c``): the stopping test's norm."""
-    gradient = evaluation.gradient
-    if bounds is None:
-        return float(np.max(np.abs(gradient)))
-    lower, upper = (np.asarray(side, dtype=float) for side in zip(*bounds))
-    projected = np.where(
-        gradient < 0.0,
-        np.maximum(evaluation.x - upper, gradient),
-        np.minimum(evaluation.x - lower, gradient),
-    )
-    return float(np.max(np.abs(projected)))
+            self._callback(accepted)
 
 
 def _minimize_lbfgsb_with_restarts(
@@ -524,8 +625,8 @@ def _minimize_lbfgsb_with_restarts(
     x_start: np.ndarray,
     *,
     options: ScipyLBFGSBOptions,
-    bounds: list[tuple[float, float]] | None,
-    callback: Callable[[np.ndarray], None] | None,
+    bounds: ScipyBounds | None,
+    callback: Callable[[_HostEvaluation], None] | None,
 ) -> tuple[OptimizeResult, tuple[LbfgsbRestartEvent, ...]]:
     """SciPy L-BFGS-B under ``restart_after_nonwolfe_stop``, as one or more SciPy calls.
 
@@ -537,32 +638,44 @@ def _minimize_lbfgsb_with_restarts(
     ``success`` and ``message`` unless the chain ends on a recognized stall it
     could not resume, which is ``SCIPY_LBFGSB_UNRESOLVED_STALL_STATUS``,
     unsuccessful, with that call's own termination kept in the message and in
-    the last ``restart_log`` event.
+    the last ``restart_log`` event.  ``optimizer_state_trace`` has one raw
+    entry per accepted iteration of the chain, with its cumulative ``nfev``.
     """
     restart_log: list[LbfgsbRestartEvent] = []
+    state_trace: list[dict[str, float | int]] = []
     nit = nfev = njev = 0
     x = x_start
     served_start: _HostEvaluation | None = None
+    scipy_bounds = None if bounds is None else bounds.scipy_bounds()
     while True:
-        recorder = _LbfgsbCallRecorder(scipy_fun, served_start, callback)
+        recorder = _LbfgsbCallRecorder(
+            scipy_fun,
+            served_start,
+            callback,
+            iteration_offset=nit,
+            evaluation_offset=nfev,
+        )
         call = scipy_minimize(
             recorder.fun,
             x,
             jac=True,
             method="L-BFGS-B",
-            bounds=bounds,
+            bounds=scipy_bounds,
             options=_lbfgsb_scipy_options(
                 options, maxiter=options.maxiter - nit, maxfun=options.maxfun - nfev
             ),
             callback=recorder.end_iteration,
         )
-        nit += int(call.nit)
+        termination = _scipy_termination(call)
+        nit += termination.nit
         nfev += int(call.nfev) - recorder.served_evaluations
         njev += int(call.njev) - recorder.served_evaluations
+        state_trace.extend(recorder.state_trace)
         search = recorder.last_search
         if (
             search is None
-            or (int(call.status), str(call.message)) != _LBFGSB_RELATIVE_REDUCTION_STOP
+            or (termination.status, str(call.message))
+            != _LBFGSB_RELATIVE_REDUCTION_STOP
         ):
             break
         classified = search.on_one_ray
@@ -573,7 +686,7 @@ def _minimize_lbfgsb_with_restarts(
         # A call's first iteration already ran with an empty memory, which is
         # where L-BFGS-B itself aborts instead of restarting (``col == 0``,
         # ``__lbfgsb.c:924-938``).
-        elif int(call.nit) == 1:
+        elif termination.nit == 1:
             reason = LbfgsbRestartReason.FRESH_MEMORY_STALL
         # SciPy completes at least one iteration whatever its budget says.
         elif nit >= options.maxiter or nfev >= options.maxfun:
@@ -586,15 +699,15 @@ def _minimize_lbfgsb_with_restarts(
                 reason=reason,
                 curvature_ratio=search.curvature_ratio if classified else math.nan,
                 fun=search.accepted.fun,
-                projected_grad_norm_inf=_projected_grad_norm_inf(
-                    search.accepted, bounds
+                projected_grad_norm_inf=projected_gradient_inf_norm(
+                    search.accepted.x, search.accepted.gradient, bounds
                 ),
                 first_trial_fun=search.first_trial.fun,
                 first_trial_fun_ratio=search.first_trial_fun_ratio,
                 accepted_step_fraction=search.accepted_step_fraction
                 if classified
                 else math.nan,
-                scipy_status=int(call.status),
+                scipy_status=termination.status,
                 scipy_message=str(call.message),
             )
         )
@@ -610,16 +723,19 @@ def _minimize_lbfgsb_with_restarts(
         OptimizeResult(
             x=call.x,
             fun=call.fun,
-            jac=call.jac,
+            jac=termination.jac,
             nit=nit,
             nfev=nfev,
             njev=njev,
-            status=SCIPY_LBFGSB_UNRESOLVED_STALL_STATUS if unresolved else call.status,
+            status=SCIPY_LBFGSB_UNRESOLVED_STALL_STATUS
+            if unresolved
+            else termination.status,
             success=False if unresolved else call.success,
             message=f"UNRESOLVED NON-WOLFE STALL ({restart_log[-1].reason}): "
             f"{call.message}"
             if unresolved
             else call.message,
+            optimizer_state_trace=state_trace,
         ),
         tuple(restart_log),
     )
@@ -659,13 +775,12 @@ def _run_scipy_minimize(
         value, gradient = value_and_gradient_at(x_host)
         return float(np.asarray(value).reshape(())), np.asarray(gradient, dtype=float)
 
-    def scipy_callback(x_host):
+    def emit_event(x_host, value, gradient):
         nonlocal iteration
         if callback is None:
             return
 
         iteration += 1
-        value, gradient = value_and_gradient_at(x_host)
         grad_host = np.asarray(gradient, dtype=float)
         event_fields = {
             "iteration": iteration,
@@ -678,6 +793,15 @@ def _run_scipy_minimize(
             callback(ScipyLBFGSBCallbackEvent(**event_fields))
         else:
             callback(ScipyBFGSCallbackEvent(**event_fields))
+
+    def scipy_callback(x_host):
+        # SciPy's callback carries x only, so this route evaluates the iterate again
+        # (outside ``nfev``); the restart route below re-uses its accepted evaluation.
+        value, gradient = value_and_gradient_at(x_host)
+        emit_event(x_host, value, gradient)
+
+    def accepted_callback(accepted: _HostEvaluation):
+        emit_event(accepted.x, accepted.fun, accepted.gradient)
 
     if isinstance(options, ScipyLBFGSBOptions):
         scipy_method = "L-BFGS-B"
@@ -696,14 +820,16 @@ def _run_scipy_minimize(
     scipy_bounds = None if bounds is None else bounds.scipy_bounds()
     observer = scipy_callback if callback is not None else None
     restart_log: tuple[LbfgsbRestartEvent, ...] = ()
+    state_trace: list[dict[str, float | int]] | None = None
     if isinstance(options, ScipyLBFGSBOptions) and options.restart_after_nonwolfe_stop:
         result, restart_log = _minimize_lbfgsb_with_restarts(
             scipy_fun,
             x_start,
             options=options,
-            bounds=scipy_bounds,
-            callback=observer,
+            bounds=bounds,
+            callback=accepted_callback if callback is not None else None,
         )
+        state_trace = result.optimizer_state_trace
     else:
         result = scipy_minimize(
             scipy_fun,
@@ -714,20 +840,24 @@ def _run_scipy_minimize(
             options=scipy_options,
             callback=observer,
         )
+    termination = _scipy_termination(result)
     return OptimizeResult(
         x=np.asarray(result.x, dtype=float),
         fun=float(np.asarray(result.fun).reshape(())),
-        jac=np.asarray(result.jac, dtype=float),
-        nit=int(getattr(result, "nit", 0)),
+        jac=None
+        if termination.jac is None
+        else np.asarray(termination.jac, dtype=float),
+        nit=termination.nit,
         nfev=int(getattr(result, "nfev", 0)),
         njev=int(getattr(result, "njev", 0)),
-        status=int(getattr(result, "status", 0)),
+        status=termination.status,
         success=bool(result.success),
         message=str(result.message),
         hessian=getattr(result, "hess_inv", None)
         if driver == Driver.SCIPY_BFGS
         else None,
         restart_log=restart_log,
+        optimizer_state_trace=state_trace,
     )
 
 
