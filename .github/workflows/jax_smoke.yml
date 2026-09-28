@@ -18,9 +18,7 @@ on:
       - 'src/simsopt_jax_adapters/**'
       - 'src/simsoptpp/**'
       - 'tests/**'
-      - 'benchmarks/**'
       - 'scripts/jax_*.py'
-      - 'scripts/portable_tar.sh'
       - 'scripts/run_gpu_parity.sh'
   pull_request:
     branches: [jax-port, master]
@@ -39,9 +37,7 @@ on:
       - 'src/simsopt_jax_adapters/**'
       - 'src/simsoptpp/**'
       - 'tests/**'
-      - 'benchmarks/**'
       - 'scripts/jax_*.py'
-      - 'scripts/portable_tar.sh'
       - 'scripts/run_gpu_parity.sh'
 
 jobs:

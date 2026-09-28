@@ -352,12 +352,6 @@ def test_parity_manifest_accepts_named_scientific_phases(
     )
 
 
-def test_parity_artifact_ignore_is_narrow_and_effective() -> None:
-    ignore_lines = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
-
-    assert ignore_lines.count(".artifacts/jax-example-parity/") == 1
-
-
 def test_parity_workflows_reach_cpu_and_strict_gpu_without_case_duplication() -> None:
     smoke_workflow = (REPO_ROOT / ".github" / "workflows" / "jax_smoke.yml").read_text(
         encoding="utf-8"

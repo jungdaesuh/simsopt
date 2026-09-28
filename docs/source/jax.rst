@@ -151,13 +151,17 @@ Accepted public results and certificate-side gradients therefore retain FP64
 authority.  The native CPU default and every omitted-precision JAX route remain
 unchanged.
 
-Quick smoke benchmark
-~~~~~~~~~~~~~~~~~~~~~
+Quick smoke run
+~~~~~~~~~~~~~~~
 
-The feasibility benchmark reports first-call compilation time and steady-state
-kernel timings::
+The parity runner executes the official upstream mirrors at their bounded scale
+next to native SIMSOPT and compares the two lanes::
 
-    python benchmarks/jax_feasibility_spike.py --platform cuda
+    python examples/jax/run_parity.py \
+      --case all-applicable \
+      --lanes native-cpu,jax-cpu \
+      --scale bounded \
+      --artifact-root .artifacts/jax-example-parity
 
 Synchronize device work before timing custom benchmarks.  JAX dispatch is
 asynchronous, so a timer must call ``jax.block_until_ready`` on the result.

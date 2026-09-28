@@ -8,8 +8,7 @@ on this page means Python examples present in ``hiddenSymmetries/simsopt``
 ``master`` at commit ``9e027eac38028d57aa23777be52a781aa860e347``.
 That source identity does not make a locally built native extension an official
 upstream binary. Workload, source, solver policy, timing boundary, and native
-comparator matter for every ratio below. Results from local-only workloads are
-kept separately under `Historical branch-only experiments`_.
+comparator matter for every ratio below.
 
 Official upstream example coverage
 ----------------------------------
@@ -124,29 +123,6 @@ checks. The retained timing authority is ``674bafd2b``, not the later
 precision head. See ``.artifacts/upstream-mirror-execution-20260919/``
 ``ALL-MIRROR-RESULTS.md`` and ``FINAL-TIMING-CLAUDE-REVIEW.md`` for receipts
 and timing boundaries.
-
-Historical branch-only experiments
-----------------------------------
-
-The following 2026-09-14/15 measurements came from branch-only benchmarks.
-They are retained as historical observations, not added
-to the 25 eligible official-example cases or used to qualify the current
-shipped/default policy. The exact-constraint single-stage test is not an
-example in the pinned upstream catalog.
-
-.. list-table::
-   :header-rows: 1
-   :widths: 35 21 21 23
-
-   * - Historical workload and timed boundary
-     - GPU
-     - Branch native
-     - Reported ratio / qualification
-   * - Exact-constraint single-stage optimization, 1000 iterations
-       (``tests/geo/test_single_stage_exact_analytic.py``)
-     - 24.1 s
-     - 52.1 s process wall
-     - 2.17x reported; gradient relative L2 difference 3.9e-13
 
 Historical official-example measurements
 ----------------------------------------
