@@ -31,6 +31,7 @@ from simsopt.geo import (
 )
 from simsopt.objectives import QuadraticPenalty, SquaredFlux
 from simsopt_contracts.optimization_endpoint import StatusConvention, TerminalStatus
+from simsopt_jax.backend.runtime import get_runtime_jax_device
 from simsopt_jax.core.specs import FixedSurfaceFluxSpec
 from simsopt_jax.examples import ExecutionScale, solve_minimal_stage_two
 from simsopt_jax.examples.stage_two_minimal import (
@@ -263,6 +264,8 @@ def build_jax_geometry(bundle: InputBundle) -> JaxMinimalGeometry:
     surface, base_curves, coils = _build_geometry(bundle.configuration)
     field = BiotSavartJAX(coils)
     flux = SquaredFluxJAX(surface, field)
+    # The lane's runtime device, where BiotSavartJAX placed the coil dofs.
+    device = get_runtime_jax_device()
     return JaxMinimalGeometry(
         surface=surface,
         base_curves=tuple(base_curves),
@@ -270,10 +273,12 @@ def build_jax_geometry(bundle: InputBundle) -> JaxMinimalGeometry:
         field=field,
         flux_spec=flux.fixed_surface_flux_spec(),
         surface_gamma=jax.device_put(
-            np.asarray(surface.gamma(), dtype=np.float64).reshape((-1, 3))
+            np.asarray(surface.gamma(), dtype=np.float64).reshape((-1, 3)),
+            device,
         ),
         surface_normal=jax.device_put(
-            np.asarray(surface.normal(), dtype=np.float64).reshape((-1, 3))
+            np.asarray(surface.normal(), dtype=np.float64).reshape((-1, 3)),
+            device,
         ),
     )
 
@@ -485,13 +490,14 @@ def _jax(
         geometry.surface,
         geometry.base_curves,
     )
+    device = get_runtime_jax_device()
     device_result = solve_minimal_stage_two(
         field=geometry.field,
         flux_spec=geometry.flux_spec,
         surface_gamma=geometry.surface_gamma,
         surface_normal=geometry.surface_normal,
-        initial_parameters=jax.device_put(arrays["initial_parameters"]),
-        taylor_direction=jax.device_put(arrays["taylor_direction"]),
+        initial_parameters=jax.device_put(arrays["initial_parameters"], device),
+        taylor_direction=jax.device_put(arrays["taylor_direction"], device),
         num_base_curves=_configuration_int(bundle, "num_base_curves"),
         length_weight=_configuration_float(bundle, "length_weight"),
         length_target=_configuration_float(bundle, "length_target"),
