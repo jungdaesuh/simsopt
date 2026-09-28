@@ -73,6 +73,7 @@ from simsopt_jax.core import curve_kernels as curve_kernels_module
 from simsopt_jax.core._pairwise_reductions import _use_dense_pairwise_path
 from simsopt_jax.core.curve_kernels import curve_surface_distance_penalty_pure
 from simsopt_jax.core.framedcurve import frenet_frame
+from simsopt_jax_adapters.geo import curve_objectives as curve_objectives_module
 from simsopt_jax_adapters.geo.curve_specs import curve_spec_from_adapter_curve
 
 from .pairwise_test_helpers import set_pairwise_penalty_chunk_size
@@ -637,6 +638,296 @@ def test_public_curve_distance_jax_wrappers_match_cpu_values_and_gradients():
         num_basecurves=2,
     )
     _assert_objective_matches_cpu(distance_cpu, distance_jax)
+
+
+def _mixed_quadrature_curves():
+    """Three overlapping and two far curves with two quadrature counts."""
+    curves = []
+    for x_offset, quadpoints in (
+        (0.0, 24),
+        (0.3, 16),
+        (0.6, 24),
+        (40.0, 16),
+        (80.0, 24),
+    ):
+        curve = _build_nonplanar_curve(quadpoints)
+        curve.set("xc(0)", x_offset)
+        curves.append(curve)
+    return curves
+
+
+def _record_sliced_pair_sweeps(monkeypatch):
+    """Record the ``batch_size`` of every ``lax.map`` traced from now on."""
+    sweeps = []
+    lax_map = jax.lax.map
+
+    def recording_map(function, inputs, *, batch_size=None):
+        sweeps.append(batch_size)
+        return lax_map(function, inputs, batch_size=batch_size)
+
+    monkeypatch.setattr(jax.lax, "map", recording_map)
+    return sweeps
+
+
+def _per_pair_curve_distance_reference(
+    curves,
+    minimum_distance,
+    pair_kernel,
+    num_basecurves=None,
+    downsample=1,
+):
+    """Value and derivative of a per-pair loop over ``pair_kernel`` (the oracle)."""
+    num_basecurves = num_basecurves or len(curves)
+    pair_gradient = jax.jit(jax.grad(pair_kernel, argnums=(0, 1, 2, 3)))
+    samples = [
+        (
+            jnp.asarray(curve.gamma()[::downsample], dtype=jnp.float64),
+            jnp.asarray(curve.gammadash()[::downsample], dtype=jnp.float64),
+        )
+        for curve in curves
+    ]
+    dgammas = [np.zeros_like(curve.gamma()) for curve in curves]
+    dgammadashes = [np.zeros_like(curve.gammadash()) for curve in curves]
+    value = 0.0
+    for i in range(len(curves)):
+        for j in range(min(i, num_basecurves)):
+            pair_arguments = (*samples[i], *samples[j], minimum_distance)
+            value += float(pair_kernel(*pair_arguments))
+            grads = [np.asarray(g) for g in pair_gradient(*pair_arguments)]
+            dgammas[i][::downsample] += grads[0]
+            dgammadashes[i][::downsample] += grads[1]
+            dgammas[j][::downsample] += grads[2]
+            dgammadashes[j][::downsample] += grads[3]
+    derivative = sum(
+        curve.dgamma_by_dcoeff_vjp(dgamma) + curve.dgammadash_by_dcoeff_vjp(dgammadash)
+        for curve, dgamma, dgammadash in zip(curves, dgammas, dgammadashes)
+    )
+    return value, derivative
+
+
+def _assert_batched_matches_per_pair(objective, reference):
+    reference_value, reference_derivative = reference
+    reference_gradient = np.asarray(reference_derivative(objective), dtype=np.float64)
+    gradient = np.asarray(objective.dJ(), dtype=np.float64)
+    np.testing.assert_allclose(
+        float(objective.J()), reference_value, rtol=1e-12, atol=0.0
+    )
+    np.testing.assert_allclose(
+        gradient,
+        reference_gradient,
+        rtol=1e-12,
+        atol=1e-12 * float(np.max(np.abs(reference_gradient))),
+    )
+
+
+@pytest.mark.parametrize(
+    ("num_basecurves", "downsample"),
+    [(None, 1), (2, 1), (None, 2)],
+)
+def test_batched_curve_curve_distance_matches_per_pair_loop(
+    num_basecurves,
+    downsample,
+):
+    curves = _mixed_quadrature_curves()
+    objective = CurveCurveDistanceJAX(
+        curves,
+        minimum_distance=0.75,
+        num_basecurves=num_basecurves,
+        downsample=downsample,
+    )
+    reference = _per_pair_curve_distance_reference(
+        curves,
+        0.75,
+        cc_distance_pure,
+        num_basecurves=num_basecurves,
+        downsample=downsample,
+    )
+
+    assert reference[0] > 0.0
+    _assert_batched_matches_per_pair(objective, reference)
+
+
+def test_batched_curve_curve_distance_ignores_pairs_beyond_the_threshold():
+    curves = _mixed_quadrature_curves()
+    near_curves = curves[:3]
+    near = CurveCurveDistanceJAX(near_curves, minimum_distance=0.75)
+    everything = CurveCurveDistanceJAX(curves, minimum_distance=0.75)
+
+    np.testing.assert_allclose(everything.J(), near.J(), rtol=1e-12, atol=0.0)
+    near_gradient = everything.dJ(partials=True)
+    for curve in near_curves:
+        np.testing.assert_allclose(
+            near_gradient(curve),
+            near.dJ(partials=True)(curve),
+            rtol=1e-12,
+            atol=1e-12 * float(np.max(np.abs(near.dJ()))),
+        )
+    for curve in curves[3:]:
+        assert not np.any(near_gradient(curve))
+
+
+def test_batched_curve_curve_distance_barrier_matches_per_pair_loop():
+    curves = _mixed_quadrature_curves()
+    sampled_min_distance = min(
+        float(np.min(np.linalg.norm(first[:, None, :] - second[None, :, :], axis=-1)))
+        for index, first in enumerate(curve.gamma() for curve in curves)
+        for second in (curve.gamma() for curve in curves[:index])
+    )
+    threshold = 0.5 * sampled_min_distance
+    objective = CurveCurveDistanceBarrierJAX(curves, minimum_distance=threshold)
+
+    _assert_batched_matches_per_pair(
+        objective,
+        _per_pair_curve_distance_reference(
+            curves,
+            threshold,
+            cc_distance_barrier_pure,
+        ),
+    )
+
+
+def test_batched_curve_curve_distance_retraces_when_the_chunk_size_changes(
+    monkeypatch,
+):
+    curves = _mixed_quadrature_curves()[:3]
+    objective = CurveCurveDistanceJAX(curves, minimum_distance=0.75)
+    chunked_traces = []
+    chunk_rows = curve_kernels_module._chunk_rows
+
+    def counting_chunk_rows(*arguments, **keywords):
+        chunked_traces.append(arguments[1])
+        return chunk_rows(*arguments, **keywords)
+
+    def fail_pairwise_distances(gamma1, gamma2):
+        raise AssertionError(
+            "a chunk size below the sample count must trace the chunked sweep"
+        )
+
+    def compiled_programs():
+        return (
+            curve_objectives_module._curve_pair_penalty._cache_size(),
+            curve_objectives_module._curve_pair_penalty_value_and_grad._cache_size(),
+        )
+
+    try:
+        monkeypatch.setenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", "0")
+        invalidate_backend_cache()
+        dense_value = objective.J()
+        dense_gradient = np.asarray(objective.dJ(), dtype=np.float64)
+        dense_programs = compiled_programs()
+
+        # No jax.clear_caches(): the jitted program must key on the chunk size.
+        monkeypatch.setenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", "5")
+        invalidate_backend_cache()
+        monkeypatch.setattr(
+            curve_kernels_module,
+            "_pairwise_distances",
+            fail_pairwise_distances,
+        )
+        monkeypatch.setattr(curve_kernels_module, "_chunk_rows", counting_chunk_rows)
+        chunked_value = objective.J()
+        value_traces = len(chunked_traces)
+        chunked_gradient = np.asarray(objective.dJ(), dtype=np.float64)
+        chunked_programs = compiled_programs()
+    finally:
+        monkeypatch.delenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", raising=False)
+        invalidate_backend_cache()
+
+    assert value_traces > 0, "J replayed a cached dense program"
+    assert len(chunked_traces) > value_traces, "dJ replayed a cached dense program"
+    assert set(chunked_traces) == {5}
+    assert chunked_programs == tuple(count + 1 for count in dense_programs)
+    np.testing.assert_allclose(chunked_value, dense_value, rtol=1e-12, atol=0.0)
+    np.testing.assert_allclose(
+        chunked_gradient,
+        dense_gradient,
+        rtol=1e-12,
+        atol=1e-12 * float(np.max(np.abs(dense_gradient))),
+    )
+
+
+@pytest.mark.parametrize(
+    ("objective_class", "minimum_distance"),
+    [(CurveCurveDistanceJAX, 0.75), (CurveCurveDistanceBarrierJAX, 0.05)],
+)
+def test_batched_curve_curve_distance_memory_budget_slices_match_one_vmap(
+    monkeypatch,
+    objective_class,
+    minimum_distance,
+):
+    curves = _mixed_quadrature_curves()
+    objective = objective_class(curves, minimum_distance=minimum_distance)
+    unbounded_value = float(objective.J())
+    unbounded_gradient = np.asarray(objective.dJ(), dtype=np.float64)
+
+    # Two 24x24-sample pairs per slice: the three-pair (24, 24) batch runs as a
+    # full slice plus a remainder; the (16, 24), (24, 16) and (16, 16) batches
+    # (three, three and one pairs) still fit one vmap.
+    budget = 2 * 24 * 24 * 8 * curve_objectives_module._CURVE_PAIR_SCRATCH_ARRAYS
+    monkeypatch.setattr(curve_objectives_module, "_CURVE_PAIR_BATCH_BYTES", budget)
+    sliced_sweeps = _record_sliced_pair_sweeps(monkeypatch)
+    plan = objective._pair_plan
+    counts = tuple(len(members) for members in plan.class_members)
+    samples = tuple(
+        int(curves[members[0]].gamma().shape[0]) for members in plan.class_members
+    )
+    batch_sizes = [
+        curve_objectives_module._curve_pair_batch_size(
+            samples[batch.first_class],
+            samples[batch.second_class],
+            len(batch.first_rows),
+            curve_objectives_module._resolve_pairwise_penalty_chunk_size(),
+            8,
+            budget,
+        )
+        for batch in plan.batches
+    ]
+    assert counts == (3, 2)
+    assert any(
+        size < len(batch.first_rows) for size, batch in zip(batch_sizes, plan.batches)
+    )
+    bounded_value = float(objective.J())
+    bounded_gradient = np.asarray(objective.dJ(), dtype=np.float64)
+
+    # The patched budget is a new static key, so J and dJ each trace once and
+    # each sweeps the (24, 24) batch through lax.map in slices of two.
+    assert sliced_sweeps == [2, 2]
+    assert np.isfinite(unbounded_value) and unbounded_value > 0.0
+    np.testing.assert_allclose(bounded_value, unbounded_value, rtol=1e-15, atol=0.0)
+    np.testing.assert_allclose(
+        bounded_gradient,
+        unbounded_gradient,
+        rtol=1e-15,
+        atol=1e-15 * float(np.max(np.abs(unbounded_gradient))),
+    )
+
+
+def test_batched_curve_curve_distance_barrier_too_close_matches_per_pair_loop():
+    curves = _mixed_quadrature_curves()
+    objective = CurveCurveDistanceBarrierJAX(curves, minimum_distance=0.75)
+    reference_value, reference_derivative = _per_pair_curve_distance_reference(
+        curves,
+        0.75,
+        cc_distance_barrier_pure,
+    )
+    reference_gradient = np.asarray(reference_derivative(objective), dtype=np.float64)
+    gradient = np.asarray(objective.dJ(), dtype=np.float64)
+
+    assert reference_value == np.inf
+    assert float(objective.J()) == np.inf
+    np.testing.assert_array_equal(np.isnan(gradient), np.isnan(reference_gradient))
+    np.testing.assert_array_equal(np.isinf(gradient), np.isinf(reference_gradient))
+    np.testing.assert_array_equal(
+        np.sign(gradient[np.isinf(gradient)]),
+        np.sign(reference_gradient[np.isinf(reference_gradient)]),
+    )
+    finite = np.isfinite(reference_gradient)
+    np.testing.assert_allclose(
+        gradient[finite],
+        reference_gradient[finite],
+        rtol=1e-12,
+        atol=1e-12 * float(np.max(np.abs(reference_gradient[finite]))),
+    )
 
 
 def test_curve_distance_jax_wrapper_signatures_match_cpu_contracts():
