@@ -793,6 +793,74 @@ class AlmInvariantComplementarityTests(unittest.TestCase):
         self.assert_reaches_the_kkt_point(result)
 
 
+class AlmComplementarityGapTests(unittest.TestCase):
+    """Convergence bounds the complementarity gap sum_i lambda+_i max(0, -g_i)
+    term by term: no row classification, no cancellation between rows. Each
+    run below starts where the augmented gradient is exactly 0 at a point that
+    is not the optimum; it must reach the optimum or end without success."""
+
+    def assert_no_false_convergence(self, result, optimum, atol):
+        if result.success:
+            np.testing.assert_allclose(result.x, optimum, rtol=0.0, atol=atol)
+
+    def test_a_steep_row_that_never_reaches_its_boundary_does_not_certify(self):
+        # g = -1 + 0.1 sin(w x) lies in [-1.1, -0.9]: never active, optimum
+        # x = 1. At x = 0, lambda+ = 2 / (0.1 w) cancels grad f = -2.
+        steepness, penalty = 1.5e7, 1.0e-8
+
+        def evaluate(x, multipliers, penalty_value):
+            phase = steepness * x[0]
+            return alm.augmented_inequality_objective(
+                float((x[0] - 1.0) ** 2), np.array([2.0 * (x[0] - 1.0)]),
+                np.array([-1.0 + 0.1 * np.sin(phase)]),
+                [np.array([0.1 * steepness * np.cos(phase)])],
+                multipliers, penalty_value,
+            )
+
+        result = _solve_from(evaluate, 0.0, 2.0 / (0.1 * steepness) + penalty, penalty)
+        self.assert_no_false_convergence(result, [1.0], atol=1.0e-6)
+
+    def test_opposing_multipliers_do_not_cancel_into_a_certificate(self):
+        # f = x^2, g1 = x - 1, g2 = -x - 1: both rows slack by 1 with
+        # lambda+ = 1, whose gradient terms +1 and -1 cancel. The dual update
+        # takes both multipliers to 0, which certifies x = 0.
+        def evaluate(x, multipliers, penalty):
+            return alm.augmented_inequality_objective(
+                float(x[0] ** 2), np.array([2.0 * x[0]]),
+                np.array([x[0] - 1.0, -x[0] - 1.0]),
+                [np.array([1.0]), np.array([-1.0])], multipliers, penalty,
+            )
+
+        result = _solve_from(evaluate, 0.0, (2.0, 2.0), 1.0, rows=("upper", "lower"))
+        self.assertTrue(result.success, result.message)
+        np.testing.assert_array_equal(result.x, [0.0])
+        self.assertEqual(result.outer_iterations, 2)
+        np.testing.assert_array_equal(result.evaluation["positive_shift_values"], [0.0, 0.0])
+
+    def test_a_large_multiplier_just_inside_its_boundary_does_not_certify(self):
+        # f = -5e5 x, g = x - 5e-7: lambda+ = 5e5 at slack 5e-7 is a gap of
+        # 0.25 in f, which moving to the boundary would recover.
+        def evaluate(x, multipliers, penalty):
+            return alm.augmented_inequality_objective(
+                -5.0e5 * float(x[0]), np.array([-5.0e5]), np.array([x[0] - 5.0e-7]),
+                [np.array([1.0])], multipliers, penalty,
+            )
+
+        result = _solve_from(evaluate, 0.0, 5.0e5 + 5.0e-7, 1.0)
+        self.assert_no_false_convergence(result, [5.0e-7], atol=1.0e-9)
+
+    def test_the_gap_is_the_lagrangian_gap_on_the_feasible_side(self):
+        evaluation = alm.augmented_inequality_objective(
+            0.3, np.zeros(1), np.array([-0.5, 0.0, -2.0]),
+            [np.ones(1), np.ones(1), np.ones(1)], np.array([2.0, 1.0, 1.0]), 1.0,
+        )
+        routing = alm_core._constraint_routing_state(
+            evaluation, np.array([2.0, 1.0, 1.0]), 1.0, 1.0e-6
+        )
+        # lambda+ = (1.5, 1, 0), slack = (0.5, 0, 2): f - l(x, lambda+) = 0.75.
+        self.assertEqual(alm_core._complementarity_gap(routing), 0.75)
+
+
 class AlmSignalMismatchTests(unittest.TestCase):
     """A signal mismatch is an actual disagreement of the hard and surrogate
     channels, not a live surrogate shift."""

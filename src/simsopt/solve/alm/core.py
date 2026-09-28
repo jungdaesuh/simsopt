@@ -765,29 +765,15 @@ def _constraint_routing_state(
         surrogate_max_value=_max_value(signal_state.surrogate_signed_constraint_values),
     )
 
-def _complementarity_residual(
-    evaluation: dict,
-    routing_state: ALMConstraintRoutingState,
-    slack_distance_tol: float,
-) -> float:
-    """``||sum_{i off} λ⁺_i ∇g_i||``: the gradient that the shifted multipliers
-    ``λ⁺ = max(0, λ + ρg)`` of the augmented Lagrangian's rows contribute from
-    rows off their boundary, those whose slack ``max(0, -g_i)`` exceeds
-    ``slack_distance_tol * ||∇g_i||`` (a distance in x; activity bands play no
-    part). Rescaling a row (g_i, λ_i, ρ_i) -> (M g_i, λ_i/M, ρ_i/M²) leaves it,
-    and the augmented gradient, unchanged."""
-    signed_values = routing_state.signal_state.surrogate_signed_constraint_values
-    shift = routing_state.surrogate_positive_shift
-    slack = np.maximum(0.0, -signed_values)
-    candidates = np.flatnonzero((shift > 0.0) & (slack > 0.0))
-    if candidates.size == 0:
-        return 0.0
-    rows = np.stack([
-        np.asarray(evaluation["constraint_grads"][index], dtype=float).reshape(-1)
-        for index in candidates
-    ])
-    off_boundary = slack[candidates] > slack_distance_tol * np.linalg.norm(rows, axis=1)
-    return float(np.linalg.norm((shift[candidates] * off_boundary) @ rows))
+def _complementarity_gap(routing_state: ALMConstraintRoutingState) -> float:
+    """``sum_i λ⁺_i s_i``, ``s_i = max(0, -g_i)``, on the signal the augmented
+    Lagrangian uses (``λ⁺ = max(0, λ + ρg)`` its shifted multipliers). Every
+    term is nonnegative, and invariant under (g_i, λ_i, ρ_i) -> (M g_i, λ_i/M,
+    ρ_i/M²). At a feasible x it is f(x) - ℓ(x, λ⁺), ℓ = f + sum_i λ⁺_i g_i the
+    Lagrangian; for convex f and g it bounds f(x) - f* by weak duality, plus
+    ``||∇ℓ(x, λ⁺)|| ||x - x*||`` (∇ℓ at λ⁺ is the augmented gradient)."""
+    slack = np.maximum(0.0, -routing_state.signal_state.surrogate_signed_constraint_values)
+    return float(np.sum(routing_state.surrogate_positive_shift * slack))
 
 def _kkt_stationarity_norm(
     total_grad,

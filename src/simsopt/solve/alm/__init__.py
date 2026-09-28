@@ -127,11 +127,13 @@ penalty raise or hold, another subproblem, stop) from a read-only view of the
 measurements (:mod:`simsopt.solve.alm.continuation`).
 ``minimize_alm(continuation_policy=...)`` defaults to
 ``DefaultContinuationPolicy``. The loop executes a policy's convergence
-decision as given, so the success guarantees (a KKT point at the shifted
-multipliers ``max(0, multipliers + penalty * g)``: hard feasibility,
-stationarity and complementarity; no hybrid disagreement, no binding
-multiplier cap) hold for ``DefaultContinuationPolicy`` and for policies that
-keep its vetoes.
+decision as given, so the success guarantees hold for
+``DefaultContinuationPolicy`` and for policies that keep its vetoes:
+``converged`` means an approximate KKT point at the shifted multipliers
+``max(0, multipliers + penalty * g)`` (violations within ``feasibility_tol``,
+augmented-gradient norm within ``stationarity_tol``, complementarity gap
+``sum(shift * max(0, -g))`` within ``feasibility_tol * max(1, |f|)``), with no
+hybrid disagreement and no binding multiplier cap.
 """
 
 from __future__ import annotations

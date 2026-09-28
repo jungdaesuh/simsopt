@@ -34,10 +34,11 @@ from .continuation import (
 )
 from .core import (
     ALMSettings,
-    _complementarity_residual,
+    _complementarity_gap,
     _finite_alm_integer,
     _finite_alm_value,
 )
+from .evaluation import _incumbent_objective_value
 
 
 class ALMContinuationPolicy(Protocol):
@@ -45,10 +46,10 @@ class ALMContinuationPolicy(Protocol):
 
     A policy has the last word on convergence: the loop executes its
     ``ALMConverge`` as given and adds no veto of its own. The success
-    guarantees (a KKT point at the shifted multipliers ``max(0, λ + ρg)``:
-    hard feasibility at ``feasibility_tol``; stationarity, and the gradient of
-    the multipliers on rows off their boundary, at ``stationarity_tol``; no
-    hybrid signal mismatch, no binding multiplier cap) hold for
+    guarantees (an approximate KKT point at the shifted multipliers
+    ``max(0, λ + ρg)``, within the feasibility, stationarity and
+    complementarity-gap tolerances of ``_kkt_point``; no hybrid signal
+    mismatch, no binding multiplier cap) hold for
     :class:`DefaultContinuationPolicy` and for policies that keep its vetoes,
     e.g. by delegating their convergence decisions to it.
     """
@@ -289,13 +290,13 @@ def _feasible_step(view: ALMPostInnerView) -> Union[ALMStop, ALMRaisePenalty, AL
 
 
 def _kkt_point(measured: ALMIterateMeasurement, settings: ALMSettings) -> bool:
-    """Whether ``measured`` passes the KKT stopping test at the shifted
+    """Whether ``measured`` is an approximate KKT point at the shifted
     multipliers ``λ⁺ = max(0, λ + ρg)`` its augmented gradient carries:
-    generic and hard violations within ``feasibility_tol``, and both the
-    augmented-gradient norm and the gradient of the multipliers on rows more
-    than ``feasibility_tol`` (a distance in x) off their boundary within
-    ``stationarity_tol``. Dropping those multipliers leaves complementary
-    multipliers with stationarity within twice ``stationarity_tol``."""
+    generic and hard violations within ``feasibility_tol``, the augmented
+    gradient (the Lagrangian's at λ⁺) within ``stationarity_tol``, and the
+    complementarity gap ``sum_i λ⁺_i max(0, -g_i)`` within
+    ``feasibility_tol * max(1, |f|)``, a relative objective tolerance, as the
+    gap is in the objective's units (λ scales with f)."""
     return (
         _strict_feasibility_satisfied(
             measured.max_feasibility_violation,
@@ -303,10 +304,9 @@ def _kkt_point(measured: ALMIterateMeasurement, settings: ALMSettings) -> bool:
             settings.feasibility_tol,
         )
         and measured.stationarity_norm <= settings.stationarity_tol
-        and _complementarity_residual(
-            measured.evaluation, measured.routing_state, settings.feasibility_tol
-        )
-        <= settings.stationarity_tol
+        and _complementarity_gap(measured.routing_state)
+        <= settings.feasibility_tol
+        * max(1.0, abs(_incumbent_objective_value(measured.evaluation)))
     )
 
 
