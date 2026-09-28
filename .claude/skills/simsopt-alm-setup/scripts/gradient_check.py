@@ -72,6 +72,9 @@ converge to different values, so then it does not decide. Per direction:
 A nonzero claim never passes through a floor: the round-off floor and the
 scatter only withhold a FAIL.
 
+Before any sweep, ``problem.constraint_names`` must be unique non-empty
+strings, one per row (value and gradient) of ``problem.physics(x0)``
+(``problem_contract.py``); otherwise it raises ``ValueError``.
 """
 
 from __future__ import annotations
@@ -86,6 +89,7 @@ from typing import List, NamedTuple, Optional, Tuple
 import numpy as np
 
 from alm_problem import build_problem
+from problem_contract import checked_constraint_names, checked_constraint_values
 from simsopt.solve.alm import ALMPhysics, run_directional_taylor_test
 
 RESULT_PREFIX = "GRADIENT_CHECK "
@@ -416,6 +420,7 @@ def main(argv=None) -> int:
                      f"must hold at least {CONVERGED_RUN + 1} steps")
     steps = step_sweep(args.max_step, args.min_step, args.steps_per_decade)
     problem = build_problem(smoke=args.smoke)
+    names = checked_constraint_names(problem.constraint_names)
     x0 = np.asarray(problem.x0, dtype=float)
 
     # Directions drawn once, each dof scaled to its own size; every quantity
@@ -424,8 +429,9 @@ def main(argv=None) -> int:
     scale = np.maximum(np.abs(x0), 1.0)
     directions = [scale * random.standard_normal(size=x0.shape) for _ in range(args.directions)]
     memo = PhysicsMemo(problem.physics)
-    labels = (OBJECTIVE_LABEL,) + tuple(problem.constraint_names)
-    indices = (None,) + tuple(range(len(problem.constraint_names)))
+    checked_constraint_values(memo(x0), names)
+    labels = (OBJECTIVE_LABEL,) + names
+    indices = (None,) + tuple(range(len(names)))
     sweeps = [[sweep_direction(memo, index, x0, direction, steps) for direction in directions]
               for index in indices]
     # The problem's derivative scale is the objective's (not the largest row's:

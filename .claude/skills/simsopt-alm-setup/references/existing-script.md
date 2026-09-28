@@ -69,7 +69,7 @@ the smoke size as upstream's `MAXITER` did):
 -examples/2_Intermediate/stage_two_optimization.py, shortened)."""
 +"""Stage-II coils with the ALM solver: the coil-regularity terms are the
 +constraint rows of alm_stage2/alm_problem.py instead of penalty weights."""
- 
+
  import os
 +import sys
  from pathlib import Path
@@ -81,7 +81,7 @@ the smoke size as upstream's `MAXITER` did):
 -from simsopt.objectives import Weight, SquaredFlux, QuadraticPenalty
 +from simsopt.geo import curves_to_vtk
  from simsopt.util import in_github_actions
- 
+
 -ncoils = 4
 -R0 = 1.0
 -R1 = 0.5
@@ -105,7 +105,7 @@ the smoke size as upstream's `MAXITER` did):
 +
  OUT_DIR = "./output/"
  os.makedirs(OUT_DIR, exist_ok=True)
- 
+
 -nphi = 32
 -ntheta = 32
 -s = SurfaceRZFourier.from_vmec_input(filename, range="half period", nphi=nphi, ntheta=ntheta)

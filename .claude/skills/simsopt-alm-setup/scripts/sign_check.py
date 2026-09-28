@@ -21,6 +21,11 @@ no row value may exceed ``ORDER_ONE_LIMIT`` in magnitude; |f(x0)| should lie
 within [1 / ORDER_ONE_LIMIT, ORDER_ONE_LIMIT]; and a row with a zero gradient
 cannot be moved. The last line printed is ``SIGN_CHECK {json}``; the exit
 status is 0 when no sign fails.
+
+Rows are read by name, so ``problem.constraint_names`` must be unique
+non-empty strings, one per row (value and gradient) of every physics
+evaluated (``problem_contract.py``); otherwise it raises ``ValueError``
+before judging a row.
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ import sys
 import numpy as np
 
 from alm_problem import build_problem
+from problem_contract import checked_constraint_names, checked_constraint_values
 
 RESULT_PREFIX = "SIGN_CHECK "
 SPREAD_LIMIT = 1e3
@@ -39,7 +45,7 @@ ORDER_ONE_LIMIT = 1e3
 
 
 def check_probe(probe, physics, constraint_names) -> dict:
-    values = dict(zip(constraint_names, physics.constraint_values.tolist()))
+    values = dict(zip(constraint_names, checked_constraint_values(physics, constraint_names).tolist()))
     failures = []
     for name in probe.violated + probe.satisfied:
         if name not in values:
@@ -57,7 +63,7 @@ def check_probe(probe, physics, constraint_names) -> dict:
 
 
 def check_scales(physics, constraint_names) -> dict:
-    values = np.asarray(physics.constraint_values, dtype=float)
+    values = checked_constraint_values(physics, constraint_names)
     gradient_norms = np.array([np.linalg.norm(grad) for grad in physics.constraint_grads])
     nonzero_norms = gradient_norms[gradient_norms > 0.0]
     spread = float(nonzero_norms.max() / nonzero_norms.min()) if nonzero_norms.size else None
@@ -90,7 +96,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     problem = build_problem(smoke=args.smoke)
-    names = tuple(problem.constraint_names)
+    names = checked_constraint_names(problem.constraint_names)
     probes = [check_probe(probe, problem.physics(probe.x), names) for probe in problem.sign_probes()]
     probed_violated = {name for probe in probes for name in probe["violated"]}
     probed_satisfied = {name for probe in probes for name in probe["satisfied"]}

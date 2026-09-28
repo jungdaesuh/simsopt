@@ -376,6 +376,33 @@ def build_problem(smoke=False):
 """
 
 
+# A problem module with rows NAMES_VALUE and values VALUES_VALUE + x[0] at
+# x0 = 0 (exact gradients); its one probe expects the first name violated.
+CONTRACT_PROBE_PROBLEM = """\
+from types import SimpleNamespace
+
+import numpy as np
+
+from simsopt.solve.alm import ALMPhysics
+
+NAMES = NAMES_VALUE
+VALUES = VALUES_VALUE
+
+
+def physics(x):
+    x = np.asarray(x, dtype=float)
+    return ALMPhysics(base_value=1.0 + x[0] + float(x @ x), base_grad=np.array([1.0, 0.0]) + 2.0 * x,
+                      constraint_values=np.array(VALUES) + x[0],
+                      constraint_grads=tuple(np.array([1.0, 0.0]) for _ in VALUES))
+
+
+def build_problem(smoke=False):
+    probe = SimpleNamespace(label="x0", x=np.zeros(2), violated=NAMES[:1], satisfied=())
+    return SimpleNamespace(name="contract", x0=np.zeros(2), physics=physics, constraint_names=NAMES,
+                           shared_source_rows=(), sign_probes=lambda: (probe,))
+"""
+
+
 def skill_markdown() -> Dict[str, str]:
     paths = [SKILL_DIR / "SKILL.md", *sorted(REFERENCES_DIR.glob("*.md"))]
     return {path.relative_to(SKILL_DIR).as_posix(): path.read_text() for path in paths}
@@ -496,8 +523,10 @@ def diff_sides(diff: str) -> tuple:
     """The old and new file of a unified diff that carries full context."""
     body = [line for line in diff.splitlines()
             if not line.startswith(("--- ", "+++ ", "@@"))]
-    old = "\n".join(line[1:] for line in body if line[:1] in (" ", "-")) + "\n"
-    new = "\n".join(line[1:] for line in body if line[:1] in (" ", "+")) + "\n"
+    # An empty line is a blank context line (as git apply and GNU patch read
+    # it), so the diff carries no trailing whitespace.
+    old = "\n".join(line[1:] for line in body if line[:1] in ("", " ", "-")) + "\n"
+    new = "\n".join(line[1:] for line in body if line[:1] in ("", " ", "+")) + "\n"
     return old, new
 
 
@@ -598,6 +627,29 @@ class SkillDocumentsThePackageTests(unittest.TestCase):
                         "docs/alm_setup_guide.md is stale: run "
                         ".claude/skills/simsopt-alm-setup/scripts/build_guide.py")
 
+    def test_skill_files_and_guide_pass_the_whitespace_check(self):
+        """What ``git diff --check`` rejects, over every skill file and the guide."""
+        self.assertEqual(build_guide.whitespace_errors(), [])
+
+    def test_whitespace_check_finds_what_git_diff_check_rejects(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            directory = Path(scratch)
+            cases = {
+                "clean.md": ("a\n\tb\n", []),
+                "trailing.md": ("a \nb\t\n", [1, 2]),
+                "space_before_tab.py": ("x = 1\n \ty = 2\n", [2]),
+                "blank_at_end.md": ("a\n\n\n", [2]),
+                "conflict.md": ("<<<<<<< ours\n=======\n", [1, 2]),
+            }
+            for name, (text, _lines) in cases.items():
+                (directory / name).write_text(text)
+            errors = build_guide.whitespace_errors(sorted(directory.iterdir()))
+            for name, (_text, lines) in cases.items():
+                with self.subTest(file=name):
+                    self.assertEqual([error.split(":")[1] for error in errors
+                                      if Path(error.split(":")[0]).name == name],
+                                     [str(line) for line in lines])
+
     def test_guide_drops_the_skill_only_blocks(self):
         blocks = re.findall(r"<!-- skill-only -->\n(.*?)<!-- /skill-only -->",
                             (SKILL_DIR / "SKILL.md").read_text(), re.DOTALL)
@@ -612,19 +664,24 @@ class CheckEnvRouteTests(unittest.TestCase):
     """``check_env.choose_route``: the first route whose condition holds."""
 
     @staticmethod
-    def report(*, blockers=(), alm_importable=False, checkout=None) -> dict:
-        return {"blockers": list(blockers), "alm": {"importable": alm_importable}, "checkout": checkout}
+    def report(*, blockers=(), alm_importable=False, signed_importable=None, simsopt_importable=True,
+               checkout=None) -> dict:
+        signed_importable = alm_importable if signed_importable is None else signed_importable
+        return {"blockers": list(blockers), "simsopt": {"importable": simsopt_importable},
+                "alm": {"importable": alm_importable},
+                "signed_constraints": {"importable": signed_importable}, "checkout": checkout}
 
     @staticmethod
     def checkout(*, has_alm_sources=False, is_git=True, upstream_remotes_with_alm=()) -> dict:
         git = {"is_git": is_git}
         if is_git:
             git["upstream_remotes_with_alm"] = list(upstream_remotes_with_alm)
-        return {"has_alm_sources": has_alm_sources, "git": git}
+        return {"has_alm_sources": has_alm_sources, "is_simsopt_source": True, "git": git}
 
     def test_routes(self):
         cases = {
             "blocked": self.report(blockers=["Python too old"], alm_importable=True),
+            "install": self.report(simsopt_importable=False, checkout=self.checkout()),
             "ready": self.report(alm_importable=True, checkout=self.checkout()),
             "reinstall": self.report(checkout=self.checkout(has_alm_sources=True)),
             "upstream": self.report(checkout=self.checkout(upstream_remotes_with_alm=["upstream"])),
@@ -635,6 +692,41 @@ class CheckEnvRouteTests(unittest.TestCase):
             with self.subTest(route=route):
                 self.assertEqual(check_env.choose_route(report), route)
         self.assertEqual(check_env.choose_route(self.report(checkout=self.checkout(is_git=False))), "copy")
+
+    def test_a_missing_signed_constraints_module_is_not_ready(self):
+        """The generic template runs on the solver alone; the Stage-2 and
+        Boozer templates also import simsopt.geo.signed_constraints, so
+        ``ready`` needs both, and the install routes supply the missing one."""
+        cases = {
+            "reinstall": self.checkout(has_alm_sources=True),
+            "upstream": self.checkout(upstream_remotes_with_alm=["upstream"]),
+            "merge-fork": self.checkout(),
+            "copy": None,
+        }
+        for route, checkout in cases.items():
+            with self.subTest(route=route):
+                self.assertEqual(check_env.choose_route(self.report(
+                    alm_importable=True, signed_importable=False, checkout=checkout)), route)
+        self.assertEqual(check_env.template_readiness(self.report(alm_importable=True, signed_importable=False)),
+                         {"generic": True, "stage2": False, "boozer_single_stage": False})
+        self.assertEqual(set(check_env.template_readiness(self.report(alm_importable=True)).values()), {True})
+        self.assertEqual(set(check_env.template_readiness(self.report()).values()), {False})
+
+    def test_template_readiness_names_each_templates_checked_imports(self):
+        """``check_env.TEMPLATE_MODULES`` lists, for every problem template,
+        exactly the checked modules (the solver, the signed constraints) it imports."""
+        problem_templates = {path.stem for path in TEMPLATES_DIR.glob("*.py")} - {"run_alm"}
+        self.assertEqual(set(check_env.TEMPLATE_MODULES), problem_templates)
+        checked = (check_env.ALM_MODULE, check_env.SIGNED_CONSTRAINTS_MODULE)
+        for name in sorted(problem_templates):
+            tree = ast.parse((TEMPLATES_DIR / f"{name}.py").read_text())
+            imported = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)} | {
+                alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
+            with self.subTest(template=name):
+                self.assertEqual(
+                    {module for module in checked
+                     if any(path == module or path.startswith(module + ".") for path in imported if path)},
+                    set(check_env.TEMPLATE_MODULES[name]))
 
     def test_remote_urls_with_spaces_parse(self):
         remotes = check_env.parse_remotes(
@@ -670,15 +762,25 @@ class CheckEnvRouteTests(unittest.TestCase):
                 self.assertEqual(check_env.missing_import(error, module), missing)
 
     def test_an_absent_parent_package_is_not_reported_as_a_broken_alm(self):
-        blocker = check_env.alm_import_blocker(
-            {"importable": False, "error": "ModuleNotFoundError: No module named 'simsopt.solve'"})
+        alm_module = check_env.ALM_MODULE
+        blocker = check_env.import_blocker(
+            {"importable": False, "error": "ModuleNotFoundError: No module named 'simsopt.solve'"}, alm_module)
         self.assertIn("simsopt.solve", blocker)
         self.assertNotIn("fails to import", blocker)
-        self.assertIn("fails to import", check_env.alm_import_blocker(
-            {"importable": False, "error": "ImportError: cannot import name 'nnls' from 'scipy.optimize'"}))
-        self.assertIsNone(check_env.alm_import_blocker(
-            {"importable": False, "error": "ModuleNotFoundError: No module named 'simsopt.solve.alm'"}))
-        self.assertIsNone(check_env.alm_import_blocker({"importable": True, "error": None}))
+        self.assertIn("fails to import", check_env.import_blocker(
+            {"importable": False, "error": "ImportError: cannot import name 'nnls' from 'scipy.optimize'"},
+            alm_module))
+        self.assertIsNone(check_env.import_blocker(
+            {"importable": False, "error": "ModuleNotFoundError: No module named 'simsopt.solve.alm'"},
+            alm_module))
+        self.assertIsNone(check_env.import_blocker({"importable": True, "error": None}, alm_module))
+
+    def test_a_broken_signed_constraints_module_blocks(self):
+        signed = check_env.SIGNED_CONSTRAINTS_MODULE
+        self.assertIsNone(check_env.import_blocker(
+            {"importable": False, "error": f"ModuleNotFoundError: No module named '{signed}'"}, signed))
+        self.assertIn(f"{signed} exists but fails to import", check_env.import_blocker(
+            {"importable": False, "error": "NameError: name 'Derivative' is not defined"}, signed))
 
     def test_merging_routes_need_a_clean_tree(self):
         dirty = {"git": {"dirty": True}}
@@ -713,6 +815,75 @@ class SkillScriptsRunTests(unittest.TestCase):
         self.assertTrue(report["alm"]["importable"])
         self.assertTrue(report["signed_constraints"]["importable"])
         self.assertTrue(report["checkout"]["has_alm_sources"])
+        self.assertEqual(report["templates"], {"generic": True, "stage2": True, "boozer_single_stage": True})
+        # Provenance: the checkout's HEAD (the installed version string is
+        # fixed at install time) and the files the imports resolve to.
+        head = subprocess.run(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], capture_output=True,
+                              text=True, check=True).stdout.strip()
+        self.assertEqual(report["checkout"]["git"]["head"], head)
+        alm_file = os.path.realpath(PACKAGE_DIR / "__init__.py")
+        self.assertEqual(report["alm"]["file"], alm_file)
+        self.assertEqual(report["simsopt"]["file"], os.path.realpath(SRC_DIR / "simsopt" / "__init__.py"))
+        printed = completed.stdout.splitlines()
+        self.assertIn(f"import simsopt.solve.alm: {alm_file}", printed)
+        self.assertTrue(any(line.startswith("checkout: ") and head in line for line in printed), printed)
+
+    def isolated_python(self) -> Path:
+        """An interpreter without site-packages or PYTHONPATH: no simsopt, as
+        in a fresh environment."""
+        wrapper = self.scratch / "fresh-python"
+        wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" -I -S "$@"\n')
+        wrapper.chmod(0o755)
+        return wrapper
+
+    def test_check_env_without_simsopt_offers_the_install_route(self):
+        """A fresh interpreter and a simsopt source checkout: install the
+        checkout (editable) and rerun, not a dead-end blocker."""
+        completed = run_python([str(SCRIPTS_DIR / "check_env.py"), "--python", str(self.isolated_python()),
+                                "--checkout", str(REPO_ROOT)], cwd=self.scratch)
+        report = result_line(completed, check_env.RESULT_PREFIX)
+        self.assertEqual(report["route"], "install", report)
+        self.assertEqual(report["blockers"], [])
+        self.assertEqual(completed.returncode, 1)
+        self.assertTrue(report["checkout"]["is_simsopt_source"])
+        self.assertFalse(report["simsopt"]["importable"])
+
+    def test_check_env_without_simsopt_or_a_source_checkout_asks_for_one(self):
+        fresh = str(self.isolated_python())
+        (self.scratch / "not-simsopt").mkdir()
+        for arguments in ([], ["--checkout", str(self.scratch / "not-simsopt")]):
+            with self.subTest(arguments=arguments):
+                completed = run_python([str(SCRIPTS_DIR / "check_env.py"), "--python", fresh, *arguments],
+                                       cwd=self.scratch)
+                report = result_line(completed, check_env.RESULT_PREFIX)
+                self.assertEqual(report["route"], "blocked", report)
+                self.assertEqual(len(report["blockers"]), 1, report)
+                self.assertIn("--checkout", report["blockers"][0])
+
+    def run_contract_probe(self, script: str, names: tuple, values: tuple) -> subprocess.CompletedProcess:
+        source = (CONTRACT_PROBE_PROBLEM.replace("NAMES_VALUE", repr(names))
+                  .replace("VALUES_VALUE", repr(values)))
+        (self.scratch / "alm_problem.py").write_text(source)
+        return run_python([str(SCRIPTS_DIR / script)], cwd=self.scratch, problem_dir=self.scratch)
+
+    def test_checks_reject_duplicate_constraint_names(self):
+        """Two rows named alike: a name-keyed check would see only one of them
+        (the last), so a wrong row could pass. Rows (-1, +1), probe expects violated."""
+        for script, prefix in (("sign_check.py", "SIGN_CHECK "), ("gradient_check.py", "GRADIENT_CHECK ")):
+            with self.subTest(script=script):
+                completed = self.run_contract_probe(script, ("dup", "dup"), (-1.0, 1.0))
+                self.assertNotEqual(completed.returncode, 0, completed.stdout[-2000:])
+                self.assertNotIn(prefix, completed.stdout)
+                self.assertIn("constraint_names must be unique", completed.stderr)
+
+    def test_checks_reject_a_row_count_that_differs_from_the_names(self):
+        for script, prefix in (("sign_check.py", "SIGN_CHECK "), ("gradient_check.py", "GRADIENT_CHECK ")):
+            with self.subTest(script=script):
+                completed = self.run_contract_probe(script, ("only",), (-1.0, 1.0))
+                self.assertNotEqual(completed.returncode, 0, completed.stdout[-2000:])
+                self.assertNotIn(prefix, completed.stdout)
+                self.assertIn("2 constraint values and 2 constraint gradients for 1 constraint_names",
+                              completed.stderr)
 
     def test_smoke_toy_passes(self):
         completed = run_python([str(SCRIPTS_DIR / "smoke_toy.py")], cwd=self.scratch)

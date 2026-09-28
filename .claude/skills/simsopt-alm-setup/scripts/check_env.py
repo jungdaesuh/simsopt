@@ -9,21 +9,33 @@ runs with (default: the one running this script; any Python that runs
 ``python -c``) in child processes, so it never imports simsopt itself: the
 Python version against the ALM floor, whether
 ``simsopt``, ``simsopt.solve.alm`` and ``simsopt.geo.signed_constraints``
-import, how simsopt is installed (editable or not, from its PEP 610 metadata),
-and, for the simsopt source checkout (``--checkout``, else the editable
-install's directory, else the ``src`` layout around the imported package), its
-git state. It reads local git refs only and changes nothing.
+import and from which file, how simsopt is installed (editable or not, from
+its PEP 610 metadata), and, for the simsopt source checkout (``--checkout``,
+else the editable install's directory, else the ``src`` layout around the
+imported package), its git state and HEAD commit. It reads local git refs
+only and changes nothing.
 
-``route`` is the first that applies: ``blocked`` (Python below the floor, no
-importable simsopt, a simsopt without the ``simsopt.solve`` package, or a
-``simsopt.solve.alm`` that exists but fails to import: the report quotes the
-error), ``ready`` (the solver imports),
-``reinstall`` (the checkout has the ALM sources but the interpreter finds no
-such module), ``upstream`` (a hiddenSymmetries remote's master has them),
-``merge-fork`` (a git checkout: merge the ``alm-library`` branch), ``copy``
-(no git checkout). ``blockers`` lists what must be fixed before the route can
-run (for ``upstream`` and ``merge-fork`` also uncommitted changes). The last
-line printed is ``CHECK_ENV {json}``; the exit status is 0 when the route is
+The ALM sources are the solver package and the signed-constraint module.
+``templates`` in the report says which problem templates can run: the
+generic one needs the solver, the Stage-2 and Boozer ones also the signed
+constraints (``TEMPLATE_MODULES``).
+
+``route`` is the first that applies: ``blocked`` (Python below the floor; no
+importable simsopt and no simsopt source checkout to install; a simsopt
+without the ``simsopt.solve`` package; or an ALM module that exists but fails
+to import: the report quotes the error), ``install`` (no importable simsopt:
+install the source checkout, then rerun), ``ready`` (both ALM modules import,
+so every template can run), ``reinstall`` (the checkout has the ALM sources
+but the interpreter finds no such modules), ``upstream`` (a hiddenSymmetries
+remote's master has them), ``merge-fork`` (a git checkout: merge the
+``alm-library`` branch), ``copy`` (no git checkout). ``blockers`` lists what
+must be fixed before the route can run (for ``upstream`` and ``merge-fork``
+also uncommitted changes).
+
+It prints the route, the blockers and notes, the file each module imports
+from (the simsopt version shown is the one recorded when simsopt was
+installed; an editable install keeps it after a merge), the checkout's HEAD,
+and, last, ``CHECK_ENV {json}``. The exit status is 0 when the route is
 ``ready``.
 """
 
@@ -45,9 +57,23 @@ ALM_UPSTREAM_BASE = "9e027eac38028d57aa23777be52a781aa860e347"
 ALM_BRANCH = "alm-library"
 FORK_URL_PLACEHOLDER = "https://github.com/<owner>/simsopt"
 UPSTREAM_REPOSITORY = "github.com/hiddensymmetries/simsopt"
+UPSTREAM_URL = "https://github.com/hiddenSymmetries/simsopt"
 ALM_MODULE = "simsopt.solve.alm"
+SIGNED_CONSTRAINTS_MODULE = "simsopt.geo.signed_constraints"
+ALM_MODULES = (ALM_MODULE, SIGNED_CONSTRAINTS_MODULE)
 ALM_INIT = Path("src") / "simsopt" / "solve" / "alm" / "__init__.py"
+# What a checkout needs to provide both ALM modules.
+ALM_SOURCES = (ALM_INIT, Path("src") / "simsopt" / "geo" / "signed_constraints.py")
+# The ALM modules each problem template imports.
+TEMPLATE_MODULES = {
+    "generic": (ALM_MODULE,),
+    "stage2": ALM_MODULES,
+    "boozer_single_stage": ALM_MODULES,
+}
+SIMSOPT_PACKAGE_INIT = Path("src") / "simsopt" / "__init__.py"
 RESULT_PREFIX = "CHECK_ENV "
+# The report key of each ALM module.
+REPORT_KEYS = {ALM_MODULE: "alm", SIGNED_CONSTRAINTS_MODULE: "signed_constraints"}
 
 VERSION_PROBE = "import json, sys; print(json.dumps(list(sys.version_info[:3])))"
 SIMSOPT_PROBE = (
@@ -75,9 +101,12 @@ def probe(python: str, code: str) -> subprocess.CompletedProcess:
 
 
 def imports(python: str, module: str) -> dict:
-    completed = probe(python, f"import {module}")
-    return {"importable": completed.returncode == 0,
-            "error": None if completed.returncode == 0 else last_line(completed.stderr)}
+    """Whether ``module`` imports, the file it resolves to, or the error."""
+    completed = probe(python, f"import json, os, {module}; "
+                              f"print(json.dumps(os.path.realpath({module}.__file__)))")
+    if completed.returncode != 0:
+        return {"importable": False, "file": None, "error": last_line(completed.stderr)}
+    return {"importable": True, "file": json.loads(last_line(completed.stdout)), "error": None}
 
 
 def missing_import(error: str, module: str) -> Optional[str]:
@@ -90,18 +119,39 @@ def missing_import(error: str, module: str) -> Optional[str]:
     return None
 
 
-def alm_import_blocker(alm_import: dict) -> Optional[str]:
-    """What stops every route when ``simsopt.solve.alm`` does not import for a
-    reason other than being absent; None when it imports or is simply absent."""
-    if alm_import["importable"]:
+def import_blocker(result: dict, module: str) -> Optional[str]:
+    """What stops every route when ALM ``module`` does not import for a reason
+    other than being absent; None when it imports or is simply absent."""
+    if result["importable"]:
         return None
-    missing = missing_import(alm_import["error"], ALM_MODULE)
-    if missing == ALM_MODULE:
+    missing = missing_import(result["error"], module)
+    if missing == module:
         return None
     if missing is not None:
-        return (f"the imported simsopt has no {missing} ({alm_import['error']}): it is incomplete or "
+        return (f"the imported simsopt has no {missing} ({result['error']}): it is incomplete or "
                 "older than the ALM package supports; reinstall or upgrade simsopt first")
-    return f"{ALM_MODULE} exists but fails to import ({alm_import['error']}); fix that error first"
+    return f"{module} exists but fails to import ({result['error']}); fix that error first"
+
+
+def simsopt_import_blocker(simsopt_import: dict, checkout: Optional[dict]) -> Optional[str]:
+    """What stops every route when simsopt itself does not import: nothing when
+    a simsopt source checkout can be installed (the ``install`` route)."""
+    if simsopt_import["importable"] or (checkout is not None and checkout["is_simsopt_source"]):
+        return None
+    if checkout is None:
+        where = "no simsopt source checkout was given"
+    else:
+        where = (f"{checkout['path']} is not a simsopt source checkout (no pyproject.toml and "
+                 f"{SIMSOPT_PACKAGE_INIT.as_posix()})")
+    return (f"simsopt does not import ({simsopt_import['error']}) and {where}: rerun with --checkout "
+            f"<simsopt source checkout> (clone {UPSTREAM_URL} if there is none) for "
+            "the install route, or install simsopt first")
+
+
+def template_readiness(report: dict) -> Dict[str, bool]:
+    """Whether each problem template's ALM modules all import."""
+    return {name: all(report[key]["importable"] for key in (REPORT_KEYS[module] for module in modules))
+            for name, modules in TEMPLATE_MODULES.items()}
 
 
 # ``git remote -v`` prints ``name<TAB>url (fetch|push)``, possibly followed by
@@ -160,12 +210,14 @@ def git_state(checkout: Path, fork_url: str) -> dict:
     upstream_with_alm = [
         name for name, url in remotes.items()
         if url is not None and normalized_repository(url) == UPSTREAM_REPOSITORY
-        and git(root, "cat-file", "-e", f"{name}/master:{ALM_INIT.as_posix()}").returncode == 0
+        and all(git(root, "cat-file", "-e", f"{name}/master:{source.as_posix()}").returncode == 0
+                for source in ALM_SOURCES)
     ]
     return {
         "is_git": True,
         "root": str(root),
         "branch": git(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip(),
+        "head": git(root, "rev-parse", "HEAD").stdout.strip() or None,
         "dirty": bool(git(root, "status", "--porcelain", "--untracked-files=no").stdout.strip()),
         "remotes": remotes,
         "fork_remote": next((name for name, url in remotes.items()
@@ -191,7 +243,9 @@ def checkout_from(simsopt_file: Optional[str], direct_url: Optional[dict]) -> Op
 def choose_route(report: dict) -> str:
     if report["blockers"]:
         return "blocked"
-    if report["alm"]["importable"]:
+    if not report["simsopt"]["importable"]:
+        return "install"
+    if all(template_readiness(report).values()):
         return "ready"
     checkout = report["checkout"]
     if checkout is not None and checkout["has_alm_sources"]:
@@ -226,39 +280,49 @@ def build_report(python: str, checkout_argument: Optional[Path], fork_url: str) 
         checkout_path = checkout_path.resolve()
         checkout = {
             "path": str(checkout_path),
-            "has_alm_sources": (checkout_path / ALM_INIT).exists(),
+            "is_simsopt_source": ((checkout_path / "pyproject.toml").exists()
+                                  and (checkout_path / SIMSOPT_PACKAGE_INIT).exists()),
+            "has_alm_sources": all((checkout_path / source).exists() for source in ALM_SOURCES),
             "git": git_state(checkout_path, fork_url),
         }
 
     blockers = []
-    not_imported = {"importable": False, "error": "simsopt does not import"}
     if tuple(version) < MIN_PYTHON:
         blockers.append(f"Python {'.'.join(map(str, version))} is below the ALM floor "
                         f"{'.'.join(map(str, MIN_PYTHON))}; use a newer interpreter")
-    if not simsopt_import["importable"]:
-        blockers.append(f"simsopt does not import ({simsopt_import['error']}); install simsopt first")
+    simsopt_blocker = simsopt_import_blocker(simsopt_import, checkout)
+    if simsopt_blocker is not None:
+        blockers.append(simsopt_blocker)
     if simsopt_import["importable"]:
-        alm_import = imports(python, ALM_MODULE)
-        alm_blocker = alm_import_blocker(alm_import)
-        if alm_blocker is not None:
-            blockers.append(alm_blocker)
+        module_imports = {module: imports(python, module) for module in ALM_MODULES}
+        blockers.extend(blocker for blocker in (import_blocker(result, module)
+                                                for module, result in module_imports.items())
+                        if blocker is not None)
     else:
-        alm_import = not_imported
+        module_imports = {module: {"importable": False, "file": None, "error": "simsopt does not import"}
+                          for module in ALM_MODULES}
     report = {
         "python": {"executable": python, "version": ".".join(map(str, version)),
                    "floor": ".".join(map(str, MIN_PYTHON)), "meets_floor": tuple(version) >= MIN_PYTHON},
         "simsopt": {**simsopt_import, "install": install, "info": simsopt_info},
-        "alm": alm_import,
-        "signed_constraints": (imports(python, "simsopt.geo.signed_constraints")
-                               if simsopt_import["importable"] else not_imported),
+        **{REPORT_KEYS[module]: result for module, result in module_imports.items()},
         "checkout": checkout,
         "fork_url": fork_url,
         "blockers": blockers,
         "notes": [],
     }
+    report["templates"] = template_readiness(report)
     report["route"] = choose_route(report)
 
     route = report["route"]
+    if route == "install" and not checkout["has_alm_sources"]:
+        report["notes"].append("the checkout lacks the ALM sources: after the install, rerun "
+                               "check_env.py for the route that adds them")
+    if route not in ("blocked", "install") and not all(report["templates"].values()):
+        report["notes"].append(
+            "templates that can run now: "
+            + (", ".join(name for name, ready in report["templates"].items() if ready) or "none")
+            + f"; the route adds what the others import ({', '.join(ALM_MODULES)})")
     if (checkout is not None and simsopt_info is not None
             and checkout_path not in Path(simsopt_info["file"]).parents):
         report["notes"].append(f"the interpreter imports simsopt from {simsopt_info['file']}, "
@@ -280,6 +344,29 @@ def build_report(python: str, checkout_argument: Optional[Path], fork_url: str) 
     return report
 
 
+def provenance_lines(report: dict) -> List[str]:
+    """Where each module imports from, and the checkout's current commit: the
+    simsopt version string is recorded when simsopt is installed, so after a
+    merge into an editable install it names the commit that was installed."""
+    lines = []
+    info = report["simsopt"]["info"]
+    for module, key in (("simsopt", "simsopt"), *((module, REPORT_KEYS[module]) for module in ALM_MODULES)):
+        result = report[key]
+        where = result["file"] if result["importable"] else f"does not import ({result['error']})"
+        if module == "simsopt" and info is not None:
+            where += f" (version {info['version']}, recorded when simsopt was installed)"
+        lines.append(f"import {module}: {where}")
+    checkout = report["checkout"]
+    if checkout is None:
+        lines.append("checkout: none found")
+    elif checkout["git"]["is_git"]:
+        lines.append(f"checkout: {checkout['path']} at {checkout['git']['head']} "
+                     f"(branch {checkout['git']['branch']})")
+    else:
+        lines.append(f"checkout: {checkout['path']} (not a git checkout)")
+    return lines
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--python", default=sys.executable,
@@ -294,6 +381,8 @@ def main(argv=None) -> int:
         print(f"BLOCKER: {blocker}")
     for note in report["notes"]:
         print(f"note: {note}")
+    for line in provenance_lines(report):
+        print(line)
     print(RESULT_PREFIX + json.dumps(report))
     return 0 if report["route"] == "ready" else 1
 

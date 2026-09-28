@@ -3,7 +3,8 @@
 sources, so the guide and the skill cannot drift apart.
 
     python build_guide.py           # write the guide
-    python build_guide.py --check   # exit 1, printing a diff, if the guide is stale
+    python build_guide.py --check   # exit 1, printing a diff, if the guide is stale,
+                                    # or listing whitespace errors in the skill or guide
 
 The guide is ``SKILL.md`` without its frontmatter and its
 ``<!-- skill-only -->`` ... ``<!-- /skill-only -->`` blocks (instructions for
@@ -12,6 +13,12 @@ then the docstring of every template and script. Headings move down one
 level under the guide's title; links between the sources become links to the
 guide's sections, and links to templates and scripts become repository paths.
 Nothing is written by hand in the guide: edit the sources and rerun this.
+
+``--check`` also applies ``git diff --check``'s rules to every skill file and
+the guide: no trailing whitespace, no space before a tab in an indent, no
+blank line at the end of a file, no leftover conflict marker. A blank
+context line of a diff in a reference is an empty line (as ``git apply``
+and GNU ``patch`` accept), not a single space.
 """
 
 from __future__ import annotations
@@ -22,14 +29,14 @@ import difflib
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional, Sequence
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = SKILL_DIR.parents[2]
 GUIDE_PATH = REPO_ROOT / "docs" / "alm_setup_guide.md"
 REFERENCES = ("install", "api", "existing-script", "settings", "termination", "pitfalls")
 TEMPLATES = ("generic", "stage2", "boozer_single_stage", "run_alm")
-SCRIPTS = ("check_env", "smoke_toy", "gradient_check", "sign_check", "build_guide")
+SCRIPTS = ("check_env", "smoke_toy", "gradient_check", "sign_check", "problem_contract", "build_guide")
 
 TITLE = "# Setting up simsopt's ALM solver"
 INTRO = """\
@@ -45,6 +52,7 @@ FRONTMATTER = re.compile(r"\A---\n.*?\n---\n+", re.DOTALL)
 HEADING = re.compile(r"^(#+) ", re.MULTILINE)
 LINK = re.compile(r"\[([^\]]+)\]\(([^)#\s]+)(#[^)\s]*)?\)")
 FENCE = re.compile(r"^```.*?^```", re.MULTILINE | re.DOTALL)
+CONFLICT_MARKER = re.compile(r"(<{7}|={7}|>{7})(?: |$)")
 
 
 def anchor(title: str) -> str:
@@ -115,6 +123,35 @@ def render_guide() -> str:
     return f"{banner}\n\n{TITLE}\n\n{INTRO}\n\n## Contents\n\n{contents}\n\n{body}"
 
 
+def skill_files() -> List[Path]:
+    return sorted(path for path in SKILL_DIR.rglob("*")
+                  if path.is_file() and "__pycache__" not in path.relative_to(SKILL_DIR).parts)
+
+
+def whitespace_errors(paths: Optional[Sequence[Path]] = None) -> List[str]:
+    """``path:line: problem`` for each line of ``paths`` (default: every skill
+    file and the guide) that ``git diff --check`` would reject."""
+    errors = []
+    for path in ([*skill_files(), GUIDE_PATH] if paths is None else paths):
+        lines = path.read_text().split("\n")
+        # A text ending in a newline splits into a final empty string.
+        if lines and lines[-1] == "":
+            lines.pop()
+        for number, line in enumerate(lines, start=1):
+            if line != line.rstrip(" \t"):
+                errors.append(f"{path}:{number}: trailing whitespace")
+            if " \t" in line[:len(line) - len(line.lstrip(" \t"))]:
+                errors.append(f"{path}:{number}: space before tab in indent")
+            if CONFLICT_MARKER.match(line):
+                errors.append(f"{path}:{number}: leftover conflict marker")
+        trailing_blank = 0
+        while trailing_blank < len(lines) and not lines[-1 - trailing_blank].strip(" \t"):
+            trailing_blank += 1
+        if trailing_blank:
+            errors.append(f"{path}:{len(lines) - trailing_blank + 1}: new blank line at EOF")
+    return errors
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--check", action="store_true",
@@ -126,9 +163,12 @@ def main(argv=None) -> int:
         print(f"wrote {GUIDE_PATH}")
         return 0
     current = GUIDE_PATH.read_text() if GUIDE_PATH.exists() else ""
+    errors = whitespace_errors()
+    for error in errors:
+        print(error)
     if current == guide:
         print(f"{GUIDE_PATH} is up to date")
-        return 0
+        return 1 if errors else 0
     sys.stdout.writelines(difflib.unified_diff(
         current.splitlines(keepends=True), guide.splitlines(keepends=True),
         fromfile=str(GUIDE_PATH), tofile="generated"))

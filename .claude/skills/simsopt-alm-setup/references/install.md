@@ -20,6 +20,29 @@ and the docs page `docs/source/simsopt.solve.alm.rst`. The package needs
 Python >= 3.8, the floor of upstream simsopt. The `alm-library` branch is
 based on upstream commit `9e027eac3`.
 
+`ready` means both modules import. The generic template needs only the
+package; the Stage-2 and Boozer templates also import the signed
+constraints. `templates` in the report says which templates can run now;
+when the package imports but the signed constraints do not, the route
+below adds them.
+
+## install
+
+simsopt does not import in `<python>`, and `<checkout>` is a simsopt source
+checkout. Install it editable, then rerun `check_env.py`: it reports `ready`
+when the checkout has the ALM sources, else the route that adds them (an
+editable install picks up the merged Python files without reinstalling).
+
+```sh
+<python> -m pip install -e <checkout>
+```
+
+This builds the C++ extension `simsoptpp` (minutes). In a uv environment
+without pip use `uv pip install --python <python> -e <checkout>` instead.
+Without a checkout, clone one first
+(`git clone https://github.com/hiddenSymmetries/simsopt <checkout>`) and rerun
+`check_env.py` with `--checkout <checkout>`.
+
 ## ready
 
 Nothing to install. Run `smoke_toy.py`.
@@ -81,6 +104,10 @@ git clone --depth 1 --branch alm-library <fork-url> <scratch>/simsopt-alm
 cp -r <scratch>/simsopt-alm/src/simsopt/solve/alm <package>/solve/alm
 cp <scratch>/simsopt-alm/src/simsopt/geo/signed_constraints.py <package>/geo/signed_constraints.py
 ```
+
+Skip the `cp -r` line when `alm.importable` is already true (only the signed
+constraints are missing): copying onto an existing `<package>/solve/alm`
+nests the package inside it.
 
 The templates import `simsopt.geo.signed_constraints` by module path, so
 `<package>/geo/__init__.py` needs no edit. Files copied into site-packages

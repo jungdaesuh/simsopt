@@ -51,7 +51,12 @@ generated files go into.
 1. Run `<python> $SKILL_DIR/scripts/check_env.py --python <python>`, adding
    `--checkout <path>` when the user named their simsopt checkout and
    `--fork-url <url>` when the repository publishing the `alm-library` branch
-   is known. Read `route`, `blockers` and `notes` from the `CHECK_ENV` line.
+   is known. When simsopt is not installed in `<python>` yet, `--checkout` is
+   what makes a route possible: ask for the user's simsopt source checkout
+   (or offer to clone upstream simsopt), and the report offers the `install`
+   route. Read `route`, `blockers` and `notes` from the `CHECK_ENV` line; the
+   lines before it show where each module imports from and the checkout's
+   HEAD commit.
 2. If `blockers` is not empty, report them and stop.
 3. If `route` is not `ready`, show the user the commands of that route from
    [Install routes](#install-routes) with the placeholders filled in, run
@@ -186,9 +191,11 @@ Then give the user the full-run command,
 - `templates/`: `generic.py`, `stage2.py`, `boozer_single_stage.py` (problem
   modules) and `run_alm.py` (the runner).
 - `scripts/`: `check_env.py`, `smoke_toy.py`, `gradient_check.py`,
-  `sign_check.py`, and `build_guide.py`, which generates the human guide
-  `docs/alm_setup_guide.md` from these files. After editing any file here,
-  run `python $SKILL_DIR/scripts/build_guide.py`.
+  `sign_check.py` (both checks share the row checks of
+  `problem_contract.py`), and `build_guide.py`, which generates the human
+  guide `docs/alm_setup_guide.md` from these files. After editing any file
+  here, run `python $SKILL_DIR/scripts/build_guide.py`; `--check` also
+  rejects whitespace errors.
 
 ## Install routes
 
@@ -211,6 +218,29 @@ module `src/simsopt/geo/signed_constraints.py` (also needs simsopt's
 and the docs page `docs/source/simsopt.solve.alm.rst`. The package needs
 Python >= 3.8, the floor of upstream simsopt. The `alm-library` branch is
 based on upstream commit `9e027eac3`.
+
+`ready` means both modules import. The generic template needs only the
+package; the Stage-2 and Boozer templates also import the signed
+constraints. `templates` in the report says which templates can run now;
+when the package imports but the signed constraints do not, the route
+below adds them.
+
+### install
+
+simsopt does not import in `<python>`, and `<checkout>` is a simsopt source
+checkout. Install it editable, then rerun `check_env.py`: it reports `ready`
+when the checkout has the ALM sources, else the route that adds them (an
+editable install picks up the merged Python files without reinstalling).
+
+```sh
+<python> -m pip install -e <checkout>
+```
+
+This builds the C++ extension `simsoptpp` (minutes). In a uv environment
+without pip use `uv pip install --python <python> -e <checkout>` instead.
+Without a checkout, clone one first
+(`git clone https://github.com/hiddenSymmetries/simsopt <checkout>`) and rerun
+`check_env.py` with `--checkout <checkout>`.
 
 ### ready
 
@@ -273,6 +303,10 @@ git clone --depth 1 --branch alm-library <fork-url> <scratch>/simsopt-alm
 cp -r <scratch>/simsopt-alm/src/simsopt/solve/alm <package>/solve/alm
 cp <scratch>/simsopt-alm/src/simsopt/geo/signed_constraints.py <package>/geo/signed_constraints.py
 ```
+
+Skip the `cp -r` line when `alm.importable` is already true (only the signed
+constraints are missing): copying onto an existing `<package>/solve/alm`
+nests the package inside it.
 
 The templates import `simsopt.geo.signed_constraints` by module path, so
 `<package>/geo/__init__.py` needs no edit. Files copied into site-packages
@@ -547,7 +581,7 @@ the smoke size as upstream's `MAXITER` did):
 -examples/2_Intermediate/stage_two_optimization.py, shortened)."""
 +"""Stage-II coils with the ALM solver: the coil-regularity terms are the
 +constraint rows of alm_stage2/alm_problem.py instead of penalty weights."""
- 
+
  import os
 +import sys
  from pathlib import Path
@@ -559,7 +593,7 @@ the smoke size as upstream's `MAXITER` did):
 -from simsopt.objectives import Weight, SquaredFlux, QuadraticPenalty
 +from simsopt.geo import curves_to_vtk
  from simsopt.util import in_github_actions
- 
+
 -ncoils = 4
 -R0 = 1.0
 -R1 = 0.5
@@ -583,7 +617,7 @@ the smoke size as upstream's `MAXITER` did):
 +
  OUT_DIR = "./output/"
  os.makedirs(OUT_DIR, exist_ok=True)
- 
+
 -nphi = 32
 -ntheta = 32
 -s = SurfaceRZFourier.from_vmec_input(filename, range="half period", nphi=nphi, ntheta=ntheta)
@@ -1012,21 +1046,33 @@ runs with (default: the one running this script; any Python that runs
 ``python -c``) in child processes, so it never imports simsopt itself: the
 Python version against the ALM floor, whether
 ``simsopt``, ``simsopt.solve.alm`` and ``simsopt.geo.signed_constraints``
-import, how simsopt is installed (editable or not, from its PEP 610 metadata),
-and, for the simsopt source checkout (``--checkout``, else the editable
-install's directory, else the ``src`` layout around the imported package), its
-git state. It reads local git refs only and changes nothing.
+import and from which file, how simsopt is installed (editable or not, from
+its PEP 610 metadata), and, for the simsopt source checkout (``--checkout``,
+else the editable install's directory, else the ``src`` layout around the
+imported package), its git state and HEAD commit. It reads local git refs
+only and changes nothing.
 
-``route`` is the first that applies: ``blocked`` (Python below the floor, no
-importable simsopt, a simsopt without the ``simsopt.solve`` package, or a
-``simsopt.solve.alm`` that exists but fails to import: the report quotes the
-error), ``ready`` (the solver imports),
-``reinstall`` (the checkout has the ALM sources but the interpreter finds no
-such module), ``upstream`` (a hiddenSymmetries remote's master has them),
-``merge-fork`` (a git checkout: merge the ``alm-library`` branch), ``copy``
-(no git checkout). ``blockers`` lists what must be fixed before the route can
-run (for ``upstream`` and ``merge-fork`` also uncommitted changes). The last
-line printed is ``CHECK_ENV {json}``; the exit status is 0 when the route is
+The ALM sources are the solver package and the signed-constraint module.
+``templates`` in the report says which problem templates can run: the
+generic one needs the solver, the Stage-2 and Boozer ones also the signed
+constraints (``TEMPLATE_MODULES``).
+
+``route`` is the first that applies: ``blocked`` (Python below the floor; no
+importable simsopt and no simsopt source checkout to install; a simsopt
+without the ``simsopt.solve`` package; or an ALM module that exists but fails
+to import: the report quotes the error), ``install`` (no importable simsopt:
+install the source checkout, then rerun), ``ready`` (both ALM modules import,
+so every template can run), ``reinstall`` (the checkout has the ALM sources
+but the interpreter finds no such modules), ``upstream`` (a hiddenSymmetries
+remote's master has them), ``merge-fork`` (a git checkout: merge the
+``alm-library`` branch), ``copy`` (no git checkout). ``blockers`` lists what
+must be fixed before the route can run (for ``upstream`` and ``merge-fork``
+also uncommitted changes).
+
+It prints the route, the blockers and notes, the file each module imports
+from (the simsopt version shown is the one recorded when simsopt was
+installed; an editable install keeps it after a merge), the checkout's HEAD,
+and, last, ``CHECK_ENV {json}``. The exit status is 0 when the route is
 ``ready``.
 
 ### [scripts/smoke_toy.py](../.claude/skills/simsopt-alm-setup/scripts/smoke_toy.py)
@@ -1122,6 +1168,10 @@ converge to different values, so then it does not decide. Per direction:
 A nonzero claim never passes through a floor: the round-off floor and the
 scatter only withhold a FAIL.
 
+Before any sweep, ``problem.constraint_names`` must be unique non-empty
+strings, one per row (value and gradient) of ``problem.physics(x0)``
+(``problem_contract.py``); otherwise it raises ``ValueError``.
+
 ### [scripts/sign_check.py](../.claude/skills/simsopt-alm-setup/scripts/sign_check.py)
 
 Check the sign convention (``g <= 0`` is feasible) of every constraint row
@@ -1147,13 +1197,33 @@ within [1 / ORDER_ONE_LIMIT, ORDER_ONE_LIMIT]; and a row with a zero gradient
 cannot be moved. The last line printed is ``SIGN_CHECK {json}``; the exit
 status is 0 when no sign fails.
 
+Rows are read by name, so ``problem.constraint_names`` must be unique
+non-empty strings, one per row (value and gradient) of every physics
+evaluated (``problem_contract.py``); otherwise it raises ``ValueError``
+before judging a row.
+
+### [scripts/problem_contract.py](../.claude/skills/simsopt-alm-setup/scripts/problem_contract.py)
+
+The row checks of the problem-module contract (``references/api.md``) that
+``gradient_check.py`` and ``sign_check.py`` share: they key each row by its
+name, so a name that repeats, or a physics whose row count differs from the
+names, would let a check read one row and report it as another.
+
+``checked_constraint_names(names)`` returns ``names`` (the problem's
+``constraint_names``) as a tuple after checking that every name is a non-empty
+string and no name repeats; ``checked_constraint_values(physics, names)``
+checks the names the same way and returns the physics' constraint values
+after checking that it has one value and one gradient per name. Both raise
+``ValueError`` naming the breach, before any row is read by name.
+
 ### [scripts/build_guide.py](../.claude/skills/simsopt-alm-setup/scripts/build_guide.py)
 
 Generate the human guide ``docs/alm_setup_guide.md`` from this skill's
 sources, so the guide and the skill cannot drift apart.
 
     python build_guide.py           # write the guide
-    python build_guide.py --check   # exit 1, printing a diff, if the guide is stale
+    python build_guide.py --check   # exit 1, printing a diff, if the guide is stale,
+                                    # or listing whitespace errors in the skill or guide
 
 The guide is ``SKILL.md`` without its frontmatter and its
 ``<!-- skill-only -->`` ... ``<!-- /skill-only -->`` blocks (instructions for
@@ -1162,3 +1232,9 @@ then the docstring of every template and script. Headings move down one
 level under the guide's title; links between the sources become links to the
 guide's sections, and links to templates and scripts become repository paths.
 Nothing is written by hand in the guide: edit the sources and rerun this.
+
+``--check`` also applies ``git diff --check``'s rules to every skill file and
+the guide: no trailing whitespace, no space before a tab in an indent, no
+blank line at the end of a file, no leftover conflict marker. A blank
+context line of a diff in a reference is an empty line (as ``git apply``
+and GNU ``patch`` accept), not a single space.

@@ -34,7 +34,12 @@ generated files go into.
 1. Run `<python> $SKILL_DIR/scripts/check_env.py --python <python>`, adding
    `--checkout <path>` when the user named their simsopt checkout and
    `--fork-url <url>` when the repository publishing the `alm-library` branch
-   is known. Read `route`, `blockers` and `notes` from the `CHECK_ENV` line.
+   is known. When simsopt is not installed in `<python>` yet, `--checkout` is
+   what makes a route possible: ask for the user's simsopt source checkout
+   (or offer to clone upstream simsopt), and the report offers the `install`
+   route. Read `route`, `blockers` and `notes` from the `CHECK_ENV` line; the
+   lines before it show where each module imports from and the checkout's
+   HEAD commit.
 2. If `blockers` is not empty, report them and stop.
 3. If `route` is not `ready`, show the user the commands of that route from
    [install.md](references/install.md) with the placeholders filled in, run
@@ -173,6 +178,8 @@ Then give the user the full-run command,
 - `templates/`: `generic.py`, `stage2.py`, `boozer_single_stage.py` (problem
   modules) and `run_alm.py` (the runner).
 - `scripts/`: `check_env.py`, `smoke_toy.py`, `gradient_check.py`,
-  `sign_check.py`, and `build_guide.py`, which generates the human guide
-  `docs/alm_setup_guide.md` from these files. After editing any file here,
-  run `python $SKILL_DIR/scripts/build_guide.py`.
+  `sign_check.py` (both checks share the row checks of
+  `problem_contract.py`), and `build_guide.py`, which generates the human
+  guide `docs/alm_setup_guide.md` from these files. After editing any file
+  here, run `python $SKILL_DIR/scripts/build_guide.py`; `--check` also
+  rejects whitespace errors.
