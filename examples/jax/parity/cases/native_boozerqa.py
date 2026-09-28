@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol, TypeVar, cast
+from typing import Protocol, TypeVar, cast
 
 import numpy as np
 from examples.jax.parity.arbiter import LaneObservation
@@ -200,7 +200,6 @@ class _PreparedJaxRuntime:
     optimizer_backend: str | None
     incumbent_evaluator: Callable[..., object]
     incumbent_factory: Callable[[], object]
-    exact_newton_variant: Literal["C0", "C1", "C2"]
 
     def fresh_incumbent_controller(self) -> object:
         """Mint isolated continuation state while retaining compiled callables."""
@@ -1045,13 +1044,8 @@ def _prepare_jax_variant_runtime(
     arrays: dict[str, np.ndarray],
     spec: BoozerSingleStageSpec,
     measurement: MeasurementExecution | None,
-    *,
-    exact_newton_variant: Literal["C0", "C1", "C2"] = "C0",
 ) -> _PreparedJaxRuntime:
     """Construct the single session whose compiled callables warm and measure."""
-
-    if exact_newton_variant not in ("C0", "C1", "C2"):
-        raise ValueError("exact_newton_variant must be C0, C1, or C2")
 
     from simsopt.geo import CurveLength, Volume
     from simsopt_jax.geo.optimizers.single_stage_routing import (
@@ -1102,39 +1096,7 @@ def _prepare_jax_variant_runtime(
                 optimizer_backend,
             )
         )
-    if exact_newton_variant == "C0":
-        solver_type = BoozerSurfaceJAX
-    else:
-
-        class _ComputeGraphCanaryBoozerSurface(BoozerSurfaceJAX):
-            """Construction-scoped C1/C2 route; production C0 stays untouched."""
-
-            def run_code_traceable(
-                self,
-                coil_source,
-                sdofs,
-                iota,
-                G,
-                *,
-                certificate_coil_source=None,
-                materialize_dense_linearization=None,
-            ):
-                del materialize_dense_linearization
-                route = self._make_run_code_traceable_exact_benchmark_variant(
-                    exact_newton_variant
-                )
-                array_result = route.compiled_kernel(
-                    coil_source,
-                    certificate_coil_source,
-                    sdofs,
-                    iota,
-                    G,
-                )
-                return route.project_result(array_result)
-
-        solver_type = _ComputeGraphCanaryBoozerSurface
-
-    solver = solver_type(
+    solver = BoozerSurfaceJAX(
         field,
         surface,
         volume,
@@ -1215,7 +1177,6 @@ def _prepare_jax_variant_runtime(
         optimizer_backend=optimizer_backend,
         incumbent_evaluator=incumbent_evaluator,
         incumbent_factory=mint_incumbent_controller,
-        exact_newton_variant=exact_newton_variant,
     )
 
 

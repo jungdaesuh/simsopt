@@ -31,17 +31,6 @@ def _parameter_sha256(parameters: np.ndarray) -> str:
     ).hexdigest()
 
 
-def test_compute_graph_variant_is_selected_at_runtime_construction() -> None:
-    with pytest.raises(ValueError, match="must be C0, C1, or C2"):
-        native_boozerqa._prepare_jax_variant_runtime(
-            None,  # type: ignore[arg-type]
-            {},
-            None,  # type: ignore[arg-type]
-            None,
-            exact_newton_variant="c1",  # type: ignore[arg-type]
-        )
-
-
 def test_timeline_optimizer_final_reuses_exact_accepted_value_and_gradient() -> None:
     parameters = np.asarray([1.25, -0.5], dtype=np.float64)
     gradient = np.asarray([0.75, -0.125], dtype=np.float64)
