@@ -24,7 +24,6 @@ __all__ = (
     "certify_optimization_endpoint",
     "normalized_terminal_status",
     "scipy_minimize_stopping_reason",
-    "status_convention_for",
     "stopping_reason_for_status",
 )
 
@@ -145,9 +144,8 @@ _FAILURE_REASON_BY_STATUS: Final[
                 6: "nonfinite",
             }
         ),
-        # The Optax lane emits its own vocabulary (benchmarks runtime
-        # _run_optax): 2 is a Wolfe line-search failure, never an
-        # evaluation budget.
+        # The Optax lane emits its own vocabulary: 2 is a Wolfe line-search
+        # failure, never an evaluation budget.
         "optax-lbfgs": MappingProxyType(
             {
                 1: "iteration-limit",
@@ -224,42 +222,6 @@ class OptimizationEndpointCertificate:
     initial_stationary: bool
     terminal_stationary: bool
     constraints_satisfied: bool
-
-
-def status_convention_for(
-    provider: str,
-    method: str,
-    *,
-    accepted_incumbent: bool,
-) -> StatusConvention:
-    """Return the emitter convention for a benchmark-runner solver lane.
-
-    The benchmark lanes route provider+method to one concrete emitter,
-    except custom BFGS, which runs the host core under accepted-incumbent
-    continuation and the private on-device solver otherwise. Callers
-    outside the benchmark runner (the example's host drivers) must name
-    their emitter convention directly instead of using this mapping.
-    """
-
-    if provider == "custom" and method == "bfgs":
-        return "host-bfgs" if accepted_incumbent else "private-bfgs"
-    if accepted_incumbent:
-        raise ValueError(
-            "accepted-incumbent continuation exists only on the custom BFGS "
-            f"lane, not provider={provider!r}, method={method!r}"
-        )
-    if provider == "custom" and method == "lbfgs":
-        return "private-lbfgsb"
-    if provider == "native" and method == "bfgs":
-        return "scipy-bfgs"
-    if provider == "native" and method == "lbfgs":
-        return "scipy-lbfgsb"
-    if provider == "optax" and method == "lbfgs":
-        return "optax-lbfgs"
-    raise ValueError(
-        "unsupported optimizer status convention for "
-        f"provider={provider!r}, method={method!r}"
-    )
 
 
 def _failure_reason(

@@ -9,7 +9,6 @@ from simsopt_contracts.optimization_endpoint import (
     StatusConvention,
     StoppingReason,
     certify_optimization_endpoint,
-    status_convention_for,
 )
 from simsopt_jax.parity_tolerances import PARITY_LADDER_TOLERANCES
 
@@ -387,45 +386,6 @@ def test_unknown_failure_status_uses_iteration_budget_fallback(
     assert certificate.success is False
 
 
-@pytest.mark.parametrize(
-    ("provider", "method", "accepted_incumbent", "expected_convention"),
-    (
-        ("custom", "bfgs", True, "host-bfgs"),
-        ("custom", "bfgs", False, "private-bfgs"),
-        ("native", "bfgs", False, "scipy-bfgs"),
-        ("custom", "lbfgs", False, "private-lbfgsb"),
-        ("optax", "lbfgs", False, "optax-lbfgs"),
-        ("native", "lbfgs", False, "scipy-lbfgsb"),
-    ),
-)
-def test_status_convention_follows_the_emitting_solver_route(
-    provider: str,
-    method: str,
-    accepted_incumbent: bool,
-    expected_convention: StatusConvention,
-) -> None:
-    assert (
-        status_convention_for(
-            provider,
-            method,
-            accepted_incumbent=accepted_incumbent,
-        )
-        == expected_convention
-    )
-
-
-@pytest.mark.parametrize(
-    ("provider", "method"),
-    (("native", "bfgs"), ("custom", "lbfgs"), ("optax", "lbfgs"), ("native", "lbfgs")),
-)
-def test_accepted_incumbent_outside_custom_bfgs_is_rejected(
-    provider: str,
-    method: str,
-) -> None:
-    with pytest.raises(ValueError, match="accepted-incumbent"):
-        status_convention_for(provider, method, accepted_incumbent=True)
-
-
 def test_optax_success_claim_with_host_lbfgsb_success_status_fails_closed() -> None:
     certificate = certify_optimization_endpoint(
         provider_success=True,
@@ -444,38 +404,25 @@ def test_optax_success_claim_with_host_lbfgsb_success_status_fails_closed() -> N
     assert certificate.success is False
 
 
-def test_unsupported_provider_method_pair_has_no_status_fallback() -> None:
-    with pytest.raises(
-        ValueError,
-        match="provider='native', method='newton-cg'",
-    ):
-        status_convention_for("native", "newton-cg", accepted_incumbent=False)
-
-
 @pytest.mark.parametrize(
-    ("provider", "accepted_incumbent", "provider_status", "expected_reason"),
+    ("status_convention", "provider_status", "expected_reason"),
     (
         # The published Boozer lanes run custom BFGS under
         # accepted-incumbent continuation (host core emitter).
-        ("custom", True, 1, "iteration-limit"),
-        ("custom", True, 2, "line-search-failed"),
-        ("native", False, 1, "iteration-limit"),
+        ("host-bfgs", 1, "iteration-limit"),
+        ("host-bfgs", 2, "line-search-failed"),
+        ("scipy-bfgs", 1, "iteration-limit"),
     ),
 )
 def test_published_bfgs_lane_stopping_reasons_remain_recomputable(
-    provider: str,
-    accepted_incumbent: bool,
+    status_convention: StatusConvention,
     provider_status: int,
     expected_reason: StoppingReason,
 ) -> None:
     certificate = certify_optimization_endpoint(
         provider_success=False,
         provider_status=provider_status,
-        status_convention=status_convention_for(
-            provider,
-            "bfgs",
-            accepted_incumbent=accepted_incumbent,
-        ),
+        status_convention=status_convention,
         iterations=1,
         max_iterations=1000,
         initial_gradient_inf_norm=1.0e-3,
