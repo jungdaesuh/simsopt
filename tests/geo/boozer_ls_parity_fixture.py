@@ -5,6 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from simsopt.field import Current, coils_via_symmetries
+from simsopt.geo import (
+    SurfaceRZFourier,
+    SurfaceXYZTensorFourier,
+    Volume,
+    create_equally_spaced_curves,
+)
 
 
 @dataclass(frozen=True)
@@ -41,13 +48,6 @@ def build_ls_parity_problem(
     ntheta: int | None = None,
 ) -> RunCodeProblem:
     """Build the known-good LS parity fixture used by integration tests."""
-    from simsopt.field import Current, coils_via_symmetries
-    from simsopt.geo import (
-        SurfaceRZFourier,
-        SurfaceXYZTensorFourier,
-        Volume,
-        create_equally_spaced_curves,
-    )
 
     resolved_nphi = 2 * ntor + 1 if nphi is None else int(nphi)
     resolved_ntheta = 2 * mpol + 1 if ntheta is None else int(ntheta)

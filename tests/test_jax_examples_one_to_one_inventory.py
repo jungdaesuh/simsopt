@@ -23,16 +23,11 @@ VMEC_BLOCKED_CANDIDATES = frozenset(
     }
 )
 
-# Native example sources this branch added on top of the pinned official
-# upstream inventory. They exist in the tree and are inventoried, but they are
-# not upstream sources, so the manifest registers them under
-# ``experimental_sources`` rather than in the official ``source_catalog``.
-BRANCH_ADDED_NATIVE_SOURCES = frozenset(
-    {
-        "3_Advanced/single_stage_boozer_vacuum_optimization.py",
-        "3_Advanced/single_stage_flat675.py",
-    }
-)
+# Native example sources this branch adds on top of the pinned official
+# upstream inventory. A branch-added source would be inventoried and registered
+# under ``experimental_sources`` rather than in the official ``source_catalog``;
+# the carve-out removed both of the branch's own, so there are none.
+BRANCH_ADDED_NATIVE_SOURCES: frozenset[str] = frozenset()
 
 EXPECTED_TOP_LEVEL_FIELDS = frozenset({"schema_version", "baseline", "native_sources"})
 EXPECTED_ROW_FIELDS = frozenset(

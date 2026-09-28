@@ -15,6 +15,13 @@ from contextlib import redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+from simsopt.field import BiotSavart
+from simsopt.geo import PermanentMagnetGrid, SurfaceRZFourier
+from simsopt.util.permanent_magnet_helper_functions import (
+    initialize_coils_for_pm_optimization,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEST_DATA = REPO_ROOT / "tests" / "test_files"
 
@@ -60,12 +67,6 @@ def _build_qa_grid(spec: GridSpec) -> GridBuild:
     ``Bnormal``, hence ``b_obj``.  Both lanes of a parity test consume the
     identical host grid, so the omission cannot tilt a comparison.
     """
-    import numpy as np
-    from simsopt.field import BiotSavart
-    from simsopt.geo import PermanentMagnetGrid, SurfaceRZFourier
-    from simsopt.util.permanent_magnet_helper_functions import (
-        initialize_coils_for_pm_optimization,
-    )
 
     if spec.dr is None or spec.inner_offset is None or spec.outer_offset is None:
         raise ProbeError("the QA grid needs dr and both surface offsets")

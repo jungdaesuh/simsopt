@@ -10,17 +10,50 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    import numpy as np
-    from numpy.typing import NDArray
-    from simsopt.geo import Curve, GaussianSampler, SurfaceRZFourier
-    from simsopt_jax.examples import (
-        ExecutionScale,
-        StochasticPerturbationBundle,
-        StochasticStageTwoConfiguration,
-    )
+import jax
+import numpy as np
+from examples.jax.parity.cases.native_stage_two_optimization_stochastic import (
+    _build_geometry,
+    _scale_configuration,
+    _symmetry_layout,
+)
+from numpy.typing import NDArray
+from scipy.optimize import minimize as scipy_minimize
+from simsopt.field import BiotSavart, Coil
+from simsopt.geo import (
+    ArclengthVariation,
+    Curve,
+    CurveCurveDistance,
+    CurveLength,
+    CurvePerturbed,
+    GaussianSampler,
+    LpCurveCurvature,
+    MeanSquaredCurvature,
+    PerturbationSample,
+    SurfaceRZFourier,
+)
+from simsopt.objectives import QuadraticPenalty, SquaredFlux
+from simsopt_jax.backend.runtime import get_runtime_jax_device
+from simsopt_jax.examples import (
+    ExecutionScale,
+    StochasticPerturbationBundle,
+    StochasticStageTwoConfiguration,
+    materialize_stochastic_coil_perturbations,
+    stochastic_stage_two_configuration,
+)
+from simsopt_jax.objectives import (
+    StageTwoObjectiveConfig,
+    StochasticCoilPerturbations,
+    make_stochastic_stage_two_objective,
+)
+from simsopt_jax.solve.dispatch import minimize
+from simsopt_jax.solve.driver import Driver
+from simsopt_jax.solve.scipy.contracts import ScipyLBFGSBOptions
+from simsopt_jax.solve.serial import TraceableScalarProblem
+from simsopt_jax.solve.simsopt.contracts import SimsoptLBFGSBOptions
+from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
+from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
 
 
 class ProbeConventionError(RuntimeError):
@@ -49,16 +82,6 @@ class SharedInputs:
 
 def build_shared_inputs(scale: ExecutionScale) -> SharedInputs:
     """Build geometry and materialize the training perturbations once."""
-    from examples.jax.parity.cases.native_stage_two_optimization_stochastic import (
-        _build_geometry,
-        _scale_configuration,
-        _symmetry_layout,
-    )
-    from simsopt.geo import GaussianSampler
-    from simsopt_jax.examples import (
-        materialize_stochastic_coil_perturbations,
-        stochastic_stage_two_configuration,
-    )
 
     started = time.perf_counter()
     configuration = stochastic_stage_two_configuration(scale)
@@ -159,7 +182,6 @@ def evaluate_states(
     gradient arrays are returned — the artifact stamps scalars, the endpoint
     archive stores the arrays.
     """
-    import numpy as np
 
     if (
         probe_parameters is not None
@@ -202,19 +224,6 @@ def run_native_leg(
     rest of the leg payload. ``shared``'s live geometry is left at the DOFs it
     arrived with, so the two lanes may be run against one ``SharedInputs``.
     """
-    import numpy as np
-    from scipy.optimize import minimize
-    from simsopt.field import BiotSavart, Coil
-    from simsopt.geo import (
-        ArclengthVariation,
-        CurveCurveDistance,
-        CurveLength,
-        CurvePerturbed,
-        LpCurveCurvature,
-        MeanSquaredCurvature,
-        PerturbationSample,
-    )
-    from simsopt.objectives import QuadraticPenalty, SquaredFlux
 
     configuration = shared.configuration
     surface = shared.surface
@@ -288,7 +297,7 @@ def run_native_leg(
     result = None
     for index in range(repeat):
         started = time.perf_counter()
-        result = minimize(
+        result = scipy_minimize(
             value_and_gradient,
             initial_parameters,
             jac=True,
@@ -358,21 +367,6 @@ def run_jax_leg(
     Returns the timed rows — which the caller gates and serializes — and the
     rest of the leg payload.
     """
-    import jax
-    import numpy as np
-    from simsopt_jax.backend.runtime import get_runtime_jax_device
-    from simsopt_jax.objectives import (
-        StageTwoObjectiveConfig,
-        StochasticCoilPerturbations,
-        make_stochastic_stage_two_objective,
-    )
-    from simsopt_jax.solve.dispatch import minimize
-    from simsopt_jax.solve.driver import Driver
-    from simsopt_jax.solve.scipy.contracts import ScipyLBFGSBOptions
-    from simsopt_jax.solve.serial import TraceableScalarProblem
-    from simsopt_jax.solve.simsopt.contracts import SimsoptLBFGSBOptions
-    from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
-    from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
 
     configuration = shared.configuration
     construction_start = time.perf_counter()
