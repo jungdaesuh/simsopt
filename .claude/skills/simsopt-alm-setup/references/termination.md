@@ -16,14 +16,14 @@ templates does).
 
 | Reason | Success | Meaning | Action |
 |---|---|---|---|
-| `converged` | yes | Max violation <= `feasibility_tol` (solver and hard channels), augmented-gradient norm <= `stationarity_tol`, no hybrid signal mismatch, no binding multiplier cap. | Accept. Check the physics at `result.x` (the runner's `finish` summary). |
-| `constraints_inactive_converged` | yes | Hybrid quartet only: every hard row is strictly inactive (no surrogate activity, zero shift) and the stationarity test holds. | Accept. The constraints did not bind; check whether the thresholds are the ones you meant. |
+| `converged` | yes | A KKT point at the shifted multipliers λ⁺ = max(0, λ + ρg): max violation <= `feasibility_tol` (solver and hard channels), augmented-gradient norm <= `stationarity_tol`, and complementarity max_i min(λ⁺_i, max(0, -g_i - a_i)) <= `feasibility_tol` (a_i the row's activity band: no multiplier left on a row with slack); no hybrid signal mismatch, no binding multiplier cap. | Accept. Check the physics at `result.x` (the runner's `finish` summary). |
+| `constraints_inactive_converged` | yes | Hybrid quartet only: every hard row is strictly inactive (no surrogate activity, zero shift) and the same KKT test holds. | Accept. The constraints did not bind; check whether the thresholds are the ones you meant. |
 
 ## Stopped early
 
 | Reason | Success | Meaning | Action |
 |---|---|---|---|
-| `plateau_stall` | no | Two consecutive hard-feasible subproblems made no meaningful progress while the multiplier-update test stayed unmet. | The iterate is feasible: usually usable. If you need a tighter optimum, run `gradient_check.py` (a wrong or noisy gradient stalls L-BFGS-B), loosen `stationarity_tol` to what f's accuracy allows, or raise `inner_options["maxiter"]`. |
+| `plateau_stall` | no | Two consecutive hard-feasible subproblems made no meaningful progress while the multiplier-update test stayed unmet. This includes a feasible, stationary point that fails complementarity (a positive λ⁺ on a row with slack, so a multiplier on an inactive row cancels f's gradient), which is not a KKT point and is no longer reported `converged`. | The iterate is feasible: usable, but not certified optimal. Compare `result.multipliers` with `result.constraint_values`: a positive multiplier on a row well below its bound is the complementarity failure; rerun from `result.x` with `initial_multipliers` zero on those rows and `initial_penalty=result.penalty`. Otherwise, for a tighter optimum, run `gradient_check.py` (a wrong or noisy gradient stalls L-BFGS-B), loosen `stationarity_tol` to what f's accuracy allows, or raise `inner_options["maxiter"]`. |
 | `constraints_inactive_stall` | no | Hybrid quartet only: the hard rows are inactive but stationarity stopped improving. | Feasible: usually usable. Same remedies as `plateau_stall`. |
 | `signal_mismatch_stall` | no | Hybrid quartet only: hard-feasible while the smooth (surrogate) rows read active, repeated without corrective progress and with a zero surrogate shift. | Lower the smoothing temperature (surrogate closer to the hard value), or set `continue_on_signal_mismatch=True`, or drop the quartet (smooth rows only). |
 | `process_budget_exhausted` | no | Your `accepted_callback` raised `ALMProcessBudgetExhausted` (a budget you enforce, e.g. wall clock). | Resume from the last checkpoint: `run_alm.py --resume <dir>/outer_NNN.pkl`. |

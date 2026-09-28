@@ -387,7 +387,14 @@ re-evaluates the same x with new multipliers or a new penalty. The dict needs
 `dual_update_values`, `constraint_grads`; `ALMPhysics.evaluation` and
 `augmented_inequality_objective` return all of them, plus `base_value` and
 `base_grad` (f without penalty terms, used to rank incumbents and for the KKT
-residual). A non-finite value at a trial point rejects the trial (the line
+residual). The solver checks every dict where it enters (outer iterate and
+each inner trial): a required key absent or None raises `KeyError`
+(`constraint_grads` included, even with every row inactive); `grad` and each
+of the one-per-row `constraint_grads` must have x's shape, and
+`constraint_values` one entry per row (`ValueError`). The optional
+`search_step_success` (False rejects the trial step; absent means accepted)
+must be a `bool` or `numpy.bool_`: 0, None or any other type raises
+`ValueError`. A non-finite value at a trial point rejects the trial (the line
 search backtracks); at an outer iterate it raises `ValueError`.
 
 - **Stateless physics** (depends on x alone): `cached_alm_evaluator(physics)`.
@@ -530,7 +537,10 @@ and apply it only after the user approves.
    replace: the penalty weights, the penalty objects, the objective sum, the
    `fun` wrapper, the hand-written Taylor test (`gradient_check.py` replaces
    it) and the optimizer calls. The setup code that built the surface, coils
-   and field goes too: `alm_problem.py` builds them.
+   and field goes too: `alm_problem.py` builds them. Do not port the script's
+   objective into a hand-built evaluator dict: the template's `physics`
+   returns `ALMPhysics`, whose evaluation carries every key the solver checks
+   (`constraint_grads` among them; see [API](#api), Evaluators).
 3. Output code that used the script's objects reads them from the problem:
    `problem.surface`, `problem.base_curves`, `problem.curves`,
    `problem.biot_savart` (Stage 2; the Boozer template has
@@ -746,14 +756,14 @@ templates does).
 
 | Reason | Success | Meaning | Action |
 |---|---|---|---|
-| `converged` | yes | Max violation <= `feasibility_tol` (solver and hard channels), augmented-gradient norm <= `stationarity_tol`, no hybrid signal mismatch, no binding multiplier cap. | Accept. Check the physics at `result.x` (the runner's `finish` summary). |
-| `constraints_inactive_converged` | yes | Hybrid quartet only: every hard row is strictly inactive (no surrogate activity, zero shift) and the stationarity test holds. | Accept. The constraints did not bind; check whether the thresholds are the ones you meant. |
+| `converged` | yes | A KKT point at the shifted multipliers λ⁺ = max(0, λ + ρg): max violation <= `feasibility_tol` (solver and hard channels), augmented-gradient norm <= `stationarity_tol`, and complementarity max_i min(λ⁺_i, max(0, -g_i - a_i)) <= `feasibility_tol` (a_i the row's activity band: no multiplier left on a row with slack); no hybrid signal mismatch, no binding multiplier cap. | Accept. Check the physics at `result.x` (the runner's `finish` summary). |
+| `constraints_inactive_converged` | yes | Hybrid quartet only: every hard row is strictly inactive (no surrogate activity, zero shift) and the same KKT test holds. | Accept. The constraints did not bind; check whether the thresholds are the ones you meant. |
 
 ### Stopped early
 
 | Reason | Success | Meaning | Action |
 |---|---|---|---|
-| `plateau_stall` | no | Two consecutive hard-feasible subproblems made no meaningful progress while the multiplier-update test stayed unmet. | The iterate is feasible: usually usable. If you need a tighter optimum, run `gradient_check.py` (a wrong or noisy gradient stalls L-BFGS-B), loosen `stationarity_tol` to what f's accuracy allows, or raise `inner_options["maxiter"]`. |
+| `plateau_stall` | no | Two consecutive hard-feasible subproblems made no meaningful progress while the multiplier-update test stayed unmet. This includes a feasible, stationary point that fails complementarity (a positive λ⁺ on a row with slack, so a multiplier on an inactive row cancels f's gradient), which is not a KKT point and is no longer reported `converged`. | The iterate is feasible: usable, but not certified optimal. Compare `result.multipliers` with `result.constraint_values`: a positive multiplier on a row well below its bound is the complementarity failure; rerun from `result.x` with `initial_multipliers` zero on those rows and `initial_penalty=result.penalty`. Otherwise, for a tighter optimum, run `gradient_check.py` (a wrong or noisy gradient stalls L-BFGS-B), loosen `stationarity_tol` to what f's accuracy allows, or raise `inner_options["maxiter"]`. |
 | `constraints_inactive_stall` | no | Hybrid quartet only: the hard rows are inactive but stationarity stopped improving. | Feasible: usually usable. Same remedies as `plateau_stall`. |
 | `signal_mismatch_stall` | no | Hybrid quartet only: hard-feasible while the smooth (surrogate) rows read active, repeated without corrective progress and with a zero surrogate shift. | Lower the smoothing temperature (surrogate closer to the hard value), or set `continue_on_signal_mismatch=True`, or drop the quartet (smooth rows only). |
 | `process_budget_exhausted` | no | Your `accepted_callback` raised `ALMProcessBudgetExhausted` (a budget you enforce, e.g. wall clock). | Resume from the last checkpoint: `run_alm.py --resume <dir>/outer_NNN.pkl`. |
@@ -844,31 +854,38 @@ Each entry: the symptom, the cause, the fix.
    raises `ValueError` naming the path. A subtree shared by two keys is fine.
    `ALMPhysics` extras also may not set `total`, `grad`, the four physics
    fields or other multiplier-dependent keys.
-8. **Non-finite values.** A NaN or inf at a trial point is rejected (the
+8. **Hand-built evaluator dicts.** A dict without `constraint_grads` (or
+   with it None) raises `KeyError`, even when no row is active; one with the
+   wrong number of rows or shapes raises `ValueError`. A
+   `search_step_success` that is not a `bool` or `numpy.bool_` (0, None, a
+   string) raises `ValueError`. Build the dict with `ALMPhysics.evaluation`
+   or `augmented_inequality_objective`, as the templates do, and pass any
+   step flag as `bool(...)`.
+9. **Non-finite values.** A NaN or inf at a trial point is rejected (the
    line search backtracks); at an outer iterate (the start point, a restored
    incumbent) `minimize_alm` raises `ValueError: ... produced non-finite ALM
    data`. Make x0 evaluate cleanly.
-9. **The returned x may be an earlier iterate.** On failure the solver can
-   return the best hard-feasible iterate (`result.restored_best_feasible`).
-   Set your objects to `result.x` (and, for stateful physics, re-solve from
-   the restored state) before saving; the templates' `finish` does this.
-10. **Callbacks come in pairs.** `snapshot_accepted_state_fn` and
+10. **The returned x may be an earlier iterate.** On failure the solver can
+    return the best hard-feasible iterate (`result.restored_best_feasible`).
+    Set your objects to `result.x` (and, for stateful physics, re-solve from
+    the restored state) before saving; the templates' `finish` does this.
+11. **Callbacks come in pairs.** `snapshot_accepted_state_fn` and
     `restore_incumbent_state_fn` are both given or both omitted
     (`ValueError`); `resume_from` cannot be combined with
     `initial_multipliers` or `initial_penalty`, and needs the checkpoint's x
     as x0.
-11. **Taylor-testing only the augmented Lagrangian misses rows.** With zero
+12. **Taylor-testing only the augmented Lagrangian misses rows.** With zero
     multipliers an inactive row (`max(0, multiplier + penalty * g) = 0`)
     drops out of L and its gradient goes unchecked; `gradient_check.py` tests
     f and each row separately.
-12. **Taylor steps and smoothing.** The smooth rows select points near the
+13. **Taylor steps and smoothing.** The smooth rows select points near the
     extremum; a step that changes the selection breaks the ratio test, so
     only steps far below the smoothing temperature see the gradient.
     `gradient_check.py` sweeps relative steps from 1 down to 1e-10; when
     larger steps plateau at the slope of the selected extremum and smaller
     ones converge to the gradient, the two ranges disagree and the row is
     NOT TESTED rather than failed.
-13. **Reading the gradient check.** `gradient_check.py` sweeps relative
+14. **Reading the gradient check.** `gradient_check.py` sweeps relative
     steps from 1 to 1e-10 (each dof moves relative to its own size). Per
     direction it finds the step ranges that converge: three or more
     consecutive steps agreeing to 1e-4, or all zero to the round-off of the
@@ -914,9 +931,10 @@ Each entry: the symptom, the cause, the fix.
     round-off-size claim such as 1e-17 (NOT TESTED); and a problem whose
     objective has no gradient at x0 (a constant) has no scale for zero, so
     zero claims are NOT TESTED.
-14. **Unique row names.** The runner reports multipliers and values keyed by
-    name, so a repeated name hides a row.
-15. **Conflicting constraints.** Thresholds no design can meet (e.g. a coil
+15. **Unique row names.** The runner reports multipliers and values keyed by
+    name, so a repeated name hides a row; `gradient_check.py` and
+    `sign_check.py` refuse one.
+16. **Conflicting constraints.** Thresholds no design can meet (e.g. a coil
     spacing and a coil-surface distance that exclude each other) show as a
     penalty that keeps rising, `penalty_cap_reached`, or `max_outer_after_penalty_increase`
     with one row's violation flat. Relax a threshold; a larger penalty does

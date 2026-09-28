@@ -39,31 +39,38 @@ Each entry: the symptom, the cause, the fix.
    raises `ValueError` naming the path. A subtree shared by two keys is fine.
    `ALMPhysics` extras also may not set `total`, `grad`, the four physics
    fields or other multiplier-dependent keys.
-8. **Non-finite values.** A NaN or inf at a trial point is rejected (the
+8. **Hand-built evaluator dicts.** A dict without `constraint_grads` (or
+   with it None) raises `KeyError`, even when no row is active; one with the
+   wrong number of rows or shapes raises `ValueError`. A
+   `search_step_success` that is not a `bool` or `numpy.bool_` (0, None, a
+   string) raises `ValueError`. Build the dict with `ALMPhysics.evaluation`
+   or `augmented_inequality_objective`, as the templates do, and pass any
+   step flag as `bool(...)`.
+9. **Non-finite values.** A NaN or inf at a trial point is rejected (the
    line search backtracks); at an outer iterate (the start point, a restored
    incumbent) `minimize_alm` raises `ValueError: ... produced non-finite ALM
    data`. Make x0 evaluate cleanly.
-9. **The returned x may be an earlier iterate.** On failure the solver can
-   return the best hard-feasible iterate (`result.restored_best_feasible`).
-   Set your objects to `result.x` (and, for stateful physics, re-solve from
-   the restored state) before saving; the templates' `finish` does this.
-10. **Callbacks come in pairs.** `snapshot_accepted_state_fn` and
+10. **The returned x may be an earlier iterate.** On failure the solver can
+    return the best hard-feasible iterate (`result.restored_best_feasible`).
+    Set your objects to `result.x` (and, for stateful physics, re-solve from
+    the restored state) before saving; the templates' `finish` does this.
+11. **Callbacks come in pairs.** `snapshot_accepted_state_fn` and
     `restore_incumbent_state_fn` are both given or both omitted
     (`ValueError`); `resume_from` cannot be combined with
     `initial_multipliers` or `initial_penalty`, and needs the checkpoint's x
     as x0.
-11. **Taylor-testing only the augmented Lagrangian misses rows.** With zero
+12. **Taylor-testing only the augmented Lagrangian misses rows.** With zero
     multipliers an inactive row (`max(0, multiplier + penalty * g) = 0`)
     drops out of L and its gradient goes unchecked; `gradient_check.py` tests
     f and each row separately.
-12. **Taylor steps and smoothing.** The smooth rows select points near the
+13. **Taylor steps and smoothing.** The smooth rows select points near the
     extremum; a step that changes the selection breaks the ratio test, so
     only steps far below the smoothing temperature see the gradient.
     `gradient_check.py` sweeps relative steps from 1 down to 1e-10; when
     larger steps plateau at the slope of the selected extremum and smaller
     ones converge to the gradient, the two ranges disagree and the row is
     NOT TESTED rather than failed.
-13. **Reading the gradient check.** `gradient_check.py` sweeps relative
+14. **Reading the gradient check.** `gradient_check.py` sweeps relative
     steps from 1 to 1e-10 (each dof moves relative to its own size). Per
     direction it finds the step ranges that converge: three or more
     consecutive steps agreeing to 1e-4, or all zero to the round-off of the
@@ -109,9 +116,10 @@ Each entry: the symptom, the cause, the fix.
     round-off-size claim such as 1e-17 (NOT TESTED); and a problem whose
     objective has no gradient at x0 (a constant) has no scale for zero, so
     zero claims are NOT TESTED.
-14. **Unique row names.** The runner reports multipliers and values keyed by
-    name, so a repeated name hides a row.
-15. **Conflicting constraints.** Thresholds no design can meet (e.g. a coil
+15. **Unique row names.** The runner reports multipliers and values keyed by
+    name, so a repeated name hides a row; `gradient_check.py` and
+    `sign_check.py` refuse one.
+16. **Conflicting constraints.** Thresholds no design can meet (e.g. a coil
     spacing and a coil-surface distance that exclude each other) show as a
     penalty that keeps rising, `penalty_cap_reached`, or `max_outer_after_penalty_increase`
     with one row's violation flat. Relax a threshold; a larger penalty does

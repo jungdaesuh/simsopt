@@ -18,7 +18,10 @@ and apply it only after the user approves.
    replace: the penalty weights, the penalty objects, the objective sum, the
    `fun` wrapper, the hand-written Taylor test (`gradient_check.py` replaces
    it) and the optimizer calls. The setup code that built the surface, coils
-   and field goes too: `alm_problem.py` builds them.
+   and field goes too: `alm_problem.py` builds them. Do not port the script's
+   objective into a hand-built evaluator dict: the template's `physics`
+   returns `ALMPhysics`, whose evaluation carries every key the solver checks
+   (`constraint_grads` among them; see [api.md](api.md), Evaluators).
 3. Output code that used the script's objects reads them from the problem:
    `problem.surface`, `problem.base_curves`, `problem.curves`,
    `problem.biot_savart` (Stage 2; the Boozer template has

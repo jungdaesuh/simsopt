@@ -67,7 +67,14 @@ re-evaluates the same x with new multipliers or a new penalty. The dict needs
 `dual_update_values`, `constraint_grads`; `ALMPhysics.evaluation` and
 `augmented_inequality_objective` return all of them, plus `base_value` and
 `base_grad` (f without penalty terms, used to rank incumbents and for the KKT
-residual). A non-finite value at a trial point rejects the trial (the line
+residual). The solver checks every dict where it enters (outer iterate and
+each inner trial): a required key absent or None raises `KeyError`
+(`constraint_grads` included, even with every row inactive); `grad` and each
+of the one-per-row `constraint_grads` must have x's shape, and
+`constraint_values` one entry per row (`ValueError`). The optional
+`search_step_success` (False rejects the trial step; absent means accepted)
+must be a `bool` or `numpy.bool_`: 0, None or any other type raises
+`ValueError`. A non-finite value at a trial point rejects the trial (the line
 search backtracks); at an outer iterate it raises `ValueError`.
 
 - **Stateless physics** (depends on x alone): `cached_alm_evaluator(physics)`.
