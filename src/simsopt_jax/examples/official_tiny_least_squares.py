@@ -2,6 +2,11 @@
 
 The residual is evaluated by JAX. SciPy owns finite-difference Jacobian
 sampling and stopping, as in ``least_squares_serial_solve(grad=None)``.
+
+It lives in the installed package because the three examples
+(``examples/jax/1_Simple/just_a_quadratic.py``, ``minimize_curve_length.py``,
+``surf_vol_area.py``) are executed as standalone scripts, with no repository
+root on ``sys.path``; their parity cases import it from here too.
 """
 
 from __future__ import annotations
@@ -11,17 +16,19 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Final, Mapping
 
+import jax
+import jax.numpy as jnp
 import numpy as np
-from examples.jax.parity.terminal_status import (
-    NormalizedTerminalStatus,
-    normalized_terminal_status,
-)
 from scipy.optimize import OptimizeResult, least_squares
 from simsopt_contracts.optimization_endpoint import (
+    NormalizedTerminalStatus,
     StatusConvention,
     StoppingReason,
+    normalized_terminal_status,
     stopping_reason_for_status,
 )
+from simsopt_jax_adapters.geo.curve_objectives import curve_length_pure
+
 from simsopt_jax.core.curve_geometry import (
     curve_incremental_arclength_from_spec,
     curve_spec_with_dofs,
@@ -33,10 +40,6 @@ from simsopt_jax.core.surface_rzfourier import (
     surface_rz_fourier_volume_from_dofs,
 )
 from simsopt_jax.examples.weighted_quadratic import weighted_quadratic_residuals
-from simsopt_jax_adapters.geo.curve_objectives import curve_length_pure
-
-import jax
-import jax.numpy as jnp
 
 DRIVER_QUADRATIC = "scipy_least_squares_trf_jax_quadratic"
 DRIVER_CURVE = "scipy_least_squares_trf_jax_curve_length"
@@ -127,8 +130,8 @@ def trf_outcome(result: OptimizeResult) -> TrfOutcome:
     """Normalize one ``scipy.optimize.least_squares`` result.
 
     The status is classified by the contract's own ``scipy-trf`` table and the
-    label is the one ``terminal_status.normalized_terminal_status`` gives every
-    other lane; nothing about either vocabulary is restated here.
+    label is the one ``optimization_endpoint.normalized_terminal_status`` gives
+    every other lane; nothing about either vocabulary is restated here.
 
     ``least_squares`` reports NO iteration count -- its budget is ``max_nfev``
     and its budget signal is status 0 -- so this call has no iteration evidence
@@ -167,7 +170,7 @@ def combine_trf_outcomes(first: TrfOutcome, *rest: TrfOutcome) -> TrfOutcome:
     """Fold one outcome per solve into the outcome of a multi-solve workflow.
 
     The fold itself is not restated here: it is
-    ``terminal_status.normalized_terminal_status``, the rule every other
+    ``optimization_endpoint.normalized_terminal_status``, the rule every other
     optimizer-backed lane folds with.
     """
     outcomes = (first, *rest)

@@ -17,7 +17,6 @@ from examples.jax.parity.input_bundle import (
 )
 from examples.jax.parity.runtime import ParityLane
 from examples.jax.parity.terminal_status import (
-    TerminalStatus,
     lane_terminal_status,
     stage_termination_from_values,
     status_convention_for_driver,
@@ -31,7 +30,7 @@ from simsopt.geo import (
     create_equally_spaced_curves,
 )
 from simsopt.objectives import QuadraticPenalty, SquaredFlux
-from simsopt_contracts.optimization_endpoint import StatusConvention
+from simsopt_contracts.optimization_endpoint import StatusConvention, TerminalStatus
 from simsopt_jax.core.specs import FixedSurfaceFluxSpec
 from simsopt_jax.examples import ExecutionScale, solve_minimal_stage_two
 from simsopt_jax.examples.stage_two_minimal import (

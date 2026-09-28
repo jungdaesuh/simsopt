@@ -14,13 +14,15 @@ import numpy as np
 import pytest
 
 from examples.jax.parity.terminal_status import (
-    BUDGET_STOPPING_REASONS,
     StageTermination,
     lane_terminal_status,
-    normalized_terminal_status,
     stage_stopping_reason,
     stage_termination_from_values,
     status_convention_for_driver,
+)
+from simsopt_contracts.optimization_endpoint import (
+    BUDGET_STOPPING_REASONS,
+    normalized_terminal_status,
 )
 
 _CAPPED_SCIPY_STAGE = StageTermination(

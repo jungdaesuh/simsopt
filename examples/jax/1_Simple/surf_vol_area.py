@@ -12,7 +12,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from examples.jax.official_tiny_least_squares import (
+from simsopt import load
+from simsopt.geo import SurfaceRZFourier
+from simsopt_jax.examples import (
+    ExampleResult,
+    ExecutionScale,
+    run_example,
+)
+from simsopt_jax.examples.official_tiny_least_squares import (
     DRIVER_SURFACE,
     combine_trf_outcomes,
     guard_finite_endpoint,
@@ -21,13 +28,6 @@ from examples.jax.official_tiny_least_squares import (
     surface_area_volume_residual,
     trf_outcome,
     value_and_jacobian,
-)
-from simsopt import load
-from simsopt.geo import SurfaceRZFourier
-from simsopt_jax.examples import (
-    ExampleResult,
-    ExecutionScale,
-    run_example,
 )
 
 EXAMPLE_ID = "native-surf-vol-area"

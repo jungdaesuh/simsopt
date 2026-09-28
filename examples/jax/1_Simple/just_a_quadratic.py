@@ -17,17 +17,17 @@ from tempfile import TemporaryDirectory
 from typing import Literal
 
 import numpy as np
-from examples.jax.official_tiny_least_squares import (
+from simsopt_jax.examples import (
+    ExecutionScale,
+    example_runtime_metadata,
+)
+from simsopt_jax.examples.official_tiny_least_squares import (
     DRIVER_QUADRATIC,
     guard_finite_endpoint,
     quadratic_residual,
     solve_jax_residual,
     trf_outcome,
     value_and_jacobian,
-)
-from simsopt_jax.examples import (
-    ExecutionScale,
-    example_runtime_metadata,
 )
 
 EXAMPLE_ID = "native-just-a-quadratic"

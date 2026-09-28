@@ -21,9 +21,9 @@ from examples.jax.parity.official_reference import (
     load_official_reference,
 )
 from examples.jax.parity.runtime import ParityLane
-from examples.jax.parity.terminal_status import normalized_terminal_status
 from simsopt_contracts.optimization_endpoint import (
     StoppingReason,
+    normalized_terminal_status,
     scipy_minimize_stopping_reason,
 )
 from simsopt.configs.zoo import get_data

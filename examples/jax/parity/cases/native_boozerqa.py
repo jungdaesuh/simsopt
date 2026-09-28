@@ -20,7 +20,6 @@ from examples.jax.parity.input_bundle import (
 )
 from examples.jax.parity.measurement import MeasurementExecution
 from examples.jax.parity.runtime import ParityLane
-from examples.jax.parity.terminal_status import normalized_terminal_status
 from simsopt.configs import get_data
 from simsopt.geo import SurfaceXYZTensorFourier
 from simsopt.optimization_trajectory import (
@@ -37,6 +36,7 @@ from simsopt_contracts.optimization_endpoint import (
     OptimizationEndpointCertificate,
     StoppingReason,
     certify_optimization_endpoint,
+    normalized_terminal_status,
 )
 from simsopt_jax.backend.runtime import get_runtime_jax_device
 from simsopt_jax.examples import ExecutionScale, scalar_example_driver

@@ -35,8 +35,8 @@ from examples.jax.parity.cases.native_qfm import (
 )
 from examples.jax.parity.input_bundle import load_input_bundle
 from examples.jax.parity.official_reference import load_official_reference
-from examples.jax.parity.terminal_status import normalized_terminal_status
 from simsopt.configs.zoo import get_data
+from simsopt_contracts.optimization_endpoint import normalized_terminal_status
 from simsopt_jax.backend.dtypes import explicit_device_array
 from simsopt_jax.backend.runtime import get_runtime_jax_device
 from simsopt_jax.examples import ExecutionScale

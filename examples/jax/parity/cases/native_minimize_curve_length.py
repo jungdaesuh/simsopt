@@ -6,16 +6,6 @@ import os
 from pathlib import Path
 
 import numpy as np
-from examples.jax.official_tiny_least_squares import (
-    CONTROLLED_CURVE_INITIAL_FULL,
-    CONTROLLED_CURVE_REPLAY_SEED,
-    DRIVER_CURVE,
-    curve_length_residual,
-    guard_finite_endpoint,
-    solve_jax_residual,
-    trf_outcome,
-    value_and_jacobian,
-)
 from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.cases._official_least_squares import (
     declared_work_budget,
@@ -31,6 +21,16 @@ from examples.jax.parity.runtime import ParityLane
 from simsopt.geo import CurveLength, CurveRZFourier
 from simsopt.objectives import LeastSquaresProblem
 from simsopt_jax.examples import ExecutionScale
+from simsopt_jax.examples.official_tiny_least_squares import (
+    CONTROLLED_CURVE_INITIAL_FULL,
+    CONTROLLED_CURVE_REPLAY_SEED,
+    DRIVER_CURVE,
+    curve_length_residual,
+    guard_finite_endpoint,
+    solve_jax_residual,
+    trf_outcome,
+    value_and_jacobian,
+)
 
 import jax
 

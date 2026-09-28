@@ -8,13 +8,6 @@ from pathlib import Path
 from typing import cast
 
 import numpy as np
-from examples.jax.official_tiny_least_squares import (
-    DRIVER_QUADRATIC,
-    guard_finite_endpoint,
-    quadratic_residual,
-    solve_jax_residual,
-    trf_outcome,
-)
 from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.cases._official_least_squares import (
     declared_work_budget,
@@ -30,6 +23,13 @@ from examples.jax.parity.runtime import ParityLane
 from simsopt.objectives import LeastSquaresProblem
 from simsopt.objectives.functions import Identity
 from simsopt_jax.examples import ExecutionScale
+from simsopt_jax.examples.official_tiny_least_squares import (
+    DRIVER_QUADRATIC,
+    guard_finite_endpoint,
+    quadratic_residual,
+    solve_jax_residual,
+    trf_outcome,
+)
 
 import jax
 

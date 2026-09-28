@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Final, Literal
@@ -12,13 +12,17 @@ TERMINAL_STATIONARITY_ATOL: Final[float] = 1.0e-7
 TERMINAL_CONSTRAINT_NORM_ATOL: Final[float] = 1.0e-10
 
 __all__ = (
+    "BUDGET_STOPPING_REASONS",
     "SCIPY_MINIMIZE_STATUS_CONVENTION_BY_METHOD",
     "TERMINAL_CONSTRAINT_NORM_ATOL",
     "TERMINAL_STATIONARITY_ATOL",
+    "NormalizedTerminalStatus",
     "OptimizationEndpointCertificate",
     "StatusConvention",
     "StoppingReason",
+    "TerminalStatus",
     "certify_optimization_endpoint",
+    "normalized_terminal_status",
     "scipy_minimize_stopping_reason",
     "status_convention_for",
     "stopping_reason_for_status",
@@ -44,6 +48,13 @@ StatusConvention = Literal[
     "scipy-slsqp",
     "scipy-trf",
 ]
+#: Terminal label of one optimizer-backed workflow: the vocabulary
+#: :func:`normalized_terminal_status` folds stopping reasons into.
+NormalizedTerminalStatus = Literal["converged", "budget_exhausted", "failed"]
+
+BUDGET_STOPPING_REASONS: Final[frozenset[StoppingReason]] = frozenset(
+    {"iteration-limit", "evaluation-limit"}
+)
 
 _SUCCESS_STATUSES: Final[Mapping[StatusConvention, frozenset[int]]] = MappingProxyType(
     {
@@ -448,3 +459,49 @@ def scipy_minimize_stopping_reason(
         observables_finite=endpoint_finite,
         inner_success=True,
     ).stopping_reason
+
+
+@dataclass(frozen=True)
+class TerminalStatus:
+    normalized_status: NormalizedTerminalStatus
+    success: bool
+    stage_stopping_reasons: tuple[StoppingReason, ...]
+
+
+def normalized_terminal_status(
+    *,
+    scientific_predicate: bool,
+    stage_stopping_reasons: Sequence[StoppingReason],
+) -> TerminalStatus:
+    """Fold per-stage stopping reasons and the scientific predicate into one label.
+
+    A label states what the optimizer reported, never what the objective did:
+
+    * the predicate is false, or any stage stopped for a reason other than its
+      own convergence or a declared budget: ``failed``;
+    * every stage reported convergence: ``converged``;
+    * otherwise (every stage converged or stopped on its budget, at least one on
+      its budget): ``budget_exhausted``.
+
+    ``success`` is true only for ``converged``. A finite, decreasing objective is
+    a scientific predicate; it never promotes a budget stop to convergence and a
+    budget stop never demotes it to failure.
+    """
+
+    reasons = tuple(stage_stopping_reasons)
+    if not reasons:
+        raise ValueError("an optimizer-backed lane reports at least one stage")
+    if not scientific_predicate or any(
+        reason != "converged" and reason not in BUDGET_STOPPING_REASONS
+        for reason in reasons
+    ):
+        normalized_status: NormalizedTerminalStatus = "failed"
+    elif all(reason == "converged" for reason in reasons):
+        normalized_status = "converged"
+    else:
+        normalized_status = "budget_exhausted"
+    return TerminalStatus(
+        normalized_status=normalized_status,
+        success=normalized_status == "converged",
+        stage_stopping_reasons=reasons,
+    )

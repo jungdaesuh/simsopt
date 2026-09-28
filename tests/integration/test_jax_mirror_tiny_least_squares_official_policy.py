@@ -20,14 +20,6 @@ from types import ModuleType
 import numpy as np
 import pytest
 from examples.jax._lane_environment import build_execution_environment
-from examples.jax.official_tiny_least_squares import (
-    CONTROLLED_CURVE_DRAWS_BEFORE_START,
-    CONTROLLED_CURVE_INITIAL_FULL,
-    CONTROLLED_CURVE_REPLAY_SEED,
-    TRF_STATUS_CONVENTION,
-    official_default_max_nfev,
-    trf_outcome,
-)
 from examples.jax.parity.cases import (
     get_case,
     native_just_a_quadratic,
@@ -45,6 +37,14 @@ from simsopt.objectives.functions import Identity
 from simsopt.solve import serial as official_serial
 from simsopt_contracts.optimization_endpoint import (
     SCIPY_MINIMIZE_STATUS_CONVENTION_BY_METHOD,
+)
+from simsopt_jax.examples.official_tiny_least_squares import (
+    CONTROLLED_CURVE_DRAWS_BEFORE_START,
+    CONTROLLED_CURVE_INITIAL_FULL,
+    CONTROLLED_CURVE_REPLAY_SEED,
+    TRF_STATUS_CONVENTION,
+    official_default_max_nfev,
+    trf_outcome,
 )
 from simsopt_jax_adapters.isolated_kernel import pythonpath_with_loaded_kernel
 

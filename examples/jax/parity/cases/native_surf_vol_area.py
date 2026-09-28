@@ -7,16 +7,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import numpy as np
-from examples.jax.official_tiny_least_squares import (
-    DRIVER_SURFACE,
-    TrfOutcome,
-    combine_trf_outcomes,
-    guard_finite_endpoint,
-    solve_jax_residual,
-    surface_area_volume_residual,
-    trf_outcome,
-    value_and_jacobian,
-)
 from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.cases._official_least_squares import (
     declared_work_budget,
@@ -37,6 +27,16 @@ from simsopt import load
 from simsopt.geo import SurfaceRZFourier
 from simsopt.objectives import LeastSquaresProblem
 from simsopt_jax.examples import ExecutionScale
+from simsopt_jax.examples.official_tiny_least_squares import (
+    DRIVER_SURFACE,
+    TrfOutcome,
+    combine_trf_outcomes,
+    guard_finite_endpoint,
+    solve_jax_residual,
+    surface_area_volume_residual,
+    trf_outcome,
+    value_and_jacobian,
+)
 
 import jax
 

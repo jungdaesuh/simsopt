@@ -1,20 +1,14 @@
 """Normalized terminal status of an optimizer-backed parity lane.
 
 A lane's label states what its optimizer reported, never what its objective did.
-The per-emitter status tables and the stopping-reason vocabulary are owned by
-:mod:`simsopt_contracts.optimization_endpoint`; this module only folds one
-stopping reason per workflow stage, plus the case-owned scientific predicate,
-into the arbiter's existing vocabulary:
-
-* the predicate is false, or any stage stopped for a reason other than its own
-  convergence or a declared budget: ``failed``;
-* every stage reported convergence: ``converged``;
-* otherwise (every stage converged or stopped on its budget, at least one on
-  its budget): ``budget_exhausted``.
-
-``success`` is true only for ``converged``. A finite, decreasing objective is a
-scientific predicate; it never promotes a budget stop to convergence and a
-budget stop never demotes it to failure. Pure: no I/O, no JAX, no globals.
+The per-emitter status tables, the stopping-reason vocabulary and the fold of
+one stopping reason per workflow stage (plus the case-owned scientific
+predicate) into the arbiter's vocabulary are owned by
+:mod:`simsopt_contracts.optimization_endpoint`
+(:func:`~simsopt_contracts.optimization_endpoint.normalized_terminal_status`),
+which the executable examples import too. This module classifies each stage of
+a lane from its published values and applies that fold. Pure: no I/O, no JAX,
+no globals.
 """
 
 from __future__ import annotations
@@ -22,20 +16,16 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Final, Literal
+from typing import Final
 
 import numpy as np
 from numpy.typing import NDArray
 from simsopt_contracts.optimization_endpoint import (
     StatusConvention,
     StoppingReason,
+    TerminalStatus,
     certify_optimization_endpoint,
-)
-
-NormalizedTerminalStatus = Literal["converged", "budget_exhausted", "failed"]
-
-BUDGET_STOPPING_REASONS: Final[frozenset[StoppingReason]] = frozenset(
-    {"iteration-limit", "evaluation-limit"}
+    normalized_terminal_status,
 )
 
 # Solver driver id -> the emitter whose status vocabulary that driver publishes.
@@ -75,13 +65,6 @@ class StageTermination:
     final_gradient: NDArray[np.float64]
     final_parameters: NDArray[np.float64]
     final_objective: float
-
-
-@dataclass(frozen=True)
-class TerminalStatus:
-    normalized_status: NormalizedTerminalStatus
-    success: bool
-    stage_stopping_reasons: tuple[StoppingReason, ...]
 
 
 def status_convention_for_driver(driver: str) -> StatusConvention:
@@ -133,32 +116,6 @@ def stage_stopping_reason(stage: StageTermination) -> StoppingReason:
         observables_finite=bool(np.isfinite(stage.final_objective)),
         inner_success=True,
     ).stopping_reason
-
-
-def normalized_terminal_status(
-    *,
-    scientific_predicate: bool,
-    stage_stopping_reasons: Sequence[StoppingReason],
-) -> TerminalStatus:
-    """Fold per-stage stopping reasons and the scientific predicate into one label."""
-
-    reasons = tuple(stage_stopping_reasons)
-    if not reasons:
-        raise ValueError("an optimizer-backed lane reports at least one stage")
-    if not scientific_predicate or any(
-        reason != "converged" and reason not in BUDGET_STOPPING_REASONS
-        for reason in reasons
-    ):
-        normalized_status: NormalizedTerminalStatus = "failed"
-    elif all(reason == "converged" for reason in reasons):
-        normalized_status = "converged"
-    else:
-        normalized_status = "budget_exhausted"
-    return TerminalStatus(
-        normalized_status=normalized_status,
-        success=normalized_status == "converged",
-        stage_stopping_reasons=reasons,
-    )
 
 
 def lane_terminal_status(

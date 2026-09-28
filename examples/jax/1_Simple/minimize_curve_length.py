@@ -17,7 +17,12 @@ from tempfile import TemporaryDirectory
 from typing import Literal
 
 import numpy as np
-from examples.jax.official_tiny_least_squares import (
+from simsopt.geo import CurveRZFourier
+from simsopt_jax.examples import (
+    ExecutionScale,
+    example_runtime_metadata,
+)
+from simsopt_jax.examples.official_tiny_least_squares import (
     CONTROLLED_CURVE_INITIAL_FULL,
     DRIVER_CURVE,
     curve_length_residual,
@@ -25,11 +30,6 @@ from examples.jax.official_tiny_least_squares import (
     solve_jax_residual,
     trf_outcome,
     value_and_jacobian,
-)
-from simsopt.geo import CurveRZFourier
-from simsopt_jax.examples import (
-    ExecutionScale,
-    example_runtime_metadata,
 )
 
 EXAMPLE_ID = "native-minimize-curve-length"
