@@ -30,6 +30,7 @@ from simsopt_jax.core.tracing import (
 )
 from simsopt_jax_adapters.field import tracing as adapter
 from simsopt_jax_adapters.field.toroidal_field import ToroidalFieldJAX
+from simsopt_jax_adapters.isolated_kernel import repo_child_pythonpath
 
 
 class _NonFiniteField:
@@ -258,6 +259,11 @@ def test_two_device_criterion_chunk_sharding_matches_single_device(monkeypatch):
             environment.get("XLA_FLAGS", "")
             + " --xla_force_host_platform_device_count=2"
         ).strip()
+        # ``-S`` drops site-packages, so the child gets the sources, the loaded
+        # kernel and the dependency root explicitly.
+        environment["PYTHONPATH"] = repo_child_pythonpath(
+            Path(__file__).resolve().parents[2], environment.get("PYTHONPATH")
+        )
         completed = subprocess.run(
             (
                 sys.executable, "-S", "-m", "pytest", "-p", "no:cacheprovider", "-q",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import subprocess
 import sys
 from dataclasses import replace
@@ -497,6 +498,12 @@ def test_shared_example_runtime_imports_without_native_or_jax() -> None:
             "assert not {'simsopt', 'simsoptpp', 'jax', 'jaxlib'} & sys.modules.keys()",
         ),
         cwd=Path(__file__).resolve().parents[2],
+        # ``-S`` drops site-packages; the repository sources are the child's
+        # only import root, so the import cannot lean on any installed package.
+        env={
+            **os.environ,
+            "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src"),
+        },
         check=False,
         capture_output=True,
         text=True,

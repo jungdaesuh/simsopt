@@ -30,6 +30,7 @@ from examples.jax.parity.cases.native_permanent_magnet_pm4stell import (
 )
 from examples.jax.parity.input_bundle import read_input_bundle
 from examples.jax.parity.official_reference import load_official_reference
+from simsopt_jax_adapters.isolated_kernel import repo_child_pythonpath
 
 # venv site-packages/tests shadows the repo tests package, so the helpers are
 # imported as top-level modules from the tests/ directory.
@@ -300,7 +301,14 @@ def test_the_mirror_accepts_every_documented_max_steps() -> None:
     completed = subprocess.run(
         (sys.executable, "-S", str(MIRROR_SOURCE), "--smoke", "--max-steps", "1"),
         cwd=MIRROR_SOURCE.parents[3],
-        env=os.environ,
+        # ``-S`` drops site-packages: the sources, the loaded kernel and the
+        # dependency root are passed explicitly.
+        env={
+            **os.environ,
+            "PYTHONPATH": repo_child_pythonpath(
+                MIRROR_SOURCE.parents[3], os.environ.get("PYTHONPATH")
+            ),
+        },
         check=False,
         capture_output=True,
         text=True,
