@@ -8,12 +8,6 @@ from pathlib import Path
 
 import numpy as np
 from examples.jax.parity.arbiter import LaneObservation
-from examples.jax.parity.cases.coil_flux import create_input as create_coil_flux_input
-from examples.jax.parity.cases.coil_flux import execute as execute_coil_flux
-from examples.jax.parity.cases.coil_force import create_input as create_coil_force_input
-from examples.jax.parity.cases.coil_force import execute as execute_coil_force
-from examples.jax.parity.cases.curve_length import create_input as create_curve_input
-from examples.jax.parity.cases.curve_length import execute as execute_curve
 from examples.jax.parity.cases.native_boozer import (
     create_input as create_native_boozer_input,
 )
@@ -160,26 +154,6 @@ from examples.jax.parity.cases.native_wireframe_rcls_with_ports import (
 from examples.jax.parity.cases.native_wireframe_rcls_with_ports import (
     execute as execute_native_wireframe_rcls_with_ports,
 )
-from examples.jax.parity.cases.permanent_magnet import (
-    create_input as create_permanent_magnet_input,
-)
-from examples.jax.parity.cases.permanent_magnet import (
-    execute as execute_permanent_magnet,
-)
-from examples.jax.parity.cases.qfm_surface import create_input as create_qfm_input
-from examples.jax.parity.cases.qfm_surface import execute as execute_qfm
-from examples.jax.parity.cases.surface_geometry import (
-    create_input as create_surface_input,
-)
-from examples.jax.parity.cases.surface_geometry import execute as execute_surface
-from examples.jax.parity.cases.traceable_least_squares import (
-    create_input as create_traceable_least_squares_input,
-)
-from examples.jax.parity.cases.traceable_least_squares import (
-    execute as execute_traceable_least_squares,
-)
-from examples.jax.parity.cases.wireframe import create_input as create_wireframe_input
-from examples.jax.parity.cases.wireframe import execute as execute_wireframe
 from examples.jax.parity.contracts import AdmittedTerminalOutcome, QualityBand
 from examples.jax.parity.input_bundle import InputBundle
 from examples.jax.parity.measurement import MeasurementExecution
@@ -450,46 +424,6 @@ _CASES = {
         case_id="native-wireframe-rcls-with-ports",
         create_input=create_native_wireframe_rcls_with_ports_input,
         execute=execute_native_wireframe_rcls_with_ports,
-    ),
-    "traceable-least-squares": CaseDefinition(
-        case_id="traceable-least-squares",
-        create_input=create_traceable_least_squares_input,
-        execute=execute_traceable_least_squares,
-    ),
-    "curve-length-optimization": CaseDefinition(
-        case_id="curve-length-optimization",
-        create_input=create_curve_input,
-        execute=execute_curve,
-    ),
-    "surface-geometry-optimization": CaseDefinition(
-        case_id="surface-geometry-optimization",
-        create_input=create_surface_input,
-        execute=execute_surface,
-    ),
-    "coil-flux-optimization": CaseDefinition(
-        case_id="coil-flux-optimization",
-        create_input=create_coil_flux_input,
-        execute=execute_coil_flux,
-    ),
-    "permanent-magnet-optimization": CaseDefinition(
-        case_id="permanent-magnet-optimization",
-        create_input=create_permanent_magnet_input,
-        execute=execute_permanent_magnet,
-    ),
-    "wireframe-optimization": CaseDefinition(
-        case_id="wireframe-optimization",
-        create_input=create_wireframe_input,
-        execute=execute_wireframe,
-    ),
-    "coil-force-and-finite-build": CaseDefinition(
-        case_id="coil-force-and-finite-build",
-        create_input=create_coil_force_input,
-        execute=execute_coil_force,
-    ),
-    "qfm-surface-optimization": CaseDefinition(
-        case_id="qfm-surface-optimization",
-        create_input=create_qfm_input,
-        execute=execute_qfm,
     ),
 }
 

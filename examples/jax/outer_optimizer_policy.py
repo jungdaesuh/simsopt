@@ -25,7 +25,7 @@ class OuterOptimizerPolicyError(ValueError):
 
     A ``ValueError`` so the manifest readers that already treat validation
     failures as one class keep working, and its own type so a caller that
-    must react to exactly this rejection -- a legacy manifest that declares no
+    must react to exactly this rejection -- a manifest record that declares no
     policy for a ready host SciPy example -- never catches an unrelated one.
     """
 
@@ -168,7 +168,7 @@ def policy_owns_parity_case(
 def validate_ready_example_policy(
     policy: OuterOptimizerPolicy | None, *, example_id: str, example_path: str
 ) -> None:
-    """Guard execution of ready canonical or legacy records before child launch."""
+    """Guard execution of ready manifest records before child launch."""
     canonical = parse_outer_optimizer_policy(
         None if policy is None else policy.policy_id,
         example_id=example_id,

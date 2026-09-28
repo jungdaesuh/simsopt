@@ -137,7 +137,7 @@ def test_qfm_host_policy_is_bound_to_its_official_example_and_case() -> None:
         load_manifest_contract_pair_documents(manifest, parity, repo_root=REPO_ROOT)
 
 
-def test_parity_runner_rejects_legacy_missing_policy_before_inputs_or_children(
+def test_parity_runner_rejects_missing_policy_before_inputs_or_children(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pair = load_runtime_contract_pair(
@@ -145,17 +145,17 @@ def test_parity_runner_rejects_legacy_missing_policy_before_inputs_or_children(
         REPO_ROOT / "examples/jax/parity_manifest.json",
         repo_root=REPO_ROOT,
     )
-    legacy_pair = dataclasses.replace(
+    policyless_pair = dataclasses.replace(
         pair,
-        version_pair=(2, 1),
-        used_legacy_adapter=True,
         examples=tuple(
             dataclasses.replace(example, outer_optimizer_policy=None)
             for example in pair.examples
         ),
     )
     monkeypatch.setattr(
-        run_parity, "load_runtime_contract_pair", lambda *args, **kwargs: legacy_pair
+        run_parity,
+        "load_runtime_contract_pair",
+        lambda *args, **kwargs: policyless_pair,
     )
     case = Mock()
     case.create_input.side_effect = AssertionError("input creation must not begin")

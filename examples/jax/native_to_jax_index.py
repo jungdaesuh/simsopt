@@ -10,10 +10,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from examples.jax.manifest_contracts_v3 import (
-    JaxExamplesManifestV3,
-    load_manifest_contract_pair_documents,
-)
+from examples.jax.manifest_contracts_v3 import load_manifest_contract_pair_documents
 from examples.jax.official_source_catalog import (
     OFFICIAL_UPSTREAM_COMMIT,
     OFFICIAL_UPSTREAM_DEFAULT_BRANCH,
@@ -1059,10 +1056,6 @@ def render_native_to_jax_index(*, repo_root: Path = REPO_ROOT) -> str:
         _load_json(jax_examples_directory / PARITY_MANIFEST_PATH.name),
         repo_root=repo_root,
     )
-    if pair.version_pair != (3, 2) or not isinstance(
-        pair.examples, JaxExamplesManifestV3
-    ):
-        raise ValueError("native-to-JAX index requires manifest v3 and parity v2")
     authority_version, authority_runs = _load_authority_evidence_runs(
         jax_examples_directory / AUTHORITY_EVIDENCE_PATH.name
     )

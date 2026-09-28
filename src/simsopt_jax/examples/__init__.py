@@ -9,18 +9,6 @@ from .execution import (
     run_example,
     scalar_example_driver,
 )
-from .qfm_sequence import (
-    QfmDeviceState,
-    QfmSequenceDeviceResult,
-    QfmStageDeviceResult,
-    solve_qfm_sequence,
-)
-from .rz_curve_length import RZCurveLengthDeviceResult, solve_rz_curve_length
-from .rz_surface_area_volume import (
-    SurfaceAreaVolumeSequenceDeviceResult,
-    SurfaceAreaVolumeStageDeviceResult,
-    solve_rz_surface_area_volume_sequence,
-)
 from .scalar_stage import (
     STAGE_OPTIMIZER_OBSERVABLES,
     TWO_STAGE_OPTIMIZER_OBSERVABLES,
@@ -82,18 +70,12 @@ __all__ = (
     "GaussianPerturbationSampler",
     "MinimalStageTwoDeviceResult",
     "MinimalStageTwoState",
-    "QfmDeviceState",
-    "QfmSequenceDeviceResult",
-    "QfmStageDeviceResult",
-    "RZCurveLengthDeviceResult",
     "StochasticPerturbationBundle",
     "StochasticStageTwoConfiguration",
     "StandardStageTwoDeviceResult",
     "StandardStageTwoState",
     "StrainOptimizationDeviceResult",
     "StrainState",
-    "SurfaceAreaVolumeSequenceDeviceResult",
-    "SurfaceAreaVolumeStageDeviceResult",
     "WeightedQuadraticDeviceResult",
     "WireframeRCLSDeviceResult",
     "WireframeRCLSState",
@@ -104,9 +86,6 @@ __all__ = (
     "solve_minimal_stage_two",
     "solve_standard_stage_two",
     "solve_stochastic_stage_two",
-    "solve_qfm_sequence",
-    "solve_rz_curve_length",
-    "solve_rz_surface_area_volume_sequence",
     "solve_scalar_stage",
     "solve_strain_rotation",
     "solve_weighted_quadratic",

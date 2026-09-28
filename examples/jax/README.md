@@ -11,11 +11,6 @@ directly — immutable state, compiled computations, batching, and explicit
 host/device boundaries — while executing the scientific workflow of the one
 native source it names.
 
-A separate set of combined and compatibility programs also lives here. They are
-typed as `tutorial`, they own no native source, and they contribute zero
-one-to-one mirror coverage. The manifest validator enforces that: a tutorial
-record cannot own a catalog source.
-
 The generated
 [`NATIVE_TO_JAX_INDEX.md`](NATIVE_TO_JAX_INDEX.md) lists the native sources,
 their exact JAX mirrors or blockers, device scope, execution scale, and latest
@@ -66,9 +61,9 @@ Use `.[JAX_GPU]` in a supported CUDA environment.
 
 Runtime selection is process-wide and must happen before importing JAX-heavy
 modules, so use the isolated runner rather than executing several examples in
-one Python process. The ordinary runner includes every ready registered record,
-including tutorials; it is not the official mirror
-verification batch. Every ready record supports both devices and both intents:
+one Python process. The ordinary runner includes every ready registered record;
+it is not the official mirror verification batch. Every ready record supports
+both devices and both intents:
 
 ```console
 python examples/jax/run_examples.py --device cpu --scale bounded
@@ -260,9 +255,8 @@ defines coverage.
   official catalog, not whatever Python files happen to be in the local tiers.
 - `experimental_sources` — branch-only source rows, which contribute zero
   official upstream coverage. There are none.
-- `jax_examples` — 37 executable records, 35 `ready` and 2 `planned`.
-  Twenty-six own official sources, and the other 11 combined or compatibility
-  programs own no one-to-one source.
+- `jax_examples` — 26 executable records, 25 `ready` and 1 `planned` (the
+  hybrid VMEC single-stage mirror). Each owns one official source.
 
 An owned record must sit at the identical tier and filename as its source, must
 be typed `one_to_one`, and cannot be a tutorial. Each mirror is owned by at
@@ -312,13 +306,11 @@ Executable records use the typed `classification` vocabulary:
   publishes accepted state explicitly. It must name at least one host boundary.
 - `hybrid` — the workflow retains a named native or external computation. Its
   GPU device scope must be declared `jax_slice_only`.
-- `tutorial` — a combined or compatibility lesson. It owns no native source
-  and contributes zero one-to-one mirror coverage.
+- `tutorial` — a combined lesson. It owns no native source and contributes
+  zero one-to-one mirror coverage.
 
 `teaching_kind` is orthogonal: `one_to_one` for every owned mirror, and
-`combined` or `compatibility` for tutorials. A `compatibility` tutorial must
-name its successor mirror ID and carry a warning text that names both itself
-and that successor.
+`combined` for tutorials.
 
 Catalog rows use the typed `disposition` vocabulary: `eligible` (owns a
 `mirror` or `adapter`), `hybrid` (owns the hybrid executable), `blocked`, and
@@ -360,15 +352,15 @@ workflow](../../.github/workflows/jax_vmec_hybrid_authority.yml) lane proving
 immutable VMEC/MPI build identity, the recorded MPI world size, and matched
 CPU and GPU slice provenance on an approved runner.
 
-## Manifest schema deprecation interval
+## Manifest schema
 
-The active contract pair is example-schema-v3 plus parity-schema-v2. The
-legacy example-schema-v2 plus parity-schema-v1 pair is still readable through a
-legacy adapter for one documented deprecation interval. The pair is accepted
-atomically: mixed `v2/v2` and `v3/v1` combinations are rejected. Every parity
+The only accepted contract pair is example-schema-v3 plus parity-schema-v2,
+read atomically; any other version of either document is rejected. Every parity
 `summary.json` records `manifest_schema_version`,
 `parity_manifest_schema_version`, and `used_legacy_manifest_adapter`, so an
-audited bundle states which contract produced it.
+audited bundle states which contract produced it. No legacy manifest reader
+exists, so `used_legacy_manifest_adapter` is always `false`; the key stays so
+summary schema 2 keeps its shape, and the auditor rejects any other value.
 
 The active v3/v2 documents separate `experimental_sources` and
 `experimental_relationships` from official coverage. Those arrays may be omitted
@@ -377,16 +369,10 @@ when empty. Historical v3 documents that mixed local extensions into
 receipts retain their original files and must be audited at their recorded
 source revision.
 
-The old v2-to-v3 candidate generator and activation gate describe the earlier
-52-source migration. Their retained inventory is not the current official
-catalog. They are historical tooling, not commands for regenerating the active
-manifests. The current index is regenerated with
+[`one_to_one_inventory.json`](one_to_one_inventory.json) is a dated record of
+the earlier 52-source migration inventory, not the current official catalog.
+The current index is regenerated with
 `python -m examples.jax.native_to_jax_index --write`.
-
-Compatibility tutorials carry their own removal gate. Each declares a successor
-mirror ID, a warning naming both itself and that successor, and
-`removal_after: "one documented deprecation interval"`, which the validator
-requires verbatim.
 
 ## Author contract
 
@@ -414,5 +400,5 @@ Add the behavioral correctness test first and preserve its authentic
 RED → GREEN → REFACTOR commands in
 [`docs/jax_examples_tdd_receipts.md`](../../docs/jax_examples_tdd_receipts.md).
 Then mark the manifest record `ready`; the validator rejects a ready record
-without an executable script, CPU device, correctness owner, or public JAX
-import.
+whose script or listed correctness tests do not exist, and the example tests
+reject a ready record without both devices or a public JAX import.

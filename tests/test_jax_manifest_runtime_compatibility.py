@@ -1,10 +1,9 @@
-"""Runtime adaptation contract across legacy and canonical manifest pairs."""
+"""Runtime adaptation contract for the canonical example/parity manifest pair."""
 
 from __future__ import annotations
 
 import copy
 import json
-from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -12,10 +11,7 @@ from examples.jax.manifest_contracts_v3 import (
     ContractVersionError,
     load_manifest_contract_pair_documents,
 )
-from examples.jax.manifest_runtime import (
-    emit_compatibility_warning,
-    load_runtime_contract_pair,
-)
+from examples.jax.manifest_runtime import load_runtime_contract_pair
 from examples.jax.official_source_catalog import OFFICIAL_NATIVE_EXAMPLE_SOURCES
 from examples.jax.parity._manifest import ParityManifest, ParityRelationship
 from examples.jax.parity.cases import implemented_case_ids
@@ -23,9 +19,6 @@ from examples.jax.parity.cases import implemented_case_ids
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ACTIVE_EXAMPLES = REPO_ROOT / "examples" / "jax" / "manifest.json"
 ACTIVE_PARITY = REPO_ROOT / "examples" / "jax" / "parity_manifest.json"
-LEGACY_PARITY = (
-    REPO_ROOT / "tests" / "fixtures" / "jax_manifests" / "parity_manifest_v1.json"
-)
 OFFICIAL_EXECUTABLE_BATCH_SIZE = 25
 QFM_CASE_ID = "native-qfm"
 
@@ -71,7 +64,6 @@ def _assert_native_case_coverage(parity: ParityManifest) -> None:
         f"{OFFICIAL_EXECUTABLE_BATCH_SIZE}, got {len(official_case_ids)}"
     )
     combined_cases = set(implemented_case_ids()) - implemented_native_cases
-    assert combined_cases
     assert not combined_cases & registered
 
 
@@ -104,7 +96,6 @@ def test_active_pair_is_the_canonical_exact_mirror_contract() -> None:
         example for example in jax_examples if example["teaching_kind"] == "one_to_one"
     ]
     assert runtime.version_pair == (3, 2)
-    assert runtime.used_legacy_adapter is False
     assert {str(row["source"]) for row in _records(catalog, "source_catalog")} == set(
         OFFICIAL_NATIVE_EXAMPLE_SOURCES
     )
@@ -151,42 +142,15 @@ def test_in_memory_qfm_omission_cannot_evade_native_case_coverage() -> None:
         _assert_native_case_coverage(pair.parity)
 
 
-def test_runtime_emits_bound_warning_only_for_compatibility_aliases() -> None:
-    runtime = load_runtime_contract_pair(
-        ACTIVE_EXAMPLES,
-        ACTIVE_PARITY,
-        repo_root=REPO_ROOT,
-    )
-    aliases = tuple(
-        example for example in runtime.examples if example.compatibility is not None
-    )
-    catalog_aliases = [
-        example
-        for example in _records(_document(ACTIVE_EXAMPLES), "jax_examples")
-        if example["teaching_kind"] == "compatibility"
-    ]
-    assert len(aliases) == len(catalog_aliases)
-    for alias in aliases:
-        metadata = alias.compatibility
-        assert metadata is not None
-        stream = StringIO()
-        emitted = emit_compatibility_warning(alias, stream=stream)
-        assert emitted is True
-        assert stream.getvalue() == metadata.warning + "\n"
-        assert metadata.removal_after == "one documented deprecation interval"
+def test_runtime_loader_rejects_a_retired_parity_schema(tmp_path: Path) -> None:
+    parity = _document(ACTIVE_PARITY)
+    parity["schema_version"] = 1
+    retired_parity = tmp_path / "parity_manifest.json"
+    retired_parity.write_text(json.dumps(parity), encoding="utf-8")
 
-    combined = next(
-        example for example in runtime.examples if example.teaching_kind == "combined"
-    )
-    stream = StringIO()
-    assert emit_compatibility_warning(combined, stream=stream) is False
-    assert stream.getvalue() == ""
-
-
-def test_runtime_loader_rejects_mixed_contract_files() -> None:
-    with pytest.raises(ContractVersionError, match="mixed manifest versions"):
+    with pytest.raises(ContractVersionError, match="unsupported parity schema"):
         load_runtime_contract_pair(
             ACTIVE_EXAMPLES,
-            LEGACY_PARITY,
+            retired_parity,
             repo_root=REPO_ROOT,
         )

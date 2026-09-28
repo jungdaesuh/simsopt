@@ -3,7 +3,6 @@ from __future__ import annotations
 import ast
 import dataclasses
 import io
-import json
 import os
 import subprocess
 import sys
@@ -14,10 +13,6 @@ import examples.jax.run_examples as example_runner
 from examples.jax._lane_environment import (
     build_execution_environment,
     build_lane_environment,
-)
-from examples.jax._manifest import (
-    JaxExampleRecord,
-    JaxExamplesManifest,
 )
 from examples.jax.manifest_runtime import (
     RuntimeContractPair,
@@ -40,25 +35,25 @@ def _record(
     *,
     lanes: tuple[str, ...] = ("cpu-smoke",),
     smoke_args: tuple[str, ...] = (),
-) -> JaxExampleRecord:
-    return JaxExampleRecord(
+) -> RuntimeExample:
+    return RuntimeExample(
         id="test-example",
         path=path,
         status="ready",
-        tier="1_Simple",
-        inspired_by=("1_Simple/just_a_quadratic.py",),
-        execution_kind="pure",
-        jax_surfaces=("simsopt_jax.solve.least_squares_serial_solve_jax",),
-        host_boundaries=(),
-        extras=("JAX",),
-        smoke_args=smoke_args,
-        correctness_tests=("tests/integration/test_jax_examples.py",),
         lanes=lanes,
+        smoke_args=smoke_args,
+        classification="mirror",
+        teaching_kind="one_to_one",
+        source="1_Simple/just_a_quadratic.py",
     )
 
 
-def _manifest(record: JaxExampleRecord) -> JaxExamplesManifest:
-    return JaxExamplesManifest(source_catalog=(), jax_examples=(record,))
+def _manifest(record: RuntimeExample) -> RuntimeContractPair:
+    return RuntimeContractPair(
+        version_pair=(3, 2),
+        examples=(record,),
+        parity=ParityManifest(schema_version=2, relationships=()),
+    )
 
 
 def _repository_examples(repo_root: Path) -> tuple[RuntimeExample, ...]:
@@ -351,18 +346,18 @@ def test_runner_rejects_child_result_for_different_scale(tmp_path: Path) -> None
     assert "scale must be bounded, got native_default" in stderr.getvalue()
 
 
-def test_runner_fails_the_example_whose_legacy_record_lacks_its_host_policy(
+def test_runner_fails_the_example_whose_record_lacks_its_host_policy(
     tmp_path: Path,
 ) -> None:
-    """A legacy record of an approved host-SciPy example fails through the runner."""
-    legacy_record = dataclasses.replace(
+    """A record of an approved host-SciPy example without its policy fails."""
+    record = dataclasses.replace(
         _record("2_Intermediate/stage_two_optimization.py"),
         id="native-stage-two-optimization",
     )
     stderr = io.StringIO()
 
     exit_code = run_profile(
-        _manifest(legacy_record),
+        _manifest(record),
         "cpu",
         "fast",
         repo_root=tmp_path,
@@ -377,7 +372,7 @@ def test_runner_fails_the_example_whose_legacy_record_lacks_its_host_policy(
     with pytest.raises(
         OuterOptimizerPolicyError, match="requires its outer optimizer policy"
     ):
-        build_child_command(legacy_record, repo_root=tmp_path)
+        build_child_command(record, repo_root=tmp_path)
 
 
 def test_runner_never_relabels_an_unrelated_value_error_as_a_missing_command(
@@ -433,20 +428,6 @@ def test_runner_parser_rejects_mixed_legacy_and_new_selectors() -> None:
         _parse_arguments(("--lane", "cpu-smoke", "--scale", "native_default"))
 
 
-def test_runner_manifest_observability_distinguishes_v1_adapter() -> None:
-    manifest = JaxExamplesManifest(
-        source_catalog=(),
-        jax_examples=(),
-        schema_version=1,
-        used_legacy_manifest_adapter=True,
-    )
-
-    assert example_runner.manifest_observability_payload(manifest) == {
-        "manifest_schema_version": 1,
-        "used_legacy_manifest_adapter": True,
-    }
-
-
 def test_runner_emits_manifest_observability_before_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -454,7 +435,6 @@ def test_runner_emits_manifest_observability_before_execution(
 ) -> None:
     manifest = RuntimeContractPair(
         version_pair=(3, 2),
-        used_legacy_adapter=False,
         examples=(),
         parity=ParityManifest(schema_version=2, relationships=()),
     )
@@ -586,292 +566,3 @@ def test_gpu_strict_rejects_malformed_result(tmp_path: Path) -> None:
 
     assert exit_code == 1
     assert "final stdout line is not valid JSON" in stderr.getvalue()
-
-
-def test_traceable_least_squares_example_matches_analytic_optimum() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    examples = _repository_examples(repo_root)
-    example = next(
-        record for record in examples if record.id == "traceable-least-squares"
-    )
-
-    assert example.status == "ready"
-    existing_logs = set(repo_root.glob("simsopt_*.dat"))
-    completed = subprocess.run(
-        build_child_command(example, repo_root=repo_root),
-        cwd=repo_root,
-        env=build_lane_environment("cpu-smoke", os.environ, repo_root=repo_root),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    result = json.loads(completed.stdout.splitlines()[-1])
-    assert result["example_id"] == "traceable-least-squares"
-    assert result["backend_mode"] == "jax_cpu_parity"
-    assert result["platform"] == "cpu"
-    assert result["precision"] == "fp64"
-    assert result["status"] == "ok"
-    assert result["observables"]["solution"] == pytest.approx([1.0, 2.0, 3.0])
-    assert result["observables"]["objective"] <= 1.0e-16
-    assert result["observables"]["residual_norm"] <= 1.0e-12
-    assert result["observables"]["gradient_inf_norm"] <= 1.0e-12
-    assert result["observables"]["solver_driver"] == "simsopt_lm_gmres"
-    assert result["observables"]["solver_success"] is True
-    assert result["observables"]["solver_status"] in (0, 1, 2)
-    assert 0 < result["observables"]["iterations"] <= 32
-    assert result["observables"]["function_evaluations"] > 0
-    assert result["observables"]["jacobian_evaluations"] > 0
-    assert set(repo_root.glob("simsopt_*.dat")) == existing_logs
-
-
-def test_curve_length_example_matches_circle_oracle_and_directional_fd() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    examples = _repository_examples(repo_root)
-    example = next(
-        record for record in examples if record.id == "curve-length-optimization"
-    )
-
-    assert example.status == "ready"
-    completed = subprocess.run(
-        build_child_command(example, repo_root=repo_root),
-        cwd=repo_root,
-        env=build_lane_environment("cpu-smoke", os.environ, repo_root=repo_root),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    result = json.loads(completed.stdout.splitlines()[-1])
-    assert result["example_id"] == "curve-length-optimization"
-    assert result["status"] == "ok"
-    assert result["observables"]["final_length"] == pytest.approx(
-        result["observables"]["circle_oracle"], rel=1.0e-10, abs=1.0e-10
-    )
-    assert result["observables"]["gradient_fd_error"] <= 1.0e-6
-
-
-def test_surface_geometry_example_matches_axisymmetric_torus_oracle() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    examples = _repository_examples(repo_root)
-    example = next(
-        record for record in examples if record.id == "surface-geometry-optimization"
-    )
-
-    assert example.status == "ready"
-    completed = subprocess.run(
-        build_child_command(example, repo_root=repo_root),
-        cwd=repo_root,
-        env=build_lane_environment("cpu-smoke", os.environ, repo_root=repo_root),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    result = json.loads(completed.stdout.splitlines()[-1])
-    observables = result["observables"]
-    assert result["status"] == "ok"
-    assert observables["area"] == pytest.approx(
-        observables["area_oracle"], rel=1.0e-9, abs=1.0e-10
-    )
-    assert observables["volume"] == pytest.approx(
-        observables["volume_oracle"], rel=1.0e-9, abs=1.0e-10
-    )
-    assert observables["residual_norm"] <= 1.0e-9
-
-
-def test_permanent_magnet_example_matches_greedy_coordinate_oracle() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    examples = _repository_examples(repo_root)
-    example = next(
-        record for record in examples if record.id == "permanent-magnet-optimization"
-    )
-
-    assert example.status == "ready"
-    completed = subprocess.run(
-        build_child_command(example, repo_root=repo_root),
-        cwd=repo_root,
-        env=build_lane_environment("cpu-smoke", os.environ, repo_root=repo_root),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    result = json.loads(completed.stdout.splitlines()[-1])
-    observables = result["observables"]
-    assert result["status"] == "ok"
-    assert observables["moments"] == [[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]]
-    assert observables["residual_norm"] == pytest.approx(5.0**0.5 / 5.0)
-    assert observables["selected_dipoles"] == [0, 1]
-
-
-def test_fieldline_example_matches_pure_toroidal_orbit_oracle() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    examples = _repository_examples(repo_root)
-    example = next(
-        record for record in examples if record.id == "fieldline-and-particle-tracing"
-    )
-
-    assert example.status == "ready"
-    completed = subprocess.run(
-        build_child_command(example, repo_root=repo_root),
-        cwd=repo_root,
-        env=build_lane_environment("cpu-smoke", os.environ, repo_root=repo_root),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    result = json.loads(completed.stdout.splitlines()[-1])
-    observables = result["observables"]
-    assert result["status"] == "ok"
-    assert observables["integrator_status"] == 0
-    assert observables["event_count"] == 0
-    assert observables["final_state"] == pytest.approx(
-        observables["analytic_final_state"], rel=1.0e-9, abs=1.0e-10
-    )
-
-
-def test_coil_flux_example_has_independent_gradient_oracle_and_reduces_flux() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    examples = _repository_examples(repo_root)
-    example = next(
-        record for record in examples if record.id == "coil-flux-optimization"
-    )
-
-    assert example.status == "ready"
-    assert example.classification == "tutorial"
-    completed = subprocess.run(
-        build_child_command(example, repo_root=repo_root),
-        cwd=repo_root,
-        env=build_lane_environment("cpu-smoke", os.environ, repo_root=repo_root),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    result = json.loads(completed.stdout.splitlines()[-1])
-    observables = result["observables"]
-    assert result["status"] == "ok"
-    assert observables["gradient_fd_error"] <= 1.0e-8
-    assert observables["final_flux"] <= 1.0e-6 * observables["initial_flux"]
-    assert observables["coil_length"] == pytest.approx(
-        observables["coil_length_oracle"], rel=1.0e-12, abs=1.0e-12
-    )
-
-
-def test_qfm_example_reduces_penalty_and_publishes_final_surface() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    examples = _repository_examples(repo_root)
-    example = next(
-        record for record in examples if record.id == "qfm-surface-optimization"
-    )
-
-    assert example.status == "ready"
-    completed = subprocess.run(
-        build_child_command(example, repo_root=repo_root),
-        cwd=repo_root,
-        env=build_lane_environment("cpu-smoke", os.environ, repo_root=repo_root),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    result = json.loads(completed.stdout.splitlines()[-1])
-    observables = result["observables"]
-    assert result["status"] == "ok"
-    assert observables["solver_success"] is True
-    assert observables["final_penalty"] < observables["initial_penalty"]
-    assert observables["surface_update_norm"] > 0.0
-    assert observables["gradient_norm"] < observables["initial_gradient_norm"]
-    assert observables["gradient_norm"] <= 1.0e-8
-    assert 0 < observables["iterations"] <= 75
-
-
-def test_boozer_example_reports_solver_certificate_and_final_surface() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    examples = _repository_examples(repo_root)
-    example = next(
-        record for record in examples if record.id == "boozer-surface-optimization"
-    )
-
-    assert example.status == "ready"
-    completed = subprocess.run(
-        build_child_command(example, repo_root=repo_root),
-        cwd=repo_root,
-        env=build_lane_environment("cpu-smoke", os.environ, repo_root=repo_root),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    result = json.loads(completed.stdout.splitlines()[-1])
-    observables = result["observables"]
-    assert result["status"] == "ok"
-    assert observables["solver_success"] is True
-    assert observables["surface_update_norm"] > 0.0
-    assert observables["residual_norm"] < 1.0
-    assert observables["final_gradient_inf_norm"] <= 1.0e-8
-
-
-def test_wireframe_example_matches_constrained_oracle_and_publishes_state() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    examples = _repository_examples(repo_root)
-    example = next(
-        record for record in examples if record.id == "wireframe-optimization"
-    )
-
-    assert example.status == "ready"
-    completed = subprocess.run(
-        build_child_command(example, repo_root=repo_root),
-        cwd=repo_root,
-        env=build_lane_environment("cpu-smoke", os.environ, repo_root=repo_root),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    result = json.loads(completed.stdout.splitlines()[-1])
-    observables = result["observables"]
-    assert result["status"] == "ok"
-    assert observables["solution_oracle_error"] <= 1.0e-10
-    assert observables["constraint_residual_norm"] <= 1.0e-10
-    assert observables["published_current_error"] == 0.0
-    assert observables["gsco_nonfinal_steps"] == 1
-    assert observables["gsco_enclosed_segments"] == 4
-
-
-def test_force_finite_build_example_matches_force_and_frame_oracles() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    examples = _repository_examples(repo_root)
-    example = next(
-        record for record in examples if record.id == "coil-force-and-finite-build"
-    )
-
-    assert example.status == "ready"
-    completed = subprocess.run(
-        build_child_command(example, repo_root=repo_root),
-        cwd=repo_root,
-        env=build_lane_environment("cpu-smoke", os.environ, repo_root=repo_root),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    result = json.loads(completed.stdout.splitlines()[-1])
-    observables = result["observables"]
-    assert result["status"] == "ok"
-    assert observables["force_objective_oracle_error"] <= 1.0e-12
-    assert observables["gradient_fd_error"] <= 1.0e-6
-    assert observables["frame_orthonormality_error"] <= 1.0e-12
-    assert observables["planar_torsion_max"] <= 1.0e-12

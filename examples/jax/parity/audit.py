@@ -132,12 +132,8 @@ def audit_published_run(
         summary.get("parity_manifest_schema_version") != contract_pair.version_pair[1]
     ):
         raise ValueError("aggregate parity manifest schema version mismatch")
-    expected_legacy_adapter = (
-        contract_pair.used_legacy_adapter
-        if summary_schema == 2
-        else contract_pair.version_pair[0] == 1
-    )
-    if summary.get("used_legacy_manifest_adapter") is not expected_legacy_adapter:
+    # No legacy manifest reader exists, so no auditable run can have used one.
+    if summary.get("used_legacy_manifest_adapter") is not False:
         raise ValueError("aggregate legacy manifest adapter mismatch")
     scale_value = summary.get(
         "scale",

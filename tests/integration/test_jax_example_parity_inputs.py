@@ -1,28 +1,11 @@
 from __future__ import annotations
 
-import dataclasses
 from pathlib import Path
 
 import numpy as np
-from examples.jax.parity.cases.surface_geometry import (
-    _build_surface,
-)
-from examples.jax.parity.cases.surface_geometry import (
-    _effective_fingerprint as surface_effective_fingerprint,
-)
-from examples.jax.parity.cases.surface_geometry import (
-    create_input as create_surface_input,
-)
-from examples.jax.parity.cases.traceable_least_squares import (
-    _effective_fingerprint as least_squares_effective_fingerprint,
-)
-from examples.jax.parity.cases.traceable_least_squares import (
-    create_input as create_least_squares_input,
-)
 from examples.jax.parity.input_bundle import (
     create_input_bundle,
     load_input_bundle,
-    read_input_bundle,
 )
 
 
@@ -86,68 +69,3 @@ def test_stochastic_samples_are_generated_once_then_loaded(tmp_path: Path) -> No
 
     np.testing.assert_array_equal(first["samples"], samples)
     np.testing.assert_array_equal(second["samples"], samples)
-
-
-def test_real_case_construction_receipts_change_for_every_input_class(
-    tmp_path: Path,
-) -> None:
-    least_squares_root = tmp_path / "least-squares"
-    create_least_squares_input(least_squares_root, "bounded")
-    bundle, arrays = read_input_bundle(least_squares_root)
-    baseline = least_squares_effective_fingerprint(bundle, arrays)
-
-    for field, mutated_bundle, mutated_arrays in (
-        (
-            "parameter",
-            bundle,
-            {**arrays, "initial_parameters": arrays["initial_parameters"] + 1.0},
-        ),
-        ("weight", bundle, {**arrays, "weights": arrays["weights"] + 1.0}),
-        (
-            "dtype",
-            bundle,
-            {**arrays, "targets": arrays["targets"].astype(np.float32)},
-        ),
-        ("seed", dataclasses.replace(bundle, random_seed=1), arrays),
-        (
-            "stopping option",
-            dataclasses.replace(
-                bundle,
-                configuration={**bundle.configuration, "max_steps": 21},
-            ),
-            arrays,
-        ),
-    ):
-        changed = least_squares_effective_fingerprint(mutated_bundle, mutated_arrays)
-        assert changed != baseline, field
-
-    surface_root = tmp_path / "surface"
-    create_surface_input(surface_root, "bounded")
-    surface_bundle, surface_arrays = read_input_bundle(surface_root)
-    surface = _build_surface(surface_bundle, surface_arrays)
-    surface_baseline = surface_effective_fingerprint(
-        surface_bundle, surface_arrays, surface
-    )
-    changed_quadrature_arrays = {
-        **surface_arrays,
-        "quadrature": surface_arrays["quadrature"] + 1.0e-3,
-    }
-    changed_quadrature_surface = _build_surface(
-        surface_bundle, changed_quadrature_arrays
-    )
-    assert (
-        surface_effective_fingerprint(
-            surface_bundle, changed_quadrature_arrays, changed_quadrature_surface
-        )
-        != surface_baseline
-    )
-    changed_constraint_arrays = {
-        **surface_arrays,
-        "targets": surface_arrays["targets"] + 1.0e-3,
-    }
-    assert (
-        surface_effective_fingerprint(
-            surface_bundle, changed_constraint_arrays, surface
-        )
-        != surface_baseline
-    )

@@ -5,48 +5,45 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
-from examples.jax._manifest import parse_manifest_document
+from examples.jax.manifest_contracts_v3 import (
+    ManifestContractPair,
+    ManifestV3ValidationError,
+    load_manifest_contract_pair_documents,
+)
 from examples.jax.parity._manifest import (
     ParityManifestValidationError,
-    load_parity_manifest,
-    parse_parity_relationships_document,
+    ParityRelationship,
+    parse_v2_parity_relationship_groups_document,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-EXAMPLES_MANIFEST_PATH = (
-    REPO_ROOT / "tests" / "fixtures" / "jax_manifests" / "manifest_v2.json"
-)
-PARITY_MANIFEST_PATH = (
-    REPO_ROOT / "tests" / "fixtures" / "jax_manifests" / "parity_manifest_v1.json"
-)
+EXAMPLES_MANIFEST_PATH = REPO_ROOT / "examples" / "jax" / "manifest.json"
+PARITY_MANIFEST_PATH = REPO_ROOT / "examples" / "jax" / "parity_manifest.json"
+
+
+def _json_document(path: Path) -> dict[str, object]:
+    document = json.loads(path.read_text(encoding="utf-8"))
+    assert isinstance(document, dict)
+    return document
 
 
 def _document() -> dict[str, object]:
-    document = json.loads(PARITY_MANIFEST_PATH.read_text(encoding="utf-8"))
-    assert isinstance(document, dict)
-    return document
+    return _json_document(PARITY_MANIFEST_PATH)
 
 
-def _active_document() -> dict[str, object]:
-    document = json.loads(
-        (REPO_ROOT / "examples/jax/parity_manifest.json").read_text(encoding="utf-8")
-    )
-    assert isinstance(document, dict)
-    return document
-
-
-def _examples_manifest():
-    return parse_manifest_document(
-        json.loads(EXAMPLES_MANIFEST_PATH.read_text(encoding="utf-8")),
+def _load_pair(parity_document: dict[str, object]) -> ManifestContractPair:
+    return load_manifest_contract_pair_documents(
+        _json_document(EXAMPLES_MANIFEST_PATH),
+        parity_document,
         repo_root=REPO_ROOT,
-        allow_historical_catalog=True,
     )
 
 
-def _write_document(tmp_path: Path, document: dict[str, object]) -> Path:
-    path = tmp_path / "parity_manifest.json"
-    path.write_text(json.dumps(document), encoding="utf-8")
-    return path
+def _parse(document: dict[str, object]) -> tuple[ParityRelationship, ...]:
+    official, experimental = parse_v2_parity_relationship_groups_document(
+        document, repo_root=REPO_ROOT
+    )
+    return official + experimental
 
 
 def _relationships(document: dict[str, object]) -> list[dict[str, object]]:
@@ -56,27 +53,21 @@ def _relationships(document: dict[str, object]) -> list[dict[str, object]]:
     return relationships
 
 
-def test_parity_manifest_covers_every_ready_inspiration_exactly_once() -> None:
-    examples_manifest = _examples_manifest()
-    parity_manifest = load_parity_manifest(
-        PARITY_MANIFEST_PATH,
-        examples_manifest=examples_manifest,
-        repo_root=REPO_ROOT,
-    )
+def test_parity_manifest_covers_every_owned_mirror_exactly_once() -> None:
+    pair = _load_pair(_document())
 
     expected = {
-        (example.id, native_source)
-        for example in examples_manifest.jax_examples
-        if example.status == "ready"
-        for native_source in example.inspired_by
+        (source.mirror_example_id, source.source)
+        for source in pair.examples.all_sources
+        if source.mirror_example_id is not None
     }
     actual = {
         (relationship.jax_example_id, relationship.native_source)
-        for relationship in parity_manifest.relationships
+        for relationship in pair.parity.all_relationships
     }
 
     assert actual == expected
-    assert len(actual) == len(parity_manifest.relationships)
+    assert len(actual) == len(pair.parity.all_relationships)
 
 
 def test_parity_manifest_declares_scientific_workflow_stage_coverage() -> None:
@@ -89,30 +80,8 @@ def test_parity_manifest_declares_scientific_workflow_stage_coverage() -> None:
         assert "excluded_teaching_stages" in relationship
 
 
-def test_coil_flux_relationship_routes_each_scientific_observable() -> None:
-    examples_manifest = _examples_manifest()
-    parity_manifest = load_parity_manifest(
-        PARITY_MANIFEST_PATH,
-        examples_manifest=examples_manifest,
-        repo_root=REPO_ROOT,
-    )
-    relationship = next(
-        item
-        for item in parity_manifest.relationships
-        if item.case_id == "coil-flux-optimization"
-    )
-
-    assert {
-        (route.phase, route.observable) for route in relationship.comparison_routes
-    } == {
-        (phase, observable)
-        for phase in ("initial", "final")
-        for observable in ("parameters", "flux", "flux_gradient", "coil_length")
-    }
-
-
 def test_additional_scale_resolves_full_routes_without_changing_base() -> None:
-    document = _active_document()
+    document = _document()
     relationship = next(
         item
         for item in _relationships(document)
@@ -132,9 +101,7 @@ def test_additional_scale_resolves_full_routes_without_changing_base() -> None:
         }
     }
 
-    parsed = parse_parity_relationships_document(
-        document, repo_root=REPO_ROOT, schema_version=2
-    )
+    parsed = _parse(document)
     selected = next(
         item for item in parsed if item.case_id == "native-just-a-quadratic"
     )
@@ -153,7 +120,7 @@ def test_additional_scale_resolves_full_routes_without_changing_base() -> None:
 
 
 def test_native_default_only_relationship_keeps_single_scale_contract() -> None:
-    document = _active_document()
+    document = _document()
     relationships = document["relationships"]
     assert isinstance(relationships, list)
     single_scale = next(
@@ -162,9 +129,7 @@ def test_native_default_only_relationship_keeps_single_scale_contract() -> None:
     single_scale["scale_tier"] = "native_default"
     single_scale["cost_tier"] = "scheduled"
     del single_scale["scale_contracts"]
-    parsed = parse_parity_relationships_document(
-        document, repo_root=REPO_ROOT, schema_version=2
-    )
+    parsed = _parse(document)
     relationship = next(item for item in parsed if item.case_id == "native-boozerqa")
     assert relationship.supported_scales == ("native_default",)
     assert relationship.resolve_scale("native_default") is relationship
@@ -201,7 +166,7 @@ def test_native_default_only_relationship_keeps_single_scale_contract() -> None:
 def test_additional_scale_rejects_undeclared_policy_and_invalid_routes(
     contract: dict[str, object], message: str
 ) -> None:
-    document = _active_document()
+    document = _document()
     relationship = next(
         item
         for item in _relationships(document)
@@ -209,9 +174,7 @@ def test_additional_scale_rejects_undeclared_policy_and_invalid_routes(
     )
     relationship["scale_contracts"] = contract
     with pytest.raises(ParityManifestValidationError, match=message):
-        parse_parity_relationships_document(
-            document, repo_root=REPO_ROOT, schema_version=2
-        )
+        _parse(document)
 
 
 @pytest.mark.parametrize(
@@ -227,7 +190,7 @@ def test_parity_manifest_rejects_unknown_cost_tier_at_each_scale(
     location: str,
     cost_tier: str,
 ) -> None:
-    document = _active_document()
+    document = _document()
     relationship = next(
         item
         for item in _relationships(document)
@@ -247,30 +210,14 @@ def test_parity_manifest_rejects_unknown_cost_tier_at_each_scale(
         additional["cost_tier"] = cost_tier
 
     with pytest.raises(ParityManifestValidationError, match="invalid cost tier"):
-        parse_parity_relationships_document(
-            document, repo_root=REPO_ROOT, schema_version=2
-        )
-
-
-def test_legacy_manifest_rejects_scale_contract_extension() -> None:
-    document = _document()
-    relationship = next(
-        item
-        for item in _relationships(document)
-        if item["classification"] != "unsupported"
-    )
-    relationship["scale_contracts"] = {"native_default": {"comparison_routes": []}}
-    with pytest.raises(ParityManifestValidationError, match="unexpected"):
-        parse_parity_relationships_document(
-            document, repo_root=REPO_ROOT, schema_version=1
-        )
+        _parse(document)
 
 
 @pytest.mark.parametrize("mutation", ("missing_pair", "duplicate_pair"))
 def test_additional_scale_validates_its_own_direct_route_matrix(
     mutation: str,
 ) -> None:
-    document = _active_document()
+    document = _document()
     relationship = next(
         item
         for item in _relationships(document)
@@ -289,13 +236,11 @@ def test_additional_scale_validates_its_own_direct_route_matrix(
         ParityManifestValidationError,
         match="complete direct lane-pair matrix|duplicate comparison route",
     ):
-        parse_parity_relationships_document(
-            document, repo_root=REPO_ROOT, schema_version=2
-        )
+        _parse(document)
 
 
 def test_unsupported_relationship_cannot_gain_executable_scale() -> None:
-    document = _active_document()
+    document = _document()
     relationship = next(
         item
         for item in _relationships(document)
@@ -303,9 +248,7 @@ def test_unsupported_relationship_cannot_gain_executable_scale() -> None:
     )
     relationship["scale_contracts"] = {"bounded": {"comparison_routes": []}}
     with pytest.raises(ParityManifestValidationError, match="executable base"):
-        parse_parity_relationships_document(
-            document, repo_root=REPO_ROOT, schema_version=2
-        )
+        _parse(document)
 
 
 @pytest.mark.parametrize(
@@ -325,10 +268,7 @@ def test_unsupported_relationship_cannot_gain_executable_scale() -> None:
         "volume",
     ),
 )
-def test_parity_manifest_accepts_named_scientific_phases(
-    tmp_path: Path,
-    phase: str,
-) -> None:
+def test_parity_manifest_accepts_named_scientific_phases(phase: str) -> None:
     document = deepcopy(_document())
     relationship = next(
         item
@@ -339,17 +279,16 @@ def test_parity_manifest_accepts_named_scientific_phases(
     assert isinstance(routes, list)
     first_route = routes[0]
     assert isinstance(first_route, dict)
-    observable = first_route["observable"]
+    renamed_key = (first_route["phase"], first_route["observable"])
+    renamed = 0
     for route in routes:
         assert isinstance(route, dict)
-        if route["phase"] == "initial" and route["observable"] == observable:
+        if (route["phase"], route["observable"]) == renamed_key:
             route["phase"] = phase
+            renamed += 1
+    assert renamed == 3, "the renamed key must keep its complete lane-pair matrix"
 
-    load_parity_manifest(
-        _write_document(tmp_path, document),
-        examples_manifest=_examples_manifest(),
-        repo_root=REPO_ROOT,
-    )
+    _load_pair(document)
 
 
 def test_parity_workflows_reach_cpu_and_strict_gpu_without_case_duplication() -> None:
@@ -370,7 +309,7 @@ def test_parity_workflows_reach_cpu_and_strict_gpu_without_case_duplication() ->
     for job in (public_integration, gpu_strict):
         assert "examples/jax/run_parity.py" in job
         assert "--case all-applicable" in job
-        assert "traceable-least-squares" not in job
+        assert job.count("--case ") == job.count("--case all-applicable")
         assert "actions/upload-artifact@v4" in job
         assert "retention-days:" in job
     assert "--lanes native-cpu,jax-cpu" in public_integration
@@ -388,34 +327,86 @@ def test_parity_workflows_reach_cpu_and_strict_gpu_without_case_duplication() ->
     assert "--lanes native-cpu,jax-cpu,jax-gpu" in scheduled_workflow
 
 
+_OWNERSHIP_ORDER = "must exactly follow one-to-one source ownership"
+
+
 @pytest.mark.parametrize(
-    ("mutation", "expected_message"),
+    ("mutation", "expected_error", "expected_message"),
     [
-        ("duplicate_relationship", "duplicate parity relationship"),
-        ("duplicate_case_id", "duplicate parity case_id"),
-        ("nondeterministic_order", "deterministic ready-lineage order"),
-        ("unknown_example", "unknown ready JAX example"),
-        ("wrong_native_source", "is not inspired_by"),
-        ("unsupported_with_case", "unsupported relationship must not define case_id"),
-        ("unsupported_without_blocker", "unsupported relationship requires blocker"),
-        ("full_without_case", "full relationship requires case_id"),
-        ("hard_coded_tolerance", "unexpected comparison route fields"),
-        ("unknown_lane_pair", "invalid lane pair"),
-        ("duplicate_route", "duplicate comparison route"),
-        ("incomplete_route_matrix", "complete direct lane-pair matrix"),
+        (
+            "duplicate_relationship",
+            ParityManifestValidationError,
+            "duplicate parity relationship",
+        ),
+        (
+            "duplicate_case_id",
+            ParityManifestValidationError,
+            "duplicate parity case_id",
+        ),
+        ("nondeterministic_order", ManifestV3ValidationError, _OWNERSHIP_ORDER),
+        ("unknown_example", ManifestV3ValidationError, _OWNERSHIP_ORDER),
+        ("wrong_native_source", ManifestV3ValidationError, _OWNERSHIP_ORDER),
+        (
+            "unsupported_with_case",
+            ParityManifestValidationError,
+            "unsupported relationship must not define case_id",
+        ),
+        (
+            "unsupported_without_blocker",
+            ParityManifestValidationError,
+            "unsupported relationship requires blocker",
+        ),
+        (
+            "full_without_case",
+            ParityManifestValidationError,
+            "full relationship requires case_id",
+        ),
+        (
+            "hard_coded_tolerance",
+            ParityManifestValidationError,
+            "unexpected comparison route fields",
+        ),
+        ("unknown_lane_pair", ParityManifestValidationError, "invalid lane pair"),
+        (
+            "duplicate_route",
+            ParityManifestValidationError,
+            "duplicate comparison route",
+        ),
+        (
+            "incomplete_route_matrix",
+            ParityManifestValidationError,
+            "complete direct lane-pair matrix",
+        ),
         (
             "inconsistent_source_tolerance",
+            ParityManifestValidationError,
             "source-owned tolerance must apply to every lane pair",
         ),
-        ("missing_test_owner", "correctness test does not exist"),
-        ("full_with_omitted_stage", "full relationship must not omit"),
-        ("reduced_without_omitted_stage", "reduced relationship requires omitted"),
-        ("unsupported_with_completed_stage", "unsupported relationship must not"),
+        (
+            "missing_test_owner",
+            ParityManifestValidationError,
+            "correctness test does not exist",
+        ),
+        (
+            "full_with_omitted_stage",
+            ParityManifestValidationError,
+            "full relationship must not omit",
+        ),
+        (
+            "reduced_without_omitted_stage",
+            ParityManifestValidationError,
+            "reduced relationship requires omitted",
+        ),
+        (
+            "unsupported_with_completed_stage",
+            ParityManifestValidationError,
+            "unsupported relationship must not",
+        ),
     ],
 )
 def test_parity_manifest_rejects_invalid_contracts(
-    tmp_path: Path,
     mutation: str,
+    expected_error: type[ValueError],
     expected_message: str,
 ) -> None:
     document = deepcopy(_document())
@@ -492,74 +483,12 @@ def test_parity_manifest_rejects_invalid_contracts(
         supported["classification"] = "full"
         supported["omitted_scientific_stages"] = ["forbidden omission"]
     elif mutation == "reduced_without_omitted_stage":
-        reduced = next(
-            item for item in relationships if item["classification"] == "reduced"
-        )
-        reduced["omitted_scientific_stages"] = []
+        supported["classification"] = "reduced"
+        supported["omitted_scientific_stages"] = []
     elif mutation == "unsupported_with_completed_stage":
         unsupported["workflow_stages"] = ["forbidden stage"]
     else:
         raise AssertionError(f"unhandled mutation: {mutation}")
 
-    examples_manifest = _examples_manifest()
-    with pytest.raises(ParityManifestValidationError, match=expected_message):
-        load_parity_manifest(
-            _write_document(tmp_path, document),
-            examples_manifest=examples_manifest,
-            repo_root=REPO_ROOT,
-        )
-
-
-def test_traceable_final_jacobian_has_all_direct_routes() -> None:
-    examples_manifest = _examples_manifest()
-    parity_manifest = load_parity_manifest(
-        PARITY_MANIFEST_PATH,
-        examples_manifest=examples_manifest,
-        repo_root=REPO_ROOT,
-    )
-    relationship = next(
-        item
-        for item in parity_manifest.relationships
-        if item.case_id == "traceable-least-squares"
-    )
-
-    assert {
-        route.lane_pair
-        for route in relationship.comparison_routes
-        if route.phase == "final" and route.observable == "residual_jacobian"
-    } == {
-        "native-cpu:jax-cpu",
-        "native-cpu:jax-gpu",
-        "jax-cpu:jax-gpu",
-    }
-
-
-def test_surface_owns_symmetric_jacobian_invariant_routes() -> None:
-    examples_manifest = _examples_manifest()
-    parity_manifest = load_parity_manifest(
-        PARITY_MANIFEST_PATH,
-        examples_manifest=examples_manifest,
-        repo_root=REPO_ROOT,
-    )
-    relationships = {
-        item.case_id: item for item in parity_manifest.relationships if item.case_id
-    }
-    invariant_routes = {
-        (route.phase, route.lane_pair)
-        for route in relationships["surface-geometry-optimization"].comparison_routes
-        if route.observable == "residual_jacobian_invariants"
-    }
-
-    assert invariant_routes == {
-        (phase, lane_pair)
-        for phase in ("initial", "final")
-        for lane_pair in (
-            "native-cpu:jax-cpu",
-            "native-cpu:jax-gpu",
-            "jax-cpu:jax-gpu",
-        )
-    }
-    assert all(
-        route.observable != "residual_jacobian_invariants"
-        for route in relationships["traceable-least-squares"].comparison_routes
-    )
+    with pytest.raises(expected_error, match=expected_message):
+        _load_pair(document)

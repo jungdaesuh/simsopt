@@ -64,8 +64,6 @@ from simsopt.single_stage_boozer_vacuum import JAX_FAST_DRIVER_ID
 from simsopt_jax.config import ExecutionIntent
 from simsopt_jax.examples import ExecutionScale
 
-_LOADED_DEPENDENCY_DIRECTORY = Path(np.__file__).resolve().parents[1]
-
 
 def _routes() -> tuple[ComparisonRoute, ...]:
     return tuple(
@@ -269,29 +267,6 @@ def test_mirror_parity_tolerances_preserve_source_owned_thresholds(
 
     assert tolerance["rtol"] == rtol
     assert tolerance["atol"] == atol
-
-
-def test_qfm_terminal_success_rejects_retained_infeasible_state() -> None:
-    from examples.jax.parity.cases.qfm_surface import _terminal_success
-
-    initial_state = {
-        "initial:penalty_objective": np.asarray([4.41288576329861e-2]),
-    }
-    final_state = {
-        "final:penalty_objective": np.asarray([7.268155221443783e-4]),
-        "final:penalty_gradient": np.zeros(9, dtype=np.float64),
-        "final:qfm_objective": np.asarray([7.268032062695834e-4]),
-        "final:constraint_value": np.asarray([1.2315874794985946e-8]),
-    }
-
-    assert not _terminal_success(initial_state, final_state)
-
-
-def test_qfm_normalized_status_preserves_driver_failure() -> None:
-    from examples.jax.parity.cases.qfm_surface import _normalized_driver_status
-
-    assert _normalized_driver_status(driver_success=True) == "converged"
-    assert _normalized_driver_status(driver_success=False) == "failed"
 
 
 def test_generated_version_source_must_name_the_clean_checkout() -> None:
@@ -1388,6 +1363,7 @@ def _publish_quality_band_run(
     cost_tier_override: str | None = None,
     terminal_contract_override: str | None = None,
     receipt_mutation: str | None = None,
+    used_legacy_manifest_adapter: bool = False,
 ) -> tuple[Path, dict[str, object]]:
     """Publish one synthetic native_default quality-band run for the auditor."""
     repo_root = Path(__file__).resolve().parents[2]
@@ -1553,7 +1529,7 @@ def _publish_quality_band_run(
         "schema_version": 2,
         "manifest_schema_version": contract_pair.version_pair[0],
         "parity_manifest_schema_version": contract_pair.version_pair[1],
-        "used_legacy_manifest_adapter": contract_pair.used_legacy_adapter,
+        "used_legacy_manifest_adapter": used_legacy_manifest_adapter,
         "run_id": paths.run_id,
         "lanes": list(lanes),
         "scale": "native_default",
@@ -1635,6 +1611,18 @@ def test_audit_rejects_a_tampered_quality_band_payload(tmp_path: Path) -> None:
     published, _summary = _publish_quality_band_run(tmp_path, tamper_band=True)
 
     with pytest.raises(ValueError, match="stored quality band differs"):
+        audit_published_run(published, repo_root=repo_root)
+
+
+def test_audit_rejects_a_summary_claiming_the_legacy_manifest_adapter(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    published, _summary = _publish_quality_band_run(
+        tmp_path, used_legacy_manifest_adapter=True
+    )
+
+    with pytest.raises(ValueError, match="legacy manifest adapter mismatch"):
         audit_published_run(published, repo_root=repo_root)
 
 
@@ -1770,75 +1758,6 @@ def test_runner_fails_closed_on_child_failure(tmp_path: Path, failure: str) -> N
             scale="bounded",
             executor=executor,
         )
-
-
-def test_traceable_least_squares_case_runs_native_and_jax_cpu_end_to_end(
-    tmp_path: Path,
-) -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    case = get_case("traceable-least-squares")
-    bundle = case.create_input(tmp_path / "inputs", "bounded")
-
-    executions, observations = execute_case_lanes(
-        case_id=case.case_id,
-        lanes=("native-cpu", "jax-cpu"),
-        input_bundle_path=tmp_path / "inputs" / "input_bundle.json",
-        run_directory=tmp_path / "run.partial",
-        repo_root=repo_root,
-        base_environment={"PYTHONPATH": str(_LOADED_DEPENDENCY_DIRECTORY)},
-        python_executable=sys.executable,
-        scale="bounded",
-    )
-
-    assert bundle.case_id == case.case_id
-    assert len(executions) == 2
-    native = observations["native-cpu"]
-    jax_cpu = observations["jax-cpu"]
-    for observable in (
-        "initial:residual",
-        "initial:residual_jacobian",
-        "initial:objective_sum_squares",
-        "initial:solver_cost",
-        "initial:objective_gradient",
-    ):
-        np.testing.assert_allclose(
-            native.values[observable],
-            jax_cpu.values[observable],
-            rtol=1.0e-8,
-            atol=1.0e-10,
-        )
-    final_tolerance = parity_ladder_tolerances("native_workflow")
-    for observable in (
-        "final:parameters",
-        "final:residual",
-        "final:residual_jacobian",
-        "final:objective_sum_squares",
-        "final:solver_cost",
-        "final:objective_gradient",
-    ):
-        np.testing.assert_allclose(
-            native.values[observable],
-            jax_cpu.values[observable],
-            rtol=float(final_tolerance["whole_solve_value_rtol"]),
-            atol=float(final_tolerance["whole_solve_value_atol"]),
-        )
-    np.testing.assert_allclose(
-        native.values["initial:objective_gradient"],
-        2.0
-        * native.values["initial:residual_jacobian"].T
-        @ native.values["initial:residual"],
-    )
-    for observation in (native, jax_cpu):
-        for phase in ("initial", "final"):
-            np.testing.assert_allclose(
-                observation.values[f"{phase}:solver_cost"],
-                0.5 * observation.values[f"{phase}:objective_sum_squares"],
-            )
-    assert native.success and jax_cpu.success
-    assert native.input_fingerprint == jax_cpu.input_fingerprint
-    assert native.effective_construction_fingerprint == (
-        jax_cpu.effective_construction_fingerprint
-    )
 
 
 def test_run_parity_cli_refuses_to_build_input_bundles_without_float64(
@@ -2090,374 +2009,6 @@ def test_run_parity_cli_rejects_scale_unsupported_by_relationship(
         if path.is_dir() and not path.name.endswith(".partial")
     ]
     assert published == []
-
-
-def test_curve_length_case_runs_native_and_jax_cpu_end_to_end(
-    tmp_path: Path,
-) -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    case = get_case("curve-length-optimization")
-    case.create_input(tmp_path / "inputs", "bounded")
-
-    _, observations = execute_case_lanes(
-        case_id=case.case_id,
-        lanes=("native-cpu", "jax-cpu"),
-        input_bundle_path=tmp_path / "inputs" / "input_bundle.json",
-        run_directory=tmp_path / "run.partial",
-        repo_root=repo_root,
-        base_environment={"PYTHONPATH": str(_LOADED_DEPENDENCY_DIRECTORY)},
-        python_executable=sys.executable,
-        scale="bounded",
-    )
-
-    native = observations["native-cpu"]
-    jax_cpu = observations["jax-cpu"]
-    np.testing.assert_allclose(
-        native.values["initial:objective"],
-        jax_cpu.values["initial:objective"],
-        rtol=1.0e-10,
-        atol=1.0e-12,
-    )
-    np.testing.assert_allclose(
-        native.values["initial:objective_gradient"],
-        jax_cpu.values["initial:objective_gradient"],
-        rtol=1.0e-8,
-        atol=1.0e-10,
-    )
-    tolerance = parity_ladder_tolerances("native_workflow")
-    for observable in ("parameters", "objective", "objective_gradient"):
-        np.testing.assert_allclose(
-            native.values[f"final:{observable}"],
-            jax_cpu.values[f"final:{observable}"],
-            rtol=float(tolerance["whole_solve_value_rtol"]),
-            atol=float(tolerance["whole_solve_value_atol"]),
-        )
-    circle_length = 4.0 * np.pi
-    np.testing.assert_allclose(
-        native.values["final:objective"], circle_length, rtol=1.0e-9
-    )
-    assert native.success and jax_cpu.success
-
-
-def test_surface_jacobian_invariants_ignore_only_global_axis_exchange() -> None:
-    from examples.jax.parity.cases.surface_geometry import (
-        _global_column_swap_jacobian_invariants,
-    )
-
-    jacobian = np.asarray(
-        (
-            (19.73908654, 19.73933106),
-            (3.94789066, 3.94779286),
-        ),
-        dtype=np.float64,
-    )
-
-    def invariants(candidate: np.ndarray) -> np.ndarray:
-        column_sum, column_product, column_association = (
-            _global_column_swap_jacobian_invariants(candidate[:, 0], candidate[:, 1])
-        )
-        return np.concatenate(
-            (column_sum, column_product, column_association.reshape(-1))
-        )
-
-    expected = invariants(jacobian)
-    swapped = invariants(jacobian[:, ::-1])
-    drifted = jacobian.copy()
-    drifted[0, 0] += 1.0e-3
-    drifted_invariants = invariants(drifted)
-    independently_swapped = jacobian.copy()
-    independently_swapped[1] = independently_swapped[1, ::-1]
-    independently_swapped_invariants = invariants(independently_swapped)
-    repeated_columns = np.column_stack((jacobian[:, 0], jacobian[:, 0]))
-    repeated_column_invariants = invariants(repeated_columns)
-    tolerance = parity_ladder_tolerances("native_workflow")
-    rtol = float(tolerance["whole_solve_value_rtol"])
-    atol = float(tolerance["whole_solve_value_atol"])
-
-    np.testing.assert_array_equal(expected, swapped)
-    assert not np.allclose(expected, drifted_invariants, rtol=rtol, atol=atol)
-    assert not np.allclose(
-        expected,
-        independently_swapped_invariants,
-        rtol=rtol,
-        atol=atol,
-    )
-    assert np.all(np.isfinite(repeated_column_invariants))
-
-
-def test_surface_geometry_case_runs_native_and_jax_cpu_end_to_end(
-    tmp_path: Path,
-) -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    case = get_case("surface-geometry-optimization")
-    case.create_input(tmp_path / "inputs", "bounded")
-    _, observations = execute_case_lanes(
-        case_id=case.case_id,
-        lanes=("native-cpu", "jax-cpu"),
-        input_bundle_path=tmp_path / "inputs" / "input_bundle.json",
-        run_directory=tmp_path / "run.partial",
-        repo_root=repo_root,
-        base_environment={"PYTHONPATH": str(_LOADED_DEPENDENCY_DIRECTORY)},
-        python_executable=sys.executable,
-        scale="bounded",
-    )
-    native = observations["native-cpu"]
-    jax_cpu = observations["jax-cpu"]
-    for observable in (
-        "residual",
-        "residual_jacobian",
-        "residual_jacobian_invariants",
-        "objective_sum_squares",
-        "objective_gradient",
-        "area",
-        "volume",
-    ):
-        np.testing.assert_allclose(
-            native.values[f"initial:{observable}"],
-            jax_cpu.values[f"initial:{observable}"],
-            rtol=1.0e-8,
-            atol=1.0e-10,
-        )
-    tolerance = parity_ladder_tolerances("native_workflow")
-    for observable in (
-        "parameter_invariants",
-        "residual",
-        "residual_jacobian_invariants",
-        "objective_sum_squares",
-        "objective_gradient",
-        "area",
-        "volume",
-    ):
-        np.testing.assert_allclose(
-            native.values[f"final:{observable}"],
-            jax_cpu.values[f"final:{observable}"],
-            rtol=float(tolerance["whole_solve_value_rtol"]),
-            atol=float(tolerance["whole_solve_value_atol"]),
-        )
-    for observation in (native, jax_cpu):
-        parameters = observation.values["final:parameters"]
-        residual_jacobian = observation.values["final:residual_jacobian"]
-        assert parameters.shape == (2,)
-        assert residual_jacobian.shape == (2, 2)
-        assert np.all(np.isfinite(parameters))
-        assert np.all(np.isfinite(residual_jacobian))
-        assert observation.applicability["final:parameters"] is False
-        assert observation.applicability["initial:residual_jacobian_invariants"] is True
-        assert observation.applicability["final:residual_jacobian"] is False
-        assert observation.applicability["final:residual_jacobian_invariants"] is True
-        for phase in ("initial", "final"):
-            np.testing.assert_allclose(
-                observation.values[f"{phase}:solver_cost"],
-                0.5 * observation.values[f"{phase}:objective_sum_squares"],
-            )
-    assert native.success and jax_cpu.success
-
-
-def test_coil_flux_case_runs_native_and_jax_cpu_end_to_end(tmp_path: Path) -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    case = get_case("coil-flux-optimization")
-    case.create_input(tmp_path / "inputs", "bounded")
-
-    _, observations = execute_case_lanes(
-        case_id=case.case_id,
-        lanes=("native-cpu", "jax-cpu"),
-        input_bundle_path=tmp_path / "inputs" / "input_bundle.json",
-        run_directory=tmp_path / "run.partial",
-        repo_root=repo_root,
-        base_environment={"PYTHONPATH": str(_LOADED_DEPENDENCY_DIRECTORY)},
-        python_executable=sys.executable,
-        scale="bounded",
-    )
-
-    native = observations["native-cpu"]
-    jax_cpu = observations["jax-cpu"]
-    for phase in ("initial", "final"):
-        for observable in ("parameters", "flux", "flux_gradient", "coil_length"):
-            np.testing.assert_allclose(
-                native.values[f"{phase}:{observable}"],
-                jax_cpu.values[f"{phase}:{observable}"],
-                rtol=1.0e-8,
-                atol=1.0e-12,
-            )
-    assert native.values["final:flux"].item() <= (
-        1.0e-12 * native.values["initial:flux"].item()
-    )
-    assert native.success and jax_cpu.success
-
-
-def test_permanent_magnet_case_matches_cpp_and_jax_cpu_end_to_end(
-    tmp_path: Path,
-) -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    case = get_case("permanent-magnet-optimization")
-    case.create_input(tmp_path / "inputs", "bounded")
-
-    _, observations = execute_case_lanes(
-        case_id=case.case_id,
-        lanes=("native-cpu", "jax-cpu"),
-        input_bundle_path=tmp_path / "inputs" / "input_bundle.json",
-        run_directory=tmp_path / "run.partial",
-        repo_root=repo_root,
-        base_environment={"PYTHONPATH": str(_LOADED_DEPENDENCY_DIRECTORY)},
-        python_executable=sys.executable,
-        scale="bounded",
-    )
-
-    native = observations["native-cpu"]
-    jax_cpu = observations["jax-cpu"]
-    for observable in ("moments", "residual", "objective_sum_squares"):
-        np.testing.assert_allclose(
-            native.values[f"initial:{observable}"],
-            jax_cpu.values[f"initial:{observable}"],
-        )
-        np.testing.assert_allclose(
-            native.values[f"final:{observable}"],
-            jax_cpu.values[f"final:{observable}"],
-        )
-    np.testing.assert_array_equal(
-        native.values["final:selected_dipoles"],
-        jax_cpu.values["final:selected_dipoles"],
-    )
-    assert native.values["final:objective_sum_squares"].item() < (
-        native.values["initial:objective_sum_squares"].item()
-    )
-    assert native.success and jax_cpu.success
-
-
-def test_wireframe_rcls_case_matches_native_and_jax_cpu_end_to_end(
-    tmp_path: Path,
-) -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    case = get_case("wireframe-optimization")
-    case.create_input(tmp_path / "inputs", "bounded")
-
-    _, observations = execute_case_lanes(
-        case_id=case.case_id,
-        lanes=("native-cpu", "jax-cpu"),
-        input_bundle_path=tmp_path / "inputs" / "input_bundle.json",
-        run_directory=tmp_path / "run.partial",
-        repo_root=repo_root,
-        base_environment={"PYTHONPATH": str(_LOADED_DEPENDENCY_DIRECTORY)},
-        python_executable=sys.executable,
-        scale="bounded",
-    )
-
-    native = observations["native-cpu"]
-    jax_cpu = observations["jax-cpu"]
-    for phase in ("initial", "final"):
-        for observable in (
-            "currents",
-            "normal_field_residual",
-            "objective",
-            "objective_gradient",
-            "constraint_residual",
-        ):
-            np.testing.assert_allclose(
-                native.values[f"{phase}:{observable}"],
-                jax_cpu.values[f"{phase}:{observable}"],
-                rtol=1.0e-9,
-                atol=1.0e-10,
-            )
-    assert np.linalg.norm(native.values["final:constraint_residual"]) < 1.0e-10
-    assert native.success and jax_cpu.success
-
-
-def test_coil_force_fixed_state_matches_native_and_jax_cpu_end_to_end(
-    tmp_path: Path,
-) -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    case = get_case("coil-force-and-finite-build")
-    case.create_input(tmp_path / "inputs", "bounded")
-
-    _, observations = execute_case_lanes(
-        case_id=case.case_id,
-        lanes=("native-cpu", "jax-cpu"),
-        input_bundle_path=tmp_path / "inputs" / "input_bundle.json",
-        run_directory=tmp_path / "run.partial",
-        repo_root=repo_root,
-        base_environment={"PYTHONPATH": str(_LOADED_DEPENDENCY_DIRECTORY)},
-        python_executable=sys.executable,
-        scale="bounded",
-    )
-
-    native = observations["native-cpu"]
-    jax_cpu = observations["jax-cpu"]
-    for phase in ("initial", "final"):
-        for observable in (
-            "parameters",
-            "force_objective",
-            "force_gradient",
-            "frame",
-            "frame_orthonormality_residual",
-            "torsion",
-        ):
-            np.testing.assert_allclose(
-                native.values[f"{phase}:{observable}"],
-                jax_cpu.values[f"{phase}:{observable}"],
-                rtol=1.0e-8,
-                atol=1.0e-9,
-            )
-    assert (
-        np.max(np.abs(native.values["final:frame_orthonormality_residual"])) < 1.0e-12
-    )
-    assert native.success and jax_cpu.success
-
-
-def test_qfm_case_matches_native_and_jax_cpu_original_residuals(
-    tmp_path: Path,
-) -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    case = get_case("qfm-surface-optimization")
-    case.create_input(tmp_path / "inputs", "bounded")
-
-    _, observations = execute_case_lanes(
-        case_id=case.case_id,
-        lanes=("native-cpu", "jax-cpu"),
-        input_bundle_path=tmp_path / "inputs" / "input_bundle.json",
-        run_directory=tmp_path / "run.partial",
-        repo_root=repo_root,
-        base_environment={"PYTHONPATH": str(_LOADED_DEPENDENCY_DIRECTORY)},
-        python_executable=sys.executable,
-        scale="bounded",
-    )
-
-    native = observations["native-cpu"]
-    jax_cpu = observations["jax-cpu"]
-    assert native.driver == "scipy_lbfgsb_qfm_penalty"
-    assert jax_cpu.driver == "simsopt_jax_bfgs_qfm_penalty"
-    for phase in ("initial", "final"):
-        for observable in (
-            "parameters",
-            "qfm_objective",
-            "qfm_gradient",
-            "constraint_value",
-            "constraint_gradient",
-            "penalty_objective",
-            "penalty_gradient",
-        ):
-            np.testing.assert_allclose(
-                native.values[f"{phase}:{observable}"],
-                jax_cpu.values[f"{phase}:{observable}"],
-                rtol=1.0e-6 if phase == "final" else 1.0e-8,
-                atol=1.0e-7 if phase == "final" else 1.0e-10,
-            )
-    assert native.values["final:penalty_objective"].item() < (
-        native.values["initial:penalty_objective"].item()
-    )
-    terminal_constraint_atol = float(
-        parity_ladder_tolerances("native_workflow")["terminal_constraint_norm_atol"]
-    )
-    for observation in (native, jax_cpu):
-        assert (
-            np.max(np.abs(observation.values["final:constraint_value"]))
-            <= terminal_constraint_atol
-        )
-        assert observation.normalized_status == "converged"
-        assert all(
-            isinstance(counter, int) and counter >= 0
-            for counter in (observation.nit, observation.nfev, observation.njev)
-        )
-    assert native.success and jax_cpu.success
 
 
 @pytest.mark.parametrize(

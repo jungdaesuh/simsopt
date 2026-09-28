@@ -1045,7 +1045,7 @@ _POLICY_DRIVER = "scipy_lbfgsb"
 _CASE_CONTRACT_SOURCE = index_module._CASE_REGISTRY_SOURCE
 #: A case-package module the replay never consults, used to prove the binding
 #: is scoped to the contract registry instead of the whole case package.
-_UNRELATED_CASE_SOURCE = "examples/jax/parity/cases/traceable_least_squares.py"
+_UNRELATED_CASE_SOURCE = "examples/jax/parity/cases/native_qfm.py"
 #: The registry only CALLS for a band; this module holds the rule that decides
 #: the ceiling a `native_default` band case is arbitrated against.
 _BAND_MODULE_SOURCE = "examples/jax/parity/official_quality_bands.py"

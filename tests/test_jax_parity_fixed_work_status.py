@@ -44,7 +44,6 @@ CASES = Path(__file__).resolve().parents[1] / "examples" / "jax" / "parity" / "c
 #: Greedy/fixed-work producer module -> ``LaneObservation`` constructions in it.
 GREEDY_PRODUCERS = {
     "_permanent_magnet_arbvec.py": 1,
-    "permanent_magnet.py": 2,
     "native_permanent_magnet_simple.py": 2,
     "native_permanent_magnet_qa.py": 1,
     "_wireframe_gsco.py": 1,
@@ -444,7 +443,6 @@ def test_multistep_label_reads_the_per_stage_budget() -> None:
 #: invariant and the non-degeneracy floor were lost one file at a time.
 USABILITY_PREDICATES = {
     "_permanent_magnet_arbvec.py": "gpmo_backtracking_outputs_usable",
-    "permanent_magnet.py": "gpmo_baseline_outputs_usable",
     "native_permanent_magnet_simple.py": "gpmo_baseline_outputs_usable",
 }
 

@@ -226,7 +226,7 @@ def test_results_report_is_generated_from_aggregate_fields() -> None:
         "lanes": ["native-cpu", "jax-cpu", "jax-gpu"],
         "cases": [
             {
-                "jax_example_id": "traceable-least-squares",
+                "jax_example_id": "native-just-a-quadratic",
                 "native_source": "1_Simple/just_a_quadratic.py",
                 "classification": "full",
                 "scale_tier": "bounded",
@@ -241,7 +241,7 @@ def test_results_report_is_generated_from_aggregate_fields() -> None:
 
     assert "Evidence class: **exploratory** (dirty checkout)" in rendered
     assert "cannot promote an authoritative parity claim" in rendered
-    assert "| traceable-least-squares |" in rendered
+    assert "| native-just-a-quadratic |" in rendered
     assert "| full | bounded | native_python_scipy | pass | 2/2 |" in rendered
 
     summary["authoritative"] = True

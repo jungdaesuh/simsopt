@@ -96,7 +96,6 @@ def _example() -> RuntimeExample:
         classification="adapter",
         teaching_kind="one_to_one",
         source="1_Simple/just_a_quadratic.py",
-        compatibility=None,
         outer_optimizer_policy=parse_outer_optimizer_policy(
             "scipy-trf-over-jax-quadratic",
             example_id="native-just-a-quadratic",
@@ -332,7 +331,7 @@ def test_parity_child_rejects_requested_scale_different_from_input(
 ) -> None:
     create_input_bundle(
         tmp_path / "inputs",
-        case_id="traceable-least-squares",
+        case_id="native-just-a-quadratic",
         random_seed=0,
         arrays={"parameters": np.asarray([1.0], dtype=np.float64)},
         configuration={"max_steps": 2},
@@ -343,7 +342,7 @@ def test_parity_child_rejects_requested_scale_different_from_input(
         run_parity_child(
             [
                 "--case",
-                "traceable-least-squares",
+                "native-just-a-quadratic",
                 "--lane",
                 "native-cpu",
                 "--input-bundle",
@@ -374,7 +373,7 @@ def test_snapshot_child_rejects_cross_profile_before_case_execution(
         run_parity_child(
             [
                 "--case",
-                "traceable-least-squares",
+                "native-just-a-quadratic",
                 "--lane",
                 "native-cpu",
                 "--input-bundle",
@@ -393,14 +392,14 @@ def test_snapshot_child_does_not_publish_when_dynamic_provenance_is_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    input_bundle = get_case("traceable-least-squares").create_input(
+    input_bundle = get_case("native-just-a-quadratic").create_input(
         tmp_path / "inputs", "bounded"
     )
     identity = _snapshot_identity("native_cpu")
     identity = replace(
         identity,
         backend_mode="native_cpu",
-        driver="scipy_least_squares",
+        driver="simsopt_least_squares_serial_solve",
     )
     monkeypatch.setattr(
         parity_child, "load_snapshot_lane_identity", lambda _path: identity
@@ -417,7 +416,7 @@ def test_snapshot_child_does_not_publish_when_dynamic_provenance_is_missing(
         run_parity_child(
             [
                 "--case",
-                "traceable-least-squares",
+                "native-just-a-quadratic",
                 "--lane",
                 "native-cpu",
                 "--input-bundle",
@@ -452,7 +451,7 @@ def test_snapshot_dynamic_source_collection_rejects_ambient_project_module(
 def test_native_child_records_native_synchronization_when_jax_is_loaded(
     tmp_path: Path,
 ) -> None:
-    input_bundle = get_case("traceable-least-squares").create_input(
+    input_bundle = get_case("native-just-a-quadratic").create_input(
         tmp_path / "inputs", "bounded"
     )
 
@@ -460,7 +459,7 @@ def test_native_child_records_native_synchronization_when_jax_is_loaded(
         run_parity_child(
             [
                 "--case",
-                "traceable-least-squares",
+                "native-just-a-quadratic",
                 "--lane",
                 "native-cpu",
                 "--input-bundle",

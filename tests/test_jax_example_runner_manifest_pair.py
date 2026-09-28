@@ -1,4 +1,4 @@
-"""Runner contract for atomic legacy and canonical manifest pairs."""
+"""Runner contract for the atomic example/parity manifest pair."""
 
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ from examples.jax.parity._manifest import ParityManifest
 def _runtime_pair(version_pair: tuple[int, int]) -> RuntimeContractPair:
     return RuntimeContractPair(
         version_pair=version_pair,
-        used_legacy_adapter=version_pair == (2, 1),
         examples=(
             RuntimeExample(
                 id="native-just-a-quadratic",
@@ -27,7 +26,6 @@ def _runtime_pair(version_pair: tuple[int, int]) -> RuntimeContractPair:
                 classification="mirror",
                 teaching_kind="one_to_one",
                 source="1_Simple/just_a_quadratic.py",
-                compatibility=None,
             ),
         ),
         parity=ParityManifest(schema_version=version_pair[1], relationships=()),

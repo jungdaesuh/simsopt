@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, cast
-
-from examples.jax._manifest import JaxExamplesManifest
 
 Classification = Literal["full", "reduced", "unsupported"]
 ScaleTier = Literal["bounded", "native_default", "not_applicable"]
@@ -57,7 +54,6 @@ PHASES = frozenset(
 )
 LANE_PAIRS = frozenset({"native-cpu:jax-cpu", "native-cpu:jax-gpu", "jax-cpu:jax-gpu"})
 COMPARATORS = frozenset({"allclose", "exact", "equivalent", "not_worse"})
-ROOT_FIELDS = frozenset({"schema_version", "relationships"})
 V2_ROOT_FIELDS = frozenset({"schema_version", "relationships"})
 V2_OPTIONAL_ROOT_FIELDS = frozenset({"experimental_relationships"})
 RELATIONSHIP_FIELDS = frozenset(
@@ -292,13 +288,10 @@ def _comparison_routes(value: object, context: str) -> tuple[ComparisonRoute, ..
     return routes
 
 
-def _relationship(
-    value: object, index: int, repo_root: Path, schema_version: Literal[1, 2]
-) -> ParityRelationship:
+def _relationship(value: object, index: int, repo_root: Path) -> ParityRelationship:
     context = f"relationships[{index}]"
     record = _mapping(value, context)
-    optional_fields = {"scale_contracts"} if schema_version == 2 else set()
-    unexpected = set(record) - RELATIONSHIP_FIELDS - optional_fields
+    unexpected = set(record) - RELATIONSHIP_FIELDS - {"scale_contracts"}
     missing = RELATIONSHIP_FIELDS - set(record)
     if unexpected or missing:
         raise ParityManifestValidationError(
@@ -460,53 +453,6 @@ def _relationship(
     )
 
 
-def parse_parity_relationships_document(
-    value: object,
-    *,
-    repo_root: Path,
-    schema_version: Literal[1, 2],
-) -> tuple[ParityRelationship, ...]:
-    """Parse versioned relationship records before ownership validation."""
-    if schema_version == 2:
-        official, experimental = parse_v2_parity_relationship_groups_document(
-            value, repo_root=repo_root
-        )
-        return official + experimental
-    document = _mapping(value, "root")
-    unexpected = set(document) - ROOT_FIELDS
-    missing = ROOT_FIELDS - set(document)
-    if unexpected or missing:
-        raise ParityManifestValidationError(
-            f"invalid parity manifest root fields: "
-            f"missing={sorted(missing)}, unexpected={sorted(unexpected)}"
-        )
-    observed_schema = document["schema_version"]
-    if observed_schema != schema_version:
-        raise ParityManifestValidationError(
-            f"unsupported parity schema version: {observed_schema!r}"
-        )
-    relationships = tuple(
-        _relationship(value, index, repo_root, schema_version)
-        for index, value in enumerate(
-            _sequence(document["relationships"], "relationships")
-        )
-    )
-    relationship_keys = tuple(
-        (relationship.jax_example_id, relationship.native_source)
-        for relationship in relationships
-    )
-    if len(relationship_keys) != len(set(relationship_keys)):
-        raise ParityManifestValidationError("duplicate parity relationship")
-    case_ids = tuple(
-        relationship.case_id
-        for relationship in relationships
-        if relationship.case_id is not None
-    )
-    if len(case_ids) != len(set(case_ids)):
-        raise ParityManifestValidationError("duplicate parity case_id")
-    return relationships
-
-
 def parse_v2_parity_relationship_groups_document(
     value: object, *, repo_root: Path
 ) -> tuple[tuple[ParityRelationship, ...], tuple[ParityRelationship, ...]]:
@@ -528,7 +474,7 @@ def parse_v2_parity_relationship_groups_document(
         relationships: object, context: str
     ) -> tuple[ParityRelationship, ...]:
         return tuple(
-            _relationship(record, index, repo_root, 2)
+            _relationship(record, index, repo_root)
             for index, record in enumerate(_sequence(relationships, context))
         )
 
@@ -550,69 +496,3 @@ def parse_v2_parity_relationship_groups_document(
     if len(case_ids) != len(set(case_ids)):
         raise ParityManifestValidationError("duplicate parity case_id")
     return official, experimental
-
-
-def parse_parity_manifest_document(
-    document: object,
-    *,
-    examples_manifest: JaxExamplesManifest,
-    repo_root: Path,
-) -> ParityManifest:
-    """Parse legacy parity v1 and validate ready-example lineage."""
-    relationships = parse_parity_relationships_document(
-        document,
-        repo_root=repo_root,
-        schema_version=1,
-    )
-    ready_examples = {
-        example.id: example
-        for example in examples_manifest.jax_examples
-        if example.status == "ready"
-    }
-    expected_order = tuple(
-        (example_id, native_source)
-        for example_id, example in ready_examples.items()
-        for native_source in example.inspired_by
-    )
-    relationship_keys = tuple(
-        (relationship.jax_example_id, relationship.native_source)
-        for relationship in relationships
-    )
-    expected_keys = set(expected_order)
-    for relationship in relationships:
-        example = ready_examples.get(relationship.jax_example_id)
-        if example is None:
-            raise ParityManifestValidationError(
-                f"unknown ready JAX example: {relationship.jax_example_id}"
-            )
-        if relationship.native_source not in example.inspired_by:
-            raise ParityManifestValidationError(
-                f"{relationship.native_source} is not inspired_by "
-                f"{relationship.jax_example_id}"
-            )
-    actual_keys = set(relationship_keys)
-    if actual_keys != expected_keys:
-        raise ParityManifestValidationError(
-            "parity relationships do not exactly cover ready inspired_by lineage: "
-            f"missing={sorted(expected_keys - actual_keys)}, "
-            f"unexpected={sorted(actual_keys - expected_keys)}"
-        )
-    if relationship_keys != expected_order:
-        raise ParityManifestValidationError(
-            "parity relationships must follow deterministic ready-lineage order"
-        )
-    return ParityManifest(schema_version=1, relationships=relationships)
-
-
-def load_parity_manifest(
-    path: Path,
-    *,
-    examples_manifest: JaxExamplesManifest,
-    repo_root: Path,
-) -> ParityManifest:
-    """Load parity policy and validate it against ready example lineage."""
-    return parse_parity_manifest_document(
-        json.loads(path.read_text(encoding="utf-8")),
-        examples_manifest=examples_manifest,
-        repo_root=repo_root,
-    )

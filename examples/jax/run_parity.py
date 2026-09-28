@@ -500,7 +500,8 @@ def main(argv: list[str] | None = None) -> int:
                     "schema_version": 2,
                     "manifest_schema_version": contract_pair.version_pair[0],
                     "parity_manifest_schema_version": contract_pair.version_pair[1],
-                    "used_legacy_manifest_adapter": (contract_pair.used_legacy_adapter),
+                    # Retired flag kept for summary schema 2; no legacy reader exists.
+                    "used_legacy_manifest_adapter": False,
                     "run_id": paths.run_id,
                     "lanes": list(args.lanes),
                     "scale": scale,

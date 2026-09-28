@@ -29,7 +29,6 @@ from examples.jax._lane_environment import (
 from examples.jax._lane_environment import (
     build_execution_environment,
 )
-from examples.jax._manifest import JaxExampleRecord, JaxExamplesManifest
 from examples.jax.outer_optimizer_policy import (
     OuterOptimizerPolicyError,
     validate_ready_example_policy,
@@ -48,18 +47,17 @@ class ChildResultValidationError(ValueError):
 
 
 def manifest_observability_payload(
-    manifest: JaxExamplesManifest | RuntimeContractPair,
+    manifest: RuntimeContractPair,
 ) -> dict[str, int | bool]:
-    """Return the schema/adapter fields emitted by every runner invocation."""
-    if isinstance(manifest, RuntimeContractPair):
-        return {
-            "examples_manifest_schema_version": manifest.version_pair[0],
-            "parity_manifest_schema_version": manifest.version_pair[1],
-            "used_legacy_manifest_adapter": manifest.used_legacy_adapter,
-        }
+    """Return the schema/adapter fields emitted by every runner invocation.
+
+    ``used_legacy_manifest_adapter`` is always ``False``: no legacy manifest
+    reader exists, and the key stays so the emitted line keeps its shape.
+    """
     return {
-        "manifest_schema_version": manifest.schema_version,
-        "used_legacy_manifest_adapter": manifest.used_legacy_manifest_adapter,
+        "examples_manifest_schema_version": manifest.version_pair[0],
+        "parity_manifest_schema_version": manifest.version_pair[1],
+        "used_legacy_manifest_adapter": False,
     }
 
 
@@ -75,7 +73,7 @@ class ChildResult:
 
 
 def build_child_command(
-    example: JaxExampleRecord | RuntimeExample,
+    example: RuntimeExample,
     *,
     repo_root: Path,
     scale: ExecutionScale = "bounded",
@@ -84,9 +82,7 @@ def build_child_command(
 
     if example.status == "ready":
         validate_ready_example_policy(
-            example.outer_optimizer_policy
-            if isinstance(example, RuntimeExample)
-            else None,
+            example.outer_optimizer_policy,
             example_id=example.id,
             example_path=example.path,
         )
@@ -151,7 +147,7 @@ def _parse_child_result(stdout: str, example_id: str) -> ChildResult:
 
 def _validate_child_result(
     result: ChildResult,
-    example: JaxExampleRecord | RuntimeExample,
+    example: RuntimeExample,
     profile: JaxExecutionProfile,
     scale: ExecutionScale,
 ) -> None:
@@ -188,7 +184,7 @@ def _validate_child_result(
 
 def _write_child_failure(
     *,
-    example: JaxExampleRecord | RuntimeExample,
+    example: RuntimeExample,
     command: tuple[str, ...],
     child_stdout: str,
     child_stderr: str,
@@ -196,12 +192,7 @@ def _write_child_failure(
     stderr: TextIO,
 ) -> None:
     print(f"FAIL {example.id}: {reason}", file=stderr)
-    lineage = (
-        example.source or "non-covering tutorial"
-        if isinstance(example, RuntimeExample)
-        else ", ".join(example.inspired_by)
-    )
-    print(f"native_source: {lineage}", file=stderr)
+    print(f"native_source: {example.source or 'non-covering tutorial'}", file=stderr)
     print(f"command: {shlex.join(command)}", file=stderr)
     print("stdout:", file=stderr)
     print(child_stdout, file=stderr, end="" if child_stdout.endswith("\n") else "\n")
@@ -210,7 +201,7 @@ def _write_child_failure(
 
 
 def run_lane(
-    manifest: JaxExamplesManifest | RuntimeContractPair,
+    manifest: RuntimeContractPair,
     lane: Lane,
     *,
     repo_root: Path,
@@ -237,7 +228,7 @@ def run_lane(
 
 
 def run_profile(
-    manifest: JaxExamplesManifest | RuntimeContractPair,
+    manifest: RuntimeContractPair,
     device: JaxDevice,
     intent: ExecutionIntent,
     scale: ExecutionScale = "bounded",
@@ -250,14 +241,9 @@ def run_profile(
     """Run every ready record for one explicit device and intent."""
     capability_lane: Lane = "cpu-smoke" if device == "cpu" else "gpu-strict"
 
-    examples = (
-        manifest.examples
-        if isinstance(manifest, RuntimeContractPair)
-        else manifest.jax_examples
-    )
     selected = tuple(
         example
-        for example in examples
+        for example in manifest.examples
         if example.status == "ready" and capability_lane in example.lanes
     )
     if not selected:

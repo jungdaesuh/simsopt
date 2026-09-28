@@ -1,19 +1,12 @@
-"""Typed no-write migration boundary for JAX example and parity manifests."""
+"""Typed ownership boundary for the JAX example and parity manifest pair."""
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Literal, Mapping
 
-from examples.jax._manifest import (
-    JaxExampleRecord,
-    JaxExamplesManifest,
-    parse_manifest_document,
-)
 from examples.jax.official_source_catalog import (
     OFFICIAL_NATIVE_EXAMPLE_SOURCE_SET,
     OFFICIAL_NATIVE_EXAMPLE_SOURCES,
@@ -25,8 +18,6 @@ from examples.jax.outer_optimizer_policy import (
 )
 from examples.jax.parity._manifest import (
     ParityManifest,
-    ParityRelationship,
-    parse_parity_manifest_document,
     parse_v2_parity_relationship_groups_document,
 )
 
@@ -34,7 +25,7 @@ SourceDispositionV3 = Literal["eligible", "hybrid", "blocked", "not_applicable"]
 PortStatus = Literal["planned", "ready", "blocked", "not_applicable"]
 ExampleStatus = Literal["planned", "ready"]
 ExampleClassification = Literal["mirror", "adapter", "hybrid", "tutorial"]
-TeachingKind = Literal["one_to_one", "combined", "compatibility"]
+TeachingKind = Literal["one_to_one", "combined"]
 DeviceScope = Literal[
     "full_workflow", "jax_region", "host_and_jax_slice", "jax_slice_only"
 ]
@@ -46,7 +37,7 @@ _SOURCE_DISPOSITIONS = frozenset({"eligible", "hybrid", "blocked", "not_applicab
 _PORT_STATUSES = frozenset({"planned", "ready", "blocked", "not_applicable"})
 _EXAMPLE_STATUSES = frozenset({"planned", "ready"})
 _CLASSIFICATIONS = frozenset({"mirror", "adapter", "hybrid", "tutorial"})
-_TEACHING_KINDS = frozenset({"one_to_one", "combined", "compatibility"})
+_TEACHING_KINDS = frozenset({"one_to_one", "combined"})
 _DEVICE_SCOPES = frozenset(
     {"full_workflow", "jax_region", "host_and_jax_slice", "jax_slice_only"}
 )
@@ -76,7 +67,6 @@ _EXAMPLE_FIELDS = frozenset(
         "smoke_args",
         "correctness_tests",
         "supported_device_scopes",
-        "compatibility",
     }
 )
 
@@ -93,13 +83,6 @@ class ContractVersionError(ValueError):
 class RuntimeDependencies:
     python_import_roots: tuple[str, ...]
     external_runtimes: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class CompatibilityAlias:
-    successor_example_id: str
-    warning: str
-    removal_after: str
 
 
 @dataclass(frozen=True)
@@ -128,7 +111,6 @@ class JaxExampleRecordV3:
     smoke_args: tuple[str, ...]
     correctness_tests: tuple[str, ...]
     supported_device_scopes: tuple[tuple[str, DeviceScope], ...]
-    compatibility: CompatibilityAlias | None
     outer_optimizer_policy: OuterOptimizerPolicy | None = None
 
     @property
@@ -155,26 +137,8 @@ class JaxExamplesManifestV3:
 @dataclass(frozen=True)
 class ManifestContractPair:
     version_pair: tuple[int, int]
-    used_legacy_adapter: bool
-    examples: JaxExamplesManifest | JaxExamplesManifestV3
+    examples: JaxExamplesManifestV3
     parity: ParityManifest
-
-
-@dataclass(frozen=True)
-class MigrationCandidate:
-    examples_bytes: bytes
-    parity_bytes: bytes
-    examples_sha256: str
-    parity_sha256: str
-    semantic_diff: Mapping[str, int]
-
-
-@dataclass(frozen=True)
-class _CandidateDocuments:
-    examples: dict[str, object]
-    parity: dict[str, object]
-    planned_one_to_one_count: int
-    relationship_count: int
 
 
 def _mapping(value: object, context: str) -> dict[str, object]:
@@ -350,24 +314,6 @@ def _device_scopes(value: object, context: str) -> tuple[tuple[str, DeviceScope]
     return tuple(entries)
 
 
-def _compatibility_alias(value: object, context: str) -> CompatibilityAlias | None:
-    if value is None:
-        return None
-    record = _mapping(value, context)
-    _exact_fields(
-        record,
-        frozenset({"successor_example_id", "warning", "removal_after"}),
-        "compatibility metadata",
-    )
-    return CompatibilityAlias(
-        successor_example_id=_string(
-            record["successor_example_id"], f"{context}.successor_example_id"
-        ),
-        warning=_string(record["warning"], f"{context}.warning"),
-        removal_after=_string(record["removal_after"], f"{context}.removal_after"),
-    )
-
-
 def _example_record(value: object, index: int) -> JaxExampleRecordV3:
     context = f"jax_examples[{index}]"
     record = _mapping(value, context)
@@ -395,17 +341,6 @@ def _example_record(value: object, index: int) -> JaxExampleRecordV3:
     teaching_value = _enum(
         record["teaching_kind"], _TEACHING_KINDS, f"{context}.teaching_kind"
     )
-    compatibility = _compatibility_alias(
-        record["compatibility"], f"{context}.compatibility"
-    )
-    if teaching_value == "compatibility" and compatibility is None:
-        raise ManifestV3ValidationError(
-            f"compatibility metadata is required for {record['id']}"
-        )
-    if teaching_value != "compatibility" and compatibility is not None:
-        raise ManifestV3ValidationError(
-            f"compatibility metadata is forbidden for {record['id']}"
-        )
     host_boundaries = _strings(record["host_boundaries"], f"{context}.host_boundaries")
     scopes = _device_scopes(
         record["supported_device_scopes"], f"{context}.supported_device_scopes"
@@ -438,13 +373,7 @@ def _example_record(value: object, index: int) -> JaxExampleRecordV3:
             if classification_value == "hybrid"
             else "tutorial"
         ),
-        teaching_kind=(
-            "one_to_one"
-            if teaching_value == "one_to_one"
-            else "combined"
-            if teaching_value == "combined"
-            else "compatibility"
-        ),
+        teaching_kind="one_to_one" if teaching_value == "one_to_one" else "combined",
         jax_surfaces=_strings(record["jax_surfaces"], f"{context}.jax_surfaces"),
         host_boundaries=host_boundaries,
         extras=_strings(record["extras"], f"{context}.extras"),
@@ -453,7 +382,6 @@ def _example_record(value: object, index: int) -> JaxExampleRecordV3:
             record["correctness_tests"], f"{context}.correctness_tests"
         ),
         supported_device_scopes=scopes,
-        compatibility=compatibility,
         outer_optimizer_policy=parse_outer_optimizer_policy(
             record.get("outer_optimizer_policy"),
             example_id=_string(record["id"], f"{context}.id"),
@@ -500,27 +428,6 @@ def _validate_v3_ownership(manifest: JaxExamplesManifestV3, repo_root: Path) -> 
     if len(example_paths) != len(set(example_paths)):
         raise ManifestV3ValidationError("duplicate executable path")
     by_id = {record.id: record for record in manifest.jax_examples}
-    for alias in manifest.jax_examples:
-        metadata = alias.compatibility
-        if metadata is None:
-            continue
-        successor = by_id.get(metadata.successor_example_id)
-        if successor is None:
-            raise ManifestV3ValidationError(
-                f"compatibility alias has unknown successor: {alias.id}"
-            )
-        if successor.teaching_kind != "one_to_one":
-            raise ManifestV3ValidationError(
-                f"compatibility successor is not one_to_one: {alias.id}"
-            )
-        if alias.id not in metadata.warning or successor.id not in metadata.warning:
-            raise ManifestV3ValidationError(
-                f"compatibility warning must name alias and successor: {alias.id}"
-            )
-        if metadata.removal_after != "one documented deprecation interval":
-            raise ManifestV3ValidationError(
-                f"compatibility removal interval is invalid: {alias.id}"
-            )
     owners: dict[str, str] = {}
     for source in all_sources:
         mirror_id = source.mirror_example_id
@@ -718,422 +625,17 @@ def load_manifest_contract_pair_documents(
     *,
     repo_root: Path,
 ) -> ManifestContractPair:
-    """Atomically accept legacy (v2/v1) or canonical (v3/v2), never a mix."""
+    """Atomically accept the example-schema-v3 and parity-schema-v2 pair."""
     examples_version = _schema_version(examples_document, "example")
     parity_version = _schema_version(parity_document, "parity")
-    if examples_version not in {2, 3}:
+    if examples_version != 3:
         raise ContractVersionError(f"unsupported example schema: {examples_version!r}")
-    if parity_version not in {1, 2}:
+    if parity_version != 2:
         raise ContractVersionError(f"unsupported parity schema: {parity_version!r}")
-    if (examples_version, parity_version) == (2, 1):
-        examples = parse_manifest_document(
-            examples_document,
-            repo_root=repo_root,
-            warn_legacy=False,
-            allow_historical_catalog=True,
-        )
-        parity = parse_parity_manifest_document(
-            parity_document,
-            examples_manifest=examples,
-            repo_root=repo_root,
-        )
-        return ManifestContractPair((2, 1), True, examples, parity)
-    if (examples_version, parity_version) == (3, 2):
-        examples_v3 = parse_examples_v3_document(
-            examples_document,
-            repo_root=repo_root,
-        )
-        parity_v2 = _parse_parity_v2_document(
-            parity_document,
-            examples_manifest=examples_v3,
-            repo_root=repo_root,
-        )
-        return ManifestContractPair((3, 2), False, examples_v3, parity_v2)
-    raise ContractVersionError(
-        "mixed manifest versions are forbidden: "
-        f"examples={examples_version}, parity={parity_version}"
-    )
-
-
-def _canonical_json_bytes(value: object) -> bytes:
-    return (
-        json.dumps(
-            value,
-            allow_nan=False,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        + "\n"
-    ).encode("utf-8")
-
-
-def _stable_mirror_id(source: str) -> str:
-    return "native-" + PurePosixPath(source).stem.replace("_", "-").lower()
-
-
-def _ordered_union(groups: tuple[tuple[str, ...], ...]) -> list[str]:
-    return sorted({entry for group in groups for entry in group})
-
-
-def _tutorial_teaching_contract(
-    example: JaxExampleRecord,
-) -> tuple[str, dict[str, str] | None]:
-    if not example.inspired_by:
-        raise ManifestV3ValidationError(
-            f"legacy tutorial has no source lineage: {example.id}"
-        )
-    if len(example.inspired_by) > 1:
-        return "combined", None
-    first_source = next(iter(example.inspired_by))
-    successor_id = _stable_mirror_id(first_source)
-    return (
-        "compatibility",
-        {
-            "successor_example_id": successor_id,
-            "warning": (
-                f"{example.id} is a non-covering compatibility lesson; "
-                f"use {successor_id} once it is ready."
-            ),
-            "removal_after": "one documented deprecation interval",
-        },
-    )
-
-
-def _tutorial_payload(example: JaxExampleRecord) -> dict[str, object]:
-    scope = "full_workflow" if example.execution_kind == "pure" else "jax_region"
-    teaching_kind, compatibility = _tutorial_teaching_contract(example)
-    return {
-        "id": example.id,
-        "path": example.path,
-        "status": example.status,
-        "tier": example.tier,
-        "classification": "tutorial",
-        "teaching_kind": teaching_kind,
-        "jax_surfaces": list(example.jax_surfaces),
-        "host_boundaries": list(example.host_boundaries),
-        "extras": list(example.extras),
-        "smoke_args": list(example.smoke_args),
-        "correctness_tests": list(example.correctness_tests),
-        "supported_device_scopes": {device: scope for device in example.devices},
-        "compatibility": compatibility,
-    }
-
-
-def _one_to_one_payload(
-    source: str,
-    target_classification: str,
-    covering_examples: tuple[JaxExampleRecord, ...],
-    jax_surfaces: tuple[str, ...],
-) -> dict[str, object]:
-    if not covering_examples:
-        raise ManifestV3ValidationError(
-            f"target source has no current public JAX surface coverage: {source}"
-        )
-    if not jax_surfaces:
-        raise ManifestV3ValidationError(
-            f"target source has no declared public JAX surfaces: {source}"
-        )
-    host_boundaries = _ordered_union(
-        tuple(example.host_boundaries for example in covering_examples)
-    )
-    extras = _ordered_union(tuple(example.extras for example in covering_examples))
-    devices = _ordered_union(tuple(example.devices for example in covering_examples))
-    if target_classification == "hybrid":
-        classification = "hybrid"
-        scopes = {
-            device: "jax_slice_only" if device == "gpu" else "host_and_jax_slice"
-            for device in devices
-        }
-    else:
-        classification = "mirror" if not host_boundaries else "adapter"
-        scope = "full_workflow" if classification == "mirror" else "jax_region"
-        scopes = {device: scope for device in devices}
-    pure_host_boundaries = [] if classification == "mirror" else host_boundaries
-    relative = PurePosixPath(source)
-    return {
-        "id": _stable_mirror_id(source),
-        "path": source,
-        "status": "planned",
-        "tier": relative.parts[0],
-        "classification": classification,
-        "teaching_kind": "one_to_one",
-        "jax_surfaces": list(jax_surfaces),
-        "host_boundaries": pure_host_boundaries,
-        "extras": extras,
-        "smoke_args": [],
-        "correctness_tests": [],
-        "supported_device_scopes": scopes,
-        "compatibility": None,
-    }
-
-
-def _inventory_rows(document: object) -> tuple[dict[str, object], ...]:
-    root = _mapping(document, "inventory")
-    if root.get("schema_version") != 1:
-        raise ManifestV3ValidationError("unsupported inventory schema")
-    rows = tuple(
-        _mapping(value, f"inventory.native_sources[{index}]")
-        for index, value in enumerate(
-            _sequence(root.get("native_sources"), "inventory.native_sources")
-        )
-    )
-    sources = tuple(_string(row.get("source"), "inventory source") for row in rows)
-    if sources != tuple(sorted(set(sources))):
-        raise ManifestV3ValidationError("inventory sources must be sorted and unique")
-    return rows
-
-
-def _inventory_coverage(
-    inventory: dict[str, object],
-    legacy_examples: JaxExamplesManifest,
-) -> tuple[tuple[JaxExampleRecord, ...], tuple[str, ...]]:
-    source = _string(inventory.get("source"), "inventory source")
-    raw_entries = _sequence(
-        inventory.get("current_public_jax_surface_coverage"),
-        f"inventory coverage for {source}",
-    )
-    examples_by_id = {example.id: example for example in legacy_examples.jax_examples}
-    covering_examples: list[JaxExampleRecord] = []
-    surface_groups: list[tuple[str, ...]] = []
-    for index, raw_entry in enumerate(raw_entries):
-        entry = _mapping(raw_entry, f"inventory coverage for {source}[{index}]")
-        example_id = _string(
-            entry.get("example_id"),
-            f"inventory coverage example for {source}",
-        )
-        example = examples_by_id.get(example_id)
-        if example is None:
-            raise ManifestV3ValidationError(
-                f"inventory coverage references unknown example {example_id}: {source}"
-            )
-        covering_examples.append(example)
-        surface_groups.append(
-            _strings(
-                entry.get("jax_surfaces"),
-                f"inventory coverage surfaces for {source}",
-            )
-        )
-    return tuple(covering_examples), tuple(_ordered_union(tuple(surface_groups)))
-
-
-def _source_payload(
-    inventory: dict[str, object], mirror_id: str | None
-) -> dict[str, object]:
-    source = _string(inventory.get("source"), "inventory source")
-    target = _enum(
-        inventory.get("recommended_target_classification"),
-        frozenset({"mirror", "hybrid", "blocked", "not_applicable"}),
-        f"inventory target for {source}",
-    )
-    reason = _string(inventory.get("reason"), f"inventory reason for {source}")
-    reconsideration = _optional_string(
-        inventory.get("reconsideration_condition"),
-        f"inventory reconsideration for {source}",
-    )
-    disposition = "eligible" if target == "mirror" else target
-    return {
-        "source": source,
-        "disposition": disposition,
-        "port_status": (
-            "planned"
-            if target in {"mirror", "hybrid"}
-            else "blocked"
-            if target == "blocked"
-            else "not_applicable"
-        ),
-        "reason": reason,
-        "blocker": reason if target == "blocked" else None,
-        "reconsideration_condition": (
-            reconsideration if target in {"blocked", "not_applicable"} else None
-        ),
-        "dependencies": inventory.get("runtime_dependencies"),
-        "mirror_example_id": mirror_id,
-    }
-
-
-def _pending_parity_payload(
-    source: str,
-    mirror_id: str,
-    legacy_relationship: ParityRelationship | None,
-) -> dict[str, object]:
-    omitted = (
-        sorted(
-            set(legacy_relationship.workflow_stages)
-            | set(legacy_relationship.omitted_scientific_stages)
-        )
-        if legacy_relationship is not None
-        else ["complete_native_workflow"]
-    )
-    if not omitted:
-        omitted = ["complete_native_workflow"]
-    return {
-        "case_id": None,
-        "jax_example_id": mirror_id,
-        "native_source": source,
-        "classification": "unsupported",
-        "classification_reason": (
-            "The exact-name mirror is planned and has no source-owned "
-            "RED-GREEN-REFACTOR parity receipt yet."
-        ),
-        "scale_tier": "not_applicable",
-        "oracle_kind": (
-            legacy_relationship.oracle_kind
-            if legacy_relationship is not None
-            else "pending_native_oracle"
-        ),
-        # An unsupported relationship may only carry the unsupported cost
-        # vocabulary ("scheduled" or "not_applicable", parity/_manifest.py:193).
-        # A legacy tutorial's executed "smoke" tier says nothing about the
-        # pending mirror, whose parity work is merely scheduled.
-        "cost_tier": (
-            legacy_relationship.cost_tier
-            if legacy_relationship is not None
-            and legacy_relationship.cost_tier == "not_applicable"
-            else "scheduled"
-        ),
-        "workflow_stages": [],
-        "omitted_scientific_stages": omitted,
-        "excluded_teaching_stages": (
-            list(legacy_relationship.excluded_teaching_stages)
-            if legacy_relationship is not None
-            else []
-        ),
-        "comparison_routes": [],
-        "correctness_tests": [],
-        "blocker": "Awaiting the exact-name mirror and matched native/JAX evidence.",
-    }
-
-
-def _candidate_documents(
-    legacy_examples: JaxExamplesManifest,
-    legacy_parity: ParityManifest,
-    inventory_rows: tuple[dict[str, object], ...],
-) -> _CandidateDocuments:
-    source_payloads: list[dict[str, object]] = []
-    experimental_payloads: list[dict[str, object]] = []
-    one_to_one_payloads: list[dict[str, object]] = []
-    relationships: list[dict[str, object]] = []
-    experimental_relationships: list[dict[str, object]] = []
-    legacy_relationship_by_source = {
-        relationship.native_source: relationship
-        for relationship in legacy_parity.relationships
-    }
-    for inventory in inventory_rows:
-        source = _string(inventory.get("source"), "inventory source")
-        target = _string(
-            inventory.get("recommended_target_classification"),
-            f"inventory target for {source}",
-        )
-        # The inventory covers every native source in the tree, official or
-        # branch-added; the candidate keeps the two apart exactly the way the
-        # active manifest does, so the official catalog stays the pinned
-        # upstream inventory and its parity group stays official too.
-        official = source in OFFICIAL_NATIVE_EXAMPLE_SOURCE_SET
-        if target in {"mirror", "hybrid"}:
-            mirror_id = _stable_mirror_id(source)
-            covering, jax_surfaces = _inventory_coverage(
-                inventory,
-                legacy_examples,
-            )
-            one_to_one_payloads.append(
-                _one_to_one_payload(
-                    source,
-                    target,
-                    covering,
-                    jax_surfaces,
-                )
-            )
-            (relationships if official else experimental_relationships).append(
-                _pending_parity_payload(
-                    source,
-                    mirror_id,
-                    legacy_relationship_by_source.get(source),
-                )
-            )
-        else:
-            mirror_id = None
-        payload = _source_payload(inventory, mirror_id)
-        (source_payloads if official else experimental_payloads).append(payload)
-    return _CandidateDocuments(
-        examples={
-            "schema_version": 3,
-            "source_catalog": source_payloads,
-            "experimental_sources": experimental_payloads,
-            "jax_examples": [
-                *(
-                    _tutorial_payload(example)
-                    for example in legacy_examples.jax_examples
-                ),
-                *one_to_one_payloads,
-            ],
-        },
-        parity={
-            "schema_version": 2,
-            "relationships": relationships,
-            "experimental_relationships": experimental_relationships,
-        },
-        planned_one_to_one_count=len(one_to_one_payloads),
-        relationship_count=len(relationships) + len(experimental_relationships),
-    )
-
-
-def build_v3_candidates(
-    *,
-    examples_v2_document: object,
-    parity_v1_document: object,
-    inventory_document: object,
-    repo_root: Path,
-) -> MigrationCandidate:
-    """Build validated canonical bytes without mutating either active manifest."""
-    legacy_examples = parse_manifest_document(
-        examples_v2_document,
-        repo_root=repo_root,
-        warn_legacy=False,
-        allow_historical_catalog=True,
-    )
-    if legacy_examples.schema_version != 2:
-        raise ManifestV3ValidationError("migration requires example schema v2")
-    legacy_parity = parse_parity_manifest_document(
-        parity_v1_document,
-        examples_manifest=legacy_examples,
+    examples = parse_examples_v3_document(examples_document, repo_root=repo_root)
+    parity = _parse_parity_v2_document(
+        parity_document,
+        examples_manifest=examples,
         repo_root=repo_root,
     )
-    inventory_rows = _inventory_rows(inventory_document)
-    legacy_sources = tuple(row.source for row in legacy_examples.source_catalog)
-    inventory_sources = tuple(
-        _string(row.get("source"), "inventory source") for row in inventory_rows
-    )
-    if not set(legacy_sources) <= set(inventory_sources):
-        raise ManifestV3ValidationError(
-            "inventory does not retain every source from the v2 source catalog"
-        )
-
-    documents = _candidate_documents(
-        legacy_examples,
-        legacy_parity,
-        inventory_rows,
-    )
-    load_manifest_contract_pair_documents(
-        documents.examples,
-        documents.parity,
-        repo_root=repo_root,
-    )
-    examples_bytes = _canonical_json_bytes(documents.examples)
-    parity_bytes = _canonical_json_bytes(documents.parity)
-    metrics = MappingProxyType(
-        {
-            "legacy_tutorial_count": len(legacy_examples.jax_examples),
-            "planned_one_to_one_count": documents.planned_one_to_one_count,
-            "legacy_relationship_count": len(legacy_parity.relationships),
-            "canonical_relationship_count": documents.relationship_count,
-            "promoted_parity_claim_count": 0,
-        }
-    )
-    return MigrationCandidate(
-        examples_bytes=examples_bytes,
-        parity_bytes=parity_bytes,
-        examples_sha256=hashlib.sha256(examples_bytes).hexdigest(),
-        parity_sha256=hashlib.sha256(parity_bytes).hexdigest(),
-        semantic_diff=metrics,
-    )
+    return ManifestContractPair((3, 2), examples, parity)
