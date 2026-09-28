@@ -62,6 +62,10 @@ from simsopt_jax.runtime.host_boundary import (
     host_scalar as _host_scalar,
     host_tree as _hostify_tree,
 )
+from simsopt_jax.runtime.jaxpr_closure import (
+    closure_converted_array_function as _closure_converted_array_function,
+    device_put_closure_consts as _device_put_closure_consts,
+)
 from simsopt_jax.core._device_scalars import staged_like as _staged_like
 from simsopt_jax.core._math_utils import (
     as_compute_array as _as_compute_array,
@@ -6308,14 +6312,26 @@ class BoozerSurfaceJAX(Optimizable):
         """
         x_initial = _as_jax_float64(x0)
         runtime_args = tuple(args)
+        # Every array the residual reads besides ``x`` -- its ``args`` and
+        # whatever it closes over -- and the stopping controls enter the solve
+        # program as explicit operands placed with ``x``. A closed-over device
+        # array would be read back to the host when the program is lowered,
+        # which ``transfer_guard("disallow")`` rejects on an accelerator.
+        converted_residual, residual_consts = _closure_converted_array_function(
+            lambda x: residual_fn(x, *runtime_args),
+            x_initial,
+        )
+        residual_consts = _device_put_closure_consts(residual_consts, x_initial)
+        tol_operand = _staged_like(x_initial, tol)
+        maxiter_operand = _staged_like(x_initial, maxiter, dtype=np.int32)
 
         @jax.jit
-        def solve(initial_x, *dynamic_args):
+        def solve(initial_x, consts, tol_value_operand, maxiter_value_operand):
+            def residual_of(x):
+                return converted_residual(x, consts)
+
             def residual_and_jacobian(x):
-                return (
-                    residual_fn(x, *dynamic_args),
-                    jax.jacobian(residual_fn, argnums=0)(x, *dynamic_args),
-                )
+                return residual_of(x), jax.jacobian(residual_of)(x)
 
             always_true = jnp.all(jnp.equal(initial_x, initial_x))
             scalar_one = always_true.astype(initial_x.dtype)
@@ -6338,8 +6354,8 @@ class BoozerSurfaceJAX(Optimizable):
                 & jnp.all(jnp.isfinite(gradient))
                 & jnp.all(jnp.isfinite(normal_matrix))
             )
-            tol_value = scalar_one * tol
-            maxiter_value = nit + maxiter
+            tol_value = scalar_one * tol_value_operand
+            maxiter_value = nit + maxiter_value_operand
 
             def cond_fn(state):
                 (
@@ -6424,7 +6440,7 @@ class BoozerSurfaceJAX(Optimizable):
             nit,
             all_finite,
             tol_value,
-        ) = solve(x_initial, *runtime_args)
+        ) = solve(x_initial, residual_consts, tol_operand, maxiter_operand)
 
         return {
             "x": x,
