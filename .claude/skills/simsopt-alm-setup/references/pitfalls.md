@@ -13,15 +13,20 @@ Each entry: the symptom, the cause, the fix.
    each subproblem and the others converge late or never. Divide each row by
    its bound or typical size, and f by a reference value such as f(x0);
    `sign_check.py` warns when gradient norms spread over more than 1e3 or a
-   value is far from O(1). The solver's own step tests (accepting an inner
-   result, counting progress, a stall, placing a point on a bound) compare
-   the reported totals with no round-off allowance: a change must beat a
-   fraction of the step's first-order size, so an offset added to f changes
-   none of them. A change the totals cannot resolve (evaluation noise, or a
-   large constant in f that rounds it away) counts as no change: expect a
-   `plateau_stall` or `max_outer_*` stop, not a false success. L-BFGS-B's own
-   `ftol` stop is relative to max(1, |f|). So remove large constant offsets
-   from f and keep its value, not only its variation, near O(1).
+   value is far from O(1). Remove large constant offsets from f as well:
+   `converged` certifies the implemented approximate-KKT tests at the
+   returned point, not global optimality, not descent from the start, and
+   not the same basin under a large constant offset. Step acceptance compares
+   the reported totals with a tolerance of a fraction of the step's
+   first-order size (no round-off allowance), and L-BFGS-B's own `ftol` stop
+   is relative to max(1, |f|), so both see an offset once |f| dwarfs f's
+   variation: at float resolution a tie can lead to a different local KKT
+   point. Example: f = C + 0.001 x - sin(2 pi x)/pi on [0, 1] from x = 0.
+   With C = 0 the run converges in the interior, x = 0.2499; with C = 6e13
+   (spacing 0.0078125) f(0) and f(1) tie though f(1) - f(0) = +0.001, and it
+   converges at the bound KKT point x = 1. A snap onto a bound is kept only
+   on a strict reported decrease, so a near-bound improvement the totals
+   cannot represent stalls instead.
 3. **`maxiter` is a whole-run budget.** `inner_options["maxiter"]` counts
    L-BFGS-B iterations over every subproblem of one `minimize_alm` call, not
    per subproblem. A small value ends the run early with the last step's

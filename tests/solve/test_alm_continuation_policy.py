@@ -979,6 +979,56 @@ class AlmInnerStepOffsetTests(unittest.TestCase):
                 self.assertFalse(result.success, result.message)
                 np.testing.assert_array_equal(result.x, [0.0])
 
+    def test_a_large_offset_may_change_the_basin_but_not_the_certificate(self):
+        # f = C + 0.001 x - sin(2 pi x)/pi on [0, 1] from x = 0, an inert row.
+        # At C = 6e13 (spacing 1/128) f(0) and f(1) tie though f(1) - f(0) =
+        # +0.001, and the run may end at the bound KKT point x = 1 instead of
+        # the interior one near 0.25: success certifies the approximate-KKT
+        # tests at the returned point, checked here from the evaluator itself.
+        settings = alm.ALMSettings(max_outer_iterations=10)
+        bounds = [(0.0, 1.0)]
+
+        def make_evaluate(offset):
+            def evaluate(x, multipliers, penalty):
+                return alm.augmented_inequality_objective(
+                    offset + 0.001 * float(x[0]) - np.sin(2.0 * np.pi * x[0]) / np.pi,
+                    np.array([0.001 - 2.0 * np.cos(2.0 * np.pi * x[0])]),
+                    np.array([-1.0]), [np.zeros(1)], multipliers, penalty,
+                )
+            return evaluate
+
+        basins = {}
+        for offset in (0.0, 1.0e12, 6.0e13):
+            with self.subTest(offset=offset):
+                evaluate = make_evaluate(offset)
+                result = alm.minimize_alm(
+                    np.array([0.0]), ["inert"], evaluate, settings, {"maxiter": 30},
+                    base_bounds=bounds,
+                )
+                self.assertTrue(result.success, result.message)
+                x = np.asarray(result.x)
+                evaluation = evaluate(x, np.asarray(result.multipliers), result.penalty)
+                g = evaluation["constraint_values"]
+                shift = np.maximum(0.0, result.multipliers + result.penalty * g)
+                self.assertLessEqual(np.max(np.maximum(g, 0.0)), settings.feasibility_tol)
+                self.assertLessEqual(float(shift @ np.maximum(0.0, -g)), settings.feasibility_tol)
+                gradient = evaluation["base_grad"] + sum(
+                    s * row for s, row in zip(shift, evaluation["constraint_grads"])
+                )
+                lower, upper = np.asarray(bounds).T
+                held = ((x == upper) & (gradient < 0.0)) | ((x == lower) & (gradient > 0.0))
+                self.assertLessEqual(
+                    float(np.linalg.norm(np.where(held, 0.0, gradient))),
+                    settings.stationarity_tol,
+                )
+                basins[offset] = "bound" if held.any() else "interior"
+        if golden.bitwise_environment():
+            # Observed in the recording environment only; SciPy's iterates
+            # elsewhere may pick either basin at C = 6e13.
+            self.assertEqual(
+                basins, {0.0: "interior", 1.0e12: "interior", 6.0e13: "bound"}
+            )
+
     def test_a_nonfinite_trial_is_rejected_whatever_its_total(self):
         # The acceptance slack now scales with the step; a sanitized
         # nonfinite trial is rejected by its flag, not by its elevated total.
