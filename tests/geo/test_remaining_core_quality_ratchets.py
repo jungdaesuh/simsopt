@@ -175,7 +175,6 @@ _OPTIMIZER_COMPAT_REEXPORT_ALLOWLIST = {
             "_solve_hessian_least_squares_system_with_status",
             "_solve_hessian_system",
             "_solve_hessian_system_with_status",
-            "_solve_regularized_normal_system_lsmr_j_with_status",
             "_solve_symmetric_operator_cg_with_status",
             "adjoint_hessian_stabilization",
         }

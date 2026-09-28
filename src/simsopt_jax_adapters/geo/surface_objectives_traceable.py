@@ -119,7 +119,6 @@ from .boozer_surface import (
     _ONDEVICE_OPTIMIZER_METHODS,
     _boozer_exact_residual,
     _make_boozer_penalty_objective_closure,
-    _make_boozer_penalty_residual_closure,
 )
 
 
@@ -883,12 +882,7 @@ def _traceable_directional_inner_objective(
 
 def _traceable_non_dense_adjoint_selected() -> bool:
     """Return whether the explicit adjoint route is matrix-free."""
-    return _adjoint_linear_solve._ADJOINT_LINEAR_SOLVER in ("cg", "lsmr_j")
-
-
-def _traceable_residual_jacobian_adjoint_selected() -> bool:
-    """Return whether the adjoint route acts on the residual Jacobian."""
-    return _adjoint_linear_solve._ADJOINT_LINEAR_SOLVER == "lsmr_j"
+    return _adjoint_linear_solve._ADJOINT_LINEAR_SOLVER == "cg"
 
 
 def _traceable_solve_hessian_linearization(
@@ -905,9 +899,6 @@ def _traceable_solve_hessian_linearization(
     certificate_probe_key=None,
 ):
     explicit_adjoint = transpose and _traceable_non_dense_adjoint_selected()
-    residual_jacobian_adjoint = (
-        explicit_adjoint and _traceable_residual_jacobian_adjoint_selected()
-    )
     objective_fn = _make_boozer_penalty_objective_closure(
         coil_set_spec=coil_set_spec,
         decision_split_mode="jvp",
@@ -936,21 +927,15 @@ def _traceable_solve_hessian_linearization(
 
     # `_traceable_result_linear_solve_factors` deliberately returns ``None`` on
     # the LS runtime lane so adjoint solves stay matrix-free. The default path
-    # uses the pure-JAX Hessian operator solve; the explicit ``lsmr_j`` selector
-    # supplies the residual-J closure to the same solver seam. Both remain fully
-    # traceable under JIT and do not call a live host solver. Removing this path
+    # uses the pure-JAX Hessian operator solve (the explicit ``cg`` selector
+    # solves the same operator matrix-free). Both remain fully traceable under
+    # JIT and do not call a live host solver. Removing this path
     # would force every LS warm-start and adjoint solve to surface
     # ``success=False`` and emit NaN gradients (the adjoint-selector coverage in
     # tests/geo/test_surface_objectives_jax.py, e.g.
     # ``test_explicit_adjoint_selector_overrides_supplied_dense_factors``,
     # exercises this seam).
     residual_kwargs = {}
-    if residual_jacobian_adjoint:
-        residual_kwargs["residual_fn"] = _make_boozer_penalty_residual_closure(
-            coil_set_spec=coil_set_spec,
-            decision_split_mode="jvp",
-            **_traceable_inner_objective_kwargs(objective_kwargs),
-        )
     linear_solver = (
         _adjoint_linear_solve._ADJOINT_LINEAR_SOLVER if transpose else "dense"
     )
@@ -5883,13 +5868,6 @@ def _traceable_term_adjoint_solve_report(
         )
         hvp_fn = _linear_solve._hessian_vector_product_fn(objective_fn)
         candidate_stab = float(linear_solve_stab)
-        residual_kwargs = {}
-        if _adjoint_linear_solve._ADJOINT_LINEAR_SOLVER == "lsmr_j":
-            residual_kwargs["residual_fn"] = _make_boozer_penalty_residual_closure(
-                coil_set_spec=coil_set_spec,
-                decision_split_mode="jvp",
-                **_traceable_inner_objective_kwargs(objective_kwargs),
-            )
         solution, attempt_status = (
             _adjoint_linear_solve._solve_hessian_least_squares_system_with_status(
                 objective_fn,
@@ -5897,7 +5875,6 @@ def _traceable_term_adjoint_solve_report(
                 rhs,
                 stab=candidate_stab,
                 tol=linear_solve_tol,
-                **residual_kwargs,
             )
         )
         attempt_success = _linear_solve._linear_solve_status_success(attempt_status)

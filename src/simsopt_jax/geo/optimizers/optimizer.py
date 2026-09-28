@@ -290,7 +290,6 @@ from simsopt_jax.geo.optimizers.adjoint_linear_solve import (
     _solve_hessian_least_squares_system_with_status as _solve_hessian_least_squares_system_with_status,
     _solve_hessian_system as _solve_hessian_system,
     _solve_hessian_system_with_status as _solve_hessian_system_with_status,
-    _solve_regularized_normal_system_lsmr_j_with_status as _solve_regularized_normal_system_lsmr_j_with_status,
     _solve_symmetric_operator_cg_with_status as _solve_symmetric_operator_cg_with_status,
     adjoint_hessian_stabilization as adjoint_hessian_stabilization,
 )
@@ -4064,16 +4063,11 @@ def dense_operator_chunk_batch_size():
 
 
 # Solver for the inner-Boozer Gauss-Newton adjoint system (``J^T J + stab I``,
-# symmetric positive-(semi)definite).  Any value other than ``"cg"`` or
-# ``"lsmr_j"`` (default ``"dense"``) keeps the established path: a dense
-# ``lstsq`` solve when the N x N operator fits ``max_dense_jacobian_bytes``, else
-# an operator-only GMRES refinement.  ``"cg"`` solves the same square system
-# matrix-free with ``lineax`` CG.  ``"lsmr_j"`` is an explicit experimental
-# comparator: it requires a residual-vector closure and positive ``stab`` so the
-# system is solved as a regularized least-squares problem on the unsquared
-# residual Jacobian ``[J; sqrt(stab) I]``.  The unstabilized production
-# ``stab=0`` case needs a KKT/two-solve formulation, not a disguised normal-
-# equation solve.  Read once at import (selects a static trace-time branch).
+# symmetric positive-(semi)definite).  Any value other than ``"cg"`` (default
+# ``"dense"``) keeps the established path: a dense ``lstsq`` solve when the N x N
+# operator fits ``max_dense_jacobian_bytes``, else an operator-only GMRES
+# refinement.  ``"cg"`` solves the same square system matrix-free with
+# ``lineax`` CG.  Read once at import (selects a static trace-time branch).
 
 
 # Operator-only square solves historically performed one residual-correction

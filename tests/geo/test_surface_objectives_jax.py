@@ -9777,18 +9777,13 @@ class TestToroidalFluxObjectParity:
         )
 
 
-@pytest.mark.parametrize(
-    ("selector", "uses_residual_jacobian"),
-    [("cg", False), ("lsmr_j", True)],
-)
+@pytest.mark.parametrize("selector", ["cg"])
 def test_explicit_adjoint_selector_overrides_supplied_dense_factors(
     monkeypatch,
     selector,
-    uses_residual_jacobian,
 ):
     """An explicit matrix-free adjoint selector must override supplied PLU."""
     objective_fn = object()
-    residual_fn = object()
     observed = {}
     monkeypatch.setattr(
         adjoint_linear_solve_module,
@@ -9799,11 +9794,6 @@ def test_explicit_adjoint_selector_overrides_supplied_dense_factors(
         surfaceobjectives_traceable_jax_module,
         "_make_boozer_penalty_objective_closure",
         lambda **_kwargs: objective_fn,
-    )
-    monkeypatch.setattr(
-        surfaceobjectives_traceable_jax_module,
-        "_make_boozer_penalty_residual_closure",
-        lambda **_kwargs: residual_fn,
     )
 
     def fail_plu(*_args, **_kwargs):
@@ -9868,11 +9858,11 @@ def test_explicit_adjoint_selector_overrides_supplied_dense_factors(
     assert observed["objective_fn"] is objective_fn
     assert observed["x"] is solved_x
     assert observed["rhs"] is rhs
-    assert observed["residual_fn"] is (residual_fn if uses_residual_jacobian else None)
+    assert observed["residual_fn"] is None
     assert observed["solver"] == selector
 
 
-@pytest.mark.parametrize("selector", ["cg", "lsmr_j"])
+@pytest.mark.parametrize("selector", ["cg"])
 @pytest.mark.parametrize("with_factors", [False, True])
 def test_explicit_adjoint_selector_does_not_reroute_forward_predictor(
     monkeypatch,
