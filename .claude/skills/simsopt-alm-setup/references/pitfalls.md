@@ -22,9 +22,11 @@ Each entry: the symptom, the cause, the fix.
    is relative to max(1, |f|), so both see an offset once |f| dwarfs f's
    variation: at float resolution a tie can lead to a different local KKT
    point. Example: f = C + 0.001 x - sin(2 pi x)/pi on [0, 1] from x = 0.
-   With C = 0 the run converges in the interior, x = 0.2499; with C = 6e13
-   (spacing 0.0078125) f(0) and f(1) tie though f(1) - f(0) = +0.001, and it
-   converges at the bound KKT point x = 1. A snap onto a bound is kept only
+   In the golden recording environment, with C = 0 the run converges in the
+   interior, x = 0.2499; with C = 6e13 (spacing 0.0078125) f(0) and f(1) tie
+   though f(1) - f(0) = +0.001, and it converges at the bound KKT point x = 1.
+   Other SciPy builds may pick either local KKT point; the certificate holds
+   at whichever point is returned. A snap onto a bound is kept only
    on a strict reported decrease, so a near-bound improvement the totals
    cannot represent stalls instead.
 3. **`maxiter` is a whole-run budget.** `inner_options["maxiter"]` counts
