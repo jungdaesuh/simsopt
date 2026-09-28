@@ -28,8 +28,8 @@ For each scenario in ``alm_golden_scenarios.SCENARIOS`` this script:
 3. writes ``<scenario>.json`` (the encoded trajectory plus its outcomes) and
    ``manifest.json`` (fixture digests, the Python, numpy and SciPy versions
    and the machine the replay needs for bitwise equality, the git blob ids of
-   the ``simsopt.solve.alm`` sources that produced them, and the outcome
-   union).
+   the ``simsopt.solve.alm`` sources that produced them and of the scripts
+   whose rules judge a replay, and the outcome union).
 """
 
 from __future__ import annotations
@@ -136,9 +136,24 @@ def _git_blob_id(data: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
+# The golden-directory scripts whose rules decide a replay: the scenarios,
+# INTENDED_OUTCOMES here, and the noise and tolerance rules of the
+# sensitivity measurement.
+PROVENANCE_SCRIPTS = (
+    "alm_golden_scenarios.py",
+    "generate_alm_golden.py",
+    "measure_alm_golden_sensitivity.py",
+)
+
+
 def alm_source_blob_ids() -> dict[str, str]:
+    """Git blob ids of the imported ``simsopt.solve.alm`` sources and of
+    ``PROVENANCE_SCRIPTS``, which ``manifest.json`` and ``sensitivity.json``
+    record."""
     package_dir = Path(alm.__file__).resolve().parent
-    paths = sorted(package_dir.glob("*.py")) + [Path(golden.__file__).resolve()]
+    paths = sorted(package_dir.glob("*.py")) + [
+        golden.FIXTURE_DIR / script for script in PROVENANCE_SCRIPTS
+    ]
     return {
         (f"simsopt/solve/alm/{path.name}" if path.parent == package_dir else path.name):
         _git_blob_id(path.read_bytes())

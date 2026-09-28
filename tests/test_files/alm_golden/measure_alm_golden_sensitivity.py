@@ -38,17 +38,15 @@ not produce. For every scenario it records:
   (``INTENDED_OUTCOMES``) that is among them;
 * ``unstable_intended_outcomes``: the intended outcomes some perturbed run
   missed, which only the recording environment's exact replay checks;
-* ``open_outcome_set``: for a label-only scenario, the outcomes held-out
-  samples (``HOLDOUT_SEEDS``) reached beyond ``observed_outcomes``; such a set
-  is still growing, so off the recording environment the replay does not
-  bound the outcomes, only the intended outcomes and the invariants;
 * ``spread``: per boundary quantity, the largest deviation from the golden
-  (``alm_golden_scenarios.boundary_deviations``) over the calibration runs;
-  every held-out run of a numeric scenario must stay within the tolerances,
-  or the measurement fails.
+  (``alm_golden_scenarios.boundary_deviations``) over the calibration runs.
 
-Calibration uses ``SEEDS`` (48 samples over ``ULPS``), validation
-``HOLDOUT_SEEDS`` (96 more); ``always_observed`` spans both.
+Calibration uses ``SEEDS`` (144 samples over ``ULPS``), validation
+``HOLDOUT_SEEDS`` (96 more); ``always_observed`` spans both. The measurement
+fails, asking for more calibration seeds, when a held-out run of a numeric
+scenario leaves its tolerances or path, or a held-out run of a label-only
+scenario reaches an outcome outside ``observed_outcomes``: each recorded
+outcome set is closed under the held-out samples.
 
 The replay test sets each numeric tolerance to ``10 x max(spread, eps)``.
 Rerun from the repository root, single-threaded, whenever the goldens or the
@@ -73,7 +71,7 @@ import alm_golden_scenarios as golden
 from generate_alm_golden import INTENDED_OUTCOMES, alm_source_blob_ids
 
 ULPS = (1, 2, 3, 4)
-SEEDS = tuple(range(1, 13))
+SEEDS = tuple(range(1, 37))
 HOLDOUT_SEEDS = tuple(range(100, 124))
 TOLERANCE_FACTOR = 10.0
 # A regression of this relative size must fail the numeric replay.
@@ -185,14 +183,18 @@ def measure_scenario(scenario) -> dict:
                 f"{ceiling:.0e} under {ULPS[0]}-{ULPS[-1]} ulp noise: "
                 + ", ".join(f"{q} {d:.1e}" for q, d in sensitive.items())
             )
-    # Held-out samples: a numeric scenario must stay within its tolerances;
-    # a label-only scenario whose outcome set still grows has an open set.
-    unobserved = set()
+    # Held-out samples: a numeric scenario must stay within its tolerances,
+    # a label-only scenario within its observed outcomes.
     for ulps, seed in _samples(HOLDOUT_SEEDS):
         trajectory = runs[ulps, seed]
         outcomes = golden.scenario_outcomes(trajectory)
         if label_only is not None:
-            unobserved |= outcomes - observed
+            unobserved = sorted(outcomes - observed)
+            if unobserved:
+                raise SystemExit(
+                    f"{scenario.name}: held-out {ulps} ulp, seed {seed} reached "
+                    f"{unobserved}, never observed in calibration; widen SEEDS"
+                )
             continue
         structural, deviations = golden.boundary_deviations(
             expected, golden.scenario_boundary_values(trajectory)
@@ -208,9 +210,6 @@ def measure_scenario(scenario) -> dict:
             )
     return {
         "label_only": label_only,
-        "open_outcome_set": (
-            f"held-out samples reached {sorted(unobserved)}" if unobserved else None
-        ),
         "observed_outcomes": sorted(observed),
         "always_observed": sorted(always),
         "unstable_intended_outcomes": sorted(set(INTENDED_OUTCOMES[scenario.name]) - always),

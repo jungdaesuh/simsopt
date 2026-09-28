@@ -19,7 +19,31 @@
    9,
    10,
    11,
-   12
+   12,
+   13,
+   14,
+   15,
+   16,
+   17,
+   18,
+   19,
+   20,
+   21,
+   22,
+   23,
+   24,
+   25,
+   26,
+   27,
+   28,
+   29,
+   30,
+   31,
+   32,
+   33,
+   34,
+   35,
+   36
   ],
   "holdout_seeds": [
    100,
@@ -71,12 +95,13 @@
   "simsopt/solve/alm/policy.py": "2a4b40573a4bff86aa8099c0f58a793b86818073",
   "simsopt/solve/alm/problem.py": "3dae69d828aff8402c5e4bc7de19c6af4eeb7824",
   "simsopt/solve/alm/taylor.py": "0145e7432911ae1ee77ed408c54ced10e03d5124",
-  "alm_golden_scenarios.py": "cd67f25e11be56f7eced16dc4dc1278ab4b1bad2"
+  "alm_golden_scenarios.py": "cd67f25e11be56f7eced16dc4dc1278ab4b1bad2",
+  "generate_alm_golden.py": "58110c26da53408dfa7d56b7bbf1e63c42b5bd69",
+  "measure_alm_golden_sensitivity.py": "572a15e9c25a9d600298f17ff8c3df40475dfca6"
  },
  "scenarios": {
   "toy_convex": {
    "label_only": null,
-   "open_outcome_set": null,
    "observed_outcomes": [
     "callback:evaluate_problem",
     "termination:converged"
@@ -87,16 +112,15 @@
    ],
    "unstable_intended_outcomes": [],
    "spread": {
-    "x": 7.216449660063518e-15,
-    "objective": 7.16093850883226e-15,
-    "max_violation": 7.105427370835892e-15,
+    "x": 1.099120794378905e-14,
+    "objective": 1.0658141036401503e-14,
+    "max_violation": 1.0658140970227054e-14,
     "multipliers": 3.517186542012496e-13,
     "penalty": 0.0
    }
   },
   "penalty_ramp_to_cap": {
    "label_only": "outcomes change under 1 ulp, seed 3: ['callback:restore_incumbent_state', 'restored:final_iterate_worse_than_best_feasible', 'termination:penalty_cap_reached', 'termination:penalty_cap_reached_restored_best_feasible']",
-   "open_outcome_set": null,
    "observed_outcomes": [
     "action:dual_update",
     "action:infeasible_stall_penalty_increase",
@@ -140,13 +164,12 @@
     "x": 1.5276668818842153e-14,
     "objective": 1.0484452812104589e-14,
     "max_violation": 2.6645352591003757e-14,
-    "multipliers": 1.3891110484109975e-14,
+    "multipliers": 1.449507180950606e-14,
     "penalty": 0.0
    }
   },
   "resume_penalty_ramp_mid_run": {
    "label_only": "outcomes change under 1 ulp, seed 3: ['restored:final_iterate_worse_than_best_feasible', 'termination:penalty_cap_reached', 'termination:penalty_cap_reached_restored_best_feasible']",
-   "open_outcome_set": null,
    "observed_outcomes": [
     "action:dual_update",
     "action:infeasible_stall_penalty_increase",
@@ -193,13 +216,12 @@
     "x": 1.5276668818842153e-14,
     "objective": 1.0484452812104589e-14,
     "max_violation": 2.6645352591003757e-14,
-    "multipliers": 1.3891110484109975e-14,
+    "multipliers": 1.449507180950606e-14,
     "penalty": 0.0
    }
   },
   "hybrid_mismatch_repair": {
    "label_only": null,
-   "open_outcome_set": null,
    "observed_outcomes": [
     "action:penalty_increase",
     "action:signal_mismatch_subproblem_limit_penalty_increase",
@@ -243,7 +265,6 @@
   },
   "hybrid_mismatch_penalty_increase": {
    "label_only": "outcomes change under 1 ulp, seed 6: ['callback:restore_incumbent_state', 'restored:final_iterate_worse_than_best_feasible', 'termination:max_outer_after_signal_mismatch_penalty_increase', 'termination:max_outer_restored_best_feasible']",
-   "open_outcome_set": null,
    "observed_outcomes": [
     "action:signal_mismatch_penalty_increase",
     "action:subproblem_continue",
@@ -285,7 +306,6 @@
   },
   "hybrid_mismatch_stall": {
    "label_only": null,
-   "open_outcome_set": null,
    "observed_outcomes": [
     "action:signal_mismatch_stall",
     "action:subproblem_continue",
@@ -315,7 +335,7 @@
    "unstable_intended_outcomes": [],
    "spread": {
     "x": 5.551115123125783e-16,
-    "objective": 1.2255377517991144e-15,
+    "objective": 1.4006145734847024e-15,
     "max_violation": 0.0,
     "multipliers": 0.0,
     "penalty": 0.0
@@ -323,7 +343,6 @@
   },
   "constraints_inactive_stall": {
    "label_only": null,
-   "open_outcome_set": null,
    "observed_outcomes": [
     "action:constraints_inactive_stall",
     "action:subproblem_continue",
@@ -357,7 +376,6 @@
   },
   "plateau_restore_best_feasible": {
    "label_only": "outcomes change under 1 ulp, seed 1: ['inner_attempts_retried']",
-   "open_outcome_set": null,
    "observed_outcomes": [
     "action:subproblem_continue",
     "action:subproblem_limit",
@@ -392,7 +410,7 @@
    "unstable_intended_outcomes": [],
    "spread": {
     "x": 2.220446049250313e-16,
-    "objective": 1.518162473163552e-16,
+    "objective": 2.711829405027806e-16,
     "max_violation": 0.0,
     "multipliers": 0.0,
     "penalty": 0.0
@@ -400,7 +418,6 @@
   },
   "resume_plateau_best_feasible": {
    "label_only": "outcomes change under 1 ulp, seed 1: ['inner_attempts_retried']",
-   "open_outcome_set": null,
    "observed_outcomes": [
     "action:subproblem_continue",
     "action:subproblem_limit",
@@ -437,7 +454,7 @@
    "unstable_intended_outcomes": [],
    "spread": {
     "x": 2.220446049250313e-16,
-    "objective": 1.518162473163552e-16,
+    "objective": 2.711829405027806e-16,
     "max_violation": 0.0,
     "multipliers": 0.0,
     "penalty": 0.0
@@ -445,7 +462,6 @@
   },
   "trust_radius_retries": {
    "label_only": "outcomes change under 1 ulp, seed 3: ['dual_update_penalty_raise', 'flag:dual_update_penalty_increase']",
-   "open_outcome_set": null,
    "observed_outcomes": [
     "action:dual_update",
     "action:penalty_increase",
@@ -481,13 +497,12 @@
     "x": 1.5543122344752192e-15,
     "objective": 1.3322676295501878e-15,
     "max_violation": 2.4424906541753444e-15,
-    "multipliers": 7.305453009694743e-15,
+    "multipliers": 8.64717102953329e-15,
     "penalty": 0.0
    }
   },
   "frozen_warm_start_restore": {
    "label_only": "outcomes change under 1 ulp, seed 1: ['action:infeasible_stall_penalty_increase', 'action:penalty_increase']",
-   "open_outcome_set": "held-out samples reached ['flag:inner_false_success']",
    "observed_outcomes": [
     "action:dual_update",
     "action:infeasible_stall_penalty_increase",
@@ -505,6 +520,7 @@
     "dual_update_penalty_raise",
     "flag:dual_update_penalty_increase",
     "flag:infeasible_stall",
+    "flag:inner_false_success",
     "inner_attempts_retried",
     "restored:final_iterate_infeasible",
     "termination:penalty_cap_reached_restored_best_feasible"
@@ -540,7 +556,6 @@
   },
   "cached_physics_smoothing": {
    "label_only": "path changes under 1 ulp, seed 2: objective: boundaries 5 != golden 6",
-   "open_outcome_set": null,
    "observed_outcomes": [
     "action:constraints_inactive_converged",
     "action:dual_update",
@@ -576,7 +591,6 @@
   },
   "multiplier_cap_process_budget": {
    "label_only": null,
-   "open_outcome_set": null,
    "observed_outcomes": [
     "action:dual_update",
     "action:infeasible_stall_penalty_increase",
@@ -611,7 +625,7 @@
    ],
    "unstable_intended_outcomes": [],
    "spread": {
-    "x": 1.2323475573339238e-14,
+    "x": 1.4099832412739488e-14,
     "objective": 6.217248937900877e-15,
     "max_violation": 6.217574198552622e-15,
     "multipliers": 0.0,
@@ -620,7 +634,6 @@
   },
   "inner_iteration_budget": {
    "label_only": null,
-   "open_outcome_set": null,
    "observed_outcomes": [
     "action:dual_update",
     "callback:accepted_callback",
@@ -649,16 +662,15 @@
    ],
    "unstable_intended_outcomes": [],
    "spread": {
-    "x": 1.2323475573339238e-14,
-    "objective": 1.6653345369377348e-14,
-    "max_violation": 1.815214645262131e-14,
-    "multipliers": 1.780797731498751e-13,
+    "x": 1.4099832412739488e-14,
+    "objective": 1.887379141862766e-14,
+    "max_violation": 2.1246893133763933e-14,
+    "multipliers": 2.3003821070233244e-13,
     "penalty": 0.0
    }
   },
   "dual_update_penalty_cap": {
    "label_only": null,
-   "open_outcome_set": null,
    "observed_outcomes": [
     "action:penalty_cap_reached",
     "callback:accepted_callback",
@@ -683,16 +695,15 @@
    ],
    "unstable_intended_outcomes": [],
    "spread": {
-    "x": 1.2323475573339238e-14,
-    "objective": 1.5210055437364645e-14,
-    "max_violation": 1.6930901125533637e-14,
-    "multipliers": 1.780797731498751e-13,
+    "x": 1.4099832412739488e-14,
+    "objective": 1.9206858326015208e-14,
+    "max_violation": 2.085831507514513e-14,
+    "multipliers": 2.3003821070233244e-13,
     "penalty": 0.0
    }
   },
   "preinner_converged": {
    "label_only": null,
-   "open_outcome_set": null,
    "observed_outcomes": [
     "action:converged",
     "callback:evaluate_problem",
@@ -714,15 +725,14 @@
    "unstable_intended_outcomes": [],
    "spread": {
     "x": 1.4802973661668753e-16,
-    "objective": 2.1649348980190553e-15,
-    "max_violation": 2.220446049250314e-15,
+    "objective": 2.55351295663786e-15,
+    "max_violation": 2.664535259100378e-15,
     "multipliers": 0.0,
     "penalty": 0.0
    }
   },
   "zero_inner_budget": {
    "label_only": null,
-   "open_outcome_set": null,
    "observed_outcomes": [
     "action:subproblem_continue",
     "action:subproblem_limit",
@@ -744,8 +754,8 @@
    "unstable_intended_outcomes": [],
    "spread": {
     "x": 5e-324,
-    "objective": 1.2434497875801752e-15,
-    "max_violation": 7.395298159624268e-16,
+    "objective": 1.4210854715202005e-15,
+    "max_violation": 7.682579172156201e-16,
     "multipliers": 0.0,
     "penalty": 0.0
    }

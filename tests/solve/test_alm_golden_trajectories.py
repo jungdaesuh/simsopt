@@ -44,9 +44,10 @@ _golden = golden.load_golden
 # measure_alm_golden_sensitivity.py (its docstring states the noise model: the
 # evaluator's x moved by 1-4 ulp of max(||x||_inf, 1), every returned float
 # scaled by 1 + 1-4 ulp, x0 moved by 1 ulp; deterministic in the evaluation's
-# inputs, as another CPU or BLAS build would be). 48 calibration samples per
+# inputs, as another CPU or BLAS build would be). 144 calibration samples per
 # scenario set the observed outcomes and spreads; 96 held-out samples must stay
-# within the numeric tolerances and show whether an outcome set still grows.
+# within the numeric tolerances and reach no unobserved outcome, so every
+# recorded outcome set is closed under them.
 # A scenario whose outcomes or path changed under that noise, or whose values
 # moved too far for a tolerance to catch a NUMERIC_REPLAY_CEILING regression,
 # is label-only (reason recorded); the others get, per quantity,
@@ -62,29 +63,21 @@ _golden = golden.load_golden
 #   plateau_restore_best_feasible,
 #   resume_plateau_best_feasible (an inner retry)    -
 #   trust_radius_retries (a dual-update penalty raise) -
-#   frozen_warm_start_restore (a plain penalty raise; OPEN: held-out samples
-#       add flag:inner_false_success)               action:infeasible_stall_penalty_increase
+#   frozen_warm_start_restore (a plain penalty raise) action:infeasible_stall_penalty_increase
 #   cached_physics_smoothing (outer-step count)      -
 #
 #   numeric replay, largest tolerance over scenarios:
-#   x              1.2e-13  (multiplier_cap_process_budget)
-#   objective      1.7e-13  (inner_iteration_budget)
-#   max_violation  1.8e-13  (inner_iteration_budget)
+#   x              1.4e-13  (multiplier_cap_process_budget)
+#   objective      1.9e-13  (dual_update_penalty_cap)
+#   max_violation  2.1e-13  (inner_iteration_budget)
 #   multipliers    3.5e-12  (toy_convex)
-#   penalty        2.2e-15  (toy_convex)
+#   penalty        2.2e-15  (every scenario: eps)
 SENSITIVITY = golden.load_sensitivity()
 NUMERIC_REPLAY_CEILING = SENSITIVITY["noise"]["numeric_replay_ceiling"]
 LABEL_ONLY_SCENARIOS = MappingProxyType({
     name: measured["label_only"]
     for name, measured in SENSITIVITY["scenarios"].items()
     if measured["label_only"] is not None
-})
-# Label-only scenarios whose outcome set still grew on held-out samples: off
-# the recording environment their outcomes are not bounded by the observed set.
-OPEN_OUTCOME_SETS = MappingProxyType({
-    name: measured["open_outcome_set"]
-    for name, measured in SENSITIVITY["scenarios"].items()
-    if measured["open_outcome_set"] is not None
 })
 
 
@@ -149,6 +142,22 @@ class AlmGoldenFixtureSetTests(unittest.TestCase):
             "generate_alm_golden.py --provenance-only",
         )
 
+    def test_the_recorded_source_ids_cover_the_rules_that_judge_a_replay(self):
+        # The generator's INTENDED_OUTCOMES and the measurement's noise and
+        # tolerance rules decide what a replay requires, like the scenarios.
+        ids = alm_source_blob_ids()
+        for script in (
+            "alm_golden_scenarios.py",
+            "generate_alm_golden.py",
+            "measure_alm_golden_sensitivity.py",
+        ):
+            with self.subTest(script=script):
+                data = (GOLDEN_DIR / script).read_bytes()
+                self.assertEqual(
+                    ids.get(script),
+                    hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest(),
+                )
+
     def test_every_golden_covers_its_intended_outcomes(self):
         for scenario in golden.SCENARIOS:
             with self.subTest(scenario=scenario.name):
@@ -161,9 +170,9 @@ class AlmGoldenFixtureSetTests(unittest.TestCase):
 def outcome_replay_failure(name: str, outcomes, *, exact: bool):
     """Why ``outcomes`` of a fresh run of scenario ``name`` fail its outcome
     replay, or ``None``. Exact replay requires the golden's outcomes; otherwise
-    a label-only scenario must reach its ``required_outcomes`` and, unless its
-    outcome set is open, nothing outside the outcomes observed under last-bit
-    noise, and every other scenario must reach exactly the golden's."""
+    a label-only scenario must reach its ``required_outcomes`` and nothing
+    outside the (closed) set observed under last-bit noise, and every other
+    scenario must reach exactly the golden's."""
     recorded = _golden(name)["outcomes"]
     if exact or name not in LABEL_ONLY_SCENARIOS:
         if sorted(outcomes) != recorded:
@@ -172,8 +181,6 @@ def outcome_replay_failure(name: str, outcomes, *, exact: bool):
     missing = sorted(required_outcomes(name) - set(outcomes))
     if missing:
         return f"intended outcomes {missing} were not reached"
-    if name in OPEN_OUTCOME_SETS:
-        return None
     unobserved = sorted(set(outcomes) - set(SENSITIVITY["scenarios"][name]["observed_outcomes"]))
     if unobserved:
         return f"outcomes {unobserved} were never observed under last-bit noise"
@@ -219,7 +226,7 @@ class AlmGoldenOutcomeReplayTests(unittest.TestCase):
                 observed = SENSITIVITY["scenarios"][name]["observed_outcomes"]
                 self.assertIsNone(outcome_replay_failure(name, observed, exact=False))
                 for extra in ("termination:converged", "action:signal_mismatch_stall"):
-                    if extra in observed or name in OPEN_OUTCOME_SETS:
+                    if extra in observed:
                         continue
                     self.assertIn(
                         extra,
@@ -228,6 +235,16 @@ class AlmGoldenOutcomeReplayTests(unittest.TestCase):
                 if observed != _golden(name)["outcomes"]:
                     # The recording environment still demands the golden's outcomes.
                     self.assertIsNotNone(outcome_replay_failure(name, observed, exact=True))
+
+    def test_an_invented_action_or_termination_fails_every_label_only_replay(self):
+        for name in LABEL_ONLY_SCENARIOS:
+            observed = SENSITIVITY["scenarios"][name]["observed_outcomes"]
+            for invented in ("action:invented_regression", "termination:invented_regression"):
+                with self.subTest(scenario=name, outcome=invented):
+                    self.assertIn(
+                        invented,
+                        outcome_replay_failure(name, [*observed, invented], exact=False) or "",
+                    )
 
     def test_a_missing_intended_outcome_fails_a_label_only_replay(self):
         for name in LABEL_ONLY_SCENARIOS:
@@ -243,9 +260,6 @@ class AlmGoldenOutcomeReplayTests(unittest.TestCase):
                         name, set(observed) - set(INTENDED_OUTCOMES[name]), exact=False
                     )
                 )
-
-    def test_open_outcome_sets_are_label_only(self):
-        self.assertLessEqual(set(OPEN_OUTCOME_SETS), set(LABEL_ONLY_SCENARIOS))
 
     def test_a_broken_invariant_is_reported(self):
         trajectory = _fresh_run("toy_convex")
