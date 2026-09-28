@@ -8,16 +8,13 @@
 #   Google's jax-releases page) and simsopt builds without isolation.
 #
 # golden-exact-replay: the bitwise replay of tests/test_files/alm_golden,
-#   which runs only under the numpy, SciPy and machine the goldens were
-#   recorded with and otherwise skips. This job installs exactly the versions
-#   manifest.json records, on x86_64 with one thread per library, and fails
+#   which runs only under the numpy, SciPy, machine and OpenBLAS kernel
+#   family the goldens were recorded with and otherwise skips. The goldens
+#   are recorded with one thread per library and OpenBLAS's Haswell kernels
+#   pinned (AVX2 and FMA, which every x86-64-v3 runner has; numpy's own
+#   AVX-512 dispatch does not change the replay). This job installs exactly
+#   the versions manifest.json records, sets the same variables, and fails
 #   (not skips) when the replay does not run.
-#   The manifest does not record the OpenBLAS kernel, and the replay depends
-#   on it: on the recording host (AVX-512) OpenBLAS picks its SkylakeX
-#   kernels, with which all bitwise tests pass; forcing its Haswell or Zen
-#   (AVX2) kernels there fails 9 of 18, while numpy's own AVX-512 dispatch
-#   makes no difference. The job pins OPENBLAS_CORETYPE=SkylakeX and fails
-#   on a runner without AVX-512 (GitHub's AMD EPYC runners have none).
 
 name: ALM
 
@@ -97,7 +94,8 @@ jobs:
       OMP_NUM_THREADS: 1
       OPENBLAS_NUM_THREADS: 1
       MKL_NUM_THREADS: 1
-      OPENBLAS_CORETYPE: SkylakeX
+      # The recording pin (manifest.json openblas_coretype; checked below).
+      OPENBLAS_CORETYPE: Haswell
       PYTHON: .venv-golden/bin/python
       MANIFEST: tests/test_files/alm_golden/manifest.json
 
@@ -119,22 +117,27 @@ jobs:
         print("numpy=" + environment["numpy"])
         print("scipy=" + environment["scipy"])
         print("machine=" + environment["machine"])
+        print("openblas_coretype=" + str(environment["openblas_coretype"]))
         EOF
         cat "$GITHUB_OUTPUT"
 
-    - name: Require the recorded machine
+    - name: Require the recorded machine and OpenBLAS kernel pin
       run: |
         if [ "$(uname -m)" != "${{ steps.recorded.outputs.machine }}" ]; then
           echo "runner machine $(uname -m) is not the recorded ${{ steps.recorded.outputs.machine }}"
           exit 1
         fi
+        if [ "$OPENBLAS_CORETYPE" != "${{ steps.recorded.outputs.openblas_coretype }}" ]; then
+          echo "OPENBLAS_CORETYPE=$OPENBLAS_CORETYPE is not the recorded ${{ steps.recorded.outputs.openblas_coretype }}"
+          exit 1
+        fi
 
-    - name: Require the AVX-512 the pinned OpenBLAS kernels need
+    - name: Require the AVX2 and FMA the pinned Haswell kernels need
       run: |
         grep -m1 "model name" /proc/cpuinfo
-        for flag in avx512f avx512dq avx512bw avx512vl; do
+        for flag in avx2 fma; do
           if ! grep -qw "$flag" /proc/cpuinfo; then
-            echo "this runner has no $flag: the goldens replay bitwise only with OpenBLAS's SkylakeX kernels"
+            echo "this runner has no $flag: OpenBLAS's Haswell kernels cannot run"
             exit 1
           fi
         done
