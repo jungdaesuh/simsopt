@@ -4,7 +4,7 @@
 `<checkout>` is the simsopt source checkout (`checkout.path` in the report),
 `<python>` the interpreter the optimization runs with, `<fork-url>` the
 repository that publishes the `alm-library` branch
-(`https://github.com/<owner>/simsopt` until the owner is known) and
+(`https://github.com/jungdaesuh/simsopt.git`, `check_env.py`'s default) and
 `<fork-remote>` its remote name in the checkout, and `<scratch>` an empty
 directory outside the checkout for a temporary clone (the copy route; delete
 it afterwards).

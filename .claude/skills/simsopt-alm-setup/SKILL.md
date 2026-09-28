@@ -32,9 +32,9 @@ generated files go into.
 ## 1. Install
 
 1. Run `<python> $SKILL_DIR/scripts/check_env.py --python <python>`, adding
-   `--checkout <path>` when the user named their simsopt checkout and
-   `--fork-url <url>` when the repository publishing the `alm-library` branch
-   is known. When simsopt is not installed in `<python>` yet, `--checkout` is
+   `--checkout <path>` when the user named their simsopt checkout (the
+   `alm-library` branch comes from `https://github.com/jungdaesuh/simsopt.git`;
+   `--fork-url <url>` overrides it). When simsopt is not installed in `<python>` yet, `--checkout` is
    what makes a route possible: ask for the user's simsopt source checkout
    (or offer to clone upstream simsopt), and the report offers the `install`
    route. Read `route`, `blockers` and `notes` from the `CHECK_ENV` line; the

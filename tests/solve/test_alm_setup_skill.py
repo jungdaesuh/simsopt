@@ -791,6 +791,16 @@ class CheckEnvRouteTests(unittest.TestCase):
                 self.assertEqual(check_env.route_blockers(route, clean), [])
         self.assertEqual(check_env.route_blockers("copy", None), [])
 
+    def test_the_default_fork_is_the_published_alm_library_repository(self):
+        self.assertEqual(check_env.FORK_URL, "https://github.com/jungdaesuh/simsopt.git")
+        self.assertEqual(
+            check_env.normalized_repository(check_env.FORK_URL), "github.com/jungdaesuh/simsopt"
+        )
+        for path in sorted(SKILL_DIR.rglob("*")) + [REPO_ROOT / "docs" / "alm_setup_guide.md"]:
+            if path.is_file() and path.suffix in (".md", ".py"):
+                with self.subTest(path=path.name):
+                    self.assertNotIn("<owner>", path.read_text(encoding="utf-8"))
+
     def test_repository_urls_compare_by_host_owner_and_name(self):
         for url in ("git@github.com:hiddenSymmetries/simsopt.git",
                     "https://github.com/hiddenSymmetries/simsopt",

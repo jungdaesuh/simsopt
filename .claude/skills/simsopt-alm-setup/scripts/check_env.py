@@ -55,7 +55,8 @@ MIN_PYTHON = (3, 8)
 # The upstream commit the alm-library branch is based on.
 ALM_UPSTREAM_BASE = "9e027eac38028d57aa23777be52a781aa860e347"
 ALM_BRANCH = "alm-library"
-FORK_URL_PLACEHOLDER = "https://github.com/<owner>/simsopt"
+# The repository that publishes the alm-library branch (--fork-url overrides it).
+FORK_URL = "https://github.com/jungdaesuh/simsopt.git"
 UPSTREAM_REPOSITORY = "github.com/hiddensymmetries/simsopt"
 UPSTREAM_URL = "https://github.com/hiddenSymmetries/simsopt"
 ALM_MODULE = "simsopt.solve.alm"
@@ -332,9 +333,6 @@ def build_report(python: str, checkout_argument: Optional[Path], fork_url: str) 
         report["notes"].append(f"HEAD does not contain the branch's upstream base "
                                f"{ALM_UPSTREAM_BASE[:9]}: merging also brings in the upstream "
                                "commits up to it; the copy route avoids that")
-    if route == "merge-fork" and fork_url == FORK_URL_PLACEHOLDER:
-        report["notes"].append("the fork URL is the placeholder; pass --fork-url with the "
-                               "repository that publishes the alm-library branch")
     if route in ("reinstall", "upstream", "merge-fork") and install == "non-editable":
         report["notes"].append("simsopt is installed non-editable: reinstall from the checkout "
                                "after its sources change")
@@ -372,8 +370,9 @@ def main(argv=None) -> int:
     parser.add_argument("--python", default=sys.executable,
                         help="the interpreter the optimization runs with (default: this one)")
     parser.add_argument("--checkout", type=Path, help="the simsopt source checkout, if known")
-    parser.add_argument("--fork-url", default=FORK_URL_PLACEHOLDER,
-                        help="the repository that publishes the alm-library branch")
+    parser.add_argument("--fork-url", default=FORK_URL,
+                        help="another repository that publishes the alm-library branch "
+                             f"(default: {FORK_URL})")
     args = parser.parse_args(argv)
     report = build_report(args.python, args.checkout, args.fork_url)
     print(f"route: {report['route']}")
