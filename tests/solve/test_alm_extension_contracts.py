@@ -183,6 +183,12 @@ class AlmEvaluationBoundaryTests(unittest.TestCase):
         self.assertFalse(np.array_equal(accepted.x, [3.0, 2.0]))
         np.testing.assert_array_equal(numpy_accepted.x, accepted.x)
 
+    def test_a_negative_activity_tolerance_is_rejected(self):
+        for tolerances in (np.array([-0.02]), -0.02):
+            with self.subTest(tolerances=tolerances):
+                with self.assertRaisesRegex(ValueError, "constraint_activity_tolerances"):
+                    _solve(_edited(constraint_activity_tolerances=tolerances))
+
     def test_a_search_flag_that_is_not_a_bool_is_rejected(self):
         for flag in (0, 1, None, "False", 0.0):
             with self.subTest(flag=flag):

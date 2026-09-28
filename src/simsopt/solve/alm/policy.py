@@ -46,10 +46,11 @@ class ALMContinuationPolicy(Protocol):
     A policy has the last word on convergence: the loop executes its
     ``ALMConverge`` as given and adds no veto of its own. The success
     guarantees (a KKT point at the shifted multipliers ``max(0, λ + ρg)``:
-    hard feasibility and complementarity at ``feasibility_tol``, stationarity
-    at ``stationarity_tol``; no hybrid signal mismatch, no binding multiplier
-    cap) hold for :class:`DefaultContinuationPolicy` and for policies that
-    keep its vetoes, e.g. by delegating their convergence decisions to it.
+    hard feasibility at ``feasibility_tol``; stationarity, and the gradient of
+    the multipliers on rows off their boundary, at ``stationarity_tol``; no
+    hybrid signal mismatch, no binding multiplier cap) hold for
+    :class:`DefaultContinuationPolicy` and for policies that keep its vetoes,
+    e.g. by delegating their convergence decisions to it.
     """
 
     def inner_plan(self, view: ALMInnerPlanView) -> ALMInnerPlan:
@@ -289,11 +290,12 @@ def _feasible_step(view: ALMPostInnerView) -> Union[ALMStop, ALMRaisePenalty, AL
 
 def _kkt_point(measured: ALMIterateMeasurement, settings: ALMSettings) -> bool:
     """Whether ``measured`` passes the KKT stopping test at the shifted
-    multipliers ``max(0, λ + ρg)`` its augmented gradient carries: generic and
-    hard violations and the complementarity residual within
-    ``feasibility_tol``, the augmented-gradient norm within
-    ``stationarity_tol``. Without the complementarity test, a multiplier on
-    an inactive row could cancel the objective gradient and pass."""
+    multipliers ``λ⁺ = max(0, λ + ρg)`` its augmented gradient carries:
+    generic and hard violations within ``feasibility_tol``, and both the
+    augmented-gradient norm and the gradient of the multipliers on rows more
+    than ``feasibility_tol`` (a distance in x) off their boundary within
+    ``stationarity_tol``. Dropping those multipliers leaves complementary
+    multipliers with stationarity within twice ``stationarity_tol``."""
     return (
         _strict_feasibility_satisfied(
             measured.max_feasibility_violation,
@@ -301,8 +303,10 @@ def _kkt_point(measured: ALMIterateMeasurement, settings: ALMSettings) -> bool:
             settings.feasibility_tol,
         )
         and measured.stationarity_norm <= settings.stationarity_tol
-        and _complementarity_residual(measured.evaluation, measured.routing_state)
-        <= settings.feasibility_tol
+        and _complementarity_residual(
+            measured.evaluation, measured.routing_state, settings.feasibility_tol
+        )
+        <= settings.stationarity_tol
     )
 
 

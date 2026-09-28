@@ -667,6 +667,154 @@ class AlmDefaultComplementarityTests(unittest.TestCase):
         np.testing.assert_allclose(result.multipliers, [0.9], atol=1.0e-6)
 
 
+def _row_scaled(*, row_scale=1.0, band=0.0, hybrid=False):
+    """min -x s.t. M (x - 0.1) <= 0 (M = ``row_scale``; KKT point x = 0.1,
+    lambda = 1/M) with activity band ``band``; ``hybrid`` returns the quartet
+    with every channel equal to the signed row."""
+
+    def evaluate(x, multipliers, penalty):
+        signed = np.array([row_scale * (x[0] - 0.1)])
+        evaluation = alm.augmented_inequality_objective(
+            -float(x[0]), np.array([-1.0]), signed, [np.array([row_scale])],
+            multipliers, penalty,
+        )
+        evaluation["constraint_activity_tolerances"] = np.array([band])
+        if hybrid:
+            evaluation.update(
+                hard_signed_constraint_values=signed.copy(),
+                hard_violation_values=np.maximum(signed, 0.0),
+                surrogate_signed_constraint_values=signed.copy(),
+                hard_dual_update_values=signed.copy(),
+            )
+        return evaluation
+
+    return evaluate
+
+
+def _solve_from(evaluate, x0, multiplier, penalty, *, rows=("c",), settings=None, **kwargs):
+    return alm.minimize_alm(
+        np.array([x0]), list(rows), evaluate,
+        settings or alm.ALMSettings(max_outer_iterations=2), {"maxiter": 10},
+        initial_multipliers=np.atleast_1d(np.asarray(multiplier, dtype=float)),
+        initial_penalty=penalty, **kwargs,
+    )
+
+
+# Row rescaling g -> M g, lambda -> lambda / M, rho -> rho / M^2 leaves the
+# augmented Lagrangian, its gradient and every iterate unchanged; the caps are
+# lifted so that each M in the sweep states the same problem.
+UNCAPPED = alm.ALMSettings(max_outer_iterations=4, penalty_max=None, multiplier_max=None)
+
+
+class AlmInvariantComplementarityTests(unittest.TestCase):
+    """The complementarity certificate uses the actual slack, never an
+    activity band, and is invariant under an equivalent row rescaling."""
+
+    def assert_reaches_the_kkt_point(self, result):
+        self.assertTrue(result.success, result.message)
+        self.assertEqual(result.termination_reason, "converged")
+        np.testing.assert_allclose(result.x, [0.1], rtol=0.0, atol=1.0e-9)
+
+    def test_an_activity_band_does_not_certify_an_interior_point(self):
+        # x = 0.08, g = -0.02 inside a 0.02 band; lambda+ = 1 cancels grad f.
+        self.assert_reaches_the_kkt_point(
+            _solve_from(_row_scaled(band=0.02), 0.08, 1.02, 1.0)
+        )
+
+    def test_a_rescaled_row_does_not_certify_an_interior_point(self):
+        # lambda+ = 5e-7 is below feasibility_tol only in the rescaled units.
+        scale = 2.0e6
+        self.assert_reaches_the_kkt_point(
+            _solve_from(_row_scaled(row_scale=scale), 0.0, 1.1 / scale, 1.0 / scale**2)
+        )
+
+    def test_success_and_x_do_not_depend_on_row_scale_or_band(self):
+        outcomes = {}
+        for scale in (1.0e-6, 1.0e-3, 1.0, 1.0e3, 1.0e6):
+            for band in (0.0, 0.01, 0.02, 0.05):
+                for x0, multiplier in ((0.0, 1.1), (0.08, 1.02)):
+                    result = _solve_from(
+                        _row_scaled(row_scale=scale, band=band), x0,
+                        multiplier / scale, 1.0 / scale**2, settings=UNCAPPED,
+                    )
+                    outcomes[scale, band, x0] = (result.success, result.x[0])
+        self.assertEqual({success for success, _x in outcomes.values()}, {True}, outcomes)
+        spread = np.ptp([x for _success, x in outcomes.values()])
+        self.assertLessEqual(spread, 1.0e-9, outcomes)
+        self.assertAlmostEqual(next(iter(outcomes.values()))[1], 0.1, delta=1.0e-9)
+
+    def test_an_exactly_active_row_with_a_positive_multiplier_converges(self):
+        result = _solve_from(_row_scaled(), 0.1, 1.0, 1.0)
+        self.assert_reaches_the_kkt_point(result)
+        self.assertEqual(result.outer_iterations, 1)
+
+    def test_a_weakly_active_row_with_a_zero_multiplier_converges(self):
+        def evaluate(x, multipliers, penalty):
+            return alm.augmented_inequality_objective(
+                float((x[0] - 0.1) ** 2), np.array([2.0 * (x[0] - 0.1)]),
+                np.array([x[0] - 0.1]), [np.array([1.0])], multipliers, penalty,
+            )
+
+        self.assert_reaches_the_kkt_point(_solve_from(evaluate, 0.1, 0.0, 1.0))
+
+    def test_an_equality_like_pair_converges(self):
+        def evaluate(x, multipliers, penalty):
+            return alm.augmented_inequality_objective(
+                -float(x[0]), np.array([-1.0]),
+                np.array([x[0] - 0.1, 0.1 - x[0]]),
+                [np.array([1.0]), np.array([-1.0])], multipliers, penalty,
+            )
+
+        result = _solve_from(
+            evaluate, 0.0, (0.0, 0.0), 1.0, rows=("upper", "lower"),
+            settings=alm.ALMSettings(max_outer_iterations=40),
+        )
+        self.assertTrue(result.success, result.message)
+        np.testing.assert_allclose(result.x, [0.1], atol=1.0e-6)
+
+    def test_rows_with_zero_gradients_do_not_block_convergence(self):
+        # A constant slack row and an identically zero row next to the active one.
+        def evaluate(x, multipliers, penalty):
+            return alm.augmented_inequality_objective(
+                -float(x[0]), np.array([-1.0]),
+                np.array([x[0] - 0.1, -1.0, 0.0]),
+                [np.array([1.0]), np.zeros(1), np.zeros(1)], multipliers, penalty,
+            )
+
+        result = _solve_from(
+            evaluate, 0.1, (1.0, 0.5, 0.5), 1.0, rows=("active", "slack", "zero"),
+        )
+        self.assert_reaches_the_kkt_point(result)
+
+    def test_base_bounds_do_not_block_convergence(self):
+        result = _solve_from(
+            _row_scaled(), 0.0, 1.1, 1.0, base_bounds=[(-1.0, 1.0)],
+        )
+        self.assert_reaches_the_kkt_point(result)
+
+
+class AlmSignalMismatchTests(unittest.TestCase):
+    """A signal mismatch is an actual disagreement of the hard and surrogate
+    channels, not a live surrogate shift."""
+
+    def test_identical_channels_at_an_active_boundary_converge(self):
+        result = _solve_from(_row_scaled(hybrid=True), 0.1, 1.0, 1.0)
+        self.assertTrue(result.success, result.message)
+        self.assertEqual(result.termination_reason, "converged")
+        np.testing.assert_allclose(result.x, [0.1], atol=1.0e-12)
+
+    def test_identical_channels_are_no_mismatch(self):
+        evaluation = _row_scaled(hybrid=True)(np.array([0.1]), np.array([1.0]), 1.0)
+        routing = alm_core._constraint_routing_state(evaluation, np.array([1.0]), 1.0, 1.0e-6)
+        self.assertFalse(routing.signal_mismatch_active)
+
+    def test_a_surrogate_that_pushes_while_the_hard_row_is_slack_is_a_mismatch(self):
+        measured = _measure(MISMATCH_LIVE_SHIFT)
+        self.assertTrue(measured.signal_mismatch_active)
+        self.assertFalse(measured.routing_state.surrogate_positive_shift_zero)
+        self.assertTrue(measured.routing_state.hard_positive_shift_zero)
+
+
 class AlmExhaustedOuterLabelTests(unittest.TestCase):
     """Each decision that can end the final outer carries its termination
     reason; most of them are golden gaps."""

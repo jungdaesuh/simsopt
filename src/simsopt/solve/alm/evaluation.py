@@ -249,7 +249,8 @@ def _contract_checked_evaluation(
     """An owned shallow copy of the evaluator's dict at ``x``, checked where
     it enters the solver: every required key present and not None, ``grad``
     and each ``constraint_grads`` row of shape ``(x.size,)``, one row and one
-    ``constraint_values`` entry per constraint, and ``search_step_success``
+    ``constraint_values`` entry per constraint, nonnegative
+    ``constraint_activity_tolerances`` (optional), and ``search_step_success``
     (optional) a bool or ``numpy.bool_``, stored as a Python bool. Raises
     ``KeyError`` for a missing key and ``ValueError`` otherwise, naming
     ``context``."""
@@ -279,6 +280,11 @@ def _contract_checked_evaluation(
             raise ValueError(
                 f"{context}: {field_name} has shape {np.shape(value)}, expected {expected}"
             )
+    activity_tolerances = evaluation.get("constraint_activity_tolerances")
+    if activity_tolerances is not None and np.any(
+        np.asarray(activity_tolerances, dtype=float) < 0.0
+    ):
+        raise ValueError(f"{context}: constraint_activity_tolerances must be nonnegative")
     checked = dict(evaluation)
     if "search_step_success" in checked:
         flag = checked["search_step_success"]

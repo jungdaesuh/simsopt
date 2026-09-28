@@ -738,10 +738,17 @@ def _constraint_routing_state(
     hard_feasible_under_gate = _max_value(signal_state.hard_violation_values) <= float(
         feasibility_gate
     )
+    # Hard-feasible, yet a row whose surrogate still pushes (positive shift)
+    # has a surrogate signal more than the gate away from its hard signal.
+    # Identical channels never mismatch, even at an active boundary.
+    signals_differ = np.abs(
+        signal_state.surrogate_signed_constraint_values
+        - signal_state.hard_signed_constraint_values
+    ) > float(feasibility_gate)
     direct_boundary_mismatch = (
         signal_state.explicit_hybrid_signals
         and hard_feasible_under_gate
-        and np.any(surrogate_positive_shift > 0.0)
+        and np.any((surrogate_positive_shift > 0.0) & signals_differ)
     )
     if direct_boundary_mismatch:
         signal_mismatch_active = True
@@ -761,20 +768,26 @@ def _constraint_routing_state(
 def _complementarity_residual(
     evaluation: dict,
     routing_state: ALMConstraintRoutingState,
+    slack_distance_tol: float,
 ) -> float:
-    """``max_i min(λ⁺_i, s_i)`` on the signal the augmented Lagrangian uses:
-    how far its shifted multipliers ``λ⁺ = max(0, λ + ρg)`` are from
-    complementarity. ``s_i = max(0, -g_i - a_i)`` is row i's slack below its
-    activity band ``a_i``: a row inside the band counts as active, and a
-    violated row as well (its violation is the feasibility test's)."""
+    """``||sum_{i off} λ⁺_i ∇g_i||``: the gradient that the shifted multipliers
+    ``λ⁺ = max(0, λ + ρg)`` of the augmented Lagrangian's rows contribute from
+    rows off their boundary, those whose slack ``max(0, -g_i)`` exceeds
+    ``slack_distance_tol * ||∇g_i||`` (a distance in x; activity bands play no
+    part). Rescaling a row (g_i, λ_i, ρ_i) -> (M g_i, λ_i/M, ρ_i/M²) leaves it,
+    and the augmented gradient, unchanged."""
     signed_values = routing_state.signal_state.surrogate_signed_constraint_values
-    if signed_values.size == 0:
+    shift = routing_state.surrogate_positive_shift
+    slack = np.maximum(0.0, -signed_values)
+    candidates = np.flatnonzero((shift > 0.0) & (slack > 0.0))
+    if candidates.size == 0:
         return 0.0
-    slack = np.maximum(
-        0.0,
-        -signed_values - _constraint_activity_tolerances(evaluation, signed_values),
-    )
-    return float(np.max(np.minimum(routing_state.surrogate_positive_shift, slack)))
+    rows = np.stack([
+        np.asarray(evaluation["constraint_grads"][index], dtype=float).reshape(-1)
+        for index in candidates
+    ])
+    off_boundary = slack[candidates] > slack_distance_tol * np.linalg.norm(rows, axis=1)
+    return float(np.linalg.norm((shift[candidates] * off_boundary) @ rows))
 
 def _kkt_stationarity_norm(
     total_grad,
