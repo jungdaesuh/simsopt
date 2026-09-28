@@ -369,11 +369,6 @@ when empty. Historical v3 documents that mixed local extensions into
 receipts retain their original files and must be audited at their recorded
 source revision.
 
-[`one_to_one_inventory.json`](one_to_one_inventory.json) is a dated record of
-the earlier 52-source migration inventory, not the current official catalog.
-The current index is regenerated with
-`python -m examples.jax.native_to_jax_index --write`.
-
 ## Author contract
 
 Every runnable script must:
@@ -396,9 +391,7 @@ A one-to-one mirror must additionally sit at the exact tier and filename of the
 native source it mirrors, and must be typed `mirror` or `adapter`, or `hybrid`
 when it retains a named native or external computation.
 
-Add the behavioral correctness test first and preserve its authentic
-RED → GREEN → REFACTOR commands in
-[`docs/jax_examples_tdd_receipts.md`](../../docs/jax_examples_tdd_receipts.md).
-Then mark the manifest record `ready`; the validator rejects a ready record
+Add the behavioral correctness test first, then mark the manifest record
+`ready`; the validator rejects a ready record
 whose script or listed correctness tests do not exist, and the example tests
 reject a ready record without both devices or a public JAX import.
