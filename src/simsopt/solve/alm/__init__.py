@@ -131,9 +131,12 @@ decision as given, so the success guarantees hold for
 ``DefaultContinuationPolicy`` and for policies that keep its vetoes:
 ``converged`` means an approximate KKT point at the shifted multipliers
 ``max(0, multipliers + penalty * g)`` (violations within ``feasibility_tol``,
-augmented-gradient norm within ``stationarity_tol``, complementarity gap
-``sum(shift * max(0, -g))`` within ``feasibility_tol * max(1, |f|)``), with no
-hybrid disagreement and no binding multiplier cap.
+augmented-gradient norm within ``stationarity_tol``, without the components
+that point out of the box at an active ``base_bounds`` bound, and
+complementarity gap ``sum(shift * max(0, -g))`` within ``feasibility_tol``),
+with no hybrid disagreement and no binding multiplier cap. Both tolerances are
+absolute in the objective's units, so scale f to O(1) (e.g. divide it by its
+initial value).
 """
 
 from __future__ import annotations

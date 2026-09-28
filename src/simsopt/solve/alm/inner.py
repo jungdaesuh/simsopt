@@ -26,6 +26,7 @@ from scipy.optimize import minimize
 from .continuation import ALMInnerPlanView, ALMStalledTrialView
 from .core import (
     ALMSettings,
+    _bound_reduced_stationarity_norm,
     _constraint_routing_state,
     _extract_constraint_state,
     _nonnegative_alm_integer,
@@ -116,6 +117,8 @@ class _ALMInnerAttemptEvaluator:
     request: ALMInnerAttemptRequest
     cached_x: Optional[np.ndarray] = None
     cached_evaluation: Optional[dict] = None
+    # The request's base bounds as (lower, upper) pairs, for stationarity.
+    base_bounds: Optional[List[Tuple[float, float]]] = None
 
     def _fresh_evaluation(self, x) -> dict:
         return _sanitize_nonfinite_inner_evaluation(
@@ -181,6 +184,12 @@ class _ALMInnerAttemptEvaluator:
             evaluation,
             callback_routing_state,
             self.request.effective_feasibility_tol,
+        )
+        callback_stationarity_norm = _bound_reduced_stationarity_norm(
+            callback_stationarity_norm,
+            evaluation["grad"],
+            inner_x_arr,
+            self.base_bounds,
         )
         if callback_routing_state.signal_state.explicit_hybrid_signals:
             if _dual_update_gate_satisfied(
@@ -491,7 +500,10 @@ def _build_box_bounds(
     return _intersect_bounds(trust_bounds, normalized_base_bounds)
 
 def _run_alm_inner_attempts(request: ALMInnerAttemptRequest) -> ALMInnerAttemptResult:
-    evaluator = _ALMInnerAttemptEvaluator(request)
+    evaluator = _ALMInnerAttemptEvaluator(
+        request,
+        base_bounds=_normalize_base_bounds(request.base_bounds, request.x.size),
+    )
     accepted_result = None
     accepted_eval = None
     accepted_x = None

@@ -21,6 +21,7 @@ import numpy as np
 
 from .core import (
     ALMSettings,
+    _bound_reduced_stationarity_norm,
     _constraint_routing_state,
     _extract_constraint_state,
     _next_penalty,
@@ -66,6 +67,7 @@ from .inner import (
     _feasibility_improvement_and_floor,
     _inner_options_with_remaining_maxiter,
     _made_meaningful_inner_progress,
+    _normalize_base_bounds,
     _normalize_trust_radius,
     _run_alm_inner_attempts,
 )
@@ -124,6 +126,9 @@ class ALMRunState:
     # ``max_outer_termination`` on the final outer, else its action.
     last_action: Optional[str] = None
     exhausted_termination: str = "terminated"
+    # The caller's base bounds as (lower, upper) pairs (±inf: none), fixed for
+    # the run; stationarity is measured against them.
+    base_bounds: Optional[List[Tuple[float, float]]] = None
 
 @dataclass(frozen=True)
 class ALMPenaltyIncreaseResult:
@@ -209,6 +214,7 @@ class _ALMNormalizedRunInputs:
     trust_radius: Optional[float]
     update_feasibility_tol: float
     update_stationarity_tol: float
+    base_bounds: Optional[List[Tuple[float, float]]]
 
 def _normalize_alm_run_inputs(
     x0,
@@ -219,6 +225,7 @@ def _normalize_alm_run_inputs(
     constraint_blocks: Optional[Sequence[str]],
     snapshot_accepted_state_fn,
     restore_incumbent_state_fn,
+    base_bounds=None,
 ) -> _ALMNormalizedRunInputs:
     if (snapshot_accepted_state_fn is None) != (restore_incumbent_state_fn is None):
         raise ValueError(
@@ -255,6 +262,7 @@ def _normalize_alm_run_inputs(
         trust_radius=_normalize_trust_radius(settings.trust_radius_init),
         update_feasibility_tol=update_feasibility_tol,
         update_stationarity_tol=update_stationarity_tol,
+        base_bounds=_normalize_base_bounds(base_bounds, x.size),
     )
 
 def _apply_alm_penalty_increase(
@@ -266,6 +274,7 @@ def _apply_alm_penalty_increase(
     penalty: float,
     constraint_names_tuple: Tuple[str, ...],
     constraint_blocks_tuple: Optional[Tuple[str, ...]],
+    base_bounds: Optional[List[Tuple[float, float]]] = None,
 ) -> ALMPenaltyIncreaseResult:
     next_penalty, cap_hit, requested_penalty = _next_penalty(
         penalty,
@@ -294,6 +303,8 @@ def _apply_alm_penalty_increase(
             constraint_blocks_tuple=constraint_blocks_tuple,
             context="ALM penalty update evaluation",
         ),
+        x=x,
+        base_bounds=base_bounds,
         multipliers=multipliers,
         penalty=penalty_argument,
         update_feasibility_tol=next_feasibility_tol,
@@ -327,8 +338,9 @@ class ALMResult:
     in ``evaluation``, and the per-row feasibility values are
     ``evaluation["feasibility_values"]``); ``max_violation`` the largest
     of the evaluator's ``feasibility_values``; ``stationarity_norm`` the
-    augmented-gradient norm (the evaluator's ``stationarity_norm`` when given)
-    and ``kkt_stationarity_norm`` the active-set KKT residual (None without the
+    augmented-gradient norm (the evaluator's ``stationarity_norm`` when given;
+    at a base bound, without the components pointing out of the box, whose
+    full value stays in ``evaluation``) and ``kkt_stationarity_norm`` the active-set KKT residual (None without the
     gradients it needs); ``multipliers`` and ``penalty`` the ones that
     evaluation used; ``evaluation`` an owned copy of the evaluator's dict,
     read-only all the way down as in an event. ``nit`` counts L-BFGS-B
@@ -537,6 +549,12 @@ def _build_alm_failure_result_with_optional_restore(
         restored_state.evaluation,
         restored_routing_state,
         settings.feasibility_tol,
+    )
+    restored_stationarity_norm = _bound_reduced_stationarity_norm(
+        restored_stationarity_norm,
+        restored_state.evaluation["grad"],
+        run_state.x,
+        run_state.base_bounds,
     )
     restored_max_feasibility_violation = _extract_constraint_state(
         restored_state.evaluation
@@ -1022,6 +1040,7 @@ def _execute_step_decision(
         penalty=state.penalty,
         constraint_names_tuple=context.constraint_names_tuple,
         constraint_blocks_tuple=context.constraint_blocks_tuple,
+        base_bounds=run_state.base_bounds,
     )
     cap_reached = penalty_transition.penalty_cap_reached
     state.penalty = penalty_transition.penalty
@@ -1188,6 +1207,8 @@ def _run_alm_continuation_step(
         start_x=start_x,
         start=_measure_iterate(
             current_eval,
+            x=run_state.x,
+            base_bounds=run_state.base_bounds,
             multipliers=state.multipliers,
             penalty=penalty_argument,
             update_feasibility_tol=state.update_feasibility_tol,
@@ -1290,6 +1311,8 @@ def _run_alm_continuation_step(
     # diverge within one outer iteration on early ALM steps.
     measured = _measure_iterate(
         state.final_eval,
+        x=run_state.x,
+        base_bounds=run_state.base_bounds,
         multipliers=state.multipliers,
         penalty=penalty_argument,
         update_feasibility_tol=state.update_feasibility_tol,
@@ -1617,6 +1640,7 @@ def minimize_alm(
         constraint_blocks,
         snapshot_accepted_state_fn,
         restore_incumbent_state_fn,
+        base_bounds,
     )
     multipliers = normalized.multipliers
     penalty = normalized.penalty
@@ -1693,6 +1717,7 @@ def minimize_alm(
             # termination is the action it published (``completed_action``).
             last_action=resume_from.completed_action,
             exhausted_termination=resume_from.completed_action,
+            base_bounds=normalized.base_bounds,
         )
         best_feasible = resumed.best_feasible
         first_outer_iteration = completed_outer + 1
@@ -1706,6 +1731,7 @@ def minimize_alm(
             cap_binding_indices=set(),
             penalty_cap_reached=False,
             penalty_cap_requested=None,
+            base_bounds=normalized.base_bounds,
         )
 
     inner_iterations_at_start = int(run_state.total_inner_iterations)
@@ -1754,7 +1780,7 @@ def minimize_alm(
             restore_incumbent_state_fn=restore_incumbent_state_fn,
             constraint_names_tuple=constraint_names_tuple,
             constraint_blocks_tuple=constraint_blocks_tuple,
-            base_bounds=base_bounds,
+            base_bounds=normalized.base_bounds,
             continuation_policy=continuation_policy,
         )
         multipliers = outcome.multipliers

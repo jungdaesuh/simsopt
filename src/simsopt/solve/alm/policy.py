@@ -38,7 +38,6 @@ from .core import (
     _finite_alm_integer,
     _finite_alm_value,
 )
-from .evaluation import _incumbent_objective_value
 
 
 class ALMContinuationPolicy(Protocol):
@@ -292,11 +291,12 @@ def _feasible_step(view: ALMPostInnerView) -> Union[ALMStop, ALMRaisePenalty, AL
 def _kkt_point(measured: ALMIterateMeasurement, settings: ALMSettings) -> bool:
     """Whether ``measured`` is an approximate KKT point at the shifted
     multipliers ``λ⁺ = max(0, λ + ρg)`` its augmented gradient carries:
-    generic and hard violations within ``feasibility_tol``, the augmented
-    gradient (the Lagrangian's at λ⁺) within ``stationarity_tol``, and the
-    complementarity gap ``sum_i λ⁺_i max(0, -g_i)`` within
-    ``feasibility_tol * max(1, |f|)``, a relative objective tolerance, as the
-    gap is in the objective's units (λ scales with f)."""
+    generic and hard violations within ``feasibility_tol``, the
+    (bound-reduced) augmented gradient, the Lagrangian's at λ⁺, within
+    ``stationarity_tol``, and the complementarity gap
+    ``sum_i λ⁺_i max(0, -g_i)`` within ``feasibility_tol``. Both tolerances
+    are absolute, in f's units (the gap is f - ℓ on the feasible side), so an
+    offset added to f changes nothing; scale f to O(1)."""
     return (
         _strict_feasibility_satisfied(
             measured.max_feasibility_violation,
@@ -304,9 +304,7 @@ def _kkt_point(measured: ALMIterateMeasurement, settings: ALMSettings) -> bool:
             settings.feasibility_tol,
         )
         and measured.stationarity_norm <= settings.stationarity_tol
-        and _complementarity_gap(measured.routing_state)
-        <= settings.feasibility_tol
-        * max(1.0, abs(_incumbent_objective_value(measured.evaluation)))
+        and _complementarity_gap(measured.routing_state) <= settings.feasibility_tol
     )
 
 

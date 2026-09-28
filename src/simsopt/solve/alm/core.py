@@ -841,6 +841,33 @@ def _kkt_stationarity_norm(
     residual = total_grad_array + active_matrix @ multipliers
     return float(np.linalg.norm(residual))
 
+def _augmented_stationarity_norm(evaluation: dict) -> float:
+    """The evaluator's ``stationarity_norm``, else ``||grad||``: the
+    augmented-gradient norm, before any bound reduction."""
+    return float(evaluation.get("stationarity_norm", np.linalg.norm(evaluation["grad"])))
+
+def _bound_reduced_stationarity_norm(
+    stationarity_norm: float,
+    grad,
+    x,
+    base_bounds: Optional[Sequence[Tuple[float, float]]],
+) -> float:
+    """Bound-constrained stationarity: ``stationarity_norm``, or, where a
+    component of ``x`` sits on a base bound (``(lower, upper)`` pairs, ±inf
+    for none) with ``grad`` pointing out of the box, the norm of ``grad`` with
+    those components zeroed: the bound's multiplier holds them."""
+    if base_bounds is None:
+        return float(stationarity_norm)
+    lower, upper = np.asarray(base_bounds, dtype=float).T
+    grad_array = np.asarray(grad, dtype=float).reshape(-1)
+    x_array = np.asarray(x, dtype=float).reshape(-1)
+    blocked = ((x_array >= upper) & (grad_array < 0.0)) | (
+        (x_array <= lower) & (grad_array > 0.0)
+    )
+    if not np.any(blocked):
+        return float(stationarity_norm)
+    return float(np.linalg.norm(np.where(blocked, 0.0, grad_array)))
+
 def _stationarity_metrics(
     evaluation: dict,
     routing_state: ALMConstraintRoutingState,
@@ -855,12 +882,7 @@ def _stationarity_metrics(
     stationarity gate. Hybrid evaluations compute it on the surrogate channel, the
     differentiable subproblem; mismatch remains a separate success guard.
     """
-    stationarity_norm = float(
-        evaluation.get(
-            "stationarity_norm",
-            np.linalg.norm(evaluation["grad"]),
-        )
-    )
+    stationarity_norm = _augmented_stationarity_norm(evaluation)
     if routing_state.signal_state.explicit_hybrid_signals:
         kkt_stationarity_norm = _surrogate_kkt_stationarity_norm(
             evaluation,

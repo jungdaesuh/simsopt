@@ -22,6 +22,7 @@ from .core import (
     ALMConstraintRoutingState,
     ALMSettings,
     _as_float_list,
+    _augmented_stationarity_norm,
     _conditioning_metrics,
     _finite_alm_integer_or_none,
     _max_value,
@@ -261,7 +262,7 @@ def _build_skipped_inner_history_entry(event: ALMOuterStepEvent) -> dict:
         solver_constraint_values=start.solver_constraint_values,
         max_feasibility_violation=start.max_feasibility_violation,
         stationarity_norm=start.stationarity_norm,
-        raw_stationarity_norm=start.stationarity_norm,
+        raw_stationarity_norm=_augmented_stationarity_norm(start.evaluation),
         kkt_stationarity_norm=start.kkt_stationarity_norm,
         signal_mismatch_active=start.signal_mismatch_active,
         update_feasibility_tol=start.update_feasibility_tol,
@@ -326,7 +327,7 @@ def _build_post_inner_history_entry(event: ALMOuterStepEvent) -> dict:
         solver_constraint_values=measured.solver_constraint_values,
         max_feasibility_violation=measured.max_feasibility_violation,
         stationarity_norm=measured.stationarity_norm,
-        raw_stationarity_norm=measured.stationarity_norm,
+        raw_stationarity_norm=_augmented_stationarity_norm(measured.evaluation),
         kkt_stationarity_norm=measured.kkt_stationarity_norm,
         signal_mismatch_active=measured.signal_mismatch_active,
         update_feasibility_tol=measured.update_feasibility_tol,
@@ -507,7 +508,7 @@ def _refresh_alm_history_for_penalty_update(
     entry["block_penalties"] = None
     entry["max_violation"] = float(updated_state.max_feasibility_violation)
     entry["stationarity_norm"] = float(updated_state.stationarity_norm)
-    entry["raw_stationarity_norm"] = float(updated_state.stationarity_norm)
+    entry["raw_stationarity_norm"] = _augmented_stationarity_norm(updated_state.evaluation)
     entry["kkt_stationarity_norm"] = (
         None
         if updated_state.kkt_stationarity_norm is None

@@ -22,6 +22,7 @@ import numpy as np
 from .continuation import ALMIterateMeasurement
 from .core import (
     _HYBRID_SIGNAL_FIELDS,
+    _bound_reduced_stationarity_norm,
     _constraint_routing_state,
     _extract_constraint_state,
     _stationarity_metrics,
@@ -333,16 +334,19 @@ def _checked_evaluation(
 def _measure_iterate(
     evaluation: dict,
     *,
+    x: np.ndarray,
+    base_bounds: Optional[Sequence[Tuple[float, float]]],
     multipliers: np.ndarray,
     penalty: float,
     update_feasibility_tol: float,
     update_stationarity_tol: float,
     effective_feasibility_tol: float,
 ) -> ALMIterateMeasurement:
-    """What the loop and the policy read about one evaluated iterate: its
-    signed and feasibility values, routing state and stationarity norms, with
-    the active sets judged at ``effective_feasibility_tol``. ``evaluation``
-    and ``multipliers`` are held by reference."""
+    """What the loop and the policy read about the iterate ``x``: its signed
+    and feasibility values, routing state and stationarity norms (reduced at
+    active ``base_bounds``), with the active sets judged at
+    ``effective_feasibility_tol``. ``evaluation`` and ``multipliers`` are held
+    by reference."""
     (
         solver_constraint_values,
         feasibility_values,
@@ -360,6 +364,9 @@ def _measure_iterate(
         kkt_stationarity_norm,
         signal_mismatch_active,
     ) = _stationarity_metrics(evaluation, routing_state, effective_feasibility_tol)
+    stationarity_norm = _bound_reduced_stationarity_norm(
+        stationarity_norm, evaluation["grad"], x, base_bounds
+    )
     return ALMIterateMeasurement(
         evaluation=evaluation,
         multipliers=multipliers,

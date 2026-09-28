@@ -861,6 +861,108 @@ class AlmComplementarityGapTests(unittest.TestCase):
         self.assertEqual(alm_core._complementarity_gap(routing), 0.75)
 
 
+class AlmObjectiveOffsetTests(unittest.TestCase):
+    """Adding a constant to f changes neither the minimizer nor any gradient,
+    so it must not change a termination decision: the complementarity-gap
+    tolerance is absolute, in f's units."""
+
+    OFFSETS = (0.0, 1.0e3, -1.0e3, 1.0e7, -1.0e7)
+
+    def decisions(self, make_evaluate, x0, multiplier):
+        return {
+            offset: (lambda r: (r.success, r.termination_reason, float(r.x[0])))(
+                _solve_from(make_evaluate(offset), x0, multiplier, 1.0)
+            )
+            for offset in self.OFFSETS
+        }
+
+    def test_an_affine_objective_offset_does_not_change_the_decision(self):
+        # f = C - x, g = x - 1: at x = 0, lambda+ = 1 cancels grad f with a gap of 1.
+        def make_evaluate(offset):
+            def evaluate(x, multipliers, penalty):
+                return alm.augmented_inequality_objective(
+                    offset - float(x[0]), np.array([-1.0]), np.array([x[0] - 1.0]),
+                    [np.array([1.0])], multipliers, penalty,
+                )
+            return evaluate
+
+        decisions = self.decisions(make_evaluate, 0.0, 2.0)
+        self.assertEqual(set(decisions.values()), {(True, "converged", 1.0)}, decisions)
+
+    def test_a_quadratic_objective_offset_does_not_change_the_decision(self):
+        # f = (x - 1)^2 + C, g = x - 2: at x = 0, lambda+ = 2 cancels grad f
+        # with a gap of 4; the optimum x = 1 leaves the row inactive.
+        def make_evaluate(offset):
+            def evaluate(x, multipliers, penalty):
+                return alm.augmented_inequality_objective(
+                    float((x[0] - 1.0) ** 2) + offset, np.array([2.0 * (x[0] - 1.0)]),
+                    np.array([x[0] - 2.0]), [np.array([1.0])], multipliers, penalty,
+                )
+            return evaluate
+
+        decisions = self.decisions(make_evaluate, 0.0, 4.0)
+        self.assertEqual(len(set(decisions.values())), 1, decisions)
+        self.assertFalse(decisions[0.0][0] and decisions[0.0][2] != 1.0, decisions)
+
+
+def _bounded(objective_slope):
+    """min slope * x on 0 <= x <= 1 with an inert row g = -1 (zero gradient)."""
+
+    def evaluate(x, multipliers, penalty):
+        return alm.augmented_inequality_objective(
+            objective_slope * float(x[0]), np.array([objective_slope]),
+            np.array([-1.0]), [np.zeros(1)], multipliers, penalty,
+        )
+
+    return evaluate
+
+
+class AlmBoundStationarityTests(unittest.TestCase):
+    """With base bounds, stationarity is the bound-constrained measure: a
+    gradient component pointing out of the box at an active bound is held by
+    the bound's multiplier and does not count."""
+
+    def solve(self, slope, x0):
+        return _solve_from(_bounded(slope), x0, 0.0, 1.0, base_bounds=[(0.0, 1.0)])
+
+    def test_an_optimum_on_the_upper_bound_converges(self):
+        result = self.solve(-1.0, 1.0)
+        self.assertTrue(result.success, result.message)
+        self.assertEqual(result.termination_reason, "converged")
+        np.testing.assert_array_equal(result.x, [1.0])
+        self.assertEqual(result.stationarity_norm, 0.0)
+        # The unprojected augmented-gradient norm stays in the evaluation.
+        self.assertEqual(result.evaluation["stationarity_norm"], 1.0)
+
+    def test_an_optimum_on_the_lower_bound_converges(self):
+        result = self.solve(1.0, 0.0)
+        self.assertTrue(result.success, result.message)
+        np.testing.assert_array_equal(result.x, [0.0])
+        self.assertEqual(result.stationarity_norm, 0.0)
+
+    def test_a_gradient_pointing_into_the_box_still_counts(self):
+        # At x = 1 the descent direction of f = x points into the box.
+        result = self.solve(1.0, 1.0)
+        self.assertTrue(result.success, result.message)
+        np.testing.assert_allclose(result.x, [0.0], atol=1.0e-12)
+
+    def test_the_reduction_zeroes_only_blocked_components(self):
+        bounds = [(0.0, 1.0), (0.0, 1.0), (-np.inf, np.inf)]
+        x = np.array([1.0, 0.0, 0.5])
+        for grad, expected in (
+            (np.array([-3.0, 4.0, 0.0]), 0.0),
+            (np.array([3.0, -4.0, 0.0]), 5.0),
+            (np.array([-3.0, -4.0, 12.0]), np.hypot(4.0, 12.0)),
+        ):
+            with self.subTest(grad=grad):
+                self.assertEqual(
+                    alm_core._bound_reduced_stationarity_norm(
+                        float(np.linalg.norm(grad)), grad, x, bounds
+                    ),
+                    expected,
+                )
+
+
 class AlmSignalMismatchTests(unittest.TestCase):
     """A signal mismatch is an actual disagreement of the hard and surrogate
     channels, not a live surrogate shift."""
