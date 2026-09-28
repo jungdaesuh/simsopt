@@ -232,7 +232,13 @@ def _scalar_value_and_grad(
         )
         return value, grad
 
-    return jax.jit(wrapped)
+    # ``inline=True``: traced inside another program -- the closure conversion
+    # of the private solvers traces it with ``make_jaxpr`` -- the call is
+    # inlined, so arrays ``fun`` closes over become that program's hoisted
+    # operands. A nested (non-inlined) jit keeps them as constants of its own
+    # jaxpr, embedded at lowering, which reads a device array back to the host
+    # and fails under ``transfer_guard("disallow")`` on an accelerator.
+    return jax.jit(wrapped, inline=True)
 
 
 def _cached_private_solver(
