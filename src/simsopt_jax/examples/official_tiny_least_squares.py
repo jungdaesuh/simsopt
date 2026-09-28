@@ -29,6 +29,7 @@ from simsopt_contracts.optimization_endpoint import (
 )
 from simsopt_jax_adapters.geo.curve_objectives import curve_length_pure
 
+from simsopt_jax.backend.dtypes import explicit_device_array
 from simsopt_jax.core.curve_geometry import (
     curve_incremental_arclength_from_spec,
     curve_spec_with_dofs,
@@ -40,6 +41,7 @@ from simsopt_jax.core.surface_rzfourier import (
     surface_rz_fourier_volume_from_dofs,
 )
 from simsopt_jax.examples.weighted_quadratic import weighted_quadratic_residuals
+from simsopt_jax.runtime.host_boundary import allow_host_transfers, host_array
 
 DRIVER_QUADRATIC = "scipy_least_squares_trf_jax_quadratic"
 DRIVER_CURVE = "scipy_least_squares_trf_jax_curve_length"
@@ -207,6 +209,11 @@ def guard_finite_endpoint(
     )
 
 
+def _placed(value: np.ndarray) -> jax.Array:
+    """Place a host array on the runtime device with its own dtype (H2D owner)."""
+    return explicit_device_array(value, dtype=value.dtype)
+
+
 def solve_jax_residual(
     residual: Callable[[jax.Array], jax.Array],
     initial: np.ndarray,
@@ -217,8 +224,8 @@ def solve_jax_residual(
     compiled = jax.jit(residual)
 
     def host_residual(parameters: np.ndarray) -> np.ndarray:
-        with jax.transfer_guard("allow"):
-            return np.asarray(jax.device_get(compiled(jax.device_put(parameters))))
+        with allow_host_transfers():
+            return host_array(compiled(_placed(parameters)))
 
     if max_nfev is None:
         return least_squares(host_residual, initial)
@@ -229,23 +236,22 @@ def value_and_jacobian(
     residual: Callable[[jax.Array], jax.Array], parameters: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
     """Measure an endpoint's JAX residual and exact observable Jacobian."""
-    with jax.transfer_guard("allow"):
-        device_parameters = jax.device_put(parameters)
+    with allow_host_transfers():
         value, jacobian = jax.jit(lambda x: (residual(x), jax.jacfwd(residual)(x)))(
-            device_parameters
+            _placed(parameters)
         )
         return (
-            np.asarray(jax.device_get(value), dtype=np.float64),
-            np.asarray(jax.device_get(jacobian), dtype=np.float64),
+            host_array(value, dtype=np.float64),
+            host_array(jacobian, dtype=np.float64),
         )
 
 
 def quadratic_residual(
     targets: np.ndarray, weights: np.ndarray
 ) -> Callable[[jax.Array], jax.Array]:
-    with jax.transfer_guard("allow"):
-        targets_device = jax.device_put(targets)
-        weights_device = jax.device_put(weights)
+    with allow_host_transfers():
+        targets_device = _placed(targets)
+        weights_device = _placed(weights)
 
     def residual(parameters: jax.Array) -> jax.Array:
         return weighted_quadratic_residuals(parameters, targets_device, weights_device)
@@ -262,12 +268,12 @@ def curve_length_residual(
     nfp: int,
     stellsym: bool,
 ) -> Callable[[jax.Array], jax.Array]:
-    with jax.transfer_guard("allow"):
-        full_device = jax.device_put(full_dofs)
-        positions_device = jax.device_put(free_positions)
+    with allow_host_transfers():
+        full_device = _placed(full_dofs)
+        positions_device = _placed(free_positions)
         spec = make_curve_rzfourier_spec(
             dofs=full_device,
-            quadpoints=jax.device_put(quadpoints),
+            quadpoints=_placed(quadpoints),
             order=order,
             nfp=nfp,
             stellsym=stellsym,
@@ -295,14 +301,14 @@ def surface_area_volume_residual(
     nfp: int,
     stellsym: bool,
 ) -> Callable[[jax.Array], jax.Array]:
-    with jax.transfer_guard("allow"):
-        full_device = jax.device_put(full_dofs)
-        positions_device = jax.device_put(free_positions)
-        targets_device = jax.device_put(targets)
+    with allow_host_transfers():
+        full_device = _placed(full_dofs)
+        positions_device = _placed(free_positions)
+        targets_device = _placed(targets)
         spec = surface_rz_fourier_spec_from_dofs(
             full_device,
-            quadpoints_phi=jax.device_put(quadpoints_phi),
-            quadpoints_theta=jax.device_put(quadpoints_theta),
+            quadpoints_phi=_placed(quadpoints_phi),
+            quadpoints_theta=_placed(quadpoints_theta),
             mpol=mpol,
             ntor=ntor,
             nfp=nfp,

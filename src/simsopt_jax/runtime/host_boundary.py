@@ -5,8 +5,8 @@ Ownership split (do not reimplement these patterns in adapters):
 * ``simsopt_jax.runtime.host_boundary`` — **host materialization** (D2H):
   ``host_array``, ``host_scalar``, ``host_float``, ``host_tree``, and the
   ready variants that ``block_until_ready`` before materializing; plus the
-  boundary's measurement and refusal contexts, ``host_transfer_audit`` and
-  ``disallow_host_transfers``.
+  boundary's measurement and scope contexts, ``host_transfer_audit``,
+  ``disallow_host_transfers`` and ``allow_host_transfers``.
 * ``simsopt_jax.backend.dtypes`` — **device placement** (H2D / on-device cast):
   policy ``runtime_device_put`` / ``as_runtime_array`` / ``as_compute_array``,
   and exact-dtype ``explicit_device_array`` (preserves requested float dtype).
@@ -132,6 +132,20 @@ def disallow_host_transfers() -> Iterator[None]:
     """
 
     with jax.transfer_guard("disallow"):
+        yield
+
+
+@contextmanager
+def allow_host_transfers() -> Iterator[None]:
+    """Permit implicit transfers inside one explicit host-driven boundary.
+
+    For host callers that hand device arrays to compiled code while an outer
+    strict guard may be active: lowering a program that closes over device
+    arrays reads them back, which the strict guard would refuse. The counterpart
+    of :func:`disallow_host_transfers`.
+    """
+
+    with jax.transfer_guard("allow"):
         yield
 
 
