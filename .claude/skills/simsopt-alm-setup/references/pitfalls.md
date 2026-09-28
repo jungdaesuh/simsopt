@@ -126,9 +126,9 @@ Each entry: the symptom, the cause, the fix.
 16. **`converged` is an approximate KKT point.** Success means feasibility
     within `feasibility_tol`, an augmented-gradient norm within
     `stationarity_tol`, and a complementarity gap Σ λ⁺_i max(0, -g_i)
-    within `feasibility_tol` x max(1, abs(f)), not an exact KKT point. With
-    f far below 1 in magnitude the gap tolerance is absolute and strict:
-    scale f to O(1). A large multiplier on a row just inside its bound
+    within `feasibility_tol`, not an exact KKT point. Both tolerances are
+    absolute in f's units (an offset added to f changes nothing): scale f
+    to O(1), as the templates do by dividing it by its initial value. A large multiplier on a row just inside its bound
     blocks success until dual updates shrink it (`plateau_stall` or a
     `max_outer_*` reason; see [termination.md](termination.md)). Known
     limit: a nonconvex row steep enough that its multiplier times its slack
