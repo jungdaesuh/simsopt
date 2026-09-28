@@ -11,11 +11,15 @@ import pytest
 from examples.jax import run_parity
 from examples.jax.manifest_contracts_v3 import load_manifest_contract_pair_documents
 from examples.jax.manifest_runtime import load_runtime_contract_pair
+from examples.jax.outer_optimizer_policy import (
+    OuterOptimizerPolicyError,
+    parse_outer_optimizer_policy,
+)
 from examples.jax.run_examples import build_child_command
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXACT_ID = "native-single-stage-boozer-vacuum-optimization"
-SERIAL_ID = "native-boozerqa-ls"
+PLANNED_PROBE_ID = "native-qfm"
 
 
 def test_approved_policies_are_available_through_the_real_runtime_registry() -> None:
@@ -24,22 +28,11 @@ def test_approved_policies_are_available_through_the_real_runtime_registry() -> 
         REPO_ROOT / "examples/jax/parity_manifest.json",
         repo_root=REPO_ROOT,
     )
-    exact, serial = (
-        next(example for example in pair.examples if example.id == identity)
-        for identity in (EXACT_ID, SERIAL_ID)
-    )
-    assert exact.status == serial.status == "ready"
+    exact = next(example for example in pair.examples if example.id == EXACT_ID)
+    assert exact.status == "ready"
     assert exact.outer_optimizer_policy is not None
-    assert serial.outer_optimizer_policy is not None
     assert exact.outer_optimizer_policy.case_id == EXACT_ID
-    assert serial.outer_optimizer_policy.case_id is None
     assert exact.outer_optimizer_policy.registry_scope == "experimental"
-    assert serial.outer_optimizer_policy.registry_scope == "experimental"
-    assert serial.teaching_kind == "combined"
-    assert not any(
-        relationship.jax_example_id == SERIAL_ID
-        for relationship in pair.parity.relationships
-    )
     assert (
         next(
             example
@@ -52,7 +45,7 @@ def test_approved_policies_are_available_through_the_real_runtime_registry() -> 
 
 @pytest.mark.parametrize(
     "mutation",
-    ("missing_exact", "missing_serial", "copied", "swapped", "unknown", "wrong_case"),
+    ("missing_exact", "copied", "unknown", "wrong_case"),
 )
 def test_manifest_rejects_missing_or_borrowed_host_outer_declarations(
     mutation: str,
@@ -62,16 +55,10 @@ def test_manifest_rejects_missing_or_borrowed_host_outer_declarations(
     examples = {example["id"]: example for example in manifest["jax_examples"]}
     if mutation == "missing_exact":
         del examples[EXACT_ID]["outer_optimizer_policy"]
-    elif mutation == "missing_serial":
-        del examples[SERIAL_ID]["outer_optimizer_policy"]
     elif mutation == "copied":
         examples["native-just-a-quadratic"]["outer_optimizer_policy"] = examples[
             EXACT_ID
         ]["outer_optimizer_policy"]
-    elif mutation == "swapped":
-        examples[SERIAL_ID]["outer_optimizer_policy"] = examples[EXACT_ID][
-            "outer_optimizer_policy"
-        ]
     elif mutation == "unknown":
         examples[EXACT_ID]["outer_optimizer_policy"] = "allow-all-scipy"
     else:
@@ -85,28 +72,26 @@ def test_manifest_rejects_missing_or_borrowed_host_outer_declarations(
         load_manifest_contract_pair_documents(manifest, parity, repo_root=REPO_ROOT)
 
 
-def test_planned_serial_record_without_declaration_keeps_legacy_default() -> None:
-    manifest = json.loads((REPO_ROOT / "examples/jax/manifest.json").read_text())
-    parity = json.loads((REPO_ROOT / "examples/jax/parity_manifest.json").read_text())
-    serial = next(
-        example for example in manifest["jax_examples"] if example["id"] == SERIAL_ID
-    )
-    serial["status"] = "planned"
-    del serial["outer_optimizer_policy"]
-    pair = load_manifest_contract_pair_documents(manifest, parity, repo_root=REPO_ROOT)
-    assert (
-        next(
-            example for example in pair.examples.jax_examples if example.id == SERIAL_ID
-        ).outer_optimizer_policy
-        is None
-    )
+def test_planned_record_without_declaration_keeps_legacy_default() -> None:
+    """Only a ready record must declare its approved host outer policy.
+
+    Every approved policy now belongs to a source-owning record, whose readiness
+    the manifest binds to its source, so the exemption is exercised at the
+    policy parser rather than through a planned manifest record.
+    """
+    identity = {"example_id": PLANNED_PROBE_ID, "example_path": "1_Simple/qfm.py"}
+    assert parse_outer_optimizer_policy(None, **identity, ready=False) is None
+    with pytest.raises(
+        OuterOptimizerPolicyError,
+        match="requires its outer optimizer policy declaration",
+    ):
+        parse_outer_optimizer_policy(None, **identity, ready=True)
 
 
 @pytest.mark.parametrize(
     "example_id",
     (
         EXACT_ID,
-        SERIAL_ID,
         "native-qfm",
         "native-just-a-quadratic",
         "native-minimize-curve-length",

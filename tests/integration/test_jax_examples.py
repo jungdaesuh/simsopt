@@ -356,8 +356,8 @@ def test_runner_fails_the_example_whose_legacy_record_lacks_its_host_policy(
 ) -> None:
     """A legacy record of an approved host-SciPy example fails through the runner."""
     legacy_record = dataclasses.replace(
-        _record("2_Intermediate/boozerQA_ls.py"),
-        id="native-boozerqa-ls",
+        _record("2_Intermediate/stage_two_optimization.py"),
+        id="native-stage-two-optimization",
     )
     stderr = io.StringIO()
 
@@ -372,7 +372,7 @@ def test_runner_fails_the_example_whose_legacy_record_lacks_its_host_policy(
     )
 
     assert exit_code == 1
-    assert "FAIL native-boozerqa-ls: no child command:" in stderr.getvalue()
+    assert "FAIL native-stage-two-optimization: no child command:" in stderr.getvalue()
     assert "requires its outer optimizer policy declaration" in stderr.getvalue()
     with pytest.raises(
         OuterOptimizerPolicyError, match="requires its outer optimizer policy"

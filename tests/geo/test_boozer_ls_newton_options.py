@@ -22,7 +22,6 @@ from simsopt_jax_adapters.geo.boozer_surface import (
     BOOZER_LS_DERIVATIVE_ASSEMBLIES,
     BoozerSurfaceJAX,
 )
-from simsopt_jax_adapters.geo.nested_ls_ncsx import NCSX_DERIVATIVE_ASSEMBLIES
 
 CONSTRAINT_WEIGHT = 11.1232
 IOTA = -0.37
@@ -55,9 +54,8 @@ def _boozer_ls(options: dict[str, object] | None = None):
     return boozer_surface, G
 
 
-def test_the_ncsx_assembly_name_is_the_boozer_vocabulary() -> None:
+def test_the_boozer_ls_derivative_assemblies_are_ad_and_analytic() -> None:
     assert BOOZER_LS_DERIVATIVE_ASSEMBLIES == ("ad", "analytic")
-    assert NCSX_DERIVATIVE_ASSEMBLIES is BOOZER_LS_DERIVATIVE_ASSEMBLIES
 
 
 def test_default_options_select_the_ad_polish_with_the_default_guard() -> None:

@@ -2,7 +2,7 @@
 
 Generated from `manifest.json`, `parity_manifest.json`, and `authority_evidence.json`. Do not edit this table by hand.
 Official upstream scope: `https://github.com/hiddenSymmetries/simsopt` `master` at `9e027eac38028d57aa23777be52a781aa860e347` (53 source files).
-Local experimental registrations: 2 source files.
+Local experimental registrations: 1 source files.
 Historical local evidence may describe an older roster and does not establish current official coverage.
 
 Historical local evidence pointers (unverified):
@@ -73,7 +73,6 @@ Historical local evidence pointers (unverified):
 | Native example | JAX mirror | Classification | Runtime dependencies | Device scope | Scale | Evidence |
 | --- | --- | --- | --- | --- | --- | --- |
 | `examples/3_Advanced/single_stage_boozer_vacuum_optimization.py` | `examples/jax/3_Advanced/single_stage_boozer_vacuum_optimization.py` | eligible / adapter | none | outer: CPU SciPy; cpu: jax_region, gpu: jax_region | native_default | native_default: historical quality-band, unverified (`20260917T035857Z-6a1f0ea9`, local_only); 12/57 comparisons failed; 3/3 lanes budget-exhausted; jax-cpu final:objective 4.3261270728412792e-08 <= 9.9999999999999995e-08; jax-gpu final:objective 4.3077269937092123e-08 <= 9.9999999999999995e-08; native-cpu final:objective 4.3972015892540963e-08 <= 9.9999999999999995e-08; endpoint quality only, no convergence or final-value equivalence |
-| `examples/3_Advanced/single_stage_flat675.py` | `examples/jax/3_Advanced/single_stage_flat675.py` | eligible / adapter | none | cpu: full_workflow, gpu: full_workflow | not_applicable | unsupported |
 
 Regenerate with:
 

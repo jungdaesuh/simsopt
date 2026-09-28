@@ -43,10 +43,10 @@ Native test surface
 -------------------
 The native surface is the upstream ``hiddenSymmetries/simsopt`` test tree that
 this fork actually contains, not a name-shaped guess. A path glob cannot
-express it: the fork adds 56 non-``jax``-named ``test_*.py`` files inside the
-native domain directories (``tests/geo/test_nested_ls_reduced.py`` and
-friends), so ``tests/{configs,core,field,geo,mhd,objectives,solve,util}`` minus
-``*jax*`` over-includes them. The surface is therefore enumerated from git:
+express it: the fork adds its own non-``jax``-named ``test_*.py`` files inside
+the native domain directories (``tests/geo/test_boozer_ls_newton_options.py``
+and friends), so ``tests/{configs,core,field,geo,mhd,objectives,solve,util}``
+minus ``*jax*`` over-includes them. The surface is therefore enumerated from git:
 
     every path under ``tests/`` in the pinned upstream authority commit whose
     basename matches ``test_*.py``

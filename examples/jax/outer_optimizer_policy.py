@@ -7,7 +7,6 @@ from typing import Literal
 
 OuterOptimizerPolicyId = Literal[
     "scipy-bfgs-over-jax-exact-boozer",
-    "scipy-lbfgsb-over-jax-reduced-boozer",
     "scipy-lbfgsb-over-jax-standard-stage-two",
     "scipy-lbfgsb-over-jax-planar-stage-two",
     "scipy-lbfgsb-over-jax-stochastic-stage-two",
@@ -87,14 +86,6 @@ _APPROVED_POLICIES = (
         "3_Advanced/single_stage_boozer_vacuum_optimization.py",
         "native-single-stage-boozer-vacuum-optimization",
         SHIPPED_SINGLE_STAGE_SCIPY_DRIVER_ID,
-        "experimental",
-    ),
-    OuterOptimizerPolicy(
-        "scipy-lbfgsb-over-jax-reduced-boozer",
-        "native-boozerqa-ls",
-        "2_Intermediate/boozerQA_ls.py",
-        None,
-        "scipy.optimize.minimize:L-BFGS-B",
         "experimental",
     ),
     # The official native scripts of standard, planar and stochastic stage two,

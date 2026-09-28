@@ -2600,7 +2600,7 @@ def test_quality_band_endpoint_evidence_has_complete_route_matrices() -> None:
         "absent",
         "wrong_case",
         "wrong_example",
-        "serial_policy",
+        "borrowed_policy",
         "forged_policy",
         "wrong_driver",
         "optax",
@@ -2629,13 +2629,13 @@ def test_approved_scipy_policy_is_bound_to_real_case_example_and_driver(
         case_id = "native-just-a-quadratic"
     elif mutation == "wrong_example":
         example_id = "native-just-a-quadratic"
-    elif mutation == "serial_policy":
+    elif mutation == "borrowed_policy":
         policy = next(
             example.outer_optimizer_policy
             for example in pair.examples
-            if example.id == "native-boozerqa-ls"
+            if example.id == "native-qfm"
         )
-        example_id = "native-boozerqa-ls"
+        example_id = "native-qfm"
     elif mutation == "forged_policy":
         policy = dataclasses.replace(policy, expected_driver="scipy_arbitrary")
         driver = "scipy_arbitrary"

@@ -47,8 +47,8 @@ def test_native_to_jax_index_matches_validated_contracts() -> None:
     )
 
     assert INDEX_PATH.read_text(encoding="utf-8") == rendered
-    # The native reference helper lives outside the public source catalog.
-    assert rendered.count("\n| `examples/") == 55
+    # One row per official source (53) and per experimental registration (1).
+    assert rendered.count("\n| `examples/") == 54
     assert "## Official upstream catalog" in rendered
     assert "## Experimental local registrations" in rendered
     assert "examples/1_Simple/periodicfieldline_QA.py" in rendered

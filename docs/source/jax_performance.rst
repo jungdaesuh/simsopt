@@ -131,13 +131,9 @@ Historical branch-only experiments
 The following 2026-09-14/15 measurements came from branch-only benchmarks.
 They are retained as historical observations, not added
 to the 25 eligible official-example cases or used to qualify the current
-shipped/default policy. In particular, the local NCSX nested least-squares
-inner solve is not the official ``boozerQA_ls_mpi.py`` MPI outer optimization;
-its 8.2x and 14.6x ratios do not establish that outer workflow's parity or
-speed. The exact-constraint single-stage test and the local
+shipped/default policy. The exact-constraint single-stage test and the local
 ``single_stage_boozer_vacuum_optimization.py`` example are not examples in
-the pinned upstream catalog. The flat675 benchmarks described on the JAX
-backend page are also local-only.
+the pinned upstream catalog.
 
 .. list-table::
    :header-rows: 1
@@ -147,15 +143,6 @@ backend page are also local-only.
      - GPU
      - Branch native
      - Reported ratio / qualification
-   * - NCSX 48x48 nested LS inner solve, unguarded
-       (``tests/geo/test_nested_ls_ncsx.py``)
-     - 57.0 s warm; 97.4 s cold
-     - 830.4 s OpenMP; 1832.7 s single-threaded upstream kernel
-     - 14.6x warm versus the OpenMP kernel; local inner solve only
-   * - NCSX 48x48 nested LS inner solve, divergence guard on both lanes
-     - 35.04 s warm; 80.74 s cold
-     - 286.28 s OpenMP; 530.21 s single-threaded upstream kernel
-     - 8.2x warm, 3.5x cold versus OpenMP; local inner solve only
    * - Exact-constraint single-stage optimization, 1000 iterations
        (``tests/geo/test_single_stage_exact_analytic.py``)
      - 24.1 s
@@ -201,12 +188,8 @@ broader timing boundary than the minimize-region rows here.
      - Eight OpenMP threads
      - 11.1x reported on 2026-09-15 with L-BFGS-B ``maxls=32``
 
-The unguarded nested-LS row preceded the shared divergence guard in commit
-``28b30477d``. That guard stops an inner Newton solve when the gradient norm
-on rejected line-search trials exceeds 1000 times its entry value. It reduced
-wasted Hessian assemblies in both lanes and changed the measured ratio. The
-historical coil-forces run used ``maxls=32`` on both lanes; the current example
-uses upstream ``maxls=20``. Its ratio is neither current-policy performance
+The historical coil-forces run used ``maxls=32`` on both lanes; the current
+example uses upstream ``maxls=20``. Its ratio is neither current-policy performance
 nor whole-workflow acceleration. The September 19 shipped/default packet
 failed the GPU work-budget admission for coil forces and a shared
 objective-quality gate for PM4Stell. The later verification above classifies
@@ -220,11 +203,8 @@ it does not qualify the present tree.
 Historical workload-size observations
 -------------------------------------
 
-Earlier local sweeps found a nested-LS crossover around 32x32 / mpol 10
-(14.2 s GPU versus 68.5 s native for the outer-solve scope); at 18x18 /
-mpol 6, native was faster (5.8 s versus 8.8 s). A GSCO 48x50 wireframe
-roughly tied within 30%, while a 96x100 case measured 5.1x and 4.2x at
-bitwise-identical currents. RCLS dense solves through n=1040 measured
+In earlier local sweeps, a GSCO 48x50 wireframe roughly tied within 30%,
+while a 96x100 case measured 5.1x and 4.2x at bitwise-identical currents. RCLS dense solves through n=1040 measured
 0.25x--0.58x of native speed on the GPU. These size-dependent observations
 are historical and do not establish a current crossover or a public-command
 speedup.

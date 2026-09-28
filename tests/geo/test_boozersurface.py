@@ -9,10 +9,7 @@ from simsopt.field.biotsavart import BiotSavart
 from simsopt.geo import SurfaceXYZTensorFourier, SurfaceRZFourier
 from simsopt.geo.surfaceobjectives import ToroidalFlux, Area, Volume
 from simsopt.configs.zoo import get_data
-from simsopt_jax_adapters.geo.nested_ls_ncsx import (
-    NCSX_EXAMPLE_JSON,
-    upsample_surface_xyz_tensor_fourier,
-)
+from .ncsx_fixtures import NCSX_EXAMPLE_JSON, upsample_surface_xyz_tensor_fourier
 from .surface_test_helpers import get_surface, get_exact_surface, get_boozer_surface
 
 

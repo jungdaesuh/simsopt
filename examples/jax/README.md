@@ -128,7 +128,6 @@ outer optimizer over JAX physics and derivatives** where explicitly declared:
 | Official upstream mirror | QFM surface (`1_Simple/qfm.py`) | SciPy L-BFGS-B, then SciPy SLSQP | QFM residual, labels and their derivatives |
 | Official upstream mirror | `just_a_quadratic`, `minimize_curve_length`, `surf_vol_area` | SciPy `least_squares` (TRF) | Residuals and Jacobians |
 | Branch-only experiment | `native-single-stage-boozer-vacuum-optimization` | SciPy BFGS | Exact Boozer Newton solve and implicit objective gradient |
-| Serial adaptation; outside official one-to-one coverage | `native-boozerqa-ls` | SciPy L-BFGS-B | Reduced-Schur nested-LS solve and implicit objective gradient |
 
 These are the providers the upstream scripts call, with upstream's own options. The minimal and finite-build
 stage-two mirrors additionally accept `--device-solver`, an opt-in performance mode that replaces the host
@@ -260,23 +259,22 @@ defines coverage.
 - `source_catalog` — 53 official upstream source rows: 25 `eligible`, 1 `hybrid`,
   25 `blocked`, and 2 `not_applicable`. Membership is checked against the pinned
   official catalog, not whatever Python files happen to be in the local tiers.
-- `experimental_sources` — two branch-only source rows: exact vacuum
-  single-stage and flat675. They contribute zero official upstream coverage.
-- `jax_examples` — 41 executable records, 39 `ready` and 2 `planned`.
-  Twenty-six own official sources, two own experimental sources, and the other
-  13 combined or compatibility programs own no one-to-one source.
+- `experimental_sources` — one branch-only source row: exact vacuum
+  single-stage. It contributes zero official upstream coverage.
+- `jax_examples` — 39 executable records, 37 `ready` and 2 `planned`.
+  Twenty-six own official sources, one owns the experimental source, and the
+  other 12 combined or compatibility programs own no one-to-one source.
 
 An owned record must sit at the identical tier and filename as its source, must
 be typed `one_to_one`, and cannot be a tutorial. Each mirror is owned by at
 most one source. `parity_manifest.json` separates 26 official relationships
-(25 `full`, 1 `unsupported`) from two experimental relationships (1 `full`,
-1 `unsupported`). Execution scale and verified evidence are separate from
-source coverage.
+(25 `full`, 1 `unsupported`) from one experimental relationship (`full`).
+Execution scale and verified evidence are separate from source coverage.
 
 `run_parity.py --case all-applicable` selects the 25 executable official
 relationships. Experimental cases remain available by explicit case ID;
 registration and safety checks still apply, but their results do not count
-toward official coverage. flat675 still has no supported parity case.
+toward official coverage.
 
 List the pairs from the manifest rather than from a hand-maintained table:
 
@@ -337,7 +335,7 @@ kinds are `native_source_owned_simsopt` for executable relationships and
 the comparator, not membership in official upstream; that comes from the
 pinned source catalog.
 
-## Branch-only experiments and serial adaptations
+## Branch-only experiments
 
 These commands remain available for development. They are outside official
 upstream mirror coverage and are not evidence that an official example passes.
@@ -385,22 +383,6 @@ checkout. Neither provenance nor an endpoint quality band proves convergence.
 The [retained numerical review package](parity/evidence/20260917T035857Z-6a1f0ea9/README.md)
 includes the input and endpoint values, all comparisons, statuses and original
 receipt hashes. It is a derived inspection record, not a portable authority bundle.
-
-### flat675
-
-The branch-only `3_Advanced/single_stage_flat675.py` native and JAX programs
-remain available. Their registration is experimental, and the parity harness
-still marks the relationship unsupported. Keeping the implementation does not
-establish an official upstream counterpart or a parity result.
-
-### Serial nested-LS Boozer
-
-`2_Intermediate/boozerQA_ls.py` uses the approved CPU SciPy L-BFGS-B controller
-with JAX reduced-Schur physics. Its native CPU reference is
-`native_reference/boozerQA_ls.py`; both support `--smoke --json`. This is a
-combined tutorial, not a one-to-one replacement for the MPI example. The
-validated three-step default run establishes improving feasible steps, not
-outer convergence or a whole-workflow speedup.
 
 ## Official VMEC hybrid single-stage
 
@@ -483,44 +465,3 @@ RED → GREEN → REFACTOR commands in
 Then mark the manifest record `ready`; the validator rejects a ready record
 without an executable script, CPU device, correctness owner, or public JAX
 import.
-
-## Serial nested-LS adaptation (outside official one-to-one coverage)
-
-The [JAX example](2_Intermediate/boozerQA_ls.py) and its
-[native CPU reference](native_reference/boozerQA_ls.py) optimize moving coils
-around one NCSX Boozer least-squares surface without MPI. The JAX example uses the
-reduced-Schur Newton inner solve and its implicit coil gradient. The native
-example uses SIMSOPT's BFGS-then-Newton inner policy. Both use host SciPy
-L-BFGS-B for the outer optimization; native setup and composition of objective
-terms also have explicit host boundaries. These are different inner solver
-policies, so matching physics or gradients does not establish identical optimizer
-trajectories.
-
-From the repository root with the native extension and JAX dependencies installed:
-
-```bash
-# Small 7x7 example, one outer iteration.
-JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=src \
-  python examples/jax/native_reference/boozerQA_ls.py --smoke --json
-SIMSOPT_BACKEND_MODE=jax_gpu_fast SIMSOPT_PRECISION=fp64 \
-  JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 PYTHONPATH=src \
-  python examples/jax/2_Intermediate/boozerQA_ls.py --smoke --json
-
-# The full example uses mpol=ntor=6 and 48x48 quadrature.
-SIMSOPT_BACKEND_MODE=jax_gpu_fast SIMSOPT_PRECISION=fp64 \
-  JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 PYTHONPATH=src \
-  python examples/jax/2_Intermediate/boozerQA_ls.py --max-steps 3 --json
-```
-
-Read the reported inner-solve result, accepted coil movement, and outer optimizer
-status separately. `status=ok` means the bounded workflow completed an accepted,
-feasible step that lowered the objective; `optimizer_success` separately reports
-convergence. A result after an iteration budget is not a converged coil optimum.
-No end-to-end speedup is claimed for this new example;
-the historical inner-solve measurements do not measure this complete workflow.
-The serial JAX program is registered as a combined tutorial, with direct example
-and gradient tests listed in the manifest. It does not count as a one-to-one MPI
-port or as authority-harness parity evidence. The original MPI example remains a
-separate, MPI-dependent workflow. The native reference uses native field and
-BFGS/Newton solvers, but its standard SIMSOPT coil objectives require CPU JAX;
-it therefore lives alongside the JAX examples and requires the JAX extra.

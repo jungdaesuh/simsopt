@@ -11,11 +11,8 @@ from simsopt.geo import BoozerSurface, Volume
 from simsopt_jax.geo.optimizers.native_ls_newton import newton_ls_native_dense
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
-from simsopt_jax_adapters.geo.nested_ls_ncsx import (
-    NCSX_EXAMPLE_JSON,
-    upsample_surface_xyz_tensor_fourier,
-)
 
+from .ncsx_fixtures import NCSX_EXAMPLE_JSON, upsample_surface_xyz_tensor_fourier
 from .surface_test_helpers import get_boozer_surface
 
 jax.config.update("jax_enable_x64", True)

@@ -22,11 +22,11 @@ from examples.jax.run_parity import _selected_cases
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXPERIMENTAL_CASE = "native-single-stage-boozer-vacuum-optimization"
-EXPERIMENTAL_SOURCES = {
-    "3_Advanced/single_stage_boozer_vacuum_optimization.py",
-    "3_Advanced/single_stage_flat675.py",
-}
-MISSING_EXPERIMENTAL_SOURCE = "3_Advanced/single_stage_flat675_missing.py"
+EXPERIMENTAL_SOURCE = "3_Advanced/single_stage_boozer_vacuum_optimization.py"
+EXPERIMENTAL_SOURCES = {EXPERIMENTAL_SOURCE}
+MISSING_EXPERIMENTAL_SOURCE = (
+    "3_Advanced/single_stage_boozer_vacuum_optimization_missing.py"
+)
 OFFICIAL_EXECUTABLE_BATCH_SIZE = 25
 
 
@@ -148,7 +148,7 @@ def test_loader_rejects_experimental_relationship_omission() -> None:
     parity["experimental_relationships"] = [
         row
         for row in experimental_rows
-        if row.get("native_source") != "3_Advanced/single_stage_flat675.py"
+        if row.get("native_source") != EXPERIMENTAL_SOURCE
     ]
     assert parity["relationships"] == official_relationships
     assert len(parity["experimental_relationships"]) == len(experimental_rows) - 1
@@ -165,9 +165,7 @@ def test_loader_rejects_experimental_relationship_omission() -> None:
 def test_loader_rejects_missing_experimental_source_file() -> None:
     manifest, parity = _mutated_active_documents()
     sources = _mapping_rows(manifest, "experimental_sources")
-    source = next(
-        row for row in sources if row["source"] == "3_Advanced/single_stage_flat675.py"
-    )
+    source = next(row for row in sources if row["source"] == EXPERIMENTAL_SOURCE)
     source["source"] = MISSING_EXPERIMENTAL_SOURCE
     manifest["experimental_sources"] = sorted(
         sources, key=lambda row: str(row["source"])

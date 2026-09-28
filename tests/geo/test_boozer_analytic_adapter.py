@@ -17,10 +17,6 @@ from simsopt.geo import (
 from simsopt_jax.geo.optimizers.native_ls_newton import newton_ls_native_dense
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
-from simsopt_jax_adapters.geo.nested_ls_ncsx import (
-    NcsxInnerReport,
-    ncsx_banana_run_code,
-)
 
 
 @pytest.fixture(params=("cpu", "gpu"), autouse=True)
@@ -280,28 +276,3 @@ def test_analytic_newton_method_matches_native_from_common_seed(weighted):
     assert actual["type"] == "ls"
     assert device.need_to_run_code is False
     assert device.res is actual
-
-
-def test_ncsx_banana_analytic_matches_native_run_code_from_common_start():
-    native, device, G = _problem("volume", True)
-    for boozer in (native, device):
-        boozer.options["verbose"] = False
-        boozer.options["bfgs_maxiter"] = 20
-    reference = native.run_code(-0.406, G)
-    report = NcsxInnerReport()
-    actual = ncsx_banana_run_code(
-        device, -0.406, G, derivative_assembly="analytic", report=report
-    )
-    assert bool(reference["success"]) and bool(actual["success"])
-    assert report.bfgs_nit >= 1
-    assert report.bfgs_seconds > 0.0 and report.newton_seconds > 0.0
-    np.testing.assert_allclose(actual["iota"], reference["iota"], rtol=1e-8, atol=1e-9)
-    np.testing.assert_allclose(actual["G"], reference["G"], rtol=1e-8, atol=1e-9)
-    np.testing.assert_allclose(
-        np.asarray(device.surface.get_dofs()),
-        np.asarray(native.surface.get_dofs()),
-        rtol=1e-8,
-        atol=1e-9,
-    )
-    with pytest.raises(ValueError, match="derivative_assembly"):
-        ncsx_banana_run_code(device, -0.406, G, derivative_assembly="symbolic")

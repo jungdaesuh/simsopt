@@ -30,9 +30,8 @@ NATIVE_TIERS = {
     "stellarator_benchmarks",
 }
 # Frozen v2 catalog is 51 sources. Post-v2 natives stay off that pin:
-# single_stage_boozer_vacuum_optimization.py, then a7df37227's flat-675 twin.
-# da1565498 registered flat675 on the live v3 catalog; this historical v2
-# contract still subtracts every post-v2 source. The two periodic-field-line
+# single_stage_boozer_vacuum_optimization.py; this historical v2 contract
+# still subtracts every post-v2 source. The two periodic-field-line
 # scripts are official upstream sources (they are in the pinned upstream
 # inventory at 9e027eac3 and in the live v3 catalog, as blocked without a
 # mirror) that reached this branch with an upstream merge, i.e. after the v2
@@ -42,7 +41,6 @@ POST_V2_NATIVE_SOURCES = frozenset(
         "1_Simple/periodicfieldline_QA.py",
         "1_Simple/periodicfieldline_QH.py",
         "3_Advanced/single_stage_boozer_vacuum_optimization.py",
-        "3_Advanced/single_stage_flat675.py",
     }
 )
 
@@ -645,14 +643,14 @@ def test_resolution_does_not_follow_other_first_party_packages(
 ) -> None:
     """A library import is a dependency, not a relocated example implementation."""
 
-    library = tmp_path / "src" / "simsopt_jax_adapters" / "geo" / "flat675.py"
+    library = tmp_path / "src" / "simsopt_jax_adapters" / "geo" / "library.py"
     library.parent.mkdir(parents=True)
     (library.parent / "__init__.py").touch()
     library.write_text("VALUE = 3\n", encoding="utf-8")
     script = _example_script(
         tmp_path,
         "self.py",
-        "from simsopt_jax_adapters.geo.flat675 import VALUE\n\n\n"
+        "from simsopt_jax_adapters.geo.library import VALUE\n\n\n"
         "def main() -> int:\n    return VALUE\n",
     )
 

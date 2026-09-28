@@ -1,12 +1,10 @@
 """Artifact-free coverage of the optimizer policy each fused lane constructs.
 
-The F3 campaign charter hashes ``{method, maxiter, maxfun, gtol, ftol, maxcor,
-maxls}`` per leg and voids a leg whose policy differs from the archived one, so
-what each binder puts in that record is a contract, not an implementation
-detail.  These tests read the constructed options record — the same object the
-charter's policy-identity sha covers — and assert its field values; the
-``minimize`` seam is intercepted only to reach that record, never asserted on
-for having been called.
+What each binder puts in the options record ``{method, maxiter, maxfun, gtol,
+ftol, maxcor, maxls}`` is its optimizer policy, a contract rather than an
+implementation detail.  These tests read the constructed options record and
+assert its field values; the ``minimize`` seam is intercepted only to reach
+that record, never asserted on for having been called.
 
 Nothing here solves a real problem: a three-DOF quadratic is enough, because
 the policy is chosen before any physics is seen.
@@ -26,11 +24,6 @@ from simsopt_jax.examples.fused_lane import (
     prepare_fused_lane_solve,
     solve_fused_lane,
 )
-from simsopt_jax.examples.single_stage_flat675 import (
-    FLAT675_LBFGS_HISTORY,
-    FLAT675_LBFGS_MAXLS,
-    solve_single_stage_flat675,
-)
 from simsopt_jax.examples.stage_two_finitebuild import (
     FINITE_BUILD_LBFGS_HISTORY,
     solve_finite_build_stage_two,
@@ -41,9 +34,6 @@ from simsopt_jax.solve.simsopt.contracts import (
     SimsoptLBFGSBOptions,
 )
 
-# The archived genuine-675 lane record's L-BFGS-B policy block.
-ARCHIVED_MAXCOR = 300
-ARCHIVED_MAXLS = 8
 STEP_BUDGET = 2
 
 
@@ -73,34 +63,11 @@ def constructed_options(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     return recorded
 
 
-def test_flat675_binder_constructs_the_archived_policy(
-    prepared: PreparedFusedLaneSolve,
-    constructed_options: list[Any],
-) -> None:
-    """The flat-675 lane must run the archived history and line-search cap."""
-    solve_single_stage_flat675(
-        prepared,
-        driver=Driver.SIMSOPT_LBFGSB,
-        max_steps=STEP_BUDGET,
-        rtol=1.0e-15,
-        atol=1.0e-12,
-    )
-
-    (options,) = constructed_options
-    assert isinstance(options, SimsoptLBFGSBOptions)
-    assert options.maxcor == FLAT675_LBFGS_HISTORY == ARCHIVED_MAXCOR
-    assert options.maxls == FLAT675_LBFGS_MAXLS == ARCHIVED_MAXLS
-    assert options.maxiter == STEP_BUDGET
-    # The charter states this cap cannot bind: at maxls=8 an iteration costs at
-    # most nine evaluations, and 20 per iteration is well above nine.
-    assert options.maxfun == STEP_BUDGET * 20
-
-
 def test_finite_build_binder_keeps_the_default_line_search(
     prepared: PreparedFusedLaneSolve,
     constructed_options: list[Any],
 ) -> None:
-    """The official finite-build policy must not inherit the flat-675 pin."""
+    """The official finite-build policy keeps the optimizer's line search."""
     solve_finite_build_stage_two(
         prepared,
         driver=Driver.SIMSOPT_LBFGSB,
