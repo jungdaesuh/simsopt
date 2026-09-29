@@ -1,50 +1,76 @@
 """Full-census ratchet for the JAX host/device boundary owners.
 
-The ``allow_host_transfers`` census is static analysis over the source text of
+The ``allow_host_transfers`` census is static analysis over the source of
 ``src/simsopt``, ``src/simsopt_contracts``, ``src/simsopt_jax``,
 ``src/simsopt_jax_adapters``, ``examples`` and ``benchmarks`` (when present),
-the owner excluded. It admits only ``with allow_host_transfers():`` items,
-each pinned by scope and fingerprint, whose callee resolves to the owner in
-its lexical scope chain: the function, enclosing functions, then the module
-(a class body only when the site sits directly in it), honouring ``global``
-and ``nonlocal``. The innermost scope binding the name must bind it only by
-an import of the owner; a parameter, assignment, loop, ``with``/``except``/
-``match`` target, ``:=`` target, other import or nested ``def``/``class`` of
-that name there is an escape. It also resolves the owner module through
-static imports, aliases and attribute chains, and checks ``getattr``/
-``hasattr`` constant names, ``sys.modules`` keys and ``import_module``/
-``__import__`` arguments; non-constant dynamic imports must be pinned in
+the owner excluded. It admits only ``with allow_host_transfers():`` items, each
+pinned by scope and by a fingerprint of the ``with`` statement's syntax tree
+and statement path (comments and formatting do not change it). An admitted
+item's callee must resolve to the owner in its lexical scope chain: the
+function, enclosing functions, then the module (a class body only when the
+site sits directly in it). ``global`` and ``nonlocal`` declarations in
+functions choose the scope a name resolves in, and a function-level write to
+a declared name counts as a binding of the scope it rebinds. The innermost
+scope binding the name must bind it only by an import of the owner; a
+parameter, assignment, loop, ``with``/``except``/``match`` target, ``:=``
+target, other import or nested ``def``/``class`` of that name there is an
+escape. The census also resolves the owner module through static imports,
+aliases and attribute chains, and checks ``getattr``/``hasattr`` constant
+names, ``sys.modules`` keys and ``import_module``/``__import__`` arguments;
+non-constant dynamic imports must be pinned in
 ``_ALLOWED_DYNAMIC_LOOKUP_SITES``.
+
+Two mechanisms are at work, and their limits differ. The visitor flags names
+wherever they appear: every ``Name`` or attribute named
+``allow_host_transfers`` except the callee of a ``with`` item (so a ``:=``
+target, an assignment or a reference is flagged), and every use of a name
+imported as the owner module other than as the base of a literal attribute.
+Binding resolution decides whether an admitted callee, or the base of an
+admitted attribute callee, is the owner.
 
 Known limits that can let a change through unseen (false negatives):
 
+* Binding resolution does not read the headers of nested definitions:
+  decorators, default values and annotations are evaluated in the enclosing
+  scope, but a ``:=`` there is not collected as a binding of it. A default
+  such as ``def f(x=(runtime := substitute))`` rebinds an owner-package alias
+  (``from simsopt_jax import runtime``) or the ``simsopt_jax`` root of a
+  dotted import unseen; the visitor catches the same form only for the
+  permit's name and for names imported as the owner module itself.
+* Binding resolution collects ``global`` writes from functions only. A class
+  body that declares a name ``global`` and rebinds it -- by an import, or by
+  assignment to an owner-package alias or the ``simsopt_jax`` root -- changes
+  the module binding an admitted site resolves to, unseen.
 * A lookup whose name is computed at run time on an object the census does
   not recognise as the owner module (reached through a call's return value,
   say), code run from strings by ``exec``/``eval``/``compile``, and writes
   through ``globals()``/``locals()``/``vars()`` of a non-owner namespace
   (``globals()["allow_host_transfers"] = ...``). The repository's rule against
   dynamic imports and review cover these.
-* A fingerprint pins the text of an admitted region, not the behaviour of the
-  functions it calls.
+* A fingerprint pins the syntax tree of an admitted region, not the behaviour
+  of the functions it calls.
 * Only the roots above are scanned; ``tests/``, ``scripts/`` and ``docs/`` are
   not.
-* Decorators, default values and annotations of a nested ``def`` are not
-  searched for ``:=`` bindings of the permit's name.
 
 Known limits that flag benign code (false positives, fail-closed; the author
 renames the code or updates an allowlist on purpose):
 
-* Names, not bindings, identify the permit. Any function, method, attribute
-  or variable named ``allow_host_transfers`` outside the owner is flagged.
-* The owner-module reference check (as opposed to admitted-site resolution)
-  collects bindings per file, so a local variable that shadows an owner import
-  elsewhere in the file and is used as a value is flagged.
+* Names, not bindings, identify the permit in the visitor: any ``Name`` or
+  attribute named ``allow_host_transfers`` outside the owner, other than an
+  admitted ``with`` callee, is flagged. (A ``def``/``class`` of that name that
+  is never referenced is not flagged, since its name is not such a node.)
+* The owner-module reference check collects bindings per file, so a local
+  variable that shadows an owner import elsewhere in the file and is used as
+  a value is flagged.
 * ``getattr``/``hasattr`` with the constant name ``"host_boundary"`` or
   ``"allow_host_transfers"`` is flagged whatever the target object is.
 * Any wildcard import in a file with admitted sites is flagged, whether or not
   it can rebind the permit.
-* A ``nonlocal`` rebinding in a nested function is attributed to every
-  enclosing function, not only to the one it binds.
+* A ``nonlocal`` write in a nested function counts as a binding of every
+  enclosing function, not only the nearest one that binds the name. So an
+  admitted site in ``outer`` that uses the imported owner is rejected when an
+  ``inner`` function rebinds, through ``nonlocal``, a same-named variable
+  that belongs to an intermediate ``middle`` function.
 """
 
 from __future__ import annotations
