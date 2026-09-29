@@ -305,8 +305,8 @@ _CASES = {
                 same_state_proof=(
                     "tests/integration/test_jax_mirror_boozer_official_end_states.py (the JAX "
                     "penalty residual and Jacobian equal native's at upstream's recorded area and "
-                    "flux end states) and the initial-state comparison in "
-                    "tests/integration/test_jax_mirror_boozer_parity.py"
+                    "flux end states of every branch representative this set admits) and the "
+                    "initial-state comparison in tests/integration/test_jax_mirror_boozer_parity.py"
                 ),
                 disclosure=disclosure,
             )
