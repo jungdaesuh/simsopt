@@ -65,7 +65,7 @@ _ALLOWED_OWNER_CALLS = frozenset(
         "src/simsopt_jax/geo/optimizers/linear_solve.py::_hager_higham_inverse_1_norm_estimate::transfer_guard_host_to_device::1338:9",
         "src/simsopt_jax/geo/optimizers/linear_solve.py::_run_operator_gmres::transfer_guard_host_to_device::686:9",
         "src/simsopt_jax/geo/optimizers/linear_solve.py::_run_operator_gmres_counted_incremental::transfer_guard_host_to_device::968:9",
-        "src/simsopt_jax/geo/optimizers/optimizer.py::_gmres_solve_least_squares_system::transfer_guard_host_to_device::2736:9",
+        "src/simsopt_jax/geo/optimizers/optimizer.py::_gmres_solve_least_squares_system::transfer_guard_host_to_device::2734:9",
         "src/simsopt_jax/geo/optimizers/reference.py::_scipy_host_array::transfer_guard_device_to_host::231:9",
         "src/simsopt_jax/geo/optimizers/reference.py::_target_array_from_scipy_host::transfer_guard_host_to_device::248:9",
         "src/simsopt_jax/geo/optimizers/reference.py::_target_scipy_host_extension_scope::transfer_guard_device_to_host::122:13",
@@ -268,36 +268,43 @@ def test_only_boundary_owners_call_jax_transfer_and_readiness_primitives() -> No
 # is a ``with allow_host_transfers():`` item (or ``with host_boundary.allow_host_
 # transfers():``). Each admitted site is keyed by its enclosing scope
 # (``path::qualified.name``) and pinned by a fingerprint of the whole normalized
-# ``with`` statement -- items and body, via ``ast.dump`` without line or column
-# attributes -- together with its statement path inside that scope (``body[1]``,
-# ``body[0].orelse[2]``, ...). Moving a region to another scope, moving it within
-# its scope, or editing anything inside it therefore fails until the allowlist is
-# updated on purpose. Every other reference is an escape: a bare call, a decorator,
-# a call inside a lambda or comprehension, a call used as a value, an aliased
-# import, ``permit = allow_host_transfers``, passing it as a value, and a string
-# constant equal to the name (``getattr(module, "allow_host_transfers")``).
+# ``with`` statement -- items and body, serialized by ``_stable_ast_dump``, which
+# emits every field in ``_fields`` order (empty lists and ``None`` included) and no
+# line or column attributes, so it does not depend on ``ast.dump``'s defaults
+# (Python 3.13 dropped empty optional fields from them) -- together with its
+# statement path inside that scope (``body[1]``, ``body[0].orelse[2]``, ...).
+# Moving a region to another scope, moving it within its scope, or editing
+# anything inside it therefore fails until the allowlist is updated on purpose.
+# Every other reference is an escape: a bare call, a decorator, a call inside a
+# lambda or comprehension, a call used as a value, an aliased import,
+# ``permit = allow_host_transfers``, passing it as a value, and a string constant
+# equal to the name (``getattr(module, "allow_host_transfers")``). The owner module
+# object is an escape too, under any import form or alias, unless it is only the
+# base of an attribute access by a literal, non-dunder name: ``getattr`` with a
+# computed name, ``vars(host_boundary)``, ``host_boundary.__dict__``, the module
+# passed as a value, and a string naming the module (``sys.modules[...]``).
 # Regenerate a fingerprint with ``_allow_host_transfers_census(source, path)`` after
 # reading the edited region.
 _ALLOWED_ALLOW_HOST_TRANSFERS_SITES = {
     # Builds the curve spec and frozen DOF vector on device from host inputs.
     "src/simsopt_jax/examples/official_tiny_least_squares.py::curve_length_residual": (
-        "ecd12f37d3f9",
+        "ba6efdf07d18",
     ),
     # Places the quadratic targets and weights on device.
     "src/simsopt_jax/examples/official_tiny_least_squares.py::quadratic_residual": (
-        "d2bcb5ef2372",
+        "e79c2feff19a",
     ),
     # SciPy's residual callback: places each host trial point, returns a host residual.
     "src/simsopt_jax/examples/official_tiny_least_squares.py::solve_jax_residual.host_residual": (
-        "2645a45d3da5",
+        "99dff2c89f4f",
     ),
     # Builds the surface spec, frozen DOF vector and targets on device from host inputs.
     "src/simsopt_jax/examples/official_tiny_least_squares.py::surface_area_volume_residual": (
-        "e4653764fee9",
+        "b2c2f91262b8",
     ),
     # Endpoint residual and exact Jacobian, read back to host float64.
     "src/simsopt_jax/examples/official_tiny_least_squares.py::value_and_jacobian": (
-        "cc992663d064",
+        "0af3fc000c8b",
     ),
 }
 _ALLOW_HOST_TRANSFERS_REQUIRED_ROOTS = (
@@ -310,6 +317,8 @@ _ALLOW_HOST_TRANSFERS_REQUIRED_ROOTS = (
 _ALLOW_HOST_TRANSFERS_OPTIONAL_ROOTS = ("benchmarks",)
 _ALLOW_HOST_TRANSFERS_OWNER = "src/simsopt_jax/runtime/host_boundary.py"
 _ALLOW_HOST_TRANSFERS = "allow_host_transfers"
+_OWNER_MODULE = "simsopt_jax.runtime.host_boundary"
+_OWNER_MODULE_NAME = "host_boundary"
 _SCOPE_NODES = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
 
@@ -342,15 +351,65 @@ def _statement_paths(tree: ast.Module) -> dict[int, str]:
     return paths
 
 
+def _stable_ast_dump(value: object) -> str:
+    """Serialize an AST with every field, independent of ``ast.dump`` defaults."""
+    if isinstance(value, ast.AST):
+        fields = ", ".join(
+            f"{field}={_stable_ast_dump(getattr(value, field))}"
+            for field in value._fields
+        )
+        return f"{type(value).__name__}({fields})"
+    if isinstance(value, list):
+        return "[" + ", ".join(_stable_ast_dump(item) for item in value) + "]"
+    return repr(value)
+
+
 def _with_fingerprint(node: ast.With | ast.AsyncWith, path: str) -> str:
-    normalized = f"{path}\n{ast.dump(node, include_attributes=False)}"
+    normalized = f"{path}\n{_stable_ast_dump(node)}"
     return hashlib.sha256(normalized.encode()).hexdigest()[:12]
 
 
+def _owner_module_bindings(tree: ast.Module) -> frozenset[str]:
+    """Names any import in the file binds to the owner module object."""
+    bound: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            bound.update(
+                alias.asname
+                for alias in node.names
+                if alias.name == _OWNER_MODULE and alias.asname is not None
+            )
+        elif isinstance(node, ast.ImportFrom):
+            bound.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name == _OWNER_MODULE_NAME
+            )
+    return frozenset(bound)
+
+
+def _literal_attribute_bases(tree: ast.Module) -> frozenset[int]:
+    """Ids of expressions used only as the base of a literal non-dunder attribute."""
+    return frozenset(
+        id(node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and not (node.attr.startswith("__") and node.attr.endswith("__"))
+    )
+
+
 class _AllowHostTransfersCensus(ast.NodeVisitor):
-    def __init__(self, relative_path: str, statement_paths: dict[int, str]) -> None:
+    def __init__(
+        self,
+        relative_path: str,
+        statement_paths: dict[int, str],
+        owner_module_names: frozenset[str],
+        literal_attribute_bases: frozenset[int],
+    ) -> None:
         self.relative_path = relative_path
         self.statement_paths = statement_paths
+        self.owner_module_names = owner_module_names
+        self.literal_attribute_bases = literal_attribute_bases
         self.scope_names: list[str] = []
         self.sites: dict[str, tuple[str, ...]] = {}
         self.escapes: list[str] = []
@@ -419,25 +478,42 @@ class _AllowHostTransfersCensus(ast.NodeVisitor):
             return
         self.generic_visit(node)
 
+    def _is_owner_module_value(self, node: ast.AST) -> bool:
+        return id(node) not in self.literal_attribute_bases
+
     def visit_Name(self, node: ast.Name) -> None:
         if node.id == _ALLOW_HOST_TRANSFERS:
             self._escape(node, "non-call reference")
+        elif node.id in self.owner_module_names and self._is_owner_module_value(node):
+            self._escape(node, "owner module reference")
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         if node.attr == _ALLOW_HOST_TRANSFERS:
             self._escape(node, "non-call reference")
+        elif node.attr == _OWNER_MODULE_NAME and self._is_owner_module_value(node):
+            self._escape(node, "owner module reference")
         self.generic_visit(node)
 
     def visit_Constant(self, node: ast.Constant) -> None:
         if node.value == _ALLOW_HOST_TRANSFERS:
             self._escape(node, "string reference")
+        elif isinstance(node.value, str) and (
+            node.value == _OWNER_MODULE_NAME
+            or node.value.endswith(f".{_OWNER_MODULE_NAME}")
+        ):
+            self._escape(node, "owner module string reference")
 
 
 def _allow_host_transfers_census(
     source: str, relative_path: str
 ) -> tuple[dict[str, tuple[str, ...]], list[str]]:
     tree = ast.parse(source)
-    census = _AllowHostTransfersCensus(relative_path, _statement_paths(tree))
+    census = _AllowHostTransfersCensus(
+        relative_path,
+        _statement_paths(tree),
+        _owner_module_bindings(tree),
+        _literal_attribute_bases(tree),
+    )
     census.visit(tree)
     return census.sites, census.escapes
 
@@ -512,6 +588,26 @@ def test_allow_host_transfers_census_admits_only_with_items() -> None:
     assert escapes == []
     assert list(attribute_sites) == ["src/example.py::approved.inner"]
     assert attribute_escapes == []
+    module_imports = {
+        "aliased module import": (
+            "import simsopt_jax.runtime.host_boundary as hb\n\n"
+            "def approved():\n"
+            "    with hb.allow_host_transfers():\n"
+            "        transfer()\n"
+        ),
+        "dotted module import": (
+            "import simsopt_jax.runtime.host_boundary\n\n"
+            "def approved():\n"
+            "    with simsopt_jax.runtime.host_boundary.allow_host_transfers():\n"
+            "        transfer()\n"
+        ),
+    }
+    for form, source in module_imports.items():
+        module_sites, module_escapes = _allow_host_transfers_census(
+            source, "src/example.py"
+        )
+        assert list(module_sites) == ["src/example.py::approved"], form
+        assert module_escapes == [], form
 
 
 def test_allow_host_transfers_census_refuses_a_moved_or_edited_region() -> None:
@@ -615,6 +711,52 @@ def test_allow_host_transfers_census_refuses_every_other_reference() -> None:
             "from simsopt_jax.runtime import host_boundary\n\n"
             "def approved():\n"
             '    with getattr(host_boundary, "allow_host_transfers")():\n'
+            "        transfer()\n"
+        ),
+        "getattr with a concatenated string": (
+            "from simsopt_jax.runtime import host_boundary\n\n"
+            "def approved():\n"
+            '    with getattr(host_boundary, "allow_" + "host_transfers")():\n'
+            "        transfer()\n"
+        ),
+        "getattr on an aliased module import": (
+            "import simsopt_jax.runtime.host_boundary as hb\n\n"
+            "def approved(name):\n"
+            "    with getattr(hb, name)():\n"
+            "        transfer()\n"
+        ),
+        "getattr on a dotted module import": (
+            "import simsopt_jax.runtime.host_boundary\n\n"
+            "def approved(name):\n"
+            "    with getattr(simsopt_jax.runtime.host_boundary, name)():\n"
+            "        transfer()\n"
+        ),
+        "vars of the module": (
+            "from simsopt_jax.runtime import host_boundary as hb\n\n"
+            "def approved(name):\n"
+            "    with vars(hb)[name]():\n"
+            "        transfer()\n"
+        ),
+        "module __dict__": (
+            "from simsopt_jax.runtime import host_boundary\n\n"
+            "def approved(name):\n"
+            "    with host_boundary.__dict__[name]():\n"
+            "        transfer()\n"
+        ),
+        "module passed as a value": (
+            "from simsopt_jax.runtime import host_boundary\n\n"
+            "def approved(run):\n"
+            "    run(host_boundary)\n"
+        ),
+        "module reached through its package": (
+            "from simsopt_jax import runtime\n\n"
+            "def approved(run):\n"
+            "    run(runtime.host_boundary)\n"
+        ),
+        "module named by a string": (
+            "import sys\n\n"
+            "def approved(name):\n"
+            '    with getattr(sys.modules["simsopt_jax.runtime.host_boundary"], name)():\n'
             "        transfer()\n"
         ),
     }
