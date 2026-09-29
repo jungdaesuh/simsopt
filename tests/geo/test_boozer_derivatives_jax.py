@@ -135,12 +135,12 @@ def _cpp_boozer_wrappers():
 
 
 def _biot_savart_fns():
-    from simsopt_jax.field.biotsavart import (
+    from simsopt_jax.core.biotsavart import (
         biot_savart_B,
         biot_savart_dB_by_dX,
         biot_savart_d2B_by_dXdX,
-        grouped_biot_savart_B,
     )
+    from simsopt_jax.core.field import grouped_biot_savart_B
 
     return (
         biot_savart_B,

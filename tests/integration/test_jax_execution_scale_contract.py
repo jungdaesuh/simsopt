@@ -35,7 +35,6 @@ from examples.jax.run_examples import (
     build_child_command as build_example_command,
 )
 from examples.jax.run_parity import _parse_arguments as parse_parity_arguments
-from simsopt import _examples_runtime as native_example_runtime
 from simsopt_contracts import examples_runtime as shared_example_runtime
 from simsopt_jax.examples import ExampleResult, ExecutionScale, run_example
 
@@ -481,9 +480,7 @@ def test_native_child_records_native_synchronization_when_jax_is_loaded(
     )
 
 
-def test_native_example_runtime_reexports_one_shared_implementation() -> None:
-    assert native_example_runtime.ExampleResult is shared_example_runtime.ExampleResult
-    assert native_example_runtime.run_example is shared_example_runtime.run_example
+def test_jax_example_result_extends_the_shared_runtime() -> None:
     assert issubclass(ExampleResult, shared_example_runtime.ExampleResult)
 
 

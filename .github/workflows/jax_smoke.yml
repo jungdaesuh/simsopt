@@ -422,17 +422,12 @@ jobs:
       - name: Ruff format check
         run: |
           bash scripts/lint.sh format \
-            src/simsopt_jax/_constants.py \
             src/simsopt_jax/backend/__init__.py \
             src/simsopt_jax/backend/dtypes.py \
             src/simsopt_jax/backend/runtime.py \
-            src/simsopt_jax/field/biotsavart.py \
             src/simsopt_jax_adapters/field/biotsavart_backend.py \
             src/simsopt_jax/core/specs.py \
             src/simsopt_jax/core/field.py \
-            src/simsopt_jax/core/redl_current.py \
-            src/simsopt_jax/mhd/_vmec_frozen.py \
-            src/simsopt_jax/mhd/vmec_diagnostics.py \
             src/simsopt_jax/geo/surface_fourier.py \
             src/simsopt_jax/geo/boozer_residual.py \
             src/simsopt_jax/geo/label_constraints.py \
@@ -445,6 +440,5 @@ jobs:
             src/simsopt_jax/solve/__init__.py \
             src/simsopt_jax/solve/dispatch.py \
             src/simsopt_jax/solve/serial.py \
-            src/simsopt_jax_adapters/io/specs.py \
             scripts/jax_where_division_lint.py \
             tests/test_jax_where_division_lint.py

@@ -8,7 +8,6 @@ import numpy as np
 
 jax.config.update("jax_enable_x64", True)
 
-from simsopt_jax.core._spline_utils import _safe_divide
 from simsopt_jax.core.biotsavart import (
     _radius_squared,
     biot_savart_A,
@@ -47,16 +46,6 @@ def test_biot_savart_public_kernels_preserve_point_singularity():
         value = kernel(points, gammas, gammadashs, currents)
 
         assert not np.all(np.isfinite(np.asarray(value)))
-
-
-def test_safe_divide_has_finite_zero_denominator_gradient():
-    def scalar_value(denominator):
-        return _safe_divide(jnp.asarray(2.0, dtype=jnp.float64), denominator)
-
-    gradient = jax.grad(scalar_value)(jnp.asarray(0.0, dtype=jnp.float64))
-
-    assert np.isfinite(np.asarray(gradient))
-    np.testing.assert_allclose(np.asarray(gradient), 0.0)
 
 
 def test_constant_row_builds_its_row_from_a_traced_reference():

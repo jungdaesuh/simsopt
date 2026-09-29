@@ -589,7 +589,6 @@ _STRICT_GPU_EXCLUDED_MARKERS = {
 
 _ADAPTER_BOUNDARY_TEST_FILES = frozenset(
     {
-        "field/test_magnetic_axis_helpers_jax_item21.py",
         "field/test_selffieldforces.py",
         "geo/test_curvexyzfouriersymmetries_spec_jax.py",
         "geo/test_qfmsurface_jax.py",

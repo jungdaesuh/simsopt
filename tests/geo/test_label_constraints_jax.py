@@ -46,7 +46,7 @@ from simsopt_jax.geo.surface_fourier import (  # noqa: E402
     surface_normal_from_dofs as _surface_normal_from_dofs,
     surface_volume as _surface_volume,
 )
-from simsopt_jax.field.biotsavart import biot_savart_A as _biot_savart_A  # noqa: E402
+from simsopt_jax.core.biotsavart import biot_savart_A as _biot_savart_A  # noqa: E402
 from simsopt_jax.geo.label_constraints import (  # noqa: E402
     toroidal_flux_jax as _toroidal_flux_jax,
 )

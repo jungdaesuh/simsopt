@@ -167,29 +167,24 @@ fi
   -k "$PARITY_EXPR" \
   -v --tb=short 2>&1 || record_failure
 
-# --- Phase 3: Biot-Savart parity tests ---
+# --- Phase 3: Boozer derivatives ---
 echo ""
-echo "=== Phase 3: Biot-Savart Parity ==="
-"$PYTHON_BIN" -m pytest tests/field/test_biotsavart_jax_parity.py -v --tb=short 2>&1 || record_failure
-
-# --- Phase 4: Boozer derivatives ---
-echo ""
-echo "=== Phase 4: Boozer Derivatives ==="
+echo "=== Phase 3: Boozer Derivatives ==="
 "$PYTHON_BIN" -m pytest tests/geo/test_boozer_derivatives_jax.py -v --tb=short 2>&1 || record_failure
 
-# --- Phase 5: Boozer surface solver ---
+# --- Phase 4: Boozer surface solver ---
 echo ""
-echo "=== Phase 5: Boozer Surface Solver ==="
+echo "=== Phase 4: Boozer Surface Solver ==="
 "$PYTHON_BIN" -m pytest tests/geo/test_boozersurface_jax.py -m "not private_optimizer_runtime" -v --tb=short 2>&1 || record_failure
 
-# --- Phase 6: JAX native path integration ---
+# --- Phase 5: JAX native path integration ---
 echo ""
-echo "=== Phase 6: JAX Native Path Integration ==="
+echo "=== Phase 5: JAX Native Path Integration ==="
 "$PYTHON_BIN" -m pytest tests/integration/test_jax_native_path.py -v --tb=short 2>&1 || record_failure
 
-# --- Phase 7: Quick device sanity ---
+# --- Phase 6: Quick device sanity ---
 echo ""
-echo "=== Phase 7: Device Sanity Check ==="
+echo "=== Phase 6: Device Sanity Check ==="
 "$PYTHON_BIN" -c "
 import jax
 jax.config.update('jax_enable_x64', True)

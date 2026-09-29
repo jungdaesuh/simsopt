@@ -72,14 +72,7 @@ The step controller, error norm and step-size update are boost.odeint's
 ``controlled_runge_kutta`` with ``default_error_checker`` and
 ``default_step_adjuster``, which is what
 ``make_dense_output(tol, tol, dtmax, runge_kutta_dopri5<State>())``
-instantiates in ``legacy native extension/tracing.cpp``. They are NOT shared with
-``simsopt_jax.core.magnetic_axis_helpers``, which deliberately keeps
-Hairer's RMS controller: the axis helper integrates a field line
-together with its tangent map to find a fixed point of the return map
-and mirrors no upstream boost driver, so aligning it with this module
-would move its accepted steps for no upstream reason. That module says
-the same thing at its own controller constants; the two policies are
-divergent on purpose and neither is a copy of the other.
+instantiates in ``legacy native extension/tracing.cpp``.
 
 Terminal statuses reported by every driver here:
 

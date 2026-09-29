@@ -32,7 +32,7 @@ _REPO_SRC_ROOT = str(Path(__file__).resolve().parents[2] / "src")
 if _REPO_SRC_ROOT not in sys.path:
     sys.path.insert(0, _REPO_SRC_ROOT)
 
-from simsopt_jax.field.biotsavart import biot_savart_A
+from simsopt_jax.core.biotsavart import biot_savart_A
 from simsopt_jax.runtime.host_boundary import scalar_pullback_seed
 from simsopt_jax.numerical_policy import (
     CertificateProbeAuthority,

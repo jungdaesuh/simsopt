@@ -5,7 +5,6 @@ __all__ = (
     "examples",
     "field",
     "geo",
-    "mhd",
     "objectives",
     "runtime",
     "solve",

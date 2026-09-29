@@ -10,6 +10,7 @@ import jax.numpy as jnp
 import jax.scipy.linalg as jsp_linalg
 
 from simsopt_jax.backend import set_backend
+from simsopt_jax.geo.optimizers import dense_ir
 from simsopt_jax.geo.optimizers import optimizer as _optimizer
 
 
@@ -25,7 +26,6 @@ def _set_test_precision(precision: Literal["mixed", "fp64"]) -> None:
 def test_dense_square_operator_solves_are_reexported_from_optimizer():
     """R07 regression: LU/LSQ dense solves must remain on the optimizer facade."""
     from simsopt_jax.geo.optimizers import optimizer as opt
-    from simsopt_jax.geo.optimizers.private import _dense_ir as dense_ir
 
     for name in (
         "_solve_dense_square_operator_lu_system_with_status",

@@ -77,13 +77,6 @@ jobs:
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
             python -m pytest tests/test_jax_import_smoke.py -v --tb=short
 
-      - name: Biot-Savart JAX parity
-        id: bs_parity
-        continue-on-error: true
-        run: |
-          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
-            python -m pytest tests/field/test_biotsavart_jax_parity.py -v --tb=short
-
       - name: Biot-Savart JAX unit
         id: bs_unit
         continue-on-error: true
@@ -139,7 +132,6 @@ jobs:
           echo "| Test | Status |" >> "$GITHUB_STEP_SUMMARY"
           echo "|------|--------|" >> "$GITHUB_STEP_SUMMARY"
           echo "| Import smoke | ${{ steps.smoke.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Biot-Savart parity | ${{ steps.bs_parity.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Biot-Savart unit | ${{ steps.bs_unit.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Boozer residual | ${{ steps.boozer.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Surface Fourier | ${{ steps.surface.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
@@ -149,7 +141,6 @@ jobs:
 
           # Fail the workflow if any test step did not succeed
           if [ "${{ steps.smoke.outcome }}" != "success" ] || \
-             [ "${{ steps.bs_parity.outcome }}" != "success" ] || \
              [ "${{ steps.bs_unit.outcome }}" != "success" ] || \
              [ "${{ steps.boozer.outcome }}" != "success" ] || \
              [ "${{ steps.surface.outcome }}" != "success" ] || \

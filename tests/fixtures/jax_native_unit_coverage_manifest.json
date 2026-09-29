@@ -296,7 +296,7 @@
         },
         {
           "anchor": "\"jax/native_unit_parity/test_force_parity.py\",",
-          "cite": "tests/conftest.py:605"
+          "cite": "tests/conftest.py:604"
         }
       ],
       "id": "MF-8",
@@ -1726,7 +1726,7 @@
         }
       ],
       "path": "tests/mhd/test_vmec_diagnostics.py",
-      "reason": "VMEC-driven diagnostics over VMEC output files; excluded by the project rule. The portable pieces that were ported already carry their own JAX-named tests. See capability VM-1."
+      "reason": "VMEC-driven diagnostics over VMEC output files; excluded by the project rule. See capability VM-1."
     },
     {
       "capabilities": [

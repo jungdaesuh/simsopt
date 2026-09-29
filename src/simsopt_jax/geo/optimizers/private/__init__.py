@@ -4,9 +4,7 @@ This package contains the private BFGS and L-BFGS implementations maintained
 against the checked local JAX 0.10.0 runtime after the initial port from the
 upstream JAX optimizer sources.
 
-The public API is in ``simsopt_jax.geo.optimizers.optimizer``. The historical
-``private._dense_ir`` path is a compatibility import for the acyclic
-``simsopt_jax.geo.optimizers.dense_ir`` owner.
+The public API is in ``simsopt_jax.geo.optimizers.optimizer``.
 """
 
 from . import _line_search as _line_search_module

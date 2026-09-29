@@ -1,8 +1,8 @@
 """Direct parity coverage for the JAX curve-subclass kernels.
 
-``CurveHelical``, ``CurvePlanarFourier``, and ``CurveRZFourier`` are today
-reached only incidentally (e.g. through ``tests/field/test_biotsavart_jax_parity.py``
-building a curve as a side effect of a Biot-Savart scenario). This module gives
+``CurveHelical``, ``CurvePlanarFourier``, and ``CurveRZFourier`` are otherwise
+reached only incidentally (building a curve as a side effect of a Biot-Savart
+scenario). This module gives
 each of the three pure JAX kernels
 (``src/simsopt_jax/core/curve_helical.py``, ``curve_planar_fourier.py``,
 ``curve_rz_fourier.py``) direct, subclass-specific coverage:

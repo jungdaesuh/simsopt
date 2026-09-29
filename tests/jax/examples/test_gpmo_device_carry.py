@@ -9,12 +9,8 @@ multistep lane.
 
 The GPMO lanes do not share the pattern. The shipped kernels
 (``simsopt_jax.solve.permanent_magnet`` -> ``simsopt_jax/core/pm_optimization.py``)
-build every carry buffer with ``jnp.zeros``, which is device-native, and the
-one module that does use the helper, ``simsopt_jax/core/pm_workflow.py``, is
-imported by ``tests/solve/test_pm_workflow_jax.py`` alone and exposes its
-``pm_gpmo_*_initial_state`` builders as eager entry points (an explicit
-transfer, which the guard allows). This test holds that negative: it fails on
-CPU if any GPMO carry gains a host buffer.
+build every carry buffer with ``jnp.zeros``, which is device-native. This test
+holds that negative: it fails on CPU if any GPMO carry gains a host buffer.
 """
 
 from __future__ import annotations

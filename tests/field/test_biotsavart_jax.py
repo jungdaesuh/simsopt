@@ -45,8 +45,6 @@ from simsopt_jax.core import sharding as sharding_core
 from simsopt_jax.core import field as core_field
 from simsopt_jax.core import biotsavart as core_biotsavart
 
-import simsopt_jax.field.biotsavart as _bs
-
 
 def _load_with_backend_mode(_mode: str):
     return core_biotsavart
@@ -90,46 +88,19 @@ def _kernel_tuning_env(
         invalidate_backend_cache()
 
 
-biot_savart_B = _bs.biot_savart_B
-biot_savart_dB_by_dX = _bs.biot_savart_dB_by_dX
-biot_savart_B_and_dB = _bs.biot_savart_B_and_dB
-biot_savart_A = _bs.biot_savart_A
-biot_savart_dA_by_dX = _bs.biot_savart_dA_by_dX
-grouped_biot_savart_A = _bs.grouped_biot_savart_A
-grouped_biot_savart_B = _bs.grouped_biot_savart_B
+biot_savart_B = core_biotsavart.biot_savart_B
+biot_savart_dB_by_dX = core_biotsavart.biot_savart_dB_by_dX
+biot_savart_B_and_dB = core_biotsavart.biot_savart_B_and_dB
+biot_savart_A = core_biotsavart.biot_savart_A
+biot_savart_dA_by_dX = core_biotsavart.biot_savart_dA_by_dX
+grouped_biot_savart_A = core_field.grouped_biot_savart_A
+grouped_biot_savart_B = core_field.grouped_biot_savart_B
 
 
 def test_compatibility_grouped_names_use_canonical_field_dispatch():
     """Historical grouped names must not bypass precision-aware dispatch."""
-    assert _bs.grouped_biot_savart_A is core_field.grouped_biot_savart_A
-    assert _bs.grouped_biot_savart_B is core_field.grouped_biot_savart_B
     assert core.grouped_biot_savart_A is core_field.grouped_biot_savart_A
     assert core.grouped_biot_savart_B is core_field.grouped_biot_savart_B
-
-
-def test_compatibility_shim_exposes_only_supported_public_kernels():
-    """The historical shim must not expose core implementation details."""
-    assert _bs.__all__ == (
-        "biot_savart_A",
-        "biot_savart_B",
-        "biot_savart_B_and_dB",
-        "biot_savart_B_vjp",
-        "biot_savart_dA_by_dX",
-        "biot_savart_dB_by_dX",
-        "biot_savart_d2A_by_dXdX",
-        "biot_savart_d2B_by_dXdX",
-        "group_coil_data",
-        "grouped_biot_savart_A",
-        "grouped_biot_savart_B",
-        "invalidate_kernel_cache",
-    )
-    for private_name in (
-        "_biot_savart_A_integrand",
-        "_biot_savart_B_integrand",
-        "_one_point_dense",
-        "_read_tuning_config",
-    ):
-        assert not hasattr(_bs, private_name)
 
 
 MU0 = 4.0 * np.pi * 1e-7

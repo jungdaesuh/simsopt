@@ -312,10 +312,6 @@ therefore cross a boundary before compiled work begins:
   the live host graph;
 * a changed host object requires a new snapshot or adapter evaluation.
 
-The same rule applies to VMEC diagnostics.  Use ``vmec_freeze_splines`` from
-``simsopt_jax_adapters.mhd.vmec_diagnostics`` to create the frozen spline state
-passed to JAX diagnostic kernels.
-
 Optimizer lanes
 ~~~~~~~~~~~~~~~
 
@@ -446,18 +442,13 @@ JAX Boozer-surface VJP callbacks stored in ``result["vjp"]`` accept
 ``(lm, booz_surf)`` because the JAX callback constructs its decision state
 from explicit arguments instead of reading mutable solver state.
 
-Tracing and MPI
-~~~~~~~~~~~~~~~
+Tracing
+~~~~~~~
 
 JAX-compatible field-line tracing adapters are available in
 ``simsopt_jax_adapters.field.tracing``.  They do not imply that every native
 tracing option or callback is traceable; validate the specific operation used
 by an application.
-
-``least_squares_mpi_solve_jax`` in ``simsopt_jax_adapters.solve.mpi`` supports
-``TraceableLeastSquaresProblem`` with MPI-distributed finite-difference
-Jacobian columns and a SciPy solve on rank zero.  It is a scoped MPI path, not
-a claim that every JAX adapter can execute under MPI.
 
 Migration checklist
 ~~~~~~~~~~~~~~~~~~~

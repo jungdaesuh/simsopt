@@ -45,26 +45,11 @@ _SIMSOPTPP_FREE_IMPORT_PROGRAM = textwrap.dedent(
     sys.meta_path.insert(0, BlockSimsoptpp())
 
     from simsopt_jax.backend import get_backend_mode, get_jax_platform
-    from simsopt_jax.mhd import (
-        RedlDetailsJAX,
-        VmecFrozenSplineState,
-        VmecGeometryResultsJAX,
-        compute_trapped_fraction_jax,
-        j_dot_B_Redl_jax_from_arrays,
-        vmec_compute_geometry_jax,
-        vmec_fieldlines_jax,
-        vmec_freeze_splines,
-    )
     from simsopt_jax.solve.serial import (
         TraceableLeastSquaresProblem,
         least_squares_serial_solve_jax,
     )
     import simsopt_jax.core._finite_difference as finite_difference_jax
-    import simsopt_jax.core.mhd_bootstrap as mhd_bootstrap_jax
-    import simsopt_jax.core.profiles as profiles_jax
-    import simsopt_jax.core.redl_current as redl_current_jax
-    import simsopt_jax.core.vmec_fieldlines as vmec_fieldlines_jax
-    import simsopt_jax.core.vmec_geometry as vmec_geometry_jax
     import simsopt_jax.solve.permanent_magnet as pm_optimization_jax
     import simsopt_jax.solve.serial as solve_serial_jax
 
@@ -91,44 +76,12 @@ _SIMSOPTPP_FREE_IMPORT_PROGRAM = textwrap.dedent(
             "forward_jacobian_shard_map_columns",
             "forward_jacobian_vmap",
         ),
-        mhd_bootstrap_jax: ("compute_trapped_fraction_jax",),
-        profiles_jax: (
-            "profile_polynomial_dfds",
-            "profile_polynomial_value",
-            "profile_pressure_dfds",
-            "profile_pressure_value",
-            "profile_scaled_dfds",
-            "profile_scaled_value",
-            "profile_spline_dfds",
-            "profile_spline_value",
-        ),
-        redl_current_jax: (
-            "RedlDetailsJAX",
-            "j_dot_B_Redl_jax_from_arrays",
-        ),
-        vmec_fieldlines_jax: (
-            "theta_vmec_from_theta_pest_implicit_jax",
-            "theta_vmec_from_theta_pest_scan_jax",
-            "theta_vmec_residual_jax",
-        ),
-        vmec_geometry_jax: (
-            "VmecGeometryResultsJAX",
-            "vmec_compute_geometry_jax",
-        ),
     }
     for module, symbols in direct_modules.items():
         for symbol in symbols:
             getattr(module, symbol)
 
     public_symbols = (
-        RedlDetailsJAX,
-        VmecFrozenSplineState,
-        VmecGeometryResultsJAX,
-        compute_trapped_fraction_jax,
-        j_dot_B_Redl_jax_from_arrays,
-        vmec_compute_geometry_jax,
-        vmec_fieldlines_jax,
-        vmec_freeze_splines,
         TraceableLeastSquaresProblem,
         least_squares_serial_solve_jax,
     )
@@ -191,7 +144,7 @@ def test_remaining_jax_surfaces_simsoptpp_free_import_mode_matrix(mode):
     payload = json.loads(result.stdout.strip().splitlines()[-1])
     assert payload["mode"] == mode
     assert payload["platform"] == platform
-    assert payload["symbols"] == 10
+    assert payload["symbols"] == 2
 
 
 def test_remaining_jax_surfaces_simsoptpp_backed_solve_exports():

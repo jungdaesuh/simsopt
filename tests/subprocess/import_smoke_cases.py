@@ -2371,7 +2371,7 @@ def case_jax_core_grouped_field_chunking_matches_dense_sum() -> None:
     import jax.numpy as jnp
 
     from simsopt_jax import config as simsopt_config
-    from simsopt_jax.field.biotsavart import (
+    from simsopt_jax.core.biotsavart import (
         biot_savart_B,
         biot_savart_B_and_dB,
         biot_savart_dB_by_dX,
@@ -2492,7 +2492,7 @@ def case_jax_classes_inherit_optimizable() -> None:
 
 
 def case_import_pure_jax_modules() -> None:
-    from simsopt_jax.field.biotsavart import biot_savart_B
+    from simsopt_jax.core.biotsavart import biot_savart_B
     from simsopt_jax.geo.surface_fourier import stellsym_scatter_indices
     from simsopt_jax.geo.boozer_residual import boozer_residual_scalar
     from simsopt_jax.objectives.integral_bdotn import integral_BdotN

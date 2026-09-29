@@ -21,7 +21,7 @@ import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
-import simsopt_jax.field.biotsavart as _bs
+import simsopt_jax.core.biotsavart as _bs
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt_jax.core.curve_xyz_fourier import jaxfouriercurve_geometry_pure
 from simsopt_jax.objectives.integral_bdotn import integral_BdotN

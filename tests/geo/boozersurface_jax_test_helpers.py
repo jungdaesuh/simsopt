@@ -23,7 +23,7 @@ from repo_bootstrap import bootstrap_local_simsopt
 
 bootstrap_local_simsopt(_SRC_ROOT)
 
-import simsopt_jax.field.biotsavart as _bs_jax
+import simsopt_jax.core.biotsavart as _bs_jax
 import simsopt_jax_adapters.field.biotsavart_backend as _bs_backend
 import simsopt_jax.geo.boozer_residual as _br
 import simsopt_jax_adapters.geo.boozer_surface as _bsj
