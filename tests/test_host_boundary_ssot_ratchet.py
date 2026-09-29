@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 from pathlib import Path
 
 import jax.numpy as jnp
@@ -263,37 +264,103 @@ def test_only_boundary_owners_call_jax_transfer_and_readiness_primitives() -> No
 
 
 # ``host_boundary.allow_host_transfers`` lifts an outer strict guard for its whole
-# block, so every caller is admitted explicitly, keyed by its enclosing scope
-# (``path::qualified.name``) with its number of calls there: moving an admitted
-# call into another function, even in the same file, fails. A call moved within
-# the same admitted function (into a lambda or a decorator inside it, say) is
-# still that approved caller, by design. Every other reference -- an aliased
-# import, ``permit = allow_host_transfers``, passing it as a value -- would let a
-# call escape the call census, so any non-call reference outside the owner fails.
-# Admitted 2026-09-28: the official tiny least-squares policy's five host-driven
-# scopes (SciPy's residual callback, the endpoint Jacobian, three residual builders).
-_ALLOWED_ALLOW_HOST_TRANSFERS_CALLS = {
-    "src/simsopt_jax/examples/official_tiny_least_squares.py::curve_length_residual": 1,
-    "src/simsopt_jax/examples/official_tiny_least_squares.py::quadratic_residual": 1,
-    "src/simsopt_jax/examples/official_tiny_least_squares.py::solve_jax_residual.host_residual": 1,
-    "src/simsopt_jax/examples/official_tiny_least_squares.py::surface_area_volume_residual": 1,
-    "src/simsopt_jax/examples/official_tiny_least_squares.py::value_and_jacobian": 1,
+# block, so every permitted region is admitted individually. The only admitted form
+# is a ``with allow_host_transfers():`` item (or ``with host_boundary.allow_host_
+# transfers():``). Each admitted site is keyed by its enclosing scope
+# (``path::qualified.name``) and pinned by a fingerprint of the whole normalized
+# ``with`` statement -- items and body, via ``ast.dump`` without line or column
+# attributes -- together with its statement path inside that scope (``body[1]``,
+# ``body[0].orelse[2]``, ...). Moving a region to another scope, moving it within
+# its scope, or editing anything inside it therefore fails until the allowlist is
+# updated on purpose. Every other reference is an escape: a bare call, a decorator,
+# a call inside a lambda or comprehension, a call used as a value, an aliased
+# import, ``permit = allow_host_transfers``, passing it as a value, and a string
+# constant equal to the name (``getattr(module, "allow_host_transfers")``).
+# Regenerate a fingerprint with ``_allow_host_transfers_census(source, path)`` after
+# reading the edited region.
+_ALLOWED_ALLOW_HOST_TRANSFERS_SITES = {
+    # Builds the curve spec and frozen DOF vector on device from host inputs.
+    "src/simsopt_jax/examples/official_tiny_least_squares.py::curve_length_residual": (
+        "ecd12f37d3f9",
+    ),
+    # Places the quadratic targets and weights on device.
+    "src/simsopt_jax/examples/official_tiny_least_squares.py::quadratic_residual": (
+        "d2bcb5ef2372",
+    ),
+    # SciPy's residual callback: places each host trial point, returns a host residual.
+    "src/simsopt_jax/examples/official_tiny_least_squares.py::solve_jax_residual.host_residual": (
+        "2645a45d3da5",
+    ),
+    # Builds the surface spec, frozen DOF vector and targets on device from host inputs.
+    "src/simsopt_jax/examples/official_tiny_least_squares.py::surface_area_volume_residual": (
+        "e4653764fee9",
+    ),
+    # Endpoint residual and exact Jacobian, read back to host float64.
+    "src/simsopt_jax/examples/official_tiny_least_squares.py::value_and_jacobian": (
+        "cc992663d064",
+    ),
 }
-_ALLOW_HOST_TRANSFERS_ROOTS = (*SOURCE_ROOTS, REPO_ROOT / "examples/jax")
+_ALLOW_HOST_TRANSFERS_REQUIRED_ROOTS = (
+    "src/simsopt",
+    "src/simsopt_contracts",
+    "src/simsopt_jax",
+    "src/simsopt_jax_adapters",
+    "examples",
+)
+_ALLOW_HOST_TRANSFERS_OPTIONAL_ROOTS = ("benchmarks",)
 _ALLOW_HOST_TRANSFERS_OWNER = "src/simsopt_jax/runtime/host_boundary.py"
 _ALLOW_HOST_TRANSFERS = "allow_host_transfers"
+_SCOPE_NODES = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+def _is_allow_host_transfers_call(node: ast.AST) -> bool:
+    return isinstance(node, ast.Call) and (
+        (isinstance(node.func, ast.Name) and node.func.id == _ALLOW_HOST_TRANSFERS)
+        or (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == _ALLOW_HOST_TRANSFERS
+        )
+    )
+
+
+def _statement_paths(tree: ast.Module) -> dict[int, str]:
+    """Map each statement's id to its path of statement lists inside its scope."""
+    paths: dict[int, str] = {}
+
+    def walk(node: ast.AST, prefix: str) -> None:
+        for field, value in ast.iter_fields(node):
+            if not isinstance(value, list):
+                continue
+            for index, child in enumerate(value):
+                if not isinstance(child, ast.stmt):
+                    continue
+                path = f"{prefix}{field}[{index}]"
+                paths[id(child)] = path
+                walk(child, "" if isinstance(child, _SCOPE_NODES) else f"{path}.")
+
+    walk(tree, "")
+    return paths
+
+
+def _with_fingerprint(node: ast.With | ast.AsyncWith, path: str) -> str:
+    normalized = f"{path}\n{ast.dump(node, include_attributes=False)}"
+    return hashlib.sha256(normalized.encode()).hexdigest()[:12]
 
 
 class _AllowHostTransfersCensus(ast.NodeVisitor):
-    def __init__(self, relative_path: str) -> None:
+    def __init__(self, relative_path: str, statement_paths: dict[int, str]) -> None:
         self.relative_path = relative_path
+        self.statement_paths = statement_paths
         self.scope_names: list[str] = []
-        self.counts: dict[str, int] = {}
+        self.sites: dict[str, tuple[str, ...]] = {}
         self.escapes: list[str] = []
 
-    def _location(self, node: ast.AST) -> str:
+    def _scope_key(self) -> str:
         scope = ".".join(self.scope_names) or "<module>"
-        return f"{self.relative_path}::{scope}::{node.lineno}"
+        return f"{self.relative_path}::{scope}"
+
+    def _escape(self, node: ast.AST, form: str) -> None:
+        self.escapes.append(f"{self._scope_key()}::{node.lineno} {form}")
 
     def _visit_scope(self, node: ast.AST, name: str) -> None:
         self.scope_names.append(name)
@@ -309,22 +376,42 @@ class _AllowHostTransfersCensus(ast.NodeVisitor):
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         self._visit_scope(node, node.name)
 
+    def _visit_with(self, node: ast.With | ast.AsyncWith) -> None:
+        admitted = False
+        for item in node.items:
+            if _is_allow_host_transfers_call(item.context_expr):
+                admitted = True
+                call = item.context_expr
+                # The callee itself is the admitted reference; visit the rest.
+                if isinstance(call.func, ast.Attribute):
+                    self.visit(call.func.value)
+                for argument in (*call.args, *call.keywords):
+                    self.visit(argument)
+            else:
+                self.visit(item.context_expr)
+            if item.optional_vars is not None:
+                self.visit(item.optional_vars)
+        if admitted:
+            key = self._scope_key()
+            fingerprint = _with_fingerprint(node, self.statement_paths[id(node)])
+            self.sites[key] = (*self.sites.get(key, ()), fingerprint)
+        for statement in node.body:
+            self.visit(statement)
+
+    def visit_With(self, node: ast.With) -> None:
+        self._visit_with(node)
+
+    def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
+        self._visit_with(node)
+
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         for alias in node.names:
             if alias.name == _ALLOW_HOST_TRANSFERS and alias.asname is not None:
-                self.escapes.append(f"{self._location(node)} aliased import")
+                self._escape(node, "aliased import")
 
     def visit_Call(self, node: ast.Call) -> None:
-        if (
-            isinstance(node.func, ast.Name) and node.func.id == _ALLOW_HOST_TRANSFERS
-        ) or (
-            isinstance(node.func, ast.Attribute)
-            and node.func.attr == _ALLOW_HOST_TRANSFERS
-        ):
-            scope = ".".join(self.scope_names) or "<module>"
-            key = f"{self.relative_path}::{scope}"
-            self.counts[key] = self.counts.get(key, 0) + 1
-            # The callee itself is the admitted reference; visit everything else.
+        if _is_allow_host_transfers_call(node):
+            self._escape(node, "call outside a with item")
             if isinstance(node.func, ast.Attribute):
                 self.visit(node.func.value)
             for argument in (*node.args, *node.keywords):
@@ -334,75 +421,128 @@ class _AllowHostTransfersCensus(ast.NodeVisitor):
 
     def visit_Name(self, node: ast.Name) -> None:
         if node.id == _ALLOW_HOST_TRANSFERS:
-            self.escapes.append(f"{self._location(node)} non-call reference")
+            self._escape(node, "non-call reference")
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         if node.attr == _ALLOW_HOST_TRANSFERS:
-            self.escapes.append(f"{self._location(node)} non-call reference")
+            self._escape(node, "non-call reference")
         self.generic_visit(node)
+
+    def visit_Constant(self, node: ast.Constant) -> None:
+        if node.value == _ALLOW_HOST_TRANSFERS:
+            self._escape(node, "string reference")
 
 
 def _allow_host_transfers_census(
     source: str, relative_path: str
-) -> tuple[dict[str, int], list[str]]:
-    census = _AllowHostTransfersCensus(relative_path)
-    census.visit(ast.parse(source))
-    return census.counts, census.escapes
+) -> tuple[dict[str, tuple[str, ...]], list[str]]:
+    tree = ast.parse(source)
+    census = _AllowHostTransfersCensus(relative_path, _statement_paths(tree))
+    census.visit(tree)
+    return census.sites, census.escapes
 
 
-def _allow_host_transfers_calls() -> tuple[dict[str, int], list[str]]:
-    counts: dict[str, int] = {}
+def _allow_host_transfers_roots(repo_root: Path) -> tuple[Path, ...]:
+    required = tuple(repo_root / root for root in _ALLOW_HOST_TRANSFERS_REQUIRED_ROOTS)
+    missing = [root for root in required if not root.is_dir()]
+    assert not missing, f"allow_host_transfers census roots are missing: {missing}"
+    optional = tuple(
+        repo_root / root
+        for root in _ALLOW_HOST_TRANSFERS_OPTIONAL_ROOTS
+        if (repo_root / root).is_dir()
+    )
+    return (*required, *optional)
+
+
+def _allow_host_transfers_sites(
+    repo_root: Path,
+) -> tuple[dict[str, tuple[str, ...]], list[str]]:
+    sites: dict[str, tuple[str, ...]] = {}
     escapes: list[str] = []
-    for source_root in _ALLOW_HOST_TRANSFERS_ROOTS:
-        for path in source_root.rglob("*.py"):
-            relative = path.relative_to(REPO_ROOT).as_posix()
-            if relative == _ALLOW_HOST_TRANSFERS_OWNER:
-                continue
-            file_counts, file_escapes = _allow_host_transfers_census(
-                path.read_text(), relative
-            )
-            counts.update(file_counts)
-            escapes.extend(file_escapes)
-    return counts, escapes
+    relatives = sorted(
+        {
+            path.relative_to(repo_root).as_posix()
+            for root in _allow_host_transfers_roots(repo_root)
+            for path in root.rglob("*.py")
+        }
+        - {_ALLOW_HOST_TRANSFERS_OWNER}
+    )
+    for relative in relatives:
+        file_sites, file_escapes = _allow_host_transfers_census(
+            (repo_root / relative).read_text(), relative
+        )
+        sites.update(file_sites)
+        escapes.extend(file_escapes)
+    return sites, escapes
 
 
-def test_only_admitted_callers_lift_the_strict_transfer_guard() -> None:
-    counts, escapes = _allow_host_transfers_calls()
+def test_only_admitted_regions_lift_the_strict_transfer_guard() -> None:
+    sites, escapes = _allow_host_transfers_sites(REPO_ROOT)
 
-    assert not escapes, "allow_host_transfers escapes the call census:\n  " + (
+    assert not escapes, "allow_host_transfers escapes the with-site census:\n  " + (
         "\n  ".join(escapes)
     )
-    assert counts == _ALLOWED_ALLOW_HOST_TRANSFERS_CALLS
+    assert sites == _ALLOWED_ALLOW_HOST_TRANSFERS_SITES
 
 
-def test_allow_host_transfers_census_refuses_a_call_moved_within_one_file() -> None:
-    admitted_source = (
-        "from simsopt_jax.runtime.host_boundary import allow_host_transfers\n\n"
+_ADMITTED_SOURCE = (
+    "from simsopt_jax.runtime.host_boundary import allow_host_transfers\n\n"
+    "def approved():\n"
+    "    prepare()\n"
+    "    with allow_host_transfers():\n"
+    "        transfer()\n\n"
+    "def other():\n"
+    "    pass\n"
+)
+
+
+def test_allow_host_transfers_census_admits_only_with_items() -> None:
+    sites, escapes = _allow_host_transfers_census(_ADMITTED_SOURCE, "src/example.py")
+    attribute_sites, attribute_escapes = _allow_host_transfers_census(
+        "from simsopt_jax.runtime import host_boundary\n\n"
         "def approved():\n"
-        "    with allow_host_transfers():\n"
-        "        pass\n\n"
-        "def other():\n"
-        "    pass\n"
+        "    async def inner():\n"
+        "        async with host_boundary.allow_host_transfers():\n"
+        "            transfer()\n",
+        "src/example.py",
     )
-    swapped_source = (
-        "from simsopt_jax.runtime.host_boundary import allow_host_transfers\n\n"
-        "def approved():\n"
-        "    pass\n\n"
-        "def other():\n"
-        "    with allow_host_transfers():\n"
-        "        pass\n"
-    )
-    admitted, admitted_escapes = _allow_host_transfers_census(
-        admitted_source, "src/example.py"
-    )
-    swapped, _ = _allow_host_transfers_census(swapped_source, "src/example.py")
 
-    assert admitted == {"src/example.py::approved": 1}
-    assert admitted_escapes == []
-    assert swapped != admitted
+    assert list(sites) == ["src/example.py::approved"]
+    assert len(sites["src/example.py::approved"]) == 1
+    assert escapes == []
+    assert list(attribute_sites) == ["src/example.py::approved.inner"]
+    assert attribute_escapes == []
 
 
-def test_allow_host_transfers_census_refuses_every_non_call_reference() -> None:
+def test_allow_host_transfers_census_refuses_a_moved_or_edited_region() -> None:
+    admitted, _ = _allow_host_transfers_census(_ADMITTED_SOURCE, "src/example.py")
+    mutations = {
+        "moved to another scope": _ADMITTED_SOURCE.replace(
+            "    prepare()\n    with allow_host_transfers():\n        transfer()\n\n"
+            "def other():\n    pass\n",
+            "    prepare()\n\n"
+            "def other():\n    with allow_host_transfers():\n        transfer()\n",
+        ),
+        "moved within its scope": _ADMITTED_SOURCE.replace(
+            "    prepare()\n    with allow_host_transfers():\n        transfer()\n",
+            "    with allow_host_transfers():\n        transfer()\n    prepare()\n",
+        ),
+        "body edited": _ADMITTED_SOURCE.replace(
+            "        transfer()\n", "        transfer()\n        transfer_more()\n"
+        ),
+        "second region added": _ADMITTED_SOURCE.replace(
+            "        transfer()\n",
+            "        transfer()\n    with allow_host_transfers():\n        more()\n",
+        ),
+    }
+    for form, source in mutations.items():
+        assert source != _ADMITTED_SOURCE, f"{form} mutation did not apply"
+        mutated, escapes = _allow_host_transfers_census(source, "src/example.py")
+        assert escapes == [], form
+        assert mutated != admitted, f"{form} kept the admitted fingerprint"
+
+
+def test_allow_host_transfers_census_refuses_every_other_reference() -> None:
     escaping_sources = {
         "aliased import": (
             "from simsopt_jax.runtime.host_boundary import allow_host_transfers as permit\n\n"
@@ -429,10 +569,93 @@ def test_allow_host_transfers_census_refuses_every_non_call_reference() -> None:
             "def approved(run):\n"
             "    run(allow_host_transfers)\n"
         ),
+        "bare call": (
+            "from simsopt_jax.runtime.host_boundary import allow_host_transfers\n\n"
+            "def approved():\n"
+            "    allow_host_transfers()\n"
+            "    transfer()\n"
+        ),
+        "call used as a value": (
+            "from simsopt_jax.runtime.host_boundary import allow_host_transfers\n\n"
+            "def approved():\n"
+            "    permit = allow_host_transfers()\n"
+            "    with permit:\n"
+            "        transfer()\n"
+        ),
+        "decorator": (
+            "from simsopt_jax.runtime.host_boundary import allow_host_transfers\n\n"
+            "def approved():\n"
+            "    @allow_host_transfers()\n"
+            "    def inner():\n"
+            "        transfer()\n"
+            "    inner()\n"
+        ),
+        "lambda": (
+            "from simsopt_jax.runtime.host_boundary import allow_host_transfers\n\n"
+            "def approved():\n"
+            "    permit = lambda: allow_host_transfers()\n"
+            "    with permit():\n"
+            "        transfer()\n"
+        ),
+        "comprehension": (
+            "from simsopt_jax.runtime.host_boundary import allow_host_transfers\n\n"
+            "def approved():\n"
+            "    permits = [allow_host_transfers() for _ in range(1)]\n"
+            "    with permits[0]:\n"
+            "        transfer()\n"
+        ),
+        "conditional with item": (
+            "from contextlib import nullcontext\n"
+            "from simsopt_jax.runtime.host_boundary import allow_host_transfers\n\n"
+            "def approved(lift):\n"
+            "    with allow_host_transfers() if lift else nullcontext():\n"
+            "        transfer()\n"
+        ),
+        "getattr with a string": (
+            "from simsopt_jax.runtime import host_boundary\n\n"
+            "def approved():\n"
+            '    with getattr(host_boundary, "allow_host_transfers")():\n'
+            "        transfer()\n"
+        ),
     }
     for form, source in escaping_sources.items():
         _, escapes = _allow_host_transfers_census(source, "src/example.py")
         assert escapes, f"{form} escaped the allow_host_transfers census"
+
+
+def test_allow_host_transfers_census_scans_every_production_root(
+    tmp_path: Path,
+) -> None:
+    for root in _ALLOW_HOST_TRANSFERS_REQUIRED_ROOTS:
+        (tmp_path / root).mkdir(parents=True)
+    injected = {
+        "src/simsopt/field/injected.py": _ADMITTED_SOURCE,
+        "src/simsopt_contracts/injected.py": _ADMITTED_SOURCE,
+        "examples/2_Intermediate/injected.py": (
+            "from simsopt_jax.runtime.host_boundary import allow_host_transfers\n\n"
+            "def run():\n"
+            "    allow_host_transfers()\n"
+        ),
+        "benchmarks/injected.py": _ADMITTED_SOURCE,
+        _ALLOW_HOST_TRANSFERS_OWNER: (
+            "def allow_host_transfers():\n    allow_host_transfers()\n"
+        ),
+    }
+    for relative, source in injected.items():
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source)
+
+    sites, escapes = _allow_host_transfers_sites(tmp_path)
+
+    assert set(sites) == {
+        "benchmarks/injected.py::approved",
+        "src/simsopt/field/injected.py::approved",
+        "src/simsopt_contracts/injected.py::approved",
+    }
+    assert [escape.split("::")[0] for escape in escapes] == [
+        "examples/2_Intermediate/injected.py"
+    ]
 
 
 def test_boundary_census_distinguishes_duplicate_invocations_in_one_function() -> None:
