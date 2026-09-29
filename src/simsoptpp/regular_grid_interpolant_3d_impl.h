@@ -164,12 +164,16 @@ void RegularGridInterpolant3D<Array>::evaluate_local(double x, double y, double 
     if constexpr (xsimd::simd_type<double>::size >= 3){
         // batches have no per-lane operator[] anymore; build the 3-lane input via a
         // small contiguous buffer + load, and read results back via store + index.
-        
-        alignas(xs::default_arch::alignment()) double xyz_arr[4] {x, y, z, 0.0};
+        // Both buffers span the full batch width (simdcount lanes, e.g. 8 doubles
+        // under AVX-512); the lanes after x, y, z are zero-initialized.
+        alignas(xs::default_arch::alignment()) double xyz_arr[simdcount] = {};
+        xyz_arr[0] = x;
+        xyz_arr[1] = y;
+        xyz_arr[2] = z;
         simd_t xyz = xs::load_aligned(xyz_arr);
         for (int k = 0; k < degree+1; ++k) {
             simd_t temp = this->rule.basis_fun(k, xyz);
-            alignas(xs::default_arch::alignment()) double temp_arr[4];
+            alignas(xs::default_arch::alignment()) double temp_arr[simdcount];
             temp.store_aligned(temp_arr);
             pkxs[k] = temp_arr[0];
             pkys[k] = temp_arr[1];
