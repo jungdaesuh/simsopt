@@ -410,6 +410,28 @@ def matmul_constant(a: Bounded, matrix: np.ndarray) -> Bounded:
     return stack(columns, axis=-1)
 
 
+def compose(outer: Bounded, inner: Bounded) -> Bounded:
+    """``outer`` as a function of ``inner``: chain the bookkeeping through it.
+
+    ``outer`` (value axes ``(..., A)``) was traced with the ``K`` entries of
+    ``inner``'s last value axis as its derivative components, seeded with their
+    values and value errors, a unit derivative and no derivative error; leading
+    value axes are shared batch axes.  Every path from a variable into ``outer``
+    passes through exactly one entry of ``inner`` and every recurrence above is
+    linear in ``(d, D, Ed, paths)``, so the result equals the direct trace --
+    except after :func:`envelope`, whose componentwise maximum it can only exceed.
+    """
+    return Bounded(
+        outer.v,
+        outer.e,
+        np.einsum("...ak,...kc->...ac", outer.d, inner.d),
+        np.einsum("...ak,...kc->...ac", outer.D, inner.D),
+        np.einsum("...ak,...kc->...ac", outer.Ed, inner.D)
+        + np.einsum("...ak,...kc->...ac", outer.D, inner.Ed),
+        np.einsum("...ak,...kc->...ac", outer.paths, inner.paths),
+    )
+
+
 def cross_implementation_bounds(quantity: Bounded) -> tuple[np.ndarray, np.ndarray]:
     """Bounds on the difference of two implementations: value, derivative."""
     return (
