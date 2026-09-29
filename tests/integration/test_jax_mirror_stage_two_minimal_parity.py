@@ -12,6 +12,7 @@ import scipy.optimize
 from examples.jax.parity.cases import get_case
 from examples.jax.parity.cases import native_stage_two_optimization_minimal
 from examples.jax.parity.cases.native_stage_two_optimization_minimal import (
+    CONVERGED_GRADIENT_INF_NORM_BOUND,
     _scale_configuration,
     _terminal_status,
     build_native_evaluator_for_configuration,
@@ -104,7 +105,6 @@ def test_minimal_currents_carry_the_official_scaled_parametrization() -> None:
 def test_minimal_official_endpoint_is_admitted_as_a_budget_exit() -> None:
     """The official run stops at its iteration cap and is never ``converged``."""
     terminal = _terminal_status(
-        scientific_predicate=True,
         status_convention="scipy-lbfgsb",
         provider_success=False,
         provider_status=1,
@@ -121,12 +121,102 @@ def test_minimal_official_endpoint_is_admitted_as_a_budget_exit() -> None:
                 [OFFICIAL_FINAL_GRADIENT_INFINITY_NORM]
             ),
             "final:parameters": np.asarray([1.0]),
+            "final:total_curve_length": np.asarray(
+                OFFICIAL.scalar("final:total_curve_length")
+            ),
         },
+        length_target=float(_scale_configuration("native_default")["length_target"]),
     )
 
     assert terminal.normalized_status == "budget_exhausted"
     assert terminal.success is False
     assert OFFICIAL_FUNCTION_EVALUATIONS > OFFICIAL_ITERATIONS
+
+
+#: The largest end-point gradient among upstream's own one-ulp starts of the
+#: official script (9e027eac3, one thread, k = 0..40; k = 27), every one of them
+#: an L-BFGS-B stop at the 300-iteration cap.  The pre-registered nine alone
+#: reach 1.171e-4 (k = 3).
+UPSTREAM_SCATTER_MAX_GRADIENT_INF_NORM = 1.945e-4
+
+
+@pytest.mark.parametrize(
+    ("provider_success", "provider_status", "iterations", "expected_status"),
+    [
+        (False, 1, 300, "budget_exhausted"),
+        (True, 0, 76, "failed"),
+    ],
+)
+def test_minimal_gradient_bound_binds_converged_stops_only(
+    provider_success: bool,
+    provider_status: int,
+    iterations: int,
+    expected_status: str,
+) -> None:
+    """A gradient above the bound fails a converged stop and not a budget stop.
+
+    Upstream's own script stops at its iteration cap from every one-ulp start
+    with an end gradient above ``CONVERGED_GRADIENT_INF_NORM_BOUND`` on 6 of 41
+    starts, so that bound is no property of a budget stop; a converged stop
+    claims stationarity and keeps it.
+    """
+    assert UPSTREAM_SCATTER_MAX_GRADIENT_INF_NORM > CONVERGED_GRADIENT_INF_NORM_BOUND
+    terminal = _terminal_status(
+        status_convention="scipy-lbfgsb",
+        provider_success=provider_success,
+        provider_status=provider_status,
+        iterations=iterations,
+        max_iterations=300,
+        initial_values={
+            "initial:objective": np.asarray(1.0),
+            "initial:objective_gradient": np.asarray([1.0]),
+            "initial:parameters": np.asarray([0.0]),
+        },
+        final_values={
+            "final:objective": np.asarray(0.5),
+            "final:objective_gradient": np.asarray(
+                [UPSTREAM_SCATTER_MAX_GRADIENT_INF_NORM]
+            ),
+            "final:parameters": np.asarray([1.0]),
+            "final:total_curve_length": np.asarray(18.0),
+        },
+        length_target=18.0,
+    )
+
+    assert terminal.normalized_status == expected_status
+    assert terminal.success is False
+
+
+@pytest.mark.parametrize(
+    ("final_objective", "total_curve_length"),
+    [(1.5, 18.0), (float("nan"), 18.0), (0.5, 1.1 * 18.0 * (1.0 + 1.0e-12))],
+)
+def test_minimal_budget_stop_keeps_decrease_finiteness_and_length(
+    final_objective: float,
+    total_curve_length: float,
+) -> None:
+    """The clauses upstream's scatter satisfies on every start still bind a budget stop."""
+    terminal = _terminal_status(
+        status_convention="scipy-lbfgsb",
+        provider_success=False,
+        provider_status=1,
+        iterations=300,
+        max_iterations=300,
+        initial_values={
+            "initial:objective": np.asarray(1.0),
+            "initial:objective_gradient": np.asarray([1.0]),
+            "initial:parameters": np.asarray([0.0]),
+        },
+        final_values={
+            "final:objective": np.asarray(final_objective),
+            "final:objective_gradient": np.asarray([1.0e-6]),
+            "final:parameters": np.asarray([1.0]),
+            "final:total_curve_length": np.asarray(total_curve_length),
+        },
+        length_target=18.0,
+    )
+
+    assert terminal.normalized_status == "failed"
 
 
 def test_minimal_case_declares_the_official_endpoint_quality_band() -> None:
@@ -206,9 +296,9 @@ def test_minimal_terminal_status_respects_provider_result(
         "final:objective": np.asarray(0.5),
         "final:objective_gradient": np.asarray([1.0e-6]),
         "final:parameters": np.asarray([1.0]),
+        "final:total_curve_length": np.asarray(18.0),
     }
     terminal = _terminal_status(
-        scientific_predicate=True,
         status_convention=status_convention,
         provider_success=provider_success,
         provider_status=provider_status,
@@ -216,6 +306,7 @@ def test_minimal_terminal_status_respects_provider_result(
         max_iterations=300,
         initial_values=initial_values,
         final_values=final_values,
+        length_target=18.0,
     )
 
     assert terminal.normalized_status == expected_status
