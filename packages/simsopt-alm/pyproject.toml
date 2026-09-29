@@ -28,6 +28,10 @@ classifiers = [
 # templates need simsopt; the solver itself does not. Leave this extra out to
 # keep the simsopt you already have (a fork, an editable checkout).
 simsopt = ["simsopt"]
+# What `python -m pytest tests` needs besides the package and simsopt:
+# threadpoolctl reports the OpenBLAS kernels numpy and SciPy loaded, which
+# gate the bitwise golden replay.
+test = ["pytest", "threadpoolctl"]
 
 [project.urls]
 Source = "https://github.com/jungdaesuh/simsopt/tree/alm-library/packages/simsopt-alm"

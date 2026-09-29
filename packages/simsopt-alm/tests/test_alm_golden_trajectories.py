@@ -25,6 +25,7 @@ leaves every fixture byte-identical refreshes the manifest's provenance with
 ``--provenance-only``.
 """
 
+import ast
 import copy
 import functools
 import hashlib
@@ -185,7 +186,7 @@ class AlmGoldenEnvironmentTests(unittest.TestCase):
 
     def test_the_kernels_are_read_from_the_loaded_openblas(self):
         if sys.platform != "linux":
-            self.skipTest("the loaded libraries are read from /proc/self/maps")
+            self.skipTest("OPENBLAS_CORETYPE=Haswell names a kernel of the Linux x86-64 wheels")
         # numpy's and SciPy's OpenBLAS may detect a host differently (None);
         # pinned before they load, both run and report the pinned kernels.
         pinned = subprocess.run(
@@ -196,6 +197,35 @@ class AlmGoldenEnvironmentTests(unittest.TestCase):
         )
         self.assertEqual(pinned.stdout.strip(), "Haswell")
         self.assertEqual(golden.current_environment()[-1], golden.openblas_coretype())
+
+    def test_the_kernel_probe_loads_no_library(self):
+        """R16-08: the probe asks threadpoolctl about the OpenBLAS numpy and
+        SciPy already loaded; it opens no library itself (no ctypes)."""
+        tree = ast.parse((GOLDEN_DIR / "alm_golden_scenarios.py").read_text(encoding="utf-8"))
+        roots = {alias.name.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.Import)
+                 for alias in node.names}
+        roots |= {node.module.split(".")[0] for node in ast.walk(tree)
+                  if isinstance(node, ast.ImportFrom) and node.module}
+        self.assertNotIn("ctypes", roots)
+        self.assertNotIn("importlib", roots)
+        self.assertIn("threadpoolctl", roots)
+
+    def test_the_kernel_probe_fails_closed(self):
+        """No OpenBLAS, or OpenBLAS builds that report different kernels, give
+        no kernel family, so the bitwise gate stays shut."""
+        cases = {
+            "no OpenBLAS": [{"internal_api": "mkl", "architecture": None}],
+            "disagreeing kernels": [{"internal_api": "openblas", "architecture": "Haswell"},
+                                    {"internal_api": "openblas", "architecture": "SkylakeX"}],
+        }
+        golden.openblas_coretype.cache_clear()
+        self.addCleanup(golden.openblas_coretype.cache_clear)
+        for label, info in cases.items():
+            with self.subTest(case=label):
+                with patch.object(golden.threadpoolctl, "threadpool_info", return_value=info):
+                    self.assertIsNone(golden.openblas_coretype())
+                    self.assertFalse(golden.bitwise_environment())
+                golden.openblas_coretype.cache_clear()
 
     def test_the_bitwise_gate_requires_the_recorded_kernels(self):
         numpy_version, scipy_version, machine, coretype = golden.recorded_environment()

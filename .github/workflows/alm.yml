@@ -73,8 +73,8 @@ jobs:
     - name: Install simsopt from this checkout, then the package
       run: |
         uv venv --python 3.11 .venv-alm
-        uv pip install --python "$PYTHON" . pytest
-        uv pip install --python "$PYTHON" ./packages/simsopt-alm
+        uv pip install --python "$PYTHON" .
+        uv pip install --python "$PYTHON" "./packages/simsopt-alm[test]"
 
     - name: Run the package tests
       working-directory: packages/simsopt-alm
@@ -110,10 +110,10 @@ jobs:
     - name: Install stock simsopt from PyPI into a clean environment
       run: |
         uv venv --python 3.11 .venv-stock
-        uv pip install --python "$PYTHON" --no-cache simsopt pytest
+        uv pip install --python "$PYTHON" --no-cache simsopt
 
-    - name: Install the package on top
-      run: uv pip install --python "$PYTHON" ./packages/simsopt-alm
+    - name: Install the package and its test dependencies on top
+      run: uv pip install --python "$PYTHON" "./packages/simsopt-alm[test]"
 
     - name: Require stock simsopt and a solver import free of simsopt
       run: |
@@ -168,14 +168,14 @@ jobs:
     - name: Install the build dependencies
       run: |
         uv pip install --python "$PYTHON" numpy==1.24.4 scipy==1.10.1 scikit-build-core "pybind11<3.0.0" \
-          "setuptools_scm>=8.0" tomli cmake ninja setuptools pytest
+          "setuptools_scm>=8.0" tomli cmake ninja setuptools
         uv pip install --python "$PYTHON" jax==0.4.13 jaxlib==0.4.13 \
           -f https://storage.googleapis.com/jax-releases/jax_releases.html
 
     - name: Build and install simsopt without build isolation, then the package
       run: |
         uv pip install --python "$PYTHON" --no-build-isolation .
-        uv pip install --python "$PYTHON" ./packages/simsopt-alm
+        uv pip install --python "$PYTHON" "./packages/simsopt-alm[test]"
 
     - name: Import the package on Python 3.8
       run: |
@@ -257,7 +257,7 @@ jobs:
         uv venv --python "${{ steps.recorded.outputs.python }}" .venv-golden
         printf 'numpy==%s\nscipy==%s\n' "${{ steps.recorded.outputs.numpy }}" \
           "${{ steps.recorded.outputs.scipy }}" > golden-constraints.txt
-        uv pip install --python "$PYTHON" -c golden-constraints.txt numpy scipy pytest ./packages/simsopt-alm
+        uv pip install --python "$PYTHON" -c golden-constraints.txt numpy scipy "./packages/simsopt-alm[test]"
 
     - name: Require the bitwise environment
       run: |

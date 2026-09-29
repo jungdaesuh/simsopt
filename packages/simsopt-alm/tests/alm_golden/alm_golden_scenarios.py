@@ -33,7 +33,6 @@ boundary values; the replay test checks both under any numpy and SciPy.
 
 from __future__ import annotations
 
-import ctypes
 import dataclasses
 import functools
 import hashlib
@@ -51,6 +50,7 @@ from typing import Optional
 import numpy as np
 import scipy
 import scipy.linalg  # noqa: F401  (loads SciPy's OpenBLAS)
+import threadpoolctl
 from scipy.optimize import LbfgsInvHessProduct, OptimizeResult
 
 from simsopt_alm import (
@@ -1471,37 +1471,18 @@ def load_sensitivity() -> dict:
     return json.loads((FIXTURE_DIR / "sensitivity.json").read_text(encoding="utf-8"))
 
 
-_OPENBLAS_CORENAME_SYMBOLS = (
-    "openblas_get_corename",
-    "openblas_get_corename64_",
-    "scipy_openblas_get_corename",
-    "scipy_openblas_get_corename64_",
-)
-
-
 @functools.lru_cache(maxsize=None)
 def openblas_coretype() -> Optional[str]:
-    """The OpenBLAS kernel family this process runs: the core name every
-    OpenBLAS loaded by numpy and SciPy reports (``OPENBLAS_CORETYPE``, set
-    before they load, pins it). None without ``/proc/self/maps`` or an
-    OpenBLAS, or when the loaded libraries disagree."""
-    maps = Path("/proc/self/maps")
-    if not maps.is_file():
-        return None
-    paths = sorted({
-        fields[-1]
-        for fields in (line.split() for line in maps.read_text().splitlines())
-        if fields[-1].startswith("/") and "openblas" in Path(fields[-1]).name.lower()
-    })
-    names = set()
-    for path in paths:
-        library = ctypes.CDLL(path)
-        for symbol in _OPENBLAS_CORENAME_SYMBOLS:
-            corename = getattr(library, symbol, None)
-            if corename is not None:
-                corename.restype = ctypes.c_char_p
-                names.add(corename().decode())
-                break
+    """The OpenBLAS kernel family this process runs: the core name
+    (threadpoolctl's ``architecture``, OpenBLAS's own ``get_corename``) that
+    every OpenBLAS numpy and SciPy loaded reports (``OPENBLAS_CORETYPE``, set
+    before they load, pins it). None without an OpenBLAS, or when the loaded
+    builds disagree."""
+    names = {
+        info["architecture"]
+        for info in threadpoolctl.threadpool_info()
+        if info["internal_api"] == "openblas"
+    }
     return names.pop() if len(names) == 1 else None
 
 

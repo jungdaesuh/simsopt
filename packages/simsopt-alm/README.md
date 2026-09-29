@@ -115,7 +115,9 @@ reading by hand, is `docs/alm_setup_guide.md` on the same branch.
 
 ## Tests
 
-From this directory, with the package and simsopt installed:
+From this directory, with the package, simsopt and the `test` extra's
+dependencies installed (`pip install pytest threadpoolctl`, or install the
+package as `".[test]"`):
 
 ```sh
 python -m pytest tests
