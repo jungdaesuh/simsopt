@@ -16,6 +16,11 @@ that mirror the C++ accumulation order operator-for-operator:
 * the ``2π`` chain-rule factor for ``gammadash{1,2}`` applied once outside
   the rotation, *not* distributed inside the basis.
 
+What the tests guarantee is agreement with the C++ values within an absolute
+1e-13 (the FMA-fusion residual); whether these twins or the production kernels
+land closer at the last bit depends on the compilation context, so no ordering
+between them is promised.
+
 These twins are diagnostic-grade: only the parity backend
 (``SIMSOPT_BACKEND_MODE=jax_cpu_parity``/``jax_gpu_parity`` →
 :func:`simsopt_jax.backend.is_parity_mode`) routes through them. The production
