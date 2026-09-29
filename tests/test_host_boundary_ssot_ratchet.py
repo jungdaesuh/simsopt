@@ -15,11 +15,20 @@ renames it or updates the allowlist on purpose):
   named ``allow_host_transfers`` outside the owner is flagged: calling it
   outside a ``with`` item, or referencing it, is an escape, and a ``with`` item
   calling it is an admitted site that fails unless it resolves to the owner.
-* Owner-module bindings are collected per file, not per lexical scope. A name
-  bound to the owner anywhere in a file counts as the owner in every scope of
-  that file, even where a local rebinding shadows it. And ``getattr``/
-  ``hasattr`` with the constant name ``"host_boundary"`` or
-  ``"allow_host_transfers"`` is flagged whatever the target object is.
+* The owner-module reference check collects bindings per file, not per
+  lexical scope: a name imported as the owner module anywhere in a file is
+  treated as the owner in every scope of that file, so a local variable that
+  shadows it and is passed as a value is flagged. And ``getattr``/``hasattr``
+  with the constant name ``"host_boundary"`` or ``"allow_host_transfers"`` is
+  flagged whatever the target object is.
+
+Admitted sites are not subject to that file-wide approximation: the callee of
+an admitted ``with`` item is resolved in its lexical scope chain (function,
+enclosing functions, then the module; a class body only when the site sits
+directly in it), and the innermost scope that binds the name must bind it
+only by an import of the owner. A parameter, assignment, loop or ``with ...
+as`` target, ``except ... as`` or ``match`` capture, other import, or nested
+``def``/``class`` of that name there is an escape.
 """
 
 from __future__ import annotations
@@ -471,11 +480,10 @@ def _import_from_module(node: ast.ImportFrom, relative_path: str) -> str:
 
 def _owner_bindings(
     tree: ast.Module, relative_path: str
-) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
-    """Names the file's imports bind to the owner module, its package, and the permit."""
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Names bound to the owner module and to its package by the file's imports."""
     owner: set[str] = set()
     package: set[str] = set()
-    permit: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -491,9 +499,107 @@ def _owner_bindings(
                     owner.add(bound)
                 elif f"{module}.{alias.name}" == _OWNER_PACKAGE:
                     package.add(bound)
-                elif module == _OWNER_MODULE and alias.name == _ALLOW_HOST_TRANSFERS:
-                    permit.add(bound)
-    return frozenset(owner), frozenset(package), frozenset(permit)
+    return frozenset(owner), frozenset(package)
+
+
+_PERMIT = "permit"
+_OWNER_MODULE_BINDING = "owner-module"
+_OWNER_PACKAGE_BINDING = "owner-package"
+_SIMSOPT_JAX_ROOT_BINDING = "simsopt_jax-root"
+_OTHER_BINDING = "other"
+_FUNCTION_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef)
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+def _import_bindings(
+    node: ast.Import | ast.ImportFrom, relative_path: str
+) -> tuple[tuple[str, str], ...]:
+    """Return ``(bound name, kind)`` for each name an import statement binds."""
+    if isinstance(node, ast.Import):
+        return tuple(
+            (
+                alias.asname,
+                _OWNER_MODULE_BINDING
+                if alias.name == _OWNER_MODULE
+                else _OWNER_PACKAGE_BINDING
+                if alias.name == _OWNER_PACKAGE
+                else _OTHER_BINDING,
+            )
+            if alias.asname is not None
+            else (
+                alias.name.split(".")[0],
+                _SIMSOPT_JAX_ROOT_BINDING
+                if alias.name.split(".")[0] == "simsopt_jax"
+                else _OTHER_BINDING,
+            )
+            for alias in node.names
+        )
+    module = _import_from_module(node, relative_path)
+    return tuple(
+        (
+            alias.asname or alias.name,
+            _PERMIT
+            if module == _OWNER_MODULE
+            and alias.name == _ALLOW_HOST_TRANSFERS
+            and alias.asname is None
+            else _OWNER_MODULE_BINDING
+            if module == _OWNER_PACKAGE and alias.name == _OWNER_MODULE_NAME
+            else _OWNER_PACKAGE_BINDING
+            if f"{module}.{alias.name}" == _OWNER_PACKAGE
+            else _OTHER_BINDING,
+        )
+        for alias in node.names
+    )
+
+
+def _scope_bindings(scope: ast.AST, relative_path: str) -> dict[str, frozenset[str]]:
+    """Map each name ``scope`` binds itself to the kinds of its bindings.
+
+    Nested functions, classes, lambdas and comprehensions are their own scopes:
+    only a nested ``def``/``class`` name and a comprehension's ``:=`` targets
+    bind here.
+    """
+    bindings: dict[str, set[str]] = {}
+
+    def bind(name: str, kind: str = _OTHER_BINDING) -> None:
+        bindings.setdefault(name, set()).add(kind)
+
+    def collect(node: ast.AST) -> None:
+        if isinstance(node, (*_FUNCTION_SCOPES, ast.ClassDef)):
+            bind(node.name)
+            return
+        if isinstance(node, ast.Lambda):
+            return
+        if isinstance(node, _COMPREHENSIONS):
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.NamedExpr):
+                    bind(inner.target.id)
+            return
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            bind(node.id)
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
+            if node.name is not None:
+                bind(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest is not None:
+            bind(node.rest)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for name, kind in _import_bindings(node, relative_path):
+                bind(name, kind)
+        for child in ast.iter_child_nodes(node):
+            collect(child)
+
+    if isinstance(scope, _FUNCTION_SCOPES):
+        arguments = scope.args
+        for argument in (
+            *arguments.posonlyargs,
+            *arguments.args,
+            *arguments.kwonlyargs,
+            *(item for item in (arguments.vararg, arguments.kwarg) if item),
+        ):
+            bind(argument.arg)
+    for statement in scope.body:
+        collect(statement)
+    return {name: frozenset(kinds) for name, kinds in bindings.items()}
 
 
 def _literal_attribute_bases(tree: ast.Module) -> frozenset[int]:
@@ -525,13 +631,17 @@ class _AllowHostTransfersCensus(ast.NodeVisitor):
         relative_path: str,
         statement_paths: dict[int, str],
         enclosing_statement_paths: dict[int, str],
-        owner_bindings: tuple[frozenset[str], frozenset[str], frozenset[str]],
+        owner_bindings: tuple[frozenset[str], frozenset[str]],
         literal_attribute_bases: frozenset[int],
+        tree: ast.Module,
     ) -> None:
         self.relative_path = relative_path
         self.statement_paths = statement_paths
         self.enclosing_statement_paths = enclosing_statement_paths
-        self.owner_names, self.package_names, self.permit_names = owner_bindings
+        self.owner_names, self.package_names = owner_bindings
+        self.tree = tree
+        self.scope_nodes: list[ast.AST] = []
+        self.scope_bindings: dict[int, dict[str, frozenset[str]]] = {}
         self.literal_attribute_bases = literal_attribute_bases
         self.scope_names: list[str] = []
         self.sites: dict[str, tuple[str, ...]] = {}
@@ -567,10 +677,38 @@ class _AllowHostTransfersCensus(ast.NodeVisitor):
             )
         )
 
+    def _bindings(self, scope: ast.AST) -> dict[str, frozenset[str]]:
+        if id(scope) not in self.scope_bindings:
+            self.scope_bindings[id(scope)] = _scope_bindings(scope, self.relative_path)
+        return self.scope_bindings[id(scope)]
+
+    def _lexical_binding(self, name: str) -> frozenset[str]:
+        """Kinds of the binding ``name`` resolves to from the current scope."""
+        for depth, scope in enumerate(reversed(self.scope_nodes)):
+            # A class body is visible only to code directly inside it.
+            if depth > 0 and isinstance(scope, ast.ClassDef):
+                continue
+            kinds = self._bindings(scope).get(name)
+            if kinds:
+                return kinds
+        return self._bindings(self.tree).get(name, frozenset())
+
     def _resolves_to_owner(self, callee: ast.expr) -> bool:
         if isinstance(callee, ast.Name):
-            return callee.id in self.permit_names
-        return isinstance(callee, ast.Attribute) and self._is_owner_module(callee.value)
+            return self._lexical_binding(callee.id) == {_PERMIT}
+        if not isinstance(callee, ast.Attribute):
+            return False
+        base = callee.value
+        if isinstance(base, ast.Name):
+            return self._lexical_binding(base.id) == {_OWNER_MODULE_BINDING}
+        if _dotted_name(base) == _OWNER_MODULE:
+            return self._lexical_binding("simsopt_jax") == {_SIMSOPT_JAX_ROOT_BINDING}
+        return (
+            isinstance(base, ast.Attribute)
+            and base.attr == _OWNER_MODULE_NAME
+            and isinstance(base.value, ast.Name)
+            and self._lexical_binding(base.value.id) == {_OWNER_PACKAGE_BINDING}
+        )
 
     def _check_module_key(self, key: ast.expr | None, node: ast.expr) -> None:
         if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
@@ -580,7 +718,9 @@ class _AllowHostTransfersCensus(ast.NodeVisitor):
 
     def _visit_scope(self, node: ast.AST, name: str) -> None:
         self.scope_names.append(name)
+        self.scope_nodes.append(node)
         self.generic_visit(node)
+        self.scope_nodes.pop()
         self.scope_names.pop()
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -701,6 +841,7 @@ def _allow_host_transfers_census(
         _enclosing_statement_paths(tree, statement_paths),
         _owner_bindings(tree, relative_path),
         _literal_attribute_bases(tree),
+        tree,
     )
     census.visit(tree)
     admitted = {
@@ -824,6 +965,18 @@ def test_allow_host_transfers_census_admits_only_with_items() -> None:
         )
         assert list(module_sites) == ["src/example.py::approved"], form
         assert module_escapes == [], form
+    class_source = (
+        "class Holder:\n"
+        "    def approved(self):\n"
+        "        from simsopt_jax.runtime.host_boundary import allow_host_transfers\n\n"
+        "        with allow_host_transfers():\n"
+        "            transfer()\n"
+    )
+    class_sites, class_escapes = _allow_host_transfers_census(
+        class_source, "src/example.py"
+    )
+    assert list(class_sites) == ["src/example.py::Holder.approved"]
+    assert class_escapes == []
 
 
 def test_allow_host_transfers_census_refuses_a_moved_or_edited_region() -> None:
@@ -1011,6 +1164,69 @@ def test_allow_host_transfers_census_refuses_every_other_reference() -> None:
             "from other_package import guards\n\n"
             "def approved():\n"
             "    with guards.allow_host_transfers():\n"
+            "        transfer()\n"
+        ),
+        "admitted site shadowed by a parameter": (
+            "from contextlib import nullcontext\n"
+            "from simsopt_jax.runtime.host_boundary import allow_host_transfers\n\n"
+            "def approved(allow_host_transfers=nullcontext):\n"
+            "    with allow_host_transfers():\n"
+            "        transfer()\n"
+        ),
+        "admitted site shadowed by a keyword-only parameter": (
+            "from contextlib import nullcontext\n"
+            "from simsopt_jax.runtime.host_boundary import allow_host_transfers\n\n"
+            "def approved(*, allow_host_transfers=nullcontext):\n"
+            "    with allow_host_transfers():\n"
+            "        transfer()\n"
+        ),
+        "admitted site shadowed by a local assignment": (
+            "from contextlib import nullcontext\n"
+            "from simsopt_jax.runtime.host_boundary import allow_host_transfers\n\n"
+            "def approved():\n"
+            "    allow_host_transfers = nullcontext\n"
+            "    with allow_host_transfers():\n"
+            "        transfer()\n"
+        ),
+        "admitted site shadowed in an enclosing function": (
+            "from contextlib import nullcontext\n"
+            "from simsopt_jax.runtime.host_boundary import allow_host_transfers\n\n"
+            "def outer():\n"
+            "    for allow_host_transfers in (nullcontext,):\n"
+            "        pass\n"
+            "    def approved():\n"
+            "        with allow_host_transfers():\n"
+            "            transfer()\n"
+            "    return approved\n"
+        ),
+        "admitted site shadowed by a local import": (
+            "from simsopt_jax.runtime.host_boundary import allow_host_transfers\n\n"
+            "def approved():\n"
+            "    from contextlib import nullcontext as allow_host_transfers\n"
+            "    with allow_host_transfers():\n"
+            "        transfer()\n"
+        ),
+        "admitted site shadowed by a nested def": (
+            "from contextlib import nullcontext\n"
+            "from simsopt_jax.runtime.host_boundary import allow_host_transfers\n\n"
+            "def approved():\n"
+            "    def allow_host_transfers():\n"
+            "        return nullcontext()\n"
+            "    with allow_host_transfers():\n"
+            "        transfer()\n"
+        ),
+        "admitted site shadowed by a with target": (
+            "from simsopt_jax.runtime.host_boundary import allow_host_transfers\n\n"
+            "def approved(factory):\n"
+            "    with factory() as allow_host_transfers:\n"
+            "        pass\n"
+            "    with allow_host_transfers():\n"
+            "        transfer()\n"
+        ),
+        "owner module shadowed by a parameter": (
+            "from simsopt_jax.runtime import host_boundary\n\n"
+            "def approved(host_boundary):\n"
+            "    with host_boundary.allow_host_transfers():\n"
             "        transfer()\n"
         ),
         "admitted site with no import": (

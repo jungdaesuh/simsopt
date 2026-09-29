@@ -8,13 +8,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SMOKE = ROOT / ".github" / "workflows" / "jax_smoke.yml"
 AUTHORITY = ROOT / ".github" / "workflows" / "jax_gpu_parity.yml"
-_PARITY_COMMAND = "python examples/jax/run_parity.py"
+# Any invocation of the parity runner: a script path (relative, ``./`` or
+# absolute, under any interpreter) or the ``-m`` module form.
+_PARITY_INVOCATION = re.compile(
+    r"(?:\S*/)?examples/jax/run_parity\.py\b|-m\s+examples\.jax\.run_parity\b"
+)
 _JOB_HEADER = re.compile(r"^  ([A-Za-z0-9_-]+):\n", re.MULTILINE)
 
 
 def _jobs(path: Path) -> dict[str, str]:
+    return _jobs_from_text(path.read_text(encoding="utf-8"))
+
+
+def _jobs_from_text(workflow: str) -> dict[str, str]:
     """Return each top-level job's text, keyed by job id."""
-    jobs_section = path.read_text(encoding="utf-8").split("\njobs:\n", maxsplit=1)[1]
+    jobs_section = workflow.split("\njobs:\n", maxsplit=1)[1]
     headers = list(_JOB_HEADER.finditer(jobs_section))
     return {
         header.group(1): jobs_section[
@@ -29,7 +37,37 @@ def _jobs(path: Path) -> dict[str, str]:
 
 
 def _parity_commands(job: str) -> list[str]:
-    return job.split(_PARITY_COMMAND)[1:]
+    return _PARITY_INVOCATION.split(job)[1:]
+
+
+def _parity_jobs(jobs: dict[str, str]) -> set[str]:
+    return {job_id for job_id, job in jobs.items() if _parity_commands(job)}
+
+
+def test_parity_invocations_are_recognised_in_every_form() -> None:
+    forms = (
+        "python examples/jax/run_parity.py --scale bounded",
+        "python3 examples/jax/run_parity.py --scale bounded",
+        "python ./examples/jax/run_parity.py --scale bounded",
+        "python /work/simsopt/examples/jax/run_parity.py --scale bounded",
+        "python -m examples.jax.run_parity --scale bounded",
+    )
+    for form in forms:
+        assert len(_parity_commands(form)) == 1, form
+    assert _parity_commands("python examples/jax/run_examples.py") == []
+
+    extra_job = (
+        "  extra-parity:\n"
+        "    runs-on: [self-hosted, gpu]\n"
+        "    steps:\n"
+        "      - run: python3 examples/jax/run_parity.py --scale bounded\n"
+    )
+    mutated = AUTHORITY.read_text(encoding="utf-8").rstrip("\n") + "\n" + extra_job
+    assert _parity_jobs(_jobs_from_text(mutated)) == {
+        "native-jax-example-parity",
+        "jax-gpu-strict-purity",
+        "extra-parity",
+    }
 
 
 def test_pr_example_commands_select_bounded_scale_explicitly() -> None:
@@ -62,10 +100,7 @@ def test_scheduled_workflow_runs_bounded_parity_in_two_distinct_gpu_jobs() -> No
     authority = jobs["native-jax-example-parity"]
     strict = jobs["jax-gpu-strict-purity"]
 
-    assert {job_id for job_id, job in jobs.items() if _parity_commands(job)} == {
-        "native-jax-example-parity",
-        "jax-gpu-strict-purity",
-    }
+    assert _parity_jobs(jobs) == {"native-jax-example-parity", "jax-gpu-strict-purity"}
     authority_scales = [
         command.split("--scale ", maxsplit=1)[1].split(maxsplit=1)[0]
         for command in _parity_commands(authority)
