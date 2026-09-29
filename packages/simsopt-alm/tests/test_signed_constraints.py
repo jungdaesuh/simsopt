@@ -494,6 +494,25 @@ class FullLogSumExpTests(unittest.TestCase):
 
 
 class SampledGeometryTests(unittest.TestCase):
+    def test_the_hard_value_is_the_extremum_over_the_samples_only(self):
+        # Codex R16-05: a thin rotated ellipse (semi-axes 1 and 0.01) sampled
+        # at 30 points is feasible for a curvature bound of 15, while 30,000
+        # samples of the same coefficients reach a curvature of 1e4.
+        phase = np.pi / 30
+        curve = CurveXYZFourier(30, 2)
+        curve.set("xc(1)", np.cos(phase))
+        curve.set("xs(1)", -np.sin(phase))
+        curve.set("yc(1)", 0.01 * np.sin(phase))
+        curve.set("ys(1)", 0.01 * np.cos(phase))
+        dense = CurveXYZFourier(30000, 2)
+        dense.x = curve.x
+        signed, _grad, hard = smooth_max_curvature_signed_constraint(
+            curve, 15.0, 0.05, _JointDofs([curve])
+        )
+        self.assertEqual(hard, float(np.max(curve.kappa())) - 15.0)
+        self.assertLess(signed, 0.0)
+        self.assertGreater(float(np.max(dense.kappa())), 1.0e3)
+
     def test_curve_surface_constraint_sees_a_fixed_coefficient_change(self):
         # A circle of radius 2.1 in the z = 0 plane touches the outboard
         # midplane of the torus (R0 = 2, a = 0.1) and clears the R0 = 1 one.

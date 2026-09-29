@@ -66,9 +66,10 @@ from simsopt_alm.signed_constraints import (smooth_max_curvature_signed_constrai
                                             smooth_min_curve_curve_signed_constraint)
 
 # Thresholds taken from boozerQA_ls_mpi.py. The distance and curvature rows are
-# smooth (log-sum-exp) bounds on the true extremum, so they are conservative:
-# a point feasible for the smooth row keeps the true distance above, or the true
-# curvature below, the threshold, with some extra margin.
+# smooth (log-sum-exp) bounds on the extremum over the sampled quadrature points,
+# so they are conservative there: a point feasible for the smooth row keeps the
+# sampled distance above, or the sampled curvature below, the threshold, with
+# some extra margin. Between samples the coils can come closer or bend more.
 MIN_DIST_THRESHOLD = 0.15
 KAPPA_THRESHOLD = 15.
 MSC_THRESHOLD = 15.

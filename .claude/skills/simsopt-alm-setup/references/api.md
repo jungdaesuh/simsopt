@@ -50,11 +50,16 @@ ignored by `alm_problem_physics`. Rows:
 - `functools.partial(signed_lower_bound, objective, bound)`: `objective >= bound`.
 - A `simsopt_alm.signed_constraints` kernel with its leading arguments bound,
   e.g. `partial(smooth_min_curve_curve_signed_constraint, curves, 0.1, 0.005)`
-  (curves, minimum distance in m, smoothing temperature in m). The smooth
-  value is never looser than the exact one (third item), so smooth-feasible
-  implies exactly feasible; the temperature is in the constrained quantity's
-  units and must be finite and > 0 (`ValueError` otherwise; 0 is rejected:
-  use the third item for the exact value).
+  (curves, minimum distance in m, smoothing temperature in m). The third
+  item is the hard value: the extremum over the sampled quadrature points of
+  the curves (and surface). The smooth value is never looser than it, so
+  smooth-feasible implies feasible over those samples, not for the
+  continuous coils: they can come closer or bend more between samples, so
+  check clearance and curvature at a higher resolution (e.g. re-evaluate the
+  rows on copies of the curves with more quadrature points) before accepting
+  a physical bound. The temperature is in the constrained quantity's units
+  and must be finite and > 0 (`ValueError` otherwise; 0 is rejected: use the
+  third item for the hard value).
 
 Divide every row by a positive scale in its units (its bound, or a typical
 size) so all rows are O(1): the penalty is shared, and the tolerances are

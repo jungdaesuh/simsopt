@@ -93,8 +93,8 @@ Ask these multiple-choice questions in one message and wait for the answers.
    evaluation (Boozer Newton, a VMEC restart, any inner solve)? (a) no:
    stateless; (b) yes: stateful.
 5. Distance and curvature rows: (a) smooth rows only (default, conservative);
-   (b) hybrid quartet: the exact values decide feasibility and drive the
-   multiplier update.
+   (b) hybrid quartet: the hard values (extrema over the sampled points)
+   decide feasibility and drive the multiplier update.
 6. Opt-ins: (a) none; (b) per-step history JSON; (c) checkpoints to resume
    from; (d) both.
 7. Where to put `<dir>` (default: a new `alm_<name>/` next to the user's
@@ -115,7 +115,7 @@ physics, that a row is violated or satisfied: they become the sign probes.
 | 4(b) with 1(c) | Evaluate without a cache and warm-start only from accepted solutions: copy the state pattern of the Boozer template (`solve`, `accept_inner_iterate`, `accept_outer_iterate`, `snapshot_accepted`, `restore_incumbent`, and `solver_callbacks` returning all four callbacks). |
 | 3, coil length | Set `MAX_LENGTH` (Stage 2) or `LENGTH_MAX` (Boozer) and `LENGTH_SCOPE` to the answer. |
 | 5(b) with 1(a) | Set `HYBRID_QUARTET = True`. |
-| 5(b) with 1(b) or 1(c) | Add the quartet to `physics` as in [API](#api) (Hybrid quartet), exact values from each kernel's third item. |
+| 5(b) with 1(b) or 1(c) | Add the quartet to `physics` as in [API](#api) (Hybrid quartet), hard values from each kernel's third item. |
 | 6 | Nothing to generate: `run_alm.py --history FILE` and `--checkpoints DIR`. |
 
 1. Create `<dir>`. Copy the chosen template to `<dir>/alm_problem.py` and
@@ -323,11 +323,16 @@ ignored by `alm_problem_physics`. Rows:
 - `functools.partial(signed_lower_bound, objective, bound)`: `objective >= bound`.
 - A `simsopt_alm.signed_constraints` kernel with its leading arguments bound,
   e.g. `partial(smooth_min_curve_curve_signed_constraint, curves, 0.1, 0.005)`
-  (curves, minimum distance in m, smoothing temperature in m). The smooth
-  value is never looser than the exact one (third item), so smooth-feasible
-  implies exactly feasible; the temperature is in the constrained quantity's
-  units and must be finite and > 0 (`ValueError` otherwise; 0 is rejected:
-  use the third item for the exact value).
+  (curves, minimum distance in m, smoothing temperature in m). The third
+  item is the hard value: the extremum over the sampled quadrature points of
+  the curves (and surface). The smooth value is never looser than it, so
+  smooth-feasible implies feasible over those samples, not for the
+  continuous coils: they can come closer or bend more between samples, so
+  check clearance and curvature at a higher resolution (e.g. re-evaluate the
+  rows on copies of the curves with more quadrature points) before accepting
+  a physical bound. The temperature is in the constrained quantity's units
+  and must be finite and > 0 (`ValueError` otherwise; 0 is rejected: use the
+  third item for the hard value).
 
 Divide every row by a positive scale in its units (its bound, or a typical
 size) so all rows are O(1): the penalty is shared, and the tolerances are
@@ -988,12 +993,16 @@ coils after the stellarator symmetry (2 * nfp times the base-coil sum).
 
 The distance and maximum-curvature rows are the smooth signed constraints of
 ``simsopt_alm.signed_constraints``: log-sum-exp values never looser than the
-exact extremum, so a point feasible for the smooth row is feasible for the
-exact one. The physics depends on the coil dofs alone, so the solver gets
-``cached_alm_evaluator(physics)``. With ``HYBRID_QUARTET = True`` the evaluator
-also returns the exact ("hard") row values: the smooth values still define the
-augmented Lagrangian, while the hard ones decide feasibility and drive the
-multiplier update (read the skill's ``references/pitfalls.md`` first).
+extremum over the sampled quadrature points (the "hard" value), so a point
+feasible for the smooth row is feasible over those samples. That is not a
+bound on the continuous coils, which can come closer or bend more between
+samples: re-evaluate clearance and curvature at a higher quadrature resolution
+before accepting a physical bound. The physics depends on the coil dofs alone,
+so the solver gets ``cached_alm_evaluator(physics)``. With ``HYBRID_QUARTET =
+True`` the evaluator also returns the hard row values: the smooth values still
+define the augmented Lagrangian, while the hard ones decide feasibility and
+drive the multiplier update (read the skill's ``references/pitfalls.md``
+first).
 
 ### [templates/boozer_single_stage.py](../.claude/skills/simsopt-alm-setup/templates/boozer_single_stage.py)
 
@@ -1015,7 +1024,10 @@ initial value and every row divided by the size of its bound:
                 MeanSquaredCurvature_i <= MAX_MEAN_SQUARED_CURVATURE          (each base coil)
 
 A target of None takes the initial configuration's value; a zero half width
-makes the pair of rows an equality.
+makes the pair of rows an equality. The smooth rows bound the extremum over
+the sampled quadrature points, not over the continuous coils: re-evaluate
+clearance and curvature at a higher quadrature resolution before accepting a
+physical bound.
 
 The evaluator is stateful: every evaluation re-solves the Boozer surface by
 Newton's method, warm-started from a solution the solver accepted (never from

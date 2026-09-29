@@ -80,8 +80,8 @@ before the answers arrive.
    evaluation (Boozer Newton, a VMEC restart, any inner solve)? (a) no:
    stateless; (b) yes: stateful.
 5. Distance and curvature rows: (a) smooth rows only (default, conservative);
-   (b) hybrid quartet: the exact values decide feasibility and drive the
-   multiplier update.
+   (b) hybrid quartet: the hard values (extrema over the sampled points)
+   decide feasibility and drive the multiplier update.
 6. Opt-ins: (a) none; (b) per-step history JSON; (c) checkpoints to resume
    from; (d) both.
 7. Where to put `<dir>` (default: a new `alm_<name>/` next to the user's
@@ -102,7 +102,7 @@ physics, that a row is violated or satisfied: they become the sign probes.
 | 4(b) with 1(c) | Evaluate without a cache and warm-start only from accepted solutions: copy the state pattern of the Boozer template (`solve`, `accept_inner_iterate`, `accept_outer_iterate`, `snapshot_accepted`, `restore_incumbent`, and `solver_callbacks` returning all four callbacks). |
 | 3, coil length | Set `MAX_LENGTH` (Stage 2) or `LENGTH_MAX` (Boozer) and `LENGTH_SCOPE` to the answer. |
 | 5(b) with 1(a) | Set `HYBRID_QUARTET = True`. |
-| 5(b) with 1(b) or 1(c) | Add the quartet to `physics` as in [api.md](references/api.md) (Hybrid quartet), exact values from each kernel's third item. |
+| 5(b) with 1(b) or 1(c) | Add the quartet to `physics` as in [api.md](references/api.md) (Hybrid quartet), hard values from each kernel's third item. |
 | 6 | Nothing to generate: `run_alm.py --history FILE` and `--checkpoints DIR`. |
 
 1. Create `<dir>`. Copy the chosen template to `<dir>/alm_problem.py` and

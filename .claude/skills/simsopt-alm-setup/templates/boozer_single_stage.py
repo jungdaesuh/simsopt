@@ -17,7 +17,10 @@ initial value and every row divided by the size of its bound:
                 MeanSquaredCurvature_i <= MAX_MEAN_SQUARED_CURVATURE          (each base coil)
 
 A target of None takes the initial configuration's value; a zero half width
-makes the pair of rows an equality.
+makes the pair of rows an equality. The smooth rows bound the extremum over
+the sampled quadrature points, not over the continuous coils: re-evaluate
+clearance and curvature at a higher quadrature resolution before accepting a
+physical bound.
 
 The evaluator is stateful: every evaluation re-solves the Boozer surface by
 Newton's method, warm-started from a solution the solver accepted (never from

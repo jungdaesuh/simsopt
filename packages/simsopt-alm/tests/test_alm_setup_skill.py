@@ -660,6 +660,20 @@ class SkillDocumentsThePackageTests(unittest.TestCase):
                                       if Path(error.split(":")[0]).name == name],
                                      [str(line) for line in lines])
 
+    def test_hard_rows_are_described_as_sampled_extrema(self):
+        """R16-05: the hard values are extrema over the sampled points; no
+        skill file, template or the guide calls them exact feasibility or
+        claims an engineering tolerance, and the kernel reference asks for a
+        resolution check."""
+        texts = {**skill_markdown(), **skill_python(),
+                 "guide": (REPO_ROOT / "docs" / "alm_setup_guide.md").read_text()}
+        for name, text in texts.items():
+            with self.subTest(file=name):
+                self.assertNotRegex(text, r"(?i)exactly feasible|engineering tolerance")
+        api = skill_markdown()["references/api.md"]
+        self.assertIn("sampled quadrature points", api)
+        self.assertIn("higher resolution", api)
+
     def test_guide_drops_the_skill_only_blocks(self):
         blocks = re.findall(r"<!-- skill-only -->\n(.*?)<!-- /skill-only -->",
                             (SKILL_DIR / "SKILL.md").read_text(), re.DOTALL)

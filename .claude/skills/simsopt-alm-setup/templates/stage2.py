@@ -22,12 +22,16 @@ coils after the stellarator symmetry (2 * nfp times the base-coil sum).
 
 The distance and maximum-curvature rows are the smooth signed constraints of
 ``simsopt_alm.signed_constraints``: log-sum-exp values never looser than the
-exact extremum, so a point feasible for the smooth row is feasible for the
-exact one. The physics depends on the coil dofs alone, so the solver gets
-``cached_alm_evaluator(physics)``. With ``HYBRID_QUARTET = True`` the evaluator
-also returns the exact ("hard") row values: the smooth values still define the
-augmented Lagrangian, while the hard ones decide feasibility and drive the
-multiplier update (read the skill's ``references/pitfalls.md`` first).
+extremum over the sampled quadrature points (the "hard" value), so a point
+feasible for the smooth row is feasible over those samples. That is not a
+bound on the continuous coils, which can come closer or bend more between
+samples: re-evaluate clearance and curvature at a higher quadrature resolution
+before accepting a physical bound. The physics depends on the coil dofs alone,
+so the solver gets ``cached_alm_evaluator(physics)``. With ``HYBRID_QUARTET =
+True`` the evaluator also returns the hard row values: the smooth values still
+define the augmented Lagrangian, while the hard ones decide feasibility and
+drive the multiplier update (read the skill's ``references/pitfalls.md``
+first).
 """
 
 from __future__ import annotations
@@ -88,11 +92,11 @@ MAX_LENGTH = None
 LENGTH_SCOPE = SUM_OF_BASE_COILS
 
 # SETUP: smoothing temperatures of the smooth rows, in the constrained
-# quantity's units. Smaller is closer to the exact value but less smooth.
+# quantity's units. Smaller is closer to the sampled extremum but less smooth.
 DISTANCE_TEMPERATURE = 0.005   # m
 CURVATURE_TEMPERATURE = 0.05   # 1/m
 
-# SETUP: True returns the hybrid quartet (exact values for feasibility and
+# SETUP: True returns the hybrid quartet (sampled extrema for feasibility and
 # the multiplier update); False uses the smooth values for everything.
 HYBRID_QUARTET = False
 
@@ -211,7 +215,8 @@ class Stage2Problem:
         self.settings = ALMSettings(
             max_outer_iterations=3 if smoke else 10,  # each outer iteration is one multiplier update
             # Rows are divided by their thresholds: 1e-4 is a violation of
-            # 0.01% of a threshold, below any engineering tolerance.
+            # 0.01% of a threshold at the sampled points (see the docstring
+            # for the continuous coils).
             feasibility_tol=1e-4,
             # f is divided by |f(x0)|: 1e-4 asks for a 1e-4 relative gradient.
             stationarity_tol=1e-4,
@@ -287,7 +292,7 @@ class Stage2Problem:
         self.objective.x = x
         values = [row(self.objective) for row in self.rows]
         surrogate = np.array([value[0] for value in values])
-        # A row without a hard value (signed_upper_bound) is exact already.
+        # A row without a hard value (signed_upper_bound) is its own hard value.
         hard = np.array([value[2] if len(value) > 2 else value[0] for value in values])
         hard_violation = np.maximum(hard, 0.0)
         return ALMPhysics(

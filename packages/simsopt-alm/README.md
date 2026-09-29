@@ -13,8 +13,10 @@ changes nothing in it.
 - The solver (`simsopt_alm` and its modules) needs only Python >= 3.8, numpy
   and scipy. Importing it loads no simsopt module.
 - `simsopt_alm.signed_constraints` holds smooth signed coil rows (minimum
-  coil-coil and coil-surface distance, maximum curvature). It imports
-  simsopt's `Derivative`, so it needs a simsopt in the same environment.
+  coil-coil and coil-surface distance, maximum curvature), conservative over
+  the sampled quadrature points; check the continuous coils at a higher
+  resolution. It imports simsopt's `Derivative`, so it needs a simsopt in the
+  same environment.
 
 ## Install
 

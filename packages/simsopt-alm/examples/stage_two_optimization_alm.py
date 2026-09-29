@@ -15,9 +15,10 @@ are constraints ``g_i(x) <= 0`` instead of weighted penalties:
 The distance and curvature rows come from ``simsopt_alm.signed_constraints``:
 smooth (log-sum-exp) signed values that keep their slack when inactive, unlike
 the hinge objectives ``CurveCurveDistance`` or ``LpCurveCurvature``. They are
-conservative (the smoothed minimum distance is at most the true one, the
-smoothed maximum curvature at least the true one), so a feasible point meets the
-thresholds with some margin to spare. The mean
+conservative over the sampled quadrature points (the smoothed minimum distance
+is at most the sampled one, the smoothed maximum curvature at least the sampled
+one), so a feasible point meets the thresholds at those points with some margin
+to spare; the continuous coils need a check at a higher resolution. The mean
 squared curvature row wraps the stock objective with ``signed_upper_bound``.
 ``minimize_alm`` then needs no weights for these terms.
 
@@ -50,11 +51,11 @@ order = 5
 LENGTH_WEIGHT = 1e-6
 
 # Thresholds of stage_two_optimization.py. The distance and curvature rows are
-# smooth (log-sum-exp) bounds over every point pair of every coil, symmetry
-# copies included, and never looser than the true extremum: a point feasible
-# for the smooth row keeps the true minimum distance above, or the true maximum
-# curvature below, the threshold, so the effective margin is larger than the
-# threshold alone.
+# smooth (log-sum-exp) bounds over every sampled point pair of every coil,
+# symmetry copies included, and never looser than the sampled extremum: a point
+# feasible for the smooth row keeps the sampled minimum distance above, or the
+# sampled maximum curvature below, the threshold. Between samples the coils can
+# come closer or bend more; check at a higher quadrature resolution.
 CC_THRESHOLD = 0.1
 CS_THRESHOLD = 0.3
 CURVATURE_THRESHOLD = 5.
