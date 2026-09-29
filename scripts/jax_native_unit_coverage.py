@@ -55,9 +55,10 @@ The trusted authority commit is code-owned, not manifest-controlled. It is the
 merge base of this fork's HEAD with upstream ``master``, so every enumerated
 file is present in the working tree by construction. A manifest repeats it as
 an auditable assertion, and validation rejects a mismatch. Files that upstream
-added *after* that merge base (for example ``tests/util/test_logger.py`` at
-``4ad6fd99...``) are outside this baseline and are reported as an upstream
-drift follow-up rather than silently classified.
+adds *after* that merge base are outside this baseline until the authority is
+advanced; when it is, every newly enumerated file fails validation until a
+human gives it a row (``unclassified`` at the least), so none is silently
+classified.
 
 Source-tree hash recipe
 -----------------------
