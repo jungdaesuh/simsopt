@@ -685,6 +685,16 @@ class SkillDocumentsThePackageTests(unittest.TestCase):
         boozer = skill_python()["templates/boozer_single_stage.py"]
         self.assertIn(r"J = (\int_S B_nonQA^2 dS) / (\int_S B_QA^2 dS)", boozer)
 
+    def test_the_alm_workflow_pins_every_action_to_a_commit(self):
+        """R16-07: a tag can move; each ``uses:`` of the package's workflow
+        names a full commit SHA, with its version tag in a comment."""
+        workflow = (REPO_ROOT / ".github" / "workflows" / "alm.yml").read_text()
+        uses = re.findall(r"^\s*-?\s*uses:\s*(.+)$", workflow, flags=re.MULTILINE)
+        self.assertTrue(uses, "the workflow names no action")
+        for reference in uses:
+            with self.subTest(uses=reference):
+                self.assertRegex(reference, r"^[\w.-]+/[\w.-]+@[0-9a-f]{40} # v\d+(\.\d+)*\b")
+
     def test_guide_drops_the_skill_only_blocks(self):
         blocks = re.findall(r"<!-- skill-only -->\n(.*?)<!-- /skill-only -->",
                             (SKILL_DIR / "SKILL.md").read_text(), re.DOTALL)
