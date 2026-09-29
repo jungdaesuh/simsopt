@@ -2256,6 +2256,58 @@ def adam_optimize_traceable(
 # ``lmpar``'s cap of ten secular-equation iterations.
 _MINPACK_STEP_BOUND_FACTOR = 100.0
 _MINPACK_LMPAR_MAX_ITERATIONS = 10
+# enorm's range limits: squares of components above ``rdwarf`` and below
+# ``rgiant / n`` neither underflow nor overflow when summed in double precision.
+_MINPACK_ENORM_RDWARF = 3.834e-20
+_MINPACK_ENORM_RGIANT = 1.304e19
+
+
+def _minpack_enorm(vector):
+    """MINPACK ``enorm``: the Euclidean norm without overflow or underflow.
+
+    Components are split into small (``<= rdwarf``), intermediate and large
+    (``>= rgiant / n``) ranges; the small and large sums are scaled by their
+    range maximum before squaring, so finite vectors never overflow to inf.
+    The scaled sums are formed at once rather than by enorm's running
+    rescale, which changes only rounding.
+    """
+    vector = jnp.ravel(vector)
+    dtype = vector.dtype
+    zero = jnp.zeros((), dtype=dtype)
+    one = jnp.ones((), dtype=dtype)
+    rdwarf = jnp.asarray(_MINPACK_ENORM_RDWARF, dtype=dtype)
+    agiant = jnp.asarray(_MINPACK_ENORM_RGIANT / vector.size, dtype=dtype)
+    magnitude = jnp.abs(vector)
+    intermediate = (magnitude > rdwarf) & (magnitude < agiant)
+    small = magnitude <= rdwarf
+    # Everything else is large, NaN included, as in enorm's branch order.
+    large = ~(intermediate | small)
+
+    def scaled_sum(mask):
+        range_max = jnp.max(jnp.where(mask, magnitude, zero))
+        ratio = jnp.where(
+            magnitude == range_max,
+            one,
+            magnitude / jnp.where(range_max == zero, one, range_max),
+        )
+        return range_max, jnp.sum(jnp.where(mask & (magnitude != zero), ratio**2, zero))
+
+    x1max, s1 = scaled_sum(large)
+    x3max, s3 = scaled_sum(small)
+    s2 = jnp.sum(jnp.where(intermediate, magnitude**2, zero))
+    safe_x1max = jnp.where(x1max == zero, one, x1max)
+    safe_x3max = jnp.where(x3max == zero, one, x3max)
+    safe_s2 = jnp.where(s2 == zero, one, s2)
+    mixed = jnp.where(
+        s2 >= x3max,
+        jnp.sqrt(s2 * (one + (x3max / safe_s2) * (x3max * s3))),
+        jnp.sqrt(x3max * ((s2 / safe_x3max) + (x3max * s3))),
+    )
+    return jnp.where(
+        s1 != zero,
+        x1max * jnp.sqrt(s1 + (s2 / safe_x1max) / safe_x1max),
+        jnp.where(s2 != zero, mixed, x3max * jnp.sqrt(s3)),
+    )
 
 
 def _minpack_scaled_gradient_cosine(r_matrix, pivots, qtf, column_norms, fnorm):
@@ -2332,7 +2384,7 @@ def _minpack_lmpar(r_matrix, pivots, diag, qtb, delta, par):
     )
     x_gauss_newton = jnp.zeros(n, dtype=dtype).at[pivots].set(gauss_newton)
     scaled_x = diag * x_gauss_newton
-    dxnorm = jnp.linalg.norm(scaled_x)
+    dxnorm = _minpack_enorm(scaled_x)
     fp = dxnorm - delta
     gauss_newton_accepted = fp <= p1 * delta
 
@@ -2345,9 +2397,9 @@ def _minpack_lmpar(r_matrix, pivots, diag, qtb, delta, par):
         trans="T",
         lower=False,
     )
-    newton_w_norm = jnp.linalg.norm(newton_w)
+    newton_w_norm = _minpack_enorm(newton_w)
     parl = jnp.where(full_rank, fp / delta / newton_w_norm / newton_w_norm, zero)
-    gnorm = jnp.linalg.norm((r_matrix.T @ qtb) / pivoted_diag)
+    gnorm = _minpack_enorm((r_matrix.T @ qtb) / pivoted_diag)
     paru = gnorm / delta
     paru = jnp.where(paru == zero, dwarf / jnp.minimum(delta, p1), paru)
     par = jnp.minimum(jnp.maximum(par, parl), paru)
@@ -2369,7 +2421,7 @@ def _minpack_lmpar(r_matrix, pivots, diag, qtb, delta, par):
             qtb,
         )
         scaled = diag * x
-        trial_dxnorm = jnp.linalg.norm(scaled)
+        trial_dxnorm = _minpack_enorm(scaled)
         previous_fp = carry["fp"]
         trial_fp = trial_dxnorm - delta
         iteration = carry["iteration"] + 1
@@ -2388,7 +2440,7 @@ def _minpack_lmpar(r_matrix, pivots, diag, qtb, delta, par):
             trans="T",
             lower=False,
         )
-        correction_norm = jnp.linalg.norm(correction)
+        correction_norm = _minpack_enorm(correction)
         parc = trial_fp / delta / correction_norm / correction_norm
         parl_next = jnp.where(
             trial_fp > zero,
@@ -2545,13 +2597,13 @@ def _build_traceable_levenberg_marquardt_minpack_runner(
         diag = jnp.ones_like(flat_x_init)
         residual0 = residual_eval(flat_x_init)
         jacobian0 = jacobian_eval(flat_x_init)
-        xnorm0 = jnp.linalg.norm(diag * flat_x_init)
+        xnorm0 = _minpack_enorm(diag * flat_x_init)
         delta0 = factor * xnorm0
         state0 = {
             "x": flat_x_init,
             "residual": residual0,
             "jacobian": jacobian0,
-            "fnorm": jnp.linalg.norm(residual0),
+            "fnorm": _minpack_enorm(residual0),
             "xnorm": xnorm0,
             "delta": jnp.where(delta0 == zero, factor, delta0),
             "par": zero,
@@ -2578,7 +2630,7 @@ def _build_traceable_levenberg_marquardt_minpack_runner(
             )
             step = -lm_x
             x_trial = state["x"] + step
-            pnorm = jnp.linalg.norm(diag * step)
+            pnorm = _minpack_enorm(diag * step)
             # Until the first successful step, the bound never exceeds the step.
             delta = jnp.where(
                 state["first_iteration"],
@@ -2588,13 +2640,13 @@ def _build_traceable_levenberg_marquardt_minpack_runner(
             residual_trial = residual_eval(x_trial)
             nfev = state["nfev"] + 1
             fnorm = state["fnorm"]
-            fnorm1 = jnp.linalg.norm(residual_trial)
+            fnorm1 = _minpack_enorm(residual_trial)
 
             # Scaled actual and predicted reductions and the directional
             # derivative; a NaN or overflowing trial compares False and falls
             # to actred = -1, a rejected step.
             actred = jnp.where(p1 * fnorm1 < fnorm, one - (fnorm1 / fnorm) ** 2, -one)
-            temp1 = jnp.linalg.norm(r_matrix @ step[pivots]) / fnorm
+            temp1 = _minpack_enorm(r_matrix @ step[pivots]) / fnorm
             temp2 = jnp.sqrt(par) * pnorm / fnorm
             prered = temp1**2 + temp2**2 / p5
             dirder = -(temp1**2 + temp2**2)
@@ -2626,7 +2678,7 @@ def _build_traceable_levenberg_marquardt_minpack_runner(
             accepted = ratio >= p0001
             x_next = jnp.where(accepted, x_trial, state["x"])
             residual_next = jnp.where(accepted, residual_trial, state["residual"])
-            xnorm = jnp.where(accepted, jnp.linalg.norm(diag * x_trial), state["xnorm"])
+            xnorm = jnp.where(accepted, _minpack_enorm(diag * x_trial), state["xnorm"])
             fnorm_next = jnp.where(accepted, fnorm1, fnorm)
             jacobian_next = lax.cond(
                 accepted,
@@ -2727,7 +2779,7 @@ def _build_traceable_levenberg_marquardt_minpack_runner(
                 r_matrix,
                 pivots,
                 qtf,
-                jnp.linalg.norm(state["jacobian"], axis=0),
+                jax.vmap(_minpack_enorm, in_axes=1)(state["jacobian"]),
                 state["fnorm"],
             )
 

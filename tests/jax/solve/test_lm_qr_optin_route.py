@@ -298,6 +298,74 @@ def test_qr_lane_never_reports_success_with_a_nonfinite_jacobian():
     assert result.message.startswith("non-finite")
 
 
+def test_qr_lane_norms_do_not_overflow_on_large_finite_residuals():
+    """r = 1e200 (x - 1) from x = 0: every norm is finite (1e200).
+
+    A plain sum of squares overflows to inf, which zeroes the gradient cosine
+    and stops on gtol at the start. MINPACK's enorm scales the sum, so the
+    solve must move to x = 1.
+    """
+    result = _opt.target_least_squares(
+        lambda x: 1.0e200 * (x - 1.0),
+        jnp.zeros(1),
+        method="lm-minpack-ondevice",
+        maxiter=50,
+    )
+
+    assert result.nfev > 1, result.message
+    assert result.success, result.message
+    np.testing.assert_allclose(np.asarray(result.x), [1.0], rtol=1e-12, atol=0)
+
+
+def _enorm_reference(vector):
+    """netlib MINPACK enorm, term by term (More, Garbow and Hillstrom 1980)."""
+    rdwarf, rgiant = 3.834e-20, 1.304e19
+    s1 = s2 = s3 = x1max = x3max = 0.0
+    agiant = rgiant / len(vector)
+    for value in vector:
+        xabs = abs(float(value))
+        if rdwarf < xabs < agiant:
+            s2 += xabs**2
+        elif xabs <= rdwarf:
+            if xabs > x3max:
+                s3 = 1.0 + s3 * (x3max / xabs) ** 2
+                x3max = xabs
+            elif xabs != 0.0:
+                s3 += (xabs / x3max) ** 2
+        elif xabs > x1max:
+            s1 = 1.0 + s1 * (x1max / xabs) ** 2
+            x1max = xabs
+        else:
+            s1 += (xabs / x1max) ** 2
+    if s1 != 0.0:
+        return x1max * np.sqrt(s1 + (s2 / x1max) / x1max)
+    if s2 != 0.0:
+        if s2 >= x3max:
+            return np.sqrt(s2 * (1.0 + (x3max / s2) * (x3max * s3)))
+        return np.sqrt(x3max * ((s2 / x3max) + (x3max * s3)))
+    return x3max * np.sqrt(s3)
+
+
+@pytest.mark.parametrize(
+    "vector",
+    [
+        [3.0, 4.0],
+        [1.0e200, -2.0e200, 3.0],
+        [1.0e-200, 2.0e-200],
+        [1.0e-25, 3.0e-30, 0.0],
+        [2.0e19, 1.0, 1.0e-30],
+        [0.0, 0.0],
+    ],
+)
+def test_minpack_enorm_matches_the_reference_algorithm(vector):
+    np.testing.assert_allclose(
+        float(_opt._minpack_enorm(jnp.asarray(vector))),
+        _enorm_reference(vector),
+        rtol=1e-15,
+        atol=0,
+    )
+
+
 def _pivoted_qr_problem(seed):
     rng = np.random.default_rng(seed)
     jacobian = rng.standard_normal((12, 5)) @ np.diag([1.0, 3.0, 1e-2, 0.5, 10.0])
