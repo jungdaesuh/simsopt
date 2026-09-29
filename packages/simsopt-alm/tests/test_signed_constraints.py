@@ -1,5 +1,6 @@
 import ast
 import unittest
+from decimal import Decimal, localcontext
 from pathlib import Path
 import tracemalloc
 from unittest import mock
@@ -586,6 +587,121 @@ class FullLogSumExpTests(unittest.TestCase):
         self.assertLess(peak, 16 * 2**20, f"peak scratch memory {peak} bytes")
         self.assertGreaterEqual(signed, hard)
         self.assertTrue(np.all(np.isfinite(grad)))
+
+
+def _decimal_soft_min(left, right, temperature, moving):
+    """80-digit oracle of ``soft_min_pair_distance`` over every pair of the
+    exact binary64 points ``left`` x ``right``: ``(hard, soft, derivative)``,
+    the derivative being that of soft when every point of the ``moving`` set
+    ("left" or "right") shifts by +1 along z. The smooth distance is
+    s = d^2 / (r + T), r = sqrt(d^2 + T^2) (exact, no cancellation)."""
+    with localcontext() as context:
+        context.prec = 80
+        t = Decimal(float(temperature))
+        pairs = []
+        for p in np.asarray(left, dtype=float):
+            for q in np.asarray(right, dtype=float):
+                difference = [Decimal(float(a)) - Decimal(float(b)) for a, b in zip(p, q)]
+                d = sum(c * c for c in difference).sqrt()
+                r = (d * d + t * t).sqrt()
+                pairs.append((d, d * d / (r + t), difference[2] / r))
+        shift = min(smooth for _d, smooth, _dz in pairs)
+        # A weight below e^-10000 is invisible next to the minimum's weight 1.
+        weights = [((shift - smooth) / t).exp() if (shift - smooth) / t > -10000 else Decimal(0)
+                   for _d, smooth, _dz in pairs]
+        total = sum(weights)
+        sign = 1 if moving == "left" else -1
+        derivative = sign * sum(w * dz for w, (_d, _s, dz) in zip(weights, pairs)) / total
+        return (float(min(d for d, _s, _dz in pairs)), float(shift - t * total.ln()),
+                float(derivative))
+
+
+# (distance, temperature): d ~ T, d >> T, exact contact, the underflow edge
+# of d^2 and the overflow edge of d^2 (Codex R19-01).
+SCALE_CASES = (
+    (1.0e-3, 1.0e-3),
+    (0.2, 1.0e-3),
+    (0.0, 1.0e-3),
+    (1.0e-170, 1.0e-200),
+    (1.0e200, 1.0),
+)
+
+
+class ScaleSafePairDistanceTests(unittest.TestCase):
+    """Hard and smooth distances and their derivatives match an 80-digit
+    oracle wherever the true values are representable (Codex R19-01: squaring
+    the differences sent d = 1e-170 to 0, with gradients near 1e30)."""
+
+    def assert_close(self, actual, expected, label):
+        self.assertTrue(np.isfinite(actual), f"{label}: {actual!r} is not finite")
+        self.assertLessEqual(
+            abs(actual - expected),
+            1.0e-12 * abs(expected) + 1.0e-300,
+            f"{label}: {actual!r} != oracle {expected!r}",
+        )
+
+    def test_one_pair_matches_the_oracle(self):
+        for distance, temperature in SCALE_CASES:
+            with self.subTest(distance=distance, temperature=temperature):
+                left = np.array([[0.0, 0.0, distance]])
+                right = np.array([[0.0, 0.0, 0.0]])
+                hard, soft, gradients = signed_constraints.soft_min_pair_distance(
+                    [left, right], [(0, 1)], temperature
+                )
+                oracle_hard, oracle_soft, oracle_derivative = _decimal_soft_min(
+                    left, right, temperature, "left"
+                )
+                self.assertEqual(hard, oracle_hard)
+                self.assertEqual(hard, distance)
+                self.assert_close(soft, oracle_soft, "soft")
+                self.assert_close(gradients[0][0, 2], oracle_derivative, "left gradient")
+                self.assert_close(gradients[1][0, 2], -oracle_derivative, "right gradient")
+                np.testing.assert_array_equal(gradients[0][0, :2], [0.0, 0.0])
+
+    def test_public_rows_match_the_oracle(self):
+        # Codex's public probe: circles offset along z, and a circle over the
+        # torus's outboard midplane samples.
+        for distance, temperature in SCALE_CASES:
+            minimum_distance = 2.0 * distance if distance > 0 else 0.1
+            first, second = _circle(1.0, 0.0, 16), _circle(1.0, distance, 16)
+            pair_owner = _JointDofs([first, second])
+            signed, grad, hard = smooth_min_curve_curve_signed_constraint(
+                [first, second], minimum_distance, temperature, pair_owner
+            )
+            oracle_hard, oracle_soft, oracle_derivative = _decimal_soft_min(
+                first.gamma(), second.gamma(), temperature, "right"
+            )
+            index = list(pair_owner.dof_names).index(f"{second.name}:zc(0)")
+            with self.subTest(row="curve_curve", distance=distance, temperature=temperature):
+                self.assert_close(hard, minimum_distance - oracle_hard, "hard")
+                self.assert_close(signed, minimum_distance - oracle_soft, "signed")
+                self.assert_close(grad[index], -oracle_derivative, "z derivative")
+
+            curve = _circle(1.3, distance, 16)
+            surface = SurfaceRZFourier(
+                nfp=1,
+                stellsym=True,
+                mpol=1,
+                ntor=1,
+                quadpoints_phi=np.linspace(0.0, 1.0, 16, endpoint=False),
+                quadpoints_theta=np.linspace(0.0, 1.0, 4, endpoint=False),
+            )
+            surface.set("rc(0,0)", 1.0)
+            surface.set("rc(1,0)", 0.3)
+            surface.set("zs(1,0)", 0.3)
+            surface.fix_all()
+            surface_owner = _JointDofs([curve])
+            signed, grad, hard = smooth_min_curve_surface_signed_constraint(
+                [curve], surface, minimum_distance, temperature, surface_owner
+            )
+            oracle_hard, oracle_soft, oracle_derivative = _decimal_soft_min(
+                curve.gamma(), surface.gamma().reshape((-1, 3)), temperature, "left"
+            )
+            index = list(surface_owner.dof_names).index(f"{curve.name}:zc(0)")
+            with self.subTest(row="curve_surface", distance=distance, temperature=temperature):
+                self.assert_close(hard, minimum_distance - oracle_hard, "hard")
+                self.assert_close(signed, minimum_distance - oracle_soft, "signed")
+                self.assert_close(grad[index], -oracle_derivative, "z derivative")
 
 
 class SampledGeometryTests(unittest.TestCase):
