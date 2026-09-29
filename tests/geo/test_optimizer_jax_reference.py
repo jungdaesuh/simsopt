@@ -1616,3 +1616,38 @@ def test_scipy_progress_observer_preserves_real_optimizer_trajectory(
     assert float(with_progress.fun) == float(without_progress.fun)
     np.testing.assert_array_equal(with_progress.x, without_progress.x)
     np.testing.assert_array_equal(with_progress.jac, without_progress.jac)
+
+
+@pytest.mark.parametrize("method", ["bfgs", "lbfgs"])
+def test_host_jax_minimize_value_and_grad_reaches_a_quadratic_minimum(
+    method: str,
+) -> None:
+    """The host-JAX Boozer inner route: SciPy control over a compiled value/grad."""
+    curvature = jnp.asarray([1.0, 4.0, 9.0], dtype=jnp.float64)
+    minimizer = jnp.asarray([0.5, -1.0, 2.0], dtype=jnp.float64)
+    value_and_grad = jax.jit(
+        jax.value_and_grad(lambda x: 0.5 * jnp.sum(curvature * (x - minimizer) ** 2))
+    )
+
+    result = _opt.host_jax_minimize_value_and_grad(
+        value_and_grad,
+        np.zeros(3, dtype=np.float64),
+        method=method,
+        tol=1.0e-12,
+        maxiter=200,
+    )
+
+    assert result.success
+    np.testing.assert_allclose(np.asarray(result.x), np.asarray(minimizer), atol=1.0e-8)
+
+
+def test_host_jax_minimize_value_and_grad_rejects_unsupported_contracts() -> None:
+    value_and_grad = jax.jit(jax.value_and_grad(lambda x: jnp.sum(x * x)))
+    x0 = np.ones(2, dtype=np.float64)
+
+    with pytest.raises(
+        ValueError, match="only supports method='bfgs' or method='lbfgs'"
+    ):
+        _opt.host_jax_minimize_value_and_grad(value_and_grad, x0, method="newton")
+    with pytest.raises(ValueError, match="requires value_and_grad=True"):
+        _opt.host_jax_minimize_value_and_grad(value_and_grad, x0, value_and_grad=False)
