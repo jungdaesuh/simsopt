@@ -5,6 +5,14 @@
 ``total`` along unit directions and checks that the error falls at least as
 fast as the step (ratio test). It is a check to run before a solve, not part
 of one.
+
+``epsilons`` are at least two finite positive steps, largest first
+(``ValueError`` otherwise). The result's ``status`` is ``"failed"`` when an
+error above the floor (1e-10 of max(1, |claimed derivative|)) does not fall
+by ``ratio_threshold`` from the step before; else ``"unavailable"`` when the
+evidence is not finite (base total or gradient, or a total at any step) or
+the steps checked no ratio while some error stayed above the floor; else
+``"passed"``. ``passed`` is ``status == "passed"``.
 """
 
 from __future__ import annotations
@@ -53,7 +61,7 @@ def _directional_taylor_result(
     unit_direction: np.ndarray,
     taylor_epsilons: Sequence[float],
     ratio_threshold: float,
-) -> Tuple[dict, bool]:
+) -> Tuple[dict, str]:
     directional_derivative = float(
         np.dot(base_grad.reshape(-1), unit_direction.reshape(-1))
     )
@@ -61,7 +69,7 @@ def _directional_taylor_result(
     errors = []
     central_estimates = []
     ratios = []
-    passed = True
+    ratio_failed = False
     previous_error = None
     for epsilon in taylor_epsilons:
         step = float(epsilon) * unit_direction
@@ -78,13 +86,22 @@ def _directional_taylor_result(
         if previous_error is not None and previous_error > error_floor:
             ratio = float(error / previous_error)
             if error > error_floor and ratio > float(ratio_threshold):
-                passed = False
+                ratio_failed = True
         ratios.append(ratio)
         previous_error = error
 
     finite_ratios = [ratio for ratio in ratios if ratio is not None]
+    if ratio_failed:
+        status = "failed"
+    elif not np.all(np.isfinite([directional_derivative, *central_estimates])) or (
+        not finite_ratios and max(errors) > error_floor
+    ):
+        status = "unavailable"
+    else:
+        status = "passed"
     return (
         {
+            "status": status,
             "direction": unit_direction.tolist(),
             "directional_derivative": directional_derivative,
             "central_estimates": central_estimates,
@@ -92,7 +109,7 @@ def _directional_taylor_result(
             "ratios": finite_ratios,
             "max_ratio": max(finite_ratios) if finite_ratios else None,
         },
-        passed,
+        status,
     )
 
 def run_directional_taylor_test(
@@ -121,17 +138,24 @@ def run_directional_taylor_test(
         if epsilons is None
         else tuple(float(epsilon) for epsilon in epsilons)
     )
-    if len(taylor_epsilons) == 0:
-        raise ValueError("epsilons must be non-empty")
+    steps = np.asarray(taylor_epsilons)
+    if steps.size < 2 or not np.all(np.isfinite(steps) & (steps > 0.0)) or not np.all(
+        np.diff(steps) < 0.0
+    ):
+        raise ValueError(
+            "epsilons must be at least two finite positive steps, largest first "
+            "(a ratio compares consecutive steps)"
+        )
 
     base_eval = evaluate_problem(x, multiplier_array, float(penalty))
     base_total = float(base_eval["total"])
     base_grad = np.asarray(base_eval["grad"], dtype=float)
-    passed = True
+    base_finite = bool(np.isfinite(base_total) and np.all(np.isfinite(base_grad)))
+    statuses = {"passed" if base_finite else "unavailable"}
     direction_results = []
     finite_ratios = []
     for unit_direction in unit_directions:
-        direction_result, direction_passed = _directional_taylor_result(
+        direction_result, direction_status = _directional_taylor_result(
             evaluate_problem,
             x,
             multiplier_array,
@@ -141,12 +165,14 @@ def run_directional_taylor_test(
             taylor_epsilons,
             float(ratio_threshold),
         )
-        passed = passed and direction_passed
+        statuses.add(direction_status)
         finite_ratios.extend(direction_result["ratios"])
         direction_results.append(direction_result)
     first_result = direction_results[0]
+    status = next(name for name in ("failed", "unavailable", "passed") if name in statuses)
     return {
-        "passed": bool(passed),
+        "passed": status == "passed",
+        "status": status,
         "seed": int(seed),
         "penalty": float(penalty),
         "direction": first_result["direction"],
