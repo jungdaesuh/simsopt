@@ -151,11 +151,16 @@ def test_jax_workflow_reaches_examples_from_both_events_and_existing_jobs() -> N
     push_section, pull_request_and_jobs = workflow.split("  pull_request:", maxsplit=1)
     pull_request_section, jobs = pull_request_and_jobs.split("jobs:", maxsplit=1)
     public_integration = jobs.split("  jax-public-integration:", maxsplit=1)[1].split(
-        "  jax-gpu-strict-purity:", maxsplit=1
-    )[0]
-    gpu_strict = jobs.split("  jax-gpu-strict-purity:", maxsplit=1)[1].split(
         "  jax-private-optimizer:", maxsplit=1
     )[0]
+    # The self-hosted strict GPU job is the last job of the dispatch/schedule
+    # workflow; the pull_request-triggered workflow has no self-hosted job.
+    gpu_strict = (
+        (REPO_ROOT / ".github" / "workflows" / "jax_gpu_parity.yml")
+        .read_text(encoding="utf-8")
+        .split("  jax-gpu-strict-purity:", maxsplit=1)[1]
+    )
+    assert "self-hosted" not in workflow
 
     assert "'examples/jax/**'" in push_section
     assert "'examples/jax/**'" in pull_request_section

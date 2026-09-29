@@ -301,10 +301,14 @@ def test_parity_workflows_reach_cpu_and_strict_gpu_without_case_duplication() ->
     smoke_jobs = smoke_workflow.split("jobs:", maxsplit=1)[1]
     public_integration = smoke_jobs.split("  jax-public-integration:", maxsplit=1)[
         1
-    ].split("  jax-gpu-strict-purity:", maxsplit=1)[0]
-    gpu_strict = smoke_jobs.split("  jax-gpu-strict-purity:", maxsplit=1)[1].split(
-        "  jax-private-optimizer:", maxsplit=1
-    )[0]
+    ].split("  jax-private-optimizer:", maxsplit=1)[0]
+    # The self-hosted strict GPU job lives in the dispatch/schedule workflow, the
+    # last job there, so the pull_request-triggered workflow never targets it.
+    scheduled_workflow, gpu_strict = scheduled_workflow.split(
+        "  jax-gpu-strict-purity:", maxsplit=1
+    )
+    assert "self-hosted" not in smoke_workflow
+    assert "pull_request" not in scheduled_workflow.split("jobs:", maxsplit=1)[0]
 
     for job in (public_integration, gpu_strict):
         assert "examples/jax/run_parity.py" in job
