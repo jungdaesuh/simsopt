@@ -265,7 +265,11 @@ def test_only_boundary_owners_call_jax_transfer_and_readiness_primitives() -> No
 # ``host_boundary.allow_host_transfers`` lifts an outer strict guard for its whole
 # block, so every caller is admitted explicitly, keyed by its enclosing scope
 # (``path::qualified.name``) with its number of calls there: moving an admitted
-# call into another function, even in the same file, fails.
+# call into another function, even in the same file, fails. A call moved within
+# the same admitted function (into a lambda or a decorator inside it, say) is
+# still that approved caller, by design. Every other reference -- an aliased
+# import, ``permit = allow_host_transfers``, passing it as a value -- would let a
+# call escape the call census, so any non-call reference outside the owner fails.
 # Admitted 2026-09-28: the official tiny least-squares policy's five host-driven
 # scopes (SciPy's residual callback, the endpoint Jacobian, three residual builders).
 _ALLOWED_ALLOW_HOST_TRANSFERS_CALLS = {
@@ -277,6 +281,7 @@ _ALLOWED_ALLOW_HOST_TRANSFERS_CALLS = {
 }
 _ALLOW_HOST_TRANSFERS_ROOTS = (*SOURCE_ROOTS, REPO_ROOT / "examples/jax")
 _ALLOW_HOST_TRANSFERS_OWNER = "src/simsopt_jax/runtime/host_boundary.py"
+_ALLOW_HOST_TRANSFERS = "allow_host_transfers"
 
 
 class _AllowHostTransfersCensus(ast.NodeVisitor):
@@ -284,6 +289,11 @@ class _AllowHostTransfersCensus(ast.NodeVisitor):
         self.relative_path = relative_path
         self.scope_names: list[str] = []
         self.counts: dict[str, int] = {}
+        self.escapes: list[str] = []
+
+    def _location(self, node: ast.AST) -> str:
+        scope = ".".join(self.scope_names) or "<module>"
+        return f"{self.relative_path}::{scope}::{node.lineno}"
 
     def _visit_scope(self, node: ast.AST, name: str) -> None:
         self.scope_names.append(name)
@@ -301,42 +311,68 @@ class _AllowHostTransfersCensus(ast.NodeVisitor):
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         for alias in node.names:
-            assert not (alias.name == "allow_host_transfers" and alias.asname), (
-                f"{self.relative_path} imports allow_host_transfers under an alias"
-            )
+            if alias.name == _ALLOW_HOST_TRANSFERS and alias.asname is not None:
+                self.escapes.append(f"{self._location(node)} aliased import")
 
     def visit_Call(self, node: ast.Call) -> None:
         if (
-            isinstance(node.func, ast.Name) and node.func.id == "allow_host_transfers"
+            isinstance(node.func, ast.Name) and node.func.id == _ALLOW_HOST_TRANSFERS
         ) or (
             isinstance(node.func, ast.Attribute)
-            and node.func.attr == "allow_host_transfers"
+            and node.func.attr == _ALLOW_HOST_TRANSFERS
         ):
             scope = ".".join(self.scope_names) or "<module>"
             key = f"{self.relative_path}::{scope}"
             self.counts[key] = self.counts.get(key, 0) + 1
+            # The callee itself is the admitted reference; visit everything else.
+            if isinstance(node.func, ast.Attribute):
+                self.visit(node.func.value)
+            for argument in (*node.args, *node.keywords):
+                self.visit(argument)
+            return
+        self.generic_visit(node)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if node.id == _ALLOW_HOST_TRANSFERS:
+            self.escapes.append(f"{self._location(node)} non-call reference")
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        if node.attr == _ALLOW_HOST_TRANSFERS:
+            self.escapes.append(f"{self._location(node)} non-call reference")
         self.generic_visit(node)
 
 
-def _allow_host_transfers_census(source: str, relative_path: str) -> dict[str, int]:
+def _allow_host_transfers_census(
+    source: str, relative_path: str
+) -> tuple[dict[str, int], list[str]]:
     census = _AllowHostTransfersCensus(relative_path)
     census.visit(ast.parse(source))
-    return census.counts
+    return census.counts, census.escapes
 
 
-def _allow_host_transfers_calls() -> dict[str, int]:
+def _allow_host_transfers_calls() -> tuple[dict[str, int], list[str]]:
     counts: dict[str, int] = {}
+    escapes: list[str] = []
     for source_root in _ALLOW_HOST_TRANSFERS_ROOTS:
         for path in source_root.rglob("*.py"):
             relative = path.relative_to(REPO_ROOT).as_posix()
             if relative == _ALLOW_HOST_TRANSFERS_OWNER:
                 continue
-            counts.update(_allow_host_transfers_census(path.read_text(), relative))
-    return counts
+            file_counts, file_escapes = _allow_host_transfers_census(
+                path.read_text(), relative
+            )
+            counts.update(file_counts)
+            escapes.extend(file_escapes)
+    return counts, escapes
 
 
 def test_only_admitted_callers_lift_the_strict_transfer_guard() -> None:
-    assert _allow_host_transfers_calls() == _ALLOWED_ALLOW_HOST_TRANSFERS_CALLS
+    counts, escapes = _allow_host_transfers_calls()
+
+    assert not escapes, "allow_host_transfers escapes the call census:\n  " + (
+        "\n  ".join(escapes)
+    )
+    assert counts == _ALLOWED_ALLOW_HOST_TRANSFERS_CALLS
 
 
 def test_allow_host_transfers_census_refuses_a_call_moved_within_one_file() -> None:
@@ -356,10 +392,47 @@ def test_allow_host_transfers_census_refuses_a_call_moved_within_one_file() -> N
         "    with allow_host_transfers():\n"
         "        pass\n"
     )
-    admitted = _allow_host_transfers_census(admitted_source, "src/example.py")
+    admitted, admitted_escapes = _allow_host_transfers_census(
+        admitted_source, "src/example.py"
+    )
+    swapped, _ = _allow_host_transfers_census(swapped_source, "src/example.py")
 
     assert admitted == {"src/example.py::approved": 1}
-    assert _allow_host_transfers_census(swapped_source, "src/example.py") != admitted
+    assert admitted_escapes == []
+    assert swapped != admitted
+
+
+def test_allow_host_transfers_census_refuses_every_non_call_reference() -> None:
+    escaping_sources = {
+        "aliased import": (
+            "from simsopt_jax.runtime.host_boundary import allow_host_transfers as permit\n\n"
+            "def approved():\n"
+            "    with permit():\n"
+            "        pass\n"
+        ),
+        "name alias": (
+            "from simsopt_jax.runtime.host_boundary import allow_host_transfers\n\n"
+            "def approved():\n"
+            "    permit = allow_host_transfers\n"
+            "    with permit():\n"
+            "        pass\n"
+        ),
+        "attribute alias": (
+            "from simsopt_jax.runtime import host_boundary\n\n"
+            "def approved():\n"
+            "    permit = host_boundary.allow_host_transfers\n"
+            "    with permit():\n"
+            "        pass\n"
+        ),
+        "passed as a value": (
+            "from simsopt_jax.runtime.host_boundary import allow_host_transfers\n\n"
+            "def approved(run):\n"
+            "    run(allow_host_transfers)\n"
+        ),
+    }
+    for form, source in escaping_sources.items():
+        _, escapes = _allow_host_transfers_census(source, "src/example.py")
+        assert escapes, f"{form} escaped the allow_host_transfers census"
 
 
 def test_boundary_census_distinguishes_duplicate_invocations_in_one_function() -> None:
