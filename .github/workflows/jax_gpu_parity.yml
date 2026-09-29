@@ -21,8 +21,10 @@ jobs:
     name: GPU parity (CUDA, JAX)
     # Self-hosted CUDA runner: upstream has none, so the job runs only where the
     # repository opts in with the variable SIMSOPT_GPU_RUNNER=true (an unset
-    # variable reads as an empty string, so the job is skipped).
-    if: vars.SIMSOPT_GPU_RUNNER == 'true'
+    # variable reads as an empty string, so the job is skipped). Pull requests run
+    # here only from branches of this repository: a fork's code never reaches the
+    # self-hosted runner.
+    if: vars.SIMSOPT_GPU_RUNNER == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, gpu]
     timeout-minutes: 45
 
@@ -158,8 +160,10 @@ jobs:
     name: Native/JAX example parity (CUDA strict)
     # Self-hosted CUDA runner: upstream has none, so the job runs only where the
     # repository opts in with the variable SIMSOPT_GPU_RUNNER=true (an unset
-    # variable reads as an empty string, so the job is skipped).
-    if: vars.SIMSOPT_GPU_RUNNER == 'true'
+    # variable reads as an empty string, so the job is skipped). Pull requests run
+    # here only from branches of this repository: a fork's code never reaches the
+    # self-hosted runner.
+    if: vars.SIMSOPT_GPU_RUNNER == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, gpu]
     timeout-minutes: 720
     env:
@@ -225,8 +229,10 @@ jobs:
     name: GPU full suite (CUDA, transfer_guard=log)
     # Self-hosted CUDA runner: upstream has none, so the job runs only where the
     # repository opts in with the variable SIMSOPT_GPU_RUNNER=true (an unset
-    # variable reads as an empty string, so the job is skipped).
-    if: vars.SIMSOPT_GPU_RUNNER == 'true'
+    # variable reads as an empty string, so the job is skipped). Pull requests run
+    # here only from branches of this repository: a fork's code never reaches the
+    # self-hosted runner.
+    if: vars.SIMSOPT_GPU_RUNNER == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, gpu]
     timeout-minutes: 240
 
