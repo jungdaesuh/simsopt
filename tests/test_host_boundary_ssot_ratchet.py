@@ -1,34 +1,50 @@
 """Full-census ratchet for the JAX host/device boundary owners.
 
-The census is static analysis over the source text. It resolves the owner
-module and ``allow_host_transfers`` through static imports, aliases, attribute
-chains, ``getattr``/``hasattr`` with a constant name, ``sys.modules`` keys and
-``importlib.import_module``/``__import__`` arguments. It cannot see a lookup
-whose name is computed at run time on an object it does not recognise as the
-owner module; those forms are outside what an AST can decide, and the
-repository's rule against dynamic imports covers them.
+The ``allow_host_transfers`` census is static analysis over the source text of
+``src/simsopt``, ``src/simsopt_contracts``, ``src/simsopt_jax``,
+``src/simsopt_jax_adapters``, ``examples`` and ``benchmarks`` (when present),
+the owner excluded. It admits only ``with allow_host_transfers():`` items,
+each pinned by scope and fingerprint, whose callee resolves to the owner in
+its lexical scope chain: the function, enclosing functions, then the module
+(a class body only when the site sits directly in it), honouring ``global``
+and ``nonlocal``. The innermost scope binding the name must bind it only by
+an import of the owner; a parameter, assignment, loop, ``with``/``except``/
+``match`` target, ``:=`` target, other import or nested ``def``/``class`` of
+that name there is an escape. It also resolves the owner module through
+static imports, aliases and attribute chains, and checks ``getattr``/
+``hasattr`` constant names, ``sys.modules`` keys and ``import_module``/
+``__import__`` arguments; non-constant dynamic imports must be pinned in
+``_ALLOWED_DYNAMIC_LOOKUP_SITES``.
 
-Known limits, both fail-closed (the census flags benign code, and the author
-renames it or updates the allowlist on purpose):
+Known limits that can let a change through unseen (false negatives):
 
-* Names, not bindings, identify the permit. Any function, method or variable
-  named ``allow_host_transfers`` outside the owner is flagged: calling it
-  outside a ``with`` item, or referencing it, is an escape, and a ``with`` item
-  calling it is an admitted site that fails unless it resolves to the owner.
-* The owner-module reference check collects bindings per file, not per
-  lexical scope: a name imported as the owner module anywhere in a file is
-  treated as the owner in every scope of that file, so a local variable that
-  shadows it and is passed as a value is flagged. And ``getattr``/``hasattr``
-  with the constant name ``"host_boundary"`` or ``"allow_host_transfers"`` is
-  flagged whatever the target object is.
+* A lookup whose name is computed at run time on an object the census does
+  not recognise as the owner module (reached through a call's return value,
+  say), code run from strings by ``exec``/``eval``/``compile``, and writes
+  through ``globals()``/``locals()``/``vars()`` of a non-owner namespace
+  (``globals()["allow_host_transfers"] = ...``). The repository's rule against
+  dynamic imports and review cover these.
+* A fingerprint pins the text of an admitted region, not the behaviour of the
+  functions it calls.
+* Only the roots above are scanned; ``tests/``, ``scripts/`` and ``docs/`` are
+  not.
+* Decorators, default values and annotations of a nested ``def`` are not
+  searched for ``:=`` bindings of the permit's name.
 
-Admitted sites are not subject to that file-wide approximation: the callee of
-an admitted ``with`` item is resolved in its lexical scope chain (function,
-enclosing functions, then the module; a class body only when the site sits
-directly in it), and the innermost scope that binds the name must bind it
-only by an import of the owner. A parameter, assignment, loop or ``with ...
-as`` target, ``except ... as`` or ``match`` capture, other import, or nested
-``def``/``class`` of that name there is an escape.
+Known limits that flag benign code (false positives, fail-closed; the author
+renames the code or updates an allowlist on purpose):
+
+* Names, not bindings, identify the permit. Any function, method, attribute
+  or variable named ``allow_host_transfers`` outside the owner is flagged.
+* The owner-module reference check (as opposed to admitted-site resolution)
+  collects bindings per file, so a local variable that shadows an owner import
+  elsewhere in the file and is used as a value is flagged.
+* ``getattr``/``hasattr`` with the constant name ``"host_boundary"`` or
+  ``"allow_host_transfers"`` is flagged whatever the target object is.
+* Any wildcard import in a file with admitted sites is flagged, whether or not
+  it can rebind the permit.
+* A ``nonlocal`` rebinding in a nested function is attributed to every
+  enclosing function, not only to the one it binds.
 """
 
 from __future__ import annotations
@@ -36,6 +52,7 @@ from __future__ import annotations
 import ast
 import hashlib
 from pathlib import Path
+from typing import NamedTuple
 
 import jax.numpy as jnp
 import numpy as np
@@ -318,12 +335,10 @@ def test_only_boundary_owners_call_jax_transfer_and_readiness_primitives() -> No
 # that is not a constant or that names the owner module or its package. Strings
 # elsewhere (docstrings, messages) are not lookups and are not escapes.
 #
-# Limit: this is static analysis. A lookup whose name is computed and whose target
-# object is not recognisably the owner module -- ``getattr(obj, "allow_" +
-# suffix)`` on an object reached through an unrecognised alias -- is not
-# visible to it; the repository rule against dynamic imports and review cover
-# that residue. Non-constant dynamic imports are escapes unless their scope is
-# admitted in ``_ALLOWED_DYNAMIC_LOOKUP_SITES``.
+# Also escapes: an admitted site whose callee does not resolve to the owner in
+# its lexical scope, and a wildcard import in a file with admitted sites.
+# Non-constant dynamic imports are escapes unless pinned in
+# ``_ALLOWED_DYNAMIC_LOOKUP_SITES``. The module docstring lists the known limits.
 #
 # Regenerate a fingerprint with ``_allow_host_transfers_census(source, path)`` after
 # reading the edited region.
@@ -552,14 +567,25 @@ def _import_bindings(
     )
 
 
-def _scope_bindings(scope: ast.AST, relative_path: str) -> dict[str, frozenset[str]]:
-    """Map each name ``scope`` binds itself to the kinds of its bindings.
+class _ScopeBindings(NamedTuple):
+    """What one scope binds, and the names it declares ``global``/``nonlocal``."""
+
+    bindings: dict[str, frozenset[str]]
+    global_names: frozenset[str]
+    nonlocal_names: frozenset[str]
+
+
+def _direct_scope_bindings(scope: ast.AST, relative_path: str) -> _ScopeBindings:
+    """Map each name ``scope``'s own code binds to the kinds of its bindings.
 
     Nested functions, classes, lambdas and comprehensions are their own scopes:
     only a nested ``def``/``class`` name and a comprehension's ``:=`` targets
-    bind here.
+    bind here. Names declared ``global``/``nonlocal`` are included; the caller
+    moves them to the scope they rebind.
     """
     bindings: dict[str, set[str]] = {}
+    global_names: set[str] = set()
+    nonlocal_names: set[str] = set()
 
     def bind(name: str, kind: str = _OTHER_BINDING) -> None:
         bindings.setdefault(name, set()).add(kind)
@@ -585,6 +611,10 @@ def _scope_bindings(scope: ast.AST, relative_path: str) -> dict[str, frozenset[s
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             for name, kind in _import_bindings(node, relative_path):
                 bind(name, kind)
+        elif isinstance(node, ast.Global):
+            global_names.update(node.names)
+        elif isinstance(node, ast.Nonlocal):
+            nonlocal_names.update(node.names)
         for child in ast.iter_child_nodes(node):
             collect(child)
 
@@ -599,7 +629,46 @@ def _scope_bindings(scope: ast.AST, relative_path: str) -> dict[str, frozenset[s
             bind(argument.arg)
     for statement in scope.body:
         collect(statement)
-    return {name: frozenset(kinds) for name, kinds in bindings.items()}
+    return _ScopeBindings(
+        {name: frozenset(kinds) for name, kinds in bindings.items()},
+        frozenset(global_names),
+        frozenset(nonlocal_names),
+    )
+
+
+def _scope_bindings(scope: ast.AST, relative_path: str) -> _ScopeBindings:
+    """Bindings that live in ``scope``, with ``global``/``nonlocal`` honoured.
+
+    A name ``scope`` declares ``global`` or ``nonlocal`` is not bound here.
+    Conversely, a nested function that declares a name ``global`` rebinds it in
+    the module, and one that declares it ``nonlocal`` rebinds it in an
+    enclosing function; those bindings are added to the module and to every
+    enclosing function respectively, which can only make resolution stricter.
+    """
+    direct = _direct_scope_bindings(scope, relative_path)
+    declared = direct.global_names | direct.nonlocal_names
+    bindings = {
+        name: set(kinds)
+        for name, kinds in direct.bindings.items()
+        if name not in declared
+    }
+    if isinstance(scope, (ast.Module, *_FUNCTION_SCOPES)):
+        for inner in ast.walk(scope):
+            if inner is scope or not isinstance(inner, _FUNCTION_SCOPES):
+                continue
+            inner_direct = _direct_scope_bindings(inner, relative_path)
+            rebound = (
+                inner_direct.global_names
+                if isinstance(scope, ast.Module)
+                else inner_direct.nonlocal_names
+            )
+            for name in rebound & inner_direct.bindings.keys():
+                bindings.setdefault(name, set()).update(inner_direct.bindings[name])
+    return _ScopeBindings(
+        {name: frozenset(kinds) for name, kinds in bindings.items()},
+        direct.global_names,
+        direct.nonlocal_names,
+    )
 
 
 def _literal_attribute_bases(tree: ast.Module) -> frozenset[int]:
@@ -641,7 +710,7 @@ class _AllowHostTransfersCensus(ast.NodeVisitor):
         self.owner_names, self.package_names = owner_bindings
         self.tree = tree
         self.scope_nodes: list[ast.AST] = []
-        self.scope_bindings: dict[int, dict[str, frozenset[str]]] = {}
+        self.scope_bindings: dict[int, _ScopeBindings] = {}
         self.literal_attribute_bases = literal_attribute_bases
         self.scope_names: list[str] = []
         self.sites: dict[str, tuple[str, ...]] = {}
@@ -677,21 +746,27 @@ class _AllowHostTransfersCensus(ast.NodeVisitor):
             )
         )
 
-    def _bindings(self, scope: ast.AST) -> dict[str, frozenset[str]]:
+    def _bindings(self, scope: ast.AST) -> _ScopeBindings:
         if id(scope) not in self.scope_bindings:
             self.scope_bindings[id(scope)] = _scope_bindings(scope, self.relative_path)
         return self.scope_bindings[id(scope)]
 
     def _lexical_binding(self, name: str) -> frozenset[str]:
         """Kinds of the binding ``name`` resolves to from the current scope."""
+        module_kinds = self._bindings(self.tree).bindings.get(name, frozenset())
         for depth, scope in enumerate(reversed(self.scope_nodes)):
             # A class body is visible only to code directly inside it.
             if depth > 0 and isinstance(scope, ast.ClassDef):
                 continue
-            kinds = self._bindings(scope).get(name)
+            scope_bindings = self._bindings(scope)
+            if name in scope_bindings.global_names:
+                return module_kinds
+            if name in scope_bindings.nonlocal_names:
+                continue
+            kinds = scope_bindings.bindings.get(name)
             if kinds:
                 return kinds
-        return self._bindings(self.tree).get(name, frozenset())
+        return module_kinds
 
     def _resolves_to_owner(self, callee: ast.expr) -> bool:
         if isinstance(callee, ast.Name):
@@ -844,6 +919,14 @@ def _allow_host_transfers_census(
         tree,
     )
     census.visit(tree)
+    if census.sites:
+        census.escapes.extend(
+            f"{relative_path}::<module>::{node.lineno} wildcard import in a file "
+            "with admitted sites"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and any(alias.name == "*" for alias in node.names)
+        )
     admitted = {
         key: fingerprints
         for key, fingerprints in (admitted_dynamic_lookups or {}).items()
@@ -972,6 +1055,37 @@ def test_allow_host_transfers_census_admits_only_with_items() -> None:
         "        with allow_host_transfers():\n"
         "            transfer()\n"
     )
+    declared_sources = {
+        "global": (
+            "from simsopt_jax.runtime import host_boundary\n\n"
+            "def outer():\n"
+            "    host_boundary = None\n"
+            "    def approved():\n"
+            "        global host_boundary\n"
+            "        with host_boundary.allow_host_transfers():\n"
+            "            transfer()\n"
+            "    return approved, host_boundary\n"
+        ),
+        "nonlocal": (
+            "def outer():\n"
+            "    from simsopt_jax.runtime import host_boundary\n"
+            "    def approved():\n"
+            "        nonlocal host_boundary\n"
+            "        with host_boundary.allow_host_transfers():\n"
+            "            transfer()\n"
+            "    return approved\n"
+        ),
+    }
+    for form, source in declared_sources.items():
+        declared_sites, declared_escapes = _allow_host_transfers_census(
+            source, "src/example.py"
+        )
+        assert list(declared_sites) == ["src/example.py::outer.approved"], form
+        assert [
+            escape
+            for escape in declared_escapes
+            if "admitted site does not resolve" in escape
+        ] == [], form
     class_sites, class_escapes = _allow_host_transfers_census(
         class_source, "src/example.py"
     )
@@ -1228,6 +1342,54 @@ def test_allow_host_transfers_census_refuses_every_other_reference() -> None:
             "def approved(host_boundary):\n"
             "    with host_boundary.allow_host_transfers():\n"
             "        transfer()\n"
+        ),
+        "wildcard import beside an admitted site": (
+            "from simsopt_jax.runtime.host_boundary import allow_host_transfers\n"
+            "from other_package import *\n\n"
+            "def approved():\n"
+            "    with allow_host_transfers():\n"
+            "        transfer()\n"
+        ),
+        "global rebinds the owner module name at module scope": (
+            "from other_package import host_boundary\n\n"
+            "def outer():\n"
+            "    from simsopt_jax.runtime import host_boundary\n"
+            "    def approved():\n"
+            "        global host_boundary\n"
+            "        with host_boundary.allow_host_transfers():\n"
+            "            transfer()\n"
+            "    return approved, host_boundary\n"
+        ),
+        "global in a nested function rebinds the module permit": (
+            "from contextlib import nullcontext\n"
+            "from simsopt_jax.runtime.host_boundary import allow_host_transfers\n\n"
+            "def swap():\n"
+            "    global allow_host_transfers\n"
+            "    allow_host_transfers = nullcontext\n\n"
+            "def approved():\n"
+            "    with allow_host_transfers():\n"
+            "        transfer()\n"
+        ),
+        "nonlocal rebinds the enclosing owner module name": (
+            "def outer(other):\n"
+            "    from simsopt_jax.runtime import host_boundary\n"
+            "    def swap():\n"
+            "        nonlocal host_boundary\n"
+            "        host_boundary = other\n"
+            "    def approved():\n"
+            "        with host_boundary.allow_host_transfers():\n"
+            "            transfer()\n"
+            "    return swap, approved\n"
+        ),
+        "nonlocal resolves to the enclosing rebinding": (
+            "import other_package as host_boundary\n\n"
+            "def outer():\n"
+            "    host_boundary = make()\n"
+            "    def approved():\n"
+            "        nonlocal host_boundary\n"
+            "        with host_boundary.allow_host_transfers():\n"
+            "            transfer()\n"
+            "    return approved\n"
         ),
         "admitted site with no import": (
             "def approved():\n    with allow_host_transfers():\n        transfer()\n"

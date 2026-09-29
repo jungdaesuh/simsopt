@@ -9,10 +9,15 @@ ROOT = Path(__file__).resolve().parents[1]
 SMOKE = ROOT / ".github" / "workflows" / "jax_smoke.yml"
 AUTHORITY = ROOT / ".github" / "workflows" / "jax_gpu_parity.yml"
 # Any invocation of the parity runner: a script path (relative, ``./`` or
-# absolute, under any interpreter) or the ``-m`` module form.
+# absolute, under any interpreter) or the ``-m`` module form, matched after
+# ``_shell_normalised`` removes quotes and backslash-newline continuations.
+# Text matching also counts a mention that is not executed (a comment, say);
+# that can only add a job to the asserted set, so it fails closed.
 _PARITY_INVOCATION = re.compile(
     r"(?:\S*/)?examples/jax/run_parity\.py\b|-m\s+examples\.jax\.run_parity\b"
 )
+_LINE_CONTINUATION = re.compile(r"\\\n\s*")
+_SHELL_QUOTES = re.compile(r"[\"']")
 _JOB_HEADER = re.compile(r"^  ([A-Za-z0-9_-]+):\n", re.MULTILINE)
 
 
@@ -36,8 +41,13 @@ def _jobs_from_text(workflow: str) -> dict[str, str]:
     }
 
 
+def _shell_normalised(text: str) -> str:
+    """Join backslash-continued lines and drop shell quotes."""
+    return _SHELL_QUOTES.sub("", _LINE_CONTINUATION.sub(" ", text))
+
+
 def _parity_commands(job: str) -> list[str]:
-    return _PARITY_INVOCATION.split(job)[1:]
+    return _PARITY_INVOCATION.split(_shell_normalised(job))[1:]
 
 
 def _parity_jobs(jobs: dict[str, str]) -> set[str]:
@@ -51,23 +61,37 @@ def test_parity_invocations_are_recognised_in_every_form() -> None:
         "python ./examples/jax/run_parity.py --scale bounded",
         "python /work/simsopt/examples/jax/run_parity.py --scale bounded",
         "python -m examples.jax.run_parity --scale bounded",
+        'python -m "examples.jax.run_parity" --scale bounded',
+        "python -m 'examples.jax.run_parity' --scale bounded",
+        "python -m \\\n              examples.jax.run_parity \\\n              --scale bounded",
+        'python "examples/jax/run_parity.py" --scale bounded',
     )
     for form in forms:
         assert len(_parity_commands(form)) == 1, form
     assert _parity_commands("python examples/jax/run_examples.py") == []
 
-    extra_job = (
-        "  extra-parity:\n"
-        "    runs-on: [self-hosted, gpu]\n"
-        "    steps:\n"
-        "      - run: python3 examples/jax/run_parity.py --scale bounded\n"
-    )
-    mutated = AUTHORITY.read_text(encoding="utf-8").rstrip("\n") + "\n" + extra_job
-    assert _parity_jobs(_jobs_from_text(mutated)) == {
-        "native-jax-example-parity",
-        "jax-gpu-strict-purity",
-        "extra-parity",
+    third_job_runs = {
+        "python3 script": "      - run: python3 examples/jax/run_parity.py --scale bounded\n",
+        "quoted module": (
+            '      - run: python -m "examples.jax.run_parity" --scale bounded\n'
+        ),
+        "continued module": (
+            "      - run: |\n"
+            "          python -m \\\n"
+            "            examples.jax.run_parity \\\n"
+            "            --scale bounded\n"
+        ),
     }
+    for form, run in third_job_runs.items():
+        extra_job = (
+            f"  extra-parity:\n    runs-on: [self-hosted, gpu]\n    steps:\n{run}"
+        )
+        mutated = AUTHORITY.read_text(encoding="utf-8").rstrip("\n") + "\n" + extra_job
+        assert _parity_jobs(_jobs_from_text(mutated)) == {
+            "native-jax-example-parity",
+            "jax-gpu-strict-purity",
+            "extra-parity",
+        }, form
 
 
 def test_pr_example_commands_select_bounded_scale_explicitly() -> None:
