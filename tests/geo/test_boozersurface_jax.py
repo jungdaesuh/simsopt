@@ -8861,6 +8861,7 @@ class TestBoozerSurfaceJAXExactPath:
             ),
         ],
     )
+    @pytest.mark.parametrize("explicit_tolerances", [True, False])
     def test_run_code_traceable_ls_routes_lm_ondevice(
         self,
         monkeypatch,
@@ -8869,11 +8870,13 @@ class TestBoozerSurfaceJAXExactPath:
         solver_attr,
         explicit_materialize,
         expected_materialize,
+        explicit_tolerances,
     ):
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
         booz.options["least_squares_algorithm"] = least_squares_algorithm
-        _set_explicit_lm_options(booz)
+        if explicit_tolerances:
+            _set_explicit_lm_options(booz)
         if explicit_materialize is not None:
             booz.options["materialize_dense_linearization"] = explicit_materialize
         coil_set_spec = booz.coil_set_spec
@@ -8946,7 +8949,13 @@ class TestBoozerSurfaceJAXExactPath:
         assert float(
             np.asarray(result["ls_residual_jacobian_condition_estimate"])
         ) == pytest.approx(1.0)
-        _assert_explicit_lm_options_forwarded(captured, booz)
+        if explicit_tolerances:
+            _assert_explicit_lm_options_forwarded(captured, booz)
+        else:
+            # Like upstream's least_squares(ftol=tol, xtol=tol, gtol=tol), the
+            # stage's single tolerance gates all three MINPACK tests.
+            for key in ("ftol", "xtol", "gtol"):
+                assert captured[key] == booz.options["bfgs_tol"]
         assert captured["materialize_dense_linearization"] is expected_materialize
         assert (
             captured["max_dense_linearization_bytes"]

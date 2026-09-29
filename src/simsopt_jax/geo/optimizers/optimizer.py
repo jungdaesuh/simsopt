@@ -410,8 +410,6 @@ _SUPPORTED_METHODS = {
 _TARGET_LEAST_SQUARES_METHODS = frozenset({"lm-minpack-ondevice"})
 _SUPPORTED_LEAST_SQUARES_METHODS = _TARGET_LEAST_SQUARES_METHODS
 _RESIDUAL_LEAST_SQUARES_ALGORITHMS = frozenset({"lm-minpack"})
-_DEFAULT_LM_FTOL = 1e-8
-_DEFAULT_LM_XTOL = 1e-8
 _REFERENCE_METHODS = frozenset({"bfgs", "lbfgs"})
 _REFERENCE_TRACE_METHODS = frozenset({"lbfgs-trace"})
 _REFERENCE_JAX_METHODS = frozenset({"adam"})
@@ -6981,6 +6979,19 @@ def _least_squares_state_to_optimize_result(result):
     )
 
 
+def _least_squares_tolerances(tol, options):
+    """Return MINPACK's ``(ftol, xtol, gtol)``: each explicit option, else ``tol``.
+
+    Upstream's Boozer least squares passes ``ftol = xtol = gtol = tol`` to
+    ``least_squares(method="lm")``, so a caller's single ``tol`` gates all
+    three tests; an option set to ``None`` counts as omitted.
+    """
+    return tuple(
+        tol if options.get(name) is None else options[name]
+        for name in ("ftol", "xtol", "gtol")
+    )
+
+
 def target_least_squares(
     residual_fn,
     x0,
@@ -6993,7 +7004,11 @@ def target_least_squares(
     progress_callback=None,
     args=(),
 ):
-    """Explicit JAX target least-squares entrypoint."""
+    """Explicit JAX target least-squares entrypoint.
+
+    ``tol`` is the default for MINPACK's ``ftol``, ``xtol`` and ``gtol`` (see
+    ``_least_squares_tolerances``); ``options`` may set any of them.
+    """
     if method not in _TARGET_LEAST_SQUARES_METHODS:
         raise ValueError(
             "target_least_squares() only supports method='lm-minpack-ondevice'. "
@@ -7007,17 +7022,13 @@ def target_least_squares(
         options["progress_callback"] = progress_callback
 
     require_target_backend_x64("ondevice")
-    ftol = options.get("ftol", _DEFAULT_LM_FTOL)
-    xtol = options.get("xtol", _DEFAULT_LM_XTOL)
+    ftol, xtol, gtol = _least_squares_tolerances(tol, options)
     materialize_dense_linearization = bool(
         options.get("materialize_dense_linearization", True)
     )
     max_dense_linearization_bytes = options.get("max_dense_linearization_bytes")
     callback = options.get("callback")
     progress_callback = options.get("progress_callback")
-    gtol = options.get("gtol")
-    if gtol is None:
-        gtol = 1e-8
     result = levenberg_marquardt_minpack_traceable(
         residual_fn,
         x0,

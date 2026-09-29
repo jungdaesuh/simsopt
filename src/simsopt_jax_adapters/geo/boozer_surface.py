@@ -163,6 +163,7 @@ from simsopt_jax.geo.optimizers._shared import (
 from simsopt_jax.geo.optimizers.optimizer import (
     _TARGET_LEAST_SQUARES_METHODS,
     _dense_lm_state_from_residual_jacobian,
+    _least_squares_tolerances,
     _mark_cacheable_jit_linear_operator,
     _mark_traceable_runner_cacheable,
     _resolve_traceable_newton_linear_solver,
@@ -6937,15 +6938,16 @@ class BoozerSurfaceJAX(Optimizable):
                 weight_inv_modB,
             )
             least_squares_options = self._collect_least_squares_options()
-            gtol = least_squares_options.get("gtol")
-            if gtol is None:
-                gtol = 1e-8
+            ftol, xtol, gtol = _least_squares_tolerances(
+                self.options["bfgs_tol"],
+                least_squares_options,
+            )
             state = levenberg_marquardt_minpack_traceable(
                 residual_fn,
                 x0,
                 maxiter=self.options["bfgs_maxiter"],
-                ftol=least_squares_options.get("ftol", 1e-8),
-                xtol=least_squares_options.get("xtol", 1e-8),
+                ftol=ftol,
+                xtol=xtol,
                 gtol=gtol,
                 materialize_dense_linearization=bool(
                     least_squares_options["materialize_dense_linearization"]

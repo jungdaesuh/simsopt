@@ -327,6 +327,63 @@ def test_lmpar_returns_the_gauss_newton_step_inside_a_long_bound():
     np.testing.assert_allclose(np.asarray(x), gauss_newton, rtol=1e-10, atol=1e-12)
 
 
+def _spy_minpack_tolerances(monkeypatch):
+    """Record the MINPACK tolerances ``target_least_squares`` hands the lane."""
+    captured = {}
+    solve = _opt.levenberg_marquardt_minpack_traceable
+
+    def spy(residual_fn, x0, **kwargs):
+        captured.update({key: kwargs[key] for key in ("ftol", "xtol", "gtol")})
+        return solve(residual_fn, x0, **kwargs)
+
+    monkeypatch.setattr(_opt, "levenberg_marquardt_minpack_traceable", spy)
+    return captured
+
+
+def test_a_single_tol_gates_ftol_xtol_and_gtol_like_upstream(monkeypatch):
+    """Upstream's Boozer LS calls least_squares(ftol=tol, xtol=tol, gtol=tol)."""
+    captured = _spy_minpack_tolerances(monkeypatch)
+    residual, x0, _ = _linear_fixture()
+
+    _opt.target_least_squares(
+        residual, x0, method="lm-minpack-ondevice", tol=1e-11, maxiter=100
+    )
+
+    assert captured == {"ftol": 1e-11, "xtol": 1e-11, "gtol": 1e-11}
+
+
+def test_explicit_minpack_tolerances_override_the_single_tol(monkeypatch):
+    captured = _spy_minpack_tolerances(monkeypatch)
+    residual, x0, _ = _linear_fixture()
+
+    _opt.target_least_squares(
+        residual,
+        x0,
+        method="lm-minpack-ondevice",
+        tol=1e-9,
+        maxiter=100,
+        options={"ftol": 1e-6, "gtol": None},
+    )
+
+    assert captured == {"ftol": 1e-6, "xtol": 1e-9, "gtol": 1e-9}
+
+
+def test_default_tol_does_not_accept_a_start_with_a_small_gradient():
+    """r(x) = x - 5e-9 at x = 0: ||J^T r|| is 5e-9, the residual is not zero."""
+    result = _opt.target_least_squares(
+        lambda x: x - 5e-9,
+        jnp.zeros(1),
+        method="lm-minpack-ondevice",
+        tol=1e-10,
+        maxiter=100,
+    )
+
+    assert result.success, result.message
+    assert result.nfev > 1
+    np.testing.assert_allclose(np.asarray(result.x), [5e-9], rtol=1e-12, atol=0)
+    assert float(result.fun) == 0.0
+
+
 # --------------------------------------------------------------------------
 # 4. Dense materialization is capped up front
 # --------------------------------------------------------------------------
@@ -638,8 +695,9 @@ def test_one_runner_keeps_two_decision_structures_apart():
         method="lm-minpack-ondevice",
         maxiter=100,
     )
+    # ``target_least_squares``'s default tol=1e-10 sets all three tolerances.
     runner = _opt._make_traceable_levenberg_marquardt_minpack_runner(
-        residual, 100, 1e-8, 1e-8, 1e-8, False, False
+        residual, 100, 1e-10, 1e-10, 1e-10, False, False
     )
 
     assert runner._cache_size() == 2, (
