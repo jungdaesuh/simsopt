@@ -2025,6 +2025,26 @@ def test_canonical_audit_rejects_lane_evidence_that_disagrees_with_quality_summa
 
 
 @pytest.mark.parametrize(
+    "driver",
+    ("jax_optax_lbfgs", "optimistix_bfgs", "host_callback_bfgs", "scipy_lbfgsb"),
+)
+def test_a_jax_lane_without_a_policy_rejects_every_forbidden_driver_family(
+    driver: str,
+) -> None:
+    # Optax is gone from the code, but a receipt that names an Optax driver
+    # (a recorded one, or a forged one) must still fail arbitration.
+    observations = {
+        lane: dataclasses.replace(observation, driver=driver)
+        if lane.startswith("jax-")
+        else observation
+        for lane, observation in _observations().items()
+    }
+
+    with pytest.raises(ArbitrationError, match="forbidden parity driver"):
+        arbitrate(_routes(), observations)
+
+
+@pytest.mark.parametrize(
     "mutation",
     (
         "none",
@@ -2034,6 +2054,7 @@ def test_canonical_audit_rejects_lane_evidence_that_disagrees_with_quality_summa
         "borrowed_policy",
         "forged_policy",
         "wrong_driver",
+        "optax",
         "optimistix",
         "host_callback",
     ),
@@ -2071,7 +2092,7 @@ def test_approved_scipy_policy_is_bound_to_real_case_example_and_driver(
         driver = "scipy_arbitrary"
     elif mutation == "wrong_driver":
         driver = "simsopt_lm_qr"
-    elif mutation in {"optimistix", "host_callback"}:
+    elif mutation in {"optax", "optimistix", "host_callback"}:
         driver = mutation + "_scipy"
     observations = {
         lane: dataclasses.replace(observation, driver=driver)
