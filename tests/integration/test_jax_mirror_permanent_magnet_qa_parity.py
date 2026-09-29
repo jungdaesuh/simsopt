@@ -74,15 +74,35 @@ DISABLED_BOUNDED_FINAL_VALUES: Final[tuple[str, ...]] = (
 #:
 #: Only ``final:objective_sum_squares`` was ever measured (one seeded draw of an
 #: ``ATb`` perturbation); the other three were switched off by extrapolation
-#: from it.  Measured here, at one thread, over the campaign's pre-registered
-#: eight one-ulp draws (worst draw against rtol 5e-4): objective_sum_squares
-#: 6.638e-04 (1.33 x), residual_norm 3.319e-04 (0.66 x), moment_l2_norm
-#: 4.476e-04 (0.90 x), proxy_moment_l2_norm 2.598e-04 (0.52 x).  This table is
-#: the record of that measurement, and a change to it in either direction is a
-#: route adjudication (the manifest's), not a test update.
+#: from it.
+#:
+#: Current record, measured 2026-09-29 on the rebased native build
+#: (``simsoptpp`` sha256 ``f74d83d35def68d0...5b``), at one thread, over the
+#: campaign's pre-registered eight one-ulp draws, worst draw against rtol 5e-4:
+#: objective_sum_squares 7.928e-11, residual_norm 3.964e-11, moment_l2_norm
+#: 5.818e-12, proxy_moment_l2_norm 1.250e-11 -- every observable DETERMINED.
+#: Two runs were bitwise identical, and upstream 9e027eac3's own ``.so``
+#: (sha256 ``9b72c853ea16e79b...bc40``) under this Python gives the same nine
+#: solves bit for bit.  ``permanent_magnet_optimization.cpp`` changed only in
+#: include paths; the shift comes from the toolchain.
+#:
+#: History: the pre-rebase build's measurement, same protocol (worst draw):
+#: objective_sum_squares 6.638e-04 (1.33 x rtol, NOT determined), residual_norm
+#: 3.319e-04 (0.66 x), moment_l2_norm 4.476e-04 (0.90 x), proxy_moment_l2_norm
+#: 2.598e-04 (0.52 x).
+#:
+#: This table is the record of the measurement on the build under test, and a
+#: change to it in either direction is a route adjudication (the manifest's),
+#: not a test update.  The manifest's bounded ``objective_sum_squares`` routes
+#: stay inapplicable: the pre-registered rule (parity redesign of 2026-09-29,
+#: item C5) re-enables them
+#: only when all eight draws fall inside rtol on this build (they do), on the
+#: RC6-dropped build (pending: not yet measured), and native-versus-JAX at
+#: bounded passes the bucket (it does: 1.163e-10 relative on this build,
+#: asserted by ``test_the_extrapolated_bounded_routes_compare_inside_their_bucket``).
 DETERMINED_TO_ITS_BUCKET: Final[Mapping[str, bool]] = MappingProxyType(
     {
-        "final:objective_sum_squares": False,
+        "final:objective_sum_squares": True,
         "final:residual_norm": True,
         "final:moment_l2_norm": True,
         "final:proxy_moment_l2_norm": True,
@@ -95,6 +115,36 @@ CONDITIONING_SEED_BASE: Final[int] = 20260920
 #: The solve input the probe perturbs: ``ATb`` is what the MwPGP continuation
 #: consumes, and the case freezes it in the bundle.
 CONDITIONING_PERTURBED_ARRAY: Final[str] = "atb"
+
+#: Unit round-off of float64.
+UNIT_ROUNDOFF: Final[float] = 2.0**-53
+
+
+def _gamma(k: int) -> float:
+    """Higham's gamma_k = k u / (1 - k u): the bound of k compounded roundings."""
+    return k * UNIT_ROUNDOFF / (1.0 - k * UNIT_ROUNDOFF)
+
+
+def _root_relation_roundoff(square: float, root: float, length: int) -> float:
+    """Worst-case round-off in |root drift - square drift / 2|, beyond ``square**2``.
+
+    ``square`` and ``root`` are the published relative drifts of
+    ``vdot(r, r)`` and ``norm(r)`` for a residual of ``length`` entries; the
+    derivation is in ``test_the_root_observable_drifts_by_half_of_its_argument``.
+    """
+    g = _gamma(length + 1)
+    division = _gamma(2)
+    c = 2.0 * g / (1.0 - g)
+    # The second-order line X**2 / (2 (1 - c)**2) is inside ``square**2`` only
+    # under this condition.
+    assert (1.0 - division) * (1.0 - c) >= 2.0**-0.5, length
+    x = square / (1.0 - division)
+    q = (1.0 + x) / (1.0 - c)
+    return (
+        (2.0 * x * c + c**2) / (2.0 * (1.0 - c) ** 2)
+        + 1.5 * c * q
+        + division * (root + 0.5 * square) / (1.0 - division)
+    )
 
 
 def _native_lane(
@@ -204,12 +254,13 @@ def test_exact_permanent_magnet_qa_matches_native_and_jax_cpu(
     assert int(native.values["final:nonzero_count"]) > 0
     assert int(jax.values["final:nonzero_count"]) > 0
     # What the two lanes must agree on at this scale is the SET of magnets the
-    # relax-and-split continuation kept; the endpoint VALUES are not a
-    # cross-lane comparable here, and
-    # ``test_the_bounded_endpoint_is_not_determined_to_the_declared_bucket``
-    # measures why. The values are compared at ``native_default``, against the
-    # official record, by
-    # ``test_permanent_magnet_qa_m_objective_matches_the_official_capture``.
+    # relax-and-split continuation kept; whether an endpoint VALUE is a
+    # cross-lane comparable here is measured per build by
+    # ``test_each_disabled_bounded_value_route_has_its_own_measured_condition``,
+    # and the determined ones are compared by
+    # ``test_the_extrapolated_bounded_routes_compare_inside_their_bucket``. The
+    # values are compared at ``native_default``, against the official record,
+    # by ``test_permanent_magnet_qa_m_objective_matches_the_official_capture``.
     assert int(native.values["final:nonzero_count"]) == int(
         jax.values["final:nonzero_count"]
     )
@@ -326,6 +377,7 @@ def test_each_disabled_bounded_value_route_has_its_own_measured_condition(
 
 def test_the_root_observable_drifts_by_half_of_its_argument(
     bounded_conditioning: ConditioningProbeResult,
+    bounded_native: tuple[NativeChildResult, Path],
 ) -> None:
     """``final:residual_norm`` is the square root of ``final:objective_sum_squares``.
 
@@ -337,16 +389,46 @@ def test_the_root_observable_drifts_by_half_of_its_argument(
     routes share, which is why a single bucket applied to a quantity and to its
     square cannot judge both.
 
-    The bound below is that second-order term itself, not a fitted number:
-    measured, the worst draw sits at 0.125 = 1/8 of it.
+    The bound is the second-order term ``square**2`` (the pre-rebase build's
+    worst draw sat at 1/8 of it) PLUS the worst-case round-off of the published
+    values, derived, not fitted.  At the rebased build's drifts (~1e-10) the
+    round-off dominates: |root - square/2| = 7e-17 against square**2 = 4e-21.
+    With u = 2**-53, gamma_k = k u / (1 - k u), n = len(final:residual):
+
+    - s = vdot(r, r) = S (1 + alpha), |alpha| <= gamma_n (n nonnegative
+      products summed, any order);
+    - rho = norm(r) = fl(sqrt(r.dot(r))) (numpy, ord=None) = R (1 + theta),
+      |theta| <= gamma_n + u <= g := gamma_{n+1};
+    - D = fl(fl(|y1 - y0|) / |y0|) = |x| (1 + eta), x = (y1 - y0) / y0,
+      |eta| <= gamma_2 (one subtraction, one division).
+
+    With q = S1 / S0: x_s = q a - 1 and x_r = sqrt(q) t - 1, where a and t are
+    the ratios (1 + alpha1)/(1 + alpha0) and (1 + theta1)/(1 + theta0), so
+    |a - 1|, |t - 1| <= c := 2 g / (1 - g), and
+    x_r - x_s/2 = -(sqrt(q) - 1)**2 / 2 + sqrt(q) (t - 1) - q (a - 1) / 2.
+    Using |x_s| <= X := D_s / (1 - gamma_2), q, sqrt(q) <= Q := (1 + X)/(1 - c)
+    and (sqrt(q) - 1)**2 <= (q - 1)**2 <= ((X + c) / (1 - c))**2:
+
+        |D_r - D_s/2| <= X**2 / (2 (1 - c)**2)              [<= D_s**2]
+                        + (2 X c + c**2) / (2 (1 - c)**2)
+                        + 3/2 c Q
+                        + gamma_2 (D_r + D_s/2) / (1 - gamma_2),
+
+    the first line being inside ``square**2`` whenever
+    (1 - gamma_2)(1 - c) >= 2**-0.5.  The other three lines are
+    :func:`_root_relation_roundoff`.
     """
     squares = bounded_conditioning.relative_drifts("final:objective_sum_squares")
     roots = bounded_conditioning.relative_drifts("final:residual_norm")
+    child, _input_root = bounded_native
+    length = int(np.asarray(child.observation.values["final:residual"]).size)
 
     for square, root in zip(squares, roots, strict=True):
-        assert abs(root - 0.5 * square) <= square**2, (
+        bound = square**2 + _root_relation_roundoff(square, root, length)
+        assert abs(root - 0.5 * square) <= bound, (
             f"the root moved by {root:.6e} where half of its argument's "
-            f"{square:.6e} is {0.5 * square:.6e}"
+            f"{square:.6e} is {0.5 * square:.6e}; allowed {bound:.3e} "
+            f"(second order {square**2:.3e} plus round-off at n={length})"
         )
 
 
@@ -360,9 +442,11 @@ def test_the_extrapolated_bounded_routes_compare_inside_their_bucket(
     extrapolation from the fourth.  This is the comparison those routes would
     make: the native lane from the one-thread child against the JAX lane, at
     the ``rtol`` the routes declare.  Only agreement is asserted -- a required
-    disagreement would fail the day two lanes agree better -- so
-    ``final:objective_sum_squares``, whose conditioning test above carries the
-    verdict, is deliberately not asserted here.
+    disagreement would fail the day two lanes agree better -- and only for the
+    observables the conditioning test above records as DETERMINED; on the
+    rebased build that includes ``final:objective_sum_squares`` (measured
+    1.163e-10 relative, 2026-09-29), which is condition (c) of its route's
+    pre-registered re-adjudication (see ``DETERMINED_TO_ITS_BUCKET``).
     """
     child, input_root = bounded_native
     bundle, arrays = read_input_bundle(input_root)
