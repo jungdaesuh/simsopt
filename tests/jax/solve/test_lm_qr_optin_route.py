@@ -379,6 +379,41 @@ def test_qr_lane_converges_from_a_residual_whose_square_overflows():
     np.testing.assert_allclose(np.asarray(result.x), [1.0e200], rtol=1e-12, atol=0)
 
 
+def test_public_route_cost_stays_finite_when_the_residual_square_overflows():
+    """r = [1.5e154], constant: r.r = 2.25e308 overflows, the cost does not.
+
+    J = 0 meets gtol at once. The true cost 0.5 r.r = 1.125e308 is
+    representable, so the cost is formed from MINPACK's enorm, which rounds
+    within two ulps of it, and the typed result is finite and successful
+    rather than a non-finite failure after convergence.
+    """
+    result = _solve_qr_lane(lambda x: jnp.full(1, 1.5e154) + 0.0 * x, jnp.zeros(1))
+
+    assert result.success, result.message
+    assert result.nonfinite_fields == ()
+    assert abs(result.fun - 1.125e308) <= 2 * np.spacing(1.125e308)
+
+
+def test_public_route_cost_is_the_plain_half_sum_of_squares_on_normal_residuals():
+    """Away from overflow the cost is the plain 0.5 * vdot(r, r), bit for bit.
+
+    SciPy reports 0.5 * np.dot(f, f); the device dot and NumPy's dot sum in
+    different orders, so the two agree to rounding, not bitwise.
+    """
+    residual, x0, _ = _linear_fixture()
+    result = _solve_qr_lane(residual, x0)
+    final_residual = jnp.asarray(result.residual)
+
+    assert result.success, result.message
+    assert result.fun == float(0.5 * jnp.vdot(final_residual, final_residual).real)
+    np.testing.assert_allclose(
+        result.fun,
+        0.5 * np.dot(result.residual, result.residual),
+        rtol=1.0e-15,
+        atol=0,
+    )
+
+
 def _enorm_reference(vector):
     """netlib MINPACK enorm, term by term (More, Garbow and Hillstrom 1980)."""
     rdwarf, rgiant = 3.834e-20, 1.304e19

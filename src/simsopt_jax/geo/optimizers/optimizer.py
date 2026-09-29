@@ -1856,8 +1856,28 @@ def resolve_target_outer_loop_optimizer_contract(
 
 
 def _least_squares_cost(residual):
+    """``0.5 * r.r``, SciPy ``least_squares``' cost, without spurious overflow.
+
+    The plain ``0.5 * vdot(r, r)`` is returned wherever it is finite, so the
+    value is unchanged on every normal path.  ``r.r`` can overflow although
+    the cost is representable (``r = [1.5e154]``: ``r.r`` is inf, the cost
+    1.125e308 is not); there, and only while MINPACK's overflow-safe norm
+    ``enorm(r)`` is finite, the cost is ``(enorm(r) * sqrt(0.5))**2``.  A
+    non-finite residual keeps the plain, non-finite value.
+    """
     residual = jnp.ravel(jnp.asarray(residual))
-    return _device_scalar(0.5, dtype=residual.dtype) * jnp.vdot(residual, residual).real
+    half = _device_scalar(0.5, dtype=residual.dtype)
+    plain = half * jnp.vdot(residual, residual).real
+    norm = _minpack_enorm(residual)
+    # XLA's algebraic simplifier reassociates (n * c) * (n * c) with a
+    # constant c into (n * n) * (c * c), which overflows again; the barrier
+    # keeps the scaled norm as formed before it is squared.
+    scaled_norm = lax.optimization_barrier(norm * jnp.sqrt(half))
+    return jnp.where(
+        ~jnp.isfinite(plain) & jnp.isfinite(norm),
+        scaled_norm * scaled_norm,
+        plain,
+    )
 
 
 def _least_squares_linearization_from_jacobian(residual, jacobian):
