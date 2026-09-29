@@ -66,7 +66,7 @@
     "penalty": "0x1.f400000000000p+9",
     "stationarity_norm": "0x1.4325e2d4aa388p-41",
     "kkt_stationarity_norm": "0x1.752e50db3a3a2p-51",
-    "nit": 8,
+    "nit": 13,
     "outer_iterations": 6,
     "restored_best_feasible": false,
     "restored_best_feasible_reason": null,
@@ -185,7 +185,7 @@
         "0x1.0020bc3a4f47ap-1"
        ]
       },
-      "nit": 1,
+      "nit": 3,
       "success": true,
       "message": "ALM inner solve satisfied the KKT stationarity gate."
      }
@@ -249,7 +249,7 @@
     "effective_feasibility_tolerance": "0x1.9d811398ddcc3p-8",
     "stationarity_tolerance": "0x1.a36e2eb1c432dp-14",
     "trust_radius": null,
-    "inner_maxiter": 193,
+    "inner_maxiter": 190,
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "unbounded",
@@ -390,7 +390,7 @@
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
     "stationarity_tolerance": "0x1.0624dd2f1a9fcp-10",
     "trust_radius": null,
-    "inner_maxiter": 193,
+    "inner_maxiter": 190,
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "unbounded",
@@ -480,7 +480,7 @@
      "sum_cap",
      "x0_floor"
     ],
-    "inner_iterations": 1,
+    "inner_iterations": 3,
     "inner_success": true,
     "inner_message": "ALM inner solve satisfied the KKT stationarity gate.",
     "penalty": "0x1.f400000000000p+9",
@@ -529,7 +529,7 @@
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
     "stationarity_tolerance": "0x1.0624dd2f1a9fcp-10",
     "trust_radius": null,
-    "inner_maxiter": 193,
+    "inner_maxiter": 190,
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "unbounded",
@@ -1549,7 +1549,7 @@
     "action": "dual_update",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "68bb171b0454031d8fb8aed515c6527a9f37d01d0812cd41e1ddcca39330cf40"
+    "event_sha256": "13a5ee85f0848087d63dddadba0c8468c1a16f15b0b74341cbbc8fee80997609"
    },
    {
     "event": "on_outer_boundary",
@@ -1668,7 +1668,7 @@
     "action": "dual_update",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "c0da12274c583d52ec4dde9e09eb7bc80313a59408257315785af77c5317b283"
+    "event_sha256": "804df26cbcf605d3f262c1ecdd5c5c0073081aee122beaa6ab2b06ebb2425d8e"
    },
    {
     "event": "on_outer_boundary",
@@ -1787,7 +1787,7 @@
     "action": "dual_update",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "2e3bfc481ea5e856a76ed517fdfacc9af0a82e5b817eb9b301691bb5def0e9be"
+    "event_sha256": "91a3fb8331d34334a80bb531400c25bf3098e70159bb7dd120b34eb39232bcb5"
    },
    {
     "event": "on_outer_boundary",
@@ -1893,7 +1893,7 @@
     "action": "infeasible_stall_penalty_increase",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "b0c7bbded252699294809eca1cbb5f913bcbc60c28baa8383de413d617c06941"
+    "event_sha256": "614f8d71d2534e60c57991a9a29217b1047fb6342c66559e952369ff5ccd53b8"
    },
    {
     "event": "on_outer_boundary",
@@ -2276,7 +2276,7 @@
     "action": "process_budget_exhausted",
     "dual_update_penalty_reason": null,
     "outer_termination": "process_budget_exhausted",
-    "event_sha256": "a08063a2732bfaf07a886d8d430d12885658ccd512bbeb712d4c4b21ecb4981a"
+    "event_sha256": "a6cc2526d6388db5a434d15e60cbeb489d83d6f7662299a0a3ef7575cc2c4ad1"
    },
    {
     "event": "on_outer_boundary",
@@ -2392,7 +2392,7 @@
      "completed_action": "dual_update",
      "termination_reason": null,
      "resume_eligible": true,
-     "total_inner_iterations": 7,
+     "total_inner_iterations": 10,
      "cap_binding_detected": true,
      "cap_binding_indices": {
       "$tuple": [
@@ -2455,7 +2455,7 @@
      "completed_action": "dual_update",
      "termination_reason": null,
      "resume_eligible": true,
-     "total_inner_iterations": 7,
+     "total_inner_iterations": 10,
      "cap_binding_detected": true,
      "cap_binding_indices": {
       "$tuple": [
@@ -2518,7 +2518,7 @@
      "completed_action": "dual_update",
      "termination_reason": null,
      "resume_eligible": true,
-     "total_inner_iterations": 7,
+     "total_inner_iterations": 10,
      "cap_binding_detected": true,
      "cap_binding_indices": {
       "$tuple": [
@@ -2581,7 +2581,7 @@
      "completed_action": "infeasible_stall_penalty_increase",
      "termination_reason": null,
      "resume_eligible": true,
-     "total_inner_iterations": 7,
+     "total_inner_iterations": 10,
      "cap_binding_detected": true,
      "cap_binding_indices": {
       "$tuple": [
@@ -2644,7 +2644,7 @@
      "completed_action": "process_budget_exhausted",
      "termination_reason": "process_budget_exhausted",
      "resume_eligible": false,
-     "total_inner_iterations": 8,
+     "total_inner_iterations": 13,
      "cap_binding_detected": true,
      "cap_binding_indices": {
       "$tuple": [

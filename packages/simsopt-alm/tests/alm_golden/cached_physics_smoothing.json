@@ -62,7 +62,7 @@
     "penalty": "0x1.4000000000000p+3",
     "stationarity_norm": "0x1.d409ae9560690p-29",
     "kkt_stationarity_norm": null,
-    "nit": 5,
+    "nit": 11,
     "outer_iterations": 5,
     "restored_best_feasible": false,
     "restored_best_feasible_reason": null,
@@ -248,7 +248,7 @@
      "spacing",
      "curvature"
     ],
-    "inner_iterations": 1,
+    "inner_iterations": 3,
     "inner_success": true,
     "inner_message": "ALM inner solve satisfied the KKT stationarity gate.",
     "penalty": "0x1.4000000000000p+3",
@@ -399,7 +399,7 @@
      "spacing",
      "curvature"
     ],
-    "inner_iterations": 1,
+    "inner_iterations": 3,
     "inner_success": true,
     "inner_message": "ALM inner solve satisfied the KKT stationarity gate.",
     "penalty": "0x1.4000000000000p+3",
@@ -448,7 +448,7 @@
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
     "stationarity_tolerance": "0x1.47ae147ae147bp-7",
     "trust_radius": null,
-    "inner_maxiter": 499,
+    "inner_maxiter": 497,
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "unbounded",
@@ -550,7 +550,7 @@
      "spacing",
      "curvature"
     ],
-    "inner_iterations": 1,
+    "inner_iterations": 3,
     "inner_success": true,
     "inner_message": "ALM inner solve satisfied the KKT stationarity gate.",
     "penalty": "0x1.4000000000000p+3",
@@ -599,7 +599,7 @@
     "effective_feasibility_tolerance": "0x1.044914f3c02b1p-7",
     "stationarity_tolerance": "0x1.0624dd2f1a9fcp-10",
     "trust_radius": null,
-    "inner_maxiter": 498,
+    "inner_maxiter": 494,
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "unbounded",
@@ -750,7 +750,7 @@
     "effective_feasibility_tolerance": "0x1.a074ee52cd11bp-11",
     "stationarity_tolerance": "0x1.a36e2eb1c432dp-14",
     "trust_radius": null,
-    "inner_maxiter": 497,
+    "inner_maxiter": 491,
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "unbounded",
@@ -901,7 +901,7 @@
     "effective_feasibility_tolerance": "0x1.4d2a58423da7cp-14",
     "stationarity_tolerance": "0x1.4f8b588e368f1p-17",
     "trust_radius": null,
-    "inner_maxiter": 496,
+    "inner_maxiter": 490,
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "unbounded",
@@ -1272,7 +1272,7 @@
     "action": "dual_update",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "607351070cf84289355b3e10ee49c6a4ddfc9bec1f77d2abb4262662246a4b74"
+    "event_sha256": "59e64b6f4a08c8168d2d8d86b462c740012809e668b633346b7add92e42331f3"
    },
    {
     "event": "outer_state_callback",
@@ -1548,7 +1548,7 @@
     "action": "dual_update",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "cac329d9c855df6fe69e7657ec32484892e4a1caf179d47dc02f8053108ae6a1"
+    "event_sha256": "93af922d65a24a61fbb4c2c7d6ceed5b9c2b3ee672df380aa2c9214cf92dfd51"
    },
    {
     "event": "outer_state_callback",
@@ -1849,7 +1849,7 @@
     "action": "dual_update",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "c497daaf7a848c88d8023c664a6ce3fbaafc49e6510ca86e9d872621f6a97f23"
+    "event_sha256": "b563a0ee5e4eecf70cdc67db191839a082ec79460e2fdbc8860f3634a4196a48"
    },
    {
     "event": "outer_state_callback",
@@ -2024,7 +2024,7 @@
     "action": "dual_update",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "99bb5a84213521be5f5076f297dccf46fda08efca5b520b3bdeb961df4bc0a2c"
+    "event_sha256": "6ec4b2839a5d9e7f97b1a49c5b09343ea1623bd3341618fd2d4e570cae9a61f8"
    },
    {
     "event": "outer_state_callback",
@@ -2174,7 +2174,7 @@
     "action": "constraints_inactive_converged",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "323b47e6e50bbd34e78c8bb0522cfe1052f2ddc17b8fba5eef1ec620ffa96394"
+    "event_sha256": "8346135ab333e93ee20f76481e37e352bd44e26d049cae08d94f6a585f10a605"
    }
   ],
   "checkpoints": [],

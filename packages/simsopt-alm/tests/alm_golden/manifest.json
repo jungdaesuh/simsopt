@@ -19,7 +19,7 @@
   "simsopt_alm/events.py": "2ce64055d724f7fc2d380f579018ea7d06ae0151",
   "simsopt_alm/history.py": "74d69bc1425227a615a8d5640c658714d28aab4e",
   "simsopt_alm/hybrid.py": "d1574700bcaee83d36ffbe243ec462c0eba66049",
-  "simsopt_alm/inner.py": "4795626cf7500d741cbd9e8f6c4076e35e932beb",
+  "simsopt_alm/inner.py": "bd07057a45d52bbcb6773203d3cf513a226e8e2e",
   "simsopt_alm/policy.py": "3df52311b95b51be71d7d4e89d774bc8e8d364fb",
   "simsopt_alm/problem.py": "1e145040b215ac60c6c7264fd59a7807b0ac3013",
   "simsopt_alm/taylor.py": "0145e7432911ae1ee77ed408c54ced10e03d5124",
@@ -81,20 +81,20 @@
   {
    "scenario": "toy_convex",
    "fixture": "toy_convex.json",
-   "sha256": "bdd8defb3407023d49daa1fca6c25de5590c12d11737b0e3b8b05d8c0af8e76e",
-   "bytes": 21524
+   "sha256": "89f0a190612f3ee83148ef6780ca43af8ac0a04ab0456813a727d5873e3f13bc",
+   "bytes": 21525
   },
   {
    "scenario": "penalty_ramp_to_cap",
    "fixture": "penalty_ramp_to_cap.json",
-   "sha256": "e3e600afec080fd6c2a7af8409e397eae6676d204b9eecf10783daf8c8c00efc",
-   "bytes": 85292
+   "sha256": "6b8508852160143fc46e1074d273814ec9996eb0ec5fdeba8f4d71d49a79da1f",
+   "bytes": 85293
   },
   {
    "scenario": "resume_penalty_ramp_mid_run",
    "fixture": "resume_penalty_ramp_mid_run.json",
-   "sha256": "1ab38f3b23994eed708d86b1358953322f255f185087741335ccb0d9607c2e8c",
-   "bytes": 89371
+   "sha256": "0303911e7cc34cb2ac0494559e50b5ea2c597abc777f57e403eaf84a8fc88055",
+   "bytes": 89372
   },
   {
    "scenario": "hybrid_mismatch_repair",
@@ -135,7 +135,7 @@
   {
    "scenario": "trust_radius_retries",
    "fixture": "trust_radius_retries.json",
-   "sha256": "d998d7ebc9ca5683ed7aa55667ceb4e81a6caec2e47c2d0b2d171046e9d3d2e8",
+   "sha256": "cd057998c25b2bb9e8e95dd5709a5bd538ea494429d3eca26482a6d15c8d602c",
    "bytes": 70326
   },
   {
@@ -147,14 +147,14 @@
   {
    "scenario": "cached_physics_smoothing",
    "fixture": "cached_physics_smoothing.json",
-   "sha256": "bd1187a98e8bc656fbf5bf3cb1e5831ee31cacd6557e7b249aaae811e5eb347c",
-   "bytes": 49198
+   "sha256": "527cc9ca0d0d8a8e5db58142d939e14e5fea0fffd32af5ea8066c210102432f6",
+   "bytes": 49199
   },
   {
    "scenario": "multiplier_cap_process_budget",
    "fixture": "multiplier_cap_process_budget.json",
-   "sha256": "a8a20b5f6b01059d631339e1b3fe16a12a0ef686ffb72ac2ffb7dcc320323e62",
-   "bytes": 55711
+   "sha256": "57e2a0b8fb4b0a1f84b112aef3b25660b7d607094f094dc6ab005ab98fd6da2e",
+   "bytes": 55717
   },
   {
    "scenario": "inner_iteration_budget",

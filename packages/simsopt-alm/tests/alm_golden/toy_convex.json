@@ -54,7 +54,7 @@
     "penalty": "0x1.9000000000000p+6",
     "stationarity_norm": "0x1.5c9ab75acf3c3p-43",
     "kkt_stationarity_norm": "0x1.94c583ada5b53p-52",
-    "nit": 9,
+    "nit": 13,
     "outer_iterations": 4,
     "restored_best_feasible": false,
     "restored_best_feasible_reason": null,

@@ -63,7 +63,7 @@
     "penalty": "0x1.9000000000000p+6",
     "stationarity_norm": "0x1.4ea3f94ea4000p-2",
     "kkt_stationarity_norm": "0x0.0p+0",
-    "nit": 16,
+    "nit": 17,
     "outer_iterations": 4,
     "restored_best_feasible": false,
     "restored_best_feasible_reason": null,
@@ -167,7 +167,7 @@
         "0x1.0000000000000p+0"
        ]
       },
-      "nit": 1,
+      "nit": 2,
       "success": true,
       "message": "ALM inner solve satisfied the KKT stationarity gate."
      }
@@ -549,7 +549,7 @@
     "constraint_names": [
      "x0_cap"
     ],
-    "inner_iterations": 1,
+    "inner_iterations": 2,
     "inner_success": true,
     "inner_message": "ALM inner solve satisfied the KKT stationarity gate.",
     "penalty": "0x1.9000000000000p+6",
@@ -3190,7 +3190,7 @@
     "action": "dual_update",
     "dual_update_penalty_reason": null,
     "outer_termination": "max_outer",
-    "event_sha256": "eb9e7058b335904d3d34f940fd6f001c29a97d0d404b9b87c74dc91d2de74e5c"
+    "event_sha256": "746e9039612a880c80573b90d85f28b58b02036151781ea2a1e0bc9d5b04c652"
    },
    {
     "event": "snapshot_accepted_state",
@@ -3521,7 +3521,7 @@
      "completed_action": "dual_update",
      "termination_reason": "max_outer_after_dual_update",
      "resume_eligible": false,
-     "total_inner_iterations": 16,
+     "total_inner_iterations": 17,
      "cap_binding_detected": false,
      "cap_binding_indices": {
       "$tuple": []

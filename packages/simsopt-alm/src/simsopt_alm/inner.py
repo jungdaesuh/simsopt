@@ -119,6 +119,9 @@ class _ALMInnerAttemptEvaluator:
     cached_evaluation: Optional[dict] = None
     # The request's base bounds as (lower, upper) pairs, for stationarity.
     base_bounds: Optional[List[Tuple[float, float]]] = None
+    # L-BFGS-B iterations completed in the current attempt: SciPy calls
+    # ``callback`` once per completed iteration.
+    attempt_iterations: int = 0
 
     def _fresh_evaluation(self, x) -> dict:
         return _sanitize_nonfinite_inner_evaluation(
@@ -171,6 +174,7 @@ class _ALMInnerAttemptEvaluator:
         return float(evaluation["total"]), grad.copy()
 
     def callback(self, inner_x):
+        self.attempt_iterations += 1
         inner_x_arr = np.asarray(inner_x, dtype=float).copy()
         if self.request.inner_callback is not None:
             # The callback receives an owned snapshot.  Its mutation must not
@@ -212,12 +216,14 @@ class _ALMInnerAttemptEvaluator:
                 update_feasibility_tol=self.request.update_feasibility_tol,
                 update_stationarity_tol=self.request.update_stationarity_tol,
             ):
-                raise _EarlyStopInnerSolve(inner_x, evaluation)
+                raise _EarlyStopInnerSolve(
+                    inner_x, evaluation, self.attempt_iterations
+                )
         elif (
             callback_max_feasibility_violation <= self.request.effective_feasibility_tol
             and callback_stationarity_norm <= self.request.update_stationarity_tol
         ):
-            raise _EarlyStopInnerSolve(inner_x, evaluation)
+            raise _EarlyStopInnerSolve(inner_x, evaluation, self.attempt_iterations)
 
 # Feasibility slack of an accepted candidate, in the rows' units.
 _ACCEPTANCE_TOTAL_ATOL = 1e-10
@@ -243,10 +249,14 @@ _INFEASIBLE_STALL_OBJECTIVE_ATOL = 1e-10
 _INFEASIBLE_STALL_OBJECTIVE_RTOL = 1e-6
 
 class _EarlyStopInnerSolve(RuntimeError):
-    def __init__(self, x, evaluation: dict):
+    """Raised by the inner callback to stop L-BFGS-B at the KKT gate, with the
+    iterate, its evaluation and the iterations the attempt completed."""
+
+    def __init__(self, x, evaluation: dict, completed_iterations: int):
         super().__init__("ALM inner solve satisfied the KKT stationarity gate.")
         self.x = np.asarray(x, dtype=float).copy()
         self.evaluation = evaluation
+        self.completed_iterations = int(completed_iterations)
 
 def _total_tolerance(gradient_norm: float, step_norm: float, rtol: float) -> float:
     """``rtol`` of a step's first-order scale ``||grad L|| ||dx||`` (the
@@ -638,6 +648,7 @@ def _run_alm_inner_attempts(request: ALMInnerAttemptRequest) -> ALMInnerAttemptR
         )
         last_inner_options = dict(inner_attempt_options)
         last_inner_profile = plan.profile
+        evaluator.attempt_iterations = 0
         try:
             result = minimize(
                 evaluator.fun,
@@ -653,7 +664,7 @@ def _run_alm_inner_attempts(request: ALMInnerAttemptRequest) -> ALMInnerAttemptR
         except _EarlyStopInnerSolve as early_stop:
             result = SimpleNamespace(
                 x=early_stop.x,
-                nit=1,
+                nit=early_stop.completed_iterations,
                 success=True,
                 message=str(early_stop),
             )

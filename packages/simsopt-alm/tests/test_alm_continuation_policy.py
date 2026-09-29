@@ -1557,7 +1557,7 @@ class AlmLibraryTrustRadiusCharacterizationTests(unittest.TestCase):
     DEFAULT_PINS = {
         "termination_reason": "max_outer_restored_best_feasible",
         "restored": True,
-        "counts": (11, 6),
+        "counts": (13, 6),
         "x": ["0x1.4000000000000p-1", "0x1.4000000000000p-1"],
         "trust_radius": "0x1.b000000000000p-1",
         "penalty": "0x1.0000000000000p+0",
@@ -1571,7 +1571,7 @@ class AlmLibraryTrustRadiusCharacterizationTests(unittest.TestCase):
             (5, 0, "dual_update", "boxed", 1, "0x1.b000000000000p-1"),
             (6, 0, "dual_update", "boxed", 1, "0x1.b000000000000p-1"),
         ],
-        "digest": "559233cc244b0d0fdd0ca52921cc51ed0d0c03e37f70821627e63be954abb7b9",
+        "digest": "3bd6fc86d4894a862e8d070793288b3c8dce5e333a526a8189a14bd90ffe8277",
     }
 
     def test_library_radius_without_a_policy_takes_the_default_path(self):

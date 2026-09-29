@@ -92,7 +92,7 @@
   "simsopt_alm/events.py": "2ce64055d724f7fc2d380f579018ea7d06ae0151",
   "simsopt_alm/history.py": "74d69bc1425227a615a8d5640c658714d28aab4e",
   "simsopt_alm/hybrid.py": "d1574700bcaee83d36ffbe243ec462c0eba66049",
-  "simsopt_alm/inner.py": "4795626cf7500d741cbd9e8f6c4076e35e932beb",
+  "simsopt_alm/inner.py": "bd07057a45d52bbcb6773203d3cf513a226e8e2e",
   "simsopt_alm/policy.py": "3df52311b95b51be71d7d4e89d774bc8e8d364fb",
   "simsopt_alm/problem.py": "1e145040b215ac60c6c7264fd59a7807b0ac3013",
   "simsopt_alm/taylor.py": "0145e7432911ae1ee77ed408c54ced10e03d5124",
