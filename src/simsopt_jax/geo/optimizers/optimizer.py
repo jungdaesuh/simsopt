@@ -2618,7 +2618,9 @@ def _build_traceable_levenberg_marquardt_minpack_runner(
             "jacobian_evaluations": jnp.asarray(1, dtype=jnp.int32),
             "info": info_none,
             "nonfinite": ~(
-                jnp.all(jnp.isfinite(residual0)) & jnp.all(jnp.isfinite(jacobian0))
+                jnp.all(jnp.isfinite(flat_x_init))
+                & jnp.all(jnp.isfinite(residual0))
+                & jnp.all(jnp.isfinite(jacobian0))
             ),
         }
 
@@ -2720,10 +2722,12 @@ def _build_traceable_levenberg_marquardt_minpack_runner(
                 ),
             )
             info = jnp.where(info == 0, stringent, info).astype(jnp.int32)
-            # A non-finite Jacobian at the accepted point ends the solve as a
-            # failure, whatever stop code this step set: lmder would factor it
-            # next, and the result must not report success with it.
-            nonfinite = accepted & ~jnp.all(jnp.isfinite(jacobian_next))
+            # A non-finite accepted x or Jacobian ends the solve as a failure,
+            # whatever stop code this step set: lmder would factor that
+            # Jacobian next, and the result must not report success with it.
+            nonfinite = accepted & ~(
+                jnp.all(jnp.isfinite(x_trial)) & jnp.all(jnp.isfinite(jacobian_next))
+            )
 
             if callback_enabled:
                 lax.cond(

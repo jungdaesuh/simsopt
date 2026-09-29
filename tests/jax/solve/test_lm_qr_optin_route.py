@@ -300,6 +300,23 @@ def test_qr_lane_never_reports_success_with_a_nonfinite_jacobian():
     assert result.message.startswith("non-finite")
 
 
+@pytest.mark.parametrize("start", [np.inf, -np.inf, np.nan])
+def test_qr_lane_fails_on_a_nonfinite_start(start):
+    """A constant, finite residual has a zero Jacobian, which meets gtol at
+    once; the solve must still fail on a non-finite x rather than return it
+    as converged."""
+    result = _opt.target_least_squares(
+        lambda x: jnp.ones(2),
+        jnp.full(1, start),
+        method="lm-minpack-ondevice",
+        maxiter=10,
+    )
+
+    assert not result.success
+    assert result.status == 2
+    assert result.message.startswith("non-finite")
+
+
 def test_qr_lane_fails_when_the_returned_gradient_overflows():
     """r = [1e109 + 1e200 x, 1e154] from x = 0: r and J are finite.
 
