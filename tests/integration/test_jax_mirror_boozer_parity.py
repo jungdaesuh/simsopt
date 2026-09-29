@@ -9,7 +9,8 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from examples.jax.parity.arbiter import LaneObservation
+from examples.jax.manifest_runtime import load_runtime_contract_pair
+from examples.jax.parity.arbiter import LaneObservation, upstream_end_state_matches
 from examples.jax.parity.cases import get_case
 from examples.jax.parity.cases.native_boozer import (
     FIRST_STAGE_STATUS_CONVENTION_BY_DRIVER,
@@ -177,30 +178,19 @@ def test_exact_boozer_surface_workflow_matches_native_and_jax_cpu(
             atol=1.0e-13,
         )
 
-    for observable in (
-        "area:iota",
-        "area:G",
-        "area:label",
-        "area:residual_norm",
-        "flux:target",
-        "flux:iota",
-        "flux:G",
-        "flux:label",
-        "flux:residual_norm",
-    ):
-        np.testing.assert_allclose(
-            jax.values[observable],
-            native.values[observable],
-            rtol=1.0e-3,
-            atol=1.0e-8,
+    # Which Boozer surface the workflow lands on is not a function of its input:
+    # the first stage stops at its iteration cap, unconverged, and upstream's
+    # own script reaches five different surfaces from nine one-ulp starts at
+    # this scale (tracked upstream scatter record). Each lane's end state is
+    # therefore judged as the arbiter judges it: it must be one of upstream's
+    # own, under the case's route comparator for every judged key.
+    end_states = get_case("native-boozer").end_states("bounded")
+    assert end_states is not None
+    routes = _scale_routes("bounded")
+    for observation in (native, jax):
+        assert upstream_end_state_matches(end_states, routes, observation.values), (
+            observation.lane
         )
-
-    np.testing.assert_allclose(
-        jax.values["flux:surface_dofs"],
-        native.values["flux:surface_dofs"],
-        rtol=0.0,
-        atol=2.0e-3,
-    )
     assert float(native.values["flux:residual_norm"]) < float(
         native.values["initial:residual_norm"]
     )
@@ -253,6 +243,44 @@ def test_exact_boozer_surface_workflow_matches_native_and_jax_cpu(
         assert bool(native.values[observable]) is bool(jax.values[observable])
         assert bool(native.values[observable]) is True
     _assert_route_matrix(set(jax.values))
+
+
+def _scale_routes(scale: str):
+    """The case's comparison routes at ``scale``, as the runner resolves them."""
+    pair = load_runtime_contract_pair(
+        _REPO_ROOT / "examples/jax/manifest.json",
+        _REPO_ROOT / "examples/jax/parity_manifest.json",
+        repo_root=_REPO_ROOT,
+    )
+    relationship = next(
+        item
+        for item in pair.parity.all_relationships
+        if item.case_id == "native-boozer"
+    )
+    return relationship.resolve_scale(scale).comparison_routes
+
+
+@pytest.mark.parametrize("scale", ("bounded", "native_default"))
+def test_upstream_end_states_span_several_boozer_surfaces(scale: str) -> None:
+    """The end-state contract exists only because upstream's nine draws disagree.
+
+    The pre-registered rule: an end-state set is declared at a scale only when
+    upstream's own nine draws land on at least two end states that the case's
+    own route comparators tell apart; with one, the end state would be a
+    function of the input and the lanes would be compared with each other.
+    """
+    end_states = get_case("native-boozer").end_states(scale)
+    assert end_states is not None
+    routes = _scale_routes(scale)
+    all_draws = tuple(state.k for state in end_states.states)
+    assert all_draws == tuple(range(9))
+    matches = {
+        state.k: upstream_end_state_matches(end_states, routes, state.values)
+        for state in end_states.states
+    }
+    for k, matched in matches.items():
+        assert k in matched
+    assert any(matched != all_draws for matched in matches.values())
 
 
 #: The first stage's exactly comparable facts. They are equal across the lanes

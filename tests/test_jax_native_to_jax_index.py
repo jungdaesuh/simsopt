@@ -1881,7 +1881,10 @@ _BOUNDED_END_STATES = UpstreamEndStates(
 def _declare_bounded(
     monkeypatch: pytest.MonkeyPatch, **declaration: tuple[object, ...]
 ) -> None:
-    declared = replace(get_case(_BOUNDED_CASE_ID), **declaration)
+    # Start from the registered case stripped of its own scatter contracts, so the
+    # fixture's declaration is the only one in force.
+    bare: dict[str, tuple[object, ...]] = {"quality_bands": (), "upstream_end_states": ()}
+    declared = replace(get_case(_BOUNDED_CASE_ID), **{**bare, **declaration})
     assert isinstance(declared, CaseDefinition)
     monkeypatch.setattr(
         index_module,
@@ -1941,8 +1944,9 @@ def _write_summary(tmp_path: Path, summary: dict[str, object]) -> Path:
 
 
 def test_bounded_quality_band_evidence_needs_a_bounded_declaration(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _declare_bounded(monkeypatch)
     path = _write_summary(
         tmp_path, _bounded_quality_band_summary({"quality_band": _bounded_band_records()})
     )

@@ -12,6 +12,9 @@ from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.cases.native_boozer import (
     create_input as create_native_boozer_input,
 )
+from examples.jax.parity.cases.native_boozer import (
+    END_STATE_OBSERVABLES as NATIVE_BOOZER_END_STATE_OBSERVABLES,
+)
 from examples.jax.parity.cases.native_boozer import execute as execute_native_boozer
 from examples.jax.parity.cases.native_boozerqa import (
     create_input as create_native_boozerqa_input,
@@ -163,6 +166,7 @@ from examples.jax.parity.contracts import (
 from examples.jax.parity.input_bundle import InputBundle
 from examples.jax.parity.measurement import MeasurementExecution
 from examples.jax.parity.official_quality_bands import official_quality_band
+from examples.jax.parity.official_scatter_contracts import upstream_end_states
 from examples.jax.parity.runtime import ParityLane
 from examples.jax.parity.work_budget import WorkBudgetContract
 from simsopt_jax.examples import ExecutionScale
@@ -246,7 +250,9 @@ class CaseDefinition:
         if self.work_budget_contract is not None and set(band_scales) & set(
             self.work_budget_contract.scales
         ):
-            raise ValueError("case cannot combine a quality band and work budget at one scale")
+            raise ValueError(
+                "case cannot combine a quality band and work budget at one scale"
+            )
         # An end-state set admits no budget exit; a work budget beside it would.
         if self.work_budget_contract is not None and set(end_state_scales) & set(
             self.work_budget_contract.scales
@@ -272,8 +278,8 @@ _FIXED_BUDGET_SCALES: tuple[ExecutionScale, ...] = ("bounded", "native_default")
 #: k = 9..40. Stage two ended ABNORMAL (SciPy status 2) on 5 of the 41 starts, every time at
 #: stage-two nit 0: stage two restarts L-BFGS-B cold at stage one's end point, where the stage-two
 #: length penalty is exactly zero, and the first trial step overshoots until ``maxls`` runs out.
-COIL_FORCES_UPSTREAM_TERMINAL_OUTCOMES: Mapping[str, tuple[int, ...]] = MappingProxyType(
-    {"2,1": (5,), "1,2": (20, 23, 35), "2,2": (19, 34)}
+COIL_FORCES_UPSTREAM_TERMINAL_OUTCOMES: Mapping[str, tuple[int, ...]] = (
+    MappingProxyType({"2,1": (5,), "1,2": (20, 23, 35), "2,2": (19, 34)})
 )
 _COIL_FORCES_UPSTREAM_DRAWS = 41
 
@@ -283,6 +289,36 @@ _CASES = {
         case_id="native-boozer",
         create_input=create_native_boozer_input,
         execute=execute_native_boozer,
+        # Which Boozer surface the workflow lands on is not a function of its input: the first
+        # stage stops at its 300-iteration L-BFGS cap, unconverged, and upstream's own official
+        # script reaches 2 surfaces from nine one-ulp starts at native_default and 5 at the bounded
+        # scale (tracked upstream scatter records). Each lane is judged by whether its end state is
+        # one of upstream's own (2026-09-29 ruling: judge by upstream's own scatter).
+        upstream_end_states=tuple(
+            upstream_end_states(
+                "native-boozer",
+                scale,
+                NATIVE_BOOZER_END_STATE_OBSERVABLES,
+                same_state_proof=(
+                    "tests/integration/test_jax_mirror_boozer_official_end_states.py (the JAX "
+                    "penalty residual and Jacobian equal native's at upstream's recorded area and "
+                    "flux end states) and the initial-state comparison in "
+                    "tests/integration/test_jax_mirror_boozer_parity.py"
+                ),
+                disclosure=disclosure,
+            )
+            for scale, disclosure in (
+                (
+                    "bounded",
+                    (
+                        "at this scale the JAX lanes run a 60-iteration first stage where "
+                        "upstream and the native lane run 300; the set holds the end states "
+                        "of upstream's 300-iteration workflow"
+                    ),
+                ),
+                ("native_default", ""),
+            )
+        ),
     ),
     "native-boozerqa": CaseDefinition(
         case_id="native-boozerqa",
@@ -396,9 +432,7 @@ _CASES = {
         execute=execute_native_stage_two_optimization_minimal,
         # Upstream's run ends at its 300-iteration L-BFGS-B limit (status 1); the band admits that outcome at
         # native_default. The reduced scale converges inside the same cap, so no work budget is declared.
-        quality_bands=(
-            official_quality_band("native-stage-two-optimization-minimal"),
-        ),
+        quality_bands=(official_quality_band("native-stage-two-optimization-minimal"),),
     ),
     "native-stage-two-optimization": CaseDefinition(
         case_id="native-stage-two-optimization",

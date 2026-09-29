@@ -3141,8 +3141,13 @@ def test_a_case_looks_up_its_band_and_end_state_set_by_scale() -> None:
 def test_a_case_declaration_keeps_one_scatter_contract_per_scale(
     changes: dict[str, object], message: str
 ) -> None:
+    # The registered case's own scatter contracts are stripped first, so each
+    # parameter's declaration is the only one in force.
+    bare = dataclasses.replace(
+        _registered(_END_STATE_CASE_ID), quality_bands=(), upstream_end_states=()
+    )
     with pytest.raises(ValueError, match=message):
-        dataclasses.replace(_registered(_END_STATE_CASE_ID), **changes)
+        dataclasses.replace(bare, **changes)
 
 
 def test_a_band_and_an_end_state_set_may_declare_different_scales() -> None:

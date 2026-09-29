@@ -145,6 +145,24 @@ FIRST_STAGE_STATUS_CONVENTION_BY_DRIVER: Final[Mapping[str, StatusConvention]] =
         }
     )
 )
+#: The end-state keys judged against upstream's own end states (``official_scatter_contracts``):
+#: every area and flux float the workflow compares lane against lane.  Which Boozer surface the
+#: workflow lands on is not a function of its input -- the first stage stops at its iteration cap,
+#: unconverged, and upstream's own script reaches several surfaces from one-ulp starts -- so these
+#: keys are matched against upstream's draws, while ``solver_success``, the persistence flags and
+#: every construction, initial and first-stage route stay lane against lane.
+END_STATE_OBSERVABLES: Final[tuple[str, ...]] = (
+    "area:G",
+    "area:iota",
+    "area:label",
+    "area:residual_norm",
+    "flux:G",
+    "flux:iota",
+    "flux:label",
+    "flux:residual_norm",
+    "flux:target",
+    "flux:surface_dofs",
+)
 #: Integer code of each normalized stopping reason, for publication as a parity
 #: observable: the arbiter compares numeric arrays only (it calls
 #: ``np.isfinite`` on every required value), so the classification travels as
