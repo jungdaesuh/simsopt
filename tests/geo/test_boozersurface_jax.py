@@ -8890,7 +8890,6 @@ class TestBoozerSurfaceJAXExactPath:
             x0,
             *,
             maxiter,
-            tol,
             ftol,
             xtol,
             gtol,
@@ -8900,7 +8899,7 @@ class TestBoozerSurfaceJAXExactPath:
             progress_callback=None,
             args=(),
         ):
-            del maxiter, tol, callback, progress_callback
+            del maxiter, callback, progress_callback
             captured["ftol"] = ftol
             captured["xtol"] = xtol
             captured["gtol"] = gtol
@@ -9064,10 +9063,9 @@ class TestBoozerSurfaceJAXExactPath:
             x0,
             *,
             maxiter,
-            tol,
             ftol=1e-8,
             xtol=1e-8,
-            gtol=None,
+            gtol=1e-8,
             materialize_dense_linearization=True,
             max_dense_linearization_bytes=None,
             callback=None,
@@ -9076,7 +9074,6 @@ class TestBoozerSurfaceJAXExactPath:
         ):
             del (
                 maxiter,
-                tol,
                 ftol,
                 xtol,
                 gtol,
@@ -9160,10 +9157,9 @@ class TestBoozerSurfaceJAXExactPath:
             x0,
             *,
             maxiter,
-            tol,
             ftol=1e-8,
             xtol=1e-8,
-            gtol=None,
+            gtol=1e-8,
             materialize_dense_linearization=True,
             max_dense_linearization_bytes=None,
             callback=None,
@@ -9172,7 +9168,6 @@ class TestBoozerSurfaceJAXExactPath:
         ):
             del (
                 maxiter,
-                tol,
                 ftol,
                 xtol,
                 gtol,
@@ -13005,3 +13000,81 @@ class TestBoozerCoilVJPCpuOracle:
                 f"{weight_inv_modB}). cpu={cpu_per_coil}, jax={jax_per_coil}"
             ),
         )
+
+
+class TestBoozerLeastSquaresLMNativeParity:
+    """Upstream's ``method='lm'`` Boozer LS against the JAX MINPACK lane.
+
+    Upstream calls ``least_squares(method='lm', x_scale=1.0)``, i.e. MINPACK
+    ``lmder``. From the NCSX fit-to-axis start, an LM whose step bound drifts
+    away from its steps took a different trust-region path and converged onto
+    another Boozer branch (iota -0.85 against upstream's -0.41). The lane has
+    to walk lmder's path: the same trial count, stop, and solved state.
+    """
+
+    @pytest.mark.parametrize("optimizer_backend", ["ondevice", "host-jax"])
+    def test_ncsx_lm_solve_matches_upstream_minpack(self, optimizer_backend):
+        from simsopt.configs import get_data
+        from simsopt.field import BiotSavart
+        from simsopt.geo import ToroidalFlux
+
+        from .boozersurface_jax_test_helpers import (
+            BiotSavartJAX,
+            _clone_upstream_label,
+            _clone_upstream_surface,
+        )
+        from .surface_test_helpers import get_surface
+
+        _, base_currents, ma, nfp, bs = get_data("ncsx")
+        surface = get_surface("SurfaceXYZTensorFourier", True, nfp=nfp)
+        surface.fit_to_curve(ma, 0.1)
+        label = ToroidalFlux(surface, BiotSavart(bs.coils), nphi=51, ntheta=51)
+        constraint_weight = 100.0 / (
+            surface.quadpoints_phi.size * surface.quadpoints_theta.size * 3
+        )
+        current_sum = nfp * sum(abs(c.get_value()) for c in base_currents)
+        solve_kwargs = {
+            "tol": 1e-10,
+            "maxiter": 100,
+            "constraint_weight": constraint_weight,
+            "iota": -0.4,
+            "G": 2.0 * np.pi * current_sum * (4 * np.pi * 1e-7 / (2 * np.pi)),
+            "method": "lm",
+        }
+
+        native_surface = _clone_upstream_surface(surface)
+        native = LegacyBoozerSurface(
+            bs,
+            native_surface,
+            _clone_upstream_label(label, native_surface, bs),
+            0.1,
+            constraint_weight=constraint_weight,
+        ).minimize_boozer_penalty_constraints_ls(**solve_kwargs)
+
+        jax_surface = _clone_upstream_surface(surface)
+        booz = BoozerSurfaceJAX(
+            BiotSavartJAX(bs.coils),
+            jax_surface,
+            _clone_upstream_label(label, jax_surface, bs),
+            0.1,
+            constraint_weight=constraint_weight,
+            options={"optimizer_backend": optimizer_backend},
+        )
+        result = booz.minimize_boozer_penalty_constraints_ls(**solve_kwargs)
+
+        assert native["success"]
+        assert result["success"]
+        # Same MINPACK trial count and stop reason (SciPy status 3 is info 2).
+        assert result["info"].nfev == native["info"].nfev
+        assert native["info"].status == 3
+        assert result["info"].info == 2
+        np.testing.assert_allclose(result["iota"], native["iota"], rtol=0, atol=1e-10)
+        np.testing.assert_allclose(result["G"], native["G"], rtol=1e-12, atol=0)
+        np.testing.assert_allclose(
+            jax_surface.get_dofs(),
+            native_surface.get_dofs(),
+            rtol=0,
+            atol=1e-10,
+        )
+        assert np.linalg.norm(np.asarray(result["residual"])) < 1e-12
+        assert np.linalg.norm(np.asarray(native["residual"])) < 1e-12

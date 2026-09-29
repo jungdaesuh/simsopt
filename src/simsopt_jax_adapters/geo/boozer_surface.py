@@ -6944,7 +6944,6 @@ class BoozerSurfaceJAX(Optimizable):
                 residual_fn,
                 x0,
                 maxiter=self.options["bfgs_maxiter"],
-                tol=self.options["bfgs_tol"],
                 ftol=least_squares_options.get("ftol", 1e-8),
                 xtol=least_squares_options.get("xtol", 1e-8),
                 gtol=gtol,

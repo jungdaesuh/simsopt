@@ -9,11 +9,11 @@ Reference/oracle methods:
 Least-squares method:
   - ``method="lm-minpack-ondevice"``: trace-safe dense pivoted-QR
     Levenberg-Marquardt for residual-vector objectives on the target lane,
-    ported from MINPACK ``lmder`` (the algorithm behind
-    ``scipy.optimize.least_squares(method="lm")``).  It matches MINPACK's QR
-    conditioning model at tolerance level without claiming MINPACK's
-    packed-QR byte identity; callers needing MINPACK byte-equality invoke
-    ``scipy.optimize.least_squares(method="lm")`` directly.
+    ported from MINPACK ``lmder``/``lmpar`` (the algorithm behind
+    ``scipy.optimize.least_squares(method="lm")``, here with
+    ``x_scale=1.0``).  It takes MINPACK's steps and stops on MINPACK's tests;
+    dense Householder QR stands in for MINPACK's packed QR and Givens sweeps,
+    so iterates agree to rounding, not bytewise.
 
 Target private methods (maintained for the pinned JAX 0.10.0 runtime after the
 initial port from the upstream JAX optimizer sources):
@@ -2253,112 +2253,179 @@ def adam_optimize_traceable(
     return jax.jit(run_solver)(x)
 
 
-def _clip_lm_damping(damping, *, dtype):
-    minimum = _device_scalar(1.0e-12, dtype=dtype)
-    maximum = _device_scalar(1.0e12, dtype=dtype)
-    return jnp.clip(jnp.asarray(damping, dtype=dtype), minimum, maximum)
+# MINPACK ``lmder`` constants (netlib MINPACK; More 1978) as SciPy's
+# ``least_squares(method="lm")`` passes them: step-bound factor 100, and
+# ``lmpar``'s cap of ten secular-equation iterations.
+_MINPACK_STEP_BOUND_FACTOR = 100.0
+_MINPACK_LMPAR_MAX_ITERATIONS = 10
 
 
-def _lm_defaults(dtype):
-    return {
-        "initial_damping": _device_scalar(1.0e-3, dtype=dtype),
-        "initial_delta_factor": _device_scalar(100.0, dtype=dtype),
-        "accept_threshold": _device_scalar(1.0e-4, dtype=dtype),
-        "increase_factor": _device_scalar(2.0, dtype=dtype),
-        "decrease_factor": _device_scalar(0.5, dtype=dtype),
-        "minimum_delta_update": _device_scalar(0.1, dtype=dtype),
-        "ratio_low": _device_scalar(0.25, dtype=dtype),
-        "ratio_high": _device_scalar(0.75, dtype=dtype),
-        "predicted_floor": _device_scalar(1.0e-18, dtype=dtype),
-    }
+def _minpack_scaled_gradient_cosine(r_matrix, pivots, qtf, column_norms, fnorm):
+    """Return MINPACK ``lmder``'s ``gnorm``, the largest |cos(f, J[:, j])|.
+
+    ``r_matrix``, ``pivots`` and ``qtf`` are J's column-pivoted QR and the
+    leading ``Q^T f``, so ``(R^T qtf)_j`` is ``J[:, pivots[j]]^T f``. Zero
+    Jacobian columns contribute nothing, and ``fnorm == 0`` gives zero.
+    """
+    dtype = qtf.dtype
+    zero = jnp.zeros((), dtype=dtype)
+    one = jnp.ones((), dtype=dtype)
+    residual_is_zero = fnorm == zero
+    projected = r_matrix.T @ (qtf / jnp.where(residual_is_zero, one, fnorm))
+    pivoted_norms = column_norms[pivots]
+    nonzero_column = pivoted_norms != zero
+    cosines = jnp.where(
+        nonzero_column,
+        jnp.abs(projected) / jnp.where(nonzero_column, pivoted_norms, one),
+        zero,
+    )
+    return jnp.where(residual_is_zero, zero, jnp.max(cosines))
 
 
-def _lm_gradient_tol(tol, gtol, *, dtype):
-    if gtol is None:
-        return _optimizer_scalar(tol, dtype=dtype)
-    return _optimizer_scalar(gtol, dtype=dtype)
+def _minpack_qrsolv(r_matrix, pivots, scaled_diag, qtb):
+    """Solve MINPACK ``qrsolv``'s damped system for one ``sqrt(par) * diag``.
+
+    Minimizes ``||[R; S] z - [qtb; 0]||`` with ``S = diag(scaled_diag[pivots])``
+    and returns ``(x, s_matrix)``: ``x[pivots] = z`` and the triangular factor
+    with ``s_matrix^T s_matrix = R^T R + S^2``. A dense Householder QR replaces
+    MINPACK's Givens sweep; the factors agree up to row signs.
+    """
+    n = r_matrix.shape[0]
+    dtype = r_matrix.dtype
+    augmented = jnp.concatenate((r_matrix, jnp.diag(scaled_diag[pivots])), axis=0)
+    q_matrix, s_matrix = jnp.linalg.qr(augmented, mode="reduced")
+    solution = jsp_linalg.solve_triangular(
+        s_matrix,
+        q_matrix[:n].T @ qtb,
+        lower=False,
+    )
+    return jnp.zeros(n, dtype=dtype).at[pivots].set(solution), s_matrix
 
 
-def _matrix_free_lm_info(
-    *,
-    actual_reduction,
-    predicted_reduction,
-    cost,
-    delta,
-    x_norm,
-    nit,
-    maxiter,
-    ftol,
-    xtol,
-    epsmch,
-):
-    """Return MINPACK-style info for the matrix-free-computable LM subset."""
-    one = jnp.asarray(1.0, dtype=cost.dtype)
-    half = jnp.asarray(0.5, dtype=cost.dtype)
-    cost_floor = jnp.maximum(cost, jnp.finfo(cost.dtype).tiny)
-    nonnegative_reduction = actual_reduction >= jnp.asarray(0.0, dtype=cost.dtype)
-    relative_actual = actual_reduction / cost_floor
-    relative_predicted = predicted_reduction / cost_floor
-    ratio = actual_reduction / jnp.maximum(predicted_reduction, cost_floor * epsmch)
-    ftol_met = (
-        nonnegative_reduction
-        & (relative_actual <= ftol)
-        & (relative_predicted <= ftol)
-        & (half * ratio <= one)
-    )
-    xtol_met = delta <= xtol * x_norm
+def _minpack_lmpar(r_matrix, pivots, diag, qtb, delta, par):
+    """MINPACK ``lmpar``: the Levenberg-Marquardt parameter for step bound ``delta``.
 
-    info = jnp.asarray(0, dtype=jnp.int32)
-    info = jnp.where(ftol_met, jnp.asarray(1, dtype=jnp.int32), info)
-    info = jnp.where(xtol_met, jnp.asarray(2, dtype=jnp.int32), info)
-    info = jnp.where(
-        ftol_met & xtol_met,
-        jnp.asarray(3, dtype=jnp.int32),
-        info,
-    )
-    info = jnp.where(
-        (info == 0) & (nit >= maxiter),
-        jnp.asarray(5, dtype=jnp.int32),
-        info,
-    )
-    info = jnp.where(
-        (info == 0)
-        & nonnegative_reduction
-        & (relative_actual <= epsmch)
-        & (relative_predicted <= epsmch)
-        & (half * ratio <= one),
-        jnp.asarray(6, dtype=jnp.int32),
-        info,
-    )
-    info = jnp.where(
-        (info == 0) & (delta <= epsmch * x_norm),
-        jnp.asarray(7, dtype=jnp.int32),
-        info,
-    )
-    return info
+    Returns ``(x, par)`` with ``x`` solving ``(J^T J + par D^2) x = J^T f`` in
+    J's pivoted-QR form (the step is ``-x``). Either ``par = 0`` and the
+    Gauss-Newton ``x`` has ``||D x|| <= 1.1 delta``, or ``par > 0`` solves the
+    secular equation ``||D x(par)|| = delta`` to 10% within ten iterations.
+    """
+    n = r_matrix.shape[0]
+    dtype = r_matrix.dtype
+    zero = jnp.zeros((), dtype=dtype)
+    p1 = jnp.asarray(0.1, dtype=dtype)
+    p001 = jnp.asarray(0.001, dtype=dtype)
+    dwarf = jnp.asarray(jnp.finfo(dtype).tiny, dtype=dtype)
+    pivoted_diag = diag[pivots]
 
+    # Gauss-Newton direction. The first zero on R's diagonal truncates the
+    # solve to the leading nonsingular block (``nsing``); later entries are 0.
+    nonsingular = jnp.cumsum(jnp.diagonal(r_matrix) == zero) == 0
+    full_rank = nonsingular[-1]
+    leading_block = jnp.where(
+        nonsingular[:, None] & nonsingular[None, :],
+        r_matrix,
+        jnp.eye(n, dtype=dtype),
+    )
+    gauss_newton = jsp_linalg.solve_triangular(
+        leading_block,
+        jnp.where(nonsingular, qtb, zero),
+        lower=False,
+    )
+    x_gauss_newton = jnp.zeros(n, dtype=dtype).at[pivots].set(gauss_newton)
+    scaled_x = diag * x_gauss_newton
+    dxnorm = jnp.linalg.norm(scaled_x)
+    fp = dxnorm - delta
+    gauss_newton_accepted = fp <= p1 * delta
 
-def _lm_delta_after_step(delta, step_norm, ratio, actual_reduction, *, defaults):
-    low_ratio_base = jnp.minimum(
-        delta,
-        step_norm / defaults["minimum_delta_update"],
+    # Bracket the root: the Newton step gives the lower bound ``parl`` (full
+    # rank only), the scaled gradient the upper bound ``paru``.
+    newton_rhs = pivoted_diag * (scaled_x[pivots] / dxnorm)
+    newton_w = jsp_linalg.solve_triangular(
+        leading_block,
+        newton_rhs,
+        trans="T",
+        lower=False,
     )
-    low_ratio_scale = jnp.where(
-        actual_reduction >= jnp.asarray(0.0, dtype=delta.dtype),
-        defaults["decrease_factor"],
-        defaults["minimum_delta_update"],
+    newton_w_norm = jnp.linalg.norm(newton_w)
+    parl = jnp.where(full_rank, fp / delta / newton_w_norm / newton_w_norm, zero)
+    gnorm = jnp.linalg.norm((r_matrix.T @ qtb) / pivoted_diag)
+    paru = gnorm / delta
+    paru = jnp.where(paru == zero, dwarf / jnp.minimum(delta, p1), paru)
+    par = jnp.minimum(jnp.maximum(par, parl), paru)
+    par = jnp.where(par == zero, gnorm / dxnorm, par)
+
+    def secular_cond(carry):
+        return ~carry["done"]
+
+    def secular_body(carry):
+        trial_par = jnp.where(
+            carry["par"] == zero,
+            jnp.maximum(dwarf, p001 * carry["paru"]),
+            carry["par"],
+        )
+        x, s_matrix = _minpack_qrsolv(
+            r_matrix,
+            pivots,
+            jnp.sqrt(trial_par) * diag,
+            qtb,
+        )
+        scaled = diag * x
+        trial_dxnorm = jnp.linalg.norm(scaled)
+        previous_fp = carry["fp"]
+        trial_fp = trial_dxnorm - delta
+        iteration = carry["iteration"] + 1
+        done = (
+            (jnp.abs(trial_fp) <= p1 * delta)
+            | (
+                (carry["parl"] == zero)
+                & (trial_fp <= previous_fp)
+                & (previous_fp < zero)
+            )
+            | (iteration == _MINPACK_LMPAR_MAX_ITERATIONS)
+        )
+        correction = jsp_linalg.solve_triangular(
+            s_matrix,
+            pivoted_diag * (scaled[pivots] / trial_dxnorm),
+            trans="T",
+            lower=False,
+        )
+        correction_norm = jnp.linalg.norm(correction)
+        parc = trial_fp / delta / correction_norm / correction_norm
+        parl_next = jnp.where(
+            trial_fp > zero,
+            jnp.maximum(carry["parl"], trial_par),
+            carry["parl"],
+        )
+        paru_next = jnp.where(
+            trial_fp < zero,
+            jnp.minimum(carry["paru"], trial_par),
+            carry["paru"],
+        )
+        return {
+            "iteration": iteration,
+            "x": x,
+            "fp": trial_fp,
+            "par": jnp.where(done, trial_par, jnp.maximum(parl_next, trial_par + parc)),
+            "parl": parl_next,
+            "paru": paru_next,
+            "done": done,
+        }
+
+    final = lax.while_loop(
+        secular_cond,
+        secular_body,
+        {
+            "iteration": jnp.asarray(0, dtype=jnp.int32),
+            "x": x_gauss_newton,
+            "fp": fp,
+            "par": par,
+            "parl": parl,
+            "paru": paru,
+            "done": gauss_newton_accepted,
+        },
     )
-    low_ratio_delta = low_ratio_scale * low_ratio_base
-    updated_delta = jnp.where(
-        ratio >= defaults["ratio_high"],
-        step_norm / defaults["decrease_factor"],
-        delta,
-    )
-    return jnp.where(
-        ratio <= defaults["ratio_low"],
-        low_ratio_delta,
-        updated_delta,
-    )
+    return final["x"], jnp.where(gauss_newton_accepted, zero, final["par"])
 
 
 def _least_squares_result_message(status, success, info=0):
@@ -2386,238 +2453,9 @@ def _least_squares_result_message(status, success, info=0):
     return "maximum iterations reached"
 
 
-def _qr_lm_dense_state(flat_residual_fn, flat_x):
-    residual = flat_residual_fn(flat_x)
-
-    def jvp_fn(x, v):
-        return jax.jvp(flat_residual_fn, (x,), (v,))[1]
-
-    jacobian = _materialize_dense_jacobian(jvp_fn, flat_x)
-    gradient, hessian = _least_squares_linearization_from_jacobian(
-        residual,
-        jacobian,
-    )
-    return {
-        "residual": residual,
-        "jacobian": jacobian,
-        "gradient": gradient,
-        "hessian": hessian,
-        "cost": _least_squares_cost(residual),
-        "grad_norm_inf": _tree_inf_norm(gradient),
-    }
-
-
-def _qr_scaled_gradient_norm(residual, jacobian):
-    residual = jnp.ravel(jnp.asarray(residual))
-    jacobian = jnp.asarray(jacobian)
-    dtype = residual.dtype
-    residual_norm = jnp.linalg.norm(residual)
-    column_norms = jnp.linalg.norm(jacobian, axis=0)
-    numerator = jnp.abs(jacobian.T @ residual)
-    denominator = column_norms * residual_norm
-    cosines = jnp.where(
-        denominator > _device_scalar(0.0, dtype=dtype),
-        numerator / denominator,
-        _device_scalar(0.0, dtype=dtype),
-    )
-    return jnp.max(cosines)
-
-
-def _qr_lm_info(
-    *,
-    actual_reduction,
-    predicted_reduction,
-    cost,
-    delta,
-    x_norm,
-    nit,
-    maxiter,
-    ftol,
-    xtol,
-    gtol,
-    epsmch,
-    qr_gnorm,
-):
-    info = _matrix_free_lm_info(
-        actual_reduction=actual_reduction,
-        predicted_reduction=predicted_reduction,
-        cost=cost,
-        delta=delta,
-        x_norm=x_norm,
-        nit=nit,
-        maxiter=maxiter,
-        ftol=ftol,
-        xtol=xtol,
-        epsmch=epsmch,
-    )
-    info = jnp.where(
-        (info == 0) & (qr_gnorm <= gtol),
-        jnp.asarray(4, dtype=jnp.int32),
-        info,
-    )
-    info = jnp.where(
-        (info == 0) & (qr_gnorm <= epsmch),
-        jnp.asarray(8, dtype=jnp.int32),
-        info,
-    )
-    return info
-
-
-def _qr_lm_step(jacobian, residual, damping):
-    jacobian = jnp.asarray(jacobian)
-    residual = jnp.ravel(jnp.asarray(residual))
-    cols = jacobian.shape[1]
-    dtype = jacobian.dtype
-    damping_sqrt = jnp.sqrt(jnp.asarray(damping, dtype=dtype))
-    augmented_jacobian = jnp.concatenate(
-        (jacobian, damping_sqrt * jnp.eye(cols, dtype=dtype)),
-        axis=0,
-    )
-    augmented_rhs = jnp.concatenate(
-        (-residual, jnp.zeros(cols, dtype=dtype)),
-        axis=0,
-    )
-    q_matrix, r_matrix, pivots = jsp_linalg.qr(
-        augmented_jacobian,
-        pivoting=True,
-        mode="economic",
-    )
-    pivoted_step = jsp_linalg.solve_triangular(
-        r_matrix,
-        q_matrix.T @ augmented_rhs,
-        lower=False,
-    )
-    return jnp.zeros_like(pivoted_step).at[pivots].set(pivoted_step)
-
-
-def _qr_lm_iteration(
-    flat_residual_fn,
-    state,
-    *,
-    gradient_tol,
-    ftol,
-    xtol,
-    gtol,
-    maxiter,
-):
-    dtype = state["x"].dtype
-    defaults = _lm_defaults(dtype)
-    damping = _clip_lm_damping(state["damping"], dtype=dtype)
-    step = _qr_lm_step(state["jacobian"], state["residual"], damping)
-    x_candidate = state["x"] + step
-    candidate = _qr_lm_dense_state(flat_residual_fn, x_candidate)
-
-    predicted_residual = state["residual"] + state["jacobian"] @ step
-    predicted_reduction = state["cost"] - _least_squares_cost(predicted_residual)
-    actual_reduction = state["cost"] - candidate["cost"]
-    ratio = actual_reduction / jnp.maximum(
-        predicted_reduction,
-        defaults["predicted_floor"],
-    )
-    finite_candidate = (
-        jnp.all(jnp.isfinite(x_candidate))
-        & jnp.all(jnp.isfinite(step))
-        & jnp.all(jnp.isfinite(candidate["residual"]))
-        & jnp.all(jnp.isfinite(candidate["jacobian"]))
-        & jnp.all(jnp.isfinite(candidate["gradient"]))
-        & jnp.all(jnp.isfinite(candidate["hessian"]))
-        & jnp.isfinite(candidate["cost"])
-        & jnp.isfinite(predicted_reduction)
-    )
-    accepted = finite_candidate & (ratio >= defaults["accept_threshold"])
-    step_norm = jnp.linalg.norm(step)
-    delta_after_step = _lm_delta_after_step(
-        state["delta"],
-        step_norm,
-        jnp.asarray(ratio, dtype=state["delta"].dtype),
-        jnp.asarray(actual_reduction, dtype=state["delta"].dtype),
-        defaults=defaults,
-    )
-    damping_after_accept = lax.cond(
-        ratio > defaults["ratio_high"],
-        lambda _: damping * defaults["decrease_factor"],
-        lambda _: lax.cond(
-            ratio < defaults["ratio_low"],
-            lambda __: damping * defaults["increase_factor"],
-            lambda __: damping,
-            operand=None,
-        ),
-        operand=None,
-    )
-    next_damping = lax.cond(
-        accepted,
-        lambda _: _clip_lm_damping(damping_after_accept, dtype=dtype),
-        lambda _: _clip_lm_damping(
-            damping * defaults["increase_factor"],
-            dtype=dtype,
-        ),
-        operand=None,
-    )
-    x_next = lax.select(accepted, x_candidate, state["x"])
-    residual_next = lax.select(accepted, candidate["residual"], state["residual"])
-    jacobian_next = lax.select(accepted, candidate["jacobian"], state["jacobian"])
-    gradient_next = lax.select(accepted, candidate["gradient"], state["gradient"])
-    hessian_next = lax.select(accepted, candidate["hessian"], state["hessian"])
-    cost_next = lax.select(accepted, candidate["cost"], state["cost"])
-    grad_norm_next = lax.select(
-        accepted,
-        candidate["grad_norm_inf"],
-        state["grad_norm_inf"],
-    )
-    x_norm = jnp.linalg.norm(x_next)
-    next_nit = state["nit"] + 1
-    qr_gnorm = _qr_scaled_gradient_norm(residual_next, jacobian_next)
-    epsmch = jnp.asarray(jnp.finfo(dtype).eps, dtype=dtype)
-    info_candidate = _qr_lm_info(
-        actual_reduction=actual_reduction,
-        predicted_reduction=predicted_reduction,
-        cost=state["cost"],
-        delta=delta_after_step,
-        x_norm=x_norm,
-        nit=next_nit,
-        maxiter=jnp.asarray(maxiter, dtype=jnp.int32),
-        ftol=jnp.asarray(ftol, dtype=dtype),
-        xtol=jnp.asarray(xtol, dtype=dtype),
-        gtol=jnp.asarray(gtol, dtype=dtype),
-        epsmch=epsmch,
-        qr_gnorm=qr_gnorm,
-    )
-    info_next = lax.select(
-        finite_candidate,
-        info_candidate,
-        jnp.asarray(0, dtype=jnp.int32),
-    )
-    legacy_success = grad_norm_next <= gradient_tol
-    info_success = (
-        (info_next == 1) | (info_next == 2) | (info_next == 3) | (info_next == 4)
-    )
-
-    return {
-        "x": x_next,
-        "residual": residual_next,
-        "jacobian": jacobian_next,
-        "gradient": gradient_next,
-        "hessian": hessian_next,
-        "cost": cost_next,
-        "grad_norm_inf": grad_norm_next,
-        "damping": next_damping,
-        "delta": delta_after_step,
-        "nit": next_nit,
-        "status": lax.select(
-            finite_candidate,
-            jnp.asarray(1, dtype=jnp.int32),
-            jnp.asarray(2, dtype=jnp.int32),
-        ),
-        "info": info_next,
-        "accepted": accepted,
-        "success": finite_candidate & (legacy_success | info_success),
-    }
-
-
 def _make_traceable_levenberg_marquardt_minpack_runner(
     residual_fn,
     maxiter,
-    tol,
     ftol,
     xtol,
     gtol,
@@ -2633,10 +2471,9 @@ def _make_traceable_levenberg_marquardt_minpack_runner(
     """
     cache_key = (
         int(maxiter),
-        float(tol),
         float(ftol),
         float(xtol),
-        None if gtol is None else float(gtol),
+        float(gtol),
         bool(callback_enabled),
         bool(progress_callback_enabled),
     )
@@ -2647,10 +2484,9 @@ def _make_traceable_levenberg_marquardt_minpack_runner(
         lambda residual_fn_ref: _build_traceable_levenberg_marquardt_minpack_runner(
             residual_fn_ref,
             int(maxiter),
-            float(tol),
             float(ftol),
             float(xtol),
-            None if gtol is None else float(gtol),
+            float(gtol),
             bool(callback_enabled),
             bool(progress_callback_enabled),
         ),
@@ -2660,7 +2496,6 @@ def _make_traceable_levenberg_marquardt_minpack_runner(
 def _build_traceable_levenberg_marquardt_minpack_runner(
     residual_fn_ref,
     maxiter,
-    tol,
     ftol,
     xtol,
     gtol,
@@ -2682,67 +2517,164 @@ def _build_traceable_levenberg_marquardt_minpack_runner(
         def residual_eval(flat_x):
             return jnp.ravel(jnp.asarray(residual_fn(unravel(flat_x), *fn_args)))
 
-        # Build tol scalars inside the trace so they are staged as constants
+        def jacobian_eval(flat_x):
+            def jvp_fn(x, v):
+                return jax.jvp(residual_eval, (x,), (v,))[1]
+
+            return _materialize_dense_jacobian(jvp_fn, flat_x)
+
+        # Build the scalars inside the trace so they are staged as constants
         # rather than closed-over concrete device arrays (which JAX bakes via
         # mlir.ir_constant -> a device->host copy, tripping transfer_guard).
-        gradient_tol = _lm_gradient_tol(tol, gtol, dtype=dtype)
+        zero = _device_scalar(0.0, dtype=dtype)
+        one = _device_scalar(1.0, dtype=dtype)
+        p1 = _device_scalar(0.1, dtype=dtype)
+        p5 = _device_scalar(0.5, dtype=dtype)
+        p25 = _device_scalar(0.25, dtype=dtype)
+        p75 = _device_scalar(0.75, dtype=dtype)
+        p0001 = _device_scalar(1.0e-4, dtype=dtype)
+        epsmch = _device_scalar(np.finfo(np.dtype(dtype)).eps, dtype=dtype)
+        ftol_value = _device_scalar(ftol, dtype=dtype)
+        xtol_value = _device_scalar(xtol, dtype=dtype)
         gtol_value = _device_scalar(gtol, dtype=dtype)
-        initial = _qr_lm_dense_state(residual_eval, flat_x_init)
-        initial_qr_gnorm = _qr_scaled_gradient_norm(
-            initial["residual"],
-            initial["jacobian"],
-        )
-        initial_info = jnp.where(
-            initial_qr_gnorm <= gtol_value,
-            jnp.asarray(4, dtype=jnp.int32),
-            jnp.asarray(0, dtype=jnp.int32),
-        )
+        factor = _device_scalar(_MINPACK_STEP_BOUND_FACTOR, dtype=dtype)
+        info_none = jnp.asarray(0, dtype=jnp.int32)
+
+        # Upstream passes x_scale=1.0, which SciPy maps to MINPACK mode=2 with
+        # diag = 1: the scaling stays fixed instead of tracking column norms.
+        diag = jnp.ones_like(flat_x_init)
+        residual0 = residual_eval(flat_x_init)
+        jacobian0 = jacobian_eval(flat_x_init)
+        xnorm0 = jnp.linalg.norm(diag * flat_x_init)
+        delta0 = factor * xnorm0
         state0 = {
             "x": flat_x_init,
-            "residual": initial["residual"],
-            "jacobian": initial["jacobian"],
-            "gradient": initial["gradient"],
-            "hessian": initial["hessian"],
-            "cost": initial["cost"],
-            "grad_norm_inf": initial["grad_norm_inf"],
-            "damping": _lm_defaults(dtype)["initial_damping"],
-            "delta": _lm_defaults(dtype)["initial_delta_factor"]
-            * jnp.maximum(
-                jnp.linalg.norm(flat_x_init),
-                _device_scalar(1.0, dtype=dtype),
+            "residual": residual0,
+            "jacobian": jacobian0,
+            "fnorm": jnp.linalg.norm(residual0),
+            "xnorm": xnorm0,
+            "delta": jnp.where(delta0 == zero, factor, delta0),
+            "par": zero,
+            "first_iteration": jnp.asarray(True),
+            "gnorm": zero,
+            "ratio": zero,
+            "nfev": jnp.asarray(1, dtype=jnp.int32),
+            "njev": jnp.asarray(1, dtype=jnp.int32),
+            "info": info_none,
+            "nonfinite": ~(
+                jnp.all(jnp.isfinite(residual0)) & jnp.all(jnp.isfinite(jacobian0))
             ),
-            "nit": jnp.asarray(0, dtype=jnp.int32),
-            "status": jnp.asarray(0, dtype=jnp.int32),
-            "info": initial_info,
-            "accepted": jnp.asarray(False),
-            "success": (initial["grad_norm_inf"] <= gradient_tol) | (initial_info == 4),
         }
 
-        def cond_fun(state):
-            return (
-                (state["nit"] < maxiter)
-                & (~state["success"])
-                & (state["status"] != 2)
-                & (state["info"] == 0)
+        def trial_step(state, r_matrix, pivots, qtf):
+            """One pass of ``lmder``'s inner loop: a step, its test, the tests."""
+            lm_x, par = _minpack_lmpar(
+                r_matrix,
+                pivots,
+                diag,
+                qtf,
+                state["delta"],
+                state["par"],
+            )
+            step = -lm_x
+            x_trial = state["x"] + step
+            pnorm = jnp.linalg.norm(diag * step)
+            # Until the first successful step, the bound never exceeds the step.
+            delta = jnp.where(
+                state["first_iteration"],
+                jnp.minimum(state["delta"], pnorm),
+                state["delta"],
+            )
+            residual_trial = residual_eval(x_trial)
+            nfev = state["nfev"] + 1
+            fnorm = state["fnorm"]
+            fnorm1 = jnp.linalg.norm(residual_trial)
+
+            # Scaled actual and predicted reductions and the directional
+            # derivative; a NaN or overflowing trial compares False and falls
+            # to actred = -1, a rejected step.
+            actred = jnp.where(p1 * fnorm1 < fnorm, one - (fnorm1 / fnorm) ** 2, -one)
+            temp1 = jnp.linalg.norm(r_matrix @ step[pivots]) / fnorm
+            temp2 = jnp.sqrt(par) * pnorm / fnorm
+            prered = temp1**2 + temp2**2 / p5
+            dirder = -(temp1**2 + temp2**2)
+            ratio = jnp.where(prered != zero, actred / prered, zero)
+
+            # Step-bound update: shrink by ``temp`` on a poor ratio (``temp`` by
+            # the quadratic model when actred < 0), expand to 2 ||D p|| on a good
+            # ratio or a Gauss-Newton step.
+            shrink = jnp.where(
+                actred >= zero,
+                p5,
+                p5 * dirder / (dirder + p5 * actred),
+            )
+            shrink = jnp.where((p1 * fnorm1 >= fnorm) | (shrink < p1), p1, shrink)
+            poor_ratio = ratio <= p25
+            expand = (par == zero) | (ratio >= p75)
+            delta = jnp.where(
+                poor_ratio,
+                shrink * jnp.minimum(delta, pnorm / p1),
+                jnp.where(expand, pnorm / p5, delta),
+            )
+            par = jnp.where(
+                poor_ratio,
+                par / shrink,
+                jnp.where(expand, p5 * par, par),
             )
 
-        def body_fun(state):
-            next_state = _qr_lm_iteration(
-                residual_eval,
-                state,
-                gradient_tol=gradient_tol,
-                ftol=_device_scalar(ftol, dtype=dtype),
-                xtol=_device_scalar(xtol, dtype=dtype),
-                gtol=gtol_value,
-                maxiter=maxiter,
+            # A rejected step keeps x, f and J; only delta and par moved.
+            accepted = ratio >= p0001
+            x_next = jnp.where(accepted, x_trial, state["x"])
+            residual_next = jnp.where(accepted, residual_trial, state["residual"])
+            xnorm = jnp.where(accepted, jnp.linalg.norm(diag * x_trial), state["xnorm"])
+            fnorm_next = jnp.where(accepted, fnorm1, fnorm)
+            jacobian_next = lax.cond(
+                accepted,
+                jacobian_eval,
+                lambda _x: state["jacobian"],
+                x_trial,
             )
+
+            # Convergence tests (a later match overrides an earlier one, as in
+            # lmder.f), then the stringent-tolerance and budget tests.
+            ftol_met = (
+                (jnp.abs(actred) <= ftol_value)
+                & (prered <= ftol_value)
+                & (p5 * ratio <= one)
+            )
+            xtol_met = delta <= xtol_value * xnorm
+            info = jnp.where(
+                ftol_met & xtol_met,
+                3,
+                jnp.where(xtol_met, 2, jnp.where(ftol_met, 1, 0)),
+            )
+            stringent = jnp.where(
+                state["gnorm"] <= epsmch,
+                8,
+                jnp.where(
+                    delta <= epsmch * xnorm,
+                    7,
+                    jnp.where(
+                        (jnp.abs(actred) <= epsmch)
+                        & (prered <= epsmch)
+                        & (p5 * ratio <= one),
+                        6,
+                        jnp.where(nfev >= maxiter, 5, 0),
+                    ),
+                ),
+            )
+            info = jnp.where(info == 0, stringent, info).astype(jnp.int32)
+            # lmder would factor this Jacobian next; a non-finite one ends the
+            # solve instead of feeding NaNs to the QR.
+            nonfinite = accepted & (info == 0) & ~jnp.all(jnp.isfinite(jacobian_next))
+
             if callback_enabled:
                 lax.cond(
-                    next_state["accepted"],
+                    accepted,
                     lambda _: jax.debug.callback(
                         _invoke_traceable_lm_callback,
                         callback_token,
-                        next_state["x"],
+                        x_next,
                         ordered=False,
                     ),
                     lambda _: None,
@@ -2750,21 +2682,104 @@ def _build_traceable_levenberg_marquardt_minpack_runner(
                 )
             if progress_callback_enabled:
                 lax.cond(
-                    next_state["accepted"],
+                    accepted,
                     lambda _: jax.debug.callback(
                         _invoke_traceable_progress_callback,
                         progress_callback_token,
-                        next_state["nit"],
-                        next_state["cost"],
-                        next_state["grad_norm_inf"],
+                        nfev - 1,
+                        _least_squares_cost(residual_next),
+                        jnp.max(jnp.abs(jacobian_next.T @ residual_next)),
                         ordered=False,
                     ),
                     lambda _: None,
                     operand=None,
                 )
-            return next_state
+            return {
+                "x": x_next,
+                "residual": residual_next,
+                "jacobian": jacobian_next,
+                "fnorm": fnorm_next,
+                "xnorm": xnorm,
+                "delta": delta,
+                "par": par,
+                "first_iteration": state["first_iteration"] & ~accepted,
+                "gnorm": state["gnorm"],
+                "ratio": ratio,
+                "nfev": nfev,
+                "njev": state["njev"] + accepted.astype(jnp.int32),
+                "info": info,
+                "nonfinite": nonfinite,
+            }
 
-        return lax.while_loop(cond_fun, body_fun, state0)
+        def outer_cond(state):
+            return (state["info"] == 0) & ~state["nonfinite"]
+
+        def outer_body(state):
+            """One ``lmder`` outer iteration: factor J, gtol test, inner loop."""
+            q_matrix, r_matrix, pivots = jsp_linalg.qr(
+                state["jacobian"],
+                pivoting=True,
+                mode="economic",
+            )
+            qtf = q_matrix.T @ state["residual"]
+            gnorm = _minpack_scaled_gradient_cosine(
+                r_matrix,
+                pivots,
+                qtf,
+                jnp.linalg.norm(state["jacobian"], axis=0),
+                state["fnorm"],
+            )
+
+            def inner_cond(inner):
+                return (
+                    (inner["info"] == 0)
+                    & ~inner["nonfinite"]
+                    & (inner["ratio"] < p0001)
+                )
+
+            return lax.while_loop(
+                inner_cond,
+                lambda inner: trial_step(inner, r_matrix, pivots, qtf),
+                {
+                    **state,
+                    "gnorm": gnorm,
+                    "ratio": zero,
+                    "info": jnp.where(
+                        gnorm <= gtol_value,
+                        jnp.asarray(4, dtype=jnp.int32),
+                        info_none,
+                    ),
+                },
+            )
+
+        final = lax.while_loop(outer_cond, outer_body, state0)
+        gradient, hessian = _least_squares_linearization_from_jacobian(
+            final["residual"],
+            final["jacobian"],
+        )
+        converged = (final["info"] >= 1) & (final["info"] <= 4)
+        return {
+            "x": final["x"],
+            "residual": final["residual"],
+            "jacobian": final["jacobian"],
+            "gradient": gradient,
+            "hessian": hessian,
+            "cost": _least_squares_cost(final["residual"]),
+            "par": final["par"],
+            "nit": final["nfev"] - 1,
+            "njev": final["njev"],
+            "status": jnp.where(
+                final["nonfinite"],
+                jnp.asarray(2, dtype=jnp.int32),
+                jnp.where(
+                    final["nfev"] > 1,
+                    jnp.asarray(1, dtype=jnp.int32),
+                    jnp.asarray(0, dtype=jnp.int32),
+                ),
+            ),
+            "info": final["info"],
+            "success": converged & ~final["nonfinite"],
+        }
 
     run_solver.__name__ = "traceable_levenberg_marquardt_minpack_run_solver"
     if not callback_enabled and not progress_callback_enabled:
@@ -2784,7 +2799,6 @@ def levenberg_marquardt_minpack_traceable(
     x0,
     *,
     maxiter=1500,
-    tol=1e-10,
     ftol=1e-8,
     xtol=1e-8,
     gtol=1e-8,
@@ -2794,17 +2808,23 @@ def levenberg_marquardt_minpack_traceable(
     progress_callback=None,
     args=(),
 ):
-    """Trace-safe QR Levenberg-Marquardt solver for least-squares residuals.
+    """Trace-safe MINPACK ``lmder`` Levenberg-Marquardt for residual vectors.
 
-    This opt-in lane materializes the dense Jacobian each iteration and solves
-    the Marquardt augmented least-squares system with column-pivoted QR. It is
-    MINPACK-style and tolerance-equivalent; it does not claim MINPACK packed-QR
-    byte identity.
+    Mirrors ``scipy.optimize.least_squares(method="lm", x_scale=1.0)``: the
+    trust-region bound ``delta`` sets the Marquardt parameter through
+    ``lmpar``'s secular equation, and the solve stops only on MINPACK's
+    ``info`` tests, with ``maxiter`` as ``max_nfev``. Dense Householder QR
+    replaces MINPACK's packed QR and Givens sweeps, so iterates agree to
+    rounding rather than bytewise.
     """
     x = jax.tree.map(jnp.asarray, x0)
     flat_x0, unravel = ravel_pytree(x)
     normalized_args = _normalize_solver_args(args)
     dtype = flat_x0.dtype
+    if int(maxiter) < 1:
+        raise ValueError(
+            f"maxiter is MINPACK's max_nfev and must be positive; got {maxiter!r}."
+        )
 
     # Probe the residual row count by abstract shape inference on the original
     # pytree (passed as a traced arg). jax.eval_shape traces without executing,
@@ -2819,6 +2839,12 @@ def levenberg_marquardt_minpack_traceable(
     )
     linearization_rows = int(np.prod(residual_shape.shape))
     linearization_cols = int(flat_x0.size)
+    if linearization_rows < linearization_cols:
+        raise ValueError(
+            "MINPACK Levenberg-Marquardt needs at least as many residuals as "
+            f"variables; got {linearization_rows} residuals for "
+            f"{linearization_cols} variables."
+        )
     dense_linearization_within_budget, dense_report = (
         _least_squares_dense_linearization_policy(
             linearization_rows,
@@ -2840,7 +2866,6 @@ def levenberg_marquardt_minpack_traceable(
     runner = _make_traceable_levenberg_marquardt_minpack_runner(
         residual_fn,
         maxiter,
-        tol,
         ftol,
         xtol,
         gtol,
@@ -2876,8 +2901,9 @@ def levenberg_marquardt_minpack_traceable(
         "fun": state["cost"],
         "grad": unravel(state["gradient"]),
         "hessian": state["hessian"],
-        "damping": state["damping"],
+        "damping": state["par"],
         "nit": state["nit"],
+        "njev": state["njev"],
         "status": state["status"],
         "info": state["info"],
         "success": state["success"],
@@ -6933,7 +6959,7 @@ def _least_squares_state_to_optimize_result(result):
         damping=result["damping"],
         nit=nit,
         nfev=nit + 1,
-        njev=nit + 1,
+        njev=int(_host_scalar(result["njev"], dtype=np.int64)),
         status=status,
         info=info,
         success=success,
@@ -6996,7 +7022,6 @@ def target_least_squares(
         residual_fn,
         x0,
         maxiter=maxiter,
-        tol=tol,
         ftol=ftol,
         xtol=xtol,
         gtol=gtol,

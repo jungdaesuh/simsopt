@@ -13,16 +13,21 @@ These tests pin the properties the lane ships with:
    spelling that reaches ``SIMSOPT_LM_QR``; the other backends default to the
    quasi-Newton route,
 2. the executed route is readable off the result,
-3. it reaches the closed-form / recoverable optimum on reference fixtures,
+3. it reaches the closed-form / recoverable optimum on reference fixtures and
+   follows MINPACK ``lmder`` step for step (``scipy.optimize.least_squares``
+   with ``method="lm"``, ``x_scale=1.0``),
 4. its dense materialization is refused up front against a declared byte
    budget, and
 5. repeated solves reuse one compiled executable instead of retracing per call,
    while problems with different embedded constants keep their own.
 """
 
+import jax
 import numpy as np
 import pytest
 import jax.numpy as jnp
+import scipy.linalg
+import scipy.optimize
 
 from simsopt_jax.geo.optimizers.single_stage_routing import (
     resolve_boozer_least_squares_algorithm,
@@ -180,6 +185,148 @@ def test_qr_lane_reaches_the_nonlinear_least_squares_optimum():
     assert float(qr.fun) < 1e-14
 
 
+# Rosenbrock chains: two coupled banana valleys in three variables. From these
+# starts an LM whose step bound is bookkeeping, detached from the step it takes,
+# collapses the bound and stops on xtol far from the minimum (cost 2.1 to 1e2);
+# MINPACK's lmder, where the bound sets the Marquardt parameter, reaches zero.
+_ROSENBROCK_CHAIN_CASES = (
+    (10.0, (-1.2, 1.0, 1.0)),
+    (10.0, (-1.2, 1.0, -1.2)),
+    (10.0, (-1.5, 2.0, 0.5)),
+    (100.0, (-1.2, 1.0, -1.2)),
+    (100.0, (0.0, 0.0, 0.0)),
+)
+# MINPACK ``info`` -> ``least_squares`` ``status`` (SciPy's
+# ``FROM_MINPACK_TO_COMMON``).
+_MINPACK_INFO_TO_SCIPY_STATUS = {1: 2, 2: 3, 3: 4, 4: 1, 5: 0}
+# SciPy's own defaults for method="lm", passed explicitly to both sides.
+_MINPACK_TOLERANCES = {"ftol": 1e-8, "xtol": 1e-8, "gtol": 1e-8}
+_MINPACK_MAX_NFEV = 300
+
+
+def _rosenbrock_chain(scale, *, anchor_last=False):
+    def residual(x):
+        terms = [
+            scale * (x[1] - x[0] ** 2),
+            1.0 - x[0],
+            scale * (x[2] - x[1] ** 2),
+            1.0 - x[1],
+        ]
+        if anchor_last:
+            terms.append(1.0 - x[2])
+        return jnp.stack(terms)
+
+    return residual
+
+
+def _solve_both_minpack_lanes(residual, x0):
+    """Run the QR lane and SciPy's MINPACK lmder on one problem."""
+    x0 = np.asarray(x0, dtype=np.float64)
+    fun = jax.jit(residual)
+    jac = jax.jit(jax.jacfwd(residual))
+    reference = scipy.optimize.least_squares(
+        lambda x: np.asarray(fun(x)),
+        x0,
+        jac=lambda x: np.asarray(jac(x)),
+        method="lm",
+        x_scale=1.0,
+        max_nfev=_MINPACK_MAX_NFEV,
+        **_MINPACK_TOLERANCES,
+    )
+    lane = _opt.target_least_squares(
+        residual,
+        jnp.asarray(x0),
+        method="lm-minpack-ondevice",
+        maxiter=_MINPACK_MAX_NFEV,
+        options=dict(_MINPACK_TOLERANCES),
+    )
+    return lane, reference
+
+
+@pytest.mark.parametrize(("scale", "x0"), _ROSENBROCK_CHAIN_CASES)
+def test_qr_lane_converges_on_rosenbrock_chains_like_minpack(scale, x0):
+    """The lane reaches the zero-residual minimum on the same MINPACK path."""
+    lane, reference = _solve_both_minpack_lanes(_rosenbrock_chain(scale), x0)
+
+    assert reference.cost <= 1e-20
+    assert lane.success, lane.message
+    assert float(lane.fun) <= 1e-20
+    np.testing.assert_allclose(np.asarray(lane.x), np.ones(3), rtol=0, atol=1e-10)
+    # Same trial count and the same MINPACK stop: the lane walks lmder's path.
+    assert lane.nfev == reference.nfev
+    assert _MINPACK_INFO_TO_SCIPY_STATUS[lane.info] == reference.status
+
+
+def test_qr_lane_matches_minpack_at_a_nonzero_residual_minimum():
+    """Anchoring x[2] leaves a local minimum with cost 1.85; both stop on ftol."""
+    lane, reference = _solve_both_minpack_lanes(
+        _rosenbrock_chain(10.0, anchor_last=True),
+        (-1.2, 1.0, 1.0),
+    )
+
+    assert reference.cost > 1.0
+    assert lane.success, lane.message
+    np.testing.assert_allclose(float(lane.fun), reference.cost, rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(lane.x), reference.x, rtol=0, atol=1e-8)
+    assert lane.nfev == reference.nfev
+    assert _MINPACK_INFO_TO_SCIPY_STATUS[lane.info] == reference.status
+
+
+def _pivoted_qr_problem(seed):
+    rng = np.random.default_rng(seed)
+    jacobian = rng.standard_normal((12, 5)) @ np.diag([1.0, 3.0, 1e-2, 0.5, 10.0])
+    residual = rng.standard_normal(12)
+    q_matrix, r_matrix, pivots = scipy.linalg.qr(
+        jacobian, pivoting=True, mode="economic"
+    )
+    return jacobian, residual, r_matrix, pivots, q_matrix.T @ residual
+
+
+def test_lmpar_solves_the_secular_equation_inside_a_short_bound():
+    """A bound shorter than the Gauss-Newton step yields par > 0 on ||x|| ~ delta."""
+    jacobian, residual, r_matrix, pivots, qtb = _pivoted_qr_problem(_FIXTURE_SEED)
+    gauss_newton = np.linalg.lstsq(jacobian, residual, rcond=None)[0]
+    delta = 0.05 * np.linalg.norm(gauss_newton)
+
+    x, par = _opt._minpack_lmpar(
+        jnp.asarray(r_matrix),
+        jnp.asarray(pivots),
+        jnp.ones(5),
+        jnp.asarray(qtb),
+        jnp.asarray(delta),
+        jnp.asarray(0.0),
+    )
+    x = np.asarray(x)
+    par = float(par)
+
+    assert par > 0.0
+    assert abs(np.linalg.norm(x) - delta) <= 0.1 * delta
+    np.testing.assert_allclose(
+        (jacobian.T @ jacobian + par * np.eye(5)) @ x,
+        jacobian.T @ residual,
+        rtol=1e-10,
+        atol=1e-12,
+    )
+
+
+def test_lmpar_returns_the_gauss_newton_step_inside_a_long_bound():
+    """A bound past 1.1 ||Gauss-Newton step|| gives par = 0 and that step."""
+    jacobian, residual, r_matrix, pivots, qtb = _pivoted_qr_problem(_FIXTURE_SEED + 5)
+    gauss_newton = np.linalg.lstsq(jacobian, residual, rcond=None)[0]
+
+    x, par = _opt._minpack_lmpar(
+        jnp.asarray(r_matrix),
+        jnp.asarray(pivots),
+        jnp.ones(5),
+        jnp.asarray(qtb),
+        jnp.asarray(2.0 * np.linalg.norm(gauss_newton)),
+        jnp.asarray(0.0),
+    )
+
+    assert float(par) == 0.0
+    np.testing.assert_allclose(np.asarray(x), gauss_newton, rtol=1e-10, atol=1e-12)
+
+
 # --------------------------------------------------------------------------
 # 4. Dense materialization is capped up front
 # --------------------------------------------------------------------------
@@ -316,10 +463,10 @@ def test_qr_runner_is_memoized_per_residual_callable_and_constant_set():
     residual, x0, _optimum = _linear_fixture()
 
     first = _opt._make_traceable_levenberg_marquardt_minpack_runner(
-        residual, 400, 1e-10, 1e-8, 1e-8, 1e-8, False, False
+        residual, 400, 1e-8, 1e-8, 1e-8, False, False
     )
     second = _opt._make_traceable_levenberg_marquardt_minpack_runner(
-        residual, 400, 1e-10, 1e-8, 1e-8, 1e-8, False, False
+        residual, 400, 1e-8, 1e-8, 1e-8, False, False
     )
     assert first is second
 
@@ -333,12 +480,12 @@ def test_qr_runner_is_memoized_per_residual_callable_and_constant_set():
     # A different build-time constant is a different executable, but both stay
     # reachable under the same residual callable.
     other_maxiter = _opt._make_traceable_levenberg_marquardt_minpack_runner(
-        residual, 7, 1e-10, 1e-8, 1e-8, 1e-8, False, False
+        residual, 7, 1e-8, 1e-8, 1e-8, False, False
     )
     assert other_maxiter is not first
     assert (
         _opt._make_traceable_levenberg_marquardt_minpack_runner(
-            residual, 7, 1e-10, 1e-8, 1e-8, 1e-8, False, False
+            residual, 7, 1e-8, 1e-8, 1e-8, False, False
         )
         is other_maxiter
     )
@@ -347,7 +494,7 @@ def test_qr_runner_is_memoized_per_residual_callable_and_constant_set():
     # because its runner carries the debug-callback effects.
     assert (
         _opt._make_traceable_levenberg_marquardt_minpack_runner(
-            residual, 400, 1e-10, 1e-8, 1e-8, 1e-8, True, False
+            residual, 400, 1e-8, 1e-8, 1e-8, True, False
         )
         is not first
     )
@@ -492,7 +639,7 @@ def test_one_runner_keeps_two_decision_structures_apart():
         maxiter=100,
     )
     runner = _opt._make_traceable_levenberg_marquardt_minpack_runner(
-        residual, 100, 1e-10, 1e-8, 1e-8, 1e-8, False, False
+        residual, 100, 1e-8, 1e-8, 1e-8, False, False
     )
 
     assert runner._cache_size() == 2, (
