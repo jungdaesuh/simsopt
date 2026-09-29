@@ -3035,6 +3035,11 @@ class NonQuasiSymmetricRatioJAX(_BoozerObjectiveBase):
     on an auxiliary surface with finer quadrature, and the gradient
     w.r.t. coil DOFs via implicit differentiation.
 
+    ``sDIM`` is fixed at construction.  ``quasi_poloidal`` is stored as
+    ``axis``, which, as in upstream ``NonQuasiSymmetricRatio``, is read each
+    time the objective is computed: assigning it changes the next value and
+    gradient (the compiled program is kept per axis).
+
     Args:
         boozer_surface: ``BoozerSurfaceJAX`` instance.
         biotsavart: ``BiotSavartJAX`` instance.
@@ -3054,15 +3059,26 @@ class NonQuasiSymmetricRatioJAX(_BoozerObjectiveBase):
         self._rebuild_coil_dof_contract_bound_programs()
 
     def _rebuild_coil_dof_contract_bound_programs(self):
-        self._direct_objective_value_and_gradients = (
-            self._build_cached_direct_objective_value_and_gradients()
-        )
+        # axis -> value-and-gradients program; each captures the coil DOF
+        # contract, so a contract change drops every axis.
+        self._direct_programs_by_axis = {}
 
-    def _build_cached_direct_objective_value_and_gradients(self):
+    def _direct_objective_value_and_gradients(self, coil_dofs, surface_dofs):
+        """Run the compiled program for the current ``axis``, built on first use."""
+        axis = int(self.axis)
+        program = self._direct_programs_by_axis.get(axis)
+        if program is None:
+            program = self._build_cached_direct_objective_value_and_gradients(axis)
+            self._direct_programs_by_axis[axis] = program
+        return program(coil_dofs, surface_dofs)
+
+    def _build_cached_direct_objective_value_and_gradients(self, axis):
         host_extraction_spec = _traceable_runtime_hostify_tree(
             self.biotsavart.coil_dof_extraction_spec()
         )
-        host_qs_kwargs = _traceable_runtime_hostify_tree(self._qs_objective_kwargs())
+        host_qs_kwargs = _traceable_runtime_hostify_tree(
+            {**self._qs_objective_kwargs(), "axis": axis}
+        )
 
         def objective(coil_dofs, surface_dofs):
             return _qs_ratio_pure(

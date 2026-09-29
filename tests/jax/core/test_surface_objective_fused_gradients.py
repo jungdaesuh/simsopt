@@ -295,3 +295,44 @@ def test_public_fused_objectives_rebuild_after_coil_dof_fix_and_unfix(
             rtol=1.0e-10,
             atol=1.0e-10,
         )
+
+
+def test_non_qs_ratio_reads_axis_when_it_computes_as_upstream_does(
+    monkeypatch,
+) -> None:
+    """Upstream NonQuasiSymmetricRatio reads ``self.axis`` inside compute().
+
+    After ``axis`` is reassigned and the cached value is cleared (as any DOF
+    change does), a reused wrapper must equal a fresh one built for the new
+    axis, value and coil gradient.  The adjoint term is zeroed, as in the
+    tests above, so the gradient is the axis-dependent direct term.
+    """
+    monkeypatch.setattr(
+        surface_objectives_module,
+        "_solve_boozer_adjoint",
+        lambda _adjoint_state, rhs: rhs - rhs,
+    )
+    monkeypatch.setattr(
+        surface_objectives_module,
+        "_adjoint_coil_dofs_gradient",
+        lambda _stream_group_vjps, _adjoint, _biotsavart, coil_dofs: (
+            coil_dofs - coil_dofs
+        ),
+    )
+    boozer_surface, biotsavart, _base_curve = _make_public_boozer_fixture()
+    reused = NonQuasiSymmetricRatioJAX(boozer_surface, biotsavart, sDIM=2)
+    quasi_axisymmetric_value = reused.J()
+    reused.dJ_by_dcoil_dofs()
+
+    reused.axis = 1
+    reused.recompute_bell()
+    fresh = NonQuasiSymmetricRatioJAX(
+        boozer_surface, biotsavart, sDIM=2, quasi_poloidal=True
+    )
+
+    assert reused.J() != quasi_axisymmetric_value
+    assert reused.J() == fresh.J()
+    np.testing.assert_array_equal(
+        np.asarray(reused.dJ_by_dcoil_dofs()),
+        np.asarray(fresh.dJ_by_dcoil_dofs()),
+    )
