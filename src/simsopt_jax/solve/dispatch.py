@@ -240,6 +240,7 @@ def _public_result(
     raw_status: int | None = None
     raw_success: bool | None = None
     raw_message: str | None = None
+    jacobian_evaluations = getattr(result, "jacobian_evaluations", None)
     if nonfinite_fields:
         raw_status, raw_success, raw_message = status, success, message
         status, success = NONFINITE_RESULT_STATUS, False
@@ -267,6 +268,9 @@ def _public_result(
         optimizer_state_trace=_optimizer_state_trace(result),
         restart_log=tuple(getattr(result, "restart_log", ())),
         nonfinite_fields=nonfinite_fields,
+        jacobian_evaluations=(
+            None if jacobian_evaluations is None else int(jacobian_evaluations)
+        ),
         raw_status=raw_status,
         raw_success=raw_success,
         raw_message=raw_message,

@@ -133,6 +133,9 @@ _NON_JAX_BINDING = "non-jax"
 # (file, scope and primitive unchanged). Then the lm-minpack traced-objective
 # refusal in ``surface_objectives_traceable.py`` moved its three
 # baseline-wrapper coordinates. Baseline: 30.
+# Re-pinned 2026-09-29, no new site: carrying lm-minpack's Jacobian count in
+# ``dispatch._public_result`` moved the four ``_run_scipy_minimize``
+# coordinates below it. Baseline: 30.
 _ALLOWED_OWNER_CALLS = frozenset(
     {
         "src/simsopt_jax/backend/dtypes.py::_device_put::device_put::308:19",
@@ -155,10 +158,10 @@ _ALLOWED_OWNER_CALLS = frozenset(
         "src/simsopt_jax/runtime/host_boundary.py::block_until_ready::block_until_ready::234:11",
         "src/simsopt_jax/runtime/host_boundary.py::disallow_host_transfers::transfer_guard::129:9",
         "src/simsopt_jax/runtime/host_boundary.py::host_value::device_get::199:11",
-        "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize.value_and_gradient_at::device_get::714:15",
-        "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize.value_and_gradient_at::device_get::714:38",
-        "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize.value_and_gradient_at::device_put::712:54",
-        "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize::device_get::765:25",
+        "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize.value_and_gradient_at::device_get::718:15",
+        "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize.value_and_gradient_at::device_get::718:38",
+        "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize.value_and_gradient_at::device_put::716:54",
+        "src/simsopt_jax/solve/dispatch.py::_run_scipy_minimize::device_get::769:25",
         "src/simsopt_jax/solve/serial.py::_write_bounded_objective_log::transfer_guard::423:9",
         "src/simsopt_jax_adapters/geo/boozer_surface.py::_with_host_bridge_transfer_guard.wrapped::transfer_guard_device_to_host::199:13",
         "src/simsopt_jax_adapters/geo/boozer_surface.py::_with_host_bridge_transfer_guard.wrapped::transfer_guard_host_to_device::200:17",

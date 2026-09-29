@@ -137,6 +137,11 @@ class OptimizerResult:
     # and ``message`` are the route's unchanged.  ``x``, ``fun`` and ``jac``
     # are always the backend's returned state, never a substitute.
     nonfinite_fields: tuple[str, ...] = ()
+    # Every Jacobian the route evaluated, where that differs from ``njev``'s
+    # solver meaning: lm-minpack reports MINPACK's njev (one per outer
+    # iteration, as SciPy does) and also evaluates J at the accepted end point
+    # for the result.  None for routes that report only ``njev``.
+    jacobian_evaluations: int | None = None
     raw_status: int | None = None
     raw_success: bool | None = None
     raw_message: str | None = None

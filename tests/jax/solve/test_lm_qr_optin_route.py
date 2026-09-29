@@ -441,6 +441,25 @@ def test_njev_counts_minpack_jacobians_not_the_terminal_one():
     assert lane.jacobian_evaluations == 2
 
 
+def test_typed_result_carries_both_jacobian_counts():
+    """The typed driver result keeps njev (SciPy's meaning) and the true count.
+
+    r = x - 1 from 0 with a budget of 2 evaluations: lmder factors one
+    Jacobian (njev = 1); the lane also evaluates J at the accepted end point
+    for the result (jacobian_evaluations = 2).
+    """
+    result = least_squares(
+        lambda x: x - 1.0,
+        jnp.zeros(1),
+        driver=Driver.SIMSOPT_LM_QR,
+        options=SimsoptLMQROptions(maxiter=2),
+    )
+
+    assert result.nfev == 2
+    assert result.njev == 1
+    assert result.jacobian_evaluations == 2
+
+
 def _pivoted_qr_problem(seed):
     rng = np.random.default_rng(seed)
     jacobian = rng.standard_normal((12, 5)) @ np.diag([1.0, 3.0, 1e-2, 0.5, 10.0])
