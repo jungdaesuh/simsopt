@@ -6731,7 +6731,10 @@ class TestBoozerSurfaceJAXClass:
         n = booz._pack_decision_vector(0.3, 0.05).size
         rng = np.random.default_rng(10)
         eigenvectors, _ = np.linalg.qr(rng.standard_normal((n, n)))
-        eigenvalues = np.geomspace(1.0, 1.0e-14, n)
+        # 1e-16 (condition ~4e16): the raw LU error is far above 1e-4 on every
+        # device (CPU 6.0e-2, GPU 3.0e-2 here); at 1e-14 it was 1.8e-4 on CPU
+        # but 4.4e-5 on GPU, so the fixture was near-singular on CPU only.
+        eigenvalues = np.geomspace(1.0, 1.0e-16, n)
         hessian_np = eigenvectors @ np.diag(eigenvalues) @ eigenvectors.T
         true_solution_np = eigenvectors[:, -1]
         rhs = jnp.asarray(hessian_np @ true_solution_np, dtype=jnp.float64)
