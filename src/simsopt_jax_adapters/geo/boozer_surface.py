@@ -165,6 +165,7 @@ from simsopt_jax.geo.optimizers.optimizer import (
     _dense_lm_state_from_residual_jacobian,
     _least_squares_tolerances,
     _mark_cacheable_jit_linear_operator,
+    _require_dense_least_squares_linearization,
     _mark_traceable_runner_cacheable,
     _resolve_traceable_newton_linear_solver,
     VALID_LEAST_SQUARES_ALGORITHMS,
@@ -6922,7 +6923,6 @@ class BoozerSurfaceJAX(Optimizable):
         *,
         optimize_G,
         weight_inv_modB,
-        materialize_dense_linearization=True,
         optimizer_state_dtype=None,
     ):
         """Run the traceable pre-Newton Boozer optimizer stage."""
@@ -6938,6 +6938,7 @@ class BoozerSurfaceJAX(Optimizable):
                 weight_inv_modB,
             )
             least_squares_options = self._collect_least_squares_options()
+            _require_dense_least_squares_linearization(least_squares_options)
             ftol, xtol, gtol = _least_squares_tolerances(
                 self.options["bfgs_tol"],
                 least_squares_options,
@@ -6949,10 +6950,6 @@ class BoozerSurfaceJAX(Optimizable):
                 ftol=ftol,
                 xtol=xtol,
                 gtol=gtol,
-                materialize_dense_linearization=bool(
-                    least_squares_options["materialize_dense_linearization"]
-                    and materialize_dense_linearization
-                ),
                 max_dense_linearization_bytes=least_squares_options[
                     "max_dense_linearization_bytes"
                 ],
@@ -7344,7 +7341,6 @@ class BoozerSurfaceJAX(Optimizable):
             method,
             optimize_G=optimize_G,
             weight_inv_modB=weight_inv_modB,
-            materialize_dense_linearization=materialize_dense_linearization,
             optimizer_state_dtype=np.dtype(get_backend_policy().runtime_dtype),
         )
         x_ls = pre_newton["x"]

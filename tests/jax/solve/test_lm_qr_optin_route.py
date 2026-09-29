@@ -441,6 +441,22 @@ def test_qr_lane_runs_when_the_dense_jacobian_fits_the_budget():
     np.testing.assert_allclose(np.asarray(result.x), optimum, rtol=0, atol=1e-7)
 
 
+def test_qr_lane_refuses_materialize_false():
+    """The matrix-free LM is gone; asking for it must fail, not materialize."""
+    residual, x0, _ = _linear_fixture()
+
+    with pytest.raises(
+        ValueError, match="cannot honour materialize_dense_linearization=False"
+    ):
+        _opt.target_least_squares(
+            residual,
+            x0,
+            method="lm-minpack-ondevice",
+            maxiter=50,
+            options={"materialize_dense_linearization": False},
+        )
+
+
 def test_qr_lane_budget_is_the_shared_dense_materialization_convention():
     """The cap reuses the repo-wide ``max_dense_linearization_bytes`` name."""
     fields = SimsoptLMQROptions().__dataclass_fields__

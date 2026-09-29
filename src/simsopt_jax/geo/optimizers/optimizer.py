@@ -2800,7 +2800,6 @@ def levenberg_marquardt_minpack_traceable(
     ftol=1e-8,
     xtol=1e-8,
     gtol=1e-8,
-    materialize_dense_linearization=True,
     max_dense_linearization_bytes=None,
     callback=None,
     progress_callback=None,
@@ -6992,6 +6991,23 @@ def _least_squares_tolerances(tol, options):
     )
 
 
+def _require_dense_least_squares_linearization(options):
+    """Refuse ``materialize_dense_linearization=False`` for the lm-minpack lane.
+
+    MINPACK's LM factors the dense residual Jacobian every iteration; the
+    matrix-free option belonged to the removed GMRES Levenberg-Marquardt.
+    ``max_dense_linearization_bytes`` bounds the dense memory instead.
+    """
+    materialize = options.get("materialize_dense_linearization")
+    if materialize is not None and not materialize:
+        raise ValueError(
+            "lm-minpack always materializes the dense residual Jacobian and "
+            "cannot honour materialize_dense_linearization=False (the "
+            "matrix-free Levenberg-Marquardt was removed); bound its memory "
+            "with max_dense_linearization_bytes instead."
+        )
+
+
 def target_least_squares(
     residual_fn,
     x0,
@@ -7023,9 +7039,7 @@ def target_least_squares(
 
     require_target_backend_x64("ondevice")
     ftol, xtol, gtol = _least_squares_tolerances(tol, options)
-    materialize_dense_linearization = bool(
-        options.get("materialize_dense_linearization", True)
-    )
+    _require_dense_least_squares_linearization(options)
     max_dense_linearization_bytes = options.get("max_dense_linearization_bytes")
     callback = options.get("callback")
     progress_callback = options.get("progress_callback")
@@ -7036,7 +7050,6 @@ def target_least_squares(
         ftol=ftol,
         xtol=xtol,
         gtol=gtol,
-        materialize_dense_linearization=materialize_dense_linearization,
         max_dense_linearization_bytes=max_dense_linearization_bytes,
         callback=callback,
         progress_callback=progress_callback,

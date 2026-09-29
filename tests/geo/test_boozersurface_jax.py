@@ -8844,13 +8844,7 @@ class TestBoozerSurfaceJAXExactPath:
         with pytest.raises(RuntimeError, match="limited_memory=False"):
             booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
 
-    @pytest.mark.parametrize(
-        ("explicit_materialize", "expected_materialize"),
-        [
-            (None, True),
-            (True, True),
-        ],
-    )
+    @pytest.mark.parametrize("explicit_materialize", [None, True])
     @pytest.mark.parametrize(
         ("least_squares_algorithm", "expected_method", "solver_attr"),
         [
@@ -8869,7 +8863,6 @@ class TestBoozerSurfaceJAXExactPath:
         expected_method,
         solver_attr,
         explicit_materialize,
-        expected_materialize,
         explicit_tolerances,
     ):
         booz = _make_mock_boozer_surface()
@@ -8896,7 +8889,6 @@ class TestBoozerSurfaceJAXExactPath:
             ftol,
             xtol,
             gtol,
-            materialize_dense_linearization=True,
             max_dense_linearization_bytes=None,
             callback=None,
             progress_callback=None,
@@ -8906,9 +8898,6 @@ class TestBoozerSurfaceJAXExactPath:
             captured["ftol"] = ftol
             captured["xtol"] = xtol
             captured["gtol"] = gtol
-            captured["materialize_dense_linearization"] = (
-                materialize_dense_linearization
-            )
             captured["max_dense_linearization_bytes"] = max_dense_linearization_bytes
             captured["residual"] = residual_fn(x0, *args)
             return {
@@ -8956,12 +8945,34 @@ class TestBoozerSurfaceJAXExactPath:
             # stage's single tolerance gates all three MINPACK tests.
             for key in ("ftol", "xtol", "gtol"):
                 assert captured[key] == booz.options["bfgs_tol"]
-        assert captured["materialize_dense_linearization"] is expected_materialize
         assert (
             captured["max_dense_linearization_bytes"]
             == booz.options["max_dense_linearization_bytes"]
         )
         assert jnp.all(jnp.isfinite(captured["residual"]))
+
+    def test_run_code_traceable_lm_refuses_materialize_false(self, monkeypatch):
+        """lm-minpack always builds the dense Jacobian; False must not pass."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.options["least_squares_algorithm"] = "lm-minpack"
+        booz.options["materialize_dense_linearization"] = False
+
+        def forbidden_lm(*_args, **_kwargs):
+            raise AssertionError("the LM must not run on a refused option")
+
+        monkeypatch.setattr(_bsj, "levenberg_marquardt_minpack_traceable", forbidden_lm)
+
+        with pytest.raises(
+            ValueError,
+            match="cannot honour materialize_dense_linearization=False",
+        ):
+            booz.run_code_traceable(
+                booz.coil_set_spec,
+                jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64),
+                jnp.asarray(0.3, dtype=jnp.float64),
+                jnp.asarray(0.05, dtype=jnp.float64),
+            )
 
     def test_run_code_traceable_lm_ondevice_executes_inner_solve_on_gpu(
         self,
@@ -9075,7 +9086,6 @@ class TestBoozerSurfaceJAXExactPath:
             ftol=1e-8,
             xtol=1e-8,
             gtol=1e-8,
-            materialize_dense_linearization=True,
             max_dense_linearization_bytes=None,
             callback=None,
             progress_callback=None,
@@ -9086,7 +9096,6 @@ class TestBoozerSurfaceJAXExactPath:
                 ftol,
                 xtol,
                 gtol,
-                materialize_dense_linearization,
                 max_dense_linearization_bytes,
                 callback,
                 progress_callback,
@@ -9169,7 +9178,6 @@ class TestBoozerSurfaceJAXExactPath:
             ftol=1e-8,
             xtol=1e-8,
             gtol=1e-8,
-            materialize_dense_linearization=True,
             max_dense_linearization_bytes=None,
             callback=None,
             progress_callback=None,
@@ -9180,7 +9188,6 @@ class TestBoozerSurfaceJAXExactPath:
                 ftol,
                 xtol,
                 gtol,
-                materialize_dense_linearization,
                 max_dense_linearization_bytes,
                 callback,
                 progress_callback,
