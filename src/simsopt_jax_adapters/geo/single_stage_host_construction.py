@@ -8,10 +8,12 @@ module evaluates them with NumPy and leaves device placement to
 ``explicit_device_array`` / ``make_coil_group_spec``.
 
 The bake is the same linear Fourier map as the on-device ``jacfwd`` origin and
-basis. CPU matches that bake bitwise. On GPU the basis differs by a few ulp
-(fp64), so comparisons across the two constructions use a first-order
-forward-error bound computed from the problem's own Jacobians
-(``tests/geo/test_single_stage_exact_analytic.py``), not bit identity.
+basis. CPU matches that bake bitwise. On GPU the two differ through the sin/cos
+libraries (glibc on the host, libdevice on the device) and the rounding of a
+few products per entry. ``tests/geo/test_single_stage_exact_analytic.py``
+bounds that difference entry by entry with fixed library error constants and
+checks, from a shared seed, that the host construction is the device-bake
+program with only the basis swapped.
 """
 
 from __future__ import annotations
