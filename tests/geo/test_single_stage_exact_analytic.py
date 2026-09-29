@@ -7,9 +7,12 @@ from operator import add
 from typing import cast
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 from conftest import enable_non_strict_jax_backend, parity_device
+from jax.flatten_util import ravel_pytree
+from jax.scipy.linalg import lu_factor, lu_solve
 from simsopt.configs import get_data
 from simsopt.field import BiotSavart
 from simsopt.geo import (
@@ -23,21 +26,29 @@ from simsopt.geo import (
     Volume,
 )
 from simsopt.objectives import QuadraticPenalty
+from simsopt_jax.core._math_utils import as_jax_float64
+from simsopt_jax.core.field import coil_set_spec_from_dof_extraction_spec
+from simsopt_jax.core.specs import host_resident_spec
 from simsopt_jax.runtime.host_boundary import host_array
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
+from simsopt_jax_adapters.geo import single_stage_exact_analytic
 from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
 from simsopt_jax_adapters.geo.single_stage_exact_analytic import (
     INNER_FAILURE_VALUE,
     ExactAnalyticSingleStage,
     HostConstructionBoozerSurfaceJAX,
 )
-from simsopt_jax_adapters.geo.single_stage_host_construction import (
-    HOST_VS_DEVICE_BAKE_RTOL,
+from simsopt_jax_adapters.geo.surface_objectives import (
+    _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS,
+)
+from simsopt_jax_adapters.geo.surface_objectives_traceable import (
+    _evaluate_traceable_total_objective,
 )
 
 INITIAL_IOTA = -0.406
 RESOLUTION = 1
 QS_RESOLUTION = 4
+UNIT_ROUNDOFF = 2.0**-53
 
 
 @pytest.fixture(params=("cpu", "gpu"), autouse=True)
@@ -184,41 +195,247 @@ def _jax_evaluator_eager_geometry(
     return evaluator, boozer
 
 
+def _gamma(n: int) -> float:
+    """Higham's worst-case bound for a length-``n`` floating-point sum."""
+    return n * UNIT_ROUNDOFF / (1.0 - n * UNIT_ROUNDOFF)
+
+
+def _differing_float_positions(host_leaves, reference_leaves):
+    """Positions of the leaves the two lanes set differently; all are fp64."""
+    positions = []
+    for position, (host_leaf, reference_leaf) in enumerate(
+        zip(host_leaves, reference_leaves, strict=True)
+    ):
+        if isinstance(host_leaf, str):
+            assert host_leaf == reference_leaf
+            continue
+        host_numbers = host_array(host_leaf)
+        reference_numbers = host_array(reference_leaf)
+        if not np.array_equal(host_numbers, reference_numbers):
+            assert host_numbers.dtype == np.float64
+            positions.append(position)
+    return tuple(positions)
+
+
+def _bake_first_order_bounds(
+    monkeypatch,
+    host,
+    host_boozer,
+    reference,
+    reference_boozer,
+    host_eval,
+    reference_eval,
+):
+    """Componentwise first-order bounds on host-vs-device differences.
+
+    The lanes run one program on one device and differ only in their inputs:
+    the affine surface basis ``b`` (host NumPy vs device ``jacfwd``; the
+    origin is asserted bitwise equal) and the outer targets ``p`` each lane
+    takes from its own solved seed (iota, major radius, vessel gamma). The
+    first evaluate starts at the seed and takes no Newton step, so every
+    compared quantity is a function of ``(x, b, p)`` at the seed ``x``.
+
+    Seed: each Newton solve stops at its residual ``F``, so to first order
+    ``|x_h - x_d| <= dx = |J^-1| (|F_h| + |F_d|) + |J^-1| |dF/db| |b_h - b_d|``
+    (distance of each seed to its own root, plus the root shift the basis
+    difference causes), with ``J = dF/dx`` at the host seed.
+
+    Value ``v``: ``|dv/dx| dx + |dv/dp| |p_h - p_d|`` plus the rounding of the
+    final sum of the outer terms. The terms are all nonnegative, so their
+    condition scale is ``|v|``; that is ``gamma_9 (|v_h| + |v_d|)``.
+
+    Gradient ``g = dJ/dc - (dF/dc)^T lambda`` with ``J^T lambda = dJ/dx``:
+    ``|dg/dx| dx + |dg/db| |b_h - b_d| + |dg/dp| |p_h - p_d|`` plus the
+    rounding of the final contraction of ``1 + len(F)`` = 16 terms,
+    ``gamma_16 (S_h + S_d)`` with ``S = |dJ/dc| + |dF/dc|^T |lambda|``.
+
+    Every Jacobian is evaluated at the host lane's inputs. Second-order terms
+    (``O(dx^2)``, about 1e-29 here) are neglected; nothing is fitted.
+    """
+    host_geometry, host_basis, _ = host_boozer._make_analytic_geometry_terms()
+    reference_geometry, reference_basis, _ = (
+        reference_boozer._make_analytic_geometry_terms()
+    )
+    zero_dofs = jnp.zeros(host_basis.gamma.shape[-1], dtype=jnp.float64)
+    origin = jax.tree.map(
+        lambda leaf: host_array(leaf, dtype=np.float64), host_geometry(zero_dofs)
+    )
+    for host_leaf, reference_leaf in zip(
+        jax.tree.leaves(origin),
+        jax.tree.leaves(reference_geometry(zero_dofs)),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(
+            host_leaf, host_array(reference_leaf, dtype=np.float64)
+        )
+    basis_host, unravel_basis = ravel_pytree(host_basis)
+    basis_reference, _ = ravel_pytree(reference_basis)
+
+    host_leaves, kwargs_tree = jax.tree_util.tree_flatten(
+        host._objective_cache_state["objective_kwargs"]
+    )
+    reference_leaves, reference_tree = jax.tree_util.tree_flatten(
+        reference._objective_cache_state["objective_kwargs"]
+    )
+    assert kwargs_tree == reference_tree
+    positions = _differing_float_positions(host_leaves, reference_leaves)
+    targets_host, unravel_targets = ravel_pytree(
+        tuple(host_array(host_leaves[i], dtype=np.float64) for i in positions)
+    )
+    targets_reference, _ = ravel_pytree(
+        tuple(host_array(reference_leaves[i], dtype=np.float64) for i in positions)
+    )
+
+    coil_extraction_spec = host_resident_spec(
+        host_boozer.biotsavart.coil_dof_extraction_spec()
+    )
+    coils = jnp.asarray(host.coil_dofs)
+    weight_inv_modB = host_boozer.options["weight_inv_modB"]
+
+    def coil_set_spec(coil_dofs):
+        return coil_set_spec_from_dof_extraction_spec(
+            coil_extraction_spec, as_jax_float64(coil_dofs)
+        )
+
+    def residual_and_jacobian(x, coil_dofs, basis):
+        # The production operator, built on this basis instead of the baked one.
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                single_stage_exact_analytic,
+                "host_analytic_geometry_origin_and_basis",
+                lambda **_: (origin, unravel_basis(basis)),
+            )
+            value_jacobian = host_boozer._make_analytic_exact_value_jacobian(
+                weight_inv_modB
+            )
+        return value_jacobian(x, coil_set_spec(coil_dofs))
+
+    def objective(x, coil_dofs, targets):
+        leaves = list(host_leaves)
+        for position, target in zip(positions, unravel_targets(targets), strict=True):
+            leaves[position] = target
+        kwargs = jax.tree_util.tree_unflatten(kwargs_tree, leaves)
+        return _evaluate_traceable_total_objective(
+            x, coil_dofs, coil_set_spec(coil_dofs), kwargs
+        )
+
+    def gradient_and_scale(x, basis, targets):
+        value, pullback = jax.vjp(lambda xx, cc: objective(xx, cc, targets), x, coils)
+        dJ_dx, dJ_dc = pullback(jnp.ones((), dtype=value.dtype))
+        _, jacobian = residual_and_jacobian(x, coils, basis)
+        adjoint = lu_solve(lu_factor(jacobian), dJ_dx, trans=1)
+        dF_dc = jax.jacfwd(lambda cc: residual_and_jacobian(x, cc, basis)[0])(coils)
+        gradient = dJ_dc - dF_dc.T @ adjoint
+        return gradient, jnp.abs(dJ_dc) + jnp.abs(dF_dc).T @ jnp.abs(adjoint)
+
+    def gradient(x, basis, targets):
+        return gradient_and_scale(x, basis, targets)[0]
+
+    @jax.jit
+    def terms(x_h, x_d, b_h, b_d, p_h, p_d):
+        F_h, J_h = residual_and_jacobian(x_h, coils, b_h)
+        F_d, _ = residual_and_jacobian(x_d, coils, b_d)
+        return {
+            "F_h": F_h,
+            "F_d": F_d,
+            "J": J_h,
+            "dF_db": jax.jacfwd(lambda b: residual_and_jacobian(x_h, coils, b)[0])(b_h),
+            "dv_dx": jax.grad(objective, argnums=0)(x_h, coils, p_h),
+            "dv_dp": jax.grad(objective, argnums=2)(x_h, coils, p_h),
+            "dg_dx": jax.jacfwd(gradient, argnums=0)(x_h, b_h, p_h),
+            "dg_db": jax.jacfwd(gradient, argnums=1)(x_h, b_h, p_h),
+            "dg_dp": jax.jacfwd(gradient, argnums=2)(x_h, b_h, p_h),
+            "S_h": gradient_and_scale(x_h, b_h, p_h)[1],
+            "S_d": gradient_and_scale(x_d, b_d, p_d)[1],
+        }
+
+    x_host = host_array(host.x_inner, dtype=np.float64)
+    x_reference = host_array(reference.x_inner, dtype=np.float64)
+    jacobians = {
+        key: host_array(value, dtype=np.float64)
+        for key, value in terms(
+            x_host,
+            x_reference,
+            basis_host,
+            basis_reference,
+            targets_host,
+            targets_reference,
+        ).items()
+    }
+    basis_gap = np.abs(host_array(basis_host - basis_reference, dtype=np.float64))
+    target_gap = np.abs(host_array(targets_host - targets_reference, dtype=np.float64))
+    inverse = np.abs(np.linalg.inv(jacobians["J"]))
+    seed_bound = inverse @ (
+        np.abs(jacobians["F_h"]) + np.abs(jacobians["F_d"])
+    ) + inverse @ (np.abs(jacobians["dF_db"]) @ basis_gap)
+    value_bound = (
+        np.abs(jacobians["dv_dx"]) @ seed_bound
+        + np.abs(jacobians["dv_dp"]) @ target_gap
+        + _gamma(len(_TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS))
+        * (abs(host_eval.value) + abs(reference_eval.value))
+    )
+    gradient_bound = (
+        np.abs(jacobians["dg_dx"]) @ seed_bound
+        + np.abs(jacobians["dg_db"]) @ basis_gap
+        + np.abs(jacobians["dg_dp"]) @ target_gap
+        + _gamma(1 + jacobians["F_h"].size) * (jacobians["S_h"] + jacobians["S_d"])
+    )
+    return {
+        "seed": (np.abs(x_host - x_reference), seed_bound),
+        "value": (np.abs(host_eval.value - reference_eval.value), value_bound),
+        "gradient": (
+            np.abs(host_eval.gradient - reference_eval.gradient),
+            gradient_bound,
+        ),
+    }
+
+
 def test_host_construction_seed_and_first_evaluate_match_eager_jax_bake(
-    analytic_backend,
+    analytic_backend, monkeypatch
 ):
     """NumPy construction bake must not change the seed or the first evaluate.
 
     Coil dofs are host copies of the same native coils, so they stay bitwise
     on every device. The inner seed and first evaluate compare the host-NumPy
     Fourier bake against the on-device JAX jacfwd bake of the same linear map:
-    CPU matches bitwise; GPU reduction order is not bit-identical, and the
-    guarantee is :data:`HOST_VS_DEVICE_BAKE_RTOL`.
+    CPU matches bitwise. On GPU the two bases differ by a few ulp, and the
+    guarantee is the first-order forward-error bound of
+    :func:`_bake_first_order_bounds` (pre-registered in the parity redesign
+    plan, C6 amendment 2), checked on both devices.
     """
-    reference, _ = _jax_evaluator_eager_geometry()
-    host, _ = _jax_evaluator()
+    reference, reference_boozer = _jax_evaluator_eager_geometry()
+    host, host_boozer = _jax_evaluator()
     np.testing.assert_array_equal(host.coil_dofs, reference.coil_dofs)
     host_inner = host_array(host.x_inner, dtype=np.float64)
     reference_inner = host_array(reference.x_inner, dtype=np.float64)
     reference_eval = reference.evaluate(reference.coil_dofs)
     host_eval = host.evaluate(host.coil_dofs)
+    # The evaluate starts at the seed, so it compares functions of the seed.
+    assert host_eval.inner_iterations == reference_eval.inner_iterations == 0
     if analytic_backend.platform == "cpu":
         np.testing.assert_array_equal(host_inner, reference_inner)
         assert host_eval.value == reference_eval.value
         np.testing.assert_array_equal(host_eval.gradient, reference_eval.gradient)
-        return
-    np.testing.assert_allclose(
-        host_inner, reference_inner, rtol=HOST_VS_DEVICE_BAKE_RTOL, atol=0.0
+    bounds = _bake_first_order_bounds(
+        monkeypatch,
+        host,
+        host_boozer,
+        reference,
+        reference_boozer,
+        host_eval,
+        reference_eval,
     )
-    np.testing.assert_allclose(
-        host_eval.value, reference_eval.value, rtol=HOST_VS_DEVICE_BAKE_RTOL, atol=0.0
-    )
-    np.testing.assert_allclose(
-        host_eval.gradient,
-        reference_eval.gradient,
-        rtol=HOST_VS_DEVICE_BAKE_RTOL,
-        atol=0.0,
-    )
+    for name, (difference, bound) in bounds.items():
+        assert np.all(difference <= bound), (
+            f"{name}: max |host - device| / bound = {np.max(difference / bound):.3e}"
+        )
+    # Negative control: a device gradient off by 10x the bound on one entry
+    # must fail the same check.
+    gradient_difference, gradient_bound = bounds["gradient"]
+    entry = int(np.argmax(gradient_difference / gradient_bound))
+    perturbed = np.array(reference_eval.gradient, copy=True)
+    perturbed[entry] += 10.0 * gradient_bound[entry]
+    assert not np.all(np.abs(host_eval.gradient - perturbed) <= gradient_bound)
 
 
 def test_construction_and_first_evaluation_are_clean_under_the_strict_transfer_guard():

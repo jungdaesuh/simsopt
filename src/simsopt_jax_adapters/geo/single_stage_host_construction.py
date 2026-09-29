@@ -8,9 +8,10 @@ module evaluates them with NumPy and leaves device placement to
 ``explicit_device_array`` / ``make_coil_group_spec``.
 
 The bake is the same linear Fourier map as the on-device ``jacfwd`` origin and
-basis. CPU matches that bake bitwise. GPU summation order differs at a few
-tens of ulp (fp64); comparisons across those two constructions use
-:data:`HOST_VS_DEVICE_BAKE_RTOL`, not bit identity.
+basis. CPU matches that bake bitwise. On GPU the basis differs by a few ulp
+(fp64), so comparisons across the two constructions use a first-order
+forward-error bound computed from the problem's own Jacobians
+(``tests/geo/test_single_stage_exact_analytic.py``), not bit identity.
 """
 
 from __future__ import annotations
@@ -28,12 +29,6 @@ from simsopt_jax_adapters.geo.boozer_surface import _BoozerPenaltyGeometry
 
 # Same bits as ``simsopt_jax.core._device_scalars.two_pi`` on float64.
 _TWO_PI = np.float64(2.0) * np.arccos(np.float64(-1.0))
-# Host-NumPy vs on-device JAX jacfwd of this linear map, including the first
-# exact-Newton evaluate that consumes the bake. CPU is bitwise. GPU seed max
-# rel is 6.2e-14 (inside ``gpu_reduction_order_rel_tol`` 1e-12); the implicit
-# gradient maps that ULP gap through the KKT LU to 1.2e-12. 1e-11 is that
-# floor times the jax_gpu_parity ``tolerance_ratchet_factor`` of 10.
-HOST_VS_DEVICE_BAKE_RTOL = 1.0e-11
 
 
 def host_grouped_coil_set_spec(biotsavart):
