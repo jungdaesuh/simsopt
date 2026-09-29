@@ -272,6 +272,32 @@ def test_qr_lane_matches_minpack_at_a_nonzero_residual_minimum():
     assert _MINPACK_INFO_TO_SCIPY_STATUS[lane.info] == reference.status
 
 
+def test_qr_lane_never_reports_success_with_a_nonfinite_jacobian():
+    """An accepted step can land where the residual is finite but J is not.
+
+    From t = 1 the Gauss-Newton step reaches t = 0, where sqrt|t| has an
+    infinite slope, and that same step meets ftol. The solve must fail
+    rather than return success with a nonfinite Jacobian and gradient.
+    """
+
+    def residual(x):
+        t = x[0]
+        return jnp.stack((t + (t - 1.0) ** 2 * jnp.sqrt(jnp.abs(t)), 1.0e5 + 0.0 * t))
+
+    result = _opt.target_least_squares(
+        residual, jnp.ones(1), method="lm-minpack-ondevice", maxiter=50
+    )
+    finite_derivatives = bool(
+        np.all(np.isfinite(np.asarray(result.residual_jacobian)))
+        and np.all(np.isfinite(np.asarray(result.jac)))
+    )
+
+    assert not (result.success and not finite_derivatives)
+    assert not result.success
+    assert result.status == 2
+    assert result.message.startswith("non-finite")
+
+
 def _pivoted_qr_problem(seed):
     rng = np.random.default_rng(seed)
     jacobian = rng.standard_normal((12, 5)) @ np.diag([1.0, 3.0, 1e-2, 0.5, 10.0])

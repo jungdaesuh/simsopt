@@ -2427,6 +2427,10 @@ def _minpack_lmpar(r_matrix, pivots, diag, qtb, delta, par):
 
 
 def _least_squares_result_message(status, success, info=0):
+    # A non-finite state is a failure even when that step also met a
+    # MINPACK stop test, so it is reported before the stop code.
+    if int(_host_scalar(status, dtype=np.int64)) == 2:
+        return "non-finite residual, gradient, or linear solve encountered"
     info_value = int(_host_scalar(info, dtype=np.int64))
     if info_value == 1:
         return "converged: ftol termination condition is satisfied"
@@ -2446,8 +2450,6 @@ def _least_squares_result_message(status, success, info=0):
         return "gtol is too small; residual is orthogonal to Jacobian columns"
     if _host_bool(success):
         return "converged"
-    if int(_host_scalar(status, dtype=np.int64)) == 2:
-        return "non-finite residual, gradient, or linear solve encountered"
     return "maximum iterations reached"
 
 
@@ -2662,9 +2664,10 @@ def _build_traceable_levenberg_marquardt_minpack_runner(
                 ),
             )
             info = jnp.where(info == 0, stringent, info).astype(jnp.int32)
-            # lmder would factor this Jacobian next; a non-finite one ends the
-            # solve instead of feeding NaNs to the QR.
-            nonfinite = accepted & (info == 0) & ~jnp.all(jnp.isfinite(jacobian_next))
+            # A non-finite Jacobian at the accepted point ends the solve as a
+            # failure, whatever stop code this step set: lmder would factor it
+            # next, and the result must not report success with it.
+            nonfinite = accepted & ~jnp.all(jnp.isfinite(jacobian_next))
 
             if callback_enabled:
                 lax.cond(
