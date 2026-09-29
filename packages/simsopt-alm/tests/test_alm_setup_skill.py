@@ -674,6 +674,17 @@ class SkillDocumentsThePackageTests(unittest.TestCase):
         self.assertIn("sampled quadrature points", api)
         self.assertIn("higher resolution", api)
 
+    def test_equations_name_the_quantities_in_use(self):
+        """R16-06: the complementarity gap is f minus the ordinary Lagrangian
+        at the shifted multipliers (core._complementarity_gap), and the Boozer
+        ratio divides by the integral of B_QA squared (simsopt's
+        NonQuasiSymmetricRatio)."""
+        settings = skill_markdown()["references/settings.md"]
+        self.assertNotIn("the gap is f - L", settings)
+        self.assertIn("f - ℓ(x, λ⁺), where ℓ(x, λ⁺) = f + Σ λ⁺_i g_i is the ordinary Lagrangian", settings)
+        boozer = skill_python()["templates/boozer_single_stage.py"]
+        self.assertIn(r"J = (\int_S B_nonQA^2 dS) / (\int_S B_QA^2 dS)", boozer)
+
     def test_guide_drops_the_skill_only_blocks(self):
         blocks = re.findall(r"<!-- skill-only -->\n(.*?)<!-- /skill-only -->",
                             (SKILL_DIR / "SKILL.md").read_text(), re.DOTALL)

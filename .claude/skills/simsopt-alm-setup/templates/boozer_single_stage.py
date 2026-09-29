@@ -7,7 +7,7 @@ marked ``SETUP``. As shipped it is the problem of the simsopt-alm package's
 ``examples/boozerQA_alm.py`` (NCSX coils), with f divided by the size of its
 initial value and every row divided by the size of its bound:
 
-    minimize    J(x) / |J(x0)|,  J = (\int_S B_nonQA^2 dS) / (\int_S B_QA dS)
+    minimize    J(x) / |J(x0)|,  J = (\int_S B_nonQA^2 dS) / (\int_S B_QA^2 dS)
     subject to  iota within IOTA_TARGET +- IOTA_HALF_WIDTH                  (two rows)
                 major radius within MAJOR_RADIUS_TARGET +- its half width   (two rows)
                 coil length <= LENGTH_MAX   (by LENGTH_SCOPE: each base coil, the sum
