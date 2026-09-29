@@ -219,7 +219,7 @@ def _rosenbrock_chain(scale, *, anchor_last=False):
     return residual
 
 
-def _solve_both_minpack_lanes(residual, x0):
+def _solve_both_minpack_lanes(residual, x0, *, max_nfev=_MINPACK_MAX_NFEV):
     """Run the QR lane and SciPy's MINPACK lmder on one problem."""
     x0 = np.asarray(x0, dtype=np.float64)
     fun = jax.jit(residual)
@@ -230,14 +230,14 @@ def _solve_both_minpack_lanes(residual, x0):
         jac=lambda x: np.asarray(jac(x)),
         method="lm",
         x_scale=1.0,
-        max_nfev=_MINPACK_MAX_NFEV,
+        max_nfev=max_nfev,
         **_MINPACK_TOLERANCES,
     )
     lane = _opt.target_least_squares(
         residual,
         jnp.asarray(x0),
         method="lm-minpack-ondevice",
-        maxiter=_MINPACK_MAX_NFEV,
+        maxiter=max_nfev,
         options=dict(_MINPACK_TOLERANCES),
     )
     return lane, reference
@@ -252,8 +252,10 @@ def test_qr_lane_converges_on_rosenbrock_chains_like_minpack(scale, x0):
     assert lane.success, lane.message
     assert float(lane.fun) <= 1e-20
     np.testing.assert_allclose(np.asarray(lane.x), np.ones(3), rtol=0, atol=1e-10)
-    # Same trial count and the same MINPACK stop: the lane walks lmder's path.
+    # Same trial count, Jacobian count and MINPACK stop: the lane walks
+    # lmder's path.
     assert lane.nfev == reference.nfev
+    assert lane.njev == reference.njev
     assert _MINPACK_INFO_TO_SCIPY_STATUS[lane.info] == reference.status
 
 
@@ -364,6 +366,19 @@ def test_minpack_enorm_matches_the_reference_algorithm(vector):
         rtol=1e-15,
         atol=0,
     )
+
+
+def test_njev_counts_minpack_jacobians_not_the_terminal_one():
+    """r = x - 1, max_nfev = 2: lmder factors one Jacobian, then stops on budget.
+
+    The lane also evaluates J at the accepted end point for its result, as
+    SciPy's wrapper does; that one is reported separately, not in njev.
+    """
+    lane, reference = _solve_both_minpack_lanes(lambda x: x - 1.0, (0.0,), max_nfev=2)
+
+    assert reference.njev == 1
+    assert lane.njev == reference.njev
+    assert lane.jacobian_evaluations == 2
 
 
 def _pivoted_qr_problem(seed):

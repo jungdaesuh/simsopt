@@ -2611,7 +2611,11 @@ def _build_traceable_levenberg_marquardt_minpack_runner(
             "gnorm": zero,
             "ratio": zero,
             "nfev": jnp.asarray(1, dtype=jnp.int32),
-            "njev": jnp.asarray(1, dtype=jnp.int32),
+            # njev counts the Jacobians lmder factors (one per outer
+            # iteration); jacobian_evaluations also counts the one evaluated at
+            # an accepted end point for the result, as SciPy's wrapper does.
+            "njev": jnp.asarray(0, dtype=jnp.int32),
+            "jacobian_evaluations": jnp.asarray(1, dtype=jnp.int32),
             "info": info_none,
             "nonfinite": ~(
                 jnp.all(jnp.isfinite(residual0)) & jnp.all(jnp.isfinite(jacobian0))
@@ -2759,7 +2763,10 @@ def _build_traceable_levenberg_marquardt_minpack_runner(
                 "gnorm": state["gnorm"],
                 "ratio": ratio,
                 "nfev": nfev,
-                "njev": state["njev"] + accepted.astype(jnp.int32),
+                "njev": state["njev"],
+                "jacobian_evaluations": (
+                    state["jacobian_evaluations"] + accepted.astype(jnp.int32)
+                ),
                 "info": info,
                 "nonfinite": nonfinite,
             }
@@ -2795,6 +2802,7 @@ def _build_traceable_levenberg_marquardt_minpack_runner(
                 lambda inner: trial_step(inner, r_matrix, pivots, qtf),
                 {
                     **state,
+                    "njev": state["njev"] + 1,
                     "gnorm": gnorm,
                     "ratio": zero,
                     "info": jnp.where(
@@ -2821,6 +2829,7 @@ def _build_traceable_levenberg_marquardt_minpack_runner(
             "par": final["par"],
             "nit": final["nfev"] - 1,
             "njev": final["njev"],
+            "jacobian_evaluations": final["jacobian_evaluations"],
             "status": jnp.where(
                 final["nonfinite"],
                 jnp.asarray(2, dtype=jnp.int32),
@@ -2956,6 +2965,7 @@ def levenberg_marquardt_minpack_traceable(
         "damping": state["par"],
         "nit": state["nit"],
         "njev": state["njev"],
+        "jacobian_evaluations": state["jacobian_evaluations"],
         "status": state["status"],
         "info": state["info"],
         "success": state["success"],
@@ -7012,6 +7022,9 @@ def _least_squares_state_to_optimize_result(result):
         nit=nit,
         nfev=nit + 1,
         njev=int(_host_scalar(result["njev"], dtype=np.int64)),
+        jacobian_evaluations=int(
+            _host_scalar(result["jacobian_evaluations"], dtype=np.int64)
+        ),
         status=status,
         info=info,
         success=success,
