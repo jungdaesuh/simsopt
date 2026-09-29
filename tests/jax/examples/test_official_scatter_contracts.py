@@ -2,22 +2,25 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import dataclasses
+from pathlib import Path
 
 import numpy as np
 import pytest
 from examples.jax.manifest_runtime import load_runtime_contract_pair
-from examples.jax.parity.arbiter import upstream_end_state_matches
+from examples.jax.parity._manifest import ComparisonRoute
+from examples.jax.parity.arbiter import (
+    upstream_branch_representatives,
+    upstream_end_state_matches,
+)
 from examples.jax.parity.cases import get_case, implemented_case_ids
-from examples.jax.parity.work_budget import WorkBudgetContract
 from examples.jax.parity.cases.native_boozer import END_STATE_OBSERVABLES
 from examples.jax.parity.official_reference import load_upstream_scatter
 from examples.jax.parity.official_scatter_contracts import (
     PRE_REGISTERED_DRAWS,
     pre_registered_runs,
 )
+from examples.jax.parity.work_budget import WorkBudgetContract
 
 PLANAR = "native-stage-two-optimization-planar-coils"
 SCALES = ("bounded", "native_default")
@@ -63,6 +66,22 @@ def test_planar_band_is_rule_v2_over_upstreams_nine_draws() -> None:
     assert get_case(PLANAR).quality_band("native_default") is None
 
 
+def _boozer_routes(scale: str) -> tuple[ComparisonRoute, ...]:
+    """native-boozer's own manifest routes at ``scale``: the comparators branch identity uses."""
+    root = Path(__file__).resolve().parents[3]
+    pair = load_runtime_contract_pair(
+        root / "examples/jax/manifest.json",
+        root / "examples/jax/parity_manifest.json",
+        repo_root=root,
+    )
+    relationship = next(
+        item
+        for item in pair.parity.all_relationships
+        if item.case_id == "native-boozer"
+    )
+    return relationship.resolve_scale(scale).comparison_routes
+
+
 @pytest.mark.parametrize("scale", SCALES)
 def test_boozer_end_states_are_upstreams_nine_successful_draws(scale: str) -> None:
     end_states = get_case("native-boozer").end_states(scale)
@@ -79,6 +98,71 @@ def test_boozer_end_states_are_upstreams_nine_successful_draws(scale: str) -> No
         for key in END_STATE_OBSERVABLES:
             np.testing.assert_array_equal(state.values[key], run.value(key))
     assert "same-state proof" in end_states.derivation
+    assert "lowest-k draw" in end_states.derivation
+
+
+#: PLAN.md C3's branch set B of each scale, read off by the pre-registration's own
+#: clustering of the nine (area iota): bounded -0.19382 (k = 0, 1, 3, 4, 8),
+#: -0.19650 (k = 2), -0.41398 (k = 5), -9.8e-5 (k = 6), +4.3e-4 (k = 7);
+#: native_default -0.19897 (k = 0, 4) and -0.40213 (k = 1-3, 5-8).
+BOOZER_BRANCH_MEMBERS = {
+    "bounded": {0: (0, 1, 3, 4, 8), 2: (2,), 5: (5,), 6: (6,), 7: (7,)},
+    "native_default": {0: (0, 4), 1: (1, 2, 3, 5, 6, 7, 8)},
+}
+
+
+@pytest.mark.parametrize("scale", SCALES)
+def test_boozer_branches_are_represented_by_their_lowest_k_draw(scale: str) -> None:
+    """C3 (ii): a lane is matched against ONE representative per branch, its lowest-k draw."""
+    end_states = get_case("native-boozer").end_states(scale)
+    assert end_states is not None
+    routes = _boozer_routes(scale)
+    representatives = upstream_branch_representatives(end_states, routes)
+
+    assert tuple(state.k for state in representatives) == tuple(
+        BOOZER_BRANCH_MEMBERS[scale]
+    )
+    for representative_k, members in BOOZER_BRANCH_MEMBERS[scale].items():
+        assert representative_k == min(members)
+        for state in end_states.states:
+            if state.k in members:
+                # Every member of a branch is matched to its representative alone.
+                assert upstream_end_state_matches(end_states, routes, state.values) == (
+                    representative_k,
+                ), (scale, state.k)
+
+
+def test_a_state_matching_a_branch_member_but_not_its_representative_is_rejected() -> (
+    None
+):
+    """Codex's boundary witness: the comparator balls are not transitive.
+
+    A finite ten-key end state built from bounded draw k = 1, with area iota
+    moved to -0.19401097835235442, still matches k = 1 under the case's own
+    area-iota route (rtol 1e-3 against k = 1's -0.19381715120215226) but not
+    k = 0, the representative of k = 1's branch. Matching any member would
+    admit it; C3 (ii) admits only a match to a representative.
+    """
+    end_states = get_case("native-boozer").end_states("bounded")
+    assert end_states is not None
+    routes = _boozer_routes("bounded")
+    (member,) = [state for state in end_states.states if state.k == 1]
+    witness = {
+        **member.values,
+        "area:iota": np.asarray([-0.19401097835235442], dtype=np.float64),
+    }
+    (other_branch,) = [state for state in end_states.states if state.k == 2]
+
+    def matches_with(first_k: int) -> tuple[int, ...]:
+        """The witness's matches when draw ``first_k`` alone stands for its branch."""
+        (first,) = [state for state in end_states.states if state.k == first_k]
+        two_branches = dataclasses.replace(end_states, states=(first, other_branch))
+        return upstream_end_state_matches(two_branches, routes, witness)
+
+    assert all(np.all(np.isfinite(value)) for value in witness.values())
+    assert matches_with(1) == (1,)
+    assert matches_with(0) == ()
+    assert upstream_end_state_matches(end_states, routes, witness) == ()
 
 
 def test_a_receipt_scalar_matches_the_upstream_draw_it_equals() -> None:
@@ -90,18 +174,7 @@ def test_a_receipt_scalar_matches_the_upstream_draw_it_equals() -> None:
     """
     end_states = get_case("native-boozer").end_states("bounded")
     assert end_states is not None
-    root = Path(__file__).resolve().parents[3]
-    pair = load_runtime_contract_pair(
-        root / "examples/jax/manifest.json",
-        root / "examples/jax/parity_manifest.json",
-        repo_root=root,
-    )
-    relationship = next(
-        item
-        for item in pair.parity.all_relationships
-        if item.case_id == "native-boozer"
-    )
-    routes = relationship.resolve_scale("bounded").comparison_routes
+    routes = _boozer_routes("bounded")
     state = end_states.states[0]
     scalar_form = {
         key: value.reshape(()) if value.size == 1 else value

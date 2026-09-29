@@ -26,6 +26,7 @@ from examples.jax.parity.arbiter import (
     LaneObservation,
     LaneOutcomeRejection,
     arbitrate,
+    upstream_branch_representatives,
     upstream_end_state_matches,
 )
 from examples.jax.parity.artifacts import (
@@ -2958,7 +2959,8 @@ def test_a_judged_lane_value_must_be_finite_fp64(
         ("bool_k", "non-negative int"),
         ("negative_k", "non-negative int"),
         ("one_draw", "at least two draws"),
-        ("duplicate_k", "unique k"),
+        ("duplicate_k", "unique ascending k"),
+        ("descending_k", "unique ascending k"),
         ("missing_key", "lack judged keys"),
         ("no_observables", "observables must be unique"),
         ("duplicate_observables", "observables must be unique"),
@@ -2992,6 +2994,8 @@ def test_an_upstream_end_state_set_rejects_an_unusable_declaration(
             dataclasses.replace(declared, states=(first,))
         elif mutation == "duplicate_k":
             dataclasses.replace(declared, states=(first, first))
+        elif mutation == "descending_k":
+            dataclasses.replace(declared, states=tuple(reversed(declared.states)))
         elif mutation == "missing_key":
             dataclasses.replace(
                 declared,
@@ -3025,6 +3029,66 @@ def test_one_value_set_is_judged_against_upstream_without_a_lane() -> None:
             declared,
             _end_state_route_matrix(dofs_odd_bucket="gpu_runtime"),
             declared.states[0].values,
+        )
+
+
+def test_a_lane_is_matched_to_a_branch_representative_never_to_a_later_member() -> None:
+    """C3 (ii): one comparator ball per branch, centred on its lowest-k draw.
+
+    k = 3 lies on k = 0's branch (its iota is inside k = 0's rtol 1e-3 ball), so
+    it is not a representative. An end state inside k = 3's ball but outside
+    k = 0's matches no representative and is rejected, though it matches a
+    draw of the set.
+    """
+    iota_k0, dofs_k0 = _UPSTREAM_DRAWS[0]
+    member = UpstreamEndState(
+        k=3,
+        values={
+            _IOTA: np.asarray(iota_k0 * (1.0 + 0.9e-3), dtype=np.float64),
+            _DOFS: np.asarray(dofs_k0, dtype=np.float64),
+        },
+    )
+    declared = _upstream_end_states()
+    declared = dataclasses.replace(declared, states=(*declared.states, member))
+    routes = _end_state_route_matrix()
+    beyond = {
+        _IOTA: np.asarray(iota_k0 * (1.0 + 1.8e-3), dtype=np.float64),
+        _DOFS: np.asarray(dofs_k0, dtype=np.float64),
+    }
+
+    assert [state.k for state in upstream_branch_representatives(declared, routes)] == [
+        0,
+        1,
+        2,
+    ]
+    assert upstream_end_state_matches(declared, routes, member.values) == (0,)
+    solo = dataclasses.replace(declared, states=(declared.states[1], member))
+    assert upstream_end_state_matches(solo, routes, beyond) == (3,)
+    assert upstream_end_state_matches(declared, routes, beyond) == ()
+
+
+def test_an_end_state_set_on_one_branch_is_refused() -> None:
+    """One branch means the input determines the end state; lane against lane decides."""
+    iota, dofs = _UPSTREAM_DRAWS[0]
+    one_branch = dataclasses.replace(
+        _upstream_end_states(),
+        states=tuple(
+            UpstreamEndState(
+                k=k,
+                values={
+                    _IOTA: np.asarray(iota, dtype=np.float64),
+                    _DOFS: np.asarray(dofs, dtype=np.float64),
+                },
+            )
+            for k in (0, 1)
+        ),
+    )
+
+    with pytest.raises(ArbitrationError, match="span one branch"):
+        upstream_end_state_matches(
+            one_branch,
+            _end_state_route_matrix(),
+            one_branch.states[0].values,
         )
 
 
@@ -3189,7 +3253,9 @@ def _round_trip_values() -> dict[str, np.ndarray]:
     }
 
 
-def _round_trip_declaration(*extra_k: int) -> CaseDefinition:
+def _round_trip_declaration(
+    draws: tuple[tuple[int, list[float]], ...] = ((0, [1.0, 2.0]), (1, [3.0, 4.0])),
+) -> CaseDefinition:
     upstream = UpstreamEndStates(
         case_id=_ROUND_TRIP_CASE_ID,
         scale="bounded",
@@ -3198,11 +3264,7 @@ def _round_trip_declaration(*extra_k: int) -> CaseDefinition:
             UpstreamEndState(
                 k=k, values={_ROUND_TRIP_KEY: np.asarray(value, dtype=np.float64)}
             )
-            for k, value in (
-                (0, [1.0, 2.0]),
-                (1, [3.0, 4.0]),
-                *((k, [1.0, 2.0]) for k in extra_k),
-            )
+            for k, value in draws
         ),
         derivation="test fixture",
     )
@@ -3272,7 +3334,12 @@ def test_run_parity_records_and_the_audit_recomputes_upstream_end_states(
     audited = audit_published_run(published, repo_root=repo_root)
     assert audited.verdict == "quality-band"
 
-    # A declaration the record was not judged by recomputes other matched draws.
-    _declare(monkeypatch, audit_module, _round_trip_declaration(7))
+    # A declaration the record was not judged by recomputes other matched draws:
+    # the lanes' branch is now represented by k = 1.
+    _declare(
+        monkeypatch,
+        audit_module,
+        _round_trip_declaration(((0, [3.0, 4.0]), (1, [1.0, 2.0]))),
+    )
     with pytest.raises(ValueError, match="stored upstream end states differ"):
         audit_published_run(published, repo_root=repo_root)

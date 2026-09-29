@@ -8,7 +8,8 @@ nine), fixed before any sample was drawn:
   upstream end values of one observable, for a workflow whose end VALUE is path dependent;
 * ``upstream_end_states`` -- upstream's end states of the nine, for a workflow whose end STATE (which solution it
   lands on) is not determined by its input: every draw whose named upstream stages all succeeded enters the set,
-  and the arbiter admits a lane whose end state matches at least one of them under the case's own route comparators.
+  the arbiter groups the set into branches under the case's own route comparators, each represented by its
+  lowest-``k`` draw, and admits a lane whose end state matches one representative.
 
 Both are engineering acceptances against upstream's own scatter, never an equivalence proof; the arbiter can
 therefore only return ``quality-band`` under them. Neither may be declared without a tracked same-state test proving
@@ -97,7 +98,7 @@ def upstream_end_states(
     same_state_proof: str,
     disclosure: str = "",
 ) -> UpstreamEndStates:
-    """Upstream's nine end states at ``scale`` whose named stages all succeeded, keyed by lane observable."""
+    """Upstream's nine end states at ``scale`` whose named stages all succeeded, keyed by lane observable, in ascending ``k``."""
     scatter = load_upstream_scatter(case_id, scale)
     runs = pre_registered_runs(scatter)
     states = tuple(
@@ -116,8 +117,9 @@ def upstream_end_states(
         states=states,
         derivation=(
             f"upstream end states at {scale}: {_provenance(scatter)}; the {len(states)} draws whose upstream "
-            f"stages all succeeded (failed: {failed or 'none'}); a lane passes when its end state matches one of "
-            "them under the case's own route comparator and tolerance for every judged key; "
+            f"stages all succeeded (failed: {failed or 'none'}); the draws are grouped into branches under the "
+            "case's own route comparator and tolerance for every judged key, each branch represented by its "
+            "lowest-k draw, and a lane passes when its end state matches one representative on every judged key; "
             f"same-state proof: {same_state_proof}"
             + (f"; {disclosure}" if disclosure else "")
         ),

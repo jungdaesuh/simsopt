@@ -18,6 +18,7 @@ from examples.jax.parity.contracts import (
     EndStateResult,
     QualityBand,
     QualityBandResult,
+    UpstreamEndState,
     UpstreamEndStates,
 )
 from examples.jax.parity.provenance import LaneProvenance
@@ -526,23 +527,10 @@ def _end_state_routes(
     return MappingProxyType(judged)
 
 
-def upstream_end_state_matches(
-    upstream_end_states: UpstreamEndStates,
-    routes: tuple[ComparisonRoute, ...],
-    values: Mapping[str, np.ndarray],
-) -> tuple[int, ...]:
-    """Return the ascending ``k`` of every upstream draw one end state matches.
-
-    A draw matches when, for EVERY judged key, ``values[key]`` (as ``left``)
-    passes that key's route comparator against the draw's value (as
-    ``right``); a shape mismatch is no match. A scalar is compared in the
-    published receipt form, a one-element array, whether it comes from a
-    receipt or from an in-process observation. The judged routes are chosen from
-    ``routes`` under the arbiter's own refusal rules, and each value must be
-    present, finite and FP64. An engineering acceptance against upstream's own
-    scatter, never an equivalence test.
-    """
-    judged_routes = _end_state_routes(routes, upstream_end_states)
+def _checked_end_state(
+    judged_routes: Mapping[str, ComparisonRoute], values: Mapping[str, np.ndarray]
+) -> dict[str, np.ndarray]:
+    """The judged values of one end state, present, finite and FP64, in receipt form."""
     checked: dict[str, np.ndarray] = {}
     for key in judged_routes:
         if key not in values:
@@ -552,15 +540,78 @@ def upstream_end_state_matches(
         if not bool(np.all(np.isfinite(value))):
             raise ArbitrationError(f"non-finite upstream end-state observable {key}")
         checked[key] = value
-    return tuple(
-        sorted(
-            state.k
-            for state in upstream_end_states.states
-            if all(
-                _compare(route, checked[key], state.values[key])[0]
-                for key, route in judged_routes.items()
-            )
+    return checked
+
+
+def _same_branch(
+    judged_routes: Mapping[str, ComparisonRoute],
+    candidate: Mapping[str, np.ndarray],
+    representative: UpstreamEndState,
+) -> bool:
+    """Whether ``candidate`` (``left``) passes every judged route against ``representative`` (``right``)."""
+    return all(
+        _compare(route, candidate[key], representative.values[key])[0]
+        for key, route in judged_routes.items()
+    )
+
+
+def upstream_branch_representatives(
+    upstream_end_states: UpstreamEndStates,
+    routes: tuple[ComparisonRoute, ...],
+) -> tuple[UpstreamEndState, ...]:
+    """Upstream's distinct end-state branches, each as its lowest-``k`` draw.
+
+    The draws are visited in ascending ``k``; a draw joins the branch of the
+    first representative it matches under every judged key's route comparator
+    (the draw as ``left``, the representative as ``right``, as a lane is
+    judged), and otherwise starts a new branch. A set whose draws all lie on
+    ONE branch is refused: one branch means the end state is a function of the
+    input, and the lane-versus-lane routes must decide instead.
+    """
+    judged_routes = _end_state_routes(routes, upstream_end_states)
+    representatives: list[UpstreamEndState] = []
+    for state in upstream_end_states.states:
+        values = _checked_end_state(judged_routes, state.values)
+        if not any(
+            _same_branch(judged_routes, values, representative)
+            for representative in representatives
+        ):
+            representatives.append(state)
+    if len(representatives) < 2:
+        raise ArbitrationError(
+            "upstream end states span one branch under the case's route "
+            "comparators; the lane-versus-lane routes decide such a case"
         )
+    return tuple(representatives)
+
+
+def upstream_end_state_matches(
+    upstream_end_states: UpstreamEndStates,
+    routes: tuple[ComparisonRoute, ...],
+    values: Mapping[str, np.ndarray],
+) -> tuple[int, ...]:
+    """Return the ascending ``k`` of every upstream branch representative one end state matches.
+
+    The representatives are :func:`upstream_branch_representatives`: a draw
+    that is not its branch's lowest-``k`` member is never matched on its own,
+    so the acceptance region is one comparator ball per branch. A
+    representative matches when, for EVERY judged key, ``values[key]`` (as
+    ``left``) passes that key's route comparator against the representative's
+    value (as ``right``); a shape mismatch is no match. A scalar is compared in
+    the published receipt form, a one-element array, whether it comes from a
+    receipt or from an in-process observation. The judged routes are chosen
+    from ``routes`` under the arbiter's own refusal rules, and each value must
+    be present, finite and FP64. An engineering acceptance against upstream's
+    own scatter, never an equivalence test.
+    """
+    judged_routes = _end_state_routes(routes, upstream_end_states)
+    checked = _checked_end_state(judged_routes, values)
+    return tuple(
+        representative.k
+        for representative in upstream_branch_representatives(
+            upstream_end_states, routes
+        )
+        if _same_branch(judged_routes, checked, representative)
     )
 
 
@@ -570,7 +621,7 @@ def _end_state_results(
     observations: Mapping[str, LaneObservation],
     required_lanes: frozenset[str],
 ) -> tuple[EndStateResult, ...]:
-    """Match every compared lane's end state against each of upstream's draws."""
+    """Match every compared lane's end state against upstream's branch representatives."""
     results: list[EndStateResult] = []
     for lane in sorted(required_lanes):
         observation = observations[lane]
@@ -675,11 +726,12 @@ def arbitrate(
     end states). It is an engineering acceptance against upstream's own
     scatter, never equivalence. Each lane must still pass the success gate
     (the contract admits no budget or failure outcome); each lane's end state
-    must then match at least one upstream draw on every judged key, under that
-    key's own route comparator and tolerance. The lane-pair comparisons of the
+    must then match one upstream branch representative (the lowest-``k`` draw
+    of each distinct branch, :func:`upstream_branch_representatives`) on every
+    judged key, under that key's own route comparator and tolerance. The lane-pair comparisons of the
     judged keys are recorded as informational; every other route still
     decides. The verdict is ``quality-band`` at best, never ``pass``, and
-    ``end_state_results`` names the draws each lane matched.
+    ``end_state_results`` names the representatives each lane matched.
     """
     admission = _validate_lanes(
         observations,

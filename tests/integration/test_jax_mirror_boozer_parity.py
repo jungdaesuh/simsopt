@@ -10,7 +10,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 from examples.jax.manifest_runtime import load_runtime_contract_pair
-from examples.jax.parity.arbiter import LaneObservation, upstream_end_state_matches
+from examples.jax.parity.arbiter import (
+    LaneObservation,
+    upstream_branch_representatives,
+    upstream_end_state_matches,
+)
 from examples.jax.parity.cases import get_case
 from examples.jax.parity.cases.native_boozer import (
     FIRST_STAGE_STATUS_CONVENTION_BY_DRIVER,
@@ -182,8 +186,9 @@ def test_exact_boozer_surface_workflow_matches_native_and_jax_cpu(
     # the first stage stops at its iteration cap, unconverged, and upstream's
     # own script reaches five different surfaces from nine one-ulp starts at
     # this scale (tracked upstream scatter record). Each lane's end state is
-    # therefore judged as the arbiter judges it: it must be one of upstream's
-    # own, under the case's route comparator for every judged key.
+    # therefore judged as the arbiter judges it: it must match one of upstream's
+    # branch representatives (the lowest-k draw of each branch), under the
+    # case's route comparator for every judged key.
     end_states = get_case("native-boozer").end_states("bounded")
     assert end_states is not None
     routes = _scale_routes("bounded")
@@ -268,19 +273,22 @@ def test_upstream_end_states_span_several_boozer_surfaces(scale: str) -> None:
     upstream's own nine draws land on at least two end states that the case's
     own route comparators tell apart; with one, the end state would be a
     function of the input and the lanes would be compared with each other.
+    Each draw then belongs to exactly one branch, represented by its
+    lowest-k draw, and matches that representative alone.
     """
     end_states = get_case("native-boozer").end_states(scale)
     assert end_states is not None
     routes = _scale_routes(scale)
     all_draws = tuple(state.k for state in end_states.states)
     assert all_draws == tuple(range(9))
-    matches = {
-        state.k: upstream_end_state_matches(end_states, routes, state.values)
-        for state in end_states.states
-    }
-    for k, matched in matches.items():
-        assert k in matched
-    assert any(matched != all_draws for matched in matches.values())
+    representatives = tuple(
+        state.k for state in upstream_branch_representatives(end_states, routes)
+    )
+    assert len(representatives) >= 2
+    for state in end_states.states:
+        (branch,) = upstream_end_state_matches(end_states, routes, state.values)
+        assert branch <= state.k
+        assert (branch == state.k) == (state.k in representatives)
 
 
 #: The first stage's exactly comparable facts. They are equal across the lanes

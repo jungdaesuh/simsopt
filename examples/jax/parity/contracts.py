@@ -177,14 +177,17 @@ class UpstreamEndStates:
 
     Where upstream's own script, started from one-ulp perturbed copies of the
     same input, lands on several distinct end states (Boozer surface branches,
-    say), no lane-versus-lane equality can be required of the port. A lane is
-    then accepted when its end state MATCHES at least one of upstream's own
-    draws: one draw whose value, for EVERY key in ``observables``, passes the
-    comparator and tolerance the case's own route matrix declares for that key.
-    This is an engineering acceptance against upstream's own scatter, never an
-    equivalence proof, so the verdict it yields is ``quality-band`` at most.
-    ``derivation`` records how the draws were produced and which tracked test
-    proves the lanes compute upstream's function at upstream's states.
+    say), no lane-versus-lane equality can be required of the port. ``states``
+    are upstream's successful draws in ascending ``k``. The arbiter groups them
+    into BRANCHES under the comparator and tolerance the case's own route
+    matrix declares for each key in ``observables``, each branch represented
+    by its lowest-``k`` draw, and accepts a lane whose end state matches one
+    REPRESENTATIVE on every key (the comparator balls are not transitive, so
+    matching any member would enlarge the region). This is an engineering
+    acceptance against upstream's own scatter, never an equivalence proof, so
+    the verdict it yields is ``quality-band`` at most. ``derivation`` records
+    how the draws were produced and which tracked test proves the lanes compute
+    upstream's function at upstream's states.
     """
 
     case_id: str
@@ -212,8 +215,8 @@ class UpstreamEndStates:
         states = tuple(self.states)
         if len(states) < 2:
             raise ValueError("an upstream end-state set needs at least two draws")
-        if len({state.k for state in states}) != len(states):
-            raise ValueError("upstream end-state draws must have unique k")
+        if any(later.k <= earlier.k for earlier, later in zip(states, states[1:])):
+            raise ValueError("upstream end-state draws must have unique ascending k")
         missing = sorted(
             {key for state in states for key in observables if key not in state.values}
         )
