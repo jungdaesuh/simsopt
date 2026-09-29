@@ -465,82 +465,98 @@ class FullLogSumExpTests(unittest.TestCase):
         self.assertGreaterEqual(signed, hard)
         self.assertTrue(np.all(np.isfinite(grad)))
 
-    def test_distance_rows_are_differentiable_through_coincidence(self):
-        # Codex R17-01: one of two identical sample sets moves through exact
-        # coincidence along z. At -h, 0 and +h the one-sided differences on
-        # either side agree with the analytic derivative (the Euclidean pair
-        # distance had a cusp there: derivative -1, 0, +1).
-        def curve_pair():
-            first, second = _circle(1.0, 0.0, 32), _circle(1.0, 0.0, 32)
-            return first, second, _JointDofs([first, second])
-
-        def curve_on_torus():
-            # The torus's outboard midplane circle, sampled at the surface's
-            # toroidal angles: every curve sample is a surface sample.
-            curve = _circle(1.3, 0.0, 32)
-            surface = SurfaceRZFourier(
-                nfp=1,
-                stellsym=True,
-                mpol=1,
-                ntor=1,
-                quadpoints_phi=np.linspace(0.0, 1.0, 32, endpoint=False),
-                quadpoints_theta=np.linspace(0.0, 1.0, 8, endpoint=False),
-            )
-            surface.set("rc(0,0)", 1.0)
-            surface.set("rc(1,0)", 0.3)
-            surface.set("zs(1,0)", 0.3)
-            surface.fix_all()
-            return curve, surface, _JointDofs([curve])
-
-        first, second, pair_owner = curve_pair()
-        curve, surface, surface_owner = curve_on_torus()
-        cases = {
+    @staticmethod
+    def _collision_cases(temperature):
+        """Both distance rows at ``temperature``, each with a dofs owner and the
+        index of a dof that moves one sample set through exact coincidence
+        along z: one of two identical circles, and the torus's outboard
+        midplane circle sampled at the surface's toroidal angles (every curve
+        sample is a surface sample)."""
+        first, second = _circle(1.0, 0.0, 32), _circle(1.0, 0.0, 32)
+        pair_owner = _JointDofs([first, second])
+        curve = _circle(1.3, 0.0, 32)
+        surface = SurfaceRZFourier(
+            nfp=1,
+            stellsym=True,
+            mpol=1,
+            ntor=1,
+            quadpoints_phi=np.linspace(0.0, 1.0, 32, endpoint=False),
+            quadpoints_theta=np.linspace(0.0, 1.0, 8, endpoint=False),
+        )
+        surface.set("rc(0,0)", 1.0)
+        surface.set("rc(1,0)", 0.3)
+        surface.set("zs(1,0)", 0.3)
+        surface.fix_all()
+        surface_owner = _JointDofs([curve])
+        return {
             "curve_curve": (
                 lambda: smooth_min_curve_curve_signed_constraint(
-                    [first, second], 0.1, 0.01, pair_owner
+                    [first, second], 0.1, temperature, pair_owner
                 ),
                 pair_owner,
                 list(pair_owner.dof_names).index(f"{second.name}:zc(0)"),
             ),
             "curve_surface": (
                 lambda: smooth_min_curve_surface_signed_constraint(
-                    [curve], surface, 0.1, 0.01, surface_owner
+                    [curve], surface, 0.1, temperature, surface_owner
                 ),
                 surface_owner,
                 list(surface_owner.dof_names).index(f"{curve.name}:zc(0)"),
             ),
         }
-        self.assertEqual(
-            smooth_min_curve_curve_signed_constraint([first, second], 0.1, 0.01, pair_owner)[2],
-            0.1,
-        )
+
+    @staticmethod
+    def _evaluate_moved(evaluate, owner, index, shift):
+        x0 = owner.x.copy()
+        moved = x0.copy()
+        moved[index] += shift
+        owner.x = moved
+        try:
+            return evaluate()
+        finally:
+            owner.x = x0
+
+    def test_distance_rows_are_differentiable_through_coincidence(self):
+        # Codex R17-01: at -h, 0 and +h the one-sided differences on either
+        # side agree with the analytic derivative (the Euclidean pair distance
+        # had a cusp there: derivative -1, 0, +1).
         step, offset = 1.0e-7, 1.0e-3
-        for name, (evaluate, owner, index) in cases.items():
-            x0 = owner.x.copy()
+        for name, (evaluate, owner, index) in self._collision_cases(0.01).items():
+            self.assertEqual(self._evaluate_moved(evaluate, owner, index, 0.0)[2], 0.1)
 
             def value_and_derivative(shift):
-                moved = x0.copy()
-                moved[index] += shift
-                owner.x = moved
-                signed, grad, _hard = evaluate()
+                signed, grad, _hard = self._evaluate_moved(evaluate, owner, index, shift)
                 return signed, grad[index]
 
-            try:
-                for position in (-offset, 0.0, offset):
-                    with self.subTest(kernel=name, position=position):
-                        value, derivative = value_and_derivative(position)
-                        forward = (value_and_derivative(position + step)[0] - value) / step
-                        backward = (value - value_and_derivative(position - step)[0]) / step
-                        for label, difference in (("forward", forward), ("backward", backward)):
-                            self.assertAlmostEqual(
-                                difference,
-                                derivative,
-                                delta=1.0e-4,
-                                msg=f"{label} difference {difference:.6g} vs analytic "
-                                f"{derivative:.6g} at z offset {position:g}",
-                            )
-            finally:
-                owner.x = x0
+            for position in (-offset, 0.0, offset):
+                with self.subTest(kernel=name, position=position):
+                    value, derivative = value_and_derivative(position)
+                    forward = (value_and_derivative(position + step)[0] - value) / step
+                    backward = (value - value_and_derivative(position - step)[0]) / step
+                    for label, difference in (("forward", forward), ("backward", backward)):
+                        self.assertAlmostEqual(
+                            difference,
+                            derivative,
+                            delta=1.0e-4,
+                            msg=f"{label} difference {difference:.6g} vs analytic "
+                            f"{derivative:.6g} at z offset {position:g}",
+                        )
+
+    def test_extreme_temperatures_give_finite_rows_at_and_near_contact(self):
+        # Codex R18-01: every finite T > 0 is accepted. At T = 1e-200 the
+        # squared temperature underflowed to 0, so the contact gradient was
+        # NaN; T = 1e150 would overflow T^2. Values and gradients stay finite,
+        # the gradient no larger than the unit direction a pair can give, and
+        # the row no looser than the hard value.
+        for temperature in (1.0e-200, 1.0e150):
+            for name, (evaluate, owner, index) in self._collision_cases(temperature).items():
+                for position in (-1.0e-3, -1.0e-8, 0.0, 1.0e-8, 1.0e-3):
+                    with self.subTest(temperature=temperature, kernel=name, position=position):
+                        signed, grad, hard = self._evaluate_moved(evaluate, owner, index, position)
+                        self.assertTrue(np.isfinite(signed))
+                        self.assertTrue(np.all(np.isfinite(grad)), grad)
+                        self.assertLessEqual(abs(grad[index]), 1.0 + 1.0e-12)
+                        self.assertGreaterEqual(signed, hard)
 
     def test_memory_stays_bounded_at_a_realistic_size(self):
         # 4 coils of 128 points against a 64 x 64 surface: 2.1 million pairs,

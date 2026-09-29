@@ -28,9 +28,10 @@ __all__ = [
 ]
 
 
-# Point pairs per distance block. A block holds its pair differences, distances
-# and weights (about 6 floats, 48 bytes, per pair), so the kernels' scratch
-# memory stays near 3 MiB whatever the number of pairs.
+# Point pairs per distance block. A block holds its three coordinate
+# differences, squared distances, regularized norms, smooth distances and
+# weights (about 8 floats, 64 bytes, per pair), so the kernels' scratch memory
+# stays near 4-5 MiB whatever the number of pairs.
 _PAIR_BLOCK = 1 << 16
 
 def require_smoothing_temperature(temperature) -> float:
@@ -70,14 +71,19 @@ def soft_min_pair_distance(point_sets, set_pairs, temperature: float):
                 left_block, right_block = left[rows], right[columns]
                 # Squared distances from the coordinate differences (no |x|^2 +
                 # |y|^2 - 2 x.y cancellation), so hard_min is the sampled minimum.
-                squared = np.zeros((len(left_block), len(right_block)))
-                for axis in range(3):
-                    difference = np.subtract.outer(left_block[:, axis], right_block[:, axis])
-                    squared += np.square(difference, out=difference)
+                differences = [
+                    np.subtract.outer(left_block[:, axis], right_block[:, axis])
+                    for axis in range(3)
+                ]
+                squared = differences[0] * differences[0]
+                for difference in differences[1:]:
+                    squared += difference * difference
                 min_squared_distance = min(min_squared_distance, float(np.min(squared)))
-                # s = d^2 / (r + T), r = sqrt(d^2 + T^2): sqrt(d^2 + T^2) - T
-                # without its cancellation for d << T.
-                roots = np.sqrt(squared + temperature * temperature)
+                # s = d^2 / (r + T) with r = hypot(d, T) = sqrt(d^2 + T^2):
+                # sqrt(d^2 + T^2) - T without its cancellation for d << T, and
+                # r >= T without the underflow or overflow of T^2 for any
+                # finite T > 0.
+                roots = np.hypot(np.sqrt(squared), temperature)
                 distances = squared / (roots + temperature)
                 block_min = float(np.min(distances))
                 if block_min < shift:
@@ -91,19 +97,16 @@ def soft_min_pair_distance(point_sets, set_pairs, temperature: float):
                 weights /= temperature
                 np.exp(weights, out=weights)
                 weight_sum += float(np.sum(weights))
-                # d(s_ij)/d(left_i) = (left_i - right_j) / r_ij (r >= T > 0), so
-                # the weighted sums over j (i) are left_i * sum_j c_ij -
-                # (c @ right)_i and right_j * sum_i c_ij - (c.T @ left)_j with
-                # c = weights / r.
-                coefficients = np.divide(weights, roots, out=weights)
-                gradients[left_index][rows] += (
-                    left_block * np.sum(coefficients, axis=1)[:, None]
-                    - coefficients @ right_block
-                )
-                gradients[right_index][columns] += (
-                    right_block * np.sum(coefficients, axis=0)[:, None]
-                    - coefficients.T @ left_block
-                )
+                # d(s_ij)/d(left_i) = (left_i - right_j) / r_ij, a vector no
+                # longer than 1, summed with the weights directly (the matmul
+                # identity left_i sum_j c_ij - (c @ right)_i cancels terms of
+                # size |left| / T, garbage when T is small).
+                for axis, directions in enumerate(differences):
+                    directions /= roots
+                    gradients[left_index][rows, axis] += np.einsum("ij,ij->i", weights, directions)
+                    gradients[right_index][columns, axis] -= np.einsum(
+                        "ij,ij->j", weights, directions
+                    )
     for gradient in gradients:
         gradient /= weight_sum
     soft_min = shift - temperature * float(np.log(weight_sum))
