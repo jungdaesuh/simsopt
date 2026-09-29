@@ -674,6 +674,17 @@ class SkillDocumentsThePackageTests(unittest.TestCase):
         self.assertIn("sampled quadrature points", api)
         self.assertIn("higher resolution", api)
 
+    def test_scaling_advice_divides_by_a_positive_scale(self):
+        """R17-02: dividing f by f(x0) maximizes a negative f and divides by 0
+        at a zero start; every piece of advice names a positive scale."""
+        texts = {**skill_markdown(), "guide": (REPO_ROOT / "docs" / "alm_setup_guide.md").read_text()}
+        for name, text in texts.items():
+            with self.subTest(file=name):
+                self.assertNotRegex(text, r"(?i)divid\w* (it|f|the objective) by its initial value")
+        termination = skill_markdown()["references/termination.md"]
+        self.assertIn("divide it by a positive scale: |f(x0)|, or a chosen positive reference "
+                      "scale when f(x0) = 0", termination)
+
     def test_equations_name_the_quantities_in_use(self):
         """R16-06: the complementarity gap is f minus the ordinary Lagrangian
         at the shifted multipliers (core._complementarity_gap), and the Boozer
