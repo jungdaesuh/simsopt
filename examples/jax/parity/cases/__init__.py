@@ -10,10 +10,16 @@ from types import MappingProxyType
 import numpy as np
 from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.cases.native_boozer import (
-    create_input as create_native_boozer_input,
+    END_STATE_OBSERVABLES as NATIVE_BOOZER_END_STATE_OBSERVABLES,
 )
 from examples.jax.parity.cases.native_boozer import (
-    END_STATE_OBSERVABLES as NATIVE_BOOZER_END_STATE_OBSERVABLES,
+    REPLAY_EXACT_OBSERVABLES as NATIVE_BOOZER_REPLAY_EXACT_OBSERVABLES,
+)
+from examples.jax.parity.cases.native_boozer import (
+    REPLAY_STATE_OBSERVABLES as NATIVE_BOOZER_REPLAY_STATE_OBSERVABLES,
+)
+from examples.jax.parity.cases.native_boozer import (
+    create_input as create_native_boozer_input,
 )
 from examples.jax.parity.cases.native_boozer import execute as execute_native_boozer
 from examples.jax.parity.cases.native_boozerqa import (
@@ -272,7 +278,9 @@ class CaseDefinition:
             )
         stage_wise_scales = [contract.scale for contract in self.stage_wise_contracts]
         if len(set(stage_wise_scales)) != len(stage_wise_scales):
-            raise ValueError("case declares more than one stage-wise contract at one scale")
+            raise ValueError(
+                "case declares more than one stage-wise contract at one scale"
+            )
         foreign_stage_wise = sorted(
             contract.case_id
             for contract in self.stage_wise_contracts
@@ -332,8 +340,37 @@ _CASES = {
         # Which Boozer surface the workflow lands on is not a function of its input: the first
         # stage stops at its 300-iteration L-BFGS cap, unconverged, and upstream's own official
         # script reaches 2 surfaces from nine one-ulp starts at native_default and 5 at the bounded
-        # scale (tracked upstream scatter records). Each lane is judged by whether its end state is
-        # one of upstream's own (2026-09-29 ruling: judge by upstream's own scatter).
+        # scale (tracked upstream scatter records). The workflow is therefore judged stage by stage
+        # (PLAN.md amendment 5, B1): the official Newton stages replayed by every lane from the same
+        # starts decide, and the chained end state is informational -- each lane's match against
+        # upstream's own end states below is recorded, and no longer decides.
+        stage_wise_contracts=tuple(
+            StageWiseContract(
+                case_id="native-boozer",
+                scale=scale,
+                informational_observables=NATIVE_BOOZER_END_STATE_OBSERVABLES,
+                deciding_observables=(
+                    *NATIVE_BOOZER_REPLAY_EXACT_OBSERVABLES,
+                    *NATIVE_BOOZER_REPLAY_STATE_OBSERVABLES,
+                ),
+                same_state_tests=(
+                    "tests/integration/test_jax_mirror_boozer_official_end_states.py",
+                ),
+                derivation=(
+                    "PLAN.md amendment 5 part 1, B1 (registered 2026-09-29 16:24 EDT, before any "
+                    "formal run): from each start -- the native lane's own first-stage end, which "
+                    "each JAX lane reruns in-process under its one-thread policy, then upstream's "
+                    f"pre-registered first-stage ends k = 0..8 at {scale} (9e027eac3, one thread, "
+                    "one-ulp protocol; tracked scatter record keys first:surface_dofs, first:iota, "
+                    "first:G) -- every lane runs the official area and flux Newton stages; the starts "
+                    "and success flags are compared exactly and the end states at the case's "
+                    "same-state tolerance (rtol 1e-11, atol 1e-13), and every replayed solve must "
+                    "succeed. The chained end state is informational: the first stage's capped, "
+                    "path-dependent L-BFGS end point decides which surface the chain reaches"
+                ),
+            )
+            for scale in ("bounded", "native_default")
+        ),
         upstream_end_states=tuple(
             upstream_end_states(
                 load_upstream_scatter("native-boozer", scale),

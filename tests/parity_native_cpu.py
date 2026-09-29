@@ -1,4 +1,4 @@
-"""Run a native-cpu child with OpenMP pinned before the extension loads."""
+"""Run a parity-lane child with the harness's lane environment (OpenMP pinned before the extension loads)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from examples.jax.parity.runtime import build_parity_lane_environment
+from examples.jax.parity.runtime import ParityLane, build_parity_lane_environment
 from simsopt_jax_adapters.isolated_kernel import pythonpath_with_loaded_kernel
 
 
@@ -24,8 +24,26 @@ def run_native_cpu_child(
     extension ahead of ``src/simsoptpp``. An in-process env pin cannot undo
     the pytest process team.
     """
+    return run_parity_lane_child(
+        "native-cpu", source, *args, repo_root=repo_root, cwd=cwd
+    )
+
+
+def run_parity_lane_child(
+    lane: ParityLane,
+    source: str,
+    *args: str,
+    repo_root: Path,
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Execute ``source`` as ``python -S -c`` under ``lane``'s parity environment.
+
+    The harness runs every lane, JAX lanes included, under one host-threading
+    policy; a JAX lane that also calls the native library (the Boozer replay's
+    native first stage) must run in such a child to reproduce the harness.
+    """
     environment = build_parity_lane_environment(
-        "native-cpu", dict(os.environ), repo_root=repo_root
+        lane, dict(os.environ), repo_root=repo_root
     )
     environment["PYTHONPATH"] = pythonpath_with_loaded_kernel(
         *environment["PYTHONPATH"].split(os.pathsep)

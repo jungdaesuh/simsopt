@@ -20,6 +20,9 @@ from examples.jax.parity.cases.native_boozer import (
     FIRST_STAGE_STATUS_CONVENTION_BY_DRIVER,
     JAX_DRIVER,
     NATIVE_DRIVER,
+    REPLAY_EXACT_OBSERVABLES,
+    REPLAY_STARTS,
+    REPLAY_STATE_OBSERVABLES,
     STOPPING_REASON_CODES,
     _observation,
     _scale_configuration,
@@ -39,19 +42,19 @@ from simsopt_jax.examples.boozer_official import (
 _TESTS_ROOT = str(Path(__file__).resolve().parents[1])
 if _TESTS_ROOT not in sys.path:
     sys.path.append(_TESTS_ROOT)
-from parity_native_cpu import run_native_cpu_child
+from parity_native_cpu import run_parity_lane_child
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Child source is a string so OpenMP is in the environment before the
-# extension is imported. ``run_native_cpu_child`` applies
-# ``build_parity_lane_environment``, the SSOT that sets
-# ``OMP_NUM_THREADS=1`` for native-cpu. An in-process env pin cannot undo
-# the pytest process team; on kernel B that team-dependent L-BFGS warm
-# start walks the area-constrained residual onto a second Boozer root
-# (iota collapsing toward 0) while JAX and the OMP=1 native lane stay on
-# the NCSX-like root near the initial iota -0.4.
-_NATIVE_CHILD = """\
+# extension is imported. ``run_parity_lane_child`` applies
+# ``build_parity_lane_environment``, the SSOT that sets ``OMP_NUM_THREADS=1``
+# for every lane. An in-process env pin cannot undo the pytest process team;
+# on kernel B that team-dependent L-BFGS warm start walks the area-constrained
+# residual onto a second Boozer root. The JAX lane runs in such a child too:
+# its stage-wise replay reruns the native first stage, which must reproduce
+# the native lane's one-thread first stage bit for bit.
+_LANE_CHILD = """\
 import pickle
 import sys
 from dataclasses import fields
@@ -60,11 +63,10 @@ from pathlib import Path
 from examples.jax.parity.cases import get_case
 from examples.jax.parity.input_bundle import read_input_bundle
 
-bundle_root = Path(sys.argv[1])
-out_path = Path(sys.argv[2])
-observation = get_case("native-boozer").execute(
-    "native-cpu", *read_input_bundle(bundle_root)
-)
+lane = sys.argv[1]
+bundle_root = Path(sys.argv[2])
+out_path = Path(sys.argv[3])
+observation = get_case("native-boozer").execute(lane, *read_input_bundle(bundle_root))
 payload = {field.name: getattr(observation, field.name) for field in fields(observation)}
 payload["values"] = dict(observation.values)
 payload["applicability"] = dict(observation.applicability)
@@ -72,9 +74,13 @@ out_path.write_bytes(pickle.dumps(payload))
 """
 
 
-def _native_observation(input_root: Path, out_path: Path) -> LaneObservation:
-    completed = run_native_cpu_child(
-        _NATIVE_CHILD,
+def _lane_observation(
+    lane: ParityLane, input_root: Path, out_path: Path
+) -> LaneObservation:
+    completed = run_parity_lane_child(
+        lane,
+        _LANE_CHILD,
+        lane,
         str(input_root),
         str(out_path),
         repo_root=_REPO_ROOT,
@@ -85,8 +91,13 @@ def _native_observation(input_root: Path, out_path: Path) -> LaneObservation:
 
 @pytest.mark.parametrize("lane", ["native-cpu", "jax-cpu"])
 @pytest.mark.parametrize(
-    ("area_success", "flux_success", "expected_success"),
-    [(True, True, True), (False, True, False), (True, False, False)],
+    ("area_success", "flux_success", "replay_success", "expected_success"),
+    [
+        (True, True, True, True),
+        (False, True, True, False),
+        (True, False, True, False),
+        (True, True, False, False),
+    ],
 )
 def test_boozer_observation_requires_both_solver_stages(
     tmp_path: Path,
@@ -94,8 +105,10 @@ def test_boozer_observation_requires_both_solver_stages(
     lane: ParityLane,
     area_success: bool,
     flux_success: bool,
+    replay_success: bool,
     expected_success: bool,
 ) -> None:
+    """Both chained solves, and every replayed solve, must succeed."""
     bundle = create_input_bundle(
         tmp_path / "inputs",
         case_id="native-boozer",
@@ -114,6 +127,10 @@ def test_boozer_observation_requires_both_solver_stages(
         "flux:residual_norm": np.asarray(1.0),
         "flux:iota": np.asarray(-0.4),
         "flux:G": np.asarray(1.0),
+        "replay:area_solver_success": np.asarray(
+            [True] * (len(REPLAY_STARTS) - 1) + [replay_success]
+        ),
+        "replay:flux_solver_success": np.asarray([True] * len(REPLAY_STARTS)),
     }
     monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_parity")
 
@@ -135,28 +152,25 @@ def test_boozer_observation_requires_both_solver_stages(
 
 def test_exact_boozer_surface_workflow_matches_native_and_jax_cpu(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Native lane is a one-thread child; kernel-B L-BFGS is not unique under OMP>1.
+    """Both lanes are one-thread children; kernel-B L-BFGS is not unique under OMP>1.
 
     ``OMP_NUM_THREADS`` is read when libgomp starts, so an in-process env
-    pin cannot undo the pytest process team. The native lane therefore
-    runs in a subprocess whose environment comes from
-    ``run_native_cpu_child`` / ``build_parity_lane_environment`` (the
-    SSOT that sets ``OMP_NUM_THREADS=1`` before the child imports the
-    extension).
+    pin cannot undo the pytest process team. Each lane therefore runs in a
+    subprocess whose environment comes from ``run_parity_lane_child`` /
+    ``build_parity_lane_environment`` (the SSOT that sets
+    ``OMP_NUM_THREADS=1`` before the child imports the extension), as the
+    harness runs it.
     """
     case = get_case("native-boozer")
     input_root = tmp_path / "inputs"
     bundle = case.create_input(input_root, "bounded")
-    _, arrays = load_input_bundle(input_root, bundle)
+    load_input_bundle(input_root, bundle)
 
-    native = _native_observation(input_root, tmp_path / "native-observation.pkl")
-
-    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_parity")
-    monkeypatch.setenv("SIMSOPT_PRECISION", "fp64")
-    monkeypatch.setenv("JAX_ENABLE_X64", "1")
-    jax = case.execute("jax-cpu", bundle, arrays)
+    native = _lane_observation(
+        "native-cpu", input_root, tmp_path / "native-observation.pkl"
+    )
+    jax = _lane_observation("jax-cpu", input_root, tmp_path / "jax-observation.pkl")
 
     assert native.success is True
     assert jax.success is True
@@ -182,20 +196,34 @@ def test_exact_boozer_surface_workflow_matches_native_and_jax_cpu(
             atol=1.0e-13,
         )
 
-    # Which Boozer surface the workflow lands on is not a function of its input:
-    # the first stage stops at its iteration cap, unconverged, and upstream's
-    # own script reaches five different surfaces from nine one-ulp starts at
-    # this scale (tracked upstream scatter record). Each lane's end state is
-    # therefore judged as the arbiter judges it: it must match one of upstream's
-    # branch representatives (the lowest-k draw of each branch), under the
-    # case's route comparator for every judged key.
-    end_states = get_case("native-boozer").end_states("bounded")
-    assert end_states is not None
-    routes = _scale_routes("bounded")
-    for observation in (native, jax):
-        assert upstream_end_state_matches(end_states, routes, observation.values), (
-            observation.lane
+    # Which Boozer surface the chained workflow lands on is not a function of
+    # its input (the first stage stops at its iteration cap, unconverged, and
+    # upstream's own script reaches five surfaces from nine one-ulp starts at
+    # this scale), so the chained end state is informational and the stages
+    # are judged from shared starts (PLAN.md amendment 5, B1): the starts
+    # exactly -- including the native first-stage end the JAX lane reran --
+    # the replayed Newton end states at the case's same-state tolerance, and
+    # every replayed solve must succeed.
+    assert native.values["replay:start_surface_dofs"].shape[0] == len(REPLAY_STARTS)
+    for observable in REPLAY_EXACT_OBSERVABLES:
+        np.testing.assert_array_equal(
+            jax.values[observable], native.values[observable], observable
         )
+    np.testing.assert_array_equal(
+        native.values["replay:start_surface_dofs"][0],
+        native.values["first:surface_dofs"],
+    )
+    for observable in REPLAY_STATE_OBSERVABLES:
+        np.testing.assert_allclose(
+            jax.values[observable],
+            native.values[observable],
+            rtol=1.0e-11,
+            atol=1.0e-13,
+            err_msg=observable,
+        )
+    for observation in (native, jax):
+        assert bool(np.all(observation.values["replay:area_solver_success"]))
+        assert bool(np.all(observation.values["replay:flux_solver_success"]))
     assert float(native.values["flux:residual_norm"]) < float(
         native.values["initial:residual_norm"]
     )
@@ -267,7 +295,10 @@ def _scale_routes(scale: str):
 
 @pytest.mark.parametrize("scale", ("bounded", "native_default"))
 def test_upstream_end_states_span_several_boozer_surfaces(scale: str) -> None:
-    """The end-state contract exists only because upstream's nine draws disagree.
+    """The end-state set exists only because upstream's nine draws disagree.
+
+    Beside the stage-wise contract (PLAN.md amendment 5, B1) the set is matched
+    and recorded, informational; the branch machinery itself is unchanged.
 
     The pre-registered rule: an end-state set is declared at a scale only when
     upstream's own nine draws land on at least two end states that the case's
@@ -393,6 +424,8 @@ def _assert_route_matrix(published: set[str]) -> None:
             assert applicability[key] == {True}, (scale, key)
         assert applicability["initial:boozer_residual"] == {True}
         assert applicability["initial:boozer_jacobian"] == {True}
+        for key in (*REPLAY_EXACT_OBSERVABLES, *REPLAY_STATE_OBSERVABLES):
+            assert applicability[key] == {True}, (scale, key)
 
 
 def _first_stage_outcome(

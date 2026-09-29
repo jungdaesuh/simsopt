@@ -251,6 +251,7 @@ def test_native_workflow_tolerance_is_centrally_owned_and_adversarial() -> None:
     (
         ("mirror_boozer_value", 1.0e-3, 1.0e-8),
         ("mirror_boozer_parameters", 0.0, 2.0e-3),
+        ("mirror_boozer_same_start", 1.0e-11, 1.0e-13),
         ("mirror_optimization_5e2", 5.0e-2, 1.0e-9),
         ("mirror_optimization_3e2", 3.0e-2, 1.0e-9),
         ("mirror_optimization_2e2", 2.0e-2, 1.0e-9),
@@ -3129,6 +3130,7 @@ def test_a_case_looks_up_its_band_and_end_state_set_by_scale() -> None:
             dataclasses.replace(_ARCHIVED_QUALITY_BAND, scale="native_default"),
         ),
         upstream_end_states=(_upstream_end_states(scale="bounded"),),
+        stage_wise_contracts=(),
     )
 
     assert case.quality_band("native_default") is case.quality_bands[0]
@@ -3229,6 +3231,7 @@ def test_a_band_and_an_end_state_set_may_declare_different_scales() -> None:
         _registered(_END_STATE_CASE_ID),
         quality_bands=(_ARCHIVED_QUALITY_BAND,),
         upstream_end_states=(_upstream_end_states(scale="bounded"),),
+        stage_wise_contracts=(),
     )
 
     assert case.quality_band("native_default") is not None

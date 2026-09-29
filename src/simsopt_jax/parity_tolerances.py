@@ -167,6 +167,11 @@ PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
     # here so manifest routes never embed or silently relax tolerances.
     "mirror_boozer_value": {"rtol": 1e-3, "atol": 1e-8},
     "mirror_boozer_parameters": {"rtol": 0.0, "atol": 2e-3},
+    # The Boozer mirror's same-state tolerance (tests/integration/
+    # test_jax_mirror_boozer_parity.py, initial residual and Jacobian), applied
+    # to the official Newton stages each lane runs from the SAME start
+    # (PLAN.md amendment 5, B1).
+    "mirror_boozer_same_start": {"rtol": 1e-11, "atol": 1e-13},
     "mirror_single_stage_initial_objective": {
         "rtol": 1e-12,
         "atol": 1e-15,

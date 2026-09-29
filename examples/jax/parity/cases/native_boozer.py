@@ -75,6 +75,20 @@ manual route) while ``BoozerSurfaceJAX`` commits as upstream does
 (``src/simsopt_jax_adapters/geo/boozer_surface.py:8162,8619``).  Without this
 key the two lanes could chain the next stage from different end states and the
 divergence would surface only as an unexplained ``area:``/``flux:`` mismatch.
+
+Which Boozer surface the chained workflow lands on is not a function of its
+input (the first stage stops at its iteration cap, unconverged, and upstream's
+own script reaches several surfaces from one-ulp starts), so the chained end
+state is informational and the workflow is judged STAGE BY STAGE (PLAN.md
+amendment 5, B1).  ``replay:*`` publishes the official Newton stages -- the
+area solve, then the flux solve at ``flux_multiplier`` times the area end's
+toroidal flux -- run by each lane from the SAME starts, ``REPLAY_STARTS``: the
+native lane's own first-stage end (which each JAX lane recomputes in-process
+by running the native first stage, under the lane's one-thread policy) and
+upstream's nine pre-registered first-stage ends at the case's scale (the
+tracked scatter record, frozen into the input bundle).  The starts are compared
+exactly, the Newton end states at the case's same-state tolerance, and every
+replayed solve must succeed.
 """
 
 from __future__ import annotations
@@ -84,7 +98,7 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final, get_args
+from typing import Final, NamedTuple, get_args
 
 import numpy as np
 from examples.jax.parity.arbiter import LaneObservation
@@ -93,12 +107,27 @@ from examples.jax.parity.input_bundle import (
     create_input_bundle,
     effective_construction_fingerprint,
 )
+from examples.jax.parity.official_reference import load_upstream_scatter
+from examples.jax.parity.official_scatter_contracts import (
+    PRE_REGISTERED_DRAWS,
+    pre_registered_runs,
+)
 from examples.jax.parity.runtime import ParityLane
+from simsopt.configs import get_data
+from simsopt.field import BiotSavart
+from simsopt.geo import (
+    Area,
+    BoozerSurface,
+    SurfaceXYZTensorFourier,
+    ToroidalFlux,
+    boozer_surface_residual,
+)
 from simsopt_contracts.optimization_endpoint import (
     StatusConvention,
     StoppingReason,
     certify_optimization_endpoint,
 )
+from simsopt_jax.backend.runtime import get_runtime_jax_device
 from simsopt_jax.examples import ExecutionScale
 from simsopt_jax.examples.boozer_official import (
     OFFICIAL_CONSTRAINT_WEIGHT,
@@ -115,6 +144,11 @@ from simsopt_jax.examples.boozer_official import (
     run_boozer_lbfgs_stage,
     run_boozer_manual_stage,
 )
+from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
+from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
+
+import jax
+import jax.numpy as jnp
 
 WORKFLOW_STAGES = (
     "construct_ncsx_coils_and_tensor_fourier_surface",
@@ -162,6 +196,33 @@ END_STATE_OBSERVABLES: Final[tuple[str, ...]] = (
     "flux:residual_norm",
     "flux:target",
     "flux:surface_dofs",
+)
+#: The starts of the stage-wise replay, in the order of every published ``replay:*`` array: the native
+#: lane's own first-stage end, then upstream's pre-registered first-stage end of each draw k.
+REPLAY_STARTS: Final[tuple[str, ...]] = (
+    "native",
+    *(f"k{k}" for k in PRE_REGISTERED_DRAWS),
+)
+#: The replay keys compared exactly: the shared starts and the solves' success flags.
+REPLAY_EXACT_OBSERVABLES: Final[tuple[str, ...]] = (
+    "replay:start_surface_dofs",
+    "replay:start_iota",
+    "replay:start_G",
+    "replay:area_solver_success",
+    "replay:flux_solver_success",
+)
+#: The replayed Newton end states, compared at the case's same-state tolerance.  No residual norm:
+#: at an area root the plain residual sits at its own rounding level.
+REPLAY_STATE_OBSERVABLES: Final[tuple[str, ...]] = (
+    "replay:area_iota",
+    "replay:area_G",
+    "replay:area_label",
+    "replay:area_surface_dofs",
+    "replay:flux_target",
+    "replay:flux_iota",
+    "replay:flux_G",
+    "replay:flux_label",
+    "replay:flux_surface_dofs",
 )
 #: Integer code of each normalized stopping reason, for publication as a parity
 #: observable: the arbiter compares numeric arrays only (it calls
@@ -254,10 +315,6 @@ def _configuration_float(configuration: Mapping[str, object], name: str) -> floa
 
 
 def _problem(configuration: Mapping[str, object]):
-    from simsopt.configs import get_data
-    from simsopt.field import BiotSavart
-    from simsopt.geo import SurfaceXYZTensorFourier
-
     _, base_currents, magnetic_axis, nfp, native_field = get_data("ncsx")
     field = BiotSavart(native_field.coils)
     current_sum = nfp * sum(abs(current.get_value()) for current in base_currents)
@@ -291,9 +348,10 @@ def _problem(configuration: Mapping[str, object]):
 
 
 def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
-    """Freeze NCSX and initial-surface state for every solver lane."""
+    """Freeze NCSX, the initial surface and upstream's replay starts for every solver lane."""
     configuration = _scale_configuration(scale)
     magnetic_axis, native_field, _, surface, G0 = _problem(configuration)
+    upstream_runs = pre_registered_runs(load_upstream_scatter("native-boozer", scale))
     return create_input_bundle(
         root,
         case_id="native-boozer",
@@ -305,9 +363,45 @@ def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
             ),
             "field_dofs": np.asarray(native_field.x, dtype=np.float64),
             "surface_dofs": np.asarray(surface.get_dofs(), dtype=np.float64),
+            "replay_upstream_surface_dofs": np.stack(
+                [
+                    np.asarray(run.value("first:surface_dofs"), dtype=np.float64)
+                    for run in upstream_runs
+                ]
+            ),
+            "replay_upstream_iota": np.asarray(
+                [float(run.value("first:iota")) for run in upstream_runs],
+                dtype=np.float64,
+            ),
+            "replay_upstream_G": np.asarray(
+                [float(run.value("first:G")) for run in upstream_runs],
+                dtype=np.float64,
+            ),
         },
         configuration={**configuration, "initial_G": G0},
         scale=scale,
+    )
+
+
+def replay_starts(
+    arrays: Mapping[str, np.ndarray], native_start: BoozerStageState
+) -> tuple[BoozerStageState, ...]:
+    """The replay's starts in ``REPLAY_STARTS`` order: ``native_start``, then upstream's nine."""
+    return (
+        native_start,
+        *(
+            BoozerStageState(
+                surface_dofs=np.asarray(surface_dofs, dtype=np.float64),
+                iota=float(iota),
+                G=float(G),
+            )
+            for surface_dofs, iota, G in zip(
+                arrays["replay_upstream_surface_dofs"],
+                arrays["replay_upstream_iota"],
+                arrays["replay_upstream_G"],
+                strict=True,
+            )
+        ),
     )
 
 
@@ -335,8 +429,6 @@ def _effective_fingerprint(
 
 def _plain_boozer_residual(surface, iota: float, G: float, field, *, derivatives: int):
     """Official plain Boozer residual: unscaled, unweighted, no constraint rows."""
-    from simsopt.geo import boozer_surface_residual
-
     return boozer_surface_residual(
         surface,
         iota,
@@ -351,12 +443,116 @@ def _residual_norm(surface, iota: float, G: float, field) -> float:
     return float(np.linalg.norm(np.asarray(residual, dtype=np.float64)))
 
 
+class _NewtonStages(NamedTuple):
+    """The official Newton stages from one start: the area solve, then the flux solve."""
+
+    area: BoozerStageOutcome
+    area_label: float
+    area_residual_norm: float
+    flux_target: float
+    flux: BoozerStageOutcome
+    flux_label: float
+    flux_residual_norm: float
+    flux_surface_dofs: np.ndarray
+
+
+def _native_newton_stages(
+    configuration: Mapping[str, object],
+    solver,
+    area,
+    surface,
+    native_field,
+    field,
+    start: BoozerStageState,
+) -> _NewtonStages:
+    """Upstream's area and flux solves with the native library, from ``start``."""
+    tolerance = _configuration_float(configuration, "solver_tolerance")
+    constraint_weight = _configuration_float(configuration, "constraint_weight")
+    maxiter = _configuration_int(configuration, "native_ls_maxiter")
+    polished = run_boozer_manual_stage(
+        solver,
+        start,
+        tol=tolerance,
+        maxiter=maxiter,
+        constraint_weight=constraint_weight,
+    )
+    area_label = float(area.J())
+    area_residual_norm = _residual_norm(
+        surface,
+        polished.state.iota,
+        polished.state.G,
+        native_field,
+    )
+    toroidal_flux = ToroidalFlux(surface, field)
+    flux_target = _configuration_float(configuration, "flux_multiplier") * float(
+        toroidal_flux.J()
+    )
+    flux_solver = BoozerSurface(
+        native_field,
+        surface,
+        toroidal_flux,
+        flux_target,
+    )
+    expanded = run_boozer_manual_stage(
+        flux_solver,
+        polished.state,
+        tol=tolerance,
+        maxiter=maxiter,
+        constraint_weight=constraint_weight,
+    )
+    return _NewtonStages(
+        area=polished,
+        area_label=area_label,
+        area_residual_norm=area_residual_norm,
+        flux_target=flux_target,
+        flux=expanded,
+        flux_label=float(toroidal_flux.J()),
+        flux_residual_norm=_residual_norm(
+            surface,
+            expanded.state.iota,
+            expanded.state.G,
+            native_field,
+        ),
+        flux_surface_dofs=np.asarray(surface.get_dofs(), dtype=np.float64),
+    )
+
+
+def _native_replay(
+    configuration: Mapping[str, object], start: BoozerStageState
+) -> _NewtonStages:
+    """The native Newton stages from ``start`` on fresh objects (the area target is the initial surface's)."""
+    _, native_field, field, surface, _ = _problem(configuration)
+    area = Area(surface)
+    solver = BoozerSurface(native_field, surface, area, float(area.J()))
+    return _native_newton_stages(
+        configuration, solver, area, surface, native_field, field, start
+    )
+
+
+def _native_first_stage(
+    configuration: Mapping[str, object], surface_dofs: np.ndarray
+) -> BoozerStageOutcome:
+    """The native lane's first stage (BoozerSurface + SciPy L-BFGS-B) from the bundle start, on fresh objects."""
+    _, native_field, _, surface, G0 = _problem(configuration)
+    area = Area(surface)
+    solver = BoozerSurface(native_field, surface, area, float(area.J()))
+    return run_boozer_lbfgs_stage(
+        solver,
+        BoozerStageState(
+            surface_dofs=np.asarray(surface_dofs, dtype=np.float64),
+            iota=_configuration_float(configuration, "initial_iota"),
+            G=G0,
+        ),
+        tol=_configuration_float(configuration, "solver_tolerance"),
+        maxiter=_configuration_int(configuration, "native_bfgs_maxiter"),
+        constraint_weight=_configuration_float(configuration, "constraint_weight"),
+    )
+
+
 def _native(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
-    from simsopt.geo import Area, BoozerSurface, ToroidalFlux
-
     magnetic_axis, native_field, field, surface, G0 = _problem(bundle.configuration)
     initial_iota = _configuration_float(bundle.configuration, "initial_iota")
     tolerance = _configuration_float(bundle.configuration, "solver_tolerance")
@@ -409,38 +605,10 @@ def _native(
         rough.state.G,
         native_field,
     )
-    polished = run_boozer_manual_stage(
-        solver,
-        rough.state,
-        tol=tolerance,
-        maxiter=_configuration_int(bundle.configuration, "native_ls_maxiter"),
-        constraint_weight=constraint_weight,
+    chained = _native_newton_stages(
+        bundle.configuration, solver, area, surface, native_field, field, rough.state
     )
-    area_label = float(area.J())
-    area_residual_norm = _residual_norm(
-        surface,
-        polished.state.iota,
-        polished.state.G,
-        native_field,
-    )
-
-    toroidal_flux = ToroidalFlux(surface, field)
-    flux_target = _configuration_float(bundle.configuration, "flux_multiplier") * float(
-        toroidal_flux.J()
-    )
-    flux_solver = BoozerSurface(
-        native_field,
-        surface,
-        toroidal_flux,
-        flux_target,
-    )
-    expanded = run_boozer_manual_stage(
-        flux_solver,
-        polished.state,
-        tol=tolerance,
-        maxiter=_configuration_int(bundle.configuration, "native_ls_maxiter"),
-        constraint_weight=constraint_weight,
-    )
+    starts = replay_starts(arrays, rough.state)
     values = _values(
         axis_dofs=np.asarray(magnetic_axis.local_full_x, dtype=np.float64),
         field_dofs=np.asarray(native_field.x, dtype=np.float64),
@@ -457,19 +625,9 @@ def _native(
         rough=rough,
         rough_label=rough_label,
         rough_residual_norm=rough_residual_norm,
-        area=polished,
-        area_label=area_label,
-        area_residual_norm=area_residual_norm,
-        flux=expanded,
-        flux_target=flux_target,
-        flux_label=float(toroidal_flux.J()),
-        flux_residual_norm=_residual_norm(
-            surface,
-            expanded.state.iota,
-            expanded.state.G,
-            native_field,
-        ),
-        flux_surface_dofs=np.asarray(surface.get_dofs(), dtype=np.float64),
+        chained=chained,
+        starts=starts,
+        replays=tuple(_native_replay(bundle.configuration, start) for start in starts),
     )
     return _observation(
         "native-cpu",
@@ -481,19 +639,105 @@ def _native(
     )
 
 
+def _jax_newton_stages(
+    configuration: Mapping[str, object],
+    options,
+    solver,
+    area,
+    surface,
+    native_field,
+    field,
+    start: BoozerStageState,
+) -> _NewtonStages:
+    """Upstream's area and flux solves with ``BoozerSurfaceJAX``, from ``start``."""
+    tolerance = _configuration_float(configuration, "solver_tolerance")
+    constraint_weight = _configuration_float(configuration, "constraint_weight")
+    maxiter = _configuration_int(configuration, "jax_ls_maxiter")
+    polished = run_boozer_manual_stage(
+        solver,
+        start,
+        tol=tolerance,
+        maxiter=maxiter,
+        constraint_weight=constraint_weight,
+    )
+    area_label = float(area.J())
+    area_residual_norm = _residual_norm(
+        surface,
+        polished.state.iota,
+        polished.state.G,
+        native_field,
+    )
+    toroidal_flux = ToroidalFlux(surface, field)
+    flux_target = _configuration_float(configuration, "flux_multiplier") * float(
+        toroidal_flux.J()
+    )
+    flux_solver = BoozerSurfaceJAX(
+        BiotSavartJAX(native_field.coils),
+        surface,
+        toroidal_flux,
+        flux_target,
+        constraint_weight=constraint_weight,
+        options=options,
+        surface_runtime_state=solver.surface_runtime_state,
+    )
+    expanded = run_boozer_manual_stage(
+        flux_solver,
+        polished.state,
+        tol=tolerance,
+        maxiter=maxiter,
+        constraint_weight=constraint_weight,
+    )
+    return _NewtonStages(
+        area=polished,
+        area_label=area_label,
+        area_residual_norm=area_residual_norm,
+        flux_target=flux_target,
+        flux=expanded,
+        flux_label=float(toroidal_flux.J()),
+        flux_residual_norm=_residual_norm(
+            surface,
+            expanded.state.iota,
+            expanded.state.G,
+            native_field,
+        ),
+        flux_surface_dofs=np.asarray(surface.get_dofs(), dtype=np.float64),
+    )
+
+
+def _jax_options(configuration: Mapping[str, object]):
+    """The official BoozerSurfaceJAX options at the lane's configured budgets."""
+    return boozer_official_options(
+        rough_maxiter=_configuration_int(configuration, "jax_bfgs_maxiter"),
+        ls_maxiter=_configuration_int(configuration, "jax_ls_maxiter"),
+        tolerance=_configuration_float(configuration, "solver_tolerance"),
+    )
+
+
+def _jax_replay(
+    configuration: Mapping[str, object], start: BoozerStageState
+) -> _NewtonStages:
+    """The JAX Newton stages from ``start`` on fresh objects (the area target is the initial surface's)."""
+    _, native_field, field, surface, _ = _problem(configuration)
+    options = _jax_options(configuration)
+    area = Area(surface)
+    solver = BoozerSurfaceJAX(
+        BiotSavartJAX(native_field.coils),
+        surface,
+        area,
+        float(area.J()),
+        constraint_weight=_configuration_float(configuration, "constraint_weight"),
+        options=options,
+    )
+    return _jax_newton_stages(
+        configuration, options, solver, area, surface, native_field, field, start
+    )
+
+
 def _jax(
     lane: ParityLane,
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
-    from simsopt.geo import Area, ToroidalFlux
-    from simsopt_jax.backend.runtime import get_runtime_jax_device
-    from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
-    from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
-
-    import jax
-    import jax.numpy as jnp
-
     magnetic_axis, native_field, field, surface, G0 = _problem(bundle.configuration)
     initial_iota = _configuration_float(bundle.configuration, "initial_iota")
     tolerance = _configuration_float(bundle.configuration, "solver_tolerance")
@@ -504,11 +748,7 @@ def _jax(
         G=G0,
     )
     jax_field = BiotSavartJAX(native_field.coils)
-    options = boozer_official_options(
-        rough_maxiter=_configuration_int(bundle.configuration, "jax_bfgs_maxiter"),
-        ls_maxiter=_configuration_int(bundle.configuration, "jax_ls_maxiter"),
-        tolerance=tolerance,
-    )
+    options = _jax_options(bundle.configuration)
     area = Area(surface)
     solver = BoozerSurfaceJAX(
         jax_field,
@@ -565,42 +805,21 @@ def _jax(
         rough.state.G,
         native_field,
     )
-    polished = run_boozer_manual_stage(
+    chained = _jax_newton_stages(
+        bundle.configuration,
+        options,
         solver,
-        rough.state,
-        tol=tolerance,
-        maxiter=_configuration_int(bundle.configuration, "jax_ls_maxiter"),
-        constraint_weight=constraint_weight,
-    )
-    area_label = float(area.J())
-    area_residual_norm = _residual_norm(
+        area,
         surface,
-        polished.state.iota,
-        polished.state.G,
         native_field,
+        field,
+        rough.state,
     )
-
-    toroidal_flux = ToroidalFlux(surface, field)
-    flux_target = _configuration_float(bundle.configuration, "flux_multiplier") * float(
-        toroidal_flux.J()
-    )
-    flux_field = BiotSavartJAX(native_field.coils)
-    flux_solver = BoozerSurfaceJAX(
-        flux_field,
-        surface,
-        toroidal_flux,
-        flux_target,
-        constraint_weight=constraint_weight,
-        options=options,
-        surface_runtime_state=solver.surface_runtime_state,
-    )
-    expanded = run_boozer_manual_stage(
-        flux_solver,
-        polished.state,
-        tol=tolerance,
-        maxiter=_configuration_int(bundle.configuration, "jax_ls_maxiter"),
-        constraint_weight=constraint_weight,
-    )
+    # The "native" replay starts where the native lane's first stage ended: that
+    # stage is rerun here, on the host and under this lane's one-thread policy,
+    # and the start is published so the arbiter compares it exactly.
+    native_first = _native_first_stage(bundle.configuration, arrays["surface_dofs"])
+    starts = replay_starts(arrays, native_first.state)
     values = _values(
         axis_dofs=np.asarray(magnetic_axis.local_full_x, dtype=np.float64),
         field_dofs=np.asarray(native_field.x, dtype=np.float64),
@@ -617,19 +836,9 @@ def _jax(
         rough=rough,
         rough_label=rough_label,
         rough_residual_norm=rough_residual_norm,
-        area=polished,
-        area_label=area_label,
-        area_residual_norm=area_residual_norm,
-        flux=expanded,
-        flux_target=flux_target,
-        flux_label=float(toroidal_flux.J()),
-        flux_residual_norm=_residual_norm(
-            surface,
-            expanded.state.iota,
-            expanded.state.G,
-            native_field,
-        ),
-        flux_surface_dofs=np.asarray(surface.get_dofs(), dtype=np.float64),
+        chained=chained,
+        starts=starts,
+        replays=tuple(_jax_replay(bundle.configuration, start) for start in starts),
     )
     device = get_runtime_jax_device()
     platform = "cpu" if device is None else device.platform
@@ -658,14 +867,9 @@ def _values(
     rough: BoozerStageOutcome,
     rough_label: float,
     rough_residual_norm: float,
-    area: BoozerStageOutcome,
-    area_label: float,
-    area_residual_norm: float,
-    flux: BoozerStageOutcome,
-    flux_target: float,
-    flux_label: float,
-    flux_residual_norm: float,
-    flux_surface_dofs: np.ndarray,
+    chained: _NewtonStages,
+    starts: tuple[BoozerStageState, ...],
+    replays: tuple[_NewtonStages, ...],
 ) -> dict[str, np.ndarray]:
     first_stopping_reason = first_stage_stopping_reason(
         rough,
@@ -701,26 +905,68 @@ def _values(
             rough.provider_persisted_iterate,
             dtype=np.bool_,
         ),
-        "area:iota": np.asarray(area.state.iota, dtype=np.float64),
-        "area:G": np.asarray(area.state.G, dtype=np.float64),
-        "area:label": np.asarray(area_label, dtype=np.float64),
-        "area:residual_norm": np.asarray(area_residual_norm, dtype=np.float64),
-        "area:solver_success": np.asarray(area.success, dtype=np.bool_),
+        "area:iota": np.asarray(chained.area.state.iota, dtype=np.float64),
+        "area:G": np.asarray(chained.area.state.G, dtype=np.float64),
+        "area:label": np.asarray(chained.area_label, dtype=np.float64),
+        "area:residual_norm": np.asarray(chained.area_residual_norm, dtype=np.float64),
+        "area:solver_success": np.asarray(chained.area.success, dtype=np.bool_),
         "area:provider_persisted_iterate": np.asarray(
-            area.provider_persisted_iterate,
+            chained.area.provider_persisted_iterate,
             dtype=np.bool_,
         ),
-        "flux:target": np.asarray(flux_target, dtype=np.float64),
-        "flux:iota": np.asarray(flux.state.iota, dtype=np.float64),
-        "flux:G": np.asarray(flux.state.G, dtype=np.float64),
-        "flux:label": np.asarray(flux_label, dtype=np.float64),
-        "flux:residual_norm": np.asarray(flux_residual_norm, dtype=np.float64),
-        "flux:surface_dofs": flux_surface_dofs,
-        "flux:solver_success": np.asarray(flux.success, dtype=np.bool_),
+        "flux:target": np.asarray(chained.flux_target, dtype=np.float64),
+        "flux:iota": np.asarray(chained.flux.state.iota, dtype=np.float64),
+        "flux:G": np.asarray(chained.flux.state.G, dtype=np.float64),
+        "flux:label": np.asarray(chained.flux_label, dtype=np.float64),
+        "flux:residual_norm": np.asarray(chained.flux_residual_norm, dtype=np.float64),
+        "flux:surface_dofs": chained.flux_surface_dofs,
+        "flux:solver_success": np.asarray(chained.flux.success, dtype=np.bool_),
         "flux:provider_persisted_iterate": np.asarray(
-            flux.provider_persisted_iterate,
+            chained.flux.provider_persisted_iterate,
             dtype=np.bool_,
         ),
+        **_replay_values(starts, replays),
+    }
+
+
+def _replay_values(
+    starts: tuple[BoozerStageState, ...], replays: tuple[_NewtonStages, ...]
+) -> dict[str, np.ndarray]:
+    """The ``replay:*`` keys: one entry per start, in ``REPLAY_STARTS`` order."""
+
+    def floats(values) -> np.ndarray:
+        return np.asarray(list(values), dtype=np.float64)
+
+    def flags(values) -> np.ndarray:
+        return np.asarray(list(values), dtype=np.bool_)
+
+    return {
+        "replay:start_surface_dofs": np.stack(
+            [np.asarray(start.surface_dofs, dtype=np.float64) for start in starts]
+        ),
+        "replay:start_iota": floats(start.iota for start in starts),
+        "replay:start_G": floats(start.G for start in starts),
+        "replay:area_iota": floats(replay.area.state.iota for replay in replays),
+        "replay:area_G": floats(replay.area.state.G for replay in replays),
+        "replay:area_label": floats(replay.area_label for replay in replays),
+        "replay:area_surface_dofs": np.stack(
+            [
+                np.asarray(replay.area.state.surface_dofs, dtype=np.float64)
+                for replay in replays
+            ]
+        ),
+        "replay:area_solver_success": flags(replay.area.success for replay in replays),
+        "replay:flux_target": floats(replay.flux_target for replay in replays),
+        "replay:flux_iota": floats(replay.flux.state.iota for replay in replays),
+        "replay:flux_G": floats(replay.flux.state.G for replay in replays),
+        "replay:flux_label": floats(replay.flux_label for replay in replays),
+        "replay:flux_surface_dofs": np.stack(
+            [
+                np.asarray(replay.flux.state.surface_dofs, dtype=np.float64)
+                for replay in replays
+            ]
+        ),
+        "replay:flux_solver_success": flags(replay.flux.success for replay in replays),
     }
 
 
@@ -736,6 +982,8 @@ def _observation(
     success = bool(
         bool(values["area:solver_success"])
         and bool(values["flux:solver_success"])
+        and bool(np.all(values["replay:area_solver_success"]))
+        and bool(np.all(values["replay:flux_solver_success"]))
         and np.all(np.isfinite(values["flux:surface_dofs"]))
         and np.isfinite(float(values["flux:residual_norm"]))
         and float(values["flux:residual_norm"]) < float(values["initial:residual_norm"])

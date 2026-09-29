@@ -15,7 +15,14 @@ from examples.jax.parity.arbiter import (
     upstream_end_state_matches,
 )
 from examples.jax.parity.cases import get_case, implemented_case_ids
-from examples.jax.parity.cases.native_boozer import END_STATE_OBSERVABLES
+from examples.jax.parity.cases.native_boozer import (
+    END_STATE_OBSERVABLES,
+    REPLAY_EXACT_OBSERVABLES,
+    REPLAY_STARTS,
+    REPLAY_STATE_OBSERVABLES,
+)
+from examples.jax.parity.cases.native_boozer import create_input as create_boozer_input
+from examples.jax.parity.input_bundle import load_input_bundle
 from examples.jax.parity.official_reference import (
     OfficialUpstreamScatter,
     build_upstream_scatter,
@@ -314,3 +321,68 @@ def test_an_end_state_set_refuses_a_work_budget_at_its_scale() -> None:
                 scales=("bounded",), derivation="Upstream fixed optimizer budget"
             ),
         )
+
+
+# ------------------------------------------------ stage-wise judgment (PLAN.md amendment 5)
+
+
+def test_every_stage_wise_contract_names_tracked_same_state_tests() -> None:
+    root = Path(__file__).resolve().parents[3]
+    declared = [
+        contract
+        for case_id in implemented_case_ids()
+        for scale in SCALES
+        if (contract := get_case(case_id).stage_wise(scale)) is not None
+    ]
+    assert declared
+    for contract in declared:
+        for test in contract.same_state_tests:
+            assert (root / test).is_file(), (contract.case_id, contract.scale, test)
+
+
+@pytest.mark.parametrize("scale", SCALES)
+def test_boozer_is_judged_stage_wise_with_its_end_state_set_informational(
+    scale: str,
+) -> None:
+    case = get_case("native-boozer")
+    contract = case.stage_wise(scale)
+    assert contract is not None
+
+    assert contract.informational_observables == END_STATE_OBSERVABLES
+    assert contract.deciding_observables == (
+        *REPLAY_EXACT_OBSERVABLES,
+        *REPLAY_STATE_OBSERVABLES,
+    )
+    # The end-state set stays declared, and is recorded informationally.
+    assert case.end_states(scale) is not None
+    assert case.quality_band(scale) is None
+    routes = {
+        f"{route.phase}:{route.observable}": route for route in _boozer_routes(scale)
+    }
+    for key in REPLAY_EXACT_OBSERVABLES:
+        assert routes[key].applicable and routes[key].comparator == "exact", key
+    for key in REPLAY_STATE_OBSERVABLES:
+        assert routes[key].applicable and routes[key].comparator == "allclose", key
+        assert routes[key].tolerance_bucket == "mirror_boozer_same_start", key
+    for key in END_STATE_OBSERVABLES:
+        assert routes[key].applicable, key
+
+
+@pytest.mark.parametrize("scale", SCALES)
+def test_boozer_replay_starts_are_upstreams_first_stage_ends(
+    scale: str, tmp_path: Path
+) -> None:
+    """The bundle freezes upstream's nine first-stage ends, bit for bit, after the native start."""
+    bundle = create_boozer_input(tmp_path / "inputs", scale)
+    _, arrays = load_input_bundle(tmp_path / "inputs", bundle)
+    runs = pre_registered_runs(load_upstream_scatter("native-boozer", scale))
+
+    assert REPLAY_STARTS == ("native", *(f"k{k}" for k in PRE_REGISTERED_DRAWS))
+    assert [run.k for run in runs] == list(PRE_REGISTERED_DRAWS)
+    for index, run in enumerate(runs):
+        np.testing.assert_array_equal(
+            arrays["replay_upstream_surface_dofs"][index],
+            run.value("first:surface_dofs"),
+        )
+        assert arrays["replay_upstream_iota"][index] == float(run.value("first:iota"))
+        assert arrays["replay_upstream_G"][index] == float(run.value("first:G"))

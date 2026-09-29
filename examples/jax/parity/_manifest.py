@@ -46,6 +46,7 @@ PHASES = frozenset(
         "initial",
         "interpolation",
         "poincare",
+        "replay",
         "second",
         "taylor",
         "toroidal_flux",
