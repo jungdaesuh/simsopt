@@ -513,9 +513,7 @@ def boozer_residual_vector_and_jacobian(
     residual = G * B - B2[..., None] * tang
 
     surface_tangent_ds = dxphi_ds + iota * dxtheta_ds
-    dB2_ds = _dtype_scalar_like(B, 2.0) * jnp.einsum(
-        "...m,...ma->...a", B, dB_ds
-    )
+    dB2_ds = _dtype_scalar_like(B, 2.0) * jnp.einsum("...m,...ma->...a", B, dB_ds)
     dresidual_ds = (
         G * dB_ds
         - tang[..., :, None] * dB2_ds[..., None, :]
@@ -525,9 +523,9 @@ def boozer_residual_vector_and_jacobian(
 
     if weight_inv_modB:
         weight = _inverse_modB(B2)
-        dweight_ds = -_dtype_scalar_like(B, 0.5) * weight[..., None] * dB2_ds / B2[
-            ..., None
-        ]
+        dweight_ds = (
+            -_dtype_scalar_like(B, 0.5) * weight[..., None] * dB2_ds / B2[..., None]
+        )
         residual_unweighted = residual
         residual = weight[..., None] * residual
         dresidual_ds = (

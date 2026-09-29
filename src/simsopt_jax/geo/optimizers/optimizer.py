@@ -684,9 +684,7 @@ class _ArrayObjectiveWithArgs(Protocol):
 
 
 class _ArrayValueAndJacobianWithArgs(Protocol):
-    def __call__(
-        self, x: jax.Array, *args: object
-    ) -> tuple[jax.Array, jax.Array]: ...
+    def __call__(self, x: jax.Array, *args: object) -> tuple[jax.Array, jax.Array]: ...
 
 
 class _DenseExactNewtonDirection(NamedTuple):
@@ -7427,9 +7425,9 @@ def _materialize_traceable_dense_exact_newton_c2_state(
                 dense_materialization_phase=PhaseId.NEWTON_DENSE_MATERIALIZATION,
             )
 
-    with device_scope(
-        PhaseId.NEWTON_JACOBIAN_CONSTRUCTION
-    ), device_scope(PhaseId.NEWTON_DENSE_MATERIALIZATION):
+    with device_scope(PhaseId.NEWTON_JACOBIAN_CONSTRUCTION), device_scope(
+        PhaseId.NEWTON_DENSE_MATERIALIZATION
+    ):
         residual, jacobian = value_jacobian_fn(x, *fn_args)
     residual = jnp.asarray(residual)
     jacobian = jnp.asarray(jacobian)
