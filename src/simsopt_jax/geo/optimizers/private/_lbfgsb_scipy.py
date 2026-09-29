@@ -1514,8 +1514,11 @@ def _lbfgsb_setulb_unconstrained_line_search(
 
     col = isave[27]
     iteration = isave[29]
-    line_direction = lbfgsb_two_loop_direction(state)
-    z = state.x + line_direction
+    # SciPy 1.17.1 searches along ``d = z - x`` (``__lbfgsb.c:910``), where
+    # ``z = x + step`` is rounded first (``cauchy``'s ``daxpy`` at iteration
+    # zero, ``subsm``'s ``x + d`` after), not along the step itself.
+    z = state.x + lbfgsb_two_loop_direction(state)
+    line_direction = z - state.x
     line_search_nfgv = jnp.where(
         (state.workspace.task[0] == FG) & (state.workspace.task[1] == FG_START),
         jnp.asarray(1, dtype=jnp.int32),

@@ -2902,3 +2902,65 @@ def test_lbfgsb_scipy_port_workspace_write_footprint_is_fidelity_bounded(
         isave_before[unwritten_isave],
         err_msg=f"port wrote isave slots outside {sorted(_ISAVE_WRITE_SLOTS)}",
     )
+
+
+_DIRECTION_CENTER = np.asarray([0.3, -0.7, 0.11, 0.5], dtype=np.float64)
+_DIRECTION_SCALE = 1.0e-3
+# Large coordinates and a small gradient: ``x - g`` rounds away low bits of
+# ``g`` in every component, so ``(x + (-g)) - x`` differs from ``-g``.
+_DIRECTION_X0 = np.asarray([1234.5678, -987.654321, 55.5, -3.25], dtype=np.float64)
+
+
+def _shallow_bowl_value_and_grad(x):
+    center = jnp.asarray(_DIRECTION_CENTER)
+    delta = x - center
+    return 0.5 * _DIRECTION_SCALE * (delta @ delta), _DIRECTION_SCALE * delta
+
+
+def _direction_workspace(state):
+    n, m = lbfgsb._lbfgsb_state_dimensions(state)
+    _, _, _, _, _, _, _, lz, lr, ld, lt, _, _ = lbfgsb._lbfgsb_workspace_offsets(n, m)
+    wa = np.asarray(state.workspace.wa)
+    return wa[lz:lr], wa[ld:lt]
+
+
+def test_lbfgsb_unconstrained_fast_path_searches_along_z_minus_x():
+    # SciPy 1.17.1 searches along ``d = z - x`` (__lbfgsb.c:910) with ``z``
+    # rounded first; the fast path used the unrounded step, so its first trial
+    # point and every later one differed from SciPy's by an ulp of ``x``.
+    gradient = _DIRECTION_SCALE * (_DIRECTION_X0 - _DIRECTION_CENTER)
+    scipy_direction = (_DIRECTION_X0 + (-gradient)) - _DIRECTION_X0
+    assert np.any(scipy_direction != -gradient)
+
+    start = lbfgsb.lbfgsb_initial_state(
+        jnp.asarray(_DIRECTION_X0), m=5, bounds=None, ftol=0.0, gtol=1e-12, maxls=20
+    )
+    first = {
+        fast_path: lbfgsb.lbfgsb_advance_from_start_to_next_observable(
+            _shallow_bowl_value_and_grad,
+            start,
+            maxiter=20,
+            maxfun=100,
+            unconstrained_fast_path=fast_path,
+        )
+        for fast_path in (True, False)
+    }
+    fast_z, fast_d = _direction_workspace(first[True].state)
+    bounded_z, bounded_d = _direction_workspace(first[False].state)
+    np.testing.assert_array_equal(fast_d, scipy_direction)
+    np.testing.assert_array_equal(fast_d, bounded_d)
+    np.testing.assert_array_equal(fast_z, bounded_z)
+    np.testing.assert_array_equal(
+        np.asarray(first[True].state.x), np.asarray(first[False].state.x)
+    )
+
+    accepted_x = np.asarray(first[True].state.x)
+    second = lbfgsb.lbfgsb_reenter_new_x(
+        _shallow_bowl_value_and_grad,
+        first[True].state,
+        maxiter=20,
+        maxfun=100,
+        unconstrained_fast_path=True,
+    )
+    second_z, second_d = _direction_workspace(second.state)
+    np.testing.assert_array_equal(second_d, second_z - accepted_x)

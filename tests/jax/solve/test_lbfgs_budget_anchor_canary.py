@@ -489,9 +489,14 @@ def _constant_gradient_objective(scale):
 
 
 def _solve_with_constant_gradient(scale, tol):
+    # The start is scaled with the gradient: the search direction is
+    # ``d = (x - g) - x`` (SciPy __lbfgsb.c:910), and from an O(1) start
+    # ``x - g`` rounds back to ``x`` for any |g| below ulp(x), so ``d`` would
+    # be exactly zero and every such solve would stop NOT_DESCENT, as SciPy's
+    # does.
     return _opt.target_minimize(
         _constant_gradient_objective(scale),
-        jnp.asarray([1.0, -2.0], dtype=jnp.float64),
+        jnp.asarray([3.0 * scale, -2.0 * scale], dtype=jnp.float64),
         method="lbfgs-ondevice",
         tol=tol,
         maxiter=8,
