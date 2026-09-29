@@ -15,11 +15,22 @@ hinge objectives, the value keeps the slack when the constraint is inactive.
 
 Domain: ``temperature`` lies in [1e-100, 1e100] (in the constrained quantity's
 units) and every sample coordinate is finite with ``|x| <= 1e100``; every
-kernel raises ``ValueError`` naming the bound and the value otherwise. There
-every distance is below 3.5e100, ``sqrt(d^2 + T^2)`` and ``T log N`` are
-representable, and near contact d underflows gracefully, so each row returns
-its value and gradient to rounding. Zero temperature is rejected, not read as
-the hard limit: that limit is ``hard_signed_value``.
+kernel raises ``ValueError`` naming the bound and the value otherwise, before
+any early return. There every distance is below 3.5e100, ``sqrt(d^2 + T^2)``
+and ``T log N`` are representable, and near contact d underflows gracefully.
+Zero temperature is rejected, not read as the hard limit: that limit is
+``hard_signed_value``.
+
+Accuracy: a distance row's signed value has absolute error at most a small
+multiple of machine epsilon times the row's scale, ``max(bound, the largest
+sampled distance, T log N)``; its gradient, whose log-sum-exp weights depend on
+``s / T``, at most a small multiple of epsilon times ``scale / T``. A value much
+smaller than its scale (``bound - soft`` for bound and distances near 1e100) is
+not resolved: it is a difference of nearly equal numbers. The curvature row is
+the soft maximum of the curvature simsopt's ``curve.kappa()`` and
+``dkappa_by_dcoeff_vjp`` provide, so its accuracy is simsopt's; a nonfinite
+curvature or curvature derivative from them raises ``ValueError`` naming the
+curve, so no nonfinite gradient is returned.
 """
 
 import numpy as np
@@ -169,6 +180,17 @@ def _curve_derivative(curves, point_gradients) -> Derivative:
     return derivative
 
 
+def _finite_curvature_output(curve, quantity: str, values: np.ndarray) -> np.ndarray:
+    """``values`` (simsopt's curvature of ``curve``, or its derivative);
+    ``ValueError`` naming the curve if any is nonfinite."""
+    if not np.all(np.isfinite(values)):
+        raise ValueError(
+            f"simsopt returned a nonfinite {quantity} for curve {curve.name}; the "
+            "curvature row takes simsopt's curvature as given"
+        )
+    return values
+
+
 def smooth_max_curvature_signed_constraint(
     curve,
     threshold,
@@ -184,14 +206,20 @@ def smooth_max_curvature_signed_constraint(
     """
     temperature = require_smoothing_temperature(temperature)
     require_sample_coordinates(curve.gamma())
-    kappa = np.asarray(curve.kappa() if kappa is None else kappa, dtype=float)
+    kappa = _finite_curvature_output(
+        curve, "curvature", np.asarray(curve.kappa() if kappa is None else kappa, dtype=float)
+    )
     hard_max = float(np.max(kappa))
     exp_shifted = np.exp((kappa - hard_max) / temperature)
     weight_sum = float(np.sum(exp_shifted))
     smooth_max = hard_max + temperature * float(np.log(weight_sum))
-    grad = np.asarray(
-        curve.dkappa_by_dcoeff_vjp(exp_shifted / weight_sum)(objective_optimizable),
-        dtype=float,
+    grad = _finite_curvature_output(
+        curve,
+        "curvature derivative",
+        np.asarray(
+            curve.dkappa_by_dcoeff_vjp(exp_shifted / weight_sum)(objective_optimizable),
+            dtype=float,
+        ),
     )
     signed_value = smooth_max - float(threshold)
     hard_signed_value = hard_max - float(threshold)
@@ -211,9 +239,9 @@ def smooth_min_curve_curve_signed_constraint(
     zero gradient.
     """
     temperature = require_smoothing_temperature(temperature)
+    curve_points = [require_sample_coordinates(curve.gamma()) for curve in curves]
     if len(curves) < 2:
         return _no_pair_result(minimum_distance, objective_optimizable)
-    curve_points = [np.asarray(curve.gamma(), dtype=float) for curve in curves]
     hard_min, smooth_min, point_gradients = soft_min_pair_distance(
         curve_points,
         [(i, j) for i in range(len(curve_points)) for j in range(i)],
@@ -243,10 +271,10 @@ def smooth_min_curve_surface_signed_constraint(
     them. No curves returns ``-minimum_distance`` and a zero gradient.
     """
     temperature = require_smoothing_temperature(temperature)
+    surface_gamma = require_sample_coordinates(surface.gamma())
+    point_sets = [require_sample_coordinates(curve.gamma()) for curve in curves]
     if not curves:
         return _no_pair_result(minimum_distance, objective_optimizable)
-    surface_gamma = np.asarray(surface.gamma(), dtype=float)
-    point_sets = [np.asarray(curve.gamma(), dtype=float) for curve in curves]
     point_sets.append(surface_gamma.reshape((-1, 3)))
     surface_index = len(curves)
     hard_min, smooth_min, point_gradients = soft_min_pair_distance(

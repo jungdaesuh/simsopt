@@ -591,14 +591,16 @@ class FullLogSumExpTests(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(grad)))
 
 
-def _decimal_soft_min(left, right, temperature, moving):
-    """80-digit oracle of ``soft_min_pair_distance`` over every pair of the
-    exact binary64 points ``left`` x ``right``: ``(hard, soft, derivative)``,
-    the derivative being that of soft when every point of the ``moving`` set
-    ("left" or "right") shifts by +1 along z. The smooth distance is
-    s = d^2 / (r + T), r = sqrt(d^2 + T^2) (exact, no cancellation)."""
+def _decimal_soft_min(left, right, temperature, moving, digits=80, offset=0.0):
+    """``digits``-digit oracle of ``soft_min_pair_distance`` over every pair of
+    the exact binary64 points ``left`` x ``right``: ``(hard, offset - soft,
+    derivative)``, the derivative being that of soft when every point of the
+    ``moving`` set ("left" or "right") shifts by +1 along z. The smooth
+    distance is s = d^2 / (r + T), r = sqrt(d^2 + T^2) (exact, no
+    cancellation); ``offset - soft`` is rounded once, as a signed row's
+    ``bound - soft``."""
     with localcontext() as context:
-        context.prec = 80
+        context.prec = digits
         t = Decimal(float(temperature))
         pairs = []
         for p in np.asarray(left, dtype=float):
@@ -614,7 +616,9 @@ def _decimal_soft_min(left, right, temperature, moving):
         total = sum(weights)
         sign = 1 if moving == "left" else -1
         derivative = sign * sum(w * dz for w, (_d, _s, dz) in zip(weights, pairs)) / total
-        return (float(min(d for d, _s, _dz in pairs)), float(shift - t * total.ln()),
+        soft = shift - t * total.ln()
+        return (float(min(d for d, _s, _dz in pairs)),
+                float(Decimal(float(offset)) - soft) if offset else float(soft),
                 float(derivative))
 
 
@@ -681,6 +685,117 @@ class SignedConstraintDomainTests(unittest.TestCase):
             with self.subTest(row=label):
                 with self.assertRaisesRegex(ValueError, message):
                     row()
+
+
+EPS = float(np.finfo(float).eps)
+
+
+class AccuracyContractTests(unittest.TestCase):
+    """The rows' accuracy contract (module docstring), checked against a
+    250-digit oracle on Codex's round-21 cancellation cases: the value has
+    absolute error <= 64 eps x scale, scale = max(bound, the largest sampled
+    distance, T log N), and the gradient <= 64 eps x scale / T (the
+    log-sum-exp weights depend on s / T). A result much smaller than its
+    scale, e.g. bound - soft at 1e100, is not resolved (Codex R21-01)."""
+
+    def assert_within_contract(self, actual, expected, scale, label):
+        self.assertTrue(np.isfinite(actual), f"{label}: {actual!r}")
+        self.assertLessEqual(abs(actual - expected), 64.0 * EPS * scale,
+                             f"{label}: {actual!r} vs oracle {expected!r}, scale {scale:.3g}")
+
+    def test_the_helper_meets_the_contract_under_cancellation(self):
+        left, right, temperature = np.array([[1.366289638048277e99, 0.0, 0.0]]), np.zeros((2, 3)), 1.0e99
+        hard, soft, gradients = signed_constraints.soft_min_pair_distance(
+            [left, right], [(0, 1)], temperature)
+        # The oracle's derivative is along z; this pair lies along x, so
+        # rotate it: the same pair along z.
+        oracle_hard, oracle_soft, _dz = _decimal_soft_min(left, right, temperature, "left", 250)
+        _h, _s, oracle_derivative = _decimal_soft_min(
+            left[:, ::-1], right, temperature, "left", 250)
+        scale = max(oracle_hard, temperature * np.log(2.0))
+        self.assert_within_contract(hard, oracle_hard, scale, "hard")
+        self.assert_within_contract(soft, oracle_soft, scale, "soft")
+        self.assert_within_contract(gradients[0][0, 0], oracle_derivative, scale / temperature,
+                                    "gradient")
+
+    def test_the_distance_rows_meet_the_contract_under_cancellation(self):
+        # Codex R21-01: circles 1e100 apart with bound 1e100 and T = 1; the
+        # row is 6.5 at 250 digits and 0 in binary64, within 64 eps x 1e100.
+        bound, temperature = 1.0e100, 1.0
+        first, second = _circle(1.0, 0.0, 16), _circle(1.0, 1.0e100, 16)
+        owner = _JointDofs([first, second])
+        signed, grad, _hard = smooth_min_curve_curve_signed_constraint(
+            [first, second], bound, temperature, owner)
+        oracle_hard, oracle_signed, oracle_derivative = _decimal_soft_min(
+            first.gamma(), second.gamma(), temperature, "right", 250, offset=bound)
+        largest = float(np.max(np.linalg.norm(
+            first.gamma()[:, None] - second.gamma()[None], axis=2)))
+        scale = max(bound, largest, temperature * np.log(256.0))
+        index = list(owner.dof_names).index(f"{second.name}:zc(0)")
+        self.assert_within_contract(signed, oracle_signed, scale, "curve_curve signed")
+        self.assert_within_contract(grad[index], -oracle_derivative, scale / temperature,
+                                    "curve_curve gradient")
+
+        curve, surface = _circle(1.3, 1.0e100, 16), _fixed_torus(1.0, 0.3)
+        surface_owner = _JointDofs([curve])
+        signed, grad, _hard = smooth_min_curve_surface_signed_constraint(
+            [curve], surface, bound, temperature, surface_owner)
+        points = surface.gamma().reshape((-1, 3))
+        oracle_hard, oracle_signed, oracle_derivative = _decimal_soft_min(
+            curve.gamma(), points, temperature, "left", 250, offset=bound)
+        largest = float(np.max(np.linalg.norm(curve.gamma()[:, None] - points[None], axis=2)))
+        scale = max(bound, largest, temperature * np.log(16.0 * len(points)))
+        index = list(surface_owner.dof_names).index(f"{curve.name}:zc(0)")
+        self.assert_within_contract(signed, oracle_signed, scale, "curve_surface signed")
+        self.assert_within_contract(grad[index], -oracle_derivative, scale / temperature,
+                                    "curve_surface gradient")
+
+
+class CurvatureBackendTests(unittest.TestCase):
+    """The curvature row is the soft maximum of simsopt's kappa: its accuracy
+    is simsopt's, and a nonfinite kappa or kappa derivative raises instead of
+    reaching the optimizer (Codex R21-02)."""
+
+    @staticmethod
+    def _small_circle(radius):
+        curve = CurveXYZFourier(32, 1)
+        curve.set("xc(1)", radius)
+        curve.set("ys(1)", radius)
+        return curve
+
+    def test_a_nonfinite_kappa_derivative_raises_naming_the_curve(self):
+        # simsopt's kappa is 0 and its derivative nonfinite at radius 1e-80.
+        curve = self._small_circle(1.0e-80)
+        with self.assertRaisesRegex(ValueError, f"nonfinite.*{curve.name}"):
+            smooth_max_curvature_signed_constraint(curve, 0.0, 1.0e-100, _JointDofs([curve]))
+
+    def test_radius_1e_minus_50_is_still_correct(self):
+        curve = self._small_circle(1.0e-50)
+        signed, grad, hard = smooth_max_curvature_signed_constraint(
+            curve, 0.0, 1.0e-100, _JointDofs([curve]))
+        self.assertAlmostEqual(hard / 1.0e50, 1.0, places=12)
+        self.assertAlmostEqual(signed / 1.0e50, 1.0, places=12)
+        self.assertTrue(np.all(np.isfinite(grad)))
+
+
+class NoPairDomainTests(unittest.TestCase):
+    """A row with no pair still validates every supplied point set and T
+    (Codex R21-03)."""
+
+    def test_a_single_out_of_domain_curve_raises(self):
+        curve = _circle(1.0e200, 0.0, 16)
+        with self.assertRaisesRegex(ValueError, r"1e\+100.*1e\+200"):
+            smooth_min_curve_curve_signed_constraint([curve], 0.1, 0.01, _JointDofs([curve]))
+
+    def test_an_out_of_domain_surface_without_curves_raises(self):
+        surface = _fixed_torus(1.0e200, 0.3)
+        with self.assertRaisesRegex(ValueError, r"1e\+100.*1e\+200"):
+            smooth_min_curve_surface_signed_constraint([], surface, 0.1, 0.01, _JointDofs([surface]))
+
+    def test_no_pair_rows_still_check_the_temperature(self):
+        curve = _circle(1.0, 0.0, 16)
+        with self.assertRaisesRegex(ValueError, "temperature"):
+            smooth_min_curve_curve_signed_constraint([curve], 0.1, 1.0e-200, _JointDofs([curve]))
 
 
 class ScaleSafePairDistanceTests(unittest.TestCase):

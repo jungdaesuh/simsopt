@@ -333,7 +333,15 @@ ignored by `alm_problem_physics`. Rows:
   a physical bound. The temperature is in the constrained quantity's units
   and must lie in [1e-100, 1e100], and every sample coordinate must be
   finite with |x| <= 1e100 (`ValueError` otherwise, naming the bound and the
-  value; 0 is rejected: use the third item for the hard value).
+  value, also for a row with no pair; 0 is rejected: use the third item for
+  the hard value). Accuracy: a distance row's value has absolute error at
+  most a small multiple of machine epsilon times its scale, max(bound, the
+  largest sampled distance, T log N), and its gradient at most a small
+  multiple of epsilon times scale / T; a value much smaller than its scale
+  is a difference of nearly equal numbers and is not resolved. The curvature
+  row is the soft maximum of simsopt's `curve.kappa()`, so its accuracy is
+  simsopt's; a nonfinite curvature or curvature derivative raises
+  `ValueError` naming the curve.
 
 Divide every row by a positive scale in its units (its bound, or a typical
 size) so all rows are O(1): the penalty is shared, and the tolerances are
@@ -873,7 +881,9 @@ Each entry: the symptom, the cause, the fix.
 13. **Taylor steps and smoothing.** A kernel's smoothing temperature must
     lie in [1e-100, 1e100], and every sample coordinate must be finite with
     |x| <= 1e100 (`ValueError` otherwise, naming the bound and the value; 0 is
-    not the exact value, which is the kernel's third item). The smooth rows are a log-sum-exp over every sample
+    not the exact value, which is the kernel's third item). Values are
+    accurate to a small multiple of machine epsilon times the row's scale,
+    gradients to that over T (api.md). The smooth rows are a log-sum-exp over every sample
     (curvature) or point pair (distances), smooth everywhere, but they bend
     on the scale of the temperature, so only steps that move the constrained
     quantity far below the temperature see the gradient.
