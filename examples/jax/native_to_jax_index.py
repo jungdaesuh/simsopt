@@ -25,6 +25,7 @@ from examples.jax.parity import (
     cases as parity_cases,
     official_quality_bands,
     official_reference,
+    official_scatter_contracts,
 )
 from examples.jax.parity._manifest import (
     ParityManifestValidationError,
@@ -39,6 +40,7 @@ from examples.jax.parity.arbiter import (
 )
 from examples.jax.parity.audit import audit_published_run
 from examples.jax.parity.cases import get_case
+from examples.jax.parity.contracts import QualityBand, UpstreamEndStates
 from examples.jax.parity.provenance import validate_authoritative_provenance
 from examples.jax.parity.receipts import load_lane_observation
 
@@ -132,6 +134,99 @@ def _work_budget_qualification(
     )
 
 
+def _declared_scatter_contracts(
+    case_id: str, scale: str
+) -> tuple[QualityBand | None, UpstreamEndStates | None]:
+    """The band and the upstream end-state set a registered case declares at ``scale``.
+
+    Those two contracts are the only ones whose verdict is ``quality-band``; a
+    case declares at most one of them at one scale.
+    """
+    if case_id not in parity_cases.implemented_case_ids() or scale not in (
+        "bounded",
+        "native_default",
+    ):
+        return None, None
+    declared = get_case(case_id)
+    return declared.quality_band(scale), declared.end_states(scale)
+
+
+def _require_quality_band_records(
+    records: object, declared_band: QualityBand, expected_lanes: set[str]
+) -> None:
+    """One passing record of the declared band per compared lane, and nothing else."""
+    if not isinstance(records, list) or len(records) != len(expected_lanes):
+        raise RuntimeError("authority summary quality band is incomplete")
+    band_lanes: set[str] = set()
+    for result in records:
+        if not isinstance(result, dict) or set(result) != {
+            "lane",
+            "observable",
+            "max_value",
+            "observed_value",
+            "passed",
+        }:
+            raise RuntimeError("authority summary quality band is incomplete")
+        lane = result["lane"]
+        observable = result["observable"]
+        limit = result["max_value"]
+        observed = result["observed_value"]
+        if (
+            not isinstance(lane, str)
+            or lane not in expected_lanes
+            or lane in band_lanes
+            or not isinstance(observable, str)
+            or observable != declared_band.observable
+            or not isinstance(limit, float)
+            or not math.isfinite(limit)
+            or limit != declared_band.max_value
+            or not isinstance(observed, float)
+            or not math.isfinite(observed)
+            or result["passed"] is not True
+            or observed > limit
+        ):
+            raise RuntimeError("authority summary quality band is incomplete")
+        band_lanes.add(lane)
+    if band_lanes != expected_lanes:
+        raise RuntimeError("authority summary quality band is incomplete")
+
+
+def _require_end_state_records(
+    records: object, declared: UpstreamEndStates, expected_lanes: set[str]
+) -> None:
+    """One passing end-state record per compared lane, naming only declared draws."""
+    if not isinstance(records, list) or len(records) != len(expected_lanes):
+        raise RuntimeError("authority summary upstream end states are incomplete")
+    declared_draws = {state.k for state in declared.states}
+    end_state_lanes: set[str] = set()
+    for result in records:
+        if not isinstance(result, dict) or set(result) != {
+            "lane",
+            "matched_draws",
+            "passed",
+        }:
+            raise RuntimeError("authority summary upstream end states are incomplete")
+        lane = result["lane"]
+        matched = result["matched_draws"]
+        if (
+            not isinstance(lane, str)
+            or lane not in expected_lanes
+            or lane in end_state_lanes
+            or not isinstance(matched, list)
+            or not matched
+            or not all(
+                isinstance(draw, int) and not isinstance(draw, bool) for draw in matched
+            )
+            or matched != sorted(set(matched))
+            or not set(matched) <= declared_draws
+            or result["passed"] is not True
+        ):
+            raise RuntimeError("authority summary upstream end states are incomplete")
+        end_state_lanes.add(lane)
+    if end_state_lanes != expected_lanes:
+        raise RuntimeError("authority summary upstream end states are incomplete")
+
+
 def _parse_authority_run(document: object, *, legacy: bool) -> AuthorityEvidence:
     if not isinstance(document, dict):
         raise TypeError("authority evidence run must be a JSON object")
@@ -166,12 +261,6 @@ def _parse_authority_run(document: object, *, legacy: bool) -> AuthorityEvidence
         raise ValueError("authority evidence schema v1 requires pass verdict")
     if not legacy and document["verdict"] not in _V2_VERDICTS:
         raise ValueError("authority evidence verdict is invalid")
-    if (
-        not legacy
-        and document["verdict"] == "quality-band"
-        and document["scale"] != "native_default"
-    ):
-        raise ValueError("quality-band evidence requires native_default scale")
     if legacy and document["native_default_status"] != "not_run":
         raise ValueError("authority evidence schema v1 requires native_default not_run")
     if document["evidence_scope"] != "local_only":
@@ -196,6 +285,22 @@ def _parse_authority_run(document: object, *, legacy: bool) -> AuthorityEvidence
     case_ids = frozenset(case_ids_value)
     if len(case_ids) != len(case_ids_value) or len(case_ids) != document["case_count"]:
         raise ValueError("authority evidence case_ids do not match case_count")
+    # A quality-band verdict exists only where a band or an upstream end-state
+    # set is declared at the evidence's own scale; the summary check then binds
+    # every quality-band case to its declaration.
+    if (
+        not legacy
+        and document["verdict"] == "quality-band"
+        and all(
+            contract is None
+            for case_id in case_ids
+            for contract in _declared_scatter_contracts(case_id, document["scale"])
+        )
+    ):
+        raise ValueError(
+            "quality-band evidence requires a case with a quality band or an "
+            "upstream end-state set at its scale"
+        )
     qualification = document.get(
         "qualification", "raw summary and lane receipts require local verification"
     )
@@ -281,17 +386,18 @@ def _repository_relative(path: Path) -> str:
 
 #: The case contract (``get_case``) is Python, so unlike the two manifests it
 #: cannot be read out of a commit; it is instead required to still be the bytes
-#: the lanes executed. The replay consumes exactly three of its facts -- the
-#: case's ``native_default_quality_band``, its ``work_budget_contract`` and its
+#: the lanes executed. The replay consumes exactly four of its facts -- the
+#: case's ``quality_band(scale)``, its ``end_states(scale)``, its
+#: ``work_budget_contract`` and its
 #: ``native_default_admitted_terminal_outcomes``.
 _CASE_REGISTRY_SOURCE = _repository_relative(Path(parity_cases.__file__))
 #: The registry DECLARES the work budget but only CALLS for the band: its
-#: ``native_default_quality_band`` is ``official_quality_band(case_id)``, whose
-#: number is computed from the band module's rule, the official-reference
-#: loader, and the case's tracked sensitivity record. Those bytes decide a band
-#: case's verdict, so the replay binds them too. They cannot be bound through
-#: the receipts -- ``collect_executed_sources`` hashes loaded Python modules and
-#: a sensitivity record is data, never imported -- so they are bound against the
+#: ``quality_bands`` entry is ``official_quality_band(case_id)``, whose number
+#: is computed from the band module's rule, the official-reference loader, and
+#: the case's tracked sensitivity record. Those bytes decide a band case's
+#: verdict, so the replay binds them too. They cannot be bound through the
+#: receipts -- ``collect_executed_sources`` hashes loaded Python modules and a
+#: sensitivity record is data, never imported -- so they are bound against the
 #: recorded commit instead, which is stricter: this checkout's band is then the
 #: recorded commit's rule over the recorded commit's data. Everything else the
 #: replay consults (routes, buckets, policies) already comes from that commit.
@@ -303,12 +409,35 @@ _BAND_CONTRACT_SOURCES = (
         for case_id in official_reference.official_sensitivity_case_ids()
     ),
 )
-#: Every repository file whose bytes decide a replayed arbitration.
-_REPLAY_CONTRACT_SOURCES = (_CASE_REGISTRY_SOURCE, *_BAND_CONTRACT_SOURCES)
 #: WHICH cases carry a band is the ``*.json`` glob of this directory, so the
 #: recorded commit must hold the same set, not merely the same files.
 _SENSITIVITY_SOURCE_DIRECTORY = _repository_relative(
     official_reference.SENSITIVITY_ROOT
+)
+#: The upstream end-state sets are bound exactly like the bands: the registry
+#: CALLS the scatter-contract loader, whose sets are read off the tracked
+#: upstream scatter records of this directory. The loader and every record
+#: decide an end-state case's verdict, and a record is data, never imported.
+_SCATTER_SOURCE_DIRECTORY = _repository_relative(
+    official_reference.REFERENCE_ROOT / "scatter"
+)
+_SCATTER_CONTRACT_SOURCES = (
+    _repository_relative(Path(official_scatter_contracts.__file__)),
+    *sorted(
+        _repository_relative(path)
+        for path in (official_reference.REFERENCE_ROOT / "scatter").glob("*.json")
+    ),
+)
+#: Every repository file whose bytes decide a replayed arbitration.
+_REPLAY_CONTRACT_SOURCES = (
+    _CASE_REGISTRY_SOURCE,
+    *_BAND_CONTRACT_SOURCES,
+    *_SCATTER_CONTRACT_SOURCES,
+)
+#: Each globbed record directory with the sources its glob produced here.
+_RECORD_DIRECTORIES = (
+    (_SENSITIVITY_SOURCE_DIRECTORY, _BAND_CONTRACT_SOURCES),
+    (_SCATTER_SOURCE_DIRECTORY, _SCATTER_CONTRACT_SOURCES),
 )
 #: Repository-relative spellings of the two contract documents, so the commit
 #: they are read out of never has to be this checkout.
@@ -373,12 +502,14 @@ def _require_replayable_case_contract(
     """Refuse to replay unless every byte the verdict depends on is the run's.
 
     Three bindings, each fail-closed. (1) Every contract source must be held by
-    this checkout with the bytes the recorded commit holds, so the band this
-    replay arbitrates against is the band the run was judged by; a commit that
-    does not hold one refuses through ``_committed_bytes``. (2) The recorded
-    commit's sensitivity directory must hold exactly the records this checkout
-    globbed, because that glob decides WHICH cases carry a band -- an added
-    record is already refused by (1), a removed one only by this. (3) The case
+    this checkout with the bytes the recorded commit holds, so the band or
+    end-state set this replay arbitrates against is the one the run was judged
+    by; a commit that does not hold one refuses through ``_committed_bytes``.
+    (2) The recorded commit's sensitivity and scatter directories must each
+    hold exactly the records this checkout globbed, because those globs decide
+    WHICH cases carry a band or an end-state set -- an added record is already
+    refused by (1), a removed one only by this; a directory neither side holds
+    is the empty set on both. (3) The case
     registry, the one contract source a lane imports, must still appear exactly
     once in every lane's executed sources with those bytes; presence is
     required, not just agreement, since a receipt set that records no case
@@ -406,25 +537,29 @@ def _require_replayable_case_contract(
                 f"{repository_commit} holds"
             )
         digests[relative] = digest
-    records = frozenset(
-        relative.rsplit("/", maxsplit=1)[1]
-        for relative in _BAND_CONTRACT_SOURCES
-        if relative.startswith(f"{_SENSITIVITY_SOURCE_DIRECTORY}/")
-    )
-    committed_records = frozenset(
-        name
-        for name in _committed_directory_entries(
-            repository_commit, _SENSITIVITY_SOURCE_DIRECTORY
+    for directory, sources in _RECORD_DIRECTORIES:
+        records = frozenset(
+            relative.rsplit("/", maxsplit=1)[1]
+            for relative in sources
+            if relative.startswith(f"{directory}/")
         )
-        if name.endswith(".json")
-    )
-    if records != committed_records:
-        raise RuntimeError(
-            "cannot replay the recorded arbitration: this checkout's tracked "
-            f"sensitivity records {sorted(records)} are not the records "
-            f"recorded commit {repository_commit} holds "
-            f"{sorted(committed_records)}"
+        committed_records = (
+            frozenset(
+                name
+                for name in _committed_directory_entries(repository_commit, directory)
+                if name.endswith(".json")
+            )
+            if records or _committed_path_exists(repository_commit, directory)
+            else frozenset()
         )
+        if records != committed_records:
+            kind = directory.rsplit("/", maxsplit=1)[1]
+            raise RuntimeError(
+                f"cannot replay the recorded arbitration: this checkout's tracked "
+                f"{kind} records {sorted(records)} are not the records "
+                f"recorded commit {repository_commit} holds "
+                f"{sorted(committed_records)}"
+            )
     for lane in sorted(observations):
         provenance = observations[lane].provenance
         assert provenance is not None
@@ -559,6 +694,7 @@ def _confirm_zero_comparison_fail(
         raise RuntimeError("recorded arbitration rejection is malformed")
     _require_replayable_case_contract(observations, repository_commit=repository_commit)
     declared = get_case(case_id)
+    declared_band, declared_end_states = _declared_scatter_contracts(case_id, scale)
     contract = _replayed_contract(repository_commit, case_id=case_id, scale=scale)
     relationship = contract.relationship
     try:
@@ -570,17 +706,14 @@ def _confirm_zero_comparison_fail(
             case_id=case_id,
             example_id=relationship.jax_example_id,
             outer_optimizer_policy=contract.outer_optimizer_policy,
-            quality_band=(
-                declared.native_default_quality_band
-                if scale == "native_default"
-                else None
-            ),
+            quality_band=declared_band,
             work_budget_contract=declared.work_budget_contract,
             admitted_terminal_outcomes=(
                 declared.native_default_admitted_terminal_outcomes
                 if scale == "native_default"
                 else ()
             ),
+            upstream_end_states=declared_end_states,
         )
     except LaneOutcomeRejection as error:
         if str(error).strip() != recorded.strip():
@@ -718,47 +851,20 @@ def verify_authority_summary(
             raise RuntimeError("authority summary contains a failed comparison")
         if case["verdict"] == "quality-band":
             quality_band_case_count += 1
-            quality_band = case.get("quality_band")
-            declared_band = get_case(case_id).native_default_quality_band
-            if (
-                evidence.scale != "native_default"
-                or declared_band is None
-                or not isinstance(quality_band, list)
-                or expected_lanes != {"native-cpu", "jax-cpu", "jax-gpu"}
-                or len(quality_band) != len(expected_lanes)
-            ):
+            if expected_lanes != {"native-cpu", "jax-cpu", "jax-gpu"}:
                 raise RuntimeError("authority summary quality band is incomplete")
-            band_lanes: set[str] = set()
-            for result in quality_band:
-                if not isinstance(result, dict) or set(result) != {
-                    "lane",
-                    "observable",
-                    "max_value",
-                    "observed_value",
-                    "passed",
-                }:
-                    raise RuntimeError("authority summary quality band is incomplete")
-                lane = result["lane"]
-                observable = result["observable"]
-                limit = result["max_value"]
-                observed = result["observed_value"]
-                if (
-                    not isinstance(lane, str)
-                    or lane not in expected_lanes
-                    or lane in band_lanes
-                    or not isinstance(observable, str)
-                    or observable != declared_band.observable
-                    or not isinstance(limit, float)
-                    or not math.isfinite(limit)
-                    or limit != declared_band.max_value
-                    or not isinstance(observed, float)
-                    or not math.isfinite(observed)
-                    or result["passed"] is not True
-                    or observed > limit
-                ):
-                    raise RuntimeError("authority summary quality band is incomplete")
-                band_lanes.add(lane)
-            if band_lanes != expected_lanes:
+            declared_band, declared_end_states = _declared_scatter_contracts(
+                case_id, evidence.scale
+            )
+            if declared_band is not None:
+                _require_quality_band_records(
+                    case.get("quality_band"), declared_band, expected_lanes
+                )
+            elif declared_end_states is not None:
+                _require_end_state_records(
+                    case.get("upstream_end_states"), declared_end_states, expected_lanes
+                )
+            else:
                 raise RuntimeError("authority summary quality band is incomplete")
         execution_lanes = {
             execution.get("lane")
@@ -979,9 +1085,19 @@ def authority_record_from_summary(summary_path: Path) -> dict[str, object]:
             for observation in observations
         )
         bands = "; ".join(
-            f"{result['lane']} {result['observable']} {result['observed_value']:.17g} <= {result['max_value']:.17g}"
-            for case in cases
-            for result in case.get("quality_band", [])
+            (
+                *(
+                    f"{result['lane']} {result['observable']} {result['observed_value']:.17g} <= {result['max_value']:.17g}"
+                    for case in cases
+                    for result in case.get("quality_band", [])
+                ),
+                *(
+                    f"{result['lane']} end state matches upstream draws k="
+                    + ",".join(str(draw) for draw in result["matched_draws"])
+                    for case in cases
+                    for result in case.get("upstream_end_states", [])
+                ),
+            )
         )
         # A declared terminal outcome is the only reason a banded lane can be
         # neither converged nor budget-exhausted, so it is published beside the

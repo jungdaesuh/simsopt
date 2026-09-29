@@ -3,15 +3,26 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Mapping
+from typing import Mapping, get_args
+
+import numpy as np
+from simsopt_contracts.examples_runtime import ExecutionScale
 
 
 def _is_hex_digest(value: str, length: int) -> bool:
     return len(value) == length and all(
         character in "0123456789abcdef" for character in value
     )
+
+
+def _is_lane_key(key: object) -> bool:
+    """Whether ``key`` spells one published lane value key, ``phase:name``."""
+    if not isinstance(key, str):
+        return False
+    phase, separator, name = key.partition(":")
+    return bool(phase and separator and name)
 
 
 @dataclass(frozen=True)
@@ -91,32 +102,127 @@ class ComparisonResult:
 
 @dataclass(frozen=True)
 class QualityBand:
-    """One case-owned endpoint quality floor certifiable at ``native_default``.
+    """One case-owned endpoint quality floor, certifiable at its declared ``scale`` only.
 
     The 2026-08-15 certification-gate ruling (rule 3) admits a continuous
-    optimizer whose lanes fork by rejection sentinel or line search at
-    ``native_default`` only as an endpoint quality band -- "every compared lane
-    reaches ``observable`` <= ``max_value`` at the matched budget" -- and never
-    as final-value equivalence. ``derivation`` records the measured evidence
-    the band was read off, so the floor can never become a free parameter.
-    When a case also declares an ``AdmittedTerminalOutcome``, that one lane is
-    exempt from the matched budget (it stopped early by definition); the
-    matched-budget clause then binds the remaining ``budget_exhausted`` lanes,
-    of which at least one must exist.
+    optimizer whose lanes fork by rejection sentinel or line search only as an
+    endpoint quality band -- "every compared lane reaches ``observable`` <=
+    ``max_value`` at the matched budget" -- and never as final-value
+    equivalence. ``derivation`` records the measured evidence the band was read
+    off, so the floor can never become a free parameter; ``scale`` is the one
+    execution scale that evidence was measured at, and the arbiter refuses the
+    band at any other. When a case also declares an ``AdmittedTerminalOutcome``,
+    that one lane is exempt from the matched budget (it stopped early by
+    definition); the matched-budget clause then binds the remaining
+    ``budget_exhausted`` lanes, of which at least one must exist.
     """
 
     observable: str
     max_value: float
     derivation: str
+    scale: ExecutionScale = field(kw_only=True)
 
     def __post_init__(self) -> None:
-        phase, separator, name = self.observable.partition(":")
-        if not phase or not separator or not name:
+        if not _is_lane_key(self.observable):
             raise ValueError("quality band observable must be 'phase:name'")
         if not isinstance(self.max_value, float) or not math.isfinite(self.max_value):
             raise ValueError("quality band max_value must be a finite float")
         if not self.derivation:
             raise ValueError("quality band requires a recorded derivation")
+        if self.scale not in get_args(ExecutionScale):
+            raise ValueError(
+                f"quality band scale is not an execution scale: {self.scale!r}"
+            )
+
+
+@dataclass(frozen=True)
+class UpstreamEndState:
+    """One end state upstream's own workflow reached from one start of the one-ulp protocol.
+
+    ``k`` is the draw index of that start (k = 0 is the unperturbed start), and
+    ``values`` maps each published lane key (``phase:name``) to upstream's
+    finite FP64 value there, 0-d for a scalar. The arrays are copied and made
+    read-only, so a recorded draw can never drift after it is declared.
+    """
+
+    k: int
+    values: Mapping[str, np.ndarray]
+
+    def __post_init__(self) -> None:
+        if isinstance(self.k, bool) or not isinstance(self.k, int) or self.k < 0:
+            raise ValueError("upstream end state k must be a non-negative int")
+        frozen: dict[str, np.ndarray] = {}
+        for key, value in self.values.items():
+            if not _is_lane_key(key):
+                raise ValueError("upstream end-state key must be 'phase:name'")
+            # Held in the published receipt form: a lane receipt stores a scalar as a
+            # one-element array (artifacts.write_array), so upstream's does too.
+            array = np.array(value, copy=True, ndmin=1)
+            if array.dtype != np.dtype(np.float64):
+                raise ValueError(f"upstream end-state value must be FP64: {key}")
+            if array.size == 0 or not bool(np.all(np.isfinite(array))):
+                raise ValueError(
+                    f"upstream end-state value must be non-empty and finite: {key}"
+                )
+            array.setflags(write=False)
+            frozen[key] = array
+        if not frozen:
+            raise ValueError("upstream end state requires at least one value")
+        object.__setattr__(self, "values", MappingProxyType(frozen))
+
+
+@dataclass(frozen=True)
+class UpstreamEndStates:
+    """Upstream's own end states at ONE scale for a workflow whose end state its input does not determine.
+
+    Where upstream's own script, started from one-ulp perturbed copies of the
+    same input, lands on several distinct end states (Boozer surface branches,
+    say), no lane-versus-lane equality can be required of the port. A lane is
+    then accepted when its end state MATCHES at least one of upstream's own
+    draws: one draw whose value, for EVERY key in ``observables``, passes the
+    comparator and tolerance the case's own route matrix declares for that key.
+    This is an engineering acceptance against upstream's own scatter, never an
+    equivalence proof, so the verdict it yields is ``quality-band`` at most.
+    ``derivation`` records how the draws were produced and which tracked test
+    proves the lanes compute upstream's function at upstream's states.
+    """
+
+    case_id: str
+    scale: ExecutionScale
+    observables: tuple[str, ...]
+    states: tuple[UpstreamEndState, ...]
+    derivation: str
+
+    def __post_init__(self) -> None:
+        if not self.case_id:
+            raise ValueError("upstream end states require an owning case_id")
+        if self.scale not in get_args(ExecutionScale):
+            raise ValueError(
+                f"upstream end-state scale is not an execution scale: {self.scale!r}"
+            )
+        observables = tuple(self.observables)
+        if (
+            not observables
+            or len(set(observables)) != len(observables)
+            or not all(_is_lane_key(key) for key in observables)
+        ):
+            raise ValueError(
+                "upstream end-state observables must be unique non-empty 'phase:name' keys"
+            )
+        states = tuple(self.states)
+        if len(states) < 2:
+            raise ValueError("an upstream end-state set needs at least two draws")
+        if len({state.k for state in states}) != len(states):
+            raise ValueError("upstream end-state draws must have unique k")
+        missing = sorted(
+            {key for state in states for key in observables if key not in state.values}
+        )
+        if missing:
+            raise ValueError(f"upstream end-state draws lack judged keys: {missing}")
+        if not self.derivation:
+            raise ValueError("upstream end states require a recorded derivation")
+        object.__setattr__(self, "observables", observables)
+        object.__setattr__(self, "states", states)
 
 
 @dataclass(frozen=True)
@@ -169,6 +275,21 @@ class QualityBandResult:
     max_value: float
     observed_value: float
     passed: bool
+
+
+@dataclass(frozen=True)
+class EndStateResult:
+    """Which of upstream's own end states one lane's end state matches."""
+
+    lane: str
+    matched_draws: tuple[int, ...]
+    passed: bool
+
+    def __post_init__(self) -> None:
+        if tuple(sorted(set(self.matched_draws))) != self.matched_draws:
+            raise ValueError("matched draws must be unique and ascending")
+        if self.passed != bool(self.matched_draws):
+            raise ValueError("an end-state result passes iff it matches a draw")
 
 
 @dataclass(frozen=True)

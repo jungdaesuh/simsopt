@@ -14,7 +14,12 @@ import examples.jax.manifest_contracts_v3 as manifest_contracts
 import examples.jax.native_to_jax_index as index_module
 import pytest
 from examples.jax.parity.arbiter import LaneObservation
-from examples.jax.parity.cases import get_case
+from examples.jax.parity.cases import CaseDefinition, get_case
+from examples.jax.parity.contracts import (
+    QualityBand,
+    UpstreamEndState,
+    UpstreamEndStates,
+)
 from examples.jax.parity.provenance import (
     REQUIRED_PROVENANCE_SOURCE_PATHS,
     DeviceMetadata,
@@ -329,7 +334,7 @@ class _QualityBandSummary(TypedDict):
 
 
 def _band_ceiling(case_id: str) -> float:
-    band = get_case(case_id).native_default_quality_band
+    band = get_case(case_id).quality_band("native_default")
     assert band is not None
     return band.max_value
 
@@ -1324,10 +1329,14 @@ def _temporary_authority_checkout(tmp_path: Path) -> Path:
         ),
         (_CASE_CONTRACT_SOURCE, (repo_root / _CASE_CONTRACT_SOURCE).read_bytes()),
         # The band module, the official-reference loader and the tracked
-        # sensitivity records: the bytes that decide a band case's ceiling.
+        # sensitivity records: the bytes that decide a band case's ceiling;
+        # and the scatter-contract loader with its tracked upstream records.
         *(
             (relative, (repo_root / relative).read_bytes())
-            for relative in index_module._BAND_CONTRACT_SOURCES
+            for relative in (
+                *index_module._BAND_CONTRACT_SOURCES,
+                *index_module._SCATTER_CONTRACT_SOURCES,
+            )
         ),
     )
     for relative, payload in documents:
@@ -1718,6 +1727,13 @@ def test_replay_contract_sources_bind_the_band_module_its_loader_and_its_data() 
         for case_id in OFFICIAL_BAND_CASE_IDS
     }
     assert _SENSITIVITY_SOURCES
+    # The upstream end-state sets are bound the same way: their loader and the
+    # tracked scatter records it reads.
+    assert "examples/jax/parity/official_scatter_contracts.py" in bound
+    assert set(index_module._SCATTER_CONTRACT_SOURCES) <= set(bound)
+    assert index_module._SCATTER_SOURCE_DIRECTORY == (
+        "examples/jax/parity/official_reference/9e027eac3/scatter"
+    )
 
 
 def test_replay_refuses_a_band_ceiling_this_checkout_moved(
@@ -1790,6 +1806,28 @@ def test_replay_refuses_a_sensitivity_set_the_recorded_commit_does_not_share(
         authority_record_from_summary(path)
 
 
+def test_replay_refuses_a_scatter_set_the_recorded_commit_does_not_share(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WHICH cases carry an upstream end-state set is a glob too, so its SET is bound."""
+    checkout = _temporary_authority_checkout(tmp_path)
+    extra = checkout / index_module._SCATTER_SOURCE_DIRECTORY / "native-extra.json"
+    extra.parent.mkdir(parents=True, exist_ok=True)
+    extra.write_bytes(b"{}\n")
+    _commit_checkout(checkout, "extra scatter record")
+    path = _zero_comparison_fail_summary(
+        tmp_path,
+        jax_cpu_success=False,
+        rejection="jax-cpu did not report scientific success",
+        checkout=checkout,
+    )
+    extra.unlink()
+    monkeypatch.setattr(index_module, "REPO_ROOT", checkout)
+
+    with pytest.raises(RuntimeError, match="scatter records"):
+        authority_record_from_summary(path)
+
+
 def test_generated_binding_cannot_hide_a_source_the_recorded_commit_tracks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1812,3 +1850,210 @@ def test_generated_binding_cannot_hide_a_source_the_recorded_commit_tracks(
 
     with pytest.raises(RuntimeError, match="the recorded commit tracks"):
         authority_record_from_summary(path)
+
+
+# ------------------------------------------ quality-band evidence at bounded
+#
+# A band or an upstream end-state set may now be declared at any scale, so a
+# quality-band record is valid wherever its case declares one. No registered
+# case declares a bounded contract yet: each test substitutes the declaration
+# the index reads through ``get_case``.
+_BOUNDED_CASE_ID = "native-boozer"
+_BOUNDED_LANES = ["native-cpu", "jax-cpu", "jax-gpu"]
+_BOUNDED_BAND = QualityBand(
+    observable="final:objective",
+    max_value=1.0e-6,
+    derivation="test fixture",
+    scale="bounded",
+)
+_BOUNDED_END_STATES = UpstreamEndStates(
+    case_id=_BOUNDED_CASE_ID,
+    scale="bounded",
+    observables=("area:iota",),
+    states=tuple(
+        UpstreamEndState(k=k, values={"area:iota": np.asarray(iota)})
+        for k, iota in ((0, -0.1938), (1, -0.4021), (3, -0.1990))
+    ),
+    derivation="test fixture",
+)
+
+
+def _declare_bounded(
+    monkeypatch: pytest.MonkeyPatch, **declaration: tuple[object, ...]
+) -> None:
+    declared = replace(get_case(_BOUNDED_CASE_ID), **declaration)
+    assert isinstance(declared, CaseDefinition)
+    monkeypatch.setattr(
+        index_module,
+        "get_case",
+        lambda case_id: declared if case_id == _BOUNDED_CASE_ID else get_case(case_id),
+    )
+
+
+def _bounded_quality_band_summary(case_fields: dict[str, object]) -> dict[str, object]:
+    return {
+        "run_id": "bounded-band",
+        "repository_commit": "a" * 40,
+        "scale": "bounded",
+        "verdict": "quality-band",
+        "authoritative": True,
+        "lanes": _BOUNDED_LANES,
+        "cases": [
+            {
+                "case_id": _BOUNDED_CASE_ID,
+                "authoritative": True,
+                "verdict": "quality-band",
+                "scale_tier": "bounded",
+                "comparisons": [{"passed": False}],
+                "executions": [
+                    {"lane": lane, "returncode": 0} for lane in _BOUNDED_LANES
+                ],
+                **case_fields,
+            }
+        ],
+    }
+
+
+def _bounded_band_records() -> list[dict[str, object]]:
+    return [
+        {
+            "lane": lane,
+            "observable": "final:objective",
+            "max_value": _BOUNDED_BAND.max_value,
+            "observed_value": 4.0e-7,
+            "passed": True,
+        }
+        for lane in _BOUNDED_LANES
+    ]
+
+
+def _end_state_records() -> list[dict[str, object]]:
+    return [
+        {"lane": lane, "matched_draws": draws, "passed": True}
+        for lane, draws in zip(_BOUNDED_LANES, ([0], [1, 3], [0]))
+    ]
+
+
+def _write_summary(tmp_path: Path, summary: dict[str, object]) -> Path:
+    path = tmp_path / "summary.json"
+    path.write_text(json.dumps(summary, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def test_bounded_quality_band_evidence_needs_a_bounded_declaration(
+    tmp_path: Path,
+) -> None:
+    path = _write_summary(
+        tmp_path, _bounded_quality_band_summary({"quality_band": _bounded_band_records()})
+    )
+
+    with pytest.raises(ValueError, match="requires a case with a quality band"):
+        authority_record_from_summary(path)
+
+
+def test_bounded_quality_band_evidence_is_valid_under_a_bounded_band(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _declare_bounded(monkeypatch, quality_bands=(_BOUNDED_BAND,))
+    summary = _bounded_quality_band_summary({"quality_band": _bounded_band_records()})
+    path = _write_summary(tmp_path, summary)
+
+    # Every band record passes; the next gate is the source commit binding.
+    with pytest.raises(RuntimeError, match="not reachable from a named ref"):
+        authority_record_from_summary(path)
+
+    band = summary["cases"][0]["quality_band"]
+    band[0]["max_value"] = 2.0 * _BOUNDED_BAND.max_value
+    _write_summary(tmp_path, summary)
+    with pytest.raises(RuntimeError, match="quality band is incomplete"):
+        authority_record_from_summary(path)
+
+
+def test_bounded_quality_band_evidence_is_valid_under_an_end_state_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _declare_bounded(monkeypatch, upstream_end_states=(_BOUNDED_END_STATES,))
+    path = _write_summary(
+        tmp_path, _bounded_quality_band_summary({"upstream_end_states": _end_state_records()})
+    )
+
+    with pytest.raises(RuntimeError, match="not reachable from a named ref"):
+        authority_record_from_summary(path)
+
+
+@pytest.mark.parametrize(
+    "defect",
+    (
+        "undeclared_draw",
+        "no_draw",
+        "not_passed",
+        "missing_lane",
+        "duplicate_lane",
+        "unsorted_draws",
+        "boolean_draw",
+        "band_record_instead",
+    ),
+)
+def test_bounded_end_state_evidence_rejects_an_incomplete_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, defect: str
+) -> None:
+    _declare_bounded(monkeypatch, upstream_end_states=(_BOUNDED_END_STATES,))
+    records = _end_state_records()
+    fields: dict[str, object] = {"upstream_end_states": records}
+    if defect == "undeclared_draw":
+        records[0]["matched_draws"] = [2]
+    elif defect == "no_draw":
+        records[0]["matched_draws"] = []
+    elif defect == "not_passed":
+        records[0]["passed"] = False
+    elif defect == "missing_lane":
+        records.pop()
+    elif defect == "duplicate_lane":
+        records[1]["lane"] = "native-cpu"
+    elif defect == "unsorted_draws":
+        records[1]["matched_draws"] = [3, 1]
+    elif defect == "boolean_draw":
+        records[0]["matched_draws"] = [False]
+    else:
+        fields = {"quality_band": _bounded_band_records()}
+    path = _write_summary(tmp_path, _bounded_quality_band_summary(fields))
+
+    with pytest.raises(RuntimeError, match="upstream end states are incomplete"):
+        authority_record_from_summary(path)
+
+
+def test_end_state_qualification_names_every_lane_and_its_draws(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _declare_bounded(monkeypatch, upstream_end_states=(_BOUNDED_END_STATES,))
+    summary = _bounded_quality_band_summary(
+        {
+            "upstream_end_states": _end_state_records(),
+            "executions": [
+                {"lane": lane, "returncode": 0, "result_directory": lane}
+                for lane in _BOUNDED_LANES
+            ],
+        }
+    )
+    path = _write_summary(tmp_path, summary)
+    for lane in _BOUNDED_LANES:
+        write_lane_observation(
+            tmp_path / lane,
+            replace(
+                _policy_case_lane_observation(
+                    (ExecutedSource("examples/jax/run_parity.py", "f" * 64, "a" * 40),)
+                ),
+                lane=lane,
+            ),
+        )
+    monkeypatch.setattr(index_module, "verify_authority_summary", lambda *_: None)
+
+    record = authority_record_from_summary(path)
+
+    assert record["qualification"] == (
+        "1/1 comparisons failed; 0/3 lanes budget-exhausted; "
+        "native-cpu end state matches upstream draws k=0; "
+        "jax-cpu end state matches upstream draws k=1,3; "
+        "jax-gpu end state matches upstream draws k=0; "
+        "endpoint quality only, no convergence or final-value equivalence"
+    )

@@ -155,7 +155,11 @@ from examples.jax.parity.cases.native_wireframe_rcls_with_ports import (
 from examples.jax.parity.cases.native_wireframe_rcls_with_ports import (
     execute as execute_native_wireframe_rcls_with_ports,
 )
-from examples.jax.parity.contracts import AdmittedTerminalOutcome, QualityBand
+from examples.jax.parity.contracts import (
+    AdmittedTerminalOutcome,
+    QualityBand,
+    UpstreamEndStates,
+)
 from examples.jax.parity.input_bundle import InputBundle
 from examples.jax.parity.measurement import MeasurementExecution
 from examples.jax.parity.official_quality_bands import official_quality_band
@@ -182,11 +186,11 @@ class CaseDefinition:
         ]
         | None
     ) = None
-    native_default_quality_band: QualityBand | None = None
-    """Endpoint quality floor certifiable at ``native_default`` (2026-08-15 rule 3).
+    quality_bands: tuple[QualityBand, ...] = ()
+    """Endpoint quality floors (2026-08-15 rule 3), at most one per scale.
 
-    ``None`` -- the default for every case -- keeps the certification-gate
-    behaviour unchanged at every scale.
+    Each band is certifiable at its own ``scale`` only. No band -- the default
+    for every case -- keeps the certification-gate behaviour unchanged there.
     """
     work_budget_contract: WorkBudgetContract | None = None
     native_default_admitted_terminal_outcomes: tuple[AdmittedTerminalOutcome, ...] = ()
@@ -198,19 +202,61 @@ class CaseDefinition:
     ``success=False``, every finite and physical check stays in force, and the verdict can only be
     ``quality-band`` (an engineering endpoint acceptance, not an equivalence proof).
     """
+    upstream_end_states: tuple[UpstreamEndStates, ...] = ()
+    """Upstream's own end-state sets, at most one per scale (the 2026-09-29 redesign, C3).
+
+    At a scale where upstream's own one-ulp draws land on several end states, each lane must match
+    one of them on every judged key; this is an engineering acceptance against upstream's scatter,
+    never an equivalence proof, and it admits no budget or failure outcome.
+    """
+
+    def quality_band(self, scale: ExecutionScale) -> QualityBand | None:
+        """The band this case declares at ``scale``, if any."""
+        return next((band for band in self.quality_bands if band.scale == scale), None)
+
+    def end_states(self, scale: ExecutionScale) -> UpstreamEndStates | None:
+        """The upstream end-state set this case declares at ``scale``, if any."""
+        return next(
+            (states for states in self.upstream_end_states if states.scale == scale),
+            None,
+        )
 
     def __post_init__(self) -> None:
-        if (
-            self.native_default_quality_band is not None
-            and self.work_budget_contract is not None
-            and "native_default" in self.work_budget_contract.scales
+        band_scales = [band.scale for band in self.quality_bands]
+        if len(set(band_scales)) != len(band_scales):
+            raise ValueError("case declares more than one quality band at one scale")
+        end_state_scales = [states.scale for states in self.upstream_end_states]
+        if len(set(end_state_scales)) != len(end_state_scales):
+            raise ValueError(
+                "case declares more than one upstream end-state set at one scale"
+            )
+        foreign = sorted(
+            states.case_id
+            for states in self.upstream_end_states
+            if states.case_id != self.case_id
+        )
+        if foreign:
+            raise ValueError(
+                f"upstream end-state set belongs to another case: {foreign} != {self.case_id!r}"
+            )
+        if set(band_scales) & set(end_state_scales):
+            raise ValueError(
+                "case cannot combine a quality band and an upstream end-state set at one scale"
+            )
+        if self.work_budget_contract is not None and set(band_scales) & set(
+            self.work_budget_contract.scales
+        ):
+            raise ValueError("case cannot combine a quality band and work budget at one scale")
+        # An end-state set admits no budget exit; a work budget beside it would.
+        if self.work_budget_contract is not None and set(end_state_scales) & set(
+            self.work_budget_contract.scales
         ):
             raise ValueError(
-                "case cannot combine native_default quality band and work budget"
+                "case cannot combine an upstream end-state set and work budget at one scale"
             )
         if (
             self.native_default_admitted_terminal_outcomes
-            and self.native_default_quality_band is None
+            and self.quality_band("native_default") is None
         ):
             raise ValueError(
                 "admitted terminal outcomes require a native_default quality band"
@@ -248,7 +294,7 @@ _CASES = {
         # iteration cap), and its own end objective scatters by 12 % under one-ulp start
         # perturbations (tracked sensitivity record). Same rule v2 as the three pre-
         # registered band cases; the campaign record says so where the values were seen.
-        native_default_quality_band=official_quality_band("native-boozerqa"),
+        quality_bands=(official_quality_band("native-boozerqa"),),
         work_budget_contract=WorkBudgetContract(
             # At native_default the band admits the cap (a band and a work budget cannot
             # both cover that scale); the reduced scales keep the fixed-budget contract.
@@ -265,7 +311,7 @@ _CASES = {
         # admitted on every lane (the 2026-09-29 ruling: judge by upstream's own scatter; C14 admitted
         # "2,2" on the JAX GPU lane only). Same rule v2 band as the other band cases; the band is an
         # engineering endpoint acceptance, not an equivalence proof.
-        native_default_quality_band=official_quality_band("native-coil-forces"),
+        quality_bands=(official_quality_band("native-coil-forces"),),
         work_budget_contract=WorkBudgetContract(
             # At native_default the band admits the cap (a band and a work budget cannot both cover
             # that scale); the reduced scale keeps the fixed-budget contract.
@@ -322,7 +368,7 @@ _CASES = {
         case_id="native-qfm",
         create_input=create_native_qfm_input,
         execute=execute_native_qfm,
-        native_default_quality_band=official_quality_band("native-qfm"),
+        quality_bands=(official_quality_band("native-qfm"),),
     ),
     "native-surf-vol-area": CaseDefinition(
         case_id="native-surf-vol-area",
@@ -350,8 +396,8 @@ _CASES = {
         execute=execute_native_stage_two_optimization_minimal,
         # Upstream's run ends at its 300-iteration L-BFGS-B limit (status 1); the band admits that outcome at
         # native_default. The reduced scale converges inside the same cap, so no work budget is declared.
-        native_default_quality_band=official_quality_band(
-            "native-stage-two-optimization-minimal"
+        quality_bands=(
+            official_quality_band("native-stage-two-optimization-minimal"),
         ),
     ),
     "native-stage-two-optimization": CaseDefinition(
@@ -367,8 +413,8 @@ _CASES = {
         case_id="native-stage-two-optimization-finitebuild",
         create_input=create_native_stage_two_finitebuild_input,
         execute=execute_native_stage_two_finitebuild,
-        native_default_quality_band=official_quality_band(
-            "native-stage-two-optimization-finitebuild"
+        quality_bands=(
+            official_quality_band("native-stage-two-optimization-finitebuild"),
         ),
         work_budget_contract=WorkBudgetContract(
             scales=("bounded",),

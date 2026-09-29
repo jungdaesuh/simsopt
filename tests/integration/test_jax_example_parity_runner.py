@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from typing import cast
 
+import examples.jax.parity.audit as audit_module
 import examples.jax.run_parity as parity_cli
 import numpy as np
 import pytest
@@ -25,6 +26,7 @@ from examples.jax.parity.arbiter import (
     LaneObservation,
     LaneOutcomeRejection,
     arbitrate,
+    upstream_end_state_matches,
 )
 from examples.jax.parity.artifacts import (
     canonical_json_bytes,
@@ -33,10 +35,17 @@ from examples.jax.parity.artifacts import (
 )
 from examples.jax.parity.audit import audit_published_run
 from examples.jax.parity.cases import (
+    CaseDefinition,
     get_case,
     implemented_case_ids,
 )
-from examples.jax.parity.contracts import QualityBand
+from examples.jax.parity.contracts import (
+    AdmittedTerminalOutcome,
+    EndStateResult,
+    QualityBand,
+    UpstreamEndState,
+    UpstreamEndStates,
+)
 from examples.jax.parity.official_quality_bands import OFFICIAL_BAND_CASE_IDS
 from examples.jax.parity.official_reference import load_official_sensitivity
 from examples.jax.parity.input_bundle import create_input_bundle, read_input_bundle
@@ -840,6 +849,7 @@ _ARCHIVED_QUALITY_BAND = QualityBand(
     observable="final:objective",
     max_value=1.0e-07,
     derivation="test fixture mirroring the 2026-08-14 native_default archive",
+    scale="native_default",
 )
 
 
@@ -1267,6 +1277,7 @@ def test_quality_band_refuses_an_unmeasurable_observable(
                 observable="final:outer_solver_status",
                 max_value=1.0,
                 derivation="test fixture",
+                scale="native_default",
             ),
         )
 
@@ -1278,7 +1289,7 @@ def test_quality_band_declaration_is_opt_in_per_case() -> None:
     assert {
         case_id
         for case_id in implemented_case_ids()
-        if get_case(case_id).native_default_quality_band is not None
+        if get_case(case_id).quality_band("native_default") is not None
     } == set(OFFICIAL_BAND_CASE_IDS)
     # Re-derived here from the tracked upstream record, never by calling the
     # function that built the entry: comparing an entry with a second call of
@@ -1286,7 +1297,7 @@ def test_quality_band_declaration_is_opt_in_per_case() -> None:
     # start perturbations and the pre-registered ceiling is
     # max(S) * (1 + (max(S) - min(S)) / min(S)).
     for case_id in OFFICIAL_BAND_CASE_IDS:
-        official = get_case(case_id).native_default_quality_band
+        official = get_case(case_id).quality_band("native_default")
         sensitivity = load_official_sensitivity(case_id)
         samples = sensitivity.end_values
         low, high = min(samples), max(samples)
@@ -1308,7 +1319,12 @@ def test_quality_band_declaration_rejects_an_unusable_floor(
     observable: str, max_value: float, derivation: str
 ) -> None:
     with pytest.raises(ValueError, match="quality band"):
-        QualityBand(observable=observable, max_value=max_value, derivation=derivation)
+        QualityBand(
+            observable=observable,
+            max_value=max_value,
+            derivation=derivation,
+            scale="native_default",
+        )
 
 
 # ------------------------------------------- quality-band published-run audit
@@ -1468,7 +1484,7 @@ def _publish_quality_band_run(
         case_id=_BAND_CASE_ID,
         example_id=relationship.jax_example_id,
         outer_optimizer_policy=outer_optimizer_policy,
-        quality_band=get_case(_BAND_CASE_ID).native_default_quality_band,
+        quality_band=get_case(_BAND_CASE_ID).quality_band("native_default"),
     )
     quality_band_payload = [
         {
@@ -2249,12 +2265,14 @@ def _inject_completed_lane_receipts(
     rejected_lane: str | None = "jax-cpu",
     corrupt_source: bool = False,
     integrity_break: str | None = None,
+    published_values: dict[str, np.ndarray] | None = None,
 ) -> None:
     """Serve hand-built lane receipts in place of real child executions.
 
     ``rejected_lane`` makes one lane report an honest failure (a lane outcome).
     ``integrity_break`` instead violates a harness/contract invariant, which is
-    never a lane's result and must abort the run.
+    never a lane's result and must abort the run. ``published_values``, when
+    given, replaces every lane's published values.
     """
 
     def execute_case_lanes(
@@ -2325,6 +2343,10 @@ def _inject_completed_lane_receipts(
                     authoritative=False,
                 ),
             )
+            if published_values is not None:
+                observation = dataclasses.replace(
+                    observation, values=published_values, applicability={}
+                )
             if integrity_break == "backend_mode" and lane == "jax-cpu":
                 observation = dataclasses.replace(
                     observation, backend_mode="jax_gpu_parity"
@@ -2512,3 +2534,731 @@ def test_run_parity_integrity_failure_after_rejection_does_not_write_summary(
     assert len(partials) == 1
     assert (partials[0] / "FAILURE.json").is_file()
     assert not (partials[0] / "summary.json").is_file()
+
+
+# ------------------------------------------------ quality band at other scales
+
+
+def _bounded_band_observations(scale: str) -> dict[str, LaneObservation]:
+    return {
+        lane: dataclasses.replace(observation, scale=cast(ExecutionScale, scale))
+        for lane, observation in _native_default_observations().items()
+    }
+
+
+def test_a_band_declared_at_bounded_certifies_the_bounded_scale() -> None:
+    band = dataclasses.replace(_ARCHIVED_QUALITY_BAND, scale="bounded")
+
+    result = arbitrate(
+        (*_routes(), *_final_objective_routes()),
+        _bounded_band_observations("bounded"),
+        quality_band=band,
+    )
+
+    assert result.verdict == "quality-band"
+    assert all(item.passed for item in result.quality_band_results)
+
+
+def test_a_band_is_refused_at_a_scale_other_than_its_own() -> None:
+    band = dataclasses.replace(_ARCHIVED_QUALITY_BAND, scale="bounded")
+
+    with pytest.raises(ArbitrationError, match="requires the bounded scale"):
+        arbitrate(
+            (*_routes(), *_final_objective_routes()),
+            _native_default_observations(),
+            quality_band=band,
+        )
+
+
+def test_an_admission_is_refused_beside_a_bounded_band() -> None:
+    band = dataclasses.replace(_ARCHIVED_QUALITY_BAND, scale="bounded")
+    admission = AdmittedTerminalOutcome(
+        case_id="native-coil-forces",
+        lane="jax-gpu",
+        raw_status="2,2",
+        normalized_status="failed",
+        upstream_evidence="test fixture",
+    )
+
+    with pytest.raises(ArbitrationError, match="native_default quality band"):
+        arbitrate(
+            (*_routes(), *_final_objective_routes()),
+            _bounded_band_observations("bounded"),
+            quality_band=band,
+            case_id="native-coil-forces",
+            admitted_terminal_outcomes=(admission,),
+        )
+
+
+def test_quality_band_declaration_rejects_an_unknown_scale() -> None:
+    with pytest.raises(ValueError, match="quality band scale"):
+        QualityBand(
+            observable="final:objective",
+            max_value=1.0e-07,
+            derivation="measured",
+            scale=cast(ExecutionScale, "full"),
+        )
+
+
+# ------------------------------------------------ upstream end-state acceptance
+#
+# A synthetic three-branch scatter in the shape of native-boozer's: two judged
+# keys, a scalar with an allclose value bucket and a vector with an allclose
+# parameter bucket, declared exactly like the case's own routes.
+_END_STATE_CASE_ID = "native-boozer"
+_IOTA = "final:iota"
+_DOFS = "final:surface_dofs"
+_UPSTREAM_DRAWS = {
+    0: (-0.19896721479888680, (0.10, 0.20, 0.30)),
+    1: (-0.40210000000000000, (0.15, 0.20, 0.30)),
+    2: (-0.19896721479888680, (0.90, 0.90, 0.90)),
+}
+
+
+def _upstream_end_states(
+    *, case_id: str = _END_STATE_CASE_ID, scale: str = "bounded"
+) -> UpstreamEndStates:
+    return UpstreamEndStates(
+        case_id=case_id,
+        scale=cast(ExecutionScale, scale),
+        observables=(_IOTA, _DOFS),
+        states=tuple(
+            UpstreamEndState(
+                k=k,
+                values={
+                    _IOTA: np.asarray(iota, dtype=np.float64),
+                    _DOFS: np.asarray(dofs, dtype=np.float64),
+                },
+            )
+            for k, (iota, dofs) in _UPSTREAM_DRAWS.items()
+        ),
+        derivation="test fixture: three upstream draws on two branches",
+    )
+
+
+def _judged_routes(
+    observable: str,
+    *,
+    comparator: str = "allclose",
+    bucket: str = "mirror_boozer_value",
+    odd_pair_bucket: str | None = None,
+) -> tuple[ComparisonRoute, ...]:
+    phase, name = observable.split(":", maxsplit=1)
+    return tuple(
+        ComparisonRoute(
+            phase=phase,
+            observable=name,
+            lane_pair=lane_pair,
+            applicable=True,
+            comparator=comparator,
+            tolerance_bucket=(
+                odd_pair_bucket
+                if odd_pair_bucket is not None and lane_pair == "jax-cpu:jax-gpu"
+                else bucket
+            ),
+        )
+        for lane_pair in (
+            "native-cpu:jax-cpu",
+            "native-cpu:jax-gpu",
+            "jax-cpu:jax-gpu",
+        )
+    )
+
+
+def _end_state_route_matrix(
+    *, dofs_comparator: str = "allclose", dofs_odd_bucket: str | None = None
+) -> tuple[ComparisonRoute, ...]:
+    return (
+        *_routes(),
+        *_judged_routes(_IOTA),
+        *_judged_routes(
+            _DOFS,
+            comparator=dofs_comparator,
+            bucket="mirror_boozer_parameters",
+            odd_pair_bucket=dofs_odd_bucket,
+        ),
+    )
+
+
+def _end_state_observations(
+    draws: dict[str, int] | None = None,
+    *,
+    overrides: dict[str, dict[str, np.ndarray]] | None = None,
+    initial: dict[str, float] | None = None,
+) -> dict[str, LaneObservation]:
+    """Lanes on upstream's branches: by default native and GPU on k = 0, JAX CPU on k = 1."""
+    lane_draws = draws or {"native-cpu": 0, "jax-cpu": 1, "jax-gpu": 0}
+    observations: dict[str, LaneObservation] = {}
+    for lane, observation in _observations().items():
+        iota, dofs = _UPSTREAM_DRAWS[lane_draws[lane]]
+        values = {
+            "initial:objective_sum_squares": np.asarray(
+                (initial or {}).get(lane, 1.0), dtype=np.float64
+            ),
+            _IOTA: np.asarray(iota, dtype=np.float64),
+            _DOFS: np.asarray(dofs, dtype=np.float64),
+            **(overrides or {}).get(lane, {}),
+        }
+        observations[lane] = dataclasses.replace(
+            observation, values=values, applicability={}
+        )
+    return observations
+
+
+def test_every_lane_on_an_upstream_branch_certifies_a_quality_band() -> None:
+    result = arbitrate(
+        _end_state_route_matrix(),
+        _end_state_observations(),
+        case_id=_END_STATE_CASE_ID,
+        upstream_end_states=_upstream_end_states(),
+    )
+
+    assert result.verdict == "quality-band"
+    assert result.verdict != "pass"
+    assert result.end_state_results == (
+        EndStateResult(lane="jax-cpu", matched_draws=(1,), passed=True),
+        EndStateResult(lane="jax-gpu", matched_draws=(0,), passed=True),
+        EndStateResult(lane="native-cpu", matched_draws=(0,), passed=True),
+    )
+    assert result.quality_band_results == ()
+    judged = {_IOTA, _DOFS}
+    for comparison in result.comparisons:
+        key = f"{comparison.phase}:{comparison.observable}"
+        informational = comparison.diagnostic.startswith(
+            "informational (quality-band, non-certifying): "
+        )
+        assert informational == (key in judged), comparison
+    # The lanes sit on different branches, so the judged lane-pair routes fail
+    # and are recorded, but they never decide.
+    assert not all(item.passed for item in result.comparisons)
+
+
+def test_a_lane_on_no_upstream_branch_fails() -> None:
+    result = arbitrate(
+        _end_state_route_matrix(),
+        _end_state_observations(
+            overrides={"jax-gpu": {_IOTA: np.asarray(-0.5197, dtype=np.float64)}}
+        ),
+        case_id=_END_STATE_CASE_ID,
+        upstream_end_states=_upstream_end_states(),
+    )
+
+    assert result.verdict == "fail"
+    assert {item.lane: item.matched_draws for item in result.end_state_results} == {
+        "jax-cpu": (1,),
+        "jax-gpu": (),
+        "native-cpu": (0,),
+    }
+    assert [item.passed for item in result.end_state_results] == [True, False, True]
+
+
+def test_an_end_state_must_match_one_draw_on_every_judged_key() -> None:
+    """k = 0's iota with k = 1's surface matches neither draw, though each key matches one."""
+    iota_k0 = _UPSTREAM_DRAWS[0][0]
+    dofs_k1 = np.asarray(_UPSTREAM_DRAWS[1][1], dtype=np.float64)
+    result = arbitrate(
+        _end_state_route_matrix(),
+        _end_state_observations(
+            overrides={
+                "jax-gpu": {
+                    _IOTA: np.asarray(iota_k0, dtype=np.float64),
+                    _DOFS: dofs_k1,
+                }
+            }
+        ),
+        case_id=_END_STATE_CASE_ID,
+        upstream_end_states=_upstream_end_states(),
+    )
+
+    assert result.verdict == "fail"
+    gpu = next(item for item in result.end_state_results if item.lane == "jax-gpu")
+    assert gpu == EndStateResult(lane="jax-gpu", matched_draws=(), passed=False)
+
+
+def test_a_shape_mismatch_is_no_match() -> None:
+    result = arbitrate(
+        _end_state_route_matrix(),
+        _end_state_observations(
+            overrides={
+                lane: {_DOFS: np.asarray([0.10, 0.20], dtype=np.float64)}
+                for lane in ("native-cpu", "jax-cpu", "jax-gpu")
+            }
+        ),
+        case_id=_END_STATE_CASE_ID,
+        upstream_end_states=_upstream_end_states(),
+    )
+
+    assert result.verdict == "fail"
+    assert all(item.matched_draws == () for item in result.end_state_results)
+
+
+def test_a_failing_deciding_route_fails_even_when_every_end_state_matches() -> None:
+    result = arbitrate(
+        _end_state_route_matrix(),
+        _end_state_observations(initial={"jax-gpu": 2.0}),
+        case_id=_END_STATE_CASE_ID,
+        upstream_end_states=_upstream_end_states(),
+    )
+
+    assert result.verdict == "fail"
+    assert all(item.passed for item in result.end_state_results)
+    failed = [item for item in result.comparisons if not item.passed]
+    assert any(
+        item.observable == "objective_sum_squares"
+        and not item.diagnostic.startswith("informational")
+        for item in failed
+    )
+
+
+@pytest.mark.parametrize(
+    ("case_id", "message"),
+    (
+        (None, "require the arbitrated case_id"),
+        ("native-qfm", "belong to another case"),
+    ),
+)
+def test_an_end_state_set_is_bound_to_the_arbitrated_case(
+    case_id: str | None, message: str
+) -> None:
+    with pytest.raises(ArbitrationError, match=message):
+        arbitrate(
+            _end_state_route_matrix(),
+            _end_state_observations(),
+            case_id=case_id,
+            upstream_end_states=_upstream_end_states(),
+        )
+
+
+def test_an_end_state_set_is_refused_at_a_scale_other_than_its_own() -> None:
+    with pytest.raises(
+        ArbitrationError, match="end-state acceptance requires the native_default scale"
+    ):
+        arbitrate(
+            _end_state_route_matrix(),
+            _end_state_observations(),
+            case_id=_END_STATE_CASE_ID,
+            upstream_end_states=_upstream_end_states(scale="native_default"),
+        )
+
+
+def test_an_end_state_set_never_combines_with_a_band() -> None:
+    with pytest.raises(ArbitrationError, match="cannot combine with a quality band"):
+        arbitrate(
+            _end_state_route_matrix(),
+            _end_state_observations(),
+            case_id=_END_STATE_CASE_ID,
+            quality_band=QualityBand(
+                observable=_IOTA,
+                max_value=1.0,
+                derivation="test fixture",
+                scale="bounded",
+            ),
+            upstream_end_states=_upstream_end_states(),
+        )
+
+
+def test_an_end_state_set_admits_no_failed_lane() -> None:
+    observations = _end_state_observations()
+    observations["jax-cpu"] = dataclasses.replace(
+        observations["jax-cpu"], normalized_status="failed", success=False
+    )
+
+    with pytest.raises(LaneOutcomeRejection, match="scientific success"):
+        arbitrate(
+            _end_state_route_matrix(),
+            observations,
+            case_id=_END_STATE_CASE_ID,
+            upstream_end_states=_upstream_end_states(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("routes", "message"),
+    (
+        (
+            _end_state_route_matrix(dofs_comparator="not_worse"),
+            "one exact or allclose comparator",
+        ),
+        (
+            _end_state_route_matrix(dofs_odd_bucket="gpu_runtime"),
+            "one tolerance bucket",
+        ),
+    ),
+    ids=("one-sided-comparator", "mixed-buckets"),
+)
+def test_a_judged_key_needs_one_matching_comparator_and_bucket(
+    routes: tuple[ComparisonRoute, ...], message: str
+) -> None:
+    with pytest.raises(ArbitrationError, match=message):
+        arbitrate(
+            routes,
+            _end_state_observations(),
+            case_id=_END_STATE_CASE_ID,
+            upstream_end_states=_upstream_end_states(),
+        )
+
+
+def test_a_judged_key_without_a_route_is_refused() -> None:
+    declared = _upstream_end_states()
+    unrouted = dataclasses.replace(
+        declared,
+        observables=(*declared.observables, "final:label"),
+        states=tuple(
+            UpstreamEndState(
+                k=state.k,
+                values={**state.values, "final:label": np.asarray(0.5)},
+            )
+            for state in declared.states
+        ),
+    )
+
+    # No lane publishes it, so the arbiter refuses at the lane first...
+    with pytest.raises(ArbitrationError, match="not applicable final:label: jax-cpu"):
+        arbitrate(
+            _end_state_route_matrix(),
+            _end_state_observations(),
+            case_id=_END_STATE_CASE_ID,
+            upstream_end_states=unrouted,
+        )
+    # ...and a value set that holds it still has no route to judge it by.
+    with pytest.raises(ArbitrationError, match="no applicable route: final:label"):
+        upstream_end_state_matches(
+            unrouted, _end_state_route_matrix(), unrouted.states[0].values
+        )
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    (
+        (np.asarray(-0.19896721479888680, dtype=np.float32), "must be FP64"),
+        (np.asarray(np.nan, dtype=np.float64), "non-finite"),
+    ),
+    ids=("fp32", "nan"),
+)
+def test_a_judged_lane_value_must_be_finite_fp64(
+    value: np.ndarray, message: str
+) -> None:
+    with pytest.raises(ArbitrationError, match=message):
+        arbitrate(
+            _end_state_route_matrix(),
+            _end_state_observations(overrides={"jax-gpu": {_IOTA: value}}),
+            case_id=_END_STATE_CASE_ID,
+            upstream_end_states=_upstream_end_states(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        ("fp32", "must be FP64"),
+        ("nan", "non-empty and finite"),
+        ("empty", "non-empty and finite"),
+        ("key", "'phase:name'"),
+        ("bool_k", "non-negative int"),
+        ("negative_k", "non-negative int"),
+        ("one_draw", "at least two draws"),
+        ("duplicate_k", "unique k"),
+        ("missing_key", "lack judged keys"),
+        ("no_observables", "observables must be unique"),
+        ("duplicate_observables", "observables must be unique"),
+        ("scale", "not an execution scale"),
+        ("case_id", "owning case_id"),
+        ("derivation", "recorded derivation"),
+    ),
+)
+def test_an_upstream_end_state_set_rejects_an_unusable_declaration(
+    mutation: str, message: str
+) -> None:
+    declared = _upstream_end_states()
+    first = declared.states[0]
+    good = {key: np.asarray(value) for key, value in first.values.items()}
+    with pytest.raises(ValueError, match=message):
+        if mutation == "fp32":
+            UpstreamEndState(k=0, values={**good, _IOTA: np.float32(0.5)})
+        elif mutation == "nan":
+            UpstreamEndState(k=0, values={**good, _IOTA: np.asarray(np.nan)})
+        elif mutation == "empty":
+            UpstreamEndState(k=0, values={**good, _DOFS: np.asarray([], dtype=np.float64)})
+        elif mutation == "key":
+            UpstreamEndState(k=0, values={"iota": np.asarray(0.5)})
+        elif mutation == "bool_k":
+            UpstreamEndState(k=cast(int, True), values=good)
+        elif mutation == "negative_k":
+            UpstreamEndState(k=-1, values=good)
+        elif mutation == "one_draw":
+            dataclasses.replace(declared, states=(first,))
+        elif mutation == "duplicate_k":
+            dataclasses.replace(declared, states=(first, first))
+        elif mutation == "missing_key":
+            dataclasses.replace(
+                declared,
+                states=(first, UpstreamEndState(k=9, values={_IOTA: np.asarray(0.5)})),
+            )
+        elif mutation == "no_observables":
+            dataclasses.replace(declared, observables=())
+        elif mutation == "duplicate_observables":
+            dataclasses.replace(declared, observables=(_IOTA, _IOTA))
+        elif mutation == "scale":
+            dataclasses.replace(declared, scale=cast(ExecutionScale, "full"))
+        elif mutation == "case_id":
+            dataclasses.replace(declared, case_id="")
+        else:
+            dataclasses.replace(declared, derivation="")
+
+
+def test_one_value_set_is_judged_against_upstream_without_a_lane() -> None:
+    """The public matcher the arbiter runs per lane, on upstream's own draws."""
+    declared = _upstream_end_states()
+    routes = _end_state_route_matrix()
+
+    assert [
+        upstream_end_state_matches(declared, routes, state.values)
+        for state in declared.states
+    ] == [(0,), (1,), (2,)]
+    with pytest.raises(ArbitrationError, match="missing upstream end-state observable"):
+        upstream_end_state_matches(declared, routes, {_IOTA: np.asarray(-0.2)})
+    with pytest.raises(ArbitrationError, match="one tolerance bucket"):
+        upstream_end_state_matches(
+            declared,
+            _end_state_route_matrix(dofs_odd_bucket="gpu_runtime"),
+            declared.states[0].values,
+        )
+
+
+def test_a_declared_upstream_draw_is_frozen() -> None:
+    source = np.asarray([0.10, 0.20, 0.30], dtype=np.float64)
+    state = UpstreamEndState(k=0, values={_DOFS: source})
+    source[0] = 9.0
+
+    assert state.values[_DOFS][0] == 0.10
+    with pytest.raises(ValueError, match="read-only"):
+        state.values[_DOFS][0] = 9.0
+    with pytest.raises(TypeError):
+        cast(dict[str, np.ndarray], state.values)[_IOTA] = np.asarray(0.5)
+
+
+def test_an_end_state_result_passes_exactly_when_it_matches_a_draw() -> None:
+    with pytest.raises(ValueError, match="passes iff"):
+        EndStateResult(lane="jax-gpu", matched_draws=(), passed=True)
+    with pytest.raises(ValueError, match="passes iff"):
+        EndStateResult(lane="jax-gpu", matched_draws=(0,), passed=False)
+    with pytest.raises(ValueError, match="ascending"):
+        EndStateResult(lane="jax-gpu", matched_draws=(1, 0), passed=True)
+
+
+# ------------------------------------------------ case registry scale rules
+
+
+def _registered(case_id: str) -> CaseDefinition:
+    return get_case(case_id)
+
+
+def test_a_case_looks_up_its_band_and_end_state_set_by_scale() -> None:
+    case = dataclasses.replace(
+        _registered(_END_STATE_CASE_ID),
+        quality_bands=(dataclasses.replace(_ARCHIVED_QUALITY_BAND, scale="native_default"),),
+        upstream_end_states=(_upstream_end_states(scale="bounded"),),
+    )
+
+    assert case.quality_band("native_default") is case.quality_bands[0]
+    assert case.quality_band("bounded") is None
+    assert case.end_states("bounded") is case.upstream_end_states[0]
+    assert case.end_states("native_default") is None
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    (
+        (
+            {
+                "quality_bands": (
+                    _ARCHIVED_QUALITY_BAND,
+                    dataclasses.replace(_ARCHIVED_QUALITY_BAND, max_value=2.0e-07),
+                )
+            },
+            "more than one quality band",
+        ),
+        (
+            {
+                "upstream_end_states": (
+                    _upstream_end_states(),
+                    _upstream_end_states(),
+                )
+            },
+            "more than one upstream end-state set",
+        ),
+        (
+            {"upstream_end_states": (_upstream_end_states(case_id="native-qfm"),)},
+            "belongs to another case",
+        ),
+        (
+            {
+                "quality_bands": (
+                    dataclasses.replace(_ARCHIVED_QUALITY_BAND, scale="bounded"),
+                ),
+                "upstream_end_states": (_upstream_end_states(),),
+            },
+            "cannot combine a quality band and an upstream end-state set",
+        ),
+        (
+            {
+                "quality_bands": (
+                    dataclasses.replace(_ARCHIVED_QUALITY_BAND, scale="bounded"),
+                ),
+                "work_budget_contract": WorkBudgetContract(
+                    scales=("bounded",), derivation="Upstream fixed optimizer budget"
+                ),
+            },
+            "cannot combine a quality band and work budget",
+        ),
+        (
+            {
+                "quality_bands": (
+                    dataclasses.replace(_ARCHIVED_QUALITY_BAND, scale="bounded"),
+                ),
+                "native_default_admitted_terminal_outcomes": (
+                    AdmittedTerminalOutcome(
+                        case_id=_END_STATE_CASE_ID,
+                        lane="jax-gpu",
+                        raw_status="2,2",
+                        normalized_status="failed",
+                        upstream_evidence="test fixture",
+                    ),
+                ),
+            },
+            "require a native_default quality band",
+        ),
+    ),
+    ids=(
+        "two-bands-one-scale",
+        "two-end-state-sets-one-scale",
+        "foreign-end-state-set",
+        "band-and-end-states-one-scale",
+        "band-and-work-budget-one-scale",
+        "admission-beside-a-bounded-band",
+    ),
+)
+def test_a_case_declaration_keeps_one_scatter_contract_per_scale(
+    changes: dict[str, object], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        dataclasses.replace(_registered(_END_STATE_CASE_ID), **changes)
+
+
+def test_a_band_and_an_end_state_set_may_declare_different_scales() -> None:
+    case = dataclasses.replace(
+        _registered(_END_STATE_CASE_ID),
+        quality_bands=(_ARCHIVED_QUALITY_BAND,),
+        upstream_end_states=(_upstream_end_states(scale="bounded"),),
+    )
+
+    assert case.quality_band("native_default") is not None
+    assert case.end_states("bounded") is not None
+
+
+# ------------------------------------------------ end-state receipt round trip
+#
+# run_parity writes the end-state record next to the verdict, and the audit
+# recomputes it from the lane receipts. The case declaration is substituted in
+# both modules, because no registered case declares an end-state set yet.
+_ROUND_TRIP_CASE_ID = "native-just-a-quadratic"
+_ROUND_TRIP_KEY = "final:parameters"
+
+
+def _round_trip_values() -> dict[str, np.ndarray]:
+    return {
+        f"{phase}:{name}": np.asarray([1.0, 2.0], dtype=np.float64)
+        for phase in ("initial", "final")
+        for name in (
+            "objective_gradient",
+            "objective_sum_squares",
+            "parameters",
+            "residual",
+            "residual_jacobian",
+        )
+    }
+
+
+def _round_trip_declaration(*extra_k: int) -> CaseDefinition:
+    upstream = UpstreamEndStates(
+        case_id=_ROUND_TRIP_CASE_ID,
+        scale="bounded",
+        observables=(_ROUND_TRIP_KEY,),
+        states=tuple(
+            UpstreamEndState(
+                k=k, values={_ROUND_TRIP_KEY: np.asarray(value, dtype=np.float64)}
+            )
+            for k, value in (
+                (0, [1.0, 2.0]),
+                (1, [3.0, 4.0]),
+                *((k, [1.0, 2.0]) for k in extra_k),
+            )
+        ),
+        derivation="test fixture",
+    )
+    return dataclasses.replace(
+        get_case(_ROUND_TRIP_CASE_ID), upstream_end_states=(upstream,)
+    )
+
+
+def _declare(monkeypatch: pytest.MonkeyPatch, module: object, declared: CaseDefinition) -> None:
+    monkeypatch.setattr(
+        module,
+        "get_case",
+        lambda case_id: declared if case_id == _ROUND_TRIP_CASE_ID else get_case(case_id),
+    )
+
+
+def test_run_parity_records_and_the_audit_recomputes_upstream_end_states(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    _inject_completed_lane_receipts(
+        monkeypatch, rejected_lane=None, published_values=_round_trip_values()
+    )
+    _declare(monkeypatch, parity_cli, _round_trip_declaration())
+    _declare(monkeypatch, audit_module, _round_trip_declaration())
+
+    result = parity_cli.main(
+        [
+            "--case",
+            _ROUND_TRIP_CASE_ID,
+            "--lanes",
+            "native-cpu,jax-cpu",
+            "--scale",
+            "bounded",
+            "--artifact-root",
+            str(tmp_path),
+        ]
+    )
+
+    assert result == 0
+    (published,) = [
+        path
+        for path in tmp_path.iterdir()
+        if path.is_dir() and not path.name.endswith(".partial")
+    ]
+    summary = json.loads((published / "summary.json").read_text(encoding="utf-8"))
+    (case,) = summary["cases"]
+    assert summary["verdict"] == "quality-band"
+    assert case["verdict"] == "quality-band"
+    assert case["upstream_end_states"] == [
+        {"lane": "jax-cpu", "matched_draws": [0], "passed": True},
+        {"lane": "native-cpu", "matched_draws": [0], "passed": True},
+    ]
+    assert "quality_band" not in case
+    judged = [
+        item
+        for item in case["comparisons"]
+        if f"{item['phase']}:{item['observable']}" == _ROUND_TRIP_KEY
+    ]
+    assert judged
+    assert all(item["diagnostic"].startswith("informational") for item in judged)
+
+    audited = audit_published_run(published, repo_root=repo_root)
+    assert audited.verdict == "quality-band"
+
+    # A declaration the record was not judged by recomputes other matched draws.
+    _declare(monkeypatch, audit_module, _round_trip_declaration(7))
+    with pytest.raises(ValueError, match="stored upstream end states differ"):
+        audit_published_run(published, repo_root=repo_root)

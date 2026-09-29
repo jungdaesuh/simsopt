@@ -229,7 +229,7 @@ def test_minimal_case_declares_the_official_endpoint_quality_band() -> None:
     whose observable no lane published would be unenforceable.
     """
     case = get_case("native-stage-two-optimization-minimal")
-    band = case.native_default_quality_band
+    band = case.quality_band("native_default")
 
     assert band is not None
     assert band.observable == "final:objective"

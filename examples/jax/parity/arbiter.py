@@ -15,8 +15,10 @@ from examples.jax.parity._manifest import ComparisonRoute
 from examples.jax.parity.contracts import (
     AdmittedTerminalOutcome,
     ComparisonResult,
+    EndStateResult,
     QualityBand,
     QualityBandResult,
+    UpstreamEndStates,
 )
 from examples.jax.parity.provenance import LaneProvenance
 from examples.jax.parity.work_budget import WorkBudgetContract
@@ -28,7 +30,6 @@ _REQUIRED_LANES = frozenset({"native-cpu", "jax-cpu", "jax-gpu"})
 _REQUIRED_PAIRS = frozenset(
     {"native-cpu:jax-cpu", "native-cpu:jax-gpu", "jax-cpu:jax-gpu"}
 )
-QUALITY_BAND_SCALE: ExecutionScale = "native_default"
 QUALITY_BAND_VERDICT = "quality-band"
 _INFORMATIONAL_DIAGNOSTIC_PREFIX = "informational (quality-band, non-certifying): "
 
@@ -97,6 +98,7 @@ class ArbitrationResult:
     quality_band_results: tuple[QualityBandResult, ...] = ()
     work_budget_admitted: bool = False
     admitted_terminal_lanes: tuple[tuple[str, str], ...] = ()
+    end_state_results: tuple[EndStateResult, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -118,6 +120,7 @@ def _validate_lanes(
     outer_optimizer_policy: OuterOptimizerPolicy | None = None,
     work_budget_contract: WorkBudgetContract | None = None,
     admitted_terminal_outcomes: tuple[AdmittedTerminalOutcome, ...] = (),
+    upstream_end_states: UpstreamEndStates | None = None,
 ) -> _TerminalAdmission:
     if outer_optimizer_policy is not None and not policy_owns_parity_case(
         outer_optimizer_policy, case_id=case_id, example_id=example_id
@@ -132,14 +135,42 @@ def _validate_lanes(
     missing = required_lanes - set(observations)
     if missing:
         raise ArbitrationError(f"missing required lane: {sorted(missing)}")
-    if quality_band is not None and {
-        observations[lane].scale for lane in required_lanes
-    } != {QUALITY_BAND_SCALE}:
+    required_scales = {observations[lane].scale for lane in required_lanes}
+    if quality_band is not None and required_scales != {quality_band.scale}:
         raise ArbitrationError(
-            f"quality-band certification requires the {QUALITY_BAND_SCALE} scale"
+            f"quality-band certification requires the {quality_band.scale} scale"
         )
     if admitted_terminal_outcomes and quality_band is None:
         raise ArbitrationError("admitted terminal outcomes require a quality band")
+    if (
+        admitted_terminal_outcomes
+        and quality_band is not None
+        and quality_band.scale != "native_default"
+    ):
+        raise ArbitrationError(
+            "admitted terminal outcomes require a native_default quality band"
+        )
+    # The end-state contract is bound at this seam like an admission: to ONE
+    # case and ONE scale, and alone. It admits no terminal outcome, so every
+    # lane still has to pass the success gate below.
+    if upstream_end_states is not None:
+        if quality_band is not None or admitted_terminal_outcomes:
+            raise ArbitrationError(
+                "upstream end states cannot combine with a quality band or "
+                "admitted terminal outcomes"
+            )
+        if case_id is None:
+            raise ArbitrationError("upstream end states require the arbitrated case_id")
+        if upstream_end_states.case_id != case_id:
+            raise ArbitrationError(
+                "upstream end states belong to another case: "
+                f"{upstream_end_states.case_id!r} != {case_id!r}"
+            )
+        if required_scales != {upstream_end_states.scale}:
+            raise ArbitrationError(
+                "upstream end-state acceptance requires the "
+                f"{upstream_end_states.scale} scale"
+            )
     # Ownership is checked at this seam, not only in the registry: an admission
     # authorized for one case can never be handed to another.
     if admitted_terminal_outcomes and case_id is None:
@@ -422,6 +453,143 @@ def _route_tolerance(route: ComparisonRoute) -> tuple[float, float]:
     return rtol, atol
 
 
+def _require_fp64(lane: str, value_key: str, value: np.ndarray) -> None:
+    if value.dtype.kind == "f" and value.dtype != np.dtype(np.float64):
+        raise ArbitrationError(
+            f"{lane} required floating observable must be FP64: {value_key}"
+        )
+    if value.dtype.kind == "c" and value.dtype != np.dtype(np.complex128):
+        raise ArbitrationError(
+            f"{lane} required complex observable must be FP64: {value_key}"
+        )
+
+
+def _compare(
+    route: ComparisonRoute, left: np.ndarray, right: np.ndarray
+) -> tuple[bool, str]:
+    """Apply ``route``'s comparator to ``left`` against ``right``.
+
+    The one comparison every lane-pair route and every lane-versus-upstream
+    end-state match runs, so both use the same comparator and tolerance.
+    """
+    if left.shape != right.shape:
+        return False, f"shape mismatch: {left.shape} != {right.shape}"
+    if route.comparator == "exact":
+        return bool(np.array_equal(left, right)), "exact comparison"
+    if route.comparator == "allclose":
+        rtol, atol = _route_tolerance(route)
+        return (
+            bool(np.allclose(left, right, rtol=rtol, atol=atol)),
+            f"allclose rtol={rtol} atol={atol}",
+        )
+    if route.comparator == "not_worse":
+        rtol, atol = _route_tolerance(route)
+        upper_bound = left + rtol * np.abs(left) + atol
+        return bool(np.all(right <= upper_bound)), f"not_worse rtol={rtol} atol={atol}"
+    raise ArbitrationError(
+        "equivalent comparator requires a case-owned invariant: "
+        f"{route.phase}:{route.observable}"
+    )
+
+
+def _end_state_routes(
+    routes: tuple[ComparisonRoute, ...], upstream_end_states: UpstreamEndStates
+) -> Mapping[str, ComparisonRoute]:
+    """Pick, per judged key, the one route whose comparator judges the upstream match.
+
+    Every selected route of a judged key must be applicable and share one
+    ``exact`` or ``allclose`` comparator and one tolerance bucket, so the
+    lane-versus-upstream comparison is exactly what the case already requires
+    of two lanes. ``not_worse`` is one-sided and cannot say two states match.
+    """
+    judged: dict[str, ComparisonRoute] = {}
+    for key in upstream_end_states.observables:
+        key_routes = tuple(
+            route for route in routes if f"{route.phase}:{route.observable}" == key
+        )
+        if not key_routes or not all(route.applicable for route in key_routes):
+            raise ArbitrationError(
+                f"upstream end-state observable has no applicable route: {key}"
+            )
+        comparators = {route.comparator for route in key_routes}
+        buckets = {route.tolerance_bucket for route in key_routes}
+        if (
+            len(comparators) != 1
+            or not comparators <= {"exact", "allclose"}
+            or len(buckets) != 1
+        ):
+            raise ArbitrationError(
+                "upstream end-state observable requires one exact or allclose "
+                f"comparator and one tolerance bucket: {key}"
+            )
+        judged[key] = key_routes[0]
+    return MappingProxyType(judged)
+
+
+def upstream_end_state_matches(
+    upstream_end_states: UpstreamEndStates,
+    routes: tuple[ComparisonRoute, ...],
+    values: Mapping[str, np.ndarray],
+) -> tuple[int, ...]:
+    """Return the ascending ``k`` of every upstream draw one end state matches.
+
+    A draw matches when, for EVERY judged key, ``values[key]`` (as ``left``)
+    passes that key's route comparator against the draw's value (as
+    ``right``); a shape mismatch is no match. A scalar is compared in the
+    published receipt form, a one-element array, whether it comes from a
+    receipt or from an in-process observation. The judged routes are chosen from
+    ``routes`` under the arbiter's own refusal rules, and each value must be
+    present, finite and FP64. An engineering acceptance against upstream's own
+    scatter, never an equivalence test.
+    """
+    judged_routes = _end_state_routes(routes, upstream_end_states)
+    checked: dict[str, np.ndarray] = {}
+    for key in judged_routes:
+        if key not in values:
+            raise ArbitrationError(f"missing upstream end-state observable {key}")
+        value = np.atleast_1d(np.asarray(values[key]))
+        _require_fp64("end state", key, value)
+        if not bool(np.all(np.isfinite(value))):
+            raise ArbitrationError(f"non-finite upstream end-state observable {key}")
+        checked[key] = value
+    return tuple(
+        sorted(
+            state.k
+            for state in upstream_end_states.states
+            if all(
+                _compare(route, checked[key], state.values[key])[0]
+                for key, route in judged_routes.items()
+            )
+        )
+    )
+
+
+def _end_state_results(
+    upstream_end_states: UpstreamEndStates,
+    routes: tuple[ComparisonRoute, ...],
+    observations: Mapping[str, LaneObservation],
+    required_lanes: frozenset[str],
+) -> tuple[EndStateResult, ...]:
+    """Match every compared lane's end state against each of upstream's draws."""
+    results: list[EndStateResult] = []
+    for lane in sorted(required_lanes):
+        observation = observations[lane]
+        for key in upstream_end_states.observables:
+            if not observation.applicability.get(key, False):
+                raise ArbitrationError(
+                    f"upstream end-state observable is not applicable {key}: {lane}"
+                )
+        matched_draws = upstream_end_state_matches(
+            upstream_end_states, routes, observation.values
+        )
+        results.append(
+            EndStateResult(
+                lane=lane, matched_draws=matched_draws, passed=bool(matched_draws)
+            )
+        )
+    return tuple(results)
+
+
 def _quality_band_results(
     quality_band: QualityBand,
     observations: Mapping[str, LaneObservation],
@@ -474,6 +642,7 @@ def arbitrate(
     outer_optimizer_policy: OuterOptimizerPolicy | None = None,
     work_budget_contract: WorkBudgetContract | None = None,
     admitted_terminal_outcomes: tuple[AdmittedTerminalOutcome, ...] = (),
+    upstream_end_states: UpstreamEndStates | None = None,
 ) -> ArbitrationResult:
     """Compare every direct pair under the declared JAX execution policy.
 
@@ -500,6 +669,17 @@ def arbitrate(
     exist. The admitted lane keeps its own ``failed`` status and ``success``
     false, the band still decides, the ceiling is still ``quality-band``, and
     every admitted lane is named in ``admitted_terminal_lanes``.
+
+    A case-owned ``upstream_end_states`` serves a workflow whose end state its
+    input does not determine (upstream's own one-ulp draws land on several
+    end states). It is an engineering acceptance against upstream's own
+    scatter, never equivalence. Each lane must still pass the success gate
+    (the contract admits no budget or failure outcome); each lane's end state
+    must then match at least one upstream draw on every judged key, under that
+    key's own route comparator and tolerance. The lane-pair comparisons of the
+    judged keys are recorded as informational; every other route still
+    decides. The verdict is ``quality-band`` at best, never ``pass``, and
+    ``end_state_results`` names the draws each lane matched.
     """
     admission = _validate_lanes(
         observations,
@@ -512,6 +692,7 @@ def arbitrate(
         outer_optimizer_policy,
         work_budget_contract,
         admitted_terminal_outcomes,
+        upstream_end_states,
     )
     selected_routes = tuple(
         route
@@ -539,38 +720,13 @@ def arbitrate(
             raise ArbitrationError(
                 f"missing required observable {value_key}: {route.lane_pair}"
             ) from error
-        for lane, value in ((left_lane, left), (right_lane, right)):
-            if value.dtype.kind == "f" and value.dtype != np.dtype(np.float64):
-                raise ArbitrationError(
-                    f"{lane} required floating observable must be FP64: {value_key}"
-                )
-            if value.dtype.kind == "c" and value.dtype != np.dtype(np.complex128):
-                raise ArbitrationError(
-                    f"{lane} required complex observable must be FP64: {value_key}"
-                )
+        _require_fp64(left_lane, value_key, left)
+        _require_fp64(right_lane, value_key, right)
         if not bool(np.all(np.isfinite(left))) or not bool(np.all(np.isfinite(right))):
             raise ArbitrationError(
                 f"non-finite required observable {value_key}: {route.lane_pair}"
             )
-        if left.shape != right.shape:
-            passed = False
-            diagnostic = f"shape mismatch: {left.shape} != {right.shape}"
-        elif route.comparator == "exact":
-            passed = bool(np.array_equal(left, right))
-            diagnostic = "exact comparison"
-        elif route.comparator == "allclose":
-            rtol, atol = _route_tolerance(route)
-            passed = bool(np.allclose(left, right, rtol=rtol, atol=atol))
-            diagnostic = f"allclose rtol={rtol} atol={atol}"
-        elif route.comparator == "not_worse":
-            rtol, atol = _route_tolerance(route)
-            upper_bound = left + rtol * np.abs(left) + atol
-            passed = bool(np.all(right <= upper_bound))
-            diagnostic = f"not_worse rtol={rtol} atol={atol}"
-        else:
-            raise ArbitrationError(
-                f"equivalent comparator requires a case-owned invariant: {value_key}"
-            )
+        passed, diagnostic = _compare(route, left, right)
         comparisons.append(
             ComparisonResult(
                 phase=route.phase,
@@ -583,6 +739,36 @@ def arbitrate(
         )
     if not comparisons:
         raise ArbitrationError("no applicable comparison routes")
+    if upstream_end_states is not None:
+        end_state_results = _end_state_results(
+            upstream_end_states, selected_routes, observations, required_lanes
+        )
+        judged = frozenset(upstream_end_states.observables)
+        deciding_passed = all(
+            comparison.passed
+            for comparison in comparisons
+            if f"{comparison.phase}:{comparison.observable}" not in judged
+        )
+        return ArbitrationResult(
+            verdict=(
+                QUALITY_BAND_VERDICT
+                if deciding_passed and all(item.passed for item in end_state_results)
+                else "fail"
+            ),
+            comparisons=tuple(
+                replace(
+                    comparison,
+                    diagnostic=(
+                        f"{_INFORMATIONAL_DIAGNOSTIC_PREFIX}{comparison.diagnostic}"
+                    ),
+                )
+                if f"{comparison.phase}:{comparison.observable}" in judged
+                else comparison
+                for comparison in comparisons
+            ),
+            work_budget_admitted=admission.work_budget_admitted,
+            end_state_results=end_state_results,
+        )
     if quality_band is None:
         return ArbitrationResult(
             verdict="pass" if all(item.passed for item in comparisons) else "fail",

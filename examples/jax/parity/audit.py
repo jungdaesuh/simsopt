@@ -305,17 +305,14 @@ def audit_published_run(
             outer_optimizer_policy=examples_by_id[
                 relationship.jax_example_id
             ].outer_optimizer_policy,
-            quality_band=(
-                case_definition.native_default_quality_band
-                if scale_value == "native_default"
-                else None
-            ),
+            quality_band=case_definition.quality_band(scale_value),
             work_budget_contract=case_definition.work_budget_contract,
             admitted_terminal_outcomes=(
                 case_definition.native_default_admitted_terminal_outcomes
                 if scale_value == "native_default"
                 else ()
             ),
+            upstream_end_states=case_definition.end_states(scale_value),
         )
         if recomputed.work_budget_admitted:
             if case.get("terminal_contract") != "work-budget":
@@ -343,6 +340,18 @@ def audit_published_run(
         if case.get("quality_band", []) != recomputed_band_payload:
             raise ValueError(
                 f"stored quality band differs from recomputation: {case_id}"
+            )
+        recomputed_end_state_payload = [
+            {
+                "lane": end_state_result.lane,
+                "matched_draws": list(end_state_result.matched_draws),
+                "passed": end_state_result.passed,
+            }
+            for end_state_result in recomputed.end_state_results
+        ]
+        if case.get("upstream_end_states", []) != recomputed_end_state_payload:
+            raise ValueError(
+                f"stored upstream end states differ from recomputation: {case_id}"
             )
         recomputed_admitted_payload = [
             {"lane": lane, "raw_status": raw_status}

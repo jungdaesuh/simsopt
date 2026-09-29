@@ -50,6 +50,7 @@ def official_quality_band(case_id: str) -> QualityBand:
             f"sensitivity record, min {min(samples)!r}, max {max(samples)!r}); "
             "ceiling = max(S) * (1 + (max(S) - min(S)) / min(S)); gross-failure guard"
         ),
+        scale="native_default",
     )
 
 

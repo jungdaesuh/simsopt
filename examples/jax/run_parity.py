@@ -30,6 +30,7 @@ from examples.jax.parity.arbiter import (
 )
 from examples.jax.parity.artifacts import canonical_json_bytes, write_bytes_exclusive
 from examples.jax.parity.cases import get_case, implemented_case_ids
+from examples.jax.parity.contracts import EndStateResult
 from examples.jax.parity.provenance import (
     REQUIRED_PROVENANCE_SOURCE_PATHS,
     collect_explicit_sources,
@@ -206,6 +207,7 @@ def _case_summary_record(
     work_budget_admitted: bool = False,
     quality_band_results: tuple[object, ...] = (),
     admitted_terminal_lanes: tuple[tuple[str, str], ...] = (),
+    end_state_results: tuple[EndStateResult, ...] = (),
 ) -> dict[str, object]:
     case_authoritative = all(
         observation.provenance is not None and observation.provenance.authoritative
@@ -290,6 +292,15 @@ def _case_summary_record(
                 "passed": band_result.passed,
             }
             for band_result in quality_band_results
+        ]
+    if end_state_results:
+        case_record["upstream_end_states"] = [
+            {
+                "lane": end_state_result.lane,
+                "matched_draws": list(end_state_result.matched_draws),
+                "passed": end_state_result.passed,
+            }
+            for end_state_result in end_state_results
         ]
     return case_record
 
@@ -399,17 +410,14 @@ def main(argv: list[str] | None = None) -> int:
                     case_id=case_id,
                     example_id=relationship.jax_example_id,
                     outer_optimizer_policy=example.outer_optimizer_policy,
-                    quality_band=(
-                        case.native_default_quality_band
-                        if scale == "native_default"
-                        else None
-                    ),
+                    quality_band=case.quality_band(scale),
                     work_budget_contract=case.work_budget_contract,
                     admitted_terminal_outcomes=(
                         case.native_default_admitted_terminal_outcomes
                         if scale == "native_default"
                         else ()
                     ),
+                    upstream_end_states=case.end_states(scale),
                 )
             except LaneOutcomeRejection as error:
                 rejection = str(error).strip()
@@ -464,6 +472,7 @@ def main(argv: list[str] | None = None) -> int:
                     work_budget_admitted=arbitration.work_budget_admitted,
                     quality_band_results=arbitration.quality_band_results,
                     admitted_terminal_lanes=arbitration.admitted_terminal_lanes,
+                    end_state_results=arbitration.end_state_results,
                 )
             )
         validate_sources_current(repo_root, explicit_sources)

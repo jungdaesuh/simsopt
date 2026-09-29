@@ -41,6 +41,7 @@ _BAND = QualityBand(
     observable="final:objective",
     max_value=1.0e-07,
     derivation="test fixture mirroring the official coil-forces native_default run",
+    scale="native_default",
 )
 _OUTCOME = AdmittedTerminalOutcome(
     case_id=_CASE_ID,

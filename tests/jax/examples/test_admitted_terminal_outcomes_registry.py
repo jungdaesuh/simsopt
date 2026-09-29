@@ -45,7 +45,7 @@ def test_every_admitted_outcome_is_band_bound_and_keeps_the_failed_category(
     case_id: str,
 ) -> None:
     case = get_case(case_id)
-    assert case.native_default_quality_band is not None
+    assert case.quality_band("native_default") is not None
     assert case.work_budget_contract is not None
     assert "native_default" not in case.work_budget_contract.scales
     for outcome in case.native_default_admitted_terminal_outcomes:
