@@ -1,11 +1,10 @@
 from deprecated import deprecated
 
-import jax
 import numpy as np
-from jax import device_get, device_put, devices, grad
+from jax import device_get, device_put, grad
 import jax.numpy as jnp
 
-from .jit import jit
+from .jit import jit, native_jax_device
 from ._curve_surface_distance_owners import curve_surface_distance_owners
 from .._core.optimizable import Optimizable
 from .._core.derivative import derivative_dec, Derivative
@@ -37,20 +36,6 @@ def curve_length_pure(l):
     return jnp.mean(l)
 
 
-def _curve_length_device():
-    """The device ``CurveLength.J`` evaluates upstream's ``jnp.mean`` on.
-
-    The host CPU device, so the native objective stays host-owned. A process
-    whose JAX initialized CUDA alone (``JAX_PLATFORMS=cuda``, the strict jax-gpu
-    parity lane) has no host JAX device; there upstream's ``jnp.mean`` runs on
-    that process's default device, reached by the same explicit transfers.
-    """
-    platforms = jax.config.jax_platforms
-    if platforms and "cpu" not in platforms.split(","):
-        return devices()[0]
-    return devices("cpu")[0]
-
-
 class CurveLength(Optimizable):
     r"""
     CurveLength is a class that computes the length of a curve, i.e.
@@ -68,14 +53,12 @@ class CurveLength(Optimizable):
         """
         This returns the value of the quantity: upstream's ``jnp.mean`` of the
         incremental arclengths, evaluated through explicit transfers on the
-        device :func:`_curve_length_device` names.
+        device :func:`simsopt.geo.jit.native_jax_device` names.
         """
         return np.float64(
             device_get(
                 curve_length_pure(
-                    device_put(
-                        self.curve.incremental_arclength(), _curve_length_device()
-                    )
+                    device_put(self.curve.incremental_arclength(), native_jax_device())
                 )
             )
         )

@@ -8,7 +8,7 @@ import simsoptpp as sopp
 from .._core.optimizable import Optimizable
 from .._core.derivative import Derivative
 
-from .jit import jit
+from .jit import jit, native_jax_device
 from .plotting import fix_matplotlib_3d
 
 __all__ = [
@@ -49,6 +49,14 @@ def incremental_arclength_pure(d1gamma):
     position vector to the curve.
     """
     return jnp.linalg.norm(d1gamma, axis=1)
+
+
+def _incremental_arclength_vjp(d1gamma, v):
+    """Upstream's (9e027eac3) VJP of the incremental arclength, the same lambda."""
+    return vjp(lambda d1g: incremental_arclength_pure(d1g), d1gamma)[1](v)[0]
+
+
+incremental_arclength_vjp = jit(_incremental_arclength_vjp)
 
 
 @jit
@@ -299,10 +307,15 @@ class Curve(Optimizable):
         to the curve and :math:`\mathbf{c}` are the curve dofs.
         """
 
-        gammadash = np.asarray(self.gammadash())
-        speed = np.linalg.norm(gammadash, axis=1)
-        incremental_arclength_cotangent = (
-            np.asarray(v)[:, None] * gammadash / speed[:, None]
+        # Upstream's jitted VJP, on the device ``native_jax_device`` names and
+        # through explicit transfers, so the native gradient stays host-owned.
+        device = native_jax_device()
+        incremental_arclength_cotangent = np.asarray(
+            device_get(
+                incremental_arclength_vjp(
+                    device_put(self.gammadash(), device), device_put(v, device)
+                )
+            )
         )
         return self.dgammadash_by_dcoeff_vjp(incremental_arclength_cotangent)
 
