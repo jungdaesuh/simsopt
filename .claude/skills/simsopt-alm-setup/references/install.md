@@ -43,8 +43,14 @@ later, rerun it with `--force-reinstall --no-deps`.
 ## editable
 
 `--checkout <clone>` was given: the user wants the solver's sources in a
-clone they can read and change. Skip the `git clone` line when `<clone>`
-already is one (`checkout.is_alm_clone` in the report).
+clone they can read and change. `<clone>` is either a place to clone into
+(a new or empty directory: `checkout.clone_target` in the report) or an
+existing clone (`checkout.is_alm_clone`): the top level of a git repository,
+on the `alm-library` branch, with `packages/simsopt-alm/pyproject.toml` and
+`packages/simsopt-alm/src/simsopt_alm/__init__.py`. Any other directory is
+a blocker (`checkout.problems` says why) and never this route: clone into a
+new directory and rerun `check_env.py` with it. Skip the `git clone` line
+when `<clone>` already is a clone.
 
 ```sh
 git clone -b alm-library <fork-url> <clone>

@@ -17,8 +17,11 @@ and changes nothing in it. It reads local git refs only and changes nothing.
 
 ``--checkout DIR`` asks for an editable install from a clone of the
 ``alm-library`` branch at ``DIR`` (cloned there first when ``DIR`` does not
-exist), for users who want to read or change the solver's sources; without
-it the plain install from ``--fork-url`` applies.
+exist or is empty), for users who want to read or change the solver's
+sources; without it the plain install from ``--fork-url`` applies. An
+existing ``DIR`` counts as a clone only when it is the top level of a git
+repository, is on the ``alm-library`` branch and has the package's sources
+(``CLONE_SOURCES``); anything else is a blocker.
 
 ``templates`` in the report says which problem templates can run: the
 generic one needs the solver, the Stage-2 and Boozer ones also the signed
@@ -26,7 +29,7 @@ constraints, which import simsopt (``TEMPLATE_MODULES``).
 
 ``route`` is the first that applies: ``blocked`` (Python below the floor; an
 ALM module that exists but fails to import: the report quotes the error; or
-``--checkout`` names an existing directory that is not an ``alm-library``
+``--checkout`` names a non-empty directory that is not an ``alm-library``
 clone), ``ready`` (``simsopt_alm`` imports, and with ``--checkout`` from that
 clone), ``editable`` (``--checkout`` given: clone if needed, then install the
 clone's package editable), ``install`` (install the package from
@@ -58,6 +61,11 @@ FORK_URL = "https://github.com/jungdaesuh/simsopt.git"
 DISTRIBUTION = "simsopt-alm"
 # The package's directory in a clone of the alm-library branch.
 PACKAGE_SUBDIRECTORY = Path("packages") / "simsopt-alm"
+# What a clone of the alm-library branch must hold to install the package.
+CLONE_SOURCES = (
+    PACKAGE_SUBDIRECTORY / "pyproject.toml",
+    PACKAGE_SUBDIRECTORY / "src" / "simsopt_alm" / "__init__.py",
+)
 ALM_MODULE = "simsopt_alm"
 SIGNED_CONSTRAINTS_MODULE = "simsopt_alm.signed_constraints"
 ALM_MODULES = (ALM_MODULE, SIGNED_CONSTRAINTS_MODULE)
@@ -137,27 +145,47 @@ def git(checkout: Path, *arguments: str) -> subprocess.CompletedProcess:
 
 
 def git_state(checkout: Path) -> dict:
-    if git(checkout, "rev-parse", "--show-toplevel").returncode != 0:
+    toplevel = git(checkout, "rev-parse", "--show-toplevel")
+    if toplevel.returncode != 0:
         return {"is_git": False}
     return {
         "is_git": True,
+        "toplevel": str(Path(toplevel.stdout.strip()).resolve()),
         "branch": git(checkout, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip(),
         "head": git(checkout, "rev-parse", "HEAD").stdout.strip() or None,
     }
 
 
+def clone_problems(path: Path, git_report: dict) -> List[str]:
+    """Why the existing directory ``path`` is not a clone of the alm-library
+    branch; empty when it is one."""
+    if not git_report["is_git"]:
+        return ["it is not a git repository"]
+    problems = []
+    if Path(git_report["toplevel"]) != path:
+        problems.append(f"it is not the top level of its git repository ({git_report['toplevel']})")
+    if git_report["branch"] != ALM_BRANCH:
+        problems.append(f"it is on branch {git_report['branch']!r}, not {ALM_BRANCH!r}")
+    problems.extend(f"{source.as_posix()} is missing" for source in CLONE_SOURCES
+                    if not (path / source).is_file())
+    return problems
+
+
 def checkout_state(path: Path) -> dict:
-    """The ``--checkout`` directory: whether it exists and is an alm-library
-    clone (it has the package's ``pyproject.toml``), and its git state."""
-    package = path / PACKAGE_SUBDIRECTORY
+    """The ``--checkout`` directory (resolved): whether it is a place to clone
+    into (absent or empty) or a valid clone, why not, and its git state."""
     exists = path.exists()
-    is_alm_clone = (package / "pyproject.toml").is_file()
+    clone_target = not exists or (path.is_dir() and not any(path.iterdir()))
+    git_report = {"is_git": False} if clone_target else git_state(path)
+    problems = [] if clone_target else clone_problems(path, git_report)
     return {
         "path": str(path),
-        "package": str(package),
+        "package": str(path / PACKAGE_SUBDIRECTORY),
         "exists": exists,
-        "is_alm_clone": is_alm_clone,
-        "git": git_state(path) if is_alm_clone else {"is_git": False},
+        "clone_target": clone_target,
+        "is_alm_clone": not clone_target and not problems,
+        "problems": problems,
+        "git": git_report,
     }
 
 
@@ -213,10 +241,11 @@ def build_report(python: str, checkout_argument: Optional[Path], fork_url: str) 
     # templates (a note below), it does not block the solver.
     if simsopt_import["importable"]:
         blockers.append(import_blocker(module_imports[SIGNED_CONSTRAINTS_MODULE], SIGNED_CONSTRAINTS_MODULE))
-    if checkout is not None and checkout["exists"] and not checkout["is_alm_clone"]:
-        blockers.append(f"{checkout['path']} exists but is not a clone of the {ALM_BRANCH} branch "
-                        f"(no {PACKAGE_SUBDIRECTORY.as_posix()}/pyproject.toml); name an empty or "
-                        "new directory to clone into, or the clone itself")
+    if checkout is not None and checkout["problems"]:
+        blockers.append(f"{checkout['path']} is not a clone of the {ALM_BRANCH} branch "
+                        f"({'; '.join(checkout['problems'])}): clone one with "
+                        f"`git clone -b {ALM_BRANCH} {fork_url} <new directory>` and pass "
+                        "--checkout <new directory> (or name a new or empty directory to clone into)")
     report = {
         "python": {"executable": python, "version": ".".join(map(str, version)),
                    "floor": ".".join(map(str, MIN_PYTHON)), "meets_floor": tuple(version) >= MIN_PYTHON},
@@ -268,7 +297,7 @@ def provenance_lines(report: dict) -> List[str]:
             lines.append(f"checkout: {checkout['path']} at {checkout['git']['head']} "
                          f"(branch {checkout['git']['branch']})")
         else:
-            lines.append(f"checkout: {checkout['path']} ({'exists' if checkout['exists'] else 'to be cloned'})")
+            lines.append(f"checkout: {checkout['path']} ({'to be cloned' if checkout['clone_target'] else 'not a clone'})")
     return lines
 
 

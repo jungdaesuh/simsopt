@@ -244,8 +244,14 @@ later, rerun it with `--force-reinstall --no-deps`.
 ### editable
 
 `--checkout <clone>` was given: the user wants the solver's sources in a
-clone they can read and change. Skip the `git clone` line when `<clone>`
-already is one (`checkout.is_alm_clone` in the report).
+clone they can read and change. `<clone>` is either a place to clone into
+(a new or empty directory: `checkout.clone_target` in the report) or an
+existing clone (`checkout.is_alm_clone`): the top level of a git repository,
+on the `alm-library` branch, with `packages/simsopt-alm/pyproject.toml` and
+`packages/simsopt-alm/src/simsopt_alm/__init__.py`. Any other directory is
+a blocker (`checkout.problems` says why) and never this route: clone into a
+new directory and rerun `check_env.py` with it. Skip the `git clone` line
+when `<clone>` already is a clone.
 
 ```sh
 git clone -b alm-library <fork-url> <clone>
@@ -1064,8 +1070,11 @@ and changes nothing in it. It reads local git refs only and changes nothing.
 
 ``--checkout DIR`` asks for an editable install from a clone of the
 ``alm-library`` branch at ``DIR`` (cloned there first when ``DIR`` does not
-exist), for users who want to read or change the solver's sources; without
-it the plain install from ``--fork-url`` applies.
+exist or is empty), for users who want to read or change the solver's
+sources; without it the plain install from ``--fork-url`` applies. An
+existing ``DIR`` counts as a clone only when it is the top level of a git
+repository, is on the ``alm-library`` branch and has the package's sources
+(``CLONE_SOURCES``); anything else is a blocker.
 
 ``templates`` in the report says which problem templates can run: the
 generic one needs the solver, the Stage-2 and Boozer ones also the signed
@@ -1073,7 +1082,7 @@ constraints, which import simsopt (``TEMPLATE_MODULES``).
 
 ``route`` is the first that applies: ``blocked`` (Python below the floor; an
 ALM module that exists but fails to import: the report quotes the error; or
-``--checkout`` names an existing directory that is not an ``alm-library``
+``--checkout`` names a non-empty directory that is not an ``alm-library``
 clone), ``ready`` (``simsopt_alm`` imports, and with ``--checkout`` from that
 clone), ``editable`` (``--checkout`` given: clone if needed, then install the
 clone's package editable), ``install`` (install the package from

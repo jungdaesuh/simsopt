@@ -783,19 +783,63 @@ class SkillScriptsRunTests(unittest.TestCase):
                                    re.MULTILINE).group(1))
         self.assertIn(f"import simsopt_alm: {alm_file}", completed.stdout.splitlines())
 
-    def test_check_env_with_this_clone_needs_its_editable_install(self):
-        """``--checkout`` names this repository: ``ready`` only when this
-        interpreter imports the clone's own package, else ``editable``."""
-        completed, report = self.check_env(sys.executable, "--checkout", str(REPO_ROOT))
-        imports_the_clone = (DISTRIBUTION_ROOT / "src").resolve() in PACKAGE_DIR.parents
-        self.assertEqual(report["route"], "ready" if imports_the_clone else "editable", report)
+    def make_repository(self, name: str, branch: str, sources: tuple) -> Path:
+        """A git repository at ``scratch/name`` on ``branch`` with ``sources``
+        committed (empty files), as a clone of the branch would hold them."""
+        repository = self.scratch / name
+        for source in sources:
+            (repository / source).parent.mkdir(parents=True, exist_ok=True)
+            (repository / source).write_text("")
+        for command in (["init", "-q", "-b", branch], ["add", "-A"],
+                        ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
+                         "commit", "-q", "--no-verify", "-m", "clone"]):
+            subprocess.run(["git", "-C", str(repository), *command], check=True, capture_output=True)
+        return repository
+
+    def test_check_env_accepts_only_a_clone_of_the_branch(self):
+        """``--checkout``: a valid clone routes to ``editable`` (this
+        interpreter imports another simsopt_alm); a new or empty directory is
+        a place to clone into; anything else is a blocker with the clone
+        command, never ``editable``."""
+        clone = self.make_repository("clone", check_env.ALM_BRANCH, check_env.CLONE_SOURCES)
+        completed, report = self.check_env(sys.executable, "--checkout", str(clone))
+        self.assertEqual(report["route"], "editable", report)
         self.assertEqual(report["blockers"], [])
         self.assertTrue(report["checkout"]["is_alm_clone"])
-        head = subprocess.run(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], capture_output=True,
+        head = subprocess.run(["git", "-C", str(clone), "rev-parse", "HEAD"], capture_output=True,
                               text=True, check=True).stdout.strip()
-        self.assertEqual(report["checkout"]["git"]["head"], head)
-        self.assertTrue(any(line.startswith("checkout: ") and head in line
-                            for line in completed.stdout.splitlines()), completed.stdout)
+        self.assertIn(f"checkout: {clone.resolve()} at {head} (branch {check_env.ALM_BRANCH})",
+                      completed.stdout.splitlines())
+
+        (self.scratch / "empty").mkdir()
+        for target in (self.scratch / "new", self.scratch / "empty"):
+            with self.subTest(clone_target=target.name):
+                _completed, report = self.check_env(sys.executable, "--checkout", str(target))
+                self.assertEqual(report["route"], "editable", report)
+                self.assertTrue(report["checkout"]["clone_target"])
+
+        fake = self.scratch / "fake"
+        (fake / check_env.PACKAGE_SUBDIRECTORY).mkdir(parents=True)
+        (fake / check_env.PACKAGE_SUBDIRECTORY / "pyproject.toml").write_text("")
+        cases = {
+            "only pyproject.toml, no git": (fake, "is not a git repository"),
+            "wrong branch": (self.make_repository("other-branch", "main", check_env.CLONE_SOURCES),
+                             "on branch 'main', not 'alm-library'"),
+            "not the top level": (clone / "packages", "not the top level of its git repository"),
+            "no package sources": (self.make_repository("no-sources", check_env.ALM_BRANCH, (Path("README"),)),
+                                   "packages/simsopt-alm/src/simsopt_alm/__init__.py is missing"),
+        }
+        for case, (directory, problem) in cases.items():
+            with self.subTest(case=case):
+                completed, report = self.check_env(sys.executable, "--checkout", str(directory))
+                self.assertEqual(report["route"], "blocked", report)
+                self.assertEqual(completed.returncode, 1)
+                self.assertFalse(report["checkout"]["is_alm_clone"])
+                self.assertEqual(len(report["blockers"]), 1, report)
+                self.assertIn("is not a clone of the alm-library branch", report["blockers"][0])
+                self.assertIn(problem, report["blockers"][0])
+                self.assertIn(f"git clone -b alm-library {check_env.FORK_URL} <new directory>",
+                              report["blockers"][0])
 
     def isolated_python(self) -> Path:
         """An interpreter without site-packages or PYTHONPATH: no simsopt and
@@ -820,12 +864,6 @@ class SkillScriptsRunTests(unittest.TestCase):
         _completed, report = self.check_env(fresh, "--checkout", str(new_clone))
         self.assertEqual(report["route"], "editable", report)
         self.assertFalse(report["checkout"]["exists"])
-
-        (self.scratch / "not-a-clone").mkdir()
-        _completed, report = self.check_env(fresh, "--checkout", str(self.scratch / "not-a-clone"))
-        self.assertEqual(report["route"], "blocked", report)
-        self.assertEqual(len(report["blockers"]), 1, report)
-        self.assertIn("is not a clone of the alm-library branch", report["blockers"][0])
 
     def run_contract_probe(self, script: str, names: tuple, values: tuple) -> subprocess.CompletedProcess:
         source = (CONTRACT_PROBE_PROBLEM.replace("NAMES_VALUE", repr(names))
