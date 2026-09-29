@@ -81,7 +81,6 @@ JAX = [
     "numpy>=2.0,<2.5",
     "scipy>=1.13",
     'lineax>=0.1.1; python_version >= "3.11"',
-    'equinox>=0.11.11; python_version >= "3.11"',
 ]
 JAX_GPU = [
     "jax[cuda12]==0.10.0",
@@ -92,7 +91,6 @@ JAX_GPU = [
     "numpy>=2.0,<2.5",
     "scipy>=1.13",
     'lineax>=0.1.1; python_version >= "3.11"',
-    'equinox>=0.11.11; python_version >= "3.11"',
 ]
 test = [
     "pytest>=7.0",

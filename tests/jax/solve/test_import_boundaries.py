@@ -8,8 +8,8 @@ import tomllib
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SRC_ROOT = REPO_ROOT / "src"
-# lineax (with equinox) backs the CG adjoint selector; optax is no longer a
-# dependency since the Optax benchmark was removed.
+# lineax backs the CG adjoint selector (it declares its own equinox
+# dependency); optax is no longer a dependency.
 RUNTIME_OPTIMIZER_MODULES = ("lineax",)
 
 
@@ -162,7 +162,6 @@ def test_jax_gpu_extra_declares_public_runtime_optimizer_dependencies():
 
     for dependency in RUNTIME_OPTIMIZER_MODULES:
         assert dependency in jax_gpu_deps
-    assert "equinox" in jax_gpu_deps
     assert "optax" not in jax_gpu_deps
 
 

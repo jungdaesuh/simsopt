@@ -62,8 +62,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install "numpy>=2.0" "scipy>=1.13" \
             "jax==0.10.0" "jaxlib==0.10.0" \
-            "lineax>=0.1.1" \
-            "equinox>=0.11.11" pytest monty setuptools-scm
+            "lineax>=0.1.1" pytest monty setuptools-scm
 
       - name: Generate version file (setuptools-scm)
         run: python -c "from setuptools_scm import get_version; get_version(write_to='src/simsopt/_version.py')"
@@ -149,8 +148,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install "numpy>=2.0" "scipy>=1.13" \
             "jax==0.10.0" "jaxlib==0.10.0" \
-            "lineax>=0.1.1" \
-            "equinox>=0.11.11" pytest monty setuptools-scm
+            "lineax>=0.1.1" pytest monty setuptools-scm
 
       - name: Generate version file (setuptools-scm)
         run: python -c "from setuptools_scm import get_version; get_version(write_to='src/simsopt/_version.py')"
@@ -311,8 +309,7 @@ jobs:
           pip install "pyright==1.1.411" pytest \
             "numpy>=2.0" "scipy>=1.13" \
             "jax==0.10.0" "jaxlib==0.10.0" \
-            "lineax>=0.1.1" \
-            "equinox>=0.11.11"
+            "lineax>=0.1.1"
 
       - name: Pyright check green JAX slice
         run: pyright --warnings
