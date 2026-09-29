@@ -166,6 +166,7 @@ from examples.jax.parity.contracts import (
 from examples.jax.parity.input_bundle import InputBundle
 from examples.jax.parity.measurement import MeasurementExecution
 from examples.jax.parity.official_quality_bands import official_quality_band
+from examples.jax.parity.official_reference import load_upstream_scatter
 from examples.jax.parity.official_scatter_contracts import (
     upstream_end_states,
     upstream_scatter_quality_band,
@@ -299,8 +300,7 @@ _CASES = {
         # one of upstream's own (2026-09-29 ruling: judge by upstream's own scatter).
         upstream_end_states=tuple(
             upstream_end_states(
-                "native-boozer",
-                scale,
+                load_upstream_scatter("native-boozer", scale),
                 NATIVE_BOOZER_END_STATE_OBSERVABLES,
                 same_state_proof=(
                     "tests/integration/test_jax_mirror_boozer_official_end_states.py (the JAX "

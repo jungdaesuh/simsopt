@@ -13,9 +13,11 @@ Example (native-boozer, bounded)::
         --runs-root <campaign>/upstream/runs \\
         --runner-receipt <campaign>/upstream/generated/examples/2_Intermediate/band_boozer.bounded.receipt.json \\
         --key area:iota=area:iota --key flux:surface_dofs=flux:surface_dofs ... \\
-        --success-key area:solver_success --success-key flux:solver_success \\
         --first-k 0 --last-k 8 --pre-registered-in "<plan path> (C3)" \\
         --output examples/jax/parity/official_reference/9e027eac3
+
+The stage success flags each run must report are the case's own (``UPSTREAM_SCATTER_SUCCESS_KEYS``), never an
+argument: every run records each flag as captured, and a run missing one is refused.
 """
 
 from __future__ import annotations
@@ -29,7 +31,9 @@ import numpy as np
 from examples.jax.parity.official_reference import (
     UPSTREAM_COMMIT,
     UPSTREAM_SCATTER_ROOT,
+    UPSTREAM_SCATTER_SCHEMA_VERSION,
     load_official_reference,
+    upstream_scatter_success_keys,
 )
 from examples.jax.parity.official_reference.build_official_reference import (
     CAPTURE_ARRAYS_NAME,
@@ -75,7 +79,7 @@ def build_run(
     success_keys: Sequence[str],
     expected_threads: dict[str, str] | None,
 ) -> tuple[dict[str, object], dict[str, str]]:
-    """One run's record; refuses a run that failed, ran unpinned, or lacks a named observable."""
+    """One run's record; refuses a run that failed, ran unpinned, or lacks a named observable or success flag."""
     run_record = json.loads(
         (directory / SENSITIVITY_RUN_NAME).read_text(encoding="utf-8")
     )
@@ -105,10 +109,18 @@ def build_run(
             values[lane_key] = array_entry(arrays[capture_key])
         else:
             raise SystemExit(f"{directory}: capture has no observable {capture_key!r}")
+    success_flags: dict[str, bool] = {}
+    for key in success_keys:
+        flag = scalars.get(key)
+        if not isinstance(flag, bool):
+            raise SystemExit(
+                f"{directory}: capture success flag {key!r} is {flag!r}, not a boolean"
+            )
+        success_flags[key] = flag
     return (
         {
             "k": k,
-            "workflow_success": all(scalars[key] is True for key in success_keys),
+            "success_flags": success_flags,
             "provider_calls": [
                 provider_outcome_entry(index, call)
                 for index, call in enumerate(capture["optimizer_calls"])
@@ -129,11 +141,11 @@ def build_payload(
     runs_root: Path,
     runner_receipt: Path,
     capture_keys: dict[str, str],
-    success_keys: Sequence[str],
     ks: Sequence[int],
     pre_registered_in: str,
 ) -> dict[str, object]:
-    """The whole record of one case at one scale."""
+    """The whole record of one case at one scale, with the case's own stage success flags per run."""
+    success_keys = upstream_scatter_success_keys(case_id)
     receipt = json.loads(runner_receipt.read_text(encoding="utf-8"))
     official = load_official_reference(case_id)
     if receipt["case_id"] != case_id or receipt["scale"] != scale:
@@ -161,7 +173,7 @@ def build_payload(
         )
         runs.append(run)
     return {
-        "schema_version": 1,
+        "schema_version": UPSTREAM_SCATTER_SCHEMA_VERSION,
         "case_id": case_id,
         "scale": scale,
         "upstream_commit": UPSTREAM_COMMIT,
@@ -182,6 +194,7 @@ def build_payload(
             "threads": threads or {},
         },
         "capture_keys": capture_keys,
+        "success_keys": list(success_keys),
         "runs": runs,
     }
 
@@ -200,12 +213,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--key", action="append", required=True, help="LANE_KEY=CAPTURE_KEY; repeat"
     )
-    parser.add_argument(
-        "--success-key",
-        action="append",
-        default=[],
-        help="capture key that must be true",
-    )
     parser.add_argument("--first-k", type=int, default=0)
     parser.add_argument("--last-k", type=int, default=8)
     parser.add_argument("--pre-registered-in", required=True)
@@ -223,7 +230,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         runs_root=arguments.runs_root,
         runner_receipt=arguments.runner_receipt,
         capture_keys=_key_pairs(arguments.key),
-        success_keys=tuple(arguments.success_key),
         ks=tuple(range(arguments.first_k, arguments.last_k + 1)),
         pre_registered_in=arguments.pre_registered_in,
     )

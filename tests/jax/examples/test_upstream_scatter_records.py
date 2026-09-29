@@ -7,12 +7,18 @@ official script verbatim -- that the unperturbed draw reproduces the canonical o
 
 from __future__ import annotations
 
+import copy
+import json
+
 import numpy as np
 import pytest
 from examples.jax.parity.official_reference import (
+    UPSTREAM_SCATTER_SUCCESS_KEYS,
+    OfficialUpstreamScatter,
     load_official_reference,
     load_official_sensitivity,
     load_upstream_scatter,
+    upstream_scatter_path,
     upstream_scatter_records,
 )
 
@@ -113,3 +119,65 @@ def test_unperturbed_native_default_draw_is_the_canonical_capture_bitwise(
         (call.result["status"], call.result["nit"], call.result["nfev"])
         for call in canonical.provider_calls
     ]
+
+
+@pytest.mark.parametrize(("case_id", "scale"), RECORDS)
+def test_record_carries_the_cases_own_stage_success_flags(
+    case_id: str, scale: str
+) -> None:
+    """Every run reports upstream's own flag of each stage the case names, as captured."""
+    scatter = load_upstream_scatter(case_id, scale)
+
+    assert scatter.success_keys == UPSTREAM_SCATTER_SUCCESS_KEYS[case_id]
+    for run in scatter.runs:
+        assert set(run.success_flags) == set(scatter.success_keys)
+        assert run.workflow_success is all(run.success_flags.values())
+    if case_id == "native-boozer":
+        # The pre-registered nine all solved both surfaces at both scales.
+        assert all(run.workflow_success for run in scatter.runs)
+
+
+def _tracked_payload(case_id: str, scale: str) -> dict[str, object]:
+    return json.loads(upstream_scatter_path(case_id, scale).read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        ("schema_1", "schema"),
+        ("no_success_keys", "success keys"),
+        ("one_success_key", "success keys"),
+        ("run_lacks_a_flag", "reports success flags"),
+        ("flag_not_bool", "must be booleans"),
+    ),
+)
+def test_the_loader_refuses_a_record_with_other_success_flags(
+    mutation: str, message: str
+) -> None:
+    """A record regenerated without a stage's success flag can never be read."""
+    payload = copy.deepcopy(_tracked_payload("native-boozer", "bounded"))
+    runs = payload["runs"]
+    assert isinstance(runs, list)
+    if mutation == "schema_1":
+        payload["schema_version"] = 1
+    elif mutation == "no_success_keys":
+        payload["success_keys"] = []
+    elif mutation == "one_success_key":
+        payload["success_keys"] = ["area:solver_success"]
+    elif mutation == "run_lacks_a_flag":
+        del runs[4]["success_flags"]["flux:solver_success"]
+    else:
+        runs[4]["success_flags"]["flux:solver_success"] = 1
+
+    with pytest.raises(ValueError, match=message):
+        OfficialUpstreamScatter.from_payload(payload)
+
+
+def test_a_failed_flag_in_a_record_marks_that_run_unsuccessful() -> None:
+    payload = copy.deepcopy(_tracked_payload("native-boozer", "bounded"))
+    runs = payload["runs"]
+    assert isinstance(runs, list)
+    runs[4]["success_flags"]["area:solver_success"] = False
+    scatter = OfficialUpstreamScatter.from_payload(payload)
+
+    assert [run.k for run in scatter.runs if not run.workflow_success] == [4]

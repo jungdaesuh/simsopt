@@ -147,8 +147,11 @@ official body with ONLY its scale lines changed to the harness's bounded configu
 diff (`runner.body_diff`).
 
 Each record maps the port lane's observable keys to upstream's capture keys (`capture_keys`) and holds, per `k`,
-every provider call's outcome, whether every upstream stage the record names succeeded (`workflow_success`), the
-sha256 of that run's `capture.json` and perturbation record, and the end-state values under LANE keys, element-exact.
+every provider call's outcome, upstream's own success flag of every stage the case names (`success_flags`, under the
+record's `success_keys`, which the loader requires to be the case's `UPSTREAM_SCATTER_SUCCESS_KEYS`), the sha256 of
+that run's `capture.json` and perturbation record, and the end-state values -- plus the recorded states a same-state
+check needs (native-boozer's area surface and target, planar coils' three parameter vectors) -- under keys spelled
+as lane keys, `phase:name`, element-exact.
 Read it with `load_upstream_scatter(case_id, scale)`; `upstream_scatter_records()` lists what exists; the records are
 written by `examples/jax/parity/official_reference/build_upstream_scatter.py`.
 

@@ -7,9 +7,9 @@ nine), fixed before any sample was drawn:
 * ``upstream_scatter_quality_band`` -- the rule-v2 band ``max(S) * (1 + (max(S) - min(S)) / min(S))`` over the nine
   upstream end values of one observable, for a workflow whose end VALUE is path dependent;
 * ``upstream_end_states`` -- upstream's end states of the nine, for a workflow whose end STATE (which solution it
-  lands on) is not determined by its input: every draw whose named upstream stages all succeeded enters the set,
-  the arbiter groups the set into branches under the case's own route comparators, each represented by its
-  lowest-``k`` draw, and admits a lane whose end state matches one representative.
+  lands on) is not determined by its input: every draw whose upstream stage success flags are all true enters the
+  set (a failed solve never does), the arbiter groups the set into branches under the case's own route comparators,
+  each represented by its lowest-``k`` draw, and admits a lane whose end state matches one representative.
 
 Both are engineering acceptances against upstream's own scatter, never an equivalence proof; the arbiter can
 therefore only return ``quality-band`` under them. Neither may be declared without a tracked same-state test proving
@@ -19,6 +19,8 @@ the lanes compute upstream's function (and gradient, where the workflow uses one
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Final
 
 from examples.jax.parity.contracts import (
@@ -36,6 +38,11 @@ from simsopt_jax.examples import ExecutionScale
 
 #: The pre-registered draws every contract is derived from (k = 0 unperturbed, k = 1..8 one ulp off the start).
 PRE_REGISTERED_DRAWS: Final[tuple[int, ...]] = tuple(range(9))
+
+#: A record's scale spelling -> the execution scale it names; a record at any other scale declares no contract.
+_EXECUTION_SCALES: Final[Mapping[str, ExecutionScale]] = MappingProxyType(
+    {"bounded": "bounded", "native_default": "native_default"}
+)
 
 
 def pre_registered_runs(
@@ -91,15 +98,26 @@ def upstream_scatter_quality_band(
 
 
 def upstream_end_states(
-    case_id: str,
-    scale: ExecutionScale,
+    scatter: OfficialUpstreamScatter,
     observables: tuple[str, ...],
     *,
     same_state_proof: str,
     disclosure: str = "",
 ) -> UpstreamEndStates:
-    """Upstream's nine end states at ``scale`` whose named stages all succeeded, keyed by lane observable, in ascending ``k``."""
-    scatter = load_upstream_scatter(case_id, scale)
+    """The nine's successful end states of ``scatter``, keyed by lane observable, in ascending ``k``.
+
+    A draw enters only if every one of upstream's own stage success flags the record carries is true; a record
+    that carries none cannot declare an end-state set, because a failed solve could not then be told apart.
+    """
+    if scatter.scale not in _EXECUTION_SCALES:
+        raise ValueError(
+            f"{scatter.case_id}: record scale {scatter.scale!r} is not an execution scale"
+        )
+    if not scatter.success_keys:
+        raise ValueError(
+            f"{scatter.case_id} ({scatter.scale}): an end-state set needs upstream's own stage success "
+            "flags, and the record carries none"
+        )
     runs = pre_registered_runs(scatter)
     states = tuple(
         UpstreamEndState(
@@ -111,15 +129,16 @@ def upstream_end_states(
     )
     failed = [run.k for run in runs if not run.workflow_success]
     return UpstreamEndStates(
-        case_id=case_id,
-        scale=scale,
+        case_id=scatter.case_id,
+        scale=_EXECUTION_SCALES[scatter.scale],
         observables=observables,
         states=states,
         derivation=(
-            f"upstream end states at {scale}: {_provenance(scatter)}; the {len(states)} draws whose upstream "
-            f"stages all succeeded (failed: {failed or 'none'}); the draws are grouped into branches under the "
-            "case's own route comparator and tolerance for every judged key, each branch represented by its "
-            "lowest-k draw, and a lane passes when its end state matches one representative on every judged key; "
+            f"upstream end states at {scatter.scale}: {_provenance(scatter)}; the {len(states)} draws whose "
+            f"upstream stage success flags ({', '.join(scatter.success_keys)}) are all true (failed: "
+            f"{failed or 'none'}); the draws are grouped into branches under the case's own route comparator and "
+            "tolerance for every judged key, each branch represented by its lowest-k draw, and a lane passes when "
+            "its end state matches one representative on every judged key; "
             f"same-state proof: {same_state_proof}"
             + (f"; {disclosure}" if disclosure else "")
         ),

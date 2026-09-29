@@ -801,6 +801,31 @@ def load_official_tracing_scatter(case_id: str) -> OfficialTracingScatter:
 #: the official body with only the scale lines changed, the diff stored in the record.
 UPSTREAM_SCATTER_ROOT: Final[Path] = REFERENCE_ROOT / "scatter"
 
+#: Schema of a scatter record: 2 stores each run's upstream stage success flags (``success_flags``) under the
+#: record's ``success_keys``, where 1 stored only their conjunction.
+UPSTREAM_SCATTER_SCHEMA_VERSION: Final[int] = 2
+
+#: Per case, the capture keys of upstream's OWN stage success flags a scatter run must report true to count as a
+#: successful workflow. The generator records exactly these and the loader refuses any other set, so a record can
+#: never be regenerated with a stage's success unchecked. Planar coils' official script publishes no success flag
+#: (its L-BFGS-B outcome is in ``provider_calls``), and its record feeds a band, never an end-state set.
+UPSTREAM_SCATTER_SUCCESS_KEYS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
+    {
+        "native-boozer": ("area:solver_success", "flux:solver_success"),
+        "native-stage-two-optimization-planar-coils": (),
+    }
+)
+
+
+def upstream_scatter_success_keys(case_id: str) -> tuple[str, ...]:
+    """The success flags a scatter record of ``case_id`` must carry; a case without an entry has no record."""
+    if case_id not in UPSTREAM_SCATTER_SUCCESS_KEYS:
+        raise MissingObservableError(
+            f"case {case_id!r} declares no upstream scatter success keys; "
+            f"declared: {sorted(UPSTREAM_SCATTER_SUCCESS_KEYS)}"
+        )
+    return UPSTREAM_SCATTER_SUCCESS_KEYS[case_id]
+
 
 @dataclass(frozen=True)
 class UpstreamScatterRunner:
@@ -830,12 +855,17 @@ class UpstreamScatterRun:
     """One upstream run at one start: its provider outcomes and its end-state observables under LANE keys."""
 
     k: int
-    workflow_success: bool
-    """Upstream's own success flags of every stage the record names were all true."""
+    success_flags: Mapping[str, bool]
+    """Upstream's own success flag of every stage the record names (``success_keys``), as captured."""
     provider_calls: tuple[ProviderOutcome, ...]
     capture_sha256: str
     perturbation_sha256: str
     _values: Mapping[str, Mapping[str, object]]
+
+    @property
+    def workflow_success(self) -> bool:
+        """Whether every upstream stage the record names succeeded (vacuously true when it names none)."""
+        return all(self.success_flags.values())
 
     def keys(self) -> tuple[str, ...]:
         return tuple(sorted(self._values))
@@ -860,9 +890,16 @@ class UpstreamScatterRun:
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, object]) -> UpstreamScatterRun:
+        flags = dict(payload["success_flags"])
+        if not all(isinstance(flag, bool) for flag in flags.values()):
+            raise ValueError(
+                f"upstream scatter run k={payload['k']}: success flags must be booleans, got {flags}"
+            )
         return cls(
             k=_as_int(payload["k"]),
-            workflow_success=bool(payload["workflow_success"]),
+            success_flags=MappingProxyType(
+                {str(key): flag for key, flag in flags.items()}
+            ),
             provider_calls=tuple(
                 ProviderOutcome.from_payload(call) for call in payload["provider_calls"]
             ),
@@ -890,7 +927,49 @@ class OfficialUpstreamScatter:
     protocol: SensitivityProtocol
     capture_keys: Mapping[str, str]
     """Lane key -> upstream's capture key of the same quantity."""
+    success_keys: tuple[str, ...]
+    """Upstream's stage success flags each run reports (``UPSTREAM_SCATTER_SUCCESS_KEYS`` of the case)."""
     runs: tuple[UpstreamScatterRun, ...]
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, object]) -> OfficialUpstreamScatter:
+        """Parse one record; refuses another schema, or success flags other than the case's own."""
+        case_id = str(payload["case_id"])
+        if payload["schema_version"] != UPSTREAM_SCATTER_SCHEMA_VERSION:
+            raise ValueError(
+                f"upstream scatter record of {case_id!r} has schema {payload['schema_version']!r}, "
+                f"expected {UPSTREAM_SCATTER_SCHEMA_VERSION}"
+            )
+        success_keys = tuple(str(key) for key in payload["success_keys"])
+        if success_keys != upstream_scatter_success_keys(case_id):
+            raise ValueError(
+                f"upstream scatter record of {case_id!r} names success keys {list(success_keys)}, "
+                f"expected {list(upstream_scatter_success_keys(case_id))}"
+            )
+        runs = tuple(UpstreamScatterRun.from_payload(run) for run in payload["runs"])
+        for run in runs:
+            if set(run.success_flags) != set(success_keys):
+                raise ValueError(
+                    f"upstream scatter run k={run.k} of {case_id!r} reports success flags "
+                    f"{list(run.success_flags)}, expected {list(success_keys)}"
+                )
+        return cls(
+            case_id=case_id,
+            scale=str(payload["scale"]),
+            upstream_commit=str(payload["upstream_commit"]),
+            official_script=str(payload["official_script"]),
+            official_script_sha256=str(payload["official_script_sha256"]),
+            runner=UpstreamScatterRunner.from_payload(payload["runner"]),
+            protocol=SensitivityProtocol.from_payload(payload["protocol"]),
+            capture_keys=MappingProxyType(
+                {
+                    str(key): str(value)
+                    for key, value in dict(payload["capture_keys"]).items()
+                }
+            ),
+            success_keys=success_keys,
+            runs=runs,
+        )
 
     def run(self, k: int) -> UpstreamScatterRun:
         for run in self.runs:
@@ -928,19 +1007,4 @@ def load_upstream_scatter(case_id: str, scale: str) -> OfficialUpstreamScatter:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if payload["case_id"] != case_id or payload["scale"] != scale:
         raise ValueError(f"{path} names {payload['case_id']!r} at {payload['scale']!r}")
-    return OfficialUpstreamScatter(
-        case_id=str(payload["case_id"]),
-        scale=str(payload["scale"]),
-        upstream_commit=str(payload["upstream_commit"]),
-        official_script=str(payload["official_script"]),
-        official_script_sha256=str(payload["official_script_sha256"]),
-        runner=UpstreamScatterRunner.from_payload(payload["runner"]),
-        protocol=SensitivityProtocol.from_payload(payload["protocol"]),
-        capture_keys=MappingProxyType(
-            {
-                str(key): str(value)
-                for key, value in dict(payload["capture_keys"]).items()
-            }
-        ),
-        runs=tuple(UpstreamScatterRun.from_payload(run) for run in payload["runs"]),
-    )
+    return OfficialUpstreamScatter.from_payload(payload)
