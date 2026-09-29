@@ -1,8 +1,10 @@
 # The source distribution carries what its tests read besides the package:
-# the golden fixtures and their scripts (tests/alm_golden) and the examples.
-# The setup-skill test (tests/test_alm_setup_skill.py) also needs the
-# repository around the package and runs from a checkout only.
+# the golden fixtures and their scripts (tests/alm_golden) and the examples,
+# so `python -m pytest tests` runs from an extracted sdist. The setup-skill
+# test reads the repository around the package (the skill, the generated
+# guide) and runs from a checkout only, so it is left out.
 include README.md LICENSE
 graft tests
 graft examples
+exclude tests/test_alm_setup_skill.py
 global-exclude __pycache__ *.py[cod]

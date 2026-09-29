@@ -8,8 +8,9 @@
 #   test, including the examples (test_alm_examples.py runs the Stage-2 and
 #   Boozer demos at their CI size; the Boozer demo is bounded by evaluations)
 #   and the skill's tests; then the sdist is built, installed and extracted,
-#   and the golden and example tests run from the extracted copy (MANIFEST.in
-#   must ship tests/alm_golden and examples).
+#   and the README's `python -m pytest tests` runs from the extracted copy
+#   (MANIFEST.in ships tests/alm_golden and examples and leaves out the
+#   checkout-only skill test).
 #
 # stock-simsopt: the same tests in a clean environment whose simsopt is the
 #   stock upstream release from PyPI, the case of a user who installs the
@@ -80,18 +81,18 @@ jobs:
       run: |
         "$PYTHON" -m pytest -q -rs tests
 
-    - name: Run the golden and example tests from the extracted sdist
+    - name: Run the README's test command from the extracted sdist
       run: |
         uv build --sdist --out-dir "$RUNNER_TEMP/sdist" packages/simsopt-alm
         sdist=$(ls "$RUNNER_TEMP"/sdist/simsopt_alm-*.tar.gz)
         tar -tzf "$sdist" | grep -q '/tests/alm_golden/manifest.json$'
         tar -tzf "$sdist" | grep -q '/examples/boozerQA_alm.py$'
+        ! tar -tzf "$sdist" | grep -q '/tests/test_alm_setup_skill.py$'
         uv pip install --python "$PYTHON" --reinstall-package simsopt-alm "$sdist"
         mkdir "$RUNNER_TEMP/extracted"
         tar -xzf "$sdist" -C "$RUNNER_TEMP/extracted"
         cd "$RUNNER_TEMP"/extracted/simsopt_alm-*/
-        "$PYTHON" -m pytest -q -rs tests/test_alm_golden_trajectories.py tests/test_alm_examples.py \
-          tests/test_alm_composition_example.py
+        "$PYTHON" -m pytest tests
 
   stock-simsopt:
     name: simsopt-alm beside stock PyPI simsopt
