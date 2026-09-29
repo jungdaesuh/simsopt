@@ -102,6 +102,7 @@ from simsopt_jax_adapters.geo.factor_handoff_identity import (
 )
 
 from .boozer_surface import (
+    _ONDEVICE_LEAST_SQUARES_METHODS,
     _ONDEVICE_OPTIMIZER_METHODS,
     _boozer_exact_residual,
     _make_boozer_penalty_objective_closure,
@@ -3211,6 +3212,24 @@ def _traceable_predict_warmstart_x(
     )
 
 
+def _require_matrix_free_traceable_inner_solve(objective_method):
+    """Refuse the dense lm-minpack inner solve for the traced objectives.
+
+    The traced objectives re-solve the Boozer surface inside every traced
+    evaluation with ``materialize_dense_linearization=False``: they need a
+    matrix-free inner solve, and lm-minpack factors the dense residual
+    Jacobian every iteration.  Use the on-device quasi-Newton inner solve
+    (``least_squares_algorithm="quasi-newton"``, the ondevice default).
+    """
+    if objective_method in _ONDEVICE_LEAST_SQUARES_METHODS:
+        raise ValueError(
+            "Traced surface objectives need a matrix-free inner solve, but the "
+            f"Boozer surface resolves to {objective_method!r}, which factors the "
+            "dense residual Jacobian every iteration; set "
+            'least_squares_algorithm="quasi-newton" for traced objectives.'
+        )
+
+
 def _build_traceable_objective_cache_state(
     booz_jax,
     bs_jax,
@@ -3231,6 +3250,8 @@ def _build_traceable_objective_cache_state(
                 "make_traceable_objective() requires an on-device optimizer method; "
                 f"got {objective_method!r}."
             )
+        if require_ondevice_inner:
+            _require_matrix_free_traceable_inner_solve(objective_method)
 
     solved_state = _resolved_boozer_solved_runtime_state(booz_jax)
     warmstart_sdofs = solved_state.sdofs

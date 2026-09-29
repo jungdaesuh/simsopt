@@ -5099,21 +5099,37 @@ def test_public_alm_factory_reuses_bundle_from_an_explicit_session():
         )
 
 
-@pytest.mark.parametrize(
-    "objective_method",
-    ["lm-minpack-ondevice"],
-)
-def test_traceable_cache_state_accepts_ondevice_least_squares_methods(
-    monkeypatch,
-    objective_method,
-):
-    booz_jax = types.SimpleNamespace(
+def _lm_minpack_cache_state_booz():
+    return types.SimpleNamespace(
         boozer_type="ls",
-        _resolve_optimizer_method=lambda: objective_method,
+        _resolve_optimizer_method=lambda: "lm-minpack-ondevice",
     )
 
+
+def test_traceable_cache_state_refuses_the_dense_lm_inner_solve(monkeypatch):
+    # The traced objectives re-solve with materialize_dense_linearization=False,
+    # so the method gate refuses lm-minpack before the solved state is read.
+    def forbidden_solved_state(_booz_jax):
+        raise AssertionError("the gate must refuse before reading the solved state")
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_resolved_boozer_solved_runtime_state",
+        forbidden_solved_state,
+    )
+
+    with pytest.raises(ValueError, match="matrix-free inner solve"):
+        surfaceobjectives_traceable_jax_module._build_traceable_objective_cache_state(
+            _lm_minpack_cache_state_booz(),
+            object(),
+            0.23,
+        )
+
+
+def test_host_solved_state_cache_state_accepts_lm_minpack(monkeypatch):
+    # The host-solve bridges never run the traced solve, so lm-minpack passes.
     def stop_after_method_gate(_booz_jax):
-        raise RuntimeError("passed traceable objective method gate")
+        raise RuntimeError("passed host solved-state method gate")
 
     monkeypatch.setattr(
         surfaceobjectives_traceable_jax_module,
@@ -5121,11 +5137,12 @@ def test_traceable_cache_state_accepts_ondevice_least_squares_methods(
         stop_after_method_gate,
     )
 
-    with pytest.raises(RuntimeError, match="passed traceable objective method gate"):
+    with pytest.raises(RuntimeError, match="passed host solved-state method gate"):
         surfaceobjectives_traceable_jax_module._build_traceable_objective_cache_state(
-            booz_jax,
+            _lm_minpack_cache_state_booz(),
             object(),
             0.23,
+            require_ondevice_inner=False,
         )
 
 
@@ -9513,3 +9530,44 @@ def test_explicit_adjoint_selector_does_not_reroute_forward_predictor(
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize(
+    "factory_name",
+    ["make_traceable_objective", "make_traceable_objective_runtime_bundle"],
+)
+def test_traced_objectives_refuse_a_dense_lm_inner_solve_at_setup(
+    monkeypatch, factory_name
+):
+    """ondevice + lm-minpack is refused when the traced objective is built.
+
+    The traced objectives run the inner Boozer solve with
+    materialize_dense_linearization=False, which the dense lm-minpack lane
+    cannot honour; the refusal must come from setup, before any traced solve.
+    """
+    from .boozersurface_jax_test_helpers import _make_mock_boozer_surface
+
+    booz = _make_mock_boozer_surface()
+    booz.options["optimizer_backend"] = "ondevice"
+    booz.options["least_squares_algorithm"] = "lm-minpack"
+
+    def forbidden_traced_solve(*_args, **_kwargs):
+        raise AssertionError("the traced inner solve ran; setup must refuse first")
+
+    monkeypatch.setattr(booz, "run_code_traceable", forbidden_traced_solve)
+
+    with pytest.raises(ValueError, match="matrix-free inner solve"):
+        getattr(surfaceobjectives_jax_module, factory_name)(booz, booz.biotsavart, 0.3)
+
+
+def test_the_default_traced_inner_solve_passes_the_setup_refusal():
+    from .boozersurface_jax_test_helpers import _make_mock_boozer_surface
+
+    booz = _make_mock_boozer_surface()
+    booz.options["optimizer_backend"] = "ondevice"
+    method = booz._resolve_optimizer_method()
+
+    assert method == "bfgs-ondevice"
+    surfaceobjectives_traceable_jax_module._require_matrix_free_traceable_inner_solve(
+        method
+    )

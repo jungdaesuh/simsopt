@@ -125,6 +125,14 @@ _NON_JAX_BINDING = "non-jax"
 # its permissive scopes use the new ``host_boundary.allow_host_transfers``,
 # whose single internal ``transfer_guard`` is the one addition. The two later
 # ``host_boundary.py`` entries are re-pins after that insertion. Baseline: 33.
+# Removed 2026-09-29, no new site (Tier-2 port of banana-trim): removing the
+# Optax and Optimistix backends took ``dispatch._run_optimistix_lm`` and
+# ``minimize_runtime.run_optimistix_minimize`` with them, and keeping one
+# Levenberg-Marquardt took ``optimizer._gmres_solve_least_squares_system``; the
+# other coordinates that range moved are re-pins after deletions above them
+# (file, scope and primitive unchanged). Then the lm-minpack traced-objective
+# refusal in ``surface_objectives_traceable.py`` moved its three
+# baseline-wrapper coordinates. Baseline: 30.
 _ALLOWED_OWNER_CALLS = frozenset(
     {
         "src/simsopt_jax/backend/dtypes.py::_device_put::device_put::308:19",
@@ -154,9 +162,9 @@ _ALLOWED_OWNER_CALLS = frozenset(
         "src/simsopt_jax/solve/serial.py::_write_bounded_objective_log::transfer_guard::423:9",
         "src/simsopt_jax_adapters/geo/boozer_surface.py::_with_host_bridge_transfer_guard.wrapped::transfer_guard_device_to_host::199:13",
         "src/simsopt_jax_adapters/geo/boozer_surface.py::_with_host_bridge_transfer_guard.wrapped::transfer_guard_host_to_device::200:17",
-        "src/simsopt_jax_adapters/geo/surface_objectives_traceable.py::_ensure_traceable_runtime_host_wrappers.compute_baseline_value_and_grad::transfer_guard_device_to_host::4743:17",
-        "src/simsopt_jax_adapters/geo/surface_objectives_traceable.py::_ensure_traceable_runtime_host_wrappers.compute_baseline_value_and_grad::transfer_guard_host_to_device::4731:17",
-        "src/simsopt_jax_adapters/geo/surface_objectives_traceable.py::_make_traceable_lazy_host_reporting_metrics._baseline_reporting_metrics::transfer_guard_device_to_host::4676:17",
+        "src/simsopt_jax_adapters/geo/surface_objectives_traceable.py::_ensure_traceable_runtime_host_wrappers.compute_baseline_value_and_grad::transfer_guard_device_to_host::4764:17",
+        "src/simsopt_jax_adapters/geo/surface_objectives_traceable.py::_ensure_traceable_runtime_host_wrappers.compute_baseline_value_and_grad::transfer_guard_host_to_device::4752:17",
+        "src/simsopt_jax_adapters/geo/surface_objectives_traceable.py::_make_traceable_lazy_host_reporting_metrics._baseline_reporting_metrics::transfer_guard_device_to_host::4697:17",
     }
 )
 
