@@ -2,33 +2,91 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SMOKE = ROOT / ".github" / "workflows" / "jax_smoke.yml"
 AUTHORITY = ROOT / ".github" / "workflows" / "jax_gpu_parity.yml"
+_PARITY_COMMAND = "python examples/jax/run_parity.py"
+_JOB_HEADER = re.compile(r"^  ([A-Za-z0-9_-]+):\n", re.MULTILINE)
+
+
+def _jobs(path: Path) -> dict[str, str]:
+    """Return each top-level job's text, keyed by job id."""
+    jobs_section = path.read_text(encoding="utf-8").split("\njobs:\n", maxsplit=1)[1]
+    headers = list(_JOB_HEADER.finditer(jobs_section))
+    return {
+        header.group(1): jobs_section[
+            header.end() : (
+                headers[index + 1].start()
+                if index + 1 < len(headers)
+                else len(jobs_section)
+            )
+        ]
+        for index, header in enumerate(headers)
+    }
+
+
+def _parity_commands(job: str) -> list[str]:
+    return job.split(_PARITY_COMMAND)[1:]
 
 
 def test_pr_example_commands_select_bounded_scale_explicitly() -> None:
-    source = SMOKE.read_text(encoding="utf-8")
-    # The strict GPU job moved to the dispatch/schedule workflow (its last job)
-    # so that no pull_request-triggered job runs on the self-hosted runner.
-    gpu_strict = AUTHORITY.read_text(encoding="utf-8").split(
-        "  jax-gpu-strict-purity:", maxsplit=1
-    )[1]
+    smoke_jobs = _jobs(SMOKE)
+    smoke = "".join(smoke_jobs.values())
+    # The strict GPU job runs from the dispatch/schedule workflow, so that no
+    # pull_request-triggered job runs on the self-hosted runner.
+    gpu_strict = _jobs(AUTHORITY)["jax-gpu-strict-purity"]
 
-    assert "run_examples.py --device cpu --scale bounded" in source
-    assert "run_examples.py --device cpu --intent parity --scale bounded" in source
+    assert "jax-gpu-strict-purity" not in smoke_jobs
+    assert "run_examples.py --device cpu --scale bounded" in smoke
+    assert "run_examples.py --device cpu --intent parity --scale bounded" in smoke
     assert "run_examples.py --device gpu --scale bounded" in gpu_strict
     assert "run_examples.py --device gpu --intent parity --scale bounded" in gpu_strict
-    cpu_parity_commands = source.split("python examples/jax/run_parity.py")[1:]
-    gpu_parity_commands = gpu_strict.split("python examples/jax/run_parity.py")[1:]
+    cpu_parity_commands = _parity_commands(smoke)
     assert len(cpu_parity_commands) == 1
-    assert len(gpu_parity_commands) == 1
-    assert all(
-        "--scale bounded" in command
-        for command in (*cpu_parity_commands, *gpu_parity_commands)
-    )
+    assert "--scale bounded" in cpu_parity_commands[0]
+
+
+def test_scheduled_workflow_runs_bounded_parity_in_two_distinct_gpu_jobs() -> None:
+    """The dispatch/schedule workflow runs the bounded native/JAX parity twice.
+
+    ``native-jax-example-parity`` is the parity authority: bounded, plus the
+    manual native-default run, with a long budget and 30-day receipts.
+    ``jax-gpu-strict-purity`` runs it once more beside the example and strict
+    transfer-guard smoke slices, under deterministic XLA GPU ops and a short
+    budget, with its own receipts. Every other job runs no parity command.
+    """
+    jobs = _jobs(AUTHORITY)
+    authority = jobs["native-jax-example-parity"]
+    strict = jobs["jax-gpu-strict-purity"]
+
+    assert {job_id for job_id, job in jobs.items() if _parity_commands(job)} == {
+        "native-jax-example-parity",
+        "jax-gpu-strict-purity",
+    }
+    authority_scales = [
+        command.split("--scale ", maxsplit=1)[1].split(maxsplit=1)[0]
+        for command in _parity_commands(authority)
+    ]
+    strict_scales = [
+        command.split("--scale ", maxsplit=1)[1].split(maxsplit=1)[0]
+        for command in _parity_commands(strict)
+    ]
+    assert authority_scales == ["bounded", "native_default"]
+    assert strict_scales == ["bounded"]
+    for job in (authority, strict):
+        assert "runs-on: [self-hosted, gpu]" in job
+        assert "--case all-applicable" in job
+        assert "--lanes native-cpu,jax-cpu,jax-gpu" in job
+        assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in job
+    assert "XLA_FLAGS: --xla_gpu_exclude_nondeterministic_ops=true" in strict
+    assert "XLA_FLAGS" not in authority
+    assert "timeout-minutes: 60" in strict
+    assert "timeout-minutes: 720" in authority
+    assert "name: jax-native-example-parity-gpu-strict" in strict
+    assert "name: jax-native-example-parity-scheduled" in authority
 
 
 def test_native_default_authority_is_manual_and_explicit() -> None:
