@@ -118,12 +118,13 @@ def resolve_boozer_optimizer_method(
         least_squares_algorithm = resolve_boozer_least_squares_algorithm(
             boozer_optimizer_backend
         )
-    if least_squares_algorithm == "lm":
+    if least_squares_algorithm == "lm-minpack":
         if limited_memory:
             raise ValueError(
-                "least_squares_algorithm='lm' is incompatible with limited_memory=True."
+                "least_squares_algorithm='lm-minpack' is incompatible with "
+                "limited_memory=True."
             )
-        return "lm" if boozer_optimizer_backend == "host-jax" else "lm-ondevice"
+        return "lm-minpack-ondevice"
     if boozer_optimizer_backend == "host-jax":
         return "lbfgs" if limited_memory else "bfgs"
     return "lbfgs-ondevice" if limited_memory else "bfgs-ondevice"
@@ -141,5 +142,5 @@ def resolve_boozer_least_squares_algorithm(
     if least_squares_algorithm is not None:
         return least_squares_algorithm
     if boozer_optimizer_backend == "host-jax":
-        return "lm"
+        return "lm-minpack"
     return "quasi-newton"

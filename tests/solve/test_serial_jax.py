@@ -41,7 +41,6 @@ from simsopt_jax.solve.serial import (
 from simsopt_jax.solve.simsopt.contracts import (
     SimsoptBFGSOptions,
     SimsoptLBFGSBOptions,
-    SimsoptLMGMRESOptions,
     SimsoptLMQROptions,
 )
 
@@ -195,16 +194,21 @@ def test_least_squares_serial_solve_jax_matches_host_quadratic_problem():
         )
         assert host_prob.objective() <= 1e-16
         assert float(jax_prob.objective()) <= 1e-16
-        assert result.driver == Driver.SIMSOPT_LM_GMRES
+        assert result.driver == Driver.SIMSOPT_LM_QR
         assert isinstance(result, OptimizerResult)
-        assert isinstance(result.options_used, SimsoptLMGMRESOptions)
+        assert isinstance(result.options_used, SimsoptLMQROptions)
         np.testing.assert_allclose(result.x, expected_x)
         expected_residual = np.asarray(jax_prob.residuals())
         expected_gradient = np.diag(np.sqrt([1.0, 2.0, 3.0])) @ expected_residual
         np.testing.assert_allclose(result.residual, expected_residual)
         np.testing.assert_allclose(result.jac, expected_gradient)
-        assert result.residual_jacobian is None
-        assert result.hessian is None
+        # The dense-QR lane materializes the Jacobian it factorizes and reports
+        # it with the Gauss-Newton Hessian J^T J at the solution.
+        expected_jacobian = np.diag(np.sqrt([1.0, 2.0, 3.0]))
+        np.testing.assert_allclose(result.residual_jacobian, expected_jacobian)
+        np.testing.assert_allclose(
+            result.hessian, expected_jacobian.T @ expected_jacobian
+        )
         assert result.fun == pytest.approx(0.5 * float(jax_prob.objective()))
         assert result.success
         assert result.status in (0, 1, 2)
@@ -391,7 +395,6 @@ def test_serial_solve_jax_accepts_bounded_bfgs_line_search_budget() -> None:
 @pytest.mark.parametrize(
     ("driver", "options_type"),
     [
-        (Driver.SIMSOPT_LM_GMRES, SimsoptLMGMRESOptions),
         (Driver.SIMSOPT_LM_QR, SimsoptLMQROptions),
     ],
 )

@@ -1228,7 +1228,7 @@ def case_transfer_guard_disallow_allows_adam_ondevice_quadratic_smokes() -> None
     assert np.allclose(np.asarray(result.x), np.asarray([0.25, -0.75]), atol=1e-4)
 
 
-def case_transfer_guard_disallow_allows_lm_ondevice_quadratic_smokes() -> None:
+def case_transfer_guard_disallow_allows_lm_minpack_ondevice_quadratic_smokes() -> None:
     import jax
     import jax.numpy as jnp
     import numpy as np
@@ -1237,7 +1237,7 @@ def case_transfer_guard_disallow_allows_lm_ondevice_quadratic_smokes() -> None:
         PRIVATE_OPTIMIZER_JAX_VERSION,  # noqa: F401
         private_optimizer_runtime_is_supported,
     )
-    from simsopt_jax.solve import Driver, SimsoptLMGMRESOptions
+    from simsopt_jax.solve import Driver, SimsoptLMQROptions
     from simsopt_jax.solve.dispatch import least_squares
 
     simsopt_config.set_backend(
@@ -1258,8 +1258,8 @@ def case_transfer_guard_disallow_allows_lm_ondevice_quadratic_smokes() -> None:
     result = least_squares(
         residual,
         x0,
-        driver=Driver.SIMSOPT_LM_GMRES,
-        options=SimsoptLMGMRESOptions(maxiter=8),
+        driver=Driver.SIMSOPT_LM_QR,
+        options=SimsoptLMQROptions(maxiter=8),
     )
 
     assert result.success is True
@@ -1297,7 +1297,7 @@ def case_transfer_guard_disallow_allows_target_least_squares_structured_entry() 
     result = target_least_squares(
         residual_fn,
         x0,
-        method="lm-ondevice",
+        method="lm-minpack-ondevice",
         maxiter=25,
         tol=1e-12,
     )

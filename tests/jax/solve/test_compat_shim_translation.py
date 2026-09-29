@@ -14,8 +14,6 @@ from simsopt_jax.solve import (
     SimsoptAdamOptions,
     SimsoptBFGSOptions,
     SimsoptLBFGSBOptions,
-    SimsoptLMGMRESHostOptions,
-    SimsoptLMGMRESOptions,
     SimsoptLMQROptions,
     SimsoptTraceLBFGSOptions,
 )
@@ -257,52 +255,6 @@ def test_old_adam_ondevice_call_matches_new_target_bridge_driver():
         jnp.array([0.0, 0.0]),
         driver=Driver.SIMSOPT_ADAM,
         options=SimsoptAdamOptions(maxiter=3, learning_rate=0.1),
-    )
-
-    _assert_same_core_result(old, new)
-
-
-def test_old_lm_call_matches_new_gmres_host_bridge_driver(monkeypatch, request):
-    enable_non_strict_jax_backend(monkeypatch, request, mode="native_cpu")
-
-    def residual(x):
-        return x - jnp.array([1.0, -2.0])
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        old = jax_least_squares(
-            residual,
-            jnp.array([0.0, 0.0]),
-            method="lm",
-            maxiter=20,
-        )
-    new = least_squares(
-        residual,
-        jnp.array([0.0, 0.0]),
-        driver=Driver.SIMSOPT_LM_GMRES_HOST,
-        options=SimsoptLMGMRESHostOptions(maxiter=20),
-    )
-
-    _assert_same_core_result(old, new)
-
-
-def test_old_lm_ondevice_call_matches_new_gmres_target_bridge_driver():
-    def residual(x):
-        return x - jnp.array([1.0, -2.0])
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        old = jax_least_squares(
-            residual,
-            jnp.array([0.0, 0.0]),
-            method="lm-ondevice",
-            maxiter=20,
-        )
-    new = least_squares(
-        residual,
-        jnp.array([0.0, 0.0]),
-        driver=Driver.SIMSOPT_LM_GMRES,
-        options=SimsoptLMGMRESOptions(maxiter=20),
     )
 
     _assert_same_core_result(old, new)

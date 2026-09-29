@@ -5,8 +5,6 @@ from .contracts import (
     SimsoptAdamOptions,
     SimsoptBFGSOptions,
     SimsoptLBFGSBOptions,
-    SimsoptLMGMRESHostOptions,
-    SimsoptLMGMRESOptions,
     SimsoptLMQROptions,
     SimsoptTraceLBFGSOptions,
 )
@@ -16,8 +14,6 @@ __all__ = [
     "SimsoptAdamOptions",
     "SimsoptBFGSOptions",
     "SimsoptLBFGSBOptions",
-    "SimsoptLMGMRESHostOptions",
-    "SimsoptLMGMRESOptions",
     "SimsoptLMQROptions",
     "SimsoptTraceLBFGSOptions",
 ]

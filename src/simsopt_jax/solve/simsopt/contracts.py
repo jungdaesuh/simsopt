@@ -54,20 +54,6 @@ class SimsoptTraceLBFGSOptions(OptionsBase):
 
 
 @dataclass(frozen=True)
-class SimsoptLMGMRESHostOptions(OptionsBase):
-    maxiter: int = 1500
-    ftol: float = 1e-8
-    xtol: float = 1e-8
-    gtol: float | None = None
-
-
-@dataclass(frozen=True)
-class SimsoptLMGMRESOptions(SimsoptLMGMRESHostOptions):
-    materialize_dense_linearization: bool = True
-    max_dense_linearization_bytes: int | None = None
-
-
-@dataclass(frozen=True)
 class SimsoptLMQROptions(OptionsBase):
     maxiter: int = 1500
     ftol: float = 1e-8
@@ -81,8 +67,6 @@ __all__ = [
     "SimsoptAdamOptions",
     "SimsoptBFGSOptions",
     "SimsoptLBFGSBOptions",
-    "SimsoptLMGMRESHostOptions",
-    "SimsoptLMGMRESOptions",
     "SimsoptLMQROptions",
     "SimsoptTraceLBFGSOptions",
 ]

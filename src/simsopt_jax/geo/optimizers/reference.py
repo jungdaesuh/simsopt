@@ -47,7 +47,6 @@ from ._evaluation_provider import (
 from . import optimizer as _optimizer
 
 __all__ = [
-    "reference_least_squares",
     "reference_minimize",
     "_scipy_dispatch",
     "_scipy_minimize",
@@ -698,77 +697,6 @@ def _trace_minimize_value_and_grad(
         invalid_step_log_capacity=options.get("invalid_step_log_capacity"),
     )
     return _host_trace_result_to_optimize_result(result)
-
-
-def reference_least_squares(
-    residual_fn,
-    x0,
-    *,
-    method="lm",
-    tol=1e-10,
-    maxiter=1500,
-    options=None,
-    callback=None,
-    progress_callback=None,
-):
-    """Run the CPU/reference least-squares lane."""
-    if method != "lm":
-        raise ValueError(
-            f"reference_least_squares() only supports method='lm'. Got {method!r}."
-        )
-
-    options = dict(options or {})
-    if callback is not None:
-        options["callback"] = callback
-    if progress_callback is not None:
-        options["progress_callback"] = progress_callback
-
-    _optimizer._raise_if_target_lane_required(
-        component="optimizer_jax_reference.reference_least_squares",
-        method=method,
-        detail=_optimizer._STRICT_REFERENCE_LEAST_SQUARES_DETAIL,
-    )
-    _optimizer._raise_if_strict_optimizer_fallback(
-        component="optimizer_jax_reference.reference_least_squares",
-        method=method,
-        detail=_optimizer._STRICT_REFERENCE_LEAST_SQUARES_DETAIL,
-    )
-    result = _optimizer.levenberg_marquardt(
-        residual_fn,
-        x0,
-        maxiter=maxiter,
-        tol=tol,
-        ftol=options.get("ftol", 1e-8),
-        xtol=options.get("xtol", 1e-8),
-        gtol=options.get("gtol"),
-        callback=options.get("callback"),
-        progress_callback=options.get("progress_callback"),
-    )
-
-    nit = int(_optimizer._host_scalar(result["nit"], dtype=np.int64))
-    status = int(_optimizer._host_scalar(result["status"], dtype=np.int64))
-    info = int(_optimizer._host_scalar(result["info"], dtype=np.int64))
-    success = _optimizer._host_bool(result["success"])
-    return OptimizeResult(
-        x=result["x"],
-        fun=result["fun"],
-        jac=result["grad"],
-        residual=result["residual"],
-        residual_jacobian=result["residual_jacobian"],
-        hessian=result["hessian"],
-        damping=result["damping"],
-        nit=nit,
-        nfev=nit + 1,
-        njev=nit + 1,
-        status=status,
-        info=info,
-        success=success,
-        message=_optimizer._least_squares_result_message(
-            status,
-            success,
-            info=info,
-        ),
-    )
 
 
 def reference_minimize(

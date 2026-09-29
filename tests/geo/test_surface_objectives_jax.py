@@ -5155,7 +5155,7 @@ def test_traceable_cache_state_allows_non_ondevice_for_solved_state_builder(
         )
 
 
-@pytest.mark.parametrize("objective_method", ["lm", "adam-ondevice"])
+@pytest.mark.parametrize("objective_method", ["bfgs", "adam-ondevice"])
 def test_traceable_cache_state_rejects_non_ondevice_methods(objective_method):
     booz_jax = types.SimpleNamespace(
         boozer_type="ls",

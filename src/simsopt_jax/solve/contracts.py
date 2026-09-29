@@ -220,22 +220,6 @@ class SimsoptAdamCallbackEvent(_OptimizerCallbackEventBase):
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class SimsoptLMGMRESHostCallbackEvent(_OptimizerCallbackEventBase):
-    residual_norm: float
-    damping: float
-    gmres_iterations: int
-    driver: Literal[Driver.SIMSOPT_LM_GMRES_HOST] = Driver.SIMSOPT_LM_GMRES_HOST
-
-
-@dataclass(frozen=True, kw_only=True, slots=True)
-class SimsoptLMGMRESCallbackEvent(_OptimizerCallbackEventBase):
-    residual_norm: float
-    damping: float
-    gmres_iterations: int
-    driver: Literal[Driver.SIMSOPT_LM_GMRES] = Driver.SIMSOPT_LM_GMRES
-
-
-@dataclass(frozen=True, kw_only=True, slots=True)
 class SimsoptLMQRCallbackEvent(_OptimizerCallbackEventBase):
     residual_norm: float
     damping: float
@@ -251,8 +235,6 @@ OptimizerCallbackEvent: TypeAlias = (
     | SimsoptTraceLBFGSCallbackEvent
     | SimsoptAdamHostCallbackEvent
     | SimsoptAdamCallbackEvent
-    | SimsoptLMGMRESHostCallbackEvent
-    | SimsoptLMGMRESCallbackEvent
     | SimsoptLMQRCallbackEvent
 )
 Callback: TypeAlias = Callable[[OptimizerCallbackEvent], None]
@@ -271,8 +253,6 @@ STATUS_CODES: dict[Driver, tuple[int, ...]] = {
         Driver.SIMSOPT_TRACE_LBFGS: (0, 1, 2, 3, 4, 5, 6),
         Driver.SIMSOPT_ADAM_HOST: (0, 1, 2),
         Driver.SIMSOPT_ADAM: (0, 1, 2),
-        Driver.SIMSOPT_LM_GMRES_HOST: (0, 1, 2),
-        Driver.SIMSOPT_LM_GMRES: (0, 1, 2),
         Driver.SIMSOPT_LM_QR: (0, 1, 2),
     }.items()
 }

@@ -174,7 +174,7 @@ def _observations() -> dict[str, LaneObservation]:
             input_fingerprint="a" * 64,
             configuration_fingerprint="b" * 64,
             effective_construction_fingerprint="c" * 64,
-            driver="simsopt_lm_gmres",
+            driver="simsopt_lm_qr",
             normalized_status="converged",
             raw_status="0",
             success=True,
@@ -194,7 +194,7 @@ def _observations() -> dict[str, LaneObservation]:
             input_fingerprint="a" * 64,
             configuration_fingerprint="b" * 64,
             effective_construction_fingerprint="c" * 64,
-            driver="simsopt_lm_gmres",
+            driver="simsopt_lm_qr",
             normalized_status="converged",
             raw_status="0",
             success=True,
@@ -2071,7 +2071,7 @@ def test_approved_scipy_policy_is_bound_to_real_case_example_and_driver(
         policy = dataclasses.replace(policy, expected_driver="scipy_arbitrary")
         driver = "scipy_arbitrary"
     elif mutation == "wrong_driver":
-        driver = "simsopt_lm_gmres"
+        driver = "simsopt_lm_qr"
     elif mutation in {"optax", "optimistix", "host_callback"}:
         driver = mutation + "_scipy"
     observations = {

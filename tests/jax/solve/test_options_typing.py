@@ -5,8 +5,8 @@ from simsopt_jax.solve.dispatch import least_squares, minimize
 from simsopt_jax.solve import (
     Driver,
     ScipyLBFGSBOptions,
+    ScipyLMOptions,
     SimsoptAdamOptions,
-    SimsoptLMGMRESOptions,
 )
 
 
@@ -56,17 +56,14 @@ def test_minimize_rejects_target_subclass_options_for_host_driver():
         )
 
 
-def test_least_squares_rejects_target_subclass_options_for_host_driver():
+def test_least_squares_rejects_the_other_least_squares_drivers_options():
     with pytest.raises(
         TypeError,
-        match=(
-            "requires options of type SimsoptLMGMRESHostOptions, "
-            "got SimsoptLMGMRESOptions"
-        ),
+        match="requires options of type SimsoptLMQROptions, got ScipyLMOptions",
     ):
         least_squares(
             _residual,
             np.zeros(2),
-            driver=Driver.SIMSOPT_LM_GMRES_HOST,
-            options=SimsoptLMGMRESOptions(maxiter=1),
+            driver=Driver.SIMSOPT_LM_QR,
+            options=ScipyLMOptions(),
         )

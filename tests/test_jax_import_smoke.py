@@ -974,12 +974,14 @@ def test_transfer_guard_disallow_allows_adam_ondevice_quadratic_smokes():
     )
 
 
-def test_transfer_guard_disallow_allows_lm_ondevice_quadratic_smokes():
+def test_transfer_guard_disallow_allows_lm_minpack_ondevice_quadratic_smokes():
     """Ondevice LM least-squares must stay transfer-clean under disallow."""
     _assert_python_script_passes(
         _IMPORT_SMOKE_CASES_PATH,
-        args=("case_transfer_guard_disallow_allows_lm_ondevice_quadratic_smokes",),
-        failure_message="lm-ondevice transfer-guard smoke failed",
+        args=(
+            "case_transfer_guard_disallow_allows_lm_minpack_ondevice_quadratic_smokes",
+        ),
+        failure_message="lm-minpack-ondevice transfer-guard smoke failed",
     )
 
 

@@ -41,14 +41,11 @@ from .contracts import (
     SimsoptAdamHostCallbackEvent,
     SimsoptBFGSCallbackEvent,
     SimsoptLBFGSBCallbackEvent,
-    SimsoptLMGMRESCallbackEvent,
-    SimsoptLMGMRESHostCallbackEvent,
     SimsoptLMQRCallbackEvent,
     SimsoptTraceLBFGSCallbackEvent,
     ValueAndGradFn,
 )
 from .driver import (
-    legacy_reference_least_squares_method,
     legacy_reference_minimize_method,
     legacy_target_least_squares_method,
     legacy_target_minimize_method,
@@ -65,8 +62,6 @@ from .simsopt.contracts import (
     SimsoptAdamOptions,
     SimsoptBFGSOptions,
     SimsoptLBFGSBOptions,
-    SimsoptLMGMRESHostOptions,
-    SimsoptLMGMRESOptions,
     SimsoptLMQROptions,
     SimsoptTraceLBFGSOptions,
 )
@@ -92,8 +87,6 @@ _MINIMIZE_OPTIONS: dict[Driver, type[OptionsBase]] = {
 
 _LEAST_SQUARES_OPTIONS: dict[Driver, type[OptionsBase]] = {
     Driver.SCIPY_LM: ScipyLMOptions,
-    Driver.SIMSOPT_LM_GMRES_HOST: SimsoptLMGMRESHostOptions,
-    Driver.SIMSOPT_LM_GMRES: SimsoptLMGMRESOptions,
     Driver.SIMSOPT_LM_QR: SimsoptLMQROptions,
 }
 
@@ -155,21 +148,13 @@ def _legacy_bfgs_options(options: ScipyBFGSOptions | SimsoptBFGSOptions):
     return payload
 
 
-def _legacy_lm_options(
-    options: SimsoptLMGMRESHostOptions | SimsoptLMGMRESOptions | SimsoptLMQROptions,
-):
-    payload: dict[str, object] = {
+def _legacy_lm_options(options: SimsoptLMQROptions):
+    return {
         "ftol": options.ftol,
         "xtol": options.xtol,
         "gtol": options.gtol,
+        "max_dense_linearization_bytes": options.max_dense_linearization_bytes,
     }
-    if isinstance(options, SimsoptLMGMRESOptions | SimsoptLMQROptions):
-        payload["max_dense_linearization_bytes"] = options.max_dense_linearization_bytes
-    if isinstance(options, SimsoptLMGMRESOptions):
-        payload["materialize_dense_linearization"] = (
-            options.materialize_dense_linearization
-        )
-    return payload
 
 
 def _invalid_step_events(result: OptimizeResult) -> list[InvalidStepEvent] | None:
@@ -949,20 +934,6 @@ def _legacy_least_squares_callbacks(
             "grad_norm_inf": grad_norm_inf,
             "wallclock_s": wallclock_s,
         }
-        if isinstance(options, SimsoptLMGMRESOptions):
-            return SimsoptLMGMRESCallbackEvent(
-                **base_fields,
-                residual_norm=residual_norm,
-                damping=float("nan"),
-                gmres_iterations=0,
-            )
-        if isinstance(options, SimsoptLMGMRESHostOptions):
-            return SimsoptLMGMRESHostCallbackEvent(
-                **base_fields,
-                residual_norm=residual_norm,
-                damping=float("nan"),
-                gmres_iterations=0,
-            )
         if isinstance(options, SimsoptLMQROptions):
             return SimsoptLMQRCallbackEvent(
                 **base_fields,
@@ -1133,28 +1104,7 @@ def least_squares(
             )
         else:
             result = _scipy_lm_result(residual_fn, x0, options=options_used)
-    elif isinstance(options_used, SimsoptLMGMRESHostOptions) and not isinstance(
-        options_used, SimsoptLMGMRESOptions
-    ):
-        legacy_callback, legacy_progress_callback = _legacy_least_squares_callbacks(
-            callback,
-            driver=driver,
-            options=options_used,
-        )
-
-        def residual_with_args(current_x):
-            return residual_fn(current_x, *residual_args)
-
-        result = legacy.reference_least_squares(
-            residual_with_args,
-            x0,
-            method=legacy_reference_least_squares_method(driver),
-            maxiter=options_used.maxiter,
-            options=_legacy_lm_options(options_used),
-            callback=legacy_callback,
-            progress_callback=legacy_progress_callback,
-        )
-    elif isinstance(options_used, SimsoptLMGMRESOptions | SimsoptLMQROptions):
+    elif isinstance(options_used, SimsoptLMQROptions):
         legacy_callback, legacy_progress_callback = _legacy_least_squares_callbacks(
             callback,
             driver=driver,

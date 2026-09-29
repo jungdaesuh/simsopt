@@ -1,29 +1,22 @@
-"""Contract tests for the explicit opt-in dense-QR Levenberg-Marquardt route.
+"""Contract tests for the dense-QR Levenberg-Marquardt route.
 
 Background
 ----------
-The on-device LM family has two inner linear solves:
+``Driver.SIMSOPT_LM_QR`` (``least_squares_algorithm="lm-minpack"``, method
+``"lm-minpack-ondevice"``) is the one Levenberg-Marquardt lane. Its inner step
+factorizes the dense damped Jacobian with column-pivoted QR (MINPACK-style,
+factorize-once), mirroring upstream ``least_squares(method="lm")``.
 
-* ``Driver.SIMSOPT_LM_GMRES`` (``least_squares_algorithm="lm"``) is the
-  **default** target lane. Its inner step is matrix-free GMRES against the
-  regularized Gauss-Newton operator ``J^T J + lambda I``. It is the byte-equality
-  oracle partner of the host-driven ``Driver.SIMSOPT_LM_GMRES_HOST``
-  (``least_squares_algorithm="lm"``, ``optimizer_backend="scipy"``), and the
-  SHA-bound receipts in this repo pin ``simsopt_lm_gmres`` by name.
-* ``Driver.SIMSOPT_LM_QR`` (``least_squares_algorithm="lm-minpack"``) is an
-  **opt-in only** lane. Its inner step factorizes the dense damped Jacobian with
-  column-pivoted QR (DESC-style factorize-once), never GMRES.
+These tests pin the properties the lane ships with:
 
-These tests pin the four properties that make the QR lane safe to ship
-alongside the default without disturbing it:
-
-1. it is never reachable by default (routing pins),
-2. it agrees with the GMRES lane on the *optimum* but is deliberately **not**
-   its byte-equality oracle (different linear algebra => different roundoff and
-   different iterate trajectories),
-3. its dense materialization is refused up front against a declared byte budget,
-   and
-4. repeated solves reuse one compiled executable instead of retracing per call,
+1. routing: ``lm-minpack`` is the ``host-jax`` Boozer default and the only
+   spelling that reaches ``SIMSOPT_LM_QR``; the other backends default to the
+   quasi-Newton route,
+2. the executed route is readable off the result,
+3. it reaches the closed-form / recoverable optimum on reference fixtures,
+4. its dense materialization is refused up front against a declared byte
+   budget, and
+5. repeated solves reuse one compiled executable instead of retracing per call,
    while problems with different embedded constants keep their own.
 """
 
@@ -39,7 +32,6 @@ from simsopt_jax.solve.dispatch import least_squares
 from simsopt_jax.solve.driver import legacy_target_least_squares_method
 from simsopt_jax.solve import (
     Driver,
-    SimsoptLMGMRESOptions,
     SimsoptLMQROptions,
 )
 
@@ -76,39 +68,36 @@ def _nonlinear_fixture():
     return residual, jnp.array([1.0, -0.3, 0.0]), np.asarray(truth)
 
 
-def _solve_both(residual, x0, *, maxiter=400):
-    qr = least_squares(
+def _solve_qr_lane(residual, x0, *, maxiter=400):
+    return least_squares(
         residual,
         x0,
         driver=Driver.SIMSOPT_LM_QR,
         options=SimsoptLMQROptions(maxiter=maxiter),
     )
-    gmres = least_squares(
-        residual,
-        x0,
-        driver=Driver.SIMSOPT_LM_GMRES,
-        options=SimsoptLMGMRESOptions(maxiter=maxiter),
-    )
-    return qr, gmres
 
 
 # --------------------------------------------------------------------------
-# 1. The QR lane is opt-in only: no default reaches it
+# 1. Routing: the host-jax default is the QR lane; the others stay quasi-Newton
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    "boozer_optimizer_backend",
-    ["ondevice", "host-jax", "scipy"],
+    ("boozer_optimizer_backend", "expected_algorithm"),
+    [
+        ("ondevice", "quasi-newton"),
+        ("host-jax", "lm-minpack"),
+        ("scipy", "quasi-newton"),
+    ],
 )
-def test_default_least_squares_algorithm_never_resolves_to_the_qr_lane(
+def test_default_least_squares_algorithm_per_backend(
     boozer_optimizer_backend,
+    expected_algorithm,
 ):
-    """With no explicit request, routing must never pick ``lm-minpack``."""
+    """With no explicit request, only ``host-jax`` defaults to ``lm-minpack``."""
     resolved = resolve_boozer_least_squares_algorithm(boozer_optimizer_backend)
 
-    assert resolved != "lm-minpack"
-    assert resolved in {"lm", "quasi-newton"}
+    assert resolved == expected_algorithm
 
 
 def test_qr_lane_requires_an_explicit_algorithm_string():
@@ -120,17 +109,6 @@ def test_qr_lane_requires_an_explicit_algorithm_string():
         )
         == "lm-minpack"
     )
-
-    # The default LM spelling keeps routing to the GMRES lane that the
-    # byte-equality oracle and the SHA-bound receipts pin.
-    assert (
-        _opt.resolve_boozer_inner_driver(
-            "ondevice",
-            limited_memory=False,
-            least_squares_algorithm="lm",
-        )
-        is Driver.SIMSOPT_LM_GMRES
-    )
     assert (
         _opt.resolve_boozer_inner_driver(
             "ondevice",
@@ -141,8 +119,8 @@ def test_qr_lane_requires_an_explicit_algorithm_string():
     )
 
 
-def test_qr_lane_is_not_in_the_default_algorithm_position():
-    """``lm-minpack`` is a valid *choice*, never a default value."""
+def test_lm_minpack_algorithm_string_binds_only_the_qr_driver():
+    """``lm-minpack`` is a valid choice owned by the QR driver alone."""
     assert "lm-minpack" in _opt.VALID_LEAST_SQUARES_ALGORITHMS
 
     # Every Boozer inner driver whose options carry ``lm-minpack`` must be the
@@ -175,84 +153,31 @@ def test_result_records_the_qr_route_explicitly():
     )
 
 
-def test_gmres_route_string_is_unchanged():
-    """The default lane keeps the exact string the existing receipts pin."""
-    residual, x0, _ = _linear_fixture()
-
-    result = least_squares(
-        residual,
-        x0,
-        driver=Driver.SIMSOPT_LM_GMRES,
-        options=SimsoptLMGMRESOptions(maxiter=50),
-    )
-
-    assert result.driver is Driver.SIMSOPT_LM_GMRES
-    assert result.driver.value == "simsopt_lm_gmres"
-    assert legacy_target_least_squares_method(Driver.SIMSOPT_LM_GMRES) == "lm-ondevice"
-
-
 # --------------------------------------------------------------------------
-# 3. Correctness: same optimum as the GMRES lane, deliberately not byte-equal
+# 3. Correctness: the QR lane reaches the reference optimum
 # --------------------------------------------------------------------------
 
 
 def test_qr_lane_reaches_the_linear_least_squares_optimum():
     residual, x0, optimum = _linear_fixture()
-    qr, gmres = _solve_both(residual, x0)
+    qr = _solve_qr_lane(residual, x0)
 
     assert qr.success
-    assert gmres.success
 
-    # Both lanes must land on the closed-form ``lstsq`` optimum.
+    # The lane must land on the closed-form ``lstsq`` optimum.
     np.testing.assert_allclose(np.asarray(qr.x), optimum, rtol=0, atol=1e-7)
-    np.testing.assert_allclose(np.asarray(gmres.x), optimum, rtol=0, atol=1e-7)
-
-    # ...and therefore on each other, at the same tolerance level.
-    np.testing.assert_allclose(np.asarray(qr.x), np.asarray(gmres.x), rtol=0, atol=1e-7)
 
 
 def test_qr_lane_reaches_the_nonlinear_least_squares_optimum():
     residual, x0, optimum = _nonlinear_fixture()
-    qr, gmres = _solve_both(residual, x0)
+    qr = _solve_qr_lane(residual, x0)
 
     assert qr.success
-    assert gmres.success
 
     np.testing.assert_allclose(np.asarray(qr.x), optimum, rtol=0, atol=1e-7)
-    np.testing.assert_allclose(np.asarray(gmres.x), optimum, rtol=0, atol=1e-7)
-    np.testing.assert_allclose(np.asarray(qr.x), np.asarray(gmres.x), rtol=0, atol=1e-7)
 
-    # Both drive the residual to (numerical) zero on this fixture.
+    # The lane drives the residual to (numerical) zero on this fixture.
     assert float(qr.fun) < 1e-14
-    assert float(gmres.fun) < 1e-14
-
-
-def test_qr_lane_is_tolerance_equivalent_but_not_a_byte_oracle():
-    """The QR lane is NOT the GMRES lane's byte-equality partner.
-
-    This is by construction, not by defect. The GMRES lane solves
-    ``(J^T J + lambda I) delta = -J^T r`` matrix-free; the QR lane factorizes the
-    augmented matrix ``[J; sqrt(lambda) I]`` against ``[-r; 0]`` with
-    column-pivoted QR. Different algebra produces different rounding and a
-    different accepted-step trajectory, so the lanes agree on the *optimum* but
-    not bit-for-bit. Byte equality on this repo's LM family remains the
-    ``lm`` <-> ``lm-ondevice`` (host GMRES <-> on-device GMRES) pair, which this
-    opt-in lane leaves untouched.
-    """
-    residual, x0, _ = _nonlinear_fixture()
-    qr, gmres = _solve_both(residual, x0)
-
-    qr_x = np.asarray(qr.x)
-    gmres_x = np.asarray(gmres.x)
-
-    # Same optimum...
-    np.testing.assert_allclose(qr_x, gmres_x, rtol=0, atol=1e-7)
-
-    # ...but genuinely different arithmetic: the lanes are not bit-identical.
-    assert not np.array_equal(qr_x, gmres_x), (
-        "QR and GMRES lanes are bit-identical; the opt-in lane is not actually "
-        "running a different inner solve."
-    )
 
 
 # --------------------------------------------------------------------------
@@ -317,18 +242,16 @@ def test_qr_lane_budget_is_the_shared_dense_materialization_convention():
     fields = SimsoptLMQROptions().__dataclass_fields__
 
     assert "max_dense_linearization_bytes" in fields
-    # Unset by default: callers declare the budget they are willing to spend,
-    # matching SimsoptLMGMRESOptions.
+    # Unset by default: callers declare the budget they are willing to spend.
     assert SimsoptLMQROptions().max_dense_linearization_bytes is None
-    assert SimsoptLMGMRESOptions().max_dense_linearization_bytes is None
 
 
 # --------------------------------------------------------------------------
 # 5. Warm solves reuse one compiled executable
 # --------------------------------------------------------------------------
 #
-# The QR lane routes through the memoized ``_cached_traceable_runner`` seam the
-# GMRES lane already uses: the residual callable owns the cache entry, and the
+# The QR lane routes through the memoized ``_cached_traceable_runner`` seam: the
+# residual callable owns the cache entry, and the
 # runner's build-time constant set is the cache key. Before that wiring, every
 # call rebuilt the closure and re-entered ``jax.jit`` on a fresh function
 # object, so no call ever hit the JIT cache.
@@ -607,9 +530,8 @@ def _compiled_executables_for(runner_cache, residual):
     ("method", "runner_cache_name"),
     [
         ("lm-minpack-ondevice", "_TRACEABLE_LM_QR_RUNNER_CACHE"),
-        ("lm-ondevice", "_TRACEABLE_LM_RUNNER_CACHE"),
     ],
-    ids=["lm_qr", "lm_gmres"],
+    ids=["lm_qr"],
 )
 def test_instrumented_solves_share_one_compiled_executable(method, runner_cache_name):
     """Callback tokens are traced operands, so they must not fork the cache.
@@ -617,7 +539,7 @@ def test_instrumented_solves_share_one_compiled_executable(method, runner_cache_
     Tokens are minted per call. Declared ``static_argnums`` they compile a
     fresh executable per instrumented solve, and because the runner itself is
     memoized the lane then *retains* every one of them — an unbounded per-solve
-    leak that a single-solve test cannot see. Pinned on both LM lanes.
+    leak that a single-solve test cannot see.
     """
     residual, x0, _optimum = _nonlinear_fixture()
     runner_cache = getattr(_opt, runner_cache_name)

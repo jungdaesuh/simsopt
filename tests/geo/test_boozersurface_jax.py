@@ -109,7 +109,6 @@ from .boozersurface_jax_test_helpers import (
     biot_savart_dA_by_dX,
     compute_G_from_currents,
     dofs_to_xyzc,
-    jax_least_squares,
     jax_minimize,
     newton_exact,
     newton_polish,
@@ -988,63 +987,6 @@ def _patch_matrix_free_exact_linear_solver(monkeypatch, *, A, expected_device=No
     monkeypatch.setattr(_opt, "_gmres_solve_exact_newton_system", fake_gmres)
     monkeypatch.setattr(_opt, "_materialize_dense_jacobian", fake_materialize)
     return dense_calls
-
-
-def _patch_matrix_free_lm_solver(monkeypatch, *, A, expected_device=None):
-    dense_calls = []
-    gmres_calls = []
-
-    def fake_gmres(_flat_residual_fn, _x, grad, _pullback, *, damping, tol):
-        del _flat_residual_fn, _pullback, tol
-        gmres_calls.append(True)
-        _maybe_assert_arrays_on_device(expected_device, _x, grad)
-        A_runtime = _matrix_constant(A, grad)
-        hessian = A_runtime.T @ A_runtime + damping * _explicit_eye(
-            A_runtime.shape[1],
-            dtype=A.dtype,
-            device=expected_device,
-        )
-        step = jnp.linalg.solve(hessian, grad)
-        return step, grad - hessian @ step, None
-
-    def fake_materialize(flat_residual_fn, x):
-        dense_calls.append(True)
-        _maybe_assert_arrays_on_device(expected_device, x)
-        residual = flat_residual_fn(x)
-        jacobian = _matrix_constant(A, x)
-        grad, hessian = _opt._least_squares_linearization_from_jacobian(
-            residual,
-            jacobian,
-        )
-        _maybe_assert_arrays_on_device(
-            expected_device,
-            residual,
-            jacobian,
-            grad,
-            hessian,
-        )
-        return residual, jacobian, grad, hessian
-
-    monkeypatch.setattr(_opt, "_gmres_solve_least_squares_system", fake_gmres)
-    monkeypatch.setattr(
-        _opt,
-        "_materialize_dense_least_squares_linearization",
-        fake_materialize,
-    )
-    return dense_calls, gmres_calls
-
-
-def _assert_linear_lm_result(result, *, A, b):
-    np.testing.assert_allclose(
-        result["x"],
-        np.linalg.solve(np.asarray(A), np.asarray(b)),
-        atol=1e-10,
-    )
-    np.testing.assert_allclose(
-        result["residual_jacobian"],
-        np.asarray(A),
-        atol=1e-12,
-    )
 
 
 def _make_structured_quadratic_problem():
@@ -3141,7 +3083,7 @@ class TestBoozerSurfaceJAXClass:
         [
             ("scipy", "quasi-newton"),
             ("ondevice", "quasi-newton"),
-            ("host-jax", "lm"),
+            ("host-jax", "lm-minpack"),
         ],
     )
     def test_instantiation_defaults_least_squares_algorithm_from_backend(
@@ -3175,8 +3117,6 @@ class TestBoozerSurfaceJAXClass:
             (Driver.SCIPY_LBFGSB, "scipy", True, "quasi-newton"),
             (Driver.SIMSOPT_BFGS, "ondevice", False, "quasi-newton"),
             (Driver.SIMSOPT_LBFGSB, "ondevice", True, "quasi-newton"),
-            (Driver.SIMSOPT_LM_GMRES_HOST, "scipy", False, "lm"),
-            (Driver.SIMSOPT_LM_GMRES, "ondevice", False, "lm"),
             (Driver.SIMSOPT_LM_QR, "ondevice", False, "lm-minpack"),
         ],
     )
@@ -3216,7 +3156,7 @@ class TestBoozerSurfaceJAXClass:
                 1.0,
                 constraint_weight=1.0,
                 options={
-                    "inner_driver": Driver.SIMSOPT_LM_GMRES,
+                    "inner_driver": Driver.SIMSOPT_LM_QR,
                     "optimizer_backend": "scipy",
                 },
             )
@@ -3366,8 +3306,8 @@ class TestBoozerSurfaceJAXClass:
         )
 
         assert booz.options["optimizer_backend"] == "host-jax"
-        assert booz.options["least_squares_algorithm"] == "lm"
-        assert booz._resolve_optimizer_method() == "lm"
+        assert booz.options["least_squares_algorithm"] == "lm-minpack"
+        assert booz._resolve_optimizer_method() == "lm-minpack-ondevice"
 
     def test_instantiation_applies_jax_default_before_private_ls_option_validation(
         self,
@@ -3719,8 +3659,9 @@ class TestBoozerSurfaceJAXClass:
             options=None,
             callback=None,
             progress_callback=None,
+            args=(),
         ):
-            del residual_fn, tol, maxiter, callback, progress_callback
+            del residual_fn, tol, maxiter, callback, progress_callback, args
             captured["method"] = method
             captured["options"] = dict(options or {})
             flat_x0, _ = ravel_pytree(x0)
@@ -3741,7 +3682,7 @@ class TestBoozerSurfaceJAXClass:
         )
 
         _assert_result_record(res, _PUBLIC_LS_LM_RESULT_RECORD_TYPE)
-        assert captured["method"] == "lm-ondevice"
+        assert captured["method"] == "lm-minpack-ondevice"
         assert (
             captured["options"]["materialize_dense_linearization"]
             is expected_materialize
@@ -3750,7 +3691,7 @@ class TestBoozerSurfaceJAXClass:
             captured["options"]["max_dense_linearization_bytes"]
             == booz.options["max_dense_linearization_bytes"]
         )
-        assert res["optimizer_method"] == "lm-ondevice"
+        assert res["optimizer_method"] == "lm-minpack-ondevice"
         assert res["success"] is True
         assert booz.need_to_run_code is False
 
@@ -3775,8 +3716,9 @@ class TestBoozerSurfaceJAXClass:
             options=None,
             callback=None,
             progress_callback=None,
+            args=(),
         ):
-            del residual_fn, tol, maxiter, options, callback, progress_callback
+            del residual_fn, tol, maxiter, options, callback, progress_callback, args
             calls.append(method)
             flat_x0, _ = ravel_pytree(x0)
             return types.SimpleNamespace(
@@ -3795,7 +3737,7 @@ class TestBoozerSurfaceJAXClass:
             method="lm",
         )
 
-        assert calls == ["lm-ondevice"]
+        assert calls == ["lm-minpack-ondevice"]
         assert res["success"] is True
 
     def test_public_ls_api_accepts_weight_inv_modB_override(self, monkeypatch):
@@ -3825,7 +3767,7 @@ class TestBoozerSurfaceJAXClass:
             captured["decision_split_mode"] = decision_split_mode
             return lambda x: jnp.zeros_like(x)
 
-        def fake_reference_least_squares(
+        def fake_target_least_squares(
             residual_fn,
             x0,
             *,
@@ -3835,8 +3777,10 @@ class TestBoozerSurfaceJAXClass:
             options=None,
             callback=None,
             progress_callback=None,
+            args=(),
         ):
             del residual_fn, method, tol, maxiter, options, callback, progress_callback
+            del args
             flat_x0, _ = ravel_pytree(x0)
             return types.SimpleNamespace(
                 x=x0,
@@ -3849,9 +3793,7 @@ class TestBoozerSurfaceJAXClass:
         monkeypatch.setattr(
             booz, "_make_penalty_residual_with", fake_make_penalty_residual_with
         )
-        monkeypatch.setattr(
-            _bsj, "reference_least_squares", fake_reference_least_squares
-        )
+        monkeypatch.setattr(_bsj, "target_least_squares", fake_target_least_squares)
 
         res = booz.minimize_boozer_penalty_constraints_ls(
             iota=0.3,
@@ -4587,8 +4529,7 @@ class TestBoozerSurfaceJAXClass:
         [
             (False, "quasi-newton", "bfgs"),
             (True, "quasi-newton", "lbfgs"),
-            (False, "lm", "lm"),
-            (False, "lm-minpack", "lm"),
+            (False, "lm-minpack", "lm-minpack-ondevice"),
         ],
     )
     def test_resolve_boozer_inner_optimizer_method_accepts_host_jax(
@@ -4642,9 +4583,9 @@ class TestBoozerSurfaceJAXClass:
             resolve_boozer_optimizer_method(
                 "host-jax",
                 limited_memory=False,
-                least_squares_algorithm="lm",
+                least_squares_algorithm="lm-minpack",
             )
-            == "lm"
+            == "lm-minpack-ondevice"
         )
 
     @pytest.mark.parametrize(
@@ -4658,7 +4599,6 @@ class TestBoozerSurfaceJAXClass:
             ("scipy", False, "quasi-newton", "bfgs"),
             ("scipy", True, "quasi-newton", "lbfgs"),
             ("ondevice", False, "quasi-newton", "bfgs-ondevice"),
-            ("ondevice", False, "lm", "lm-ondevice"),
             ("ondevice", False, "lm-minpack", "lm-minpack-ondevice"),
             ("scipy-jax", False, "quasi-newton", "lbfgs-scipy-jax"),
             (
@@ -4667,8 +4607,7 @@ class TestBoozerSurfaceJAXClass:
                 "quasi-newton",
                 "lbfgs-scipy-jax-fullgraph",
             ),
-            ("scipy", False, "lm", "lm"),
-            ("scipy", False, "lm-minpack", "lm"),
+            ("scipy", False, "lm-minpack", "lm-minpack-ondevice"),
         ],
     )
     def test_resolve_least_squares_optimizer_method_contract(
@@ -4695,26 +4634,24 @@ class TestBoozerSurfaceJAXClass:
             resolve_least_squares_optimizer_method(
                 "bogus",
                 limited_memory=False,
-                least_squares_algorithm="lm",
+                least_squares_algorithm="lm-minpack",
             )
 
     def test_resolve_least_squares_optimizer_method_rejects_limited_memory_lm(self):
         with pytest.raises(
             ValueError,
-            match="least_squares_algorithm='lm'.*limited_memory=True",
+            match="least_squares_algorithm='lm-minpack'.*limited_memory=True",
         ):
             resolve_least_squares_optimizer_method(
                 "ondevice",
                 limited_memory=True,
-                least_squares_algorithm="lm",
+                least_squares_algorithm="lm-minpack",
             )
 
     @pytest.mark.parametrize(
         ("optimizer_backend", "least_squares_algorithm"),
         [
-            ("scipy-jax", "lm"),
             ("scipy-jax", "lm-minpack"),
-            ("scipy-jax-fullgraph", "lm"),
             ("scipy-jax-fullgraph", "lm-minpack"),
         ],
     )
@@ -5403,7 +5340,6 @@ class TestBoozerSurfaceJAXClass:
     @pytest.mark.parametrize(
         ("least_squares_algorithm", "expected_method"),
         [
-            ("lm", "lm-ondevice"),
             ("lm-minpack", "lm-minpack-ondevice"),
         ],
     )
@@ -5434,8 +5370,9 @@ class TestBoozerSurfaceJAXClass:
             options=None,
             callback=None,
             progress_callback=None,
+            args=(),
         ):
-            del residual_fn, tol, maxiter, callback, progress_callback
+            del residual_fn, tol, maxiter, callback, progress_callback, args
             captured["method"] = method
             captured["options"] = dict(options or {})
             flat_x0, _ = ravel_pytree(x0)
@@ -5492,12 +5429,12 @@ class TestBoozerSurfaceJAXClass:
         _select_native_cpu_reference_backend()
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "scipy"
-        booz.options["least_squares_algorithm"] = "lm"
+        booz.options["least_squares_algorithm"] = "lm-minpack"
         booz.options["limited_memory"] = False
         _set_explicit_lm_options(booz)
         captured = {}
 
-        def fake_reference_least_squares(
+        def fake_target_least_squares(
             residual_fn,
             x0,
             *,
@@ -5507,8 +5444,9 @@ class TestBoozerSurfaceJAXClass:
             options=None,
             callback=None,
             progress_callback=None,
+            args=(),
         ):
-            del residual_fn, tol, maxiter, callback, progress_callback
+            del residual_fn, tol, maxiter, callback, progress_callback, args
             captured["method"] = method
             captured["options"] = dict(options or {})
             flat_x0, _ = ravel_pytree(x0)
@@ -5541,26 +5479,24 @@ class TestBoozerSurfaceJAXClass:
             del maxiter, tol, stab, progress_callback, objective_args
             return _successful_newton_polish_result(x0)
 
-        monkeypatch.setattr(
-            _bsj, "reference_least_squares", fake_reference_least_squares
-        )
+        monkeypatch.setattr(_bsj, "target_least_squares", fake_target_least_squares)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
         res = booz.run_code(iota=0.3, G=0.05)
 
-        assert captured["method"] == "lm"
+        assert captured["method"] == "lm-minpack-ondevice"
         _assert_explicit_lm_options_forwarded(captured["options"], booz)
         assert (
             captured["options"]["materialize_dense_linearization"]
             is booz.options["materialize_dense_linearization"]
         )
-        assert res["optimizer_method"] == "lm"
+        assert res["optimizer_method"] == "lm-minpack-ondevice"
         assert res["success"] is True
 
     def test_run_code_emits_actual_first_stage_method_for_lm(self, monkeypatch):
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
-        booz.options["least_squares_algorithm"] = "lm"
+        booz.options["least_squares_algorithm"] = "lm-minpack"
 
         observed = []
 
@@ -5579,8 +5515,9 @@ class TestBoozerSurfaceJAXClass:
             options=None,
             callback=None,
             progress_callback=None,
+            args=(),
         ):
-            del residual_fn, tol, maxiter, options, callback, progress_callback
+            del residual_fn, tol, maxiter, options, callback, progress_callback, args
             flat_x0, _ = ravel_pytree(x0)
             return types.SimpleNamespace(
                 x=x0,
@@ -5616,7 +5553,7 @@ class TestBoozerSurfaceJAXClass:
         booz.run_code(iota=0.3, G=0.05)
 
         before_payload = _stage_payload(observed, "before_boozer_lbfgs")
-        assert before_payload["method"] == "lm-ondevice"
+        assert before_payload["method"] == "lm-minpack-ondevice"
 
     def test_penalty_residual_closure_hostifies_surface_metadata(self):
         booz = _make_mock_boozer_surface(stellsym=True, mpol=2, ntor=2)
@@ -5635,58 +5572,6 @@ class TestBoozerSurfaceJAXClass:
             for value in closure_nonlocals.values()
             for leaf in jax.tree.leaves(value)
         )
-
-    def test_run_code_uses_quasi_newton_for_fixed_G_ondevice_lm_option(
-        self, monkeypatch
-    ):
-        booz = _make_mock_boozer_surface()
-        booz.options["optimizer_backend"] = "ondevice"
-        booz.options["least_squares_algorithm"] = "lm"
-
-        captured = {}
-
-        def forbidden_target_least_squares(*args, **kwargs):
-            raise AssertionError("fixed-G ondevice path should not enter lm-ondevice")
-
-        def fake_target_minimize(
-            fun,
-            x0,
-            *,
-            method,
-            tol,
-            maxiter,
-            options,
-            progress_callback=None,
-        ):
-            del fun, tol, maxiter, options, progress_callback
-            captured["method"] = method
-            return _successful_minimize_result(x0)
-
-        def fake_newton_polish(
-            _objective_fn,
-            x0,
-            *,
-            maxiter,
-            tol,
-            stab,
-            progress_callback=None,
-            objective_args=(),
-        ):
-            del maxiter, tol, stab, progress_callback, objective_args
-            return _successful_newton_polish_result(x0)
-
-        monkeypatch.setattr(
-            _bsj, "target_least_squares", forbidden_target_least_squares
-        )
-        monkeypatch.setattr(_bsj, "target_minimize", fake_target_minimize)
-        _patch_ondevice_bfgs_minimize(monkeypatch, fake_target_minimize)
-        _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
-
-        res = booz.run_code(iota=0.3, G=None)
-
-        assert captured["method"] == "bfgs-ondevice"
-        assert res["optimizer_method"] == "bfgs-ondevice"
-        assert res["success"] is True
 
     @pytest.mark.parametrize("backend_mode", _TARGET_ONDEVICE_JAX_BACKEND_MODES)
     @pytest.mark.parametrize("optimizer_backend", ["scipy"])
@@ -5793,28 +5678,6 @@ class TestBoozerSurfaceJAXClass:
                 options={"step_size": 0.1} if method == "adam" else None,
             )
 
-    @pytest.mark.parametrize("backend_mode", _ALL_JAX_BACKEND_MODES)
-    def test_jax_least_squares_reference_lm_rejects_in_jax_backend_mode(
-        self,
-        monkeypatch,
-        request,
-        backend_mode,
-    ):
-        enable_non_strict_jax_backend(monkeypatch, request, mode=backend_mode)
-        with pytest.raises(
-            RuntimeError,
-            match=_target_lane_rejection_pattern(
-                r"optimizer_jax\.jax_least_squares", "lm", backend_mode
-            ),
-        ):
-            jax_least_squares(
-                lambda x: x - jnp.asarray([2.0, -1.0], dtype=jnp.float64),
-                jnp.asarray([5.0, 3.0], dtype=jnp.float64),
-                method="lm",
-                maxiter=25,
-                tol=1e-12,
-            )
-
     def test_jax_least_squares_solves_simple_structured_problem(self):
         def residual_fn(state):
             return jnp.asarray(
@@ -5831,10 +5694,16 @@ class TestBoozerSurfaceJAXClass:
             "iota": jnp.asarray(0.0, dtype=jnp.float64),
         }
 
-        with _native_cpu_reference_context():
-            result = _opt.reference_least_squares(
-                residual_fn, x0, method="lm", maxiter=25, tol=1e-12
-            )
+        # The removed reference LM gated the gradient on ``tol``; the MINPACK
+        # lane gates it on ``gtol``, so the test requests the same 1e-12 gate.
+        result = _opt.target_least_squares(
+            residual_fn,
+            x0,
+            method="lm-minpack-ondevice",
+            maxiter=25,
+            tol=1e-12,
+            options={"gtol": 1e-12},
+        )
 
         assert result.success is True
         np.testing.assert_allclose(result.x["surface"], np.asarray([2.0, -1.0]))
@@ -5973,58 +5842,13 @@ class TestBoozerSurfaceJAXClass:
             ),
         )
 
-        with _native_cpu_reference_context():
-            result = _opt.reference_least_squares(
-                residual_fn, x0, method="lm", maxiter=25, tol=1e-12
-            )
+        result = _opt.target_least_squares(
+            residual_fn, x0, method="lm-minpack-ondevice", maxiter=25, tol=1e-12
+        )
 
         assert result.success is True
         np.testing.assert_allclose(result.x["surface"], np.asarray([2.0, -1.0]))
         np.testing.assert_allclose(result.x["iota"], 0.25)
-
-    def test_levenberg_marquardt_materializes_dense_linearization_once_at_final_iterate(
-        self,
-        monkeypatch,
-    ):
-        A = jnp.array([[3.0, 1.0], [1.0, 4.0]], dtype=jnp.float64)
-        b = jnp.array([5.0, 7.0], dtype=jnp.float64)
-        dense_calls, gmres_calls = _patch_matrix_free_lm_solver(
-            monkeypatch,
-            A=A,
-        )
-
-        def residual(x):
-            return A @ x - b
-
-        result = _opt.levenberg_marquardt(residual, jnp.zeros(2), maxiter=25, tol=1e-14)
-
-        assert gmres_calls
-        assert len(dense_calls) == 1
-        _assert_linear_lm_result(result, A=A, b=b)
-        assert result["success"]
-
-    def test_levenberg_marquardt_traceable_materializes_dense_linearization_once_at_final_iterate(
-        self,
-        monkeypatch,
-    ):
-        A = jnp.array([[3.0, 1.0], [1.0, 4.0]], dtype=jnp.float64)
-        b = jnp.array([5.0, 7.0], dtype=jnp.float64)
-        dense_calls, gmres_calls = _patch_matrix_free_lm_solver(monkeypatch, A=A)
-
-        def residual(x):
-            return A @ x - b
-
-        result = _opt.levenberg_marquardt_traceable(
-            residual,
-            jnp.zeros(2),
-            maxiter=25,
-            tol=1e-14,
-        )
-
-        assert gmres_calls
-        assert len(dense_calls) == 1
-        _assert_linear_lm_result(result, A=A, b=b)
-        assert bool(result["success"])
 
     def test_jax_minimize_allows_explicit_value_grad_ondevice_in_strict_mode(
         self,
@@ -9046,7 +8870,6 @@ class TestBoozerSurfaceJAXExactPath:
     @pytest.mark.parametrize(
         ("least_squares_algorithm", "expected_method", "solver_attr"),
         [
-            ("lm", "lm-ondevice", "levenberg_marquardt_traceable"),
             (
                 "lm-minpack",
                 "lm-minpack-ondevice",
@@ -9158,18 +8981,13 @@ class TestBoozerSurfaceJAXExactPath:
         _enable_fast_strict_jax_backend(monkeypatch, request)
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
-        booz.options["least_squares_algorithm"] = "lm"
+        booz.options["least_squares_algorithm"] = "lm-minpack"
         coil_set_spec, sdofs, iota, G, x_target, A = (
             _build_gpu_traceable_linear_problem(
                 booz,
                 gpu,
                 step_scale=0.02,
             )
-        )
-        dense_calls, gmres_calls = _patch_matrix_free_lm_solver(
-            monkeypatch,
-            A=A,
-            expected_device=gpu,
         )
 
         def fake_get_traceable_penalty_residual(_optimize_G, _weight_inv_modB):
@@ -9233,10 +9051,8 @@ class TestBoozerSurfaceJAXExactPath:
 
         result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
 
-        assert gmres_calls
-        assert len(dense_calls) == 1
         assert result["type"] == "ls"
-        assert result["optimizer_method"] == "lm-ondevice"
+        assert result["optimizer_method"] == "lm-minpack-ondevice"
         assert bool(np.asarray(jax.device_get(result["success"])))
         _assert_traceable_gpu_result(
             result,
@@ -9250,7 +9066,7 @@ class TestBoozerSurfaceJAXExactPath:
     ):
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
-        booz.options["least_squares_algorithm"] = "lm"
+        booz.options["least_squares_algorithm"] = "lm-minpack"
         coil_set_spec = booz.coil_set_spec
         sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
         iota = jnp.asarray(0.3, dtype=jnp.float64)
@@ -9318,7 +9134,7 @@ class TestBoozerSurfaceJAXExactPath:
 
         monkeypatch.setattr(_bsj, "_minimize_bfgs_private", lambda *_a, **_k: None)
         monkeypatch.setattr(_bsj, "_minimize_lbfgs_private", lambda *_a, **_k: None)
-        monkeypatch.setattr(_bsj, "levenberg_marquardt_traceable", fake_lm)
+        monkeypatch.setattr(_bsj, "levenberg_marquardt_minpack_traceable", fake_lm)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
         first = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
@@ -9332,7 +9148,11 @@ class TestBoozerSurfaceJAXExactPath:
         for key in ("x", "sdofs", "iota", "G", "fun", "grad", "hessian"):
             np.testing.assert_allclose(np.asarray(first[key]), np.asarray(second[key]))
         assert first["nit"] == second["nit"]
-        assert first["optimizer_method"] == second["optimizer_method"] == "lm-ondevice"
+        assert (
+            first["optimizer_method"]
+            == second["optimizer_method"]
+            == "lm-minpack-ondevice"
+        )
         assert first["type"] == second["type"] == "ls"
         assert first["weight_inv_modB"] == second["weight_inv_modB"]
         assert booz.res is res_before
@@ -9343,7 +9163,7 @@ class TestBoozerSurfaceJAXExactPath:
     ):
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
-        booz.options["least_squares_algorithm"] = "lm"
+        booz.options["least_squares_algorithm"] = "lm-minpack"
         coil_set_spec = booz.coil_set_spec
         sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
         iota = jnp.asarray(0.3, dtype=jnp.float64)
@@ -9412,7 +9232,7 @@ class TestBoozerSurfaceJAXExactPath:
 
         monkeypatch.setattr(_bsj, "_minimize_bfgs_private", lambda *_a, **_k: None)
         monkeypatch.setattr(_bsj, "_minimize_lbfgs_private", lambda *_a, **_k: None)
-        monkeypatch.setattr(_bsj, "levenberg_marquardt_traceable", fake_lm)
+        monkeypatch.setattr(_bsj, "levenberg_marquardt_minpack_traceable", fake_lm)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
         first = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
@@ -11168,14 +10988,14 @@ class TestUpstreamFactoryBoozerMatrix:
         )
 
     @staticmethod
-    def _patch_solve_boozer_state_host_runner(
+    def _patch_solve_boozer_state_least_squares_runner(
         monkeypatch,
         x0,
         *,
         success,
         message,
     ):
-        def fake_host_jax_least_squares(*args, **kwargs):
+        def fake_target_least_squares(*args, **kwargs):
             del args, kwargs
             return types.SimpleNamespace(
                 x=x0,
@@ -11186,7 +11006,7 @@ class TestUpstreamFactoryBoozerMatrix:
                 message=message,
             )
 
-        monkeypatch.setattr(_bsj, "host_jax_least_squares", fake_host_jax_least_squares)
+        monkeypatch.setattr(_bsj, "target_least_squares", fake_target_least_squares)
 
     @staticmethod
     def _solve_boozer_state_gate_bundle(
@@ -11214,12 +11034,6 @@ class TestUpstreamFactoryBoozerMatrix:
                 objective=lambda x, dynamic_state: jnp.asarray(0.0, dtype=x.dtype),
                 residual=residual,
                 jacobian=jacobian,
-                jacobian_block=(
-                    lambda x, tangent_block, dynamic_state: tangent_block.T[
-                        : residual_values.shape[0]
-                    ]
-                ),
-                least_squares_state=lambda x, dynamic_state: {},
                 linear_solve=linear_solve,
                 factor_apply=lambda x, vector, dynamic_state: vector,
                 value_and_grad=lambda x, dynamic_state: (
@@ -11257,7 +11071,7 @@ class TestUpstreamFactoryBoozerMatrix:
             jacobian_matrix,
             original_status,
         )
-        self._patch_solve_boozer_state_host_runner(
+        self._patch_solve_boozer_state_least_squares_runner(
             monkeypatch,
             x0,
             success=True,
@@ -11292,7 +11106,7 @@ class TestUpstreamFactoryBoozerMatrix:
             coil_set_spec=object(),
             optimize_G=True,
             weight_inv_modB=False,
-            method="lm",
+            method="lm-minpack-ondevice",
             tol=1e-10,
             maxiter=8,
             options={},
@@ -11363,7 +11177,7 @@ class TestUpstreamFactoryBoozerMatrix:
             jnp.eye(4, dtype=jnp.float64),
             original_status,
         )
-        self._patch_solve_boozer_state_host_runner(
+        self._patch_solve_boozer_state_least_squares_runner(
             monkeypatch,
             x0,
             success=False,
@@ -11389,7 +11203,7 @@ class TestUpstreamFactoryBoozerMatrix:
             coil_set_spec=object(),
             optimize_G=True,
             weight_inv_modB=False,
-            method="lm",
+            method="lm-minpack-ondevice",
             tol=1e-10,
             maxiter=8,
             options={},
@@ -11425,7 +11239,7 @@ class TestUpstreamFactoryBoozerMatrix:
             ),
             original_status,
         )
-        self._patch_solve_boozer_state_host_runner(
+        self._patch_solve_boozer_state_least_squares_runner(
             monkeypatch,
             x0,
             success=True,
@@ -11451,7 +11265,7 @@ class TestUpstreamFactoryBoozerMatrix:
             coil_set_spec=object(),
             optimize_G=True,
             weight_inv_modB=False,
-            method="lm",
+            method="lm-minpack-ondevice",
             tol=1e-10,
             maxiter=8,
             options={},
@@ -11483,7 +11297,7 @@ class TestUpstreamFactoryBoozerMatrix:
             jnp.eye(4, dtype=jnp.float64),
             original_status,
         )
-        self._patch_solve_boozer_state_host_runner(
+        self._patch_solve_boozer_state_least_squares_runner(
             monkeypatch,
             x0,
             success=True,
@@ -11519,7 +11333,7 @@ class TestUpstreamFactoryBoozerMatrix:
             coil_set_spec=object(),
             optimize_G=True,
             weight_inv_modB=False,
-            method="lm",
+            method="lm-minpack-ondevice",
             tol=1e-10,
             maxiter=8,
             options={},
@@ -11553,7 +11367,7 @@ class TestUpstreamFactoryBoozerMatrix:
             jnp.eye(4, dtype=jnp.float64),
             original_status,
         )
-        self._patch_solve_boozer_state_host_runner(
+        self._patch_solve_boozer_state_least_squares_runner(
             monkeypatch,
             x0,
             success=True,
@@ -11579,7 +11393,7 @@ class TestUpstreamFactoryBoozerMatrix:
             coil_set_spec=object(),
             optimize_G=True,
             weight_inv_modB=False,
-            method="lm",
+            method="lm-minpack-ondevice",
             tol=1e-10,
             maxiter=8,
             options={},
@@ -11594,11 +11408,11 @@ class TestUpstreamFactoryBoozerMatrix:
             == "least-squares-hessian"
         )
 
-    def test_solve_boozer_state_helper_uses_host_runner_and_staged_kernels(
+    def test_solve_boozer_state_helper_uses_least_squares_runner_and_staged_kernels(
         self,
         monkeypatch,
     ):
-        """Host solve helper keeps iteration on host and final state in kernels."""
+        """Solve helper iterates in the LS runner and keeps final state in kernels."""
         calls = []
         x0 = jnp.asarray([1.0, 2.0, -0.3, 1.5], dtype=jnp.float64)
         coil_set_spec = object()
@@ -11614,21 +11428,6 @@ class TestUpstreamFactoryBoozerMatrix:
                 dtype=jnp.float64,
             )
 
-        def jacobian_block(x, tangent_block, dynamic_state):
-            calls.append(("jacobian_block", dynamic_state))
-            return jnp.asarray(tangent_block, dtype=jnp.float64).T[:2]
-
-        def least_squares_state(x, dynamic_state):
-            calls.append(("least_squares_state", dynamic_state))
-            return {
-                "residual": residual(x, dynamic_state),
-                "residual_jacobian": jacobian(x, dynamic_state),
-                "grad": jnp.zeros_like(x),
-                "hessian": jnp.eye(x.shape[0], dtype=x.dtype),
-                "fun": jnp.asarray(0.0, dtype=x.dtype),
-                "grad_norm_inf": jnp.asarray(0.0, dtype=x.dtype),
-            }
-
         def linear_solve(x, rhs, dynamic_state):
             calls.append(("linear_solve", dynamic_state, tuple(np.asarray(rhs))))
             return rhs, _mock_linear_solve_status(True)
@@ -11637,8 +11436,6 @@ class TestUpstreamFactoryBoozerMatrix:
             objective=lambda x, dynamic_state: jnp.asarray(0.0, dtype=x.dtype),
             residual=residual,
             jacobian=jacobian,
-            jacobian_block=jacobian_block,
-            least_squares_state=least_squares_state,
             linear_solve=linear_solve,
             factor_apply=lambda x, vector, dynamic_state: vector,
             value_and_grad=lambda x, dynamic_state: (
@@ -11647,7 +11444,7 @@ class TestUpstreamFactoryBoozerMatrix:
             ),
         )
 
-        def fake_host_jax_least_squares(
+        def fake_target_least_squares(
             residual_fn,
             initial_x,
             *,
@@ -11657,13 +11454,10 @@ class TestUpstreamFactoryBoozerMatrix:
             options,
             progress_callback,
             args,
-            state_fn,
-            jacobian_block_fn,
         ):
             calls.append(("runner", method, tol, maxiter, options, progress_callback))
             assert residual_fn is residual
-            assert state_fn is least_squares_state
-            assert jacobian_block_fn is jacobian_block
+            assert method == "lm-minpack-ondevice"
             assert args == (coil_set_spec,)
             return types.SimpleNamespace(
                 x=initial_x,
@@ -11674,7 +11468,7 @@ class TestUpstreamFactoryBoozerMatrix:
                 message="converged",
             )
 
-        monkeypatch.setattr(_bsj, "host_jax_least_squares", fake_host_jax_least_squares)
+        monkeypatch.setattr(_bsj, "target_least_squares", fake_target_least_squares)
 
         result = _bsj._solve_boozer_state_with_kernel_bundle(
             bundle,
@@ -11682,7 +11476,7 @@ class TestUpstreamFactoryBoozerMatrix:
             coil_set_spec=coil_set_spec,
             optimize_G=True,
             weight_inv_modB=True,
-            method="lm",
+            method="lm-minpack-ondevice",
             tol=1e-10,
             maxiter=8,
             options={"materialize_dense_linearization": True},
@@ -11723,8 +11517,6 @@ class TestUpstreamFactoryBoozerMatrix:
             objective=lambda x, dynamic_state: jnp.asarray(0.0, dtype=x.dtype),
             residual=residual,
             jacobian=jacobian,
-            jacobian_block=lambda x, tangent_block, dynamic_state: tangent_block.T[:2],
-            least_squares_state=lambda x, dynamic_state: {},
             linear_solve=linear_solve,
             factor_apply=lambda x, vector, dynamic_state: vector,
             value_and_grad=lambda x, dynamic_state: (
@@ -11733,7 +11525,7 @@ class TestUpstreamFactoryBoozerMatrix:
             ),
         )
 
-        def fake_host_jax_least_squares(*args, **kwargs):
+        def fake_target_least_squares(*args, **kwargs):
             return types.SimpleNamespace(
                 x=x0,
                 success=True,
@@ -11743,7 +11535,7 @@ class TestUpstreamFactoryBoozerMatrix:
                 message="converged",
             )
 
-        monkeypatch.setattr(_bsj, "host_jax_least_squares", fake_host_jax_least_squares)
+        monkeypatch.setattr(_bsj, "target_least_squares", fake_target_least_squares)
 
         result = _bsj._solve_boozer_state_with_kernel_bundle(
             bundle,
@@ -11751,7 +11543,7 @@ class TestUpstreamFactoryBoozerMatrix:
             coil_set_spec=object(),
             optimize_G=True,
             weight_inv_modB=False,
-            method="lm",
+            method="lm-minpack-ondevice",
             tol=1e-10,
             maxiter=8,
             options={},

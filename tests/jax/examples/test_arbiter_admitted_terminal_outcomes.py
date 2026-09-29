@@ -157,7 +157,7 @@ def _lane(
         input_fingerprint="a" * 64,
         configuration_fingerprint="b" * 64,
         effective_construction_fingerprint="c" * 64,
-        driver="simsopt_lm_gmres",
+        driver="simsopt_lm_qr",
         normalized_status=normalized_status,
         raw_status=raw_status,
         success=success,

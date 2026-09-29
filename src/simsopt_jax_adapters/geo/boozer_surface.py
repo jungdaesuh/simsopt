@@ -167,15 +167,12 @@ from simsopt_jax.geo.optimizers.optimizer import (
     _mark_traceable_runner_cacheable,
     _resolve_traceable_newton_linear_solver,
     VALID_LEAST_SQUARES_ALGORITHMS,
-    host_jax_least_squares,
     host_jax_minimize_value_and_grad,
     levenberg_marquardt_minpack_traceable,
-    levenberg_marquardt_traceable,
     newton_exact,
     newton_exact_traceable,
     newton_polish,
     newton_polish_traceable,
-    reference_least_squares,
     reference_minimize,
     require_boozer_inner_backend_x64,
     require_target_backend_x64,
@@ -4122,7 +4119,6 @@ _SCIPY_TRACE_OPTIONS = frozenset({"record_scipy_callback_trace"})
 _CALLBACK_OPTIONS = frozenset({"stage_callback", "progress_callback"})
 _LINEARIZATION_RESIDENCY_VALUES = frozenset({"device", "host"})
 _ONDEVICE_LEAST_SQUARES_METHODS = _TARGET_LEAST_SQUARES_METHODS
-_LEAST_SQUARES_METHODS = frozenset({"lm"}) | _ONDEVICE_LEAST_SQUARES_METHODS
 _ONDEVICE_OPTIMIZER_METHODS = (
     frozenset({"bfgs-ondevice", "lbfgs-ondevice"}) | _ONDEVICE_LEAST_SQUARES_METHODS
 )
@@ -4162,7 +4158,7 @@ _ALLOWED_OPTIONS_EXACT = frozenset(_DEFAULT_OPTIONS_EXACT) | {
 
 def default_least_squares_algorithm_for_backend(optimizer_backend):
     if optimizer_backend == "host-jax":
-        return "lm"
+        return "lm-minpack"
     return "quasi-newton"
 
 
@@ -4287,8 +4283,6 @@ class BoozerKernelBundle:
     objective: Callable[[object, object], object]
     residual: Callable[[object, object], object]
     jacobian: Callable[[object, object], object]
-    jacobian_block: Callable[[object, object, object], object]
-    least_squares_state: Callable[[object, object], Mapping[str, object]]
     linear_solve: Callable[[object, object, object], tuple[object, object]]
     factor_apply: Callable[[object, object, object], object]
     value_and_grad: Callable[[object, object], tuple[object, object]]
@@ -4365,7 +4359,7 @@ def _solve_boozer_state_with_kernel_bundle(
     options: Mapping[str, object],
     progress_callback=None,
 ) -> BoozerHostSolveResult:
-    result = host_jax_least_squares(
+    result = target_least_squares(
         bundle.residual,
         x0,
         method=method,
@@ -4374,8 +4368,6 @@ def _solve_boozer_state_with_kernel_bundle(
         options=options,
         progress_callback=progress_callback,
         args=(coil_set_spec,),
-        state_fn=bundle.least_squares_state,
-        jacobian_block_fn=bundle.jacobian_block,
     )
     final_x = result.x
     residual = bundle.residual(final_x, coil_set_spec)
@@ -4707,8 +4699,9 @@ class BoozerSurfaceJAX(Optimizable):
             ``record_scipy_callback_trace=True`` records every SciPy adapter
             objective evaluation on the SciPy reference lane only.
             ``least_squares_algorithm="quasi-newton"``
-            preserves the historical BFGS/L-BFGS route; ``"lm"`` enables the
-            residual-vector Levenberg-Marquardt route on supported backends.
+            preserves the historical BFGS/L-BFGS route; ``"lm-minpack"``
+            enables the MINPACK-style residual-vector Levenberg-Marquardt
+            route (the ``host-jax`` default).
             ``newton_linear_solver`` selects one of the four exact traceable
             Newton solver names and defaults to ``"dense_lu"``, matching
             native C++ LS Newton (``np.linalg.solve``). Pass
@@ -5922,12 +5915,7 @@ class BoozerSurfaceJAX(Optimizable):
             coil_arrays=coil_arrays,
             coil_set_spec=coil_set_spec,
         )
-        return (
-            bundle.residual,
-            bundle.least_squares_state,
-            bundle.jacobian_block,
-            (resolved_coil_set_spec,),
-        )
+        return bundle.residual, (resolved_coil_set_spec,)
 
     def solve_boozer_state(
         self,
@@ -5959,7 +5947,7 @@ class BoozerSurfaceJAX(Optimizable):
             constraint_weight,
         )
         x0 = self._pack_decision_vector(iota, G, sdofs=sdofs)
-        method = "lm"
+        method = "lm-minpack-ondevice"
         solve_tol = self.options["bfgs_tol"] if tol is None else tol
         solve_maxiter = self.options["bfgs_maxiter"] if maxiter is None else maxiter
         return _solve_boozer_state_with_kernel_bundle(
@@ -6667,21 +6655,6 @@ class BoozerSurfaceJAX(Optimizable):
                 columns = jax.lax.map(jvp_column, eye, batch_size=8)
                 return jnp.moveaxis(columns, 0, -1)
 
-            def least_squares_state_fn(x, coil_set_spec):
-                return _dense_lm_state_from_residual_jacobian(
-                    residual_fn(x, coil_set_spec),
-                    jacobian_fn(x, coil_set_spec),
-                )
-
-            def jacobian_block_fn(x, tangent_block, coil_set_spec):
-                def residual_for_x(x_inner):
-                    return jnp.ravel(jnp.asarray(residual_fn(x_inner, coil_set_spec)))
-
-                def jvp_column(tangent):
-                    return jax.jvp(residual_for_x, (x,), (tangent,))[1]
-
-                return jax.vmap(jvp_column)(tangent_block).T
-
             def linear_solve_fn(x, rhs, coil_set_spec):
                 def objective_for_x(x_inner):
                     return objective_fn(x_inner, coil_set_spec)
@@ -6709,8 +6682,6 @@ class BoozerSurfaceJAX(Optimizable):
                 objective=jax.jit(objective_fn),
                 residual=jax.jit(residual_fn),
                 jacobian=jax.jit(jacobian_fn),
-                jacobian_block=jax.jit(jacobian_block_fn),
-                least_squares_state=jax.jit(least_squares_state_fn),
                 linear_solve=jax.jit(linear_solve_fn),
                 factor_apply=jax.jit(factor_apply_fn),
                 value_and_grad=jax.jit(jax.value_and_grad(objective_fn, argnums=0)),
@@ -6961,15 +6932,10 @@ class BoozerSurfaceJAX(Optimizable):
                 weight_inv_modB,
             )
             least_squares_options = self._collect_least_squares_options()
-            solver = (
-                levenberg_marquardt_minpack_traceable
-                if method == "lm-minpack-ondevice"
-                else levenberg_marquardt_traceable
-            )
             gtol = least_squares_options.get("gtol")
-            if method == "lm-minpack-ondevice" and gtol is None:
+            if gtol is None:
                 gtol = 1e-8
-            state = solver(
+            state = levenberg_marquardt_minpack_traceable(
                 residual_fn,
                 x0,
                 maxiter=self.options["bfgs_maxiter"],
@@ -7618,15 +7584,6 @@ class BoozerSurfaceJAX(Optimizable):
         ):
             effective_limited_memory = True
         least_squares_algorithm = self.options["least_squares_algorithm"]
-        if (
-            optimizer_backend == "ondevice"
-            and least_squares_algorithm == "lm"
-            and not optimize_G
-        ):
-            # The explicit-G full-state path is the on-device LM target lane.
-            # The reduced fixed-G compatibility path remains more reliable on
-            # the historical quasi-Newton formulation.
-            least_squares_algorithm = "quasi-newton"
         if optimizer_backend == "ondevice":
             return resolve_target_least_squares_optimizer_method(
                 limited_memory=effective_limited_memory,
@@ -7840,20 +7797,15 @@ class BoozerSurfaceJAX(Optimizable):
             optimize_G=optimize_G,
         )
         progress_callback = self._make_solver_progress_callback(method)
-        if method in _LEAST_SQUARES_METHODS:
-            host_jax_state_fn = None
-            host_jax_jacobian_block_fn = None
+        if method in _TARGET_LEAST_SQUARES_METHODS:
             residual_args = ()
             if self.options["optimizer_backend"] == "host-jax":
-                (
-                    residual_fn,
-                    host_jax_state_fn,
-                    host_jax_jacobian_block_fn,
-                    residual_args,
-                ) = self._make_penalty_least_squares_host_jax_inputs(
-                    optimize_G,
-                    weight_inv_modB,
-                    constraint_weight,
+                residual_fn, residual_args = (
+                    self._make_penalty_least_squares_host_jax_inputs(
+                        optimize_G,
+                        weight_inv_modB,
+                        constraint_weight,
+                    )
                 )
             else:
                 residual_fn = self._make_penalty_residual_with(
@@ -7862,28 +7814,15 @@ class BoozerSurfaceJAX(Optimizable):
                     constraint_weight,
                     decision_split_mode=decision_split_mode,
                 )
-            least_squares_runner = (
-                host_jax_least_squares
-                if self.options["optimizer_backend"] == "host-jax"
-                else target_least_squares
-                if method.endswith("-ondevice")
-                else reference_least_squares
-            )
-            least_squares_kwargs = {
-                "method": method,
-                "tol": tol,
-                "maxiter": maxiter,
-                "options": self._collect_least_squares_options(),
-                "progress_callback": progress_callback,
-            }
-            if self.options["optimizer_backend"] == "host-jax":
-                least_squares_kwargs["args"] = residual_args
-                least_squares_kwargs["state_fn"] = host_jax_state_fn
-                least_squares_kwargs["jacobian_block_fn"] = host_jax_jacobian_block_fn
-            result = least_squares_runner(
+            result = target_least_squares(
                 residual_fn,
                 x0,
-                **least_squares_kwargs,
+                method=method,
+                tol=tol,
+                maxiter=maxiter,
+                options=self._collect_least_squares_options(),
+                progress_callback=progress_callback,
+                args=residual_args,
             )
         else:
             optimizer_options = self._collect_optimizer_options(method=method)
@@ -8395,7 +8334,7 @@ class BoozerSurfaceJAX(Optimizable):
 
         if method == "manual":
             if self.options["optimizer_backend"] in {"host-jax", "ondevice"}:
-                residual_fn, _state_fn, _jacobian_block_fn, residual_args = (
+                residual_fn, residual_args = (
                     self._make_penalty_least_squares_host_jax_inputs(
                         optimize_G,
                         weight_inv_modB,
@@ -8455,19 +8394,16 @@ class BoozerSurfaceJAX(Optimizable):
                 "supports method='lm' or method='manual'."
             )
 
-        host_jax_state_fn = None
-        host_jax_jacobian_block_fn = None
+        # Every backend runs the one Levenberg-Marquardt, the MINPACK-style
+        # on-device lane that mirrors upstream's least_squares(method='lm').
         residual_args = ()
         if self.options["optimizer_backend"] == "host-jax":
-            (
-                residual_fn,
-                host_jax_state_fn,
-                host_jax_jacobian_block_fn,
-                residual_args,
-            ) = self._make_penalty_least_squares_host_jax_inputs(
-                optimize_G,
-                weight_inv_modB,
-                constraint_weight,
+            residual_fn, residual_args = (
+                self._make_penalty_least_squares_host_jax_inputs(
+                    optimize_G,
+                    weight_inv_modB,
+                    constraint_weight,
+                )
             )
         else:
             residual_fn = self._make_penalty_residual_with(
@@ -8477,47 +8413,16 @@ class BoozerSurfaceJAX(Optimizable):
                 hostify_inputs=self.options["optimizer_backend"] != "ondevice",
                 decision_split_mode=decision_split_mode,
             )
-        if self.options["optimizer_backend"] == "ondevice":
-            resolved_method = self._resolve_optimizer_method(
-                limited_memory=False,
-                optimize_G=optimize_G,
-            )
-            optimizer_method = (
-                resolved_method
-                if resolved_method in _ONDEVICE_LEAST_SQUARES_METHODS
-                else "lm-ondevice"
-            )
-            result = target_least_squares(
-                residual_fn,
-                x0,
-                method=optimizer_method,
-                tol=tol,
-                maxiter=maxiter,
-                options=self._collect_least_squares_options(),
-            )
-        elif self.options["optimizer_backend"] == "host-jax":
-            result = host_jax_least_squares(
-                residual_fn,
-                x0,
-                method="lm",
-                tol=tol,
-                maxiter=maxiter,
-                options=self._collect_least_squares_options(),
-                args=residual_args,
-                state_fn=host_jax_state_fn,
-                jacobian_block_fn=host_jax_jacobian_block_fn,
-            )
-            optimizer_method = "lm"
-        else:
-            result = reference_least_squares(
-                residual_fn,
-                x0,
-                method="lm",
-                tol=tol,
-                maxiter=maxiter,
-                options=self._collect_least_squares_options(),
-            )
-            optimizer_method = "lm"
+        optimizer_method = "lm-minpack-ondevice"
+        result = target_least_squares(
+            residual_fn,
+            x0,
+            method=optimizer_method,
+            tol=tol,
+            maxiter=maxiter,
+            options=self._collect_least_squares_options(),
+            args=residual_args,
+        )
 
         sdofs_final, iota_out, G_out = self._unpack_decision_vector(
             result.x, optimize_G

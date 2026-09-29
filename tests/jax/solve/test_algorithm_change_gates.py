@@ -21,10 +21,10 @@ def _fake_result():
     )
 
 
-def test_old_lm_shim_maps_to_gmres_host_not_scipy_lm(monkeypatch, caplog):
+def test_old_lm_shim_maps_to_lm_qr_not_scipy_lm(monkeypatch, caplog):
     monkeypatch.setattr(
         legacy_optimizer,
-        "_jax_least_squares_legacy",
+        "target_least_squares",
         lambda *_args, **_kwargs: _fake_result(),
     )
     with legacy_optimizer._DEPRECATED_SOLVE_JAX_CALLSITE_LOCK:
@@ -36,12 +36,12 @@ def test_old_lm_shim_maps_to_gmres_host_not_scipy_lm(monkeypatch, caplog):
         legacy_optimizer.jax_least_squares(
             lambda x: x,
             np.zeros(2),
-            method="lm",
+            method="lm-minpack-ondevice",
         )
 
     assert len(caught) == 1
-    assert "driver='simsopt_lm_gmres_host'" in str(caught[0].message)
-    assert caplog.records[0].translated_driver == "simsopt_lm_gmres_host"
+    assert "driver='simsopt_lm_qr'" in str(caught[0].message)
+    assert caplog.records[0].translated_driver == "simsopt_lm_qr"
 
 
 def test_old_adam_shim_maps_to_bridge_not_optax(monkeypatch, caplog):

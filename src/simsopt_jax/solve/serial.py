@@ -36,7 +36,6 @@ from simsopt_jax.solve.driver import Driver
 from simsopt_jax.solve.simsopt.contracts import (
     SimsoptBFGSOptions,
     SimsoptLBFGSBOptions,
-    SimsoptLMGMRESOptions,
     SimsoptLMQROptions,
 )
 
@@ -369,15 +368,7 @@ def _least_squares_options(
     rtol: float,
     atol: float,
     max_steps: int,
-) -> SimsoptLMGMRESOptions | SimsoptLMQROptions:
-    if driver == Driver.SIMSOPT_LM_GMRES:
-        return SimsoptLMGMRESOptions(
-            maxiter=max_steps,
-            ftol=rtol,
-            xtol=atol,
-            gtol=min(rtol, atol),
-            materialize_dense_linearization=False,
-        )
+) -> SimsoptLMQROptions:
     if driver == Driver.SIMSOPT_LM_QR:
         return SimsoptLMQROptions(
             maxiter=max_steps,
@@ -385,10 +376,7 @@ def _least_squares_options(
             xtol=atol,
             gtol=min(rtol, atol),
         )
-    raise ValueError(
-        "least_squares_serial_solve_jax driver must be simsopt_lm_gmres or "
-        "simsopt_lm_qr."
-    )
+    raise ValueError("least_squares_serial_solve_jax driver must be simsopt_lm_qr.")
 
 
 def _scalar_options(
@@ -467,7 +455,7 @@ def _require_success(result: OptimizerResult, *, operation: str) -> None:
 def least_squares_serial_solve_jax(
     prob: TraceableLeastSquaresProblem,
     *,
-    driver: Driver = Driver.SIMSOPT_LM_GMRES,
+    driver: Driver = Driver.SIMSOPT_LM_QR,
     rtol: float = 1.0e-8,
     atol: float = 1.0e-8,
     max_steps: int = 256,

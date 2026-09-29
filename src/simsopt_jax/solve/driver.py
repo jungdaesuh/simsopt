@@ -25,8 +25,6 @@ class Driver(StrEnum):
     SIMSOPT_TRACE_LBFGS = "simsopt_trace_lbfgs"
     SIMSOPT_ADAM_HOST = "simsopt_adam_host"
     SIMSOPT_ADAM = "simsopt_adam"
-    SIMSOPT_LM_GMRES_HOST = "simsopt_lm_gmres_host"
-    SIMSOPT_LM_GMRES = "simsopt_lm_gmres"
     SIMSOPT_LM_QR = "simsopt_lm_qr"
 
 
@@ -39,7 +37,6 @@ _LEGACY_REFERENCE_MINIMIZE_METHODS = {
 _LEGACY_REFERENCE_LEAST_SQUARES_METHODS = {
     Driver.SCIPY_BFGS: "bfgs",
     Driver.SCIPY_LBFGSB: "lbfgs",
-    Driver.SIMSOPT_LM_GMRES_HOST: "lm",
 }
 _LEGACY_TARGET_MINIMIZE_METHODS = {
     Driver.SIMSOPT_BFGS: "bfgs-ondevice",
@@ -47,7 +44,6 @@ _LEGACY_TARGET_MINIMIZE_METHODS = {
     Driver.SIMSOPT_ADAM: "adam-ondevice",
 }
 _LEGACY_TARGET_LEAST_SQUARES_METHODS = {
-    Driver.SIMSOPT_LM_GMRES: "lm-ondevice",
     Driver.SIMSOPT_LM_QR: "lm-minpack-ondevice",
 }
 _LEGACY_TARGET_METHODS = {
