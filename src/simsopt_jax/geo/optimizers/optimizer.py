@@ -7098,14 +7098,17 @@ def _require_dense_least_squares_linearization(materialize):
     ``materialize`` is the caller's resolved setting (``None`` when unset).
     MINPACK's LM factors the dense residual Jacobian every iteration; the
     matrix-free option belonged to the removed GMRES Levenberg-Marquardt.
-    ``max_dense_linearization_bytes`` bounds the dense memory instead.
+    ``max_dense_linearization_bytes`` caps the bytes of the dense residual
+    Jacobian and Hessian instead; it gates those two arrays, not the solver's
+    peak workspace (QR factors and ``lmpar`` temporaries come on top).
     """
     if materialize is not None and not materialize:
         raise ValueError(
             "lm-minpack always materializes the dense residual Jacobian and "
             "cannot honour materialize_dense_linearization=False (the "
-            "matrix-free Levenberg-Marquardt was removed); bound its memory "
-            "with max_dense_linearization_bytes instead."
+            "matrix-free Levenberg-Marquardt was removed); cap its dense "
+            "residual Jacobian and Hessian bytes with "
+            "max_dense_linearization_bytes instead."
         )
 
 
