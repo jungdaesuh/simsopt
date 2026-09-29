@@ -1,20 +1,32 @@
-# ALM solver gates for this fork's alm-library branch (simsopt.solve.alm and
-# the simsopt-alm-setup skill). Two jobs:
+# Gates of the simsopt-alm package (packages/simsopt-alm: the ALM solver
+# simsopt_alm, its tests and examples) and of the simsopt-alm-setup skill.
+# The package installs beside any simsopt, so each job installs a simsopt
+# first and the package on top, non-editable, and runs the package's tests
+# from packages/simsopt-alm (they import the installed package). Four jobs:
 #
-# python38: the declared Python floor (requires-python = ">=3.8"), which the
-#   other workflows' matrices do not reach. Upstream's isolated build needs
-#   numpy >= 2, which has no Python 3.8 release, so the build dependencies are
-#   installed first (numpy 1.24.4, SciPy 1.10.1, jax/jaxlib 0.4.13 from
-#   Google's jax-releases page) and simsopt builds without isolation.
+# package: Python 3.11 with simsopt built from this checkout: every package
+#   test, including the examples (test_alm_examples.py runs the Stage-2 and
+#   Boozer demos at their CI size; the Boozer demo is bounded by evaluations)
+#   and the skill's tests.
 #
-# golden-exact-replay: the bitwise replay of tests/test_files/alm_golden,
-#   which runs only under the numpy, SciPy, machine and OpenBLAS kernel
-#   family the goldens were recorded with and otherwise skips. The goldens
-#   are recorded with one thread per library and OpenBLAS's Haswell kernels
-#   pinned (AVX2 and FMA, which every x86-64-v3 runner has; numpy's own
-#   AVX-512 dispatch does not change the replay). This job installs exactly
-#   the versions manifest.json records, sets the same variables, and fails
-#   (not skips) when the replay does not run.
+# stock-simsopt: the same tests in a clean environment whose simsopt is the
+#   stock upstream release from PyPI, the case of a user who installs the
+#   package next to someone else's simsopt.
+#
+# python38: the declared Python floor (requires-python = ">=3.8"). Upstream
+#   simsopt's isolated build needs numpy >= 2, which has no Python 3.8
+#   release, so the build dependencies are installed first (numpy 1.24.4,
+#   SciPy 1.10.1, jax/jaxlib 0.4.13 from Google's jax-releases page) and
+#   simsopt builds without isolation.
+#
+# golden-exact-replay: the bitwise replay of tests/alm_golden, which runs only
+#   under the numpy, SciPy, machine and OpenBLAS kernel family the goldens
+#   were recorded with and otherwise skips. The goldens are recorded with one
+#   thread per library and OpenBLAS's Haswell kernels pinned (AVX2 and FMA,
+#   which every x86-64-v3 runner has; numpy's own AVX-512 dispatch does not
+#   change the replay). This job installs exactly the versions manifest.json
+#   records and the package alone (the goldens need no simsopt), sets the same
+#   variables, and fails (not skips) when the replay does not run.
 
 name: ALM
 
@@ -35,18 +47,97 @@ permissions:
   contents: read
 
 jobs:
-  python38:
-    name: ALM on Python 3.8
+  package:
+    name: simsopt-alm on this checkout's simsopt
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       OMP_NUM_THREADS: 4
-      PYTHON: .venv-alm/bin/python
+      PYTHON: ${{ github.workspace }}/.venv-alm/bin/python
 
     steps:
     - uses: actions/checkout@v4
       with:
-        # setuptools_scm derives the version from the tags.
+        # setuptools_scm derives simsopt's version from the tags.
+        fetch-depth: 0
+        submodules: recursive
+
+    - uses: astral-sh/setup-uv@v6
+
+    - name: Install Boost headers
+      run: sudo apt-get update && sudo apt-get install -y libboost-dev
+
+    - name: Install simsopt from this checkout, then the package
+      run: |
+        uv venv --python 3.11 .venv-alm
+        uv pip install --python "$PYTHON" . pytest
+        uv pip install --python "$PYTHON" ./packages/simsopt-alm
+
+    - name: Run the package tests
+      working-directory: packages/simsopt-alm
+      run: |
+        "$PYTHON" -m pytest -q -rs tests
+
+  stock-simsopt:
+    name: simsopt-alm beside stock PyPI simsopt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      OMP_NUM_THREADS: 4
+      PYTHON: ${{ github.workspace }}/.venv-stock/bin/python
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: astral-sh/setup-uv@v6
+
+    - name: Install stock simsopt from PyPI into a clean environment
+      run: |
+        uv venv --python 3.11 .venv-stock
+        uv pip install --python "$PYTHON" --no-cache simsopt pytest
+
+    - name: Install the package on top
+      run: uv pip install --python "$PYTHON" ./packages/simsopt-alm
+
+    - name: Require stock simsopt and a solver import free of simsopt
+      run: |
+        "$PYTHON" - <<'EOF'
+        import importlib.metadata
+        import json
+        import subprocess
+        import sys
+        import simsopt
+        import simsopt_alm
+        import simsopt_alm.signed_constraints
+        direct_url = importlib.metadata.distribution("simsopt").read_text("direct_url.json")
+        print("simsopt", importlib.metadata.version("simsopt"), simsopt.__file__, "direct_url", direct_url)
+        print("simsopt_alm", importlib.metadata.version("simsopt-alm"), simsopt_alm.__file__)
+        if direct_url is not None:
+            sys.exit("simsopt was not installed from an index")
+        probe = ("import json, sys, simsopt_alm; print(json.dumps(sorted(name for name in sys.modules "
+                 "if name == 'simsopt' or name.startswith('simsopt.'))))")
+        loaded = json.loads(subprocess.run([sys.executable, "-c", probe], capture_output=True,
+                                           text=True, check=True).stdout)
+        print("simsopt modules loaded by import simsopt_alm:", loaded)
+        sys.exit(f"import simsopt_alm loaded {loaded}" if loaded else 0)
+        EOF
+
+    - name: Run the package tests
+      working-directory: packages/simsopt-alm
+      run: |
+        "$PYTHON" -m pytest -q -rs tests
+
+  python38:
+    name: simsopt-alm on Python 3.8
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      OMP_NUM_THREADS: 4
+      PYTHON: ${{ github.workspace }}/.venv-alm/bin/python
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
         fetch-depth: 0
         submodules: recursive
 
@@ -65,17 +156,19 @@ jobs:
         uv pip install --python "$PYTHON" jax==0.4.13 jaxlib==0.4.13 \
           -f https://storage.googleapis.com/jax-releases/jax_releases.html
 
-    - name: Build and install simsopt without build isolation
-      run: uv pip install --python "$PYTHON" --no-build-isolation -e .
+    - name: Build and install simsopt without build isolation, then the package
+      run: |
+        uv pip install --python "$PYTHON" --no-build-isolation .
+        uv pip install --python "$PYTHON" ./packages/simsopt-alm
 
-    - name: Import the ALM package on Python 3.8
+    - name: Import the package on Python 3.8
       run: |
         "$PYTHON" - <<'EOF'
         import sys
         import numpy, scipy, jax
         import simsopt
-        import simsopt.solve.alm as alm
-        import simsopt.geo.signed_constraints as signed_constraints
+        import simsopt_alm as alm
+        import simsopt_alm.signed_constraints as signed_constraints
         assert sys.version_info[:2] == (3, 8), sys.version
         print(sys.version.split()[0], "numpy", numpy.__version__, "scipy", scipy.__version__, "jax", jax.__version__)
         print("simsopt", simsopt.__file__)
@@ -83,11 +176,12 @@ jobs:
         print("signed_constraints", signed_constraints.__file__)
         EOF
 
-    - name: Run the focused ALM tests (examples excluded)
+    - name: Run the package tests (examples excluded)
+      working-directory: packages/simsopt-alm
       run: |
-        "$PYTHON" -m pytest -q -rs tests/solve/test_alm*.py \
-          --ignore=tests/solve/test_alm_examples.py \
-          --ignore=tests/solve/test_alm_composition_example.py
+        "$PYTHON" -m pytest -q -rs tests \
+          --ignore=tests/test_alm_examples.py \
+          --ignore=tests/test_alm_composition_example.py
 
   golden-exact-replay:
     name: ALM golden exact replay
@@ -99,14 +193,11 @@ jobs:
       MKL_NUM_THREADS: 1
       # The recording pin (manifest.json openblas_coretype; checked below).
       OPENBLAS_CORETYPE: Haswell
-      PYTHON: .venv-golden/bin/python
-      MANIFEST: tests/test_files/alm_golden/manifest.json
+      PYTHON: ${{ github.workspace }}/.venv-golden/bin/python
+      GOLDEN_DIR: ${{ github.workspace }}/packages/simsopt-alm/tests/alm_golden
 
     steps:
     - uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-        submodules: recursive
 
     - uses: astral-sh/setup-uv@v6
 
@@ -115,7 +206,7 @@ jobs:
       run: |
         python3 - <<'EOF' >> "$GITHUB_OUTPUT"
         import json, os
-        environment = json.load(open(os.environ["MANIFEST"]))["environment"]
+        environment = json.load(open(os.path.join(os.environ["GOLDEN_DIR"], "manifest.json")))["environment"]
         print("python=" + ".".join(environment["python"].split(".")[:2]))
         print("numpy=" + environment["numpy"])
         print("scipy=" + environment["scipy"])
@@ -145,23 +236,18 @@ jobs:
           fi
         done
 
-    - name: Install Boost headers
-      run: sudo apt-get update && sudo apt-get install -y libboost-dev
-
     - name: Create the environment with the recorded numpy and SciPy
       run: |
         uv venv --python "${{ steps.recorded.outputs.python }}" .venv-golden
         printf 'numpy==%s\nscipy==%s\n' "${{ steps.recorded.outputs.numpy }}" \
           "${{ steps.recorded.outputs.scipy }}" > golden-constraints.txt
-        uv pip install --python "$PYTHON" -c golden-constraints.txt numpy scipy scikit-build-core \
-          "pybind11<3.0.0" "setuptools_scm>=8.0" cmake ninja setuptools pytest
-        uv pip install --python "$PYTHON" -c golden-constraints.txt --no-build-isolation -e .
+        uv pip install --python "$PYTHON" -c golden-constraints.txt numpy scipy pytest ./packages/simsopt-alm
 
     - name: Require the bitwise environment
       run: |
         "$PYTHON" - <<'EOF'
-        import sys
-        sys.path.insert(0, "tests/test_files/alm_golden")
+        import os, sys
+        sys.path.insert(0, os.environ["GOLDEN_DIR"])
         import alm_golden_scenarios as golden
         print("current ", golden.current_environment())
         print("recorded", golden.recorded_environment())
@@ -173,15 +259,16 @@ jobs:
         [ "$cores" = "Core: $OPENBLAS_CORETYPE" ]
 
     - name: Run the golden tests
+      working-directory: packages/simsopt-alm
       run: |
-        "$PYTHON" -m pytest -q -rs tests/solve/test_alm_golden_trajectories.py --junitxml=golden-junit.xml
+        "$PYTHON" -m pytest -q -rs tests/test_alm_golden_trajectories.py --junitxml="$GITHUB_WORKSPACE/golden-junit.xml"
 
     - name: Fail unless every bitwise replay ran and passed
       run: |
         "$PYTHON" - <<'EOF'
-        import sys
+        import os, sys
         import xml.etree.ElementTree as ElementTree
-        sys.path.insert(0, "tests/test_files/alm_golden")
+        sys.path.insert(0, os.environ["GOLDEN_DIR"])
         import alm_golden_scenarios as golden
         # One bitwise test per scenario, test_<scenario name>; each must pass,
         # not skip.
