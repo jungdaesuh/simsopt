@@ -1,6 +1,7 @@
 #include "xtensor-python/pyarray.hpp"
 typedef xt::pyarray<double> PyArray;
 #include <math.h>
+#include <vector>
 
 /** Compute quadratic flux and similar quantities.
  *
@@ -55,11 +56,18 @@ double integral_BdotN(PyArray& Bcoil, PyArray& Btarget, PyArray& n, std::string 
     } else {
         throw std::runtime_error("Unrecognized value for 'definition'.");
     }
-    double numerator_sum = 0.0;
-    double denominator_sum = 0.0;
+    // The per-point terms are computed in parallel and then summed serially in
+    // index order. An OpenMP reduction combines the threads' partial sums in
+    // whatever order the threads finish, so its result changed with the team
+    // size and from call to call; the serial sum is the single-thread
+    // reduction's own order, so every team now gives that value bit for bit.
+    int npoints = nphi*ntheta;
+    std::vector<double> numerator_terms(npoints);
+    std::vector<double> denominator_terms(
+        definition_int == DEFINITION_NORMALIZED ? npoints : 0);
 
-    #pragma omp parallel for reduction(+:numerator_sum, denominator_sum)
-    for(int i=0; i<nphi*ntheta; i++){
+    #pragma omp parallel for
+    for(int i=0; i<npoints; i++){
         double normN = std::sqrt(
             n_ptr[3 * i + 0] * n_ptr[3 * i + 0] 
             + n_ptr[3 * i + 1] * n_ptr[3 * i + 1] 
@@ -82,16 +90,23 @@ double integral_BdotN(PyArray& Bcoil, PyArray& Btarget, PyArray& n, std::string 
             + Bcoil_ptr[3 * i + 2] * Bcoil_ptr[3 * i + 2];
         
         if (definition_int == DEFINITION_QUADRATIC_FLUX) {
-            numerator_sum += (BcoildotN * BcoildotN) * normN;
+            numerator_terms[i] = (BcoildotN * BcoildotN) * normN;
         } else if (definition_int == DEFINITION_NORMALIZED){
-            numerator_sum += (BcoildotN * BcoildotN) * normN;
-            denominator_sum += mod_B_squared * normN;
+            numerator_terms[i] = (BcoildotN * BcoildotN) * normN;
+            denominator_terms[i] = mod_B_squared * normN;
         } else if (definition_int == DEFINITION_LOCAL) {
-            numerator_sum += (BcoildotN * BcoildotN) / mod_B_squared * normN;
+            numerator_terms[i] = (BcoildotN * BcoildotN) / mod_B_squared * normN;
         } else {
             throw std::runtime_error("Should never reach this point.");
         }
     }
+
+    double numerator_sum = 0.0;
+    for (double term : numerator_terms)
+        numerator_sum += term;
+    double denominator_sum = 0.0;
+    for (double term : denominator_terms)
+        denominator_sum += term;
 
     double result;
     if (definition_int == DEFINITION_NORMALIZED) {
