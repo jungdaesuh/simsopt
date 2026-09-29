@@ -8,8 +8,9 @@ Phase 2 acceptance gate is "census in parity mode shows surface-side arrays
 byte-identical OR documents the exact remaining first-mismatch with
 arithmetic-order reason." Today the residual is FMA-fusion (Phase 4
 territory), so these tests assert that the cpu_ordered output reproduces the
-C++ values within the absolute 1e-13 bound below, directly and through the
-parity-policy routing. They do not order cpu_ordered against the production
+C++ values within 1e-13 for gamma and the coefficient derivatives and 5e-13
+for the tangents gammadash{1,2}, whose magnitudes scale with 2π·|coeff|,
+directly and through the parity-policy routing. They do not order cpu_ordered against the production
 matmul kernel: both sit within a few ULP of the C++ values, and which one
 lands closer at the last bit depends on the compilation context (XLA's fusion
 and FMA choices differ between a CPU-only process, the CPU device of a CUDA
@@ -314,7 +315,10 @@ def test_parity_policy_routes_through_cpu_ordered_kernels_and_meets_ulp_ceiling(
     """
     fx = cpu_jax_pair(mpol=2, ntor=2, nfp=3, stellsym=True, nphi=11, ntheta=11)
     routed = _routed_gamma(fx, "cpu_ordered")
-    np.testing.assert_array_equal(routed, _direct_cpu_ordered_gamma(fx))
+    # Compare the bit patterns: ``assert_array_equal`` would treat +0.0 and -0.0 as equal.
+    np.testing.assert_array_equal(
+        routed.view(np.uint64), _direct_cpu_ordered_gamma(fx).view(np.uint64)
+    )
     cpp_gamma = np.asarray(fx["surface"].gamma(), dtype=np.float64)
     cpu_drift = np.max(np.abs(routed - cpp_gamma))
     assert cpu_drift < _SURFACE_GAMMA_ULP_CEILING, (
