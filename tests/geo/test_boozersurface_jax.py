@@ -8951,12 +8951,23 @@ class TestBoozerSurfaceJAXExactPath:
         )
         assert jnp.all(jnp.isfinite(captured["residual"]))
 
-    def test_run_code_traceable_lm_refuses_materialize_false(self, monkeypatch):
-        """lm-minpack always builds the dense Jacobian; False must not pass."""
+    @pytest.mark.parametrize(
+        ("stored_materialize", "call_materialize"),
+        [(False, True), (True, False)],
+        ids=["stored-false", "per-call-false"],
+    )
+    def test_run_code_traceable_lm_refuses_materialize_false(
+        self, monkeypatch, stored_materialize, call_materialize
+    ):
+        """lm-minpack always builds the dense Jacobian; False must not pass.
+
+        Either source of False, the stored option or run_code_traceable's
+        per-call argument, must be refused before the LM runs.
+        """
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
         booz.options["least_squares_algorithm"] = "lm-minpack"
-        booz.options["materialize_dense_linearization"] = False
+        booz.options["materialize_dense_linearization"] = stored_materialize
 
         def forbidden_lm(*_args, **_kwargs):
             raise AssertionError("the LM must not run on a refused option")
@@ -8972,6 +8983,7 @@ class TestBoozerSurfaceJAXExactPath:
                 jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64),
                 jnp.asarray(0.3, dtype=jnp.float64),
                 jnp.asarray(0.05, dtype=jnp.float64),
+                materialize_dense_linearization=call_materialize,
             )
 
     def test_run_code_traceable_lm_ondevice_executes_inner_solve_on_gpu(

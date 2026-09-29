@@ -7046,14 +7046,14 @@ def _least_squares_tolerances(tol, options):
     )
 
 
-def _require_dense_least_squares_linearization(options):
-    """Refuse ``materialize_dense_linearization=False`` for the lm-minpack lane.
+def _require_dense_least_squares_linearization(materialize):
+    """Refuse an effective ``materialize_dense_linearization=False`` for lm-minpack.
 
+    ``materialize`` is the caller's resolved setting (``None`` when unset).
     MINPACK's LM factors the dense residual Jacobian every iteration; the
     matrix-free option belonged to the removed GMRES Levenberg-Marquardt.
     ``max_dense_linearization_bytes`` bounds the dense memory instead.
     """
-    materialize = options.get("materialize_dense_linearization")
     if materialize is not None and not materialize:
         raise ValueError(
             "lm-minpack always materializes the dense residual Jacobian and "
@@ -7094,7 +7094,9 @@ def target_least_squares(
 
     require_target_backend_x64("ondevice")
     ftol, xtol, gtol = _least_squares_tolerances(tol, options)
-    _require_dense_least_squares_linearization(options)
+    _require_dense_least_squares_linearization(
+        options.get("materialize_dense_linearization")
+    )
     max_dense_linearization_bytes = options.get("max_dense_linearization_bytes")
     callback = options.get("callback")
     progress_callback = options.get("progress_callback")

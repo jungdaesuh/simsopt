@@ -6923,9 +6923,14 @@ class BoozerSurfaceJAX(Optimizable):
         *,
         optimize_G,
         weight_inv_modB,
+        materialize_dense_linearization=True,
         optimizer_state_dtype=None,
     ):
-        """Run the traceable pre-Newton Boozer optimizer stage."""
+        """Run the traceable pre-Newton Boozer optimizer stage.
+
+        ``materialize_dense_linearization`` is the caller's per-call request;
+        it combines with the stored option, and the LM refuses a False result.
+        """
         if method not in _TRACEABLE_PRE_NEWTON_METHODS:
             raise RuntimeError(
                 "run_code_traceable() requires optimizer_backend='ondevice' and "
@@ -6938,7 +6943,12 @@ class BoozerSurfaceJAX(Optimizable):
                 weight_inv_modB,
             )
             least_squares_options = self._collect_least_squares_options()
-            _require_dense_least_squares_linearization(least_squares_options)
+            _require_dense_least_squares_linearization(
+                bool(
+                    least_squares_options["materialize_dense_linearization"]
+                    and materialize_dense_linearization
+                )
+            )
             ftol, xtol, gtol = _least_squares_tolerances(
                 self.options["bfgs_tol"],
                 least_squares_options,
@@ -7341,6 +7351,7 @@ class BoozerSurfaceJAX(Optimizable):
             method,
             optimize_G=optimize_G,
             weight_inv_modB=weight_inv_modB,
+            materialize_dense_linearization=materialize_dense_linearization,
             optimizer_state_dtype=np.dtype(get_backend_policy().runtime_dtype),
         )
         x_ls = pre_newton["x"]
