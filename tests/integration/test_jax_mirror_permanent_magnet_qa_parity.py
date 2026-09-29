@@ -62,7 +62,9 @@ OFFICIAL = load_official_reference(CASE_ID)
 #: The four bounded ``final`` VALUE observables the coordinator made
 #: inapplicable on every lane pair on 2026-09-20
 #: (``A/fix-wave-3/integration/apply_pm_requests.py``), each with the ``rtol``
-#: bucket its routes declare (all four declare ``mirror_pmqa_final``).
+#: bucket its routes declare (all four declare ``mirror_pmqa_final``).  The
+#: three measured as determined were re-enabled later; the fourth,
+#: ``objective_sum_squares``, was re-enabled on 2026-09-29 (see below).
 DISABLED_BOUNDED_FINAL_VALUES: Final[tuple[str, ...]] = (
     "final:objective_sum_squares",
     "final:residual_norm",
@@ -76,8 +78,10 @@ DISABLED_BOUNDED_FINAL_VALUES: Final[tuple[str, ...]] = (
 #: ``ATb`` perturbation); the other three were switched off by extrapolation
 #: from it.
 #:
-#: Current record, measured 2026-09-29 on the rebased native build
-#: (``simsoptpp`` sha256 ``f74d83d35def68d0...5b``), at one thread, over the
+#: Current record, measured 2026-09-29 on the rebased native build, both with
+#: and without the deterministic ``integral_BdotN`` summation (``simsoptpp``
+#: sha256 ``f74d83d35def68d0...5b`` and ``0149cc25cefa1d90...53``, bit-identical
+#: results), at one thread, over the
 #: campaign's pre-registered eight one-ulp draws, worst draw against rtol 5e-4:
 #: objective_sum_squares 7.928e-11, residual_norm 3.964e-11, moment_l2_norm
 #: 5.818e-12, proxy_moment_l2_norm 1.250e-11 -- every observable DETERMINED.
@@ -93,13 +97,12 @@ DISABLED_BOUNDED_FINAL_VALUES: Final[tuple[str, ...]] = (
 #:
 #: This table is the record of the measurement on the build under test, and a
 #: change to it in either direction is a route adjudication (the manifest's),
-#: not a test update.  The manifest's bounded ``objective_sum_squares`` routes
-#: stay inapplicable: the pre-registered rule (parity redesign of 2026-09-29,
-#: item C5) re-enables them
-#: only when all eight draws fall inside rtol on this build (they do), on the
-#: RC6-dropped build (pending: not yet measured), and native-versus-JAX at
-#: bounded passes the bucket (it does: 1.163e-10 relative on this build,
-#: asserted by ``test_the_extrapolated_bounded_routes_compare_inside_their_bucket``).
+#: not a test update.  Adjudicated 2026-09-29 by the rule pre-registered for it
+#: (parity redesign, item C5): the manifest's bounded ``objective_sum_squares``
+#: routes are applicable again, because all eight draws fall inside rtol on the
+#: build with the deterministic summation and on the build without it, and
+#: native-versus-JAX at bounded passes the bucket (1.163e-10 relative, asserted
+#: by ``test_the_extrapolated_bounded_routes_compare_inside_their_bucket``).
 DETERMINED_TO_ITS_BUCKET: Final[Mapping[str, bool]] = MappingProxyType(
     {
         "final:objective_sum_squares": True,
@@ -329,7 +332,7 @@ def test_each_disabled_bounded_value_route_has_its_own_measured_condition(
     A cross-lane comparison at ``rtol`` decides between two implementations
     only if the observable does not move past ``rtol`` when its own input moves
     by a single ulp.  That is measured here, per observable, and it is what the
-    four inapplicable ``final`` value routes rest on.
+    applicability of the four bounded ``final`` value routes rests on.
 
     Both halves run in the SAME one-thread child: the old probe ran both solves
     in the pytest process with no pin, where the unperturbed repeat alone moves
