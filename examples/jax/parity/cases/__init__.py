@@ -352,6 +352,7 @@ _CASES = {
                 ),
                 same_state_tests=(
                     "tests/integration/test_jax_mirror_boozer_official_end_states.py",
+                    "tests/integration/test_jax_mirror_boozer_first_stage_same_state.py",
                 ),
                 derivation=(
                     "PLAN.md amendment 5 part 1, B1 (registered 2026-09-29 16:24 EDT, before any "
