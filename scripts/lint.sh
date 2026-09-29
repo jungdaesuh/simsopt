@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Single home for the ruff pin. Workflows and humans call this instead of
-# unpinned `uvx ruff` / ruff-action without a version.
+# Ruff pin for the JAX workflows and for humans, who call this instead of
+# unpinned `uvx ruff`. It matches upstream's pin in .github/workflows/linting.yml
+# (ruff-action `version: 0.15.0`); change both together.
 #
-# Bump RUFF_VERSION here only. Pair a 0.16.x bump with the auto-fixable hits
-# that version introduces.
+# Pair a 0.16.x bump with the auto-fixable hits that version introduces.
 set -euo pipefail
 
-RUFF_VERSION=0.15.22
+RUFF_VERSION=0.15.0
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
