@@ -793,7 +793,9 @@ Each entry: the symptom, the cause, the fix.
    absolute. Rows in raw units (a distance in m next to a curvature in 1/m and
    a squared curvature) differ by orders of magnitude, so one row dominates
    each subproblem and the others converge late or never. Divide each row by
-   its bound or typical size, and f by a reference value such as f(x0);
+   its bound or typical size, and f by a positive reference value such as
+   |f(x0)| (a negative divisor turns minimization into maximization; the
+   templates use `ZERO_OBJECTIVE_SCALE` when f(x0) = 0);
    `sign_check.py` warns when gradient norms spread over more than 1e3 or a
    value is far from O(1). Remove large constant offsets from f as well:
    `converged` certifies the implemented approximate-KKT tests at the
@@ -926,7 +928,7 @@ Each entry: the symptom, the cause, the fix.
     `stationarity_tol`, and a complementarity gap Σ λ⁺_i max(0, -g_i)
     within `feasibility_tol`, not an exact KKT point. Both tolerances are
     absolute in f's units (an offset added to f changes nothing): scale f
-    to O(1), as the templates do by dividing it by its initial value. A large multiplier on a row just inside its bound
+    to O(1), as the templates do by dividing it by |f(x0)|. A large multiplier on a row just inside its bound
     blocks success until dual updates shrink it (`plateau_stall` or a
     `max_outer_*` reason; see [Termination reasons](#termination-reasons)). Known
     limit: a nonconvex row steep enough that its multiplier times its slack
@@ -969,10 +971,10 @@ surface, with coil-regularity requirements as constraints instead of weights.
 Copy this file to ``alm_problem.py`` next to ``run_alm.py`` and edit the parts
 marked ``SETUP``. As shipped it is the problem of the simsopt-alm package's
 ``examples/stage_two_optimization_alm.py`` (the QA target of arXiv:2108.03711,
-four base coils), with f divided by its initial value and every row divided by
-its threshold, so that all of them are O(1):
+four base coils), with f divided by the size of its initial value and every
+row divided by its threshold, so that all of them are O(1):
 
-    minimize    f(x) / f(x0),  f = (1/2) \int |B.n|^2 ds + LENGTH_WEIGHT * sum_i CurveLength_i
+    minimize    f(x) / |f(x0)|,  f = (1/2) \int |B.n|^2 ds + LENGTH_WEIGHT * sum_i CurveLength_i
     subject to  (CC_MIN_DISTANCE - min coil-coil distance) / CC_MIN_DISTANCE    <= 0
                 (CS_MIN_DISTANCE - min coil-surface distance) / CS_MIN_DISTANCE <= 0
                 (max curvature_i - MAX_CURVATURE) / MAX_CURVATURE                <= 0  (each base coil)
@@ -1000,10 +1002,10 @@ quasi-symmetry on a Boozer surface that is re-solved at every evaluation.
 
 Copy this file to ``alm_problem.py`` next to ``run_alm.py`` and edit the parts
 marked ``SETUP``. As shipped it is the problem of the simsopt-alm package's
-``examples/boozerQA_alm.py`` (NCSX coils), with f divided by its initial value
-and every row divided by the size of its bound:
+``examples/boozerQA_alm.py`` (NCSX coils), with f divided by the size of its
+initial value and every row divided by the size of its bound:
 
-    minimize    J(x) / J(x0),  J = (\int_S B_nonQA^2 dS) / (\int_S B_QA dS)
+    minimize    J(x) / |J(x0)|,  J = (\int_S B_nonQA^2 dS) / (\int_S B_QA dS)
     subject to  iota within IOTA_TARGET +- IOTA_HALF_WIDTH                  (two rows)
                 major radius within MAJOR_RADIUS_TARGET +- its half width   (two rows)
                 coil length <= LENGTH_MAX   (by LENGTH_SCOPE: each base coil, the sum

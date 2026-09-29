@@ -1357,6 +1357,67 @@ class TemplateSmokeTests(unittest.TestCase):
                                      "IOTA_TARGET: Optional[float] = 0.0")
             self.assertRegex(error, r"^ValueError: .*IOTA_SCALE")
 
+    # The objective line of each coil template, which these tests replace by
+    # FACTOR x the base-coil length sum (both templates define coil_lengths
+    # first), and a probe printing the built problem's objective scale, its
+    # scaled f at x0 and the cosine between the scaled gradient and the
+    # gradient of the objective written into the template.
+    OBJECTIVE_LINES = {
+        "stage2": "unscaled = self.squared_flux + LENGTH_WEIGHT * sum(self.coil_lengths)",
+        "boozer_single_stage": "unscaled = NonQuasiSymmetricRatio(self.boozer_surface, "
+                               "BiotSavart(biot_savart.coils))",
+    }
+    OBJECTIVE_PROBE = (
+        "import json, numpy as np\n"
+        "from alm_problem import build_problem\n"
+        "problem = build_problem(smoke=True)\n"
+        "requested = {factor} * sum(problem.coil_lengths)\n"
+        "scaled, wanted = problem.objective.dJ(), requested.dJ()\n"
+        "norms = np.linalg.norm(scaled) * np.linalg.norm(wanted)\n"
+        "print('OBJECTIVE ' + json.dumps({{'scale': problem.objective_scale, "
+        "'scaled_value': float(problem.objective.J()), 'requested_value': float(requested.J()), "
+        "'cosine': float(np.dot(scaled, wanted) / norms) if norms else None}}))\n"
+    )
+
+    def build_with_objective(self, template: str, factor: str) -> dict:
+        generate_problem(self.scratch, template, replaced_once(
+            (TEMPLATES_DIR / f"{template}.py").read_text(), self.OBJECTIVE_LINES[template],
+            f"unscaled = {factor} * sum(self.coil_lengths)"))
+        completed = run_python(["-c", self.OBJECTIVE_PROBE.format(factor=factor)],
+                               cwd=self.scratch, problem_dir=self.scratch)
+        self.assertEqual(completed.returncode, 0, completed.stderr[-4000:])
+        return result_line(completed, "OBJECTIVE ")
+
+    def test_templates_minimize_a_negative_objective(self):
+        """R16-03: f / f(x0) turned a negative f into its negation, so the
+        solver maximized it; the templates divide by |f(x0)|."""
+        for template in self.OBJECTIVE_LINES:
+            with self.subTest(template=template):
+                built = self.build_with_objective(template, "-1.0")
+                self.assertLess(built["requested_value"], 0.0)
+                self.assertAlmostEqual(built["scale"], -built["requested_value"], places=12)
+                self.assertAlmostEqual(built["scaled_value"], -1.0, places=12)
+                self.assertAlmostEqual(built["cosine"], 1.0, places=12,
+                                       msg="the scaled gradient does not point along the requested one")
+
+    def test_templates_build_with_a_zero_initial_objective(self):
+        """R16-03: a zero f(x0) divided by zero; the templates divide by
+        ZERO_OBJECTIVE_SCALE (1, in f's units) instead."""
+        for template in self.OBJECTIVE_LINES:
+            with self.subTest(template=template):
+                built = self.build_with_objective(template, "0.0")
+                self.assertEqual(built["requested_value"], 0.0)
+                self.assertEqual(built["scale"], 1.0)
+                self.assertEqual(built["scaled_value"], 0.0)
+
+    def test_templates_reject_an_invalid_zero_objective_scale(self):
+        for template in self.OBJECTIVE_LINES:
+            for scale in ("0.0", "-1.0", "float('nan')"):
+                with self.subTest(template=template, scale=scale):
+                    error = self.build_fails(template, "ZERO_OBJECTIVE_SCALE = 1.0",
+                                             f"ZERO_OBJECTIVE_SCALE = {scale}")
+                    self.assertRegex(error, r"^ValueError: ZERO_OBJECTIVE_SCALE")
+
     def test_stage2_length_scopes_count_the_right_coils(self):
         """The all-coils row is 2 x nfp = 4 times the base-coil sum (16 circles of
         length pi at x0); the per-coil rows bound each base coil; the sign probes

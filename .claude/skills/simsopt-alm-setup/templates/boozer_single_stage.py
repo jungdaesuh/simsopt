@@ -4,10 +4,10 @@ quasi-symmetry on a Boozer surface that is re-solved at every evaluation.
 
 Copy this file to ``alm_problem.py`` next to ``run_alm.py`` and edit the parts
 marked ``SETUP``. As shipped it is the problem of the simsopt-alm package's
-``examples/boozerQA_alm.py`` (NCSX coils), with f divided by its initial value
-and every row divided by the size of its bound:
+``examples/boozerQA_alm.py`` (NCSX coils), with f divided by the size of its
+initial value and every row divided by the size of its bound:
 
-    minimize    J(x) / J(x0),  J = (\int_S B_nonQA^2 dS) / (\int_S B_QA dS)
+    minimize    J(x) / |J(x0)|,  J = (\int_S B_nonQA^2 dS) / (\int_S B_QA dS)
     subject to  iota within IOTA_TARGET +- IOTA_HALF_WIDTH                  (two rows)
                 major radius within MAJOR_RADIUS_TARGET +- its half width   (two rows)
                 coil length <= LENGTH_MAX   (by LENGTH_SCOPE: each base coil, the sum
@@ -80,6 +80,10 @@ LENGTH_SCOPE = SUM_OF_BASE_COILS
 CC_MIN_DISTANCE = 0.15                         # m, coil to coil
 MAX_CURVATURE = 15.0                           # 1/m, each base coil
 MAX_MEAN_SQUARED_CURVATURE = 15.0              # 1/m^2, each base coil
+# f is divided by |f(x0)|, a positive scale, so its sign and so the direction
+# of minimization are kept; an f(x0) of 0 has no size, and f is divided by
+# this positive reference (in f's units) instead.
+ZERO_OBJECTIVE_SCALE = 1.0
 
 # SETUP: smoothing temperatures of the smooth rows, in the constrained
 # quantity's units.
@@ -174,7 +178,8 @@ class BoozerSingleStageProblem:
                             ("MAX_MEAN_SQUARED_CURVATURE", MAX_MEAN_SQUARED_CURVATURE),
                             ("DISTANCE_TEMPERATURE", DISTANCE_TEMPERATURE),
                             ("CURVATURE_TEMPERATURE", CURVATURE_TEMPERATURE), ("LENGTH_MAX", LENGTH_MAX),
-                            ("MAJOR_RADIUS_TARGET", MAJOR_RADIUS_TARGET), ("IOTA_SCALE", IOTA_SCALE)):
+                            ("MAJOR_RADIUS_TARGET", MAJOR_RADIUS_TARGET), ("IOTA_SCALE", IOTA_SCALE),
+                            ("ZERO_OBJECTIVE_SCALE", ZERO_OBJECTIVE_SCALE)):
             if value is not None:
                 require_positive(name, value)
         for name, value in (("IOTA_HALF_WIDTH", IOTA_HALF_WIDTH),
@@ -211,8 +216,8 @@ class BoozerSingleStageProblem:
         unscaled = NonQuasiSymmetricRatio(self.boozer_surface, BiotSavart(biot_savart.coils))
         # Fix one current so the problem cannot scale all currents together.
         base_currents[0].fix_all()
-        # J / J(x0): the stationarity tolerance becomes relative to the start.
-        self.objective_scale = float(unscaled.J())
+        # J / |J(x0)|: the stationarity tolerance becomes relative to the start.
+        self.objective_scale = abs(float(unscaled.J())) or ZERO_OBJECTIVE_SCALE
         self.objective = (1.0 / self.objective_scale) * unscaled
         self.x0 = self.objective.x.copy()
         iota_target = float(res["iota"]) if IOTA_TARGET is None else IOTA_TARGET
@@ -240,7 +245,7 @@ class BoozerSingleStageProblem:
             # Rows are divided by the size of their bounds: 1e-4 is a
             # violation of 0.01% of a bound.
             feasibility_tol=1e-4,
-            # J is divided by J(x0): 1e-4 asks for a 1e-4 relative gradient.
+            # J is divided by |J(x0)|: 1e-4 asks for a 1e-4 relative gradient.
             stationarity_tol=1e-4,
         )
         # maxiter is the L-BFGS-B budget of the whole minimize_alm call (all

@@ -11,7 +11,9 @@ Each entry: the symptom, the cause, the fix.
    absolute. Rows in raw units (a distance in m next to a curvature in 1/m and
    a squared curvature) differ by orders of magnitude, so one row dominates
    each subproblem and the others converge late or never. Divide each row by
-   its bound or typical size, and f by a reference value such as f(x0);
+   its bound or typical size, and f by a positive reference value such as
+   |f(x0)| (a negative divisor turns minimization into maximization; the
+   templates use `ZERO_OBJECTIVE_SCALE` when f(x0) = 0);
    `sign_check.py` warns when gradient norms spread over more than 1e3 or a
    value is far from O(1). Remove large constant offsets from f as well:
    `converged` certifies the implemented approximate-KKT tests at the
@@ -144,7 +146,7 @@ Each entry: the symptom, the cause, the fix.
     `stationarity_tol`, and a complementarity gap Σ λ⁺_i max(0, -g_i)
     within `feasibility_tol`, not an exact KKT point. Both tolerances are
     absolute in f's units (an offset added to f changes nothing): scale f
-    to O(1), as the templates do by dividing it by its initial value. A large multiplier on a row just inside its bound
+    to O(1), as the templates do by dividing it by |f(x0)|. A large multiplier on a row just inside its bound
     blocks success until dual updates shrink it (`plateau_stall` or a
     `max_outer_*` reason; see [termination.md](termination.md)). Known
     limit: a nonconvex row steep enough that its multiplier times its slack

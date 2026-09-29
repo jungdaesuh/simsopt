@@ -5,10 +5,10 @@ surface, with coil-regularity requirements as constraints instead of weights.
 Copy this file to ``alm_problem.py`` next to ``run_alm.py`` and edit the parts
 marked ``SETUP``. As shipped it is the problem of the simsopt-alm package's
 ``examples/stage_two_optimization_alm.py`` (the QA target of arXiv:2108.03711,
-four base coils), with f divided by its initial value and every row divided by
-its threshold, so that all of them are O(1):
+four base coils), with f divided by the size of its initial value and every
+row divided by its threshold, so that all of them are O(1):
 
-    minimize    f(x) / f(x0),  f = (1/2) \int |B.n|^2 ds + LENGTH_WEIGHT * sum_i CurveLength_i
+    minimize    f(x) / |f(x0)|,  f = (1/2) \int |B.n|^2 ds + LENGTH_WEIGHT * sum_i CurveLength_i
     subject to  (CC_MIN_DISTANCE - min coil-coil distance) / CC_MIN_DISTANCE    <= 0
                 (CS_MIN_DISTANCE - min coil-surface distance) / CS_MIN_DISTANCE <= 0
                 (max curvature_i - MAX_CURVATURE) / MAX_CURVATURE                <= 0  (each base coil)
@@ -63,6 +63,10 @@ R0 = 1.0                # m, major radius of the initial circular coils
 R1 = 0.5                # m, minor radius of the initial circular coils
 CURRENT = 1e5           # A, initial current of every base coil (the first stays fixed)
 LENGTH_WEIGHT = 1e-6    # weight of the base-coil length sum in f (a regularizer, not a constraint)
+# f is divided by |f(x0)|, a positive scale, so its sign and so the direction
+# of minimization are kept; an f(x0) of 0 has no size, and f is divided by
+# this positive reference (in f's units) instead.
+ZERO_OBJECTIVE_SCALE = 1.0
 
 # What the coil-length bound applies to:
 PER_BASE_COIL = "per_base_coil"
@@ -172,7 +176,8 @@ class Stage2Problem:
                             ("MAX_CURVATURE", MAX_CURVATURE),
                             ("MAX_MEAN_SQUARED_CURVATURE", MAX_MEAN_SQUARED_CURVATURE),
                             ("MAX_LENGTH", MAX_LENGTH), ("DISTANCE_TEMPERATURE", DISTANCE_TEMPERATURE),
-                            ("CURVATURE_TEMPERATURE", CURVATURE_TEMPERATURE)):
+                            ("CURVATURE_TEMPERATURE", CURVATURE_TEMPERATURE),
+                            ("ZERO_OBJECTIVE_SCALE", ZERO_OBJECTIVE_SCALE)):
             if value is not None:
                 require_positive(name, value)
         # Smoke runs a coarse surface and low-order coils.
@@ -193,8 +198,8 @@ class Stage2Problem:
         self.squared_flux = SquaredFlux(self.surface, self.biot_savart)
         # SETUP: the objective f, any simsopt Optimizable of the coil dofs.
         unscaled = self.squared_flux + LENGTH_WEIGHT * sum(self.coil_lengths)
-        # f / f(x0): the stationarity tolerance becomes relative to the start.
-        self.objective_scale = float(unscaled.J())
+        # f / |f(x0)|: the stationarity tolerance becomes relative to the start.
+        self.objective_scale = abs(float(unscaled.J())) or ZERO_OBJECTIVE_SCALE
         self.objective = (1.0 / self.objective_scale) * unscaled
         self.x0 = self.objective.x.copy()
         self.row_specs = self._row_specs()
@@ -208,7 +213,7 @@ class Stage2Problem:
             # Rows are divided by their thresholds: 1e-4 is a violation of
             # 0.01% of a threshold, below any engineering tolerance.
             feasibility_tol=1e-4,
-            # f is divided by f(x0): 1e-4 asks for a 1e-4 relative gradient.
+            # f is divided by |f(x0)|: 1e-4 asks for a 1e-4 relative gradient.
             stationarity_tol=1e-4,
         )
         # maxiter is the L-BFGS-B budget of the whole minimize_alm call (all
@@ -343,7 +348,7 @@ class Stage2Problem:
         curves_to_vtk(self.curves, str(OUT_DIR / "curves_opt_alm"))
         self.biot_savart.save(str(OUT_DIR / "biot_savart_opt_alm.json"))
         return {
-            # f without the 1 / f(x0) scale: the squared flux plus LENGTH_WEIGHT x the base-coil lengths.
+            # f without the 1 / |f(x0)| scale: the squared flux plus LENGTH_WEIGHT x the base-coil lengths.
             "objective": float(result.objective) * self.objective_scale,
             "squared_flux": float(self.squared_flux.J()),
             "min_coil_coil_distance": min_curve_curve_distance(self.curves),
