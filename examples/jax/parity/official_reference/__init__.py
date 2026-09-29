@@ -16,6 +16,7 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final
 
 import numpy as np
@@ -277,17 +278,10 @@ class OfficialReference:
 
     def array(self, key: str) -> np.ndarray:
         """The exact array. Raises when the fixture kept only a digest for this key."""
-        entry = self._require(key, "array")
-        if "values" not in entry:
-            raise ObservableKindError(
-                f"observable {key!r} of case {self.case_id!r} ({self.variant}) has {entry['count']} elements, "
-                f"above the inline limit "
-                f"{INLINE_ELEMENT_LIMIT}; only a digest is stored. Use digest({key!r})."
-            )
-        values = np.asarray(
-            decode_nonfinite(entry["values"]), dtype=str(entry["dtype"])
+        return _inline_array(
+            self._require(key, "array"),
+            f"{key!r} of case {self.case_id!r} ({self.variant})",
         )
-        return values.reshape(tuple(int(extent) for extent in entry["shape"]))
 
     def digest(self, key: str) -> ArrayDigest:
         return ArrayDigest.from_payload(self._require(key, "array"))
@@ -311,6 +305,17 @@ class OfficialReference:
                 f"observable {key!r} of case {self.case_id!r} ({self.variant}) is a {entry['kind']}, not a {kind}"
             )
         return entry
+
+
+def _inline_array(entry: Mapping[str, object], label: str) -> np.ndarray:
+    """Decode one element-exact array entry; a digest-only entry is refused."""
+    if "values" not in entry:
+        raise ObservableKindError(
+            f"observable {label} has {entry['count']} elements, above the inline limit "
+            f"{INLINE_ELEMENT_LIMIT}; only a digest is stored"
+        )
+    values = np.asarray(decode_nonfinite(entry["values"]), dtype=str(entry["dtype"]))
+    return values.reshape(tuple(int(extent) for extent in entry["shape"]))
 
 
 def reference_path(case_id: str) -> Path:
@@ -787,4 +792,155 @@ def load_official_tracing_scatter(case_id: str) -> OfficialTracingScatter:
         unperturbed=UnperturbedTrace.from_payload(payload["unperturbed"]),
         runs=tuple(TracingScatterRun.from_payload(run) for run in payload["runs"]),
         maxima=TracingScatter.from_payload(payload["maxima_over_k"]),
+    )
+
+
+#: Directory holding UPSTREAM's own end-state scatter at the parity harness's own scales: one file per case and scale,
+#: ``<case_id>.<scale>.json``. Unlike ``sensitivity/`` (one end value per run of the unmodified official script), a
+#: scatter record keeps every end-state observable a contract judges, and at a reduced scale its runner is DERIVED:
+#: the official body with only the scale lines changed, the diff stored in the record.
+UPSTREAM_SCATTER_ROOT: Final[Path] = REFERENCE_ROOT / "scatter"
+
+
+@dataclass(frozen=True)
+class UpstreamScatterRunner:
+    """Which bytes ran: the official body verbatim, or the official body with the recorded scale edits."""
+
+    kind: str
+    body_sha256: str
+    body_diff: str
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, object]) -> UpstreamScatterRunner:
+        kind = str(payload["kind"])
+        if kind not in ("verbatim", "derived"):
+            raise ValueError(f"unknown upstream scatter runner kind {kind!r}")
+        body_diff = str(payload["body_diff"])
+        if (kind == "verbatim") != (body_diff == ""):
+            raise ValueError(
+                "a verbatim runner has no body diff and a derived runner has one"
+            )
+        return cls(
+            kind=kind, body_sha256=str(payload["body_sha256"]), body_diff=body_diff
+        )
+
+
+@dataclass(frozen=True)
+class UpstreamScatterRun:
+    """One upstream run at one start: its provider outcomes and its end-state observables under LANE keys."""
+
+    k: int
+    workflow_success: bool
+    """Upstream's own success flags of every stage the record names were all true."""
+    provider_calls: tuple[ProviderOutcome, ...]
+    capture_sha256: str
+    perturbation_sha256: str
+    _values: Mapping[str, Mapping[str, object]]
+
+    def keys(self) -> tuple[str, ...]:
+        return tuple(sorted(self._values))
+
+    def value(self, lane_key: str) -> np.ndarray:
+        """The end-state observable as an FP64 array (0-d for a scalar), element-exact."""
+        if lane_key not in self._values:
+            raise MissingObservableError(
+                f"upstream scatter run k={self.k} has no observable {lane_key!r}; available: {list(self.keys())}"
+            )
+        entry = self._values[lane_key]
+        if entry["kind"] == "scalar":
+            return np.asarray(_as_float(entry["value"]), dtype=np.float64)
+        if entry["kind"] == "array":
+            return np.asarray(
+                _inline_array(entry, f"{lane_key!r} of run k={self.k}"),
+                dtype=np.float64,
+            )
+        raise ObservableKindError(
+            f"observable {lane_key!r} of run k={self.k} is a {entry['kind']}"
+        )
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, object]) -> UpstreamScatterRun:
+        return cls(
+            k=_as_int(payload["k"]),
+            workflow_success=bool(payload["workflow_success"]),
+            provider_calls=tuple(
+                ProviderOutcome.from_payload(call) for call in payload["provider_calls"]
+            ),
+            capture_sha256=str(payload["capture_sha256"]),
+            perturbation_sha256=str(payload["perturbation_sha256"]),
+            _values=MappingProxyType(
+                {
+                    str(key): dict(entry)
+                    for key, entry in dict(payload["values"]).items()
+                }
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class OfficialUpstreamScatter:
+    """Upstream's own end states at one of the harness's scales. Raw numbers only: no band, no set, no bound."""
+
+    case_id: str
+    scale: str
+    upstream_commit: str
+    official_script: str
+    official_script_sha256: str
+    runner: UpstreamScatterRunner
+    protocol: SensitivityProtocol
+    capture_keys: Mapping[str, str]
+    """Lane key -> upstream's capture key of the same quantity."""
+    runs: tuple[UpstreamScatterRun, ...]
+
+    def run(self, k: int) -> UpstreamScatterRun:
+        for run in self.runs:
+            if run.k == k:
+                return run
+        raise MissingObservableError(
+            f"case {self.case_id!r} ({self.scale}) has no upstream scatter run k={k}; "
+            f"available: {[r.k for r in self.runs]}"
+        )
+
+
+def upstream_scatter_path(case_id: str, scale: str) -> Path:
+    """Path of the tracked upstream scatter file of ``case_id`` at ``scale`` (it need not exist)."""
+    return UPSTREAM_SCATTER_ROOT / f"{case_id}.{scale}.json"
+
+
+def upstream_scatter_records() -> tuple[tuple[str, str], ...]:
+    """Sorted ``(case_id, scale)`` pairs that have a tracked upstream scatter record."""
+    return tuple(
+        sorted(
+            tuple(path.name.removesuffix(".json").rsplit(".", maxsplit=1))
+            for path in UPSTREAM_SCATTER_ROOT.glob("*.json")
+        )
+    )
+
+
+def load_upstream_scatter(case_id: str, scale: str) -> OfficialUpstreamScatter:
+    """Load upstream's own end-state scatter of ``case_id`` at ``scale``."""
+    path = upstream_scatter_path(case_id, scale)
+    if not path.is_file():
+        raise MissingObservableError(
+            f"no upstream scatter record for case {case_id!r} at scale {scale!r} ({path}); "
+            f"available: {list(upstream_scatter_records())}"
+        )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload["case_id"] != case_id or payload["scale"] != scale:
+        raise ValueError(f"{path} names {payload['case_id']!r} at {payload['scale']!r}")
+    return OfficialUpstreamScatter(
+        case_id=str(payload["case_id"]),
+        scale=str(payload["scale"]),
+        upstream_commit=str(payload["upstream_commit"]),
+        official_script=str(payload["official_script"]),
+        official_script_sha256=str(payload["official_script_sha256"]),
+        runner=UpstreamScatterRunner.from_payload(payload["runner"]),
+        protocol=SensitivityProtocol.from_payload(payload["protocol"]),
+        capture_keys=MappingProxyType(
+            {
+                str(key): str(value)
+                for key, value in dict(payload["capture_keys"]).items()
+            }
+        ),
+        runs=tuple(UpstreamScatterRun.from_payload(run) for run in payload["runs"]),
     )

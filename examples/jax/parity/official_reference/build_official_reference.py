@@ -133,6 +133,29 @@ says so there. Note also that `fun` is what the provider reported, which is not 
 `native-stage-two-optimization-finitebuild` the official script scales the objective it hands the optimizer by
 `1e-4`, so `end_value` (the unscaled `final:objective`) is `1e4` times the reported `fun`.
 
+## `scatter/`
+
+`scatter/<case_id>.<scale>.json` records UPSTREAM's OWN end states at one of the parity harness's scales, for a case
+whose end point is path dependent (`native-stage-two-optimization-planar-coils`) or whose end STATE -- which
+solution the workflow lands on -- is not determined by its input at all (`native-boozer`, whose first stage stops at
+its 300-iteration cap and whose Boozer solves then converge onto one of several surfaces). Runs of the official script
+on the official build, one thread, the same one-ulp protocol as `sensitivity/` (`k = 0` unperturbed, `k = 1..8`
+with ONLY the first provider call's start vector moved by one unit in the last place per entry, signs from
+`np.random.RandomState(20260920 + k)`), pre-registered before any sample was drawn. At `native_default` the runner
+body is the official script verbatim and `k = 0` reproduces the canonical capture bitwise; at `bounded` it is the
+official body with ONLY its scale lines changed to the harness's bounded configuration, and the record stores that
+diff (`runner.body_diff`).
+
+Each record maps the port lane's observable keys to upstream's capture keys (`capture_keys`) and holds, per `k`,
+every provider call's outcome, whether every upstream stage the record names succeeded (`workflow_success`), the
+sha256 of that run's `capture.json` and perturbation record, and the end-state values under LANE keys, element-exact.
+Read it with `load_upstream_scatter(case_id, scale)`; `upstream_scatter_records()` lists what exists; the records are
+written by `examples/jax/parity/official_reference/build_upstream_scatter.py`.
+
+As for `sensitivity/`, these are upstream's numbers and nothing else: **the fixture computes no band, set or bound**.
+The contracts derived from them live in `examples/jax/parity/official_scatter_contracts.py` and state their
+derivation there.
+
 ## `tracing/`
 
 `tracing/<case_id>.json` records UPSTREAM's OWN trajectory scatter for the three tracing mirrors, whose observable is

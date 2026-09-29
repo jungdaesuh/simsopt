@@ -16,6 +16,7 @@ import pytest
 
 from examples.jax.parity import official_reference
 from examples.jax.parity.official_reference import (
+    UPSTREAM_SCATTER_ROOT,
     CANONICAL_VARIANT,
     SENSITIVITY_ROOT,
     INLINE_ELEMENT_LIMIT,
@@ -84,6 +85,7 @@ def test_fixture_covers_exactly_the_official_case_ids() -> None:
             "README.md",
             SENSITIVITY_DIRECTORY_NAME,
             TRACING_DIRECTORY_NAME,
+            UPSTREAM_SCATTER_ROOT.name,
         ]
     )
     assert SENSITIVITY_ROOT.is_dir()
