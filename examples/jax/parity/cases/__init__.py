@@ -364,7 +364,10 @@ _CASES = {
                     "and success flags are compared exactly and the end states at the case's "
                     "same-state tolerance (rtol 1e-11, atol 1e-13), and every replayed solve must "
                     "succeed. The chained end state is informational: the first stage's capped, "
-                    "path-dependent L-BFGS end point decides which surface the chain reaches"
+                    "path-dependent L-BFGS end point decides which surface the chain reaches. "
+                    "The first stage itself is judged at identical x (x0 and upstream's nine "
+                    "first-stage ends) against a derived first-order rounding bound (amendment 5 "
+                    "part 2, B2; an engineering error envelope on the GPU in its rsqrt constant)"
                 ),
             )
             for scale in ("bounded", "native_default")
