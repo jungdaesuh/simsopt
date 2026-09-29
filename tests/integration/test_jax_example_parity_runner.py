@@ -1051,7 +1051,7 @@ def test_work_budget_contract_is_case_owned_and_scoped() -> None:
     # explicit max_iter cap (wireframe_optimization.cpp:281), but the official
     # native_default and CI runs both stop earlier on "minimum objective
     # reached", so only the reduced bounded cap is ever reached.
-    # Planar coils left this group on 2026-09-29 (parity redesign, C4): at both scales its verdict is a band
+    # Planar coils left this group on 2026-09-29 (parity redesign, C4): at the bounded scale its verdict is a band
     # from upstream's own one-ulp scatter, which admits the budget exit and excludes a work budget there.
     fixed_budget_scales = {
         "native-stage-two-optimization",
@@ -1073,7 +1073,7 @@ def test_work_budget_contract_is_case_owned_and_scoped() -> None:
     }
     # Minimal stage two declares no work budget: upstream's native_default run ends at its L-BFGS-B iteration limit
     # (status 1, nit 300), which the official endpoint quality band admits, and the reduced scale converges.
-    native_default_only: set[str] = set()
+    native_default_only = {"native-stage-two-optimization-planar-coils"}
     assert declared == fixed_budget_scales | bounded_only | native_default_only
     expected_scales = {
         **{case_id: ("bounded", "native_default") for case_id in fixed_budget_scales},
@@ -1285,15 +1285,13 @@ def test_quality_band_refuses_an_unmeasurable_observable(
 
 def test_quality_band_declaration_is_opt_in_per_case() -> None:
     # Opt-in stays per case: only the official mirrors whose band is derived from
-    # upstream's own end-point scatter declare one -- the sensitivity records
-    # (official_quality_bands, rule v2 of 2026-09-20) and, since the 2026-09-29
-    # redesign, planar coils from its upstream scatter record (its re-derivation
-    # is in tests/jax/examples/test_official_scatter_contracts.py).
+    # upstream's own end-point scatter (official_quality_bands, rule v2 of
+    # 2026-09-20) declare one at native_default.
     assert {
         case_id
         for case_id in implemented_case_ids()
         if get_case(case_id).quality_band("native_default") is not None
-    } == set(OFFICIAL_BAND_CASE_IDS) | {"native-stage-two-optimization-planar-coils"}
+    } == set(OFFICIAL_BAND_CASE_IDS)
     # Re-derived here from the tracked upstream record, never by calling the
     # function that built the entry: comparing an entry with a second call of
     # its own factory cannot fail. S is upstream's end values under one-ulp
@@ -2981,7 +2979,9 @@ def test_an_upstream_end_state_set_rejects_an_unusable_declaration(
         elif mutation == "nan":
             UpstreamEndState(k=0, values={**good, _IOTA: np.asarray(np.nan)})
         elif mutation == "empty":
-            UpstreamEndState(k=0, values={**good, _DOFS: np.asarray([], dtype=np.float64)})
+            UpstreamEndState(
+                k=0, values={**good, _DOFS: np.asarray([], dtype=np.float64)}
+            )
         elif mutation == "key":
             UpstreamEndState(k=0, values={"iota": np.asarray(0.5)})
         elif mutation == "bool_k":
@@ -3059,7 +3059,9 @@ def _registered(case_id: str) -> CaseDefinition:
 def test_a_case_looks_up_its_band_and_end_state_set_by_scale() -> None:
     case = dataclasses.replace(
         _registered(_END_STATE_CASE_ID),
-        quality_bands=(dataclasses.replace(_ARCHIVED_QUALITY_BAND, scale="native_default"),),
+        quality_bands=(
+            dataclasses.replace(_ARCHIVED_QUALITY_BAND, scale="native_default"),
+        ),
         upstream_end_states=(_upstream_end_states(scale="bounded"),),
     )
 
@@ -3209,11 +3211,15 @@ def _round_trip_declaration(*extra_k: int) -> CaseDefinition:
     )
 
 
-def _declare(monkeypatch: pytest.MonkeyPatch, module: object, declared: CaseDefinition) -> None:
+def _declare(
+    monkeypatch: pytest.MonkeyPatch, module: object, declared: CaseDefinition
+) -> None:
     monkeypatch.setattr(
         module,
         "get_case",
-        lambda case_id: declared if case_id == _ROUND_TRIP_CASE_ID else get_case(case_id),
+        lambda case_id: (
+            declared if case_id == _ROUND_TRIP_CASE_ID else get_case(case_id)
+        ),
     )
 
 

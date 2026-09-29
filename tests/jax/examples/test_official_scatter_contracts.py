@@ -38,8 +38,8 @@ def test_only_the_pre_registered_cases_declare_scatter_contracts() -> None:
     assert end_state_cases == {"native-boozer"}
 
 
-@pytest.mark.parametrize("scale", SCALES)
-def test_planar_band_is_rule_v2_over_upstreams_nine_draws(scale: str) -> None:
+def test_planar_band_is_rule_v2_over_upstreams_nine_draws() -> None:
+    scale = "bounded"
     band = get_case(PLANAR).quality_band(scale)
     assert band is not None
     samples = [
@@ -54,7 +54,13 @@ def test_planar_band_is_rule_v2_over_upstreams_nine_draws(scale: str) -> None:
     assert "same-state proof" in band.derivation
     assert "stale" in band.derivation
     # A band admits a stop at the cap, so no work budget may cover a banded scale.
-    assert get_case(PLANAR).work_budget_contract is None
+    # At native_default the lanes agree to 1.5e-7 relative and may end stage two on
+    # their own convergence, which the band's matched-budget clause cannot express,
+    # so the work budget and the lane-against-lane routes decide there.
+    contract = get_case(PLANAR).work_budget_contract
+    assert contract is not None
+    assert contract.scales == ("native_default",)
+    assert get_case(PLANAR).quality_band("native_default") is None
 
 
 @pytest.mark.parametrize("scale", SCALES)
