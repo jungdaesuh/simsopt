@@ -7,7 +7,7 @@ import numpy as np
 from typing import Type, Union
 
 from simsopt.geo.curve import kappa_pure
-from simsopt.geo.curveobjectives import CurveLength
+from simsopt.geo.curveobjectives import CurveLength, curve_length_pure
 from simsopt.geo.curvexyzfourier import CurveXYZFourier, JaxCurveXYZFourier
 
 
@@ -25,7 +25,10 @@ def test_native_curve_length_stays_host_owned_under_strict_transfer_guard() -> N
     curve = _unit_circle(CurveXYZFourier)
     objective = CurveLength(curve)
     incremental_arclength = curve.incremental_arclength()
-    expected_value = np.mean(incremental_arclength)
+    # Upstream's value: ``jnp.mean`` of the arclengths on the host CPU device.
+    expected_value = jax.device_get(
+        curve_length_pure(jax.device_put(incremental_arclength, jax.devices("cpu")[0]))
+    )
     expected_derivative = curve.dincremental_arclength_by_dcoeff_vjp(
         np.full_like(incremental_arclength, 1.0 / incremental_arclength.size)
     )(curve)
