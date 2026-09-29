@@ -17,9 +17,11 @@ that mirror the C++ accumulation order operator-for-operator:
   the rotation, *not* distributed inside the basis.
 
 What the tests guarantee is agreement with the C++ values within an absolute
-1e-13 (the FMA-fusion residual); whether these twins or the production kernels
-land closer at the last bit depends on the compilation context, so no ordering
-between them is promised.
+1e-13 for ``gamma`` and the coefficient derivatives, and 5e-13 for the tangents
+``gammadash{1,2}``, whose magnitudes scale with ``2π·|coeff|`` (the FMA-fusion
+residual); whether these twins or the production kernels land closer at the
+last bit depends on the compilation context, so no ordering between them is
+promised.
 
 These twins are diagnostic-grade: only the parity backend
 (``SIMSOPT_BACKEND_MODE=jax_cpu_parity``/``jax_gpu_parity`` →
