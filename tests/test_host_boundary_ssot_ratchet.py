@@ -316,6 +316,48 @@ def test_only_boundary_owners_call_jax_transfer_and_readiness_primitives() -> No
     assert not stale, "Stale owner-call allowlist entries:\n  " + "\n  ".join(stale)
 
 
+# ``host_boundary.allow_host_transfers`` lifts an outer strict guard for its whole
+# block, so every caller is admitted explicitly: file -> number of call sites.
+# Admitted 2026-09-28: the official tiny least-squares policy's five host-driven
+# scopes (SciPy's residual callback, the endpoint Jacobian, three residual builders).
+_ALLOWED_ALLOW_HOST_TRANSFERS_CALLS = {
+    "src/simsopt_jax/examples/official_tiny_least_squares.py": 5,
+}
+_ALLOW_HOST_TRANSFERS_ROOTS = (*SOURCE_ROOTS, REPO_ROOT / "examples/jax")
+_ALLOW_HOST_TRANSFERS_OWNER = "src/simsopt_jax/runtime/host_boundary.py"
+
+
+def _allow_host_transfers_calls() -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for source_root in _ALLOW_HOST_TRANSFERS_ROOTS:
+        for path in source_root.rglob("*.py"):
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            if relative == _ALLOW_HOST_TRANSFERS_OWNER:
+                continue
+            for node in ast.walk(ast.parse(path.read_text())):
+                if isinstance(node, ast.ImportFrom):
+                    for alias in node.names:
+                        assert not (
+                            alias.name == "allow_host_transfers" and alias.asname
+                        ), f"{relative} imports allow_host_transfers under an alias"
+                if isinstance(node, ast.Call) and (
+                    (
+                        isinstance(node.func, ast.Name)
+                        and node.func.id == "allow_host_transfers"
+                    )
+                    or (
+                        isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "allow_host_transfers"
+                    )
+                ):
+                    counts[relative] = counts.get(relative, 0) + 1
+    return counts
+
+
+def test_only_admitted_callers_lift_the_strict_transfer_guard() -> None:
+    assert _allow_host_transfers_calls() == _ALLOWED_ALLOW_HOST_TRANSFERS_CALLS
+
+
 def test_boundary_census_distinguishes_duplicate_invocations_in_one_function() -> None:
     calls = _census_source(
         "import jax\n\n"
