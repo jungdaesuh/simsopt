@@ -80,7 +80,10 @@ from simsopt_jax.core.specs import (
     make_surface_xyz_tensor_fourier_spec,
 )
 from simsopt_jax.core.surface_rzfourier import surface_rz_fourier_spec_from_dofs
-from .boozersurface_jax_test_helpers import _mock_linear_solve_status
+from .boozersurface_jax_test_helpers import (
+    _make_mock_boozer_surface,
+    _mock_linear_solve_status,
+)
 from .pairwise_test_helpers import set_pairwise_penalty_chunk_size
 from .surface_test_helpers import get_exact_surface, get_surface
 
@@ -9545,8 +9548,6 @@ def test_traced_objectives_refuse_a_dense_lm_inner_solve_at_setup(
     materialize_dense_linearization=False, which the dense lm-minpack lane
     cannot honour; the refusal must come from setup, before any traced solve.
     """
-    from .boozersurface_jax_test_helpers import _make_mock_boozer_surface
-
     booz = _make_mock_boozer_surface()
     booz.options["optimizer_backend"] = "ondevice"
     booz.options["least_squares_algorithm"] = "lm-minpack"
@@ -9561,8 +9562,6 @@ def test_traced_objectives_refuse_a_dense_lm_inner_solve_at_setup(
 
 
 def test_the_default_traced_inner_solve_passes_the_setup_refusal():
-    from .boozersurface_jax_test_helpers import _make_mock_boozer_surface
-
     booz = _make_mock_boozer_surface()
     booz.options["optimizer_backend"] = "ondevice"
     method = booz._resolve_optimizer_method()

@@ -36,7 +36,10 @@ from conftest import (
 )
 from jax.flatten_util import ravel_pytree
 from scipy.optimize import OptimizeResult
+from simsopt.configs import get_data as get_zoo_data
+from simsopt.field import BiotSavart as NativeBiotSavart
 from simsopt.field.coil import Coil, Current
+from simsopt.geo import ToroidalFlux
 from simsopt.geo.boozersurface import BoozerSurface as LegacyBoozerSurface
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt.objectives.utilities import forward_backward
@@ -75,6 +78,7 @@ from .boozersurface_jax_test_helpers import (
     UPSTREAM_BOOZER_OPTIMIZE_G,
     UPSTREAM_BOOZER_STELLSYM,
     UPSTREAM_BOOZER_SURFACE_TYPES,
+    BiotSavartJAX,
     BoozerSurfaceJAX,
     _bsj,
     _build_penalty_problem,
@@ -83,6 +87,8 @@ from .boozersurface_jax_test_helpers import (
     _build_upstream_boozer_pair,
     _build_upstream_boozer_penalty_case,
     _build_upstream_exact_surface_case,
+    _clone_upstream_label,
+    _clone_upstream_surface,
     _ensure_solved_jax,
     _evaluate_upstream_boozer_exact_constraints_case,
     _evaluate_upstream_boozer_penalty_case,
@@ -120,6 +126,7 @@ from .boozersurface_jax_test_helpers import (
     surface_gammadash1,
     surface_gammadash2,
 )
+from .surface_test_helpers import get_surface as get_test_surface
 
 _TORUS_GEOMETRY_RTOL = 1e-13
 _ROSENBROCK_SOLUTION_ATOL = 1e-8
@@ -13042,21 +13049,10 @@ class TestBoozerLeastSquaresLMNativeParity:
 
     @pytest.mark.parametrize("optimizer_backend", ["ondevice", "host-jax"])
     def test_ncsx_lm_solve_matches_upstream_minpack(self, optimizer_backend):
-        from simsopt.configs import get_data
-        from simsopt.field import BiotSavart
-        from simsopt.geo import ToroidalFlux
-
-        from .boozersurface_jax_test_helpers import (
-            BiotSavartJAX,
-            _clone_upstream_label,
-            _clone_upstream_surface,
-        )
-        from .surface_test_helpers import get_surface
-
-        _, base_currents, ma, nfp, bs = get_data("ncsx")
-        surface = get_surface("SurfaceXYZTensorFourier", True, nfp=nfp)
+        _, base_currents, ma, nfp, bs = get_zoo_data("ncsx")
+        surface = get_test_surface("SurfaceXYZTensorFourier", True, nfp=nfp)
         surface.fit_to_curve(ma, 0.1)
-        label = ToroidalFlux(surface, BiotSavart(bs.coils), nphi=51, ntheta=51)
+        label = ToroidalFlux(surface, NativeBiotSavart(bs.coils), nphi=51, ntheta=51)
         constraint_weight = 100.0 / (
             surface.quadpoints_phi.size * surface.quadpoints_theta.size * 3
         )
