@@ -82,11 +82,12 @@ Each entry: the symptom, the cause, the fix.
     f and each row separately.
 13. **Taylor steps and smoothing.** A kernel's smoothing temperature must be
     finite and > 0 (0 raises `ValueError`; the exact value is the kernel's
-    third item). The smooth rows select points near the
-    extremum; a step that changes the selection breaks the ratio test, so
-    only steps far below the smoothing temperature see the gradient.
+    third item). The smooth rows are a log-sum-exp over every sample
+    (curvature) or point pair (distances), smooth everywhere, but they bend
+    on the scale of the temperature, so only steps that move the constrained
+    quantity far below the temperature see the gradient.
     `gradient_check.py` sweeps relative steps from 1 down to 1e-10; when
-    larger steps plateau at the slope of the selected extremum and smaller
+    larger steps plateau at the slope of the extremum and smaller
     ones converge to the gradient, the two ranges disagree and the row is
     NOT TESTED rather than failed.
 14. **Reading the gradient check.** `gradient_check.py` sweeps relative

@@ -1,9 +1,11 @@
 import ast
 import unittest
 from pathlib import Path
+import tracemalloc
 from unittest import mock
 
 import numpy as np
+from scipy.special import logsumexp
 
 from simsopt._core import Optimizable
 from simsopt.geo.curveobjectives import CurveCurveDistance
@@ -254,133 +256,244 @@ class SignedConstraintTemperatureTests(unittest.TestCase):
                 self.assertGreaterEqual(signed_value, hard_signed_value)
 
 
-class SelectionHelperTests(unittest.TestCase):
-    def test_kdtree_pairwise_selection_matches_bruteforce_threshold(self):
-        left = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [3.0, 0.0, 0.0]])
-        right = np.array([[0.1, 0.0, 0.0], [2.0, 0.0, 0.0], [3.4, 0.0, 0.0]])
+class _SupportEdgeCase:
+    """A kernel, its dofs owner and one dof, at a temperature that puts a sample
+    exactly at ``4 T`` from the extremum (the edge of the support window the
+    kernels once truncated to, where they were discontinuous)."""
 
-        self.assertAlmostEqual(signed_constraints.pairwise_block_min(left, right), 0.1)
-        rows, cols, diffs, distances = signed_constraints.select_pairwise_near_min(
-            left,
-            right,
-            threshold=0.45,
-        )
+    def __init__(self, evaluate, owner, curve, dof_name):
+        self.evaluate = evaluate
+        self.owner = owner
+        self.index = list(owner.dof_names).index(f"{curve.name}:{dof_name}")
 
-        self.assertEqual(set(zip(rows.tolist(), cols.tolist())), {(0, 0), (2, 2)})
-        np.testing.assert_allclose(np.linalg.norm(diffs, axis=1), distances)
+    def at_offset(self, offset):
+        x0 = self.owner.x.copy()
+        moved = x0.copy()
+        moved[self.index] += offset
+        self.owner.x = moved
+        try:
+            return self.evaluate()
+        finally:
+            self.owner.x = x0
 
-    def test_kdtree_pairwise_selection_returns_empty_arrays_when_no_pairs_match(self):
-        rows, cols, diffs, distances = signed_constraints.select_pairwise_near_min(
-            np.array([[0.0, 0.0, 0.0]]),
-            np.array([[2.0, 0.0, 0.0]]),
-            threshold=0.5,
-        )
 
-        self.assertEqual(rows.tolist(), [])
-        self.assertEqual(cols.tolist(), [])
-        self.assertEqual(diffs.shape, (0, 3))
-        self.assertEqual(distances.tolist(), [])
+def _bumped_circle(radius, z, count=32, bump=0.04):
+    curve = CurveXYZFourier(count, 2)
+    curve.set("xc(1)", radius)
+    curve.set("ys(1)", radius)
+    curve.set("zc(0)", z)
+    curve.set("xc(2)", bump)
+    return curve
 
-    def test_kdtree_pairwise_selection_reuses_supplied_trees(self):
-        left = np.array([[0.0, 0.0, 0.0]])
-        right = np.array([[0.25, 0.0, 0.0]])
-        left_tree = signed_constraints.point_tree(left)
-        right_tree = signed_constraints.point_tree(right)
 
-        with mock.patch.object(
-            signed_constraints,
-            "point_tree",
-            side_effect=AssertionError("selection should reuse supplied trees"),
-        ):
-            rows, cols, diffs, distances = signed_constraints.select_pairwise_near_min(
-                left,
-                right,
-                threshold=0.5,
-                left_tree=left_tree,
-                right_tree=right_tree,
+def _support_edge_cases():
+    # Codex round-16 R16-02 reproduction geometry.
+    curvature_curve = _bumped_circle(1.0, 0.0, count=64, bump=0.1)
+    kappa = curvature_curve.kappa().copy()
+    curvature_temperature = float((np.max(kappa) - kappa[13]) / 4)
+
+    first, second = _bumped_circle(1.0, 0.0), _bumped_circle(0.9, 0.3)
+    pair_distances = np.linalg.norm(
+        first.gamma()[:, None, :] - second.gamma()[None, :, :], axis=2
+    ).ravel()
+    pair_temperature = float(
+        (np.sort(pair_distances)[len(pair_distances) // 5] - np.min(pair_distances)) / 4
+    )
+
+    surface_curve = _bumped_circle(1.7, 0.07)
+    surface_curve.set("yc(0)", 0.03)
+    surface = SurfaceRZFourier(
+        nfp=1,
+        stellsym=True,
+        mpol=1,
+        ntor=1,
+        quadpoints_phi=np.linspace(0, 1, 16, endpoint=False),
+        quadpoints_theta=np.linspace(0, 1, 16, endpoint=False),
+    )
+    surface.set("rc(0,0)", 1.0)
+    surface.set("rc(1,0)", 0.3)
+    surface.set("zs(1,0)", 0.3)
+    surface.fix_all()
+    surface_distances = np.linalg.norm(
+        surface_curve.gamma()[:, None, :] - surface.gamma().reshape(-1, 3)[None, :, :],
+        axis=2,
+    ).ravel()
+    surface_temperature = float(
+        (np.sort(surface_distances)[200] - np.min(surface_distances)) / 4
+    )
+
+    curvature_owner = _JointDofs([curvature_curve])
+    pair_owner = _JointDofs([first, second])
+    surface_owner = _JointDofs([surface_curve])
+    return {
+        "curvature": _SupportEdgeCase(
+            lambda: smooth_max_curvature_signed_constraint(
+                curvature_curve, 1.5, curvature_temperature, curvature_owner
+            ),
+            curvature_owner,
+            curvature_curve,
+            "xc(2)",
+        ),
+        "curve_curve": _SupportEdgeCase(
+            lambda: smooth_min_curve_curve_signed_constraint(
+                [first, second], 0.4, pair_temperature, pair_owner
+            ),
+            pair_owner,
+            second,
+            "xc(1)",
+        ),
+        "curve_surface": _SupportEdgeCase(
+            lambda: smooth_min_curve_surface_signed_constraint(
+                [surface_curve], surface, 0.4, surface_temperature, surface_owner
+            ),
+            surface_owner,
+            surface_curve,
+            "xc(1)",
+        ),
+    }
+
+
+class SupportChangeSmoothnessTests(unittest.TestCase):
+    """The rows are smooth where a sample crosses 4 T from the extremum: the
+    value is continuous there and the gradient matches finite differences."""
+
+    def test_the_value_is_continuous_across_the_support_edge(self):
+        for name, case in _support_edge_cases().items():
+            with self.subTest(kernel=name):
+                gradient = case.at_offset(0.0)[1][case.index]
+                for step in (1.0e-8, 1.0e-10):
+                    jump = case.at_offset(step)[0] - case.at_offset(-step)[0]
+                    self.assertLessEqual(
+                        abs(jump - 2.0 * step * gradient),
+                        1.0e-12,
+                        f"the {name} row jumps by {jump:.3e} over a {2 * step:.0e} "
+                        "move: it is not continuous there",
+                    )
+
+    def test_the_gradient_matches_finite_differences_across_the_support_edge(self):
+        for name, case in _support_edge_cases().items():
+            gradient = case.at_offset(0.0)[1][case.index]
+            for step in (1.0e-4, 1.0e-6, 1.0e-8):
+                with self.subTest(kernel=name, step=step):
+                    finite_difference = (
+                        case.at_offset(step)[0] - case.at_offset(-step)[0]
+                    ) / (2.0 * step)
+                    self.assertAlmostEqual(
+                        finite_difference,
+                        gradient,
+                        delta=1.0e-5 * max(1.0, abs(gradient)),
+                        msg=f"the {name} gradient disagrees with a central "
+                        f"difference of step {step:.0e}",
+                    )
+
+
+class FullLogSumExpTests(unittest.TestCase):
+    def test_distance_rows_are_the_log_sum_exp_over_every_pair(self):
+        curves = [_circle(1.0, 0.0, 16), _circle(0.9, 0.3, 12), _circle(1.1, -0.4, 8)]
+        surface = _fixed_torus(1.0, 0.3)
+        temperature = 0.05
+        points = [np.asarray(c.gamma()) for c in curves]
+        surface_points = surface.gamma().reshape((-1, 3))
+
+        def reference(pairs, minimum_distance):
+            distances = np.concatenate(
+                [np.linalg.norm(a[:, None] - b[None], axis=2).ravel() for a, b in pairs]
             )
+            soft = -temperature * logsumexp(-distances / temperature)
+            return minimum_distance - soft, minimum_distance - np.min(distances)
 
-        self.assertEqual(rows.tolist(), [0])
-        self.assertEqual(cols.tolist(), [0])
-        np.testing.assert_allclose(diffs, [[-0.25, 0.0, 0.0]])
-        np.testing.assert_allclose(distances, [0.25])
+        curve_pairs = [(points[i], points[j]) for i in range(3) for j in range(i)]
+        signed, _grad, hard = smooth_min_curve_curve_signed_constraint(
+            curves, 0.4, temperature, _JointDofs(curves)
+        )
+        np.testing.assert_allclose((signed, hard), reference(curve_pairs, 0.4), rtol=1e-13)
 
-    def test_surface_tree_cache_reuses_while_the_sampled_geometry_is_unchanged(self):
-        class Surface:
-            def __init__(self):
-                self.x = np.array([0.0])
-                self.gamma_calls = 0
-
-            def gamma(self):
-                self.gamma_calls += 1
-                offset = float(self.x[0])
-                return np.array([[[offset, 0.0, 0.0], [offset + 1.0, 0.0, 0.0]]])
-
-        surface = Surface()
-        points, tree, shape = signed_constraints.surface_points_tree_shape(surface)
-        same_points, same_tree, same_shape = (
-            signed_constraints.surface_points_tree_shape(surface)
+        surface_pairs = [(p, surface_points) for p in points]
+        signed, _grad, hard = smooth_min_curve_surface_signed_constraint(
+            curves, surface, 0.4, temperature, _JointDofs(curves)
+        )
+        np.testing.assert_allclose(
+            (signed, hard), reference(surface_pairs, 0.4), rtol=1e-13
         )
 
-        # gamma() is sampled on every call (it is the cache key); the tree is not rebuilt.
-        self.assertEqual(surface.gamma_calls, 2)
-        self.assertIs(same_points, points)
-        self.assertIs(same_tree, tree)
-        self.assertEqual(same_shape, shape)
-
-        surface.x = np.array([2.0])
-        updated_points, updated_tree, updated_shape = (
-            signed_constraints.surface_points_tree_shape(surface)
+    def test_curvature_row_is_the_log_sum_exp_over_every_point(self):
+        curve = _circle_with_bump()
+        kappa = np.asarray(curve.kappa())
+        signed, _grad, hard = smooth_max_curvature_signed_constraint(
+            curve, 1.5, 0.05, _JointDofs([curve])
         )
+        self.assertAlmostEqual(signed, 0.05 * logsumexp(kappa / 0.05) - 1.5, places=13)
+        self.assertEqual(hard, float(np.max(kappa)) - 1.5)
 
-        self.assertEqual(surface.gamma_calls, 3)
-        self.assertIsNot(updated_points, points)
-        self.assertIsNot(updated_tree, tree)
-        self.assertEqual(updated_shape, shape)
-        np.testing.assert_allclose(updated_points[:, 0], [2.0, 3.0])
+    def test_blocking_does_not_change_the_result(self):
+        # Blocks of 7 pairs split rows and columns unevenly and move the
+        # running shift many times; the sums are the same up to rounding.
+        curves = [_circle(1.0, 0.0, 16), _circle(0.9, 0.3, 12)]
+        surface = _fixed_torus(1.0, 0.3)
+        owner = _JointDofs(curves)
+        kernels = {
+            "curve_curve": lambda: smooth_min_curve_curve_signed_constraint(
+                curves, 0.4, 0.05, owner
+            ),
+            "curve_surface": lambda: smooth_min_curve_surface_signed_constraint(
+                curves, surface, 0.4, 0.05, owner
+            ),
+        }
+        for name, kernel in kernels.items():
+            with self.subTest(kernel=name):
+                whole = kernel()
+                with mock.patch.object(signed_constraints, "_PAIR_BLOCK", 7):
+                    blocked = kernel()
+                self.assertEqual(blocked[2], whole[2])
+                self.assertAlmostEqual(blocked[0], whole[0], delta=1e-14)
+                np.testing.assert_allclose(blocked[1], whole[1], rtol=1e-12, atol=1e-15)
 
-    def test_surface_tree_cache_follows_geometry_the_dofs_do_not_hold(self):
-        # The sample points move while x stays put (as a quadrature change
-        # would): the cache must follow the sampled geometry, not x.
-        class Surface:
-            x = np.array([0.0])
+    def test_coincident_samples_give_a_finite_gradient(self):
+        # Two unit circles in perpendicular planes share the sample (1, 0, 0):
+        # that pair has distance 0 and no direction, and contributes nothing.
+        xy = _circle(1.0, 0.0, 8)
+        xz = CurveXYZFourier(8, 1)
+        xz.set("xc(1)", 1.0)
+        xz.set("zs(1)", 1.0)
+        owner = _JointDofs([xy, xz])
+        signed, grad, hard = smooth_min_curve_curve_signed_constraint(
+            [xy, xz], 0.1, 0.01, owner
+        )
+        self.assertEqual(hard, 0.1)
+        self.assertGreaterEqual(signed, hard)
+        self.assertTrue(np.all(np.isfinite(grad)))
 
-            def __init__(self):
-                self.sample_offset = 0.0
-
-            def gamma(self):
-                return np.array([[[self.sample_offset, 0.0, 0.0], [1.0, 0.0, 0.0]]])
-
-        surface = Surface()
-        signed_constraints.surface_points_tree_shape(surface)
-        surface.sample_offset = 0.5
-        points, tree, _shape = signed_constraints.surface_points_tree_shape(surface)
-
-        np.testing.assert_array_equal(points[:, 0], [0.5, 1.0])
-        self.assertEqual(tree.query([0.5, 0.0, 0.0])[0], 0.0)
-
-    def test_surface_tree_cache_follows_a_fixed_coefficient_change(self):
-        # All dofs fixed: surface.x is empty and cannot see rc(0,0) move.
-        surface = _torus(1.0, 0.1)
+    def test_memory_stays_bounded_at_a_realistic_size(self):
+        # 4 coils of 128 points against a 64 x 64 surface: 2.1 million pairs,
+        # whose differences alone would take 50 MB if built at once.
+        curves = [_circle(1.0 + 0.05 * k, 0.1 * k, 128) for k in range(4)]
+        surface = SurfaceRZFourier(
+            nfp=1,
+            stellsym=True,
+            mpol=1,
+            ntor=1,
+            quadpoints_phi=np.linspace(0.0, 1.0, 64, endpoint=False),
+            quadpoints_theta=np.linspace(0.0, 1.0, 64, endpoint=False),
+        )
+        surface.set("rc(0,0)", 1.0)
+        surface.set("rc(1,0)", 0.3)
+        surface.set("zs(1,0)", 0.3)
         surface.fix_all()
-        points, tree, shape = signed_constraints.surface_points_tree_shape(surface)
-        old_points = points.copy()
+        owner = _JointDofs(curves)
+        tracemalloc.start()
+        try:
+            signed, grad, hard = smooth_min_curve_surface_signed_constraint(
+                curves, surface, 0.4, 0.005, owner
+            )
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 16 * 2**20, f"peak scratch memory {peak} bytes")
+        self.assertGreaterEqual(signed, hard)
+        self.assertTrue(np.all(np.isfinite(grad)))
 
-        surface.set("rc(0,0)", 2.0)
-        fresh_gamma = np.array(surface.gamma())
-        new_points, new_tree, new_shape = signed_constraints.surface_points_tree_shape(
-            surface
-        )
 
-        np.testing.assert_array_equal(new_points, fresh_gamma.reshape((-1, 3)))
-        self.assertEqual(new_shape, fresh_gamma.shape)
-        self.assertEqual(new_tree.query(fresh_gamma[0, 0])[0], 0.0)
-        # The first call's points and tree are one owned snapshot: recomputing
-        # the surface's gamma in place does not move them.
-        np.testing.assert_array_equal(points, old_points)
-        self.assertEqual(tree.query(old_points[0])[0], 0.0)
-        self.assertFalse(points.flags.writeable)
-
+class SampledGeometryTests(unittest.TestCase):
     def test_curve_surface_constraint_sees_a_fixed_coefficient_change(self):
         # A circle of radius 2.1 in the z = 0 plane touches the outboard
         # midplane of the torus (R0 = 2, a = 0.1) and clears the R0 = 1 one.
@@ -404,8 +517,8 @@ class SelectionHelperTests(unittest.TestCase):
 
 class SignedConstraintsImportBoundaryTests(unittest.TestCase):
     def test_the_rows_import_nothing_from_the_solver(self):
-        # The geometry rows serve any optimizer: the module imports simsopt,
-        # numpy, scipy and the standard library, and no solver module (the
+        # The geometry rows serve any optimizer: the module imports simsopt
+        # and numpy, and no solver module (the
         # package's __init__ still runs, as for any submodule import).
         tree = ast.parse(Path(signed_constraints.__file__).read_text(encoding="utf-8"))
         roots = set()
@@ -415,7 +528,7 @@ class SignedConstraintsImportBoundaryTests(unittest.TestCase):
             elif isinstance(node, ast.ImportFrom):
                 self.assertEqual(node.level, 0, "signed_constraints imports a solver module")
                 roots.add(node.module.split(".")[0])
-        self.assertEqual(roots, {"numpy", "scipy", "simsopt", "threading", "weakref"})
+        self.assertEqual(roots, {"numpy", "simsopt"})
 
 
 if __name__ == "__main__":

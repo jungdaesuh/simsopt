@@ -140,12 +140,10 @@ def main():
 ### Perform a Taylor test ######################################################
 ################################################################################
 """)
-    # The signed constraints keep only points near the extremum, and a point that
-    # enters or leaves that selection makes the rows non-smooth. At the largest
-    # step here (1e-5 along a unit direction) the curvature moves by about 5e-4
-    # 1/m and the distances by about 1e-5 m, about 1% of the smoothing
-    # temperatures and far below the selection window, so the differences stay
-    # in the smooth regime; at 1e-4 the first error ratio already shows a jump.
+    # The signed constraints are smooth but bend on the scale of their smoothing
+    # temperatures. At the largest step here (1e-5 along a unit direction) the
+    # curvature moves by about 5e-4 1/m and the distances by about 1e-5 m, about
+    # 1% of those temperatures, so the differences stay in the Taylor regime.
     # A row enters the augmented Lagrangian through max(0, multiplier + penalty * g),
     # so with zero multipliers every inactive row (g < 0) drops out unchecked. These
     # multipliers make that shift at least 1 for every row at the initial coils, so

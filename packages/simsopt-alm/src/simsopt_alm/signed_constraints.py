@@ -1,20 +1,21 @@
 """Smooth signed geometry constraints ``g(x) <= 0`` for constrained coil optimization.
 
-Every kernel returns ``(signed_value, grad, hard_signed_value)``. ``signed_value``
-is a log-sum-exp surrogate of ``hard_signed_value`` at ``temperature`` (never
-looser than it), and ``grad`` is ``d(signed_value)/dx`` over the free dofs of
-``objective_optimizable``. Unlike the stock hinge objectives, the value keeps the
-slack when the constraint is inactive. ``temperature`` must be finite and
-positive (in the constrained quantity's units); every kernel raises
-``ValueError`` otherwise. Zero is rejected, not read as the hard limit: that
-limit is ``hard_signed_value``.
+Every kernel returns ``(signed_value, grad, hard_signed_value)``.
+``hard_signed_value`` is the constraint at the extremum over the sampled points
+(quadrature points of curves and surface), and ``signed_value`` its log-sum-exp
+surrogate at ``temperature`` T over every sample (curvature) or every point pair
+(distances), with no support truncation: a smooth function of the sampled
+points, so ``grad = d(signed_value)/dx`` over the free dofs of
+``objective_optimizable`` holds everywhere. The surrogate is conservative:
+``hard_signed_value <= signed_value <= hard_signed_value + T log N`` for N
+samples or pairs. Unlike the stock hinge objectives, the value keeps the slack
+when the constraint is inactive. ``temperature`` must be finite and positive
+(in the constrained quantity's units); every kernel raises ``ValueError``
+otherwise. Zero is rejected, not read as the hard limit: that limit is
+``hard_signed_value``.
 """
 
-from threading import RLock
-from weakref import WeakKeyDictionary
-
 import numpy as np
-from scipy.spatial import cKDTree
 
 from simsopt._core.derivative import Derivative
 
@@ -25,11 +26,10 @@ __all__ = [
 ]
 
 
-_SMOOTHING_EPS = float(np.finfo(float).eps)
-_SURFACE_TREE_CACHE = WeakKeyDictionary()
-_SURFACE_TREE_CACHE_LOCK = RLock()
-_SOFTMIN_SELECTION_WINDOW_TEMPERATURES = 4.0
-
+# Point pairs per distance block. A block holds its pair differences, distances
+# and weights (about 6 floats, 48 bytes, per pair), so the kernels' scratch
+# memory stays near 3 MiB whatever the number of pairs.
+_PAIR_BLOCK = 1 << 16
 
 def require_smoothing_temperature(temperature) -> float:
     """``temperature`` as a float; ``ValueError`` unless finite and positive."""
@@ -41,107 +41,68 @@ def require_smoothing_temperature(temperature) -> float:
     return value
 
 
-def stable_softmax(values, smoothing_eps: float):
-    shifted = np.asarray(values, dtype=float) - float(np.max(values))
-    weights = np.exp(shifted)
-    total = max(float(np.sum(weights)), float(smoothing_eps))
-    return weights / total
+def soft_min_pair_distance(point_sets, set_pairs, temperature: float):
+    """Soft minimum of the distances between every point pair of the listed sets.
 
-
-def smoothmax_selected(values, temperature: float, smoothing_eps: float):
-    bounded_temperature = max(float(temperature), float(smoothing_eps))
-    values_array = np.asarray(values, dtype=float)
-    maximum_value = float(np.max(values_array))
-    exp_shifted = np.exp((values_array - maximum_value) / bounded_temperature)
-    total = max(float(np.sum(exp_shifted)), float(smoothing_eps))
-    weights = exp_shifted / total
-    smooth_value = maximum_value + bounded_temperature * float(np.log(total))
-    return smooth_value, weights
-
-
-def smoothmin_selected(values, temperature: float, smoothing_eps: float):
-    bounded_temperature = max(float(temperature), float(smoothing_eps))
-    values_array = np.asarray(values, dtype=float)
-    minimum_value = float(np.min(values_array))
-    exp_shifted = np.exp(-(values_array - minimum_value) / bounded_temperature)
-    total = max(float(np.sum(exp_shifted)), float(smoothing_eps))
-    weights = exp_shifted / total
-    smooth_value = minimum_value - bounded_temperature * float(np.log(total))
-    return smooth_value, weights
-
-
-def softmin_selection_window(temperature):
-    """Return the truncated soft-min support window.
-
-    Distances outside hard_min + 4T have Boltzmann weights below exp(-4)
-    relative to the hard-min pair; hard certification remains exhaustive.
+    ``point_sets`` are ``(n_k, 3)`` arrays; ``set_pairs`` lists ``(a, b)``
+    indices of sets whose every point pair counts. Returns ``(hard_min,
+    soft_min, point_gradients)``: the smallest pair distance, ``-T log sum
+    exp(-d/T)`` over all pairs (at most ``hard_min``), and ``d(soft_min)/d
+    points`` per set. Pairs are visited in blocks of ``_PAIR_BLOCK`` with the
+    running minimum as the exponent shift, so every exponent is <= 0.
     """
-    return _SOFTMIN_SELECTION_WINDOW_TEMPERATURES * float(temperature)
-
-
-def point_tree(points):
-    return cKDTree(np.asarray(points, dtype=float))
-
-
-def surface_points_tree_shape(surface):
-    """``surface.gamma()`` as ``(n, 3)`` points, their KD-tree, and gamma's shape.
-
-    The tree is cached per surface and keyed by the sampled geometry itself
-    (gamma's shape and bytes), so any change to it rebuilds the tree: free or
-    fixed coefficients, quadrature points, or anything else ``gamma()`` reads.
-    The points are a read-only view of that key's bytes, the snapshot the tree
-    was built from; a surface recomputing gamma in place does not move them.
-    """
-    gamma = np.asarray(surface.gamma(), dtype=float)
-    geometry_key = (gamma.shape, gamma.tobytes())
-    with _SURFACE_TREE_CACHE_LOCK:
-        cached = _SURFACE_TREE_CACHE.get(surface)
-        if cached is not None and cached[0] == geometry_key:
-            return cached[1], cached[2], gamma.shape
-
-    points = np.frombuffer(geometry_key[1], dtype=float).reshape((-1, 3))
-    tree = point_tree(points)
-    with _SURFACE_TREE_CACHE_LOCK:
-        _SURFACE_TREE_CACHE[surface] = (geometry_key, points, tree)
-    return points, tree, gamma.shape
-
-
-def surface_points_and_tree(surface):
-    points, tree, _shape = surface_points_tree_shape(surface)
-    return points, tree
-
-
-def pairwise_block_min(left_points, right_points, *, right_tree=None):
-    tree = point_tree(right_points) if right_tree is None else right_tree
-    distances, _indices = tree.query(
-        np.asarray(left_points, dtype=float),
-        k=1,
-    )
-    return float(np.min(distances))
-
-
-def select_pairwise_near_min(
-    left_points,
-    right_points,
-    threshold,
-    *,
-    left_tree=None,
-    right_tree=None,
-):
-    left = np.asarray(left_points, dtype=float)
-    right = np.asarray(right_points, dtype=float)
-    source_tree = point_tree(left) if left_tree is None else left_tree
-    tree = point_tree(right) if right_tree is None else right_tree
-    sparse_distances = source_tree.sparse_distance_matrix(
-        tree,
-        float(threshold),
-        output_type="coo_matrix",
-    )
-    rows = np.asarray(sparse_distances.row, dtype=np.intp)
-    cols = np.asarray(sparse_distances.col, dtype=np.intp)
-    diffs = left[rows] - right[cols]
-    distances = np.asarray(sparse_distances.data, dtype=float)
-    return rows, cols, diffs, distances
+    gradients = [np.zeros_like(points) for points in point_sets]
+    shift = np.inf
+    weight_sum = 0.0
+    for left_index, right_index in set_pairs:
+        left, right = point_sets[left_index], point_sets[right_index]
+        column_step = min(len(right), _PAIR_BLOCK)
+        row_step = max(1, _PAIR_BLOCK // column_step)
+        for row_start in range(0, len(left), row_step):
+            rows = slice(row_start, row_start + row_step)
+            for column_start in range(0, len(right), column_step):
+                columns = slice(column_start, column_start + column_step)
+                left_block, right_block = left[rows], right[columns]
+                # Distances from the coordinate differences (no |x|^2 + |y|^2 -
+                # 2 x.y cancellation), so hard_min is the sampled minimum.
+                distances = np.zeros((len(left_block), len(right_block)))
+                for axis in range(3):
+                    difference = np.subtract.outer(left_block[:, axis], right_block[:, axis])
+                    distances += np.square(difference, out=difference)
+                np.sqrt(distances, out=distances)
+                block_min = float(np.min(distances))
+                if block_min < shift:
+                    # Re-reference the sums to the new minimum (0 on the first block).
+                    rescale = float(np.exp((block_min - shift) / temperature))
+                    weight_sum *= rescale
+                    for gradient in gradients:
+                        gradient *= rescale
+                    shift = block_min
+                weights = np.subtract(shift, distances)
+                weights /= temperature
+                np.exp(weights, out=weights)
+                weight_sum += float(np.sum(weights))
+                # d(d_ij)/d(left_i) = (left_i - right_j) / d_ij, so the weighted
+                # sums over j (i) are left_i * sum_j c_ij - (c @ right)_i and
+                # right_j * sum_i c_ij - (c.T @ left)_j with c = weights / d.
+                # A coincident pair (d = 0) has no direction and contributes 0.
+                coefficients = np.divide(
+                    weights,
+                    distances,
+                    out=np.zeros_like(weights),
+                    where=distances > 0.0,
+                )
+                gradients[left_index][rows] += (
+                    left_block * np.sum(coefficients, axis=1)[:, None]
+                    - coefficients @ right_block
+                )
+                gradients[right_index][columns] += (
+                    right_block * np.sum(coefficients, axis=0)[:, None]
+                    - coefficients.T @ left_block
+                )
+    for gradient in gradients:
+        gradient /= weight_sum
+    return shift, shift - temperature * float(np.log(weight_sum)), gradients
 
 
 def surface_dgamma_by_dcoeff_derivative(surface, point_gradient):
@@ -149,10 +110,6 @@ def surface_dgamma_by_dcoeff_derivative(surface, point_gradient):
     if isinstance(surface_vjp, Derivative):
         return surface_vjp
     return Derivative({surface: np.asarray(surface_vjp, dtype=float)})
-
-
-def _new_derivative():
-    return Derivative({})
 
 
 def _no_pair_result(minimum_distance, objective_optimizable):
@@ -166,6 +123,14 @@ def _no_pair_result(minimum_distance, objective_optimizable):
     )
 
 
+def _curve_derivative(curves, point_gradients) -> Derivative:
+    derivative = Derivative({})
+    for curve, point_gradient in zip(curves, point_gradients):
+        if np.any(point_gradient):
+            derivative += curve.dgamma_by_dcoeff_vjp(point_gradient)
+    return derivative
+
+
 def smooth_max_curvature_signed_constraint(
     curve,
     threshold,
@@ -174,7 +139,7 @@ def smooth_max_curvature_signed_constraint(
     *,
     kappa=None,
 ):
-    """Signed ``max(kappa) - threshold`` for one curve.
+    """Signed ``max(kappa) - threshold`` for one curve, over its quadrature points.
 
     ``kappa`` optionally passes ``curve.kappa()`` already evaluated at the
     current dofs, so a caller that also reports the hard maximum evaluates it once.
@@ -182,18 +147,11 @@ def smooth_max_curvature_signed_constraint(
     temperature = require_smoothing_temperature(temperature)
     kappa = np.asarray(curve.kappa() if kappa is None else kappa, dtype=float)
     hard_max = float(np.max(kappa))
-    active_mask = kappa >= (hard_max - 4.0 * float(temperature))
-    if not np.any(active_mask):
-        active_mask[np.argmax(kappa)] = True
-    smooth_max, active_weights = smoothmax_selected(
-        kappa[active_mask],
-        temperature,
-        _SMOOTHING_EPS,
-    )
-    full_weights = np.zeros_like(kappa)
-    full_weights[active_mask] = active_weights
+    exp_shifted = np.exp((kappa - hard_max) / temperature)
+    weight_sum = float(np.sum(exp_shifted))
+    smooth_max = hard_max + temperature * float(np.log(weight_sum))
     grad = np.asarray(
-        curve.dkappa_by_dcoeff_vjp(full_weights)(objective_optimizable),
+        curve.dkappa_by_dcoeff_vjp(exp_shifted / weight_sum)(objective_optimizable),
         dtype=float,
     )
     signed_value = smooth_max - float(threshold)
@@ -207,72 +165,28 @@ def smooth_min_curve_curve_signed_constraint(
     temperature,
     objective_optimizable,
 ):
-    """Signed ``minimum_distance - min_{i<j} dist(curve_i, curve_j)``.
+    """Signed ``minimum_distance - min_{i<j} dist(curve_i, curve_j)`` over the
+    curves' quadrature points.
 
     Fewer than two curves has no pair, so it returns ``-minimum_distance`` and a
     zero gradient.
     """
     temperature = require_smoothing_temperature(temperature)
-    curve_points = [np.asarray(curve.gamma(), dtype=float) for curve in curves]
-    curve_trees = [point_tree(points) for points in curve_points]
-    pair_blocks = []
-    hard_min = np.inf
-    for i, gamma_i in enumerate(curve_points):
-        for j in range(i):
-            block_min = pairwise_block_min(
-                gamma_i,
-                curve_points[j],
-                right_tree=curve_trees[j],
-            )
-            hard_min = min(hard_min, block_min)
-            pair_blocks.append((i, j, block_min))
-
-    if not pair_blocks:
+    if len(curves) < 2:
         return _no_pair_result(minimum_distance, objective_optimizable)
-
-    selection_window = softmin_selection_window(temperature)
-    selected_distances = []
-    selected_entries = []
-    selection_threshold = hard_min + selection_window
-    for i, j, block_min in pair_blocks:
-        if block_min > selection_threshold:
-            continue
-        rows, cols, diffs, distances = select_pairwise_near_min(
-            curve_points[i],
-            curve_points[j],
-            selection_threshold,
-            left_tree=curve_trees[i],
-            right_tree=curve_trees[j],
-        )
-        selected_distances.append(distances)
-        selected_entries.append((i, j, rows, cols, diffs, distances))
-
-    flat_distances = np.concatenate(selected_distances)
-    smooth_min, flat_weights = smoothmin_selected(
-        flat_distances,
+    curve_points = [np.asarray(curve.gamma(), dtype=float) for curve in curves]
+    hard_min, smooth_min, point_gradients = soft_min_pair_distance(
+        curve_points,
+        [(i, j) for i in range(len(curve_points)) for j in range(i)],
         temperature,
-        _SMOOTHING_EPS,
     )
-
-    point_gradients = [np.zeros_like(gamma) for gamma in curve_points]
-    offset = 0
-    for i, j, rows, cols, diffs, distances in selected_entries:
-        count = len(distances)
-        local_weights = flat_weights[offset : offset + count]
-        offset += count
-        directions = diffs / np.maximum(distances[:, None], _SMOOTHING_EPS)
-        np.add.at(point_gradients[i], rows, local_weights[:, None] * directions)
-        np.add.at(point_gradients[j], cols, -local_weights[:, None] * directions)
-
-    derivative = _new_derivative()
-    for curve, point_gradient in zip(curves, point_gradients):
-        if np.any(point_gradient):
-            derivative += curve.dgamma_by_dcoeff_vjp(point_gradient)
-    grad = np.asarray(derivative(objective_optimizable), dtype=float)
+    grad = np.asarray(
+        _curve_derivative(curves, point_gradients)(objective_optimizable), dtype=float
+    )
     # grad = d(smooth_min)/dx, but signed_value = min_dist - smooth_min,
     # so d(signed_value)/dx = -d(smooth_min)/dx = -grad.
     signed_value = float(minimum_distance) - smooth_min
-    hard_signed_value = float(minimum_distance) - float(hard_min)
+    hard_signed_value = float(minimum_distance) - hard_min
     return signed_value, -grad, hard_signed_value
 
 
@@ -283,7 +197,8 @@ def smooth_min_curve_surface_signed_constraint(
     temperature,
     objective_optimizable,
 ):
-    """Signed ``minimum_distance - min_i dist(curve_i, surface)``.
+    """Signed ``minimum_distance - min_i dist(curve_i, surface)`` over the
+    curves' and the surface's quadrature points.
 
     The gradient includes the surface dofs when ``objective_optimizable`` owns
     them. No curves returns ``-minimum_distance`` and a zero gradient.
@@ -291,70 +206,25 @@ def smooth_min_curve_surface_signed_constraint(
     temperature = require_smoothing_temperature(temperature)
     if not curves:
         return _no_pair_result(minimum_distance, objective_optimizable)
-
-    surface_points, surface_tree, surface_gamma_shape = surface_points_tree_shape(
-        surface
-    )
-    curve_points = [np.asarray(curve.gamma(), dtype=float) for curve in curves]
-    curve_trees = [None] * len(curve_points)
-    curve_blocks = []
-    hard_min = np.inf
-    for curve_index, gamma in enumerate(curve_points):
-        block_min = pairwise_block_min(gamma, surface_points, right_tree=surface_tree)
-        hard_min = min(hard_min, block_min)
-        curve_blocks.append((curve_index, block_min))
-
-    selection_window = softmin_selection_window(temperature)
-    selected_distances = []
-    selected_entries = []
-    selection_threshold = hard_min + selection_window
-    for curve_index, block_min in curve_blocks:
-        if block_min > selection_threshold:
-            continue
-        if curve_trees[curve_index] is None:
-            curve_trees[curve_index] = point_tree(curve_points[curve_index])
-        rows, cols, diffs, distances = select_pairwise_near_min(
-            curve_points[curve_index],
-            surface_points,
-            selection_threshold,
-            left_tree=curve_trees[curve_index],
-            right_tree=surface_tree,
-        )
-        selected_distances.append(distances)
-        selected_entries.append((curve_index, rows, cols, diffs, distances))
-
-    flat_distances = np.concatenate(selected_distances)
-    smooth_min, flat_weights = smoothmin_selected(
-        flat_distances,
+    surface_gamma = np.asarray(surface.gamma(), dtype=float)
+    point_sets = [np.asarray(curve.gamma(), dtype=float) for curve in curves]
+    point_sets.append(surface_gamma.reshape((-1, 3)))
+    surface_index = len(curves)
+    hard_min, smooth_min, point_gradients = soft_min_pair_distance(
+        point_sets,
+        [(curve_index, surface_index) for curve_index in range(len(curves))],
         temperature,
-        _SMOOTHING_EPS,
     )
-
-    curve_gradients = [np.zeros_like(gamma) for gamma in curve_points]
-    surface_gradient = np.zeros_like(surface_points)
-    offset = 0
-    for curve_index, rows, cols, diffs, distances in selected_entries:
-        count = len(distances)
-        local_weights = flat_weights[offset : offset + count]
-        offset += count
-        directions = diffs / np.maximum(distances[:, None], _SMOOTHING_EPS)
-        np.add.at(
-            curve_gradients[curve_index], rows, local_weights[:, None] * directions
-        )
-        np.add.at(surface_gradient, cols, -local_weights[:, None] * directions)
-
-    derivative = _new_derivative()
-    for curve, point_gradient in zip(curves, curve_gradients):
-        if np.any(point_gradient):
-            derivative += curve.dgamma_by_dcoeff_vjp(point_gradient)
+    derivative = _curve_derivative(curves, point_gradients[:surface_index])
+    surface_gradient = point_gradients[surface_index]
     if np.any(surface_gradient):
         derivative += surface_dgamma_by_dcoeff_derivative(
             surface,
-            surface_gradient.reshape(surface_gamma_shape),
+            surface_gradient.reshape(surface_gamma.shape),
         )
     grad = np.asarray(derivative(objective_optimizable), dtype=float)
     # grad = d(smooth_min)/dx, but signed_value = min_dist - smooth_min,
     # so d(signed_value)/dx = -d(smooth_min)/dx = -grad.
     signed_value = float(minimum_distance) - smooth_min
-    hard_signed_value = float(minimum_distance) - float(hard_min)
+    hard_signed_value = float(minimum_distance) - hard_min
     return signed_value, -grad, hard_signed_value
