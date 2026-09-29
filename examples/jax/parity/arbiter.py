@@ -492,8 +492,8 @@ def arbitrate(
 
     A case-owned ``admitted_terminal_outcomes`` widens the band path's
     admissible terminal states from ``budget_exhausted`` alone to those exact
-    published outcomes, for the one declared lane whose receipt matches the
-    declared raw status string for string. The admitted lane is exempt from
+    published outcomes, for each declared lane whose receipt matches its
+    declared raw status string for string. An admitted lane is exempt from
     the matched-budget clause (it stopped early by definition) and from the
     single-category rule; every other required lane must still be
     ``budget_exhausted`` at one shared budget, so at least one such lane must

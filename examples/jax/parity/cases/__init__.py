@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
 import numpy as np
 from examples.jax.parity.arbiter import LaneObservation
@@ -189,13 +190,13 @@ class CaseDefinition:
     """
     work_budget_contract: WorkBudgetContract | None = None
     native_default_admitted_terminal_outcomes: tuple[AdmittedTerminalOutcome, ...] = ()
-    """Provider failures admitted for band judgment at ``native_default`` only (user decision C14).
+    """Provider failures admitted for band judgment at ``native_default`` only.
 
-    Each entry is an explicitly authorized case-specific composite ``raw_status`` whose stage-one provider
-    failure mode upstream's own one-ulp samples document (later stages may differ and are disclosed in the
-    evidence text); the lane keeps its raw and normalized status and its ``success=False``, every finite and
-    physical check stays in force, and the verdict can only be ``quality-band`` (an engineering endpoint
-    acceptance, not an equivalence proof).
+    Each entry is an explicitly authorized case-specific composite ``raw_status`` for one lane, and
+    upstream's own official script produced exactly that composite outcome under the one-ulp start
+    protocol (the evidence text names the draws). The lane keeps its raw and normalized status and its
+    ``success=False``, every finite and physical check stays in force, and the verdict can only be
+    ``quality-band`` (an engineering endpoint acceptance, not an equivalence proof).
     """
 
     def __post_init__(self) -> None:
@@ -217,6 +218,18 @@ class CaseDefinition:
 
 
 _FIXED_BUDGET_SCALES: tuple[ExecutionScale, ...] = ("bounded", "native_default")
+
+#: Upstream's own composite terminal outcomes of ``coil_forces.py`` other than the budget pair
+#: ``"1,1"`` (official 9e027eac3 build, one thread, one-ulp start protocol with signs from
+#: ``RandomState(20260920 + k)``, k = 0..40), each with the draws that produced it. ``"2,1"`` is in
+#: the tracked nine (k = 5); ``"1,2"`` and ``"2,2"`` come from the pre-registered extension
+#: k = 9..40. Stage two ended ABNORMAL (SciPy status 2) on 5 of the 41 starts, every time at
+#: stage-two nit 0: stage two restarts L-BFGS-B cold at stage one's end point, where the stage-two
+#: length penalty is exactly zero, and the first trial step overshoots until ``maxls`` runs out.
+COIL_FORCES_UPSTREAM_TERMINAL_OUTCOMES: Mapping[str, tuple[int, ...]] = MappingProxyType(
+    {"2,1": (5,), "1,2": (20, 23, 35), "2,2": (19, 34)}
+)
+_COIL_FORCES_UPSTREAM_DRAWS = 41
 
 
 _CASES = {
@@ -247,13 +260,11 @@ _CASES = {
         case_id="native-coil-forces",
         create_input=create_native_coil_forces_input,
         execute=execute_native_coil_forces,
-        # Declared POST HOC on the user's decision C14 (2026-09-20 23:48 EDT, implemented under the
-        # 2026-09-21 reconciliation consensus): at native_default the JAX GPU lane ends stage one with
-        # SciPy status 2 (ABNORMAL line search at nit 381) where the other lanes reach the 400-iteration
-        # cap; upstream's own official script stops stage one the same way under a one-ulp start
-        # perturbation (tracked sensitivity record, k = 5: status 2 at nit 273; its stage two then ran to the
-        # cap, status 1, where the lane's stage two is an inert restart, status 2). Same rule v2 as the
-        # other band cases; the band is an engineering endpoint acceptance, not an equivalence proof.
+        # Both stages are path dependent: upstream's own official script ends a stage ABNORMAL on 6 of
+        # 41 one-ulp starts (COIL_FORCES_UPSTREAM_TERMINAL_OUTCOMES), so each such composite outcome is
+        # admitted on every lane (the 2026-09-29 ruling: judge by upstream's own scatter; C14 admitted
+        # "2,2" on the JAX GPU lane only). Same rule v2 band as the other band cases; the band is an
+        # engineering endpoint acceptance, not an equivalence proof.
         native_default_quality_band=official_quality_band("native-coil-forces"),
         work_budget_contract=WorkBudgetContract(
             # At native_default the band admits the cap (a band and a work budget cannot both cover
@@ -261,21 +272,20 @@ _CASES = {
             scales=("bounded",),
             derivation="Upstream coil-forces stages use fixed L-BFGS-B iteration caps; accepted endpoints may exhaust the stage budgets.",
         ),
-        native_default_admitted_terminal_outcomes=(
+        native_default_admitted_terminal_outcomes=tuple(
             AdmittedTerminalOutcome(
                 case_id="native-coil-forces",
-                lane="jax-gpu",
-                # Stage one SciPy status 2 (ABNORMAL_TERMINATION_IN_LNSRCH); stage two is the inert cold
-                # restart at the same point (status 2 at nit 0: the length penalty is exactly zero there).
-                raw_status="2,2",
+                lane=lane,
+                raw_status=raw_status,
                 normalized_status="failed",
                 upstream_evidence=(
-                    "official coil_forces.py, one-ulp protocol, sensitivity record k = 5: "
-                    "stage one status 2 (ABNORMAL) at nit 273, stage two status 1 at the cap; the "
-                    "lane's stage two is an inert restart at that point (status 2), a disclosed "
-                    "difference (investigations/coil-forces-gpu/REPORT.md:93,205-214)"
+                    f"official coil_forces.py at 9e027eac3, one thread, one-ulp start protocol: upstream "
+                    f"ended with composite status {raw_status} on k = {', '.join(map(str, draws))} of "
+                    f"k = 0..{_COIL_FORCES_UPSTREAM_DRAWS - 1}"
                 ),
-            ),
+            )
+            for lane in ("native-cpu", "jax-cpu", "jax-gpu")
+            for raw_status, draws in COIL_FORCES_UPSTREAM_TERMINAL_OUTCOMES.items()
         ),
     ),
     "native-just-a-quadratic": CaseDefinition(

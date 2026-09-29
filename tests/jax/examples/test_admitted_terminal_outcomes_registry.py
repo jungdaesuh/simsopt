@@ -1,14 +1,26 @@
-"""Admitted terminal outcomes in the case registry are narrow, band-bound and backed by upstream's own samples (C14)."""
+"""Admitted terminal outcomes in the case registry are narrow, band-bound and backed by upstream's own samples."""
 
 from __future__ import annotations
 
 import pytest
-from examples.jax.parity.cases import CaseDefinition, get_case, implemented_case_ids
+from examples.jax.parity.cases import (
+    COIL_FORCES_UPSTREAM_TERMINAL_OUTCOMES,
+    CaseDefinition,
+    get_case,
+    implemented_case_ids,
+)
 from examples.jax.parity.contracts import AdmittedTerminalOutcome
 from examples.jax.parity.official_reference import load_official_sensitivity
 
-#: The only case that declares an admitted provider failure, and the exact outcome it admits.
-ADMITTING_CASES = {"native-coil-forces": (("jax-gpu", "2,2"),)}
+#: The only case that declares an admitted provider failure, and the exact outcomes it admits: every
+#: composite outcome other than the budget pair that upstream's own one-ulp draws produced, on each lane.
+ADMITTING_CASES = {
+    "native-coil-forces": tuple(
+        (lane, raw_status)
+        for lane in ("native-cpu", "jax-cpu", "jax-gpu")
+        for raw_status in ("2,1", "1,2", "2,2")
+    )
+}
 
 
 def _admitting_cases() -> dict[str, tuple[tuple[str, str], ...]]:
@@ -42,16 +54,32 @@ def test_every_admitted_outcome_is_band_bound_and_keeps_the_failed_category(
         assert outcome.upstream_evidence
 
 
-@pytest.mark.parametrize("case_id", sorted(ADMITTING_CASES))
-def test_the_admitted_stage_one_status_occurs_in_upstreams_own_samples(
-    case_id: str,
-) -> None:
-    sensitivity = load_official_sensitivity(case_id)
-    upstream_stage_one = {run.provider_calls[0].status for run in sensitivity.runs}
-    for outcome in get_case(case_id).native_default_admitted_terminal_outcomes:
-        stage_one = int(outcome.raw_status.split(",")[0])
-        assert stage_one in upstream_stage_one, (outcome.raw_status, upstream_stage_one)
-        assert stage_one == 2
+def test_every_admitted_coil_forces_outcome_is_one_upstream_produced() -> None:
+    """Each admitted composite status names the upstream draws that produced it.
+
+    Draws inside the tracked nine (k = 0..8) are checked against the tracked
+    sensitivity record here; the draws of the pre-registered extension
+    (k = 9..40) are named in the evidence text, and their per-run records are
+    local evidence outside this repository.
+    """
+    sensitivity = load_official_sensitivity("native-coil-forces")
+    tracked = {
+        run.k: ",".join(str(call.status) for call in run.provider_calls)
+        for run in sensitivity.runs
+    }
+    assert "1,1" not in COIL_FORCES_UPSTREAM_TERMINAL_OUTCOMES
+    for raw_status, draws in COIL_FORCES_UPSTREAM_TERMINAL_OUTCOMES.items():
+        assert draws
+        for k in draws:
+            if k in tracked:
+                assert tracked[k] == raw_status, (k, tracked[k], raw_status)
+    # The tracked nine show exactly one non-budget outcome, and it is listed.
+    assert {k: status for k, status in tracked.items() if status != "1,1"} == {
+        5: "2,1"
+    }
+    for outcome in get_case("native-coil-forces").native_default_admitted_terminal_outcomes:
+        draws = COIL_FORCES_UPSTREAM_TERMINAL_OUTCOMES[outcome.raw_status]
+        assert f"k = {', '.join(map(str, draws))} of k = 0..40" in outcome.upstream_evidence
 
 
 def test_an_admitted_outcome_without_a_band_is_refused() -> None:

@@ -123,12 +123,10 @@ class QualityBand:
 class AdmittedTerminalOutcome:
     """One case-owned terminal lane outcome authorized at ``native_default``.
 
-    A case declares this where a DOCUMENTED upstream failure mode -- the
-    stage-one provider termination -- motivates authorizing one case-specific
-    composite outcome. It is not a claim that upstream reaches the same
-    composite outcome: ``upstream_evidence`` records the measurement AND
-    discloses how the later stages differ from it. The admission is then bound
-    by four properties. It never relabels the lane: ``raw_status`` and
+    A case declares this where upstream's own official script produced exactly
+    this composite provider outcome under the one-ulp start protocol;
+    ``upstream_evidence`` names the draws. The admission is then bound by four
+    properties. It never relabels the lane: ``raw_status`` and
     ``normalized_status`` are the receipt's published strings, matched exactly
     and never parsed, and the lane keeps ``success`` false. Every finite, FP64
     and physical check and the upstream-only endpoint band stay in force, so
@@ -137,9 +135,10 @@ class AdmittedTerminalOutcome:
     only ever be ``quality-band``, never ``pass``. And the admission is
     published in the arbitration result and in the receipt, so it can never be
     a silent pass. ``case_id`` and ``lane`` bind the authorization to ONE case
-    and ONE lane (the lane the evidence was measured on): the arbiter refuses an
-    admission whose ``case_id`` is not the case it arbitrates, and any other lane
-    publishing the same raw status stays a rejected failure.
+    and ONE lane (a case that admits an outcome on several lanes declares one
+    entry per lane): the arbiter refuses an admission whose ``case_id`` is not
+    the case it arbitrates, and any undeclared lane publishing the same raw
+    status stays a rejected failure.
     """
 
     case_id: str
