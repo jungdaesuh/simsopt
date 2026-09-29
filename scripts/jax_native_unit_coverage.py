@@ -110,7 +110,7 @@ COVERAGE_CONTRACT_PLAN_PATH = (
     "docs/jax_native_unit_test_coverage_implementation_plan.md"
 )
 MIRROR_WAVE_PLAN_PATH = "docs/jax_native_test_mirror_wave_implementation_plan.md"
-TRUSTED_UPSTREAM_AUTHORITY_COMMIT = "377cf665158f47a9bed4a8b03a00352457ea27c8"
+TRUSTED_UPSTREAM_AUTHORITY_COMMIT = "9e027eac38028d57aa23777be52a781aa860e347"
 
 # Verbatim from the 2026-07-29 plan, section "Allowed dispositions".
 ALLOWED_DISPOSITIONS = (

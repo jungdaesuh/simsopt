@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import stat
 import sys
 from pathlib import Path
@@ -252,15 +253,23 @@ def test_red_source_tree_hash_drift_is_rejected(manifest):
 
 
 def test_red_manifest_cannot_replace_the_trusted_upstream_authority(manifest):
-    """A root commit that self-certifies no files cannot replace code authority."""
+    """An authority that self-certifies no files cannot replace code authority.
+
+    The candidate is git's empty tree, derived by git without writing an
+    object. Its native surface is empty in every clone, so the case does not
+    depend on the shape of the history: a root commit is not one object once
+    the fork is rebased across a shallow boundary, and a shallow boundary
+    commit lists files.
+    """
     corrupted = copy.deepcopy(manifest)
-    root_commit = COV._git(REPO_ROOT, "rev-list", "--max-parents=0", "HEAD").strip()
-    assert COV.native_test_surface(REPO_ROOT, root_commit) == ()
-    corrupted["baseline"]["upstream_authority_commit"] = root_commit
+    empty_tree = COV._git(REPO_ROOT, "hash-object", "-t", "tree", os.devnull).strip()
+    assert COV.native_test_surface(REPO_ROOT, empty_tree) == ()
+    assert empty_tree != COV.TRUSTED_UPSTREAM_AUTHORITY_COMMIT
+    corrupted["baseline"]["upstream_authority_commit"] = empty_tree
 
     message = _assert_rejected(corrupted, "upstream_authority_mismatch")
 
-    assert root_commit in message
+    assert empty_tree in message
 
 
 def test_red_orphan_jax_test_id_is_rejected(manifest):
