@@ -18,8 +18,14 @@ process, and the GPU), so no such ordering is a property of the kernels.
 
 from __future__ import annotations
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
+from simsopt_jax.geo.surface_fourier_cpu_ordered import surface_gamma_cpu_ordered
+from simsopt_jax_adapters.geo.boozer_surface import (
+    _surface_geometry_and_derivatives_from_dofs,
+)
 
 
 pytestmark = [pytest.mark.parity_census, pytest.mark.boozer]
@@ -260,26 +266,9 @@ def test_dgamma_by_dcoeff_cpu_ordered_matches_cpp(
         assert diff < 1e-13, f"{name}: cpu_ordered drift {diff!r} too large"
 
 
-def test_parity_policy_routes_through_cpu_ordered_kernels_and_meets_ulp_ceiling(
-    cpu_jax_pair,
-):
-    """The parity policy gate exposes the cpu_ordered kernels via
-    ``_surface_geometry_and_derivatives_from_dofs``.
-
-    The routed cpu_ordered gamma must meet the same absolute FMA-fusion ULP
-    ceiling as the direct kernel, so the routing path cannot silently drift.
-    """
-    import jax
-
-    from simsopt_jax_adapters.geo.boozer_surface import (
-        _surface_geometry_and_derivatives_from_dofs,
-    )
-    import jax.numpy as jnp
-
-    fx = cpu_jax_pair(mpol=2, ntor=2, nfp=3, stellsym=True, nphi=11, ntheta=11)
-    sdofs = jnp.asarray(fx["sdofs"])
-    geom_cpu, _ = _surface_geometry_and_derivatives_from_dofs(
-        sdofs,
+def _routed_gamma(fx, parity_policy):
+    geometry, _ = _surface_geometry_and_derivatives_from_dofs(
+        jnp.asarray(fx["sdofs"]),
         quadpoints_phi=fx["surface"].quadpoints_phi,
         quadpoints_theta=fx["surface"].quadpoints_theta,
         mpol=fx["mpol"],
@@ -288,11 +277,46 @@ def test_parity_policy_routes_through_cpu_ordered_kernels_and_meets_ulp_ceiling(
         stellsym=fx["stellsym"],
         scatter_indices=fx["scatter_indices"],
         surface_kind="generic",
-        parity_policy="cpu_ordered",
+        parity_policy=parity_policy,
     )
+    return np.asarray(jax.device_get(geometry.gamma), dtype=np.float64)
+
+
+def _direct_cpu_ordered_gamma(fx):
+    s = fx["surface"]
+    return np.asarray(
+        jax.device_get(
+            surface_gamma_cpu_ordered(
+                s.quadpoints_phi,
+                s.quadpoints_theta,
+                fx["xc"],
+                fx["yc"],
+                fx["zc"],
+                fx["mpol"],
+                fx["ntor"],
+                fx["nfp"],
+            )
+        ),
+        dtype=np.float64,
+    )
+
+
+def test_parity_policy_routes_through_cpu_ordered_kernels_and_meets_ulp_ceiling(
+    cpu_jax_pair,
+):
+    """The parity policy gate exposes the cpu_ordered kernels via
+    ``_surface_geometry_and_derivatives_from_dofs``.
+
+    The routed gamma must equal a direct cpu_ordered kernel call bit for bit,
+    which proves the route itself (the production kernel also meets the
+    absolute ceiling, so the ceiling alone cannot tell the two apart), and it
+    must meet the same absolute FMA-fusion ULP ceiling as the direct kernel.
+    """
+    fx = cpu_jax_pair(mpol=2, ntor=2, nfp=3, stellsym=True, nphi=11, ntheta=11)
+    routed = _routed_gamma(fx, "cpu_ordered")
+    np.testing.assert_array_equal(routed, _direct_cpu_ordered_gamma(fx))
     cpp_gamma = np.asarray(fx["surface"].gamma(), dtype=np.float64)
-    cpu = np.asarray(jax.device_get(geom_cpu.gamma), dtype=np.float64)
-    cpu_drift = np.max(np.abs(cpu - cpp_gamma))
+    cpu_drift = np.max(np.abs(routed - cpp_gamma))
     assert cpu_drift < _SURFACE_GAMMA_ULP_CEILING, (
         f"cpu_ordered gamma drift {cpu_drift!r} exceeds the FMA-fusion "
         "ULP ceiling; the routing path cannot silently drift."
