@@ -10,11 +10,16 @@ at coincident points), so ``signed_value`` is a smooth function of the sampled
 points and ``grad = d(signed_value)/dx`` over the free dofs of
 ``objective_optimizable`` holds everywhere. The surrogate is conservative:
 ``hard_signed_value <= signed_value <= hard_signed_value + T log N`` for N
-curvature samples, ``+ T (log N + 1)`` for N distance pairs. Unlike the stock hinge objectives, the value keeps the slack
-when the constraint is inactive. ``temperature`` must be finite and positive
-(in the constrained quantity's units); every kernel raises ``ValueError``
-otherwise. Zero is rejected, not read as the hard limit: that limit is
-``hard_signed_value``.
+curvature samples, ``+ T (log N + 1)`` for N distance pairs. Unlike the stock
+hinge objectives, the value keeps the slack when the constraint is inactive.
+
+Domain: ``temperature`` lies in [1e-100, 1e100] (in the constrained quantity's
+units) and every sample coordinate is finite with ``|x| <= 1e100``; every
+kernel raises ``ValueError`` naming the bound and the value otherwise. There
+every distance is below 3.5e100, ``sqrt(d^2 + T^2)`` and ``T log N`` are
+representable, and near contact d underflows gracefully, so each row returns
+its value and gradient to rounding. Zero temperature is rejected, not read as
+the hard limit: that limit is ``hard_signed_value``.
 """
 
 import numpy as np
@@ -34,14 +39,33 @@ __all__ = [
 # stays near 4-5 MiB whatever the number of pairs.
 _PAIR_BLOCK = 1 << 16
 
+# The kernels' domain (module docstring).
+TEMPERATURE_RANGE = (1.0e-100, 1.0e100)
+COORDINATE_BOUND = 1.0e100
+
+
 def require_smoothing_temperature(temperature) -> float:
-    """``temperature`` as a float; ``ValueError`` unless finite and positive."""
+    """``temperature`` as a float; ``ValueError`` unless in ``TEMPERATURE_RANGE``."""
     value = float(temperature)
-    if not np.isfinite(value) or value <= 0.0:
+    lower, upper = TEMPERATURE_RANGE
+    if not lower <= value <= upper:
         raise ValueError(
-            f"smoothing temperature must be finite and positive; got {temperature!r}"
+            f"smoothing temperature must lie in [{lower:g}, {upper:g}]; got {temperature!r}"
         )
     return value
+
+
+def require_sample_coordinates(points) -> np.ndarray:
+    """``points`` as a float array; ``ValueError`` unless every coordinate is
+    finite with ``|x| <= COORDINATE_BOUND``."""
+    array = np.asarray(points, dtype=float)
+    largest = float(np.max(np.abs(array), initial=0.0))
+    if not largest <= COORDINATE_BOUND:
+        raise ValueError(
+            f"sample coordinates must be finite with |x| <= {COORDINATE_BOUND:g}; "
+            f"got max |x| = {largest!r}"
+        )
+    return array
 
 
 def soft_min_pair_distance(point_sets, set_pairs, temperature: float):
@@ -52,12 +76,15 @@ def soft_min_pair_distance(point_sets, set_pairs, temperature: float):
     soft_min, point_gradients)``: the smallest pair distance d, ``-T log sum
     exp(-s/T)`` over all pairs of the smooth distance ``s = sqrt(d^2 + T^2) -
     T`` (at most ``hard_min``, at least ``hard_min - T (log N + 1)``), and
-    ``d(soft_min)/d points`` per set. No square or quotient of d or T is
-    formed unscaled, so every result that is representable in binary64 is
-    returned, for any finite T > 0. Pairs are visited in blocks of
+    ``d(soft_min)/d points`` per set. ``temperature`` and the points must lie
+    in the module's domain (``ValueError`` otherwise); no square or quotient
+    of d or T is formed unscaled, so d underflows gracefully near contact.
+    Pairs are visited in blocks of
     ``_PAIR_BLOCK`` with the running minimum of s as the exponent shift, so
     every exponent is <= 0.
     """
+    temperature = require_smoothing_temperature(temperature)
+    point_sets = [require_sample_coordinates(points) for points in point_sets]
     gradients = [np.zeros_like(points) for points in point_sets]
     shift = np.inf
     hard_min = np.inf
@@ -156,6 +183,7 @@ def smooth_max_curvature_signed_constraint(
     current dofs, so a caller that also reports the hard maximum evaluates it once.
     """
     temperature = require_smoothing_temperature(temperature)
+    require_sample_coordinates(curve.gamma())
     kappa = np.asarray(curve.kappa() if kappa is None else kappa, dtype=float)
     hard_max = float(np.max(kappa))
     exp_shifted = np.exp((kappa - hard_max) / temperature)

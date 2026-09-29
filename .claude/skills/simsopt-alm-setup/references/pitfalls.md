@@ -82,9 +82,10 @@ Each entry: the symptom, the cause, the fix.
     multipliers an inactive row (`max(0, multiplier + penalty * g) = 0`)
     drops out of L and its gradient goes unchecked; `gradient_check.py` tests
     f and each row separately.
-13. **Taylor steps and smoothing.** A kernel's smoothing temperature must be
-    finite and > 0 (0 raises `ValueError`; the exact value is the kernel's
-    third item). The smooth rows are a log-sum-exp over every sample
+13. **Taylor steps and smoothing.** A kernel's smoothing temperature must
+    lie in [1e-100, 1e100], and every sample coordinate must be finite with
+    |x| <= 1e100 (`ValueError` otherwise, naming the bound and the value; 0 is
+    not the exact value, which is the kernel's third item). The smooth rows are a log-sum-exp over every sample
     (curvature) or point pair (distances), smooth everywhere, but they bend
     on the scale of the temperature, so only steps that move the constrained
     quantity far below the temperature see the gradient.

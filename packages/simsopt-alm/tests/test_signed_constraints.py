@@ -223,7 +223,9 @@ class SignedConstraintTemperatureTests(unittest.TestCase):
     with a ValueError naming it (zero is not the hard limit: the hard signal
     is the third return value)."""
 
-    INVALID = (-0.01, 0.0, float("nan"), float("inf"), -float("inf"))
+    # Outside [1e-100, 1e100] as well (Codex R20: the domain is enforced).
+    INVALID = (-0.01, 0.0, float("nan"), float("inf"), -float("inf"),
+               1.0e-200, 9.0e-101, 1.1e100, 1.0e150, 3.0e307)
 
     def _kernels(self):
         curves = [_circle(1.0, 0.0), _circle(1.0, 0.5)]
@@ -543,13 +545,13 @@ class FullLogSumExpTests(unittest.TestCase):
                             f"{derivative:.6g} at z offset {position:g}",
                         )
 
-    def test_extreme_temperatures_give_finite_rows_at_and_near_contact(self):
-        # Codex R18-01: every finite T > 0 is accepted. At T = 1e-200 the
-        # squared temperature underflowed to 0, so the contact gradient was
-        # NaN; T = 1e150 would overflow T^2. Values and gradients stay finite,
-        # the gradient no larger than the unit direction a pair can give, and
-        # the row no looser than the hard value.
-        for temperature in (1.0e-200, 1.0e150):
+    def test_edge_temperatures_give_finite_rows_at_and_near_contact(self):
+        # Codex R18-01 at the domain's temperature edges: values and gradients
+        # stay finite at and next to contact, the gradient no larger than the
+        # unit direction a pair can give, the row no looser than the hard
+        # value. (T = 1e-200 and 1e150, where T^2 underflowed or overflowed,
+        # are now rejected: SignedConstraintDomainTests.)
+        for temperature in (1.0e-100, 1.0e100):
             for name, (evaluate, owner, index) in self._collision_cases(temperature).items():
                 for position in (-1.0e-3, -1.0e-8, 0.0, 1.0e-8, 1.0e-3):
                     with self.subTest(temperature=temperature, kernel=name, position=position):
@@ -616,15 +618,69 @@ def _decimal_soft_min(left, right, temperature, moving):
                 float(derivative))
 
 
-# (distance, temperature): d ~ T, d >> T, exact contact, the underflow edge
-# of d^2 and the overflow edge of d^2 (Codex R19-01).
+# (z of the moving samples, z of the fixed ones, temperature), all inside the
+# enforced domain (T in [1e-100, 1e100], |coordinate| <= 1e100): d ~ T, d >> T
+# and contact at an ordinary T; near contact, contact and d = T at T = 1e-100;
+# d = T = 1e100; and d = 2e100 against T = 1 (Codex R19-01, R20).
 SCALE_CASES = (
-    (1.0e-3, 1.0e-3),
-    (0.2, 1.0e-3),
-    (0.0, 1.0e-3),
-    (1.0e-170, 1.0e-200),
-    (1.0e200, 1.0),
+    (1.0e-3, 0.0, 1.0e-3),
+    (0.2, 0.0, 1.0e-3),
+    (0.0, 0.0, 1.0e-3),
+    (1.0e-150, 0.0, 1.0e-100),
+    (0.0, 0.0, 1.0e-100),
+    (1.0e-100, 0.0, 1.0e-100),
+    (1.0e100, 0.0, 1.0e100),
+    (1.0e100, -1.0e100, 1.0),
 )
+
+
+class SignedConstraintDomainTests(unittest.TestCase):
+    """Outside T in [1e-100, 1e100] or |sample coordinate| <= 1e100 (finite),
+    every row and the pair helper raise a ValueError naming the bound and the
+    value, instead of returning a row whose intermediates overflowed or
+    underflowed (Codex R18-R20)."""
+
+    def test_the_helper_rejects_out_of_domain_temperatures_and_points(self):
+        origin = np.zeros((1, 3))
+        cases = {
+            # Codex R19-01: d = 1e-170 at T = 1e-200.
+            "T = 1e-200": ([np.array([[0.0, 0.0, 1.0e-170]]), origin], 1.0e-200, r"1e-100.*1e-200"),
+            "T = 1e150": ([np.array([[0.0, 0.0, 1.0]]), origin], 1.0e150, r"1e\+100.*1e\+150"),
+            # Codex R19-01: d = 1e200.
+            "d = 1e200": ([np.array([[0.0, 0.0, 1.0e200]]), origin], 1.0, r"1e\+100.*1e\+200"),
+            "NaN point": ([np.array([[0.0, 0.0, np.nan]]), origin], 1.0, r"finite.*nan"),
+            # Codex R20-01: one pair at d = T = 1.5e308.
+            "R20-01": ([np.array([[1.5e308, 0.0, 0.0]]), origin], 1.5e308, r"temperature.*1\.5e\+308"),
+            # Codex R20-02: eight pairs at d = T = 1e308.
+            "R20-02": ([np.array([[1.0e308, 0.0, 0.0]]), np.zeros((8, 3))], 1.0e308,
+                       r"temperature.*1e\+308"),
+            "R20-02 points": ([np.array([[1.0e308, 0.0, 0.0]]), np.zeros((8, 3))], 1.0,
+                              r"coordinates.*1e\+308"),
+        }
+        for label, (point_sets, temperature, message) in cases.items():
+            with self.subTest(case=label):
+                with self.assertRaisesRegex(ValueError, message):
+                    signed_constraints.soft_min_pair_distance(point_sets, [(0, 1)], temperature)
+
+    def test_the_rows_reject_out_of_domain_samples(self):
+        far = _circle(1.0, 1.5e308, 16)
+        near = _circle(1.0, 0.0, 16)
+        surface = _fixed_torus(1.0, 0.3)
+        cases = {
+            # Codex R20-02's public row: separation 1.5e308 at T = 3e307.
+            "curve_curve R20-02": (lambda: smooth_min_curve_curve_signed_constraint(
+                [near, far], 0.0, 3.0e307, _JointDofs([near, far])), r"1e\+100.*3e\+307"),
+            "curve_curve": (lambda: smooth_min_curve_curve_signed_constraint(
+                [near, far], 0.1, 1.0e-3, _JointDofs([near, far])), r"1e\+100.*1\.5e\+308"),
+            "curve_surface": (lambda: smooth_min_curve_surface_signed_constraint(
+                [far], surface, 0.1, 1.0e-3, _JointDofs([far])), r"1e\+100.*1\.5e\+308"),
+            "curvature": (lambda: smooth_max_curvature_signed_constraint(
+                far, 1.5, 0.05, _JointDofs([far])), r"1e\+100.*1\.5e\+308"),
+        }
+        for label, (row, message) in cases.items():
+            with self.subTest(row=label):
+                with self.assertRaisesRegex(ValueError, message):
+                    row()
 
 
 class ScaleSafePairDistanceTests(unittest.TestCase):
@@ -641,29 +697,30 @@ class ScaleSafePairDistanceTests(unittest.TestCase):
         )
 
     def test_one_pair_matches_the_oracle(self):
-        for distance, temperature in SCALE_CASES:
-            with self.subTest(distance=distance, temperature=temperature):
-                left = np.array([[0.0, 0.0, distance]])
-                right = np.array([[0.0, 0.0, 0.0]])
+        cases = [(np.array([[0.0, 0.0, moving]]), np.array([[0.0, 0.0, fixed]]), temperature)
+                 for moving, fixed, temperature in SCALE_CASES]
+        # The domain's largest pair: opposite corners of the 1e100 cube, d = 3.46e100.
+        cases.append((np.full((1, 3), 1.0e100), np.full((1, 3), -1.0e100), 1.0))
+        for left, right, temperature in cases:
+            with self.subTest(left=left[0].tolist(), right=right[0].tolist(), temperature=temperature):
                 hard, soft, gradients = signed_constraints.soft_min_pair_distance(
                     [left, right], [(0, 1)], temperature
                 )
                 oracle_hard, oracle_soft, oracle_derivative = _decimal_soft_min(
                     left, right, temperature, "left"
                 )
-                self.assertEqual(hard, oracle_hard)
-                self.assertEqual(hard, distance)
+                self.assert_close(hard, oracle_hard, "hard")
                 self.assert_close(soft, oracle_soft, "soft")
                 self.assert_close(gradients[0][0, 2], oracle_derivative, "left gradient")
                 self.assert_close(gradients[1][0, 2], -oracle_derivative, "right gradient")
-                np.testing.assert_array_equal(gradients[0][0, :2], [0.0, 0.0])
 
     def test_public_rows_match_the_oracle(self):
         # Codex's public probe: circles offset along z, and a circle over the
         # torus's outboard midplane samples.
-        for distance, temperature in SCALE_CASES:
+        for moving, fixed, temperature in SCALE_CASES:
+            distance = moving - fixed
             minimum_distance = 2.0 * distance if distance > 0 else 0.1
-            first, second = _circle(1.0, 0.0, 16), _circle(1.0, distance, 16)
+            first, second = _circle(1.0, fixed, 16), _circle(1.0, moving, 16)
             pair_owner = _JointDofs([first, second])
             signed, grad, hard = smooth_min_curve_curve_signed_constraint(
                 [first, second], minimum_distance, temperature, pair_owner
@@ -677,7 +734,7 @@ class ScaleSafePairDistanceTests(unittest.TestCase):
                 self.assert_close(signed, minimum_distance - oracle_soft, "signed")
                 self.assert_close(grad[index], -oracle_derivative, "z derivative")
 
-            curve = _circle(1.3, distance, 16)
+            curve = _circle(1.3, moving, 16)
             surface = SurfaceRZFourier(
                 nfp=1,
                 stellsym=True,

@@ -58,8 +58,9 @@ ignored by `alm_problem_physics`. Rows:
   check clearance and curvature at a higher resolution (e.g. re-evaluate the
   rows on copies of the curves with more quadrature points) before accepting
   a physical bound. The temperature is in the constrained quantity's units
-  and must be finite and > 0 (`ValueError` otherwise; 0 is rejected: use the
-  third item for the hard value).
+  and must lie in [1e-100, 1e100], and every sample coordinate must be
+  finite with |x| <= 1e100 (`ValueError` otherwise, naming the bound and the
+  value; 0 is rejected: use the third item for the hard value).
 
 Divide every row by a positive scale in its units (its bound, or a typical
 size) so all rows are O(1): the penalty is shared, and the tolerances are
