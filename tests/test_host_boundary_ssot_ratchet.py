@@ -263,14 +263,65 @@ def test_only_boundary_owners_call_jax_transfer_and_readiness_primitives() -> No
 
 
 # ``host_boundary.allow_host_transfers`` lifts an outer strict guard for its whole
-# block, so every caller is admitted explicitly: file -> number of call sites.
+# block, so every caller is admitted explicitly, keyed by its enclosing scope
+# (``path::qualified.name``) with its number of calls there: moving an admitted
+# call into another function, even in the same file, fails.
 # Admitted 2026-09-28: the official tiny least-squares policy's five host-driven
 # scopes (SciPy's residual callback, the endpoint Jacobian, three residual builders).
 _ALLOWED_ALLOW_HOST_TRANSFERS_CALLS = {
-    "src/simsopt_jax/examples/official_tiny_least_squares.py": 5,
+    "src/simsopt_jax/examples/official_tiny_least_squares.py::curve_length_residual": 1,
+    "src/simsopt_jax/examples/official_tiny_least_squares.py::quadratic_residual": 1,
+    "src/simsopt_jax/examples/official_tiny_least_squares.py::solve_jax_residual.host_residual": 1,
+    "src/simsopt_jax/examples/official_tiny_least_squares.py::surface_area_volume_residual": 1,
+    "src/simsopt_jax/examples/official_tiny_least_squares.py::value_and_jacobian": 1,
 }
 _ALLOW_HOST_TRANSFERS_ROOTS = (*SOURCE_ROOTS, REPO_ROOT / "examples/jax")
 _ALLOW_HOST_TRANSFERS_OWNER = "src/simsopt_jax/runtime/host_boundary.py"
+
+
+class _AllowHostTransfersCensus(ast.NodeVisitor):
+    def __init__(self, relative_path: str) -> None:
+        self.relative_path = relative_path
+        self.scope_names: list[str] = []
+        self.counts: dict[str, int] = {}
+
+    def _visit_scope(self, node: ast.AST, name: str) -> None:
+        self.scope_names.append(name)
+        self.generic_visit(node)
+        self.scope_names.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_scope(node, node.name)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_scope(node, node.name)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self._visit_scope(node, node.name)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        for alias in node.names:
+            assert not (alias.name == "allow_host_transfers" and alias.asname), (
+                f"{self.relative_path} imports allow_host_transfers under an alias"
+            )
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if (
+            isinstance(node.func, ast.Name) and node.func.id == "allow_host_transfers"
+        ) or (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "allow_host_transfers"
+        ):
+            scope = ".".join(self.scope_names) or "<module>"
+            key = f"{self.relative_path}::{scope}"
+            self.counts[key] = self.counts.get(key, 0) + 1
+        self.generic_visit(node)
+
+
+def _allow_host_transfers_census(source: str, relative_path: str) -> dict[str, int]:
+    census = _AllowHostTransfersCensus(relative_path)
+    census.visit(ast.parse(source))
+    return census.counts
 
 
 def _allow_host_transfers_calls() -> dict[str, int]:
@@ -280,28 +331,35 @@ def _allow_host_transfers_calls() -> dict[str, int]:
             relative = path.relative_to(REPO_ROOT).as_posix()
             if relative == _ALLOW_HOST_TRANSFERS_OWNER:
                 continue
-            for node in ast.walk(ast.parse(path.read_text())):
-                if isinstance(node, ast.ImportFrom):
-                    for alias in node.names:
-                        assert not (
-                            alias.name == "allow_host_transfers" and alias.asname
-                        ), f"{relative} imports allow_host_transfers under an alias"
-                if isinstance(node, ast.Call) and (
-                    (
-                        isinstance(node.func, ast.Name)
-                        and node.func.id == "allow_host_transfers"
-                    )
-                    or (
-                        isinstance(node.func, ast.Attribute)
-                        and node.func.attr == "allow_host_transfers"
-                    )
-                ):
-                    counts[relative] = counts.get(relative, 0) + 1
+            counts.update(_allow_host_transfers_census(path.read_text(), relative))
     return counts
 
 
 def test_only_admitted_callers_lift_the_strict_transfer_guard() -> None:
     assert _allow_host_transfers_calls() == _ALLOWED_ALLOW_HOST_TRANSFERS_CALLS
+
+
+def test_allow_host_transfers_census_refuses_a_call_moved_within_one_file() -> None:
+    admitted_source = (
+        "from simsopt_jax.runtime.host_boundary import allow_host_transfers\n\n"
+        "def approved():\n"
+        "    with allow_host_transfers():\n"
+        "        pass\n\n"
+        "def other():\n"
+        "    pass\n"
+    )
+    swapped_source = (
+        "from simsopt_jax.runtime.host_boundary import allow_host_transfers\n\n"
+        "def approved():\n"
+        "    pass\n\n"
+        "def other():\n"
+        "    with allow_host_transfers():\n"
+        "        pass\n"
+    )
+    admitted = _allow_host_transfers_census(admitted_source, "src/example.py")
+
+    assert admitted == {"src/example.py::approved": 1}
+    assert _allow_host_transfers_census(swapped_source, "src/example.py") != admitted
 
 
 def test_boundary_census_distinguishes_duplicate_invocations_in_one_function() -> None:
