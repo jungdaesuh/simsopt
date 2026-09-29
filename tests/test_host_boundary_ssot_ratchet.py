@@ -1,4 +1,13 @@
-"""Full-census ratchet for the JAX host/device boundary owners."""
+"""Full-census ratchet for the JAX host/device boundary owners.
+
+The census is static analysis over the source text. It resolves the owner
+module and ``allow_host_transfers`` through static imports, aliases, attribute
+chains, ``getattr``/``hasattr`` with a constant name, ``sys.modules`` keys and
+``importlib.import_module``/``__import__`` arguments. It cannot see a lookup
+whose name is computed at run time on an object it does not recognise as the
+owner module; those forms are outside what an AST can decide, and the
+repository's rule against dynamic imports covers them.
+"""
 
 from __future__ import annotations
 
@@ -267,45 +276,65 @@ def test_only_boundary_owners_call_jax_transfer_and_readiness_primitives() -> No
 # block, so every permitted region is admitted individually. The only admitted form
 # is a ``with allow_host_transfers():`` item (or ``with host_boundary.allow_host_
 # transfers():``). Each admitted site is keyed by its enclosing scope
-# (``path::qualified.name``) and pinned by a fingerprint of the whole normalized
-# ``with`` statement -- items and body, serialized by ``_stable_ast_dump``, which
-# emits every field in ``_fields`` order (empty lists and ``None`` included) and no
-# line or column attributes, so it does not depend on ``ast.dump``'s defaults
-# (Python 3.13 dropped empty optional fields from them) -- together with its
-# statement path inside that scope (``body[1]``, ``body[0].orelse[2]``, ...).
+# (``path::qualified.name``) and pinned by a fingerprint of the whole ``with``
+# statement -- items and body, serialized by ``_stable_ast_dump`` -- together with
+# its statement path inside that scope (``body[1]``, ``body[0].orelse[2]``, ...).
 # Moving a region to another scope, moving it within its scope, or editing
 # anything inside it therefore fails until the allowlist is updated on purpose.
-# Every other reference is an escape: a bare call, a decorator, a call inside a
-# lambda or comprehension, a call used as a value, an aliased import,
-# ``permit = allow_host_transfers``, passing it as a value, and a string constant
-# equal to the name (``getattr(module, "allow_host_transfers")``). The owner module
-# object is an escape too, under any import form or alias, unless it is only the
-# base of an attribute access by a literal, non-dunder name: ``getattr`` with a
-# computed name, ``vars(host_boundary)``, ``host_boundary.__dict__``, the module
-# passed as a value, and a string naming the module (``sys.modules[...]``).
+#
+# Escapes: a bare call, a decorator, a call inside a lambda or comprehension, a
+# call used as a value, an aliased import, ``permit = allow_host_transfers``,
+# passing the name as a value; the owner module object (bound by ``from
+# simsopt_jax.runtime import host_boundary``, ``import simsopt_jax.runtime.
+# host_boundary as hb``, the dotted import, or ``runtime.host_boundary`` after
+# ``from simsopt_jax import runtime``) used as anything but the base of an
+# attribute access by a literal, non-dunder name (``getattr(hb, name)``,
+# ``vars(hb)``, ``hb.__dict__``, the module passed as a value); and these lookup
+# forms: a ``getattr``/``hasattr`` name equal to ``"allow_host_transfers"`` or
+# ``"host_boundary"``, a ``sys.modules[...]`` key or ``sys.modules.get(...)``
+# argument, and an ``importlib.import_module(...)``/``__import__(...)`` argument
+# that is not a constant or that names the owner module or its package. Strings
+# elsewhere (docstrings, messages) are not lookups and are not escapes.
+#
+# Limit: this is static analysis. A lookup whose name is computed and whose target
+# object is not recognisably the owner module -- ``getattr(obj, "allow_" +
+# suffix)`` on an object reached through an unrecognised alias -- is not
+# visible to it; the repository rule against dynamic imports and review cover
+# that residue. Non-constant dynamic imports are escapes unless their scope is
+# admitted in ``_ALLOWED_DYNAMIC_LOOKUP_SITES``.
+#
 # Regenerate a fingerprint with ``_allow_host_transfers_census(source, path)`` after
 # reading the edited region.
 _ALLOWED_ALLOW_HOST_TRANSFERS_SITES = {
     # Builds the curve spec and frozen DOF vector on device from host inputs.
     "src/simsopt_jax/examples/official_tiny_least_squares.py::curve_length_residual": (
-        "ba6efdf07d18",
+        "a783309da54f",
     ),
     # Places the quadratic targets and weights on device.
     "src/simsopt_jax/examples/official_tiny_least_squares.py::quadratic_residual": (
-        "e79c2feff19a",
+        "3f827b920703",
     ),
     # SciPy's residual callback: places each host trial point, returns a host residual.
     "src/simsopt_jax/examples/official_tiny_least_squares.py::solve_jax_residual.host_residual": (
-        "99dff2c89f4f",
+        "d9273088359e",
     ),
     # Builds the surface spec, frozen DOF vector and targets on device from host inputs.
     "src/simsopt_jax/examples/official_tiny_least_squares.py::surface_area_volume_residual": (
-        "b2c2f91262b8",
+        "317b98758dbe",
     ),
     # Endpoint residual and exact Jacobian, read back to host float64.
     "src/simsopt_jax/examples/official_tiny_least_squares.py::value_and_jacobian": (
-        "0af3fc000c8b",
+        "c97967c48d74",
     ),
+}
+# Scopes admitted to import a module by a non-constant name, with their count.
+_ALLOWED_DYNAMIC_LOOKUP_SITES = {
+    # Upstream serialization: imports a class's parent package to record its version.
+    "src/simsopt/_core/json.py::GSONEncoder.default": 1,
+    "src/simsopt/_core/json.py::GSONable.as_dict": 1,
+    "src/simsopt/_core/json.py::SIMSON.as_dict": 1,
+    # Upstream deserialization: imports the module a serialized document names.
+    "src/simsopt/_core/json.py::GSONDecoder.process_decoded": 2,
 }
 _ALLOW_HOST_TRANSFERS_REQUIRED_ROOTS = (
     "src/simsopt",
@@ -317,8 +346,12 @@ _ALLOW_HOST_TRANSFERS_REQUIRED_ROOTS = (
 _ALLOW_HOST_TRANSFERS_OPTIONAL_ROOTS = ("benchmarks",)
 _ALLOW_HOST_TRANSFERS_OWNER = "src/simsopt_jax/runtime/host_boundary.py"
 _ALLOW_HOST_TRANSFERS = "allow_host_transfers"
-_OWNER_MODULE = "simsopt_jax.runtime.host_boundary"
+_OWNER_PACKAGE = "simsopt_jax.runtime"
 _OWNER_MODULE_NAME = "host_boundary"
+_OWNER_MODULE = f"{_OWNER_PACKAGE}.{_OWNER_MODULE_NAME}"
+_LOOKUP_NAMES = frozenset({_ALLOW_HOST_TRANSFERS, _OWNER_MODULE_NAME})
+_NAME_LOOKUP_BUILTINS = frozenset({"getattr", "hasattr"})
+_DYNAMIC_IMPORTERS = frozenset({"import_module", "__import__"})
 _SCOPE_NODES = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
 
@@ -330,6 +363,15 @@ def _is_allow_host_transfers_call(node: ast.AST) -> bool:
             and node.func.attr == _ALLOW_HOST_TRANSFERS
         )
     )
+
+
+def _dotted_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _dotted_name(node.value)
+        return None if base is None else f"{base}.{node.attr}"
+    return None
 
 
 def _statement_paths(tree: ast.Module) -> dict[int, str]:
@@ -352,11 +394,17 @@ def _statement_paths(tree: ast.Module) -> dict[int, str]:
 
 
 def _stable_ast_dump(value: object) -> str:
-    """Serialize an AST with every field, independent of ``ast.dump`` defaults."""
+    """Serialize an AST in ``_fields`` order without positions or empty fields.
+
+    Empty-list and ``None`` fields are omitted, the canonical form Python 3.13's
+    ``ast.dump`` uses, so a field a newer grammar adds empty (``type_params=[]``
+    on functions since 3.12) leaves the serialization unchanged.
+    """
     if isinstance(value, ast.AST):
         fields = ", ".join(
             f"{field}={_stable_ast_dump(getattr(value, field))}"
             for field in value._fields
+            if getattr(value, field) not in ([], None)
         )
         return f"{type(value).__name__}({fields})"
     if isinstance(value, list):
@@ -369,27 +417,45 @@ def _with_fingerprint(node: ast.With | ast.AsyncWith, path: str) -> str:
     return hashlib.sha256(normalized.encode()).hexdigest()[:12]
 
 
-def _owner_module_bindings(tree: ast.Module) -> frozenset[str]:
-    """Names any import in the file binds to the owner module object."""
-    bound: set[str] = set()
+def _module_package(relative_path: str) -> tuple[str, ...]:
+    parts = Path(relative_path).with_suffix("").parts
+    return (parts[1:] if parts[:1] == ("src",) else parts)[:-1]
+
+
+def _import_from_module(node: ast.ImportFrom, relative_path: str) -> str:
+    if node.level == 0:
+        return node.module or ""
+    package = _module_package(relative_path)
+    base = package[: len(package) - (node.level - 1)]
+    return ".".join((*base, *((node.module,) if node.module else ())))
+
+
+def _owner_bindings(
+    tree: ast.Module, relative_path: str
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Names bound to the owner module and to its package by the file's imports."""
+    owner: set[str] = set()
+    package: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            bound.update(
-                alias.asname
-                for alias in node.names
-                if alias.name == _OWNER_MODULE and alias.asname is not None
-            )
+            for alias in node.names:
+                if alias.asname is not None and alias.name == _OWNER_MODULE:
+                    owner.add(alias.asname)
+                elif alias.asname is not None and alias.name == _OWNER_PACKAGE:
+                    package.add(alias.asname)
         elif isinstance(node, ast.ImportFrom):
-            bound.update(
-                alias.asname or alias.name
-                for alias in node.names
-                if alias.name == _OWNER_MODULE_NAME
-            )
-    return frozenset(bound)
+            module = _import_from_module(node, relative_path)
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                if module == _OWNER_PACKAGE and alias.name == _OWNER_MODULE_NAME:
+                    owner.add(bound)
+                elif f"{module}.{alias.name}" == _OWNER_PACKAGE:
+                    package.add(bound)
+    return frozenset(owner), frozenset(package)
 
 
 def _literal_attribute_bases(tree: ast.Module) -> frozenset[int]:
-    """Ids of expressions used only as the base of a literal non-dunder attribute."""
+    """Ids of expressions used as the base of a literal non-dunder attribute."""
     return frozenset(
         id(node.value)
         for node in ast.walk(tree)
@@ -398,21 +464,35 @@ def _literal_attribute_bases(tree: ast.Module) -> frozenset[int]:
     )
 
 
+def _names_owner_module(value: str) -> bool:
+    return value in (_OWNER_MODULE, _OWNER_PACKAGE) or value.startswith(".")
+
+
+def _first_argument(node: ast.Call, keyword: str) -> ast.expr | None:
+    if node.args:
+        return node.args[0]
+    return next(
+        (item.value for item in node.keywords if item.arg == keyword),
+        None,
+    )
+
+
 class _AllowHostTransfersCensus(ast.NodeVisitor):
     def __init__(
         self,
         relative_path: str,
         statement_paths: dict[int, str],
-        owner_module_names: frozenset[str],
+        owner_bindings: tuple[frozenset[str], frozenset[str]],
         literal_attribute_bases: frozenset[int],
     ) -> None:
         self.relative_path = relative_path
         self.statement_paths = statement_paths
-        self.owner_module_names = owner_module_names
+        self.owner_names, self.package_names = owner_bindings
         self.literal_attribute_bases = literal_attribute_bases
         self.scope_names: list[str] = []
         self.sites: dict[str, tuple[str, ...]] = {}
         self.escapes: list[str] = []
+        self.dynamic_lookups: dict[str, int] = {}
 
     def _scope_key(self) -> str:
         scope = ".".join(self.scope_names) or "<module>"
@@ -420,6 +500,31 @@ class _AllowHostTransfersCensus(ast.NodeVisitor):
 
     def _escape(self, node: ast.AST, form: str) -> None:
         self.escapes.append(f"{self._scope_key()}::{node.lineno} {form}")
+
+    def _dynamic_lookup(self) -> None:
+        key = self._scope_key()
+        self.dynamic_lookups[key] = self.dynamic_lookups.get(key, 0) + 1
+
+    def _is_owner_module(self, node: ast.AST) -> bool:
+        if isinstance(node, ast.Name):
+            return node.id in self.owner_names
+        return (
+            isinstance(node, ast.Attribute)
+            and node.attr == _OWNER_MODULE_NAME
+            and (
+                (
+                    isinstance(node.value, ast.Name)
+                    and node.value.id in self.package_names
+                )
+                or _dotted_name(node) == _OWNER_MODULE
+            )
+        )
+
+    def _check_module_key(self, key: ast.expr | None, node: ast.AST) -> None:
+        if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+            self._dynamic_lookup()
+        elif _names_owner_module(key.value):
+            self._escape(node, "owner module lookup by name")
 
     def _visit_scope(self, node: ast.AST, name: str) -> None:
         self.scope_names.append(name)
@@ -476,46 +581,80 @@ class _AllowHostTransfersCensus(ast.NodeVisitor):
             for argument in (*node.args, *node.keywords):
                 self.visit(argument)
             return
+        callee = node.func
+        if (
+            isinstance(callee, ast.Name)
+            and callee.id in _NAME_LOOKUP_BUILTINS
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value in _LOOKUP_NAMES
+        ):
+            self._escape(node, f"{callee.id} of {node.args[1].value!r}")
+        callee_name = (
+            callee.id
+            if isinstance(callee, ast.Name)
+            else callee.attr
+            if isinstance(callee, ast.Attribute)
+            else None
+        )
+        if callee_name in _DYNAMIC_IMPORTERS:
+            self._check_module_key(_first_argument(node, "name"), node)
+        if (
+            isinstance(callee, ast.Attribute)
+            and callee.attr == "get"
+            and _dotted_name(callee.value) == "sys.modules"
+        ):
+            self._check_module_key(_first_argument(node, "key"), node)
         self.generic_visit(node)
 
-    def _is_owner_module_value(self, node: ast.AST) -> bool:
-        return id(node) not in self.literal_attribute_bases
+    def visit_Subscript(self, node: ast.Subscript) -> None:
+        if _dotted_name(node.value) == "sys.modules":
+            self._check_module_key(node.slice, node)
+        self.generic_visit(node)
 
     def visit_Name(self, node: ast.Name) -> None:
         if node.id == _ALLOW_HOST_TRANSFERS:
             self._escape(node, "non-call reference")
-        elif node.id in self.owner_module_names and self._is_owner_module_value(node):
+        elif (
+            self._is_owner_module(node) and id(node) not in self.literal_attribute_bases
+        ):
             self._escape(node, "owner module reference")
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         if node.attr == _ALLOW_HOST_TRANSFERS:
             self._escape(node, "non-call reference")
-        elif node.attr == _OWNER_MODULE_NAME and self._is_owner_module_value(node):
+        elif (
+            self._is_owner_module(node) and id(node) not in self.literal_attribute_bases
+        ):
             self._escape(node, "owner module reference")
         self.generic_visit(node)
 
-    def visit_Constant(self, node: ast.Constant) -> None:
-        if node.value == _ALLOW_HOST_TRANSFERS:
-            self._escape(node, "string reference")
-        elif isinstance(node.value, str) and (
-            node.value == _OWNER_MODULE_NAME
-            or node.value.endswith(f".{_OWNER_MODULE_NAME}")
-        ):
-            self._escape(node, "owner module string reference")
-
 
 def _allow_host_transfers_census(
-    source: str, relative_path: str
+    source: str,
+    relative_path: str,
+    admitted_dynamic_lookups: dict[str, int] | None = None,
 ) -> tuple[dict[str, tuple[str, ...]], list[str]]:
     tree = ast.parse(source)
     census = _AllowHostTransfersCensus(
         relative_path,
         _statement_paths(tree),
-        _owner_module_bindings(tree),
+        _owner_bindings(tree, relative_path),
         _literal_attribute_bases(tree),
     )
     census.visit(tree)
-    return census.sites, census.escapes
+    admitted = {
+        key: count
+        for key, count in (admitted_dynamic_lookups or {}).items()
+        if key.startswith(f"{relative_path}::")
+    }
+    dynamic_escapes = [
+        f"{key} dynamic module lookup x{census.dynamic_lookups.get(key, 0)}"
+        f" (admitted {admitted.get(key, 0)})"
+        for key in sorted({*census.dynamic_lookups, *admitted})
+        if census.dynamic_lookups.get(key, 0) != admitted.get(key, 0)
+    ]
+    return census.sites, [*census.escapes, *dynamic_escapes]
 
 
 def _allow_host_transfers_roots(repo_root: Path) -> tuple[Path, ...]:
@@ -545,7 +684,7 @@ def _allow_host_transfers_sites(
     )
     for relative in relatives:
         file_sites, file_escapes = _allow_host_transfers_census(
-            (repo_root / relative).read_text(), relative
+            (repo_root / relative).read_text(), relative, _ALLOWED_DYNAMIC_LOOKUP_SITES
         )
         sites.update(file_sites)
         escapes.extend(file_escapes)
@@ -559,6 +698,10 @@ def test_only_admitted_regions_lift_the_strict_transfer_guard() -> None:
         "\n  ".join(escapes)
     )
     assert sites == _ALLOWED_ALLOW_HOST_TRANSFERS_SITES
+    assert all(
+        (REPO_ROOT / key.split("::", maxsplit=1)[0]).is_file()
+        for key in _ALLOWED_DYNAMIC_LOOKUP_SITES
+    )
 
 
 _ADMITTED_SOURCE = (
@@ -753,6 +896,40 @@ def test_allow_host_transfers_census_refuses_every_other_reference() -> None:
             "def approved(run):\n"
             "    run(runtime.host_boundary)\n"
         ),
+        "computed sys.modules key": (
+            "import sys\n\n"
+            "def approved(name):\n"
+            "    with getattr(sys.modules[name], 'allow_' + 'host_transfers')():\n"
+            "        transfer()\n"
+        ),
+        "computed sys.modules.get key": (
+            "import sys\n\n"
+            "def approved(name, attribute):\n"
+            "    with getattr(sys.modules.get(name), attribute)():\n"
+            "        transfer()\n"
+        ),
+        "computed import_module name": (
+            "import importlib\n\n"
+            "def approved(name, attribute):\n"
+            "    with getattr(importlib.import_module(name), attribute)():\n"
+            "        transfer()\n"
+        ),
+        "import_module of the owner": (
+            "from importlib import import_module\n\n"
+            "def approved(attribute):\n"
+            '    module = import_module("simsopt_jax.runtime.host_boundary")\n'
+            "    with getattr(module, attribute)():\n"
+            "        transfer()\n"
+        ),
+        "hasattr probe of the permit": (
+            "def approved(module):\n"
+            '    return hasattr(module, "allow_host_transfers")\n'
+        ),
+        "relative import of the owner": (
+            "from . import host_boundary\n\n"
+            "def approved(run):\n"
+            "    run(host_boundary)\n"
+        ),
         "module named by a string": (
             "import sys\n\n"
             "def approved(name):\n"
@@ -761,8 +938,59 @@ def test_allow_host_transfers_census_refuses_every_other_reference() -> None:
         ),
     }
     for form, source in escaping_sources.items():
-        _, escapes = _allow_host_transfers_census(source, "src/example.py")
+        _, escapes = _allow_host_transfers_census(
+            source, "src/simsopt_jax/runtime/example.py"
+        )
         assert escapes, f"{form} escaped the allow_host_transfers census"
+
+
+def test_allow_host_transfers_census_ignores_unrelated_names_and_plain_strings() -> (
+    None
+):
+    benign_sources = {
+        "unrelated host_boundary module": (
+            "import other_package.host_boundary\n"
+            "from other_package import host_boundary as other\n\n"
+            "def unrelated(run):\n"
+            "    run(other_package.host_boundary)\n"
+            "    run(other)\n"
+        ),
+        "docstring equal to the module name": (
+            'def unrelated():\n    """host_boundary"""\n    return "allow_host_transfers"\n'
+        ),
+        "constant sys.modules key": (
+            "import sys\n\n"
+            "def unrelated():\n"
+            '    return sys.modules["jax"], sys.modules.get("jax")\n'
+        ),
+        "literal attribute of the owner module": (
+            "from simsopt_jax.runtime import host_boundary\n\n"
+            "def approved(value):\n"
+            "    return host_boundary.host_array(value)\n"
+        ),
+    }
+    for form, source in benign_sources.items():
+        sites, escapes = _allow_host_transfers_census(source, "src/example.py")
+        assert (sites, escapes) == ({}, []), f"{form} was flagged: {escapes}"
+
+
+def test_allow_host_transfers_census_admits_only_listed_dynamic_lookups() -> None:
+    source = (
+        "import importlib\n\n"
+        "def load(name):\n"
+        "    return importlib.import_module(name)\n"
+    )
+    admitted = {"src/example.py::load": 1}
+
+    _, unlisted = _allow_host_transfers_census(source, "src/example.py")
+    _, listed = _allow_host_transfers_census(source, "src/example.py", admitted)
+    _, stale = _allow_host_transfers_census(
+        "def load(name):\n    return name\n", "src/example.py", admitted
+    )
+
+    assert unlisted == ["src/example.py::load dynamic module lookup x1 (admitted 0)"]
+    assert listed == []
+    assert stale == ["src/example.py::load dynamic module lookup x0 (admitted 1)"]
 
 
 def test_allow_host_transfers_census_scans_every_production_root(
