@@ -881,9 +881,10 @@ Each entry: the symptom, the cause, the fix.
 13. **Taylor steps and smoothing.** A kernel's smoothing temperature must
     lie in [1e-100, 1e100], and every sample coordinate must be finite with
     |x| <= 1e100 (`ValueError` otherwise, naming the bound and the value; 0 is
-    not the exact value, which is the kernel's third item). Values are
-    accurate to a small multiple of machine epsilon times the row's scale,
-    gradients to that over T (api.md). The smooth rows are a log-sum-exp over every sample
+    not the exact value, which is the kernel's third item). Distance-row
+    values are accurate to a small multiple of machine epsilon times the
+    row's scale, gradients to that over T; the curvature row is as accurate
+    as simsopt's `kappa()` (api.md). The smooth rows are a log-sum-exp over every sample
     (curvature) or point pair (distances), smooth everywhere, but they bend
     on the scale of the temperature, so only steps that move the constrained
     quantity far below the temperature see the gradient.
