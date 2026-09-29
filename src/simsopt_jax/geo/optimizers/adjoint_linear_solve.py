@@ -40,8 +40,28 @@ def _require_tree_first_leaf(tree, *, detail):
 _AdjointHessianLinearSolver = Literal["dense", "cg"]
 
 
-_ADJOINT_LINEAR_SOLVER = (
-    os.environ.get("SIMSOPT_ADJOINT_LINEAR_SOLVER", "dense").strip().lower()
+def _validated_adjoint_linear_solver(
+    value: str, *, source: str
+) -> _AdjointHessianLinearSolver:
+    """Return ``value`` as a supported adjoint solver name, else raise.
+
+    Only ``"dense"`` and ``"cg"`` exist; any other name, including the removed
+    residual-Jacobian ``"lsmr_j"`` comparator, is rejected instead of silently
+    running the dense solve.
+    """
+    if value == "dense":
+        return "dense"
+    if value == "cg":
+        return "cg"
+    raise ValueError(
+        f"{source} must be 'dense' or 'cg', got {value!r}; the 'lsmr_j' "
+        "residual-Jacobian adjoint solver was removed."
+    )
+
+
+_ADJOINT_LINEAR_SOLVER = _validated_adjoint_linear_solver(
+    os.environ.get("SIMSOPT_ADJOINT_LINEAR_SOLVER", "dense").strip().lower(),
+    source="SIMSOPT_ADJOINT_LINEAR_SOLVER",
 )
 
 
@@ -183,7 +203,11 @@ def _solve_hessian_least_squares_system_with_status(
     rhs = jnp.asarray(rhs)
     x = _place_like_concrete_array(x, rhs)
     operator = _hessian_linear_operator(objective_fn, x, stab=stab)
-    selected_solver = _ADJOINT_LINEAR_SOLVER if solver is None else solver
+    selected_solver = (
+        _ADJOINT_LINEAR_SOLVER
+        if solver is None
+        else _validated_adjoint_linear_solver(solver, source="solver")
+    )
     if selected_solver == "cg":
         return _solve_symmetric_operator_cg_with_status(
             operator["matvec"],

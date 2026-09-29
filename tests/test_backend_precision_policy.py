@@ -36,6 +36,7 @@ def _clear_precision_environment(monkeypatch: pytest.MonkeyPatch):
         "SIMSOPT_JAX_PLATFORM",
         "SIMSOPT_JAX_BACKEND",
         "SIMSOPT_PRECISION",
+        "SIMSOPT_MIXED_PRECISION",
     ):
         monkeypatch.delenv(name, raising=False)
     runtime.invalidate_backend_cache()
@@ -134,6 +135,13 @@ def test_invalid_environment_precision_fails_before_runtime_configuration(monkey
     monkeypatch.setenv("SIMSOPT_PRECISION", "fp32")
 
     with pytest.raises(ValueError, match="SIMSOPT_PRECISION='fp32'.*Accepted"):
+        runtime.set_backend("jax_cpu_parity", configure_runtime=False)
+
+
+def test_obsolete_mixed_precision_environment_is_rejected(monkeypatch):
+    monkeypatch.setenv("SIMSOPT_MIXED_PRECISION", "1")
+
+    with pytest.raises(ValueError, match="SIMSOPT_MIXED_PRECISION is not supported"):
         runtime.set_backend("jax_cpu_parity", configure_runtime=False)
 
 

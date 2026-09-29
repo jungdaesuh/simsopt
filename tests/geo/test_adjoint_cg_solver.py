@@ -225,6 +225,54 @@ def test_default_selector_does_not_use_cg():
     assert _adjoint_linear_solve._ADJOINT_LINEAR_SOLVER != "cg"
 
 
+def test_removed_adjoint_solver_environment_value_fails_at_import():
+    """A stale ``SIMSOPT_ADJOINT_LINEAR_SOLVER=lsmr_j`` must not run dense silently."""
+    repo_root = Path(__file__).resolve().parents[2]
+    env = dict(os.environ)
+    env["SIMSOPT_ADJOINT_LINEAR_SOLVER"] = "lsmr_j"
+    env["JAX_PLATFORMS"] = "cpu"
+    probe = (
+        "import sys; "
+        f"sys.path.insert(0, {str(repo_root)!r}); "
+        "from repo_bootstrap import bootstrap_local_simsopt; "
+        f"bootstrap_local_simsopt({str(repo_root / 'src')!r}); "
+        "import simsopt_jax.geo.optimizers.adjoint_linear_solve"
+    )
+    result = subprocess.run(
+        (sys.executable, "-c", probe),
+        cwd=repo_root,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+
+    assert result.returncode != 0
+    assert (
+        "SIMSOPT_ADJOINT_LINEAR_SOLVER must be 'dense' or 'cg', got 'lsmr_j'"
+        in result.stderr
+    )
+
+
+def test_removed_adjoint_solver_argument_is_rejected():
+    """An explicit ``solver='lsmr_j'`` fails instead of taking the dense path."""
+    x = jnp.ones(3, dtype=jnp.float64)
+
+    def objective(point):
+        return 0.5 * jnp.sum(point**2)
+
+    with pytest.raises(ValueError, match="solver must be 'dense' or 'cg'"):
+        _adjoint_linear_solve._solve_hessian_least_squares_system_with_status(
+            objective,
+            x,
+            jnp.ones(3, dtype=jnp.float64),
+            stab=0.0,
+            tol=1e-10,
+            solver="lsmr_j",
+        )
+
+
 def test_operator_gmres_does_not_inherit_dense_lu_dimension_floor():
     """A dense-LU backward-error allowance must not weaken GMRES acceptance."""
     n = 32

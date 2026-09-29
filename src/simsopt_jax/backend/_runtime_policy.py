@@ -43,6 +43,9 @@ _PLATFORM_ENV = "SIMSOPT_JAX_PLATFORM"
 _PLATFORM_LEGACY_ENV = "SIMSOPT_JAX_BACKEND"
 _MODE_ENV = "SIMSOPT_BACKEND_MODE"
 _PRECISION_ENV = "SIMSOPT_PRECISION"
+# Selected mixed precision before it was removed; a caller still setting it
+# must learn that it no longer has any effect.
+_OBSOLETE_MIXED_PRECISION_ENV = "SIMSOPT_MIXED_PRECISION"
 _STRICT_ENV = "SIMSOPT_BACKEND_STRICT"
 _TARGET_LANE_STRICT_ENV = "SIMSOPT_TARGET_LANE_STRICT"
 _DEBUG_ENV = "SIMSOPT_DEBUG"
@@ -493,6 +496,15 @@ def _validate_precision_selection(
     return cast(PrecisionSelection, value)
 
 
+def _reject_obsolete_precision_environment() -> None:
+    if _OBSOLETE_MIXED_PRECISION_ENV in os.environ:
+        raise ValueError(
+            f"{_OBSOLETE_MIXED_PRECISION_ENV} is not supported: mixed precision "
+            f"was removed. Unset it and select {_PRECISION_ENV}=fp64 or "
+            "mode_default."
+        )
+
+
 def _validate_precision_for_mode(
     mode: str,
     precision: PrecisionSelection,
@@ -670,6 +682,7 @@ def _config_from_mode(
     xla_gpu_allocator: Literal["platform", "vmm"] | None = None,
     tf_gpu_allocator: Literal["cuda_malloc_async"] | None = None,
 ) -> BackendConfig:
+    _reject_obsolete_precision_environment()
     mode = _validate_mode(mode)
     backend, jax_platform = _MODE_TO_RUNTIME[mode]
     debug_overlay = _debug_overlay_enabled()
