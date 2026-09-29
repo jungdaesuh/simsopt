@@ -51,33 +51,45 @@ def test_only_the_pre_registered_cases_declare_scatter_contracts() -> None:
         for case_id in implemented_case_ids()
         if any(get_case(case_id).end_states(scale) is not None for scale in SCALES)
     }
-    assert bounded_bands == {PLANAR}
+    stage_wise_cases = {
+        (case_id, scale)
+        for case_id in implemented_case_ids()
+        for scale in SCALES
+        if get_case(case_id).stage_wise(scale) is not None
+    }
+    # PLAN.md amendment 5: the planar bounded band is removed; native-boozer's
+    # end-state set stays declared and is recorded informationally.
+    assert bounded_bands == set()
     assert end_state_cases == {"native-boozer"}
+    assert stage_wise_cases == {
+        ("native-boozer", "bounded"),
+        ("native-boozer", "native_default"),
+        (PLANAR, "bounded"),
+    }
 
 
-def test_planar_band_is_rule_v2_over_upstreams_nine_draws() -> None:
-    scale = "bounded"
-    band = get_case(PLANAR).quality_band(scale)
-    assert band is not None
-    samples = [
-        float(load_upstream_scatter(PLANAR, scale).run(k).value("final:objective"))
-        for k in PRE_REGISTERED_DRAWS
-    ]
-    low, high = min(samples), max(samples)
-
-    assert band.scale == scale
-    assert band.observable == "final:objective"
-    assert band.max_value == high * (1.0 + (high - low) / low)
-    assert "same-state proof" in band.derivation
-    assert "stale" in band.derivation
-    # A band admits a stop at the cap, so no work budget may cover a banded scale.
-    # At native_default the lanes agree to 1.5e-7 relative and may end stage two on
-    # their own convergence, which the band's matched-budget clause cannot express,
-    # so the work budget and the lane-against-lane routes decide there.
-    contract = get_case(PLANAR).work_budget_contract
+def test_planar_bounded_is_judged_stage_wise_with_its_work_budget() -> None:
+    """Amendment 5, P1: no band; final:objective informational; two tracked tests decide."""
+    case = get_case(PLANAR)
+    contract = case.stage_wise("bounded")
     assert contract is not None
-    assert contract.scales == ("native_default",)
-    assert get_case(PLANAR).quality_band("native_default") is None
+
+    assert case.quality_band("bounded") is None
+    assert case.quality_band("native_default") is None
+    assert case.stage_wise("native_default") is None
+    assert contract.informational_observables == ("final:objective",)
+    assert contract.deciding_observables == (
+        "initial:objective",
+        "initial:objective_gradient",
+    )
+    assert contract.same_state_tests == (
+        "tests/integration/test_jax_mirror_planar_coils_bounded_upstream_states.py",
+        "tests/integration/test_jax_mirror_planar_coils_bounded_trajectory_twins.py",
+    )
+    # Both lanes run each bounded stage to MAXITER, as before the band.
+    budget = case.work_budget_contract
+    assert budget is not None
+    assert budget.scales == ("bounded", "native_default")
 
 
 def _boozer_routes(scale: str) -> tuple[ComparisonRoute, ...]:

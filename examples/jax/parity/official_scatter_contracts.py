@@ -1,19 +1,16 @@
 """Contracts derived from upstream's own end-state scatter at the parity harness's scales.
 
-Both derivations read one tracked upstream scatter record (``official_reference/9e027eac3/scatter/``) and nothing
-else; no branch value, native or JAX, enters either. Each uses only the pre-registered draws ``k = 0..8`` (the
-nine), fixed before any sample was drawn:
+The derivation reads one tracked upstream scatter record (``official_reference/9e027eac3/scatter/``) and nothing
+else; no branch value, native or JAX, enters it. It uses only the pre-registered draws ``k = 0..8`` (the nine), fixed
+before any sample was drawn: ``upstream_end_states`` -- upstream's end states of the nine, for a workflow whose end
+STATE (which solution it lands on) is not determined by its input. Every draw whose upstream stage success flags are
+all true enters the set (a failed solve never does), the arbiter groups the set into branches under the case's own
+route comparators, each represented by its lowest-``k`` draw, and admits a lane whose end state matches one
+representative -- or, beside a stage-wise contract, records the match informationally.
 
-* ``upstream_scatter_quality_band`` -- the rule-v2 band ``max(S) * (1 + (max(S) - min(S)) / min(S))`` over the nine
-  upstream end values of one observable, for a workflow whose end VALUE is path dependent;
-* ``upstream_end_states`` -- upstream's end states of the nine, for a workflow whose end STATE (which solution it
-  lands on) is not determined by its input: every draw whose upstream stage success flags are all true enters the
-  set (a failed solve never does), the arbiter groups the set into branches under the case's own route comparators,
-  each represented by its lowest-``k`` draw, and admits a lane whose end state matches one representative.
-
-Both are engineering acceptances against upstream's own scatter, never an equivalence proof; the arbiter can
-therefore only return ``quality-band`` under them. Neither may be declared without a tracked same-state test proving
-the lanes compute upstream's function (and gradient, where the workflow uses one) at upstream's recorded states; the
+It is an engineering acceptance against upstream's own scatter, never an equivalence proof; the arbiter can therefore
+only return ``quality-band`` under it. It may not be declared without a tracked same-state test proving the lanes
+compute upstream's function (and gradient, where the workflow uses one) at upstream's recorded states; the
 ``same_state_proof`` argument names it and is carried into the derivation.
 """
 
@@ -24,15 +21,12 @@ from types import MappingProxyType
 from typing import Final
 
 from examples.jax.parity.contracts import (
-    QualityBand,
     UpstreamEndState,
     UpstreamEndStates,
 )
-from examples.jax.parity.official_quality_bands import upstream_scatter_ceiling
 from examples.jax.parity.official_reference import (
     OfficialUpstreamScatter,
     UpstreamScatterRun,
-    load_upstream_scatter,
 )
 from simsopt_jax.examples import ExecutionScale
 
@@ -67,33 +61,6 @@ def _provenance(scatter: OfficialUpstreamScatter) -> str:
     return (
         f"upstream {scatter.upstream_commit[:9]} {scatter.official_script}, {runner}, one thread, "
         f"one-ulp start protocol, pre-registered draws k = 0..8"
-    )
-
-
-def upstream_scatter_quality_band(
-    case_id: str,
-    scale: ExecutionScale,
-    observable: str,
-    *,
-    same_state_proof: str,
-    disclosure: str = "",
-) -> QualityBand:
-    """The rule-v2 band of ``observable`` over upstream's nine end values at ``scale``."""
-    scatter = load_upstream_scatter(case_id, scale)
-    samples = tuple(
-        float(run.value(observable)) for run in pre_registered_runs(scatter)
-    )
-    return QualityBand(
-        observable=observable,
-        max_value=upstream_scatter_ceiling(samples),
-        derivation=(
-            f"upstream scatter at {scale}: {_provenance(scatter)}; end values of {observable} "
-            f"(upstream key {scatter.capture_keys[observable]}) min {min(samples)!r}, max {max(samples)!r}; "
-            "ceiling = max(S) * (1 + (max(S) - min(S)) / min(S)); gross-failure guard; "
-            f"same-state proof: {same_state_proof}"
-            + (f"; {disclosure}" if disclosure else "")
-        ),
-        scale=scale,
     )
 
 

@@ -174,10 +174,7 @@ from examples.jax.parity.input_bundle import InputBundle
 from examples.jax.parity.measurement import MeasurementExecution
 from examples.jax.parity.official_quality_bands import official_quality_band
 from examples.jax.parity.official_reference import load_upstream_scatter
-from examples.jax.parity.official_scatter_contracts import (
-    upstream_end_states,
-    upstream_scatter_quality_band,
-)
+from examples.jax.parity.official_scatter_contracts import upstream_end_states
 from examples.jax.parity.runtime import ParityLane
 from examples.jax.parity.work_budget import WorkBudgetContract
 from simsopt_jax.examples import ExecutionScale
@@ -536,37 +533,45 @@ _CASES = {
         create_input=create_native_stage_two_optimization_planar_coils_input,
         execute=execute_native_stage_two_optimization_planar_coils,
         # At the bounded scale both lanes run each stage to MAXITER on a path that forks at
-        # round-off (the lanes' end objectives differ by 6 %), so the end objective is judged by a
-        # band from upstream's own nine one-ulp draws there (2026-09-29 ruling). At native_default
-        # the lanes' end objectives agree to 1.5e-7 relative, and a lane may end its second stage
-        # on its own convergence ("1,0") where another runs to the cap ("1,1"), which the band's
-        # matched-budget clause cannot express; the work budget and the lane-against-lane routes
-        # stay in force there.
-        quality_bands=(
-            upstream_scatter_quality_band(
-                "native-stage-two-optimization-planar-coils",
-                "bounded",
-                "final:objective",
-                same_state_proof=(
-                    "tests/integration/test_jax_mirror_planar_coils_official_states.py (objective "
-                    "values bitwise equal to upstream's at x0 and at both official end states, "
-                    "gradient equal at x0) and "
-                    "tests/geo/test_curveplanarfourier_objective_slopes_at_official_state.py (the "
-                    "lane gradient passes central finite differences at upstream's end states)"
+        # round-off (the lanes' end objectives differ by 6 %; their own one-ulp twins scatter as
+        # far), so the end objective is informational there and the stages are judged from shared
+        # states (PLAN.md amendment 5, P1): the objective and gradient at upstream's 28 recorded
+        # bounded states against a derived rounding bound, and the iterates against the lanes' own
+        # one-ulp twin envelope up to the horizon. At native_default the lanes' end objectives
+        # agree to 1.5e-7 relative; the work budget and the lane-against-lane routes decide there.
+        stage_wise_contracts=(
+            StageWiseContract(
+                case_id="native-stage-two-optimization-planar-coils",
+                scale="bounded",
+                informational_observables=("final:objective",),
+                deciding_observables=(
+                    "initial:objective",
+                    "initial:objective_gradient",
                 ),
-                disclosure=(
-                    "upstream 9e027eac3 keeps the four CurvePlanarFourier Jacobians in the "
-                    "persistent cache (src/simsoptpp/curveplanarfourier.h:94-105), so its gradient "
-                    "is stale after the first evaluated state and its L-BFGS-B stagnates; the band "
-                    "bounds the lanes by upstream's own end values, a gross-failure guard, not the "
-                    "scatter of a correct-gradient optimizer; at this scale upstream's unperturbed "
-                    "J(x0) differs from the lane's by 4.8e-15 relative, because the branch's "
-                    "CurveLength.J averages with np.mean where upstream uses jnp.mean"
+                same_state_tests=(
+                    "tests/integration/test_jax_mirror_planar_coils_bounded_upstream_states.py",
+                    "tests/integration/test_jax_mirror_planar_coils_bounded_trajectory_twins.py",
+                ),
+                derivation=(
+                    "PLAN.md amendment 5 part 1, P1 (registered 2026-09-29 16:24 EDT, before any "
+                    "formal run): the upstream-scatter band at bounded is removed. Deciding: every "
+                    "lane-pair route but final:objective (including first:objective, which P2 "
+                    "passed), the x0 same-state routes, and two tracked tests on the jax-cpu lane: "
+                    "the native and JAX objective and gradient at x0 and at the 27 states of "
+                    "upstream's tracked bounded record within twice the derived first-order "
+                    "rounding bound of the formula both evaluate (tests/planar_stage_two_roundoff.py "
+                    "over tests/forward_roundoff_bound.py), and the native-versus-JAX iterate "
+                    "distance within the envelope of the lanes' sixteen one-ulp twins (upstream's "
+                    "draws k = 1..8) before the horizon at which every twin distance reaches 1e-6. "
+                    "The jax-gpu lane is not covered by the two tests (their trig constants are "
+                    "the host libraries'). Upstream 9e027eac3's own trajectory uses a stale "
+                    "CurvePlanarFourier Jacobian (src/simsoptpp/curveplanarfourier.h:94-105), so "
+                    "its end values cannot bound a correct-gradient optimizer"
                 ),
             ),
         ),
         work_budget_contract=WorkBudgetContract(
-            scales=("native_default",),
+            scales=_FIXED_BUDGET_SCALES,
             derivation="Upstream's own planar-coil run does NOT end at the cap: 9e027eac3 keeps the four CurvePlanarFourier Jacobians in the persistent cache (src/simsoptpp/curveplanarfourier.h:94-105), which is only sound for a curve linear in its dofs, so upstream's gradient is stale after the first evaluated state and L-BFGS-B stagnates at nit 135 and 69 (status 0, RELATIVE REDUCTION OF F <= FACTR*EPSMCH, nfev 604 and 844). A lane whose CurvePlanarFourier Jacobian follows the dofs instead runs the script's own MAXITER per stage, so a budget exit is this case's expected honest terminal status. The end point is therefore NOT compared with upstream's; what is compared with upstream is the objective VALUE at upstream's own states (bitwise at x0 and at both official end states) and the gradient at x0 (2.56e-16 relative), in tests/integration/test_jax_mirror_planar_coils_official_states.py.",
         ),
     ),

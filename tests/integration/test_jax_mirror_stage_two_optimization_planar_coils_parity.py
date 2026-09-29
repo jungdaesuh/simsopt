@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 import ast
-from contextlib import chdir
+import pickle
+import sys
 from pathlib import Path
 
 import numpy as np
-import pytest
+from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.cases import get_case
 from examples.jax.parity.input_bundle import load_input_bundle
+from examples.jax.parity.runtime import ParityLane
+
+# venv site-packages/tests shadows the repo tests package, so the helper
+# is imported as a top-level module from the tests/ directory.
+_TESTS_ROOT = str(Path(__file__).resolve().parents[1])
+if _TESTS_ROOT not in sys.path:
+    sys.path.append(_TESTS_ROOT)
+from parity_native_cpu import run_parity_lane_child
 
 CASE_PATH = (
     Path(__file__).resolve().parents[2]
@@ -38,24 +47,58 @@ def test_planar_topology_jit_receives_device_arrays_as_operands() -> None:
     ] == ["extraction", "parameter_states"]
 
 
-def test_exact_planar_stage_two_matches_native_and_jax_cpu(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+# Each lane runs in a child under its parity environment, as the harness runs
+# it: the native SquaredFlux reduction depends on the OpenMP team, which an
+# in-process pin cannot undo once the pytest process has started it.
+_LANE_CHILD = """\
+import pickle
+import sys
+from dataclasses import fields
+from pathlib import Path
+
+from examples.jax.parity.cases import get_case
+from examples.jax.parity.input_bundle import read_input_bundle
+
+lane = sys.argv[1]
+bundle_root = Path(sys.argv[2])
+out_path = Path(sys.argv[3])
+observation = get_case("native-stage-two-optimization-planar-coils").execute(
+    lane, *read_input_bundle(bundle_root)
+)
+payload = {field.name: getattr(observation, field.name) for field in fields(observation)}
+payload["values"] = dict(observation.values)
+payload["applicability"] = dict(observation.applicability)
+out_path.write_bytes(pickle.dumps(payload))
+"""
+
+
+def _lane_observation(
+    lane: ParityLane, input_root: Path, work: Path
+) -> LaneObservation:
+    work.mkdir()
+    out_path = work / "observation.pkl"
+    completed = run_parity_lane_child(
+        lane,
+        _LANE_CHILD,
+        lane,
+        str(input_root),
+        str(out_path),
+        repo_root=_REPO_ROOT,
+        cwd=work,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return LaneObservation(**pickle.loads(out_path.read_bytes()))
+
+
+def test_exact_planar_stage_two_matches_native_and_jax_cpu(tmp_path: Path) -> None:
     case = get_case("native-stage-two-optimization-planar-coils")
     input_root = tmp_path / "inputs"
     bundle = case.create_input(input_root, "bounded")
-    _, arrays = load_input_bundle(input_root, bundle)
+    load_input_bundle(input_root, bundle)
 
-    native_directory = tmp_path / "native"
-    native_directory.mkdir()
-    with chdir(native_directory):
-        native = case.execute("native-cpu", bundle, arrays)
-
-    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_parity")
-    monkeypatch.setenv("SIMSOPT_PRECISION", "fp64")
-    monkeypatch.setenv("JAX_ENABLE_X64", "1")
-    jax = case.execute("jax-cpu", bundle, arrays)
+    native = _lane_observation("native-cpu", input_root, tmp_path / "native")
+    jax = _lane_observation("jax-cpu", input_root, tmp_path / "jax")
 
     # The bounded budget ends every stage on its iteration cap. The label says
     # so; it is neither convergence nor failure, and it still implies the case's
@@ -65,9 +108,11 @@ def test_exact_planar_stage_two_matches_native_and_jax_cpu(
     # CurvePlanarFourier Jacobians sit in the persistent cache, so its end point
     # is not reachable by a gradient that describes the objective. The same-state
     # comparison with upstream is value-at-upstream's-states and gradient-at-the-
-    # start-state, in tests/integration/test_jax_mirror_planar_coils_official_states.py;
-    # the end point, which forks between runs at round-off, is judged below by
-    # the band from upstream's own scatter at this scale.
+    # start-state, in tests/integration/test_jax_mirror_planar_coils_official_states.py.
+    # The end point forks between runs at round-off, so it is informational at
+    # this scale (PLAN.md amendment 5, P1); the stages are judged by
+    # test_jax_mirror_planar_coils_bounded_upstream_states.py and
+    # test_jax_mirror_planar_coils_bounded_trajectory_twins.py.
     for observation in (native, jax):
         assert observation.normalized_status == "budget_exhausted"
         assert observation.success is False
@@ -115,14 +160,12 @@ def test_exact_planar_stage_two_matches_native_and_jax_cpu(
             assert np.all(np.isfinite(canonical_geometry))
             assert abs(float(np.sum(canonical_geometry[:, 0])) - 10.4) <= 3.0e-2
 
-    # Both lanes stop at the iteration cap on a path that forks at round-off,
-    # so the end point is judged as the arbiter judges it: each lane against
-    # the band from upstream's own nine one-ulp draws at this scale.
-    band = case.quality_band("bounded")
-    assert band is not None
-    assert band.observable == "final:objective"
-    for observation in (native, jax):
-        assert float(observation.values["final:objective"]) <= band.max_value
+    # The first stage's end objective still decides lane against lane, as the
+    # case's not_worse route does (mirror_optimization_3e2); the final one is
+    # informational.
+    assert float(jax.values["first:objective"]) <= (
+        1.03 * float(native.values["first:objective"]) + 1.0e-9
+    )
 
     for observation in (native, jax):
         taylor_errors = np.abs(observation.values["taylor:errors"][:3])

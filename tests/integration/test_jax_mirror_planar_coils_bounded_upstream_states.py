@@ -1,14 +1,16 @@
 """Same-state proof for the planar-coils lanes at UPSTREAM's recorded BOUNDED states.
 
-At the bounded scale the planar-coils end objective is judged by a band from
-upstream's own nine one-ulp draws (``examples/jax/parity/official_scatter_contracts.py``).
-This file asks the question beneath that band: at every state upstream recorded
-in the bounded scatter record -- each of the nine draws' start, stage-1 end and
-stage-2 end, read from the tracked record, none written here -- do the native
-lane's objective (``NativePlanarEvaluator``) and the JAX lane's objective
-program (``standard_stage_two_state``, the entry the JAX lane's own solve
-evaluates) take the same VALUE and the same GRADIENT, each at the stage's own
-length weight?  Upstream's recorded gradients after the start state are stale
+At the bounded scale the planar-coils end objective is informational: the lanes'
+paths fork at round-off, so the case is judged stage-wise (PLAN.md amendment 5,
+P1, the case's ``StageWiseContract``), and this file is one of its two deciding
+tests (the other is the trajectory-twin check beside it).  It asks whether the
+lanes compute the same function where both are evaluated at one state: at every
+state upstream recorded in the bounded scatter record -- each of the nine draws'
+start, stage-1 end and stage-2 end, read from the tracked record, none written
+here -- do the native lane's objective (``NativePlanarEvaluator``) and the JAX
+lane's objective program (``standard_stage_two_state``, the entry the JAX lane's
+own solve evaluates) take the same VALUE and the same GRADIENT, each at the
+stage's own length weight?  Upstream's recorded gradients after the start state are stale
 (the persistent ``CurvePlanarFourier`` Jacobian cache) and cannot be a
 reference, so the two lanes of this branch are compared with each other.
 

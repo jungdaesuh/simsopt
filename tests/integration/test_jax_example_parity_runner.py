@@ -1059,6 +1059,7 @@ def test_work_budget_contract_is_case_owned_and_scoped() -> None:
     # from upstream's own one-ulp scatter, which admits the budget exit and excludes a work budget there.
     fixed_budget_scales = {
         "native-stage-two-optimization",
+        "native-stage-two-optimization-planar-coils",
         "native-stage-two-optimization-stochastic",
         "native-strain-optimization",
     }
@@ -1077,7 +1078,7 @@ def test_work_budget_contract_is_case_owned_and_scoped() -> None:
     }
     # Minimal stage two declares no work budget: upstream's native_default run ends at its L-BFGS-B iteration limit
     # (status 1, nit 300), which the official endpoint quality band admits, and the reduced scale converges.
-    native_default_only = {"native-stage-two-optimization-planar-coils"}
+    native_default_only: set[str] = set()
     assert declared == fixed_budget_scales | bounded_only | native_default_only
     expected_scales = {
         **{case_id: ("bounded", "native_default") for case_id in fixed_budget_scales},
