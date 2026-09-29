@@ -300,12 +300,35 @@ def test_qr_lane_never_reports_success_with_a_nonfinite_jacobian():
     assert result.message.startswith("non-finite")
 
 
+def test_qr_lane_fails_when_the_returned_gradient_overflows():
+    """r = [1e109 + 1e200 x, 1e154] from x = 0: r and J are finite.
+
+    J^T r is 1e309 and J^T J 1e400, both inf in float64. The solve stops on
+    gtol at once, but a result carrying an infinite gradient or Hessian must
+    not report success.
+    """
+    result = _opt.target_least_squares(
+        lambda x: jnp.stack((1.0e109 + 1.0e200 * x[0], 1.0e154 + 0.0 * x[0])),
+        jnp.zeros(1),
+        method="lm-minpack-ondevice",
+        maxiter=50,
+    )
+
+    assert np.all(np.isfinite(np.asarray(result.residual)))
+    assert np.all(np.isfinite(np.asarray(result.residual_jacobian)))
+    assert not np.all(np.isfinite(np.asarray(result.jac)))
+    assert not result.success
+    assert result.status == 2
+    assert result.message.startswith("non-finite")
+
+
 def test_qr_lane_norms_do_not_overflow_on_large_finite_residuals():
     """r = 1e200 (x - 1) from x = 0: every norm is finite (1e200).
 
     A plain sum of squares overflows to inf, which zeroes the gradient cosine
     and stops on gtol at the start. MINPACK's enorm scales the sum, so the
-    solve must move to x = 1.
+    solve moves to x = 1. J^T J = 1e400 still overflows, so the result, which
+    carries it, is a non-finite failure rather than a success.
     """
     result = _opt.target_least_squares(
         lambda x: 1.0e200 * (x - 1.0),
@@ -315,8 +338,28 @@ def test_qr_lane_norms_do_not_overflow_on_large_finite_residuals():
     )
 
     assert result.nfev > 1, result.message
-    assert result.success, result.message
     np.testing.assert_allclose(np.asarray(result.x), [1.0], rtol=1e-12, atol=0)
+    assert not result.success
+    assert result.status == 2
+
+
+def test_qr_lane_converges_from_a_residual_whose_square_overflows():
+    """r = x - 1e200 from x = 1e199: ||r||^2 overflows, J = 1 does not.
+
+    With an unscaled norm the start's gradient cosine is 0 and the solve
+    stops there; with enorm it reaches x = 1e200, where every returned value
+    is finite.
+    """
+    result = _opt.target_least_squares(
+        lambda x: x - 1.0e200,
+        jnp.full(1, 1.0e199),
+        method="lm-minpack-ondevice",
+        maxiter=50,
+    )
+
+    assert result.nfev > 1, result.message
+    assert result.success, result.message
+    np.testing.assert_allclose(np.asarray(result.x), [1.0e200], rtol=1e-12, atol=0)
 
 
 def _enorm_reference(vector):

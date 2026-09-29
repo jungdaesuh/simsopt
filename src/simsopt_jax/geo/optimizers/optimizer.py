@@ -2819,19 +2819,28 @@ def _build_traceable_levenberg_marquardt_minpack_runner(
             final["jacobian"],
         )
         converged = (final["info"] >= 1) & (final["info"] <= 4)
+        cost = _least_squares_cost(final["residual"])
+        # A finite residual and Jacobian can still overflow in J^T r, J^T J
+        # or the cost; a result carrying any non-finite value is a failure.
+        nonfinite = (
+            final["nonfinite"]
+            | ~jnp.all(jnp.isfinite(gradient))
+            | ~jnp.all(jnp.isfinite(hessian))
+            | ~jnp.isfinite(cost)
+        )
         return {
             "x": final["x"],
             "residual": final["residual"],
             "jacobian": final["jacobian"],
             "gradient": gradient,
             "hessian": hessian,
-            "cost": _least_squares_cost(final["residual"]),
+            "cost": cost,
             "par": final["par"],
             "nit": final["nfev"] - 1,
             "njev": final["njev"],
             "jacobian_evaluations": final["jacobian_evaluations"],
             "status": jnp.where(
-                final["nonfinite"],
+                nonfinite,
                 jnp.asarray(2, dtype=jnp.int32),
                 jnp.where(
                     final["nfev"] > 1,
@@ -2840,7 +2849,7 @@ def _build_traceable_levenberg_marquardt_minpack_runner(
                 ),
             ),
             "info": final["info"],
-            "success": converged & ~final["nonfinite"],
+            "success": converged & ~nonfinite,
         }
 
     run_solver.__name__ = "traceable_levenberg_marquardt_minpack_run_solver"
