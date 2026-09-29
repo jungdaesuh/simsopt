@@ -23,9 +23,9 @@ validation.
 ## Retained shipped-workload validation
 
 The 2026-09-22 UTC verification ran all 25 eligible official mappings at
-`native_default` on local validation snapshot
-`998148365e8db55577b4372c4c791ef6bc20cc35`. Each JAX lane was compared with
-native CPU separately:
+`native_default` on local validation snapshot `998148365` of the development
+branch before its 2026-09-28 carve-out (kept on `research/jax-port-full`, not in
+this history). Each JAX lane was compared with native CPU separately:
 
 | Comparison | Case-contract pass | Qualified quality-band | Failed |
 | --- | ---: | ---: | ---: |

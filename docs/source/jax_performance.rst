@@ -10,12 +10,18 @@ That source identity does not make a locally built native extension an official
 upstream binary. Workload, source, solver policy, timing boundary, and native
 comparator matter for every ratio below.
 
+All numbers on this page were measured on the development branch before its
+2026-09-28 carve-out to the official-example scope, and none has been
+remeasured on this tree. The branch revisions cited below belong to that
+pre-carve-out history, which is kept on the ``research/jax-port-full`` branch
+of the development repository rather than in this history.
+
 Official upstream example coverage
 ----------------------------------
 
 The 2026-09-22 UTC verification ran all 25 eligible examples mapped to that
-upstream commit at their shipped/default work budgets on validation snapshot
-``998148365e8db55577b4372c4c791ef6bc20cc35``. These are separate native/JAX
+upstream commit at their shipped/default work budgets on the pre-carve-out
+validation snapshot ``998148365``. These are separate native/JAX
 CPU and native/JAX GPU comparisons, not the full upstream example catalog or
 a complete three-lane comparison matrix.
 

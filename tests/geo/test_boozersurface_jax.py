@@ -722,11 +722,10 @@ def _assert_exact_well_conditioned_operator_case(case, exact_lane):
 # Action-level adjoint parity for ill-conditioned exact lane
 # ---------------------------------------------------------------------------
 #
-# The ``exact_ill_conditioned_adjoint`` lane in
-# ``benchmarks/validation_ladder_contract.py`` correctly disables raw vector
-# parity (``vector_parity_required=False``) because near-singular Jacobians
-# admit infinitely many adjoint vectors that all satisfy the residual gate.
-# But that leaves a real coverage gap: a regression that returns total
+# Raw adjoint-vector parity is not required for the ill-conditioned exact
+# lane: near-singular Jacobians admit infinitely many adjoint vectors that all
+# satisfy the residual gate, so two correct solvers may return different
+# vectors. That leaves a real coverage gap: a regression that returns total
 # garbage in the well-conditioned subspace would only be caught if the
 # residual check itself blew up. Action-level (range-space) parity is well
 # defined even when raw vectors are not — it asserts that two adjoint

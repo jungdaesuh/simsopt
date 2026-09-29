@@ -1,8 +1,8 @@
 """Pin scipy 1.17.1's ``StopIteration``-from-callback control flow.
 
-The nested-LS outer children drive ``scipy.optimize.minimize(...,
-method="L-BFGS-B", callback=...)`` and the upgrade plan uses
-``StopIteration`` raised from that callback as a halt signal. The
+A driver of ``scipy.optimize.minimize(..., method="L-BFGS-B",
+callback=...)`` can use ``StopIteration`` raised from that callback as a
+halt signal. The
 status/message/success triple that halt produces is version-specific, and the
 published accounts disagree between status ``2`` and status ``99``. Both are
 real: they are two different *boundaries* of the same run, and this file pins

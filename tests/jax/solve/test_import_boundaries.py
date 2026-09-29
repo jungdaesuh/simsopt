@@ -169,8 +169,6 @@ def test_pyright_is_pinned_and_reachable_for_the_green_jax_slice():
     That list is the live green-slice SSOT; this test freezes the same list so
     a silent expansion or shrinkage fails closed. Policy (1cde5dbf1): when
     pyproject grows the slice, mirror it here — do not shrink pyproject.
-    Commit 96a1e5856 added the three nested-LS adapter modules after Pyright
-    was clean on them.
     """
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
     workflow = (REPO_ROOT / ".github/workflows/jax_smoke.yml").read_text()

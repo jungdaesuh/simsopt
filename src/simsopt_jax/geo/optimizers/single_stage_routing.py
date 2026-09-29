@@ -1,8 +1,8 @@
 """Single-stage JAX optimizer routing policy.
 
-This module is dependency-light so examples, benchmarks, and subprocess probes
-can share the same backend resolution rules without importing the optimizer
-runtime or benchmark package.
+This module is dependency-light so examples, parity cases, and subprocess
+probes can share the same backend resolution rules without importing the
+optimizer runtime.
 """
 
 from __future__ import annotations
@@ -105,7 +105,7 @@ def resolve_boozer_limited_memory(
     boozer_optimizer_backend: str,
     boozer_limited_memory_requested: bool,
 ) -> bool:
-    """Match the current benchmark/example plumbing for effective limited memory."""
+    """Match the example plumbing for effective limited memory."""
     return bool(
         boozer_optimizer_backend in {"host-jax", "ondevice"}
         and boozer_limited_memory_requested

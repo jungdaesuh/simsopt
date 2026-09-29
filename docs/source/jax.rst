@@ -248,10 +248,11 @@ workflow at once.
 Runnable examples
 ~~~~~~~~~~~~~~~~~
 
-The JAX-first examples collection in :simsopt:`examples/jax` provides pure and
-adapter lessons plus isolated CPU and strict-GPU runner commands.  Its
-machine-readable manifest records native-example inspiration, remaining host
-boundaries, correctness owners, and deliberately deferred external workflows.
+The examples collection in :simsopt:`examples/jax` mirrors the official native
+examples one-to-one, at the same tier and filename, with isolated CPU and
+strict-GPU runner commands.  Its machine-readable manifest records the native
+source of each mirror, remaining host boundaries, correctness owners, and
+deliberately deferred external workflows.
 
 Adapter APIs
 ~~~~~~~~~~~~

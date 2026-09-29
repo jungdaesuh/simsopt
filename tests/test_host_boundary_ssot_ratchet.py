@@ -33,64 +33,10 @@ _NON_JAX_BINDING = "non-jax"
 # Each allowlist item names one direct invocation, not merely an owning function.
 # The source coordinate deliberately ratchets additions, removals, and duplicate
 # primitive calls. A JAX import or direct alias must resolve lexically to count.
-# This baseline contains 33 direct invocations; the dated notes below record each change.
-#
-# Admitted 2026-08-24, both for the Phase-2 predictor and both counted as
-# call SITES rather than executions:
-#
-# * ``_predicted_inner_start::device_get`` -- the predictor computes
-#   ``delta_s`` on device and the start surface must reach the host, because
-#   ``set_dofs`` takes a numpy array. One crossing per predicted trial, and
-#   only when ``inner_predictor`` is on. The first draft had TWO here, a
-#   ``block_until_ready`` bracketing the JVP as well, and this gate refused
-#   the pair -- correctly, since ``device_get`` already blocks.
-# * a second ``nested_ls_outer_value_and_grad::block_until_ready`` -- the
-#   adjoint solve is now branched, ``lu_solve`` on the predictor lane and
-#   ``jnp.linalg.solve`` off it, so there are two sites where there was one.
-#   Exactly one executes per run; the census counts sites, so the number
-#   goes up while the work does not.
-# Admitted 2026-09-14 (analytic nested-Boozer / exact single-stage arc), counted as call
-# SITES: 23 previously admitted site(s) re-pinned after line drift (same file, scope and
-# primitive; the coordinate moved), plus 10 NEW crossing(s), each a deliberate host read or
-# write the design requires:
-# * ``src/simsopt_jax/solve/dispatch.py``: 4 new site(s).
-# * ``src/simsopt_jax_adapters/geo/single_stage_exact_analytic.py``: 6 new site(s).
-# Retired 2026-09-15: those six exact-analytic sites now call the SSOT owners
-# ``host_boundary.block_until_ready`` / ``host_value`` and
-# ``dtypes.explicit_device_array``. Direct jax transfers in that adapter are
-# no longer admitted. Baseline: 88.
-# Admitted 2026-09-17, ONE new owner-internal site: the shipped flat-675
-# single-stage example moved out of ``examples/`` (not swept) into
-# ``src/simsopt_jax_adapters/examples/``, and its two ``device_put`` calls plus
-# its ``transfer_guard`` now route through owners instead of being admitted as
-# adapter call sites: placement reuses ``dtypes.explicit_device_array`` (no new
-# site at all) and the strict guard became
-# ``host_boundary.disallow_host_transfers``, whose single internal
-# ``transfer_guard`` is the one addition. The two other ``host_boundary.py``
-# entries are re-pins after that insertion moved their lines. Baseline: 89.
-# Re-pinned 2026-09-23, no new site: the SciPy route's typed ``bounds`` (the
-# ``ScipyBounds`` import and one argument) moved the five ``dispatch.py``
-# coordinates below; file, scope and primitive are unchanged. Baseline: 89.
-# Re-pinned 2026-09-23 again, no new site: the L-BFGS-B non-Wolfe restart
-# helpers (all host-side, no transfer) moved the same five coordinates.
-# Baseline: 89.
-# Re-pinned 2026-09-24, no new site: the restart route's accepted-iterate
-# trace (host-side counts) and the move of ``projgr`` to ``solve/termination.py``
-# (host numpy, no transfer) moved the same five coordinates. Baseline: 89.
-# Re-pinned 2026-09-24 again, no new site: the restart route's callback re-uses
-# the accepted evaluation (host-side, no transfer) and moved the same five
-# coordinates. Baseline: 89.
-# Re-pinned 2026-09-24 a third time, no new site: the shared result boundary's
-# finiteness check (``_public_result``, host numpy on already-host arrays, no
-# transfer) moved the same five coordinates. Baseline: 89.
-# Re-pinned 2026-09-24 a fourth time, no new site: the SciPy result-shape reader
-# (``_scipy_termination``, host-side, no transfer) moved the same five
-# coordinates. Baseline: 89.
-# Re-pinned 2026-09-27, no new site: the ``bfgs-ondevice`` runner's two imports
-# in ``boozer_surface.py`` moved its two host-bridge guard coordinates.
-# Baseline: 89.
-# Retired 2026-09-27, 57 sites: the three nested least-squares research
-# modules that held them were removed from the port. Baseline: 32.
+# This baseline contains 33 direct invocations (2026-09-28); record every later change
+# as a dated note here. The admission notes before the 2026-09-28 carve-out (the
+# baseline peaked at 89 before the removed research modules took 57 sites with them)
+# are in git history. Since then:
 # Re-pinned 2026-09-28, no new site: the manual-LS operand fix in
 # ``boozer_surface.py`` moved its two host-bridge guard coordinates, and the
 # frozen-grid host-boundary fix in ``surface_objectives_traceable.py`` moved its
