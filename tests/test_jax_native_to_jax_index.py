@@ -17,6 +17,7 @@ from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.cases import CaseDefinition, get_case
 from examples.jax.parity.contracts import (
     QualityBand,
+    StageWiseContract,
     UpstreamEndState,
     UpstreamEndStates,
 )
@@ -1883,7 +1884,11 @@ def _declare_bounded(
 ) -> None:
     # Start from the registered case stripped of its own scatter contracts, so the
     # fixture's declaration is the only one in force.
-    bare: dict[str, tuple[object, ...]] = {"quality_bands": (), "upstream_end_states": ()}
+    bare: dict[str, tuple[object, ...]] = {
+        "quality_bands": (),
+        "upstream_end_states": (),
+        "stage_wise_contracts": (),
+    }
     declared = replace(get_case(_BOUNDED_CASE_ID), **{**bare, **declaration})
     assert isinstance(declared, CaseDefinition)
     monkeypatch.setattr(
@@ -2059,5 +2064,126 @@ def test_end_state_qualification_names_every_lane_and_its_draws(
         "native-cpu end state matches upstream draws k=0; "
         "jax-cpu end state matches upstream draws k=1,3; "
         "jax-gpu end state matches upstream draws k=0; "
+        "endpoint quality only, no convergence or final-value equivalence"
+    )
+
+
+_BOUNDED_STAGE_WISE = StageWiseContract(
+    case_id=_BOUNDED_CASE_ID,
+    scale="bounded",
+    informational_observables=("area:iota",),
+    deciding_observables=("replay:area_iota",),
+    same_state_tests=("tests/fixture_same_state.py",),
+    derivation="test fixture",
+)
+
+
+def _informational_end_state_records() -> list[dict[str, object]]:
+    """Beside a stage-wise contract a lane may match no upstream draw."""
+    return [
+        {"lane": lane, "matched_draws": draws, "passed": bool(draws)}
+        for lane, draws in zip(_BOUNDED_LANES, ([0], [], [0]))
+    ]
+
+
+def test_bounded_quality_band_evidence_is_valid_under_a_stage_wise_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _declare_bounded(
+        monkeypatch,
+        upstream_end_states=(_BOUNDED_END_STATES,),
+        stage_wise_contracts=(_BOUNDED_STAGE_WISE,),
+    )
+    path = _write_summary(
+        tmp_path,
+        _bounded_quality_band_summary(
+            {
+                "stage_wise": _BOUNDED_STAGE_WISE.summary_record(),
+                "upstream_end_states": _informational_end_state_records(),
+            }
+        ),
+    )
+
+    # The informational end-state records need not pass; the next gate is the
+    # source commit binding.
+    with pytest.raises(RuntimeError, match="not reachable from a named ref"):
+        authority_record_from_summary(path)
+
+
+@pytest.mark.parametrize(
+    "defect", ("missing", "other_contract", "passed_without_a_draw", "undeclared_draw")
+)
+def test_stage_wise_evidence_rejects_an_incomplete_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, defect: str
+) -> None:
+    _declare_bounded(
+        monkeypatch,
+        upstream_end_states=(_BOUNDED_END_STATES,),
+        stage_wise_contracts=(_BOUNDED_STAGE_WISE,),
+    )
+    records = _informational_end_state_records()
+    fields: dict[str, object] = {
+        "stage_wise": _BOUNDED_STAGE_WISE.summary_record(),
+        "upstream_end_states": records,
+    }
+    message = "upstream end states are incomplete"
+    if defect == "missing":
+        del fields["stage_wise"]
+        message = "stage-wise contract is incomplete"
+    elif defect == "other_contract":
+        fields["stage_wise"] = replace(
+            _BOUNDED_STAGE_WISE, informational_observables=("flux:iota",)
+        ).summary_record()
+        message = "stage-wise contract is incomplete"
+    elif defect == "passed_without_a_draw":
+        records[1]["passed"] = True
+    else:
+        records[0]["matched_draws"] = [2]
+    path = _write_summary(tmp_path, _bounded_quality_band_summary(fields))
+
+    with pytest.raises(RuntimeError, match=message):
+        authority_record_from_summary(path)
+
+
+def test_stage_wise_qualification_names_the_deciding_and_informational_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _declare_bounded(
+        monkeypatch,
+        upstream_end_states=(_BOUNDED_END_STATES,),
+        stage_wise_contracts=(_BOUNDED_STAGE_WISE,),
+    )
+    summary = _bounded_quality_band_summary(
+        {
+            "stage_wise": _BOUNDED_STAGE_WISE.summary_record(),
+            "upstream_end_states": _informational_end_state_records(),
+            "executions": [
+                {"lane": lane, "returncode": 0, "result_directory": lane}
+                for lane in _BOUNDED_LANES
+            ],
+        }
+    )
+    path = _write_summary(tmp_path, summary)
+    for lane in _BOUNDED_LANES:
+        write_lane_observation(
+            tmp_path / lane,
+            replace(
+                _policy_case_lane_observation(
+                    (ExecutedSource("examples/jax/run_parity.py", "f" * 64, "a" * 40),)
+                ),
+                lane=lane,
+            ),
+        )
+    monkeypatch.setattr(index_module, "verify_authority_summary", lambda *_: None)
+
+    record = authority_record_from_summary(path)
+
+    assert record["qualification"] == (
+        "1/1 comparisons failed; 0/3 lanes budget-exhausted; "
+        "native-boozer stage-wise: deciding replay:area_iota and tests "
+        "tests/fixture_same_state.py; chained end point area:iota informational; "
+        "native-cpu informational end state matches upstream draws k=0; "
+        "jax-cpu informational end state matches upstream draws k=none; "
+        "jax-gpu informational end state matches upstream draws k=0; "
         "endpoint quality only, no convergence or final-value equivalence"
     )

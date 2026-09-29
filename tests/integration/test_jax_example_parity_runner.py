@@ -42,8 +42,10 @@ from examples.jax.parity.cases import (
 )
 from examples.jax.parity.contracts import (
     AdmittedTerminalOutcome,
+    ComparisonResult,
     EndStateResult,
     QualityBand,
+    StageWiseContract,
     UpstreamEndState,
     UpstreamEndStates,
 )
@@ -3213,7 +3215,10 @@ def test_a_case_declaration_keeps_one_scatter_contract_per_scale(
     # The registered case's own scatter contracts are stripped first, so each
     # parameter's declaration is the only one in force.
     bare = dataclasses.replace(
-        _registered(_END_STATE_CASE_ID), quality_bands=(), upstream_end_states=()
+        _registered(_END_STATE_CASE_ID),
+        quality_bands=(),
+        upstream_end_states=(),
+        stage_wise_contracts=(),
     )
     with pytest.raises(ValueError, match=message):
         dataclasses.replace(bare, **changes)
@@ -3342,4 +3347,312 @@ def test_run_parity_records_and_the_audit_recomputes_upstream_end_states(
         _round_trip_declaration(((0, [3.0, 4.0]), (1, [1.0, 2.0]))),
     )
     with pytest.raises(ValueError, match="stored upstream end states differ"):
+        audit_published_run(published, repo_root=repo_root)
+
+
+# ------------------------------------------------ stage-wise contract (PLAN.md amendment 5, H)
+#
+# The end-state fixture above is reused: the judged iota and surface keys play
+# the chained end point (informational) and ``initial:objective_sum_squares``
+# the key published from a state both lanes share (deciding).
+_STAGE_WISE_DECIDING = "initial:objective_sum_squares"
+
+
+def _stage_wise(
+    *, case_id: str = _END_STATE_CASE_ID, scale: str = "bounded"
+) -> StageWiseContract:
+    return StageWiseContract(
+        case_id=case_id,
+        scale=cast(ExecutionScale, scale),
+        informational_observables=(_IOTA, _DOFS),
+        deciding_observables=(_STAGE_WISE_DECIDING,),
+        same_state_tests=("tests/fixture_same_state.py",),
+        derivation="test fixture: the chained end point is path dependent",
+    )
+
+
+def _is_informational(comparison: ComparisonResult) -> bool:
+    return comparison.diagnostic.startswith(
+        "informational (quality-band, non-certifying): "
+    )
+
+
+def test_a_stage_wise_contract_decides_by_its_shared_state_routes() -> None:
+    result = arbitrate(
+        _end_state_route_matrix(),
+        _end_state_observations(),
+        case_id=_END_STATE_CASE_ID,
+        stage_wise=_stage_wise(),
+    )
+
+    # The lanes' chained end points differ (jax-cpu on another branch), which is
+    # recorded and never decides; the shared-state key passes and decides.
+    assert result.verdict == "quality-band"
+    assert result.stage_wise == _stage_wise()
+    assert result.end_state_results == ()
+    assert not all(item.passed for item in result.comparisons)
+    for comparison in result.comparisons:
+        key = f"{comparison.phase}:{comparison.observable}"
+        assert _is_informational(comparison) == (key in {_IOTA, _DOFS}), comparison
+        if key == _STAGE_WISE_DECIDING:
+            assert comparison.passed
+
+
+def test_a_stage_wise_contract_never_yields_pass() -> None:
+    result = arbitrate(
+        _end_state_route_matrix(),
+        _end_state_observations({"native-cpu": 0, "jax-cpu": 0, "jax-gpu": 0}),
+        case_id=_END_STATE_CASE_ID,
+        stage_wise=_stage_wise(),
+    )
+
+    assert all(item.passed for item in result.comparisons)
+    assert result.verdict == "quality-band"
+
+
+def test_a_failing_shared_state_route_fails_a_stage_wise_case() -> None:
+    result = arbitrate(
+        _end_state_route_matrix(),
+        _end_state_observations(
+            initial={"native-cpu": 1.0, "jax-cpu": 1.0, "jax-gpu": 1.5}
+        ),
+        case_id=_END_STATE_CASE_ID,
+        stage_wise=_stage_wise(),
+    )
+
+    assert result.verdict == "fail"
+
+
+def test_an_end_state_set_beside_a_stage_wise_contract_is_informational() -> None:
+    """A lane on no upstream branch is recorded as such and does not decide."""
+    result = arbitrate(
+        _end_state_route_matrix(),
+        _end_state_observations(
+            overrides={"jax-gpu": {_IOTA: np.asarray(-0.5197, dtype=np.float64)}}
+        ),
+        case_id=_END_STATE_CASE_ID,
+        upstream_end_states=_upstream_end_states(),
+        stage_wise=_stage_wise(),
+    )
+
+    assert result.verdict == "quality-band"
+    assert result.end_state_results == (
+        EndStateResult(lane="jax-cpu", matched_draws=(1,), passed=True),
+        EndStateResult(lane="jax-gpu", matched_draws=(), passed=False),
+        EndStateResult(lane="native-cpu", matched_draws=(0,), passed=True),
+    )
+
+
+def test_a_stage_wise_contract_admits_no_failed_lane() -> None:
+    observations = _end_state_observations()
+    observations["jax-cpu"] = dataclasses.replace(
+        observations["jax-cpu"], normalized_status="failed", success=False
+    )
+
+    with pytest.raises(LaneOutcomeRejection, match="scientific success"):
+        arbitrate(
+            _end_state_route_matrix(),
+            observations,
+            case_id=_END_STATE_CASE_ID,
+            stage_wise=_stage_wise(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    (
+        ({"case_id": "native-qfm"}, "belongs to another case"),
+        ({"scale": "native_default"}, "requires the native_default scale"),
+        (
+            {"deciding_observables": ("replay:area_iota",)},
+            "no applicable complete route matrix: replay:area_iota",
+        ),
+        (
+            {"informational_observables": ("final:unrouted",)},
+            "no applicable complete route matrix: final:unrouted",
+        ),
+    ),
+    ids=("foreign-case", "other-scale", "unrouted-deciding", "unrouted-informational"),
+)
+def test_a_stage_wise_contract_is_refused_where_it_cannot_judge(
+    changes: dict[str, object], message: str
+) -> None:
+    with pytest.raises(ArbitrationError, match=message):
+        arbitrate(
+            _end_state_route_matrix(),
+            _end_state_observations(),
+            case_id=_END_STATE_CASE_ID,
+            stage_wise=dataclasses.replace(_stage_wise(), **changes),
+        )
+
+
+def test_a_stage_wise_contract_refuses_an_inapplicable_deciding_route() -> None:
+    routes = tuple(
+        dataclasses.replace(route, applicable=False)
+        if f"{route.phase}:{route.observable}" == _STAGE_WISE_DECIDING
+        else route
+        for route in _end_state_route_matrix()
+    )
+
+    with pytest.raises(ArbitrationError, match="no applicable complete route matrix"):
+        arbitrate(
+            routes,
+            _end_state_observations(),
+            case_id=_END_STATE_CASE_ID,
+            stage_wise=_stage_wise(),
+        )
+
+
+def test_a_stage_wise_contract_never_combines_with_a_band() -> None:
+    with pytest.raises(ArbitrationError, match="cannot combine with a quality band"):
+        arbitrate(
+            _end_state_route_matrix(),
+            _end_state_observations(),
+            case_id=_END_STATE_CASE_ID,
+            quality_band=dataclasses.replace(_ARCHIVED_QUALITY_BAND, scale="bounded"),
+            stage_wise=_stage_wise(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    (
+        ({"informational_observables": ()}, "informational observables"),
+        ({"deciding_observables": ("initial:x", "initial:x")}, "deciding observables"),
+        ({"deciding_observables": ("no-phase",)}, "deciding observables"),
+        ({"deciding_observables": (_IOTA,)}, "both informational and deciding"),
+        ({"same_state_tests": ()}, "same-state tests"),
+        ({"derivation": ""}, "recorded derivation"),
+        ({"case_id": ""}, "owning case_id"),
+        ({"scale": "full"}, "not an execution scale"),
+    ),
+)
+def test_a_stage_wise_contract_rejects_an_unusable_declaration(
+    changes: dict[str, object], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        dataclasses.replace(_stage_wise(), **changes)
+
+
+def test_a_case_looks_up_its_stage_wise_contract_by_scale() -> None:
+    bare = dataclasses.replace(
+        _registered(_END_STATE_CASE_ID),
+        quality_bands=(),
+        upstream_end_states=(),
+        stage_wise_contracts=(),
+    )
+    case = dataclasses.replace(bare, stage_wise_contracts=(_stage_wise(),))
+
+    assert case.stage_wise("bounded") is case.stage_wise_contracts[0]
+    assert case.stage_wise("native_default") is None
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    (
+        (
+            {"stage_wise_contracts": (_stage_wise(), _stage_wise())},
+            "more than one stage-wise contract",
+        ),
+        (
+            {"stage_wise_contracts": (_stage_wise(case_id="native-qfm"),)},
+            "stage-wise contract belongs to another case",
+        ),
+        (
+            {
+                "stage_wise_contracts": (_stage_wise(),),
+                "quality_bands": (
+                    dataclasses.replace(_ARCHIVED_QUALITY_BAND, scale="bounded"),
+                ),
+            },
+            "cannot combine a quality band and a stage-wise contract",
+        ),
+    ),
+    ids=("two-one-scale", "foreign", "band-and-stage-wise-one-scale"),
+)
+def test_a_case_declaration_keeps_one_stage_wise_contract_per_scale(
+    changes: dict[str, object], message: str
+) -> None:
+    bare = dataclasses.replace(
+        _registered(_END_STATE_CASE_ID),
+        quality_bands=(),
+        upstream_end_states=(),
+        stage_wise_contracts=(),
+    )
+    with pytest.raises(ValueError, match=message):
+        dataclasses.replace(bare, **changes)
+
+
+def _round_trip_stage_wise_declaration() -> CaseDefinition:
+    """The round-trip case with its final parameters informational and its initial ones deciding."""
+    return dataclasses.replace(
+        _round_trip_declaration(),
+        stage_wise_contracts=(
+            StageWiseContract(
+                case_id=_ROUND_TRIP_CASE_ID,
+                scale="bounded",
+                informational_observables=(_ROUND_TRIP_KEY,),
+                deciding_observables=("initial:parameters",),
+                same_state_tests=("tests/fixture_same_state.py",),
+                derivation="test fixture",
+            ),
+        ),
+    )
+
+
+def test_run_parity_records_and_the_audit_recomputes_a_stage_wise_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    _inject_completed_lane_receipts(
+        monkeypatch, rejected_lane=None, published_values=_round_trip_values()
+    )
+    _declare(monkeypatch, parity_cli, _round_trip_stage_wise_declaration())
+    _declare(monkeypatch, audit_module, _round_trip_stage_wise_declaration())
+
+    result = parity_cli.main(
+        [
+            "--case",
+            _ROUND_TRIP_CASE_ID,
+            "--lanes",
+            "native-cpu,jax-cpu",
+            "--scale",
+            "bounded",
+            "--artifact-root",
+            str(tmp_path),
+        ]
+    )
+
+    assert result == 0
+    (published,) = [
+        path
+        for path in tmp_path.iterdir()
+        if path.is_dir() and not path.name.endswith(".partial")
+    ]
+    summary = json.loads((published / "summary.json").read_text(encoding="utf-8"))
+    (case,) = summary["cases"]
+    assert summary["verdict"] == "quality-band"
+    assert case["verdict"] == "quality-band"
+    assert case["stage_wise"] == {
+        "informational_observables": [_ROUND_TRIP_KEY],
+        "deciding_observables": ["initial:parameters"],
+        "same_state_tests": ["tests/fixture_same_state.py"],
+    }
+    # The end-state set beside it is matched and recorded, informational.
+    assert case["upstream_end_states"] == [
+        {"lane": "jax-cpu", "matched_draws": [0], "passed": True},
+        {"lane": "native-cpu", "matched_draws": [0], "passed": True},
+    ]
+    for item in case["comparisons"]:
+        key = f"{item['phase']}:{item['observable']}"
+        assert item["diagnostic"].startswith("informational") == (
+            key == _ROUND_TRIP_KEY
+        )
+
+    audited = audit_published_run(published, repo_root=repo_root)
+    assert audited.verdict == "quality-band"
+
+    # A declaration without the contract recomputes a different record.
+    _declare(monkeypatch, audit_module, _round_trip_declaration())
+    with pytest.raises(ValueError, match="stored stage-wise contract differs"):
         audit_published_run(published, repo_root=repo_root)

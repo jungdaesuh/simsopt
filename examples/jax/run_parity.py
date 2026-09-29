@@ -30,7 +30,7 @@ from examples.jax.parity.arbiter import (
 )
 from examples.jax.parity.artifacts import canonical_json_bytes, write_bytes_exclusive
 from examples.jax.parity.cases import get_case, implemented_case_ids
-from examples.jax.parity.contracts import EndStateResult
+from examples.jax.parity.contracts import EndStateResult, StageWiseContract
 from examples.jax.parity.provenance import (
     REQUIRED_PROVENANCE_SOURCE_PATHS,
     collect_explicit_sources,
@@ -208,6 +208,7 @@ def _case_summary_record(
     quality_band_results: tuple[object, ...] = (),
     admitted_terminal_lanes: tuple[tuple[str, str], ...] = (),
     end_state_results: tuple[EndStateResult, ...] = (),
+    stage_wise: StageWiseContract | None = None,
 ) -> dict[str, object]:
     case_authoritative = all(
         observation.provenance is not None and observation.provenance.authoritative
@@ -302,6 +303,8 @@ def _case_summary_record(
             }
             for end_state_result in end_state_results
         ]
+    if stage_wise is not None:
+        case_record["stage_wise"] = stage_wise.summary_record()
     return case_record
 
 
@@ -418,6 +421,7 @@ def main(argv: list[str] | None = None) -> int:
                         else ()
                     ),
                     upstream_end_states=case.end_states(scale),
+                    stage_wise=case.stage_wise(scale),
                 )
             except LaneOutcomeRejection as error:
                 rejection = str(error).strip()
@@ -473,6 +477,7 @@ def main(argv: list[str] | None = None) -> int:
                     quality_band_results=arbitration.quality_band_results,
                     admitted_terminal_lanes=arbitration.admitted_terminal_lanes,
                     end_state_results=arbitration.end_state_results,
+                    stage_wise=arbitration.stage_wise,
                 )
             )
         validate_sources_current(repo_root, explicit_sources)

@@ -40,7 +40,11 @@ from examples.jax.parity.arbiter import (
 )
 from examples.jax.parity.audit import audit_published_run
 from examples.jax.parity.cases import get_case
-from examples.jax.parity.contracts import QualityBand, UpstreamEndStates
+from examples.jax.parity.contracts import (
+    QualityBand,
+    StageWiseContract,
+    UpstreamEndStates,
+)
 from examples.jax.parity.provenance import validate_authoritative_provenance
 from examples.jax.parity.receipts import load_lane_observation
 
@@ -136,19 +140,24 @@ def _work_budget_qualification(
 
 def _declared_scatter_contracts(
     case_id: str, scale: str
-) -> tuple[QualityBand | None, UpstreamEndStates | None]:
-    """The band and the upstream end-state set a registered case declares at ``scale``.
+) -> tuple[QualityBand | None, UpstreamEndStates | None, StageWiseContract | None]:
+    """The band, upstream end-state set and stage-wise contract a registered case declares at ``scale``.
 
-    Those two contracts are the only ones whose verdict is ``quality-band``; a
-    case declares at most one of them at one scale.
+    Those contracts are the only ones whose verdict is ``quality-band``. A case
+    declares at most one band or one stage-wise contract at one scale; an
+    end-state set beside a stage-wise contract is recorded informationally.
     """
     if case_id not in parity_cases.implemented_case_ids() or scale not in (
         "bounded",
         "native_default",
     ):
-        return None, None
+        return None, None, None
     declared = get_case(case_id)
-    return declared.quality_band(scale), declared.end_states(scale)
+    return (
+        declared.quality_band(scale),
+        declared.end_states(scale),
+        declared.stage_wise(scale),
+    )
 
 
 def _require_quality_band_records(
@@ -192,9 +201,18 @@ def _require_quality_band_records(
 
 
 def _require_end_state_records(
-    records: object, declared: UpstreamEndStates, expected_lanes: set[str]
+    records: object,
+    declared: UpstreamEndStates,
+    expected_lanes: set[str],
+    *,
+    informational: bool = False,
 ) -> None:
-    """One passing end-state record per compared lane, naming only declared draws."""
+    """One end-state record per compared lane, naming only declared draws.
+
+    A deciding set requires every record to pass; an ``informational`` set
+    (beside a stage-wise contract) requires each record to be well formed, and
+    ``passed`` to say whether it matched a representative.
+    """
     if not isinstance(records, list) or len(records) != len(expected_lanes):
         raise RuntimeError("authority summary upstream end states are incomplete")
     declared_draws = {state.k for state in declared.states}
@@ -213,13 +231,13 @@ def _require_end_state_records(
             or lane not in expected_lanes
             or lane in end_state_lanes
             or not isinstance(matched, list)
-            or not matched
+            or (not matched and not informational)
             or not all(
                 isinstance(draw, int) and not isinstance(draw, bool) for draw in matched
             )
             or matched != sorted(set(matched))
             or not set(matched) <= declared_draws
-            or result["passed"] is not True
+            or result["passed"] is not bool(matched)
         ):
             raise RuntimeError("authority summary upstream end states are incomplete")
         end_state_lanes.add(lane)
@@ -285,9 +303,9 @@ def _parse_authority_run(document: object, *, legacy: bool) -> AuthorityEvidence
     case_ids = frozenset(case_ids_value)
     if len(case_ids) != len(case_ids_value) or len(case_ids) != document["case_count"]:
         raise ValueError("authority evidence case_ids do not match case_count")
-    # A quality-band verdict exists only where a band or an upstream end-state
-    # set is declared at the evidence's own scale; the summary check then binds
-    # every quality-band case to its declaration.
+    # A quality-band verdict exists only where a band, an upstream end-state
+    # set or a stage-wise contract is declared at the evidence's own scale; the
+    # summary check then binds every quality-band case to its declaration.
     if (
         not legacy
         and document["verdict"] == "quality-band"
@@ -298,8 +316,8 @@ def _parse_authority_run(document: object, *, legacy: bool) -> AuthorityEvidence
         )
     ):
         raise ValueError(
-            "quality-band evidence requires a case with a quality band or an "
-            "upstream end-state set at its scale"
+            "quality-band evidence requires a case with a quality band, an "
+            "upstream end-state set or a stage-wise contract at its scale"
         )
     qualification = document.get(
         "qualification", "raw summary and lane receipts require local verification"
@@ -694,7 +712,9 @@ def _confirm_zero_comparison_fail(
         raise RuntimeError("recorded arbitration rejection is malformed")
     _require_replayable_case_contract(observations, repository_commit=repository_commit)
     declared = get_case(case_id)
-    declared_band, declared_end_states = _declared_scatter_contracts(case_id, scale)
+    declared_band, declared_end_states, declared_stage_wise = (
+        _declared_scatter_contracts(case_id, scale)
+    )
     contract = _replayed_contract(repository_commit, case_id=case_id, scale=scale)
     relationship = contract.relationship
     try:
@@ -714,6 +734,7 @@ def _confirm_zero_comparison_fail(
                 else ()
             ),
             upstream_end_states=declared_end_states,
+            stage_wise=declared_stage_wise,
         )
     except LaneOutcomeRejection as error:
         if str(error).strip() != recorded.strip():
@@ -853,13 +874,25 @@ def verify_authority_summary(
             quality_band_case_count += 1
             if expected_lanes != {"native-cpu", "jax-cpu", "jax-gpu"}:
                 raise RuntimeError("authority summary quality band is incomplete")
-            declared_band, declared_end_states = _declared_scatter_contracts(
-                case_id, evidence.scale
+            declared_band, declared_end_states, declared_stage_wise = (
+                _declared_scatter_contracts(case_id, evidence.scale)
             )
             if declared_band is not None:
                 _require_quality_band_records(
                     case.get("quality_band"), declared_band, expected_lanes
                 )
+            elif declared_stage_wise is not None:
+                if case.get("stage_wise") != declared_stage_wise.summary_record():
+                    raise RuntimeError(
+                        "authority summary stage-wise contract is incomplete"
+                    )
+                if declared_end_states is not None:
+                    _require_end_state_records(
+                        case.get("upstream_end_states"),
+                        declared_end_states,
+                        expected_lanes,
+                        informational=True,
+                    )
             elif declared_end_states is not None:
                 _require_end_state_records(
                     case.get("upstream_end_states"), declared_end_states, expected_lanes
@@ -1095,7 +1128,27 @@ def authority_record_from_summary(summary_path: Path) -> dict[str, object]:
                     f"{result['lane']} end state matches upstream draws k="
                     + ",".join(str(draw) for draw in result["matched_draws"])
                     for case in cases
+                    if "stage_wise" not in case
                     for result in case.get("upstream_end_states", [])
+                ),
+                *(
+                    f"{case['case_id']} stage-wise: deciding "
+                    + ", ".join(case["stage_wise"]["deciding_observables"])
+                    + " and tests "
+                    + ", ".join(case["stage_wise"]["same_state_tests"])
+                    + "; chained end point "
+                    + ", ".join(case["stage_wise"]["informational_observables"])
+                    + " informational"
+                    + "".join(
+                        f"; {result['lane']} informational end state matches upstream draws k="
+                        + (
+                            ",".join(str(draw) for draw in result["matched_draws"])
+                            or "none"
+                        )
+                        for result in case.get("upstream_end_states", [])
+                    )
+                    for case in cases
+                    if "stage_wise" in case
                 ),
             )
         )

@@ -313,6 +313,7 @@ def audit_published_run(
                 else ()
             ),
             upstream_end_states=case_definition.end_states(scale_value),
+            stage_wise=case_definition.stage_wise(scale_value),
         )
         if recomputed.work_budget_admitted:
             if case.get("terminal_contract") != "work-budget":
@@ -352,6 +353,15 @@ def audit_published_run(
         if case.get("upstream_end_states", []) != recomputed_end_state_payload:
             raise ValueError(
                 f"stored upstream end states differ from recomputation: {case_id}"
+            )
+        recomputed_stage_wise_payload = (
+            None
+            if recomputed.stage_wise is None
+            else recomputed.stage_wise.summary_record()
+        )
+        if case.get("stage_wise") != recomputed_stage_wise_payload:
+            raise ValueError(
+                f"stored stage-wise contract differs from recomputation: {case_id}"
             )
         recomputed_admitted_payload = [
             {"lane": lane, "raw_status": raw_status}

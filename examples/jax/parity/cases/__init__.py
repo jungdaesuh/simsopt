@@ -161,6 +161,7 @@ from examples.jax.parity.cases.native_wireframe_rcls_with_ports import (
 from examples.jax.parity.contracts import (
     AdmittedTerminalOutcome,
     QualityBand,
+    StageWiseContract,
     UpstreamEndStates,
 )
 from examples.jax.parity.input_bundle import InputBundle
@@ -215,7 +216,14 @@ class CaseDefinition:
 
     At a scale where upstream's own one-ulp draws land on several end states, each lane must match
     one of them on every judged key; this is an engineering acceptance against upstream's scatter,
-    never an equivalence proof, and it admits no budget or failure outcome.
+    never an equivalence proof, and it admits no budget or failure outcome. At a scale that also
+    declares a stage-wise contract the set is matched and recorded, informational.
+    """
+    stage_wise_contracts: tuple[StageWiseContract, ...] = ()
+    """Stage-wise contracts, at most one per scale (PLAN.md amendment 5).
+
+    At such a scale the stages are judged from shared states and the chained end point is
+    informational; the verdict is ``quality-band`` at most.
     """
 
     def quality_band(self, scale: ExecutionScale) -> QualityBand | None:
@@ -226,6 +234,17 @@ class CaseDefinition:
         """The upstream end-state set this case declares at ``scale``, if any."""
         return next(
             (states for states in self.upstream_end_states if states.scale == scale),
+            None,
+        )
+
+    def stage_wise(self, scale: ExecutionScale) -> StageWiseContract | None:
+        """The stage-wise contract this case declares at ``scale``, if any."""
+        return next(
+            (
+                contract
+                for contract in self.stage_wise_contracts
+                if contract.scale == scale
+            ),
             None,
         )
 
@@ -250,6 +269,23 @@ class CaseDefinition:
         if set(band_scales) & set(end_state_scales):
             raise ValueError(
                 "case cannot combine a quality band and an upstream end-state set at one scale"
+            )
+        stage_wise_scales = [contract.scale for contract in self.stage_wise_contracts]
+        if len(set(stage_wise_scales)) != len(stage_wise_scales):
+            raise ValueError("case declares more than one stage-wise contract at one scale")
+        foreign_stage_wise = sorted(
+            contract.case_id
+            for contract in self.stage_wise_contracts
+            if contract.case_id != self.case_id
+        )
+        if foreign_stage_wise:
+            raise ValueError(
+                "stage-wise contract belongs to another case: "
+                f"{foreign_stage_wise} != {self.case_id!r}"
+            )
+        if set(band_scales) & set(stage_wise_scales):
+            raise ValueError(
+                "case cannot combine a quality band and a stage-wise contract at one scale"
             )
         if self.work_budget_contract is not None and set(band_scales) & set(
             self.work_budget_contract.scales

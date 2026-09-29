@@ -18,6 +18,7 @@ from examples.jax.parity.contracts import (
     EndStateResult,
     QualityBand,
     QualityBandResult,
+    StageWiseContract,
     UpstreamEndState,
     UpstreamEndStates,
 )
@@ -100,6 +101,7 @@ class ArbitrationResult:
     work_budget_admitted: bool = False
     admitted_terminal_lanes: tuple[tuple[str, str], ...] = ()
     end_state_results: tuple[EndStateResult, ...] = ()
+    stage_wise: StageWiseContract | None = None
 
 
 @dataclass(frozen=True)
@@ -122,6 +124,7 @@ def _validate_lanes(
     work_budget_contract: WorkBudgetContract | None = None,
     admitted_terminal_outcomes: tuple[AdmittedTerminalOutcome, ...] = (),
     upstream_end_states: UpstreamEndStates | None = None,
+    stage_wise: StageWiseContract | None = None,
 ) -> _TerminalAdmission:
     if outer_optimizer_policy is not None and not policy_owns_parity_case(
         outer_optimizer_policy, case_id=case_id, example_id=example_id
@@ -171,6 +174,27 @@ def _validate_lanes(
             raise ArbitrationError(
                 "upstream end-state acceptance requires the "
                 f"{upstream_end_states.scale} scale"
+            )
+    # A stage-wise contract is bound like the end-state set: to ONE case and
+    # ONE scale. It admits no terminal outcome and cannot stand beside a band.
+    if stage_wise is not None:
+        if quality_band is not None or admitted_terminal_outcomes:
+            raise ArbitrationError(
+                "a stage-wise contract cannot combine with a quality band or "
+                "admitted terminal outcomes"
+            )
+        if case_id is None:
+            raise ArbitrationError(
+                "a stage-wise contract requires the arbitrated case_id"
+            )
+        if stage_wise.case_id != case_id:
+            raise ArbitrationError(
+                "stage-wise contract belongs to another case: "
+                f"{stage_wise.case_id!r} != {case_id!r}"
+            )
+        if required_scales != {stage_wise.scale}:
+            raise ArbitrationError(
+                f"the stage-wise contract requires the {stage_wise.scale} scale"
             )
     # Ownership is checked at this seam, not only in the registry: an admission
     # authorized for one case can never be handed to another.
@@ -641,6 +665,35 @@ def _end_state_results(
     return tuple(results)
 
 
+def _require_stage_wise_routes(
+    stage_wise: StageWiseContract,
+    routes: tuple[ComparisonRoute, ...],
+    required_lanes: frozenset[str],
+) -> None:
+    """Refuse a stage-wise contract whose keys the route matrix does not judge.
+
+    A deciding key must be applicable on every required lane pair (it is the
+    harness half of the stage-wise proof); an informational key must be an
+    applicable route too, or there would be nothing to record.
+    """
+    required_pairs = _required_lane_pairs(required_lanes)
+    for key in (
+        *stage_wise.deciding_observables,
+        *stage_wise.informational_observables,
+    ):
+        key_routes = tuple(
+            route for route in routes if f"{route.phase}:{route.observable}" == key
+        )
+        if (
+            not key_routes
+            or not all(route.applicable for route in key_routes)
+            or {route.lane_pair for route in key_routes} != required_pairs
+        ):
+            raise ArbitrationError(
+                f"stage-wise observable has no applicable complete route matrix: {key}"
+            )
+
+
 def _quality_band_results(
     quality_band: QualityBand,
     observations: Mapping[str, LaneObservation],
@@ -694,6 +747,7 @@ def arbitrate(
     work_budget_contract: WorkBudgetContract | None = None,
     admitted_terminal_outcomes: tuple[AdmittedTerminalOutcome, ...] = (),
     upstream_end_states: UpstreamEndStates | None = None,
+    stage_wise: StageWiseContract | None = None,
 ) -> ArbitrationResult:
     """Compare every direct pair under the declared JAX execution policy.
 
@@ -732,6 +786,16 @@ def arbitrate(
     judged keys are recorded as informational; every other route still
     decides. The verdict is ``quality-band`` at best, never ``pass``, and
     ``end_state_results`` names the representatives each lane matched.
+
+    A case-owned ``stage_wise`` contract serves a workflow judged stage by
+    stage from shared states. Its deciding keys must be applicable routes on
+    every required pair and decide like any route; the lane-pair comparisons
+    of its informational keys (the chained, path-dependent end point) are
+    recorded as informational. Every lane must still pass the success gate
+    (a work budget may admit budget exits as usual). An upstream end-state set
+    passed beside it is matched and recorded, informational: under a
+    stage-wise contract ``end_state_results`` decide nothing. The verdict is
+    ``quality-band`` at best, never ``pass``.
     """
     admission = _validate_lanes(
         observations,
@@ -745,6 +809,7 @@ def arbitrate(
         work_budget_contract,
         admitted_terminal_outcomes,
         upstream_end_states,
+        stage_wise,
     )
     selected_routes = tuple(
         route
@@ -791,6 +856,41 @@ def arbitrate(
         )
     if not comparisons:
         raise ArbitrationError("no applicable comparison routes")
+    if stage_wise is not None:
+        _require_stage_wise_routes(stage_wise, selected_routes, required_lanes)
+        informational = frozenset(stage_wise.informational_observables)
+        return ArbitrationResult(
+            verdict=(
+                QUALITY_BAND_VERDICT
+                if all(
+                    comparison.passed
+                    for comparison in comparisons
+                    if f"{comparison.phase}:{comparison.observable}"
+                    not in informational
+                )
+                else "fail"
+            ),
+            comparisons=tuple(
+                replace(
+                    comparison,
+                    diagnostic=(
+                        f"{_INFORMATIONAL_DIAGNOSTIC_PREFIX}{comparison.diagnostic}"
+                    ),
+                )
+                if f"{comparison.phase}:{comparison.observable}" in informational
+                else comparison
+                for comparison in comparisons
+            ),
+            work_budget_admitted=admission.work_budget_admitted,
+            end_state_results=(
+                _end_state_results(
+                    upstream_end_states, selected_routes, observations, required_lanes
+                )
+                if upstream_end_states is not None
+                else ()
+            ),
+            stage_wise=stage_wise,
+        )
     if upstream_end_states is not None:
         end_state_results = _end_state_results(
             upstream_end_states, selected_routes, observations, required_lanes

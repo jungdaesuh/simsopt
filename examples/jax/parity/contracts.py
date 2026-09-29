@@ -229,6 +229,73 @@ class UpstreamEndStates:
 
 
 @dataclass(frozen=True)
+class StageWiseContract:
+    """A workflow judged stage by stage from shared states, its chained end point informational.
+
+    Where a capped, path-dependent stage decides WHICH end point the workflow
+    reaches (lanes forking at round-off land on different end points), the
+    chained end point cannot be compared lane against lane. This contract
+    judges the stages instead, at ONE case and ONE scale.
+    ``deciding_observables`` are lane keys the case publishes from states both
+    lanes share (a stage replayed from one start); each must have applicable
+    routes, and they decide under their own comparator and bucket.
+    ``same_state_tests`` name the tracked tests that decide what the harness
+    does not publish (derived-bound comparisons at identical states).
+    ``informational_observables`` are the chained end point: their lane-pair
+    routes are recorded with an informational diagnostic and never decide.
+    Every other route and gate stays in force, and because the chained end
+    point is not compared the verdict is ``quality-band`` at most, never
+    ``pass``.
+    """
+
+    case_id: str
+    scale: ExecutionScale
+    informational_observables: tuple[str, ...]
+    deciding_observables: tuple[str, ...]
+    same_state_tests: tuple[str, ...]
+    derivation: str
+
+    def __post_init__(self) -> None:
+        if not self.case_id:
+            raise ValueError("stage-wise contract requires an owning case_id")
+        if self.scale not in get_args(ExecutionScale):
+            raise ValueError(
+                f"stage-wise contract scale is not an execution scale: {self.scale!r}"
+            )
+        informational = tuple(self.informational_observables)
+        deciding = tuple(self.deciding_observables)
+        for name, keys in (("informational", informational), ("deciding", deciding)):
+            if (
+                not keys
+                or len(set(keys)) != len(keys)
+                or not all(_is_lane_key(key) for key in keys)
+            ):
+                raise ValueError(
+                    f"stage-wise {name} observables must be unique non-empty 'phase:name' keys"
+                )
+        if set(informational) & set(deciding):
+            raise ValueError(
+                "a stage-wise observable cannot be both informational and deciding"
+            )
+        tests = tuple(self.same_state_tests)
+        if not tests or len(set(tests)) != len(tests) or not all(tests):
+            raise ValueError("stage-wise contract requires its same-state tests")
+        if not self.derivation:
+            raise ValueError("stage-wise contract requires a recorded derivation")
+        object.__setattr__(self, "informational_observables", informational)
+        object.__setattr__(self, "deciding_observables", deciding)
+        object.__setattr__(self, "same_state_tests", tests)
+
+    def summary_record(self) -> dict[str, list[str]]:
+        """The contract as a case summary records it (JSON-ready; the registry holds the derivation)."""
+        return {
+            "informational_observables": list(self.informational_observables),
+            "deciding_observables": list(self.deciding_observables),
+            "same_state_tests": list(self.same_state_tests),
+        }
+
+
+@dataclass(frozen=True)
 class AdmittedTerminalOutcome:
     """One case-owned terminal lane outcome authorized at ``native_default``.
 
@@ -282,7 +349,11 @@ class QualityBandResult:
 
 @dataclass(frozen=True)
 class EndStateResult:
-    """Which of upstream's own end states one lane's end state matches."""
+    """Which of upstream's own end states one lane's end state matches.
+
+    Under a :class:`StageWiseContract` the result is recorded informationally
+    and ``passed`` decides nothing.
+    """
 
     lane: str
     matched_draws: tuple[int, ...]
