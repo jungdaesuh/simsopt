@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 
 from ._device_scalars import device_one, two_pi
@@ -12,12 +11,12 @@ from ._math_utils import (
 
 
 def _mode_numbers(order, *, reference):
-    one = jax.lax.stop_gradient(device_one(reference))
+    one = device_one(reference)
     return jnp.cumsum(jnp.broadcast_to(one, (int(order),)))
 
 
 def _constant_row(length: int, *, is_one: bool, reference):
-    one = jax.lax.stop_gradient(device_one(reference))
+    one = device_one(reference)
     zero = one - one
     scalar = one if is_one else zero
     return jnp.broadcast_to(scalar, (1, int(length)))
@@ -29,7 +28,7 @@ def _interleave_harmonics(first, second):
 
 def _fourier_basis_terms(quadpoints, order):
     quadpoints = _as_jax_float64(quadpoints)
-    angle_scale = jax.lax.stop_gradient(two_pi(quadpoints))
+    angle_scale = two_pi(quadpoints)
     points = angle_scale * quadpoints
     mode_numbers = _mode_numbers(order, reference=points)
     phase = jnp.expand_dims(mode_numbers, axis=1) * jnp.expand_dims(points, axis=0)

@@ -25,11 +25,21 @@ def _staged_scalar_builder(host_value: object, dtype_string: str):
 
 
 def device_one(reference: jax.Array) -> jax.Array:
-    return jnp.exp(jnp.sum(reference - reference))
+    """A 1.0 placed and typed like ``reference``, with no derivative path.
+
+    The value is built from ``reference`` only for placement.  Its derivative
+    is zero, and it must also be computed as zero: left differentiable, reverse
+    mode sends the full cotangent of every product ``device_one(r) * y`` into
+    ``r`` twice, as ``+c`` and ``-c``, and accumulates them beside ``r``'s own
+    cotangent.  When ``c`` dwarfs that cotangent -- ``mu0/4pi`` scaling a field
+    whose currents are its reference -- the sum ``(g + c) - c`` keeps only
+    ``u |c|`` of ``g``'s accuracy.
+    """
+    return jax.lax.stop_gradient(jnp.exp(jnp.sum(reference - reference)))
 
 
 def two_pi(reference: jax.Array) -> jax.Array:
-    pi = jax.lax.stop_gradient(jnp.arccos(-device_one(reference)))
+    pi = jnp.arccos(-device_one(reference))
     return pi + pi
 
 
