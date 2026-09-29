@@ -43,7 +43,6 @@ StatusConvention = Literal[
     "scipy-lbfgsb",
     "private-lbfgsb",
     "host-lbfgsb",
-    "optax-lbfgs",
     "scipy-slsqp",
     "scipy-trf",
 ]
@@ -63,7 +62,6 @@ _SUCCESS_STATUSES: Final[Mapping[StatusConvention, frozenset[int]]] = MappingPro
         "scipy-lbfgsb": frozenset({0}),
         "private-lbfgsb": frozenset({0}),
         "host-lbfgsb": frozenset({0, 4}),
-        "optax-lbfgs": frozenset({0}),
         # scipy.optimize.minimize(method="SLSQP"): the result carries the
         # solver's exit mode, and success is exactly mode 0
         # (scipy/optimize/_slsqp_py.py:562-565,
@@ -141,15 +139,6 @@ _FAILURE_REASON_BY_STATUS: Final[
                 2: "evaluation-limit",
                 3: "evaluation-limit",
                 5: "line-search-failed",
-                6: "nonfinite",
-            }
-        ),
-        # The Optax lane emits its own vocabulary: 2 is a Wolfe line-search
-        # failure, never an evaluation budget.
-        "optax-lbfgs": MappingProxyType(
-            {
-                1: "iteration-limit",
-                2: "line-search-failed",
                 6: "nonfinite",
             }
         ),

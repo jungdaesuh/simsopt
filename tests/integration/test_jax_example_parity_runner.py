@@ -2034,7 +2034,6 @@ def test_canonical_audit_rejects_lane_evidence_that_disagrees_with_quality_summa
         "borrowed_policy",
         "forged_policy",
         "wrong_driver",
-        "optax",
         "optimistix",
         "host_callback",
     ),
@@ -2072,7 +2071,7 @@ def test_approved_scipy_policy_is_bound_to_real_case_example_and_driver(
         driver = "scipy_arbitrary"
     elif mutation == "wrong_driver":
         driver = "simsopt_lm_qr"
-    elif mutation in {"optax", "optimistix", "host_callback"}:
+    elif mutation in {"optimistix", "host_callback"}:
         driver = mutation + "_scipy"
     observations = {
         lane: dataclasses.replace(observation, driver=driver)

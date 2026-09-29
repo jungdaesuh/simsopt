@@ -220,7 +220,7 @@ def _validate_lanes(
             and outer_optimizer_policy is None
             and any(
                 forbidden in observation.driver.lower()
-                for forbidden in ("scipy", "optimistix", "optax", "host_callback")
+                for forbidden in ("scipy", "optimistix", "host_callback")
             )
         ):
             raise ArbitrationError(

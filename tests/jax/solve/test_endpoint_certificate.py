@@ -233,7 +233,6 @@ def test_invalid_iteration_budgets_are_rejected_fail_closed(
         "scipy-lbfgsb",
         "private-lbfgsb",
         "host-lbfgsb",
-        "optax-lbfgs",
     ),
 )
 @pytest.mark.parametrize("provider_status", (2, 5, 6, 99, None, 42))
@@ -286,7 +285,6 @@ def test_contradictory_success_status_precedes_nonfinite_reason() -> None:
         ("host-lbfgsb", 4),
         ("scipy-lbfgsb", 0),
         ("private-lbfgsb", 0),
-        ("optax-lbfgs", 0),
     ),
 )
 def test_provider_success_with_convention_success_status_can_certify(
@@ -334,9 +332,6 @@ def test_provider_success_with_convention_success_status_can_certify(
         ("private-lbfgsb", 2, "line-search-failed"),
         ("private-lbfgsb", 6, "nonfinite"),
         ("private-lbfgsb", 99, "callback-stopped"),
-        ("optax-lbfgs", 1, "iteration-limit"),
-        ("optax-lbfgs", 2, "line-search-failed"),
-        ("optax-lbfgs", 6, "nonfinite"),
     ),
 )
 def test_provider_failure_uses_convention_specific_reason(
@@ -383,24 +378,6 @@ def test_unknown_failure_status_uses_iteration_budget_fallback(
     )
 
     assert certificate.stopping_reason == expected_reason
-    assert certificate.success is False
-
-
-def test_optax_success_claim_with_host_lbfgsb_success_status_fails_closed() -> None:
-    certificate = certify_optimization_endpoint(
-        provider_success=True,
-        provider_status=4,
-        status_convention="optax-lbfgs",
-        iterations=1,
-        max_iterations=1000,
-        initial_gradient_inf_norm=1.0e-3,
-        final_gradient_inf_norm=1.0e-8,
-        parameters_finite=True,
-        observables_finite=True,
-        inner_success=True,
-    )
-
-    assert certificate.stopping_reason == "failed"
     assert certificate.success is False
 
 
