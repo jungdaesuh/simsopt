@@ -4,11 +4,13 @@ Every kernel returns ``(signed_value, grad, hard_signed_value)``.
 ``hard_signed_value`` is the constraint at the extremum over the sampled points
 (quadrature points of curves and surface), and ``signed_value`` its log-sum-exp
 surrogate at ``temperature`` T over every sample (curvature) or every point pair
-(distances), with no support truncation: a smooth function of the sampled
-points, so ``grad = d(signed_value)/dx`` over the free dofs of
+(distances), with no support truncation. A pair enters through the smooth
+distance ``s(d) = sqrt(d^2 + T^2) - T`` (``d - T <= s(d) <= d``, differentiable
+at coincident points), so ``signed_value`` is a smooth function of the sampled
+points and ``grad = d(signed_value)/dx`` over the free dofs of
 ``objective_optimizable`` holds everywhere. The surrogate is conservative:
 ``hard_signed_value <= signed_value <= hard_signed_value + T log N`` for N
-samples or pairs. Unlike the stock hinge objectives, the value keeps the slack
+curvature samples, ``+ T (log N + 1)`` for N distance pairs. Unlike the stock hinge objectives, the value keeps the slack
 when the constraint is inactive. ``temperature`` must be finite and positive
 (in the constrained quantity's units); every kernel raises ``ValueError``
 otherwise. Zero is rejected, not read as the hard limit: that limit is
@@ -46,13 +48,16 @@ def soft_min_pair_distance(point_sets, set_pairs, temperature: float):
 
     ``point_sets`` are ``(n_k, 3)`` arrays; ``set_pairs`` lists ``(a, b)``
     indices of sets whose every point pair counts. Returns ``(hard_min,
-    soft_min, point_gradients)``: the smallest pair distance, ``-T log sum
-    exp(-d/T)`` over all pairs (at most ``hard_min``), and ``d(soft_min)/d
-    points`` per set. Pairs are visited in blocks of ``_PAIR_BLOCK`` with the
-    running minimum as the exponent shift, so every exponent is <= 0.
+    soft_min, point_gradients)``: the smallest pair distance d, ``-T log sum
+    exp(-s/T)`` over all pairs of the smooth distance ``s = sqrt(d^2 + T^2) -
+    T`` (at most ``hard_min``, at least ``hard_min - T (log N + 1)``), and
+    ``d(soft_min)/d points`` per set. Pairs are visited in blocks of
+    ``_PAIR_BLOCK`` with the running minimum of s as the exponent shift, so
+    every exponent is <= 0.
     """
     gradients = [np.zeros_like(points) for points in point_sets]
     shift = np.inf
+    min_squared_distance = np.inf
     weight_sum = 0.0
     for left_index, right_index in set_pairs:
         left, right = point_sets[left_index], point_sets[right_index]
@@ -63,13 +68,17 @@ def soft_min_pair_distance(point_sets, set_pairs, temperature: float):
             for column_start in range(0, len(right), column_step):
                 columns = slice(column_start, column_start + column_step)
                 left_block, right_block = left[rows], right[columns]
-                # Distances from the coordinate differences (no |x|^2 + |y|^2 -
-                # 2 x.y cancellation), so hard_min is the sampled minimum.
-                distances = np.zeros((len(left_block), len(right_block)))
+                # Squared distances from the coordinate differences (no |x|^2 +
+                # |y|^2 - 2 x.y cancellation), so hard_min is the sampled minimum.
+                squared = np.zeros((len(left_block), len(right_block)))
                 for axis in range(3):
                     difference = np.subtract.outer(left_block[:, axis], right_block[:, axis])
-                    distances += np.square(difference, out=difference)
-                np.sqrt(distances, out=distances)
+                    squared += np.square(difference, out=difference)
+                min_squared_distance = min(min_squared_distance, float(np.min(squared)))
+                # s = d^2 / (r + T), r = sqrt(d^2 + T^2): sqrt(d^2 + T^2) - T
+                # without its cancellation for d << T.
+                roots = np.sqrt(squared + temperature * temperature)
+                distances = squared / (roots + temperature)
                 block_min = float(np.min(distances))
                 if block_min < shift:
                     # Re-reference the sums to the new minimum (0 on the first block).
@@ -82,16 +91,11 @@ def soft_min_pair_distance(point_sets, set_pairs, temperature: float):
                 weights /= temperature
                 np.exp(weights, out=weights)
                 weight_sum += float(np.sum(weights))
-                # d(d_ij)/d(left_i) = (left_i - right_j) / d_ij, so the weighted
-                # sums over j (i) are left_i * sum_j c_ij - (c @ right)_i and
-                # right_j * sum_i c_ij - (c.T @ left)_j with c = weights / d.
-                # A coincident pair (d = 0) has no direction and contributes 0.
-                coefficients = np.divide(
-                    weights,
-                    distances,
-                    out=np.zeros_like(weights),
-                    where=distances > 0.0,
-                )
+                # d(s_ij)/d(left_i) = (left_i - right_j) / r_ij (r >= T > 0), so
+                # the weighted sums over j (i) are left_i * sum_j c_ij -
+                # (c @ right)_i and right_j * sum_i c_ij - (c.T @ left)_j with
+                # c = weights / r.
+                coefficients = np.divide(weights, roots, out=weights)
                 gradients[left_index][rows] += (
                     left_block * np.sum(coefficients, axis=1)[:, None]
                     - coefficients @ right_block
@@ -102,7 +106,8 @@ def soft_min_pair_distance(point_sets, set_pairs, temperature: float):
                 )
     for gradient in gradients:
         gradient /= weight_sum
-    return shift, shift - temperature * float(np.log(weight_sum)), gradients
+    soft_min = shift - temperature * float(np.log(weight_sum))
+    return float(np.sqrt(min_squared_distance)), soft_min, gradients
 
 
 def surface_dgamma_by_dcoeff_derivative(surface, point_gradient):

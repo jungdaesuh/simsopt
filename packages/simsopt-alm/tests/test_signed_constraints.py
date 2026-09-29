@@ -388,7 +388,7 @@ class SupportChangeSmoothnessTests(unittest.TestCase):
 
 
 class FullLogSumExpTests(unittest.TestCase):
-    def test_distance_rows_are_the_log_sum_exp_over_every_pair(self):
+    def test_distance_rows_are_the_log_sum_exp_of_the_smooth_distance_over_every_pair(self):
         curves = [_circle(1.0, 0.0, 16), _circle(0.9, 0.3, 12), _circle(1.1, -0.4, 8)]
         surface = _fixed_torus(1.0, 0.3)
         temperature = 0.05
@@ -399,7 +399,9 @@ class FullLogSumExpTests(unittest.TestCase):
             distances = np.concatenate(
                 [np.linalg.norm(a[:, None] - b[None], axis=2).ravel() for a, b in pairs]
             )
-            soft = -temperature * logsumexp(-distances / temperature)
+            # Pairs enter through the smooth distance s(d) = sqrt(d^2 + T^2) - T.
+            smooth = np.sqrt(distances**2 + temperature**2) - temperature
+            soft = -temperature * logsumexp(-smooth / temperature)
             return minimum_distance - soft, minimum_distance - np.min(distances)
 
         curve_pairs = [(points[i], points[j]) for i in range(3) for j in range(i)]
@@ -450,7 +452,7 @@ class FullLogSumExpTests(unittest.TestCase):
 
     def test_coincident_samples_give_a_finite_gradient(self):
         # Two unit circles in perpendicular planes share the sample (1, 0, 0):
-        # that pair has distance 0 and no direction, and contributes nothing.
+        # that pair has distance 0, where the smooth distance is flat.
         xy = _circle(1.0, 0.0, 8)
         xz = CurveXYZFourier(8, 1)
         xz.set("xc(1)", 1.0)
@@ -462,6 +464,83 @@ class FullLogSumExpTests(unittest.TestCase):
         self.assertEqual(hard, 0.1)
         self.assertGreaterEqual(signed, hard)
         self.assertTrue(np.all(np.isfinite(grad)))
+
+    def test_distance_rows_are_differentiable_through_coincidence(self):
+        # Codex R17-01: one of two identical sample sets moves through exact
+        # coincidence along z. At -h, 0 and +h the one-sided differences on
+        # either side agree with the analytic derivative (the Euclidean pair
+        # distance had a cusp there: derivative -1, 0, +1).
+        def curve_pair():
+            first, second = _circle(1.0, 0.0, 32), _circle(1.0, 0.0, 32)
+            return first, second, _JointDofs([first, second])
+
+        def curve_on_torus():
+            # The torus's outboard midplane circle, sampled at the surface's
+            # toroidal angles: every curve sample is a surface sample.
+            curve = _circle(1.3, 0.0, 32)
+            surface = SurfaceRZFourier(
+                nfp=1,
+                stellsym=True,
+                mpol=1,
+                ntor=1,
+                quadpoints_phi=np.linspace(0.0, 1.0, 32, endpoint=False),
+                quadpoints_theta=np.linspace(0.0, 1.0, 8, endpoint=False),
+            )
+            surface.set("rc(0,0)", 1.0)
+            surface.set("rc(1,0)", 0.3)
+            surface.set("zs(1,0)", 0.3)
+            surface.fix_all()
+            return curve, surface, _JointDofs([curve])
+
+        first, second, pair_owner = curve_pair()
+        curve, surface, surface_owner = curve_on_torus()
+        cases = {
+            "curve_curve": (
+                lambda: smooth_min_curve_curve_signed_constraint(
+                    [first, second], 0.1, 0.01, pair_owner
+                ),
+                pair_owner,
+                list(pair_owner.dof_names).index(f"{second.name}:zc(0)"),
+            ),
+            "curve_surface": (
+                lambda: smooth_min_curve_surface_signed_constraint(
+                    [curve], surface, 0.1, 0.01, surface_owner
+                ),
+                surface_owner,
+                list(surface_owner.dof_names).index(f"{curve.name}:zc(0)"),
+            ),
+        }
+        self.assertEqual(
+            smooth_min_curve_curve_signed_constraint([first, second], 0.1, 0.01, pair_owner)[2],
+            0.1,
+        )
+        step, offset = 1.0e-7, 1.0e-3
+        for name, (evaluate, owner, index) in cases.items():
+            x0 = owner.x.copy()
+
+            def value_and_derivative(shift):
+                moved = x0.copy()
+                moved[index] += shift
+                owner.x = moved
+                signed, grad, _hard = evaluate()
+                return signed, grad[index]
+
+            try:
+                for position in (-offset, 0.0, offset):
+                    with self.subTest(kernel=name, position=position):
+                        value, derivative = value_and_derivative(position)
+                        forward = (value_and_derivative(position + step)[0] - value) / step
+                        backward = (value - value_and_derivative(position - step)[0]) / step
+                        for label, difference in (("forward", forward), ("backward", backward)):
+                            self.assertAlmostEqual(
+                                difference,
+                                derivative,
+                                delta=1.0e-4,
+                                msg=f"{label} difference {difference:.6g} vs analytic "
+                                f"{derivative:.6g} at z offset {position:g}",
+                            )
+            finally:
+                owner.x = x0
 
     def test_memory_stays_bounded_at_a_realistic_size(self):
         # 4 coils of 128 points against a 64 x 64 surface: 2.1 million pairs,
