@@ -3,7 +3,7 @@
 # Setting up simsopt's ALM solver
 
 This guide covers installing the augmented-Lagrangian solver
-`simsopt.solve.alm` and setting up a constrained optimization with it. It is
+`simsopt_alm` and setting up a constrained optimization with it. It is
 generated from the Claude Code skill in
 `.claude/skills/simsopt-alm-setup/` (`SKILL.md` and its `references/`), so it
 matches what the skill does. To follow it by hand, run the scripts and copy
@@ -22,13 +22,14 @@ the templates yourself; where the steps say "the user", that is you.
 
 ## Set up simsopt's ALM solver
 
-This skill installs the augmented-Lagrangian solver `simsopt.solve.alm` into a
-simsopt installation and sets up one constrained optimization,
+This skill installs the augmented-Lagrangian solver package `simsopt-alm`
+(import name `simsopt_alm`) beside the user's own simsopt, which it leaves
+unchanged, and sets up one constrained optimization,
 `min f(x) s.t. g_i(x) <= 0`, as two new files built from tested templates,
 checked before the real run.
 
-`$SKILL_DIR` is the skill's directory (`.claude/skills/simsopt-alm-setup` in
-the simsopt repository). `<python>` is the interpreter the user's
+`$SKILL_DIR` is the skill's directory (`.claude/skills/simsopt-alm-setup` of
+the `alm-library` branch). `<python>` is the interpreter the user's
 optimization runs with (ask when unclear). `<dir>` is the directory the
 generated files go into.
 
@@ -38,8 +39,8 @@ generated files go into.
   empty. An existing file (for example the user's current optimization
   script) changes only through a unified diff shown to the user and applied
   after the user approves it.
-- simsopt's own sources change only through the install route of step 1,
-  after the user approves its commands. Nothing is pushed.
+- Packages are installed only by the route of step 1, after the user
+  approves its commands; simsopt itself is never changed. Nothing is pushed.
 - Stop and report instead of working around when: `check_env.py` lists
   `blockers`; `smoke_toy.py` fails; a check in step 4 fails for a reason
   outside the generated files; the user declines a step.
@@ -49,19 +50,20 @@ generated files go into.
 ### 1. Install
 
 1. Run `<python> $SKILL_DIR/scripts/check_env.py --python <python>`, adding
-   `--checkout <path>` when the user named their simsopt checkout (the
-   `alm-library` branch comes from `https://github.com/jungdaesuh/simsopt.git`;
-   `--fork-url <url>` overrides it). When simsopt is not installed in `<python>` yet, `--checkout` is
-   what makes a route possible: ask for the user's simsopt source checkout
-   (or offer to clone upstream simsopt), and the report offers the `install`
-   route. Read `route`, `blockers` and `notes` from the `CHECK_ENV` line; the
-   lines before it show where each module imports from and the checkout's
-   HEAD commit.
+   `--checkout <path>` when the user wants the solver's sources in an
+   editable clone of the `alm-library` branch at `<path>` (an existing clone,
+   or a new directory to clone into). The branch comes from
+   `https://github.com/jungdaesuh/simsopt.git`; `--fork-url <url>`
+   overrides it. Read `route`, `blockers` and `notes` from the `CHECK_ENV`
+   line; the lines before it show where each module imports from, how the
+   package is installed and the clone's HEAD commit.
 2. If `blockers` is not empty, report them and stop.
 3. If `route` is not `ready`, show the user the commands of that route from
    [Install routes](#install-routes) with the placeholders filled in, run
    them after the user approves, and rerun `check_env.py`. Repeat until
-   `route` is `ready`.
+   `route` is `ready`. For a Stage-2 or Boozer problem, `templates` must also
+   show that template ready: it needs simsopt in `<python>`
+   ([Install routes](#install-routes) says how when it is missing).
 4. Run `<python> $SKILL_DIR/scripts/smoke_toy.py`. Step 1 is done when it
    exits 0 (`"passed": true`).
 
@@ -200,118 +202,63 @@ Then give the user the full-run command,
 ## Install routes
 
 `check_env.py` picks the route; this page has the commands for each. In them,
-`<checkout>` is the simsopt source checkout (`checkout.path` in the report),
-`<python>` the interpreter the optimization runs with, `<fork-url>` the
+`<python>` is the interpreter the optimization runs with, `<fork-url>` the
 repository that publishes the `alm-library` branch
-(`https://github.com/jungdaesuh/simsopt.git`, `check_env.py`'s default) and
-`<fork-remote>` its remote name in the checkout, and `<scratch>` an empty
-directory outside the checkout for a temporary clone (the copy route; delete
-it afterwards).
+(`https://github.com/jungdaesuh/simsopt.git`, `check_env.py`'s default), and
+`<clone>` the directory of an `alm-library` clone (`checkout.path` in the
+report).
 
-What gets installed: the self-contained package `src/simsopt/solve/alm/`
-(numpy, scipy and the standard library only) and, for the coil rows, the
-module `src/simsopt/geo/signed_constraints.py` (also needs simsopt's
-`Derivative`). The branch also adds the four examples in
-`examples/2_Intermediate/` (`stage_two_optimization_alm.py`,
-`boozerQA_alm.py`, `alm_composition_example.py`,
-`alm_typed_evaluator_example.py`), the tests in `tests/solve/test_alm*.py`,
-and the docs page `docs/source/simsopt.solve.alm.rst`. The package needs
-Python >= 3.8, the floor of upstream simsopt. The `alm-library` branch is
-based on upstream commit `9e027eac3`.
+What gets installed: the pip package `simsopt-alm` (import name
+`simsopt_alm`), which lives in `packages/simsopt-alm/` of the `alm-library`
+branch. It is pure Python and needs Python >= 3.8, numpy and scipy. It
+installs beside the simsopt the user already has (a fork, an editable
+checkout or a PyPI release) and changes nothing in it. The solver
+(`simsopt_alm` and its modules) imports only numpy, scipy and the standard
+library; `simsopt_alm.signed_constraints` (the coil rows) also imports
+simsopt's `Derivative`, so it needs a simsopt in the same interpreter. The
+package directory also holds the four examples in `examples/`
+(`stage_two_optimization_alm.py`, `boozerQA_alm.py`,
+`alm_composition_example.py`, `alm_typed_evaluator_example.py`) and the tests
+in `tests/`.
 
-`ready` means both modules import. The generic template needs only the
-package; the Stage-2 and Boozer templates also import the signed
-constraints. `templates` in the report says which templates can run now;
-when the package imports but the signed constraints do not, the route
-below adds them.
+`ready` means `simsopt_alm` imports. The generic template needs only the
+solver; the Stage-2 and Boozer templates also import the signed constraints,
+so they also need simsopt. `templates` in the report says which templates can
+run now. Without a simsopt, install the user's own first; for PyPI's, add
+the `simsopt` extra: `"simsopt-alm[simsopt] @ git+<fork-url>@alm-library#subdirectory=packages/simsopt-alm"`.
+
+In a uv environment without pip, use `uv pip install --python <python> ...`
+instead of `<python> -m pip install ...` in the commands below.
 
 ### install
 
-simsopt does not import in `<python>`, and `<checkout>` is a simsopt source
-checkout. Install it editable, then rerun `check_env.py`: it reports `ready`
-when the checkout has the ALM sources, else the route that adds them (an
-editable install picks up the merged Python files without reinstalling).
+The default: install the package from the fork, with no local clone.
 
 ```sh
-<python> -m pip install -e <checkout>
+<python> -m pip install "git+<fork-url>@alm-library#subdirectory=packages/simsopt-alm"
 ```
 
-This builds the C++ extension `simsoptpp` (minutes). In a uv environment
-without pip use `uv pip install --python <python> -e <checkout>` instead.
-Without a checkout, clone one first
-(`git clone https://github.com/hiddenSymmetries/simsopt <checkout>`) and rerun
-`check_env.py` with `--checkout <checkout>`.
+This builds no C++ and takes seconds. To update to a newer `alm-library`
+later, rerun it with `--force-reinstall --no-deps`.
+
+### editable
+
+`--checkout <clone>` was given: the user wants the solver's sources in a
+clone they can read and change. Skip the `git clone` line when `<clone>`
+already is one (`checkout.is_alm_clone` in the report).
+
+```sh
+git clone -b alm-library <fork-url> <clone>
+<python> -m pip install -e <clone>/packages/simsopt-alm
+```
+
+Changes to the clone's Python files then take effect without reinstalling;
+`git -C <clone> pull` updates it. When the report's notes say the interpreter
+imports `simsopt_alm` from somewhere else, this install replaces that one.
 
 ### ready
 
 Nothing to install. Run `smoke_toy.py`.
-
-### reinstall
-
-The checkout has the ALM sources but the interpreter does not import them:
-either the interpreter's simsopt is another copy (the report's notes say
-where it is imported from), or the install predates the sources.
-
-```sh
-<python> -m pip install -e <checkout>    # editable: new Python files are then picked up without reinstalling
-<python> -m pip install <checkout>       # or non-editable: repeat after every source change
-```
-
-Both rebuild the C++ extension `simsoptpp` (minutes). In a uv environment
-without pip use `uv pip install --python <python> ...` instead.
-
-### upstream
-
-A remote pointing at `github.com/hiddenSymmetries/simsopt` already has the
-ALM package on its `master` (`upstream_remotes_with_alm` in the report).
-
-```sh
-git -C <checkout> merge --no-edit <upstream-remote>/master
-```
-
-Then, for a non-editable install, reinstall (see `reinstall`).
-
-### merge-fork
-
-A git checkout without the package. Needs a clean tree (commit or stash
-first; `blockers` says so). When `contains_alm_upstream_base` is false the
-merge also brings in the upstream commits up to `9e027eac3`; use `copy` if
-that is unwanted.
-
-```sh
-git -C <checkout> remote add alm-fork <fork-url>    # skip when fork_remote is already set
-git -C <checkout> fetch alm-fork alm-library
-git -C <checkout> switch -c alm-setup                # optional: merge on a new branch
-git -C <checkout> merge --no-edit alm-fork/alm-library
-```
-
-The branch adds files and touches three existing ones
-(`src/simsopt/geo/__init__.py` exports the signed constraints;
-`docs/source/simsopt.geo.rst` and `docs/source/simsopt.solve.rst` list the new
-modules), so conflicts are rare and limited to those. Then, for a
-non-editable install, reinstall.
-
-### copy
-
-No git checkout (a pip or conda install), or the user prefers not to merge.
-Copy the package into the directory the interpreter imports simsopt from,
-`<package>` below: the parent directory of
-`report["simsopt"]["info"]["file"]` in the `CHECK_ENV` report.
-
-```sh
-git clone --depth 1 --branch alm-library <fork-url> <scratch>/simsopt-alm
-cp -r <scratch>/simsopt-alm/src/simsopt/solve/alm <package>/solve/alm
-cp <scratch>/simsopt-alm/src/simsopt/geo/signed_constraints.py <package>/geo/signed_constraints.py
-```
-
-Skip the `cp -r` line when `alm.importable` is already true (only the signed
-constraints are missing): copying onto an existing `<package>/solve/alm`
-nests the package inside it.
-
-The templates import `simsopt.geo.signed_constraints` by module path, so
-`<package>/geo/__init__.py` needs no edit. Files copied into site-packages
-are lost when simsopt is reinstalled or upgraded; copy them into a source
-checkout instead when there is one.
 
 ### After any route
 
@@ -321,39 +268,39 @@ the same interpreter until it prints `"passed": true`.
 ## API
 
 The names the skill uses, where they live, and the contracts the generated
-files follow. Full docstrings: `python -c "import simsopt.solve.alm as a; help(a)"`
-and `docs/source/simsopt.solve.alm.rst`.
+files follow. Full docstrings: `python -c "import simsopt_alm as a; help(a)"`
+and the help of each module named below.
 
 ### Names
 
 | Name | Module | Use |
 |---|---|---|
-| `minimize_alm` | `simsopt.solve.alm` | The solver: `minimize_alm(x0, constraint_names, evaluate_problem, settings, inner_options, **optional)` returns an `ALMResult`. |
-| `ALMSettings` | `simsopt.solve.alm` | Frozen, validated solver settings ([Settings](#settings)). |
-| `ALMResult` | `simsopt.solve.alm` | Frozen result; fields below. |
-| `ALMPhysics` | `simsopt.solve.alm` | f, grad f, g, grad g (and x-only `extras`) at one x; `.evaluation(multipliers, penalty)` builds the evaluator dict. |
-| `cached_alm_evaluator` | `simsopt.solve.alm` | Wraps `physics(x) -> ALMPhysics` into an evaluator that reuses the physics at a revisited x. Stateless physics only. |
-| `CachedALMEvaluator` | `simsopt.solve.alm` | The type `cached_alm_evaluator` returns (has `cache_clear()`). |
-| `alm_problem_physics` | `simsopt.solve.alm` | `alm_problem_physics(dofs, base_objective, inequalities) -> ALMPhysics` for a simsopt Optimizable and a list of rows. |
-| `evaluate_alm_problem` | `simsopt.solve.alm` | The uncached evaluator form of `alm_problem_physics`. |
-| `signed_upper_bound` | `simsopt.solve.alm` | Row `objective.J() - bound` (with its gradient over the base objective's free dofs). |
-| `signed_lower_bound` | `simsopt.solve.alm` | Row `bound - objective.J()`. |
-| `augmented_inequality_objective` | `simsopt.solve.alm` | Builds the evaluator dict from f, grad f, g, grad g, multipliers, penalty (what `ALMPhysics.evaluation` calls). |
-| `run_directional_taylor_test` | `simsopt.solve.alm` | Central differences of an evaluator's `total` along a direction, with the claimed directional derivative (`gradient_check.py` sweeps its steps per quantity). |
-| `ALMEvaluation` | `simsopt.solve.alm` | TypedDict of the evaluator dict (required and optional keys). |
-| `ALMEvaluator` | `simsopt.solve.alm` | Protocol `(x, multipliers, penalty) -> ALMEvaluation`. |
-| `ALMOuterStepEvent` | `simsopt.solve.alm` | What `on_outer_step` receives once per continuation step. |
-| `ALMOuterBoundary` | `simsopt.solve.alm` | What `on_outer_boundary` receives after each outer iteration; `resume_from` takes a non-final one. |
-| `ALMHistoryRecorder` | `simsopt.solve.alm.history` | Opt-in history: pass `recorder.record` as `on_outer_step`, read `recorder.history()`. |
-| `alm_checkpointing` | `simsopt.solve.alm.checkpoint` | `alm_checkpointing(inner_options, resume_state, completed_outer_callback)` returns the `inner_options`, `resume_from` and `on_outer_boundary` arguments of one checkpointed run. |
-| `ALMCheckpointing` | `simsopt.solve.alm.checkpoint` | The frozen triple `alm_checkpointing` returns. |
-| `ALMTransitionSnapshot` | `simsopt.solve.alm.checkpoint` | Immutable checkpoint (no Jacobians): `x`, `total_inner_iterations`, `completed_outer_iterations`, `resume_eligible`, `accepted_state`, ... |
-| `DefaultContinuationPolicy` | `simsopt.solve.alm.policy` | The default `continuation_policy`; its vetoes give the success guarantees. |
-| `ALMContinuationPolicy` | `simsopt.solve.alm.policy` | Protocol of a custom policy (advanced; keep the default's convergence vetoes). |
-| `ALMProcessBudgetExhausted` | `simsopt.solve.alm.control` | Raise it from `accepted_callback` to stop with `process_budget_exhausted` (your own budget, e.g. wall clock). |
-| `smooth_min_curve_curve_signed_constraint` | `simsopt.geo.signed_constraints` | Row `minimum_distance - min dist(curve_i, curve_j)`, smooth; returns `(signed, grad, hard_signed)`. |
-| `smooth_min_curve_surface_signed_constraint` | `simsopt.geo.signed_constraints` | Row `minimum_distance - min dist(curve_i, surface)`, smooth. |
-| `smooth_max_curvature_signed_constraint` | `simsopt.geo.signed_constraints` | Row `max(kappa) - threshold` for one curve, smooth. |
+| `minimize_alm` | `simsopt_alm` | The solver: `minimize_alm(x0, constraint_names, evaluate_problem, settings, inner_options, **optional)` returns an `ALMResult`. |
+| `ALMSettings` | `simsopt_alm` | Frozen, validated solver settings ([Settings](#settings)). |
+| `ALMResult` | `simsopt_alm` | Frozen result; fields below. |
+| `ALMPhysics` | `simsopt_alm` | f, grad f, g, grad g (and x-only `extras`) at one x; `.evaluation(multipliers, penalty)` builds the evaluator dict. |
+| `cached_alm_evaluator` | `simsopt_alm` | Wraps `physics(x) -> ALMPhysics` into an evaluator that reuses the physics at a revisited x. Stateless physics only. |
+| `CachedALMEvaluator` | `simsopt_alm` | The type `cached_alm_evaluator` returns (has `cache_clear()`). |
+| `alm_problem_physics` | `simsopt_alm` | `alm_problem_physics(dofs, base_objective, inequalities) -> ALMPhysics` for a simsopt Optimizable and a list of rows. |
+| `evaluate_alm_problem` | `simsopt_alm` | The uncached evaluator form of `alm_problem_physics`. |
+| `signed_upper_bound` | `simsopt_alm` | Row `objective.J() - bound` (with its gradient over the base objective's free dofs). |
+| `signed_lower_bound` | `simsopt_alm` | Row `bound - objective.J()`. |
+| `augmented_inequality_objective` | `simsopt_alm` | Builds the evaluator dict from f, grad f, g, grad g, multipliers, penalty (what `ALMPhysics.evaluation` calls). |
+| `run_directional_taylor_test` | `simsopt_alm` | Central differences of an evaluator's `total` along a direction, with the claimed directional derivative (`gradient_check.py` sweeps its steps per quantity). |
+| `ALMEvaluation` | `simsopt_alm` | TypedDict of the evaluator dict (required and optional keys). |
+| `ALMEvaluator` | `simsopt_alm` | Protocol `(x, multipliers, penalty) -> ALMEvaluation`. |
+| `ALMOuterStepEvent` | `simsopt_alm` | What `on_outer_step` receives once per continuation step. |
+| `ALMOuterBoundary` | `simsopt_alm` | What `on_outer_boundary` receives after each outer iteration; `resume_from` takes a non-final one. |
+| `ALMHistoryRecorder` | `simsopt_alm.history` | Opt-in history: pass `recorder.record` as `on_outer_step`, read `recorder.history()`. |
+| `alm_checkpointing` | `simsopt_alm.checkpoint` | `alm_checkpointing(inner_options, resume_state, completed_outer_callback)` returns the `inner_options`, `resume_from` and `on_outer_boundary` arguments of one checkpointed run. |
+| `ALMCheckpointing` | `simsopt_alm.checkpoint` | The frozen triple `alm_checkpointing` returns. |
+| `ALMTransitionSnapshot` | `simsopt_alm.checkpoint` | Immutable checkpoint (no Jacobians): `x`, `total_inner_iterations`, `completed_outer_iterations`, `resume_eligible`, `accepted_state`, ... |
+| `DefaultContinuationPolicy` | `simsopt_alm.policy` | The default `continuation_policy`; its vetoes give the success guarantees. |
+| `ALMContinuationPolicy` | `simsopt_alm.policy` | Protocol of a custom policy (advanced; keep the default's convergence vetoes). |
+| `ALMProcessBudgetExhausted` | `simsopt_alm.control` | Raise it from `accepted_callback` to stop with `process_budget_exhausted` (your own budget, e.g. wall clock). |
+| `smooth_min_curve_curve_signed_constraint` | `simsopt_alm.signed_constraints` | Row `minimum_distance - min dist(curve_i, curve_j)`, smooth; returns `(signed, grad, hard_signed)`. |
+| `smooth_min_curve_surface_signed_constraint` | `simsopt_alm.signed_constraints` | Row `minimum_distance - min dist(curve_i, surface)`, smooth. |
+| `smooth_max_curvature_signed_constraint` | `simsopt_alm.signed_constraints` | Row `max(kappa) - threshold` for one curve, smooth. |
 
 ### Rows
 
@@ -368,7 +315,7 @@ ignored by `alm_problem_physics`. Rows:
 
 - `functools.partial(signed_upper_bound, objective, bound)`: `objective <= bound`.
 - `functools.partial(signed_lower_bound, objective, bound)`: `objective >= bound`.
-- A `simsopt.geo.signed_constraints` kernel with its leading arguments bound,
+- A `simsopt_alm.signed_constraints` kernel with its leading arguments bound,
   e.g. `partial(smooth_min_curve_curve_signed_constraint, curves, 0.1, 0.005)`
   (curves, minimum distance in m, smoothing temperature in m). The smooth
   value is never looser than the exact one (third item), so smooth-feasible
@@ -435,7 +382,7 @@ channels never disagree, so a hybrid run can converge with rows active. As `ALMP
 
 ```python
 import numpy as np
-from simsopt.solve.alm import ALMPhysics
+from simsopt_alm import ALMPhysics
 
 
 def hybrid_physics(base_value, base_grad, surrogate, hard, constraint_grads):
@@ -755,8 +702,9 @@ tune them from the termination reason, not in advance.
 
 `ALMResult.termination_reason` says why `minimize_alm` returned. This table
 lists every reason the package can return (the drift test in
-`tests/solve/test_alm_setup_skill.py` checks the list against the source in
-both directions). `success` is `yes` only for the two converged reasons.
+`packages/simsopt-alm/tests/test_alm_setup_skill.py` checks the list against
+the source in both directions). `success` is `yes` only for the two
+converged reasons.
 
 Read these together with `result.restored_best_feasible`: on any failure the
 solver returns the best hard-feasible iterate it saw instead of the last one
@@ -1012,10 +960,10 @@ Stage-2 coil optimization with the ALM solver: coils for a fixed target
 surface, with coil-regularity requirements as constraints instead of weights.
 
 Copy this file to ``alm_problem.py`` next to ``run_alm.py`` and edit the parts
-marked ``SETUP``. As shipped it is the problem of simsopt's
-``examples/2_Intermediate/stage_two_optimization_alm.py`` (the QA target of
-arXiv:2108.03711, four base coils), with f divided by its initial value and
-every row divided by its threshold, so that all of them are O(1):
+marked ``SETUP``. As shipped it is the problem of the simsopt-alm package's
+``examples/stage_two_optimization_alm.py`` (the QA target of arXiv:2108.03711,
+four base coils), with f divided by its initial value and every row divided by
+its threshold, so that all of them are O(1):
 
     minimize    f(x) / f(x0),  f = (1/2) \int |B.n|^2 ds + LENGTH_WEIGHT * sum_i CurveLength_i
     subject to  (CC_MIN_DISTANCE - min coil-coil distance) / CC_MIN_DISTANCE    <= 0
@@ -1030,7 +978,7 @@ sum over the NCOILS base coils, or the sum over all 2 * nfp * NCOILS physical
 coils after the stellarator symmetry (2 * nfp times the base-coil sum).
 
 The distance and maximum-curvature rows are the smooth signed constraints of
-``simsopt.geo.signed_constraints``: log-sum-exp values never looser than the
+``simsopt_alm.signed_constraints``: log-sum-exp values never looser than the
 exact extremum, so a point feasible for the smooth row is feasible for the
 exact one. The physics depends on the coil dofs alone, so the solver gets
 ``cached_alm_evaluator(physics)``. With ``HYBRID_QUARTET = True`` the evaluator
@@ -1044,9 +992,9 @@ Boozer single-stage optimization with the ALM solver: coils optimized for
 quasi-symmetry on a Boozer surface that is re-solved at every evaluation.
 
 Copy this file to ``alm_problem.py`` next to ``run_alm.py`` and edit the parts
-marked ``SETUP``. As shipped it is the problem of simsopt's
-``examples/2_Intermediate/boozerQA_alm.py`` (NCSX coils), with f divided by
-its initial value and every row divided by the size of its bound:
+marked ``SETUP``. As shipped it is the problem of the simsopt-alm package's
+``examples/boozerQA_alm.py`` (NCSX coils), with f divided by its initial value
+and every row divided by the size of its bound:
 
     minimize    J(x) / J(x0),  J = (\int_S B_nonQA^2 dS) / (\int_S B_QA dS)
     subject to  iota within IOTA_TARGET +- IOTA_HALF_WIDTH                  (two rows)
@@ -1098,48 +1046,48 @@ An existing script calls ``run(build_problem())`` instead (the skill's
 
 ### [scripts/check_env.py](../.claude/skills/simsopt-alm-setup/scripts/check_env.py)
 
-Report whether a Python environment can run simsopt's ALM solver
-(``simsopt.solve.alm``) and which install route applies.
+Report whether a Python environment can run the ALM solver package
+``simsopt_alm`` (the ``simsopt-alm`` distribution) and which install route
+applies.
 
     python check_env.py [--python INTERPRETER] [--checkout DIR] [--fork-url URL]
 
 It runs on Python 3.7 or newer and inspects the interpreter the optimization
 runs with (default: the one running this script; any Python that runs
-``python -c``) in child processes, so it never imports simsopt itself: the
-Python version against the ALM floor, whether
-``simsopt``, ``simsopt.solve.alm`` and ``simsopt.geo.signed_constraints``
-import and from which file, how simsopt is installed (editable or not, from
-its PEP 610 metadata), and, for the simsopt source checkout (``--checkout``,
-else the editable install's directory, else the ``src`` layout around the
-imported package), its git state and HEAD commit. It reads local git refs
-only and changes nothing.
+``python -c``) in child processes, so it never imports the package itself:
+the Python version against the package's floor, whether ``simsopt_alm`` and
+``simsopt_alm.signed_constraints`` import and from which file, how the
+``simsopt-alm`` distribution is installed (editable or not, from its PEP 610
+metadata), and which ``simsopt`` the interpreter imports. The package
+installs beside any simsopt (a fork, an editable checkout, a PyPI release)
+and changes nothing in it. It reads local git refs only and changes nothing.
 
-The ALM sources are the solver package and the signed-constraint module.
+``--checkout DIR`` asks for an editable install from a clone of the
+``alm-library`` branch at ``DIR`` (cloned there first when ``DIR`` does not
+exist), for users who want to read or change the solver's sources; without
+it the plain install from ``--fork-url`` applies.
+
 ``templates`` in the report says which problem templates can run: the
 generic one needs the solver, the Stage-2 and Boozer ones also the signed
-constraints (``TEMPLATE_MODULES``).
+constraints, which import simsopt (``TEMPLATE_MODULES``).
 
-``route`` is the first that applies: ``blocked`` (Python below the floor; no
-importable simsopt and no simsopt source checkout to install; a simsopt
-without the ``simsopt.solve`` package; or an ALM module that exists but fails
-to import: the report quotes the error), ``install`` (no importable simsopt:
-install the source checkout, then rerun), ``ready`` (both ALM modules import,
-so every template can run), ``reinstall`` (the checkout has the ALM sources
-but the interpreter finds no such modules), ``upstream`` (a hiddenSymmetries
-remote's master has them), ``merge-fork`` (a git checkout: merge the
-``alm-library`` branch), ``copy`` (no git checkout). ``blockers`` lists what
-must be fixed before the route can run (for ``upstream`` and ``merge-fork``
-also uncommitted changes).
+``route`` is the first that applies: ``blocked`` (Python below the floor; an
+ALM module that exists but fails to import: the report quotes the error; or
+``--checkout`` names an existing directory that is not an ``alm-library``
+clone), ``ready`` (``simsopt_alm`` imports, and with ``--checkout`` from that
+clone), ``editable`` (``--checkout`` given: clone if needed, then install the
+clone's package editable), ``install`` (install the package from
+``--fork-url``). ``blockers`` lists what must be fixed first. When simsopt
+does not import, ``ready`` covers the generic template only, and a note says
+so.
 
 It prints the route, the blockers and notes, the file each module imports
-from (the simsopt version shown is the one recorded when simsopt was
-installed; an editable install keeps it after a merge), the checkout's HEAD,
-and, last, ``CHECK_ENV {json}``. The exit status is 0 when the route is
-``ready``.
+from, the clone's HEAD (with ``--checkout``), and, last,
+``CHECK_ENV {json}``. The exit status is 0 when the route is ``ready``.
 
 ### [scripts/smoke_toy.py](../.claude/skills/simsopt-alm-setup/scripts/smoke_toy.py)
 
-Solve two toy problems with ``simsopt.solve.alm`` and check the answers:
+Solve two toy problems with ``simsopt_alm`` and check the answers:
 the install check that follows ``check_env.py``.
 
     python smoke_toy.py
@@ -1152,8 +1100,9 @@ the install check that follows ``check_env.py``.
 
 Each must end ``converged`` within ``feasibility_tol`` of feasibility, within
 1e-4 of the solution and, for problem 2, with multipliers within 1e-3 of
-(1, 0). The last line printed is ``SMOKE_TOY {json}`` (which Python and which
-simsopt ran, and each problem's outcome); the exit status is 0 when both pass.
+(1, 0). The last line printed is ``SMOKE_TOY {json}`` (which Python ran, the
+file ``simsopt_alm`` imports from, and each problem's outcome); the exit
+status is 0 when both pass. It needs only the package, not simsopt.
 
 ### [scripts/gradient_check.py](../.claude/skills/simsopt-alm-setup/scripts/gradient_check.py)
 

@@ -30,9 +30,9 @@ from typing import Optional
 import numpy as np
 
 from alm_problem import build_problem
-from simsopt.solve.alm import minimize_alm
-from simsopt.solve.alm.checkpoint import ALMTransitionSnapshot, alm_checkpointing
-from simsopt.solve.alm.history import ALMHistoryRecorder
+from simsopt_alm import minimize_alm
+from simsopt_alm.checkpoint import ALMTransitionSnapshot, alm_checkpointing
+from simsopt_alm.history import ALMHistoryRecorder
 
 RESULT_PREFIX = "ALM_RESULT "
 

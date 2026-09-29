@@ -148,14 +148,6 @@ simsopt.geo.qfmsurface module
    :undoc-members:
    :show-inheritance:
 
-simsopt.geo.signed\_constraints module
---------------------------------------
-
-.. automodule:: simsopt.geo.signed_constraints
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
 simsopt.geo.strain\_optimization module
 ---------------------------------------
 

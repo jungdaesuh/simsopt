@@ -24,7 +24,7 @@ from typing import NamedTuple, Tuple
 
 import numpy as np
 
-from simsopt.solve.alm import ALMPhysics, ALMResult, ALMSettings, cached_alm_evaluator
+from simsopt_alm import ALMPhysics, ALMResult, ALMSettings, cached_alm_evaluator
 
 
 class SignProbe(NamedTuple):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Solve two toy problems with ``simsopt.solve.alm`` and check the answers:
+"""Solve two toy problems with ``simsopt_alm`` and check the answers:
 the install check that follows ``check_env.py``.
 
     python smoke_toy.py
@@ -12,8 +12,9 @@ the install check that follows ``check_env.py``.
 
 Each must end ``converged`` within ``feasibility_tol`` of feasibility, within
 1e-4 of the solution and, for problem 2, with multipliers within 1e-3 of
-(1, 0). The last line printed is ``SMOKE_TOY {json}`` (which Python and which
-simsopt ran, and each problem's outcome); the exit status is 0 when both pass.
+(1, 0). The last line printed is ``SMOKE_TOY {json}`` (which Python ran, the
+file ``simsopt_alm`` imports from, and each problem's outcome); the exit
+status is 0 when both pass. It needs only the package, not simsopt.
 """
 
 from __future__ import annotations
@@ -24,9 +25,8 @@ import sys
 
 import numpy as np
 
-import simsopt
-import simsopt.solve.alm as alm
-from simsopt.solve.alm import ALMPhysics, ALMSettings, cached_alm_evaluator, minimize_alm
+import simsopt_alm as alm
+from simsopt_alm import ALMPhysics, ALMSettings, cached_alm_evaluator, minimize_alm
 
 RESULT_PREFIX = "SMOKE_TOY "
 X_TOLERANCE = 1e-4
@@ -91,7 +91,6 @@ def main() -> int:
     print(RESULT_PREFIX + json.dumps({
         "passed": passed,
         "python": sys.version.split()[0],
-        "simsopt_file": os.path.realpath(simsopt.__file__),
         "alm_file": os.path.realpath(alm.__file__),
         "problems": outcomes,
     }))

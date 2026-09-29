@@ -2,8 +2,9 @@
 
 `ALMResult.termination_reason` says why `minimize_alm` returned. This table
 lists every reason the package can return (the drift test in
-`tests/solve/test_alm_setup_skill.py` checks the list against the source in
-both directions). `success` is `yes` only for the two converged reasons.
+`packages/simsopt-alm/tests/test_alm_setup_skill.py` checks the list against
+the source in both directions). `success` is `yes` only for the two
+converged reasons.
 
 Read these together with `result.restored_best_feasible`: on any failure the
 solver returns the best hard-feasible iterate it saw instead of the last one

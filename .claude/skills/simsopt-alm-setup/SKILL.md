@@ -1,17 +1,18 @@
 ---
 name: simsopt-alm-setup
-description: "Install simsopt's augmented-Lagrangian solver (simsopt.solve.alm) into a user's simsopt checkout and set up a constrained optimization min f(x) s.t. g_i(x) <= 0 for their case: Stage-2 coils, Boozer single-stage, or a custom problem. Detects the Python and simsopt install and picks an install route (merge the alm-library branch, copy the package, or upstream), interviews the user (objective, constraints, stateful evaluator, hybrid signals), generates a problem module and a runner from tested templates, verifies gradients, constraint signs and scales plus a smoke run, and explains termination reasons. Use when the user says 'set up ALM', 'install the ALM solver', 'constrained coil optimization in simsopt', 'replace penalty weights with constraints', 'minimize_alm', or asks what an ALM termination_reason means or how to tune ALMSettings."
+description: "Install the augmented-Lagrangian solver package simsopt-alm (import simsopt_alm) beside a user's own simsopt and set up a constrained optimization min f(x) s.t. g_i(x) <= 0 for their case: Stage-2 coils, Boozer single-stage, or a custom problem. Detects the Python, the simsopt and the package install and picks an install route (pip install from the fork, or an editable clone), interviews the user (objective, constraints, stateful evaluator, hybrid signals), generates a problem module and a runner from tested templates, verifies gradients, constraint signs and scales plus a smoke run, and explains termination reasons. Use when the user says 'set up ALM', 'install the ALM solver', 'constrained coil optimization in simsopt', 'replace penalty weights with constraints', 'minimize_alm', or asks what an ALM termination_reason means or how to tune ALMSettings."
 ---
 
 # Set up simsopt's ALM solver
 
-This skill installs the augmented-Lagrangian solver `simsopt.solve.alm` into a
-simsopt installation and sets up one constrained optimization,
+This skill installs the augmented-Lagrangian solver package `simsopt-alm`
+(import name `simsopt_alm`) beside the user's own simsopt, which it leaves
+unchanged, and sets up one constrained optimization,
 `min f(x) s.t. g_i(x) <= 0`, as two new files built from tested templates,
 checked before the real run.
 
-`$SKILL_DIR` is the skill's directory (`.claude/skills/simsopt-alm-setup` in
-the simsopt repository). `<python>` is the interpreter the user's
+`$SKILL_DIR` is the skill's directory (`.claude/skills/simsopt-alm-setup` of
+the `alm-library` branch). `<python>` is the interpreter the user's
 optimization runs with (ask when unclear). `<dir>` is the directory the
 generated files go into.
 
@@ -21,8 +22,8 @@ generated files go into.
   empty. An existing file (for example the user's current optimization
   script) changes only through a unified diff shown to the user and applied
   after the user approves it.
-- simsopt's own sources change only through the install route of step 1,
-  after the user approves its commands. Nothing is pushed.
+- Packages are installed only by the route of step 1, after the user
+  approves its commands; simsopt itself is never changed. Nothing is pushed.
 - Stop and report instead of working around when: `check_env.py` lists
   `blockers`; `smoke_toy.py` fails; a check in step 4 fails for a reason
   outside the generated files; the user declines a step.
@@ -32,19 +33,20 @@ generated files go into.
 ## 1. Install
 
 1. Run `<python> $SKILL_DIR/scripts/check_env.py --python <python>`, adding
-   `--checkout <path>` when the user named their simsopt checkout (the
-   `alm-library` branch comes from `https://github.com/jungdaesuh/simsopt.git`;
-   `--fork-url <url>` overrides it). When simsopt is not installed in `<python>` yet, `--checkout` is
-   what makes a route possible: ask for the user's simsopt source checkout
-   (or offer to clone upstream simsopt), and the report offers the `install`
-   route. Read `route`, `blockers` and `notes` from the `CHECK_ENV` line; the
-   lines before it show where each module imports from and the checkout's
-   HEAD commit.
+   `--checkout <path>` when the user wants the solver's sources in an
+   editable clone of the `alm-library` branch at `<path>` (an existing clone,
+   or a new directory to clone into). The branch comes from
+   `https://github.com/jungdaesuh/simsopt.git`; `--fork-url <url>`
+   overrides it. Read `route`, `blockers` and `notes` from the `CHECK_ENV`
+   line; the lines before it show where each module imports from, how the
+   package is installed and the clone's HEAD commit.
 2. If `blockers` is not empty, report them and stop.
 3. If `route` is not `ready`, show the user the commands of that route from
    [install.md](references/install.md) with the placeholders filled in, run
    them after the user approves, and rerun `check_env.py`. Repeat until
-   `route` is `ready`.
+   `route` is `ready`. For a Stage-2 or Boozer problem, `templates` must also
+   show that template ready: it needs simsopt in `<python>`
+   ([install.md](references/install.md) says how when it is missing).
 4. Run `<python> $SKILL_DIR/scripts/smoke_toy.py`. Step 1 is done when it
    exits 0 (`"passed": true`).
 

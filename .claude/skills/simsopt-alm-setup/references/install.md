@@ -1,118 +1,63 @@
 # Install routes
 
 `check_env.py` picks the route; this page has the commands for each. In them,
-`<checkout>` is the simsopt source checkout (`checkout.path` in the report),
-`<python>` the interpreter the optimization runs with, `<fork-url>` the
+`<python>` is the interpreter the optimization runs with, `<fork-url>` the
 repository that publishes the `alm-library` branch
-(`https://github.com/jungdaesuh/simsopt.git`, `check_env.py`'s default) and
-`<fork-remote>` its remote name in the checkout, and `<scratch>` an empty
-directory outside the checkout for a temporary clone (the copy route; delete
-it afterwards).
+(`https://github.com/jungdaesuh/simsopt.git`, `check_env.py`'s default), and
+`<clone>` the directory of an `alm-library` clone (`checkout.path` in the
+report).
 
-What gets installed: the self-contained package `src/simsopt/solve/alm/`
-(numpy, scipy and the standard library only) and, for the coil rows, the
-module `src/simsopt/geo/signed_constraints.py` (also needs simsopt's
-`Derivative`). The branch also adds the four examples in
-`examples/2_Intermediate/` (`stage_two_optimization_alm.py`,
-`boozerQA_alm.py`, `alm_composition_example.py`,
-`alm_typed_evaluator_example.py`), the tests in `tests/solve/test_alm*.py`,
-and the docs page `docs/source/simsopt.solve.alm.rst`. The package needs
-Python >= 3.8, the floor of upstream simsopt. The `alm-library` branch is
-based on upstream commit `9e027eac3`.
+What gets installed: the pip package `simsopt-alm` (import name
+`simsopt_alm`), which lives in `packages/simsopt-alm/` of the `alm-library`
+branch. It is pure Python and needs Python >= 3.8, numpy and scipy. It
+installs beside the simsopt the user already has (a fork, an editable
+checkout or a PyPI release) and changes nothing in it. The solver
+(`simsopt_alm` and its modules) imports only numpy, scipy and the standard
+library; `simsopt_alm.signed_constraints` (the coil rows) also imports
+simsopt's `Derivative`, so it needs a simsopt in the same interpreter. The
+package directory also holds the four examples in `examples/`
+(`stage_two_optimization_alm.py`, `boozerQA_alm.py`,
+`alm_composition_example.py`, `alm_typed_evaluator_example.py`) and the tests
+in `tests/`.
 
-`ready` means both modules import. The generic template needs only the
-package; the Stage-2 and Boozer templates also import the signed
-constraints. `templates` in the report says which templates can run now;
-when the package imports but the signed constraints do not, the route
-below adds them.
+`ready` means `simsopt_alm` imports. The generic template needs only the
+solver; the Stage-2 and Boozer templates also import the signed constraints,
+so they also need simsopt. `templates` in the report says which templates can
+run now. Without a simsopt, install the user's own first; for PyPI's, add
+the `simsopt` extra: `"simsopt-alm[simsopt] @ git+<fork-url>@alm-library#subdirectory=packages/simsopt-alm"`.
+
+In a uv environment without pip, use `uv pip install --python <python> ...`
+instead of `<python> -m pip install ...` in the commands below.
 
 ## install
 
-simsopt does not import in `<python>`, and `<checkout>` is a simsopt source
-checkout. Install it editable, then rerun `check_env.py`: it reports `ready`
-when the checkout has the ALM sources, else the route that adds them (an
-editable install picks up the merged Python files without reinstalling).
+The default: install the package from the fork, with no local clone.
 
 ```sh
-<python> -m pip install -e <checkout>
+<python> -m pip install "git+<fork-url>@alm-library#subdirectory=packages/simsopt-alm"
 ```
 
-This builds the C++ extension `simsoptpp` (minutes). In a uv environment
-without pip use `uv pip install --python <python> -e <checkout>` instead.
-Without a checkout, clone one first
-(`git clone https://github.com/hiddenSymmetries/simsopt <checkout>`) and rerun
-`check_env.py` with `--checkout <checkout>`.
+This builds no C++ and takes seconds. To update to a newer `alm-library`
+later, rerun it with `--force-reinstall --no-deps`.
+
+## editable
+
+`--checkout <clone>` was given: the user wants the solver's sources in a
+clone they can read and change. Skip the `git clone` line when `<clone>`
+already is one (`checkout.is_alm_clone` in the report).
+
+```sh
+git clone -b alm-library <fork-url> <clone>
+<python> -m pip install -e <clone>/packages/simsopt-alm
+```
+
+Changes to the clone's Python files then take effect without reinstalling;
+`git -C <clone> pull` updates it. When the report's notes say the interpreter
+imports `simsopt_alm` from somewhere else, this install replaces that one.
 
 ## ready
 
 Nothing to install. Run `smoke_toy.py`.
-
-## reinstall
-
-The checkout has the ALM sources but the interpreter does not import them:
-either the interpreter's simsopt is another copy (the report's notes say
-where it is imported from), or the install predates the sources.
-
-```sh
-<python> -m pip install -e <checkout>    # editable: new Python files are then picked up without reinstalling
-<python> -m pip install <checkout>       # or non-editable: repeat after every source change
-```
-
-Both rebuild the C++ extension `simsoptpp` (minutes). In a uv environment
-without pip use `uv pip install --python <python> ...` instead.
-
-## upstream
-
-A remote pointing at `github.com/hiddenSymmetries/simsopt` already has the
-ALM package on its `master` (`upstream_remotes_with_alm` in the report).
-
-```sh
-git -C <checkout> merge --no-edit <upstream-remote>/master
-```
-
-Then, for a non-editable install, reinstall (see `reinstall`).
-
-## merge-fork
-
-A git checkout without the package. Needs a clean tree (commit or stash
-first; `blockers` says so). When `contains_alm_upstream_base` is false the
-merge also brings in the upstream commits up to `9e027eac3`; use `copy` if
-that is unwanted.
-
-```sh
-git -C <checkout> remote add alm-fork <fork-url>    # skip when fork_remote is already set
-git -C <checkout> fetch alm-fork alm-library
-git -C <checkout> switch -c alm-setup                # optional: merge on a new branch
-git -C <checkout> merge --no-edit alm-fork/alm-library
-```
-
-The branch adds files and touches three existing ones
-(`src/simsopt/geo/__init__.py` exports the signed constraints;
-`docs/source/simsopt.geo.rst` and `docs/source/simsopt.solve.rst` list the new
-modules), so conflicts are rare and limited to those. Then, for a
-non-editable install, reinstall.
-
-## copy
-
-No git checkout (a pip or conda install), or the user prefers not to merge.
-Copy the package into the directory the interpreter imports simsopt from,
-`<package>` below: the parent directory of
-`report["simsopt"]["info"]["file"]` in the `CHECK_ENV` report.
-
-```sh
-git clone --depth 1 --branch alm-library <fork-url> <scratch>/simsopt-alm
-cp -r <scratch>/simsopt-alm/src/simsopt/solve/alm <package>/solve/alm
-cp <scratch>/simsopt-alm/src/simsopt/geo/signed_constraints.py <package>/geo/signed_constraints.py
-```
-
-Skip the `cp -r` line when `alm.importable` is already true (only the signed
-constraints are missing): copying onto an existing `<package>/solve/alm`
-nests the package inside it.
-
-The templates import `simsopt.geo.signed_constraints` by module path, so
-`<package>/geo/__init__.py` needs no edit. Files copied into site-packages
-are lost when simsopt is reinstalled or upgraded; copy them into a source
-checkout instead when there is one.
 
 ## After any route
 

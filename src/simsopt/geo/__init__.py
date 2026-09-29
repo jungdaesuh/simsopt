@@ -18,7 +18,6 @@ from .periodicfieldline import *
 
 from .boozersurface import *
 from .qfmsurface import *
-from .signed_constraints import *
 from .surface import *
 from .surfacegarabedian import *
 from .surfacehenneberg import *
@@ -40,7 +39,6 @@ __all__ = (curve.__all__ + curvehelical.__all__ +
            finitebuild.__all__ + plotting.__all__ +
            periodicfieldline.__all__ +
            boozersurface.__all__ + qfmsurface.__all__ +
-           signed_constraints.__all__ +
            surface.__all__ +
            surfacegarabedian.__all__ + surfacehenneberg.__all__ +
            surfacerzfourier.__all__ + surfacexyzfourier.__all__ +

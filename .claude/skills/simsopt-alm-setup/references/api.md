@@ -1,39 +1,39 @@
 # API
 
 The names the skill uses, where they live, and the contracts the generated
-files follow. Full docstrings: `python -c "import simsopt.solve.alm as a; help(a)"`
-and `docs/source/simsopt.solve.alm.rst`.
+files follow. Full docstrings: `python -c "import simsopt_alm as a; help(a)"`
+and the help of each module named below.
 
 ## Names
 
 | Name | Module | Use |
 |---|---|---|
-| `minimize_alm` | `simsopt.solve.alm` | The solver: `minimize_alm(x0, constraint_names, evaluate_problem, settings, inner_options, **optional)` returns an `ALMResult`. |
-| `ALMSettings` | `simsopt.solve.alm` | Frozen, validated solver settings ([settings.md](settings.md)). |
-| `ALMResult` | `simsopt.solve.alm` | Frozen result; fields below. |
-| `ALMPhysics` | `simsopt.solve.alm` | f, grad f, g, grad g (and x-only `extras`) at one x; `.evaluation(multipliers, penalty)` builds the evaluator dict. |
-| `cached_alm_evaluator` | `simsopt.solve.alm` | Wraps `physics(x) -> ALMPhysics` into an evaluator that reuses the physics at a revisited x. Stateless physics only. |
-| `CachedALMEvaluator` | `simsopt.solve.alm` | The type `cached_alm_evaluator` returns (has `cache_clear()`). |
-| `alm_problem_physics` | `simsopt.solve.alm` | `alm_problem_physics(dofs, base_objective, inequalities) -> ALMPhysics` for a simsopt Optimizable and a list of rows. |
-| `evaluate_alm_problem` | `simsopt.solve.alm` | The uncached evaluator form of `alm_problem_physics`. |
-| `signed_upper_bound` | `simsopt.solve.alm` | Row `objective.J() - bound` (with its gradient over the base objective's free dofs). |
-| `signed_lower_bound` | `simsopt.solve.alm` | Row `bound - objective.J()`. |
-| `augmented_inequality_objective` | `simsopt.solve.alm` | Builds the evaluator dict from f, grad f, g, grad g, multipliers, penalty (what `ALMPhysics.evaluation` calls). |
-| `run_directional_taylor_test` | `simsopt.solve.alm` | Central differences of an evaluator's `total` along a direction, with the claimed directional derivative (`gradient_check.py` sweeps its steps per quantity). |
-| `ALMEvaluation` | `simsopt.solve.alm` | TypedDict of the evaluator dict (required and optional keys). |
-| `ALMEvaluator` | `simsopt.solve.alm` | Protocol `(x, multipliers, penalty) -> ALMEvaluation`. |
-| `ALMOuterStepEvent` | `simsopt.solve.alm` | What `on_outer_step` receives once per continuation step. |
-| `ALMOuterBoundary` | `simsopt.solve.alm` | What `on_outer_boundary` receives after each outer iteration; `resume_from` takes a non-final one. |
-| `ALMHistoryRecorder` | `simsopt.solve.alm.history` | Opt-in history: pass `recorder.record` as `on_outer_step`, read `recorder.history()`. |
-| `alm_checkpointing` | `simsopt.solve.alm.checkpoint` | `alm_checkpointing(inner_options, resume_state, completed_outer_callback)` returns the `inner_options`, `resume_from` and `on_outer_boundary` arguments of one checkpointed run. |
-| `ALMCheckpointing` | `simsopt.solve.alm.checkpoint` | The frozen triple `alm_checkpointing` returns. |
-| `ALMTransitionSnapshot` | `simsopt.solve.alm.checkpoint` | Immutable checkpoint (no Jacobians): `x`, `total_inner_iterations`, `completed_outer_iterations`, `resume_eligible`, `accepted_state`, ... |
-| `DefaultContinuationPolicy` | `simsopt.solve.alm.policy` | The default `continuation_policy`; its vetoes give the success guarantees. |
-| `ALMContinuationPolicy` | `simsopt.solve.alm.policy` | Protocol of a custom policy (advanced; keep the default's convergence vetoes). |
-| `ALMProcessBudgetExhausted` | `simsopt.solve.alm.control` | Raise it from `accepted_callback` to stop with `process_budget_exhausted` (your own budget, e.g. wall clock). |
-| `smooth_min_curve_curve_signed_constraint` | `simsopt.geo.signed_constraints` | Row `minimum_distance - min dist(curve_i, curve_j)`, smooth; returns `(signed, grad, hard_signed)`. |
-| `smooth_min_curve_surface_signed_constraint` | `simsopt.geo.signed_constraints` | Row `minimum_distance - min dist(curve_i, surface)`, smooth. |
-| `smooth_max_curvature_signed_constraint` | `simsopt.geo.signed_constraints` | Row `max(kappa) - threshold` for one curve, smooth. |
+| `minimize_alm` | `simsopt_alm` | The solver: `minimize_alm(x0, constraint_names, evaluate_problem, settings, inner_options, **optional)` returns an `ALMResult`. |
+| `ALMSettings` | `simsopt_alm` | Frozen, validated solver settings ([settings.md](settings.md)). |
+| `ALMResult` | `simsopt_alm` | Frozen result; fields below. |
+| `ALMPhysics` | `simsopt_alm` | f, grad f, g, grad g (and x-only `extras`) at one x; `.evaluation(multipliers, penalty)` builds the evaluator dict. |
+| `cached_alm_evaluator` | `simsopt_alm` | Wraps `physics(x) -> ALMPhysics` into an evaluator that reuses the physics at a revisited x. Stateless physics only. |
+| `CachedALMEvaluator` | `simsopt_alm` | The type `cached_alm_evaluator` returns (has `cache_clear()`). |
+| `alm_problem_physics` | `simsopt_alm` | `alm_problem_physics(dofs, base_objective, inequalities) -> ALMPhysics` for a simsopt Optimizable and a list of rows. |
+| `evaluate_alm_problem` | `simsopt_alm` | The uncached evaluator form of `alm_problem_physics`. |
+| `signed_upper_bound` | `simsopt_alm` | Row `objective.J() - bound` (with its gradient over the base objective's free dofs). |
+| `signed_lower_bound` | `simsopt_alm` | Row `bound - objective.J()`. |
+| `augmented_inequality_objective` | `simsopt_alm` | Builds the evaluator dict from f, grad f, g, grad g, multipliers, penalty (what `ALMPhysics.evaluation` calls). |
+| `run_directional_taylor_test` | `simsopt_alm` | Central differences of an evaluator's `total` along a direction, with the claimed directional derivative (`gradient_check.py` sweeps its steps per quantity). |
+| `ALMEvaluation` | `simsopt_alm` | TypedDict of the evaluator dict (required and optional keys). |
+| `ALMEvaluator` | `simsopt_alm` | Protocol `(x, multipliers, penalty) -> ALMEvaluation`. |
+| `ALMOuterStepEvent` | `simsopt_alm` | What `on_outer_step` receives once per continuation step. |
+| `ALMOuterBoundary` | `simsopt_alm` | What `on_outer_boundary` receives after each outer iteration; `resume_from` takes a non-final one. |
+| `ALMHistoryRecorder` | `simsopt_alm.history` | Opt-in history: pass `recorder.record` as `on_outer_step`, read `recorder.history()`. |
+| `alm_checkpointing` | `simsopt_alm.checkpoint` | `alm_checkpointing(inner_options, resume_state, completed_outer_callback)` returns the `inner_options`, `resume_from` and `on_outer_boundary` arguments of one checkpointed run. |
+| `ALMCheckpointing` | `simsopt_alm.checkpoint` | The frozen triple `alm_checkpointing` returns. |
+| `ALMTransitionSnapshot` | `simsopt_alm.checkpoint` | Immutable checkpoint (no Jacobians): `x`, `total_inner_iterations`, `completed_outer_iterations`, `resume_eligible`, `accepted_state`, ... |
+| `DefaultContinuationPolicy` | `simsopt_alm.policy` | The default `continuation_policy`; its vetoes give the success guarantees. |
+| `ALMContinuationPolicy` | `simsopt_alm.policy` | Protocol of a custom policy (advanced; keep the default's convergence vetoes). |
+| `ALMProcessBudgetExhausted` | `simsopt_alm.control` | Raise it from `accepted_callback` to stop with `process_budget_exhausted` (your own budget, e.g. wall clock). |
+| `smooth_min_curve_curve_signed_constraint` | `simsopt_alm.signed_constraints` | Row `minimum_distance - min dist(curve_i, curve_j)`, smooth; returns `(signed, grad, hard_signed)`. |
+| `smooth_min_curve_surface_signed_constraint` | `simsopt_alm.signed_constraints` | Row `minimum_distance - min dist(curve_i, surface)`, smooth. |
+| `smooth_max_curvature_signed_constraint` | `simsopt_alm.signed_constraints` | Row `max(kappa) - threshold` for one curve, smooth. |
 
 ## Rows
 
@@ -48,7 +48,7 @@ ignored by `alm_problem_physics`. Rows:
 
 - `functools.partial(signed_upper_bound, objective, bound)`: `objective <= bound`.
 - `functools.partial(signed_lower_bound, objective, bound)`: `objective >= bound`.
-- A `simsopt.geo.signed_constraints` kernel with its leading arguments bound,
+- A `simsopt_alm.signed_constraints` kernel with its leading arguments bound,
   e.g. `partial(smooth_min_curve_curve_signed_constraint, curves, 0.1, 0.005)`
   (curves, minimum distance in m, smoothing temperature in m). The smooth
   value is never looser than the exact one (third item), so smooth-feasible
@@ -115,7 +115,7 @@ channels never disagree, so a hybrid run can converge with rows active. As `ALMP
 
 ```python
 import numpy as np
-from simsopt.solve.alm import ALMPhysics
+from simsopt_alm import ALMPhysics
 
 
 def hybrid_physics(base_value, base_grad, surrogate, hard, constraint_grads):

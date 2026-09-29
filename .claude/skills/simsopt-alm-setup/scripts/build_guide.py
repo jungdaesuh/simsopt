@@ -41,7 +41,7 @@ SCRIPTS = ("check_env", "smoke_toy", "gradient_check", "sign_check", "problem_co
 TITLE = "# Setting up simsopt's ALM solver"
 INTRO = """\
 This guide covers installing the augmented-Lagrangian solver
-`simsopt.solve.alm` and setting up a constrained optimization with it. It is
+`simsopt_alm` and setting up a constrained optimization with it. It is
 generated from the Claude Code skill in
 `.claude/skills/simsopt-alm-setup/` (`SKILL.md` and its `references/`), so it
 matches what the skill does. To follow it by hand, run the scripts and copy

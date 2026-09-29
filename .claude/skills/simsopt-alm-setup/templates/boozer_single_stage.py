@@ -3,9 +3,9 @@ r"""Boozer single-stage optimization with the ALM solver: coils optimized for
 quasi-symmetry on a Boozer surface that is re-solved at every evaluation.
 
 Copy this file to ``alm_problem.py`` next to ``run_alm.py`` and edit the parts
-marked ``SETUP``. As shipped it is the problem of simsopt's
-``examples/2_Intermediate/boozerQA_alm.py`` (NCSX coils), with f divided by
-its initial value and every row divided by the size of its bound:
+marked ``SETUP``. As shipped it is the problem of the simsopt-alm package's
+``examples/boozerQA_alm.py`` (NCSX coils), with f divided by its initial value
+and every row divided by the size of its bound:
 
     minimize    J(x) / J(x0),  J = (\int_S B_nonQA^2 dS) / (\int_S B_QA dS)
     subject to  iota within IOTA_TARGET +- IOTA_HALF_WIDTH                  (two rows)
@@ -48,10 +48,10 @@ from simsopt.configs import get_data
 from simsopt.field import BiotSavart
 from simsopt.geo import (BoozerSurface, CurveLength, Iotas, MajorRadius, MeanSquaredCurvature,
                          NonQuasiSymmetricRatio, SurfaceXYZTensorFourier, Volume)
-from simsopt.geo.signed_constraints import (smooth_max_curvature_signed_constraint,
+from simsopt_alm import (ALMPhysics, ALMResult, ALMSettings, signed_lower_bound,
+                         signed_upper_bound)
+from simsopt_alm.signed_constraints import (smooth_max_curvature_signed_constraint,
                                             smooth_min_curve_curve_signed_constraint)
-from simsopt.solve.alm import (ALMPhysics, ALMResult, ALMSettings, signed_lower_bound,
-                               signed_upper_bound)
 
 # SETUP: the coils (a simsopt.configs name) and the initial surface guess.
 COIL_CONFIG = "ncsx"

@@ -1,0 +1,42 @@
+[build-system]
+# setuptools 61 reads [project]; the requirement leaves the upper end open so
+# Python 3.8 (last setuptools 75.3) and newer interpreters both build.
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "simsopt-alm"
+version = "0.1.0"
+description = "Augmented Lagrangian solver for min f(x) s.t. g_i(x) <= 0, for simsopt Stage-2 and single-stage coil optimization"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [{name = "Jung Dae Suh"}]
+dependencies = ["numpy", "scipy"]
+classifiers = [
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+[project.optional-dependencies]
+# simsopt_alm.signed_constraints, the examples and the setup skill's coil
+# templates need simsopt; the solver itself does not. Leave this extra out to
+# keep the simsopt you already have (a fork, an editable checkout).
+simsopt = ["simsopt"]
+
+[project.urls]
+Source = "https://github.com/jungdaesuh/simsopt/tree/alm-library/packages/simsopt-alm"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# The QA target boundary of arXiv:2108.03711 (simsopt's
+# tests/test_files/input.LandremanPaul2021_QA), which the Stage-2 example and
+# the setup skill's Stage-2 template optimize coils for.
+simsopt_alm = ["data/input.LandremanPaul2021_QA"]

@@ -3,10 +3,10 @@ r"""Stage-2 coil optimization with the ALM solver: coils for a fixed target
 surface, with coil-regularity requirements as constraints instead of weights.
 
 Copy this file to ``alm_problem.py`` next to ``run_alm.py`` and edit the parts
-marked ``SETUP``. As shipped it is the problem of simsopt's
-``examples/2_Intermediate/stage_two_optimization_alm.py`` (the QA target of
-arXiv:2108.03711, four base coils), with f divided by its initial value and
-every row divided by its threshold, so that all of them are O(1):
+marked ``SETUP``. As shipped it is the problem of the simsopt-alm package's
+``examples/stage_two_optimization_alm.py`` (the QA target of arXiv:2108.03711,
+four base coils), with f divided by its initial value and every row divided by
+its threshold, so that all of them are O(1):
 
     minimize    f(x) / f(x0),  f = (1/2) \int |B.n|^2 ds + LENGTH_WEIGHT * sum_i CurveLength_i
     subject to  (CC_MIN_DISTANCE - min coil-coil distance) / CC_MIN_DISTANCE    <= 0
@@ -21,7 +21,7 @@ sum over the NCOILS base coils, or the sum over all 2 * nfp * NCOILS physical
 coils after the stellarator symmetry (2 * nfp times the base-coil sum).
 
 The distance and maximum-curvature rows are the smooth signed constraints of
-``simsopt.geo.signed_constraints``: log-sum-exp values never looser than the
+``simsopt_alm.signed_constraints``: log-sum-exp values never looser than the
 exact extremum, so a point feasible for the smooth row is feasible for the
 exact one. The physics depends on the coil dofs alone, so the solver gets
 ``cached_alm_evaluator(physics)``. With ``HYBRID_QUARTET = True`` the evaluator
@@ -39,21 +39,21 @@ from typing import Callable, NamedTuple, Tuple
 import numpy as np
 from scipy.spatial.distance import cdist
 
-import simsopt
+import simsopt_alm
 from simsopt.field import BiotSavart, Current, coils_via_symmetries
 from simsopt.geo import (CurveLength, MeanSquaredCurvature, SurfaceRZFourier,
                          create_equally_spaced_curves, curves_to_vtk)
-from simsopt.geo.signed_constraints import (smooth_max_curvature_signed_constraint,
+from simsopt.objectives import SquaredFlux
+from simsopt_alm import (ALMPhysics, ALMResult, ALMSettings, alm_problem_physics,
+                         cached_alm_evaluator, signed_upper_bound)
+from simsopt_alm.signed_constraints import (smooth_max_curvature_signed_constraint,
                                             smooth_min_curve_curve_signed_constraint,
                                             smooth_min_curve_surface_signed_constraint)
-from simsopt.objectives import SquaredFlux
-from simsopt.solve.alm import (ALMPhysics, ALMResult, ALMSettings, alm_problem_physics,
-                               cached_alm_evaluator, signed_upper_bound)
 
 # SETUP: the target surface (a VMEC input file). The default is the QA target
-# shipped in a simsopt source checkout's tests/test_files.
-SURFACE_FILE = (Path(simsopt.__file__).resolve().parents[2] / "tests" / "test_files"
-                / "input.LandremanPaul2021_QA")
+# of arXiv:2108.03711 that simsopt-alm ships (simsopt's
+# tests/test_files/input.LandremanPaul2021_QA).
+SURFACE_FILE = Path(simsopt_alm.__file__).parent / "data" / "input.LandremanPaul2021_QA"
 
 # SETUP: the surface sampling, the initial coils and the objective.
 QUADRATURE_POINTS = 32  # surface quadrature points in each direction (nphi = ntheta)

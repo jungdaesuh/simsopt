@@ -90,7 +90,7 @@ import numpy as np
 
 from alm_problem import build_problem
 from problem_contract import checked_constraint_names, checked_constraint_values
-from simsopt.solve.alm import ALMPhysics, run_directional_taylor_test
+from simsopt_alm import ALMPhysics, run_directional_taylor_test
 
 RESULT_PREFIX = "GRADIENT_CHECK "
 OBJECTIVE_LABEL = "f"
