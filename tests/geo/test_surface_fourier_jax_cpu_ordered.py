@@ -23,11 +23,22 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from simsopt_jax.geo.surface_fourier_cpu_ordered import surface_gamma_cpu_ordered
+from simsopt.geo import SurfaceXYZTensorFourier
+from simsopt_jax.geo.surface_fourier import (
+    _dofs_to_xyzc_any,
+    stellsym_scatter_indices,
+)
+from simsopt_jax.geo.surface_fourier_cpu_ordered import (
+    dgamma_by_dcoeff_cpu_ordered,
+    dgammadash1_by_dcoeff_cpu_ordered,
+    dgammadash2_by_dcoeff_cpu_ordered,
+    surface_gamma_cpu_ordered,
+    surface_gammadash1_cpu_ordered,
+    surface_gammadash2_cpu_ordered,
+)
 from simsopt_jax_adapters.geo.boozer_surface import (
     _surface_geometry_and_derivatives_from_dofs,
 )
-
 
 pytestmark = [pytest.mark.parity_census, pytest.mark.boozer]
 
@@ -50,16 +61,7 @@ def cpu_jax_pair():
     """Build a ``SurfaceXYZTensorFourier`` and bind helpers we'll need."""
 
     def _build(*, mpol, ntor, nfp, stellsym, nphi, ntheta, seed=42):
-        import jax
-
         jax.config.update("jax_enable_x64", True)
-        from simsopt.geo import SurfaceXYZTensorFourier
-        from simsopt_jax.geo.surface_fourier import (
-            _dofs_to_xyzc_any,
-            stellsym_scatter_indices,
-        )
-        import jax.numpy as jnp
-
         phis = np.linspace(0, 1.0 / nfp, nphi, endpoint=False)
         thetas = np.linspace(0, 1.0, ntheta, endpoint=False)
         s = SurfaceXYZTensorFourier(
@@ -100,12 +102,6 @@ def cpu_jax_pair():
 def test_surface_gamma_cpu_ordered_matches_cpp_within_ulp(
     cpu_jax_pair, mpol, ntor, nfp, stellsym, nphi, ntheta
 ):
-    import jax
-
-    from simsopt_jax.geo.surface_fourier_cpu_ordered import (
-        surface_gamma_cpu_ordered,
-    )
-
     fx = cpu_jax_pair(
         mpol=mpol, ntor=ntor, nfp=nfp, stellsym=stellsym, nphi=nphi, ntheta=ntheta
     )
@@ -137,13 +133,6 @@ def test_surface_gamma_cpu_ordered_matches_cpp_within_ulp(
 def test_surface_gammadash_cpu_ordered_matches_cpp(
     cpu_jax_pair, mpol, ntor, nfp, stellsym, nphi, ntheta
 ):
-    import jax
-
-    from simsopt_jax.geo.surface_fourier_cpu_ordered import (
-        surface_gammadash1_cpu_ordered,
-        surface_gammadash2_cpu_ordered,
-    )
-
     fx = cpu_jax_pair(
         mpol=mpol, ntor=ntor, nfp=nfp, stellsym=stellsym, nphi=nphi, ntheta=ntheta
     )
@@ -191,14 +180,6 @@ def test_surface_gammadash_cpu_ordered_matches_cpp(
 def test_dgamma_by_dcoeff_cpu_ordered_matches_cpp(
     cpu_jax_pair, mpol, ntor, nfp, stellsym, nphi, ntheta
 ):
-    import jax
-
-    from simsopt_jax.geo.surface_fourier_cpu_ordered import (
-        dgamma_by_dcoeff_cpu_ordered,
-        dgammadash1_by_dcoeff_cpu_ordered,
-        dgammadash2_by_dcoeff_cpu_ordered,
-    )
-
     fx = cpu_jax_pair(
         mpol=mpol, ntor=ntor, nfp=nfp, stellsym=stellsym, nphi=nphi, ntheta=ntheta
     )
