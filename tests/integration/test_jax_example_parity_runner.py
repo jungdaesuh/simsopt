@@ -1051,9 +1051,10 @@ def test_work_budget_contract_is_case_owned_and_scoped() -> None:
     # explicit max_iter cap (wireframe_optimization.cpp:281), but the official
     # native_default and CI runs both stop earlier on "minimum objective
     # reached", so only the reduced bounded cap is ever reached.
+    # Planar coils left this group on 2026-09-29 (parity redesign, C4): at both scales its verdict is a band
+    # from upstream's own one-ulp scatter, which admits the budget exit and excludes a work budget there.
     fixed_budget_scales = {
         "native-stage-two-optimization",
-        "native-stage-two-optimization-planar-coils",
         "native-stage-two-optimization-stochastic",
         "native-strain-optimization",
     }
@@ -1284,13 +1285,15 @@ def test_quality_band_refuses_an_unmeasurable_observable(
 
 def test_quality_band_declaration_is_opt_in_per_case() -> None:
     # Opt-in stays per case: only the official mirrors whose band is derived from
-    # upstream's own end-point scatter (official_quality_bands, rule v2 of
-    # 2026-09-20) declare one.
+    # upstream's own end-point scatter declare one -- the sensitivity records
+    # (official_quality_bands, rule v2 of 2026-09-20) and, since the 2026-09-29
+    # redesign, planar coils from its upstream scatter record (its re-derivation
+    # is in tests/jax/examples/test_official_scatter_contracts.py).
     assert {
         case_id
         for case_id in implemented_case_ids()
         if get_case(case_id).quality_band("native_default") is not None
-    } == set(OFFICIAL_BAND_CASE_IDS)
+    } == set(OFFICIAL_BAND_CASE_IDS) | {"native-stage-two-optimization-planar-coils"}
     # Re-derived here from the tracked upstream record, never by calling the
     # function that built the entry: comparing an entry with a second call of
     # its own factory cannot fail. S is upstream's end values under one-ulp

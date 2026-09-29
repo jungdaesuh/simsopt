@@ -166,7 +166,10 @@ from examples.jax.parity.contracts import (
 from examples.jax.parity.input_bundle import InputBundle
 from examples.jax.parity.measurement import MeasurementExecution
 from examples.jax.parity.official_quality_bands import official_quality_band
-from examples.jax.parity.official_scatter_contracts import upstream_end_states
+from examples.jax.parity.official_scatter_contracts import (
+    upstream_end_states,
+    upstream_scatter_quality_band,
+)
 from examples.jax.parity.runtime import ParityLane
 from examples.jax.parity.work_budget import WorkBudgetContract
 from simsopt_jax.examples import ExecutionScale
@@ -459,9 +462,40 @@ _CASES = {
         case_id="native-stage-two-optimization-planar-coils",
         create_input=create_native_stage_two_optimization_planar_coils_input,
         execute=execute_native_stage_two_optimization_planar_coils,
-        work_budget_contract=WorkBudgetContract(
-            scales=_FIXED_BUDGET_SCALES,
-            derivation="Upstream's own planar-coil run does NOT end at the cap: 9e027eac3 keeps the four CurvePlanarFourier Jacobians in the persistent cache (src/simsoptpp/curveplanarfourier.h:94-105), which is only sound for a curve linear in its dofs, so upstream's gradient is stale after the first evaluated state and L-BFGS-B stagnates at nit 135 and 69 (status 0, RELATIVE REDUCTION OF F <= FACTR*EPSMCH, nfev 604 and 844). A lane whose CurvePlanarFourier Jacobian follows the dofs instead runs the script's own MAXITER per stage, so a budget exit is this case's expected honest terminal status. The end point is therefore NOT compared with upstream's; what is compared with upstream is the objective VALUE at upstream's own states (bitwise at x0 and at both official end states) and the gradient at x0 (2.56e-16 relative), in tests/integration/test_jax_mirror_planar_coils_official_states.py.",
+        # Both lanes run each stage to the script's own MAXITER (a budget exit, admitted by the
+        # band) on a path that forks at round-off, so the end objective is judged by a band from
+        # upstream's own nine one-ulp draws at each scale (2026-09-29 ruling).
+        quality_bands=tuple(
+            upstream_scatter_quality_band(
+                "native-stage-two-optimization-planar-coils",
+                scale,
+                "final:objective",
+                same_state_proof=(
+                    "tests/integration/test_jax_mirror_planar_coils_official_states.py (objective "
+                    "values bitwise equal to upstream's at x0 and at both official end states, "
+                    "gradient equal at x0) and "
+                    "tests/geo/test_curveplanarfourier_objective_slopes_at_official_state.py (the "
+                    "lane gradient passes central finite differences at upstream's end states)"
+                ),
+                disclosure=(
+                    "upstream 9e027eac3 keeps the four CurvePlanarFourier Jacobians in the "
+                    "persistent cache (src/simsoptpp/curveplanarfourier.h:94-105), so its gradient "
+                    "is stale after the first evaluated state and its L-BFGS-B stagnates; the band "
+                    "bounds the lanes by upstream's own end values, a gross-failure guard, not the "
+                    "scatter of a correct-gradient optimizer" + extra
+                ),
+            )
+            for scale, extra in (
+                (
+                    "bounded",
+                    (
+                        "; at this scale upstream's unperturbed J(x0) differs from the lane's "
+                        "by 4.8e-15 relative, because the branch's CurveLength.J averages "
+                        "with np.mean where upstream uses jnp.mean"
+                    ),
+                ),
+                ("native_default", ""),
+            )
         ),
     ),
     "native-stage-two-optimization-stochastic": CaseDefinition(

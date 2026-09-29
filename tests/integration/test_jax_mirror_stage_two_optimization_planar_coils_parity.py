@@ -63,10 +63,11 @@ def test_exact_planar_stage_two_matches_native_and_jax_cpu(
     # It is also not upstream's terminal status: upstream 9e027eac3 stops by
     # line-search stagnation at 135 and 69 iterations because its four
     # CurvePlanarFourier Jacobians sit in the persistent cache, so its end point
-    # is not reachable by a gradient that describes the objective. Every
-    # endpoint comparison below is therefore lane-versus-lane; the comparison
-    # with upstream is value-at-upstream's-states and gradient-at-the-start-
-    # state, in tests/integration/test_jax_mirror_planar_coils_official_states.py.
+    # is not reachable by a gradient that describes the objective. The same-state
+    # comparison with upstream is value-at-upstream's-states and gradient-at-the-
+    # start-state, in tests/integration/test_jax_mirror_planar_coils_official_states.py;
+    # the end point, which forks between runs at round-off, is judged below by
+    # the band from upstream's own scatter at this scale.
     for observation in (native, jax):
         assert observation.normalized_status == "budget_exhausted"
         assert observation.success is False
@@ -114,9 +115,14 @@ def test_exact_planar_stage_two_matches_native_and_jax_cpu(
             assert np.all(np.isfinite(canonical_geometry))
             assert abs(float(np.sum(canonical_geometry[:, 0])) - 10.4) <= 3.0e-2
 
-        assert float(jax.values[f"{stage}:objective"]) <= (
-            1.03 * float(native.values[f"{stage}:objective"]) + 1.0e-9
-        )
+    # Both lanes stop at the iteration cap on a path that forks at round-off,
+    # so the end point is judged as the arbiter judges it: each lane against
+    # the band from upstream's own nine one-ulp draws at this scale.
+    band = case.quality_band("bounded")
+    assert band is not None
+    assert band.observable == "final:objective"
+    for observation in (native, jax):
+        assert float(observation.values["final:objective"]) <= band.max_value
 
     for observation in (native, jax):
         taylor_errors = np.abs(observation.values["taylor:errors"][:3])

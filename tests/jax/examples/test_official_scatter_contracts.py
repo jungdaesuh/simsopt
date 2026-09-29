@@ -10,13 +10,51 @@ import numpy as np
 import pytest
 from examples.jax.manifest_runtime import load_runtime_contract_pair
 from examples.jax.parity.arbiter import upstream_end_state_matches
-from examples.jax.parity.cases import get_case
+from examples.jax.parity.cases import get_case, implemented_case_ids
 from examples.jax.parity.work_budget import WorkBudgetContract
 from examples.jax.parity.cases.native_boozer import END_STATE_OBSERVABLES
 from examples.jax.parity.official_reference import load_upstream_scatter
-from examples.jax.parity.official_scatter_contracts import pre_registered_runs
+from examples.jax.parity.official_scatter_contracts import (
+    PRE_REGISTERED_DRAWS,
+    pre_registered_runs,
+)
 
+PLANAR = "native-stage-two-optimization-planar-coils"
 SCALES = ("bounded", "native_default")
+
+
+def test_only_the_pre_registered_cases_declare_scatter_contracts() -> None:
+    bounded_bands = {
+        case_id
+        for case_id in implemented_case_ids()
+        if get_case(case_id).quality_band("bounded") is not None
+    }
+    end_state_cases = {
+        case_id
+        for case_id in implemented_case_ids()
+        if any(get_case(case_id).end_states(scale) is not None for scale in SCALES)
+    }
+    assert bounded_bands == {PLANAR}
+    assert end_state_cases == {"native-boozer"}
+
+
+@pytest.mark.parametrize("scale", SCALES)
+def test_planar_band_is_rule_v2_over_upstreams_nine_draws(scale: str) -> None:
+    band = get_case(PLANAR).quality_band(scale)
+    assert band is not None
+    samples = [
+        float(load_upstream_scatter(PLANAR, scale).run(k).value("final:objective"))
+        for k in PRE_REGISTERED_DRAWS
+    ]
+    low, high = min(samples), max(samples)
+
+    assert band.scale == scale
+    assert band.observable == "final:objective"
+    assert band.max_value == high * (1.0 + (high - low) / low)
+    assert "same-state proof" in band.derivation
+    assert "stale" in band.derivation
+    # A band admits a stop at the cap, so no work budget may cover a banded scale.
+    assert get_case(PLANAR).work_budget_contract is None
 
 
 @pytest.mark.parametrize("scale", SCALES)
