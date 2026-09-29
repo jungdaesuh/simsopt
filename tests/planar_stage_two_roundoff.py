@@ -9,6 +9,13 @@ ANY implementation that differs only in summation order, product association,
 derivative mode, and the per-element forms counted below may round away from
 the exact value and gradient.  Nothing here is fitted to a measured gap.
 
+Status (PLAN.md amendment 5 part 2, P2): an ENGINEERING ERROR ENVELOPE, not a
+proven bound.  It assumes library accuracies that are not all established for
+the pinned builds: ``sin``/``cos`` within one ulp in both lanes (covered for
+glibc, documented at about 0.55 ulp, and for XLA CPU where it equals glibc) and
+the C++ ``SurfaceRZFourier`` xsimd ``sincos`` within two ulp (not established).
+The JAX side it models is the CPU evaluator; the GPU lane is not covered.
+
 Per-element quantities are injected with derived bounds rather than traced op
 by op, because the two lanes write them differently.  With ``u = 2**-53``, all
 counts in units of ``u`` and first order in ``u``:

@@ -18,7 +18,11 @@ reference, so the two lanes of this branch are compared with each other.
 evaluate (``planar_stage_two_roundoff.planar_objective_bound``), doubled for two
 implementations -- worst-order sums, per-rounding charges, the chain rule's path
 sums for the gradient, per-element geometry counts taken from the longer of the
-two lanes' forms.  No tolerance here is fitted to a measured gap.
+two lanes' forms.  No tolerance here is fitted to a measured gap.  The bound is
+an ENGINEERING ERROR ENVELOPE (PLAN.md amendment 5 part 2, P2): its xsimd
+``sincos`` constant is assumed, not established for the pinned build.  The JAX
+evaluator here runs on the CPU device only, so this test covers the jax-cpu
+lane and not jax-gpu.
 
 That bound replaces a scalar relative budget whose scale was the objective's
 value and the gradient's largest entry, which fails at these states for a
