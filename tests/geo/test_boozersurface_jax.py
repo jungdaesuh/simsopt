@@ -5142,7 +5142,7 @@ class TestBoozerSurfaceJAXClass:
         booz.options["ftol"] = 2e-13
         booz.options["maxfun"] = 19
         booz.options["maxls"] = 11
-        booz.options["lbfgs_run_mode"] = "monolithic_debug"
+        booz.options["lbfgs_run_mode"] = "stepwise"
         captured = {}
 
         def fake_target_minimize(
@@ -5184,7 +5184,7 @@ class TestBoozerSurfaceJAXClass:
             "ftol": 2e-13,
             "maxfun": 19,
             "maxls": 11,
-            "lbfgs_run_mode": "monolithic_debug",
+            "lbfgs_run_mode": "stepwise",
         }
         assert captured["value_and_grad"] is False
         assert result["optimizer_method"] == "lbfgs-ondevice"
@@ -5194,7 +5194,7 @@ class TestBoozerSurfaceJAXClass:
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "scipy"
         booz.options["limited_memory"] = True
-        booz.options["lbfgs_run_mode"] = "monolithic_debug"
+        booz.options["lbfgs_run_mode"] = "stepwise"
 
         options = booz._collect_optimizer_options(method="lbfgs")
 
@@ -8630,7 +8630,6 @@ class TestBoozerSurfaceJAXExactPath:
         """LS traceable path must reuse Newton outputs instead of re-differentiating."""
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
-        booz.options["limited_memory"] = True
         coil_set_spec = booz.coil_set_spec
         sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
         iota = jnp.asarray(0.3, dtype=jnp.float64)
@@ -8671,7 +8670,7 @@ class TestBoozerSurfaceJAXExactPath:
 
         # ``boozer_surface`` imports this private solver directly, so patch
         # the adapter's lookup rather than the public optimizer module.
-        monkeypatch.setattr(_bsj, "_minimize_lbfgs_private", fake_minimize)
+        monkeypatch.setattr(_bsj, "_minimize_bfgs_private", fake_minimize)
         monkeypatch.setattr(
             _bsj.jax,
             "value_and_grad",
@@ -8703,7 +8702,7 @@ class TestBoozerSurfaceJAXExactPath:
             np.asarray(expected_grad),
         )
 
-    def test_traceable_pre_newton_stage_owns_lbfgs_result_schema(self, monkeypatch):
+    def test_traceable_pre_newton_stage_owns_bfgs_result_schema(self, monkeypatch):
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
         x0 = booz._pack_decision_vector(
@@ -8724,12 +8723,12 @@ class TestBoozerSurfaceJAXExactPath:
                 ls_status=expected_status,
             )
 
-        monkeypatch.setattr(_bsj, "_minimize_lbfgs_private", fake_minimize)
+        monkeypatch.setattr(_bsj, "_minimize_bfgs_private", fake_minimize)
 
         result = booz._run_traceable_pre_newton_stage(
             booz.coil_set_spec,
             x0,
-            "lbfgs-ondevice",
+            "bfgs-ondevice",
             optimize_G=True,
             weight_inv_modB=True,
         )
@@ -8797,7 +8796,6 @@ class TestBoozerSurfaceJAXExactPath:
         """Traceable LS skip policy must return the LS state without Newton lowering."""
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
-        booz.options["limited_memory"] = True
         booz.options["newton_polish_policy"] = "skip"
         coil_set_spec = booz.coil_set_spec
         sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
@@ -8815,7 +8813,7 @@ class TestBoozerSurfaceJAXExactPath:
         def forbidden_newton_polish(*_args, **_kwargs):
             raise AssertionError("run_code_traceable() should skip Newton polish")
 
-        monkeypatch.setattr(_bsj, "_minimize_lbfgs_private", fake_minimize)
+        monkeypatch.setattr(_bsj, "_minimize_bfgs_private", fake_minimize)
         _patch_newton_polish_runner(monkeypatch, forbidden_newton_polish)
 
         result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
@@ -8832,8 +8830,8 @@ class TestBoozerSurfaceJAXExactPath:
         assert result["dense_newton_steps_materialized"] is False
         assert result["newton_iter"] == 0
 
-    def test_run_code_traceable_limited_memory_uses_monolithic_lbfgs(self, monkeypatch):
-        """Traceable limited-memory LS must use the jit-compatible L-BFGS mode."""
+    def test_run_code_traceable_rejects_limited_memory_ls(self):
+        """The traced LS stage has no limited-memory L-BFGS-B route."""
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
         booz.options["limited_memory"] = True
@@ -8842,23 +8840,9 @@ class TestBoozerSurfaceJAXExactPath:
         sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
         iota = jnp.asarray(0.3, dtype=jnp.float64)
         G = jnp.asarray(0.05, dtype=jnp.float64)
-        captured = {}
 
-        def fake_minimize(_fun, x0, **kwargs):
-            captured["run_mode"] = kwargs["run_mode"]
-            return types.SimpleNamespace(
-                x_k=x0,
-                converged=jnp.asarray(True),
-                failed=jnp.asarray(False),
-                k=jnp.asarray(2, dtype=jnp.int32),
-            )
-
-        monkeypatch.setattr(_bsj, "_minimize_lbfgs_private", fake_minimize)
-
-        result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
-
-        assert captured["run_mode"] == "monolithic_debug"
-        assert bool(result["success"])
+        with pytest.raises(RuntimeError, match="limited_memory=False"):
+            booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
 
     @pytest.mark.parametrize(
         ("explicit_materialize", "expected_materialize"),
@@ -8952,7 +8936,6 @@ class TestBoozerSurfaceJAXExactPath:
             return _successful_newton_polish_result(x0)
 
         monkeypatch.setattr(_bsj, "_minimize_bfgs_private", forbidden_private_minimize)
-        monkeypatch.setattr(_bsj, "_minimize_lbfgs_private", forbidden_private_minimize)
         monkeypatch.setattr(_bsj, solver_attr, fake_lm)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
@@ -9133,7 +9116,6 @@ class TestBoozerSurfaceJAXExactPath:
             return _successful_newton_polish_result(x0)
 
         monkeypatch.setattr(_bsj, "_minimize_bfgs_private", lambda *_a, **_k: None)
-        monkeypatch.setattr(_bsj, "_minimize_lbfgs_private", lambda *_a, **_k: None)
         monkeypatch.setattr(_bsj, "levenberg_marquardt_minpack_traceable", fake_lm)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
@@ -9231,7 +9213,6 @@ class TestBoozerSurfaceJAXExactPath:
             return _successful_newton_polish_result(x0)
 
         monkeypatch.setattr(_bsj, "_minimize_bfgs_private", lambda *_a, **_k: None)
-        monkeypatch.setattr(_bsj, "_minimize_lbfgs_private", lambda *_a, **_k: None)
         monkeypatch.setattr(_bsj, "levenberg_marquardt_minpack_traceable", fake_lm)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
@@ -9252,7 +9233,6 @@ class TestBoozerSurfaceJAXExactPath:
         """LS traceable failures must return the dummy PLU payload."""
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
-        booz.options["limited_memory"] = True
         coil_set_spec = booz.coil_set_spec
         sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
         iota = jnp.asarray(0.3, dtype=jnp.float64)
@@ -9288,7 +9268,7 @@ class TestBoozerSurfaceJAXExactPath:
                 "success": False,
             }
 
-        monkeypatch.setattr(_bsj, "_minimize_lbfgs_private", fake_minimize)
+        monkeypatch.setattr(_bsj, "_minimize_bfgs_private", fake_minimize)
         monkeypatch.setattr(
             _bsj.jax.scipy.linalg,
             "lu",

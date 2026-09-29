@@ -2380,29 +2380,6 @@ def lbfgsb_advance_to_next_observable(
     )
 
 
-def lbfgsb_mainlb(
-    value_and_grad: Callable[[jax.Array], tuple[jax.Array, jax.Array]],
-    state: LbfgsbState,
-    *,
-    maxiter: jax.typing.ArrayLike,
-    maxfun: jax.typing.ArrayLike,
-    accepted_step_callback: Callable[..., object] | None = None,
-) -> LbfgsbState:
-    def continue_condition(state: LbfgsbState) -> jax.Array:
-        return state.workspace.task[0] < CONVERGENCE
-
-    def body(state: LbfgsbState) -> LbfgsbState:
-        return lbfgsb_transition(
-            value_and_grad,
-            state,
-            maxiter=maxiter,
-            maxfun=maxfun,
-            accepted_step_callback=accepted_step_callback,
-        ).state
-
-    return jax.lax.while_loop(continue_condition, body, state)
-
-
 def _lbfgsb_emit_accepted_step(
     state: LbfgsbState,
     accepted_step_callback,

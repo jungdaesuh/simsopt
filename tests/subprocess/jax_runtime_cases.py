@@ -27,7 +27,6 @@ class SkippedCase(RuntimeError):
 class _CompileCountPayload(TypedDict, total=False):
     compile_count: int
     stepwise_compile_count: int
-    monolithic_compile_count: int
     counts_by_fragment: dict[str, int]
 
 
@@ -243,9 +242,6 @@ def _compile_count_payload(
             )
             if fragment in counts_by_fragment
         ),
-        "monolithic_compile_count": counts_by_fragment.get(
-            "lbfgs_private_monolithic_mainlb_solver)", 0
-        ),
     }
 
 
@@ -270,12 +266,10 @@ def _assert_lbfgs_private_step_kernels_compile_once_each(
             "lbfgs_private_initial_state_solver)",
             "lbfgs_private_macro_step_solver)",
             "lbfgs_private_result_payload_solver)",
-            "lbfgs_private_monolithic_mainlb_solver)",
         ),
         expected_compile_count=5,
     )
     payload = _compile_count_payload(counts_by_fragment)
-    assert payload["monolithic_compile_count"] == 0, payload
     return {
         **payload,
         "counts_by_fragment": counts_by_fragment,
@@ -287,7 +281,6 @@ _LBFGS_FUSED_DEVICE_ROUTE_FRAGMENTS = (
     "lbfgs_private_initial_state_solver)",
     "lbfgs_private_macro_step_solver)",
     "lbfgs_private_result_payload_solver)",
-    "lbfgs_private_monolithic_mainlb_solver)",
     "lbfgsb_fused_stepwise)",
 )
 
@@ -296,7 +289,6 @@ _LBFGS_FUSED_DEVICE_ROUTE_FIRST_RUN_COMPILES = {
     "lbfgs_private_initial_state_solver)": 1,
     "lbfgs_private_macro_step_solver)": 0,
     "lbfgs_private_result_payload_solver)": 0,
-    "lbfgs_private_monolithic_mainlb_solver)": 0,
     "lbfgsb_fused_stepwise)": 1,
 }
 
@@ -340,8 +332,7 @@ def _assert_lbfgs_fused_device_route_compiles_once(
     whenever no accepted-step observer is attached, so the solve compiles the
     bounded initial-state kernel plus one fused device program and must reuse
     both executables on every identical repeat.  The host-observed macro-step
-    and result-payload kernels and the monolithic debug program stay
-    uncompiled on this route; the repeat runs must compile nothing at all.
+    and result-payload kernels stay uncompiled on this route; the repeat runs must compile nothing at all.
     """
 
     counts_per_run = _lbfgs_compile_counts_per_run(
@@ -369,9 +360,6 @@ def _assert_lbfgs_fused_device_route_compiles_once(
             counts_by_fragment["lbfgs_private_macro_step_solver)"]
             + counts_by_fragment["lbfgs_private_result_payload_solver)"]
         ),
-        "monolithic_compile_count": counts_by_fragment[
-            "lbfgs_private_monolithic_mainlb_solver)"
-        ],
         "counts_by_fragment": counts_by_fragment,
     }
 

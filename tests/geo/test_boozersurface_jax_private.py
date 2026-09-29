@@ -2042,12 +2042,12 @@ class TestOptimizerAdapterPrivate:
             value_and_grad=True,
             tol=1.0e-4,
             maxiter=3,
-            options={"ftol": 1.0e-7, "lbfgs_run_mode": "monolithic_debug"},
+            options={"ftol": 1.0e-7, "lbfgs_run_mode": "fused_stepwise"},
         )
 
         assert captured["gtol"] == pytest.approx(1.0e-4)
         assert captured["ftol"] == pytest.approx(1.0e-7)
-        assert captured["run_mode"] == "monolithic_debug"
+        assert captured["run_mode"] == "fused_stepwise"
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
@@ -2350,18 +2350,18 @@ class TestLBFGSMethodPrivate:
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_LBFGS_RUNTIME
     def test_lbfgs_ondevice_defaults_to_stepwise_driver(self, monkeypatch):
-        """Public lbfgs-ondevice must not use the legacy full-solve compile path."""
+        """Public lbfgs-ondevice defaults to the host-observed stepwise driver."""
 
         def quad(x):
             return 0.5 * jnp.dot(x, x)
 
-        def reject_legacy_mainlb(*_args, **_kwargs):
-            raise AssertionError("default lbfgs-ondevice called legacy mainlb kernel")
+        def reject_fused_kernel(*_args, **_kwargs):
+            raise AssertionError("default lbfgs-ondevice called the fused kernel")
 
         monkeypatch.setattr(
             _private_lbfgs,
-            "_lbfgsb_mainlb_kernel",
-            reject_legacy_mainlb,
+            "_lbfgsb_fused_stepwise_kernel",
+            reject_fused_kernel,
         )
 
         result = _opt.target_minimize(
@@ -2906,38 +2906,6 @@ class TestLBFGSMethodPrivate:
 
         with pytest.raises(ValueError, match="stepwise mode uses host-observed"):
             jax.jit(run_traced_lbfgs)(jnp.asarray([1.0, -2.0], dtype=jnp.float64))
-
-    @PRIVATE_OPTIMIZER_RUNTIME
-    @REQUIRES_PRIVATE_LBFGS_RUNTIME
-    def test_minimize_lbfgs_private_monolithic_debug_runs_inside_jit(self):
-        target = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
-
-        def quad(x):
-            residual = x - target
-            return 0.5 * jnp.vdot(residual, residual)
-
-        def run_traced_lbfgs(x):
-            result = _private_lbfgs._minimize_lbfgs_private(
-                quad,
-                x,
-                maxiter=3,
-                gtol=1e-12,
-                run_mode="monolithic_debug",
-            )
-            return result.x_k, result.f_k, result.k
-
-        x, value, iterations = jax.jit(run_traced_lbfgs)(
-            jnp.asarray([0.0, 0.0], dtype=jnp.float64)
-        )
-
-        assert int(iterations) > 0
-        assert float(value) < 2.5
-        np.testing.assert_allclose(
-            np.asarray(x),
-            np.asarray([1.0, -2.0]),
-            rtol=1e-6,
-            atol=1e-6,
-        )
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_LBFGS_RUNTIME

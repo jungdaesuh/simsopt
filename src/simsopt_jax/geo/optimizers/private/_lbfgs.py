@@ -54,7 +54,6 @@ _TRACE_ARRAYS_PER_ENTRY = 2
 _TRACE_SCALARS_PER_ENTRY = 5
 _LBFGS_RUN_MODE_STEPWISE = "stepwise"
 _LBFGS_RUN_MODE_FUSED_STEPWISE = "fused_stepwise"
-_LBFGS_RUN_MODE_MONOLITHIC_DEBUG = "monolithic_debug"
 _LBFGSB_PRIVATE_BOUNDS = None
 _LBFGS_STEP_ENTRY_START = "start"
 _LBFGS_STEP_ENTRY_SEARCH = "search"
@@ -290,56 +289,6 @@ def _lbfgsb_initial_state_kernel(
             int(maxls),
         ),
         builder=lambda: jax.jit(build),
-    )
-
-
-def _lbfgsb_mainlb_kernel(
-    value_and_grad: _LBFGSValueAndGrad,
-    *,
-    cache_owner: object | None = None,
-    cache_key_prefix: tuple[object, ...] = (),
-    maxiter: int,
-    maxfun: int,
-    accepted_step_callback: _LBFGSObserver | None = None,
-) -> Callable[[lbfgsb.LbfgsbState, _LBFGSConsts | None], _LBFGSResults]:
-    """Legacy full-solve compile wrapper kept only for explicit debug runs."""
-
-    def run(
-        state: lbfgsb.LbfgsbState,
-        value_and_grad_consts: _LBFGSConsts | None = None,
-    ) -> _LBFGSResults:
-        def value_and_grad_with_consts(x):
-            return _call_lbfgs_value_and_grad(
-                value_and_grad,
-                x,
-                value_and_grad_consts,
-            )
-
-        final_state = lbfgsb.lbfgsb_mainlb(
-            value_and_grad_with_consts,
-            state,
-            maxiter=maxiter,
-            maxfun=maxfun,
-            accepted_step_callback=accepted_step_callback,
-        )
-        history = lbfgsb.lbfgsb_inverse_hessian_history(final_state)
-        return _lbfgsb_state_to_lbfgs_results(
-            final_state,
-            history=history,
-            maxiter_limit=_int_scalar(maxiter),
-            maxfun_limit=_int_scalar(maxfun),
-        )
-
-    run.__name__ = "lbfgs_private_monolithic_mainlb_solver"
-    return _cached_private_solver(
-        cache_owner if accepted_step_callback is None else None,
-        cache_key=(
-            "lbfgsb-mainlb",
-            *cache_key_prefix,
-            int(maxiter),
-            int(maxfun),
-        ),
-        builder=lambda: jax.jit(run),
     )
 
 
@@ -688,14 +637,9 @@ def _resolve_scipy_lbfgsb_limits(
 
 
 def _check_lbfgsb_run_mode(run_mode: str) -> str:
-    if run_mode not in {
-        _LBFGS_RUN_MODE_STEPWISE,
-        _LBFGS_RUN_MODE_FUSED_STEPWISE,
-        _LBFGS_RUN_MODE_MONOLITHIC_DEBUG,
-    }:
+    if run_mode not in {_LBFGS_RUN_MODE_STEPWISE, _LBFGS_RUN_MODE_FUSED_STEPWISE}:
         raise ValueError(
-            "lbfgs_run_mode must be 'stepwise', 'fused_stepwise' or "
-            f"'monolithic_debug', got {run_mode!r}."
+            f"lbfgs_run_mode must be 'stepwise' or 'fused_stepwise', got {run_mode!r}."
         )
     return run_mode
 
@@ -752,9 +696,7 @@ def _resolve_lbfgsb_run_mode_for_runtime(
         raise ValueError(
             "lbfgs-ondevice stepwise mode uses host-observed macro steps and "
             "cannot run while tracing a JAX function. Pass "
-            "lbfgs_run_mode='fused_stepwise' for the on-device driver, or "
-            "lbfgs_run_mode='monolithic_debug' explicitly for the full-solve "
-            "debug path."
+            "lbfgs_run_mode='fused_stepwise' for the on-device driver."
         )
     return run_mode
 
@@ -1267,12 +1209,6 @@ def prepare_lbfgs_private(
     """
 
     run_mode = _check_lbfgsb_run_mode(str(run_mode))
-    if run_mode == _LBFGS_RUN_MODE_MONOLITHIC_DEBUG:
-        raise ValueError(
-            "prepared L-BFGS programs do not serve lbfgs_run_mode="
-            "'monolithic_debug'; it is a full-solve debug path. Use "
-            "'stepwise' or 'fused_stepwise'."
-        )
     value_and_grad_fun = _scalar_value_and_grad(fun)
     prepared_fun, prepared_x0, _callback, adapter = _prepare_optimizer_callable_inputs(
         value_and_grad_fun,
@@ -1664,15 +1600,6 @@ def _minimize_lbfgs_private_impl(
             _int_scalar(maxiter_limit_value),
             _int_scalar(maxfun_limit_value),
         )
-    elif run_mode == _LBFGS_RUN_MODE_MONOLITHIC_DEBUG:
-        result = _lbfgsb_mainlb_kernel(
-            value_and_grad_kernel,
-            cache_owner=solver_cache_owner,
-            cache_key_prefix=solver_cache_key_prefix,
-            maxiter=int(maxiter_limit_value),
-            maxfun=int(maxfun_limit_value),
-            accepted_step_callback=accepted_step_callback,
-        )(state, value_and_grad_consts)
     else:
         unconstrained_fast_path = _lbfgsb_unconstrained_fast_path_enabled(
             _LBFGSB_PRIVATE_BOUNDS

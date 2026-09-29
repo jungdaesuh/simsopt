@@ -183,7 +183,6 @@ from simsopt_jax.geo.optimizers.optimizer import (
 )
 from simsopt_jax.geo.optimizers.private import (
     _minimize_bfgs_private,
-    _minimize_lbfgs_private,
     _private_bfgs_result_to_optimize_result,
 )
 
@@ -4122,6 +4121,11 @@ _ONDEVICE_LEAST_SQUARES_METHODS = _TARGET_LEAST_SQUARES_METHODS
 _ONDEVICE_OPTIMIZER_METHODS = (
     frozenset({"bfgs-ondevice", "lbfgs-ondevice"}) | _ONDEVICE_LEAST_SQUARES_METHODS
 )
+# The traced LS stage runs the dense BFGS or the MINPACK-style LM; the
+# limited-memory L-BFGS-B route exists only on the host-driven run_code path.
+_TRACEABLE_PRE_NEWTON_METHODS = (
+    frozenset({"bfgs-ondevice"}) | _ONDEVICE_LEAST_SQUARES_METHODS
+)
 _NEWTON_POLISH_POLICIES = frozenset({"run", "skip"})
 # Derivative assemblies of the LS Newton polish (option ``newton_assembly``):
 # basis HVPs of the AD penalty, or the analytic field-jet operators.
@@ -6921,9 +6925,10 @@ class BoozerSurfaceJAX(Optimizable):
         optimizer_state_dtype=None,
     ):
         """Run the traceable pre-Newton Boozer optimizer stage."""
-        if method not in _ONDEVICE_OPTIMIZER_METHODS:
+        if method not in _TRACEABLE_PRE_NEWTON_METHODS:
             raise RuntimeError(
-                "run_code_traceable() requires optimizer_backend='ondevice' for LS solves."
+                "run_code_traceable() requires optimizer_backend='ondevice' and "
+                "limited_memory=False for LS solves."
             )
 
         if method in _ONDEVICE_LEAST_SQUARES_METHODS:
@@ -6970,39 +6975,16 @@ class BoozerSurfaceJAX(Optimizable):
                 optimizer_state_dtype=optimizer_state_dtype,
             )
             optimizer_options = self._collect_optimizer_options(method=method)
-            if method == "bfgs-ondevice":
-                state = _minimize_bfgs_private(
-                    objective,
-                    x0,
-                    maxiter=self.options["bfgs_maxiter"],
-                    gtol=self.options["bfgs_tol"],
-                    line_search_maxiter=int(
-                        optimizer_options.get("line_search_maxiter", 10)
-                    ),
-                    x_dtype=optimizer_state_dtype,
-                )
-            else:
-                state = _minimize_lbfgs_private(
-                    objective,
-                    x0,
-                    maxiter=self.options["bfgs_maxiter"],
-                    gtol=self.options["bfgs_tol"],
-                    maxcor=int(
-                        optimizer_options.get(
-                            "maxcor", _default_lbfgs_maxcor_for_method(method)
-                        )
-                    ),
-                    ftol=float(optimizer_options.get("ftol", 0.0)),
-                    maxfun=optimizer_options.get("maxfun"),
-                    maxls=int(optimizer_options.get("maxls", 20)),
-                    run_mode=str(
-                        optimizer_options.get(
-                            "lbfgs_run_mode",
-                            "monolithic_debug",
-                        )
-                    ),
-                    x_dtype=optimizer_state_dtype,
-                )
+            state = _minimize_bfgs_private(
+                objective,
+                x0,
+                maxiter=self.options["bfgs_maxiter"],
+                gtol=self.options["bfgs_tol"],
+                line_search_maxiter=int(
+                    optimizer_options.get("line_search_maxiter", 10)
+                ),
+                x_dtype=optimizer_state_dtype,
+            )
             x = state.x_k
             success = state.converged & jnp.logical_not(state.failed)
             nit = state.k

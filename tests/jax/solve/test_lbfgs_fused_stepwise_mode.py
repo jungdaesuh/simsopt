@@ -19,7 +19,6 @@ from simsopt_jax.geo.optimizers.private._common import (
 )
 from simsopt_jax.geo.optimizers.private._lbfgs import (
     _LBFGS_RUN_MODE_FUSED_STEPWISE,
-    _LBFGS_RUN_MODE_MONOLITHIC_DEBUG,
     _LBFGS_RUN_MODE_STEPWISE,
     _check_lbfgsb_run_mode,
     _minimize_lbfgs_private,
@@ -87,11 +86,7 @@ def test_unknown_run_mode_error_names_every_supported_mode() -> None:
     with pytest.raises(ValueError) as excinfo:
         _check_lbfgsb_run_mode("junk")
     message = str(excinfo.value)
-    for mode in (
-        _LBFGS_RUN_MODE_STEPWISE,
-        _LBFGS_RUN_MODE_FUSED_STEPWISE,
-        _LBFGS_RUN_MODE_MONOLITHIC_DEBUG,
-    ):
+    for mode in (_LBFGS_RUN_MODE_STEPWISE, _LBFGS_RUN_MODE_FUSED_STEPWISE):
         assert mode in message
 
 
@@ -114,14 +109,6 @@ def test_prepare_default_and_stepwise_keep_the_host_driven_path() -> None:
         assert prepared.advance_from_start is not None
         assert prepared.advance_from_search is not None
         assert prepared.reenter_new_x is not None
-
-
-def test_prepare_rejects_monolithic_debug_for_prepared_programs() -> None:
-    x0 = jnp.asarray([-1.2, 1.0], dtype=jnp.float64)
-    with pytest.raises(ValueError, match="monolithic_debug"):
-        prepare_lbfgs_private(
-            _rosenbrock, x0, run_mode=_LBFGS_RUN_MODE_MONOLITHIC_DEBUG
-        )
 
 
 def _cacheable_owner():

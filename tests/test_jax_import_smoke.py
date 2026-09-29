@@ -888,7 +888,6 @@ def _assert_ondevice_optimizer_reuses_compiled_solver(method: str) -> None:
         assert payload["recompile_count"] == 0
         assert payload["fused_compile_count"] == 1
         assert payload["host_stepwise_compile_count"] == 0
-        assert payload["monolithic_compile_count"] == 0
         assert sum(payload["counts_by_fragment"].values()) == expected_compile_count
 
 
@@ -938,7 +937,6 @@ def test_target_lbfgs_ondevice_reuses_compiled_solver_across_identical_value_and
     assert payload["method"] == "lbfgs-ondevice"
     assert payload["compile_count"] == 5
     assert payload["stepwise_compile_count"] == 5
-    assert payload["monolithic_compile_count"] == 0
     assert payload["run_count"] == 3
     assert payload["value_and_grad"] is True
     assert sum(payload["counts_by_fragment"].values()) == 5
