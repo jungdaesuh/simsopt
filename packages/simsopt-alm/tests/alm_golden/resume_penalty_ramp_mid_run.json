@@ -46,6 +46,9 @@
      "constraint_values": [
       "0x1.8000003d0b1aap+2"
      ],
+     "violation_values": [
+      "0x1.8000003d0b1aap+2"
+     ],
      "solver_constraint_values": [
       "0x1.8000003d0b1aap+2"
      ],
@@ -166,6 +169,9 @@
      "raw_stationarity_norm": "0x1.bf89e52000000p-25",
      "kkt_stationarity_norm": "0x1.bf89e52000000p-25",
      "constraint_values": [
+      "0x1.8000000000000p+0"
+     ],
+     "violation_values": [
       "0x1.8000000000000p+0"
      ],
      "solver_constraint_values": [
@@ -293,6 +299,9 @@
      "constraint_values": [
       "0x1.8000000000000p+0"
      ],
+     "violation_values": [
+      "0x1.8000000000000p+0"
+     ],
      "solver_constraint_values": [
       "0x1.8000000000000p+0"
      ],
@@ -413,6 +422,9 @@
      "raw_stationarity_norm": "0x1.ae2901c0002adp-25",
      "kkt_stationarity_norm": "0x1.ae2901c000000p-25",
      "constraint_values": [
+      "0x1.6969696969690p-3"
+     ],
+     "violation_values": [
       "0x1.6969696969690p-3"
      ],
      "solver_constraint_values": [
@@ -1849,6 +1861,9 @@
      "constraint_values": [
       "0x1.c5894d10d4c00p-9"
      ],
+     "violation_values": [
+      "0x1.c5894d10d4c00p-9"
+     ],
      "solver_constraint_values": [
       "0x1.c5894d10d4c00p-9"
      ],
@@ -1969,6 +1984,9 @@
      "raw_stationarity_norm": "0x1.8d66c9e000015p-25",
      "kkt_stationarity_norm": "0x1.8d66c9e000000p-25",
      "constraint_values": [
+      "0x1.1c92628d10000p-14"
+     ],
+     "violation_values": [
       "0x1.1c92628d10000p-14"
      ],
      "solver_constraint_values": [
@@ -2093,6 +2111,9 @@
      "constraint_values": [
       "0x1.651c173a00000p-20"
      ],
+     "violation_values": [
+      "0x1.651c173a00000p-20"
+     ],
      "solver_constraint_values": [
       "0x1.651c173a00000p-20"
      ],
@@ -2213,6 +2234,9 @@
      "raw_stationarity_norm": "0x1.87ebb567eeeeap-12",
      "kkt_stationarity_norm": null,
      "constraint_values": [
+      "-0x1.8ce1e68900000p-21"
+     ],
+     "violation_values": [
       "0x0.0p+0"
      ],
      "solver_constraint_values": [

@@ -192,6 +192,10 @@
     "kkt_stationarity_norm": "0x1.6a09e667f3bcdp-53",
     "constraint_values": [
      "0x0.0p+0",
+     "-0x1.8000000000000p+0"
+    ],
+    "violation_values": [
+     "0x0.0p+0",
      "0x0.0p+0"
     ],
     "solver_constraint_values": [

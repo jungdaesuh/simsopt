@@ -196,6 +196,9 @@
     "constraint_values": [
      "0x1.0000000000000p+0"
     ],
+    "violation_values": [
+     "0x1.0000000000000p+0"
+    ],
     "solver_constraint_values": [
      "0x1.0000000000000p+0"
     ],
@@ -320,6 +323,9 @@
     "constraint_values": [
      "0x1.0000000000000p+0"
     ],
+    "violation_values": [
+     "0x1.0000000000000p+0"
+    ],
     "solver_constraint_values": [
      "0x1.0000000000000p+0"
     ],
@@ -442,6 +448,9 @@
     "constraint_values": [
      "0x1.5555555555558p-3"
     ],
+    "violation_values": [
+     "0x1.5555555555558p-3"
+    ],
     "solver_constraint_values": [
      "0x1.5555555555558p-3"
     ],
@@ -562,6 +571,9 @@
     "raw_stationarity_norm": "0x1.0000000000000p-47",
     "kkt_stationarity_norm": "0x0.0p+0",
     "constraint_values": [
+     "0x1.ac5701ac57000p-9"
+    ],
+    "violation_values": [
      "0x1.ac5701ac57000p-9"
     ],
     "solver_constraint_values": [

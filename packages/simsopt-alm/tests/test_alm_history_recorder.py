@@ -212,6 +212,37 @@ class AlmHistoryOwnershipTests(unittest.TestCase):
         self.assertEqual(calls, [1])
 
 
+class AlmHistoryConstraintValuesTests(unittest.TestCase):
+    def test_constraint_values_are_the_signed_g_of_the_result(self):
+        # Grok's reproduction: min x0^2 s.t. x0 - 1 <= 0 and -2 <= 0 from
+        # (0, 0). The history's constraint_values were the clipped
+        # violations [0, 0] while result.constraint_values is g = [-1, -2].
+        def physics(x):
+            x = np.asarray(x, dtype=float)
+            return alm.ALMPhysics(
+                base_value=float(x[0] ** 2),
+                base_grad=np.array([2.0 * x[0], 0.0]),
+                constraint_values=np.array([x[0] - 1.0, -2.0]),
+                constraint_grads=(np.array([1.0, 0.0]), np.zeros(2)),
+            )
+
+        recorder = ALMHistoryRecorder(max_entries=None)
+        result = alm.minimize_alm(
+            np.zeros(2), ["g0", "g1"], alm.cached_alm_evaluator(physics),
+            alm.ALMSettings(max_outer_iterations=4), {"maxiter": 40},
+            on_outer_step=recorder.record,
+        )
+        self.assertTrue(result.success, result.termination_reason)
+        last = recorder.history()[-1]
+        self.assertEqual(last["constraint_values"], result.constraint_values.tolist())
+        self.assertEqual(last["constraint_values"], [-1.0, -2.0])
+        self.assertEqual(last["violation_values"], [0.0, 0.0])
+        self.assertEqual(
+            last["violation_values"],
+            np.asarray(result.evaluation["feasibility_values"]).tolist(),
+        )
+
+
 class AlmLibraryWithoutRecorderTests(unittest.TestCase):
     def test_library_runs_without_a_recorder(self):
         def evaluate_problem(x, multipliers, penalty):

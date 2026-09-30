@@ -24,7 +24,7 @@ and the help of each module named below.
 | `ALMEvaluator` | `simsopt_alm` | Protocol `(x, multipliers, penalty) -> ALMEvaluation`. |
 | `ALMOuterStepEvent` | `simsopt_alm` | What `on_outer_step` receives once per continuation step. |
 | `ALMOuterBoundary` | `simsopt_alm` | What `on_outer_boundary` receives after each outer iteration; `resume_from` takes a non-final one. |
-| `ALMHistoryRecorder` | `simsopt_alm.history` | Opt-in history: pass `recorder.record` as `on_outer_step`, read `recorder.history()`. |
+| `ALMHistoryRecorder` | `simsopt_alm.history` | Opt-in history: pass `recorder.record` as `on_outer_step`, read `recorder.history()`. An entry's `constraint_values` is the signed g (as `result.constraint_values`), `violation_values` the per-row violation (`feasibility_values`). |
 | `alm_checkpointing` | `simsopt_alm.checkpoint` | `alm_checkpointing(inner_options, resume_state, completed_outer_callback)` returns the `inner_options`, `resume_from` and `on_outer_boundary` arguments of one checkpointed run. |
 | `ALMCheckpointing` | `simsopt_alm.checkpoint` | The frozen triple `alm_checkpointing` returns. |
 | `ALMTransitionSnapshot` | `simsopt_alm.checkpoint` | Immutable checkpoint (no Jacobians): `x`, `total_inner_iterations`, `completed_outer_iterations`, `resume_eligible`, `accepted_state`, ... |

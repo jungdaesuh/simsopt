@@ -261,6 +261,9 @@
     "raw_stationarity_norm": "0x1.219999999999ap+4",
     "kkt_stationarity_norm": "0x1.0306af70d5c23p+3",
     "constraint_values": [
+     "0x1.4000000000000p-54"
+    ],
+    "violation_values": [
      "0x0.0p+0"
     ],
     "solver_constraint_values": [
@@ -384,6 +387,9 @@
     "raw_stationarity_norm": "0x1.10e515c8d9a1cp+4",
     "kkt_stationarity_norm": "0x1.014aa9012a3adp+3",
     "constraint_values": [
+     "0x1.4af4f0d844d28p-7"
+    ],
+    "violation_values": [
      "0x0.0p+0"
     ],
     "solver_constraint_values": [
@@ -506,6 +512,9 @@
     "raw_stationarity_norm": "0x1.00414eb087a97p+4",
     "kkt_stationarity_norm": "0x1.ff1463ba5b408p+2",
     "constraint_values": [
+     "0x1.4c9c90c4dec34p-6"
+    ],
+    "violation_values": [
      "0x0.0p+0"
     ],
     "solver_constraint_values": [
@@ -630,6 +639,9 @@
     "raw_stationarity_norm": "0x1.3be99ab20bc7fp+4",
     "kkt_stationarity_norm": "0x1.fb8a7d4dd2c0ap+2",
     "constraint_values": [
+     "0x1.f56a8584e4ab4p-6"
+    ],
+    "violation_values": [
      "0x0.0p+0"
     ],
     "solver_constraint_values": [

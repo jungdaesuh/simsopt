@@ -262,6 +262,10 @@
     "raw_stationarity_norm": "0x1.8f86873423842p-5",
     "kkt_stationarity_norm": null,
     "constraint_values": [
+     "-0x1.a5865f7928980p-11",
+     "-0x1.64a9ba0abf550p-9"
+    ],
+    "violation_values": [
      "0x0.0p+0",
      "0x0.0p+0"
     ],
@@ -413,6 +417,10 @@
     "raw_stationarity_norm": "0x1.1511f16e75ec0p-7",
     "kkt_stationarity_norm": "0x1.3612456aff900p-8",
     "constraint_values": [
+     "0x1.26ff7cc97afb0p-9",
+     "-0x1.7f6b41df27a00p-12"
+    ],
+    "violation_values": [
      "0x0.0p+0",
      "0x0.0p+0"
     ],
@@ -564,6 +572,10 @@
     "raw_stationarity_norm": "0x1.0a1aa6d3f7f69p-10",
     "kkt_stationarity_norm": "0x1.ef8bea6ca8800p-11",
     "constraint_values": [
+     "0x1.7de0918a49e00p-12",
+     "-0x1.3f547ec1016ccp-8"
+    ],
+    "violation_values": [
      "0x0.0p+0",
      "0x0.0p+0"
     ],
@@ -715,6 +727,10 @@
     "raw_stationarity_norm": "0x1.c9117504f188ep-19",
     "kkt_stationarity_norm": null,
     "constraint_values": [
+     "-0x1.207731de2e6ccp-8",
+     "-0x1.37f783355239ep-7"
+    ],
+    "violation_values": [
      "0x0.0p+0",
      "0x0.0p+0"
     ],
@@ -866,6 +882,10 @@
     "raw_stationarity_norm": "0x1.d409ae9560690p-29",
     "kkt_stationarity_norm": null,
     "constraint_values": [
+     "-0x1.37f38fd78301ep-7",
+     "-0x1.be2b4a5db5464p-7"
+    ],
+    "violation_values": [
      "0x0.0p+0",
      "0x0.0p+0"
     ],

@@ -207,6 +207,10 @@
     "raw_stationarity_norm": "0x1.1e3779b97f4a8p+2",
     "kkt_stationarity_norm": "0x1.1e3779b97f4a8p+2",
     "constraint_values": [
+     "-0x1.0000000000000p+1",
+     "-0x0.0p+0"
+    ],
+    "violation_values": [
      "0x0.0p+0",
      "0x0.0p+0"
     ],

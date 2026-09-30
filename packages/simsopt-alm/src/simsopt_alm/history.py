@@ -2,7 +2,7 @@
 
 :class:`ALMHistoryRecorder` consumes the :class:`~.events.ALMOuterStepEvent`
 stream and rebuilds, from the events alone, the per-step history that
-drivers and artifact writers read: 52 shared keys per entry
+drivers and artifact writers read: 53 shared keys per entry
 (`_build_alm_history_entry`), the conditioning metrics, the decision
 annotations, and per-constraint diagnostics that are materialized only for
 surviving entries, once, when a callback or ``history()`` first needs them.
@@ -92,6 +92,8 @@ class ALMHistoryRecorder:
     the latest entries are kept, and ``truncated_count`` counts the dropped
     ones. Every entry handed out is the caller's own copy, nested lists and
     dicts included; the recorder keeps an immutable snapshot of each entry.
+    An entry's ``constraint_values`` is the signed g, as in ``ALMResult``,
+    and ``violation_values`` the evaluator's per-row ``feasibility_values``.
     """
 
     def __init__(
@@ -447,7 +449,10 @@ def _build_alm_history_entry(
         "stationarity_norm": float(stationarity_norm),
         "raw_stationarity_norm": float(raw_stationarity_norm),
         "kkt_stationarity_norm": kkt_stationarity_norm,
-        "constraint_values": _as_float_list(feasibility_values),
+        # Signed g, as ``ALMResult.constraint_values``; the clipped per-row
+        # violation (the evaluator's feasibility_values) is violation_values.
+        "constraint_values": _as_float_list(solver_constraint_values),
+        "violation_values": _as_float_list(feasibility_values),
         "solver_constraint_values": _as_float_list(solver_constraint_values),
         "hard_signed_constraint_values": _as_float_list(
             signal_state.hard_signed_constraint_values
@@ -514,7 +519,8 @@ def _refresh_alm_history_for_penalty_update(
         if updated_state.kkt_stationarity_norm is None
         else float(updated_state.kkt_stationarity_norm)
     )
-    entry["constraint_values"] = _as_float_list(updated_state.feasibility_values)
+    entry["constraint_values"] = _as_float_list(updated_state.solver_constraint_values)
+    entry["violation_values"] = _as_float_list(updated_state.feasibility_values)
     entry["solver_constraint_values"] = _as_float_list(
         updated_state.solver_constraint_values
     )

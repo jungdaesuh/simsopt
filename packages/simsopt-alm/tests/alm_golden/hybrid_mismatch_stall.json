@@ -270,6 +270,9 @@
     "raw_stationarity_norm": "0x1.219999999999ap+4",
     "kkt_stationarity_norm": null,
     "constraint_values": [
+     "-0x1.9999999999995p-4"
+    ],
+    "violation_values": [
      "0x0.0p+0"
     ],
     "solver_constraint_values": [
@@ -393,6 +396,9 @@
     "raw_stationarity_norm": "0x1.20f41f212d773p+4",
     "kkt_stationarity_norm": null,
     "constraint_values": [
+     "-0x1.46dc5d6388655p-4"
+    ],
+    "violation_values": [
      "0x0.0p+0"
     ],
     "solver_constraint_values": [
@@ -516,6 +522,9 @@
     "raw_stationarity_norm": "0x1.204cfd08d4badp+4",
     "kkt_stationarity_norm": null,
     "constraint_values": [
+     "-0x1.e696a26e5470ap-5"
+    ],
+    "violation_values": [
      "0x0.0p+0"
     ],
     "solver_constraint_values": [
