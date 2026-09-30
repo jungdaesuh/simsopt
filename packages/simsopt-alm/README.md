@@ -94,9 +94,10 @@ KKT point at the shifted multipliers `λ⁺ = max(0, λ + ρ g)`:
   at most `stationarity_tol`;
 - complementarity: the gap `Σ_i λ⁺_i max(0, -g_i)` is at most
   `feasibility_tol` (absolute, in the units of f: scale f to O(1));
-- and no hybrid signal mismatch (judged at `feasibility_tol`; the relaxed
-  early gate only routes steps and the dual update) or binding multiplier
-  cap.
+- and no hybrid signal mismatch (a row whose smooth value still pushes
+  while its exact value is more than the gate away; judged at
+  `feasibility_tol`, the relaxed early gate only routes steps and the dual
+  update) or binding multiplier cap.
 
 This certifies the returned point only. It is not global optimality, not a
 guarantee of descent from the start, and not a statement about which basin
